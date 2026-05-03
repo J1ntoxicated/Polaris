@@ -9,7 +9,7 @@ Single-cycle evaluator: OKX history fetch → strategy.evaluate → state update
 
 ADR-010 risk management:
 - 단일 포지션 ≤ 2% balance
-- 일일 손실 한도 ≤ 5% balance (TODO: 추후 구현)
+- 일일 손실 한도 ≤ 5% balance (구현됨, codex Round 1 fix)
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from pathlib import Path
 from src.data.okx_history import fetch_history
 from src.domain.signal import SignalAction
 from src.domain.strategy import Strategy
+
+DAILY_LOSS_LIMIT_PCT = 0.05  # ADR-010
 from src.paper import logger as paper_logger
 from src.paper.state import PaperBalance, Position, PositionStatus
 
@@ -83,8 +85,9 @@ def load_state(ticker: str, strategy_name: str, starting_usd: float = 5000.0) ->
 
 
 def save_state(ticker: str, strategy_name: str, balance: PaperBalance) -> None:
-    """JSON 저장 (machine state, P1 — vault X)."""
+    """JSON 저장 (machine state, P1 — vault X). Atomic write via tmp + rename (race protection)."""
     path = _state_file(ticker, strategy_name)
+    tmp = path.with_suffix(".json.tmp")
     raw = {
         "starting_usd": balance.starting_usd,
         "cash_usd": balance.cash_usd,
@@ -103,7 +106,25 @@ def save_state(ticker: str, strategy_name: str, balance: PaperBalance) -> None:
             for p in balance.closed_positions
         ],
     }
-    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    tmp.replace(path)  # atomic rename (POSIX guarantee)
+
+
+def _daily_loss_breached(balance: PaperBalance, last_ts_ms: int) -> tuple[bool, float]:
+    """ADR-010 일일 손실 5% 한도 체크. Returns (breached, today_loss_pct)."""
+    if not balance.closed_positions:
+        return False, 0.0
+    # last_ts_ms 기준 오늘 (UTC) closed positions 합산
+    one_day_ms = 86_400_000
+    day_start_ms = (last_ts_ms // one_day_ms) * one_day_ms
+    today_pnl = sum(
+        p.net_usd for p in balance.closed_positions
+        if p.close_ts_ms >= day_start_ms
+    )
+    if today_pnl >= 0:
+        return False, 0.0
+    loss_pct = abs(today_pnl) / balance.starting_usd
+    return loss_pct >= DAILY_LOSS_LIMIT_PCT, loss_pct
 
 
 def run_cycle(
@@ -158,9 +179,13 @@ def run_cycle(
             closed = balance.closed_positions[-1]
             paper_logger.log_close(ticker, strategy.name, closed)
 
+    # ADR-010 daily loss 5% 한도 체크 (entry 전)
+    daily_breached, today_loss = _daily_loss_breached(balance, last.timestamp_ms)
+    summary["daily_loss_pct"] = today_loss
+
     # 2. ENTRY (현재 open 없을 때만, 단순 — 1 ticker 1 position)
     has_open = any(p.ticker == ticker for p in balance.open_positions)
-    if signal.action == SignalAction.ENTER_LONG and not has_open:
+    if signal.action == SignalAction.ENTER_LONG and not has_open and not daily_breached:
         size_cap = balance.equity_usd({ticker: last.close}) * max_position_pct
         size = min(signal.target_size_usd, size_cap, balance.cash_usd)
         if size <= 0:
@@ -177,6 +202,13 @@ def run_cycle(
             )
             balance = balance.open(pos)
             paper_logger.log_open(ticker, strategy.name, pos)
+    elif signal.action == SignalAction.ENTER_LONG and daily_breached:
+        summary["entry_skipped"] = f"daily_loss_breached: {today_loss:.2%} >= {DAILY_LOSS_LIMIT_PCT:.0%}"
+        paper_logger.log_event(
+            ticker, strategy.name,
+            "DAILY_LOSS_BREACH",
+            f"loss_pct={today_loss:.4f} blocked entry",
+        )
 
     # 3. Balance log + save
     paper_logger.log_balance(ticker, strategy.name, balance, last.close)

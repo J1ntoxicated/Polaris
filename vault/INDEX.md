@@ -62,6 +62,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-015]] | SMA crossover 1d = SPOT viable (HYPO-003 fast-fail 통과, P0) | active |
 | [[INSIGHT-016]] | HYPO-003 walk-forward robustness (3-fold + TRAIN/TEST 일관 양수) | active |
 | [[INSIGHT-017]] | Look-ahead bias fix + HYPO-003 robust 재확인 (codex Round 1, P0) | active |
+| [[INSIGHT-018]] | Codex Round 2 88% — 5 fix 적용 (look-ahead/Position guard/daily loss/auto category/vault contract) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

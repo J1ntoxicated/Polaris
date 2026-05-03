@@ -63,7 +63,7 @@ tags: [type/constitution, status/active, polaris, contracts]
 | INSIGHT | vault-curator (forensic-investigator 산출 의무 1개) |
 | Lesson | vault-curator |
 | Component note | code-implementer (40_components/), curator review |
-| Runtime log | harness (append-only) |
+| Runtime log | harness (append-only) — **paper runner 도 50_runtime/paper_log_*.md append 권한 (alpha 검증 사이클 일부, ADR-010)** |
 | Hypothesis | Jin + vault-curator |
 | Code | code-implementer + Jin |
 | Test | code-implementer (TDD 의무) |

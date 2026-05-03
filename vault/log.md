@@ -42,3 +42,5 @@ tags: [meta, log, append_only, polaris]
 
 - **Phase 2c paper infra + HYPO-003 multi-ticker (BTC/ETH/SOL) 시작** — paper layer (state/runner/logger) 작성, 87 tests pass, 3 ticker 첫 cycle (모두 HOLD trend-down).
 - **Codex Round 1 review (78% 합의) + Look-ahead bias CRITICAL fix** — backtest engine i+1 next bar open 체결로 변경, Position.close already-closed 차단 추가. HYPO-003 재backtest = 동일 결과 (1d trend은 same-bar vs next-bar 영향 미미, robust 재확인). [[INSIGHT-017]]
+
+- **Codex Round 2 (88% 합의) — 5 fix 적용** — Look-ahead PASS / Position.close guard WARN(race) / Daily loss limit WARN(state 단위) / Timeframe auto PASS / vault paper log FAIL→4_contracts narrative 보강. atomic rename for state save (race protection). 잔여 gap 5: sizing/stop-loss/dedup/partial/short. Round 3 권장.

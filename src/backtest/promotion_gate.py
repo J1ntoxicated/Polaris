@@ -49,14 +49,28 @@ MAX_DRAWDOWN_LIMIT = SCALP_MAX_DRAWDOWN
 MIN_EXPECTANCY = 0.001  # legacy compat
 
 
-def categorize_timeframe(timeframe: str) -> str:
-    """timeframe → 'scalp' | 'swing' | 'position'."""
+def categorize_timeframe(timeframe: str, n_trades: int | None = None) -> str:
+    """timeframe → 'scalp' | 'swing' | 'position'.
+
+    ADR-011: 4h는 경계 — n_trades 기반 자동 분류 (>100 → scalp, ≤ → swing).
+    1d는 n_trades < SWING_MIN_TRADES (15)이면 position으로 격하 (긴 hold 가설).
+    """
     tf = timeframe.lower().strip()
     if tf in {"1m", "3m", "5m", "15m", "30m", "1h"}:
         return "scalp"
-    if tf in {"2h", "4h", "6h", "8h", "12h", "1d"}:
+    if tf == "4h":
+        # 4h 경계: n_trades 많으면 scalp, 적으면 swing (ADR-011)
+        if n_trades is not None and n_trades > 100:
+            return "scalp"
         return "swing"
-    return "position"
+    if tf in {"2h", "6h", "8h", "12h"}:
+        return "swing"
+    if tf == "1d":
+        # 1d: trade 빈도 낮으면 position (long-hold 가설)
+        if n_trades is not None and n_trades < SWING_MIN_TRADES:
+            return "position"
+        return "swing"
+    return "position"  # 3d, 1w 등
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +168,7 @@ def evaluate_promotion(
         category: 'scalp' | 'swing' | 'position' | None (auto from timeframe).
     """
     if category is None:
-        category = categorize_timeframe(result.timeframe)
+        category = categorize_timeframe(result.timeframe, n_trades=result.n_trades)
     if category == "scalp":
         return evaluate_promotion_scalp(result)
     if category == "swing":

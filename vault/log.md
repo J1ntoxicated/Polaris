@@ -29,3 +29,5 @@ tags: [meta, log, append_only, polaris]
 - **Phase A/B/C/D 완료** — vault 31 md / 2,290 라인, vault_lint 0 FAIL, 4 agent active + 20 _DEPRECATED, hooks 4 + git pre-commit symlink, implementation plan (1041 lines).
 - **첫 commit `1cd3aba`** — feat(polaris): bootstrap v4 (310 files, 122,812 insertions).
 - **Phase 0 완료 (Codex 리뷰 ADR-004 첫 사례)** — Round 1 80% → 5 fix 적용 → Round 2 93% 합의. Round 3 불필요. 잔여 gap 10개는 Phase 1+ plan. ([[codex_review_phase_abc]])
+- **Phase 0 commit `24d8569`** — feat(polaris): Phase 0 verified [reviewed-by: codex(2 rounds)] (6 files, 256 insertions).
+- **Phase 1 완료 (8 인수 소스 추출)** — 모태 vault에서 학습값 4 + ADR 4 + INSIGHT 4 + lessons 5 + WS URL 위험 1 = 18 노트 신규 작성 (INSIGHT-003~011, ADR-006~009, LESSON-001~005). _INHERIT_QUEUE archived.

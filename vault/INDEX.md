@@ -34,6 +34,10 @@ tags: [meta, index, polaris]
 | [[ADR-003]] | Codex debate protocol (max 3 라운드 합의) | applied |
 | [[ADR-004]] | Code review codex external (Jin mandate) | applied |
 | [[ADR-005]] | Harness 4 modes (DEV/ALPHA/FORENSIC/DEBATE) | applied |
+| [[ADR-006]] | SPOT trend N-strategies architecture (모태 ADR-007 인수) | provisional |
+| [[ADR-007]] | Paper sizing freedom + fee floor (모태 ADR-009 인수) | provisional |
+| [[ADR-008]] | vol_factor PROPORTIONAL fix CRITICAL (모태 ADR-010 인수) | provisional |
+| [[ADR-009]] | SPOT-only 유지 + PERP 검토 3개월 (모태 ADR-011 인수) | provisional |
 
 ## 💡 Insights (30_knowledge/insights/)
 
@@ -41,6 +45,25 @@ tags: [meta, index, polaris]
 |---|---|---|
 | [[INSIGHT-001]] | Legacy spot pollution (6,263 라인 누더기) | active |
 | [[INSIGHT-002]] | MTTR-alpha KPI 정의 | active |
+| [[INSIGHT-003]] | Edge calibration baseline (Bayesian 132 cells) | active |
+| [[INSIGHT-004]] | Tournament ELO top strategies (volatility_spike 4391) | active |
+| [[INSIGHT-005]] | Regime presets base (VIX/FG/DXY thresholds) | active |
+| [[INSIGHT-006]] | Frozen params boundary (spot_crypto/global) | active |
+| [[INSIGHT-007]] | OKX SPOT fee 0.7% scalp 수학적 불가능 (P0) | active |
+| [[INSIGHT-008]] | Taker fallback unwired (lessons #44 사례) | active |
+| [[INSIGHT-009]] | Fee floor miswire 4-fold cascade (P0) | active |
+| [[INSIGHT-010]] | fee_paid base units corruption (P7 적용) | active |
+| [[INSIGHT-011]] | Demo WS URL risk (Phase 2b 적용 의무, P0) | active |
+
+## 📚 Lessons (30_knowledge/lessons/)
+
+| LESSON | 제목 | 상태 |
+|---|---|---|
+| [[LESSON-001]] | NULL cascade prevention (모태 #78) | active |
+| [[LESSON-002]] | Paper vs Live divergence (모태 #47) | active |
+| [[LESSON-003]] | Runtime verify mandatory (모태 #46) | active |
+| [[LESSON-004]] | Grep-before-guess (모태 #45) | active |
+| [[LESSON-005]] | 소비자 grep 증거 (모태 #44) | active |
 
 ## 📚 Lessons + Patterns
 

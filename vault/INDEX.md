@@ -39,6 +39,7 @@ tags: [meta, index, polaris]
 | [[ADR-008]] | vol_factor PROPORTIONAL fix CRITICAL (모태 ADR-010 인수) | provisional |
 | [[ADR-009]] | SPOT-only 유지 + PERP 검토 3개월 (모태 ADR-011 인수) | provisional |
 | [[ADR-010]] | Backtest + Paper parallel (백테스트 신뢰도 한계 대응) | provisional |
+| [[ADR-011]] | Promotion Gate Timeframe-aware (1h scalp / 1d trend 분리) | provisional |
 
 ## 💡 Insights (30_knowledge/insights/)
 
@@ -58,6 +59,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-012]] | Backtest 신뢰도 한계 정량 (Sharpe CI/regime/overfitting, P0) | active |
 | [[INSIGHT-013]] | RSI mean reversion BTC fast-fail (HYPO-001 6 params, P0) | active |
 | [[INSIGHT-014]] | BB breakout multi-ticker fast-fail (HYPO-002 ETH+BTC, P0) | active |
+| [[INSIGHT-015]] | SMA crossover 1d = SPOT viable (HYPO-003 fast-fail 통과, P0) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

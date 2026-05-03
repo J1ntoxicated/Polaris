@@ -74,9 +74,9 @@ GROUP BY file.frontmatter.status AS status
 
 | Status | Count |
 |---|---|
-| Active | 0 |
+| Active | 1 |
 | Graduated | 0 |
 | Archived | 2 |
-| **Total** | 2 |
+| **Total** | 3 |
 
 > Phase 2에서 첫 HYPOTHESIS-001 추가 예정.

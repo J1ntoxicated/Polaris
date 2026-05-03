@@ -54,7 +54,11 @@ class Position:
         return self.status == PositionStatus.OPEN
 
     def close(self, exit_price: float, close_ts_ms: int) -> "Position":
-        """새 closed Position 반환 (immutable)."""
+        """새 closed Position 반환 (immutable). already CLOSED 재종료 차단 (codex fix)."""
+        if not self.is_open:
+            raise ValueError(
+                f"position {self.position_id} already closed (status={self.status.value})"
+            )
         if exit_price <= 0:
             raise ValueError(f"exit_price must be > 0, got {exit_price}")
         if close_ts_ms < self.open_ts_ms:

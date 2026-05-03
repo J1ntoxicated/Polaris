@@ -75,27 +75,35 @@ class TestBacktestEngine:
         assert result.n_candles == 0
 
     def test_single_long_trade_profit(self) -> None:
+        # Look-ahead bias 제거 후 (engine fix 2026-05-04):
+        # idx 0 ENTER signal → entry = idx 1 open = 110 (next bar open)
+        # idx 2는 마지막 → EXIT signal 체결 X → force-close at last close = 120
         candles = make_candles([100, 110, 120])
         strategy = EnterFirstExitLast(n_candles=3)
         result = backtest(candles, strategy, "BTC-USDT", "1h", fee_round_trip=0.0)
         assert result.n_trades == 1
-        # entry=100 (idx 0 close), exit=120 (idx 2 close), gross=+20%
-        assert result.trades[0].gross_pct == pytest.approx(0.20)
+        assert result.trades[0].entry_price == pytest.approx(110)
+        assert result.trades[0].exit_price == pytest.approx(120)
 
     def test_force_close_at_last_candle(self) -> None:
-        # AlwaysLong은 매 candle에서 ENTER_LONG → 첫 candle 진입 후 동일 direction이라 reversal X → 마지막 force-close
+        # AlwaysLong: idx 0 ENTER signal → entry = idx 1 open = 110 (next bar)
+        # 마지막 idx 2는 force-close at last close = 120
         candles = make_candles([100, 110, 120])
         result = backtest(candles, AlwaysLong(), "BTC-USDT", "1h", fee_round_trip=0.0)
         assert result.n_trades == 1
-        assert result.trades[0].entry_price == 100  # idx 0 close
-        assert result.trades[0].exit_price == 120  # last close
+        assert result.trades[0].entry_price == pytest.approx(110)
+        assert result.trades[0].exit_price == pytest.approx(120)
 
     def test_fee_subtracted_from_net(self) -> None:
+        # candles [100, 102]: idx 0 ENTER → entry = idx 1 open = 102
+        # idx 1은 마지막 → force-close at last close = 102
+        # gross 0, net = -fee = -1.4%
         candles = make_candles([100, 102])
         strategy = EnterFirstExitLast(n_candles=2)
         result = backtest(candles, strategy, "BTC-USDT", "1h", fee_round_trip=0.014)
-        # gross=+2%, net = 2% - 1.4% = 0.6%
-        assert result.expectancy == pytest.approx(0.02 - 0.014)
+        assert result.trades[0].entry_price == pytest.approx(102)
+        assert result.trades[0].exit_price == pytest.approx(102)
+        assert result.expectancy == pytest.approx(-0.014)
 
 
 class TestPromotionGate:

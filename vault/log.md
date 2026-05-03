@@ -58,3 +58,5 @@ tags: [meta, log, append_only, polaris]
 - **Dashboard 항상 켜놓기** — start_dashboard.sh (osascript 새 Terminal window) + login agent (com.polaris.dashboard.plist). macOS login 시 자동 dashboard window 띄움. Refresh 60s.
 
 - **2026-05-04 07:30 — Realtime WebSocket activated + 3 entry 발생** — SOL/DOGE×2 OPEN. ADR-012 (Realtime architecture shift) + INSIGHT-018 (tick-driven discovery). HYPO-007~012 active 노트 작성 (vault 정합 회복 — 자율 진행 중 누락). OKX candle channel은 business endpoint (public X) 발견.
+
+- **2026-05-04 07:48 — Codex Round 3 + 4 CRITICAL fix** — Phase 2c~e 82% / 운영 모델 v2 74% 합의. intraday plist removed (state race 차단) + TickMomentum 24h guard + reconnect stale clear + exponential backoff. 6 open positions live (BTC/DOGE/ETH/ORDI/TRUMP TradeFlow + SUI legacy). HYPO-012 가장 active. INSIGHT-019.

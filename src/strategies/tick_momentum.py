@@ -64,9 +64,10 @@ class TickMomentum(Strategy):
         low24 = float(tick.get("low24h", 0) or 0)
         ts = int(tick.get("ts", 0) or 0)
 
-        if last <= 0 or open24 <= 0:
+        # Codex Round 3 fix: high24h/low24h zero guard (false positive 차단)
+        if last <= 0 or open24 <= 0 or high24 <= 0 or low24 <= 0:
             return Signal(timestamp_ms=ts, action=SignalAction.HOLD, confidence=0.0,
-                          reason="invalid tick")
+                          reason="invalid tick (24h fields)")
 
         change_24h = (last - open24) / open24
         spread_bps = (ask - bid) / last * 10000 if (bid > 0 and ask > 0) else 0

@@ -60,6 +60,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-013]] | RSI mean reversion BTC fast-fail (HYPO-001 6 params, P0) | active |
 | [[INSIGHT-014]] | BB breakout multi-ticker fast-fail (HYPO-002 ETH+BTC, P0) | active |
 | [[INSIGHT-015]] | SMA crossover 1d = SPOT viable (HYPO-003 fast-fail 통과, P0) | active |
+| [[INSIGHT-016]] | HYPO-003 walk-forward robustness (3-fold + TRAIN/TEST 일관 양수) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

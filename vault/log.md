@@ -37,3 +37,5 @@ tags: [meta, log, append_only, polaris]
 - **HYPO-002 BB Breakout multi-ticker fast-fail** — BTC 1h/4h × 6 BB 파라미터 + ETH 1h cross-check 모두 expectancy < fee. Momentum도 mean-reversion과 동일 결과. INSIGHT-014. PERP counter 2/5. [[INSIGHT-014]]
 
 - **HYPO-003 SMA Crossover 1d = first fast-fail PASS** — BTC 1d 8.5년 데이터 (3127 candles) SMA(10/20/50/200) 모든 파라미터 expectancy 양수 (+3.5% ~ +47%). SMA(50,200) hit 62.5%, Sharpe 0.475. 멀티 ticker (ETH/SOL/BNB) 일관. **결정적 발견**: 1d trend following으로 INSIGHT-007 fee 함정 우회. ADR-009 PERP counter 보류. ADR-011 (Promotion Gate Timeframe-aware) 신설. [[INSIGHT-015]]
+
+- **HYPO-003 Walk-forward + 3-fold robustness 검증** — TRAIN 5년 exp +74%, TEST 3년 out-of-sample +23%, 3-fold (3 다른 cycle) 모두 양수 일관. Overfitting 위험 낮음, regime robust 입증. INSIGHT-016. **HYPO-003 Polaris 첫 viable strategy 확정** (BACKTEST 단계). 다음: Phase 2c 페이퍼 인프라.

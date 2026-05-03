@@ -48,3 +48,5 @@ tags: [meta, log, append_only, polaris]
 - **HYPO-004 Donchian Breakout 1d = 두 번째 viable** — BTC Donchian(40/15) swing PASS (26 trades, exp +18%, Sharpe 0.31, MDD 41%), ETH Donchian(20/10) swing PASS (35 trades, exp +15%, Sharpe 0.33). Cron에 추가. Polaris alpha 다양화 시작 (SMA crossover + Donchian breakout 다른 메커니즘).
 
 - **HYPO-005 MACD trend 1d archived** — MACD(12,26,9) BTC 1d expectancy +0.0009 fast-fail (whipsaw로 fee 잠식). Pattern 발견: 1d trend도 신호 빈도 낮아야 fee 통과 — SMA(50,200) 8 trades vs MACD 58 trades. viable 1d trend = long-cycle 신호만.
+
+- **HYPO-004 Walk-forward + 3-fold robustness** — TRAIN 5년 exp +31%, TEST 3.5년 out-of-sample +5.2%, 3-fold 모두 양수 일관. HYPO-003 패턴 반복 — robust 확인. INSIGHT-020. Polaris 첫 viable 알파 portfolio: HYPO-003 (SMA Position) + HYPO-004 (Donchian Swing) 신호 분산.

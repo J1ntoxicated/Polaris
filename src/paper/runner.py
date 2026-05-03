@@ -167,7 +167,10 @@ def run_cycle(
         "n_open_pre": balance.n_open,
     }
 
-    # 1. EXIT 처리 (open position 있을 때만)
+    # 1. EXIT 처리 (open position 있을 때만 — no-op exit는 silent)
+    has_pos = any(p.ticker == ticker for p in balance.open_positions)
+    if not has_pos and signal.action == SignalAction.EXIT:
+        summary["signal"] = "exit_noop"
     for pos in tuple(balance.open_positions):
         if pos.ticker != ticker:
             continue

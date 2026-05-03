@@ -28,6 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from src.paper.cron import ACTIVE_HYPOS
+from src.paper.intraday_cron import INTRADAY_HYPOS
 from src.paper.runner import load_state
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -115,6 +116,50 @@ def render_active_hypos() -> Table:
     return table
 
 
+def render_intraday_positions() -> Table:
+    """Intraday HYPO universe — open position 있는 것만 표시."""
+    table = Table(
+        title="⚡ Intraday Open Positions (HYPO-007/008 universe)",
+        show_header=True,
+        header_style="bold yellow",
+        expand=True,
+        title_justify="left",
+    )
+    table.add_column("HYPO", justify="left", no_wrap=True)
+    table.add_column("Ticker", justify="left")
+    table.add_column("Strategy", justify="left")
+    table.add_column("Entry $", justify="right")
+    table.add_column("Size $", justify="right")
+    table.add_column("Open Time", justify="left")
+
+    rows = []
+    for hypo in INTRADAY_HYPOS:
+        sname = hypo["strategy_cls"](**hypo["strategy_params"]).name
+        # Scan all paper_state files for this strategy
+        for state_file in DATA_PAPER_DIR.glob(f"paper_state_*_{sname}.json"):
+            try:
+                import json
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+                for pos in state.get("open_positions", []):
+                    open_dt = _dt.datetime.fromtimestamp(pos["open_ts_ms"] / 1000)
+                    rows.append((
+                        hypo["hypo_id"],
+                        pos["ticker"],
+                        sname,
+                        f"{pos['entry_price']:.4g}",
+                        f"{pos['size_usd']:.0f}",
+                        open_dt.isoformat(timespec="minutes"),
+                    ))
+            except Exception:
+                pass
+    if rows:
+        for r in rows:
+            table.add_row(*r)
+    else:
+        table.add_row("—", "—", "—", "—", "—", "(no open intraday positions)")
+    return table
+
+
 def render_alpha_index() -> Panel:
     idx_path = PROJECT_ROOT / "vault" / "60_alpha" / "_alpha_index.md"
     if not idx_path.exists():
@@ -183,8 +228,9 @@ def render_live_logs(max_lines: int = 25, hide_balance: bool = True) -> Panel:
 def render_dashboard() -> None:
     console.print(render_header())
     console.print(render_active_hypos())
+    console.print(render_intraday_positions())
     console.print(render_alpha_index())
-    console.print(render_live_logs(max_lines=25))
+    console.print(render_live_logs(max_lines=20))
 
 
 def main() -> None:

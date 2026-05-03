@@ -75,11 +75,22 @@ def log_close(ticker: str, strategy_name: str, position: Position) -> None:
 
 
 def log_balance(ticker: str, strategy_name: str, balance: PaperBalance, current_price: float) -> None:
+    """BALANCE 이벤트 — 직전 entry와 다를 때만 append (M4 메타 작업 한도)."""
     eq = balance.equity_usd({ticker: current_price})
     pnl = balance.realized_pnl_usd
-    log_event(
-        ticker, strategy_name,
-        "BALANCE",
+    new_msg = (
         f"cash=${balance.cash_usd:.2f} equity=${eq:.2f} realized_pnl=${pnl:+.2f} "
-        f"open={balance.n_open} closed={balance.n_closed}",
+        f"open={balance.n_open} closed={balance.n_closed}"
     )
+    # 직전 BALANCE와 동일하면 skip (noise 차단)
+    path = _ensure_log_file(ticker, strategy_name)
+    last_balance = ""
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        if "| BALANCE |" in line:
+            parts = [p.strip() for p in line.split("|")[1:-1]]
+            if len(parts) >= 3:
+                last_balance = parts[2]
+            break
+    if last_balance == new_msg:
+        return  # no change → skip
+    log_event(ticker, strategy_name, "BALANCE", new_msg)

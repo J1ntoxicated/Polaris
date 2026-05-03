@@ -139,8 +139,8 @@ def _tail_lines(path: Path, n: int) -> list[str]:
         return []
 
 
-def render_live_logs(max_lines: int = 25) -> Panel:
-    """모든 vault paper_log + cron.log의 latest events 합친 live stream."""
+def render_live_logs(max_lines: int = 25, hide_balance: bool = True) -> Panel:
+    """vault paper_log + cron.log latest events. BALANCE noise는 기본 숨김."""
     events: list[tuple[str, str, str]] = []
 
     if VAULT_LOG_DIR.exists():
@@ -150,6 +150,8 @@ def render_live_logs(max_lines: int = 25) -> Panel:
                 if line.startswith("| 20"):
                     parts = [p.strip() for p in line.split("|")[1:-1]]
                     if len(parts) >= 3:
+                        if hide_balance and parts[1] == "BALANCE":
+                            continue
                         events.append((parts[0], label[:28], f"[{parts[1]}] {parts[2]}"))
 
     if CRON_LOG.exists():
@@ -162,20 +164,20 @@ def render_live_logs(max_lines: int = 25) -> Panel:
     latest = events[:max_lines]
 
     if not latest:
-        body = "[dim](no events yet — first cycle 대기 중)[/dim]"
+        body = "[dim](no real trades yet — only HOLD signals.\n첫 OPEN/CLOSE 대기 중. BTC golden cross 또는 40-day high 발생 시 자동 entry.)[/dim]"
     else:
         lines = []
         for ts, src, msg in latest:
             color = (
-                "yellow" if "OPEN" in msg
-                else "green" if "CLOSE" in msg
-                else "magenta" if "BREACH" in msg
-                else "blue" if "BALANCE" in msg
+                "yellow bold" if "OPEN" in msg
+                else "green bold" if "CLOSE" in msg
+                else "magenta bold" if "BREACH" in msg
                 else "white"
             )
             lines.append(f"[dim]{ts[-8:]}[/dim] [{color}]{src:28s}[/{color}] {msg[:130]}")
         body = "\n".join(lines)
-    return Panel(body, title=f"📡 Live Log Stream (latest {max_lines})", border_style="magenta", padding=(0, 1))
+    title = f"📡 Trade Events (BALANCE 숨김, latest {max_lines})" if hide_balance else f"📡 All Events (latest {max_lines})"
+    return Panel(body, title=title, border_style="magenta", padding=(0, 1))
 
 
 def render_dashboard() -> None:

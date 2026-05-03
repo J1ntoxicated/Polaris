@@ -52,3 +52,5 @@ tags: [meta, log, append_only, polaris]
 - **HYPO-004 Walk-forward + 3-fold robustness** — TRAIN 5년 exp +31%, TEST 3.5년 out-of-sample +5.2%, 3-fold 모두 양수 일관. HYPO-003 패턴 반복 — robust 확인. INSIGHT-020. Polaris 첫 viable 알파 portfolio: HYPO-003 (SMA Position) + HYPO-004 (Donchian Swing) 신호 분산.
 
 - **HYPO-006 Ichimoku Tenkan/Kijun 1d archived** — 모든 시도 Sharpe < 0.3 (swing min). SMA crossover 변형이라 added value 없음. Pattern 강화: 1d trend도 신호 빈도 잦으면 Promotion Gate 미달. HYPO-007+ 후보: cross-asset / volume / on-chain (mechanism diversification).
+
+- **Phase F 대시보드 + 자동 운영 시작** — src/dashboard/cli.py (Rich terminal: Polaris 운영 모델 / Active HYPOs / Alpha Index / Recent Signals). Cron HYPO-004 재추가 (regression fix). launchd plist 활성화 — `com.polaris.paper.daily` 매일 01:00 UTC 자동 실행. 5 cycle (BTC/ETH/SOL × HYPO-003 + BTC/ETH × HYPO-004) 자동.

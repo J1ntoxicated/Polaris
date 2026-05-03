@@ -21,6 +21,7 @@ import sys
 import traceback
 
 from src.paper.runner import run_cycle
+from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.sma_crossover import SMACrossover
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,24 @@ ACTIVE_HYPOS = [
         "strategy": SMACrossover,
         "strategy_params": {"fast": 50, "slow": 200},
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
+    {
+        "hypo_id": "HYPO-004-BTC",
+        "strategy": DonchianBreakout,
+        "strategy_params": {"entry_period": 40, "exit_period": 15},
+        "tickers": ["BTC-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
+    {
+        "hypo_id": "HYPO-004-ETH",
+        "strategy": DonchianBreakout,
+        "strategy_params": {"entry_period": 20, "exit_period": 10},
+        "tickers": ["ETH-USDT"],
         "bar": "1D",
         "starting_usd": 5000.0,
         "max_position_pct": 0.02,

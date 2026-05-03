@@ -13,11 +13,25 @@ authoritative_basis: ADR-002, ADR-005, codex-debate 3 라운드 합의
 tags: [type/constitution, status/active, polaris, operating_model]
 ---
 
-# Polaris 운영 모델 v1 — 8 섹션 (vault SSOT)
+# Polaris 운영 모델 v2 — 9 섹션 (vault SSOT)
 
 > Jin 2026-05-03 mandate: 운영 모델 메타-구조 먼저 정의 후 코드 진행. 이 파일이 모든 작업의 기반.
+> Jin 2026-05-04 update: HARNESS 메타 모드 명시 (메인 Claude = orchestrator).
 
-## §1. 하네스 4 모드
+## §0. HARNESS Meta Mode (메인 Claude orchestrator)
+
+**메인 Claude (사용자와 직접 소통하는 인스턴스) = 항상 HARNESS 모드**.
+
+역할:
+- 사용자 요청 분석 → 적절 mode 분류
+- 4 sub-mode 중 적합한 것 dispatch (Agent / Skill / Codex)
+- Sub-agent 결과 종합 → 사용자에게 보고
+- Vault-first cycle 강제 (READ → seq thinking → codex → UPDATE)
+- 운영 모델 정합 감시 (모드 누락 / vault 미작성 / codex 미리뷰 차단)
+
+HARNESS 모드 자체는 코드/vault/forensic 직접 X — 항상 dispatch.
+
+## §1. 4 Sub-Modes (HARNESS가 dispatch)
 
 | 모드 | 트리거 | 활성 agent | 활성 스킬 | 외부 advisor | Vault 동작 |
 |---|---|---|---|---|---|

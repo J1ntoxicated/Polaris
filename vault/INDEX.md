@@ -41,6 +41,7 @@ tags: [meta, index, polaris]
 | [[ADR-010]] | Backtest + Paper parallel (백테스트 신뢰도 한계 대응) | provisional |
 | [[ADR-011]] | Promotion Gate Timeframe-aware (1h scalp / 1d trend 분리) | provisional |
 | [[ADR-012]] | WebSocket Realtime Architecture Shift (cron→tick-driven) | provisional |
+| [[ADR-013]] | HARNESS Meta Mode (메인 Claude = orchestrator, 5번째 모드) | provisional |
 
 ## 💡 Insights (30_knowledge/insights/)
 

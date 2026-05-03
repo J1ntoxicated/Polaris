@@ -46,3 +46,5 @@ tags: [meta, log, append_only, polaris]
 - **Codex Round 2 (88% 합의) — 5 fix 적용** — Look-ahead PASS / Position.close guard WARN(race) / Daily loss limit WARN(state 단위) / Timeframe auto PASS / vault paper log FAIL→4_contracts narrative 보강. atomic rename for state save (race protection). 잔여 gap 5: sizing/stop-loss/dedup/partial/short. Round 3 권장.
 
 - **HYPO-004 Donchian Breakout 1d = 두 번째 viable** — BTC Donchian(40/15) swing PASS (26 trades, exp +18%, Sharpe 0.31, MDD 41%), ETH Donchian(20/10) swing PASS (35 trades, exp +15%, Sharpe 0.33). Cron에 추가. Polaris alpha 다양화 시작 (SMA crossover + Donchian breakout 다른 메커니즘).
+
+- **HYPO-005 MACD trend 1d archived** — MACD(12,26,9) BTC 1d expectancy +0.0009 fast-fail (whipsaw로 fee 잠식). Pattern 발견: 1d trend도 신호 빈도 낮아야 fee 통과 — SMA(50,200) 8 trades vs MACD 58 trades. viable 1d trend = long-cycle 신호만.

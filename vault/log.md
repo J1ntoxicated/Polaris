@@ -33,3 +33,5 @@ tags: [meta, log, append_only, polaris]
 - **Phase 1 완료 (8 인수 소스 추출)** — 모태 vault에서 학습값 4 + ADR 4 + INSIGHT 4 + lessons 5 + WS URL 위험 1 = 18 노트 신규 작성 (INSIGHT-003~011, ADR-006~009, LESSON-001~005). _INHERIT_QUEUE archived.
 
 - **Phase 2 — Backtest engine + HYPO-001 fast-fail** — 백테스트 인프라 작성 (Pure P6 + Property-based P7, 68 tests pass). HYPO-001 (RSI mean reversion BTC 1h) 직접 측정: 6 파라미터 × 4 timeframe 모두 expectancy < fee → archived. INSIGHT-013 + ADR-010 (Backtest+Paper parallel) + ADR-009 PERP counter 1/5. [[INSIGHT-013]]
+
+- **HYPO-002 BB Breakout multi-ticker fast-fail** — BTC 1h/4h × 6 BB 파라미터 + ETH 1h cross-check 모두 expectancy < fee. Momentum도 mean-reversion과 동일 결과. INSIGHT-014. PERP counter 2/5. [[INSIGHT-014]]

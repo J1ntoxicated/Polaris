@@ -56,6 +56,8 @@ tags: [meta, index, polaris]
 | [[INSIGHT-010]] | fee_paid base units corruption (P7 적용) | active |
 | [[INSIGHT-011]] | Demo WS URL risk (Phase 2b 적용 의무, P0) | active |
 | [[INSIGHT-012]] | Backtest 신뢰도 한계 정량 (Sharpe CI/regime/overfitting, P0) | active |
+| [[INSIGHT-013]] | RSI mean reversion BTC fast-fail (HYPO-001 6 params, P0) | active |
+| [[INSIGHT-014]] | BB breakout multi-ticker fast-fail (HYPO-002 ETH+BTC, P0) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

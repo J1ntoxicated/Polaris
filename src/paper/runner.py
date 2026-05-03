@@ -178,6 +178,7 @@ def run_cycle(
     if not has_pos and signal.action == SignalAction.EXIT:
         summary["signal"] = "exit_noop"
 
+    closed_this_cycle = False  # flip-flop 차단
     for pos in tuple(balance.open_positions):
         if pos.ticker != ticker:
             continue
@@ -200,14 +201,16 @@ def run_cycle(
                 "EXIT_REASON",
                 exit_reason,
             )
+            closed_this_cycle = True
+    summary["closed_this_cycle"] = closed_this_cycle
 
     # ADR-010 daily loss 5% 한도 체크 (entry 전)
     daily_breached, today_loss = _daily_loss_breached(balance, last.timestamp_ms)
     summary["daily_loss_pct"] = today_loss
 
-    # 2. ENTRY (현재 open 없을 때만, 단순 — 1 ticker 1 position)
+    # 2. ENTRY (현재 open 없을 때만 + 같은 cycle close 안 했을 때 — flip-flop 차단)
     has_open = any(p.ticker == ticker for p in balance.open_positions)
-    if signal.action == SignalAction.ENTER_LONG and not has_open and not daily_breached:
+    if signal.action == SignalAction.ENTER_LONG and not has_open and not daily_breached and not closed_this_cycle:
         size_cap = balance.equity_usd({ticker: last.close}) * max_position_pct
         size = min(signal.target_size_usd, size_cap, balance.cash_usd)
         if size <= 0:

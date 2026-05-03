@@ -34,16 +34,18 @@ INTRADAY_HYPOS = [
         "strategy_cls": RSI15mIntraday,
         "strategy_params": {},
         "bar": "15m",
-        "n_universe": 30,
+        # Backtest viable expectancy > 0.001 (live fee 0.14%)
+        "tickers": ["BTC-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ADA-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,  # 4% per trade
+        "max_position_pct": 0.04,
     },
     {
         "hypo_id": "HYPO-008",
         "strategy_cls": VolumeBurst,
         "strategy_params": {},
         "bar": "1H",
-        "n_universe": 20,  # 1h fewer ticker (resource)
+        # Backtest viable (SUI excluded — neg expectancy)
+        "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.05,
     },
@@ -54,21 +56,13 @@ def main() -> int:
     today = _dt.datetime.now().isoformat(timespec="seconds")
     logger.info(f"=== Polaris Intraday Cron — {today} ===")
 
-    # Universe top 30 fetch (cached 15min)
-    try:
-        universe = fetch_top_volume_tickers(n=30)
-        logger.info(f"Universe ({len(universe)}): {', '.join(universe[:10])}...")
-    except Exception as e:
-        logger.error(f"Universe fetch failed: {e}")
-        return 1
-
     summaries = []
     errors = []
     trades_opened = 0
 
     for hypo in INTRADAY_HYPOS:
-        n = hypo["n_universe"]
-        tickers = universe[:n]
+        tickers = hypo["tickers"]  # viable list (backtest expectancy > 0.001)
+        logger.info(f"{hypo['hypo_id']} tickers ({len(tickers)}): {', '.join(tickers)}")
         for ticker in tickers:
             try:
                 strategy = hypo["strategy_cls"](**hypo["strategy_params"])

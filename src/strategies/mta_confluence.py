@@ -1,18 +1,20 @@
 """Multi-Timeframe Analysis (MTA) Confluence — pure (P6).
 
-HYPOTHESIS-010: high-probability long entry — 4 timeframe confluence.
+HYPOTHESIS-010: high-probability long entry — 3-of-4 timeframe confluence.
 
-Logic (모두 만족 시 ENTER_LONG):
-- 1d trend UP: SMA(20) > SMA(50) (long-term bullish)
-- 4h zone: pullback (price < 4h SMA(20) but > 4h SMA(50)) — 매수 zone
-- 1h trigger: RSI(14) < 45 (oversold-ish in higher TF zone)
-- 15m timing: bullish candle (close > open) AND close > prev close
+Codex Round 1 권고 (Phase 2g Round 2):
+- 4/4 hard confluence는 trade-zero risk → 3-of-4 scoring
+- 4H pullback + 15m bullish = MANDATORY (price-action core)
+- 1H RSI<48 = SOFT (1점)
+- 1D uptrend = SOFT (1점) — regime filter
+- 4 of 4 weak signals 평균 ≥ 3점 통과
+- 금지: 1H RSI<40 hard
 
 Exit:
-- 1h RSI > 65 (overbought) → EXIT
-- 15m close < prev close × 0.997 (-0.3% SL implicit) — TP/SL은 runner enforces
+- 1H RSI > 65 → EXIT
+- TP/SL은 runner (TP +0.6% / SL -0.35%)
 
-특이: 이 strategy는 evaluate(window) interface 변형 — multi-tf data 받음.
+특이: evaluate(window) 대신 evaluate_multi_tf(tf_data) 사용.
 """
 from __future__ import annotations
 
@@ -40,8 +42,17 @@ class MTAConfluence(Strategy):
     name = "mta_confluence"
     min_window = 50  # primary tf (15m) 기준
 
-    def __init__(self, target_size_usd: float = 250.0):
+    def __init__(
+        self,
+        target_size_usd: float = 100.0,
+        rsi_soft_threshold: float = 48.0,
+        rsi_overbought: float = 65.0,
+        min_score: int = 3,
+    ):
         self.target_size_usd = target_size_usd
+        self.rsi_soft_threshold = rsi_soft_threshold
+        self.rsi_overbought = rsi_overbought
+        self.min_score = min_score
 
     def evaluate(self, window: list[Candle]) -> Signal:
         """Single-tf fallback — confluence 평가 불가, HOLD 반환."""
@@ -70,43 +81,52 @@ class MTAConfluence(Strategy):
         h1_closes = [c.close for c in h1]
         ts = m15[-1].timestamp_ms
 
-        # 1d trend
+        # 1D uptrend (regime filter — soft, 1점)
         d1_sma20 = _sma(d1_closes, 20)
         d1_sma50 = _sma(d1_closes, 50)
         d1_uptrend = d1_sma20 > d1_sma50
 
-        # 4h zone (pullback)
+        # 4H pullback (mandatory — price-action core)
         h4_sma20 = _sma(h4_closes, 20)
         h4_sma50 = _sma(h4_closes, 50)
         h4_close = h4_closes[-1]
         h4_pullback = h4_close < h4_sma20 and h4_close > h4_sma50
 
-        # 1h trigger (RSI oversold-ish in zone)
+        # 1H RSI soft (1점)
         h1_rsi = compute_rsi(h1_closes, 14)
-        h1_trigger = h1_rsi < 45
+        h1_trigger = h1_rsi < self.rsi_soft_threshold
 
-        # 15m timing (bullish candle + close > prev close)
+        # 15m bullish candle (mandatory — entry timing)
         m15_curr = m15[-1]
         m15_prev = m15[-2]
         m15_bullish = m15_curr.close > m15_curr.open and m15_curr.close > m15_prev.close
 
-        # Exit condition: 1h RSI overbought
-        if h1_rsi > 65:
+        # Exit: 1H RSI overbought
+        if h1_rsi > self.rsi_overbought:
             return Signal(
                 timestamp_ms=ts, action=SignalAction.EXIT, confidence=0.7,
-                reason=f"1h RSI {h1_rsi:.1f} > 65 overbought",
+                reason=f"1h RSI {h1_rsi:.1f} > {self.rsi_overbought} overbought",
             )
 
-        # Confluence ENTRY
-        if d1_uptrend and h4_pullback and h1_trigger and m15_bullish:
+        # Codex Round 1 권고: 4H pullback + 15m bullish 둘 다 필수, 그 외 score >= min_score
+        mandatory_pass = h4_pullback and m15_bullish
+        score = int(d1_uptrend) + int(h4_pullback) + int(h1_trigger) + int(m15_bullish)
+
+        if mandatory_pass and score >= self.min_score:
             return Signal(
                 timestamp_ms=ts, action=SignalAction.ENTER_LONG,
-                confidence=0.85,
+                confidence=0.7 + 0.05 * (score - self.min_score),
                 target_size_usd=self.target_size_usd,
-                reason=f"MTA confluence: 1d↑ 4h pullback 1h_rsi={h1_rsi:.1f} 15m bullish",
+                reason=(
+                    f"MTA score={score}/4 mandatory(4H+15m)=PASS "
+                    f"1d↑={d1_uptrend} h4_pull={h4_pullback} 1h_rsi={h1_rsi:.1f} 15m_bull={m15_bullish}"
+                ),
             )
 
         return Signal(
             timestamp_ms=ts, action=SignalAction.HOLD, confidence=0.0,
-            reason=f"1d↑={d1_uptrend} 4h_pull={h4_pullback} 1h_rsi={h1_rsi:.1f} 15m_bull={m15_bullish}",
+            reason=(
+                f"score={score}/4 mandatory={mandatory_pass} "
+                f"1d↑={d1_uptrend} h4_pull={h4_pullback} 1h_rsi={h1_rsi:.1f} 15m_bull={m15_bullish}"
+            ),
         )

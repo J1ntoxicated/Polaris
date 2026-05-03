@@ -113,6 +113,16 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
+    # HYPO-013 MTA Confluence (Phase 2g Round 2 — 3-of-4 scoring, Codex 권고 threshold)
+    {
+        "hypo_id": "HYPO-013-MTA",
+        "strategy_cls": MTAConfluence,
+        "params": {"target_size_usd": 100.0, "rsi_soft_threshold": 48.0, "min_score": 3},
+        "primary_tf": "mta",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "ORDI-USDT", "SUI-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
 ]
 
 # Tick-cached indicators per (hypo_id, ticker)
@@ -162,6 +172,23 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         if ratio is None or full_tick is None:
             return
         signal = strategy.evaluate_flow(full_tick, ratio, n_trades)
+    elif primary == "mta" and hasattr(strategy, "evaluate_multi_tf"):
+        # Phase 2g Round 2: MTA confluence — 4 TF (1D/4H/1H/15m) candle fetch
+        tf_data = fetch_multi_tf(ticker, timeframes=("1D", "4H", "1H", "15m"))
+        if not all(tf_data.get(tf) for tf in ("1D", "4H", "1H", "15m")):
+            return
+        # Codex Round 2 fix (Q5 IMMEDIATE): stale data guard — 각 TF 마지막 candle
+        # 이 자체 주기의 1.5x 이상 오래되면 skip (가격 발견 stale)
+        TF_MAX_STALE_MS = {"15m": 30*60_000, "1H": 90*60_000, "4H": 6*3600_000, "1D": 36*3600_000}
+        stale = False
+        for tf in ("15m", "1H", "4H", "1D"):
+            last_ts = tf_data[tf][-1].timestamp_ms
+            if tick_ts_ms - last_ts > TF_MAX_STALE_MS[tf]:
+                stale = True
+                break
+        if stale:
+            return
+        signal = strategy.evaluate_multi_tf(tf_data)
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:

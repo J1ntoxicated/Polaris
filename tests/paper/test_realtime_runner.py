@@ -228,6 +228,47 @@ def test_cross_strategy_cooldown_blocks_other_strategy():
     assert len(bal.open_positions) == 0, "ticker-global cooldown — 다른 strategy도 60s 차단"
 
 
+def test_mta_stale_tf_data_skip():
+    """Codex Round 2 fix: 1H TF 데이터가 90분+ stale → MTA branch skip (no entry)."""
+    from src.strategies.mta_confluence import MTAConfluence
+    from src.domain.candle import Candle
+
+    hypo = {
+        "hypo_id": "HYPO-013-MTA",
+        "strategy_cls": MTAConfluence,
+        "params": {},
+        "primary_tf": "mta",
+        "tickers": ["BTC-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    }
+    ticker = "BTC-USDT"
+    now_ms = 1_700_000_000_000
+
+    def _fake_candles(n=60, slope=0.001):
+        return [Candle(timestamp_ms=(i+1)*60_000, open=100*(1+i*slope),
+                       high=100*(1+i*slope)*1.005, low=100*(1+i*slope)*0.995,
+                       close=100*(1+i*slope), volume=100) for i in range(n)]
+
+    # 1H tf data — last candle 100분 전 (stale > 90min)
+    h1_stale = _fake_candles(20)
+    h1_stale[-1] = Candle(
+        timestamp_ms=now_ms - 100*60_000,  # 100분 전 stale
+        open=100, high=101, low=99, close=100, volume=100,
+    )
+    fresh = _fake_candles(60)
+    fresh[-1] = Candle(timestamp_ms=now_ms, open=100, high=101, low=99, close=100, volume=100)
+
+    fake_tf = {"1D": fresh, "4H": fresh, "1H": h1_stale, "15m": fresh}
+    with patch.object(rt, "fetch_multi_tf", return_value=fake_tf):
+        rt._eval_and_act(hypo, ticker, tick_price=100.0, tick_ts_ms=now_ms,
+                         full_tick=_full_tick(100.0, now_ms))
+
+    bal = rt.load_state(ticker, "mta_confluence", starting_usd=5000.0)
+    assert len(bal.open_positions) == 0, "stale 1H TF → entry 차단"
+    assert len(bal.closed_positions) == 0
+
+
 def test_re_entry_allowed_after_cooldown():
     hypo = _hypo_flow()
     ticker = "BTC-USDT"

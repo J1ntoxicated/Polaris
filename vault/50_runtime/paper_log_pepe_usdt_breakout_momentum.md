@@ -23,3 +23,5 @@ Append-only. ADR-010 paper 운영 기록.
 |---|---|---|
 | 2026-05-04T06:48:53 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
 | 2026-05-04T08:46:09 | OPEN | id=PEPE-USDT-1777848367718 dir=1 entry=0.00 size=$200 |
+| 2026-05-04T09:20:09 | CLOSE | id=PEPE-USDT-1777848367718 entry=0.00 exit=0.00 net=-0.49% net_usd=-0.98 |
+| 2026-05-04T09:20:09 | EXIT_REASON | sl_hit:-0.0035 |

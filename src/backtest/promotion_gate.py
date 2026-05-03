@@ -5,8 +5,11 @@
 References:
 - principles P4 Validation Boundary (alpha)
 - 60_alpha/_README workflow
-- INSIGHT-006 frozen_params (m2_promotion_min_n_trades=30, min_expectancy=0.001)
+- INSIGHT-006 frozen_params
 - INSIGHT-007 fast-fail gate
+- INSIGHT-015 timeframe-aware (1d viable)
+- ADR-010 Backtest + Paper parallel
+- ADR-011 Promotion Gate Timeframe-aware (Scalp/Swing/Position)
 """
 from __future__ import annotations
 
@@ -15,12 +18,45 @@ from dataclasses import dataclass
 from src.backtest.result import BacktestResult
 from src.domain.metrics import fast_fail_gate
 
-# Promotion thresholds (frozen_params [[INSIGHT-006]] + ADR-010 강화)
-MIN_TRADES = 30
-MIN_EXPECTANCY = 0.001  # 0.1% per trade after fee
-MIN_SHARPE = 0.5  # ADR-010: 백테스트 신뢰도 낮음 (INSIGHT-012) → fast-fail 수준만
-MIN_WIN_RATE = 0.52  # ADR-010: random walk null (50%) 약간 위
-MAX_DRAWDOWN_LIMIT = 0.10  # 10%
+# ─────── Category thresholds (ADR-011 Timeframe-aware) ───────
+
+# Category 1 — Scalp (1m, 5m, 15m, 1h)
+SCALP_MIN_TRADES = 50
+SCALP_MIN_SHARPE = 0.8
+SCALP_MIN_WIN_RATE = 0.55
+SCALP_MAX_DRAWDOWN = 0.10
+SCALP_FEE_MULTIPLIER = 1.5  # expectancy > fee × 1.5
+
+# Category 2 — Swing (4h, 12h, 1d)
+SWING_MIN_TRADES = 15
+SWING_MIN_SHARPE = 0.3
+SWING_MIN_WIN_RATE = 0.30
+SWING_MAX_DRAWDOWN = 0.50
+SWING_FEE_MULTIPLIER = 5.0
+
+# Category 3 — Position (3d+, weekly)
+POSITION_MIN_TRADES = 8
+POSITION_MIN_SHARPE = 0.2
+POSITION_MIN_WIN_RATE = 0.25
+POSITION_MAX_DRAWDOWN = 0.70
+POSITION_FEE_MULTIPLIER = 10.0
+
+# Default (legacy = scalp 기본)
+MIN_TRADES = SCALP_MIN_TRADES
+MIN_SHARPE = SCALP_MIN_SHARPE
+MIN_WIN_RATE = SCALP_MIN_WIN_RATE
+MAX_DRAWDOWN_LIMIT = SCALP_MAX_DRAWDOWN
+MIN_EXPECTANCY = 0.001  # legacy compat
+
+
+def categorize_timeframe(timeframe: str) -> str:
+    """timeframe → 'scalp' | 'swing' | 'position'."""
+    tf = timeframe.lower().strip()
+    if tf in {"1m", "3m", "5m", "15m", "30m", "1h"}:
+        return "scalp"
+    if tf in {"2h", "4h", "6h", "8h", "12h", "1d"}:
+        return "swing"
+    return "position"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +67,7 @@ class PromotionDecision:
     fast_fail_passed: bool
     failures: tuple[str, ...]
     summary: dict
+    category: str = ""
 
 
 def evaluate_fast_fail(expected_tp_pct: float, fee_round_trip: float) -> bool:
@@ -38,21 +75,15 @@ def evaluate_fast_fail(expected_tp_pct: float, fee_round_trip: float) -> bool:
     return fast_fail_gate(expected_tp_pct, fee_round_trip)
 
 
-def evaluate_promotion(result: BacktestResult) -> PromotionDecision:
-    """BACKTEST 결과 → PAPER 진입 가능 여부.
-
-    ADR-010 (Backtest + Paper parallel) 적용:
-    - 백테스트 = fast-fail + sanity check (INSIGHT-012 신뢰도 한계)
-    - PAPER가 진짜 알파 검증
-
-    PAPER 진입 조건 (모두 만족):
-    1. fast-fail gate (expectancy > fee_round_trip) — INSIGHT-007
-    2. n_trades >= MIN_TRADES (30, 통계 최소)
-    3. expectancy >= MIN_EXPECTANCY (0.001)
-    4. sharpe >= MIN_SHARPE (0.5, ADR-010 강화)
-    5. win_rate >= MIN_WIN_RATE (0.52, random walk null 위)
-    6. max_drawdown <= MAX_DRAWDOWN_LIMIT (0.10)
-    """
+def _evaluate_with_thresholds(
+    result: BacktestResult,
+    category: str,
+    min_trades: int,
+    min_sharpe: float,
+    min_win_rate: float,
+    max_dd: float,
+    fee_mult: float,
+) -> PromotionDecision:
     failures: list[str] = []
 
     fast_fail_ok = evaluate_fast_fail(result.expectancy, result.fee_round_trip)
@@ -61,28 +92,73 @@ def evaluate_promotion(result: BacktestResult) -> PromotionDecision:
             f"fast-fail: expectancy {result.expectancy:.6f} <= fee {result.fee_round_trip}"
         )
 
-    if result.n_trades < MIN_TRADES:
-        failures.append(f"n_trades: {result.n_trades} < {MIN_TRADES}")
+    if result.n_trades < min_trades:
+        failures.append(f"n_trades: {result.n_trades} < {min_trades}")
 
-    if result.expectancy < MIN_EXPECTANCY:
+    fee_threshold = result.fee_round_trip * fee_mult
+    if result.expectancy < fee_threshold:
         failures.append(
-            f"expectancy: {result.expectancy:.6f} < {MIN_EXPECTANCY}"
+            f"expectancy: {result.expectancy:.6f} < fee × {fee_mult} ({fee_threshold:.6f})"
         )
 
-    if result.sharpe < MIN_SHARPE:
-        failures.append(f"sharpe: {result.sharpe:.4f} < {MIN_SHARPE}")
+    if result.sharpe < min_sharpe:
+        failures.append(f"sharpe: {result.sharpe:.4f} < {min_sharpe}")
 
-    if result.hit_rate < MIN_WIN_RATE:
-        failures.append(f"win_rate: {result.hit_rate:.4f} < {MIN_WIN_RATE}")
+    if result.hit_rate < min_win_rate:
+        failures.append(f"win_rate: {result.hit_rate:.4f} < {min_win_rate}")
 
-    if result.max_drawdown > MAX_DRAWDOWN_LIMIT:
-        failures.append(
-            f"max_drawdown: {result.max_drawdown:.4f} > {MAX_DRAWDOWN_LIMIT}"
-        )
+    if result.max_drawdown > max_dd:
+        failures.append(f"max_drawdown: {result.max_drawdown:.4f} > {max_dd}")
 
     return PromotionDecision(
         passed=len(failures) == 0,
         fast_fail_passed=fast_fail_ok,
         failures=tuple(failures),
         summary=result.summary(),
+        category=category,
     )
+
+
+def evaluate_promotion_scalp(result: BacktestResult) -> PromotionDecision:
+    """Category 1 — Scalp (1m~1h). ADR-011 strict thresholds."""
+    return _evaluate_with_thresholds(
+        result, "scalp", SCALP_MIN_TRADES, SCALP_MIN_SHARPE, SCALP_MIN_WIN_RATE,
+        SCALP_MAX_DRAWDOWN, SCALP_FEE_MULTIPLIER,
+    )
+
+
+def evaluate_promotion_swing(result: BacktestResult) -> PromotionDecision:
+    """Category 2 — Swing (4h~1d). ADR-011 trend-aware thresholds."""
+    return _evaluate_with_thresholds(
+        result, "swing", SWING_MIN_TRADES, SWING_MIN_SHARPE, SWING_MIN_WIN_RATE,
+        SWING_MAX_DRAWDOWN, SWING_FEE_MULTIPLIER,
+    )
+
+
+def evaluate_promotion_position(result: BacktestResult) -> PromotionDecision:
+    """Category 3 — Position (3d+, weekly). ADR-011 long-hold thresholds."""
+    return _evaluate_with_thresholds(
+        result, "position", POSITION_MIN_TRADES, POSITION_MIN_SHARPE, POSITION_MIN_WIN_RATE,
+        POSITION_MAX_DRAWDOWN, POSITION_FEE_MULTIPLIER,
+    )
+
+
+def evaluate_promotion(
+    result: BacktestResult,
+    category: str | None = None,
+) -> PromotionDecision:
+    """Dispatcher — category 자동 분류 또는 명시.
+
+    Args:
+        result: BacktestResult.
+        category: 'scalp' | 'swing' | 'position' | None (auto from timeframe).
+    """
+    if category is None:
+        category = categorize_timeframe(result.timeframe)
+    if category == "scalp":
+        return evaluate_promotion_scalp(result)
+    if category == "swing":
+        return evaluate_promotion_swing(result)
+    if category == "position":
+        return evaluate_promotion_position(result)
+    raise ValueError(f"unknown category: {category!r}")

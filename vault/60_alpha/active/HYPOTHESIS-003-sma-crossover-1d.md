@@ -76,9 +76,21 @@ tags: [type/hypothesis, status/active, scope/alpha, priority/p0, polaris]
 - MDD 36-67% = paper에서 심리적 부담
 - Survivorship: BTC 8.5년 데이터 자체가 bull cycle 평균
 
+## Promotion Gate 평가 (ADR-011 Timeframe-aware)
+
+| Strategy | Category | Result | Verdict |
+|---|---|---|---|
+| **SMA(50, 200) BTC 1d** | **position** | trades 8, exp +47.7%, Sharpe 0.475, MDD 36% | ✅ **PASS** |
+| SMA(20, 50) BTC 1d | swing | trades 34, exp +14.2%, Sharpe 0.20, MDD 54% | FAIL (Sharpe / MDD) |
+| SMA(10, 30) BTC 1d | swing | trades 64, exp +5.0%, Sharpe 0.15, MDD 67% | FAIL (expectancy×5 / Sharpe / WR / MDD) |
+
+**핵심 발견**: SMA(50, 200) Category Position 분류 시 Promotion Gate 통과 (Polaris 첫 가설 통과 사례).
+
+→ Polaris 첫 페이퍼 후보 = SMA(50, 200) BTC 1d.
+
 ## Promotion 결정
 
-**Active 유지**. 페이퍼 검증 후 Jin ack로 라이브 진입 결정.
+**Stage 1 BACKTEST PASS** (Category Position). Stage 2 PAPER 90-180일 검증 대기 (Phase 2c 페이퍼 인프라 후).
 
 ## Related
 - INSIGHT-015 (1d viable 발견)

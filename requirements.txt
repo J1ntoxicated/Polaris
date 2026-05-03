@@ -1,0 +1,17 @@
+# Core
+requests>=2.31.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# CLI Dashboard
+rich>=13.0.0
+
+# WebSocket (OKX real-time)
+websockets>=12.0
+
+# Async HTTP (Forex bot)
+aiohttp>=3.9.0
+
+# IG Lightstreamer (optional - for real-time forex streaming)
+# lightstreamer-client-lib>=1.0.0

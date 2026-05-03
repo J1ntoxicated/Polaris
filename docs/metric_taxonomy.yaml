@@ -1,0 +1,138 @@
+# Metric Taxonomy v1 (T13 D0, Pillar 1)
+#
+# Canonical definition of every metric flowing through DB / preg / cell_matrix.
+# Runtime validator `_metric_contract.py` (D1/D2 scope) will enforce these at:
+# - Cell API entry (cell_resolve / cell_learn)
+# - preg register (_reg) — category invariants
+# - DB insert — range invariants
+#
+# Sibling doc: docs/DATA_CONTRACTS.md (exchange feed layer only).
+
+version: 1
+base_unit_conventions:
+  percent: "value as-is (e.g., 2.5 = 2.5%). DO NOT multiply by 100 at consumer (E14/D-A)."
+  fraction: "[0, 1] range. Multiply by 100 only at render layer if percent display needed."
+  ratio: "[-1, 1] or unbounded ratio. unit-less."
+  sec: "seconds (unix epoch or duration)."
+  ms: "milliseconds."
+  usd: "USD notional."
+  count: "integer count."
+
+# ────────────────────────────────────────────────────────────────────
+# DB source-of-truth metrics (trades table)
+# ────────────────────────────────────────────────────────────────────
+trade_metrics:
+  pnl_pct:
+    unit: percent
+    range: [-50, 100]
+    source: trades.pnl_pct
+    consumers: [hourly_stats, cell_matrix, subsystem_reviewer, ticker_baseline]
+    invariants: ["percent_already — consumer must NOT *100"]
+  max_profit_pct:
+    unit: percent
+    range: [0, 500]
+    source: trades.max_profit_pct
+    consumers: [hourly_stats._learn_profit_target, exit_cycle TIME→TRAIL suppression]
+    invariants: ["percent_already (E14/D-A *100 중복곱 제거)", "value >= 0"]
+  hold_seconds:
+    unit: sec
+    range: [0, 604800]
+    source: trades.hold_seconds
+    consumers: [hourly_stats._learn_max_hold, subsystem_reviewer]
+  size_usd:
+    unit: usd
+    range: [0, 1000000]
+    source: trades.size_usd
+  pnl_usd:
+    unit: usd
+    source: trades.pnl_usd
+  realized_slippage_bps:
+    unit: basis_points  # 1 bps = 0.01%
+    source: trades.realized_slippage_bps
+
+# ────────────────────────────────────────────────────────────────────
+# Signal metrics (signals table)
+# ────────────────────────────────────────────────────────────────────
+signal_metrics:
+  score:
+    unit: ratio
+    range: [-1, 1]
+    source: signals.score
+  strength:
+    unit: fraction
+    range: [0, 1]
+    source: signals.strength
+  confidence:
+    unit: fraction
+    range: [0, 1]
+    invariants: ["composer lowconf drop threshold = confidence <= 0"]
+
+# ────────────────────────────────────────────────────────────────────
+# ticker_baseline metrics (normalization source)
+# ────────────────────────────────────────────────────────────────────
+ticker_baseline_metrics:
+  atr_pct_median: {unit: percent, range: [0, 50]}
+  atr_pct_p75: {unit: percent}
+  size_usd_median: {unit: usd}
+  signal_score_median: {unit: ratio}
+  volume_usd_median: {unit: usd}
+  pnl_pct_std: {unit: percent, semantic: "std dev of pnl_pct for group"}
+  n_samples: {unit: count}
+
+# ────────────────────────────────────────────────────────────────────
+# preg category invariants
+# ────────────────────────────────────────────────────────────────────
+preg_categories:
+  mult:
+    invariant: "bounds low >= 1.0 (amplify-only, D-J/D0.5)"
+    exceptions:
+      - "provider_mult_* 17건 — weight composite, bounds (0.0, 2.0) 허용 (별개 debate)"
+      - "slippage_size_adjust_mult / position_size_mult_asia — default<1.0 (Jin debate 대기)"
+      - "hard_stop_atr_mult — 음수 mult (의미 다름)"
+  pct:
+    unit: percent
+  sec|ms:
+    unit: time
+  fraction:
+    range: [0, 1]
+  usd:
+    unit: usd
+
+# ────────────────────────────────────────────────────────────────────
+# Per-exchange variance (feed layer)
+# ────────────────────────────────────────────────────────────────────
+per_exchange_variance:
+  vol24h:
+    okx: "USD (converted at ingest from volCcy24h * price)"
+    alpaca: "shares — caller must * price for USD notional"
+    cap: "instrument quote currency"
+  atr_pct:
+    all: "percent of price"
+  asset_group:
+    okx: crypto
+    alpaca: [stock, etf]   # D-D alpaca populate 강제 후 unknown fallback
+    cap: [forex, indices, commodity]
+
+# ────────────────────────────────────────────────────────────────────
+# Cell matrix axes
+# ────────────────────────────────────────────────────────────────────
+cell_matrix_axes:
+  v1_current_6dim: [exchange, asset_group, session, regime, strategy_id, direction]
+  v2_planned_8dim: [+ticker, +liquidity_tier]   # D-E 동시 추가 확정
+  lookup_fallback: "depth-reverse (specific→coarse). 4단 MVP → 8단 확장 (원안 #9)"
+  session_band:
+    count: 8
+    members: [asia_syd_pre, asia_tokyo_open, asia_core, asia_close, europe_early, europe_late, us_core, us_late]
+
+# ────────────────────────────────────────────────────────────────────
+# Validator contract (runtime enforce, D2/D16a scope)
+# ────────────────────────────────────────────────────────────────────
+validator_contract:
+  file: invasion/config/_metric_contract.py   # TBD D2 신설
+  entrypoints:
+    cell_resolve: "assert metric.unit matches declaration"
+    cell_learn: "assert value in range + unit consistent"
+    preg_register: "assert bounds match category invariant"
+  regressions:
+    - E14_D-A: "max_profit_pct *100 중복곱 재발 방지"
+    - D-J: "mult preg bounds low < 1.0 재발 방지"

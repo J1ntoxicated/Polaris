@@ -1,0 +1,98 @@
+# Security
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+
+# Logs & data
+*.log
+logs/
+trades/
+data/cache/
+data/candles/
+data/logs/
+data/*.pid
+data/*_output.log
+data/*_activity.log
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.duckdb
+data/*.duckdb.wal
+data/*.json
+data/*.jsonl
+data/*.jsonl.old
+data/*.jsonl.1
+data/*.log.*
+data/*.bak
+data/*.tmp
+data/strategies/*.json
+data/tmp*
+data/lake_snapshot/
+data/debates/
+data/backups/
+data/*.parquet
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Archive
+_Archive/
+backup/
+archive_temp/
+data/.env
+data/*.bak_audit_*
+data/*.bak_*
+data/*.malformed_*
+data/*.pre-fresh_*
+data/*.pre-redesign*
+data/system_monitor/
+data/mass_collection/
+data/news_data.json
+data/*_data.json
+data/*signals*.jsonl
+data/yolo_*
+data/sentiment_history*
+data/archive_*
+
+# Large historical reports (Jin 2026-04-24: GitHub 100MB cap 사고 재발 방지)
+*.html
+*.duckdb
+*.duckdb.wal
+
+# MSG-072 Phase 1: yahoo_symbol_mapping.json is the committed seed
+# (human-editable + Phase 2 AI append). Whitelist it out of the
+# blanket data/*.json rule above.
+!data/yahoo_symbol_mapping.json
+
+# Vault — Polaris human knowledge hub (2026-05-03 ADR-002)
+# Polaris vault는 git tracked (Codex-debate 합의 — 모태 hourly auto-sync churn 폐기, lessons #80).
+# 다음 항목만 untracked:
+vault/generated/
+vault/50_runtime/daily-*.md
+vault/.obsidian/workspace.json
+vault/.obsidian/workspace-mobile.json
+
+# Polaris additions (2026-05-03)
+docs/superpowers/plans/local-*.md
+
+# Harness 잔재 (모태) — ADR-005 자율 forensic loop 폐기로 무용
+.claude/harness_alerts/
+.claude/agent-memory/
+.claude/archive/
+.claude/projects/
+
+# Claude Code 로컬 plugin cache (글로벌 ~/.claude/plugins/ 사용)
+.claude/plugins/
+.claude/skills/

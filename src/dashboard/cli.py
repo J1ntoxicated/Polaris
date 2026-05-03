@@ -1,31 +1,28 @@
 """Polaris Terminal Dashboard — shell (P6).
 
-Single-shot rendering of:
-- Active HYPO summary (per ticker × strategy: balance, equity, positions, PnL)
-- BACKTEST results (recent backtest cache or live re-run)
-- Signal history (last N from vault paper logs)
-- Daily summary
+Layout (content-fit, ~180 cols × ~50 rows):
+- Header (compact 1 panel)
+- Active HYPOs table (5+ rows expand)
+- Alpha Index (1 line)
+- Live log stream (real-time tail of all paper_log + cron.log)
 
 Usage:
     python -m src.dashboard.cli                  # snapshot
-    python -m src.dashboard.cli --refresh 60     # auto-refresh every 60s
+    python -m src.dashboard.cli --refresh 10     # auto refresh
 
 References:
 - INSIGHT-002 MTTR-alpha
 - ADR-010 Backtest + Paper parallel
-- vault/60_alpha/_README workflow
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import json
 import re
 import time
 from pathlib import Path
 
 from rich.console import Console
-from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -36,125 +33,160 @@ from src.paper.runner import load_state
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 VAULT_LOG_DIR = PROJECT_ROOT / "vault" / "50_runtime"
 DATA_PAPER_DIR = PROJECT_ROOT / "data" / "paper"
+CRON_LOG = DATA_PAPER_DIR / "cron.log"
 
 console = Console()
 
 
-def _safe_strategy_name(hypo: dict) -> str:
-    s = hypo["strategy"](**hypo["strategy_params"])
-    return s.name
+def _strategy_name(hypo: dict) -> str:
+    return hypo["strategy"](**hypo["strategy_params"]).name
+
+
+def render_header() -> Panel:
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    body = (
+        f"[bold cyan]Polaris[/bold cyan] [dim]│[/dim] {now} [dim]│[/dim] "
+        f"[green]●[/green] paper cron daily 01:00 UTC [dim]│[/dim] "
+        f"[green]●[/green] dashboard live\n"
+        f"[dim]7 원칙[/dim] P1 Authority/P2 Lifecycle/P3 Write/P4 Validation/P5 Alpha-first/P6 Pure/P7 Property "
+        f"[dim]│[/dim] [dim]Codex Round 2[/dim] 88%"
+    )
+    return Panel(body, border_style="green", padding=(0, 1))
 
 
 def render_active_hypos() -> Table:
-    """Active HYPO 5 cycle status."""
-    table = Table(title="🎯 Active HYPOs (Paper Status)", show_header=True, header_style="bold cyan")
-    table.add_column("HYPO", justify="left")
-    table.add_column("Ticker", justify="left")
-    table.add_column("Strategy", justify="left")
+    table = Table(
+        title="🎯 Active HYPOs (Paper Status)",
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+        title_justify="left",
+    )
+    table.add_column("HYPO", justify="left", no_wrap=True)
+    table.add_column("Ticker", justify="left", no_wrap=True)
+    table.add_column("Strategy", justify="left", no_wrap=True)
     table.add_column("Cash $", justify="right")
     table.add_column("Equity $", justify="right")
     table.add_column("Open", justify="right")
     table.add_column("Closed", justify="right")
     table.add_column("Realized PnL $", justify="right")
+    table.add_column("Last Event", justify="left", overflow="fold")
 
     for hypo in ACTIVE_HYPOS:
-        strategy_name = _safe_strategy_name(hypo)
+        sname = _strategy_name(hypo)
         for ticker in hypo["tickers"]:
             try:
-                bal = load_state(ticker, strategy_name, starting_usd=hypo["starting_usd"])
+                bal = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
                 cash = bal.cash_usd
-                # equity 계산 — current price unknown, 마지막 paper log에서 read
-                eq = bal.cash_usd + sum(p.size_usd for p in bal.open_positions)  # 단순화
+                eq = bal.cash_usd + sum(p.size_usd for p in bal.open_positions)
                 pnl = bal.realized_pnl_usd
                 pnl_color = "green" if pnl >= 0 else "red"
+
+                safe_t = ticker.replace("-", "_").lower()
+                log_file = VAULT_LOG_DIR / f"paper_log_{safe_t}_{sname}.md"
+                last_event = "—"
+                if log_file.exists():
+                    lines = [
+                        ln for ln in log_file.read_text(encoding="utf-8").splitlines()
+                        if ln.startswith("| 20")
+                    ]
+                    if lines:
+                        last = lines[-1]
+                        parts = [p.strip() for p in last.split("|")[1:-1]]
+                        if len(parts) >= 3:
+                            last_event = f"{parts[1]}: {parts[2][:60]}"
+
                 table.add_row(
                     hypo["hypo_id"],
                     ticker,
-                    strategy_name,
+                    sname,
                     f"{cash:,.0f}",
                     f"{eq:,.0f}",
                     str(bal.n_open),
                     str(bal.n_closed),
                     Text(f"{pnl:+,.2f}", style=pnl_color),
+                    last_event,
                 )
             except Exception as e:
                 table.add_row(
-                    hypo["hypo_id"], ticker, strategy_name,
-                    "—", "—", "—", "—", f"err: {e}",
+                    hypo["hypo_id"], ticker, sname,
+                    "—", "—", "—", "—", "—", f"err: {e}"[:60],
                 )
-    return table
-
-
-def render_recent_signals(n_lines: int = 10) -> Table:
-    """Vault paper log 마지막 N events."""
-    table = Table(title=f"📡 Recent Signals (last {n_lines} per log)", show_header=True, header_style="bold magenta")
-    table.add_column("Log file", style="dim")
-    table.add_column("Last event", justify="left")
-
-    if not VAULT_LOG_DIR.exists():
-        table.add_row("—", "no log dir")
-        return table
-
-    log_files = sorted(VAULT_LOG_DIR.glob("paper_log_*.md"))
-    if not log_files:
-        table.add_row("—", "no paper logs yet")
-        return table
-
-    for f in log_files:
-        text = f.read_text(encoding="utf-8")
-        # Extract event lines (after the table header)
-        lines = [ln for ln in text.splitlines() if ln.startswith("| 20")]
-        if not lines:
-            table.add_row(f.name, "(no events)")
-            continue
-        last_n = lines[-min(n_lines, len(lines)):]
-        # 가장 최근 1줄만 short display, 추가는 별도 panel에
-        short = last_n[-1] if last_n else ""
-        # Strip table syntax
-        short = re.sub(r"^\|\s*", "", short).rstrip("|").strip()
-        table.add_row(f.name.replace("paper_log_", "").replace(".md", ""), short[:120])
     return table
 
 
 def render_alpha_index() -> Panel:
-    """Vault alpha_index 상태 카운트."""
     idx_path = PROJECT_ROOT / "vault" / "60_alpha" / "_alpha_index.md"
     if not idx_path.exists():
-        return Panel("alpha_index missing", title="🔬 Alpha Index", border_style="red")
+        return Panel("alpha_index missing", title="🔬 Alpha", border_style="red")
     text = idx_path.read_text(encoding="utf-8")
-    # Extract count rows
     counts = []
     for line in text.splitlines():
         m = re.match(r"\|\s*(Active|Graduated|Archived|\*\*Total\*\*)\s*\|\s*(\d+)\s*\|", line)
         if m:
-            counts.append(f"{m.group(1)}: {m.group(2)}")
-    body = "\n".join(counts) if counts else "(no count)"
-    return Panel(body, title="🔬 Alpha Index", border_style="cyan")
+            label = m.group(1).replace("*", "")
+            counts.append(f"[bold]{label}[/bold]: {m.group(2)}")
+    body = " · ".join(counts) if counts else "(no count)"
+    return Panel(body, title="🔬 Alpha Index", border_style="cyan", padding=(0, 1))
 
 
-def render_polaris_summary() -> Panel:
-    """Polaris 운영 모델 요약."""
-    body = (
-        "[bold]7 영속 원칙[/bold]: P1 Authority · P2 Lifecycle · P3 Write Path · P4 Validation · P5 Alpha-first KPI · P6 Pure Core · P7 Property test\n"
-        "[bold]4 모드[/bold]: DEV · ALPHA · FORENSIC · DEBATE\n"
-        "[bold]4 agent[/bold]: vault-curator · code-implementer · forensic-investigator · codex-debate-partner\n"
-        "[bold]Cron[/bold]: 매일 01:00 UTC × 5 cycle (BTC/ETH/SOL × HYPO-003/004)\n"
-        "[bold]Codex review[/bold]: Round 1 78% → Round 2 88% (잔여 gap 5: stop/dedup/partial/short/sizing)"
-    )
-    return Panel(body, title="🌟 Polaris 운영 모델", border_style="green")
+def _tail_lines(path: Path, n: int) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def render_live_logs(max_lines: int = 25) -> Panel:
+    """모든 vault paper_log + cron.log의 latest events 합친 live stream."""
+    events: list[tuple[str, str, str]] = []
+
+    if VAULT_LOG_DIR.exists():
+        for log_file in VAULT_LOG_DIR.glob("paper_log_*.md"):
+            label = log_file.name.replace("paper_log_", "").replace(".md", "")
+            for line in log_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("| 20"):
+                    parts = [p.strip() for p in line.split("|")[1:-1]]
+                    if len(parts) >= 3:
+                        events.append((parts[0], label[:28], f"[{parts[1]}] {parts[2]}"))
+
+    if CRON_LOG.exists():
+        for line in _tail_lines(CRON_LOG, 50):
+            m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]?\d* \[(\w+)\] (.+)$", line)
+            if m:
+                events.append((m.group(1).replace(" ", "T"), "cron", f"[{m.group(2)}] {m.group(3)}"))
+
+    events.sort(key=lambda x: x[0], reverse=True)
+    latest = events[:max_lines]
+
+    if not latest:
+        body = "[dim](no events yet — first cycle 대기 중)[/dim]"
+    else:
+        lines = []
+        for ts, src, msg in latest:
+            color = (
+                "yellow" if "OPEN" in msg
+                else "green" if "CLOSE" in msg
+                else "magenta" if "BREACH" in msg
+                else "blue" if "BALANCE" in msg
+                else "white"
+            )
+            lines.append(f"[dim]{ts[-8:]}[/dim] [{color}]{src:28s}[/{color}] {msg[:130]}")
+        body = "\n".join(lines)
+    return Panel(body, title=f"📡 Live Log Stream (latest {max_lines})", border_style="magenta", padding=(0, 1))
 
 
 def render_dashboard() -> None:
-    now = _dt.datetime.now().isoformat(timespec="seconds")
-    console.rule(f"[bold]Polaris Dashboard — {now}[/bold]")
-    console.print(render_polaris_summary())
+    console.print(render_header())
     console.print(render_active_hypos())
     console.print(render_alpha_index())
-    console.print(render_recent_signals())
+    console.print(render_live_logs(max_lines=25))
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Polaris terminal dashboard")
+    ap = argparse.ArgumentParser(description="Polaris terminal dashboard (live)")
     ap.add_argument("--refresh", type=int, default=0,
                     help="auto refresh interval seconds (0 = single shot)")
     args = ap.parse_args()
@@ -167,7 +199,7 @@ def main() -> None:
         try:
             console.clear()
             render_dashboard()
-            console.print(f"\n[dim]Auto refresh every {args.refresh}s — Ctrl+C to exit[/dim]")
+            console.print(f"\n[dim]Refresh every {args.refresh}s — Ctrl+C to exit[/dim]")
             time.sleep(args.refresh)
         except KeyboardInterrupt:
             console.print("\n[bold yellow]Exiting...[/bold yellow]")

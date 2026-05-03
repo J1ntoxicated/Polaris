@@ -15,9 +15,11 @@ venv/
 *.log
 logs/
 trades/
+data/
 data/cache/
 data/candles/
 data/logs/
+data/paper/  # paper machine state (P1 — vault X, code/DB SSOT)
 data/*.pid
 data/*_output.log
 data/*_activity.log

@@ -26,3 +26,6 @@ tags: [meta, log, append_only, polaris]
 - **A2 메모리 4개 신규** — feedback_code_review_codex_external / feedback_reasoning_superbrain / feedback_harness_4_modes / polaris_operating_model. MEMORY.md 인덱스 갱신.
 - **A3 디렉토리 구조** — vault 7계층 + .templates + generated/components + .claude/hooks + .claude/agents/_DEPRECATED + docs/superpowers/{specs,plans} 생성.
 - **A4 vault 핵심 콘텐츠 작성 중** — _NOW + INDEX + log + tag_taxonomy + 5 templates + 7 constitution + 5 ADR + 2 INSIGHT + _README들.
+- **Phase A/B/C/D 완료** — vault 31 md / 2,290 라인, vault_lint 0 FAIL, 4 agent active + 20 _DEPRECATED, hooks 4 + git pre-commit symlink, implementation plan (1041 lines).
+- **첫 commit `1cd3aba`** — feat(polaris): bootstrap v4 (310 files, 122,812 insertions).
+- **Phase 0 완료 (Codex 리뷰 ADR-004 첫 사례)** — Round 1 80% → 5 fix 적용 → Round 2 93% 합의. Round 3 불필요. 잔여 gap 10개는 Phase 1+ plan. ([[codex_review_phase_abc]])

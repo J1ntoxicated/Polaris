@@ -58,17 +58,21 @@ def main() -> int:
 
     emergency = os.environ.get("EMERGENCY", "").strip() == "1"
     if emergency:
-        reason = os.environ.get("EMERGENCY_REASON", "(no reason given)")
+        reason = os.environ.get("EMERGENCY_REASON", "")
+        if not reason.strip():
+            print("[pre_commit] EMERGENCY=1 but EMERGENCY_REASON empty → fail (감사 추적 의무).", file=sys.stderr)
+            return 1
         print(f"[pre_commit] EMERGENCY=1 — vault_lint warning 허용. Reason: {reason}")
         _log_emergency(reason)
-        # 그래도 lint 실행 (정보 수집), exit code는 0
-        subprocess.run([sys.executable, str(VAULT_LINT), "--karpathy", "--dry-run"])
+        # 그래도 full lint 실행 (정보 수집), exit code는 0
+        subprocess.run([sys.executable, str(VAULT_LINT), "--dry-run"])
         return 0
 
-    result = subprocess.run([sys.executable, str(VAULT_LINT), "--karpathy"])
+    # Full lint (Karpathy + Polaris contracts) — ADR-004 reviewed_by gate 포함
+    result = subprocess.run([sys.executable, str(VAULT_LINT)])
     if result.returncode != 0:
-        print("[pre_commit] vault_lint --karpathy FAIL → commit 차단.", file=sys.stderr)
-        print("[pre_commit] 긴급 시: EMERGENCY=1 EMERGENCY_REASON='...' git commit ...", file=sys.stderr)
+        print("[pre_commit] vault_lint FAIL → commit 차단 (Karpathy + Polaris contracts).", file=sys.stderr)
+        print("[pre_commit] 긴급 시: EMERGENCY=1 EMERGENCY_REASON='reason' git commit ...", file=sys.stderr)
         return 1
     return 0
 

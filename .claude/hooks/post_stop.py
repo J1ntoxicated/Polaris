@@ -24,7 +24,11 @@ EMERGENCY_LOG = PROJECT_ROOT / "vault" / "50_runtime" / "emergency_bypass_log.md
 def _check_now_age() -> int:
     if not NOW_FILE.exists():
         return 0
-    text = NOW_FILE.read_text(encoding="utf-8")
+    try:
+        text = NOW_FILE.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[post_stop] WARN: _NOW.md read 실패: {e}", file=sys.stderr)
+        return 0
     m = re.search(r"^last_modified:\s*(\S+)", text, re.MULTILINE)
     if not m:
         return 0
@@ -44,7 +48,11 @@ def _check_now_age() -> int:
 def _check_emergency_followup() -> int:
     if not EMERGENCY_LOG.exists():
         return 0
-    text = EMERGENCY_LOG.read_text(encoding="utf-8")
+    try:
+        text = EMERGENCY_LOG.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[post_stop] WARN: emergency_bypass_log.md read 실패: {e}", file=sys.stderr)
+        return 0
     now = _dt.datetime.now()
     overdue = []
     for line in text.splitlines():

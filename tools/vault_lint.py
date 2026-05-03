@@ -37,13 +37,35 @@ REQUIRED_EXPIRES_TYPES = {"adr", "insight", "hypothesis"}
 PROPOSED_MAX_DAYS = 7
 MIN_BACKLINKS_KNOWLEDGE = 2
 
-# P1 — machine state write 흔적 패턴 (코드 블록 밖에서만 검출)
+# P1 — machine state write 흔적 패턴 (코드 블록 + inline backtick 밖에서만 검출).
+# SQL 패턴은 table identifier 뒤따라야 매치 (false positive 차단 — 단순 인용 SQL 키워드는 통과).
 MACHINE_STATE_LEAK_PATTERNS = [
-    r"\bopen\(['\"][^'\"]+\.(json|jsonl|sqlite|db)['\"],\s*['\"][wa]\b",
+    # File write APIs
+    r"\bopen\([^)]*\.(json|jsonl|sqlite|db|csv|parquet)[^)]*[,\s]+(mode\s*=\s*)?['\"][wax]b?\b",
     r"\.write_text\(",
-    r"\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b",
-    r"\.execute\(['\"]?(INSERT|UPDATE|DELETE)\b",
+    r"\.write_bytes\(",
+    # JSON / pickle / shelve high-level write
+    r"\bjson\.dump\(",
+    r"\bpickle\.dump\(",
+    r"\bshelve\.open\(",
+    # SQL writes — table identifier 필수 (단순 키워드 인용 차단)
+    r"\bINSERT\s+INTO\s+[\w`\"\.]+",
+    r"\bUPDATE\s+[\w`\"\.]+\s+SET\b",
+    r"\bDELETE\s+FROM\s+[\w`\"\.]+",
+    r"\.execute(?:many)?\(\s*['\"]?(INSERT\s+INTO|UPDATE\s+\w|DELETE\s+FROM)",
+    # ORM patterns
+    r"\bsession\.add\(|\bsession\.commit\(|\bdb\.commit\(",
 ]
+
+
+def _in_inline_code(line: str, col: int) -> bool:
+    """주어진 라인의 col 위치가 inline code (`...`) 안인지 검사.
+
+    fence (```)는 별도 처리 — 이 함수는 한 라인 inline backtick만.
+    """
+    backtick_count = line[:col].count("`")
+    # 라인 내 backtick이 홀수면 inline code 안
+    return backtick_count % 2 == 1
 
 
 def _iter_md_pages():
@@ -63,7 +85,10 @@ def _read_safe(path: Path) -> str:
 
 
 def _parse_frontmatter(text: str) -> dict:
-    """간단한 YAML frontmatter parser (외부 의존성 없이)."""
+    """YAML frontmatter parser. inline + multi-line list (`- item`) 지원.
+
+    한계: nested dict / multi-line scalar (`|`) 미지원 (필요 시 PyYAML 도입).
+    """
     if not text.startswith("---"):
         return {}
     end = text.find("\n---", 3)
@@ -71,22 +96,53 @@ def _parse_frontmatter(text: str) -> dict:
         return {}
     fm_text = text[3:end].strip()
     result = {}
-    for line in fm_text.splitlines():
+    current_list_key = None
+    current_list_items: list[str] = []
+
+    def _coerce_value(val: str):
+        val = val.strip()
+        # null / none → empty
+        if val.lower() in {"null", "none", "~"}:
+            return ""
+        if val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1]
+            return [s.strip().strip('"').strip("'") for s in inner.split(",") if s.strip()]
+        if val.startswith('"') and val.endswith('"'):
+            return val[1:-1]
+        if val.startswith("'") and val.endswith("'"):
+            return val[1:-1]
+        return val
+
+    for raw_line in fm_text.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        # multi-line list item ("  - value")
+        stripped = line.lstrip()
+        if stripped.startswith("- ") and current_list_key is not None:
+            item = stripped[2:].strip().strip('"').strip("'")
+            if item:
+                current_list_items.append(item)
+            continue
+        # 새 key 만나면 직전 list 마감
+        if current_list_key is not None:
+            result[current_list_key] = current_list_items
+            current_list_key = None
+            current_list_items = []
         if ":" not in line:
             continue
         key, _, val = line.partition(":")
         key = key.strip()
-        val = val.strip()
-        if val.startswith("[") and val.endswith("]"):
-            inner = val[1:-1]
-            items = [s.strip().strip('"').strip("'") for s in inner.split(",") if s.strip()]
-            result[key] = items
-        elif val.startswith('"') and val.endswith('"'):
-            result[key] = val[1:-1]
-        elif val.startswith("'") and val.endswith("'"):
-            result[key] = val[1:-1]
+        val_stripped = val.strip()
+        if not val_stripped:
+            # multi-line list 시작
+            current_list_key = key
+            current_list_items = []
         else:
-            result[key] = val
+            result[key] = _coerce_value(val_stripped)
+    # 마지막 list 마감
+    if current_list_key is not None:
+        result[current_list_key] = current_list_items
     return result
 
 
@@ -185,22 +241,69 @@ def lint_contradictions() -> list[str]:
 # ─────────────────────────── Polaris contracts ───────────────────────────
 
 
+def _code_block_ranges(body: str) -> list[tuple[int, int]]:
+    """본문 안 코드 블록 (```) 범위 (start, end) 리스트 — fence 라인 단위 정확 매칭."""
+    ranges = []
+    in_block = False
+    block_start = 0
+    pos = 0
+    for line in body.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            if in_block:
+                ranges.append((block_start, pos + len(line)))
+                in_block = False
+            else:
+                block_start = pos
+                in_block = True
+        pos += len(line)
+    if in_block:
+        ranges.append((block_start, pos))
+    return ranges
+
+
+def _in_code_block(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
+
 def lint_machine_state_leak() -> list[str]:
-    """P1 — vault md 안 machine state write 흔적 검출 (코드 블록 밖)."""
+    """P1 — vault md 안 machine state write 흔적 검출 (fence + inline code 밖). 다중 위반 모두 보고."""
     violations = []
     for md in _iter_md_pages():
         text = _read_safe(md)
         body = _body(text)
+        ranges = _code_block_ranges(body)
+        rel = md.relative_to(VAULT)
+        seen_patterns: set[str] = set()
+        # 라인별 offset 매핑 (inline backtick 검사용)
+        line_offsets = []
+        offset = 0
+        for line in body.splitlines(keepends=True):
+            line_offsets.append((offset, line))
+            offset += len(line)
         for pattern in MACHINE_STATE_LEAK_PATTERNS:
             for m in re.finditer(pattern, body):
-                preceding = body[:m.start()]
-                if preceding.count("```") % 2 == 1:
-                    continue  # 코드 블록 내부는 예시
-                rel = md.relative_to(VAULT)
+                if _in_code_block(m.start(), ranges):
+                    continue
+                # inline backtick 검사 — 같은 라인 내
+                line_start = 0
+                line_text = ""
+                for ls, lt in line_offsets:
+                    if ls <= m.start() < ls + len(lt):
+                        line_start = ls
+                        line_text = lt
+                        break
+                col = m.start() - line_start
+                if _in_inline_code(line_text, col):
+                    continue
+                snippet = m.group(0)[:60]
+                key = f"{rel}::{snippet}"
+                if key in seen_patterns:
+                    continue
+                seen_patterns.add(key)
                 violations.append(
-                    f"FAIL P1 machine-state-leak: {rel} → '{m.group(0)[:60]}'"
+                    f"FAIL P1 machine-state-leak: {rel} → '{snippet}'"
                 )
-                break
     return violations
 
 

@@ -13,8 +13,10 @@ from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
-DEFAULT_BUY_RATIO = 0.60
-DEFAULT_SELL_RATIO = 0.40
+# Codex Round 4 fix: hysteresis 강화 — entry 0.65 / exit 0.45 (deadzone 0.45-0.65)
+# 변경 전 0.60/0.40 — 0.45-0.55 영역에서 flip-flop → fee bleed (-$10 in 30min)
+DEFAULT_BUY_RATIO = 0.65
+DEFAULT_SELL_RATIO = 0.45
 DEFAULT_MIN_TRADES = 30
 DEFAULT_TARGET_SIZE_USD = 200.0
 

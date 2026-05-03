@@ -47,6 +47,8 @@ LIVE_FEE_ROUND_TRIP = 0.0014
 INDICATOR_REFRESH_SEC = 60  # candle indicator 매 60초 refresh
 TP_PCT_INTRADAY = 0.006
 SL_PCT_INTRADAY = 0.0035
+MIN_HOLD_MS = 90_000          # entry 후 90s signal_exit lockout (TP/SL는 활성)
+RE_ENTRY_COOLDOWN_MS = 60_000 # close 후 60s 같은 (ticker,strategy) re-entry 차단
 
 # Realtime active HYPOs — 모든 viable ticker
 REALTIME_HYPOS = [
@@ -115,6 +117,12 @@ REALTIME_HYPOS = [
 # Tick-cached indicators per (hypo_id, ticker)
 _indicator_cache: dict[tuple, tuple[float, list[Candle]]] = {}
 
+# Last close timestamp per (ticker, strategy_name) — strategy-level cooldown
+_last_close_ms: dict[tuple[str, str], int] = {}
+# Last close timestamp per ticker (any strategy) — account-level cooldown
+# (Codex Round 4 gap fix: 다른 strategy의 즉시 재진입 차단으로 fee bleed 누적 방지)
+_last_close_ms_ticker: dict[str, int] = {}
+
 
 def _refresh_candles(ticker: str, tf: str) -> list[Candle]:
     """Refresh candles for ticker × tf. Cache 60s per primary_tf."""
@@ -162,32 +170,43 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     balance = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
 
     # 1. Open positions — TP/SL/exit-signal 체크 (TICK PRICE 기반!)
+    # Codex Round 4 fix: min hold time — entry 후 MIN_HOLD_MS 동안 signal_exit 차단 (flip-flop fee bleed 방지)
     closed_this_tick = False
     for pos in tuple(balance.open_positions):
         if pos.ticker != ticker:
             continue
         gross = pos.direction * (tick_price - pos.entry_price) / pos.entry_price
+        held_ms = max(0, tick_ts_ms - pos.open_ts_ms)
         exit_reason = None
-        if signal.action == SignalAction.EXIT:
-            exit_reason = "signal_exit"
-        elif gross >= TP_PCT_INTRADAY:
+        if gross >= TP_PCT_INTRADAY:
             exit_reason = f"tp_hit:{gross:+.4f}"
         elif gross <= -SL_PCT_INTRADAY:
             exit_reason = f"sl_hit:{gross:+.4f}"
+        elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
+            exit_reason = "signal_exit"
         if exit_reason:
             balance = balance.close(pos.position_id, exit_price=tick_price, close_ts_ms=tick_ts_ms)
             closed = balance.closed_positions[-1]
             paper_logger.log_close(ticker, sname, closed)
             paper_logger.log_event(ticker, sname, "EXIT_REASON", exit_reason)
-            logger.info(f"[CLOSE] {hypo['hypo_id']} {ticker} @{tick_price} reason={exit_reason} net={closed.net_usd:+.2f}")
+            logger.info(f"[CLOSE] {hypo['hypo_id']} {ticker} @{tick_price} reason={exit_reason} net={closed.net_usd:+.2f} held={held_ms/1000:.0f}s")
             closed_this_tick = True
+            _last_close_ms[(ticker, sname)] = tick_ts_ms
+            _last_close_ms_ticker[ticker] = tick_ts_ms
             save_state(ticker, sname, balance)
 
     # 2. Daily loss + entry
+    # Codex Round 4 fix: re-entry cooldown — close 후 RE_ENTRY_COOLDOWN_MS 동안 같은 (ticker,strategy) 재진입 차단
     daily_breached, _ = _daily_loss_breached(balance, tick_ts_ms)
     has_open = any(p.ticker == ticker for p in balance.open_positions)
+    last_close = _last_close_ms.get((ticker, sname), 0)
+    last_close_ticker = _last_close_ms_ticker.get(ticker, 0)
+    in_cooldown = (
+        (last_close > 0 and (tick_ts_ms - last_close) < RE_ENTRY_COOLDOWN_MS)
+        or (last_close_ticker > 0 and (tick_ts_ms - last_close_ticker) < RE_ENTRY_COOLDOWN_MS)
+    )
     if (signal.action == SignalAction.ENTER_LONG
-            and not has_open and not daily_breached and not closed_this_tick):
+            and not has_open and not daily_breached and not closed_this_tick and not in_cooldown):
         size_cap = balance.equity_usd({ticker: tick_price}) * hypo["max_position_pct"]
         size = min(signal.target_size_usd, size_cap, balance.cash_usd)
         if size > 0:

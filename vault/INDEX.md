@@ -64,12 +64,10 @@ tags: [meta, index, polaris]
 | [[INSIGHT-015]] | SMA crossover 1d = SPOT viable (HYPO-003 fast-fail 통과, P0) | active |
 | [[INSIGHT-016]] | HYPO-003 walk-forward robustness (3-fold + TRAIN/TEST 일관 양수) | active |
 | [[INSIGHT-017]] | Look-ahead bias fix + HYPO-003 robust 재확인 (codex Round 1, P0) | active |
-| [[INSIGHT-018]] | Codex Round 2 88% — 5 fix 적용 (look-ahead/Position guard/daily loss/auto category/vault contract) | active |
-| [[INSIGHT-019]] | HYPO-004 Donchian breakout = 두 번째 viable (BTC 40/15 + ETH 20/10) | active |
-| [[INSIGHT-020]] | HYPO-004 walk-forward robust (TEST out-of-sample 양수, 3-fold 일관) | active |
 | [[INSIGHT-018]] | Realtime tick-driven 발견 (cron 한계 + 3 entry 즉시) | active |
 | [[INSIGHT-019]] | Codex Round 3 Phase 2c~e 4 CRITICAL fix (state race/fee/guard/reconnect) | active |
-| [[INSIGHT-018]] | Codex Round 2 88% — 5 fix 적용 (look-ahead/Position guard/daily loss/auto category/vault contract) | active |
+| [[INSIGHT-020]] | HYPO-004 walk-forward robust (TEST out-of-sample 양수, 3-fold 일관) | active |
+| [[INSIGHT-021]] | Codex Round 4 — flip-flop fee bleed fix (min hold 90s + hysteresis + ticker-global cooldown) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

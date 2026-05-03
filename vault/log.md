@@ -60,3 +60,5 @@ tags: [meta, log, append_only, polaris]
 - **2026-05-04 07:30 — Realtime WebSocket activated + 3 entry 발생** — SOL/DOGE×2 OPEN. ADR-012 (Realtime architecture shift) + INSIGHT-018 (tick-driven discovery). HYPO-007~012 active 노트 작성 (vault 정합 회복 — 자율 진행 중 누락). OKX candle channel은 business endpoint (public X) 발견.
 
 - **2026-05-04 07:48 — Codex Round 3 + 4 CRITICAL fix** — Phase 2c~e 82% / 운영 모델 v2 74% 합의. intraday plist removed (state race 차단) + TickMomentum 24h guard + reconnect stale clear + exponential backoff. 6 open positions live (BTC/DOGE/ETH/ORDI/TRUMP TradeFlow + SUI legacy). HYPO-012 가장 active. INSIGHT-019.
+
+- **2026-05-04 — Codex Round 4 + flip-flop fee bleed fix** — 5분 운영 측정: 26 closed trades 100% 손실, total -$10.45 (모두 signal_exit 1-30s 안 → fee 0.14% > 가격 변동 = 음수 EV). Fix: MIN_HOLD_MS 90s (signal_exit lockout, TP/SL는 활성) + hysteresis TradeFlow 0.65/0.45 OrderBook 0.68/0.42 + ticker-global cooldown 60s. Codex 74% ACCEPT WITH CONDITIONS — 3 gap 중 2개 즉시 보강 (경계값 테스트 + ticker-global), 1개 후속 (post-fee EV 양수 증명 — 26 losing trade MFE/MAE 분석). 107/107 tests pass + vault lint 0/0. INSIGHT-021. INDEX 중복 line 정리 (018/019 잘못 매핑 3개 제거).

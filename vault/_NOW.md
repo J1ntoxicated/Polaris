@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-03
+last_modified: 2026-05-04
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -15,13 +15,14 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 🎯 현재 상태 (2026-05-03)
+## 🎯 현재 상태 (2026-05-04)
 
-**Polaris bootstrap Phase A 진행 중**:
-- 모태(auto_invasion_mk1-main) 인수 → 새 프로젝트로 정리
-- 옵션 Y 확정: 코드는 처음부터 SPOT-first 새로, 학습 노하우는 INSIGHT/lessons/JSON 19 소스로 보존
-- Codex 디베이트 3 라운드(95→100% 합의)로 진단/방향 v4 확정
-- 운영 모델 v1 정착 중 (7 영속 원칙 + 4 모드 + 4 agent + vault 7계층 + 코드 리뷰 codex 외부 의무)
+**Phase 2c~e 운영 + Codex Round 4 flip-flop fix 적용 직후**:
+- 운영 모델 v2 (HARNESS Meta Mode + 4 sub-mode) 정착 — ADR-013
+- realtime runner KeepAlive 운영 중 (PID 91650 — fix 적용 전), 재시작 예정
+- 첫 5분 측정에서 26 closed trades 100% 손실 발견 → **flip-flop fee bleed**
+- Codex Round 4 (74% ACCEPT WITH CONDITIONS) — INSIGHT-021 fix 적용 (min hold 90s + hysteresis + ticker-global cooldown)
+- 후속 (Phase 2g): post-fee EV 양수 증명 (26 losing trade MFE/MAE 분석)
 
 ## 📍 다음 액션
 
@@ -51,7 +52,9 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
-- [[INSIGHT-001]] 모태 spot 누더기 (퍼펙·alpaca·stock 잔재 6,263 라인) — Polaris fresh start 근거
+- [[INSIGHT-021]] flip-flop fee bleed fix — 운영 재시작 후 24h 측정 필요 (post-fee EV 양수 증명 = Phase 2g)
+- [[INSIGHT-019]] Codex Round 3 4 fix 적용됨 (intraday plist removed)
+- [[ADR-013]] HARNESS Meta Mode 정착 — 모든 작업 mode dispatch
 - [[ADR-004]] 코드 리뷰 codex 외부 의무 (Jin 2026-05-03 mandate)
 
 ## ⚠️ Watch List

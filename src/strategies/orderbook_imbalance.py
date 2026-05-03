@@ -13,8 +13,10 @@ from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
-DEFAULT_IMBALANCE_BUY = 0.62
-DEFAULT_IMBALANCE_SELL = 0.38
+# Codex Round 4 fix: hysteresis 강화 — entry 0.68 / exit 0.42 (deadzone 0.42-0.68)
+# 변경 전 0.62/0.38 — book imbalance 0.5 근처 jitter → flip-flop fee bleed
+DEFAULT_IMBALANCE_BUY = 0.68
+DEFAULT_IMBALANCE_SELL = 0.42
 DEFAULT_TARGET_SIZE_USD = 200.0
 
 

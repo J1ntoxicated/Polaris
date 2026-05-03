@@ -28,3 +28,26 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T07:59:57 | CLOSE | id=SOL-USDT-1777845053011 entry=84.00 exit=84.12 net=+0.00% net_usd=+0.01 |
 | 2026-05-04T07:59:57 | EXIT_REASON | signal_exit |
 | 2026-05-04T08:00:11 | OPEN | id=SOL-USDT-1777845611913 dir=1 entry=84.21 size=$200 |
+| 2026-05-04T08:06:26 | CLOSE | id=SOL-USDT-1777845611913 entry=84.21 exit=84.44 net=+0.13% net_usd=+0.27 |
+| 2026-05-04T08:06:26 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:10:31 | OPEN | id=SOL-USDT-1777846230210 dir=1 entry=84.47 size=$200 |
+| 2026-05-04T08:12:07 | CLOSE | id=SOL-USDT-1777846230210 entry=84.47 exit=84.62 net=+0.04% net_usd=+0.08 |
+| 2026-05-04T08:12:07 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:14:02 | OPEN | id=SOL-USDT-1777846442213 dir=1 entry=84.71 size=$200 |
+| 2026-05-04T08:16:37 | CLOSE | id=SOL-USDT-1777846442213 entry=84.71 exit=84.76 net=-0.08% net_usd=-0.16 |
+| 2026-05-04T08:16:37 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:17:38 | OPEN | id=SOL-USDT-1777846658311 dir=1 entry=84.69 size=$200 |
+| 2026-05-04T08:21:31 | CLOSE | id=SOL-USDT-1777846658311 entry=84.69 exit=84.67 net=-0.16% net_usd=-0.33 |
+| 2026-05-04T08:21:31 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:34:17 | OPEN | id=SOL-USDT-1777847657435 dir=1 entry=84.60 size=$200 |
+| 2026-05-04T08:39:58 | CLOSE | id=SOL-USDT-1777847657435 entry=84.60 exit=84.57 net=-0.18% net_usd=-0.35 |
+| 2026-05-04T08:39:58 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:42:52 | OPEN | id=SOL-USDT-1777848172706 dir=1 entry=84.70 size=$200 |
+| 2026-05-04T08:45:16 | CLOSE | id=SOL-USDT-1777848172706 entry=84.70 exit=84.74 net=-0.09% net_usd=-0.19 |
+| 2026-05-04T08:45:16 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:46:46 | OPEN | id=SOL-USDT-1777848406411 dir=1 entry=84.83 size=$200 |
+| 2026-05-04T08:50:57 | CLOSE | id=SOL-USDT-1777848406411 entry=84.83 exit=84.79 net=-0.19% net_usd=-0.37 |
+| 2026-05-04T08:50:57 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:56:26 | OPEN | id=SOL-USDT-1777848985866 dir=1 entry=84.65 size=$200 |
+| 2026-05-04T09:01:30 | CLOSE | id=SOL-USDT-1777848985866 entry=84.65 exit=84.65 net=-0.14% net_usd=-0.28 |
+| 2026-05-04T09:01:30 | EXIT_REASON | signal_exit |

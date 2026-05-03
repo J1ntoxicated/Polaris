@@ -18,7 +18,9 @@ from src.domain.strategy import Strategy
 DEFAULT_BUY_RATIO = 0.65
 DEFAULT_SELL_RATIO = 0.45
 DEFAULT_MIN_TRADES = 30
-DEFAULT_TARGET_SIZE_USD = 200.0
+# Phase 2g size cap: post-Round 4 측정 win=17% (post-fee EV 음수 의심) — 알파 증명까지 size↓
+# 200 → 100 (50% 감소). 학습 데이터 수집 유지 + 손실 cap.
+DEFAULT_TARGET_SIZE_USD = 100.0
 
 
 class TradeFlow(Strategy):

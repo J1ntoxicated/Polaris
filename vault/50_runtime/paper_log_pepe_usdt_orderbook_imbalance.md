@@ -1,6 +1,6 @@
 ---
 entity_type: paper_log
-entity_id: paper_log_pepe_usdt_breakout_momentum
+entity_id: paper_log_pepe_usdt_orderbook_imbalance
 auto: true
 last_modified: 2026-05-04
 expires: never
@@ -9,11 +9,11 @@ back_links: ["[[60_alpha/_README]]", "[[ADR-010]]"]
 mode: alpha
 reviewed_by: none
 tags: [meta, paper, alpha, polaris, mode/alpha]
-strategy: breakout_momentum
+strategy: orderbook_imbalance
 ticker: PEPE-USDT
 ---
 
-# Paper Log — PEPE-USDT breakout_momentum
+# Paper Log — PEPE-USDT orderbook_imbalance
 
 Append-only. ADR-010 paper 운영 기록.
 
@@ -21,5 +21,4 @@ Append-only. ADR-010 paper 운영 기록.
 
 | timestamp | event | detail |
 |---|---|---|
-| 2026-05-04T06:48:53 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
-| 2026-05-04T08:46:09 | OPEN | id=PEPE-USDT-1777848367718 dir=1 entry=0.00 size=$200 |
+| 2026-05-04T09:02:13 | OPEN | id=PEPE-USDT-1777849333508 dir=1 entry=0.00 size=$200 |

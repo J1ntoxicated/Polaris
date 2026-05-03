@@ -22,3 +22,10 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-04T06:48:53 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
+| 2026-05-04T08:15:29 | OPEN | id=DOGE-USDT-1777846527713 dir=1 entry=0.11 size=$200 |
+| 2026-05-04T08:16:52 | CLOSE | id=DOGE-USDT-1777846527713 entry=0.11 exit=0.11 net=-0.50% net_usd=-0.99 |
+| 2026-05-04T08:16:52 | EXIT_REASON | sl_hit:-0.0036 |
+| 2026-05-04T08:17:55 | OPEN | id=DOGE-USDT-1777846675412 dir=1 entry=0.11 size=$200 |
+| 2026-05-04T08:23:51 | CLOSE | id=DOGE-USDT-1777846675412 entry=0.11 exit=0.11 net=-0.50% net_usd=-0.99 |
+| 2026-05-04T08:23:51 | EXIT_REASON | sl_hit:-0.0036 |
+| 2026-05-04T08:45:59 | OPEN | id=DOGE-USDT-1777848358368 dir=1 entry=0.11 size=$200 |

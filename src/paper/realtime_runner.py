@@ -49,6 +49,7 @@ TP_PCT_INTRADAY = 0.006
 SL_PCT_INTRADAY = 0.0035
 MIN_HOLD_MS = 90_000          # entry 후 90s signal_exit lockout (TP/SL는 활성)
 RE_ENTRY_COOLDOWN_MS = 60_000 # close 후 60s 같은 (ticker,strategy) re-entry 차단
+MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (timeframe mismatch SUI 등)
 
 # Realtime active HYPOs — 모든 viable ticker
 REALTIME_HYPOS = [
@@ -182,6 +183,8 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             exit_reason = f"tp_hit:{gross:+.4f}"
         elif gross <= -SL_PCT_INTRADAY:
             exit_reason = f"sl_hit:{gross:+.4f}"
+        elif held_ms >= MAX_HOLD_MS:
+            exit_reason = f"max_hold:{held_ms//1000}s"  # Phase 2g: timeframe mismatch 강제 청산
         elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
             exit_reason = "signal_exit"
         if exit_reason:

@@ -28,3 +28,5 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T00:59:57 | EXIT_REASON | sl_hit:-0.0040<=-0.0035 |
 | 2026-05-04T00:59:57 | OPEN | id=SUI-USDT-1777816800000 dir=1 entry=0.93 size=$250 |
 | 2026-05-04T00:59:57 | BALANCE | cash=$4748.72 equity=$4998.66 realized_pnl=$-1.34 open=1 closed=1 |
+| 2026-05-04T09:03:40 | CLOSE | id=SUI-USDT-1777816800000 entry=0.93 exit=0.93 net=+0.01% net_usd=+0.03 |
+| 2026-05-04T09:03:40 | EXIT_REASON | phase2g_legacy_cleanup |

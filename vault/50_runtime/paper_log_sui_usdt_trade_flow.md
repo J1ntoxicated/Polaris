@@ -22,3 +22,12 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-04T07:59:01 | OPEN | id=SUI-USDT-1777845540617 dir=1 entry=0.92 size=$200 |
+| 2026-05-04T08:09:13 | CLOSE | id=SUI-USDT-1777845540617 entry=0.92 exit=0.92 net=+0.16% net_usd=+0.33 |
+| 2026-05-04T08:09:13 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:14:04 | OPEN | id=SUI-USDT-1777846444631 dir=1 entry=0.93 size=$200 |
+| 2026-05-04T08:23:24 | CLOSE | id=SUI-USDT-1777846444631 entry=0.93 exit=0.93 net=-0.50% net_usd=-0.99 |
+| 2026-05-04T08:23:24 | EXIT_REASON | sl_hit:-0.0036 |
+| 2026-05-04T08:34:38 | OPEN | id=SUI-USDT-1777847678812 dir=1 entry=0.93 size=$200 |
+| 2026-05-04T08:41:39 | CLOSE | id=SUI-USDT-1777847678812 entry=0.93 exit=0.93 net=-0.15% net_usd=-0.30 |
+| 2026-05-04T08:41:39 | EXIT_REASON | signal_exit |
+| 2026-05-04T08:56:40 | OPEN | id=SUI-USDT-1777849000069 dir=1 entry=0.93 size=$200 |

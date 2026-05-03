@@ -17,7 +17,8 @@ from src.domain.strategy import Strategy
 # 변경 전 0.62/0.38 — book imbalance 0.5 근처 jitter → flip-flop fee bleed
 DEFAULT_IMBALANCE_BUY = 0.68
 DEFAULT_IMBALANCE_SELL = 0.42
-DEFAULT_TARGET_SIZE_USD = 200.0
+# Phase 2g size cap: post-Round 4 측정 win=17% — 알파 증명까지 size↓
+DEFAULT_TARGET_SIZE_USD = 100.0
 
 
 class OrderBookImbalance(Strategy):

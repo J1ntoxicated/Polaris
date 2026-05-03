@@ -20,7 +20,13 @@ import time
 from typing import Callable
 
 from src.data.multi_tf import fetch_multi_tf
-from src.data.okx_ws import get_last_price, stream_tickers
+from src.data.okx_ws import (
+    compute_book_imbalance,
+    compute_taker_buy_ratio,
+    get_last_price,
+    get_recent_trades,
+    stream_tickers,
+)
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.paper import logger as paper_logger
@@ -28,8 +34,10 @@ from src.paper.runner import _daily_loss_breached, load_state, save_state
 from src.paper.state import PaperBalance, Position
 from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.mta_confluence import MTAConfluence
+from src.strategies.orderbook_imbalance import OrderBookImbalance
 from src.strategies.rsi_15m_intraday import RSI15mIntraday
 from src.strategies.tick_momentum import TickMomentum
+from src.strategies.trade_flow import TradeFlow
 from src.strategies.volume_burst import VolumeBurst
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -69,14 +77,36 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
-    # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가 (24h change + high proximity + spread)
+    # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가
     {
         "hypo_id": "HYPO-010-TICK",
         "strategy_cls": TickMomentum,
         "params": {},
-        "primary_tf": "tick",  # special — no candle
+        "primary_tf": "tick",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
                     "ORDI-USDT", "TRUMP-USDT", "ADA-USDT", "XRP-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    # HYPO-011 OrderBook Imbalance (OKX books5)
+    {
+        "hypo_id": "HYPO-011-BOOK",
+        "strategy_cls": OrderBookImbalance,
+        "params": {},
+        "primary_tf": "book",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
+                    "ORDI-USDT", "TRUMP-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    # HYPO-012 Trade Flow (taker buy/sell ratio)
+    {
+        "hypo_id": "HYPO-012-FLOW",
+        "strategy_cls": TradeFlow,
+        "params": {},
+        "primary_tf": "flow",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
+                    "ORDI-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
@@ -106,11 +136,23 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     strategy = hypo["strategy_cls"](**hypo["params"])
     sname = strategy.name
 
-    # 1. Strategy evaluate — tick or candle
-    if hypo.get("primary_tf") == "tick" and hasattr(strategy, "evaluate_tick"):
+    # 1. Strategy evaluate — tick / book / flow / candle
+    primary = hypo.get("primary_tf")
+    if primary == "tick" and hasattr(strategy, "evaluate_tick"):
         if full_tick is None:
             return
         signal = strategy.evaluate_tick(full_tick)
+    elif primary == "book" and hasattr(strategy, "evaluate_book"):
+        imb = compute_book_imbalance(ticker)
+        if imb is None or full_tick is None:
+            return
+        signal = strategy.evaluate_book(full_tick, imb)
+    elif primary == "flow" and hasattr(strategy, "evaluate_flow"):
+        ratio = compute_taker_buy_ratio(ticker, window=100)
+        n_trades = len(get_recent_trades(ticker, 100))
+        if ratio is None or full_tick is None:
+            return
+        signal = strategy.evaluate_flow(full_tick, ratio, n_trades)
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:

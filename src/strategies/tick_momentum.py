@@ -16,10 +16,10 @@ from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
-DEFAULT_CHANGE_THRESHOLD = 0.03  # 3%
-DEFAULT_HIGH_PROXIMITY = 0.995  # last > 24h high × 0.995
-DEFAULT_LOW_PROXIMITY = 1.005  # last < 24h low × 1.005
-DEFAULT_MAX_SPREAD_BPS = 20  # 20 bps = 0.2% (유동성 cap)
+DEFAULT_CHANGE_THRESHOLD = 0.015  # 1.5% (3% → 1.5% 완화 — 더 자주 trigger)
+DEFAULT_HIGH_PROXIMITY = 0.99   # 0.995 → 0.99 (1% 이내 high 근처)
+DEFAULT_LOW_PROXIMITY = 1.01
+DEFAULT_MAX_SPREAD_BPS = 50     # 20 → 50 bps (더 많은 ticker 통과)
 DEFAULT_TARGET_SIZE_USD = 200.0
 
 

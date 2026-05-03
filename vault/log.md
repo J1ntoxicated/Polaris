@@ -56,3 +56,5 @@ tags: [meta, log, append_only, polaris]
 - **Phase F 대시보드 + 자동 운영 시작** — src/dashboard/cli.py (Rich terminal: Polaris 운영 모델 / Active HYPOs / Alpha Index / Recent Signals). Cron HYPO-004 재추가 (regression fix). launchd plist 활성화 — `com.polaris.paper.daily` 매일 01:00 UTC 자동 실행. 5 cycle (BTC/ETH/SOL × HYPO-003 + BTC/ETH × HYPO-004) 자동.
 
 - **Dashboard 항상 켜놓기** — start_dashboard.sh (osascript 새 Terminal window) + login agent (com.polaris.dashboard.plist). macOS login 시 자동 dashboard window 띄움. Refresh 60s.
+
+- **2026-05-04 07:30 — Realtime WebSocket activated + 3 entry 발생** — SOL/DOGE×2 OPEN. ADR-012 (Realtime architecture shift) + INSIGHT-018 (tick-driven discovery). HYPO-007~012 active 노트 작성 (vault 정합 회복 — 자율 진행 중 누락). OKX candle channel은 business endpoint (public X) 발견.

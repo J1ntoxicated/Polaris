@@ -19,6 +19,7 @@ import traceback
 
 from src.data.okx_universe import fetch_top_volume_tickers
 from src.paper.runner import run_cycle
+from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.rsi_15m_intraday import RSI15mIntraday
 from src.strategies.volume_burst import VolumeBurst
 
@@ -44,10 +45,19 @@ INTRADAY_HYPOS = [
         "strategy_cls": VolumeBurst,
         "strategy_params": {},
         "bar": "1H",
-        # Backtest viable (SUI excluded — neg expectancy)
         "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.05,
+    },
+    {
+        "hypo_id": "HYPO-009",
+        "strategy_cls": BreakoutMomentum,
+        "strategy_params": {"lookback": 10},
+        "bar": "1H",
+        # Backtest viable (exp > 0.001 1h lookback 10): trend-up 시장 정합
+        "tickers": ["DOGE-USDT", "PEPE-USDT", "ORDI-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
     },
 ]
 

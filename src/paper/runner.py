@@ -167,20 +167,39 @@ def run_cycle(
         "n_open_pre": balance.n_open,
     }
 
-    # 1. EXIT 처리 (open position 있을 때만 — no-op exit는 silent)
+    # 1. EXIT 처리 — TP/SL 강제 + signal.EXIT
+    # ADR-010 risk: TP +0.6%, SL -0.35% (intraday 기본)
+    # 1d strategy는 더 wide (TP +3%, SL -2%)
+    is_intraday = bar.lower() in {"1m", "3m", "5m", "15m", "30m", "1h"}
+    tp_pct = 0.006 if is_intraday else 0.03
+    sl_pct = 0.0035 if is_intraday else 0.02
+
     has_pos = any(p.ticker == ticker for p in balance.open_positions)
     if not has_pos and signal.action == SignalAction.EXIT:
         summary["signal"] = "exit_noop"
+
     for pos in tuple(balance.open_positions):
         if pos.ticker != ticker:
             continue
-        should_exit = signal.action == SignalAction.EXIT
-        if should_exit:
+        gross = pos.direction * (last.close - pos.entry_price) / pos.entry_price
+        exit_reason = None
+        if signal.action == SignalAction.EXIT:
+            exit_reason = "signal_exit"
+        elif gross >= tp_pct:
+            exit_reason = f"tp_hit:{gross:+.4f}>={tp_pct}"
+        elif gross <= -sl_pct:
+            exit_reason = f"sl_hit:{gross:+.4f}<=-{sl_pct}"
+        if exit_reason:
             balance = balance.close(
                 pos.position_id, exit_price=last.close, close_ts_ms=last.timestamp_ms,
             )
             closed = balance.closed_positions[-1]
             paper_logger.log_close(ticker, strategy.name, closed)
+            paper_logger.log_event(
+                ticker, strategy.name,
+                "EXIT_REASON",
+                exit_reason,
+            )
 
     # ADR-010 daily loss 5% 한도 체크 (entry 전)
     daily_breached, today_loss = _daily_loss_breached(balance, last.timestamp_ms)

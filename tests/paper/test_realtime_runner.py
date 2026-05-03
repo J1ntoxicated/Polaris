@@ -269,6 +269,104 @@ def test_mta_stale_tf_data_skip():
     assert len(bal.closed_positions) == 0
 
 
+# ── Fix 1: supervisor — binance task crash does not kill OKX task ─────────────
+
+
+def test_run_okx_and_binance_is_coroutine():
+    """_run_okx_and_binance must be a coroutine (async def)."""
+    import inspect
+    assert inspect.iscoroutinefunction(rt._run_okx_and_binance), (
+        "_run_okx_and_binance must be async"
+    )
+
+
+def test_supervisor_restarts_after_binance_crash():
+    """Fix 1: if binance_task raises, supervisor must restart (not propagate).
+
+    Simulates Binance 24h auto-disconnect → exception → supervisor catches + restarts.
+    The 5s sleep is patched to 0 so the restart happens immediately in test.
+    """
+    import asyncio
+
+    call_count = {"stream": 0, "okx": 0}
+
+    async def fake_binance_stream(symbols, on_event):
+        call_count["stream"] += 1
+        if call_count["stream"] == 1:
+            raise RuntimeError("Binance 24h auto-disconnect")
+        # Second call: hang (simulate running normally)
+        await asyncio.sleep(1000)
+
+    async def fake_okx_stream(tickers, on_tick):
+        call_count["okx"] += 1
+        await asyncio.sleep(1000)
+
+    async def _run_with_timeout():
+        task = asyncio.create_task(
+            rt._run_okx_and_binance(["BTC-USDT"], ["BTC-USDT"])
+        )
+        # Allow the event loop to complete: crash + sleep(0) + restart → 2nd call
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Patch the 5s restart delay to 0 so the test doesn't hang
+    with patch.object(rt, "stream_tickers", fake_okx_stream), \
+         patch.object(rt, "binance_stream", fake_binance_stream), \
+         patch.object(rt, "make_tick_handler", return_value=lambda *a: None), \
+         patch.object(rt, "_SUPERVISOR_RESTART_DELAY_S", 0.0):
+        asyncio.run(_run_with_timeout())
+
+    # After crash + restart (sleep patched to 0), stream called at least twice
+    assert call_count["stream"] >= 2, (
+        f"Supervisor should restart Binance task after crash, "
+        f"got {call_count['stream']} call(s)"
+    )
+
+
+def test_supervisor_returns_exceptions_not_raises():
+    """Fix 1: return_exceptions=True — gather must not raise on task failure.
+
+    Old code used return_exceptions=False (default) → gather raised on Binance crash.
+    New supervisor catches exceptions from gather result list.
+    """
+    import asyncio
+
+    async def crash_immediately(symbols, on_event):
+        raise ValueError("immediate crash")
+
+    async def okx_hang(tickers, on_tick):
+        await asyncio.sleep(1000)
+
+    propagated = {"error": None}
+
+    async def _run():
+        task = asyncio.create_task(
+            rt._run_okx_and_binance(["BTC-USDT"], ["BTC-USDT"])
+        )
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            propagated["error"] = e
+
+    with patch.object(rt, "stream_tickers", okx_hang), \
+         patch.object(rt, "binance_stream", crash_immediately), \
+         patch.object(rt, "make_tick_handler", return_value=lambda *a: None), \
+         patch.object(rt, "_SUPERVISOR_RESTART_DELAY_S", 0.0):
+        asyncio.run(_run())
+
+    assert propagated["error"] is None, (
+        f"Supervisor must not propagate Binance crash to caller: {propagated['error']}"
+    )
+
+
 def test_re_entry_allowed_after_cooldown():
     hypo = _hypo_flow()
     ticker = "BTC-USDT"
@@ -295,3 +393,126 @@ def test_re_entry_allowed_after_cooldown():
 
     bal = rt.load_state(ticker, "trade_flow", starting_usd=5000.0)
     assert len(bal.open_positions) == 1, "cooldown 후 re-entry 허용"
+
+
+# ── Fix 4 (Codex Round 5): pending cancel await — 이중 subscribe 방지 ─────────
+
+
+def test_pending_cancel_awaited_after_first_completed():
+    """Fix 4: supervisor must call asyncio.gather on pending tasks after cancel.
+
+    Codex Round 5 gap: `t.cancel()` schedules cancellation but does not await
+    completion. In production, WS coroutines may not have an immediate await
+    point (e.g., during SSL handshake or socket send), so the old task can
+    overlap with the new iteration.
+
+    This test directly verifies the structural fix: `asyncio.gather` is called
+    with the pending set. We patch `asyncio.gather` to intercept the call and
+    confirm it receives the pending tasks (not just the empty set).
+
+    The old code (t.cancel() only) never calls gather on pending tasks.
+    The new code calls `await asyncio.gather(*pending, return_exceptions=True)`.
+    """
+    import asyncio
+
+    gather_calls_with_tasks = []
+    original_gather = asyncio.gather
+
+    async def spy_gather(*coros_or_futures, **kwargs):
+        # Record non-empty gather calls (ignoring gather() called by asyncio internals)
+        if coros_or_futures:
+            gather_calls_with_tasks.append(len(coros_or_futures))
+        return await original_gather(*coros_or_futures, **kwargs)
+
+    call_count = {"binance": 0}
+
+    async def fake_binance(symbols, on_event):
+        call_count["binance"] += 1
+        if call_count["binance"] == 1:
+            raise RuntimeError("binance crash")
+        await asyncio.sleep(1000)
+
+    async def fake_okx(tickers, on_tick):
+        await asyncio.sleep(1000)
+
+    async def _run():
+        task = asyncio.create_task(
+            rt._run_okx_and_binance(["BTC-USDT"], ["BTC-USDT"])
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    with patch.object(rt, "stream_tickers", fake_okx), \
+         patch.object(rt, "binance_stream", fake_binance), \
+         patch.object(rt, "make_tick_handler", return_value=lambda *a: None), \
+         patch.object(rt, "_SUPERVISOR_RESTART_DELAY_S", 0.01), \
+         patch("asyncio.gather", spy_gather):
+        asyncio.run(_run())
+
+    # After crash, pending OKX task must have been gathered
+    assert any(n > 0 for n in gather_calls_with_tasks), (
+        "asyncio.gather must be called on pending tasks after cancel. "
+        "Fix: add `await asyncio.gather(*pending, return_exceptions=True)` "
+        "after the t.cancel() loop."
+    )
+
+
+def test_no_double_subscribe_after_crash():
+    """Fix 4: at most 1 active OKX task at a time after crash (no duplicate subscribe).
+
+    Tracks concurrent OKX coroutine count. Without `await gather(*pending)`,
+    the old OKX task and new OKX task can overlap during restart_delay, giving
+    max_concurrent == 2 (two simultaneous WS subscriptions to same ticker).
+
+    With the fix, gather(*pending) blocks until old task is done → max = 1.
+
+    Note: asyncio cooperative multitasking means this test may pass even without
+    the fix in simple mock scenarios (sleep(0) yields). The structural test above
+    (test_pending_cancel_awaited_after_first_completed) is the canonical regression
+    guard. This test provides a complementary behaviour check.
+    """
+    import asyncio
+
+    active = {"count": 0, "max": 0}
+    binance_calls = {"n": 0}
+
+    async def fake_binance(symbols, on_event):
+        binance_calls["n"] += 1
+        if binance_calls["n"] == 1:
+            raise RuntimeError("crash")
+        await asyncio.sleep(1000)
+
+    async def fake_okx(tickers, on_tick):
+        active["count"] += 1
+        active["max"] = max(active["max"], active["count"])
+        try:
+            await asyncio.sleep(1000)
+        except asyncio.CancelledError:
+            active["count"] -= 1
+            raise
+
+    async def _run():
+        task = asyncio.create_task(
+            rt._run_okx_and_binance(["BTC-USDT"], ["BTC-USDT"])
+        )
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    with patch.object(rt, "stream_tickers", fake_okx), \
+         patch.object(rt, "binance_stream", fake_binance), \
+         patch.object(rt, "make_tick_handler", return_value=lambda *a: None), \
+         patch.object(rt, "_SUPERVISOR_RESTART_DELAY_S", 0.02):
+        asyncio.run(_run())
+
+    assert active["max"] <= 1, (
+        f"Max concurrent OKX tasks must be 1, got {active['max']} "
+        f"— duplicate subscribe detected"
+    )

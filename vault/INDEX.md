@@ -68,6 +68,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-019]] | Codex Round 3 Phase 2c~e 4 CRITICAL fix (state race/fee/guard/reconnect) | active |
 | [[INSIGHT-020]] | HYPO-004 walk-forward robust (TEST out-of-sample 양수, 3-fold 일관) | active |
 | [[INSIGHT-021]] | Codex Round 4 — flip-flop fee bleed fix (min hold 90s + hysteresis + ticker-global cooldown) | active |
+| [[INSIGHT-022]] | Phase 2g Round 2/3 — MTAConfluence 활성화 + Binance WS spec + 즉시 구현 (HYPO-014 운영 중) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

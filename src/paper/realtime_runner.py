@@ -19,6 +19,13 @@ import logging
 import time
 from typing import Callable
 
+from src.data.binance_ws import (
+    compute_recent_volatility_bps as binance_volatility_bps,
+    compute_taker_buy_ratio as binance_taker_buy_ratio,
+    get_last_trade as binance_get_last_trade,
+    get_recent_trades as binance_get_recent_trades,
+    stream as binance_stream,
+)
 from src.data.multi_tf import fetch_multi_tf
 from src.data.okx_ws import (
     compute_book_imbalance,
@@ -32,6 +39,7 @@ from src.domain.signal import Signal, SignalAction
 from src.paper import logger as paper_logger
 from src.paper.runner import _daily_loss_breached, load_state, save_state
 from src.paper.state import PaperBalance, Position
+from src.strategies.binance_lead import BinanceLeadSignal
 from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.mta_confluence import MTAConfluence
 from src.strategies.orderbook_imbalance import OrderBookImbalance
@@ -50,6 +58,8 @@ SL_PCT_INTRADAY = 0.0035
 MIN_HOLD_MS = 90_000          # entry 후 90s signal_exit lockout (TP/SL는 활성)
 RE_ENTRY_COOLDOWN_MS = 60_000 # close 후 60s 같은 (ticker,strategy) re-entry 차단
 MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (timeframe mismatch SUI 등)
+# Fix 1 (Codex Round 4): supervisor restart delay (patchable in tests)
+_SUPERVISOR_RESTART_DELAY_S: float = 5.0
 
 # Realtime active HYPOs — 모든 viable ticker
 REALTIME_HYPOS = [
@@ -123,7 +133,27 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.02,
     },
+    # HYPO-014 Binance Lead Signal (Phase 2g Round 3 — cross-exchange leading)
+    {
+        "hypo_id": "HYPO-014-BLEAD",
+        "strategy_cls": BinanceLeadSignal,
+        "params": {"target_size_usd": 100.0},
+        "primary_tf": "cross",
+        # Binance-OKX 매칭되는 ticker만 (BTC/ETH/SOL/DOGE — Binance major pair)
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
 ]
+
+
+# Binance ticker subset for cross-exchange — derived from REALTIME_HYPOS primary_tf="cross"
+def _binance_subscribe_tickers() -> list[str]:
+    syms = set()
+    for h in REALTIME_HYPOS:
+        if h.get("primary_tf") == "cross":
+            syms.update(h["tickers"])
+    return sorted(syms)
 
 # Tick-cached indicators per (hypo_id, ticker)
 _indicator_cache: dict[tuple, tuple[float, list[Candle]]] = {}
@@ -172,6 +202,26 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         if ratio is None or full_tick is None:
             return
         signal = strategy.evaluate_flow(full_tick, ratio, n_trades)
+    elif primary == "cross" and hasattr(strategy, "evaluate_cross"):
+        # Phase 2g Round 3: Binance cross-exchange leading signal (HYPO-014)
+        # OKX-style "BTC-USDT" → Binance "BTCUSDT" conversion
+        binance_sym = ticker.replace("-", "")
+        b_ratio = binance_taker_buy_ratio(binance_sym, window=100)
+        b_vol = binance_volatility_bps(binance_sym, window=50)
+        b_last = binance_get_last_trade(binance_sym)  # (ts_ms, side, size, price)
+        if full_tick is None or b_last is None:
+            return
+        binance_state = {
+            "taker_buy_ratio": b_ratio,
+            "n_trades": len(binance_get_recent_trades(binance_sym, 100)),
+            "volatility_bps": b_vol,
+            "last_price": b_last[3],
+            "last_trade_ts_ms": b_last[0],
+            # Fix 2 (Codex Round 4): local clock avoids cross-exchange clock skew.
+            # OKX ts and Binance ts use different exchange servers → pure local time.
+            "now_ms": int(time.time() * 1000),
+        }
+        signal = strategy.evaluate_cross(full_tick, binance_state)
     elif primary == "mta" and hasattr(strategy, "evaluate_multi_tf"):
         # Phase 2g Round 2: MTA confluence — 4 TF (1D/4H/1H/15m) candle fetch
         tf_data = fetch_multi_tf(ticker, timeframes=("1D", "4H", "1H", "15m"))
@@ -274,16 +324,65 @@ def make_tick_handler() -> Callable[[str, dict], None]:
     return handler
 
 
+async def _run_okx_and_binance(tickers: list[str], binance_tickers: list[str]) -> None:
+    """OKX + Binance WS 동시 실행 (Phase 2g Round 3 cross-exchange).
+
+    Fix 1 (Codex Round 4): supervisor loop — either task crashing no longer kills the other.
+    Uses asyncio.wait(FIRST_COMPLETED) so that when Binance crashes (24h auto-disconnect),
+    OKX task is cancelled, and the entire pair restarts after _SUPERVISOR_RESTART_DELAY_S.
+    `_SUPERVISOR_RESTART_DELAY_S` is module-level to allow test patching.
+    """
+    handler = make_tick_handler()
+    while True:  # supervisor — one side crash → cancel all + restart
+        tasks: set[asyncio.Task] = {
+            asyncio.create_task(stream_tickers(tickers=tickers, on_tick=handler))
+        }
+        if binance_tickers:
+            logger.info(f"Binance WS subscribe: {binance_tickers}")
+            tasks.add(asyncio.create_task(binance_stream(symbols=binance_tickers, on_event=None)))
+        try:
+            # Wait until any task finishes (normal return or exception)
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            # Fix 4 (Codex Round 5): await actual cancellation before next iteration.
+            # t.cancel() only schedules; gather blocks until CancelledError is delivered.
+            # Without this, the old task can overlap with new tasks (duplicate WS subscribe).
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for t in done:
+                exc = t.exception() if not t.cancelled() else None
+                if exc is not None:
+                    logger.error(
+                        f"WS task crashed: {exc!r} — supervisor restart in {_SUPERVISOR_RESTART_DELAY_S}s"
+                    )
+                else:
+                    logger.warning(
+                        f"WS task completed normally — supervisor restart in {_SUPERVISOR_RESTART_DELAY_S}s"
+                    )
+            await asyncio.sleep(_SUPERVISOR_RESTART_DELAY_S)
+        except asyncio.CancelledError:
+            # Propagate clean shutdown (test teardown / process kill)
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
+        except Exception as e:
+            logger.error(f"supervisor outer error: {e!r} — restart in {_SUPERVISOR_RESTART_DELAY_S}s")
+            await asyncio.sleep(_SUPERVISOR_RESTART_DELAY_S)
+
+
 def main() -> None:
-    # 모든 unique ticker 합치기
     all_tickers = set()
     for h in REALTIME_HYPOS:
         all_tickers.update(h["tickers"])
     tickers = sorted(all_tickers)
+    binance_tickers = _binance_subscribe_tickers()
     logger.info(f"=== Polaris Realtime Runner — {_dt.datetime.now().isoformat(timespec='seconds')} ===")
-    logger.info(f"Subscribing {len(tickers)} tickers: {tickers}")
-    handler = make_tick_handler()
-    asyncio.run(stream_tickers(tickers=tickers, on_tick=handler))
+    logger.info(f"OKX subscribe {len(tickers)} tickers: {tickers}")
+    if binance_tickers:
+        logger.info(f"Binance subscribe {len(binance_tickers)} tickers: {binance_tickers}")
+    asyncio.run(_run_okx_and_binance(tickers, binance_tickers))
 
 
 if __name__ == "__main__":

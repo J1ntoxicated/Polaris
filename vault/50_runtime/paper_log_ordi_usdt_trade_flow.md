@@ -69,3 +69,7 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T09:02:38 | OPEN | id=ORDI-USDT-1777849358505 dir=1 entry=5.42 size=$200 |
 | 2026-05-04T09:16:07 | CLOSE | id=ORDI-USDT-1777849358505 entry=5.42 exit=5.46 net=+0.47% net_usd=+0.94 |
 | 2026-05-04T09:16:07 | EXIT_REASON | tp_hit:+0.0061 |
+| 2026-05-04T09:38:00 | OPEN | id=ORDI-USDT-1777851480605 dir=1 entry=5.39 size=$100 |
+| 2026-05-04T09:41:34 | CLOSE | id=ORDI-USDT-1777851480605 entry=5.39 exit=5.39 net=-0.21% net_usd=-0.21 |
+| 2026-05-04T09:41:34 | EXIT_REASON | signal_exit |
+| 2026-05-04T09:44:20 | OPEN | id=ORDI-USDT-1777851860015 dir=1 entry=5.41 size=$100 |

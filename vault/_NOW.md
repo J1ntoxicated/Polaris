@@ -17,12 +17,13 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🎯 현재 상태 (2026-05-04)
 
-**Phase 2c~e 운영 + Codex Round 4 flip-flop fix 적용 직후**:
+**Phase 2g Round 3 완료 + Codex Round 4 (91%) 3 즉시 fix 적용**:
 - 운영 모델 v2 (HARNESS Meta Mode + 4 sub-mode) 정착 — ADR-013
-- realtime runner KeepAlive 운영 중 (PID 91650 — fix 적용 전), 재시작 예정
-- 첫 5분 측정에서 26 closed trades 100% 손실 발견 → **flip-flop fee bleed**
-- Codex Round 4 (74% ACCEPT WITH CONDITIONS) — INSIGHT-021 fix 적용 (min hold 90s + hysteresis + ticker-global cooldown)
-- 후속 (Phase 2g): post-fee EV 양수 증명 (26 losing trade MFE/MAE 분석)
+- Fix 1 (HIGH): supervisor `asyncio.wait(FIRST_COMPLETED)` — Binance 24h 자동종료 시 OKX 유지 + 재시작
+- Fix 2 (MEDIUM): stale clock `now_ms` 주입 — cross-exchange clock skew 해소
+- Fix 3 (MEDIUM): `BINANCE_SPOT_SYMBOLS` whitelist — TRUMP/ORDI 미상장 silent fail 차단
+- 147/147 tests pass (+26 신규) + vault lint 0/0
+- 후속: Codex Round 5 dispatch 권고 (ADR-004 의무 리뷰)
 
 ## 📍 다음 액션
 
@@ -52,10 +53,24 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
-- [[INSIGHT-021]] flip-flop fee bleed fix — 운영 재시작 후 24h 측정 필요 (post-fee EV 양수 증명 = Phase 2g)
+- [[INSIGHT-022]] Phase 2g Round 3 — Binance WS 즉시 구현 완료 (HYPO-014 운영 중) + Codex Round 4 (91%) 3 fix 적용 완료
+- [[INSIGHT-021]] flip-flop fee bleed fix — Round 4 hysteresis + min hold + ticker-global cooldown
 - [[INSIGHT-019]] Codex Round 3 4 fix 적용됨 (intraday plist removed)
 - [[ADR-013]] HARNESS Meta Mode 정착 — 모든 작업 mode dispatch
 - [[ADR-004]] 코드 리뷰 codex 외부 의무 (Jin 2026-05-03 mandate)
+
+## 🟢 운영 중 (HYPO 활성)
+
+| HYPO | Strategy | Status |
+|---|---|---|
+| HYPO-007-RT | RSI15m intraday | size=fee*equity (default) |
+| HYPO-008-RT | VolumeBurst 1H | size=fee*equity |
+| HYPO-009-RT | BreakoutMomentum 1H | size=fee*equity |
+| HYPO-010-TICK | TickMomentum tick | size=fee*equity |
+| HYPO-011-BOOK | OrderBookImbalance book | **size=$100** (Phase 2g cap) |
+| HYPO-012-FLOW | TradeFlow flow | **size=$100** (Phase 2g cap) |
+| HYPO-013-MTA | MTAConfluence mta | **size=$100, max_position 0.02** (Round 2 NEW) |
+| HYPO-014-BINANCE | BinanceLeadSignal cross | **BTC-USDT only** (Round 3 즉시 구현) |
 
 ## ⚠️ Watch List
 

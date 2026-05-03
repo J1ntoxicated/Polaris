@@ -5,7 +5,7 @@ auto: false
 last_modified: 2026-05-04
 expires: 2026-11-04
 editable: true
-back_links: ["[[ADR-012]]", "[[INSIGHT-007]]", "[[60_alpha/_README]]"]
+back_links: ["[[ADR-012]]", "[[INSIGHT-007]]", "[[60_alpha/_README]]", "[[INSIGHT-022]]"]
 mode: alpha
 reviewed_by: codex
 maturity: verified
@@ -100,4 +100,5 @@ Tick-driven 우월:
 - ADR-012 (Realtime architecture shift)
 - INSIGHT-007 (fee 함정 — tick-driven은 우회 가능)
 - INSIGHT-014 (BB fast-fail — candle 한계)
+- [[INSIGHT-022]] (Binance WS spec + 즉시 구현 — "Binance WebSocket TODO" 이행)
 - 60_alpha/_README

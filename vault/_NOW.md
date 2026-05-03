@@ -31,7 +31,9 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 - [x] Phase D (writing-plans으로 implementation plan)
 - [x] Phase 0 완료 (Codex 외부 리뷰 93% 합의 — [[codex_review_phase_abc]])
 - [x] Phase 1 완료 (8 인수 소스 → 18 노트: 9 INSIGHT + 4 ADR + 5 LESSON)
-- [ ] Phase E — Phase 2a HYPOTHESIS-001 (Bayesian 비교) 또는 Phase 2b 첫 컴포넌트 (OKX SPOT WS feed)
+- [x] Phase 2a HYPOTHESIS-001 fast-fail (archived) → INSIGHT-013
+- [ ] Phase 2 — HYPOTHESIS-002 (Bollinger band breakout 또는 momentum 시도)
+- [ ] Phase 2c — 페이퍼 인프라 (WS feed + simulated order book + position tracker, ADR-010)
 - [ ] Phase F (visualizer + dashboard, 코어 완성 후)
 
 ## 🧭 네비게이션

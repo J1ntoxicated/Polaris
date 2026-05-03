@@ -31,3 +31,5 @@ tags: [meta, log, append_only, polaris]
 - **Phase 0 완료 (Codex 리뷰 ADR-004 첫 사례)** — Round 1 80% → 5 fix 적용 → Round 2 93% 합의. Round 3 불필요. 잔여 gap 10개는 Phase 1+ plan. ([[codex_review_phase_abc]])
 - **Phase 0 commit `24d8569`** — feat(polaris): Phase 0 verified [reviewed-by: codex(2 rounds)] (6 files, 256 insertions).
 - **Phase 1 완료 (8 인수 소스 추출)** — 모태 vault에서 학습값 4 + ADR 4 + INSIGHT 4 + lessons 5 + WS URL 위험 1 = 18 노트 신규 작성 (INSIGHT-003~011, ADR-006~009, LESSON-001~005). _INHERIT_QUEUE archived.
+
+- **Phase 2 — Backtest engine + HYPO-001 fast-fail** — 백테스트 인프라 작성 (Pure P6 + Property-based P7, 68 tests pass). HYPO-001 (RSI mean reversion BTC 1h) 직접 측정: 6 파라미터 × 4 timeframe 모두 expectancy < fee → archived. INSIGHT-013 + ADR-010 (Backtest+Paper parallel) + ADR-009 PERP counter 1/5. [[INSIGHT-013]]

@@ -38,6 +38,7 @@ tags: [meta, index, polaris]
 | [[ADR-007]] | Paper sizing freedom + fee floor (모태 ADR-009 인수) | provisional |
 | [[ADR-008]] | vol_factor PROPORTIONAL fix CRITICAL (모태 ADR-010 인수) | provisional |
 | [[ADR-009]] | SPOT-only 유지 + PERP 검토 3개월 (모태 ADR-011 인수) | provisional |
+| [[ADR-010]] | Backtest + Paper parallel (백테스트 신뢰도 한계 대응) | provisional |
 
 ## 💡 Insights (30_knowledge/insights/)
 
@@ -54,6 +55,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-009]] | Fee floor miswire 4-fold cascade (P0) | active |
 | [[INSIGHT-010]] | fee_paid base units corruption (P7 적용) | active |
 | [[INSIGHT-011]] | Demo WS URL risk (Phase 2b 적용 의무, P0) | active |
+| [[INSIGHT-012]] | Backtest 신뢰도 한계 정량 (Sharpe CI/regime/overfitting, P0) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

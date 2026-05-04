@@ -20,6 +20,7 @@ import time
 from collections import deque
 from typing import Callable, Optional
 
+from src.paper.exit_profiles import get_exit_profile
 from src.data.binance_liquidation_ws import (
     compute_liquidation_pressure,
     stream as binance_liq_stream,
@@ -110,6 +111,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ADA-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "scalp",  # Phase 2P: 15m intraday — TP 0.6%, SL 0.35%, max 4h
     },
     {
         "hypo_id": "HYPO-008-RT",
@@ -119,6 +121,7 @@ REALTIME_HYPOS = [
         "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "swing",  # Phase 2P: 1H VolumeBurst → swing moves — TP 5%, SL 2%, max 7d
     },
     {
         # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k 2026-05-04)
@@ -136,6 +139,7 @@ REALTIME_HYPOS = [
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         # Binance perp symbols for liquidation WS (derived at runtime)
         "_binance_perp_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
+        "exit_profile": "liquidation",  # Phase 2P: event-driven mean revert — TP 1.5%, SL 0.7%, max 30min
     },
     # ── Phase 2L: 5 신규 HYPOs (fail-fast paradigm, 2026-05-04) ──────────────
     {
@@ -149,6 +153,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "scalp",  # Phase 2P: cross-exchange gap (sub-second) — TP 0.6%, SL 0.35%, max 4h
     },
     # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
     # n=6, win 33% < 40% fast_fail threshold, avg_size $687, lifetime -$3.76.
@@ -182,6 +187,7 @@ REALTIME_HYPOS = [
         "_binance_futures_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "swing",  # Phase 2P: funding 8h cycle → swing — TP 5%, SL 2%, max 7d
     },
     {
         # HYPO-028: Tick Burst Follow
@@ -195,6 +201,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "scalp",  # Phase 2P: 5s burst, 60s expected hold — TP 0.6%, SL 0.35%, max 4h
     },
     # ── Phase 2L+: 3 신규 HYPOs (candle-based 1H, 2026-05-04) ────────────────
     # ── Phase 2M: 3 Academic-grade HYPOs (2026-05-04) ────────────────────────
@@ -211,6 +218,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "position",  # Phase 2P: 30d momentum — TP 12%, SL 4%, max 30d (aligns with Moskowitz 2012 expectancy)
     },
     {
         # HYPO-033: VPIN Toxicity (simplified)
@@ -226,6 +234,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "scalp",  # Phase 2P: intraday informed flow — TP 0.6%, SL 0.35%, max 4h
     },
     {
         # HYPO-034: BTC Dominance Lead-Lag
@@ -241,6 +250,7 @@ REALTIME_HYPOS = [
         "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
+        "exit_profile": "scalp",  # Phase 2P: BTC→alt lag 30s-3min — TP 0.6%, SL 0.35%, max 4h
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
@@ -772,6 +782,13 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
 
     balance = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
 
+    # Phase 2P: strategy timeframe별 exit profile (TP/SL/max_hold 차등)
+    # get_exit_profile reads "exit_profile" key from hypo; defaults to "scalp" if absent.
+    _exit_profile = get_exit_profile(hypo)
+    _tp_pct = _exit_profile["tp_pct"]
+    _sl_pct = _exit_profile["sl_pct"]
+    _max_hold_ms = int(_exit_profile["max_hold_h"] * 3600 * 1000)
+
     # 1. Open positions — TP/SL/exit-signal 체크 (TICK PRICE 기반!)
     # Codex Round 4 fix: min hold time — entry 후 MIN_HOLD_MS 동안 signal_exit 차단 (flip-flop fee bleed 방지)
     closed_this_tick = False
@@ -781,11 +798,11 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         gross = pos.direction * (tick_price - pos.entry_price) / pos.entry_price
         held_ms = max(0, tick_ts_ms - pos.open_ts_ms)
         exit_reason = None
-        if gross >= TP_PCT_INTRADAY:
+        if gross >= _tp_pct:
             exit_reason = f"tp_hit:{gross:+.4f}"
-        elif gross <= -SL_PCT_INTRADAY:
+        elif gross <= -_sl_pct:
             exit_reason = f"sl_hit:{gross:+.4f}"
-        elif held_ms >= MAX_HOLD_MS:
+        elif held_ms >= _max_hold_ms:
             exit_reason = f"max_hold:{held_ms//1000}s"  # Phase 2g: timeframe mismatch 강제 청산
         elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
             exit_reason = "signal_exit"

@@ -23,3 +23,15 @@ Append-only. ADR-010 paper 운영 기록.
 |---|---|---|
 | 2026-05-04T00:55:29 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
 | 2026-05-04T20:32:49 | OPEN | id=BTC-USDT-1777890769510 dir=1 entry=78839.90 size=$200 |
+| 2026-05-04T22:38:42 | OPEN | id=BTC-USDT-1700000000000 dir=1 entry=100.00 size=$300 |
+| 2026-05-04T22:38:42 | CLOSE | id=BTC-USDT-1700000000000 entry=100.00 exit=100.70 net=+0.56% net_usd=+1.68 |
+| 2026-05-04T22:38:42 | EXIT_REASON | tp_hit:+0.0070 |
+| 2026-05-04T22:38:47 | OPEN | id=BTC-USDT-1700000000000 dir=1 entry=100.00 size=$300 |
+| 2026-05-04T22:38:47 | CLOSE | id=BTC-USDT-1700000000000 entry=100.00 exit=100.70 net=+0.56% net_usd=+1.68 |
+| 2026-05-04T22:38:47 | EXIT_REASON | tp_hit:+0.0070 |
+| 2026-05-04T22:38:53 | OPEN | id=BTC-USDT-1700000000000 dir=1 entry=100.00 size=$300 |
+| 2026-05-04T22:38:53 | CLOSE | id=BTC-USDT-1700000000000 entry=100.00 exit=100.70 net=+0.56% net_usd=+1.68 |
+| 2026-05-04T22:38:53 | EXIT_REASON | tp_hit:+0.0070 |
+| 2026-05-04T22:39:01 | OPEN | id=BTC-USDT-1700000000000 dir=1 entry=100.00 size=$300 |
+| 2026-05-04T22:39:01 | CLOSE | id=BTC-USDT-1700000000000 entry=100.00 exit=100.70 net=+0.56% net_usd=+1.68 |
+| 2026-05-04T22:39:01 | EXIT_REASON | tp_hit:+0.0070 |

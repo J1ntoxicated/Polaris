@@ -187,6 +187,13 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         b_vol = binance_volatility_bps(binance_sym, window=50)
         b_last = binance_get_last_trade(binance_sym)  # (ts_ms, side, size, price)
         if full_tick is None or b_last is None:
+            # Round 10: 5분에 1번 WARN — Binance state 미공급 추적 (WS 문제 vs threshold 미충족 구분)
+            if not hasattr(_eval_and_act, "_blead_nofeed_last"):
+                _eval_and_act._blead_nofeed_last = {}
+            last_warn = _eval_and_act._blead_nofeed_last.get(ticker, 0)
+            if tick_ts_ms - last_warn > 300_000:  # 5분
+                logger.warning(f"[BLEAD-NOFEED] {ticker} b_last={b_last} (Binance trades 미공급)")
+                _eval_and_act._blead_nofeed_last[ticker] = tick_ts_ms
             return
         binance_state = {
             "taker_buy_ratio": b_ratio,
@@ -199,6 +206,14 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             "now_ms": int(time.time() * 1000),
         }
         signal = strategy.evaluate_cross(full_tick, binance_state)
+        # Round 10: HOLD reason 분포 추적 (rate-limited 1분/ticker)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_blead_hold_last"):
+                _eval_and_act._blead_hold_last = {}
+            last_hold = _eval_and_act._blead_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_hold > 60_000:  # 1분
+                logger.info(f"[BLEAD-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._blead_hold_last[ticker] = tick_ts_ms
     elif primary == "mta" and hasattr(strategy, "evaluate_multi_tf"):
         # Phase 2g Round 2: MTA confluence — 4 TF (1D/4H/1H/15m) candle fetch
         tf_data = fetch_multi_tf(ticker, timeframes=("1D", "4H", "1H", "15m"))
@@ -216,6 +231,15 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         if stale:
             return
         signal = strategy.evaluate_multi_tf(tf_data)
+        # Round 10: HOLD reason 분포 추적 (24h 후 too strict vs wrong logic 판단)
+        # Rate-limit 5분/ticker (BLEAD-HOLD/NOFEED 패턴 — log spam 방지)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_mta_hold_last"):
+                _eval_and_act._mta_hold_last = {}
+            last_log = _eval_and_act._mta_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_log > 300_000:  # 5분
+                logger.info(f"[MTA-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._mta_hold_last[ticker] = tick_ts_ms
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:

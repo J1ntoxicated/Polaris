@@ -17,12 +17,13 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🎯 현재 상태 (2026-05-04)
 
-**Phase 2g Round 9 완료 (Codex 92% 합의) — HYPO-009 deprecate**:
-- HYPO-009 n=16, win 44%, TP 7 / SL 9, EV -1.33%/trade (paper fee) → REALTIME_HYPOS 제거
-- TP<SL 비대칭 구조적 원인 — parameter tuning 불가, 아카이브 보존
-- 157/157 tests pass + TDD `test_hypo_009_not_in_realtime_hypos`
-- 잔여 8% gap: forensic audit `net_usd` fee 차감 검증 (HYPO-008/010 size 결정 보류)
-- Round 10 불필요 (92% ≥ 80% ADR-004 기준)
+**HYPO-005/001/002/006 fee fix 후 재평가 완료 (INSIGHT-026)**:
+- fee 0.0014 기준 재backtest (BTC 1D 1800 candles, 1H 3000 candles)
+- MACD(12,26,9): expectancy -0.09%→+1.17% (fast-fail 통과 전환), Sharpe 0.10 미달 → archived 유지
+- BB/RSI/Ichimoku 모두 Sharpe 미달 → archived 유지
+- 패턴: fee fix = expectancy 보정 O / Sharpe 보정 X (신호 분산은 fee와 무관)
+- 55/55 backtest+domain tests pass
+- 다음 액션: HYPO-013/014 60분 실측 + size 결정 (HYPO-008/010)
 
 ## 📍 다음 액션
 
@@ -52,13 +53,24 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
-- [[INSIGHT-025]] fee 0.014 latent bug 4건 (runner.py:59,74,136 + metrics.py:15) — 즉시 fix 후 backtest 재실행 필요
+- [[INSIGHT-026]] archived HYPO 재평가 완료 — 4개 모두 archived 유지 (Sharpe 미달 일관)
+- [[INSIGHT-025]] fee 0.014 latent bug 4건 fix 완료 — backtest 재실행 완료 (INSIGHT-026)
 - [[INSIGHT-024]] HYPO-009 deprecate 근거 (n=16, EV -1.33%, TP<SL 비대칭) — Round 9
 - [[INSIGHT-023]] HYPO-011/012 deprecate 근거 (n=336/450, EV 계산, signal_exit 구조) — Round 8
 - [[INSIGHT-022]] Phase 2g Binance WS + MTA + Codex Round 4~7 fix 누적
 - [[INSIGHT-021]] flip-flop fee bleed fix — Round 4 hysteresis + min hold + ticker-global cooldown
 - [[ADR-013]] HARNESS Meta Mode 정착 — 모든 작업 mode dispatch
 - [[ADR-004]] 코드 리뷰 codex 외부 의무 (Jin 2026-05-03 mandate)
+
+## 🔥 Round 10 (2026-05-04)
+
+**Fix 1 — HYPO-013 MTA HOLD 로깅**: `_eval_and_act` mta branch에 `[MTA-HOLD] {ticker} {reason}` INFO 로그 추가. 24h 후 too strict vs wrong logic 판단 근거 확보.
+
+**Fix 2 — HYPO-014 Binance feed health check**: cross branch에 `[BLEAD-NOFEED]` WARN (rate-limit 5분/ticker) + `[BLEAD-HOLD]` INFO (rate-limit 1분/ticker) 추가. WS feed 미공급 vs threshold 미충족 구분 가능.
+
+**TDD**: `test_mta_hold_logged` + `test_blead_nofeed_warn_rate_limited` RED→GREEN. **160/160 pass**.
+
+**24h 분석 plan**: runner restart 후 logs/realtime.err에서 `grep -E "\[MTA-HOLD\]|\[BLEAD-NOFEED\]|\[BLEAD-HOLD\]"` → HOLD reason 분포 집계 → 2026-05-05 분석.
 
 ## 🟢 운영 중 (HYPO 활성)
 

@@ -17,6 +17,10 @@ def _isolate_state(tmp_path, monkeypatch):
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()
+    # Round 10: rate-limit 딕셔너리 초기화 (함수 속성)
+    for attr in ("_blead_nofeed_last", "_blead_hold_last"):
+        if hasattr(rt._eval_and_act, attr):
+            delattr(rt._eval_and_act, attr)
     yield
 
 
@@ -555,3 +559,121 @@ def test_hypo_011_012_not_in_realtime_hypos():
         "HYPO-012-FLOW (TradeFlow) must be deprecated — "
         "n=450, TP 9.8%, -$151.77 lifetime, EV -0.22%/trade"
     )
+
+
+# ── Round 10: HYPO-013 MTA HOLD log + HYPO-014 BLEAD health check ────────────
+
+
+def test_mta_hold_logged(tmp_path, monkeypatch, caplog):
+    """Round 10 Fix 1: MTAConfluence HOLD signal 시 [MTA-HOLD] INFO 로그 발생.
+
+    HYPO-013 60분 trade 0 → too strict vs wrong logic 판단을 위해
+    HOLD reason 분포가 로그로 노출돼야 한다.
+
+    Strategy.evaluate_multi_tf를 mock하여 HOLD를 강제 — MTAConfluence
+    내부 조건 변화에 무관하게 로그 경로만 검증.
+    """
+    import logging
+    from src.strategies.mta_confluence import MTAConfluence
+    from src.domain.candle import Candle
+    from src.domain.signal import Signal, SignalAction
+
+    hypo = {
+        "hypo_id": "HYPO-013-MTA",
+        "strategy_cls": MTAConfluence,
+        "params": {"target_size_usd": 100.0, "rsi_soft_threshold": 52.0, "min_score": 2},
+        "primary_tf": "mta",
+        "tickers": ["BTC-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    }
+    ticker = "BTC-USDT"
+    now_ms = 1_700_000_000_000
+
+    def _fresh(n: int = 60):
+        return [
+            Candle(
+                timestamp_ms=now_ms - (n - i) * 60_000,
+                open=100.0, high=101.0, low=99.0, close=100.0, volume=100.0,
+            )
+            for i in range(n)
+        ]
+
+    fake_tf = {"1D": _fresh(60), "4H": _fresh(60), "1H": _fresh(60), "15m": _fresh(60)}
+    hold_signal = Signal(
+        timestamp_ms=now_ms,
+        action=SignalAction.HOLD,
+        confidence=0.0,
+        reason="score=1/4 (effective_min=3) mandatory=False test",
+    )
+
+    with patch.object(rt, "fetch_multi_tf", return_value=fake_tf), \
+         patch.object(MTAConfluence, "evaluate_multi_tf", return_value=hold_signal), \
+         caplog.at_level(logging.INFO, logger="src.paper.realtime_runner"):
+        rt._eval_and_act(
+            hypo, ticker, tick_price=100.0, tick_ts_ms=now_ms,
+            full_tick=_full_tick(100.0, now_ms),
+        )
+
+    mta_hold_lines = [r.message for r in caplog.records if "[MTA-HOLD]" in r.message]
+    assert mta_hold_lines, (
+        "HOLD signal from MTAConfluence must emit [MTA-HOLD] INFO log. "
+        f"All log messages: {[r.message for r in caplog.records]}"
+    )
+    assert ticker in mta_hold_lines[0], "Log must include the ticker symbol"
+    assert hold_signal.reason in mta_hold_lines[0], "Log must include the HOLD reason"
+
+
+def test_blead_nofeed_warn_rate_limited(tmp_path, monkeypatch, caplog):
+    """Round 10 Fix 2: b_last is None → [BLEAD-NOFEED] WARN 발생, 5분 rate-limit 적용.
+
+    HYPO-014 60분 trade 0 원인: WS feed 미공급인지 threshold 미충족인지 구분 불가.
+    Fix: b_last=None 시 WARN 로그 (최초 + 5분마다), 그 사이 tick은 suppress.
+    """
+    import logging
+    from src.strategies.binance_lead import BinanceLeadSignal
+
+    hypo = {
+        "hypo_id": "HYPO-014-BLEAD",
+        "strategy_cls": BinanceLeadSignal,
+        "params": {"target_size_usd": 100.0},
+        "primary_tf": "cross",
+        "tickers": ["BTC-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    }
+    ticker = "BTC-USDT"
+    base_ts = 1_700_000_000_000
+
+    with patch.object(rt, "binance_taker_buy_ratio", return_value=None), \
+         patch.object(rt, "binance_volatility_bps", return_value=None), \
+         patch.object(rt, "binance_get_last_trade", return_value=None), \
+         caplog.at_level(logging.WARNING, logger="src.paper.realtime_runner"):
+
+        # Tick 1 (t=0): b_last=None → WARN 발생해야 함
+        rt._eval_and_act(hypo, ticker, tick_price=100.0, tick_ts_ms=base_ts,
+                         full_tick=_full_tick(100.0, base_ts))
+        warns_after_first = [r for r in caplog.records if "[BLEAD-NOFEED]" in r.message]
+        assert len(warns_after_first) == 1, (
+            "첫 번째 b_last=None tick에서 [BLEAD-NOFEED] WARN 1회 발생해야 함"
+        )
+
+        caplog.clear()
+
+        # Tick 2 (t=2분): rate-limit 5분 안 → WARN suppress
+        rt._eval_and_act(hypo, ticker, tick_price=100.0, tick_ts_ms=base_ts + 120_000,
+                         full_tick=_full_tick(100.0, base_ts + 120_000))
+        warns_after_second = [r for r in caplog.records if "[BLEAD-NOFEED]" in r.message]
+        assert len(warns_after_second) == 0, (
+            "5분 안 두 번째 tick은 [BLEAD-NOFEED] suppress돼야 함 (rate-limit)"
+        )
+
+        caplog.clear()
+
+        # Tick 3 (t=6분): rate-limit 초과 → WARN 재발생
+        rt._eval_and_act(hypo, ticker, tick_price=100.0, tick_ts_ms=base_ts + 360_000,
+                         full_tick=_full_tick(100.0, base_ts + 360_000))
+        warns_after_third = [r for r in caplog.records if "[BLEAD-NOFEED]" in r.message]
+        assert len(warns_after_third) == 1, (
+            "5분 초과 후 [BLEAD-NOFEED] WARN 재발생해야 함"
+        )

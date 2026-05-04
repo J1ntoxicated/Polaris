@@ -818,13 +818,17 @@ def test_cascade_state_stale_guard_works_with_fix():
 
 
 def test_hypo010_target_size_200_round14():
-    """HYPO-010 Round 14: target_size_usd == 200 (silent cap bug 수정).
+    """HYPO-010 Round 14 검증 — Round 15에서 deprecated.
 
-    Round 13 300 override → max_position_pct 0.04 × $5000 = $200 cap에 silent 차단.
-    Round 14: intent-code 정합 복원 — params["target_size_usd"] == 200.
+    Round 14: target_size_usd 200 (max_position_pct 0.04 × $5000 = $200 cap 정합 복원).
+    Round 15: HYPO-010 전체 deprecated (n=95, win 43%, -$14.98 변질 확인).
+    이 테스트는 Round 14 config 정합을 historical record로 보존.
+    HYPO-010이 REALTIME_HYPOS에 없으면 skip (deprecated 확인).
     """
     hypo010 = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-010-TICK"), None)
-    assert hypo010 is not None, "HYPO-010-TICK must exist in REALTIME_HYPOS"
+    if hypo010 is None:
+        # Round 15 deprecated — expected absence, test passes
+        return
     assert hypo010["params"].get("target_size_usd") == 200.0, (
         f"HYPO-010-TICK params target_size_usd must be 200.0, "
         f"got {hypo010['params'].get('target_size_usd')} — "
@@ -833,13 +837,16 @@ def test_hypo010_target_size_200_round14():
 
 
 def test_hypo010_trump_removed_round14():
-    """HYPO-010 Round 14: TRUMP-USDT 제거 (구조적 SL 도달 부적합).
+    """HYPO-010 Round 14 검증 — Round 15에서 deprecated.
 
-    TRUMP price range 0.42% < SL×2=0.70% → 정상 변동성에서 SL 도달 구조적 부적합.
-    3/3 SL (100% SL rate) forensic 결과 기반 제거.
+    Round 14: TRUMP-USDT 제거 (price range 0.42% < SL×2=0.70%, 구조적 부적합).
+    Round 15: HYPO-010 전체 deprecated (n=95, win 43%, -$14.98 변질 확인).
+    HYPO-010이 REALTIME_HYPOS에 없으면 skip (deprecated 확인).
     """
     hypo010 = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-010-TICK"), None)
-    assert hypo010 is not None, "HYPO-010-TICK must exist in REALTIME_HYPOS"
+    if hypo010 is None:
+        # Round 15 deprecated — expected absence, test passes
+        return
     assert "TRUMP-USDT" not in hypo010["tickers"], (
         "TRUMP-USDT must be removed from HYPO-010-TICK tickers — "
         "price range 0.42% < SL×2=0.70% (구조적 SL 도달 부적합, 3/3 SL Round 14 forensic)"
@@ -899,4 +906,55 @@ def test_regime_cluster_5min_window_expiry():
     # SOL SL (tick_6min): 유일하게 window 내 → distinct_tickers = {SOL} → count < 3
     assert rt._hypo010_pause_until_ms == 0, (
         "5분 초과 SL trim 후 distinct tickers < 3 → pause 발동 안 됨"
+    )
+
+
+# ── Round 15: tick-driven scalp 비활성 + 1d trend 강화 ───────────────────────
+# Jin 판단 (2026-05-04):
+# HYPO-010 n=95 win 43% -$14.98 → deprecate
+# HYPO-013 n=1 → deprecate (sample 부족)
+# HYPO-014 n=1 0% → deprecate (vol 미달)
+# HYPO-016 n=37 win 24% -$3.92 → deprecate (사전 trigger)
+# HYPO-017 n=0 → deprecate (60분 trigger 0)
+# HYPO-007/008 유지 (양수 EV 또는 cron-style)
+# cron ACTIVE_HYPOS: SMA 8ticker + Donchian 2 variants
+
+
+def test_realtime_hypos_only_007_008():
+    """Round 15: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT만 포함 (나머지 전부 deprecated).
+
+    Deprecated:
+    - HYPO-010-TICK: n=95, win 43%, -$14.98 (변질 진행)
+    - HYPO-013-MTA: n=1, sample 부족, 빈도 0
+    - HYPO-014-BLEAD: n=1, 0% win, vol 미달
+    - HYPO-016-OFI: n=37, win 24%, -$3.92 (사전 trigger)
+    - HYPO-017-CASCADE: n=0, 60분 trigger 0
+    """
+    active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
+
+    # 유지 — 반드시 존재
+    assert "HYPO-007-RT" in active_ids, "HYPO-007-RT (RSI15m) must remain active"
+    assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
+
+    # Deprecated — 반드시 부재
+    assert "HYPO-010-TICK" not in active_ids, (
+        "HYPO-010-TICK must be deprecated — n=95, win 43%, -$14.98 (변질 진행)"
+    )
+    assert "HYPO-013-MTA" not in active_ids, (
+        "HYPO-013-MTA must be deprecated — n=1, sample 부족, 빈도 0"
+    )
+    assert "HYPO-014-BLEAD" not in active_ids, (
+        "HYPO-014-BLEAD must be deprecated — n=1, 0% win, vol 미달"
+    )
+    assert "HYPO-016-OFI" not in active_ids, (
+        "HYPO-016-OFI must be deprecated — n=37, win 24%, -$3.92 (사전 trigger)"
+    )
+    assert "HYPO-017-CASCADE" not in active_ids, (
+        "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
+    )
+
+    # 정확히 2개만 (007 + 008)
+    assert len(active_ids) == 2, (
+        f"REALTIME_HYPOS must contain exactly 2 active HYPOs (007+008), "
+        f"got {len(active_ids)}: {active_ids}"
     )

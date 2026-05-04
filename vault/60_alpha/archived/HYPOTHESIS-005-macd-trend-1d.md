@@ -17,13 +17,22 @@ tags: [type/hypothesis, status/archived, scope/alpha, polaris]
 ## Hypothesis
 MACD(12, 26, 9) BTC 1d crossover trend = expectancy > fee.
 
-## Result (BTC 1d 1500 candles)
+## Result (BTC 1d 1500 candles, fee=0.014 — 원본 bug 있는 수치)
 | Config | trades | hit | expectancy | Sharpe |
 |---|---|---|---|---|
 | MACD(12, 26, 9) | 58 | ? | **+0.0009** (fast-fail) | +0.009 |
 | MACD(8, 21, 5) | 88 | ? | **+0.0005** (fast-fail) | +0.006 |
 
 → **Fast-fail** (expectancy < fee 0.014).
+
+## Re-evaluation (BTC 1d 1800 candles, fee=0.0014 — INSIGHT-026, 2026-05-04)
+| Config | trades | hit | expectancy | Sharpe | MDD | ann_return |
+|---|---|---|---|---|---|---|
+| MACD(12, 26, 9) | 72 | 34.7% | **+1.17%** | +0.105 | 53.8% | +9.4% |
+| MACD(8, 21, 5) | 107 | 34.6% | **+1.13%** | +0.123 | 47.8% | +17.6% |
+| MACD(20, 50, 9) | 46 | 41.3% | **+2.94%** | +0.200 | 52.2% | +20.7% |
+
+→ **Fast-fail 통과** (expectancy > fee 0.0014). **그러나 Promotion Gate 미달**: Sharpe < 0.3 (swing min) — archived 유지.
 
 ## Why fail vs HYPO-003/004 viable
 
@@ -43,5 +52,6 @@ ADR-009 PERP counter는 변경 없음 (HYPO-003/004 viable 입증으로 SPOT 1d 
 
 ## Related
 - INSIGHT-007 (fee 함정 1d 신호 빈도 적용)
+- INSIGHT-026 (fee fix 후 archived HYPO 재평가 — MACD archived 유지 근거)
 - HYPO-003 (SMA crossover viable)
 - HYPO-004 (Donchian viable)

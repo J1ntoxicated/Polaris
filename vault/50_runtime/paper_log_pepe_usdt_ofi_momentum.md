@@ -34,3 +34,9 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T15:47:52 | CLOSE | id=PEPE-USDT-1777872855806 entry=0.00 exit=0.00 net=-0.09% net_usd=-0.09 |
 | 2026-05-04T15:47:52 | EXIT_REASON | signal_exit |
 | 2026-05-04T15:56:46 | OPEN | id=PEPE-USDT-1777874206064 dir=1 entry=0.00 size=$100 |
+| 2026-05-04T16:01:05 | CLOSE | id=PEPE-USDT-1777874206064 entry=0.00 exit=0.00 net=-0.19% net_usd=-0.19 |
+| 2026-05-04T16:01:05 | EXIT_REASON | signal_exit |
+| 2026-05-04T16:28:58 | OPEN | id=PEPE-USDT-1777876138761 dir=1 entry=0.00 size=$100 |
+| 2026-05-04T16:32:43 | CLOSE | id=PEPE-USDT-1777876138761 entry=0.00 exit=0.00 net=+0.16% net_usd=+0.16 |
+| 2026-05-04T16:32:43 | EXIT_REASON | signal_exit |
+| 2026-05-04T16:37:18 | OPEN | id=PEPE-USDT-1777876638788 dir=1 entry=0.00 size=$100 |

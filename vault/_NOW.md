@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # Round 14 결정 반영
+last_modified: 2026-05-04  # Codex Round 15 ADR-010 fix + walk-forward 3-fold ROBUST
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -15,7 +15,13 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 🎯 현재 상태 (2026-05-04)
+## 현재 상태 (2026-05-04 — Codex Round 15 ADR-010 fix 완료)
+
+**Codex Round 15 3 작업 완료**:
+- ADR-010 위반 fix: HYPO-020 cron ACTIVE_HYPOS 제거 → `daily_paper_runner.py` DAILY_PAPER_HYPOS 신규.
+- walk-forward 3-fold: DOGE 1D 2486 candles — Fold1 Sharpe=0.364 / Fold2=0.469 / Fold3=0.678 → ROBUST.
+- HYPO-008 fee 검증: LIVE_FEE_ROUND_TRIP=0.0014 + paper_state JSON fee={0.0014} 일관 확인.
+- 301/301 tests pass (+7 신규).
 
 **HYPO-005/001/002/006 fee fix 후 재평가 완료 (INSIGHT-026)**:
 - fee 0.0014 기준 재backtest (BTC 1D 1800 candles, 1H 3000 candles)
@@ -65,6 +71,25 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 - [[ADR-013]] HARNESS Meta Mode 정착 — 모든 작업 mode dispatch
 - [[ADR-004]] 코드 리뷰 codex 외부 의무 (Jin 2026-05-03 mandate)
 
+## 🔥 Round 15 (2026-05-04) — tick-driven scalp 비활성 + 1d trend 강화
+
+**Jin 판단**: tick-driven scalp 5개 전부 deprecated. 1d trend portfolio 강화.
+
+| HYPO | n | win% | PnL | 상태 |
+|---|---|---|---|---|
+| HYPO-010-TICK | 95 | 43% | -$14.98 | **DEPRECATED** |
+| HYPO-013-MTA | 1 | 100% | +$0.46 | **DEPRECATED** (sample 부족) |
+| HYPO-014-BLEAD | 1 | 0% | -$0.20 | **DEPRECATED** (vol 미달) |
+| HYPO-016-OFI | 37 | 24% | -$3.92 | **DEPRECATED** (사전 trigger) |
+| HYPO-017-CASCADE | 0 | - | - | **DEPRECATED** (trigger 빈도 0) |
+
+**코드 변경**:
+- `REALTIME_HYPOS` → HYPO-007-RT + HYPO-008-RT (2개)
+- `ACTIVE_HYPOS` → SMA 8ticker + Donchian 2 variants (3 entries)
+- 238/238 tests pass + INSIGHT-030 + ADR-014 신규
+
+**Codex Round 15 dispatch 의무** (ADR-004 — fundamental portfolio decision review)
+
 ## 🔥 Round 11 (2026-05-04) — HYPO-016 + HYPO-017 구현 완료
 
 **HYPO-016 OFI Momentum**: `src/strategies/ofi_momentum.py` (pure P6) + 20 tests. HYPO-016-OFI 등록 (primary_tf="ofi", 6 tickers). Codex 72% 합의.
@@ -93,18 +118,39 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🟢 운영 중 (HYPO 활성)
 
+### Realtime (tick-driven) — 2개만 (Round 15)
+
 | HYPO | Strategy | Status |
 |---|---|---|
-| HYPO-007-RT | RSI15m intraday | active |
-| HYPO-008-RT | VolumeBurst 1H | active |
-| HYPO-009-RT | BreakoutMomentum 1H | **DEPRECATED Round 9** — n=16, EV -1.33%, TP<SL |
-| HYPO-010-TICK | TickMomentum tick | active — **size $200** (Round 14 cap 정합 복원), TRUMP 제거, regime cluster guard active |
-| HYPO-011-BOOK | OrderBookImbalance book | **DEPRECATED Round 8** — n=336, TP 0, -$77.93 |
-| HYPO-012-FLOW | TradeFlow flow | **DEPRECATED Round 8** — n=450, EV -0.22%, -$151.77 |
-| HYPO-013-MTA | MTAConfluence mta | active, 60분 측정 중 |
-| HYPO-014-BLEAD | BinanceLeadSignal cross | active — **vol 5 bps** (Round 13 완화, 기존 8 bps) |
-| HYPO-016-OFI | OFIMomentum ofi | **신규 Round 11** — n=5 win 20% signal_exit 100% → **n=10 TP=0 시 즉시 deprecate** (Round 13) |
-| HYPO-017-CASCADE | BTCCascade cascade | **신규 Round 11** — BTC 1min +0.30% + ETH confirm → alt follow lag, 5 tickers |
+| HYPO-007-RT | RSI15m intraday | active — cron-style rare trigger |
+| HYPO-008-RT | VolumeBurst 1H | active — n=29 win 55% +$3.50 유일 양수 EV |
+
+### 1d Cron (trend) — Promotion Gate PASSED (Round 15)
+
+| HYPO | Strategy | Tickers | Status |
+|---|---|---|---|
+| HYPO-003-SMA50-200 | SMA 50/200 1D | 8 (BTC/ETH/SOL/DOGE/ADA/XRP/ORDI/SUI) | active |
+| HYPO-004-DONCH-40-15 | Donchian 40/15 1D | BTC+ETH | active |
+| HYPO-004-DONCH-20-10 | Donchian 20/10 1D | BTC+ETH+SOL | active |
+
+### Paper Stage (ADR-010 — 60일 실측 중, Promotion Gate 미통과)
+
+| HYPO | Strategy | Tickers | paper_since | Walk-Forward |
+|---|---|---|---|---|
+| HYPO-020-VB-DONCH-DOGE | ConfluenceSignal(VB+Donchian 40/15) 1D | DOGE | 2026-05-04 | ROBUST (3/3 fold PASS) |
+
+### Deprecated
+
+| HYPO | Strategy | 이유 |
+|---|---|---|
+| HYPO-009-RT | BreakoutMomentum | Round 9 — n=16, EV -1.33%, TP<SL |
+| HYPO-010-TICK | TickMomentum | **Round 15** — n=95, win 43%, -$14.98 변질 |
+| HYPO-011-BOOK | OrderBookImbalance | Round 8 — n=336, TP 0, -$77.93 |
+| HYPO-012-FLOW | TradeFlow | Round 8 — n=450, EV -0.22%, -$151.77 |
+| HYPO-013-MTA | MTAConfluence | **Round 15** — n=1, sample 부족 |
+| HYPO-014-BLEAD | BinanceLeadSignal | **Round 15** — n=1, 0% win, vol 미달 |
+| HYPO-016-OFI | OFIMomentum | **Round 15** — n=37, win 24%, -$3.92 사전 trigger |
+| HYPO-017-CASCADE | BTCCascade | **Round 15** — n=0, 60분 trigger 0 |
 
 ## ⚠️ Watch List
 

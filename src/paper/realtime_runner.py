@@ -64,7 +64,9 @@ MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (time
 # Fix 1 (Codex Round 4): supervisor restart delay (patchable in tests)
 _SUPERVISOR_RESTART_DELAY_S: float = 5.0
 
-# Realtime active HYPOs — 모든 viable ticker
+# Realtime active HYPOs — Round 15: tick-driven scalp 비활성, 1d trend 강화
+# Deprecated tick strategies: HYPO-010/013/014/016/017 — Jin 판단 2026-05-04
+# Remaining: HYPO-007-RT (RSI15m cron-style) + HYPO-008-RT (VolumeBurst 유일 양수 EV)
 REALTIME_HYPOS = [
     {
         "hypo_id": "HYPO-007-RT",
@@ -84,75 +86,24 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.05,
     },
+    # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-009 BreakoutMomentum — DEPRECATED Round 9 (Codex 92% 합의 2026-05-04)
-    # n=16, win 44%, TP 7 / SL 9, -$2.47 total. EV -1.33%/trade (paper fee 0.0014 — was 0.014 typo).
-    # TP<SL asymmetry: structural negative EV — unfixable by parameter tuning.
-    # Strategy file (breakout_momentum.py) preserved for learning archive.
-    # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가
-    # Round 14: target_size_usd 200 (max_position_pct 0.04 × $5000 = $200 cap — intent 정합).
-    #   Round 13 300 override는 silent cap bug — 실제 executed size는 $200이었음.
-    #   TRUMP-USDT 제거: 0.42% price range < SL×2=0.70% — 구조적 SL 도달 부적합.
-    {
-        "hypo_id": "HYPO-010-TICK",
-        "strategy_cls": TickMomentum,
-        "params": {"target_size_usd": 200.0},
-        "primary_tf": "tick",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
-                    "ORDI-USDT", "ADA-USDT", "XRP-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
-    },
-    # HYPO-011 OrderBook Imbalance — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
-    # n=336, TP 0회, signal_exit 99.7%, -$77.93 lifetime. 전략 파일 archive 보존.
-    # HYPO-012 Trade Flow — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
-    # n=450, TP 9.8%, EV -0.22%/trade, -$151.77 lifetime. 전략 파일 archive 보존.
-    # HYPO-013 MTA Confluence (Phase 2g Round 6 — threshold 완화, Codex 78% 합의 B 완전형)
-    {
-        "hypo_id": "HYPO-013-MTA",
-        "strategy_cls": MTAConfluence,
-        "params": {"target_size_usd": 100.0, "rsi_soft_threshold": 52.0, "min_score": 2},
-        "primary_tf": "mta",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "ORDI-USDT", "SUI-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
-    # HYPO-014 Binance Lead Signal (Phase 2g Round 3 — cross-exchange leading)
-    {
-        "hypo_id": "HYPO-014-BLEAD",
-        "strategy_cls": BinanceLeadSignal,
-        "params": {"target_size_usd": 100.0},
-        "primary_tf": "cross",
-        # Binance-OKX 매칭되는 ticker만 (BTC/ETH/SOL/DOGE — Binance major pair)
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
-    # HYPO-016 OFI Momentum (Phase 2g Round 11 — Codex 72% 합의)
-    # HYPO-012 TradeFlow 실패 후속: count ratio → signed volume + vwap confirmation
-    # OFI = Chordia et al. 2021 order flow momentum alpha
-    {
-        "hypo_id": "HYPO-016-OFI",
-        "strategy_cls": OFIMomentum,
-        "params": {"target_size_usd": 100.0},
-        "primary_tf": "ofi",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "ORDI-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
-    # HYPO-017 BTC-Led Alt Cascade (Phase 2g Round 11 — Codex Round 11 + INSIGHT-027 forensic)
-    # HYPO-010 orthogonality: 11.1% raw overlap, causal cascade ~0% → orthogonal
-    # BTCCascade: BTC 1min +0.30% AND ETH +0.10% → alt follow lag entry
-    # alt_24h < +0.50% guard: HYPO-010 territory exclusion (orthogonality hard guard)
-    {
-        "hypo_id": "HYPO-017-CASCADE",
-        "strategy_cls": BTCCascade,
-        "params": {"target_size_usd": 100.0},
-        "primary_tf": "cascade",
-        # Alt 5종 — BTC/ETH는 cascade signal source (not traded)
-        "tickers": ["DOGE-USDT", "SOL-USDT", "ORDI-USDT", "PEPE-USDT", "TRUMP-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
+    # n=16, win 44%, TP 7 / SL 9, -$2.47. EV -1.33%/trade. TP<SL asymmetry unfixable.
+    # HYPO-010 TickMomentum — DEPRECATED Round 15 (Jin 판단 2026-05-04)
+    # n=95, win 43%, -$14.98. 변질 진행 — tick-driven scalp alpha deterioration confirmed.
+    # Round 14 수정 (size $200, TRUMP 제거, regime cluster guard) 후에도 EV 음수 지속.
+    # HYPO-011 OrderBookImbalance — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
+    # n=336, TP 0회, signal_exit 99.7%, -$77.93 lifetime.
+    # HYPO-012 TradeFlow — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
+    # n=450, TP 9.8%, EV -0.22%/trade, -$151.77 lifetime.
+    # HYPO-013 MTAConfluence — DEPRECATED Round 15 (Jin 판단 2026-05-04)
+    # n=1, 100% win, +$0.46 — sample 부족, 빈도 0. 60분 실측에서 1 trade 기록.
+    # HYPO-014 BinanceLeadSignal — DEPRECATED Round 15 (Jin 판단 2026-05-04)
+    # n=1, 0% win, -$0.20 — vol threshold 미달 지속, cross-exchange lead 미확인.
+    # HYPO-016 OFIMomentum — DEPRECATED Round 15 (Jin 판단 2026-05-04)
+    # n=37, win 24%, -$3.92 — 사전 trigger (사후 momentum 추종 실패). Round 13 n=10 TP=0 조건 달성.
+    # HYPO-017 BTCCascade — DEPRECATED Round 15 (Jin 판단 2026-05-04)
+    # n=0, 60분 trigger 0 — BTC 1min +0.30% + ETH +0.10% 동시 조건 빈도 부족.
 ]
 
 

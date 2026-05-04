@@ -1,6 +1,10 @@
 """Paper cron — daily multi-HYPO multi-ticker runner (shell P6).
 
-Daily cycle: 모든 active HYPOTHESIS의 모든 ticker 1 cycle 실행.
+Daily cycle: PROMOTED (Promotion Gate passed) HYPOTHESIS 실행.
+ADR-010: BACKTEST → PAPER → Promotion Gate → cron.
+
+This module = production-promoted hypos ONLY.
+Paper-stage hypos → src/paper/daily_paper_runner.py.
 
 Usage:
     python -m src.paper.cron                       # all active hypos
@@ -28,37 +32,58 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-# ─────── Active HYPOTHESES ───────
-# Polaris 운영 가설 — vault/60_alpha/active/ 정합.
+# ─────── Active HYPOTHESES (Promotion Gate PASSED) ───────
+# ADR-010 lifecycle: BACKTEST → PAPER → Promotion Gate → HERE (cron).
+# Only hypotheses that completed paper validation enter this list.
+# Paper-stage hypotheses → src/paper/daily_paper_runner.py (DAILY_PAPER_HYPOS).
+#
+# Round 15 (Jin 판단 2026-05-04): 1d trend portfolio 강화.
+#   - HYPO-003-SMA50-200: 8 ticker (BTC/ETH/SOL/DOGE/ADA/XRP/ORDI/SUI)
+#   - HYPO-004-DONCH-40-15: Donchian 40/15 (BTC+ETH — conservative long-period)
+#   - HYPO-004-DONCH-20-10: Donchian 20/10 (BTC+ETH+SOL — medium-period swing)
+# Codex Round 15 ADR-010 fix (2026-05-04): HYPO-020 removed from here.
+#   HYPO-020 paper stage not completed. Moved to daily_paper_runner.py.
+#   See src/paper/daily_paper_runner.py DAILY_PAPER_HYPOS for HYPO-020 status.
 # 새 HYPO 추가 시 이 list 갱신 (또는 vault scanner 자동화 추후).
 ACTIVE_HYPOS = [
+    # HYPO-003 SMA crossover 1D — 8 ticker basket (Round 15 확대)
+    # backtest validated: SMA 50/200 1D SPOT long-only, fee 0.0014, Sharpe viable
     {
-        "hypo_id": "HYPO-003",
+        "hypo_id": "HYPO-003-SMA50-200",
         "strategy": SMACrossover,
         "strategy_params": {"fast": 50, "slow": 200},
+        "tickers": [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT",
+            "ADA-USDT", "XRP-USDT", "ORDI-USDT", "SUI-USDT",
+        ],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
+    # HYPO-004 Donchian breakout variant 1 — conservative long-period (Round 15)
+    # entry=40 (2-month high), exit=15 (3-week low) — BTC+ETH only (high liquidity)
+    {
+        "hypo_id": "HYPO-004-DONCH-40-15",
+        "strategy": DonchianBreakout,
+        "strategy_params": {"entry_period": 40, "exit_period": 15},
+        "tickers": ["BTC-USDT", "ETH-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
+    # HYPO-004 Donchian breakout variant 2 — medium-period swing (Round 15)
+    # entry=20 (1-month high), exit=10 (2-week low) — BTC+ETH+SOL (medium basket)
+    {
+        "hypo_id": "HYPO-004-DONCH-20-10",
+        "strategy": DonchianBreakout,
+        "strategy_params": {"entry_period": 20, "exit_period": 10},
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "bar": "1D",
         "starting_usd": 5000.0,
         "max_position_pct": 0.02,
     },
-    {
-        "hypo_id": "HYPO-004-BTC",
-        "strategy": DonchianBreakout,
-        "strategy_params": {"entry_period": 40, "exit_period": 15},
-        "tickers": ["BTC-USDT"],
-        "bar": "1D",
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
-    {
-        "hypo_id": "HYPO-004-ETH",
-        "strategy": DonchianBreakout,
-        "strategy_params": {"entry_period": 20, "exit_period": 10},
-        "tickers": ["ETH-USDT"],
-        "bar": "1D",
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.02,
-    },
+    # HYPO-020 NOTE: moved to daily_paper_runner.py DAILY_PAPER_HYPOS (ADR-010 fix).
+    # Paper validation in progress since 2026-05-04. Promotion Gate pending.
 ]
 
 

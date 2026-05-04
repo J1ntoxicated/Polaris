@@ -47,22 +47,38 @@ from src.paper.state import PaperBalance, Position
 from src.risk.dynamic_sizing import SizingInputs, compute_size
 from src.risk.performance_tracker import compute_recent_stats
 from src.risk.regime_detector import detect_regime
+from src.risk.auto_deprecate import check_deprecate
 from src.strategies.binance_lead import BinanceLeadSignal
 from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.btc_cascade import BTCCascade
+from src.strategies.cross_exchange_gap import CrossExchangeGap
+from src.strategies.funding_rate_filter import FundingRateFilter
 from src.strategies.liquidation_cascade import LiquidationCascade
 from src.strategies.mta_confluence import MTAConfluence
 from src.strategies.ofi_momentum import OFIMomentum
 from src.strategies.orderbook_imbalance import OrderBookImbalance
 from src.strategies.rsi_15m_intraday import RSI15mIntraday
+from src.strategies.tick_burst import TickBurst
 from src.strategies.tick_momentum import TickMomentum
 from src.strategies.trade_flow import TradeFlow
 from src.strategies.volume_burst import VolumeBurst
+from src.strategies.volume_delta_divergence import VolumeDeltaDivergence
+from src.strategies.whale_wall import WhaleWall
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 LIVE_FEE_ROUND_TRIP = 0.0014
+# Auto-deprecate check interval (seconds) — checked per-HYPO on every tick for the
+# fast_fail/loss_cap triggers; frequency trigger checked at DEPRECATE_CHECK_INTERVAL_S cadence
+DEPRECATE_CHECK_INTERVAL_S: float = 300.0  # 5 min interval for frequency check
+_deprecate_last_check_s: float = 0.0
+# Track HYPO started_at timestamps (ms) — populated on first trade or runner start
+_hypo_started_at_ms: dict[str, int] = {}
+# Funding rate cache — updated by funding rate poll task
+_funding_rate_cache: dict[str, float | None] = {}  # symbol -> funding_8h rate
+_FUNDING_POLL_INTERVAL_S: float = 60.0
+_funding_last_poll_s: float = 0.0
 INDICATOR_REFRESH_SEC = 60  # candle indicator 매 60초 refresh
 TP_PCT_INTRADAY = 0.006
 SL_PCT_INTRADAY = 0.0035
@@ -111,6 +127,70 @@ REALTIME_HYPOS = [
         # Binance perp symbols for liquidation WS (derived at runtime)
         "_binance_perp_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
     },
+    # ── Phase 2L: 5 신규 HYPOs (fail-fast paradigm, 2026-05-04) ──────────────
+    {
+        # HYPO-024: Cross-Exchange Price Gap
+        # Binance price directly leads OKX by 0.1-0.5s via raw price gap (not flow ratio).
+        # Source: binance_ws @bookTicker (get_book_ticker) already active.
+        "hypo_id": "HYPO-024",
+        "strategy_cls": CrossExchangeGap,
+        "params": {},
+        "primary_tf": "gap",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-025: Volume Delta Divergence
+        # Cumulative delta (buy_vol - sell_vol) diverges from price → mean-revert.
+        # Source: OKX trades WS (get_recent_trades) already active.
+        "hypo_id": "HYPO-025",
+        "strategy_cls": VolumeDeltaDivergence,
+        "params": {},
+        "primary_tf": "delta",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-026: Whale Wall Detection
+        # OKX books5 large bid wall ($100k+) = support → mean-revert long.
+        # Source: OKX books5 WS (compute_book_imbalance + get_book) already active.
+        "hypo_id": "HYPO-026",
+        "strategy_cls": WhaleWall,
+        "params": {},
+        "primary_tf": "wall",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-027: Funding Rate Filter (HYPO-015 부활, size modifier role)
+        # Binance Futures funding_8h <= -0.05% → boost; >= +0.10% → block.
+        # Runs as independent HYPO here: funding_boost = ENTER_LONG signal on squeeze.
+        # Shell fetches funding rate via REST every 60s (see _poll_funding_rate).
+        "hypo_id": "HYPO-027",
+        "strategy_cls": FundingRateFilter,
+        "params": {},
+        "primary_tf": "funding",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "_binance_futures_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-028: Tick Burst Follow
+        # 5s price spike +0.3% → same-direction entry, 60s hold.
+        # Fee 0.28% < 0.30% burst → marginal positive EV if continuation follows.
+        # Source: OKX tickers WS (5s price history maintained in _price_history_5s).
+        "hypo_id": "HYPO-028",
+        "strategy_cls": TickBurst,
+        "params": {},
+        "primary_tf": "burst",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-009 BreakoutMomentum — DEPRECATED Round 9 (Codex 92% 합의 2026-05-04)
     # n=16, win 44%, TP 7 / SL 9, -$2.47. EV -1.33%/trade. TP<SL asymmetry unfixable.
@@ -132,11 +212,11 @@ REALTIME_HYPOS = [
 ]
 
 
-# Binance ticker subset for cross-exchange — derived from REALTIME_HYPOS primary_tf="cross"
+# Binance ticker subset for cross-exchange — derived from REALTIME_HYPOS primary_tf="cross" or "gap"
 def _binance_subscribe_tickers() -> list[str]:
     syms = set()
     for h in REALTIME_HYPOS:
-        if h.get("primary_tf") == "cross":
+        if h.get("primary_tf") in ("cross", "gap"):
             syms.update(h["tickers"])
     return sorted(syms)
 
@@ -171,6 +251,10 @@ _last_close_ms_ticker: dict[str, int] = {}
 # (Codex Round 12 F1: maxlen 200 → 600; spike 10tps × 60s = 600 entries, deque
 #  auto-truncate was triggering before ts-trim → stale price_1min_ago)
 _price_history_60s: dict[str, deque] = {}
+
+# HYPO-028 Tick Burst: 5s rolling price history per ticker
+# deque[(ts_ms, price)] — maxlen 150: 30Hz × 5s = 150 max entries
+_price_history_5s: dict[str, deque] = {}
 
 # HYPO-010 regime cluster guard (Round 14 — forensic INSIGHT-029).
 # 5분 sliding window: 3+ 다른 ticker에서 SL hit → 10분 pause (regime change 자동 감지).
@@ -223,6 +307,40 @@ def _update_price_history(ticker: str, ts_ms: int, price: float) -> None:
     # Trim entries older than 65s (preserve a 60s window with 5s margin)
     while len(buf) > 1 and ts_ms - buf[0][0] > 65_000:
         buf.popleft()
+
+
+def _update_price_history_5s(ticker: str, ts_ms: int, price: float) -> None:
+    """매 tick 호출 — 5s rolling window 유지 (HYPO-028 tick burst 계산용).
+
+    Args:
+        ticker: e.g. "BTC-USDT".
+        ts_ms: tick timestamp in milliseconds.
+        price: current price.
+
+    Shell function — modifies module-level state.
+    """
+    buf = _price_history_5s.setdefault(ticker, deque(maxlen=150))
+    buf.append((ts_ms, price))
+    # Trim entries older than 6s (5s window + 1s margin)
+    while len(buf) > 1 and ts_ms - buf[0][0] > 6_000:
+        buf.popleft()
+
+
+def _get_price_5s_ago(ticker: str, ts_ms: int) -> Optional[float]:
+    """Get price ~5s ago for tick burst calculation.
+
+    Returns oldest price in 5s window if window has >= 3s of data, else None.
+
+    Pure logic — reads module-level _price_history_5s (shell boundary).
+    """
+    buf = _price_history_5s.get(ticker)
+    if not buf or len(buf) < 2:
+        return None
+    oldest_ts, oldest_price = buf[0]
+    if ts_ms - oldest_ts < 3_000:
+        # Less than 3s of data — not enough
+        return None
+    return oldest_price
 
 
 def _get_cascade_state(ticker: str, current_price: float, current_ts_ms: int) -> Optional[dict]:
@@ -429,6 +547,79 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             logger.info(
                 f"[LIQ-CASCADE] {ticker} ENTRY SIGNAL pressure={pressure_str} {signal.reason}"
             )
+    elif primary == "gap" and hasattr(strategy, "evaluate_cross"):
+        # HYPO-024: Cross-Exchange Price Gap — Binance @bookTicker best bid vs OKX last
+        if full_tick is None:
+            return
+        binance_sym = ticker.replace("-", "")  # "BTC-USDT" → "BTCUSDT"
+        from src.data.binance_ws import get_book_ticker
+        b_book = get_book_ticker(binance_sym)
+        if b_book is None:
+            if not hasattr(_eval_and_act, "_gap_nofeed_last"):
+                _eval_and_act._gap_nofeed_last = {}
+            last_warn = _eval_and_act._gap_nofeed_last.get(ticker, 0)
+            if tick_ts_ms - last_warn > 300_000:  # 5분
+                logger.warning(f"[GAP-NOFEED] {ticker} Binance bookTicker 미공급")
+                _eval_and_act._gap_nofeed_last[ticker] = tick_ts_ms
+            return
+        binance_price_state = {
+            "price": b_book.get("bid", 0.0),  # best bid = Binance SPOT best buy price
+            "ts_ms": b_book.get("ts_ms", 0),
+            "now_ms": int(time.time() * 1000),
+        }
+        signal = strategy.evaluate_cross(full_tick, binance_price_state)
+    elif primary == "delta" and hasattr(strategy, "evaluate_delta"):
+        # HYPO-025: Volume Delta Divergence — OKX trades WS cumulative delta
+        if full_tick is None:
+            return
+        trades = get_recent_trades(ticker, 200)
+        signal = strategy.evaluate_delta(full_tick, trades)
+    elif primary == "wall" and hasattr(strategy, "evaluate_book"):
+        # HYPO-026: Whale Wall — OKX books5 large bid detection
+        if full_tick is None:
+            return
+        from src.data.okx_ws import get_book
+        book = get_book(ticker)
+        if book is None:
+            return
+        signal = strategy.evaluate_book(full_tick, book)
+    elif primary == "funding" and hasattr(strategy, "compute_multiplier"):
+        # HYPO-027: Funding Rate Filter — standalone ENTER signal on squeeze
+        # Funding rate fetched by shell poll; pure compute_multiplier determines action
+        binance_sym = ticker.replace("-", "")
+        funding = _funding_rate_cache.get(binance_sym)
+        multiplier = strategy.compute_multiplier(funding)
+        ts_val = int((full_tick or {}).get("ts", 0) or 0) or 1
+        if multiplier == 0.0:
+            # Longs blocked
+            signal = Signal(
+                timestamp_ms=ts_val,
+                action=SignalAction.HOLD,
+                confidence=0.0,
+                reason=f"funding_block rate={funding}",
+            )
+        elif multiplier > 1.0:
+            # Short squeeze → enter
+            signal = Signal(
+                timestamp_ms=ts_val,
+                action=SignalAction.ENTER_LONG,
+                confidence=0.70,
+                target_size_usd=200.0,
+                reason=f"funding_squeeze rate={funding} boost=x{multiplier:.2f}",
+            )
+        else:
+            signal = Signal(
+                timestamp_ms=ts_val,
+                action=SignalAction.HOLD,
+                confidence=0.0,
+                reason=f"funding_neutral rate={funding}",
+            )
+    elif primary == "burst" and hasattr(strategy, "evaluate_tick"):
+        # HYPO-028: Tick Burst — 5s price spike follow
+        if full_tick is None:
+            return
+        price_5s_ago = _get_price_5s_ago(ticker, tick_ts_ms)
+        signal = strategy.evaluate_tick(full_tick, price_5s_ago)
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:
@@ -537,6 +728,54 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
 # ───── Tick callback ─────
 
 
+def _get_all_closed_for_hypo(hypo: dict) -> list:
+    """Collect all closed positions across all tickers for a HYPO.
+
+    Shell function — calls load_state for each ticker.
+    """
+    strategy = hypo["strategy_cls"](**hypo["params"])
+    sname = strategy.name
+    closed: list = []
+    for ticker in hypo["tickers"]:
+        try:
+            bal = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
+            closed.extend(list(bal.closed_positions))
+        except Exception:
+            pass
+    return closed
+
+
+def _check_hypo_deprecate_inline(hypo: dict, tick_ts_ms: int) -> None:
+    """Inline fast_fail + loss_cap check after each eval. Removes from REALTIME_HYPOS if triggered.
+
+    Shell function — mutates REALTIME_HYPOS list.
+    """
+    hid = hypo["hypo_id"]
+    started = _hypo_started_at_ms.get(hid, tick_ts_ms)
+    closed = _get_all_closed_for_hypo(hypo)
+    reason = check_deprecate(hid, closed, started, now_ms=tick_ts_ms)
+    if reason is not None:
+        if hypo in REALTIME_HYPOS:
+            REALTIME_HYPOS.remove(hypo)
+            logger.warning(f"[DEPRECATE] {hid} removed — {reason}")
+
+
+def _run_auto_deprecate_check(tick_ts_ms: int) -> None:
+    """5min cadence: frequency trigger check across all active HYPOs.
+
+    Shell function — mutates REALTIME_HYPOS list.
+    """
+    for hypo in list(REALTIME_HYPOS):
+        hid = hypo["hypo_id"]
+        started = _hypo_started_at_ms.get(hid, tick_ts_ms)
+        closed = _get_all_closed_for_hypo(hypo)
+        reason = check_deprecate(hid, closed, started, now_ms=tick_ts_ms)
+        if reason is not None:
+            if hypo in REALTIME_HYPOS:
+                REALTIME_HYPOS.remove(hypo)
+                logger.warning(f"[DEPRECATE] {hid} removed — {reason}")
+
+
 def make_tick_handler() -> Callable[[str, dict], None]:
     """Closure — tick 받으면 모든 매칭 HYPO 평가."""
     def handler(inst_id: str, tick: dict) -> None:
@@ -545,14 +784,25 @@ def make_tick_handler() -> Callable[[str, dict], None]:
         if tick_price <= 0:
             return
         # HYPO-017: 1min price history 업데이트 — BTC/ETH cascade source tickers
-        # 모든 ticker tick에 대해 호출 (BTC-USDT, ETH-USDT 포함)
+        # HYPO-028: 5s price history 업데이트 — burst detection
+        # 모든 ticker tick에 대해 호출
         if tick_ts > 0:
             _update_price_history(inst_id, tick_ts, tick_price)
-        for hypo in REALTIME_HYPOS:
+            _update_price_history_5s(inst_id, tick_ts, tick_price)
+        # Auto-deprecate: frequency trigger check every 5min (fast_fail/loss_cap inline)
+        global _deprecate_last_check_s
+        now_s = time.time()
+        if now_s - _deprecate_last_check_s >= DEPRECATE_CHECK_INTERVAL_S:
+            _deprecate_last_check_s = now_s
+            _run_auto_deprecate_check(tick_ts)
+
+        for hypo in list(REALTIME_HYPOS):
             if inst_id not in hypo["tickers"]:
                 continue
             try:
                 _eval_and_act(hypo, inst_id, tick_price, tick_ts, full_tick=tick)
+                # Inline fast_fail + loss_cap check after each eval (real-time cut)
+                _check_hypo_deprecate_inline(hypo, tick_ts)
             except Exception as e:
                 logger.error(f"eval err {hypo['hypo_id']} {inst_id}: {e}")
     return handler
@@ -616,6 +866,11 @@ async def _run_okx_and_binance(
 
 
 def main() -> None:
+    # Initialize started_at timestamps for all HYPOs (deprecate frequency trigger reference)
+    now_ms = int(time.time() * 1000)
+    for h in REALTIME_HYPOS:
+        _hypo_started_at_ms.setdefault(h["hypo_id"], now_ms)
+
     all_tickers = set()
     for h in REALTIME_HYPOS:
         all_tickers.update(h["tickers"])
@@ -624,6 +879,7 @@ def main() -> None:
     binance_liq_symbols = _binance_liq_subscribe_symbols()
     logger.info(f"=== Polaris Realtime Runner — {_dt.datetime.now().isoformat(timespec='seconds')} ===")
     logger.info(f"OKX subscribe {len(tickers)} tickers: {tickers}")
+    logger.info(f"Active HYPOs: {[h['hypo_id'] for h in REALTIME_HYPOS]}")
     if binance_tickers:
         logger.info(f"Binance SPOT subscribe {len(binance_tickers)} tickers: {binance_tickers}")
     if binance_liq_symbols:

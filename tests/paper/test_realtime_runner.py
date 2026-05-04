@@ -921,9 +921,10 @@ def test_regime_cluster_5min_window_expiry():
 
 
 def test_realtime_hypos_007_008_023():
-    """Phase 2k: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT + HYPO-023 포함.
+    """Phase 2L: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT + HYPO-023 + HYPO-024~028 포함.
 
-    HYPO-023 (LiquidationCascade) 추가 — Binance Perp forceOrder mean-revert.
+    Phase 2k: HYPO-023 (LiquidationCascade) 추가.
+    Phase 2L: HYPO-024~028 일괄 추가 (fail-fast paradigm).
 
     Deprecated:
     - HYPO-010-TICK: n=95, win 43%, -$14.98 (변질 진행)
@@ -934,10 +935,17 @@ def test_realtime_hypos_007_008_023():
     """
     active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
 
-    # 유지 — 반드시 존재
+    # 유지 — 반드시 존재 (이전 Phase)
     assert "HYPO-007-RT" in active_ids, "HYPO-007-RT (RSI15m) must remain active"
     assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
     assert "HYPO-023" in active_ids, "HYPO-023 (LiquidationCascade) must be active — Phase 2k"
+
+    # Phase 2L 신규 — 반드시 존재
+    assert "HYPO-024" in active_ids, "HYPO-024 (CrossExchangeGap) must be active — Phase 2L"
+    assert "HYPO-025" in active_ids, "HYPO-025 (VolumeDeltaDivergence) must be active — Phase 2L"
+    assert "HYPO-026" in active_ids, "HYPO-026 (WhaleWall) must be active — Phase 2L"
+    assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
+    assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
     # Deprecated — 반드시 부재
     assert "HYPO-010-TICK" not in active_ids, (
@@ -956,8 +964,8 @@ def test_realtime_hypos_007_008_023():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # 정확히 3개 (007 + 008 + 023)
-    assert len(active_ids) == 3, (
-        f"REALTIME_HYPOS must contain exactly 3 active HYPOs (007+008+023), "
+    # 정확히 8개 (007 + 008 + 023 + 024 + 025 + 026 + 027 + 028)
+    assert len(active_ids) == 8, (
+        f"REALTIME_HYPOS must contain exactly 8 active HYPOs (007+008+023+024~028), "
         f"got {len(active_ids)}: {active_ids}"
     )

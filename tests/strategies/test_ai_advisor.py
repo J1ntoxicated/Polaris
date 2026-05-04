@@ -45,6 +45,8 @@ from src.strategies.ai_advisor import (
     ANTHROPIC_MODEL,
     DEFAULT_MIN_CONFIDENCE,
     OPENAI_MODEL,
+    _API_RETRY_MAX,
+    _API_RETRY_BACKOFF_S,
 )
 
 
@@ -580,3 +582,144 @@ class TestDecisionCounter:
         """_ai_decision_counts module-level dict has exactly long/hold/exit keys."""
         from src.strategies.ai_advisor import _ai_decision_counts
         assert set(_ai_decision_counts.keys()) == {"long", "hold", "exit"}
+
+
+# ── Retry logic tests (INSIGHT-035 fix) ──────────────────────────────────────
+
+class TestRetryLogic:
+    """INSIGHT-035: HYPO-AI-001 RuntimeError 무한 반복 방지 — retry 3x + backoff."""
+
+    def _make_failing_advisor(self, n_failures: int, success_response: str) -> tuple[AIAdvisor, MagicMock]:
+        """Build advisor whose API client fails n_failures times then succeeds."""
+        advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.65, api_key="sk-test")
+        advisor.provider = "anthropic"
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=success_response)]
+        mock_msg.usage = MagicMock(input_tokens=500, output_tokens=50)
+        mock_client = MagicMock()
+        call_count = {"n": 0}
+        def side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= n_failures:
+                raise RuntimeError(f"transient error #{call_count['n']}")
+            return mock_msg
+        mock_client.messages.create.side_effect = side_effect
+        advisor._client = mock_client
+        return advisor, mock_client
+
+    def test_retry_constants_defined(self) -> None:
+        """_API_RETRY_MAX == 3, _API_RETRY_BACKOFF_S has 3 entries."""
+        assert _API_RETRY_MAX == 3
+        assert len(_API_RETRY_BACKOFF_S) == 3
+
+    def test_single_transient_failure_recovers(self) -> None:
+        """1 transient failure then success → ENTER_LONG (retry works)."""
+        advisor, mock_client = self._make_failing_advisor(
+            1, '{"action": "long", "confidence": 0.80, "reason": "recovered"}'
+        )
+        with patch("time.sleep"):  # skip actual sleep in tests
+            sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.ENTER_LONG
+        assert mock_client.messages.create.call_count == 2  # 1 fail + 1 success
+
+    def test_two_transient_failures_recovers(self) -> None:
+        """2 transient failures then success → ENTER_LONG (3 attempts total)."""
+        advisor, mock_client = self._make_failing_advisor(
+            2, '{"action": "long", "confidence": 0.75, "reason": "two_fails_ok"}'
+        )
+        with patch("time.sleep"):
+            sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.ENTER_LONG
+        assert mock_client.messages.create.call_count == 3
+
+    def test_three_failures_returns_hold(self) -> None:
+        """All 3 attempts fail → HOLD with api_error reason (no crash)."""
+        advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.65, api_key="sk-test")
+        advisor.provider = "anthropic"
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("persistent error")
+        advisor._client = mock_client
+        with patch("time.sleep"):
+            sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.HOLD
+        assert "api_error" in sig.reason
+        # 3 retry attempts made
+        assert mock_client.messages.create.call_count == _API_RETRY_MAX
+
+    def test_rate_limit_error_incurs_extra_backoff(self) -> None:
+        """Rate limit error substring triggers extra 5s backoff in sleep call."""
+        advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.65, api_key="sk-test")
+        advisor.provider = "anthropic"
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("rate_limit exceeded 429")
+        advisor._client = mock_client
+        sleep_calls = []
+        with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.HOLD
+        # At least one sleep with value > base backoff (rate limit adds +5s)
+        assert any(s > 5.0 for s in sleep_calls)
+
+    def test_no_sleep_on_credit_error_fallback(self) -> None:
+        """Anthropic credit error → immediate fallback to OpenAI, no sleep."""
+        with patch.dict(
+            "os.environ",
+            {"ANTHROPIC_API_KEY": "sk-ant-test", "OPENAI_API_KEY": "sk-oai-test", "AI_PROVIDER": ""},
+            clear=False,
+        ):
+            advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.65)
+            assert advisor.provider == "anthropic"
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = Exception("credit balance insufficient")
+        advisor._client = mock_anthropic
+
+        mock_openai = MagicMock()
+        mock_openai_resp = _make_openai_response(
+            '{"action": "hold", "confidence": 0.4, "reason": "fallback_no_sleep"}'
+        )
+        mock_openai.chat.completions.create.return_value = mock_openai_resp
+
+        sleep_calls = []
+        with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("src.strategies.ai_advisor.AIAdvisor._switch_to_openai_fallback") as mock_switch:
+                def _do_switch(self_ref=None):
+                    advisor.provider = "openai"
+                    advisor._client = mock_openai
+                    return True
+                mock_switch.side_effect = _do_switch
+                advisor.evaluate_ai(_make_market_state())
+        # Credit fallback should not sleep (immediate switch)
+        assert len(sleep_calls) == 0
+
+    def test_call_api_once_anthropic_success(self) -> None:
+        """_call_api_once: Anthropic success → returns text string."""
+        advisor = AIAdvisor(target_size_usd=200.0, api_key="sk-test")
+        advisor.provider = "anthropic"
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text='{"action": "hold", "confidence": 0.3, "reason": "ok"}')]
+        mock_msg.usage = MagicMock(input_tokens=500, output_tokens=50)
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        advisor._client = mock_client
+        result = advisor._call_api_once("test prompt")
+        assert isinstance(result, str)
+        assert "hold" in result
+
+    def test_call_api_once_raises_on_error(self) -> None:
+        """_call_api_once: raises exception (no swallowing)."""
+        advisor = AIAdvisor(target_size_usd=200.0, api_key="sk-test")
+        advisor.provider = "anthropic"
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("boom")
+        advisor._client = mock_client
+        with pytest.raises(RuntimeError, match="boom"):
+            advisor._call_api_once("prompt")
+
+    def test_unknown_provider_raises(self) -> None:
+        """_call_api_once: unknown provider → RuntimeError."""
+        advisor = AIAdvisor(target_size_usd=200.0, api_key="sk-test")
+        advisor.provider = "foobar"
+        advisor._client = MagicMock()  # prevent lazy-init from running
+        with pytest.raises(RuntimeError, match="Unknown provider"):
+            advisor._call_api_once("prompt")

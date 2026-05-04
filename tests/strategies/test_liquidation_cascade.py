@@ -66,7 +66,8 @@ def _pressure(
 
 class TestDefaultConstants:
     def test_min_total_usd(self) -> None:
-        assert DEFAULT_MIN_TOTAL_USD == pytest.approx(1_000_000.0)
+        # INSIGHT-035 fix #2: $100k → $30k (300s window + rare event diagnosis)
+        assert DEFAULT_MIN_TOTAL_USD == pytest.approx(30_000.0)
 
     def test_imbalance_threshold(self) -> None:
         """임계값 < 0 (short 청산 dominant = imbalance < threshold)."""
@@ -108,9 +109,9 @@ class TestEntryConditions:
         assert sig.action == SignalAction.HOLD
 
     def test_below_min_total_usd_holds(self) -> None:
-        """total_usd $800k < $1M threshold → HOLD."""
+        """total_usd $15k < $30k threshold → HOLD. (INSIGHT-035 #2: $100k → $30k threshold)."""
         strat = LiquidationCascade()
-        p = _pressure(total_usd=800_000.0, long_liq_usd=80_000.0, short_liq_usd=720_000.0)
+        p = _pressure(total_usd=15_000.0, long_liq_usd=1_500.0, short_liq_usd=13_500.0)
         tick = _tick(last=64_500.0)
         price_60s_ago = 65_500.0
         sig = strat.evaluate_cascade(tick, p, price_60s_ago=price_60s_ago)
@@ -145,9 +146,9 @@ class TestEntryConditions:
         assert sig.action == SignalAction.HOLD
 
     def test_exactly_at_total_threshold_enters(self) -> None:
-        """total_usd == $1M (경계) → ENTER_LONG."""
+        """total_usd == $30k (경계) → ENTER_LONG. (INSIGHT-035 #2: lowered from $100k → $30k)."""
         strat = LiquidationCascade()
-        p = _pressure(total_usd=1_000_000.0, long_liq_usd=100_000.0, short_liq_usd=900_000.0)
+        p = _pressure(total_usd=30_000.0, long_liq_usd=3_000.0, short_liq_usd=27_000.0)
         assert p["imbalance"] < -0.6  # -0.8 — dominant
         tick = _tick(last=64_500.0)
         price_60s_ago = 65_200.0  # 1.07% drop
@@ -171,9 +172,10 @@ class TestEntryConditions:
 
 class TestExitLogic:
     def test_pressure_recovered_exits(self) -> None:
-        """total_usd < $300k → pressure 완화 → EXIT."""
+        """total_usd $8k < $10k exit threshold → pressure 완화 → EXIT.
+        (INSIGHT-035 #2: exit $30k → $10k, scaled with $30k entry threshold)."""
         strat = LiquidationCascade()
-        p = _pressure(total_usd=200_000.0, long_liq_usd=20_000.0, short_liq_usd=180_000.0)
+        p = _pressure(total_usd=8_000.0, long_liq_usd=800.0, short_liq_usd=7_200.0)
         tick = _tick(last=64_500.0)
         sig = strat.evaluate_cascade(tick, p, price_60s_ago=64_800.0)
         assert sig.action == SignalAction.EXIT
@@ -212,9 +214,9 @@ class TestEvaluateStub:
 
 class TestCustomParams:
     def test_custom_min_total_usd(self) -> None:
-        """낮은 임계값: $500k → 더 민감한 entry."""
-        strat = LiquidationCascade(min_total_usd=500_000.0)
-        p = _pressure(total_usd=700_000.0, long_liq_usd=70_000.0, short_liq_usd=630_000.0)
+        """낮은 임계값: $50k → 더 민감한 entry."""
+        strat = LiquidationCascade(min_total_usd=50_000.0)
+        p = _pressure(total_usd=70_000.0, long_liq_usd=7_000.0, short_liq_usd=63_000.0)
         tick = _tick(last=64_500.0)
         sig = strat.evaluate_cascade(tick, p, price_60s_ago=65_200.0)
         assert sig.action == SignalAction.ENTER_LONG

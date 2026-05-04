@@ -34,6 +34,12 @@ import os
 import time
 from typing import Optional
 
+# HYPO-AI-001 retry config (INSIGHT-035 fix — no retry = RuntimeError loops)
+_API_RETRY_MAX = 3
+_API_RETRY_BACKOFF_S = [1.0, 2.0, 5.0]  # seconds per attempt (jitter-free for testability)
+# HTTP status codes / substrings that indicate rate limiting (need longer backoff)
+_RATE_LIMIT_SUBSTRINGS = ("rate_limit", "rate limit", "429", "too many")
+
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
@@ -421,9 +427,17 @@ class AIAdvisor(Strategy):
         return signal
 
     def _call_api(self, prompt: str) -> str:
-        """Call current provider API and return raw response text. Shell — I/O.
+        """Call current provider API with retry (max 3) + backoff. Shell — I/O.
 
-        On Anthropic credit/balance error, auto-switches to OpenAI and retries once.
+        INSIGHT-035 fix: original had no retry — transient errors caused infinite
+        HOLD loops in the runner (evaluate_ai caught exception → HOLD → next tick
+        immediately re-evaluates past rate-limit → same exception → repeat).
+
+        Retry policy:
+          - Attempt 1-3: exponential-ish backoff (1s, 2s, 5s)
+          - Rate-limit errors: extra 5s added to backoff
+          - Credit/balance error: auto-switch to OpenAI, no sleep, retry from attempt 0
+          - All 3 attempts exhausted: raise last exception (caller returns HOLD)
 
         Args:
             prompt: Formatted prompt string.
@@ -432,29 +446,65 @@ class AIAdvisor(Strategy):
             Raw text response from API.
 
         Raises:
-            Exception: Propagated if both providers fail or fallback unavailable.
+            Exception: last exception if all retries fail.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_API_RETRY_MAX):
+            try:
+                return self._call_api_once(prompt)
+            except Exception as e:
+                last_exc = e
+                err_lower = str(e).lower()
+                # Credit exhaustion → switch to OpenAI immediately (no sleep, reset attempt)
+                is_credit_err = any(s in err_lower for s in _CREDIT_ERROR_SUBSTRINGS)
+                if is_credit_err and self._switch_to_openai_fallback():
+                    logger.warning(f"[AI-ADVISOR] Anthropic credit error → OpenAI fallback (attempt {attempt+1})")
+                    # Restart retry loop with new provider (at most once — provider now openai)
+                    try:
+                        return self._call_api_once(prompt)
+                    except Exception as e2:
+                        last_exc = e2
+                        break
+                # Rate limit → longer backoff
+                is_rate_limit = any(s in err_lower for s in _RATE_LIMIT_SUBSTRINGS)
+                delay = _API_RETRY_BACKOFF_S[min(attempt, len(_API_RETRY_BACKOFF_S) - 1)]
+                if is_rate_limit:
+                    delay += 5.0
+                if attempt < _API_RETRY_MAX - 1:
+                    logger.warning(
+                        f"[AI-ADVISOR] API error attempt {attempt+1}/{_API_RETRY_MAX}: "
+                        f"{type(e).__name__}:{e} — retry in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
+    def _call_api_once(self, prompt: str) -> str:
+        """Single API call attempt — no retry. Shell — I/O.
+
+        On Anthropic credit error: raises immediately (caller handles fallback).
+
+        Args:
+            prompt: Formatted prompt string.
+
+        Returns:
+            Raw text response from API.
+
+        Raises:
+            Exception: provider API error (rate limit, network, etc.).
         """
         client = self._get_client()
 
         if self.provider == "anthropic":
-            try:
-                msg = client.messages.create(
-                    model=ANTHROPIC_MODEL,
-                    max_tokens=MAX_TOKENS,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                raw_text = msg.content[0].text if msg.content else ""
-                input_tokens = getattr(msg.usage, "input_tokens", 500) if hasattr(msg, "usage") else 500
-                output_tokens = getattr(msg.usage, "output_tokens", 50) if hasattr(msg, "usage") else 50
-                _track_call(input_tokens, output_tokens)
-                return raw_text
-            except Exception as e:
-                err_lower = str(e).lower()
-                is_credit_err = any(s in err_lower for s in _CREDIT_ERROR_SUBSTRINGS)
-                if is_credit_err and self._switch_to_openai_fallback():
-                    # Retry with OpenAI
-                    return self._call_api(prompt)
-                raise
+            msg = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=MAX_TOKENS,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_text = msg.content[0].text if msg.content else ""
+            input_tokens = getattr(msg.usage, "input_tokens", 500) if hasattr(msg, "usage") else 500
+            output_tokens = getattr(msg.usage, "output_tokens", 50) if hasattr(msg, "usage") else 50
+            _track_call(input_tokens, output_tokens)
+            return raw_text
 
         elif self.provider == "openai":
             resp = client.chat.completions.create(

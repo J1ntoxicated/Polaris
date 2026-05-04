@@ -4,7 +4,8 @@ HYPOTHESIS-023: Binance perp 대규모 청산 직후 mean-revert 포착.
 
 Logic (`evaluate_cascade(tick, liq_pressure, price_60s_ago)`):
   Short 청산 dominant (강제 매수 → 가격 spike → over-extension) + panic drop 신호:
-  1. liq_pressure.total_usd >= min_total_usd ($1M) — 충분한 cascade 규모
+  1. liq_pressure.total_usd >= min_total_usd ($30k) — 충분한 cascade 규모
+     (INSIGHT-035: $1M → $100k → $30k; rare event, 300s window 필요)
   2. liq_pressure.imbalance < imbalance_threshold (-0.6) — short 청산 dominant
      (imbalance = (long_liq - short_liq) / total; 음수 = short 청산 우세)
   3. price drop >= price_drop_threshold (0.4%) — panic 신호 (short 청산 후 over-extension)
@@ -16,7 +17,7 @@ Logic (`evaluate_cascade(tick, liq_pressure, price_60s_ago)`):
   - short 청산 dominant → 가격 spike 직후 over-extension → mean-revert 기회
 
 Exit:
-  - total_usd < exit_total_threshold ($300k) — pressure 완화 → EXIT
+  - total_usd < exit_total_threshold ($10k) — pressure 완화 → EXIT
   - 그 외 → HOLD (position은 runner의 TP/SL/max_hold가 처리)
 
 Edge 추정:
@@ -36,10 +37,14 @@ from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
 # Default thresholds
-DEFAULT_MIN_TOTAL_USD: float = 1_000_000.0      # $1M cascade threshold
+# INSIGHT-035 fix #1: $1M → $100k (25h / 612 events = 0 signals — too high for 60s window).
+# INSIGHT-035 fix #2: $100k → $30k + window 60s → 300s (300s window diagnosis: still 0 signals.
+#   Binance perp forceOrder rare event even for BTC/ETH on low-vol days.
+#   $30k threshold + 300s window captures small-to-medium cascades that were being missed.)
+DEFAULT_MIN_TOTAL_USD: float = 30_000.0         # $30k cascade threshold (was $100k, rare event fix)
 DEFAULT_IMBALANCE_THRESHOLD: float = -0.6       # short 청산 dominant (음수)
 DEFAULT_PRICE_DROP_THRESHOLD: float = 0.004     # 0.4% drop (panic signal)
-DEFAULT_EXIT_TOTAL_THRESHOLD: float = 300_000.0 # $300k — pressure 완화 EXIT
+DEFAULT_EXIT_TOTAL_THRESHOLD: float = 10_000.0  # $10k — pressure 완화 EXIT (scaled with $30k entry)
 DEFAULT_TARGET_SIZE_USD: float = 200.0
 
 

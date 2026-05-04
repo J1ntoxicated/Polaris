@@ -81,6 +81,7 @@ from src.strategies.tsmom import TSMOM
 from src.strategies.vpin_toxicity import VPINToxicity
 from src.strategies.whale_wall import WhaleWall
 from src.strategies.ai_advisor import AIAdvisor
+from src.strategies.grid_bot import GridBot
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -112,24 +113,34 @@ _SUPERVISOR_RESTART_DELAY_S: float = 5.0
 # Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023/024/027/028/032/033/034
 REALTIME_HYPOS = [
     {
+        # HYPO-007-RT: RSI 15m intraday — expanded to 15 tickers (INSIGHT-035 Phase 4)
+        # NFI standard 40-80 tickers; 15 → signal frequency ~1.7x vs original 6.
+        # Added: XRP, AVAX, LINK, MATIC, ATOM, NEAR, SOL, ORDI
         "hypo_id": "HYPO-007-RT",
         "strategy_cls": RSI15mIntraday,
         "params": {},
         "primary_tf": "15m",
-        "tickers": ["BTC-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ADA-USDT", "TRUMP-USDT"],
-        "starting_usd": 50000.0,  # Phase 2Q: 10x capital (50k) for 10x size exposure
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "scalp",  # Phase 2P: 15m intraday — TP 0.6%, SL 0.35%, max 4h
+        "tickers": [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
+            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
+            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
+        ],
+        "starting_usd": 50000.0,
+        "exit_profile": "scalp",  # TP 0.6%, SL 0.35%, max 4h
     },
     {
+        # HYPO-008-RT: Volume Burst 1H — expanded to 15 tickers (INSIGHT-035 Phase 4)
         "hypo_id": "HYPO-008-RT",
         "strategy_cls": VolumeBurst,
         "params": {},
         "primary_tf": "1H",
-        "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
-        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "swing",  # Phase 2P: 1H VolumeBurst → swing moves — TP 5%, SL 2%, max 7d
+        "tickers": [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
+            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
+            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
+        ],
+        "starting_usd": 50000.0,
+        "exit_profile": "swing",  # TP 5%, SL 2%, max 7d
     },
     {
         # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k 2026-05-04)
@@ -257,6 +268,25 @@ REALTIME_HYPOS = [
     #     "starting_usd": 50000.0,
     #     "exit_profile": "scalp",
     # }
+    # ── Phase 4: Grid Bot + expanded universe (INSIGHT-035, 2026-05-04) ─────────
+    {
+        # HYPO-040: Grid Bot — sideways market recurring PnL (BingX 287K users validated).
+        # ATR compression (<1%) + lower 30% of 24h range → 5-level grid BUY.
+        # SPOT-only: BUY at lower boundary, TP +0.8% per level, exit on range breakout.
+        # 15 tickers (same as HYPO-007/008 universe).
+        # primary_tf = "grid" → evaluate_grid(tick, atr_pct, high_24h, low_24h)
+        "hypo_id": "HYPO-040",
+        "strategy_cls": GridBot,
+        "params": {},
+        "primary_tf": "grid",
+        "tickers": [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
+            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
+            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
+        ],
+        "starting_usd": 50000.0,
+        "exit_profile": "scalp",  # TP 0.6% (grid default +0.8% handled per-level), max 4h
+    },
     # ── Phase 3: AI Advisor (Jin mandate — 원래 의도 부활, 2026-05-04) ────────────
     {
         # HYPO-AI-001: Claude AI Advisor — 실시간 multi-source 시장 분석 entry
@@ -690,7 +720,9 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         if full_tick is None:
             return
         binance_sym = ticker.replace("-", "")  # "BTC-USDT" → "BTCUSDT"
-        liq_pressure = compute_liquidation_pressure(binance_sym, lookback_ms=60_000)
+        # HYPO-023 diagnosis: 60s window too short for rare forceOrder events (0 signals in 25h).
+        # Expanded to 300s (5min) — captures ~5x more events on low-vol days.
+        liq_pressure = compute_liquidation_pressure(binance_sym, lookback_ms=300_000)
         # 60s price history via existing _price_history_60s (HYPO-017 reuse)
         buf = _price_history_60s.get(ticker)
         price_60s_ago = None
@@ -788,6 +820,45 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                 confidence=0.0,
                 reason=f"funding_neutral rate={funding}",
             )
+    elif primary == "grid" and hasattr(strategy, "evaluate_grid"):
+        # HYPO-040: Grid Bot — sideways ATR-compressed lower-boundary entry
+        if full_tick is None:
+            return
+        # ATR from 1H candles (last 14 — cached 60s)
+        candles_1h = _refresh_candles(ticker, "1H")
+        atr_pct: Optional[float] = None
+        if len(candles_1h) >= 14:
+            last_price_val = float(full_tick.get("last", 0) or 0)
+            if last_price_val > 0:
+                trs = []
+                for i in range(1, min(15, len(candles_1h))):
+                    c = candles_1h[-i]
+                    prev_c = candles_1h[-i - 1] if i < len(candles_1h) - 1 else c
+                    tr = max(
+                        c.high - c.low,
+                        abs(c.high - prev_c.close),
+                        abs(c.low - prev_c.close),
+                    )
+                    trs.append(tr)
+                atr_val = sum(trs) / len(trs) if trs else 0.0
+                atr_pct = atr_val / last_price_val
+        # 24h high/low directly from OKX tickers tick (high24h, low24h fields)
+        high_24h_val = float(full_tick.get("high24h", 0) or 0) or None
+        low_24h_val = float(full_tick.get("low24h", 0) or 0) or None
+        # is_active: any open position for this ticker × grid_bot
+        has_open_grid = any(
+            p.ticker == ticker
+            for p in load_state(ticker, strategy.name, starting_usd=hypo["starting_usd"]).open_positions
+        )
+        signal = strategy.evaluate_grid(full_tick, atr_pct, high_24h_val, low_24h_val, is_active=has_open_grid)
+        # HOLD reason logging (rate-limited 10min/ticker)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_grid_hold_last"):
+                _eval_and_act._grid_hold_last = {}
+            last_grid_log = _eval_and_act._grid_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_grid_log > 600_000:  # 10분
+                logger.info(f"[GRID-HOLD] {ticker} atr={atr_pct and f'{atr_pct*100:.2f}%' or 'N/A'} {signal.reason}")
+                _eval_and_act._grid_hold_last[ticker] = tick_ts_ms
     elif primary == "burst" and hasattr(strategy, "evaluate_tick"):
         # HYPO-028: Tick Burst — 5s price spike follow
         if full_tick is None:

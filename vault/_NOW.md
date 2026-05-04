@@ -15,14 +15,23 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — AI Advisor LONG bias fix: 747/747 pass)
+## 현재 상태 (2026-05-05 — HYPO-023 deep fix: 792/792 pass)
+
+**HYPO-023 final diagnosis (792/792 pass)**:
+- **확정 원인**: A (rare event). WS 구독 정상 + 60s/8sym 모두 forceOrder 0건 (low-vol day BTC $78k-$80k)
+- **Fix**: lookback 60s→**300s**, min_total **$100k→$30k**, exit_total **$30k→$10k**, `get_store_status()` + `[LIQ-STORE]` 5분 주기 진단 log
+- 5 신규 tests. deprecate 후보 아님 — 우선 extended window + lower threshold로 관측 계속
+
+**Phase 4 Forensic+Research — 4 핵심 fix (787/787 pass)**:
+- **HYPO-023 진단 v1**: $1M→**$100k** (60s window 실현 불가 임계값), exit $300k→$30k, WS raw log 20 events, noise filter $1000→$500
+- **HYPO-AI-001 retry**: max 3x + backoff 1/2/5s + rate_limit +5s + credit error OpenAI fallback. 무한 HOLD 루프 완전 차단.
+- **HYPO-040 GridBot NEW**: BingX 287K users 검증, ATR<1%+lower 30% range boundary, pure core `_compute_grid_signal`. 25 TDD tests.
+- **pair universe 6→15**: HYPO-007-RT/008-RT/040 동일 15 tickers (NFI 표준). 신호 빈도 ~1.7x.
+- Active HYPOs: **10개** (007+008+023+024+027+028+032+033+040+AI-001). **+35 신규 tests**.
 
 **AI Advisor LONG bias fix (88% → target 30-50%)**:
-- `DEFAULT_MIN_CONFIDENCE`: 0.65 → **0.75** (더 엄격한 LONG 게이트)
-- `_build_prompt`: neutral 재프레이밍 — "quantitative analyst for paper trading" + "Default to hold" + confidence > 0.75 명시
-- `_ai_decision_counts` module-level 카운터 + `_track_decision()` 함수 + 시간당 `[AI-STATS]` bias 분포 로그
-- `realtime_runner.py` HYPO-AI-001: `min_confidence` 0.65 → 0.75
-- 13 신규 테스트 TDD RED→GREEN. **747/747 tests pass**.
+- `DEFAULT_MIN_CONFIDENCE`: 0.72 (tuned: 0.75 → too strict → LONG 0.3%)
+- neutral prompt, `_ai_decision_counts`, HYPO-AI-001 params 동기화. 747/747 pass.
 
 **VPIN fix + cold_start default fix (698/698 pass)**:
 - HYPO-033 `exit_profile`: scalp→**liquidation** (Easley/LdP 2012 — informed flow 5-30min reversion)
@@ -161,19 +170,20 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🟢 운영 중 (HYPO 활성)
 
-### Realtime (tick-driven) — Phase 2M (10개)
+### Realtime (tick-driven) — Phase 4 (10개)
 
 | HYPO | Strategy | Status |
 |---|---|---|
-| HYPO-007-RT | RSI15m intraday | active — cron-style rare trigger |
-| HYPO-008-RT | VolumeBurst 1H | active — n=29 win 55% +$3.50 유일 양수 EV |
-| HYPO-023 | LiquidationCascade | active — Binance perp forceOrder → OKX SPOT |
+| HYPO-007-RT | RSI15m intraday | active — **15 tickers** (↑ from 6, INSIGHT-035) |
+| HYPO-008-RT | VolumeBurst 1H | active — **15 tickers** (↑ from 5) |
+| HYPO-023 | LiquidationCascade | active — **$100k threshold** (was $1M, 25h 0 signals fixed) |
 | HYPO-024 | CrossExchangeGap | active — Binance bookTicker lead |
 | HYPO-027 | FundingRateFilter | active — Binance funding squeeze |
 | HYPO-028 | TickBurst | active — 5s price spike |
-| HYPO-032 | TSMOM | **Phase 2M NEW** — Moskowitz 2012 JFE, 1d/7d/30d return |
-| HYPO-033 | VPINToxicity | **Phase 2M NEW** — Easley 2012 RFS, VPIN > 0.7 |
-| HYPO-034 | BTCDominanceLag | **Phase 2M NEW** — Stalder 2025 + Liu 2022 |
+| HYPO-032 | TSMOM | Phase 2M — Moskowitz 2012 JFE |
+| HYPO-033 | VPINToxicity | Phase 2M — Easley 2012 RFS |
+| HYPO-040 | GridBot | **Phase 4 NEW** — BingX 287K users, ATR<1%+lower 30% boundary, 15 tickers |
+| HYPO-AI-001 | AIAdvisor | Phase 3 — **retry 3x** (was no retry, infinite HOLD loop fixed) |
 
 ### 1d Cron (trend) — Promotion Gate PASSED (Round 15)
 

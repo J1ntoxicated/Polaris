@@ -1078,10 +1078,15 @@ def test_realtime_hypos_007_008_023():
         "HYPO-AI-001 must be active — Phase 3 AI Advisor (Jin mandate '원래 의도 = AI 개입')"
     )
 
-    # 정확히 9개 (007+008+023+024+027+028+032+033+AI-001; 034 deprecated 2026-05-04, 025 deprecated Phase 2N+)
-    assert len(active_ids) == 9, (
-        f"REALTIME_HYPOS must contain exactly 9 active HYPOs "
-        f"(007+008+023+024+027+028+032+033+AI-001), "
+    # Phase 4 추가: HYPO-040 (Grid Bot) — INSIGHT-035 (BingX 검증 sideways 전략)
+    assert "HYPO-040" in active_ids, (
+        "HYPO-040 must be active — Grid Bot (BingX 287K users validated, sideways PnL)"
+    )
+
+    # 정확히 10개 (007+008+023+024+027+028+032+033+040+AI-001; 034 deprecated 2026-05-04, 025 deprecated Phase 2N+)
+    assert len(active_ids) == 10, (
+        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
+        f"(007+008+023+024+027+028+032+033+040+AI-001), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 

@@ -15,7 +15,13 @@ tags: [meta, log, append_only, polaris]
 
 > Append-only. 모든 모드 작업 마감 시 1 줄 추가.
 
+## 2026-05-05
+
+- **HYPO-023 deep diagnosis + final fix** — 확정 원인: A (rare event). WS 연결/구독 정상 (ack 수신) + 60s 및 25s 모두 forceOrder 0건 (low-vol day). Fix: (1) lookback 60s→300s (5min window), (2) min_total $100k→$30k, exit_total $30k→$10k, (3) `get_store_status()` 신규 (5분 주기 `[LIQ-STORE]` 진단 log). 5 신규 tests. 792/792 pass. [[HYPO-023]] [[INSIGHT-035]]
+
 ## 2026-05-04
+
+- **Phase 4 Forensic+Research fix — 4 핵심 수정** — (1) HYPO-023 $1M→$100k threshold (25h 0 signals 원인 — 60s 윈도우에서 $1M 집적 불가), exit threshold $300k→$30k, WS raw log 20 events 진단, noise filter $1000→$500; (2) HYPO-AI-001 retry 3x + backoff 1/2/5s + rate_limit +5s extra + credit error OpenAI fallback (무한 HOLD 루프 방지); (3) GridBot NEW (HYPO-040, BingX 287K users 검증, ATR<1%+lower 30% boundary, 5-level $50 grid); (4) pair universe 6→15 tickers (HYPO-007-RT/008-RT/040, NFI 표준 40-80 → 신호 ~1.7x). 787/787 tests pass (+35 신규). [[HYPO-023]] [[HYPO-AI-001]] [[HYPO-040]] [[INSIGHT-035]]
 
 - **HYPO-034 cut + AI threshold 0.72** — (1) HYPO-034 BTCDominanceLag deprecated (n=3 win 0% 3 SL -$7.09, manual cut — pattern 확실), (2) `DEFAULT_MIN_CONFIDENCE` 0.75→0.72 (too strict → LONG 0.3%, target 5-15%), prompt "0.72 + clear edge", HYPO-AI-001 params 동기화. 5 신규 TDD tests. 752/752 pass. [[HYPO-034]] [[HYPO-AI-001]]
 - **AI Advisor LONG bias fix (88% → target 30-50%)** — 3 fixes: (1) `DEFAULT_MIN_CONFIDENCE` 0.65→0.75 (더 엄격한 LONG 게이트), (2) `_build_prompt` neutral 재프레이밍 ("quantitative analyst" + "Default to hold" + "0.75 강조"), (3) `_ai_decision_counts` module-level 카운터 + `_track_decision()` + 시간당 `[AI-STATS]` bias 로그. `realtime_runner.py` HYPO-AI-001 params `min_confidence` 0.65→0.75. TDD RED→GREEN: 13 신규 테스트 (`TestMinConfidenceDefault` 4개 + `TestNeutralPromptFraming` 4개 + `TestDecisionCounter` 5개). 747/747 tests pass. [[HYPO-AI-001]]
@@ -145,3 +151,7 @@ tags: [meta, log, append_only, polaris]
 - **2026-05-04 — Phase 2M: 학술 검증 알파 deploy + random strategies cut (499/499 pass)** — Jin mandate "리서치 안해?": HYPO-029/030/031 (basic indicators, 학술 근거 없음) deprecated comment 전환. 3 academic-grade 전략 신규: HYPO-032 TSMOM (Moskowitz/Ooi/Pedersen 2012 JFE — 58 futures Sharpe 1.0+ 25yr / `src/strategies/tsmom.py`), HYPO-033 VPINToxicity (Easley/Lopez de Prado/O'Hara 2012 RFS — informed trading detection / `src/strategies/vpin_toxicity.py`), HYPO-034 BTCDominanceLag (Stalder/Cosenza 2025 + Liu 2022 JF / `src/strategies/btc_dominance_lag.py`). auto_deprecate.py 임계값 강화: min_n 10→**5**, max_loss_usd -$10→**-$5** (Phase 2M random strategy 가속 차단). realtime_runner.py: vpin + btclag primary_tf 분기 신규 추가. TDD: 41 신규 tests (15+14+12). Active HYPOs: 007+008+023+024+025+027+028+032+033+034 = 10개. 499/499 pass + runtime verify 완료. [[HYPO-032]] [[HYPO-033]] [[HYPO-034]]
 
 - **2026-05-04 — Phase 2O: 7 backtest-viable strategies 즉시 paper 추가 (671/671 pass)** — Multi-resolution backtest grid (171s) 10 viable (Sharpe>=0.3, IS+OOS EV>0). ADR-010 준수: 모두 DAILY_PAPER_HYPOS (paper stage) 진입. ACTIVE_HYPOS(cron) 진입 X (60일 paper + Promotion Gate 미통과). 7 신규 entries: HYPO-004-DONCH-DOGE-1D (IS exp+63% Sharpe 1.16, OOS+67% — 최강) / HYPO-020-VB-DONCH-BTC-1D + ETH-1D (Sharpe 0.57/0.45) / HYPO-008-VB-1D-BTC+ETH+DOGE (Sharpe 0.38/0.41/0.36) / HYPO-008-VB-4H-ETH (Sharpe 0.33, n=53 9x faster). runner.py `bar` 파라미터 4H 지원 확인. TDD: `test_active_hypos_phase2o_count` + 6 param/ADR-010 tests (8 신규). 전체 **671/671 pass** (+8). Runtime instantiation 7/7 확인. [[HYPO-004]] [[HYPO-020]] [[HYPO-008]] [[ADR-010]] [[ADR-011]]
+
+## 2026-05-05
+
+- **2026-05-05 — FORENSIC: 6-cycle 정적 + vault 미활용 감사 (INSIGHT-035)** — 3 root cause 확정: (A) HYPO-023 LiquidationCascade 25h 100% no_data (Binance forceOrder WS 미수신 가능성), (D) HYPO-AI-001 RuntimeError/BadRequestError 반복 — 3 entries 후 사실상 사망, (E) CFD(100+건/h 18879 trades) vs SPOT(구조적 20건/day) 차이. VB 17.6h 무신호 = 시장 조건 부재(정상). vault 33 INSIGHT 기록 전용 — 코드 의사결정 참조율 < 10% 확인. 즉시 fix 권고: HYPO-023 WS data flow 디버그 + AI-001 retry 복구. [[INSIGHT-035]] [[HYPO-023]] [[HYPO-AI-001]] [[HYPO-008]]

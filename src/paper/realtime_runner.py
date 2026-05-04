@@ -79,7 +79,8 @@ logger = logging.getLogger(__name__)
 LIVE_FEE_ROUND_TRIP = 0.0014
 # Auto-deprecate check interval (seconds) — checked per-HYPO on every tick for the
 # fast_fail/loss_cap triggers; frequency trigger checked at DEPRECATE_CHECK_INTERVAL_S cadence
-DEPRECATE_CHECK_INTERVAL_S: float = 300.0  # 5 min interval for frequency check
+# Phase 2N+: 5min → 1min (faster fail-fast — HYPO-025 lesson: 5min delay = more loss accumulation)
+DEPRECATE_CHECK_INTERVAL_S: float = 60.0  # 1 min interval for frequency check (was 300s)
 _deprecate_last_check_s: float = 0.0
 # Track HYPO started_at timestamps (ms) — populated on first trade or runner start
 _hypo_started_at_ms: dict[str, int] = {}
@@ -96,9 +97,10 @@ MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (time
 # Fix 1 (Codex Round 4): supervisor restart delay (patchable in tests)
 _SUPERVISOR_RESTART_DELAY_S: float = 5.0
 
-# Realtime active HYPOs — Round 15 + Phase 2k (HYPO-023 liquidation cascade)
+# Realtime active HYPOs — Phase 2N+ (HYPO-025 cut 2026-05-04)
 # Deprecated tick strategies: HYPO-010/013/014/016/017 — Jin 판단 2026-05-04
-# Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023 (liquidation cascade, Phase 2k)
+# HYPO-025 — DEPRECATED Phase 2N+ (n=6 win 33%, -$3.76, auto-trigger met)
+# Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023/024/027/028/032/033/034
 REALTIME_HYPOS = [
     {
         "hypo_id": "HYPO-007-RT",
@@ -148,18 +150,18 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
-    {
-        # HYPO-025: Volume Delta Divergence
-        # Cumulative delta (buy_vol - sell_vol) diverges from price → mean-revert.
-        # Source: OKX trades WS (get_recent_trades) already active.
-        "hypo_id": "HYPO-025",
-        "strategy_cls": VolumeDeltaDivergence,
-        "params": {},
-        "primary_tf": "delta",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT"],
-        "starting_usd": 5000.0,
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-    },
+    # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
+    # n=6, win 33% < 40% fast_fail threshold, avg_size $687, lifetime -$3.76.
+    # Auto-trigger met (n>=5, win<40%). Dynamic sizing gave large size to weak strategy → loss acceleration.
+    # Manual cut to immediately stop bleeding (trigger was already met, 5min check delay accrued more loss).
+    # {
+    #     "hypo_id": "HYPO-025",
+    #     "strategy_cls": VolumeDeltaDivergence,
+    #     "params": {},
+    #     "primary_tf": "delta",
+    #     "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT"],
+    #     "starting_usd": 5000.0,
+    # }
     # HYPO-026 DEPRECATED 2026-05-04: n=7, 0 wins, -$1.31.
     # whale_wall pattern明백히 비유효 — n=10 auto-trigger 미달이지만 수동 cut.
     # {
@@ -241,6 +243,9 @@ REALTIME_HYPOS = [
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
+    # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
+    # n=6, win 33%, avg_size $687, -$3.76. Auto fast_fail trigger met (n>=5, win<40%).
+    # Dynamic sizing gave $687 to a 33% win-rate strategy → loss acceleration confirmed.
     # HYPO-029 StochRSI — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
     # 학술 근거 부족: basic indicator, no academic paper backing. Cut before deploy.
     # HYPO-030 ADXTrendPullback — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
@@ -831,6 +836,8 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         dd = max(0.0, (starting - equity) / starting)
 
         # 4. Compute dynamic size (pure)
+        # Phase 2N+: pass n_trades for cold start cap (< 20 → max $300)
+        n_closed = len(balance.closed_positions)
         sizing = compute_size(SizingInputs(
             cash_usd=balance.cash_usd,
             signal_confidence=signal.confidence,
@@ -839,7 +846,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             recent_avg_loss_pct=perf_stats["avg_loss_pct"],
             regime=regime,
             drawdown_pct=dd,
-        ))
+        ), n_trades=n_closed)
         # Phase 2N+: hard_cap replaces per-HYPO max_position_pct (ADR-015 정합).
         # max_position_pct (0.04 → $200 cap) was silently overriding dynamic sizing.
         # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.

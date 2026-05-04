@@ -10,6 +10,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.risk.dynamic_sizing import (
+    COLD_START_MAX_USD,
+    COLD_START_N,
     MAX_FRACTION,
     MIN_SIZE_USD,
     REGIME_MULT,
@@ -210,6 +212,120 @@ class TestRegimeConstants:
         result = compute_size(_inputs(regime="unknown_regime"))
         flat_result = compute_size(_inputs(regime="flat"))
         assert result.fraction == pytest.approx(flat_result.fraction, rel=0.001)
+
+
+# ── Cold start size cap (Phase 2N+ — HYPO-025 lesson) ────────────────────
+
+class TestColdStartCap:
+    """n_trades < COLD_START_N → size capped at COLD_START_MAX_USD."""
+
+    def test_cold_start_caps_size_at_300(self) -> None:
+        """n_trades=0 + high confidence + uptrend → size <= $300."""
+        result = compute_size(
+            _inputs(
+                cash_usd=5000.0,
+                signal_confidence=1.0,
+                recent_win_rate=0.8,
+                recent_avg_win_pct=2.0,
+                recent_avg_loss_pct=0.5,
+                regime="uptrend",
+                drawdown_pct=0.0,
+            ),
+            n_trades=0,
+        )
+        assert result.size_usd <= COLD_START_MAX_USD
+        assert result.size_usd == COLD_START_MAX_USD  # capped exactly
+
+    def test_n_19_still_cold_start(self) -> None:
+        """n_trades=19 (< 20) → still capped."""
+        result = compute_size(
+            _inputs(
+                cash_usd=5000.0,
+                signal_confidence=0.9,
+                recent_win_rate=0.7,
+                recent_avg_win_pct=1.5,
+                recent_avg_loss_pct=0.5,
+                regime="crisis",
+                drawdown_pct=0.0,
+            ),
+            n_trades=19,
+        )
+        assert result.size_usd <= COLD_START_MAX_USD
+
+    def test_n_20_plus_uses_full_dynamic(self) -> None:
+        """n_trades=20 → no cold start cap — full dynamic sizing applies."""
+        result_20 = compute_size(
+            _inputs(
+                cash_usd=5000.0,
+                signal_confidence=1.0,
+                recent_win_rate=0.8,
+                recent_avg_win_pct=2.0,
+                recent_avg_loss_pct=0.5,
+                regime="uptrend",
+                drawdown_pct=0.0,
+            ),
+            n_trades=20,
+        )
+        # At n=20 full dynamic applies — should exceed cold start cap (high confidence + uptrend)
+        assert result_20.size_usd > COLD_START_MAX_USD
+
+    def test_cold_start_threshold_constant(self) -> None:
+        assert COLD_START_N == 20
+        assert COLD_START_MAX_USD == 300.0
+
+    def test_cold_start_reason_tag(self) -> None:
+        """cold_start tag appears in reason when cap applied."""
+        result = compute_size(
+            _inputs(
+                cash_usd=5000.0,
+                signal_confidence=1.0,
+                recent_win_rate=0.8,
+                recent_avg_win_pct=2.0,
+                recent_avg_loss_pct=0.5,
+                regime="uptrend",
+                drawdown_pct=0.0,
+            ),
+            n_trades=5,
+        )
+        assert "cold_start" in result.reason
+
+    def test_no_cold_start_tag_when_n_20(self) -> None:
+        """No cold_start tag in reason when n_trades >= 20."""
+        result = compute_size(_inputs(), n_trades=20)
+        assert "cold_start" not in result.reason
+
+    def test_cold_start_below_min_size_still_returns_zero(self) -> None:
+        """Even with cold start, if dynamic size < MIN_SIZE_USD → return 0."""
+        # tiny cash + downtrend + low conf → size < $100 → skip
+        result = compute_size(
+            _inputs(
+                cash_usd=200.0,
+                signal_confidence=0.3,
+                recent_win_rate=0.0,
+                regime="downtrend",
+                drawdown_pct=0.5,
+            ),
+            n_trades=0,
+        )
+        assert result.size_usd == 0.0
+
+    def test_property_cold_start_never_exceeds_cap(self) -> None:
+        """Property: n_trades < COLD_START_N → size_usd <= COLD_START_MAX_USD."""
+        # Test boundary values
+        for n_t in [0, 1, 10, 19]:
+            result = compute_size(
+                _inputs(
+                    cash_usd=100_000.0,
+                    signal_confidence=1.0,
+                    recent_win_rate=0.9,
+                    recent_avg_win_pct=5.0,
+                    recent_avg_loss_pct=0.1,
+                    regime="crisis",
+                    drawdown_pct=0.0,
+                ),
+                n_trades=n_t,
+            )
+            assert result.size_usd <= COLD_START_MAX_USD, f"n_trades={n_t} exceeded cap"
 
 
 # ── property-based test (P7 — Hypothesis) ─────────────────────────────────

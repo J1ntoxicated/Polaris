@@ -15,7 +15,16 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — Phase 2M+ 학술 backtest + 3 신규 전략 deploy)
+## 현재 상태 (2026-05-04 — Phase 2N+ Emergency Fix: HYPO-025 cut + cold start cap)
+
+**Phase 2N+ Emergency Fix (663/663 pass)**:
+- HYPO-025 VolumeDeltaDivergence: **DEPRECATED** (n=6 win 33%, avg_size $687, -$3.76)
+- `src/risk/dynamic_sizing.py`: `compute_size(n_trades=COLD_START_N)` — cold start cap $300 (n<20)
+- `src/paper/realtime_runner.py`: `DEPRECATE_CHECK_INTERVAL_S` 300s→60s + n_closed 전달
+- 11 신규 tests (`TestColdStartCap` 8개 + runner 3개) TDD RED→GREEN
+- Active HYPOs: 9개 (007+008+023+024+027+028+032+033+034)
+
+**Phase 2M+ 신규 전략 (557/557 pass)**:
 
 **Phase 2M+ 신규 전략 (557/557 pass)**:
 - HYPO-035 CrossSectionalMomentum: `src/strategies/cross_sectional_momentum.py` — Jegadeesh & Titman 1993 JoF (30d rank)
@@ -147,7 +156,6 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO-008-RT | VolumeBurst 1H | active — n=29 win 55% +$3.50 유일 양수 EV |
 | HYPO-023 | LiquidationCascade | active — Binance perp forceOrder → OKX SPOT |
 | HYPO-024 | CrossExchangeGap | active — Binance bookTicker lead |
-| HYPO-025 | VolumeDeltaDivergence | active — OKX cumulative delta |
 | HYPO-027 | FundingRateFilter | active — Binance funding squeeze |
 | HYPO-028 | TickBurst | active — 5s price spike |
 | HYPO-032 | TSMOM | **Phase 2M NEW** — Moskowitz 2012 JFE, 1d/7d/30d return |
@@ -182,6 +190,7 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO-014-BLEAD | BinanceLeadSignal | Round 15 — n=1, 0% win, vol 미달 |
 | HYPO-016-OFI | OFIMomentum | Round 15 — n=37, win 24%, -$3.92 사전 trigger |
 | HYPO-017-CASCADE | BTCCascade | Round 15 — n=0, 60분 trigger 0 |
+| HYPO-025 | VolumeDeltaDivergence | **Phase 2N+** — n=6 win 33%, avg_size $687, -$3.76 (fast_fail trigger + dynamic sizing over-bet) |
 | HYPO-029 | StochRSI | **Phase 2M** — 학술 근거 없음 (basic indicator) |
 | HYPO-030 | ADXTrendPullback | **Phase 2M** — 학술 근거 없음 (basic combo) |
 | HYPO-031 | OBVDivergence | **Phase 2M** — 학술 근거 없음 (basic indicator) |

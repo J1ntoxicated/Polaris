@@ -944,9 +944,8 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
     assert "HYPO-023" in active_ids, "HYPO-023 (LiquidationCascade) must be active — Phase 2k"
 
-    # Phase 2L 유지 (026 제외)
+    # Phase 2L 유지 (026 제외, 025 deprecated Phase 2N+)
     assert "HYPO-024" in active_ids, "HYPO-024 (CrossExchangeGap) must be active — Phase 2L"
-    assert "HYPO-025" in active_ids, "HYPO-025 (VolumeDeltaDivergence) must be active — Phase 2L"
     assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
     assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
@@ -959,6 +958,11 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-029" not in active_ids, "HYPO-029 must be cut — basic indicator, no academic basis"
     assert "HYPO-030" not in active_ids, "HYPO-030 must be cut — basic combo, no academic basis"
     assert "HYPO-031" not in active_ids, "HYPO-031 must be cut — basic indicator, no academic basis"
+
+    # Deprecated Phase 2N+ — HYPO-025 cut (n=6 win 33%, fast_fail trigger met)
+    assert "HYPO-025" not in active_ids, (
+        "HYPO-025 must be cut — n=6, win 33%, -$3.76 (fast_fail auto-trigger met)"
+    )
 
     # Deprecated Phase 2L/earlier — 반드시 부재
     assert "HYPO-026" not in active_ids, (
@@ -980,10 +984,10 @@ def test_realtime_hypos_007_008_023():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # 정확히 10개 (007 + 008 + 023 + 024 + 025 + 027 + 028 + 029 + 030 + 031)
-    assert len(active_ids) == 10, (
-        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
-        f"(007+008+023+024+025+027+028+029+030+031), "
+    # 정확히 9개 (007+008+023+024+027+028+032+033+034; 025 deprecated Phase 2N+)
+    assert len(active_ids) == 9, (
+        f"REALTIME_HYPOS must contain exactly 9 active HYPOs "
+        f"(007+008+023+024+027+028+032+033+034; HYPO-025 deprecated Phase 2N+), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 
@@ -1133,4 +1137,90 @@ def test_hard_cap_30pct_applied():
     assert size <= hard_cap + 0.01, (
         f"Size ${size:.2f} must not exceed hard_cap ${hard_cap:.2f} (equity×0.30). "
         "New shell contract: only hard_cap=equity×0.30 as upper bound."
+    )
+
+
+# ── Phase 2N+: HYPO-025 cut + cold start cap + deprecate interval ────────────
+
+
+def test_hypo_025_not_in_realtime_hypos():
+    """Phase 2N+: HYPO-025 (VolumeDeltaDivergence) must be absent from REALTIME_HYPOS.
+
+    n=6, win 33% < 40% fast_fail threshold. avg_size $687 → loss acceleration.
+    Auto-trigger was already met. Manual cut to stop bleeding immediately.
+    """
+    active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
+    assert "HYPO-025" not in active_ids, (
+        "HYPO-025 (VolumeDeltaDivergence) must be deprecated — "
+        "n=6, win 33%, avg_size $687, -$3.76 lifetime. "
+        "fast_fail auto-trigger met (n>=5, win<40%)."
+    )
+
+
+def test_deprecate_check_interval_1min():
+    """Phase 2N+: DEPRECATE_CHECK_INTERVAL_S must be 60s (was 300s).
+
+    5min → 1min for faster fail-fast. HYPO-025 lesson:
+    5min delay = 1-2 more trades at $687 size → unnecessary loss accumulation.
+    """
+    assert rt.DEPRECATE_CHECK_INTERVAL_S == 60.0, (
+        f"DEPRECATE_CHECK_INTERVAL_S must be 60.0s (1 min), "
+        f"got {rt.DEPRECATE_CHECK_INTERVAL_S}s. "
+        "Phase 2N+ change: 5min → 1min for faster auto-deprecate."
+    )
+
+
+def test_cold_start_cap_applied_in_eval_and_act():
+    """Phase 2N+: _eval_and_act passes n_trades to compute_size → cold start cap active.
+
+    Uses flow strategy with 0 closed positions (n_trades=0 → cold start).
+    Even with high confidence + crisis regime, size must be <= $300 (COLD_START_MAX_USD).
+    Verifies that n_closed is passed from _eval_and_act to compute_size.
+    """
+    from src.strategies.trade_flow import TradeFlow
+    from src.domain.signal import Signal, SignalAction
+    from src.risk.dynamic_sizing import COLD_START_MAX_USD
+
+    ticker = "BTC-USDT"
+    tick_price = 100.0
+    entry_ts = 1_700_000_010_000
+    starting_usd = 5000.0
+
+    hypo = {
+        "hypo_id": "HYPO-TEST-COLDCAP",
+        "strategy_cls": TradeFlow,
+        "params": {},
+        "primary_tf": "flow",
+        "tickers": [ticker],
+        "starting_usd": starting_usd,
+    }
+
+    # High confidence crisis signal → without cold start cap would produce >> $300
+    enter_signal = Signal(
+        timestamp_ms=entry_ts,
+        action=SignalAction.ENTER_LONG,
+        confidence=1.0,
+        target_size_usd=9999.0,
+        reason="test_cold_cap",
+    )
+
+    with patch.object(rt, "compute_taker_buy_ratio", return_value=0.80), \
+         patch.object(rt, "get_recent_trades", return_value=[None] * 100), \
+         patch("src.strategies.trade_flow.TradeFlow.evaluate_flow",
+               return_value=enter_signal), \
+         patch.object(rt, "_get_btc_1d_candles", return_value=[]), \
+         patch("src.risk.regime_detector.detect_regime", return_value="crisis"), \
+         patch("src.risk.performance_tracker.compute_recent_stats",
+               return_value={"win_rate": 0.80, "avg_win_pct": 2.0, "avg_loss_pct": 0.5}):
+        rt._eval_and_act(hypo, ticker, tick_price=tick_price, tick_ts_ms=entry_ts,
+                         full_tick=_full_tick(tick_price, entry_ts))
+
+    bal = rt.load_state(ticker, "trade_flow", starting_usd=starting_usd)
+    assert len(bal.open_positions) == 1, "entry must have occurred"
+    size = bal.open_positions[0].size_usd
+    # n_trades=0 (no closed positions) → cold start cap $300 applied
+    assert size <= COLD_START_MAX_USD, (
+        f"Cold start (n=0) must cap size at ${COLD_START_MAX_USD:.0f}, "
+        f"got ${size:.2f}. "
+        "Check that _eval_and_act passes n_closed to compute_size(n_trades=n_closed)."
     )

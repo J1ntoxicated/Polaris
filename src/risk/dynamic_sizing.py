@@ -68,8 +68,14 @@ MIN_SIZE_USD = 100.0    # below this → skip signal (fee drag too high)
 _KELLY_COLD_START = 0.05  # baseline for subnormal-float / zero-history guard
 _KELLY_HALF_CAP = 0.5     # half-Kelly cap (full Kelly too volatile)
 
+# Phase 2N+: Cold start size cap — weak strategy에 큰 size 방지 (HYPO-025 -$3.76 lesson).
+# n_trades < COLD_START_N 시 hard cap $300 → 학술 검증된 충분 sample 후 full dynamic size.
+# Rationale: n=6 win 33% (HYPO-025)처럼 small sample에서 dynamic sizing이 과대 size 줌.
+COLD_START_N = 20          # sample threshold — below this → cold start cap
+COLD_START_MAX_USD = 300.0 # max size during cold start period
 
-def compute_size(inputs: SizingInputs) -> SizingOutput:
+
+def compute_size(inputs: SizingInputs, n_trades: int = COLD_START_N) -> SizingOutput:
     """Compute dynamic position size.
 
     Pipeline:
@@ -82,6 +88,8 @@ def compute_size(inputs: SizingInputs) -> SizingOutput:
 
     Args:
         inputs: SizingInputs with all required parameters.
+        n_trades: number of closed trades for this HYPO (default 0).
+            If < COLD_START_N, applies cold start size cap (COLD_START_MAX_USD).
 
     Returns:
         SizingOutput with size_usd=0 if signal should be skipped.
@@ -127,8 +135,18 @@ def compute_size(inputs: SizingInputs) -> SizingOutput:
         size_usd = 0.0
         fraction = 0.0
 
+    # 7. Cold start size cap — insufficient sample → cap at $300 (Phase 2N+)
+    # Prevents dynamic sizing from giving large size to unvalidated strategies.
+    # HYPO-025 lesson: n=6 win 33% received $687 → loss acceleration.
+    cold_start_applied = False
+    if n_trades < COLD_START_N and size_usd > COLD_START_MAX_USD:
+        size_usd = COLD_START_MAX_USD
+        fraction = size_usd / inputs.cash_usd if inputs.cash_usd > 0 else 0.0
+        cold_start_applied = True
+
+    cold_tag = f" [cold_start n={n_trades}<{COLD_START_N} cap=${COLD_START_MAX_USD:.0f}]" if cold_start_applied else ""
     reason = (
         f"kelly={kelly:.2f} × conf²={conf_mult:.2f} × regime[{inputs.regime}]={regime_mult:.1f} "
-        f"× dd[{inputs.drawdown_pct:.1%}]={dd_mult:.2f} = {fraction:.3f}"
+        f"× dd[{inputs.drawdown_pct:.1%}]={dd_mult:.2f} = {fraction:.3f}{cold_tag}"
     )
     return SizingOutput(size_usd=size_usd, fraction=fraction, reason=reason)

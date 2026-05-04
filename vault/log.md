@@ -18,6 +18,7 @@ tags: [meta, log, append_only, polaris]
 ## 2026-05-04
 
 - **HYPO-033 VPIN runtime fix** — `realtime_runner.py` bucket 구축 코드에서 `t.get("sz")` dict 호출 → tuple unpack `for _ts_ms, side, size, price in chunk` 수정. `get_recent_trades()` returns `list[tuple]` (not dict). 5 신규 tests (`TestVPINWithTupleTrades`) TDD RED→GREEN. 652/652 pass. 다른 strategy (OFI/delta) tuple 사용 정합 확인.
+- **Phase 2N+ Emergency Fix** — 3 fixes: (1) HYPO-025 cut (n=6 win 33% fast_fail trigger met, avg_size $687→$300 cap 적용 후 즉시 제거); (2) dynamic_sizing cold start cap `COLD_START_N=20 / COLD_START_MAX_USD=$300` (n_trades<20 시 size hard cap, weak strategy 큰 size 방지); (3) `DEPRECATE_CHECK_INTERVAL_S` 300s→60s (faster fail-fast). 11 신규 tests RED→GREEN. 663/663 pass. Runtime verify: HYPO-025 absent, n=0→$300 cap, n=20→$1000 full dynamic.
 
 - **Phase 2N+ Dynamic sizing cap fix** — max_position_pct silent cap bug ($200) 제거. REALTIME_HYPOS 10개 max_position_pct 키 삭제, _eval_and_act hard_cap=equity×0.30으로 교체. Effect: $200→$590 (3.0x). 3 신규 tests (TDD RED→GREEN). 647/647 pass.
 - **Phase 2N 완료 — 5 mandates** — Fix1: okx_history_trades 페이지네이션 (7d tick fetch) / Fix2: backup_history yfinance+CoinGecko (pure parser + shell) / Fix3: backtest_multi_resolution.py (5 strategies × 6 TF × 4 tickers = 120 runs, 3-fold walk-forward) / Fix4: TickPersister SQLite (WS trades → buffer 1000 → batch INSERT, okx_ws integrated, realtime_runner init) / Fix5: cold start 3x (win=0.55, avg_win=0.8 → Kelly=0.269) + MIN_SIZE_USD $50→$100. Effective size flat $5000=$602, uptrend=$860, crisis=$1000. 644/644 tests pass (+62 신규).

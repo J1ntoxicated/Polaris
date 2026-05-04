@@ -89,14 +89,16 @@ REALTIME_HYPOS = [
     # TP<SL asymmetry: structural negative EV — unfixable by parameter tuning.
     # Strategy file (breakout_momentum.py) preserved for learning archive.
     # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가
-    # Round 13: target_size_usd 300 explicit override (n=70, win 57%, ×1.5 partial size-up)
+    # Round 14: target_size_usd 200 (max_position_pct 0.04 × $5000 = $200 cap — intent 정합).
+    #   Round 13 300 override는 silent cap bug — 실제 executed size는 $200이었음.
+    #   TRUMP-USDT 제거: 0.42% price range < SL×2=0.70% — 구조적 SL 도달 부적합.
     {
         "hypo_id": "HYPO-010-TICK",
         "strategy_cls": TickMomentum,
-        "params": {"target_size_usd": 300.0},
+        "params": {"target_size_usd": 200.0},
         "primary_tf": "tick",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
-                    "ORDI-USDT", "TRUMP-USDT", "ADA-USDT", "XRP-USDT"],
+                    "ORDI-USDT", "ADA-USDT", "XRP-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
@@ -176,6 +178,41 @@ _last_close_ms_ticker: dict[str, int] = {}
 # (Codex Round 12 F1: maxlen 200 → 600; spike 10tps × 60s = 600 entries, deque
 #  auto-truncate was triggering before ts-trim → stale price_1min_ago)
 _price_history_60s: dict[str, deque] = {}
+
+# HYPO-010 regime cluster guard (Round 14 — forensic INSIGHT-029).
+# 5분 sliding window: 3+ 다른 ticker에서 SL hit → 10분 pause (regime change 자동 감지).
+_hypo010_sl_window: deque = deque(maxlen=20)  # (ts_ms, ticker)
+_hypo010_pause_until_ms: int = 0
+
+
+def _check_hypo010_regime_cluster(ticker: str, exit_reason: str, tick_ts_ms: int) -> None:
+    """HYPO-010 SL hit 시 cross-ticker cluster 추적.
+
+    5분 sliding window 내 3+ ticker에서 SL hit 발생 시 HYPO-010 신규 entry를 10분 pause.
+    regime change cluster 자동 감지 (forensic INSIGHT-029 — multi-ticker 동조 하락).
+
+    Args:
+        ticker: SL이 발생한 ticker (e.g. "BTC-USDT").
+        exit_reason: close exit reason 문자열 (e.g. "sl_hit:-0.0036").
+        tick_ts_ms: 현재 tick timestamp ms.
+
+    Shell function — modifies module-level _hypo010_sl_window, _hypo010_pause_until_ms.
+    """
+    global _hypo010_pause_until_ms
+    if not exit_reason.startswith("sl_hit"):
+        return
+    _hypo010_sl_window.append((tick_ts_ms, ticker))
+    # 5분 초과 항목 trim
+    cutoff = tick_ts_ms - 300_000
+    while _hypo010_sl_window and _hypo010_sl_window[0][0] < cutoff:
+        _hypo010_sl_window.popleft()
+    distinct_tickers = {t for _, t in _hypo010_sl_window}
+    if len(distinct_tickers) >= 3:
+        _hypo010_pause_until_ms = tick_ts_ms + 600_000  # 10분 pause
+        logger.warning(
+            f"[REGIME-CLUSTER] HYPO-010 paused 10min "
+            f"(5min window: {len(_hypo010_sl_window)} SLs across {len(distinct_tickers)} tickers)"
+        )
 
 
 def _update_price_history(ticker: str, ts_ms: int, price: float) -> None:
@@ -381,6 +418,9 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             _last_close_ms[(ticker, sname)] = tick_ts_ms
             _last_close_ms_ticker[ticker] = tick_ts_ms
             save_state(ticker, sname, balance)
+            # Round 14: HYPO-010 regime cluster guard — SL hit 시 cross-ticker 추적
+            if hypo["hypo_id"] == "HYPO-010-TICK" and sname == "tick_momentum":
+                _check_hypo010_regime_cluster(ticker, exit_reason, tick_ts_ms)
 
     # 2. Daily loss + entry
     # Codex Round 4 fix: re-entry cooldown — close 후 RE_ENTRY_COOLDOWN_MS 동안 같은 (ticker,strategy) 재진입 차단
@@ -392,8 +432,15 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         (last_close > 0 and (tick_ts_ms - last_close) < RE_ENTRY_COOLDOWN_MS)
         or (last_close_ticker > 0 and (tick_ts_ms - last_close_ticker) < RE_ENTRY_COOLDOWN_MS)
     )
+    # Round 14: HYPO-010 regime cluster pause guard (INSIGHT-029 — 5min 3+ SL → 10min entry block)
+    in_regime_pause = (
+        hypo["hypo_id"] == "HYPO-010-TICK"
+        and _hypo010_pause_until_ms > 0
+        and tick_ts_ms < _hypo010_pause_until_ms
+    )
     if (signal.action == SignalAction.ENTER_LONG
-            and not has_open and not daily_breached and not closed_this_tick and not in_cooldown):
+            and not has_open and not daily_breached and not closed_this_tick
+            and not in_cooldown and not in_regime_pause):
         size_cap = balance.equity_usd({ticker: tick_price}) * hypo["max_position_pct"]
         size = min(signal.target_size_usd, size_cap, balance.cash_usd)
         if size > 0:

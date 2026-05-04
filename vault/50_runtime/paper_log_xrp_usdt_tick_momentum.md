@@ -34,3 +34,6 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T14:18:37 | CLOSE | id=XRP-USDT-1777866234463 entry=1.41 exit=1.42 net=+0.47% net_usd=+0.94 |
 | 2026-05-04T14:18:37 | EXIT_REASON | tp_hit:+0.0061 |
 | 2026-05-04T14:19:35 | OPEN | id=XRP-USDT-1777868375804 dir=1 entry=1.42 size=$200 |
+| 2026-05-04T15:10:44 | CLOSE | id=XRP-USDT-1777868375804 entry=1.42 exit=1.41 net=-0.49% net_usd=-0.98 |
+| 2026-05-04T15:10:44 | EXIT_REASON | sl_hit:-0.0035 |
+| 2026-05-04T15:11:45 | OPEN | id=XRP-USDT-1777871505418 dir=1 entry=1.41 size=$200 |

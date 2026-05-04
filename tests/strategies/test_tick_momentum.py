@@ -1,4 +1,4 @@
-"""tests/strategies/test_tick_momentum.py — TickMomentum unit tests (Phase 2g Round 13)."""
+"""tests/strategies/test_tick_momentum.py — TickMomentum unit tests (Phase 2g Round 14)."""
 from __future__ import annotations
 
 import pytest
@@ -11,21 +11,25 @@ from src.strategies.tick_momentum import (
 
 
 # ---------------------------------------------------------------------------
-# Round 13 regression — DEFAULT_TARGET_SIZE_USD == 300
+# Round 14 regression — DEFAULT_TARGET_SIZE_USD == 200 (intent-code 정합 복원)
 # ---------------------------------------------------------------------------
 
-class TestRound13SizeUp:
-    def test_default_target_size_usd_300_round13(self) -> None:
-        """HYPO-010 Round 13: partial size-up ×1.5 (200 → 300). n=70, win 57%."""
-        assert DEFAULT_TARGET_SIZE_USD == 300.0
+class TestRound14TargetSize:
+    def test_default_target_size_usd_200_round14(self) -> None:
+        """HYPO-010 Round 14: target_size_usd 200 복원 — max_position_pct 0.04 × $5000 = $200 cap 정합.
 
-    def test_instance_target_size_usd_300_round13(self) -> None:
-        """Instance default matches module constant."""
+        Round 13의 300 override는 silent cap bug (실제 executed size = $200).
+        Round 14: intent-code 정합성 회복.
+        """
+        assert DEFAULT_TARGET_SIZE_USD == 200.0
+
+    def test_instance_target_size_usd_200_round14(self) -> None:
+        """Instance default matches module constant (200.0)."""
         s = TickMomentum()
-        assert s.target_size_usd == 300.0
+        assert s.target_size_usd == 200.0
 
-    def test_enter_long_signal_carries_300_size(self) -> None:
-        """ENTER_LONG signal target_size_usd == 300 (size-up propagates to signal)."""
+    def test_enter_long_signal_carries_200_size(self) -> None:
+        """ENTER_LONG signal target_size_usd == 200 (Round 14 정합 검증)."""
         s = TickMomentum()
         tick = {
             "ts": 1_700_000_000_000,
@@ -39,7 +43,7 @@ class TestRound13SizeUp:
         # last (101.0) > high24h * 0.99 (100.485) → ENTER_LONG
         sig = s.evaluate_tick(tick)
         assert sig.action == SignalAction.ENTER_LONG
-        assert sig.target_size_usd == 300.0
+        assert sig.target_size_usd == 200.0
 
 
 # ---------------------------------------------------------------------------

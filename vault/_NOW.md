@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # Round 13 결정 반영
+last_modified: 2026-05-04  # Round 14 결정 반영
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -53,7 +53,8 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
-- [[INSIGHT-028]] Round 13 결정 (Codex 85%) — HYPO-010 size $300 / HYPO-016 deprecate trigger / HYPO-014 vol 5 bps / $15~18/h 추정
+- [[INSIGHT-029]] Round 14 forensic (Codex 88%) — HYPO-010 silent cap bug + 14:36 regime cluster 13 SL + TRUMP 구조적 부적합. 4 fix: size $200 복원 / TRUMP 제거 / regime cluster guard / HYPO-016 trigger 재정의
+- [[INSIGHT-028]] Round 13 결정 (Codex 85%) — HYPO-010 size $300 (INSIGHT-029에서 복원) / HYPO-016 deprecate trigger / HYPO-014 vol 5 bps / $15~18/h 추정
 - [[INSIGHT-027]] HYPO-010/017 신호 직교성 확인 (orthogonal alpha)
 - [[INSIGHT-026]] archived HYPO 재평가 완료 — 4개 모두 archived 유지 (Sharpe 미달 일관)
 - [[INSIGHT-025]] fee 0.014 latent bug 4건 fix 완료 — backtest 재실행 완료 (INSIGHT-026)
@@ -97,7 +98,7 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO-007-RT | RSI15m intraday | active |
 | HYPO-008-RT | VolumeBurst 1H | active |
 | HYPO-009-RT | BreakoutMomentum 1H | **DEPRECATED Round 9** — n=16, EV -1.33%, TP<SL |
-| HYPO-010-TICK | TickMomentum tick | active — **size $300** (Round 13 ×1.5) |
+| HYPO-010-TICK | TickMomentum tick | active — **size $200** (Round 14 cap 정합 복원), TRUMP 제거, regime cluster guard active |
 | HYPO-011-BOOK | OrderBookImbalance book | **DEPRECATED Round 8** — n=336, TP 0, -$77.93 |
 | HYPO-012-FLOW | TradeFlow flow | **DEPRECATED Round 8** — n=450, EV -0.22%, -$151.77 |
 | HYPO-013-MTA | MTAConfluence mta | active, 60분 측정 중 |

@@ -20,7 +20,7 @@ DEFAULT_CHANGE_THRESHOLD = 0.015  # 1.5% (3% → 1.5% 완화 — 더 자주 trig
 DEFAULT_HIGH_PROXIMITY = 0.99   # 0.995 → 0.99 (1% 이내 high 근처)
 DEFAULT_LOW_PROXIMITY = 1.01
 DEFAULT_MAX_SPREAD_BPS = 50     # 20 → 50 bps (더 많은 ticker 통과)
-DEFAULT_TARGET_SIZE_USD = 300.0  # Phase 2g Round 13: ×1.5 size-up (n=70, win 57%, +$8.25)
+DEFAULT_TARGET_SIZE_USD = 200.0  # Phase 2g Round 14: intent-code 정합 복원 (max_position_pct 0.04 × $5000 = $200 cap)
 
 
 class TickMomentum(Strategy):

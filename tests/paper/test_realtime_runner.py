@@ -23,6 +23,9 @@ def _isolate_state(tmp_path, monkeypatch):
     for attr in ("_blead_nofeed_last", "_blead_hold_last", "_cascade_warmup_last"):
         if hasattr(rt._eval_and_act, attr):
             delattr(rt._eval_and_act, attr)
+    # Round 14: regime cluster guard state 초기화
+    rt._hypo010_sl_window.clear()
+    rt._hypo010_pause_until_ms = 0
     yield
 
 
@@ -808,4 +811,92 @@ def test_cascade_state_stale_guard_works_with_fix():
     assert stale_ms == 29_000, (
         f"stale_ms must be 29_000 (29s), got {stale_ms}ms — "
         "F2 fix ensures BTCCascade can correctly detect 30s stale"
+    )
+
+
+# ── Round 14: intent-code 정합 복원 + regime cluster guard ──────────────────
+
+
+def test_hypo010_target_size_200_round14():
+    """HYPO-010 Round 14: target_size_usd == 200 (silent cap bug 수정).
+
+    Round 13 300 override → max_position_pct 0.04 × $5000 = $200 cap에 silent 차단.
+    Round 14: intent-code 정합 복원 — params["target_size_usd"] == 200.
+    """
+    hypo010 = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-010-TICK"), None)
+    assert hypo010 is not None, "HYPO-010-TICK must exist in REALTIME_HYPOS"
+    assert hypo010["params"].get("target_size_usd") == 200.0, (
+        f"HYPO-010-TICK params target_size_usd must be 200.0, "
+        f"got {hypo010['params'].get('target_size_usd')} — "
+        "Round 14 intent-code 정합 복원 (max_position_pct 0.04 × $5000 = $200 cap)"
+    )
+
+
+def test_hypo010_trump_removed_round14():
+    """HYPO-010 Round 14: TRUMP-USDT 제거 (구조적 SL 도달 부적합).
+
+    TRUMP price range 0.42% < SL×2=0.70% → 정상 변동성에서 SL 도달 구조적 부적합.
+    3/3 SL (100% SL rate) forensic 결과 기반 제거.
+    """
+    hypo010 = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-010-TICK"), None)
+    assert hypo010 is not None, "HYPO-010-TICK must exist in REALTIME_HYPOS"
+    assert "TRUMP-USDT" not in hypo010["tickers"], (
+        "TRUMP-USDT must be removed from HYPO-010-TICK tickers — "
+        "price range 0.42% < SL×2=0.70% (구조적 SL 도달 부적합, 3/3 SL Round 14 forensic)"
+    )
+
+
+def test_regime_cluster_pauses_hypo010():
+    """Round 14: _check_hypo010_regime_cluster — 3+ ticker SL in 5min → 10min pause.
+
+    forensic INSIGHT-029: 14:36 이후 13 trade 전부 SL = regime change cluster.
+    Fix: 5분 window 내 3+ ticker SL hit 시 HYPO-010 entry 10분 pause.
+    """
+    # 초기화
+    rt._hypo010_sl_window.clear()
+    rt._hypo010_pause_until_ms = 0
+
+    base_ts = 1_700_000_000_000
+    # Ticker A SL (t=0)
+    rt._check_hypo010_regime_cluster("BTC-USDT", "sl_hit:-0.0036", base_ts)
+    assert rt._hypo010_pause_until_ms == 0, "2 tickers 미만 — pause 안 됨"
+
+    # Ticker B SL (t=1min)
+    rt._check_hypo010_regime_cluster("ETH-USDT", "sl_hit:-0.0038", base_ts + 60_000)
+    assert rt._hypo010_pause_until_ms == 0, "2 tickers — pause 안 됨"
+
+    # Ticker C SL (t=2min) → 3 distinct tickers → 10분 pause 발동
+    rt._check_hypo010_regime_cluster("SOL-USDT", "sl_hit:-0.0035", base_ts + 120_000)
+    assert rt._hypo010_pause_until_ms > 0, "3 tickers SL → 10min pause 발동해야 함"
+    expected_pause_until = (base_ts + 120_000) + 600_000  # 10min
+    assert rt._hypo010_pause_until_ms == expected_pause_until, (
+        f"pause_until_ms must be {expected_pause_until}, got {rt._hypo010_pause_until_ms}"
+    )
+
+    # TP hit은 cluster 추적에서 제외
+    rt._hypo010_sl_window.clear()
+    rt._hypo010_pause_until_ms = 0
+    rt._check_hypo010_regime_cluster("DOGE-USDT", "tp_hit:+0.006", base_ts + 300_000)
+    assert rt._hypo010_pause_until_ms == 0, "TP hit은 regime cluster 추적 대상 아님"
+
+
+def test_regime_cluster_5min_window_expiry():
+    """Round 14: 5분 초과 SL은 cluster window에서 제거 — 오래된 SL로 trigger 방지."""
+    rt._hypo010_sl_window.clear()
+    rt._hypo010_pause_until_ms = 0
+
+    base_ts = 1_700_000_000_000
+    # 오래된 SL 2건 (t=0, t=1min)
+    rt._check_hypo010_regime_cluster("BTC-USDT", "sl_hit:-0.0036", base_ts)
+    rt._check_hypo010_regime_cluster("ETH-USDT", "sl_hit:-0.0038", base_ts + 60_000)
+
+    # 6분 후 새 SL — 5분 window 초과 이전 항목 trim됨 → distinct tickers 재계산
+    tick_6min = base_ts + 360_000
+    rt._check_hypo010_regime_cluster("SOL-USDT", "sl_hit:-0.0035", tick_6min)
+    # 5분 cutoff = tick_6min - 300_000 = base_ts + 60_000
+    # BTC SL (base_ts): < cutoff → trim됨
+    # ETH SL (base_ts+60_000): == cutoff → trim됨 (< 조건, popleft while)
+    # SOL SL (tick_6min): 유일하게 window 내 → distinct_tickers = {SOL} → count < 3
+    assert rt._hypo010_pause_until_ms == 0, (
+        "5분 초과 SL trim 후 distinct tickers < 3 → pause 발동 안 됨"
     )

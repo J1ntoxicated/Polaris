@@ -75,6 +75,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-026]] | fee fix 후 archived HYPO 재평가 — 4개 모두 archived 유지 (Sharpe 미달 일관) | active |
 | [[INSIGHT-027]] | HYPO-010/017 신호 직교성 확인 — 11.1% raw overlap, 인과 cascade ~0%, orthogonal alpha 정당화 | active |
 | [[INSIGHT-028]] | Round 13 결정 — HYPO-010 size ×1.5, HYPO-016 deprecate trigger, HYPO-014 vol 5 bps (Codex 85%) | active |
+| [[INSIGHT-029]] | Round 14 forensic — HYPO-010 silent cap bug + 14:36 regime cluster 13 SL + TRUMP 구조적 부적합 (Codex 88%) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

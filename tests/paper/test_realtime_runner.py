@@ -986,3 +986,151 @@ def test_realtime_hypos_007_008_023():
         f"(007+008+023+024+025+027+028+029+030+031), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
+
+
+# ── Phase 2N+: Dynamic sizing cap fix (ADR-015 정합) ─────────────────────────
+# Bug: max_position_pct=0.04 → $5000×0.04=$200 hard cap silently overrides
+# dynamic sizing (e.g. fraction=0.12 × $5000=$600 → capped to $200).
+# Fix: remove max_position_pct from REALTIME_HYPOS; use hard_cap=equity×0.30.
+
+
+def test_dynamic_sizing_not_capped_by_max_position_pct():
+    """Phase 2N+ bug regression: dynamic size must NOT be silently capped by max_position_pct=0.04.
+
+    Scenario: fraction=0.12 × $5000 = $600 expected.
+    Old code: min($600, $5000×0.04=$200, $5000) = $200 (silent override).
+    New code: min($600, $5000×0.30=$1500, $5000) = $600 (dynamic respected).
+
+    Uses flow strategy (primary_tf="flow") with stubbed ENTER_LONG at confidence=0.70.
+    Kelly cold-start (win_rate=0.55, avg_win=0.8, avg_loss=0.5): kelly=0.268.
+    fraction = 0.268 × 0.70²=0.49 × uptrend=1.0 × dd=1.0 = 0.131 (> 0.04).
+    Expected size = $5000 × 0.131 = $655 >> $200 old cap.
+    """
+    from src.strategies.trade_flow import TradeFlow
+    from src.domain.signal import Signal, SignalAction
+    from src.risk.performance_tracker import _COLD_START_DEFAULTS
+
+    ticker = "BTC-USDT"
+    tick_price = 100.0
+    entry_ts = 1_700_000_000_000
+    starting_usd = 5000.0
+
+    # HYPO without max_position_pct (new config — key removed)
+    hypo = {
+        "hypo_id": "HYPO-TEST-DYNCAP",
+        "strategy_cls": TradeFlow,
+        "params": {},
+        "primary_tf": "flow",
+        "tickers": [ticker],
+        "starting_usd": starting_usd,
+        # max_position_pct intentionally absent — new contract
+    }
+
+    enter_signal = Signal(
+        timestamp_ms=entry_ts,
+        action=SignalAction.ENTER_LONG,
+        confidence=0.70,
+        target_size_usd=9999.0,  # large value — dynamic sizing will override
+        reason="test_strong_signal",
+    )
+
+    with patch.object(rt, "compute_taker_buy_ratio", return_value=0.80), \
+         patch.object(rt, "get_recent_trades", return_value=[None] * 100), \
+         patch("src.strategies.trade_flow.TradeFlow.evaluate_flow",
+               return_value=enter_signal), \
+         patch.object(rt, "_get_btc_1d_candles", return_value=[]), \
+         patch("src.risk.regime_detector.detect_regime", return_value="uptrend"), \
+         patch("src.risk.performance_tracker.compute_recent_stats",
+               return_value=dict(_COLD_START_DEFAULTS)):
+        rt._eval_and_act(hypo, ticker, tick_price=tick_price, tick_ts_ms=entry_ts,
+                         full_tick=_full_tick(tick_price, entry_ts))
+
+    bal = rt.load_state(ticker, "trade_flow", starting_usd=starting_usd)
+    assert len(bal.open_positions) == 1, "entry must have occurred"
+    size = bal.open_positions[0].size_usd
+    # Old cap: $200 (max_position_pct=0.04 × $5000)
+    # New: dynamic sizing should produce >> $200
+    assert size > 200.0, (
+        f"Dynamic size must exceed old $200 cap (max_position_pct=0.04 silent override). "
+        f"Got ${size:.2f}. "
+        f"Expected > $200 (dynamic kelly=~0.27 × conf²≈0.49 × uptrend × $5000)."
+    )
+    # Also must not exceed hard_cap = equity × 0.30
+    hard_cap = starting_usd * 0.30
+    assert size <= hard_cap + 0.01, (
+        f"Size ${size:.2f} must not exceed hard_cap ${hard_cap:.2f} (equity × 0.30)"
+    )
+
+
+def test_realtime_hypos_no_max_position_pct_key():
+    """Phase 2N+: REALTIME_HYPOS entries must NOT contain max_position_pct key.
+
+    max_position_pct was the source of the silent $200 cap bug.
+    Dynamic sizing (ADR-015 MAX_FRACTION=0.20) handles sizing internally.
+    Shell uses hard_cap=equity×0.30 as the only upper bound.
+    """
+    for hypo in rt.REALTIME_HYPOS:
+        assert "max_position_pct" not in hypo, (
+            f"{hypo['hypo_id']} must not have max_position_pct key — "
+            "Phase 2N+ removes this key; dynamic sizing handles cap via ADR-015 MAX_FRACTION=0.20 "
+            "and shell hard_cap=equity×0.30"
+        )
+
+
+def test_hard_cap_30pct_applied():
+    """Phase 2N+: hard_cap=equity×0.30 is the only shell-level cap.
+
+    Even with extreme Kelly (full cap), size must not exceed equity×0.30.
+    Tests that the new hard_cap line replaced the max_position_pct line.
+    """
+    from src.strategies.trade_flow import TradeFlow
+    from src.domain.signal import Signal, SignalAction
+
+    ticker = "BTC-USDT"
+    tick_price = 100.0
+    entry_ts = 1_700_000_000_001
+    starting_usd = 5000.0
+
+    hypo = {
+        "hypo_id": "HYPO-TEST-HARDCAP",
+        "strategy_cls": TradeFlow,
+        "params": {},
+        "primary_tf": "flow",
+        "tickers": [ticker],
+        "starting_usd": starting_usd,
+    }
+
+    # Confidence=1.0 + excellent performance → maximum dynamic size (capped at MAX_FRACTION=0.20)
+    enter_signal = Signal(
+        timestamp_ms=entry_ts,
+        action=SignalAction.ENTER_LONG,
+        confidence=1.0,
+        target_size_usd=9999.0,  # large value — dynamic sizing will override
+        reason="test_max_signal",
+    )
+
+    with patch.object(rt, "compute_taker_buy_ratio", return_value=0.80), \
+         patch.object(rt, "get_recent_trades", return_value=[None] * 100), \
+         patch("src.strategies.trade_flow.TradeFlow.evaluate_flow",
+               return_value=enter_signal), \
+         patch.object(rt, "_get_btc_1d_candles", return_value=[]), \
+         patch("src.risk.regime_detector.detect_regime", return_value="crisis"), \
+         patch("src.risk.performance_tracker.compute_recent_stats",
+               return_value={
+                   "win_rate": 0.80,
+                   "avg_win_pct": 2.0,
+                   "avg_loss_pct": 0.5,
+               }):
+        rt._eval_and_act(hypo, ticker, tick_price=tick_price, tick_ts_ms=entry_ts,
+                         full_tick=_full_tick(tick_price, entry_ts))
+
+    bal = rt.load_state(ticker, "trade_flow", starting_usd=starting_usd)
+    if len(bal.open_positions) == 0:
+        # size < MIN_SIZE_USD or skip — acceptable if dynamic_sizing returned 0
+        return
+    size = bal.open_positions[0].size_usd
+    hard_cap = starting_usd * 0.30  # $1500
+    assert size <= hard_cap + 0.01, (
+        f"Size ${size:.2f} must not exceed hard_cap ${hard_cap:.2f} (equity×0.30). "
+        "New shell contract: only hard_cap=equity×0.30 as upper bound."
+    )

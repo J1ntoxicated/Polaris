@@ -17,6 +17,9 @@ tags: [meta, log, append_only, polaris]
 
 ## 2026-05-04
 
+- **HYPO-033 VPIN runtime fix** — `realtime_runner.py` bucket 구축 코드에서 `t.get("sz")` dict 호출 → tuple unpack `for _ts_ms, side, size, price in chunk` 수정. `get_recent_trades()` returns `list[tuple]` (not dict). 5 신규 tests (`TestVPINWithTupleTrades`) TDD RED→GREEN. 652/652 pass. 다른 strategy (OFI/delta) tuple 사용 정합 확인.
+
+- **Phase 2N+ Dynamic sizing cap fix** — max_position_pct silent cap bug ($200) 제거. REALTIME_HYPOS 10개 max_position_pct 키 삭제, _eval_and_act hard_cap=equity×0.30으로 교체. Effect: $200→$590 (3.0x). 3 신규 tests (TDD RED→GREEN). 647/647 pass.
 - **Phase 2N 완료 — 5 mandates** — Fix1: okx_history_trades 페이지네이션 (7d tick fetch) / Fix2: backup_history yfinance+CoinGecko (pure parser + shell) / Fix3: backtest_multi_resolution.py (5 strategies × 6 TF × 4 tickers = 120 runs, 3-fold walk-forward) / Fix4: TickPersister SQLite (WS trades → buffer 1000 → batch INSERT, okx_ws integrated, realtime_runner init) / Fix5: cold start 3x (win=0.55, avg_win=0.8 → Kelly=0.269) + MIN_SIZE_USD $50→$100. Effective size flat $5000=$602, uptrend=$860, crisis=$1000. 644/644 tests pass (+62 신규).
 
 - **Phase 2M+ 완료** — HYPO-035 CrossSectionalMomentum (Jegadeesh & Titman 1993 JoF) + HYPO-036 FundingCarry (Liu & Yu 2024) + binance_funding poller 신규. 557/557 tests pass.

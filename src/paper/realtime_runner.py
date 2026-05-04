@@ -107,7 +107,7 @@ REALTIME_HYPOS = [
         "primary_tf": "15m",
         "tickers": ["BTC-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ADA-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         "hypo_id": "HYPO-008-RT",
@@ -116,7 +116,7 @@ REALTIME_HYPOS = [
         "primary_tf": "1H",
         "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.05,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k 2026-05-04)
@@ -131,7 +131,7 @@ REALTIME_HYPOS = [
         # Major liquid pairs with active Binance perp liquidation
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         # Binance perp symbols for liquidation WS (derived at runtime)
         "_binance_perp_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
     },
@@ -146,7 +146,7 @@ REALTIME_HYPOS = [
         "primary_tf": "gap",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         # HYPO-025: Volume Delta Divergence
@@ -158,7 +158,7 @@ REALTIME_HYPOS = [
         "primary_tf": "delta",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     # HYPO-026 DEPRECATED 2026-05-04: n=7, 0 wins, -$1.31.
     # whale_wall pattern明백히 비유효 — n=10 auto-trigger 미달이지만 수동 cut.
@@ -179,7 +179,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "_binance_futures_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         # HYPO-028: Tick Burst Follow
@@ -192,7 +192,7 @@ REALTIME_HYPOS = [
         "primary_tf": "burst",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     # ── Phase 2L+: 3 신규 HYPOs (candle-based 1H, 2026-05-04) ────────────────
     # ── Phase 2M: 3 Academic-grade HYPOs (2026-05-04) ────────────────────────
@@ -208,7 +208,7 @@ REALTIME_HYPOS = [
         "primary_tf": "1D",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         # HYPO-033: VPIN Toxicity (simplified)
@@ -223,7 +223,7 @@ REALTIME_HYPOS = [
         "primary_tf": "vpin",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     {
         # HYPO-034: BTC Dominance Lead-Lag
@@ -238,7 +238,7 @@ REALTIME_HYPOS = [
         "primary_tf": "btclag",
         "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
+        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-029 StochRSI — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
@@ -683,16 +683,24 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             return
         trades = get_recent_trades(ticker, 200)
         # Build rolling 50-trade buckets (each bucket = 10 trades aggregated)
+        # get_recent_trades returns list[tuple]: (ts_ms, side, size, price)
+        # Must use tuple unpacking — NOT dict .get() — fixes HYPO-033 runtime error.
         buckets: list[dict] = []
         bucket_size = 10
         for i in range(0, len(trades), bucket_size):
             chunk = trades[i:i + bucket_size]
             if not chunk:
                 continue
-            buy_vol = sum(float(t.get("sz", 0) or 0) * float(t.get("px", 0) or 0)
-                          for t in chunk if t.get("side") == "buy")
-            sell_vol = sum(float(t.get("sz", 0) or 0) * float(t.get("px", 0) or 0)
-                           for t in chunk if t.get("side") == "sell")
+            buy_vol = sum(
+                size * price
+                for _ts_ms, side, size, price in chunk
+                if side == "buy"
+            )
+            sell_vol = sum(
+                size * price
+                for _ts_ms, side, size, price in chunk
+                if side == "sell"
+            )
             buckets.append({"buy_vol": buy_vol, "sell_vol": sell_vol})
         signal = strategy.evaluate_vpin(full_tick, buckets)
         # HOLD reason logging (rate-limited 5min/ticker)
@@ -832,9 +840,12 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             regime=regime,
             drawdown_pct=dd,
         ))
-        # Apply max_position_pct cap from HYPO config (equity-based upper bound)
-        size_cap = equity * hypo["max_position_pct"]
-        size = min(sizing.size_usd, size_cap, balance.cash_usd)
+        # Phase 2N+: hard_cap replaces per-HYPO max_position_pct (ADR-015 정합).
+        # max_position_pct (0.04 → $200 cap) was silently overriding dynamic sizing.
+        # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.
+        # Shell adds one absolute safety bound: equity × 0.30 ($5000 → $1500 max).
+        hard_cap = equity * 0.30
+        size = min(sizing.size_usd, hard_cap, balance.cash_usd)
 
         logger.info(
             f"[DYN-SIZE] {hypo['hypo_id']} {ticker} size=${size:.0f} "

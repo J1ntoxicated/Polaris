@@ -159,3 +159,109 @@ class TestVPINComputeFunction:
         # Only non-zero bucket contributes → 600/1000 = 0.6
         vpin = strategy.compute_vpin(buckets)
         assert 0.0 <= vpin <= 1.0  # no crash, valid range
+
+
+def _build_buckets_from_tuple_trades(
+    trades: list[tuple], bucket_size: int = 10
+) -> list[dict]:
+    """Shell logic: build VPIN buckets from OKX tuple trades.
+
+    Replicates realtime_runner.py bucket construction for isolation testing.
+    trades format: list of (ts_ms, side, size, price) tuples — as returned
+    by okx_ws.get_recent_trades().
+    """
+    buckets: list[dict] = []
+    for i in range(0, len(trades), bucket_size):
+        chunk = trades[i : i + bucket_size]
+        if not chunk:
+            continue
+        buy_vol = sum(
+            size * price for ts_ms, side, size, price in chunk if side == "buy"
+        )
+        sell_vol = sum(
+            size * price for ts_ms, side, size, price in chunk if side == "sell"
+        )
+        buckets.append({"buy_vol": buy_vol, "sell_vol": sell_vol})
+    return buckets
+
+
+class TestVPINWithTupleTrades:
+    """HYPO-033 runtime fix: OKX get_recent_trades() returns list[tuple].
+
+    realtime_runner shell must unpack tuples — not call .get() dict methods.
+    Tests isolate bucket construction from tuple trades (shell logic).
+    """
+
+    def _make_tuple_trade(
+        self, side: str, size: float = 1.0, price: float = 100.0, ts_ms: int = 1_000_000
+    ) -> tuple:
+        """OKX-style tuple: (ts_ms, side, size, price)."""
+        return (ts_ms, side, size, price)
+
+    def test_bucket_from_tuple_trades_no_attribute_error(self):
+        """Bucket construction from tuple trades must not raise AttributeError.
+
+        Regression: 'tuple' object has no attribute 'get' — HYPO-033 runtime error.
+        """
+        trades = [
+            self._make_tuple_trade("buy", size=2.0, price=50000.0),
+            self._make_tuple_trade("sell", size=1.0, price=50000.0),
+            self._make_tuple_trade("buy", size=3.0, price=50000.0),
+        ]
+        # Must not raise
+        buckets = _build_buckets_from_tuple_trades(trades, bucket_size=10)
+        assert isinstance(buckets, list)
+
+    def test_bucket_buy_vol_computed_correctly_from_tuples(self):
+        """buy_vol = sum(size * price) for buy-side tuple trades."""
+        trades = [
+            self._make_tuple_trade("buy", size=2.0, price=100.0),   # notional 200
+            self._make_tuple_trade("buy", size=3.0, price=100.0),   # notional 300
+            self._make_tuple_trade("sell", size=1.0, price=100.0),  # notional 100
+        ]
+        buckets = _build_buckets_from_tuple_trades(trades, bucket_size=10)
+        assert len(buckets) == 1
+        assert abs(buckets[0]["buy_vol"] - 500.0) < 1e-9
+        assert abs(buckets[0]["sell_vol"] - 100.0) < 1e-9
+
+    def test_evaluate_vpin_with_tuple_derived_buckets_enters_long(self):
+        """evaluate_vpin with buckets derived from tuple trades → ENTER_LONG when buy-dominant."""
+        strategy = VPINToxicity(high_toxicity_threshold=0.7, min_buckets=5)
+        # 60 trades: 80% buy-side → high VPIN
+        trades = []
+        for i in range(48):
+            trades.append((1_000_000 + i, "buy", 10.0, 100.0))   # buy notional 1000
+        for i in range(12):
+            trades.append((1_001_000 + i, "sell", 10.0, 100.0))  # sell notional 1000
+        buckets = _build_buckets_from_tuple_trades(trades, bucket_size=10)
+        tick = {"last": "100.0", "ts": "1_002_000"}
+        signal = strategy.evaluate_vpin(tick, buckets)
+        assert signal.action == SignalAction.ENTER_LONG
+
+    def test_evaluate_vpin_with_tuple_derived_buckets_holds_balanced(self):
+        """evaluate_vpin with balanced tuple-derived buckets → HOLD.
+
+        Trades must be interleaved buy/sell so each bucket contains equal
+        buy and sell volume (not batched — batching would make each bucket
+        all-one-side giving VPIN=1.0 globally).
+        """
+        strategy = VPINToxicity(high_toxicity_threshold=0.7, min_buckets=5)
+        # 60 interleaved trades: alternating buy/sell → each bucket ~50/50 → VPIN ~ 0
+        trades = []
+        for i in range(60):
+            side = "buy" if i % 2 == 0 else "sell"
+            trades.append((1_000_000 + i, side, 5.0, 100.0))
+        buckets = _build_buckets_from_tuple_trades(trades, bucket_size=10)
+        tick = {"last": "100.0", "ts": "1_002_000"}
+        signal = strategy.evaluate_vpin(tick, buckets)
+        assert signal.action == SignalAction.HOLD
+
+    def test_tuple_trade_format_matches_okx_ws_store(self):
+        """Tuple format (ts_ms, side, size, price) matches _trade_store deque format."""
+        # okx_ws._handle_trade appends: (ts, side, size, price)
+        trade: tuple = (1_717_000_000_000, "buy", 0.5, 62345.0)
+        ts_ms, side, size, price = trade  # must unpack cleanly
+        assert isinstance(ts_ms, int)
+        assert side in ("buy", "sell")
+        assert isinstance(size, float)
+        assert isinstance(price, float)

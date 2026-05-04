@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # VPIN exit_profile scalp→liquidation + compute_size default n_trades=0 fix
+last_modified: 2026-05-04  # AI Advisor LONG bias fix: confidence 0.75 + neutral prompt + decision counter
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -15,7 +15,14 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — VPIN exit_profile fix + cold_start default fix: 698/698 pass)
+## 현재 상태 (2026-05-04 — AI Advisor LONG bias fix: 747/747 pass)
+
+**AI Advisor LONG bias fix (88% → target 30-50%)**:
+- `DEFAULT_MIN_CONFIDENCE`: 0.65 → **0.75** (더 엄격한 LONG 게이트)
+- `_build_prompt`: neutral 재프레이밍 — "quantitative analyst for paper trading" + "Default to hold" + confidence > 0.75 명시
+- `_ai_decision_counts` module-level 카운터 + `_track_decision()` 함수 + 시간당 `[AI-STATS]` bias 분포 로그
+- `realtime_runner.py` HYPO-AI-001: `min_confidence` 0.65 → 0.75
+- 13 신규 테스트 TDD RED→GREEN. **747/747 tests pass**.
 
 **VPIN fix + cold_start default fix (698/698 pass)**:
 - HYPO-033 `exit_profile`: scalp→**liquidation** (Easley/LdP 2012 — informed flow 5-30min reversion)

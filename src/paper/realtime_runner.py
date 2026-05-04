@@ -271,7 +271,7 @@ REALTIME_HYPOS = [
         # Exit: liquidation profile (TP 1.5%, SL 0.7%, max 30min — tight event-driven)
         "hypo_id": "HYPO-AI-001",
         "strategy_cls": AIAdvisor,
-        "params": {"target_size_usd": 200.0, "min_confidence": 0.65},
+        "params": {"target_size_usd": 200.0, "min_confidence": 0.75},
         "primary_tf": "ai",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "starting_usd": 50000.0,

@@ -22,6 +22,9 @@ Test coverage:
 - test_provider_auto_detect_anthropic: ANTHROPIC_API_KEY → provider=anthropic
 - test_provider_auto_detect_openai: no ANTHROPIC key, OPENAI key → provider=openai
 - test_anthropic_credit_fail_fallback_openai: credit error → OpenAI fallback
+- test_min_confidence_default_075: DEFAULT_MIN_CONFIDENCE == 0.75
+- test_neutral_prompt_no_entry_bias: prompt contains "default" / "hold" framing
+- test_decision_counter_tracks_distribution: _ai_decision_counts increments correctly
 """
 from __future__ import annotations
 
@@ -38,7 +41,9 @@ from src.strategies.ai_advisor import (
     _estimate_cost,
     _parse_response,
     _state_hash,
+    _ai_decision_counts,
     ANTHROPIC_MODEL,
+    DEFAULT_MIN_CONFIDENCE,
     OPENAI_MODEL,
 )
 
@@ -468,3 +473,107 @@ class TestAnthropicCreditFallback:
         sig = advisor.evaluate_ai(_make_market_state())
         assert sig.action == SignalAction.HOLD
         assert "api_error" in sig.reason
+
+
+# ── New bias-fix tests (TDD RED → GREEN) ─────────────────────────────────────
+
+class TestMinConfidenceDefault:
+    def test_min_confidence_default_075(self) -> None:
+        """DEFAULT_MIN_CONFIDENCE must be 0.75 (raised from 0.65 to reduce LONG bias)."""
+        assert DEFAULT_MIN_CONFIDENCE == pytest.approx(0.75)
+
+    def test_advisor_default_min_confidence_075(self) -> None:
+        """AIAdvisor() without explicit min_confidence uses 0.75."""
+        advisor = AIAdvisor()
+        assert advisor.min_confidence == pytest.approx(0.75)
+
+    def test_confidence_074_does_not_enter(self) -> None:
+        """confidence=0.74 < 0.75 → HOLD (boundary below new threshold)."""
+        advisor, _ = _make_advisor(
+            {"action": "long", "confidence": 0.74, "reason": "below threshold"}
+        )
+        advisor.min_confidence = 0.75
+        sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.HOLD
+
+    def test_confidence_075_enters(self) -> None:
+        """confidence=0.75 == 0.75 → ENTER_LONG (boundary inclusive)."""
+        advisor, _ = _make_advisor(
+            {"action": "long", "confidence": 0.75, "reason": "at threshold"}
+        )
+        advisor.min_confidence = 0.75
+        sig = advisor.evaluate_ai(_make_market_state())
+        assert sig.action == SignalAction.ENTER_LONG
+
+
+class TestNeutralPromptFraming:
+    def test_neutral_prompt_no_entry_bias(self) -> None:
+        """Prompt must NOT contain 'for entry' framing (entry-biased language removed)."""
+        prompt = _build_prompt(_make_market_state())
+        assert "for entry" not in prompt.lower()
+
+    def test_prompt_contains_default_hold_instruction(self) -> None:
+        """Prompt must explicitly say 'Default to hold' or 'default to hold'."""
+        prompt = _build_prompt(_make_market_state())
+        assert "default to" in prompt.lower() and "hold" in prompt.lower()
+
+    def test_prompt_contains_075_threshold(self) -> None:
+        """Prompt must reference confidence > 0.75 threshold (strong conviction gate)."""
+        prompt = _build_prompt(_make_market_state())
+        assert "0.75" in prompt
+
+    def test_prompt_uses_quantitative_analyst_framing(self) -> None:
+        """Prompt must frame role as 'quantitative analyst' not 'crypto trader'."""
+        prompt = _build_prompt(_make_market_state())
+        # Should NOT be biased toward trading/entry
+        assert "quantitative" in prompt.lower() or "analyst" in prompt.lower()
+
+
+class TestDecisionCounter:
+    def test_decision_counter_tracks_long(self) -> None:
+        """evaluate_ai increments _ai_decision_counts['long'] on LONG decision."""
+        import src.strategies.ai_advisor as mod
+        # Reset counters to known state
+        initial_long = mod._ai_decision_counts["long"]
+        advisor, _ = _make_advisor(
+            {"action": "long", "confidence": 0.8, "reason": "test count"}
+        )
+        advisor.min_confidence = 0.75
+        advisor.evaluate_ai(_make_market_state())
+        assert mod._ai_decision_counts["long"] == initial_long + 1
+
+    def test_decision_counter_tracks_hold(self) -> None:
+        """evaluate_ai increments _ai_decision_counts['hold'] on HOLD decision."""
+        import src.strategies.ai_advisor as mod
+        initial_hold = mod._ai_decision_counts["hold"]
+        advisor, _ = _make_advisor(
+            {"action": "hold", "confidence": 0.4, "reason": "uncertain"}
+        )
+        advisor.evaluate_ai(_make_market_state())
+        assert mod._ai_decision_counts["hold"] == initial_hold + 1
+
+    def test_decision_counter_tracks_exit(self) -> None:
+        """evaluate_ai increments _ai_decision_counts['exit'] on EXIT decision."""
+        import src.strategies.ai_advisor as mod
+        initial_exit = mod._ai_decision_counts["exit"]
+        advisor, _ = _make_advisor(
+            {"action": "exit", "confidence": 0.9, "reason": "reverse"}
+        )
+        advisor.evaluate_ai(_make_market_state())
+        assert mod._ai_decision_counts["exit"] == initial_exit + 1
+
+    def test_decision_counter_below_threshold_increments_hold(self) -> None:
+        """Long with confidence below threshold → HOLD signal → hold counter increments."""
+        import src.strategies.ai_advisor as mod
+        initial_hold = mod._ai_decision_counts["hold"]
+        advisor, _ = _make_advisor(
+            {"action": "long", "confidence": 0.50, "reason": "weak"}
+        )
+        advisor.evaluate_ai(_make_market_state())
+        # confidence < min_confidence → HOLD branch
+        assert mod._ai_decision_counts["hold"] == initial_hold + 1
+
+    def test_decision_counter_keys_exist(self) -> None:
+        """_ai_decision_counts module-level dict has exactly long/hold/exit keys."""
+        from src.strategies.ai_advisor import _ai_decision_counts
+        assert set(_ai_decision_counts.keys()) == {"long", "hold", "exit"}

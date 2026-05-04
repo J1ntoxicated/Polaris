@@ -48,9 +48,10 @@ AI_MODEL = ANTHROPIC_MODEL   # Backwards-compat alias (cost tracker uses this)
 CACHE_TTL_S = 300          # 5min cache per unique market state hash
 RATE_LIMIT_S = 60          # 1 call per ticker per 60s
 MAX_TOKENS = 200           # Response bounded (JSON only — no need for 4K)
-DEFAULT_MIN_CONFIDENCE = 0.65
+DEFAULT_MIN_CONFIDENCE = 0.75  # Raised from 0.65 — reduce LONG bias (88% → target 30-50%)
 DEFAULT_TARGET_SIZE_USD = 200.0
 COST_LOG_INTERVAL_S = 3600.0  # Hourly cost report
+DECISION_STATS_LOG_INTERVAL_S = 3600.0  # Hourly bias distribution log
 
 # Error substrings that signal Anthropic credit exhaustion → trigger OpenAI fallback
 _CREDIT_ERROR_SUBSTRINGS = ("credit", "balance", "quota", "insufficient", "overloaded")
@@ -63,6 +64,11 @@ _cost_tracker: dict = {
     "window_calls": 0,
     "window_start": 0.0,
 }
+
+# ── Module-level decision distribution tracker ────────────────────────────────
+
+_ai_decision_counts: dict[str, int] = {"long": 0, "hold": 0, "exit": 0}
+_ai_stats_window_start: float = 0.0
 
 # Rough per-token costs (Haiku 4.5 pricing as of 2026-05)
 _COST_PER_INPUT_TOKEN = 0.0008 / 1000   # $0.0008 per 1K input
@@ -96,6 +102,39 @@ def _track_call(input_tokens: int = 500, output_tokens: int = 50) -> None:
         )
         _cost_tracker["window_calls"] = 0
         _cost_tracker["window_start"] = now
+
+
+def _track_decision(action: str) -> None:
+    """Record AI decision in distribution counter and emit hourly stats log. Shell.
+
+    Args:
+        action: One of 'long', 'hold', 'exit'.
+    """
+    global _ai_stats_window_start
+    if action in _ai_decision_counts:
+        _ai_decision_counts[action] += 1
+    now = time.time()
+    if _ai_stats_window_start == 0.0:
+        _ai_stats_window_start = now
+    elapsed = now - _ai_stats_window_start
+    if elapsed >= DECISION_STATS_LOG_INTERVAL_S:
+        total = sum(_ai_decision_counts.values())
+        if total > 0:
+            long_pct = 100 * _ai_decision_counts["long"] / total
+            hold_pct = 100 * _ai_decision_counts["hold"] / total
+            exit_pct = 100 * _ai_decision_counts["exit"] / total
+            bias_warn = " ⚠ LONG BIAS DETECTED" if long_pct > 60 else ""
+            logger.info(
+                f"[AI-STATS] last 1h distribution: "
+                f"LONG={long_pct:.0f}% ({_ai_decision_counts['long']}) "
+                f"HOLD={hold_pct:.0f}% ({_ai_decision_counts['hold']}) "
+                f"EXIT={exit_pct:.0f}% ({_ai_decision_counts['exit']})"
+                f"{bias_warn}"
+            )
+        _ai_decision_counts["long"] = 0
+        _ai_decision_counts["hold"] = 0
+        _ai_decision_counts["exit"] = 0
+        _ai_stats_window_start = now
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -132,8 +171,8 @@ def _build_prompt(market_state: dict) -> str:
     regime = market_state.get("regime", "unknown")
 
     return (
-        f"You are a crypto SPOT trader analyzing {ticker} for entry/exit decision.\n"
-        f"Current state:\n"
+        f"You are a quantitative analyst evaluating {ticker} for paper trading.\n"
+        f"Current market state:\n"
         f"- Price: ${last:,.4f} | 24h change: {change_24h:+.2f}%\n"
         f"- Multi-TF: 1H RSI={rsi_1h}, 4H trend={trend_4h}, 1D trend={trend_1d}\n"
         f"- Order book: bid_depth=${bid_depth:,.0f}, ask_depth=${ask_depth:,.0f}\n"
@@ -145,13 +184,14 @@ def _build_prompt(market_state: dict) -> str:
         f'{{\"action\": \"long\" | \"exit\" | \"hold\", '
         f'\"confidence\": 0.0-1.0, \"reason\": \"<50 chars\"}}\n'
         f"\n"
-        f"Trading rules:\n"
+        f"Decision rules:\n"
         f"- SPOT only (no short selling)\n"
-        f"- Fee: 0.14% round-trip — your edge must exceed this\n"
+        f"- Fee: 0.14% round-trip — edge must exceed this\n"
         f"- TP ~1.5% / SL ~0.7% (asymmetric profile)\n"
-        f"- Only recommend 'long' if confidence > 0.65 and setup is strong\n"
-        f"- Recommend 'exit' to close existing position if momentum reverses\n"
-        f"- Default to 'hold' when uncertain\n"
+        f"- Choose 'long' ONLY if confidence > 0.75 and setup shows STRONG conviction\n"
+        f"- Choose 'exit' to close existing position if momentum clearly reverses\n"
+        f"- Default to 'hold' when uncertain, sideways, or mixed signals\n"
+        f"- Most situations = 'hold'. Only LONG on high conviction.\n"
     )
 
 
@@ -430,7 +470,7 @@ class AIAdvisor(Strategy):
             raise RuntimeError(f"Unknown provider: {self.provider!r}")
 
     def _response_to_signal(self, response: dict, ts_ms: int) -> Signal:
-        """Convert parsed response dict → Signal. Pure.
+        """Convert parsed response dict → Signal. Tracks decision distribution.
 
         Args:
             response: dict from _parse_response (action, confidence, reason).
@@ -444,6 +484,7 @@ class AIAdvisor(Strategy):
         reason = response["reason"]
 
         if action_str == "long" and confidence >= self.min_confidence:
+            _track_decision("long")
             return Signal(
                 timestamp_ms=ts_ms,
                 action=SignalAction.ENTER_LONG,
@@ -452,6 +493,7 @@ class AIAdvisor(Strategy):
                 reason=reason[:100],
             )
         if action_str == "exit":
+            _track_decision("exit")
             return Signal(
                 timestamp_ms=ts_ms,
                 action=SignalAction.EXIT,
@@ -459,6 +501,7 @@ class AIAdvisor(Strategy):
                 reason=reason[:100],
             )
         # hold or long below confidence threshold
+        _track_decision("hold")
         return Signal(
             timestamp_ms=ts_ms,
             action=SignalAction.HOLD,

@@ -17,6 +17,8 @@ tags: [meta, log, append_only, polaris]
 
 ## 2026-05-04
 
+- **AI Advisor LONG bias fix (88% → target 30-50%)** — 3 fixes: (1) `DEFAULT_MIN_CONFIDENCE` 0.65→0.75 (더 엄격한 LONG 게이트), (2) `_build_prompt` neutral 재프레이밍 ("quantitative analyst" + "Default to hold" + "0.75 강조"), (3) `_ai_decision_counts` module-level 카운터 + `_track_decision()` + 시간당 `[AI-STATS]` bias 로그. `realtime_runner.py` HYPO-AI-001 params `min_confidence` 0.65→0.75. TDD RED→GREEN: 13 신규 테스트 (`TestMinConfidenceDefault` 4개 + `TestNeutralPromptFraming` 4개 + `TestDecisionCounter` 5개). 747/747 tests pass. [[HYPO-AI-001]]
+
 - **Phase 3 AI Advisor 부활** — `src/strategies/ai_advisor.py` NEW (Claude Haiku 4.5 per-tick market analysis). HYPO-AI-001 (BTC/ETH/SOL, $200, liquidation profile, 0.65 confidence gate). 27/27 tests pass. Jin mandate '원래 의도 = AI 개입 실시간 분석' 이행. INSIGHT-034 + HYPOTHESIS-AI-001 vault 등록. Cost: ~$0.11/h (180 calls/h × $0.0006). [[INSIGHT-034]] [[HYPO-AI-001]]
 
 - **VPIN exit_profile fix + cold_start default fix** — Fix1: HYPO-033 `exit_profile` scalp→liquidation (Easley/LdP 2012 — informed flow 5-30min reversion, scalp TP 0.6% too tight, confirmed by SL hit -$5.21). Fix2: `compute_size` default `n_trades=0` (was `COLD_START_N=20` — latent bug: omitting n_trades bypassed cold start cap). `_sized()` helper 추가 (warm start 비교 테스트용). 698/698 pass (2 신규 테스트: `test_vpin_uses_liquidation_profile` + `TestColdStartCapDefault`).

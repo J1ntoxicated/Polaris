@@ -109,7 +109,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "15m",
         "tickers": ["BTC-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ADA-USDT", "TRUMP-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital (50k) for 10x size exposure
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: 15m intraday — TP 0.6%, SL 0.35%, max 4h
     },
@@ -119,7 +119,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "1H",
         "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "swing",  # Phase 2P: 1H VolumeBurst → swing moves — TP 5%, SL 2%, max 7d
     },
@@ -135,7 +135,7 @@ REALTIME_HYPOS = [
         "primary_tf": "liquidation",
         # Major liquid pairs with active Binance perp liquidation
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         # Binance perp symbols for liquidation WS (derived at runtime)
         "_binance_perp_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
@@ -151,7 +151,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "gap",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: cross-exchange gap (sub-second) — TP 0.6%, SL 0.35%, max 4h
     },
@@ -185,7 +185,7 @@ REALTIME_HYPOS = [
         "primary_tf": "funding",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "_binance_futures_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "swing",  # Phase 2P: funding 8h cycle → swing — TP 5%, SL 2%, max 7d
     },
@@ -199,7 +199,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "burst",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: 5s burst, 60s expected hold — TP 0.6%, SL 0.35%, max 4h
     },
@@ -216,7 +216,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "1D",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "position",  # Phase 2P: 30d momentum — TP 12%, SL 4%, max 30d (aligns with Moskowitz 2012 expectancy)
     },
@@ -232,7 +232,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "vpin",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: intraday informed flow — TP 0.6%, SL 0.35%, max 4h
     },
@@ -248,7 +248,7 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "btclag",
         "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: BTC→alt lag 30s-3min — TP 0.6%, SL 0.35%, max 4h
     },

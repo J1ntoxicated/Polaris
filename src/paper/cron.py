@@ -57,7 +57,7 @@ ACTIVE_HYPOS = [
             "ADA-USDT", "XRP-USDT", "ORDI-USDT", "SUI-USDT",
         ],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.02,
     },
     # HYPO-004 Donchian breakout variant 1 — conservative long-period (Round 15)
@@ -68,7 +68,7 @@ ACTIVE_HYPOS = [
         "strategy_params": {"entry_period": 40, "exit_period": 15},
         "tickers": ["BTC-USDT", "ETH-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.02,
     },
     # HYPO-004 Donchian breakout variant 2 — medium-period swing (Round 15)
@@ -79,7 +79,7 @@ ACTIVE_HYPOS = [
         "strategy_params": {"entry_period": 20, "exit_period": 10},
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.02,
     },
     # HYPO-020 NOTE: moved to daily_paper_runner.py DAILY_PAPER_HYPOS (ADR-010 fix).

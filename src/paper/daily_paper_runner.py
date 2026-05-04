@@ -84,7 +84,7 @@ DAILY_PAPER_HYPOS = [
             "ADA-USDT", "XRP-USDT", "ORDI-USDT", "SUI-USDT",
         ],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -114,7 +114,7 @@ DAILY_PAPER_HYPOS = [
         },
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "bar": "1H",  # check funding every 1H (funding cycle 8H, intraday bar for price)
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -134,7 +134,7 @@ DAILY_PAPER_HYPOS = [
         },
         "tickers": ["DOGE-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -156,7 +156,7 @@ DAILY_PAPER_HYPOS = [
         "strategy_params": {"entry_period": 40, "exit_period": 15},
         "tickers": ["DOGE-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -177,7 +177,7 @@ DAILY_PAPER_HYPOS = [
         },
         "tickers": ["BTC-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -198,7 +198,7 @@ DAILY_PAPER_HYPOS = [
         },
         "tickers": ["ETH-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -216,7 +216,7 @@ DAILY_PAPER_HYPOS = [
         "strategy_params": {},
         "tickers": ["BTC-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -233,7 +233,7 @@ DAILY_PAPER_HYPOS = [
         "strategy_params": {},
         "tickers": ["ETH-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -250,7 +250,7 @@ DAILY_PAPER_HYPOS = [
         "strategy_params": {},
         "tickers": ["DOGE-USDT"],
         "bar": "1D",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {
@@ -268,7 +268,7 @@ DAILY_PAPER_HYPOS = [
         "strategy_params": {},
         "tickers": ["ETH-USDT"],
         "bar": "4H",
-        "starting_usd": 5000.0,
+        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         "max_position_pct": 0.04,
         "paper_since": "2026-05-04",
         "promotion_criteria": {

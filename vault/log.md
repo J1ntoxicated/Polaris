@@ -17,6 +17,7 @@ tags: [meta, log, append_only, polaris]
 
 ## 2026-05-04
 
+- **Phase 2Q — 10x capital + live audit + ADR-009v2** — (A) realtime_runner/cron/daily_paper_runner 3 파일 REALTIME_HYPOS starting_usd 5000→50000 (9 active HYPOs). 기존 JSON 유지 (신규 entry만 50k fresh). (B) `scripts/live_readiness_audit.py` 신규 작성+실행: 778 trades, Paper PnL -$132.86, Live est. -$242.20, score 22/100 NOT READY. 주요 문제: orderbook_imbalance (n=353, win 4%) + trade_flow (n=209, win 18%) 압도적 손실. volume_burst (win 55%, +$3.50)만 유일 양성. (C) `vault/20_decisions/ADR-009v2-spot-perp-dual-mode.md` provisional: 5x leverage / funding <= -0.05% 조건 / Sharpe >= 0.5 / liquidation distance > SL×2 / code X until Jin ack. 696/696 tests pass.
 - **HYPO-033 VPIN runtime fix** — `realtime_runner.py` bucket 구축 코드에서 `t.get("sz")` dict 호출 → tuple unpack `for _ts_ms, side, size, price in chunk` 수정. `get_recent_trades()` returns `list[tuple]` (not dict). 5 신규 tests (`TestVPINWithTupleTrades`) TDD RED→GREEN. 652/652 pass. 다른 strategy (OFI/delta) tuple 사용 정합 확인.
 - **Phase 2N+ Emergency Fix** — 3 fixes: (1) HYPO-025 cut (n=6 win 33% fast_fail trigger met, avg_size $687→$300 cap 적용 후 즉시 제거); (2) dynamic_sizing cold start cap `COLD_START_N=20 / COLD_START_MAX_USD=$300` (n_trades<20 시 size hard cap, weak strategy 큰 size 방지); (3) `DEPRECATE_CHECK_INTERVAL_S` 300s→60s (faster fail-fast). 11 신규 tests RED→GREEN. 663/663 pass. Runtime verify: HYPO-025 absent, n=0→$300 cap, n=20→$1000 full dynamic.
 

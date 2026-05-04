@@ -17,12 +17,12 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🎯 현재 상태 (2026-05-04)
 
-**Phase 2g Round 8 완료 (Codex 95% 합의) — HYPO-011/012 deprecate**:
-- HYPO-011 n=336, TP 0, signal_exit 99.7%, -$77.93 lifetime → REALTIME_HYPOS 제거
-- HYPO-012 n=450, TP 9.8%, EV -0.22%/trade, -$151.77 lifetime → REALTIME_HYPOS 제거
-- 전략 파일 보존 (학습 아카이브), comment 흔적 유지
-- 156/156 tests pass + TDD `test_hypo_011_012_not_in_realtime_hypos`
-- 후속: runner restart + HYPO-013/014 60분 측정 (n>=10 수집)
+**Phase 2g Round 9 완료 (Codex 92% 합의) — HYPO-009 deprecate**:
+- HYPO-009 n=16, win 44%, TP 7 / SL 9, EV -1.33%/trade (paper fee) → REALTIME_HYPOS 제거
+- TP<SL 비대칭 구조적 원인 — parameter tuning 불가, 아카이브 보존
+- 157/157 tests pass + TDD `test_hypo_009_not_in_realtime_hypos`
+- 잔여 8% gap: forensic audit `net_usd` fee 차감 검증 (HYPO-008/010 size 결정 보류)
+- Round 10 불필요 (92% ≥ 80% ADR-004 기준)
 
 ## 📍 다음 액션
 
@@ -52,6 +52,8 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
+- [[INSIGHT-025]] fee 0.014 latent bug 4건 (runner.py:59,74,136 + metrics.py:15) — 즉시 fix 후 backtest 재실행 필요
+- [[INSIGHT-024]] HYPO-009 deprecate 근거 (n=16, EV -1.33%, TP<SL 비대칭) — Round 9
 - [[INSIGHT-023]] HYPO-011/012 deprecate 근거 (n=336/450, EV 계산, signal_exit 구조) — Round 8
 - [[INSIGHT-022]] Phase 2g Binance WS + MTA + Codex Round 4~7 fix 누적
 - [[INSIGHT-021]] flip-flop fee bleed fix — Round 4 hysteresis + min hold + ticker-global cooldown
@@ -64,7 +66,7 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 |---|---|---|
 | HYPO-007-RT | RSI15m intraday | active |
 | HYPO-008-RT | VolumeBurst 1H | active |
-| HYPO-009-RT | BreakoutMomentum 1H | active |
+| HYPO-009-RT | BreakoutMomentum 1H | **DEPRECATED Round 9** — n=16, EV -1.33%, TP<SL |
 | HYPO-010-TICK | TickMomentum tick | active |
 | HYPO-011-BOOK | OrderBookImbalance book | **DEPRECATED Round 8** — n=336, TP 0, -$77.93 |
 | HYPO-012-FLOW | TradeFlow flow | **DEPRECATED Round 8** — n=450, EV -0.22%, -$151.77 |

@@ -4,7 +4,7 @@ All functions deterministic, no I/O. P7 property-based test 적용 영역.
 
 References:
 - INSIGHT-002 MTTR-alpha 정의
-- INSIGHT-007 OKX SPOT fee 수학 (fee_round_trip 0.014 default)
+- INSIGHT-007 OKX SPOT fee 수학 (fee_round_trip 0.0014 default = LV3+ taker 0.07% × 2)
 - 60_alpha/_README Promotion Gate 기준
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-DEFAULT_FEE_ROUND_TRIP = 0.014  # INSIGHT-007 / ADR-007 OKX paper Lv1
+DEFAULT_FEE_ROUND_TRIP = 0.0014  # INSIGHT-007 OKX SPOT LV3+ taker 0.07% × 2 (latent bug fix 2026-05-04)
 
 
 @dataclass(frozen=True, slots=True)

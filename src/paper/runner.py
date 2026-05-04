@@ -56,7 +56,7 @@ def load_state(ticker: str, strategy_name: str, starting_usd: float = 5000.0) ->
             open_ts_ms=p["open_ts_ms"],
             close_ts_ms=p.get("close_ts_ms", 0),
             exit_price=p.get("exit_price", 0.0),
-            fee_round_trip=p.get("fee_round_trip", 0.014),
+            fee_round_trip=p.get("fee_round_trip", 0.0014),
             status=PositionStatus(p.get("status", "open")),
         )
         for p in raw.get("open_positions", [])
@@ -71,7 +71,7 @@ def load_state(ticker: str, strategy_name: str, starting_usd: float = 5000.0) ->
             open_ts_ms=p["open_ts_ms"],
             close_ts_ms=p.get("close_ts_ms", 0),
             exit_price=p.get("exit_price", 0.0),
-            fee_round_trip=p.get("fee_round_trip", 0.014),
+            fee_round_trip=p.get("fee_round_trip", 0.0014),
             status=PositionStatus(p.get("status", "closed")),
         )
         for p in raw.get("closed_positions", [])
@@ -133,7 +133,7 @@ def run_cycle(
     bar: str = "1D",
     starting_usd: float = 5000.0,
     max_position_pct: float = 0.02,
-    fee_round_trip: float = 0.014,
+    fee_round_trip: float = 0.0014,
 ) -> dict:
     """Single paper cycle.
 

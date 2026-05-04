@@ -26,8 +26,8 @@ class TestPosition:
         c = p.close(exit_price=55000, close_ts_ms=2)
         assert not c.is_open
         assert c.gross_pct == pytest.approx(0.10)
-        assert c.net_pct == pytest.approx(0.10 - 0.014)
-        assert c.net_usd == pytest.approx(1000 * (0.10 - 0.014))
+        assert c.net_pct == pytest.approx(0.10 - 0.0014)  # fee 0.0014 (latent bug fix 2026-05-04)
+        assert c.net_usd == pytest.approx(1000 * (0.10 - 0.0014))
 
     def test_close_invalid_ts(self) -> None:
         p = Position("X", "BTC", 1, 50000, 1000, 100)
@@ -65,11 +65,12 @@ class TestPaperBalance:
         p = Position("BTC-1", "BTC-USDT", 1, 50000, 1000, 1)
         b = b.open(p)
         b = b.close("BTC-1", exit_price=55000, close_ts_ms=2)
-        # cash = 4000 (after open) + 1000 (size returned) + (1000 × (0.10 - 0.014))
-        assert b.cash_usd == pytest.approx(4000 + 1000 + 1000 * 0.086)
+        # cash = 4000 (after open) + 1000 (size returned) + (1000 × (0.10 - 0.0014))
+        # net_pct = 0.10 - 0.0014 = 0.0986 (fee 0.0014, latent bug fix 2026-05-04)
+        assert b.cash_usd == pytest.approx(4000 + 1000 + 1000 * 0.0986)
         assert b.n_open == 0
         assert b.n_closed == 1
-        assert b.realized_pnl_usd == pytest.approx(1000 * 0.086)
+        assert b.realized_pnl_usd == pytest.approx(1000 * 0.0986)
 
     def test_close_not_found(self) -> None:
         b = PaperBalance(starting_usd=5000, cash_usd=5000)

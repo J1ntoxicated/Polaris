@@ -518,6 +518,24 @@ def test_no_double_subscribe_after_crash():
     )
 
 
+# ── Round 9: HYPO-009 deprecated (Codex 92% 합의) ────────────────────────────
+
+
+def test_hypo_009_not_in_realtime_hypos():
+    """HYPO-009-RT (BreakoutMomentum) must be absent from REALTIME_HYPOS.
+
+    Codex Round 9 (92% consensus): n=16, win 44%, TP 7 / SL 9, -$2.47 total.
+    EV (paper fee 0.0014): -0.07%/trade — structural negative EV (TP<SL asymmetry).
+    EV (live fee 0.0014): -0.07%/trade — still negative, TP<SL asymmetry unfixable.
+    Deprecated to stop fee bleed. Strategy file preserved for learning archive.
+    """
+    active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
+    assert "HYPO-009-RT" not in active_ids, (
+        "HYPO-009-RT (BreakoutMomentum) must be deprecated — "
+        "n=16, win 44%, TP<SL asymmetry, EV -1.33%/trade (paper fee)"
+    )
+
+
 # ── Round 8: HYPO-011/012 deprecated (Codex 95% 합의) ───────────────────────
 
 

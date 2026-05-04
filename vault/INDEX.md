@@ -2,7 +2,7 @@
 entity_type: index
 entity_id: master_index
 auto: false
-last_modified: 2026-05-03
+last_modified: 2026-05-04
 expires: never
 editable: true
 back_links: ["[[_NOW]]"]
@@ -70,6 +70,8 @@ tags: [meta, index, polaris]
 | [[INSIGHT-021]] | Codex Round 4 — flip-flop fee bleed fix (min hold 90s + hysteresis + ticker-global cooldown) | active |
 | [[INSIGHT-022]] | Phase 2g Round 2/3 — MTAConfluence 활성화 + Binance WS spec + 즉시 구현 (HYPO-014 운영 중) | active |
 | [[INSIGHT-023]] | HYPO-011/012 deprecate 근거 — n=336/450 직접 측정, EV 음수, Codex 95% 합의 (Round 8) | active |
+| [[INSIGHT-024]] | HYPO-009 deprecate 근거 — n=16, EV -1.33%/trade, TP<SL 비대칭, Codex 92% 합의 (Round 9) | active |
+| [[INSIGHT-025]] | fee 0.014 latent bug 4건 (runner.py + metrics.py) — realtime 무영향, cron/backtest 오염 위험 (Forensic Round 9) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

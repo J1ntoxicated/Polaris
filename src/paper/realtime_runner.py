@@ -81,15 +81,10 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.05,
     },
-    {
-        "hypo_id": "HYPO-009-RT",
-        "strategy_cls": BreakoutMomentum,
-        "params": {"lookback": 10},
-        "primary_tf": "1H",
-        "tickers": ["DOGE-USDT", "PEPE-USDT", "ORDI-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
-    },
+    # HYPO-009 BreakoutMomentum — DEPRECATED Round 9 (Codex 92% 합의 2026-05-04)
+    # n=16, win 44%, TP 7 / SL 9, -$2.47 total. EV -1.33%/trade (paper fee 0.0014 — was 0.014 typo).
+    # TP<SL asymmetry: structural negative EV — unfixable by parameter tuning.
+    # Strategy file (breakout_momentum.py) preserved for learning archive.
     # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가
     {
         "hypo_id": "HYPO-010-TICK",

@@ -5,7 +5,7 @@ Position + Balance dataclasses + state transitions. No I/O.
 References:
 - ADR-007 paper sizing $1000
 - ADR-010 risk management (단일 ≤2%, 일일 ≤5%)
-- INSIGHT-007 fee 0.014 round-trip
+- INSIGHT-007 fee 0.0014 round-trip (OKX SPOT LV3+ taker 0.07% × 2)
 - LESSON-001 NULL cascade prevention
 """
 from __future__ import annotations

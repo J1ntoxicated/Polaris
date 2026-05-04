@@ -17,6 +17,15 @@ from src.domain.metrics import (
 )
 
 
+class TestDefaultFee:
+    def test_default_fee_round_trip_lv3(self) -> None:
+        """INSIGHT-007: OKX SPOT LV3+ taker 0.07% × 2 = 0.0014 (not 0.014).
+
+        latent bug fix 2026-05-04: 0.014 → 0.0014 (10x correction).
+        """
+        assert DEFAULT_FEE_ROUND_TRIP == pytest.approx(0.0014)
+
+
 class TestTradeReturn:
     def test_long_profit(self) -> None:
         r = TradeReturn(entry_price=100, exit_price=105, direction=1)

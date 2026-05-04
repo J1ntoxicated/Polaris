@@ -144,6 +144,140 @@ DAILY_PAPER_HYPOS = [
             "min_calendar_days": 60,
         },
     },
+    # ── Phase 2O (2026-05-04): 7 backtest-viable strategies paper validation ────
+    # Multi-resolution backtest grid (171s) identified 10 viable (Sharpe>=0.3, IS+OOS EV>0).
+    # ADR-010: all enter PAPER stage (60d tracking) before Promotion Gate → cron.
+    #
+    # HYPO-004-DONCH-DOGE-1D: IS exp +63%, OOS exp +67%, Sharpe 1.16 — strongest signal.
+    # Donchian 40/15 applied to DOGE (already proven for BTC/ETH in cron ACTIVE_HYPOS).
+    {
+        "hypo_id": "HYPO-004-DONCH-DOGE-1D",
+        "strategy": DonchianBreakout,
+        "strategy_params": {"entry_period": 40, "exit_period": 15},
+        "tickers": ["DOGE-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-020-VB-DONCH-BTC-1D: IS Sharpe 0.57 — VB+Donchian AND confluence for BTC.
+    {
+        "hypo_id": "HYPO-020-VB-DONCH-BTC-1D",
+        "strategy": ConfluenceSignal,
+        "strategy_params": {
+            "sub_strategies": [VolumeBurst(), DonchianBreakout(40, 15)],
+            "require_all": True,
+            "target_size_usd": 200.0,
+        },
+        "tickers": ["BTC-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-020-VB-DONCH-ETH-1D: IS Sharpe 0.45 — VB+Donchian AND confluence for ETH.
+    {
+        "hypo_id": "HYPO-020-VB-DONCH-ETH-1D",
+        "strategy": ConfluenceSignal,
+        "strategy_params": {
+            "sub_strategies": [VolumeBurst(), DonchianBreakout(40, 15)],
+            "require_all": True,
+            "target_size_usd": 200.0,
+        },
+        "tickers": ["ETH-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-008-VB-1D-BTC: VolumeBurst 1D (currently runs 1H realtime — 1D is new entry).
+    # IS Sharpe 0.38 — slower signal, captures larger volume expansions.
+    {
+        "hypo_id": "HYPO-008-VB-1D-BTC",
+        "strategy": VolumeBurst,
+        "strategy_params": {},
+        "tickers": ["BTC-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-008-VB-1D-ETH: IS Sharpe 0.41 — slightly stronger than BTC 1D variant.
+    {
+        "hypo_id": "HYPO-008-VB-1D-ETH",
+        "strategy": VolumeBurst,
+        "strategy_params": {},
+        "tickers": ["ETH-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-008-VB-1D-DOGE: IS Sharpe 0.36 — weakest of 1D VB trio but OOS EV>0.
+    {
+        "hypo_id": "HYPO-008-VB-1D-DOGE",
+        "strategy": VolumeBurst,
+        "strategy_params": {},
+        "tickers": ["DOGE-USDT"],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-008-VB-4H-ETH: first viable 4H entry. n=53 trades (9x faster than 1D).
+    # IS Sharpe 0.33 — runner.py bar="4H" uses OKX 4H candles natively.
+    {
+        "hypo_id": "HYPO-008-VB-4H-ETH",
+        "strategy": VolumeBurst,
+        "strategy_params": {},
+        "tickers": ["ETH-USDT"],
+        "bar": "4H",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 10,
+            "min_calendar_days": 60,
+        },
+    },
 ]
 
 

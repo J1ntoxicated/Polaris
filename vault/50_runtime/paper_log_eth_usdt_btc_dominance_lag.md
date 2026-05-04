@@ -22,3 +22,5 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-05T00:48:26 | OPEN | id=ETH-USDT-1777906105915 dir=1 entry=2368.48 size=$300 |
+| 2026-05-05T01:29:26 | CLOSE | id=ETH-USDT-1777906105915 entry=2368.48 exit=2349.78 net=-0.93% net_usd=-2.79 |
+| 2026-05-05T01:29:26 | EXIT_REASON | sl_hit:-0.0079 |

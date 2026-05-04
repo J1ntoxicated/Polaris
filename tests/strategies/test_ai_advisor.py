@@ -478,30 +478,33 @@ class TestAnthropicCreditFallback:
 # ── New bias-fix tests (TDD RED → GREEN) ─────────────────────────────────────
 
 class TestMinConfidenceDefault:
-    def test_min_confidence_default_075(self) -> None:
-        """DEFAULT_MIN_CONFIDENCE must be 0.75 (raised from 0.65 to reduce LONG bias)."""
-        assert DEFAULT_MIN_CONFIDENCE == pytest.approx(0.75)
+    def test_min_confidence_default_072(self) -> None:
+        """DEFAULT_MIN_CONFIDENCE must be 0.72 (tuned from 0.75 — too strict → LONG 0.3%).
 
-    def test_advisor_default_min_confidence_075(self) -> None:
-        """AIAdvisor() without explicit min_confidence uses 0.75."""
+        0.72 targets 5-15% LONG ratio (balanced signal rate).
+        """
+        assert DEFAULT_MIN_CONFIDENCE == pytest.approx(0.72)
+
+    def test_advisor_default_min_confidence_072(self) -> None:
+        """AIAdvisor() without explicit min_confidence uses 0.72."""
         advisor = AIAdvisor()
-        assert advisor.min_confidence == pytest.approx(0.75)
+        assert advisor.min_confidence == pytest.approx(0.72)
 
-    def test_confidence_074_does_not_enter(self) -> None:
-        """confidence=0.74 < 0.75 → HOLD (boundary below new threshold)."""
+    def test_confidence_071_does_not_enter(self) -> None:
+        """confidence=0.71 < 0.72 → HOLD (boundary below new threshold)."""
         advisor, _ = _make_advisor(
-            {"action": "long", "confidence": 0.74, "reason": "below threshold"}
+            {"action": "long", "confidence": 0.71, "reason": "below threshold"}
         )
-        advisor.min_confidence = 0.75
+        advisor.min_confidence = 0.72
         sig = advisor.evaluate_ai(_make_market_state())
         assert sig.action == SignalAction.HOLD
 
-    def test_confidence_075_enters(self) -> None:
-        """confidence=0.75 == 0.75 → ENTER_LONG (boundary inclusive)."""
+    def test_confidence_072_enters(self) -> None:
+        """confidence=0.72 == 0.72 → ENTER_LONG (boundary inclusive)."""
         advisor, _ = _make_advisor(
-            {"action": "long", "confidence": 0.75, "reason": "at threshold"}
+            {"action": "long", "confidence": 0.72, "reason": "at threshold"}
         )
-        advisor.min_confidence = 0.75
+        advisor.min_confidence = 0.72
         sig = advisor.evaluate_ai(_make_market_state())
         assert sig.action == SignalAction.ENTER_LONG
 
@@ -517,10 +520,10 @@ class TestNeutralPromptFraming:
         prompt = _build_prompt(_make_market_state())
         assert "default to" in prompt.lower() and "hold" in prompt.lower()
 
-    def test_prompt_contains_075_threshold(self) -> None:
-        """Prompt must reference confidence > 0.75 threshold (strong conviction gate)."""
+    def test_prompt_contains_072_threshold(self) -> None:
+        """Prompt must reference confidence >= 0.72 threshold (tuned from 0.75)."""
         prompt = _build_prompt(_make_market_state())
-        assert "0.75" in prompt
+        assert "0.72" in prompt
 
     def test_prompt_uses_quantitative_analyst_framing(self) -> None:
         """Prompt must frame role as 'quantitative analyst' not 'crypto trader'."""

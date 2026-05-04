@@ -17,6 +17,7 @@ tags: [meta, log, append_only, polaris]
 
 ## 2026-05-04
 
+- **HYPO-034 cut + AI threshold 0.72** — (1) HYPO-034 BTCDominanceLag deprecated (n=3 win 0% 3 SL -$7.09, manual cut — pattern 확실), (2) `DEFAULT_MIN_CONFIDENCE` 0.75→0.72 (too strict → LONG 0.3%, target 5-15%), prompt "0.72 + clear edge", HYPO-AI-001 params 동기화. 5 신규 TDD tests. 752/752 pass. [[HYPO-034]] [[HYPO-AI-001]]
 - **AI Advisor LONG bias fix (88% → target 30-50%)** — 3 fixes: (1) `DEFAULT_MIN_CONFIDENCE` 0.65→0.75 (더 엄격한 LONG 게이트), (2) `_build_prompt` neutral 재프레이밍 ("quantitative analyst" + "Default to hold" + "0.75 강조"), (3) `_ai_decision_counts` module-level 카운터 + `_track_decision()` + 시간당 `[AI-STATS]` bias 로그. `realtime_runner.py` HYPO-AI-001 params `min_confidence` 0.65→0.75. TDD RED→GREEN: 13 신규 테스트 (`TestMinConfidenceDefault` 4개 + `TestNeutralPromptFraming` 4개 + `TestDecisionCounter` 5개). 747/747 tests pass. [[HYPO-AI-001]]
 
 - **Phase 3 AI Advisor 부활** — `src/strategies/ai_advisor.py` NEW (Claude Haiku 4.5 per-tick market analysis). HYPO-AI-001 (BTC/ETH/SOL, $200, liquidation profile, 0.65 confidence gate). 27/27 tests pass. Jin mandate '원래 의도 = AI 개입 실시간 분석' 이행. INSIGHT-034 + HYPOTHESIS-AI-001 vault 등록. Cost: ~$0.11/h (180 calls/h × $0.0006). [[INSIGHT-034]] [[HYPO-AI-001]]

@@ -234,14 +234,17 @@ def test_vpin_uses_liquidation_profile():
     )
 
 
-def test_hypo_034_uses_scalp_profile():
-    """HYPO-034 (BTCDominanceLag): exit_profile='scalp' — 30s-3min lead-lag window."""
+def test_hypo_034_deprecated():
+    """HYPO-034 (BTCDominanceLag) must be deprecated (not in REALTIME_HYPOS).
+
+    Manual cut 2026-05-04: n=3, win 0%, 3 SL consecutive, -$7.09.
+    Pattern confirmed — BTC spike reversal before alt entry fills alt into correction.
+    """
     from src.paper import realtime_runner as rt
     hypo = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-034"), None)
-    assert hypo is not None, "HYPO-034 must exist in REALTIME_HYPOS"
-    assert hypo.get("exit_profile") == "scalp", (
-        f"HYPO-034 (BTC→alt lag 30s-3min) must use scalp profile, "
-        f"got '{hypo.get('exit_profile')}'"
+    assert hypo is None, (
+        "HYPO-034 must NOT exist in REALTIME_HYPOS — deprecated 2026-05-04 "
+        "(n=3 win 0% 3 SL consecutive)"
     )
 
 

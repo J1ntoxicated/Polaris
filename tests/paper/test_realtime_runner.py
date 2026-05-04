@@ -237,6 +237,94 @@ def test_cross_strategy_cooldown_blocks_other_strategy():
     assert len(bal.open_positions) == 0, "ticker-global cooldown — 다른 strategy도 60s 차단"
 
 
+def test_hypo_034_btc_lag_deprecated():
+    """HYPO-034 btc_dominance_lag must NOT be in REALTIME_HYPOS (manual cut 2026-05-04).
+
+    n=3 win 0% 3 SL 연속 → manual cut (auto-trigger n=5 미도달이지만 패턴 확실).
+    """
+    hypo_ids = [h["hypo_id"] for h in rt.REALTIME_HYPOS]
+    assert "HYPO-034" not in hypo_ids, (
+        "HYPO-034 (btc_dominance_lag) must be deprecated — n=3 win 0% 3 SL consecutive"
+    )
+
+
+def test_ai_min_confidence_072():
+    """HYPO-AI-001 params must use min_confidence=0.72 (reduced from 0.75).
+
+    0.75 was too strict → LONG 0.3%. 0.72 targets 5-15% LONG ratio.
+    """
+    ai_hypo = next(
+        (h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-AI-001"),
+        None,
+    )
+    assert ai_hypo is not None, "HYPO-AI-001 must be in REALTIME_HYPOS"
+    assert ai_hypo["params"].get("min_confidence") == pytest.approx(0.72), (
+        "HYPO-AI-001 min_confidence must be 0.72"
+    )
+
+
+def test_ai_advisor_default_min_confidence_072():
+    """DEFAULT_MIN_CONFIDENCE in ai_advisor.py must be 0.72 (lowered from 0.75)."""
+    from src.strategies.ai_advisor import DEFAULT_MIN_CONFIDENCE
+    assert DEFAULT_MIN_CONFIDENCE == pytest.approx(0.72), (
+        "DEFAULT_MIN_CONFIDENCE must be 0.72 — 0.75 caused LONG 0.3% (too strict)"
+    )
+
+
+def test_ai_advisor_072_threshold_enters():
+    """confidence=0.72 >= 0.72 → ENTER_LONG with new threshold."""
+    from unittest.mock import MagicMock
+    from src.strategies.ai_advisor import AIAdvisor
+    from src.domain.signal import SignalAction
+
+    advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.72, api_key="test-key")
+    advisor.provider = "anthropic"
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text='{"action": "long", "confidence": 0.72, "reason": "clear setup"}')]
+    mock_msg.usage = MagicMock(input_tokens=500, output_tokens=50)
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+    advisor._client = mock_client
+
+    market_state = {
+        "ticker": "BTC-USDT", "last": 60000.0, "change_24h": 1.5,
+        "rsi_1h": 55.0, "trend_4h": "up", "trend_1d": "up",
+        "bid_depth_usd": 500000.0, "ask_depth_usd": 400000.0,
+        "taker_buy_ratio": 0.65, "vpin": 0.3, "funding_8h": -0.0002, "regime": "bull",
+    }
+    sig = advisor.evaluate_ai(market_state)
+    assert sig.action == SignalAction.ENTER_LONG, (
+        "confidence=0.72 should ENTER_LONG with threshold 0.72"
+    )
+
+
+def test_ai_advisor_071_below_threshold_holds():
+    """confidence=0.71 < 0.72 → HOLD (below new threshold)."""
+    from unittest.mock import MagicMock
+    from src.strategies.ai_advisor import AIAdvisor
+    from src.domain.signal import SignalAction
+
+    advisor = AIAdvisor(target_size_usd=200.0, min_confidence=0.72, api_key="test-key")
+    advisor.provider = "anthropic"
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text='{"action": "long", "confidence": 0.71, "reason": "borderline"}')]
+    mock_msg.usage = MagicMock(input_tokens=500, output_tokens=50)
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+    advisor._client = mock_client
+
+    market_state = {
+        "ticker": "BTC-USDT", "last": 60000.0, "change_24h": 1.5,
+        "rsi_1h": 55.0, "trend_4h": "up", "trend_1d": "up",
+        "bid_depth_usd": 500000.0, "ask_depth_usd": 400000.0,
+        "taker_buy_ratio": 0.65, "vpin": 0.3, "funding_8h": -0.0002, "regime": "bull",
+    }
+    sig = advisor.evaluate_ai(market_state)
+    assert sig.action == SignalAction.HOLD, (
+        "confidence=0.71 should HOLD — below 0.72 threshold"
+    )
+
+
 def test_mta_stale_tf_data_skip():
     """Codex Round 2 fix: 1H TF 데이터가 90분+ stale → MTA branch skip (no entry)."""
     from src.strategies.mta_confluence import MTAConfluence
@@ -935,7 +1023,7 @@ def test_realtime_hypos_007_008_023():
     Deployed Phase 2M:
     - HYPO-032 TSMOM: Moskowitz/Ooi/Pedersen 2012 JFE
     - HYPO-033 VPINToxicity: Easley/Lopez de Prado/O'Hara 2012 RFS
-    - HYPO-034 BTCDominanceLag: Stalder/Cosenza 2025 + Liu 2022
+    - HYPO-034 BTCDominanceLag: DEPRECATED 2026-05-04 (n=3, win 0%, 3 SL, -$7.09)
     """
     active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
 
@@ -949,10 +1037,11 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
     assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
-    # Phase 2M 신규 — academic-grade alphas
+    # Phase 2M 신규 — academic-grade alphas (HYPO-034 deprecated 2026-05-04)
     assert "HYPO-032" in active_ids, "HYPO-032 (TSMOM — Moskowitz 2012 JFE) must be active — Phase 2M"
     assert "HYPO-033" in active_ids, "HYPO-033 (VPINToxicity — Easley 2012 RFS) must be active — Phase 2M"
-    assert "HYPO-034" in active_ids, "HYPO-034 (BTCDominanceLag — Stalder 2025) must be active — Phase 2M"
+    # HYPO-034 BTCDominanceLag — deprecated 2026-05-04: n=3, win 0%, 3 SL, -$7.09 (manual cut)
+    assert "HYPO-034" not in active_ids, "HYPO-034 must be deprecated — n=3 win 0% 3 SL -$7.09"
 
     # Deprecated Phase 2M — basic indicators cut (학술 근거 부족)
     assert "HYPO-029" not in active_ids, "HYPO-029 must be cut — basic indicator, no academic basis"
@@ -989,10 +1078,10 @@ def test_realtime_hypos_007_008_023():
         "HYPO-AI-001 must be active — Phase 3 AI Advisor (Jin mandate '원래 의도 = AI 개입')"
     )
 
-    # 정확히 10개 (007+008+023+024+027+028+032+033+034+AI-001; 025 deprecated Phase 2N+)
-    assert len(active_ids) == 10, (
-        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
-        f"(007+008+023+024+027+028+032+033+034+AI-001), "
+    # 정확히 9개 (007+008+023+024+027+028+032+033+AI-001; 034 deprecated 2026-05-04, 025 deprecated Phase 2N+)
+    assert len(active_ids) == 9, (
+        f"REALTIME_HYPOS must contain exactly 9 active HYPOs "
+        f"(007+008+023+024+027+028+032+033+AI-001), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 

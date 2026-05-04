@@ -48,7 +48,7 @@ AI_MODEL = ANTHROPIC_MODEL   # Backwards-compat alias (cost tracker uses this)
 CACHE_TTL_S = 300          # 5min cache per unique market state hash
 RATE_LIMIT_S = 60          # 1 call per ticker per 60s
 MAX_TOKENS = 200           # Response bounded (JSON only — no need for 4K)
-DEFAULT_MIN_CONFIDENCE = 0.75  # Raised from 0.65 — reduce LONG bias (88% → target 30-50%)
+DEFAULT_MIN_CONFIDENCE = 0.72  # Tuned: 0.75 → too strict (LONG 0.3%), 0.72 targets 5-15% LONG
 DEFAULT_TARGET_SIZE_USD = 200.0
 COST_LOG_INTERVAL_S = 3600.0  # Hourly cost report
 DECISION_STATS_LOG_INTERVAL_S = 3600.0  # Hourly bias distribution log
@@ -188,7 +188,7 @@ def _build_prompt(market_state: dict) -> str:
         f"- SPOT only (no short selling)\n"
         f"- Fee: 0.14% round-trip — edge must exceed this\n"
         f"- TP ~1.5% / SL ~0.7% (asymmetric profile)\n"
-        f"- Choose 'long' ONLY if confidence > 0.75 and setup shows STRONG conviction\n"
+        f"- Choose 'long' ONLY if confidence >= 0.72 and setup shows a clear edge\n"
         f"- Choose 'exit' to close existing position if momentum clearly reverses\n"
         f"- Default to 'hold' when uncertain, sideways, or mixed signals\n"
         f"- Most situations = 'hold'. Only LONG on high conviction.\n"

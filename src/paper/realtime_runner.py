@@ -244,22 +244,19 @@ REALTIME_HYPOS = [
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "liquidation",  # Fix: Easley/LdP 2012 — informed flow → 5-15min reversion. TP 1.5%, SL 0.7%, max 30min
     },
-    {
-        # HYPO-034: BTC Dominance Lead-Lag
-        # Basis: Stalder & Cosenza (2025) + Liu et al. (2022) — BTC leads alt returns by 30s-3min.
-        # Hypothesis: BTC 5min delta > +0.5% + alt lags BTC → alt will follow → ENTER_LONG.
-        # Source: OKX tickers WS (price_history_60s already active from HYPO-017 infra).
-        # Uses _get_cascade_state() BTC 5min delta + tick alt delta.
-        # Auto-deprecate: n=5 / -$5 (Phase 2M strict gate).
-        "hypo_id": "HYPO-034",
-        "strategy_cls": BTCDominanceLag,
-        "params": {},
-        "primary_tf": "btclag",
-        "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
-        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "scalp",  # Phase 2P: BTC→alt lag 30s-3min — TP 0.6%, SL 0.35%, max 4h
-    },
+    # HYPO-034 BTCDominanceLag — DEPRECATED 2026-05-04 (manual cut)
+    # n=3, win 0%, 3 SL consecutive, -$7.09. Pattern확실, manual cut (auto-trigger n=5 미도달).
+    # Basis: Stalder & Cosenza (2025) — BTC leads alt by 30s-3min.
+    # Observed: BTC spike rebound immediately corrected before alt entry → alt enters into reversal.
+    # {
+    #     "hypo_id": "HYPO-034",
+    #     "strategy_cls": BTCDominanceLag,
+    #     "params": {},
+    #     "primary_tf": "btclag",
+    #     "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
+    #     "starting_usd": 50000.0,
+    #     "exit_profile": "scalp",
+    # }
     # ── Phase 3: AI Advisor (Jin mandate — 원래 의도 부활, 2026-05-04) ────────────
     {
         # HYPO-AI-001: Claude AI Advisor — 실시간 multi-source 시장 분석 entry
@@ -271,7 +268,7 @@ REALTIME_HYPOS = [
         # Exit: liquidation profile (TP 1.5%, SL 0.7%, max 30min — tight event-driven)
         "hypo_id": "HYPO-AI-001",
         "strategy_cls": AIAdvisor,
-        "params": {"target_size_usd": 200.0, "min_confidence": 0.75},
+        "params": {"target_size_usd": 200.0, "min_confidence": 0.72},
         "primary_tf": "ai",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
         "starting_usd": 50000.0,

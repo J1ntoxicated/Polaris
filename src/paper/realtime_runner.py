@@ -123,11 +123,11 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
-    # HYPO-013 MTA Confluence (Phase 2g Round 2 — 3-of-4 scoring, Codex 권고 threshold)
+    # HYPO-013 MTA Confluence (Phase 2g Round 6 — threshold 완화, Codex 78% 합의 B 완전형)
     {
         "hypo_id": "HYPO-013-MTA",
         "strategy_cls": MTAConfluence,
-        "params": {"target_size_usd": 100.0, "rsi_soft_threshold": 48.0, "min_score": 3},
+        "params": {"target_size_usd": 100.0, "rsi_soft_threshold": 52.0, "min_score": 2},
         "primary_tf": "mta",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "ORDI-USDT", "SUI-USDT"],
         "starting_usd": 5000.0,

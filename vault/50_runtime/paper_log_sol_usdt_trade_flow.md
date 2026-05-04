@@ -61,3 +61,12 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T09:35:13 | CLOSE | id=SOL-USDT-1777851059114 entry=84.11 exit=84.03 net=-0.24% net_usd=-0.24 |
 | 2026-05-04T09:35:13 | EXIT_REASON | signal_exit |
 | 2026-05-04T09:45:30 | OPEN | id=SOL-USDT-1777851930617 dir=1 entry=83.95 size=$100 |
+| 2026-05-04T09:52:27 | CLOSE | id=SOL-USDT-1777851930617 entry=83.95 exit=83.92 net=-0.18% net_usd=-0.18 |
+| 2026-05-04T09:52:27 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:00:17 | OPEN | id=SOL-USDT-1777852817406 dir=1 entry=83.89 size=$100 |
+| 2026-05-04T10:01:47 | CLOSE | id=SOL-USDT-1777852817406 entry=83.89 exit=83.85 net=-0.19% net_usd=-0.19 |
+| 2026-05-04T10:01:47 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:04:02 | OPEN | id=SOL-USDT-1777853042070 dir=1 entry=83.75 size=$100 |
+| 2026-05-04T10:05:33 | CLOSE | id=SOL-USDT-1777853042070 entry=83.75 exit=83.79 net=-0.09% net_usd=-0.09 |
+| 2026-05-04T10:05:33 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:06:33 | OPEN | id=SOL-USDT-1777853193504 dir=1 entry=83.81 size=$100 |

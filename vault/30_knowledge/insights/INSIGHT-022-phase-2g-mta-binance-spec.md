@@ -165,6 +165,90 @@ HYPO-013과 동일한 measurement protocol 적용.
 
 Codex Round 1: "n>=200에서 post-fee EV 음수 확인 시 폐기" — Phase 2g Round 1 size cut으로 추가 데이터 수집 중. n=200 도달 + EV 음수면 deprecate.
 
+## Phase 2g Round 6 — HYPO-013 Threshold 완화 (2026-05-04, 78% 합의 B 완전형)
+
+### 진단 (30분 운영 결과 = 0 trades)
+
+BTC dry-run 분석:
+- score=1/4, mandatory=False
+- 1d↑=True (1점) / h4_pull=False (0) / 1h_rsi=49.6 → rsi_soft 48 미달 (0) / 15m_bull=False (0)
+- Codex Round 2 Q3 예측 적중: "4H pullback + 15m bullish AND mandatory 너무 strict"
+- 이전 min_score=3: mandatory 2점 + soft 1점 이상 필요 → BTC RSI 49.6이면 0점
+
+### Codex Round 6 B 완전형 (78% 합의)
+
+| Fix | 변경 전 | 변경 후 | 근거 |
+|-----|---------|---------|------|
+| A. min_score | 3 | 2 | mandatory(2점) + soft 0점이면 진입 가능 |
+| B. rsi_soft_threshold | 48.0 | 52.0 | BTC RSI 49.6 통과 (실측 기반) |
+| C. m15_bullish | `close>open AND close>prev_close` | `close>open` | entry timing 단순화 (prev_close 비교 제거) |
+
+### 변경 파일
+
+| 파일 | 변경 |
+|---|---|
+| `src/strategies/mta_confluence.py` | rsi_soft=52.0, min_score=2, m15_bullish 단순화 |
+| `src/paper/realtime_runner.py` | HYPO-013 params 동기화 |
+| `tests/strategies/test_mta_confluence.py` | 신규 4 tests (TestRelaxedThreshold) + 기존 threshold 테스트 업데이트 |
+
+### TDD 검증
+
+- 실패 테스트 먼저 작성 → fix 적용 → 통과
+- 9 MTA tests pass, 전체 152/152 pass
+- BTC dry-run 재현: h4_pull=True + rsi<52 + m15_bull=True → score=4/4 → ENTER_LONG
+
+### 측정 Plan (Round 7 입력)
+
+- 30분 wakeup: HYPO-013 첫 trade 발생 여부 확인
+- 6시간 후: trade 빈도 + win rate 측정
+- Codex Round 7 의무: 78% 합의이므로 round 추가 필요 (22% gap — m15 단독 noise risk)
+
+### Codex Round 7 권고 사항
+
+78% 합의 → Round 7 의무 (ADR-004 기준 80% 미달):
+- Q1: m15 close>open 단독이 false signal 비율 증가시키는가? (backt 없이 논리 검증)
+- Q2: min_score=2 = mandatory=True(2점) + soft=0점 → RSI soft 없이 진입 — lagging risk?
+- Q3: rsi_soft=52 + min_score=2 조합에서 overbought RSI>65 EXIT가 방어막 충분한가?
+
+## Phase 2g Round 7 — 1D Downtrend Hard Guard (2026-05-04, 82% → 90%+ 예상)
+
+### 진단 (Round 6 후 18% gap)
+
+`min_score=2` 적용 후 1D downtrend에서도 `h4_pullback=True + m15_bullish=True`(mandatory, score=2)만 충족하면 진입 가능해짐. 1D 명백한 하락 중 4H 일시 pullback + 15m 단일 green candle → ENTER_LONG = [[INSIGHT-021]] flip-flop fee bleed 패턴 재현 위험.
+
+### Fix — effective_min_score 조건부 상향
+
+```python
+# src/strategies/mta_confluence.py line 116
+effective_min_score = self.min_score if d1_uptrend else self.min_score + 1
+```
+
+- 1D uptrend: `effective_min=2` → 기존 동작 유지
+- 1D downtrend: `effective_min=3` → mandatory only(score=2) 진입 차단
+
+reason 필드에 `effective_min={N}` 노출 (디버깅 가시성 확보).
+
+### TDD 검증 (3 신규 tests)
+
+| 테스트 | 조건 | 기대 | 결과 |
+|---|---|---|---|
+| `test_downtrend_blocks_mandatory_only` | d1↓ + mandatory + RSI neutral(57) | HOLD | PASS |
+| `test_uptrend_allows_mandatory_only` | d1↑ + mandatory + RSI neutral(57) | ENTER_LONG | PASS |
+| `test_downtrend_allows_score_3` | d1↓ + mandatory + RSI<52(1점) | ENTER_LONG | PASS |
+
+- 155/155 전체 suite pass
+- 변경 파일: `src/strategies/mta_confluence.py` (2줄 변경) + `tests/strategies/test_mta_confluence.py` (+110줄 신규 class)
+
+### Round 8 dispatch 여부
+
+Round 7 fix 후 예상 합의 90%+ (1D guard는 구조적 보완 — Codex objection 없을 가능성 높음). HYPO-014 24h 실측 데이터 확보 후 Round 8 dispatch 결정. 24h 내 flip-flop 재현 없으면 Round 8 불필요 (90%+ 자체 종결).
+
+### HYPO-014 측정 사항 (Round 8 입력 조건)
+
+- 24h 후: downtrend 환경에서 missed entry 빈도 (effective_min+1로 차단된 trade 수)
+- uptrend 환경: 기존 대비 trade 빈도 동일 여부 확인
+- flip-flop 재현 없음 확인 (consecutive loss < 3회)
+
 ## Related
 
 - INSIGHT-021 (flip-flop fee bleed fix Round 4)

@@ -45,9 +45,9 @@ class MTAConfluence(Strategy):
     def __init__(
         self,
         target_size_usd: float = 100.0,
-        rsi_soft_threshold: float = 48.0,
+        rsi_soft_threshold: float = 52.0,  # Phase 2g Round 6 fix: 48→52 (BTC RSI 49.6 통과)
         rsi_overbought: float = 65.0,
-        min_score: int = 3,
+        min_score: int = 2,                 # Phase 2g Round 6 fix: 3→2 (mandatory + 1점이면 진입)
     ):
         self.target_size_usd = target_size_usd
         self.rsi_soft_threshold = rsi_soft_threshold
@@ -97,9 +97,9 @@ class MTAConfluence(Strategy):
         h1_trigger = h1_rsi < self.rsi_soft_threshold
 
         # 15m bullish candle (mandatory — entry timing)
+        # Phase 2g Round 6 Fix B: close > open 단독 (prev_close 비교 제거 — entry timing 단순화)
         m15_curr = m15[-1]
-        m15_prev = m15[-2]
-        m15_bullish = m15_curr.close > m15_curr.open and m15_curr.close > m15_prev.close
+        m15_bullish = m15_curr.close > m15_curr.open
 
         # Exit: 1H RSI overbought
         if h1_rsi > self.rsi_overbought:
@@ -109,16 +109,19 @@ class MTAConfluence(Strategy):
             )
 
         # Codex Round 1 권고: 4H pullback + 15m bullish 둘 다 필수, 그 외 score >= min_score
+        # Phase 2g Round 7 fix: 1D downtrend 시 effective_min_score 자동 상향
+        #   → downtrend에서 mandatory only(score=2) 진입 차단 (INSIGHT-021 flip-flop 방지)
         mandatory_pass = h4_pullback and m15_bullish
         score = int(d1_uptrend) + int(h4_pullback) + int(h1_trigger) + int(m15_bullish)
+        effective_min_score = self.min_score if d1_uptrend else self.min_score + 1
 
-        if mandatory_pass and score >= self.min_score:
+        if mandatory_pass and score >= effective_min_score:
             return Signal(
                 timestamp_ms=ts, action=SignalAction.ENTER_LONG,
-                confidence=0.7 + 0.05 * (score - self.min_score),
+                confidence=0.7 + 0.05 * (score - effective_min_score),
                 target_size_usd=self.target_size_usd,
                 reason=(
-                    f"MTA score={score}/4 mandatory(4H+15m)=PASS "
+                    f"MTA score={score}/4 (effective_min={effective_min_score}) mandatory=PASS "
                     f"1d↑={d1_uptrend} h4_pull={h4_pullback} 1h_rsi={h1_rsi:.1f} 15m_bull={m15_bullish}"
                 ),
             )
@@ -126,7 +129,7 @@ class MTAConfluence(Strategy):
         return Signal(
             timestamp_ms=ts, action=SignalAction.HOLD, confidence=0.0,
             reason=(
-                f"score={score}/4 mandatory={mandatory_pass} "
+                f"score={score}/4 (effective_min={effective_min_score}) mandatory={mandatory_pass} "
                 f"1d↑={d1_uptrend} h4_pull={h4_pullback} 1h_rsi={h1_rsi:.1f} 15m_bull={m15_bullish}"
             ),
         )

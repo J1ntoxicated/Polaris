@@ -75,7 +75,7 @@ COLD_START_N = 20          # sample threshold — below this → cold start cap
 COLD_START_MAX_USD = 300.0 # max size during cold start period
 
 
-def compute_size(inputs: SizingInputs, n_trades: int = COLD_START_N) -> SizingOutput:
+def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
     """Compute dynamic position size.
 
     Pipeline:
@@ -88,8 +88,9 @@ def compute_size(inputs: SizingInputs, n_trades: int = COLD_START_N) -> SizingOu
 
     Args:
         inputs: SizingInputs with all required parameters.
-        n_trades: number of closed trades for this HYPO (default 0).
+        n_trades: number of closed trades for this HYPO (default 0 — safe cold start).
             If < COLD_START_N, applies cold start size cap (COLD_START_MAX_USD).
+            Default 0 ensures cold start cap applies when caller omits this arg.
 
     Returns:
         SizingOutput with size_usd=0 if signal should be skipped.

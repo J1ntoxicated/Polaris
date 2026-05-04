@@ -234,7 +234,7 @@ REALTIME_HYPOS = [
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "scalp",  # Phase 2P: intraday informed flow — TP 0.6%, SL 0.35%, max 4h
+        "exit_profile": "liquidation",  # Fix: Easley/LdP 2012 — informed flow → 5-15min reversion. TP 1.5%, SL 0.7%, max 30min
     },
     {
         # HYPO-034: BTC Dominance Lead-Lag

@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # Codex Round 17 — drawdown_pct docstring + _KELLY_COLD_START 명확화 + ADR-015 provisional
+last_modified: 2026-05-04  # VPIN exit_profile scalp→liquidation + compute_size default n_trades=0 fix
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -15,7 +15,13 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — Phase 2N+ Emergency Fix: HYPO-025 cut + cold start cap)
+## 현재 상태 (2026-05-04 — VPIN exit_profile fix + cold_start default fix: 698/698 pass)
+
+**VPIN fix + cold_start default fix (698/698 pass)**:
+- HYPO-033 `exit_profile`: scalp→**liquidation** (Easley/LdP 2012 — informed flow 5-30min reversion)
+- `compute_size` default `n_trades`: `COLD_START_N(20)` → **0** (safe cold start — omit = cap applies)
+- `_sized()` helper 추가 (test_dynamic_sizing.py — warm start 비교 테스트 편의)
+- 2 신규 테스트: `test_vpin_uses_liquidation_profile` + `TestColdStartCapDefault` (2 tests)
 
 **Phase 2N+ Emergency Fix (663/663 pass)**:
 - HYPO-025 VolumeDeltaDivergence: **DEPRECATED** (n=6 win 33%, avg_size $687, -$3.76)

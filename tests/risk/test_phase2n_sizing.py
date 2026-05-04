@@ -14,6 +14,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.risk.dynamic_sizing import (
+    COLD_START_N,
     MAX_FRACTION,
     MIN_SIZE_USD,
     SizingInputs,
@@ -123,30 +124,40 @@ class TestEffectiveSizePipeline:
         )
 
     def test_flat_regime_size_above_400(self) -> None:
-        """flat regime: $5000 cold-start → size ~$600 (well above $100 min)."""
-        result = compute_size(self._cold_start_inputs(regime="flat"))
+        """flat regime: $5000 warm-start (n=20) → size ~$600 (well above $100 min).
+
+        n_trades=COLD_START_N (20) explicitly passed — this test validates dynamic
+        sizing pipeline WITHOUT cold start cap (warm start scenario).
+        """
+        result = compute_size(self._cold_start_inputs(regime="flat"), n_trades=COLD_START_N)
         assert result.size_usd >= 400.0
 
     def test_uptrend_regime_larger_than_flat(self) -> None:
-        flat = compute_size(self._cold_start_inputs(regime="flat"))
-        uptrend = compute_size(self._cold_start_inputs(regime="uptrend"))
+        """n_trades=COLD_START_N → no cold start cap → regime comparison valid."""
+        flat = compute_size(self._cold_start_inputs(regime="flat"), n_trades=COLD_START_N)
+        uptrend = compute_size(self._cold_start_inputs(regime="uptrend"), n_trades=COLD_START_N)
         assert uptrend.size_usd > flat.size_usd
 
     def test_crisis_regime_max_size(self) -> None:
         """crisis=1.5x: should approach MAX_FRACTION cap at $5000."""
-        result = compute_size(self._cold_start_inputs(regime="crisis", conf=1.0))
+        result = compute_size(
+            self._cold_start_inputs(regime="crisis", conf=1.0),
+            n_trades=COLD_START_N,
+        )
         # MAX_FRACTION=0.20 → cap at $1000
         assert result.size_usd <= MAX_FRACTION * 5000.0 + 0.01
 
     def test_downtrend_regime_reduces_size(self) -> None:
         """downtrend=0.3x: size should be significantly reduced."""
-        flat = compute_size(self._cold_start_inputs(regime="flat"))
-        down = compute_size(self._cold_start_inputs(regime="downtrend"))
+        flat = compute_size(self._cold_start_inputs(regime="flat"), n_trades=COLD_START_N)
+        down = compute_size(self._cold_start_inputs(regime="downtrend"), n_trades=COLD_START_N)
         assert down.size_usd < flat.size_usd
 
     def test_size_3x_vs_old_cold_start(self) -> None:
-        """New cold-start (~$600 flat) vs old cold-start estimate (~$265).
+        """New defaults (~$600 flat at n=20) vs old defaults estimate (~$265).
         Kelly ratio: 0.268 / 0.083 = 3.2× improvement.
+
+        n_trades=COLD_START_N: warm start (n=20) comparison — cold start both would cap at $300.
         """
         # Old defaults: win=0.5, avg_win=0.6, avg_loss=0.5 → kelly=0.083
         old_inputs = SizingInputs(
@@ -159,8 +170,8 @@ class TestEffectiveSizePipeline:
             drawdown_pct=0.0,
         )
         new_inputs = self._cold_start_inputs(regime="flat")
-        old_result = compute_size(old_inputs)
-        new_result = compute_size(new_inputs)
+        old_result = compute_size(old_inputs, n_trades=COLD_START_N)
+        new_result = compute_size(new_inputs, n_trades=COLD_START_N)
         assert new_result.size_usd > old_result.size_usd
         # Ratio should be ~3x (kelly 0.268 / 0.083)
         ratio = new_result.size_usd / max(old_result.size_usd, 1.0)

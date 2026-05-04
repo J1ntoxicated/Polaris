@@ -20,6 +20,10 @@ import time
 from collections import deque
 from typing import Callable, Optional
 
+from src.data.binance_liquidation_ws import (
+    compute_liquidation_pressure,
+    stream as binance_liq_stream,
+)
 from src.data.binance_ws import (
     compute_recent_volatility_bps as binance_volatility_bps,
     compute_taker_buy_ratio as binance_taker_buy_ratio,
@@ -46,6 +50,7 @@ from src.risk.regime_detector import detect_regime
 from src.strategies.binance_lead import BinanceLeadSignal
 from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.btc_cascade import BTCCascade
+from src.strategies.liquidation_cascade import LiquidationCascade
 from src.strategies.mta_confluence import MTAConfluence
 from src.strategies.ofi_momentum import OFIMomentum
 from src.strategies.orderbook_imbalance import OrderBookImbalance
@@ -67,9 +72,9 @@ MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (time
 # Fix 1 (Codex Round 4): supervisor restart delay (patchable in tests)
 _SUPERVISOR_RESTART_DELAY_S: float = 5.0
 
-# Realtime active HYPOs — Round 15: tick-driven scalp 비활성, 1d trend 강화
+# Realtime active HYPOs — Round 15 + Phase 2k (HYPO-023 liquidation cascade)
 # Deprecated tick strategies: HYPO-010/013/014/016/017 — Jin 판단 2026-05-04
-# Remaining: HYPO-007-RT (RSI15m cron-style) + HYPO-008-RT (VolumeBurst 유일 양수 EV)
+# Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023 (liquidation cascade, Phase 2k)
 REALTIME_HYPOS = [
     {
         "hypo_id": "HYPO-007-RT",
@@ -88,6 +93,23 @@ REALTIME_HYPOS = [
         "tickers": ["ORDI-USDT", "DOGE-USDT", "SOL-USDT", "PEPE-USDT", "TRUMP-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.05,
+    },
+    {
+        # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k 2026-05-04)
+        # Binance PERP forceOrder → data source only. OKX SPOT → execution.
+        # Target: short 청산 dominant ($1M+) + OKX price panic drop (0.4%) → ENTER_LONG
+        # Expected edge: 0.5-2% mean-revert vs 0.28% fee round-trip = 양수 EV
+        # Paper forward only (historical forceOrder 미제공)
+        "hypo_id": "HYPO-023",
+        "strategy_cls": LiquidationCascade,
+        "params": {},
+        "primary_tf": "liquidation",
+        # Major liquid pairs with active Binance perp liquidation
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        # Binance perp symbols for liquidation WS (derived at runtime)
+        "_binance_perp_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-009 BreakoutMomentum — DEPRECATED Round 9 (Codex 92% 합의 2026-05-04)
@@ -116,6 +138,19 @@ def _binance_subscribe_tickers() -> list[str]:
     for h in REALTIME_HYPOS:
         if h.get("primary_tf") == "cross":
             syms.update(h["tickers"])
+    return sorted(syms)
+
+
+# Binance perp liquidation symbols — derived from REALTIME_HYPOS primary_tf="liquidation"
+def _binance_liq_subscribe_symbols() -> list[str]:
+    """HYPO-023: liquidation WS 구독 symbol list.
+
+    Returns Binance perp format (e.g. "BTCUSDT") from hypo._binance_perp_syms.
+    """
+    syms: set[str] = set()
+    for h in REALTIME_HYPOS:
+        if h.get("primary_tf") == "liquidation":
+            syms.update(h.get("_binance_perp_syms", []))
     return sorted(syms)
 
 # Tick-cached indicators per (hypo_id, ticker)
@@ -356,6 +391,44 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             if tick_ts_ms - last_log > 300_000:  # 5분
                 logger.info(f"[MTA-HOLD] {ticker} {signal.reason}")
                 _eval_and_act._mta_hold_last[ticker] = tick_ts_ms
+    elif primary == "liquidation" and hasattr(strategy, "evaluate_cascade"):
+        # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k)
+        # Binance perp forceOrder → liquidation pressure (data source)
+        # OKX SPOT price → panic-drop detection (execution)
+        if full_tick is None:
+            return
+        binance_sym = ticker.replace("-", "")  # "BTC-USDT" → "BTCUSDT"
+        liq_pressure = compute_liquidation_pressure(binance_sym, lookback_ms=60_000)
+        # 60s price history via existing _price_history_60s (HYPO-017 reuse)
+        buf = _price_history_60s.get(ticker)
+        price_60s_ago = None
+        if buf and len(buf) >= 2:
+            oldest_ts, oldest_price = buf[0]
+            if tick_ts_ms - oldest_ts >= 50_000:  # at least 50s of history
+                price_60s_ago = oldest_price
+        signal = strategy.evaluate_cascade(full_tick, liq_pressure, price_60s_ago=price_60s_ago)
+        # Warm-up + HOLD reason logging (rate-limited 5min/ticker)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_liq_hold_last"):
+                _eval_and_act._liq_hold_last = {}
+            last_liq_log = _eval_and_act._liq_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_liq_log > 300_000:  # 5분
+                pressure_str = (
+                    f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
+                    if liq_pressure else "no_data"
+                )
+                logger.info(
+                    f"[LIQ-CASCADE-HOLD] {ticker} pressure={pressure_str} {signal.reason}"
+                )
+                _eval_and_act._liq_hold_last[ticker] = tick_ts_ms
+        elif signal.action == SignalAction.ENTER_LONG:
+            pressure_str = (
+                f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
+                if liq_pressure else "?"
+            )
+            logger.info(
+                f"[LIQ-CASCADE] {ticker} ENTRY SIGNAL pressure={pressure_str} {signal.reason}"
+            )
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:
@@ -485,8 +558,14 @@ def make_tick_handler() -> Callable[[str, dict], None]:
     return handler
 
 
-async def _run_okx_and_binance(tickers: list[str], binance_tickers: list[str]) -> None:
-    """OKX + Binance WS 동시 실행 (Phase 2g Round 3 cross-exchange).
+async def _run_okx_and_binance(
+    tickers: list[str],
+    binance_tickers: list[str],
+    binance_liq_symbols: list[str] | None = None,
+) -> None:
+    """OKX + Binance SPOT WS + Binance Perp Liquidation WS 동시 실행.
+
+    Phase 2k 추가: HYPO-023 Liquidation Cascade — binance_liq_symbols 구독.
 
     Fix 1 (Codex Round 4): supervisor loop — either task crashing no longer kills the other.
     Uses asyncio.wait(FIRST_COMPLETED) so that when Binance crashes (24h auto-disconnect),
@@ -499,8 +578,11 @@ async def _run_okx_and_binance(tickers: list[str], binance_tickers: list[str]) -
             asyncio.create_task(stream_tickers(tickers=tickers, on_tick=handler))
         }
         if binance_tickers:
-            logger.info(f"Binance WS subscribe: {binance_tickers}")
+            logger.info(f"Binance SPOT WS subscribe: {binance_tickers}")
             tasks.add(asyncio.create_task(binance_stream(symbols=binance_tickers, on_event=None)))
+        if binance_liq_symbols:
+            logger.info(f"Binance perp liquidation WS subscribe: {binance_liq_symbols}")
+            tasks.add(asyncio.create_task(binance_liq_stream(symbols=binance_liq_symbols)))
         try:
             # Wait until any task finishes (normal return or exception)
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -539,11 +621,16 @@ def main() -> None:
         all_tickers.update(h["tickers"])
     tickers = sorted(all_tickers)
     binance_tickers = _binance_subscribe_tickers()
+    binance_liq_symbols = _binance_liq_subscribe_symbols()
     logger.info(f"=== Polaris Realtime Runner — {_dt.datetime.now().isoformat(timespec='seconds')} ===")
     logger.info(f"OKX subscribe {len(tickers)} tickers: {tickers}")
     if binance_tickers:
-        logger.info(f"Binance subscribe {len(binance_tickers)} tickers: {binance_tickers}")
-    asyncio.run(_run_okx_and_binance(tickers, binance_tickers))
+        logger.info(f"Binance SPOT subscribe {len(binance_tickers)} tickers: {binance_tickers}")
+    if binance_liq_symbols:
+        logger.info(
+            f"Binance perp liquidation subscribe {len(binance_liq_symbols)} symbols: {binance_liq_symbols}"
+        )
+    asyncio.run(_run_okx_and_binance(tickers, binance_tickers, binance_liq_symbols))
 
 
 if __name__ == "__main__":

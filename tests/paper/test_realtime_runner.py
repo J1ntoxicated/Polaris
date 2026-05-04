@@ -920,8 +920,10 @@ def test_regime_cluster_5min_window_expiry():
 # cron ACTIVE_HYPOS: SMA 8ticker + Donchian 2 variants
 
 
-def test_realtime_hypos_only_007_008():
-    """Round 15: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT만 포함 (나머지 전부 deprecated).
+def test_realtime_hypos_007_008_023():
+    """Phase 2k: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT + HYPO-023 포함.
+
+    HYPO-023 (LiquidationCascade) 추가 — Binance Perp forceOrder mean-revert.
 
     Deprecated:
     - HYPO-010-TICK: n=95, win 43%, -$14.98 (변질 진행)
@@ -935,6 +937,7 @@ def test_realtime_hypos_only_007_008():
     # 유지 — 반드시 존재
     assert "HYPO-007-RT" in active_ids, "HYPO-007-RT (RSI15m) must remain active"
     assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
+    assert "HYPO-023" in active_ids, "HYPO-023 (LiquidationCascade) must be active — Phase 2k"
 
     # Deprecated — 반드시 부재
     assert "HYPO-010-TICK" not in active_ids, (
@@ -953,8 +956,8 @@ def test_realtime_hypos_only_007_008():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # 정확히 2개만 (007 + 008)
-    assert len(active_ids) == 2, (
-        f"REALTIME_HYPOS must contain exactly 2 active HYPOs (007+008), "
+    # 정확히 3개 (007 + 008 + 023)
+    assert len(active_ids) == 3, (
+        f"REALTIME_HYPOS must contain exactly 3 active HYPOs (007+008+023), "
         f"got {len(active_ids)}: {active_ids}"
     )

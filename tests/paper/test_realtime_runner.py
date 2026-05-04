@@ -921,19 +921,21 @@ def test_regime_cluster_5min_window_expiry():
 
 
 def test_realtime_hypos_007_008_023():
-    """Phase 2L+: REALTIME_HYPOS active HYPO 목록 검증.
+    """Phase 2M: REALTIME_HYPOS active HYPO 목록 검증.
 
     Phase 2k: HYPO-023 (LiquidationCascade) 추가.
     Phase 2L: HYPO-024~028 일괄 추가 (fail-fast paradigm).
-    Phase 2L+: HYPO-026 cut (n=7, 0 wins, -$1.31) + HYPO-029/030/031 신규.
+    Phase 2L+: HYPO-026 cut + HYPO-029/030/031 신규 (basic indicators, no academic basis).
+    Phase 2M: HYPO-029/030/031 cut (학술 근거 부족) + HYPO-032/033/034 신규 (academic-grade).
 
-    Deprecated:
-    - HYPO-010-TICK: n=95, win 43%, -$14.98 (변질 진행)
-    - HYPO-013-MTA: n=1, sample 부족, 빈도 0
-    - HYPO-014-BLEAD: n=1, 0% win, vol 미달
-    - HYPO-016-OFI: n=37, win 24%, -$3.92 (사전 trigger)
-    - HYPO-017-CASCADE: n=0, 60분 trigger 0
-    - HYPO-026: n=7, 0 wins, -$1.31 (whale_wall pattern 비유효)
+    Deprecated Phase 2M:
+    - HYPO-029 StochRSI: basic indicator, no peer-reviewed basis
+    - HYPO-030 ADXTrendPullback: basic combo, no peer-reviewed basis
+    - HYPO-031 OBVDivergence: basic indicator, no peer-reviewed basis
+    Deployed Phase 2M:
+    - HYPO-032 TSMOM: Moskowitz/Ooi/Pedersen 2012 JFE
+    - HYPO-033 VPINToxicity: Easley/Lopez de Prado/O'Hara 2012 RFS
+    - HYPO-034 BTCDominanceLag: Stalder/Cosenza 2025 + Liu 2022
     """
     active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
 
@@ -948,12 +950,17 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
     assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
-    # Phase 2L+ 신규
-    assert "HYPO-029" in active_ids, "HYPO-029 (StochRSI) must be active — Phase 2L+"
-    assert "HYPO-030" in active_ids, "HYPO-030 (ADXTrendPullback) must be active — Phase 2L+"
-    assert "HYPO-031" in active_ids, "HYPO-031 (OBVDivergence) must be active — Phase 2L+"
+    # Phase 2M 신규 — academic-grade alphas
+    assert "HYPO-032" in active_ids, "HYPO-032 (TSMOM — Moskowitz 2012 JFE) must be active — Phase 2M"
+    assert "HYPO-033" in active_ids, "HYPO-033 (VPINToxicity — Easley 2012 RFS) must be active — Phase 2M"
+    assert "HYPO-034" in active_ids, "HYPO-034 (BTCDominanceLag — Stalder 2025) must be active — Phase 2M"
 
-    # Deprecated — 반드시 부재
+    # Deprecated Phase 2M — basic indicators cut (학술 근거 부족)
+    assert "HYPO-029" not in active_ids, "HYPO-029 must be cut — basic indicator, no academic basis"
+    assert "HYPO-030" not in active_ids, "HYPO-030 must be cut — basic combo, no academic basis"
+    assert "HYPO-031" not in active_ids, "HYPO-031 must be cut — basic indicator, no academic basis"
+
+    # Deprecated Phase 2L/earlier — 반드시 부재
     assert "HYPO-026" not in active_ids, (
         "HYPO-026 must be cut — n=7, 0 wins, -$1.31 (whale_wall 비유효)"
     )

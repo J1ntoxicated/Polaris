@@ -70,8 +70,9 @@ class TestLowConfidenceReduceSize:
         # conf=0.5 → conf²=0.25; conf=1.0 → conf²=1.0 (4x difference)
         # Use cold-start kelly (win_rate=0) to avoid MAX_FRACTION cap distorting ratio.
         # cold kelly=0.05 × conf²=0.25 × flat=0.7 × dd=1.0 = 0.00875 (well under cap)
-        low = compute_size(_inputs(signal_confidence=0.5, regime="flat", recent_win_rate=0.0))
-        perfect = compute_size(_inputs(signal_confidence=1.0, regime="flat", recent_win_rate=0.0))
+        # Phase 2N: MIN_SIZE_USD=$100 — use large cash to avoid skip masking ratio.
+        low = compute_size(_inputs(cash_usd=100_000.0, signal_confidence=0.5, regime="flat", recent_win_rate=0.0))
+        perfect = compute_size(_inputs(cash_usd=100_000.0, signal_confidence=1.0, regime="flat", recent_win_rate=0.0))
         ratio = perfect.fraction / low.fraction if low.fraction > 0 else float("inf")
         # Should be ~4x (conf² ratio: 1.0 / 0.25 = 4.0)
         assert ratio == pytest.approx(4.0, rel=0.05)
@@ -158,7 +159,8 @@ class TestMinSizeSkipSignal:
         assert result.fraction == 0
 
     def test_min_size_threshold_constant(self) -> None:
-        assert MIN_SIZE_USD == 50.0
+        # Phase 2N: raised from $50 to $100 (Jin mandate — fee efficiency)
+        assert MIN_SIZE_USD == 100.0
 
 
 class TestColdStart:

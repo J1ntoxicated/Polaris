@@ -50,17 +50,20 @@ class TestComputeRecentStats:
         assert stats["avg_loss_pct"] > 0
 
     def test_cold_start_fewer_than_5(self) -> None:
-        """< 5 closed positions → cold start defaults returned."""
+        """< 5 closed positions → cold start defaults returned.
+        Phase 2N: defaults updated to win=0.55, avg_win=0.8, avg_loss=0.5.
+        """
         positions = [_pos(entry=100.0, exit_=101.0, open_ts=(i + 1) * 1000, close_ts=(i + 1) * 1000 + 500) for i in range(3)]
         stats = compute_recent_stats(positions, lookback=20)
-        # Cold start defaults
-        assert stats["win_rate"] == 0.5
-        assert stats["avg_win_pct"] == 0.6
-        assert stats["avg_loss_pct"] == 0.5
+        # Phase 2N cold start defaults
+        assert stats["win_rate"] == pytest.approx(0.55)
+        assert stats["avg_win_pct"] == pytest.approx(0.8)
+        assert stats["avg_loss_pct"] == pytest.approx(0.5)
 
     def test_empty_positions_cold_start(self) -> None:
+        # Phase 2N: cold start win_rate updated to 0.55
         stats = compute_recent_stats([], lookback=20)
-        assert stats["win_rate"] == 0.5
+        assert stats["win_rate"] == pytest.approx(0.55)
 
     def test_lookback_limits_to_last_n(self) -> None:
         """lookback=5 uses only last 5 positions."""

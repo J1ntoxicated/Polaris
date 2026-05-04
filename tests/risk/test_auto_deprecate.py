@@ -72,16 +72,21 @@ class TestCheckDeprecate:
         assert "fast_fail" in reason
 
     def test_no_trigger_above_40pct(self):
-        """n >= 10 + win >= 40% → no fast_fail trigger."""
-        closed = [_winner()] * 5 + [_loser()] * 5  # 50% win
+        """n >= 5 + win >= 40% → no fast_fail trigger, but may hit loss_cap if realized < -$5.
+
+        Phase 2M: threshold -$10 → -$5. Use 5 winners + 2 losers (net positive) for clean HOLD.
+        """
+        closed = [_winner()] * 5 + [_loser()] * 2  # 5/7 = 71% win — above 40%, net positive
         reason = check_deprecate("TEST", closed, self.START_MS, now_ms=self.NOW_MS)
-        assert reason is None  # 50% win + realized > -$10
+        assert reason is None  # 71% win + realized positive (net wins > net losses)
 
     def test_loss_cap_trigger(self):
-        """Realized < -$10 → loss_cap."""
-        # Each loser: size=200, net=-0.0214 → -$4.28 per trade
-        # 3 losers = -$12.84 → triggers
-        closed = [_loser(size_usd=200.0)] * 3
+        """Realized < -$5 → loss_cap (Phase 2M: -$10 → -$5).
+
+        Each loser: size=200, net=-0.0214 → -$4.28 per trade.
+        2 losers = -$8.56 → triggers (< -$5).
+        """
+        closed = [_loser(size_usd=200.0)] * 2
         reason = check_deprecate("TEST", closed, self.START_MS, now_ms=self.NOW_MS)
         assert reason is not None
         assert "loss_cap" in reason
@@ -99,12 +104,15 @@ class TestCheckDeprecate:
         assert reason is None
 
     def test_no_trigger_with_enough_trades_and_above_40pct(self):
-        """4 winners + 5 losers (but n<10) → no fast_fail; realized may cause loss_cap."""
-        closed = [_winner()] * 4 + [_loser()] * 4  # n=8 < 10, no fast_fail check
-        # realized: 4 winners × $2.72 - 4 losers × $4.28 = $10.88 - $17.12 = -$6.24 > -$10
+        """n<5 → no fast_fail; small loss → no loss_cap; < 24h → no frequency.
+
+        Phase 2M: min_n=5, max_loss_usd=-$5.
+        Use 2 winners + 1 loser: n=3 < 5 (no fast_fail), realized > -$5 (no loss_cap), < 24h (no freq).
+        """
+        closed = [_winner()] * 2 + [_loser()] * 1  # n=3 < 5, realized positive net
         start_ms = self.NOW_MS - 12 * 3_600_000
         reason = check_deprecate("TEST", closed, start_ms, now_ms=self.NOW_MS)
-        assert reason is None  # n<10 no fast_fail; loss > -$10; < 24h
+        assert reason is None  # n<5 no fast_fail; net positive (no loss_cap); < 24h
 
 
 class TestCheckAllHypos:

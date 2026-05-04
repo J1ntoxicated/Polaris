@@ -15,6 +15,16 @@ tags: [meta, log, append_only, polaris]
 
 > Append-only. 모든 모드 작업 마감 시 1 줄 추가.
 
+## 2026-05-04
+
+- **Phase 2N 완료 — 5 mandates** — Fix1: okx_history_trades 페이지네이션 (7d tick fetch) / Fix2: backup_history yfinance+CoinGecko (pure parser + shell) / Fix3: backtest_multi_resolution.py (5 strategies × 6 TF × 4 tickers = 120 runs, 3-fold walk-forward) / Fix4: TickPersister SQLite (WS trades → buffer 1000 → batch INSERT, okx_ws integrated, realtime_runner init) / Fix5: cold start 3x (win=0.55, avg_win=0.8 → Kelly=0.269) + MIN_SIZE_USD $50→$100. Effective size flat $5000=$602, uptrend=$860, crisis=$1000. 644/644 tests pass (+62 신규).
+
+- **Phase 2M+ 완료** — HYPO-035 CrossSectionalMomentum (Jegadeesh & Titman 1993 JoF) + HYPO-036 FundingCarry (Liu & Yu 2024) + binance_funding poller 신규. 557/557 tests pass.
+- **HYPO-032 TSMOM 5년 backtest** — 6 tickers 1D: Sharpe 0.04~0.12, EV 양수 (+0.45~+1.72%). ADR-011 swing 0.3 미달. Viable=0/6. Crypto high vol로 Sharpe 억압. Paper stage 보류.
+- **HYPO-034 BTC Lead-Lag 5m backtest** — 5m candle proxy: Sharpe 음수. Realtime tick 전략 candle proxy로 표현 불가. 결과 불신뢰. Paper stage realtime validate 필요.
+- **DAILY_PAPER_HYPOS**: HYPO-035/036/020 = 3개 등록. cross_sectional/funding_carry 분기 추가.
+- **58 신규 tests**: test_cross_sectional_momentum.py (22) + test_funding_carry.py (18) + test_binance_funding.py (18). TDD RED→GREEN 완료.
+
 ## 2026-05-03
 
 - **Polaris bootstrap 시작** — auto_invasion_mk1 인수 결정. 모태 .env, .claude, docs/tasks/tools/agents/tests/scripts 카피 완료. vault는 새로 시작 (모태 vault 참조 read-only).
@@ -120,3 +130,5 @@ tags: [meta, log, append_only, polaris]
 - **2026-05-04 — Codex Round 17: 2 즉시 fix + ADR-015 provisional (316/316 pass 유지)** — Fix 1: `SizingInputs.drawdown_pct` inline docstring 명시 (rolling peak-to-trough, NOT daily PnL, caller 계산식 명시). Fix 2: `_KELLY_COLD_START` NOTE 주석 — tracker cold_start defaults(win=0.5/avg_win=0.6%/avg_loss=0.5%) → Kelly=0.083 > _EPS → 정상 운영 시 _KELLY_COLD_START guard는 hit 안 됨. 향후 tracker rewrite 시 explicit cold_start path 도입 권고. ADR-015 신규 (provisional): dynamic sizing MAX_FRACTION=0.20 채택 — ADR-010 "단일 포지션 ≤ 2%" 조항 supersede. 근거: ADR-010 작성 시 fixed-size 시대 / Phase 2j fraction-based paradigm shift / 다중 damping (Kelly×conf²×regime×dd) → 실효 fraction 5~12% / paper OK, live 도입 시 재평가 필수. 316/316 pass (변경 없음, 순수 docstring+주석+ADR). [[ADR-015]] [[ADR-010]] [[INSIGHT-032]] [[dynamic_sizing]]
 
 - **2026-05-04 — Phase 2L+: HYPO-026 cut + HYPO-029/030/031 신규 deploy (458/458 pass)** — HYPO-026 whale_wall n=7 0 wins -$1.31 수동 cut (auto n=10 미달 패턴 명백). 3 신규 (1H candle, dynamic sizing 자동 적용): HYPO-029 StochRSI (14/3/3 oversold K<20 crossover up D → ENTER_LONG, 6 tickers), HYPO-030 ADXTrendPullback (ADX>25 +DI>-DI RSI<40 → ENTER_LONG, 6 tickers), HYPO-031 OBVDivergence (price down + OBV up = bullish div → ENTER_LONG, 6 tickers). 신규 파일 3 + TDD 52 tests (19+17+16). 기존 test_realtime_hypos_007_008_023 갱신 (10개 assert, HYPO-026 absent). Active HYPOs: 007+008+023+024+025+027+028+029+030+031 = 10개. [[HYPO-029]] [[HYPO-030]] [[HYPO-031]]
+
+- **2026-05-04 — Phase 2M: 학술 검증 알파 deploy + random strategies cut (499/499 pass)** — Jin mandate "리서치 안해?": HYPO-029/030/031 (basic indicators, 학술 근거 없음) deprecated comment 전환. 3 academic-grade 전략 신규: HYPO-032 TSMOM (Moskowitz/Ooi/Pedersen 2012 JFE — 58 futures Sharpe 1.0+ 25yr / `src/strategies/tsmom.py`), HYPO-033 VPINToxicity (Easley/Lopez de Prado/O'Hara 2012 RFS — informed trading detection / `src/strategies/vpin_toxicity.py`), HYPO-034 BTCDominanceLag (Stalder/Cosenza 2025 + Liu 2022 JF / `src/strategies/btc_dominance_lag.py`). auto_deprecate.py 임계값 강화: min_n 10→**5**, max_loss_usd -$10→**-$5** (Phase 2M random strategy 가속 차단). realtime_runner.py: vpin + btclag primary_tf 분기 신규 추가. TDD: 41 신규 tests (15+14+12). Active HYPOs: 007+008+023+024+025+027+028+032+033+034 = 10개. 499/499 pass + runtime verify 완료. [[HYPO-032]] [[HYPO-033]] [[HYPO-034]]

@@ -15,18 +15,33 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — Phase 2j AI Dynamic Sizing 구현 완료)
+## 현재 상태 (2026-05-04 — Phase 2M+ 학술 backtest + 3 신규 전략 deploy)
 
-**Phase 2j AI Dynamic Sizing 완료 (316/316 pass)**:
-- `src/risk/dynamic_sizing.py` (pure P6) — Kelly + confidence² + regime + drawdown pipeline
-- `src/risk/performance_tracker.py` (pure P6) — recent win_rate / avg_pct 계산
-- `src/risk/regime_detector.py` (pure P6) — BTC 1D SMA + crisis 24h -8%
-- `realtime_runner.py` ENTER_LONG → `[DYN-SIZE]` 로그 활성
-- TDD 40 신규 tests + Hypothesis property-based (300 samples, fraction ∈ [0, MAX_FRACTION])
-- 효과: crisis+high_conf → $1000 (5x) / weak signal → $0 (skip). [[INSIGHT-032]]
+**Phase 2M+ 신규 전략 (557/557 pass)**:
+- HYPO-035 CrossSectionalMomentum: `src/strategies/cross_sectional_momentum.py` — Jegadeesh & Titman 1993 JoF (30d rank)
+- HYPO-036 FundingCarry: `src/strategies/funding_carry.py` — Liu & Yu 2024 (funding <= -0.05% carry long)
+- `src/data/binance_funding.py` — Binance Futures funding REST poller (TTL cache 60s)
+- `scripts/backtest_research_strategies.py` — HYPO-032/034 5년 backtest 실행
+- DAILY_PAPER_HYPOS 3개 (HYPO-035/036/020) 등록 — `src/paper/daily_paper_runner.py`
+- 58 신규 tests (CSMomentum 22 + FundingCarry 18 + BinanceFunding 18)
 
-**이전: Codex Round 15 3 작업 완료**:
-- ADR-010 위반 fix + walk-forward 3-fold ROBUST + HYPO-008 fee 검증 → 301/301.
+**HYPO-032/034 backtest 결과 (2026-05-04 실행)**:
+- TSMOM 1D (6 tickers): Sharpe 0.04~0.12 (all below 0.3 threshold). EV 양수 (+0.45~+1.72%). n_trades 198~219.
+  → Viable=0/6. ADR-011 swing Sharpe 기준 미달. Crypto 1D vol 과대로 Sharpe 억압.
+  → INSIGHT 필요: TSMOM crypto 적합성 vs equity/futures gap.
+- BTC Lead-Lag 5m proxy (5 alts): Sharpe -0.18~-0.81. EV 음수.
+  → 5m candle-based proxy가 realtime tick 전략을 표현 못 함. 결과 해석 주의.
+
+**Phase 2M 학술 검증 알파 deploy (499/499 pass)**:
+- HYPO-029/030/031 (StochRSI/ADXTrendPullback/OBVDivergence) → deprecated (학술 근거 없음)
+- HYPO-032 TSMOM: `src/strategies/tsmom.py` — Moskowitz/Ooi/Pedersen 2012 JFE (1d/7d/30d return ratio)
+- HYPO-033 VPINToxicity: `src/strategies/vpin_toxicity.py` — Easley/LdP/O'Hara 2012 RFS (VPIN > 0.7)
+- HYPO-034 BTCDominanceLag: `src/strategies/btc_dominance_lag.py` — Stalder 2025 + Liu 2022 (5min lead-lag)
+- auto_deprecate.py: min_n 10→5, max_loss_usd -$10→-$5 (Phase 2M strict gate)
+- TDD 41 신규 tests + runtime verify. Active HYPOs: 007+008+023+024+025+027+028+032+033+034 = 10개.
+
+**이전: Phase 2j AI Dynamic Sizing 완료 (316/316 pass)**:
+- Kelly + confidence² + regime + drawdown pipeline. [[INSIGHT-032]]
 
 **HYPO-005/001/002/006 fee fix 후 재평가 완료 (INSIGHT-026)**:
 - fee 0.0014 기준 재backtest (BTC 1D 1800 candles, 1H 3000 candles)
@@ -124,12 +139,20 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🟢 운영 중 (HYPO 활성)
 
-### Realtime (tick-driven) — 2개만 (Round 15)
+### Realtime (tick-driven) — Phase 2M (10개)
 
 | HYPO | Strategy | Status |
 |---|---|---|
 | HYPO-007-RT | RSI15m intraday | active — cron-style rare trigger |
 | HYPO-008-RT | VolumeBurst 1H | active — n=29 win 55% +$3.50 유일 양수 EV |
+| HYPO-023 | LiquidationCascade | active — Binance perp forceOrder → OKX SPOT |
+| HYPO-024 | CrossExchangeGap | active — Binance bookTicker lead |
+| HYPO-025 | VolumeDeltaDivergence | active — OKX cumulative delta |
+| HYPO-027 | FundingRateFilter | active — Binance funding squeeze |
+| HYPO-028 | TickBurst | active — 5s price spike |
+| HYPO-032 | TSMOM | **Phase 2M NEW** — Moskowitz 2012 JFE, 1d/7d/30d return |
+| HYPO-033 | VPINToxicity | **Phase 2M NEW** — Easley 2012 RFS, VPIN > 0.7 |
+| HYPO-034 | BTCDominanceLag | **Phase 2M NEW** — Stalder 2025 + Liu 2022 |
 
 ### 1d Cron (trend) — Promotion Gate PASSED (Round 15)
 
@@ -144,19 +167,24 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO | Strategy | Tickers | paper_since | Walk-Forward |
 |---|---|---|---|---|
 | HYPO-020-VB-DONCH-DOGE | ConfluenceSignal(VB+Donchian 40/15) 1D | DOGE | 2026-05-04 | ROBUST (3/3 fold PASS) |
+| HYPO-035-CS-MOM | CrossSectionalMomentum 1D (30d rank, top 30%) | 8 universe | 2026-05-04 | TBD (paper accumulation) |
+| HYPO-036-FUNDING-CARRY | FundingCarry (funding <= -0.05%) | BTC/ETH/SOL | 2026-05-04 | TBD (event-driven) |
 
 ### Deprecated
 
 | HYPO | Strategy | 이유 |
 |---|---|---|
 | HYPO-009-RT | BreakoutMomentum | Round 9 — n=16, EV -1.33%, TP<SL |
-| HYPO-010-TICK | TickMomentum | **Round 15** — n=95, win 43%, -$14.98 변질 |
+| HYPO-010-TICK | TickMomentum | Round 15 — n=95, win 43%, -$14.98 변질 |
 | HYPO-011-BOOK | OrderBookImbalance | Round 8 — n=336, TP 0, -$77.93 |
 | HYPO-012-FLOW | TradeFlow | Round 8 — n=450, EV -0.22%, -$151.77 |
-| HYPO-013-MTA | MTAConfluence | **Round 15** — n=1, sample 부족 |
-| HYPO-014-BLEAD | BinanceLeadSignal | **Round 15** — n=1, 0% win, vol 미달 |
-| HYPO-016-OFI | OFIMomentum | **Round 15** — n=37, win 24%, -$3.92 사전 trigger |
-| HYPO-017-CASCADE | BTCCascade | **Round 15** — n=0, 60분 trigger 0 |
+| HYPO-013-MTA | MTAConfluence | Round 15 — n=1, sample 부족 |
+| HYPO-014-BLEAD | BinanceLeadSignal | Round 15 — n=1, 0% win, vol 미달 |
+| HYPO-016-OFI | OFIMomentum | Round 15 — n=37, win 24%, -$3.92 사전 trigger |
+| HYPO-017-CASCADE | BTCCascade | Round 15 — n=0, 60분 trigger 0 |
+| HYPO-029 | StochRSI | **Phase 2M** — 학술 근거 없음 (basic indicator) |
+| HYPO-030 | ADXTrendPullback | **Phase 2M** — 학술 근거 없음 (basic combo) |
+| HYPO-031 | OBVDivergence | **Phase 2M** — 학술 근거 없음 (basic indicator) |
 
 ## ⚠️ Watch List
 

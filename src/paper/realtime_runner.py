@@ -37,8 +37,10 @@ from src.data.okx_ws import (
     compute_taker_buy_ratio,
     get_last_price,
     get_recent_trades,
+    set_persister,
     stream_tickers,
 )
+from src.data.tick_persister import TickPersister
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.paper import logger as paper_logger
@@ -64,8 +66,11 @@ from src.strategies.trade_flow import TradeFlow
 from src.strategies.volume_burst import VolumeBurst
 from src.strategies.volume_delta_divergence import VolumeDeltaDivergence
 from src.strategies.adx_trend_pullback import ADXTrendPullback
+from src.strategies.btc_dominance_lag import BTCDominanceLag
 from src.strategies.obv_divergence import OBVDivergence
 from src.strategies.stoch_rsi import StochRSI
+from src.strategies.tsmom import TSMOM
+from src.strategies.vpin_toxicity import VPINToxicity
 from src.strategies.whale_wall import WhaleWall
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -190,44 +195,58 @@ REALTIME_HYPOS = [
         "max_position_pct": 0.04,
     },
     # ── Phase 2L+: 3 신규 HYPOs (candle-based 1H, 2026-05-04) ────────────────
+    # ── Phase 2M: 3 Academic-grade HYPOs (2026-05-04) ────────────────────────
     {
-        # HYPO-029: Stochastic RSI Mean Reversion (multi-tf)
-        # 1H Stoch RSI (K,D) 14/3/3 — K < 20 + crossover up D → ENTER_LONG (oversold reversal)
-        # K > 80 + crossover down → EXIT.
-        # Source: 1H candles (fetch_multi_tf "1H", INDICATOR_REFRESH_SEC cache).
-        "hypo_id": "HYPO-029",
-        "strategy_cls": StochRSI,
+        # HYPO-032: Time-Series Momentum (TSMOM)
+        # Basis: Moskowitz, Ooi, Pedersen (2012) JFE 104(2) — 58 futures, Sharpe 1.0+, 25yr persistent.
+        # Hypothesis: 1d/7d/30d return continuation (ratio >= 60% positive → ENTER_LONG).
+        # Source: 1D candles (daily bar close comparison — no indicator computation).
+        # Auto-deprecate: n=5 / -$5 (Phase 2M strict gate).
+        "hypo_id": "HYPO-032",
+        "strategy_cls": TSMOM,
         "params": {},
-        "primary_tf": "1H",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
+        "primary_tf": "1D",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
     {
-        # HYPO-030: ADX Trend Strength + RSI Pullback
-        # 1H ADX > 25 (strong trend) + +DI > -DI (uptrend) + RSI < 40 (pullback) → ENTER_LONG.
-        # Source: 1H candles.
-        "hypo_id": "HYPO-030",
-        "strategy_cls": ADXTrendPullback,
+        # HYPO-033: VPIN Toxicity (simplified)
+        # Basis: Easley, Lopez de Prado, O'Hara (2012) RFS — informed trading detection.
+        # Hypothesis: VPIN > 0.7 over last 50 volume buckets → informed buy flow → momentum.
+        # Source: OKX trades WS (get_recent_trades already active).
+        # Shell builds volume buckets from OKX trades; VPIN pure function evaluates.
+        # Auto-deprecate: n=5 / -$5 (Phase 2M strict gate).
+        "hypo_id": "HYPO-033",
+        "strategy_cls": VPINToxicity,
         "params": {},
-        "primary_tf": "1H",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
+        "primary_tf": "vpin",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
     {
-        # HYPO-031: OBV (On-Balance Volume) Divergence
-        # 1H cumulative OBV vs price — price down + OBV up = bullish divergence → ENTER_LONG.
-        # Source: 1H candles.
-        "hypo_id": "HYPO-031",
-        "strategy_cls": OBVDivergence,
+        # HYPO-034: BTC Dominance Lead-Lag
+        # Basis: Stalder & Cosenza (2025) + Liu et al. (2022) — BTC leads alt returns by 30s-3min.
+        # Hypothesis: BTC 5min delta > +0.5% + alt lags BTC → alt will follow → ENTER_LONG.
+        # Source: OKX tickers WS (price_history_60s already active from HYPO-017 infra).
+        # Uses _get_cascade_state() BTC 5min delta + tick alt delta.
+        # Auto-deprecate: n=5 / -$5 (Phase 2M strict gate).
+        "hypo_id": "HYPO-034",
+        "strategy_cls": BTCDominanceLag,
         "params": {},
-        "primary_tf": "1H",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
+        "primary_tf": "btclag",
+        "tickers": ["ETH-USDT", "SOL-USDT", "DOGE-USDT", "XRP-USDT", "ADA-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
+    # HYPO-029 StochRSI — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
+    # 학술 근거 부족: basic indicator, no academic paper backing. Cut before deploy.
+    # HYPO-030 ADXTrendPullback — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
+    # 학술 근거 부족: basic indicator combo, no peer-reviewed basis. Cut before deploy.
+    # HYPO-031 OBVDivergence — DEPRECATED Phase 2M (Jin mandate 2026-05-04)
+    # 학술 근거 부족: basic indicator, no peer-reviewed paper. Cut before deploy.
     # HYPO-009 BreakoutMomentum — DEPRECATED Round 9 (Codex 92% 합의 2026-05-04)
     # n=16, win 44%, TP 7 / SL 9, -$2.47. EV -1.33%/trade. TP<SL asymmetry unfixable.
     # HYPO-010 TickMomentum — DEPRECATED Round 15 (Jin 판단 2026-05-04)
@@ -656,6 +675,82 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             return
         price_5s_ago = _get_price_5s_ago(ticker, tick_ts_ms)
         signal = strategy.evaluate_tick(full_tick, price_5s_ago)
+    elif primary == "vpin" and hasattr(strategy, "evaluate_vpin"):
+        # HYPO-033: VPIN Toxicity — OKX trades WS volume bucket construction
+        # Shell builds per-tick synthetic volume buckets from OKX recent trades.
+        # Bucket = {buy_vol: sum of buy_qty, sell_vol: sum of sell_qty} per 50-trade window.
+        if full_tick is None:
+            return
+        trades = get_recent_trades(ticker, 200)
+        # Build rolling 50-trade buckets (each bucket = 10 trades aggregated)
+        buckets: list[dict] = []
+        bucket_size = 10
+        for i in range(0, len(trades), bucket_size):
+            chunk = trades[i:i + bucket_size]
+            if not chunk:
+                continue
+            buy_vol = sum(float(t.get("sz", 0) or 0) * float(t.get("px", 0) or 0)
+                          for t in chunk if t.get("side") == "buy")
+            sell_vol = sum(float(t.get("sz", 0) or 0) * float(t.get("px", 0) or 0)
+                           for t in chunk if t.get("side") == "sell")
+            buckets.append({"buy_vol": buy_vol, "sell_vol": sell_vol})
+        signal = strategy.evaluate_vpin(full_tick, buckets)
+        # HOLD reason logging (rate-limited 5min/ticker)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_vpin_hold_last"):
+                _eval_and_act._vpin_hold_last = {}
+            last_vpin_log = _eval_and_act._vpin_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_vpin_log > 300_000:
+                logger.info(f"[VPIN-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._vpin_hold_last[ticker] = tick_ts_ms
+    elif primary == "btclag" and hasattr(strategy, "evaluate_lag"):
+        # HYPO-034: BTC Dominance Lead-Lag — BTC 5min delta leads alt
+        # Reuses _price_history_60s infrastructure from HYPO-017 (already maintained per tick).
+        if full_tick is None:
+            return
+        # Build BTC 5min state from 60s rolling price history
+        # Use oldest entry in 5min window as "price_5min_ago" approximation
+        buf_btc = _price_history_60s.get("BTC-USDT")
+        if buf_btc is None or len(buf_btc) < 2:
+            # BTC warmup — log rate-limited
+            if not hasattr(_eval_and_act, "_btclag_warmup_last"):
+                _eval_and_act._btclag_warmup_last = {}
+            last_warm = _eval_and_act._btclag_warmup_last.get(ticker, 0)
+            if tick_ts_ms - last_warm > 60_000:
+                logger.info(f"[BTCLAG-WARMUP] {ticker} BTC price history not ready")
+                _eval_and_act._btclag_warmup_last[ticker] = tick_ts_ms
+            return
+        btc_price_now = buf_btc[-1][1]
+        btc_price_5min_ago = buf_btc[0][1]  # oldest entry in 60s window ≈ up to 65s ago
+        btc_ts_ms = buf_btc[-1][0]
+        btc_state_for_lag = {
+            "price_now": btc_price_now,
+            "price_5min_ago": btc_price_5min_ago,
+            "ts_ms": btc_ts_ms,
+        }
+        # Alt 5min delta from alt's own price history
+        buf_alt = _price_history_60s.get(ticker)
+        alt_5min_delta_pct = 0.0
+        if buf_alt and len(buf_alt) >= 2:
+            alt_old = buf_alt[0][1]
+            alt_now = buf_alt[-1][1]
+            alt_5min_delta_pct = (alt_now - alt_old) / alt_old if alt_old > 0 else 0.0
+        # 24h delta from tick (OKX tickers WS provides open24h)
+        alt_24h_open = float(full_tick.get("open24h", 0) or 0)
+        alt_last = float(full_tick.get("last", 0) or 0)
+        alt_24h_delta_pct = (alt_last - alt_24h_open) / alt_24h_open if alt_24h_open > 0 else 0.0
+        alt_context = {
+            "alt_5min_delta_pct": alt_5min_delta_pct,
+            "alt_24h_delta_pct": alt_24h_delta_pct,
+        }
+        signal = strategy.evaluate_lag(full_tick, btc_state_for_lag, alt_context, now_ms=tick_ts_ms)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_btclag_hold_last"):
+                _eval_and_act._btclag_hold_last = {}
+            last_lag_log = _eval_and_act._btclag_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_lag_log > 300_000:
+                logger.info(f"[BTCLAG-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._btclag_hold_last[ticker] = tick_ts_ms
     else:
         candles = _refresh_candles(ticker, hypo["primary_tf"])
         if len(candles) < strategy.min_window:
@@ -906,6 +1001,16 @@ def main() -> None:
     now_ms = int(time.time() * 1000)
     for h in REALTIME_HYPOS:
         _hypo_started_at_ms.setdefault(h["hypo_id"], now_ms)
+
+    # Fix 4 (Phase 2N): Tick persistence — OKX trades WS → SQLite
+    # Persister init before WS connect so first trades are captured.
+    try:
+        _tick_persister = TickPersister(db_path="data/tick_history.sqlite")
+        set_persister(_tick_persister)
+        logger.info("[TICK-PERSIST] TickPersister started: data/tick_history.sqlite")
+    except Exception as e:
+        logger.error(f"[TICK-PERSIST] TickPersister init failed (non-fatal): {e}")
+        _tick_persister = None
 
     all_tickers = set()
     for h in REALTIME_HYPOS:

@@ -28,9 +28,13 @@ import logging
 import sys
 import traceback
 
+from src.data.binance_funding import fetch_funding_rate, to_binance_futures_symbol
+from src.data.okx_history import fetch_history
 from src.paper.runner import run_cycle
 from src.strategies.confluence_signal import ConfluenceSignal
+from src.strategies.cross_sectional_momentum import CrossSectionalMomentum
 from src.strategies.donchian_breakout import DonchianBreakout
+from src.strategies.funding_carry import FundingCarry
 from src.strategies.volume_burst import VolumeBurst
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,69 @@ DAILY_PAPER_HYPOS = [
     #   cron entry was premature — paper stage not completed.
     #   Moved from cron ACTIVE_HYPOS to here for proper paper tracking.
     # paper_since: 2026-05-04
+    # HYPO-035: Cross-Sectional Momentum — Jegadeesh & Titman 1993 JoF
+    # Academic: 50+ year persistent factor in stocks/futures/crypto (Liu et al. 2022).
+    # Crypto adapt: 30d lookback / 7d hold / top 30% → long / SPOT-only (no short).
+    # Runner: uses set_rank_pct injection (cross-sectional ranking via evaluate_universe).
+    # For paper_runner compatibility, each ticker runs independently with rank_pct pre-set
+    # via _run_cs_momentum_cycle (see main() below). SPOT long-only.
+    # Promotion criteria: 60d paper, Sharpe >= 0.3, EV > 0, n_trades >= 8.
+    # paper_since: 2026-05-04
+    {
+        "hypo_id": "HYPO-035-CS-MOM",
+        "_type": "cross_sectional",  # runner dispatches to _run_cs_momentum_cycle()
+        "strategy_cls": CrossSectionalMomentum,
+        "strategy_params": {
+            "lookback_days": 30,
+            "hold_days": 7,
+            "top_pct": 0.30,
+            "target_size_usd": 200.0,
+        },
+        "universe": [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT",
+            "ADA-USDT", "XRP-USDT", "ORDI-USDT", "SUI-USDT",
+        ],
+        "bar": "1D",
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 8,
+            "min_calendar_days": 60,
+        },
+    },
+    # HYPO-036: Carry Trade — Funding Rate Extreme (Liu & Yu 2024)
+    # Entry: Binance 8h funding <= -0.05% → SPOT long carry opportunity.
+    # Exit: funding recovery >= 0% OR 12h max hold.
+    # Runner: polling via binance_funding.fetch_funding_rate (REST, not candle-based).
+    # For paper_runner compatibility, dispatches to _run_funding_carry_cycle() in main().
+    # SPOT long-only.
+    # Promotion criteria: 60d paper, Sharpe >= 0.3, EV > 0, n_trades >= 8.
+    # paper_since: 2026-05-04
+    {
+        "hypo_id": "HYPO-036-FUNDING-CARRY",
+        "_type": "funding_carry",  # runner dispatches to _run_funding_carry_cycle()
+        "strategy_cls": FundingCarry,
+        "strategy_params": {
+            "entry_threshold": -0.0005,
+            "exit_threshold": 0.0,
+            "max_hold_hours": 12.0,
+            "target_size_usd": 200.0,
+        },
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "bar": "1H",  # check funding every 1H (funding cycle 8H, intraday bar for price)
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+        "paper_since": "2026-05-04",
+        "promotion_criteria": {
+            "min_sharpe": 0.3,
+            "min_ev": 0.0,
+            "min_trades": 8,
+            "min_calendar_days": 60,
+        },
+    },
     {
         "hypo_id": "HYPO-020-VB-DONCH-DOGE",
         "strategy": ConfluenceSignal,
@@ -80,6 +147,178 @@ DAILY_PAPER_HYPOS = [
 ]
 
 
+def _run_cs_momentum_cycle(hypo: dict, dry_run: bool = False) -> tuple[list[dict], list[str]]:
+    """HYPO-035 cross-sectional momentum cycle.
+
+    Fetches all universe 1D candles, computes cross-sectional ranks,
+    injects rank_pct into strategy, then runs per-ticker paper cycle.
+
+    Returns (summaries, errors).
+    """
+    summaries = []
+    errors = []
+    hypo_id = hypo["hypo_id"]
+    paper_since = hypo.get("paper_since", "unknown")
+    universe = hypo.get("universe", [])
+    bar = hypo.get("bar", "1D")
+
+    strat_cls = hypo["strategy_cls"]
+    strat_params = hypo["strategy_params"]
+    # Build universe-aware strategy instance
+    strat = strat_cls(universe=universe, **strat_params)
+
+    # Fetch all universe candles
+    universe_windows: dict[str, list] = {}
+    for ticker in universe:
+        try:
+            candles = fetch_history(inst_id=ticker, bar=bar, limit=min(strat.min_window + 10, 100))
+            universe_windows[ticker] = candles
+        except Exception as e:
+            logger.warning(f"{hypo_id} {ticker}: candle fetch failed: {e}")
+            universe_windows[ticker] = []
+
+    # Cross-sectional evaluate
+    try:
+        universe_signals = strat.evaluate_universe(universe_windows)
+    except Exception as e:
+        errors.append(f"{hypo_id} evaluate_universe: {type(e).__name__}: {e}")
+        return summaries, errors
+
+    # Per-ticker paper cycle with injected rank
+    for ticker in universe:
+        try:
+            rank_sig = universe_signals.get(ticker)
+            if rank_sig is None:
+                continue
+            # Build ticker-specific strategy instance with rank injected
+            ticker_strat = strat_cls(universe=universe, **strat_params)
+            if rank_sig.action.value == "enter_long":
+                ticker_strat.set_rank_pct(0.9)  # top — will trigger ENTER_LONG
+            elif rank_sig.action.value == "exit":
+                ticker_strat.set_rank_pct(0.1)  # bottom — will trigger EXIT
+            else:
+                ticker_strat.set_rank_pct(0.5)  # mid — HOLD
+
+            if dry_run:
+                summaries.append({
+                    "hypo_id": hypo_id,
+                    "ticker": ticker,
+                    "signal": rank_sig.action.value,
+                    "reason": rank_sig.reason,
+                    "dry_run": True,
+                    "paper_since": paper_since,
+                })
+                continue
+
+            summary = run_cycle(
+                ticker=ticker,
+                strategy=ticker_strat,
+                bar=bar,
+                starting_usd=hypo["starting_usd"],
+                max_position_pct=hypo["max_position_pct"],
+            )
+            summary["hypo_id"] = hypo_id
+            summary["paper_since"] = paper_since
+            summary["cs_rank_signal"] = rank_sig.action.value
+            summaries.append(summary)
+            logger.info(
+                f"[PAPER] {hypo_id} {ticker} {bar}: "
+                f"cs_rank={rank_sig.action.value} signal={summary.get('signal')} "
+                f"open={summary.get('n_open_post')} equity=${summary.get('equity_usd', 0):.2f}"
+            )
+        except Exception as e:
+            err = f"{hypo_id} {ticker}: {type(e).__name__}: {e}"
+            errors.append(err)
+            logger.error(err)
+            traceback.print_exc()
+
+    return summaries, errors
+
+
+def _run_funding_carry_cycle(hypo: dict, dry_run: bool = False) -> tuple[list[dict], list[str]]:
+    """HYPO-036 funding carry cycle.
+
+    Fetches Binance funding rate, evaluates FundingCarry signal,
+    then runs per-ticker paper cycle if signal is ENTER_LONG.
+
+    Returns (summaries, errors).
+    """
+    summaries = []
+    errors = []
+    hypo_id = hypo["hypo_id"]
+    paper_since = hypo.get("paper_since", "unknown")
+    bar = hypo.get("bar", "1H")
+
+    strat_cls = hypo["strategy_cls"]
+    strat_params = hypo["strategy_params"]
+    strat = strat_cls(**strat_params)
+
+    import time as _time
+    ts_ms = int(_time.time() * 1000)
+
+    for ticker in hypo.get("tickers", []):
+        try:
+            binance_sym = to_binance_futures_symbol(ticker)
+            funding_rate = fetch_funding_rate(binance_sym, use_cache=True)
+
+            carry_signal = strat.evaluate_funding(
+                funding_8h=funding_rate,
+                ts_ms=ts_ms,
+                position_age_hours=0.0,
+                in_position=False,
+            )
+            logger.info(
+                f"{hypo_id} {ticker}: funding={funding_rate} signal={carry_signal.action.value} "
+                f"reason={carry_signal.reason}"
+            )
+
+            if dry_run:
+                summaries.append({
+                    "hypo_id": hypo_id,
+                    "ticker": ticker,
+                    "funding_rate": funding_rate,
+                    "signal": carry_signal.action.value,
+                    "reason": carry_signal.reason,
+                    "dry_run": True,
+                    "paper_since": paper_since,
+                })
+                continue
+
+            if carry_signal.action.value in ("enter_long", "exit"):
+                summary = run_cycle(
+                    ticker=ticker,
+                    strategy=strat,
+                    bar=bar,
+                    starting_usd=hypo["starting_usd"],
+                    max_position_pct=hypo["max_position_pct"],
+                )
+                summary["hypo_id"] = hypo_id
+                summary["paper_since"] = paper_since
+                summary["funding_rate"] = funding_rate
+                summaries.append(summary)
+                logger.info(
+                    f"[PAPER] {hypo_id} {ticker}: "
+                    f"funding={funding_rate} runner_signal={summary.get('signal')} "
+                    f"equity=${summary.get('equity_usd', 0):.2f}"
+                )
+            else:
+                summaries.append({
+                    "hypo_id": hypo_id,
+                    "ticker": ticker,
+                    "signal": "hold_funding_neutral",
+                    "funding_rate": funding_rate,
+                    "paper_since": paper_since,
+                })
+
+        except Exception as e:
+            err = f"{hypo_id} {ticker}: {type(e).__name__}: {e}"
+            errors.append(err)
+            logger.error(err)
+            traceback.print_exc()
+
+    return summaries, errors
+
+
 def main(dry_run: bool = False) -> int:
     """Run all paper-stage hypos x tickers. Returns exit code (0 = all OK)."""
     today = _dt.date.today().isoformat()
@@ -90,10 +329,28 @@ def main(dry_run: bool = False) -> int:
     errors = []
     summaries = []
     for hypo in DAILY_PAPER_HYPOS:
-        strategy_cls = hypo["strategy"]
-        strategy_params = hypo["strategy_params"]
+        hypo_type = hypo.get("_type", "standard")
         paper_since = hypo.get("paper_since", "unknown")
-        for ticker in hypo["tickers"]:
+
+        if hypo_type == "cross_sectional":
+            # HYPO-035: cross-sectional universe ranking
+            s, e = _run_cs_momentum_cycle(hypo, dry_run=dry_run)
+            summaries.extend(s)
+            errors.extend(e)
+            continue
+
+        if hypo_type == "funding_carry":
+            # HYPO-036: funding rate carry
+            s, e = _run_funding_carry_cycle(hypo, dry_run=dry_run)
+            summaries.extend(s)
+            errors.extend(e)
+            continue
+
+        # Standard per-ticker cycle
+        # Support both "strategy_cls" (new) and "strategy" (legacy HYPO-020 key)
+        strategy_cls = hypo.get("strategy_cls") or hypo["strategy"]
+        strategy_params = hypo["strategy_params"]
+        for ticker in hypo.get("tickers", []):
             try:
                 strategy = strategy_cls(**strategy_params)
                 summary = run_cycle(

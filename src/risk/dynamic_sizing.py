@@ -56,13 +56,15 @@ REGIME_MULT: dict[str, float] = {
 }
 
 MAX_FRACTION = 0.20     # hard cap — prevents over-betting even at full Kelly
-MIN_SIZE_USD = 50.0     # below this → skip signal (fee drag too high)
-# NOTE (Codex Round 17): PerformanceTracker cold_start defaults
-# (win_rate=0.5, avg_win=0.6%, avg_loss=0.5%) → Kelly = (1.2×0.5-0.5)/1.2 = 0.083 > _EPS,
-# so tracker output never triggers the _EPS guard below under normal operation.
-# _KELLY_COLD_START is only reached when caller explicitly passes win_rate=0 / avg_loss=0
-# (e.g. unit tests or zero-trade bootstrap). Tracker rewrite should add explicit cold_start
-# path rather than relying on _EPS guard.
+# Phase 2N: MIN_SIZE_USD $50 → $100 (Jin mandate — small size skip ↑, fee efficiency ↑).
+# Previously $50: ~0.28% fee on $50 = $0.14, needs 0.56% move to break even (high noise).
+# At $100: same fee overhead but 2× trade value → better signal-to-noise per trade.
+MIN_SIZE_USD = 100.0    # below this → skip signal (fee drag too high)
+# NOTE (Phase 2N): PerformanceTracker cold_start defaults updated.
+# Previous: win=0.5, avg_win=0.6%, avg_loss=0.5% → Kelly=0.083
+# Updated:  win=0.55, avg_win=0.8%, avg_loss=0.5% → Kelly=0.225 (2.7x)
+# _KELLY_COLD_START is only reached when caller explicitly passes win_rate=0/avg_loss=0
+# (e.g. unit tests or zero-trade bootstrap). Under normal cold-start tracker returns 0.225.
 _KELLY_COLD_START = 0.05  # baseline for subnormal-float / zero-history guard
 _KELLY_HALF_CAP = 0.5     # half-Kelly cap (full Kelly too volatile)
 

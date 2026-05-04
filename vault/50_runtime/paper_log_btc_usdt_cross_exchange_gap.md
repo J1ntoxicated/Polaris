@@ -24,3 +24,6 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T20:36:33 | OPEN | id=BTC-USDT-1777890993798 dir=1 entry=78938.60 size=$188 |
 | 2026-05-04T20:39:05 | CLOSE | id=BTC-USDT-1777890993798 entry=78938.60 exit=78933.60 net=-0.15% net_usd=-0.28 |
 | 2026-05-04T20:39:05 | EXIT_REASON | signal_exit |
+| 2026-05-04T21:02:29 | OPEN | id=BTC-USDT-1777892549306 dir=1 entry=79037.80 size=$200 |
+| 2026-05-04T21:04:16 | CLOSE | id=BTC-USDT-1777892549306 entry=79037.80 exit=78964.00 net=-0.23% net_usd=-0.47 |
+| 2026-05-04T21:04:16 | EXIT_REASON | signal_exit |

@@ -15,10 +15,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.paper.state import Position
 
-# Cold-start defaults — used when < 5 closed positions exist
+# Cold-start defaults — used when < 5 closed positions exist.
+# Phase 2N update (Jin mandate): more aggressive for paper environment.
+# Previous: win=0.5, avg_win=0.6, avg_loss=0.5 → Kelly=0.083
+# Updated:  win=0.55, avg_win=0.8, avg_loss=0.5 → Kelly=0.225 (2.7x larger)
+# Effective: 0.225 × conf²(0.8)=0.144 × regime(1.0) × dd(1.0) = 0.144
+# → $5000 × 0.144 = $720 target size (vs ~$265 before).
+# MAX_FRACTION=0.20 remains hard cap; min_size_usd raised to $100.
 _COLD_START_DEFAULTS = {
-    "win_rate": 0.5,
-    "avg_win_pct": 0.6,
+    "win_rate": 0.55,
+    "avg_win_pct": 0.8,
     "avg_loss_pct": 0.5,
 }
 _MIN_SAMPLE = 5

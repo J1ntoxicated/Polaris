@@ -13,5 +13,8 @@ websockets>=12.0
 # Async HTTP (Forex bot)
 aiohttp>=3.9.0
 
+# Historical data backup sources (Fix 2 Phase 2N)
+yfinance>=0.2.0  # Yahoo Finance: BTC-USD, ETH-USD 등 1d+ candles
+
 # IG Lightstreamer (optional - for real-time forex streaming)
 # lightstreamer-client-lib>=1.0.0

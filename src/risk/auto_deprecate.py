@@ -9,8 +9,10 @@ the runner removes the HYPO from REALTIME_HYPOS, closes positions, and logs WARN
 No manual Codex round patterns. Triggers are mathematical and automatic.
 
 Trigger definitions (DEPRECATE_TRIGGERS):
-  fast_fail: n >= 10 AND win_rate < 40% → EV likely negative, cut fast
-  loss_cap:  realized PnL < -$10 → hard loss stop (size $200, ~5% of HYPO starting cap)
+  fast_fail: n >= 5 AND win_rate < 40% → EV likely negative, cut fast
+             (Phase 2M: 10 → 5 for faster random strategy elimination)
+  loss_cap:  realized PnL < -$5 → hard loss stop
+             (Phase 2M: -$10 → -$5 for tighter academic-grade validation)
   frequency: 24h elapsed AND n < 3 → signal too infrequent to validate
 
 Pure function — no I/O, no module state. Shell calls check_deprecate with position data.
@@ -20,14 +22,16 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-# Trigger thresholds
+# Trigger thresholds — Phase 2M academic validation (2026-05-04)
+# Rationale: academic-backed strategies should demonstrate edge early;
+#   random/unvalidated strategies fail faster with stricter thresholds.
 DEPRECATE_TRIGGERS: dict = {
     "fast_fail": {
-        "min_n": 10,
+        "min_n": 5,           # Phase 2M: 10 → 5 (faster cut for random strategies)
         "max_win_rate": 0.40,
     },
     "loss_cap": {
-        "max_loss_usd": -10.0,
+        "max_loss_usd": -5.0, # Phase 2M: -$10 → -$5 (tighter academic validation gate)
     },
     "frequency": {
         "max_age_h": 24.0,

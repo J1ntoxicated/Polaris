@@ -175,24 +175,41 @@ def test_hypo_020_runtime_instantiation():
 
 
 def test_daily_paper_hypos_required_fields():
-    """DAILY_PAPER_HYPOS 모든 entry에 필수 필드 존재."""
-    required = {
-        "hypo_id", "strategy", "strategy_params", "tickers",
-        "bar", "starting_usd", "max_position_pct",
-        "paper_since", "promotion_criteria",
+    """DAILY_PAPER_HYPOS 모든 entry에 필수 필드 존재.
+
+    Updated: strategy key is "strategy" OR "strategy_cls" (new pattern).
+    tickers OR universe (for cross-sectional).
+    """
+    base_required = {
+        "hypo_id", "strategy_params", "bar", "starting_usd",
+        "max_position_pct", "paper_since", "promotion_criteria",
     }
     for h in DAILY_PAPER_HYPOS:
-        missing = required - set(h.keys())
+        missing = base_required - set(h.keys())
         assert not missing, (
             f"{h.get('hypo_id', '?')} missing required fields: {missing}"
+        )
+        # Must have either "strategy" or "strategy_cls"
+        has_strategy_key = "strategy" in h or "strategy_cls" in h
+        assert has_strategy_key, (
+            f"{h.get('hypo_id', '?')} must have 'strategy' or 'strategy_cls' key"
+        )
+        # Must have either "tickers" or "universe" (cross-sectional)
+        has_tickers_key = "tickers" in h or "universe" in h
+        assert has_tickers_key, (
+            f"{h.get('hypo_id', '?')} must have 'tickers' or 'universe' key"
         )
 
 
 def test_daily_paper_hypos_all_instantiable():
     """DAILY_PAPER_HYPOS 모든 strategy runtime instantiation (lessons #46)."""
     for h in DAILY_PAPER_HYPOS:
-        cls = h["strategy"]
+        # Support both "strategy" (legacy) and "strategy_cls" (new)
+        cls = h.get("strategy_cls") or h.get("strategy")
+        assert cls is not None, f"{h['hypo_id']}: no strategy class found"
         params = h.get("strategy_params", {})
+        # Skip sub_strategies-containing params that have pre-built instances
+        # (ConfluenceSignal with sub_strategies already instantiated)
         try:
             instance = cls(**params)
         except Exception as e:

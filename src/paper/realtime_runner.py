@@ -63,6 +63,9 @@ from src.strategies.tick_momentum import TickMomentum
 from src.strategies.trade_flow import TradeFlow
 from src.strategies.volume_burst import VolumeBurst
 from src.strategies.volume_delta_divergence import VolumeDeltaDivergence
+from src.strategies.adx_trend_pullback import ADXTrendPullback
+from src.strategies.obv_divergence import OBVDivergence
+from src.strategies.stoch_rsi import StochRSI
 from src.strategies.whale_wall import WhaleWall
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -152,18 +155,13 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
-    {
-        # HYPO-026: Whale Wall Detection
-        # OKX books5 large bid wall ($100k+) = support → mean-revert long.
-        # Source: OKX books5 WS (compute_book_imbalance + get_book) already active.
-        "hypo_id": "HYPO-026",
-        "strategy_cls": WhaleWall,
-        "params": {},
-        "primary_tf": "wall",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
-    },
+    # HYPO-026 DEPRECATED 2026-05-04: n=7, 0 wins, -$1.31.
+    # whale_wall pattern明백히 비유효 — n=10 auto-trigger 미달이지만 수동 cut.
+    # {
+    #     "hypo_id": "HYPO-026",
+    #     "strategy_cls": WhaleWall,
+    #     ...
+    # }
     {
         # HYPO-027: Funding Rate Filter (HYPO-015 부활, size modifier role)
         # Binance Futures funding_8h <= -0.05% → boost; >= +0.10% → block.
@@ -188,6 +186,44 @@ REALTIME_HYPOS = [
         "params": {},
         "primary_tf": "burst",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    # ── Phase 2L+: 3 신규 HYPOs (candle-based 1H, 2026-05-04) ────────────────
+    {
+        # HYPO-029: Stochastic RSI Mean Reversion (multi-tf)
+        # 1H Stoch RSI (K,D) 14/3/3 — K < 20 + crossover up D → ENTER_LONG (oversold reversal)
+        # K > 80 + crossover down → EXIT.
+        # Source: 1H candles (fetch_multi_tf "1H", INDICATOR_REFRESH_SEC cache).
+        "hypo_id": "HYPO-029",
+        "strategy_cls": StochRSI,
+        "params": {},
+        "primary_tf": "1H",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-030: ADX Trend Strength + RSI Pullback
+        # 1H ADX > 25 (strong trend) + +DI > -DI (uptrend) + RSI < 40 (pullback) → ENTER_LONG.
+        # Source: 1H candles.
+        "hypo_id": "HYPO-030",
+        "strategy_cls": ADXTrendPullback,
+        "params": {},
+        "primary_tf": "1H",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.04,
+    },
+    {
+        # HYPO-031: OBV (On-Balance Volume) Divergence
+        # 1H cumulative OBV vs price — price down + OBV up = bullish divergence → ENTER_LONG.
+        # Source: 1H candles.
+        "hypo_id": "HYPO-031",
+        "strategy_cls": OBVDivergence,
+        "params": {},
+        "primary_tf": "1H",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT"],
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },

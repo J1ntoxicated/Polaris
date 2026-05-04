@@ -921,10 +921,11 @@ def test_regime_cluster_5min_window_expiry():
 
 
 def test_realtime_hypos_007_008_023():
-    """Phase 2L: REALTIME_HYPOS에 HYPO-007-RT + HYPO-008-RT + HYPO-023 + HYPO-024~028 포함.
+    """Phase 2L+: REALTIME_HYPOS active HYPO 목록 검증.
 
     Phase 2k: HYPO-023 (LiquidationCascade) 추가.
     Phase 2L: HYPO-024~028 일괄 추가 (fail-fast paradigm).
+    Phase 2L+: HYPO-026 cut (n=7, 0 wins, -$1.31) + HYPO-029/030/031 신규.
 
     Deprecated:
     - HYPO-010-TICK: n=95, win 43%, -$14.98 (변질 진행)
@@ -932,6 +933,7 @@ def test_realtime_hypos_007_008_023():
     - HYPO-014-BLEAD: n=1, 0% win, vol 미달
     - HYPO-016-OFI: n=37, win 24%, -$3.92 (사전 trigger)
     - HYPO-017-CASCADE: n=0, 60분 trigger 0
+    - HYPO-026: n=7, 0 wins, -$1.31 (whale_wall pattern 비유효)
     """
     active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
 
@@ -940,14 +942,21 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
     assert "HYPO-023" in active_ids, "HYPO-023 (LiquidationCascade) must be active — Phase 2k"
 
-    # Phase 2L 신규 — 반드시 존재
+    # Phase 2L 유지 (026 제외)
     assert "HYPO-024" in active_ids, "HYPO-024 (CrossExchangeGap) must be active — Phase 2L"
     assert "HYPO-025" in active_ids, "HYPO-025 (VolumeDeltaDivergence) must be active — Phase 2L"
-    assert "HYPO-026" in active_ids, "HYPO-026 (WhaleWall) must be active — Phase 2L"
     assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
     assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
+    # Phase 2L+ 신규
+    assert "HYPO-029" in active_ids, "HYPO-029 (StochRSI) must be active — Phase 2L+"
+    assert "HYPO-030" in active_ids, "HYPO-030 (ADXTrendPullback) must be active — Phase 2L+"
+    assert "HYPO-031" in active_ids, "HYPO-031 (OBVDivergence) must be active — Phase 2L+"
+
     # Deprecated — 반드시 부재
+    assert "HYPO-026" not in active_ids, (
+        "HYPO-026 must be cut — n=7, 0 wins, -$1.31 (whale_wall 비유효)"
+    )
     assert "HYPO-010-TICK" not in active_ids, (
         "HYPO-010-TICK must be deprecated — n=95, win 43%, -$14.98 (변질 진행)"
     )
@@ -964,8 +973,9 @@ def test_realtime_hypos_007_008_023():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # 정확히 8개 (007 + 008 + 023 + 024 + 025 + 026 + 027 + 028)
-    assert len(active_ids) == 8, (
-        f"REALTIME_HYPOS must contain exactly 8 active HYPOs (007+008+023+024~028), "
-        f"got {len(active_ids)}: {active_ids}"
+    # 정확히 10개 (007 + 008 + 023 + 024 + 025 + 027 + 028 + 029 + 030 + 031)
+    assert len(active_ids) == 10, (
+        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
+        f"(007+008+023+024+025+027+028+029+030+031), "
+        f"got {len(active_ids)}: {sorted(active_ids)}"
     )

@@ -161,19 +161,8 @@ REALTIME_HYPOS = [
         "exit_profile": "liquidation",  # Phase 2P: event-driven mean revert — TP 1.5%, SL 0.7%, max 30min
     },
     # ── Phase 2L: 5 신규 HYPOs (fail-fast paradigm, 2026-05-04) ──────────────
-    {
-        # HYPO-024: Cross-Exchange Price Gap
-        # Binance price directly leads OKX by 0.1-0.5s via raw price gap (not flow ratio).
-        # Source: binance_ws @bookTicker (get_book_ticker) already active.
-        "hypo_id": "HYPO-024",
-        "strategy_cls": CrossExchangeGap,
-        "params": {},
-        "primary_tf": "gap",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "scalp",  # Phase 2P: cross-exchange gap (sub-second) — TP 0.6%, SL 0.35%, max 4h
-    },
+    # HYPO-024 CrossExchangeGap — DEPRECATED (auto fast_fail n=11 win 36% < 40%, 2026-05-04)
+    # Phase 4에서 실수로 다시 active 됐다 confirmed (2026-05-05). 영구 cut.
     # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
     # n=6, win 33% < 40% fast_fail threshold, avg_size $687, lifetime -$3.76.
     # Auto-trigger met (n>=5, win<40%). Dynamic sizing gave large size to weak strategy → loss acceleration.
@@ -239,22 +228,8 @@ REALTIME_HYPOS = [
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "position",  # Phase 2P: 30d momentum — TP 12%, SL 4%, max 30d (aligns with Moskowitz 2012 expectancy)
     },
-    {
-        # HYPO-033: VPIN Toxicity (simplified)
-        # Basis: Easley, Lopez de Prado, O'Hara (2012) RFS — informed trading detection.
-        # Hypothesis: VPIN > 0.7 over last 50 volume buckets → informed buy flow → momentum.
-        # Source: OKX trades WS (get_recent_trades already active).
-        # Shell builds volume buckets from OKX trades; VPIN pure function evaluates.
-        # Auto-deprecate: n=5 / -$5 (Phase 2M strict gate).
-        "hypo_id": "HYPO-033",
-        "strategy_cls": VPINToxicity,
-        "params": {},
-        "primary_tf": "vpin",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT"],
-        "starting_usd": 50000.0,  # Phase 2Q: 10x capital
-        # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
-        "exit_profile": "liquidation",  # Fix: Easley/LdP 2012 — informed flow → 5-15min reversion. TP 1.5%, SL 0.7%, max 30min
-    },
+    # HYPO-033 VPIN Toxicity — DEPRECATED (auto loss_cap -$5.21 < -$5, 2026-05-04)
+    # Phase 4에서 실수로 다시 active 됐다 confirmed (2026-05-05). 영구 cut.
     # HYPO-034 BTCDominanceLag — DEPRECATED 2026-05-04 (manual cut)
     # n=3, win 0%, 3 SL consecutive, -$7.09. Pattern확실, manual cut (auto-trigger n=5 미도달).
     # Basis: Stalder & Cosenza (2025) — BTC leads alt by 30s-3min.
@@ -287,24 +262,13 @@ REALTIME_HYPOS = [
         "starting_usd": 50000.0,
         "exit_profile": "scalp",  # TP 0.6% (grid default +0.8% handled per-level), max 4h
     },
-    # ── Phase 3: AI Advisor (Jin mandate — 원래 의도 부활, 2026-05-04) ────────────
-    {
-        # HYPO-AI-001: Claude AI Advisor — 실시간 multi-source 시장 분석 entry
-        # Jin mandate: '원래 의도는 AI 개입 실시간 분석으로 거래'.
-        # Claude Haiku 4.5 → per-tick market_state JSON 분석 → ENTER_LONG / EXIT / HOLD
-        # Cost: ~$0.11/h (180 calls/h × $0.0006/call) — profitable if ≥ 1 trade/day wins
-        # Rate limit: 1 API call per ticker per 60s (rate_limit → HOLD)
-        # Cache: same market_state hash → cached 5min (no duplicate API call)
-        # Exit: liquidation profile (TP 1.5%, SL 0.7%, max 30min — tight event-driven)
-        "hypo_id": "HYPO-AI-001",
-        "strategy_cls": AIAdvisor,
-        "params": {"target_size_usd": 200.0, "min_confidence": 0.72},
-        "primary_tf": "ai",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
-        "starting_usd": 50000.0,
-        "exit_profile": "liquidation",  # TP 1.5%, SL 0.7%, max 30min — tight
-    },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
+    # HYPO-AI-001 Claude AI Advisor — DEPRECATED Phase 4 (2026-05-05)
+    # n=2, 0% win, -$5.91, auto loss_cap trigger 적중 (-$5.91 < -$5)
+    # Phase 4 retry fix 후 재등장 했지만 새 entry 1개도 동일 패턴 (조건 trigger 의심)
+    # 재차 cut. AI advisor 자체 가치 X retail SPOT 환경 (sample n=2 SL hit 100%).
+    # 재시도 시 Codex DEBATE 의무 (다른 spec / threshold / model).
+
     # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
     # n=6, win 33%, avg_size $687, -$3.76. Auto fast_fail trigger met (n>=5, win<40%).
     # Dynamic sizing gave $687 to a 33% win-rate strategy → loss acceleration confirmed.

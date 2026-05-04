@@ -1,8 +1,40 @@
-"""tests/strategies/test_binance_lead.py — BinanceLeadSignal cross-exchange (Phase 2g Round 3)."""
+"""tests/strategies/test_binance_lead.py — BinanceLeadSignal cross-exchange (Phase 2g Round 3/13)."""
 from __future__ import annotations
 
 from src.domain.signal import SignalAction
-from src.strategies.binance_lead import BinanceLeadSignal
+from src.strategies.binance_lead import DEFAULT_MIN_VOLATILITY_BPS, BinanceLeadSignal
+
+
+# ---------------------------------------------------------------------------
+# Round 13 regression — DEFAULT_MIN_VOLATILITY_BPS == 5.0
+# ---------------------------------------------------------------------------
+
+class TestRound13VolThreshold:
+    def test_default_min_volatility_bps_5_round13(self) -> None:
+        """HYPO-014 Round 13: vol threshold 8 → 5 bps (BLEAD-HOLD 분포 완화)."""
+        assert DEFAULT_MIN_VOLATILITY_BPS == 5.0
+
+    def test_instance_min_volatility_bps_5_round13(self) -> None:
+        """Instance default matches module constant."""
+        s = BinanceLeadSignal()
+        assert s.min_volatility_bps == 5.0
+
+    def test_vol_between_5_and_8_now_enters(self) -> None:
+        """vol=6.0 bps: was rejected at threshold 8, now passes at threshold 5."""
+        s = BinanceLeadSignal()
+        # vol=6.0 (between old 8 and new 5 threshold) + strong buy → ENTER_LONG
+        sig = s.evaluate_cross(
+            _okx_tick(),
+            _bs(taker=0.7, n=100, vol=6.0, price=79050.0),
+        )
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_vol_below_5_still_holds(self) -> None:
+        """vol=3.0 bps: below new threshold 5 → HOLD."""
+        s = BinanceLeadSignal()
+        sig = s.evaluate_cross(_okx_tick(), _bs(taker=0.7, n=100, vol=3.0))
+        assert sig.action == SignalAction.HOLD
+        assert "vol" in sig.reason
 
 
 def _okx_tick(price: float = 79000.0, ts: int = 1_700_000_000_000) -> dict:

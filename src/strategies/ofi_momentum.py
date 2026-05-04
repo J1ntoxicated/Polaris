@@ -75,6 +75,10 @@ class OFIMomentum(Strategy):
 
     HYPOTHESIS-016: OFI signed volume + price VWAP confirmation.
     Addresses HYPO-012 TradeFlow failure (naive count ratio, lagging).
+
+    # Phase 2g Round 13 deprecate trigger (Codex 88% 합의):
+    # n=10 도달 시 TP hit count == 0 → 즉시 REALTIME_HYPOS 제거 (HYPO-012 동일 패턴 재발)
+    # 현재 (n=5): TP 0 / SL 0 / signal_exit 5 → trigger 모니터링 중
     """
 
     name = "ofi_momentum"

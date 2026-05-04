@@ -89,10 +89,11 @@ REALTIME_HYPOS = [
     # TP<SL asymmetry: structural negative EV — unfixable by parameter tuning.
     # Strategy file (breakout_momentum.py) preserved for learning archive.
     # HYPO-010 TickMomentum — candle 무관, tick payload 직접 평가
+    # Round 13: target_size_usd 300 explicit override (n=70, win 57%, ×1.5 partial size-up)
     {
         "hypo_id": "HYPO-010-TICK",
         "strategy_cls": TickMomentum,
-        "params": {},
+        "params": {"target_size_usd": 300.0},
         "primary_tf": "tick",
         "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
                     "ORDI-USDT", "TRUMP-USDT", "ADA-USDT", "XRP-USDT"],

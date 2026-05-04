@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04
+last_modified: 2026-05-04  # Round 13 결정 반영
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -53,6 +53,8 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
+- [[INSIGHT-028]] Round 13 결정 (Codex 85%) — HYPO-010 size $300 / HYPO-016 deprecate trigger / HYPO-014 vol 5 bps / $15~18/h 추정
+- [[INSIGHT-027]] HYPO-010/017 신호 직교성 확인 (orthogonal alpha)
 - [[INSIGHT-026]] archived HYPO 재평가 완료 — 4개 모두 archived 유지 (Sharpe 미달 일관)
 - [[INSIGHT-025]] fee 0.014 latent bug 4건 fix 완료 — backtest 재실행 완료 (INSIGHT-026)
 - [[INSIGHT-024]] HYPO-009 deprecate 근거 (n=16, EV -1.33%, TP<SL 비대칭) — Round 9
@@ -95,12 +97,12 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO-007-RT | RSI15m intraday | active |
 | HYPO-008-RT | VolumeBurst 1H | active |
 | HYPO-009-RT | BreakoutMomentum 1H | **DEPRECATED Round 9** — n=16, EV -1.33%, TP<SL |
-| HYPO-010-TICK | TickMomentum tick | active |
+| HYPO-010-TICK | TickMomentum tick | active — **size $300** (Round 13 ×1.5) |
 | HYPO-011-BOOK | OrderBookImbalance book | **DEPRECATED Round 8** — n=336, TP 0, -$77.93 |
 | HYPO-012-FLOW | TradeFlow flow | **DEPRECATED Round 8** — n=450, EV -0.22%, -$151.77 |
 | HYPO-013-MTA | MTAConfluence mta | active, 60분 측정 중 |
-| HYPO-014-BLEAD | BinanceLeadSignal cross | active, 60분 측정 중 |
-| HYPO-016-OFI | OFIMomentum ofi | **신규 Round 11** — OFI signed vol + VWAP confirm, 6 tickers |
+| HYPO-014-BLEAD | BinanceLeadSignal cross | active — **vol 5 bps** (Round 13 완화, 기존 8 bps) |
+| HYPO-016-OFI | OFIMomentum ofi | **신규 Round 11** — n=5 win 20% signal_exit 100% → **n=10 TP=0 시 즉시 deprecate** (Round 13) |
 | HYPO-017-CASCADE | BTCCascade cascade | **신규 Round 11** — BTC 1min +0.30% + ETH confirm → alt follow lag, 5 tickers |
 
 ## ⚠️ Watch List

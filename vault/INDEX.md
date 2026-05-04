@@ -72,6 +72,9 @@ tags: [meta, index, polaris]
 | [[INSIGHT-023]] | HYPO-011/012 deprecate 근거 — n=336/450 직접 측정, EV 음수, Codex 95% 합의 (Round 8) | active |
 | [[INSIGHT-024]] | HYPO-009 deprecate 근거 — n=16, EV -1.33%/trade, TP<SL 비대칭, Codex 92% 합의 (Round 9) | active |
 | [[INSIGHT-025]] | fee 0.014 latent bug 4건 (runner.py + metrics.py) — realtime 무영향, cron/backtest 오염 위험 (Forensic Round 9) | active |
+| [[INSIGHT-026]] | fee fix 후 archived HYPO 재평가 — 4개 모두 archived 유지 (Sharpe 미달 일관) | active |
+| [[INSIGHT-027]] | HYPO-010/017 신호 직교성 확인 — 11.1% raw overlap, 인과 cascade ~0%, orthogonal alpha 정당화 | active |
+| [[INSIGHT-028]] | Round 13 결정 — HYPO-010 size ×1.5, HYPO-016 deprecate trigger, HYPO-014 vol 5 bps (Codex 85%) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

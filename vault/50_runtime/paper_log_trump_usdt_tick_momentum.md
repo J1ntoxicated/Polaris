@@ -27,3 +27,4 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T13:23:10 | OPEN | id=TRUMP-USDT-1777864990567 dir=1 entry=2.37 size=$200 |
 | 2026-05-04T13:32:07 | CLOSE | id=TRUMP-USDT-1777864990567 entry=2.37 exit=2.36 net=-0.52% net_usd=-1.04 |
 | 2026-05-04T13:32:07 | EXIT_REASON | sl_hit:-0.0038 |
+| 2026-05-04T14:12:36 | OPEN | id=TRUMP-USDT-1777867956504 dir=1 entry=2.37 size=$200 |

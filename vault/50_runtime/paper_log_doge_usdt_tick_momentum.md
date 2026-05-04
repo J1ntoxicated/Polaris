@@ -70,3 +70,6 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T13:42:08 | CLOSE | id=DOGE-USDT-1777865566509 entry=0.11 exit=0.11 net=-0.49% net_usd=-0.99 |
 | 2026-05-04T13:42:08 | EXIT_REASON | sl_hit:-0.0035 |
 | 2026-05-04T13:48:32 | OPEN | id=DOGE-USDT-1777866512492 dir=1 entry=0.11 size=$200 |
+| 2026-05-04T14:19:03 | CLOSE | id=DOGE-USDT-1777866512492 entry=0.11 exit=0.11 net=+0.47% net_usd=+0.95 |
+| 2026-05-04T14:19:03 | EXIT_REASON | tp_hit:+0.0061 |
+| 2026-05-04T14:20:03 | OPEN | id=DOGE-USDT-1777868402966 dir=1 entry=0.11 size=$200 |

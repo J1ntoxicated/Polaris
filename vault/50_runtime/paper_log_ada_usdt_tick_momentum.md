@@ -31,3 +31,6 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T13:42:08 | CLOSE | id=ADA-USDT-1777863164105 entry=0.25 exit=0.25 net=-0.49% net_usd=-0.99 |
 | 2026-05-04T13:42:08 | EXIT_REASON | sl_hit:-0.0035 |
 | 2026-05-04T13:43:08 | OPEN | id=ADA-USDT-1777866188608 dir=1 entry=0.25 size=$200 |
+| 2026-05-04T14:16:32 | CLOSE | id=ADA-USDT-1777866188608 entry=0.25 exit=0.25 net=+0.49% net_usd=+0.98 |
+| 2026-05-04T14:16:32 | EXIT_REASON | tp_hit:+0.0063 |
+| 2026-05-04T14:17:34 | OPEN | id=ADA-USDT-1777868253710 dir=1 entry=0.25 size=$200 |

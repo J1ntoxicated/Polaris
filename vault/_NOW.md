@@ -62,6 +62,22 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 - [[ADR-013]] HARNESS Meta Mode 정착 — 모든 작업 mode dispatch
 - [[ADR-004]] 코드 리뷰 codex 외부 의무 (Jin 2026-05-03 mandate)
 
+## 🔥 Round 11 (2026-05-04) — HYPO-016 + HYPO-017 구현 완료
+
+**HYPO-016 OFI Momentum**: `src/strategies/ofi_momentum.py` (pure P6) + 20 tests. HYPO-016-OFI 등록 (primary_tf="ofi", 6 tickers). Codex 72% 합의.
+
+**HYPO-017 BTC-Led Alt Cascade**: `src/strategies/btc_cascade.py` (pure P6) + `tests/strategies/test_btc_cascade.py` 30 tests. HYPO-017-CASCADE 등록 (primary_tf="cascade", alt 5 tickers: DOGE/SOL/ORDI/PEPE/TRUMP).
+
+- 1min price history: `_update_price_history` / `_get_cascade_state` (module-level deque per ticker, 65s window)
+- HYPO-010 orthogonality guard: alt_24h >= +0.5% → HOLD (신호 겹침 차단, INSIGHT-027 forensic)
+- ETH confirmation: eth_1min_delta >= +0.10% (false positive 차단)
+- Stale guard: btc/eth state >= 30s → HOLD
+- Hysteresis deadzone: -0.20% ~ +0.30% (flip-flop 방지)
+
+**TDD**: 30 tests RED→GREEN. 전체 **210/210 pass**. Runtime import + evaluate_cascade() 확인.
+
+**Round 12 dispatch 의무**: ADR-004 — HYPO-016 + HYPO-017 implementation review.
+
 ## 🔥 Round 10 (2026-05-04)
 
 **Fix 1 — HYPO-013 MTA HOLD 로깅**: `_eval_and_act` mta branch에 `[MTA-HOLD] {ticker} {reason}` INFO 로그 추가. 24h 후 too strict vs wrong logic 판단 근거 확보.
@@ -84,6 +100,8 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 | HYPO-012-FLOW | TradeFlow flow | **DEPRECATED Round 8** — n=450, EV -0.22%, -$151.77 |
 | HYPO-013-MTA | MTAConfluence mta | active, 60분 측정 중 |
 | HYPO-014-BLEAD | BinanceLeadSignal cross | active, 60분 측정 중 |
+| HYPO-016-OFI | OFIMomentum ofi | **신규 Round 11** — OFI signed vol + VWAP confirm, 6 tickers |
+| HYPO-017-CASCADE | BTCCascade cascade | **신규 Round 11** — BTC 1min +0.30% + ETH confirm → alt follow lag, 5 tickers |
 
 ## ⚠️ Watch List
 

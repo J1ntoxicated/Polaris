@@ -17,8 +17,10 @@ def _isolate_state(tmp_path, monkeypatch):
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()
+    rt._price_history_60s.clear()
     # Round 10: rate-limit 딕셔너리 초기화 (함수 속성)
-    for attr in ("_blead_nofeed_last", "_blead_hold_last"):
+    # Round 12 Q7: cascade warmup state 초기화 추가
+    for attr in ("_blead_nofeed_last", "_blead_hold_last", "_cascade_warmup_last"):
         if hasattr(rt._eval_and_act, attr):
             delattr(rt._eval_and_act, attr)
     yield
@@ -677,3 +679,133 @@ def test_blead_nofeed_warn_rate_limited(tmp_path, monkeypatch, caplog):
         assert len(warns_after_third) == 1, (
             "5분 초과 후 [BLEAD-NOFEED] WARN 재발생해야 함"
         )
+
+
+# ── Round 12 F1: _price_history_60s maxlen=600 (spike safety margin) ────────
+
+
+def test_price_history_high_tick_rate():
+    """Codex Round 12 F1: maxlen=600으로 10Hz spike 흡수 — deque auto-truncate 방지.
+
+    10Hz × 60s = 600 entries. maxlen=200이면 deque auto-truncate가 ts-trim보다
+    먼저 작동 → price_1min_ago가 30s 전 값이 됨 (stale 1min delta).
+    Fix: maxlen=600 → 600 entries push 후에도 deque overflow 없음.
+    """
+    rt._price_history_60s.clear()
+    ticker = "BTC-USDT"
+    base_ts = 1_700_000_000_000
+    n_ticks = 600  # 10Hz × 60s
+
+    # Push 600 entries spanning 60s (10Hz)
+    for i in range(n_ticks):
+        ts = base_ts + i * 100  # 100ms interval = 10Hz
+        rt._update_price_history(ticker, ts, 50_000.0 + i)
+
+    buf = rt._price_history_60s[ticker]
+    # deque maxlen=600이므로 overflow 없이 600 entries 전부 유지
+    assert len(buf) == n_ticks, (
+        f"maxlen=600이면 600 entries 전부 유지돼야 함, 실제={len(buf)}"
+    )
+    # ts-trim: 65s 초과 entry는 제거됨. 60s 범위는 모두 유지
+    oldest_ts = buf[0][0]
+    newest_ts = buf[-1][0]
+    assert newest_ts - oldest_ts <= 65_000, (
+        f"oldest→newest 범위가 65s 이내여야 함, 실제={newest_ts - oldest_ts}ms"
+    )
+    # price_1min_ago가 실제 60초 전 가격인지 확인
+    # oldest entry는 base_ts (index 0, price=50_000.0)
+    assert buf[0][1] == 50_000.0, (
+        "oldest entry price == 50_000.0 (index 0) — 1min delta 기준점 정확"
+    )
+
+
+def test_price_history_high_tick_rate_no_maxlen_overflow():
+    """보완: maxlen=600이 실제 deque 제한 설정인지 직접 확인 (구현 검증)."""
+    rt._price_history_60s.clear()
+    ticker = "ETH-USDT"
+    base_ts = 2_000_000_000_000
+    # 601 entries push → maxlen=600이면 마지막 600만 유지 (oldest 1개 drop)
+    for i in range(601):
+        rt._update_price_history(ticker, base_ts + i * 100, 3_000.0 + i)
+
+    buf = rt._price_history_60s[ticker]
+    # deque(maxlen=600) → 601번째 push 시 0번째 drop
+    # (ts-trim은 601번째가 base_ts+60100ms → 60.1s, 0번째 base_ts → diff=60100ms < 65000 → trim 안 됨)
+    # 결론: len은 maxlen 기준 ≤ 600
+    assert len(buf) <= 600, (
+        f"deque maxlen=600 → 601 push 후 len≤600, 실제={len(buf)}"
+    )
+    # 첫 entry는 index 1 (50000ms ts, price=3001.0) — index 0은 overflow로 dropped
+    assert buf[0][1] == 3_001.0, (
+        "601번째 push 후 oldest entry는 index 1 (price=3001.0)"
+    )
+
+
+# ── Round 12 F2: _get_cascade_state uses last BTC/ETH tick ts ────────────────
+
+
+def test_cascade_state_uses_last_tick_ts():
+    """Codex Round 12 F2: ts_ms = buf[-1][0] (실제 마지막 BTC/ETH tick ts).
+
+    BTC가 50s 범위 history 보유, 마지막 BTC tick = base_ts+50s.
+    alt tick은 base_ts+80s (30s 더 늦게 도착) → current_ts_ms=base_ts+80s.
+
+    F2 fix 전: ts_ms = current_ts_ms = base_ts+80s → stale=0s → guard 무력화.
+    F2 fix 후: ts_ms = buf[-1][0] = base_ts+50s → stale = 30s → guard 작동.
+    """
+    rt._price_history_60s.clear()
+    ticker = "BTC-USDT"
+    base_ts = 1_700_000_000_000
+
+    # BTC history: 51 ticks at 1Hz spanning 50s (index 0→50), last tick = base_ts+50s
+    for i in range(51):
+        ts = base_ts + i * 1_000  # 1Hz
+        rt._update_price_history(ticker, ts, 50_000.0 + i)
+
+    btc_last_tick_ts = base_ts + 50 * 1_000  # buf[-1][0]
+
+    # alt tick arrives 30s AFTER the last BTC tick
+    alt_tick_ts = btc_last_tick_ts + 30_000  # base_ts + 80s
+    assert alt_tick_ts != btc_last_tick_ts, "alt_tick_ts must differ from BTC last tick"
+
+    state = rt._get_cascade_state(ticker, 50_060.0, alt_tick_ts)
+    assert state is not None, "50s+ history → should return state (not None)"
+
+    # F2 fix: ts_ms == buf[-1][0] == btc_last_tick_ts, NOT alt_tick_ts
+    assert state["ts_ms"] == btc_last_tick_ts, (
+        f"ts_ms must be last BTC tick ts={btc_last_tick_ts}, "
+        f"got {state['ts_ms']} (alt_tick_ts={alt_tick_ts})"
+    )
+    assert state["ts_ms"] != alt_tick_ts, (
+        f"ts_ms must NOT equal alt-ticker tick ts ({alt_tick_ts}) — "
+        "stale guard would be bypassed if they match"
+    )
+
+
+def test_cascade_state_stale_guard_works_with_fix():
+    """F2 fix 실제 효과: BTC 29s 미update → BTCCascade stale guard 계산 정확.
+
+    BTCCascade.evaluate_cascade가 ts_ms를 이용해 stale 여부 판단한다고 가정.
+    state['ts_ms']가 29s 전이면 now_ms - ts_ms = 29_000ms → guard 작동 가능.
+    (BTCCascade 내부 30s stale threshold 검증은 별도 test_btc_cascade.py 담당)
+    """
+    rt._price_history_60s.clear()
+    ticker = "BTC-USDT"
+    base_ts = 1_700_000_000_000
+
+    # BTC: 50s 히스토리, 마지막 틱 = base_ts+50s (29s 전 기준 alt_tick at base_ts+79s)
+    for i in range(51):
+        rt._update_price_history(ticker, base_ts + i * 1_000, 50_000.0 + i)
+
+    btc_last_tick = base_ts + 50_000  # BTC 마지막 틱
+    alt_tick_now = btc_last_tick + 29_000  # alt tick = 29s 후
+
+    state = rt._get_cascade_state(ticker, 50_060.0, alt_tick_now)
+    assert state is not None
+
+    # ts_ms = buf[-1][0] = btc_last_tick → stale = alt_tick_now - ts_ms = 29_000ms
+    stale_ms = alt_tick_now - state["ts_ms"]
+    assert stale_ms == 29_000, (
+        f"stale_ms must be 29_000 (29s), got {stale_ms}ms — "
+        "F2 fix ensures BTCCascade can correctly detect 30s stale"
+    )

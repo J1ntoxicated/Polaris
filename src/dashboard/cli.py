@@ -82,22 +82,28 @@ def _strategy_name(hypo: dict) -> str:
     return cls(**hypo.get("params", hypo.get("strategy_params", {}))).name
 
 
-# 짧은 strategy 코드 — table cell wrap 방지 (Jin "콘텐츠 랩핑 사이즈 조절" mandate)
-SHORT_NAME = {
-    "rsi_15m_intraday": "RSI15m",
-    "volume_burst": "VolBst",
-    "breakout_momentum": "BkOut",
-    "tick_momentum": "TickMo",
-    "orderbook_imbalance": "OB_Imb",
-    "trade_flow": "TF",
-    "sma_crossover": "SMA",
-    "donchian_breakout": "Donch",
-    "rsi_mean_reversion": "RSI_MR",
-}
+def fmt_price(price: float) -> str:
+    """Format price without scientific notation — tier by magnitude.
 
+    Pure function (P6). No I/O, deterministic.
 
-def _short_strategy(name: str) -> str:
-    return SHORT_NAME.get(name, name[:8])
+    Tiers:
+        >= 1000  : comma-separated, 2 dp  e.g. BTC  79,134.50
+        >= 10    : 3 dp                   e.g. SOL  150.123
+        >= 0.1   : 4 dp                   e.g. DOGE   0.1083
+        >= 0.001 : 5 dp                   e.g. SUI    0.00920
+        else     : 8 dp                   e.g. PEPE   0.00000392
+    """
+    if price >= 1000:
+        return f"{price:,.2f}"
+    elif price >= 10:
+        return f"{price:.3f}"
+    elif price >= 0.1:
+        return f"{price:.4f}"
+    elif price >= 0.001:
+        return f"{price:.5f}"
+    else:
+        return f"{price:.8f}"
 
 
 # ───── Header ─────
@@ -246,7 +252,7 @@ def render_realtime_hypos() -> Table:
         border_style=BORDER, box=BOX,
     )
     table.add_column("HYPO", justify="left", no_wrap=True, max_width=14)
-    table.add_column("Strat", justify="left", no_wrap=True, max_width=8)
+    table.add_column("Strategy", justify="left", no_wrap=True, max_width=22)
     table.add_column("TF", justify="left", no_wrap=True, max_width=5)
     table.add_column("Tickers", justify="left", no_wrap=True, max_width=22, overflow="ellipsis")
     table.add_column("Open", justify="right", no_wrap=True)
@@ -280,7 +286,7 @@ def render_realtime_hypos() -> Table:
         first_two = ",".join(t.split("-")[0] for t in hypo['tickers'][:2])
         ticker_str = f"{len(hypo['tickers'])}({first_two})"
         table.add_row(
-            hypo["hypo_id"], _short_strategy(sname), hypo.get("primary_tf", "?"), ticker_str,
+            hypo["hypo_id"], sname, hypo.get("primary_tf", "?"), ticker_str,
             str(n_open), str(n_closed),
             f"{cash_sum:,.0f}",
             Text(f"{pnl_sum:+,.2f}", style=pnl_style),
@@ -300,8 +306,8 @@ def render_cron_hypos() -> Table:
         border_style=BORDER, box=BOX,
     )
     table.add_column("HYPO", justify="left", no_wrap=True, max_width=14)
-    table.add_column("Ticker", justify="left", no_wrap=True, max_width=10)
-    table.add_column("Strat", justify="left", no_wrap=True, max_width=8)
+    table.add_column("Ticker", justify="left", no_wrap=True, max_width=14)
+    table.add_column("Strategy", justify="left", no_wrap=True, max_width=22)
     table.add_column("Cash $", justify="right", no_wrap=True)
     table.add_column("Open", justify="right", no_wrap=True)
     table.add_column("Closed", justify="right", no_wrap=True)
@@ -315,7 +321,7 @@ def render_cron_hypos() -> Table:
                 pnl = bal.realized_pnl_usd
                 pnl_style = "green" if pnl >= 0 else ("red" if pnl < 0 else "dim")
                 table.add_row(
-                    hypo["hypo_id"], ticker, _short_strategy(sname),
+                    hypo["hypo_id"], ticker, sname,
                     f"{bal.cash_usd:,.0f}",
                     str(bal.n_open), str(bal.n_closed),
                     Text(f"{pnl:+,.2f}", style=pnl_style),
@@ -335,13 +341,13 @@ def render_open_positions() -> Table:
         expand=True, title_justify="left",
         border_style=BORDER, box=BOX,
     )
-    table.add_column("Ticker", justify="left", no_wrap=True, max_width=10)
-    table.add_column("Strat", justify="left", no_wrap=True, max_width=8)
-    table.add_column("Entry $", justify="right", no_wrap=True, max_width=11)
-    table.add_column("Last $", justify="right", no_wrap=True, max_width=11)
+    table.add_column("Ticker", justify="left", no_wrap=True, max_width=14)
+    table.add_column("Strategy", justify="left", no_wrap=True, max_width=22)
+    table.add_column("Entry $", justify="right", no_wrap=True, max_width=14)
+    table.add_column("Last $", justify="right", no_wrap=True, max_width=14)
     table.add_column("Δ %", justify="right", no_wrap=True, max_width=8)
     table.add_column("uPnL $", justify="right", no_wrap=True, max_width=8)
-    table.add_column("Size $", justify="right", no_wrap=True, max_width=6)
+    table.add_column("Size $", justify="right", no_wrap=True, max_width=8)
     table.add_column("Held", justify="right", no_wrap=True, max_width=7)
 
     _, open_pos = _scan_all_states()
@@ -361,7 +367,6 @@ def render_open_positions() -> Table:
         # _strategy_file = "btc-usdt_trade_flow" → split first "_usdt_" → "trade_flow"
         sf = p["_strategy_file"]
         sname = sf.split("_usdt_", 1)[1] if "_usdt_" in sf else sf.split("_", 1)[1] if "_" in sf else sf
-        sname_short = _short_strategy(sname)
 
         cur_price = tickers_map.get(p["ticker"])
         if cur_price:
@@ -376,7 +381,7 @@ def render_open_positions() -> Table:
                 ch_style = "green"
             else:
                 ch_style = "red"
-            cur_str = f"{cur_price:.4g}"
+            cur_str = fmt_price(cur_price)
             ch_str = f"{change_pct:+.2f}%"
             upnl_style = "green" if unrealized_usd >= 0 else "red"
             upnl_str = f"{unrealized_usd:+.2f}"
@@ -388,8 +393,8 @@ def render_open_positions() -> Table:
             upnl_style = "dim"
 
         table.add_row(
-            p["ticker"], sname_short,
-            f"{p['entry_price']:.4g}",
+            p["ticker"], sname,
+            fmt_price(p["entry_price"]),
             cur_str,
             Text(ch_str, style=ch_style),
             Text(upnl_str, style=upnl_style),

@@ -17,7 +17,8 @@ import asyncio
 import datetime as _dt
 import logging
 import time
-from typing import Callable
+from collections import deque
+from typing import Callable, Optional
 
 from src.data.binance_ws import (
     compute_recent_volatility_bps as binance_volatility_bps,
@@ -41,7 +42,9 @@ from src.paper.runner import _daily_loss_breached, load_state, save_state
 from src.paper.state import PaperBalance, Position
 from src.strategies.binance_lead import BinanceLeadSignal
 from src.strategies.breakout_momentum import BreakoutMomentum
+from src.strategies.btc_cascade import BTCCascade
 from src.strategies.mta_confluence import MTAConfluence
+from src.strategies.ofi_momentum import OFIMomentum
 from src.strategies.orderbook_imbalance import OrderBookImbalance
 from src.strategies.rsi_15m_intraday import RSI15mIntraday
 from src.strategies.tick_momentum import TickMomentum
@@ -121,6 +124,32 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.02,
     },
+    # HYPO-016 OFI Momentum (Phase 2g Round 11 — Codex 72% 합의)
+    # HYPO-012 TradeFlow 실패 후속: count ratio → signed volume + vwap confirmation
+    # OFI = Chordia et al. 2021 order flow momentum alpha
+    {
+        "hypo_id": "HYPO-016-OFI",
+        "strategy_cls": OFIMomentum,
+        "params": {"target_size_usd": 100.0},
+        "primary_tf": "ofi",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "ORDI-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
+    # HYPO-017 BTC-Led Alt Cascade (Phase 2g Round 11 — Codex Round 11 + INSIGHT-027 forensic)
+    # HYPO-010 orthogonality: 11.1% raw overlap, causal cascade ~0% → orthogonal
+    # BTCCascade: BTC 1min +0.30% AND ETH +0.10% → alt follow lag entry
+    # alt_24h < +0.50% guard: HYPO-010 territory exclusion (orthogonality hard guard)
+    {
+        "hypo_id": "HYPO-017-CASCADE",
+        "strategy_cls": BTCCascade,
+        "params": {"target_size_usd": 100.0},
+        "primary_tf": "cascade",
+        # Alt 5종 — BTC/ETH는 cascade signal source (not traded)
+        "tickers": ["DOGE-USDT", "SOL-USDT", "ORDI-USDT", "PEPE-USDT", "TRUMP-USDT"],
+        "starting_usd": 5000.0,
+        "max_position_pct": 0.02,
+    },
 ]
 
 
@@ -140,6 +169,56 @@ _last_close_ms: dict[tuple[str, str], int] = {}
 # Last close timestamp per ticker (any strategy) — account-level cooldown
 # (Codex Round 4 gap fix: 다른 strategy의 즉시 재진입 차단으로 fee bleed 누적 방지)
 _last_close_ms_ticker: dict[str, int] = {}
+
+# HYPO-017 BTC Cascade: 1min rolling price history per ticker (BTC/ETH source tickers)
+# deque[(ts_ms, price)] — maxlen 600: 3Hz × 60s = 180 + 3× spike safety margin
+# (Codex Round 12 F1: maxlen 200 → 600; spike 10tps × 60s = 600 entries, deque
+#  auto-truncate was triggering before ts-trim → stale price_1min_ago)
+_price_history_60s: dict[str, deque] = {}
+
+
+def _update_price_history(ticker: str, ts_ms: int, price: float) -> None:
+    """매 tick 호출 — 60s rolling window 유지 (HYPO-017 cascade 1min delta 계산용).
+
+    Args:
+        ticker: e.g. "BTC-USDT" or "ETH-USDT".
+        ts_ms: tick timestamp in milliseconds.
+        price: current price.
+
+    Shell function — modifies module-level state.
+    """
+    buf = _price_history_60s.setdefault(ticker, deque(maxlen=600))
+    buf.append((ts_ms, price))
+    # Trim entries older than 65s (preserve a 60s window with 5s margin)
+    while len(buf) > 1 and ts_ms - buf[0][0] > 65_000:
+        buf.popleft()
+
+
+def _get_cascade_state(ticker: str, current_price: float, current_ts_ms: int) -> Optional[dict]:
+    """Build cascade state dict for BTC/ETH from price history.
+
+    Returns dict with price_now, price_1min_ago, ts_ms — or None if insufficient data.
+    Requires at least 50s of price history (50_000ms oldest entry).
+
+    Pure logic — reads module-level _price_history_60s (shell boundary).
+    """
+    buf = _price_history_60s.get(ticker)
+    if not buf or len(buf) < 2:
+        return None
+    oldest_ts, oldest_price = buf[0]
+    if current_ts_ms - oldest_ts < 50_000:
+        # Less than 50s of data — not enough for reliable 1min delta
+        return None
+    # Codex Round 12 F2: use the actual last BTC/ETH tick ts, not the alt-ticker
+    # tick ts. If BTC/ETH has not ticked for 29s and an alt tick arrives now,
+    # current_ts_ms would report 0s stale — defeating the 30s stale guard in
+    # BTCCascade.evaluate_cascade. buf[-1][0] is the real last source tick time.
+    last_source_ts = buf[-1][0]
+    return {
+        "price_now": current_price,
+        "price_1min_ago": oldest_price,
+        "ts_ms": last_source_ts,
+    }
 
 
 def _refresh_candles(ticker: str, tf: str) -> list[Candle]:
@@ -179,6 +258,32 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         if ratio is None or full_tick is None:
             return
         signal = strategy.evaluate_flow(full_tick, ratio, n_trades)
+    elif primary == "ofi" and hasattr(strategy, "evaluate_ofi"):
+        # HYPO-016: signed volume OFI + vwap price confirmation
+        trades_recent = get_recent_trades(ticker, 50)
+        if full_tick is None:
+            return
+        signal = strategy.evaluate_ofi(full_tick, trades_recent)
+    elif primary == "cascade" and hasattr(strategy, "evaluate_cascade"):
+        # HYPO-017: BTC-led alt cascade — 1min BTC/ETH delta → alt follow lag
+        if full_tick is None:
+            return
+        btc_state = _get_cascade_state("BTC-USDT", get_last_price("BTC-USDT") or 0.0, tick_ts_ms)
+        eth_state = _get_cascade_state("ETH-USDT", get_last_price("ETH-USDT") or 0.0, tick_ts_ms)
+        if btc_state is None or eth_state is None:
+            # Insufficient price history — log warmup progress (rate-limited 1min/ticker)
+            # Codex Round 12 Q7: distinguish cold-start warmup from persistent data gap
+            if not hasattr(_eval_and_act, "_cascade_warmup_last"):
+                _eval_and_act._cascade_warmup_last = {}
+            last_warmup = _eval_and_act._cascade_warmup_last.get(ticker, 0)
+            if tick_ts_ms - last_warmup > 60_000:
+                logger.info(
+                    f"[CASCADE-WARMUP] {ticker} btc_ready={btc_state is not None}"
+                    f" eth_ready={eth_state is not None}"
+                )
+                _eval_and_act._cascade_warmup_last[ticker] = tick_ts_ms
+            return
+        signal = strategy.evaluate_cascade(full_tick, btc_state, eth_state, now_ms=tick_ts_ms)
     elif primary == "cross" and hasattr(strategy, "evaluate_cross"):
         # Phase 2g Round 3: Binance cross-exchange leading signal (HYPO-014)
         # OKX-style "BTC-USDT" → Binance "BTCUSDT" conversion
@@ -315,6 +420,10 @@ def make_tick_handler() -> Callable[[str, dict], None]:
         tick_ts = int(tick.get("ts", 0) or 0)
         if tick_price <= 0:
             return
+        # HYPO-017: 1min price history 업데이트 — BTC/ETH cascade source tickers
+        # 모든 ticker tick에 대해 호출 (BTC-USDT, ETH-USDT 포함)
+        if tick_ts > 0:
+            _update_price_history(inst_id, tick_ts, tick_price)
         for hypo in REALTIME_HYPOS:
             if inst_id not in hypo["tickers"]:
                 continue

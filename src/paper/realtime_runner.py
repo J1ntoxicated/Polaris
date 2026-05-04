@@ -40,6 +40,9 @@ from src.domain.signal import Signal, SignalAction
 from src.paper import logger as paper_logger
 from src.paper.runner import _daily_loss_breached, load_state, save_state
 from src.paper.state import PaperBalance, Position
+from src.risk.dynamic_sizing import SizingInputs, compute_size
+from src.risk.performance_tracker import compute_recent_stats
+from src.risk.regime_detector import detect_regime
 from src.strategies.binance_lead import BinanceLeadSignal
 from src.strategies.breakout_momentum import BreakoutMomentum
 from src.strategies.btc_cascade import BTCCascade
@@ -117,6 +120,10 @@ def _binance_subscribe_tickers() -> list[str]:
 
 # Tick-cached indicators per (hypo_id, ticker)
 _indicator_cache: dict[tuple, tuple[float, list[Candle]]] = {}
+
+# BTC 1D candle cache for regime detection (refresh every 60s)
+_btc_1d_cache: tuple[float, list] = (0.0, [])
+_BTC_1D_REFRESH_SEC = 60.0
 
 # Last close timestamp per (ticker, strategy_name) — strategy-level cooldown
 _last_close_ms: dict[tuple[str, str], int] = {}
@@ -219,6 +226,21 @@ def _refresh_candles(ticker: str, tf: str) -> list[Candle]:
     data = fetch_multi_tf(ticker, timeframes=(tf,))
     candles = data.get(tf, [])
     _indicator_cache[key] = (time.time(), candles)
+    return candles
+
+
+def _get_btc_1d_candles() -> list:
+    """Return BTC 1D candles for regime detection. Cache 60s (module-level).
+
+    Shell function — touches _btc_1d_cache (module state).
+    """
+    global _btc_1d_cache
+    ts, candles = _btc_1d_cache
+    if time.time() - ts < _BTC_1D_REFRESH_SEC:
+        return candles
+    data = fetch_multi_tf("BTC-USDT", timeframes=("1D",))
+    candles = data.get("1D", [])
+    _btc_1d_cache = (time.time(), candles)
     return candles
 
 
@@ -392,8 +414,38 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     if (signal.action == SignalAction.ENTER_LONG
             and not has_open and not daily_breached and not closed_this_tick
             and not in_cooldown and not in_regime_pause):
-        size_cap = balance.equity_usd({ticker: tick_price}) * hypo["max_position_pct"]
-        size = min(signal.target_size_usd, size_cap, balance.cash_usd)
+        # ── Phase 2j: Dynamic sizing (Kelly + confidence + regime + drawdown) ──
+        # 1. Recent performance stats (HYPO별 last 20 closed trades)
+        perf_stats = compute_recent_stats(list(balance.closed_positions), lookback=20)
+
+        # 2. Regime — BTC 1D candles (cached 60s)
+        btc_1d = _get_btc_1d_candles()
+        regime = detect_regime(btc_1d)
+
+        # 3. Current drawdown (vs HYPO starting capital)
+        equity = balance.equity_usd({ticker: tick_price})
+        starting = hypo.get("starting_usd", balance.starting_usd)
+        dd = max(0.0, (starting - equity) / starting)
+
+        # 4. Compute dynamic size (pure)
+        sizing = compute_size(SizingInputs(
+            cash_usd=balance.cash_usd,
+            signal_confidence=signal.confidence,
+            recent_win_rate=perf_stats["win_rate"],
+            recent_avg_win_pct=perf_stats["avg_win_pct"],
+            recent_avg_loss_pct=perf_stats["avg_loss_pct"],
+            regime=regime,
+            drawdown_pct=dd,
+        ))
+        # Apply max_position_pct cap from HYPO config (equity-based upper bound)
+        size_cap = equity * hypo["max_position_pct"]
+        size = min(sizing.size_usd, size_cap, balance.cash_usd)
+
+        logger.info(
+            f"[DYN-SIZE] {hypo['hypo_id']} {ticker} size=${size:.0f} "
+            f"regime={regime} {sizing.reason}"
+        )
+
         if size > 0:
             pos = Position(
                 position_id=f"{ticker}-{tick_ts_ms}",

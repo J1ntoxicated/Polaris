@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # Codex Round 15 ADR-010 fix + walk-forward 3-fold ROBUST
+last_modified: 2026-05-04  # Codex Round 17 — drawdown_pct docstring + _KELLY_COLD_START 명확화 + ADR-015 provisional
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -15,13 +15,18 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-04 — Codex Round 15 ADR-010 fix 완료)
+## 현재 상태 (2026-05-04 — Phase 2j AI Dynamic Sizing 구현 완료)
 
-**Codex Round 15 3 작업 완료**:
-- ADR-010 위반 fix: HYPO-020 cron ACTIVE_HYPOS 제거 → `daily_paper_runner.py` DAILY_PAPER_HYPOS 신규.
-- walk-forward 3-fold: DOGE 1D 2486 candles — Fold1 Sharpe=0.364 / Fold2=0.469 / Fold3=0.678 → ROBUST.
-- HYPO-008 fee 검증: LIVE_FEE_ROUND_TRIP=0.0014 + paper_state JSON fee={0.0014} 일관 확인.
-- 301/301 tests pass (+7 신규).
+**Phase 2j AI Dynamic Sizing 완료 (316/316 pass)**:
+- `src/risk/dynamic_sizing.py` (pure P6) — Kelly + confidence² + regime + drawdown pipeline
+- `src/risk/performance_tracker.py` (pure P6) — recent win_rate / avg_pct 계산
+- `src/risk/regime_detector.py` (pure P6) — BTC 1D SMA + crisis 24h -8%
+- `realtime_runner.py` ENTER_LONG → `[DYN-SIZE]` 로그 활성
+- TDD 40 신규 tests + Hypothesis property-based (300 samples, fraction ∈ [0, MAX_FRACTION])
+- 효과: crisis+high_conf → $1000 (5x) / weak signal → $0 (skip). [[INSIGHT-032]]
+
+**이전: Codex Round 15 3 작업 완료**:
+- ADR-010 위반 fix + walk-forward 3-fold ROBUST + HYPO-008 fee 검증 → 301/301.
 
 **HYPO-005/001/002/006 fee fix 후 재평가 완료 (INSIGHT-026)**:
 - fee 0.0014 기준 재backtest (BTC 1D 1800 candles, 1H 3000 candles)
@@ -59,6 +64,7 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 ## 🔥 Active Critical
 
+- [[ADR-015]] Dynamic Sizing MAX_FRACTION=0.20 (ADR-010 단일 포지션 2% 조항 supersede) — **provisional, Jin ack 대기**. paper OK, live 도입 시 재평가 필수.
 - [[INSIGHT-029]] Round 14 forensic (Codex 88%) — HYPO-010 silent cap bug + 14:36 regime cluster 13 SL + TRUMP 구조적 부적합. 4 fix: size $200 복원 / TRUMP 제거 / regime cluster guard / HYPO-016 trigger 재정의
 - [[INSIGHT-028]] Round 13 결정 (Codex 85%) — HYPO-010 size $300 (INSIGHT-029에서 복원) / HYPO-016 deprecate trigger / HYPO-014 vol 5 bps / $15~18/h 추정
 - [[INSIGHT-027]] HYPO-010/017 신호 직교성 확인 (orthogonal alpha)

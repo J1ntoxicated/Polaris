@@ -42,6 +42,8 @@ tags: [meta, index, polaris]
 | [[ADR-011]] | Promotion Gate Timeframe-aware (1h scalp / 1d trend 분리) | provisional |
 | [[ADR-012]] | WebSocket Realtime Architecture Shift (cron→tick-driven) | provisional |
 | [[ADR-013]] | HARNESS Meta Mode (메인 Claude = orchestrator, 5번째 모드) | provisional |
+| [[ADR-014]] | Polaris Alpha Portfolio v1 (tick-driven deprecated, 1d trend 강화) | provisional |
+| [[ADR-015]] | Dynamic Sizing MAX_FRACTION=0.20 (ADR-010 단일 포지션 조항 supersede) | provisional |
 
 ## 💡 Insights (30_knowledge/insights/)
 

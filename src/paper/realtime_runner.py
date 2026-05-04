@@ -101,28 +101,10 @@ REALTIME_HYPOS = [
         "starting_usd": 5000.0,
         "max_position_pct": 0.04,
     },
-    # HYPO-011 OrderBook Imbalance (OKX books5)
-    {
-        "hypo_id": "HYPO-011-BOOK",
-        "strategy_cls": OrderBookImbalance,
-        "params": {},
-        "primary_tf": "book",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
-                    "ORDI-USDT", "TRUMP-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
-    },
-    # HYPO-012 Trade Flow (taker buy/sell ratio)
-    {
-        "hypo_id": "HYPO-012-FLOW",
-        "strategy_cls": TradeFlow,
-        "params": {},
-        "primary_tf": "flow",
-        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT",
-                    "ORDI-USDT", "TRUMP-USDT"],
-        "starting_usd": 5000.0,
-        "max_position_pct": 0.04,
-    },
+    # HYPO-011 OrderBook Imbalance — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
+    # n=336, TP 0회, signal_exit 99.7%, -$77.93 lifetime. 전략 파일 archive 보존.
+    # HYPO-012 Trade Flow — DEPRECATED Round 8 (Codex 95% 합의 2026-05-04)
+    # n=450, TP 9.8%, EV -0.22%/trade, -$151.77 lifetime. 전략 파일 archive 보존.
     # HYPO-013 MTA Confluence (Phase 2g Round 6 — threshold 완화, Codex 78% 합의 B 완전형)
     {
         "hypo_id": "HYPO-013-MTA",

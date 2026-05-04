@@ -109,3 +109,32 @@ Append-only. ADR-010 paper 운영 기록.
 | 2026-05-04T09:39:12 | CLOSE | id=DOGE-USDT-1777851461665 entry=0.11 exit=0.11 net=-0.04% net_usd=-0.04 |
 | 2026-05-04T09:39:12 | EXIT_REASON | signal_exit |
 | 2026-05-04T10:08:08 | OPEN | id=DOGE-USDT-1777853288910 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:09:39 | CLOSE | id=DOGE-USDT-1777853288910 entry=0.11 exit=0.11 net=-0.23% net_usd=-0.23 |
+| 2026-05-04T10:09:39 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:15:01 | OPEN | id=DOGE-USDT-1777853701809 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:16:34 | CLOSE | id=DOGE-USDT-1777853701809 entry=0.11 exit=0.11 net=-0.26% net_usd=-0.26 |
+| 2026-05-04T10:16:34 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:47:39 | OPEN | id=DOGE-USDT-1777855659088 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:49:47 | CLOSE | id=DOGE-USDT-1777855659088 entry=0.11 exit=0.11 net=+0.12% net_usd=+0.12 |
+| 2026-05-04T10:49:47 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:50:59 | OPEN | id=DOGE-USDT-1777855859346 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:52:38 | CLOSE | id=DOGE-USDT-1777855859346 entry=0.11 exit=0.11 net=-0.10% net_usd=-0.10 |
+| 2026-05-04T10:52:38 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:54:46 | OPEN | id=DOGE-USDT-1777856086365 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:56:51 | CLOSE | id=DOGE-USDT-1777856086365 entry=0.11 exit=0.11 net=+0.05% net_usd=+0.05 |
+| 2026-05-04T10:56:51 | EXIT_REASON | signal_exit |
+| 2026-05-04T10:57:52 | OPEN | id=DOGE-USDT-1777856272709 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T10:59:27 | CLOSE | id=DOGE-USDT-1777856272709 entry=0.11 exit=0.11 net=-0.09% net_usd=-0.09 |
+| 2026-05-04T10:59:27 | EXIT_REASON | signal_exit |
+| 2026-05-04T11:00:32 | OPEN | id=DOGE-USDT-1777856431510 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T11:02:01 | CLOSE | id=DOGE-USDT-1777856431510 entry=0.11 exit=0.11 net=-0.25% net_usd=-0.25 |
+| 2026-05-04T11:02:01 | EXIT_REASON | signal_exit |
+| 2026-05-04T11:04:22 | OPEN | id=DOGE-USDT-1777856662191 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T11:06:01 | CLOSE | id=DOGE-USDT-1777856662191 entry=0.11 exit=0.11 net=-0.15% net_usd=-0.15 |
+| 2026-05-04T11:06:01 | EXIT_REASON | signal_exit |
+| 2026-05-04T11:07:51 | OPEN | id=DOGE-USDT-1777856866341 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T11:09:20 | CLOSE | id=DOGE-USDT-1777856866341 entry=0.11 exit=0.11 net=-0.07% net_usd=-0.07 |
+| 2026-05-04T11:09:20 | EXIT_REASON | signal_exit |
+| 2026-05-04T11:14:15 | OPEN | id=DOGE-USDT-1777857255704 dir=1 entry=0.11 size=$100 |
+| 2026-05-04T11:15:51 | CLOSE | id=DOGE-USDT-1777857255704 entry=0.11 exit=0.11 net=-0.00% net_usd=-0.00 |
+| 2026-05-04T11:15:51 | EXIT_REASON | signal_exit |

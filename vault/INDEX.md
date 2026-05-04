@@ -69,6 +69,7 @@ tags: [meta, index, polaris]
 | [[INSIGHT-020]] | HYPO-004 walk-forward robust (TEST out-of-sample 양수, 3-fold 일관) | active |
 | [[INSIGHT-021]] | Codex Round 4 — flip-flop fee bleed fix (min hold 90s + hysteresis + ticker-global cooldown) | active |
 | [[INSIGHT-022]] | Phase 2g Round 2/3 — MTAConfluence 활성화 + Binance WS spec + 즉시 구현 (HYPO-014 운영 중) | active |
+| [[INSIGHT-023]] | HYPO-011/012 deprecate 근거 — n=336/450 직접 측정, EV 음수, Codex 95% 합의 (Round 8) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

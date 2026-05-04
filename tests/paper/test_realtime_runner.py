@@ -516,3 +516,24 @@ def test_no_double_subscribe_after_crash():
         f"Max concurrent OKX tasks must be 1, got {active['max']} "
         f"— duplicate subscribe detected"
     )
+
+
+# ── Round 8: HYPO-011/012 deprecated (Codex 95% 합의) ───────────────────────
+
+
+def test_hypo_011_012_not_in_realtime_hypos():
+    """HYPO-011-BOOK / HYPO-012-FLOW must be absent from REALTIME_HYPOS.
+
+    Codex Round 8 (95% consensus): n=336 / n=450 measured, EV < -0.20%/trade,
+    signal_exit dominates (99.7% / 90.2%), -$77.93 / -$151.77 lifetime losses.
+    Both deprecated to stop fee bleed. Strategy files preserved for archive.
+    """
+    active_ids = {h["hypo_id"] for h in rt.REALTIME_HYPOS}
+    assert "HYPO-011-BOOK" not in active_ids, (
+        "HYPO-011-BOOK (OrderBookImbalance) must be deprecated — "
+        "n=336, 0 TP, -$77.93 lifetime, signal_exit 99.7%"
+    )
+    assert "HYPO-012-FLOW" not in active_ids, (
+        "HYPO-012-FLOW (TradeFlow) must be deprecated — "
+        "n=450, TP 9.8%, -$151.77 lifetime, EV -0.22%/trade"
+    )

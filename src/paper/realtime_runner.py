@@ -16,6 +16,13 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import logging
+# Load .env (ANTHROPIC_API_KEY etc) at startup — launchd doesn't auto-load
+try:
+    from dotenv import load_dotenv
+    from pathlib import Path
+    load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+except ImportError:
+    pass
 import time
 from collections import deque
 from typing import Callable, Optional
@@ -73,6 +80,7 @@ from src.strategies.stoch_rsi import StochRSI
 from src.strategies.tsmom import TSMOM
 from src.strategies.vpin_toxicity import VPINToxicity
 from src.strategies.whale_wall import WhaleWall
+from src.strategies.ai_advisor import AIAdvisor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -251,6 +259,23 @@ REALTIME_HYPOS = [
         "starting_usd": 50000.0,  # Phase 2Q: 10x capital
         # max_position_pct removed (Phase 2N+) — dynamic sizing handles cap via ADR-015
         "exit_profile": "scalp",  # Phase 2P: BTC→alt lag 30s-3min — TP 0.6%, SL 0.35%, max 4h
+    },
+    # ── Phase 3: AI Advisor (Jin mandate — 원래 의도 부활, 2026-05-04) ────────────
+    {
+        # HYPO-AI-001: Claude AI Advisor — 실시간 multi-source 시장 분석 entry
+        # Jin mandate: '원래 의도는 AI 개입 실시간 분석으로 거래'.
+        # Claude Haiku 4.5 → per-tick market_state JSON 분석 → ENTER_LONG / EXIT / HOLD
+        # Cost: ~$0.11/h (180 calls/h × $0.0006/call) — profitable if ≥ 1 trade/day wins
+        # Rate limit: 1 API call per ticker per 60s (rate_limit → HOLD)
+        # Cache: same market_state hash → cached 5min (no duplicate API call)
+        # Exit: liquidation profile (TP 1.5%, SL 0.7%, max 30min — tight event-driven)
+        "hypo_id": "HYPO-AI-001",
+        "strategy_cls": AIAdvisor,
+        "params": {"target_size_usd": 200.0, "min_confidence": 0.65},
+        "primary_tf": "ai",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "starting_usd": 50000.0,
+        "exit_profile": "liquidation",  # TP 1.5%, SL 0.7%, max 30min — tight
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-025 VolumeDeltaDivergence — DEPRECATED Phase 2N+ (2026-05-04)
@@ -553,6 +578,88 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             if tick_ts_ms - last_hold > 60_000:  # 1분
                 logger.info(f"[BLEAD-HOLD] {ticker} {signal.reason}")
                 _eval_and_act._blead_hold_last[ticker] = tick_ts_ms
+    elif primary == "ai" and hasattr(strategy, "evaluate_ai"):
+        # HYPO-AI-001: Claude AI Advisor — realtime multi-source market state assembly + API call
+        # Shell assembles market_state from OKX WS + cached candles; pure evaluate_ai → Signal.
+        # Rate limit (60s/ticker) and cache (5min) enforced inside AIAdvisor.evaluate_ai.
+        if full_tick is None:
+            return
+        # Assemble market_state from all available sources
+        last_price = float(full_tick.get("last", 0) or 0)
+        open_24h = float(full_tick.get("open24h", last_price) or last_price)
+        change_24h = (last_price - open_24h) / open_24h * 100.0 if open_24h > 0 else 0.0
+        # OKX book imbalance → bid/ask depth approximation
+        imb = compute_book_imbalance(ticker)
+        bid_depth_usd = 0.0
+        ask_depth_usd = 0.0
+        if imb is not None:
+            # imb = (bid_vol - ask_vol) / (bid_vol + ask_vol), range [-1, 1]
+            # Rough estimate from tick vol24h: bid/ask split by imbalance
+            vol24h = float(full_tick.get("vol24h", 0) or 0) * last_price
+            mid = vol24h / 2.0
+            bid_depth_usd = mid * (1 + imb)
+            ask_depth_usd = mid * (1 - imb)
+        # OKX taker buy ratio (recent 100 trades)
+        taker_buy_ratio = compute_taker_buy_ratio(ticker, window=100) or 0.5
+        # 1H candles for RSI approximation
+        candles_1h = _refresh_candles(ticker, "1H")
+        rsi_1h_val = "N/A"
+        trend_4h_val = "unknown"
+        trend_1d_val = "unknown"
+        if len(candles_1h) >= 14:
+            # Simple RSI approximation from last 14 1H candles
+            closes = [c.close for c in candles_1h[-15:]]
+            gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+            avg_gain = sum(gains) / len(gains) if gains else 0
+            avg_loss = sum(losses) / len(losses) if losses else 0
+            if avg_loss > 0:
+                rs = avg_gain / avg_loss
+                rsi_1h_val = round(100 - 100 / (1 + rs), 1)
+            else:
+                rsi_1h_val = 100.0
+        # 4H/1D trend from cached 1D candles (BTC regime as proxy)
+        btc_1d = _get_btc_1d_candles()
+        if len(btc_1d) >= 2:
+            last_close = btc_1d[-1].close
+            prev_close = btc_1d[-2].close
+            trend_1d_val = "up" if last_close > prev_close else "down"
+            trend_4h_val = trend_1d_val  # use 1D trend as 4H proxy (conservative)
+        # Regime detection
+        regime_val = detect_regime(btc_1d) if btc_1d else "unknown"
+        # Funding rate from cache (populated by _poll_funding_rate)
+        binance_sym = ticker.replace("-", "")
+        funding_8h = _funding_rate_cache.get(binance_sym, 0.0) or 0.0
+        # VPIN approximation from recent trades
+        trades = get_recent_trades(ticker, 100)
+        vpin_val = 0.0
+        if trades:
+            buy_vol = sum(size * price for _, side, size, price in trades if side == "buy")
+            total_vol = sum(size * price for _, side, size, price in trades)
+            vpin_val = abs(buy_vol / total_vol - 0.5) * 2 if total_vol > 0 else 0.0
+        market_state = {
+            "ticker": ticker,
+            "last": last_price,
+            "change_24h": change_24h,
+            "rsi_1h": rsi_1h_val,
+            "trend_4h": trend_4h_val,
+            "trend_1d": trend_1d_val,
+            "bid_depth_usd": bid_depth_usd,
+            "ask_depth_usd": ask_depth_usd,
+            "taker_buy_ratio": taker_buy_ratio,
+            "vpin": vpin_val,
+            "funding_8h": funding_8h,
+            "regime": regime_val,
+        }
+        signal = strategy.evaluate_ai(market_state)
+        # Log HOLD reason rate-limited 5min/ticker
+        if signal.action == SignalAction.HOLD and "rate_limit" not in signal.reason:
+            if not hasattr(_eval_and_act, "_ai_hold_last"):
+                _eval_and_act._ai_hold_last = {}
+            last_ai_log = _eval_and_act._ai_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_ai_log > 300_000:
+                logger.info(f"[AI-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._ai_hold_last[ticker] = tick_ts_ms
     elif primary == "mta" and hasattr(strategy, "evaluate_multi_tf"):
         # Phase 2g Round 2: MTA confluence — 4 TF (1D/4H/1H/15m) candle fetch
         tf_data = fetch_multi_tf(ticker, timeframes=("1D", "4H", "1H", "15m"))

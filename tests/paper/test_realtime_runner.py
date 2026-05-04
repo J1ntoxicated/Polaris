@@ -984,10 +984,15 @@ def test_realtime_hypos_007_008_023():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # 정확히 9개 (007+008+023+024+027+028+032+033+034; 025 deprecated Phase 2N+)
-    assert len(active_ids) == 9, (
-        f"REALTIME_HYPOS must contain exactly 9 active HYPOs "
-        f"(007+008+023+024+027+028+032+033+034; HYPO-025 deprecated Phase 2N+), "
+    # Phase 3 추가: HYPO-AI-001 (Claude AI Advisor) — Phase 3 mandate
+    assert "HYPO-AI-001" in active_ids, (
+        "HYPO-AI-001 must be active — Phase 3 AI Advisor (Jin mandate '원래 의도 = AI 개입')"
+    )
+
+    # 정확히 10개 (007+008+023+024+027+028+032+033+034+AI-001; 025 deprecated Phase 2N+)
+    assert len(active_ids) == 10, (
+        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
+        f"(007+008+023+024+027+028+032+033+034+AI-001), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 

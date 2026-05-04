@@ -16,5 +16,9 @@ aiohttp>=3.9.0
 # Historical data backup sources (Fix 2 Phase 2N)
 yfinance>=0.2.0  # Yahoo Finance: BTC-USD, ETH-USD 등 1d+ candles
 
+# AI Advisor (Phase 3 — Claude API realtime analysis; OpenAI fallback on credit error)
+anthropic>=0.97.0  # Claude Haiku 4.5 for per-tick market analysis
+openai>=1.0.0      # GPT-4o-mini fallback (~$0.0002/call) when Anthropic credit exhausted
+
 # IG Lightstreamer (optional - for real-time forex streaming)
 # lightstreamer-client-lib>=1.0.0

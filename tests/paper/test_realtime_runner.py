@@ -5,8 +5,28 @@ from unittest.mock import patch
 
 import pytest
 
+from src.data import okx_ws as _okx_ws
 from src.paper import realtime_runner as rt
 from src.paper.state import PaperBalance
+
+
+@pytest.fixture(autouse=True)
+def _populate_book_store():
+    """Phase 7+: tests need a populated _book_store (else LIQ-SKIP fires).
+    Inject a synthetic deep book at ~1bps spread around price=100 (matches
+    tight-spread liquid pair conditions assumed by tests).
+    """
+    fake_book = {
+        "bids": [(100.0 * (1 - 0.00005 - i * 0.00001), 100.0) for i in range(5)],
+        "asks": [(100.0 * (1 + 0.00005 + i * 0.00001), 100.0) for i in range(5)],
+        "ts": 0,
+    }
+    _save = dict(_okx_ws._book_store)
+    for t in ("BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ORDI-USDT", "TRUMP-USDT"):
+        _okx_ws._book_store[t] = fake_book
+    yield
+    _okx_ws._book_store.clear()
+    _okx_ws._book_store.update(_save)
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +66,8 @@ def _hypo_flow(starting_usd: float = 5000.0) -> dict:
 
 
 def _full_tick(price: float = 100.0, ts: int = 1_000) -> dict:
-    return {"ts": ts, "last": price, "bid": price * 0.999, "ask": price * 1.001,
+    # Phase 6+: tight 2bps spread to pass entry spread filter
+    return {"ts": ts, "last": price, "bid": price * 0.99995, "ask": price * 1.00005,
             "open24h": price * 0.98, "high24h": price * 1.02, "low24h": price * 0.97}
 
 

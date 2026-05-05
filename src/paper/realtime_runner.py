@@ -1038,11 +1038,12 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     _max_hold_ms = int(_exit_profile["max_hold_h"] * 3600 * 1000)
 
     # Phase 6 (slippage fix): fetch book + L1 quote once per tick — used by both
-    # entry and exit fill price computation. Falls back gracefully when missing.
+    # entry and exit fill price computation. Prefer caller-supplied full_tick
+    # (test injection) before falling back to global store.
     _book = get_book(ticker) or {}
-    _tick_full = get_tick(ticker) or {}
-    _bid = float(_tick_full.get("bid", 0) or 0)
-    _ask = float(_tick_full.get("ask", 0) or 0)
+    _tick_full = full_tick if full_tick is not None else (get_tick(ticker) or {})
+    _bid = float((_tick_full or {}).get("bid", 0) or 0)
+    _ask = float((_tick_full or {}).get("ask", 0) or 0)
 
     # 1. Open positions — TP/SL/exit-signal 체크 (TICK PRICE 기반!)
     # Codex Round 4 fix: min hold time — entry 후 MIN_HOLD_MS 동안 signal_exit 차단 (flip-flop fee bleed 방지)
@@ -1062,10 +1063,16 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
             exit_reason = "signal_exit"
         if exit_reason:
-            # Phase 6: realistic fill price for SELL (consume bid side)
+            # Phase 6 + Codex round-1: exit notional uses base qty × tick_price
+            # (entry size_usd is stale once price moved). Without this, wins
+            # under-estimated and losses over-estimated paper-vs-live drift.
+            exit_notional_usd = (
+                (pos.size_usd / pos.entry_price) * tick_price
+                if pos.entry_price > 0 else pos.size_usd
+            )
             exit_fill, exit_slip_bps = compute_fill_price(
                 "sell",
-                size_usd=pos.size_usd,
+                size_usd=exit_notional_usd,
                 book=_book,
                 last=tick_price,
                 bid=_bid,
@@ -1102,15 +1109,18 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         and _hypo010_pause_until_ms > 0
         and tick_ts_ms < _hypo010_pause_until_ms
     )
-    # Phase 6 (slippage fix): spread filter — skip entries when bid-ask too wide
-    # (structural slippage from thin liquidity). Uses bid/ask from L1 quote.
+    # Phase 6 + Codex round-1: spread filter — skip entries when bid-ask too
+    # wide (structural slippage). compute_spread_bps returns inf for invalid
+    # quotes (zero/crossed) so we always skip in that case rather than
+    # silently fall through to fill_price fallback.
     spread_too_wide = False
-    if signal.action == SignalAction.ENTER_LONG and _bid > 0 and _ask > 0:
+    if signal.action == SignalAction.ENTER_LONG:
         _spread_bps = compute_spread_bps(_bid, _ask)
         if should_skip_entry_spread(_spread_bps):
             spread_too_wide = True
+            _spread_repr = "inf" if _spread_bps == float("inf") else f"{_spread_bps:.1f}bps"
             logger.info(
-                f"[SPREAD-SKIP] {hypo['hypo_id']} {ticker} spread={_spread_bps:.1f}bps > 5bps"
+                f"[SPREAD-SKIP] {hypo['hypo_id']} {ticker} spread={_spread_repr} > 5bps"
             )
 
     if (signal.action == SignalAction.ENTER_LONG
@@ -1147,21 +1157,26 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.
         # Shell adds one absolute safety bound: equity × 0.30 ($5000 → $1500 max).
         hard_cap = equity * 0.30
-        # Phase 7 (liquidity-aware sizing): cap size to 10% of top-5 ask depth.
-        # Addresses BLUR 10.2bps slip observed 2026-05-05 — tight spread but $300
-        # walks book on thin pair. liq_cap=0 → book missing → skip rather than
-        # silent walk. Floor 0.0 prevents accidental size on no-book.
+        # Phase 7 + Codex round-1: liquidity-aware sizing. Cap size to 10% of
+        # top-5 ask depth. liq_cap=0 (book missing/empty) → SKIP entry — book
+        # absence implies unknown liquidity, not safe liquidity. Brief WS gap
+        # is OK to wait one tick rather than enter blind.
         _liq_cap = compute_liquidity_cap("buy", _book, max_book_fraction=0.10)
-        size = min(sizing.size_usd, hard_cap, balance.cash_usd)
-        if _liq_cap > 0:
-            size = min(size, _liq_cap)
+        if _liq_cap <= 0:
+            logger.info(
+                f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book — skip entry"
+            )
+            _liq_skip = True
+        else:
+            _liq_skip = False
+        size = min(sizing.size_usd, hard_cap, balance.cash_usd, _liq_cap if _liq_cap > 0 else float("inf"))
 
         logger.info(
             f"[DYN-SIZE] {hypo['hypo_id']} {ticker} size=${size:.0f} "
             f"liq_cap=${_liq_cap:.0f} regime={regime} {sizing.reason}"
         )
 
-        if size > 0:
+        if size > 0 and not _liq_skip:
             # Phase 6: realistic fill price for BUY (consume ask side, walk book)
             entry_fill, entry_slip_bps = compute_fill_price(
                 "buy",

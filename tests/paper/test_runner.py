@@ -48,6 +48,9 @@ def tmp_state(tmp_path, monkeypatch):
     monkeypatch.setattr(paper_runner, "DEFAULT_STATE_DIR", tmp_path)
     log_dir = tmp_path / "log"
     monkeypatch.setattr(paper_runner.paper_logger, "LOG_DIR", log_dir)
+    # Phase 16: disable SQL ledger primary-read for these tests so each runs
+    # against a fresh JSON-only state (else SQL holds prod-leftover positions).
+    monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
     return tmp_path
 
 

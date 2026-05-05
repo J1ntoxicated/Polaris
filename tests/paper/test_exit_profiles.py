@@ -257,6 +257,7 @@ def test_swing_profile_tp_not_hit_at_scalp_threshold(tmp_path, monkeypatch):
 
     from src.paper import runner as paper_runner
     monkeypatch.setattr(paper_runner, "DEFAULT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()
@@ -350,6 +351,7 @@ def test_position_profile_closes_at_tp_12pct(tmp_path, monkeypatch):
 
     from src.paper import runner as paper_runner
     monkeypatch.setattr(paper_runner, "DEFAULT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()
@@ -433,6 +435,7 @@ def test_scalp_profile_closes_at_old_tp_threshold(tmp_path, monkeypatch):
 
     from src.paper import runner as paper_runner
     monkeypatch.setattr(paper_runner, "DEFAULT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()

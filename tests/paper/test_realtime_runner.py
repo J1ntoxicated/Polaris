@@ -40,6 +40,9 @@ def _isolate_state(tmp_path, monkeypatch):
     """Redirect paper state files + reset cooldown registry per test."""
     from src.paper import runner as paper_runner
     monkeypatch.setattr(paper_runner, "DEFAULT_STATE_DIR", tmp_path)
+    # Phase 16: disable SQL ledger primary-read in tests so each test gets
+    # a fresh JSON-backed state (else SQL holds prod-leftover positions).
+    monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()

@@ -23,6 +23,8 @@ from src.domain.signal import SignalAction
 from src.domain.strategy import Strategy
 
 DAILY_LOSS_LIMIT_PCT = 0.05  # ADR-010
+from typing import Optional
+
 from src.paper import logger as paper_logger
 from src.paper.state import PaperBalance, Position, PositionStatus
 
@@ -139,7 +141,19 @@ def _state_file(ticker: str, strategy_name: str, base_dir: Path | None = None) -
 
 
 def load_state(ticker: str, strategy_name: str, starting_usd: float = 5000.0) -> PaperBalance:
-    """JSON에서 state 로드. 없으면 초기 balance."""
+    """Load PaperBalance — Phase 16: SQL ledger primary, JSON fallback.
+
+    Phase 9.1: JSON primary, SQL shadow.
+    Phase 16 (this): SQL primary read, JSON fallback (handles legacy / SQL miss).
+
+    SQL is now SSOT. JSON kept as backup for safety + human inspection.
+    """
+    # Phase 16: try SQL first
+    bal = _load_from_ledger(ticker, strategy_name)
+    if bal is not None:
+        return bal
+
+    # JSON fallback
     path = _state_file(ticker, strategy_name)
     if not path.exists():
         return PaperBalance(starting_usd=starting_usd, cash_usd=starting_usd)
@@ -180,6 +194,27 @@ def load_state(ticker: str, strategy_name: str, starting_usd: float = 5000.0) ->
         open_positions=open_positions,
         closed_positions=closed_positions,
     )
+
+
+def _load_from_ledger(
+    ticker: str, strategy_name: str,
+) -> Optional[PaperBalance]:
+    """Phase 16 — try SQL ledger as primary source. Returns None on miss/error."""
+    if not _LEDGER_ENABLED:
+        return None
+    try:
+        led = _get_ledger()
+        if led is None:
+            return None
+        from src.persist.migrations import _hypo_id_for_strategy
+        try:
+            hid = _hypo_id_for_strategy(strategy_name)
+        except Exception:
+            hid = f"LEGACY-{strategy_name}"
+        return led.get_paper_balance(hid, ticker)
+    except Exception as e:
+        logger.warning(f"ledger primary read failed ({ticker}/{strategy_name}): {e!r}")
+        return None
 
 
 def save_state(ticker: str, strategy_name: str, balance: PaperBalance) -> None:

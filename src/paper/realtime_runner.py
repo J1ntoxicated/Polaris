@@ -1192,6 +1192,25 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         and _hypo010_pause_until_ms > 0
         and tick_ts_ms < _hypo010_pause_until_ms
     )
+    # Phase 11: regime activation matrix — block strategy in mismatched regime.
+    # Computes BTC 1D regime (cached 60s) and looks up REGIME_ACTIVATION.
+    # Only applied to ENTER_LONG paths (exits always allowed).
+    regime_blocked = False
+    if signal.action == SignalAction.ENTER_LONG:
+        from src.risk.regime_activation import block_reason as _regime_block_reason
+        _btc_1d_for_regime = _get_btc_1d_candles()
+        _curr_regime = detect_regime(_btc_1d_for_regime) if _btc_1d_for_regime else "flat"
+        _block_msg = _regime_block_reason(sname, _curr_regime)
+        if _block_msg:
+            regime_blocked = True
+            # Rate-limit log (5min/strategy) — avoids spam
+            if not hasattr(_eval_and_act, "_regime_block_last"):
+                _eval_and_act._regime_block_last = {}
+            last_log = _eval_and_act._regime_block_last.get((sname, _curr_regime), 0)
+            if tick_ts_ms - last_log > 300_000:
+                logger.info(f"[REGIME-BLOCK] {hypo['hypo_id']} {ticker} {_block_msg}")
+                _eval_and_act._regime_block_last[(sname, _curr_regime)] = tick_ts_ms
+
     # Phase 6 + Codex round-1: spread filter — skip entries when bid-ask too
     # wide (structural slippage). compute_spread_bps returns inf for invalid
     # quotes (zero/crossed) so we always skip in that case rather than
@@ -1209,7 +1228,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     if (signal.action == SignalAction.ENTER_LONG
             and not has_open and not daily_breached and not closed_this_tick
             and not in_cooldown and not in_regime_pause
-            and not spread_too_wide):
+            and not spread_too_wide and not regime_blocked):
         # ── Phase 2j: Dynamic sizing (Kelly + confidence + regime + drawdown) ──
         # 1. Recent performance stats (HYPO별 last 20 closed trades)
         perf_stats = compute_recent_stats(list(balance.closed_positions), lookback=20)

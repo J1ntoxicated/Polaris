@@ -57,8 +57,33 @@ Wired into `realtime_runner.py`:
 - `compute_fill_price` 9 cases (buy/sell book / L1 fallback / default / partial blend)
 - `compute_spread_bps` + `should_skip_entry_spread` 7 cases
 
-## Next (Phase 7+)
+## Phase 7 (2026-05-05) — Liquidity-aware sizing (Layer 3)
 
-- **Maker-only mode** for live: post-only limit at bid/ask (saves 4bps round-trip)
-- **Liquidity-aware sizing**: cap size to top-5 ask depth × 0.10
-- **L2 orderbook persistence** for backtest accuracy (currently only WS-derived top-5)
+Spread filter blocked wide-spread entries, but tight-spread thin pairs still
+slipped on size walks (BLUR 10.2bps observed with $300 size). Phase 7 caps
+size to **10% of top-5 ask depth**.
+
+`compute_liquidity_cap("buy", book, max_book_fraction=0.10)` (P6 pure, 6 tests).
+Sizing: `min(sizing, hard_cap, cash, liq_cap)`.
+
+## Codex round-1 (2026-05-05) — 3 critical fixes accepted
+
+1. **liq_cap=0 silent bypass** → SKIP entry with `[LIQ-SKIP]` log (book missing
+   = unknown liquidity, not safe).
+2. **Spread filter bypass for invalid quotes** → `compute_spread_bps` `inf`
+   triggers SKIP unconditionally (caller no longer guards on `bid>0 and ask>0`).
+3. **Exit notional drift** — entry `size_usd` is stale once price moved.
+   Fix: `exit_notional = (size_usd / entry_price) × tick_price` so exit
+   slippage matches realized base-qty notional.
+
+Codex round-2: NONE (all 3 fixes verified clean — entry_price>0 enforced,
+_liq_skip is final gate, inf path division-safe).
+
+## Cumulative Result (Phase 6 + 7 + Codex round-1)
+
+- Live readiness: **22 → 35 → 41/100** (MARGINAL threshold reached)
+- Paper PnL: **−$59 → −$30 → +$11.82** (negative-to-positive flip)
+- Live PnL est: **−$77 → −$37 → +$2.14** (first positive estimate)
+- Overall EV: **−0.42% → −0.084% → +0.024%** per trade
+- Slippage drag: $109 → $6.96 → $9.68 (drag stable, sample grew 154→201)
+- Tests: 806 + 6 new (Phase 7) = 812 passing

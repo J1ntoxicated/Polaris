@@ -15,12 +15,15 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## Phase 6 (2026-05-05) — Slippage internalized in paper engine
-- **Root fix**: paper-vs-live PnL divergence. Paper엔진이 fill price에 spread cross + book walk를 내장 → live와 PnL 매칭.
-- `src/paper/slippage_model.py` (P6 pure, 21 tests): walk_book / compute_fill_price / spread_bps / should_skip_entry_spread.
-- `realtime_runner` 패치: entry/exit 모두 compute_fill_price 호출, 진입 전 spread > 5bps 시 SKIP.
-- **Result**: live readiness `32 → 35/100`, slippage drag `$27 → $6.90 (-75%)`, friction delta `0.08% → 0.02%`.
-- 자세히: [[INSIGHT-036]]
+## Phase 6+7 + Codex round-1 (2026-05-05) — Slippage 4-layer + EV flip
+
+**🎯 Polaris EV 양수 첫 전환** — Live readiness 22→35→41/100 (MARGINAL), Paper PnL -$59→-$30→**+$11.82**, Live est -$77→-$37→**+$2.14** (첫 양수). NFI = hidden alpha (n=22, 86% win, +$45.34).
+
+- Phase 6: slippage_model.py (P6 pure, 21 tests). walk_book + compute_fill_price + spread filter (>5bps SKIP).
+- Phase 7: compute_liquidity_cap (size ≤ 10% × top-5 ask depth, 6 tests).
+- Codex round-1 (3 critical fixes accepted): liq_cap=0 → SKIP, spread filter inf 처리 unconditional, exit_notional = (size_usd/entry_price)×tick_price.
+- Codex round-2: NONE (clean).
+- Tests: 812 pass. 자세히: [[INSIGHT-036]]
 
 ## 현재 상태 (2026-05-04 — Phase 5 Codex Top5 + NFI X7: 825/825 pass)
 

@@ -762,483 +762,33 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     strategy = _get_strategy(hypo, ticker)
     sname = strategy.name
 
-    # 1. Strategy evaluate — registry first, legacy chain as fallback.
+    # 1. Strategy evaluate — Phase 18: registry-only dispatch.
+    # Legacy if/elif chain removed; all 19 dispatchers registered at module load.
     primary = hypo.get("primary_tf")
-    signal = None
     dispatcher = get_dispatcher(primary)
     if dispatcher is not None:
-        # Pre-fetch shared inputs (book / L1 quote)
         _book_pre = get_book(ticker) or {}
         _tick_pre = full_tick if full_tick is not None else (get_tick(ticker) or {})
         _bid_pre = float((_tick_pre or {}).get("bid", 0) or 0)
         _ask_pre = float((_tick_pre or {}).get("ask", 0) or 0)
         ctx = DispatchContext(
-            strategy=strategy,
-            hypo=hypo,
-            ticker=ticker,
-            tick_ts_ms=tick_ts_ms,
-            tick_price=tick_price,
-            full_tick=full_tick,
-            book=_book_pre,
-            bid=_bid_pre,
-            ask=_ask_pre,
+            strategy=strategy, hypo=hypo, ticker=ticker,
+            tick_ts_ms=tick_ts_ms, tick_price=tick_price,
+            full_tick=full_tick, book=_book_pre, bid=_bid_pre, ask=_ask_pre,
         )
         signal = dispatcher(ctx)
         if signal is None:
-            # Dispatcher signaled "data not ready, skip" — exit early
             return
-    elif primary == "tick" and hasattr(strategy, "evaluate_tick"):
-        if full_tick is None:
+    elif primary in (None, ""):
+        # No primary_tf set → fallback to candle-based evaluate (default path).
+        candles = _refresh_candles(ticker, "1H")
+        if len(candles) < strategy.min_window:
             return
-        signal = strategy.evaluate_tick(full_tick)
-    elif primary == "book" and hasattr(strategy, "evaluate_book"):
-        imb = compute_book_imbalance(ticker)
-        if imb is None or full_tick is None:
-            return
-        signal = strategy.evaluate_book(full_tick, imb)
-    elif primary == "flow" and hasattr(strategy, "evaluate_flow"):
-        ratio = compute_taker_buy_ratio(ticker, window=100)
-        n_trades = len(get_recent_trades(ticker, 100))
-        if ratio is None or full_tick is None:
-            return
-        signal = strategy.evaluate_flow(full_tick, ratio, n_trades)
-    elif primary == "ofi" and hasattr(strategy, "evaluate_ofi"):
-        # HYPO-016: signed volume OFI + vwap price confirmation
-        trades_recent = get_recent_trades(ticker, 50)
-        if full_tick is None:
-            return
-        signal = strategy.evaluate_ofi(full_tick, trades_recent)
-    elif primary == "cascade" and hasattr(strategy, "evaluate_cascade"):
-        # HYPO-017: BTC-led alt cascade — 1min BTC/ETH delta → alt follow lag
-        if full_tick is None:
-            return
-        btc_state = _get_cascade_state("BTC-USDT", get_last_price("BTC-USDT") or 0.0, tick_ts_ms)
-        eth_state = _get_cascade_state("ETH-USDT", get_last_price("ETH-USDT") or 0.0, tick_ts_ms)
-        if btc_state is None or eth_state is None:
-            # Insufficient price history — log warmup progress (rate-limited 1min/ticker)
-            # Codex Round 12 Q7: distinguish cold-start warmup from persistent data gap
-            if not hasattr(_eval_and_act, "_cascade_warmup_last"):
-                _eval_and_act._cascade_warmup_last = {}
-            last_warmup = _eval_and_act._cascade_warmup_last.get(ticker, 0)
-            if tick_ts_ms - last_warmup > 60_000:
-                logger.info(
-                    f"[CASCADE-WARMUP] {ticker} btc_ready={btc_state is not None}"
-                    f" eth_ready={eth_state is not None}"
-                )
-                _eval_and_act._cascade_warmup_last[ticker] = tick_ts_ms
-            return
-        signal = strategy.evaluate_cascade(full_tick, btc_state, eth_state, now_ms=tick_ts_ms)
-    elif primary == "cross" and hasattr(strategy, "evaluate_cross"):
-        # Phase 2g Round 3: Binance cross-exchange leading signal (HYPO-014)
-        # OKX-style "BTC-USDT" → Binance "BTCUSDT" conversion
-        binance_sym = ticker.replace("-", "")
-        b_ratio = binance_taker_buy_ratio(binance_sym, window=100)
-        b_vol = binance_volatility_bps(binance_sym, window=50)
-        b_last = binance_get_last_trade(binance_sym)  # (ts_ms, side, size, price)
-        if full_tick is None or b_last is None:
-            # Round 10: 5분에 1번 WARN — Binance state 미공급 추적 (WS 문제 vs threshold 미충족 구분)
-            if not hasattr(_eval_and_act, "_blead_nofeed_last"):
-                _eval_and_act._blead_nofeed_last = {}
-            last_warn = _eval_and_act._blead_nofeed_last.get(ticker, 0)
-            if tick_ts_ms - last_warn > 300_000:  # 5분
-                logger.warning(f"[BLEAD-NOFEED] {ticker} b_last={b_last} (Binance trades 미공급)")
-                _eval_and_act._blead_nofeed_last[ticker] = tick_ts_ms
-            return
-        binance_state = {
-            "taker_buy_ratio": b_ratio,
-            "n_trades": len(binance_get_recent_trades(binance_sym, 100)),
-            "volatility_bps": b_vol,
-            "last_price": b_last[3],
-            "last_trade_ts_ms": b_last[0],
-            # Fix 2 (Codex Round 4): local clock avoids cross-exchange clock skew.
-            # OKX ts and Binance ts use different exchange servers → pure local time.
-            "now_ms": int(time.time() * 1000),
-        }
-        signal = strategy.evaluate_cross(full_tick, binance_state)
-        # Round 10: HOLD reason 분포 추적 (rate-limited 1분/ticker)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_blead_hold_last"):
-                _eval_and_act._blead_hold_last = {}
-            last_hold = _eval_and_act._blead_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_hold > 60_000:  # 1분
-                logger.info(f"[BLEAD-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._blead_hold_last[ticker] = tick_ts_ms
-    elif primary == "ai" and hasattr(strategy, "evaluate_ai"):
-        # HYPO-AI-001: Claude AI Advisor — realtime multi-source market state assembly + API call
-        # Shell assembles market_state from OKX WS + cached candles; pure evaluate_ai → Signal.
-        # Rate limit (60s/ticker) and cache (5min) enforced inside AIAdvisor.evaluate_ai.
-        if full_tick is None:
-            return
-        # Assemble market_state from all available sources
-        last_price = float(full_tick.get("last", 0) or 0)
-        open_24h = float(full_tick.get("open24h", last_price) or last_price)
-        change_24h = (last_price - open_24h) / open_24h * 100.0 if open_24h > 0 else 0.0
-        # OKX book imbalance → bid/ask depth approximation
-        imb = compute_book_imbalance(ticker)
-        bid_depth_usd = 0.0
-        ask_depth_usd = 0.0
-        if imb is not None:
-            # imb = (bid_vol - ask_vol) / (bid_vol + ask_vol), range [-1, 1]
-            # Rough estimate from tick vol24h: bid/ask split by imbalance
-            vol24h = float(full_tick.get("vol24h", 0) or 0) * last_price
-            mid = vol24h / 2.0
-            bid_depth_usd = mid * (1 + imb)
-            ask_depth_usd = mid * (1 - imb)
-        # OKX taker buy ratio (recent 100 trades)
-        taker_buy_ratio = compute_taker_buy_ratio(ticker, window=100) or 0.5
-        # 1H candles for RSI approximation
-        candles_1h = _refresh_candles(ticker, "1H")
-        rsi_1h_val = "N/A"
-        trend_4h_val = "unknown"
-        trend_1d_val = "unknown"
-        if len(candles_1h) >= 14:
-            # Simple RSI approximation from last 14 1H candles
-            closes = [c.close for c in candles_1h[-15:]]
-            gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
-            losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
-            avg_gain = sum(gains) / len(gains) if gains else 0
-            avg_loss = sum(losses) / len(losses) if losses else 0
-            if avg_loss > 0:
-                rs = avg_gain / avg_loss
-                rsi_1h_val = round(100 - 100 / (1 + rs), 1)
-            else:
-                rsi_1h_val = 100.0
-        # 4H/1D trend from cached 1D candles (BTC regime as proxy)
-        btc_1d = _get_btc_1d_candles()
-        if len(btc_1d) >= 2:
-            last_close = btc_1d[-1].close
-            prev_close = btc_1d[-2].close
-            trend_1d_val = "up" if last_close > prev_close else "down"
-            trend_4h_val = trend_1d_val  # use 1D trend as 4H proxy (conservative)
-        # Regime detection
-        regime_val = detect_regime(btc_1d) if btc_1d else "unknown"
-        # Funding rate from cache (populated by _poll_funding_rate)
-        binance_sym = ticker.replace("-", "")
-        funding_8h = _funding_rate_cache.get(binance_sym, 0.0) or 0.0
-        # VPIN approximation from recent trades
-        trades = get_recent_trades(ticker, 100)
-        vpin_val = 0.0
-        if trades:
-            buy_vol = sum(size * price for _, side, size, price in trades if side == "buy")
-            total_vol = sum(size * price for _, side, size, price in trades)
-            vpin_val = abs(buy_vol / total_vol - 0.5) * 2 if total_vol > 0 else 0.0
-        market_state = {
-            "ticker": ticker,
-            "last": last_price,
-            "change_24h": change_24h,
-            "rsi_1h": rsi_1h_val,
-            "trend_4h": trend_4h_val,
-            "trend_1d": trend_1d_val,
-            "bid_depth_usd": bid_depth_usd,
-            "ask_depth_usd": ask_depth_usd,
-            "taker_buy_ratio": taker_buy_ratio,
-            "vpin": vpin_val,
-            "funding_8h": funding_8h,
-            "regime": regime_val,
-        }
-        signal = strategy.evaluate_ai(market_state)
-        # Log HOLD reason rate-limited 5min/ticker
-        if signal.action == SignalAction.HOLD and "rate_limit" not in signal.reason:
-            if not hasattr(_eval_and_act, "_ai_hold_last"):
-                _eval_and_act._ai_hold_last = {}
-            last_ai_log = _eval_and_act._ai_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_ai_log > 300_000:
-                logger.info(f"[AI-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._ai_hold_last[ticker] = tick_ts_ms
-    elif primary == "mta" and hasattr(strategy, "evaluate_multi_tf"):
-        # Phase 2g Round 2: MTA confluence — 4 TF (1D/4H/1H/15m) candle fetch
-        tf_data = fetch_multi_tf(ticker, timeframes=("1D", "4H", "1H", "15m"))
-        if not all(tf_data.get(tf) for tf in ("1D", "4H", "1H", "15m")):
-            return
-        # Codex Round 2 fix (Q5 IMMEDIATE): stale data guard — 각 TF 마지막 candle
-        # 이 자체 주기의 1.5x 이상 오래되면 skip (가격 발견 stale)
-        TF_MAX_STALE_MS = {"15m": 30*60_000, "1H": 90*60_000, "4H": 6*3600_000, "1D": 36*3600_000}
-        stale = False
-        for tf in ("15m", "1H", "4H", "1D"):
-            last_ts = tf_data[tf][-1].timestamp_ms
-            if tick_ts_ms - last_ts > TF_MAX_STALE_MS[tf]:
-                stale = True
-                break
-        if stale:
-            return
-        signal = strategy.evaluate_multi_tf(tf_data)
-        # Round 10: HOLD reason 분포 추적 (24h 후 too strict vs wrong logic 판단)
-        # Rate-limit 5분/ticker (BLEAD-HOLD/NOFEED 패턴 — log spam 방지)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_mta_hold_last"):
-                _eval_and_act._mta_hold_last = {}
-            last_log = _eval_and_act._mta_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_log > 300_000:  # 5분
-                logger.info(f"[MTA-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._mta_hold_last[ticker] = tick_ts_ms
-    elif primary == "nfi" and hasattr(strategy, "evaluate_multi_tf"):
-        # HYPO-NFI-001: NFI X7 dip-buy — 5m/15m/1H/4H multi-TF candle fetch
-        tf_data = fetch_multi_tf(ticker, timeframes=("5m", "15m", "1H", "4H"))
-        # Require at least 1H and 4H (most data-intensive TFs)
-        if not tf_data.get("1H") or not tf_data.get("4H"):
-            return
-        # Stale guard: 1H candle must be within 90min, 4H within 6h
-        TF_MAX_STALE_NFI: dict[str, int] = {
-            "5m": 15 * 60_000, "15m": 30 * 60_000,
-            "1H": 90 * 60_000, "4H": 6 * 3_600_000,
-        }
-        nfi_stale = False
-        for tf, max_ms in TF_MAX_STALE_NFI.items():
-            if tf_data.get(tf) and tick_ts_ms - tf_data[tf][-1].timestamp_ms > max_ms:
-                nfi_stale = True
-                break
-        if nfi_stale:
-            return
-        signal = strategy.evaluate_multi_tf(tf_data)
-        # HOLD reason logging (rate-limited 5min/ticker)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_nfi_hold_last"):
-                _eval_and_act._nfi_hold_last = {}
-            last_nfi_log = _eval_and_act._nfi_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_nfi_log > 300_000:  # 5분
-                logger.info(f"[NFI-DIP-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._nfi_hold_last[ticker] = tick_ts_ms
-        elif signal.action == SignalAction.ENTER_LONG:
-            logger.info(f"[NFI-DIP] {ticker} ENTRY confidence={signal.confidence:.2f} {signal.reason}")
-    elif primary == "liquidation" and hasattr(strategy, "evaluate_cascade"):
-        # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k)
-        # Binance perp forceOrder → liquidation pressure (data source)
-        # OKX SPOT price → panic-drop detection (execution)
-        if full_tick is None:
-            return
-        binance_sym = ticker.replace("-", "")  # "BTC-USDT" → "BTCUSDT"
-        # HYPO-023 diagnosis: 60s window too short for rare forceOrder events (0 signals in 25h).
-        # Expanded to 300s (5min) — captures ~5x more events on low-vol days.
-        liq_pressure = compute_liquidation_pressure(binance_sym, lookback_ms=300_000)
-        # 60s price history via existing _price_history_60s (HYPO-017 reuse)
-        buf = _price_history_60s.get(ticker)
-        price_60s_ago = None
-        if buf and len(buf) >= 2:
-            oldest_ts, oldest_price = buf[0]
-            if tick_ts_ms - oldest_ts >= 50_000:  # at least 50s of history
-                price_60s_ago = oldest_price
-        signal = strategy.evaluate_cascade(full_tick, liq_pressure, price_60s_ago=price_60s_ago)
-        # Warm-up + HOLD reason logging (rate-limited 5min/ticker)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_liq_hold_last"):
-                _eval_and_act._liq_hold_last = {}
-            last_liq_log = _eval_and_act._liq_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_liq_log > 300_000:  # 5분
-                pressure_str = (
-                    f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
-                    if liq_pressure else "no_data"
-                )
-                logger.info(
-                    f"[LIQ-CASCADE-HOLD] {ticker} pressure={pressure_str} {signal.reason}"
-                )
-                _eval_and_act._liq_hold_last[ticker] = tick_ts_ms
-        elif signal.action == SignalAction.ENTER_LONG:
-            pressure_str = (
-                f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
-                if liq_pressure else "?"
-            )
-            logger.info(
-                f"[LIQ-CASCADE] {ticker} ENTRY SIGNAL pressure={pressure_str} {signal.reason}"
-            )
-    elif primary == "gap" and hasattr(strategy, "evaluate_cross"):
-        # HYPO-024: Cross-Exchange Price Gap — Binance @bookTicker best bid vs OKX last
-        if full_tick is None:
-            return
-        binance_sym = ticker.replace("-", "")  # "BTC-USDT" → "BTCUSDT"
-        from src.data.binance_ws import get_book_ticker
-        b_book = get_book_ticker(binance_sym)
-        if b_book is None:
-            if not hasattr(_eval_and_act, "_gap_nofeed_last"):
-                _eval_and_act._gap_nofeed_last = {}
-            last_warn = _eval_and_act._gap_nofeed_last.get(ticker, 0)
-            if tick_ts_ms - last_warn > 300_000:  # 5분
-                logger.warning(f"[GAP-NOFEED] {ticker} Binance bookTicker 미공급")
-                _eval_and_act._gap_nofeed_last[ticker] = tick_ts_ms
-            return
-        binance_price_state = {
-            "price": b_book.get("bid", 0.0),  # best bid = Binance SPOT best buy price
-            "ts_ms": b_book.get("ts_ms", 0),
-            "now_ms": int(time.time() * 1000),
-        }
-        signal = strategy.evaluate_cross(full_tick, binance_price_state)
-    elif primary == "delta" and hasattr(strategy, "evaluate_delta"):
-        # HYPO-025: Volume Delta Divergence — OKX trades WS cumulative delta
-        if full_tick is None:
-            return
-        trades = get_recent_trades(ticker, 200)
-        signal = strategy.evaluate_delta(full_tick, trades)
-    elif primary == "wall" and hasattr(strategy, "evaluate_book"):
-        # HYPO-026: Whale Wall — OKX books5 large bid detection
-        if full_tick is None:
-            return
-        book = get_book(ticker)
-        if book is None:
-            return
-        signal = strategy.evaluate_book(full_tick, book)
-    elif primary == "funding" and hasattr(strategy, "compute_multiplier"):
-        # HYPO-027: Funding Rate Filter — standalone ENTER signal on squeeze
-        # Funding rate fetched by shell poll; pure compute_multiplier determines action
-        binance_sym = ticker.replace("-", "")
-        funding = _funding_rate_cache.get(binance_sym)
-        multiplier = strategy.compute_multiplier(funding)
-        ts_val = int((full_tick or {}).get("ts", 0) or 0) or 1
-        if multiplier == 0.0:
-            # Longs blocked
-            signal = Signal(
-                timestamp_ms=ts_val,
-                action=SignalAction.HOLD,
-                confidence=0.0,
-                reason=f"funding_block rate={funding}",
-            )
-        elif multiplier > 1.0:
-            # Short squeeze → enter
-            signal = Signal(
-                timestamp_ms=ts_val,
-                action=SignalAction.ENTER_LONG,
-                confidence=0.70,
-                target_size_usd=200.0,
-                reason=f"funding_squeeze rate={funding} boost=x{multiplier:.2f}",
-            )
-        else:
-            signal = Signal(
-                timestamp_ms=ts_val,
-                action=SignalAction.HOLD,
-                confidence=0.0,
-                reason=f"funding_neutral rate={funding}",
-            )
-    # NOTE: primary == "carry" is now handled by registered dispatcher
-    # (see _dispatch_carry below). Legacy branch removed in Phase 10.
-    elif primary == "grid" and hasattr(strategy, "evaluate_grid"):
-        # HYPO-040: Grid Bot — sideways ATR-compressed lower-boundary entry
-        if full_tick is None:
-            return
-        # ATR from 1H candles (last 14 — cached 60s)
-        candles_1h = _refresh_candles(ticker, "1H")
-        atr_pct: Optional[float] = None
-        if len(candles_1h) >= 14:
-            last_price_val = float(full_tick.get("last", 0) or 0)
-            if last_price_val > 0:
-                trs = []
-                for i in range(1, min(15, len(candles_1h))):
-                    c = candles_1h[-i]
-                    prev_c = candles_1h[-i - 1] if i < len(candles_1h) - 1 else c
-                    tr = max(
-                        c.high - c.low,
-                        abs(c.high - prev_c.close),
-                        abs(c.low - prev_c.close),
-                    )
-                    trs.append(tr)
-                atr_val = sum(trs) / len(trs) if trs else 0.0
-                atr_pct = atr_val / last_price_val
-        # 24h high/low directly from OKX tickers tick (high24h, low24h fields)
-        high_24h_val = float(full_tick.get("high24h", 0) or 0) or None
-        low_24h_val = float(full_tick.get("low24h", 0) or 0) or None
-        # is_active: any open position for this ticker × grid_bot (use cached balance)
-        has_open_grid = any(
-            p.ticker == ticker
-            for p in _load_balance(ticker, strategy.name, hypo["starting_usd"]).open_positions
-        )
-        signal = strategy.evaluate_grid(full_tick, atr_pct, high_24h_val, low_24h_val, is_active=has_open_grid)
-        # HOLD reason logging (rate-limited 10min/ticker)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_grid_hold_last"):
-                _eval_and_act._grid_hold_last = {}
-            last_grid_log = _eval_and_act._grid_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_grid_log > 600_000:  # 10분
-                logger.info(f"[GRID-HOLD] {ticker} atr={atr_pct and f'{atr_pct*100:.2f}%' or 'N/A'} {signal.reason}")
-                _eval_and_act._grid_hold_last[ticker] = tick_ts_ms
-    elif primary == "burst" and hasattr(strategy, "evaluate_tick"):
-        # HYPO-028: Tick Burst — 5s price spike follow
-        if full_tick is None:
-            return
-        price_5s_ago = _get_price_5s_ago(ticker, tick_ts_ms)
-        signal = strategy.evaluate_tick(full_tick, price_5s_ago)
-    elif primary == "vpin" and hasattr(strategy, "evaluate_vpin"):
-        # HYPO-033: VPIN Toxicity — OKX trades WS volume bucket construction
-        # Shell builds per-tick synthetic volume buckets from OKX recent trades.
-        # Bucket = {buy_vol: sum of buy_qty, sell_vol: sum of sell_qty} per 50-trade window.
-        if full_tick is None:
-            return
-        trades = get_recent_trades(ticker, 200)
-        # Build rolling 50-trade buckets (each bucket = 10 trades aggregated)
-        # get_recent_trades returns list[tuple]: (ts_ms, side, size, price)
-        # Must use tuple unpacking — NOT dict .get() — fixes HYPO-033 runtime error.
-        buckets: list[dict] = []
-        bucket_size = 10
-        for i in range(0, len(trades), bucket_size):
-            chunk = trades[i:i + bucket_size]
-            if not chunk:
-                continue
-            buy_vol = sum(
-                size * price
-                for _ts_ms, side, size, price in chunk
-                if side == "buy"
-            )
-            sell_vol = sum(
-                size * price
-                for _ts_ms, side, size, price in chunk
-                if side == "sell"
-            )
-            buckets.append({"buy_vol": buy_vol, "sell_vol": sell_vol})
-        signal = strategy.evaluate_vpin(full_tick, buckets)
-        # HOLD reason logging (rate-limited 5min/ticker)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_vpin_hold_last"):
-                _eval_and_act._vpin_hold_last = {}
-            last_vpin_log = _eval_and_act._vpin_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_vpin_log > 300_000:
-                logger.info(f"[VPIN-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._vpin_hold_last[ticker] = tick_ts_ms
-    elif primary == "btclag" and hasattr(strategy, "evaluate_lag"):
-        # HYPO-034: BTC Dominance Lead-Lag — BTC 5min delta leads alt
-        # Reuses _price_history_60s infrastructure from HYPO-017 (already maintained per tick).
-        if full_tick is None:
-            return
-        # Build BTC 5min state from 60s rolling price history
-        # Use oldest entry in 5min window as "price_5min_ago" approximation
-        buf_btc = _price_history_60s.get("BTC-USDT")
-        if buf_btc is None or len(buf_btc) < 2:
-            # BTC warmup — log rate-limited
-            if not hasattr(_eval_and_act, "_btclag_warmup_last"):
-                _eval_and_act._btclag_warmup_last = {}
-            last_warm = _eval_and_act._btclag_warmup_last.get(ticker, 0)
-            if tick_ts_ms - last_warm > 60_000:
-                logger.info(f"[BTCLAG-WARMUP] {ticker} BTC price history not ready")
-                _eval_and_act._btclag_warmup_last[ticker] = tick_ts_ms
-            return
-        btc_price_now = buf_btc[-1][1]
-        btc_price_5min_ago = buf_btc[0][1]  # oldest entry in 60s window ≈ up to 65s ago
-        btc_ts_ms = buf_btc[-1][0]
-        btc_state_for_lag = {
-            "price_now": btc_price_now,
-            "price_5min_ago": btc_price_5min_ago,
-            "ts_ms": btc_ts_ms,
-        }
-        # Alt 5min delta from alt's own price history
-        buf_alt = _price_history_60s.get(ticker)
-        alt_5min_delta_pct = 0.0
-        if buf_alt and len(buf_alt) >= 2:
-            alt_old = buf_alt[0][1]
-            alt_now = buf_alt[-1][1]
-            alt_5min_delta_pct = (alt_now - alt_old) / alt_old if alt_old > 0 else 0.0
-        # 24h delta from tick (OKX tickers WS provides open24h)
-        alt_24h_open = float(full_tick.get("open24h", 0) or 0)
-        alt_last = float(full_tick.get("last", 0) or 0)
-        alt_24h_delta_pct = (alt_last - alt_24h_open) / alt_24h_open if alt_24h_open > 0 else 0.0
-        alt_context = {
-            "alt_5min_delta_pct": alt_5min_delta_pct,
-            "alt_24h_delta_pct": alt_24h_delta_pct,
-        }
-        signal = strategy.evaluate_lag(full_tick, btc_state_for_lag, alt_context, now_ms=tick_ts_ms)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_btclag_hold_last"):
-                _eval_and_act._btclag_hold_last = {}
-            last_lag_log = _eval_and_act._btclag_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_lag_log > 300_000:
-                logger.info(f"[BTCLAG-HOLD] {ticker} {signal.reason}")
-                _eval_and_act._btclag_hold_last[ticker] = tick_ts_ms
+        signal = strategy.evaluate(candles)
     else:
-        candles = _refresh_candles(ticker, hypo["primary_tf"])
+        # primary_tf set but no dispatcher registered → fallback to candle eval
+        # using primary_tf as candle timeframe. Backward-compat path.
+        candles = _refresh_candles(ticker, primary)
         if len(candles) < strategy.min_window:
             return
         signal = strategy.evaluate(candles)
@@ -1645,6 +1195,363 @@ async def _run_okx_and_binance(
 # Migrated dispatchers — replace if/elif chain in `_eval_and_act`.
 # Each function takes a DispatchContext and returns Signal | None.
 # (None = data not ready, runner aborts early. SignalAction.HOLD = real HOLD.)
+
+
+# --- Phase 18: All 19 dispatchers registered (was if/elif chain in _eval_and_act) ---
+
+
+def _rate_limit(fn, key, ts_ms: int, interval_ms: int) -> bool:
+    """Rate-limit helper — returns True if ok to log (and updates timestamp)."""
+    cache_attr = "_rl_cache"
+    if not hasattr(fn, cache_attr):
+        setattr(fn, cache_attr, {})
+    cache = getattr(fn, cache_attr)
+    last = cache.get(key, 0)
+    if ts_ms - last >= interval_ms:
+        cache[key] = ts_ms
+        return True
+    return False
+
+
+@register_dispatcher("tick")
+def _dispatch_tick(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    return ctx.strategy.evaluate_tick(ctx.full_tick)
+
+
+@register_dispatcher("book")
+def _dispatch_book(ctx: DispatchContext) -> Signal | None:
+    imb = compute_book_imbalance(ctx.ticker)
+    if imb is None or ctx.full_tick is None:
+        return None
+    return ctx.strategy.evaluate_book(ctx.full_tick, imb)
+
+
+@register_dispatcher("flow")
+def _dispatch_flow(ctx: DispatchContext) -> Signal | None:
+    ratio = compute_taker_buy_ratio(ctx.ticker, window=100)
+    n_trades = len(get_recent_trades(ctx.ticker, 100))
+    if ratio is None or ctx.full_tick is None:
+        return None
+    return ctx.strategy.evaluate_flow(ctx.full_tick, ratio, n_trades)
+
+
+@register_dispatcher("ofi")
+def _dispatch_ofi(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    trades_recent = get_recent_trades(ctx.ticker, 50)
+    return ctx.strategy.evaluate_ofi(ctx.full_tick, trades_recent)
+
+
+@register_dispatcher("cascade")
+def _dispatch_cascade(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    btc_state = _get_cascade_state("BTC-USDT", get_last_price("BTC-USDT") or 0.0, ctx.tick_ts_ms)
+    eth_state = _get_cascade_state("ETH-USDT", get_last_price("ETH-USDT") or 0.0, ctx.tick_ts_ms)
+    if btc_state is None or eth_state is None:
+        if _rate_limit(_dispatch_cascade, ctx.ticker, ctx.tick_ts_ms, 60_000):
+            logger.info(
+                f"[CASCADE-WARMUP] {ctx.ticker} btc_ready={btc_state is not None}"
+                f" eth_ready={eth_state is not None}"
+            )
+        return None
+    return ctx.strategy.evaluate_cascade(ctx.full_tick, btc_state, eth_state, now_ms=ctx.tick_ts_ms)
+
+
+@register_dispatcher("cross")
+def _dispatch_cross(ctx: DispatchContext) -> Signal | None:
+    binance_sym = ctx.ticker.replace("-", "")
+    b_ratio = binance_taker_buy_ratio(binance_sym, window=100)
+    b_vol = binance_volatility_bps(binance_sym, window=50)
+    b_last = binance_get_last_trade(binance_sym)
+    if ctx.full_tick is None or b_last is None:
+        if _rate_limit(_dispatch_cross, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.warning(f"[BLEAD-NOFEED] {ctx.ticker} b_last={b_last} (Binance trades 미공급)")
+        return None
+    binance_state = {
+        "taker_buy_ratio": b_ratio,
+        "n_trades": len(binance_get_recent_trades(binance_sym, 100)),
+        "volatility_bps": b_vol,
+        "last_price": b_last[3],
+        "last_trade_ts_ms": b_last[0],
+        "now_ms": int(time.time() * 1000),
+    }
+    sig = ctx.strategy.evaluate_cross(ctx.full_tick, binance_state)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_cross, f"hold-{ctx.ticker}", ctx.tick_ts_ms, 60_000):
+            logger.info(f"[BLEAD-HOLD] {ctx.ticker} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("ai")
+def _dispatch_ai(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    last_price = float(ctx.full_tick.get("last", 0) or 0)
+    open_24h = float(ctx.full_tick.get("open24h", last_price) or last_price)
+    change_24h = (last_price - open_24h) / open_24h * 100.0 if open_24h > 0 else 0.0
+    imb = compute_book_imbalance(ctx.ticker)
+    bid_depth_usd = ask_depth_usd = 0.0
+    if imb is not None:
+        vol24h = float(ctx.full_tick.get("vol24h", 0) or 0) * last_price
+        mid = vol24h / 2.0
+        bid_depth_usd = mid * (1 + imb)
+        ask_depth_usd = mid * (1 - imb)
+    taker_buy_ratio = compute_taker_buy_ratio(ctx.ticker, window=100) or 0.5
+    candles_1h = _refresh_candles(ctx.ticker, "1H")
+    rsi_1h_val = "N/A"
+    trend_4h_val = trend_1d_val = "unknown"
+    if len(candles_1h) >= 14:
+        closes = [c.close for c in candles_1h[-15:]]
+        gains = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+        losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+        avg_gain = sum(gains) / len(gains) if gains else 0
+        avg_loss = sum(losses) / len(losses) if losses else 0
+        if avg_loss > 0:
+            rs = avg_gain / avg_loss
+            rsi_1h_val = round(100 - 100 / (1 + rs), 1)
+        else:
+            rsi_1h_val = 100.0
+    btc_1d = _get_btc_1d_candles()
+    if len(btc_1d) >= 2:
+        last_close = btc_1d[-1].close
+        prev_close = btc_1d[-2].close
+        trend_1d_val = "up" if last_close > prev_close else "down"
+        trend_4h_val = trend_1d_val
+    regime_val = detect_regime(btc_1d) if btc_1d else "unknown"
+    binance_sym = ctx.ticker.replace("-", "")
+    funding_8h = _funding_rate_cache.get(binance_sym, 0.0) or 0.0
+    trades = get_recent_trades(ctx.ticker, 100)
+    vpin_val = 0.0
+    if trades:
+        buy_vol = sum(size * price for _, side, size, price in trades if side == "buy")
+        total_vol = sum(size * price for _, side, size, price in trades)
+        vpin_val = abs(buy_vol / total_vol - 0.5) * 2 if total_vol > 0 else 0.0
+    market_state = {
+        "ticker": ctx.ticker, "last": last_price, "change_24h": change_24h,
+        "rsi_1h": rsi_1h_val, "trend_4h": trend_4h_val, "trend_1d": trend_1d_val,
+        "bid_depth_usd": bid_depth_usd, "ask_depth_usd": ask_depth_usd,
+        "taker_buy_ratio": taker_buy_ratio, "vpin": vpin_val,
+        "funding_8h": funding_8h, "regime": regime_val,
+    }
+    sig = ctx.strategy.evaluate_ai(market_state)
+    if sig.action == SignalAction.HOLD and "rate_limit" not in sig.reason:
+        if _rate_limit(_dispatch_ai, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.info(f"[AI-HOLD] {ctx.ticker} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("mta")
+def _dispatch_mta(ctx: DispatchContext) -> Signal | None:
+    tf_data = fetch_multi_tf(ctx.ticker, timeframes=("1D", "4H", "1H", "15m"))
+    if not all(tf_data.get(tf) for tf in ("1D", "4H", "1H", "15m")):
+        return None
+    TF_MAX_STALE_MS = {"15m": 30*60_000, "1H": 90*60_000, "4H": 6*3600_000, "1D": 36*3600_000}
+    for tf in ("15m", "1H", "4H", "1D"):
+        if ctx.tick_ts_ms - tf_data[tf][-1].timestamp_ms > TF_MAX_STALE_MS[tf]:
+            return None
+    sig = ctx.strategy.evaluate_multi_tf(tf_data)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_mta, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.info(f"[MTA-HOLD] {ctx.ticker} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("nfi")
+def _dispatch_nfi(ctx: DispatchContext) -> Signal | None:
+    tf_data = fetch_multi_tf(ctx.ticker, timeframes=("5m", "15m", "1H", "4H"))
+    if not tf_data.get("1H") or not tf_data.get("4H"):
+        return None
+    TF_MAX_STALE_NFI = {"5m": 15*60_000, "15m": 30*60_000, "1H": 90*60_000, "4H": 6*3_600_000}
+    for tf, max_ms in TF_MAX_STALE_NFI.items():
+        if tf_data.get(tf) and ctx.tick_ts_ms - tf_data[tf][-1].timestamp_ms > max_ms:
+            return None
+    sig = ctx.strategy.evaluate_multi_tf(tf_data)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_nfi, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.info(f"[NFI-DIP-HOLD] {ctx.ticker} {sig.reason}")
+    elif sig.action == SignalAction.ENTER_LONG:
+        logger.info(f"[NFI-DIP] {ctx.ticker} ENTRY confidence={sig.confidence:.2f} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("liquidation")
+def _dispatch_liquidation(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    binance_sym = ctx.ticker.replace("-", "")
+    liq_pressure = compute_liquidation_pressure(binance_sym, lookback_ms=300_000)
+    buf = _price_history_60s.get(ctx.ticker)
+    price_60s_ago = None
+    if buf and len(buf) >= 2:
+        oldest_ts, oldest_price = buf[0]
+        if ctx.tick_ts_ms - oldest_ts >= 50_000:
+            price_60s_ago = oldest_price
+    sig = ctx.strategy.evaluate_cascade(ctx.full_tick, liq_pressure, price_60s_ago=price_60s_ago)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_liquidation, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            pressure_str = (
+                f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
+                if liq_pressure else "no_data"
+            )
+            logger.info(f"[LIQ-CASCADE-HOLD] {ctx.ticker} pressure={pressure_str} {sig.reason}")
+    elif sig.action == SignalAction.ENTER_LONG:
+        pressure_str = (
+            f"${liq_pressure['total_usd']:,.0f} imb={liq_pressure['imbalance']:+.3f}"
+            if liq_pressure else "?"
+        )
+        logger.info(f"[LIQ-CASCADE] {ctx.ticker} ENTRY SIGNAL pressure={pressure_str} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("gap")
+def _dispatch_gap(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    binance_sym = ctx.ticker.replace("-", "")
+    from src.data.binance_ws import get_book_ticker
+    b_book = get_book_ticker(binance_sym)
+    if b_book is None:
+        if _rate_limit(_dispatch_gap, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.warning(f"[GAP-NOFEED] {ctx.ticker} Binance bookTicker 미공급")
+        return None
+    binance_price_state = {
+        "price": b_book.get("bid", 0.0),
+        "ts_ms": b_book.get("ts_ms", 0),
+        "now_ms": int(time.time() * 1000),
+    }
+    return ctx.strategy.evaluate_cross(ctx.full_tick, binance_price_state)
+
+
+@register_dispatcher("delta")
+def _dispatch_delta(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    trades = get_recent_trades(ctx.ticker, 200)
+    return ctx.strategy.evaluate_delta(ctx.full_tick, trades)
+
+
+@register_dispatcher("wall")
+def _dispatch_wall(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    book = get_book(ctx.ticker)
+    if book is None:
+        return None
+    return ctx.strategy.evaluate_book(ctx.full_tick, book)
+
+
+@register_dispatcher("funding")
+def _dispatch_funding(ctx: DispatchContext) -> Signal | None:
+    binance_sym = ctx.ticker.replace("-", "")
+    funding = _funding_rate_cache.get(binance_sym)
+    multiplier = ctx.strategy.compute_multiplier(funding)
+    ts_val = int((ctx.full_tick or {}).get("ts", 0) or 0) or 1
+    if multiplier == 0.0:
+        return Signal(timestamp_ms=ts_val, action=SignalAction.HOLD, confidence=0.0,
+                      reason=f"funding_block rate={funding}")
+    elif multiplier > 1.0:
+        return Signal(timestamp_ms=ts_val, action=SignalAction.ENTER_LONG, confidence=0.70,
+                      target_size_usd=200.0,
+                      reason=f"funding_squeeze rate={funding} boost=x{multiplier:.2f}")
+    return Signal(timestamp_ms=ts_val, action=SignalAction.HOLD, confidence=0.0,
+                  reason=f"funding_neutral rate={funding}")
+
+
+@register_dispatcher("grid")
+def _dispatch_grid(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    candles_1h = _refresh_candles(ctx.ticker, "1H")
+    atr_pct: Optional[float] = None
+    if len(candles_1h) >= 14:
+        last_price_val = float(ctx.full_tick.get("last", 0) or 0)
+        if last_price_val > 0:
+            trs = []
+            for i in range(1, min(15, len(candles_1h))):
+                c = candles_1h[-i]
+                prev_c = candles_1h[-i - 1] if i < len(candles_1h) - 1 else c
+                tr = max(c.high - c.low, abs(c.high - prev_c.close), abs(c.low - prev_c.close))
+                trs.append(tr)
+            atr_val = sum(trs) / len(trs) if trs else 0.0
+            atr_pct = atr_val / last_price_val
+    high_24h_val = float(ctx.full_tick.get("high24h", 0) or 0) or None
+    low_24h_val = float(ctx.full_tick.get("low24h", 0) or 0) or None
+    has_open_grid = any(
+        p.ticker == ctx.ticker
+        for p in _load_balance(ctx.ticker, ctx.strategy.name, ctx.hypo["starting_usd"]).open_positions
+    )
+    sig = ctx.strategy.evaluate_grid(ctx.full_tick, atr_pct, high_24h_val, low_24h_val, is_active=has_open_grid)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_grid, ctx.ticker, ctx.tick_ts_ms, 600_000):
+            logger.info(f"[GRID-HOLD] {ctx.ticker} atr={atr_pct and f'{atr_pct*100:.2f}%' or 'N/A'} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("burst")
+def _dispatch_burst(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    price_5s_ago = _get_price_5s_ago(ctx.ticker, ctx.tick_ts_ms)
+    return ctx.strategy.evaluate_tick(ctx.full_tick, price_5s_ago)
+
+
+@register_dispatcher("vpin")
+def _dispatch_vpin(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    trades = get_recent_trades(ctx.ticker, 200)
+    buckets: list[dict] = []
+    bucket_size = 10
+    for i in range(0, len(trades), bucket_size):
+        chunk = trades[i:i + bucket_size]
+        if not chunk:
+            continue
+        buy_vol = sum(size * price for _ts_ms, side, size, price in chunk if side == "buy")
+        sell_vol = sum(size * price for _ts_ms, side, size, price in chunk if side == "sell")
+        buckets.append({"buy_vol": buy_vol, "sell_vol": sell_vol})
+    sig = ctx.strategy.evaluate_vpin(ctx.full_tick, buckets)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_vpin, ctx.ticker, ctx.tick_ts_ms, 300_000):
+            logger.info(f"[VPIN-HOLD] {ctx.ticker} {sig.reason}")
+    return sig
+
+
+@register_dispatcher("btclag")
+def _dispatch_btclag(ctx: DispatchContext) -> Signal | None:
+    if ctx.full_tick is None:
+        return None
+    buf_btc = _price_history_60s.get("BTC-USDT")
+    if buf_btc is None or len(buf_btc) < 2:
+        if _rate_limit(_dispatch_btclag, ctx.ticker, ctx.tick_ts_ms, 60_000):
+            logger.info(f"[BTCLAG-WARMUP] {ctx.ticker} BTC price history not ready")
+        return None
+    btc_price_now = buf_btc[-1][1]
+    btc_price_5min_ago = buf_btc[0][1]
+    btc_ts_ms = buf_btc[-1][0]
+    btc_state_for_lag = {
+        "price_now": btc_price_now,
+        "price_5min_ago": btc_price_5min_ago,
+        "ts_ms": btc_ts_ms,
+    }
+    buf_alt = _price_history_60s.get(ctx.ticker)
+    alt_5min_delta_pct = 0.0
+    if buf_alt and len(buf_alt) >= 2:
+        alt_old = buf_alt[0][1]
+        alt_now = buf_alt[-1][1]
+        alt_5min_delta_pct = (alt_now - alt_old) / alt_old if alt_old > 0 else 0.0
+    alt_24h_open = float(ctx.full_tick.get("open24h", 0) or 0)
+    alt_last = float(ctx.full_tick.get("last", 0) or 0)
+    alt_24h_delta_pct = (alt_last - alt_24h_open) / alt_24h_open if alt_24h_open > 0 else 0.0
+    alt_context = {"alt_5min_delta_pct": alt_5min_delta_pct, "alt_24h_delta_pct": alt_24h_delta_pct}
+    sig = ctx.strategy.evaluate_lag(ctx.full_tick, btc_state_for_lag, alt_context, now_ms=ctx.tick_ts_ms)
+    if sig.action == SignalAction.HOLD:
+        if _rate_limit(_dispatch_btclag, f"hold-{ctx.ticker}", ctx.tick_ts_ms, 300_000):
+            logger.info(f"[BTCLAG-HOLD] {ctx.ticker} {sig.reason}")
+    return sig
 
 
 @register_dispatcher("carry")

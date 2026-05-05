@@ -174,6 +174,35 @@ def _scan_all_states() -> tuple[list[dict], list[dict]]:
     return closed_all, open_all
 
 
+def _equity_from_ledger(tickers_map: dict) -> tuple[float, float, float]:
+    """Phase 19: total cash + open size + unrealized from SQL ledger (SSOT).
+
+    Returns (total_cash_usd, total_open_size_usd, total_unrealized_usd).
+    Raises on ledger error (caller falls back to JSON).
+    """
+    from pathlib import Path
+    from src.persist.ledger import TradeLedger
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "polaris.sqlite"
+    if not db_path.exists():
+        raise FileNotFoundError(db_path)
+    with TradeLedger(db_path) as led:
+        total_cash = led.conn.execute(
+            "SELECT COALESCE(SUM(cash_usd), 0) AS s FROM balances"
+        ).fetchone()["s"]
+        opens = led.conn.execute(
+            "SELECT ticker, direction, entry_price, entry_size_usd, fee_round_trip "
+            "FROM positions WHERE status = 'open'"
+        ).fetchall()
+    total_open_size = sum(r["entry_size_usd"] for r in opens)
+    total_unrealized = 0.0
+    for r in opens:
+        cur = tickers_map.get(r["ticker"])
+        if cur:
+            gross = r["direction"] * (cur - r["entry_price"]) / r["entry_price"]
+            total_unrealized += (gross - r["fee_round_trip"]) * r["entry_size_usd"]
+    return float(total_cash), float(total_open_size), float(total_unrealized)
+
+
 def _scan_from_ledger() -> tuple[list[dict], list[dict]]:
     """Phase 17: query SQL ledger for all positions (SSOT)."""
     from pathlib import Path
@@ -256,20 +285,23 @@ def render_stats_summary() -> Panel:
     total_cash = 0.0
     total_open_size = 0.0
     total_unrealized = 0.0
-    n_open_files = 0
-    for f in DATA_PAPER_DIR.glob("paper_state_*.json"):
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        total_cash += d.get("cash_usd", 0.0)
-        n_open_files += 1
-        for p in d.get("open_positions", []):
-            total_open_size += p["size_usd"]
-            cur = tickers_map.get(p["ticker"])
-            if cur:
-                gross = p["direction"] * (cur - p["entry_price"]) / p["entry_price"]
-                total_unrealized += (gross - p["fee_round_trip"]) * p["size_usd"]
+    # Phase 19: total equity from SQL ledger (SSOT). Falls back to JSON scan
+    # if ledger unavailable (graceful degradation).
+    try:
+        total_cash, total_open_size, total_unrealized = _equity_from_ledger(tickers_map)
+    except Exception:
+        for f in DATA_PAPER_DIR.glob("paper_state_*.json"):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            total_cash += d.get("cash_usd", 0.0)
+            for p in d.get("open_positions", []):
+                total_open_size += p["size_usd"]
+                cur = tickers_map.get(p["ticker"])
+                if cur:
+                    gross = p["direction"] * (cur - p["entry_price"]) / p["entry_price"]
+                    total_unrealized += (gross - p["fee_round_trip"]) * p["size_usd"]
     total_realized = sum(_net_usd(p) for p in closed)
     total_equity = total_cash + total_open_size + total_unrealized
     realized_color = "green" if total_realized >= 0 else "red"

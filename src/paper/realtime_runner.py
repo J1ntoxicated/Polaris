@@ -1213,6 +1213,24 @@ def _rate_limit(fn, key, ts_ms: int, interval_ms: int) -> bool:
     return False
 
 
+def _dispatch_candle_factory(timeframe: str):
+    """Phase 19: factory for candle-based dispatchers (1m/5m/15m/1H/4H/1D).
+    Each registered with timeframe as primary_tf so no candle fallback needed.
+    """
+    def _dispatch_candle(ctx: DispatchContext) -> Signal | None:
+        candles = _refresh_candles(ctx.ticker, timeframe)
+        if len(candles) < ctx.strategy.min_window:
+            return None
+        return ctx.strategy.evaluate(candles)
+    _dispatch_candle.__name__ = f"_dispatch_candle_{timeframe}"
+    return _dispatch_candle
+
+
+# Register candle dispatchers for all common timeframes used in REALTIME_HYPOS
+for _tf in ("1m", "5m", "15m", "1H", "4H", "1D"):
+    register_dispatcher(_tf)(_dispatch_candle_factory(_tf))
+
+
 @register_dispatcher("tick")
 def _dispatch_tick(ctx: DispatchContext) -> Signal | None:
     if ctx.full_tick is None:

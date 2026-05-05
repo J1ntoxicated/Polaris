@@ -15,6 +15,21 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
+## Phase 9-16 (2026-05-05) — 구조 airtight 8 phase
+
+**Codex 합의 우선순위 A→D→C→E→B→F 완료**: 데이터 SSOT → 전략 제어 → EV 개선 → 실행 모듈화 → 글로벌 리스크 → 라이브 path.
+
+- **Phase 9** Unified Trade Ledger (SQLite SSOT, 270 JSON 통합)
+- **Phase 10** Strategy Registry (`@register_dispatcher`)
+- **Phase 11** Regime activation matrix (fee bleed 차단)
+- **Phase 12.1+12.2** State manager + entry gate 추출
+- **Phase 13** Portfolio risk + correlation (drawdown 5% cap)
+- **Phase 14.1** Broker abstraction (paper/live unified, dry-run skeleton)
+- **Phase 15** Codex P0/P1 fix (ledger health, MTM, snapshot writer, broker wiring) + round-2 (snapshot 독립)
+- **Phase 16** SQL primary read (JSON-SQL drift 차단)
+
+**941 tests pass**, 8 commits, ~2,600 LOC 추가, 110 신규 tests. Live transition은 broker singleton swap 만 필요. 자세히: [[INSIGHT-038]]
+
 ## Phase 8 (2026-05-05) — HYPO-036 FundingCarry + funding poll bug fix
 - Codex priority debate (1 round 합의 B): HYPO-036 활성화 가장 임팩트.
 - **Latent bug fix**: `_funding_rate_cache` write 부재 (HYPO-027 + AI 항상 funding=0). `_poll_funding_rates` async task 추가 (executor offload, Codex round-1).

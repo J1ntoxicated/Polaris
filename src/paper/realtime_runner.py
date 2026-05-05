@@ -91,6 +91,8 @@ from src.strategies.whale_wall import WhaleWall
 from src.strategies.ai_advisor import AIAdvisor
 from src.strategies.grid_bot import GridBot
 from src.strategies.nfi_dipbuy import NFIDipBuy
+from src.strategies.funding_carry import FundingCarry
+from src.data.binance_funding import fetch_funding_rates_bulk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -110,6 +112,32 @@ _hypo_started_at_ms: dict[str, int] = {}
 # Funding rate cache — updated by funding rate poll task
 _funding_rate_cache: dict[str, float | None] = {}  # symbol -> funding_8h rate
 _FUNDING_POLL_INTERVAL_S: float = 60.0
+
+
+async def _poll_funding_rates(symbols: list[str]) -> None:
+    """Background task — poll Binance Futures funding every 60s, populate cache.
+
+    Phase 8 (2026-05-05) fix: cache was read-only (HYPO-027 + AI silently saw
+    funding=0.0 forever). Polling now writes the cache so downstream funding-
+    aware strategies (HYPO-027 FundingFilter, HYPO-036 FundingCarry, AI advisor)
+    actually receive live data.
+
+    Shell function — performs HTTP I/O.
+    """
+    while True:
+        try:
+            rates = fetch_funding_rates_bulk(symbols, use_cache=False)
+            for sym, rate in rates.items():
+                if rate is not None:
+                    _funding_rate_cache[sym] = rate
+            non_null = sum(1 for v in _funding_rate_cache.values() if v is not None)
+            logger.info(
+                f"[FUNDING-POLL] populated {non_null}/{len(symbols)} symbols "
+                f"sample={dict(list(_funding_rate_cache.items())[:3])}"
+            )
+        except Exception as e:
+            logger.error(f"[FUNDING-POLL] fetch error: {e!r}")
+        await asyncio.sleep(_FUNDING_POLL_INTERVAL_S)
 _funding_last_poll_s: float = 0.0
 INDICATOR_REFRESH_SEC = 60  # candle indicator 매 60초 refresh
 TP_PCT_INTRADAY = 0.006
@@ -277,6 +305,20 @@ REALTIME_HYPOS = [
         "exit_profile": "scalp",  # TP 0.6% (grid default +0.8% handled per-level), max 4h
     },
     # ── Phase 5: NFI X7 Dip-Buy (HYPO-NFI-001) ────────────────────────────────
+    {
+        # HYPO-036: Funding Carry — Liu & Yu (2024) ~70% hit rate empirical.
+        # Standalone entry on extreme negative funding (shorts squeezed → SPOT rally).
+        # Distinct from HYPO-027 (size modifier). primary_tf="carry" → evaluate_funding.
+        # Default entry threshold -0.05% per 8h, exit on funding recovery (>= 0%) or 12h max.
+        "hypo_id": "HYPO-036",
+        "strategy_cls": FundingCarry,
+        "params": {},
+        "primary_tf": "carry",
+        "tickers": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],
+        "_binance_futures_syms": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        "starting_usd": 50000.0,
+        "exit_profile": "swing",  # 12h hold target — swing (TP 5%, SL 2%, max 7d aligns)
+    },
     {
         # HYPO-NFI-001: NFI X7 dip-buy — multi-TF oversold confluence
         # Basis: NostalgiaForInfinity X7 (strat.ninja validated, 88-92% win rate backtests).
@@ -893,6 +935,40 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                 confidence=0.0,
                 reason=f"funding_neutral rate={funding}",
             )
+    elif primary == "carry" and hasattr(strategy, "evaluate_funding"):
+        # HYPO-036: Funding Carry — funding-triggered SPOT entry (Liu & Yu 2024)
+        # Reads cached funding (populated by _poll_funding_rates).
+        # Computes in_position + position_age_hours from current balance.
+        binance_sym = ticker.replace("-", "")
+        funding = _funding_rate_cache.get(binance_sym)
+        # Determine open position state for this strategy on this ticker
+        bal_check = _load_balance(ticker, strategy.name, hypo["starting_usd"])
+        open_pos = next(
+            (p for p in bal_check.open_positions if p.ticker == ticker),
+            None,
+        )
+        in_position = open_pos is not None
+        age_h = (
+            (tick_ts_ms - open_pos.open_ts_ms) / 3_600_000.0 if open_pos else 0.0
+        )
+        signal = strategy.evaluate_funding(
+            funding_8h=funding,
+            ts_ms=tick_ts_ms,
+            position_age_hours=age_h,
+            in_position=in_position,
+        )
+        # Rate-limit HOLD logging per ticker (5min)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_carry_hold_last"):
+                _eval_and_act._carry_hold_last = {}
+            last_log = _eval_and_act._carry_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_log > 300_000:
+                logger.info(f"[CARRY-HOLD] {ticker} funding={funding} {signal.reason}")
+                _eval_and_act._carry_hold_last[ticker] = tick_ts_ms
+        elif signal.action == SignalAction.ENTER_LONG:
+            logger.info(
+                f"[CARRY-ENTER] {ticker} funding={funding} conf={signal.confidence:.2f} {signal.reason}"
+            )
     elif primary == "grid" and hasattr(strategy, "evaluate_grid"):
         # HYPO-040: Grid Bot — sideways ATR-compressed lower-boundary entry
         if full_tick is None:
@@ -1318,6 +1394,16 @@ async def _run_okx_and_binance(
         if binance_liq_symbols:
             logger.info(f"Binance perp liquidation WS subscribe: {binance_liq_symbols}")
             tasks.add(asyncio.create_task(binance_liq_stream(symbols=binance_liq_symbols)))
+        # Phase 8: funding poll task — populate _funding_rate_cache for HYPO-027/036/AI.
+        # Symbols derived from REALTIME_HYPOS entries with `_binance_futures_syms`.
+        funding_syms_set: set[str] = set()
+        for h in REALTIME_HYPOS:
+            for s in h.get("_binance_futures_syms", []):
+                funding_syms_set.add(s)
+        if funding_syms_set:
+            funding_syms = sorted(funding_syms_set)
+            logger.info(f"Funding poll subscribe: {funding_syms}")
+            tasks.add(asyncio.create_task(_poll_funding_rates(funding_syms)))
         try:
             # Wait until any task finishes (normal return or exception)
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

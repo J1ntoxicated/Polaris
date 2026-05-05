@@ -435,9 +435,11 @@ def test_supervisor_restarts_after_binance_crash():
             pass
 
     # Patch the 5s restart delay to 0 so the test doesn't hang
+    # Phase 8: also patch funding poll (was blocking event loop on real HTTP)
     with patch.object(rt, "stream_tickers", fake_okx_stream), \
          patch.object(rt, "binance_stream", fake_binance_stream), \
          patch.object(rt, "make_tick_handler", return_value=lambda *a: None), \
+         patch.object(rt, "_poll_funding_rates", lambda symbols: asyncio.sleep(1000)), \
          patch.object(rt, "_SUPERVISOR_RESTART_DELAY_S", 0.0):
         asyncio.run(_run_with_timeout())
 
@@ -1116,12 +1118,13 @@ def test_realtime_hypos_007_008_023():
         "HYPO-NFI-001 must be active — NFI X7 dip-buy (strat.ninja 88-92% win rate)"
     )
 
-    # Phase 5: 7 active HYPOs (007+008+023+027+028+032+040+NFI-001 = 8)
-    # Deprecated: 024(fast_fail), 025(fast_fail), 026(manual), 033(loss_cap),
-    #             034(manual), AI-001(loss_cap)
-    assert len(active_ids) == 8, (
-        f"REALTIME_HYPOS must contain exactly 8 active HYPOs "
-        f"(007+008+023+027+028+032+040+NFI-001), "
+    # Phase 8: HYPO-036 FundingCarry 활성화 (Codex priority B). 9 active.
+    assert "HYPO-036" in active_ids, (
+        "HYPO-036 must be active — Funding Carry (Liu & Yu 2024 70% hit rate)"
+    )
+    assert len(active_ids) == 9, (
+        f"REALTIME_HYPOS must contain exactly 9 active HYPOs "
+        f"(007+008+023+027+028+032+036+040+NFI-001), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 

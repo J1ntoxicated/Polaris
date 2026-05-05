@@ -43,10 +43,17 @@ from src.data.multi_tf import fetch_multi_tf
 from src.data.okx_ws import (
     compute_book_imbalance,
     compute_taker_buy_ratio,
+    get_book,
     get_last_price,
     get_recent_trades,
+    get_tick,
     set_persister,
     stream_tickers,
+)
+from src.paper.slippage_model import (
+    compute_fill_price,
+    compute_spread_bps,
+    should_skip_entry_spread,
 )
 from src.data.tick_persister import TickPersister
 from src.domain.candle import Candle
@@ -850,7 +857,6 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         # HYPO-026: Whale Wall — OKX books5 large bid detection
         if full_tick is None:
             return
-        from src.data.okx_ws import get_book
         book = get_book(ticker)
         if book is None:
             return
@@ -1030,6 +1036,13 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     _sl_pct = _exit_profile["sl_pct"]
     _max_hold_ms = int(_exit_profile["max_hold_h"] * 3600 * 1000)
 
+    # Phase 6 (slippage fix): fetch book + L1 quote once per tick — used by both
+    # entry and exit fill price computation. Falls back gracefully when missing.
+    _book = get_book(ticker) or {}
+    _tick_full = get_tick(ticker) or {}
+    _bid = float(_tick_full.get("bid", 0) or 0)
+    _ask = float(_tick_full.get("ask", 0) or 0)
+
     # 1. Open positions — TP/SL/exit-signal 체크 (TICK PRICE 기반!)
     # Codex Round 4 fix: min hold time — entry 후 MIN_HOLD_MS 동안 signal_exit 차단 (flip-flop fee bleed 방지)
     closed_this_tick = False
@@ -1048,7 +1061,18 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
             exit_reason = "signal_exit"
         if exit_reason:
-            balance = balance.close(pos.position_id, exit_price=tick_price, close_ts_ms=tick_ts_ms)
+            # Phase 6: realistic fill price for SELL (consume bid side)
+            exit_fill, exit_slip_bps = compute_fill_price(
+                "sell",
+                size_usd=pos.size_usd,
+                book=_book,
+                last=tick_price,
+                bid=_bid,
+                ask=_ask,
+            )
+            if exit_fill <= 0:
+                exit_fill = tick_price  # safety fallback (should never trigger)
+            balance = balance.close(pos.position_id, exit_price=exit_fill, close_ts_ms=tick_ts_ms)
             closed = balance.closed_positions[-1]
             paper_logger.log_close(ticker, sname, closed)
             paper_logger.log_event(ticker, sname, "EXIT_REASON", exit_reason)
@@ -1077,9 +1101,21 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         and _hypo010_pause_until_ms > 0
         and tick_ts_ms < _hypo010_pause_until_ms
     )
+    # Phase 6 (slippage fix): spread filter — skip entries when bid-ask too wide
+    # (structural slippage from thin liquidity). Uses bid/ask from L1 quote.
+    spread_too_wide = False
+    if signal.action == SignalAction.ENTER_LONG and _bid > 0 and _ask > 0:
+        _spread_bps = compute_spread_bps(_bid, _ask)
+        if should_skip_entry_spread(_spread_bps):
+            spread_too_wide = True
+            logger.info(
+                f"[SPREAD-SKIP] {hypo['hypo_id']} {ticker} spread={_spread_bps:.1f}bps > 5bps"
+            )
+
     if (signal.action == SignalAction.ENTER_LONG
             and not has_open and not daily_breached and not closed_this_tick
-            and not in_cooldown and not in_regime_pause):
+            and not in_cooldown and not in_regime_pause
+            and not spread_too_wide):
         # ── Phase 2j: Dynamic sizing (Kelly + confidence + regime + drawdown) ──
         # 1. Recent performance stats (HYPO별 last 20 closed trades)
         perf_stats = compute_recent_stats(list(balance.closed_positions), lookback=20)
@@ -1118,17 +1154,31 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         )
 
         if size > 0:
+            # Phase 6: realistic fill price for BUY (consume ask side, walk book)
+            entry_fill, entry_slip_bps = compute_fill_price(
+                "buy",
+                size_usd=size,
+                book=_book,
+                last=tick_price,
+                bid=_bid,
+                ask=_ask,
+            )
+            if entry_fill <= 0:
+                entry_fill = tick_price  # safety fallback
             pos = Position(
                 position_id=f"{ticker}-{tick_ts_ms}",
                 ticker=ticker, direction=1,
-                entry_price=tick_price,  # TICK PRICE, not candle close!
+                entry_price=entry_fill,  # Phase 6: walked-book fill (paper-live parity)
                 size_usd=size,
                 open_ts_ms=tick_ts_ms,
                 fee_round_trip=LIVE_FEE_ROUND_TRIP,
             )
             balance = balance.open(pos)
             paper_logger.log_open(ticker, sname, pos)
-            logger.info(f"[OPEN] {hypo['hypo_id']} {ticker} @{tick_price} size=${size:.2f}")
+            logger.info(
+                f"[OPEN] {hypo['hypo_id']} {ticker} @{entry_fill:.6f} (last={tick_price:.6f}, "
+                f"slip={entry_slip_bps:.1f}bps) size=${size:.2f}"
+            )
             _save_balance(ticker, sname, balance)
 
 

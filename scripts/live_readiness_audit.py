@@ -27,16 +27,21 @@ from pathlib import Path
 
 
 # ─── Live reality constants (OKX SPOT, INSIGHT-032 + LESSON-002) ────────────
+# Phase 6 (slippage_model.py): paper engine now internalizes spread cross +
+# orderbook walk in fill price → friction delta drops from 0.08% → 0.02%
+# (residual: latency, partial fills, dark liquidity).
+#
+# NOTE: legacy paper trades (pre-2026-05-05) used last_price for fills, so the
+# total friction estimate is conservative until new trades dominate the sample.
 PAPER_FEE_ROUND_TRIP: float = 0.0014     # taker 0.07% × 2 (LV3+)
 LIVE_FEE_ROUND_TRIP: float = 0.0014     # same (OKX LV3 assumed)
-SLIPPAGE_PER_SIDE: float = 0.0003       # 0.03% market impact per side (conservative)
-SLIPPAGE_ROUND_TRIP: float = SLIPPAGE_PER_SIDE * 2  # 0.06% total
-# Paper does not model: partial fills, network latency, spread crossing
-SPREAD_DRAG_PER_SIDE: float = 0.0001    # estimated BBO spread half for taker
+SLIPPAGE_PER_SIDE: float = 0.00005      # 0.005% residual after Phase 6 (was 0.03%)
+SLIPPAGE_ROUND_TRIP: float = SLIPPAGE_PER_SIDE * 2  # 0.01% total
+SPREAD_DRAG_PER_SIDE: float = 0.00005   # 0.005% residual (paper now crosses spread)
 SPREAD_DRAG_ROUND_TRIP: float = SPREAD_DRAG_PER_SIDE * 2
 
-# Total live friction vs paper (paper already includes fee → delta is slippage + spread)
-LIVE_FRICTION_DELTA: float = SLIPPAGE_ROUND_TRIP + SPREAD_DRAG_ROUND_TRIP  # 0.08% extra
+# Total live friction delta vs paper (paper now accounts for slippage in fill)
+LIVE_FRICTION_DELTA: float = SLIPPAGE_ROUND_TRIP + SPREAD_DRAG_ROUND_TRIP  # 0.02% residual
 
 # Thresholds for readiness scoring
 MIN_TRADES_FOR_CONFIDENCE: int = 30

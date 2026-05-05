@@ -17,6 +17,7 @@ tags: [meta, log, append_only, polaris]
 
 ## 2026-05-05
 
+- **Phase 6 — slippage internalized in paper engine** — Root fix paper-vs-live divergence. `src/paper/slippage_model.py` (P6 pure, 21 tests): walk_book / compute_fill_price / spread_bps / should_skip_entry_spread. realtime_runner: entry/exit `compute_fill_price`, 진입 전 spread > 5bps SKIP. Live readiness 32→35/100, slippage drag $27→$6.90 (-75%), friction delta 0.08%→0.02%. [[INSIGHT-036]]
 - **HYPO-023 deep diagnosis + final fix** — 확정 원인: A (rare event). WS 연결/구독 정상 (ack 수신) + 60s 및 25s 모두 forceOrder 0건 (low-vol day). Fix: (1) lookback 60s→300s (5min window), (2) min_total $100k→$30k, exit_total $30k→$10k, (3) `get_store_status()` 신규 (5분 주기 `[LIQ-STORE]` 진단 log). 5 신규 tests. 792/792 pass. [[HYPO-023]] [[INSIGHT-035]]
 
 ## 2026-05-04 (Phase 5)

@@ -122,11 +122,19 @@ async def _poll_funding_rates(symbols: list[str]) -> None:
     aware strategies (HYPO-027 FundingFilter, HYPO-036 FundingCarry, AI advisor)
     actually receive live data.
 
-    Shell function — performs HTTP I/O.
+    Codex round-1 fix: fetch_funding_rates_bulk is sync (requests.get × N).
+    Run in default executor so the event loop is not blocked while WS streams
+    + tick handlers continue. Without this, 3 symbols × 8s timeout = up to
+    24s of event-loop stall per poll cycle.
+
+    Shell function — performs HTTP I/O via thread executor.
     """
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            rates = fetch_funding_rates_bulk(symbols, use_cache=False)
+            rates = await loop.run_in_executor(
+                None, fetch_funding_rates_bulk, symbols, False
+            )
             for sym, rate in rates.items():
                 if rate is not None:
                     _funding_rate_cache[sym] = rate

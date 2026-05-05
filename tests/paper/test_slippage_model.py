@@ -13,6 +13,7 @@ import pytest
 from src.paper.slippage_model import (
     DEFAULT_FALLBACK_SLIP,
     compute_fill_price,
+    compute_liquidity_cap,
     compute_spread_bps,
     should_skip_entry_spread,
     walk_book,
@@ -150,6 +151,48 @@ class TestSpreadBps:
     def test_zero_prices_returns_inf(self):
         assert compute_spread_bps(0.0, 100.0) == float("inf")
         assert compute_spread_bps(100.0, 0.0) == float("inf")
+
+
+class TestComputeLiquidityCap:
+    """Liquidity-aware sizing: cap order size to a fraction of visible book.
+
+    Phase 7 — addresses BLUR-style 10bps slip (size walks book even when
+    spread is acceptable). Cap = sum(top-N depth) × max_book_fraction.
+    """
+
+    def test_buy_caps_to_ask_depth(self):
+        # asks: 100@0.5 ($50) + 101@0.5 ($50.5) = $100.5 total depth
+        # cap fraction 0.10 → max $10.05
+        book = {"bids": [(99, 1)], "asks": [(100.0, 0.5), (101.0, 0.5)]}
+        cap = compute_liquidity_cap("buy", book, max_book_fraction=0.10)
+        assert 9 < cap < 11
+
+    def test_sell_caps_to_bid_depth(self):
+        book = {"bids": [(99.0, 1.0), (98.0, 1.0)], "asks": [(100, 1)]}
+        # bids depth = 99 + 98 = $197, cap 10% → ~$19.7
+        cap = compute_liquidity_cap("sell", book, max_book_fraction=0.10)
+        assert 18 < cap < 21
+
+    def test_empty_book_returns_zero(self):
+        assert compute_liquidity_cap("buy", {}, max_book_fraction=0.10) == 0.0
+        assert compute_liquidity_cap("sell", {"bids": [], "asks": []}, max_book_fraction=0.10) == 0.0
+
+    def test_default_fraction_is_10pct(self):
+        book = {"asks": [(100.0, 1.0)]}  # $100 depth
+        cap = compute_liquidity_cap("buy", book)  # default
+        assert 9 < cap < 11
+
+    def test_invalid_side_raises(self):
+        with pytest.raises(ValueError, match="side"):
+            compute_liquidity_cap("hold", {"asks": [(100, 1)]})
+
+    def test_uses_only_top_n_levels(self):
+        # 10 levels but max_levels=5 → only first 5 counted
+        asks = [(100.0 + i, 1.0) for i in range(10)]
+        book = {"asks": asks}
+        cap_5 = compute_liquidity_cap("buy", book, max_book_fraction=0.10, max_levels=5)
+        cap_10 = compute_liquidity_cap("buy", book, max_book_fraction=0.10, max_levels=10)
+        assert cap_10 > cap_5
 
 
 class TestShouldSkipEntrySpread:

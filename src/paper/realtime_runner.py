@@ -52,6 +52,7 @@ from src.data.okx_ws import (
 )
 from src.paper.slippage_model import (
     compute_fill_price,
+    compute_liquidity_cap,
     compute_spread_bps,
     should_skip_entry_spread,
 )
@@ -1146,11 +1147,18 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.
         # Shell adds one absolute safety bound: equity × 0.30 ($5000 → $1500 max).
         hard_cap = equity * 0.30
+        # Phase 7 (liquidity-aware sizing): cap size to 10% of top-5 ask depth.
+        # Addresses BLUR 10.2bps slip observed 2026-05-05 — tight spread but $300
+        # walks book on thin pair. liq_cap=0 → book missing → skip rather than
+        # silent walk. Floor 0.0 prevents accidental size on no-book.
+        _liq_cap = compute_liquidity_cap("buy", _book, max_book_fraction=0.10)
         size = min(sizing.size_usd, hard_cap, balance.cash_usd)
+        if _liq_cap > 0:
+            size = min(size, _liq_cap)
 
         logger.info(
             f"[DYN-SIZE] {hypo['hypo_id']} {ticker} size=${size:.0f} "
-            f"regime={regime} {sizing.reason}"
+            f"liq_cap=${_liq_cap:.0f} regime={regime} {sizing.reason}"
         )
 
         if size > 0:

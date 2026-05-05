@@ -148,6 +148,43 @@ def compute_fill_price(
     return blended, slip_bps
 
 
+def compute_liquidity_cap(
+    side: str,
+    book: dict,
+    max_book_fraction: float = 0.10,
+    max_levels: int = 5,
+) -> float:
+    """Cap order size to a fraction of visible book depth (USD).
+
+    Phase 7 fix: Phase 6 spread filter blocks wide-spread entries, but a tight
+    spread can still hide deep liquidity walks (BLUR 10.2bps slip observed
+    2026-05-05 with $300 size on thin pair). This caps size to a configurable
+    fraction (default 10%) of top-N visible depth.
+
+    side: 'buy' (caps vs ask depth) or 'sell' (caps vs bid depth)
+    book: {'bids': [(px, sz)], 'asks': [(px, sz)]}
+    max_book_fraction: max share of visible depth to consume (0.10 = 10%)
+    max_levels: top-N levels to count (default 5)
+
+    Returns USD cap. Returns 0.0 when book empty or invalid → caller should
+    skip entry rather than fall through to default sizing.
+
+    Pure: no I/O.
+    """
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+    if not isinstance(book, dict):
+        return 0.0
+    levels_key = "asks" if side == "buy" else "bids"
+    levels = book.get(levels_key, [])[:max_levels]
+    depth_usd = sum(
+        price * size_base
+        for price, size_base in levels
+        if price > 0 and size_base > 0
+    )
+    return depth_usd * max_book_fraction
+
+
 def compute_spread_bps(bid: float, ask: float) -> float:
     """Spread in basis points: (ask - bid) / mid * 10000.
 

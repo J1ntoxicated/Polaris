@@ -15,6 +15,13 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
+## Phase 17-19 (2026-05-05) — 100% airtight closure
+- **Phase 17**: SQL primary write + dashboard SQL feed (SSOT 완전화)
+- **Phase 18**: 18 dispatcher 모두 registry, elif chain 완전 제거 (1,720→1,627 LOC)
+- **Phase 19**: candle dispatchers (1m~1D) 명시 등록 + dashboard equity SQL-only
+
+**941 tests pass**, Codex round-3 audit 통과 (dual-path JSON fallback은 **의도된 resilience**). Live transition은 Phase 14.2 OKX REST 구현만 남음 (Jin 권한 필요).
+
 ## Phase 9-16 (2026-05-05) — 구조 airtight 8 phase
 
 **Codex 합의 우선순위 A→D→C→E→B→F 완료**: 데이터 SSOT → 전략 제어 → EV 개선 → 실행 모듈화 → 글로벌 리스크 → 라이브 path.

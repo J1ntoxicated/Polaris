@@ -22,16 +22,17 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-# Trigger thresholds — Phase 2M academic validation (2026-05-04)
-# Rationale: academic-backed strategies should demonstrate edge early;
-#   random/unvalidated strategies fail faster with stricter thresholds.
+# Trigger thresholds — Phase 5 Codex review (2026-05-04)
+# Rationale: Bailey (2014) minimum n=20 for statistically meaningful win-rate.
+#   loss_cap -$15 = 7.5% of $200 baseline sizing across 30-trade validation window.
+#   Prevents premature deprecation of high-variance strategies before statistical signal.
 DEPRECATE_TRIGGERS: dict = {
     "fast_fail": {
-        "min_n": 5,           # Phase 2M: 10 → 5 (faster cut for random strategies)
+        "min_n": 20,          # Phase 5: 5 → 20 (Bailey 2014 statistical minimum)
         "max_win_rate": 0.40,
     },
     "loss_cap": {
-        "max_loss_usd": -5.0, # Phase 2M: -$10 → -$5 (tighter academic validation gate)
+        "max_loss_usd": -15.0,  # Phase 5: -$5 → -$15 (7.5% of $200 sizing / 30-trade window)
     },
     "frequency": {
         "max_age_h": 24.0,
@@ -98,7 +99,7 @@ def check_deprecate(
 
     n = len(closed_positions)
 
-    # Trigger 1: fast_fail — n >= 10 and win_rate < 40%
+    # Trigger 1: fast_fail — n >= 20 and win_rate < 40%
     fast_cfg = DEPRECATE_TRIGGERS["fast_fail"]
     if n >= fast_cfg["min_n"]:
         wins = sum(1 for p in closed_positions if _is_win(p))
@@ -108,7 +109,7 @@ def check_deprecate(
                 f"fast_fail n={n} win_rate={win_rate:.0%} < {fast_cfg['max_win_rate']:.0%}"
             )
 
-    # Trigger 2: loss_cap — realized PnL < -$10
+    # Trigger 2: loss_cap — realized PnL < -$15
     loss_cfg = DEPRECATE_TRIGGERS["loss_cap"]
     realized = _realized_usd(closed_positions)
     if realized < loss_cfg["max_loss_usd"]:

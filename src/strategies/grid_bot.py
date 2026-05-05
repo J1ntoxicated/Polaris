@@ -19,7 +19,7 @@ Logic (`evaluate_grid(tick, indicators)`):
   Exit:
     - TP +0.8% per level (fee-adjusted: 0.14% each side = 0.28% rt → net +0.52%)
     - No SL — range breakout handled by evaluate_grid returning EXIT
-    - Range breakout: price moves outside 24h_range ± buffer (5%) → close all
+    - Range breakout: price moves outside 24h_range ± buffer (2% of price, absolute) → close all
 
 SPOT-only constraints (ADR-001):
   - No short levels
@@ -30,7 +30,7 @@ Edge estimate:
   - Sideways: 70% of 24h periods (empirical — BingX published win rate)
   - Each level: +0.52% net after fee
   - 5 levels × 0.52% = +2.6% per full grid cycle
-  - Fee round-trip: 0.28% (OKX 0.14% × 2)
+  - Fee round-trip: 0.40% (OKX Lv1 0.20% × 2 — Phase 5 fee correction)
 
 pure: true
 code_path: src/strategies/grid_bot.py
@@ -51,7 +51,7 @@ DEFAULT_GRID_LEVELS: int = 5
 DEFAULT_GRID_SPACING_PCT: float = 0.01       # 1% per grid level
 DEFAULT_LEVEL_SIZE_USD: float = 50.0         # $50 per level
 DEFAULT_TP_PCT: float = 0.008                # +0.8% TP per level
-DEFAULT_BREAKOUT_BUFFER_PCT: float = 0.05    # 5% beyond 24h range = breakout
+DEFAULT_BREAKOUT_BUFFER_PCT: float = 0.02    # Phase 5 Codex: absolute 2% (was range × 5% — noise trigger risk)
 DEFAULT_TARGET_SIZE_USD: float = 200.0       # Total entry (4 of 5 levels active)
 
 
@@ -88,9 +88,12 @@ def _compute_grid_signal(
     # ── Active grid: check for breakout exit ────────────────────────────────
     if is_active:
         if high_24h is not None and low_24h is not None and high_24h > low_24h:
-            range_span = high_24h - low_24h
-            breakout_upper = high_24h + range_span * breakout_buffer_pct
-            breakout_lower = low_24h - range_span * breakout_buffer_pct
+            # Phase 5 Codex: absolute buffer (last × 2%) not range × 5%.
+            # range × 5% was proportional to volatility → noisy trigger on wide-range days.
+            # Absolute 2% of current price is range-independent and consistent.
+            abs_buffer = last * breakout_buffer_pct
+            breakout_upper = high_24h + abs_buffer
+            breakout_lower = low_24h - abs_buffer
             if last > breakout_upper or last < breakout_lower:
                 direction = "up" if last > breakout_upper else "down"
                 return Signal(

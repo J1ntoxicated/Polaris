@@ -123,18 +123,26 @@ class TestComputeGridSignal:
         assert "grid_active_no_breakout" in signal.reason
 
     def test_active_grid_upper_breakout_exit(self) -> None:
-        """Active grid, price > high_24h + 5% buffer → EXIT."""
-        # range [90, 110], buffer=5% of span=20 → upper = 110 + 1 = 111
-        tick = {"last": 112.0, "ts": NOW_MS}  # above 111
+        """Active grid, price > high_24h + 2% absolute buffer → EXIT (Phase 5).
+
+        Phase 5 Codex fix: absolute buffer = last × 2%, not range × 5%.
+        last=115, high=110 → buffer = 115 × 0.02 = 2.3 → upper = 112.3.
+        last=115 > 112.3 → EXIT.
+        """
+        tick = {"last": 115.0, "ts": NOW_MS}  # above 110 + 115*0.02=2.3 → 112.3
         signal = _compute_grid_signal(tick, atr_pct=0.005, high_24h=110.0, low_24h=90.0, is_active=True)
         assert signal.action == SignalAction.EXIT
         assert "breakout" in signal.reason
         assert "up" in signal.reason
 
     def test_active_grid_lower_breakout_exit(self) -> None:
-        """Active grid, price < low_24h - 5% buffer → EXIT."""
-        # range [90, 110], buffer=5% of 20 → lower = 90 - 1 = 89
-        tick = {"last": 88.0, "ts": NOW_MS}  # below 89
+        """Active grid, price < low_24h - 2% absolute buffer → EXIT (Phase 5).
+
+        Phase 5 Codex fix: absolute buffer = last × 2%, not range × 5%.
+        last=87, low=90 → buffer = 87 × 0.02 = 1.74 → lower = 88.26.
+        last=87 < 88.26 → EXIT.
+        """
+        tick = {"last": 87.0, "ts": NOW_MS}  # below 90 - 87*0.02=1.74 → 88.26
         signal = _compute_grid_signal(tick, atr_pct=0.005, high_24h=110.0, low_24h=90.0, is_active=True)
         assert signal.action == SignalAction.EXIT
         assert "breakout" in signal.reason

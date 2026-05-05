@@ -82,11 +82,16 @@ from src.strategies.vpin_toxicity import VPINToxicity
 from src.strategies.whale_wall import WhaleWall
 from src.strategies.ai_advisor import AIAdvisor
 from src.strategies.grid_bot import GridBot
+from src.strategies.nfi_dipbuy import NFIDipBuy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-LIVE_FEE_ROUND_TRIP = 0.0014
+# Phase 5 Codex fix: OKX paper Lv1 fee = 0.1%/side = 0.2% round-trip.
+# Previous 0.0014 assumed Lv3+ (0.07%/side) — 30% underestimate.
+# Override via env LIVE_FEE_ROUND_TRIP=0.002 for live or test environments.
+import os as _os
+LIVE_FEE_ROUND_TRIP = float(_os.environ.get("LIVE_FEE_ROUND_TRIP", "0.002"))
 # Auto-deprecate check interval (seconds) — checked per-HYPO on every tick for the
 # fast_fail/loss_cap triggers; frequency trigger checked at DEPRECATE_CHECK_INTERVAL_S cadence
 # Phase 2N+: 5min → 1min (faster fail-fast — HYPO-025 lesson: 5min delay = more loss accumulation)
@@ -107,38 +112,43 @@ MAX_HOLD_MS = 4 * 3600 * 1000 # Phase 2g: 4h 초과 position 자동 청산 (time
 # Fix 1 (Codex Round 4): supervisor restart delay (patchable in tests)
 _SUPERVISOR_RESTART_DELAY_S: float = 5.0
 
-# Realtime active HYPOs — Phase 2N+ (HYPO-025 cut 2026-05-04)
-# Deprecated tick strategies: HYPO-010/013/014/016/017 — Jin 판단 2026-05-04
-# HYPO-025 — DEPRECATED Phase 2N+ (n=6 win 33%, -$3.76, auto-trigger met)
-# Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023/024/027/028/032/033/034
+# Phase 5: 30-ticker universe (NFI X7 standard 40-80 pair pool, Polaris subset).
+# Original 15 + 15 new: BNB, ATOM, NEAR, UNI, AAVE, LDO, ICP, FIL, ARB, OP, SHIB, INJ, SEI, TIA, JTO
+# OKX SPOT format: "XXX-USDT"
+_UNIVERSE_30 = [
+    # Original 15 (Phase 4)
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
+    "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
+    "LINK-USDT", "POL-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
+    # Phase 5 additions (NFI style — liquid mid-caps)
+    "BNB-USDT", "UNI-USDT", "AAVE-USDT", "LDO-USDT", "ICP-USDT",
+    "FIL-USDT", "ARB-USDT", "OP-USDT", "SHIB-USDT", "INJ-USDT",
+    "SEI-USDT", "TIA-USDT", "JTO-USDT", "BLUR-USDT", "WLD-USDT",
+]
+
+# Realtime active HYPOs — Phase 5 (Codex deep review 2026-05-04)
+# Phase 2N+: HYPO-025 cut (n=6 win 33%, -$3.76, auto-trigger met)
+# Phase 5 new: HYPO-NFI-001 (NFI X7 dip-buy), 30-ticker universe
+# Remaining: HYPO-007-RT + HYPO-008-RT + HYPO-023/027/028/032 + HYPO-NFI-001
 REALTIME_HYPOS = [
     {
-        # HYPO-007-RT: RSI 15m intraday — expanded to 15 tickers (INSIGHT-035 Phase 4)
-        # NFI standard 40-80 tickers; 15 → signal frequency ~1.7x vs original 6.
-        # Added: XRP, AVAX, LINK, MATIC, ATOM, NEAR, SOL, ORDI
+        # HYPO-007-RT: RSI 15m intraday — Phase 5: expanded to 30 tickers
+        # NFI standard 40-80 tickers; 30 → signal frequency ~2x vs 15.
         "hypo_id": "HYPO-007-RT",
         "strategy_cls": RSI15mIntraday,
         "params": {},
         "primary_tf": "15m",
-        "tickers": [
-            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
-            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
-            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
-        ],
+        "tickers": _UNIVERSE_30,
         "starting_usd": 50000.0,
         "exit_profile": "scalp",  # TP 0.6%, SL 0.35%, max 4h
     },
     {
-        # HYPO-008-RT: Volume Burst 1H — expanded to 15 tickers (INSIGHT-035 Phase 4)
+        # HYPO-008-RT: Volume Burst 1H — Phase 5: expanded to 30 tickers
         "hypo_id": "HYPO-008-RT",
         "strategy_cls": VolumeBurst,
         "params": {},
         "primary_tf": "1H",
-        "tickers": [
-            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
-            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
-            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
-        ],
+        "tickers": _UNIVERSE_30,
         "starting_usd": 50000.0,
         "exit_profile": "swing",  # TP 5%, SL 2%, max 7d
     },
@@ -254,13 +264,24 @@ REALTIME_HYPOS = [
         "strategy_cls": GridBot,
         "params": {},
         "primary_tf": "grid",
-        "tickers": [
-            "BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT",
-            "SUI-USDT", "ADA-USDT", "TRUMP-USDT", "XRP-USDT", "AVAX-USDT",
-            "LINK-USDT", "MATIC-USDT", "ATOM-USDT", "NEAR-USDT", "ORDI-USDT",
-        ],
+        "tickers": _UNIVERSE_30,  # Phase 5: 15 → 30 tickers
         "starting_usd": 50000.0,
         "exit_profile": "scalp",  # TP 0.6% (grid default +0.8% handled per-level), max 4h
+    },
+    # ── Phase 5: NFI X7 Dip-Buy (HYPO-NFI-001) ────────────────────────────────
+    {
+        # HYPO-NFI-001: NFI X7 dip-buy — multi-TF oversold confluence
+        # Basis: NostalgiaForInfinity X7 (strat.ninja validated, 88-92% win rate backtests).
+        # Multi-TF: RSI_3 5m/15m < 5 + RSI_14 1h < 30 + AROON_4h < 80 + BB lower.
+        # Exit: RSI_14 1h > 84 OR price > BB upper.
+        # primary_tf = "nfi" → evaluate_multi_tf({5m, 15m, 1H, 4H})
+        "hypo_id": "HYPO-NFI-001",
+        "strategy_cls": NFIDipBuy,
+        "params": {},
+        "primary_tf": "nfi",
+        "tickers": _UNIVERSE_30,  # NFI standard = 40-80 pairs; Polaris 30-ticker subset
+        "starting_usd": 50000.0,
+        "exit_profile": "swing",  # NFI exit: RSI_14>84 + BB upper → swing-duration hold TP 5%, SL 2%, max 7d
     },
     # ── DEPRECATED strategies (preserved as comments for audit trail) ──────────
     # HYPO-AI-001 Claude AI Advisor — DEPRECATED Phase 4 (2026-05-05)
@@ -318,6 +339,18 @@ def _binance_liq_subscribe_symbols() -> list[str]:
         if h.get("primary_tf") == "liquidation":
             syms.update(h.get("_binance_perp_syms", []))
     return sorted(syms)
+
+# Phase 5 Codex fix #1: Strategy singleton cache — instantiate once per (hypo_id, ticker).
+# Previously: every tick created new Strategy(**params) — 90 calls/tick × 15 tickers = CPU waste.
+# Key: (hypo_id, ticker) → Strategy instance (reused across ticks).
+# Populated lazily on first eval, cleared only on runner restart.
+_strategy_instances: dict[tuple[str, str], object] = {}
+
+# Phase 5 Codex fix #1 (balance cache): load_state disk I/O per tick is expensive.
+# Cache balance in-memory per (ticker, strategy_name); flush only on entry/exit state change.
+# Key: (ticker, strategy_name) → PaperBalance
+# Invariant: cache is always in sync after save_state calls (cache updated = file written).
+_balance_cache: dict[tuple[str, str], "PaperBalance"] = {}
 
 # Tick-cached indicators per (hypo_id, ticker)
 _indicator_cache: dict[tuple, tuple[float, list[Candle]]] = {}
@@ -483,12 +516,52 @@ def _get_btc_1d_candles() -> list:
     return candles
 
 
+def _get_strategy(hypo: dict, ticker: str) -> object:
+    """Return cached Strategy instance for (hypo_id, ticker). Create once, reuse forever.
+
+    Phase 5 Codex fix: strategy objects are stateless (pure) — no need to re-instantiate per tick.
+    Singleton per (hypo_id, ticker) eliminates ~90 __init__ calls/tick × 15 tickers.
+
+    Shell function — reads/writes module-level _strategy_instances.
+    """
+    key = (hypo["hypo_id"], ticker)
+    if key not in _strategy_instances:
+        _strategy_instances[key] = hypo["strategy_cls"](**hypo["params"])
+    return _strategy_instances[key]
+
+
+def _load_balance(ticker: str, strategy_name: str, starting_usd: float) -> "PaperBalance":
+    """Load balance from in-memory cache or disk.
+
+    Phase 5 Codex fix: cache eliminates per-tick load_state disk I/O.
+    Cache miss → disk read + populate cache. Cache hit → return cached.
+
+    Shell function — reads/writes module-level _balance_cache.
+    """
+    key = (ticker, strategy_name)
+    if key not in _balance_cache:
+        _balance_cache[key] = load_state(ticker, strategy_name, starting_usd=starting_usd)
+    return _balance_cache[key]
+
+
+def _save_balance(ticker: str, strategy_name: str, balance: "PaperBalance") -> None:
+    """Save balance to disk and update in-memory cache atomically.
+
+    Phase 5 Codex fix: cache kept in sync — always write both cache + disk together.
+    Called only on entry/exit state changes (not every tick).
+
+    Shell function — reads/writes module-level _balance_cache.
+    """
+    _balance_cache[(ticker, strategy_name)] = balance
+    save_state(ticker, strategy_name, balance)
+
+
 def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, full_tick: dict | None = None) -> None:
     """매 tick 호출 — strategy 평가 + 즉시 entry/exit.
 
     primary_tf == 'tick' 인 strategy는 candle 무관 — tick payload 직접 사용.
     """
-    strategy = hypo["strategy_cls"](**hypo["params"])
+    strategy = _get_strategy(hypo, ticker)
     sname = strategy.name
 
     # 1. Strategy evaluate — tick / book / flow / candle
@@ -677,6 +750,35 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             if tick_ts_ms - last_log > 300_000:  # 5분
                 logger.info(f"[MTA-HOLD] {ticker} {signal.reason}")
                 _eval_and_act._mta_hold_last[ticker] = tick_ts_ms
+    elif primary == "nfi" and hasattr(strategy, "evaluate_multi_tf"):
+        # HYPO-NFI-001: NFI X7 dip-buy — 5m/15m/1H/4H multi-TF candle fetch
+        tf_data = fetch_multi_tf(ticker, timeframes=("5m", "15m", "1H", "4H"))
+        # Require at least 1H and 4H (most data-intensive TFs)
+        if not tf_data.get("1H") or not tf_data.get("4H"):
+            return
+        # Stale guard: 1H candle must be within 90min, 4H within 6h
+        TF_MAX_STALE_NFI: dict[str, int] = {
+            "5m": 15 * 60_000, "15m": 30 * 60_000,
+            "1H": 90 * 60_000, "4H": 6 * 3_600_000,
+        }
+        nfi_stale = False
+        for tf, max_ms in TF_MAX_STALE_NFI.items():
+            if tf_data.get(tf) and tick_ts_ms - tf_data[tf][-1].timestamp_ms > max_ms:
+                nfi_stale = True
+                break
+        if nfi_stale:
+            return
+        signal = strategy.evaluate_multi_tf(tf_data)
+        # HOLD reason logging (rate-limited 5min/ticker)
+        if signal.action == SignalAction.HOLD:
+            if not hasattr(_eval_and_act, "_nfi_hold_last"):
+                _eval_and_act._nfi_hold_last = {}
+            last_nfi_log = _eval_and_act._nfi_hold_last.get(ticker, 0)
+            if tick_ts_ms - last_nfi_log > 300_000:  # 5분
+                logger.info(f"[NFI-DIP-HOLD] {ticker} {signal.reason}")
+                _eval_and_act._nfi_hold_last[ticker] = tick_ts_ms
+        elif signal.action == SignalAction.ENTER_LONG:
+            logger.info(f"[NFI-DIP] {ticker} ENTRY confidence={signal.confidence:.2f} {signal.reason}")
     elif primary == "liquidation" and hasattr(strategy, "evaluate_cascade"):
         # HYPO-023: Binance Perp Liquidation Cascade Mean Reversion (Phase 2k)
         # Binance perp forceOrder → liquidation pressure (data source)
@@ -809,10 +911,10 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         # 24h high/low directly from OKX tickers tick (high24h, low24h fields)
         high_24h_val = float(full_tick.get("high24h", 0) or 0) or None
         low_24h_val = float(full_tick.get("low24h", 0) or 0) or None
-        # is_active: any open position for this ticker × grid_bot
+        # is_active: any open position for this ticker × grid_bot (use cached balance)
         has_open_grid = any(
             p.ticker == ticker
-            for p in load_state(ticker, strategy.name, starting_usd=hypo["starting_usd"]).open_positions
+            for p in _load_balance(ticker, strategy.name, hypo["starting_usd"]).open_positions
         )
         signal = strategy.evaluate_grid(full_tick, atr_pct, high_24h_val, low_24h_val, is_active=has_open_grid)
         # HOLD reason logging (rate-limited 10min/ticker)
@@ -919,7 +1021,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             return
         signal = strategy.evaluate(candles)
 
-    balance = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
+    balance = _load_balance(ticker, sname, hypo["starting_usd"])
 
     # Phase 2P: strategy timeframe별 exit profile (TP/SL/max_hold 차등)
     # get_exit_profile reads "exit_profile" key from hypo; defaults to "scalp" if absent.
@@ -954,7 +1056,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             closed_this_tick = True
             _last_close_ms[(ticker, sname)] = tick_ts_ms
             _last_close_ms_ticker[ticker] = tick_ts_ms
-            save_state(ticker, sname, balance)
+            _save_balance(ticker, sname, balance)
             # Round 14: HYPO-010 regime cluster guard — SL hit 시 cross-ticker 추적
             if hypo["hypo_id"] == "HYPO-010-TICK" and sname == "tick_momentum":
                 _check_hypo010_regime_cluster(ticker, exit_reason, tick_ts_ms)
@@ -1027,7 +1129,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             balance = balance.open(pos)
             paper_logger.log_open(ticker, sname, pos)
             logger.info(f"[OPEN] {hypo['hypo_id']} {ticker} @{tick_price} size=${size:.2f}")
-            save_state(ticker, sname, balance)
+            _save_balance(ticker, sname, balance)
 
 
 # ───── Tick callback ─────
@@ -1036,14 +1138,19 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
 def _get_all_closed_for_hypo(hypo: dict) -> list:
     """Collect all closed positions across all tickers for a HYPO.
 
-    Shell function — calls load_state for each ticker.
+    Shell function — uses balance cache (falls back to disk on cache miss).
+    Strategy singleton used to get sname without re-instantiating.
     """
-    strategy = hypo["strategy_cls"](**hypo["params"])
+    # Get sname via singleton (first ticker as key — name is strategy-global)
+    first_ticker = hypo["tickers"][0] if hypo["tickers"] else None
+    if first_ticker is None:
+        return []
+    strategy = _get_strategy(hypo, first_ticker)
     sname = strategy.name
     closed: list = []
     for ticker in hypo["tickers"]:
         try:
-            bal = load_state(ticker, sname, starting_usd=hypo["starting_usd"])
+            bal = _load_balance(ticker, sname, hypo["starting_usd"])
             closed.extend(list(bal.closed_positions))
         except Exception:
             pass

@@ -18,6 +18,9 @@ def _isolate_state(tmp_path, monkeypatch):
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()
     rt._price_history_60s.clear()
+    # Phase 5: singleton + balance cache clear (isolation between tests)
+    rt._strategy_instances.clear()
+    rt._balance_cache.clear()
     # Round 10: rate-limit 딕셔너리 초기화 (함수 속성)
     # Round 12 Q7: cascade warmup state 초기화 추가
     for attr in ("_blead_nofeed_last", "_blead_hold_last", "_cascade_warmup_last"):
@@ -249,17 +252,17 @@ def test_hypo_034_btc_lag_deprecated():
 
 
 def test_ai_min_confidence_072():
-    """HYPO-AI-001 params must use min_confidence=0.72 (reduced from 0.75).
+    """HYPO-AI-001 must be deprecated (cut Phase 4 2026-05-05).
 
-    0.75 was too strict → LONG 0.3%. 0.72 targets 5-15% LONG ratio.
+    n=2, 0% win, -$5.91, auto loss_cap trigger met. Permanently cut.
+    Verify it is NOT in REALTIME_HYPOS.
     """
     ai_hypo = next(
         (h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-AI-001"),
         None,
     )
-    assert ai_hypo is not None, "HYPO-AI-001 must be in REALTIME_HYPOS"
-    assert ai_hypo["params"].get("min_confidence") == pytest.approx(0.72), (
-        "HYPO-AI-001 min_confidence must be 0.72"
+    assert ai_hypo is None, (
+        "HYPO-AI-001 must be deprecated (n=2, 0% win, -$5.91, loss_cap trigger met)"
     )
 
 
@@ -1032,16 +1035,20 @@ def test_realtime_hypos_007_008_023():
     assert "HYPO-008-RT" in active_ids, "HYPO-008-RT (VolumeBurst) must remain active"
     assert "HYPO-023" in active_ids, "HYPO-023 (LiquidationCascade) must be active — Phase 2k"
 
-    # Phase 2L 유지 (026 제외, 025 deprecated Phase 2N+)
-    assert "HYPO-024" in active_ids, "HYPO-024 (CrossExchangeGap) must be active — Phase 2L"
+    # Phase 2L 유지 (024/026 deprecated, 025 deprecated Phase 2N+)
+    assert "HYPO-024" not in active_ids, "HYPO-024 (CrossExchangeGap) must be deprecated — auto fast_fail n=11 win 36%"
     assert "HYPO-027" in active_ids, "HYPO-027 (FundingRateFilter) must be active — Phase 2L"
     assert "HYPO-028" in active_ids, "HYPO-028 (TickBurst) must be active — Phase 2L"
 
-    # Phase 2M 신규 — academic-grade alphas (HYPO-034 deprecated 2026-05-04)
+    # Phase 2M 신규 — academic-grade alphas
     assert "HYPO-032" in active_ids, "HYPO-032 (TSMOM — Moskowitz 2012 JFE) must be active — Phase 2M"
-    assert "HYPO-033" in active_ids, "HYPO-033 (VPINToxicity — Easley 2012 RFS) must be active — Phase 2M"
+    # HYPO-033 VPIN — deprecated auto loss_cap -$5.21 < -$5 (before Phase 5 threshold change)
+    assert "HYPO-033" not in active_ids, "HYPO-033 (VPIN) must be deprecated — auto loss_cap -$5.21"
     # HYPO-034 BTCDominanceLag — deprecated 2026-05-04: n=3, win 0%, 3 SL, -$7.09 (manual cut)
     assert "HYPO-034" not in active_ids, "HYPO-034 must be deprecated — n=3 win 0% 3 SL -$7.09"
+
+    # Phase 5 신규 — NFI DipBuy (HYPO-NFI-001)
+    assert "HYPO-NFI-001" in active_ids, "HYPO-NFI-001 (NFI DipBuy) must be active — Phase 5"
 
     # Deprecated Phase 2M — basic indicators cut (학술 근거 부족)
     assert "HYPO-029" not in active_ids, "HYPO-029 must be cut — basic indicator, no academic basis"
@@ -1073,9 +1080,9 @@ def test_realtime_hypos_007_008_023():
         "HYPO-017-CASCADE must be deprecated — n=0, 60분 trigger 0"
     )
 
-    # Phase 3 추가: HYPO-AI-001 (Claude AI Advisor) — Phase 3 mandate
-    assert "HYPO-AI-001" in active_ids, (
-        "HYPO-AI-001 must be active — Phase 3 AI Advisor (Jin mandate '원래 의도 = AI 개입')"
+    # Phase 3 HYPO-AI-001 deprecated Phase 4 (n=2, 0% win, -$5.91)
+    assert "HYPO-AI-001" not in active_ids, (
+        "HYPO-AI-001 must be deprecated — n=2, 0% win, -$5.91, loss_cap auto-trigger"
     )
 
     # Phase 4 추가: HYPO-040 (Grid Bot) — INSIGHT-035 (BingX 검증 sideways 전략)
@@ -1083,10 +1090,17 @@ def test_realtime_hypos_007_008_023():
         "HYPO-040 must be active — Grid Bot (BingX 287K users validated, sideways PnL)"
     )
 
-    # 정확히 10개 (007+008+023+024+027+028+032+033+040+AI-001; 034 deprecated 2026-05-04, 025 deprecated Phase 2N+)
-    assert len(active_ids) == 10, (
-        f"REALTIME_HYPOS must contain exactly 10 active HYPOs "
-        f"(007+008+023+024+027+028+032+033+040+AI-001), "
+    # Phase 5 신규: HYPO-NFI-001 (NFI X7 DipBuy)
+    assert "HYPO-NFI-001" in active_ids, (
+        "HYPO-NFI-001 must be active — NFI X7 dip-buy (strat.ninja 88-92% win rate)"
+    )
+
+    # Phase 5: 7 active HYPOs (007+008+023+027+028+032+040+NFI-001 = 8)
+    # Deprecated: 024(fast_fail), 025(fast_fail), 026(manual), 033(loss_cap),
+    #             034(manual), AI-001(loss_cap)
+    assert len(active_ids) == 8, (
+        f"REALTIME_HYPOS must contain exactly 8 active HYPOs "
+        f"(007+008+023+027+028+032+040+NFI-001), "
         f"got {len(active_ids)}: {sorted(active_ids)}"
     )
 

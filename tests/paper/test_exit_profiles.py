@@ -166,15 +166,14 @@ def test_hypo_023_uses_liquidation_profile():
     )
 
 
-def test_hypo_024_uses_scalp_profile():
-    """HYPO-024 (CrossExchangeGap): exit_profile='scalp' — micro-price lead-lag."""
+def test_hypo_024_deprecated():
+    """HYPO-024 (CrossExchangeGap) must be deprecated (not in REALTIME_HYPOS).
+
+    Confirmed DEPRECATED Phase 4 (2026-05-05): auto fast_fail n=11 win 36% < 40%.
+    """
     from src.paper import realtime_runner as rt
     hypo = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-024"), None)
-    assert hypo is not None, "HYPO-024 must exist in REALTIME_HYPOS"
-    assert hypo.get("exit_profile") == "scalp", (
-        f"HYPO-024 (cross-exchange gap, sub-second) must use scalp profile, "
-        f"got '{hypo.get('exit_profile')}'"
-    )
+    assert hypo is None, "HYPO-024 must be deprecated (n=11 win 36% < 40% fast_fail)"
 
 
 def test_hypo_027_uses_swing_profile():
@@ -215,23 +214,16 @@ def test_hypo_032_uses_position_profile():
     )
 
 
-def test_vpin_uses_liquidation_profile():
-    """HYPO-033 (VPIN Toxicity): exit_profile='liquidation'.
+def test_vpin_deprecated():
+    """HYPO-033 (VPIN Toxicity) must be deprecated (not in REALTIME_HYPOS).
 
-    Easley/Lopez de Prado/O'Hara (2012 RFS): informed flow triggers 5-30min
-    mean reversion cascade. scalp TP 0.6% too tight — confirmed by SL hit -$5.21
-    on first live VPIN trade (2026-05-04 observation).
-
-    liquidation profile: TP 1.5%, SL 0.7%, max 30min aligns with academic hypothesis.
+    Auto loss_cap -$5.21 < -$5 trigger met 2026-05-04. Permanently cut.
+    Phase 5: loss_cap threshold raised to -$15 — HYPO-033 was cut before Phase 5,
+    so it remains deprecated.
     """
     from src.paper import realtime_runner as rt
     hypo = next((h for h in rt.REALTIME_HYPOS if h["hypo_id"] == "HYPO-033"), None)
-    assert hypo is not None, "HYPO-033 must exist in REALTIME_HYPOS"
-    assert hypo.get("exit_profile") == "liquidation", (
-        f"HYPO-033 (VPIN Easley 2012 — informed flow 5-30min reversion) must use liquidation profile. "
-        f"scalp TP=0.6% is too tight for 5-30min informed flow cascade. "
-        f"liquidation: TP 1.5%, SL 0.7%, max 30min. Got '{hypo.get('exit_profile')}'"
-    )
+    assert hypo is None, "HYPO-033 must be deprecated (auto loss_cap -$5.21 < -$5)"
 
 
 def test_hypo_034_deprecated():

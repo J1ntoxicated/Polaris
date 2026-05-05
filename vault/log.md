@@ -19,8 +19,9 @@ tags: [meta, log, append_only, polaris]
 
 - **HYPO-023 deep diagnosis + final fix** — 확정 원인: A (rare event). WS 연결/구독 정상 (ack 수신) + 60s 및 25s 모두 forceOrder 0건 (low-vol day). Fix: (1) lookback 60s→300s (5min window), (2) min_total $100k→$30k, exit_total $30k→$10k, (3) `get_store_status()` 신규 (5분 주기 `[LIQ-STORE]` 진단 log). 5 신규 tests. 792/792 pass. [[HYPO-023]] [[INSIGHT-035]]
 
-## 2026-05-04
+## 2026-05-04 (Phase 5)
 
+- **Phase 5 Codex Top5 + NFI X7** — (1) strategy singleton + balance cache (CPU: 90 __init__/tick→0); (2) fee 0.0014→0.002 (Lv1 실측 정합); (3) GridBot buffer absolute 2%; (4) auto_deprecate min_n 5→20 + loss_cap -$5→-$15; (5) HYPO-NFI-001 NFI X7 DipBuy 신규 (`nfi_dipbuy.py` 32 TDD tests); (6) pair universe 15→30 (_UNIVERSE_30). 825/825 pass. [[HYPO-NFI-001]]
 - **Phase 4 Forensic+Research fix — 4 핵심 수정** — (1) HYPO-023 $1M→$100k threshold (25h 0 signals 원인 — 60s 윈도우에서 $1M 집적 불가), exit threshold $300k→$30k, WS raw log 20 events 진단, noise filter $1000→$500; (2) HYPO-AI-001 retry 3x + backoff 1/2/5s + rate_limit +5s extra + credit error OpenAI fallback (무한 HOLD 루프 방지); (3) GridBot NEW (HYPO-040, BingX 287K users 검증, ATR<1%+lower 30% boundary, 5-level $50 grid); (4) pair universe 6→15 tickers (HYPO-007-RT/008-RT/040, NFI 표준 40-80 → 신호 ~1.7x). 787/787 tests pass (+35 신규). [[HYPO-023]] [[HYPO-AI-001]] [[HYPO-040]] [[INSIGHT-035]]
 
 - **HYPO-034 cut + AI threshold 0.72** — (1) HYPO-034 BTCDominanceLag deprecated (n=3 win 0% 3 SL -$7.09, manual cut — pattern 확실), (2) `DEFAULT_MIN_CONFIDENCE` 0.75→0.72 (too strict → LONG 0.3%, target 5-15%), prompt "0.72 + clear edge", HYPO-AI-001 params 동기화. 5 신규 TDD tests. 752/752 pass. [[HYPO-034]] [[HYPO-AI-001]]

@@ -15,7 +15,16 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
-## 현재 상태 (2026-05-05 — HYPO-023 deep fix: 792/792 pass)
+## 현재 상태 (2026-05-04 — Phase 5 Codex Top5 + NFI X7: 825/825 pass)
+
+**Phase 5 Codex Top5 + NFI X7 (825/825 pass)**:
+- **CRITICAL (Codex #1)**: strategy singleton `_strategy_instances` + balance cache `_balance_cache` — `_eval_and_act` 매 tick 1회 생성→재사용. 90 calls/tick×15ticker CPU 낭비 제거.
+- **CRITICAL (Codex #5)**: fee default 0.0014→**0.002** (OKX paper Lv1 0.1%/side = 0.2% rt). env `LIVE_FEE_ROUND_TRIP` override 가능.
+- **HIGH (Codex #3)**: GridBot breakout_buffer_pct = absolute 2% (range×5% → noise trigger on wide-range days 제거).
+- **MEDIUM (Codex #4)**: auto_deprecate min_n **5→20** (Bailey 2014 통계), loss_cap **-$5→-$15** (7.5%/30-trade window).
+- **NEW (NFI)**: `HYPO-NFI-001` NFI X7 DipBuy — RSI_3 5m/15m<5 + RSI_14 1h<30 + BB lower + AROON_4h<80. `src/strategies/nfi_dipbuy.py` 32 TDD tests.
+- **pair universe 15→30**: `_UNIVERSE_30` (BNB/UNI/AAVE/LDO/ICP/FIL/ARB/OP/SHIB/INJ/SEI/TIA/JTO/BLUR/WLD 추가). HYPO-007/008/040/NFI-001 적용.
+- Active HYPOs: **8개** (007+008+023+027+028+032+040+NFI-001). 025/024/033/AI-001 deprecated 제거.
 
 **HYPO-023 final diagnosis (792/792 pass)**:
 - **확정 원인**: A (rare event). WS 구독 정상 + 60s/8sym 모두 forceOrder 0건 (low-vol day BTC $78k-$80k)

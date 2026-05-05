@@ -15,6 +15,12 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
+## Phase 8 (2026-05-05) — HYPO-036 FundingCarry + funding poll bug fix
+- Codex priority debate (1 round 합의 B): HYPO-036 활성화 가장 임팩트.
+- **Latent bug fix**: `_funding_rate_cache` write 부재 (HYPO-027 + AI 항상 funding=0). `_poll_funding_rates` async task 추가 (executor offload, Codex round-1).
+- Live: `[FUNDING-POLL] populated 3/3` BTC -0.003% ETH -0.004% SOL +0.01%. HYPO-036 대기 (threshold -0.05% 미달).
+- 9 active HYPO. 자세히: [[INSIGHT-037]]
+
 ## Phase 6+7 + Codex round-1 (2026-05-05) — Slippage 4-layer + EV flip
 
 **🎯 Polaris EV 양수 첫 전환** — Live readiness 22→35→41/100 (MARGINAL), Paper PnL -$59→-$30→**+$11.82**, Live est -$77→-$37→**+$2.14** (첫 양수). NFI = hidden alpha (n=22, 86% win, +$45.34).

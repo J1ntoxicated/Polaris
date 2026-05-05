@@ -56,6 +56,11 @@ from src.paper.slippage_model import (
     compute_spread_bps,
     should_skip_entry_spread,
 )
+from src.paper.dispatchers import (
+    DispatchContext,
+    get_dispatcher,
+    register_dispatcher,
+)
 from src.data.tick_persister import TickPersister
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
@@ -618,13 +623,39 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     """매 tick 호출 — strategy 평가 + 즉시 entry/exit.
 
     primary_tf == 'tick' 인 strategy는 candle 무관 — tick payload 직접 사용.
+
+    Phase 10 (registry pattern): primary_tf with registered dispatcher takes
+    precedence; otherwise legacy if/elif chain runs (for un-migrated branches).
     """
     strategy = _get_strategy(hypo, ticker)
     sname = strategy.name
 
-    # 1. Strategy evaluate — tick / book / flow / candle
+    # 1. Strategy evaluate — registry first, legacy chain as fallback.
     primary = hypo.get("primary_tf")
-    if primary == "tick" and hasattr(strategy, "evaluate_tick"):
+    signal = None
+    dispatcher = get_dispatcher(primary)
+    if dispatcher is not None:
+        # Pre-fetch shared inputs (book / L1 quote)
+        _book_pre = get_book(ticker) or {}
+        _tick_pre = full_tick if full_tick is not None else (get_tick(ticker) or {})
+        _bid_pre = float((_tick_pre or {}).get("bid", 0) or 0)
+        _ask_pre = float((_tick_pre or {}).get("ask", 0) or 0)
+        ctx = DispatchContext(
+            strategy=strategy,
+            hypo=hypo,
+            ticker=ticker,
+            tick_ts_ms=tick_ts_ms,
+            tick_price=tick_price,
+            full_tick=full_tick,
+            book=_book_pre,
+            bid=_bid_pre,
+            ask=_ask_pre,
+        )
+        signal = dispatcher(ctx)
+        if signal is None:
+            # Dispatcher signaled "data not ready, skip" — exit early
+            return
+    elif primary == "tick" and hasattr(strategy, "evaluate_tick"):
         if full_tick is None:
             return
         signal = strategy.evaluate_tick(full_tick)
@@ -943,40 +974,8 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                 confidence=0.0,
                 reason=f"funding_neutral rate={funding}",
             )
-    elif primary == "carry" and hasattr(strategy, "evaluate_funding"):
-        # HYPO-036: Funding Carry — funding-triggered SPOT entry (Liu & Yu 2024)
-        # Reads cached funding (populated by _poll_funding_rates).
-        # Computes in_position + position_age_hours from current balance.
-        binance_sym = ticker.replace("-", "")
-        funding = _funding_rate_cache.get(binance_sym)
-        # Determine open position state for this strategy on this ticker
-        bal_check = _load_balance(ticker, strategy.name, hypo["starting_usd"])
-        open_pos = next(
-            (p for p in bal_check.open_positions if p.ticker == ticker),
-            None,
-        )
-        in_position = open_pos is not None
-        age_h = (
-            (tick_ts_ms - open_pos.open_ts_ms) / 3_600_000.0 if open_pos else 0.0
-        )
-        signal = strategy.evaluate_funding(
-            funding_8h=funding,
-            ts_ms=tick_ts_ms,
-            position_age_hours=age_h,
-            in_position=in_position,
-        )
-        # Rate-limit HOLD logging per ticker (5min)
-        if signal.action == SignalAction.HOLD:
-            if not hasattr(_eval_and_act, "_carry_hold_last"):
-                _eval_and_act._carry_hold_last = {}
-            last_log = _eval_and_act._carry_hold_last.get(ticker, 0)
-            if tick_ts_ms - last_log > 300_000:
-                logger.info(f"[CARRY-HOLD] {ticker} funding={funding} {signal.reason}")
-                _eval_and_act._carry_hold_last[ticker] = tick_ts_ms
-        elif signal.action == SignalAction.ENTER_LONG:
-            logger.info(
-                f"[CARRY-ENTER] {ticker} funding={funding} conf={signal.confidence:.2f} {signal.reason}"
-            )
+    # NOTE: primary == "carry" is now handled by registered dispatcher
+    # (see _dispatch_carry below). Legacy branch removed in Phase 10.
     elif primary == "grid" and hasattr(strategy, "evaluate_grid"):
         # HYPO-040: Grid Bot — sideways ATR-compressed lower-boundary entry
         if full_tick is None:
@@ -1442,6 +1441,48 @@ async def _run_okx_and_binance(
         except Exception as e:
             logger.error(f"supervisor outer error: {e!r} — restart in {_SUPERVISOR_RESTART_DELAY_S}s")
             await asyncio.sleep(_SUPERVISOR_RESTART_DELAY_S)
+
+
+# ───── Phase 10: Registered dispatchers (registry pattern) ─────
+#
+# Migrated dispatchers — replace if/elif chain in `_eval_and_act`.
+# Each function takes a DispatchContext and returns Signal | None.
+# (None = data not ready, runner aborts early. SignalAction.HOLD = real HOLD.)
+
+
+@register_dispatcher("carry")
+def _dispatch_carry(ctx: DispatchContext) -> Signal | None:
+    """HYPO-036 Funding Carry — funding-triggered SPOT entry (Liu & Yu 2024)."""
+    binance_sym = ctx.ticker.replace("-", "")
+    funding = _funding_rate_cache.get(binance_sym)
+    bal = _load_balance(ctx.ticker, ctx.strategy.name, ctx.hypo["starting_usd"])
+    open_pos = next(
+        (p for p in bal.open_positions if p.ticker == ctx.ticker), None,
+    )
+    in_position = open_pos is not None
+    age_h = (
+        (ctx.tick_ts_ms - open_pos.open_ts_ms) / 3_600_000.0 if open_pos else 0.0
+    )
+    sig = ctx.strategy.evaluate_funding(
+        funding_8h=funding, ts_ms=ctx.tick_ts_ms,
+        position_age_hours=age_h, in_position=in_position,
+    )
+    # Rate-limited HOLD log (5min/ticker)
+    if sig.action == SignalAction.HOLD:
+        if not hasattr(_dispatch_carry, "_hold_last"):
+            _dispatch_carry._hold_last = {}  # type: ignore[attr-defined]
+        last_log = _dispatch_carry._hold_last.get(ctx.ticker, 0)  # type: ignore[attr-defined]
+        if ctx.tick_ts_ms - last_log > 300_000:
+            logger.info(
+                f"[CARRY-HOLD] {ctx.ticker} funding={funding} {sig.reason}"
+            )
+            _dispatch_carry._hold_last[ctx.ticker] = ctx.tick_ts_ms  # type: ignore[attr-defined]
+    elif sig.action == SignalAction.ENTER_LONG:
+        logger.info(
+            f"[CARRY-ENTER] {ctx.ticker} funding={funding} "
+            f"conf={sig.confidence:.2f} {sig.reason}"
+        )
+    return sig
 
 
 def main() -> None:

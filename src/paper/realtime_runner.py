@@ -61,6 +61,14 @@ from src.paper.dispatchers import (
     get_dispatcher,
     register_dispatcher,
 )
+from src.exec.broker import (
+    Broker,
+    OrderRequest,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+)
+from src.exec.paper_broker import PaperBroker
 from src.data.tick_persister import TickPersister
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
@@ -607,36 +615,103 @@ def _load_balance(ticker: str, strategy_name: str, starting_usd: float) -> "Pape
     return _balance_cache[key]
 
 
+# Phase 15 (P1-3 fix): broker singleton — entry/exit go through this contract.
+# Defaults to PaperBroker (current paper engine simulation). Live transition
+# means swapping to OKXBroker via configuration. realtime_runner stays unchanged.
+_broker_singleton: Broker | None = None
+
+
+def get_broker() -> Broker:
+    """Lazy broker singleton — PaperBroker by default."""
+    global _broker_singleton
+    if _broker_singleton is None:
+        _broker_singleton = PaperBroker(fee_round_trip=LIVE_FEE_ROUND_TRIP)
+    return _broker_singleton
+
+
+def set_broker(broker: Broker) -> None:
+    """Override broker singleton (used by tests / live promotion)."""
+    global _broker_singleton
+    _broker_singleton = broker
+
+
 # Phase 13: cached portfolio halt check — refresh every 60s
 _portfolio_halt_cache: tuple[int, bool] = (0, False)
 _PORTFOLIO_HALT_REFRESH_MS: int = 60_000
+_PORTFOLIO_SNAPSHOT_INTERVAL_MS: int = 300_000  # 5min
+_last_portfolio_snapshot_ms: int = 0
 PORTFOLIO_MAX_DRAWDOWN_PCT: float = 0.05  # ADR-010 daily 5% applied at portfolio level
+
+# Phase 15 (P0-2 fix): last seen tick price per ticker — used by portfolio halt
+# to MTM open positions. Without this, snapshot uses entry_price → blind to
+# intraday open-loss drawdown.
+_last_tick_price_per_ticker: dict[str, float] = {}
+
+
+def _record_tick_price(ticker: str, price: float) -> None:
+    """Record latest tick price for portfolio MTM. Shell."""
+    if price > 0:
+        _last_tick_price_per_ticker[ticker] = price
+
+
+def _get_current_prices_snapshot() -> dict[str, float]:
+    """Return shallow copy of last-seen prices (for portfolio MTM)."""
+    return dict(_last_tick_price_per_ticker)
 
 
 def _check_portfolio_halt(tick_ts_ms: int) -> bool:
     """Return True if portfolio drawdown >= cap (cached 60s).
 
-    Uses src/persist/ledger via shadow ledger singleton in src/paper/runner.
-    Failures swallowed (default to no-halt to avoid trading freeze on SQL issues).
-
-    Shell — reads ledger + module cache.
+    Phase 15 fix:
+      - Uses _last_tick_price_per_ticker for open-position MTM (was {})
+      - Writes portfolio_snapshots every 5min so HWM rolls forward
+      - Shadow write failures still swallowed but at least surface as warning
     """
-    global _portfolio_halt_cache
+    global _portfolio_halt_cache, _last_portfolio_snapshot_ms
     last_ts, last_halt = _portfolio_halt_cache
     if tick_ts_ms - last_ts < _PORTFOLIO_HALT_REFRESH_MS:
         return last_halt
     try:
-        from src.paper.runner import _get_ledger
+        from src.paper.runner import _get_ledger, get_ledger_health
         from src.risk.portfolio import (
             compute_portfolio_snapshot,
             should_halt_portfolio,
         )
+        # Phase 15: skip halt if ledger unreliable (>10 consecutive write failures
+        # → ledger can't be trusted to reflect reality; halt would be blind).
+        health = get_ledger_health()
+        if health["consecutive_failures"] > 10:
+            logger.warning(
+                f"[PORTFOLIO-HALT] ledger unreliable ({health['consecutive_failures']} "
+                "consecutive failures) — skipping halt check"
+            )
+            _portfolio_halt_cache = (tick_ts_ms, False)
+            return False
+
         led = _get_ledger()
         if led is None:
             _portfolio_halt_cache = (tick_ts_ms, False)
             return False
-        snap = compute_portfolio_snapshot(led, current_prices={}, ts_ms=tick_ts_ms)
+
+        prices = _get_current_prices_snapshot()
+        snap = compute_portfolio_snapshot(led, current_prices=prices, ts_ms=tick_ts_ms)
         halt, _ = should_halt_portfolio(snap, max_drawdown_pct=PORTFOLIO_MAX_DRAWDOWN_PCT)
+
+        # Phase 15: write portfolio snapshot every 5 min (rolls HWM forward)
+        if tick_ts_ms - _last_portfolio_snapshot_ms >= _PORTFOLIO_SNAPSHOT_INTERVAL_MS:
+            try:
+                led.insert_portfolio_snapshot(
+                    ts_ms=tick_ts_ms,
+                    total_equity_usd=snap.total_equity_usd,
+                    total_open=snap.total_open_count,
+                    total_realized=snap.total_realized_usd,
+                    drawdown_pct=snap.drawdown_pct,
+                    active_hypos=[h["hypo_id"] for h in REALTIME_HYPOS],
+                )
+                _last_portfolio_snapshot_ms = tick_ts_ms
+            except Exception as e:
+                logger.warning(f"portfolio snapshot write failed: {e!r}")
+
         _portfolio_halt_cache = (tick_ts_ms, halt)
         return halt
     except Exception as e:
@@ -1184,23 +1259,28 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
             exit_reason = "signal_exit"
         if exit_reason:
-            # Phase 6 + Codex round-1: exit notional uses base qty × tick_price
-            # (entry size_usd is stale once price moved). Without this, wins
-            # under-estimated and losses over-estimated paper-vs-live drift.
+            # Phase 15 (P1-3): exit through Broker contract too.
+            # Codex round-1 fix: exit notional uses base qty × tick_price
+            # (entry size_usd is stale once price moved).
             exit_notional_usd = (
                 (pos.size_usd / pos.entry_price) * tick_price
                 if pos.entry_price > 0 else pos.size_usd
             )
-            exit_fill, exit_slip_bps = compute_fill_price(
-                "sell",
+            _exit_result = get_broker().place_order(OrderRequest(
+                side=OrderSide.SELL,
+                ticker=ticker,
                 size_usd=exit_notional_usd,
-                book=_book,
-                last=tick_price,
-                bid=_bid,
-                ask=_ask,
-            )
-            if exit_fill <= 0:
-                exit_fill = tick_price  # safety fallback (should never trigger)
+                order_type=OrderType.MARKET,
+                client_order_id=f"{pos.position_id}-exit",
+            ))
+            if _exit_result.status == OrderStatus.FILLED and _exit_result.avg_fill_price > 0:
+                exit_fill = _exit_result.avg_fill_price
+            else:
+                logger.warning(
+                    f"[EXIT-FALLBACK] {ticker} broker rejected — using tick price "
+                    f"(status={_exit_result.status.value} {_exit_result.error_msg})"
+                )
+                exit_fill = tick_price
             balance = balance.close(pos.position_id, exit_price=exit_fill, close_ts_ms=tick_ts_ms)
             closed = balance.closed_positions[-1]
             paper_logger.log_close(ticker, sname, closed)
@@ -1346,33 +1426,39 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         )
 
         if size > 0:
-            # Phase 12.2: liq_skip already gated above; sizing is now safe.
-            # Phase 6: realistic fill price for BUY (consume ask side, walk book)
-            entry_fill, entry_slip_bps = compute_fill_price(
-                "buy",
+            # Phase 15 (P1-3 fix): all entries flow through Broker contract.
+            # Default broker = PaperBroker (slippage_model fill). Live promotion
+            # = swap broker singleton to OKXBroker — no logic change here.
+            _result = get_broker().place_order(OrderRequest(
+                side=OrderSide.BUY,
+                ticker=ticker,
                 size_usd=size,
-                book=_book,
-                last=tick_price,
-                bid=_bid,
-                ask=_ask,
-            )
-            if entry_fill <= 0:
-                entry_fill = tick_price  # safety fallback
-            pos = Position(
-                position_id=f"{ticker}-{tick_ts_ms}",
-                ticker=ticker, direction=1,
-                entry_price=entry_fill,  # Phase 6: walked-book fill (paper-live parity)
-                size_usd=size,
-                open_ts_ms=tick_ts_ms,
-                fee_round_trip=LIVE_FEE_ROUND_TRIP,
-            )
-            balance = balance.open(pos)
-            paper_logger.log_open(ticker, sname, pos)
-            logger.info(
-                f"[OPEN] {hypo['hypo_id']} {ticker} @{entry_fill:.6f} (last={tick_price:.6f}, "
-                f"slip={entry_slip_bps:.1f}bps) size=${size:.2f}"
-            )
-            _save_balance(ticker, sname, balance)
+                order_type=OrderType.MARKET,
+                client_order_id=f"{ticker}-{tick_ts_ms}",
+            ))
+            if _result.status != OrderStatus.FILLED:
+                logger.warning(
+                    f"[ENTRY-REJECTED] {hypo['hypo_id']} {ticker} "
+                    f"status={_result.status.value} {_result.error_msg}"
+                )
+            else:
+                entry_fill = _result.avg_fill_price
+                entry_slip_bps = _result.slippage_bps
+                pos = Position(
+                    position_id=f"{ticker}-{tick_ts_ms}",
+                    ticker=ticker, direction=1,
+                    entry_price=entry_fill,
+                    size_usd=size,
+                    open_ts_ms=tick_ts_ms,
+                    fee_round_trip=LIVE_FEE_ROUND_TRIP,
+                )
+                balance = balance.open(pos)
+                paper_logger.log_open(ticker, sname, pos)
+                logger.info(
+                    f"[OPEN] {hypo['hypo_id']} {ticker} @{entry_fill:.6f} (last={tick_price:.6f}, "
+                    f"slip={entry_slip_bps:.1f}bps) size=${size:.2f} broker={get_broker().__class__.__name__}"
+                )
+                _save_balance(ticker, sname, balance)
 
 
 # ───── Tick callback ─────
@@ -1444,6 +1530,8 @@ def make_tick_handler() -> Callable[[str, dict], None]:
         if tick_ts > 0:
             _update_price_history(inst_id, tick_ts, tick_price)
             _update_price_history_5s(inst_id, tick_ts, tick_price)
+        # Phase 15 (P0-2 fix): record latest price for portfolio MTM
+        _record_tick_price(inst_id, tick_price)
         # Auto-deprecate: frequency trigger check every 5min (fast_fail/loss_cap inline)
         global _deprecate_last_check_s
         now_s = time.time()

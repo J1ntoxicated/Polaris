@@ -57,16 +57,38 @@ def _get_ledger():
         return None
 
 
+# Phase 15 (P0-1 fix): track shadow write health so portfolio halt knows
+# whether ledger reflects reality. Failures still don't crash trading, but
+# they're now visible + counted (after N consecutive failures, runner could
+# auto-disable ledger-dependent gates as a safety measure).
+_shadow_write_failures: int = 0
+_shadow_write_last_success_ms: int = 0
+
+
+def get_ledger_health() -> dict:
+    """Return ledger write health stats (consumed by portfolio halt + dashboard)."""
+    return {
+        "consecutive_failures": _shadow_write_failures,
+        "last_success_ms": _shadow_write_last_success_ms,
+    }
+
+
 def _shadow_write_balance(
     ticker: str, strategy_name: str, balance: PaperBalance, hypo_id: str | None = None,
 ) -> None:
-    """Phase 9 shadow write — JSON remains source of truth, ledger is duplicate.
+    """Phase 9 shadow write — JSON SSOT, ledger duplicate.
 
-    Failures swallowed (warn only) so SQL issues never break trading.
+    Phase 15: failures still swallowed (trading must not stop on SQL issue),
+    but now COUNTED + LOGGED so downstream consumers can detect divergence.
+    Successive failures > 3 → log error (was just warning). After 10 failures
+    portfolio halt should treat ledger as unreliable.
+
     hypo_id resolved lazily from REALTIME_HYPOS if not provided.
     """
+    global _shadow_write_failures, _shadow_write_last_success_ms
     led = _get_ledger()
     if led is None:
+        _shadow_write_failures += 1
         return
     try:
         # Resolve hypo_id if not passed
@@ -93,8 +115,19 @@ def _shadow_write_balance(
                     close_ts_ms=pos.close_ts_ms,
                     exit_reason="shadow_sync",
                 )
+        # Success — reset failure counter
+        _shadow_write_failures = 0
+        import time as _t
+        _shadow_write_last_success_ms = int(_t.time() * 1000)
     except Exception as e:
-        logger.warning(f"shadow write failed ({hypo_id}/{ticker}): {e!r}")
+        _shadow_write_failures += 1
+        if _shadow_write_failures > 3:
+            logger.error(
+                f"shadow write FAILED {_shadow_write_failures}× consecutive "
+                f"({hypo_id}/{ticker}): {e!r}"
+            )
+        else:
+            logger.warning(f"shadow write failed ({hypo_id}/{ticker}): {e!r}")
 
 
 def _state_file(ticker: str, strategy_name: str, base_dir: Path | None = None) -> Path:

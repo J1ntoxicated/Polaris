@@ -13,6 +13,7 @@ from src.paper.state import PaperBalance
 @pytest.fixture(autouse=True)
 def _populate_book_store():
     """Phase 7+: tests need a populated _book_store (else LIQ-SKIP fires).
+    Phase 15: also populate _tick_store so PaperBroker can fetch last/bid/ask.
     Inject a synthetic deep book at ~1bps spread around price=100 (matches
     tight-spread liquid pair conditions assumed by tests).
     """
@@ -21,12 +22,17 @@ def _populate_book_store():
         "asks": [(100.0 * (1 + 0.00005 + i * 0.00001), 100.0) for i in range(5)],
         "ts": 0,
     }
-    _save = dict(_okx_ws._book_store)
+    fake_tick = {"last": 100.0, "bid": 99.995, "ask": 100.005, "ts": 0}
+    _save_book = dict(_okx_ws._book_store)
+    _save_tick = dict(_okx_ws._tick_store)
     for t in ("BTC-USDT", "ETH-USDT", "SOL-USDT", "DOGE-USDT", "PEPE-USDT", "SUI-USDT", "ORDI-USDT", "TRUMP-USDT"):
         _okx_ws._book_store[t] = fake_book
+        _okx_ws._tick_store[t] = fake_tick
     yield
     _okx_ws._book_store.clear()
-    _okx_ws._book_store.update(_save)
+    _okx_ws._book_store.update(_save_book)
+    _okx_ws._tick_store.clear()
+    _okx_ws._tick_store.update(_save_tick)
 
 
 @pytest.fixture(autouse=True)

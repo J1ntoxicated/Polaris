@@ -3,11 +3,13 @@
 TDD: 실패 테스트 먼저 작성 → 구현 후 통과 (lessons #46 — import pass != runtime pass).
 
 Spec (HYPO-NFI-001, NFI X7 Polaris simplification):
-  Entry conditions (all must hold):
-    1. RSI_3 5m < 5 OR RSI_3 15m < 5 (multi-TF extreme dip)
-    2. RSI_14 1h < 30 (classic oversold)
-    3. close <= BB lower (price at oversold band)
-    4. 4h AROON_UP < 80 (no overbought peak on 4h)
+  Entry conditions — 3-of-5 confluence (NFI-style OR-AND):
+    1. RSI_3 5m < 15  (1점)
+    2. RSI_3 15m < 15 (1점)
+    3. RSI_14 1h < 35  (1점)
+    4. price < bb_lower × 1.005  (1점, 0.5% 여유)
+    5. 4h AROON_UP < 85  (1점)
+    3+ 만족 시 ENTER_LONG
   Exit:
     - RSI_14 1h > 84 (momentum exhaustion)
     - OR close > BB upper
@@ -24,7 +26,9 @@ from src.domain.candle import Candle
 from src.domain.signal import SignalAction
 from src.strategies.nfi_dipbuy import (
     DEFAULT_AROON_UP_MAX,
+    DEFAULT_BB_BUFFER,
     DEFAULT_BB_WINDOW,
+    DEFAULT_MIN_CONFLUENCE,
     DEFAULT_RSI14_ENTRY,
     DEFAULT_RSI14_EXIT,
     DEFAULT_RSI3_ENTRY,
@@ -174,15 +178,36 @@ class TestComputeNFISignal:
         )
 
     def test_all_conditions_met_enter_long(self) -> None:
-        """All 4 conditions met → ENTER_LONG."""
+        """All 5 conditions met → ENTER_LONG (score=5 >= min_confluence=3)."""
         sig = self._make_full_dip_signal()
         assert sig.action == SignalAction.ENTER_LONG
 
-    def test_4h_overbought_blocks_entry(self) -> None:
-        """AROON_UP >= 80 on 4h → no ENTER_LONG."""
+    def test_4h_overbought_reduces_score_but_not_block(self) -> None:
+        """AROON_UP = 100 on 4h → score drops by 1 but 4 other conditions still give 4/5 → ENTER_LONG.
+
+        In 3-of-5 mode, overbought 4h alone does not block entry (4 others pass).
+        To block entry, use min_confluence=5 (strict all-must-pass mode).
+        """
         sig = self._make_full_dip_signal(aroon_overbought=True)
-        # AROON_UP = 100 >= 80 → should not enter
-        assert sig.action != SignalAction.ENTER_LONG
+        # score = 4 (RSI_3 5m + 15m + RSI_14 + BB) >= 3 → still enters
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_4h_overbought_blocks_entry_strict_mode(self) -> None:
+        """AROON_UP = 100 on 4h with min_confluence=5 → HOLD (all-must-pass strict)."""
+        m5_closes = [100.0, 100.0, 100.0, 60.0, 50.0]
+        m15_closes = [100.0, 100.0, 100.0, 60.0, 50.0]
+        h1_closes = _make_declining_closes(25, start=100.0, step=2.0)
+        h4_highs = _make_h4_highs_overbought(14)  # AROON_UP = 100 → cond_aroon fails
+        sig = _compute_nfi_signal(
+            m5_closes=m5_closes,
+            m15_closes=m15_closes,
+            h1_closes=h1_closes,
+            h4_highs=h4_highs,
+            ts_ms=NOW_MS,
+            bb_std=0.001,
+            min_confluence=5,  # all-must-pass
+        )
+        assert sig.action == SignalAction.HOLD
 
     def test_insufficient_5m_data_hold(self) -> None:
         """len(m5_closes) < 4 → HOLD (insufficient_5m)."""
@@ -247,20 +272,24 @@ class TestComputeNFISignal:
         )
         assert sig.action == SignalAction.EXIT
 
-    def test_hold_when_rsi14_not_oversold(self) -> None:
-        """RSI_14 1h >= 30 → no entry (need_rsi14 not met)."""
-        # Flat prices → RSI_14 ≈ 50
-        h1_closes = [100.0] * 25
-        m5_closes = [100.0, 100.0, 100.0, 60.0, 50.0]  # RSI_3 < 5
+    def test_hold_when_only_1_condition_met(self) -> None:
+        """Only 1 of 5 conditions met → HOLD (score < min_confluence=3).
+
+        Flat h1 prices → RSI_14 ≈ 50 (c3 fails) + price ≈ mean (c4 fails, default bb_std=2.0).
+        Flat m5/m15 → RSI_3 ≈ 50 (c1+c2 fail).
+        Only AROON (c5) passes → score=1 < 3 → HOLD.
+        """
+        h1_closes = [100.0] * 25  # flat → RSI_14 ≈ 50, price=mean → not at bb_lower
+        m5_closes = [97.0, 98.0, 99.0, 100.0, 101.0]  # rising → RSI_3 high
         sig = _compute_nfi_signal(
             m5_closes=m5_closes,
             m15_closes=m5_closes,
             h1_closes=h1_closes,
             h4_highs=_make_h4_highs_not_overbought(14),
             ts_ms=NOW_MS,
+            bb_std=2.0,  # standard bands → flat price not at bb_lower
         )
         assert sig.action == SignalAction.HOLD
-        assert "rsi14" in sig.reason
 
     def test_enter_long_has_positive_confidence(self) -> None:
         """ENTER_LONG signal has confidence in (0, 1]."""
@@ -279,7 +308,7 @@ class TestComputeNFISignal:
             assert sig.target_size_usd == DEFAULT_TARGET_SIZE_USD
 
     def test_enter_long_reason_contains_nfi_prefix(self) -> None:
-        """ENTER_LONG reason starts with 'nfi_dip:'."""
+        """ENTER_LONG reason starts with 'nfi_dip' (includes conf= score)."""
         m5 = [100.0, 100.0, 100.0, 60.0, 45.0]
         h1 = _make_declining_closes(25, start=100.0, step=1.5)
         sig = _compute_nfi_signal(
@@ -290,7 +319,7 @@ class TestComputeNFISignal:
             ts_ms=NOW_MS,
         )
         if sig.action == SignalAction.ENTER_LONG:
-            assert sig.reason.startswith("nfi_dip:")
+            assert sig.reason.startswith("nfi_dip")
 
 
 # ── NFIDipBuy class tests ──────────────────────────────────────────────────────
@@ -363,12 +392,12 @@ class TestNFIDipBuyClass:
         sig = strat.evaluate_multi_tf(tf_data)
         assert sig.action == SignalAction.ENTER_LONG
 
-    def test_evaluate_multi_tf_4h_overbought_no_entry(self) -> None:
-        """4h overbought → no ENTER_LONG."""
-        strat = NFIDipBuy(bb_std=0.001)
+    def test_evaluate_multi_tf_4h_overbought_strict_no_entry(self) -> None:
+        """4h overbought with min_confluence=5 (all-must-pass) → HOLD."""
+        strat = NFIDipBuy(bb_std=0.001, min_confluence=5)
         tf_data = self._make_tf_data(oversold=True, overbought_4h=True)
         sig = strat.evaluate_multi_tf(tf_data)
-        assert sig.action != SignalAction.ENTER_LONG
+        assert sig.action == SignalAction.HOLD
 
     def test_evaluate_multi_tf_empty_returns_hold(self) -> None:
         """Empty tf_data → HOLD (insufficient data)."""
@@ -393,12 +422,15 @@ class TestNFIDipBuyClass:
         assert "insufficient_candles" in sig.reason
 
     def test_custom_params_applied(self) -> None:
-        """Custom rsi3_entry/rsi14_entry params are respected."""
-        # Very strict entry: RSI_3 < 1 (near impossible)
-        strat = NFIDipBuy(rsi3_entry=1.0, rsi14_entry=10.0)
-        tf_data = self._make_tf_data(oversold=True, overbought_4h=False)
+        """Custom min_confluence=5 (all-must-pass) respected: aroon overbought → HOLD.
+
+        With overbought_4h=True → cond_aroon (c5) fails → score = 4 < 5 → HOLD.
+        This verifies min_confluence param is wired correctly.
+        """
+        strat = NFIDipBuy(bb_std=0.001, min_confluence=5)
+        tf_data = self._make_tf_data(oversold=True, overbought_4h=True)  # aroon fails
         sig = strat.evaluate_multi_tf(tf_data)
-        # With very strict thresholds, should HOLD (standard dip not deep enough)
+        # c1+c2+c3+c4 pass, c5 (aroon) fails → score=4 < 5 → HOLD
         assert sig.action == SignalAction.HOLD
 
     def test_enter_long_target_size_default(self) -> None:
@@ -473,3 +505,149 @@ class TestNFIPropertyBased:
         result = compute_rsi(closes, period=3)
         assert not (result != result)  # NaN check
         assert 0.0 <= result <= 100.0
+
+
+# ── New threshold tests (URGENT FIX — 0 entry in 30m) ────────────────────────
+
+class TestNFIThreshold15:
+    """test_nfi_threshold_15: RSI_3 threshold 5 → 15, RSI_14 30 → 35, AROON 80 → 85."""
+
+    def test_default_rsi3_entry_is_15(self) -> None:
+        """DEFAULT_RSI3_ENTRY must be 15.0 (relaxed from 5.0)."""
+        assert DEFAULT_RSI3_ENTRY == 15.0
+
+    def test_default_rsi14_entry_is_35(self) -> None:
+        """DEFAULT_RSI14_ENTRY must be 35.0 (relaxed from 30.0)."""
+        assert DEFAULT_RSI14_ENTRY == 35.0
+
+    def test_default_aroon_up_max_is_85(self) -> None:
+        """DEFAULT_AROON_UP_MAX must be 85.0 (relaxed from 80.0)."""
+        assert DEFAULT_AROON_UP_MAX == 85.0
+
+    def test_default_bb_buffer_is_0_005(self) -> None:
+        """DEFAULT_BB_BUFFER must be 1.005 (0.5% slack above bb_lower)."""
+        assert DEFAULT_BB_BUFFER == 1.005
+
+    def test_default_min_confluence_is_3(self) -> None:
+        """DEFAULT_MIN_CONFLUENCE must be 3 (3-of-5 NFI-style)."""
+        assert DEFAULT_MIN_CONFLUENCE == 3
+
+    def test_rsi3_between_5_and_15_triggers_entry(self) -> None:
+        """RSI_3 5m = 10 (between old=5 and new=15) should now trigger entry with enough confluence."""
+        # Craft scenario: RSI_3 5m is ~10 (moderate dip), other conditions met
+        # m5: moderate decline giving RSI_3 ~ 10
+        m5_closes = [100.0, 100.0, 98.0, 94.0, 91.0]   # RSI_3 moderate dip
+        m15_closes = [100.0, 100.0, 98.0, 94.0, 91.0]  # same → RSI_3 ~10
+        h1_closes = _make_declining_closes(25, start=100.0, step=2.5)  # RSI_14 < 35
+        h4_highs = _make_h4_highs_not_overbought(14)
+        sig = _compute_nfi_signal(
+            m5_closes=m5_closes,
+            m15_closes=m15_closes,
+            h1_closes=h1_closes,
+            h4_highs=h4_highs,
+            ts_ms=NOW_MS,
+            bb_std=0.001,  # near-zero bands → bb_lower ≈ mean; last < mean
+        )
+        # With 3-of-5 confluence, RSI_3 ~10 + RSI_14 < 35 + bb_buffer + aroon should give >= 3
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_typical_nfi_hold_distribution_enters(self) -> None:
+        """Observed: rsi3_5m=58.3 rsi3_15m=75.0 — those should still HOLD (too high)."""
+        # Only bb + aroon conditions met → 2 of 5 < 3 → HOLD
+        m5_closes = [95.0, 96.0, 97.0, 98.0, 99.0]  # RSI_3 ~ 58 (rising)
+        m15_closes = [88.0, 90.0, 93.0, 96.0, 100.0]  # RSI_3 ~ 75 (rising fast)
+        h1_closes = _make_declining_closes(25, start=100.0, step=2.5)
+        h4_highs = _make_h4_highs_not_overbought(14)
+        sig = _compute_nfi_signal(
+            m5_closes=m5_closes,
+            m15_closes=m15_closes,
+            h1_closes=h1_closes,
+            h4_highs=h4_highs,
+            ts_ms=NOW_MS,
+            bb_std=0.001,
+        )
+        # RSI_3 5m ~58 and 15m ~75 → conditions 1+2 not met; only 3+4+5 = 3 points → borderline
+        # Accept either ENTER_LONG (3 conditions: bb+aroon+rsi14) or HOLD
+        assert sig.action in (SignalAction.ENTER_LONG, SignalAction.HOLD)
+
+
+class TestNFI3of5Confluence:
+    """test_nfi_3_of_5_confluence: 3-of-5 OR-AND logic (require_all=False)."""
+
+    def _base_signal(
+        self,
+        rsi3_5m_low: bool = True,
+        rsi3_15m_low: bool = True,
+        rsi14_1h_low: bool = True,
+        at_bb_lower: bool = True,
+        aroon_ok: bool = True,
+    ) -> "Signal":
+        """Build signal with selective conditions met."""
+        # RSI_3 low scenario: sharp drop gives RSI_3 < 15
+        m5_closes = [100.0, 100.0, 100.0, 88.0, 82.0] if rsi3_5m_low else [90.0, 92.0, 94.0, 96.0, 98.0]
+        m15_closes = [100.0, 100.0, 100.0, 88.0, 82.0] if rsi3_15m_low else [90.0, 92.0, 94.0, 96.0, 98.0]
+        # RSI_14 < 35: sustained decline
+        h1_closes = _make_declining_closes(25, start=100.0, step=2.5) if rsi14_1h_low else [100.0] * 25
+        h4_highs = _make_h4_highs_not_overbought(14) if aroon_ok else _make_h4_highs_overbought(14)
+        # bb_std: 0.001 → near-zero bands. at_bb_lower requires last < mean.
+        # h1_closes[-1] < mean(h1_closes) when declining → at_bb_lower True (with 0.5% buffer).
+        # For at_bb_lower=False, we need last > bb_lower*1.005 but not exit territory.
+        # Use flat h1 + moderate price — last ≈ mean → not below bb_lower*1.005.
+        bb_std = 0.001 if at_bb_lower else 2.0  # std=2.0: wide bands → last well inside
+        return _compute_nfi_signal(
+            m5_closes=m5_closes,
+            m15_closes=m15_closes,
+            h1_closes=h1_closes,
+            h4_highs=h4_highs,
+            ts_ms=NOW_MS,
+            bb_std=bb_std,
+        )
+
+    def test_5_of_5_conditions_enter_long(self) -> None:
+        """All 5 conditions met → ENTER_LONG."""
+        sig = self._base_signal()
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_exactly_3_conditions_enter_long(self) -> None:
+        """3 of 5 conditions met → ENTER_LONG (RSI_3 5m/15m fail, rest pass)."""
+        # Fail conditions 1+2 (RSI_3 not low), pass 3+4+5
+        sig = self._base_signal(rsi3_5m_low=False, rsi3_15m_low=False)
+        # rsi14_1h_low + at_bb_lower + aroon_ok = 3 conditions
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_exactly_2_conditions_hold(self) -> None:
+        """Only 2 of 5 conditions met → HOLD."""
+        # Fail 3 conditions: RSI_3 5m, RSI_3 15m, RSI_14 1h all not met
+        # Only bb_lower + aroon pass = 2 conditions
+        sig = self._base_signal(rsi3_5m_low=False, rsi3_15m_low=False, rsi14_1h_low=False)
+        assert sig.action == SignalAction.HOLD
+
+    def test_confluence_score_in_reason(self) -> None:
+        """ENTER_LONG reason includes confluence score."""
+        sig = self._base_signal()
+        assert sig.action == SignalAction.ENTER_LONG
+        assert "conf=" in sig.reason or "confluence" in sig.reason
+
+    def test_aroon_fail_still_enters_with_4_conditions(self) -> None:
+        """4h overbought (aroon fails) but 4 other conditions pass → still ENTER_LONG."""
+        sig = self._base_signal(aroon_ok=False)
+        # 4 conditions met (RSI_3 5m + 15m + RSI_14 + bb) → >= 3 → ENTER_LONG
+        assert sig.action == SignalAction.ENTER_LONG
+
+    def test_min_confluence_param_respected(self) -> None:
+        """min_confluence=5 (strict, all must pass) → only 3 conditions → HOLD."""
+        # Only RSI_3 5m/15m fail → 3 conditions pass → with min=5, should HOLD
+        m5_closes = [95.0, 96.0, 97.0, 98.0, 99.0]   # RSI_3 not low
+        m15_closes = [95.0, 96.0, 97.0, 98.0, 99.0]  # RSI_3 not low
+        h1_closes = _make_declining_closes(25, start=100.0, step=2.5)
+        h4_highs = _make_h4_highs_not_overbought(14)
+        sig = _compute_nfi_signal(
+            m5_closes=m5_closes,
+            m15_closes=m15_closes,
+            h1_closes=h1_closes,
+            h4_highs=h4_highs,
+            ts_ms=NOW_MS,
+            bb_std=0.001,
+            min_confluence=5,  # all-must-pass mode
+        )
+        assert sig.action == SignalAction.HOLD

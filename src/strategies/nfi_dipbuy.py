@@ -6,11 +6,15 @@ NFI X7 basis (NostalgiaForInfinity X7, strat.ninja validated):
   - BB lower confluence for oversold confirmation
   - Exit: RSI_14 > 84 + close > BB upper (momentum exhaustion)
 
-Polaris simplification (SPOT-only, OKX paper):
-  - Multi-TF dip: RSI_3 5m < 5 OR RSI_3 15m < 5 (extreme short-term oversold)
-  - 1h RSI_14 < 30 (classic oversold)
-  - 4h AROON UP < 80 (not near overbought peak on 4h)
-  - Exit: 1h RSI_14 > 84 OR close > 1h BB upper (2std)
+Polaris simplification v2 (SPOT-only, OKX paper — NFI-style 3-of-5 OR-AND):
+  5 conditions scored (each = 1 point):
+    1. RSI_3 5m  < 15  (relaxed from 5 — deep dip not required)
+    2. RSI_3 15m < 15
+    3. RSI_14 1h < 35  (relaxed from 30)
+    4. price < bb_lower × 1.005  (0.5% buffer above BB lower)
+    5. 4h AROON_UP < 85  (relaxed from 80)
+  ENTER_LONG when score >= min_confluence (default 3).
+  Exit: 1h RSI_14 > 84 OR close > 1h BB upper (2std).
 
 Data: 5m/15m/1H/4H candle list via evaluate_multi_tf(tf_data)
 HYPO-NFI-001: forward paper validation (no historical forceOrder / NFI exact params)
@@ -28,12 +32,14 @@ from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
-# Entry thresholds
-DEFAULT_RSI3_ENTRY: float = 5.0       # RSI_3 < 5 on 5m or 15m = extreme dip
-DEFAULT_RSI14_ENTRY: float = 30.0     # RSI_14 < 30 on 1h = classic oversold
-DEFAULT_AROON_UP_MAX: float = 80.0    # 4h AROON_UP < 80 = not near overbought
+# Entry thresholds (v2 — relaxed for NFI-style 3-of-5 OR-AND)
+DEFAULT_RSI3_ENTRY: float = 15.0      # RSI_3 < 15 on 5m or 15m (relaxed from 5)
+DEFAULT_RSI14_ENTRY: float = 35.0     # RSI_14 < 35 on 1h (relaxed from 30)
+DEFAULT_AROON_UP_MAX: float = 85.0    # 4h AROON_UP < 85 (relaxed from 80)
 DEFAULT_BB_STD: float = 2.0           # Bollinger Band std multiplier
 DEFAULT_BB_WINDOW: int = 20           # BB window (1h candles)
+DEFAULT_BB_BUFFER: float = 1.005      # price < bb_lower × 1.005 (0.5% slack)
+DEFAULT_MIN_CONFLUENCE: int = 3       # 3-of-5 conditions required for ENTER_LONG
 
 # Exit thresholds
 DEFAULT_RSI14_EXIT: float = 84.0      # RSI_14 > 84 on 1h = momentum exhaustion
@@ -103,10 +109,20 @@ def _compute_nfi_signal(
     aroon_up_max: float = DEFAULT_AROON_UP_MAX,
     bb_std: float = DEFAULT_BB_STD,
     bb_window: int = DEFAULT_BB_WINDOW,
+    bb_buffer: float = DEFAULT_BB_BUFFER,
+    min_confluence: int = DEFAULT_MIN_CONFLUENCE,
     rsi14_exit: float = DEFAULT_RSI14_EXIT,
     target_size_usd: float = DEFAULT_TARGET_SIZE_USD,
 ) -> Signal:
-    """Pure NFI dip-buy signal from multi-TF close lists.
+    """Pure NFI dip-buy signal from multi-TF close lists (v2 — 3-of-5 OR-AND).
+
+    5 conditions each scored 1 point:
+      1. RSI_3 5m  < rsi3_entry  (default 15)
+      2. RSI_3 15m < rsi3_entry  (default 15)
+      3. RSI_14 1h < rsi14_entry (default 35)
+      4. price < bb_lower × bb_buffer  (default 1.005 = 0.5% above BB lower)
+      5. 4h AROON_UP < aroon_up_max   (default 85)
+    ENTER_LONG when score >= min_confluence (default 3).
 
     Args:
         m5_closes: 5m close price list (newest last). Min 4 required.
@@ -119,6 +135,8 @@ def _compute_nfi_signal(
         aroon_up_max: 4h AROON_UP upper bound (filter overbought).
         bb_std: Bollinger Band standard deviation multiplier.
         bb_window: BB lookback window (1h candles).
+        bb_buffer: multiplier on bb_lower for price proximity check (1.005 = 0.5% slack).
+        min_confluence: minimum score to trigger ENTER_LONG (1-5).
         rsi14_exit: RSI_14 threshold for exit signal.
         target_size_usd: position size for ENTER_LONG signal.
 
@@ -171,37 +189,29 @@ def _compute_nfi_signal(
             reason=reason,
         )
 
-    # ── Entry confluence check ───────────────────────────────────────────────
-    # Condition 1: multi-TF dip (RSI_3 extreme — 5m OR 15m)
-    dip_5m = rsi3_5m < rsi3_entry
-    dip_15m = rsi3_15m < rsi3_entry
-    multi_tf_dip = dip_5m or dip_15m
+    # ── 3-of-5 confluence scoring (NFI-style OR-AND) ────────────────────────
+    # Each condition contributes 1 point; ENTER_LONG when score >= min_confluence.
+    cond_rsi3_5m = rsi3_5m < rsi3_entry           # c1
+    cond_rsi3_15m = rsi3_15m < rsi3_entry         # c2
+    cond_rsi14_1h = rsi14_1h < rsi14_entry        # c3
+    cond_bb = h1_last < bb_lower * bb_buffer      # c4: price within bb_buffer of BB lower
+    cond_aroon = aroon_up_4h < aroon_up_max       # c5
 
-    # Condition 2: 1h oversold
-    oversold_1h = rsi14_1h < rsi14_entry
+    score = sum([cond_rsi3_5m, cond_rsi3_15m, cond_rsi14_1h, cond_bb, cond_aroon])
 
-    # Condition 3: below 1h BB lower (price at oversold band)
-    at_bb_lower = h1_last <= bb_lower
-
-    # Condition 4: 4h not overbought (AROON_UP < 80 — no exhaustion on higher TF)
-    not_4h_overbought = aroon_up_4h < aroon_up_max
-
-    # All 4 must hold for entry
-    if multi_tf_dip and oversold_1h and at_bb_lower and not_4h_overbought:
-        dip_src = "5m" if dip_5m else "15m"
-        confidence = min(
-            0.90,
-            0.60
-            + (rsi14_entry - rsi14_1h) / 100.0  # deeper oversold → higher confidence
-            + (rsi3_entry - min(rsi3_5m, rsi3_15m)) / 100.0,  # deeper RSI_3 dip
-        )
+    if score >= min_confluence:
+        # Confidence: base 0.60 + depth bonuses (capped 0.90)
+        rsi14_depth = max(0.0, rsi14_entry - rsi14_1h) / 100.0 if cond_rsi14_1h else 0.0
+        rsi3_depth = max(0.0, rsi3_entry - min(rsi3_5m, rsi3_15m)) / 100.0 if (cond_rsi3_5m or cond_rsi3_15m) else 0.0
+        confidence = min(0.90, 0.60 + rsi14_depth + rsi3_depth)
         return Signal(
             timestamp_ms=ts_ms,
             action=SignalAction.ENTER_LONG,
             confidence=confidence,
             target_size_usd=target_size_usd,
             reason=(
-                f"nfi_dip: rsi3_{dip_src}={min(rsi3_5m, rsi3_15m):.1f}"
+                f"nfi_dip conf={score}/5:"
+                f" rsi3_5m={rsi3_5m:.1f} rsi3_15m={rsi3_15m:.1f}"
                 f" rsi14_1h={rsi14_1h:.1f} bb_lower={bb_lower:.4f}"
                 f" aroon_4h={aroon_up_4h:.0f}"
             ),
@@ -209,15 +219,17 @@ def _compute_nfi_signal(
 
     # Build HOLD reason for monitoring
     reasons = []
-    if not multi_tf_dip:
-        reasons.append(f"rsi3_5m={rsi3_5m:.1f} rsi3_15m={rsi3_15m:.1f} (need<{rsi3_entry})")
-    if not oversold_1h:
-        reasons.append(f"rsi14_1h={rsi14_1h:.1f} (need<{rsi14_entry})")
-    if not at_bb_lower:
-        reasons.append(f"price={h1_last:.4f}>bb_lower={bb_lower:.4f}")
-    if not not_4h_overbought:
+    if not cond_rsi3_5m:
+        reasons.append(f"rsi3_5m={rsi3_5m:.1f}>={rsi3_entry}")
+    if not cond_rsi3_15m:
+        reasons.append(f"rsi3_15m={rsi3_15m:.1f}>={rsi3_entry}")
+    if not cond_rsi14_1h:
+        reasons.append(f"rsi14_1h={rsi14_1h:.1f}>={rsi14_entry}")
+    if not cond_bb:
+        reasons.append(f"price={h1_last:.4f}>={bb_lower:.4f}*{bb_buffer}")
+    if not cond_aroon:
         reasons.append(f"aroon_4h={aroon_up_4h:.0f}>={aroon_up_max}")
-    return hold("no_confluence: " + "; ".join(reasons))
+    return hold(f"no_confluence({score}/5): " + "; ".join(reasons))
 
 
 class NFIDipBuy(Strategy):
@@ -249,6 +261,8 @@ class NFIDipBuy(Strategy):
         aroon_up_max: float = DEFAULT_AROON_UP_MAX,
         bb_std: float = DEFAULT_BB_STD,
         bb_window: int = DEFAULT_BB_WINDOW,
+        bb_buffer: float = DEFAULT_BB_BUFFER,
+        min_confluence: int = DEFAULT_MIN_CONFLUENCE,
         rsi14_exit: float = DEFAULT_RSI14_EXIT,
         target_size_usd: float = DEFAULT_TARGET_SIZE_USD,
     ) -> None:
@@ -257,6 +271,8 @@ class NFIDipBuy(Strategy):
         self.aroon_up_max = aroon_up_max
         self.bb_std = bb_std
         self.bb_window = bb_window
+        self.bb_buffer = bb_buffer
+        self.min_confluence = min_confluence
         self.rsi14_exit = rsi14_exit
         self.target_size_usd = target_size_usd
 
@@ -293,6 +309,8 @@ class NFIDipBuy(Strategy):
             aroon_up_max=self.aroon_up_max,
             bb_std=self.bb_std,
             bb_window=self.bb_window,
+            bb_buffer=self.bb_buffer,
+            min_confluence=self.min_confluence,
             rsi14_exit=self.rsi14_exit,
             target_size_usd=self.target_size_usd,
         )
@@ -333,6 +351,8 @@ class NFIDipBuy(Strategy):
             aroon_up_max=self.aroon_up_max,
             bb_std=self.bb_std,
             bb_window=self.bb_window,
+            bb_buffer=self.bb_buffer,
+            min_confluence=self.min_confluence,
             rsi14_exit=self.rsi14_exit,
             target_size_usd=self.target_size_usd,
         )

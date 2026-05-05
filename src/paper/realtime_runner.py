@@ -69,6 +69,7 @@ from src.exec.broker import (
     OrderType,
 )
 from src.exec.paper_broker import PaperBroker
+from src.exec.okx_broker import OKXBroker, _live_armed as _okx_live_armed
 from src.data.tick_persister import TickPersister
 from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
@@ -622,10 +623,25 @@ _broker_singleton: Broker | None = None
 
 
 def get_broker() -> Broker:
-    """Lazy broker singleton — PaperBroker by default."""
+    """Lazy broker singleton — auto-selects based on env.
+
+    Phase 14.2:
+      POLARIS_LIVE_MODE=1 + OKX keys present → OKXBroker (demo by default)
+      otherwise → PaperBroker (slippage_model simulation)
+    """
     global _broker_singleton
     if _broker_singleton is None:
-        _broker_singleton = PaperBroker(fee_round_trip=LIVE_FEE_ROUND_TRIP)
+        if _okx_live_armed():
+            # Phase 14.2 — live OKX (defaults to demo via x-simulated-trading)
+            max_live_size = float(_os.environ.get("POLARIS_LIVE_MAX_USD", "500"))
+            _broker_singleton = OKXBroker(max_size_usd=max_live_size)
+            demo_str = "DEMO" if _os.environ.get("POLARIS_OKX_DEMO", "1") == "1" else "REAL-MONEY"
+            logger.warning(
+                f"[BROKER] OKXBroker armed mode={demo_str} max_size=${max_live_size:.0f}"
+            )
+        else:
+            _broker_singleton = PaperBroker(fee_round_trip=LIVE_FEE_ROUND_TRIP)
+            logger.info("[BROKER] PaperBroker (paper trading, no live exchange)")
     return _broker_singleton
 
 

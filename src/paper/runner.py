@@ -28,8 +28,73 @@ from src.paper.state import PaperBalance, Position, PositionStatus
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_STATE_DIR = PROJECT_ROOT / "data" / "paper"
+DEFAULT_LEDGER_PATH = PROJECT_ROOT / "data" / "polaris.sqlite"
 
 logger = logging.getLogger(__name__)
+
+
+# Phase 9: shadow write to SQLite ledger. JSON remains primary (read path) until
+# Phase 9.3 cutover. Toggle via env or by passing _LEDGER_ENABLED=False.
+_LEDGER_ENABLED: bool = True
+_ledger_singleton = None  # type: ignore[var-annotated]
+
+
+def _get_ledger():
+    """Lazy-init module-level ledger connection. Returns None on disable/error."""
+    global _ledger_singleton
+    if not _LEDGER_ENABLED:
+        return None
+    if _ledger_singleton is not None:
+        return _ledger_singleton
+    try:
+        from src.persist.ledger import TradeLedger
+        led = TradeLedger(DEFAULT_LEDGER_PATH)
+        led.open()
+        _ledger_singleton = led
+        return led
+    except Exception as e:
+        logger.warning(f"ledger init failed: {e!r} — JSON-only mode")
+        return None
+
+
+def _shadow_write_balance(
+    ticker: str, strategy_name: str, balance: PaperBalance, hypo_id: str | None = None,
+) -> None:
+    """Phase 9 shadow write — JSON remains source of truth, ledger is duplicate.
+
+    Failures swallowed (warn only) so SQL issues never break trading.
+    hypo_id resolved lazily from REALTIME_HYPOS if not provided.
+    """
+    led = _get_ledger()
+    if led is None:
+        return
+    try:
+        # Resolve hypo_id if not passed
+        hid = hypo_id
+        if hid is None:
+            try:
+                from src.persist.migrations import _hypo_id_for_strategy
+                hid = _hypo_id_for_strategy(strategy_name)
+            except Exception:
+                hid = f"LEGACY-{strategy_name}"
+
+        # Upsert balance
+        led.upsert_balance(hid, ticker, balance)
+
+        # Upsert positions (shadow — INSERT OR REPLACE handles dedup)
+        for pos in balance.open_positions:
+            led.insert_position_open(pos, hid, strategy_name)
+        for pos in balance.closed_positions:
+            led.insert_position_open(pos, hid, strategy_name)
+            if pos.exit_price > 0 and pos.close_ts_ms > 0:
+                led.update_position_close(
+                    position_id=pos.position_id,
+                    exit_price=pos.exit_price,
+                    close_ts_ms=pos.close_ts_ms,
+                    exit_reason="shadow_sync",
+                )
+    except Exception as e:
+        logger.warning(f"shadow write failed ({hypo_id}/{ticker}): {e!r}")
 
 
 def _state_file(ticker: str, strategy_name: str, base_dir: Path | None = None) -> Path:
@@ -108,6 +173,8 @@ def save_state(ticker: str, strategy_name: str, balance: PaperBalance) -> None:
     }
     tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     tmp.replace(path)  # atomic rename (POSIX guarantee)
+    # Phase 9: shadow write to SQLite (best-effort, JSON stays primary)
+    _shadow_write_balance(ticker, strategy_name, balance)
 
 
 def _daily_loss_breached(balance: PaperBalance, last_ts_ms: int) -> tuple[bool, float]:

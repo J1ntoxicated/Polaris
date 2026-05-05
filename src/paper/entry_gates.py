@@ -38,6 +38,7 @@ def evaluate_entry_gates(
     spread_too_wide: bool,
     regime_blocked: bool,
     liq_skip: bool,
+    portfolio_halt: bool = False,
 ) -> GateVerdict:
     """Combine all pre-entry blockers into a single verdict.
 
@@ -45,9 +46,14 @@ def evaluate_entry_gates(
 
     Returns GateVerdict(allow=True, reason="") when entry is permitted,
     or GateVerdict(allow=False, reason="<first_blocker>") otherwise.
+
+    portfolio_halt: Phase 13 — global drawdown halt (highest precedence
+    after has_open since it's account-fatal).
     """
     if has_open:
         return GateVerdict(False, "has_open")
+    if portfolio_halt:
+        return GateVerdict(False, "portfolio_halt")
     if daily_breached:
         return GateVerdict(False, "daily_breached")
     if closed_this_tick:

@@ -607,6 +607,44 @@ def _load_balance(ticker: str, strategy_name: str, starting_usd: float) -> "Pape
     return _balance_cache[key]
 
 
+# Phase 13: cached portfolio halt check — refresh every 60s
+_portfolio_halt_cache: tuple[int, bool] = (0, False)
+_PORTFOLIO_HALT_REFRESH_MS: int = 60_000
+PORTFOLIO_MAX_DRAWDOWN_PCT: float = 0.05  # ADR-010 daily 5% applied at portfolio level
+
+
+def _check_portfolio_halt(tick_ts_ms: int) -> bool:
+    """Return True if portfolio drawdown >= cap (cached 60s).
+
+    Uses src/persist/ledger via shadow ledger singleton in src/paper/runner.
+    Failures swallowed (default to no-halt to avoid trading freeze on SQL issues).
+
+    Shell — reads ledger + module cache.
+    """
+    global _portfolio_halt_cache
+    last_ts, last_halt = _portfolio_halt_cache
+    if tick_ts_ms - last_ts < _PORTFOLIO_HALT_REFRESH_MS:
+        return last_halt
+    try:
+        from src.paper.runner import _get_ledger
+        from src.risk.portfolio import (
+            compute_portfolio_snapshot,
+            should_halt_portfolio,
+        )
+        led = _get_ledger()
+        if led is None:
+            _portfolio_halt_cache = (tick_ts_ms, False)
+            return False
+        snap = compute_portfolio_snapshot(led, current_prices={}, ts_ms=tick_ts_ms)
+        halt, _ = should_halt_portfolio(snap, max_drawdown_pct=PORTFOLIO_MAX_DRAWDOWN_PCT)
+        _portfolio_halt_cache = (tick_ts_ms, halt)
+        return halt
+    except Exception as e:
+        logger.warning(f"portfolio halt check failed: {e!r}")
+        _portfolio_halt_cache = (tick_ts_ms, False)
+        return False
+
+
 def _save_balance(ticker: str, strategy_name: str, balance: "PaperBalance") -> None:
     """Save balance to disk and update in-memory cache atomically.
 
@@ -1237,6 +1275,20 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                 f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book — skip entry"
             )
 
+    # Phase 13: portfolio-level halt — global drawdown cap (5% default).
+    # Cached snapshot 60s to avoid per-tick SQL aggregation.
+    _portfolio_halt = False
+    if signal.action == SignalAction.ENTER_LONG:
+        _portfolio_halt = _check_portfolio_halt(tick_ts_ms)
+        if _portfolio_halt:
+            if not hasattr(_eval_and_act, "_pf_halt_log_last"):
+                _eval_and_act._pf_halt_log_last = 0
+            if tick_ts_ms - _eval_and_act._pf_halt_log_last > 60_000:
+                logger.warning(
+                    f"[PORTFOLIO-HALT] global drawdown >= cap — all entries blocked"
+                )
+                _eval_and_act._pf_halt_log_last = tick_ts_ms
+
     # Phase 12.2 — composite entry gate (replaces the long boolean chain).
     # All blockers consolidated into a single GateVerdict. Pure decision.
     from src.paper.entry_gates import evaluate_entry_gates as _eval_gates
@@ -1249,6 +1301,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         spread_too_wide=spread_too_wide,
         regime_blocked=regime_blocked,
         liq_skip=_liq_skip_pre,
+        portfolio_halt=_portfolio_halt,
     )
 
     if signal.action == SignalAction.ENTER_LONG and _gate.allow:

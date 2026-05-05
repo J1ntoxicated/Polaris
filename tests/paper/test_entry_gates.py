@@ -17,6 +17,7 @@ def _all_clear() -> dict:
         spread_too_wide=False,
         regime_blocked=False,
         liq_skip=False,
+        portfolio_halt=False,
     )
 
 
@@ -34,6 +35,7 @@ class TestPriorityOrder:
         "field,expected_reason",
         [
             ("has_open", "has_open"),
+            ("portfolio_halt", "portfolio_halt"),
             ("daily_breached", "daily_breached"),
             ("closed_this_tick", "closed_this_tick"),
             ("in_cooldown", "in_cooldown"),

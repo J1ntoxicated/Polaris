@@ -146,7 +146,18 @@ def _runner_pid() -> int:
 
 
 def _scan_all_states() -> tuple[list[dict], list[dict]]:
-    """Return (all_closed, all_open) across every paper_state file."""
+    """Return (all_closed, all_open) across every paper position.
+
+    Phase 17: read from SQL ledger (SSOT). Falls back to JSON file scan
+    if ledger unavailable (graceful degradation).
+    """
+    # Phase 17: SQL primary
+    try:
+        return _scan_from_ledger()
+    except Exception as e:
+        # Fall back to JSON scan
+        pass
+
     closed_all, open_all = [], []
     for f in sorted(DATA_PAPER_DIR.glob("paper_state_*.json")):
         try:
@@ -160,6 +171,42 @@ def _scan_all_states() -> tuple[list[dict], list[dict]]:
         for p in d.get("open_positions", []):
             p["_strategy_file"] = name
             open_all.append(p)
+    return closed_all, open_all
+
+
+def _scan_from_ledger() -> tuple[list[dict], list[dict]]:
+    """Phase 17: query SQL ledger for all positions (SSOT)."""
+    from pathlib import Path
+    from src.persist.ledger import TradeLedger
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "polaris.sqlite"
+    if not db_path.exists():
+        raise FileNotFoundError(db_path)
+    closed_all, open_all = [], []
+    with TradeLedger(db_path) as led:
+        rows = led.conn.execute(
+            "SELECT * FROM positions"
+        ).fetchall()
+    for r in rows:
+        # Adapt SQL row to legacy dict format
+        p = {
+            "position_id": r["position_id"],
+            "ticker": r["ticker"],
+            "direction": r["direction"],
+            "entry_price": r["entry_price"],
+            "exit_price": r["exit_price"] or 0.0,
+            "size_usd": r["entry_size_usd"],
+            "open_ts_ms": r["open_ts_ms"],
+            "close_ts_ms": r["close_ts_ms"] or 0,
+            "fee_round_trip": r["fee_round_trip"],
+            "_strategy_file": (
+                r["ticker"].lower() + "_" + r["strategy_name"]
+            ),
+            "status": r["status"],
+        }
+        if r["status"] == "open":
+            open_all.append(p)
+        else:
+            closed_all.append(p)
     return closed_all, open_all
 
 

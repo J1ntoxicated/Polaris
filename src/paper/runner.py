@@ -77,13 +77,16 @@ def get_ledger_health() -> dict:
 
 def _shadow_write_balance(
     ticker: str, strategy_name: str, balance: PaperBalance, hypo_id: str | None = None,
-) -> None:
-    """Phase 9 shadow write — JSON SSOT, ledger duplicate.
+) -> bool:
+    """Phase 17: SQL ledger PRIMARY write (formerly shadow). Returns True on success.
 
-    Phase 15: failures still swallowed (trading must not stop on SQL issue),
-    but now COUNTED + LOGGED so downstream consumers can detect divergence.
-    Successive failures > 3 → log error (was just warning). After 10 failures
-    portfolio halt should treat ledger as unreliable.
+    Phase 9 history (now superseded by Phase 17):
+      - Phase 9: shadow write, JSON primary
+      - Phase 16: SQL primary read, JSON shadow read fallback
+      - Phase 17 (this): SQL primary write, JSON still written as backup
+
+    Failures still don't crash trading (returns False, JSON shadow continues).
+    Counter exposed via get_ledger_health() for portfolio halt + dashboard.
 
     hypo_id resolved lazily from REALTIME_HYPOS if not provided.
     """
@@ -91,7 +94,7 @@ def _shadow_write_balance(
     led = _get_ledger()
     if led is None:
         _shadow_write_failures += 1
-        return
+        return False
     try:
         # Resolve hypo_id if not passed
         hid = hypo_id
@@ -121,15 +124,17 @@ def _shadow_write_balance(
         _shadow_write_failures = 0
         import time as _t
         _shadow_write_last_success_ms = int(_t.time() * 1000)
+        return True
     except Exception as e:
         _shadow_write_failures += 1
         if _shadow_write_failures > 3:
             logger.error(
-                f"shadow write FAILED {_shadow_write_failures}× consecutive "
+                f"ledger write FAILED {_shadow_write_failures}× consecutive "
                 f"({hypo_id}/{ticker}): {e!r}"
             )
         else:
-            logger.warning(f"shadow write failed ({hypo_id}/{ticker}): {e!r}")
+            logger.warning(f"ledger write failed ({hypo_id}/{ticker}): {e!r}")
+        return False
 
 
 def _state_file(ticker: str, strategy_name: str, base_dir: Path | None = None) -> Path:
@@ -218,31 +223,46 @@ def _load_from_ledger(
 
 
 def save_state(ticker: str, strategy_name: str, balance: PaperBalance) -> None:
-    """JSON 저장 (machine state, P1 — vault X). Atomic write via tmp + rename (race protection)."""
+    """Phase 17: SQL primary write, JSON shadow.
+
+    Order:
+      1. SQL ledger upsert (primary, raises on failure)
+      2. JSON file atomic write (shadow — backup, human inspection)
+
+    Falls back to JSON-only if ledger disabled or fails (with warning).
+    """
+    # Phase 17: SQL primary write
+    sql_ok = _primary_write_ledger(ticker, strategy_name, balance)
+
+    # JSON shadow write (always — preserves backup + dashboard backward compat)
     path = _state_file(ticker, strategy_name)
     tmp = path.with_suffix(".json.tmp")
     raw = {
         "starting_usd": balance.starting_usd,
         "cash_usd": balance.cash_usd,
         "open_positions": [
-            {
-                **asdict(p),
-                "status": p.status.value,
-            }
+            {**asdict(p), "status": p.status.value}
             for p in balance.open_positions
         ],
         "closed_positions": [
-            {
-                **asdict(p),
-                "status": p.status.value,
-            }
+            {**asdict(p), "status": p.status.value}
             for p in balance.closed_positions
         ],
     }
     tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     tmp.replace(path)  # atomic rename (POSIX guarantee)
-    # Phase 9: shadow write to SQLite (best-effort, JSON stays primary)
-    _shadow_write_balance(ticker, strategy_name, balance)
+
+
+def _primary_write_ledger(
+    ticker: str, strategy_name: str, balance: PaperBalance,
+) -> bool:
+    """Phase 17: SQL ledger primary write. Returns True on success.
+
+    Failures still don't crash trading (fall through to JSON shadow), but
+    they're visible via get_ledger_health(). After 10+ failures, portfolio
+    halt skips (avoids blind halt on unreliable ledger).
+    """
+    return _shadow_write_balance(ticker, strategy_name, balance)
 
 
 def _daily_loss_breached(balance: PaperBalance, last_ts_ms: int) -> tuple[bool, float]:

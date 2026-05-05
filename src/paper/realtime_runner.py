@@ -1225,10 +1225,33 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                 f"[SPREAD-SKIP] {hypo['hypo_id']} {ticker} spread={_spread_repr} > 5bps"
             )
 
-    if (signal.action == SignalAction.ENTER_LONG
-            and not has_open and not daily_breached and not closed_this_tick
-            and not in_cooldown and not in_regime_pause
-            and not spread_too_wide and not regime_blocked):
+    # Phase 12.2 — pre-compute liq_cap so it joins entry gates (no longer
+    # a post-gate check). _liq_skip = book missing/empty.
+    _liq_cap_pre = 0.0
+    _liq_skip_pre = False
+    if signal.action == SignalAction.ENTER_LONG:
+        _liq_cap_pre = compute_liquidity_cap("buy", _book, max_book_fraction=0.10)
+        if _liq_cap_pre <= 0:
+            _liq_skip_pre = True
+            logger.info(
+                f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book — skip entry"
+            )
+
+    # Phase 12.2 — composite entry gate (replaces the long boolean chain).
+    # All blockers consolidated into a single GateVerdict. Pure decision.
+    from src.paper.entry_gates import evaluate_entry_gates as _eval_gates
+    _gate = _eval_gates(
+        has_open=has_open,
+        daily_breached=daily_breached,
+        closed_this_tick=closed_this_tick,
+        in_cooldown=in_cooldown,
+        in_regime_pause=in_regime_pause,
+        spread_too_wide=spread_too_wide,
+        regime_blocked=regime_blocked,
+        liq_skip=_liq_skip_pre,
+    )
+
+    if signal.action == SignalAction.ENTER_LONG and _gate.allow:
         # ── Phase 2j: Dynamic sizing (Kelly + confidence + regime + drawdown) ──
         # 1. Recent performance stats (HYPO별 last 20 closed trades)
         perf_stats = compute_recent_stats(list(balance.closed_positions), lookback=20)
@@ -1259,18 +1282,9 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.
         # Shell adds one absolute safety bound: equity × 0.30 ($5000 → $1500 max).
         hard_cap = equity * 0.30
-        # Phase 7 + Codex round-1: liquidity-aware sizing. Cap size to 10% of
-        # top-5 ask depth. liq_cap=0 (book missing/empty) → SKIP entry — book
-        # absence implies unknown liquidity, not safe liquidity. Brief WS gap
-        # is OK to wait one tick rather than enter blind.
-        _liq_cap = compute_liquidity_cap("buy", _book, max_book_fraction=0.10)
-        if _liq_cap <= 0:
-            logger.info(
-                f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book — skip entry"
-            )
-            _liq_skip = True
-        else:
-            _liq_skip = False
+        # Phase 12.2: liq_cap already pre-computed for the entry gate above.
+        # Apply it here as part of the size cap composition.
+        _liq_cap = _liq_cap_pre
         size = min(sizing.size_usd, hard_cap, balance.cash_usd, _liq_cap if _liq_cap > 0 else float("inf"))
 
         logger.info(
@@ -1278,7 +1292,8 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             f"liq_cap=${_liq_cap:.0f} regime={regime} {sizing.reason}"
         )
 
-        if size > 0 and not _liq_skip:
+        if size > 0:
+            # Phase 12.2: liq_skip already gated above; sizing is now safe.
             # Phase 6: realistic fill price for BUY (consume ask side, walk book)
             entry_fill, entry_slip_bps = compute_fill_price(
                 "buy",

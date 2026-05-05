@@ -659,15 +659,52 @@ def _get_current_prices_snapshot() -> dict[str, float]:
     return dict(_last_tick_price_per_ticker)
 
 
+def _maybe_snapshot_portfolio(tick_ts_ms: int) -> None:
+    """Phase 15 round-2 fix: portfolio snapshot write runs from tick handler
+    (independent of signal action). Was previously inside _check_portfolio_halt,
+    which only ran on ENTER_LONG → HWM stayed stale during low-signal periods.
+
+    Called every tick. Writes only every _PORTFOLIO_SNAPSHOT_INTERVAL_MS (5min).
+    Failures swallowed (paper trading must not stop on SQL issues).
+    """
+    global _last_portfolio_snapshot_ms
+    if tick_ts_ms - _last_portfolio_snapshot_ms < _PORTFOLIO_SNAPSHOT_INTERVAL_MS:
+        return
+    try:
+        from src.paper.runner import _get_ledger
+        from src.risk.portfolio import compute_portfolio_snapshot
+        led = _get_ledger()
+        if led is None:
+            return
+        prices = _get_current_prices_snapshot()
+        snap = compute_portfolio_snapshot(led, current_prices=prices, ts_ms=tick_ts_ms)
+        led.insert_portfolio_snapshot(
+            ts_ms=tick_ts_ms,
+            total_equity_usd=snap.total_equity_usd,
+            total_open=snap.total_open_count,
+            total_realized=snap.total_realized_usd,
+            drawdown_pct=snap.drawdown_pct,
+            active_hypos=[h["hypo_id"] for h in REALTIME_HYPOS],
+        )
+        _last_portfolio_snapshot_ms = tick_ts_ms
+        logger.info(
+            f"[PORTFOLIO-SNAP] equity=${snap.total_equity_usd:.0f} "
+            f"open={snap.total_open_count} dd={snap.drawdown_pct*100:.2f}% "
+            f"hwm=${snap.high_water_mark_usd:.0f}"
+        )
+    except Exception as e:
+        logger.warning(f"portfolio snapshot write failed: {e!r}")
+
+
 def _check_portfolio_halt(tick_ts_ms: int) -> bool:
     """Return True if portfolio drawdown >= cap (cached 60s).
 
     Phase 15 fix:
       - Uses _last_tick_price_per_ticker for open-position MTM (was {})
-      - Writes portfolio_snapshots every 5min so HWM rolls forward
-      - Shadow write failures still swallowed but at least surface as warning
+      - Snapshot WRITE moved out (see _maybe_snapshot_portfolio) so HWM
+        rolls forward independent of signal action.
     """
-    global _portfolio_halt_cache, _last_portfolio_snapshot_ms
+    global _portfolio_halt_cache
     last_ts, last_halt = _portfolio_halt_cache
     if tick_ts_ms - last_ts < _PORTFOLIO_HALT_REFRESH_MS:
         return last_halt
@@ -677,8 +714,6 @@ def _check_portfolio_halt(tick_ts_ms: int) -> bool:
             compute_portfolio_snapshot,
             should_halt_portfolio,
         )
-        # Phase 15: skip halt if ledger unreliable (>10 consecutive write failures
-        # → ledger can't be trusted to reflect reality; halt would be blind).
         health = get_ledger_health()
         if health["consecutive_failures"] > 10:
             logger.warning(
@@ -696,22 +731,6 @@ def _check_portfolio_halt(tick_ts_ms: int) -> bool:
         prices = _get_current_prices_snapshot()
         snap = compute_portfolio_snapshot(led, current_prices=prices, ts_ms=tick_ts_ms)
         halt, _ = should_halt_portfolio(snap, max_drawdown_pct=PORTFOLIO_MAX_DRAWDOWN_PCT)
-
-        # Phase 15: write portfolio snapshot every 5 min (rolls HWM forward)
-        if tick_ts_ms - _last_portfolio_snapshot_ms >= _PORTFOLIO_SNAPSHOT_INTERVAL_MS:
-            try:
-                led.insert_portfolio_snapshot(
-                    ts_ms=tick_ts_ms,
-                    total_equity_usd=snap.total_equity_usd,
-                    total_open=snap.total_open_count,
-                    total_realized=snap.total_realized_usd,
-                    drawdown_pct=snap.drawdown_pct,
-                    active_hypos=[h["hypo_id"] for h in REALTIME_HYPOS],
-                )
-                _last_portfolio_snapshot_ms = tick_ts_ms
-            except Exception as e:
-                logger.warning(f"portfolio snapshot write failed: {e!r}")
-
         _portfolio_halt_cache = (tick_ts_ms, halt)
         return halt
     except Exception as e:
@@ -1532,6 +1551,9 @@ def make_tick_handler() -> Callable[[str, dict], None]:
             _update_price_history_5s(inst_id, tick_ts, tick_price)
         # Phase 15 (P0-2 fix): record latest price for portfolio MTM
         _record_tick_price(inst_id, tick_price)
+        # Phase 15 round-2 fix: snapshot write from tick handler (independent
+        # of signal action) — ensures HWM rolls forward even in low-signal periods.
+        _maybe_snapshot_portfolio(tick_ts)
         # Auto-deprecate: frequency trigger check every 5min (fast_fail/loss_cap inline)
         global _deprecate_last_check_s
         now_s = time.time()

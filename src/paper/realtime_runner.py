@@ -880,13 +880,17 @@ def _check_portfolio_exits(tick_ts_ms: int) -> None:
         return
     pm = get_position_manager()
     prices = _get_current_prices_snapshot()
-    last_actions = {sname: act for (_t, sname), act in _strategy_last_action.items()}
-    events = pm.check_exits(prices, ts_ms=tick_ts_ms, last_signal_actions=last_actions)
+    # Phase 20.7 (Codex P1 fix): pass per-(ticker, strategy) actions so
+    # SignalReversal isolates between tickers running same strategy.
+    events = pm.check_exits(
+        prices, ts_ms=tick_ts_ms,
+        last_signal_actions=dict(_strategy_last_action),
+    )
     for ev in events:
-        # Update cooldown maps so re-entry blocks
+        # Phase 20.7 — broker SELL was already placed in PositionManager._execute_exit.
+        # Here we just update cooldown maps + audit log + legacy state sync.
         _last_close_ms[(ev.ticker, ev.strategy_name)] = tick_ts_ms
         _last_close_ms_ticker[ev.ticker] = tick_ts_ms
-        # Audit log
         logger.info(
             f"[CLOSE] {ev.strategy_name} {ev.ticker} @{ev.exit_price:.6f} "
             f"reason={ev.exit_reason} net=${ev.realized_net_usd:+.2f} frac={ev.fraction:.2f}"

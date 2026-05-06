@@ -52,14 +52,15 @@ class PositionManager:
         self,
         current_prices: dict[str, float],
         ts_ms: int,
-        last_signal_actions: dict[str, str] | None = None,
+        last_signal_actions: dict[tuple[str, str], str] | None = None,
     ) -> list[ExitEvent]:
         """Evaluate all open contributions; close those whose exit fires.
 
         current_prices: {ticker: latest tick price}
         ts_ms: tick timestamp
-        last_signal_actions: optional {strategy_name: latest_action} for
-                             SignalReversal exit strategies.
+        last_signal_actions: optional {(ticker, strategy_name): latest_action}
+                             for SignalReversal — per-ticker isolated to avoid
+                             cross-ticker false EXIT triggers.
 
         Returns list of ExitEvent (one per fire). Side effects on self.portfolio.
         """
@@ -81,7 +82,11 @@ class PositionManager:
             for contrib in list(pos.contributions):
                 if contrib.is_closed:
                     continue
-                last_action = last_signal_actions.get(contrib.strategy_name)
+                # Phase 20.7 (Codex P1 fix): isolate by (ticker, strategy)
+                # so cross-ticker EXIT doesn't bleed into other contributions.
+                last_action = last_signal_actions.get(
+                    (ticker, contrib.strategy_name)
+                )
                 market = MarketSnapshot(
                     ticker=ticker,
                     price=price,
@@ -112,10 +117,16 @@ class PositionManager:
         exit_price: float,
         ts_ms: int,
     ) -> "ExitEvent | None":
-        """Apply decision via portfolio.partial_close. Track partial_tp levels."""
+        """Apply decision via portfolio.partial_close + broker SELL.
+
+        Phase 20.7 (Codex P0 fix): broker.place_order(SELL) called BEFORE
+        portfolio.partial_close so live exchange position is reduced. For
+        PaperBroker this is a noop simulation; for OKXBroker it sends real
+        sell order. Without this, live OKX position grows unbounded as
+        Polaris's internal ledger drains.
+        """
         # If PartialTP fired, mark the level so it doesn't re-fire next tick
         if "partial_tp" in decision.reason:
-            # Parse level from reason (e.g. "partial_tp:0.50%×33%")
             try:
                 level_str = decision.reason.split(":")[1].split("%")[0]
                 level_pct = float(level_str) / 100.0
@@ -125,9 +136,37 @@ class PositionManager:
             except (IndexError, ValueError):
                 pass
 
+        # Phase 20.7 — execute broker SELL (live exchange close).
+        # Exit notional: base_qty × current_price × fraction (USD value at exit)
+        exit_notional_usd = (
+            contrib.base_qty * exit_price * decision.fraction
+        )
+        try:
+            from src.exec.broker import OrderRequest, OrderSide, OrderStatus, OrderType
+            from src.paper.realtime_runner import get_broker
+            _result = get_broker().place_order(OrderRequest(
+                side=OrderSide.SELL,
+                ticker=contrib.ticker,
+                size_usd=exit_notional_usd,
+                order_type=OrderType.MARKET,
+                client_order_id=f"{contrib.contribution_id[:24]}exit",
+            ))
+            if _result.status == OrderStatus.FILLED and _result.avg_fill_price > 0:
+                # Use broker's actual fill price for partial_close
+                exit_price_actual = _result.avg_fill_price
+            else:
+                logger.warning(
+                    f"[EXIT-BROKER-FAIL] {contrib.ticker} {_result.error_msg} "
+                    f"— using tick price for ledger settlement"
+                )
+                exit_price_actual = exit_price
+        except Exception as e:
+            logger.warning(f"[EXIT-BROKER-ERR] {contrib.ticker}: {e!r}")
+            exit_price_actual = exit_price
+
         closed = self.portfolio.partial_close(
             contribution_id=contrib.contribution_id,
-            exit_price=exit_price,
+            exit_price=exit_price_actual,
             ts_ms=ts_ms,
             reason=decision.reason,
             fraction=decision.fraction,
@@ -145,7 +184,7 @@ class PositionManager:
             strategy_name=contrib.strategy_name,
             exit_reason=decision.reason,
             fraction=decision.fraction,
-            exit_price=exit_price,
+            exit_price=exit_price_actual,
             realized_net_usd=closed.realized_net_usd,
             ts_ms=ts_ms,
         )

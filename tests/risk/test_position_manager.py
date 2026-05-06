@@ -202,7 +202,7 @@ class TestSignalReversal:
         )
         events = manager.check_exits(
             {"BTC-USDT": 80000}, ts_ms=2,
-            last_signal_actions={"vb": "EXIT"},
+            last_signal_actions={("BTC-USDT", "vb"): "EXIT"},
         )
         assert len(events) == 1
         assert "signal_exit" in events[0].exit_reason
@@ -214,9 +214,32 @@ class TestSignalReversal:
         )
         events = manager.check_exits(
             {"BTC-USDT": 80000}, ts_ms=2,
-            last_signal_actions={"vb": "HOLD"},
+            last_signal_actions={("BTC-USDT", "vb"): "HOLD"},
         )
         assert events == []
+
+    def test_per_ticker_isolation(self, portfolio, manager):
+        """Phase 20.7 (P1 fix) — same strategy, different tickers, independent."""
+        portfolio.process_entry(
+            "BTC-USDT", "vb", "X", 100, 80000, 1,
+            (SignalReversal("vb", min_hold_ms=0),),
+        )
+        portfolio.process_entry(
+            "ETH-USDT", "vb", "X", 100, 2000, 1,
+            (SignalReversal("vb", min_hold_ms=0),),
+        )
+        # BTC strategy=vb has EXIT; ETH strategy=vb has HOLD
+        events = manager.check_exits(
+            {"BTC-USDT": 80000, "ETH-USDT": 2000}, ts_ms=2,
+            last_signal_actions={
+                ("BTC-USDT", "vb"): "EXIT",
+                ("ETH-USDT", "vb"): "HOLD",
+            },
+        )
+        # Only BTC closes; ETH stays open
+        assert len(events) == 1
+        assert events[0].ticker == "BTC-USDT"
+        assert portfolio.get_position("ETH-USDT") is not None
 
 
 # ─── Realized PnL accumulates correctly ─────────────────────────────────────

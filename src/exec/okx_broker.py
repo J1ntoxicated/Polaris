@@ -302,6 +302,34 @@ class OKXBroker(Broker):
                     continue
         return out
 
+    def get_positions(self) -> list[dict]:
+        """GET /api/v5/account/positions — returns list of position dicts.
+
+        For SPOT, OKX returns each non-zero base ccy as a "position" via
+        /asset/balances. For SPOT positions on demo, prefer
+        /asset/balances (more accurate for SPOT base qty). Returns:
+            [{ccy: "BTC", qty: 0.05, ...}, ...]
+        """
+        if not _live_armed():
+            return []
+        try:
+            resp = self._request("GET", "/api/v5/asset/balances")
+        except requests.RequestException:
+            return []
+        if str(resp.get("code", "")) != "0":
+            return []
+        out: list[dict] = []
+        for d in resp.get("data") or []:
+            ccy = d.get("ccy")
+            try:
+                bal = float(d.get("bal") or 0)
+                avail = float(d.get("availBal") or 0)
+            except (ValueError, TypeError):
+                continue
+            if ccy and bal > 0:
+                out.append({"ccy": ccy, "bal": bal, "avail": avail})
+        return out
+
 
 def _rejected(order_id: str, error_msg: str, ts_ms: int) -> OrderResult:
     """Helper — build a uniform REJECTED OrderResult."""

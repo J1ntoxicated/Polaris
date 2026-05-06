@@ -59,7 +59,7 @@ def _query_hypo_stats() -> list[dict]:
 
 def render(W: int, n: int = 12) -> list[str]:
     rows = _query_hypo_stats()
-    lines: list[str] = [hline("REALTIME HYPOs — Per-Strategy KPI", W, POLARIS_BLUE)]
+    lines: list[str] = [hline("STRATEGY PERFORMANCE (lifetime KPI)", W, POLARIS_BLUE)]
     hdr = (
         f"  {c('HYPO', P_DIM):<22} {c('STRATEGY', P_DIM):<22} "
         f"{c('OPEN', P_DIM):>5} {c('CLOSED', P_DIM):>7} "

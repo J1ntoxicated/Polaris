@@ -33,21 +33,18 @@ from src.dashboard.sections.live_log import render as render_live_log
 
 REFRESH_INTERVAL_S = 1.0
 
+# Jin mandate: 폭/줄수 FIXED. Layout breaks if these move.
+# Override via env if absolutely needed.
+W_FIXED = int(os.environ.get("POLARIS_DASH_W", "180"))
+H_FIXED = int(os.environ.get("POLARIS_DASH_H", "50"))
+
 
 def _get_W() -> int:
-    try:
-        w, _ = os.get_terminal_size()
-        return max(140, w)
-    except Exception:
-        return 200
+    return W_FIXED
 
 
 def _get_H() -> int:
-    try:
-        _, h = os.get_terminal_size()
-        return max(40, h - 1)
-    except Exception:
-        return 60
+    return H_FIXED
 
 
 def _render_footer(W: int, tick: int) -> str:
@@ -63,29 +60,47 @@ def _render_footer(W: int, tick: int) -> str:
     return pad(body, W)
 
 
+def _fit(rows: list[str], target: int, W: int) -> list[str]:
+    """Strict row count — pad with empty or truncate. Like legacy fit_rows."""
+    if len(rows) >= target:
+        return rows[:target]
+    return rows + [pad("", W)] * (target - len(rows))
+
+
 def render_full(tick: int = 0) -> str:
-    """Layout — log compressed to 3 rows (heartbeat only).
-    Bulk = positions / PM / realtime HYPOs.
+    """Layout — STRICT 180×50 (Jin mandate). Sums to exactly H rows.
+
+    Row budget (H=50):
+      HEADER       4
+      POSITIONS   20  (bulk content)
+      AUTO MGR     9
+      STRATEGIES  12
+      LIVE LOG     4  (1 hline + 3 heartbeat rows)
+      FOOTER       1
+      ─────────  ──
+      TOTAL       50
     """
     W = _get_W()
     H = _get_H()
 
     HEADER_H = 4
-    LOG_H = 4   # 1 hline + 3 rows
+    PM_H = 9
+    HYPOS_H = 12
+    LOG_H = 4
     FOOTER_H = 1
-
-    # Positions absorbs available space (bulk content)
-    fixed = HEADER_H + LOG_H + FOOTER_H + 9 + 12  # PM + Realtime
-    pos_h = max(8, H - fixed)
+    POS_H = H - (HEADER_H + PM_H + HYPOS_H + LOG_H + FOOTER_H)
+    if POS_H < 8:
+        POS_H = 8
 
     out: list[str] = []
-    out.extend(render_header(W, tick))                       # 4
-    out.extend(render_positions(W, n=pos_h))                  # var (bulk)
-    out.extend(render_pm_activity(W, n=9))                    # 9
-    out.extend(render_realtime_hypos(W, n=12))                # 12
-    out.extend(render_live_log(W, n=LOG_H))                   # 4 (1 hline + 3 rows)
-    out.append(_render_footer(W, tick))                       # 1
-    return "\n".join(out)
+    out.extend(_fit(render_header(W, tick), HEADER_H, W))
+    out.extend(_fit(render_positions(W, n=POS_H), POS_H, W))
+    out.extend(_fit(render_pm_activity(W, n=PM_H), PM_H, W))
+    out.extend(_fit(render_realtime_hypos(W, n=HYPOS_H), HYPOS_H, W))
+    out.extend(_fit(render_live_log(W, n=LOG_H), LOG_H, W))
+    out.append(_render_footer(W, tick))
+    # Strict total — never exceed H
+    return "\n".join(out[:H])
 
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

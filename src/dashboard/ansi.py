@@ -276,9 +276,10 @@ def hline(label: str, w: int, color: str = None, label_color: str = None) -> str
     col = color if color else POLARIS_BLUE
     lcol = label_color if label_color else P_GRY
     if label:
-        lbl = f" {label} "  # plain label, no ✦ decoration
-        side = max(3, (w - len(lbl)) // 2)
-        rest = w - side - len(lbl)
+        lbl = f" {label} "
+        lbl_w = vlen(lbl)  # CJK-aware
+        side = max(3, (w - lbl_w) // 2)
+        rest = w - side - lbl_w
         return c(HL * side, col) + c(lbl, lcol) + c(HL * max(0, rest), col)
     return c(HL * w, col)
 

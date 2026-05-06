@@ -842,11 +842,25 @@ def _write_portfolio_live_json(tick_ts_ms: int) -> None:
         if broker is not None and broker.is_live:
             broker_mode = "DEMO" if _os.environ.get("POLARIS_OKX_DEMO", "1") == "1" else "REAL"
 
+        # Phase 26: include latest reconcile result in live JSON
+        recon_dict = {}
+        if _last_reconcile_result is not None:
+            r = _last_reconcile_result
+            recon_dict = {
+                "ts_ms": r.ts_ms,
+                "status": r.sync_status,
+                "cash_drift_usd": r.cash_drift_usd,
+                "polaris_pos": r.position_count_polaris,
+                "broker_pos": r.position_count_broker,
+                "summary": r.summary,
+            }
+
         snap = {
             "ts_ms": tick_ts_ms,
             "starting_cash": portfolio.starting_cash,
             "cash": portfolio.cash,
             "equity": equity,
+            "reconcile": recon_dict,
             "hwm": _portfolio_hwm_usd,
             "drawdown_pct": (
                 (_portfolio_hwm_usd - equity) / _portfolio_hwm_usd
@@ -1483,10 +1497,43 @@ def make_tick_handler() -> Callable[[str, dict], None]:
                 _last_live_json_write_ms = tick_ts
             except Exception as e:
                 logger.warning(f"live json write err: {e!r}")
+
+        # Phase 26: reconcile Polaris portfolio vs OKX demo (~5min cadence)
+        try:
+            _maybe_reconcile(tick_ts)
+        except Exception as e:
+            logger.warning(f"reconcile err: {e!r}")
     return handler
 
 
 _last_live_json_write_ms: int = 0
+_last_reconcile_ms: int = 0
+_RECONCILE_INTERVAL_MS: int = 300_000  # 5 min
+_last_reconcile_result = None  # type: ignore[var-annotated]
+
+
+def _maybe_reconcile(tick_ts_ms: int) -> None:
+    """Phase 26 — periodic Polaris ↔ broker reconciliation.
+
+    Compares portfolio cash + base_qty per ticker to broker's actual
+    balance + asset balances. Logs DRIFT on mismatch.
+    """
+    global _last_reconcile_ms, _last_reconcile_result
+    if tick_ts_ms - _last_reconcile_ms < _RECONCILE_INTERVAL_MS:
+        return
+    _last_reconcile_ms = tick_ts_ms
+    try:
+        from src.risk.reconciler import reconcile
+        result = reconcile(get_portfolio(), get_broker(), ts_ms=tick_ts_ms)
+        _last_reconcile_result = result
+        if result.sync_status == "DRIFT":
+            logger.warning(f"[RECONCILE-DRIFT] {result.summary}")
+        elif result.sync_status == "OK":
+            logger.info(f"[RECONCILE] {result.summary}")
+        elif result.sync_status == "ERROR":
+            logger.warning(f"[RECONCILE-ERROR] {result.summary}")
+    except Exception as e:
+        logger.warning(f"[RECONCILE] failed: {e!r}")
 
 
 def _run_pm_cycle(tick_ts_ms: int) -> None:

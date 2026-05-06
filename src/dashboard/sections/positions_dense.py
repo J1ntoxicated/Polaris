@@ -212,7 +212,7 @@ def render(W: int, n: int = 18) -> list[str]:
     snap = _read_live()
     groups = snap.get("position_groups", [])
 
-    lines: list[str] = [hline("POSITIONS — LIVE (per-strategy contributions)", W, POLARIS_BLUE)]
+    lines: list[str] = [hline("OPEN POSITIONS (per-strategy slice)", W, POLARIS_BLUE)]
     lines.append(pad(_build_header(cw), W))
 
     if not groups:

@@ -21,7 +21,7 @@ def render(W: int, n: int = 9) -> list[str]:
     snap = _read_live()
     pm = snap.get("pm_stats", {})
 
-    lines: list[str] = [hline("PM ORCHESTRATOR — ACTIVE CAPITAL ALLOCATION", W, POLARIS_BLUE)]
+    lines: list[str] = [hline("AUTO MANAGER — HOLD / CLOSE / ROTATE / ADD", W, POLARIS_BLUE)]
 
     # Cycle counters
     n_eval = pm.get("n_evaluated", 0)
@@ -31,7 +31,7 @@ def render(W: int, n: int = 9) -> list[str]:
     n_add = pm.get("n_adds", 0)
 
     cycle_row = (
-        f"  {c('CYCLE', P_DIM)} "
+        f"  {c('LAST CYCLE', P_DIM)} "
         f"eval={c(str(n_eval), P_WHT + B)} "
         f"hold={c(str(n_hold), P_GRY)} "
         f"close={c(str(n_close), P_YLW)} "
@@ -44,13 +44,12 @@ def render(W: int, n: int = 9) -> list[str]:
     opps = pm.get("top_opportunities", [])
     if opps:
         opp_hdr = (
-            f"  {c('TOP OPPORTUNITIES', P_DIM)} "
-            f"({c(str(len(opps)), P_WHT + B)} ranked)"
+            f"  {c('TOP OPPORTUNITIES', P_DIM)} ({c(str(len(opps)), P_WHT + B)} candidates)"
         )
         lines.append(pad(opp_hdr, W))
         col_hdr = (
             f"    {c('TICKER', P_DIM):<14} {c('STRATEGY', P_DIM):<22} "
-            f"{c('CONF', P_DIM):>7} {c('EV%', P_DIM):>9}"
+            f"{c('CONF', P_DIM):>7} {c('ER%', P_DIM):>9}"
         )
         lines.append(pad(col_hdr, W))
         for o in opps[:5]:

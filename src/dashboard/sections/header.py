@@ -48,7 +48,7 @@ def render(W: int, tick: int = 0) -> list[str]:
 
     # Row 0: title
     star = c(STAR, POLARIS_BLUE + B)
-    title = f"{star} {c('POLARIS', P_WHT + B)} {c('북극성', P_GRY)} {c('— Ops Dashboard', P_DIM)}"
+    title = f"{star} {c('POLARIS', P_WHT + B)} {c('— Ops Dashboard', P_DIM)}"
     age_lbl = (
         c(" LIVE", P_GRN + B) if age_s < 60 and age_s >= 0
         else c(" STALE", P_YLW) if age_s < 300
@@ -110,13 +110,27 @@ def render(W: int, tick: int = 0) -> list[str]:
     vdiag = velocity.get("diagnosis", "")
     diag_color = P_RED if vdiag and vdiag != "OK" else P_GRN
 
+    # Reconcile status (Phase 26)
+    recon = snap.get("reconcile", {})
+    recon_status = recon.get("status", "—")
+    recon_color = (
+        P_GRN + B if recon_status == "OK"
+        else P_RED + B if recon_status in ("DRIFT", "ERROR")
+        else P_DIM
+    )
+    recon_str = c(recon_status, recon_color)
+    if recon_status in ("DRIFT", "OK"):
+        cdrift = recon.get("cash_drift_usd", 0)
+        recon_str += c(f" Δ${cdrift:+.2f}", P_DIM)
+
     row2 = pad(
         f"  {c('DAILY 0.5%', P_DIM)} target=${target_usd:.2f} "
         f"actual={c(f'${actual:+.2f}', P_GRN if actual >= 0 else P_RED)} "
         f"({c(f'{progress:+.1f}%', prog_color)}) trades={n_today}    "
         f"{c('VELOCITY', P_DIM)} idle={idle:.0f}% turnover={turnover} "
         f"{c(vdiag or 'OK', diag_color)}    "
-        f"{c('HYPO', P_DIM)} {c(str(len(active_hypos)), P_WHT + B)}={','.join(h.replace('HYPO-', '') for h in active_hypos[:6])}",
+        f"{c('SYNC', P_DIM)} {recon_str}    "
+        f"{c('HYPO', P_DIM)} {c(str(len(active_hypos)), P_WHT + B)}={','.join(h.replace('HYPO-', '') for h in active_hypos[:5])}",
         W,
     )
 

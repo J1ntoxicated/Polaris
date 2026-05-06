@@ -171,19 +171,27 @@ class TimeBasedHold(ExitStrategy):
 
 @dataclass(frozen=True)
 class SignalReversal(ExitStrategy):
-    """Close when source strategy signal flips (e.g. ENTER_LONG → EXIT or HOLD)."""
+    """Close when source strategy signal flips (e.g. ENTER_LONG → EXIT or HOLD).
+
+    min_hold_ms: don't fire within first N milliseconds (Codex Round 4 fix —
+    flip-flop fee bleed prevention. Default 90s matches MIN_HOLD_MS).
+    """
     strategy_name: str
+    min_hold_ms: int = 90_000  # 90s minimum hold before signal_exit allowed
     name: str = "signal_reversal"
 
     def should_exit(
         self, entry_price: float, size_usd: float, open_ts_ms: int,
         market: MarketSnapshot,
     ) -> ExitDecision:
-        if market.last_signal_action == "EXIT":
-            return ExitDecision(
-                True, f"signal_exit:{self.strategy_name}", fraction=1.0,
-            )
-        return ExitDecision(False, "")
+        if market.last_signal_action != "EXIT":
+            return ExitDecision(False, "")
+        if market.ts_ms - open_ts_ms < self.min_hold_ms:
+            # Within min hold — block signal_exit
+            return ExitDecision(False, "")
+        return ExitDecision(
+            True, f"signal_exit:{self.strategy_name}", fraction=1.0,
+        )
 
 
 @dataclass(frozen=True)

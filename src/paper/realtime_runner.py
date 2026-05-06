@@ -124,6 +124,10 @@ _deprecate_last_check_s: float = 0.0
 # Track HYPO started_at timestamps (ms) — populated on first trade or runner start
 _hypo_started_at_ms: dict[str, int] = {}
 # Funding rate cache — updated by funding rate poll task
+# Phase 20.5: track each (ticker, strategy_name) latest signal action — used
+# by SignalReversal exit strategies inside PositionManager.check_exits.
+_strategy_last_action: dict[tuple[str, str], str] = {}
+
 _funding_rate_cache: dict[str, float | None] = {}  # symbol -> funding_8h rate
 _FUNDING_POLL_INTERVAL_S: float = 60.0
 
@@ -622,6 +626,49 @@ def _load_balance(ticker: str, strategy_name: str, starting_usd: float) -> "Pape
 _broker_singleton: Broker | None = None
 
 
+# Phase 20.5: PortfolioManager + PositionManager singletons —
+# replaces 270 PaperBalance state files with single account portfolio.
+_portfolio_singleton = None  # type: ignore[var-annotated]
+_position_manager_singleton = None  # type: ignore[var-annotated]
+PORTFOLIO_STARTING_USD: float = float(_os.environ.get("POLARIS_PORTFOLIO_USD", "5000"))
+
+
+def get_portfolio():
+    """Lazy PortfolioManager singleton — single account, multi-strategy."""
+    global _portfolio_singleton
+    if _portfolio_singleton is None:
+        from src.risk.portfolio_manager import PortfolioConfig, PortfolioManager
+        cfg = PortfolioConfig(
+            max_per_ticker_usd=float(_os.environ.get("POLARIS_MAX_PER_TICKER_USD", "1500")),
+        )
+        _portfolio_singleton = PortfolioManager(
+            starting_cash_usd=PORTFOLIO_STARTING_USD,
+            config=cfg,
+        )
+        logger.info(
+            f"[PORTFOLIO] initialized cash=${PORTFOLIO_STARTING_USD:.0f} "
+            f"per_ticker_cap=${cfg.max_per_ticker_usd:.0f}"
+        )
+    return _portfolio_singleton
+
+
+def get_position_manager():
+    """Lazy PositionManager singleton — wraps portfolio for exit monitoring."""
+    global _position_manager_singleton
+    if _position_manager_singleton is None:
+        from src.risk.position_manager import PositionManager
+        _position_manager_singleton = PositionManager(get_portfolio())
+        logger.info("[POSITION-MGR] initialized")
+    return _position_manager_singleton
+
+
+def reset_portfolio_singletons() -> None:
+    """Test helper — drop both singletons."""
+    global _portfolio_singleton, _position_manager_singleton
+    _portfolio_singleton = None
+    _position_manager_singleton = None
+
+
 def get_broker() -> Broker:
     """Lazy broker singleton — auto-selects based on env.
 
@@ -676,83 +723,193 @@ def _get_current_prices_snapshot() -> dict[str, float]:
 
 
 def _maybe_snapshot_portfolio(tick_ts_ms: int) -> None:
-    """Phase 15 round-2 fix: portfolio snapshot write runs from tick handler
-    (independent of signal action). Was previously inside _check_portfolio_halt,
-    which only ran on ENTER_LONG → HWM stayed stale during low-signal periods.
+    """Phase 20.5 — snapshot now uses PortfolioManager state directly.
 
-    Called every tick. Writes only every _PORTFOLIO_SNAPSHOT_INTERVAL_MS (5min).
-    Failures swallowed (paper trading must not stop on SQL issues).
+    Writes to SQL ledger every 5min for dashboard / audit.
     """
     global _last_portfolio_snapshot_ms
     if tick_ts_ms - _last_portfolio_snapshot_ms < _PORTFOLIO_SNAPSHOT_INTERVAL_MS:
         return
     try:
-        from src.paper.runner import _get_ledger
-        from src.risk.portfolio import compute_portfolio_snapshot
-        led = _get_ledger()
-        if led is None:
-            return
+        portfolio = get_portfolio()
         prices = _get_current_prices_snapshot()
-        snap = compute_portfolio_snapshot(led, current_prices=prices, ts_ms=tick_ts_ms)
-        led.insert_portfolio_snapshot(
-            ts_ms=tick_ts_ms,
-            total_equity_usd=snap.total_equity_usd,
-            total_open=snap.total_open_count,
-            total_realized=snap.total_realized_usd,
-            drawdown_pct=snap.drawdown_pct,
-            active_hypos=[h["hypo_id"] for h in REALTIME_HYPOS],
+        equity = portfolio.equity(prices)
+        global _portfolio_hwm_usd
+        _portfolio_hwm_usd = max(_portfolio_hwm_usd, equity)
+        drawdown = (
+            (_portfolio_hwm_usd - equity) / _portfolio_hwm_usd
+            if _portfolio_hwm_usd > 0 else 0.0
         )
+        # Optional ledger persistence (not authoritative for halt)
+        try:
+            from src.paper.runner import _get_ledger
+            led = _get_ledger()
+            if led is not None:
+                led.insert_portfolio_snapshot(
+                    ts_ms=tick_ts_ms,
+                    total_equity_usd=equity,
+                    total_open=portfolio.n_open_contributions,
+                    total_realized=portfolio.realized_pnl_usd(),
+                    drawdown_pct=drawdown,
+                    active_hypos=[h["hypo_id"] for h in REALTIME_HYPOS],
+                )
+        except Exception:
+            pass
         _last_portfolio_snapshot_ms = tick_ts_ms
         logger.info(
-            f"[PORTFOLIO-SNAP] equity=${snap.total_equity_usd:.0f} "
-            f"open={snap.total_open_count} dd={snap.drawdown_pct*100:.2f}% "
-            f"hwm=${snap.high_water_mark_usd:.0f}"
+            f"[PORTFOLIO-SNAP] equity=${equity:.0f} cash=${portfolio.cash:.0f} "
+            f"open={portfolio.n_open_contributions} dd={drawdown*100:.2f}% "
+            f"hwm=${_portfolio_hwm_usd:.0f} realized=${portfolio.realized_pnl_usd():+.2f}"
         )
     except Exception as e:
         logger.warning(f"portfolio snapshot write failed: {e!r}")
 
 
 def _check_portfolio_halt(tick_ts_ms: int) -> bool:
-    """Return True if portfolio drawdown >= cap (cached 60s).
+    """Phase 20.5 — drawdown halt from PortfolioManager (single account state).
 
-    Phase 15 fix:
-      - Uses _last_tick_price_per_ticker for open-position MTM (was {})
-      - Snapshot WRITE moved out (see _maybe_snapshot_portfolio) so HWM
-        rolls forward independent of signal action.
+    Uses PortfolioManager's own equity vs starting_cash — no longer reads
+    SQL ledger aggregation (which was per-strategy balances summing to
+    inflated virtual capital). True portfolio drawdown.
+
+    Cached 60s.
     """
     global _portfolio_halt_cache
     last_ts, last_halt = _portfolio_halt_cache
     if tick_ts_ms - last_ts < _PORTFOLIO_HALT_REFRESH_MS:
         return last_halt
     try:
-        from src.paper.runner import _get_ledger, get_ledger_health
-        from src.risk.portfolio import (
-            compute_portfolio_snapshot,
-            should_halt_portfolio,
-        )
-        health = get_ledger_health()
-        if health["consecutive_failures"] > 10:
-            logger.warning(
-                f"[PORTFOLIO-HALT] ledger unreliable ({health['consecutive_failures']} "
-                "consecutive failures) — skipping halt check"
-            )
-            _portfolio_halt_cache = (tick_ts_ms, False)
-            return False
-
-        led = _get_ledger()
-        if led is None:
-            _portfolio_halt_cache = (tick_ts_ms, False)
-            return False
-
+        portfolio = get_portfolio()
         prices = _get_current_prices_snapshot()
-        snap = compute_portfolio_snapshot(led, current_prices=prices, ts_ms=tick_ts_ms)
-        halt, _ = should_halt_portfolio(snap, max_drawdown_pct=PORTFOLIO_MAX_DRAWDOWN_PCT)
+        equity = portfolio.equity(prices)
+        # HWM tracking — kept in module-level cache (not ledger snapshots)
+        global _portfolio_hwm_usd
+        _portfolio_hwm_usd = max(_portfolio_hwm_usd, equity)
+        drawdown = (
+            (_portfolio_hwm_usd - equity) / _portfolio_hwm_usd
+            if _portfolio_hwm_usd > 0 else 0.0
+        )
+        halt = drawdown >= PORTFOLIO_MAX_DRAWDOWN_PCT
         _portfolio_halt_cache = (tick_ts_ms, halt)
         return halt
     except Exception as e:
         logger.warning(f"portfolio halt check failed: {e!r}")
         _portfolio_halt_cache = (tick_ts_ms, False)
         return False
+
+
+# Module-level HWM (in-memory, resets with runner restart)
+_portfolio_hwm_usd: float = 0.0
+
+
+def _sync_legacy_state(
+    ticker: str, strategy_name: str, hypo: dict, portfolio,
+) -> None:
+    """Phase 20.5 backward-compat — build per-(ticker, strategy) PaperBalance
+    from portfolio state and persist via legacy save_state.
+
+    Maintains JSON + SQL ledger compat for dashboard, daily_paper_runner,
+    and existing tests. Does NOT change portfolio truth — pure mirror.
+    """
+    try:
+        from src.paper.state import PaperBalance, Position as _P, PositionStatus as _PS
+        pos_aggr = portfolio.get_position(ticker)
+        opens = []
+        if pos_aggr is not None:
+            for c in pos_aggr.contributions:
+                if c.is_closed or c.strategy_name != strategy_name:
+                    continue
+                opens.append(_P(
+                    position_id=c.contribution_id, ticker=ticker, direction=1,
+                    entry_price=c.entry_price, size_usd=c.size_usd,
+                    open_ts_ms=c.open_ts_ms, fee_round_trip=c.fee_round_trip,
+                ))
+        # Closed contributions for this (ticker, strategy)
+        closes = []
+        for c in portfolio.closed_contributions():
+            if c.ticker != ticker or c.strategy_name != strategy_name:
+                continue
+            if c.exit_price <= 0:
+                continue
+            closes.append(_P(
+                position_id=c.contribution_id, ticker=ticker, direction=1,
+                entry_price=c.entry_price, size_usd=c.size_usd,
+                open_ts_ms=c.open_ts_ms, close_ts_ms=c.close_ts_ms,
+                exit_price=c.exit_price, fee_round_trip=c.fee_round_trip,
+                status=_PS.CLOSED,
+            ))
+        bal = PaperBalance(
+            starting_usd=hypo.get("starting_usd", 5000.0),
+            cash_usd=portfolio.cash,  # shared cash — informational
+            open_positions=tuple(opens),
+            closed_positions=tuple(closes),
+        )
+        _save_balance(ticker, strategy_name, bal)
+    except Exception as e:
+        logger.warning(f"legacy sync failed ({ticker}/{strategy_name}): {e!r}")
+
+
+def _portfolio_daily_loss_breached(portfolio, tick_ts_ms: int) -> bool:
+    """Phase 20.5 — daily loss breach at portfolio level.
+
+    Returns True if today's realized PnL across all contributions <= -5% of
+    starting cash (ADR-010 daily loss limit).
+    """
+    if not portfolio.closed_contributions():
+        return False
+    one_day_ms = 86_400_000
+    day_start_ms = (tick_ts_ms // one_day_ms) * one_day_ms
+    today_pnl = sum(
+        c.realized_net_usd for c in portfolio.closed_contributions()
+        if c.close_ts_ms >= day_start_ms
+    )
+    if today_pnl >= 0:
+        return False
+    loss_pct = abs(today_pnl) / portfolio.starting_cash
+    return loss_pct >= 0.05
+
+
+def _check_portfolio_exits(tick_ts_ms: int) -> None:
+    """Phase 20.5 — runs PositionManager.check_exits for all open contributions.
+
+    Called once per tick from tick handler (after _eval_and_act runs for all
+    HYPOs). Real-time exit monitoring decoupled from entry strategy.
+    """
+    portfolio = get_portfolio()
+    if portfolio.n_open_contributions == 0:
+        return
+    pm = get_position_manager()
+    prices = _get_current_prices_snapshot()
+    last_actions = {sname: act for (_t, sname), act in _strategy_last_action.items()}
+    events = pm.check_exits(prices, ts_ms=tick_ts_ms, last_signal_actions=last_actions)
+    for ev in events:
+        # Update cooldown maps so re-entry blocks
+        _last_close_ms[(ev.ticker, ev.strategy_name)] = tick_ts_ms
+        _last_close_ms_ticker[ev.ticker] = tick_ts_ms
+        # Audit log
+        logger.info(
+            f"[CLOSE] {ev.strategy_name} {ev.ticker} @{ev.exit_price:.6f} "
+            f"reason={ev.exit_reason} net=${ev.realized_net_usd:+.2f} frac={ev.fraction:.2f}"
+        )
+        # Sync legacy state (JSON + SQL) for dashboard / tests.
+        # Try to find owning hypo via strategy_name; if not in REALTIME_HYPOS
+        # (test hypo, deprecated, etc.) sync with default fallback.
+        synced = False
+        for h in REALTIME_HYPOS:
+            try:
+                strat = _get_strategy(h, ev.ticker)
+                if strat.name == ev.strategy_name:
+                    _sync_legacy_state(ev.ticker, ev.strategy_name, h, portfolio)
+                    synced = True
+                    break
+            except Exception:
+                continue
+        if not synced:
+            # Default starting_usd 5000 — preserves test compat
+            _sync_legacy_state(
+                ev.ticker, ev.strategy_name,
+                {"starting_usd": 5000.0}, portfolio,
+            )
 
 
 def _save_balance(ticker: str, strategy_name: str, balance: "PaperBalance") -> None:
@@ -809,86 +966,48 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             return
         signal = strategy.evaluate(candles)
 
-    balance = _load_balance(ticker, sname, hypo["starting_usd"])
+    # Phase 20.5: Portfolio-based — exit handling via PositionManager.
+    # Run exits at START of eval so subsequent entry decisions see updated
+    # portfolio state (e.g. TP closes a slot, freeing cash for new entry).
+    # Track strategy's last action for SignalReversal exit strategies.
+    _strategy_last_action[(ticker, sname)] = signal.action.name  # "EXIT", "ENTER_LONG", "HOLD"
+    _record_tick_price(ticker, tick_price)
+    try:
+        _check_portfolio_exits(tick_ts_ms)
+    except Exception as e:
+        logger.warning(f"in-eval exits err: {e!r}")
 
-    # Phase 2P: strategy timeframe별 exit profile (TP/SL/max_hold 차등)
-    # get_exit_profile reads "exit_profile" key from hypo; defaults to "scalp" if absent.
-    _exit_profile = get_exit_profile(hypo)
-    _tp_pct = _exit_profile["tp_pct"]
-    _sl_pct = _exit_profile["sl_pct"]
-    _max_hold_ms = int(_exit_profile["max_hold_h"] * 3600 * 1000)
-
-    # Phase 6 (slippage fix): fetch book + L1 quote once per tick — used by both
-    # entry and exit fill price computation. Prefer caller-supplied full_tick
-    # (test injection) before falling back to global store.
+    # Phase 6 (slippage fix): fetch book + L1 quote once per tick.
     _book = get_book(ticker) or {}
     _tick_full = full_tick if full_tick is not None else (get_tick(ticker) or {})
     _bid = float((_tick_full or {}).get("bid", 0) or 0)
     _ask = float((_tick_full or {}).get("ask", 0) or 0)
 
-    # 1. Open positions — TP/SL/exit-signal 체크 (TICK PRICE 기반!)
-    # Codex Round 4 fix: min hold time — entry 후 MIN_HOLD_MS 동안 signal_exit 차단 (flip-flop fee bleed 방지)
-    closed_this_tick = False
-    for pos in tuple(balance.open_positions):
-        if pos.ticker != ticker:
-            continue
-        gross = pos.direction * (tick_price - pos.entry_price) / pos.entry_price
-        held_ms = max(0, tick_ts_ms - pos.open_ts_ms)
-        exit_reason = None
-        if gross >= _tp_pct:
-            exit_reason = f"tp_hit:{gross:+.4f}"
-        elif gross <= -_sl_pct:
-            exit_reason = f"sl_hit:{gross:+.4f}"
-        elif held_ms >= _max_hold_ms:
-            exit_reason = f"max_hold:{held_ms//1000}s"  # Phase 2g: timeframe mismatch 강제 청산
-        elif signal.action == SignalAction.EXIT and held_ms >= MIN_HOLD_MS:
-            exit_reason = "signal_exit"
-        if exit_reason:
-            # Phase 15 (P1-3): exit through Broker contract too.
-            # Codex round-1 fix: exit notional uses base qty × tick_price
-            # (entry size_usd is stale once price moved).
-            exit_notional_usd = (
-                (pos.size_usd / pos.entry_price) * tick_price
-                if pos.entry_price > 0 else pos.size_usd
-            )
-            _exit_result = get_broker().place_order(OrderRequest(
-                side=OrderSide.SELL,
-                ticker=ticker,
-                size_usd=exit_notional_usd,
-                order_type=OrderType.MARKET,
-                client_order_id=f"{pos.position_id}-exit",
-            ))
-            if _exit_result.status == OrderStatus.FILLED and _exit_result.avg_fill_price > 0:
-                exit_fill = _exit_result.avg_fill_price
-            else:
-                logger.warning(
-                    f"[EXIT-FALLBACK] {ticker} broker rejected — using tick price "
-                    f"(status={_exit_result.status.value} {_exit_result.error_msg})"
-                )
-                exit_fill = tick_price
-            balance = balance.close(pos.position_id, exit_price=exit_fill, close_ts_ms=tick_ts_ms)
-            closed = balance.closed_positions[-1]
-            paper_logger.log_close(ticker, sname, closed)
-            paper_logger.log_event(ticker, sname, "EXIT_REASON", exit_reason)
-            logger.info(f"[CLOSE] {hypo['hypo_id']} {ticker} @{tick_price} reason={exit_reason} net={closed.net_usd:+.2f} held={held_ms/1000:.0f}s")
-            closed_this_tick = True
-            _last_close_ms[(ticker, sname)] = tick_ts_ms
-            _last_close_ms_ticker[ticker] = tick_ts_ms
-            _save_balance(ticker, sname, balance)
-            # Round 14: HYPO-010 regime cluster guard — SL hit 시 cross-ticker 추적
-            if hypo["hypo_id"] == "HYPO-010-TICK" and sname == "tick_momentum":
-                _check_hypo010_regime_cluster(ticker, exit_reason, tick_ts_ms)
+    # Portfolio-level state (replaces per-strategy PaperBalance)
+    portfolio = get_portfolio()
+    pos_aggr = portfolio.get_position(ticker)
 
-    # 2. Daily loss + entry
-    # Codex Round 4 fix: re-entry cooldown — close 후 RE_ENTRY_COOLDOWN_MS 동안 같은 (ticker,strategy) 재진입 차단
-    daily_breached, _ = _daily_loss_breached(balance, tick_ts_ms)
-    has_open = any(p.ticker == ticker for p in balance.open_positions)
+    # has_open = does this STRATEGY already have an open contribution on this ticker?
+    has_open = False
+    if pos_aggr is not None:
+        has_open = any(
+            (not c.is_closed) and c.strategy_name == sname
+            for c in pos_aggr.contributions
+        )
+
+    # daily_breached at portfolio level (today's realized PnL < -5% of starting cash)
+    daily_breached = _portfolio_daily_loss_breached(portfolio, tick_ts_ms)
+
+    # Cooldown via _last_close_ms (preserved from old path; updated by PositionManager exit hook)
     last_close = _last_close_ms.get((ticker, sname), 0)
     last_close_ticker = _last_close_ms_ticker.get(ticker, 0)
     in_cooldown = (
         (last_close > 0 and (tick_ts_ms - last_close) < RE_ENTRY_COOLDOWN_MS)
         or (last_close_ticker > 0 and (tick_ts_ms - last_close_ticker) < RE_ENTRY_COOLDOWN_MS)
     )
+
+    # closed_this_tick now handled by PositionManager run; no longer per-strategy.
+    closed_this_tick = False
     # Round 14: HYPO-010 regime cluster pause guard (INSIGHT-029 — 5min 3+ SL → 10min entry block)
     in_regime_pause = (
         hypo["hypo_id"] == "HYPO-010-TICK"
@@ -970,24 +1089,37 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     )
 
     if signal.action == SignalAction.ENTER_LONG and _gate.allow:
-        # ── Phase 2j: Dynamic sizing (Kelly + confidence + regime + drawdown) ──
-        # 1. Recent performance stats (HYPO별 last 20 closed trades)
-        perf_stats = compute_recent_stats(list(balance.closed_positions), lookback=20)
+        # ── Phase 20.5: portfolio-based entry ──
+        # Recent performance stats — derived from PORTFOLIO closed contributions
+        # for THIS strategy (cross-ticker). More accurate than per-(ticker,strategy).
+        strategy_closes = [
+            c for c in portfolio.closed_contributions()
+            if c.strategy_name == sname
+        ]
+        # Convert Contribution → pseudo-Position-like for compute_recent_stats
+        from src.paper.state import Position as _Pos, PositionStatus as _PS
+        pseudo_closed = [
+            _Pos(
+                position_id=c.contribution_id, ticker=c.ticker, direction=c.direction,
+                entry_price=c.entry_price, size_usd=c.size_usd, open_ts_ms=c.open_ts_ms,
+                close_ts_ms=c.close_ts_ms, exit_price=c.exit_price,
+                fee_round_trip=c.fee_round_trip, status=_PS.CLOSED,
+            ) for c in strategy_closes if c.exit_price > 0
+        ]
+        perf_stats = compute_recent_stats(pseudo_closed, lookback=20)
 
-        # 2. Regime — BTC 1D candles (cached 60s)
+        # Regime — BTC 1D candles (cached 60s)
         btc_1d = _get_btc_1d_candles()
         regime = detect_regime(btc_1d)
 
-        # 3. Current drawdown (vs HYPO starting capital)
-        equity = balance.equity_usd({ticker: tick_price})
-        starting = hypo.get("starting_usd", balance.starting_usd)
-        dd = max(0.0, (starting - equity) / starting)
+        # Drawdown vs starting cash (portfolio-level)
+        equity = portfolio.equity({ticker: tick_price})
+        dd = max(0.0, (portfolio.starting_cash - equity) / portfolio.starting_cash)
 
-        # 4. Compute dynamic size (pure)
-        # Phase 2N+: pass n_trades for cold start cap (< 20 → max $300)
-        n_closed = len(balance.closed_positions)
+        # Dynamic size (pure)
+        n_closed = len(strategy_closes)
         sizing = compute_size(SizingInputs(
-            cash_usd=balance.cash_usd,
+            cash_usd=portfolio.cash,
             signal_confidence=signal.confidence,
             recent_win_rate=perf_stats["win_rate"],
             recent_avg_win_pct=perf_stats["avg_win_pct"],
@@ -995,15 +1127,9 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             regime=regime,
             drawdown_pct=dd,
         ), n_trades=n_closed)
-        # Phase 2N+: hard_cap replaces per-HYPO max_position_pct (ADR-015 정합).
-        # max_position_pct (0.04 → $200 cap) was silently overriding dynamic sizing.
-        # Dynamic sizing (compute_size) already caps at MAX_FRACTION=0.20 internally.
-        # Shell adds one absolute safety bound: equity × 0.30 ($5000 → $1500 max).
         hard_cap = equity * 0.30
-        # Phase 12.2: liq_cap already pre-computed for the entry gate above.
-        # Apply it here as part of the size cap composition.
         _liq_cap = _liq_cap_pre
-        size = min(sizing.size_usd, hard_cap, balance.cash_usd, _liq_cap if _liq_cap > 0 else float("inf"))
+        size = min(sizing.size_usd, hard_cap, portfolio.cash, _liq_cap if _liq_cap > 0 else float("inf"))
 
         logger.info(
             f"[DYN-SIZE] {hypo['hypo_id']} {ticker} size=${size:.0f} "
@@ -1011,15 +1137,13 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         )
 
         if size > 0:
-            # Phase 15 (P1-3 fix): all entries flow through Broker contract.
-            # Default broker = PaperBroker (slippage_model fill). Live promotion
-            # = swap broker singleton to OKXBroker — no logic change here.
+            # Place broker order (PaperBroker or OKXBroker)
             _result = get_broker().place_order(OrderRequest(
                 side=OrderSide.BUY,
                 ticker=ticker,
                 size_usd=size,
                 order_type=OrderType.MARKET,
-                client_order_id=f"{ticker}-{tick_ts_ms}",
+                client_order_id=f"{sname[:8]}{tick_ts_ms}",
             ))
             if _result.status != OrderStatus.FILLED:
                 logger.warning(
@@ -1027,23 +1151,38 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                     f"status={_result.status.value} {_result.error_msg}"
                 )
             else:
-                entry_fill = _result.avg_fill_price
-                entry_slip_bps = _result.slippage_bps
-                pos = Position(
-                    position_id=f"{ticker}-{tick_ts_ms}",
-                    ticker=ticker, direction=1,
-                    entry_price=entry_fill,
+                # Build exit_strategies for this contribution from hypo profile
+                exit_profile = hypo.get("exit_profile", "scalp")
+                from src.exec.exit_strategies import build_default_exits
+                exit_strats = build_default_exits(exit_profile)
+                # Add SignalReversal as supplementary exit (entry strategy still has voice)
+                from src.exec.exit_strategies import SignalReversal
+                exit_strats = exit_strats + (SignalReversal(sname),)
+
+                contrib = portfolio.process_entry(
+                    ticker=ticker,
+                    strategy_name=sname,
+                    hypo_id=hypo["hypo_id"],
                     size_usd=size,
-                    open_ts_ms=tick_ts_ms,
+                    fill_price=_result.avg_fill_price,
+                    ts_ms=tick_ts_ms,
+                    exit_strategies=exit_strats,
                     fee_round_trip=LIVE_FEE_ROUND_TRIP,
+                    signal_confidence=signal.confidence,
+                    signal_reason=signal.reason,
+                    regime=regime,
                 )
-                balance = balance.open(pos)
-                paper_logger.log_open(ticker, sname, pos)
-                logger.info(
-                    f"[OPEN] {hypo['hypo_id']} {ticker} @{entry_fill:.6f} (last={tick_price:.6f}, "
-                    f"slip={entry_slip_bps:.1f}bps) size=${size:.2f} broker={get_broker().__class__.__name__}"
-                )
-                _save_balance(ticker, sname, balance)
+                if contrib is not None:
+                    logger.info(
+                        f"[OPEN] {hypo['hypo_id']} {ticker} @{_result.avg_fill_price:.6f} "
+                        f"(last={tick_price:.6f}, slip={_result.slippage_bps:.1f}bps) "
+                        f"size=${size:.2f} cid={contrib.contribution_id[:16]} "
+                        f"broker={get_broker().__class__.__name__}"
+                    )
+                    # Phase 20.5 backward-compat: sync to JSON + SQL via
+                    # _save_balance for dashboard / tests / cron compat.
+                    # Per-(ticker, strategy) snapshot built from portfolio state.
+                    _sync_legacy_state(ticker, sname, hypo, portfolio)
 
 
 # ───── Tick callback ─────
@@ -1136,6 +1275,13 @@ def make_tick_handler() -> Callable[[str, dict], None]:
                 _check_hypo_deprecate_inline(hypo, tick_ts)
             except Exception as e:
                 logger.error(f"eval err {hypo['hypo_id']} {inst_id}: {e}")
+
+        # Phase 20.5: portfolio-level exit monitoring — runs per tick
+        # AFTER all per-(ticker, hypo) signal evaluations complete.
+        try:
+            _check_portfolio_exits(tick_ts)
+        except Exception as e:
+            logger.error(f"portfolio exits err: {e!r}")
     return handler
 
 

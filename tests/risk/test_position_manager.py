@@ -198,7 +198,7 @@ class TestSignalReversal:
     def test_signal_exit_fires(self, portfolio, manager):
         portfolio.process_entry(
             "BTC-USDT", "vb", "X", 100, 80000, 1,
-            (SignalReversal("vb"),),
+            (SignalReversal("vb", min_hold_ms=0),),
         )
         events = manager.check_exits(
             {"BTC-USDT": 80000}, ts_ms=2,
@@ -210,7 +210,7 @@ class TestSignalReversal:
     def test_no_fire_on_hold(self, portfolio, manager):
         portfolio.process_entry(
             "BTC-USDT", "vb", "X", 100, 80000, 1,
-            (SignalReversal("vb"),),
+            (SignalReversal("vb", min_hold_ms=0),),
         )
         events = manager.check_exits(
             {"BTC-USDT": 80000}, ts_ms=2,

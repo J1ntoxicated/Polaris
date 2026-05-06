@@ -129,15 +129,27 @@ class TestTimeBasedHold:
 
 
 class TestSignalReversal:
-    def test_fires_on_exit_action(self):
-        ex = SignalReversal("volume_burst")
-        m = _market(price=100, last_action="EXIT")
-        d = ex.should_exit(100, 100, 0, m)
+    def test_fires_on_exit_action_after_min_hold(self):
+        ex = SignalReversal("volume_burst", min_hold_ms=0)
+        m = _market(price=100, last_action="EXIT", ts_ms=1000)
+        d = ex.should_exit(100, 100, open_ts_ms=0, market=m)
         assert d.should_close
         assert "signal_exit" in d.reason
 
+    def test_no_fire_within_min_hold(self):
+        ex = SignalReversal("volume_burst", min_hold_ms=90_000)
+        m = _market(price=100, last_action="EXIT", ts_ms=50_000)  # 50s held
+        d = ex.should_exit(100, 100, open_ts_ms=0, market=m)
+        assert not d.should_close
+
+    def test_fires_at_min_hold_boundary(self):
+        ex = SignalReversal("volume_burst", min_hold_ms=90_000)
+        m = _market(price=100, last_action="EXIT", ts_ms=90_000)  # exactly 90s
+        d = ex.should_exit(100, 100, open_ts_ms=0, market=m)
+        assert d.should_close
+
     def test_no_fire_on_hold(self):
-        ex = SignalReversal("volume_burst")
+        ex = SignalReversal("volume_burst", min_hold_ms=0)
         m = _market(price=100, last_action="HOLD")
         d = ex.should_exit(100, 100, 0, m)
         assert not d.should_close

@@ -43,6 +43,13 @@ def _isolate_state(tmp_path, monkeypatch):
     # Phase 16: disable SQL ledger primary-read in tests so each test gets
     # a fresh JSON-backed state (else SQL holds prod-leftover positions).
     monkeypatch.setattr(paper_runner, "_LEDGER_ENABLED", False)
+    # Phase 20: force PaperBroker for tests (else OKXBroker arms when env has
+    # POLARIS_LIVE_MODE=1 + size cap rejects test sizes >$100).
+    monkeypatch.delenv("POLARIS_LIVE_MODE", raising=False)
+    rt._broker_singleton = None  # reset cached broker
+    # Phase 20.5: reset portfolio + position manager singletons (state leak)
+    rt.reset_portfolio_singletons()
+    rt._strategy_last_action.clear()
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()

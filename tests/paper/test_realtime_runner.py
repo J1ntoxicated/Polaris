@@ -47,6 +47,7 @@ def _isolate_state(tmp_path, monkeypatch):
     # POLARIS_LIVE_MODE=1 + size cap rejects test sizes >$100).
     monkeypatch.delenv("POLARIS_LIVE_MODE", raising=False)
     rt._broker_singleton = None  # reset cached broker
+    # Note: COLD_START_MAX_USD=300.0 is enforced by tests/conftest.py autouse fixture.
     # Phase 20.5: reset portfolio + position manager singletons (state leak)
     rt.reset_portfolio_singletons()
     rt._strategy_last_action.clear()

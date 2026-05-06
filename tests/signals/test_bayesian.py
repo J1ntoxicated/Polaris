@@ -65,8 +65,10 @@ class TestCalibrateConfidence:
         ci_high_n = CalibrationInput(win_rate=0.0, composite_score=0.9, n_trades=500)
         # Higher n_trades → win_rate dominates more → confidence should be lower
         assert calibrate_confidence(ci_high_n) < calibrate_confidence(ci_low_n)
-        # At very large n, should be pulled significantly toward win_rate=0
-        assert calibrate_confidence(ci_high_n) < 0.3
+        # F2: MAX_EVIDENCE_WEIGHT=0.50 → at large n, prior still ≥50% weight.
+        # calibrated ≈ 0.50×score + 0.50×win_rate = 0.50×0.9 + 0.50×0.0 = 0.45.
+        # So pulled down but composite_score influence floors at 50% → ≤ 0.5
+        assert calibrate_confidence(ci_high_n) <= 0.5
 
     def test_zero_composite_score_gives_low_confidence(self):
         # score=0 but win_rate=0.8 at high n_trades → evidence dominates, pulls up.

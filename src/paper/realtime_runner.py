@@ -1310,6 +1310,21 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         equity = portfolio.equity({ticker: tick_price})
         dd = max(0.0, (portfolio.starting_cash - equity) / portfolio.starting_cash)
 
+        # F6: Calibrated confidence — composite_score × bayesian blend
+        from src.signals.wire import calibrate_signal
+        _market_ctx = {
+            "regime": regime,
+            "spread_bps": full_tick.get("spread_bps", 5) if full_tick else 5,
+            "volume_ratio": full_tick.get("volume_ratio", 0.5) if full_tick else 0.5,
+            "momentum_1h": full_tick.get("momentum_1h", 0.5) if full_tick else 0.5,
+        }
+        cal_conf = calibrate_signal(
+            signal=signal,
+            market_ctx=_market_ctx,
+            win_rate=perf_stats["win_rate"],
+            n_trades=len(strategy_closes),
+        )
+
         # Dynamic size (pure)
         n_closed = len(strategy_closes)
         sizing = compute_size(SizingInputs(
@@ -1320,6 +1335,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
             recent_avg_loss_pct=perf_stats["avg_loss_pct"],
             regime=regime,
             drawdown_pct=dd,
+            calibrated_confidence=cal_conf,   # F6: wire feeds calibrated conf
         ), n_trades=n_closed)
         hard_cap = equity * 0.30
         _liq_cap = _liq_cap_pre
@@ -1363,6 +1379,7 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                     exit_strategies=exit_strats,
                     fee_round_trip=LIVE_FEE_ROUND_TRIP,
                     signal_confidence=signal.confidence,
+                    calibrated_confidence=cal_conf,   # F6: wire-calibrated
                     signal_reason=signal.reason,
                     regime=regime,
                 )
@@ -2132,6 +2149,19 @@ def main() -> None:
     logger.info(f"=== Polaris Realtime Runner — {_dt.datetime.now().isoformat(timespec='seconds')} ===")
     logger.info(f"OKX subscribe {len(tickers)} tickers: {tickers}")
     logger.info(f"Active HYPOs: {[h['hypo_id'] for h in REALTIME_HYPOS]}")
+
+    # Phase 27 — startup sync: pull broker balance + positions before trading.
+    # User mandate: "재부팅시 평가 다시해서 닫을껀 닫고"
+    try:
+        from src.risk.reconciler import startup_sync
+        sync = startup_sync(get_portfolio(), get_broker())
+        if sync.get("synced_cash") or sync.get("synced_positions"):
+            logger.warning(
+                f"[STARTUP-SYNC] cash=${sync['synced_cash']:.2f} "
+                f"orphan_positions={sync['synced_positions']} errors={sync['errors']}"
+            )
+    except Exception as e:
+        logger.warning(f"[STARTUP-SYNC] failed: {e!r}")
     if binance_tickers:
         logger.info(f"Binance SPOT subscribe {len(binance_tickers)} tickers: {binance_tickers}")
     if binance_liq_symbols:

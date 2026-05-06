@@ -33,6 +33,7 @@ class Opportunity:
     expected_return_pct: float     # signal_confidence × historical_ev (rank key)
     signal_reason: str
     ts_ms: int
+    calibrated_confidence: float = 0.0   # F5: from bayesian.calibrate_confidence(); 0.0 = not set
 
 
 @dataclass(frozen=True)

@@ -38,6 +38,7 @@ class Contribution:
     fired_partial_levels: tuple[float, ...] = ()  # PartialTP already-fired levels
     # Audit
     signal_confidence: float = 0.0
+    calibrated_confidence: float = 0.0   # F5: from bayesian.calibrate_confidence(); 0.0 = not set
     signal_reason: str = ""
     regime: str = ""
     # Closed contribution fields (set on close)

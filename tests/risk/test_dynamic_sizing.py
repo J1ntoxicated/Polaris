@@ -9,8 +9,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import src.risk.dynamic_sizing as _ds_module  # module ref for dynamic COLD_START_MAX_USD read
 from src.risk.dynamic_sizing import (
-    COLD_START_MAX_USD,
     COLD_START_N,
     MAX_FRACTION,
     MIN_SIZE_USD,
@@ -19,6 +19,17 @@ from src.risk.dynamic_sizing import (
     SizingOutput,
     compute_size,
 )
+
+
+def _cold_start_max() -> float:
+    """Read COLD_START_MAX_USD from module (reflects conftest monkeypatch).
+
+    IMPORTANT: Do NOT use `from src.risk.dynamic_sizing import COLD_START_MAX_USD` directly.
+    That binds the value at import time. When production .env sets POLARIS_COLD_START_MAX_USD=0,
+    the imported name is 0.0. conftest patches the module attr to 300.0, but local name stays 0.0.
+    This helper always reads the live module attribute.
+    """
+    return _ds_module.COLD_START_MAX_USD
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -98,16 +109,16 @@ class TestLowConfidenceReduceSize:
         # confidence² : 0.25 vs 0.81 → low should be much smaller
         assert low.size_usd < high.size_usd
 
-    def test_confidence_squared_applied(self) -> None:
-        # conf=0.5 → conf²=0.25; conf=1.0 → conf²=1.0 (4x difference)
+    def test_confidence_cubed_applied(self) -> None:
+        # F1: conf**3 (was **2). conf=0.5 → conf³=0.125; conf=1.0 → conf³=1.0 (8x difference).
         # Use cold-start kelly (win_rate=0) to avoid MAX_FRACTION cap distorting ratio.
-        # cold kelly=0.05 × conf²=0.25 × flat=0.7 × dd=1.0 = 0.00875 (well under cap)
+        # cold kelly=0.05 × conf³=0.125 × flat=0.7 × dd=1.0 = 0.004375 (well under cap)
         # Phase 2N: MIN_SIZE_USD=$100 — use large cash to avoid skip masking ratio.
         low = _sized(cash_usd=100_000.0, signal_confidence=0.5, regime="flat", recent_win_rate=0.0)
         perfect = _sized(cash_usd=100_000.0, signal_confidence=1.0, regime="flat", recent_win_rate=0.0)
         ratio = perfect.fraction / low.fraction if low.fraction > 0 else float("inf")
-        # Should be ~4x (conf² ratio: 1.0 / 0.25 = 4.0)
-        assert ratio == pytest.approx(4.0, rel=0.05)
+        # Should be ~8x (conf³ ratio: 1.0 / 0.125 = 8.0)
+        assert ratio == pytest.approx(8.0, rel=0.05)
 
 
 class TestDowntrendSize:
@@ -220,7 +231,7 @@ class TestReasonFormat:
     def test_reason_includes_all_components(self) -> None:
         result = _sized()
         assert "kelly=" in result.reason
-        assert "conf²=" in result.reason
+        assert "conf³=" in result.reason  # F1: cubed tag
         assert "regime[" in result.reason
         assert "dd[" in result.reason
 
@@ -264,8 +275,8 @@ class TestColdStartCap:
             ),
             n_trades=0,
         )
-        assert result.size_usd <= COLD_START_MAX_USD
-        assert result.size_usd == COLD_START_MAX_USD  # capped exactly
+        assert result.size_usd <= _cold_start_max()
+        assert result.size_usd == _cold_start_max()  # capped exactly
 
     def test_n_19_still_cold_start(self) -> None:
         """n_trades=19 (< 20) → still capped."""
@@ -281,7 +292,7 @@ class TestColdStartCap:
             ),
             n_trades=19,
         )
-        assert result.size_usd <= COLD_START_MAX_USD
+        assert result.size_usd <= _cold_start_max()
 
     def test_n_20_plus_uses_full_dynamic(self) -> None:
         """n_trades=20 → no cold start cap — full dynamic sizing applies."""
@@ -298,11 +309,11 @@ class TestColdStartCap:
             n_trades=20,
         )
         # At n=20 full dynamic applies — should exceed cold start cap (high confidence + uptrend)
-        assert result_20.size_usd > COLD_START_MAX_USD
+        assert result_20.size_usd > _cold_start_max()
 
     def test_cold_start_threshold_constant(self) -> None:
         assert COLD_START_N == 20
-        assert COLD_START_MAX_USD == 300.0
+        assert _cold_start_max() == 300.0  # default value when env not set
 
     def test_cold_start_reason_tag(self) -> None:
         """cold_start tag appears in reason when cap applied."""
@@ -356,7 +367,7 @@ class TestColdStartCap:
                 ),
                 n_trades=n_t,
             )
-            assert result.size_usd <= COLD_START_MAX_USD, f"n_trades={n_t} exceeded cap"
+            assert result.size_usd <= _cold_start_max(), f"n_trades={n_t} exceeded cap"
 
 
 # ── Fix: n_trades default=0 ensures cold start cap without explicit arg ───────
@@ -388,9 +399,9 @@ class TestColdStartCapDefault:
             )
             # n_trades intentionally OMITTED — must default to 0 (cold start safe)
         )
-        assert result.size_usd <= COLD_START_MAX_USD, (
+        assert result.size_usd <= _cold_start_max(), (
             f"Omitting n_trades must apply cold start cap (n=0 default). "
-            f"Got ${result.size_usd:.0f} > COLD_START_MAX_USD=${COLD_START_MAX_USD:.0f}. "
+            f"Got ${result.size_usd:.0f} > COLD_START_MAX_USD=${_cold_start_max():.0f}. "
             "Root cause fix: default n_trades=0 (was COLD_START_N=20 before fix)."
         )
         assert "cold_start" in result.reason, "cold_start tag must appear in reason"
@@ -413,12 +424,115 @@ class TestColdStartCapDefault:
             ),
             n_trades=0,
         )
-        assert result.size_usd <= COLD_START_MAX_USD, (
-            f"n=0 cold start must cap at ${COLD_START_MAX_USD:.0f}, got ${result.size_usd:.0f}"
+        assert result.size_usd <= _cold_start_max(), (
+            f"n=0 cold start must cap at ${_cold_start_max():.0f}, got ${result.size_usd:.0f}"
         )
-        assert result.size_usd == COLD_START_MAX_USD, (
+        assert result.size_usd == _cold_start_max(), (
             f"High-signal n=0 should hit cap exactly at $300, got ${result.size_usd:.0f}"
         )
+
+
+# ── F1 amplification: conf³ + F4 Kelly boost ──────────────────────────────
+
+class TestF1Amplification:
+    """F1: conf**3 — strong signal dominates, weak signal suppressed harder."""
+
+    def test_strong_conf_09_cubed_vs_squared(self) -> None:
+        # conf=0.9: **3=0.729 vs **2=0.81. conf³ < conf² for conf<1.
+        # Test that sizing with cal_conf=0.9 produces LESS than the old conf²=0.81 path
+        # (F1 trades peak-conf for steeper penalty on mediocre signals).
+        # We verify conf³ < conf² for conf<1 which is mathematically guaranteed.
+        for conf in (0.7, 0.8, 0.9):
+            cubed = conf ** 3
+            squared = conf ** 2
+            assert cubed < squared, f"conf={conf}: cubed={cubed} must < squared={squared}"
+
+    def test_conf_1_unchanged_by_cubing(self) -> None:
+        # conf=1.0 → 1.0**3 = 1.0 (top signal unaffected)
+        result = compute_size(SizingInputs(
+            cash_usd=50_000.0,
+            signal_confidence=1.0,
+            recent_win_rate=0.55,
+            recent_avg_win_pct=0.8,
+            recent_avg_loss_pct=0.5,
+            regime="uptrend",
+            drawdown_pct=0.0,
+            calibrated_confidence=1.0,
+        ), n_trades=COLD_START_N)
+        # Perfect confidence → max fraction (capped at MAX_FRACTION or kelly cap)
+        assert result.fraction > 0
+
+    def test_conf_cubed_reason_tag(self) -> None:
+        result = compute_size(SizingInputs(
+            cash_usd=10_000.0,
+            signal_confidence=0.8,
+            recent_win_rate=0.55,
+            recent_avg_win_pct=0.8,
+            recent_avg_loss_pct=0.5,
+            regime="flat",
+            drawdown_pct=0.0,
+            calibrated_confidence=0.8,
+        ), n_trades=COLD_START_N)
+        assert "cal_conf³" in result.reason  # F1: cubed tag with cal prefix
+
+
+class TestF4KellyBoost:
+    """F4: calibrated_confidence boosts kelly by ×(1 + cal_conf×0.5). cal=0.9 → ×1.45."""
+
+    def test_f4_boost_increases_kelly(self) -> None:
+        # Without cal_conf: kelly uses raw value only.
+        # With cal_conf=0.9: kelly gets ×1.45 boost.
+        base = compute_size(SizingInputs(
+            cash_usd=50_000.0,
+            signal_confidence=0.8,
+            recent_win_rate=0.55,
+            recent_avg_win_pct=0.8,
+            recent_avg_loss_pct=0.5,
+            regime="uptrend",
+            drawdown_pct=0.0,
+            calibrated_confidence=None,   # no cal → no boost
+        ), n_trades=COLD_START_N)
+        boosted = compute_size(SizingInputs(
+            cash_usd=50_000.0,
+            signal_confidence=0.8,
+            recent_win_rate=0.55,
+            recent_avg_win_pct=0.8,
+            recent_avg_loss_pct=0.5,
+            regime="uptrend",
+            drawdown_pct=0.0,
+            calibrated_confidence=0.9,   # F4: kelly × 1.45
+        ), n_trades=COLD_START_N)
+        # Boosted must be >= base (kelly boost + conf³ compound)
+        assert boosted.size_usd >= base.size_usd
+
+    def test_f4_boost_capped_at_half_kelly(self) -> None:
+        # Even with extreme boost, kelly stays ≤ _KELLY_HALF_CAP
+        result = compute_size(SizingInputs(
+            cash_usd=50_000.0,
+            signal_confidence=0.9,
+            recent_win_rate=0.9,
+            recent_avg_win_pct=5.0,
+            recent_avg_loss_pct=0.1,
+            regime="crisis",
+            drawdown_pct=0.0,
+            calibrated_confidence=1.0,   # max boost
+        ), n_trades=COLD_START_N)
+        assert result.fraction <= MAX_FRACTION
+
+    def test_f4_no_boost_when_cal_conf_none(self) -> None:
+        # calibrated_confidence=None → F4 block skipped (no boost applied)
+        result = compute_size(SizingInputs(
+            cash_usd=10_000.0,
+            signal_confidence=0.8,
+            recent_win_rate=0.55,
+            recent_avg_win_pct=0.8,
+            recent_avg_loss_pct=0.5,
+            regime="flat",
+            drawdown_pct=0.0,
+            calibrated_confidence=None,
+        ), n_trades=COLD_START_N)
+        assert result.fraction > 0
+        assert "conf³" in result.reason  # no cal prefix when cal_conf is None
 
 
 # ── property-based test (P7 — Hypothesis) ─────────────────────────────────

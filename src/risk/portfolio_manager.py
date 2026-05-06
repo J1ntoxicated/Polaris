@@ -116,6 +116,7 @@ class PortfolioManager:
         exit_strategies: tuple[ExitStrategy, ...],
         fee_round_trip: float = 0.002,
         signal_confidence: float = 0.0,
+        calibrated_confidence: float = 0.0,   # F5: bayesian-calibrated confidence
         signal_reason: str = "",
         regime: str = "",
     ) -> Optional[Contribution]:
@@ -160,6 +161,7 @@ class PortfolioManager:
             exit_strategies=exit_strategies,
             high_since_entry=fill_price,  # peak starts at entry
             signal_confidence=signal_confidence,
+            calibrated_confidence=calibrated_confidence,   # F5
             signal_reason=signal_reason,
             regime=regime,
         )

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 # Sigmoid midpoint: n_trades=30 gives ~50% evidence weight.
 _SIGMOID_MIDPOINT = 30.0
 _SIGMOID_STEEPNESS = 0.1
-_MAX_EVIDENCE_WEIGHT = 0.85   # max fraction attributable to win_rate evidence
+_MAX_EVIDENCE_WEIGHT = 0.50   # F2: was 0.85 — warm-start composite_score always ≥50% influence
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,14 +27,15 @@ FACTOR_NAMES: tuple[str, ...] = (
 )
 
 # Default weights — sum to 1.0.
-# Rationale: strength + momentum carry most directional conviction;
-# volume confirms; regime_fit and microstructure are secondary filters.
+# F3 (Phase 27.4): strength + momentum = 0.75. Directional strong signal not diluted.
+# Rationale: strength + momentum carry directional conviction → 0.75 combined weight.
+# volume confirms (0.15); regime_fit (0.07) and microstructure (0.03) are tertiary.
 _DEFAULT_WEIGHTS: dict[str, float] = {
-    "strength":      0.30,
-    "momentum":      0.25,
-    "volume":        0.20,
-    "regime_fit":    0.15,
-    "microstructure": 0.10,
+    "strength":       0.40,   # F3: was 0.30
+    "momentum":       0.35,   # F3: was 0.25
+    "volume":         0.15,   # F3: was 0.20
+    "regime_fit":     0.07,   # F3: was 0.15
+    "microstructure": 0.03,   # F3: was 0.10
 }
 
 

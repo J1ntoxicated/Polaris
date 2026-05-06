@@ -41,6 +41,7 @@ class MarketContext:
     funding_8h: float = 0.0
     btc_trend: str = "unknown"     # up / down / unknown
     last_signal_action: Optional[str] = None
+    calibrated_confidence: float = 0.0   # F5: from bayesian.calibrate_confidence(); 0.0 = not set
 
 
 @dataclass(frozen=True)

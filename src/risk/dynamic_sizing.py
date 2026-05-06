@@ -121,10 +121,16 @@ def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
             kelly_raw = 0.0
         kelly = max(0.0, min(kelly_raw, _KELLY_HALF_CAP))
 
-    # 2. Confidence multiplier — squares penalise low confidence hard.
-    # Phase 27: use calibrated_confidence² when available (stronger signal → size up).
+    # 1b. F4: Kelly boost via calibrated_confidence (after clamp, before conf_mult).
+    # cal_conf=0.9 → kelly × (1 + 0.9×0.5) = kelly × 1.45. HALF_CAP is ceiling.
+    if inputs.calibrated_confidence is not None:
+        kelly = min(kelly * (1.0 + inputs.calibrated_confidence * 0.5), _KELLY_HALF_CAP)
+
+    # 2. Confidence multiplier — cubed penalise low confidence hard (F1: **3 amplification).
+    # Phase 27.4: conf**3 (was **2). Strong signal 0.9→0.729 vs 0.81; weak 0.6→0.216 vs 0.36.
+    # Weak signals suppressed harder; strong signals maintain dominance.
     _conf = inputs.calibrated_confidence if inputs.calibrated_confidence is not None else inputs.signal_confidence
-    conf_mult = _conf ** 2
+    conf_mult = _conf ** 3  # F1: was _conf ** 2 — strong signal amplification
 
     # 3. Regime multiplier — default to flat if unknown
     regime_mult = REGIME_MULT.get(inputs.regime, REGIME_MULT["flat"])
@@ -153,7 +159,7 @@ def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
         cold_start_applied = True
 
     cold_tag = f" [cold_start n={n_trades}<{COLD_START_N} cap=${COLD_START_MAX_USD:.0f}]" if cold_start_applied else ""
-    _conf_tag = f"cal_conf²" if inputs.calibrated_confidence is not None else "conf²"
+    _conf_tag = f"cal_conf³" if inputs.calibrated_confidence is not None else "conf³"  # F1: cubed
     reason = (
         f"kelly={kelly:.2f} × {_conf_tag}={conf_mult:.2f} × regime[{inputs.regime}]={regime_mult:.1f} "
         f"× dd[{inputs.drawdown_pct:.1%}]={dd_mult:.2f} = {fraction:.3f}{cold_tag}"

@@ -24,10 +24,12 @@ import time
 from src.dashboard.ansi import (
     P_GRN, P_RED, P_DIM, POLARIS_BLUE, c, pad, hline,
 )
+from src.dashboard.ansi import merge_cols
 from src.dashboard.sections.header import render as render_header
 from src.dashboard.sections.positions_dense import render as render_positions
 from src.dashboard.sections.pm_activity import render as render_pm_activity
 from src.dashboard.sections.realtime_hypos import render as render_realtime_hypos
+from src.dashboard.sections.closed_trades import render as render_closed_trades
 from src.dashboard.sections.live_log import render as render_live_log
 
 
@@ -68,38 +70,46 @@ def _fit(rows: list[str], target: int, W: int) -> list[str]:
 
 
 def render_full(tick: int = 0) -> str:
-    """Layout — STRICT 180×50 (Jin mandate). Sums to exactly H rows.
+    """Layout — STRICT 180×50 (Jin mandate). Side-by-side mid panels.
 
     Row budget (H=50):
-      HEADER       4
-      POSITIONS   20  (bulk content)
-      AUTO MGR     9
-      STRATEGIES  12
-      LIVE LOG     4  (1 hline + 3 heartbeat rows)
-      FOOTER       1
-      ─────────  ──
-      TOTAL       50
+      HEADER          4
+      OPEN POSITIONS 14
+      [SIDE-BY-SIDE] 11  (AUTO MGR LW=88 | STRATEGY PERF RW=89, 1-col GAP=3)
+      CLOSED TRADES 16
+      LIVE LOG        4  (1 hline + 3 heartbeat)
+      FOOTER          1
+      ─────────────  ──
+      TOTAL          50
     """
     W = _get_W()
     H = _get_H()
 
+    GAP = 3
+    LW = W // 2 - GAP // 2  # 88 if W=180
+    RW = W - LW - GAP        # 89
+
     HEADER_H = 4
-    PM_H = 9
-    HYPOS_H = 12
+    POS_H = 14
+    SBS_H = 11   # side-by-side row count
+    CLOSED_H = 16
     LOG_H = 4
     FOOTER_H = 1
-    POS_H = H - (HEADER_H + PM_H + HYPOS_H + LOG_H + FOOTER_H)
-    if POS_H < 8:
-        POS_H = 8
 
     out: list[str] = []
     out.extend(_fit(render_header(W, tick), HEADER_H, W))
     out.extend(_fit(render_positions(W, n=POS_H), POS_H, W))
-    out.extend(_fit(render_pm_activity(W, n=PM_H), PM_H, W))
-    out.extend(_fit(render_realtime_hypos(W, n=HYPOS_H), HYPOS_H, W))
+
+    # Side-by-side: AUTO MANAGER (left) + STRATEGY PERFORMANCE (right)
+    left = _fit(render_pm_activity(LW, n=SBS_H), SBS_H, LW)
+    right = _fit(render_realtime_hypos(RW, n=SBS_H), SBS_H, RW)
+    sbs_gap = " " + c("│", POLARIS_BLUE) + " "
+    sbs = merge_cols(left, right, LW, RW, gap=sbs_gap)
+    out.extend(_fit(sbs, SBS_H, W))
+
+    out.extend(_fit(render_closed_trades(W, n=CLOSED_H), CLOSED_H, W))
     out.extend(_fit(render_live_log(W, n=LOG_H), LOG_H, W))
     out.append(_render_footer(W, tick))
-    # Strict total — never exceed H
     return "\n".join(out[:H])
 
 

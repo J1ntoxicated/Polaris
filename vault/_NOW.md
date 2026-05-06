@@ -15,6 +15,19 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
 
+## Phase 20 (2026-05-06) — Real trading bot architecture (testing rig 졸업)
+
+User: "전략 테스팅기냐고..." — Polaris가 270 독립 paper 봇이었음. 진짜 trading bot으로 재구조.
+
+- **20.1** ExitStrategy framework (TakeProfit/StopLoss/TrailingStop/TimeBasedHold/SignalReversal/PartialTP composable, P6 pure, 29 tests)
+- **20.2** Contribution + AggregatedPosition (per-strategy slice, ticker별 합산, 20 tests)
+- **20.3** PortfolioManager (1 account, signal aggregation, per-ticker cap, 17 tests)
+- **20.4** PositionManager (실시간 exit monitor, multi-strategy independent exits, 13 tests)
+- **20.5** realtime_runner restructure (270 PaperBalance → 1 portfolio + N contributions)
+- **20.6** Vault docs ([[INSIGHT-039]])
+
+**1027 tests pass.** Live verified: `[PORTFOLIO] initialized cash=$5000 per_ticker_cap=$1500`. OKXBroker demo armed. Multi-strategy on same ticker now properly attributed via contribution slices, exits independent per strategy. Live transition은 broker singleton 그대로 (Phase 14.2).
+
 ## Phase 17-19 (2026-05-05) — 100% airtight closure
 - **Phase 17**: SQL primary write + dashboard SQL feed (SSOT 완전화)
 - **Phase 18**: 18 dispatcher 모두 registry, elif chain 완전 제거 (1,720→1,627 LOC)

@@ -68,11 +68,14 @@ MIN_SIZE_USD = 100.0    # below this → skip signal (fee drag too high)
 _KELLY_COLD_START = 0.05  # baseline for subnormal-float / zero-history guard
 _KELLY_HALF_CAP = 0.5     # half-Kelly cap (full Kelly too volatile)
 
-# Phase 2N+: Cold start size cap — weak strategy에 큰 size 방지 (HYPO-025 -$3.76 lesson).
-# n_trades < COLD_START_N 시 hard cap $300 → 학술 검증된 충분 sample 후 full dynamic size.
-# Rationale: n=6 win 33% (HYPO-025)처럼 small sample에서 dynamic sizing이 과대 size 줌.
-COLD_START_N = 20          # sample threshold — below this → cold start cap
-COLD_START_MAX_USD = 300.0 # max size during cold start period
+# Phase 27: Auto-scaling cold start (Jin mandate "위험해도 먹고 나와", "자동화").
+# Removed hard $300 cap. Cold start now scales by confidence — high-conf
+# signals can take full Kelly even with no history. Floor protects against
+# subnormal Kelly when no data; ceiling = MAX_FRACTION (already in compute_size).
+COLD_START_N = 20
+import os as _os
+# Optional cold-start cap via env (0 = disabled, default disabled — auto)
+COLD_START_MAX_USD = float(_os.environ.get("POLARIS_COLD_START_MAX_USD", "0"))
 
 
 def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:

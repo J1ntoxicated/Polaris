@@ -63,16 +63,20 @@ class PosCols:
 
 
 def _alloc(W: int) -> PosCols:
-    """Return ColWidths sized for terminal W. Sum + 18 separators = W."""
+    """Return ColWidths sized for terminal W. Sum + 18 separators = W.
+    REASON column absorbs remainder so content fills full width.
+    """
     if W >= 240:  # ultra
+        c = PosCols(2, 12, 5, 20, 4, 13, 13, 12, 8, 10, 9, 7, 6, 6, 12, 6, 8, 8, 9, 0)
+    elif W >= 200:  # wide (220 default)
         c = PosCols(2, 12, 5, 18, 4, 12, 12, 12, 8, 9, 8, 7, 6, 6, 10, 6, 7, 7, 9, 0)
-    elif W >= 180:  # wide (default 180×50)
+    elif W >= 180:
         c = PosCols(2, 11, 5, 14, 3, 10, 10, 10, 7, 9, 7, 6, 5, 5, 9, 5, 6, 6, 7, 0)
     else:  # narrow
         c = PosCols(2, 10, 4, 10, 3, 9, 9, 8, 7, 8, 6, 5, 4, 4, 7, 4, 5, 5, 5, 0)
     used = (c.LEAD + c.TKR + c.HYPO + c.STRAT + c.ST + c.ENTRY + c.LAST
             + c.BAR + c.PCT + c.UPNL + c.SIZE + c.HELD + c.SLIP + c.FEE
-            + c.REG + c.CONF + c.STOPD + c.FWDEV + c.EXITS + 18)  # 18 = 1-space separators
+            + c.REG + c.CONF + c.STOPD + c.FWDEV + c.EXITS + 18)
     c.REASON = max(0, W - used)
     return c
 

@@ -239,6 +239,170 @@ def _scan_from_ledger() -> tuple[list[dict], list[dict]]:
     return closed_all, open_all
 
 
+def _read_portfolio_live() -> dict:
+    """Phase 24 — read live portfolio JSON snapshot from runner."""
+    p = DATA_PAPER_DIR / "portfolio_live.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def render_portfolio_summary() -> Panel:
+    """Phase 24 — Polaris real trading bot architecture summary.
+
+    Replaces legacy stats_summary. Shows:
+    - Cash / Equity / Drawdown / HWM (single account, Phase 20)
+    - Daily 0.5% target progress (Phase 22)
+    - Capital velocity (Phase 22.3)
+    - Broker status (Phase 14.2)
+    - PM orchestrator activity (Phase 23.5)
+    """
+    snap = _read_portfolio_live()
+    if not snap:
+        return Panel("[dim]Waiting for runner snapshot…[/dim]",
+                     title="Portfolio (Phase 20-23)",
+                     border_style=BORDER, box=BOX, padding=(0, 1))
+
+    cash = snap.get("cash", 0)
+    equity = snap.get("equity", 0)
+    starting = snap.get("starting_cash", 5000)
+    hwm = snap.get("hwm", equity)
+    dd = snap.get("drawdown_pct", 0) * 100
+    realized = snap.get("realized_pnl", 0)
+    n_open = snap.get("n_open_contributions", 0)
+    n_tickers = snap.get("n_unique_tickers", 0)
+    broker_class = snap.get("broker_class", "—")
+    broker_mode = snap.get("broker_mode", "")
+
+    daily = snap.get("daily_target", {})
+    target = daily.get("target_usd", 0)
+    actual = daily.get("actual_today_usd", 0)
+    prog = daily.get("progress_ratio", 0) * 100
+    n_today = daily.get("n_trades_today", 0)
+    on_track = daily.get("on_track", False)
+
+    velocity = snap.get("velocity", {})
+    idle = velocity.get("cash_idle_ratio", 0) * 100
+    turnover = velocity.get("turnover_today", 0)
+    vscore = velocity.get("score", 0)
+    vdiag = velocity.get("diagnosis", "")
+
+    pm = snap.get("pm_stats", {})
+
+    # Color helpers
+    eq_color = "green" if equity >= starting else "red"
+    real_color = "green" if realized >= 0 else "red"
+    prog_color = "green" if on_track else ("yellow" if prog > 30 else "red")
+    dd_color = "red" if dd > 3 else ("yellow" if dd > 1 else "green")
+    broker_color = "magenta" if "OKX" in broker_class else "cyan"
+    broker_label = (
+        f"[{broker_color}]{broker_class}[/{broker_color}]"
+        + (f" ({broker_mode})" if broker_mode else "")
+    )
+
+    line1 = (
+        f"[bold]EQUITY[/bold] [{eq_color}]${equity:,.2f}[/{eq_color}] "
+        f"cash=${cash:,.2f} hwm=${hwm:,.2f} "
+        f"dd=[{dd_color}]{dd:.2f}%[/{dd_color}]  "
+        f"open=[bold]{n_open}[/bold] (×{n_tickers} ticker)  "
+        f"realized=[{real_color}]${realized:+.2f}[/{real_color}]  "
+        f"broker={broker_label}"
+    )
+    line2 = (
+        f"[bold]DAILY 0.5%[/bold] target=${target:.2f} actual=${actual:+.2f} "
+        f"([{prog_color}]{prog:+.1f}%[/{prog_color}]) trades={n_today}  "
+        f"[bold]VELOCITY[/bold] idle={idle:.0f}% turnover={turnover} "
+        f"score={vscore} {vdiag}"
+    )
+    pm_line = ""
+    if pm:
+        pm_line = (
+            f"\n[bold]PM CYCLE[/bold] eval={pm.get('n_evaluated', 0)} "
+            f"hold={pm.get('n_holds', 0)} close={pm.get('n_closes', 0)} "
+            f"rotate={pm.get('n_rotates', 0)} add={pm.get('n_adds', 0)}"
+        )
+        opps = pm.get("top_opportunities", [])
+        if opps:
+            top3 = ", ".join(
+                f"{o['ticker']}/{o['strategy']}({o['expected_return_pct']*100:+.2f}%)"
+                for o in opps[:3]
+            )
+            pm_line += f"  top: {top3}"
+
+    body = line1 + "\n" + line2 + pm_line
+    return Panel(body, title="Polaris Real Trading Bot (Phase 20-23)",
+                 border_style=BORDER, box=BOX, padding=(0, 1))
+
+
+def render_position_groups() -> Table:
+    """Phase 24 — position grouping by ticker (AggregatedPosition + contributions).
+
+    Each row = 1 contribution slice. Ticker grouped, strategy attribution visible.
+    State (HOT/WARM/COLD/LOSING) from PositionEvaluator.
+    """
+    table = Table(
+        title="Position Groups (per-ticker contributions, with HOT/WARM/COLD state)",
+        show_header=True, header_style="bold yellow",
+        expand=True, title_justify="left",
+        border_style=BORDER, box=BOX,
+    )
+    table.add_column("Ticker", justify="left", no_wrap=True, max_width=12)
+    table.add_column("Strategy", justify="left", no_wrap=True, max_width=18)
+    table.add_column("State", justify="center", no_wrap=True, max_width=7)
+    table.add_column("Entry $", justify="right", no_wrap=True, max_width=12)
+    table.add_column("Last $", justify="right", no_wrap=True, max_width=12)
+    table.add_column("Δ %", justify="right", no_wrap=True, max_width=8)
+    table.add_column("uPnL $", justify="right", no_wrap=True, max_width=8)
+    table.add_column("Size $", justify="right", no_wrap=True, max_width=7)
+    table.add_column("Held", justify="right", no_wrap=True, max_width=7)
+
+    snap = _read_portfolio_live()
+    groups = snap.get("position_groups", [])
+    if not groups:
+        table.add_row("—", "—", "—", "—", "—", "—", "—", "—", "—")
+        return table
+
+    now_ms = int(_dt.datetime.now().timestamp() * 1000)
+    state_styles = {
+        "hot": "bold green", "warm": "yellow",
+        "cold": "cyan", "losing": "bold red", "?": "dim",
+    }
+
+    # Sort groups by total_size desc
+    groups.sort(key=lambda g: g.get("total_size_usd", 0), reverse=True)
+
+    for grp in groups:
+        ticker = grp["ticker"]
+        cur_price = grp.get("current_price", 0)
+        for i, c in enumerate(grp.get("contributions", [])):
+            held_s = (now_ms - c["open_ts_ms"]) / 1000
+            held_str = f"{held_s:.0f}s" if held_s < 3600 else f"{held_s/3600:.1f}h"
+            change_pct = c.get("unrealized_pct", 0) * 100
+            unrealized = c.get("unrealized_usd", 0)
+            state = c.get("state", "?")
+            state_style = state_styles.get(state, "dim")
+            ch_style = "green" if change_pct > 0 else ("red" if change_pct < 0 else "dim")
+            upnl_style = "green" if unrealized >= 0 else "red"
+
+            # Show ticker only on first contribution of the group
+            ticker_disp = ticker if i == 0 else f"  └─"
+            table.add_row(
+                ticker_disp,
+                c["strategy"][:18],
+                Text(state.upper(), style=state_style),
+                fmt_price(c["entry_price"]),
+                fmt_price(cur_price) if cur_price else "—",
+                Text(f"{change_pct:+.2f}%", style=ch_style),
+                Text(f"{unrealized:+.2f}", style=upnl_style),
+                f"{c['size_usd']:.0f}",
+                held_str,
+            )
+    return table
+
+
 def render_stats_summary() -> Panel:
     closed, open_pos = _scan_all_states()
 
@@ -509,16 +673,44 @@ def render_live_logs(max_lines: int = 25, hide_balance: bool = True) -> Panel:
                             continue
                         events.append((parts[0], label[:28], f"[{parts[1]}] {parts[2]}"))
 
-    # Realtime err log — high signal trades from runner stdout
+    # Realtime err log — Phase 24: capture all new event types
     if REALTIME_ERR.exists():
         try:
-            tail = REALTIME_ERR.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+            tail = REALTIME_ERR.read_text(encoding="utf-8", errors="replace").splitlines()[-300:]
         except OSError:
             tail = []
+        # Phase 24 event tags to surface in dashboard
+        watch_tags = (
+            "OPEN", "CLOSE", "POS-EXIT", "PM-CYCLE", "PM-CLOSE", "PM-ROTATE",
+            "PM-ADD", "PM-ROTATE-FAIL", "PORTFOLIO-HALT", "REGIME-BLOCK",
+            "SPREAD-SKIP", "LIQ-SKIP", "BROKER", "PORTFOLIO", "PM-ORCH",
+            "POLICY-UPDATE",
+        )
+        tag_pattern = "|".join(re.escape(t) for t in watch_tags)
+        evt_re = re.compile(
+            rf"^(\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}})[,.]?\d* "
+            rf"\[(\w+)\] \[({tag_pattern})\]\s+(.+)$"
+        )
+        # Aggregate noisy SPREAD-SKIP / REGIME-BLOCK into hourly counts (don't spam)
+        skip_counts: dict[str, int] = {}
         for line in tail:
-            m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]?\d* \[(\w+)\] \[(OPEN|CLOSE)\]\s+(.+)$", line)
-            if m:
-                events.append((m.group(1).replace(" ", "T"), "runner", f"[{m.group(3)}] {m.group(4)}"))
+            m = evt_re.match(line)
+            if not m:
+                continue
+            tag = m.group(3)
+            ts = m.group(1)
+            if tag in ("SPREAD-SKIP", "REGIME-BLOCK"):
+                skip_counts[tag] = skip_counts.get(tag, 0) + 1
+                continue
+            events.append(
+                (ts.replace(" ", "T"), "runner", f"[{tag}] {m.group(4)}")
+            )
+        if skip_counts:
+            events.append((
+                _dt.datetime.now().isoformat(timespec="seconds"),
+                "aggregator",
+                "[SKIPS] " + ", ".join(f"{k}={v}" for k, v in skip_counts.items()),
+            ))
 
     events.sort(key=lambda x: x[0], reverse=True)
     latest = events[:max_lines]
@@ -534,8 +726,18 @@ def render_live_logs(max_lines: int = 25, hide_balance: bool = True) -> Panel:
                 color = "green bold"
             elif "[CLOSE]" in msg and "net=-" in msg:
                 color = "red bold"
-            elif "BREACH" in msg:
+            elif "[PM-ROTATE]" in msg:
+                color = "cyan bold"
+            elif "[PM-ADD]" in msg:
+                color = "blue bold"
+            elif "[PM-CLOSE]" in msg:
+                color = "magenta"
+            elif "[PORTFOLIO-HALT]" in msg or "BREACH" in msg:
                 color = "magenta bold"
+            elif "[BROKER]" in msg or "[PORTFOLIO]" in msg or "[PM-ORCH]" in msg:
+                color = "cyan"
+            elif "[POLICY-UPDATE]" in msg:
+                color = "yellow"
             else:
                 color = "white"
             lines.append(f"[dim]{ts[-8:]}[/dim] [{color}]{src:14s}[/{color}] {msg[:msg_max]}")
@@ -578,9 +780,10 @@ def render_dashboard() -> Group:
             buf = io.StringIO()
             test_c = _C(width=console.size.width, file=buf, force_terminal=False, no_color=True)
             test_c.print(Group(
-                render_header(), render_stats_summary(),
+                render_header(), render_portfolio_summary(),
+                render_position_groups(),
                 render_realtime_hypos(), render_cron_hypos(),
-                render_open_positions(), render_live_logs(max_lines=14),
+                render_stats_summary(), render_live_logs(max_lines=14),
             ))
             out = buf.getvalue().split("\n")
             widths = [len(ln) for ln in out]
@@ -598,10 +801,11 @@ def render_dashboard() -> Group:
             pass
     return Group(
         render_header(),
-        render_stats_summary(),
+        render_portfolio_summary(),       # Phase 24 — new top-of-screen panel
+        render_position_groups(),          # Phase 24 — contribution grouping with state
         render_realtime_hypos(),
         render_cron_hypos(),
-        render_open_positions(),
+        render_stats_summary(),            # Legacy stats (lifetime PnL)
         render_live_logs(max_lines=_dynamic_log_lines()),
     )
 

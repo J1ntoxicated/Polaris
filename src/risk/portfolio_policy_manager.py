@@ -78,6 +78,7 @@ class PortfolioPolicyManager:
         self.evaluator = evaluator or PositionEvaluator()
         self.cycle_interval_s = cycle_interval_s
         self._last_cycle_ms: int = 0
+        self._last_cycle_result: Optional[PMCycleResult] = None
 
     def should_run(self, ts_ms: int) -> bool:
         if self._last_cycle_ms == 0:
@@ -176,6 +177,7 @@ class PortfolioPolicyManager:
             ts_ms=ts_ms, n_evaluated=n_eval, n_holds=n_hold,
             n_closes=n_close, n_rotates=n_rotate, n_adds=n_add,
         )
+        self._last_cycle_result = result
         if n_eval > 0:
             logger.info(
                 f"[PM-CYCLE] eval={n_eval} hold={n_hold} close={n_close} "

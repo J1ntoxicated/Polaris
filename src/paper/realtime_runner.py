@@ -751,6 +751,138 @@ def _get_current_prices_snapshot() -> dict[str, float]:
     return dict(_last_tick_price_per_ticker)
 
 
+def _write_portfolio_live_json(tick_ts_ms: int) -> None:
+    """Phase 24 — write live portfolio state JSON for dashboard consumption.
+
+    Cheap (~1KB write every 30s). Dashboard reads this instead of querying
+    runner singletons directly (separate process boundary).
+    """
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        portfolio = get_portfolio()
+        prices = _get_current_prices_snapshot()
+        equity = portfolio.equity(prices)
+
+        # Position groups
+        position_groups = []
+        from src.risk.position_evaluator import PositionEvaluator
+        # Read current PM evaluator state
+        pm_orch = _portfolio_policy_manager_singleton
+        evaluator = pm_orch.evaluator if pm_orch else None
+
+        for ticker, pos in portfolio.positions.items():
+            price = prices.get(ticker, 0.0)
+            contribs = []
+            for c in pos.contributions:
+                if c.is_closed:
+                    continue
+                unreal_pct = c.unrealized_pct(price) if price > 0 else 0.0
+                state = "?"
+                if evaluator:
+                    last_state = evaluator._last_state.get(c.contribution_id)
+                    if last_state:
+                        state = last_state.value
+                contribs.append({
+                    "contribution_id": c.contribution_id,
+                    "strategy": c.strategy_name,
+                    "hypo_id": c.hypo_id,
+                    "entry_price": c.entry_price,
+                    "size_usd": c.size_usd,
+                    "open_ts_ms": c.open_ts_ms,
+                    "unrealized_pct": unreal_pct,
+                    "unrealized_usd": c.unrealized_usd(price) if price > 0 else 0.0,
+                    "state": state,
+                })
+            if contribs:
+                position_groups.append({
+                    "ticker": ticker,
+                    "total_size_usd": pos.total_size_usd,
+                    "avg_entry_price": pos.avg_entry_price,
+                    "current_price": price,
+                    "n_contrib": pos.n_open,
+                    "contributions": contribs,
+                })
+
+        # PM cycle stats (last result)
+        pm_stats = {}
+        if pm_orch is not None:
+            last = getattr(pm_orch, "_last_cycle_result", None)
+            if last:
+                pm_stats = {
+                    "ts_ms": last.ts_ms,
+                    "n_evaluated": last.n_evaluated,
+                    "n_holds": last.n_holds,
+                    "n_closes": last.n_closes,
+                    "n_rotates": last.n_rotates,
+                    "n_adds": last.n_adds,
+                }
+            scan = pm_orch.scanner.cached
+            if scan and scan.opportunities:
+                pm_stats["top_opportunities"] = [
+                    {"ticker": o.ticker, "strategy": o.strategy_name,
+                     "expected_return_pct": o.expected_return_pct,
+                     "confidence": o.signal_confidence}
+                    for o in scan.opportunities[:5]
+                ]
+
+        # Daily target + velocity
+        from src.risk.daily_target import compute_daily_progress
+        from src.risk.capital_velocity import compute_velocity
+        try:
+            daily = compute_daily_progress(portfolio, prices, tick_ts_ms)
+            velocity = compute_velocity(portfolio, tick_ts_ms)
+        except Exception:
+            daily = velocity = None
+
+        # Broker info
+        broker = _broker_singleton
+        broker_class = broker.__class__.__name__ if broker else "—"
+        broker_mode = ""
+        if broker is not None and broker.is_live:
+            broker_mode = "DEMO" if _os.environ.get("POLARIS_OKX_DEMO", "1") == "1" else "REAL"
+
+        snap = {
+            "ts_ms": tick_ts_ms,
+            "starting_cash": portfolio.starting_cash,
+            "cash": portfolio.cash,
+            "equity": equity,
+            "hwm": _portfolio_hwm_usd,
+            "drawdown_pct": (
+                (_portfolio_hwm_usd - equity) / _portfolio_hwm_usd
+                if _portfolio_hwm_usd > 0 else 0.0
+            ),
+            "realized_pnl": portfolio.realized_pnl_usd(),
+            "n_open_contributions": portfolio.n_open_contributions,
+            "n_unique_tickers": len(portfolio.positions),
+            "broker_class": broker_class,
+            "broker_mode": broker_mode,
+            "active_hypos": [h["hypo_id"] for h in REALTIME_HYPOS],
+            "position_groups": position_groups,
+            "pm_stats": pm_stats,
+            "daily_target": {
+                "target_usd": daily.target_usd if daily else 0,
+                "actual_today_usd": daily.actual_today_usd if daily else 0,
+                "progress_ratio": daily.progress_ratio if daily else 0,
+                "n_trades_today": daily.n_trades_today if daily else 0,
+                "on_track": daily.on_track if daily else False,
+            } if daily else {},
+            "velocity": {
+                "cash_idle_ratio": velocity.cash_idle_ratio if velocity else 0,
+                "turnover_today": velocity.turnover_today if velocity else 0,
+                "score": velocity.velocity_score if velocity else 0,
+                "diagnosis": velocity.diagnosis if velocity else "",
+            } if velocity else {},
+        }
+
+        out_path = _Path(__file__).resolve().parent.parent.parent / "data" / "paper" / "portfolio_live.json"
+        tmp = out_path.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(snap, default=str, indent=2))
+        tmp.replace(out_path)
+    except Exception as e:
+        logger.warning(f"portfolio_live.json write failed: {e!r}")
+
+
 def _maybe_snapshot_portfolio(tick_ts_ms: int) -> None:
     """Phase 20.5 — snapshot now uses PortfolioManager state directly.
 
@@ -1342,7 +1474,19 @@ def make_tick_handler() -> Callable[[str, dict], None]:
             _run_pm_cycle(tick_ts)
         except Exception as e:
             logger.error(f"pm cycle err: {e!r}")
+
+        # Phase 24: write live portfolio snapshot for dashboard (~30s cadence)
+        global _last_live_json_write_ms
+        if tick_ts - _last_live_json_write_ms >= 30_000:
+            try:
+                _write_portfolio_live_json(tick_ts)
+                _last_live_json_write_ms = tick_ts
+            except Exception as e:
+                logger.warning(f"live json write err: {e!r}")
     return handler
+
+
+_last_live_json_write_ms: int = 0
 
 
 def _run_pm_cycle(tick_ts_ms: int) -> None:

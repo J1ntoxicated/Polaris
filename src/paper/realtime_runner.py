@@ -662,11 +662,40 @@ def get_position_manager():
     return _position_manager_singleton
 
 
+# Phase 23.5: PortfolioPolicyManager singleton (orchestrator).
+_portfolio_policy_manager_singleton = None  # type: ignore[var-annotated]
+
+
+def get_pm_orchestrator():
+    """Lazy PortfolioPolicyManager singleton — runs every 30s by default."""
+    global _portfolio_policy_manager_singleton
+    if _portfolio_policy_manager_singleton is None:
+        from src.risk.portfolio_policy_manager import PortfolioPolicyManager
+        from src.risk.opportunity_scanner import OpportunityScanner
+        from src.risk.reallocation_decider import ReallocationDecider
+        from src.risk.position_evaluator import PositionEvaluator
+        cycle_s = float(_os.environ.get("POLARIS_PM_CYCLE_S", "30"))
+        switching_pct = float(_os.environ.get("POLARIS_SWITCH_COST_PCT", "0.007"))
+        _portfolio_policy_manager_singleton = PortfolioPolicyManager(
+            portfolio=get_portfolio(),
+            scanner=OpportunityScanner(scan_interval_s=cycle_s, top_n=10),
+            decider=ReallocationDecider(switching_cost_pct=switching_pct),
+            evaluator=PositionEvaluator(),
+            cycle_interval_s=cycle_s,
+        )
+        logger.info(
+            f"[PM-ORCH] initialized cycle={cycle_s}s switching_cost={switching_pct*100:.2f}%"
+        )
+    return _portfolio_policy_manager_singleton
+
+
 def reset_portfolio_singletons() -> None:
-    """Test helper — drop both singletons."""
+    """Test helper — drop singletons."""
     global _portfolio_singleton, _position_manager_singleton
+    global _portfolio_policy_manager_singleton
     _portfolio_singleton = None
     _position_manager_singleton = None
+    _portfolio_policy_manager_singleton = None
 
 
 def get_broker() -> Broker:
@@ -1306,7 +1335,101 @@ def make_tick_handler() -> Callable[[str, dict], None]:
             _check_portfolio_exits(tick_ts)
         except Exception as e:
             logger.error(f"portfolio exits err: {e!r}")
+
+        # Phase 23.5: PM orchestrator — periodic (default 30s) active
+        # capital reallocation. Throttled internally; cheap when not running.
+        try:
+            _run_pm_cycle(tick_ts)
+        except Exception as e:
+            logger.error(f"pm cycle err: {e!r}")
     return handler
+
+
+def _run_pm_cycle(tick_ts_ms: int) -> None:
+    """Phase 23.5 — PortfolioPolicyManager cycle.
+
+    Builds candidate signals (all REALTIME_HYPOS × tickers), invokes
+    PM.cycle which:
+      1. Scans for opportunities (cached, periodic)
+      2. Evaluates each open contribution (HOT/WARM/COLD/LOSING)
+      3. Decides per-contribution action (HOLD/CLOSE/ROTATE/ADD)
+      4. Executes atomically (close-then-open guarded)
+
+    Cycle is throttled by PortfolioPolicyManager.should_run.
+    """
+    pm = get_pm_orchestrator()
+    if not pm.should_run(tick_ts_ms):
+        return
+    portfolio = get_portfolio()
+    if portfolio.n_open_contributions == 0:
+        # No positions to manage; still runs scan to populate cache.
+        pass
+
+    # Build candidate signals — all (ticker, hypo) combos active
+    candidates: list[tuple[str, str, str]] = []
+    for h in REALTIME_HYPOS:
+        for t in h.get("tickers", []):
+            try:
+                strat = _get_strategy(h, t)
+                candidates.append((t, strat.name, h["hypo_id"]))
+            except Exception:
+                continue
+
+    # Signal eval function — invokes existing dispatchers, builds Opportunity
+    def _signal_eval_fn(ticker: str, strategy_name: str, hypo_id: str):
+        # Locate hypo
+        hypo = next((h for h in REALTIME_HYPOS if h["hypo_id"] == hypo_id), None)
+        if hypo is None:
+            return None
+        try:
+            strategy = _get_strategy(hypo, ticker)
+            primary = hypo.get("primary_tf")
+            dispatcher = get_dispatcher(primary)
+            if dispatcher is None:
+                return None
+            tick_full = get_tick(ticker) or {}
+            tick_price = float(tick_full.get("last", 0) or 0)
+            if tick_price <= 0:
+                return None
+            book = get_book(ticker) or {}
+            bid = float(tick_full.get("bid", 0) or 0)
+            ask = float(tick_full.get("ask", 0) or 0)
+            ctx = DispatchContext(
+                strategy=strategy, hypo=hypo, ticker=ticker,
+                tick_ts_ms=tick_ts_ms, tick_price=tick_price,
+                full_tick=tick_full, book=book, bid=bid, ask=ask,
+            )
+            sig = dispatcher(ctx)
+            if sig is None or sig.action != SignalAction.ENTER_LONG:
+                return None
+            from src.risk.opportunity_scanner import Opportunity
+            # Historical EV proxy: confidence × 0.01 (1% nominal)
+            er = sig.confidence * 0.01
+            return Opportunity(
+                ticker=ticker, strategy_name=strategy_name, hypo_id=hypo_id,
+                signal_confidence=sig.confidence,
+                historical_ev_pct=0.01,
+                expected_return_pct=er,
+                signal_reason=sig.reason or "",
+                ts_ms=tick_ts_ms,
+            )
+        except Exception:
+            return None
+
+    def _recent_prices_fn(ticker: str) -> list[float]:
+        buf = _price_history_60s.get(ticker)
+        if not buf:
+            return []
+        return [p for _ts, p in buf][-30:]
+
+    prices = _get_current_prices_snapshot()
+    pm.cycle(
+        ts_ms=tick_ts_ms,
+        current_prices=prices,
+        candidate_signals=candidates,
+        signal_eval_fn=_signal_eval_fn,
+        recent_prices_fn=_recent_prices_fn,
+    )
 
 
 async def _run_okx_and_binance(

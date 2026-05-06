@@ -188,14 +188,16 @@ class TestCapitalVelocity:
 
 
 class TestDefaultComposite:
-    def test_default_includes_micro_profit(self):
+    def test_default_no_micro_profit(self):
+        """Phase 23.6: MicroProfit moved to PortfolioPolicyManager, not default chain."""
         comp = build_default_composite()
         assert isinstance(comp, CompositePolicy)
         names = [p.name for p in comp.policies]
         assert "merge_adaptive" in names
-        assert "micro_profit" in names
         assert "regime_adaptive" in names
-        assert "trailing_profit" not in names  # Phase 22 removed
+        # MicroProfit no longer default — handled conditionally by PM orchestrator
+        assert "micro_profit" not in names
+        assert "trailing_profit" not in names
 
     def test_aggressive_lower_threshold(self):
         comp = build_aggressive_composite()
@@ -204,13 +206,15 @@ class TestDefaultComposite:
         assert micro.min_profit_pct == 0.003
 
 
-# ─── End-to-end: micro profit fires before regime can adapt ─────────────────
+# ─── Phase 23.6: MicroProfit only fires conditionally via PM orchestrator ──
 
 
-class TestMicroProfitWinsOverRegime:
-    """Phase 22 user philosophy: micro profit beats regime adaptation."""
+class TestMicroProfitConditional:
+    """Phase 23.6: MicroProfit no longer fires unconditionally in CompositePolicy.
+       Only fires via PortfolioPolicyManager when position is COLD.
+    """
 
-    def test_micro_profit_fires_before_regime_change(self, portfolio):
+    def test_default_composite_does_not_microprofit(self, portfolio):
         portfolio.process_entry(
             "BTC-USDT", "vb", "X", 100, 80000, 1, _exits(),
         )
@@ -220,5 +224,5 @@ class TestMicroProfitWinsOverRegime:
             ticker="BTC-USDT", price=80480, ts_ms=2, regime="uptrend",
         )
         d = comp.evaluate(portfolio.get_position("BTC-USDT"), ctx)
-        assert d.action == PolicyAction.EXIT_FULL
-        assert "micro_profit" in d.reason
+        # No EXIT_FULL because MicroProfit removed; RegimeAdaptive may UPDATE
+        assert d.action != PolicyAction.EXIT_FULL

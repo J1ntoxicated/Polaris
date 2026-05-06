@@ -206,21 +206,25 @@ class TrailingProfitPolicy(PositionPolicy):
 
 
 def build_default_composite() -> PositionPolicy:
-    """Factory — default CompositePolicy: Merge → MicroProfit → Regime.
+    """Factory — default CompositePolicy: Merge → Regime.
 
-    Phase 22 philosophy: 작은 profit 빨리 take, 자본 회전. 들고있기 X.
-    Daily 0.5% target via volume of small wins.
+    Phase 23.6 (Codex round-1 final): MicroProfit removed from default chain.
+    Profit-take logic moved INTO PortfolioPolicyManager (PM orchestrator) and
+    only fires conditionally — when PositionEvaluator classifies as COLD.
+
+    HOT/WARM positions HOLD (potential remains, don't fragment).
+    COLD positions either profit-take or rotate (handled by PM orchestrator).
 
     Order:
         1. MergeAdaptive — re-unify exits when contribution joins
-        2. MicroProfit — TAKE first 0.5%+ profit (cycle capital)
-        3. RegimeAdaptive — adjust exits to regime if no profit yet
+        2. RegimeAdaptive — adjust exits to regime if appropriate
+
+    User vision realized: "포텐셜 있음 들고있고, 횡보면 갈아치워."
     """
     from src.risk.position_policy import CompositePolicy
     return CompositePolicy(
         policies=(
             MergeAdaptivePolicy(),
-            MicroProfitPolicy(min_profit_pct=0.005),
             RegimeAdaptivePolicy(),
         ),
     )

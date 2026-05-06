@@ -29,6 +29,10 @@ class SizingInputs:
     recent_avg_loss_pct: float      # avg gross % per loss (positive, e.g. 0.5 = 0.5%)
     regime: str                     # "crisis" / "uptrend" / "flat" / "downtrend"
     drawdown_pct: float
+    # Phase 27: optional calibrated_confidence from bayesian.calibrate_confidence().
+    # When provided, replaces signal_confidence in conf² multiplier.
+    # Caller sets this when CompositeScorer + bayesian calibration is available.
+    calibrated_confidence: float | None = None
     """drawdown_pct: rolling peak-to-trough drawdown ratio (0.0-1.0).
 
     Rolling window: account 시작 또는 last 30d high 기준.
@@ -68,14 +72,12 @@ MIN_SIZE_USD = 100.0    # below this → skip signal (fee drag too high)
 _KELLY_COLD_START = 0.05  # baseline for subnormal-float / zero-history guard
 _KELLY_HALF_CAP = 0.5     # half-Kelly cap (full Kelly too volatile)
 
-# Phase 27: Auto-scaling cold start (Jin mandate "위험해도 먹고 나와", "자동화").
-# Removed hard $300 cap. Cold start now scales by confidence — high-conf
-# signals can take full Kelly even with no history. Floor protects against
-# subnormal Kelly when no data; ceiling = MAX_FRACTION (already in compute_size).
+# Phase 27: Auto-scaling cold start (Jin mandate "위험해도 먹고 나와").
+# Default 300 (legacy safety) — production sets POLARIS_COLD_START_MAX_USD=0
+# to disable cap and let Kelly+confidence² do dynamic sizing.
 COLD_START_N = 20
 import os as _os
-# Optional cold-start cap via env (0 = disabled, default disabled — auto)
-COLD_START_MAX_USD = float(_os.environ.get("POLARIS_COLD_START_MAX_USD", "0"))
+COLD_START_MAX_USD = float(_os.environ.get("POLARIS_COLD_START_MAX_USD", "300"))
 
 
 def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
@@ -119,8 +121,10 @@ def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
             kelly_raw = 0.0
         kelly = max(0.0, min(kelly_raw, _KELLY_HALF_CAP))
 
-    # 2. Confidence multiplier — squares penalise low confidence hard
-    conf_mult = inputs.signal_confidence ** 2
+    # 2. Confidence multiplier — squares penalise low confidence hard.
+    # Phase 27: use calibrated_confidence² when available (stronger signal → size up).
+    _conf = inputs.calibrated_confidence if inputs.calibrated_confidence is not None else inputs.signal_confidence
+    conf_mult = _conf ** 2
 
     # 3. Regime multiplier — default to flat if unknown
     regime_mult = REGIME_MULT.get(inputs.regime, REGIME_MULT["flat"])
@@ -149,8 +153,9 @@ def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
         cold_start_applied = True
 
     cold_tag = f" [cold_start n={n_trades}<{COLD_START_N} cap=${COLD_START_MAX_USD:.0f}]" if cold_start_applied else ""
+    _conf_tag = f"cal_conf²" if inputs.calibrated_confidence is not None else "conf²"
     reason = (
-        f"kelly={kelly:.2f} × conf²={conf_mult:.2f} × regime[{inputs.regime}]={regime_mult:.1f} "
+        f"kelly={kelly:.2f} × {_conf_tag}={conf_mult:.2f} × regime[{inputs.regime}]={regime_mult:.1f} "
         f"× dd[{inputs.drawdown_pct:.1%}]={dd_mult:.2f} = {fraction:.3f}{cold_tag}"
     )
     return SizingOutput(size_usd=size_usd, fraction=fraction, reason=reason)

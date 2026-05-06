@@ -21,6 +21,12 @@ from src.exec.exit_strategies import (
     evaluate_all,
 )
 from src.risk.portfolio_manager import PortfolioManager
+from src.risk.position_policy import (
+    MarketContext,
+    PolicyAction,
+    PositionPolicy,
+    StaticPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +45,38 @@ class ExitEvent:
 
 
 class PositionManager:
-    """Real-time monitor — runs exit_strategies on every contribution per tick.
+    """Real-time monitor — runs PositionPolicy + exit_strategies per tick.
 
-    Stateless wrt exit decisions — relies on Contribution.high_since_entry
-    + fired_partial_levels for state, both tracked via PortfolioManager.
+    Phase 21: each ticker has an attached PositionPolicy that adapts exits
+    over time (merge / regime / trailing). Default StaticPolicy preserves
+    Phase 20 behavior.
+
+    Per-tick flow:
+        1. Build MarketContext from price + regime + indicators
+        2. policy.evaluate(position, context) → decision
+        3. If UPDATE_EXITS: replace contributions' exit_strategies in place
+        4. If EXIT_FULL/PARTIAL: directly close (rare path)
+        5. Else (HOLD): run static exit_strategies (Phase 20 logic)
     """
 
     def __init__(self, portfolio: PortfolioManager) -> None:
         self.portfolio = portfolio
+        # Per-ticker policy. Default StaticPolicy when not assigned.
+        self._policies: dict[str, PositionPolicy] = {}
+
+    def assign_policy(self, ticker: str, policy: PositionPolicy) -> None:
+        """Attach a policy to a ticker. Called at first entry."""
+        self._policies[ticker] = policy
+
+    def get_policy(self, ticker: str) -> PositionPolicy:
+        return self._policies.get(ticker, StaticPolicy())
 
     def check_exits(
         self,
         current_prices: dict[str, float],
         ts_ms: int,
         last_signal_actions: dict[tuple[str, str], str] | None = None,
+        market_contexts: dict[str, MarketContext] | None = None,
     ) -> list[ExitEvent]:
         """Evaluate all open contributions; close those whose exit fires.
 
@@ -65,6 +89,7 @@ class PositionManager:
         Returns list of ExitEvent (one per fire). Side effects on self.portfolio.
         """
         last_signal_actions = last_signal_actions or {}
+        market_contexts = market_contexts or {}
         events: list[ExitEvent] = []
 
         for ticker, pos in list(self.portfolio.positions.items()):
@@ -79,6 +104,57 @@ class PositionManager:
             if pos is None:
                 continue
 
+            # Phase 21: PositionPolicy.evaluate — adaptive exit logic.
+            ctx = market_contexts.get(ticker) or MarketContext(
+                ticker=ticker, price=price, ts_ms=ts_ms,
+            )
+            policy = self.get_policy(ticker)
+            decision = policy.evaluate(pos, ctx)
+
+            if decision.action == PolicyAction.UPDATE_EXITS:
+                # Replace each open contribution's exit_strategies with new ones.
+                # Maintains attribution but unifies exit logic.
+                self._update_position_exits(pos, decision.new_exits)
+                logger.info(
+                    f"[POLICY-UPDATE] {ticker} reason={decision.reason} "
+                    f"new_exits={[e.name for e in decision.new_exits]}"
+                )
+                # Re-fetch after update
+                pos = self.portfolio.get_position(ticker)
+                if pos is None:
+                    continue
+            elif decision.action == PolicyAction.EXIT_FULL:
+                # Force close all contributions
+                for contrib in list(pos.contributions):
+                    if contrib.is_closed:
+                        continue
+                    market_for_exit = MarketSnapshot(
+                        ticker=ticker, price=price, ts_ms=ts_ms,
+                        high_since_entry=contrib.high_since_entry,
+                    )
+                    ex_decision = ExitDecision(
+                        should_close=True, reason=decision.reason or "policy_full",
+                        fraction=1.0,
+                    )
+                    ev = self._execute_exit(contrib, ex_decision, price, ts_ms)
+                    if ev:
+                        events.append(ev)
+                continue  # don't run static check on closed
+            elif decision.action == PolicyAction.EXIT_PARTIAL:
+                # Force partial close — apply to first open contribution
+                for contrib in list(pos.contributions):
+                    if contrib.is_closed:
+                        continue
+                    ex_decision = ExitDecision(
+                        should_close=True, reason=decision.reason or "policy_partial",
+                        fraction=decision.fraction,
+                    )
+                    ev = self._execute_exit(contrib, ex_decision, price, ts_ms)
+                    if ev:
+                        events.append(ev)
+                    break
+
+            # Static exit check (HOLD path or after UPDATE_EXITS)
             for contrib in list(pos.contributions):
                 if contrib.is_closed:
                     continue
@@ -109,6 +185,36 @@ class PositionManager:
                 if event is not None:
                     events.append(event)
         return events
+
+    def _update_position_exits(self, pos, new_exits: tuple) -> None:
+        """Replace exit_strategies on every active contribution.
+
+        Preserves per-contribution SignalReversal exits — these are the
+        owning strategy's voice and must survive policy updates. Other
+        exits (TP/SL/TimeBased/Trailing/PartialTP) get replaced from the
+        unified policy decision.
+        """
+        from dataclasses import replace as _replace
+        from src.exec.exit_strategies import SignalReversal
+        for contrib in list(pos.contributions):
+            if contrib.is_closed:
+                continue
+            # Preserve this contribution's SignalReversal(s)
+            preserved_sigrev = tuple(
+                e for e in contrib.exit_strategies if isinstance(e, SignalReversal)
+            )
+            # Drop any SignalReversal in new_exits (don't double-add)
+            new_non_sigrev = tuple(
+                e for e in new_exits if not isinstance(e, SignalReversal)
+            )
+            merged = new_non_sigrev + preserved_sigrev
+            updated = _replace(contrib, exit_strategies=merged)
+            self.portfolio._positions[pos.ticker] = pos.replace_contribution(
+                contrib.contribution_id, updated,
+            )
+            pos = self.portfolio.get_position(pos.ticker)
+            if pos is None:
+                break
 
     def _execute_exit(
         self,

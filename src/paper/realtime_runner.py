@@ -880,11 +880,26 @@ def _check_portfolio_exits(tick_ts_ms: int) -> None:
         return
     pm = get_position_manager()
     prices = _get_current_prices_snapshot()
-    # Phase 20.7 (Codex P1 fix): pass per-(ticker, strategy) actions so
-    # SignalReversal isolates between tickers running same strategy.
+    # Phase 21: build MarketContext per ticker for adaptive policies.
+    btc_1d = _get_btc_1d_candles()
+    regime_now = detect_regime(btc_1d) if btc_1d else "flat"
+    btc_trend = "unknown"
+    if len(btc_1d) >= 2:
+        btc_trend = "up" if btc_1d[-1].close > btc_1d[-2].close else "down"
+    from src.risk.position_policy import MarketContext
+    market_ctxs = {}
+    for ticker, price in prices.items():
+        binance_sym = ticker.replace("-", "")
+        funding = _funding_rate_cache.get(binance_sym) or 0.0
+        market_ctxs[ticker] = MarketContext(
+            ticker=ticker, price=price, ts_ms=tick_ts_ms,
+            regime=regime_now, btc_trend=btc_trend, funding_8h=funding,
+        )
+    # Phase 20.7 (Codex P1 fix): pass per-(ticker, strategy) actions.
     events = pm.check_exits(
         prices, ts_ms=tick_ts_ms,
         last_signal_actions=dict(_strategy_last_action),
+        market_contexts=market_ctxs,
     )
     for ev in events:
         # Phase 20.7 — broker SELL was already placed in PositionManager._execute_exit.
@@ -1183,9 +1198,14 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
                         f"size=${size:.2f} cid={contrib.contribution_id[:16]} "
                         f"broker={get_broker().__class__.__name__}"
                     )
-                    # Phase 20.5 backward-compat: sync to JSON + SQL via
-                    # _save_balance for dashboard / tests / cron compat.
-                    # Per-(ticker, strategy) snapshot built from portfolio state.
+                    # Phase 21: assign default adaptive policy on first entry
+                    # for this ticker. Subsequent entries (merge) get the same
+                    # policy which detects merge and unifies exits.
+                    pmgr = get_position_manager()
+                    if ticker not in pmgr._policies:
+                        from src.risk.adaptive_policies import build_default_composite
+                        pmgr.assign_policy(ticker, build_default_composite())
+                    # Phase 20.5 backward-compat: sync to JSON + SQL.
                     _sync_legacy_state(ticker, sname, hypo, portfolio)
 
 

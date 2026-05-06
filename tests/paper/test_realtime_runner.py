@@ -50,6 +50,19 @@ def _isolate_state(tmp_path, monkeypatch):
     # Phase 20.5: reset portfolio + position manager singletons (state leak)
     rt.reset_portfolio_singletons()
     rt._strategy_last_action.clear()
+    # Phase 21: clear BTC 1D cache (regime detection state)
+    rt._btc_1d_cache = (0.0, [])
+    # Phase 21: override default adaptive policy with StaticPolicy for tests.
+    # Legacy tests assume scalp TP 0.6% / SL 0.35% — adaptive policies would
+    # rewrite these based on regime. Production uses CompositePolicy default.
+    from src.risk.position_policy import StaticPolicy
+    _original_build = None
+    try:
+        from src.risk import adaptive_policies as _ap
+        _original_build = _ap.build_default_composite
+        _ap.build_default_composite = lambda: StaticPolicy()
+    except Exception:
+        pass
     rt._last_close_ms.clear()
     rt._last_close_ms_ticker.clear()
     rt._indicator_cache.clear()

@@ -118,6 +118,42 @@ class RegimeAdaptivePolicy(PositionPolicy):
 
 
 @dataclass
+class MicroProfitPolicy(PositionPolicy):
+    """Take first viable profit > fee + slippage + cushion (Phase 22.1).
+
+    Philosophy: don't hold for big targets. Cycle capital fast — small
+    wins compound. Daily 0.5% goal via volume of small profitable trades.
+
+    min_profit_pct breakdown (default 0.005 = 0.5%):
+        fee_round_trip:  0.0020  (OKX taker 0.1% × 2)
+        slippage_est:    0.0005  (5bps avg observed)
+        cushion:         0.0025  (safety + clean win)
+        total:           0.0050
+
+    EXIT_FULL when weighted unrealized >= min_profit_pct.
+    """
+    min_profit_pct: float = 0.005
+    name: str = "micro_profit"
+
+    def evaluate(self, position, market: MarketContext) -> PolicyDecision:
+        active = [c for c in position.contributions if not c.is_closed]
+        if not active:
+            return PolicyDecision(action=PolicyAction.HOLD, reason="no_active")
+        total_size = sum(c.size_usd for c in active)
+        if total_size <= 0:
+            return PolicyDecision(action=PolicyAction.HOLD, reason="zero_size")
+        weighted_gain = sum(
+            c.unrealized_pct(market.price) * c.size_usd for c in active
+        ) / total_size
+        if weighted_gain >= self.min_profit_pct:
+            return PolicyDecision(
+                action=PolicyAction.EXIT_FULL,
+                reason=f"micro_profit:{weighted_gain*100:.3f}%>={self.min_profit_pct*100:.2f}%",
+            )
+        return PolicyDecision(action=PolicyAction.HOLD, reason="below_micro_threshold")
+
+
+@dataclass
 class TrailingProfitPolicy(PositionPolicy):
     """Once position reaches activation profit, switch to trailing-only exits.
 
@@ -170,16 +206,37 @@ class TrailingProfitPolicy(PositionPolicy):
 
 
 def build_default_composite() -> PositionPolicy:
-    """Factory — default CompositePolicy: Merge → Regime → Trailing.
+    """Factory — default CompositePolicy: Merge → MicroProfit → Regime.
 
-    Order matters: merge first (re-unify), then regime adapt, then profit
-    trailing (most-recent state wins).
+    Phase 22 philosophy: 작은 profit 빨리 take, 자본 회전. 들고있기 X.
+    Daily 0.5% target via volume of small wins.
+
+    Order:
+        1. MergeAdaptive — re-unify exits when contribution joins
+        2. MicroProfit — TAKE first 0.5%+ profit (cycle capital)
+        3. RegimeAdaptive — adjust exits to regime if no profit yet
     """
     from src.risk.position_policy import CompositePolicy
     return CompositePolicy(
         policies=(
             MergeAdaptivePolicy(),
+            MicroProfitPolicy(min_profit_pct=0.005),
             RegimeAdaptivePolicy(),
-            TrailingProfitPolicy(),
+        ),
+    )
+
+
+def build_aggressive_composite() -> PositionPolicy:
+    """Factory — even tighter cycling for high-velocity environments.
+
+    min_profit_pct = 0.003 (just barely above fee+slip).
+    Use only on high-frequency strategies (HYPO-008 VolBurst, HYPO-040 Grid).
+    """
+    from src.risk.position_policy import CompositePolicy
+    return CompositePolicy(
+        policies=(
+            MergeAdaptivePolicy(),
+            MicroProfitPolicy(min_profit_pct=0.003),
+            RegimeAdaptivePolicy(),
         ),
     )

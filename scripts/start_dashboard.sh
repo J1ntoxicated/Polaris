@@ -46,10 +46,10 @@ BOUNDS="${POLARIS_DASH_BOUNDS:-$BOUNDS_DEFAULT}"
 LAUNCHER="/tmp/polaris_dashboard.command"
 cat > "$LAUNCHER" <<WRAPPER
 #!/bin/bash
-printf '\033]0;Polaris Dashboard\007'
+printf '\033]0;Polaris Intel\007'
 cd "$POLARIS_DIR"
 source .venv/bin/activate
-exec python -m src.dashboard.cli --refresh $REFRESH_SEC
+exec python -m src.dashboard.intel
 WRAPPER
 chmod +x "$LAUNCHER"
 

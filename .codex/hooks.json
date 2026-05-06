@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Users/jinyoon/Projects/Polaris/.codex/hooks/pre_agent.py'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Users/jinyoon/Projects/Polaris/.codex/hooks/post_edit.py'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 '/Users/jinyoon/Projects/Polaris/.codex/hooks/post_stop.py'"
+          }
+        ]
+      }
+    ]
+  }
+}

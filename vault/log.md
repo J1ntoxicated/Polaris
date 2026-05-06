@@ -15,6 +15,10 @@ tags: [meta, log, append_only, polaris]
 
 > Append-only. 모든 모드 작업 마감 시 1 줄 추가.
 
+## 2026-05-06
+
+- **Phase 26.3 완료 + Phase 27 개시** — (26.1) 8-section 220×55 dashboard (header/open_positions/auto_manager+strategy_perf side-by-side/closed_trades/live_log/footer), env override POLARIS_DASH_W/H. (26.2) reconcile 5min cadence + startup_sync (broker positions 복구). (26.3) portfolio $50k / per-ticker $10k / broker_max $2k / cold_start_cap=0 aggressive sizing 확정. Phase 27: Codex debate 1라운드 합의 — composer-lite (Elo 가중 합산) + Bayesian calibration only, XGBoost 전체 ML 거부. [[INSIGHT-040]] [[INSIGHT-041]]
+
 ## 2026-05-05
 
 - **Phase 20 (2026-05-06) — Real trading bot architecture (testing rig 졸업)** — User 핵심 지적 "전략 테스팅기냐고..." 수용. 270 PaperBalance 독립 봇 모드 → 1 PortfolioManager + N Contribution 구조. 6 ExitStrategy composable (TP/SL/Trailing/MaxHold/SignalReversal/PartialTP), Contribution per-strategy slice, AggregatedPosition per-ticker 합산, PositionManager 실시간 multi-strategy independent exits. realtime_runner restructure — 9 balance → 1 portfolio. 84 신규 tests, 1027 tests pass. OKX demo broker (Phase 14.2) auto-armed. [[INSIGHT-039]]

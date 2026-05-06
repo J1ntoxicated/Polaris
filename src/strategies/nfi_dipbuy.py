@@ -39,7 +39,7 @@ DEFAULT_AROON_UP_MAX: float = 85.0    # 4h AROON_UP < 85 (relaxed from 80)
 DEFAULT_BB_STD: float = 2.0           # Bollinger Band std multiplier
 DEFAULT_BB_WINDOW: int = 20           # BB window (1h candles)
 DEFAULT_BB_BUFFER: float = 1.005      # price < bb_lower × 1.005 (0.5% slack)
-DEFAULT_MIN_CONFLUENCE: int = 3       # 3-of-5 conditions required for ENTER_LONG
+DEFAULT_MIN_CONFLUENCE: int = 2       # Phase 27.5 aggressive: 2-of-5 (was 3) — Jin "위험해도 먹고 나와"
 
 # Exit thresholds
 DEFAULT_RSI14_EXIT: float = 84.0      # RSI_14 > 84 on 1h = momentum exhaustion

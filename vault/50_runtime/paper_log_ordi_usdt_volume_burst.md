@@ -22,3 +22,6 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-04T00:55:35 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
+| 2026-05-06T03:39:17 | OPEN | id=ORDI-USDT-1778002744912 dir=1 entry=5.27 size=$132 |
+| 2026-05-06T04:40:57 | CLOSE | id=ORDI-USDT-1778002744912 entry=5.27 exit=5.17 net=-2.17% net_usd=-2.86 |
+| 2026-05-06T04:40:57 | EXIT_REASON | sl_hit:-0.0205 |

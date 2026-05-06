@@ -22,3 +22,5 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-05T10:02:16 | OPEN | id=SHIB-USDT-1777939303669 dir=1 entry=0.00 size=$300 |
+| 2026-05-05T11:53:31 | CLOSE | id=SHIB-USDT-1777939303669 entry=0.00 exit=0.00 net=+0.41% net_usd=+1.24 |
+| 2026-05-05T11:53:31 | EXIT_REASON | tp_hit:+0.0061 |

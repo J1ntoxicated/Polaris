@@ -2,7 +2,7 @@
 entity_type: live_dashboard
 entity_id: now
 auto: false
-last_modified: 2026-05-04  # AI Advisor LONG bias fix: confidence 0.75 + neutral prompt + decision counter
+last_modified: 2026-05-06  # Phase 26.3 complete + Phase 27 개시 (codex debate 합의: composer-lite + bayesian calibration)
 expires: never
 editable: true
 back_links: ["[[INDEX]]", "[[log]]"]
@@ -14,6 +14,20 @@ tags: [meta, live, dashboard, polaris, bootstrap]
 # _NOW — Live Diagnostic Dashboard
 
 > **세션 시작 시 이 파일부터 read** — Polaris 현재 상태 + 진단 진입점.
+
+## Phase 26-27 (2026-05-06) — Dashboard 220×55 fix + reconcile + signal scoring
+
+**Phase 26 완료**:
+- **26.1** 8-section 220×55 fixed dashboard (header / open positions / auto manager + strategy perf side-by-side / closed trades / live log / footer). `POLARIS_DASH_W` / `POLARIS_DASH_H` env override 가능.
+- **26.2** Broker reconcile 5min cadence + `startup_sync()` (OKX 잔여 포지션 복구). drift threshold: size_delta > 0.001 or pnl_delta > $1.
+- **26.3** Aggressive sizing 확정: portfolio $50k / per-ticker $10k / broker_max $2k / cold_start_cap=0.
+- Vault: [[INSIGHT-040]]
+
+**Phase 27 개시**:
+- Codex debate 1라운드 합의 (ADR-003) — **composer-lite + bayesian calibration only**.
+- XGBoost / feature engineering 전체 ML 파이프라인 거부 (P6 위반 + 데이터 부족).
+- 신규 파일 계획: `src/signal/composer.py` + `src/signal/bayesian_calibrator.py` + PortfolioManager 연결.
+- Vault: [[INSIGHT-041]]
 
 ## Phase 20 (2026-05-06) — Real trading bot architecture (testing rig 졸업)
 
@@ -143,6 +157,16 @@ User: "전략 테스팅기냐고..." — Polaris가 270 독립 paper 봇이었�
 - 다음 액션: HYPO-013/014 60분 실측 + size 결정 (HYPO-008/010)
 
 ## 📍 다음 액션
+
+- [x] Phase 26.1 — 8-section 220×55 dashboard
+- [x] Phase 26.2 — reconcile 5min loop + startup_sync
+- [x] Phase 26.3 — aggressive sizing + cold_start_cap=0
+- [ ] Phase 27.1 — `src/signal/composer.py` TDD (DEV dispatch)
+- [ ] Phase 27.2 — `src/signal/bayesian_calibrator.py` TDD (DEV dispatch)
+- [ ] Phase 27.3 — PortfolioManager conviction_threshold gate (DEV dispatch)
+- [ ] Live 전환 — startup_sync 로그 검증 후 Jin 승인
+
+## 📍 이전 다음 액션 (Phase 20 기준)
 
 - [x] Phase A 완료 (vault SSOT 콘텐츠 작성)
 - [x] Phase B (hooks + lint v4)

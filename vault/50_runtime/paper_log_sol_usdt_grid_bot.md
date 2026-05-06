@@ -22,3 +22,5 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-05T09:36:47 | OPEN | id=SOL-USDT-1777937807114 dir=1 entry=84.03 size=$300 |
+| 2026-05-05T12:04:31 | CLOSE | id=SOL-USDT-1777937807114 entry=84.03 exit=84.54 net=+0.47% net_usd=+1.40 |
+| 2026-05-05T12:04:31 | EXIT_REASON | tp_hit:+0.0061 |

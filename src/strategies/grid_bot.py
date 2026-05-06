@@ -45,8 +45,8 @@ from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
 # Grid configuration
-DEFAULT_ATR_PCT_THRESHOLD: float = 0.01      # ATR < 1% of price = compressed
-DEFAULT_RANGE_BOUNDARY_PCT: float = 0.30     # lower/upper 30% of 24h range
+DEFAULT_ATR_PCT_THRESHOLD: float = 0.03      # Phase 27.5 aggressive: 3% (was 1%) — vol = opportunity
+DEFAULT_RANGE_BOUNDARY_PCT: float = 0.45     # Phase 27.5 aggressive: 45% (was 30%) — wider entry zone
 DEFAULT_GRID_LEVELS: int = 5
 DEFAULT_GRID_SPACING_PCT: float = 0.01       # 1% per grid level
 DEFAULT_LEVEL_SIZE_USD: float = 50.0         # $50 per level

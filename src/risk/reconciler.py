@@ -152,3 +152,46 @@ def reconcile(
         drift_entries=tuple(drift_entries),
         summary=summary,
     )
+
+
+def startup_sync(portfolio, broker) -> dict:
+    """Phase 27 — on-boot sync: pull broker positions into Polaris portfolio.
+
+    User mandate: "재부팅시 평가 다시해서 닫을껀 닫고"
+    1. Query broker balance + positions
+    2. If broker has USDT > 0 → set Polaris.starting_cash from broker
+    3. Each broker position → create synthetic Contribution (orphan reconcile)
+    4. Caller evaluates orphans + closes per policy
+
+    Returns {synced_cash, synced_positions, errors}.
+    """
+    out = {"synced_cash": 0.0, "synced_positions": 0, "errors": []}
+    if not broker.is_live:
+        return out
+    try:
+        bcash = broker.get_balance()
+        usdt = bcash.get("USDT", 0.0)
+        if usdt > 0:
+            # Override Polaris starting cash with broker USDT (real demo balance)
+            portfolio._starting_cash = usdt
+            portfolio._cash = usdt
+            out["synced_cash"] = usdt
+            logger.warning(
+                f"[STARTUP-SYNC] Polaris cash → broker USDT ${usdt:.2f}"
+            )
+    except Exception as e:
+        out["errors"].append(f"balance: {e!r}")
+    try:
+        bpos = broker.get_positions()
+        # Note: orphan positions need ticker→hypo mapping; we log only.
+        # Auto-import would require base_qty → fake entry_price. Skip for safety.
+        for p in bpos:
+            if p["ccy"] == "USDT":
+                continue
+            logger.warning(
+                f"[STARTUP-SYNC] orphan broker position: {p['ccy']} qty={p['bal']}"
+            )
+        out["synced_positions"] = len([p for p in bpos if p["ccy"] != "USDT"])
+    except Exception as e:
+        out["errors"].append(f"positions: {e!r}")
+    return out

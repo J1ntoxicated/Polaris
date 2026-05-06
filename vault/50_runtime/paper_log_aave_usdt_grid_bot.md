@@ -22,3 +22,5 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-05T10:00:47 | OPEN | id=AAVE-USDT-1777939242668 dir=1 entry=92.27 size=$300 |
+| 2026-05-05T11:10:11 | CLOSE | id=AAVE-USDT-1777939242668 entry=92.27 exit=92.82 net=+0.40% net_usd=+1.19 |
+| 2026-05-05T11:10:11 | EXIT_REASON | tp_hit:+0.0062 |

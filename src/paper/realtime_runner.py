@@ -1248,10 +1248,19 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
     if signal.action == SignalAction.ENTER_LONG:
         _liq_cap_pre = compute_liquidity_cap("buy", _book, max_book_fraction=0.10)
         if _liq_cap_pre <= 0:
-            _liq_skip_pre = True
-            logger.info(
-                f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book — skip entry"
-            )
+            # Phase 27.5 aggressive (F5): no orderbook → fall back to L1 spread proxy.
+            # If bid/ask quote available, allow entry with conservative $500 cap.
+            # Skip only when both book and quote missing (truly blind).
+            if _bid > 0 and _ask > 0:
+                _liq_cap_pre = 500.0
+                logger.info(
+                    f"[LIQ-PROXY] {hypo['hypo_id']} {ticker} no_book spread_proxy cap=$500"
+                )
+            else:
+                _liq_skip_pre = True
+                logger.info(
+                    f"[LIQ-SKIP] {hypo['hypo_id']} {ticker} no_book no_quote — skip"
+                )
 
     # Phase 13: portfolio-level halt — global drawdown cap (5% default).
     # Cached snapshot 60s to avoid per-tick SQL aggregation.
@@ -1347,8 +1356,12 @@ def _eval_and_act(hypo: dict, ticker: str, tick_price: float, tick_ts_ms: int, f
         )
 
         if size > 0:
+            # Phase 27.5: feed last quote so OKX 401 trade error can paper-fallback.
+            _broker = get_broker()
+            if hasattr(_broker, "update_last_price"):
+                _broker.update_last_price(ticker, tick_price)
             # Place broker order (PaperBroker or OKXBroker)
-            _result = get_broker().place_order(OrderRequest(
+            _result = _broker.place_order(OrderRequest(
                 side=OrderSide.BUY,
                 ticker=ticker,
                 size_usd=size,

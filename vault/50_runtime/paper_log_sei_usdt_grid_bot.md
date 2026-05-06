@@ -22,3 +22,5 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-05T10:00:39 | OPEN | id=SEI-USDT-1777939182912 dir=1 entry=0.06 size=$300 |
+| 2026-05-05T11:48:28 | CLOSE | id=SEI-USDT-1777939182912 entry=0.06 exit=0.06 net=+0.42% net_usd=+1.25 |
+| 2026-05-05T11:48:28 | EXIT_REASON | tp_hit:+0.0065 |

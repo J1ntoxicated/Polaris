@@ -34,7 +34,7 @@ from src.domain.candle import Candle
 from src.domain.signal import Signal, SignalAction
 from src.domain.strategy import Strategy
 
-DEFAULT_ENTRY_THRESHOLD: float = -0.0005   # -0.05% (8h) — shorts squeezed
+DEFAULT_ENTRY_THRESHOLD: float = -0.0002   # Phase 27.5 aggressive: -0.02% (was -0.05%) — early squeeze capture
 DEFAULT_EXIT_THRESHOLD: float = 0.0        # funding recovered → release carry
 DEFAULT_MAX_HOLD_HOURS: float = 12.0       # max hold 12h (3 × 4h cycles)
 DEFAULT_TARGET_SIZE_USD: float = 200.0

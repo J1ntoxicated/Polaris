@@ -81,87 +81,33 @@ COLD_START_MAX_USD = float(_os.environ.get("POLARIS_COLD_START_MAX_USD", "300"))
 
 
 def compute_size(inputs: SizingInputs, n_trades: int = 0) -> SizingOutput:
-    """Compute dynamic position size.
+    """Aggressive sizing — single confidence×regime scaler, no Kelly stack.
 
-    Pipeline:
-        1. Kelly fraction (recent performance)
-        2. Confidence multiplier (signal.confidence²)
-        3. Regime multiplier (market context)
-        4. Drawdown circuit breaker
-        5. Hard cap at MAX_FRACTION
-        6. Min size check — return (0, 0) if below MIN_SIZE_USD
+    Phase 27.5 simplification (Jin mandate "위험해도 먹고 나와"):
+        size = cash × MAX_FRACTION × confidence × regime × dd_floor
 
-    Args:
-        inputs: SizingInputs with all required parameters.
-        n_trades: number of closed trades for this HYPO (default 0 — safe cold start).
-            If < COLD_START_N, applies cold start size cap (COLD_START_MAX_USD).
-            Default 0 ensures cold start cap applies when caller omits this arg.
+    Removed (defensive over-engineering that compounded to near-zero):
+        - Kelly criterion (risk-aversion math, ≤0.5 always)
+        - conf³ cube (sub-1 values shrink on cube)
+        - Cold-start cap (zeroed all entries first 20 trades)
+        - Min-size skip (signal noise filter is upstream)
 
-    Returns:
-        SizingOutput with size_usd=0 if signal should be skipped.
+    confidence = calibrated if available else signal_confidence (linear, not squared/cubed).
+    Hard ceiling at MAX_FRACTION (20% cash) + per-order live cap (caller's POLARIS_LIVE_MAX_USD).
     """
-    # 1. Kelly fraction (recent performance basis)
-    # Minimum meaningful threshold — guards against subnormal floats (e.g. 5e-324)
-    # that pass > 0 but produce inf/nan in Kelly division.
-    _EPS = 1e-9
-    if (inputs.recent_avg_loss_pct < _EPS
-            or inputs.recent_win_rate < _EPS
-            or inputs.recent_avg_win_pct < _EPS):
-        # Cold start: insufficient data — use conservative baseline
-        kelly = _KELLY_COLD_START
-    else:
-        # Kelly formula: f* = (b*p - q) / b  where b = win/loss ratio, p = win prob
-        b = inputs.recent_avg_win_pct / inputs.recent_avg_loss_pct
-        p = inputs.recent_win_rate
-        q = 1.0 - p
-        # b > 0 guaranteed (both >= _EPS checked above)
-        kelly_raw = (b * p - q) / b
-        # Clamp to [0, half-Kelly] — full Kelly is too aggressive in practice
-        if not (kelly_raw == kelly_raw):  # NaN guard
-            kelly_raw = 0.0
-        kelly = max(0.0, min(kelly_raw, _KELLY_HALF_CAP))
+    conf = inputs.calibrated_confidence if inputs.calibrated_confidence is not None else inputs.signal_confidence
+    conf = max(0.0, min(1.0, conf))
 
-    # 1b. F4: Kelly boost via calibrated_confidence (after clamp, before conf_mult).
-    # cal_conf=0.9 → kelly × (1 + 0.9×0.5) = kelly × 1.45. HALF_CAP is ceiling.
-    if inputs.calibrated_confidence is not None:
-        kelly = min(kelly * (1.0 + inputs.calibrated_confidence * 0.5), _KELLY_HALF_CAP)
-
-    # 2. Confidence multiplier — cubed penalise low confidence hard (F1: **3 amplification).
-    # Phase 27.4: conf**3 (was **2). Strong signal 0.9→0.729 vs 0.81; weak 0.6→0.216 vs 0.36.
-    # Weak signals suppressed harder; strong signals maintain dominance.
-    _conf = inputs.calibrated_confidence if inputs.calibrated_confidence is not None else inputs.signal_confidence
-    conf_mult = _conf ** 3  # F1: was _conf ** 2 — strong signal amplification
-
-    # 3. Regime multiplier — default to flat if unknown
     regime_mult = REGIME_MULT.get(inputs.regime, REGIME_MULT["flat"])
+    dd_mult = max(0.5, 1.0 - inputs.drawdown_pct)  # -50% dd → 0.5 floor
 
-    # 4. Drawdown circuit breaker
-    # -10% dd → 0.8x, -25% dd → 0.5x, -40%+ → floor 0.2x
-    dd_mult = max(0.2, 1.0 - inputs.drawdown_pct * 2)
-
-    # 5. Combine and cap
-    fraction = kelly * conf_mult * regime_mult * dd_mult
+    fraction = MAX_FRACTION * conf * regime_mult * dd_mult
     fraction = min(MAX_FRACTION, fraction)
 
-    # 6. Compute USD size and enforce minimum
     size_usd = inputs.cash_usd * fraction
-    if size_usd < MIN_SIZE_USD:
-        size_usd = 0.0
-        fraction = 0.0
-
-    # 7. Cold start size cap — insufficient sample → cap at $300 (Phase 2N+)
-    # Prevents dynamic sizing from giving large size to unvalidated strategies.
-    # HYPO-025 lesson: n=6 win 33% received $687 → loss acceleration.
-    cold_start_applied = False
-    if n_trades < COLD_START_N and size_usd > COLD_START_MAX_USD:
-        size_usd = COLD_START_MAX_USD
-        fraction = size_usd / inputs.cash_usd if inputs.cash_usd > 0 else 0.0
-        cold_start_applied = True
-
-    cold_tag = f" [cold_start n={n_trades}<{COLD_START_N} cap=${COLD_START_MAX_USD:.0f}]" if cold_start_applied else ""
-    _conf_tag = f"cal_conf³" if inputs.calibrated_confidence is not None else "conf³"  # F1: cubed
+    _conf_tag = "cal_conf" if inputs.calibrated_confidence is not None else "conf"
     reason = (
-        f"kelly={kelly:.2f} × {_conf_tag}={conf_mult:.2f} × regime[{inputs.regime}]={regime_mult:.1f} "
-        f"× dd[{inputs.drawdown_pct:.1%}]={dd_mult:.2f} = {fraction:.3f}{cold_tag}"
+        f"cash×MAX({MAX_FRACTION:.2f})×{_conf_tag}({conf:.2f})"
+        f"×regime[{inputs.regime}]({regime_mult:.1f})×dd({dd_mult:.2f})={fraction:.3f}"
     )
     return SizingOutput(size_usd=size_usd, fraction=fraction, reason=reason)

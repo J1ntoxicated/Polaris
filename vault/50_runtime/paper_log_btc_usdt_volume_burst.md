@@ -22,3 +22,6 @@ Append-only. ADR-010 paper 운영 기록.
 | timestamp | event | detail |
 |---|---|---|
 | 2026-05-04T00:55:34 | BALANCE | cash=$5000.00 equity=$5000.00 realized_pnl=$+0.00 open=0 closed=0 |
+| 2026-05-05T23:14:09 | OPEN | id=BTC-USDT-1777986847476 dir=1 entry=81630.30 size=$132 |
+| 2026-05-06T00:37:47 | CLOSE | id=BTC-USDT-1777986847476 entry=81630.30 exit=81309.70 net=-0.59% net_usd=-0.78 |
+| 2026-05-06T00:37:47 | EXIT_REASON | signal_exit |

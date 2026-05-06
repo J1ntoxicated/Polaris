@@ -78,6 +78,17 @@ tags: [meta, index, polaris]
 | [[INSIGHT-027]] | HYPO-010/017 신호 직교성 확인 — 11.1% raw overlap, 인과 cascade ~0%, orthogonal alpha 정당화 | active |
 | [[INSIGHT-028]] | Round 13 결정 — HYPO-010 size ×1.5, HYPO-016 deprecate trigger, HYPO-014 vol 5 bps (Codex 85%) | active |
 | [[INSIGHT-029]] | Round 14 forensic — HYPO-010 silent cap bug + 14:36 regime cluster 13 SL + TRUMP 구조적 부적합 (Codex 88%) | active |
+| [[INSIGHT-030]] | Phase 2g 종료 — tick scalp deprecated, 1d trend 강화 (Round 15) | active |
+| [[INSIGHT-031]] | Confluence + GridBot 조합 실험 결과 | active |
+| [[INSIGHT-032]] | Phase 2j AI Dynamic Sizing (Kelly + confidence² + regime + drawdown) | active |
+| [[INSIGHT-034]] | AI Advisor revival — LONG bias fix, confidence 0.72, neutral prompt | active |
+| [[INSIGHT-035]] | Static cycle root cause + vault audit (paper infra SSOT 강화) | active |
+| [[INSIGHT-036]] | Paper slippage internalized — walk_book + spread filter + EV 양수 전환 | active |
+| [[INSIGHT-037]] | FundingCarry + funding cache latent bug fix (Phase 8) | active |
+| [[INSIGHT-038]] | Airtight structure Phase 9-16 (SQLite SSOT, registry, broker abstraction) | active |
+| [[INSIGHT-039]] | Phase 20 real trading bot architecture (270 봇 → 1 PortfolioManager) | active |
+| [[INSIGHT-040]] | Phase 26 dashboard 220×55 + reconcile 5min + aggressive sizing | active |
+| [[INSIGHT-041]] | Phase 27 multi-factor signal scoring — composer-lite + Bayesian (codex debate) | active |
 
 ## 📚 Lessons (30_knowledge/lessons/)
 

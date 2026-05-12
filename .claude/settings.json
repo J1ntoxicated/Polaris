@@ -1,61 +1,137 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
+      "Bash(*)",
       "WebSearch",
-      "WebFetch(domain:api.openai.com)",
-      "WebFetch(domain:generativelanguage.googleapis.com)",
-      "WebFetch(domain:www.okx.com)",
-      "WebFetch(domain:alpaca.markets)",
-      "Skill(update-config)",
-      "Skill(superpowers:*)",
-      "Skill(codex:*)",
-      "Skill(polaris:*)",
-      "Bash(python3 tools/vault_lint.py:*)",
-      "Bash(python3 .claude/hooks/*.py:*)"
+      "WebFetch",
+      "WebFetch(domain:*)",
+      "Skill(*)",
+      "Read(//**)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "mcp__sqlite__read_query",
+      "mcp__duckdb__query",
+      "mcp__obsidian-mcp__*",
+      "mcp__time__*",
+      "mcp__ccxt__*"
     ]
   },
   "hooks": {
-    "PreToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/pre_agent.py"
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/session_start.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/session_end.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/pre_tool_use.py"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/post_edit.py"
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/post_tool_use.py"
           }
         ]
       }
     ],
-    "Stop": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/post_stop.py"
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/user_prompt_submit.py"
+          }
+        ]
+      }
+    ],
+    "PreStateTransition": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/pre_state_transition.py"
           }
         ]
       }
     ]
   },
+  "mcpServers": {
+    "ccxt": {
+      "command": "npx",
+      "args": ["-y", "@lazydino/ccxt-mcp"]
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "${CLAUDE_PROJECT_DIR}/data/polaris.sqlite"]
+    },
+    "duckdb": {
+      "command": "uvx",
+      "args": ["mcp-server-motherduck", "--db-path", "${CLAUDE_PROJECT_DIR}/data/polaris_analytics.duckdb"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    "obsidian-mcp": {
+      "command": "npx",
+      "args": ["-y", "@bitbonsai/mcpvault"],
+      "env": {
+        "OBSIDIAN_VAULT_PATH": "${CLAUDE_PROJECT_DIR}/vault"
+      }
+    },
+    "time": {
+      "command": "uvx",
+      "args": ["mcp-server-time", "--local-timezone=Australia/Sydney"]
+    }
+  },
   "polaris": {
     "vault_first_cycle": true,
-    "emergency_bypass_window_hours": 24,
-    "adr_proposed_max_days": 7,
-    "code_review_external_only": true,
-    "harness_modes": ["DEV", "ALPHA", "FORENSIC", "DEBATE"],
-    "min_backlinks_knowledge": 2,
-    "spec_dir": "docs/superpowers/specs",
-    "plan_dir": "docs/superpowers/plans"
-  }
+    "harness_modes": {
+      "base_modes": ["dev", "alpha", "forensic"],
+      "overlay_modes": ["debate"],
+      "hard_exclusive_base": true
+    },
+    "posture": "aggressive",
+    "demo_only": true,
+    "auto_stop": false,
+    "vault_lint": {
+      "light_pre_commit": true,
+      "heavy_weekly_cron": true,
+      "tool": "tools/vault_lint.py"
+    }
+  },
+  "outputStyle": "default",
+  "spinnerTipsEnabled": false,
+  "prefersReducedMotion": true
 }

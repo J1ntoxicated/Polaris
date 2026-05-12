@@ -1,0 +1,70 @@
+"""Polaris strategy registry — 7 P0 signal generators (ADR-008).
+
+Each strategy = ``BaseStrategy`` subclass that emits ``RawSignal | None`` from
+``generate_raw_signal(market_view)``. Lifecycle (entry / exit / swap) belongs
+to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
+
+Track A — OKX SPOT (4):
+  - ``volume_burst``           (correlation_group=spot_intraday_event)
+  - ``tsmom``                  (correlation_group=spot_cross_sectional_momo)
+  - ``rsi_bb_pullback``        (correlation_group=spot_mean_reversion)
+  - ``spot_donchian``          (correlation_group=spot_breakout)
+
+Track B — Capital CFD (3):
+  - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
+  - ``xau_indices_trend``      (correlation_group=cfd_index_commodity_trend)
+  - ``session_breakout``       (correlation_group=cfd_session_event)
+"""
+
+from __future__ import annotations
+
+from polaris.strategies.base import (
+    COLD_START_NEUTRAL_STRENGTH,
+    BarView,
+    BaseStrategy,
+    MarketView,
+    RawSignal,
+    StrategyMetadata,
+)
+from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
+from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
+from polaris.strategies.session_breakout import SessionBreakoutStrategy
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
+from polaris.strategies.tsmom import TSMOMStrategy
+from polaris.strategies.volume_burst import VolumeBurstStrategy
+from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
+
+# Registry: strategy_id → factory. ``factory()`` returns a fresh instance.
+STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
+    VolumeBurstStrategy.metadata.strategy_id: VolumeBurstStrategy,
+    TSMOMStrategy.metadata.strategy_id: TSMOMStrategy,
+    RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
+    SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
+    FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
+    XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
+    SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
+}
+
+
+def all_strategies() -> list[BaseStrategy]:
+    """Instantiate one of each registered strategy (used by smoke + tests)."""
+    return [cls() for cls in STRATEGY_REGISTRY.values()]
+
+
+__all__ = [
+    "BarView",
+    "BaseStrategy",
+    "COLD_START_NEUTRAL_STRENGTH",
+    "FXBreakoutBasketStrategy",
+    "MarketView",
+    "RSIBBPullbackStrategy",
+    "RawSignal",
+    "STRATEGY_REGISTRY",
+    "SessionBreakoutStrategy",
+    "SpotDonchianStrategy",
+    "StrategyMetadata",
+    "TSMOMStrategy",
+    "VolumeBurstStrategy",
+    "XAUIndicesTrendStrategy",
+    "all_strategies",
+]

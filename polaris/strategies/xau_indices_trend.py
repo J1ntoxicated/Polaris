@@ -1,0 +1,106 @@
+"""XAU/Indices Trend — Capital CFD (correlation_group=cfd_index_commodity_trend).
+
+Spec source: vault/10_decisions/ADR-008-7-strategies-signal-generator-role.md (#6).
+
+Symbols: ``XAUUSD / US500 / US100 / GER40``.
+Trigger: ``close > donchian_high_30`` AND ``momentum_20bar > 0`` (20d momentum).
+Leverage: 20×.
+
+P0 params:
+  - ``donchian = 30``
+  - ``momentum_lookback = 20``
+"""
+
+from __future__ import annotations
+
+from polaris.strategies.base import (
+    BaseStrategy,
+    MarketView,
+    RawSignal,
+    StrategyMetadata,
+    is_finite,
+    make_signal_id,
+)
+
+DONCHIAN_WINDOW = 30
+MOMENTUM_LOOKBACK = 20
+SUPPORTED_SYMBOLS: frozenset[str] = frozenset(
+    {"XAUUSD", "US500", "US100", "DE40", "UK100", "EU50", "US30"}
+)
+
+# Strength curve + venue constraints (frozen v1).
+STRENGTH_BASE = 0.5
+MOMENTUM_GAIN = 4.0
+TTL_BARS = 6
+LEVERAGE_MAX = 20.0
+
+
+class XAUIndicesTrendStrategy(BaseStrategy):
+    metadata = StrategyMetadata(
+        strategy_id="xau_indices_trend",
+        timeframe="1H",
+        warmup_bars=DONCHIAN_WINDOW + 5,
+        max_positions=4,
+        gross_cap=0.40,
+        per_symbol_cap=0.16,
+        expected_holding_bars=48,
+        asset_class="commodity",
+        venue="capital",
+        correlation_group_id="cfd_index_commodity_trend",
+    )
+
+    def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
+        if not self.warmup_ok(market_view):
+            return None
+        sym = market_view.symbol.upper().replace("/", "").replace(".", "")
+        if sym not in SUPPORTED_SYMBOLS:
+            return None
+        bars = market_view.bars
+        if len(bars) < max(DONCHIAN_WINDOW, MOMENTUM_LOOKBACK) + 1:
+            return None
+        last = bars[-1]
+        if is_finite(market_view.donchian_high_30):
+            high = market_view.donchian_high_30
+        else:
+            high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])
+        if high is None or last.close <= high:
+            return None
+        if is_finite(market_view.momentum_20bar):
+            momentum = market_view.momentum_20bar
+        else:
+            past_close = bars[-(MOMENTUM_LOOKBACK + 1)].close
+            if past_close <= 0:
+                return None
+            momentum = (last.close - past_close) / past_close
+        if momentum is None or momentum <= 0.0:
+            return None
+        scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
+        strength = min(1.0, max(STRENGTH_BASE, scored))
+        return RawSignal(
+            signal_id=make_signal_id(),
+            strategy_id=self.metadata.strategy_id,
+            symbol=market_view.symbol,
+            side="long",
+            strength=strength,
+            sizing_hint=strength,
+            ttl_bars=TTL_BARS,
+            thesis_tag=f"donchian_30+mom_20={momentum:.4f}",
+            correlation_group=self.metadata.correlation_group_id,
+            venue_constraints={"leverage_max": LEVERAGE_MAX},
+            created_at_bar=last.ts,
+            tags={"momentum_20": f"{momentum:.4f}",
+                  "donchian_high_30": f"{high:.4f}",
+                  "leverage": f"{int(LEVERAGE_MAX)}"},
+        )
+
+
+__all__ = [
+    "DONCHIAN_WINDOW",
+    "LEVERAGE_MAX",
+    "MOMENTUM_GAIN",
+    "MOMENTUM_LOOKBACK",
+    "STRENGTH_BASE",
+    "SUPPORTED_SYMBOLS",
+    "TTL_BARS",
+    "XAUIndicesTrendStrategy",
+]

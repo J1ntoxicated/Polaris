@@ -1,0 +1,403 @@
+"""Gate 7 — Adaptive Exit (Python P0, GPT-5.5 P1).
+
+Spec source:
+- vault/30_components/layer-2-per-gate-pipeline.md (Q9 floor-only widening)
+- vault/10_decisions/ADR-004-per-gate-ai-pipeline.md (Adaptive Exit)
+
+Phase contract:
+- **P0** (``client is None``): deterministic widening rules (default ATR
+  exit = floor; override only widens, never tightens; max 5/trade, 30s
+  cooldown, never below max-loss / BEP). ``model_used="python"``.
+- **P1** (``client is not None``): GPT decides among
+  HOLD / WIDEN / TIGHTEN / EXIT_NOW. **TIGHTEN is rejected** when the
+  proposed stop is *closer* than the default ATR floor (Q9 conservative
+  trap avoidance). WIDEN must push the stop *farther* than the current
+  level. EXIT_NOW falls through to a normal exit.
+
+Aggressive bias (Jin 2026-05-07): TIGHTEN suggestions that violate the
+default ATR floor are reversed to HOLD — the LLM cannot dampen winners
+with a smaller stop. WIDEN is the only direction the floor permits.
+
+Hard rails (Q9):
+- never exceed ``max_loss_r`` hard cap.
+- ``unrealized_pnl_r > +0.7R`` required to widen.
+- never widen back below BEP once already above BEP.
+- max 5 overrides per trade, 30s cooldown.
+
+Fail-open (Q4): on any error → HOLD with current stop (floor preserved).
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from polaris.core.pipeline.agents._gpt_client import (
+    DEFAULT_TIMEOUT_SEC,
+    GPT_P0_MODEL,
+    GPT_P1_MODEL,
+    call_gpt,
+    make_system_prefix,
+)
+from polaris.core.pipeline.gate_state import (
+    GATE_POST_TRADE_REFLECTOR,
+    GateContext,
+    GateDecision,
+    GateResult,
+)
+
+__all__ = [
+    "COOLDOWN_SEC",
+    "G7_DECISION_ENUM",
+    "G7_MAX_TOKENS",
+    "MAX_OVERRIDES_PER_TRADE",
+    "WIDEN_WINDOW_R",
+    "adaptive_exit_gate",
+    "can_widen_exit",
+]
+
+logger = logging.getLogger(__name__)
+
+WIDEN_WINDOW_R: float = 0.7
+MAX_OVERRIDES_PER_TRADE: int = 5
+COOLDOWN_SEC: int = 30
+G7_MAX_TOKENS: int = 200
+G7_DECISION_ENUM: list[str] = ["HOLD", "WIDEN", "TIGHTEN", "EXIT_NOW"]
+
+
+def can_widen_exit(
+    *,
+    side: str,
+    current_stop_price: float,
+    proposed_stop_price: float,
+    entry_price: float,
+    unrealized_pnl_r: float,
+    max_loss_r: float,
+    overrides_used: int,
+    seconds_since_last_override: int,
+    initial_stop_price: float | None = None,
+) -> tuple[bool, str]:
+    """Q9 floor-only widening check. Returns (allowed, reason).
+
+    Hard rails (Q9):
+    - max overrides per trade.
+    - 30s cooldown after last override.
+    - unrealized_pnl_r > 0.7 to widen.
+    - long: new_stop < current_stop (more loss tolerance, further from entry).
+    - short: new_stop > current_stop.
+    - never widen below max_loss_r floor (uses ``initial_stop_price`` when
+      provided; otherwise treats max_loss_r as a fraction of entry price).
+    - never widen back below BEP once already above BEP.
+    """
+    if overrides_used >= MAX_OVERRIDES_PER_TRADE:
+        return False, "override_cap"
+    if seconds_since_last_override < COOLDOWN_SEC:
+        return False, "cooldown"
+    if unrealized_pnl_r <= WIDEN_WINDOW_R:
+        return False, "below_widen_window"
+    side_lc = side.lower()
+
+    # Compute the absolute max-loss floor: prefer caller-provided initial_stop,
+    # otherwise approximate from max_loss_r fraction of entry price.
+    if side_lc == "long":
+        if proposed_stop_price >= current_stop_price:
+            return False, "not_widening_long"
+        floor = (
+            float(initial_stop_price)
+            if initial_stop_price is not None
+            else entry_price * (1.0 - max(0.0, max_loss_r) * 0.05)
+        )
+        # Long stops are loss when below entry; the absolute floor is the lower
+        # bound — proposed must not go lower than the floor.
+        if proposed_stop_price < floor:
+            return False, "below_max_loss"
+        if proposed_stop_price < entry_price and current_stop_price >= entry_price:
+            return False, "below_bep"
+    elif side_lc == "short":
+        if proposed_stop_price <= current_stop_price:
+            return False, "not_widening_short"
+        floor = (
+            float(initial_stop_price)
+            if initial_stop_price is not None
+            else entry_price * (1.0 + max(0.0, max_loss_r) * 0.05)
+        )
+        if proposed_stop_price > floor:
+            return False, "above_max_loss"
+        if proposed_stop_price > entry_price and current_stop_price <= entry_price:
+            return False, "above_bep"
+    else:
+        return False, "bad_side"
+    return True, "ok"
+
+
+def _python_widen_only(
+    *,
+    proposal: dict[str, Any],
+    next_gate_after_exit: int | None,
+) -> GateResult:
+    """Run the deterministic Q9 widening check (used at P0 + as P1 fallback)."""
+    initial_stop = proposal.get("initial_stop_price")
+    initial_stop_f: float | None = float(initial_stop) if initial_stop is not None else None
+    allowed, reason = can_widen_exit(
+        side=str(proposal.get("side", "long")),
+        current_stop_price=float(proposal.get("current_stop_price", 0.0)),
+        proposed_stop_price=float(proposal.get("proposed_stop_price", 0.0)),
+        entry_price=float(proposal.get("entry_price", 0.0)),
+        unrealized_pnl_r=float(proposal.get("unrealized_pnl_r", 0.0)),
+        max_loss_r=float(proposal.get("max_loss_r", 1.0)),
+        overrides_used=int(proposal.get("overrides_used", 0)),
+        seconds_since_last_override=int(
+            proposal.get("seconds_since_last_override", COOLDOWN_SEC + 1)
+        ),
+        initial_stop_price=initial_stop_f,
+    )
+    new_stop = (
+        float(proposal["proposed_stop_price"]) if allowed else float(proposal["current_stop_price"])
+    )
+    return GateResult(
+        decision=GateDecision.ADJUST_EXIT if allowed else GateDecision.HOLD,
+        next_gate=next_gate_after_exit,
+        payload={
+            "stop_price": new_stop,
+            "widening_applied": allowed,
+            "reason": reason,
+        },
+        model_used="python",
+    )
+
+
+def _is_widening(side: str, *, current_stop: float, proposed_stop: float) -> bool:
+    """Long: proposed < current (further below entry). Short: proposed > current."""
+    s = side.lower()
+    if s == "long":
+        return proposed_stop < current_stop
+    if s == "short":
+        return proposed_stop > current_stop
+    return False
+
+
+def _build_g7_user_prompt(proposal: dict[str, Any]) -> str:
+    """Compact prompt for G7 GPT call."""
+    return (
+        "# Open position — adaptive exit\n"
+        f"{proposal}\n\n"
+        "Decide HOLD / WIDEN / TIGHTEN / EXIT_NOW.\n"
+        "WIDEN = push stop FARTHER from price (winners run further).\n"
+        "TIGHTEN = pull stop CLOSER (rejected if it crosses default ATR floor).\n"
+        "Default = HOLD when unsure. Aggressive bias = winner extension > "
+        "premature lock-in.\n"
+        'Output JSON: {"decision":"HOLD|WIDEN|TIGHTEN|EXIT_NOW",'
+        '"new_exit_atr":2.5,"reason":"..."}'
+    )
+
+
+def _coerce_g7_decision(text: str) -> str | None:
+    s = text.strip().upper()
+    if s in {"HOLD", "WIDEN", "TIGHTEN", "EXIT_NOW"}:
+        return s
+    return None
+
+
+async def adaptive_exit_gate(
+    ctx: GateContext,
+    *,
+    client: Any | None = None,
+    model: str = GPT_P1_MODEL,
+) -> GateResult:
+    """Gate 7 dispatcher (Python P0 + GPT P1).
+
+    Reads ``ctx.payload`` for the widening proposal; default = HOLD with the
+    current stop (floor preserved). Fail-open: errors → HOLD.
+
+    G8 (Reflector) only runs after the trade actually closes. If the upstream
+    state is ``EXIT_PENDING`` (G6 emitted EXIT_NOW or venue close in flight),
+    we chain to G8; otherwise terminate the per-tick loop here so the
+    lifecycle stays coherent (no premature reflection of an open position).
+
+    P1 GPT branch (``client is not None``):
+    - HOLD / WIDEN / TIGHTEN / EXIT_NOW.
+    - WIDEN must satisfy Q9 widening rail (further than current,
+      above max-loss floor); else reverts to HOLD.
+    - TIGHTEN that crosses the default ATR floor is reversed to HOLD
+      (conservative trap avoidance — Jin aggressive bias mandate).
+    """
+    state = getattr(ctx, "state", None)
+    next_gate_after_exit: int | None = (
+        GATE_POST_TRADE_REFLECTOR
+        if state and state.value in {"EXIT_PENDING", "CLOSED"}
+        else None
+    )
+    proposal = ctx.payload.get("widen_proposal")
+    if not isinstance(proposal, dict):
+        return GateResult(
+            decision=GateDecision.HOLD,
+            next_gate=next_gate_after_exit,
+            payload={"stop_price": ctx.payload.get("current_stop_price")},
+            model_used="python",
+        )
+    if client is None:
+        return _python_widen_only(
+            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+
+    p1_root = GPT_P1_MODEL.lower()
+    p0_root = GPT_P0_MODEL.lower()
+    m = model.lower()
+    if m == p1_root or m.startswith(f"{p1_root}-"):
+        model_label = "gpt_p1"
+    elif m == p0_root or m.startswith(f"{p0_root}-"):
+        model_label = "gpt"
+    else:
+        model_label = "gpt"
+
+    system = make_system_prefix(
+        role=(
+            "Polaris Adaptive Exit — winner-extension bias. WIDEN = push "
+            "stop further from entry to let winners run. TIGHTEN that "
+            "crosses the default ATR floor will be rejected upstream as a "
+            "conservative trap. Default = HOLD (current stop preserved)."
+        ),
+        decision_enum=G7_DECISION_ENUM,
+        cell_summary="",
+        baseline_summary="",
+        recent_trades_summary="",
+    )
+    res = await call_gpt(
+        client=client,
+        system_prefix=system,
+        user_prompt=_build_g7_user_prompt(proposal),
+        max_tokens=G7_MAX_TOKENS,
+        model=model,
+        timeout_sec=DEFAULT_TIMEOUT_SEC,
+    )
+    if res.error or res.parsed is None:
+        fallback = _python_widen_only(
+            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+        return GateResult(
+            decision=fallback.decision,
+            next_gate=fallback.next_gate,
+            payload={**fallback.payload, "fallback": "gpt_error", "error": res.error},
+            model_used=model_label,
+            latency_ms=res.latency_ms,
+            error=res.error,
+        )
+    parsed = res.parsed
+    decision_text = _coerce_g7_decision(str(parsed.get("decision", "HOLD")))
+    if decision_text is None:
+        fallback = _python_widen_only(
+            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+        return GateResult(
+            decision=fallback.decision,
+            next_gate=fallback.next_gate,
+            payload={**fallback.payload, "fallback": "bad_decision",
+                     "raw": str(parsed.get("decision", ""))[:50]},
+            model_used=model_label,
+            latency_ms=res.latency_ms,
+        )
+    side = str(proposal.get("side", "long"))
+    current_stop = float(proposal.get("current_stop_price", 0.0))
+    proposed_stop = float(proposal.get("proposed_stop_price", current_stop))
+    reason_g7 = str(parsed.get("reason", ""))[:200]
+    new_exit_atr = parsed.get("new_exit_atr")
+
+    if decision_text == "EXIT_NOW":
+        return GateResult(
+            decision=GateDecision.EXIT_NOW,
+            next_gate=GATE_POST_TRADE_REFLECTOR,
+            payload={
+                "reason": reason_g7 or "gpt_exit_now",
+                "stop_price": current_stop,
+                "decision_source": model_label,
+            },
+            model_used=model_label,
+            latency_ms=res.latency_ms,
+        )
+
+    if decision_text == "WIDEN":
+        # WIDEN must push stop FARTHER than current; verify Q9 rails too.
+        if not _is_widening(side, current_stop=current_stop, proposed_stop=proposed_stop):
+            # Reverse to HOLD — stop wasn't actually widened in the proposal.
+            return GateResult(
+                decision=GateDecision.HOLD,
+                next_gate=next_gate_after_exit,
+                payload={
+                    "stop_price": current_stop,
+                    "widening_applied": False,
+                    "reason": "widen_not_farther",
+                    "decision_source": model_label,
+                },
+                model_used=model_label,
+                latency_ms=res.latency_ms,
+            )
+        # Re-use Q9 deterministic check on the proposal so all hard rails fire.
+        rail = _python_widen_only(
+            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+        rail.payload["decision_source"] = model_label
+        rail.payload["reason"] = (
+            "gpt_widen_accepted" if rail.payload.get("widening_applied") else
+            f"gpt_widen_blocked:{rail.payload.get('reason', '')}"
+        )
+        if isinstance(new_exit_atr, (int, float)):
+            rail.payload["new_exit_atr"] = float(new_exit_atr)
+        return GateResult(
+            decision=rail.decision,
+            next_gate=rail.next_gate,
+            payload=rail.payload,
+            model_used=model_label,
+            latency_ms=res.latency_ms,
+        )
+
+    if decision_text == "TIGHTEN":
+        # Conservative trap avoidance: TIGHTEN that brings stop CLOSER than
+        # the proposal's current_stop is reversed to HOLD. We never tighten
+        # past the default ATR floor — the proposal's current_stop IS the
+        # default floor at this layer.
+        # (Long: tighter = stop > current. Short: tighter = stop < current.)
+        s_lc = side.lower()
+        is_tightening = (
+            (s_lc == "long" and proposed_stop > current_stop)
+            or (s_lc == "short" and proposed_stop < current_stop)
+        )
+        if is_tightening:
+            return GateResult(
+                decision=GateDecision.HOLD,
+                next_gate=next_gate_after_exit,
+                payload={
+                    "stop_price": current_stop,
+                    "widening_applied": False,
+                    "reason": "tighten_rejected_floor",
+                    "decision_source": model_label,
+                },
+                model_used=model_label,
+                latency_ms=res.latency_ms,
+            )
+        # Not actually a tighten — fall through as HOLD.
+        return GateResult(
+            decision=GateDecision.HOLD,
+            next_gate=next_gate_after_exit,
+            payload={
+                "stop_price": current_stop,
+                "widening_applied": False,
+                "reason": "tighten_not_closer",
+                "decision_source": model_label,
+            },
+            model_used=model_label,
+            latency_ms=res.latency_ms,
+        )
+
+    # HOLD (default).
+    return GateResult(
+        decision=GateDecision.HOLD,
+        next_gate=next_gate_after_exit,
+        payload={
+            "stop_price": current_stop,
+            "widening_applied": False,
+            "reason": reason_g7 or "gpt_hold",
+            "decision_source": model_label,
+        },
+        model_used=model_label,
+        latency_ms=res.latency_ms,
+    )

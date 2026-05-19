@@ -3,12 +3,12 @@ name: vault-curator
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, sonnet, vault, lint]
+tags: [agent, dev-ops, opus, vault, lint]
 related: [[ADR-001]], [[karpathy-workflow]]
-model: claude-sonnet-4-7
+model: claude-opus-4-7
 ---
 
-# vault-curator (Dev/Ops, Sonnet)
+# vault-curator (Dev/Ops, Opus)
 
 ## Role
 Vault read / write / lint. ADR mint (Jin sign-off 후). 백링크 정합성 보장. Karpathy 3-ops (Ingest/Query/Lint) 운영. **코드 작성 X**.

@@ -3,12 +3,12 @@ name: forensicist
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, sonnet, incident]
+tags: [agent, dev-ops, opus, incident]
 related: [[ADR-002]]
-model: claude-sonnet-4-7
+model: claude-opus-4-7
 ---
 
-# forensicist (Dev/Ops, Sonnet)
+# forensicist (Dev/Ops, Opus)
 
 ## Role
 Incident 조사 + drawdown checkpoint forensic. 발동 조건:

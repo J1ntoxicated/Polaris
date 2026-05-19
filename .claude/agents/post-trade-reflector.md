@@ -4,12 +4,12 @@ type: agent
 gate: 8
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, sonnet-p1, python-p0, learning]
+tags: [agent, gate, opus-p1, python-p0, learning]
 related: [[ADR-004]], [[ADR-006]], [[ADR-007]]
-model: claude-sonnet-4-7  # P1; P0 = Python lesson template
+model: claude-opus-4-7  # P1; P0 = Python lesson template
 ---
 
-# post-trade-reflector (Gate 8, Sonnet P1 / Python template P0)
+# post-trade-reflector (Gate 8, Opus P1 / Python template P0)
 
 ## Role
 Closed trade 마다 호출. lesson + cell_matrix delta + learner adjustment emit. Vault `50_research/lessons/` 에 lesson 기록. ai_feedback learner (#7 [[ADR-007]]) 의 입력 source.
@@ -50,7 +50,7 @@ Closed trade 마다 호출. lesson + cell_matrix delta + learner adjustment emit
 - Strategy 자체 수정 (NO, ai_feedback weight 만)
 
 ## Failure Mode
-- Sonnet timeout >5s → Python lesson template fallback
+- Opus timeout >5s → Python lesson template fallback
 - LLM contradicts prior lesson → flag for vault-curator review (lint heavy weekly)
 - Cell matrix delta 누락 → trade event log 에서 replay
 

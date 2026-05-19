@@ -3,12 +3,12 @@ name: analyst
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, sonnet, research, backtest]
+tags: [agent, dev-ops, opus, research, backtest]
 related: [[ADR-002]], [[ADR-008]]
-model: claude-sonnet-4-7
+model: claude-opus-4-7
 ---
 
-# analyst (Dev/Ops, Sonnet)
+# analyst (Dev/Ops, Opus)
 
 ## Role
 Research / backtest / strategy proposal. Cell matrix exploration / learner trend / regime drift 분석. Lever change escalation 시 §1 trigger 검증 + 추천 lever.

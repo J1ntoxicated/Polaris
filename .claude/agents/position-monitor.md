@@ -4,12 +4,12 @@ type: agent
 gate: 6
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, sonnet-p1, python-p0, realtime, n-sec-loop]
+tags: [agent, gate, opus-p1, python-p0, realtime, n-sec-loop]
 related: [[ADR-004]], [[ADR-006]]
-model: claude-sonnet-4-7  # P1; P0 = Python
+model: claude-opus-4-7  # P1; P0 = Python
 ---
 
-# position-monitor (Gate 6, Sonnet P1 / Python P0)
+# position-monitor (Gate 6, Opus P1 / Python P0)
 
 ## Role
 활성 position 마다 N-sec loop 모니터. Market view + regime flag + recent ticks 종합 → HOLD / ADJUST_EXIT / EXIT_NOW / SWAP_STRATEGY.
@@ -47,7 +47,7 @@ model: claude-sonnet-4-7  # P1; P0 = Python
 
 ## Failure Mode
 - Timeout >5s → HOLD default
-- Sonnet down → Python fallback (regime crisis → EXIT_NOW, 그 외 HOLD)
+- Opus down → Python fallback (regime crisis → EXIT_NOW, 그 외 HOLD)
 - SWAP_STRATEGY 빈도 >5/h → ai_feedback learner alert (over-active drift)
 
 ## SLA

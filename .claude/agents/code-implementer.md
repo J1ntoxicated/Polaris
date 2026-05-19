@@ -3,12 +3,12 @@ name: code-implementer
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, sonnet, p0-build, tdd]
+tags: [agent, dev-ops, opus, p0-build, tdd]
 related: [[ADR-003]]
-model: claude-sonnet-4-7
+model: claude-opus-4-7
 ---
 
-# code-implementer (Dev/Ops, Sonnet)
+# code-implementer (Dev/Ops, Opus)
 
 ## Role
 P0 build / refactor / bug fix. **TDD 의무**. **본인 코드 review 금지** (작성 agent ≠ 리뷰 agent — `feedback_code_review_codex_external`).

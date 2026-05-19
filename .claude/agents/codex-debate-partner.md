@@ -3,15 +3,15 @@ name: codex-debate-partner
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, sonnet, codex, review]
+tags: [agent, dev-ops, opus, codex, review]
 related: [[ADR-003]]
-model: claude-sonnet-4-7
+model: claude-opus-4-7
 ---
 
-# codex-debate-partner (Dev/Ops, Sonnet)
+# codex-debate-partner (Dev/Ops, Opus)
 
 ## Role
-Codex external review routing. code-implementer / analyst output → codex (gpt-5.4) 외부 review 의무 dispatch. **Max 5 round** per topic (escalation 방지).
+Codex external review routing. code-implementer / analyst output → codex (gpt-5.5) 외부 review 의무 dispatch. **Max 5 round** per topic (escalation 방지).
 
 ## Input
 - Topic + draft output (code diff / ADR draft / plan)

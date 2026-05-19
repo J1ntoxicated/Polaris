@@ -4,12 +4,12 @@ type: agent
 gate: 7
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, sonnet-p1, python-p0, realtime]
+tags: [agent, gate, opus-p1, python-p0, realtime]
 related: [[ADR-004]], [[ADR-005]], [[active-autonomous-vision]]
-model: claude-sonnet-4-7  # P1; P0 = Python
+model: claude-opus-4-7  # P1; P0 = Python
 ---
 
-# adaptive-exit (Gate 7, Sonnet P1 / Python P0)
+# adaptive-exit (Gate 7, Opus P1 / Python P0)
 
 ## Role
 Position Monitor 가 ADJUST_EXIT / EXIT_NOW emit 시, 또는 default ATR×N exit 도달 시 호출. Default ATR exit 위에 AI override layer. **Winner 길게, default 보호**.

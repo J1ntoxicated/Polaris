@@ -70,16 +70,6 @@
           }
         ]
       }
-    ],
-    "PreStateTransition": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 ${CLAUDE_PROJECT_DIR}/.claude/hooks/pre_state_transition.py"
-          }
-        ]
-      }
     ]
   },
   "mcpServers": {

@@ -32,6 +32,14 @@ import time
 from dataclasses import dataclass
 
 from polaris.core.cell_matrix import CellKeyP0
+from polaris.core.learners.base import (
+    NEUTRAL_MULT,
+    clip_individual_mult,
+    clip_product_mult,
+    evaluate_triple_block,
+)
+from polaris.core.learners.regime import RegimeMultLearner
+from polaris.core.learners.session import SessionMultLearner
 from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
@@ -58,6 +66,7 @@ from polaris.core.sizing.schema import (
     StrategyRiskState,
     Track,
 )
+from polaris.core.sizing.session import derive_session
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +101,7 @@ class SignalIntent:
     listing_age_hours: float
     leverage: float = 1.0
     base_risk_pct: float = DEFAULT_BASE_RISK_PCT
+    session: str | None = None  # None → derive_session(now_ts) at sizing time
 
 
 # ---------------------------------------------------------------------------
@@ -170,18 +180,31 @@ def compute_proposed(
     tier_amp: float,
     cell_mult: float,
     listing_mult: float = 1.0,
+    session_mult: float = 1.0,
+    regime_mult: float = 1.0,
+    triple_block_mult: float = 1.0,
 ) -> SizingProposal:
-    """Pure compositional T4 step. No clipping happens here.
+    """Pure compositional T4 step. No clipping happens on base/tier/cell.
 
-    Negative or non-finite inputs collapse to base — the engine refuses to
-    produce a NaN proposal (downstream ``min()`` would silently winner the
-    NaN otherwise).
+    L5 learner mults (session/regime/triple_block) are each individually clipped
+    to ``LEARNER_INDIVIDUAL_MULT_CLIP`` and their product is re-clipped to
+    ``LEARNER_PRODUCT_CLIP`` — guards against 9-stack collapse and runaway top.
+    Aggressive top (3.0×) on base/tier/cell is preserved; the hard MAX
+    ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` + ``headroom_min`` still cap downstream.
+
+    Negative or non-finite base/continuous/tier/cell/listing → ``ValueError``.
     """
     if not all(math.isfinite(x) for x in (base_risk_pct, continuous, tier_amp, cell_mult, listing_mult)):
         raise ValueError("compute_proposed: non-finite multiplier")
     if any(x < 0.0 for x in (base_risk_pct, continuous, tier_amp, cell_mult, listing_mult)):
         raise ValueError("compute_proposed: negative multiplier")
-    proposed = base_risk_pct * continuous * tier_amp * cell_mult * listing_mult
+    s_clip = clip_individual_mult(session_mult)
+    r_clip = clip_individual_mult(regime_mult)
+    t_clip = clip_individual_mult(triple_block_mult)
+    learner_product = clip_product_mult(s_clip * r_clip * t_clip)
+    proposed = (
+        base_risk_pct * continuous * tier_amp * cell_mult * listing_mult * learner_product
+    )
     return SizingProposal(
         base_risk_pct=base_risk_pct,
         continuous_scalar=continuous,
@@ -189,6 +212,9 @@ def compute_proposed(
         cell_routing_mult=cell_mult,
         listing_watchdog_mult=listing_mult,
         proposed_risk_pct=proposed,
+        session_mult=s_clip,
+        regime_mult=r_clip,
+        triple_block_mult=t_clip,
     )
 
 
@@ -320,6 +346,34 @@ def compute_size(
     # (4) listing watchdog
     listing_mult = listing_watchdog_mult(intent.listing_age_hours)
 
+    # (4.5) L5 learner mults — session × regime × triple_block
+    # Aggressive bias preserved: sparse / disabled / no row → NEUTRAL_MULT (1.0).
+    # Each mult individually clipped by BaseLearner.get_mult; product re-clip in
+    # compute_proposed.
+    session_label = intent.session if intent.session else derive_session(ts)
+    session_learner = SessionMultLearner(conn)
+    regime_learner = RegimeMultLearner(conn)
+    session_mult = session_learner.get_mult(
+        ticker=intent.symbol,
+        strategy_id=intent.strategy,
+        regime=intent.regime,
+        session=session_label,
+    ).value
+    regime_mult = regime_learner.get_mult(
+        ticker=intent.symbol,
+        strategy_id=intent.strategy,
+        regime=intent.regime,
+        session=session_label,
+    ).value
+    block = evaluate_triple_block(
+        conn,
+        ticker=intent.symbol,
+        strategy_id=intent.strategy,
+        regime=intent.regime,
+        now_ts=ts,
+    )
+    triple_block_mult = block.size_mult if block else NEUTRAL_MULT
+
     # (5) proposed
     proposal = compute_proposed(
         base_risk_pct=intent.base_risk_pct,
@@ -327,6 +381,9 @@ def compute_size(
         tier_amp=tier_amp,
         cell_mult=cell_mult,
         listing_mult=listing_mult,
+        session_mult=session_mult,
+        regime_mult=regime_mult,
+        triple_block_mult=triple_block_mult,
     )
 
     # (6) Kelly + Cold-Start single cap
@@ -386,8 +443,9 @@ def compute_size(
     notional = final_risk_pct * portfolio.equity_usd * intent.leverage
     logger.info(
         "[T4] %s/%s sid=%s strat=%s base=%.4f cont=%.2f tier=%.1fx cell=%.1fx "
-        "list=%.1fx → proposed_pct=%.4f single_cap=%.4f → final_pct=%.4f "
-        "(binding=%s) notional=%.2f USD lev=%.1f kelly=%.4f cold=%s",
+        "list=%.1fx ses=%.2f reg=%.2f blk=%.2f → proposed_pct=%.4f "
+        "single_cap=%.4f → final_pct=%.4f (binding=%s) notional=%.2f USD "
+        "lev=%.1f kelly=%.4f cold=%s",
         intent.venue,
         intent.symbol,
         intent.signal_id,
@@ -397,6 +455,9 @@ def compute_size(
         tier_amp,
         cell_mult,
         listing_mult,
+        proposal.session_mult,
+        proposal.regime_mult,
+        proposal.triple_block_mult,
         proposal.proposed_risk_pct,
         single_cap_pct,
         final_risk_pct,

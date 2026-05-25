@@ -101,10 +101,11 @@ Track = Literal["A", "B"]
 
 @dataclass(frozen=True, slots=True)
 class SizingProposal:
-    """Pre-cap T4 proposal: ``base × continuous × tier × cell × listing_watchdog``.
+    """Pre-cap T4 proposal: ``base × continuous × tier × cell × listing × L5_learner_product``.
 
     Each multiplier captured for audit so post-trade reflector can attribute
-    sizing back to the inputs that drove it.
+    sizing back to the inputs that drove it. L5 learner mults
+    (session/regime/triple_block) default to 1.0 (neutral) for backward compat.
     """
 
     base_risk_pct: float
@@ -113,6 +114,10 @@ class SizingProposal:
     cell_routing_mult: float
     listing_watchdog_mult: float
     proposed_risk_pct: float
+    # L5 learner wire (2026-05-26 p0_l5_l3_sizing_wire)
+    session_mult: float = 1.0
+    regime_mult: float = 1.0
+    triple_block_mult: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

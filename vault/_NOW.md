@@ -117,4 +117,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-20 07:31 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-25 23:46 (paper=False, full_pipeline=True)

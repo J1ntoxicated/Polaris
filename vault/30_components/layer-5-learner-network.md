@@ -28,6 +28,7 @@ reviewed_by: codex+jin (round 1, gpt-5.4)
 - 같은 learner 내부 같은 hour 상반 delta = `net_delta` 합산 후 `±0.1/hour` cap.
 - **Individual mult clip**: `[0.3, 3.0]` (ADR-007 carryover, [0.2, 5.0] 거부 — saturation 빠름).
 - **Final product clip**: `[0.1, 5.0]`.
+- **Production caller (2026-05-26)**: `polaris.core.sizing.engine.compute_size` 가 매 sizing 시 `SessionMultLearner.get_mult` + `RegimeMultLearner.get_mult` + `evaluate_triple_block` 호출 → `clip_product_mult(s × r × b)` 결과를 T4 chain 의 단일 mult 로 곱함. cell_routing 은 별개 (T4 별도 항). ai_feedback = P1 (스텁).
 
 ### Q3 — Rollback (SQLite hot backup + auto-flag manual apply)
 - Snapshot: `data/learner_snapshots/<ts>.db` + `data/learner_snapshots/<ts>.json` (manifest).

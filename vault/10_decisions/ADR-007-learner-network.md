@@ -107,6 +107,11 @@ strategy weight × cell routing → next cycle sizing
 - P1: 7 full + AI feedback + triple specific block live
 - P2: meta-learner (learner of learners, hyperparam tune)
 
+## Status (2026-05-26)
+- session_mult / regime_mult / triple_block: **wired into T4 sizing** via `polaris.core.sizing.engine.compute_size` ([[ADR-005]] T4 chain + [[layer-3-sizing-risk]] Q1). 이전: spec-only (`resolve_final_size_mult` 호출자 0). 현재: production caller live, fallback NEUTRAL 1.0 (sparse/disabled/no row).
+- max_hold: P0 learner active, sizing 비관여 (exit/G7 path).
+- ai_feedback: P1 stub 유지.
+
 ## Sources
 - T11 archive: `feedback_adaptive_learner_attack` 영속 원칙
 - Memory: `feedback_adaptive_learner_attack.md`, `feedback_loss_profit_asymmetry.md`

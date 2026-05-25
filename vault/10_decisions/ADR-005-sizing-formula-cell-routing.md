@@ -12,17 +12,21 @@ reviewed_by: codex+jin (round 3 D2 + D4 + Jin sign-off MED/LOW)
 
 ## Decision
 
-**T4 공식 (anti-collapse + tier amplifier + cell routing)**:
+**T4 공식 (anti-collapse + tier amplifier + cell routing + L5 learner wire 2026-05-26)**:
 
 ```
-notional = base × continuous_scalar(0.75-1.5×) × tier_amplifier(1.5/2/3×) × cell_routing_mult
-clipped  = min(notional, hard_caps)
-final    = clipped × leverage(venue)
+L5_product = clip_product(clip_ind(session_mult) × clip_ind(regime_mult) × clip_ind(triple_block_mult))
+proposed   = base × continuous_scalar(0.75-1.5×) × tier_amplifier(1.5/2/3×)
+             × cell_routing_mult × listing_watchdog_mult × L5_product
+clipped    = min(proposed, hard_caps)
+final      = clipped × leverage(venue)
 ```
 
 - 1 continuous scalar BEFORE notional clip (anti-collapse)
 - 1 tier amplifier (3승 1.5× / 5승 2.0× / 8+승 3.0× / 1패 R1 reset)
 - 1 cell routing mult (top quartile **×1.5** / bottom quartile ×0.5 / mid ×1.0)  ([[layer-4-cell-matrix]] Phase 0 patch — top ×1.3 → ×1.5 amplify)
+- 1 listing_watchdog (age<24h → ×0.5)
+- 1 L5 learner product = session × regime × triple_block, each `clip_ind=[0.3,3.0]`, product `clip=[0.1,5.0]` (sparse/disabled → 1.0 neutral, never block)
 - All other = HARD MAX (소프트 dampener X)
 - v1 9-stack collapse 영구 봉쇄
 
@@ -114,3 +118,4 @@ venue daily risk ceiling (8%/9%) 빠른 도달 시:
 - Round 3 D2 (k=0.5, single 8%/9%, hard MAX > Kelly)
 - Round 3 D4 (tier amplifier 1.5/2/3×, R1 reset)
 - Jin sign-off (CS-3 / fill-rate cut / cluster cap)
+- 2026-05-26 L5→L3 wire — `.claude/plans/p0_l5_l3_sizing_wire.md` (session/regime/triple_block multiplied into T4, individual+product clip)

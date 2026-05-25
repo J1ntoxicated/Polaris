@@ -206,3 +206,5 @@
 2026-05-10 09:56 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=20 learners=3 paper=True]
 2026-05-10 10:00 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
 2026-05-10 12:40 [Edit: /Users/jinyoon/Projects/Polaris/polaris/scripts/dashboard/snapshot.py]
+2026-05-20 07:31 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=38 learners=3 paper=True]
+2026-05-25 23:24 [Write: /Users/jinyoon/Projects/Polaris/.claude/plans/p0_l5_l3_sizing_wire.md]

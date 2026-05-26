@@ -98,9 +98,11 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - [ ] Day 9+ vault backlog: 8 component spec split (≤60 line summary + impl/decisions sub-pages) / start_dashboard hook 1-min dedup / ADR-007 provenance back-fill / vault-curator agent pattern (per-Day dispatch)
 - [x] **Day 9 P0 quad bundle (full-audit 2026-05-07 [[2026-05-07_p1_full_audit]])**: F1+F2 G6/G7 GPT P1 wire + per-tick re-invocation + close_specific_position (FIFO 폐기) + G8 phase=P1 default — done 2026-05-07. F10 timeframe + F11 supervise + F12 equity SSOT — done 2026-05-07.
 - [x] **Day 9 24h production loop completed (2026-05-08)**: G6 GPT 27,003 / G7 GPT 20,833 / G8 GPT lessons 1,917 / live_recalc exit_now 95,778 widen 10,645 / OKX PnL +$599.43 / cell pool 201 / fence reservations 5,616. Audit: [[2026-05-08_p1_day9_24h_full_audit]] + [[2026-05-08_p1_day9_24h_audit_detail]].
-- [ ] **Day 10 P0 from 24h audit**: Capital fills 0 silent drop (55 SIZED→55 reservation→0 fills, 0 fault_events) — trace simulate_open_fill→persist_fill for venue=capital
-- [ ] Day 10 P1 from 24h audit: fx_breakout_basket 0 signals all-time / xau_indices_trend US100 ticker mismatch / G3 KILL ratio 73% (target 50%, Variant B v2 + cell_score evidence)
-- [ ] Day 10+ P2: F6 persist signals/orders/quote_ticks / fault_events table empty vs counter 153 reconcile / F4 A1 session×regime in T4 / F8 ignite_p1 bootstrap dedup hook
+- [x] **Day 10 P0 "Capital fills 0 silent drop" — diagnosed 2026-05-26** ([[2026-05-26_p0_capital_silent_drop_diagnosis]]): audit query frame 잘못 (ts_ms 필터가 -10h drift된 ts 못 잡음 — 실제 165 capital fills 정상 persist). 진짜 P0 = `fills.ts_ms` -36000s drift (Sydney AEST naive→UTC artefact, historical only). 현재 코드는 0 drift reproduce — 다음 24h paper run 으로 확정 close.
+- [ ] **Day 10 P0 follow-up**: 다음 24h paper run 후 신규 capital fills 의 ts_ms drift verify (0 → close ; non-0 → remaining naive-ts path hunt)
+- [x] **Day 10 P1 (session×regime in T4) — done 2026-05-26**: [[ADR-005]] T4 chain 에 L5_product wire (`9d3c79d feat(L3) wire L5 learner mults`). plan: `.claude/plans/p0_l5_l3_sizing_wire.md`. 10 new tests, 609 suite pass, mypy strict + ruff clean.
+- [ ] Day 10 P1 remaining: fx_breakout_basket 0 signals all-time / xau_indices_trend US100 ticker mismatch / G3 KILL ratio 73% (target 50%, Variant B v2 + cell_score evidence)
+- [ ] Day 10+ P2: F6 persist signals/orders/quote_ticks / fault_events table empty vs counter 153 reconcile / F8 ignite_p1 bootstrap dedup hook
 
 ## Auto-generated (DO NOT EDIT BELOW)
 <!-- AUTO-START -->

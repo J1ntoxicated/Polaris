@@ -214,3 +214,4 @@
 2026-05-25 23:42 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=29 learners=3 paper=True]
 2026-05-25 23:46 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
 2026-05-26 09:50 [L5→L3 sizing wire: engine.compute_size now multiplies session × regime × triple_block (10 new tests pass, 609 total)]
+2026-05-26 10:15 [Day 10 P0 diagnosis: Capital silent-drop was audit frame error — fills are present, real bug = -10h ts_ms drift (historical only, current code 0 drift)]

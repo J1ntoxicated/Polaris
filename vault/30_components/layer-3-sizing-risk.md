@@ -82,20 +82,24 @@ cluster cap 은 `T4 제안 size 산출 후`, `order submit 전`, `open positions
 
 ## Implementation notes
 
-### File layout (P0)
+### File layout (impl, [[ADR-003]] file map 일치)
 ```
 polaris/core/sizing/
-├── t4.py             # compute_proposed_risk_pct + compute_final_order_risk_pct
-├── schema.py         # SizingProposal / SizingFinal dataclass
-├── cluster_cap.py    # cluster_id resolve + headroom
-├── cell_router.py    # cell_routing_mult (n<5 → 1.0, quartile)
-└── kelly.py          # CS-3 (n<20 → off, single 6%/7%)
-polaris/core/risk/
-├── fill_rate.py      # 70% cut + 60% hysteresis
-└── caps.py           # headroom min() composer
+├── engine.py             # compute_proposed + headroom_min + compute_size (T4 SSOT)
+├── schema.py             # SignalIntent / SizingProposal / SizingFinal dataclass
+├── constants.py          # SSOT 상수 (cap / floor / clip 경계)
+├── cluster_cap.py        # cluster_id resolve + headroom
+├── cell_mult_application.py  # cell_routing_mult (n<5 → 1.0, quartile) + apply
+├── amplifier.py          # tier_amplifier (1.5/2/3×)
+├── session.py            # L5 session/regime mult wire
+├── fill_rate_cut.py      # 70% cut + 60% hysteresis (sizing/ 내 흡수, 별도 risk/ dir X)
+└── kelly.py              # CS-3 (n<20 → off, single 6%/7%)
 polaris/config/
-└── risk_caps.yaml    # cluster + watchdog + fill_rate config
+└── risk_caps.yaml        # cluster + watchdog + fill_rate config
 ```
+**Drift note**: 초기 spec 의 `t4.py`/`cell_router.py`/`polaris/core/risk/` 는
+impl 에서 `engine.py`/`cell_mult_application.py`/`sizing/` 흡수로 정렬됨.
+headroom min() composer = `engine.headroom_min` (별도 `caps.py` 없음).
 
 ### Schema (SQLite)
 ```sql
@@ -154,7 +158,7 @@ cold_start:
 
 ### Function signatures
 ```python
-# t4.py
+# engine.py (T4 SSOT)
 def compute_proposed_risk_pct(*, base_risk_pct, continuous_scalar,
     tier_amplifier, cell_routing_mult, listing_watchdog_mult=1.0) -> float
 
@@ -165,7 +169,7 @@ def compute_final_order_risk_pct(*, proposed_risk_pct,
     track_remaining_pct, venue_daily_remaining_pct,
     total_daily_remaining_pct) -> float
 
-# cell_router.py
+# cell_mult_application.py
 def resolve_cell_routing_mult(*, exchange, strategy, ticker, regime,
     cell_n_trades: int | None, cell_score: float | None,
     active_score_distribution: list[float]) -> float
@@ -177,7 +181,7 @@ def resolve_cluster_id(*, underlying_group_id, asset_class, symbol,
 def compute_remaining_headrooms(*, candidate, open_positions,
     venue_daily_used_pct, total_daily_used_pct, config) -> dict[str, float | None]
 
-# fill_rate.py
+# fill_rate_cut.py
 def compute_fill_rate(*, used_risk_pct, venue_daily_ceiling_pct) -> float
 def rank_cut_candidates(open_positions: list) -> list
 

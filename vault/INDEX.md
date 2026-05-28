@@ -27,6 +27,8 @@ tags: [index, catalog]
 - [[ADR-006]] Cell Matrix 8-dim (4-dim P0)
 - [[ADR-007]] Learner Network 7 (3 P0)
 - [[ADR-008]] 7 Strategies (signal generator role)
+- [[ADR-009]] Harness Collaboration Protocol (3-layer install)
+- [[ADR-010]] Venue Round-Trip Activation (real demo wire + db 격리)
 
 ## 20_strategies (P0 Day 4 — 7 signal generators)
 - [[volume_burst]] — OKX SPOT 1m, vol z>2.5 + prior-high break + ATR floor (corr_group=spot_intraday_event)
@@ -46,12 +48,15 @@ tags: [index, catalog]
 - [[layer-5-learner-network]] — incremental + hourly commit + triple block + SQLite snapshot + AI feedback ≠ cell
 - [[layer-6-live-recalc]] — dirty-trigger 5s + venue regime + 1-swap/trade + 3-layer stack + close-only override reset
 - [[layer-7-strategy-isolation]] — asyncio task + central allocator (one Lock) + 4-state breaker + idempotent key
+- [[harness-collab-protocol]] — multi-agent orchestration glue: agent roster + handoff triggers + builder≠reviewer + brain contribution ([[ADR-009]])
 
 ## 40_ops
 - daily/, incidents/, digests/, lever_changes/
+- [[2026-05-28_5axis_audit]] — 5-axis P0 venue wire-miss + fix + Capital live 증명
 
 ## 50_research
 - forensic/, debates/, lessons/
+- [[t-p0-wire_2026-05-28]] — venue wire-miss (green ≠ safe, builder≠reviewer 실증)
 
 ## .templates
 - ADR.md / INSIGHT.md / STRATEGY.md / COMPONENT.md / LESSON.md

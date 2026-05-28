@@ -2,13 +2,17 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-date_updated: 2026-05-08
+date_updated: 2026-05-28
 tags: [now, tier-0]
 ---
 
 # Polaris _NOW (Tier 0 — read first)
 
 ## What matters now (HAND-WRITTEN)
+
+**2026-05-28 P0 venue wire fix + 라이브 증명 (최신)**: 5-axis 검수가 P0 발견 — production paper loop 이 실제 demo 주문을 한 번도 안 보냄 (open/close 둘 다 simulate-only, `--real-roundtrip` 폐기). 기존 `data/polaris.sqlite` 17,259 fills 전부 가짜. builder TDD 로 wire 복구 (618 green) → **codex 외부 review 가 green 코드에서 실주문 안전 P0 5건 포착** (db 혼재 / reservation 누수 / orphan 실포지션 / Capital deal_id 유실 / pnl_r 오산) → 재수정, codex 재review 7/7 safe=yes → 627 green. **라이브 증명**: `ignite_p1 --real-roundtrip --db data/polaris_live.sqlite` 로 Capital demo 실왕복 (13 fills 실 dealId, fault 0 / orphan 0 / fence conflict 0). OKX live = 시그널 미발화로 미확인 (gap). silent-drop 2건 warning 추가. 교훈 = green ≠ safe, builder≠reviewer 실증 → [[ADR-010]] + [[t-p0-wire_2026-05-28]] + [[2026-05-28_5axis_audit]].
+
+**Day 8-10 backlog 상태 (stale 해소)**: Day 8 P0 quad (AllocatorFence/supervise/dynamic focus/ingest) + Day 9 24h production (G6/G7/G8 GPT wire + live_recalc) 완료. Day 10 P1 L5→L3 sizing wire (session×regime×triple_block in T4) done 2026-05-26. Day 10 P0 Capital silent-drop = audit frame error 로 debunk (ts_ms -10h drift historical only). 현재 최우선 = 위 venue round-trip 활성화 완료, 남은 gap = OKX live 증명 + orphan scanner.
 
 Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완료** (2026-05-06): L0~L7 codex round 1 합의 + `vault/30_components/layer-0..7-*.md` 8 spec write. 거부 키워드 0건.
 
@@ -119,4 +123,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-25 23:46 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-28 14:38 (paper=False, full_pipeline=True)

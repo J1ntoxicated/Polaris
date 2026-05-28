@@ -39,11 +39,15 @@ Behavioral guidelines + Polaris project context. **항상 숙지.**
 - Tracks: OKX SPOT demo (`us.okx.com` + `x-simulated-trading: 1`) + Capital CFD demo
 
 ## Absolute mandates (non-negotiable)
+<absolute-mandates>
 - **DEMO/PAPER ONLY** — 가상 자금. real-money 보수 논거 (regulatory / professional risk / capital protection / fund mandate / fractional Kelly is too aggressive in practice) **무효**
 - **Aggressive bias preserved** — defensive throttle 거부. `aggressive_always_profit` / `no_defensive_param_dampen` / `no_block_filter_architecture` / `flow_not_block`
 - **Anthropic = Claude Code (Opus) 개발용만** / Code 내부 LLM = **OpenAI GPT** (gpt-5-mini P0 / gpt-5.5 P1)
-- **거부 키워드 sweep 의무** (모든 vault digest / log line / agent prompt): `12주` / `90d gate` / `monthly review` / `regrets/` / `posture standard` / `regulatory cap` / `professional risk` / `real-money safety` / `fractional Kelly is too aggressive in practice` / `표본 부족 risk` → 0건
 - **9-stack collapse 영구 봉쇄** — sizing chain ≤1 mult 누적 X. T4: 1 continuous scalar (0.75-1.5×) BEFORE clip + tier amplifier (1.5/2/3×) + cell mult (1.5/0.5/1.0) + hard MAX headroom min()
+<rejection-keywords sweep="모든 vault digest / log line / agent prompt → 0건 의무">
+12주 · 90d gate · monthly review · regrets/ · posture standard · regulatory cap · professional risk · real-money safety · fractional Kelly is too aggressive in practice · 표본 부족 risk
+</rejection-keywords>
+</absolute-mandates>
 
 ## 8-Layer Architecture ([[ADR-003]])
 L0 Dynamic Universe · L1 Canonical+Baseline · L2 Per-Gate AI (G1-G8) · L3 Sizing+Risk · L4 Cell Matrix · L5 Learner Network · L6 Live Recalc · L7 Strategy Isolation
@@ -61,6 +65,26 @@ L0 Dynamic Universe · L1 Canonical+Baseline · L2 Per-Gate AI (G1-G8) · L3 Siz
 5. **큰 wave = 5-axis review**: technical / 4-axis policy / cumulative coherence / functional / live audit
 6. **Vault 지속 리뷰** (주 1회 또는 50+ commit) — Karpathy 3-ops + backlink + lifecycle
 7. **Session end** — material change 시 vault append (digest/insight/ADR/lesson) + log 1-line
+
+## Handoff & Agent 모델 (context pollution 방지 + brain contribution)
+Canonical spec → `vault/30_components/harness-collab-protocol.md`. 메인 = orchestrator + synthesizer, raw read/search dump 회피.
+
+<agent-definition>
+Agent = 자율 실행 주체: 독립 context + 전체 toolkit 소환 (sub-agent spawn / advisor codex / skill / vault r·w / sequential-thinking / parallel 협업).
+tool call · skill · advisor 단독 호출 ≠ agent — agent는 위 권한을 행사하는 실행 주체.
+</agent-definition>
+
+<handoff-triggers>
+5+ 파일 read·codebase-wide search → Explore·general-purpose · 큰 wave 검수 → 5-axis 병렬(technical/4-axis policy/coherence/functional/live) · 다단계 설계 → Plan, 리팩토링 → code-simplifier · 신규 코드·거동 변경 → code-implementer→codex-debate-partner · 거부키워드 sweep hit·9-stack/sizing 변경·vault write 충돌 → 전담 agent · 오염 신호(Read 5+/grep 100+ line/반복 search) → 전환 · 단일 known target → 직접 처리
+</handoff-triggers>
+
+<builder-not-reviewer>
+코드·spec·rule 작성 주체 self-review 금지 (confirmation bias). 신규 작성 → codex 외부 review **의무** (codex 불가 시에만 별도 Claude reviewer fallback). Workflow #3 강화.
+</builder-not-reviewer>
+
+<sub-agent-prompt-header>
+DEMO/PAPER 명시 + Aggressive bias + 거부 키워드 sweep + length cap + vault r·w 권한 (brain contribution).
+</sub-agent-prompt-header>
 
 ## Tech stack
 - Python 3.13+, `httpx` async, `sqlite3` stdlib, `mypy --strict`, `ruff` clean

@@ -167,6 +167,9 @@ async def _evaluate_position(
     close_specific: Callable[..., Any],
     lookup_regime: Callable[[sqlite3.Connection, str, str], str],
     phase: str,
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> None:
     """Build payload + call G6, then G7 / close / swap based on decision."""
     side = str(pos.get("side", "long"))
@@ -222,6 +225,8 @@ async def _evaluate_position(
             conn, state=state, position_id=str(pos["position_id"]),
             now_ts=now_ts, lookup_regime=lookup_regime,
             gpt_client=gpt_client, phase=phase,
+            real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+            capital_session=capital_session,
         )
         state.recalc_exit_now = getattr(state, "recalc_exit_now", 0) + 1
         return
@@ -294,6 +299,9 @@ async def recalc_active_positions(
     lookup_regime: Callable[[sqlite3.Connection, str, str], str],
     close_specific: Callable[..., Any],
     max_positions: int = LIVE_RECALC_MAX_POSITIONS,
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> int:
     """Sweep every active position through G6 (and G7 if ADJUST_EXIT).
 
@@ -318,7 +326,8 @@ async def recalc_active_positions(
                 conn=conn, state=state, pos=pos, regime=regime,
                 gpt_client=gpt_client, now_ts=now_ts,
                 close_specific=close_specific, lookup_regime=lookup_regime,
-                phase=phase,
+                phase=phase, real_roundtrip=real_roundtrip,
+                okx_adapter=okx_adapter, capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — fault isolate per position
             logger.error(

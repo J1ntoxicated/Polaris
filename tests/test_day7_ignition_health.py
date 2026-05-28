@@ -475,6 +475,7 @@ async def test_kill_switch_paper_mode_cancels_inner_tasks(
 
     from unittest.mock import AsyncMock
 
+    import polaris.scripts._production_bars as prod_bars
     import polaris.scripts._production_layers as prod_layers
     import polaris.scripts.smoke_paper_loop as mod
     from polaris.strategies import BarView
@@ -490,10 +491,10 @@ async def test_kill_switch_paper_mode_cancels_inner_tasks(
     # on a populated universe).
     original_okx_fetch = prod_layers.fetch_okx_instruments
     original_cap_fetch = prod_layers.fetch_capital_instruments
-    original_okx_bars = prod_layers.fetch_okx_bars
+    original_okx_bars = prod_bars.fetch_okx_bars
     prod_layers.fetch_okx_instruments = AsyncMock(return_value=[])
     prod_layers.fetch_capital_instruments = AsyncMock(return_value=[])
-    prod_layers.fetch_okx_bars = AsyncMock(return_value=[])
+    prod_bars.fetch_okx_bars = AsyncMock(return_value=[])
 
     # Spy on LearnerScheduler.run_forever — track:
     #  - started: the coroutine ran at least once.
@@ -535,7 +536,7 @@ async def test_kill_switch_paper_mode_cancels_inner_tasks(
         mod._fetch_bars_for_symbol = original
         prod_layers.fetch_okx_instruments = original_okx_fetch
         prod_layers.fetch_capital_instruments = original_cap_fetch
-        prod_layers.fetch_okx_bars = original_okx_bars
+        prod_bars.fetch_okx_bars = original_okx_bars
         LearnerScheduler.run_forever = real_run_forever  # type: ignore[method-assign]
 
 
@@ -618,6 +619,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
 
     from unittest.mock import AsyncMock
 
+    import polaris.scripts._production_bars as prod_bars
     import polaris.scripts._production_layers as prod_layers
     import polaris.scripts.smoke_paper_loop as mod
     from polaris.core.universe.schema import UniverseInstrument
@@ -668,10 +670,10 @@ async def test_24h_readiness_composite_exercises_all_layers(
 
     original_okx_fetch = prod_layers.fetch_okx_instruments
     original_cap_fetch = prod_layers.fetch_capital_instruments
-    original_okx_bars = prod_layers.fetch_okx_bars
+    original_okx_bars = prod_bars.fetch_okx_bars
     prod_layers.fetch_okx_instruments = AsyncMock(return_value=sample_universe)
     prod_layers.fetch_capital_instruments = AsyncMock(return_value=[])
-    prod_layers.fetch_okx_bars = AsyncMock(return_value=list(reversed(_fake_bars())))
+    prod_bars.fetch_okx_bars = AsyncMock(return_value=list(reversed(_fake_bars())))
 
     # Spy on run_forever so we can prove it started + counted at least one
     # run_once cycle within the test window.
@@ -707,7 +709,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
         mod._fetch_bars_for_symbol = original
         prod_layers.fetch_okx_instruments = original_okx_fetch
         prod_layers.fetch_capital_instruments = original_cap_fetch
-        prod_layers.fetch_okx_bars = original_okx_bars
+        prod_bars.fetch_okx_bars = original_okx_bars
         LearnerScheduler.run_forever = real_run_forever  # type: ignore[method-assign]
         LearnerScheduler.run_once = real_run_once  # type: ignore[method-assign]
 

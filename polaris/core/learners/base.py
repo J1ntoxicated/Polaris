@@ -7,6 +7,11 @@ Pure functions + protocol surface only. SQLite I/O lives in
 ``polaris.core.learners.{session,regime,max_hold}`` (per-learner) and
 ``polaris.core.learners.scheduler`` (orchestration).
 
+Constants, result dataclasses, and clip helpers live in ``_primitives``; the
+triple-block lookup, block emission, and snapshot-restore free functions live
+in ``triple_block``. Both are re-exported here so existing ``learners.base``
+import paths keep working.
+
 Design notes:
 - Incremental stats per close → ``record_trade_close()``.
 - Hourly commit → ``commit_hourly()`` writes ``pending_delta`` into ``value`` and
@@ -25,163 +30,37 @@ import sqlite3
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Final
+from typing import Any
+
+from polaris.core.learners._primitives import (
+    DEFAULT_MAX_HOLD_FALLBACK_BARS,
+    LEARNER_DELTA_HOURLY_CAP,
+    LEARNER_INDIVIDUAL_MULT_CLIP,
+    LEARNER_MIN_NEFF_FOR_DELTA,
+    LEARNER_PRODUCT_CLIP,
+    LEARNER_SNAPSHOT_DIR,
+    NEUTRAL_MULT,
+    TRIPLE_BLOCK_DURATION_SEC,
+    TRIPLE_BLOCK_SIZE_MULT,
+    WR_DEMOTE_THRESHOLD,
+    WR_PROMOTE_THRESHOLD,
+    ClosedTrade,
+    HourlyCommitReport,
+    LearnerMultResult,
+    TripleBlockEntry,
+    clip_hourly_delta,
+    clip_individual_mult,
+    clip_product_mult,
+    resolve_final_size_mult,
+)
+from polaris.core.learners.triple_block import (
+    evaluate_triple_block,
+    evict_expired_triple_blocks,
+    maybe_emit_triple_block,
+    restore_snapshot_from_disk,
+)
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants (P0)  — see vault/30_components/layer-5-learner-network.md
-# ---------------------------------------------------------------------------
-
-LEARNER_MIN_NEFF_FOR_DELTA: Final[float] = 20.0
-"""Minimum n_eff before a learner is allowed to commit a delta."""
-
-LEARNER_DELTA_HOURLY_CAP: Final[float] = 0.1
-"""Per-key per-hour absolute delta ceiling (sanity bound)."""
-
-LEARNER_INDIVIDUAL_MULT_CLIP: Final[tuple[float, float]] = (0.3, 3.0)
-"""ADR-007 individual multiplier clip — saturation guard."""
-
-LEARNER_PRODUCT_CLIP: Final[tuple[float, float]] = (0.1, 5.0)
-"""ADR-007 final composed multiplier clip."""
-
-WR_PROMOTE_THRESHOLD: Final[float] = 0.55
-"""regime_mult promotion threshold (≥55% → +0.1)."""
-
-WR_DEMOTE_THRESHOLD: Final[float] = 0.40
-"""regime_mult demotion threshold (≤40% → -0.1)."""
-
-TRIPLE_BLOCK_NEFF_THRESHOLD: Final[float] = 20.0
-"""Minimum trades before triple block evaluates."""
-
-TRIPLE_BLOCK_WR_THRESHOLD: Final[float] = 0.30
-"""WR ceiling that triggers a triple block."""
-
-TRIPLE_BLOCK_EXPECTANCY_THRESHOLD: Final[float] = -0.25
-"""Expectancy R floor that triggers a triple block."""
-
-TRIPLE_BLOCK_DURATION_SEC: Final[int] = 3600
-"""Auto-unblock interval (1h) — ADR-007 principle 2."""
-
-TRIPLE_BLOCK_SIZE_MULT: Final[float] = 0.3
-"""Block applied as a size multiplier (entry remains allowed)."""
-
-NEUTRAL_MULT: Final[float] = 1.0
-"""Default fallback multiplier when sparse / disabled."""
-
-DEFAULT_MAX_HOLD_FALLBACK_BARS: Final[int] = 60
-"""max_hold fallback when no StrategyMetadata.expected_holding_bars."""
-
-LEARNER_SNAPSHOT_DIR: Final[Path] = Path("data/learner_snapshots")
-"""Filesystem location of SQLite hot-backup + JSON manifest snapshots
-(spec: vault/30_components/layer-5-learner-network.md §Q3)."""
-
-# ---------------------------------------------------------------------------
-# Result dataclasses
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class ClosedTrade:
-    """Trade close event consumed by every learner update."""
-
-    trade_id: str
-    strategy_id: str
-    ticker: str
-    venue: str
-    regime: str
-    session: str
-    pnl_r: float
-    won: bool
-    holding_bars: int
-    closed_ts: int
-
-
-@dataclass(frozen=True, slots=True)
-class LearnerMultResult:
-    """``get_mult`` output, surfacing fallback/source for audit."""
-
-    value: float
-    source: str  # "live" / "fallback_neutral" / "disabled" / "sparse"
-    n_eff: float = 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class TripleBlockEntry:
-    """Active triple block row."""
-
-    ticker: str
-    strategy_id: str
-    regime: str
-    size_mult: float
-    reason: str
-    source_learner: str
-    blocked_until_ts: int
-    created_ts: int
-
-
-@dataclass(slots=True)
-class HourlyCommitReport:
-    """Outcome from one ``commit_hourly`` invocation (audit + smoke)."""
-
-    learner_id: str
-    keys_updated: int
-    deltas_applied: dict[str, float] = field(default_factory=dict)
-    snapshot_ts: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Clip helpers
-# ---------------------------------------------------------------------------
-
-
-def clip_individual_mult(value: float) -> float:
-    """Clip a single learner multiplier to ``LEARNER_INDIVIDUAL_MULT_CLIP``."""
-    if not math.isfinite(value):
-        return NEUTRAL_MULT
-    lo, hi = LEARNER_INDIVIDUAL_MULT_CLIP
-    return max(lo, min(hi, value))
-
-
-def clip_product_mult(value: float) -> float:
-    """Clip the composed product multiplier to ``LEARNER_PRODUCT_CLIP``."""
-    if not math.isfinite(value):
-        return NEUTRAL_MULT
-    lo, hi = LEARNER_PRODUCT_CLIP
-    return max(lo, min(hi, value))
-
-
-def clip_hourly_delta(delta: float) -> float:
-    """Clip a single-hour delta proposal to ``±LEARNER_DELTA_HOURLY_CAP``."""
-    if not math.isfinite(delta):
-        return 0.0
-    return max(-LEARNER_DELTA_HOURLY_CAP, min(LEARNER_DELTA_HOURLY_CAP, delta))
-
-
-def resolve_final_size_mult(
-    *,
-    session_mult: float,
-    regime_mult: float,
-    cell_routing_mult: float,
-    ai_feedback_weight: float = NEUTRAL_MULT,
-) -> float:
-    """Independent-axis composition (vault Q2 — multiplicative chain).
-
-    Each input is individually clipped before composition; the product is then
-    re-clipped to keep the cumulative multiplier sane.
-    """
-    s = clip_individual_mult(session_mult)
-    r = clip_individual_mult(regime_mult)
-    c = clip_individual_mult(cell_routing_mult)
-    a = clip_individual_mult(ai_feedback_weight)
-    return clip_product_mult(s * r * c * a)
-
-
-# ---------------------------------------------------------------------------
-# BaseLearner ABC
-# ---------------------------------------------------------------------------
 
 
 class BaseLearner(ABC):
@@ -578,174 +457,14 @@ class BaseLearner(ABC):
             return
 
     def _maybe_emit_triple_block(self, trade: ClosedTrade, ts: int) -> None:
-        """ADR-007 §triple specific block.
+        """ADR-007 §triple specific block — delegates to the free function.
 
-        Triggered from regime_mult only (single source-of-truth for blocks).
-        Subclasses that should never emit a block leave ``learner_id !=
-        regime_mult`` and this is a no-op.
+        Triggered from regime_mult only (single source-of-truth for blocks);
+        the free function is a no-op for any other ``learner_id``.
         """
-        if self.learner_id != "regime_mult":
-            return
-        # n_eff / wr / expectancy from the just-updated row
-        triple_key = f"{trade.ticker}|{trade.strategy_id}|{trade.regime}"
-        row = self.conn.execute(
-            "SELECT n_eff, wins_eff, pnl_r_sum_eff FROM learner_state "
-            "WHERE learner_id = 'triple_stats' AND key = ?",
-            (triple_key,),
-        ).fetchone()
-        if row is None:
-            n_eff, wins, pnl_sum = 0.0, 0.0, 0.0
-        else:
-            n_eff, wins, pnl_sum = float(row[0]), float(row[1]), float(row[2])
-        n_eff += 1.0
-        wins += 1.0 if trade.won else 0.0
-        pnl_sum += trade.pnl_r
-        self.conn.execute(
-            "INSERT INTO learner_state "
-            "(learner_id, key, value, n_eff, wins_eff, pnl_r_sum_eff, "
-            " pending_delta, updated_at) "
-            "VALUES ('triple_stats', ?, 1.0, ?, ?, ?, 0.0, ?) "
-            "ON CONFLICT(learner_id, key) DO UPDATE SET "
-            " n_eff = excluded.n_eff, wins_eff = excluded.wins_eff, "
-            " pnl_r_sum_eff = excluded.pnl_r_sum_eff, "
-            " updated_at = excluded.updated_at",
-            (triple_key, n_eff, wins, pnl_sum, ts),
+        maybe_emit_triple_block(
+            self.conn, learner_id=self.learner_id, trade=trade, ts=ts
         )
-        if n_eff < TRIPLE_BLOCK_NEFF_THRESHOLD:
-            return
-        wr = wins / n_eff if n_eff > 0 else 0.0
-        expectancy = pnl_sum / n_eff if n_eff > 0 else 0.0
-        if wr <= TRIPLE_BLOCK_WR_THRESHOLD and expectancy <= TRIPLE_BLOCK_EXPECTANCY_THRESHOLD:
-            until = ts + TRIPLE_BLOCK_DURATION_SEC
-            logger.warning(
-                "[learner %s] triple BLOCK %s|%s|%s wr=%.2f exp=%.2f size_mult=%.2f until=%d",
-                self.learner_id,
-                trade.ticker,
-                trade.strategy_id,
-                trade.regime,
-                wr,
-                expectancy,
-                TRIPLE_BLOCK_SIZE_MULT,
-                until,
-            )
-            self.conn.execute(
-                "INSERT INTO learner_blocks "
-                "(ticker, strategy_id, regime, size_mult, reason, source_learner, "
-                " blocked_until_ts, created_ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ticker, strategy_id, regime) DO UPDATE SET "
-                " size_mult = excluded.size_mult, "
-                " reason = excluded.reason, "
-                " source_learner = excluded.source_learner, "
-                " blocked_until_ts = excluded.blocked_until_ts, "
-                " created_ts = excluded.created_ts",
-                (
-                    trade.ticker,
-                    trade.strategy_id,
-                    trade.regime,
-                    TRIPLE_BLOCK_SIZE_MULT,
-                    f"wr={wr:.2f},exp={expectancy:.2f}",
-                    self.learner_id,
-                    until,
-                    ts,
-                ),
-            )
-
-
-# ---------------------------------------------------------------------------
-# Triple block lookup (read-only, used by sizing/pre-entry pipeline)
-# ---------------------------------------------------------------------------
-
-
-def evaluate_triple_block(
-    conn: sqlite3.Connection,
-    *,
-    ticker: str,
-    strategy_id: str,
-    regime: str,
-    now_ts: int,
-) -> TripleBlockEntry | None:
-    """Return active block for ``(ticker, strategy_id, regime)`` or ``None``.
-
-    Auto-unblock: a row whose ``blocked_until_ts <= now_ts`` is treated as
-    expired (and lazily not returned). Eviction is handled by the scheduler
-    so concurrent readers don't race each other.
-    """
-    row = conn.execute(
-        "SELECT ticker, strategy_id, regime, size_mult, reason, source_learner, "
-        " blocked_until_ts, created_ts FROM learner_blocks "
-        "WHERE ticker = ? AND strategy_id = ? AND regime = ?",
-        (ticker, strategy_id, regime),
-    ).fetchone()
-    if row is None:
-        return None
-    if int(row[6]) <= int(now_ts):
-        return None
-    return TripleBlockEntry(
-        ticker=row[0],
-        strategy_id=row[1],
-        regime=row[2],
-        size_mult=float(row[3]),
-        reason=row[4],
-        source_learner=row[5],
-        blocked_until_ts=int(row[6]),
-        created_ts=int(row[7]),
-    )
-
-
-def evict_expired_triple_blocks(conn: sqlite3.Connection, *, now_ts: int) -> int:
-    """Delete rows whose ``blocked_until_ts <= now_ts``. Returns count."""
-    cur = conn.execute(
-        "DELETE FROM learner_blocks WHERE blocked_until_ts <= ?", (int(now_ts),)
-    )
-    return int(cur.rowcount or 0)
-
-
-def restore_snapshot_from_disk(
-    conn: sqlite3.Connection,
-    *,
-    snapshot_ts: int,
-    learner_id: str,
-    snapshot_dir: Path = LEARNER_SNAPSHOT_DIR,
-) -> int:
-    """Manual-apply rollback path (spec §Q3 — operator-driven).
-
-    Reads ``<snapshot_dir>/<snapshot_ts>.<learner_id>.json`` and replays the
-    rows into ``learner_state`` for the given learner. Returns row count.
-    Raises :class:`FileNotFoundError` if the manifest is missing.
-    """
-    manifest_path = snapshot_dir / f"{snapshot_ts}.{learner_id}.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(str(manifest_path))
-    payload = json.loads(manifest_path.read_text())
-    rows = payload.get("rows", [])
-    ts = int(time.time())
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute(
-            "DELETE FROM learner_state WHERE learner_id = ?", (learner_id,)
-        )
-        for k in rows:
-            conn.execute(
-                "INSERT INTO learner_state "
-                "(learner_id, key, value, n_eff, wins_eff, pnl_r_sum_eff, "
-                " pending_delta, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?)",
-                (
-                    learner_id,
-                    k["key"],
-                    float(k["value"]),
-                    float(k["n_eff"]),
-                    float(k["wins_eff"]),
-                    float(k["pnl_r_sum_eff"]),
-                    ts,
-                ),
-            )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    return len(rows)
 
 
 __all__ = [

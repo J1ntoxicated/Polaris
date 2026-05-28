@@ -14,34 +14,30 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sqlite3
-import uuid
 from typing import TYPE_CHECKING, Any
 
-from polaris.core.cell_matrix import (
-    CellContext,
-    CellKeyP0,
-    TradeClose,
-    update_on_trade_close,
-)
+from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
 )
-from polaris.core.learners import ClosedTrade, LearnerScheduler
-from polaris.core.pipeline.agents import post_trade_reflector_gate
-from polaris.core.pipeline.agents._gpt_client import (
-    GPT_P0_MODEL,
-    GPT_P1_MODEL,
-)
-from polaris.core.pipeline.gate_orchestrator import log_gate_event
-from polaris.core.pipeline.gate_state import (
-    GATE_POST_TRADE_REFLECTOR,
-    GateContext,
-    SignalLifecycle,
+from polaris.scripts._production_close_effects import (
+    _safe_lookup_regime,
+    _safe_run_g8,
+    _safe_run_learners,
+    _safe_update_cell_matrix,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
+from polaris.scripts._smoke_real_roundtrip import (
+    real_capital_close_fill,
+    real_okx_close_fill,
+    resolve_okx_base_url,
+)
+from polaris.venues.capital import CapitalAdapter
+from polaris.venues.okx import OKXAdapter
 
 if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
@@ -50,7 +46,8 @@ logger = logging.getLogger(__name__)
 
 
 def real_pnl_r_from_fills(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade
+    conn: sqlite3.Connection, *, trade: SimulatedTrade,
+    exit_price_override: float | None = None,
 ) -> tuple[float, float, float]:
     """Read entry fill + most recent bars; compute R-units from real bar drift.
 
@@ -58,6 +55,13 @@ def real_pnl_r_from_fills(
     short the R denominator falls back to ``entry_price × 0.5%`` so the
     calculation is finite — but the magnitude reflects the *actual* close
     drift, not a hard-coded sign.
+
+    ``exit_price_override`` (P1-6 venue-wire fix): when set (real-roundtrip
+    close), ``pnl_r`` / ``pnl_usd`` are computed against the **real exit fill
+    price** instead of the most recent bar close, using the same ATR
+    denominator. This keeps Layer 4/5 telemetry consistent with what was
+    actually traded — without it a loss exit could be logged as a win when
+    the seeded bars happened to trend the other way.
 
     Day 8 codex P0 fix: matches the entry fill by ``contribution_id =
     position_id`` so two trades on the same (strategy, instrument) can never
@@ -83,7 +87,8 @@ def real_pnl_r_from_fills(
             (trade.strategy_id, f"{trade.venue}:{trade.symbol}"),
         ).fetchone()
     if row is None:
-        return (0.0, 0.0, trade.entry_price)
+        fallback_exit = exit_price_override if exit_price_override else trade.entry_price
+        return (0.0, 0.0, fallback_exit)
     entry_price = float(row[0])
     size_usd = float(row[1])
     trade.entry_price = entry_price
@@ -95,10 +100,13 @@ def real_pnl_r_from_fills(
         """,
         (f"{trade.venue}:{trade.symbol}",),
     ).fetchall()
-    if not bar_rows:
+    # P1-6: an override exit price must drive pnl_r/pnl_usd even when there is
+    # no bar history (the real close already gives us the true exit level).
+    if not bar_rows and exit_price_override is None:
         return (0.0, 0.0, entry_price)
-    last_close = float(bar_rows[0][0])
-    if entry_price <= 0.0 or last_close <= 0.0:
+    bar_close = float(bar_rows[0][0]) if bar_rows else entry_price
+    exit_price = exit_price_override if exit_price_override else bar_close
+    if entry_price <= 0.0 or exit_price <= 0.0:
         return (0.0, 0.0, entry_price)
     atr_pct_samples = [
         (float(r[1]) - float(r[2])) / float(r[0])
@@ -107,15 +115,61 @@ def real_pnl_r_from_fills(
     ]
     atr_pct = sum(atr_pct_samples) / len(atr_pct_samples) if atr_pct_samples else 0.005
     pnl_abs = (
-        (last_close - entry_price)
+        (exit_price - entry_price)
         if trade.side == "long"
-        else (entry_price - last_close)
+        else (entry_price - exit_price)
     )
     atr_usd = max(entry_price * atr_pct * 2.0, 1e-6)
     pnl_r = pnl_abs / atr_usd
     pnl_usd = (pnl_abs / entry_price) * size_usd
     pnl_r = max(-10.0, min(10.0, pnl_r))
-    return (pnl_r, pnl_usd, last_close)
+    return (pnl_r, pnl_usd, exit_price)
+
+
+async def _real_close_fill(
+    *,
+    trade: SimulatedTrade,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
+) -> Fill | None:
+    """Drive the real demo venue close leg → return the exit ``Fill``.
+
+    P0 venue wire: OKX sells the entry ``base_qty``; Capital closes by
+    ``deal_id``. Adapters are injected for testability; when ``okx_adapter``
+    is ``None`` we build one from ``OKX_DEMO_*`` env. Returns ``None`` on
+    reject / no-fill so the caller falls back to mark-to-market only.
+    """
+    if trade.venue == "okx":
+        if okx_adapter is not None:
+            return await real_okx_close_fill(
+                okx_adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
+                strategy_id=trade.strategy_id,
+            )
+        api_key = os.environ.get("OKX_DEMO_API_KEY", "")
+        secret = os.environ.get("OKX_DEMO_SECRET", "")
+        passphrase = os.environ.get("OKX_DEMO_PASSPHRASE", "")
+        base_url = resolve_okx_base_url(os.environ.get("OKX_DEMO_BASE"))
+        if not (api_key and secret and passphrase):
+            logger.error("[real-close] OKX_DEMO_* env missing — cannot close")
+            return None
+        async with OKXAdapter(
+            api_key=api_key, secret=secret, passphrase=passphrase, base_url=base_url,
+        ) as adapter:
+            return await real_okx_close_fill(
+                adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
+                strategy_id=trade.strategy_id,
+            )
+    # Capital CFD — close by deal_id captured at open.
+    if capital_session is None or not trade.deal_id:
+        logger.error(
+            "[real-close] Capital close needs session + deal_id (deal_id=%s)",
+            trade.deal_id,
+        )
+        return None
+    cap_adapter = CapitalAdapter(capital_session)
+    return await real_capital_close_fill(
+        cap_adapter, deal_id=trade.deal_id, strategy_id=trade.strategy_id,
+    )
 
 
 async def close_specific_position(
@@ -127,6 +181,9 @@ async def close_specific_position(
     lookup_regime: Any,
     gpt_client: Any | None = None,
     phase: str = "P0",
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> bool:
     """Day 9 F2.b — close a specific position by ``position_id``.
 
@@ -147,6 +204,8 @@ async def close_specific_position(
     return await _close_trade_with_real_pnl(
         conn, state=state, trade=target, trade_idx=target_idx, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session,
     )
 
 
@@ -158,6 +217,9 @@ async def close_oldest_with_real_pnl(
     lookup_regime: Any,
     gpt_client: Any | None = None,
     phase: str = "P0",
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> None:
     """F + G8 fix: real mark-to-market PnL + G8 reflector + gate_events log.
 
@@ -181,6 +243,8 @@ async def close_oldest_with_real_pnl(
         conn, state=state, trade=state.open_trades[0], trade_idx=0,
         now_ts=now_ts, lookup_regime=lookup_regime,
         gpt_client=gpt_client, phase=phase,
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session,
     )
 
 
@@ -194,14 +258,57 @@ async def _close_trade_with_real_pnl(
     lookup_regime: Any,
     gpt_client: Any | None,
     phase: str,
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> bool:
     """Shared close path used by FIFO oldest + specific-position closes.
 
     ``trade_idx`` is the index in ``state.open_trades`` to pop on durable
     persist success. Returns ``True`` on persist + fan-out completion.
+
+    ``real_roundtrip=True`` (P0 venue wire) submits a real demo close order
+    and derives ``exit_price``/``pnl`` from the actual exit fill; the sim path
+    keeps the existing mark-to-market drift. PnL_R is always recomputed from
+    the entry fill so Layer 4/5 telemetry stays consistent.
     """
-    pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(conn, trade=trade)
-    close_fill = simulate_close(trade, exit_price=exit_price)
+    if real_roundtrip:
+        # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
+        # computed against the actual exit fill (not the pre-close bar drift).
+        real_fill = None
+        try:
+            real_fill = await _real_close_fill(
+                trade=trade, okx_adapter=okx_adapter,
+                capital_session=capital_session,
+            )
+        except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
+            logger.error(
+                "[close/real] %s:%s close adapter raised: %r — state preserved",
+                trade.venue, trade.symbol, exc,
+            )
+        if real_fill is None:
+            logger.warning(
+                "[close/real] %s:%s close rejected / no-fill — state preserved",
+                trade.venue, trade.symbol,
+            )
+            record_fault(
+                conn, strategy_id=trade.strategy_id, fault_type=FAULT_EXCEPTION,
+                now_ts=now_ts,
+                detail={"phase": "real_close_fill", "symbol": trade.symbol},
+            )
+            state.fault_events += 1
+            return False
+        # P1-6: recompute pnl_r AND pnl_usd from the real exit price so the
+        # Layer 4 cell matrix + Layer 5 learner updates reflect what actually
+        # traded (a real loss must not be logged as a win because the seeded
+        # bars trended up).
+        pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
+            conn, trade=trade, exit_price_override=real_fill.fill_price,
+        )
+        close_fill = real_fill
+    else:
+        pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(conn, trade=trade)
+        close_fill = simulate_close(trade, exit_price=exit_price)
     try:
         conn.execute("BEGIN IMMEDIATE")
         persist_fill(
@@ -259,146 +366,3 @@ async def _close_trade_with_real_pnl(
         state=state, gpt_client=gpt_client, phase=phase,
     )
     return True
-
-
-# ---------------------------------------------------------------------------
-# Auxiliary fail-safe helpers (R5 P2 fix)
-# ---------------------------------------------------------------------------
-
-
-def _safe_record_fault(
-    conn: sqlite3.Connection, *, strategy_id: str, phase: str, exc: BaseException,
-    now_ts: int, state: ProdLoopState,
-) -> None:
-    """Record a fault without ever propagating an exception out of this call."""
-    try:
-        record_fault(
-            conn, strategy_id=strategy_id, fault_type=FAULT_EXCEPTION,
-            now_ts=now_ts,
-            detail={"phase": phase, "exc": str(exc)[:200]},
-        )
-        state.fault_events += 1
-    except Exception as inner:  # noqa: BLE001 — fault recording is best-effort
-        logger.error(
-            "[fault] record_fault itself failed phase=%s strategy=%s: %r",
-            phase, strategy_id, inner,
-        )
-
-
-def _safe_lookup_regime(
-    lookup_regime: Any, conn: sqlite3.Connection, trade: SimulatedTrade,
-) -> str:
-    try:
-        return str(lookup_regime(conn, trade.venue, trade.symbol))
-    except Exception as exc:  # noqa: BLE001 — fail-open to chop
-        logger.error("[L6] lookup_regime raised: %r", exc)
-        return "chop"
-
-
-def _safe_update_cell_matrix(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
-    pnl_r: float, won: bool, now_ts: int, state: ProdLoopState,
-) -> None:
-    try:
-        update_on_trade_close(
-            conn,
-            trade=TradeClose(
-                key=CellKeyP0(
-                    exchange=trade.venue, strategy=trade.strategy_id,
-                    ticker=trade.symbol, regime=regime,
-                ),
-                context=CellContext(
-                    group="spot" if trade.venue == "okx" else "cfd",
-                    session="asia", direction=trade.side,
-                    liquidity_tier="top",
-                ),
-                pnl_r=pnl_r, won=won, closed_ts=now_ts,
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        logger.error("[L4] cell matrix update failed: %r", exc)
-        _safe_record_fault(
-            conn, strategy_id=trade.strategy_id,
-            phase="cell_matrix_update", exc=exc, now_ts=now_ts, state=state,
-        )
-
-
-def _safe_run_learners(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
-    pnl_r: float, won: bool, now_ts: int, state: ProdLoopState,
-) -> None:
-    try:
-        sched = LearnerScheduler(conn, expected_holding_bars=20)
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        logger.error("[L5] LearnerScheduler init raised: %r", exc)
-        _safe_record_fault(
-            conn, strategy_id=trade.strategy_id,
-            phase="learner_init", exc=exc, now_ts=now_ts, state=state,
-        )
-        return
-    closed_record = ClosedTrade(
-        trade_id=trade.signal_id, strategy_id=trade.strategy_id,
-        ticker=trade.symbol, venue=trade.venue, regime=regime,
-        session="asia", pnl_r=pnl_r, won=won, holding_bars=20, closed_ts=now_ts,
-    )
-    for learner in sched.learners:
-        try:
-            learner.update(closed_record, now_ts=now_ts)
-        except Exception as exc:  # noqa: BLE001 — fault-isolate per learner
-            logger.error(
-                "[L5] learner %s update raised: %r",
-                getattr(learner, "learner_id", "<unknown>"), exc,
-            )
-            _safe_record_fault(
-                conn, strategy_id=trade.strategy_id,
-                phase=f"learner_update_{getattr(learner, 'learner_id', 'unknown')}",
-                exc=exc, now_ts=now_ts, state=state,
-            )
-
-
-async def _safe_run_g8(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
-    pnl_r: float, won: bool, now_ts: int, state: ProdLoopState,
-    gpt_client: Any | None = None, phase: str = "P0",
-) -> None:
-    g8_ctx = GateContext(
-        run_id=uuid.uuid4().hex, signal_id=trade.signal_id,
-        position_id=trade.position_id or f"pos_{trade.signal_id[:10]}",
-        gate_id=GATE_POST_TRADE_REFLECTOR,
-        venue=trade.venue, symbol=trade.symbol,
-        strategy_id=trade.strategy_id,
-        payload={
-            "closed_trade": {
-                "trade_id": trade.signal_id,
-                "strategy_id": trade.strategy_id,
-                "regime": regime, "session": "asia",
-                "pnl_r": pnl_r, "won": won,
-            },
-            "closed_trade_count": len(state.closed_trades),
-        },
-        started_ts=now_ts, state=SignalLifecycle.CLOSED,
-    )
-    # codex 2026-05-07 P1.4 fix: phase-aware G8 dispatch so the production
-    # paper harness can exercise the GPT P1 lesson branch (was hardcoded
-    # ``client=None``, which silently kept G8 on the Python template even
-    # when phase=="P1"). ADR-004 §Phase invariant honoured by passing
-    # ``GPT_P0_MODEL`` (unused, client=None) at P0 vs. ``GPT_P1_MODEL`` +
-    # gpt_client at P1.
-    if phase == "P1" and gpt_client is not None:
-        client_arg: Any = gpt_client
-        model_arg = GPT_P1_MODEL
-    else:
-        client_arg = None
-        model_arg = GPT_P0_MODEL
-    try:
-        g8_result = await post_trade_reflector_gate(
-            g8_ctx, client=client_arg, conn=conn, model=model_arg,
-        )
-        log_gate_event(conn, g8_ctx, g8_result)
-        state.g8_runs += 1
-    except Exception as exc:  # noqa: BLE001 — G8 must not drop a closed trade
-        logger.error("[G8] reflector raised: %r", exc)
-        _safe_record_fault(
-            conn, strategy_id=trade.strategy_id,
-            phase="g8_reflector", exc=exc, now_ts=now_ts, state=state,
-        )

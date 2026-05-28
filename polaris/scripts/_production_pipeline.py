@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sqlite3
-import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.allocator_fence import (
     AllocationRequest,
@@ -39,34 +41,19 @@ from polaris.core.isolation.order_keys import (
     payload_hash,
     register_order_intent,
 )
-from polaris.core.pipeline import (
-    GateOrchestrator,
-    build_exit_payload,
-    build_monitor_payload,
-    build_sizer_payload,
-    build_validator_payload,
-    build_watcher_payload,
-)
-from polaris.core.pipeline.agents import (
-    adaptive_exit_gate,
-    position_monitor_gate,
-)
-from polaris.core.pipeline.gate_orchestrator import log_gate_event
-from polaris.core.pipeline.gate_state import (
-    GATE_ADAPTIVE_EXIT,
-    GATE_POSITION_MONITOR,
-    GATE_UNIVERSE_SCANNER,
-    GateContext,
-    GateDecision,
-    SignalLifecycle,
-)
-from polaris.core.sizing.constants import (
-    OKX_DEMO_STARTING_EQUITY_USD,
-    production_default_equity_usd,
-)
-from polaris.scripts._production_indicators import compute_unrealized_pnl_r
+from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
+from polaris.scripts._production_run_signal import run_pipeline_for_signal
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
-from polaris.strategies import STRATEGY_REGISTRY, BaseStrategy, RawSignal
+from polaris.scripts._smoke_real_roundtrip import (
+    MIN_CAPITAL_LOT,
+    real_capital_open_fill,
+    real_okx_open_fill,
+    record_venue_orphan,
+    resolve_okx_base_url,
+)
+from polaris.strategies import STRATEGY_REGISTRY, RawSignal
+from polaris.venues.capital import CapitalAdapter
+from polaris.venues.okx import OKXAdapter
 
 if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
@@ -81,7 +68,6 @@ def _strategy_timeframe(strategy_id: str) -> str:
         return "1m"
     return cls.metadata.timeframe
 
-CFD_LEVERAGE_DEFAULT = 30.0
 # Day 9 F12 fix: pull from sizing.constants SSOT so dashboard + pipeline agree.
 EQUITY_USD_DEMO_DEFAULT = OKX_DEMO_STARTING_EQUITY_USD
 
@@ -89,6 +75,64 @@ EQUITY_USD_DEMO_DEFAULT = OKX_DEMO_STARTING_EQUITY_USD
 # ---------------------------------------------------------------------------
 # Layer 7 — fence + idempotent register + paper submit
 # ---------------------------------------------------------------------------
+
+
+async def _real_open_fill(
+    *,
+    venue: str,
+    symbol: str,
+    side: str,
+    notional_usd: float,
+    last_price: float,
+    strategy_id: str,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
+) -> tuple[Fill, str | None] | None:
+    """Drive the real demo venue entry leg → return ``(Fill, deal_id)``.
+
+    P0 venue wire: replaces the synthetic fill source with a live adapter
+    response. OKX places a market buy then polls the order; Capital opens a
+    position then confirms. ``deal_id`` is the Capital position id the close
+    leg needs (``None`` for OKX, which closes by base_qty). Returns ``None``
+    on reject / no-fill so the caller can release the reservation.
+
+    Adapters are injected for testability; when ``okx_adapter`` is ``None`` we
+    construct one from the ``OKX_DEMO_*`` env (real network). Capital always
+    needs the loop-owned ``capital_session``.
+    """
+    if venue == "okx":
+        if okx_adapter is not None:
+            fill = await real_okx_open_fill(
+                okx_adapter, inst_id=symbol, notional_usd=notional_usd,
+                strategy_id=strategy_id, last_price=last_price,
+            )
+            return None if fill is None else (fill, None)
+        api_key = os.environ.get("OKX_DEMO_API_KEY", "")
+        secret = os.environ.get("OKX_DEMO_SECRET", "")
+        passphrase = os.environ.get("OKX_DEMO_PASSPHRASE", "")
+        base_url = resolve_okx_base_url(os.environ.get("OKX_DEMO_BASE"))
+        if not (api_key and secret and passphrase):
+            logger.error("[real-open] OKX_DEMO_* env missing — cannot submit")
+            return None
+        async with OKXAdapter(
+            api_key=api_key, secret=secret, passphrase=passphrase, base_url=base_url,
+        ) as adapter:
+            fill = await real_okx_open_fill(
+                adapter, inst_id=symbol, notional_usd=notional_usd,
+                strategy_id=strategy_id, last_price=last_price,
+            )
+        return None if fill is None else (fill, None)
+
+    # Capital CFD — close needs the deal_id from the confirm.
+    if capital_session is None:
+        logger.error("[real-open] no Capital session — cannot submit %s", symbol)
+        return None
+    cap_adapter = CapitalAdapter(capital_session)
+    direction = "BUY" if side == "long" else "SELL"
+    return await real_capital_open_fill(
+        cap_adapter, epic=symbol, direction=direction, size=MIN_CAPITAL_LOT,
+        strategy_id=strategy_id, last_price=last_price,
+    )
 
 
 async def reserve_and_submit(
@@ -103,8 +147,17 @@ async def reserve_and_submit(
     notional_usd: float,
     last_price: float,
     now_ts: int,
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+    capital_session: Any = None,
 ) -> SimulatedTrade | None:
-    """A2 + K fix: AllocatorFence reservation → idempotent register → submit."""
+    """A2 + K fix: AllocatorFence reservation → idempotent register → submit.
+
+    ``real_roundtrip=True`` (P0 venue wire) submits a real demo order via the
+    venue adapter instead of the local synthetic fill. The fence reserve →
+    register → confirm → atomic-persist contract is identical; only the fill
+    payload source changes.
+    """
     _ = asset_class  # unused at this layer (Layer 5 already used it)
     fence = get_process_fence(conn)
     order_key = build_order_key(
@@ -151,9 +204,72 @@ async def reserve_and_submit(
         )
         state.fault_events += 1
         return None
-    fill, trade = simulate_open_fill(
-        signal=sig, venue=venue, last_price=last_price, notional_usd=notional_usd,
-    )
+    deal_id: str | None = None
+    if real_roundtrip:
+        # P0 venue wire: real demo order via adapter. On reject / no-fill we
+        # release the reservation + record a fault (orphan-free) and bail.
+        # P0-2 fix: a venue/adapter *exception* (timeout, transport, parse)
+        # must also release + fault here — it previously escaped the function,
+        # bypassing release_reservation and leaking the order_key + reservation.
+        try:
+            real = await _real_open_fill(
+                venue=venue, symbol=symbol, side=sig.side, notional_usd=notional_usd,
+                last_price=last_price, strategy_id=sig.strategy_id,
+                okx_adapter=okx_adapter, capital_session=capital_session,
+            )
+        except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
+            logger.error(
+                "[L7/real] %s:%s entry adapter raised: %r — releasing reservation",
+                venue, symbol, exc,
+            )
+            await fence.release_reservation(
+                reservation["reservation_id"],
+                reason="real_open_exception", now_ts=now_ts,
+            )
+            record_fault(
+                conn, strategy_id=sig.strategy_id, fault_type=FAULT_EXCEPTION,
+                now_ts=now_ts,
+                detail={"phase": "real_open_fill", "venue": venue,
+                        "symbol": symbol, "exc": str(exc)[:200]},
+            )
+            state.fault_events += 1
+            return None
+        if real is None:
+            logger.warning(
+                "[L7/real] %s:%s entry rejected / no-fill — releasing reservation",
+                venue, symbol,
+            )
+            await fence.release_reservation(
+                reservation["reservation_id"],
+                reason="real_open_no_fill", now_ts=now_ts,
+            )
+            record_fault(
+                conn, strategy_id=sig.strategy_id, fault_type=FAULT_REJECT,
+                now_ts=now_ts,
+                detail={"phase": "real_open_fill", "venue": venue, "symbol": symbol},
+            )
+            state.fault_events += 1
+            return None
+        fill, deal_id = real
+        # P0-5 fix: persist the close-relevant venue ref so a restart can
+        # reconstruct it. For Capital the close needs the position ``deal_id``
+        # (which differs from the top-level confirm dealId); persist it as the
+        # fill ``order_id`` so hydration recovers it. OKX closes by base_qty,
+        # so its order_id is left as the OKX ``ordId``.
+        if venue == "capital" and deal_id:
+            fill = replace(fill, order_id=deal_id)
+        trade = SimulatedTrade(
+            signal_id=sig.signal_id, venue=venue, symbol=symbol,
+            strategy_id=sig.strategy_id, side=sig.side, entry_price=fill.fill_price,
+            notional_usd=fill.size_usd, open_ts=now_ts,
+        )
+    else:
+        fill, trade = simulate_open_fill(
+            signal=sig, venue=venue, last_price=last_price, notional_usd=notional_usd,
+        )
+    trade.venue_order_id = fill.order_id or None
+    trade.deal_id = deal_id
+    trade.base_qty = fill.base_qty
     # Day 8 codex R2 P1 fix: confirm the reservation FIRST so a failed
     # confirm cannot leave an orphan positions/fill row in SQLite without a
     # matching in-memory trade. After confirm we persist atomically; on
@@ -174,6 +290,16 @@ async def reserve_and_submit(
             detail={"phase": "confirm_reservation", "exc": str(exc)},
         )
         state.fault_events += 1
+        # P0-3 fix: under real_roundtrip a venue position already exists, but
+        # confirm failed so it is now untracked. Record a durable orphan with
+        # the venue ref so a reconciliation pass can close the live exposure.
+        if real_roundtrip:
+            record_venue_orphan(
+                conn, strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
+                side=sig.side, phase="confirm_reservation",
+                venue_order_id=trade.venue_order_id, deal_id=deal_id,
+                base_qty=fill.base_qty, now_ts=now_ts,
+            )
         return None
     # Day 8 codex BLOCKER + R2 P1 fix: persist a real ``positions`` row +
     # tag the simulated trade with that id so Layer 6 recalc/swap and the
@@ -219,6 +345,18 @@ async def reserve_and_submit(
             detail={"phase": "persist_fill_open", "exc": str(exc)},
         )
         state.fault_events += 1
+        # P0-4 fix: under real_roundtrip the venue position is live but the DB
+        # write rolled back — it is now untracked. Record a durable orphan
+        # (venue ref + base_qty) so reconciliation can recover/close it.
+        # ``record_venue_orphan`` opens its own statement *after* ROLLBACK so
+        # it commits even though the position/fill insert was reverted.
+        if real_roundtrip:
+            record_venue_orphan(
+                conn, strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
+                side=sig.side, phase="persist_fill_open",
+                venue_order_id=trade.venue_order_id, deal_id=deal_id,
+                base_qty=fill.base_qty, now_ts=now_ts,
+            )
         # Reservation already confirmed; release it so the order_key isn't
         # leaked. (No SQLite mutation happened thanks to ROLLBACK above.)
         await fence.release_reservation(
@@ -229,212 +367,6 @@ async def reserve_and_submit(
     state.fills_open += 1
     return trade
 
-
-# ---------------------------------------------------------------------------
-# Helpers — real state lookups for G4/G5 payloads (Day 8 codex P1 fix)
-# ---------------------------------------------------------------------------
-
-
-def _read_universe_state(
-    conn: sqlite3.Connection, *, venue: str, symbol: str, now_ts: int,
-) -> tuple[float, float]:
-    """Return (spread_bps, listing_age_hours) from the universe row.
-
-    Falls back to (5.0 bps, 365×24 h) when the row is missing — the smoke
-    seed path may not have populated universe yet for cold-start runs.
-    """
-    row = conn.execute(
-        "SELECT spread_bps, listing_ts FROM universe "
-        "WHERE venue = ? AND symbol = ?",
-        (venue, symbol),
-    ).fetchone()
-    if row is None:
-        return (5.0, 24 * 365.0)
-    spread_bps = float(row[0] or 5.0)
-    listing_ts = int(row[1]) if row[1] is not None else (now_ts - 24 * 3600 * 365)
-    listing_age_hours = max(0.0, (now_ts - listing_ts) / 3600.0)
-    return (spread_bps, listing_age_hours)
-
-
-def _strategy_recent_reject(
-    conn: sqlite3.Connection, *, strategy_id: str, now_ts: int,
-    window_sec: int = 6 * 3600,
-) -> bool:
-    """True if the strategy logged a reject/halt within the last 6h."""
-    cutoff = now_ts - window_sec
-    row = conn.execute(
-        "SELECT 1 FROM strategy_fault_events "
-        "WHERE strategy_id = ? AND fault_type IN ('reject', 'idempotency_conflict') "
-        "AND event_ts >= ? LIMIT 1",
-        (strategy_id, cutoff),
-    ).fetchone()
-    return row is not None
-
-
-# ---------------------------------------------------------------------------
-# G1 → G8 production pipeline
-# ---------------------------------------------------------------------------
-
-
-async def run_pipeline_for_signal(
-    *,
-    conn: sqlite3.Connection,
-    haiku: Any,
-    state: ProdLoopState,
-    strategy: BaseStrategy,
-    sig: RawSignal,
-    venue: str,
-    symbol: str,
-    asset_class: str,
-    underlying_group_id: str,
-    regime: str,
-    bars_atr_pct: float,
-    last_price: float,
-    universe_rows: list[dict[str, Any]],
-    now_ts: int,
-    reserve_and_submit: Any,
-    phase: str = "P0",
-) -> None:
-    """Run G1 → G2 → G3 → G4 → G5 → G6 → G7 for one validated signal.
-
-    ``reserve_and_submit`` is the AllocatorFence-aware submit closure from
-    ``production_paper_loop`` (kept as an injected dep so this module stays
-    free of state.fields-binding logic).
-
-    Day 8 spec D: ``start_gate=GATE_UNIVERSE_SCANNER`` so G1/G2 also run.
-    Day 8 spec E: G6/G7 use real ``unrealized_pnl_r``; G8 fires on close.
-    """
-    instrument_id = f"{venue}:{symbol}"
-    track: Any = "A" if venue == "okx" else "B"
-    leverage = 1.0 if venue == "okx" else CFD_LEVERAGE_DEFAULT
-    equity_usd = production_default_equity_usd()
-
-    # Day 8 codex P1 fix: read spread/listing/recent-reject from real state
-    # (universe + bars + strategy_fault_events) instead of hard-coded fixtures.
-    spread_bps_real, listing_age_h = _read_universe_state(
-        conn, venue=venue, symbol=symbol, now_ts=now_ts,
-    )
-    recent_reject = _strategy_recent_reject(
-        conn, strategy_id=sig.strategy_id, now_ts=now_ts,
-    )
-
-    g3_payload = build_validator_payload(
-        raw_signal=sig, venue=venue, symbol=symbol, instrument_id=instrument_id,
-        regime=regime, conn=conn,
-    )
-    g4_payload = build_watcher_payload(
-        spread_bps=spread_bps_real, baseline_p50_spread_bps=spread_bps_real,
-        listing_age_hours=listing_age_h, recent_reject_in_6h=recent_reject,
-        session_open_shock_window=False, tick_window=[],
-    )
-    g5_payload = build_sizer_payload(
-        raw_signal=sig, venue=venue, symbol=symbol,
-        instrument_id=instrument_id, underlying_group_id=underlying_group_id,
-        asset_class=asset_class, regime=regime, track=track,
-        listing_age_hours=listing_age_h, leverage=leverage,
-        equity_usd=equity_usd, conn=conn,
-    )
-    payload: dict[str, Any] = {
-        "signal_id": sig.signal_id,
-        "universe": universe_rows,
-        "cell_summary": "",
-        "raw_signal": g3_payload["raw_signal"],
-        **g3_payload, **g4_payload, **g5_payload,
-    }
-    ctx = GateContext(
-        run_id=uuid.uuid4().hex, signal_id=sig.signal_id, position_id=None,
-        gate_id=GATE_UNIVERSE_SCANNER, venue=venue, symbol=symbol,
-        strategy_id=strategy.metadata.strategy_id, payload=payload,
-        started_ts=now_ts, state=SignalLifecycle.RAW,
-    )
-    orch = GateOrchestrator(conn=conn, haiku_client=haiku, phase=phase)
-    results = await orch.run(ctx, start_gate=GATE_UNIVERSE_SCANNER)
-    state.pipeline_runs += len(results)
-    if any(r.decision == GateDecision.KILL for r in results):
-        state.pipeline_kills += 1
-    state.g1_runs += 1
-    state.g2_emits += 1
-    sized_payload: dict[str, Any] | None = None
-    for r in results:
-        if r.decision == GateDecision.SIZED:
-            sized_payload = r.payload.get("sized")
-            state.sized_count += 1
-            break
-    if sized_payload is None:
-        return
-
-    notional_usd = max(
-        10.0, min(float(sized_payload.get("final_notional_usd", 50.0)), 5_000.0)
-    )
-    trade = await reserve_and_submit(
-        conn=conn, state=state, sig=sig, venue=venue, symbol=symbol,
-        asset_class=asset_class, underlying_group_id=underlying_group_id,
-        notional_usd=notional_usd, last_price=last_price, now_ts=now_ts,
-    )
-    if trade is None:
-        return
-    state.open_trades.append(trade)
-
-    # G6 / G7 with real R-multiples.
-    pnl_r = compute_unrealized_pnl_r(
-        side=sig.side, entry_price=last_price, last_price=last_price,
-        atr_pct=max(bars_atr_pct, 1e-4),
-    )
-    g6_payload = build_monitor_payload(
-        position={
-            "venue": venue, "symbol": symbol, "side": sig.side,
-            "strategy": sig.strategy_id,
-            "correlation_group": sig.correlation_group,
-            "entry_price": last_price,
-            "qty": notional_usd / max(last_price, 1e-6),
-        },
-        unrealized_pnl_r=pnl_r, max_loss_r=1.0,
-    )
-    g7_payload = build_exit_payload(
-        side=sig.side,
-        current_stop_price=last_price * (0.99 if sig.side == "long" else 1.01),
-        proposed_stop_price=last_price * (0.985 if sig.side == "long" else 1.015),
-        entry_price=last_price, unrealized_pnl_r=pnl_r, max_loss_r=1.0,
-        overrides_used=0, seconds_since_last_override=60,
-    )
-    # Day 8 codex R2 P2 fix: G6/G7/G8 telemetry must use the persisted
-    # ``positions.position_id`` so gate_events.position_id joins back to
-    # positions for audits + downstream replay.
-    persisted_position_id = trade.position_id or f"pos_{sig.signal_id[:10]}"
-    g6_ctx = GateContext(
-        run_id=ctx.run_id, signal_id=sig.signal_id,
-        position_id=persisted_position_id,
-        gate_id=GATE_POSITION_MONITOR,
-        venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
-        payload=g6_payload, started_ts=now_ts, state=SignalLifecycle.SIZED,
-    )
-    # Day 9 F1 wire: forward GPT client at P1 so G6 fires the gpt_p1 branch
-    # (entry-time invocation also exercises the LLM path; F2 live recalc
-    # then re-invokes G6 per dirty trigger).
-    g6_client = haiku if phase == "P1" else None
-    g6_result = await position_monitor_gate(g6_ctx, client=g6_client)
-    # Day 8 codex R3 P2 fix: persist G6 result to gate_events so audits can
-    # join gate_events.position_id back to positions for the full lifecycle.
-    log_gate_event(conn, g6_ctx, g6_result)
-    g7_ctx = GateContext(
-        run_id=ctx.run_id, signal_id=sig.signal_id,
-        position_id=g6_ctx.position_id,
-        gate_id=GATE_ADAPTIVE_EXIT,
-        venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
-        payload={
-            **g6_payload, **g7_payload,
-            "current_stop_price": g7_payload["current_stop_price"],
-        },
-        started_ts=now_ts,
-        state=(
-            SignalLifecycle.MONITORED
-            if g6_result.decision == GateDecision.HOLD
-            else SignalLifecycle.ACTIVE
-        ),
-    )
-    g7_client = haiku if phase == "P1" else None
-    g7_result = await adaptive_exit_gate(g7_ctx, client=g7_client)
-    log_gate_event(conn, g7_ctx, g7_result)
 
 
 # ---------------------------------------------------------------------------

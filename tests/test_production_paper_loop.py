@@ -153,7 +153,7 @@ async def test_l0_producer_10min_capital_refresh(memdb: sqlite3.Connection) -> N
 async def test_l1_bar_ingest_persists_bars(memdb: sqlite3.Connection) -> None:
     bars = _bars_series(60)
     with patch(
-        "polaris.scripts._production_layers.fetch_okx_bars",
+        "polaris.scripts._production_bars.fetch_okx_bars",
         new=AsyncMock(return_value=list(reversed(bars))),  # OKX returns newest first
     ):
         result = await ingest_bars_for_focus(
@@ -169,7 +169,7 @@ async def test_l1_bar_ingest_persists_bars(memdb: sqlite3.Connection) -> None:
 async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
     bars = _bars_series(60)
     with patch(
-        "polaris.scripts._production_layers.fetch_okx_bars",
+        "polaris.scripts._production_bars.fetch_okx_bars",
         new=AsyncMock(return_value=list(reversed(bars))),
     ):
         result = await ingest_bars_for_focus(
@@ -487,7 +487,7 @@ async def test_capital_bars_ingest(memdb: sqlite3.Connection) -> None:
                           close=1.10 + i * 0.0001) for i in range(40)]
     # Patch fetch_capital_bars so no Capital network calls happen.
     with patch(
-        "polaris.scripts._production_layers.fetch_capital_bars",
+        "polaris.scripts._production_bars.fetch_capital_bars",
         new=AsyncMock(return_value=cap_bars),
     ):
         # Synthesize a fake session with ensure_tokens.

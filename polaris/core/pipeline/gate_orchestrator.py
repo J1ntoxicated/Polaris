@@ -17,7 +17,6 @@ loop (no I/O beyond the ``gate_events`` log).
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
@@ -35,6 +34,7 @@ from polaris.core.pipeline.agents import (
     strategy_signal_gate,
     universe_scanner_gate,
 )
+from polaris.core.pipeline.gate_event_log import log_gate_event
 from polaris.core.pipeline.gate_state import (
     ENTRY_GATES,
     GATE_ADAPTIVE_EXIT,
@@ -422,69 +422,6 @@ def _next_position_gate(gate_id: int) -> int | None:
         GATE_ADAPTIVE_EXIT: GATE_POST_TRADE_REFLECTOR,
         GATE_POST_TRADE_REFLECTOR: None,
     }.get(gate_id)
-
-
-# ---------------------------------------------------------------------------
-# gate_events durable log (append-only)
-# ---------------------------------------------------------------------------
-
-
-def log_gate_event(
-    conn: sqlite3.Connection | None,
-    ctx: GateContext,
-    result: GateResult,
-) -> None:
-    """Append one ``gate_events`` row.
-
-    No-op when ``conn`` is None (test harness without DB) or when the schema
-    doesn't include the table — the row is structured so the orchestrator
-    keeps running even on log failure (Q2 — log is durability layer, not hot
-    path).
-    """
-    if conn is None:
-        return
-    event_id = uuid.uuid4().hex
-    phase = "fail" if result.error else "success"
-    payload_json = json.dumps(_safe_payload(result.payload), separators=(",", ":"))
-    try:
-        conn.execute(
-            """
-            INSERT INTO gate_events
-                (event_id, run_id, signal_id, position_id, gate_id, phase,
-                 decision, model_used, latency_ms, payload_json, error_text, created_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_id,
-                ctx.run_id,
-                ctx.signal_id,
-                ctx.position_id,
-                int(ctx.gate_id),
-                phase,
-                str(result.decision.value),
-                result.model_used,
-                int(result.latency_ms),
-                payload_json,
-                result.error,
-                int(time.time()),
-            ),
-        )
-    except sqlite3.Error:
-        # Durable log must not crash the hot path. The schema may not include
-        # gate_events yet (e.g. legacy DB). Caller has the in-memory results.
-        return
-
-
-def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Strip non-JSON-serializable values from payload (best-effort)."""
-    out: dict[str, Any] = {}
-    for k, v in payload.items():
-        try:
-            json.dumps(v)
-            out[k] = v
-        except (TypeError, ValueError):
-            out[k] = repr(v)[:200]
-    return out
 
 
 # ---------------------------------------------------------------------------

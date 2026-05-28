@@ -141,18 +141,20 @@ async def test_supervisor_uses_taskgroup_pattern(memdb: sqlite3.Connection) -> N
 
 
 def _read_paper_loop_source() -> str:
-    """Read the production_paper_loop.py source from disk.
+    """Read the per-tick orchestration source from disk.
 
-    We avoid ``inspect.getsource(_run_tick)`` because the function body has a
-    deeply-nested closure with keyword-only parameters that triggers a
-    spurious ``tokenize.TokenError('EOF in multi-line string')`` on
-    Python 3.13's ``inspect.getblock`` heuristic — the file itself parses
-    cleanly via ``ast.parse``, but ``getblock`` walks the raw token stream
-    and gives up. Reading the file is robust to that.
+    ``_run_tick`` lives in ``_production_tick.py`` (split out of
+    ``production_paper_loop.py`` for the ≤500-LOC budget). We grep the source
+    text rather than ``inspect.getsource(_run_tick)`` because the function body
+    has a deeply-nested closure with keyword-only parameters that triggers a
+    spurious ``tokenize.TokenError('EOF in multi-line string')`` on Python
+    3.13's ``inspect.getblock`` heuristic — the file itself parses cleanly via
+    ``ast.parse``, but ``getblock`` walks the raw token stream and gives up.
+    Reading the file is robust to that.
     """
     from pathlib import Path
 
-    return Path("polaris/scripts/production_paper_loop.py").read_text()
+    return Path("polaris/scripts/_production_tick.py").read_text()
 
 
 def test_production_loop_uses_supervise_pipeline_tasks() -> None:
@@ -195,6 +197,7 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
     supervised counters match (1 failure recorded; siblings ran).
     """
     from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts import _production_tick as tick
     from polaris.scripts import production_paper_loop as ppl
     from polaris.scripts._smoke_gpt_stub import StubGPTClient
 
@@ -202,8 +205,8 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
     state = ppl.ProdLoopState()
     haiku = StubGPTClient()
 
-    # Replace run_pipeline_for_signal in production_paper_loop's namespace
-    # with a controllable test double.
+    # Replace run_pipeline_for_signal in the tick body's namespace (where
+    # ``_run_tick`` lives post-split) with a controllable test double.
     call_log: list[str] = []
 
     async def _fake_pipeline(
@@ -214,7 +217,7 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
         if sid == "tsmom":
             raise RuntimeError("simulated TSMOM crash")
 
-    monkeypatch.setattr(ppl, "run_pipeline_for_signal", _fake_pipeline)
+    monkeypatch.setattr(tick, "run_pipeline_for_signal", _fake_pipeline)
 
     # Build supervision specs by hand (mimics what _run_tick does) so we
     # can assert siblings continue without spinning up the full DB seed.

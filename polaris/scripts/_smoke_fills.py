@@ -49,6 +49,12 @@ class SimulatedTrade:
     position_id: str | None = None
     correlation_group: str = ""
     underlying_group_id: str = ""
+    # Real-roundtrip venue refs (P0 venue wire). ``venue_order_id`` is the
+    # OKX ``ordId`` / Capital ``dealId`` of the entry fill; ``deal_id`` is the
+    # Capital position id the close leg needs (OKX closes by base_qty instead).
+    venue_order_id: str | None = None
+    deal_id: str | None = None
+    base_qty: float = 0.0
 
 
 def _okx_fill_payload(

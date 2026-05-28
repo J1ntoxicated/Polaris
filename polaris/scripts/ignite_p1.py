@@ -307,17 +307,17 @@ async def ignite(
         try:
             # Day 8: production paper loop — Layer 0 producer schedule, real
             # bars ingest, real MarketView/regime, G1→G8, fence + idempotent
-            # order keys, real PnL on close. ``full_pipeline`` /
-            # ``real_roundtrip`` flags retained for CLI parity but the prod
-            # loop runs the full pipeline by definition.
+            # order keys, real PnL on close. ``full_pipeline`` runs the full
+            # pipeline by definition; ``real_roundtrip`` (P0 venue wire) now
+            # threads through so open + close submit real demo orders.
             _ = full_pipeline
-            _ = real_roundtrip
             _ = roundtrip_dry_run
             smoke_exit = await run_production_paper_loop(
                 duration_sec=duration_sec,
                 tick_sec=tick_sec,
                 db_path=target_db,
                 haiku=haiku,
+                real_roundtrip=real_roundtrip,
             )
             logger.info(
                 "[ignite] paper loop exit smoke_exit=%s elapsed=%.1fs",

@@ -43,7 +43,9 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
         SELECT p.position_id, p.venue, p.symbol, p.strategy_id, p.side,
                p.opened_ts, p.underlying_group_id,
                SUM(f.fill_price * f.size_usd) / SUM(f.size_usd) AS entry_price,
-               SUM(f.size_usd) AS notional_usd
+               SUM(f.size_usd) AS notional_usd,
+               MAX(f.order_id) AS venue_order_id,
+               SUM(f.base_qty) AS base_qty
         FROM positions p
         JOIN fills f
           ON f.contribution_id = p.position_id
@@ -57,9 +59,11 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
     for r in rows:
         position_id = str(r[0])
+        venue = str(r[1])
+        venue_order_id = str(r[9]) if r[9] else None
         trade = SimulatedTrade(
             signal_id=position_id,
-            venue=str(r[1]),
+            venue=venue,
             symbol=str(r[2]),
             strategy_id=str(r[3]),
             side=str(r[4]),
@@ -68,6 +72,14 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
             open_ts=int(r[5]),
             position_id=position_id,
             underlying_group_id=str(r[6] or ""),
+            # P0-5 venue-wire: restore the close-relevant venue refs so a
+            # real-roundtrip restart can still close the position. For Capital
+            # the entry fill's ``order_id`` carries the position ``deal_id``
+            # (persisted that way in reserve_and_submit); OKX closes by
+            # ``base_qty`` and needs no deal_id.
+            venue_order_id=venue_order_id,
+            deal_id=venue_order_id if venue == "capital" else None,
+            base_qty=float(r[10] or 0.0),
         )
         out.append(trade)
     return out

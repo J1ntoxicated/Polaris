@@ -1,0 +1,345 @@
+"""Day 8 production paper loop — per-tick orchestration (one 5s cycle).
+
+Split out of ``production_paper_loop`` to keep both modules ≤500 LOC.
+``production_paper_loop`` re-exports ``_run_tick`` + the strategy/regime/swap
+helpers it owns so existing import paths (incl. tests) keep working. Shared
+loop state lives in ``_production_state``.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import sqlite3
+import time
+from typing import Any
+
+from polaris.core.isolation.circuit_breaker import (
+    FAULT_EXCEPTION,
+    FAULT_NAN,
+    record_fault,
+    should_allow_new_entry,
+)
+from polaris.core.isolation.worker import (
+    PipelineTaskSpec,
+    supervise_pipeline_tasks,
+)
+from polaris.core.live_recalc.strategy_swap import (
+    SwapCandidate,
+    evaluate_strategy_swap,
+)
+from polaris.scripts._production_indicators import (
+    build_real_market_view,
+    session_window_now,
+)
+from polaris.scripts._production_layers import (
+    compute_and_flip_regime,
+    get_focus_targets,
+    ingest_bars_per_timeframe,
+    read_recent_bars,
+    run_recalc_for_active_positions,
+)
+from polaris.scripts._production_pipeline import (
+    close_oldest_with_real_pnl,
+    close_specific_position,
+    reserve_and_submit,
+    run_pipeline_for_signal,
+)
+from polaris.scripts._production_recalc import recalc_active_positions
+from polaris.scripts._production_state import ProdLoopState
+from polaris.strategies import (
+    BaseStrategy,
+    FXBreakoutBasketStrategy,
+    RawSignal,
+    RSIBBPullbackStrategy,
+    SessionBreakoutStrategy,
+    SpotDonchianStrategy,
+    TSMOMStrategy,
+    VolumeBurstStrategy,
+    XAUIndicesTrendStrategy,
+)
+from polaris.venues.capital.session import CapitalSession
+
+logger = logging.getLogger(__name__)
+
+FOCUS_CYCLE_TARGET = 30
+
+
+def _all_strategies() -> list[BaseStrategy]:
+    return [
+        VolumeBurstStrategy(),
+        TSMOMStrategy(),
+        RSIBBPullbackStrategy(),
+        SpotDonchianStrategy(),
+        FXBreakoutBasketStrategy(),
+        XAUIndicesTrendStrategy(),
+        SessionBreakoutStrategy(),
+    ]
+
+
+def _lookup_regime(conn: sqlite3.Connection, venue: str, symbol: str) -> str:
+    """Read the Layer 6 SSOT regime for a (venue, symbol). Defaults to 'chop'."""
+    instrument_row = conn.execute(
+        "SELECT underlying_group_id FROM universe WHERE venue = ? AND symbol = ?",
+        (venue, symbol),
+    ).fetchone()
+    if instrument_row is None:
+        return "chop"
+    group_id = str(instrument_row[0])
+    row = conn.execute(
+        "SELECT regime FROM regime_state WHERE venue = ? AND underlying_group_id = ?",
+        (venue, group_id),
+    ).fetchone()
+    if row is None:
+        return "chop"
+    return str(row[0])
+
+
+def _is_finite_signal(sig: RawSignal) -> bool:
+    """Reject a signal whose strength / sizing_hint is non-finite."""
+    return math.isfinite(sig.strength) and math.isfinite(sig.sizing_hint)
+
+
+def _evaluate_swaps(conn: sqlite3.Connection, *, now_ts: int) -> None:
+    """Day 8 spec E + cumulative #81 X3: Layer 6 SSOT swap predicate."""
+    rows = conn.execute(
+        "SELECT position_id, active_strategy_id, venue, symbol, side, "
+        "       underlying_group_id "
+        "FROM positions WHERE status NOT IN ('closed', 'cancelled') LIMIT 10"
+    ).fetchall()
+    for r in rows:
+        pos_id, active_strat, venue, symbol, side, group = (
+            str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[5] or ""),
+        )
+        candidate = SwapCandidate(
+            position_id=pos_id,
+            from_strategy_id=active_strat, to_strategy_id=active_strat,
+            venue=venue, symbol=symbol, side=side,
+            from_correlation_group=group, to_correlation_group=group,
+        )
+        evaluate_strategy_swap(conn, candidate=candidate, now_ts=now_ts, apply=False)
+
+
+def _strategies_by_timeframe(
+    strategies: list[BaseStrategy],
+) -> dict[str, list[BaseStrategy]]:
+    """Bucket strategies by their ``metadata.timeframe`` (F10 — Day 9).
+
+    Each bucket runs against a venue/symbol MarketView built from bars at the
+    matching ``bar_interval``. This eliminates the 1m hardcode that silently
+    starved Capital strategies of usable history.
+    """
+    out: dict[str, list[BaseStrategy]] = {}
+    for s in strategies:
+        out.setdefault(s.metadata.timeframe, []).append(s)
+    return out
+
+
+# F10 R2/R3 — ``_is_fetch_due`` was removed (codex R3 P2 nit). The
+# orchestrator delegates cadence gating to ``ingest_bars_per_timeframe``,
+# which now keys cadence per ``(timeframe, venue)``. A standalone "by
+# timeframe only" helper would re-introduce the partial-bucket starvation
+# bug if a caller reused it.
+
+
+async def _run_tick(
+    *,
+    conn: sqlite3.Connection,
+    haiku: Any,
+    state: ProdLoopState,
+    capital_session: CapitalSession | None,
+    tick_idx: int,
+    phase: str = "P0",
+    real_roundtrip: bool = False,
+    okx_adapter: Any = None,
+) -> None:
+    """One 5-second cycle (Day 8 spec B + D + E + F + Day 9 F10).
+
+    F10 contract: bars ingest + market view + strategy eval are partitioned
+    by ``strategy.metadata.timeframe``. The hardcoded ``timeframe="1m"``
+    that previously starved Capital strategies of their 1H history is gone.
+    """
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=FOCUS_CYCLE_TARGET)
+    if not focus:
+        logger.warning(
+            "[tick %d] focus empty — falling back to BTC/ETH (universe not yet "
+            "populated?)", tick_idx,
+        )
+        focus = [
+            ("okx", "BTC-USDT", "crypto", "crypto:BTC"),
+            ("okx", "ETH-USDT", "crypto", "crypto:ETH"),
+        ]
+
+    strategies = _all_strategies()
+    strategies_by_tf = _strategies_by_timeframe(strategies)
+
+    # F10 — fetch bars per timeframe at the appropriate cadence (delegated
+    # to ``ingest_bars_per_timeframe`` so the orchestrator stays light).
+    #
+    # Codex F10 R1 P1-1 fix: Layer 6 regime SSOT is computed from 1m bars
+    # for *every* focus venue, not just venues that have a 1m strategy.
+    # Capital has no 1m strategy, but its symbols still need fresh 1m bars
+    # so ``compute_and_flip_regime`` doesn't fall through to "chop". Force
+    # the 1m bucket to cover every focus venue.
+    timeframe_to_venues = {
+        tf: {s.metadata.venue for s in strats}
+        for tf, strats in strategies_by_tf.items()
+    }
+    all_focus_venues = {t[0] for t in focus}
+    timeframe_to_venues.setdefault("1m", set()).update(all_focus_venues)
+    ingest_totals = await ingest_bars_per_timeframe(
+        conn, focus,
+        timeframe_to_venues=timeframe_to_venues,
+        last_fetch_monotonic_by_tf=state.last_fetch_monotonic_by_tf,
+        bars_persisted_by_tf=state.bars_persisted_by_tf,
+        capital_session=capital_session, limit=240, now_mono=now_mono,
+    )
+    state.bars_persisted += ingest_totals["bars"]
+    state.bars_baseline_samples += ingest_totals["baseline_samples"]
+
+    await run_recalc_for_active_positions(conn, now_ts=now_ts)
+    # Day 9 F1+F2 — live recalc loop with G6/G7 GPT per-position invocation.
+    # Replaces the entry-time-only G6 wiring + FIFO-oldest close path with a
+    # per-tick AI supervisory pass over every active position. Phase=P1
+    # forwards the GPT client; phase=P0 keeps decisions deterministic.
+    await recalc_active_positions(
+        conn, state=state, now_ts=now_ts, gpt_client=haiku, phase=phase,
+        lookup_regime=_lookup_regime, close_specific=close_specific_position,
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session,
+    )
+    # Regime is computed off 1m bars (Layer 6 SSOT — keep stable across tf
+    # buckets so swap predicate doesn't oscillate with strategy timeframe).
+    regime_by_group: dict[tuple[str, str], str] = {}
+    for venue, symbol, _ac, group_id in focus:
+        if not group_id:
+            continue
+        bars_1m = read_recent_bars(conn, venue=venue, symbol=symbol, bar_interval="1m")
+        if not bars_1m:
+            continue
+        regime_by_group[(venue, group_id)] = compute_and_flip_regime(
+            conn, venue=venue, underlying_group_id=group_id,
+            bars=bars_1m, now_ts=now_ts,
+        )
+
+    universe_rows: list[dict[str, Any]] = []
+    cur = conn.execute(
+        "SELECT venue, symbol, vol_24h_usd FROM universe WHERE is_active = 1 LIMIT 50"
+    )
+    for r in cur.fetchall():
+        universe_rows.append(
+            {"venue": r[0], "symbol": r[1], "vol_24h_usd": float(r[2] or 0.0)}
+        )
+    # Day 9 F11 fix: build PipelineTaskSpec list + delegate execution to
+    # ``supervise_pipeline_tasks`` (Layer 7 SSOT). Replaces the bare
+    # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
+    # site that bypassed ``supervise_strategies``.
+    pipeline_specs: list[PipelineTaskSpec] = []
+    for timeframe, strategies_for_tf in strategies_by_tf.items():
+        venues_for_tf = {s.metadata.venue for s in strategies_for_tf}
+        for venue, symbol, asset_class, group_id in focus:
+            if venue not in venues_for_tf:
+                continue
+            bars = read_recent_bars(
+                conn, venue=venue, symbol=symbol, bar_interval=timeframe,
+            )
+            if len(bars) < 30:
+                continue
+            regime = regime_by_group.get((venue, group_id), "chop")
+            mv = build_real_market_view(
+                venue=venue, symbol=symbol, timeframe=timeframe, bars=bars,
+                spread_bps=5.0, session_open_window=session_window_now(now_ts),
+            )
+            for strategy in strategies_for_tf:
+                if strategy.metadata.venue != venue:
+                    continue
+                strategy_id = strategy.metadata.strategy_id
+                # Day 9 F11 fix: respect the Layer 7 circuit breaker — skip
+                # HALTed strategies (HARD_HALT / SOFT_HALT / RISK_ONLY) so
+                # the per-cycle fan-out cannot bypass the 4-state machine.
+                if not should_allow_new_entry(conn, strategy_id, now_ts=now_ts):
+                    continue
+                try:
+                    sig = strategy.generate_raw_signal(mv)
+                except Exception as exc:  # noqa: BLE001 — must isolate
+                    record_fault(
+                        conn, strategy_id=strategy_id,
+                        fault_type=FAULT_EXCEPTION, now_ts=now_ts,
+                        detail={"phase": "generate_raw_signal", "exc": str(exc)[:200]},
+                    )
+                    state.fault_events += 1
+                    continue
+                if sig is None:
+                    continue
+                if not _is_finite_signal(sig):
+                    record_fault(
+                        conn, strategy_id=strategy_id,
+                        fault_type=FAULT_NAN, now_ts=now_ts,
+                        detail={"phase": "raw_signal_nan", "signal_id": sig.signal_id},
+                    )
+                    state.fault_events += 1
+                    continue
+                state.signals_by_tf[timeframe] = (
+                    state.signals_by_tf.get(timeframe, 0) + 1
+                )
+
+                def _factory(
+                    *, _strategy: Any = strategy, _sig: Any = sig,
+                    _venue: str = venue, _symbol: str = symbol,
+                    _asset_class: str = asset_class, _group_id: str = group_id,
+                    _regime: str = regime, _atr_pct: float = mv.atr_pct,
+                    _last_price: float = mv.last_price,
+                ) -> Any:
+                    return run_pipeline_for_signal(
+                        conn=conn, haiku=haiku, state=state, strategy=_strategy,
+                        sig=_sig, venue=_venue, symbol=_symbol,
+                        asset_class=_asset_class,
+                        underlying_group_id=_group_id, regime=_regime,
+                        bars_atr_pct=_atr_pct, last_price=_last_price,
+                        universe_rows=universe_rows, now_ts=now_ts,
+                        reserve_and_submit=reserve_and_submit,
+                        phase=phase, real_roundtrip=real_roundtrip,
+                        capital_session=capital_session, okx_adapter=okx_adapter,
+                    )
+
+                pipeline_specs.append(
+                    PipelineTaskSpec(strategy_id=strategy_id, coro_factory=_factory)
+                )
+    if pipeline_specs:
+        results = await supervise_pipeline_tasks(
+            pipeline_specs, conn=conn, now_ts=now_ts,
+            fault_phase="pipeline_supervisor",
+        )
+        for r in results:
+            if r["exception"] is not None:
+                state.fault_events += 1
+        state.supervised_tasks_total += len(pipeline_specs)
+        state.supervised_tasks_failed += sum(
+            1 for r in results if r["exception"] is not None
+        )
+
+    _evaluate_swaps(conn, now_ts=now_ts)
+
+    if state.open_trades:
+        # codex 2026-05-07 P1.4 fix: forward gpt_client + phase so G8
+        # can exercise the GPT P1 lesson branch when phase=="P1". P0 keeps
+        # the deterministic Python template (client=None inside the close).
+        await close_oldest_with_real_pnl(
+            conn, state=state, now_ts=now_ts,
+            lookup_regime=_lookup_regime,
+            gpt_client=haiku, phase=phase,
+            real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+            capital_session=capital_session,
+        )
+
+    tf_summary = ",".join(
+        f"{tf}={state.bars_persisted_by_tf.get(tf, 0)}"
+        for tf in sorted(strategies_by_tf)
+    )
+    logger.info(
+        "[tick %d] focus=%d bars_by_tf=%s open=%d closed=%d sized=%d kills=%d",
+        tick_idx, len(focus), tf_summary, len(state.open_trades),
+        len(state.closed_trades), state.sized_count, state.pipeline_kills,
+    )

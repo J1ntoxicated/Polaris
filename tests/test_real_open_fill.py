@@ -1,0 +1,736 @@
+"""P0 venue wire — real open/close fill TDD surface.
+
+All tests inject a mock venue adapter (or use the ``dry_run`` synthetic-fill
+path); **no real venue network call ever happens**. The real-roundtrip smoke
+(actual demo orders) is driven manually outside pytest.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from polaris.core.data.fill_normalizer import Fill
+from polaris.scripts._production_pipeline import (
+    _real_open_fill,
+)
+from polaris.scripts._production_pipeline import (
+    reserve_and_submit as _reserve_and_submit,
+)
+from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
+from polaris.scripts.production_paper_loop import ProdLoopState
+from polaris.strategies.base import RawSignal
+
+
+def _sig(signal_id: str = "rt_sig") -> RawSignal:
+    return RawSignal(
+        signal_id=signal_id, strategy_id="volume_burst", symbol="BTC-USDT",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="spot_intraday_event",
+    )
+
+
+def _okx_order_resp(ok: bool = True, ord_id: str = "ord_live_1") -> Any:
+    from polaris.venues.okx.adapter import OKXOrderResponse
+
+    return OKXOrderResponse(
+        ok=ok, venue_order_id=ord_id if ok else None,
+        client_order_id="cl1", code="0", msg="", raw={},
+    )
+
+
+def _okx_filled_row(price: float = 60_000.0) -> dict[str, Any]:
+    return {
+        "ordId": "ord_live_1", "clOrdId": "cl1", "instId": "BTC-USDT",
+        "side": "buy", "tgtCcy": "quote_ccy", "accFillSz": "100.0",
+        "avgPx": str(price), "fee": "-0.1", "feeCcy": "USDT",
+        "state": "filled", "uTime": str(int(time.time() * 1000)),
+    }
+
+
+def _make_okx_adapter(*, ok: bool = True, filled: bool = True) -> AsyncMock:
+    adapter = AsyncMock()
+    adapter.place_market_order = AsyncMock(return_value=_okx_order_resp(ok=ok))
+    adapter.fetch_order = AsyncMock(
+        return_value={"data": [_okx_filled_row()] if filled else []}
+    )
+    return adapter
+
+
+# ---------------------------------------------------------------------------
+# (a) reserve_and_submit(real_roundtrip=True) drives the adapter + persists
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_real_calls_adapter_and_persists(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter(ok=True, filled=True)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig(), venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=100.0, last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is not None
+    # Adapter was actually driven (the bug was: it never was).
+    okx_adapter.place_market_order.assert_awaited_once()
+    okx_adapter.fetch_order.assert_awaited_once()
+    # Entry fill persisted + position row created + reservation confirmed.
+    fill_row = memdb.execute(
+        "SELECT order_id FROM fills WHERE contribution_id = ? AND is_close = 0",
+        (trade.position_id,),
+    ).fetchone()
+    assert fill_row is not None
+    assert fill_row[0] == "ord_live_1"
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='volume_burst'"
+    ).fetchone()
+    assert res is not None and res[0] == "confirmed"
+    assert trade.venue_order_id == "ord_live_1"
+
+
+# ---------------------------------------------------------------------------
+# (b) adapter ok=False → release + record_fault + None + no positions row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_real_reject_releases_and_faults(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter(ok=False)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("rej"), venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=100.0, last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is None
+    # No positions row, no fills row.
+    assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+    assert memdb.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    # Reservation released (not confirmed) + fault recorded.
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='volume_burst'"
+    ).fetchone()
+    assert res is None or res[0] != "confirmed"
+    assert state.fault_events == 1
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='volume_burst'"
+    ).fetchone()[0]
+    assert int(fault) >= 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_real_no_fill_row_releases(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Order accepted but the fill query returns no rows → treat as no-fill."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter(ok=True, filled=False)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("nofill"), venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=100.0, last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is None
+    assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+    assert state.fault_events == 1
+
+
+# ---------------------------------------------------------------------------
+# (d) real_roundtrip=False regression — simulate path only, adapter untouched
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_sim_does_not_call_adapter(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter()
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("sim"), venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=100.0, last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=False, okx_adapter=okx_adapter,
+    )
+    assert trade is not None
+    okx_adapter.place_market_order.assert_not_awaited()
+    okx_adapter.fetch_order.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _real_open_fill helper — OKX + Capital dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_open_fill_okx_dispatch() -> None:
+    okx_adapter = _make_okx_adapter()
+    result = await _real_open_fill(
+        venue="okx", symbol="BTC-USDT", side="long", notional_usd=100.0,
+        last_price=60_000.0, strategy_id="volume_burst",
+        okx_adapter=okx_adapter, capital_session=None,
+    )
+    assert result is not None
+    fill, deal_id = result
+    assert isinstance(fill, Fill)
+    assert fill.order_id == "ord_live_1"
+    assert deal_id is None  # OKX closes by base_qty, not deal_id
+
+
+@pytest.mark.asyncio
+async def test_real_open_fill_okx_reject_returns_none() -> None:
+    okx_adapter = _make_okx_adapter(ok=False)
+    result = await _real_open_fill(
+        venue="okx", symbol="BTC-USDT", side="long", notional_usd=100.0,
+        last_price=60_000.0, strategy_id="volume_burst",
+        okx_adapter=okx_adapter, capital_session=None,
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# (c) flag threading e2e — run_pipeline_for_signal forwards real_roundtrip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_threads_real_roundtrip_to_reserve(
+    memdb: sqlite3.Connection,
+) -> None:
+    """run_pipeline_for_signal must forward ``real_roundtrip`` to the
+    injected ``reserve_and_submit`` closure (adapter boundary mocked)."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import run_pipeline_for_signal
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import _all_strategies
+
+    reset_process_fence()
+    memdb.execute(
+        "INSERT OR REPLACE INTO universe "
+        "(venue, symbol, instrument_id, underlying_group_id, asset_class, "
+        " quote_ccy, state, vol_24h_usd, spread_bps, atr_24h_pct, "
+        " depth_10bps_usd, signal_density_7d, listing_ts, last_seen_ts, "
+        " is_active, active_reason) "
+        "VALUES ('okx', 'BTC-USDT', 'okx:BTC-USDT', 'crypto:BTC', 'crypto', "
+        "        'USDT', 'live', 1e9, 2.0, 3.0, 1e6, 0.0, NULL, ?, 1, NULL)",
+        (int(time.time()),),
+    )
+    captured: dict[str, Any] = {}
+
+    async def _spy_reserve(**kwargs: Any) -> SimulatedTrade | None:
+        captured["real_roundtrip"] = kwargs.get("real_roundtrip")
+        fill, trade = simulate_open_fill(
+            signal=kwargs["sig"], venue=kwargs["venue"],
+            last_price=kwargs["last_price"], notional_usd=kwargs["notional_usd"],
+        )
+        trade.position_id = "pos_spy"
+        return trade
+
+    await run_pipeline_for_signal(
+        conn=memdb, haiku=StubGPTClient(), state=ProdLoopState(),
+        strategy=_all_strategies()[0], sig=_sig("thread"), venue="okx",
+        symbol="BTC-USDT", asset_class="crypto",
+        underlying_group_id="crypto:BTC", regime="bull_trend",
+        bars_atr_pct=0.02, last_price=60_000.0,
+        universe_rows=[{"venue": "okx", "symbol": "BTC-USDT", "vol_24h_usd": 2e9}],
+        now_ts=int(time.time()), reserve_and_submit=_spy_reserve,
+        real_roundtrip=True,
+    )
+    assert captured.get("real_roundtrip") is True
+
+
+# ---------------------------------------------------------------------------
+# Close path — real_roundtrip OKX sells the entry base_qty
+# ---------------------------------------------------------------------------
+
+
+def _seed_pos_and_entry(memdb: sqlite3.Connection, pos_id: str) -> None:
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, "
+        " underlying_group_id, strategy_id, entry_strategy_id, "
+        " active_strategy_id, side, qty, status, opened_ts, swap_count) "
+        "VALUES (?, 'okx', 'BTC-USDT', 'crypto:BTC', 'volume_burst', "
+        "        'volume_burst', 'volume_burst', 'long', 0.001, 'open', ?, 0)",
+        (pos_id, int(time.time())),
+    )
+    memdb.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+        " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+        "VALUES ('f_rt', 'okx', 'okx:BTC-USDT', 'volume_burst', 'buy', "
+        "        100.0, 60000.0, 0.1, 1.0, ?, 'o_rt', ?, 0.0, 0, "
+        "        0.001666, 100.0, 'filled')",
+        (int(time.time() * 1000), pos_id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_real_roundtrip_okx_sells_base_qty(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.scripts._production_close import close_oldest_with_real_pnl
+    from polaris.scripts.production_paper_loop import _lookup_regime
+
+    pos_id = "pos_rt_close"
+    _seed_pos_and_entry(memdb, pos_id)
+    state = ProdLoopState()
+    trade = SimulatedTrade(
+        signal_id="t_rt", venue="okx", symbol="BTC-USDT",
+        strategy_id="volume_burst", side="long", entry_price=60_000.0,
+        notional_usd=100.0, open_ts=int(time.time()), position_id=pos_id,
+        venue_order_id="o_rt", base_qty=0.001666,
+    )
+    state.open_trades.append(trade)
+
+    okx_adapter = AsyncMock()
+    okx_adapter.place_market_order = AsyncMock(return_value=_okx_order_resp(ok=True, ord_id="sell_1"))
+    sell_row = _okx_filled_row(price=60_600.0)
+    sell_row["side"] = "sell"
+    sell_row["ordId"] = "sell_1"
+    okx_adapter.fetch_order = AsyncMock(return_value={"data": [sell_row]})
+
+    await close_oldest_with_real_pnl(
+        memdb, state=state, now_ts=int(time.time()),
+        lookup_regime=_lookup_regime, real_roundtrip=True,
+        okx_adapter=okx_adapter,
+    )
+    # Adapter sell leg was driven.
+    okx_adapter.place_market_order.assert_awaited_once()
+    assert okx_adapter.place_market_order.await_args.kwargs["side"] == "sell"
+    # Close fill persisted from the real exit price (60_600).
+    close_row = memdb.execute(
+        "SELECT fill_price, is_close FROM fills "
+        "WHERE contribution_id = ? AND is_close = 1",
+        (pos_id,),
+    ).fetchone()
+    assert close_row is not None
+    assert abs(float(close_row[0]) - 60_600.0) < 1e-6
+    assert len(state.closed_trades) == 1
+
+
+@pytest.mark.asyncio
+async def test_close_sim_does_not_call_adapter(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.scripts._production_close import close_oldest_with_real_pnl
+    from polaris.scripts.production_paper_loop import _lookup_regime
+
+    pos_id = "pos_sim_close"
+    _seed_pos_and_entry(memdb, pos_id)
+    for ts_off in range(20):
+        memdb.execute(
+            "INSERT OR REPLACE INTO bars (instrument_id, underlying_group_id, "
+            " venue, symbol, bar_interval, ts, open, high, low, close, volume, "
+            " notional_usd, trade_count, vwap, bid_close, ask_close, "
+            " spread_bps_close, source) "
+            "VALUES ('okx:BTC-USDT', 'crypto:BTC', 'okx', 'BTC-USDT', '1m', ?, "
+            "        60000.0, 60100.0, 59900.0, ?, 1000.0, 6e7, 0, 0, 0, 0, 0, 'test')",
+            (1_700_000_000 + ts_off * 60, 60_000.0 + ts_off * 10),
+        )
+    state = ProdLoopState()
+    trade = SimulatedTrade(
+        signal_id="t_sim", venue="okx", symbol="BTC-USDT",
+        strategy_id="volume_burst", side="long", entry_price=60_000.0,
+        notional_usd=100.0, open_ts=int(time.time()), position_id=pos_id,
+    )
+    state.open_trades.append(trade)
+    okx_adapter = AsyncMock()
+    okx_adapter.place_market_order = AsyncMock()
+    await close_oldest_with_real_pnl(
+        memdb, state=state, now_ts=int(time.time()),
+        lookup_regime=_lookup_regime, real_roundtrip=False,
+        okx_adapter=okx_adapter,
+    )
+    okx_adapter.place_market_order.assert_not_awaited()
+    assert len(state.closed_trades) == 1
+
+
+# ===========================================================================
+# codex review round 2 — real-order safety defects (P0-1..5, P1-6, P2-7)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# P0-1 — real_roundtrip must refuse the shared sim DB
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_roundtrip_refuses_sim_db(tmp_path: Any) -> None:
+    """real_roundtrip=True against data/polaris.sqlite must raise (no co-mingle)."""
+    from pathlib import Path
+
+    from polaris.scripts.production_paper_loop import run_production_paper_loop
+
+    with pytest.raises(ValueError, match="real_roundtrip"):
+        await run_production_paper_loop(
+            duration_sec=0.0, tick_sec=0.0,
+            db_path=Path("data/polaris.sqlite"),
+            haiku=object(), real_roundtrip=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_real_roundtrip_refuses_default_db(tmp_path: Any) -> None:
+    """db_path=None defaults to the sim DB → must also raise under real."""
+    from polaris.scripts.production_paper_loop import run_production_paper_loop
+
+    with pytest.raises(ValueError, match="real_roundtrip"):
+        await run_production_paper_loop(
+            duration_sec=0.0, tick_sec=0.0, db_path=None,
+            haiku=object(), real_roundtrip=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# P0-2 — adapter EXCEPTION during real open must release + fault (not escape)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_real_open_exception_releases(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = AsyncMock()
+    okx_adapter.place_market_order = AsyncMock(
+        side_effect=RuntimeError("venue timeout")
+    )
+    okx_adapter.fetch_order = AsyncMock()
+    # Must NOT propagate the exception; must release + fault + None.
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("exc"), venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=100.0, last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is None
+    assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='volume_burst'"
+    ).fetchone()
+    assert res is None or res[0] != "confirmed"
+    assert state.fault_events == 1
+
+
+# ---------------------------------------------------------------------------
+# P0-3 — confirm_reservation failure after a real fill must record an orphan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_failure_after_real_fill_records_orphan(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polaris.core.isolation.allocator_fence import (
+        ReservationConflictError,
+        get_process_fence,
+        reset_process_fence,
+    )
+
+    reset_process_fence()
+    fence = get_process_fence(memdb)
+
+    async def _boom_confirm(*args: Any, **kwargs: Any) -> Any:
+        raise ReservationConflictError("confirm lost the race")
+
+    monkeypatch.setattr(fence, "confirm_reservation", _boom_confirm)
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter(ok=True, filled=True)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("orphan_c"), venue="okx",
+        symbol="BTC-USDT", asset_class="crypto",
+        underlying_group_id="crypto:BTC", notional_usd=100.0,
+        last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is None
+    # Durable orphan record carrying the venue ref (ord_live_1) so a
+    # reconciliation pass can find + close the untracked venue position.
+    orphan = memdb.execute(
+        "SELECT payload_json FROM risk_events WHERE event_type = 'venue_orphan'"
+    ).fetchone()
+    assert orphan is not None
+    assert "ord_live_1" in orphan[0]
+    assert state.fault_events == 1
+
+
+# ---------------------------------------------------------------------------
+# P0-4 — persist failure after a real fill must record an orphan + release
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_after_real_fill_records_orphan(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    okx_adapter = _make_okx_adapter(ok=True, filled=True)
+
+    import polaris.scripts._production_pipeline as pipe_mod
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.Error("persist failed")
+
+    monkeypatch.setattr(pipe_mod, "persist_fill", _boom)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("orphan_p"), venue="okx",
+        symbol="BTC-USDT", asset_class="crypto",
+        underlying_group_id="crypto:BTC", notional_usd=100.0,
+        last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=okx_adapter,
+    )
+    assert trade is None
+    orphan = memdb.execute(
+        "SELECT payload_json FROM risk_events WHERE event_type = 'venue_orphan'"
+    ).fetchone()
+    assert orphan is not None
+    assert "ord_live_1" in orphan[0]
+    # Reservation released so the order_key is not leaked.
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='volume_burst'"
+    ).fetchone()
+    assert res is None or res[0] != "confirmed"
+
+
+# ---------------------------------------------------------------------------
+# P0-4b — sim persist failure must NOT record a venue_orphan (no real position)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sim_persist_failure_no_orphan(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    import polaris.scripts._production_pipeline as pipe_mod
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.Error("persist failed")
+
+    monkeypatch.setattr(pipe_mod, "persist_fill", _boom)
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("sim_pf"), venue="okx",
+        symbol="BTC-USDT", asset_class="crypto",
+        underlying_group_id="crypto:BTC", notional_usd=100.0,
+        last_price=60_000.0, now_ts=int(time.time()),
+        real_roundtrip=False,
+    )
+    assert trade is None
+    orphan = memdb.execute(
+        "SELECT COUNT(*) FROM risk_events WHERE event_type = 'venue_orphan'"
+    ).fetchone()[0]
+    assert int(orphan) == 0
+
+
+# ---------------------------------------------------------------------------
+# P0-5 — open persists deal_id/venue_order_id; hydration restores them
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capital_open_persists_deal_id_and_hydrate_restores(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.core.lifecycle.recover import hydrate_open_positions
+
+    reset_process_fence()
+    state = ProdLoopState()
+
+    # Mock Capital session + adapter via the open path: open → confirm.
+    cap_session = AsyncMock()
+
+    class _OpenResp:
+        ok = True
+        deal_reference = "ref_1"
+        deal_id = "deal_top"
+
+    class _CloseResp:
+        ok = True
+        deal_reference = "cref"
+
+    confirm_open = {
+        "epic": "EURUSD", "direction": "BUY", "level": 1.105, "size": 1.0,
+        "dealStatus": "ACCEPTED", "status": "OPEN", "dealId": "deal_top",
+        "affectedDeals": [{"dealId": "deal_position_99", "status": "OPENED"}],
+        "date": "2026-05-28T00:00:00Z",
+    }
+    sig = RawSignal(
+        signal_id="cap_open", strategy_id="fx_breakout", symbol="EURUSD",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="fx_intraday",
+    )
+
+    import polaris.scripts._production_pipeline as pipe_mod
+
+    # Patch CapitalAdapter so the real-open path drives our mock.
+    class _FakeCapAdapter:
+        def __init__(self, _session: Any) -> None: ...
+        async def open_position(self, **kwargs: Any) -> Any:
+            return _OpenResp()
+        async def confirm(self, _ref: str) -> dict[str, Any]:
+            return confirm_open
+
+    monkeypatch_target = pipe_mod.CapitalAdapter
+    pipe_mod.CapitalAdapter = _FakeCapAdapter  # type: ignore[misc,assignment]
+    try:
+        trade = await _reserve_and_submit(
+            conn=memdb, state=state, sig=sig, venue="capital", symbol="EURUSD",
+            asset_class="forex", underlying_group_id="forex:EURUSD",
+            notional_usd=100.0, last_price=1.105, now_ts=int(time.time()),
+            real_roundtrip=True, capital_session=cap_session,
+        )
+    finally:
+        pipe_mod.CapitalAdapter = monkeypatch_target  # type: ignore[misc]
+
+    assert trade is not None
+    assert trade.deal_id == "deal_position_99"
+    # Restart: hydrate must restore deal_id (+ venue_order_id) from persisted state.
+    restored = hydrate_open_positions(memdb)
+    assert len(restored) == 1
+    assert restored[0].deal_id == "deal_position_99"
+
+
+# ---------------------------------------------------------------------------
+# P1-6 — real close recomputes pnl_r from the real exit price
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_close_recomputes_pnl_r_from_exit(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A loss exit (sell below entry) must produce pnl_r < 0 even though the
+    seeded bars trended *up* (pre-close bar-based pnl_r would be positive)."""
+    from polaris.scripts._production_close import close_oldest_with_real_pnl
+    from polaris.scripts.production_paper_loop import _lookup_regime
+
+    pos_id = "pos_pnl_r"
+    _seed_pos_and_entry(memdb, pos_id)
+    # Seed bars trending UP (bar-based pnl_r would be positive).
+    for ts_off in range(20):
+        memdb.execute(
+            "INSERT OR REPLACE INTO bars (instrument_id, underlying_group_id, "
+            " venue, symbol, bar_interval, ts, open, high, low, close, volume, "
+            " notional_usd, trade_count, vwap, bid_close, ask_close, "
+            " spread_bps_close, source) "
+            "VALUES ('okx:BTC-USDT', 'crypto:BTC', 'okx', 'BTC-USDT', '1m', ?, "
+            "        60000.0, 61000.0, 59000.0, ?, 1000.0, 6e7, 0, 0, 0, 0, 0, 'test')",
+            (1_700_000_000 + ts_off * 60, 61_000.0 + ts_off * 50),
+        )
+    state = ProdLoopState()
+    trade = SimulatedTrade(
+        signal_id="t_pnlr", venue="okx", symbol="BTC-USDT",
+        strategy_id="volume_burst", side="long", entry_price=60_000.0,
+        notional_usd=100.0, open_ts=int(time.time()), position_id=pos_id,
+        venue_order_id="o_rt", base_qty=0.001666,
+    )
+    state.open_trades.append(trade)
+
+    okx_adapter = AsyncMock()
+    okx_adapter.place_market_order = AsyncMock(
+        return_value=_okx_order_resp(ok=True, ord_id="sell_loss")
+    )
+    # Real exit at 55_000 — a LOSS for the long entered at 60_000.
+    sell_row = _okx_filled_row(price=55_000.0)
+    sell_row["side"] = "sell"
+    sell_row["ordId"] = "sell_loss"
+    okx_adapter.fetch_order = AsyncMock(return_value={"data": [sell_row]})
+
+    await close_oldest_with_real_pnl(
+        memdb, state=state, now_ts=int(time.time()),
+        lookup_regime=_lookup_regime, real_roundtrip=True,
+        okx_adapter=okx_adapter,
+    )
+    assert len(state.closed_trades) == 1
+    # pnl_r must reflect the REAL loss exit, not the up-trending bars.
+    assert state.closed_trades[0].pnl_r < 0.0
+    close_row = memdb.execute(
+        "SELECT pnl_usd FROM fills WHERE contribution_id = ? AND is_close = 1",
+        (pos_id,),
+    ).fetchone()
+    assert float(close_row[0]) < 0.0
+
+
+# ---------------------------------------------------------------------------
+# P2-7 — shared okx_adapter threads through run_pipeline_for_signal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_threads_shared_okx_adapter(
+    memdb: sqlite3.Connection,
+) -> None:
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import run_pipeline_for_signal
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import _all_strategies
+
+    reset_process_fence()
+    memdb.execute(
+        "INSERT OR REPLACE INTO universe "
+        "(venue, symbol, instrument_id, underlying_group_id, asset_class, "
+        " quote_ccy, state, vol_24h_usd, spread_bps, atr_24h_pct, "
+        " depth_10bps_usd, signal_density_7d, listing_ts, last_seen_ts, "
+        " is_active, active_reason) "
+        "VALUES ('okx', 'BTC-USDT', 'okx:BTC-USDT', 'crypto:BTC', 'crypto', "
+        "        'USDT', 'live', 1e9, 2.0, 3.0, 1e6, 0.0, NULL, ?, 1, NULL)",
+        (int(time.time()),),
+    )
+    captured: dict[str, Any] = {}
+
+    async def _spy_reserve(**kwargs: Any) -> SimulatedTrade | None:
+        captured["okx_adapter"] = kwargs.get("okx_adapter")
+        fill, trade = simulate_open_fill(
+            signal=kwargs["sig"], venue=kwargs["venue"],
+            last_price=kwargs["last_price"], notional_usd=kwargs["notional_usd"],
+        )
+        trade.position_id = "pos_spy2"
+        return trade
+
+    sentinel = object()
+    await run_pipeline_for_signal(
+        conn=memdb, haiku=StubGPTClient(), state=ProdLoopState(),
+        strategy=_all_strategies()[0], sig=_sig("shared"), venue="okx",
+        symbol="BTC-USDT", asset_class="crypto",
+        underlying_group_id="crypto:BTC", regime="bull_trend",
+        bars_atr_pct=0.02, last_price=60_000.0,
+        universe_rows=[{"venue": "okx", "symbol": "BTC-USDT", "vol_24h_usd": 2e9}],
+        now_ts=int(time.time()), reserve_and_submit=_spy_reserve,
+        real_roundtrip=True, okx_adapter=sentinel,
+    )
+    assert captured.get("okx_adapter") is sentinel

@@ -9,8 +9,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from polaris.core.universe._capital import _capital_name_matches
 from polaris.core.universe.discovery import (
-    _capital_name_matches,
     _filter_failure_reason,
     apply_active_filters,
     detect_listing_changes,

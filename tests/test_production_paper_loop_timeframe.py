@@ -133,7 +133,7 @@ def test_no_timeframe_hardcode_in_run_tick_source() -> None:
     import re
     from pathlib import Path
 
-    src = Path("polaris/scripts/production_paper_loop.py").read_text()
+    src = Path("polaris/scripts/_production_tick.py").read_text()
     # Match build_real_market_view(...) calls and reject any whose timeframe
     # kwarg is the literal "1m". The fixed loop passes the strategy
     # metadata.timeframe (a variable), not a literal.
@@ -160,7 +160,7 @@ async def test_fetch_bars_one_okx_forwards_bar_interval() -> None:
         captured.update(kwargs)
         return []
 
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_fake):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         await fetch_bars_one(
             "okx", "BTC-USDT", "crypto", limit=10, bar_interval="15m",
         )
@@ -186,7 +186,7 @@ async def test_fetch_bars_one_capital_maps_resolution() -> None:
             return t
 
     with patch(
-        "polaris.scripts._production_layers.fetch_capital_bars",
+        "polaris.scripts._production_bars.fetch_capital_bars",
         new=_fake_capital,
     ):
         await fetch_bars_one(
@@ -239,7 +239,7 @@ async def test_volume_burst_1m_bars_fetched(memdb: sqlite3.Connection) -> None:
         return list(reversed(fake_1m))  # OKX returns newest first
 
     with patch(
-        "polaris.scripts._production_layers.fetch_okx_bars", new=_fake_okx,
+        "polaris.scripts._production_bars.fetch_okx_bars", new=_fake_okx,
     ):
         result = await ingest_bars_for_focus(
             memdb,
@@ -278,7 +278,7 @@ async def test_fx_breakout_1h_bars_fetched(memdb: sqlite3.Connection) -> None:
             return t
 
     with patch(
-        "polaris.scripts._production_layers.fetch_capital_bars",
+        "polaris.scripts._production_bars.fetch_capital_bars",
         new=_fake_capital,
     ):
         result = await ingest_bars_for_focus(
@@ -413,7 +413,7 @@ async def test_fetch_bars_one_default_bar_interval_is_1m() -> None:
         captured.update(kwargs)
         return []
 
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_fake):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         await fetch_bars_one("okx", "BTC-USDT", "crypto")
     assert captured["bar_interval"] == "1m"
 
@@ -438,7 +438,7 @@ async def test_non_1m_ingest_does_not_mutate_baseline(
     async def _fake(*args: Any, **kwargs: Any) -> list[Bar]:
         return list(reversed(fake_1h))
 
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_fake):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         result = await ingest_bars_for_focus(
             memdb,
             [("okx", "BTC-USDT", "crypto", "crypto:BTC")],
@@ -464,7 +464,7 @@ async def test_1m_ingest_updates_baseline(memdb: sqlite3.Connection) -> None:
     async def _fake(*args: Any, **kwargs: Any) -> list[Bar]:
         return list(reversed(fake_1m))
 
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_fake):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         result = await ingest_bars_for_focus(
             memdb,
             [("okx", "BTC-USDT", "crypto", "crypto:BTC")],
@@ -488,7 +488,7 @@ async def test_zero_bar_fetch_does_not_advance_cadence(
 
     last_fetch: dict[str, float] = {}
     bars_by_tf: dict[str, int] = {}
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_empty):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_empty):
         await ingest_bars_per_timeframe(
             memdb,
             [("okx", "BTC-USDT", "crypto", "crypto:BTC")],
@@ -512,7 +512,7 @@ async def test_nonzero_fetch_advances_cadence(memdb: sqlite3.Connection) -> None
 
     last_fetch: dict[str, float] = {}
     bars_by_tf: dict[str, int] = {}
-    with patch("polaris.scripts._production_layers.fetch_okx_bars", new=_fake):
+    with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         await ingest_bars_per_timeframe(
             memdb,
             [("okx", "BTC-USDT", "crypto", "crypto:BTC")],
@@ -554,9 +554,9 @@ async def test_partial_bucket_failure_does_not_starve_failing_venue(
     last_fetch: dict[str, float] = {}
     bars_by_tf: dict[str, int] = {}
     with patch(
-        "polaris.scripts._production_layers.fetch_okx_bars", new=_okx,
+        "polaris.scripts._production_bars.fetch_okx_bars", new=_okx,
     ), patch(
-        "polaris.scripts._production_layers.fetch_capital_bars", new=_capital,
+        "polaris.scripts._production_bars.fetch_capital_bars", new=_capital,
     ):
         await ingest_bars_per_timeframe(
             memdb,
@@ -586,7 +586,7 @@ def test_1m_bucket_covers_capital_for_regime() -> None:
     """
     from pathlib import Path
 
-    src = Path("polaris/scripts/production_paper_loop.py").read_text()
+    src = Path("polaris/scripts/_production_tick.py").read_text()
     assert "all_focus_venues" in src, (
         "F10 R1 P1-1: 1m bucket must be force-augmented with every focus "
         "venue so Capital regime has 1m bars."

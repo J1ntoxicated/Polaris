@@ -2,7 +2,7 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-date_updated: 2026-05-29
+date_updated: 2026-05-30
 tags: [now, tier-0]
 ---
 
@@ -10,7 +10,16 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
-**2026-05-30 자율 3-스트림 재설계 빌드 진행 중 (최신, Jin 취침 — 끝까지 완성 위임)**: 목표 = OKX 크립토 SPOT(롱only) / Capital CFD(FX·지수·금, 롱숏·레버리지) / Alpaca 미국주식 SPOT(롱) **3 스트림 분할**. 크립토 파생 접근 불가(OKX 검증실패=spot only, Binance 선물 막힘 → Binance 전면 철회 `22fffd9`). 설계 plan = `.claude/plans/stream_architecture_redesign_2026-05-30.md`(StreamConfig SSOT, venue 이진분기 철폐, product_class 1급, additive 무중단 마이그레이션, T0-T17). /debate 확정(`b565392`): Capital 레버리지 flat30→per-market, Track C buying_power gross 3.0. **빌드 체인(워크플로우, 거동게이트·adversarial review, OKX 봇 무중단)**: 파운데이션 #21(T1-T4+T15, wf wmq98s3yo 진행중) → Phase2 #23(Capital숏+per-market레버리지+net-edge) → Phase3 #24(Track C+Alpaca 어댑터/전략) → Phase4 #25(대시보드2+3-스트림 봇 재기동·검증). 각 단계 커밋+보고. **다음 컨텍스트는 task #21-25 + plan 따라 이어서 완성.** 불변: 9-stack 봉쇄/hard-MAX/AGGRESSIVE/DEMO. 현 OKX 스팟 봇 pid 67774 `data/polaris_live.sqlite` 수집중, 웹 :8770, Alpaca paper 키 검증됨($79.7k BP).
+**🔴 HANDOVER 2026-05-30 (Jin 취침 — 자율 완성 mandate. 다음 세션 여기서 이어가기. 핸드오버 digest=[[2026-05-30_handover_3stream]]).**
+**Mandate**: 3-스트림 아키텍처를 끝까지 자율 완성 + 대시보드 + 교차검증, 자는 동안. 각 단계 워크플로우(build TDD→adversarial review→거동게이트)→커밋→보고. 끊김 없이 체인. 돌이키기 어려운 외부/venue 변경은 보류·기록.
+**불변**: 9-stack 봉쇄 · hard-MAX(headroom_min+0.09 ceiling) · AGGRESSIVE(방어throttle/축소 X, 거부키워드 0) · DEMO/PAPER only · builder≠reviewer · OKX 봇 무중단(최종 재기동만 graceful) · Claude 창 kill 금지 · workflow-first 기본.
+**목표 3 스트림**: A=OKX 크립토 SPOT(롱only,lev1,24/7) · B=Capital CFD(FX/지수/금,롱숏,per-market lev,세션) · C=Alpaca 미국주식 SPOT(롱,US장/PDT/갭). 크립토 파생 불가(OKX 검증실패=spot, Binance 선물 막힘→Binance 철회 `22fffd9`). **plan SSOT**=`.claude/plans/stream_architecture_redesign_2026-05-30.md`(StreamConfig·product_class 1급·additive 무중단·T0-T17).
+**AI 제공자(중요)**: **GPT(OpenAI)=봇 LLM, Gemini=교차검증 — 둘 다 사용 가능. Anthropic/Claude는 Jin이 차단 → 호출해도 안 됨(라우팅 금지).** /debate=GPT+Gemini.
+**/debate 확정**(`b565392`, vault/50_research/debates/trading_params_leverage_trackC_2026-05-30.md): Capital 레버리지 flat30→per-market(폴백 FX30/지수20/원자재20/cCFD2, 0-폴백 교체, fill_normalizer 전달) · Track C buying_power 기준 gross 3.0/per-sym 0.99/daily 0.99, PDT 별도 카운터.
+**완료·커밋**: 파운데이션 P0-1 `e932af6`(StreamConfig SSOT+product_class+venue 이진분기 9곳→resolve_stream+schema additive+대시보드 단계1) — 815 green, 거동 100% 동일, OKX 봇 무중단.
+**다음 세션 착수(워크플로우)**: #23 Phase2(T6 Capital 3전략 숏 미러+T7 per-market 레버리지+T14 net-edge 비용) → #24 Phase3(T8 Track C+T9-13 Alpaca 어댑터/universe/전략3종[equity_tsmom·rsi_bb 리스킨+equity_gap_go 신규], paper키 검증됨 $79.7k BP) → #25 Phase4(대시보드 단계2+3-스트림 봇 클린재기동+**교차통합 live-audit**: 3 venue 각자 레짐·전략·엑싯 맞물림·cross-contam 0) → #26 Phase5(사용성검증+익스체인지별 분류/오픈·클로즈 포지션+**은하 확장** 스트림colony) → #27(read-only /debate: AI 멀티소스 의사결정경로[auto_invasion mk1 ~/Projects/auto_invasion_mk1-main]+alt-data wire[CoinGlass·FRED·Quandl·MyFxBook]+게이트별 AI/all-PASS 실태[live DB G1-G8 pass-rate]+AI콜 효과+전체설계 재검증) → #28(비용 모니터링 fee+slip+AI$ stream별→대시보드).
+**.env toolkit**: AI=OpenAI/Gemini(가용)·Anthropic(차단) · venue=OKX/Capital(CAP_*)/Alpaca(ARCHIVE_ALPACA_PAPER)/IG(ARCHIVE_IG=또다른 CFD)/Binance(철회) · data=CoinGlass(펀딩/OI/청산)/FRED(매크로)/Quandl/MyFxBook(센티먼트).
+**운영**: OKX 스팟 봇 pid 67774 `data/polaris_live.sqlite` 수집중 · 웹 :8770(3:7 글로브+board) · 아카이브 DB=polaris_churn/session2/okx_s3. **버그노트**: .gitignore `data/` 패턴이 소스 `polaris/core/data/`까지 잡음 → 거기 신규 파일은 `git add -f`.
 
 **2026-05-29 대시보드 부활 + 동적 시각화 + 스페이스 비주얼**: 봇 PID 96290 (`data/polaris_live.sqlite`, 24h 수집) 가동 유지. (1) **"봇 실행이 Claude 창 닫던" root cause 해결** — `start_dashboard.sh` aggressive tty cleanup 가 Bash 도구의 `$$` tty 를 Claude 창으로 오인해 Jin 창을 닫음 → 기본 OFF 반전 + 기본 DB → polaris_live ([[feedback_never_kill_claude_session]]). 대시보드 PID 7638 라이브 가동. (2) **`7e4cf33`** Bayesian edge-validation P1 (`posterior.py` NIG, display-only) + dashboard overflow 힌트 + crisis silent-drop 수정 + orphan liquidation 스크립트 (666 green, fresh-Claude SAFE). (3) **`5940107`** dashboard_v2 동적 시각화 (자산 스파크라인 + DD/노출/AI/승률 게이지 + 셀 히트타일, 40행 불변). (4) **스페이스 비주얼** `tools/visualizer/` 이식 중 (mk1 Neural Cloud → collect_snapshot 어댑터, plan: `.claude/plans/space_viz_neural_cloud_2026-05-29.md`). 판단: OKX 고아 `--live` 청산 SKIP (USDT $35.8k 충분, 고아=봇 활성 포지션). digest [[2026-05-29_dashboard_revival_dynamic_viz_spaceviz]].
 
@@ -127,4 +136,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-29 15:24 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-29 15:28 (paper=False, full_pipeline=True)

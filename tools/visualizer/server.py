@@ -116,6 +116,37 @@ def _fresh_snapshot() -> dict[str, Any]:
     return fresh
 
 
+def _resolve_bot_log() -> Path | None:
+    """Newest bot runtime log under data/paper/ (collect_*.log preferred)."""
+    paper = Path("data/paper")
+    if not paper.is_dir():
+        return None
+    cands = sorted(
+        [*paper.glob("collect_*.log"), *paper.glob("polaris_runtime*.log")],
+        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+        reverse=True,
+    )
+    return cands[0] if cands else None
+
+
+def _tail_botlog(n: int = 160) -> list[str]:
+    """Last n lines of the live bot log (seek-based tail, read-only)."""
+    log = _resolve_bot_log()
+    if log is None or not log.exists():
+        return []
+    try:
+        with log.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            block = min(size, 200_000)  # ~200KB tail is plenty for n lines
+            fh.seek(size - block)
+            data = fh.read(block)
+        lines = data.decode("utf-8", "replace").splitlines()
+        return lines[-n:]
+    except OSError:
+        return []
+
+
 def _latest_fill_ts() -> int:
     """Max fill ts_ms currently in the DB, or 0 if unavailable."""
     if not _DB_PATH.exists():
@@ -203,6 +234,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json(_fresh_graph())
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"snapshot err: {exc}")
+            return
+        if self.path.startswith("/api/botlog"):
+            try:
+                self._json({"lines": _tail_botlog(180), "ts": time.time()})
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"botlog err: {exc}")
             return
         if self.path.startswith("/api/snapshot"):
             try:

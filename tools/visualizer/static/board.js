@@ -1,7 +1,7 @@
 /* board.js — Polaris right-half analytics board + left-column bot log (DEMO/PAPER display-only).
  * Native HTML/CSS. 1s polling: /api/snapshot → #board, /api/botlog → #botlog-body.
  * All fetches cache-busted (?t=Date.now()) + no-store. No ANSI mirror. No sizing/order logic.
- * Injects its own <style>; renders into #board (right 50vw). Bot-log pane styled in index.html.
+ * Injects its own <style>; renders into #board (right 70vw). Bot-log pane styled in index.html.
  */
 (function () {
   'use strict';
@@ -14,13 +14,13 @@
     /* header / kpis / equity (auto) + mid + bottom (bounded flex). minmax(0,..) keeps the
        sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
     grid-template-rows: auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
-    gap: 6px;
-    padding: 8px 12px;
+    gap: 8px;
+    padding: 10px 16px;
     box-sizing: border-box;
     background: linear-gradient(180deg, rgba(8,11,17,0.92), rgba(5,7,11,0.96));
     border-left: 1px solid var(--ghost);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 12px;
     color: var(--p-wht);
   }
   #board .b-pos { color: var(--p-grn); }
@@ -33,51 +33,51 @@
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     padding-bottom: 4px; border-bottom: 1px solid var(--ghost);
   }
-  #board .b-head .title { font-weight: 700; letter-spacing: 0.18em; color: var(--p-wht); font-size: 13px; }
+  #board .b-head .title { font-weight: 700; letter-spacing: 0.18em; color: var(--p-wht); font-size: 15px; }
   #board .b-head .star { color: var(--polaris-blue); }
   #board .b-head .badge {
-    font-size: 9px; letter-spacing: 0.18em; font-weight: 700;
-    padding: 2px 7px; border: 1px solid var(--polaris-blue); color: var(--polaris-blue);
+    font-size: 10px; letter-spacing: 0.18em; font-weight: 700;
+    padding: 2px 8px; border: 1px solid var(--polaris-blue); color: var(--polaris-blue);
   }
-  #board .b-head .meta { color: var(--p-gry); font-size: 10px; }
+  #board .b-head .meta { color: var(--p-gry); font-size: 11px; }
   #board .b-head .meta b { color: var(--p-wht); font-weight: 700; }
-  #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 12px; }
+  #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 14px; }
   #board .b-head .regime-tag { color: var(--p-mag); font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase; }
 
-  /* KPI cards */
+  /* KPI cards — 70% width fits all 8 in one row */
   #board .kpis {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px;
+    display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px;
   }
   #board .kpi {
     border: 1px solid rgba(95,135,175,0.22);
     background: rgba(15,19,26,0.55);
-    padding: 4px 7px;
+    padding: 6px 9px;
+    min-width: 0; overflow: hidden;
   }
-  #board .kpi { min-width: 0; overflow: hidden; }
-  #board .kpi .k { color: var(--p-dim); font-size: 8px; letter-spacing: 0.10em; text-transform: uppercase;
+  #board .kpi .k { color: var(--p-dim); font-size: 9px; letter-spacing: 0.10em; text-transform: uppercase;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #board .kpi .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; line-height: 1.1;
+  #board .kpi .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; line-height: 1.1;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #board .kpi .sub { color: var(--p-gry); font-size: 8px; margin-top: 0;
+  #board .kpi .sub { color: var(--p-gry); font-size: 9px; margin-top: 1px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* Equity chart */
   #board .eq-wrap {
     border: 1px solid rgba(95,135,175,0.22);
     background: rgba(15,19,26,0.40);
-    padding: 4px 8px 2px;
+    padding: 5px 10px 3px;
   }
   #board .eq-wrap .eq-head {
-    display: flex; align-items: baseline; gap: 12px;
-    font-size: 9px; letter-spacing: 0.12em; color: var(--p-dim); text-transform: uppercase;
+    display: flex; align-items: baseline; gap: 16px;
+    font-size: 10px; letter-spacing: 0.12em; color: var(--p-dim); text-transform: uppercase;
   }
   #board .eq-wrap .eq-head .h-title { color: var(--polaris-blue); font-weight: 700; }
   #board .eq-wrap .eq-head .v { color: var(--p-wht); font-weight: 700; }
-  #board .eq-wrap svg { display: block; width: 100%; height: 58px; }
+  #board .eq-wrap svg { display: block; width: 100%; height: 72px; }
 
-  /* Tables row (positions + recent trades side by side) */
+  /* Tables row (positions + recent trades side by side) — wide at 70% */
   #board .mid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
     min-height: 0;
   }
   #board .panel {
@@ -87,30 +87,30 @@
   }
   #board .panel .p-head {
     display: flex; justify-content: space-between; align-items: baseline;
-    padding: 3px 8px; border-bottom: 1px solid var(--ghost); flex: 0 0 auto;
-    color: var(--polaris-blue); font-size: 9px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 4px 10px; border-bottom: 1px solid var(--ghost); flex: 0 0 auto;
+    color: var(--polaris-blue); font-size: 10px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
   }
   #board .panel .p-head .cnt { color: var(--p-cyn); letter-spacing: 0; }
   #board .panel .p-body { overflow: auto; flex: 1 1 0; min-height: 0; }
-  #board .panel .p-body::-webkit-scrollbar { width: 4px; height: 4px; }
+  #board .panel .p-body::-webkit-scrollbar { width: 5px; height: 5px; }
   #board .panel .p-body::-webkit-scrollbar-thumb { background: var(--ghost); }
 
-  #board table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
+  #board table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
   #board thead th {
     position: sticky; top: 0; background: rgba(10,13,18,0.96);
     color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.04em;
-    padding: 3px 5px; font-size: 9px; text-transform: uppercase;
+    padding: 4px 7px; font-size: 10px; text-transform: uppercase;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #board thead th.l { text-align: left; }
   #board tbody td {
-    padding: 2px 5px; text-align: right; font-variant-numeric: tabular-nums;
+    padding: 3px 7px; text-align: right; font-variant-numeric: tabular-nums;
     border-bottom: 1px dotted rgba(95,135,175,0.08); color: var(--p-gry);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #board tbody td.l { text-align: left; }
   #board tbody td.tk { color: var(--p-wht); font-weight: 700; }
-  #board tbody td.ex { color: var(--p-cyn); font-size: 9px; font-weight: 700; }
+  #board tbody td.ex { color: var(--p-cyn); font-size: 10px; font-weight: 700; }
   /* per-table column widths (table-layout:fixed) — numeric cols sized, text cols flex+ellipsis */
   #board .tbl-pos col.c-ven  { width: 8%; }
   #board .tbl-pos col.c-sym  { width: 22%; }
@@ -134,16 +134,16 @@
   #board tbody tr:hover td { background: rgba(95,135,175,0.06); }
   #board .empty { color: var(--p-dim); padding: 8px; text-align: center; font-size: 10px; }
 
-  /* Bottom analytics grid */
+  /* Bottom analytics grid — 3-col, roomier at 70% */
   #board .bottom-grid {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 6px; min-height: 0;
+    gap: 8px; min-height: 0;
   }
-  #board .mini { font-size: 10px; }
+  #board .mini { font-size: 11px; }
   #board .mini .row {
-    display: grid; align-items: center; gap: 6px; padding: 1px 8px;
+    display: grid; align-items: center; gap: 8px; padding: 2px 10px;
     border-bottom: 1px dotted rgba(95,135,175,0.08);
   }
   /* min-width:0 so 1fr name column can shrink → ellipsis fires instead of overflowing the panel */
@@ -153,18 +153,18 @@
   #board .mini .row .sub { color: var(--p-dim); font-size: 9px; }
 
   /* gate funnel bars */
-  #board .gate-row { grid-template-columns: 20px 1fr 38px; }
-  #board .gate-bar { height: 7px; background: rgba(95,135,175,0.12); position: relative; }
+  #board .gate-row { grid-template-columns: 24px 1fr 42px; }
+  #board .gate-bar { height: 8px; background: rgba(95,135,175,0.12); position: relative; }
   #board .gate-bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--p-cyn); }
-  #board .gate-row .gid { color: var(--p-dim); font-size: 9px; }
+  #board .gate-row .gid { color: var(--p-dim); font-size: 10px; }
   #board .gate-row .pct { text-align: right; font-variant-numeric: tabular-nums; }
 
-  /* strategy / cell / edge rows */
-  #board .strat-row { grid-template-columns: 1fr 36px 34px 56px; }
-  #board .cell-row  { grid-template-columns: 1fr 40px 40px; }
-  #board .edge-row  { grid-template-columns: 1fr 64px 44px; }
-  #board .learn-row { grid-template-columns: 1fr 50px 40px; }
-  #board .alert-row { grid-template-columns: 44px 1fr; }
+  /* strategy / cell / edge rows — slightly wider numeric cols for the larger font */
+  #board .strat-row { grid-template-columns: 1fr 40px 40px 64px; }
+  #board .cell-row  { grid-template-columns: 1fr 46px 44px; }
+  #board .edge-row  { grid-template-columns: 1fr 70px 50px; }
+  #board .learn-row { grid-template-columns: 1fr 56px 46px; }
+  #board .alert-row { grid-template-columns: 50px 1fr; }
   #board .verdict-edge { color: var(--p-grn); }
   #board .verdict-anti { color: var(--p-red); }
   #board .verdict-neutral { color: var(--p-ylw); }

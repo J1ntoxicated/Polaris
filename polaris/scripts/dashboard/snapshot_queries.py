@@ -20,11 +20,17 @@ from polaris.scripts.dashboard.snapshot_models import (
 )
 
 DEFAULT_R_USD: Final[float] = 10.0          # 1 R = $10 (display heuristic)
-EQUITY_BUCKET_SEC: Final[int] = 5 * 60       # 5-min bucket, 288 buckets/24h
-EQUITY_LOOKBACK_SEC: Final[int] = 24 * 3600
+EQUITY_BUCKET_SEC: Final[int] = 5 * 60       # legacy 5-min bucket (24h fallback)
+EQUITY_LOOKBACK_SEC: Final[int] = 24 * 3600  # legacy 24h window (fallback only)
 GATE_FUNNEL_LOOKBACK_SEC: Final[int] = 3600
 GPT_LOOKBACK_SEC: Final[int] = 3600
 LEARNER_DELTA_LOOKBACK_SEC: Final[int] = 3600
+
+# Session-anchored curve config (Jin 2026-05-29): all PnL/DD/Sharpe lookbacks
+# start at the session anchor (clean restart → DB is the current session), not
+# a rolling 24h window. The session is split into N buckets, floor 60s each.
+EQUITY_TARGET_BUCKETS: Final[int] = 288      # target resolution across the session
+EQUITY_MIN_BUCKET_SEC: Final[int] = 60       # floor bucket size
 
 # GPT pricing (USD per 1K tokens) — gpt-5-mini & gpt-5.5 ballpark for projection.
 GPT_PRICE_PER_1K: Final[Mapping[str, float]] = {
@@ -53,6 +59,32 @@ def _now_s() -> int:
     return int(time.time())
 
 
+def _session_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
+    """Session anchor in ms = earliest fill in the DB (clean restart → the DB is
+    the current session). Falls back to ``now`` when no fills exist yet.
+
+    All session-scoped PnL/equity/DD/Sharpe lookbacks start here instead of a
+    rolling 24h window (Jin 2026-05-29).
+    """
+    rows = _safe_query(conn, "SELECT MIN(ts_ms) FROM fills")
+    if rows and rows[0][0] is not None:
+        return int(rows[0][0])
+    return now_s * 1000
+
+
+def _session_buckets(session_start_s: int, now_s: int) -> tuple[list[int], int]:
+    """Split [session_start, now] into bucket end-timestamps (s) + bucket size.
+
+    Session length is divided into ``EQUITY_TARGET_BUCKETS`` buckets, each at
+    least ``EQUITY_MIN_BUCKET_SEC`` wide. Returns (bucket_ts, bucket_sec).
+    """
+    span = max(1, now_s - session_start_s)
+    bucket_sec = max(EQUITY_MIN_BUCKET_SEC, span // EQUITY_TARGET_BUCKETS)
+    n_buckets = max(1, (span + bucket_sec - 1) // bucket_sec)
+    bucket_ts = [session_start_s + (i + 1) * bucket_sec for i in range(n_buckets)]
+    return bucket_ts, bucket_sec
+
+
 def _strategy_label(s: str | None) -> str:
     return (s or "?")[:18]
 
@@ -71,11 +103,17 @@ def _symbol_from_inst(inst: str | None) -> str:
 def _build_equity_curve(
     conn: sqlite3.Connection, *, now_s: int, starting_capital: float
 ) -> tuple[list[int], list[float], float]:
-    """Build 24h equity curve buckets from realised fills, NET of fees.
+    """Build the SESSION equity curve from realised fills, NET of fees.
 
     equity_t = starting_capital
                + Σ(pnl_usd for closed fills with ts<=t)
                − Σ(fee_usd for ALL fills with ts<=t)
+
+    Lookback starts at the session anchor (``MIN(fills.ts_ms)``) rather than a
+    rolling 24h window (Jin 2026-05-29). Since the bot runs on a clean-restart
+    DB, the whole DB is the current session, so there is no carry-in: ``base``
+    is simply ``starting_capital``. The session span is split into N buckets
+    (floor 60s).
 
     Fees hit on BOTH the open and close leg and are a real venue deduction
     (even on DEMO), so each fill contributes ``(pnl if close else 0) − fee``
@@ -83,7 +121,8 @@ def _build_equity_curve(
 
     Returns (bucket_ts list, equity list, total_realised).
     """
-    lookback_ms = (now_s - EQUITY_LOOKBACK_SEC) * 1000
+    session_start_ms = _session_start_ms(conn, now_s=now_s)
+    session_start_s = session_start_ms // 1000
     rows = _safe_query(
         conn,
         """SELECT ts_ms,
@@ -92,25 +131,14 @@ def _build_equity_curve(
            FROM fills
            WHERE ts_ms >= ?
            ORDER BY ts_ms ASC""",
-        (lookback_ms,),
+        (session_start_ms,),
     )
 
-    # Net realised (pnl − fees) outside the 24h window (carry-in starting point).
-    pre_rows = _safe_query(
-        conn,
-        """SELECT COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
-                  - COALESCE(SUM(fee_usd), 0.0)
-           FROM fills WHERE ts_ms < ?""",
-        (lookback_ms,),
-    )
-    base = starting_capital + (float(pre_rows[0][0]) if pre_rows else 0.0)
+    # Clean-restart DB = current session → no pre-session carry-in.
+    base = starting_capital
 
-    n_buckets = EQUITY_LOOKBACK_SEC // EQUITY_BUCKET_SEC
-    bucket_ts = [
-        now_s - EQUITY_LOOKBACK_SEC + (i + 1) * EQUITY_BUCKET_SEC
-        for i in range(n_buckets)
-    ]
-    equity = [base] * n_buckets
+    bucket_ts, _bucket_sec = _session_buckets(session_start_s, now_s)
+    equity = [base] * len(bucket_ts)
 
     if not rows:
         total_realised = base - starting_capital
@@ -164,12 +192,16 @@ def _drawdown_and_sharpe(
 def _daily_realised_pnl(
     conn: sqlite3.Connection, *, now_s: int
 ) -> tuple[float, int]:
-    """Realised PnL (NET of fees) & closed-trade count over last 24h.
+    """Realised PnL (NET of fees) & closed-trade count over the SESSION.
+
+    Lookback starts at the session anchor (``MIN(fills.ts_ms)``) instead of a
+    rolling 24h window (Jin 2026-05-29). The ``daily_pnl_usd`` field name is
+    kept for schema stability but now carries the session sum.
 
     Net = Σ(close pnl_usd) − Σ(fee_usd over ALL fills) in-window. Fees on both
     legs are real deductions (forensic 2026-05-29 P0 — were omitted).
     """
-    lookback_ms = (now_s - EQUITY_LOOKBACK_SEC) * 1000
+    lookback_ms = _session_start_ms(conn, now_s=now_s)
     rows = _safe_query(
         conn,
         """SELECT COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
@@ -349,7 +381,7 @@ def _strategy_stats(
     now_s: int,
     positions: list[PositionRow],
 ) -> list[StrategyStat]:
-    lookback_ms = (now_s - EQUITY_LOOKBACK_SEC) * 1000
+    lookback_ms = _session_start_ms(conn, now_s=now_s)
     rows = _safe_query(
         conn,
         """SELECT strategy_id,

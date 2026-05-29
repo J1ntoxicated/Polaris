@@ -223,7 +223,7 @@
 
     <div class="eq-wrap">
       <div class="eq-head">
-        <span class="h-title">Equity Curve (1H)</span>
+        <span class="h-title">Equity Curve (SESSION)</span>
         <span>min <span class="v" id="eq-min">—</span></span>
         <span>max <span class="v" id="eq-max">—</span></span>
         <span>Δ <span class="v" id="eq-delta">—</span></span>
@@ -244,7 +244,7 @@
 
     <div class="bottom-grid">
       <div class="panel"><div class="p-head"><span>Per-Strategy</span></div><div class="p-body mini" id="strat-body"></div></div>
-      <div class="panel"><div class="p-head"><span>Gate Funnel</span></div><div class="p-body mini" id="gate-body"></div></div>
+      <div class="panel" title="8-gate AI pipeline. pass% = signal survival rate at each stage.&#10;G1 Universe · G2 Strategy signal · G3 Validator (main cut) · G4 Pre-Entry · G5 Sizer · G6 Position Monitor · G7 Adaptive Exit · G8 Reflector"><div class="p-head"><span>Gate Funnel</span></div><div class="p-body mini" id="gate-body"></div></div>
       <div class="panel"><div class="p-head"><span>Cell Matrix</span></div><div class="p-body mini" id="cell-body"></div></div>
       <div class="panel"><div class="p-head"><span>Edge Validation</span></div><div class="p-body mini" id="edge-body"></div></div>
       <div class="panel"><div class="p-head"><span>Learners</span></div><div class="p-body mini" id="learn-body"></div></div>
@@ -270,10 +270,10 @@
     const expPct = d.equity_now ? (d.exposed_usd / d.equity_now) * 100 : 0;
 
     const cards = [
-      { k: 'Net PnL (today)', v: fmtUsd(d.daily_pnl_usd, 2), cls: pn(d.daily_pnl_usd), sub: (d.daily_trades || 0) + ' trades' },
+      { k: 'Net PnL (session)', v: fmtUsd(d.daily_pnl_usd, 2), cls: pn(d.daily_pnl_usd), sub: (d.daily_trades || 0) + ' trades' },
       { k: 'Equity', v: fmtUsd(d.equity_now, 0), cls: '', sub: 'start ' + fmtUsd(d.starting_capital, 0) },
       { k: 'Drawdown', v: '-' + fmtPct(d.drawdown_pct), cls: (d.drawdown_pct > 0 ? 'b-neg' : 'b-flat'), sub: 'peak ' + fmtUsd(d.peak_equity, 0) },
-      { k: 'Sharpe 24h', v: (d.sharpe_24h == null ? '—' : d.sharpe_24h.toFixed(2)), cls: pn(d.sharpe_24h), sub: '' },
+      { k: 'Sharpe (session)', v: (d.sharpe_24h == null ? '—' : d.sharpe_24h.toFixed(2)), cls: pn(d.sharpe_24h), sub: '' },
       { k: 'Win Rate', v: (wr == null ? '—' : fmtPct(wr, 1)), cls: '', sub: cn + ' closed' },
       { k: 'Exposure', v: fmtUsd(d.exposed_usd, 0), cls: '', sub: fmtPct(expPct, 1) + ' of eq · ' + (d.open_positions_n || 0) + ' pos' },
       { k: 'uPnL', v: fmtUsd(d.upnl_total, 2), cls: pn(d.upnl_total), sub: '' },
@@ -286,19 +286,9 @@
 
   function renderEquity(d) {
     const svg = $('eq-svg');
-    let curve = d.equity_curve || [];
-    const ts = d.equity_curve_ts || [];
-    // Frontend-only 1h slice: keep last 3600s by timestamp. Does NOT touch server/daily PnL/DD/Sharpe.
-    if (ts.length === curve.length && curve.length > 1) {
-      const ref = (d.ts_now || ts[ts.length - 1]);
-      const cutoff = ref - 3600;
-      let start = 0;
-      for (let i = curve.length - 1; i >= 0; i--) {
-        if (ts[i] < cutoff) { start = i + 1; break; }
-      }
-      if (start > 0 && start < curve.length) curve = curve.slice(start);
-      // if <1h of data, start stays 0 → show all available
-    }
+    // Server now delivers the full SESSION curve (session anchor → now), so use
+    // it whole — no frontend slicing (Jin 2026-05-29).
+    const curve = d.equity_curve || [];
     if (curve.length < 2) { svg.innerHTML = ''; return; }
     const W = 600, H = 84, pad = 2;
     const min = Math.min(...curve), max = Math.max(...curve);
@@ -392,22 +382,44 @@
       </div>`).join('');
   }
 
+  // 8-gate AI pipeline descriptions (hover tooltip). pass% = survival rate of
+  // signals through that stage.
+  const GATE_DESC = {
+    1: 'G1 Universe — tradable-universe scan',
+    2: 'G2 Strategy signal — raw signal generation',
+    3: 'G3 Validator — main cut (signal validation)',
+    4: 'G4 Pre-Entry — pre-entry watcher',
+    5: 'G5 Sizer — entry sizing',
+    6: 'G6 Position Monitor — open-position monitoring',
+    7: 'G7 Adaptive Exit — exit decision',
+    8: 'G8 Reflector — post-trade reflection',
+  };
+
   function renderGates(d) {
     const rows = d.gate_funnel || [];
     if (!rows.length) { $('gate-body').innerHTML = '<div class="empty">—</div>'; return; }
-    $('gate-body').innerHTML = rows.map(g => `
-      <div class="row gate-row" title="${esc(g.label)} pass ${g.pass_n}/${g.total}">
+    $('gate-body').innerHTML = rows.map(g => {
+      const desc = GATE_DESC[g.gate_id] || (esc(g.label));
+      const tip = `${desc}\npass ${g.pass_n}/${g.total} (${(g.pass_rate || 0).toFixed(0)}%) — signal survival rate at this stage`;
+      return `
+      <div class="row gate-row" title="${esc(tip)}">
         <span class="gid">G${g.gate_id}</span>
         <span class="gate-bar"><i style="width:${Math.max(0, Math.min(100, g.pass_rate || 0)).toFixed(0)}%"></i></span>
         <span class="pct b-flat">${(g.pass_rate || 0).toFixed(0)}%</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 
   function renderCells(d) {
     const top = (d.cell_top || []).map(c => ({ ...c, side: 'top' }));
     const bot = (d.cell_bottom || []).map(c => ({ ...c, side: 'bot' }));
     const rows = top.concat(bot);
-    if (!rows.length) { $('cell-body').innerHTML = '<div class="empty">—</div>'; return; }
+    if (!rows.length) {
+      // Both top & bottom empty → cells still warming up (need n≥20 samples).
+      $('cell-body').innerHTML =
+        '<div class="empty">cold start · building<br><span class="b-flat">(need n≥20 samples)</span></div>';
+      return;
+    }
     $('cell-body').innerHTML = rows.map(c => {
       const cls = c.score > 0 ? 'b-pos' : c.score < 0 ? 'b-neg' : 'b-flat';
       return `<div class="row cell-row" title="${esc(c.exchange)}/${esc(c.strategy)}/${esc(c.regime)} n=${(c.n_eff||0).toFixed(0)}">

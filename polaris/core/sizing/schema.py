@@ -145,6 +145,15 @@ def cluster_xau_indices_pct() -> float:
 def cluster_fx_majors_pct() -> float:
     return _cap_env("POLARIS_CAP_CLUSTER_FX_MAJORS_PCT", CLUSTER_FX_MAJORS_PCT)
 
+
+def target_vol() -> float:
+    """Target per-period realized vol for the vol-targeted scalar.
+
+    Env: ``POLARIS_TARGET_VOL``. Non-numeric / missing / non-positive → default.
+    """
+    v = _cap_env("POLARIS_TARGET_VOL", DEFAULT_TARGET_VOL)
+    return v if v > 0.0 else DEFAULT_TARGET_VOL
+
 # Tier amplifier triggers
 TIER_3WIN_AMP: Final[float] = 1.5
 TIER_5WIN_AMP: Final[float] = 2.0
@@ -171,6 +180,20 @@ FILL_RATE_RESUME_THRESHOLD: Final[float] = 0.60
 # Continuous scalar bounds (ADR-005 T4)
 CONT_SCALAR_MIN: Final[float] = 0.75
 CONT_SCALAR_MAX: Final[float] = 1.50
+
+# Vol-targeting (T4 single scalar made vol-aware — #8).
+# The continuous scalar can be derived from realized volatility via inverse
+# weighting ``target_vol / realized_vol`` (ex-ante / past-only — no look-ahead),
+# clipped to the SAME [CONT_SCALAR_MIN, CONT_SCALAR_MAX] band. This replaces the
+# one scalar with a vol-aware value; it does NOT add a multiplier to the chain
+# (9-stack ban preserved). High realized vol → smaller scalar; low → larger.
+DEFAULT_TARGET_VOL: Final[float] = 0.02
+"""Target per-period realized vol the scalar normalises toward (env:
+``POLARIS_TARGET_VOL``). When realized == target the scalar is 1.0 (neutral)."""
+
+EWMA_VOL_LAMBDA: Final[float] = 0.94
+"""EWMA decay for realized-vol estimate (RiskMetrics-style). Recent returns
+weighted more; ``vol = sqrt(EWMA of squared returns around zero)``."""
 
 # Default base risk (% of equity) when caller didn't specify.
 DEFAULT_BASE_RISK_PCT: Final[float] = 0.02

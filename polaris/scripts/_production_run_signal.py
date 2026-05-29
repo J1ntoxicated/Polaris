@@ -36,6 +36,7 @@ from polaris.core.pipeline.gate_state import (
     SignalLifecycle,
 )
 from polaris.core.sizing.constants import production_default_equity_usd
+from polaris.core.streams import resolve_stream
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.strategies import BaseStrategy, RawSignal
 
@@ -44,6 +45,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Retained as the SSOT-drift anchor: B_capital_cfd's StreamConfig leverage is
+# pinned to this value by test_stream_config. Runtime leverage now comes from
+# resolve_stream(venue).sizing_profile.leverage (design §2.1).
 CFD_LEVERAGE_DEFAULT = 30.0
 
 
@@ -120,8 +124,12 @@ async def run_pipeline_for_signal(
     Day 8 spec E: G6/G7 use real ``unrealized_pnl_r``; G8 fires on close.
     """
     instrument_id = f"{venue}:{symbol}"
-    track: Any = "A" if venue == "okx" else "B"
-    leverage = 1.0 if venue == "okx" else CFD_LEVERAGE_DEFAULT
+    # Stream SSOT lookup (design §2.1) replaces the venue-binary track/leverage
+    # branches. Values are identical to the prior literals: A_okx_crypto→track A
+    # / leverage 1.0, B_capital_cfd→track B / leverage 30.0 (== CFD_LEVERAGE_DEFAULT).
+    stream = resolve_stream(venue)
+    track: Any = stream.track
+    leverage = stream.sizing_profile.leverage
     equity_usd = production_default_equity_usd()
 
     # Day 8 codex P1 fix: read spread/listing/recent-reject from real state

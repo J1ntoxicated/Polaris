@@ -44,6 +44,7 @@ from polaris.core.pipeline.gate_state import (
     GateContext,
     SignalLifecycle,
 )
+from polaris.core.streams import resolve_stream
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 if TYPE_CHECKING:
@@ -94,7 +95,9 @@ def _safe_update_cell_matrix(
                     ticker=trade.symbol, regime=regime,
                 ),
                 context=CellContext(
-                    group="spot" if trade.venue == "okx" else "cfd",
+                    # Stream SSOT (design §2.1): okx→spot, capital→cfd, identical
+                    # to the prior venue-binary literal.
+                    group=resolve_stream(trade.venue).product_class,
                     session="asia", direction=trade.side,
                     liquidity_tier="top",
                 ),

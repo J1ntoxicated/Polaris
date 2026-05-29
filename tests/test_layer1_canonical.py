@@ -57,6 +57,34 @@ def test_compute_underlying_group_id_forex() -> None:
     assert compute_underlying_group_id("capital", "EURUSD", "forex") == "forex:EURUSD"
 
 
+def test_compute_underlying_group_id_equity() -> None:
+    # Explicit equity branch (stream C prep). Symbol upper-cased like other branches.
+    assert compute_underlying_group_id("alpaca", "SPY", "equity") == "equity:SPY"
+    assert compute_underlying_group_id("alpaca", "aapl", "equity") == "equity:AAPL"
+
+
+def test_compute_underlying_group_id_equity_behavior_unchanged() -> None:
+    # The explicit equity branch must equal the prior generic-fallback output.
+    assert compute_underlying_group_id("alpaca", "SPY", "equity") == "equity:SPY"
+
+
+def test_compute_underlying_group_id_crypto_forex_regression() -> None:
+    # Crypto/forex/index/commodity outputs are unchanged by the equity branch.
+    assert compute_underlying_group_id("okx", "ETH-USDT", "crypto") == "crypto:ETH"
+    assert compute_underlying_group_id("capital", "ETHUSD", "crypto") == "crypto:ETH"
+    assert compute_underlying_group_id("capital", "GBPUSD", "fx") == "forex:GBPUSD"
+    assert compute_underlying_group_id("capital", "US500", "index") == "index:US500"
+    assert compute_underlying_group_id("capital", "XAUUSD", "commodity") == "commodity:XAUUSD"
+
+
+def test_atr_floor_by_class_equity_key() -> None:
+    from polaris.core.universe.schema import ATR_FLOOR_BY_CLASS
+
+    assert ATR_FLOOR_BY_CLASS["equity"] == 1.0
+    # Crypto floor unchanged (regression).
+    assert ATR_FLOOR_BY_CLASS["crypto"] == 2.0
+
+
 def test_okx_ticker_to_quote_tick_basic() -> None:
     payload = {
         "instId": "BTC-USDT",

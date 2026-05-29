@@ -43,6 +43,11 @@ class StrategyMetadata:
     asset_class: str  # "spot" / "fx" / "index" / "commodity"
     venue: str  # "okx" / "capital"
     correlation_group_id: str
+    # product_class is the venue's instrument family (spot | cfd | equity). It
+    # is the 1st-class routing dimension the StreamConfig SSOT keys on. Defaults
+    # to "" so existing constructors stay source-compatible; ``asset_class`` is
+    # preserved unchanged (it currently doubles as product_class — design §2.2).
+    product_class: str = ""
 
 
 @dataclass(frozen=True, slots=True)

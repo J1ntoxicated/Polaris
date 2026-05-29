@@ -63,6 +63,7 @@ from polaris.core.sizing.schema import (
 )
 from polaris.core.sizing.session import derive_session
 from polaris.core.sizing.vol_target import ewma_realized_vol, vol_targeted_scalar
+from polaris.core.streams import resolve_stream
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,12 @@ class SignalIntent:
     # Ex-ante (past-only) realized vol → vol-targeted scalar; None → legacy
     # strength ramp. Never a forward/look-ahead value. See vol_target.py.
     realized_vol: float | None = None
+    # Stream routing dimensions (design §2.2). Default "" so existing callers
+    # stay source-compatible; they carry the resolved StreamConfig identity
+    # alongside the legacy ``venue``/``track`` fields — purely descriptive, not
+    # a sizing multiplier (9-stack chain untouched).
+    product_class: str = ""
+    stream_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +162,20 @@ def listing_watchdog_mult(listing_age_hours: float) -> float:
 
 
 def venue_per_symbol_cap(venue: str) -> float:
-    """Per-symbol % cap for the venue (env-overridable; high default)."""
-    v = (venue or "").lower()
-    if v == "capital":
+    """Per-symbol % cap for the venue (env-overridable; high default).
+
+    The spot/cfd decision now routes through the StreamConfig SSOT
+    (``product_class``) instead of a venue literal, but the cap *value* is still
+    read live from the env-aware ``per_symbol_*_pct`` knobs (POLARIS_CAP_*) — the
+    registry holds no cached cap. Behavior is identical: capital→cfd cap, every
+    other (incl. unknown) venue→spot cap (resolve_stream KeyError → spot
+    fallback preserves the prior default branch).
+    """
+    try:
+        product_class = resolve_stream(venue).product_class
+    except KeyError:
+        product_class = "spot"
+    if product_class == "cfd":
         return per_symbol_cfd_pct()
     return per_symbol_spot_pct()
 

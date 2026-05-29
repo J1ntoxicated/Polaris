@@ -242,6 +242,50 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
             "ALTER TABLE position_strategy_segments "
             "ADD COLUMN attribution_weight REAL NOT NULL DEFAULT 0.0"
         )
+    # universe / positions: product_class + stream_id — added 3-stream
+    # architecture P0-1 (stream_architecture_redesign §2.3). ADDITIVE only:
+    # all rows backfilled to '' default; venue→product_class/stream_id mapping
+    # repaired below. SQLite has no ``ADD COLUMN IF NOT EXISTS`` so a
+    # pragma table_info guard makes the ALTER idempotent.
+    uni_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(universe)").fetchall()
+    }
+    if uni_cols and "product_class" not in uni_cols:
+        conn.execute(
+            "ALTER TABLE universe ADD COLUMN product_class TEXT NOT NULL DEFAULT ''"
+        )
+    if uni_cols and "stream_id" not in uni_cols:
+        conn.execute(
+            "ALTER TABLE universe ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "product_class" not in cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN product_class TEXT NOT NULL DEFAULT ''"
+        )
+    if "stream_id" not in cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''"
+        )
+    # Backfill venue→product_class/stream_id for legacy rows left at ''.
+    # okx→spot/A_okx_crypto, capital→cfd/B_capital_cfd. Runs unconditionally
+    # (idempotent: WHERE clause only touches still-blank rows).
+    for table in ("universe", "positions"):
+        conn.execute(
+            f"UPDATE {table} SET product_class = 'spot' "
+            f"WHERE product_class = '' AND venue = 'okx'"
+        )
+        conn.execute(
+            f"UPDATE {table} SET product_class = 'cfd' "
+            f"WHERE product_class = '' AND venue = 'capital'"
+        )
+        conn.execute(
+            f"UPDATE {table} SET stream_id = 'A_okx_crypto' "
+            f"WHERE stream_id = '' AND venue = 'okx'"
+        )
+        conn.execute(
+            f"UPDATE {table} SET stream_id = 'B_capital_cfd' "
+            f"WHERE stream_id = '' AND venue = 'capital'"
+        )
     # learner_posterior.running_mean — edge-validation P0-1 fix: persist the
     # Welford running mean so an existing cell folds the next observation into
     # its own accumulated NIG state without re-mixing the parent prior. DBs

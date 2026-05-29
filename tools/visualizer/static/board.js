@@ -172,6 +172,26 @@
   #board .lvl-ERROR, #board .lvl-CRITICAL { color: var(--p-red); font-weight: 700; }
   #board .lvl-WARN, #board .lvl-WARNING { color: var(--p-ylw); }
   #board .lvl-INFO { color: var(--p-cyn); }
+
+  /* Stream lanes (T15 stage-1) — client-side group-by venue→stream. Display-only.
+     Tokens match sphere-render EXCHANGE_COLOR hex (venue is already a 1st-class
+     encoding on the globe). A=okx B=capital C=alpaca. */
+  #board { --stream-a: #5fdfff; --stream-b: #a87cff; --stream-c: #ffc84f; }
+  #board td.lane-head {
+    padding: 2px 7px 2px 6px; border-left: 4px solid var(--ghost);
+    border-bottom: 1px solid var(--ghost);
+    font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--p-dim); background: rgba(15,19,26,0.55);
+  }
+  #board td.lane-head .ln-cnt { color: var(--p-gry); letter-spacing: 0; font-weight: 400; margin-left: 5px; }
+  #board td.lane-head.lane-a { border-left-color: var(--stream-a); color: var(--stream-a); }
+  #board td.lane-head.lane-b { border-left-color: var(--stream-b); color: var(--stream-b); }
+  #board td.lane-head.lane-c { border-left-color: var(--stream-c); color: var(--stream-c); }
+  #board tbody tr.row-a td:first-child { border-left: 3px solid var(--stream-a); }
+  #board tbody tr.row-b td:first-child { border-left: 3px solid var(--stream-b); }
+  #board tbody tr.row-c td:first-child { border-left: 3px solid var(--stream-c); }
+  #board tbody tr.row-x td:first-child { border-left: 3px solid var(--ghost); }
   `;
 
   function injectStyle() {
@@ -206,6 +226,22 @@
   function hhmmss(epoch) {
     const d = new Date(epoch * 1000);
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  }
+
+  // ── Stream lanes (T15 stage-1) ────────────────────────────────────
+  // Client-side venue→stream group-by. A=okx B=capital C=alpaca. Display-only —
+  // no snapshot/server change (stage-2 adds server-side StreamSummary).
+  const VENUE_TO_STREAM = { okx: 'A', capital: 'B', alpaca: 'C' };
+  const STREAM_ORDER = ['A', 'B', 'C', 'X'];          // X = unknown venue (lane tail)
+  const STREAM_LABEL = { A: 'Stream A · OKX', B: 'Stream B · Capital', C: 'Stream C · Alpaca', X: 'Other' };
+  function venueStream(venue) {
+    return VENUE_TO_STREAM[String(venue || '').toLowerCase()] || 'X';
+  }
+  // Group rows by stream into lanes, preserving STREAM_ORDER and within-stream order.
+  function laneGroups(rows) {
+    const by = {};
+    rows.forEach(r => { const s = venueStream(r.venue); (by[s] = by[s] || []).push(r); });
+    return STREAM_ORDER.filter(s => by[s] && by[s].length).map(s => ({ stream: s, rows: by[s] }));
   }
 
   // ── one-time skeleton ─────────────────────────────────────────────
@@ -322,19 +358,25 @@
     const rows = d.positions || [];
     $('pos-cnt').textContent = rows.length;
     if (!rows.length) { $('pos-body').innerHTML = '<div class="empty">no open positions</div>'; return; }
-    const body = rows.map(p => {
-      const rc = (p.row_count > 1) ? ` <span class="b-flat">×${p.row_count}</span>` : '';
-      return `<tr>
-        <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
-        <td class="l tk" title="${esc(p.symbol)}${p.row_count>1?' ×'+p.row_count:''}">${esc(p.symbol)}${rc}</td>
-        <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
-        <td class="dir ${esc(p.side)}">${esc(p.side)}</td>
-        <td class="num">${fmtUsd(p.size_usd, 0)}</td>
-        <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
-        <td class="num ${pn(p.delta_pct)}">${(p.delta_pct >= 0 ? '+' : '') + (p.delta_pct || 0).toFixed(2)}%</td>
-        <td class="num b-flat">${hms(p.held_sec)}</td>
-        <td class="num b-flat">${(p.cell_mult || 1).toFixed(2)}×</td>
-      </tr>`;
+    const COLS = 9;
+    const body = laneGroups(rows).map(g => {
+      const s = g.stream, lc = s.toLowerCase();
+      const head = `<tr><td colspan="${COLS}" class="lane-head lane-${lc}">${esc(STREAM_LABEL[s])}<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
+      const trs = g.rows.map(p => {
+        const rc = (p.row_count > 1) ? ` <span class="b-flat">×${p.row_count}</span>` : '';
+        return `<tr class="row-${lc}">
+          <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
+          <td class="l tk" title="${esc(p.symbol)}${p.row_count>1?' ×'+p.row_count:''}">${esc(p.symbol)}${rc}</td>
+          <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
+          <td class="dir ${esc(p.side)}">${esc(p.side)}</td>
+          <td class="num">${fmtUsd(p.size_usd, 0)}</td>
+          <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
+          <td class="num ${pn(p.delta_pct)}">${(p.delta_pct >= 0 ? '+' : '') + (p.delta_pct || 0).toFixed(2)}%</td>
+          <td class="num b-flat">${hms(p.held_sec)}</td>
+          <td class="num b-flat">${(p.cell_mult || 1).toFixed(2)}×</td>
+        </tr>`;
+      }).join('');
+      return head + trs;
     }).join('');
     $('pos-body').innerHTML =
       `<table class="tbl-pos"><colgroup>
@@ -350,16 +392,22 @@
     const rows = (d.recent_trades || []).slice(0, 10);
     $('trd-cnt').textContent = rows.length;
     if (!rows.length) { $('trd-body').innerHTML = '<div class="empty">no recent trades</div>'; return; }
-    const body = rows.map(t => `<tr>
-        <td class="l b-flat">${hhmmss(t.ts_close)}</td>
-        <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
-        <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
-        <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
-        <td class="dir ${esc(t.side_close)}">${esc(t.side_close)}</td>
-        <td class="num ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 2)}</td>
-        <td class="num ${pn(t.r_units)}">${(t.r_units >= 0 ? '+' : '') + (t.r_units || 0).toFixed(2)}R</td>
-        <td class="l b-flat" title="${esc(t.exit_reason)}">${esc(t.exit_reason)}</td>
-      </tr>`).join('');
+    const COLS = 8;
+    const body = laneGroups(rows).map(g => {
+      const s = g.stream, lc = s.toLowerCase();
+      const head = `<tr><td colspan="${COLS}" class="lane-head lane-${lc}">${esc(STREAM_LABEL[s])}<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
+      const trs = g.rows.map(t => `<tr class="row-${lc}">
+          <td class="l b-flat">${hhmmss(t.ts_close)}</td>
+          <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
+          <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
+          <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
+          <td class="dir ${esc(t.side_close)}">${esc(t.side_close)}</td>
+          <td class="num ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 2)}</td>
+          <td class="num ${pn(t.r_units)}">${(t.r_units >= 0 ? '+' : '') + (t.r_units || 0).toFixed(2)}R</td>
+          <td class="l b-flat" title="${esc(t.exit_reason)}">${esc(t.exit_reason)}</td>
+        </tr>`).join('');
+      return head + trs;
+    }).join('');
     $('trd-body').innerHTML =
       `<table class="tbl-trd"><colgroup>
         <col class="c-time"><col class="c-ven"><col class="c-sym"><col class="c-str">

@@ -42,6 +42,7 @@ from polaris.core.isolation.order_keys import (
     register_order_intent,
 )
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
+from polaris.core.streams import resolve_stream
 from polaris.scripts._production_run_signal import run_pipeline_for_signal
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
 from polaris.scripts._smoke_real_roundtrip import (
@@ -85,10 +86,9 @@ EXTERNAL_NONFAULT_REJECT_CODES: frozenset[str] = frozenset(
 # OKX compliance reject → permanent blocklist (never auto-clears). Balance /
 # no-fill codes are transient and are NOT blocklisted.
 COMPLIANCE_REJECT_CODES: frozenset[str] = frozenset({"51155"})
-# Capital external (non-fault) reject statuses: market closed / not tradeable.
-CAPITAL_EXTERNAL_REJECT_CODES: frozenset[str] = frozenset(
-    {"MARKET_CLOSED", "MARKET_OFFLINE", "INSTRUMENT_NOT_TRADEABLE", "REJECTED"}
-)
+# Capital's venue-specific external (non-fault) reject statuses now live in the
+# StreamConfig SSOT (B_capital_cfd.external_reject_codes); _is_external_reject
+# reads them via resolve_stream (design §2.1).
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,10 @@ async def _real_open_fill(
     construct one from the ``OKX_DEMO_*`` env (real network). Capital always
     needs the loop-owned ``capital_session``.
     """
-    if venue == "okx":
+    # Stream SSOT (design §2.1): the adapter-dispatch decision routes on the
+    # resolved product_class (okx→spot, capital→cfd) instead of a venue literal.
+    # Identical dispatch; per-venue bodies (creds / session) are unchanged.
+    if resolve_stream(venue).product_class == "spot":
         if okx_adapter is not None:
             return await real_okx_open_fill(
                 okx_adapter, inst_id=symbol, notional_usd=notional_usd,
@@ -167,7 +170,15 @@ def _is_external_reject(venue: str, reject_code: str | None) -> bool:
         return True
     if reject_code in EXTERNAL_NONFAULT_REJECT_CODES:
         return True
-    return venue == "capital" and reject_code in CAPITAL_EXTERNAL_REJECT_CODES
+    # Stream SSOT (design §2.1): venue-specific external codes come from the
+    # resolved stream's external_reject_codes (A=∅, B=Capital's 4 statuses) —
+    # identical to the prior `venue == "capital" and code in <capital set>`.
+    # Unknown venue → no stream → not external (matches the prior False branch).
+    try:
+        stream_codes = resolve_stream(venue).external_reject_codes
+    except KeyError:
+        return False
+    return reject_code in stream_codes
 
 
 async def _handle_open_reject(
@@ -350,7 +361,9 @@ async def reserve_and_submit(
         # (which differs from the top-level confirm dealId); persist it as the
         # fill ``order_id`` so hydration recovers it. OKX closes by base_qty,
         # so its order_id is left as the OKX ``ordId``.
-        if venue == "capital" and deal_id:
+        # Stream SSOT (design §2.1): cfd product (capital) closes by deal_id;
+        # spot (okx) closes by base_qty. Routes on product_class — identical.
+        if resolve_stream(venue).product_class == "cfd" and deal_id:
             fill = replace(fill, order_id=deal_id)
         trade = SimulatedTrade(
             signal_id=sig.signal_id, venue=venue, symbol=symbol,

@@ -43,6 +43,7 @@ ATR_FLOOR_BY_CLASS: Final[dict[str, float]] = {
     "forex": 0.3,
     "indices": 0.4,
     "commodity": 0.5,
+    "equity": 1.0,
     "other": 0.5,
 }
 

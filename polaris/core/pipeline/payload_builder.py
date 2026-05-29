@@ -25,6 +25,10 @@ Builder responsibilities (per spec):
       widen_proposal { side, current/proposed_stop_price, entry_price,
                        unrealized_pnl_r, max_loss_r, overrides_used,
                        seconds_since_last_override, initial_stop_price }
+      + optional exit_context { regime, atr_pct, atr_slope, volume_z,
+                       held_seconds, mfe_r, mae_r, exit_state, peak_price,
+                       recent_close_first/last/n } — #26 display/context only,
+                       surfaced to G7 for precise time/momentum/regime exits.
 
 Pure functions. No I/O. Callers (smoke, ignite, tests) compose them
 sequentially: each payload is layered into ``GateContext.payload`` so the
@@ -338,12 +342,34 @@ def build_exit_payload(
     overrides_used: int = 0,
     seconds_since_last_override: int = 31,
     initial_stop_price: float | None = None,
+    regime: str | None = None,
+    atr_pct: float | None = None,
+    atr_slope: float | None = None,
+    volume_z: float | None = None,
+    held_seconds: int | None = None,
+    mfe_r: float | None = None,
+    mae_r: float | None = None,
+    exit_state: str | None = None,
+    peak_price: float | None = None,
+    recent_closes: list[float] | None = None,
 ) -> dict[str, Any]:
-    """Compose G7 widen proposal payload.
+    """Compose G7 widen proposal payload (+ optional precise-exit context).
 
     ``seconds_since_last_override`` defaults above the 30 s cooldown so the
     first call after entry is eligible (matches L2 spec Q9). Caller sets
     smaller values to test cooldown enforcement.
+
+    #26 (precise exits) DISPLAY/CONTEXT enrichment: the optional ``regime``,
+    ``atr_pct``, ``atr_slope``, ``volume_z``, ``held_seconds``, ``mfe_r``,
+    ``mae_r``, ``exit_state``, ``peak_price`` and ``recent_closes`` arguments
+    are folded into an ``exit_context`` block so G7 can reason about time /
+    momentum / regime / excursion before HOLD/WIDEN/TIGHTEN/EXIT_NOW. This is
+    **context surfaced to the model only** — the gate's decision rails read
+    ``widen_proposal`` exactly as before (Q9 floor-only widening unchanged, no
+    sizing touched, no entry blocked, no P&L halt). When no context arg is
+    supplied the returned payload is byte-identical to the pre-enrichment shape
+    (``widen_proposal`` + ``current_stop_price`` only) — behaviour-identity for
+    every existing caller.
     """
     proposal: dict[str, Any] = {
         "side": str(side),
@@ -357,10 +383,37 @@ def build_exit_payload(
     }
     if initial_stop_price is not None:
         proposal["initial_stop_price"] = float(initial_stop_price)
-    return {
+    payload: dict[str, Any] = {
         "widen_proposal": proposal,
         "current_stop_price": float(current_stop_price),
     }
+    exit_context: dict[str, Any] = {}
+    if regime is not None:
+        exit_context["regime"] = str(regime)
+    if atr_pct is not None:
+        exit_context["atr_pct"] = float(atr_pct)
+    if atr_slope is not None:
+        exit_context["atr_slope"] = float(atr_slope)
+    if volume_z is not None:
+        exit_context["volume_z"] = float(volume_z)
+    if held_seconds is not None:
+        exit_context["held_seconds"] = int(held_seconds)
+    if mfe_r is not None:
+        exit_context["mfe_r"] = float(mfe_r)
+    if mae_r is not None:
+        exit_context["mae_r"] = float(mae_r)
+    if exit_state is not None:
+        exit_context["exit_state"] = str(exit_state)
+    if peak_price is not None:
+        exit_context["peak_price"] = float(peak_price)
+    if recent_closes:
+        closes = [float(c) for c in recent_closes]
+        exit_context["recent_close_first"] = closes[0]
+        exit_context["recent_close_last"] = closes[-1]
+        exit_context["recent_close_n"] = len(closes)
+    if exit_context:
+        payload["exit_context"] = exit_context
+    return payload
 
 
 # ---------------------------------------------------------------------------

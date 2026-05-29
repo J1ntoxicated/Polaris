@@ -424,6 +424,73 @@ def test_build_exit_payload_passes_initial_stop() -> None:
     assert p["widen_proposal"]["seconds_since_last_override"] == 31
 
 
+def test_build_exit_payload_omits_exit_context_when_no_context() -> None:
+    """#26 G7 enrichment: with no context kwargs the payload is the pre-enrich
+    shape (widen_proposal + current_stop_price only) — behaviour-identity."""
+    p = build_exit_payload(
+        side="long", current_stop_price=80.0, proposed_stop_price=78.0,
+        entry_price=85.0, unrealized_pnl_r=0.9, max_loss_r=1.0,
+    )
+    assert set(p) == {"widen_proposal", "current_stop_price"}
+    assert "exit_context" not in p
+
+
+def test_build_exit_payload_folds_rich_context() -> None:
+    """#26 G7 enrichment: regime/ATR trajectory/MFE-MAE/exit_state/peak +
+    recent close summary are folded into an exit_context block. The widen
+    proposal (Q9 rail inputs) is left untouched."""
+    p = build_exit_payload(
+        side="long", current_stop_price=80.0, proposed_stop_price=78.0,
+        entry_price=85.0, unrealized_pnl_r=1.3, max_loss_r=1.0,
+        initial_stop_price=75.0,
+        regime="bull_trend",
+        atr_pct=0.006,
+        atr_slope=0.0012,
+        volume_z=2.1,
+        held_seconds=420,
+        mfe_r=1.8,
+        mae_r=-0.4,
+        exit_state="protect",
+        peak_price=88.0,
+        recent_closes=[85.0, 86.0, 87.0, 88.0, 86.5],
+    )
+    # Widen proposal (Q9 rail inputs) unchanged.
+    assert p["widen_proposal"]["proposed_stop_price"] == 78.0
+    assert p["widen_proposal"]["unrealized_pnl_r"] == 1.3
+    assert p["current_stop_price"] == 80.0
+    ctx = p["exit_context"]
+    assert ctx["regime"] == "bull_trend"
+    assert ctx["atr_pct"] == 0.006
+    assert ctx["atr_slope"] == 0.0012
+    assert ctx["volume_z"] == 2.1
+    assert ctx["held_seconds"] == 420
+    assert ctx["mfe_r"] == 1.8
+    assert ctx["mae_r"] == -0.4
+    assert ctx["exit_state"] == "protect"
+    assert ctx["peak_price"] == 88.0
+    # Recent close summary: first/last + count (compact, not the raw list).
+    assert ctx["recent_close_first"] == 85.0
+    assert ctx["recent_close_last"] == 86.5
+    assert ctx["recent_close_n"] == 5
+
+
+def test_build_exit_payload_partial_context_only_includes_supplied() -> None:
+    """Only the supplied context fields appear — partial enrichment is safe."""
+    p = build_exit_payload(
+        side="short", current_stop_price=81.0, proposed_stop_price=82.0,
+        entry_price=80.0, unrealized_pnl_r=1.1, max_loss_r=1.0,
+        regime="high_vol",
+        mfe_r=1.2,
+    )
+    ctx = p["exit_context"]
+    assert ctx["regime"] == "high_vol"
+    assert ctx["mfe_r"] == 1.2
+    # Unsupplied numeric/text context keys are absent (no noisy zeros).
+    assert "atr_slope" not in ctx
+    assert "exit_state" not in ctx
+    assert "recent_close_first" not in ctx
+
+
 @pytest.mark.asyncio
 async def test_g6_to_g7_chain_widening_allowed() -> None:
     """G7 with above-window pnl + valid widening -> ADJUST_EXIT."""

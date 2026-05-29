@@ -21,6 +21,11 @@ from polaris.core.live_recalc.conviction import (
     compute_stack_size_mult,
     count_layers,
 )
+from polaris.core.live_recalc.excursion import (
+    compute_excursion_r,
+    compute_mae_r,
+    compute_mfe_r,
+)
 from polaris.core.live_recalc.regime_flip import (
     REGIME_FLIP_CONFIRM_CLOSES,
     REGIME_VALUES,
@@ -73,6 +78,9 @@ __all__ = [
     "SwapDecision",
     "can_stack_conviction",
     "classify_regime",
+    "compute_excursion_r",
+    "compute_mae_r",
+    "compute_mfe_r",
     "compute_stack_size_mult",
     "count_layers",
     "detect_regime_flip",

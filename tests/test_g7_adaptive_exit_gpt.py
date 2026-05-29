@@ -71,11 +71,13 @@ def _make_proposal(
     }
 
 
-def _ctx(proposal: dict | None) -> GateContext:
+def _ctx(proposal: dict | None, exit_context: dict | None = None) -> GateContext:
     payload: dict = {}
     if proposal is not None:
         payload["widen_proposal"] = proposal
         payload["current_stop_price"] = proposal["current_stop_price"]
+    if exit_context is not None:
+        payload["exit_context"] = exit_context
     return GateContext(
         run_id=uuid.uuid4().hex,
         signal_id="sig-test",
@@ -203,3 +205,83 @@ async def test_g7_short_widen_direction() -> None:
     result = await adaptive_exit_gate(_ctx(proposal), client=haiku)
     assert result.decision == GateDecision.ADJUST_EXIT
     assert result.payload.get("widening_applied") is True
+
+
+# ---------------------------------------------------------------------------
+# #26 — rich-context enrichment surfaced in the G7 prompt
+# ---------------------------------------------------------------------------
+
+_RICH_EXIT_CONTEXT = {
+    "regime": "bull_trend",
+    "atr_pct": 0.006,
+    "atr_slope": 0.0012,
+    "volume_z": 2.1,
+    "held_seconds": 420,
+    "mfe_r": 1.8,
+    "mae_r": -0.4,
+    "exit_state": "protect",
+    "peak_price": 88_500.0,
+    "recent_close_first": 80_000.0,
+    "recent_close_last": 84_500.0,
+    "recent_close_n": 12,
+}
+
+
+async def test_g7_prompt_surfaces_rich_context() -> None:
+    """When exit_context is present the user prompt names regime, MFE/MAE,
+    exit_state, ATR trajectory, and recent price action so G7 can make a
+    time/momentum/regime-aware decision instead of a HOLD-stamp."""
+    haiku = _MockGPTClient(response_text='{"decision":"HOLD","reason":"x"}')
+    await adaptive_exit_gate(
+        _ctx(_make_proposal(), exit_context=_RICH_EXIT_CONTEXT), client=haiku,
+    )
+    user_text = haiku.calls[0]["messages"][0]["content"]
+    assert "bull_trend" in user_text          # regime
+    assert "MFE" in user_text                  # excursion label
+    assert "1.8" in user_text                  # mfe_r value
+    assert "protect" in user_text              # exit_state (FSM phase)
+    assert "atr_slope" in user_text or "ATR" in user_text  # ATR trajectory
+    assert "420" in user_text                  # held_seconds (timing)
+
+
+async def test_g7_prompt_without_context_unchanged() -> None:
+    """No exit_context → the prompt still carries the proposal + the Q9
+    widening rails text (decision enum + WIDEN/TIGHTEN definitions)."""
+    haiku = _MockGPTClient(response_text='{"decision":"HOLD","reason":"x"}')
+    await adaptive_exit_gate(_ctx(_make_proposal()), client=haiku)
+    user_text = haiku.calls[0]["messages"][0]["content"]
+    assert "HOLD / WIDEN / TIGHTEN / EXIT_NOW" in user_text
+    assert "FARTHER" in user_text
+    assert "ATR floor" in user_text
+
+
+async def test_g7_rich_context_does_not_change_widen_rail() -> None:
+    """Enrichment is display-only: with rich context present the WIDEN rail
+    fires identically (ADJUST_EXIT) to the no-context case."""
+    haiku = _MockGPTClient(response_text=json.dumps({
+        "decision": "WIDEN", "new_exit_atr": 2.5, "reason": "winner extension",
+    }))
+    proposal = _make_proposal(
+        current_stop=79_000.0, proposed_stop=78_000.0, pnl_r=1.2,
+    )
+    result = await adaptive_exit_gate(
+        _ctx(proposal, exit_context=_RICH_EXIT_CONTEXT), client=haiku,
+    )
+    assert result.decision == GateDecision.ADJUST_EXIT
+    assert result.payload.get("widening_applied") is True
+
+
+async def test_g7_rich_context_does_not_change_tighten_rail() -> None:
+    """Enrichment is display-only: TIGHTEN trap reversal still fires to HOLD
+    even with rich context present (aggressive-bias rail unchanged)."""
+    haiku = _MockGPTClient(response_text=json.dumps({
+        "decision": "TIGHTEN", "reason": "lock in some profit",
+    }))
+    proposal = _make_proposal(
+        current_stop=79_000.0, proposed_stop=79_500.0, pnl_r=1.2,
+    )
+    result = await adaptive_exit_gate(
+        _ctx(proposal, exit_context=_RICH_EXIT_CONTEXT), client=haiku,
+    )
+    assert result.decision == GateDecision.HOLD
+    assert result.payload.get("reason") == "tighten_rejected_floor"

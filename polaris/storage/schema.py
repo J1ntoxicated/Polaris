@@ -275,6 +275,40 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN signal_id TEXT NOT NULL DEFAULT ''"
         )
+    # positions excursion / precise-exit columns (BUILD_SCHEMA, #26 precise
+    # exits prerequisite). ADDITIVE only — every column is nullable DEFAULT NULL
+    # (exit_state DEFAULT 'open') so existing reads are unaffected and legacy
+    # rows backfill to NULL/'open'. These persist the position's tracked
+    # stop / price extremes (peak/trough) and the close-time MFE/MAE in R units;
+    # measurement only — never gates sizing or blocks entry. Pragma guard makes
+    # each ALTER idempotent (SQLite has no ADD COLUMN IF NOT EXISTS). exit_state
+    # carries a non-constant-incompatible default ('open') so the ALTER is legal.
+    if "stop_price" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN stop_price REAL")
+    if "peak_price" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN peak_price REAL")
+    if "trough_price" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN trough_price REAL")
+    if "mfe_r" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN mfe_r REAL")
+    if "mae_r" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN mae_r REAL")
+    if "exit_state" not in cols:
+        # No column DEFAULT on the ALTER: SQLite backfills EVERY existing row
+        # with an ALTER default (open + closed alike), which would stamp a
+        # meaningless 'open' onto already-closed legacy positions. Adding it
+        # without a default leaves legacy rows NULL, then the targeted backfill
+        # below sets ONLY open rows to 'open'. The fresh-DB DDL still carries
+        # ``DEFAULT 'open'`` so new inserts get the lifecycle marker.
+        conn.execute("ALTER TABLE positions ADD COLUMN exit_state TEXT")
+    # Backfill legacy open positions left at NULL exit_state to 'open' so the
+    # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
+    # touches still-NULL rows (idempotent). Closed rows keep NULL → they are
+    # not driven by the exit FSM.
+    conn.execute(
+        "UPDATE positions SET exit_state = 'open' "
+        "WHERE exit_state IS NULL AND status = 'open'"
+    )
     # Backfill venue→product_class/stream_id for legacy rows left at ''.
     # okx→spot/A_okx_crypto, capital→cfd/B_capital_cfd. Runs unconditionally
     # (idempotent: WHERE clause only touches still-blank rows).

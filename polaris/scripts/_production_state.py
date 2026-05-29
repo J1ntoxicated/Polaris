@@ -68,6 +68,10 @@ class ProdLoopState:
     recalc_widen_applied: int = 0
     recalc_exit_now: int = 0
     recalc_swap: int = 0
+    # #26 precise-exit engine — count of positions closed by the deterministic
+    # adaptive-exit pass (ATR-trail stop / protected break-even / loser
+    # timeout). EXPECTANCY telemetry only — never a size dampen or entry block.
+    recalc_precise_exit: int = 0
     # #15 — G6 GPT call-efficiency: per-position cooldown/context cache + a
     # counter of ticks where the prior GPT decision was reused (no call).
     recalc_g6_skipped: int = 0

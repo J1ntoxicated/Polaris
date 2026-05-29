@@ -1,9 +1,7 @@
 """Day 9 F2 — live recalc loop with G6/G7 GPT per-position invocation.
 
-Spec source:
-- vault/30_components/layer-6-live-recalc.md (Q1 5s cadence + dirty triggers)
-- vault/30_components/layer-2-per-gate-pipeline.md (Q3 G6/G7 P1 = GPT)
-- vault/10_decisions/ADR-004-per-gate-ai-pipeline.md (per-gate AI supervisory)
+Spec source: vault/30_components/layer-6-live-recalc.md (Q1 5s cadence) +
+layer-2-per-gate-pipeline.md (Q3 G6/G7 P1=GPT) + ADR-004 (per-gate AI).
 
 Design (Jin 2026-05-07 mandate):
 - Per dirty active position, build a fresh G6 payload from real DB state
@@ -15,12 +13,12 @@ Design (Jin 2026-05-07 mandate):
 - G6 ADJUST_EXIT triggers G7 (also GPT P1) to widen/hold.
 - G6 SWAP_STRATEGY hands off to Layer 6 SSOT
   ``polaris.core.live_recalc.strategy_swap.evaluate_strategy_swap``.
-
-P0 fallback (``phase="P0"``): the GPT client is suppressed at the call site
-so G6/G7 emit deterministic Python decisions. This module is still wired
-into the loop at P0 — it gives Layer 4/5 telemetry parity (each tick
-produces a gate_events row per active position), only the `model_used`
-flips from "gpt_p1" to "python".
+- #26: deterministic precise-exit engine runs per tick BEFORE G6 (see
+  ``_production_recalc_exit.run_precise_exit``) — ATR-trail / FSM / loser
+  timeout. EXPECTANCY only: no size change, no entry block, no halt.
+P0 fallback (``phase="P0"``): the GPT client is suppressed at the call site so
+G6/G7 emit deterministic Python decisions; the module stays wired for Layer 4/5
+telemetry parity (one gate_events row per active position per tick).
 """
 
 from __future__ import annotations
@@ -56,6 +54,7 @@ from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
 )
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
+from polaris.scripts._production_recalc_exit import run_precise_exit
 
 if TYPE_CHECKING:
     from polaris.scripts._smoke_fills import SimulatedTrade
@@ -88,7 +87,8 @@ def load_active_position_rows(
         """
         SELECT p.position_id, p.venue, p.symbol, p.underlying_group_id,
                p.strategy_id, p.entry_strategy_id, p.active_strategy_id,
-               p.side, p.qty, p.opened_ts
+               p.side, p.qty, p.opened_ts,
+               p.stop_price, p.peak_price, p.trough_price, p.exit_state
         FROM positions p
         WHERE p.status NOT IN ('closed','cancelled')
         ORDER BY p.opened_ts DESC LIMIT ?
@@ -154,6 +154,11 @@ def load_active_position_rows(
             volume_z=market["volume_z"],
             atr_slope=market["atr_slope"],
             recent_ticks=market["recent_ticks"],
+            # #26 precise-exit tracked state (NULL until first tick populates).
+            stop_price=None if r[10] is None else float(r[10]),
+            peak_price=None if r[11] is None else float(r[11]),
+            trough_price=None if r[12] is None else float(r[12]),
+            exit_state=str(r[13]) if r[13] is not None else "open",
         )
         out.append(ap)
     return out
@@ -259,6 +264,20 @@ async def _evaluate_position(
         side=side, entry_price=entry_price, last_price=last_price, atr_pct=atr_pct,
     )
 
+    # #26 — precise exits FIRST (deterministic, every tick): track excursion,
+    # ratchet the ATR-trailing stop, advance the MFE FSM, close on trail-stop /
+    # protected-BEP / loser-timeout. If it fires, the position is gone — skip G6.
+    closed = await run_precise_exit(
+        conn=conn, state=state, pos=pos, side=side, entry_price=entry_price,
+        last_price=last_price, atr_pct=atr_pct, pnl_r=pnl_r,
+        held_seconds=held_seconds, now_ts=now_ts, close_specific=close_specific,
+        lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session,
+    )
+    if closed:
+        return
+
     monitor_payload = build_monitor_payload(
         position={
             "venue": pos["venue"],
@@ -346,11 +365,21 @@ async def _evaluate_position(
         return
 
     if g6_result.decision == GateDecision.ADJUST_EXIT:
-        proposed_stop = (
-            last_price * (0.985 if side == "long" else 1.015)
-        )
+        # #26 — current stop = the PERSISTED ATR-trailing stop the precise-exit
+        # engine ratcheted (not the old hardcoded entry*0.99); G7's Q9 rail only
+        # ever WIDENS. last_price fallback when the engine hasn't set a stop yet.
+        atr_one = max(entry_price * atr_pct, 1e-6)
+        stop_row = conn.execute(
+            "SELECT stop_price FROM positions WHERE position_id = ?",
+            (str(pos["position_id"]),),
+        ).fetchone()
         current_stop = (
-            entry_price * (0.99 if side == "long" else 1.01)
+            float(stop_row[0]) if stop_row is not None and stop_row[0] is not None
+            else (last_price - 2.0 * atr_one if side == "long"
+                  else last_price + 2.0 * atr_one)
+        )
+        proposed_stop = (
+            current_stop - atr_one if side == "long" else current_stop + atr_one
         )
         g7_payload = build_exit_payload(
             side=side,
@@ -379,7 +408,27 @@ async def _evaluate_position(
         g7_result = await adaptive_exit_gate(g7_ctx, client=g7_client)
         log_gate_event(conn, g7_ctx, g7_result)
         state.recalc_g7_calls = getattr(state, "recalc_g7_calls", 0) + 1
+        # 🔴 BUG FIX: G7 EXIT_NOW was SILENTLY DROPPED (only widening_applied was
+        # checked). It must now actually close the specific position (no halt).
+        if g7_result.decision == GateDecision.EXIT_NOW:
+            await close_specific(
+                conn, state=state, position_id=str(pos["position_id"]),
+                now_ts=now_ts, lookup_regime=lookup_regime,
+                gpt_client=gpt_client, phase=phase,
+                real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+                capital_session=capital_session,
+            )
+            state.recalc_exit_now = getattr(state, "recalc_exit_now", 0) + 1
+            return
         if g7_result.payload.get("widening_applied"):
+            # Persist the G7-widened stop (only ever looser in the winner's
+            # favour) so the precise-exit trail respects it next tick.
+            new_stop = g7_result.payload.get("stop_price")
+            if new_stop is not None:
+                conn.execute(
+                    "UPDATE positions SET stop_price = ? WHERE position_id = ?",
+                    (float(new_stop), str(pos["position_id"])),
+                )
             state.recalc_widen_applied = getattr(state, "recalc_widen_applied", 0) + 1
 
 

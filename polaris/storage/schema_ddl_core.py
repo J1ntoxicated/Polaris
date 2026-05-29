@@ -338,7 +338,13 @@ CREATE TABLE IF NOT EXISTS positions (
     status TEXT NOT NULL,
     opened_ts INTEGER NOT NULL DEFAULT 0,
     closed_ts INTEGER,
-    swap_count INTEGER NOT NULL DEFAULT 0
+    swap_count INTEGER NOT NULL DEFAULT 0,
+    stop_price REAL,
+    peak_price REAL,
+    trough_price REAL,
+    mfe_r REAL,
+    mae_r REAL,
+    exit_state TEXT DEFAULT 'open'
 );
 """
 

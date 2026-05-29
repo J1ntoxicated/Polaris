@@ -176,14 +176,67 @@ def _is_widening(side: str, *, current_stop: float, proposed_stop: float) -> boo
     return False
 
 
-def _build_g7_user_prompt(proposal: dict[str, Any]) -> str:
-    """Compact prompt for G7 GPT call."""
+def _format_exit_context(exit_context: dict[str, Any]) -> str:
+    """Render the #26 precise-exit context block as readable prompt lines.
+
+    DISPLAY-ONLY: this enriches what G7 *sees* (regime, ATR trajectory,
+    MFE/MAE excursion, FSM exit_state, holding time, recent price action) so it
+    can make a time/momentum/regime-aware HOLD/WIDEN/TIGHTEN/EXIT_NOW call
+    instead of rubber-stamping HOLD. It does NOT alter any decision rail.
+    """
+    lines: list[str] = []
+    if "regime" in exit_context:
+        lines.append(f"- regime: {exit_context['regime']}")
+    if "exit_state" in exit_context:
+        lines.append(f"- exit_state (FSM phase): {exit_context['exit_state']}")
+    if "held_seconds" in exit_context:
+        lines.append(f"- held_seconds: {exit_context['held_seconds']}")
+    if "mfe_r" in exit_context or "mae_r" in exit_context:
+        mfe = exit_context.get("mfe_r")
+        mae = exit_context.get("mae_r")
+        lines.append(f"- MFE/MAE (R): MFE={mfe} MAE={mae}")
+    if "atr_pct" in exit_context or "atr_slope" in exit_context:
+        lines.append(
+            f"- ATR: atr_pct={exit_context.get('atr_pct')} "
+            f"atr_slope={exit_context.get('atr_slope')} "
+            "(slope>0 = expanding volatility)"
+        )
+    if "volume_z" in exit_context:
+        lines.append(f"- volume_z: {exit_context['volume_z']}")
+    if "peak_price" in exit_context:
+        lines.append(f"- peak_price: {exit_context['peak_price']}")
+    if "recent_close_first" in exit_context:
+        lines.append(
+            f"- recent price action: {exit_context['recent_close_first']} -> "
+            f"{exit_context['recent_close_last']} "
+            f"over last {exit_context.get('recent_close_n')} bars"
+        )
+    if not lines:
+        return ""
+    return "# Market / position context\n" + "\n".join(lines) + "\n\n"
+
+
+def _build_g7_user_prompt(
+    proposal: dict[str, Any],
+    exit_context: dict[str, Any] | None = None,
+) -> str:
+    """Compact prompt for G7 GPT call.
+
+    When ``exit_context`` is supplied (#26), regime / ATR trajectory /
+    MFE-MAE / FSM exit_state / holding time / recent price action are surfaced
+    before the proposal so G7 reasons precisely. The widening rails text is
+    unchanged — enrichment is context-only, not a new decision branch.
+    """
+    context_block = _format_exit_context(exit_context or {})
     return (
         "# Open position — adaptive exit\n"
         f"{proposal}\n\n"
+        f"{context_block}"
         "Decide HOLD / WIDEN / TIGHTEN / EXIT_NOW.\n"
         "WIDEN = push stop FARTHER from price (winners run further).\n"
         "TIGHTEN = pull stop CLOSER (rejected if it crosses default ATR floor).\n"
+        "Use the context: a stalled winner in a fading regime may EXIT_NOW; a "
+        "strong winner with expanding favourable momentum should WIDEN. "
         "Default = HOLD when unsure. Aggressive bias = winner extension > "
         "premature lock-in.\n"
         'Output JSON: {"decision":"HOLD|WIDEN|TIGHTEN|EXIT_NOW",'
@@ -262,10 +315,14 @@ async def adaptive_exit_gate(
         baseline_summary="",
         recent_trades_summary="",
     )
+    exit_context = ctx.payload.get("exit_context")
     res = await call_gpt(
         client=client,
         system_prefix=system,
-        user_prompt=_build_g7_user_prompt(proposal),
+        user_prompt=_build_g7_user_prompt(
+            proposal,
+            exit_context if isinstance(exit_context, dict) else None,
+        ),
         max_tokens=G7_MAX_TOKENS,
         model=model,
         timeout_sec=DEFAULT_TIMEOUT_SEC,

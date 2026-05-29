@@ -24,6 +24,7 @@ from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
 )
+from polaris.core.live_recalc.excursion import compute_excursion_r
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
     _safe_record_meta_label,
@@ -110,12 +111,7 @@ def real_pnl_r_from_fills(
     exit_price = exit_price_override if exit_price_override else bar_close
     if entry_price <= 0.0 or exit_price <= 0.0:
         return (0.0, 0.0, entry_price)
-    atr_pct_samples = [
-        (float(r[1]) - float(r[2])) / float(r[0])
-        for r in bar_rows
-        if float(r[0]) > 0.0
-    ]
-    atr_pct = sum(atr_pct_samples) / len(atr_pct_samples) if atr_pct_samples else 0.005
+    atr_pct = _atr_pct_from_bars(bar_rows)
     pnl_abs = (
         (exit_price - entry_price)
         if trade.side == "long"
@@ -126,6 +122,78 @@ def real_pnl_r_from_fills(
     pnl_usd = (pnl_abs / entry_price) * size_usd
     pnl_r = max(-10.0, min(10.0, pnl_r))
     return (pnl_r, pnl_usd, exit_price)
+
+
+def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
+    """Mean (high-low)/close over recent 1m bars; 0.005 fallback when empty.
+
+    Extracted from ``real_pnl_r_from_fills`` so the close-time excursion write
+    shares the *same* ATR-pct denominator the realised-PnL path uses (no drift
+    between pnl_r and mfe_r/mae_r R units). Pure.
+    """
+    samples = [
+        (float(r[1]) - float(r[2])) / float(r[0])
+        for r in bar_rows
+        if float(r[0]) > 0.0
+    ]
+    return sum(samples) / len(samples) if samples else 0.005
+
+
+def _close_excursion_r(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, exit_price: float,
+) -> tuple[float, float]:
+    """Best-effort ``(mfe_r, mae_r)`` for a position at close time.
+
+    BUILD_SCHEMA prerequisite: the tick loop does not yet populate the
+    ``positions.peak_price`` / ``trough_price`` extremes (a later precise-exit
+    stream owns that). So this reads whatever extremes the position row carries
+    and falls back to the observed entry/exit bounds when they are NULL — a
+    position that only ever recorded its entry and exit still yields a finite,
+    correctly-signed excursion (never *under*-states MFE/MAE relative to the
+    realised move). The R denominator is re-derived from the same entry fill +
+    recent bars as ``real_pnl_r_from_fills`` so pnl_r and mfe_r/mae_r share one
+    risk unit. Returns ``(0.0, 0.0)`` only when entry price is unknowable.
+    """
+    entry_price = trade.entry_price
+    if entry_price <= 0.0:
+        row = conn.execute(
+            "SELECT fill_price FROM fills WHERE contribution_id = ? "
+            "AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
+            (trade.position_id,),
+        ).fetchone() if trade.position_id else None
+        if row is None:
+            return (0.0, 0.0)
+        entry_price = float(row[0])
+    if entry_price <= 0.0:
+        return (0.0, 0.0)
+    bar_rows = conn.execute(
+        """
+        SELECT close, high, low FROM bars
+        WHERE instrument_id = ? AND bar_interval = '1m'
+        ORDER BY ts DESC LIMIT 14
+        """,
+        (f"{trade.venue}:{trade.symbol}",),
+    ).fetchall()
+    atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
+    # Read tracked extremes; fall back to entry/exit bounds when the tick loop
+    # has not populated them. peak = max(entry, exit, tracked_peak); trough =
+    # min(entry, exit, tracked_trough) so the excursion is never under-stated.
+    tracked_peak: float | None = None
+    tracked_trough: float | None = None
+    if trade.position_id:
+        prow = conn.execute(
+            "SELECT peak_price, trough_price FROM positions WHERE position_id = ?",
+            (trade.position_id,),
+        ).fetchone()
+        if prow is not None:
+            tracked_peak = None if prow[0] is None else float(prow[0])
+            tracked_trough = None if prow[1] is None else float(prow[1])
+    peak = max(entry_price, exit_price, tracked_peak or entry_price)
+    trough = min(entry_price, exit_price, tracked_trough or entry_price)
+    return compute_excursion_r(
+        entry_price=entry_price, peak_price=peak, trough_price=trough,
+        side=trade.side, atr_usd=atr_usd,
+    )
 
 
 async def _real_close_fill(
@@ -320,6 +388,10 @@ async def _close_trade_with_real_pnl(
     else:
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(conn, trade=trade)
         close_fill = simulate_close(trade, exit_price=exit_price)
+    # BUILD_SCHEMA: persist final MFE/MAE (R units) + exit_state at close.
+    # Best-effort from tracked peak/trough vs entry — measurement only, never
+    # gates sizing or blocks entry. Computed BEFORE the write txn (pure read).
+    mfe_r, mae_r = _close_excursion_r(conn, trade=trade, exit_price=exit_price)
     try:
         conn.execute("BEGIN IMMEDIATE")
         persist_fill(
@@ -328,9 +400,10 @@ async def _close_trade_with_real_pnl(
         )
         if trade.position_id:
             conn.execute(
-                "UPDATE positions SET status = 'closed', closed_ts = ? "
+                "UPDATE positions SET status = 'closed', closed_ts = ?, "
+                "mfe_r = ?, mae_r = ?, exit_state = 'closed' "
                 "WHERE position_id = ?",
-                (now_ts, trade.position_id),
+                (now_ts, mfe_r, mae_r, trade.position_id),
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:

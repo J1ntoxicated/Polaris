@@ -179,6 +179,18 @@ class StreamSummary:
     open_positions_n: int = 0
     daily_trades: int = 0
     drawdown_pct: float = 0.0
+    # Cost monitoring (display-only — "근거 있는 수익 추적"): track the real
+    # deductions per stream so profit is evidence-based. ``fee_usd`` = Σ venue
+    # fills.fee_usd; ``slippage_usd`` = Σ derived from fills.slippage_bps;
+    # ``ai_cost_usd`` = Σ gate_events tokens × model-price (attributed via the
+    # position_id→venue join); ``net_after_cost_usd`` = net_pnl − slippage −
+    # ai_cost (net_pnl ALREADY nets fees, so fees are counted exactly once;
+    # economic identity = gross_close_pnl − fee − slippage − ai_cost). These
+    # NEVER feed sizing/gating — pure read-only telemetry.
+    fee_usd: float = 0.0
+    slippage_usd: float = 0.0
+    ai_cost_usd: float = 0.0
+    net_after_cost_usd: float = 0.0
 
 
 @dataclass(slots=True)

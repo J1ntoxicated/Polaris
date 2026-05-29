@@ -42,18 +42,21 @@ def _seed(conn: sqlite3.Connection) -> None:
     # fills: (fill_id, venue, instrument_id, strategy_id, side, size_usd,
     #         fill_price, fee_usd, slippage_bps, ts_ms, order_id,
     #         contribution_id, pnl_usd, is_close, base_qty, quote_qty, state)
+    # slippage_bps on each fill → slippage_usd = slippage_bps/10000 * size_usd.
+    #   okx:     10 bps * 1000 + 10 bps * 1050 = 1.0 + 1.05 = 2.05
+    #   capital: 5 bps * 2000 + 5 bps * 1980  = 1.0 + 0.99 = 1.99
     fills = [
-        # okx — one open + one closing fill (+50 pnl, -2 fee)
-        ("f1", "okx", "okx:BTC-USDT", "tsmom", "buy", 1000.0, 100.0, 1.0, 0.0,
+        # okx — one open + one closing fill (+50 pnl, -2 fee, 10 bps slip each)
+        ("f1", "okx", "okx:BTC-USDT", "tsmom", "buy", 1000.0, 100.0, 1.0, 10.0,
          now_ms - 5000, "o1", None, 0.0, 0, 10.0, 1000.0, "filled"),
-        ("f2", "okx", "okx:BTC-USDT", "tsmom", "sell", 1050.0, 105.0, 1.0, 0.0,
+        ("f2", "okx", "okx:BTC-USDT", "tsmom", "sell", 1050.0, 105.0, 1.0, 10.0,
          now_ms - 4000, "o2", None, 50.0, 1, 10.0, 1050.0, "filled"),
-        # capital — one open + one closing fill (-20 pnl, -3 fee)
+        # capital — one open + one closing fill (-20 pnl, -3 fee, 5 bps slip each)
         ("f3", "capital", "capital:XAUUSD", "xau_indices_trend", "buy", 2000.0,
-         1900.0, 1.5, 0.0, now_ms - 3000, "o3", None, 0.0, 0, 1.0, 2000.0,
+         1900.0, 1.5, 5.0, now_ms - 3000, "o3", None, 0.0, 0, 1.0, 2000.0,
          "filled"),
         ("f4", "capital", "capital:XAUUSD", "xau_indices_trend", "sell", 1980.0,
-         1880.0, 1.5, 0.0, now_ms - 2000, "o4", None, -20.0, 1, 1.0, 1980.0,
+         1880.0, 1.5, 5.0, now_ms - 2000, "o4", None, -20.0, 1, 1.0, 1980.0,
          "filled"),
     ]
     conn.executemany(
@@ -87,6 +90,40 @@ def _seed(conn: sqlite3.Connection) -> None:
         "opened_ts, closed_ts, swap_count) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         positions,
+    )
+
+    # gate_events: per-call AI token usage + model, attributed to a stream via
+    # the position_id -> positions.venue join (gate_events has no venue column).
+    #   okx (p1):      one gpt(mini) call  (1000 in + 500 out tokens)
+    #                  one python call     (cost 0 — deterministic gate)
+    #   capital (p2):  one gpt_p1(5.5) call (2000 in + 1000 out tokens)
+    #                  one cached call      (cost 0)
+    # alpaca: none (zeroed AI cost lane). A pre-position event (NULL position_id)
+    # is also seeded — it must NOT be attributed to any stream.
+    now_ts = _now_s()
+    gate_events = [
+        # (event_id, run_id, signal_id, position_id, gate_id, phase, decision,
+        #  model_used, latency_ms, input_tokens, output_tokens, payload_json,
+        #  error_text, created_ts)
+        ("ge1", "r1", "s1", "p1", 5, "success", "SIZED", "gpt", 10,
+         1000, 500, "{}", None, now_ts),
+        ("ge2", "r1", "s1", "p1", 6, "success", "HOLD", "python", 1,
+         0, 0, "{}", None, now_ts),
+        ("ge3", "r2", "s2", "p2", 5, "success", "SIZED", "gpt_p1", 20,
+         2000, 1000, "{}", None, now_ts),
+        ("ge4", "r2", "s2", "p2", 6, "success", "HOLD", "cached", 0,
+         500, 250, "{}", None, now_ts),
+        # pre-position gate (no position_id) — unattributed, must not count
+        # toward any stream's ai_cost.
+        ("ge5", "r3", "s3", None, 1, "success", "PASS", "gpt", 10,
+         9999, 9999, "{}", None, now_ts),
+    ]
+    conn.executemany(
+        "INSERT INTO gate_events (event_id, run_id, signal_id, position_id, "
+        "gate_id, phase, decision, model_used, latency_ms, input_tokens, "
+        "output_tokens, payload_json, error_text, created_ts) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        gate_events,
     )
 
     # bars: last close per instrument so open positions get a mark (so
@@ -216,3 +253,154 @@ def test_collect_snapshot_populates_streams(tmp_path: Path) -> None:
     # exposed reconciliation: per-stream exposed sums to the global exposed.
     sum_exposed = sum(s.exposed_usd for s in snap.streams)
     assert round(sum_exposed, 6) == round(snap.exposed_usd, 6)
+
+
+# ---------------------------------------------------------------------------
+# Cost monitoring (display-only) — fee / slippage / AI$ / net-after-cost per
+# stream. READ-ONLY evidence-based profit tracking; no trading behavior touched.
+# ---------------------------------------------------------------------------
+
+
+def test_per_stream_fee_usd(tmp_path: Path) -> None:
+    """fee_usd per stream = SUM(fills.fee_usd) for that venue."""
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    # okx: 1.0 + 1.0 = 2.0 ; capital: 1.5 + 1.5 = 3.0 ; alpaca: 0.0
+    assert round(by_id["A_okx_crypto"].fee_usd, 6) == 2.0
+    assert round(by_id["B_capital_cfd"].fee_usd, 6) == 3.0
+    assert by_id["C_alpaca_equity"].fee_usd == 0.0
+
+
+def test_per_stream_slippage_usd(tmp_path: Path) -> None:
+    """slippage_usd per stream derived from slippage_bps/10000 * size_usd."""
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    # okx: 10bps*1000 + 10bps*1050 = 1.0 + 1.05 = 2.05
+    assert round(by_id["A_okx_crypto"].slippage_usd, 6) == 2.05
+    # capital: 5bps*2000 + 5bps*1980 = 1.0 + 0.99 = 1.99
+    assert round(by_id["B_capital_cfd"].slippage_usd, 6) == 1.99
+    assert by_id["C_alpaca_equity"].slippage_usd == 0.0
+
+
+def test_per_stream_ai_cost_usd_model_price_map(tmp_path: Path) -> None:
+    """ai_cost_usd per stream = Σ (tokens/1000 * MODEL_PRICE_PER_1K[model]),
+    attributed via the position_id -> positions.venue join. python/cached = 0."""
+    from polaris.scripts.dashboard.snapshot_queries import MODEL_PRICE_PER_1K
+
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    # okx: gpt(mini) 1500 tokens @ 0.00015/1k + python(0) = 1.5*0.00015 = 0.000225
+    okx_expected = 1500 / 1000.0 * MODEL_PRICE_PER_1K["gpt"]
+    assert round(by_id["A_okx_crypto"].ai_cost_usd, 9) == round(okx_expected, 9)
+    # capital: gpt_p1 3000 tokens @ 0.005/1k + cached(0) = 3.0*0.005 = 0.015
+    cap_expected = 3000 / 1000.0 * MODEL_PRICE_PER_1K["gpt_p1"]
+    assert round(by_id["B_capital_cfd"].ai_cost_usd, 9) == round(cap_expected, 9)
+    # alpaca: no gate_events → 0
+    assert by_id["C_alpaca_equity"].ai_cost_usd == 0.0
+    # cached + python rows cost 0 by the price map.
+    assert MODEL_PRICE_PER_1K["python"] == 0.0
+    assert MODEL_PRICE_PER_1K["cached"] == 0.0
+
+
+def test_unattributed_gate_event_not_counted(tmp_path: Path) -> None:
+    """A gate_event with NULL position_id (pre-position gate) must NOT inflate
+    any stream's ai_cost (its 9999/9999 tokens are dropped)."""
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    total_ai = sum(s.ai_cost_usd for s in streams)
+    # The 9999+9999-token unattributed event would dominate if counted.
+    assert total_ai < 0.02  # only the okx (0.000225) + capital (0.015) calls
+
+
+def test_net_after_cost_reconciliation(tmp_path: Path) -> None:
+    """net_after_cost_usd == net_pnl_usd - slippage_usd - ai_cost_usd.
+
+    ``net_pnl_usd`` is ALREADY net of fees (Σ close pnl − Σ fee), so the
+    fee leg must NOT be subtracted a second time. The economic identity the
+    column reports is gross_close_pnl − fee − slippage − ai_cost, which equals
+    net_pnl − slippage − ai_cost since net_pnl == gross − fee.
+    """
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    for s in streams:
+        expected = s.net_pnl_usd - s.slippage_usd - s.ai_cost_usd
+        assert round(s.net_after_cost_usd, 9) == round(expected, 9)
+
+
+def test_net_after_cost_economic_identity_no_double_fee(tmp_path: Path) -> None:
+    """Regression guard: net_after_cost must equal gross_close_pnl − fee −
+    slippage − ai_cost (fees counted EXACTLY ONCE), matching the canonical
+    cost model in posterior.py:_apply_cost. Catches re-introducing the
+    fee double-subtraction the reviewer flagged.
+
+    Seeded gross close pnl: okx +50 (fees 2, slip 2.05, ai 0.000225),
+    capital −20 (fees 3, slip 1.99, ai 0.015). alpaca all-zero.
+    """
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    okx = by_id["A_okx_crypto"]
+    # gross 50 − fee 2 − slip 2.05 − ai 0.000225 = 45.949775
+    assert round(okx.net_after_cost_usd, 6) == round(
+        50.0 - okx.fee_usd - okx.slippage_usd - okx.ai_cost_usd, 6
+    )
+    cap = by_id["B_capital_cfd"]
+    # gross −20 − fee 3 − slip 1.99 − ai 0.015 = −25.005
+    assert round(cap.net_after_cost_usd, 6) == round(
+        -20.0 - cap.fee_usd - cap.slippage_usd - cap.ai_cost_usd, 6
+    )
+
+
+def test_empty_venue_zero_costs(tmp_path: Path) -> None:
+    """Alpaca (no activity) → all cost fields 0.0 and net_after_cost 0.0."""
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_now_s())
+    finally:
+        conn.close()
+    alpaca = next(s for s in streams if s.stream_id == "C_alpaca_equity")
+    assert alpaca.fee_usd == 0.0
+    assert alpaca.slippage_usd == 0.0
+    assert alpaca.ai_cost_usd == 0.0
+    assert alpaca.net_after_cost_usd == 0.0
+
+
+def test_collect_snapshot_populates_cost_fields(tmp_path: Path) -> None:
+    """End-to-end: collect_snapshot streams carry the new cost fields and the
+    net-after-cost identity holds for every lane."""
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    _seed(conn)
+    conn.close()
+
+    snap = collect_snapshot(db_path)
+    assert len(snap.streams) == 3
+    for s in snap.streams:
+        # net_pnl already nets fees; net_after_cost subtracts only the
+        # remaining cost legs (slippage + ai) — fees counted exactly once.
+        expected = s.net_pnl_usd - s.slippage_usd - s.ai_cost_usd
+        assert round(s.net_after_cost_usd, 9) == round(expected, 9)
+    by_id = {s.stream_id: s for s in snap.streams}
+    assert round(by_id["A_okx_crypto"].fee_usd, 6) == 2.0
+    assert round(by_id["B_capital_cfd"].fee_usd, 6) == 3.0

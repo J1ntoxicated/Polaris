@@ -46,6 +46,26 @@ GPT_PRICE_PER_1K: Final[Mapping[str, float]] = {
 }
 GPT_TOKENS_PER_CALL: Final[int] = 1500       # heuristic — average prompt+completion
 
+# Per-stream AI-cost price table (USD per 1K tokens). DISPLAY-ONLY: feeds the
+# read-only cost-monitoring breakdown, never sizing/gating. Keyed on the
+# ``gate_events.model_used`` labels the orchestrator actually emits — ``gpt`` =
+# GPT-mini (P0), ``gpt_p1``/``haiku`` = the P1 model, ``python`` /
+# ``python_fast_path`` = deterministic gate (no LLM, $0), ``cached`` = served
+# from cache ($0). This is the AUDIT's price table (Jin /debate-tunable), not a
+# venue billing source of truth. Unknown labels fall back to the mini price
+# (``_model_price``) so a new label is never silently free.
+MODEL_PRICE_PER_1K: Final[Mapping[str, float]] = {
+    "gpt": 0.000150,            # GPT-mini (P0)
+    "gpt-5-mini": 0.000150,
+    "gpt_p1": 0.005,            # GPT-5.5 (P1)
+    "gpt-5.5": 0.005,
+    "haiku": 0.005,             # legacy P1 label — priced at the P1 tier
+    "python": 0.0,              # deterministic gate — no LLM call
+    "python_fast_path": 0.0,
+    "cached": 0.0,              # cache hit — no incremental cost
+}
+SLIPPAGE_BPS_DIVISOR: Final[float] = 10_000.0  # bps → fraction of notional
+
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -99,6 +119,17 @@ def _symbol_from_inst(inst: str | None) -> str:
     if not inst:
         return "?"
     return inst.split(":", 1)[-1] if ":" in inst else inst
+
+
+def _model_price(model: str | None) -> float:
+    """USD per 1K tokens for a ``gate_events.model_used`` label (display only).
+
+    Unknown / unlabelled models fall back to the mini price so a new model id
+    is never silently treated as free. ``python`` / ``cached`` map to 0.0.
+    """
+    if not model:
+        return MODEL_PRICE_PER_1K["gpt"]
+    return MODEL_PRICE_PER_1K.get(str(model), MODEL_PRICE_PER_1K["gpt"])
 
 
 # ---------------------------------------------------------------------------
@@ -497,22 +528,57 @@ def _per_stream_summary(
     # Same formula + session lookback as ``_daily_realised_pnl`` so the per-venue
     # sum reconciles to the global total exactly.
     lookback_ms = _session_start_ms(conn, now_s=now_s)
+    # ``net_pnl`` already nets fees (Σ close pnl − Σ all fees) so it reconciles
+    # to the global ``_daily_realised_pnl``. ``fee_total`` + ``slip_total`` are
+    # display-only cost breakdowns surfaced alongside it. slippage_usd is derived
+    # from ``slippage_bps`` (no explicit slippage_usd column in fills):
+    # slippage_bps / 10000 × size_usd, summed per venue.
     fill_rows = _safe_query(
         conn,
         """SELECT venue,
                   COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
                   - COALESCE(SUM(fee_usd), 0.0) AS net_pnl,
-                  COALESCE(SUM(is_close), 0) AS closed_n
+                  COALESCE(SUM(is_close), 0) AS closed_n,
+                  COALESCE(SUM(fee_usd), 0.0) AS fee_total,
+                  COALESCE(SUM(slippage_bps / ? * size_usd), 0.0) AS slip_total
            FROM fills WHERE ts_ms >= ?
            GROUP BY venue""",
-        (lookback_ms,),
+        (SLIPPAGE_BPS_DIVISOR, lookback_ms),
     )
     pnl_by_venue: dict[str, float] = {}
     trades_by_venue: dict[str, int] = {}
+    fee_by_venue: dict[str, float] = {}
+    slip_by_venue: dict[str, float] = {}
     for r in fill_rows:
         venue = str(r[0] or "").lower()
         pnl_by_venue[venue] = float(r[1] or 0.0)
         trades_by_venue[venue] = int(r[2] or 0)
+        fee_by_venue[venue] = float(r[3] or 0.0)
+        slip_by_venue[venue] = float(r[4] or 0.0)
+
+    # --- AI cost side: gate_events has NO venue column, so attribute each event
+    # to a venue via the position_id → positions.venue join (the SSOT venue
+    # source). Pre-position gate_events (NULL position_id — G1..G5 before a
+    # position exists) are UNATTRIBUTABLE and intentionally excluded; their
+    # tokens are not assigned to any stream (documented gap, display-only).
+    # Cost = Σ (input+output tokens)/1000 × MODEL_PRICE_PER_1K[model_used].
+    ai_cost_by_venue: dict[str, float] = {}
+    ai_rows = _safe_query(
+        conn,
+        """SELECT p.venue, g.model_used,
+                  COALESCE(SUM(g.input_tokens + g.output_tokens), 0)
+           FROM gate_events g
+           JOIN positions p ON g.position_id = p.position_id
+           WHERE g.created_ts >= ?
+             AND g.position_id IS NOT NULL AND g.position_id != ''
+           GROUP BY p.venue, g.model_used""",
+        (lookback_ms // 1000,),
+    )
+    for r in ai_rows:
+        venue = str(r[0] or "").lower()
+        tokens = int(r[2] or 0)
+        cost = tokens / 1000.0 * _model_price(r[1])
+        ai_cost_by_venue[venue] = ai_cost_by_venue.get(venue, 0.0) + cost
 
     # --- positions side: open_n / exposed / upnl, grouped by venue from the
     # already-aggregated PositionRow list (exact decomposition of the globals).
@@ -547,6 +613,16 @@ def _per_stream_summary(
         drawdown_pct = (
             max(0.0, (starting - equity) / starting * 100.0) if starting > 0 else 0.0
         )
+        fee = fee_by_venue.get(venue, 0.0)
+        slippage = slip_by_venue.get(venue, 0.0)
+        ai_cost = ai_cost_by_venue.get(venue, 0.0)
+        # Display-only "evidence-based profit". ``net_pnl`` is ALREADY net of
+        # fees (Σ close pnl − Σ fee, line above), so only the remaining cost
+        # legs (slippage + ai_cost) are subtracted here — fees are NOT counted
+        # twice. The economic identity reported = gross_close_pnl − fee −
+        # slippage − ai_cost (matches posterior.py:_apply_cost, the canonical
+        # gross-minus-costs model). Never feeds sizing/gating.
+        net_after_cost = net_pnl - slippage - ai_cost
         out.append(
             StreamSummary(
                 stream_id=stream_id,
@@ -562,6 +638,10 @@ def _per_stream_summary(
                 open_positions_n=open_by_venue.get(venue, 0),
                 daily_trades=trades_by_venue.get(venue, 0),
                 drawdown_pct=drawdown_pct,
+                fee_usd=fee,
+                slippage_usd=slippage,
+                ai_cost_usd=ai_cost,
+                net_after_cost_usd=net_after_cost,
             )
         )
     return out

@@ -94,6 +94,14 @@
   #board .lane .ln-stats .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board .lane .ln-stats .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
   #board .lane .ln-stats .s .lv { font-variant-numeric: tabular-nums; }
+  /* Cost row (display-only "근거 있는 수익 추적") — fee / slip / AI$ / net-after-cost. */
+  #board .lane .ln-cost {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 8px; margin-top: 3px;
+    font-size: 9px; border-top: 1px dotted rgba(255,255,255,0.08); padding-top: 3px;
+  }
+  #board .lane .ln-cost .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .lane .ln-cost .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; }
+  #board .lane .ln-cost .s .lv { font-variant-numeric: tabular-nums; }
 
   /* Equity chart */
   #board .eq-wrap {
@@ -367,6 +375,16 @@
     el.innerHTML = rows.map(s => {
       const lc = venueStream(s.venue).toLowerCase();    // reuse stage-1 venue→stream SSOT
       const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
+      // Cost row (display-only). Graceful when an older snapshot omits the
+      // fields: net_after_cost_usd === undefined → skip the row entirely.
+      const hasCost = s.net_after_cost_usd != null;
+      const costRow = hasCost ? `
+        <div class="ln-cost">
+          <span class="s"><span class="lk">Fee</span> <span class="lv b-flat">${fmtUsd(s.fee_usd, 2)}</span></span>
+          <span class="s"><span class="lk">Slip</span> <span class="lv b-flat">${fmtUsd(s.slippage_usd, 2)}</span></span>
+          <span class="s" title="AI cost attributed to this lane only (position-linked gate calls); pre-position G1-G5 LLM spend is unattributable and excluded"><span class="lk">AI$*</span> <span class="lv b-flat">${fmtUsd(s.ai_cost_usd, 4)}</span></span>
+          <span class="s"><span class="lk">Net-Cost</span> <span class="lv ${pn(s.net_after_cost_usd)}">${fmtUsd(s.net_after_cost_usd, 2)}</span></span>
+        </div>` : '';
       return `<div class="lane lane-${lc}" title="${esc(s.label)} (${esc(s.product_class)}) · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
         <div class="ln-top">
           <span class="ln-label">${esc(s.label)}</span>
@@ -379,7 +397,7 @@
           <span class="s"><span class="lk">Open</span> <span class="lv b-flat">${s.open_positions_n || 0}</span></span>
           <span class="s"><span class="lk">Trades</span> <span class="lv b-flat">${s.daily_trades || 0}</span></span>
           <span class="s"><span class="lk">Exp%</span> <span class="lv b-flat">${fmtPct(expPct, 1)}</span></span>
-        </div>
+        </div>${costRow}
       </div>`;
     }).join('');
   }

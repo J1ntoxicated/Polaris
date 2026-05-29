@@ -23,12 +23,36 @@ import http.server
 import json
 import socketserver
 import sqlite3
+
+# The ANSI palette decides colour support once at import via sys.stdout.isatty().
+# The server's stdout is a pipe (not a TTY) → it would import the palette with
+# colour DISABLED, and the browser dashboard overlay would receive plain
+# uncoloured rows. Force isatty() True for the duration of the colour-sensitive
+# polaris imports so render_dashboard_v2 emits SGR codes; dashboard-overlay.js
+# converts SGR → HTML in the browser. Display-only; stdout is restored after.
+import sys as _sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from tools.visualizer.polaris_graph import build_graph
+
+class _ForceTTYStdout:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_sys.__stdout__, name)
+
+    def isatty(self) -> bool:
+        return True
+
+
+_saved_stdout = _sys.stdout
+_sys.stdout = _ForceTTYStdout()
+try:
+    from polaris.scripts.dashboard.snapshot import collect_snapshot
+    from polaris.scripts.dashboard_v2 import render_dashboard_v2
+    from tools.visualizer.polaris_graph import build_graph
+finally:
+    _sys.stdout = _saved_stdout
 
 ROOT = Path(__file__).parent
 
@@ -52,6 +76,24 @@ def _fresh_graph() -> dict[str, Any]:
     with _snapshot_lock:
         _snapshot_cache["data"] = fresh
         _snapshot_cache["ts"] = time.time()
+    return fresh
+
+
+_dash_cache: dict[str, Any] = {"rows": None, "ts": 0.0}
+_dash_lock = threading.Lock()
+
+
+def _fresh_dashboard() -> list[str]:
+    """dashboard_v2 ANSI rows (same view as the terminal), TTL-cached."""
+    now = time.time()
+    with _dash_lock:
+        rows: list[str] | None = _dash_cache["rows"]
+        if rows is not None and (now - float(_dash_cache["ts"])) < _SNAPSHOT_TTL:
+            return rows
+    fresh = render_dashboard_v2(collect_snapshot(_DB_PATH))
+    with _dash_lock:
+        _dash_cache["rows"] = fresh
+        _dash_cache["ts"] = time.time()
     return fresh
 
 
@@ -142,6 +184,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json(_fresh_graph())
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"snapshot err: {exc}")
+            return
+        if self.path.startswith("/api/dashboard"):
+            try:
+                self._json({"rows": _fresh_dashboard(), "ts": time.time()})
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"dashboard err: {exc}")
             return
         super().do_GET()
 

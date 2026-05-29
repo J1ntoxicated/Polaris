@@ -20,8 +20,11 @@
     pointer-events: none;
     z-index: 0;
   }
-  .stage { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  /* 50/50 split: left = sphere canvas, right = conventional analytics board */
+  .stage { display: grid; grid-template-columns: 1fr 1fr; width: 100vw; height: 100vh; overflow: hidden; }
+  .sphere-col { position: relative; width: 100%; height: 100%; overflow: hidden; }
   canvas#sphere { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  /* board.js owns #board styling (right column) */
 
   /* ── Top bar ──────────────────────────────────────────────────── */
   .topbar {
@@ -314,6 +317,7 @@
 <body>
 
 <div class="stage">
+ <div class="sphere-col">
   <canvas id="sphere"></canvas>
 
   <!-- Jin 2026-04-27 cloud-only: top-bar stats (REGIME/TICK/NODES/FIRING) + pagenav
@@ -438,10 +442,23 @@
     </div>
     <div class="hint">Esc to close · R reset · Space toggle rotate</div>
   </aside>
+ </div><!-- /.sphere-col -->
+
+ <!-- Right half: conventional analytics board (native HTML/CSS, rendered by board.js) -->
+ <div id="board"></div>
 </div>
 
 <script src="static/sphere-render.js?v=8_node_size_bump_20260502"></script>
-<script src="static/dashboard-overlay.js?v=1"></script>
+<script src="static/board.js?v=1"></script>
+<script>
+  // 50/50 split: sphere engine fits to canvas.clientWidth/Height. After layout settles,
+  // nudge a resize so fit() picks up the 50vw column instead of an initial full-width guess.
+  window.addEventListener('load', function () {
+    requestAnimationFrame(function () {
+      window.dispatchEvent(new Event('resize'));
+    });
+  });
+</script>
 <script>
   // Jin 2026-04-27 Hans Zimmer space OST player + galaxy sound toggle.
   // Single button toggles both Web Audio synth (sphere-render) and YouTube IFrame music.

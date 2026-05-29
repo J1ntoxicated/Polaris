@@ -43,6 +43,7 @@ from polaris.core.isolation.order_keys import (
 )
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
+from polaris.scripts._alpaca_open import real_alpaca_open_fill
 from polaris.scripts._production_run_signal import run_pipeline_for_signal
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
 from polaris.scripts._smoke_real_roundtrip import (
@@ -54,6 +55,7 @@ from polaris.scripts._smoke_real_roundtrip import (
     resolve_okx_base_url,
 )
 from polaris.strategies import STRATEGY_REGISTRY, RawSignal
+from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital import CapitalAdapter
 from polaris.venues.okx import OKXAdapter
 
@@ -108,6 +110,7 @@ async def _real_open_fill(
     strength: float = 0.0,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
 ) -> OpenAttempt:
     """Drive the real demo venue entry leg → return an ``OpenAttempt``.
 
@@ -145,6 +148,24 @@ async def _real_open_fill(
             return await real_okx_open_fill(
                 adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
+            )
+
+    # Track C — Alpaca US equity (additive; OKX/Capital paths above unchanged).
+    if resolve_stream(venue).product_class == "equity":
+        side_eq = "buy" if side == "long" else "sell"
+        if alpaca_adapter is not None:
+            return await real_alpaca_open_fill(
+                alpaca_adapter, symbol=symbol, notional_usd=notional_usd,
+                strategy_id=strategy_id, side=side_eq, last_price=last_price,
+            )
+        api_key, secret = resolve_alpaca_credentials()
+        if not (api_key and secret):
+            logger.error("[real-open] ALPACA_PAPER_* env missing — cannot submit")
+            return OpenAttempt(fill=None, reject_code="env_missing")
+        async with AlpacaAdapter(api_key=api_key, secret=secret) as adapter:
+            return await real_alpaca_open_fill(
+                adapter, symbol=symbol, notional_usd=notional_usd,
+                strategy_id=strategy_id, side=side_eq, last_price=last_price,
             )
 
     # Capital CFD — close needs the deal_id from the confirm.

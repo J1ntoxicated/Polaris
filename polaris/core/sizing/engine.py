@@ -52,6 +52,7 @@ from polaris.core.sizing.schema import (
     StrategyRiskState,
     Track,
     per_symbol_cfd_pct,
+    per_symbol_equity_pct,
     per_symbol_spot_pct,
     target_vol,
     total_daily_risk_ceiling_pct,
@@ -59,6 +60,8 @@ from polaris.core.sizing.schema import (
     track_a_gross_pct,
     track_b_daily_venue_pct,
     track_b_gross_pct,
+    track_c_daily_venue_pct,
+    track_c_gross_pct,
     underlying_group_pct,
 )
 from polaris.core.sizing.session import derive_session
@@ -161,31 +164,44 @@ def listing_watchdog_mult(listing_age_hours: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def venue_per_symbol_cap(venue: str) -> float:
+def venue_per_symbol_cap(venue: str, product_class: str | None = None) -> float:
     """Per-symbol % cap for the venue (env-overridable; high default).
 
-    The spot/cfd decision now routes through the StreamConfig SSOT
+    The spot/cfd/equity decision routes through the StreamConfig SSOT
     (``product_class``) instead of a venue literal, but the cap *value* is still
     read live from the env-aware ``per_symbol_*_pct`` knobs (POLARIS_CAP_*) — the
-    registry holds no cached cap. Behavior is identical: capital→cfd cap, every
-    other (incl. unknown) venue→spot cap (resolve_stream KeyError → spot
-    fallback preserves the prior default branch).
+    registry holds no cached cap. Behavior is identical for A/B: capital→cfd cap,
+    every other (incl. unknown) venue→spot cap (resolve_stream KeyError → spot
+    fallback preserves the prior default branch). Track C (equity) returns the
+    equity per-symbol cap. ``product_class`` may be passed explicitly to reach
+    the equity branch before the C stream is registered (T11).
     """
-    try:
-        product_class = resolve_stream(venue).product_class
-    except KeyError:
-        product_class = "spot"
+    if product_class is None:
+        try:
+            product_class = resolve_stream(venue).product_class
+        except KeyError:
+            product_class = "spot"
     if product_class == "cfd":
         return per_symbol_cfd_pct()
+    if product_class == "equity":
+        return per_symbol_equity_pct()
     return per_symbol_spot_pct()
 
 
 def track_gross_cap(track: Track) -> float:
-    return track_a_gross_pct() if track == "A" else track_b_gross_pct()
+    if track == "A":
+        return track_a_gross_pct()
+    elif track == "C":
+        return track_c_gross_pct()
+    return track_b_gross_pct()
 
 
 def track_daily_cap(track: Track) -> float:
-    return track_a_daily_venue_pct() if track == "A" else track_b_daily_venue_pct()
+    if track == "A":
+        return track_a_daily_venue_pct()
+    elif track == "C":
+        return track_c_daily_venue_pct()
+    return track_b_daily_venue_pct()
 
 
 # ---------------------------------------------------------------------------

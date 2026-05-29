@@ -33,6 +33,7 @@ from polaris.core.live_recalc.strategy_swap import (
     SwapCandidate,
     evaluate_strategy_swap,
 )
+from polaris.core.streams import resolve_stream
 from polaris.scripts._production_indicators import (
     build_real_market_view,
     session_window_now,
@@ -54,6 +55,9 @@ from polaris.scripts._production_recalc import recalc_active_positions
 from polaris.scripts._production_state import ProdLoopState
 from polaris.strategies import (
     BaseStrategy,
+    EquityGapGoStrategy,
+    EquityRSIBBPullbackStrategy,
+    EquityTSMOMStrategy,
     FXBreakoutBasketStrategy,
     RawSignal,
     RSIBBPullbackStrategy,
@@ -63,11 +67,70 @@ from polaris.strategies import (
     VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
+from polaris.venues.alpaca.equity_session_gate import (
+    equity_entry_held_for_session,
+    pdt_rank_penalty,
+    stream_session_gate_active,
+)
 from polaris.venues.capital.session import CapitalSession
 
 logger = logging.getLogger(__name__)
 
 FOCUS_CYCLE_TARGET = 30
+
+
+def equity_session_entry_hold(
+    venue: str, *, now_ts: int, state: ProdLoopState
+) -> bool:
+    """T13 — hold a NEW equity entry outside US RTH (INTEGRITY, not P&L).
+
+    Applies ONLY to the us_equity_cal stream (Track C / Alpaca equity). For
+    OKX (always_on / track A) and Capital (fx_indices_cal / track B) this is a
+    no-op returning ``False`` — A/B stay byte-identical (no gate, no counter).
+
+    For the equity stream, returns ``True`` when the US market is closed
+    (outside 13:30-20:00 UTC RTH): the venue would reject a closed-market
+    order, so the new entry is HELD until RTH. This is an integrity constraint
+    (same class as the circuit-breaker integrity halt) — NOT a defensive size
+    throttle, NOT a P&L halt. It decides only NEW entries; existing positions
+    are never force-closed. A hold bumps ``state.equity_session_holds``
+    (telemetry only). Unknown venue → no hold (fail-open, flow_not_block).
+    """
+    try:
+        calendar = resolve_stream(venue).session_calendar
+    except KeyError:
+        return False
+    if not stream_session_gate_active(calendar):
+        return False
+    if equity_entry_held_for_session(now_ts):
+        state.equity_session_holds += 1
+        return True
+    return False
+
+
+def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
+    """T13 — PDT ranking-down for an equity entry (RANK DOWN, NEVER a block).
+
+    Applies ONLY to the us_equity_cal stream (Track C / Alpaca equity). A/B
+    venues return ``0.0`` (no PDT concept — byte-identical). For the equity
+    stream, returns :func:`pdt_rank_penalty` of ``state.pdt_daytrade_count``: a
+    finite, non-negative ranking number that lowers a day-trade-style entry's
+    priority in the existing universe/signal ranking when daytrade_count >= 3.
+    It NEVER blocks the entry (flow_not_block), never halts on P&L, and never
+    touches notional (not a T4 multiplier). A positive penalty bumps
+    ``state.equity_pdt_rank_downs`` (telemetry); the caller proceeds with the
+    entry regardless. Overnight holds are unaffected (entry-ranking only).
+    """
+    try:
+        calendar = resolve_stream(venue).session_calendar
+    except KeyError:
+        return 0.0
+    if not stream_session_gate_active(calendar):
+        return 0.0
+    penalty = pdt_rank_penalty(state.pdt_daytrade_count)
+    if penalty > 0.0:
+        state.equity_pdt_rank_downs += 1
+    return penalty
 
 
 def _all_strategies() -> list[BaseStrategy]:
@@ -79,6 +142,9 @@ def _all_strategies() -> list[BaseStrategy]:
         FXBreakoutBasketStrategy(),
         XAUIndicesTrendStrategy(),
         SessionBreakoutStrategy(),
+        EquityTSMOMStrategy(),
+        EquityRSIBBPullbackStrategy(),
+        EquityGapGoStrategy(),
     ]
 
 
@@ -266,6 +332,13 @@ async def _run_tick(
                 # the per-cycle fan-out cannot bypass the 4-state machine.
                 if not should_allow_new_entry(conn, strategy_id, now_ts=now_ts):
                     continue
+                # T13 — us_equity_cal RTH integrity hold (Track C only; OKX
+                # always_on + Capital fx_indices_cal are no-ops → A/B identical).
+                # Outside 13:30-20:00 UTC the equity venue rejects orders, so a
+                # NEW entry is HELD until RTH (integrity, not a P&L throttle).
+                # Existing positions are untouched (this skips only the entry).
+                if equity_session_entry_hold(venue, now_ts=now_ts, state=state):
+                    continue
                 try:
                     sig = strategy.generate_raw_signal(mv)
                 except Exception as exc:  # noqa: BLE001 — must isolate
@@ -300,6 +373,16 @@ async def _run_tick(
                 ):
                     state.reentry_skips += 1
                     continue
+
+                # T13 — PDT ranking-down (equity only; A/B no-op). When the
+                # rolling daytrade_count >= 3 this surfaces a finite, positive
+                # rank penalty as telemetry — it RANKS DOWN a day-trade-style
+                # equity entry in the existing universe/signal ranking but
+                # NEVER blocks it (flow_not_block) and never halts on P&L. The
+                # entry proceeds regardless; the penalty is the hook the
+                # universe/signal ranking consumes (focus_rank / signal
+                # priority). Not a T4 multiplier — notional is untouched.
+                apply_equity_pdt_rank_down(venue, state=state)
 
                 def _factory(
                     *, _strategy: Any = strategy, _sig: Any = sig,

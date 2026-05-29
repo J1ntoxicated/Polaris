@@ -102,6 +102,10 @@ def test_strategy_metadata_timeframe_used() -> None:
         "fx_breakout_basket": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",
+        # Track C — Alpaca US equity (T12, additive).
+        "equity_tsmom": "1D",
+        "equity_rsi_bb_pullback": "1D",
+        "equity_gap_go": "1D",
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

@@ -35,6 +35,7 @@ from typing import Any, Final, Literal
 __all__ = [
     "Fill",
     "FillNormalizationError",
+    "normalize_alpaca_fill",
     "normalize_capital_confirm",
     "normalize_okx_fill",
 ]
@@ -217,3 +218,59 @@ def _safe_float(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return f if math.isfinite(f) else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Alpaca (US equity — Track C)
+# ---------------------------------------------------------------------------
+
+ALPACA_FILLED_STATES: Final[frozenset[str]] = frozenset({"filled", "partially_filled"})
+
+
+def normalize_alpaca_fill(
+    payload: dict[str, Any],
+    *,
+    strategy_id: str,
+    expected_price: float | None = None,
+) -> Fill:
+    """Convert a single Alpaca ``GET /v2/orders/{id}`` object into a Fill.
+
+    US equity is unlevered cash (1:1): ``size_usd`` is the filled notional
+    (``filled_qty × filled_avg_price``) and ``base_qty`` is the filled share
+    count. Raises :class:`FillNormalizationError` for non-fill states / missing
+    fields so callers can skip without hiding the error (mirror OKX/Capital).
+    """
+    status = str(payload.get("status") or "").lower()
+    if status not in ALPACA_FILLED_STATES:
+        raise FillNormalizationError(f"Alpaca order not in filled state: {status!r}")
+    symbol = str(payload.get("symbol") or "")
+    if not symbol:
+        raise FillNormalizationError("Alpaca fill missing symbol")
+    side_raw = str(payload.get("side") or "").lower()
+    if side_raw not in ("buy", "sell"):
+        raise FillNormalizationError(f"Alpaca fill invalid side {side_raw!r}")
+    avg_px = _safe_float(payload.get("filled_avg_price"))
+    filled_qty = _safe_float(payload.get("filled_qty"))
+    if avg_px <= 0.0 or filled_qty <= 0.0:
+        raise FillNormalizationError("Alpaca fill missing filled_avg_price/filled_qty")
+    quote_qty = filled_qty * avg_px
+    slippage_bps = 0.0
+    if expected_price is not None and expected_price > 0.0:
+        slippage_bps = abs(avg_px - expected_price) / expected_price * 10_000.0
+    ts_ms = _capital_ts_ms(payload.get("filled_at") or payload.get("updated_at"))
+    return Fill(
+        venue="alpaca",
+        instrument_id=f"alpaca:{symbol}",
+        strategy_id=strategy_id,
+        side=side_raw,  # type: ignore[arg-type]
+        size_usd=quote_qty,
+        fill_price=avg_px,
+        fee_usd=0.0,  # Alpaca US equity = commission-free.
+        slippage_bps=slippage_bps,
+        ts_ms=ts_ms,
+        order_id=str(payload.get("id") or ""),
+        client_order_id=str(payload.get("client_order_id") or "") or None,
+        base_qty=filled_qty,
+        quote_qty=quote_qty,
+        state="filled" if status == "filled" else "partially_filled",
+    )

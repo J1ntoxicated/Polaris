@@ -51,6 +51,7 @@ class ProdLoopState:
     bars_baseline_samples: int = 0
     universe_refreshes: int = 0
     capital_refreshes: int = 0
+    alpaca_refreshes: int = 0
     # F11 — Day 9: Layer 7 SSOT supervisor counters (TaskGroup-managed).
     supervised_tasks_total: int = 0
     supervised_tasks_failed: int = 0
@@ -71,3 +72,17 @@ class ProdLoopState:
     # counter of ticks where the prior GPT decision was reused (no call).
     recalc_g6_skipped: int = 0
     g6_call_cache: G6CallCache = field(default_factory=G6CallCache)
+    # T13 — us_equity_cal RTH integrity gate (Track C / Alpaca equity ONLY;
+    # OKX always_on + Capital fx_indices_cal are NEVER gated → A/B identical).
+    # ``equity_session_holds`` counts NEW equity entries HELD because the US
+    # equity market was closed (outside 13:30-20:00 UTC RTH). This is an
+    # INTEGRITY hold (the venue would reject a closed-market order), NOT a P&L
+    # throttle and NOT a size dampener — existing positions are never touched.
+    equity_session_holds: int = 0
+    # T13 — PDT rolling-day day-trade count (sourced from Alpaca
+    # /v2/account.daytrade_count via parse_account_pdt; defaults 0 until a live
+    # account read populates it). ``equity_pdt_rank_downs`` counts equity entries
+    # that were RANKED DOWN (lower priority) because daytrade_count >= 3 — NOT
+    # blocked. Overnight holds are free; there is no P&L halt, no entry veto.
+    pdt_daytrade_count: int = 0
+    equity_pdt_rank_downs: int = 0

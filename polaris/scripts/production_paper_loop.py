@@ -28,8 +28,10 @@ from polaris.core.isolation.allocator_fence import (
 from polaris.core.lifecycle.recover import hydrate_open_positions
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
+    ALPACA_REFRESH_SEC,
     CAPITAL_REFRESH_SEC,
     OKX_REFRESH_SEC,
+    refresh_alpaca_universe_once,
     refresh_capital_universe_once,
     refresh_focus_watchlist,
     refresh_okx_universe_once,
@@ -104,14 +106,22 @@ def _build_okx_adapter() -> OKXAdapter | None:
 async def _layer0_producer(
     conn: sqlite3.Connection, *, state: ProdLoopState, stop_evt: asyncio.Event,
 ) -> None:
-    """OKX (5min) + Capital (10min) refresh + focus recompute on cadence."""
+    """OKX (5min) + Capital (10min) + Alpaca (10min) refresh + focus recompute.
+
+    Alpaca (Track C / US-equity) is an added producer; OKX/Capital cadence and
+    behavior are unchanged. ``refresh_alpaca_universe_once`` is smoke-safe (no
+    creds → 0 active, no rows persisted).
+    """
     await refresh_okx_universe_once(conn)
     state.universe_refreshes += 1
     await refresh_capital_universe_once(conn)
     state.capital_refreshes += 1
+    await refresh_alpaca_universe_once(conn)
+    state.alpaca_refreshes += 1
     refresh_focus_watchlist(conn)
     last_okx = time.monotonic()
     last_capital = time.monotonic()
+    last_alpaca = time.monotonic()
     while not stop_evt.is_set():
         await asyncio.sleep(15.0)
         now = time.monotonic()
@@ -123,6 +133,10 @@ async def _layer0_producer(
             await refresh_capital_universe_once(conn)
             state.capital_refreshes += 1
             last_capital = now
+        if now - last_alpaca >= ALPACA_REFRESH_SEC:
+            await refresh_alpaca_universe_once(conn)
+            state.alpaca_refreshes += 1
+            last_alpaca = now
         refresh_focus_watchlist(conn)
 
 

@@ -14,6 +14,11 @@ Track B — Capital CFD (3):
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
   - ``xau_indices_trend``      (correlation_group=cfd_index_commodity_trend)
   - ``session_breakout``       (correlation_group=cfd_session_event)
+
+Track C — Alpaca US equity (3, additive — A/B unchanged):
+  - ``equity_tsmom``           (correlation_group=equity_cross_sectional_momo)
+  - ``equity_rsi_bb_pullback`` (correlation_group=equity_mean_reversion)
+  - ``equity_gap_go``          (correlation_group=equity_gap)
 """
 
 from __future__ import annotations
@@ -26,6 +31,9 @@ from polaris.strategies.base import (
     RawSignal,
     StrategyMetadata,
 )
+from polaris.strategies.equity_gap_go import EquityGapGoStrategy
+from polaris.strategies.equity_rsi_bb_pullback import EquityRSIBBPullbackStrategy
+from polaris.strategies.equity_tsmom import EquityTSMOMStrategy
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
@@ -43,6 +51,9 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
     SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
+    EquityTSMOMStrategy.metadata.strategy_id: EquityTSMOMStrategy,
+    EquityRSIBBPullbackStrategy.metadata.strategy_id: EquityRSIBBPullbackStrategy,
+    EquityGapGoStrategy.metadata.strategy_id: EquityGapGoStrategy,
 }
 
 
@@ -55,6 +66,9 @@ __all__ = [
     "BarView",
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",
+    "EquityGapGoStrategy",
+    "EquityRSIBBPullbackStrategy",
+    "EquityTSMOMStrategy",
     "FXBreakoutBasketStrategy",
     "MarketView",
     "RSIBBPullbackStrategy",

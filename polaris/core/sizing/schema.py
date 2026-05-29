@@ -57,17 +57,27 @@ PER_SYMBOL_SPOT_PCT: Final[float] = 0.99
 PER_SYMBOL_CFD_PCT: Final[float] = 0.99
 """Per-symbol cap, Capital CFD (env: ``POLARIS_CAP_PER_SYMBOL_CFD_PCT``)."""
 
+PER_SYMBOL_EQUITY_PCT: Final[float] = 0.99
+"""Per-symbol cap, Track C equity (env: ``POLARIS_CAP_PER_SYMBOL_EQUITY_PCT``)."""
+
 TRACK_A_GROSS_PCT: Final[float] = 0.99
 """Track A gross cap (env: ``POLARIS_CAP_TRACK_A_GROSS_PCT``)."""
 
 TRACK_B_GROSS_PCT: Final[float] = 1.00
 """Track B gross cap (env: ``POLARIS_CAP_TRACK_B_GROSS_PCT``)."""
 
+TRACK_C_GROSS_PCT: Final[float] = 3.0
+"""Track C gross cap on buying_power basis (/debate-CONFIRMED b565392;
+env: ``POLARIS_CAP_TRACK_C_GROSS_PCT``)."""
+
 TRACK_A_DAILY_VENUE_PCT: Final[float] = 0.99
 """Track A daily venue risk (env: ``POLARIS_CAP_TRACK_A_DAILY_VENUE_PCT``)."""
 
 TRACK_B_DAILY_VENUE_PCT: Final[float] = 0.99
 """Track B daily venue risk (env: ``POLARIS_CAP_TRACK_B_DAILY_VENUE_PCT``)."""
+
+TRACK_C_DAILY_VENUE_PCT: Final[float] = 0.99
+"""Track C daily venue risk (env: ``POLARIS_CAP_TRACK_C_DAILY_VENUE_PCT``)."""
 
 TOTAL_DAILY_RISK_CEILING_PCT: Final[float] = 0.99
 """Total daily risk ceiling (env: ``POLARIS_CAP_TOTAL_DAILY_PCT``)."""
@@ -110,6 +120,10 @@ def per_symbol_cfd_pct() -> float:
     return _cap_env("POLARIS_CAP_PER_SYMBOL_CFD_PCT", PER_SYMBOL_CFD_PCT)
 
 
+def per_symbol_equity_pct() -> float:
+    return _cap_env("POLARIS_CAP_PER_SYMBOL_EQUITY_PCT", PER_SYMBOL_EQUITY_PCT)
+
+
 def track_a_gross_pct() -> float:
     return _cap_env("POLARIS_CAP_TRACK_A_GROSS_PCT", TRACK_A_GROSS_PCT)
 
@@ -118,12 +132,20 @@ def track_b_gross_pct() -> float:
     return _cap_env("POLARIS_CAP_TRACK_B_GROSS_PCT", TRACK_B_GROSS_PCT)
 
 
+def track_c_gross_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_C_GROSS_PCT", TRACK_C_GROSS_PCT)
+
+
 def track_a_daily_venue_pct() -> float:
     return _cap_env("POLARIS_CAP_TRACK_A_DAILY_VENUE_PCT", TRACK_A_DAILY_VENUE_PCT)
 
 
 def track_b_daily_venue_pct() -> float:
     return _cap_env("POLARIS_CAP_TRACK_B_DAILY_VENUE_PCT", TRACK_B_DAILY_VENUE_PCT)
+
+
+def track_c_daily_venue_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_C_DAILY_VENUE_PCT", TRACK_C_DAILY_VENUE_PCT)
 
 
 def total_daily_risk_ceiling_pct() -> float:
@@ -199,7 +221,7 @@ weighted more; ``vol = sqrt(EWMA of squared returns around zero)``."""
 DEFAULT_BASE_RISK_PCT: Final[float] = 0.02
 
 
-Track = Literal["A", "B"]
+Track = Literal["A", "B", "C"]
 
 
 @dataclass(frozen=True, slots=True)

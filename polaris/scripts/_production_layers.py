@@ -34,6 +34,7 @@ from polaris.core.live_recalc.tick_recalc import (
     run_live_recalc_cycle,
 )
 from polaris.core.universe.discovery import (
+    fetch_alpaca_instruments,
     fetch_capital_instruments,
     fetch_okx_instruments,
     persist_universe,
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 # Layer 1 bar-ingest helpers + timeframe constants now live in ``_production_bars``;
 # re-exported here so existing ``_production_layers`` import paths keep working.
 __all__ = [
+    "ALPACA_REFRESH_SEC",
     "CAPITAL_REFRESH_SEC",
     "CAPITAL_RESOLUTION_BY_INTERVAL",
     "OKX_REFRESH_SEC",
@@ -69,6 +71,7 @@ __all__ = [
     "ingest_bars_per_timeframe",
     "read_active_universe",
     "read_recent_bars",
+    "refresh_alpaca_universe_once",
     "refresh_capital_universe_once",
     "refresh_focus_watchlist",
     "refresh_okx_universe_once",
@@ -77,6 +80,7 @@ __all__ = [
 
 OKX_REFRESH_SEC = 300
 CAPITAL_REFRESH_SEC = 600
+ALPACA_REFRESH_SEC = 600
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +143,35 @@ async def refresh_capital_universe_once(
     persist_universe(conn, instruments, is_active_set=active_ids)
     logger.info(
         "[L0/capital] universe %d → active %d (continuous-rank)",
+        len(instruments),
+        len(active),
+    )
+    return len(active)
+
+
+async def refresh_alpaca_universe_once(
+    conn: sqlite3.Connection, *, now_ts: int | None = None
+) -> int:
+    """Fetch Alpaca US-equity assets → rank → persist. Returns active count.
+
+    Track C (additive). Coarse liquidity proxies are set at fetch time
+    (``_alpaca``); a per-row proxy refine step is deferred to the dashboards /
+    learners, so this path stays minimal (fetch → rank → persist), mirroring
+    the OKX producer. Returns 0 when credentials are missing (smoke-safe).
+    """
+    ts = now_ts if now_ts is not None else int(time.time())
+    try:
+        instruments = await fetch_alpaca_instruments(now_ts=ts)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        logger.warning("[L0] Alpaca fetch failed: %r", exc)
+        return 0
+    if not instruments:
+        return 0
+    active = rank_active_universe(instruments)
+    active_ids = {ins.instrument_id for ins in active}
+    persist_universe(conn, instruments, is_active_set=active_ids)
+    logger.info(
+        "[L0/alpaca] universe %d → active %d (continuous-rank)",
         len(instruments),
         len(active),
     )

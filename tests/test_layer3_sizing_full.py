@@ -48,7 +48,11 @@ from polaris.core.sizing import (
     resolve_cluster_id,
     resolve_cut_state,
     resolve_tier_amplifier,
+    track_daily_cap,
+    track_gross_cap,
+    venue_per_symbol_cap,
 )
+from polaris.core.sizing.schema import per_symbol_equity_pct
 
 NOW = 1_780_000_000
 
@@ -299,6 +303,94 @@ def test_t4_hard_cap_headroom_min_cluster_clips() -> None:
     )
     assert val == pytest.approx(0.05)
     assert name == "cluster"
+
+
+# ---------------------------------------------------------------------------
+# T8 — Track C caps (/debate-CONFIRMED b565392: gross 3.0, daily 0.99,
+# per-symbol 0.99 on equity). NEW min() SLOT — never a chain multiplier.
+# ---------------------------------------------------------------------------
+
+
+def test_t8_track_c_gross_cap_is_three() -> None:
+    """Track C gross cap = 3.0 (buying_power basis, /debate-CONFIRMED)."""
+    assert track_gross_cap("C") == pytest.approx(3.0)
+
+
+def test_t8_track_c_daily_cap_is_099() -> None:
+    assert track_daily_cap("C") == pytest.approx(0.99)
+
+
+def test_t8_track_c_gross_env_override() -> None:
+    import os
+
+    os.environ["POLARIS_CAP_TRACK_C_GROSS_PCT"] = "2.5"
+    try:
+        assert track_gross_cap("C") == pytest.approx(2.5)
+    finally:
+        del os.environ["POLARIS_CAP_TRACK_C_GROSS_PCT"]
+
+
+def test_t8_track_c_daily_env_override() -> None:
+    import os
+
+    os.environ["POLARIS_CAP_TRACK_C_DAILY_VENUE_PCT"] = "0.5"
+    try:
+        assert track_daily_cap("C") == pytest.approx(0.5)
+    finally:
+        del os.environ["POLARIS_CAP_TRACK_C_DAILY_VENUE_PCT"]
+
+
+def test_t8_per_symbol_equity_pct_default() -> None:
+    assert per_symbol_equity_pct() == pytest.approx(0.99)
+
+
+def test_t8_per_symbol_equity_env_override() -> None:
+    import os
+
+    os.environ["POLARIS_CAP_PER_SYMBOL_EQUITY_PCT"] = "0.42"
+    try:
+        assert per_symbol_equity_pct() == pytest.approx(0.42)
+    finally:
+        del os.environ["POLARIS_CAP_PER_SYMBOL_EQUITY_PCT"]
+
+
+def test_t8_venue_per_symbol_cap_equity_branch() -> None:
+    """Explicit equity product_class returns the equity per-symbol cap (0.99)."""
+    assert venue_per_symbol_cap("alpaca", product_class="equity") == pytest.approx(0.99)
+
+
+def test_t8_headroom_min_picks_track_c_remaining() -> None:
+    """A Track C gross remaining derived from the 3.0 cap participates in the
+    single min() clip as the ``track`` SLOT (NOT a multiplier)."""
+    track_rem = max(0.0, track_gross_cap("C") - 2.97)  # used 2.97 -> 0.03 left
+    val, name = headroom_min(
+        proposed_risk_pct=0.12,
+        single_trade_cap=0.09,
+        per_symbol_remaining=0.50,
+        underlying_remaining=0.60,
+        cluster_remaining=0.40,
+        track_remaining=track_rem,
+        venue_daily_remaining=0.08,
+        total_daily_remaining=0.10,
+    )
+    assert val == pytest.approx(0.03)
+    assert name == "track"
+
+
+# --- A/B regression: caps MUST stay exactly as before ----------------------
+
+
+def test_t8_track_a_b_caps_unchanged() -> None:
+    assert track_gross_cap("A") == pytest.approx(0.99)
+    assert track_gross_cap("B") == pytest.approx(1.00)
+    assert track_daily_cap("A") == pytest.approx(0.99)
+    assert track_daily_cap("B") == pytest.approx(0.99)
+
+
+def test_t8_venue_per_symbol_cap_ab_unchanged() -> None:
+    assert venue_per_symbol_cap("okx") == pytest.approx(0.99)  # spot
+    assert venue_per_symbol_cap("capital") == pytest.approx(0.99)  # cfd
+    assert venue_per_symbol_cap("unknown_venue") == pytest.approx(0.99)  # spot fallback
 
 
 # ---------------------------------------------------------------------------

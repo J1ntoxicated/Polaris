@@ -273,6 +273,18 @@ def build_real_market_view(
         session_open_ts = None
         session_atr = None
 
+    # Equity stream only (venue==alpaca → product_class equity in StreamConfig):
+    # the gap_go strategy needs the prior session close and the open-vs-prev-close
+    # gap. On the 1D equity feed each bar is one session, so prev_close is the
+    # 2nd-to-last close. Left None for crypto/CFD (default), so the OKX/Capital
+    # strategies' MarketView is unaffected (backward-compatible).
+    prev_close: float | None = None
+    gap_pct: float | None = None
+    if venue.lower() == "alpaca" and len(bar_views) >= 2:
+        prev_close = float(bar_views[-2].close)
+        if prev_close > 0.0:
+            gap_pct = (float(bar_views[-1].open) - prev_close) / prev_close
+
     return MarketView(
         symbol=symbol,
         venue=venue,
@@ -297,6 +309,8 @@ def build_real_market_view(
         session_open_ts=session_open_ts,
         session_atr=session_atr,
         is_session_open_window=session_open_window,
+        prev_close=prev_close,
+        gap_pct=gap_pct,
     )
 
 

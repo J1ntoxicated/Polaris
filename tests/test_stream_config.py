@@ -15,6 +15,7 @@ from polaris.core.streams import (
     STREAMS,
     VENUE_TO_STREAM,
     StreamConfig,
+    derive_leverage,
     fallback_leverage_for_asset_class,
     resolve_stream,
 )
@@ -101,7 +102,7 @@ def test_resolve_stream_rejects_mismatched_product_class() -> None:
 
 def test_resolve_stream_unknown_venue_raises() -> None:
     with pytest.raises(KeyError):
-        resolve_stream("alpaca")
+        resolve_stream("kraken")
 
 
 # --- T7 constraint_translator asset-class fallback (never-0 invariant) -------
@@ -154,16 +155,16 @@ def test_constraint_margin_factor_still_wins_over_fallback() -> None:
     assert _payload_to_constraint("EPIC", body).leverage == pytest.approx(20.0)
 
 
-# --- registry shape: only 2 venues, no Track C / Alpaca / short-in-use ------
+# --- registry shape: 3 venues incl. Track C / Alpaca (T11) ------------------
 
 
-def test_only_two_streams_registered() -> None:
-    assert set(STREAMS) == {"A_okx_crypto", "B_capital_cfd"}
-    assert set(VENUE_TO_STREAM) == {"okx", "capital"}
+def test_three_streams_registered() -> None:
+    assert set(STREAMS) == {"A_okx_crypto", "B_capital_cfd", "C_alpaca_equity"}
+    assert set(VENUE_TO_STREAM) == {"okx", "capital", "alpaca"}
 
 
-def test_no_track_c_present() -> None:
-    assert {s.track for s in STREAMS.values()} == {"A", "B"}
+def test_track_c_present() -> None:
+    assert {s.track for s in STREAMS.values()} == {"A", "B", "C"}
 
 
 def test_stream_a_long_only_stream_b_short_allowed_but_encoded() -> None:
@@ -213,3 +214,129 @@ def test_streamconfig_is_frozen() -> None:
     assert isinstance(s, StreamConfig)
     with pytest.raises((AttributeError, TypeError)):
         s.track = "B"  # type: ignore[misc]
+
+
+# --- T8: Track type extended to A/B/C + _sizer_payload 3-way decode ----------
+
+
+def test_t8_track_alias_includes_c() -> None:
+    """Both independent Track aliases must admit "C" (caps + type only; the C
+    stream itself is NOT registered until T11)."""
+    from typing import get_args
+
+    from polaris.core.sizing.schema import Track as SizingTrack
+    from polaris.core.streams.config import Track as StreamTrack
+
+    assert set(get_args(SizingTrack)) == {"A", "B", "C"}
+    assert set(get_args(StreamTrack)) == {"A", "B", "C"}
+
+
+def test_t11_c_stream_registered() -> None:
+    """T11 registers the C stream (T8 added only the type + caps)."""
+    assert {s.track for s in STREAMS.values()} == {"A", "B", "C"}
+
+
+def test_t8_sizer_payload_decodes_track_c() -> None:
+    """``_read_portfolio_state`` must 3-way decode a stored "C" track to "C",
+    never silently collapse it to "B"."""
+    import sqlite3
+
+    from polaris.core.pipeline._sizer_payload import _read_portfolio_state
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_risk_state (
+            venue TEXT, symbol TEXT, instrument_id TEXT, underlying_group_id TEXT,
+            cluster_id TEXT, strategy TEXT, track TEXT, signal_strength REAL,
+            open_risk_pct REAL, notional_usd REAL, opened_ts INTEGER
+        )
+        """
+    )
+    rows = [
+        ("alpaca", "AAPL", "AAPL", "AAPL", None, "equity_mom", "C", 0.8, 0.05, 500.0, 1),
+        ("okx", "BTC-USDT", "BTC-USDT", "BTC", "crypto:BTC", "tsmom", "A", 0.7, 0.04, 400.0, 2),
+        ("capital", "EURUSD", "EURUSD", "EUR", "cfd:FX_MAJORS", "fx_breakout_basket", "B", 0.6, 0.03, 300.0, 3),
+    ]
+    conn.executemany(
+        "INSERT INTO position_risk_state VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows
+    )
+    conn.commit()
+    state = _read_portfolio_state(conn, equity_usd=10_000.0, track="C")
+    by_symbol = {p.symbol: p.track for p in state.open_positions}
+    assert by_symbol == {"AAPL": "C", "BTC-USDT": "A", "EURUSD": "B"}
+
+
+def test_t8_sizer_payload_unknown_track_does_not_crash() -> None:
+    """An unexpected stored track value is passed through as-is (no silent
+    collapse to B); decode never raises on a stray value."""
+    import sqlite3
+
+    from polaris.core.pipeline._sizer_payload import _read_portfolio_state
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_risk_state (
+            venue TEXT, symbol TEXT, instrument_id TEXT, underlying_group_id TEXT,
+            cluster_id TEXT, strategy TEXT, track TEXT, signal_strength REAL,
+            open_risk_pct REAL, notional_usd REAL, opened_ts INTEGER
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_risk_state VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("x", "X", "X", "X", None, "s", "Z", 0.5, 0.01, 100.0, 1),
+    )
+    conn.commit()
+    state = _read_portfolio_state(conn, equity_usd=10_000.0, track="C")
+    assert [p.track for p in state.open_positions] == ["Z"]
+
+
+# --- T11: C_alpaca_equity stream registered (additive; A/B unchanged) --------
+
+
+def test_resolve_stream_alpaca_is_track_c_equity() -> None:
+    """``alpaca`` resolves to the C stream: equity product_class, track C,
+    long-only (P0), AlpacaAdapter dispatch."""
+    s = resolve_stream("alpaca")
+    assert s.stream_id == "C_alpaca_equity"
+    assert s.track == "C"
+    assert s.product_class == "equity"
+    assert s.asset_classes == frozenset({"equity"})
+    assert s.allow_short is False  # P0 long-only
+    assert s.adapter_ref == "AlpacaAdapter"
+
+
+def test_resolve_stream_alpaca_leverage_is_fixed_one() -> None:
+    """Track C equity is cash (no leverage): fixed 1.0 via derive_leverage,
+    asset_class-independent (leverage_source="fixed_1")."""
+    s = resolve_stream("alpaca")
+    assert s.sizing_profile.leverage_source == "fixed_1"
+    assert s.sizing_profile.leverage == 1.0
+    assert derive_leverage(s, "equity") == 1.0
+    assert derive_leverage(s, "anything") == 1.0
+
+
+def test_venue_to_stream_maps_alpaca_to_c() -> None:
+    assert VENUE_TO_STREAM["alpaca"] == "C_alpaca_equity"
+
+
+def test_resolve_stream_alpaca_accepts_matching_product_class() -> None:
+    assert resolve_stream("alpaca", "equity").stream_id == "C_alpaca_equity"
+
+
+def test_alpaca_external_reject_codes_avoid_unjust_hard_halt() -> None:
+    """Realistic Alpaca paper rejects (market-closed / PDT / buying-power /
+    forbidden) are EXTERNAL non-fault codes so they never trip an unjust
+    HARD_HALT (lesson 1a315a3)."""
+    codes = resolve_stream("alpaca").external_reject_codes
+    assert codes >= frozenset(
+        {
+            "forbidden",
+            "403",
+            "account_blocked",
+            "pdt_block",
+            "insufficient_buying_power",
+        }
+    )

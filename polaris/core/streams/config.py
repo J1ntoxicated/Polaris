@@ -4,12 +4,13 @@ A *stream* is the 1st-class routing/isolation dimension. ``resolve_stream`` is
 the lookup that replaces the venue-binary branches (track / leverage_source /
 product_class / adapter dispatch). This step encodes **current behavior only**:
 
-- A_okx_crypto  : okx / spot / {crypto}        / track A / leverage 1.0 (fixed) / long-only
-- B_capital_cfd : capital / cfd / {forex,index,commodity} / track B / leverage PER-MARKET (T7: FX 30 / index 20 / commodity 20 / crypto 2; live constraint overrides) / short allowed (unused this step)
+- A_okx_crypto   : okx / spot / {crypto}        / track A / leverage 1.0 (fixed) / long-only
+- B_capital_cfd  : capital / cfd / {forex,index,commodity} / track B / leverage PER-MARKET (T7: FX 30 / index 20 / commodity 20 / crypto 2; live constraint overrides) / short allowed (unused this step)
+- C_alpaca_equity: alpaca / equity / {equity}    / track C / leverage 1.0 (fixed, cash) / long-only (T11, P0)
 
 Per-market CFD leverage (T7) is supplied by ``fallback_leverage_for_asset_class``
-(live ``CapitalMarketConstraint.leverage`` overrides). No Track C, no short
-activation, no Alpaca — those are later P0 steps. Stream supplies
+(live ``CapitalMarketConstraint.leverage`` overrides). Track C (Alpaca US
+equity, T11) is additive — A/B stay behavior-identical. Stream supplies
 leverage/caps/dispatch, NEVER a multiplier:
 the T4 chain (base×continuous×tier×cell×listing×learner), headroom_min(), and
 the 0.09 SINGLE_TRADE_ABSOLUTE_CEILING are all untouched.
@@ -32,8 +33,11 @@ __all__ = [
     "resolve_stream",
 ]
 
-StreamId = Literal["A_okx_crypto", "B_capital_cfd"]
-Track = Literal["A", "B"]
+StreamId = Literal["A_okx_crypto", "B_capital_cfd", "C_alpaca_equity"]
+Track = Literal["A", "B", "C"]
+# "C" is the equity track (Alpaca US equity). Registered in STREAMS at T11 as
+# C_alpaca_equity (additive — A/B unchanged): fixed leverage 1.0 (cash equity),
+# long-only (P0), AlpacaAdapter dispatch.
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +193,47 @@ STREAMS: dict[StreamId, StreamConfig] = {
                 "MARKET_OFFLINE",
                 "INSTRUMENT_NOT_TRADEABLE",
                 "REJECTED",
+            }
+        ),
+    ),
+    # Track C — Alpaca US equity (T11, additive; A/B above are byte-for-byte
+    # unchanged). Cash equity → fixed leverage 1.0 (no leverage source). P0 is
+    # long-only (allow_short=False). The C *stream* registration here makes
+    # resolve_stream("alpaca")/VENUE_TO_STREAM["alpaca"] resolve automatically
+    # and feeds _is_external_reject the Alpaca non-fault codes below. Stream
+    # supplies leverage/caps/dispatch only — NO T4 multiplier (chain untouched).
+    "C_alpaca_equity": StreamConfig(
+        stream_id="C_alpaca_equity",
+        venue="alpaca",
+        product_class="equity",
+        asset_classes=frozenset({"equity"}),
+        track="C",
+        allow_short=False,  # P0 long-only
+        adapter_ref="AlpacaAdapter",
+        universe_source="alpaca_assets",
+        strategy_roster=frozenset(
+            {"equity_tsmom", "equity_rsi_bb_pullback", "equity_gap_go"}
+        ),
+        sizing_profile=SizingProfile(
+            leverage_source="fixed_1",
+            leverage=1.0,  # cash equity — INVARIANT, no leverage
+            base_risk_pct=_BASE_RISK_PCT,
+            cluster_ids=("equity:MEGA_CAP",),
+        ),
+        session_calendar="us_equity_cal",
+        cost_model="equity_commission",
+        # Alpaca paper rejects that are EXTERNAL (not strategy/client faults) —
+        # market-closed / PDT / buying-power / auth-forbidden. Classified as
+        # non-fault so they never trip an unjust HARD_HALT (lesson 1a315a3).
+        external_reject_codes=frozenset(
+            {
+                "forbidden",
+                "403",
+                "account_blocked",
+                "pdt_block",
+                "insufficient_buying_power",
+                "market_closed",
+                "422",
             }
         ),
     ),

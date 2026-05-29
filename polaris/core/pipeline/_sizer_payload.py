@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Any
+from typing import Any, cast
 
 from polaris.core.pipeline._payload_db import _safe_query
 from polaris.core.sizing import (
@@ -103,7 +103,10 @@ def _read_portfolio_state(
     open_positions: list[PositionRiskState] = []
     for r in rows:
         try:
-            track_val: Track = "A" if str(r[6]) == "A" else "B"
+            # 3-way decode (A/B/C): pass the stored DB value through, never
+            # silently collapse C -> B. ``cast`` documents the Track contract;
+            # an unexpected stray value is preserved as-is for audit fidelity.
+            track_val = cast(Track, str(r[6]))
             open_positions.append(
                 PositionRiskState(
                     venue=str(r[0]),

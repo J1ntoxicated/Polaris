@@ -20,6 +20,10 @@ from typing import Any
 import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
+from polaris.core.universe._alpaca import (
+    fetch_alpaca_instruments,
+    refresh_alpaca_universe,
+)
 from polaris.core.universe._capital import (
     CAPITAL_BASE_DEMO,
     CAPITAL_NAV_PATH,
@@ -52,12 +56,14 @@ __all__ = [
     "CAPITAL_SESSION_PATH",
     "apply_active_filters",
     "detect_listing_changes",
+    "fetch_alpaca_instruments",
     "fetch_capital_instruments",
     "fetch_okx_instruments",
     "merge_listing_timestamps",
     "parse_okx_tickers",
     "persist_universe",
     "rank_active_universe",
+    "refresh_alpaca_universe",
     "refresh_capital_universe",
     "refresh_okx_universe",
 ]

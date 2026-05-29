@@ -189,12 +189,13 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 7 (no emitted-cap)."""
+    """The strategy list is exactly 10 (no emitted-cap; +3 equity, T12)."""
     strategies = _all_strategies()
-    assert len(strategies) == 7
+    assert len(strategies) == 10
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" in ids
     assert "session_breakout" in ids
+    assert "equity_gap_go" in ids
 
 
 @pytest.mark.asyncio
@@ -266,9 +267,9 @@ async def test_g1_universe_scanner_invoked(memdb: sqlite3.Connection) -> None:
 
 
 def test_g2_emit_no_cap() -> None:
-    """The 7-strategy list is exposed without an emitted[:3] cap."""
+    """The 10-strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
-    assert len(strategies) == 7  # Day 8 spec D — no cap
+    assert len(strategies) == 10  # Day 8 spec D — no cap (+3 equity, T12)
 
 
 @pytest.mark.asyncio

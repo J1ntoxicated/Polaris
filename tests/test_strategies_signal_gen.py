@@ -11,6 +11,9 @@ from polaris.strategies import (
     STRATEGY_REGISTRY,
     BarView,
     BaseStrategy,
+    EquityGapGoStrategy,
+    EquityRSIBBPullbackStrategy,
+    EquityTSMOMStrategy,
     FXBreakoutBasketStrategy,
     MarketView,
     RawSignal,
@@ -468,6 +471,136 @@ def test_session_breakout_inside_band_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Equity TSMOM (Track C — Alpaca, long-only re-skin)
+# ---------------------------------------------------------------------------
+
+
+def test_equity_tsmom_emits_signal_on_positive_momentum() -> None:
+    s = EquityTSMOMStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=1.0)
+    mv = MarketView(
+        symbol="AAPL", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        momentum_20bar=0.10,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.correlation_group == "equity_cross_sectional_momo"
+    assert s.metadata.venue == "alpaca"
+    assert s.metadata.asset_class == "equity"
+
+
+def test_equity_tsmom_returns_none_on_negative_momentum() -> None:
+    s = EquityTSMOMStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=-1.0)
+    mv = MarketView(
+        symbol="AAPL", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        momentum_20bar=-0.05,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+# ---------------------------------------------------------------------------
+# Equity RSI-BB Pullback (Track C — Alpaca, long-only dip buy)
+# ---------------------------------------------------------------------------
+
+
+def test_equity_rsi_bb_pullback_emits_signal() -> None:
+    s = EquityRSIBBPullbackStrategy()
+    bars = _make_bars(220, base_close=100.0, drift=0.10)
+    last = bars[-1]
+    bars[-1] = BarView(
+        ts=last.ts, open=last.open, high=last.high,
+        low=85.0, close=88.0, volume=last.volume,
+    )
+    mv = MarketView(
+        symbol="MSFT", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=88.0, spread_bps=3.0,
+        rsi_14=22.0, bb_lower=90.0, ma_200=80.0,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.correlation_group == "equity_mean_reversion"
+
+
+def test_equity_rsi_bb_pullback_returns_none_when_above_ma_filter_fails() -> None:
+    s = EquityRSIBBPullbackStrategy()
+    bars = _make_bars(220, base_close=100.0, drift=0.10)
+    last = bars[-1]
+    bars[-1] = BarView(
+        ts=last.ts, open=last.open, high=last.high,
+        low=85.0, close=70.0, volume=last.volume,  # below ma_200
+    )
+    mv = MarketView(
+        symbol="MSFT", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=70.0, spread_bps=3.0,
+        rsi_14=22.0, bb_lower=90.0, ma_200=120.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+# ---------------------------------------------------------------------------
+# Equity Gap-and-Go (Track C — Alpaca, NEW gap-up continuation, long-only)
+# ---------------------------------------------------------------------------
+
+
+def test_equity_gap_go_emits_on_gap_up() -> None:
+    s = EquityGapGoStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.0)
+    prev = bars[-2]
+    # Prior session close=100, prior high≈100.5 (from _make_bars). Gap-up open
+    # at 105 (>= 100*1.02) and above prior high → fires long.
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=105.0, high=108.0, low=104.0, close=107.0,
+        volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="NVDA", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=107.0, spread_bps=3.0,
+        prev_close=prev.close, gap_pct=(105.0 - prev.close) / prev.close,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.correlation_group == "equity_gap"
+
+
+def test_equity_gap_go_returns_none_on_flat_open() -> None:
+    s = EquityGapGoStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.0)
+    prev = bars[-2]
+    # Flat open at prior close → no gap, must not fire.
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=prev.close, high=101.0, low=99.0, close=100.5,
+        volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="NVDA", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=100.5, spread_bps=3.0,
+        prev_close=prev.close, gap_pct=0.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_equity_gap_go_returns_none_without_prev_close() -> None:
+    """None-path: prev_close/gap_pct unset (defaults) → no fire (no panic)."""
+    s = EquityGapGoStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.0)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=105.0, high=108.0, low=104.0, close=107.0,
+        volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="NVDA", venue="alpaca", timeframe="1D",
+        bars=bars, last_price=107.0, spread_bps=3.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+# ---------------------------------------------------------------------------
 # Cross-strategy invariants
 # ---------------------------------------------------------------------------
 
@@ -496,11 +629,14 @@ def test_strategy_metadata_complete() -> None:
 
 def test_correlation_group_id_unique_per_strategy() -> None:
     seen = {s.metadata.correlation_group_id for s in all_strategies()}
-    assert len(seen) == 7, f"correlation groups not unique: {seen}"
+    assert len(seen) == len(all_strategies()), (
+        f"correlation groups not unique: {seen}"
+    )
+    assert len(seen) == 10, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    assert len(STRATEGY_REGISTRY) == 7
+    assert len(STRATEGY_REGISTRY) == 10
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

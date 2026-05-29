@@ -115,6 +115,8 @@ class MarketView:
     session_open_ts: int | None = None
     session_atr: float | None = None
     is_session_open_window: bool = False
+    prev_close: float | None = None  # equity gap_go (prior session close)
+    gap_pct: float | None = None  # equity gap_go ((open - prev_close)/prev_close)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

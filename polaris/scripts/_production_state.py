@@ -34,6 +34,9 @@ class ProdLoopState:
     # rejects (compliance 51155 / balance 51008 / no_fill ...) that were
     # released WITHOUT a strategy fault. Observability only — never a throttle.
     venue_rejects_by_code: dict[str, int] = field(default_factory=dict)
+    # Close-leg venue rejects (external — min-order 51020 / compliance / market
+    # closed) released WITHOUT a strategy fault; position preserved + retried.
+    venue_close_rejects: int = 0
     g1_runs: int = 0
     g2_emits: int = 0
     g8_runs: int = 0

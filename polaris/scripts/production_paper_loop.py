@@ -285,6 +285,7 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
         ("idempotency_hits", state.idempotency_conflicts),
         ("fault_events", state.fault_events),
         ("venue_rejects", venue_rejects),
+        ("venue_close_rejects", state.venue_close_rejects),
         ("supervisor_tasks", f"{state.supervised_tasks_total} (failed={state.supervised_tasks_failed})"),
         (
             "live_recalc",

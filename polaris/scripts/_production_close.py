@@ -29,6 +29,7 @@ from polaris.scripts._production_close_effects import (
     _safe_run_g8,
     _safe_run_learners,
     _safe_update_cell_matrix,
+    _safe_update_posterior,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
@@ -282,21 +283,30 @@ async def _close_trade_with_real_pnl(
                 capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
+            # Genuine adapter exception (transport/parse) — internal fault.
             logger.error(
                 "[close/real] %s:%s close adapter raised: %r — state preserved",
                 trade.venue, trade.symbol, exc,
             )
-        if real_fill is None:
-            logger.warning(
-                "[close/real] %s:%s close rejected / no-fill — state preserved",
-                trade.venue, trade.symbol,
-            )
             record_fault(
                 conn, strategy_id=trade.strategy_id, fault_type=FAULT_EXCEPTION,
                 now_ts=now_ts,
-                detail={"phase": "real_close_fill", "symbol": trade.symbol},
+                detail={"phase": "real_close_fill_exc", "symbol": trade.symbol},
             )
             state.fault_events += 1
+            return False
+        if real_fill is None:
+            # Venue reject / no-fill (EXTERNAL — e.g. 51020 min-order, compliance,
+            # market closed) is NOT a strategy fault: preserve the position +
+            # retry next tick. A venue decision must not trip the strategy
+            # circuit breaker (integrity-only philosophy; close failure is
+            # self-healing). The prior unconditional FAULT_EXCEPTION here caused
+            # a HARD_HALT cascade when a sub-min position kept failing to close.
+            logger.warning(
+                "[close/real] %s:%s close rejected / no-fill — state preserved (external, no fault)",
+                trade.venue, trade.symbol,
+            )
+            state.venue_close_rejects += 1
             return False
         # P1-6: recompute pnl_r AND pnl_usd from the real exit price so the
         # Layer 4 cell matrix + Layer 5 learner updates reflect what actually
@@ -360,6 +370,12 @@ async def _close_trade_with_real_pnl(
     _safe_run_learners(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
         state=state,
+    )
+    # Edge-validation Phase 1 — cost-adjusted expectancy posterior (measure +
+    # display only; never wired into sizing). Fail-open inside the helper.
+    _safe_update_posterior(
+        conn, trade=trade, regime=regime, pnl_r=pnl_r, pnl_usd=pnl_usd,
+        now_ts=now_ts,
     )
     await _safe_run_g8(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,

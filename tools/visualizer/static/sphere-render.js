@@ -1714,41 +1714,44 @@
     }
   });
 
+  // Jin 2026-05-29 freeze fix: 전체 body try/catch + finally 항상 재예약 → draw 예외 1회로
+  // 영구 정지 안 됨 (복원력 래퍼, 엔진 로직 변경 아님). __sphereHB = 워치독용 하트비트.
   function frame(now) {
     rafId = 0;
-    // Jin 2026-04-30 랙 fix: 탭 hidden 시 frame skip (background 시 GPU/CPU 0)
-    if (document.hidden) {
-      setTimeout(scheduleFrame, 500);  // 500ms 후 재시도 (alive 만 유지)
-      return;
-    }
-    if (now - lastFrameAt < MIN_FRAME_INTERVAL_MS) {
-      // Skip — schedule next without drawing
-      scheduleFrame();
-      return;
-    }
-    lastFrameAt = now;
-    // Jin 2026-04-30 PERF: shadowBlur 글로벌 override (모든 site 0).
-    // PERF off 시 정상 복원.
-    if (_PERF_MODE) {
-      const _proto = Object.getPrototypeOf(ctx);
-      if (!ctx._perfPatched) {
-        Object.defineProperty(ctx, 'shadowBlur', {
-          get() { return 0; },
-          set(_v) { /* swallow */ },
-          configurable: true,
-        });
-        ctx._perfPatched = true;
-      }
-    } else if (ctx._perfPatched) {
-      delete ctx.shadowBlur;  // restore prototype default
-      ctx._perfPatched = false;
-    }
+    window.__sphereHB = (window.__sphereHB || 0) + 1;   // heartbeat (watchdog reads this)
+    let hiddenBackoff = false;
     try {
+      // Jin 2026-04-30 랙 fix: 탭 hidden 시 frame skip (background 시 GPU/CPU 0)
+      if (document.hidden) {
+        hiddenBackoff = true;            // 500ms 후 재시도 (alive 만 유지) — finally 에서 처리
+        return;
+      }
+      if (now - lastFrameAt < MIN_FRAME_INTERVAL_MS) {
+        return;                          // Skip — schedule next without drawing (finally)
+      }
+      lastFrameAt = now;
+      // Jin 2026-04-30 PERF: shadowBlur 글로벌 override (모든 site 0). PERF off 시 정상 복원.
+      if (_PERF_MODE) {
+        if (!ctx._perfPatched) {
+          Object.defineProperty(ctx, 'shadowBlur', {
+            get() { return 0; },
+            set(_v) { /* swallow */ },
+            configurable: true,
+          });
+          ctx._perfPatched = true;
+        }
+      } else if (ctx._perfPatched) {
+        delete ctx.shadowBlur;  // restore prototype default
+        ctx._perfPatched = false;
+      }
       _frameBody(now);
     } catch (err) {
-      console.error('frame error', err);
+      console.warn('frame error (recovered, loop continues):', err);
+    } finally {
+      // ALWAYS re-arm the loop — even on exception — so one bad draw never freezes the globe.
+      if (hiddenBackoff) setTimeout(scheduleFrame, 500);
+      else scheduleFrame();
     }
-    scheduleFrame();
   }
 
   function _frameBody(now) {

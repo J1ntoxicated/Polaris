@@ -53,9 +53,13 @@
     background: rgba(15,19,26,0.55);
     padding: 4px 7px;
   }
-  #board .kpi .k { color: var(--p-dim); font-size: 8px; letter-spacing: 0.12em; text-transform: uppercase; }
-  #board .kpi .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; line-height: 1.1; }
-  #board .kpi .sub { color: var(--p-gry); font-size: 8px; margin-top: 0; }
+  #board .kpi { min-width: 0; overflow: hidden; }
+  #board .kpi .k { color: var(--p-dim); font-size: 8px; letter-spacing: 0.10em; text-transform: uppercase;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #board .kpi .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; line-height: 1.1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #board .kpi .sub { color: var(--p-gry); font-size: 8px; margin-top: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* Equity chart */
   #board .eq-wrap {
@@ -91,20 +95,40 @@
   #board .panel .p-body::-webkit-scrollbar { width: 4px; height: 4px; }
   #board .panel .p-body::-webkit-scrollbar-thumb { background: var(--ghost); }
 
-  #board table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  #board table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
   #board thead th {
     position: sticky; top: 0; background: rgba(10,13,18,0.96);
-    color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.06em;
-    padding: 3px 6px; font-size: 9px; text-transform: uppercase;
+    color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.04em;
+    padding: 3px 5px; font-size: 9px; text-transform: uppercase;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #board thead th.l { text-align: left; }
   #board tbody td {
-    padding: 2px 6px; text-align: right; font-variant-numeric: tabular-nums;
+    padding: 2px 5px; text-align: right; font-variant-numeric: tabular-nums;
     border-bottom: 1px dotted rgba(95,135,175,0.08); color: var(--p-gry);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #board tbody td.l { text-align: left; }
   #board tbody td.tk { color: var(--p-wht); font-weight: 700; }
   #board tbody td.ex { color: var(--p-cyn); font-size: 9px; font-weight: 700; }
+  /* per-table column widths (table-layout:fixed) — numeric cols sized, text cols flex+ellipsis */
+  #board .tbl-pos col.c-ven  { width: 8%; }
+  #board .tbl-pos col.c-sym  { width: 22%; }
+  #board .tbl-pos col.c-str  { width: 14%; }
+  #board .tbl-pos col.c-side { width: 9%; }
+  #board .tbl-pos col.c-size { width: 12%; }
+  #board .tbl-pos col.c-upnl { width: 13%; }
+  #board .tbl-pos col.c-dlt  { width: 9%; }
+  #board .tbl-pos col.c-held { width: 8%; }
+  #board .tbl-pos col.c-mult { width: 9%; }
+  #board .tbl-trd col.c-time { width: 13%; }
+  #board .tbl-trd col.c-ven  { width: 8%; }
+  #board .tbl-trd col.c-sym  { width: 20%; }
+  #board .tbl-trd col.c-str  { width: 14%; }
+  #board .tbl-trd col.c-side { width: 9%; }
+  #board .tbl-trd col.c-pnl  { width: 14%; }
+  #board .tbl-trd col.c-r    { width: 10%; }
+  #board .tbl-trd col.c-rsn  { width: 12%; }
   #board tbody td.dir.long, #board tbody td.dir.buy { color: var(--p-grn); font-weight: 700; }
   #board tbody td.dir.short, #board tbody td.dir.sell { color: var(--p-red); font-weight: 700; }
   #board tbody tr:hover td { background: rgba(95,135,175,0.06); }
@@ -122,7 +146,10 @@
     display: grid; align-items: center; gap: 6px; padding: 1px 8px;
     border-bottom: 1px dotted rgba(95,135,175,0.08);
   }
+  /* min-width:0 so 1fr name column can shrink → ellipsis fires instead of overflowing the panel */
+  #board .mini .row > * { min-width: 0; }
   #board .mini .row .name { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .mini .row .num { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board .mini .row .sub { color: var(--p-dim); font-size: 9px; }
 
   /* gate funnel bars */
@@ -141,6 +168,7 @@
   #board .verdict-edge { color: var(--p-grn); }
   #board .verdict-anti { color: var(--p-red); }
   #board .verdict-neutral { color: var(--p-ylw); }
+  #board .edge-row .vrd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board .lvl-ERROR, #board .lvl-CRITICAL { color: var(--p-red); font-weight: 700; }
   #board .lvl-WARN, #board .lvl-WARNING { color: var(--p-ylw); }
   #board .lvl-INFO { color: var(--p-cyn); }
@@ -195,7 +223,7 @@
 
     <div class="eq-wrap">
       <div class="eq-head">
-        <span class="h-title">Equity Curve (24h)</span>
+        <span class="h-title">Equity Curve (1H)</span>
         <span>min <span class="v" id="eq-min">—</span></span>
         <span>max <span class="v" id="eq-max">—</span></span>
         <span>Δ <span class="v" id="eq-delta">—</span></span>
@@ -258,7 +286,19 @@
 
   function renderEquity(d) {
     const svg = $('eq-svg');
-    const curve = d.equity_curve || [];
+    let curve = d.equity_curve || [];
+    const ts = d.equity_curve_ts || [];
+    // Frontend-only 1h slice: keep last 3600s by timestamp. Does NOT touch server/daily PnL/DD/Sharpe.
+    if (ts.length === curve.length && curve.length > 1) {
+      const ref = (d.ts_now || ts[ts.length - 1]);
+      const cutoff = ref - 3600;
+      let start = 0;
+      for (let i = curve.length - 1; i >= 0; i--) {
+        if (ts[i] < cutoff) { start = i + 1; break; }
+      }
+      if (start > 0 && start < curve.length) curve = curve.slice(start);
+      // if <1h of data, start stays 0 → show all available
+    }
     if (curve.length < 2) { svg.innerHTML = ''; return; }
     const W = 600, H = 84, pad = 2;
     const min = Math.min(...curve), max = Math.max(...curve);
@@ -295,9 +335,9 @@
     const body = rows.map(p => {
       const rc = (p.row_count > 1) ? ` <span class="b-flat">×${p.row_count}</span>` : '';
       return `<tr>
-        <td class="l ex">${esc(p.venue)}</td>
-        <td class="l tk">${esc(p.symbol)}${rc}</td>
-        <td class="l b-flat">${esc(p.strategy_id)}</td>
+        <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
+        <td class="l tk" title="${esc(p.symbol)}${p.row_count>1?' ×'+p.row_count:''}">${esc(p.symbol)}${rc}</td>
+        <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
         <td class="dir ${esc(p.side)}">${esc(p.side)}</td>
         <td class="num">${fmtUsd(p.size_usd, 0)}</td>
         <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
@@ -307,7 +347,10 @@
       </tr>`;
     }).join('');
     $('pos-body').innerHTML =
-      `<table><thead><tr>
+      `<table class="tbl-pos"><colgroup>
+        <col class="c-ven"><col class="c-sym"><col class="c-str"><col class="c-side">
+        <col class="c-size"><col class="c-upnl"><col class="c-dlt"><col class="c-held"><col class="c-mult">
+       </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th class="l">STRAT</th><th>SIDE</th>
         <th>SIZE$</th><th>uPnL$</th><th>Δ%</th><th>HELD</th><th>MULT</th>
       </tr></thead><tbody>${body}</tbody></table>`;
@@ -319,16 +362,19 @@
     if (!rows.length) { $('trd-body').innerHTML = '<div class="empty">no recent trades</div>'; return; }
     const body = rows.map(t => `<tr>
         <td class="l b-flat">${hhmmss(t.ts_close)}</td>
-        <td class="l ex">${esc(t.venue)}</td>
-        <td class="l tk">${esc(t.symbol)}</td>
-        <td class="l b-flat">${esc(t.strategy_id)}</td>
+        <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
+        <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
+        <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
         <td class="dir ${esc(t.side_close)}">${esc(t.side_close)}</td>
         <td class="num ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 2)}</td>
         <td class="num ${pn(t.r_units)}">${(t.r_units >= 0 ? '+' : '') + (t.r_units || 0).toFixed(2)}R</td>
-        <td class="l b-flat">${esc(t.exit_reason)}</td>
+        <td class="l b-flat" title="${esc(t.exit_reason)}">${esc(t.exit_reason)}</td>
       </tr>`).join('');
     $('trd-body').innerHTML =
-      `<table><thead><tr>
+      `<table class="tbl-trd"><colgroup>
+        <col class="c-time"><col class="c-ven"><col class="c-sym"><col class="c-str">
+        <col class="c-side"><col class="c-pnl"><col class="c-r"><col class="c-rsn">
+       </colgroup><thead><tr>
         <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th class="l">STRAT</th>
         <th>SIDE</th><th>PnL$</th><th>R</th><th class="l">REASON</th>
       </tr></thead><tbody>${body}</tbody></table>`;
@@ -338,7 +384,7 @@
     const rows = d.strategy_stats || [];
     if (!rows.length) { $('strat-body').innerHTML = '<div class="empty">—</div>'; return; }
     $('strat-body').innerHTML = rows.map(s => `
-      <div class="row strat-row">
+      <div class="row strat-row" title="${esc(s.strategy_id)} · ${s.open_n} open / ${s.closed_n} closed · WR ${(s.wr_pct||0).toFixed(1)}% · PF ${(s.pf||0).toFixed(2)}">
         <span class="name">${esc(s.strategy_id)} <span class="sub">${s.open_n}o/${s.closed_n}c</span></span>
         <span class="num b-flat">${(s.wr_pct || 0).toFixed(0)}%</span>
         <span class="num b-flat">pf${(s.pf || 0).toFixed(1)}</span>
@@ -381,7 +427,7 @@
       return `<div class="row edge-row" title="p+ ${(e.p_pos||0).toFixed(3)} n=${e.n_samples} ${esc(e.regime)}">
         <span class="name">${esc(e.ticker)} <span class="sub">${esc(e.strategy)}</span></span>
         <span class="num ${e.cost_adj_exp >= 0 ? 'b-pos' : 'b-neg'}">${(e.cost_adj_exp || 0).toFixed(0)}</span>
-        <span class="${cls}" style="text-align:right;font-size:9px">${esc(e.verdict)}</span>
+        <span class="vrd ${cls}" style="text-align:right;font-size:9px">${esc(e.verdict)}</span>
       </div>`;
     }).join('');
   }
@@ -412,9 +458,9 @@
       </div>`).join('');
     }
     if (alerts.length) {
-      html += alerts.map(a => `<div class="row alert-row" title="${esc(a.module)} ${hhmmss(a.ts)}">
+      html += alerts.map(a => `<div class="row alert-row" title="[${esc(a.level)}] ${esc(a.module)} ${hhmmss(a.ts)} — ${esc(a.msg || '')}">
         <span class="lvl-${esc(a.level)}">${esc(a.level)}</span>
-        <span class="name b-flat" style="font-weight:400">${esc((a.msg || '').slice(0, 60))}</span>
+        <span class="name b-flat" style="font-weight:400">${esc(a.msg || '')}</span>
       </div>`).join('');
     }
     $('alert-body').innerHTML = html || '<div class="empty">no alerts</div>';
@@ -480,6 +526,28 @@
     } catch (e) { /* keep last frame */ }
   }
 
+  // ── Sphere freeze watchdog ────────────────────────────────────────
+  // sphere-render frame() bumps window.__sphereHB every frame. If visible (!hidden) but the
+  // heartbeat hasn't moved for ~5s → nudge a resize (re-fit kick). If still frozen ~10s → reload.
+  function startSphereWatchdog() {
+    let lastHB = -1, stalledMs = 0, nudged = false;
+    setInterval(function () {
+      if (document.hidden) { stalledMs = 0; nudged = false; lastHB = window.__sphereHB || 0; return; }
+      const hb = window.__sphereHB || 0;
+      if (hb !== lastHB) {                  // healthy — loop advancing
+        lastHB = hb; stalledMs = 0; nudged = false;
+        return;
+      }
+      stalledMs += 1000;
+      if (stalledMs >= 10000) {             // hard freeze → last resort full refresh
+        location.reload();
+      } else if (stalledMs >= 5000 && !nudged) {   // soft stall → re-fit kick
+        nudged = true;
+        window.dispatchEvent(new Event('resize'));
+      }
+    }, 1000);
+  }
+
   function init() {
     injectStyle();
     const board = $('board');
@@ -494,6 +562,7 @@
       pollLog();
       setInterval(pollLog, 1000);
     }
+    startSphereWatchdog();
   }
 
   if (document.readyState === 'loading') {

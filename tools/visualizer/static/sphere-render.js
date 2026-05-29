@@ -1759,9 +1759,11 @@
     last = now;
 
     // Auto-rotate only when no recent user interaction (and toggle enabled)
+    // Jin 2026-05-29 "회전 안 보여": idle 2500→1200ms (마우스 안 만져도 1.2초 후 회전),
+    // yaw 속도 0.03→0.05 (살짝 빠르게, 과하지 않게). drag/zoom/own-axis 로직 그대로.
     const idleMs = now - lastInteractionAt;
-    if (autoRotateEnabled && !dragging && idleMs > 2500) {
-      yaw += dt * 0.03;
+    if (autoRotateEnabled && !dragging && idleMs > 1200) {
+      yaw += dt * 0.05;
       pitch = 0.18 + Math.sin(now * 0.0003) * 0.06;
     }
     // Click zoom — gradual zoom toward focus node (Jin v4)

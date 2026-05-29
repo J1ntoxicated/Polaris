@@ -323,3 +323,8 @@
 2026-05-29 13:36 [fix start_dashboard.sh: aggressive tty-cleanup → opt-in (was closing Claude window); default DB → polaris_live.sqlite]
 2026-05-29 13:40 [space-viz: mk1 Neural Cloud → Polaris tools/visualizer/ MVP build dispatched (background)]
 2026-05-29 13:50 [commit fb96129: Polaris Neural Cloud space-viz MVP (tools/visualizer); server PID 12266 port 8770 live; browser opened]
+2026-05-29 04:08 [ignite_p1: bootstrap target_db=ignite_custom.sqlite layer0_focus=1 learners=3 paper=True]
+2026-05-29 04:08 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-29 04:08 [ignite_p1: bootstrap target_db=fresh.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-29 14:05 [forensic: net loss -$1.35K (87% fees, over-trade); commit 6d77b5e dashboard fee-netting P0 fix; over-trade P1 pending]
+2026-05-29 14:10 [research backlog saved: universe expand + maker/limit + cooldown + vol-scaling (GitHub+papers)]

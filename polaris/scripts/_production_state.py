@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
 from polaris.scripts._smoke_fills import SimulatedTrade
 
@@ -76,6 +77,13 @@ class ProdLoopState:
     # counter of ticks where the prior GPT decision was reused (no call).
     recalc_g6_skipped: int = 0
     g6_call_cache: G6CallCache = field(default_factory=G6CallCache)
+    # G1-EFF — G1 GPT call-efficiency: shared on-change-only focus cache + a
+    # counter of pipeline runs where the cached focus was reused (no G1 GPT
+    # call). The focus DECISION is still GPT-chosen; only the call FREQUENCY
+    # drops while the universe composition is unchanged. Cost telemetry only —
+    # G1 still always PASS, no entry blocked.
+    g1_focus_skipped: int = 0
+    g1_focus_cache: G1FocusCache = field(default_factory=G1FocusCache)
     # T13 — us_equity_cal RTH integrity gate (Track C / Alpaca equity ONLY;
     # OKX always_on + Capital fx_indices_cal are NEVER gated → A/B identical).
     # ``equity_session_holds`` counts NEW equity entries HELD because the US

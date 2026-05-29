@@ -232,18 +232,17 @@ def evaluate_exit(
     if stop_touched:
         return ExitDecision(state=state, close=True, close_reason="atr_trail_stop")
 
-    #    (c) Stale-loser timeout — only for a position still OPEN (never touched
-    #        profit) AND currently losing. Peak-extension lengthens the timeout
-    #        if the position once touched profit (it earned more rope).
+    #    (c) Stale-loser timeout — a currently-losing position past its timeout
+    #        is closed. Peak-extension: a position that ONCE touched profit
+    #        earned more rope, so its timeout is multiplied by
+    #        EXIT_LOSER_TIMEOUT_EXT_MULT before the close fires (a never-profit
+    #        loser still times out at the BASE EXIT_LOSER_TIMEOUT_SEC). Still a
+    #        per-position exit — no size change, no entry block, no halt.
     touched_profit = _STATE_RANK.get(new_state, 0) > _STATE_RANK[EXIT_STATE_OPEN]
     timeout = EXIT_LOSER_TIMEOUT_SEC
     if touched_profit:
         timeout *= EXIT_LOSER_TIMEOUT_EXT_MULT
-    if (
-        not touched_profit
-        and pnl_r < 0.0
-        and held_seconds > EXIT_LOSER_TIMEOUT_SEC
-    ):
+    if pnl_r < 0.0 and held_seconds > timeout:
         return ExitDecision(state=state, close=True, close_reason="loser_timeout")
 
     return ExitDecision(state=state, close=False, close_reason=None)

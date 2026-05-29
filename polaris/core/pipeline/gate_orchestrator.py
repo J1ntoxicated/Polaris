@@ -34,6 +34,7 @@ from polaris.core.pipeline.agents import (
     strategy_signal_gate,
     universe_scanner_gate,
 )
+from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.gate_event_log import log_gate_event
 from polaris.core.pipeline.gate_state import (
     ENTRY_GATES,
@@ -101,6 +102,7 @@ class GateOrchestrator:
         haiku_client: Any | None = None,
         handlers: dict[int, GateHandler] | None = None,
         phase: str = "P0",
+        g1_focus_cache: G1FocusCache | None = None,
     ) -> None:
         """Build a P0/P1 orchestrator.
 
@@ -119,6 +121,11 @@ class GateOrchestrator:
         self.conn = conn
         self.haiku_client = haiku_client
         self.phase = phase
+        # G1-EFF: shared on-change-only focus cache. When supplied (production
+        # loop), the G1 GPT call is reused across signals/ticks while the
+        # universe composition is unchanged (efficiency only; focus DECISION
+        # still GPT-chosen). None → G1 calls GPT every cycle (back-compat).
+        self.g1_focus_cache = g1_focus_cache
         self.handlers: dict[int, GateHandler] = handlers or {
             GATE_UNIVERSE_SCANNER: self._wrap_universe,
             GATE_STRATEGY_SIGNAL: self._wrap_strategy,
@@ -242,7 +249,9 @@ class GateOrchestrator:
     # ------------------------------------------------------------------
 
     async def _wrap_universe(self, ctx: GateContext) -> GateResult:
-        return await universe_scanner_gate(ctx, client=self.haiku_client)
+        return await universe_scanner_gate(
+            ctx, client=self.haiku_client, focus_cache=self.g1_focus_cache,
+        )
 
     async def _wrap_strategy(self, ctx: GateContext) -> GateResult:
         return await strategy_signal_gate(ctx)

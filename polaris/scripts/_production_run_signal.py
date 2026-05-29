@@ -191,12 +191,22 @@ async def run_pipeline_for_signal(
         strategy_id=strategy.metadata.strategy_id, payload=payload,
         started_ts=now_ts, state=SignalLifecycle.RAW,
     )
-    orch = GateOrchestrator(conn=conn, haiku_client=haiku, phase=phase)
+    # G1-EFF: share the per-run focus cache so the G1 GPT call is reused across
+    # signals/ticks while the universe composition is unchanged (efficiency
+    # only — the focus DECISION is still GPT-chosen). G1 still always PASS.
+    orch = GateOrchestrator(
+        conn=conn, haiku_client=haiku, phase=phase,
+        g1_focus_cache=state.g1_focus_cache,
+    )
     results = await orch.run(ctx, start_gate=GATE_UNIVERSE_SCANNER)
     state.pipeline_runs += len(results)
     if any(r.decision == GateDecision.KILL for r in results):
         state.pipeline_kills += 1
     state.g1_runs += 1
+    # Cost telemetry: count G1 runs that reused the cached focus (no GPT call).
+    # ``model_used == "cached"`` is emitted ONLY by the G1-EFF skip path.
+    if any(r.model_used == "cached" for r in results):
+        state.g1_focus_skipped += 1
     state.g2_emits += 1
     sized_payload: dict[str, Any] | None = None
     for r in results:

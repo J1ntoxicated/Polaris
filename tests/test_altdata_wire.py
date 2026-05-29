@@ -154,6 +154,73 @@ def test_no_change_path_unaffected(memdb: sqlite3.Connection) -> None:
     assert dec.confirmed is False
 
 
+def test_no_change_evidence_less_tick_preserves_prior_evidence(
+    memdb: sqlite3.Connection,
+) -> None:
+    """N1: a same-regime tick WITHOUT evidence must NOT wipe evidence written
+    on a prior evidence-bearing tick (durable G3/G7 context)."""
+    # Evidence-bearing tick first (seeds + writes real evidence).
+    detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bull_trend", now_ts=1000,
+        evidence={"crypto_fg": 80, "vix": 13.0}, confidence=0.72,
+    )
+    # Evidence-less same-regime tick (no evidence / default confidence 0.5).
+    dec = detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bull_trend", now_ts=1060,
+    )
+    assert dec.reason == "no_change"
+    row = _regime_row(memdb, "okx", "crypto:BTC")
+    # Prior evidence + confidence PRESERVED (not overwritten by {} / 0.5).
+    assert json.loads(row[2]) == {"crypto_fg": 80, "vix": 13.0}
+    assert row[1] == pytest.approx(0.72)
+    # A LATER evidence-bearing tick still overwrites with the new evidence.
+    detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bull_trend", now_ts=1120,
+        evidence={"crypto_fg": 60}, confidence=0.6,
+    )
+    row2 = _regime_row(memdb, "okx", "crypto:BTC")
+    assert json.loads(row2[2]) == {"crypto_fg": 60}
+    assert row2[1] == pytest.approx(0.6)
+
+
+def test_pending_evidence_less_tick_preserves_prior_evidence(
+    memdb: sqlite3.Connection,
+) -> None:
+    """N1: a pending (1x) UPDATE WITHOUT evidence must NOT wipe evidence from a
+    prior evidence-bearing pending tick.
+
+    Seed bull → pending bear WITH evidence → pending chop WITHOUT evidence
+    (a different candidate resets the counter via the SAME pending UPDATE path).
+    The evidence-less chop pend must preserve the bear-tick evidence.
+    """
+    detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bull_trend", now_ts=1000,
+    )
+    dec1 = detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bear_trend", now_ts=1060,
+        evidence={"avg_funding": -0.003}, confidence=0.58,
+    )
+    assert dec1.reason == "pending_1x"
+    row1 = _regime_row(memdb, "okx", "crypto:BTC")
+    assert json.loads(row1[2]) == {"avg_funding": -0.003}
+    # Evidence-less pending chop (different candidate → pending UPDATE, count→1).
+    dec2 = detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="chop", now_ts=1120,
+    )
+    assert dec2.reason == "pending_1x"
+    row2 = _regime_row(memdb, "okx", "crypto:BTC")
+    # Candidate switched to chop but the PRIOR evidence/confidence survive.
+    assert row2[3] == "chop"
+    assert json.loads(row2[2]) == {"avg_funding": -0.003}
+    assert row2[1] == pytest.approx(0.58)
+
+
 # ---------------------------------------------------------------------------
 # compute_and_flip_regime — conservative override + price-only fallback
 # ---------------------------------------------------------------------------

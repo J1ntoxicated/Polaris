@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from polaris.core.live_recalc.exit_engine import (
     EXIT_ATR_TRAIL_MULT,
+    EXIT_LOSER_TIMEOUT_EXT_MULT,
     EXIT_LOSER_TIMEOUT_SEC,
     EXIT_STATE_HARVEST,
     EXIT_STATE_PROTECTED,
@@ -210,20 +211,59 @@ def test_loser_timeout_does_not_close_winner() -> None:
     assert d.close is False
 
 
-def test_loser_timeout_peak_extension() -> None:
-    # touched profit once (TOUCHED), now losing & past the BASE timeout but
-    # within the extended window → must NOT close (earned more rope).
+def test_loser_timeout_peak_extension_survives_past_base() -> None:
+    # #26 N2: touched profit once (TOUCHED), now losing & past the BASE timeout
+    # but WITHIN the extended window → must NOT close yet (earned more rope).
     st = ExitState(
         peak_price=101.0, trough_price=ENTRY, stop_price=99.0,
         exit_state=EXIT_STATE_TOUCHED,
     )
+    # last_price 99.5 stays above the 99.0 stop (no ATR-trail close) and the
+    # FSM is only TOUCHED (no protected_bep) → only the timeout path can fire.
     d = evaluate_exit(
         prev=st, side="long", entry_price=ENTRY, last_price=99.5,
         atr_pct=ATR_PCT, pnl_r=-0.25,
         held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) + 1,
     )
-    # touched_profit path → loser_timeout branch is skipped entirely.
-    assert d.close_reason != "loser_timeout"
+    # Past base but below the extended window → still held.
+    assert d.close is False
+    assert d.close_reason is None
+
+
+def test_loser_timeout_peak_extension_closes_past_extended() -> None:
+    # #26 N2: the SAME profit-touched loser DOES time out once held beyond the
+    # EXTENDED window (EXT_MULT × base) — peak-extension lengthens, not removes.
+    st = ExitState(
+        peak_price=101.0, trough_price=ENTRY, stop_price=99.0,
+        exit_state=EXIT_STATE_TOUCHED,
+    )
+    extended = int(EXIT_LOSER_TIMEOUT_SEC * EXIT_LOSER_TIMEOUT_EXT_MULT)
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.5,
+        atr_pct=ATR_PCT, pnl_r=-0.25,
+        held_seconds=extended + 1,
+    )
+    assert d.close is True
+    assert d.close_reason == "loser_timeout"
+
+
+def test_never_profit_loser_times_out_at_base() -> None:
+    # #26 N2 companion: a never-profit loser still closes at the BASE timeout —
+    # the extension is reserved for positions that once touched profit.
+    st = _fresh("long")  # OPEN, never advanced
+    base_survives = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.8,
+        atr_pct=ATR_PCT, pnl_r=-0.1,
+        held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) - 1,
+    )
+    assert base_survives.close is False
+    base_closes = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.8,
+        atr_pct=ATR_PCT, pnl_r=-0.1,
+        held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) + 1,
+    )
+    assert base_closes.close is True
+    assert base_closes.close_reason == "loser_timeout"
 
 
 def test_loser_timeout_not_fired_before_age() -> None:

@@ -92,6 +92,7 @@ def detect_regime_flip(
     """
     if candidate not in REGIME_VALUES:
         raise ValueError(f"unknown regime {candidate!r}")
+    has_evidence = bool(evidence)
     evidence_json = json.dumps(evidence or {}, separators=(",", ":"))
     conf = float(confidence)
     row = conn.execute(
@@ -124,13 +125,25 @@ def detect_regime_flip(
     cur_count = int(row[2] or 0)
 
     if candidate == cur_regime:
-        conn.execute(
-            "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
-            "consecutive_candidate = NULL, "
-            "consecutive_count = 0, updated_ts = ? "
-            "WHERE venue = ? AND underlying_group_id = ?",
-            (conf, evidence_json, now_ts, venue, underlying_group_id),
-        )
+        # N1: an EVIDENCE-LESS tick must NOT wipe evidence/confidence written
+        # by a prior evidence-bearing tick — only overwrite when new non-empty
+        # evidence is supplied (durable G3/G7 context). The 2-close confirm gate
+        # is untouched; this only governs which columns the UPDATE rewrites.
+        if has_evidence:
+            conn.execute(
+                "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
+                "consecutive_candidate = NULL, "
+                "consecutive_count = 0, updated_ts = ? "
+                "WHERE venue = ? AND underlying_group_id = ?",
+                (conf, evidence_json, now_ts, venue, underlying_group_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE regime_state SET consecutive_candidate = NULL, "
+                "consecutive_count = 0, updated_ts = ? "
+                "WHERE venue = ? AND underlying_group_id = ?",
+                (now_ts, venue, underlying_group_id),
+            )
         return RegimeFlipDecision(
             venue=venue,
             underlying_group_id=underlying_group_id,
@@ -196,13 +209,25 @@ def detect_regime_flip(
             consecutive_count=new_count,
             reason="confirmed_2x",
         )
-    conn.execute(
-        "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
-        "consecutive_candidate = ?, "
-        "consecutive_count = ?, updated_ts = ? "
-        "WHERE venue = ? AND underlying_group_id = ?",
-        (conf, evidence_json, candidate, new_count, now_ts, venue, underlying_group_id),
-    )
+    # N1: pending UPDATE preserves prior evidence/confidence on an evidence-less
+    # tick (only overwrite when new non-empty evidence is supplied). Counter +
+    # candidate tracking — i.e. the confirm gate — is unchanged either way.
+    if has_evidence:
+        conn.execute(
+            "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
+            "consecutive_candidate = ?, "
+            "consecutive_count = ?, updated_ts = ? "
+            "WHERE venue = ? AND underlying_group_id = ?",
+            (conf, evidence_json, candidate, new_count, now_ts, venue,
+             underlying_group_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE regime_state SET consecutive_candidate = ?, "
+            "consecutive_count = ?, updated_ts = ? "
+            "WHERE venue = ? AND underlying_group_id = ?",
+            (candidate, new_count, now_ts, venue, underlying_group_id),
+        )
     return RegimeFlipDecision(
         venue=venue,
         underlying_group_id=underlying_group_id,

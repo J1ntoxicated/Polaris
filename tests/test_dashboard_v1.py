@@ -36,6 +36,7 @@ from polaris.scripts.dashboard.render import (
     render_cell_bottom_panel,
     render_cell_top_panel,
     render_dashboard,
+    render_edge_validation_panel,
     render_equity_panel,
     render_gate_panel,
     render_learner_gpt_row,
@@ -51,6 +52,7 @@ from polaris.scripts.dashboard.snapshot import (
     CellRow,
     ClosedTrade,
     DashboardSnapshot,
+    EdgeValidationRow,
     GateRow,
     GptStat,
     LearnerSlot,
@@ -356,6 +358,78 @@ def test_55_row_fit_exact() -> None:
     snap = _full_snap()
     rows = render_dashboard(snap, width=TARGET_WIDTH, height=TARGET_HEIGHT)
     assert len(rows) == TARGET_HEIGHT
+
+
+def _edge_rows(n: int) -> list[EdgeValidationRow]:
+    return [
+        EdgeValidationRow(
+            exchange="okx", strategy="volume_burst", ticker=f"T{i}-USDT",
+            regime="bull_trend", cost_adj_exp=0.4 - i * 0.05, p_pos=0.9 - i * 0.05,
+            n_samples=30 - i, verdict="validated-alpha" if i == 0 else "unproven",
+            est_cost=(i % 2 == 1),
+        )
+        for i in range(n)
+    ]
+
+
+def test_edge_validation_panel_in_dashboard_grid() -> None:
+    """P1-3: edge-validation panel is wired into the 55-row grid."""
+    snap = _full_snap()
+    snap.edge_validation = _edge_rows(2)
+    rows = render_dashboard(snap, width=TARGET_WIDTH, height=TARGET_HEIGHT)
+    assert len(rows) == TARGET_HEIGHT
+    assert any("EDGE VALIDATION" in r for r in rows)
+    assert any("validated-alpha" in r for r in rows)
+
+
+def test_edge_panel_with_data_keeps_55_rows_and_full_width() -> None:
+    snap = _full_snap()
+    snap.edge_validation = _edge_rows(8)
+    rows = render_dashboard(snap, width=TARGET_WIDTH, height=TARGET_HEIGHT)
+    assert len(rows) == TARGET_HEIGHT
+    for i, r in enumerate(rows):
+        assert vlen(r) == TARGET_WIDTH, f"row {i} vlen={vlen(r)}"
+
+
+def test_regime_crisis_still_visible_with_edge_panel() -> None:
+    """P1-3 regression guard: adding the edge panel must NOT silently truncate
+    the regime heatmap — crisis (the 4th regime) must still render in-grid.
+    """
+    snap = _full_snap()
+    snap.edge_validation = _edge_rows(4)
+    snap.regime_bars[3] = RegimeBar(regime="crisis", count=3)
+    rows = render_dashboard(snap, width=TARGET_WIDTH, height=TARGET_HEIGHT)
+    assert any("crisis" in r for r in rows), "crisis regime silently dropped"
+
+
+def test_cell_top_overflow_shows_more_hint() -> None:
+    """P1-3: cell-top truncation is announced (not a silent data drop)."""
+    snap = _full_snap()
+    snap.cell_top = snap.cell_top * 5  # 10 eligible cells
+    rows = render_cell_top_panel(snap, width=TARGET_WIDTH, max_rows=4)
+    assert any("more" in r.lower() for r in rows), "silent cell-top truncation"
+
+
+def test_cell_bottom_overflow_shows_more_hint() -> None:
+    snap = _full_snap()
+    snap.cell_bottom = snap.cell_bottom * 5
+    rows = render_cell_bottom_panel(snap, width=TARGET_WIDTH, max_rows=3)
+    assert any("more" in r.lower() for r in rows), "silent cell-bottom truncation"
+
+
+def test_trades_overflow_shows_more_hint() -> None:
+    snap = _full_snap()
+    snap.recent_trades = snap.recent_trades * 5
+    rows = render_trades_panel(snap, width=TARGET_WIDTH, max_rows=1)
+    assert any("more" in r.lower() for r in rows), "silent trades truncation"
+
+
+def test_edge_validation_panel_standalone_renders_rows() -> None:
+    snap = _full_snap()
+    snap.edge_validation = _edge_rows(2)
+    rows = render_edge_validation_panel(snap, width=TARGET_WIDTH, max_rows=2)
+    assert "EDGE VALIDATION" in rows[0]
+    assert any("validated-alpha" in r for r in rows)
 
 
 def test_zero_snapshot_renders_zero_grid_safely() -> None:

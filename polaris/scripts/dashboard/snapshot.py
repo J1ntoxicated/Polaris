@@ -37,6 +37,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     CellRow,
     ClosedTrade,
     DashboardSnapshot,
+    EdgeValidationRow,
     GateRow,
     GptStat,
     LearnerSlot,
@@ -58,6 +59,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
 from polaris.scripts.dashboard.snapshot_sections import (
     _alerts,
     _cell_top_bottom,
+    _edge_validation,
     _gate_funnel,
     _gpt_stats,
     _learner_slots,
@@ -73,6 +75,7 @@ __all__ = [
     "CellRow",
     "ClosedTrade",
     "DashboardSnapshot",
+    "EdgeValidationRow",
     "GateRow",
     "GptStat",
     "LearnerSlot",
@@ -153,6 +156,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         cell_top, cell_bot, eligible_n = _cell_top_bottom(conn, cell_mult=cell_mult, n=5)
         recent_trades = _recent_closed_trades(conn, n=10)
         learners = _learner_slots(conn, now_s=now_s)
+        edge_validation = _edge_validation(conn, n=8)
         gpt_stats = _gpt_stats(conn, now_s=now_s)
         alerts = _alerts(conn, n=3)
         focus_n, focus_ts = _universe(conn)
@@ -183,6 +187,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             regime_bars=regime_bars,
             recent_trades=recent_trades,
             learners=learners,
+            edge_validation=edge_validation,
             gpt_stats=gpt_stats,
             alerts=alerts,
         )

@@ -105,6 +105,22 @@ class LearnerSlot:
 
 
 @dataclass(slots=True)
+class EdgeValidationRow:
+    """Edge-validation Phase 1 row — Bayesian posterior on cost-adjusted
+    expectancy per (strategy × ticker × regime). Display only; not a gate."""
+
+    exchange: str
+    strategy: str
+    ticker: str
+    regime: str
+    cost_adj_exp: float  # mu_n (posterior mean of cost-adjusted expectancy R)
+    p_pos: float  # P(expectancy>0)
+    n_samples: int
+    verdict: str  # validated-alpha / anti-edge / unproven
+    est_cost: bool  # True when Capital const-bps cost was used (vs real fees)
+
+
+@dataclass(slots=True)
 class GptStat:
     model: str
     calls_per_h: int
@@ -153,5 +169,6 @@ class DashboardSnapshot:
     regime_bars: list[RegimeBar] = field(default_factory=list)
     recent_trades: list[ClosedTrade] = field(default_factory=list)
     learners: list[LearnerSlot] = field(default_factory=list)
+    edge_validation: list[EdgeValidationRow] = field(default_factory=list)
     gpt_stats: list[GptStat] = field(default_factory=list)
     alerts: list[AlertRow] = field(default_factory=list)

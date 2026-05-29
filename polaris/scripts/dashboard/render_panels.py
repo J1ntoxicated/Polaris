@@ -31,6 +31,7 @@ from polaris.scripts.dashboard.ansi_palette import (
 )
 from polaris.scripts.dashboard.snapshot import (
     DashboardSnapshot,
+    EdgeValidationRow,
     GateRow,
     PositionRow,
 )
@@ -200,7 +201,8 @@ def render_cell_top_panel(
         for _ in range(max_rows - 1):
             out.append(pad("", width))
         return out
-    for c in snap.cell_top[:max_rows]:
+    rows = snap.cell_top[:max_rows]
+    for c in rows:
         mult_c = POSITIVE if c.mult > 1.05 else NEUTRAL
         score_c = pnl_color(c.score)
         out.append(
@@ -212,6 +214,11 @@ def render_cell_top_panel(
                 f"{color(f'{c.mult:>5.2f}x', mult_c):>8}",
                 width,
             )
+        )
+    overflow = len(snap.cell_top) - len(rows)
+    if overflow > 0:
+        out[-1] = pad(
+            f"  {color(f'+ {overflow} more cells hidden', MUTED + DIM)}", width
         )
     while len(out) < 2 + max_rows:
         out.append(pad("", width))
@@ -228,7 +235,8 @@ def render_cell_bottom_panel(
         for _ in range(max_rows - 1):
             out.append(pad("", width))
         return out
-    for c in snap.cell_bottom[:max_rows]:
+    rows = snap.cell_bottom[:max_rows]
+    for c in rows:
         mult_c = NEGATIVE if c.mult < 0.95 else NEUTRAL
         score_c = pnl_color(c.score)
         out.append(
@@ -240,6 +248,11 @@ def render_cell_bottom_panel(
                 f"{color(f'{c.mult:>5.2f}x', mult_c):>8}",
                 width,
             )
+        )
+    overflow = len(snap.cell_bottom) - len(rows)
+    if overflow > 0:
+        out[-1] = pad(
+            f"  {color(f'+ {overflow} more cells hidden', MUTED + DIM)}", width
         )
     while len(out) < 1 + max_rows:
         out.append(pad("", width))
@@ -293,6 +306,62 @@ def render_regime_panel(
 
 
 # ---------------------------------------------------------------------------
+# Edge-validation panel (Phase 1 — Bayesian posterior, display only)
+# ---------------------------------------------------------------------------
+
+
+_EDGE_HEADER = (
+    f"  {'EXCH':<6}{'STRATEGY':<18}{'TICKER':<14}{'REGIME':<12}"
+    f"{'COST_ADJ_EXP':>14}{'P(exp>0)':>10}{'N':>6}{'VERDICT':>17}{'COST':>7}"
+)
+
+
+def _edge_row(e: EdgeValidationRow) -> str:
+    exp_c = pnl_color(e.cost_adj_exp)
+    if e.verdict == "validated-alpha":
+        v_c = POSITIVE + BOLD
+    elif e.verdict == "anti-edge":
+        v_c = NEGATIVE + BOLD
+    else:
+        v_c = MUTED
+    p_c = POSITIVE if e.p_pos >= 0.85 else NEGATIVE if e.p_pos <= 0.15 else NEUTRAL
+    cost_tag = color("est", WARNING) if e.est_cost else color("real", MUTED)
+    return (
+        f"{e.exchange[:5]:<6}{e.strategy[:16]:<18}{e.ticker[:12]:<14}"
+        f"{e.regime[:10]:<12}"
+        f"{color(f'{e.cost_adj_exp:>+12.3f}', exp_c):>14}"
+        f"{color(f'{e.p_pos:>8.3f}', p_c + BOLD):>10}"
+        f"{e.n_samples:>6}"
+        f"{color(f'{e.verdict[:15]:>15}', v_c):>17}"
+        f"{cost_tag:>7}"
+    )
+
+
+def render_edge_validation_panel(
+    snap: DashboardSnapshot, *, width: int = TARGET_WIDTH, max_rows: int = 6
+) -> list[str]:
+    """Render the cost-adjusted expectancy posterior table (measure-only).
+
+    Strictly display: ``cost_adj_exp`` (posterior mean μ_n), ``P(exp>0)``
+    confidence, sample count, verdict label, and a Capital ``est cost`` flag.
+    Never feeds sizing.
+    """
+    out: list[str] = []
+    out.append(hline("EDGE VALIDATION (cost-adj expectancy posterior — display only)", width))
+    out.append(pad(color(_EDGE_HEADER, HIGHLIGHT + BOLD), width))
+    if not snap.edge_validation:
+        out.append(pad(f"  {color('(no posterior samples yet)', MUTED)}", width))
+        for _ in range(max_rows - 1):
+            out.append(pad("", width))
+        return out
+    for e in snap.edge_validation[:max_rows]:
+        out.append(pad(f"  {_edge_row(e)}", width))
+    while len(out) < 2 + max_rows:
+        out.append(pad("", width))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Rows 49-53 — recent closed trades panel
 # ---------------------------------------------------------------------------
 
@@ -314,7 +383,8 @@ def render_trades_panel(
         for _ in range(max_rows - 1):
             out.append(pad("", width))
         return out
-    for t in snap.recent_trades[:max_rows]:
+    rows = snap.recent_trades[:max_rows]
+    for t in rows:
         pnl_c = pnl_color(t.pnl_usd)
         side_c = NEGATIVE if t.side_close.lower() in {"sell", "short"} else POSITIVE
         ts_str = time.strftime("%H:%M:%S", time.localtime(t.ts_close))
@@ -336,6 +406,11 @@ def render_trades_panel(
                 f"{color(t.exit_reason[:7], reason_c):>8}",
                 width,
             )
+        )
+    overflow = len(snap.recent_trades) - len(rows)
+    if overflow > 0:
+        out[-1] = pad(
+            f"  {color(f'+ {overflow} more trades hidden', MUTED + DIM)}", width
         )
     while len(out) < 2 + max_rows:
         out.append(pad("", width))

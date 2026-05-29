@@ -63,6 +63,27 @@ LEARNER_SNAPSHOT_DIR: Final[Path] = Path("data/learner_snapshots")
 (spec: vault/30_components/layer-5-learner-network.md §Q3)."""
 
 # ---------------------------------------------------------------------------
+# Edge-validation Phase 1 — cost overlay + verdict thresholds (measure-only,
+# never wired into sizing; aggressive-bias / 9-stack guard preserved).
+# ---------------------------------------------------------------------------
+
+COST_BPS_CAPITAL: Final[float] = 3.0
+"""Per-leg cost (bps of notional) assumed for Capital CFD demo — the demo
+venue reports ``fee=0`` so a tunable constant stands in for the implicit
+spread/financing. Applied to *both* legs in the cost overlay."""
+
+COST_BPS_OKX_FALLBACK: Final[float] = 1.0
+"""Per-leg fallback cost (bps) for OKX when a fill row carries no slippage —
+real OKX fills already include fee + slippage, so this is only a floor."""
+
+EDGE_VERDICT_TAU_HI: Final[float] = 0.85
+"""P(expectancy>0) ceiling at/above which a bucket is labelled
+``validated-alpha`` (display label only — NOT a sizing gate)."""
+
+EDGE_VERDICT_TAU_LO: Final[float] = 0.15
+"""P(expectancy>0) floor at/below which a bucket is labelled ``anti-edge``."""
+
+# ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
 

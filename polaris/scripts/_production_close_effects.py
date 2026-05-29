@@ -25,6 +25,10 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
 )
 from polaris.core.learners import ClosedTrade, LearnerScheduler
+from polaris.core.learners.posterior import (
+    cost_adjusted_pnl_r,
+    maybe_update_posterior,
+)
 from polaris.core.pipeline.agents import post_trade_reflector_gate
 from polaris.core.pipeline.agents._gpt_client import (
     GPT_P0_MODEL,
@@ -132,6 +136,96 @@ def _safe_run_learners(
                 phase=f"learner_update_{getattr(learner, 'learner_id', 'unknown')}",
                 exc=exc, now_ts=now_ts, state=state,
             )
+
+
+def _read_cost_inputs(
+    conn: sqlite3.Connection, trade: SimulatedTrade
+) -> tuple[float, float, float, float, float, float]:
+    """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd).
+
+    P0-2 fix — BOTH legs are matched by ``contribution_id = position_id`` (the
+    close fill is persisted with ``contribution_id=trade.position_id`` in
+    ``_close_trade_with_real_pnl``). This stops a sibling position on the same
+    (strategy, instrument) from having its close fee/slippage cross-applied.
+    Only when ``position_id`` is unset (legacy callers) do we fall back to the
+    latest ``(strategy, instrument)`` fill. ``atr_usd`` mirrors the
+    R-denominator used by the gross calc so ``pnl_r_net = pnl_r -
+    cost_usd/atr_usd`` is consistent.
+    """
+    inst = f"{trade.venue}:{trade.symbol}"
+    entry: tuple[Any, ...] | None = None
+    exit_row: tuple[Any, ...] | None = None
+    if trade.position_id:
+        entry = conn.execute(
+            "SELECT fee_usd, slippage_bps, size_usd, fill_price FROM fills "
+            "WHERE contribution_id = ? AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
+            (trade.position_id,),
+        ).fetchone()
+        exit_row = conn.execute(
+            "SELECT fee_usd, slippage_bps FROM fills "
+            "WHERE contribution_id = ? AND is_close = 1 ORDER BY ts_ms DESC LIMIT 1",
+            (trade.position_id,),
+        ).fetchone()
+    if entry is None:
+        entry = conn.execute(
+            "SELECT fee_usd, slippage_bps, size_usd, fill_price FROM fills "
+            "WHERE strategy_id = ? AND instrument_id = ? AND is_close = 0 "
+            "ORDER BY ts_ms DESC LIMIT 1",
+            (trade.strategy_id, inst),
+        ).fetchone()
+    if exit_row is None:
+        exit_row = conn.execute(
+            "SELECT fee_usd, slippage_bps FROM fills "
+            "WHERE strategy_id = ? AND instrument_id = ? AND is_close = 1 "
+            "ORDER BY ts_ms DESC LIMIT 1",
+            (trade.strategy_id, inst),
+        ).fetchone()
+    entry_fee = float(entry[0]) if entry else 0.0
+    entry_slip = float(entry[1]) if entry else 0.0
+    size_usd = float(entry[2]) if entry else trade.notional_usd
+    entry_price = float(entry[3]) if entry else trade.entry_price
+    exit_fee = float(exit_row[0]) if exit_row else 0.0
+    exit_slip = float(exit_row[1]) if exit_row else 0.0
+    bar_rows = conn.execute(
+        "SELECT close, high, low FROM bars WHERE instrument_id = ? "
+        "AND bar_interval = '1m' ORDER BY ts DESC LIMIT 14",
+        (inst,),
+    ).fetchall()
+    atr_pct_samples = [
+        (float(r[1]) - float(r[2])) / float(r[0]) for r in bar_rows if float(r[0]) > 0.0
+    ]
+    atr_pct = sum(atr_pct_samples) / len(atr_pct_samples) if atr_pct_samples else 0.005
+    atr_usd = max(entry_price * atr_pct * 2.0, 1e-6)
+    return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd
+
+
+def _safe_update_posterior(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
+    pnl_r: float, pnl_usd: float, now_ts: int,
+) -> None:
+    """Edge-validation Phase 1 — fold the cost-adjusted R into the bucket
+    posterior. Fail-open (``logger.warning``): a posterior failure must never
+    abort an already-committed close. This table is never read by sizing.
+    """
+    try:
+        (
+            entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd,
+        ) = _read_cost_inputs(conn, trade)
+        _pnl_usd_net, pnl_r_net = cost_adjusted_pnl_r(
+            gross_pnl_usd=pnl_usd, gross_pnl_r=pnl_r, size_usd=size_usd,
+            atr_usd=atr_usd, venue=trade.venue,
+            entry_fee_usd=entry_fee, exit_fee_usd=exit_fee,
+            entry_slippage_bps=entry_slip, exit_slippage_bps=exit_slip,
+        )
+        maybe_update_posterior(
+            conn, exchange=trade.venue, strategy=trade.strategy_id,
+            ticker=trade.symbol, regime=regime, pnl_r_net=pnl_r_net, now_ts=now_ts,
+        )
+    except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
+        logger.warning(
+            "[edge-validation] posterior update failed %s:%s: %r",
+            trade.venue, trade.symbol, exc,
+        )
 
 
 async def _safe_run_g8(

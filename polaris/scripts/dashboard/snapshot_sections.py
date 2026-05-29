@@ -13,10 +13,12 @@ import sqlite3
 import time
 from typing import Any, Final
 
+from polaris.core.learners.posterior import edge_verdict
 from polaris.scripts.dashboard.snapshot_models import (
     AlertRow,
     CellRow,
     ClosedTrade,
+    EdgeValidationRow,
     GateRow,
     GptStat,
     LearnerSlot,
@@ -298,6 +300,47 @@ def _learner_slots(conn: sqlite3.Connection, *, now_s: int) -> list[LearnerSlot]
         out.append(
             LearnerSlot(
                 learner_id=lid, key=key, value=value, delta_1h=value - prev, n_eff=n_eff,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section: edge validation (Phase 1 — Bayesian posterior, display only)
+# ---------------------------------------------------------------------------
+
+
+def _edge_validation(
+    conn: sqlite3.Connection, *, n: int = 8
+) -> list[EdgeValidationRow]:
+    """Read the cost-adjusted expectancy posterior per (strategy × cell × regime).
+
+    Ordered by confidence ``p_pos`` so the most-validated / most-anti edges
+    surface first. The ``est_cost`` flag is set for Capital rows (const-bps
+    cost stand-in) vs OKX rows (real fee + slippage). Measurement/display
+    only — this query has no effect on sizing.
+    """
+    rows = _safe_query(
+        conn,
+        """SELECT exchange, strategy, ticker, regime, mu, p_pos, n_samples
+           FROM learner_posterior
+           ORDER BY n_samples DESC, p_pos DESC""",
+    )
+    out: list[EdgeValidationRow] = []
+    for r in rows[:n]:
+        exchange = str(r[0])
+        p_pos = float(r[5] or 0.5)
+        out.append(
+            EdgeValidationRow(
+                exchange=exchange,
+                strategy=str(r[1]),
+                ticker=str(r[2]),
+                regime=str(r[3]),
+                cost_adj_exp=float(r[4] or 0.0),
+                p_pos=p_pos,
+                n_samples=int(r[6] or 0),
+                verdict=edge_verdict(p_pos),
+                est_cost=exchange == "capital",
             )
         )
     return out

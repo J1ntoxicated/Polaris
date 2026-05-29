@@ -60,6 +60,7 @@ from polaris.scripts.dashboard.render_panels import (
     TARGET_WIDTH,
     render_cell_bottom_panel,
     render_cell_top_panel,
+    render_edge_validation_panel,
     render_gate_panel,
     render_positions_panel,
     render_regime_panel,
@@ -249,10 +250,11 @@ def render_dashboard(
     rows.extend(render_positions_panel(snap, width=width))   # rows 6-13 (8)
     rows.extend(render_strategy_panel(snap, width=width))    # rows 14-22 (9)
     rows.extend(render_gate_panel(snap, width=width))        # rows 23-31 (9)
-    rows.extend(render_cell_top_panel(snap, width=width))    # rows 32-38 (7)
-    rows.extend(render_cell_bottom_panel(snap, width=width)) # rows 39-44 (6)
-    rows.extend(render_regime_panel(snap, width=width))      # rows 45-48 (4)
-    rows.extend(render_trades_panel(snap, width=width))      # rows 49-53 (5)
+    rows.extend(render_cell_top_panel(snap, width=width, max_rows=3))  # 5 rows (+overflow hint)
+    rows.extend(render_cell_bottom_panel(snap, width=width, max_rows=4))  # 5 rows
+    rows.extend(render_regime_panel(snap, width=width, max_rows=4))    # 5 rows (all 4 regimes incl crisis)
+    rows.extend(render_edge_validation_panel(snap, width=width, max_rows=2))  # 4 rows
+    rows.extend(render_trades_panel(snap, width=width, max_rows=1))    # 3 rows
     rows.append(render_learner_gpt_row(snap, width=width))   # row 54
     rows.append(render_alert_row(snap, width=width))         # row 55
     # Truncate or pad to fixed height
@@ -281,6 +283,7 @@ __all__ = [
     "render_cell_bottom_panel",
     "render_cell_top_panel",
     "render_dashboard",
+    "render_edge_validation_panel",
     "render_equity_panel",
     "render_full_screen",
     "render_gate_panel",

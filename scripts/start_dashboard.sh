@@ -22,7 +22,7 @@ set -e
 
 POLARIS_DIR="/Users/jinyoon/Projects/Polaris"
 REFRESH_SEC="${POLARIS_DASH_REFRESH:-5}"
-DASH_DB="${POLARIS_DASH_DB:-data/polaris.sqlite}"
+DASH_DB="${POLARIS_DASH_DB:-data/polaris_live.sqlite}"
 DASH_TARGET="${POLARIS_DASH_TARGET:-polaris.scripts.dashboard_v2}"
 
 # ── Profile detection (WORK 주중 9-17 / OFFHOURS 그 외) ─────────────────────
@@ -96,9 +96,10 @@ APPLESCRIPT
 sleep 0.3
 
 # ── 1c. (Optional) Aggressive tty cleanup — close ALL except Claude tty ────
-# Jin mandate "이 클러드 창 제외 나머지 다 끄고 — 메모리 누수로 뻑나서":
-# Override: SKIP_TTY_CLEANUP=1 ./start_dashboard.sh (skip aggressive)
-if [[ -z "${SKIP_TTY_CLEANUP:-}" ]]; then
+# DANGER: Claude Code가 Bash 도구로 실행하면 $$ tty가 Jin의 실제 Claude 창과
+# 달라서 이 블록이 Jin의 창을 닫아버린다 (feedback_never_kill_claude_session).
+# → 기본 OFF. 수동 터미널 실행 시에만 opt-in: AGGRESSIVE_TTY_CLEANUP=1 ./start_dashboard.sh
+if [[ -n "${AGGRESSIVE_TTY_CLEANUP:-}" ]]; then
     CLAUDE_TTY=$(ps -p $$ -o tty= 2>/dev/null | tr -d ' ')
     if [[ -n "$CLAUDE_TTY" ]]; then
         osascript <<APPLESCRIPT 2>/dev/null || true

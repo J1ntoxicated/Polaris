@@ -2,11 +2,11 @@
 
 A ``(venue, symbol)`` that the venue permanently refuses on compliance grounds
 (OKX US-region ``51155``: e.g. GAS, TRUMP) is recorded here so the focus
-producer + the order guard skip it — no reservation, no strategy fault. This is
-NOT a defensive throttle: it removes a guaranteed-reject symbol from the flow so
-the rest of the universe keeps trading (flow_not_block). Only permanent
-compliance rejects are recorded; transient codes (insufficient balance,
-no-fill) are never blocklisted.
+producer + the order guard skip it — no reservation, no strategy fault. It is
+purely a flow-preserving exclusion: it removes a guaranteed-reject symbol so the
+rest of the universe keeps trading (flow_not_block), never dampening sizing or
+participation. Only permanent compliance rejects are recorded; transient codes
+(insufficient balance, no-fill) are never blocklisted.
 
 SQLite-backed (survives restart). The schema DDL lives in
 ``polaris.storage.schema_ddl_ext`` (``DDL_VENUE_BLOCKLIST``).

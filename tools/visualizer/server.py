@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import http.server
 import json
 import socketserver
@@ -94,6 +95,24 @@ def _fresh_dashboard() -> list[str]:
     with _dash_lock:
         _dash_cache["rows"] = fresh
         _dash_cache["ts"] = time.time()
+    return fresh
+
+
+_snap_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_snap_lock = threading.Lock()
+
+
+def _fresh_snapshot() -> dict[str, Any]:
+    """DashboardSnapshot as a structured JSON dict (native web board), TTL-cached."""
+    now = time.time()
+    with _snap_lock:
+        data: dict[str, Any] | None = _snap_cache["data"]
+        if data is not None and (now - float(_snap_cache["ts"])) < _SNAPSHOT_TTL:
+            return data
+    fresh = dataclasses.asdict(collect_snapshot(_DB_PATH))
+    with _snap_lock:
+        _snap_cache["data"] = fresh
+        _snap_cache["ts"] = time.time()
     return fresh
 
 
@@ -182,6 +201,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/static/graph.json"):
             try:
                 self._json(_fresh_graph())
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"snapshot err: {exc}")
+            return
+        if self.path.startswith("/api/snapshot"):
+            try:
+                self._json(_fresh_snapshot())
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"snapshot err: {exc}")
             return

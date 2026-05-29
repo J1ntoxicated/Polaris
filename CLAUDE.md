@@ -100,5 +100,5 @@ DEMO/PAPER 명시 + Aggressive bias + 거부 키워드 sweep + length cap + vaul
 
 ## Quick reference
 - **24h paper loop**: `python3 -m polaris.scripts.ignite_p1 --paper --duration 86400 --tick 5 --full-pipeline --real-roundtrip --db data/polaris.sqlite -vv --log-file data/paper/polaris_runtime.log`
-- **Dashboard**: `./scripts/start_dashboard.sh` (우측 LG monitor, OFFHOURS profile auto-detect)
+- **Dashboard**: WEB — `./scripts/start_dashboard.sh` launches `tools.visualizer.server` (detached) + opens browser at http://localhost:8770 (left=Neural Cloud sphere, right=analysis board, fed by `/api/snapshot`). Terminal `dashboard_v2` retired 2026-05-29; tty-cleanup removed ([[feedback_never_kill_claude_session]]). Stop: `./scripts/stop_dashboard.sh`.
 - **Stop**: `kill -SIGTERM <PID>` · **Tests**: `python3 -m pytest tests/ -q` · **Vault lint**: `python3 tools/vault_lint.py --karpathy --report`

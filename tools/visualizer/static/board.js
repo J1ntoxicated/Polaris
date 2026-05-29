@@ -1,6 +1,7 @@
-/* board.js — Polaris right-half conventional analytics board (DEMO/PAPER display-only).
- * Native HTML/CSS, 1s /api/snapshot polling. No ANSI mirror. No sizing/order logic.
- * Injects its own <style>; renders into #board (right 50vw column).
+/* board.js — Polaris right-half analytics board + left-column bot log (DEMO/PAPER display-only).
+ * Native HTML/CSS. 1s polling: /api/snapshot → #board, /api/botlog → #botlog-body.
+ * All fetches cache-busted (?t=Date.now()) + no-store. No ANSI mirror. No sizing/order logic.
+ * Injects its own <style>; renders into #board (right 50vw). Bot-log pane styled in index.html.
  */
 (function () {
   'use strict';
@@ -436,19 +437,63 @@
 
   async function poll() {
     try {
-      const r = await fetch('/api/snapshot', { cache: 'no-store' });
+      // cache-bust (?t=) + no-store → always-fresh, no stale cached frame
+      const r = await fetch('/api/snapshot?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) render(await r.json());
+    } catch (e) { /* keep last frame */ }
+  }
+
+  // ── Bot log (bottom-left pane) ────────────────────────────────────
+  // ts (gray) + level/keyword coloring. Auto-scroll to bottom when new lines arrive.
+  function classifyLog(line) {
+    const l = line.toLowerCase();
+    if (l.includes('[error]') || l.includes('exception') || l.includes('traceback')) return 'bl-err';
+    if (l.includes('[warning]') || l.includes('rejected')) return 'bl-warn';
+    if (l.includes('order resp ok=true') || /\bopen\b/.test(l) || /\[tick \d+\]/.test(l)) return 'bl-hi';
+    return '';
+  }
+  function fmtLogLine(line) {
+    // split leading ISO timestamp (gray) from the rest
+    const m = line.match(/^(\S+T\S+Z?)\s+(.*)$/);
+    const cls = classifyLog(line);
+    if (m) {
+      return `<div class="bl-line ${cls}"><span class="ts">${esc(m[1])}</span> ${esc(m[2])}</div>`;
+    }
+    return `<div class="bl-line ${cls}">${esc(line)}</div>`;
+  }
+  let _lastLogSig = '';
+  async function pollLog() {
+    const body = $('botlog-body');
+    if (!body) return;
+    try {
+      const r = await fetch('/api/botlog?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      const lines = d.lines || [];
+      const sig = lines.length + '|' + (lines[lines.length - 1] || '');
+      if (sig === _lastLogSig) return;            // no change → skip re-render
+      _lastLogSig = sig;
+      // auto-scroll only if user is already near the bottom (don't yank during manual scroll-up)
+      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+      body.innerHTML = lines.map(fmtLogLine).join('');
+      if (atBottom) body.scrollTop = body.scrollHeight;
     } catch (e) { /* keep last frame */ }
   }
 
   function init() {
     injectStyle();
     const board = $('board');
-    if (!board) return;
-    board.innerHTML = skeleton();
-    setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
-    poll();
-    setInterval(poll, 1000);
+    if (board) {
+      board.innerHTML = skeleton();
+      setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
+      poll();
+      setInterval(poll, 1000);
+    }
+    // Bot log pane (left column bottom 1/3) — independent of #board presence
+    if ($('botlog-body')) {
+      pollLog();
+      setInterval(pollLog, 1000);
+    }
   }
 
   if (document.readyState === 'loading') {

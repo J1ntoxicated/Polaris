@@ -3818,7 +3818,7 @@
   }, 500);
 
   loadGraph();
-  setInterval(loadGraph, 30000);   // Jin 2026-04-30 랙 fix: 15s → 30s (loadGraph rebuild 너무 자주 stutter)
+  setInterval(loadGraph, 5000);   // Jin 2026-05-29 실시간화: 노드(포지션/universe) ~5s 갱신 (SSE 펄스는 별도 실시간)
 
   // Jin v25: debounced loadGraph — entry/exit burst (분당 5+ trade) 시 매번
   // setTimeout 호출 폭주 → frame stutter. 다음 reload 예정 있으면 reset 해서

@@ -70,6 +70,8 @@ def detect_regime_flip(
     underlying_group_id: str,
     candidate: str,
     now_ts: int,
+    evidence: dict[str, Any] | None = None,
+    confidence: float = 0.5,
 ) -> RegimeFlipDecision:
     """Apply 2-consecutive-close rule (or immediate for ``crisis``).
 
@@ -80,9 +82,18 @@ def detect_regime_flip(
           - ``crisis`` → immediate flip.
           - else: increment ``consecutive_count`` for that candidate.
             On count ≥ 2 → flip + reset.
+
+    ``evidence`` / ``confidence`` are alt-data EVIDENCE context (#6). They are
+    persisted to ``regime_state.evidence_json`` / ``confidence`` on every write
+    path as read-only context for G3/G7 — they do NOT alter the confirm gate.
+    The candidate (which may have been tilted by an alt-data hint upstream)
+    still has to clear the SAME 2-consecutive-close gate; evidence never
+    bypasses it.
     """
     if candidate not in REGIME_VALUES:
         raise ValueError(f"unknown regime {candidate!r}")
+    evidence_json = json.dumps(evidence or {}, separators=(",", ":"))
+    conf = float(confidence)
     row = conn.execute(
         "SELECT regime, consecutive_candidate, consecutive_count "
         "FROM regime_state WHERE venue = ? AND underlying_group_id = ?",
@@ -96,8 +107,8 @@ def detect_regime_flip(
             "INSERT INTO regime_state "
             "(venue, underlying_group_id, regime, confidence, evidence_json, "
             " consecutive_candidate, consecutive_count, updated_ts) "
-            "VALUES (?, ?, ?, 0.5, '{}', NULL, 0, ?)",
-            (venue, underlying_group_id, candidate, now_ts),
+            "VALUES (?, ?, ?, ?, ?, NULL, 0, ?)",
+            (venue, underlying_group_id, candidate, conf, evidence_json, now_ts),
         )
         return RegimeFlipDecision(
             venue=venue,
@@ -114,10 +125,11 @@ def detect_regime_flip(
 
     if candidate == cur_regime:
         conn.execute(
-            "UPDATE regime_state SET consecutive_candidate = NULL, "
+            "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
+            "consecutive_candidate = NULL, "
             "consecutive_count = 0, updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
-            (now_ts, venue, underlying_group_id),
+            (conf, evidence_json, now_ts, venue, underlying_group_id),
         )
         return RegimeFlipDecision(
             venue=venue,
@@ -132,10 +144,11 @@ def detect_regime_flip(
     if candidate == "crisis":
         # Immediate flip
         conn.execute(
-            "UPDATE regime_state SET regime = ?, consecutive_candidate = NULL, "
+            "UPDATE regime_state SET regime = ?, confidence = ?, "
+            "evidence_json = ?, consecutive_candidate = NULL, "
             "consecutive_count = 0, updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
-            (candidate, now_ts, venue, underlying_group_id),
+            (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
         _publish_event(conn, venue, underlying_group_id, cur_regime, candidate, now_ts)
         logger.warning(
@@ -160,10 +173,11 @@ def detect_regime_flip(
 
     if new_count >= REGIME_FLIP_CONFIRM_CLOSES:
         conn.execute(
-            "UPDATE regime_state SET regime = ?, consecutive_candidate = NULL, "
+            "UPDATE regime_state SET regime = ?, confidence = ?, "
+            "evidence_json = ?, consecutive_candidate = NULL, "
             "consecutive_count = 0, updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
-            (candidate, now_ts, venue, underlying_group_id),
+            (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
         _publish_event(conn, venue, underlying_group_id, cur_regime, candidate, now_ts)
         logger.info(
@@ -183,10 +197,11 @@ def detect_regime_flip(
             reason="confirmed_2x",
         )
     conn.execute(
-        "UPDATE regime_state SET consecutive_candidate = ?, "
+        "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
+        "consecutive_candidate = ?, "
         "consecutive_count = ?, updated_ts = ? "
         "WHERE venue = ? AND underlying_group_id = ?",
-        (candidate, new_count, now_ts, venue, underlying_group_id),
+        (conf, evidence_json, candidate, new_count, now_ts, venue, underlying_group_id),
     )
     return RegimeFlipDecision(
         venue=venue,

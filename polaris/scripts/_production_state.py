@@ -90,3 +90,9 @@ class ProdLoopState:
     # blocked. Overnight holds are free; there is no P&L halt, no entry veto.
     pdt_daytrade_count: int = 0
     equity_pdt_rank_downs: int = 0
+    # #6 — alt-data EVIDENCE producer counters. ``altdata_refreshes`` = successful
+    # non-empty collector fetches that updated the cache + snapshot; ``altdata_errors``
+    # = collector exceptions swallowed (last cache kept). SIGNAL/EVIDENCE only —
+    # these never drive sizing/blocking/exits; telemetry for the dashboard.
+    altdata_refreshes: int = 0
+    altdata_errors: int = 0

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sqlite3
@@ -21,6 +22,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from polaris.core.altdata.cache import AltDataCache
+from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
+from polaris.core.altdata.fred_macro import FredMacroCollector
+from polaris.core.altdata.okx_funding import OKXFundingCollector
 from polaris.core.isolation.allocator_fence import (
     get_process_fence,
     reset_process_fence,
@@ -59,8 +64,10 @@ __all__ = [
     "FOCUS_CYCLE_TARGET",
     "ProdLoopState",
     "main",
+    "persist_altdata_snapshot",
     "run_production_paper_loop",
     "_all_strategies",
+    "_altdata_producer",
     "_evaluate_swaps",
     "_is_finite_signal",
     "_lookup_regime",
@@ -154,6 +161,98 @@ async def _layer0_producer(
 
 
 # ---------------------------------------------------------------------------
+# Layer 6 — alt-data EVIDENCE background producer (#6)
+# ---------------------------------------------------------------------------
+
+
+def persist_altdata_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    ts: int,
+    source: str,
+    asset_class: str,
+    payload: dict[str, Any],
+) -> None:
+    """Append a raw alt-data EVIDENCE snapshot row (idempotent on ``(ts, source)``).
+
+    Read-only audit context. This table is NEVER consulted by sizing / blocking
+    / exit / halt logic — it backs the dashboard + G3/G7 evidence trail only.
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO altdata_snapshot (ts, source, asset_class, payload_json) "
+        "VALUES (?, ?, ?, ?)",
+        (int(ts), source, asset_class, json.dumps(payload, separators=(",", ":"))),
+    )
+
+
+def _default_altdata_collectors() -> list[Any]:
+    """The live alt-data EVIDENCE collectors (keyless/keyed graceful-skip).
+
+    Keyless sources (Coinglass / MyFxBook) are intentionally omitted until keys
+    are present — their stubs would only ever return ``{}``. FRED uses
+    ``FRED_API_KEY`` (no key → graceful ``{}``, no network); OKX funding + alt.me
+    F&G need no key.
+    """
+    return [OKXFundingCollector(), CryptoFearGreedCollector(), FredMacroCollector()]
+
+
+async def _altdata_producer(
+    conn: sqlite3.Connection,
+    *,
+    cache: AltDataCache,
+    state: ProdLoopState,
+    stop_evt: asyncio.Event,
+    collectors: list[Any] | None = None,
+    poll_sec: float = 30.0,
+) -> None:
+    """Refresh alt-data EVIDENCE collectors on each one's own TTL cadence.
+
+    SIGNAL/EVIDENCE only. Each collector is re-fetched only after its own
+    ``ttl_sec`` has elapsed (OKX funding 300s, F&G 1800s, FRED 3600s). On a
+    successful non-empty fetch the payload updates the ``AltDataCache`` singleton
+    and a snapshot row is persisted. On a collector error or empty result the
+    LAST cache value is kept untouched (graceful — fewer evidence sources, never
+    a throttle / halt). The loop exits promptly when ``stop_evt`` is set.
+    """
+    active = collectors if collectors is not None else _default_altdata_collectors()
+    last_fetch: dict[str, float] = {}
+    while not stop_evt.is_set():
+        now_mono = time.monotonic()
+        for coll in active:
+            name = coll.name
+            ttl = float(getattr(coll, "ttl_sec", 0) or 0)
+            prev = last_fetch.get(name)
+            if prev is not None and (now_mono - prev) < ttl:
+                continue
+            try:
+                payload = await coll.fetch()
+            except Exception as exc:  # noqa: BLE001 — never let a collector halt the loop
+                logger.warning(
+                    "[altdata] collector %s raised (%r) — keeping last cache "
+                    "(no throttle)", name, exc,
+                )
+                state.altdata_errors += 1
+                last_fetch[name] = now_mono  # respect cadence even on error
+                continue
+            last_fetch[name] = now_mono
+            if not payload:
+                # Empty result = keyless/parse skip. Keep last cache value.
+                continue
+            cache.set(name, payload, ttl_sec=int(ttl) or 1, now_ts=time.time())
+            asset_class = (getattr(coll, "asset_classes", ()) or ("",))[0]
+            try:
+                persist_altdata_snapshot(
+                    conn, ts=int(time.time()), source=name,
+                    asset_class=asset_class, payload=payload,
+                )
+            except Exception:  # noqa: BLE001 — snapshot is audit-only, never fatal
+                logger.exception("[altdata] snapshot persist failed for %s", name)
+            state.altdata_refreshes += 1
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop_evt.wait(), timeout=poll_sec)
+
+
+# ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 
@@ -229,6 +328,13 @@ async def run_production_paper_loop(
     layer0_task = asyncio.create_task(
         _layer0_producer(conn, state=state, stop_evt=stop_evt)
     )
+    # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each
+    # source's own TTL cadence; the cache feeds compute_and_flip_regime as
+    # read-only regime evidence (SIGNAL only, never a throttle).
+    altdata_cache = AltDataCache()
+    altdata_task = asyncio.create_task(
+        _altdata_producer(conn, cache=altdata_cache, state=state, stop_evt=stop_evt)
+    )
 
     capital_session: CapitalSession | None = None
     cap_key = os.environ.get("CAP_API_KEY")
@@ -278,6 +384,7 @@ async def run_production_paper_loop(
                     capital_session=capital_session, tick_idx=tick_idx,
                     phase=phase, real_roundtrip=real_roundtrip,
                     okx_adapter=okx_adapter, alpaca_adapter=alpaca_adapter,
+                    altdata_cache=altdata_cache,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("[tick %d] error: %r", tick_idx, exc)
@@ -286,8 +393,11 @@ async def run_production_paper_loop(
     finally:
         stop_evt.set()
         layer0_task.cancel()
+        altdata_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await layer0_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await altdata_task
         if okx_adapter is not None:
             await okx_adapter.aclose()
         if alpaca_adapter is not None:

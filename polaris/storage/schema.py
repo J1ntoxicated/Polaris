@@ -17,6 +17,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from polaris.storage.schema_ddl_altdata import (
+    DDL_ALTDATA_SNAPSHOT,
+    DDL_ALTDATA_SNAPSHOT_INDEX,
+)
 from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS,
     DDL_ALLOCATOR_RESERVATIONS_KEY_INDEX,
@@ -152,6 +156,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_FILLS_INDEX_TS,
     DDL_FILLS_INDEX_VENUE_SYMBOL,
     DDL_FILLS_INDEX_ORDER,
+    # Layer 6 — alt-data EVIDENCE snapshot (#6)
+    DDL_ALTDATA_SNAPSHOT,
+    DDL_ALTDATA_SNAPSHOT_INDEX,
 )
 
 

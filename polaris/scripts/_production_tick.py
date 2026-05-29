@@ -243,6 +243,7 @@ async def _run_tick(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     alpaca_adapter: Any = None,
+    altdata_cache: Any = None,
 ) -> None:
     """One 5-second cycle (Day 8 spec B + D + E + F + Day 9 F10).
 
@@ -312,7 +313,7 @@ async def _run_tick(
             continue
         regime_by_group[(venue, group_id)] = compute_and_flip_regime(
             conn, venue=venue, underlying_group_id=group_id,
-            bars=bars_1m, now_ts=now_ts,
+            bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
         )
 
     universe_rows: list[dict[str, Any]] = []

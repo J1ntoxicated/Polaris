@@ -23,9 +23,11 @@ import os
 import sqlite3
 import time
 from collections.abc import Sequence
+from typing import Any
 
 import httpx
 
+from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.schema import Bar
 from polaris.core.isolation.blocklist import load_blocklist
 from polaris.core.live_recalc.regime_flip import detect_regime_flip
@@ -282,20 +284,46 @@ def compute_and_flip_regime(
     underlying_group_id: str,
     bars: Sequence[Bar],
     now_ts: int,
+    altdata_cache: Any = None,
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
     Returns the regime SSOT *after* applying the flip rule so callers using
     the Layer 6 SSOT receive the gated value (matches strategy_swap's
     ``_lookup_regime`` semantics).
+
+    ``altdata_cache`` (#6) supplies alt-data EVIDENCE only. When present, the
+    fuser may tilt the candidate to a SUGGESTED label and surface raw evidence:
+
+      * The price-derived candidate is computed first and always stands when
+        there is no fresh evidence (failing/keyless collector → price-only;
+        correct fallback, NOT a defensive throttle).
+      * A hint NEVER downgrades a price-derived ``crisis`` — evidence may only
+        confirm/tilt a borderline (non-crisis) price regime.
+      * The (possibly tilted) candidate STILL has to clear the unchanged
+        2-consecutive-close confirm gate. Evidence is additive context only;
+        it does not size, block, exit, or write learner/risk state.
     """
-    candidate = compute_real_regime(bars)
+    price_candidate = compute_real_regime(bars)
+    candidate = price_candidate
+    evidence: dict[str, Any] = {}
+    confidence = 0.5
+    if altdata_cache is not None:
+        hint, conf, ev = fuse_evidence(underlying_group_id, altdata_cache, now_ts=now_ts)
+        evidence = ev
+        # Conservative override: never override a price-derived crisis DOWN —
+        # evidence can only confirm/tilt a borderline (non-crisis) regime.
+        if hint and price_candidate != "crisis":
+            candidate = hint
+            confidence = conf
     decision = detect_regime_flip(
         conn,
         venue=venue,
         underlying_group_id=underlying_group_id,
         candidate=candidate,
         now_ts=now_ts,
+        evidence=evidence,
+        confidence=confidence,
     )
     # Either the flip was confirmed (decision.to_regime is the new SSOT) or
     # the row stayed at the prior regime. Read back the persisted SSOT so the

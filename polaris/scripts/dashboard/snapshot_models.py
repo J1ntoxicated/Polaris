@@ -144,6 +144,44 @@ class AlertRow:
 
 
 @dataclass(slots=True)
+class StreamSummary:
+    """Per-stream (venue lane) rollup for the stage-2 dashboard — read-only.
+
+    One row per registered stream (A_okx_crypto / B_capital_cfd /
+    C_alpaca_equity), emitted even when a venue has zero activity so all three
+    lanes always render. ``stream_id`` / ``venue`` / ``label`` / ``product_class``
+    / ``color`` are sourced from the streams SSOT (``polaris.core.streams.config``
+    + a display label/color map keyed on stream_id) — never a second hardcoded
+    venue map.
+
+    Reconciliation invariant: ``Σ net_pnl_usd`` == global ``daily_pnl_usd`` and
+    ``Σ open_positions_n`` == global ``open_positions_n`` (the dashboard never
+    lies). ``upnl_usd`` / ``exposed_usd`` likewise sum to the global totals.
+
+    Per-stream derivables: ``net_pnl_usd`` (session realised, net of fees),
+    ``daily_trades`` (closed-fill count), ``open_positions_n``, ``exposed_usd``
+    (deployed notional), ``upnl_usd`` (unrealised). ``equity_usd`` /
+    ``drawdown_pct`` are best-effort (``starting_capital + net_pnl + upnl`` and a
+    naive peak/now DD); ``starting_capital`` is the per-venue split where known
+    (okx / capital), alpaca placeholder 0.0.
+    """
+
+    stream_id: str
+    venue: str
+    label: str
+    product_class: str
+    color: str
+    starting_capital: float = 0.0
+    equity_usd: float = 0.0
+    net_pnl_usd: float = 0.0
+    upnl_usd: float = 0.0
+    exposed_usd: float = 0.0
+    open_positions_n: int = 0
+    daily_trades: int = 0
+    drawdown_pct: float = 0.0
+
+
+@dataclass(slots=True)
 class DashboardSnapshot:
     ts_now: int = 0
     starting_capital: float = STARTING_CAPITAL
@@ -179,3 +217,7 @@ class DashboardSnapshot:
     edge_validation: list[EdgeValidationRow] = field(default_factory=list)
     gpt_stats: list[GptStat] = field(default_factory=list)
     alerts: list[AlertRow] = field(default_factory=list)
+    # Stage-2 per-stream (venue lane) rollup — additive. One row per registered
+    # stream; sums reconcile to the global totals above. server.py
+    # dataclasses.asdict auto-serializes this for the web snapshot.
+    streams: list[StreamSummary] = field(default_factory=list)

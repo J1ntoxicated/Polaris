@@ -11,9 +11,9 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    /* header / kpis / equity (auto) + mid + bottom (bounded flex). minmax(0,..) keeps the
-       sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
-    grid-template-rows: auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
+    /* header / kpis / streams / equity (auto) + mid + bottom (bounded flex). minmax(0,..)
+       keeps the sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
+    grid-template-rows: auto auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
     gap: 8px;
     padding: 10px 16px;
     box-sizing: border-box;
@@ -60,6 +60,40 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #board .kpi .sub { color: var(--p-gry); font-size: 9px; margin-top: 1px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Stream summary strip (T15 stage-2) — server-fed d.streams, 3 venue lanes.
+     Display-only rollup; numbers are authoritative from snapshot.streams[]. */
+  #board .streams-strip {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px;
+  }
+  #board .lane {
+    border: 1px solid rgba(95,135,175,0.22);
+    border-left: 4px solid var(--ghost);
+    background: rgba(15,19,26,0.55);
+    padding: 5px 9px; min-width: 0; overflow: hidden;
+  }
+  #board .lane.lane-a { border-left-color: var(--stream-a); }
+  #board .lane.lane-b { border-left-color: var(--stream-b); }
+  #board .lane.lane-c { border-left-color: var(--stream-c); }
+  #board .lane .ln-top {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  #board .lane .ln-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #board .lane.lane-a .ln-label { color: var(--stream-a); }
+  #board .lane.lane-b .ln-label { color: var(--stream-b); }
+  #board .lane.lane-c .ln-label { color: var(--stream-c); }
+  #board .lane .ln-eq { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums;
+    color: var(--p-wht); white-space: nowrap; }
+  #board .lane .ln-stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; margin-top: 3px;
+    font-size: 10px;
+  }
+  #board .lane .ln-stats .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .lane .ln-stats .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #board .lane .ln-stats .s .lv { font-variant-numeric: tabular-nums; }
 
   /* Equity chart */
   #board .eq-wrap {
@@ -257,6 +291,8 @@
 
     <div class="kpis" id="b-kpis"></div>
 
+    <div class="streams-strip" id="b-streams"></div>
+
     <div class="eq-wrap">
       <div class="eq-head">
         <span class="h-title">Equity Curve (SESSION)</span>
@@ -318,6 +354,34 @@
     $('b-kpis').innerHTML = cards.map(c =>
       `<div class="kpi"><div class="k">${esc(c.k)}</div><div class="v num ${c.cls}">${c.v}</div><div class="sub">${esc(c.sub)}</div></div>`
     ).join('');
+  }
+
+  // Per-stream summary strip (T15 stage-2). Server-fed d.streams is authoritative
+  // for these rollup numbers (prefer over client laneGroups, which stays for the
+  // per-row position/trade grouping). Graceful when d.streams missing/empty.
+  function renderStreams(d) {
+    const el = $('b-streams');
+    if (!el) return;
+    const rows = d.streams || [];
+    if (!rows.length) { el.innerHTML = ''; return; }   // older snapshot → render nothing
+    el.innerHTML = rows.map(s => {
+      const lc = venueStream(s.venue).toLowerCase();    // reuse stage-1 venue→stream SSOT
+      const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
+      return `<div class="lane lane-${lc}" title="${esc(s.label)} (${esc(s.product_class)}) · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
+        <div class="ln-top">
+          <span class="ln-label">${esc(s.label)}</span>
+          <span class="ln-eq">${fmtUsd(s.equity_usd, 0)}</span>
+        </div>
+        <div class="ln-stats">
+          <span class="s"><span class="lk">Net PnL</span> <span class="lv ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 2)}</span></span>
+          <span class="s"><span class="lk">uPnL</span> <span class="lv ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 2)}</span></span>
+          <span class="s"><span class="lk">Exposure</span> <span class="lv b-flat">${fmtUsd(s.exposed_usd, 0)}</span></span>
+          <span class="s"><span class="lk">Open</span> <span class="lv b-flat">${s.open_positions_n || 0}</span></span>
+          <span class="s"><span class="lk">Trades</span> <span class="lv b-flat">${s.daily_trades || 0}</span></span>
+          <span class="s"><span class="lk">Exp%</span> <span class="lv b-flat">${fmtPct(expPct, 1)}</span></span>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   function renderEquity(d) {
@@ -542,6 +606,7 @@
   function render(d) {
     renderHeader(d);
     renderKpis(d);
+    renderStreams(d);
     renderEquity(d);
     renderPositions(d);
     renderTrades(d);

@@ -44,6 +44,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     PositionRow,
     RegimeBar,
     StrategyStat,
+    StreamSummary,
 )
 from polaris.scripts.dashboard.snapshot_queries import (
     _build_equity_curve,
@@ -53,6 +54,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _entry_price_lookup,
     _last_prices,
     _now_s,
+    _per_stream_summary,
     _read_positions,
     _strategy_stats,
 )
@@ -81,6 +83,7 @@ __all__ = [
     "LearnerSlot",
     "PositionRow",
     "RegimeBar",
+    "StreamSummary",
     "StrategyStat",
     "collect_snapshot",
 ]
@@ -160,6 +163,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         gpt_stats = _gpt_stats(conn, now_s=now_s)
         alerts = _alerts(conn, n=3)
         focus_n, focus_ts = _universe(conn)
+        # Stage-2 per-stream rollup. ``positions`` is passed so the per-stream
+        # open_n / upnl / exposed decompose the global totals exactly.
+        streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -190,6 +196,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             edge_validation=edge_validation,
             gpt_stats=gpt_stats,
             alerts=alerts,
+            streams=streams,
         )
     finally:
         conn.close()

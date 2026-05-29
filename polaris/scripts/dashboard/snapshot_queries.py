@@ -14,9 +14,15 @@ import time
 from collections.abc import Mapping
 from typing import Any, Final
 
+from polaris.core.sizing.constants import (
+    demo_starting_equity_capital,
+    demo_starting_equity_okx,
+)
+from polaris.core.streams.config import STREAMS
 from polaris.scripts.dashboard.snapshot_models import (
     PositionRow,
     StrategyStat,
+    StreamSummary,
 )
 
 DEFAULT_R_USD: Final[float] = 10.0          # 1 R = $10 (display heuristic)
@@ -428,4 +434,134 @@ def _strategy_stats(
         by_strat[p.strategy_id] = s
 
     out = sorted(by_strat.values(), key=lambda s: s.pnl_usd, reverse=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section: per-stream (venue lane) summary
+# ---------------------------------------------------------------------------
+
+# Display label + web color per stream, keyed on the SSOT ``stream_id``
+# (``polaris.core.streams.config.STREAMS``). The venue→stream_id mapping itself
+# is NOT duplicated here — it comes from ``VENUE_TO_STREAM`` (the SSOT). This map
+# only carries the two purely-presentational attributes the streams config does
+# not own (a human label + a CSS hex color the web board renders). Hex colors so
+# the JSON snapshot is directly consumable by the frontend (board.js).
+_STREAM_DISPLAY: Final[Mapping[str, tuple[str, str]]] = {
+    "A_okx_crypto": ("OKX SPOT", "#5fafff"),       # blue lane
+    "B_capital_cfd": ("CAPITAL CFD", "#ffd75f"),   # gold lane
+    "C_alpaca_equity": ("ALPACA EQUITY", "#87d75f"),  # green lane
+}
+_STREAM_DISPLAY_DEFAULT: Final[tuple[str, str]] = ("?", "#9e9e9e")
+
+
+def _per_stream_summary(
+    conn: sqlite3.Connection,
+    *,
+    now_s: int,
+    positions: list[PositionRow] | None = None,
+) -> list[StreamSummary]:
+    """Per-stream (venue lane) rollup — one row per registered stream.
+
+    Emits a row for **every** stream in the SSOT (``STREAMS``) even when a venue
+    has zero activity, so the dashboard always renders all lanes. Reconciliation
+    invariant (the dashboard never lies):
+
+    - ``Σ net_pnl_usd`` == global ``daily_pnl_usd`` (``_daily_realised_pnl``):
+      both use the identical session lookback + ``Σ(close pnl) − Σ(all fees)``
+      formula, grouped by venue here.
+    - ``Σ daily_trades`` == global closed-trade count.
+    - ``Σ open_positions_n`` / ``upnl_usd`` / ``exposed_usd`` decompose the same
+      ``positions`` list the global snapshot aggregates, so they sum exactly.
+
+    ``positions`` is the already-built list from ``_read_positions`` (passed by
+    ``collect_snapshot`` for exact reconciliation); when omitted it is read here.
+    Pure read-only; no trading behavior touched.
+    """
+    if positions is None:
+        last_prices = _last_prices(conn)
+        entry_lookup = _entry_price_lookup(conn)
+        cell_mult = _cell_mult_lookup(conn)
+        # regime_lookup is only used to refine cell_mult; an empty map is fine
+        # for the rollup (mult does not affect pnl/upnl/exposed aggregation).
+        positions = _read_positions(
+            conn,
+            now_s=now_s,
+            last_prices=last_prices,
+            entry_lookup=entry_lookup,
+            cell_mult=cell_mult,
+            regime_lookup={},
+        )
+
+    # --- fills side: net realised pnl + closed-trade count, GROUP BY venue.
+    # Same formula + session lookback as ``_daily_realised_pnl`` so the per-venue
+    # sum reconciles to the global total exactly.
+    lookback_ms = _session_start_ms(conn, now_s=now_s)
+    fill_rows = _safe_query(
+        conn,
+        """SELECT venue,
+                  COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
+                  - COALESCE(SUM(fee_usd), 0.0) AS net_pnl,
+                  COALESCE(SUM(is_close), 0) AS closed_n
+           FROM fills WHERE ts_ms >= ?
+           GROUP BY venue""",
+        (lookback_ms,),
+    )
+    pnl_by_venue: dict[str, float] = {}
+    trades_by_venue: dict[str, int] = {}
+    for r in fill_rows:
+        venue = str(r[0] or "").lower()
+        pnl_by_venue[venue] = float(r[1] or 0.0)
+        trades_by_venue[venue] = int(r[2] or 0)
+
+    # --- positions side: open_n / exposed / upnl, grouped by venue from the
+    # already-aggregated PositionRow list (exact decomposition of the globals).
+    open_by_venue: dict[str, int] = {}
+    exposed_by_venue: dict[str, float] = {}
+    upnl_by_venue: dict[str, float] = {}
+    for p in positions:
+        v = p.venue.lower()
+        open_by_venue[v] = open_by_venue.get(v, 0) + 1
+        exposed_by_venue[v] = exposed_by_venue.get(v, 0.0) + p.size_usd
+        upnl_by_venue[v] = upnl_by_venue.get(v, 0.0) + p.upnl_usd
+
+    # Per-venue starting capital where known (okx / capital split). Alpaca has
+    # no account probe in the snapshot path → 0.0 placeholder.
+    starting_by_venue: dict[str, float] = {
+        "okx": demo_starting_equity_okx(),
+        "capital": demo_starting_equity_capital(),
+        "alpaca": 0.0,
+    }
+
+    out: list[StreamSummary] = []
+    # Stable lane order = SSOT registration order (A, B, C).
+    for stream_id, cfg in STREAMS.items():
+        venue = cfg.venue
+        label, color = _STREAM_DISPLAY.get(stream_id, _STREAM_DISPLAY_DEFAULT)
+        net_pnl = pnl_by_venue.get(venue, 0.0)
+        upnl = upnl_by_venue.get(venue, 0.0)
+        starting = starting_by_venue.get(venue, 0.0)
+        equity = starting + net_pnl + upnl
+        # Naive per-stream DD: shortfall of current equity vs starting (peak
+        # proxy). Best-effort display only — the global curve owns the true DD.
+        drawdown_pct = (
+            max(0.0, (starting - equity) / starting * 100.0) if starting > 0 else 0.0
+        )
+        out.append(
+            StreamSummary(
+                stream_id=stream_id,
+                venue=venue,
+                label=label,
+                product_class=cfg.product_class,
+                color=color,
+                starting_capital=starting,
+                equity_usd=equity,
+                net_pnl_usd=net_pnl,
+                upnl_usd=upnl,
+                exposed_usd=exposed_by_venue.get(venue, 0.0),
+                open_positions_n=open_by_venue.get(venue, 0),
+                daily_trades=trades_by_venue.get(venue, 0),
+                drawdown_pct=drawdown_pct,
+            )
+        )
     return out

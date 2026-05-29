@@ -2,7 +2,7 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-date_updated: 2026-05-28
+date_updated: 2026-05-29
 tags: [now, tier-0]
 ---
 
@@ -10,7 +10,9 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
-**2026-05-28 P0 venue wire fix + 라이브 증명 (최신)**: 5-axis 검수가 P0 발견 — production paper loop 이 실제 demo 주문을 한 번도 안 보냄 (open/close 둘 다 simulate-only, `--real-roundtrip` 폐기). 기존 `data/polaris.sqlite` 17,259 fills 전부 가짜. builder TDD 로 wire 복구 (618 green) → **codex 외부 review 가 green 코드에서 실주문 안전 P0 5건 포착** (db 혼재 / reservation 누수 / orphan 실포지션 / Capital deal_id 유실 / pnl_r 오산) → 재수정, codex 재review 7/7 safe=yes → 627 green. **라이브 증명**: `ignite_p1 --real-roundtrip --db data/polaris_live.sqlite` 로 Capital demo 실왕복 (13 fills 실 dealId, fault 0 / orphan 0 / fence conflict 0). OKX live = 시그널 미발화로 미확인 (gap). silent-drop 2건 warning 추가. 교훈 = green ≠ safe, builder≠reviewer 실증 → [[ADR-010]] + [[t-p0-wire_2026-05-28]] + [[2026-05-28_5axis_audit]].
+**2026-05-29 대시보드 부활 + 동적 시각화 + 스페이스 비주얼 (최신)**: 봇 PID 96290 (`data/polaris_live.sqlite`, 24h 수집) 가동 유지. (1) **"봇 실행이 Claude 창 닫던" root cause 해결** — `start_dashboard.sh` aggressive tty cleanup 가 Bash 도구의 `$$` tty 를 Claude 창으로 오인해 Jin 창을 닫음 → 기본 OFF 반전 + 기본 DB → polaris_live ([[feedback_never_kill_claude_session]]). 대시보드 PID 7638 라이브 가동. (2) **`7e4cf33`** Bayesian edge-validation P1 (`posterior.py` NIG, display-only) + dashboard overflow 힌트 + crisis silent-drop 수정 + orphan liquidation 스크립트 (666 green, fresh-Claude SAFE). (3) **`5940107`** dashboard_v2 동적 시각화 (자산 스파크라인 + DD/노출/AI/승률 게이지 + 셀 히트타일, 40행 불변). (4) **스페이스 비주얼** `tools/visualizer/` 이식 중 (mk1 Neural Cloud → collect_snapshot 어댑터, plan: `.claude/plans/space_viz_neural_cloud_2026-05-29.md`). 판단: OKX 고아 `--live` 청산 SKIP (USDT $35.8k 충분, 고아=봇 활성 포지션). digest [[2026-05-29_dashboard_revival_dynamic_viz_spaceviz]].
+
+**2026-05-28 P0 venue wire fix + 라이브 증명**: 5-axis 검수가 P0 발견 — production paper loop 이 실제 demo 주문을 한 번도 안 보냄 (open/close 둘 다 simulate-only, `--real-roundtrip` 폐기). 기존 `data/polaris.sqlite` 17,259 fills 전부 가짜. builder TDD 로 wire 복구 (618 green) → **codex 외부 review 가 green 코드에서 실주문 안전 P0 5건 포착** (db 혼재 / reservation 누수 / orphan 실포지션 / Capital deal_id 유실 / pnl_r 오산) → 재수정, codex 재review 7/7 safe=yes → 627 green. **라이브 증명**: `ignite_p1 --real-roundtrip --db data/polaris_live.sqlite` 로 Capital demo 실왕복 (13 fills 실 dealId, fault 0 / orphan 0 / fence conflict 0). OKX live = 시그널 미발화로 미확인 (gap). silent-drop 2건 warning 추가. 교훈 = green ≠ safe, builder≠reviewer 실증 → [[ADR-010]] + [[t-p0-wire_2026-05-28]] + [[2026-05-28_5axis_audit]].
 
 **Day 8-10 backlog 상태 (stale 해소)**: Day 8 P0 quad (AllocatorFence/supervise/dynamic focus/ingest) + Day 9 24h production (G6/G7/G8 GPT wire + live_recalc) 완료. Day 10 P1 L5→L3 sizing wire (session×regime×triple_block in T4) done 2026-05-26. Day 10 P0 Capital silent-drop = audit frame error 로 debunk (ts_ms -10h drift historical only). 현재 최우선 = 위 venue round-trip 활성화 완료, 남은 gap = OKX live 증명 + orphan scanner.
 
@@ -123,4 +125,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-28 14:38 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-29 03:27 (paper=False, full_pipeline=True)

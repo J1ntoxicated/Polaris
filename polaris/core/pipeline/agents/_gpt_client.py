@@ -160,6 +160,21 @@ def _is_gpt5(model: str) -> bool:
     return model.lower().startswith("gpt-5")
 
 
+def _resolve_reasoning_effort(model: str, requested: str | None) -> str:
+    """Resolve the reasoning_effort value for a gpt-5.x model.
+
+    gpt-5.5 dropped ``'minimal'`` (returns 400 "does not support 'minimal'";
+    supported: none/low/medium/high/xhigh) so we map minimal→``'none'`` for that
+    family (equivalent: skip chain-of-thought so the token budget goes to the
+    answer). gpt-5-mini (P0 gates) still accepts ``'minimal'``. Explicit non-
+    minimal overrides are never rewritten. (forensic 2026-05-29 P0.)
+    """
+    effort = str(requested or "minimal")
+    if effort == "minimal" and "5.5" in model.lower():
+        return "none"
+    return effort
+
+
 class _GPTMessages:
     """``client.messages.create(...)`` shim — Anthropic-shape wrapper around OpenAI."""
 
@@ -192,9 +207,10 @@ class _GPTMessages:
             # token consumption so the entire ``max_completion_tokens`` budget
             # goes to the actual JSON answer (otherwise reasoning_tokens
             # silently eat the cap and ``content`` returns empty string).
-            # Caller may override via ``reasoning_effort`` kwarg.
-            payload["reasoning_effort"] = str(
-                kwargs.get("reasoning_effort") or "minimal"
+            # Caller may override via ``reasoning_effort`` kwarg. gpt-5.5 dropped
+            # 'minimal' → mapped to 'none' (see _resolve_reasoning_effort).
+            payload["reasoning_effort"] = _resolve_reasoning_effort(
+                model, kwargs.get("reasoning_effort")
             )
         else:
             # gpt-4.x accepts a custom temperature; gpt-5.x does not.

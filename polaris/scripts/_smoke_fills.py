@@ -76,8 +76,10 @@ def _okx_fill_payload(
         "side": flipped,
         "ordType": "ioc",
         "tgtCcy": "quote_ccy",
-        "sz": str(notional_usd),
-        "accFillSz": str(notional_usd),
+        "sz": str(notional_usd),  # request sz is quote ($) for tgtCcy=quote_ccy
+        # accFillSz is the filled BASE-ccy qty (notional / price) — OKX reports
+        # fills in base ccy regardless of the quote request sz.
+        "accFillSz": str(notional_usd / avg_price if avg_price > 0.0 else 0.0),
         "avgPx": str(avg_price),
         "fee": str(-notional_usd * 0.001),
         "feeCcy": "USDT",

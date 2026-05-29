@@ -13,16 +13,19 @@ from polaris.core.data.fill_normalizer import (
 
 
 def test_okx_fill_to_unified_quote_ccy() -> None:
+    # A $10-notional market buy (request sz=10 USDT, tgtCcy=quote_ccy) fills
+    # ~0.00016667 BTC @ 60000. OKX reports accFillSz in BASE ccy regardless of
+    # the request's quote sz, so size_usd = accFillSz * avgPx = $10.
     payload = {
         "ordId": "999",
         "clOrdId": "polarisvb",
         "instId": "BTC-USDT",
         "tdMode": "cash",
         "side": "buy",
-        "ordType": "ioc",
+        "ordType": "market",
         "tgtCcy": "quote_ccy",
         "sz": "10",
-        "accFillSz": "10",  # in quote ccy when tgtCcy=quote_ccy
+        "accFillSz": "0.00016667",  # base ccy (BTC) — the filled quantity
         "avgPx": "60000",
         "fee": "-0.0035",
         "feeCcy": "USDT",
@@ -34,7 +37,8 @@ def test_okx_fill_to_unified_quote_ccy() -> None:
     assert f.venue == "okx"
     assert f.instrument_id == "okx:BTC-USDT"
     assert f.side == "buy"
-    assert f.size_usd == 10.0  # quote ccy
+    assert f.base_qty == pytest.approx(0.00016667)
+    assert f.size_usd == pytest.approx(10.0, rel=1e-3)  # base * avgPx
     assert f.fill_price == 60_000.0
     assert f.fee_usd == pytest.approx(0.0035)
     assert f.slippage_bps == pytest.approx(0.0)
@@ -60,6 +64,28 @@ def test_okx_fill_base_ccy_units_recovered() -> None:
     assert f.base_qty == pytest.approx(0.001)
     assert f.quote_qty == pytest.approx(60.0)
     assert f.size_usd == pytest.approx(60.0)
+
+
+def test_okx_fill_quote_ccy_accfillsz_is_base() -> None:
+    """OKX accFillSz is ALWAYS base ccy, even for a tgtCcy=quote_ccy market
+    buy (the *request* sz is quote, but the *fill* qty is base). A real
+    0.618-ETH fill (~$1240 @ 2007) must record size_usd~1240 and base_qty
+    0.618 — NOT $0.62 (the pre-2026-05-29 flip bug that mis-treated base
+    accFillSz as quote, under-recording the position and orphaning the rest)."""
+    payload = {
+        "ordId": "7",
+        "instId": "ETH-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "0.618",  # base ccy (ETH) — the actual filled quantity
+        "avgPx": "2007.0",
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="tsmom")
+    assert f.base_qty == pytest.approx(0.618)
+    assert f.size_usd == pytest.approx(0.618 * 2007.0, rel=1e-6)
+    assert f.fill_price == pytest.approx(2007.0)
 
 
 def test_okx_fill_rejects_non_filled() -> None:

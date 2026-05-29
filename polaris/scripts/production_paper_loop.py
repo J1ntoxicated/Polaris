@@ -269,6 +269,9 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
     sigs_by_tf = " ".join(
         f"{tf}={n}" for tf, n in sorted(state.signals_by_tf.items())
     ) or "-"
+    venue_rejects = " ".join(
+        f"{code}={n}" for code, n in sorted(state.venue_rejects_by_code.items())
+    ) or "-"
     fields = [
         ("ticks", tick_idx),
         ("universe_refresh", f"okx={state.universe_refreshes} capital={state.capital_refreshes}"),
@@ -281,6 +284,7 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
         ("fence", f"{state.fence_reservations} (conflicts={state.fence_conflicts})"),
         ("idempotency_hits", state.idempotency_conflicts),
         ("fault_events", state.fault_events),
+        ("venue_rejects", venue_rejects),
         ("supervisor_tasks", f"{state.supervised_tasks_total} (failed={state.supervised_tasks_failed})"),
         (
             "live_recalc",

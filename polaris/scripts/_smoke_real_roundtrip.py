@@ -37,6 +37,7 @@ from polaris.scripts._smoke_roundtrip_capital import (
 from polaris.scripts._smoke_roundtrip_shared import (
     MIN_CAPITAL_LOT,
     MIN_OKX_NOTIONAL_USD,
+    OpenAttempt,
     record_venue_orphan,
     resolve_okx_base_url,
 )
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "MIN_OKX_NOTIONAL_USD",
     "MIN_CAPITAL_LOT",
+    "OpenAttempt",
     "real_capital_close_fill",
     "real_capital_open_fill",
     "real_okx_close_fill",
@@ -101,8 +103,14 @@ async def real_okx_open_fill(
     strategy_id: str,
     last_price: float | None = None,
     poll_delay_sec: float = 0.5,
-) -> Fill | None:
-    """OKX entry leg: place buy → poll order → normalize. ``None`` on no-fill."""
+) -> OpenAttempt:
+    """OKX entry leg: place buy → poll order → normalize.
+
+    Returns an ``OpenAttempt`` carrying the venue reject ``code``/``msg`` on a
+    rejected order, the ``"no_fill"`` sentinel when the order was accepted but
+    no fill row came back, or the normalized ``Fill`` on success — so the caller
+    can tell an EXTERNAL venue reject apart from an internal fault.
+    """
     buy_resp = await adapter.place_market_order(
         inst_id=inst_id,
         side="buy",
@@ -110,15 +118,18 @@ async def real_okx_open_fill(
         client_order_id=f"polLbuy{uuid.uuid4().hex[:8]}",
     )
     if not buy_resp.ok or not buy_resp.venue_order_id:
-        return None
+        return OpenAttempt(
+            fill=None, reject_code=buy_resp.code, reject_msg=buy_resp.msg,
+        )
     await asyncio.sleep(poll_delay_sec)
     state = await adapter.fetch_order(inst_id=inst_id, ord_id=buy_resp.venue_order_id)
     rows = state.get("data", []) or []
     if not rows:
-        return None
-    return normalize_okx_fill(
+        return OpenAttempt(fill=None, reject_code="no_fill")
+    fill = normalize_okx_fill(
         rows[0], strategy_id=strategy_id, expected_price=last_price,
     )
+    return OpenAttempt(fill=fill)
 
 
 async def real_okx_close_fill(

@@ -18,7 +18,7 @@ from typing import Any
 
 from polaris.core.data.fill_normalizer import Fill, normalize_capital_confirm
 from polaris.core.data.fills_persist import persist_fill
-from polaris.scripts._smoke_roundtrip_shared import MIN_CAPITAL_LOT
+from polaris.scripts._smoke_roundtrip_shared import MIN_CAPITAL_LOT, OpenAttempt
 from polaris.venues.capital import CapitalAdapter, CapitalSession
 
 logger = logging.getLogger(__name__)
@@ -71,24 +71,37 @@ async def real_capital_open_fill(
     leverage: float = 1.0,
     last_price: float | None = None,
     poll_delay_sec: float = 0.5,
-) -> tuple[Fill, str | None] | None:
+) -> OpenAttempt:
     """Capital entry leg: open → confirm → normalize.
 
-    Returns ``(fill, deal_id)`` where ``deal_id`` is the position id the close
-    leg needs. ``None`` on reject / unconfirmed.
+    Returns an ``OpenAttempt`` carrying the normalized ``fill`` + position
+    ``deal_id`` on success, or the venue reject ``status``/``reason`` (e.g.
+    ``"REJECTED"``, market-closed) — falling back to the ``"no_fill"`` sentinel
+    — so the caller can classify an EXTERNAL venue reject apart from a fault.
     """
     open_resp = await adapter.open_position(epic=epic, direction=direction, size=size)
     if not open_resp.ok or not open_resp.deal_reference:
-        return None
+        return OpenAttempt(
+            fill=None,
+            reject_code=str(open_resp.status) if open_resp.status else "no_fill",
+            reject_msg=open_resp.reason or None,
+        )
     await asyncio.sleep(poll_delay_sec)
     confirm = await adapter.confirm(open_resp.deal_reference)
-    if str(confirm.get("dealStatus")) not in ("ACCEPTED", "OPEN"):
-        return None
+    deal_status = str(confirm.get("dealStatus"))
+    if deal_status not in ("ACCEPTED", "OPEN"):
+        return OpenAttempt(
+            fill=None,
+            reject_code=deal_status if deal_status and deal_status != "None" else "no_fill",
+            reject_msg=str(confirm.get("reason") or "") or None,
+        )
     fill = normalize_capital_confirm(
         confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
         leverage=leverage, expected_price=last_price,
     )
-    return fill, _capital_deal_id_from_confirm(confirm, open_resp)
+    return OpenAttempt(
+        fill=fill, deal_id=_capital_deal_id_from_confirm(confirm, open_resp),
+    )
 
 
 async def real_capital_close_fill(

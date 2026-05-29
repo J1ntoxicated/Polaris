@@ -23,13 +23,13 @@ import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.allocator_fence import (
     AllocationRequest,
     ReservationConflictError,
     get_process_fence,
 )
+from polaris.core.isolation.blocklist import add_blocklist, is_blocklisted
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     FAULT_REJECT,
@@ -46,6 +46,7 @@ from polaris.scripts._production_run_signal import run_pipeline_for_signal
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
 from polaris.scripts._smoke_real_roundtrip import (
     MIN_CAPITAL_LOT,
+    OpenAttempt,
     real_capital_open_fill,
     real_okx_open_fill,
     record_venue_orphan,
@@ -71,6 +72,24 @@ def _strategy_timeframe(strategy_id: str) -> str:
 # Day 9 F12 fix: pull from sizing.constants SSOT so dashboard + pipeline agree.
 EQUITY_USD_DEMO_DEFAULT = OKX_DEMO_STARTING_EQUITY_USD
 
+# Venue rejects that are EXTERNAL events, not strategy faults — they must NOT
+# trip the per-strategy circuit breaker (flow_not_block / no_block_filter).
+#   51155 = OKX US-region compliance (pair not tradeable in region)
+#   51008 / 51131 = insufficient balance (portfolio/sizing, transient)
+#   no_fill = order accepted but unfilled / liquidity / transport no-fill
+# A reject code OUTSIDE this set is treated as a possible internal/client bug
+# and still records a FAULT_REJECT so real anomalies can eventually halt.
+EXTERNAL_NONFAULT_REJECT_CODES: frozenset[str] = frozenset(
+    {"51155", "51008", "51131", "no_fill"}
+)
+# OKX compliance reject → permanent blocklist (never auto-clears). Balance /
+# no-fill codes are transient and are NOT blocklisted.
+COMPLIANCE_REJECT_CODES: frozenset[str] = frozenset({"51155"})
+# Capital external (non-fault) reject statuses: market closed / not tradeable.
+CAPITAL_EXTERNAL_REJECT_CODES: frozenset[str] = frozenset(
+    {"MARKET_CLOSED", "MARKET_OFFLINE", "INSTRUMENT_NOT_TRADEABLE", "REJECTED"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Layer 7 — fence + idempotent register + paper submit
@@ -87,14 +106,16 @@ async def _real_open_fill(
     strategy_id: str,
     okx_adapter: Any = None,
     capital_session: Any = None,
-) -> tuple[Fill, str | None] | None:
-    """Drive the real demo venue entry leg → return ``(Fill, deal_id)``.
+) -> OpenAttempt:
+    """Drive the real demo venue entry leg → return an ``OpenAttempt``.
 
     P0 venue wire: replaces the synthetic fill source with a live adapter
     response. OKX places a market buy then polls the order; Capital opens a
-    position then confirms. ``deal_id`` is the Capital position id the close
-    leg needs (``None`` for OKX, which closes by base_qty). Returns ``None``
-    on reject / no-fill so the caller can release the reservation.
+    position then confirms. The returned ``OpenAttempt`` carries the normalized
+    ``fill`` + ``deal_id`` (Capital position id the close leg needs; ``None``
+    for OKX, which closes by base_qty) on success, or the venue reject
+    ``code``/``msg`` on reject / no-fill so the caller can classify it as an
+    EXTERNAL venue event rather than a strategy fault.
 
     Adapters are injected for testability; when ``okx_adapter`` is ``None`` we
     construct one from the ``OKX_DEMO_*`` env (real network). Capital always
@@ -102,37 +123,110 @@ async def _real_open_fill(
     """
     if venue == "okx":
         if okx_adapter is not None:
-            fill = await real_okx_open_fill(
+            return await real_okx_open_fill(
                 okx_adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price,
             )
-            return None if fill is None else (fill, None)
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
         passphrase = os.environ.get("OKX_DEMO_PASSPHRASE", "")
         base_url = resolve_okx_base_url(os.environ.get("OKX_DEMO_BASE"))
         if not (api_key and secret and passphrase):
             logger.error("[real-open] OKX_DEMO_* env missing — cannot submit")
-            return None
+            return OpenAttempt(fill=None, reject_code="env_missing")
         async with OKXAdapter(
             api_key=api_key, secret=secret, passphrase=passphrase, base_url=base_url,
         ) as adapter:
-            fill = await real_okx_open_fill(
+            return await real_okx_open_fill(
                 adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price,
             )
-        return None if fill is None else (fill, None)
 
     # Capital CFD — close needs the deal_id from the confirm.
     if capital_session is None:
         logger.error("[real-open] no Capital session — cannot submit %s", symbol)
-        return None
+        return OpenAttempt(fill=None, reject_code="no_session")
     cap_adapter = CapitalAdapter(capital_session)
     direction = "BUY" if side == "long" else "SELL"
     return await real_capital_open_fill(
         cap_adapter, epic=symbol, direction=direction, size=MIN_CAPITAL_LOT,
         strategy_id=strategy_id, last_price=last_price,
     )
+
+
+def _is_external_reject(venue: str, reject_code: str | None) -> bool:
+    """A venue reject that is EXTERNAL (not a strategy/client fault).
+
+    ``None`` (generic no-fill) is external. OKX codes in
+    ``EXTERNAL_NONFAULT_REJECT_CODES`` (compliance / balance / no-fill) and
+    Capital market-closed / not-tradeable statuses are external. Everything
+    else is treated as a possible internal/client bug and still faults.
+    """
+    if reject_code is None:
+        return True
+    if reject_code in EXTERNAL_NONFAULT_REJECT_CODES:
+        return True
+    return venue == "capital" and reject_code in CAPITAL_EXTERNAL_REJECT_CODES
+
+
+async def _handle_open_reject(
+    conn: sqlite3.Connection,
+    *,
+    fence: Any,
+    state: ProdLoopState,
+    sig: RawSignal,
+    venue: str,
+    symbol: str,
+    reservation_id: str,
+    reject_code: str | None,
+    reject_msg: str | None,
+    now_ts: int,
+) -> None:
+    """Release the reservation + classify a real-open no-fill (Task 2 / D1).
+
+    EXTERNAL venue rejects (compliance / balance / market-closed / no-fill) are
+    NOT strategy faults — they release the reservation and bump a telemetry
+    counter, but they do NOT trip the circuit breaker (flow_not_block). A
+    compliance reject (51155) also adds the (venue, symbol) to the permanent
+    runtime blocklist. A reject code outside the external set is a possible
+    internal/client bug and still records a FAULT_REJECT so real anomalies can
+    eventually halt.
+    """
+    await fence.release_reservation(
+        reservation_id, reason="real_open_no_fill", now_ts=now_ts,
+    )
+    code_key = reject_code or "no_fill"
+    if _is_external_reject(venue, reject_code):
+        state.venue_rejects_by_code[code_key] = (
+            state.venue_rejects_by_code.get(code_key, 0) + 1
+        )
+        logger.warning(
+            "[L7/real] %s:%s external venue reject code=%s msg=%s — "
+            "released, NO strategy fault",
+            venue, symbol, code_key, (reject_msg or "")[:120],
+        )
+        if reject_code in COMPLIANCE_REJECT_CODES:
+            add_blocklist(
+                conn, venue, symbol, reason="compliance",
+                code=reject_code, now_ts=now_ts,
+            )
+            logger.warning(
+                "[L7/blocklist] %s:%s blocklisted (compliance %s)",
+                venue, symbol, reject_code,
+            )
+        return
+    # Anomalous reject code → possible internal/client bug. Keep faulting.
+    logger.error(
+        "[L7/real] %s:%s anomalous reject code=%s — recording FAULT_REJECT",
+        venue, symbol, code_key,
+    )
+    record_fault(
+        conn, strategy_id=sig.strategy_id, fault_type=FAULT_REJECT,
+        now_ts=now_ts,
+        detail={"phase": "real_open_fill", "venue": venue,
+                "symbol": symbol, "reject_code": code_key},
+    )
+    state.fault_events += 1
 
 
 async def reserve_and_submit(
@@ -159,6 +253,12 @@ async def reserve_and_submit(
     payload source changes.
     """
     _ = asset_class  # unused at this layer (Layer 5 already used it)
+    # Task 3 / D2: skip a runtime-blocklisted (venue, symbol) BEFORE reserving —
+    # the venue permanently refuses it (compliance), so reserving + submitting
+    # would only churn. No reservation, no fault (it's an external decision).
+    if is_blocklisted(conn, venue, symbol):
+        logger.info("[L7/blocklist] %s:%s non-tradeable — skipping", venue, symbol)
+        return None
     fence = get_process_fence(conn)
     order_key = build_order_key(
         strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
@@ -212,7 +312,7 @@ async def reserve_and_submit(
         # must also release + fault here — it previously escaped the function,
         # bypassing release_reservation and leaking the order_key + reservation.
         try:
-            real = await _real_open_fill(
+            attempt = await _real_open_fill(
                 venue=venue, symbol=symbol, side=sig.side, notional_usd=notional_usd,
                 last_price=last_price, strategy_id=sig.strategy_id,
                 okx_adapter=okx_adapter, capital_session=capital_session,
@@ -234,23 +334,15 @@ async def reserve_and_submit(
             )
             state.fault_events += 1
             return None
-        if real is None:
-            logger.warning(
-                "[L7/real] %s:%s entry rejected / no-fill — releasing reservation",
-                venue, symbol,
-            )
-            await fence.release_reservation(
-                reservation["reservation_id"],
-                reason="real_open_no_fill", now_ts=now_ts,
-            )
-            record_fault(
-                conn, strategy_id=sig.strategy_id, fault_type=FAULT_REJECT,
+        if attempt.fill is None:
+            await _handle_open_reject(
+                conn, fence=fence, state=state, sig=sig, venue=venue,
+                symbol=symbol, reservation_id=reservation["reservation_id"],
+                reject_code=attempt.reject_code, reject_msg=attempt.reject_msg,
                 now_ts=now_ts,
-                detail={"phase": "real_open_fill", "venue": venue, "symbol": symbol},
             )
-            state.fault_events += 1
             return None
-        fill, deal_id = real
+        fill, deal_id = attempt.fill, attempt.deal_id
         # P0-5 fix: persist the close-relevant venue ref so a restart can
         # reconstruct it. For Capital the close needs the position ``deal_id``
         # (which differs from the top-level confirm dealId); persist it as the

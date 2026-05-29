@@ -12,11 +12,31 @@ import json
 import logging
 import sqlite3
 import uuid
+from dataclasses import dataclass
+
+from polaris.core.data.fill_normalizer import Fill
 
 logger = logging.getLogger(__name__)
 
 MIN_OKX_NOTIONAL_USD: float = 10.0  # OKX SPOT minimum (BTC-USDT minSz × px ≥ 5 USDT)
 MIN_CAPITAL_LOT: float = 1.0  # Capital min_deal_size for FX majors
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAttempt:
+    """Result of a single real venue open leg (P0 wire).
+
+    ``fill`` is the normalized entry fill on success, ``None`` on reject /
+    no-fill. ``reject_code`` carries the venue reason code (OKX ``sCode`` like
+    ``"51155"``/``"51008"``, Capital status, or the sentinel ``"no_fill"`` when
+    the order was accepted but never filled) so the caller can classify an
+    EXTERNAL venue event apart from an internal/client fault.
+    """
+
+    fill: Fill | None
+    deal_id: str | None = None
+    reject_code: str | None = None
+    reject_msg: str | None = None
 
 
 def record_venue_orphan(

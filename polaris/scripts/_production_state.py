@@ -30,6 +30,10 @@ class ProdLoopState:
     fence_conflicts: int = 0
     idempotency_conflicts: int = 0
     fault_events: int = 0
+    # Venue-reject telemetry (Task 2 / D1): per-code count of EXTERNAL venue
+    # rejects (compliance 51155 / balance 51008 / no_fill ...) that were
+    # released WITHOUT a strategy fault. Observability only — never a throttle.
+    venue_rejects_by_code: dict[str, int] = field(default_factory=dict)
     g1_runs: int = 0
     g2_emits: int = 0
     g8_runs: int = 0

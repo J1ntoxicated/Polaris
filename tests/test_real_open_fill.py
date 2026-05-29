@@ -139,7 +139,8 @@ async def test_reserve_and_submit_real_reject_releases_and_faults(
 async def test_reserve_and_submit_real_no_fill_row_releases(
     memdb: sqlite3.Connection,
 ) -> None:
-    """Order accepted but the fill query returns no rows → treat as no-fill."""
+    """Order accepted but the fill query returns no rows → external no-fill:
+    released WITHOUT a strategy fault (flow_not_block), telemetry incremented."""
     from polaris.core.isolation.allocator_fence import reset_process_fence
 
     reset_process_fence()
@@ -153,7 +154,13 @@ async def test_reserve_and_submit_real_no_fill_row_releases(
     )
     assert trade is None
     assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
-    assert state.fault_events == 1
+    # no_fill is EXTERNAL — no strategy fault; telemetry counter bumped instead.
+    assert state.fault_events == 0
+    assert state.venue_rejects_by_code.get("no_fill") == 1
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='volume_burst'"
+    ).fetchone()
+    assert res is None or res[0] != "confirmed"
 
 
 # ---------------------------------------------------------------------------
@@ -189,27 +196,28 @@ async def test_reserve_and_submit_sim_does_not_call_adapter(
 @pytest.mark.asyncio
 async def test_real_open_fill_okx_dispatch() -> None:
     okx_adapter = _make_okx_adapter()
-    result = await _real_open_fill(
+    attempt = await _real_open_fill(
         venue="okx", symbol="BTC-USDT", side="long", notional_usd=100.0,
         last_price=60_000.0, strategy_id="volume_burst",
         okx_adapter=okx_adapter, capital_session=None,
     )
-    assert result is not None
-    fill, deal_id = result
-    assert isinstance(fill, Fill)
-    assert fill.order_id == "ord_live_1"
-    assert deal_id is None  # OKX closes by base_qty, not deal_id
+    assert attempt.fill is not None
+    assert isinstance(attempt.fill, Fill)
+    assert attempt.fill.order_id == "ord_live_1"
+    assert attempt.deal_id is None  # OKX closes by base_qty, not deal_id
 
 
 @pytest.mark.asyncio
-async def test_real_open_fill_okx_reject_returns_none() -> None:
+async def test_real_open_fill_okx_reject_returns_attempt_with_code() -> None:
     okx_adapter = _make_okx_adapter(ok=False)
-    result = await _real_open_fill(
+    attempt = await _real_open_fill(
         venue="okx", symbol="BTC-USDT", side="long", notional_usd=100.0,
         last_price=60_000.0, strategy_id="volume_burst",
         okx_adapter=okx_adapter, capital_session=None,
     )
-    assert result is None
+    assert attempt.fill is None
+    # _okx_order_resp(ok=False) carries code="0"; reject_code is propagated.
+    assert attempt.reject_code == "0"
 
 
 # ---------------------------------------------------------------------------

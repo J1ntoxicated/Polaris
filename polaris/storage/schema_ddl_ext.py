@@ -170,6 +170,47 @@ CREATE TABLE IF NOT EXISTS rollback_candidates (
 """
 
 # ---------------------------------------------------------------------------
+# Edge-validation Phase 1 — Bayesian posterior on cost-adjusted expectancy.
+# MEASUREMENT + DISPLAY ONLY (never read by Layer 3 sizing). New tables; the
+# learner_state PK/semantics are left untouched.
+# Spec source: edge-validation Phase 1 (Jin approved 2026-05-29).
+# ---------------------------------------------------------------------------
+
+DDL_LEARNER_POSTERIOR = """
+CREATE TABLE IF NOT EXISTS learner_posterior (
+    exchange TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    mu REAL NOT NULL DEFAULT 0.0,
+    kappa REAL NOT NULL DEFAULT 1.0,
+    alpha REAL NOT NULL DEFAULT 1.0,
+    beta REAL NOT NULL DEFAULT 1.0,
+    m2 REAL NOT NULL DEFAULT 0.0,
+    running_mean REAL NOT NULL DEFAULT 0.0,
+    n_samples INTEGER NOT NULL DEFAULT 0,
+    p_pos REAL NOT NULL DEFAULT 0.5,
+    updated_ts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (exchange, strategy, ticker, regime)
+);
+"""
+
+DDL_STRATEGY_REGIME_PRIOR = """
+CREATE TABLE IF NOT EXISTS strategy_regime_prior (
+    strategy TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    mu0 REAL NOT NULL DEFAULT 0.0,
+    kappa0 REAL NOT NULL DEFAULT 1.0,
+    alpha0 REAL NOT NULL DEFAULT 1.0,
+    beta0 REAL NOT NULL DEFAULT 1.0,
+    m2 REAL NOT NULL DEFAULT 0.0,
+    n_samples INTEGER NOT NULL DEFAULT 0,
+    updated_ts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (strategy, regime)
+);
+"""
+
+# ---------------------------------------------------------------------------
 # Layer 6 — Live Recalc (per-position dirty state + regime SSOT)
 # Spec source: vault/30_components/layer-6-live-recalc.md (Schema)
 # ---------------------------------------------------------------------------
@@ -268,4 +309,23 @@ CREATE INDEX IF NOT EXISTS idx_fills_venue_instrument
 DDL_FILLS_INDEX_ORDER = """
 CREATE INDEX IF NOT EXISTS idx_fills_order
     ON fills(order_id);
+"""
+
+# ---------------------------------------------------------------------------
+# Layer 7 — runtime non-tradeable venue blocklist (compliance / 51155).
+# A (venue, symbol) the venue permanently refuses is skipped by focus + the
+# order guard so the rest of the universe keeps flowing (flow_not_block).
+# ---------------------------------------------------------------------------
+
+DDL_VENUE_BLOCKLIST = """
+CREATE TABLE IF NOT EXISTS venue_blocklist (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    code TEXT NOT NULL,
+    first_ts INTEGER NOT NULL,
+    last_ts INTEGER NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (venue, symbol)
+);
 """

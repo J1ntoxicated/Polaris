@@ -61,6 +61,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_GATE_EVENTS_INDEX,
     DDL_LEARNER_BLOCKS,
     DDL_LEARNER_BLOCKS_INDEX,
+    DDL_LEARNER_POSTERIOR,
     DDL_LEARNER_SNAPSHOT,
     DDL_LEARNER_STATE,
     DDL_POSITION_CONVICTION_LAYERS,
@@ -71,7 +72,9 @@ from polaris.storage.schema_ddl_ext import (
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
     DDL_REGIME_STATE,
     DDL_ROLLBACK_CANDIDATES,
+    DDL_STRATEGY_REGIME_PRIOR,
     DDL_STRATEGY_RISK_STATE,
+    DDL_VENUE_BLOCKLIST,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +118,7 @@ ALL_DDL: tuple[str, ...] = (
     DDL_ORDERS_INDEX,
     DDL_RISK_EVENTS,
     DDL_RISK_EVENTS_INDEX,
+    DDL_VENUE_BLOCKLIST,
     # Layer 2 — Pipeline
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,
@@ -131,6 +135,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_LEARNER_BLOCKS_INDEX,
     DDL_LEARNER_SNAPSHOT,
     DDL_ROLLBACK_CANDIDATES,
+    # Edge-validation Phase 1 — Bayesian posterior (measure-only, no sizing wire)
+    DDL_LEARNER_POSTERIOR,
+    DDL_STRATEGY_REGIME_PRIOR,
     # Layer 6 — Live Recalc
     DDL_POSITION_LIVE_RECALC_STATE,
     DDL_REGIME_STATE,
@@ -230,4 +237,17 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE position_strategy_segments "
             "ADD COLUMN attribution_weight REAL NOT NULL DEFAULT 0.0"
+        )
+    # learner_posterior.running_mean — edge-validation P0-1 fix: persist the
+    # Welford running mean so an existing cell folds the next observation into
+    # its own accumulated NIG state without re-mixing the parent prior. DBs
+    # that bootstrapped the table before this column need an idempotent ALTER.
+    post_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(learner_posterior)").fetchall()
+    }
+    if post_cols and "running_mean" not in post_cols:
+        conn.execute(
+            "ALTER TABLE learner_posterior "
+            "ADD COLUMN running_mean REAL NOT NULL DEFAULT 0.0"
         )

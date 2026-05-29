@@ -26,6 +26,10 @@ class ProdLoopState:
     pipeline_runs: int = 0
     pipeline_kills: int = 0
     sized_count: int = 0
+    # P1 re-entry cooldown skips: duplicate opens on the same
+    # (venue, symbol, strategy_id) suppressed inside the cooldown window.
+    # Turnover-cost telemetry only — never a P&L halt or size dampen.
+    reentry_skips: int = 0
     fence_reservations: int = 0
     fence_conflicts: int = 0
     idempotency_conflicts: int = 0

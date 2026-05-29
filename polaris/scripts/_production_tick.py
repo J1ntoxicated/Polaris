@@ -20,6 +20,11 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
     should_allow_new_entry,
 )
+from polaris.core.isolation.reentry import (
+    REENTRY_COOLDOWN_SEC,
+    REENTRY_STRONG_SIGNAL_STRENGTH,
+    reentry_cooldown_active,
+)
 from polaris.core.isolation.worker import (
     PipelineTaskSpec,
     supervise_pipeline_tasks,
@@ -284,6 +289,17 @@ async def _run_tick(
                 state.signals_by_tf[timeframe] = (
                     state.signals_by_tf.get(timeframe, 0) + 1
                 )
+                # P1 re-entry cooldown — suppress duplicate opens on the same
+                # (venue, symbol, strategy_id) inside REENTRY_COOLDOWN_SEC so
+                # the 5s fan-out can't compound fees (forensic: SOL 20x re-buy).
+                # Strong signals are exempt → flow preserved (AGGRESSIVE bias).
+                if reentry_cooldown_active(
+                    conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
+                    now_ts=now_ts, cooldown_sec=REENTRY_COOLDOWN_SEC,
+                    exempt=sig.strength >= REENTRY_STRONG_SIGNAL_STRENGTH,
+                ):
+                    state.reentry_skips += 1
+                    continue
 
                 def _factory(
                     *, _strategy: Any = strategy, _sig: Any = sig,
@@ -339,7 +355,9 @@ async def _run_tick(
         for tf in sorted(strategies_by_tf)
     )
     logger.info(
-        "[tick %d] focus=%d bars_by_tf=%s open=%d closed=%d sized=%d kills=%d",
+        "[tick %d] focus=%d bars_by_tf=%s open=%d closed=%d sized=%d "
+        "kills=%d reentry_skips=%d",
         tick_idx, len(focus), tf_summary, len(state.open_trades),
         len(state.closed_trades), state.sized_count, state.pipeline_kills,
+        state.reentry_skips,
     )

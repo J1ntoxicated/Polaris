@@ -350,6 +350,215 @@ async def test_fetch_instruments_filters_invalid_rows() -> None:
     assert len(out) == 1
 
 
+# ---------------------------------------------------------------------------
+# #12 Order placement 5xx / timeout retry (exponential backoff, idempotent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fast_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero out the retry sleep so retry tests run instantly."""
+    import polaris.venues.okx.adapter as okx_adapter
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(okx_adapter, "_async_sleep", _no_sleep)
+
+
+class _SequenceTransport(httpx.AsyncBaseTransport):
+    """Returns queued responses/exceptions in order; tracks order-POST count."""
+
+    def __init__(self, order_responses: list[Any], *, ticker: dict[str, Any] | None = None) -> None:
+        self._order_responses = list(order_responses)
+        self._ticker = ticker or {"bidPx": "60000", "askPx": "60010"}
+        self.order_post_count = 0
+        self.fetch_order_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v5/market/ticker":
+            return httpx.Response(200, json={"code": "0", "data": [self._ticker]})
+        if path == OKX_PLACE_ORDER_PATH and request.method == "POST":
+            self.order_post_count += 1
+            nxt = self._order_responses.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+        if path == "/api/v5/trade/order" and request.method == "GET":
+            # Idempotency lookup by clOrdId — default: order NOT found (empty).
+            self.fetch_order_count += 1
+            return httpx.Response(200, json={"code": "0", "data": []})
+        return httpx.Response(404, json={"code": "1", "msg": "not found"})
+
+
+def _ok_order(cl: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "code": "0",
+            "msg": "",
+            "data": [{"ordId": "777", "clOrdId": cl, "sCode": "0", "sMsg": ""}],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_order_5xx_then_success_retries() -> None:
+    """A single 5xx on order POST is absorbed; a retry succeeds (no error)."""
+    transport = _SequenceTransport(
+        order_responses=[
+            httpx.Response(503, json={"code": "1", "msg": "service unavailable"}),
+            _ok_order("polarisvb"),
+        ]
+    )
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_market_order(
+            inst_id="BTC-USDT",
+            side="buy",
+            notional_usd=10.0,
+            client_order_id="polarisvb",
+            ord_type="market",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is True
+    assert resp.venue_order_id == "777"
+    assert transport.order_post_count == 2  # 1 failure + 1 retry
+
+
+@pytest.mark.asyncio
+async def test_order_timeout_then_success_retries() -> None:
+    """A network timeout on order POST is absorbed; the retry succeeds."""
+    transport = _SequenceTransport(
+        order_responses=[
+            httpx.ConnectTimeout("timed out"),
+            _ok_order("polarisvb"),
+        ]
+    )
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_market_order(
+            inst_id="BTC-USDT",
+            side="buy",
+            notional_usd=10.0,
+            client_order_id="polarisvb",
+            ord_type="market",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is True
+    assert transport.order_post_count == 2
+
+
+@pytest.mark.asyncio
+async def test_order_persistent_5xx_propagates_error() -> None:
+    """Continuous 5xx (initial + all retries) ultimately raises — no silent OK."""
+    transport = _SequenceTransport(
+        order_responses=[
+            httpx.Response(502, json={"code": "1", "msg": "bad gateway"}),
+            httpx.Response(502, json={"code": "1", "msg": "bad gateway"}),
+            httpx.Response(502, json={"code": "1", "msg": "bad gateway"}),
+        ]
+    )
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.place_market_order(
+                inst_id="BTC-USDT",
+                side="buy",
+                notional_usd=10.0,
+                client_order_id="polarisvb",
+                ord_type="market",
+            )
+    finally:
+        await client.aclose()
+    # initial + 2 retries (ORDER_RETRY_MAX) = 3 attempts.
+    assert transport.order_post_count == 3
+
+
+@pytest.mark.asyncio
+async def test_order_4xx_does_not_retry() -> None:
+    """A 4xx (client error, e.g. bad param) is NOT retried — fail fast."""
+    transport = _SequenceTransport(
+        order_responses=[httpx.Response(400, json={"code": "51000", "msg": "param error"})]
+    )
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.place_market_order(
+                inst_id="BTC-USDT",
+                side="buy",
+                notional_usd=10.0,
+                client_order_id="polarisvb",
+                ord_type="market",
+            )
+    finally:
+        await client.aclose()
+    assert transport.order_post_count == 1  # no retry on 4xx
+
+
+@pytest.mark.asyncio
+async def test_order_idempotency_landed_order_not_duplicated() -> None:
+    """If the failed POST actually landed, the clOrdId lookup returns it —
+    the retry must NOT submit a second order (no duplicate)."""
+
+    class _IdempotentTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.order_post_count = 0
+            self.fetch_order_count = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == OKX_PLACE_ORDER_PATH and request.method == "POST":
+                self.order_post_count += 1
+                # First POST times out AFTER the server accepted the order.
+                raise httpx.ReadTimeout("response lost")
+            if path == "/api/v5/trade/order" and request.method == "GET":
+                self.fetch_order_count += 1
+                # clOrdId lookup shows the order DID land (live/filled).
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": "0",
+                        "data": [
+                            {
+                                "ordId": "555",
+                                "clOrdId": "polarisvb",
+                                "state": "live",
+                                "sCode": "0",
+                            }
+                        ],
+                    },
+                )
+            return httpx.Response(404, json={"code": "1"})
+
+    transport = _IdempotentTransport()
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_market_order(
+            inst_id="BTC-USDT",
+            side="buy",
+            notional_usd=10.0,
+            client_order_id="polarisvb",
+            ord_type="market",
+        )
+    finally:
+        await client.aclose()
+    # Exactly ONE POST — the idempotency lookup found the landed order, so no
+    # second submission. Response reflects the existing venue order.
+    assert transport.order_post_count == 1
+    assert transport.fetch_order_count >= 1
+    assert resp.ok is True
+    assert resp.venue_order_id == "555"
+
+
 @pytest.mark.asyncio
 async def test_signed_request_includes_auth_headers() -> None:
     captured: dict[str, dict[str, str]] = {}

@@ -7,16 +7,9 @@ Spec source:
 T4 chain (single ``min()`` clip — Q5 spec):
 
     proposed = base × continuous × tier × cell × listing_watchdog
-    final    = min(
-                 proposed,
-                 single_trade_cap,
-                 per_symbol_remaining,
-                 underlying_remaining,
-                 cluster_remaining,
-                 track_remaining,
-                 venue_daily_remaining,
-                 total_daily_remaining
-               )
+    final    = min(proposed, single_trade_cap, per_symbol_remaining,
+                   underlying_remaining, cluster_remaining, track_remaining,
+                   venue_daily_remaining, total_daily_remaining)
     notional = final × equity × leverage(venue)
 
 The ``binding_cap`` field on :class:`SizingFinal` tells the caller which input
@@ -60,6 +53,7 @@ from polaris.core.sizing.schema import (
     Track,
     per_symbol_cfd_pct,
     per_symbol_spot_pct,
+    target_vol,
     total_daily_risk_ceiling_pct,
     track_a_daily_venue_pct,
     track_a_gross_pct,
@@ -68,6 +62,7 @@ from polaris.core.sizing.schema import (
     underlying_group_pct,
 )
 from polaris.core.sizing.session import derive_session
+from polaris.core.sizing.vol_target import ewma_realized_vol, vol_targeted_scalar
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +70,11 @@ __all__ = [
     "SignalIntent",
     "compute_proposed",
     "compute_size",
+    "continuous_scalar",
+    "ewma_realized_vol",
     "headroom_min",
     "venue_per_symbol_cap",
+    "vol_targeted_scalar",
 ]
 
 
@@ -103,6 +101,9 @@ class SignalIntent:
     leverage: float = 1.0
     base_risk_pct: float = DEFAULT_BASE_RISK_PCT
     session: str | None = None  # None → derive_session(now_ts) at sizing time
+    # Ex-ante (past-only) realized vol → vol-targeted scalar; None → legacy
+    # strength ramp. Never a forward/look-ahead value. See vol_target.py.
+    realized_vol: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -322,8 +323,15 @@ def compute_size(
     """
     ts = now_ts if now_ts is not None else int(time.time())
 
-    # (1) continuous scalar
-    cont = continuous_scalar(intent.signal_strength)
+    # (1) continuous scalar — vol-aware when ex-ante realized_vol is supplied,
+    # else the legacy signal-strength ramp (backward compat). Still ONE scalar
+    # in the chain (no new multiplier — 9-stack ban preserved).
+    if intent.realized_vol is not None:
+        cont = vol_targeted_scalar(
+            realized_vol=intent.realized_vol, target_vol=target_vol()
+        )
+    else:
+        cont = continuous_scalar(intent.signal_strength)
 
     # (2) tier amplifier
     tier_amp = resolve_tier_amplifier(

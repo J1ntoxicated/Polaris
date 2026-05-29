@@ -31,6 +31,7 @@ from polaris.core.sizing.engine import (
     compute_proposed,
     compute_size,
     continuous_scalar,
+    ewma_realized_vol,
     headroom_min,
     listing_watchdog_mult,
     per_symbol_remaining_pct,
@@ -38,6 +39,7 @@ from polaris.core.sizing.engine import (
     track_gross_cap,
     underlying_remaining_pct,
     venue_per_symbol_cap,
+    vol_targeted_scalar,
 )
 from polaris.core.sizing.fill_rate_cut import (
     CutCandidate,
@@ -59,6 +61,8 @@ from polaris.core.sizing.schema import (
     CS3_SINGLE_AMPLIFIED_PCT,
     CS3_SINGLE_DEFAULT_PCT,
     DEFAULT_BASE_RISK_PCT,
+    DEFAULT_TARGET_VOL,
+    EWMA_VOL_LAMBDA,
     KELLY_FRACTION_K,
     SINGLE_TRADE_ABSOLUTE_CEILING_PCT,
     SINGLE_TRADE_AMPLIFIED_PCT,
@@ -79,6 +83,8 @@ __all__ = [
     "CS3_SINGLE_DEFAULT_PCT",
     "CutCandidate",
     "DEFAULT_BASE_RISK_PCT",
+    "DEFAULT_TARGET_VOL",
+    "EWMA_VOL_LAMBDA",
     "KELLY_FRACTION_K",
     "KellyDecision",
     "PortfolioState",
@@ -99,6 +105,7 @@ __all__ = [
     "compute_proposed",
     "compute_size",
     "continuous_scalar",
+    "ewma_realized_vol",
     "headroom_min",
     "is_cold_start",
     "kelly_fraction",
@@ -115,4 +122,5 @@ __all__ = [
     "track_gross_cap",
     "underlying_remaining_pct",
     "venue_per_symbol_cap",
+    "vol_targeted_scalar",
 ]

@@ -16,14 +16,82 @@ from polaris.core.cell_matrix.schema import (
 )
 
 __all__ = [
+    "REGIME_ALIGN_AMPLIFY",
+    "REGIME_ALIGN_DAMPEN",
+    "REGIME_ALIGN_NEUTRAL",
     "apply_exponential_decay",
+    "apply_regime_alignment",
     "compute_avg_pnl_r",
     "compute_cell_score",
     "decay_factor",
+    "regime_alignment_mult",
     "resolve_effective_score",
 ]
 
 _LN2: Final[float] = math.log(2.0)
+
+# ---------------------------------------------------------------------------
+# Regime → cell-score alignment (MVP, deterministic vol/trend fit)
+# ---------------------------------------------------------------------------
+
+REGIME_ALIGN_AMPLIFY: Final[float] = 1.25
+"""Score weight when the strategy's edge type matches the live regime."""
+
+REGIME_ALIGN_NEUTRAL: Final[float] = 1.0
+"""No directional claim (crisis / unknown regime or strategy)."""
+
+REGIME_ALIGN_DAMPEN: Final[float] = 0.8
+"""Misaligned strategy/regime — down-weighted, never zeroed (redistribution)."""
+
+# Trend-following / breakout family: edge is captured when price trends.
+_TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
+    {
+        "tsmom",
+        "spot_donchian",
+        "fx_breakout_basket",
+        "session_breakout",
+        "xau_indices_trend",
+        "volume_burst",
+    }
+)
+# Counter-trend / mean-reversion: edge is captured in range-bound chop.
+_COUNTER_TREND_STRATEGIES: Final[frozenset[str]] = frozenset({"rsi_bb_pullback"})
+
+_TREND_REGIMES: Final[frozenset[str]] = frozenset({"bull_trend", "bear_trend"})
+_CHOP_REGIME: Final[str] = "chop"
+
+
+def regime_alignment_mult(*, strategy: str, regime: str) -> float:
+    """Deterministic regime/strategy fit multiplier (MVP — not a full HMM).
+
+    Trend strategies are amplified in trend regimes and dampened in chop;
+    counter-trend (``rsi_bb_pullback``) is amplified in chop and dampened in
+    trend. ``crisis`` and any unknown regime/strategy stay neutral — no edge
+    claim. Dampen is a redistribution (strictly positive), never an off-switch.
+    """
+    if regime in _TREND_REGIMES:
+        if strategy in _TREND_STRATEGIES:
+            return REGIME_ALIGN_AMPLIFY
+        if strategy in _COUNTER_TREND_STRATEGIES:
+            return REGIME_ALIGN_DAMPEN
+        return REGIME_ALIGN_NEUTRAL
+    if regime == _CHOP_REGIME:
+        if strategy in _COUNTER_TREND_STRATEGIES:
+            return REGIME_ALIGN_AMPLIFY
+        if strategy in _TREND_STRATEGIES:
+            return REGIME_ALIGN_DAMPEN
+        return REGIME_ALIGN_NEUTRAL
+    return REGIME_ALIGN_NEUTRAL
+
+
+def apply_regime_alignment(score: float, *, strategy: str, regime: str) -> float:
+    """Scale a cell score by the regime/strategy alignment multiplier.
+
+    Purely multiplicative, so sign is preserved (a losing cell stays losing)
+    and a zero score stays zero. Existing ``compute_cell_score`` contract is
+    untouched — callers opt in to alignment by wrapping the score with this.
+    """
+    return score * regime_alignment_mult(strategy=strategy, regime=regime)
 
 
 def decay_factor(*, elapsed_sec: float, half_life_sec: float = CELL_DECAY_HALF_LIFE_SEC) -> float:

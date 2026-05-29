@@ -53,6 +53,35 @@ CREATE INDEX IF NOT EXISTS idx_ai_lessons_strategy
     ON ai_lessons(strategy_id, created_ts DESC);
 """
 
+# Meta-labeling (#10) — triple-barrier label collection (collection-only;
+# never gates sizing/exits). One row per closed trade; ``trade_id`` UNIQUE so
+# re-labeling overwrites. Future 2nd-stage act/skip model trains on this table
+# once sample-count is sufficient.
+DDL_META_LABELS = """
+CREATE TABLE IF NOT EXISTS meta_labels (
+    label_id TEXT PRIMARY KEY,
+    trade_id TEXT NOT NULL UNIQUE,
+    strategy_id TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    regime TEXT,
+    session TEXT,
+    barrier TEXT NOT NULL,
+    pnl_sign INTEGER NOT NULL,
+    r REAL NOT NULL,
+    hit_horizontal INTEGER NOT NULL,
+    holding_bars INTEGER NOT NULL,
+    expected_holding_bars INTEGER NOT NULL,
+    horizon_fraction REAL NOT NULL,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_META_LABELS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_meta_labels_strategy
+    ON meta_labels(strategy_id, created_ts DESC);
+"""
+
 DDL_POSITION_STRATEGY_SEGMENTS = """
 CREATE TABLE IF NOT EXISTS position_strategy_segments (
     position_id TEXT NOT NULL,

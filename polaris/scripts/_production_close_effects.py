@@ -25,6 +25,10 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
 )
 from polaris.core.learners import ClosedTrade, LearnerScheduler
+from polaris.core.learners.meta_label import (
+    compute_triple_barrier_label,
+    persist_meta_label,
+)
 from polaris.core.learners.posterior import (
     cost_adjusted_pnl_r,
     maybe_update_posterior,
@@ -136,6 +140,38 @@ def _safe_run_learners(
                 phase=f"learner_update_{getattr(learner, 'learner_id', 'unknown')}",
                 exc=exc, now_ts=now_ts, state=state,
             )
+
+
+def _safe_record_meta_label(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
+    pnl_r: float, won: bool, now_ts: int, state: ProdLoopState,
+    expected_holding_bars: int = 20,
+) -> None:
+    """Meta-labeling (#10) — record the triple-barrier label for this close.
+
+    Collection-only: writes one ``meta_labels`` row per closed trade and never
+    gates sizing/exits (AGGRESSIVE bias preserved). Fail-open — a label failure
+    must never abort an already-committed close. ``holding_bars`` is derived
+    from elapsed wall-clock against 1-minute bars (the loop's bar cadence).
+    """
+    try:
+        elapsed_sec = max(0, now_ts - trade.open_ts)
+        holding_bars = elapsed_sec // 60
+        label = compute_triple_barrier_label(
+            pnl_r=pnl_r, won=won, holding_bars=holding_bars,
+            expected_holding_bars=expected_holding_bars,
+        )
+        persist_meta_label(
+            conn, trade_id=trade.signal_id, strategy_id=trade.strategy_id,
+            venue=trade.venue, ticker=trade.symbol, regime=regime,
+            session="asia", label=label, now_ts=now_ts,
+        )
+        state.meta_labels += 1
+    except Exception as exc:  # noqa: BLE001 — collection-only side effect, fail-open
+        logger.warning(
+            "[meta-label] label record failed %s:%s: %r",
+            trade.venue, trade.symbol, exc,
+        )
 
 
 def _read_cost_inputs(

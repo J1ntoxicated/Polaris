@@ -32,10 +32,15 @@ from polaris.core.cell_matrix.schema import (
     TradeClose,
 )
 from polaris.core.cell_matrix.score import (
+    REGIME_ALIGN_AMPLIFY,
+    REGIME_ALIGN_DAMPEN,
+    REGIME_ALIGN_NEUTRAL,
     apply_exponential_decay,
+    apply_regime_alignment,
     compute_avg_pnl_r,
     compute_cell_score,
     decay_factor,
+    regime_alignment_mult,
     resolve_effective_score,
 )
 
@@ -46,6 +51,9 @@ __all__ = [
     "CELL_MIN_POOL_SIZE",
     "CELL_SHRINKAGE_N",
     "EIGHT_DIM_PROMOTION_THRESHOLD",
+    "REGIME_ALIGN_AMPLIFY",
+    "REGIME_ALIGN_DAMPEN",
+    "REGIME_ALIGN_NEUTRAL",
     "ROUTING_BOTTOM_MULT",
     "ROUTING_MID_MULT",
     "ROUTING_TOP_MULT",
@@ -56,6 +64,7 @@ __all__ = [
     "TradeClose",
     "active_eligible_cells",
     "apply_exponential_decay",
+    "apply_regime_alignment",
     "classify_quartile",
     "compute_avg_pnl_r",
     "compute_cell_score",
@@ -66,6 +75,7 @@ __all__ = [
     "fetch_parent3_score",
     "load_eligible_scores",
     "load_eligible_scores_decayed",
+    "regime_alignment_mult",
     "resolve_effective_score",
     "resolve_routing_for_cell",
     "update_on_trade_close",

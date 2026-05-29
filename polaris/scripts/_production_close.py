@@ -26,6 +26,7 @@ from polaris.core.isolation.circuit_breaker import (
 )
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
+    _safe_record_meta_label,
     _safe_run_g8,
     _safe_run_learners,
     _safe_update_cell_matrix,
@@ -368,6 +369,12 @@ async def _close_trade_with_real_pnl(
         state=state,
     )
     _safe_run_learners(
+        conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
+        state=state,
+    )
+    # Meta-labeling (#10) — collection-only triple-barrier label per close.
+    # Never gates sizing/exits; fail-open inside the helper.
+    _safe_record_meta_label(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
         state=state,
     )

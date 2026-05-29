@@ -36,6 +36,7 @@ Returns canonical ``Bar`` objects ready to write to the ``bars`` table via
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -76,6 +77,17 @@ OKX_TRADE_ORDER_PATH: Final[str] = "/api/v5/trade/order"
 DEMO_HEADERS: Final[dict[str, str]] = {"x-simulated-trading": "1"}
 REST_TIMEOUT_SEC: Final[float] = 15.0
 DEFAULT_SLIPPAGE_BPS: Final[float] = 5.0  # 0.05 %, R2 aggressive cap
+
+# #12 — absorb transient OKX order-placement outages (5xx / timeout). AGGRESSIVE:
+# a momentary venue/network blip should not drop a trade. Retries are bounded
+# and idempotent (clOrdId state-check before each retry → never double-submit).
+ORDER_RETRY_MAX: Final[int] = 2  # extra attempts after the initial POST
+ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
+
+
+async def _async_sleep(delay: float) -> None:
+    """Indirection so tests can monkeypatch the backoff sleep to a no-op."""
+    await asyncio.sleep(delay)
 
 _CLORDID_RE: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9]")
 _CLORDID_MAX: Final[int] = 32
@@ -250,6 +262,93 @@ class OKXAdapter:
             raise RuntimeError(f"OKX unexpected payload type: {type(data).__name__}")
         return data
 
+    async def _place_order_with_retry(
+        self,
+        *,
+        order_body: dict[str, Any],
+        inst_id: str,
+        cl_ord_id: str,
+    ) -> OKXOrderResponse:
+        """POST the order, retrying transient 5xx / timeouts with backoff.
+
+        #12 — AGGRESSIVE transient-fault absorption (NOT a throttle): a momentary
+        OKX 5xx or a lost response should not silently drop a trade. Bounded to
+        ``ORDER_RETRY_MAX`` extra attempts with exponential backoff.
+
+        Idempotency: before every retry we query OKX by ``clOrdId``. If the prior
+        attempt actually landed (response was lost, not the order), we return that
+        existing order instead of submitting a duplicate. ``clOrdId`` is OKX's
+        idempotency key, so a re-POST with the same id would also be rejected —
+        the lookup turns that ambiguity into a correct, single-order outcome.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(ORDER_RETRY_MAX + 1):
+            if attempt > 0:
+                # Before re-submitting, check whether the failed attempt landed.
+                existing = await self._lookup_existing_order(
+                    inst_id=inst_id, cl_ord_id=cl_ord_id
+                )
+                if existing is not None:
+                    logger.warning(
+                        "[okx] order retry short-circuit — clOrdId=%s already landed "
+                        "(ordId=%s); not re-submitting (idempotent)",
+                        cl_ord_id,
+                        existing.venue_order_id,
+                    )
+                    return existing
+                delay = ORDER_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1))
+                logger.warning(
+                    "[okx] order POST retry %d/%d clOrdId=%s after %.2fs backoff",
+                    attempt,
+                    ORDER_RETRY_MAX,
+                    cl_ord_id,
+                    delay,
+                )
+                await _async_sleep(delay)
+            try:
+                body = await self._signed_request(
+                    "POST", OKX_PLACE_ORDER_PATH, json_body=order_body
+                )
+                return _parse_order_response(body)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status < 500:
+                    raise  # client error (4xx) — not transient, fail fast.
+                last_exc = exc
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+        assert last_exc is not None  # loop always sets last_exc before exhausting
+        logger.error(
+            "[okx] order POST failed after %d attempts clOrdId=%s: %s",
+            ORDER_RETRY_MAX + 1,
+            cl_ord_id,
+            last_exc,
+        )
+        raise last_exc
+
+    async def _lookup_existing_order(
+        self, *, inst_id: str, cl_ord_id: str
+    ) -> OKXOrderResponse | None:
+        """Return the order if ``cl_ord_id`` already exists on OKX, else ``None``.
+
+        Used between retries to avoid double-submission when a prior POST response
+        was lost. Any error in the lookup itself returns ``None`` (treat as 'not
+        found' → allow the retry to proceed).
+        """
+        try:
+            body = await self._signed_request(
+                "GET",
+                OKX_TRADE_ORDER_PATH,
+                params={"instId": inst_id, "clOrdId": cl_ord_id},
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.warning("[okx] idempotency lookup failed clOrdId=%s: %s", cl_ord_id, exc)
+            return None
+        rows = body.get("data") or []
+        if not rows or not rows[0].get("ordId"):
+            return None
+        return _parse_order_response(body)
+
     # ------------------------------------------------------------------
     # Public sign-required endpoints
     # ------------------------------------------------------------------
@@ -351,8 +450,9 @@ class OKXAdapter:
             order_body.get("ordType"),
             cl_ord_id,
         )
-        body = await self._signed_request("POST", OKX_PLACE_ORDER_PATH, json_body=order_body)
-        parsed = _parse_order_response(body)
+        parsed = await self._place_order_with_retry(
+            order_body=order_body, inst_id=inst_id, cl_ord_id=cl_ord_id
+        )
         log_level = logging.INFO if parsed.ok else logging.WARNING
         logger.log(
             log_level,
@@ -393,12 +493,26 @@ class OKXAdapter:
             params={"instType": inst_type},
         )
 
-    async def fetch_order(self, *, inst_id: str, ord_id: str) -> dict[str, Any]:
-        return await self._signed_request(
-            "GET",
-            OKX_TRADE_ORDER_PATH,
-            params={"instId": inst_id, "ordId": ord_id},
-        )
+    async def fetch_order(
+        self,
+        *,
+        inst_id: str,
+        ord_id: str | None = None,
+        cl_ord_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Query an order by venue ``ordId`` or client ``clOrdId``.
+
+        OKX ``GET /trade/order`` accepts either key; ``clOrdId`` lets us look up
+        an order whose POST response we never received (#12 idempotency check).
+        """
+        if not ord_id and not cl_ord_id:
+            raise ValueError("fetch_order requires ord_id or cl_ord_id")
+        params: dict[str, Any] = {"instId": inst_id}
+        if ord_id:
+            params["ordId"] = ord_id
+        else:
+            params["clOrdId"] = cl_ord_id
+        return await self._signed_request("GET", OKX_TRADE_ORDER_PATH, params=params)
 
 
 # ---------------------------------------------------------------------------

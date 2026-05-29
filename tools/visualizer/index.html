@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<title>★ POLARIS · NEURAL CLOUD</title>
+<link rel="stylesheet" href="static/polaris.css"/>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #05070b; color: var(--p-wht);
+    font-family: var(--font-mono);
+    overflow: hidden;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 50%, rgba(95,135,175,0.10), transparent 60%),
+      radial-gradient(ellipse at 30% 70%, rgba(215,175,255,0.04), transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .stage { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+  canvas#sphere { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+
+  /* ── Top bar ──────────────────────────────────────────────────── */
+  .topbar {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; gap: 24px;
+    padding: 14px 24px; font-size: 12px; z-index: 10;
+    background: linear-gradient(to bottom, rgba(5,7,11,0.85), transparent);
+  }
+  .topbar .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.18em; }
+  .topbar .brand .star { color: var(--polaris-blue); font-size: 18px; animation: starpulse 3s ease-in-out infinite; }
+  @keyframes starpulse {
+    0%,100% { text-shadow: 0 0 6px rgba(95,135,175,0.6); opacity: 1; }
+    50%     { text-shadow: 0 0 20px rgba(95,135,175,1); opacity: 0.85; }
+  }
+  .topbar .meta { color: var(--p-gry); display: flex; gap: 18px; }
+  .topbar .meta .lbl { color: var(--p-dim); margin-right: 6px; }
+  .topbar .meta .val { color: var(--p-wht); font-weight: 700; }
+  .topbar .legend { margin-left: auto; display: flex; gap: 14px; font-size: 11px; color: var(--p-gry); align-items: center; }
+  .legend .swatch { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .legend .dot.hot { background: #fff; box-shadow: 0 0 12px #fff; }
+  .legend .dot.lit { background: #87d7ff; box-shadow: 0 0 8px #87d7ff; }
+  .legend .dot.dim { background: #4a5060; }
+  .legend .line { width: 14px; height: 1px; background: linear-gradient(to right, transparent, #87d7ff, transparent); box-shadow: 0 0 6px #87d7ff; }
+
+  /* legacy — superseded by .side-rail */
+
+  /* ── Side rail base ─────────────────────────────────────────── */
+  .side-rail {
+    position: absolute; top: 80px;
+    width: 280px;
+    z-index: 10;
+    background: rgba(5,7,11,0.65);
+    border: 1px solid var(--ghost);
+    padding: 12px 14px 8px;
+    backdrop-filter: blur(3px);
+    font-size: 11px;
+    max-height: calc(100vh - 120px);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .side-rail.left  { left: 24px; }
+  .side-rail.right { right: 24px; }
+  /* Right rail leaves room for bottom-right PIPELINE strip + .bottom strip */
+  .side-rail.right { max-height: calc(100vh - 360px); }
+  /* Left rail uses full vertical (no bottom widget on left) */
+  .side-rail.left  { max-height: calc(100vh - 130px); }
+  .side-rail .heading {
+    color: var(--polaris-blue);
+    letter-spacing: 0.22em;
+    font-weight: 700;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--ghost);
+    margin-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .side-rail .heading.sub { margin-top: 10px; }
+  .side-rail .heading .cnt { color: var(--p-cyn); font-size: 11px; letter-spacing: 0; }
+  .side-rail .scroll-area {
+    overflow-y: auto;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .side-rail .scroll-area::-webkit-scrollbar { width: 3px; }
+  .side-rail .scroll-area::-webkit-scrollbar-thumb { background: var(--ghost); }
+  .plrow {
+    display: grid;
+    grid-template-columns: 28px 50px 12px 1fr 50px;
+    gap: 5px;
+    align-items: center;
+    padding: 3px 0;
+    font-size: 11px;
+    border-bottom: 1px dotted rgba(95,135,175,0.10);
+  }
+  .plrow.cls {
+    grid-template-columns: 28px 50px 12px 60px 50px;
+  }
+  .plrow .ex { color: var(--p-cyn); font-size: 9px; font-weight: 700; letter-spacing: 0.10em; }
+  .plrow .tk { color: var(--p-wht); font-weight: 700; letter-spacing: 0.04em; }
+  .plrow .dir.long  { color: var(--p-grn); font-weight: 700; }
+  .plrow .dir.short { color: var(--p-red); font-weight: 700; }
+  .plrow .px { color: var(--p-gry); text-align: right; font-size: 10px; font-variant-numeric: tabular-nums; }
+  .plrow .pn { text-align: right; font-size: 10px; font-variant-numeric: tabular-nums; }
+  .plrow .pn.pos { color: var(--p-grn); }
+  .plrow .pn.neg { color: var(--p-red); }
+  .plrow .exit { color: var(--p-mag); text-align: right; font-size: 9px; letter-spacing: 0.05em; }
+
+  /* Exchange PnL panel (3 sub-cluster summary) */
+  #expnl-list { padding: 4px 0 6px; }
+  .expnl-row {
+    display: grid;
+    grid-template-columns: 36px 1fr 60px;
+    gap: 8px;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 11px;
+  }
+  .expnl-row .ex { color: var(--polaris-blue); font-weight: 700; letter-spacing: 0.10em; }
+  .expnl-row .cnt { color: var(--p-dim); font-size: 10px; }
+  .expnl-row .pn { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+  .expnl-row .pn.pos { color: var(--p-grn); }
+  .expnl-row .pn.neg { color: var(--p-red); }
+
+  /* Bottom-right corner compact PIPELINE strip — vertical stack */
+  .pipeline-strip {
+    position: absolute;
+    bottom: 56px;
+    right: 24px;
+    z-index: 11;
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 8px 12px;
+    background: rgba(5,7,11,0.75);
+    border: 1px solid var(--ghost);
+    backdrop-filter: blur(3px);
+    font-size: 10px; letter-spacing: 0.08em;
+    color: var(--p-gry);
+    min-width: 120px;
+  }
+  .pipeline-strip .ph {
+    color: var(--polaris-blue); font-size: 9px;
+    letter-spacing: 0.20em; font-weight: 700;
+    padding-bottom: 4px; margin-bottom: 2px;
+    border-bottom: 1px solid var(--ghost);
+  }
+  .pipeline-strip .lg {
+    display: flex; gap: 6px; align-items: center;
+    color: var(--p-wht); font-weight: 700;
+    padding: 1px 0;
+  }
+  .pipeline-strip .lg .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    box-shadow: 0 0 4px currentColor;
+  }
+  .pipeline-strip .lg .tier { color: var(--p-dim); font-size: 9px; margin-left: auto; }
+  .pipeline-strip .hint {
+    color: var(--p-dim); font-size: 9px;
+    padding-top: 4px; margin-top: 2px;
+    border-top: 1px solid var(--ghost);
+    line-height: 1.5;
+  }
+
+  /* legacy pipeline-mini class (still used for fallback) */
+  .pipeline-mini {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--ghost);
+    font-size: 10px;
+    color: var(--p-dim);
+  }
+  .pipeline-mini .row {
+    display: grid;
+    grid-template-columns: 10px 36px 18px 1fr;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 0;
+  }
+  .pipeline-mini .swatch { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+  .pipeline-mini .name { color: var(--p-wht); font-weight: 700; }
+  .pipeline-mini .tier { color: var(--p-dim); font-size: 9px; }
+
+  /* ── Bottom strip ─────────────────────────────────────────────── */
+  .bottom {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    padding: 12px 24px;
+    display: flex; gap: 24px; align-items: center;
+    font-size: 11px;
+    background: linear-gradient(to top, rgba(5,7,11,0.85), transparent);
+    z-index: 10;
+  }
+  .bottom .scope { color: var(--p-gry); }
+  .bottom .scope .v { color: var(--p-wht); font-weight: 700; }
+  .bottom .pulse-counter { color: var(--p-cyn); font-weight: 700; }
+  .bottom .filler { flex: 1; }
+  .bottom .ticker { color: var(--p-dim); font-size: 10px; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── Title block ──────────────────────────────────────────────── */
+  .title-block { position: absolute; bottom: 60px; left: 24px; z-index: 10; pointer-events: none; }
+  .title-block .t1 { font-size: 18px; font-weight: 700; letter-spacing: 0.28em; color: var(--p-wht); }
+  .title-block .t2 { font-size: 10px; letter-spacing: 0.30em; color: var(--p-dim); margin-top: 4px; }
+
+  /* ── Page nav ─────────────────────────────────────────────────── */
+  .pagenav {
+    position: absolute; top: 48px; right: 24px;
+    display: flex; gap: 16px;
+    font-size: 11px; letter-spacing: 0.06em;
+    z-index: 11;
+  }
+  .pagenav a { color: var(--p-dim); text-decoration: none; }
+  .pagenav a.active { color: var(--polaris-blue); }
+  .pagenav a:hover { color: var(--p-wht); }
+
+  /* ── Tooltip ──────────────────────────────────────────────────── */
+  #tooltip {
+    position: absolute;
+    display: none;
+    z-index: 50;
+    pointer-events: none;
+    background: rgba(5,7,11,0.92);
+    border: 1px solid var(--ghost);
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--p-wht);
+    backdrop-filter: blur(4px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    max-width: 240px;
+  }
+  #tooltip .tt-h {
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--ghost);
+    padding-bottom: 4px;
+  }
+  #tooltip .tt-tier {
+    display: inline-block;
+    padding: 1px 6px;
+    margin-right: 8px;
+    border: 1px solid currentColor;
+    font-size: 9px;
+    letter-spacing: 0.16em;
+  }
+  #tooltip .tt-tier.t0 { color: #87d7ff; }
+  #tooltip .tt-tier.t1 { color: #ff87d7; }
+  #tooltip .tt-tier.t2 { color: #87afd7; }
+  #tooltip .tt-tier.t3 { color: #d7d787; }
+  #tooltip .tt-tier.t4 { color: #ff9f87; }
+  #tooltip .tt-tier.t5 { color: #d7afff; }
+  #tooltip .tt-tier.t6 { color: #87ffd7; }
+  #tooltip .tt-tier.t7 { color: #ffaf87; }
+  #tooltip .tt-tier.t8 { color: #d7d787; }
+  #tooltip .tt-tier.t9 { color: #d78787; }
+  #tooltip .tt-l { color: var(--p-gry); font-size: 10px; line-height: 1.5; }
+  #tooltip .tt-l b { color: var(--p-wht); font-weight: 700; }
+  #tooltip .tt-l b.pos { color: var(--p-grn); }
+  #tooltip .tt-l b.neg { color: var(--p-red); }
+
+  /* ── Detail panel (Jin v4 click → detail) ─────────────────────── */
+  #detail-panel {
+    position: absolute; top: 80px; left: 24px;
+    width: 320px; z-index: 20;
+    background: rgba(5,7,11,0.92);
+    border: 1px solid var(--ghost);
+    padding: 14px 16px;
+    color: var(--p-wht);
+    font-size: 11px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+    display: none;
+  }
+  #detail-panel.visible { display: block; }
+  #detail-panel .head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 8px; border-bottom: 1px solid var(--ghost); margin-bottom: 10px;
+  }
+  #detail-panel .cluster-tag {
+    font-size: 9px; letter-spacing: 0.22em;
+    padding: 2px 8px; border: 1px solid currentColor;
+  }
+  #detail-panel .close { color: var(--p-dim); cursor: pointer; font-size: 14px; padding: 0 4px; }
+  #detail-panel .close:hover { color: var(--p-wht); }
+  #detail-panel .title { font-size: 13px; font-weight: 700; margin: 6px 0 12px; word-break: break-all; }
+  #detail-panel .grid {
+    display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 10px;
+  }
+  #detail-panel .grid .k { color: var(--p-dim); }
+  #detail-panel .grid .v { color: var(--p-wht); text-align: right; font-weight: 700; }
+  #detail-panel .grid .v.pos { color: var(--p-grn); }
+  #detail-panel .grid .v.neg { color: var(--p-red); }
+  #detail-panel .chain {
+    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--ghost);
+  }
+  #detail-panel .chain-head { color: var(--polaris-blue); font-size: 9px; letter-spacing: 0.22em; margin-bottom: 8px; }
+  #detail-panel .chain-step {
+    display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 10px;
+  }
+  #detail-panel .chain-step .swatch {
+    width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 6px currentColor; flex-shrink: 0;
+  }
+  #detail-panel .chain-step .lbl {
+    color: var(--p-gry); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #detail-panel .chain-step.seed .lbl { color: #fff5d2; font-weight: 700; }
+  #detail-panel .chain-step .arrow { color: var(--p-dim); margin-left: 14px; }
+  #detail-panel .hint {
+    margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--ghost);
+    color: var(--p-dim); font-size: 9px; letter-spacing: 0.12em;
+  }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <canvas id="sphere"></canvas>
+
+  <!-- Jin 2026-04-27 cloud-only: top-bar stats (REGIME/TICK/NODES/FIRING) + pagenav
+       + side-rail (OPEN POSITIONS / EXCHANGE PnL / RECENT CLOSES) 모두 제거.
+       단일 regime 표기 = multi-matrix 정합 위반.  제목/legend 만 minimal 유지. -->
+  <div class="topbar">
+    <div class="brand"><span class="star">★</span> POLARIS · NEURAL CLOUD</div>
+    <div class="legend" style="margin-left:auto">
+      <span class="swatch"><span class="dot hot"></span>FIRING</span>
+      <span class="swatch"><span class="dot lit"></span>LIT</span>
+      <span class="swatch"><span class="dot dim"></span>DORMANT</span>
+      <span class="swatch"><span class="line"></span>SYNAPSE</span>
+    </div>
+  </div>
+
+  <!-- Bottom-right Pipeline legend (8 sphere data + 8 function inter-tier orbits + 4 outer ring) -->
+  <!-- Jin 2026-04-27: 데이터 = sphere / 함수 = 위성 (inter-tier orbit) / 외부 ring 분리 -->
+  <div class="pipeline-strip">
+    <!-- Jin 2026-04-28 v22 update: layout 정합 — chain 6 layers (data 표면) +
+         13 satellite kinds (function ring, kind-별 distinct color) + outer ring.
+         v16 EXEC/BRAIN sphere 제거 → 위성 흡수. STRAT 색은 group-별 dynamic. -->
+    <div class="ph">Static data · Sphere chain (POS heart → MKT shell)</div>
+    <div class="lg"><span class="dot" style="background:#87d7ff"></span>Live Positions (PnL color)<span class="tier">T0</span></div>
+    <div class="lg"><span class="dot" style="background:#ff87d7"></span>Exit Types<span class="tier">T1</span></div>
+    <div class="lg"><span class="dot" style="background:#d7d787"></span>Regime States<span class="tier">T3</span></div>
+    <div class="lg"><span class="dot" style="background:linear-gradient(90deg,#ffaa55,#5577ff,#aa55ff,#cc7755,#55cc77,#55ccff)"></span>Strategies (group color)<span class="tier">T5</span></div>
+    <div class="lg"><span class="dot" style="background:#87ffd7"></span>Signal Watchlist<span class="tier">T7</span></div>
+    <div class="lg"><span class="dot" style="background:#ffaf87"></span>Market Universe (exchange tint)<span class="tier">T8</span></div>
+
+    <div class="ph" style="margin-top:6px">Function satellites · Inter-tier rings</div>
+    <div class="lg"><span class="dot" style="background:#ff87d7"></span>Exit Engines<span class="tier">POS↔EXIT</span></div>
+    <div class="lg"><span class="dot" style="background:#6fb4e6"></span>Exec Router<span class="tier">POS↔EXIT</span></div>
+    <div class="lg"><span class="dot" style="background:#ff8282"></span>Brain Exit (exit_advise)<span class="tier">POS↔EXIT</span></div>
+    <div class="lg"><span class="dot" style="background:#87afd7"></span>Exec Gate<span class="tier">EXIT↔REG</span></div>
+    <div class="lg"><span class="dot" style="background:#b48cff"></span>Sensor (regime sensing)<span class="tier">REG↔STRAT</span></div>
+    <div class="lg"><span class="dot" style="background:#dcc882"></span>Regime Infra<span class="tier">REG↔STRAT</span></div>
+    <div class="lg"><span class="dot" style="background:#c8dc82"></span>Brain Entry (entry_judge)<span class="tier">REG↔STRAT</span></div>
+    <div class="lg"><span class="dot" style="background:#82e6c8"></span>Hourly Learners<span class="tier">STRAT↔BRAIN</span></div>
+    <div class="lg"><span class="dot" style="background:#ff96dc"></span>AI Judge<span class="tier">STRAT↔BRAIN</span></div>
+    <div class="lg"><span class="dot" style="background:#c8aaff"></span>Brain Data / Tools<span class="tier">STRAT↔WATCH</span></div>
+    <div class="lg"><span class="dot" style="background:#78c8ff"></span>Providers (data feed)<span class="tier">WATCH↔MKT</span></div>
+
+    <div class="ph" style="margin-top:6px">Outer ring (떠돌이)</div>
+    <div class="lg"><span class="dot" style="background:#d7d787;border-radius:0"></span>System Health (OBS)<span class="tier">T9</span></div>
+    <div class="lg"><span class="dot" style="background:#d78787;border-radius:0"></span>Action Queue<span class="tier">T10</span></div>
+    <div class="lg"><span class="dot" style="background:#ffd7c7;transform:rotate(45deg)"></span>Dimension Axis (session/liq/crisis)<span class="tier">T12</span></div>
+    <div class="lg"><span class="dot" style="background:#ff87af;border-radius:0"></span>Exit Type Tally<span class="tier">T13</span></div>
+
+    <div class="ph" style="margin-top:6px">Asset group regions (azimuth)</div>
+    <div class="lg"><span class="dot" style="background:#ffaa55"></span>crypto<span class="tier">amber</span></div>
+    <div class="lg"><span class="dot" style="background:#5577ff"></span>forex<span class="tier">blue</span></div>
+    <div class="lg"><span class="dot" style="background:#aa55ff"></span>indices<span class="tier">purple</span></div>
+    <div class="lg"><span class="dot" style="background:#cc7755"></span>commodity<span class="tier">brown</span></div>
+    <div class="lg"><span class="dot" style="background:#55cc77"></span>stock<span class="tier">green</span></div>
+    <div class="lg"><span class="dot" style="background:#55ccff"></span>etf<span class="tier">cyan</span></div>
+
+    <div class="hint" style="margin-top: 4px;">
+      <span style="color:#5fdfff">●</span> OKX
+      <span style="color:#a87cff; margin-left:6px">●</span> Capital
+      <span style="color:#ffc84f; margin-left:6px">●</span> Alpaca
+      <span style="color:#5fe08a; margin-left:6px">●</span> Binance
+    </div>
+    <div class="hint">
+      <span style="color:var(--p-grn)">●</span> profit chain<br/>
+      <span style="color:var(--p-red)">●</span> loss chain<br/>
+      click node · drag · wheel · hover
+    </div>
+  </div>
+
+  <!-- Jin 2026-04-27 cloud-only: title-block + bottom stats 제거.
+       제목/카운터 모두 stats 패널 정합 위반 — sphere 자체가 SSOT. -->
+  <div class="bottom">
+    <div class="filler"></div>
+    <div class="ticker" id="ticker">--</div>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <!-- Jin 2026-04-27 galaxy sound: subtle Web Audio API synth, default mute (browser autoplay policy).
+       Click toggles _audioEnabled; on → AudioContext init + cues for entry/exit/signal/regime/alert/ai_critical. -->
+  <button id="sound-toggle" type="button"
+          style="position:fixed; bottom:36px; left:8px; z-index:30;
+                 background:rgba(5,7,11,0.85); border:1px solid var(--ghost);
+                 color:var(--p-wht); padding:4px 10px; font-family:var(--font-mono);
+                 font-size:11px; letter-spacing:0.10em; cursor:pointer;
+                 backdrop-filter:blur(3px);">SOUND OFF</button>
+
+  <!-- Jin 2026-04-27 Hans Zimmer space OST: hidden YouTube IFrame audio + visible attribution.
+       Random pick from HANS_ZIMMER_SPACE_TRACKS pool on toggle. Default mute (autoplay policy).
+       Sound toggle button enables both Web Audio synth AND YouTube music together. -->
+  <div id="yt-player-container"
+       style="position:fixed; bottom:64px; left:8px; width:180px; height:0;
+              opacity:0; pointer-events:none; z-index:1; overflow:hidden;">
+    <iframe id="yt-player" width="180" height="100"
+            src="" frameborder="0"
+            allow="autoplay; encrypted-media"
+            allowfullscreen></iframe>
+  </div>
+  <div id="yt-attribution"
+       style="position:fixed; bottom:8px; left:8px; z-index:12;
+              font-family:var(--font-mono); font-size:10px; color:#7a7f8a;
+              opacity:0.7; pointer-events:auto; letter-spacing:0.05em;
+              background:rgba(5,7,11,0.6); padding:2px 8px;
+              border:1px solid rgba(95,135,175,0.15);
+              display:none;">
+    <span id="yt-track-title">Music off</span>
+    <a id="yt-track-link" href="https://www.youtube.com" target="_blank" rel="noopener"
+       style="color:#5fcfff; margin-left:6px; text-decoration:none;">via YouTube</a>
+  </div>
+
+  <!-- Detail panel (Jin v4: click 시 노드 detail + provenance chain) -->
+  <aside id="detail-panel">
+    <div class="head">
+      <span class="cluster-tag" id="dp-cluster">—</span>
+      <span class="close" id="dp-close">✕</span>
+    </div>
+    <div class="title" id="dp-title">—</div>
+    <div class="grid" id="dp-grid"></div>
+    <div class="chain">
+      <div class="chain-head">Provenance Chain</div>
+      <div id="dp-chain"></div>
+    </div>
+    <div class="hint">Esc to close · R reset · Space toggle rotate</div>
+  </aside>
+</div>
+
+<script src="static/sphere-render.js?v=8_node_size_bump_20260502"></script>
+<script>
+  // Jin 2026-04-27 Hans Zimmer space OST player + galaxy sound toggle.
+  // Single button toggles both Web Audio synth (sphere-render) and YouTube IFrame music.
+  // Default mute. On enable, picks random track from HANS_ZIMMER_SPACE_TRACKS.
+  (function () {
+    // Cosmic OST mix — Hans Zimmer (Interstellar + Inception) + Daniel Pemberton (Project Hail Mary)
+    // Note: Project Hail Mary 의 composer 는 Hans Zimmer 가 아니라 Daniel Pemberton (정정).
+    const HANS_ZIMMER_SPACE_TRACKS = [
+      // Hans Zimmer — Interstellar
+      { id: 'JuSsvM8B4Jc', title: 'Cornfield Chase',                 album: 'Interstellar',         artist: 'Hans Zimmer' },
+      { id: 'YF1eYbfbH5k', title: 'Full Album',                      album: 'Interstellar OST',     artist: 'Hans Zimmer' },
+      { id: 'oKYn0QAgRys', title: 'Day One + Cornfield (Live)',      album: 'Interstellar Prague', artist: 'Hans Zimmer' },
+      // Hans Zimmer — Inception
+      { id: 'hMQ7VhcCpuY', title: 'Time',                            album: 'Inception',            artist: 'Hans Zimmer' },
+      { id: 'kn_wEjhla-4', title: 'Mombasa',                         album: 'Inception',            artist: 'Hans Zimmer' },
+      { id: 'kFc0T_D36W8', title: 'Dream Within a Dream',            album: 'Inception',            artist: 'Hans Zimmer' },
+      { id: 'N1WTIstPKTY', title: '528491',                          album: 'Inception',            artist: 'Hans Zimmer' },
+      { id: 'hwBDiTqPt-0', title: 'Projections',                     album: 'Inception',            artist: 'Hans Zimmer' },
+      { id: 'NPGvvfPbW20', title: 'We Build Our Own World',          album: 'Inception',            artist: 'Hans Zimmer' },
+      // Daniel Pemberton — Project Hail Mary (2026)
+      { id: 'v-Hb0UknaMg', title: 'Ultimate Suite',                  album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
+      { id: 'FoWcQcys8Zc', title: 'Main Theme EPIC',                 album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
+      { id: 'nR5KY-03xiw', title: '1h Ambient Space',                album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
+      { id: 'LQrKQVAQ_Q4', title: 'You Are the Only One',            album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
+      // Hans Zimmer — Dune (2021) WaterTower official
+      { id: 'uTmBeR32GRA', title: 'Full Album',                      album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'x2Mc4RTOeLg', title: 'Art and Soul Full Album',         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'BdtiYwSP9ko', title: 'Paul\'s Dream',                   album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'U8HzOPVIqaU', title: 'Armada',                          album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: '2xpVQapRtGw', title: 'The One',                         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'rm6Dncay7Bg', title: 'Eclipse',                         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'T0P6YDveLsM', title: 'Leaving Caladan',                 album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'AgzE2TeXCl0', title: 'Ripples in the Sand',             album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      { id: 'RpR4ySXm5f0', title: 'Bene Gesserit',                   album: 'Dune (2021)',          artist: 'Hans Zimmer' },
+      // John Murphy — Sunshine (2007 space sci-fi)
+      { id: 'ab3NscEJ80s', title: 'Adagio in D Minor (Extended)',    album: 'Sunshine',             artist: 'John Murphy' },
+      { id: 'FWmCKhBmFVY', title: 'Adagio in D Minor (2021 Remake)', album: 'Sunshine',             artist: 'John Murphy' }
+    ];
+
+    let _ytEnabled = false;
+    let _currentTrack = null;
+
+    function _pickRandomTrack() {
+      return HANS_ZIMMER_SPACE_TRACKS[Math.floor(Math.random() * HANS_ZIMMER_SPACE_TRACKS.length)];
+    }
+
+    // YouTube IFrame Player API for ENDED detection (auto next random track)
+    let _ytPlayer = null;
+    let _ytApiLoaded = false;
+
+    // Load YouTube IFrame API once
+    function _loadYtApi() {
+      if (_ytApiLoaded || window.YT) { _ytApiLoaded = true; return; }
+      _ytApiLoaded = true;
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    }
+
+    // Global callback YouTube API calls when ready
+    window.onYouTubeIframeAPIReady = function () {
+      _ytPlayer = new YT.Player('yt-player', {
+        events: {
+          'onStateChange': (event) => {
+            // ENDED (0) → auto-pick next random track (무한 다른 곡 재생)
+            if (event.data === 0 && _ytEnabled) {
+              const next = _pickRandomTrack();
+              _setYtTrack(next, true);  // re-use existing player
+            }
+          },
+        }
+      });
+    };
+
+    function _setYtTrack(track, useApi) {
+      _currentTrack = track;
+      const titleEl  = document.getElementById('yt-track-title');
+      const linkEl   = document.getElementById('yt-track-link');
+      const attrBox  = document.getElementById('yt-attribution');
+      // Use IFrame API if ready (즉시 video 교체, no iframe reload)
+      if (useApi && _ytPlayer && typeof _ytPlayer.loadVideoById === 'function') {
+        _ytPlayer.loadVideoById(track.id);
+      } else {
+        const iframe = document.getElementById('yt-player');
+        if (iframe) {
+          // enablejsapi=1 — IFrame API 가 player control 가능
+          iframe.src = 'https://www.youtube.com/embed/' + track.id +
+                       '?autoplay=1&enablejsapi=1&modestbranding=1&showinfo=0&rel=0&origin=' +
+                       encodeURIComponent(window.location.origin);
+        }
+        _loadYtApi();
+      }
+      if (titleEl) {
+        titleEl.textContent = (track.artist || 'Hans Zimmer') + ' - ' + track.title + ' (' + track.album + ')';
+      }
+      if (linkEl) {
+        linkEl.href = 'https://www.youtube.com/watch?v=' + track.id;
+      }
+      if (attrBox) attrBox.style.display = 'block';
+    }
+
+    function _stopYtTrack() {
+      const iframe  = document.getElementById('yt-player');
+      const titleEl = document.getElementById('yt-track-title');
+      const attrBox = document.getElementById('yt-attribution');
+      if (_ytPlayer && typeof _ytPlayer.stopVideo === 'function') {
+        _ytPlayer.stopVideo();
+      }
+      if (iframe) iframe.src = '';
+      if (titleEl) titleEl.textContent = 'Music off';
+      if (attrBox) attrBox.style.display = 'none';
+      _currentTrack = null;
+    }
+
+    function _toggleYtMusic() {
+      _ytEnabled = !_ytEnabled;
+      if (_ytEnabled) {
+        _setYtTrack(_pickRandomTrack());
+      } else {
+        _stopYtTrack();
+      }
+      return _ytEnabled;
+    }
+
+    function _nextYtTrack() {
+      if (!_ytEnabled) {
+        _ytEnabled = true;
+      }
+      // 같은 곡 안 나오게 재 pick (small pool 일 때 idential pick 방지)
+      let next = _pickRandomTrack();
+      if (_currentTrack && HANS_ZIMMER_SPACE_TRACKS.length > 1) {
+        let tries = 0;
+        while (next.id === _currentTrack.id && tries < 5) {
+          next = _pickRandomTrack();
+          tries++;
+        }
+      }
+      _setYtTrack(next, !!_ytPlayer);
+      return _currentTrack;
+    }
+
+    // Expose to console for manual control
+    window.PolarisCloud = window.PolarisCloud || {};
+    window.PolarisCloud.toggleMusic  = _toggleYtMusic;
+    window.PolarisCloud.nextTrack    = _nextYtTrack;
+    window.PolarisCloud.musicTracks  = HANS_ZIMMER_SPACE_TRACKS;
+
+    // Wire single sound-toggle button to BOTH sphere Web Audio synth + YouTube music
+    const btn = document.getElementById('sound-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const synthOn = window.PolarisCloud && window.PolarisCloud.toggleSound
+        ? window.PolarisCloud.toggleSound() : false;
+      const musicOn = _toggleYtMusic();
+      const anyOn   = synthOn || musicOn;
+      btn.textContent = anyOn ? 'SOUND ON' : 'SOUND OFF';
+      btn.style.color = anyOn ? '#87ffd7' : '#ffffff';
+    });
+  })();
+</script>
+</body>
+</html>

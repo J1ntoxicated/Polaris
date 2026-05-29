@@ -1,0 +1,130 @@
+/* Polaris (북극성) Design System — colors + type tokens
+ *
+ * Source of truth: invasion/dashboard/ansi.py (256-color ANSI palette)
+ * Approximate hex values — these are the closest sRGB matches to xterm 256-color codes.
+ *
+ * Use these vars in any HTML mockup of Polaris. Do not invent new colors;
+ * if you need a state not covered, layer one of the existing pastels with
+ * the BG_R / BG_Y backgrounds (full-row reverse-video).
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+  /* ── Surfaces ───────────────────────────────────────────── */
+  --bg:           #0a0d12;   /* near-black terminal bg */
+  --bg-row-alt:  #0f131a;    /* dim_row alternate row */
+  --bg-row-r:    #5f0000;    /* BG_R full-row alert (loss > 2%) */
+  --bg-row-y:    #5f5f00;    /* BG_Y full-row warn */
+
+  /* ── Pastel palette (256-color → sRGB) ──────────────────── */
+  --p-grn:       #87d787;    /* 114 — profit, long, OK */
+  --p-red:       #d78787;    /* 174 — loss, short, danger */
+  --p-cyn:       #87d7ff;    /* 117 — signal, AI, OKX */
+  --p-ylw:       #d7d787;    /* 186 — warning, ALP */
+  --p-mag:       #d7afff;    /* 183 — regime, strategy */
+  --p-blu:       #87afd7;    /* 110 — CAP, info */
+  --p-org:       #ffaf87;    /* 216 — accents (legacy) */
+  --p-wht:       #dadada;    /* 253 — key numbers */
+  --p-gry:       #a8a8a8;    /* 248 — secondary labels */
+  --p-dim:       #6c6c6c;    /* 242 — background elements */
+  --ghost:       #626262;    /* 241 — faint dividers */
+
+  /* ── Brand accents ──────────────────────────────────────── */
+  --polaris-blue: #5f87af;   /* 67  — section dividers, ★ glyph */
+  --p-navy:       #005f87;   /* 24  — deep brand accent */
+
+  /* ── Saturated 16-color ANSI (urgent only) ──────────────── */
+  --grn:         #00ff5f;    /* 92  bright */
+  --red:         #ff5f5f;    /* 91  bright */
+  --ylw:         #ffff5f;    /* 93  bright */
+  --cyn:         #5fffff;    /* 96  bright */
+  --mag:         #ff5fff;    /* 95  bright */
+  --blu:         #5f5fff;    /* 94  bright */
+  --wht:         #ffffff;    /* 97  bright */
+
+  /* ── Semantic aliases (use these in components) ─────────── */
+  --fg-primary:    var(--p-wht);
+  --fg-secondary:  var(--p-gry);
+  --fg-muted:      var(--p-dim);
+  --fg-ghost:      var(--ghost);
+
+  --pnl-pos:       var(--p-grn);
+  --pnl-neg:       var(--p-red);
+  --pnl-flat:      var(--p-dim);
+
+  --status-lit:    var(--p-grn);
+  --status-dark:   var(--p-dim);
+  --status-warn:   var(--p-ylw);
+  --status-danger: var(--p-red);
+  --status-info:   var(--p-cyn);
+
+  --exch-okx:      var(--p-cyn);
+  --exch-cap:      var(--p-blu);
+  --exch-alp:      var(--p-ylw);
+  --exch-bin:      var(--p-grn);
+
+  --divider:       var(--polaris-blue);
+  --divider-soft:  var(--ghost);
+
+  /* ── Type ───────────────────────────────────────────────── */
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-stack: var(--font-mono);
+
+  --fs-12: 12px;   /* body, data rows */
+  --fs-13: 13px;   /* row emphasis */
+  --fs-14: 14px;   /* section header */
+  --fs-16: 16px;   /* banner */
+  --fs-18: 18px;   /* hero number */
+  --fs-24: 24px;   /* dashboard title */
+  --fs-32: 32px;   /* splash */
+
+  --lh-tight:  1.15;
+  --lh-row:    1.4;     /* exactly the terminal cell ratio */
+  --lh-loose:  1.6;
+
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-bold:    700;
+
+  /* ── Spacing (cell-grid, 1ch ≈ 7.2px @12px JBM) ─────────── */
+  --cell:      0.6em;
+  --gap-1:     1ch;     /* single space */
+  --gap-2:     2ch;     /* two spaces — group separator */
+  --gap-3:     3ch;     /* col gutter " │ " */
+
+  /* No radius. Polaris is square. */
+  --radius:    0;
+  --shadow:    none;
+}
+
+/* ── Base type primitives ─────────────────────────────────── */
+
+body, .polaris {
+  background: var(--bg);
+  color: var(--fg-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  line-height: var(--lh-row);
+  font-weight: var(--fw-regular);
+  font-feature-settings: "calt" 0, "liga" 0;  /* disable ligatures — terminal-faithful */
+  -webkit-font-smoothing: antialiased;
+}
+
+.polaris h1, .pl-h1 { font-size: var(--fs-24); font-weight: var(--fw-bold); letter-spacing: 0.05em; text-transform: uppercase; color: var(--p-wht); margin: 0; }
+.polaris h2, .pl-h2 { font-size: var(--fs-16); font-weight: var(--fw-bold); letter-spacing: 0.04em; text-transform: uppercase; color: var(--p-wht); margin: 0; }
+.polaris h3, .pl-h3 { font-size: var(--fs-14); font-weight: var(--fw-bold); letter-spacing: 0.04em; text-transform: uppercase; color: var(--polaris-blue); margin: 0; }
+
+.pl-label    { color: var(--fg-secondary); font-size: var(--fs-12); }
+.pl-value    { color: var(--p-wht); font-weight: var(--fw-bold); }
+.pl-num      { color: var(--p-wht); font-variant-numeric: tabular-nums; }
+.pl-dim      { color: var(--p-dim); }
+.pl-ghost    { color: var(--ghost); }
+.pl-mono     { font-family: var(--font-mono); }
+
+.pl-pos      { color: var(--pnl-pos); font-weight: var(--fw-bold); }
+.pl-neg      { color: var(--pnl-neg); font-weight: var(--fw-bold); }
+.pl-flat     { color: var(--pnl-flat); }
+
+.pl-divider  { color: var(--divider); }
+.pl-section  { color: var(--polaris-blue); font-weight: var(--fw-bold); letter-spacing: 0.04em; }

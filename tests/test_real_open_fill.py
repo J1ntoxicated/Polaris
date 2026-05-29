@@ -58,6 +58,9 @@ def _make_okx_adapter(*, ok: bool = True, filled: bool = True) -> AsyncMock:
     adapter.fetch_order = AsyncMock(
         return_value={"data": [_okx_filled_row()] if filled else []}
     )
+    # No bid → #7 maker path falls back to the single market leg, so the
+    # place_market_order / fetch_order awaited-once assertions still hold.
+    adapter.fetch_ticker = AsyncMock(return_value={})
     return adapter
 
 
@@ -432,6 +435,7 @@ async def test_reserve_and_submit_real_open_exception_releases(
         side_effect=RuntimeError("venue timeout")
     )
     okx_adapter.fetch_order = AsyncMock()
+    okx_adapter.fetch_ticker = AsyncMock(return_value={})  # no bid → market leg
     # Must NOT propagate the exception; must release + fault + None.
     trade = await _reserve_and_submit(
         conn=memdb, state=state, sig=_sig("exc"), venue="okx", symbol="BTC-USDT",

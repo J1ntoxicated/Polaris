@@ -47,6 +47,9 @@ def _make_okx_reject_adapter(code: str) -> AsyncMock:
     adapter = AsyncMock()
     adapter.place_market_order = AsyncMock(return_value=_okx_reject_resp(code))
     adapter.fetch_order = AsyncMock(return_value={"data": []})
+    # No bid → #7 maker path falls back to the market leg (which carries the
+    # reject), so the reject-code assertions below still hold.
+    adapter.fetch_ticker = AsyncMock(return_value={})
     return adapter
 
 
@@ -81,6 +84,7 @@ async def test_real_okx_open_fill_no_fill_when_no_rows() -> None:
         )
     )
     adapter.fetch_order = AsyncMock(return_value={"data": []})
+    adapter.fetch_ticker = AsyncMock(return_value={})  # no bid → market leg
     attempt = await real_okx_open_fill(
         adapter, inst_id="BTC-USDT", notional_usd=100.0,
         strategy_id="tsmom", last_price=60_000.0,

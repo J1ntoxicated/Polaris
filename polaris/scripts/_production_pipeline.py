@@ -104,6 +104,7 @@ async def _real_open_fill(
     notional_usd: float,
     last_price: float,
     strategy_id: str,
+    strength: float = 0.0,
     okx_adapter: Any = None,
     capital_session: Any = None,
 ) -> OpenAttempt:
@@ -125,7 +126,7 @@ async def _real_open_fill(
         if okx_adapter is not None:
             return await real_okx_open_fill(
                 okx_adapter, inst_id=symbol, notional_usd=notional_usd,
-                strategy_id=strategy_id, last_price=last_price,
+                strategy_id=strategy_id, last_price=last_price, strength=strength,
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -139,7 +140,7 @@ async def _real_open_fill(
         ) as adapter:
             return await real_okx_open_fill(
                 adapter, inst_id=symbol, notional_usd=notional_usd,
-                strategy_id=strategy_id, last_price=last_price,
+                strategy_id=strategy_id, last_price=last_price, strength=strength,
             )
 
     # Capital CFD — close needs the deal_id from the confirm.
@@ -315,6 +316,7 @@ async def reserve_and_submit(
             attempt = await _real_open_fill(
                 venue=venue, symbol=symbol, side=sig.side, notional_usd=notional_usd,
                 last_price=last_price, strategy_id=sig.strategy_id,
+                strength=sig.strength,
                 okx_adapter=okx_adapter, capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape

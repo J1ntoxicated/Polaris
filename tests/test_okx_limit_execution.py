@@ -1,0 +1,234 @@
+"""#7 maker/limit execution — post-only limit at touch + market fallback.
+
+All tests inject a fake OKX adapter; **no real venue network call ever
+happens**. Covers: limit immediate fill (no market), limit timeout → cancel +
+market fallback, strong signal → market (no limit), limit-path exception →
+market fallback (entry guaranteed), and the partial-fill-on-cancel orphan guard.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import pytest
+
+from polaris.core.data.fill_normalizer import Fill
+from polaris.scripts._smoke_real_roundtrip import real_okx_open_fill
+
+
+def _resp(*, ok: bool = True, ord_id: str = "ord_1", code: str = "0") -> Any:
+    from polaris.venues.okx.adapter import OKXOrderResponse
+
+    return OKXOrderResponse(
+        ok=ok, venue_order_id=ord_id if ok else None,
+        client_order_id="cl1", code=code, msg="", raw={},
+    )
+
+
+def _row(*, state: str = "filled", price: float = 60_000.0, acc: str = "100.0") -> dict[str, Any]:
+    return {
+        "ordId": "ord_1", "clOrdId": "cl1", "instId": "BTC-USDT",
+        "side": "buy", "tgtCcy": "quote_ccy", "accFillSz": acc,
+        "avgPx": str(price), "fee": "-0.02", "feeCcy": "USDT",
+        "state": state, "uTime": str(int(time.time() * 1000)),
+    }
+
+
+class _FakeOKX:
+    """State-aware fake adapter.
+
+    ``waiting_row`` is returned by ``fetch_order`` while the post-only limit is
+    resting (before timeout/cancel). After ``cancel_order`` fires, ``post_cancel_row``
+    is returned. ``market_row`` is returned once a market order is placed (the
+    fallback leg). This mirrors the real REST sequence without relying on poll
+    iteration counts.
+    """
+
+    def __init__(
+        self,
+        *,
+        place_resp: Any,
+        waiting_row: dict[str, Any] | None = None,
+        post_cancel_row: dict[str, Any] | None = None,
+        market_row: dict[str, Any] | None = None,
+        bid: str | None = "59999.0",
+    ) -> None:
+        self._place_resp = place_resp
+        self._waiting_row = waiting_row
+        self._post_cancel_row = post_cancel_row
+        self._market_row = market_row
+        self._bid = bid
+        self._cancelled = False
+        self._market_placed = False
+        self.place_calls: list[dict[str, Any]] = []
+        self.cancel_calls: list[dict[str, Any]] = []
+
+    async def fetch_ticker(self, inst_id: str) -> dict[str, Any]:
+        return {"bidPx": self._bid, "askPx": "60001.0"} if self._bid is not None else {}
+
+    async def place_market_order(self, **kwargs: Any) -> Any:
+        self.place_calls.append(kwargs)
+        if kwargs["ord_type"] == "market":
+            self._market_placed = True
+        return self._place_resp
+
+    async def fetch_order(self, *, inst_id: str, ord_id: str) -> dict[str, Any]:
+        if self._market_placed:
+            return {"data": [self._market_row] if self._market_row else []}
+        if self._cancelled:
+            return {"data": [self._post_cancel_row] if self._post_cancel_row else []}
+        return {"data": [self._waiting_row] if self._waiting_row else []}
+
+    async def cancel_order(self, *, inst_id: str, ord_id: str) -> dict[str, Any]:
+        self._cancelled = True
+        self.cancel_calls.append({"ord_id": ord_id})
+        return {"code": "0"}
+
+
+@pytest.fixture(autouse=True)
+def _fast_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the limit fill-wait so timeout tests run fast."""
+    monkeypatch.setenv("POLARIS_LIMIT_FILL_WAIT_SEC", "0.05")
+
+
+# ---------------------------------------------------------------------------
+# (1) limit immediate fill → market is NOT used (single post_only place)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_limit_immediate_fill_no_market() -> None:
+    adapter = _FakeOKX(place_resp=_resp(), waiting_row=_row(state="filled"))
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=0.8,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert len(adapter.place_calls) == 1
+    assert adapter.place_calls[0]["ord_type"] == "post_only"
+    assert adapter.place_calls[0]["last_price_hint"] == 59_999.0  # best bid touch
+    assert adapter.cancel_calls == []  # filled → no cancel
+
+
+# ---------------------------------------------------------------------------
+# (2) limit unfilled → timeout → cancel + market fallback fills
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_limit_timeout_cancel_then_market_fallback() -> None:
+    # post_only stays 'live' (unfilled) on every poll; after cancel the re-check
+    # still shows no fill; market fallback then returns a filled row.
+    adapter = _FakeOKX(
+        place_resp=_resp(ord_id="ord_1"),
+        waiting_row=_row(state="live", acc="0"),          # unfilled while resting
+        post_cancel_row=_row(state="canceled", acc="0"),  # re-check after cancel
+        market_row=_row(state="filled"),                  # market fallback fill
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=0.8,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    # 1 post_only + 1 market fallback.
+    assert len(adapter.place_calls) == 2
+    assert adapter.place_calls[0]["ord_type"] == "post_only"
+    assert adapter.place_calls[1]["ord_type"] == "market"
+    assert len(adapter.cancel_calls) == 1  # cancelled the resting maker order
+
+
+# ---------------------------------------------------------------------------
+# (3) strong signal → straight to market (no limit place, no ticker fetch)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_strong_signal_skips_limit_goes_market() -> None:
+    adapter = _FakeOKX(place_resp=_resp(), market_row=_row(state="filled"))
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=1.6,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert len(adapter.place_calls) == 1
+    assert adapter.place_calls[0]["ord_type"] == "market"
+    assert adapter.cancel_calls == []
+
+
+# ---------------------------------------------------------------------------
+# (4) limit path raises → fail-safe market fallback still fills the entry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_limit_exception_falls_back_to_market() -> None:
+    calls: dict[str, int] = {"post_only": 0, "market": 0}
+
+    class _Boom(_FakeOKX):
+        async def place_market_order(self, **kwargs: Any) -> Any:
+            calls[kwargs["ord_type"]] += 1
+            if kwargs["ord_type"] == "post_only":
+                raise RuntimeError("post_only unsupported on this pair")
+            self._market_placed = True
+            return _resp()
+
+    adapter = _Boom(place_resp=_resp(), market_row=_row(state="filled"))
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=0.8,
+        poll_delay_sec=0.0,
+    )
+    # Entry NOT blocked — market fallback filled it.
+    assert isinstance(attempt.fill, Fill)
+    assert calls["post_only"] == 1 and calls["market"] == 1
+
+
+# ---------------------------------------------------------------------------
+# (5) no usable bid (ticker has no bidPx) → market fallback (fail-safe)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_bid_falls_back_to_market() -> None:
+    adapter = _FakeOKX(
+        place_resp=_resp(), market_row=_row(state="filled"), bid=None,
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=0.8,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    # No post_only place (no bid) — straight market.
+    assert len(adapter.place_calls) == 1
+    assert adapter.place_calls[0]["ord_type"] == "market"
+
+
+# ---------------------------------------------------------------------------
+# (6) partial fill on cancel race → tracked as a REAL position (orphan guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_on_cancel_is_tracked() -> None:
+    # Unfilled while waiting, then a partial fill (accFillSz>0) appears in the
+    # post-cancel re-check → must be normalized + returned, never orphaned.
+    adapter = _FakeOKX(
+        place_resp=_resp(ord_id="ord_1"),
+        waiting_row=_row(state="live", acc="0"),           # unfilled while resting
+        post_cancel_row=_row(state="canceled", acc="40.0"),  # cancel race partial
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="volume_burst", last_price=60_000.0, strength=0.8,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert attempt.fill.base_qty > 0.0
+    assert len(adapter.cancel_calls) == 1
+    # NO market fallback — the partial fill is a real position.
+    assert all(c["ord_type"] == "post_only" for c in adapter.place_calls)

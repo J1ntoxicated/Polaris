@@ -487,7 +487,8 @@ def test_collect_snapshot_with_fills_computes_realised_pnl(tmp_path: Path) -> No
     conn.commit()
     conn.close()
     snap = collect_snapshot(db_path)
-    assert snap.daily_pnl_usd == pytest.approx(25.0)
+    # Net of fees (forensic 2026-05-29 P0): gross +25.0 − fees (0.05 + 0.06).
+    assert snap.daily_pnl_usd == pytest.approx(24.89)
     assert snap.daily_trades == 1
     assert len(snap.recent_trades) == 1
     t = snap.recent_trades[0]

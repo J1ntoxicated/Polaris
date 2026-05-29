@@ -71,25 +71,36 @@ def _symbol_from_inst(inst: str | None) -> str:
 def _build_equity_curve(
     conn: sqlite3.Connection, *, now_s: int, starting_capital: float
 ) -> tuple[list[int], list[float], float]:
-    """Build 24h equity curve buckets from realised fills.
+    """Build 24h equity curve buckets from realised fills, NET of fees.
 
-    equity_t = starting_capital + sum(pnl_usd for closed fills with ts<=t)
+    equity_t = starting_capital
+               + Σ(pnl_usd for closed fills with ts<=t)
+               − Σ(fee_usd for ALL fills with ts<=t)
+
+    Fees hit on BOTH the open and close leg and are a real venue deduction
+    (even on DEMO), so each fill contributes ``(pnl if close else 0) − fee``
+    at its own timestamp (forensic 2026-05-29 P0 — fees were omitted).
 
     Returns (bucket_ts list, equity list, total_realised).
     """
     lookback_ms = (now_s - EQUITY_LOOKBACK_SEC) * 1000
     rows = _safe_query(
         conn,
-        """SELECT ts_ms, pnl_usd FROM fills
-           WHERE is_close = 1 AND ts_ms >= ?
+        """SELECT ts_ms,
+                  (CASE WHEN is_close = 1 THEN COALESCE(pnl_usd, 0.0) ELSE 0.0 END)
+                  - COALESCE(fee_usd, 0.0) AS delta
+           FROM fills
+           WHERE ts_ms >= ?
            ORDER BY ts_ms ASC""",
         (lookback_ms,),
     )
 
-    # Realised PnL outside the 24h window (carry-in starting point).
+    # Net realised (pnl − fees) outside the 24h window (carry-in starting point).
     pre_rows = _safe_query(
         conn,
-        "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM fills WHERE is_close = 1 AND ts_ms < ?",
+        """SELECT COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
+                  - COALESCE(SUM(fee_usd), 0.0)
+           FROM fills WHERE ts_ms < ?""",
         (lookback_ms,),
     )
     base = starting_capital + (float(pre_rows[0][0]) if pre_rows else 0.0)
@@ -153,12 +164,18 @@ def _drawdown_and_sharpe(
 def _daily_realised_pnl(
     conn: sqlite3.Connection, *, now_s: int
 ) -> tuple[float, int]:
-    """Realised PnL & closed-trade count over last 24h."""
+    """Realised PnL (NET of fees) & closed-trade count over last 24h.
+
+    Net = Σ(close pnl_usd) − Σ(fee_usd over ALL fills) in-window. Fees on both
+    legs are real deductions (forensic 2026-05-29 P0 — were omitted).
+    """
     lookback_ms = (now_s - EQUITY_LOOKBACK_SEC) * 1000
     rows = _safe_query(
         conn,
-        """SELECT COALESCE(SUM(pnl_usd), 0.0), COUNT(*) FROM fills
-           WHERE is_close = 1 AND ts_ms >= ?""",
+        """SELECT COALESCE(SUM(CASE WHEN is_close = 1 THEN pnl_usd ELSE 0.0 END), 0.0)
+                  - COALESCE(SUM(fee_usd), 0.0),
+                  COALESCE(SUM(is_close), 0)
+           FROM fills WHERE ts_ms >= ?""",
         (lookback_ms,),
     )
     if not rows:

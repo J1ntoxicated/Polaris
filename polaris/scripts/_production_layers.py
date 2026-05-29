@@ -27,6 +27,7 @@ from collections.abc import Sequence
 import httpx
 
 from polaris.core.data.schema import Bar
+from polaris.core.isolation.blocklist import load_blocklist
 from polaris.core.live_recalc.regime_flip import detect_regime_flip
 from polaris.core.live_recalc.tick_recalc import (
     mark_position_dirty,
@@ -179,11 +180,23 @@ def read_active_universe(conn: sqlite3.Connection) -> list[UniverseInstrument]:
 def refresh_focus_watchlist(
     conn: sqlite3.Connection, *, cycle_ts: int | None = None
 ) -> int:
-    """Compute dynamic focus over active universe + persist; return count."""
+    """Compute dynamic focus over active universe + persist; return count.
+
+    Task 3 / D2: runtime-blocklisted (venue, symbol) — venue-permanent
+    compliance rejects (51155) — are excluded so they never enter focus and
+    cannot churn the order path.
+    """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
     universe = read_active_universe(conn)
     if not universe:
         return 0
+    blocked = load_blocklist(conn)
+    if blocked:
+        universe = [
+            ins for ins in universe if (ins.venue, ins.symbol) not in blocked
+        ]
+        if not universe:
+            return 0
     focus = compute_dynamic_focus(universe, cycle_ts=ts)
     persist_focus(conn, focus)
     logger.info("[L0/focus] universe=%d → focus=%d", len(universe), len(focus))

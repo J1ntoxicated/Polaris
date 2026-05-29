@@ -27,7 +27,11 @@ import time
 import uuid
 from typing import Any
 
-from polaris.core.data.fill_normalizer import Fill, normalize_okx_fill
+from polaris.core.data.fill_normalizer import (
+    OKX_FILLED_STATES,
+    Fill,
+    normalize_okx_fill,
+)
 from polaris.core.data.fills_persist import persist_fill
 from polaris.scripts._smoke_roundtrip_capital import (
     real_capital_close_fill,
@@ -88,10 +92,12 @@ def _synthetic_okx_fill(*, is_close: bool) -> Fill:
 # ---------------------------------------------------------------------------
 # Single-leg adapter helpers (reused by the production paper loop real wire).
 #
-# Each helper drives one leg (open or close) on an *already-constructed*
-# adapter and returns a normalized ``Fill`` (or ``None`` on reject / no-fill).
-# The adapter is injected so the production loop and the unit tests can pass a
-# mock; no network call happens unless the caller hands in a live adapter.
+# Each helper drives one leg on an *already-constructed* adapter. Open helpers
+# return an ``OpenAttempt`` (Fill on success, else venue reject code/msg or the
+# ``"no_fill"`` sentinel); close helpers return a normalized ``Fill`` (or
+# ``None`` on reject / no-fill). The adapter is injected so the production loop
+# and unit tests can pass a mock; no network call happens unless the caller
+# hands in a live adapter.
 # ---------------------------------------------------------------------------
 
 
@@ -111,11 +117,17 @@ async def real_okx_open_fill(
     no fill row came back, or the normalized ``Fill`` on success — so the caller
     can tell an EXTERNAL venue reject apart from an internal fault.
     """
+    # Aggressive bias (flow_not_block): a market order with quote-ccy notional
+    # fills at best available rather than a tight IOC px clamp that 'canceled's
+    # on illiquid alts. The fill normalizer still records the real fill_price +
+    # slippage_bps, so the edge-validation cost overlay measures honest slippage.
     buy_resp = await adapter.place_market_order(
         inst_id=inst_id,
         side="buy",
         notional_usd=notional_usd,
         client_order_id=f"polLbuy{uuid.uuid4().hex[:8]}",
+        tgt_ccy="quote_ccy",
+        ord_type="market",
     )
     if not buy_resp.ok or not buy_resp.venue_order_id:
         return OpenAttempt(
@@ -126,6 +138,14 @@ async def real_okx_open_fill(
     rows = state.get("data", []) or []
     if not rows:
         return OpenAttempt(fill=None, reject_code="no_fill")
+    # A non-filled venue state (e.g. 'canceled') is an EXTERNAL no-fill, not a
+    # fault: route it to no_fill instead of letting normalize_okx_fill raise
+    # (which would surface as a FAULT_EXCEPTION).
+    order_state = str(rows[0].get("state") or "").lower()
+    if order_state not in OKX_FILLED_STATES:
+        return OpenAttempt(
+            fill=None, reject_code="no_fill", reject_msg=f"state={order_state}",
+        )
     fill = normalize_okx_fill(
         rows[0], strategy_id=strategy_id, expected_price=last_price,
     )

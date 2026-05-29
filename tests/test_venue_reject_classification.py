@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from polaris.core.data.fill_normalizer import FillNormalizationError
 from polaris.core.isolation.circuit_breaker import ACTIVE, current_strategy_mode
 from polaris.scripts._production_pipeline import reserve_and_submit
 from polaris.scripts._smoke_real_roundtrip import real_okx_open_fill
@@ -195,3 +196,84 @@ async def test_anomalous_reject_code_does_record_fault(
         "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='tsmom'"
     ).fetchone()[0]
     assert int(fault) == 1
+
+
+# ---------------------------------------------------------------------------
+# Part C — OKX entry uses market order + non-filled state → no_fill (not fault)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingOKXAdapter:
+    """Fake adapter recording place_market_order kwargs; scriptable fetch row."""
+
+    def __init__(self, fetch_row: dict[str, Any] | None) -> None:
+        self.place_kwargs: dict[str, Any] = {}
+        self._fetch_row = fetch_row
+
+    async def place_market_order(self, **kwargs: Any) -> Any:
+        from polaris.venues.okx.adapter import OKXOrderResponse
+
+        self.place_kwargs = kwargs
+        return OKXOrderResponse(
+            ok=True, venue_order_id="o1", client_order_id="cl1",
+            code="0", msg="", raw={},
+        )
+
+    async def fetch_order(self, **_kwargs: Any) -> dict[str, Any]:
+        rows = [self._fetch_row] if self._fetch_row is not None else []
+        return {"data": rows}
+
+
+@pytest.mark.asyncio
+async def test_okx_open_uses_market_order() -> None:
+    """Entry leg must place a market order with quote-ccy notional semantics so
+    OKX fills at best available (aggressive bias: getting filled > px clamp)."""
+    adapter = _RecordingOKXAdapter(
+        fetch_row={
+            "instId": "GAS-USDT", "side": "buy", "state": "filled",
+            "avgPx": "10.0", "accFillSz": "10.0", "ordId": "o1",
+            "tgtCcy": "quote_ccy",
+        }
+    )
+    await real_okx_open_fill(
+        adapter, inst_id="GAS-USDT", notional_usd=100.0,
+        strategy_id="tsmom", last_price=10.0, poll_delay_sec=0.0,
+    )
+    assert adapter.place_kwargs.get("ord_type") == "market"
+    assert adapter.place_kwargs.get("tgt_ccy") == "quote_ccy"
+
+
+@pytest.mark.asyncio
+async def test_okx_open_canceled_state_is_no_fill_not_exception() -> None:
+    """A non-filled venue state (e.g. 'canceled') must route to no_fill, NOT
+    raise FillNormalizationError → keeps the no-fill on the external-nonfault
+    path instead of a FAULT_EXCEPTION."""
+    adapter = _RecordingOKXAdapter(
+        fetch_row={"instId": "GAS-USDT", "side": "buy", "state": "canceled"}
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="GAS-USDT", notional_usd=100.0,
+        strategy_id="tsmom", last_price=10.0, poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt, OpenAttempt)
+    assert attempt.fill is None
+    assert attempt.reject_code == "no_fill"
+
+
+@pytest.mark.asyncio
+async def test_okx_open_filled_state_returns_fill() -> None:
+    """A filled row still normalizes to a Fill (success path preserved)."""
+    adapter = _RecordingOKXAdapter(
+        fetch_row={
+            "instId": "GAS-USDT", "side": "buy", "state": "filled",
+            "avgPx": "10.0", "accFillSz": "10.0", "ordId": "o1",
+            "tgtCcy": "quote_ccy",
+        }
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="GAS-USDT", notional_usd=100.0,
+        strategy_id="tsmom", last_price=10.0, poll_delay_sec=0.0,
+    )
+    assert attempt.fill is not None
+    assert attempt.reject_code is None
+    _ = FillNormalizationError  # imported for negative-path documentation

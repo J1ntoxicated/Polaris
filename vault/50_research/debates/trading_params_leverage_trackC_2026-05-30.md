@@ -58,3 +58,7 @@ read-only 준수. 거부키워드 sweep 0건(방어/축소/real-money 보수 논
 9-stack 곱셈 mult 추가 0(#1 leverage=notional 배수, #2 캡=headroom_min 멤버). hard-MAX 불변.
 파일: `_production_run_signal.py:124,149` · `constraint_translator.py:129-133` ·
 `engine.py:453` · `fill_normalizer.py:169` · `schema.py:36,54,60-85,202`.
+
+## Jin 최종 결정 (2026-05-30)
+- **#1 Capital 레버리지**: per-market 전환 확정 (translator per-epic + 폴백 FX30/지수20/원자재20/cCFD2, 0-폴백 교체, fill_normalizer 전달). → T7.
+- **#2 Track C 캡**: **buying_power 기준** 채택 (aggressive). `TRACK_C_GROSS_PCT=3.0`, per-symbol 0.99, daily 0.99, total 0.99 불변. equity_usd(Track C)=buying_power($318.8k). PDT=별도 day-trade 카운터(랭킹 다운, 차단 X). 단일거래 0.09 ceiling·headroom_min·9-stack 불변. → T8.

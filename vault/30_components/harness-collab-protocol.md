@@ -49,3 +49,15 @@ vault read → sequential-thinking → codex debate → vault update. 4개 모�
 - vault = md + YAML frontmatter + `[[wikilink]]` (Obsidian-native, XML/HTML 금지 → graph 보존)
 - config/state = JSON / SQLite
 - rendered report = HTML (dashboard only — 실제 렌더되는 유일 layer)
+
+---
+
+## Workflow-first 기본 모드 (Jin 2026-05-29 mandate)
+
+작업 기본 = **다이나믹 멀티에이전트 Workflow** 오케스트레이션. 단발 Agent 를 수동으로 여러 개 띄우는 대신 **Workflow 스크립트 하나**로:
+- **fan-out** — 차원/항목 병렬 분해 + 커버
+- **pipeline** — design → build(TDD) → adversarial review (단계 간 배리어 없이 항목별 흐름)
+- **loop-until-dry** — 미지 규모 탐색(버그/엣지/이슈) K회 연속 무소득까지
+- **adversarial verify / judge panel / completeness critic** — 다관점 반박으로 거짓양성 제거
+
+직접/단발 = trivial·대화·단일 known target·즉각 1-edit 만. 토큰 비용은 제약 아님(철저함·정확성 우선), 큰 비용은 Jin 사전 고지. builder≠reviewer 는 pipeline 의 review 단계로 내장. CLAUDE.md `## Workflow` 작업모드 SSOT.

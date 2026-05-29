@@ -58,6 +58,7 @@ L0 Dynamic Universe · L1 Canonical+Baseline · L2 Per-Gate AI (G1-G8) · L3 Siz
 - `~/.claude/projects/-Users-jinyoon-Projects-Polaris/memory/MEMORY.md` (영속 원칙 index)
 
 ## Workflow (영속 cycle)
+**작업 모드 기본 = 다이나믹 멀티에이전트 Workflow** (Jin 2026-05-29 mandate): 모든 substantial 작업(설계·구현·리뷰·리서치·감사·sweep·마이그레이션)은 단발 Agent 가 아니라 **Workflow 스크립트로 오케스트레이션**을 기본으로 한다 — fan-out(병렬 분해) / pipeline(design→build→adversarial review) / loop-until-dry(완전 탐색) + 적대적 검증(다관점 반박)을 엮어 가장 철저·정확한 결과를 낸다. 토큰 비용은 제약이 아니다(품질 우선). **직접/단발 처리 = trivial·대화·단일 known target·즉각 1-edit 만.** 단발 Agent 를 여러 개 손으로 띄우는 대신 한 Workflow 로 묶는다. 큰 비용 작업은 Jin 에게 사전 1줄 고지.
 1. **Session start** — read `_NOW.md` + MEMORY.md
 2. **비-자명 결정 = 슈퍼 브레인 4 합주** — vault read + sequential-thinking + codex debate + vault update
 3. **모든 신규 코드 = codex 외부 review** (작성 ≠ 리뷰)
@@ -75,7 +76,7 @@ tool call · skill · advisor 단독 호출 ≠ agent — agent는 위 권한을
 </agent-definition>
 
 <handoff-triggers>
-5+ 파일 read·codebase-wide search → Explore·general-purpose · 큰 wave 검수 → 5-axis 병렬(technical/4-axis policy/coherence/functional/live) · 다단계 설계 → Plan, 리팩토링 → code-simplifier · 신규 코드·거동 변경 → code-implementer→codex-debate-partner · 거부키워드 sweep hit·9-stack/sizing 변경·vault write 충돌 → 전담 agent · 오염 신호(Read 5+/grep 100+ line/반복 search) → 전환 · 단일 known target → 직접 처리
+**기본 = Workflow 오케스트레이션** (위 작업모드). substantial 다단계·구현·리서치·감사·sweep → **Workflow**(design→build(TDD)→adversarial review pipeline, 또는 find→verify fan-out, 또는 loop-until-dry). 5+ 파일 read·codebase-wide search → Explore·general-purpose(또는 Workflow 내 reader fan-out) · 큰 wave 검수 → 5-axis 병렬 · 다단계 설계 → Plan, 리팩토링 → code-simplifier · 신규 코드·거동 변경 → builder→adversarial review(Workflow 단계) · 거부키워드 sweep hit·9-stack/sizing 변경·vault write 충돌 → 전담 agent/Workflow 단계 · 오염 신호(Read 5+/grep 100+ line/반복 search) → 전환 · 단일 known target·trivial → 직접 처리
 </handoff-triggers>
 
 <builder-not-reviewer>

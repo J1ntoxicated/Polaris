@@ -62,12 +62,7 @@ class FXBreakoutBasketStrategy(BaseStrategy):
         if len(bars) < WINDOW + 1:
             return None
         last = bars[-1]
-        if is_finite(market_view.donchian_high_40):
-            high = market_view.donchian_high_40
-        else:
-            high = max(b.high for b in bars[-(WINDOW + 1):-1])
-        if high is None or last.close <= high:
-            return None
+        # adx is a direction-agnostic gate (trend strength, not direction).
         if not is_finite(market_view.adx_14):
             return None
         adx = market_view.adx_14
@@ -75,21 +70,49 @@ class FXBreakoutBasketStrategy(BaseStrategy):
             return None
         adx_score = STRENGTH_BASE + (adx - ADX_THRESHOLD) / ADX_STRENGTH_DENOM
         strength = min(1.0, max(STRENGTH_BASE, adx_score))
-        return RawSignal(
-            signal_id=make_signal_id(),
-            strategy_id=self.metadata.strategy_id,
-            symbol=market_view.symbol,
-            side="long",
-            strength=strength,
-            sizing_hint=strength,
-            ttl_bars=TTL_BARS,
-            thesis_tag=f"fx_donchian_40+adx={adx:.1f}",
-            correlation_group=self.metadata.correlation_group_id,
-            venue_constraints={"leverage_max": LEVERAGE_MAX},
-            created_at_bar=last.ts,
-            tags={"adx_14": f"{adx:.1f}", "donchian_high_40": f"{high:.5f}",
-                  "leverage": f"{int(LEVERAGE_MAX)}"},
-        )
+        if is_finite(market_view.donchian_high_40):
+            high = market_view.donchian_high_40
+        else:
+            high = max(b.high for b in bars[-(WINDOW + 1):-1])
+        # Long branch first (mutually exclusive with short).
+        if high is not None and last.close > high:
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="long",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"fx_donchian_40+adx={adx:.1f}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={"adx_14": f"{adx:.1f}", "donchian_high_40": f"{high:.5f}",
+                      "leverage": f"{int(LEVERAGE_MAX)}"},
+            )
+        if is_finite(market_view.donchian_low_40):
+            low = market_view.donchian_low_40
+        else:
+            low = min(b.low for b in bars[-(WINDOW + 1):-1])
+        # Symmetric short branch: break below the 40-bar low (same adx gate).
+        if low is not None and last.close < low:
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="short",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"fx_donchian_40_short+adx={adx:.1f}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={"adx_14": f"{adx:.1f}", "donchian_low_40": f"{low:.5f}",
+                      "leverage": f"{int(LEVERAGE_MAX)}"},
+            )
+        return None
 
 
 __all__ = [

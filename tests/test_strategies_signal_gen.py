@@ -232,6 +232,61 @@ def test_fx_breakout_blocks_unsupported_symbol() -> None:
     assert s.generate_raw_signal(mv) is None
 
 
+def test_fx_breakout_emits_short_on_break_below_low() -> None:
+    s = FXBreakoutBasketStrategy()
+    bars = _make_bars(60, base_close=1.10, drift=0.001)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=1.00, high=1.01, low=0.94, close=0.95,
+        volume=1500.0,
+    )
+    mv = MarketView(
+        symbol="EURUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=0.95, spread_bps=1.0,
+        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=28.0,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "short"
+    assert sig.correlation_group == "cfd_fx_trend"
+    assert sig.venue_constraints.get("leverage_max") == 30.0
+
+
+def test_fx_breakout_no_double_fire_long_and_short() -> None:
+    """close cannot be both > high and < low → at most one side fires."""
+    s = FXBreakoutBasketStrategy()
+    # Long-trigger setup must NOT also fire short.
+    bars = _make_bars(60, base_close=1.10, drift=0.001)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=1.20, high=1.25, low=1.19, close=1.24,
+        volume=1500.0,
+    )
+    mv = MarketView(
+        symbol="EURUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=1.24, spread_bps=1.0,
+        donchian_high_40=1.20, donchian_low_40=1.00, adx_14=28.0,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+
+
+def test_fx_breakout_low_break_blocked_by_low_adx_returns_none() -> None:
+    """Negative path: a clean break BELOW the 40-bar low must NOT fire short
+    when adx_14 <= 20. The adx gate (direction-agnostic) blocks both sides."""
+    s = FXBreakoutBasketStrategy()
+    bars = _make_bars(60, base_close=1.10, drift=0.001)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=1.00, high=1.01, low=0.94, close=0.95,
+        volume=1500.0,
+    )
+    mv = MarketView(
+        symbol="EURUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=0.95, spread_bps=1.0,
+        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=18.0,  # <= 20
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
 # ---------------------------------------------------------------------------
 # XAU/Indices Trend
 # ---------------------------------------------------------------------------
@@ -261,6 +316,60 @@ def test_xau_indices_blocks_unsupported_symbol() -> None:
         symbol="EURUSD", venue="capital", timeframe="1H",
         bars=bars, last_price=2105.0, spread_bps=2.0,
         donchian_high_30=2098.0, momentum_20bar=0.04,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_xau_indices_emits_short_on_break_below_low() -> None:
+    s = XAUIndicesTrendStrategy()
+    bars = _make_bars(50, base_close=2000.0, drift=2.0)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=1900.0, high=1905.0, low=1880.0,
+        close=1885.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="XAUUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=1885.0, spread_bps=2.0,
+        donchian_high_30=2200.0, donchian_low_30=1900.0, momentum_20bar=-0.04,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "short"
+    assert sig.correlation_group == "cfd_index_commodity_trend"
+
+
+def test_xau_indices_no_double_fire_long_and_short() -> None:
+    s = XAUIndicesTrendStrategy()
+    bars = _make_bars(50, base_close=2000.0, drift=2.0)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=2100.0, high=2110.0, low=2099.0,
+        close=2105.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="XAUUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=2105.0, spread_bps=2.0,
+        donchian_high_30=2098.0, donchian_low_30=1900.0, momentum_20bar=0.04,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+
+
+def test_xau_indices_low_break_non_negative_momentum_returns_none() -> None:
+    """Subtle fall-through: a clean break BELOW the 30-bar low must NOT fire
+    short while momentum_20bar >= 0 (the short branch requires momentum < 0).
+    Long is also impossible (close < high), so the result is None."""
+    s = XAUIndicesTrendStrategy()
+    bars = _make_bars(50, base_close=2000.0, drift=2.0)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=1900.0, high=1905.0, low=1880.0,
+        close=1885.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="XAUUSD", venue="capital", timeframe="1H",
+        bars=bars, last_price=1885.0, spread_bps=2.0,
+        donchian_high_30=2200.0, donchian_low_30=1900.0,
+        momentum_20bar=0.0,  # >= 0 -> short branch must not fire
     )
     assert s.generate_raw_signal(mv) is None
 
@@ -296,6 +405,64 @@ def test_session_breakout_returns_none_outside_window() -> None:
         bars=bars, last_price=4535.0, spread_bps=1.0,
         session_open_price=4500.0, session_atr=10.0,
         is_session_open_window=False,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_session_breakout_emits_short_below_open_minus_atr() -> None:
+    s = SessionBreakoutStrategy()
+    bars = _make_bars(30, base_close=4500.0, drift=0.5)
+    # session_open=4500, ATR=10, threshold_short = 4500 - 1.5*10 = 4485.
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=4480.0, high=4485.0, low=4460.0,
+        close=4465.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="US500", venue="capital", timeframe="5m",
+        bars=bars, last_price=4465.0, spread_bps=1.0,
+        session_open_price=4500.0, session_atr=10.0,
+        is_session_open_window=True,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "short"
+    assert sig.correlation_group == "cfd_session_event"
+
+
+def test_session_breakout_no_double_fire_long_and_short() -> None:
+    s = SessionBreakoutStrategy()
+    bars = _make_bars(30, base_close=4500.0, drift=0.5)
+    # Long-trigger: close above open + 1.5*ATR; must NOT also fire short.
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=4520.0, high=4540.0, low=4515.0,
+        close=4535.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="US500", venue="capital", timeframe="5m",
+        bars=bars, last_price=4535.0, spread_bps=1.0,
+        session_open_price=4500.0, session_atr=10.0,
+        is_session_open_window=True,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+
+
+def test_session_breakout_inside_band_returns_none() -> None:
+    """Negative path: in-window but the close sits INSIDE the band — neither
+    above open+1.5*ATR (4515) nor below open-1.5*ATR (4485) — fires nothing."""
+    s = SessionBreakoutStrategy()
+    bars = _make_bars(30, base_close=4500.0, drift=0.5)
+    # session_open=4500, ATR=10 -> long >4515, short <4485. close=4500 is inside.
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=4498.0, high=4505.0, low=4495.0,
+        close=4500.0, volume=2000.0,
+    )
+    mv = MarketView(
+        symbol="US500", venue="capital", timeframe="5m",
+        bars=bars, last_price=4500.0, spread_bps=1.0,
+        session_open_price=4500.0, session_atr=10.0,
+        is_session_open_window=True,
     )
     assert s.generate_raw_signal(mv) is None
 

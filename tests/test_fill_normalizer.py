@@ -172,6 +172,37 @@ def test_capital_fill_includes_leverage_in_notional() -> None:
     assert f30.size_usd == 30.0 * f1.size_usd
 
 
+@pytest.mark.parametrize(
+    ("leverage", "exp_size_usd"),
+    [
+        (30.0, 300.0),  # FX
+        (20.0, 200.0),  # index / commodity
+        (2.0, 20.0),    # crypto-CFD
+        (1.0, 10.0),    # spot-equivalent / no leverage
+    ],
+)
+def test_capital_per_market_leverage_reaches_size_usd(
+    leverage: float, exp_size_usd: float
+) -> None:
+    """T7 — the per-market leverage passed by the real_capital_open_fill caller
+    must scale size_usd = size * pip * lev so the recorded notional matches the
+    sized notional (index/commodity 20x, crypto 2x, NOT a flat 30x)."""
+    payload = {
+        "dealReference": "R",
+        "dealId": "D",
+        "epic": "EPIC",
+        "direction": "BUY",
+        "level": 1.10,
+        "size": 1.0,
+        "status": "OPEN",
+        "date": "2026-05-07T00:00:00",
+    }
+    f = normalize_capital_confirm(
+        payload, strategy_id="x", pip_value_usd=10.0, leverage=leverage
+    )
+    assert f.size_usd == pytest.approx(exp_size_usd)
+
+
 def test_fee_slippage_calc_okx_non_usdt_fee() -> None:
     """When fee is paid in BTC, we convert to USD via avgPx."""
     payload = {

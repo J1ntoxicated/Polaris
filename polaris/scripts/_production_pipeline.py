@@ -42,7 +42,7 @@ from polaris.core.isolation.order_keys import (
     register_order_intent,
 )
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
-from polaris.core.streams import resolve_stream
+from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.scripts._production_run_signal import run_pipeline_for_signal
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
 from polaris.scripts._smoke_real_roundtrip import (
@@ -104,6 +104,7 @@ async def _real_open_fill(
     notional_usd: float,
     last_price: float,
     strategy_id: str,
+    asset_class: str = "",
     strength: float = 0.0,
     okx_adapter: Any = None,
     capital_session: Any = None,
@@ -152,9 +153,13 @@ async def _real_open_fill(
         return OpenAttempt(fill=None, reject_code="no_session")
     cap_adapter = CapitalAdapter(capital_session)
     direction = "BUY" if side == "long" else "SELL"
+    # T7: pass the per-market leverage so the normalized fill's gross notional
+    # (size × pip × leverage) matches the sized notional — FX 30 / index 20 /
+    # commodity 20 / crypto 2, not the prior implicit flat default.
+    leverage = derive_leverage(resolve_stream(venue), asset_class)
     return await real_capital_open_fill(
         cap_adapter, epic=symbol, direction=direction, size=MIN_CAPITAL_LOT,
-        strategy_id=strategy_id, last_price=last_price,
+        strategy_id=strategy_id, last_price=last_price, leverage=leverage,
     )
 
 
@@ -264,7 +269,9 @@ async def reserve_and_submit(
     register → confirm → atomic-persist contract is identical; only the fill
     payload source changes.
     """
-    _ = asset_class  # unused at this layer (Layer 5 already used it)
+    # T7: asset_class is forwarded to _real_open_fill so Capital derives its
+    # per-market leverage (FX 30 / index 20 / commodity 20 / crypto 2) for the
+    # fill's gross notional. (Layer 5 sizing already used asset_class upstream.)
     # Task 3 / D2: skip a runtime-blocklisted (venue, symbol) BEFORE reserving —
     # the venue permanently refuses it (compliance), so reserving + submitting
     # would only churn. No reservation, no fault (it's an external decision).
@@ -327,7 +334,7 @@ async def reserve_and_submit(
             attempt = await _real_open_fill(
                 venue=venue, symbol=symbol, side=sig.side, notional_usd=notional_usd,
                 last_price=last_price, strategy_id=sig.strategy_id,
-                strength=sig.strength,
+                asset_class=asset_class, strength=sig.strength,
                 okx_adapter=okx_adapter, capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape

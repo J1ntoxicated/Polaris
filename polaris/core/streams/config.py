@@ -4,11 +4,13 @@ A *stream* is the 1st-class routing/isolation dimension. ``resolve_stream`` is
 the lookup that replaces the venue-binary branches (track / leverage_source /
 product_class / adapter dispatch). This step encodes **current behavior only**:
 
-- A_okx_crypto  : okx / spot / {crypto}        / track A / leverage 1.0    / long-only
-- B_capital_cfd : capital / cfd / {forex,index,commodity} / track B / leverage 30.0 / short allowed (unused this step)
+- A_okx_crypto  : okx / spot / {crypto}        / track A / leverage 1.0 (fixed) / long-only
+- B_capital_cfd : capital / cfd / {forex,index,commodity} / track B / leverage PER-MARKET (T7: FX 30 / index 20 / commodity 20 / crypto 2; live constraint overrides) / short allowed (unused this step)
 
-No per-market leverage, no Track C, no short activation, no Alpaca — those are
-later P0 steps. Stream supplies leverage/caps/dispatch, NEVER a multiplier:
+Per-market CFD leverage (T7) is supplied by ``fallback_leverage_for_asset_class``
+(live ``CapitalMarketConstraint.leverage`` overrides). No Track C, no short
+activation, no Alpaca — those are later P0 steps. Stream supplies
+leverage/caps/dispatch, NEVER a multiplier:
 the T4 chain (base×continuous×tier×cell×listing×learner), headroom_min(), and
 the 0.09 SINGLE_TRADE_ABSOLUTE_CEILING are all untouched.
 """
@@ -25,6 +27,8 @@ __all__ = [
     "StreamConfig",
     "StreamId",
     "Track",
+    "derive_leverage",
+    "fallback_leverage_for_asset_class",
     "resolve_stream",
 ]
 
@@ -36,15 +40,22 @@ Track = Literal["A", "B"]
 class SizingProfile:
     """Sizing-relevant stream attributes (design §2.2 — facet3 absorbed).
 
-    ``leverage`` encodes current behavior literally: A=1.0 (spot, no leverage),
-    B=30.0 (== current ``CFD_LEVERAGE_DEFAULT``). ``leverage_source`` is a label
-    only — actual per-market translation is a later step (not wired here).
+    ``leverage`` is the stream's leverage SSOT only for the *fixed* case:
+    A=1.0 (spot, no leverage — INVARIANT). For B (Capital CFD) leverage is
+    NOT a single stream constant — it is **per-market** (T7,
+    ``leverage_source="per_market_constraint"``): the live venue
+    ``CapitalMarketConstraint.leverage`` when > 0, else the asset-class
+    fallback (``fallback_leverage_for_asset_class``: FX 30 / index 20 /
+    commodity 20 / crypto-CFD 2). The ``leverage`` field below for B is kept
+    as the documented FX-modal default (30.0) so a path lacking an
+    asset_class/constraint degrades to the most-common CFD case, but the
+    runtime driver is the per-market helper — there is no second flat-30 SSOT.
     Per-symbol caps stay env-overridable downstream (POLARIS_CAP_*); the value
-    here is the static default knob name, not a multiplier.
+    here is a static default knob, not a multiplier.
     """
 
     leverage_source: str  # "fixed_1" | "per_market_constraint"
-    leverage: float  # current literal value (A=1.0, B=30.0)
+    leverage: float  # A=1.0 (invariant); B=30.0 FX-modal default (per-market at runtime)
     base_risk_pct: float  # 0.02 common
     cluster_ids: tuple[str, ...]
 
@@ -68,9 +79,66 @@ class StreamConfig:
     external_reject_codes: frozenset[str]  # venue-specific non-fault codes
 
 
-# Current CFD leverage default (mirrors _production_run_signal.CFD_LEVERAGE_DEFAULT).
-_CFD_LEVERAGE_DEFAULT = 30.0
+# Capital CFD per-market leverage fallback (T7, /debate-CONFIRMED b565392).
+# Applied ONLY when the live venue constraint leverage is 0/absent — the live
+# CapitalMarketConstraint.leverage (> 0) always takes precedence. This is NOT a
+# T4 sizing-chain multiplier: leverage is the existing ``intent.leverage`` field
+# that drives notional (engine.py:471), set per-market instead of a flat 30.
+# Keys are normalized lowercase; both singular/plural asset-class spellings map.
+_FALLBACK_LEVERAGE_BY_ASSET_CLASS: dict[str, float] = {
+    "forex": 30.0,
+    "fx": 30.0,
+    "index": 20.0,
+    "indices": 20.0,
+    "commodity": 20.0,
+    "commodities": 20.0,
+    "crypto": 2.0,
+    "cryptocurrency": 2.0,
+    "cryptocurrencies": 2.0,
+}
+# Unmapped CFD asset_class → crypto-CFD floor (2.0): never 0 (no 0x notional)
+# and never the erroneous flat 30x. A correctness floor, not a defensive damper.
+_FALLBACK_LEVERAGE_DEFAULT = 2.0
+
+# B's SizingProfile.leverage FX-modal default (see SizingProfile docstring). The
+# runtime driver for Capital is fallback_leverage_for_asset_class / the live
+# constraint — this constant is NOT a second flat-leverage SSOT.
+_CFD_FX_MODAL_LEVERAGE = 30.0
 _BASE_RISK_PCT = 0.02
+
+
+def fallback_leverage_for_asset_class(asset_class: str) -> float:
+    """Per-market CFD leverage fallback keyed on ``asset_class`` (T7).
+
+    /debate-CONFIRMED mapping: FX/forex → 30, index → 20, commodity → 20,
+    crypto-CFD → 2. Case-insensitive; accepts singular or plural spellings
+    (``index``/``indices``, ``commodity``/``commodities``). An unmapped class
+    returns the crypto-CFD floor (2.0) so notional is never 0x and never the
+    erroneous flat 30x. The live ``CapitalMarketConstraint.leverage`` (> 0)
+    overrides this fallback — callers apply it only when the venue value is
+    0/absent. Pure function; OKX spot does not use it (stays fixed 1.0).
+    """
+    return _FALLBACK_LEVERAGE_BY_ASSET_CLASS.get(
+        (asset_class or "").strip().lower(), _FALLBACK_LEVERAGE_DEFAULT
+    )
+
+
+def derive_leverage(stream: StreamConfig, asset_class: str) -> float:
+    """Runtime leverage for a (stream, asset_class) (T7).
+
+    Fixed-leverage streams (``leverage_source="fixed_1"`` — OKX spot) keep their
+    INVARIANT profile leverage (1.0), ignoring asset_class. Per-market streams
+    (``per_market_constraint`` — Capital CFD) resolve leverage from the
+    asset_class via :func:`fallback_leverage_for_asset_class` (FX 30 / index 20
+    / commodity 20 / crypto 2). The live ``CapitalMarketConstraint.leverage``
+    overrides at the constraint_translator layer (when a per-symbol constraint
+    is loaded); this function is the path used when only the asset_class is
+    available. Pure; no T4 multiplier — leverage feeds ``intent.leverage``.
+    """
+    if stream.sizing_profile.leverage_source == "per_market_constraint":
+        return fallback_leverage_for_asset_class(asset_class)
+    return stream.sizing_profile.leverage
+
 
 STREAMS: dict[StreamId, StreamConfig] = {
     "A_okx_crypto": StreamConfig(
@@ -109,7 +177,7 @@ STREAMS: dict[StreamId, StreamConfig] = {
         ),
         sizing_profile=SizingProfile(
             leverage_source="per_market_constraint",
-            leverage=_CFD_LEVERAGE_DEFAULT,
+            leverage=_CFD_FX_MODAL_LEVERAGE,  # FX-modal default; per-market at runtime
             base_risk_pct=_BASE_RISK_PCT,
             cluster_ids=("cfd:XAU_INDICES", "cfd:FX_MAJORS"),
         ),

@@ -26,6 +26,8 @@ from typing import Any, Final
 
 import httpx
 
+from polaris.core.streams import fallback_leverage_for_asset_class
+
 __all__ = [
     "CAPITAL_MARKET_DETAIL_PATH",
     "CapitalMarketConstraint",
@@ -36,6 +38,16 @@ __all__ = [
 
 CAPITAL_MARKET_DETAIL_PATH: Final[str] = "/api/v1/markets"
 REST_TIMEOUT_SEC: Final[float] = 15.0
+
+# Capital ``instrument.type`` → asset_class key for the per-market leverage
+# fallback (T7). Used ONLY when the venue payload carries neither ``leverage``
+# nor ``marginFactor`` — so CapitalMarketConstraint.leverage is NEVER 0.
+_INSTRUMENT_TYPE_TO_ASSET_CLASS: Final[dict[str, str]] = {
+    "CURRENCIES": "forex",
+    "INDICES": "indices",
+    "COMMODITIES": "commodity",
+    "CRYPTOCURRENCIES": "crypto",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +143,14 @@ def _payload_to_constraint(epic: str, body: dict[str, Any]) -> CapitalMarketCons
         # Some endpoints return ``marginFactor`` instead of ``leverage``.
         margin_factor = _safe_float(instrument.get("marginFactor", 0.0))
         leverage = (1.0 / margin_factor) if margin_factor > 0.0 else 0.0
+    if leverage <= 0.0:
+        # T7: neither live ``leverage`` nor ``marginFactor`` present — apply the
+        # /debate-CONFIRMED per-market fallback keyed on instrument_type so the
+        # constraint leverage is NEVER 0 (a 0 here would zero out CFD notional).
+        # The live venue value always wins above; this is a correctness floor,
+        # not a defensive damper.
+        asset_class = _INSTRUMENT_TYPE_TO_ASSET_CLASS.get(instrument_type, "")
+        leverage = fallback_leverage_for_asset_class(asset_class)
     return CapitalMarketConstraint(
         epic=epic,
         instrument_type=instrument_type,

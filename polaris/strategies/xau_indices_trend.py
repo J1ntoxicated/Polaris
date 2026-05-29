@@ -59,12 +59,6 @@ class XAUIndicesTrendStrategy(BaseStrategy):
         if len(bars) < max(DONCHIAN_WINDOW, MOMENTUM_LOOKBACK) + 1:
             return None
         last = bars[-1]
-        if is_finite(market_view.donchian_high_30):
-            high = market_view.donchian_high_30
-        else:
-            high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])
-        if high is None or last.close <= high:
-            return None
         if is_finite(market_view.momentum_20bar):
             momentum = market_view.momentum_20bar
         else:
@@ -72,26 +66,57 @@ class XAUIndicesTrendStrategy(BaseStrategy):
             if past_close <= 0:
                 return None
             momentum = (last.close - past_close) / past_close
-        if momentum is None or momentum <= 0.0:
+        if momentum is None:
             return None
-        scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
-        strength = min(1.0, max(STRENGTH_BASE, scored))
-        return RawSignal(
-            signal_id=make_signal_id(),
-            strategy_id=self.metadata.strategy_id,
-            symbol=market_view.symbol,
-            side="long",
-            strength=strength,
-            sizing_hint=strength,
-            ttl_bars=TTL_BARS,
-            thesis_tag=f"donchian_30+mom_20={momentum:.4f}",
-            correlation_group=self.metadata.correlation_group_id,
-            venue_constraints={"leverage_max": LEVERAGE_MAX},
-            created_at_bar=last.ts,
-            tags={"momentum_20": f"{momentum:.4f}",
-                  "donchian_high_30": f"{high:.4f}",
-                  "leverage": f"{int(LEVERAGE_MAX)}"},
-        )
+        if is_finite(market_view.donchian_high_30):
+            high = market_view.donchian_high_30
+        else:
+            high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])
+        # Long branch first (mutually exclusive with short).
+        if high is not None and last.close > high and momentum > 0.0:
+            scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
+            strength = min(1.0, max(STRENGTH_BASE, scored))
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="long",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"donchian_30+mom_20={momentum:.4f}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={"momentum_20": f"{momentum:.4f}",
+                      "donchian_high_30": f"{high:.4f}",
+                      "leverage": f"{int(LEVERAGE_MAX)}"},
+            )
+        if is_finite(market_view.donchian_low_30):
+            low = market_view.donchian_low_30
+        else:
+            low = min(b.low for b in bars[-(DONCHIAN_WINDOW + 1):-1])
+        # Symmetric short branch: break below 30-bar low with negative momentum.
+        if low is not None and last.close < low and momentum < 0.0:
+            scored = STRENGTH_BASE + MOMENTUM_GAIN * (-momentum)
+            strength = min(1.0, max(STRENGTH_BASE, scored))
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="short",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"donchian_30_short+mom_20={momentum:.4f}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={"momentum_20": f"{momentum:.4f}",
+                      "donchian_low_30": f"{low:.4f}",
+                      "leverage": f"{int(LEVERAGE_MAX)}"},
+            )
+        return None
 
 
 __all__ = [

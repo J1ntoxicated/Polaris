@@ -36,7 +36,7 @@ from polaris.core.pipeline.gate_state import (
     SignalLifecycle,
 )
 from polaris.core.sizing.constants import production_default_equity_usd
-from polaris.core.streams import resolve_stream
+from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.strategies import BaseStrategy, RawSignal
 
@@ -45,10 +45,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Retained as the SSOT-drift anchor: B_capital_cfd's StreamConfig leverage is
-# pinned to this value by test_stream_config. Runtime leverage now comes from
-# resolve_stream(venue).sizing_profile.leverage (design §2.1).
-CFD_LEVERAGE_DEFAULT = 30.0
+# T7: the flat CFD_LEVERAGE_DEFAULT (was 30.0) is RETIRED — Capital leverage is
+# now per-market via derive_leverage(stream, asset_class) (FX 30 / index 20 /
+# commodity 20 / crypto 2; live CapitalMarketConstraint.leverage overrides).
+# SSOT = polaris.core.streams.fallback_leverage_for_asset_class. OKX spot stays
+# the invariant fixed 1.0.
 
 
 def _read_universe_state(
@@ -124,12 +125,18 @@ async def run_pipeline_for_signal(
     Day 8 spec E: G6/G7 use real ``unrealized_pnl_r``; G8 fires on close.
     """
     instrument_id = f"{venue}:{symbol}"
-    # Stream SSOT lookup (design §2.1) replaces the venue-binary track/leverage
-    # branches. Values are identical to the prior literals: A_okx_crypto→track A
-    # / leverage 1.0, B_capital_cfd→track B / leverage 30.0 (== CFD_LEVERAGE_DEFAULT).
+    # Stream SSOT lookup (design §2.1) replaces the venue-binary track branch.
+    # Track is identical to the prior literal (A_okx_crypto→A, B_capital_cfd→B).
     stream = resolve_stream(venue)
     track: Any = stream.track
-    leverage = stream.sizing_profile.leverage
+    # T7: per-market leverage. OKX spot stays the INVARIANT fixed 1.0; Capital
+    # CFD derives leverage from the symbol's asset_class (FX 30 / index 20 /
+    # commodity 20 / crypto 2) instead of the erroneous flat 30 — this CORRECTS
+    # the notional down for index/commodity/crypto (a bug fix, not a throttle).
+    # (Live CapitalMarketConstraint.leverage overrides the fallback at the
+    # constraint_translator layer; here we use the asset_class fallback because
+    # the per-symbol constraint is not loaded on this path.)
+    leverage = derive_leverage(stream, asset_class)
     equity_usd = production_default_equity_usd()
 
     # Day 8 codex P1 fix: read spread/listing/recent-reject from real state
@@ -149,6 +156,19 @@ async def run_pipeline_for_signal(
         spread_bps=spread_bps_real, baseline_p50_spread_bps=spread_bps_real,
         listing_age_hours=listing_age_h, recent_reject_in_6h=recent_reject,
         session_open_shock_window=False, tick_window=[],
+        # T14 net-edge measurement inputs (DISPLAY/LOG-ONLY). Surfacing these
+        # adds payload keys + the log line below; it does NOT change control
+        # flow — no early return / no skip (SKIP_ON_NEGATIVE_NET_EDGE is False).
+        venue=venue, signal_strength=sig.strength, atr_pct=bars_atr_pct,
+    )
+    # Display-only emit so the dashboard can later read net edge vs cost. The
+    # values never gate (cost measurement, not a defensive throttle).
+    logger.info(
+        "[net_edge] %s:%s cost_model=%s net_edge_r=%.4f "
+        "gross_edge_r=%.4f roundtrip_cost_r=%.4f (display-only, no gate)",
+        venue, symbol, g4_payload.get("cost_model", "?"),
+        g4_payload.get("net_edge_r", 0.0), g4_payload.get("gross_edge_r", 0.0),
+        g4_payload.get("roundtrip_cost_r", 0.0),
     )
     g5_payload = build_sizer_payload(
         raw_signal=sig, venue=venue, symbol=symbol,

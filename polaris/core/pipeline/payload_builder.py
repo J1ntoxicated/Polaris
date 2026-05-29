@@ -49,6 +49,12 @@ from polaris.core.pipeline._sizer_payload import (
     build_sizer_payload,
     default_strategy_risk_state,
 )
+from polaris.core.pipeline.net_edge import (
+    gross_edge_r,
+    net_edge_r,
+    roundtrip_cost_r,
+)
+from polaris.core.streams import resolve_stream
 from polaris.strategies.base import RawSignal
 
 __all__ = [
@@ -252,13 +258,25 @@ def build_watcher_payload(
     recent_reject_in_6h: bool = False,
     session_open_shock_window: bool = False,
     tick_window: list[dict[str, Any]] | None = None,
+    venue: str | None = None,
+    signal_strength: float | None = None,
+    atr_pct: float | None = None,
 ) -> dict[str, Any]:
     """Compose G4 input payload (fast-path hints + tick window).
 
     The validated_signal field is stamped by G3 and propagated by the
     orchestrator's ``_stamp_payload`` — caller does not duplicate it here.
+
+    T14 (DISPLAY/LOG-ONLY): when ``venue`` is supplied, four net-edge
+    measurement keys are ADDED — ``roundtrip_cost_r``, ``gross_edge_r``,
+    ``net_edge_r``, ``cost_model`` (resolved via ``resolve_stream(venue)``).
+    This is a **cost measurement, not a defensive throttle**: the values are
+    surfaced only, the gate does NOT branch on them, and no entry is skipped
+    (``net_edge.SKIP_ON_NEGATIVE_NET_EDGE`` is False). Callers that omit
+    ``venue`` get the byte-identical pre-T14 payload — the OKX behavior-identity
+    invariant is preserved.
     """
-    return {
+    payload: dict[str, Any] = {
         "spread_bps": float(spread_bps),
         "baseline_p50_spread_bps": float(baseline_p50_spread_bps),
         "listing_age_hours": float(listing_age_hours),
@@ -266,6 +284,19 @@ def build_watcher_payload(
         "session_open_shock_window": bool(session_open_shock_window),
         "tick_window": tick_window or [],
     }
+    if venue is not None:
+        cost_model = resolve_stream(venue).cost_model
+        cost = roundtrip_cost_r(spread_bps=float(spread_bps), cost_model=cost_model)
+        gross = gross_edge_r(
+            signal_strength=float(signal_strength or 0.0),
+            atr_pct=float(atr_pct or 0.0),
+        )
+        # Surface only — G4 does NOT branch on these (flow_not_block intact).
+        payload["roundtrip_cost_r"] = cost
+        payload["gross_edge_r"] = gross
+        payload["net_edge_r"] = net_edge_r(gross_edge=gross, roundtrip_cost=cost)
+        payload["cost_model"] = cost_model
+    return payload
 
 
 # ---------------------------------------------------------------------------

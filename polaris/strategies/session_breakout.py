@@ -70,33 +70,58 @@ class SessionBreakoutStrategy(BaseStrategy):
         if open_price is None or atr_val is None or atr_val <= 0.0:
             return None
         threshold = open_price + ATR_MULT * atr_val
+        threshold_short = open_price - ATR_MULT * atr_val
         bars = market_view.bars
         if not bars:
             return None
         last = bars[-1]
-        if last.close <= threshold:
-            return None
-        excess = (last.close - threshold) / max(1e-9, atr_val)
-        scored = STRENGTH_BASE + EXCESS_GAIN * excess
-        strength = min(1.0, max(STRENGTH_BASE, scored))
-        return RawSignal(
-            signal_id=make_signal_id(),
-            strategy_id=self.metadata.strategy_id,
-            symbol=market_view.symbol,
-            side="long",
-            strength=strength,
-            sizing_hint=strength,
-            ttl_bars=TTL_BARS,
-            thesis_tag=f"session_open+ATR×{ATR_MULT}",
-            correlation_group=self.metadata.correlation_group_id,
-            venue_constraints={"leverage_max": LEVERAGE_MAX},
-            created_at_bar=last.ts,
-            tags={
-                "session_open": f"{open_price:.4f}",
-                "session_atr": f"{atr_val:.4f}",
-                "leverage": f"{int(LEVERAGE_MAX)}",
-            },
-        )
+        # Long branch first (mutually exclusive with short).
+        if last.close > threshold:
+            excess = (last.close - threshold) / max(1e-9, atr_val)
+            scored = STRENGTH_BASE + EXCESS_GAIN * excess
+            strength = min(1.0, max(STRENGTH_BASE, scored))
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="long",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"session_open+ATR×{ATR_MULT}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={
+                    "session_open": f"{open_price:.4f}",
+                    "session_atr": f"{atr_val:.4f}",
+                    "leverage": f"{int(LEVERAGE_MAX)}",
+                },
+            )
+        # Symmetric short branch: close below session_open - 1.5×ATR.
+        if last.close < threshold_short:
+            excess = (threshold_short - last.close) / max(1e-9, atr_val)
+            scored = STRENGTH_BASE + EXCESS_GAIN * excess
+            strength = min(1.0, max(STRENGTH_BASE, scored))
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="short",
+                strength=strength,
+                sizing_hint=strength,
+                ttl_bars=TTL_BARS,
+                thesis_tag=f"session_open-ATR×{ATR_MULT}",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={"leverage_max": LEVERAGE_MAX},
+                created_at_bar=last.ts,
+                tags={
+                    "session_open": f"{open_price:.4f}",
+                    "session_atr": f"{atr_val:.4f}",
+                    "leverage": f"{int(LEVERAGE_MAX)}",
+                },
+            )
+        return None
 
 
 __all__ = [

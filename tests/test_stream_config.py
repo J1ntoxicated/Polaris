@@ -1,9 +1,10 @@
-"""StreamConfig SSOT — behavior-identity tests (design §2.2).
+"""StreamConfig SSOT — behavior-identity + per-market leverage tests.
 
-The whole point of this step is that ``resolve_stream`` reproduces the existing
-venue-binary branches *exactly*. We pin track / leverage / product_class to the
-literal current code (``_production_run_signal`` lines 123-124,
-``CFD_LEVERAGE_DEFAULT``) so any future drift fails loudly.
+``resolve_stream`` reproduces the venue-binary track/product_class branches
+exactly. Leverage is per-market for Capital CFD (T7, /debate-CONFIRMED
+b565392): FX 30 / index 20 / commodity 20 / crypto-CFD 2, with the live
+``CapitalMarketConstraint.leverage`` overriding the asset-class fallback. OKX
+spot leverage stays the invariant fixed 1.0.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from polaris.core.streams import (
     STREAMS,
     VENUE_TO_STREAM,
     StreamConfig,
+    fallback_leverage_for_asset_class,
     resolve_stream,
 )
 
@@ -21,31 +23,62 @@ from polaris.core.streams import (
 
 
 @pytest.mark.parametrize(
-    ("venue", "exp_track", "exp_leverage", "exp_product_class"),
+    ("venue", "exp_track", "exp_product_class"),
     [
-        ("okx", "A", 1.0, "spot"),
-        ("capital", "B", 30.0, "cfd"),
+        ("okx", "A", "spot"),
+        ("capital", "B", "cfd"),
     ],
 )
 def test_resolve_stream_matches_venue_binary(
-    venue: str, exp_track: str, exp_leverage: float, exp_product_class: str
+    venue: str, exp_track: str, exp_product_class: str
 ) -> None:
-    """``track = "A" if venue=="okx" else "B"`` and
-    ``leverage = 1.0 if venue=="okx" else CFD_LEVERAGE_DEFAULT`` reproduced."""
+    """``track = "A" if venue=="okx" else "B"`` reproduced. Leverage is now
+    per-market for B (T7) so it is asserted via the fallback helper below, not
+    here — OKX spot stays the invariant 1.0."""
     s = resolve_stream(venue)
-    # mirror of _production_run_signal.py:123-124
+    # mirror of _production_run_signal.py track branch
     binary_track = "A" if venue == "okx" else "B"
-    binary_leverage = 1.0 if venue == "okx" else 30.0
     assert s.track == binary_track == exp_track
-    assert s.sizing_profile.leverage == binary_leverage == exp_leverage
     assert s.product_class == exp_product_class
 
 
-def test_resolve_stream_cfd_leverage_equals_current_default() -> None:
-    """B leverage must equal the live ``CFD_LEVERAGE_DEFAULT`` constant."""
-    from polaris.scripts._production_run_signal import CFD_LEVERAGE_DEFAULT
+def test_okx_spot_leverage_is_invariant_one() -> None:
+    """OKX spot leverage MUST remain 1.0 (notional behavior-identical)."""
+    assert resolve_stream("okx").sizing_profile.leverage == 1.0
 
-    assert resolve_stream("capital").sizing_profile.leverage == CFD_LEVERAGE_DEFAULT
+
+# --- T7 per-market fallback leverage (asset_class -> leverage) ---------------
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "exp_leverage"),
+    [
+        ("forex", 30.0),
+        ("fx", 30.0),
+        ("index", 20.0),
+        ("indices", 20.0),
+        ("commodity", 20.0),
+        ("commodities", 20.0),
+        ("crypto", 2.0),
+    ],
+)
+def test_fallback_leverage_per_asset_class(
+    asset_class: str, exp_leverage: float
+) -> None:
+    """/debate-CONFIRMED (b565392): FX 30 / index 20 / commodity 20 / crypto-CFD 2."""
+    assert fallback_leverage_for_asset_class(asset_class) == exp_leverage
+
+
+def test_fallback_leverage_is_case_insensitive() -> None:
+    assert fallback_leverage_for_asset_class("FOREX") == 30.0
+    assert fallback_leverage_for_asset_class("Indices") == 20.0
+
+
+def test_fallback_leverage_unknown_class_defaults_conservative_cfd() -> None:
+    """An unmapped CFD asset_class falls to the crypto-CFD floor (2.0), never 0
+    and never the erroneous flat 30 — so notional can never be silently 0x."""
+    assert fallback_leverage_for_asset_class("other") == 2.0
+    assert fallback_leverage_for_asset_class("") == 2.0
 
 
 def test_resolve_stream_is_case_insensitive() -> None:
@@ -69,6 +102,56 @@ def test_resolve_stream_rejects_mismatched_product_class() -> None:
 def test_resolve_stream_unknown_venue_raises() -> None:
     with pytest.raises(KeyError):
         resolve_stream("alpaca")
+
+
+# --- T7 constraint_translator asset-class fallback (never-0 invariant) -------
+
+
+@pytest.mark.parametrize(
+    ("instrument_type", "exp_leverage"),
+    [
+        ("CURRENCIES", 30.0),
+        ("INDICES", 20.0),
+        ("COMMODITIES", 20.0),
+        ("CRYPTOCURRENCIES", 2.0),
+    ],
+)
+def test_constraint_applies_asset_class_fallback_when_leverage_absent(
+    instrument_type: str, exp_leverage: float
+) -> None:
+    """When the venue payload has neither ``leverage`` nor ``marginFactor``,
+    CapitalMarketConstraint.leverage falls back per instrument_type and is
+    NEVER 0 (the prior gap left it 0.0 -> 0x notional)."""
+    from polaris.venues.capital.constraint_translator import _payload_to_constraint
+
+    body = {"instrument": {"type": instrument_type}, "dealingRules": {}, "snapshot": {}}
+    c = _payload_to_constraint("EPIC", body)
+    assert c.leverage == exp_leverage
+
+
+def test_constraint_live_venue_leverage_overrides_fallback() -> None:
+    """A live ``leverage > 0`` from the venue takes precedence over the
+    asset-class fallback (live constraint wins)."""
+    from polaris.venues.capital.constraint_translator import _payload_to_constraint
+
+    body = {
+        "instrument": {"type": "CURRENCIES", "leverage": 50.0},
+        "dealingRules": {},
+        "snapshot": {},
+    }
+    assert _payload_to_constraint("EPIC", body).leverage == 50.0
+
+
+def test_constraint_margin_factor_still_wins_over_fallback() -> None:
+    """1/marginFactor (live) still takes precedence over the fallback."""
+    from polaris.venues.capital.constraint_translator import _payload_to_constraint
+
+    body = {
+        "instrument": {"type": "INDICES", "marginFactor": 0.05},  # -> 20:1
+        "dealingRules": {},
+        "snapshot": {},
+    }
+    assert _payload_to_constraint("EPIC", body).leverage == pytest.approx(20.0)
 
 
 # --- registry shape: only 2 venues, no Track C / Alpaca / short-in-use ------

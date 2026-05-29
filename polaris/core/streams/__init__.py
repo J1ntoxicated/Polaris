@@ -16,6 +16,8 @@ from polaris.core.streams.config import (
     StreamConfig,
     StreamId,
     Track,
+    derive_leverage,
+    fallback_leverage_for_asset_class,
     resolve_stream,
 )
 
@@ -26,5 +28,7 @@ __all__ = [
     "StreamConfig",
     "StreamId",
     "Track",
+    "derive_leverage",
+    "fallback_leverage_for_asset_class",
     "resolve_stream",
 ]

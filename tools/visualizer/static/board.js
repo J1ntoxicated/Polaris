@@ -1,5 +1,5 @@
 /* board.js — Polaris right-half conventional analytics board (DEMO/PAPER display-only).
- * Native HTML/CSS, 3s /api/snapshot polling. No ANSI mirror. No sizing/order logic.
+ * Native HTML/CSS, 1s /api/snapshot polling. No ANSI mirror. No sizing/order logic.
  * Injects its own <style>; renders into #board (right 50vw column).
  */
 (function () {
@@ -10,9 +10,11 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    grid-template-rows: auto auto auto minmax(0, 1.1fr) minmax(0, 1.4fr);
-    gap: 8px;
-    padding: 10px 14px 12px;
+    /* header / kpis / equity (auto) + mid + bottom (bounded flex). minmax(0,..) keeps the
+       sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
+    grid-template-rows: auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
+    gap: 6px;
+    padding: 8px 12px;
     box-sizing: border-box;
     background: linear-gradient(180deg, rgba(8,11,17,0.92), rgba(5,7,11,0.96));
     border-left: 1px solid var(--ghost);
@@ -27,8 +29,8 @@
 
   /* Header */
   #board .b-head {
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding-bottom: 6px; border-bottom: 1px solid var(--ghost);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding-bottom: 4px; border-bottom: 1px solid var(--ghost);
   }
   #board .b-head .title { font-weight: 700; letter-spacing: 0.18em; color: var(--p-wht); font-size: 13px; }
   #board .b-head .star { color: var(--polaris-blue); }
@@ -43,22 +45,22 @@
 
   /* KPI cards */
   #board .kpis {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px;
   }
   #board .kpi {
     border: 1px solid rgba(95,135,175,0.22);
     background: rgba(15,19,26,0.55);
-    padding: 6px 8px;
+    padding: 4px 7px;
   }
-  #board .kpi .k { color: var(--p-dim); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; }
-  #board .kpi .v { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
-  #board .kpi .sub { color: var(--p-gry); font-size: 9px; margin-top: 1px; }
+  #board .kpi .k { color: var(--p-dim); font-size: 8px; letter-spacing: 0.12em; text-transform: uppercase; }
+  #board .kpi .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 1px; line-height: 1.1; }
+  #board .kpi .sub { color: var(--p-gry); font-size: 8px; margin-top: 0; }
 
   /* Equity chart */
   #board .eq-wrap {
     border: 1px solid rgba(95,135,175,0.22);
     background: rgba(15,19,26,0.40);
-    padding: 6px 8px 2px;
+    padding: 4px 8px 2px;
   }
   #board .eq-wrap .eq-head {
     display: flex; align-items: baseline; gap: 12px;
@@ -66,11 +68,11 @@
   }
   #board .eq-wrap .eq-head .h-title { color: var(--polaris-blue); font-weight: 700; }
   #board .eq-wrap .eq-head .v { color: var(--p-wht); font-weight: 700; }
-  #board .eq-wrap svg { display: block; width: 100%; height: 84px; }
+  #board .eq-wrap svg { display: block; width: 100%; height: 58px; }
 
   /* Tables row (positions + recent trades side by side) */
   #board .mid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
     min-height: 0;
   }
   #board .panel {
@@ -80,7 +82,7 @@
   }
   #board .panel .p-head {
     display: flex; justify-content: space-between; align-items: baseline;
-    padding: 4px 8px; border-bottom: 1px solid var(--ghost);
+    padding: 3px 8px; border-bottom: 1px solid var(--ghost); flex: 0 0 auto;
     color: var(--polaris-blue); font-size: 9px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
   }
   #board .panel .p-head .cnt { color: var(--p-cyn); letter-spacing: 0; }
@@ -111,12 +113,12 @@
   #board .bottom-grid {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-    gap: 8px; min-height: 0;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 6px; min-height: 0;
   }
   #board .mini { font-size: 10px; }
   #board .mini .row {
-    display: grid; align-items: center; gap: 6px; padding: 2px 8px;
+    display: grid; align-items: center; gap: 6px; padding: 1px 8px;
     border-bottom: 1px dotted rgba(95,135,175,0.08);
   }
   #board .mini .row .name { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -446,7 +448,7 @@
     board.innerHTML = skeleton();
     setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
     poll();
-    setInterval(poll, 3000);
+    setInterval(poll, 1000);
   }
 
   if (document.readyState === 'loading') {

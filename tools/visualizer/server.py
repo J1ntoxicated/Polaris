@@ -64,7 +64,7 @@ _DB_PATH = Path("data/polaris_live.sqlite")
 # multi-tab / sub-second reloads from re-querying on every fetch.
 _snapshot_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _snapshot_lock = threading.Lock()
-_SNAPSHOT_TTL = 5.0
+_SNAPSHOT_TTL = 1.0  # 1s — match the board's 1s poll for live refresh
 
 
 def _fresh_graph() -> dict[str, Any]:

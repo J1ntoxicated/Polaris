@@ -128,21 +128,54 @@
   .expnl-row .pn.pos { color: var(--p-grn); }
   .expnl-row .pn.neg { color: var(--p-red); }
 
-  /* Bottom-right corner compact PIPELINE strip — vertical stack */
-  .pipeline-strip {
+  /* Jin: 큰 tier 범례 기본 숨김 — 좌측 가장자리 hover/탭으로 slide-in.
+     기본 상태 = 글로브만. .legend-flyout = hover hot-zone(좌측 edge) + off-canvas panel. */
+  .legend-flyout {
     position: absolute;
-    bottom: 56px;
-    right: 24px;
-    z-index: 11;
+    top: 64px; left: 0; bottom: 24px;
+    z-index: 12;
+    display: flex; align-items: stretch;
+    pointer-events: none;            /* only tab + panel are interactive */
+  }
+  .legend-flyout .legend-tab {
+    pointer-events: auto;
+    align-self: flex-start;
+    margin-top: 8px;
+    width: 22px; min-height: 90px;
+    display: flex; align-items: center; justify-content: center;
+    writing-mode: vertical-rl; text-orientation: mixed;
+    background: rgba(5,7,11,0.70);
+    border: 1px solid var(--ghost); border-left: none;
+    color: var(--polaris-blue); font-size: 9px; font-weight: 700;
+    letter-spacing: 0.22em; cursor: pointer;
+    backdrop-filter: blur(3px);
+    transition: opacity 0.2s ease;
+  }
+  /* Bottom-left slide-in PIPELINE strip — vertical stack, off-canvas by default */
+  .pipeline-strip {
+    pointer-events: auto;
+    position: absolute;
+    top: 0; bottom: 0; left: 0;
+    z-index: 13;
+    transform: translateX(-105%);
+    transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
     display: flex; flex-direction: column; gap: 3px;
     padding: 8px 12px;
-    background: rgba(5,7,11,0.75);
-    border: 1px solid var(--ghost);
-    backdrop-filter: blur(3px);
+    overflow-y: auto;
+    background: rgba(5,7,11,0.92);
+    border: 1px solid var(--ghost); border-left: none;
+    backdrop-filter: blur(5px);
     font-size: 10px; letter-spacing: 0.08em;
     color: var(--p-gry);
-    min-width: 120px;
+    min-width: 120px; max-width: 280px;
+    box-shadow: 6px 0 22px rgba(0,0,0,0.55);
   }
+  .legend-flyout:hover .pipeline-strip,
+  .legend-flyout.pinned .pipeline-strip { transform: translateX(0); }
+  .legend-flyout:hover .legend-tab,
+  .legend-flyout.pinned .legend-tab { opacity: 0; pointer-events: none; }
+  .pipeline-strip::-webkit-scrollbar { width: 4px; }
+  .pipeline-strip::-webkit-scrollbar-thumb { background: var(--ghost); }
   .pipeline-strip .ph {
     color: var(--polaris-blue); font-size: 9px;
     letter-spacing: 0.20em; font-weight: 700;
@@ -333,9 +366,11 @@
     </div>
   </div>
 
-  <!-- Bottom-right Pipeline legend (8 sphere data + 8 function inter-tier orbits + 4 outer ring) -->
-  <!-- Jin 2026-04-27: 데이터 = sphere / 함수 = 위성 (inter-tier orbit) / 외부 ring 분리 -->
-  <div class="pipeline-strip">
+  <!-- Jin 2026-05-29: 큰 tier 범례 기본 숨김 → 좌측 edge hover/탭 slide-in. 기본 = 글로브만. -->
+  <!-- Pipeline legend (8 sphere data + function inter-tier orbits + outer ring + asset regions) -->
+  <div class="legend-flyout" id="legend-flyout">
+   <div class="legend-tab" id="legend-tab" title="범례 보기 (hover)">LEGEND ▸</div>
+   <div class="pipeline-strip">
     <!-- Jin 2026-04-28 v22 update: layout 정합 — chain 6 layers (data 표면) +
          13 satellite kinds (function ring, kind-별 distinct color) + outer ring.
          v16 EXEC/BRAIN sphere 제거 → 위성 흡수. STRAT 색은 group-별 dynamic. -->
@@ -385,7 +420,8 @@
       <span style="color:var(--p-red)">●</span> loss chain<br/>
       click node · drag · wheel · hover
     </div>
-  </div>
+   </div><!-- /.pipeline-strip -->
+  </div><!-- /.legend-flyout -->
 
   <!-- Jin 2026-04-27 cloud-only: title-block + bottom stats 제거.
        제목/카운터 모두 stats 패널 정합 위반 — sphere 자체가 SSOT. -->
@@ -449,7 +485,7 @@
 </div>
 
 <script src="static/sphere-render.js?v=8_node_size_bump_20260502"></script>
-<script src="static/board.js?v=1"></script>
+<script src="static/board.js?v=2"></script>
 <script>
   // 50/50 split: sphere engine fits to canvas.clientWidth/Height. After layout settles,
   // nudge a resize so fit() picks up the 50vw column instead of an initial full-width guess.
@@ -458,6 +494,15 @@
       window.dispatchEvent(new Event('resize'));
     });
   });
+  // Legend flyout: hover slides in (CSS). Click tab = pin open; click panel bg toggles off.
+  (function () {
+    var fly = document.getElementById('legend-flyout');
+    var tab = document.getElementById('legend-tab');
+    if (!fly || !tab) return;
+    tab.addEventListener('click', function (e) { e.stopPropagation(); fly.classList.add('pinned'); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') fly.classList.remove('pinned'); });
+    fly.addEventListener('mouseleave', function () { fly.classList.remove('pinned'); });
+  })();
 </script>
 <script>
   // Jin 2026-04-27 Hans Zimmer space OST player + galaxy sound toggle.

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from polaris.scripts.dashboard.ansi_palette import (
+    BLOCK,
     BOLD,
     DIM,
     HIDE_CURSOR,
@@ -42,7 +43,9 @@ from polaris.scripts.dashboard.ansi_palette import (
     RESET,
     SHOW_CURSOR,
     WARNING,
+    bar,
     color,
+    sparkline,
 )
 from polaris.scripts.dashboard.snapshot import (
     DEFAULT_DB_PATH,
@@ -108,6 +111,43 @@ def _hr(label: str = "", width: int = WIDTH) -> str:
     return color("━" * width, MUTED)
 
 
+def _heat_tile(score: float) -> str:
+    """2-char colored block whose hue encodes cell score (green=alpha, red=anti)."""
+    if score >= 0.30:
+        c = POSITIVE + BOLD
+    elif score >= 0.05:
+        c = POSITIVE
+    elif score > -0.05:
+        c = NEUTRAL
+    elif score > -0.30:
+        c = NEGATIVE
+    else:
+        c = NEGATIVE + BOLD
+    return color(BLOCK * 2, c)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic visualization (Task D — sparkline + gauges + heat tiles)
+# ---------------------------------------------------------------------------
+
+
+def render_equity_spark(snap: DashboardSnapshot) -> str:
+    """1행 — 24h 자산 곡선 스파크라인 + Δ 주석 (데이터 없으면 graceful)."""
+    label = color("  📈  24h 자산", NEUTRAL + BOLD)
+    curve = snap.equity_curve
+    if not curve:
+        return _pad(f"{label}   {color('(데이터 수집 중…)', MUTED + DIM)}")
+    spark = color(sparkline(curve, 70), INFO)
+    delta = curve[-1] - curve[0]
+    pct = (delta / curve[0] * 100.0) if curve[0] else 0.0
+    lo, hi = min(curve), max(curve)
+    ann = (
+        color(f"  {_fmt_money(delta, signed=True)} ({_fmt_pct(pct)})", _color_pnl(delta) + BOLD)
+        + color(f"   lo {_fmt_money(lo)} · hi {_fmt_money(hi)}", MUTED)
+    )
+    return _pad(f"{label}  {spark}{ann}")
+
+
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
@@ -150,20 +190,29 @@ def render_core_metrics(snap: DashboardSnapshot) -> list[str]:
         + color(f"{_fmt_money(eq):>20}", eq_color_v + BOLD)
         + color(f"   시작 ${snap.starting_capital:,.0f}  ({_fmt_money(eq_delta, signed=True)})", MUTED)
     ))
+    # DD gauge scaled to the -35% deep-drawdown checkpoint (full bar = 35%).
+    dd_gauge = bar(min(dd / 35.0 * 100.0, 100.0), 14, fill_color=dd_color_v)
     rows.append(_pad(
         color("  📉  Drawdown".ljust(label_w), NEUTRAL + BOLD)
         + color(f"{_fmt_pct(-dd, signed=False):>20}", dd_color_v + BOLD)
-        + color(f"   peak ${snap.peak_equity:,.0f}", MUTED)
+        + f"  {dd_gauge}"
+        + color(f"  peak ${snap.peak_equity:,.0f}", MUTED)
     ))
     rows.append(_pad(
         color("  🎯  Sharpe (24h)".ljust(label_w), NEUTRAL + BOLD)
         + color(f"{sharpe:>20.2f}", sharpe_color_v + BOLD)
         + color(f"   {'좋음' if sharpe >= 1 else '보통' if sharpe >= 0 else '주의'}", MUTED)
     ))
+    exp_ratio = (snap.exposed_usd / eq * 100.0) if eq else 0.0
+    exp_gauge = bar(
+        min(exp_ratio, 100.0), 14,
+        fill_color=WARNING if exp_ratio > 80 else NEUTRAL,
+    )
     rows.append(_pad(
         color("  💱  활성 노출".ljust(label_w), NEUTRAL + BOLD)
         + color(f"{_fmt_money(snap.exposed_usd):>20}", NEUTRAL + BOLD)
-        + color(f"   open {snap.open_positions_n} · uPnL {_fmt_money(snap.upnl_total, signed=True)}", MUTED)
+        + f"  {exp_gauge}"
+        + color(f"  {exp_ratio:.0f}% · open {snap.open_positions_n} · uPnL {_fmt_money(snap.upnl_total, signed=True)}", MUTED)
     ))
     return rows
 
@@ -193,20 +242,34 @@ def render_system_status(snap: DashboardSnapshot) -> list[str]:
         + (color("  ✅ 정상", POSITIVE + BOLD) if health_ok else color(f"  ⚠️  ERROR x{err_alerts}", NEGATIVE + BOLD))
         + color(f"     refresh {snap.universe_last_refresh}", MUTED)
     ))
+    # AI budget gauge — 24h projected cost against a $50/day soft reference.
+    ai_gauge = bar(
+        min(total_cost_24h / 50.0 * 100.0, 100.0), 12,
+        fill_color=WARNING if total_cost_24h > 40 else INFO,
+    )
     rows.append(_pad(
         color("  🤖  AI 호출 (1h)".ljust(label_w), NEUTRAL + BOLD)
         + color(f"  {total_calls_h:>5,} calls", INFO + BOLD)
-        + color(f"     ${total_cost_h:.3f}/h  →  24h ${total_cost_24h:,.2f} 예상", MUTED)
+        + f"  {ai_gauge}"
+        + color(f"  ${total_cost_h:.3f}/h → 24h ${total_cost_24h:,.2f} 예상", MUTED)
     ))
     rows.append(_pad(
         color("  📡  거래소".ljust(label_w), NEUTRAL + BOLD)
         + color(f"  OKX {snap.starting_capital_okx/1000:.0f}K · CAP {snap.starting_capital_capital/1000:.0f}K", NEUTRAL + BOLD)
         + color(f"     focus {universe_n} symbols · cells {cells_n}", MUTED)
     ))
+    # Portfolio win-rate gauge (closed-trade weighted across strategies).
+    closed_total = sum(s.closed_n for s in snap.strategy_stats)
+    wr = (
+        sum(s.wr_pct * s.closed_n for s in snap.strategy_stats) / closed_total
+        if closed_total else 0.0
+    )
+    wr_gauge = bar(wr, 12, fill_color=POSITIVE if wr >= 50 else NEGATIVE)
     rows.append(_pad(
         color("  🚦  Strategies".ljust(label_w), NEUTRAL + BOLD)
         + color(f"  {n_strategies_active}/7 active", INFO + BOLD)
-        + color("     0 HALTed · 0 faults", MUTED)
+        + f"  {wr_gauge}"
+        + color(f"  WR {wr:.0f}% · 0 HALTed · 0 faults", MUTED)
     ))
     # 4 regimes summary
     regime_str = " ".join(f"{r.regime}:{r.count}" for r in snap.regime_bars)
@@ -238,17 +301,19 @@ def render_top_bottom(snap: DashboardSnapshot) -> list[str]:
             t = top[i]
             l_label = f"{t.ticker}/{t.strategy}/{t.regime}"[:40]
             l_part = (
-                color(f"  {l_label:<40}", NEUTRAL)
+                f"  {_heat_tile(t.score)} "
+                + color(f"{l_label:<40}", NEUTRAL)
                 + color(f" {t.score:>+7.3f}", POSITIVE)
                 + color(f" {int(t.n_eff):>6}", MUTED)
             )
         else:
-            l_part = " " * (2 + 40 + 1 + 7 + 1 + 6)
+            l_part = " " * (2 + 3 + 40 + 1 + 7 + 1 + 6)
         if i < len(bot):
             b = bot[i]
             r_label = f"{b.ticker}/{b.strategy}/{b.regime}"[:40]
             r_part = (
-                color(f"   {r_label:<40}", NEUTRAL)
+                f"   {_heat_tile(b.score)} "
+                + color(f"{r_label:<40}", NEUTRAL)
                 + color(f" {b.score:>+7.3f}", NEGATIVE)
                 + color(f" {int(b.n_eff):>6}", MUTED)
             )
@@ -318,7 +383,7 @@ def render_recent_trades(snap: DashboardSnapshot) -> list[str]:
 def render_dashboard_v2(snap: DashboardSnapshot) -> list[str]:
     rows: list[str] = []
     rows.append(render_header(snap))
-    rows.append(_pad(""))
+    rows.append(render_equity_spark(snap))
     rows.append(_hr("핵심 지표"))
     rows.extend(render_core_metrics(snap))
     rows.append(_pad(""))

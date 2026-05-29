@@ -167,6 +167,7 @@ async def _evaluate_position(
     close_specific: Callable[..., Any],
     lookup_regime: Callable[[sqlite3.Connection, str, str], str],
     phase: str,
+    tick_idx: int = 0,
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
@@ -215,9 +216,15 @@ async def _evaluate_position(
         state=SignalLifecycle.MONITORED,
     )
     g6_client = gpt_client if phase == "P1" else None
-    g6_result = await position_monitor_gate(g6_ctx, client=g6_client)
+    g6_result = await position_monitor_gate(
+        g6_ctx, client=g6_client,
+        call_cache=state.g6_call_cache, tick_idx=tick_idx,
+    )
     log_gate_event(conn, g6_ctx, g6_result)
     state.recalc_g6_calls = getattr(state, "recalc_g6_calls", 0) + 1
+    # #15 — count reused (no-call) decisions for the GPT-cost telemetry.
+    if g6_result.model_used == "python_fast_path":
+        state.recalc_g6_skipped = getattr(state, "recalc_g6_skipped", 0) + 1
 
     if g6_result.decision == GateDecision.EXIT_NOW:
         # F2.b — specific position close (no FIFO oldest pop).
@@ -298,6 +305,7 @@ async def recalc_active_positions(
     phase: str,
     lookup_regime: Callable[[sqlite3.Connection, str, str], str],
     close_specific: Callable[..., Any],
+    tick_idx: int = 0,
     max_positions: int = LIVE_RECALC_MAX_POSITIONS,
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
@@ -314,7 +322,11 @@ async def recalc_active_positions(
     """
     positions = load_active_position_rows(conn, limit=max_positions)
     if not positions:
+        # No open positions — clear the G6 call cache so it never grows stale.
+        state.g6_call_cache.prune(set())
         return 0
+    # #15 — drop cache anchors for positions that closed since the last sweep.
+    state.g6_call_cache.prune({str(p["position_id"]) for p in positions})
     for pos in positions:
         position_id = str(pos["position_id"])
         try:
@@ -326,7 +338,7 @@ async def recalc_active_positions(
                 conn=conn, state=state, pos=pos, regime=regime,
                 gpt_client=gpt_client, now_ts=now_ts,
                 close_specific=close_specific, lookup_regime=lookup_regime,
-                phase=phase, real_roundtrip=real_roundtrip,
+                phase=phase, tick_idx=tick_idx, real_roundtrip=real_roundtrip,
                 okx_adapter=okx_adapter, capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — fault isolate per position

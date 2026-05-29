@@ -28,6 +28,10 @@ from polaris.core.pipeline.agents.position_monitor import (
     G6_DECISION_ENUM,
     position_monitor_gate,
 )
+from polaris.core.pipeline.g6_call_gate import (
+    DEFAULT_G6_COOLDOWN_SEC,
+    G6CallCache,
+)
 from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
     GateContext,
@@ -310,6 +314,120 @@ async def test_g6_decision_always_in_enum(pnl_r: float) -> None:
         GateDecision.EXIT_NOW, GateDecision.SWAP_STRATEGY,
     }
     assert result.decision in valid
+
+
+# ---------------------------------------------------------------------------
+# #15 — GPT call-efficiency gate (cooldown + context-change) integration
+# ---------------------------------------------------------------------------
+
+
+def _ctx_at(payload: dict, *, started_ts: int, position_id: str = "pos-1") -> GateContext:
+    return GateContext(
+        run_id=uuid.uuid4().hex,
+        signal_id=position_id,
+        position_id=position_id,
+        gate_id=GATE_POSITION_MONITOR,
+        venue="okx",
+        symbol="BTC-USDT",
+        strategy_id="vb",
+        payload=dict(payload),
+        started_ts=started_ts,
+        state=SignalLifecycle.MONITORED,
+    )
+
+
+def _g6_payload(*, last_price: float = 80_400.0, pnl_r: float = 0.30, regime: str = "bull_trend") -> dict:
+    pos = _make_position()
+    pos["last_price"] = last_price
+    return {
+        "position": pos,
+        "unrealized_pnl_r": pnl_r,
+        "max_loss_r": 1.0,
+        "market_view": {"regime": regime, "atr_pct": 0.012, "volume_now": 1.0},
+        "recent_ticks": [],
+    }
+
+
+async def test_g6_call_gate_skips_unchanged_context() -> None:
+    """Second tick inside cooldown + unchanged context reuses prior decision."""
+    haiku = _MockGPTClient(response_text=json.dumps({"decision": "HOLD", "reason": "trend"}))
+    cache = G6CallCache()
+    # Tick 1 — real GPT call, anchors the cache.
+    r1 = await position_monitor_gate(
+        _ctx_at(_g6_payload(), started_ts=1_000), client=haiku,
+        call_cache=cache, tick_idx=100,
+    )
+    assert r1.model_used == "gpt_p1"
+    assert len(haiku.calls) == 1
+    # Tick 2 — 5s later, identical context → no GPT call, reuse HOLD.
+    r2 = await position_monitor_gate(
+        _ctx_at(_g6_payload(), started_ts=1_005), client=haiku,
+        call_cache=cache, tick_idx=101,
+    )
+    assert r2.decision == GateDecision.HOLD
+    assert r2.model_used == "python_fast_path"
+    assert len(haiku.calls) == 1  # no new call
+
+
+async def test_g6_call_gate_calls_on_context_change() -> None:
+    """A regime flip inside cooldown forces a fresh GPT call."""
+    haiku = _MockGPTClient(response_text=json.dumps({"decision": "HOLD", "reason": "x"}))
+    cache = G6CallCache()
+    await position_monitor_gate(
+        _ctx_at(_g6_payload(regime="bull_trend"), started_ts=1_000),
+        client=haiku, call_cache=cache, tick_idx=100,
+    )
+    assert len(haiku.calls) == 1
+    r2 = await position_monitor_gate(
+        _ctx_at(_g6_payload(regime="chop"), started_ts=1_005),
+        client=haiku, call_cache=cache, tick_idx=101,
+    )
+    assert len(haiku.calls) == 2  # context changed → called
+    assert r2.model_used == "gpt_p1"
+
+
+async def test_g6_call_gate_calls_after_cooldown() -> None:
+    haiku = _MockGPTClient(response_text=json.dumps({"decision": "HOLD", "reason": "x"}))
+    cache = G6CallCache()
+    await position_monitor_gate(
+        _ctx_at(_g6_payload(), started_ts=1_000), client=haiku,
+        call_cache=cache, tick_idx=100,
+    )
+    later = 1_000 + int(DEFAULT_G6_COOLDOWN_SEC) + 1
+    await position_monitor_gate(
+        _ctx_at(_g6_payload(), started_ts=later), client=haiku,
+        call_cache=cache, tick_idx=101,
+    )
+    assert len(haiku.calls) == 2  # cooldown elapsed → refresh call
+
+
+async def test_g6_call_gate_hard_loss_rail_bypasses_cache() -> None:
+    """A stop hit must EXIT_NOW even when a cached HOLD exists (quality > cost)."""
+    haiku = _MockGPTClient(response_text=json.dumps({"decision": "HOLD", "reason": "x"}))
+    cache = G6CallCache()
+    await position_monitor_gate(
+        _ctx_at(_g6_payload(pnl_r=0.3), started_ts=1_000), client=haiku,
+        call_cache=cache, tick_idx=100,
+    )
+    # Next tick: stop hit. Even inside cooldown, the Python hard rail fires.
+    r2 = await position_monitor_gate(
+        _ctx_at(_g6_payload(pnl_r=-1.5), started_ts=1_002), client=haiku,
+        call_cache=cache, tick_idx=101,
+    )
+    assert r2.decision == GateDecision.EXIT_NOW
+    assert r2.model_used == "python"
+
+
+async def test_g6_call_gate_first_tick_always_calls() -> None:
+    """No prior anchor → always call (cold cache)."""
+    haiku = _MockGPTClient(response_text=json.dumps({"decision": "HOLD", "reason": "x"}))
+    cache = G6CallCache()
+    r = await position_monitor_gate(
+        _ctx_at(_g6_payload(), started_ts=1_000), client=haiku,
+        call_cache=cache, tick_idx=100,
+    )
+    assert r.model_used == "gpt_p1"
+    assert len(haiku.calls) == 1
 
 
 @given(

@@ -37,6 +37,11 @@ from polaris.core.pipeline.agents._gpt_client import (
     call_gpt,
     make_system_prefix,
 )
+from polaris.core.pipeline.g6_call_gate import (
+    G6CallCache,
+    G6CallContext,
+    should_call_gpt,
+)
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GateContext,
@@ -157,11 +162,44 @@ def _coerce_decision(text: str) -> GateDecision | None:
     return mapping.get(s)
 
 
+def _reuse_decision(decision_str: str, pnl_r: float) -> GateResult:
+    """Rebuild a G6 result from a cached prior GPT decision (no call).
+
+    Used by the call-efficiency gate (#15): when the cooldown has not elapsed
+    and the decision context is unchanged we reuse the last GPT verdict instead
+    of paying for another call. Quality is preserved because any *material*
+    context change bypasses this path (``should_call_gpt`` returns True).
+    """
+    mapping = {
+        "HOLD": GateDecision.HOLD,
+        "ADJUST_EXIT": GateDecision.ADJUST_EXIT,
+        "EXIT_NOW": GateDecision.EXIT_NOW,
+        "SWAP_STRATEGY": GateDecision.SWAP_STRATEGY,
+    }
+    decision = mapping.get(decision_str, GateDecision.HOLD)
+    # SWAP_STRATEGY without a live candidate cannot be re-emitted blindly; the
+    # Q8 fast-path above already handles eligible swaps, so reuse → HOLD here.
+    if decision == GateDecision.SWAP_STRATEGY:
+        decision = GateDecision.HOLD
+    return GateResult(
+        decision=decision,
+        next_gate=GATE_ADAPTIVE_EXIT,
+        payload={
+            "reason": "g6_cached_decision",
+            "pnl_r": pnl_r,
+            "decision_source": "cache",
+        },
+        model_used="python_fast_path",
+    )
+
+
 async def position_monitor_gate(
     ctx: GateContext,
     *,
     client: Any | None = None,
     model: str = GPT_P1_MODEL,
+    call_cache: G6CallCache | None = None,
+    tick_idx: int = 0,
 ) -> GateResult:
     """Gate 6 dispatcher (Python P0 + GPT P1).
 
@@ -170,6 +208,12 @@ async def position_monitor_gate(
         ``max_loss_r`` (float), ``swap_candidate`` (dict | None),
         ``market_view`` (dict, optional — regime / atr_pct / volume_now),
         ``recent_ticks`` (list, optional).
+
+    Call-efficiency (#15): when ``call_cache`` is supplied (P1 live recalc) the
+    GPT call is gated behind a per-position cooldown + context-change check —
+    an unchanged context inside the cooldown reuses the prior GPT decision
+    (``model_used="python_fast_path"``). The hard loss rail + Q8 swap still
+    fire as a Python fast-path *before* this gate, so quality is preserved.
 
     Fail-open (Q4): missing position or LLM error → Python rules (never KILL).
     """
@@ -212,6 +256,26 @@ async def position_monitor_gate(
     recent_ticks_obj = ctx.payload.get("recent_ticks") or []
     recent_ticks = recent_ticks_obj if isinstance(recent_ticks_obj, list) else []
 
+    # Call-efficiency gate (#15): reuse the prior GPT decision when the context
+    # is unchanged inside the cooldown. Hard rails already fired above, so this
+    # only short-circuits the supervisory GPT branch (cost, not quality).
+    call_ctx: G6CallContext | None = None
+    if call_cache is not None and ctx.position_id is not None:
+        price_raw = pos.get("last_price")
+        if price_raw is None:
+            price_raw = pos.get("entry_price", 0.0)
+        call_ctx = G6CallContext(
+            price=float(price_raw),
+            regime=str(market_view.get("regime", "chop")),
+            pnl_r=pnl_r,
+            now_ts=int(ctx.started_ts),
+            tick_idx=int(tick_idx),
+        )
+        if not should_call_gpt(call_cache, ctx.position_id, call_ctx):
+            cached = call_cache.last_decision(ctx.position_id)
+            if cached is not None:
+                return _reuse_decision(cached, pnl_r)
+
     system = make_system_prefix(
         role=(
             "Polaris Position Monitor — keep winners open longer (aggressive "
@@ -244,6 +308,12 @@ async def position_monitor_gate(
         model=model,
         timeout_sec=DEFAULT_TIMEOUT_SEC,
     )
+    # Re-anchor the call cache now that GPT actually ran (resets the cooldown +
+    # context windows from this call, regardless of parse outcome). #15.
+    if call_cache is not None and call_ctx is not None and ctx.position_id is not None:
+        call_cache.record(
+            ctx.position_id, call_ctx, decision=str(res.parsed and res.parsed.get("decision") or "HOLD"),
+        )
     if res.error or res.parsed is None:
         # Fail-open to Python rules.
         fallback = _python_decision(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from polaris.core.pipeline.g6_call_gate import G6CallCache
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 
@@ -44,6 +45,8 @@ class ProdLoopState:
     g1_runs: int = 0
     g2_emits: int = 0
     g8_runs: int = 0
+    # Meta-labeling (#10) — triple-barrier labels recorded (collection-only).
+    meta_labels: int = 0
     bars_persisted: int = 0
     bars_baseline_samples: int = 0
     universe_refreshes: int = 0
@@ -64,3 +67,7 @@ class ProdLoopState:
     recalc_widen_applied: int = 0
     recalc_exit_now: int = 0
     recalc_swap: int = 0
+    # #15 — G6 GPT call-efficiency: per-position cooldown/context cache + a
+    # counter of ticks where the prior GPT decision was reused (no call).
+    recalc_g6_skipped: int = 0
+    g6_call_cache: G6CallCache = field(default_factory=G6CallCache)

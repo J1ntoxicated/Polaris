@@ -224,6 +224,93 @@ async def test_real_open_fill_okx_reject_returns_attempt_with_code() -> None:
 
 
 # ---------------------------------------------------------------------------
+# H5 — Alpaca (equity) dispatch through _real_open_fill (adapter MOCKED).
+# ---------------------------------------------------------------------------
+
+
+def _make_alpaca_adapter(*, filled: bool = True) -> AsyncMock:
+    from polaris.venues.alpaca.adapter import AlpacaOrderResponse
+
+    adapter = AsyncMock()
+    adapter.place_market_order = AsyncMock(
+        return_value=AlpacaOrderResponse(
+            ok=True, venue_order_id="alp-1", client_order_id="clA",
+            code="accepted", msg="accepted", raw={},
+        )
+    )
+    row = {
+        "id": "alp-1", "symbol": "AAPL", "side": "buy",
+        "status": "filled" if filled else "new",
+        "filled_qty": "1.05" if filled else "0",
+        "filled_avg_price": "190.0" if filled else None,
+    }
+    adapter.fetch_order = AsyncMock(return_value=row)
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_real_open_fill_alpaca_equity_dispatch() -> None:
+    """An equity venue routes to the (mock) Alpaca open fill; long → buy."""
+    adapter = _make_alpaca_adapter(filled=True)
+    attempt = await _real_open_fill(
+        venue="alpaca", symbol="AAPL", side="long", notional_usd=200.0,
+        last_price=190.0, strategy_id="equity_tsmom", asset_class="equity",
+        alpaca_adapter=adapter,
+    )
+    assert attempt.fill is not None
+    assert isinstance(attempt.fill, Fill)
+    adapter.place_market_order.assert_awaited_once()
+    assert adapter.place_market_order.await_args.kwargs["side"] == "buy"
+    # Equity closes by base_qty (cash, no deal_id) — like OKX spot.
+    assert attempt.deal_id is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_threads_alpaca_adapter_to_reserve(
+    memdb: sqlite3.Connection,
+) -> None:
+    """run_pipeline_for_signal must forward the injected ``alpaca_adapter`` to
+    the ``reserve_and_submit`` closure (mirror of the okx_adapter threading)."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import run_pipeline_for_signal
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import _all_strategies
+
+    reset_process_fence()
+    sentinel = _make_alpaca_adapter()
+    captured: dict[str, Any] = {}
+
+    async def _spy_reserve(**kwargs: Any) -> SimulatedTrade | None:
+        captured["alpaca_adapter"] = kwargs.get("alpaca_adapter")
+        fill, trade = simulate_open_fill(
+            signal=kwargs["sig"], venue=kwargs["venue"],
+            last_price=kwargs["last_price"], notional_usd=kwargs["notional_usd"],
+        )
+        trade.position_id = "pos_eq_spy"
+        return trade
+
+    equity_strat = next(
+        s for s in _all_strategies() if s.metadata.strategy_id == "equity_tsmom"
+    )
+    eq_sig = RawSignal(
+        signal_id="eq_thread", strategy_id="equity_tsmom", symbol="AAPL",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="equity_intraday",
+    )
+    await run_pipeline_for_signal(
+        conn=memdb, haiku=StubGPTClient(), state=ProdLoopState(),
+        strategy=equity_strat, sig=eq_sig, venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", regime="bull_trend",
+        bars_atr_pct=0.02, last_price=190.0,
+        universe_rows=[{"venue": "alpaca", "symbol": "AAPL", "vol_24h_usd": 2e9}],
+        now_ts=int(time.time()), reserve_and_submit=_spy_reserve,
+        real_roundtrip=True, alpaca_adapter=sentinel,
+    )
+    assert captured.get("alpaca_adapter") is sentinel
+
+
+# ---------------------------------------------------------------------------
 # (c) flag threading e2e — run_pipeline_for_signal forwards real_roundtrip
 # ---------------------------------------------------------------------------
 

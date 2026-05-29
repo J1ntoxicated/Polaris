@@ -33,12 +33,16 @@ chain, headroom_min(), and the 0.09 ceiling are untouched.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Final, Literal
+from zoneinfo import ZoneInfo
 
 __all__ = [
     "PDT_DAYTRADE_THRESHOLD",
     "PDT_RANK_PENALTY_STEP",
+    "RTH_CLOSE_LOCAL_MINUTES",
     "RTH_CLOSE_UTC_MINUTES",
+    "RTH_OPEN_LOCAL_MINUTES",
     "RTH_OPEN_UTC_MINUTES",
     "US_EQUITY_CALENDAR",
     "equity_entry_held_for_session",
@@ -49,15 +53,34 @@ __all__ = [
 
 US_EQUITY_CALENDAR: Final[str] = "us_equity_cal"
 
-# US regular trading hours in UTC minutes-since-midnight. RTH is the half-open
-# window [13:30, 20:00) UTC (= 09:30-16:00 ET). Open boundary inclusive, close
-# boundary exclusive. This is a deterministic UTC-clock approximation used for
-# the entry-hold decision; the live venue ``/v2/clock`` (AlpacaClock.is_open,
-# T9) remains the authoritative holiday-aware source and overrides at the
-# adapter layer when available. The pure window is what the per-tick gate uses
-# (no per-tick HTTP), matching the deterministic ``derive_session`` clock.
-RTH_OPEN_UTC_MINUTES: Final[int] = 13 * 60 + 30  # 13:30 UTC
-RTH_CLOSE_UTC_MINUTES: Final[int] = 20 * 60  # 20:00 UTC
+# US regular trading hours, expressed in America/New_York LOCAL minutes. RTH is
+# the half-open window [09:30, 16:00) ET. Open boundary inclusive, close
+# boundary exclusive. ``us_equity_session_state`` converts the UTC timestamp to
+# NY local time via ``zoneinfo`` so the gate is DST-correct YEAR-ROUND (the
+# EST↔EDT shift moves the UTC window between 14:30-21:00 and 13:30-20:00).
+#
+# This is a deterministic clock (no per-tick HTTP), matching the deterministic
+# ``derive_session`` clock; the live venue ``/v2/clock`` (AlpacaClock.is_open,
+# T9) remains the authoritative HOLIDAY-aware source and overrides at the
+# adapter layer when available.
+NY_TZ: Final[ZoneInfo] = ZoneInfo("America/New_York")
+RTH_OPEN_LOCAL_MINUTES: Final[int] = 9 * 60 + 30  # 09:30 ET
+RTH_CLOSE_LOCAL_MINUTES: Final[int] = 16 * 60  # 16:00 ET
+# Extended-hours envelope (ET local): pre-market 04:00-09:30, after-hours
+# 16:00-20:00. Only RTH gates entries; pre/after/closed all HOLD — these bounds
+# are telemetry/observability, not a separate policy.
+PRE_MARKET_OPEN_LOCAL_MINUTES: Final[int] = 4 * 60  # 04:00 ET
+AFTER_HOURS_CLOSE_LOCAL_MINUTES: Final[int] = 20 * 60  # 20:00 ET
+
+# DST-NAIVE EDT-reference / offline-fallback constants (minutes since UTC
+# midnight). These pin the RTH window AS SEEN IN EDT (summer): 13:30-20:00 UTC.
+# They are NOT used by the live ``us_equity_session_state`` path (which is
+# DST-correct via NY_TZ) — they remain only as a documented reference and an
+# offline fallback for environments without the tz database. NOTE: in EST
+# (winter) the true UTC window is 14:30-21:00, so do NOT use these for a live
+# UTC comparison; convert to NY local time instead.
+RTH_OPEN_UTC_MINUTES: Final[int] = 13 * 60 + 30  # 13:30 UTC (EDT reference only)
+RTH_CLOSE_UTC_MINUTES: Final[int] = 20 * 60  # 20:00 UTC (EDT reference only)
 
 # PDT (pattern-day-trader) ranking-down. >= 3 day-trades in the rolling 5-day
 # window is the venue's PDT trigger. At/above this we RANK DOWN new entries
@@ -70,13 +93,14 @@ SessionState = Literal["closed", "pre_market", "rth", "after_hours"]
 
 
 def us_equity_session_state(ts: int | float) -> SessionState:
-    """Map a UTC unix timestamp to the US-equity session state.
+    """Map a UTC unix timestamp to the US-equity session state (DST-correct).
 
     Returns one of ``"closed" | "pre_market" | "rth" | "after_hours"``. RTH is
-    the half-open window [13:30, 20:00) UTC. ``pre_market`` / ``after_hours``
-    are the same UTC day before / after RTH; deep overnight (outside the rough
-    extended-hours envelope) is ``closed``. Pure function of the UTC wall-clock
-    minute; non-finite / negative input clamps to 0 (midnight UTC → closed).
+    the half-open window [09:30, 16:00) America/New_York LOCAL time, so it is
+    correct YEAR-ROUND: the timestamp is converted to NY local time via
+    ``zoneinfo`` (EST/EDT applied automatically). ``pre_market`` (04:00-09:30
+    ET) / ``after_hours`` (16:00-20:00 ET) bracket RTH; outside that envelope is
+    ``closed``. Non-finite / negative input clamps to epoch (→ closed).
 
     This is a deterministic clock, not a venue call. The authoritative,
     holiday-aware ``is_open`` comes from the venue ``/v2/clock`` at the adapter
@@ -88,16 +112,16 @@ def us_equity_session_state(ts: int | float) -> SessionState:
         return "closed"
     if ts_int < 0:
         ts_int = 0
-    minute_of_day = (ts_int % 86400) // 60
-    if RTH_OPEN_UTC_MINUTES <= minute_of_day < RTH_CLOSE_UTC_MINUTES:
+    local = dt.datetime.fromtimestamp(ts_int, tz=NY_TZ)
+    minute_of_day = local.hour * 60 + local.minute
+    if RTH_OPEN_LOCAL_MINUTES <= minute_of_day < RTH_CLOSE_LOCAL_MINUTES:
         return "rth"
-    # Rough extended-hours envelope around RTH so pre/after are distinguishable
-    # from deep-closed. US extended hours ~ 08:00-13:30 (pre) / 20:00-24:00
-    # (after) UTC. Only RTH gates entries; pre/after/closed all HOLD entries —
+    # Extended-hours envelope (ET local) so pre/after are distinguishable from
+    # deep-closed. Only RTH gates entries; pre/after/closed all HOLD entries —
     # the distinction is telemetry/observability, not a separate policy.
-    if 8 * 60 <= minute_of_day < RTH_OPEN_UTC_MINUTES:
+    if PRE_MARKET_OPEN_LOCAL_MINUTES <= minute_of_day < RTH_OPEN_LOCAL_MINUTES:
         return "pre_market"
-    if RTH_CLOSE_UTC_MINUTES <= minute_of_day < 24 * 60:
+    if RTH_CLOSE_LOCAL_MINUTES <= minute_of_day < AFTER_HOURS_CLOSE_LOCAL_MINUTES:
         return "after_hours"
     return "closed"
 

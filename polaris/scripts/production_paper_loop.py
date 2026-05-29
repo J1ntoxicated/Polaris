@@ -49,6 +49,7 @@ from polaris.scripts._production_tick import (
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
 from polaris.storage.schema import init_db
+from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx import OKXAdapter
 
@@ -96,6 +97,18 @@ def _build_okx_adapter() -> OKXAdapter | None:
     return OKXAdapter(
         api_key=api_key, secret=secret, passphrase=passphrase, base_url=base_url,
     )
+
+
+def _build_alpaca_adapter() -> AlpacaAdapter | None:
+    """Build an Alpaca PAPER adapter from creds, or ``None`` if unset (Track C).
+
+    Mirrors ``_build_okx_adapter``: one adapter reused across ticks for the real
+    equity round-trip. PAPER-only (the adapter refuses any live trade host).
+    """
+    api_key, secret = resolve_alpaca_credentials()
+    if not (api_key and secret):
+        return None
+    return AlpacaAdapter(api_key=api_key, secret=secret)
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +250,21 @@ async def run_production_paper_loop(
     # P0 venue wire: build a single OKX adapter for real-roundtrip runs so the
     # demo order endpoints are reachable across every tick (open + close).
     okx_adapter: OKXAdapter | None = None
+    # Track C — single Alpaca PAPER adapter reused across ticks (mirror OKX).
+    alpaca_adapter: AlpacaAdapter | None = None
     if real_roundtrip:
         okx_adapter = _build_okx_adapter()
         if okx_adapter is None:
             logger.warning(
                 "[loop] real_roundtrip requested but OKX_DEMO_* env missing — "
                 "OKX real orders disabled (per-tick env fallback will also fail)"
+            )
+        alpaca_adapter = _build_alpaca_adapter()
+        if alpaca_adapter is None:
+            logger.warning(
+                "[loop] real_roundtrip requested but ALPACA_PAPER_* creds missing "
+                "— Alpaca equity real orders disabled (per-tick env fallback will "
+                "also fail)"
             )
 
     deadline = time.monotonic() + duration_sec
@@ -255,7 +277,7 @@ async def run_production_paper_loop(
                     conn=conn, haiku=haiku, state=state,
                     capital_session=capital_session, tick_idx=tick_idx,
                     phase=phase, real_roundtrip=real_roundtrip,
-                    okx_adapter=okx_adapter,
+                    okx_adapter=okx_adapter, alpaca_adapter=alpaca_adapter,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("[tick %d] error: %r", tick_idx, exc)
@@ -268,6 +290,8 @@ async def run_production_paper_loop(
             await layer0_task
         if okx_adapter is not None:
             await okx_adapter.aclose()
+        if alpaca_adapter is not None:
+            await alpaca_adapter.aclose()
         if capital_session is not None:
             await capital_session.aclose()
 

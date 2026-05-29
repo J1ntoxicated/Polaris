@@ -225,15 +225,17 @@ STREAMS: dict[StreamId, StreamConfig] = {
         # Alpaca paper rejects that are EXTERNAL (not strategy/client faults) —
         # market-closed / PDT / buying-power / auth-forbidden. Classified as
         # non-fault so they never trip an unjust HARD_HALT (lesson 1a315a3).
+        # H2: these are the SEMANTIC TOKENS the AlpacaAdapter now emits
+        # (``classify_reject_code`` normalizes Alpaca's numeric code + HTTP
+        # status into this vocabulary). A 422-style validation reject normalizes
+        # to ``validation_rejected`` — intentionally ABSENT here so a genuinely
+        # anomalous reject still records a fault (can eventually halt).
         external_reject_codes=frozenset(
             {
                 "forbidden",
-                "403",
-                "account_blocked",
                 "pdt_block",
                 "insufficient_buying_power",
                 "market_closed",
-                "422",
             }
         ),
     ),

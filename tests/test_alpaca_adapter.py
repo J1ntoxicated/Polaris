@@ -180,8 +180,96 @@ async def test_place_market_order_reject_classification() -> None:
     finally:
         await client.aclose()
     assert resp.ok is False
-    assert resp.code == "40310000"
+    # H2: Alpaca's numeric 40310000 (insufficient buying power) is normalized to
+    # the SSOT semantic token so _is_external_reject matches it as non-fault.
+    assert resp.code == "insufficient_buying_power"
     assert "buying power" in resp.msg
+    # The raw numeric code is preserved in ``raw`` for audit/debugging.
+    assert resp.raw.get("code") == 40310000
+
+
+# ---------------------------------------------------------------------------
+# H2 — reject-code normalization: numeric Alpaca codes / HTTP statuses are
+# mapped to the SSOT semantic vocabulary (C_alpaca_equity.external_reject_codes)
+# so a genuine external reject classifies non-fault. A validation 422 normalizes
+# to a token OUTSIDE that set so it still faults (anomalous → halt path).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "raw_code", "message", "expected_token"),
+    [
+        # 403 + 40310000 family → buying power / restriction / not-authorized.
+        (403, 40310000, "insufficient buying power", "insufficient_buying_power"),
+        (403, 40310000, "account is not authorized to trade", "insufficient_buying_power"),
+        # 403 + 40310100 → pattern-day-trading protection.
+        (403, 40310100, "trade denied due to pattern day trading protection", "pdt_block"),
+        # Generic 403 with no recognized numeric code → forbidden (auth/perm).
+        (403, None, "forbidden", "forbidden"),
+        (401, None, "unauthorized", "forbidden"),
+        # Market closed (Alpaca surfaces this on the 403 family) → market_closed.
+        (403, None, "market is closed", "market_closed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reject_code_normalized_to_external_token(
+    status: int, raw_code: int | None, message: str, expected_token: str
+) -> None:
+    """Each genuine external Alpaca reject normalizes to an SSOT external token."""
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "POST":
+            body: dict[str, Any] = {"message": message}
+            if raw_code is not None:
+                body["code"] = raw_code
+            return httpx.Response(status, json=body)
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={"message": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url=ALPACA_PAPER_BASE)
+    adapter = _adapter(client)
+    try:
+        resp = await adapter.place_market_order(
+            symbol="AAPL", side="buy", notional_usd=1e9,
+            client_order_id=f"polaris-ext-{expected_token}",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.code == expected_token
+
+
+@pytest.mark.asyncio
+async def test_reject_validation_422_normalizes_to_fault_token() -> None:
+    """A 422 validation reject (invalid order params — a client/strategy bug) must
+    NOT normalize to an external token; it stays anomalous so it still faults."""
+    from polaris.core.streams import resolve_stream
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "POST":
+            return httpx.Response(
+                422, json={"code": 42210000, "message": "invalid order type"}
+            )
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={"message": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url=ALPACA_PAPER_BASE)
+    adapter = _adapter(client)
+    try:
+        resp = await adapter.place_market_order(
+            symbol="ZZZ", side="buy", notional_usd=100.0,
+            client_order_id="polaris-422-fault",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    # The normalized token must NOT be in the stream's external set → it faults.
+    external = resolve_stream("alpaca").external_reject_codes
+    assert resp.code not in external
 
 
 # ---------------------------------------------------------------------------

@@ -329,14 +329,23 @@ def test_resolve_stream_alpaca_accepts_matching_product_class() -> None:
 def test_alpaca_external_reject_codes_avoid_unjust_hard_halt() -> None:
     """Realistic Alpaca paper rejects (market-closed / PDT / buying-power /
     forbidden) are EXTERNAL non-fault codes so they never trip an unjust
-    HARD_HALT (lesson 1a315a3)."""
+    HARD_HALT (lesson 1a315a3).
+
+    H2: these are the SEMANTIC TOKENS the AlpacaAdapter emits after normalizing
+    its numeric code + HTTP status (``classify_reject_code``). The raw numeric
+    codes / bare HTTP statuses are NO LONGER emitted, so the set holds the four
+    semantic external tokens only."""
     codes = resolve_stream("alpaca").external_reject_codes
     assert codes >= frozenset(
         {
             "forbidden",
-            "403",
-            "account_blocked",
             "pdt_block",
             "insufficient_buying_power",
+            "market_closed",
         }
     )
+    # H2: a 422-style validation reject normalizes to ``validation_rejected`` —
+    # it must NOT be external so a genuinely anomalous reject still faults.
+    from polaris.venues.alpaca.reject_codes import REJECT_VALIDATION
+
+    assert REJECT_VALIDATION not in codes

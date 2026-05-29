@@ -302,3 +302,182 @@ async def test_okx_open_filled_state_returns_fill() -> None:
     assert attempt.fill is not None
     assert attempt.reject_code is None
     _ = FillNormalizationError  # imported for negative-path documentation
+
+
+# ---------------------------------------------------------------------------
+# Part D — Alpaca (Track C) external reject classification (H2 + H5).
+#   external (market-closed / PDT / buying-power / forbidden) → NO fault, the
+#   reservation is released and a telemetry counter bumps. A validation reject
+#   (anomalous, normalized to a non-external token) DOES fault. The alpaca
+#   adapter is MOCKED end-to-end through reserve_and_submit — NO real order.
+# ---------------------------------------------------------------------------
+
+
+def _eq_sig(signal_id: str = "eq_sig") -> RawSignal:
+    return RawSignal(
+        signal_id=signal_id, strategy_id="equity_tsmom", symbol="AAPL",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="equity_intraday",
+    )
+
+
+def _alpaca_reject_resp(code: str, msg: str = "rej") -> Any:
+    from polaris.venues.alpaca.adapter import AlpacaOrderResponse
+
+    return AlpacaOrderResponse(
+        ok=False, venue_order_id=None, client_order_id="clA",
+        code=code, msg=msg, raw={},
+    )
+
+
+def _make_alpaca_reject_adapter(code: str) -> AsyncMock:
+    """Mock AlpacaAdapter whose order POST returns a normalized reject code."""
+    adapter = AsyncMock()
+    adapter.place_market_order = AsyncMock(return_value=_alpaca_reject_resp(code))
+    # If the open path ever polled, return no rows (no fill) — defensive.
+    adapter.fetch_order = AsyncMock(return_value={})
+    return adapter
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["insufficient_buying_power", "pdt_block", "market_closed", "forbidden"],
+)
+@pytest.mark.asyncio
+async def test_alpaca_external_reject_does_not_fault(
+    memdb: sqlite3.Connection, code: str
+) -> None:
+    """Each genuine external Alpaca reject classifies non-fault (no HARD_HALT)."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    adapter = _make_alpaca_reject_adapter(code)
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig(f"ext_{code}"), venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", notional_usd=200.0,
+        last_price=190.0, now_ts=int(time.time()),
+        real_roundtrip=True, alpaca_adapter=adapter,
+    )
+    assert trade is None
+    # External reject → NO strategy fault.
+    assert state.fault_events == 0
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='equity_tsmom'"
+    ).fetchone()[0]
+    assert int(fault) == 0
+    # Telemetry counter incremented for the external code.
+    assert state.venue_rejects_by_code.get(code) == 1
+
+
+@pytest.mark.asyncio
+async def test_alpaca_external_rejects_keep_breaker_active(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Repeated external Alpaca rejects leave the strategy breaker ACTIVE."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    now = int(time.time())
+    for i, code in enumerate(
+        ("insufficient_buying_power", "market_closed", "pdt_block")
+    ):
+        adapter = _make_alpaca_reject_adapter(code)
+        await reserve_and_submit(
+            conn=memdb, state=state, sig=_eq_sig(f"eqext{i}"), venue="alpaca",
+            symbol=f"SYM{i}", asset_class="equity",
+            underlying_group_id=f"equity:SYM{i}", notional_usd=200.0,
+            last_price=100.0, now_ts=now + i, real_roundtrip=True,
+            alpaca_adapter=adapter,
+        )
+    assert state.fault_events == 0
+    assert current_strategy_mode(memdb, "equity_tsmom", now_ts=now + 10) == ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_alpaca_anomalous_reject_records_fault(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A reject code OUTSIDE the Alpaca external set (e.g. a normalized 422
+    validation token / unknown code) must still record a fault."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    # ``validation_rejected`` is the adapter's normalized token for a 422
+    # business-validation reject — NOT in C_alpaca_equity.external_reject_codes.
+    adapter = _make_alpaca_reject_adapter("validation_rejected")
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig("eqanom"), venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", notional_usd=200.0,
+        last_price=190.0, now_ts=int(time.time()),
+        real_roundtrip=True, alpaca_adapter=adapter,
+    )
+    assert trade is None
+    assert state.fault_events == 1
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='equity_tsmom'"
+    ).fetchone()[0]
+    assert int(fault) == 1
+
+
+@pytest.mark.asyncio
+async def test_alpaca_equity_signal_flows_through_reserve_and_submit_to_mock_fill(
+    memdb: sqlite3.Connection,
+) -> None:
+    """H5 wiring: an equity signal reaches the (MOCK) Alpaca open fill via
+    reserve_and_submit → _real_open_fill, producing a tracked trade. NO real
+    order — the adapter is a mock that returns a filled order."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+
+    class _MockAlpacaAdapter:
+        """Records the order POST + returns a filled order on lookup."""
+
+        def __init__(self) -> None:
+            self.place_kwargs: dict[str, Any] = {}
+
+        async def place_market_order(self, **kwargs: Any) -> Any:
+            from polaris.venues.alpaca.adapter import AlpacaOrderResponse
+
+            self.place_kwargs = kwargs
+            return AlpacaOrderResponse(
+                ok=True, venue_order_id="alp-1",
+                client_order_id=kwargs.get("client_order_id"),
+                code="accepted", msg="accepted", raw={},
+            )
+
+        async def fetch_order(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "id": "alp-1", "symbol": "AAPL", "side": "buy",
+                "status": "filled", "filled_qty": "1.05",
+                "filled_avg_price": "190.0",
+            }
+
+    adapter = _MockAlpacaAdapter()
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig("eqflow"), venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", notional_usd=200.0,
+        last_price=190.0, now_ts=int(time.time()),
+        real_roundtrip=True, alpaca_adapter=adapter,
+    )
+    # The equity signal flowed end-to-end to the mock fill → a tracked trade.
+    assert trade is not None
+    assert trade.venue == "alpaca"
+    assert trade.symbol == "AAPL"
+    assert state.fills_open == 1
+    assert state.fault_events == 0
+    # The adapter actually received the order (the long side maps to "buy").
+    assert adapter.place_kwargs.get("side") == "buy"
+    assert adapter.place_kwargs.get("symbol") == "AAPL"
+    # A positions row was persisted for the equity trade.
+    pos = memdb.execute(
+        "SELECT COUNT(*) FROM positions WHERE venue='alpaca' AND symbol='AAPL'"
+    ).fetchone()[0]
+    assert int(pos) == 1

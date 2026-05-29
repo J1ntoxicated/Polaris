@@ -29,6 +29,8 @@ from typing import Any, Final
 
 import httpx
 
+from polaris.venues.alpaca.reject_codes import classify_reject_code
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -484,13 +486,15 @@ def _parse_order_response(resp: httpx.Response) -> AlpacaOrderResponse:
         return _parse_order_row(parsed)
     # Business reject — Alpaca returns ``{"code": <int>, "message": "..."}``.
     raw = parsed if isinstance(parsed, dict) else {"raw_text": resp.text}
-    code = raw.get("code")
     msg = str(raw.get("message") or raw.get("msg") or resp.text or "")
+    code = classify_reject_code(  # H2: numeric+status → SSOT semantic token
+        numeric_code=raw.get("code"), status_code=resp.status_code, message=msg
+    )
     return AlpacaOrderResponse(
         ok=False,
         venue_order_id=None,
         client_order_id=str(raw.get("client_order_id")) if raw.get("client_order_id") else None,
-        code=str(code) if code is not None else str(resp.status_code),
+        code=code,
         msg=msg,
         raw=raw,
     )

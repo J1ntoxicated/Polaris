@@ -44,6 +44,7 @@ from polaris.core.sizing import (
     kelly_fraction,
     kelly_or_cold_start,
     listing_watchdog_mult,
+    per_symbol_remaining_pct,
     rank_cut_candidates,
     resolve_cluster_id,
     resolve_cut_state,
@@ -391,6 +392,62 @@ def test_t8_venue_per_symbol_cap_ab_unchanged() -> None:
     assert venue_per_symbol_cap("okx") == pytest.approx(0.99)  # spot
     assert venue_per_symbol_cap("capital") == pytest.approx(0.99)  # cfd
     assert venue_per_symbol_cap("unknown_venue") == pytest.approx(0.99)  # spot fallback
+
+
+# --- H1 (Phase 3 T12 review nit): the RUNTIME per-symbol remaining path. ----
+# per_symbol_remaining_pct (engine.py:443) calls venue_per_symbol_cap(venue)
+# WITHOUT product_class. This must still resolve the equity cap for alpaca via
+# resolve_stream(venue).product_class — NOT silently miss to spot/cfd. Distinct
+# env caps (spot != cfd != equity) make the branch observable; all-0.99 defaults
+# would mask a dead branch. Per-symbol cap is a headroom_min SLOT (no chain
+# multiplier); 0.99 equity RAISES headroom (aggressive-consistent).
+def test_h1_per_symbol_remaining_alpaca_resolves_equity_cap() -> None:
+    import os
+
+    os.environ["POLARIS_CAP_PER_SYMBOL_SPOT_PCT"] = "0.50"
+    os.environ["POLARIS_CAP_PER_SYMBOL_CFD_PCT"] = "0.60"
+    os.environ["POLARIS_CAP_PER_SYMBOL_EQUITY_PCT"] = "0.99"
+    try:
+        # Runtime caller path: product_class OMITTED -> resolve via stream SSOT.
+        alpaca_rem = per_symbol_remaining_pct(
+            venue="alpaca", symbol="AAPL", open_positions=[]
+        )
+        assert alpaca_rem == pytest.approx(0.99)  # equity, NOT 0.50 spot fallback
+        # A/B byte-identical: same omitted-product_class path stays spot/cfd.
+        okx_rem = per_symbol_remaining_pct(
+            venue="okx", symbol="BTC-USDT", open_positions=[]
+        )
+        assert okx_rem == pytest.approx(0.50)  # spot — unchanged
+        capital_rem = per_symbol_remaining_pct(
+            venue="capital", symbol="EURUSD", open_positions=[]
+        )
+        assert capital_rem == pytest.approx(0.60)  # cfd — unchanged
+    finally:
+        del os.environ["POLARIS_CAP_PER_SYMBOL_SPOT_PCT"]
+        del os.environ["POLARIS_CAP_PER_SYMBOL_CFD_PCT"]
+        del os.environ["POLARIS_CAP_PER_SYMBOL_EQUITY_PCT"]
+
+
+def test_h1_per_symbol_remaining_alpaca_subtracts_open_risk() -> None:
+    """The equity cap (0.99) participates in the min() SLOT and is reduced by
+    open same-symbol risk — proving the cap is *applied*, not just resolved."""
+    pos = PositionRiskState(
+        venue="alpaca",
+        symbol="AAPL",
+        instrument_id="AAPL",
+        underlying_group_id="AAPL",
+        cluster_id="equity:MEGA_CAP",
+        strategy="equity_tsmom",
+        track="C",
+        signal_strength=1.0,
+        open_risk_pct=0.10,
+        notional_usd=1_000.0,
+        opened_ts=NOW,
+    )
+    rem = per_symbol_remaining_pct(
+        venue="alpaca", symbol="AAPL", open_positions=[pos]
+    )
+    assert rem == pytest.approx(0.89)  # 0.99 equity cap - 0.10 open
 
 
 # ---------------------------------------------------------------------------

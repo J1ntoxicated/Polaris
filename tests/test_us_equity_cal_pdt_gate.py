@@ -310,3 +310,155 @@ def test_run_tick_source_gates_equity_only_before_signal() -> None:
     assert "apply_equity_pdt_rank_down" in src, (
         "T13: PDT ranking-down must be wired into _run_tick."
     )
+
+
+# ---------------------------------------------------------------------------
+# F — RTH is DST-correct (America/New_York 09:30-16:00 local, year-round).
+#     Parametrize a January (EST, UTC-5) and a July (EDT, UTC-4) date and
+#     prove the UTC window shifts with DST. H3 review nit (b).
+# ---------------------------------------------------------------------------
+
+
+def _utc_ts_on(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
+    """Unix ts at a fixed UTC wall-clock on an explicit calendar date.
+
+    Unlike ``_utc_ts`` (which fixes a May/EDT date), this lets a test pin a
+    January (EST) vs July (EDT) date so the DST shift is observable.
+    """
+    base = dt.datetime(year, month, day, hour, minute, tzinfo=dt.UTC)
+    return int(base.timestamp())
+
+
+def test_rth_open_is_0930_et_in_est_january() -> None:
+    """In EST (January) 09:30 ET == 14:30 UTC → RTH at 14:30 UTC, NOT 13:30."""
+    # 14:30 UTC on a Jan date = 09:30 EST → RTH open boundary inclusive.
+    assert us_equity_session_state(_utc_ts_on(2026, 1, 15, 14, 30)) == "rth"
+    # 13:30 UTC on the same Jan date = 08:30 EST → still pre_market (NOT RTH).
+    assert us_equity_session_state(_utc_ts_on(2026, 1, 15, 13, 30)) == "pre_market"
+
+
+def test_rth_open_is_0930_et_in_edt_july() -> None:
+    """In EDT (July) 09:30 ET == 13:30 UTC → RTH at 13:30 UTC."""
+    assert us_equity_session_state(_utc_ts_on(2026, 7, 15, 13, 30)) == "rth"
+    # 14:30 UTC in July = 10:30 EDT → mid-session RTH.
+    assert us_equity_session_state(_utc_ts_on(2026, 7, 15, 14, 30)) == "rth"
+
+
+def test_1400_utc_is_pre_in_january_but_rth_in_july() -> None:
+    """The discriminating case: 14:00 UTC is 09:00 EST (pre) in January but
+    10:00 EDT (RTH) in July. A DST-naive UTC hardcode gets one of these wrong."""
+    assert us_equity_session_state(_utc_ts_on(2026, 1, 15, 14, 0)) == "pre_market"
+    assert us_equity_session_state(_utc_ts_on(2026, 7, 15, 14, 0)) == "rth"
+
+
+def test_2030_utc_is_rth_in_january_but_after_in_july() -> None:
+    """20:30 UTC is 15:30 EST (still RTH) in January but 16:30 EDT (after) in
+    July — the close boundary tracks DST too."""
+    assert us_equity_session_state(_utc_ts_on(2026, 1, 15, 20, 30)) == "rth"
+    assert us_equity_session_state(_utc_ts_on(2026, 7, 15, 20, 30)) == "after_hours"
+
+
+def test_rth_close_is_1600_et_both_seasons() -> None:
+    """16:00 ET close is exclusive year-round: 21:00 UTC (EST) and 20:00 UTC
+    (EDT) are both just past the close → after_hours."""
+    assert us_equity_session_state(_utc_ts_on(2026, 1, 15, 21, 0)) == "after_hours"
+    assert us_equity_session_state(_utc_ts_on(2026, 7, 15, 20, 0)) == "after_hours"
+
+
+def test_equity_entry_held_uses_dst_correct_window() -> None:
+    """The integrity entry-hold tracks the DST-correct RTH: at 14:00 UTC the
+    new equity entry is HELD in January (market not yet open) but allowed in
+    July (market open). Same UTC instant, different season → different hold."""
+    assert equity_entry_held_for_session(_utc_ts_on(2026, 1, 15, 14, 0)) is True
+    assert equity_entry_held_for_session(_utc_ts_on(2026, 7, 15, 14, 0)) is False
+
+
+# ---------------------------------------------------------------------------
+# G — PDT ranking-down is ACTUALLY APPLIED to spec ordering (H3 review nit a):
+#     a PDT-flagged equity spec is demoted BELOW an unflagged one, but is
+#     NEVER dropped/blocked. The rank-down result is consumed, not discarded.
+# ---------------------------------------------------------------------------
+
+
+def test_order_specs_by_rank_demotes_flagged_below_unflagged() -> None:
+    """A PDT-flagged spec (positive rank_penalty) inserted FIRST must end up
+    AFTER an unflagged spec (penalty 0.0) once ordered — ranked down, not
+    blocked. Both specs survive (flow_not_block)."""
+    from polaris.core.isolation.worker import PipelineTaskSpec
+    from polaris.scripts._production_tick import order_specs_by_rank
+
+    async def _noop() -> None:
+        return None
+
+    flagged = PipelineTaskSpec(
+        strategy_id="equity_flagged", coro_factory=_noop, rank_penalty=1.0
+    )
+    unflagged = PipelineTaskSpec(
+        strategy_id="equity_clean", coro_factory=_noop, rank_penalty=0.0
+    )
+    # flagged inserted first on purpose — ordering must demote it.
+    ordered = order_specs_by_rank([flagged, unflagged])
+    assert [s.strategy_id for s in ordered] == ["equity_clean", "equity_flagged"]
+    # NOT a block: both specs are still present after ranking.
+    assert len(ordered) == 2
+
+
+def test_order_specs_by_rank_never_drops_a_flagged_spec() -> None:
+    """Even a lone PDT-flagged spec survives ordering — ranking-down is never a
+    veto. The penalty lowers priority; it never removes the entry."""
+    from polaris.core.isolation.worker import PipelineTaskSpec
+    from polaris.scripts._production_tick import order_specs_by_rank
+
+    async def _noop() -> None:
+        return None
+
+    flagged = PipelineTaskSpec(
+        strategy_id="equity_flagged", coro_factory=_noop, rank_penalty=5.0
+    )
+    ordered = order_specs_by_rank([flagged])
+    assert [s.strategy_id for s in ordered] == ["equity_flagged"]
+
+
+def test_order_specs_by_rank_is_stable_for_equal_penalty() -> None:
+    """Unflagged specs (all penalty 0.0) keep their original signal order — the
+    sort is stable so A/B venues (always penalty 0) are byte-identical."""
+    from polaris.core.isolation.worker import PipelineTaskSpec
+    from polaris.scripts._production_tick import order_specs_by_rank
+
+    async def _noop() -> None:
+        return None
+
+    specs = [
+        PipelineTaskSpec(strategy_id=f"s{i}", coro_factory=_noop, rank_penalty=0.0)
+        for i in range(5)
+    ]
+    ordered = order_specs_by_rank(specs)
+    assert [s.strategy_id for s in ordered] == [f"s{i}" for i in range(5)]
+
+
+def test_pipeline_spec_rank_penalty_defaults_zero() -> None:
+    """The new rank_penalty field defaults to 0.0 so every existing call site
+    (supervise_strategies, A/B specs) stays byte-identical."""
+    from polaris.core.isolation.worker import PipelineTaskSpec
+
+    async def _noop() -> None:
+        return None
+
+    spec = PipelineTaskSpec(strategy_id="s", coro_factory=_noop)
+    assert spec.rank_penalty == 0.0
+
+
+def test_run_tick_consumes_pdt_penalty_into_spec_ordering() -> None:
+    """Source-level lint: the PDT rank-down RESULT must be consumed (not
+    discarded) — attached to the spec's rank_penalty and the spec list ordered
+    by it. Guards the H3 nit (a) regression where the return value was dropped."""
+    from pathlib import Path
+
+    src = Path("polaris/scripts/_production_tick.py").read_text()
+    assert "order_specs_by_rank" in src, (
+        "T13/H3: PDT rank-down must reorder pipeline specs (penalty consumed)."
+    )
+    assert "rank_penalty=" in src, (
+        "T13/H3: the PDT penalty must be attached to the PipelineTaskSpec, not "
+        "discarded at the call site."
+    )

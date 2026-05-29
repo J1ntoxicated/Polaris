@@ -166,6 +166,26 @@ def _lookup_regime(conn: sqlite3.Connection, venue: str, symbol: str) -> str:
     return str(row[0])
 
 
+def order_specs_by_rank(
+    specs: list[PipelineTaskSpec],
+) -> list[PipelineTaskSpec]:
+    """T13/H3 — order pipeline specs by their ranking-down penalty (NOT a block).
+
+    Stable-sorts ascending by ``spec.rank_penalty`` so specs with a higher
+    penalty (e.g. a PDT-flagged equity entry, penalty > 0) are RANKED BELOW
+    unflagged specs (penalty 0.0). Within an equal penalty the original signal
+    order is preserved (stable), so A/B venues — which always carry penalty
+    ``0.0`` — keep their byte-identical ordering.
+
+    This is the consumer of :func:`apply_equity_pdt_rank_down`'s return value:
+    the penalty actually demotes the entry's priority in the per-tick signal
+    ranking. It NEVER drops a spec (flow_not_block) — the demoted entry still
+    runs through the pipeline, just later in the supervised batch — and it never
+    touches notional (not a T4 multiplier).
+    """
+    return sorted(specs, key=lambda s: s.rank_penalty)
+
+
 def _is_finite_signal(sig: RawSignal) -> bool:
     """Reject a signal whose strength / sizing_hint is non-finite."""
     return math.isfinite(sig.strength) and math.isfinite(sig.sizing_hint)
@@ -223,6 +243,7 @@ async def _run_tick(
     phase: str = "P0",
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
+    alpaca_adapter: Any = None,
 ) -> None:
     """One 5-second cycle (Day 8 spec B + D + E + F + Day 9 F10).
 
@@ -374,15 +395,16 @@ async def _run_tick(
                     state.reentry_skips += 1
                     continue
 
-                # T13 — PDT ranking-down (equity only; A/B no-op). When the
+                # T13/H3 — PDT ranking-down (equity only; A/B no-op). When the
                 # rolling daytrade_count >= 3 this surfaces a finite, positive
-                # rank penalty as telemetry — it RANKS DOWN a day-trade-style
-                # equity entry in the existing universe/signal ranking but
-                # NEVER blocks it (flow_not_block) and never halts on P&L. The
-                # entry proceeds regardless; the penalty is the hook the
-                # universe/signal ranking consumes (focus_rank / signal
-                # priority). Not a T4 multiplier — notional is untouched.
-                apply_equity_pdt_rank_down(venue, state=state)
+                # rank penalty — it RANKS DOWN a day-trade-style equity entry in
+                # the per-tick signal ranking but NEVER blocks it (flow_not_block)
+                # and never halts on P&L. The penalty is CONSUMED below: it is
+                # attached to the spec's ``rank_penalty`` and ``order_specs_by_rank``
+                # demotes the flagged entry BELOW unflagged ones before the
+                # supervised batch runs. The entry still runs (just later). Not a
+                # T4 multiplier — notional is untouched.
+                pdt_penalty = apply_equity_pdt_rank_down(venue, state=state)
 
                 def _factory(
                     *, _strategy: Any = strategy, _sig: Any = sig,
@@ -401,12 +423,20 @@ async def _run_tick(
                         reserve_and_submit=reserve_and_submit,
                         phase=phase, real_roundtrip=real_roundtrip,
                         capital_session=capital_session, okx_adapter=okx_adapter,
+                        alpaca_adapter=alpaca_adapter,
                     )
 
                 pipeline_specs.append(
-                    PipelineTaskSpec(strategy_id=strategy_id, coro_factory=_factory)
+                    PipelineTaskSpec(
+                        strategy_id=strategy_id, coro_factory=_factory,
+                        rank_penalty=pdt_penalty,
+                    )
                 )
     if pipeline_specs:
+        # T13/H3 — consume the PDT rank-down: demote PDT-flagged equity specs
+        # BELOW unflagged ones (stable; A/B carry penalty 0.0 → byte-identical
+        # order). Ranking-down only — no spec is dropped (flow_not_block).
+        pipeline_specs = order_specs_by_rank(pipeline_specs)
         results = await supervise_pipeline_tasks(
             pipeline_specs, conn=conn, now_ts=now_ts,
             fault_phase="pipeline_supervisor",

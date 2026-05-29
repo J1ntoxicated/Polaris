@@ -282,6 +282,7 @@ async def reserve_and_submit(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
 ) -> SimulatedTrade | None:
     """A2 + K fix: AllocatorFence reservation → idempotent register → submit.
 
@@ -357,6 +358,7 @@ async def reserve_and_submit(
                 last_price=last_price, strategy_id=sig.strategy_id,
                 asset_class=asset_class, strength=sig.strength,
                 okx_adapter=okx_adapter, capital_session=capital_session,
+                alpaca_adapter=alpaca_adapter,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             logger.error(

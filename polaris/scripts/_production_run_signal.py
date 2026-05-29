@@ -114,6 +114,7 @@ async def run_pipeline_for_signal(
     real_roundtrip: bool = False,
     capital_session: Any = None,
     okx_adapter: Any = None,
+    alpaca_adapter: Any = None,
 ) -> None:
     """Run G1 → G2 → G3 → G4 → G5 → G6 → G7 for one validated signal.
 
@@ -214,7 +215,7 @@ async def run_pipeline_for_signal(
         asset_class=asset_class, underlying_group_id=underlying_group_id,
         notional_usd=notional_usd, last_price=last_price, now_ts=now_ts,
         real_roundtrip=real_roundtrip, capital_session=capital_session,
-        okx_adapter=okx_adapter,
+        okx_adapter=okx_adapter, alpaca_adapter=alpaca_adapter,
     )
     if trade is None:
         return

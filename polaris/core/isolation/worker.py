@@ -223,10 +223,17 @@ class PipelineTaskSpec:
     TaskGroup, catches any escaped exception, and records a strategy-scoped
     fault so the circuit breaker can transition the offending strategy
     (ACTIVE → SOFT_HALT → HARD_HALT → RISK_ONLY) without aborting siblings.
+
+    ``rank_penalty`` is a finite, non-negative RANKING-DOWN hook (flow_not_block):
+    the caller (T13 PDT gate) sets it positive to LOWER a candidate's priority so
+    a PDT-flagged equity entry is ordered BELOW unflagged ones — it is NEVER a
+    block/drop and NEVER a T4 sizing multiplier. Defaults to ``0.0`` so every
+    existing call site stays byte-identical.
     """
 
     strategy_id: str
     coro_factory: Callable[[], Awaitable[None]]
+    rank_penalty: float = 0.0
 
 
 async def supervise_pipeline_tasks(

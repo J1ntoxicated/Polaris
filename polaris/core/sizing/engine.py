@@ -51,20 +51,21 @@ from polaris.core.sizing.schema import (
     DEFAULT_BASE_RISK_PCT,
     LISTING_WATCHDOG_AGE_HOURS,
     LISTING_WATCHDOG_MULT,
-    PER_SYMBOL_CFD_PCT,
-    PER_SYMBOL_SPOT_PCT,
     SINGLE_TRADE_ABSOLUTE_CEILING_PCT,
-    TOTAL_DAILY_RISK_CEILING_PCT,
-    TRACK_A_DAILY_VENUE_PCT,
-    TRACK_A_GROSS_PCT,
-    TRACK_B_DAILY_VENUE_PCT,
-    TRACK_B_GROSS_PCT,
     PortfolioState,
     PositionRiskState,
     SizingFinal,
     SizingProposal,
     StrategyRiskState,
     Track,
+    per_symbol_cfd_pct,
+    per_symbol_spot_pct,
+    total_daily_risk_ceiling_pct,
+    track_a_daily_venue_pct,
+    track_a_gross_pct,
+    track_b_daily_venue_pct,
+    track_b_gross_pct,
+    underlying_group_pct,
 )
 from polaris.core.sizing.session import derive_session
 
@@ -153,19 +154,19 @@ def listing_watchdog_mult(listing_age_hours: float) -> float:
 
 
 def venue_per_symbol_cap(venue: str) -> float:
-    """Per-symbol % cap for the venue (OKX SPOT 50% / Capital CFD 35%)."""
+    """Per-symbol % cap for the venue (env-overridable; high default)."""
     v = (venue or "").lower()
     if v == "capital":
-        return PER_SYMBOL_CFD_PCT
-    return PER_SYMBOL_SPOT_PCT
+        return per_symbol_cfd_pct()
+    return per_symbol_spot_pct()
 
 
 def track_gross_cap(track: Track) -> float:
-    return TRACK_A_GROSS_PCT if track == "A" else TRACK_B_GROSS_PCT
+    return track_a_gross_pct() if track == "A" else track_b_gross_pct()
 
 
 def track_daily_cap(track: Track) -> float:
-    return TRACK_A_DAILY_VENUE_PCT if track == "A" else TRACK_B_DAILY_VENUE_PCT
+    return track_a_daily_venue_pct() if track == "A" else track_b_daily_venue_pct()
 
 
 # ---------------------------------------------------------------------------
@@ -283,10 +284,11 @@ def underlying_remaining_pct(
     *,
     underlying_group_id: str,
     open_positions: list[PositionRiskState],
-    cap_pct: float = 0.60,
+    cap_pct: float | None = None,
 ) -> float:
+    cap = underlying_group_pct() if cap_pct is None else cap_pct
     used = sum(p.open_risk_pct for p in open_positions if p.underlying_group_id == underlying_group_id)
-    return max(0.0, cap_pct - used)
+    return max(0.0, cap - used)
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +415,7 @@ def compute_size(
     track_rem = max(0.0, track_gross_cap(intent.track) - portfolio.track_used_pct.get(intent.track, 0.0))
     venue_daily_cap = track_daily_cap(intent.track)
     venue_daily_rem = max(0.0, venue_daily_cap - portfolio.venue_daily_used_pct)
-    total_daily_rem = max(0.0, TOTAL_DAILY_RISK_CEILING_PCT - portfolio.total_daily_used_pct)
+    total_daily_rem = max(0.0, total_daily_risk_ceiling_pct() - portfolio.total_daily_used_pct)
 
     # (8) Single clip
     final_risk_pct, binding = headroom_min(

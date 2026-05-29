@@ -7,6 +7,7 @@ Spec source:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
@@ -35,35 +36,114 @@ SINGLE_TRADE_AMPLIFIED_PCT: Final[float] = 0.09
 SINGLE_TRADE_ABSOLUTE_CEILING_PCT: Final[float] = 0.09
 """ADR-005 absolute single-trade ceiling (hard MAX)."""
 
-PER_SYMBOL_SPOT_PCT: Final[float] = 0.50
-"""ADR-005 — per-symbol cap, OKX SPOT."""
+# ---------------------------------------------------------------------------
+# Structural %-of-equity caps (DEMO/PAPER data-collection — AGGRESSIVE bias).
+#
+# These bound the *risk budget*; the number of concurrent open positions is only
+# limited indirectly when a budget is exhausted. For DEMO data collection the
+# defaults are set HIGH (~0.99/1.00) so they no longer bind at low position
+# counts — the bot can open many concurrent positions. They remain finite
+# members of the T4 single ``headroom_min()`` clip (no cap removed, no 9-stack);
+# the hard-MAX ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` is the per-trade backstop.
+#
+# Every cap is env-overridable via the ``POLARIS_CAP_*`` vars resolved by the
+# ``*_pct()`` helpers below (operator can dial a tighter budget without code
+# change).
+# ---------------------------------------------------------------------------
 
-PER_SYMBOL_CFD_PCT: Final[float] = 0.35
-"""ADR-005 — per-symbol cap, Capital CFD."""
+PER_SYMBOL_SPOT_PCT: Final[float] = 0.99
+"""Per-symbol cap, OKX SPOT (env: ``POLARIS_CAP_PER_SYMBOL_SPOT_PCT``)."""
 
-TRACK_A_GROSS_PCT: Final[float] = 0.60
-"""ADR-005 — Track A gross cap."""
+PER_SYMBOL_CFD_PCT: Final[float] = 0.99
+"""Per-symbol cap, Capital CFD (env: ``POLARIS_CAP_PER_SYMBOL_CFD_PCT``)."""
 
-TRACK_B_GROSS_PCT: Final[float] = 0.80
-"""ADR-005 — Track B gross cap."""
+TRACK_A_GROSS_PCT: Final[float] = 0.99
+"""Track A gross cap (env: ``POLARIS_CAP_TRACK_A_GROSS_PCT``)."""
 
-TRACK_A_DAILY_VENUE_PCT: Final[float] = 0.08
-"""ADR-005 — Track A daily venue risk."""
+TRACK_B_GROSS_PCT: Final[float] = 1.00
+"""Track B gross cap (env: ``POLARIS_CAP_TRACK_B_GROSS_PCT``)."""
 
-TRACK_B_DAILY_VENUE_PCT: Final[float] = 0.09
-"""ADR-005 — Track B daily venue risk."""
+TRACK_A_DAILY_VENUE_PCT: Final[float] = 0.99
+"""Track A daily venue risk (env: ``POLARIS_CAP_TRACK_A_DAILY_VENUE_PCT``)."""
 
-TOTAL_DAILY_RISK_CEILING_PCT: Final[float] = 0.10
-"""ADR-005 — total daily risk absolute ceiling."""
+TRACK_B_DAILY_VENUE_PCT: Final[float] = 0.99
+"""Track B daily venue risk (env: ``POLARIS_CAP_TRACK_B_DAILY_VENUE_PCT``)."""
 
-CLUSTER_BTC_ETH_PCT: Final[float] = 0.40
-"""ADR-005 cluster cap — BTC/ETH spot."""
+TOTAL_DAILY_RISK_CEILING_PCT: Final[float] = 0.99
+"""Total daily risk ceiling (env: ``POLARIS_CAP_TOTAL_DAILY_PCT``)."""
 
-CLUSTER_XAU_INDICES_PCT: Final[float] = 0.50
-"""ADR-005 cluster cap — XAU/indices CFD."""
+UNDERLYING_GROUP_PCT: Final[float] = 0.99
+"""Per-underlying-group cap (env: ``POLARIS_CAP_UNDERLYING_PCT``)."""
 
-CLUSTER_FX_MAJORS_PCT: Final[float] = 0.60
-"""ADR-005 cluster cap — FX majors."""
+CLUSTER_BTC_ETH_PCT: Final[float] = 0.99
+"""Cluster cap — BTC/ETH spot (env: ``POLARIS_CAP_CLUSTER_BTC_ETH_PCT``)."""
+
+CLUSTER_XAU_INDICES_PCT: Final[float] = 0.99
+"""Cluster cap — XAU/indices CFD (env: ``POLARIS_CAP_CLUSTER_XAU_INDICES_PCT``)."""
+
+CLUSTER_FX_MAJORS_PCT: Final[float] = 0.99
+"""Cluster cap — FX majors (env: ``POLARIS_CAP_CLUSTER_FX_MAJORS_PCT``)."""
+
+
+# ---------------------------------------------------------------------------
+# Env-override resolvers (read at call time so operator can dial caps without a
+# code change). Same idiom as ``polaris.core.sizing.constants._read_float_env``.
+# Non-numeric / missing / empty → the high default above.
+# ---------------------------------------------------------------------------
+
+
+def _cap_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def per_symbol_spot_pct() -> float:
+    return _cap_env("POLARIS_CAP_PER_SYMBOL_SPOT_PCT", PER_SYMBOL_SPOT_PCT)
+
+
+def per_symbol_cfd_pct() -> float:
+    return _cap_env("POLARIS_CAP_PER_SYMBOL_CFD_PCT", PER_SYMBOL_CFD_PCT)
+
+
+def track_a_gross_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_A_GROSS_PCT", TRACK_A_GROSS_PCT)
+
+
+def track_b_gross_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_B_GROSS_PCT", TRACK_B_GROSS_PCT)
+
+
+def track_a_daily_venue_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_A_DAILY_VENUE_PCT", TRACK_A_DAILY_VENUE_PCT)
+
+
+def track_b_daily_venue_pct() -> float:
+    return _cap_env("POLARIS_CAP_TRACK_B_DAILY_VENUE_PCT", TRACK_B_DAILY_VENUE_PCT)
+
+
+def total_daily_risk_ceiling_pct() -> float:
+    return _cap_env("POLARIS_CAP_TOTAL_DAILY_PCT", TOTAL_DAILY_RISK_CEILING_PCT)
+
+
+def underlying_group_pct() -> float:
+    return _cap_env("POLARIS_CAP_UNDERLYING_PCT", UNDERLYING_GROUP_PCT)
+
+
+def cluster_btc_eth_pct() -> float:
+    return _cap_env("POLARIS_CAP_CLUSTER_BTC_ETH_PCT", CLUSTER_BTC_ETH_PCT)
+
+
+def cluster_xau_indices_pct() -> float:
+    return _cap_env("POLARIS_CAP_CLUSTER_XAU_INDICES_PCT", CLUSTER_XAU_INDICES_PCT)
+
+
+def cluster_fx_majors_pct() -> float:
+    return _cap_env("POLARIS_CAP_CLUSTER_FX_MAJORS_PCT", CLUSTER_FX_MAJORS_PCT)
 
 # Tier amplifier triggers
 TIER_3WIN_AMP: Final[float] = 1.5

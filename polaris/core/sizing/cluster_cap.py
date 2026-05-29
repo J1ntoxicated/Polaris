@@ -18,12 +18,16 @@ from polaris.core.sizing.schema import (
     CLUSTER_FX_MAJORS_PCT,
     CLUSTER_XAU_INDICES_PCT,
     PositionRiskState,
+    cluster_btc_eth_pct,
+    cluster_fx_majors_pct,
+    cluster_xau_indices_pct,
 )
 
 __all__ = [
     "CLUSTER_DEFINITIONS",
     "cluster_remaining_pct",
     "cluster_used_pct",
+    "resolve_cluster_definitions",
     "resolve_cluster_id",
 ]
 
@@ -56,6 +60,20 @@ CLUSTER_DEFINITIONS: Final[dict[str, float]] = {
     "cfd:XAU+INDICES": CLUSTER_XAU_INDICES_PCT,
     "cfd:FX_MAJORS": CLUSTER_FX_MAJORS_PCT,
 }
+
+
+def resolve_cluster_definitions() -> dict[str, float]:
+    """Cluster caps with env overrides applied (read at call time).
+
+    Env-overridable for durability: ``POLARIS_CAP_CLUSTER_{BTC_ETH,XAU_INDICES,
+    FX_MAJORS}_PCT``. Defaults are the high values in :mod:`schema` (DEMO
+    data-collection — caps no longer bind at low position counts).
+    """
+    return {
+        "crypto:BTC+ETH": cluster_btc_eth_pct(),
+        "cfd:XAU+INDICES": cluster_xau_indices_pct(),
+        "cfd:FX_MAJORS": cluster_fx_majors_pct(),
+    }
 
 
 def resolve_cluster_id(
@@ -107,7 +125,7 @@ def cluster_remaining_pct(
     """
     if cluster_id is None:
         return None
-    cap = CLUSTER_DEFINITIONS.get(cluster_id)
+    cap = resolve_cluster_definitions().get(cluster_id)
     if cap is None:
         return None
     used = cluster_used_pct(cluster_id=cluster_id, open_positions=open_positions)

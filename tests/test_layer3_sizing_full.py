@@ -197,8 +197,9 @@ def test_t4_cluster_used_and_remaining() -> None:
     remaining = cluster_remaining_pct(
         cluster_id="crypto:BTC+ETH", open_positions=[pos_btc, pos_eth]
     )
-    # BTC/ETH cluster cap = 0.40 → remaining = 0.05
-    assert remaining == pytest.approx(0.05)
+    # BTC/ETH cluster cap raised to 0.99 (DEMO data-collection — count uncap)
+    # → remaining = 0.99 - 0.35 = 0.64.
+    assert remaining == pytest.approx(0.99 - 0.35)
 
 
 def test_t4_cluster_unmapped_returns_none() -> None:

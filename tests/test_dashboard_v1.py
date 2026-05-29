@@ -637,3 +637,72 @@ def test_pad_does_not_truncate_in_non_tty_mode(tmp_path: Path) -> None:
     out = pad(s, 20)
     assert out.startswith("abcdef")
     assert vlen(out) == 20
+
+
+# ---------------------------------------------------------------------------
+# GPT silent-degradation: per-model ok% aggregation (#13 observability)
+# ---------------------------------------------------------------------------
+
+
+def _insert_gate_event(
+    conn: object, *, model: str, phase: str, ts: int, gate_id: int = 4
+) -> None:
+    conn.execute(  # type: ignore[attr-defined]
+        """INSERT INTO gate_events
+            (event_id, run_id, gate_id, phase, decision, model_used,
+             latency_ms, created_ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            f"{model}-{phase}-{ts}-{gate_id}-{time.time_ns()}",
+            "run1",
+            gate_id,
+            phase,
+            "KILL" if phase == "fail" else "PASS",
+            model,
+            10,
+            ts,
+        ),
+    )
+
+
+def test_gpt_stats_ok_pct_per_model(tmp_path: Path) -> None:
+    """#13: per-model ok% surfaces silent degradation (gpt-5.5 100% fail)."""
+    from polaris.scripts.dashboard.snapshot_sections import _gpt_stats
+
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    now_s = int(time.time())
+    # gpt (P0): 8 success + 2 fail → 80% ok, err_n=2
+    for i in range(8):
+        _insert_gate_event(conn, model="gpt", phase="success", ts=now_s - i)
+    for i in range(2):
+        _insert_gate_event(conn, model="gpt", phase="fail", ts=now_s - i)
+    # gpt_p1 (P1): 5 fail, 0 success → 0% ok (silent fail), err_n=5
+    for i in range(5):
+        _insert_gate_event(conn, model="gpt_p1", phase="fail", ts=now_s - i)
+    # python rows must be excluded entirely
+    _insert_gate_event(conn, model="python", phase="success", ts=now_s)
+    conn.commit()
+
+    stats = _gpt_stats(conn, now_s=now_s + 1)
+    by_model = {s.model: s for s in stats}
+    conn.close()
+
+    assert set(by_model) == {"gpt", "gpt_p1"}  # python excluded
+    assert by_model["gpt"].calls_per_h == 10
+    assert by_model["gpt"].ok_pct == pytest.approx(80.0)
+    assert by_model["gpt"].err_n == 2
+    assert by_model["gpt_p1"].calls_per_h == 5
+    assert by_model["gpt_p1"].ok_pct == pytest.approx(0.0)
+    assert by_model["gpt_p1"].err_n == 5
+
+
+def test_gpt_stats_empty_returns_no_rows(tmp_path: Path) -> None:
+    """No gate_events → empty list (no divide-by-zero)."""
+    from polaris.scripts.dashboard.snapshot_sections import _gpt_stats
+
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    stats = _gpt_stats(conn, now_s=int(time.time()))
+    conn.close()
+    assert stats == []

@@ -126,6 +126,13 @@ class GptStat:
     calls_per_h: int
     cost_per_h_usd: float
     cost_24h_proj_usd: float
+    # Silent-degradation telemetry: per-model success rate over the lookback.
+    # ok_pct = success rows / total rows (gate_events.phase == 'success'). A
+    # model silently failing (e.g. gpt-5.5 100% errors) shows ok_pct ≈ 0 even
+    # while calls_per_h stays high — surfaces the failure the cost card alone
+    # would hide.
+    ok_pct: float = 100.0
+    err_n: int = 0
 
 
 @dataclass(slots=True)

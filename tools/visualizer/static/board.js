@@ -451,11 +451,23 @@
     const alerts = (d.alerts || []).slice(0, 4);
     let html = '';
     if (gpt.length) {
-      html += gpt.map(g => `<div class="row strat-row" style="grid-template-columns:1fr 50px 50px">
-        <span class="name b-flat">${esc(g.model)}</span>
-        <span class="num b-flat">${(g.calls_per_h || 0).toFixed(0)}/h</span>
-        <span class="num b-flat">${fmtUsd(g.cost_24h_proj_usd, 2)}</span>
-      </div>`).join('');
+      // ok% surfaces silent GPT degradation (e.g. gpt-5.5 100% fail) that the
+      // call-rate / cost columns alone would hide. <90% = warn, <50% = neg.
+      html += gpt.map(g => {
+        const ok = (g.ok_pct == null) ? 100 : g.ok_pct;
+        // <50% ok = red, <90% = amber, else green — surfaces silent GPT
+        // degradation the call-rate/cost columns alone would hide.
+        const okStyle = ok < 50 ? 'color:var(--p-red);font-weight:700'
+          : ok < 90 ? 'color:var(--p-ylw);font-weight:700' : 'color:var(--p-grn)';
+        const errTip = (g.err_n || 0) > 0 ? ` (${g.err_n} err)` : '';
+        return `<div class="row strat-row" style="grid-template-columns:1fr 44px 44px 50px"
+          title="${esc(g.model)} ok ${ok.toFixed(0)}%${errTip} · ${(g.calls_per_h || 0).toFixed(0)}/h">
+          <span class="name b-flat">${esc(g.model)}</span>
+          <span class="num b-flat">${(g.calls_per_h || 0).toFixed(0)}/h</span>
+          <span class="num" style="${okStyle}">${ok.toFixed(0)}%</span>
+          <span class="num b-flat">${fmtUsd(g.cost_24h_proj_usd, 2)}</span>
+        </div>`;
+      }).join('');
     }
     if (alerts.length) {
       html += alerts.map(a => `<div class="row alert-row" title="[${esc(a.level)}] ${esc(a.module)} ${hhmmss(a.ts)} — ${esc(a.msg || '')}">

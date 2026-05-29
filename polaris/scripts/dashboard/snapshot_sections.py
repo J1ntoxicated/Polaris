@@ -354,26 +354,38 @@ def _edge_validation(
 def _gpt_stats(conn: sqlite3.Connection, *, now_s: int) -> list[GptStat]:
     rows = _safe_query(
         conn,
-        """SELECT model_used, COUNT(*) FROM gate_events
+        """SELECT model_used, phase, COUNT(*) FROM gate_events
            WHERE created_ts >= ? AND model_used IS NOT NULL
-           GROUP BY model_used""",
+           GROUP BY model_used, phase""",
         (now_s - GPT_LOOKBACK_SEC,),
     )
-    out: list[GptStat] = []
-    for model, n in rows:
+    # Aggregate ok / total per model (phase == 'success' is an ok call; any
+    # other phase — 'fail' — is an error). Drives the silent-degradation card.
+    totals: dict[str, int] = {}
+    ok: dict[str, int] = {}
+    for model, phase, n in rows:
         if not model:
             continue
         m = str(model)
         if m == "python":
             continue
+        cnt = int(n)
+        totals[m] = totals.get(m, 0) + cnt
+        if str(phase) == "success":
+            ok[m] = ok.get(m, 0) + cnt
+    out: list[GptStat] = []
+    for m, total in totals.items():
+        ok_n = ok.get(m, 0)
         price = GPT_PRICE_PER_1K.get(m, GPT_PRICE_PER_1K["gpt"])
-        cost_per_h = int(n) * GPT_TOKENS_PER_CALL / 1000.0 * price
+        cost_per_h = total * GPT_TOKENS_PER_CALL / 1000.0 * price
         out.append(
             GptStat(
                 model=m,
-                calls_per_h=int(n),
+                calls_per_h=total,
                 cost_per_h_usd=cost_per_h,
                 cost_24h_proj_usd=cost_per_h * 24.0,
+                ok_pct=(ok_n / total * 100.0) if total else 100.0,
+                err_n=total - ok_n,
             )
         )
     out.sort(key=lambda g: g.calls_per_h, reverse=True)

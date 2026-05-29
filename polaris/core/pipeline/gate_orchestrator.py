@@ -202,11 +202,12 @@ class GateOrchestrator:
             self._update_lifecycle(ctx, current, result)
             log_gate_event(self.conn, ctx, result)
 
-            # Level discipline: KILL = abort (ERROR), errored handler = WARNING,
-            # PASS/PROCEED/SIZED/HOLD = milestone (INFO).
-            if result.decision == GateDecision.KILL:
-                level = logging.ERROR
-            elif result.error:
+            # Level discipline: KILL = normal AI filtering (WARNING, not ERROR —
+            # an AI gate rejecting a signal is expected flow, not a fault; logging
+            # it at ERROR inflated the dashboard error count with ~269 false
+            # positives). A genuine handler exception is surfaced as WARNING via
+            # result.error. PASS/PROCEED/SIZED/HOLD = milestone (INFO).
+            if result.decision == GateDecision.KILL or result.error:
                 level = logging.WARNING
             else:
                 level = logging.INFO
@@ -226,7 +227,7 @@ class GateOrchestrator:
 
             if result.decision == GateDecision.KILL:
                 ctx.state = SignalLifecycle.KILLED
-                logger.error(
+                logger.info(
                     "[orchestrator] pipeline KILL at G%s (run_id=%s signal_id=%s)",
                     current,
                     ctx.run_id,

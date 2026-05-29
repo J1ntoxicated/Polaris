@@ -280,6 +280,8 @@ async def adaptive_exit_gate(
             payload={**fallback.payload, "fallback": "gpt_error", "error": res.error},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
     parsed = res.parsed
@@ -295,6 +297,8 @@ async def adaptive_exit_gate(
                      "raw": str(parsed.get("decision", ""))[:50]},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     side = str(proposal.get("side", "long"))
     current_stop = float(proposal.get("current_stop_price", 0.0))
@@ -313,6 +317,8 @@ async def adaptive_exit_gate(
             },
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
 
     if decision_text == "WIDEN":
@@ -330,6 +336,8 @@ async def adaptive_exit_gate(
                 },
                 model_used=model_label,
                 latency_ms=res.latency_ms,
+                input_tokens=res.input_tokens,
+                output_tokens=res.output_tokens,
             )
         # Re-use Q9 deterministic check on the proposal so all hard rails fire.
         rail = _python_widen_only(
@@ -348,6 +356,8 @@ async def adaptive_exit_gate(
             payload=rail.payload,
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
 
     if decision_text == "TIGHTEN":
@@ -373,6 +383,8 @@ async def adaptive_exit_gate(
                 },
                 model_used=model_label,
                 latency_ms=res.latency_ms,
+                input_tokens=res.input_tokens,
+                output_tokens=res.output_tokens,
             )
         # Not actually a tighten — fall through as HOLD.
         return GateResult(
@@ -386,6 +398,8 @@ async def adaptive_exit_gate(
             },
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
 
     # HOLD (default).
@@ -400,4 +414,6 @@ async def adaptive_exit_gate(
         },
         model_used=model_label,
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

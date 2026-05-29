@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS positions (
     underlying_group_id TEXT NOT NULL DEFAULT '',
     product_class TEXT NOT NULL DEFAULT '',
     stream_id TEXT NOT NULL DEFAULT '',
+    signal_id TEXT NOT NULL DEFAULT '',
     strategy_id TEXT NOT NULL,
     entry_strategy_id TEXT NOT NULL,
     active_strategy_id TEXT NOT NULL,

@@ -22,10 +22,28 @@ from typing import Final
 __all__ = [
     "LIMIT_FILL_WAIT_SEC",
     "LIMIT_POLL_DELAY_SEC",
+    "OKX_BALANCE_CLAMP_BUFFER_FRAC",
+    "OKX_MAX_MARKET_NOTIONAL_USDT",
     "STRONG_SIGNAL_STRENGTH",
     "limit_fill_wait_sec",
     "strong_signal_strength",
 ]
+
+# OKX SPOT VENUE RULE (not our choice, not tunable): a single market order's
+# quote value may not exceed 1000 USDT (reject 51201 "The value of a market
+# order can't exceed 1000USDT"). A larger entry must be split into sequential
+# child market orders each <= this cap. Encoding the venue rule so a >1000 USDT
+# entry actually FILLS (flow_not_block) instead of being 100 % rejected — this
+# is a bug fix, NOT a sizing-parameter change (the sized notional is unchanged;
+# it is delivered in <=1000 USDT chunks).
+OKX_MAX_MARKET_NOTIONAL_USDT: Final[float] = 1_000.0
+
+# When clamping the OKX entry to the live available USDT balance (reject 51008
+# "insufficient balance"), leave this fraction as headroom so OKX's own
+# fee/precision accounting can never push the cash buy over the wallet balance.
+# This is a fill-ENABLING clamp toward what the venue can actually fund (lets
+# SOME order through instead of 100 % rejection), NOT a defensive size cut.
+OKX_BALANCE_CLAMP_BUFFER_FRAC: Final[float] = 0.01
 
 
 def _env_float(name: str, default: float) -> float:

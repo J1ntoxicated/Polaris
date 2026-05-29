@@ -45,8 +45,9 @@ def log_gate_event(
             """
             INSERT INTO gate_events
                 (event_id, run_id, signal_id, position_id, gate_id, phase,
-                 decision, model_used, latency_ms, payload_json, error_text, created_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 decision, model_used, latency_ms, input_tokens, output_tokens,
+                 payload_json, error_text, created_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -58,6 +59,8 @@ def log_gate_event(
                 str(result.decision.value),
                 result.model_used,
                 int(result.latency_ms),
+                int(result.input_tokens),
+                int(result.output_tokens),
                 payload_json,
                 result.error,
                 int(time.time()),

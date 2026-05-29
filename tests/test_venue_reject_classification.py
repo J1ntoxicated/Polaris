@@ -43,13 +43,26 @@ def _okx_reject_resp(code: str, msg: str = "rej") -> Any:
     )
 
 
-def _make_okx_reject_adapter(code: str) -> AsyncMock:
+def _okx_balance(avail_usdt: float = 1_000_000.0) -> dict[str, Any]:
+    """OKX /account/balance payload with a USDT availBal detail row.
+
+    Default is a large balance so the FIX-2 clamp is a no-op and the reject
+    classification under test is exercised unchanged. Tests that want the clamp
+    to engage pass a small ``avail_usdt``.
+    """
+    return {"data": [{"details": [{"ccy": "USDT", "availBal": str(avail_usdt)}]}]}
+
+
+def _make_okx_reject_adapter(code: str, *, avail_usdt: float = 1_000_000.0) -> AsyncMock:
     adapter = AsyncMock()
     adapter.place_market_order = AsyncMock(return_value=_okx_reject_resp(code))
     adapter.fetch_order = AsyncMock(return_value={"data": []})
     # No bid → #7 maker path falls back to the market leg (which carries the
     # reject), so the reject-code assertions below still hold.
     adapter.fetch_ticker = AsyncMock(return_value={})
+    # FIX-2 balance clamp reads available USDT before submit; a large balance
+    # keeps the clamp a no-op so the reject path under test is unchanged.
+    adapter.fetch_balance = AsyncMock(return_value=_okx_balance(avail_usdt))
     return adapter
 
 
@@ -177,6 +190,64 @@ async def test_three_external_rejects_keep_circuit_breaker_active(
 
 
 @pytest.mark.asyncio
+async def test_51201_market_cap_reject_does_not_fault(
+    memdb: sqlite3.Connection,
+) -> None:
+    """51201 (OKX SPOT 1000-USDT market cap) is a deterministic VENUE RULE, not
+    a strategy fault — FIX 1 splits >1000 USDT entries so it stops occurring,
+    but a residual 51201 must classify external (no FAULT_REJECT)."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.core.isolation.blocklist import is_blocklisted
+
+    reset_process_fence()
+    state = ProdLoopState()
+    adapter = _make_okx_reject_adapter("51201")
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("cap"), venue="okx",
+        symbol="ALGO-USDT", asset_class="crypto",
+        underlying_group_id="crypto:ALGO", notional_usd=100.0,
+        last_price=1.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=adapter,
+    )
+    assert trade is None
+    assert state.fault_events == 0
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='tsmom'"
+    ).fetchone()[0]
+    assert int(fault) == 0
+    assert state.venue_rejects_by_code.get("51201") == 1
+    # Venue rule, not compliance → NOT blocklisted (transient/deterministic).
+    assert is_blocklisted(memdb, "okx", "ALGO-USDT") is False
+
+
+@pytest.mark.asyncio
+async def test_fix2_low_balance_clamp_skips_without_fault(
+    memdb: sqlite3.Connection,
+) -> None:
+    """FIX 2 end-to-end: an OKX available USDT below the min notional makes the
+    entry skip cleanly (reject_code=insufficient_balance) with NO order POSTed
+    and NO strategy fault (flow_not_block: no oversized 51008 churn)."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    # availBal=2 USDT (below MIN_OKX_NOTIONAL_USD=10) → clamp returns None → skip.
+    adapter = _make_okx_reject_adapter("51008", avail_usdt=2.0)
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_sig("lowbal"), venue="okx",
+        symbol="INJ-USDT", asset_class="crypto",
+        underlying_group_id="crypto:INJ", notional_usd=1_468.0,
+        last_price=10.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=adapter,
+    )
+    assert trade is None
+    assert state.fault_events == 0
+    # Skipped BEFORE submit → no market order ever placed.
+    adapter.place_market_order.assert_not_awaited()
+    assert state.venue_rejects_by_code.get("insufficient_balance") == 1
+
+
+@pytest.mark.asyncio
 async def test_anomalous_reject_code_does_record_fault(
     memdb: sqlite3.Connection,
 ) -> None:
@@ -226,6 +297,10 @@ class _RecordingOKXAdapter:
     async def fetch_order(self, **_kwargs: Any) -> dict[str, Any]:
         rows = [self._fetch_row] if self._fetch_row is not None else []
         return {"data": rows}
+
+    async def fetch_balance(self, _ccy: str | None = None) -> dict[str, Any]:
+        # Large balance → FIX-2 clamp is a no-op for these market-path tests.
+        return {"data": [{"details": [{"ccy": "USDT", "availBal": "1000000"}]}]}
 
 
 @pytest.mark.asyncio

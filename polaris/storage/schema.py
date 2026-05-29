@@ -266,6 +266,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''"
         )
+    # positions.signal_id — AI-effect instrumentation (BUILD_SCHEMA): the
+    # originating signal_id is the join key that ties a PASSED signal_id
+    # (gate_events) to its resulting position/outcome. position_id truncates
+    # signal_id to 16 chars so it is not a reliable reverse-join. ADDITIVE
+    # only: backfilled to '' for existing rows. Pragma guard = idempotent.
+    if "signal_id" not in cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN signal_id TEXT NOT NULL DEFAULT ''"
+        )
     # Backfill venue→product_class/stream_id for legacy rows left at ''.
     # okx→spot/A_okx_crypto, capital→cfd/B_capital_cfd. Runs unconditionally
     # (idempotent: WHERE clause only touches still-blank rows).
@@ -298,4 +307,20 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE learner_posterior "
             "ADD COLUMN running_mean REAL NOT NULL DEFAULT 0.0"
+        )
+    # gate_events.input_tokens + output_tokens — AI-effect instrumentation
+    # (BUILD_SCHEMA): GPTCallResult captures per-call token usage but the
+    # gate_events INSERT dropped it. ADDITIVE: backfilled to 0 for existing
+    # rows. Pragma guard = idempotent.
+    ge_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(gate_events)").fetchall()
+    }
+    if ge_cols and "input_tokens" not in ge_cols:
+        conn.execute(
+            "ALTER TABLE gate_events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"
+        )
+    if ge_cols and "output_tokens" not in ge_cols:
+        conn.execute(
+            "ALTER TABLE gate_events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"
         )

@@ -102,3 +102,8 @@ class GateResult:
     latency_ms: int = 0
     error: str | None = None
     skipped: bool = False
+    # AI-effect instrumentation (BUILD_SCHEMA): per-call GPT token usage,
+    # threaded from GPTCallResult.{input,output}_tokens so log_gate_event can
+    # persist them on gate_events. 0 for Python / non-GPT gates.
+    input_tokens: int = 0
+    output_tokens: int = 0

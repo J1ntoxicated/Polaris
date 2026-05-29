@@ -134,6 +134,8 @@ async def universe_scanner_gate(
             },
             model_used="python",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
 
@@ -155,4 +157,6 @@ async def universe_scanner_gate(
         payload={"focus": focus_list},
         model_used="gpt",
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

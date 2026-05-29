@@ -49,6 +49,7 @@ from polaris.scripts._smoke_fills import SimulatedTrade, simulate_open_fill
 from polaris.scripts._smoke_real_roundtrip import (
     MIN_CAPITAL_LOT,
     OpenAttempt,
+    fetch_okx_available_usdt,
     real_capital_open_fill,
     real_okx_open_fill,
     record_venue_orphan,
@@ -79,11 +80,16 @@ EQUITY_USD_DEMO_DEFAULT = OKX_DEMO_STARTING_EQUITY_USD
 # trip the per-strategy circuit breaker (flow_not_block / no_block_filter).
 #   51155 = OKX US-region compliance (pair not tradeable in region)
 #   51008 / 51131 = insufficient balance (portfolio/sizing, transient)
+#   51201 = OKX SPOT 1000-USDT market-order cap (deterministic VENUE RULE, not
+#           a strategy fault — FIX 1 splits >1000 USDT entries so it no longer
+#           occurs, but classify it external so the residual race never faults)
+#   insufficient_balance = FIX-2 pre-submit balance-clamp skip (wallet below min
+#           notional → entry skipped cleanly, not a fault)
 #   no_fill = order accepted but unfilled / liquidity / transport no-fill
 # A reject code OUTSIDE this set is treated as a possible internal/client bug
 # and still records a FAULT_REJECT so real anomalies can eventually halt.
 EXTERNAL_NONFAULT_REJECT_CODES: frozenset[str] = frozenset(
-    {"51155", "51008", "51131", "no_fill"}
+    {"51155", "51008", "51131", "51201", "insufficient_balance", "no_fill"}
 )
 # OKX compliance reject → permanent blocklist (never auto-clears). Balance /
 # no-fill codes are transient and are NOT blocklisted.
@@ -130,10 +136,13 @@ async def _real_open_fill(
     # resolved product_class (okx→spot, capital→cfd) instead of a venue literal.
     # Identical dispatch; per-venue bodies (creds / session) are unchanged.
     if resolve_stream(venue).product_class == "spot":
+        # FIX 2: clamp the entry to the live OKX available USDT before submit
+        # (best-effort, None=prior path) so we never re-emit an unfundable order.
         if okx_adapter is not None:
             return await real_okx_open_fill(
                 okx_adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
+                available_usdt=await fetch_okx_available_usdt(okx_adapter),
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -148,6 +157,7 @@ async def _real_open_fill(
             return await real_okx_open_fill(
                 adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
+                available_usdt=await fetch_okx_available_usdt(adapter),
             )
 
     # Track C — Alpaca US equity (additive; OKX/Capital paths above unchanged).
@@ -454,12 +464,12 @@ async def reserve_and_submit(
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT OR REPLACE INTO positions "
-            "(position_id, venue, symbol, underlying_group_id, strategy_id, "
-            " entry_strategy_id, active_strategy_id, side, qty, status, "
-            " opened_ts, swap_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0)",
+            "(position_id, venue, symbol, underlying_group_id, signal_id, "
+            " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
+            " status, opened_ts, swap_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0)",
             (
-                position_id, venue, symbol, underlying_group_id,
+                position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
                 float(
                     fill.base_qty if fill.base_qty > 0

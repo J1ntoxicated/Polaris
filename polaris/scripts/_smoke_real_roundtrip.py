@@ -32,7 +32,10 @@ from polaris.core.data.fill_normalizer import (
     normalize_okx_fill,
 )
 from polaris.core.data.fills_persist import persist_fill
-from polaris.scripts._okx_limit_open import real_okx_open_fill
+from polaris.scripts._okx_limit_open import (
+    fetch_okx_available_usdt,
+    real_okx_open_fill,
+)
 from polaris.scripts._smoke_roundtrip_capital import (
     real_capital_close_fill,
     real_capital_open_fill,
@@ -53,6 +56,7 @@ __all__ = [
     "MIN_OKX_NOTIONAL_USD",
     "MIN_CAPITAL_LOT",
     "OpenAttempt",
+    "fetch_okx_available_usdt",
     "real_capital_close_fill",
     "real_capital_open_fill",
     "real_okx_close_fill",

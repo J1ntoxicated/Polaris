@@ -388,6 +388,8 @@ async def post_trade_reflector_gate(
             payload={"reason": f"{model_label}_error", "error": res.error},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
 
@@ -404,6 +406,8 @@ async def post_trade_reflector_gate(
             payload={"reason": "low_confidence", "confidence": confidence},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
 
     lesson_text = str(parsed.get("lesson_text", "")).strip() or "(empty lesson)"
@@ -464,4 +468,6 @@ async def post_trade_reflector_gate(
         },
         model_used=model_label,
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

@@ -269,6 +269,43 @@ async def test_market_buy_uses_quote_ccy_for_market_ord_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_order_51201_parsed_as_reject() -> None:
+    """A 51201 (1000-USDT market cap) response parses to a non-ok reject with
+    code=51201 — the venue rule FIX 1 avoids by splitting, locked here so the
+    classifier (external, non-fault) keys off the right code."""
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ORDER_PATH:
+            return {
+                "code": "1",
+                "msg": "",
+                "data": [
+                    {
+                        "ordId": "",
+                        "clOrdId": "polarisvb",
+                        "sCode": "51201",
+                        "sMsg": "The value of a market order can't exceed 1000USDT.",
+                    }
+                ],
+            }
+        return httpx.Response(404, json={"code": "1"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_market_order(
+            inst_id="ALGO-USDT", side="buy", notional_usd=1_468.0,
+            client_order_id="polarisvb", ord_type="market",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.code == "51201"
+    assert resp.venue_order_id is None
+
+
+@pytest.mark.asyncio
 async def test_position_fetch_mock() -> None:
     def responder(_req: httpx.Request) -> Any:
         return {

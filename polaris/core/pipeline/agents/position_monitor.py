@@ -325,6 +325,8 @@ async def position_monitor_gate(
             payload={**fallback.payload, "fallback": "gpt_error", "error": res.error},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
     parsed = res.parsed
@@ -342,6 +344,8 @@ async def position_monitor_gate(
                      "raw": decision_text},
             model_used=model_label,
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     # Reject SWAP_STRATEGY when no candidate present (Q8 invariant).
     if decision == GateDecision.SWAP_STRATEGY and candidate_dict is None:
@@ -364,4 +368,6 @@ async def position_monitor_gate(
         payload=payload,
         model_used=model_label,
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

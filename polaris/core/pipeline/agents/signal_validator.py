@@ -152,6 +152,8 @@ async def signal_validator_gate(
             payload={"reason": "gpt_error", "error": res.error},
             model_used="gpt",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
 
@@ -163,15 +165,22 @@ async def signal_validator_gate(
             payload={"reason": "gpt_schema_violation", "raw": res.text[:200]},
             model_used="gpt",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     decision, scalar = decoded
     if decision == GateDecision.KILL:
+        # Mirror G4's raw-reason capture (pre_entry_watcher ``watcher_kill``):
+        # persist the model's own KILL rationale so a G3 reject is auditable
+        # instead of an opaque {reason: validator_kill}. (BUILD_SCHEMA #3.)
         return GateResult(
             decision=decision,
             next_gate=None,
-            payload={"reason": "validator_kill"},
+            payload={"reason": "validator_kill", "raw": res.text[:200]},
             model_used="gpt",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     return GateResult(
         decision=decision,
@@ -184,4 +193,6 @@ async def signal_validator_gate(
         },
         model_used="gpt",
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

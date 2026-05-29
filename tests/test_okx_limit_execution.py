@@ -232,3 +232,186 @@ async def test_partial_fill_on_cancel_is_tracked() -> None:
     assert len(adapter.cancel_calls) == 1
     # NO market fallback — the partial fill is a real position.
     assert all(c["ord_type"] == "post_only" for c in adapter.place_calls)
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — OKX SPOT 1000-USDT market-order cap: split a >1000 USDT entry into
+# sequential market child-orders so it FILLS instead of being rejected (51201).
+# ---------------------------------------------------------------------------
+
+
+class _ChildSplitOKX:
+    """Fake adapter for the market-split path.
+
+    Each market POST gets its own ordId and a filled row whose accFillSz is the
+    child's notional / price (so the aggregated base_qty == sum of children).
+    No ticker / post_only path is exercised (strong-signal → straight market).
+    """
+
+    def __init__(self, *, price: float = 10.0) -> None:
+        self._price = price
+        self.market_notionals: list[float] = []
+        self._rows: dict[str, dict[str, Any]] = {}
+
+    async def fetch_ticker(self, inst_id: str) -> dict[str, Any]:
+        return {"bidPx": str(self._price), "askPx": str(self._price)}
+
+    async def place_market_order(self, **kwargs: Any) -> Any:
+        assert kwargs["ord_type"] == "market"
+        notional = float(kwargs["notional_usd"])
+        self.market_notionals.append(notional)
+        ord_id = f"ord_{len(self.market_notionals)}"
+        base = notional / self._price
+        self._rows[ord_id] = {
+            "ordId": ord_id, "clOrdId": kwargs["client_order_id"],
+            "instId": kwargs["inst_id"], "side": "buy", "tgtCcy": "quote_ccy",
+            "accFillSz": f"{base:.8f}", "avgPx": str(self._price),
+            "fee": "-0.02", "feeCcy": "USDT", "state": "filled",
+            "uTime": str(int(time.time() * 1000)),
+        }
+        return _resp(ord_id=ord_id)
+
+    async def fetch_order(self, *, inst_id: str, ord_id: str) -> dict[str, Any]:
+        row = self._rows.get(ord_id)
+        return {"data": [row] if row else []}
+
+
+@pytest.mark.asyncio
+async def test_market_entry_over_cap_splits_into_children() -> None:
+    """A 1468-USDT entry must be POSTed as children each <= 1000 USDT, and the
+    aggregated fill must reflect the full notional (no order ever >1000 USDT)."""
+    adapter = _ChildSplitOKX(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="ALGO-USDT", notional_usd=1_468.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,  # strong → market
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    # Children: 1000 + 468 (both <= cap), never a single >1000 POST.
+    assert adapter.market_notionals == [1_000.0, 468.0]
+    assert all(n <= 1_000.0 for n in adapter.market_notionals)
+    # Aggregated base_qty == sum of children (1468/10 = 146.8).
+    assert attempt.fill.base_qty == pytest.approx(146.8, rel=1e-6)
+    # size-weighted avg price (uniform here) + summed fee.
+    assert attempt.fill.fill_price == pytest.approx(10.0, rel=1e-6)
+    assert attempt.fill.fee_usd == pytest.approx(0.04, rel=1e-6)  # 2 × 0.02
+
+
+@pytest.mark.asyncio
+async def test_market_entry_at_or_below_cap_single_order() -> None:
+    """A <=1000 USDT entry is a single market POST (no needless splitting)."""
+    adapter = _ChildSplitOKX(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=950.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert adapter.market_notionals == [950.0]
+
+
+@pytest.mark.asyncio
+async def test_market_entry_exactly_3000_three_children() -> None:
+    """3000 USDT → 1000 + 1000 + 1000 (N ceil split, each at the cap)."""
+    adapter = _ChildSplitOKX(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="ETH-USDT", notional_usd=3_000.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert adapter.market_notionals == [1_000.0, 1_000.0, 1_000.0]
+    assert attempt.fill.base_qty == pytest.approx(300.0, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_split_first_child_rejected_returns_reject() -> None:
+    """If the FIRST child is rejected (no fill at all) the attempt carries the
+    reject code (no silent success, no orphan)."""
+
+    class _RejectFirst(_ChildSplitOKX):
+        async def place_market_order(self, **kwargs: Any) -> Any:
+            self.market_notionals.append(float(kwargs["notional_usd"]))
+            return _resp(ok=False, code="51201")
+
+    adapter = _RejectFirst(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="ALGO-USDT", notional_usd=1_468.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0,
+    )
+    assert attempt.fill is None
+    assert attempt.reject_code == "51201"
+
+
+@pytest.mark.asyncio
+async def test_split_partial_children_aggregates_filled_only() -> None:
+    """If a later child fails after earlier children filled, the aggregated fill
+    tracks the REAL filled position (never orphan the funded children)."""
+
+    class _FailSecond(_ChildSplitOKX):
+        async def place_market_order(self, **kwargs: Any) -> Any:
+            if len(self.market_notionals) >= 1:
+                self.market_notionals.append(float(kwargs["notional_usd"]))
+                return _resp(ok=False, code="51008")
+            return await super().place_market_order(**kwargs)
+
+    adapter = _FailSecond(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="ALGO-USDT", notional_usd=1_468.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0,
+    )
+    # First child (1000 USDT) filled → tracked; second (468) rejected → stop.
+    assert isinstance(attempt.fill, Fill)
+    assert attempt.fill.base_qty == pytest.approx(100.0, rel=1e-6)  # 1000/10
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — balance clamp: never emit an OKX order the demo account cannot fund.
+# Clamp the notional to (available_usdt - buffer) BEFORE submit (51008 cause).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_balance_clamp_caps_notional_to_available() -> None:
+    """available_usdt far below the sized notional → the submitted notional is
+    clamped to availBal-minus-buffer (and split under the 1000 cap)."""
+    adapter = _ChildSplitOKX(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="INJ-USDT", notional_usd=1_468.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0, available_usdt=300.0,
+    )
+    assert isinstance(attempt.fill, Fill)
+    # Clamped to 300 × (1 - 0.01) = 297 → single child (<=1000), never 1468.
+    assert sum(adapter.market_notionals) == pytest.approx(297.0, rel=1e-6)
+    assert all(n <= 1_000.0 for n in adapter.market_notionals)
+
+
+@pytest.mark.asyncio
+async def test_balance_clamp_below_min_notional_skips_cleanly() -> None:
+    """available_usdt below the OKX min notional → skip with a clean no-fill
+    sentinel (no churn / no oversized re-submit)."""
+    adapter = _ChildSplitOKX(price=10.0)
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="INJ-USDT", notional_usd=1_468.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0, available_usdt=2.0,  # below MIN_OKX_NOTIONAL_USD=10
+    )
+    assert attempt.fill is None
+    assert attempt.reject_code == "insufficient_balance"
+    # NOTHING was POSTed (no churn).
+    assert adapter.market_notionals == []
+
+
+@pytest.mark.asyncio
+async def test_no_balance_clamp_when_available_none() -> None:
+    """available_usdt=None (default) preserves prior behaviour — no clamp."""
+    adapter = _ChildSplitOKX(price=10.0)
+    await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=800.0,
+        strategy_id="tsmom", last_price=10.0, strength=1.6,
+        poll_delay_sec=0.0, available_usdt=None,
+    )
+    assert adapter.market_notionals == [800.0]

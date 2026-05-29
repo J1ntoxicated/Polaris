@@ -114,21 +114,25 @@ def load_active_position_rows(
             continue
         entry_price = float(fill_row[0])
         size_usd = float(fill_row[1])
+        # FIX-2 (2026-05-30): pull volume too (newest first) so the G6 monitor
+        # sees REAL market data — the prior wiring hardcoded volume_now=0.0 and
+        # recent_ticks=[] for every position, blinding the monitor.
         bar_row = conn.execute(
             """
-            SELECT close, high, low FROM bars
+            SELECT ts, close, high, low, volume FROM bars
             WHERE instrument_id = ? AND bar_interval = '1m'
-            ORDER BY ts DESC LIMIT 14
+            ORDER BY ts DESC LIMIT 20
             """,
             (f"{venue}:{symbol}",),
         ).fetchall()
-        last_price = float(bar_row[0][0]) if bar_row else entry_price
+        last_price = float(bar_row[0][1]) if bar_row else entry_price
         atr_samples = [
-            (float(br[1]) - float(br[2])) / float(br[0])
+            (float(br[2]) - float(br[3])) / float(br[1])
             for br in bar_row
-            if float(br[0]) > 0.0
+            if float(br[1]) > 0.0
         ]
         atr_pct = sum(atr_samples) / len(atr_samples) if atr_samples else 0.005
+        market = _recent_market_state(bar_row)
         ap = ActivePositionRow()
         ap.update(
             position_id=position_id,
@@ -146,9 +150,82 @@ def load_active_position_rows(
             size_usd=size_usd,
             atr_pct=atr_pct,
             correlation_group=str(r[3] or ""),
+            volume_now=market["volume_now"],
+            volume_z=market["volume_z"],
+            atr_slope=market["atr_slope"],
+            recent_ticks=market["recent_ticks"],
         )
         out.append(ap)
     return out
+
+
+def _recent_market_state(
+    bar_row: list[tuple[Any, ...]],
+) -> dict[str, Any]:
+    """FIX-2 — derive real G6 market inputs from the recent bar rows.
+
+    ``bar_row`` is ``(ts, close, high, low, volume)`` newest-first. Returns the
+    live volume of the latest bar, its z-score over the trailing window, the
+    ATR slope (recent-half ATR% vs older-half ATR%), and a newest-last list of
+    recent ticks ``{ts, close, volume}`` for the G6 prompt. Empty input → all
+    neutral (0.0 / empty list) so the monitor stays fail-open.
+    """
+    if not bar_row:
+        return {"volume_now": 0.0, "volume_z": 0.0, "atr_slope": 0.0, "recent_ticks": []}
+    # Oldest-first views for slope / z windows.
+    closes = [float(br[1]) for br in reversed(bar_row)]
+    highs = [float(br[2]) for br in reversed(bar_row)]
+    lows = [float(br[3]) for br in reversed(bar_row)]
+    volumes = [float(br[4]) for br in reversed(bar_row)]
+    volume_now = volumes[-1]
+    # Volume z-score of the latest bar over the trailing window (exclude last).
+    trailing = volumes[:-1]
+    volume_z = 0.0
+    if len(trailing) >= 2:
+        mu = sum(trailing) / len(trailing)
+        var = sum((v - mu) ** 2 for v in trailing) / (len(trailing) - 1)
+        sd = var ** 0.5
+        if sd > 0.0:
+            volume_z = (volume_now - mu) / sd
+    # ATR slope: mean true-range% of the recent half minus the older half.
+    atr_slope = _atr_slope(closes, highs, lows)
+    recent_ticks = [
+        {"ts": int(br[0]), "close": float(br[1]), "volume": float(br[4])}
+        for br in reversed(bar_row[:10])  # newest-last, cap to last 10
+    ]
+    return {
+        "volume_now": volume_now,
+        "volume_z": volume_z,
+        "atr_slope": atr_slope,
+        "recent_ticks": recent_ticks,
+    }
+
+
+def _atr_slope(
+    closes: list[float], highs: list[float], lows: list[float]
+) -> float:
+    """Recent-half mean TR% minus older-half mean TR% (positive = expanding)."""
+    n = len(closes)
+    if n < 4:
+        return 0.0
+    tr_pct: list[float] = []
+    for i in range(1, n):
+        if closes[i] <= 0.0:
+            continue
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        tr_pct.append(tr / closes[i])
+    if len(tr_pct) < 2:
+        return 0.0
+    half = len(tr_pct) // 2
+    older = tr_pct[:half]
+    recent = tr_pct[half:]
+    older_mean = sum(older) / len(older) if older else 0.0
+    recent_mean = sum(recent) / len(recent) if recent else 0.0
+    return recent_mean - older_mean
 
 
 # ---------------------------------------------------------------------------
@@ -197,12 +274,22 @@ async def _evaluate_position(
         unrealized_pnl_r=pnl_r,
         max_loss_r=1.0,
     )
+    # FIX-2 (2026-05-30): feed REAL recent-bar data into the G6 market_view +
+    # recent_ticks instead of the prior hardcoded volume_now=0.0 / []. The
+    # monitor now sees the live volume, its z-score, the ATR slope, and the
+    # last-N closes so it can decide HOLD vs ADJUST_EXIT vs EXIT_NOW on actual
+    # market action. Data-correctness only — never a throttle or size dampen.
     monitor_payload["market_view"] = {
         "regime": regime,
         "atr_pct": atr_pct,
-        "volume_now": 0.0,
+        "volume_now": float(pos.get("volume_now", 0.0)),
+        "volume_z": float(pos.get("volume_z", 0.0)),
+        "atr_slope": float(pos.get("atr_slope", 0.0)),
     }
-    monitor_payload["recent_ticks"] = []
+    recent_ticks_obj = pos.get("recent_ticks", [])
+    monitor_payload["recent_ticks"] = (
+        recent_ticks_obj if isinstance(recent_ticks_obj, list) else []
+    )
     g6_ctx = GateContext(
         run_id=uuid.uuid4().hex,
         signal_id=str(pos["position_id"]),

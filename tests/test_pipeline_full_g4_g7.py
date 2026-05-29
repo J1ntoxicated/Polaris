@@ -7,6 +7,7 @@ Each test exercises one builder + the gate it feeds. Tests stay pure-Python
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from pathlib import Path
 
@@ -122,6 +123,125 @@ def test_payload_builder_validator_payload_pulls_recent_trades(tmp_path: Path) -
         )
         assert len(payload["recent_trades"]) == 3
         assert payload["recent_trades"][0]["ts"] >= payload["recent_trades"][-1]["ts"]
+    finally:
+        conn.close()
+
+
+def _seed_baseline(
+    conn: sqlite3.Connection, *, instrument_id: str, group_id: str, asset_class: str
+) -> None:
+    """Seed atr/size/volume baseline rows for one instrument (FIX-1 regression)."""
+    from polaris.core.data.baseline import upsert_baseline_state
+    from polaris.core.data.schema import BaselineValue
+
+    seeds = {"atr": (0.0024, 0.0031), "size": (8.68, 11.2), "volume": (22.0, 41.0)}
+    for metric, (p50, p75) in seeds.items():
+        upsert_baseline_state(
+            conn,
+            instrument_id=instrument_id,
+            underlying_group_id=group_id,
+            asset_class=asset_class,
+            baseline=BaselineValue(
+                metric=metric,
+                p50=p50,
+                p75=p75,
+                sample_count=400,
+                lookback_sec=604_800,
+                updated_ts=int(time.time()),
+            ),
+        )
+
+
+def test_validator_payload_capital_carries_populated_baseline(tmp_path: Path) -> None:
+    """FIX-1 regression: a Capital signal whose ``ticker_baseline_state`` is
+    populated MUST carry the real atr/size/volume baseline into the G3 payload
+    (not the empty stub that triggers GPT "insufficient data" false-KILLs).
+
+    The lookup key is ``f"{venue}:{symbol}"`` — identical to the OKX path and to
+    what the bar-ingest writer stores (``Bar.instrument_id``). This locks the
+    OKX/Capital symmetry: removing it would re-introduce the false-KILL failure
+    mode (aggressive bias = fewer false KILLs = MORE entries).
+    """
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    try:
+        _seed_baseline(
+            conn, instrument_id="capital:NOSUSD", group_id="NOS", asset_class="forex"
+        )
+        sig = RawSignal(
+            signal_id="sig_cap_g3",
+            strategy_id="fx_breakout",
+            symbol="NOSUSD",
+            side="long",
+            strength=0.8,
+            sizing_hint=0.05,
+            ttl_bars=10,
+            thesis_tag="fx_test",
+            correlation_group="NOS",
+        )
+        payload = build_validator_payload(
+            raw_signal=sig,
+            venue="capital",
+            symbol="NOSUSD",
+            instrument_id="capital:NOSUSD",
+            regime="bull_trend",
+            conn=conn,
+        )
+        baseline = payload["baseline"]
+        assert set(baseline) == {"atr", "size", "volume"}, baseline
+        assert baseline["atr"]["p50"] > 0.0
+        assert baseline["atr"]["n"] == 400
+        assert baseline["size"]["p50"] > 0.0
+        assert baseline["volume"]["p50"] > 0.0
+    finally:
+        conn.close()
+
+
+def test_validator_payload_okx_capital_baseline_symmetry(tmp_path: Path) -> None:
+    """FIX-1: with both venues seeded identically, the G3 baseline block is
+    structurally identical — no OKX-vs-Capital asymmetry in the builder."""
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    try:
+        _seed_baseline(
+            conn, instrument_id="okx:BTC-USDT", group_id="BTC", asset_class="crypto"
+        )
+        _seed_baseline(
+            conn, instrument_id="capital:XAUUSD", group_id="XAU", asset_class="commodity"
+        )
+        okx_sig = RawSignal(
+            signal_id="o",
+            strategy_id="volume_burst",
+            symbol="BTC-USDT",
+            side="long",
+            strength=1.0,
+            sizing_hint=0.05,
+            ttl_bars=10,
+            thesis_tag="t",
+            correlation_group="BTC",
+        )
+        cap_sig = RawSignal(
+            signal_id="c",
+            strategy_id="xau_indices_trend",
+            symbol="XAUUSD",
+            side="long",
+            strength=1.0,
+            sizing_hint=0.05,
+            ttl_bars=10,
+            thesis_tag="t",
+            correlation_group="XAU",
+        )
+        okx_p = build_validator_payload(
+            raw_signal=okx_sig, venue="okx", symbol="BTC-USDT",
+            instrument_id="okx:BTC-USDT", regime="bull_trend", conn=conn,
+        )
+        cap_p = build_validator_payload(
+            raw_signal=cap_sig, venue="capital", symbol="XAUUSD",
+            instrument_id="capital:XAUUSD", regime="bull_trend", conn=conn,
+        )
+        assert set(okx_p["baseline"]) == set(cap_p["baseline"]) == {"atr", "size", "volume"}
+        # Capital must NOT be the empty stub when its baseline exists.
+        assert cap_p["baseline"] != {}
     finally:
         conn.close()
 

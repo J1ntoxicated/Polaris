@@ -179,6 +179,8 @@ async def pre_entry_watcher_gate(
             payload={"reason": "gpt_error", "error": res.error},
             model_used="gpt",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
             error=res.error,
         )
     decision = _validate_decision(res.parsed)
@@ -189,6 +191,8 @@ async def pre_entry_watcher_gate(
             payload={"reason": "watcher_kill", "raw": res.text[:200]},
             model_used="gpt",
             latency_ms=res.latency_ms,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     return GateResult(
         decision=GateDecision.PROCEED,
@@ -196,4 +200,6 @@ async def pre_entry_watcher_gate(
         payload={"watched_signal": validated, "fast_path": False},
         model_used="gpt",
         latency_ms=res.latency_ms,
+        input_tokens=res.input_tokens,
+        output_tokens=res.output_tokens,
     )

@@ -46,7 +46,6 @@ from polaris.scripts._production_layers import (
     run_recalc_for_active_positions,
 )
 from polaris.scripts._production_pipeline import (
-    close_oldest_with_real_pnl,
     close_specific_position,
     reserve_and_submit,
     run_pipeline_for_signal,
@@ -451,17 +450,17 @@ async def _run_tick(
 
     _evaluate_swaps(conn, now_ts=now_ts)
 
-    if state.open_trades:
-        # codex 2026-05-07 P1.4 fix: forward gpt_client + phase so G8
-        # can exercise the GPT P1 lesson branch when phase=="P1". P0 keeps
-        # the deterministic Python template (client=None inside the close).
-        await close_oldest_with_real_pnl(
-            conn, state=state, now_ts=now_ts,
-            lookup_regime=_lookup_regime,
-            gpt_client=haiku, phase=phase,
-            real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-            capital_session=capital_session,
-        )
+    # FIX-4 (2026-05-30): the unconditional tail-of-tick FIFO-oldest drain
+    # (``if state.open_trades:`` then a bare close of trade[0]) was REMOVED.
+    # It force-closed ``state.open_trades[0]`` at the END of EVERY
+    # tick with NO exit predicate (no stop, no PnL, no holding gate), so a
+    # position opened during the pipeline fan-out was closed within the same/
+    # next tick — every position died at holding_bars=0 and the multi-bar
+    # adaptive exit (G6/G7) never managed a live position. Closes now happen
+    # EXCLUSIVELY through the G6/G7 path (``recalc_active_positions`` ->
+    # ``close_specific_position`` on a genuine EXIT_NOW), so a position lives
+    # across ticks until a real exit reason fires. This STRENGTHENS precise
+    # exits (Jin's loss-defense) — it is NOT a throttle and NOT a size dampen.
 
     tf_summary = ",".join(
         f"{tf}={state.bars_persisted_by_tf.get(tf, 0)}"

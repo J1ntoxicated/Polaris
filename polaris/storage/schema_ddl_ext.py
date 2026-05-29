@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS gate_events (
     decision TEXT,
     model_used TEXT,
     latency_ms INTEGER,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
     payload_json TEXT,
     error_text TEXT,
     created_ts INTEGER NOT NULL

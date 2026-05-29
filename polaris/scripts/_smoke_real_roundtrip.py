@@ -101,6 +101,19 @@ def _synthetic_okx_fill(*, is_close: bool) -> Fill:
 # ---------------------------------------------------------------------------
 
 
+def _accfill_qty(row: dict[str, Any]) -> float:
+    """Filled base qty from an OKX order row (accFillSz, fallback fillSz)."""
+    for key in ("accFillSz", "fillSz"):
+        raw = row.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 async def real_okx_open_fill(
     adapter: Any,
     *,
@@ -142,12 +155,20 @@ async def real_okx_open_fill(
     # fault: route it to no_fill instead of letting normalize_okx_fill raise
     # (which would surface as a FAULT_EXCEPTION).
     order_state = str(rows[0].get("state") or "").lower()
-    if order_state not in OKX_FILLED_STATES:
+    filled_qty = _accfill_qty(rows[0])
+    if order_state not in OKX_FILLED_STATES and filled_qty <= 0.0:
         return OpenAttempt(
             fill=None, reject_code="no_fill", reject_msg=f"state={order_state}",
         )
+    # A 'canceled' order that still left a partial fill (accFillSz>0) is a REAL
+    # position — normalize it (treat as partially_filled) so it is tracked and
+    # never becomes an untracked orphan (codex review 2026-05-29).
+    row = (
+        rows[0] if order_state in OKX_FILLED_STATES
+        else {**rows[0], "state": "partially_filled"}
+    )
     fill = normalize_okx_fill(
-        rows[0], strategy_id=strategy_id, expected_price=last_price,
+        row, strategy_id=strategy_id, expected_price=last_price,
     )
     return OpenAttempt(fill=fill)
 

@@ -261,6 +261,27 @@ async def test_okx_open_canceled_state_is_no_fill_not_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_okx_open_canceled_with_partial_fill_is_tracked() -> None:
+    """A 'canceled' order that left a partial fill (accFillSz>0) is a REAL
+    position — it must be normalized + tracked, never dropped to no_fill (which
+    would leave an untracked orphan). codex review 2026-05-29."""
+    adapter = _RecordingOKXAdapter(
+        fetch_row={
+            "instId": "GAS-USDT", "side": "buy", "state": "canceled",
+            "avgPx": "10.0", "accFillSz": "3.0", "ordId": "o1",
+            "tgtCcy": "quote_ccy",
+        }
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="GAS-USDT", notional_usd=100.0,
+        strategy_id="tsmom", last_price=10.0, poll_delay_sec=0.0,
+    )
+    assert isinstance(attempt, OpenAttempt)
+    assert attempt.fill is not None
+    assert attempt.reject_code is None
+
+
+@pytest.mark.asyncio
 async def test_okx_open_filled_state_returns_fill() -> None:
     """A filled row still normalizes to a Fill (success path preserved)."""
     adapter = _RecordingOKXAdapter(

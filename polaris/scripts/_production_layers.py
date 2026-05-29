@@ -34,10 +34,10 @@ from polaris.core.live_recalc.tick_recalc import (
     run_live_recalc_cycle,
 )
 from polaris.core.universe.discovery import (
-    apply_active_filters,
     fetch_capital_instruments,
     fetch_okx_instruments,
     persist_universe,
+    rank_active_universe,
 )
 from polaris.core.universe.schema import UniverseInstrument
 from polaris.core.universe.watchlist import compute_dynamic_focus, persist_focus
@@ -94,7 +94,7 @@ async def refresh_okx_universe_once(
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0] OKX fetch failed: %r", exc)
         return 0
-    active = apply_active_filters(instruments)
+    active = rank_active_universe(instruments)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
     logger.info("[L0/okx] universe %d → active %d", len(instruments), len(active))
@@ -134,11 +134,11 @@ async def refresh_capital_universe_once(
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0/capital] proxy fetch failed: %r", exc)
 
-    active = apply_active_filters(instruments)
+    active = rank_active_universe(instruments)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
     logger.info(
-        "[L0/capital] universe %d → active %d (proxy-filtered)",
+        "[L0/capital] universe %d → active %d (continuous-rank)",
         len(instruments),
         len(active),
     )

@@ -17,10 +17,13 @@ from polaris.core.universe.discovery import (
     merge_listing_timestamps,
     parse_okx_tickers,
     persist_universe,
+    rank_active_universe,
 )
 from polaris.core.universe.schema import (
     FOCUS_TARGET_MAX,
     FOCUS_TARGET_MIN,
+    UNIVERSE_RANK_TOP_N_DEFAULT,
+    UNIVERSE_RANK_TOP_N_ENV,
     FilterThresholds,
     UniverseInstrument,
     default_thresholds,
@@ -144,6 +147,73 @@ def test_4_axis_filter_custom_thresholds() -> None:
     )
     sample = _make_inst("FOO-USDT", vol=10.0, spread_bps=50.0, atr_pct=0.1, depth=1.0)
     assert apply_active_filters([sample], th) == [sample]
+
+
+# ---------------------------------------------------------------------------
+# Continuous active-set ranking (flow_not_block)
+# ---------------------------------------------------------------------------
+
+
+def test_rank_returns_top_n() -> None:
+    """Ranking caps the active set at top_n, sorted by descending score."""
+    insts = [
+        _make_inst(f"S{i}-USDT", vol=1e7 + i * 1e7, atr_pct=2.0 + i * 0.1)
+        for i in range(50)
+    ]
+    out = rank_active_universe(insts, top_n=10)
+    assert len(out) == 10
+    # Highest vol/atr rows survive; the thinnest are cut.
+    surviving = {ins.symbol for ins in out}
+    assert "S49-USDT" in surviving
+    assert "S0-USDT" not in surviving
+
+
+def test_rank_includes_mid_liquidity_previously_spread_rejected() -> None:
+    """A mid-liquidity symbol the hard spread gate would reject still flows."""
+    th = default_thresholds()
+    # Wide spread → old gate hard-rejected. Decent vol + atr → strong reward.
+    mid = _make_inst(
+        "MID-USDT", vol=8e7, atr_pct=5.0, spread_bps=th.max_spread_bps * 3.0, depth=5_000.0
+    )
+    # Confirm the old hard gate would have dropped it.
+    assert apply_active_filters([mid]) == []
+    # Fill out the population with weaker rows so MID still ranks into top_n.
+    weak = [_make_inst(f"W{i}-USDT", vol=1e6, atr_pct=0.6, depth=2_000.0) for i in range(20)]
+    out = rank_active_universe([mid, *weak], top_n=5)
+    assert any(ins.symbol == "MID-USDT" for ins in out)
+
+
+def test_rank_keeps_validity_hard() -> None:
+    """Non-live and non-USDT-quote rows are still hard-excluded (validity)."""
+    live = _make_inst("GOOD-USDT", vol=5e8)
+    halted = _make_inst("HALT-USDT", state="halt", vol=9e9)  # huge vol but dead
+    nonusdt = _make_inst("BTC-USDC", quote_ccy="USDC", vol=9e9)
+    out = rank_active_universe([live, halted, nonusdt], top_n=10)
+    syms = {ins.symbol for ins in out}
+    assert syms == {"GOOD-USDT"}
+
+
+def test_rank_empty_input_safe() -> None:
+    assert rank_active_universe([], top_n=10) == []
+
+
+def test_rank_ties_and_zero_division_safe() -> None:
+    """Identical rows (zero stdev) must not raise and return up to top_n."""
+    same = [_make_inst(f"T{i}-USDT", vol=1e8, atr_pct=3.0) for i in range(5)]
+    out = rank_active_universe(same, top_n=3)
+    assert len(out) == 3
+
+
+def test_rank_top_n_cap_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    insts = [_make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6) for i in range(60)]
+    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT.
+    monkeypatch.delenv(UNIVERSE_RANK_TOP_N_ENV, raising=False)
+    assert len(rank_active_universe(insts)) == UNIVERSE_RANK_TOP_N_DEFAULT
+    # Env override is honored and capped at FOCUS_TARGET_MAX.
+    monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "9999")
+    assert len(rank_active_universe(insts)) == min(len(insts), FOCUS_TARGET_MAX)
+    monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "5")
+    assert len(rank_active_universe(insts)) == 5
 
 
 # ---------------------------------------------------------------------------

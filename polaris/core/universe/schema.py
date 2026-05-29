@@ -49,6 +49,27 @@ ATR_FLOOR_BY_CLASS: Final[dict[str, float]] = {
 ALLOWED_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT"})
 
 # ---------------------------------------------------------------------------
+# Continuous active-set ranking (flow_not_block — replaces hard 4-axis cut)
+# ---------------------------------------------------------------------------
+# The hard 4-axis gate over-cut the candidate set (189 → 6), starving cold-start
+# samples. Liquidity / spread / depth / ATR are no longer hard blocks: they
+# become a continuous composite score and the top-N rows become the active set.
+# Hard keep is validity only (state=live; OKX USDT-quote already enforced at
+# parse time). Weak candidates still flow — the downstream cell-matrix
+# down-routes them. Aggressive bias preserved (flow_not_block).
+UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 40
+UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
+
+# Composite reward weights (vol + realized-vol proxy), z-normalized population.
+RANK_SCORE_W_VOL: Final[float] = 0.55
+RANK_SCORE_W_ATR: Final[float] = 0.45
+# Soft penalties (subtracted from the reward, also z-normalized population).
+# Thin depth / wide spread lower the rank but never hard-reject — anomaly edge
+# on thinner names is preserved (low-liquidity → anomaly profit thesis).
+RANK_PENALTY_W_SPREAD: Final[float] = 0.30
+RANK_PENALTY_W_DEPTH: Final[float] = 0.15
+
+# ---------------------------------------------------------------------------
 # Pre-rank score weights (Q3)
 # ---------------------------------------------------------------------------
 

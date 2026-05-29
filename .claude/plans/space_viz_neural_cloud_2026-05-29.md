@@ -30,10 +30,11 @@ node: `{id,label,ticker,direction,exchange,trade_id,strategy_id,asset_group,pnl_
 | recent closes (fills is_close) | recent_closes |
 
 ## 실행 단계
-- [ ] 1. 빌드 에이전트: 엔진 복사 + polaris_graph.py + server.py + 검증(graph.json 9키, build_graph 노드수, curl 200). [background 진행 중]
-- [ ] 2. 빌드 검증 → fresh-Claude 리뷰(display-only라 경량).
-- [ ] 3. 서버 백그라운드 실행(8770) → Jin 브라우저로 확인.
-- [ ] 4. vault digest + _NOW 갱신.
+- [x] 1. 빌드: 엔진 복사 + `polaris_graph.py`(298) + `server.py`(214) + 검증(9키, 81 노드, curl 200, ruff/mypy clean). commit `fb96129`.
+- [x] 2. 빌드 검증 완료 (build agent self-verify: curl 200 + ruff + mypy). display-only라 별도 중리뷰 생략, P2 후속만.
+- [x] 3. 서버 detached 실행 (PID 12266, port 8770) → 브라우저 open 완료. 라이브 데이터(포지션 4/universe 71/regime chop) 렌더.
+- [x] 4. vault digest([[2026-05-29_dashboard_revival_dynamic_viz_spaceviz]]) + _NOW 갱신 + 본 plan.
+- [ ] 5. (후속) richer SSE 이벤트(signal/gate/regime_flip/ai_decision) + tier 1/7/9~13 데이터 wire + edge posterior verdict → 노드 밝기 매핑.
 
 ## 더 나은 방향 (후보, 후속)
 - 셀 히트맵을 우주 노드 색으로 직접 매핑(edge posterior verdict → validated-alpha 별 밝기).

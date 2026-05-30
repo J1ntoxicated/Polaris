@@ -11,6 +11,7 @@ tags: [now, tier-0]
 ## What matters now (HAND-WRITTEN)
 
 **🔴 HANDOVER 2026-05-30 (Jin 취침 — 자율 완성 mandate. 다음 세션 여기서 이어가기. 핸드오버 digest=[[2026-05-30_handover_3stream]]).**
+**🟢 최신 상태(2026-05-30 후반, 봇 PID=data/paper/production.pid=80589 라이브)**: ✅ **capital rotation(#11) 빌드+라이브**(`polaris/core/rotation/evaluator.py` 순수 evaluator + `_production_rotation.py` 매틱 hook; /debate w1iz37hwt가 FATAL 단위불일치 잡음→**expected $edge 양쪽 동일단위·additive margin·posterior LCB n≥20**로 재설계; winner{protected,harvest} 면제; observability no-fire 로깅 `f37889d`). ✅ **게이트 아키텍처(#13) 결정**=OPTION A(통합 파이프라인 유지+스트림별 정밀도는 StreamProfile DATA 주입, 게이트 fork X; judge panel 8/10) → **Phase 0-3 빌드**(StreamProfile SSOT `core/streams/config.py`+resolve / G4 per-stream guard `_stream_guards.py` / G7 session-forced-exit rail `session_exit_rail.py`[유일 DECISION 분기; A always-on never-fire byte동일] / equity regime evidence `_GROUP_SOURCES`). plan SSOT=`.claude/plans/{capital_rotation,gate_architecture}_2026-05-30.md`. ✅ **OKX deadlock 해소(Jin 승인 "코드로 청산→USDT")**: USDT $0→**$74,882 회복**(`liquidate_okx_orphans.py --live` BTC1+ETH1 청산, us.okx.com)+ghost ETHW-USDT DB 정리+봇 clean 재기동 → **OKX 거래 재개 라이브 증명**(12 order POST buy→12 RESP ok=True, fills 5/open 5, fault 0). ~21 커밋(`cf98ed8`→`f37889d`), ~1247 green. **남은 #12**(데이터 누적 대기): 파라미터 /debate 캘리브(exit 7·Track C 캡·net-edge·rotation 6·CLOSE_BUFFER)+alt-data equity conviction 캘리브(현 FX macro 가중 재사용, conviction<1.5 floor) — 봇이 거래하며 posterior 쌓이면 진행. rotation 기계적 fire는 잔고 막힐 때(시간) 로깅으로 가시화.
 **Mandate**: 3-스트림 아키텍처를 끝까지 자율 완성 + 대시보드 + 교차검증, 자는 동안. 각 단계 워크플로우(build TDD→adversarial review→거동게이트)→커밋→보고. 끊김 없이 체인. 돌이키기 어려운 외부/venue 변경은 보류·기록.
 **🎯 봇 목적(Jin 2026-05-30, 나침반)**: surgical-strike — 정밀 타이밍 진입/엑싯, **오직 수익, 근거 있는 거래**. alt-data(뉴스·매크로·CoinGlass·FRED·MyFxBook) = 진입 근거 SIGNAL·레짐 evidence(NOT 방어 blackout/throttle). 손실방어 = **정밀 엑싯**(적응형 stop/타이밍)으로 — 사이징 축소·진입 차단 아님. 데이터 충당 + AI콜/기술계산으로 판단 정밀·신속. ⇒ **#27(AI 타당성+alt-data) 1급 격상**, 엑싯·레짐 정밀도 강조. 위임: "말이 되는 봇 + 목적 충족 + 원하는 대시보드" 나올 때까지 끝까지 자율+검증, 컴프레션/핸드오버 내 판단. ([[north-star]] Operating thesis · [[project_operating_thesis_surgical_strike]] · [[feedback_autonomous_until_intent_met]])
 **불변**: 9-stack 봉쇄 · hard-MAX(headroom_min+0.09 ceiling) · AGGRESSIVE(방어throttle/축소 X, 거부키워드 0) · DEMO/PAPER only · builder≠reviewer · OKX 봇 무중단(최종 재기동만 graceful) · Claude 창 kill 금지 · workflow-first 기본.
@@ -149,4 +150,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-30 03:29 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-30 09:11 (paper=True, full_pipeline=True)

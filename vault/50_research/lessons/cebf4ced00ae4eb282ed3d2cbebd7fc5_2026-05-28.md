@@ -1,0 +1,19 @@
+---
+type: research
+status: active
+date_created: 2026-05-28
+tags: [lesson, p0, strategy/vb, type/entry_timing]
+related: [[ADR-007]], [[ADR-008]]
+lesson_id: cebf4ced00ae4eb282ed3d2cbebd7fc5
+---
+
+# Lesson — cebf4ced00ae4eb282ed3d2cbebd7fc5
+- strategy: vb
+- regime: bull_trend
+- session: asia
+- type: entry_timing
+- confidence: 0.70
+- soft_mode: True
+- delta: {'vb_x_bull_trend': 0.0075}
+
+Mixed result +0.40R — entry timing review.

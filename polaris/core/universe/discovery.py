@@ -371,6 +371,53 @@ def persist_universe(
         """,
         rows,
     )
+    _deactivate_off_venue_active_rows(conn, {ins.venue for ins in instruments})
+
+
+def _deactivate_off_venue_active_rows(
+    conn: sqlite3.Connection, venues: set[str]
+) -> None:
+    """Sweep each refreshed venue's stale whitelist-violating active rows.
+
+    Live-audit gap (2026-05-30): STEP 2 filters off-venue asset_classes out of a
+    *new* fetch, but a row persisted ``is_active=1`` by an earlier build (before
+    fetch-time filtering) is absent from the current ``instruments`` list, so
+    ``persist_universe``'s upsert never touches it and it lingers active —
+    e.g. a Capital crypto-CFD focus candidate routed to the wrong stream.
+
+    This is a **full-venue** sweep (independent of the fetched instrument set):
+    any ``is_active=1`` row whose ``asset_class`` is NOT on its venue's stream
+    whitelist (:func:`asset_class_allowed_for_venue`) is flipped to
+    ``is_active=0, active_reason='off_venue_class'``. It is an asset-class
+    routing correction (crypto edge belongs on OKX track A), NOT a defensive
+    throttle and NOT a session gate.
+
+    Invariants held by the SSOT whitelist:
+    * OKX (crypto-only) / Alpaca (equity-only) carry no violation → no-op.
+    * STEP 3 session-wait rows (off-session FX/index/commodity, ``is_active=0``,
+      ``session_wait:*``) keep a *whitelisted* asset_class → never matched here
+      (and already inactive), so their reason is preserved.
+    """
+    for venue in venues:
+        active_classes = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT DISTINCT asset_class FROM universe "
+                "WHERE venue = ? AND is_active = 1",
+                (venue,),
+            ).fetchall()
+        }
+        off_venue = [
+            ac for ac in active_classes if not asset_class_allowed_for_venue(venue, ac)
+        ]
+        if not off_venue:
+            continue
+        placeholders = ",".join("?" for _ in off_venue)
+        conn.execute(
+            f"UPDATE universe SET is_active = 0, active_reason = 'off_venue_class' "
+            f"WHERE venue = ? AND is_active = 1 AND asset_class IN ({placeholders})",
+            (venue, *off_venue),
+        )
 
 
 # ---------------------------------------------------------------------------

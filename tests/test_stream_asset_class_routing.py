@@ -144,6 +144,104 @@ def test_capital_crypto_persisted_with_off_venue_reason(
 
 
 # ---------------------------------------------------------------------------
+# STEP 2 (stale sweep) — a venue refresh deactivates whitelist-violating rows
+# that the current fetch no longer carries (live-audit gap: STEP 2 filters new
+# fetches but never touches a previously-persisted is_active=1 off-venue row).
+# ---------------------------------------------------------------------------
+
+
+def test_persist_deactivates_stale_off_venue_active_row(
+    memdb: sqlite3.Connection,
+) -> None:
+    # Seed a leftover Capital crypto-CFD row as is_active=1 directly (simulates a
+    # row persisted by an earlier build before STEP 2 fetch-time filtering — a
+    # current persist would never write a crypto Capital row active).
+    memdb.execute(
+        "INSERT INTO universe (venue, symbol, instrument_id, underlying_group_id, "
+        "asset_class, quote_ccy, state, last_seen_ts, is_active, active_reason) "
+        "VALUES ('capital','BTCUSD','capital:BTCUSD','crypto:BTCUSD','crypto','USD',"
+        "'live', ?, 1, NULL)",
+        (NOW,),
+    )
+    seeded = memdb.execute(
+        "SELECT is_active FROM universe WHERE instrument_id = ?",
+        ("capital:BTCUSD",),
+    ).fetchone()
+    assert seeded[0] == 1  # stale active row exists
+
+    # A subsequent Capital refresh carries ONLY whitelisted FX (crypto is filtered
+    # out at fetch, so it is absent from `instruments`). The stale crypto row must
+    # still be swept to is_active=0 with the off-venue routing reason.
+    fx = _inst("EURUSD", venue="capital", asset_class="forex")
+    persist_universe(memdb, [fx], is_active_set={fx.instrument_id})
+
+    row = memdb.execute(
+        "SELECT is_active, active_reason FROM universe WHERE instrument_id = ?",
+        ("capital:BTCUSD",),
+    ).fetchone()
+    assert row[0] == 0
+    assert row[1] == "off_venue_class"
+
+
+def test_stale_sweep_noop_for_okx_crypto(memdb: sqlite3.Connection) -> None:
+    # OKX is crypto-only → no whitelist violation → the sweep is a no-op and the
+    # active crypto row stays is_active=1 (aggressive: crypto edge stays on A).
+    btc = _inst("BTC-USDT", venue="okx", asset_class="crypto", quote_ccy="USDT")
+    persist_universe(memdb, [btc], is_active_set={btc.instrument_id})
+    # A later OKX refresh persisting a different name must not disturb the first.
+    eth = _inst("ETH-USDT", venue="okx", asset_class="crypto", quote_ccy="USDT")
+    persist_universe(memdb, [eth], is_active_set={eth.instrument_id})
+    row = memdb.execute(
+        "SELECT is_active, active_reason FROM universe WHERE instrument_id = ?",
+        ("okx:BTC-USDT",),
+    ).fetchone()
+    assert row[0] == 1
+    assert row[1] is None
+
+
+def test_stale_sweep_noop_for_alpaca_equity(memdb: sqlite3.Connection) -> None:
+    # Alpaca is equity-only → no whitelist violation → no-op.
+    aapl = _inst("AAPL", venue="alpaca", asset_class="equity")
+    persist_universe(memdb, [aapl], is_active_set={aapl.instrument_id})
+    nvda = _inst("NVDA", venue="alpaca", asset_class="equity")
+    persist_universe(memdb, [nvda], is_active_set={nvda.instrument_id})
+    row = memdb.execute(
+        "SELECT is_active, active_reason FROM universe WHERE instrument_id = ?",
+        ("alpaca:AAPL",),
+    ).fetchone()
+    assert row[0] == 1
+    assert row[1] is None
+
+
+def test_stale_sweep_leaves_session_wait_fx_untouched(
+    memdb: sqlite3.Connection,
+) -> None:
+    # STEP 3 session-wait: an off-session FX row is is_active=0 with a
+    # `session_wait` reason — its asset_class (forex) IS whitelisted for Capital,
+    # so the off-venue stale sweep must NOT touch it (no reason overwrite, no
+    # spurious reactivation). Sweep targets only whitelist VIOLATIONS.
+    closed_fx = _inst("EURUSD", venue="capital", asset_class="forex", state="closed")
+    persist_universe(memdb, [closed_fx], is_active_set=set())
+    before = memdb.execute(
+        "SELECT is_active, active_reason FROM universe WHERE instrument_id = ?",
+        ("capital:EURUSD",),
+    ).fetchone()
+    assert before[0] == 0
+    assert "session" in str(before[1])
+
+    # A later Capital refresh carrying a whitelisted commodity must not rewrite
+    # the FX session-wait reason to off_venue_class.
+    gold = _inst("GOLD", venue="capital", asset_class="commodity")
+    persist_universe(memdb, [gold], is_active_set={gold.instrument_id})
+    after = memdb.execute(
+        "SELECT is_active, active_reason FROM universe WHERE instrument_id = ?",
+        ("capital:EURUSD",),
+    ).fetchone()
+    assert after[0] == 0
+    assert after[1] == before[1]  # session_wait reason preserved, not overwritten
+
+
+# ---------------------------------------------------------------------------
 # STEP 3 (session asymmetry) — CFD closed = session-wait, not permanent drop
 # ---------------------------------------------------------------------------
 

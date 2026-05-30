@@ -23,12 +23,71 @@ from polaris.core.live_recalc.exit_engine import (
     evaluate_exit,
     init_exit_state,
 )
+from polaris.core.live_recalc.session_exit_rail import session_forced_exit
+from polaris.core.streams import resolve_stream
 
 if TYPE_CHECKING:
     from polaris.scripts._production_recalc import ActivePositionRow
     from polaris.scripts.production_paper_loop import ProdLoopState
 
-__all__ = ["persist_exit_state", "run_precise_exit"]
+__all__ = [
+    "persist_exit_state",
+    "run_precise_exit",
+    "run_session_forced_exit",
+]
+
+
+def _session_calendar_for_venue(venue: str) -> str:
+    """Resolve a venue's ``session_calendar`` (always_on / fx_indices_cal /
+    us_equity_cal). An unknown venue degrades to ``always_on`` so the session
+    rail NEVER fires for it (no spurious calendar flat) — A's behaviour and any
+    unmapped stream stay byte-identical.
+    """
+    try:
+        return resolve_stream(venue).session_calendar
+    except (KeyError, ValueError):
+        return "always_on"
+
+
+async def run_session_forced_exit(
+    *,
+    conn: sqlite3.Connection,
+    state: ProdLoopState,
+    pos: ActivePositionRow,
+    pnl_r: float,
+    now_ts: int,
+    close_specific: Callable[..., Any],
+    lookup_regime: Callable[[sqlite3.Connection, str, str], str],
+    gpt_client: Any | None,
+    phase: str,
+    real_roundtrip: bool,
+    okx_adapter: Any,
+    capital_session: Any,
+) -> bool:
+    """Phase 3 per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L
+    throttle). Keyed on the position's stream ``session_calendar``: ``always_on``
+    (A) NEVER fires (byte-identical); ``fx_indices_cal`` (B) forces a flat when
+    the weekend close is imminent; ``us_equity_cal`` (C) forces a flat when the
+    RTH close is imminent (no-overnight). Fires on TIME ONLY — never on pnl /
+    drawdown — and routes through the EXISTING ``close_specific_position`` (the
+    close path is unchanged; this only ADDS a calendar-driven EXIT_NOW on top of
+    the shared #26 FSM / G6 stop / G7 widening). Returns ``True`` when this
+    position was force-flattened (caller skips the rest of the exit/G6 pass).
+    """
+    session_calendar = _session_calendar_for_venue(str(pos["venue"]))
+    decision = session_forced_exit(session_calendar, now_ts, pnl_r=pnl_r)
+    if not decision.close:
+        return False
+    await close_specific(
+        conn, state=state, position_id=str(pos["position_id"]), now_ts=now_ts,
+        lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session,
+    )
+    state.recalc_session_forced_exit = (
+        getattr(state, "recalc_session_forced_exit", 0) + 1
+    )
+    return True
 
 
 def persist_exit_state(

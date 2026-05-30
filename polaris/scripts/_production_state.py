@@ -74,6 +74,11 @@ class ProdLoopState:
     # adaptive-exit pass (ATR-trail stop / protected break-even / loser
     # timeout). EXPECTANCY telemetry only — never a size dampen or entry block.
     recalc_precise_exit: int = 0
+    # Phase 3 per-stream session-close RAIL — count of positions force-flattened
+    # because the venue's session/weekend close was imminent (CALENDAR
+    # INTEGRITY, TIME-only). always_on (A) NEVER increments this → A identical.
+    # Never a P&L throttle / size dampen / entry block.
+    recalc_session_forced_exit: int = 0
     # #15 — G6 GPT call-efficiency: per-position cooldown/context cache + a
     # counter of ticks where the prior GPT decision was reused (no call).
     recalc_g6_skipped: int = 0

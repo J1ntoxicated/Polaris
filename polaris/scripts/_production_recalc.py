@@ -55,7 +55,10 @@ from polaris.core.pipeline.gate_state import (
 )
 from polaris.core.streams import resolve_stream_profile
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
-from polaris.scripts._production_recalc_exit import run_precise_exit
+from polaris.scripts._production_recalc_exit import (
+    run_precise_exit,
+    run_session_forced_exit,
+)
 
 if TYPE_CHECKING:
     from polaris.scripts._smoke_fills import SimulatedTrade
@@ -264,6 +267,18 @@ async def _evaluate_position(
     pnl_r = compute_unrealized_pnl_r(
         side=side, entry_price=entry_price, last_price=last_price, atr_pct=atr_pct,
     )
+
+    # Phase 3 — per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L
+    # throttle). BEFORE the #26 FSM: a calendar-forced flat is unconditional
+    # venue reality (weekend/RTH close imminent), so it pre-empts. always_on (A)
+    # NEVER fires → A byte-identical. Fires on TIME only — never pnl/drawdown.
+    if await run_session_forced_exit(
+        conn=conn, state=state, pos=pos, pnl_r=pnl_r, now_ts=now_ts,
+        close_specific=close_specific, lookup_regime=lookup_regime,
+        gpt_client=gpt_client, phase=phase, real_roundtrip=real_roundtrip,
+        okx_adapter=okx_adapter, capital_session=capital_session,
+    ):
+        return
 
     # #26 — precise exits FIRST (deterministic, every tick): track excursion,
     # ratchet the ATR-trailing stop, advance the MFE FSM, close on trail-stop /

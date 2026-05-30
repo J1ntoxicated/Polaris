@@ -17,6 +17,7 @@ related: [[aggressive-bias]], [[active-autonomous-vision]], [[ADR-002]]
 - **데이터 보강 → 판단 정밀·신속**: 부족한 데이터(뉴스·매크로·CoinGlass 펀딩/OI/청산·FRED·Quandl·MyFxBook 센티먼트) 충당 + 기술계산/AI콜로 더 정확하고 빠른 판단.
 - **근거 있는 거래**: 각종 데이터 → 레짐 확정 → 전략 확정 → 실시간 라이브 포지션 모니터 → 엑싯 확장.
 - **손실방어 + 공격적 수익 동시**: 손실방어는 **정밀 엑싯**(적응형 stop/타이밍)으로 달성한다 — 사이징 축소·진입 차단으로가 아니다.
+- **유한 자본 회전 (capital rotation, Jin 2026-05-30)**: 자본은 무한하지 않다(모든 venue 공통). 잔고가 차면 새 기회의 expected return이 기존 보유보다 충분히 높을 때 **약한 포지션 정리 → 자본 회수 → 더 나은 기회 진입**. best risk-adjusted 기회로 자본을 계속 회전시켜 수익 창출. ⚠️ rotation = **자본 효율 극대화이지 방어 throttle 아님**(flow_not_block 정합, P&L halt X, "지는 전략 재배분" 철학 일치). ([[project_capital_rotation]])
 - ⚠️ **구분(중요)**: 매크로/뉴스/alt-data 는 **진입 근거 SIGNAL · 레짐 evidence** 로 쓴다 (권장). 방어적 **차단·축소**(blackout/throttle)로 쓰는 것은 아래 "거부된 전제" 그대로 무효.
 
 ## Targets (DEMO ONLY)

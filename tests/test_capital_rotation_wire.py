@@ -477,6 +477,58 @@ async def test_evaluate_cold_candidate_cannot_beat_measured_negative_held(
 
 
 @pytest.mark.asyncio
+async def test_evaluate_no_fire_logs_reason_cold_candidate(
+    memdb: sqlite3.Connection, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Observability: when there ARE capital-blocked candidates + held but no
+    swap fires, the wire emits ONE logger.info stating WHY (so the OKX-availBal
+    silent stall is visible in the bot log). Behavior is unchanged — n still 0,
+    no close — only the diagnostic log is added."""
+    import logging
+
+    now = int(time.time())
+    _seed_position_row(
+        memdb, position_id="pos_weak_log", venue="okx", symbol="DOGE-USDT",
+        strategy="tsmom", regime="chop", opened_ts=now - 700,
+    )
+    _seed_losing_bars(memdb, symbol="DOGE-USDT", opened_ts=now - 700)
+    _seed_posterior(
+        memdb, ticker="DOGE-USDT", strategy="tsmom", regime="chop",
+        mu=-0.5, n_samples=30,
+    )
+    # Candidate cell COLD (n below min) — eligible victim exists but no winner.
+    _seed_posterior(
+        memdb, ticker="ETH-USDT", strategy="volume_burst", regime="bull_trend",
+        mu=0.9, n_samples=POSTERIOR_MIN_N - 5,
+    )
+    state = ProdLoopState()
+    register_rotation_candidate(
+        state, sig=_sig(symbol="ETH-USDT"), proposed_risk_pct=0.06,
+        venue="okx", binding_reason="sizing_zero",
+    )
+    close_mock = AsyncMock(return_value=True)
+    with caplog.at_level(logging.INFO, logger="polaris.scripts._production_rotation"):
+        n = await evaluate_capital_rotation(
+            memdb, state=state, now_ts=now, close_specific=close_mock,
+            lookup_regime=lambda c, v, s: ("bull_trend" if s == "ETH-USDT" else "chop"),
+            equity=79_000.0,
+        )
+    # Behavior byte-identical to the existing cold-candidate test: no fire.
+    assert n == 0
+    close_mock.assert_not_awaited()
+    assert state.rotations == []
+    # The no-fire reason is surfaced exactly once.
+    no_fire_logs = [
+        r.getMessage() for r in caplog.records if "no fire: reason=" in r.getMessage()
+    ]
+    assert len(no_fire_logs) == 1
+    msg = no_fire_logs[0]
+    assert "venue=okx" in msg
+    assert "candidates=1" in msg
+    assert "reason=all_candidates_cold" in msg
+
+
+@pytest.mark.asyncio
 async def test_evaluate_winners_never_touched(memdb: sqlite3.Connection) -> None:
     """A protected/harvest position is NEVER a victim even if it is the only
     held and the candidate is strong."""

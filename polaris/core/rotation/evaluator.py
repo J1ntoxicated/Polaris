@@ -431,6 +431,7 @@ def choose_rotation(
     venue: str,
     improvement_margin_usd: float = ROTATION_DEFAULT_IMPROVEMENT_MARGIN_USD,
     rotation_cost_usd_value: float | None = None,
+    reason_out: dict[str, object] | None = None,
 ) -> tuple[HeldPosition, RotationCandidate] | None:
     """Greedy single-best candidate vs single-weakest held, PER-VENUE only.
 
@@ -443,14 +444,27 @@ def choose_rotation(
     ``rotation_cost_usd_value`` may be injected (e.g. computed with live fee/
     slippage); when ``None`` a default per-name round-trip cost is derived from
     the candidate's ``proposed_size_usd`` and the victim's notional proxy.
+
+    ``reason_out`` is an OPTIONAL observability out-param: when a ``dict`` is
+    passed, the no-fire diagnosis is written into it (``reason`` plus the values
+    available at the decision point: ``weakest_victim`` / ``best_cand_edge`` /
+    ``e_held`` / ``e_new`` / ``margin`` / ``cost``). It NEVER affects the
+    fire/no-fire decision or the return value — pure observability so a silent
+    stall (capital-blocked + no swap) can be surfaced in the bot log. No-fire
+    reasons: ``no_held_or_candidates_on_venue`` / ``no_eligible_victim`` /
+    ``all_candidates_cold`` / ``below_margin``.
     """
     venue_holds = [p for p in held_positions if p.venue == venue]
     venue_cands = [c for c in blocked_candidates if c.venue == venue]
     if not venue_holds or not venue_cands:
+        if reason_out is not None:
+            reason_out["reason"] = "no_held_or_candidates_on_venue"
         return None
 
     victim = select_weakest(venue_holds, equity=equity)
     if victim is None:
+        if reason_out is not None:
+            reason_out["reason"] = "no_eligible_victim"
         return None
     assert victim.fwd_R_held is not None  # select_weakest guarantees finite R
     e_held = expected_dollar_edge_held(
@@ -475,6 +489,10 @@ def choose_rotation(
         if e_new > best_e_new or (e_new == best_e_new and edge > best_edge):
             best, best_e_new, best_edge = cand, e_new, edge
     if best is None:
+        if reason_out is not None:
+            reason_out["reason"] = "all_candidates_cold"
+            reason_out["weakest_victim"] = victim.position_id
+            reason_out["e_held"] = e_held
         return None
 
     cost = rotation_cost_usd_value
@@ -491,5 +509,13 @@ def choose_rotation(
     if not should_rotate(
         e_new=best_e_new, e_held=e_held, margin_usd=improvement_margin_usd, cost_usd=cost
     ):
+        if reason_out is not None:
+            reason_out["reason"] = "below_margin"
+            reason_out["weakest_victim"] = victim.position_id
+            reason_out["best_cand_edge"] = best_edge
+            reason_out["e_held"] = e_held
+            reason_out["e_new"] = best_e_new
+            reason_out["margin"] = improvement_margin_usd
+            reason_out["cost"] = cost
         return None
     return victim, best

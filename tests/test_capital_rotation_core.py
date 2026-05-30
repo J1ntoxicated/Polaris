@@ -382,6 +382,98 @@ def test_choose_rotation_picks_best_candidate_against_weakest_held() -> None:
 
 
 # --------------------------------------------------------------------------
+# 7b. choose_rotation reason_out — observability ONLY (no behavior change).
+# A capital-blocked candidate that does not fire must surface WHY so a silent
+# stall is visible in the bot log. reason_out is a pure out-param: the
+# return value and fire/no-fire decision are unchanged whether it is passed.
+# --------------------------------------------------------------------------
+
+
+def test_reason_out_no_eligible_victim_all_winners() -> None:
+    # All held are winners (harvest) => no eligible victim, even with a strong
+    # candidate. The no-fire reason must be surfaced.
+    strong_cell = _cell_with_posterior(mu=0.60, sd=0.20, n=40)
+    cand = _candidate(cid="c1", venue="okx", cell=strong_cell, risk_pct=0.06)
+    winner_held = _held(pid="p", fwd_R=0.40, risk_pct=0.06, exit_state="harvest", pnl_r=0.4)
+    reason: dict[str, object] = {}
+    result = choose_rotation(
+        blocked_candidates=[cand],
+        held_positions=[winner_held],
+        equity=10_000.0,
+        venue="okx",
+        improvement_margin_usd=10.0,
+        reason_out=reason,
+    )
+    assert result is None  # behavior unchanged
+    assert reason["reason"] == "no_eligible_victim"
+
+
+def test_reason_out_all_candidates_cold() -> None:
+    # Candidate cell is cold (n<N) => ineligible; a measured-negative held exists
+    # (eligible victim) => the no-fire reason is the cold candidate, not the victim.
+    cold = _cold_cell(avg_pnl_r=0.80, n=5)
+    cand = _candidate(cid="cold", venue="okx", cell=cold, risk_pct=0.06)
+    weak = _held(pid="w", fwd_R=-0.30, risk_pct=0.06, pnl_r=-0.3)
+    reason: dict[str, object] = {}
+    result = choose_rotation(
+        blocked_candidates=[cand],
+        held_positions=[weak],
+        equity=10_000.0,
+        venue="okx",
+        improvement_margin_usd=10.0,
+        reason_out=reason,
+    )
+    assert result is None  # behavior unchanged
+    assert reason["reason"] == "all_candidates_cold"
+    assert reason["weakest_victim"] == "w"  # victim was found before the cold check
+
+
+def test_reason_out_below_margin() -> None:
+    # Slightly-better candidate but an absurd injected cost eats the improvement
+    # => below_margin. The diagnostic edges/margin/cost must be surfaced.
+    small_edge = _cell_with_posterior(mu=0.06, sd=0.05, n=40)
+    cand = _candidate(cid="c1", venue="okx", cell=small_edge, risk_pct=0.05, size_usd=1_000.0)
+    weak = _held(pid="w", fwd_R=-0.02, risk_pct=0.05, pnl_r=-0.02)
+    reason: dict[str, object] = {}
+    result = choose_rotation(
+        blocked_candidates=[cand],
+        held_positions=[weak],
+        equity=10_000.0,
+        venue="okx",
+        improvement_margin_usd=5.0,
+        rotation_cost_usd_value=10_000.0,  # absurd cost => never worth it
+        reason_out=reason,
+    )
+    assert result is None  # behavior unchanged
+    assert reason["reason"] == "below_margin"
+    assert reason["weakest_victim"] == "w"
+    assert reason["cost"] == pytest.approx(10_000.0)
+    assert "e_held" in reason and "e_new" in reason and "margin" in reason
+
+
+def test_reason_out_omitted_leaves_behavior_identical() -> None:
+    # Without reason_out the function behaves EXACTLY as before (return value and
+    # decision unchanged) — pins that the out-param is pure observability.
+    strong_cell = _cell_with_posterior(mu=0.60, sd=0.20, n=40)
+    cand = _candidate(cid="c1", venue="okx", cell=strong_cell, risk_pct=0.06)
+    weak = _held(pid="w1", fwd_R=-0.50, risk_pct=0.06, pnl_r=-0.5)
+    with_reason: dict[str, object] = {}
+    fired_with = choose_rotation(
+        blocked_candidates=[cand], held_positions=[weak], equity=10_000.0,
+        venue="okx", improvement_margin_usd=10.0, reason_out=with_reason,
+    )
+    fired_without = choose_rotation(
+        blocked_candidates=[cand], held_positions=[weak], equity=10_000.0,
+        venue="okx", improvement_margin_usd=10.0,
+    )
+    # A fire returns the same (victim, winner); reason_out stays empty on a fire.
+    assert fired_with is not None and fired_without is not None
+    assert fired_with[0].position_id == fired_without[0].position_id
+    assert fired_with[1].candidate_id == fired_without[1].candidate_id
+    assert with_reason == {}  # no reason written when it fires
+
+
+# --------------------------------------------------------------------------
 # Param surface sanity — defaults exist and are env-tunable constants.
 # --------------------------------------------------------------------------
 

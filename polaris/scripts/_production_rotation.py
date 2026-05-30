@@ -300,14 +300,32 @@ async def _rotate_one_venue(
     if not held:
         return False
 
+    reason_out: dict[str, object] = {}
     chosen = choose_rotation(
         blocked_candidates=candidates,
         held_positions=held,
         equity=equity,
         venue=venue,
         improvement_margin_usd=improvement_margin_usd,
+        reason_out=reason_out,
     )
     if chosen is None:
+        # Observability: there ARE capital-blocked candidates + held on this venue
+        # but no swap fired — surface WHY so a silent capital-blocked stall (the
+        # OKX-availBal case that needed a forensic trace) is visible in the bot
+        # log. logger.info (not debug) is safe here: this point is only reached
+        # when candidates+held both exist, so it is not per-tick spam. Pure
+        # logging — the no-fire decision above is unchanged.
+        logger.info(
+            "[rotation] venue=%s candidates=%d but no fire: reason=%s "
+            "(weakest_victim=%s best_cand_edge=%s e_held=%s e_new=%s "
+            "margin=%s cost=%s)",
+            venue, len(candidates), reason_out.get("reason", "unknown"),
+            reason_out.get("weakest_victim", "-"),
+            reason_out.get("best_cand_edge", "-"),
+            reason_out.get("e_held", "-"), reason_out.get("e_new", "-"),
+            reason_out.get("margin", "-"), reason_out.get("cost", "-"),
+        )
         return False
     victim, winner = chosen
     meta = id_map.get(victim.position_id, {})

@@ -9,6 +9,17 @@ to Polaris' 4 canonical regime labels (``bull_trend`` / ``bear_trend`` / ``chop`
   funding:      < -0.001 → bear ; > 0.003 → bull
   VIX:          > 40 (or HY > 500) → crisis ; > 25 → bear ; < 15 (& HY<300) → bull
 
+Per asset-class branch (matched on the ``underlying_group_id`` prefix):
+
+  crypto:*                          → crypto F&G + funding scorers
+  forex:* / index:* / commodity:* / equity:* → FRED macro scorer
+
+Stream C (Alpaca US equity, ``equity:*``) is MACRO-sensitive — it reuses the
+SAME FRED macro scorer (VIX / HY) and the SAME conservative conviction floor
++ lower-credible discipline as the FX/index/commodity branch. Crypto and FX
+outputs are byte-identical (each branch only runs the scorers for its own
+routed sources; absent sources are no-ops as before).
+
 Output contract:
   ``(regime_hint, confidence, evidence)``
   - ``regime_hint`` = winning label ONLY if ``best_score >= 1.5`` (conviction
@@ -61,9 +72,15 @@ def fuse_evidence(
     scores: dict[str, float] = {_BULL: 0.0, _BEAR: 0.0, _CHOP: 0.0, _CRISIS: 0.0}
     evidence: dict[str, Any] = {}
 
-    _score_crypto_fg(sources.get("crypto_fg"), scores, evidence)
-    _score_funding(sources.get("okx_funding"), scores, evidence)
-    _score_macro(sources.get("fred_macro"), scores, evidence)
+    prefix = underlying_group_id.split(":", 1)[0]
+    if prefix == "crypto":
+        _score_crypto_fg(sources.get("crypto_fg"), scores, evidence)
+        _score_funding(sources.get("okx_funding"), scores, evidence)
+    else:
+        # forex / index / commodity / equity — all macro-sensitive. Equity
+        # (Stream C / Alpaca) reuses the SAME FRED macro scorer + conservative
+        # conviction floor as the FX/index/commodity branch.
+        _score_macro(sources.get("fred_macro"), scores, evidence)
 
     if not evidence:
         return None, 0.0, {}

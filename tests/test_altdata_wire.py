@@ -349,6 +349,105 @@ def test_weak_evidence_below_floor_is_price_only(memdb: sqlite3.Connection) -> N
 
 
 # ---------------------------------------------------------------------------
+# Equity (Stream C / Alpaca) — macro evidence populates evidence_json
+# ---------------------------------------------------------------------------
+
+
+def test_equity_macro_populates_evidence_json(memdb: sqlite3.Connection) -> None:
+    """An alpaca/equity group now gets macro regime EVIDENCE: a crisis VIX
+    populates evidence_json for the equity:* group (was price-only before)."""
+    cache = _StubCache({"fred_macro": {"vix": 45.0, "hy_spread": 620.0}})
+    import polaris.scripts._production_layers as pl
+
+    orig = pl.compute_real_regime
+    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    try:
+        compute_and_flip_regime(
+            memdb, venue="alpaca", underlying_group_id="equity:AAPL",
+            bars=_bars_series_chop(), now_ts=1000, altdata_cache=cache,
+        )
+    finally:
+        pl.compute_real_regime = orig  # type: ignore[assignment]
+    row = _regime_row(memdb, "alpaca", "equity:AAPL")
+    assert row is not None
+    ev = json.loads(row[2])
+    assert ev.get("vix") == 45.0  # equity now carries macro evidence
+    assert ev.get("hy_spread") == 620.0
+
+
+def test_equity_neutral_macro_no_override(memdb: sqlite3.Connection) -> None:
+    """Neutral macro → None hint → price-only equity regime stands (no throttle)."""
+    cache = _StubCache({"fred_macro": {"vix": 18.0, "hy_spread": 350.0}})
+    import polaris.scripts._production_layers as pl
+
+    orig = pl.compute_real_regime
+    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    try:
+        out = compute_and_flip_regime(
+            memdb, venue="alpaca", underlying_group_id="equity:SPY",
+            bars=_bars_series_chop(), now_ts=1000, altdata_cache=cache,
+        )
+        assert out == "chop"  # price candidate, not overridden
+    finally:
+        pl.compute_real_regime = orig  # type: ignore[assignment]
+
+
+def test_equity_missing_fred_is_price_only(memdb: sqlite3.Connection) -> None:
+    """Missing FRED source → {} → price-only equity regime (correct fallback)."""
+    cache = _StubCache({})  # no fresh macro at all (keyless FRED)
+    import polaris.scripts._production_layers as pl
+
+    orig = pl.compute_real_regime
+    pl.compute_real_regime = lambda _bars: "bull_trend"  # type: ignore[assignment]
+    try:
+        out = compute_and_flip_regime(
+            memdb, venue="alpaca", underlying_group_id="equity:MSFT",
+            bars=_bars_series_chop(), now_ts=1000, altdata_cache=cache,
+        )
+        assert out == "bull_trend"
+    finally:
+        pl.compute_real_regime = orig  # type: ignore[assignment]
+    row = _regime_row(memdb, "alpaca", "equity:MSFT")
+    assert json.loads(row[2]) == {}  # no evidence → empty-object default
+
+
+def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> None:
+    """A NON-crisis equity macro hint STILL needs 2 consecutive closes.
+
+    Uses a calm-macro bull hint (not crisis — crisis has a pre-existing
+    immediate-flip rule that is unchanged here). Price says chop; the bull
+    hint becomes the candidate but only flips after the 2nd consecutive close.
+    """
+    detect_regime_flip(
+        memdb, venue="alpaca", underlying_group_id="equity:AAPL",
+        candidate="bear_trend", now_ts=900,
+    )
+    cache = _StubCache({"fred_macro": {"vix": 12.0, "hy_spread": 250.0}})  # → bull
+    import polaris.scripts._production_layers as pl
+
+    orig = pl.compute_real_regime
+    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    try:
+        out1 = compute_and_flip_regime(
+            memdb, venue="alpaca", underlying_group_id="equity:AAPL",
+            bars=_bars_series_chop(), now_ts=1000, altdata_cache=cache,
+        )
+        # First close of the hinted bull candidate: NOT yet flipped (gate holds).
+        assert out1 == "bear_trend"  # prior SSOT (pending)
+        row = _regime_row(memdb, "alpaca", "equity:AAPL")
+        assert row[3] == "bull_trend"  # candidate tracked
+        assert json.loads(row[2]).get("vix") == 12.0  # evidence written
+        # Second consecutive close confirms (gate honored, not bypassed).
+        out2 = compute_and_flip_regime(
+            memdb, venue="alpaca", underlying_group_id="equity:AAPL",
+            bars=_bars_series_chop(), now_ts=1060, altdata_cache=cache,
+        )
+        assert out2 == "bull_trend"
+    finally:
+        pl.compute_real_regime = orig  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
 # altdata_snapshot persistence
 # ---------------------------------------------------------------------------
 

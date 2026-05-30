@@ -6,6 +6,8 @@ a given ``underlying_group_id`` by asset-class prefix:
 
   - ``crypto:*``                 → okx_funding + crypto_fg + coinglass
   - ``forex:* / index:* / commodity:*`` → fred_macro + myfxbook (forex only)
+  - ``equity:*``                 → fred_macro (Stream C / Alpaca US equity is
+                                   MACRO-sensitive: VIX / HY / risk-on-off)
 
 There is NO write path to positions / learner / risk state — this cache feeds
 the regime fuser as read-only evidence context only.
@@ -23,6 +25,7 @@ _GROUP_SOURCES: dict[str, tuple[str, ...]] = {
     "forex": ("fred_macro", "myfxbook"),
     "index": ("fred_macro",),
     "commodity": ("fred_macro",),
+    "equity": ("fred_macro",),
 }
 
 

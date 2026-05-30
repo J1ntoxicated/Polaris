@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 __all__ = [
+    "GUARD_TOKEN_BY_PRODUCT_CLASS",
     "STREAMS",
     "VENUE_TO_STREAM",
     "SizingProfile",
@@ -31,9 +32,39 @@ __all__ = [
     "Track",
     "derive_leverage",
     "fallback_leverage_for_asset_class",
+    "guard_token_for_product_class",
     "resolve_stream",
     "resolve_stream_profile",
 ]
+
+# Per-stream G4 pre-entry guard tokens (gate architecture Phase 2). The token
+# names WHICH fast-path-eligibility guard applies to a stream, keyed on
+# ``product_class``. ``StreamProfile.guard_hooks`` carries the token (resolved
+# once via ``from_stream``); G4's ``is_fast_path_eligible`` reads it to dispatch
+# the correct per-stream eligibility check. This is an EFFICIENCY/eligibility
+# seam (skip the slow GPT watcher when clean), NEVER an entry block: a
+# not-eligible signal always falls through to the slow GPT path. NOT a T4
+# multiplier — it touches no notional.
+GUARD_TOKEN_BY_PRODUCT_CLASS: dict[str, str] = {
+    "spot": "crypto_spread_listing",  # A — spread-vs-baseline + listing_age (legacy)
+    "cfd": "cfd_session_state",  # B — market open / rollover / FX-session shock
+    "equity": "equity_rth_pdt_gap",  # C — RTH boundary + PDT state + opening gap
+}
+# Unmapped product_class -> legacy crypto guard (safe default; never blocks).
+_GUARD_TOKEN_DEFAULT = "crypto_spread_listing"
+
+
+def guard_token_for_product_class(product_class: str) -> str:
+    """Return the G4 pre-entry guard token for a ``product_class`` (Phase 2).
+
+    Pure mapping (``spot``→crypto, ``cfd``→session, ``equity``→RTH/PDT/gap). An
+    unmapped class degrades to the legacy crypto guard so an unknown stream still
+    gets a well-defined (never-blocking) eligibility check. The guard decides
+    fast-path eligibility only — it is NOT a throttle and touches no sizing.
+    """
+    return GUARD_TOKEN_BY_PRODUCT_CLASS.get(
+        (product_class or "").strip().lower(), _GUARD_TOKEN_DEFAULT
+    )
 
 StreamId = Literal["A_okx_crypto", "B_capital_cfd", "C_alpaca_equity"]
 Track = Literal["A", "B", "C"]
@@ -290,11 +321,16 @@ class StreamProfile:
 
     Phase 0 is a STRUCTURAL ENABLER ONLY: the fields below merely mirror the
     StreamConfig values the pipeline already uses, so threading the profile
-    produces byte-identical gate decisions today. The reserved hook fields
-    (``regime_evidence`` / ``guard_hooks``) are intentionally EMPTY and unread in
-    P0 — they are the place where P1+ phases attach per-stream evidence/guards
-    WITHOUT re-plumbing GateContext. Stream supplies leverage/caps/dispatch/
-    context only — NEVER a T4 multiplier (9-stack collapse stays blocked).
+    produces byte-identical gate decisions today. ``regime_evidence`` stays the
+    empty seam P1+ regime phases will fill.
+
+    Phase 2 fills ``guard_hooks``: ``from_stream`` populates it with the
+    per-stream G4 pre-entry guard token (``guard_token_for_product_class`` keyed
+    on ``product_class``). G4 reads ``guard_hooks`` to dispatch the correct
+    fast-path-eligibility guard (A crypto / B session / C RTH-PDT-gap). This is
+    an EFFICIENCY/eligibility seam, NEVER an entry block — Stream supplies
+    leverage/caps/dispatch/context only, NEVER a T4 multiplier (9-stack collapse
+    stays blocked).
     """
 
     stream_id: StreamId
@@ -313,7 +349,12 @@ class StreamProfile:
 
     @classmethod
     def from_stream(cls, cfg: StreamConfig) -> StreamProfile:
-        """Project a :class:`StreamConfig` into a P0 (hook-empty) profile."""
+        """Project a :class:`StreamConfig` into a profile (Phase 2 guard token).
+
+        ``guard_hooks`` carries the per-stream G4 pre-entry guard token derived
+        from ``product_class`` (Phase 2). ``regime_evidence`` stays the empty
+        P1+ regime seam.
+        """
         return cls(
             stream_id=cfg.stream_id,
             venue=cfg.venue,
@@ -324,6 +365,7 @@ class StreamProfile:
             allow_short=cfg.allow_short,
             leverage_source=cfg.sizing_profile.leverage_source,
             external_reject_codes=cfg.external_reject_codes,
+            guard_hooks=frozenset({guard_token_for_product_class(cfg.product_class)}),
         )
 
 

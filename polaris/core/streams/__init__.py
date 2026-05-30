@@ -10,6 +10,7 @@ multiplicative chain is untouched (9-stack collapse stays blocked).
 """
 
 from polaris.core.streams.config import (
+    GUARD_TOKEN_BY_PRODUCT_CLASS,
     STREAMS,
     VENUE_TO_STREAM,
     SizingProfile,
@@ -19,11 +20,13 @@ from polaris.core.streams.config import (
     Track,
     derive_leverage,
     fallback_leverage_for_asset_class,
+    guard_token_for_product_class,
     resolve_stream,
     resolve_stream_profile,
 )
 
 __all__ = [
+    "GUARD_TOKEN_BY_PRODUCT_CLASS",
     "STREAMS",
     "VENUE_TO_STREAM",
     "SizingProfile",
@@ -33,6 +36,7 @@ __all__ = [
     "Track",
     "derive_leverage",
     "fallback_leverage_for_asset_class",
+    "guard_token_for_product_class",
     "resolve_stream",
     "resolve_stream_profile",
 ]

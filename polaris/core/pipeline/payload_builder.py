@@ -53,6 +53,14 @@ from polaris.core.pipeline._sizer_payload import (
     build_sizer_payload,
     default_strategy_risk_state,
 )
+from polaris.core.pipeline.agents._stream_guards import (
+    GUARD_CFD,
+    GUARD_EQUITY,
+    cfd_market_open_at,
+    cfd_rollover_window_at,
+    cfd_session_open_shock_at,
+    equity_session_state_for,
+)
 from polaris.core.pipeline.net_edge import (
     gross_edge_r,
     net_edge_r,
@@ -261,6 +269,35 @@ class TickWindowEntry(dict[str, Any]):
     """Lightweight typed alias — bid/ask/mid + ts in a dict shape G4 expects."""
 
 
+def _add_stream_guard_inputs(
+    payload: dict[str, Any],
+    *,
+    stream_profile: StreamProfile,
+    now_ts: int | float,
+    daytrade_count: int,
+    opening_gap_window: bool,
+) -> None:
+    """Stamp the per-stream G4 fast-path-eligibility SESSION inputs (Phase 2).
+
+    Dispatches on the profile's ``guard_hooks`` token. B (cfd) gets the FX/indices
+    clock inputs (market-open / rollover / session-open shock). C (equity) gets
+    the RTH state + PDT day-trade-count + opening-gap inputs (RTH via the reused
+    ``us_equity_session_state``). A (crypto/spot) adds nothing (legacy hints
+    already cover it) — so A stays byte-identical. Eligibility inputs only; no
+    entry is blocked and no sizing is touched.
+    """
+    hooks = stream_profile.guard_hooks
+    if GUARD_CFD in hooks:
+        payload["cfd_market_open"] = cfd_market_open_at(now_ts)
+        payload["cfd_rollover_window"] = cfd_rollover_window_at(now_ts)
+        # FX session-open shock overrides the crypto-shaped default hardcode.
+        payload["session_open_shock_window"] = cfd_session_open_shock_at(now_ts)
+    elif GUARD_EQUITY in hooks:
+        payload["equity_session_state"] = equity_session_state_for(now_ts)
+        payload["daytrade_count"] = int(daytrade_count)
+        payload["opening_gap_window"] = bool(opening_gap_window)
+
+
 def build_watcher_payload(
     *,
     spread_bps: float,
@@ -273,13 +310,24 @@ def build_watcher_payload(
     signal_strength: float | None = None,
     atr_pct: float | None = None,
     stream_profile: StreamProfile | None = None,
+    now_ts: int | float | None = None,
+    daytrade_count: int = 0,
+    opening_gap_window: bool = False,
 ) -> dict[str, Any]:
     """Compose G4 input payload (fast-path hints + tick window).
 
-    Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
-    but NOT read in P0 — the cost_model used for the T14 net-edge keys still
-    derives from ``resolve_stream(venue)`` exactly as before, so the output is
-    byte-identical with or without the profile (behavior-identity enabler).
+    Gate architecture Phase 2: when ``stream_profile`` is a B (cfd) / C (equity)
+    stream AND ``now_ts`` is supplied, the per-stream fast-path-eligibility
+    SESSION inputs are ADDED so G4 evaluates the stream-correct guard instead of
+    the crypto ``session_open_shock_window=False`` hardcode:
+    - B (cfd): ``cfd_market_open`` / ``cfd_rollover_window`` /
+      ``session_open_shock_window`` (FX/indices clock).
+    - C (equity): ``equity_session_state`` (RTH boundary) / ``daytrade_count``
+      (PDT) / ``opening_gap_window``.
+    These are EFFICIENCY/eligibility inputs only — a not-eligible signal flows to
+    the slow GPT path, NEVER blocked, NEVER a sizing multiplier. When ``now_ts``
+    is omitted (or for stream A / no profile) NO per-stream key is added, so the
+    legacy callers get the byte-identical pre-Phase-2 payload (A parity intact).
 
     The validated_signal field is stamped by G3 and propagated by the
     orchestrator's ``_stamp_payload`` — caller does not duplicate it here.
@@ -293,7 +341,6 @@ def build_watcher_payload(
     ``venue`` get the byte-identical pre-T14 payload — the OKX behavior-identity
     invariant is preserved.
     """
-    del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     payload: dict[str, Any] = {
         "spread_bps": float(spread_bps),
         "baseline_p50_spread_bps": float(baseline_p50_spread_bps),
@@ -302,6 +349,14 @@ def build_watcher_payload(
         "session_open_shock_window": bool(session_open_shock_window),
         "tick_window": tick_window or [],
     }
+    if stream_profile is not None and now_ts is not None:
+        _add_stream_guard_inputs(
+            payload,
+            stream_profile=stream_profile,
+            now_ts=now_ts,
+            daytrade_count=daytrade_count,
+            opening_gap_window=opening_gap_window,
+        )
     if venue is not None:
         cost_model = resolve_stream(venue).cost_model
         cost = roundtrip_cost_r(spread_bps=float(spread_bps), cost_model=cost_model)

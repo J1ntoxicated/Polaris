@@ -19,13 +19,19 @@ Aggressive bias preserved — fast-path PROCEED stays unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from polaris.core.pipeline.agents._gpt_client import (
     DEFAULT_TIMEOUT_SEC,
     GPTCallResult,
     call_gpt,
     make_system_prefix,
+)
+from polaris.core.pipeline.agents._stream_guards import (
+    GUARD_CFD,
+    GUARD_EQUITY,
+    cfd_fast_path_eligible,
+    equity_fast_path_eligible,
 )
 from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
@@ -36,6 +42,9 @@ from polaris.core.pipeline.gate_state import (
     GateDecision,
     GateResult,
 )
+
+if TYPE_CHECKING:
+    from polaris.core.streams import StreamProfile
 
 __all__ = [
     "FastPathContext",
@@ -52,7 +61,15 @@ WATCHER_MAX_TOKENS: Final[int] = 150
 
 @dataclass(frozen=True, slots=True)
 class FastPathContext:
-    """Inputs for fast-path eligibility (Q7 spec)."""
+    """Inputs for fast-path eligibility (Q7 spec + Phase 2 per-stream guards).
+
+    The first block is the legacy crypto (stream A) input set. The trailing
+    fields (defaulted so A construction is unchanged) carry the per-stream
+    session inputs read by the B (cfd) / C (equity) guards — supplied by
+    ``build_watcher_payload`` from the reused session modules. They are
+    eligibility inputs only: a not-eligible signal flows to the slow GPT path,
+    never blocked.
+    """
 
     cell_quartile: str  # "top" | "mid" | "bottom" | "cold"
     signal_strength: float  # validated_signal.strength
@@ -61,10 +78,32 @@ class FastPathContext:
     recent_reject_in_6h: bool
     listing_age_hours: float
     session_open_shock_window: bool
+    # B (cfd) session-state inputs (default = open & calm → no effect on A/C).
+    cfd_market_open: bool = True
+    cfd_rollover_window: bool = False
+    # C (equity) RTH / PDT / opening-gap inputs (defaults → no effect on A/B).
+    equity_session_state: str = "rth"
+    opening_gap_window: bool = False
+    daytrade_count: int = 0
 
 
-def is_fast_path_eligible(fp: FastPathContext) -> bool:
-    """Q7 spec: ALL conditions must hold to skip Haiku call."""
+def is_fast_path_eligible(
+    fp: FastPathContext, stream_profile: StreamProfile | None = None
+) -> bool:
+    """Whether G4 may skip the slow GPT watcher (per-stream guard, Phase 2).
+
+    Dispatches on the ``StreamProfile.guard_hooks`` token (resolved once via
+    ``guard_token_for_product_class``): B → CFD session-state guard, C → equity
+    RTH/PDT/gap guard. With NO profile (or any non-B/C token) the LEGACY crypto
+    (stream A) logic runs verbatim — byte-identical, so A is unaffected. This is
+    an EFFICIENCY/eligibility decision, NEVER an entry block.
+    """
+    hooks = stream_profile.guard_hooks if stream_profile is not None else frozenset()
+    if GUARD_CFD in hooks:
+        return cfd_fast_path_eligible(fp)
+    if GUARD_EQUITY in hooks:
+        return equity_fast_path_eligible(fp)
+    # A (crypto/spot) — legacy logic, byte-identical (Q7 spec).
     if fp.cell_quartile != "top":
         return False
     if fp.signal_strength < 1.25:
@@ -126,7 +165,10 @@ async def pre_entry_watcher_gate(
     # Fast-path
     fp = fast_path_ctx
     if fp is None:
-        # Build a default conservative FastPathContext from payload hints.
+        # Build a default conservative FastPathContext from payload hints. The
+        # per-stream (B/C) session inputs are read from the payload when
+        # build_watcher_payload supplied them; their defaults (open & calm /
+        # rth) keep A unchanged.
         fp = FastPathContext(
             cell_quartile=str(ctx.payload.get("cell_quartile", "mid")),
             signal_strength=float(validated.get("strength_scalar", 1.0)),
@@ -135,8 +177,13 @@ async def pre_entry_watcher_gate(
             recent_reject_in_6h=bool(ctx.payload.get("recent_reject_in_6h", False)),
             listing_age_hours=float(ctx.payload.get("listing_age_hours", 9999.0)),
             session_open_shock_window=bool(ctx.payload.get("session_open_shock_window", False)),
+            cfd_market_open=bool(ctx.payload.get("cfd_market_open", True)),
+            cfd_rollover_window=bool(ctx.payload.get("cfd_rollover_window", False)),
+            equity_session_state=str(ctx.payload.get("equity_session_state", "rth")),
+            opening_gap_window=bool(ctx.payload.get("opening_gap_window", False)),
+            daytrade_count=int(ctx.payload.get("daytrade_count", 0)),
         )
-    if is_fast_path_eligible(fp):
+    if is_fast_path_eligible(fp, ctx.stream_profile):
         return GateResult(
             decision=GateDecision.PROCEED,
             next_gate=GATE_ENTRY_SIZER,

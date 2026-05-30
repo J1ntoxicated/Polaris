@@ -79,13 +79,15 @@ def test_resolve_stream_profile_mirrors_streamconfig() -> None:
         assert prof.external_reject_codes == cfg.external_reject_codes
 
 
-def test_stream_profile_hooks_empty_in_p0() -> None:
-    """Reserved per-stream enrichment hooks are EMPTY + unread in P0 — they are
-    the seam P1+ phases fill, never a P0 decision input."""
+def test_stream_profile_hooks_seam() -> None:
+    """``regime_evidence`` stays the empty P1+ regime seam. ``guard_hooks`` is
+    now FILLED (gate architecture Phase 2) with the per-stream G4 pre-entry guard
+    token — this is the documented enrichment point, not a P0 decision input."""
     for venue in _VENUES:
         prof = resolve_stream_profile(venue)
         assert prof.regime_evidence == frozenset()
-        assert prof.guard_hooks == frozenset()
+        assert prof.guard_hooks  # Phase 2: populated per product_class
+        assert len(prof.guard_hooks) == 1
 
 
 def test_stream_profile_is_frozen() -> None:

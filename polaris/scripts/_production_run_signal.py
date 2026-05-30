@@ -37,6 +37,8 @@ from polaris.core.pipeline.gate_state import (
 )
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import (
+    StreamConfig,
+    asset_class_allowed_for_venue,
     derive_leverage,
     resolve_stream,
     resolve_stream_profile,
@@ -88,6 +90,20 @@ def _maybe_register_rotation_candidate(
             binding_reason=f"sizing_zero:{r.payload.get('binding_cap', '?')}",
         )
         return
+
+
+def _assert_stream_asset_class_coherent(stream: StreamConfig, asset_class: str) -> bool:
+    """True iff ``asset_class`` belongs on ``stream``'s venue (STEP 4 guard).
+
+    Runtime regression catch for the STEP 2 routing correction: if a crypto tag
+    leaks back into the Capital B-stream (e.g. a stale universe row or a future
+    nav-tree change re-admits crypto CFDs), this returns ``False`` so the caller
+    drops/flags the signal instead of sizing an off-venue (wrong-leverage)
+    position. Delegates to the SSOT (``asset_class_allowed_for_venue``) — an
+    unregistered venue stays permissive. This is a coherence/routing assertion,
+    NOT a defensive throttle (a coherent signal is never touched).
+    """
+    return asset_class_allowed_for_venue(stream.venue, asset_class)
 
 
 def _read_universe_state(
@@ -167,6 +183,18 @@ async def run_pipeline_for_signal(
     # Stream SSOT lookup (design §2.1) replaces the venue-binary track branch.
     # Track is identical to the prior literal (A_okx_crypto→A, B_capital_cfd→B).
     stream = resolve_stream(venue)
+    # STEP 4 (coherence guard): the symbol's asset_class MUST belong on this
+    # stream's venue (Jin 2026-05-30 STEP 0 (a) — crypto on OKX, FX/index/
+    # commodity on Capital). If a crypto tag leaks back into the Capital
+    # B-stream (stale universe row / future nav change), drop the signal here
+    # before it sizes with the wrong leverage. Routing coherence, NOT a throttle.
+    if not _assert_stream_asset_class_coherent(stream, asset_class):
+        logger.warning(
+            "[stream-coherence] DROP off-venue signal %s asset_class=%r not in "
+            "stream %s asset_classes=%s (crypto belongs on OKX track A)",
+            instrument_id, asset_class, stream.stream_id, sorted(stream.asset_classes),
+        )
+        return
     track: Any = stream.track
     # T7: per-market leverage. OKX spot stays the INVARIANT fixed 1.0; Capital
     # CFD derives leverage from the symbol's asset_class (FX 30 / index 20 /

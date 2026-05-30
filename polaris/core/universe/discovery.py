@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
+from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.core.universe._alpaca import (
     fetch_alpaca_instruments,
     refresh_alpaca_universe,
@@ -307,9 +308,18 @@ def persist_universe(
     ``is_active_set`` = set of `instrument_id` that survived 4-axis filter; rows
     not in the set are written with ``is_active=0`` and an ``active_reason``
     explaining which axis failed (vol / spread / atr / depth / state).
+
+    ``is_active_set=None`` means "no selection ran" → every row is marked active
+    (legacy seed/test path). An **empty** set is honored as "nothing active"
+    (STEP 3: off-session Capital → all rows persist with ``is_active=0`` and a
+    ``session_wait`` reason, reviving next refresh) — it is NOT treated as None.
     """
     th = thresholds or default_thresholds()
-    active_ids = is_active_set or {ins.instrument_id for ins in instruments}
+    active_ids = (
+        {ins.instrument_id for ins in instruments}
+        if is_active_set is None
+        else is_active_set
+    )
     rows = []
     for ins in instruments:
         is_active = ins.instrument_id in active_ids
@@ -394,8 +404,23 @@ async def refresh_capital_universe(
 
 
 def _filter_failure_reason(ins: UniverseInstrument, th: FilterThresholds) -> str:
-    """First-failing axis name for the 4-axis hard filter (used in `active_reason`)."""
+    """First-failing axis name for the 4-axis hard filter (used in `active_reason`).
+
+    STEP 2 (asset-class routing): a row whose ``asset_class`` is off its venue's
+    stream whitelist (e.g. a Capital crypto-CFD) is tagged ``off_venue_class:...``
+    — it never enters the active set (crypto → OKX track A).
+
+    STEP 3 (session asymmetry): a non-live CFD (Capital) row is a **session-wait**
+    — it is persisted (``is_active=0``) and revives automatically the next refresh
+    once the venue reports it TRADEABLE again, so the reason is tagged
+    ``session_wait:<state>`` (not a permanent ``state=...`` reject). Crypto (OKX,
+    24/7) and any genuinely halted/off venue keep the literal state reason.
+    """
+    if not asset_class_allowed_for_venue(ins.venue, ins.asset_class):
+        return f"off_venue_class:{ins.asset_class}"
     if ins.state != "live":
+        if ins.venue == "capital":
+            return f"session_wait:{ins.state}"
         return f"state={ins.state}"
     if ins.spread_bps > th.max_spread_bps:
         return f"spread_bps={ins.spread_bps:.1f}>{th.max_spread_bps}"

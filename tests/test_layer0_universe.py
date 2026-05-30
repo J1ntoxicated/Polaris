@@ -368,9 +368,12 @@ def test_capital_name_matches_p0_categories() -> None:
     from polaris.core.universe.discovery import CAPITAL_P0_CATEGORY_TOKENS
 
     assert _capital_name_matches({"name": "Forex"}, CAPITAL_P0_CATEGORY_TOKENS)
+    assert _capital_name_matches({"name": "Currencies"}, CAPITAL_P0_CATEGORY_TOKENS)
     assert _capital_name_matches({"name": "Indices"}, CAPITAL_P0_CATEGORY_TOKENS)
     assert _capital_name_matches({"name": "Commodities"}, CAPITAL_P0_CATEGORY_TOKENS)
-    assert _capital_name_matches({"name": "Crypto"}, CAPITAL_P0_CATEGORY_TOKENS)
+    # Crypto is OWNED by OKX track A (Jin 2026-05-30 STEP 0 (a)) — the "crypto"
+    # token was removed, so a standalone "Crypto" node no longer matches.
+    assert not _capital_name_matches({"name": "Crypto"}, CAPITAL_P0_CATEGORY_TOKENS)
     # Shares = P2 by spec; must NOT match.
     assert not _capital_name_matches({"name": "Shares"}, CAPITAL_P0_CATEGORY_TOKENS)
     assert not _capital_name_matches({"name": "ETFs"}, CAPITAL_P0_CATEGORY_TOKENS)

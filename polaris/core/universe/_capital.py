@@ -25,20 +25,23 @@ CAPITAL_BASE_DEMO = "https://demo-api-capital.backend-capital.com"
 CAPITAL_SESSION_PATH = "/api/v1/session"
 CAPITAL_NAV_PATH = "/api/v1/marketnavigation"
 
-# ADR-003 P0 categories (forex / indices / commodity / crypto). Shares = P2.
+# ADR-003 P0 categories restricted to the Capital B-stream whitelist
+# (forex / indices / commodity). Crypto is OWNED by OKX track A (Jin 2026-05-30
+# STEP 0 (a) — intended asset-class routing, not a throttle), so the "crypto"
+# token is removed here as an efficiency cut: the crypto_currencies_group walk
+# (~290 CFDs) is no longer fetched. ``currenc`` is RETAINED for the FX
+# "Currencies" node, but ``_classify_capital_node`` still tags crypto first, and
+# any crypto row that slips through a shared node is dropped downstream by
+# ``apply_stream_asset_class_filter`` (the SSOT enforcement in _ranking.py).
 # Match by name token (case-insensitive substring), not by nav-tree position.
-# Capital demo nav node names include underscores ("crypto_currencies_group",
-# "oil_markets_group", "commodities_group") so we keep the token list lower-case
-# and substring-only.
 CAPITAL_P0_CATEGORY_TOKENS: tuple[str, ...] = (
     "forex",
-    "currenc",  # "Currencies" / "crypto_currencies_group"
+    "currenc",  # "Currencies" (FX). crypto_currencies node skipped at walk time.
     "indic",  # "Indices"
     "commod",  # "Commodities"
     "metal",
     "energ",
     "oil",  # "oil_markets_group"
-    "crypto",
 )
 
 
@@ -88,7 +91,17 @@ async def fetch_capital_instruments(
         nav_resp = await cli.get(CAPITAL_NAV_PATH, headers=auth_headers)
         nav_resp.raise_for_status()
         nodes = nav_resp.json().get("nodes", [])
-        p0_nodes = [n for n in nodes if _capital_name_matches(n, category_tokens)]
+        # Token match selects P0 categories; the crypto skip (Jin 2026-05-30
+        # STEP 0 (a)) drops the crypto_currencies node that "currenc" would
+        # otherwise re-admit — crypto is OKX track A only. Pure efficiency: the
+        # SSOT enforcement (apply_stream_asset_class_filter) is still the hard
+        # guarantee downstream.
+        p0_nodes = [
+            n
+            for n in nodes
+            if _capital_name_matches(n, category_tokens)
+            and _classify_capital_node(str(n.get("name", ""))) != "crypto"
+        ]
 
         seen_epics: set[str] = set()
         out: list[UniverseInstrument] = []

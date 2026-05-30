@@ -30,6 +30,7 @@ __all__ = [
     "StreamId",
     "StreamProfile",
     "Track",
+    "asset_class_allowed_for_venue",
     "derive_leverage",
     "fallback_leverage_for_asset_class",
     "guard_token_for_product_class",
@@ -302,6 +303,50 @@ def resolve_stream(venue: str, product_class: str | None = None) -> StreamConfig
             f"{cfg.stream_id} (expected {cfg.product_class!r})"
         )
     return cfg
+
+
+# Asset-class spelling normalization (STEP 2/4 SSOT enforcement). The universe
+# classifier emits ``indices`` (plural) and ``commodities`` while StreamConfig
+# encodes the canonical singular ``index`` / ``commodity``; map both spellings
+# onto the canonical token so the whitelist compares like-for-like. Unknown
+# tokens pass through unchanged (compared literally → not in the set → dropped).
+_ASSET_CLASS_CANON: dict[str, str] = {
+    "fx": "forex",
+    "forex": "forex",
+    "indices": "index",
+    "index": "index",
+    "commodities": "commodity",
+    "commodity": "commodity",
+    "crypto": "crypto",
+    "cryptocurrency": "crypto",
+    "cryptocurrencies": "crypto",
+    "equity": "equity",
+    "equities": "equity",
+}
+
+
+def asset_class_allowed_for_venue(venue: str, asset_class: str) -> bool:
+    """True iff ``asset_class`` is in the venue's stream whitelist (STEP 2/4 SSOT).
+
+    The single source of truth for "does this asset_class belong on this venue":
+    ``resolve_stream(venue).asset_classes``. Spelling is normalized first
+    (``indices``→``index``, ``commodities``→``commodity``, ``fx``→``forex``,
+    crypto plurals→``crypto``) so the universe classifier's plural labels match
+    StreamConfig's canonical singular tokens.
+
+    This is an intended **asset-class routing** correction (Jin 2026-05-30
+    STEP 0 (a): OKX=crypto, Capital=forex/index/commodity), NOT a defensive
+    throttle — a row on the wrong venue is mis-routed, not "too risky". An
+    **unregistered** venue returns ``True`` (no enforcement): smoke / unit
+    paths that fabricate venues stay unaffected.
+    """
+    v = (venue or "").lower()
+    stream_id = VENUE_TO_STREAM.get(v)
+    if stream_id is None:
+        return True
+    allowed = STREAMS[stream_id].asset_classes
+    canon = _ASSET_CLASS_CANON.get((asset_class or "").strip().lower(), (asset_class or "").strip().lower())
+    return canon in allowed
 
 
 # ---------------------------------------------------------------------------

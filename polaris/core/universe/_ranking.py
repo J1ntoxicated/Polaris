@@ -17,6 +17,7 @@ import os
 import statistics
 from collections.abc import Sequence
 
+from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.core.universe.schema import (
     ALLOWED_QUOTE_CCY_OKX,
     FOCUS_TARGET_MAX,
@@ -32,11 +33,49 @@ from polaris.core.universe.schema import (
 logger = logging.getLogger(__name__)
 
 
+def apply_stream_asset_class_filter(
+    instruments: list[UniverseInstrument],
+) -> list[UniverseInstrument]:
+    """Drop rows whose ``asset_class`` is not in their venue's stream whitelist.
+
+    STEP 2 SSOT enforcement (Jin 2026-05-30 STEP 0 (a)): the universe selection
+    now obeys ``resolve_stream(venue).asset_classes`` — A=OKX crypto, B=Capital
+    forex/index/commodity, C=Alpaca equity. This removes the Capital crypto-CFD
+    rows that the nav-tree walk pulled in, routing the crypto edge to OKX track A
+    where it belongs. An **unregistered** venue is untouched (permissive — smoke
+    paths). This is an INTENDED asset-class routing correction, NOT a defensive
+    throttle: a mis-venued row is re-routed, not deemed "too risky".
+    """
+    kept: list[UniverseInstrument] = []
+    dropped = 0
+    for ins in instruments:
+        if asset_class_allowed_for_venue(ins.venue, ins.asset_class):
+            kept.append(ins)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info(
+            "[universe] stream asset-class filter: %d → %d (dropped %d off-venue rows)",
+            len(instruments),
+            len(kept),
+            dropped,
+        )
+    return kept
+
+
 def _is_valid_candidate(ins: UniverseInstrument) -> bool:
     """Hard validity gate (kept hard): tradeable, live, OKX USDT-quote.
 
     Everything else (vol / spread / depth / atr) is a *ranking* signal, never a
     hard block — weak names still flow and the cell-matrix down-routes them.
+
+    STEP 3 (session asymmetry, Jin 2026-05-30): ``state != 'live'`` excludes a
+    row from the *active set*, but for CFD (Capital) this is a **session-wait**,
+    not a permanent drop — the row is still persisted (``is_active=0``,
+    ``session_wait`` reason) and re-enters automatically the next refresh once
+    the venue reports it TRADEABLE again. Capital trades only when its session is
+    open (off-session OKX 24/7 carries the book); the routing here is session
+    STATE, not a hard block (flow_not_block). Crypto (24/7) is unaffected.
     """
     if ins.state != "live":
         return False
@@ -83,7 +122,10 @@ def rank_active_universe(
     (all-tied) populations are safe — z-scores collapse to 0 and ordering is
     stable by input order.
     """
-    valid = [ins for ins in instruments if _is_valid_candidate(ins)]
+    # STEP 2: enforce the per-venue stream asset-class whitelist BEFORE validity
+    # ranking (Capital crypto-CFD rows are off-venue → routed to OKX track A).
+    scoped = apply_stream_asset_class_filter(instruments)
+    valid = [ins for ins in scoped if _is_valid_candidate(ins)]
     if not valid:
         return []
 

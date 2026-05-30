@@ -36,6 +36,36 @@ CREATE INDEX IF NOT EXISTS idx_gate_events_run
     ON gate_events(run_id, gate_id, created_ts);
 """
 
+# AI-conductor P0 SHADOW — deterministic technical rule vs live GPT decision.
+# One row per gate execution that ran a shadow technical rule (G3/G4 in P0).
+# INSTRUMENTATION ONLY — never read by the pipeline; feeds the next-session
+# acceptance gate (KILL/PASS-rate + agreement by regime / cell warmth).
+# Spec: .claude/plans/ai_conductor_architecture_2026-05-30.md (P0 shadow).
+DDL_GATE_SHADOW_EVENTS = """
+CREATE TABLE IF NOT EXISTS gate_shadow_events (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_id TEXT,
+    gate_id INTEGER NOT NULL,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    regime TEXT NOT NULL DEFAULT '',
+    technical_decision TEXT NOT NULL,
+    technical_scalar REAL NOT NULL DEFAULT 1.0,
+    technical_reason TEXT NOT NULL DEFAULT '',
+    technical_flags TEXT NOT NULL DEFAULT '',
+    gpt_decision TEXT NOT NULL DEFAULT '',
+    mismatch INTEGER NOT NULL DEFAULT 0,
+    cell_warm INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_GATE_SHADOW_EVENTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_gate_shadow_events_gate
+    ON gate_shadow_events(gate_id, regime, cell_warm, created_ts);
+"""
+
 DDL_AI_LESSONS = """
 CREATE TABLE IF NOT EXISTS ai_lessons (
     lesson_id TEXT PRIMARY KEY,

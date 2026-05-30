@@ -63,6 +63,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_FILLS_INDEX_VENUE_SYMBOL,
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,
+    DDL_GATE_SHADOW_EVENTS,
+    DDL_GATE_SHADOW_EVENTS_INDEX,
     DDL_LEARNER_BLOCKS,
     DDL_LEARNER_BLOCKS_INDEX,
     DDL_LEARNER_POSTERIOR,
@@ -132,6 +134,9 @@ ALL_DDL: tuple[str, ...] = (
     # Layer 2 — Pipeline
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,
+    # AI-conductor P0 SHADOW — technical-vs-GPT shadow decision log
+    DDL_GATE_SHADOW_EVENTS,
+    DDL_GATE_SHADOW_EVENTS_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,

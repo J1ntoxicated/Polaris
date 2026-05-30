@@ -259,10 +259,19 @@ class GateOrchestrator:
         return await strategy_signal_gate(ctx)
 
     async def _wrap_validator(self, ctx: GateContext) -> GateResult:
-        return await signal_validator_gate(ctx, client=self.haiku_client)
+        # ai_conductor P0 SHADOW: pass the conn so the G3 deterministic technical
+        # rule is computed + logged vs the live GPT decision (behavior 0 — the
+        # GPT decision is still what drives the pipeline).
+        return await signal_validator_gate(
+            ctx, client=self.haiku_client, shadow_conn=self.conn
+        )
 
     async def _wrap_watcher(self, ctx: GateContext) -> GateResult:
-        return await pre_entry_watcher_gate(ctx, client=self.haiku_client)
+        # ai_conductor P0 SHADOW: same as G3 — G4 technical rule logged in
+        # parallel (PROCEED default / stale-crossed KILL only); GPT still decides.
+        return await pre_entry_watcher_gate(
+            ctx, client=self.haiku_client, shadow_conn=self.conn
+        )
 
     async def _wrap_sizer(self, ctx: GateContext) -> GateResult:
         if self.conn is None:

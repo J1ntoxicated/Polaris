@@ -18,6 +18,8 @@ Aggressive bias preserved — fast-path PROCEED stays unchanged.
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -26,6 +28,10 @@ from polaris.core.pipeline.agents._gpt_client import (
     GPTCallResult,
     call_gpt,
     make_system_prefix,
+)
+from polaris.core.pipeline.agents._shadow_rules import (
+    g4_shadow_inputs_from_payload,
+    technical_watch_decision,
 )
 from polaris.core.pipeline.agents._stream_guards import (
     GUARD_CFD,
@@ -36,8 +42,10 @@ from polaris.core.pipeline.agents._stream_guards import (
 from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
 )
+from polaris.core.pipeline.agents.shadow_log import log_shadow_event
 from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
+    GATE_PRE_ENTRY_WATCHER,
     GateContext,
     GateDecision,
     GateResult,
@@ -142,15 +150,57 @@ def _validate_decision(parsed: dict[str, Any]) -> GateDecision | None:
     return GateDecision.PROCEED if decision == "PROCEED" else GateDecision.KILL
 
 
+def _log_g4_shadow(
+    ctx: GateContext,
+    shadow_conn: sqlite3.Connection | None,
+    gpt_decision: GateDecision | None,
+) -> None:
+    """Compute the G4 deterministic technical rule + log it vs the GPT decision.
+
+    AI-conductor P0 SHADOW (behavior 0): the technical decision is logged for the
+    acceptance gate and NEVER returned. KILL only on stale/crossed book;
+    spread/drift = flag; realized-vol not consulted; net_edge not consulted (all
+    enforced inside the rule). No-op when ``shadow_conn`` is None.
+    """
+    if shadow_conn is None:
+        return
+    # Staleness is measured against the signal's processing clock (``started_ts``),
+    # which shares the epoch of the tick ``ts`` values — NOT wall-clock — so a
+    # fresh tick is never spuriously judged stale.
+    now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
+    inp = g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
+    technical = technical_watch_decision(inp)
+    # G4 cell warmth — surfaced via the carried-forward cell_routing hint if any.
+    cell = ctx.payload.get("cell_routing", {})
+    n_eff = float(cell.get("n_eff", 0.0) or 0.0) if isinstance(cell, dict) else 0.0
+    log_shadow_event(
+        shadow_conn,
+        run_id=ctx.run_id,
+        signal_id=ctx.signal_id,
+        gate_id=GATE_PRE_ENTRY_WATCHER,
+        venue=ctx.venue,
+        symbol=ctx.symbol,
+        regime=str(ctx.payload.get("regime", "")),
+        technical=technical,
+        gpt_decision=gpt_decision,
+        cell_warm=n_eff >= 5.0,
+    )
+
+
 async def pre_entry_watcher_gate(
     ctx: GateContext,
     *,
     client: Any | None = None,
     fast_path_ctx: FastPathContext | None = None,
+    shadow_conn: sqlite3.Connection | None = None,
 ) -> GateResult:
     """Gate 4 dispatcher.
 
     Inputs from ``ctx.payload``: ``validated_signal``, ``tick_window``.
+
+    ``shadow_conn`` (AI-conductor P0 SHADOW): when supplied, a deterministic
+    technical rule is computed in parallel and logged against the live GPT
+    decision (behavior 0). None = legacy behavior, byte-identical.
     """
     validated = ctx.payload.get("validated_signal", {})
     tick_window = list(ctx.payload.get("tick_window", []))
@@ -231,6 +281,12 @@ async def pre_entry_watcher_gate(
             error=res.error,
         )
     decision = _validate_decision(res.parsed)
+    # AI-conductor P0 SHADOW: log the technical rule vs the live GPT decision.
+    # Behavior 0 — the GPT ``decision`` drives the returns below unchanged. A
+    # None decoded GPT output is a fail-closed KILL (logged as such).
+    _log_g4_shadow(
+        ctx, shadow_conn, decision if decision is not None else GateDecision.KILL
+    )
     if decision is None or decision == GateDecision.KILL:
         return GateResult(
             decision=GateDecision.KILL,

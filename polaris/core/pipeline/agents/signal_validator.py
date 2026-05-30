@@ -15,6 +15,7 @@ Aggressive bias preserved — no defensive throttle on PASS rate.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Final
 
 from polaris.core.pipeline.agents._gpt_client import (
@@ -23,8 +24,15 @@ from polaris.core.pipeline.agents._gpt_client import (
     call_gpt,
     make_system_prefix,
 )
+from polaris.core.pipeline.agents._shadow_rules import (
+    CELL_WARM_MIN_N_EFF,
+    g3_shadow_inputs_from_payload,
+    technical_validate_decision,
+)
+from polaris.core.pipeline.agents.shadow_log import log_shadow_event
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
+    GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
     GateResult,
@@ -88,16 +96,52 @@ def _validate_decision(parsed: dict[str, Any]) -> tuple[GateDecision, float] | N
     return GateDecision.MODIFY, scalar
 
 
+def _log_g3_shadow(
+    ctx: GateContext,
+    shadow_conn: sqlite3.Connection | None,
+    gpt_decision: GateDecision | None,
+) -> None:
+    """Compute the G3 deterministic technical rule + log it vs the GPT decision.
+
+    AI-conductor P0 SHADOW (behavior 0): the technical decision is logged for the
+    acceptance gate and NEVER returned. ``cold cell = pass-through`` and
+    ``net_edge`` is not consulted (both enforced inside the rule). No-op when
+    ``shadow_conn`` is None.
+    """
+    if shadow_conn is None:
+        return
+    inp = g3_shadow_inputs_from_payload(ctx.payload)
+    technical = technical_validate_decision(inp)
+    log_shadow_event(
+        shadow_conn,
+        run_id=ctx.run_id,
+        signal_id=ctx.signal_id,
+        gate_id=GATE_SIGNAL_VALIDATOR,
+        venue=ctx.venue,
+        symbol=ctx.symbol,
+        regime=str(ctx.payload.get("regime", "")),
+        technical=technical,
+        gpt_decision=gpt_decision,
+        cell_warm=inp.n_eff >= CELL_WARM_MIN_N_EFF,
+    )
+
+
 async def signal_validator_gate(
     ctx: GateContext,
     *,
     client: Any | None = None,
+    shadow_conn: sqlite3.Connection | None = None,
 ) -> GateResult:
     """Gate 3 dispatcher (GPT validator).
 
     Reads inputs from ``ctx.payload``:
         ``raw_signal``, ``cell_routing``, ``baseline``, ``recent_trades``.
     Fail-closed: any unhandled error / non-conformant output → KILL.
+
+    ``shadow_conn`` (AI-conductor P0 SHADOW): when supplied, a deterministic
+    technical rule is computed in parallel and logged against the live GPT
+    decision (behavior 0 — the GPT decision is what this gate returns). None =
+    legacy behavior, byte-identical.
     """
     raw_signal = ctx.payload.get("raw_signal", {})
     cell_routing = ctx.payload.get("cell_routing", {})
@@ -169,6 +213,9 @@ async def signal_validator_gate(
             output_tokens=res.output_tokens,
         )
     decision, scalar = decoded
+    # AI-conductor P0 SHADOW: log the technical rule vs the live GPT decision.
+    # Behavior 0 — the GPT ``decision`` is returned unchanged below.
+    _log_g3_shadow(ctx, shadow_conn, decision)
     if decision == GateDecision.KILL:
         # Mirror G4's raw-reason capture (pre_entry_watcher ``watcher_kill``):
         # persist the model's own KILL rationale so a G3 reject is auditable

@@ -248,6 +248,10 @@ async def run_pipeline_for_signal(
         "signal_id": sig.signal_id,
         "universe": universe_rows,
         "cell_summary": "",
+        # ai_conductor P0 SHADOW dimension: surface ``regime`` so the G3/G4
+        # shadow log can bucket technical-vs-GPT agreement by regime. Display/log
+        # key only — no gate branches on it (behavior 0).
+        "regime": regime,
         "raw_signal": g3_payload["raw_signal"],
         **g3_payload, **g4_payload, **g5_payload,
     }

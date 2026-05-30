@@ -755,3 +755,9 @@
 2026-05-30 13:26 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=41 learners=3 paper=True]
 2026-05-30 13:29 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
 2026-05-31 AI conductor STEP 0-4 완료: G1 GPT제거→vol-ranker a2b7ab4(2850콜→0) + Capital crypto배제/세션watch/coherence 460e416 (1278 green, /debate PROCEED_WITH_CHANGES). 남음=STEP5 regime계층 L1/L2/L3 합성(classify_regime stub 실구현, /debate 선행)+STEP6 G1-aware. 봇 80589 정지(Jin AI절감). 핸드오버=_NOW.
+2026-05-30 15:38 [ignite_p1: bootstrap target_db=ignite_custom.sqlite layer0_focus=1 learners=3 paper=True]
+2026-05-30 15:38 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-30 15:38 [ignite_p1: bootstrap target_db=fresh.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-30 15:38 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=41 learners=3 paper=True]
+2026-05-30 15:40 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-31 [STEP5 regime layered synthesis P1-P5: fuser asset-class weights(0.75-1.25)+scores/source_weights/asset_class evidence · compute_real_regime_signal(label,strength,evidence)+label-only wrapper · compose_regime_candidate weighted tilt(price base,conviction-proportional) · evidence-crisis candidate_source 2-close(price-crisis immediate) · dynamic confidence. SIGNAL-only,2-close invariant held,key unchanged. 1298 pass,ruff+mypy clean]

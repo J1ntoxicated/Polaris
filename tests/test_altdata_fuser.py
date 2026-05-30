@@ -258,3 +258,107 @@ def test_fuse_label_in_polaris_four() -> None:
     )
     hint, _, _ = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
     assert hint in ("bull_trend", "bear_trend", "chop", "crisis")
+
+
+# ── P1: asset-class differentiated source weighting (0.75-1.25) ────────────────
+
+
+def test_fuse_evidence_records_scores_weights_asset_class() -> None:
+    """Evidence dict surfaces the structured synthesis context for G3/G7:
+    label + scores + source_weights + asset_class (contract still 3-tuple)."""
+    cache = AltDataCache()
+    cache.set("crypto_fg", {"value": 8, "label": "Extreme Fear"}, ttl_sec=9999, now_ts=0.0)
+    cache.set(
+        "okx_funding",
+        {"BTC-USDT-SWAP": {"fundingRate": -0.0025}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, conf, evidence = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint in ("bear_trend", "crisis")
+    # structured synthesis context recorded
+    assert evidence["asset_class"] == "crypto"
+    assert evidence["label"] == hint
+    assert "scores" in evidence and isinstance(evidence["scores"], dict)
+    assert set(evidence["scores"]) == {"bull_trend", "bear_trend", "chop", "crisis"}
+    assert "source_weights" in evidence and isinstance(evidence["source_weights"], dict)
+    # crypto source-type multipliers within the 0.75-1.25 band
+    for w in evidence["source_weights"].values():
+        assert 0.75 <= w <= 1.25
+
+
+def test_fuse_crypto_funding_weight_amplified() -> None:
+    """Crypto branch amplifies funding/F&G source type (multiplier > 1.0,
+    capped at 1.25). Raw evidence values are still the unscaled inputs."""
+    cache = AltDataCache()
+    cache.set("crypto_fg", {"value": 8}, ttl_sec=9999, now_ts=0.0)
+    cache.set(
+        "okx_funding",
+        {"BTC-USDT-SWAP": {"fundingRate": -0.0025}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    _, _, evidence = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    weights = evidence["source_weights"]
+    # crypto-native sources are emphasised
+    assert weights["crypto_fg"] > 1.0
+    assert weights["okx_funding"] > 1.0
+    assert weights["crypto_fg"] <= 1.25
+    assert weights["okx_funding"] <= 1.25
+    # raw evidence still the unscaled funding/F&G readings
+    assert evidence["crypto_fg"] == 8
+
+
+def test_fuse_macro_weight_amplified_for_fx_commodity() -> None:
+    """FX / commodity branch amplifies the macro source type (>1.0, <=1.25)."""
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {"vix": 45.0, "hy_spread": 620.0},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    for gid, ac in (("forex:EURUSD", "forex"), ("commodity:XAUUSD", "commodity")):
+        _, _, evidence = fuse_evidence(gid, cache, now_ts=1.0)
+        assert evidence["asset_class"] == ac
+        assert evidence["source_weights"]["fred_macro"] > 1.0
+        assert evidence["source_weights"]["fred_macro"] <= 1.25
+
+
+def test_fuse_weight_routing_isolation_crypto_vs_macro() -> None:
+    """Routing isolation stays fixed: a crypto group never weights macro and a
+    macro group never weights crypto sources (only its own routed sources get a
+    multiplier)."""
+    cache = AltDataCache()
+    cache.set("crypto_fg", {"value": 8}, ttl_sec=9999, now_ts=0.0)
+    cache.set("okx_funding", {"X": {"fundingRate": -0.0025}}, ttl_sec=9999, now_ts=0.0)
+    cache.set("fred_macro", {"vix": 45.0, "hy_spread": 620.0}, ttl_sec=9999, now_ts=0.0)
+
+    _, _, crypto_ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert "fred_macro" not in crypto_ev["source_weights"]  # macro not routed to crypto
+    assert "crypto_fg" in crypto_ev["source_weights"]
+
+    _, _, macro_ev = fuse_evidence("forex:EURUSD", cache, now_ts=1.0)
+    assert "crypto_fg" not in macro_ev["source_weights"]  # crypto not routed to fx
+    assert "okx_funding" not in macro_ev["source_weights"]
+    assert "fred_macro" in macro_ev["source_weights"]
+
+
+def test_fuse_weighting_preserves_label_outcomes() -> None:
+    """The 0.75-1.25 weighting is a tilt on the existing base scores; it must
+    not change which canonical label wins for the already-covered fixtures
+    (label산출 동일, behavior-identical for these convictions)."""
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {"vix": 12.0, "hy_spread": 250.0},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _, _ = fuse_evidence("index:US500", cache, now_ts=1.0)
+    assert hint == "bull_trend"  # unchanged from pre-P1
+
+    cache2 = AltDataCache()
+    cache2.set("fred_macro", {"vix": 26.0, "hy_spread": 350.0}, ttl_sec=9999, now_ts=0.0)
+    hint2, _, _ = fuse_evidence("forex:GBPUSD", cache2, now_ts=1.0)
+    assert hint2 is None  # single mild bear (+1.0 * 1.25 = 1.25) still below 1.5 floor

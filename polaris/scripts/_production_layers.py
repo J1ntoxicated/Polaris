@@ -52,7 +52,7 @@ from polaris.scripts._production_bars import (
     ingest_bars_per_timeframe,
     read_recent_bars,
 )
-from polaris.scripts._production_indicators import compute_real_regime
+from polaris.scripts._production_indicators import compute_real_regime_signal
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
 
@@ -66,6 +66,7 @@ __all__ = [
     "CAPITAL_RESOLUTION_BY_INTERVAL",
     "OKX_REFRESH_SEC",
     "TIMEFRAME_FETCH_CADENCE_SEC",
+    "compose_regime_candidate",
     "compute_and_flip_regime",
     "fetch_bars_one",
     "get_focus_targets",
@@ -277,6 +278,77 @@ def get_focus_targets(
 # ---------------------------------------------------------------------------
 
 
+_REGIME_LABELS: tuple[str, ...] = ("bull_trend", "bear_trend", "chop", "crisis")
+# Conviction floor mirrors fuser.CONVICTION_FLOOR — an evidence label must clear
+# this before it can tilt a borderline price candidate.
+_EVIDENCE_CONVICTION_FLOOR = 1.5
+
+
+def compose_regime_candidate(
+    price_candidate: str,
+    price_strength: float,
+    evidence_scores: dict[str, float],
+) -> str:
+    """Weighted price↔evidence synthesis — SIGNAL-only label, no side effects.
+
+    Price is the base. Evidence (the fuser's per-label scores) can *tilt* the
+    candidate ONLY when its winning conviction beats the price conviction:
+
+      * No evidence scores → price candidate stands (fallback).
+      * A price-derived ``crisis`` is NEVER tilted away (safety; a price crash
+        is the highest-priority signal and keeps the immediate-flip path).
+      * Otherwise compare conviction: ``price_strength`` (0..1) scaled to the
+        evidence score-space vs the best evidence score above the conviction
+        floor. The stronger conviction wins; ties go to price (status-quo bias,
+        NOT a throttle — synthesis only relabels, it never reduces flow).
+
+    This is a pure relabel. It does not size, block, exit, or halt.
+    """
+    if price_candidate == "crisis":
+        return "crisis"
+    if not evidence_scores:
+        return price_candidate
+    best_label = max(evidence_scores, key=lambda k: evidence_scores[k])
+    best_score = evidence_scores[best_label]
+    if best_score < _EVIDENCE_CONVICTION_FLOOR or best_label == price_candidate:
+        return price_candidate
+    if best_label not in _REGIME_LABELS:
+        return price_candidate
+    # Project price conviction into the evidence score-space. A full-strength
+    # (1.0) price regime maps to a conviction comparable to a strong evidence
+    # win (~3.0); evidence must out-convict it to tilt.
+    price_conviction = price_strength * 3.0
+    if best_score > price_conviction:
+        return best_label
+    return price_candidate
+
+
+def _compose_confidence(
+    price_strength: float,
+    composed_candidate: str,
+    price_candidate: str,
+    evidence_scores: dict[str, float],
+) -> float:
+    """Dynamic confidence (P5) in ``[0, 1]`` from L3 strength + L2/L1 agreement.
+
+    Base = price strength. Agreement bonus when the evidence's winning label
+    matches the composed candidate (L3↔L2/L1 concur); a mild penalty when
+    evidence disagreed but did not win the tilt. Computed BEFORE the
+    detect_regime_flip confirm gate (does NOT alter the gate).
+    """
+    conf = max(0.0, min(1.0, price_strength))
+    if not evidence_scores:
+        return max(0.1, conf)  # price-only: never report a zero-confidence label
+    best_label = max(evidence_scores, key=lambda k: evidence_scores[k])
+    best_score = evidence_scores[best_label]
+    if best_score >= _EVIDENCE_CONVICTION_FLOOR:
+        if best_label == composed_candidate:
+            conf = conf + 0.25 * (1.0 - conf)  # concurrence → tighten toward 1
+        elif best_label != price_candidate:
+            conf = conf * 0.85  # unresolved disagreement → slightly less certain
+    return max(0.1, min(1.0, conf))
+
+
 def compute_and_flip_regime(
     conn: sqlite3.Connection,
     *,
@@ -292,30 +364,47 @@ def compute_and_flip_regime(
     the Layer 6 SSOT receive the gated value (matches strategy_swap's
     ``_lookup_regime`` semantics).
 
-    ``altdata_cache`` (#6) supplies alt-data EVIDENCE only. When present, the
-    fuser may tilt the candidate to a SUGGESTED label and surface raw evidence:
+    ``altdata_cache`` (#6) supplies alt-data EVIDENCE only. The L3 price signal
+    is the base; the fuser's per-label scores tilt a *borderline* candidate via
+    ``compose_regime_candidate`` (price conviction vs evidence conviction):
 
       * The price-derived candidate is computed first and always stands when
         there is no fresh evidence (failing/keyless collector → price-only;
         correct fallback, NOT a defensive throttle).
-      * A hint NEVER downgrades a price-derived ``crisis`` — evidence may only
-        confirm/tilt a borderline (non-crisis) price regime.
-      * The (possibly tilted) candidate STILL has to clear the unchanged
-        2-consecutive-close confirm gate. Evidence is additive context only;
-        it does not size, block, exit, or write learner/risk state.
+      * Evidence NEVER downgrades a price-derived ``crisis``.
+      * ``candidate_source`` (P4) tags the candidate: a ``crisis`` that came
+        from PRICE keeps the immediate-flip fast path; a ``crisis`` introduced
+        by EVIDENCE must clear the SAME 2-consecutive-close gate (no bypass).
+      * The (possibly tilted) candidate STILL clears the unchanged confirm
+        gate. Evidence is additive context only; it does not size, block,
+        exit, or write learner/risk state. SIGNAL-only.
     """
-    price_candidate = compute_real_regime(bars)
+    price_candidate, price_strength, _price_ev = compute_real_regime_signal(bars)
     candidate = price_candidate
     evidence: dict[str, Any] = {}
-    confidence = 0.5
+    evidence_scores: dict[str, float] = {}
     if altdata_cache is not None:
-        hint, conf, ev = fuse_evidence(underlying_group_id, altdata_cache, now_ts=now_ts)
+        _hint, _conf, ev = fuse_evidence(
+            underlying_group_id, altdata_cache, now_ts=now_ts
+        )
         evidence = ev
-        # Conservative override: never override a price-derived crisis DOWN —
-        # evidence can only confirm/tilt a borderline (non-crisis) regime.
-        if hint and price_candidate != "crisis":
-            candidate = hint
-            confidence = conf
+        raw_scores = ev.get("scores") if isinstance(ev, dict) else None
+        if isinstance(raw_scores, dict):
+            evidence_scores = {str(k): float(v) for k, v in raw_scores.items()}
+        candidate = compose_regime_candidate(
+            price_candidate, price_strength, evidence_scores
+        )
+    # P5: dynamic confidence from L3 strength + L2/L1 agreement (pre-gate).
+    confidence = _compose_confidence(
+        price_strength, candidate, price_candidate, evidence_scores
+    )
+    # P4: a crisis candidate that PRICE did not produce is evidence-derived and
+    # must NOT take the immediate-flip path.
+    candidate_source = (
+        "evidence"
+        if candidate == "crisis" and price_candidate != "crisis"
+        else "price"
+    )
     decision = detect_regime_flip(
         conn,
         venue=venue,
@@ -324,6 +413,7 @@ def compute_and_flip_regime(
         now_ts=now_ts,
         evidence=evidence,
         confidence=confidence,
+        candidate_source=candidate_source,
     )
     # Either the flip was confirmed (decision.to_regime is the new SSOT) or
     # the row stayed at the prior regime. Read back the persisted SSOT so the

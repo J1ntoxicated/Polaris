@@ -33,6 +33,7 @@ __all__ = [
     "compute_ma",
     "compute_momentum",
     "compute_real_regime",
+    "compute_real_regime_signal",
     "compute_rsi_14",
     "compute_volume_z",
     "compute_unrealized_pnl_r",
@@ -319,46 +320,106 @@ def build_real_market_view(
 # ---------------------------------------------------------------------------
 
 
-def compute_real_regime(bars: Sequence[Bar | BarView], *, lookback: int = 100) -> str:
-    """Map bar history → ``bull_trend`` / ``bear_trend`` / ``chop`` / ``crisis``.
+def compute_real_regime_signal(
+    bars: Sequence[Bar | BarView], *, lookback: int = 100
+) -> tuple[str, float, dict[str, float]]:
+    """Map bar history → ``(label, strength, evidence)`` (L3 price regime SIGNAL).
 
-    Algorithm (Layer 6 §Q2 + Day 8 spec H):
-    1. ≤ ``REGIME_CRISIS_DRAWDOWN_PCT`` peak-to-last drawdown → ``crisis``
-       (immediate flip; matches regime_flip.detect_flip's crisis fast-path).
-    2. Efficiency ratio < ``REGIME_CHOP_EFFICIENCY`` → ``chop`` (low directional
-       persistence; the strategy mix that prefers mean-reversion will get the
-       higher cell-routing mult through Layer 4).
+    The ``label`` is computed by the SAME deterministic 4-state mapping that
+    ``compute_real_regime`` has always used — P2 does NOT widen any flip
+    condition (label산출 동일). ``strength`` (0..1) is a *magnitude boost only*:
+    a confidence/conviction proxy consumed downstream by the weighted synthesis
+    + dynamic confidence; it never changes which label is produced.
+
+    Label algorithm (Layer 6 §Q2 + Day 8 spec H):
+    1. ≤ ``REGIME_CRISIS_DRAWDOWN_PCT`` peak-to-last drawdown → ``crisis``.
+    2. Efficiency ratio < ``REGIME_CHOP_EFFICIENCY`` → ``chop``.
     3. Else: signed return over ``lookback`` bars chooses bull / bear.
 
-    Falls back to ``chop`` when there is too little history (bootstrap state
-    keeps the regime non-committal until Layer 6's 2-consecutive-close gate
-    can confirm).
+    Strength inputs (보강값 only):
+      * |return| vs the bull/bear threshold (directional magnitude),
+      * efficiency ratio (directional persistence),
+      * EMA20/50 cross alignment with the label,
+      * 24h ATR ratio (volatility context — caps strength for crisis high).
+
+    Falls back to ``("chop", 0.0, {})`` when there is too little history.
     """
     if len(bars) < 30:
-        return "chop"
+        return "chop", 0.0, {}
     closes = [float(b.close) for b in bars]
     n = min(lookback, len(closes) - 1)
     base = closes[-n - 1]
     last = closes[-1]
     if base <= 0.0:
-        return "chop"
+        return "chop", 0.0, {}
     ret_pct = (last - base) / base * 100.0
+    er = compute_efficiency_ratio(closes, n=min(30, n))
+    atr_ratio = compute_atr_pct(bars, n=min(14, len(bars) - 1))
 
-    # Crisis fast-path: any 100-bar window seeing a sharp drawdown.
     peak = max(closes[-n:])
     drawdown_pct = (last - peak) / peak * 100.0 if peak > 0.0 else 0.0
+
+    ema_fast = compute_ma(closes, min(20, len(closes)))
+    ema_slow = compute_ma(closes, min(50, len(closes)))
+    ema_cross = 1.0 if ema_fast > ema_slow else (-1.0 if ema_fast < ema_slow else 0.0)
+
+    evidence: dict[str, float] = {
+        "ret_pct": ret_pct,
+        "efficiency_ratio": er,
+        "drawdown_pct": drawdown_pct,
+        "atr_ratio": atr_ratio,
+        "ema_cross": ema_cross,
+    }
+
+    # ── Label (unchanged mapping) ──
     if drawdown_pct <= REGIME_CRISIS_DRAWDOWN_PCT:
-        return "crisis"
+        label = "crisis"
+    elif er < REGIME_CHOP_EFFICIENCY:
+        label = "chop"
+    elif ret_pct >= REGIME_BULL_THRESHOLD_PCT:
+        label = "bull_trend"
+    elif ret_pct <= -REGIME_BULL_THRESHOLD_PCT:
+        label = "bear_trend"
+    else:
+        label = "chop"
 
-    er = compute_efficiency_ratio(closes, n=min(30, n))
-    if er < REGIME_CHOP_EFFICIENCY:
-        return "chop"
+    strength = _regime_strength(label, ret_pct, er, drawdown_pct, ema_cross)
+    evidence["strength"] = strength
+    return label, strength, evidence
 
-    if ret_pct >= REGIME_BULL_THRESHOLD_PCT:
-        return "bull_trend"
-    if ret_pct <= -REGIME_BULL_THRESHOLD_PCT:
-        return "bear_trend"
-    return "chop"
+
+def _regime_strength(
+    label: str,
+    ret_pct: float,
+    er: float,
+    drawdown_pct: float,
+    ema_cross: float,
+) -> float:
+    """Conviction proxy in ``[0, 1]`` — magnitude boost only, never a label gate."""
+    if label == "crisis":
+        # Deeper-than-threshold drawdown → high conviction (scaled past floor).
+        excess = abs(drawdown_pct) - abs(REGIME_CRISIS_DRAWDOWN_PCT)
+        return min(1.0, 0.8 + max(0.0, excess) / 20.0)
+    if label == "chop":
+        # Chop conviction grows as efficiency falls below the chop floor.
+        return min(1.0, max(0.0, (REGIME_CHOP_EFFICIENCY - er) / REGIME_CHOP_EFFICIENCY))
+    # bull/bear trend: blend return magnitude, efficiency, EMA alignment.
+    direction = 1.0 if label == "bull_trend" else -1.0
+    mag = min(1.0, abs(ret_pct) / (REGIME_BULL_THRESHOLD_PCT * 10.0))
+    align = 1.0 if (ema_cross == direction) else (0.5 if ema_cross == 0.0 else 0.0)
+    raw = 0.55 * mag + 0.25 * min(1.0, er) + 0.20 * align
+    return max(0.0, min(1.0, raw))
+
+
+def compute_real_regime(bars: Sequence[Bar | BarView], *, lookback: int = 100) -> str:
+    """Label-only wrapper over ``compute_real_regime_signal`` (back-compat).
+
+    Returns just the regime label string — byte-identical to the pre-P2
+    behaviour. New callers wanting strength/evidence use
+    ``compute_real_regime_signal``.
+    """
+    label, _, _ = compute_real_regime_signal(bars, lookback=lookback)
+    return label
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,33 @@ _CRISIS = "crisis"
 CONVICTION_FLOOR = 1.5
 CONFIDENCE_FLOOR = 0.3
 
+# P1 asset-class differentiated source-type weighting. A multiplier applied to
+# each source's base score BEFORE accumulation. Clamped to ``[0.75, 1.25]`` so
+# the tilt can never dominate the ported base weights (it emphasises the
+# source type that is most informative for each asset class, NOT a throttle).
+#   crypto    → funding / F&G amplified (crypto-native risk signal)
+#   fx/cmdty  → macro amplified (FX & commodities are macro-driven)
+#   equity    → macro amplified (+ gap context already in MarketView)
+SOURCE_WEIGHT_MIN = 0.75
+SOURCE_WEIGHT_MAX = 1.25
+_DEFAULT_WEIGHT = 1.0
+# (asset_class_prefix → {source_name → multiplier}). Absent entries default to
+# 1.0 (behaviour-identical to pre-P1). Only sources actually routed to a group
+# (cache.get_for_group) can appear in ``source_weights`` — routing isolation.
+_SOURCE_WEIGHTS: dict[str, dict[str, float]] = {
+    "crypto": {"crypto_fg": 1.25, "okx_funding": 1.25},
+    "forex": {"fred_macro": 1.25},
+    "commodity": {"fred_macro": 1.25},
+    "index": {"fred_macro": 1.15},
+    "equity": {"fred_macro": 1.25},
+}
+
+
+def _source_weight(prefix: str, source: str) -> float:
+    """Asset-class source-type multiplier, clamped to ``[0.75, 1.25]``."""
+    w = _SOURCE_WEIGHTS.get(prefix, {}).get(source, _DEFAULT_WEIGHT)
+    return max(SOURCE_WEIGHT_MIN, min(SOURCE_WEIGHT_MAX, w))
+
 # Ported thresholds (auto_invasion weighted scoring).
 _FG_EXTREME_FEAR = 20
 _FG_GREED = 75
@@ -71,16 +98,23 @@ def fuse_evidence(
 
     scores: dict[str, float] = {_BULL: 0.0, _BEAR: 0.0, _CHOP: 0.0, _CRISIS: 0.0}
     evidence: dict[str, Any] = {}
+    source_weights: dict[str, float] = {}
 
     prefix = underlying_group_id.split(":", 1)[0]
     if prefix == "crypto":
-        _score_crypto_fg(sources.get("crypto_fg"), scores, evidence)
-        _score_funding(sources.get("okx_funding"), scores, evidence)
+        _score_crypto_fg(
+            sources.get("crypto_fg"), scores, evidence, source_weights, prefix
+        )
+        _score_funding(
+            sources.get("okx_funding"), scores, evidence, source_weights, prefix
+        )
     else:
         # forex / index / commodity / equity — all macro-sensitive. Equity
         # (Stream C / Alpaca) reuses the SAME FRED macro scorer + conservative
         # conviction floor as the FX/index/commodity branch.
-        _score_macro(sources.get("fred_macro"), scores, evidence)
+        _score_macro(
+            sources.get("fred_macro"), scores, evidence, source_weights, prefix
+        )
 
     if not evidence:
         return None, 0.0, {}
@@ -89,10 +123,18 @@ def fuse_evidence(
     best_label, best_score = ranked[0]
     runner_score = ranked[1][1]
 
+    # P1: structured synthesis context for G3/G7 (read-only) + downstream
+    # weighted compose. Recorded on EVERY evidence-bearing return (even below
+    # the conviction floor) so the consumer always sees scores/weights/class.
+    evidence["asset_class"] = prefix
+    evidence["scores"] = dict(scores)
+    evidence["source_weights"] = source_weights
+
     if best_score < CONVICTION_FLOOR:
         # Below conviction floor → no override. Evidence still surfaced.
         return None, 0.0, evidence
 
+    evidence["label"] = best_label
     confidence = _confidence(best_score, runner_score)
     return best_label, confidence, evidence
 
@@ -105,21 +147,31 @@ def _confidence(best: float, runner: float) -> float:
 
 
 def _score_crypto_fg(
-    fg: dict[str, Any] | None, scores: dict[str, float], evidence: dict[str, Any]
+    fg: dict[str, Any] | None,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
 ) -> None:
     if not fg or "value" not in fg:
         return
     value = fg["value"]
     evidence["crypto_fg"] = value
+    w = _source_weight(prefix, "crypto_fg")
+    source_weights["crypto_fg"] = w
     if value < _FG_EXTREME_FEAR:
-        scores[_CRISIS] += 1.0
-        scores[_BEAR] += 1.0
+        scores[_CRISIS] += 1.0 * w
+        scores[_BEAR] += 1.0 * w
     elif value > _FG_GREED:
-        scores[_BULL] += 1.5
+        scores[_BULL] += 1.5 * w
 
 
 def _score_funding(
-    funding: dict[str, Any] | None, scores: dict[str, float], evidence: dict[str, Any]
+    funding: dict[str, Any] | None,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
 ) -> None:
     if not funding:
         return
@@ -132,14 +184,20 @@ def _score_funding(
         return
     avg = sum(rates) / len(rates)
     evidence["avg_funding"] = avg
+    w = _source_weight(prefix, "okx_funding")
+    source_weights["okx_funding"] = w
     if avg < _FUNDING_BEAR:
-        scores[_BEAR] += 2.0
+        scores[_BEAR] += 2.0 * w
     elif avg > _FUNDING_BULL:
-        scores[_BULL] += 2.0
+        scores[_BULL] += 2.0 * w
 
 
 def _score_macro(
-    macro: dict[str, Any] | None, scores: dict[str, float], evidence: dict[str, Any]
+    macro: dict[str, Any] | None,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
 ) -> None:
     if not macro:
         return
@@ -150,16 +208,18 @@ def _score_macro(
     if isinstance(hy, (int, float)):
         evidence["hy_spread"] = hy
 
+    w = _source_weight(prefix, "fred_macro")
+    source_weights["fred_macro"] = w
     crisis = (isinstance(vix, (int, float)) and vix > _VIX_CRISIS) or (
         isinstance(hy, (int, float)) and hy > _HY_CRISIS
     )
     if crisis:
-        scores[_CRISIS] += 2.0
+        scores[_CRISIS] += 2.0 * w
         return
     if isinstance(vix, (int, float)) and vix > _VIX_BEAR:
-        scores[_BEAR] += 1.0
+        scores[_BEAR] += 1.0 * w
         return
     low_vix = isinstance(vix, (int, float)) and vix < _VIX_BULL
     low_hy = (not isinstance(hy, (int, float))) or hy < _HY_BULL
     if low_vix and low_hy:
-        scores[_BULL] += 2.0
+        scores[_BULL] += 2.0 * w

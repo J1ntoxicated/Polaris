@@ -72,16 +72,26 @@ def detect_regime_flip(
     now_ts: int,
     evidence: dict[str, Any] | None = None,
     confidence: float = 0.5,
+    candidate_source: str = "price",
 ) -> RegimeFlipDecision:
-    """Apply 2-consecutive-close rule (or immediate for ``crisis``).
+    """Apply 2-consecutive-close rule (or immediate for a PRICE ``crisis``).
 
     State machine on ``regime_state``:
       - row missing → first observation, write row, no flip.
       - candidate == current → reset consecutive_candidate, no flip.
       - candidate != current:
-          - ``crisis`` → immediate flip.
+          - ``crisis`` from PRICE → immediate flip.
+          - ``crisis`` from EVIDENCE → 2-consecutive-close (no bypass).
           - else: increment ``consecutive_count`` for that candidate.
             On count ≥ 2 → flip + reset.
+
+    ``candidate_source`` (P4 🔴BLOCKING) tags how the candidate was derived:
+      * ``"price"`` (default) — the L3 price regime saw the drawdown; a price
+        crisis keeps the immediate-flip fast path (sharp crash = act now).
+      * ``"evidence"`` — the crisis was introduced by alt-data evidence tilt.
+        Evidence must NEVER bypass the 2-consecutive-close confirm gate, so an
+        evidence-derived crisis is confirmed exactly like any other non-crisis
+        flip.
 
     ``evidence`` / ``confidence`` are alt-data EVIDENCE context (#6). They are
     persisted to ``regime_state.evidence_json`` / ``confidence`` on every write
@@ -154,8 +164,10 @@ def detect_regime_flip(
             reason="no_change",
         )
 
-    if candidate == "crisis":
-        # Immediate flip
+    if candidate == "crisis" and candidate_source == "price":
+        # Immediate flip — PRICE-derived crisis only (sharp crash = act now).
+        # An EVIDENCE-derived crisis falls through to the 2-close gate below
+        # (P4 🔴BLOCKING: evidence never bypasses the confirm gate).
         conn.execute(
             "UPDATE regime_state SET regime = ?, confidence = ?, "
             "evidence_json = ?, consecutive_candidate = NULL, "

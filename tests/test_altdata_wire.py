@@ -273,22 +273,24 @@ def test_evidence_never_downgrades_price_crisis(memdb: sqlite3.Connection) -> No
         memdb, venue="okx", underlying_group_id="crypto:BTC",
         candidate="crisis", now_ts=900,
     )
-    # Force price candidate = crisis via monkeypatched compute_real_regime.
+    # Force price candidate = crisis via monkeypatched compute_real_regime_signal.
     bars = _bars_series_chop()
     # Bullish alt-data (would suggest bull_trend if it could override).
     cache = _StubCache({"crypto_fg": {"value": 85}, "okx_funding": {
         "BTC-USDT-SWAP": {"fundingRate": 0.004}}})
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "crisis"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("crisis", 0.9, {})
+    )
     try:
         out = compute_and_flip_regime(
             memdb, venue="okx", underlying_group_id="crypto:BTC",
             bars=bars, now_ts=1000, altdata_cache=cache,
         )
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
     assert out == "crisis"
 
 
@@ -305,8 +307,11 @@ def test_evidence_tilts_borderline_then_confirms(memdb: sqlite3.Connection) -> N
     })
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    # Borderline chop (low strength) → strong bear evidence wins the P3 tilt.
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 0.1, {})
+    )
     try:
         bars = _bars_series_chop()
         # First close: candidate becomes bear (hint), but gate not yet met.
@@ -327,16 +332,18 @@ def test_evidence_tilts_borderline_then_confirms(memdb: sqlite3.Connection) -> N
         row2 = _regime_row(memdb, "okx", "crypto:BTC")
         assert json.loads(row2[2])  # evidence persisted on confirmed flip
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
 
 
 def test_weak_evidence_below_floor_is_price_only(memdb: sqlite3.Connection) -> None:
-    """Evidence below the conviction floor → no hint, price regime stands."""
+    """Evidence below the conviction floor → no tilt, price regime stands."""
     cache = _StubCache({"fred_macro": {"vix": 26.0}})  # single mild bear < floor
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 0.5, {})
+    )
     try:
         bars = _bars_series_chop()
         out = compute_and_flip_regime(
@@ -345,7 +352,7 @@ def test_weak_evidence_below_floor_is_price_only(memdb: sqlite3.Connection) -> N
         )
         assert out == "chop"
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -359,15 +366,17 @@ def test_equity_macro_populates_evidence_json(memdb: sqlite3.Connection) -> None
     cache = _StubCache({"fred_macro": {"vix": 45.0, "hy_spread": 620.0}})
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 1.0, {})
+    )
     try:
         compute_and_flip_regime(
             memdb, venue="alpaca", underlying_group_id="equity:AAPL",
             bars=_bars_series_chop(), now_ts=1000, altdata_cache=cache,
         )
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
     row = _regime_row(memdb, "alpaca", "equity:AAPL")
     assert row is not None
     ev = json.loads(row[2])
@@ -380,8 +389,10 @@ def test_equity_neutral_macro_no_override(memdb: sqlite3.Connection) -> None:
     cache = _StubCache({"fred_macro": {"vix": 18.0, "hy_spread": 350.0}})
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 1.0, {})
+    )
     try:
         out = compute_and_flip_regime(
             memdb, venue="alpaca", underlying_group_id="equity:SPY",
@@ -389,7 +400,7 @@ def test_equity_neutral_macro_no_override(memdb: sqlite3.Connection) -> None:
         )
         assert out == "chop"  # price candidate, not overridden
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
 
 
 def test_equity_missing_fred_is_price_only(memdb: sqlite3.Connection) -> None:
@@ -397,8 +408,10 @@ def test_equity_missing_fred_is_price_only(memdb: sqlite3.Connection) -> None:
     cache = _StubCache({})  # no fresh macro at all (keyless FRED)
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "bull_trend"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("bull_trend", 0.7, {})
+    )
     try:
         out = compute_and_flip_regime(
             memdb, venue="alpaca", underlying_group_id="equity:MSFT",
@@ -406,7 +419,7 @@ def test_equity_missing_fred_is_price_only(memdb: sqlite3.Connection) -> None:
         )
         assert out == "bull_trend"
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
     row = _regime_row(memdb, "alpaca", "equity:MSFT")
     assert json.loads(row[2]) == {}  # no evidence → empty-object default
 
@@ -415,8 +428,10 @@ def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> 
     """A NON-crisis equity macro hint STILL needs 2 consecutive closes.
 
     Uses a calm-macro bull hint (not crisis — crisis has a pre-existing
-    immediate-flip rule that is unchanged here). Price says chop; the bull
-    hint becomes the candidate but only flips after the 2nd consecutive close.
+    immediate-flip rule that is unchanged here). Price says a LOW-conviction
+    chop (P3 weighted synthesis: a strong evidence win tilts a borderline price
+    candidate); the bull hint becomes the candidate but only flips after the
+    2nd consecutive close — the confirm gate is never bypassed.
     """
     detect_regime_flip(
         memdb, venue="alpaca", underlying_group_id="equity:AAPL",
@@ -425,8 +440,12 @@ def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> 
     cache = _StubCache({"fred_macro": {"vix": 12.0, "hy_spread": 250.0}})  # → bull
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    # Borderline (low-strength) chop so the strong bull macro evidence wins the
+    # P3 conviction tilt; strength 0.1 → price_conviction 0.3 < evidence 2.5.
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 0.1, {})
+    )
     try:
         out1 = compute_and_flip_regime(
             memdb, venue="alpaca", underlying_group_id="equity:AAPL",
@@ -444,7 +463,7 @@ def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> 
         )
         assert out2 == "bull_trend"
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -601,8 +620,10 @@ def test_wire_writes_no_learner_or_risk_state(memdb: sqlite3.Connection) -> None
     })
     import polaris.scripts._production_layers as pl
 
-    orig = pl.compute_real_regime
-    pl.compute_real_regime = lambda _bars: "chop"  # type: ignore[assignment]
+    orig = pl.compute_real_regime_signal
+    pl.compute_real_regime_signal = (  # type: ignore[assignment]
+        lambda _bars: ("chop", 0.5, {})
+    )
     try:
         for ts in (1000, 1060):
             compute_and_flip_regime(
@@ -610,7 +631,7 @@ def test_wire_writes_no_learner_or_risk_state(memdb: sqlite3.Connection) -> None
                 bars=_bars_series_chop(), now_ts=ts, altdata_cache=cache,
             )
     finally:
-        pl.compute_real_regime = orig  # type: ignore[assignment]
+        pl.compute_real_regime_signal = orig  # type: ignore[assignment]
     assert memdb.execute("SELECT COUNT(*) FROM learner_blocks").fetchone()[0] == 0
     assert memdb.execute("SELECT COUNT(*) FROM strategy_risk_state").fetchone()[0] == 0
     assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0

@@ -733,3 +733,9 @@
 2026-05-30 07:28 [ignite_p1: bootstrap target_db=fresh.sqlite layer0_focus=0 learners=3 paper=False]
 2026-05-30 09:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=80 learners=3 paper=True]
 2026-05-30 okx deadlock 해소: liquidate BTC1+ETH1→USDT $74.9k, ghost ETHW DB cleanup, bot 80589 clean restart, OKX 거래 재개(12 buy ok, fills5/open5, fault0); capital rotation(#11)+gate phase0-3(#13) 라이브, ~1247 green
+2026-05-30 12:40 [ignite_p1: bootstrap target_db=ignite_custom.sqlite layer0_focus=1 learners=3 paper=True]
+2026-05-30 12:40 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-30 12:40 [ignite_p1: bootstrap target_db=fresh.sqlite layer0_focus=0 learners=3 paper=False]
+2026-05-30 12:40 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=80 learners=3 paper=True]
+2026-05-30 12:43 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+- 2026-05-30 P1 G1 cutover: universe_scanner GPT→deterministic scored ranker (w·log(vol)+quartile+ATR+hit-rate, clamp 12-48, env-tunable weights, RECOMPUTE trigger=should_call_gpt_g1 reuse). 거동보존: vol-only==legacy top-N, always PASS. 23 new tests, 1265 pass, ruff+mypy clean.

@@ -249,8 +249,10 @@ class GateOrchestrator:
     # ------------------------------------------------------------------
 
     async def _wrap_universe(self, ctx: GateContext) -> GateResult:
+        # G1 is a deterministic scored ranker (AI-conductor P1 cutover) — no GPT
+        # client. ``focus_cache`` gates the RECOMPUTE trigger only.
         return await universe_scanner_gate(
-            ctx, client=self.haiku_client, focus_cache=self.g1_focus_cache,
+            ctx, focus_cache=self.g1_focus_cache,
         )
 
     async def _wrap_strategy(self, ctx: GateContext) -> GateResult:

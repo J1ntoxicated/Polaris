@@ -20,6 +20,7 @@ from polaris.core.universe.discovery import (
     rank_active_universe,
 )
 from polaris.core.universe.schema import (
+    FOCUS_QUOTA_ENV_PREFIX,
     FOCUS_TARGET_MAX,
     FOCUS_TARGET_MIN,
     UNIVERSE_RANK_TOP_N_DEFAULT,
@@ -27,6 +28,7 @@ from polaris.core.universe.schema import (
     FilterThresholds,
     UniverseInstrument,
     default_thresholds,
+    focus_min_quota_by_class,
 )
 from polaris.core.universe.watchlist import (
     compute_dynamic_focus,
@@ -481,3 +483,123 @@ def test_property_compute_dynamic_focus_size(n: int, seed: int) -> None:
     focus = compute_dynamic_focus(actives, cycle_ts=NOW)
     assert len(focus) <= len(actives)
     assert len(focus) <= FOCUS_TARGET_MAX
+
+
+# ---------------------------------------------------------------------------
+# Asset-class focus quota (STEP 6 — crypto monopoly fix; flow_not_block)
+# ---------------------------------------------------------------------------
+#
+# DEMO/PAPER virtual capital. The quota GUARANTEES under-represented asset
+# classes (Capital FX/indices/commodity, Alpaca equity) a minimum number of
+# focus slots so 24/7 crypto (huge vol) cannot monopolize the cross-venue focus.
+# It is a FLOW INCREASE (more classes reach the order path), NOT a throttle: no
+# entry is blocked, no notional is cut, and crypto coverage stays wide.
+# vol=0.0 Capital rows (no 24h notional via nav) are still guaranteed slots.
+
+
+def _cls(symbol: str, *, venue: str, asset_class: str, vol: float) -> UniverseInstrument:
+    """Build an instrument for quota tests (cross-venue, mixed asset classes)."""
+    return _make_inst(symbol, venue=venue, asset_class=asset_class, vol=vol)
+
+
+def test_focus_min_quota_defaults_conservative() -> None:
+    """Defaults: crypto unbounded (no min); FX/indices/commodity/equity floored."""
+    q = focus_min_quota_by_class()
+    assert q.get("crypto", 0) == 0  # crypto never floored — it dominates anyway
+    for cls in ("forex", "indices", "commodity", "equity"):
+        assert q.get(cls, 0) >= 1
+    # Conservative: the guaranteed minimums must fit inside the focus window.
+    assert sum(q.values()) <= FOCUS_TARGET_MAX
+
+
+def test_focus_min_quota_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(f"{FOCUS_QUOTA_ENV_PREFIX}FOREX", "5")
+    monkeypatch.setenv(f"{FOCUS_QUOTA_ENV_PREFIX}EQUITY", "0")
+    q = focus_min_quota_by_class()
+    assert q["forex"] == 5
+    assert q["equity"] == 0
+
+
+def test_quota_guarantees_capital_classes_under_crypto_monopoly() -> None:
+    """40 high-vol crypto + a few Capital FX/index/gold rows → Capital still in focus."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    capital = [
+        _cls("EURUSD", venue="capital", asset_class="forex", vol=0.0),
+        _cls("US500", venue="capital", asset_class="indices", vol=0.0),
+        _cls("GOLD", venue="capital", asset_class="commodity", vol=0.0),
+    ]
+    focus = compute_dynamic_focus(crypto + capital, cycle_ts=NOW, target_size=30)
+    classes = {(f.venue, f.symbol) for f in focus}
+    assert ("capital", "EURUSD") in classes
+    assert ("capital", "US500") in classes
+    assert ("capital", "GOLD") in classes
+    # Flow increase, not throttle: total size unchanged + crypto still dominates.
+    assert len(focus) == 30
+    crypto_in_focus = sum(1 for f in focus if f.venue == "okx")
+    assert crypto_in_focus >= 27  # crypto keeps the bulk of the window
+
+
+def test_quota_includes_vol_zero_capital_even_with_extra_capital_competition() -> None:
+    """vol=0 Capital rows compete only with each other for the quota; top-scored win."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    # Many forex rows, all vol=0 but different ATR so scores differ; quota guarantees
+    # at least the min count, drawn from the highest-scored forex rows.
+    forex = [
+        _make_inst(f"FX{i}", venue="capital", asset_class="forex", vol=0.0, atr_pct=0.3 + i * 0.05)
+        for i in range(8)
+    ]
+    focus = compute_dynamic_focus(crypto + forex, cycle_ts=NOW, target_size=30)
+    fx_in_focus = [f for f in focus if f.venue == "capital"]
+    qmin = focus_min_quota_by_class()["forex"]
+    assert len(fx_in_focus) >= qmin
+    assert len(focus) == 30
+
+
+def test_quota_noop_for_single_class_okx_crypto() -> None:
+    """OKX-only crypto universe → every slot is crypto → quota is a no-op."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(50)]
+    with_quota = compute_dynamic_focus(crypto, cycle_ts=NOW, target_size=30)
+    # Identical to a manual top-30 by score: ordering + membership unchanged.
+    assert len(with_quota) == 30
+    assert all(f.venue == "okx" for f in with_quota)
+    scores = [f.focus_score for f in with_quota]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_quota_noop_for_single_class_alpaca_equity() -> None:
+    """Alpaca-only equity universe → quota is a no-op (no other class to guarantee)."""
+    equity = [_cls(f"EQ{i}", venue="alpaca", asset_class="equity", vol=5e8 - i * 1e6) for i in range(40)]
+    focus = compute_dynamic_focus(equity, cycle_ts=NOW, target_size=30)
+    assert len(focus) == 30
+    assert all(f.venue == "alpaca" for f in focus)
+
+
+def test_quota_preserves_descending_score_order_and_ranks() -> None:
+    """After quota promotion the output is still sorted by score desc with 1..N ranks."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    capital = [
+        _cls("EURUSD", venue="capital", asset_class="forex", vol=0.0),
+        _cls("GOLD", venue="capital", asset_class="commodity", vol=0.0),
+    ]
+    focus = compute_dynamic_focus(crypto + capital, cycle_ts=NOW, target_size=30)
+    scores = [f.focus_score for f in focus]
+    assert scores == sorted(scores, reverse=True)
+    assert [f.rank for f in focus] == list(range(1, len(focus) + 1))
+
+
+def test_quota_clamp_preserved_12_48() -> None:
+    """Quota never breaks the 12-48 clamp invariant."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(60)]
+    capital = [_cls("EURUSD", venue="capital", asset_class="forex", vol=0.0)]
+    focus = compute_dynamic_focus(crypto + capital, cycle_ts=NOW)
+    assert FOCUS_TARGET_MIN <= len(focus) <= FOCUS_TARGET_MAX
+
+
+def test_quota_capped_by_available_rows_of_class() -> None:
+    """If a class has fewer rows than its quota, take all it has (no fabrication)."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    capital = [_cls("EURUSD", venue="capital", asset_class="forex", vol=0.0)]  # only 1 forex
+    focus = compute_dynamic_focus(crypto + capital, cycle_ts=NOW, target_size=30)
+    fx = [f for f in focus if f.venue == "capital"]
+    assert len(fx) == 1  # only one exists; quota cannot fabricate rows
+    assert ("capital", "EURUSD") in {(f.venue, f.symbol) for f in focus}

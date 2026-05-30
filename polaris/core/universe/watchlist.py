@@ -28,6 +28,7 @@ from polaris.core.universe.schema import (
     FocusBucket,
     FocusSelection,
     UniverseInstrument,
+    focus_min_quota_by_class,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,81 @@ def _bucket_for(
     return "satellite"
 
 
+def _apply_asset_class_quota(
+    order: list[int],
+    active_universe: list[UniverseInstrument],
+    *,
+    target_size: int,
+) -> list[int]:
+    """Guarantee each present asset class its minimum focus-slot quota.
+
+    ``order`` is the global score order (desc). The plain top-``target_size`` cut
+    lets the dominant class (24/7 crypto, huge vol) monopolize the window and
+    starves Capital FX/indices/gold (``vol_24h_usd=0.0`` → lowest score) and
+    Alpaca equity. This promotes the highest-scored *unselected* rows of any
+    under-quota class into the focus, DISPLACING the lowest-scored rows of
+    *over-quota* classes — a FLOW INCREASE (more classes trade), never a
+    throttle: the dominant class keeps the bulk of the window, size is unchanged,
+    no entry is blocked. A single-asset-class universe satisfies every quota
+    trivially → this returns the plain top-``target_size`` cut unchanged (no-op).
+
+    Returns source indices (subset of ``order``) of length
+    ``min(target_size, len(order))``.
+    """
+    base = order[:target_size]
+    quota = focus_min_quota_by_class()
+    # No-op fast paths: nothing floored, or the whole universe is one asset class
+    # (OKX-only crypto / Alpaca-only equity → every quota trivially satisfied).
+    if not any(quota.values()):
+        return base
+    universe_classes = {ins.asset_class for ins in active_universe}
+    if len(universe_classes) <= 1:
+        return base
+    selected = set(base)
+
+    # Per-class shortfall = guaranteed min − already selected (capped by what
+    # exists). Promote the highest-scored unselected rows of short classes.
+    in_count: dict[str, int] = {}
+    for i in base:
+        cls = active_universe[i].asset_class
+        in_count[cls] = in_count.get(cls, 0) + 1
+
+    promotions: list[int] = []
+    for src_idx in order:  # order is score-desc, so this picks best-scored first
+        if src_idx in selected:
+            continue
+        cls = active_universe[src_idx].asset_class
+        need = quota.get(cls, 0) - in_count.get(cls, 0)
+        if need > 0:
+            promotions.append(src_idx)
+            in_count[cls] = in_count.get(cls, 0) + 1
+    if not promotions:
+        return base
+
+    # Displace the lowest-scored rows of OVER-quota classes (worst score first).
+    # ``order`` is desc, so iterate reversed for the worst rows. crypto (quota 0)
+    # is freely displaceable down to its share; a class is never cut below its
+    # own quota.
+    drop: set[int] = set()
+    for src_idx in reversed(base):
+        if len(drop) >= len(promotions):
+            break
+        cls = active_universe[src_idx].asset_class
+        # Only drop rows whose class would still meet its quota afterwards.
+        if in_count.get(cls, 0) - 1 >= quota.get(cls, 0):
+            drop.add(src_idx)
+            in_count[cls] = in_count.get(cls, 0) - 1
+
+    kept = [i for i in base if i not in drop]
+    # Add as many promotions as we freed room for (bounded by target_size).
+    room = target_size - len(kept)
+    merged = kept + promotions[: max(0, room)]
+    # Re-sort the final selection by score order (desc) for a stable ranked list.
+    order_pos = {idx: pos for pos, idx in enumerate(order)}
+    merged.sort(key=lambda i: order_pos[i])
+    return merged[:target_size]
+
+
 def compute_dynamic_focus(
     active_universe: list[UniverseInstrument],
     *,
@@ -187,7 +263,9 @@ def compute_dynamic_focus(
     Steps:
     1. Score every active instrument deterministically.
     2. Resolve dynamic target size (12-48).
-    3. Sort desc by score, take top-N.
+    3. Sort desc by score, take top-N, then apply the per-asset-class min quota
+       (guarantees under-represented classes — Capital FX/indices/gold, Alpaca
+       equity — a floor of slots; flow_not_block, no-op for single-class venues).
     4. Bucket = listing_watch (<24h) | core (top-quartile cell AND active signal) | satellite.
     """
     if not active_universe:
@@ -204,6 +282,10 @@ def compute_dynamic_focus(
             top_score_concentration=top_score_concentration,
         )
 
+    selected = _apply_asset_class_quota(
+        order, active_universe, target_size=target_size
+    )
+
     # Top-quartile thresholds across the *active universe* (not the focus subset).
     cell_score_lookup = cell_scores or {}
     cell_population = [
@@ -214,7 +296,7 @@ def compute_dynamic_focus(
     sig_q75 = _quantile(sig_population, 0.75)
 
     out: list[FocusSelection] = []
-    for rank_idx, src_idx in enumerate(order[:target_size], start=1):
+    for rank_idx, src_idx in enumerate(selected, start=1):
         inst = active_universe[src_idx]
         bucket = _bucket_for(
             inst,

@@ -5,6 +5,7 @@ Spec source: vault/30_components/layer-0-universe-discovery.md (Dataclass + Cons
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -79,6 +80,57 @@ RANK_WEIGHT_SIGNAL_DENSITY_Z: Final[float] = 0.25
 RANK_WEIGHT_ATR_Z: Final[float] = 0.20
 RANK_WEIGHT_DEPTH_Z: Final[float] = 0.10
 RANK_WEIGHT_CELL_Z: Final[float] = 0.10
+
+# ---------------------------------------------------------------------------
+# Asset-class focus quota (STEP 6 — crypto-monopoly fix; flow_not_block)
+# ---------------------------------------------------------------------------
+# DEMO/PAPER virtual capital. The cross-venue focus is sorted globally by score
+# (vol-dominant). 24/7 crypto carries huge 24h notional while Capital CFD rows
+# expose no 24h notional via the nav tree (``vol_24h_usd=0.0``), so a pure score
+# sort lets crypto MONOPOLIZE the focus window and starves FX / indices / gold /
+# equity → those classes never reach the order path.
+#
+# The quota GUARANTEES each present-but-under-represented asset class a minimum
+# number of focus slots, drawn from its own highest-scored rows. This is a FLOW
+# INCREASE (more asset classes trade), NOT a throttle: crypto coverage stays
+# wide (it keeps the bulk of the window), no entry is blocked, no notional is
+# cut. A single-asset-class universe (OKX-only crypto / Alpaca-only equity)
+# satisfies every quota trivially → the quota is a NO-OP there.
+#
+# Defaults are CONSERVATIVE (small guaranteed floors). crypto has NO floor — it
+# dominates the score sort on its own. Each class is env-overridable
+# (``POLARIS_FOCUS_QUOTA_<CLASS>``) — a /debate calibration target.
+FOCUS_QUOTA_ENV_PREFIX: Final[str] = "POLARIS_FOCUS_QUOTA_"
+_DEFAULT_FOCUS_MIN_QUOTA: Final[dict[str, int]] = {
+    "crypto": 0,  # never floored — wins the score sort outright (24/7 + high vol)
+    "forex": 4,
+    "indices": 3,
+    "commodity": 2,
+    "equity": 4,
+    "other": 0,
+}
+
+
+def focus_min_quota_by_class() -> dict[str, int]:
+    """Per-asset-class minimum focus-slot quota (env-overridable; clamped >= 0).
+
+    Read ``POLARIS_FOCUS_QUOTA_<CLASS>`` (e.g. ``POLARIS_FOCUS_QUOTA_FOREX``) to
+    override a class floor; unset/invalid keeps the conservative default. The
+    guaranteed minimums fit inside the focus window by construction. /debate
+    calibration target.
+    """
+    out: dict[str, int] = {}
+    for cls, default in _DEFAULT_FOCUS_MIN_QUOTA.items():
+        raw = os.environ.get(f"{FOCUS_QUOTA_ENV_PREFIX}{cls.upper()}")
+        val = default
+        if raw is not None and raw != "":
+            try:
+                val = int(float(raw))
+            except ValueError:
+                val = default
+        out[cls] = max(0, val)
+    return out
+
 
 FocusBucket = Literal["core", "satellite", "listing_watch"]
 

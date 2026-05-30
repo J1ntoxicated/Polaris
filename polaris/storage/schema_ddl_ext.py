@@ -360,3 +360,53 @@ CREATE TABLE IF NOT EXISTS venue_blocklist (
     PRIMARY KEY (venue, symbol)
 );
 """
+
+# ---------------------------------------------------------------------------
+# Dashboard telemetry — capital-rotation + session-forced-exit observability.
+#
+# DISPLAY-ONLY, additive. The live loop holds these counters in-memory on
+# ``ProdLoopState`` (``state.rotations`` / ``recalc_session_forced_exit``) and
+# only logs them; the read-only dashboard cannot reach process memory. The
+# rotation/forced-exit wires append a row here best-effort so the snapshot can
+# surface a count + the last rotation detail (victim / E$_new / E$_held / margin
+# / cost). NEVER read by sizing / gating / the rotation evaluator — pure
+# observability (the rotation telemetry "REQUIRED before any live run"). One row
+# per fire; a missing table degrades to a zeroed dashboard panel (graceful zero).
+# ---------------------------------------------------------------------------
+
+DDL_LOOP_ROTATION_EVENTS = """
+CREATE TABLE IF NOT EXISTS loop_rotation_events (
+    rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    venue TEXT NOT NULL DEFAULT '',
+    victim_symbol TEXT NOT NULL DEFAULT '',
+    victim_strategy TEXT NOT NULL DEFAULT '',
+    winner_symbol TEXT NOT NULL DEFAULT '',
+    e_new REAL NOT NULL DEFAULT 0.0,
+    e_held REAL NOT NULL DEFAULT 0.0,
+    margin REAL NOT NULL DEFAULT 0.0,
+    cost REAL NOT NULL DEFAULT 0.0
+);
+"""
+
+DDL_LOOP_ROTATION_EVENTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_loop_rotation_events_ts
+    ON loop_rotation_events(ts);
+"""
+
+# Session-forced-exit (CALENDAR INTEGRITY, TIME-only) telemetry — one row per
+# force-flatten so the dashboard can show a count + last venue/symbol. Same
+# display-only / never-gating contract as the rotation events above.
+DDL_LOOP_SESSION_EXIT_EVENTS = """
+CREATE TABLE IF NOT EXISTS loop_session_exit_events (
+    rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT ''
+);
+"""
+
+DDL_LOOP_SESSION_EXIT_EVENTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_loop_session_exit_events_ts
+    ON loop_session_exit_events(ts);
+"""

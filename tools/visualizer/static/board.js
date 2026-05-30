@@ -11,9 +11,9 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    /* header / kpis / streams / equity (auto) + mid + bottom (bounded flex). minmax(0,..)
+    /* header / kpis / streams / rotation / equity (auto) + mid + bottom (bounded flex). minmax(0,..)
        keeps the sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
-    grid-template-rows: auto auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
     gap: 8px;
     padding: 10px 16px;
     box-sizing: border-box;
@@ -102,6 +102,35 @@
   #board .lane .ln-cost .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #board .lane .ln-cost .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; }
   #board .lane .ln-cost .s .lv { font-variant-numeric: tabular-nums; }
+  /* Recent-closed mini-row per lane (OPEN vs CLOSED split) — compact closed list. */
+  #board .lane .ln-closed {
+    margin-top: 3px; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-top: 1px dotted rgba(255,255,255,0.08); padding-top: 3px;
+  }
+  #board .lane .ln-closed .rc-lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; }
+  #board .lane .ln-closed .rc-item { margin-right: 7px; }
+  #board .lane .ln-closed .rc-sym { color: var(--p-gry); }
+  #board .lane .ln-closed .rc-pn { font-variant-numeric: tabular-nums; }
+
+  /* Rotation + session-forced-exit telemetry strip (follow-up #12) — display-only.
+     Surfaces the capital-rotation count + last fire (victim / E$_new vs E$_held /
+     margin / cost) and the session-forced-exit counter. Graceful zero when none. */
+  #board .rot-strip {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    border: 1px solid rgba(95,135,175,0.22);
+    border-left: 4px solid var(--p-mag);
+    background: rgba(15,19,26,0.55);
+    padding: 4px 10px; font-size: 10px; min-width: 0; overflow: hidden;
+  }
+  #board .rot-strip .rt-title {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--p-mag);
+  }
+  #board .rot-strip .rt-kv { white-space: nowrap; }
+  #board .rot-strip .rt-kv .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #board .rot-strip .rt-kv .lv { font-variant-numeric: tabular-nums; color: var(--p-wht); font-weight: 700; }
+  #board .rot-strip .rt-last { color: var(--p-gry); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #board .rot-strip .rt-last b { color: var(--p-cyn); }
+  #board .rot-strip .rt-none { color: var(--p-dim); }
 
   /* Equity chart */
   #board .eq-wrap {
@@ -301,6 +330,8 @@
 
     <div class="streams-strip" id="b-streams"></div>
 
+    <div class="rot-strip" id="b-rotation"></div>
+
     <div class="eq-wrap">
       <div class="eq-head">
         <span class="h-title">Equity Curve (SESSION)</span>
@@ -394,12 +425,53 @@
           <span class="s"><span class="lk">Net PnL</span> <span class="lv ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 2)}</span></span>
           <span class="s"><span class="lk">uPnL</span> <span class="lv ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 2)}</span></span>
           <span class="s"><span class="lk">Exposure</span> <span class="lv b-flat">${fmtUsd(s.exposed_usd, 0)}</span></span>
-          <span class="s"><span class="lk">Open</span> <span class="lv b-flat">${s.open_positions_n || 0}</span></span>
-          <span class="s"><span class="lk">Trades</span> <span class="lv b-flat">${s.daily_trades || 0}</span></span>
+          <span class="s" title="currently-open positions"><span class="lk">Open</span> <span class="lv ${s.open_positions_n ? 'b-pos' : 'b-flat'}">${s.open_positions_n || 0}</span></span>
+          <span class="s" title="closed trades this session"><span class="lk">Closed</span> <span class="lv b-flat">${(s.closed_n != null ? s.closed_n : (s.daily_trades || 0))}</span></span>
           <span class="s"><span class="lk">Exp%</span> <span class="lv b-flat">${fmtPct(expPct, 1)}</span></span>
-        </div>${costRow}
+        </div>${costRow}${recentClosedRow(s)}
       </div>`;
     }).join('');
+  }
+
+  // Recent-closed mini-row per lane (OPEN vs CLOSED split): compact list of this
+  // lane's most-recent closed trades. Graceful: omitted when older snapshot has
+  // no recent_closed or the lane has no closed trades.
+  function recentClosedRow(s) {
+    const rc = s.recent_closed || [];
+    if (!rc.length) return '';
+    const items = rc.slice(0, 4).map(t => {
+      const cls = pn(t.pnl_usd);
+      return `<span class="rc-item" title="${esc(t.symbol)} ${esc(t.strategy_id)} ${esc(t.exit_reason)} ${fmtUsd(t.pnl_usd, 2)}">`
+        + `<span class="rc-sym">${esc(t.symbol)}</span> <span class="rc-pn ${cls}">${fmtUsd(t.pnl_usd, 1)}</span></span>`;
+    }).join('');
+    return `<div class="ln-closed" title="recently-closed (distinct from currently-open)"><span class="rc-lk">closed:</span> ${items}</div>`;
+  }
+
+  // Rotation + session-forced-exit telemetry strip (follow-up #12). Server-fed
+  // top-level fields: rotation_count / session_forced_exit_count / last_rotation
+  // (victim symbol, E$_new vs E$_held, margin, cost). Graceful zero when none —
+  // older snapshots omit these fields entirely.
+  function renderRotation(d) {
+    const el = $('b-rotation');
+    if (!el) return;
+    const rc = d.rotation_count || 0;
+    const sfe = d.session_forced_exit_count || 0;
+    const last = d.last_rotation || null;
+    let lastHtml;
+    if (last) {
+      const eNew = last.e_new || 0, eHeld = last.e_held || 0;
+      lastHtml = `<span class="rt-last" title="last rotation: ${esc(last.venue)} closed ${esc(last.victim_symbol)} (${esc(last.victim_strategy)}) → E$new ${eNew.toFixed(2)} vs E$held ${eHeld.toFixed(2)}, margin ${(last.margin||0).toFixed(2)}, cost ${(last.cost||0).toFixed(2)}">`
+        + `last <b>${esc(last.victim_symbol)}</b> `
+        + `<span class="${pn(eNew - eHeld)}">E$new ${eNew.toFixed(1)}</span> vs E$held ${eHeld.toFixed(1)} `
+        + `· mgn ${(last.margin||0).toFixed(1)} · cost ${(last.cost||0).toFixed(2)}</span>`;
+    } else {
+      lastHtml = `<span class="rt-last rt-none">no rotations yet</span>`;
+    }
+    el.innerHTML =
+      `<span class="rt-title" title="capital-rotation = finite-capital opportunity-cost redeploy (display-only telemetry)">Rotation</span>`
+      + `<span class="rt-kv" title="capital rotations fired this session"><span class="lk">Rotations</span> <span class="lv">${rc}</span></span>`
+      + `<span class="rt-kv" title="session-forced exits (calendar integrity, time-only)"><span class="lk">Session Exits</span> <span class="lv">${sfe}</span></span>`
+      + lastHtml;
   }
 
   function renderEquity(d) {
@@ -625,6 +697,7 @@
     renderHeader(d);
     renderKpis(d);
     renderStreams(d);
+    renderRotation(d);
     renderEquity(d);
     renderPositions(d);
     renderTrades(d);

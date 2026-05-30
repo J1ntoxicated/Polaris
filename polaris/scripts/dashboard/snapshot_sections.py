@@ -23,6 +23,8 @@ from polaris.scripts.dashboard.snapshot_models import (
     GptStat,
     LearnerSlot,
     RegimeBar,
+    RotationEvent,
+    RotationTelemetry,
 )
 from polaris.scripts.dashboard.snapshot_queries import (
     DEFAULT_R_USD,
@@ -455,3 +457,53 @@ def _universe(conn: sqlite3.Connection) -> tuple[int, str]:
     rows = _safe_query(conn, "SELECT COUNT(*) FROM universe WHERE is_active = 1")
     cnt = int(rows[0][0]) if rows else 0
     return cnt, "n/a"
+
+
+# ---------------------------------------------------------------------------
+# Section: rotation + session-forced-exit telemetry (display-only, #12)
+# ---------------------------------------------------------------------------
+
+
+def _rotation_telemetry(
+    conn: sqlite3.Connection, *, now_s: int
+) -> RotationTelemetry:
+    """Read rotation + session-forced-exit observability (display-only).
+
+    Sources the ``loop_rotation_events`` / ``loop_session_exit_events`` tables
+    the rotation/forced-exit wires append to (the in-memory ``state.rotations``
+    counter is unreachable from the read-only dashboard process). Best-effort:
+    a missing table (older schema) or empty tables degrade to a zeroed
+    ``RotationTelemetry`` with ``last_rotation=None`` — graceful zero. NEVER read
+    by sizing / gating / the rotation evaluator.
+    """
+    rot_rows = _safe_query(conn, "SELECT COUNT(*) FROM loop_rotation_events")
+    rotation_count = int(rot_rows[0][0] or 0) if rot_rows else 0
+    exit_rows = _safe_query(conn, "SELECT COUNT(*) FROM loop_session_exit_events")
+    session_forced_exit_count = int(exit_rows[0][0] or 0) if exit_rows else 0
+
+    last: RotationEvent | None = None
+    last_rows = _safe_query(
+        conn,
+        """SELECT ts, venue, victim_symbol, victim_strategy, winner_symbol,
+                  e_new, e_held, margin, cost
+           FROM loop_rotation_events
+           ORDER BY ts DESC, rowid_pk DESC LIMIT 1""",
+    )
+    if last_rows:
+        r = last_rows[0]
+        last = RotationEvent(
+            ts=int(r[0] or 0),
+            venue=str(r[1] or ""),
+            victim_symbol=str(r[2] or ""),
+            victim_strategy=str(r[3] or ""),
+            winner_symbol=str(r[4] or ""),
+            e_new=float(r[5] or 0.0),
+            e_held=float(r[6] or 0.0),
+            margin=float(r[7] or 0.0),
+            cost=float(r[8] or 0.0),
+        )
+    return RotationTelemetry(
+        rotation_count=rotation_count,
+        session_forced_exit_count=session_forced_exit_count,
+        last_rotation=last,
+    )

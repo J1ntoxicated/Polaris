@@ -144,6 +144,39 @@ class AlertRow:
 
 
 @dataclass(slots=True)
+class RotationEvent:
+    """One capital-rotation fire — display-only telemetry row.
+
+    Sourced from the ``loop_rotation_events`` table the rotation wire appends to
+    (``state.rotations`` lives in process memory the read-only dashboard cannot
+    reach). NEVER read by sizing / gating / the rotation evaluator.
+    """
+
+    ts: int
+    venue: str
+    victim_symbol: str
+    victim_strategy: str
+    winner_symbol: str
+    e_new: float
+    e_held: float
+    margin: float
+    cost: float
+
+
+@dataclass(slots=True)
+class RotationTelemetry:
+    """Rollup of rotation + session-forced-exit observability for the dashboard.
+
+    ``rotation_count`` / ``session_forced_exit_count`` are session-window totals;
+    ``last_rotation`` is the most-recent fire (or ``None`` when none). Graceful
+    zero when the telemetry tables are empty or absent (older schema)."""
+
+    rotation_count: int = 0
+    session_forced_exit_count: int = 0
+    last_rotation: RotationEvent | None = None
+
+
+@dataclass(slots=True)
 class StreamSummary:
     """Per-stream (venue lane) rollup for the stage-2 dashboard — read-only.
 
@@ -191,6 +224,13 @@ class StreamSummary:
     slippage_usd: float = 0.0
     ai_cost_usd: float = 0.0
     net_after_cost_usd: float = 0.0
+    # OPEN vs CLOSED split (follow-up #12) — additive. ``open_positions_n`` above
+    # is the currently-open count; ``closed_n`` is this lane's closed-fill count
+    # (== ``daily_trades``, surfaced under a clearer name so the board can show a
+    # distinct open-vs-closed view per exchange lane). ``recent_closed`` is the
+    # lane's most-recent closed trades (newest first), an empty list when none.
+    closed_n: int = 0
+    recent_closed: list[ClosedTrade] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -233,3 +273,10 @@ class DashboardSnapshot:
     # stream; sums reconcile to the global totals above. server.py
     # dataclasses.asdict auto-serializes this for the web snapshot.
     streams: list[StreamSummary] = field(default_factory=list)
+    # Rotation + session-forced-exit telemetry (follow-up #12) — display-only,
+    # additive. Read from the loop_rotation_events / loop_session_exit_events
+    # tables; graceful zero when none. dataclasses.asdict serializes
+    # ``last_rotation`` (a nested RotationEvent or None) for the web snapshot.
+    rotation_count: int = 0
+    session_forced_exit_count: int = 0
+    last_rotation: RotationEvent | None = None

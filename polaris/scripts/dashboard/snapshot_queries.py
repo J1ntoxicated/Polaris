@@ -20,6 +20,7 @@ from polaris.core.sizing.constants import (
 )
 from polaris.core.streams.config import STREAMS
 from polaris.scripts.dashboard.snapshot_models import (
+    ClosedTrade,
     PositionRow,
     StrategyStat,
     StreamSummary,
@@ -486,6 +487,64 @@ _STREAM_DISPLAY: Final[Mapping[str, tuple[str, str]]] = {
 _STREAM_DISPLAY_DEFAULT: Final[tuple[str, str]] = ("?", "#9e9e9e")
 
 
+RECENT_CLOSED_PER_STREAM: Final[int] = 6  # cap of recent-closed rows per lane
+
+
+def _recent_closed_by_venue(
+    conn: sqlite3.Connection, *, per_venue: int = RECENT_CLOSED_PER_STREAM
+) -> dict[str, list[ClosedTrade]]:
+    """Most-recent closed trades per venue (newest first, capped per venue).
+
+    Lightweight read for the per-stream OPEN/CLOSED split: each close fill is a
+    closed trade, grouped by venue. Entry price/held are reconstructed from the
+    close fill's own pnl (display-only; the global ``recent_trades`` panel keeps
+    the exact entry-pairing logic). Empty venues yield no key → an empty list at
+    the call site (graceful zero). Pure read-only.
+    """
+    rows = _safe_query(
+        conn,
+        """SELECT venue, instrument_id, strategy_id, side, fill_price,
+                  pnl_usd, ts_ms, base_qty
+           FROM fills
+           WHERE is_close = 1
+           ORDER BY ts_ms DESC""",
+    )
+    out: dict[str, list[ClosedTrade]] = {}
+    for r in rows:
+        venue = str(r[0] or "").lower()
+        bucket = out.setdefault(venue, [])
+        if len(bucket) >= per_venue:
+            continue
+        inst = str(r[1] or "")
+        side = str(r[3] or "")
+        fill_price = float(r[4] or 0.0)
+        pnl = float(r[5] or 0.0)
+        ts_ms = int(r[6] or 0)
+        qty = float(r[7] or 0.0)
+        if qty > 0 and fill_price > 0:
+            sign = 1.0 if side.lower() == "sell" else -1.0
+            entry_px = fill_price - (pnl / qty) * sign
+        else:
+            entry_px = fill_price
+        reason = "TP" if pnl > 0 else ("SL" if pnl < 0 else "FLAT")
+        bucket.append(
+            ClosedTrade(
+                ts_close=ts_ms // 1000,
+                venue=venue,
+                symbol=_symbol_from_inst(inst),
+                strategy_id=str(r[2] or ""),
+                side_close=side,
+                entry_price=entry_px,
+                exit_price=fill_price,
+                pnl_usd=pnl,
+                r_units=pnl / DEFAULT_R_USD,
+                held_sec=0.0,
+                exit_reason=reason,
+            )
+        )
+    return out
+
+
 def _per_stream_summary(
     conn: sqlite3.Connection,
     *,
@@ -599,6 +658,9 @@ def _per_stream_summary(
         "alpaca": 0.0,
     }
 
+    # OPEN vs CLOSED split — per-venue recent-closed trades (newest first).
+    recent_closed_by_venue = _recent_closed_by_venue(conn)
+
     out: list[StreamSummary] = []
     # Stable lane order = SSOT registration order (A, B, C).
     for stream_id, cfg in STREAMS.items():
@@ -642,6 +704,12 @@ def _per_stream_summary(
                 slippage_usd=slippage,
                 ai_cost_usd=ai_cost,
                 net_after_cost_usd=net_after_cost,
+                # OPEN vs CLOSED split: closed_n == this lane's closed-trade
+                # count (same is_close sum as daily_trades — one source of
+                # truth, surfaced under a clearer name). recent_closed is the
+                # lane's most-recent closed trades (empty list when none).
+                closed_n=trades_by_venue.get(venue, 0),
+                recent_closed=recent_closed_by_venue.get(venue, []),
             )
         )
     return out

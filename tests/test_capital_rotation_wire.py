@@ -425,6 +425,15 @@ async def test_evaluate_fires_closes_victim_and_does_not_reopen_same_tick(
     assert rec["victim_id"] == "pos_weak"
     assert rec["e_new"] > rec["e_held"]
     assert "margin" in rec and "cost" in rec
+    # Display-only telemetry persisted to loop_rotation_events (dashboard read
+    # path) — one row mirroring the fire, victim/winner symbols carried through.
+    db_rows = memdb.execute(
+        "SELECT venue, victim_symbol, winner_symbol FROM loop_rotation_events"
+    ).fetchall()
+    assert len(db_rows) == 1
+    assert db_rows[0][0] == "okx"
+    assert db_rows[0][1] == "DOGE-USDT"
+    assert db_rows[0][2] == "ETH-USDT"
     # Vacated-side cooldown registered on the victim.
     assert rotation_vacated_cooldown_active(
         state, venue="okx", symbol="DOGE-USDT", strategy="tsmom", now_ts=now,

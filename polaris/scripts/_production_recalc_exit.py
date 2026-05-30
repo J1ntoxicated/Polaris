@@ -14,6 +14,7 @@ halt. The G6 -1.0R hard ``stop_hit`` rail lives in the G6 gate and is untouched
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -87,7 +88,30 @@ async def run_session_forced_exit(
     state.recalc_session_forced_exit = (
         getattr(state, "recalc_session_forced_exit", 0) + 1
     )
+    _persist_session_exit_telemetry(
+        conn, now_ts=now_ts, venue=str(pos["venue"]),
+        symbol=str(pos.get("symbol", "")),
+    )
     return True
+
+
+def _persist_session_exit_telemetry(
+    conn: sqlite3.Connection, *, now_ts: int, venue: str, symbol: str
+) -> None:
+    """Append one session-forced-exit row to ``loop_session_exit_events``.
+
+    Display-only observability for the read-only dashboard — the flatten already
+    happened via ``close_specific`` and ``state.recalc_session_forced_exit`` is
+    the authoritative in-memory counter. Best-effort: any sqlite error (older
+    schema lacking the table) is swallowed. Touches ONLY this isolated telemetry
+    table; never positions/fills/sizing/gating.
+    """
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute(
+            "INSERT INTO loop_session_exit_events (ts, venue, symbol) "
+            "VALUES (?,?,?)",
+            (int(now_ts), str(venue), str(symbol)),
+        )
 
 
 def persist_exit_state(

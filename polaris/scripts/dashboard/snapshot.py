@@ -67,6 +67,7 @@ from polaris.scripts.dashboard.snapshot_sections import (
     _learner_slots,
     _recent_closed_trades,
     _regime_bars,
+    _rotation_telemetry,
     _universe,
 )
 
@@ -166,6 +167,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # Stage-2 per-stream rollup. ``positions`` is passed so the per-stream
         # open_n / upnl / exposed decompose the global totals exactly.
         streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
+        # Rotation + session-forced-exit telemetry (follow-up #12) — display-only,
+        # graceful zero when the telemetry tables are empty/absent.
+        rotation = _rotation_telemetry(conn, now_s=now_s)
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -197,6 +201,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             gpt_stats=gpt_stats,
             alerts=alerts,
             streams=streams,
+            rotation_count=rotation.rotation_count,
+            session_forced_exit_count=rotation.session_forced_exit_count,
+            last_rotation=rotation.last_rotation,
         )
     finally:
         conn.close()

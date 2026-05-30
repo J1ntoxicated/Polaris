@@ -95,6 +95,47 @@ ROTATION_VACATED_COOLDOWN_SEC: Final[float] = _env_float(
 
 
 # ---------------------------------------------------------------------------
+# 0. display-only telemetry persistence (read-only dashboard observability).
+# ---------------------------------------------------------------------------
+
+
+def _persist_rotation_telemetry(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int,
+    venue: str,
+    victim_symbol: str,
+    victim_strategy: str,
+    winner_symbol: str,
+    e_new: float,
+    e_held: float,
+    margin: float,
+    cost: float,
+) -> None:
+    """Append one rotation-fire row to ``loop_rotation_events`` (display-only).
+
+    Pure observability for the read-only dashboard — the live rotation decision
+    is already done (``state.rotations`` holds the authoritative in-memory
+    record). Best-effort: any sqlite error (e.g. older schema lacking the table)
+    is swallowed so telemetry can never disturb the loop. Touches ONLY this
+    isolated table; never positions/fills/sizing/gating.
+    """
+    try:
+        conn.execute(
+            "INSERT INTO loop_rotation_events (ts, venue, victim_symbol, "
+            "victim_strategy, winner_symbol, e_new, e_held, margin, cost) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                int(now_ts), str(venue), str(victim_symbol),
+                str(victim_strategy), str(winner_symbol), float(e_new),
+                float(e_held), float(margin), float(cost),
+            ),
+        )
+    except sqlite3.Error:
+        logger.debug("[rotation] telemetry persist skipped (best-effort)")
+
+
+# ---------------------------------------------------------------------------
 # 1. capital-kill propagation.
 # ---------------------------------------------------------------------------
 
@@ -346,6 +387,17 @@ async def _rotate_one_venue(
             "same_symbol_reopen_count": same_symbol_reopen,
             "rotations_this_hour": rotations_this_hour,
         }
+    )
+    # Display-only telemetry persistence (follow-up #12): mirror the fire into
+    # the read-only dashboard's loop_rotation_events table so the snapshot can
+    # surface a count + last-rotation detail (state.rotations is in-process and
+    # unreachable from the read-only dashboard). Best-effort: a write failure /
+    # missing table NEVER affects the rotation (it already happened). Touches
+    # ONLY this isolated telemetry table — no positions/fills/sizing/gating.
+    _persist_rotation_telemetry(
+        conn, now_ts=now_ts, venue=venue, victim_symbol=v_symbol,
+        victim_strategy=v_strategy, winner_symbol=winner.candidate_id,
+        e_new=e_new, e_held=e_held, margin=improvement_margin_usd, cost=cost,
     )
     logger.info(
         "[rotation] FIRED venue=%s victim=%s(%s pnl_r=%.3f fwd_R=%.3f) -> "

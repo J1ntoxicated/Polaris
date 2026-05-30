@@ -34,3 +34,27 @@ scoping(done) → /debate(GPT+Gemini 교차검증: 옳은 방향·파라미터·
 
 ## AGGRESSIVE/mandate 정합
 rotation=자본 효율(더 나은 EV로 재배치) NOT 방어 throttle. 정량 score 비교로만 close(blanket P&L limiter X). circuit_breaker(무결성-only) 무간섭(insufficient_balance=external non-fault). winner(protected/harvest) 면제. 9-stack 무관(사이징 체인 미변경, rotation은 close+open 오케스트레이션).
+
+---
+## ⚠️ /debate cross-verify (w1iz37hwt) = PROCEED_WITH_CHANGES — 아래가 BUILD 확정 설계 (위 초안의 비교부 SUPERSEDE)
+
+**🔴 FATAL fix — 비교 단위 일치 (expected dollar edge, 양쪽 동일 단위)**:
+- `proposed_risk_pct`는 stake 크기(%equity)이지 return 아님 / `mu`는 expected R. 직접 비교 금지(bet크기 랭킹됨).
+- **NEW score** = `E$_new = fwd_mu(new_cell) × proposed_risk_pct × equity` — fwd_mu = **NEW 신호 자신의** (venue,strategy,ticker,regime) cell의 learner_posterior.mu(=edge; fallback cell avg_pnl_r). proposed_risk_pct는 **capital scale로만** 진입.
+- **HELD score** = `E$_held = fwd_R(position) × open_risk_pct_held × equity`.
+- **rotate iff** `E$_new − E$_held > IMPROVEMENT_MARGIN + ROTATION_COST` — **ADDITIVE margin**(곱셈 (1+THRESH) 금지: weak는 음수-by-selection이라 곱셈은 역방향), 같은 $단위.
+- forward score = **posterior lower credible bound** (mu − z·posterior_sd, df=2·alpha_n) at **n≥20**, point estimate 금지(winner's/loser's curse).
+
+**필수 변경 (8)**:
+1. 비교 = expected $edge (위). IMPROVEMENT_MARGIN = additive $ (env, /debate; 시작값 build agent 제안).
+2. **GAP-fix #1 재설계**: `position_risk_state`는 production writer 없음(read-only) → free-capital을 **venue availBal path**로(OKX `fetch_okx_available_usdt` 재조회; close 후 settle된 USDT). position_risk_state 삭제는 no-op이므로 폐기.
+3. **close→settle→reopen ordering**: freed 자본은 OKX close sell **settle 후** availBal에 반영 → same-tick 즉시 reserve_and_submit 금지; 다음 recalc/짧은 confirm 후 new entry(또는 settle 확인 게이트).
+4. **vacated-side anti-churn**: 막 청산한 victim에 post-close cooldown(reentry backdoor 닫기 — reentry.py:67/76 strength≥0.x exempt 우회 차단). MIN_HOLD는 victim age floor.
+5. `ROTATION_POSTERIOR_MIN_N` 10→**20** (codebase trust floor 일치).
+6. **cold-start candidate gate**: 새 후보 cell n<N면 prior mu~0 → 항상 measured-negative held 이김(잘못). 후보도 n≥N(또는 보수적 prior shrink)일 때만 rotation 자격.
+7. `ROTATION_COST_R` per-name 실값 = close-leg(A)+open-leg(B) round-trip(slip+fee) in R/$ (cost_adjusted_pnl_r 패턴 재사용).
+8. **per-rotation telemetry**(DEMO run 전 필수): `state.rotations`(victim_id/victim_fwd/pnl_r/E$_new/E$_held/margin/cost + same-symbol-reopen counter + rotations/hour).
+
+**확정 유지**: MAX_PER_TICK=1(구조적, env X) · cross-venue=NO(**invariant** 아님 tunable X; OKX USDT↔Capital margin 비-fungible) · winner-exempt{protected,harvest}=YES · MIN_HOLD 300s(victim age floor, +symmetric cooldown) · trigger=capital-block only(sizing_zero/51008; 매 fire에 pending entry → net deploy↑) · greedy single-weakest/single-best(assignment 과설계 X, per-tick 수렴).
+
+**잔여 리스크(빌드 시 주석/telemetry로 추적)**: horizon 비정규화(per-trade R; E$/expected_holding_bars 고려 가능) · mu unconditional(held 라이브상태 미조건; mfe/pnl_r 보강 여지) · self-referential survivorship(loser 조기청산이 mu 상향편향) · estimator mixing(mu vs avg_pnl_r 한 축 혼용 — 한 family 고정).

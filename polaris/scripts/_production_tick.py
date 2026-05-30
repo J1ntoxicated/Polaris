@@ -33,7 +33,9 @@ from polaris.core.live_recalc.strategy_swap import (
     SwapCandidate,
     evaluate_strategy_swap,
 )
+from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
+from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_indicators import (
     build_real_market_view,
     session_window_now,
@@ -394,6 +396,15 @@ async def _run_tick(
                 ):
                     state.reentry_skips += 1
                     continue
+                # Capital rotation VACATED-SIDE anti-churn (Jin 2026-05-30): a
+                # JUST-rotated-out name cannot re-enter immediately — NO strong-
+                # signal exemption (backdoor CLOSED), not a P&L halt / size dampen.
+                if rotation.rotation_vacated_cooldown_active(
+                    state, venue=venue, symbol=symbol, strategy=strategy_id,
+                    now_ts=now_ts,
+                ):
+                    state.reentry_skips += 1
+                    continue
 
                 # T13/H3 — PDT ranking-down (equity only; A/B no-op). When the
                 # rolling daytrade_count >= 3 this surfaces a finite, positive
@@ -448,6 +459,19 @@ async def _run_tick(
         state.supervised_tasks_failed += sum(
             1 for r in results if r["exception"] is not None
         )
+
+    # Capital rotation HOOK SEAM (Jin 2026-05-30): rotate one per-venue from the
+    # capital-blocked candidates the fan-out populated (close weakest loser,
+    # winner re-proposed next tick — no same-tick reopen, MAX_PER_TICK=1). Capital
+    # EFFICIENCY (net deploy UP), NOT a throttle; before _evaluate_swaps so a
+    # closed victim is not swap-eval'd. See _production_rotation for the contract.
+    await rotation.evaluate_capital_rotation(
+        conn, state=state, now_ts=now_ts,
+        close_specific=close_specific_position, lookup_regime=_lookup_regime,
+        equity=production_default_equity_usd(),
+        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+        capital_session=capital_session, gpt_client=haiku, phase=phase,
+    )
 
     _evaluate_swaps(conn, now_ts=now_ts)
 

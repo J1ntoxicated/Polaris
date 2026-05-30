@@ -11,6 +11,7 @@ sub-modules.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
@@ -104,3 +105,24 @@ class ProdLoopState:
     # these never drive sizing/blocking/exits; telemetry for the dashboard.
     altdata_refreshes: int = 0
     altdata_errors: int = 0
+    # Capital rotation (Jin 2026-05-30) — finite-capital opportunity-cost
+    # redeploy. A NEW signal blocked *for a capital reason* (entry_sizer
+    # ``sizing_zero`` on a binding cap, or OKX ``insufficient_balance``/51008) is
+    # pushed here as a rotation CANDIDATE carrying its conviction-derived
+    # ``proposed_risk_pct`` (the capital scale only). Cleared every tick after the
+    # rotation pass. rotation = capital EFFICIENCY, NOT a defensive throttle:
+    # every fire pairs with a concrete pending entry so net deployed capital goes
+    # UP; winners (exit_state protected/harvest) are never touched; no P&L halt;
+    # no T4 multiplier (9-stack ban intact). DEMO/PAPER only.
+    rotation_candidates: list[dict[str, Any]] = field(default_factory=list)
+    # Per-rotation telemetry (REQUIRED before any live run). One record per fire:
+    # victim_id / victim_fwd_R / victim_pnl_r / e_new / e_held / margin / cost +
+    # same_symbol_reopen_count + rotations_this_hour. Observability only.
+    rotations: list[dict[str, Any]] = field(default_factory=list)
+    # Vacated-side anti-churn: a just-rotated victim (venue, symbol, strategy) →
+    # cooldown-until ts. The reentry backdoor (strong-signal exempt) is CLOSED
+    # for these names so the freed capital is NOT immediately re-spent on the
+    # name we just exited (cross-verify item 4). No strong-signal escape hatch.
+    rotation_vacated_cooldowns: dict[tuple[str, str, str], int] = field(
+        default_factory=dict
+    )

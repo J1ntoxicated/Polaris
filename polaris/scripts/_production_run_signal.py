@@ -52,6 +52,40 @@ logger = logging.getLogger(__name__)
 # the invariant fixed 1.0.
 
 
+def _maybe_register_rotation_candidate(
+    state: ProdLoopState,
+    *,
+    results: list[Any],
+    sig: RawSignal,
+    venue: str,
+) -> None:
+    """Register a capital-blocked signal as a rotation candidate (trigger 1).
+
+    Scans the gate results for an entry-sizer ``sizing_zero`` KILL on a binding
+    cap and, if found, pushes the signal + its surfaced ``proposed_risk_pct``
+    onto ``state.rotation_candidates`` via the rotation wire. Only a
+    capital-block (binding cap) qualifies — a missing/zero ``proposed_risk_pct``
+    or any other KILL reason is skipped (rotation only fires for a real pending
+    deploy, keeping net deploy UP). Import is local to avoid a module-load cycle
+    (``_production_rotation`` -> state -> tick -> run_signal).
+    """
+    from polaris.scripts._production_rotation import register_rotation_candidate
+
+    for r in results:
+        if r.decision != GateDecision.KILL:
+            continue
+        if r.payload.get("reason") != "sizing_zero":
+            continue
+        proposed = r.payload.get("proposed_risk_pct")
+        if proposed is None:
+            continue
+        register_rotation_candidate(
+            state, sig=sig, proposed_risk_pct=float(proposed), venue=venue,
+            binding_reason=f"sizing_zero:{r.payload.get('binding_cap', '?')}",
+        )
+        return
+
+
 def _read_universe_state(
     conn: sqlite3.Connection, *, venue: str, symbol: str, now_ts: int,
 ) -> tuple[float, float]:
@@ -215,6 +249,18 @@ async def run_pipeline_for_signal(
             state.sized_count += 1
             break
     if sized_payload is None:
+        # Capital rotation TRIGGER SEAM 1 (Jin 2026-05-30): the signal was
+        # KILLed by the entry sizer on a binding cap (``sizing_zero``) — capital
+        # is the blocker, not the signal's quality. Register it as a rotation
+        # CANDIDATE carrying its conviction-derived ``proposed_risk_pct`` (the
+        # capital SCALE only) so a later weak held can be redeployed into it.
+        # This is capital EFFICIENCY (a concrete pending entry → net deploy UP),
+        # NOT a defensive throttle; it does NOT re-open this entry here and adds
+        # NO T4 multiplier. Other KILL reasons are signal-quality rejects (not a
+        # capital block) and are intentionally NOT registered.
+        _maybe_register_rotation_candidate(
+            state, results=results, sig=sig, venue=venue,
+        )
         return
 
     notional_usd = max(

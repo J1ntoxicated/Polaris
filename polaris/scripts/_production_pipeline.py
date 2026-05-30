@@ -90,6 +90,39 @@ def _strategy_timeframe(strategy_id: str) -> str:
         return "1m"
     return cls.metadata.timeframe
 
+
+# OKX venue BALANCE rejects that mean capital (not signal) blocked the fill —
+# the capital-rotation trigger. Compliance/min-order/no-fill codes are NOT here.
+_ROTATION_BALANCE_REJECT_CODES: frozenset[str] = frozenset(
+    {"51008", "51131", "insufficient_balance"}
+)
+
+
+def _maybe_register_balance_rotation_candidate(
+    state: ProdLoopState,
+    *,
+    sig: RawSignal,
+    venue: str,
+    reject_code: str | None,
+    notional_usd: float,
+) -> None:
+    """Register a venue-balance-blocked signal as a rotation candidate (trig 2).
+
+    Only fires for a BALANCE reject (OKX 51008/51131/insufficient_balance). The
+    capital SCALE (``proposed_risk_pct``) is approximated from the sized notional
+    vs the demo equity. Import is local to avoid a module-load cycle.
+    """
+    if reject_code not in _ROTATION_BALANCE_REJECT_CODES:
+        return
+    equity = EQUITY_USD_DEMO_DEFAULT
+    proposed_risk_pct = (notional_usd / equity) if equity > 0.0 else 0.0
+    from polaris.scripts._production_rotation import register_rotation_candidate
+
+    register_rotation_candidate(
+        state, sig=sig, proposed_risk_pct=proposed_risk_pct, venue=venue,
+        binding_reason=f"insufficient_balance:{reject_code}",
+    )
+
 # Day 9 F12 fix: pull from sizing.constants SSOT so dashboard + pipeline agree.
 EQUITY_USD_DEMO_DEFAULT = OKX_DEMO_STARTING_EQUITY_USD
 
@@ -305,6 +338,18 @@ async def reserve_and_submit(
                 symbol=symbol, reservation_id=reservation["reservation_id"],
                 reject_code=attempt.reject_code, reject_msg=attempt.reject_msg,
                 now_ts=now_ts,
+            )
+            # Capital rotation TRIGGER SEAM 2 (Jin 2026-05-30): a venue BALANCE
+            # reject (OKX 51008/51131 insufficient_balance) means capital — not
+            # signal quality — blocked this fill. Register it as a rotation
+            # candidate so a weak held can free capital for it next tick. The
+            # capital SCALE is recovered from the sized notional vs equity (the
+            # sizer already passed, so this is the real requested deploy). Other
+            # rejects (compliance/min-order/no-fill) are NOT capital blocks and
+            # are not registered.
+            _maybe_register_balance_rotation_candidate(
+                state, sig=sig, venue=venue,
+                reject_code=attempt.reject_code, notional_usd=notional_usd,
             )
             return None
         fill, deal_id = attempt.fill, attempt.deal_id

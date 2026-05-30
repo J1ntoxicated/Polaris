@@ -77,10 +77,20 @@ async def entry_sizer_gate(
         )
 
     if sized.final_risk_pct <= 0.0:
+        # Capital rotation (Jin 2026-05-30): surface the conviction-derived
+        # ``proposed_risk_pct`` (the capital SCALE the sizer asked for BEFORE a
+        # binding cap clipped final_risk_pct to 0) so the rotation trigger seam
+        # can register this capital-blocked signal as a rotation candidate.
+        # Display/telemetry only on the KILL — it does NOT re-open the entry and
+        # adds NO T4 multiplier (9-stack ban intact).
         return GateResult(
             decision=GateDecision.KILL,
             next_gate=None,
-            payload={"reason": "sizing_zero", "binding_cap": sized.binding_cap},
+            payload={
+                "reason": "sizing_zero",
+                "binding_cap": sized.binding_cap,
+                "proposed_risk_pct": sized.proposed.proposed_risk_pct,
+            },
             model_used="python",
         )
 

@@ -25,14 +25,12 @@ tags: [now, tier-0]
 ✅ **#10 AI 효율화+nit 정리 `2c7fe8a`**(1108 green +21): G1 on-change cached-GPT(`g1_focus_gate.py`, g6 패턴 미러; focus 결정 GPT 유지·per-signal 중복호출 제거 → 56.5% AI비용 절감)+prompt cap 300→70; nit: alt-data evidence 보존(덮어쓰기 방지)·#26 peak-extension 활성·`_production_pipeline.py` 448 LOC split(`_production_reject.py`). G1 항상 PASS(selector) 유지, 거동 보존.
 ✅ **비용 모니터링 `f069823`**(1116 green +8): StreamSummary fee/slip/AI$/net_after_cost per-stream + board.js 비용행, display-only. builder≠reviewer가 이중 fee 차감 버그 잡음(REJECT→fix). server.py 무변경.
 **🟢 코드 빌드 완성(1116 green, 13 커밋 `cf98ed8`→`f069823`). 봇 목적 6축 + 비용 모니터링 충족.** builder≠reviewer 적대리뷰 전구간 통과(blocker 0), 기존 스트림 byte-동일, 거부키워드 0, 9-stack·hard-MAX 불변.
-**다음 세션 착수 — ⚠️최종 운영 전환은 Jin 확인 필요(mandate "돌이키기 어려운 venue 변경 보류·기록")**:
-  (A) **OKX equity reconcile /debate 선결**: `OKX_DEMO_STARTING_EQUITY_USD=$79k`(sizing/constants.py:45) vs 실 demo available USDT($35.8k?) — sizing-policy. GPT+Gemini /debate 또는 Jin 결정. (FIX-2 entry-leg 클램프로 우회는 됨)
-  (B) **3-스트림 graceful 재기동**: 현재 봇 PID67774(구 코드 OKX+Capital 수집중)→ **SIGINT**(SIGTERM 핸들러 X, asyncio finally clean)→오펀 체크(OKX liquidate_okx_orphans.py / Capital·Alpaca 수동 fetch_positions)→새 코드 `ignite_p1 --paper --real-roundtrip --db data/polaris_live.sqlite`. ⚠️첫 실 Alpaca paper 주문: fetch_account 선검증($79.7k BP)·소액·실패 시 즉시 청산·기록. Alpaca universe 발화 로그 확인.
-  (C) **교차 live-audit**: 3 venue 각자 레짐·전략·엑싯 맞물림, cross-contam 0(strategy_roster/venue 필터 검증), OKX 실체결 확인(fills venue=okx >0), same-bar close 해소 확인(holding_bars>0), alt-data evidence_json 채워짐 확인.
-  (D) **5-axis 최종검증** + 사용성/갤럭시 대시보드 폴리시(재기동 후 3-스트림 라이브 데이터로 더 의미).
-  task #1-10 완료(#7 비용 done, 사용성/갤럭시 남음 / #8 최종).
+**✅ 최종 운영 전환 완료 (Jin 승인 "자율 진행" → 실행, 2026-05-30 03:1x UTC, 라이브 증명):**
+  (A) OKX equity: $79k 유지 + FIX-2 entry-leg 클램프로 venue 현실 대응 결정(equity 낮추면 aggressive 위반). (B) 구 봇 67774(real-roundtrip 구 코드) SIGTERM 정지 → 검증 봇(duration600 신코드) → **24h 프로덕션 봇 PID 6565 가동중**(`ignite_p1 --paper --duration 86400 --real-roundtrip --db data/polaris_live.sqlite`, log=data/paper/production_2026-05-30.log).
+  **🟢 라이브 증명**: OKX **실체결**(INJ-USDT, 구코드 752 SIZED→0fill **zero-fill 해소**) · 새봇 **fault 0**(51201/51008 해소; 79 fault 전부 구봇) · **same-bar close 해소**(position multi-bar 유지) · **#26 엑싯 엔진 라이브**(mfe_r 0.173 추적+stop_price persist 6.655 ATR트레일+exit_state) · **#6 alt-data→regime evidence 33건**(crypto_fg23+funding, LIT=crisis/BTC=chop) · Alpaca universe 12,929 발화(주문은 US장 마감 RTH보류=정상). fetch_account $79.9k 검증.
+  **남은**: (C) 5-axis 최종검증(cumulative coherence + cross-contam 정밀확인) (D) 사용성/갤럭시 대시보드 폴리시. task #1-10(7 비용 done, 8 최종 live증명 done — 5-axis만).
 **.env toolkit**: AI=OpenAI/Gemini(가용)·Anthropic(차단) · venue=OKX/Capital(CAP_*)/Alpaca(ARCHIVE_ALPACA_PAPER)/IG(ARCHIVE_IG=또다른 CFD)/Binance(철회) · data=CoinGlass(펀딩/OI/청산)/FRED(매크로)/Quandl/MyFxBook(센티먼트).
-**운영**: OKX 스팟 봇 pid 67774 `data/polaris_live.sqlite` 수집중 · 웹 :8770(3:7 글로브+board) · 아카이브 DB=polaris_churn/session2/okx_s3. **버그노트**: .gitignore `data/` 패턴이 소스 `polaris/core/data/`까지 잡음 → 거기 신규 파일은 `git add -f`.
+**운영**: ⭐ **3-스트림 프로덕션 봇 pid 6565 가동중**(새 코드, 24h, real-roundtrip, OKX+Capital+Alpaca, `data/polaris_live.sqlite`). 구 봇 67774 정지(SIGTERM). 웹 :8770(3:7 글로브+board, 3-레인 StreamSummary+비용). **버그노트**: .gitignore `data/` 패턴이 소스 `polaris/core/data/`까지 잡음 → 거기 신규 파일은 `git add -f`(단 altdata는 core/altdata/라 무관).
 
 **2026-05-29 대시보드 부활 + 동적 시각화 + 스페이스 비주얼**: 봇 PID 96290 (`data/polaris_live.sqlite`, 24h 수집) 가동 유지. (1) **"봇 실행이 Claude 창 닫던" root cause 해결** — `start_dashboard.sh` aggressive tty cleanup 가 Bash 도구의 `$$` tty 를 Claude 창으로 오인해 Jin 창을 닫음 → 기본 OFF 반전 + 기본 DB → polaris_live ([[feedback_never_kill_claude_session]]). 대시보드 PID 7638 라이브 가동. (2) **`7e4cf33`** Bayesian edge-validation P1 (`posterior.py` NIG, display-only) + dashboard overflow 힌트 + crisis silent-drop 수정 + orphan liquidation 스크립트 (666 green, fresh-Claude SAFE). (3) **`5940107`** dashboard_v2 동적 시각화 (자산 스파크라인 + DD/노출/AI/승률 게이지 + 셀 히트타일, 40행 불변). (4) **스페이스 비주얼** `tools/visualizer/` 이식 중 (mk1 Neural Cloud → collect_snapshot 어댑터, plan: `.claude/plans/space_viz_neural_cloud_2026-05-29.md`). 판단: OKX 고아 `--live` 청산 SKIP (USDT $35.8k 충분, 고아=봇 활성 포지션). digest [[2026-05-29_dashboard_revival_dynamic_viz_spaceviz]].
 
@@ -149,4 +147,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-29 22:32 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-30 03:07 (paper=True, full_pipeline=True)

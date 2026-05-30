@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from polaris.core.streams import StreamProfile
 
 
 class SignalLifecycle(StrEnum):
@@ -89,6 +92,12 @@ class GateContext:
     payload: dict[str, Any]
     started_ts: int
     state: SignalLifecycle = SignalLifecycle.RAW
+    # Gate architecture Phase 0 (Option A): the single first-class per-stream
+    # seam, resolved ONCE via ``resolve_stream_profile(venue)``. Optional +
+    # default None for back-compat — gates/payload builders MAY read it but, in
+    # P0, NONE branches a decision on it (structural enabler only; A/B/C stay
+    # byte-identical). P1+ enriches the profile's hooks per stream.
+    stream_profile: StreamProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)

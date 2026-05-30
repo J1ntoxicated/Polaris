@@ -15,10 +15,12 @@ from polaris.core.streams.config import (
     SizingProfile,
     StreamConfig,
     StreamId,
+    StreamProfile,
     Track,
     derive_leverage,
     fallback_leverage_for_asset_class,
     resolve_stream,
+    resolve_stream_profile,
 )
 
 __all__ = [
@@ -27,8 +29,10 @@ __all__ = [
     "SizingProfile",
     "StreamConfig",
     "StreamId",
+    "StreamProfile",
     "Track",
     "derive_leverage",
     "fallback_leverage_for_asset_class",
     "resolve_stream",
+    "resolve_stream_profile",
 ]

@@ -53,6 +53,7 @@ from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_POSITION_MONITOR,
 )
+from polaris.core.streams import resolve_stream_profile
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_recalc_exit import run_precise_exit
 
@@ -309,6 +310,9 @@ async def _evaluate_position(
     monitor_payload["recent_ticks"] = (
         recent_ticks_obj if isinstance(recent_ticks_obj, list) else []
     )
+    # Gate architecture Phase 0: per-stream seam, resolved once from the
+    # position's venue and threaded through G6/G7 (read-but-no-decision in P0).
+    stream_profile = resolve_stream_profile(str(pos["venue"]))
     g6_ctx = GateContext(
         run_id=uuid.uuid4().hex,
         signal_id=str(pos["position_id"]),
@@ -320,6 +324,7 @@ async def _evaluate_position(
         payload=monitor_payload,
         started_ts=now_ts,
         state=SignalLifecycle.MONITORED,
+        stream_profile=stream_profile,
     )
     g6_client = gpt_client if phase == "P1" else None
     g6_result = await position_monitor_gate(
@@ -403,6 +408,7 @@ async def _evaluate_position(
             payload=g7_payload_full,
             started_ts=now_ts,
             state=SignalLifecycle.MONITORED,
+            stream_profile=stream_profile,
         )
         g7_client = gpt_client if phase == "P1" else None
         g7_result = await adaptive_exit_gate(g7_ctx, client=g7_client)

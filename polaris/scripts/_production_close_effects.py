@@ -44,7 +44,7 @@ from polaris.core.pipeline.gate_state import (
     GateContext,
     SignalLifecycle,
 )
-from polaris.core.streams import resolve_stream
+from polaris.core.streams import resolve_stream, resolve_stream_profile
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 if TYPE_CHECKING:
@@ -288,6 +288,8 @@ async def _safe_run_g8(
             "closed_trade_count": len(state.closed_trades),
         },
         started_ts=now_ts, state=SignalLifecycle.CLOSED,
+        # Gate architecture Phase 0: per-stream seam (read-but-no-decision in P0).
+        stream_profile=resolve_stream_profile(trade.venue),
     )
     # codex 2026-05-07 P1.4 fix: phase-aware G8 dispatch so the production
     # paper harness can exercise the GPT P1 lesson branch (was hardcoded

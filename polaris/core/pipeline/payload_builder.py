@@ -58,7 +58,7 @@ from polaris.core.pipeline.net_edge import (
     net_edge_r,
     roundtrip_cost_r,
 )
-from polaris.core.streams import resolve_stream
+from polaris.core.streams import StreamProfile, resolve_stream
 from polaris.strategies.base import RawSignal
 
 __all__ = [
@@ -211,8 +211,15 @@ def build_validator_payload(
     regime: str,
     conn: sqlite3.Connection,
     now_ts: int | None = None,
+    stream_profile: StreamProfile | None = None,
 ) -> dict[str, Any]:
-    """Compose the G3 input payload (raw signal + cell + baseline + recent)."""
+    """Compose the G3 input payload (raw signal + cell + baseline + recent).
+
+    Gate architecture Phase 0: ``stream_profile`` is accepted so the builder can
+    read the per-stream seam in later phases. In P0 it is NOT read for any output
+    — the returned payload is byte-identical with or without it (parity enabler).
+    """
+    del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     ts = int(now_ts if now_ts is not None else time.time())
     cell_summary = _cell_routing_summary(
         conn,
@@ -265,8 +272,14 @@ def build_watcher_payload(
     venue: str | None = None,
     signal_strength: float | None = None,
     atr_pct: float | None = None,
+    stream_profile: StreamProfile | None = None,
 ) -> dict[str, Any]:
     """Compose G4 input payload (fast-path hints + tick window).
+
+    Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
+    but NOT read in P0 — the cost_model used for the T14 net-edge keys still
+    derives from ``resolve_stream(venue)`` exactly as before, so the output is
+    byte-identical with or without the profile (behavior-identity enabler).
 
     The validated_signal field is stamped by G3 and propagated by the
     orchestrator's ``_stamp_payload`` — caller does not duplicate it here.
@@ -280,6 +293,7 @@ def build_watcher_payload(
     ``venue`` get the byte-identical pre-T14 payload — the OKX behavior-identity
     invariant is preserved.
     """
+    del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     payload: dict[str, Any] = {
         "spread_bps": float(spread_bps),
         "baseline_p50_spread_bps": float(baseline_p50_spread_bps),
@@ -314,8 +328,14 @@ def build_monitor_payload(
     unrealized_pnl_r: float,
     max_loss_r: float = 1.0,
     swap_candidate: dict[str, Any] | None = None,
+    stream_profile: StreamProfile | None = None,
 ) -> dict[str, Any]:
-    """Compose G6 payload (position + R-multiples + optional swap candidate)."""
+    """Compose G6 payload (position + R-multiples + optional swap candidate).
+
+    Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
+    but NOT read in P0 — output is byte-identical with or without it.
+    """
+    del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     payload: dict[str, Any] = {
         "position": dict(position),
         "unrealized_pnl_r": float(unrealized_pnl_r),
@@ -352,6 +372,7 @@ def build_exit_payload(
     exit_state: str | None = None,
     peak_price: float | None = None,
     recent_closes: list[float] | None = None,
+    stream_profile: StreamProfile | None = None,
 ) -> dict[str, Any]:
     """Compose G7 widen proposal payload (+ optional precise-exit context).
 
@@ -370,7 +391,11 @@ def build_exit_payload(
     supplied the returned payload is byte-identical to the pre-enrichment shape
     (``widen_proposal`` + ``current_stop_price`` only) — behaviour-identity for
     every existing caller.
+
+    Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
+    but NOT read in P0 — output is byte-identical with or without it.
     """
+    del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     proposal: dict[str, Any] = {
         "side": str(side),
         "current_stop_price": float(current_stop_price),

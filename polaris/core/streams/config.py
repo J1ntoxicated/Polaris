@@ -27,10 +27,12 @@ __all__ = [
     "SizingProfile",
     "StreamConfig",
     "StreamId",
+    "StreamProfile",
     "Track",
     "derive_leverage",
     "fallback_leverage_for_asset_class",
     "resolve_stream",
+    "resolve_stream_profile",
 ]
 
 StreamId = Literal["A_okx_crypto", "B_capital_cfd", "C_alpaca_equity"]
@@ -269,3 +271,70 @@ def resolve_stream(venue: str, product_class: str | None = None) -> StreamConfig
             f"{cfg.stream_id} (expected {cfg.product_class!r})"
         )
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# StreamProfile — first-class per-stream seam for the gate pipeline (Phase 0).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StreamProfile:
+    """Per-stream gate-context seam (gate architecture Phase 0, design Option A).
+
+    A read-only projection of :class:`StreamConfig` resolved ONCE per signal and
+    threaded into ``GateContext.stream_profile`` so every gate / payload builder
+    reads ``ctx.stream_profile`` instead of re-deriving ``if venue == ...``
+    branches. The UNIFIED 8-gate pipeline stays unified — A/B/C vary via this
+    single injected carrier, never via forked gates or scattered branches.
+
+    Phase 0 is a STRUCTURAL ENABLER ONLY: the fields below merely mirror the
+    StreamConfig values the pipeline already uses, so threading the profile
+    produces byte-identical gate decisions today. The reserved hook fields
+    (``regime_evidence`` / ``guard_hooks``) are intentionally EMPTY and unread in
+    P0 — they are the place where P1+ phases attach per-stream evidence/guards
+    WITHOUT re-plumbing GateContext. Stream supplies leverage/caps/dispatch/
+    context only — NEVER a T4 multiplier (9-stack collapse stays blocked).
+    """
+
+    stream_id: StreamId
+    venue: str
+    product_class: str
+    asset_classes: frozenset[str]
+    session_calendar: str
+    cost_model: str
+    allow_short: bool
+    leverage_source: str
+    external_reject_codes: frozenset[str]
+    # Reserved per-stream enrichment hooks (P1+). Empty + unread in P0 — present
+    # so future phases attach evidence/guards without re-threading GateContext.
+    regime_evidence: frozenset[str] = frozenset()
+    guard_hooks: frozenset[str] = frozenset()
+
+    @classmethod
+    def from_stream(cls, cfg: StreamConfig) -> StreamProfile:
+        """Project a :class:`StreamConfig` into a P0 (hook-empty) profile."""
+        return cls(
+            stream_id=cfg.stream_id,
+            venue=cfg.venue,
+            product_class=cfg.product_class,
+            asset_classes=cfg.asset_classes,
+            session_calendar=cfg.session_calendar,
+            cost_model=cfg.cost_model,
+            allow_short=cfg.allow_short,
+            leverage_source=cfg.sizing_profile.leverage_source,
+            external_reject_codes=cfg.external_reject_codes,
+        )
+
+
+def resolve_stream_profile(
+    venue: str, product_class: str | None = None
+) -> StreamProfile:
+    """Resolve the :class:`StreamProfile` for ``venue`` (one lookup, P0).
+
+    Thin wrapper over :func:`resolve_stream` — the single place the pipeline
+    builds the per-signal stream seam. Raises the same ``KeyError`` /
+    ``ValueError`` as ``resolve_stream`` for an unknown venue / product_class
+    mismatch (both programming errors, not runtime states).
+    """
+    return StreamProfile.from_stream(resolve_stream(venue, product_class))

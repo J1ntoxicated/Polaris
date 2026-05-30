@@ -36,7 +36,11 @@ from polaris.core.pipeline.gate_state import (
     SignalLifecycle,
 )
 from polaris.core.sizing.constants import production_default_equity_usd
-from polaris.core.streams import derive_leverage, resolve_stream
+from polaris.core.streams import (
+    derive_leverage,
+    resolve_stream,
+    resolve_stream_profile,
+)
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.strategies import BaseStrategy, RawSignal
 
@@ -219,11 +223,16 @@ async def run_pipeline_for_signal(
         "raw_signal": g3_payload["raw_signal"],
         **g3_payload, **g4_payload, **g5_payload,
     }
+    # Gate architecture Phase 0 (Option A): resolve the per-stream seam ONCE and
+    # thread it through every GateContext. P0 = structural enabler only — no gate
+    # reads it for a decision yet, so A/B/C stay byte-identical (P1+ enriches it).
+    stream_profile = resolve_stream_profile(venue)
     ctx = GateContext(
         run_id=uuid.uuid4().hex, signal_id=sig.signal_id, position_id=None,
         gate_id=GATE_UNIVERSE_SCANNER, venue=venue, symbol=symbol,
         strategy_id=strategy.metadata.strategy_id, payload=payload,
         started_ts=now_ts, state=SignalLifecycle.RAW,
+        stream_profile=stream_profile,
     )
     # G1-EFF: share the per-run focus cache so the G1 GPT call is reused across
     # signals/ticks while the universe composition is unchanged (efficiency
@@ -309,6 +318,7 @@ async def run_pipeline_for_signal(
         gate_id=GATE_POSITION_MONITOR,
         venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
         payload=g6_payload, started_ts=now_ts, state=SignalLifecycle.SIZED,
+        stream_profile=stream_profile,
     )
     # Day 9 F1 wire: forward GPT client at P1 so G6 fires the gpt_p1 branch
     # (entry-time invocation also exercises the LLM path; F2 live recalc
@@ -333,6 +343,7 @@ async def run_pipeline_for_signal(
             if g6_result.decision == GateDecision.HOLD
             else SignalLifecycle.ACTIVE
         ),
+        stream_profile=stream_profile,
     )
     g7_client = haiku if phase == "P1" else None
     g7_result = await adaptive_exit_gate(g7_ctx, client=g7_client)

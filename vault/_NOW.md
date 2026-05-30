@@ -28,7 +28,8 @@ tags: [now, tier-0]
 **✅ 최종 운영 전환 완료 (Jin 승인 "자율 진행" → 실행, 2026-05-30 03:1x UTC, 라이브 증명):**
   (A) OKX equity: $79k 유지 + FIX-2 entry-leg 클램프로 venue 현실 대응 결정(equity 낮추면 aggressive 위반). (B) 구 봇 67774(real-roundtrip 구 코드) SIGTERM 정지 → 검증 봇(duration600 신코드) → **24h 프로덕션 봇 PID 6565 가동중**(`ignite_p1 --paper --duration 86400 --real-roundtrip --db data/polaris_live.sqlite`, log=data/paper/production_2026-05-30.log).
   **🟢 라이브 증명**: OKX **실체결**(INJ-USDT, 구코드 752 SIZED→0fill **zero-fill 해소**) · 새봇 **fault 0**(51201/51008 해소; 79 fault 전부 구봇) · **same-bar close 해소**(position multi-bar 유지) · **#26 엑싯 엔진 라이브**(mfe_r 0.173 추적+stop_price persist 6.655 ATR트레일+exit_state) · **#6 alt-data→regime evidence 33건**(crypto_fg23+funding, LIT=crisis/BTC=chop) · Alpaca universe 12,929 발화(주문은 US장 마감 RTH보류=정상). fetch_account $79.9k 검증.
-  **남은**: (C) 5-axis 최종검증(cumulative coherence + cross-contam 정밀확인) (D) 사용성/갤럭시 대시보드 폴리시. task #1-10(7 비용 done, 8 최종 live증명 done — 5-axis만).
+  **✅ 5-axis 최종검증 = SHIP_WITH_FOLLOWUPS (critical/major 0; 5축 PASS[3 clean+2 minor]; cross-contam·real-money leak·9-stack 위반·거부키워드 전부 evidence 반증; purpose_met=YES). 자율 세션 완료. digest [[2026-05-30_3stream_live_cutover]].**
+  **🔶 follow-up (Jin 결정/후속, non-blocking)**: 🔴 **OKX 24h봇 추가체결 insufficient_balance(51008)** — sizer $79k 가정 vs 실 demo available USDT 부족(altcoin 보유로 묶임), INJ 1건 후 추가 주문 reject → **OKX balance reconcile = /debate**(available기준 사이징 / altcoin 정리 USDT회복 / demo리셋; 수익봇 지속거래의 실질 제약) · alt-data conviction 1.5 floor 미달(regime override 약함, 캘리브) · 엑싯7파라미터/Track C캡/net-edge = /debate 캘리브 후보 · 사용성/갤럭시 대시보드(optional). **task #1-10 전부 완료.**
 **.env toolkit**: AI=OpenAI/Gemini(가용)·Anthropic(차단) · venue=OKX/Capital(CAP_*)/Alpaca(ARCHIVE_ALPACA_PAPER)/IG(ARCHIVE_IG=또다른 CFD)/Binance(철회) · data=CoinGlass(펀딩/OI/청산)/FRED(매크로)/Quandl/MyFxBook(센티먼트).
 **운영**: ⭐ **3-스트림 프로덕션 봇 pid 6565 가동중**(새 코드, 24h, real-roundtrip, OKX+Capital+Alpaca, `data/polaris_live.sqlite`). 구 봇 67774 정지(SIGTERM). 웹 :8770(3:7 글로브+board, 3-레인 StreamSummary+비용). **버그노트**: .gitignore `data/` 패턴이 소스 `polaris/core/data/`까지 잡음 → 거기 신규 파일은 `git add -f`(단 altdata는 core/altdata/라 무관).
 
@@ -147,4 +148,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-30 03:07 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-30 03:29 (paper=False, full_pipeline=True)

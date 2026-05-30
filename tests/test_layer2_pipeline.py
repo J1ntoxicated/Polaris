@@ -537,14 +537,15 @@ async def test_g8_p0_phase_forces_python_even_with_gpt_client(
     assert ctx.state == SignalLifecycle.REFLECTED
 
 
-async def test_g8_p1_phase_forwards_gpt_p1_model(
+async def test_g8_p1_phase_stays_python_gpt_removed(
     memdb: sqlite3.Connection,
 ) -> None:
-    """``phase='P1'`` forwards the client AND tags ``model_used='gpt_p1'``.
+    """``phase='P1'`` no longer upgrades G8 to GPT — it stays deterministic.
 
-    ADR-004 §Phase mandates G8 P1 = GPT P1 tier (gpt-5.5). The orchestrator
-    passes ``GPT_P1_MODEL`` to the reflector at P1 so ``GateResult.model_used``
-    honestly reports the spec-mandated GPT P1 upgrade.
+    ai_conductor P2 (2026-05-30) removed the G8 GPT lesson branch (the real
+    learning is posterior NIG + cell EWMA; ``ai_lessons`` has zero readers).
+    The reflector is now a Python template at every phase, so a P1 orchestrator
+    must still report ``model_used="python"`` and never call the client.
     """
     haiku = _MockGPTClient(
         response_text='{"lesson_type":"ok","confidence":0.9,"lesson_text":"x","delta":{}}'
@@ -567,7 +568,7 @@ async def test_g8_p1_phase_forwards_gpt_p1_model(
         phase="P1",
     )
     g8_result = next(r for r in results if r.decision == GateDecision.REFLECTED)
-    assert g8_result.model_used == "gpt_p1"
+    assert g8_result.model_used == "python"
     assert ctx.state == SignalLifecycle.REFLECTED
 
 

@@ -208,10 +208,15 @@ def test_fast_path_eligibility_spread_wide_rejects() -> None:
 async def test_post_trade_reflector_lesson_write_to_vault(
     memdb: sqlite3.Connection, tmp_path: Path
 ) -> None:
+    """ai_conductor P2: deterministic template writes a lesson + ai_lessons row.
+
+    GPT branch removed — a supplied client is inert. A losing trade
+    (pnl_r=-0.5, mixed) → ``entry_timing`` at the confidence floor.
+    """
     haiku = _MockGPTClient(response_text=json.dumps({
-        "lesson_type": "entry_timing",
+        "lesson_type": "GPT_VALUE_IGNORED",
         "confidence": 0.85,
-        "lesson_text": "Entered too early; wait for 1m close above breakout.",
+        "lesson_text": "GPT text that must never appear.",
         "delta": {"vb_x_bull_trend": 0.02},
     }))
     closed_trade = {
@@ -227,7 +232,11 @@ async def test_post_trade_reflector_lesson_write_to_vault(
         ctx, client=haiku, conn=memdb, lessons_dir=lessons_dir
     )
     assert result.decision == GateDecision.REFLECTED
-    assert result.payload["confidence"] == 0.85
+    assert result.model_used == "python"
+    assert haiku.calls == []  # GPT never called
+    # Deterministic: mixed result → entry_timing at the confidence floor.
+    assert result.payload["lesson_type"] == "entry_timing"
+    assert result.payload["confidence"] == 0.70
     # File should be written.
     files = list(lessons_dir.glob("trade-1_*.md"))
     assert len(files) == 1
@@ -237,62 +246,40 @@ async def test_post_trade_reflector_lesson_write_to_vault(
     assert row[0] == "entry_timing"
 
 
-async def test_post_trade_reflector_malformed_confidence_dropped(
+async def test_post_trade_reflector_always_persists_no_drop(
     memdb: sqlite3.Connection, tmp_path: Path
 ) -> None:
-    """Codex P1: malformed confidence string must not raise — drops as low confidence."""
-    haiku = _MockGPTClient(response_text=json.dumps({
-        "lesson_type": "ok",
-        "confidence": "not-a-number",
-        "lesson_text": "x",
-        "delta": {},
-    }))
-    closed_trade = {"trade_id": "trade-malformed", "strategy_id": "vb"}
+    """ai_conductor P2: the deterministic template never drops a lesson.
+
+    The old GPT low-confidence / malformed-confidence drop branches are gone —
+    every closed trade leaves exactly one ai_lessons row at the confidence floor.
+    """
+    closed_trade = {"trade_id": "trade-keep", "strategy_id": "vb", "pnl_r": 0.0}
     ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 50}, gate_id=8)
     result = await post_trade_reflector_gate(
-        ctx, client=haiku, conn=memdb, lessons_dir=tmp_path
+        ctx, client=None, conn=memdb, lessons_dir=tmp_path
     )
     assert result.decision == GateDecision.REFLECTED
-    assert result.payload.get("reason") == "low_confidence"
-
-
-async def test_post_trade_reflector_low_confidence_dropped(
-    memdb: sqlite3.Connection, tmp_path: Path
-) -> None:
-    haiku = _MockGPTClient(response_text=json.dumps({
-        "lesson_type": "entry_timing",
-        "confidence": 0.50,  # below floor
-        "lesson_text": "low conviction",
-        "delta": {},
-    }))
-    closed_trade = {"trade_id": "trade-2", "strategy_id": "vb", "pnl_r": 0.0}
-    ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 50}, gate_id=8)
-    result = await post_trade_reflector_gate(
-        ctx, client=haiku, conn=memdb, lessons_dir=tmp_path
-    )
-    assert result.decision == GateDecision.REFLECTED
-    assert result.payload.get("reason") == "low_confidence"
-    # No row inserted.
+    assert result.payload["confidence"] == 0.70
+    assert "reason" not in result.payload  # not a drop
     n = memdb.execute("SELECT COUNT(*) FROM ai_lessons").fetchone()[0]
-    assert n == 0
+    assert n == 1
 
 
 async def test_post_trade_reflector_soft_mode_dampens_delta(
     memdb: sqlite3.Connection, tmp_path: Path
 ) -> None:
-    haiku = _MockGPTClient(response_text=json.dumps({
-        "lesson_type": "exit_patience",
-        "confidence": 0.80,
-        "lesson_text": "soft mode test",
-        "delta": {"vb_x_asia": 0.1},
-    }))
-    closed_trade = {"trade_id": "trade-3", "strategy_id": "vb"}
+    """Soft mode (n<100) dampens the deterministic Δ to 25% of the P0 rail."""
+    closed_trade = {
+        "trade_id": "trade-3", "strategy_id": "vb", "regime": "asia",
+        "pnl_r": 1.0, "won": True,
+    }
     ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 10}, gate_id=8)
     result = await post_trade_reflector_gate(
-        ctx, client=haiku, conn=memdb, lessons_dir=tmp_path
+        ctx, client=None, conn=memdb, lessons_dir=tmp_path
     )
-    # Soft mode = 25% of 0.1 = 0.025
-    assert result.payload["delta"]["vb_x_asia"] == pytest.approx(0.025)
+    # Soft mode = 25% of the +0.03 P0 rail = +0.0075.
+    assert result.payload["delta"]["vb_x_asia"] == pytest.approx(0.03 * 0.25)
     assert result.payload["soft_mode"] is True
 
 

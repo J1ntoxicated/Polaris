@@ -276,34 +276,44 @@ async def test_loser_timeout_does_not_close_aged_winner(
 
 @pytest.mark.asyncio
 async def test_g7_exit_now_now_closes_position(memdb: sqlite3.Connection) -> None:
-    # G6 ADJUST_EXIT chains G7; G7 emits EXIT_NOW → position must close now.
-    # last 100.1 keeps the precise-exit engine from closing first (winner,
-    # inside trail, fresh, not protected).
-    _seed(memdb, position_id="pos-g7x", entry_price=100.0, last_price=100.1)
+    # Strong winner (pnl_r > 0.7R) → deterministic G6 ADJUST_EXIT chains G7;
+    # G7 GPT emits EXIT_NOW → position must close now. tight band keeps the
+    # precise-exit engine from closing first (winner, harvest, not stopped).
+    # ai_conductor P3: G6 is deterministic, so the mock only feeds G7.
+    _seed(memdb, position_id="pos-g7x", entry_price=100.0, last_price=101.0, band=0.1)
     state = ProdLoopState()
     state.open_trades = [_trade("pos-g7x")]
     gpt = _MockGPTClient([
-        '{"decision":"ADJUST_EXIT","reason":"winner"}',  # G6
         '{"decision":"EXIT_NOW","reason":"regime flip","new_exit_atr":0.0}',  # G7
     ])
     await _recalc(memdb, state, gpt=gpt)
     assert _pos_row(memdb, "pos-g7x")["status"] == "closed"
+    assert state.recalc_g6_calls == 1
     assert state.recalc_g7_calls == 1
     assert state.recalc_exit_now == 1
     # precise-exit did NOT close it (the G7 EXIT_NOW did).
     assert state.recalc_precise_exit == 0
+    # G7 is the only GPT call — G6 is deterministic (no per-position GPT).
+    assert len(gpt.calls) == 1
 
 
-# --- G6 EXIT_NOW path still honoured (hard rail unchanged) ------------------
+# --- G6 hard loss rail unchanged (deterministic EXIT_NOW at pnl_r <= -1R) ---
 
 
 @pytest.mark.asyncio
-async def test_g6_exit_now_still_closes(memdb: sqlite3.Connection) -> None:
-    _seed(memdb, position_id="pos-g6x", entry_price=100.0, last_price=100.1)
+async def test_g6_hard_rail_exit_now_unchanged(memdb: sqlite3.Connection) -> None:
+    """The deterministic G6 -1.0R EXIT_NOW rail is unchanged (ai_conductor P3).
+
+    A hard loser closes within one tick (the FSM precise-exit owns the stop
+    close; the G6 rail is the deterministic backstop behind it). No GPT call is
+    made for G6.
+    """
+    _seed(memdb, position_id="pos-g6x", entry_price=100.0, last_price=98.0, band=0.1)
     state = ProdLoopState()
     state.open_trades = [_trade("pos-g6x")]
-    gpt = _MockGPTClient(['{"decision":"EXIT_NOW","reason":"g6 exit"}'])
+    gpt = _MockGPTClient(['{"decision":"HOLD","reason":"x"}'])
     await _recalc(memdb, state, gpt=gpt)
+    # The hard loser is gone within the tick (FSM stop / G6 rail backstop).
     assert _pos_row(memdb, "pos-g6x")["status"] == "closed"
-    assert state.recalc_exit_now == 1
-    assert state.recalc_precise_exit == 0
+    # No GPT call was needed to close a deterministic loser.
+    assert gpt.calls == []

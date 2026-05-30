@@ -110,11 +110,11 @@ class GateOrchestrator:
         (``vault/30_components/layer-2-per-gate-pipeline.md`` Q3 +
         ``vault/10_decisions/ADR-004-per-gate-ai-pipeline.md`` §Phase):
 
-        - **P0** (default): G1/G3/G4 = Haiku, G2/G5/G6/G7/**G8 = Python
-          template/deterministic**. ``haiku_client`` is suppressed for G8
-          even when supplied so the gate is unambiguously Python at P0.
-        - **P1**: G8 may upgrade to Sonnet via ``haiku_client`` /
-          dedicated client argument; orchestrator forwards as-is.
+        - **P0** (default): G1/G3/G4 = GPT, G2/G5/G6/G7/G8 = Python
+          template/deterministic.
+        - **P1**: G7 adaptive-exit may use ``haiku_client``; G6/G8 are
+          deterministic Python at every phase (ai_conductor P2+P3 removed
+          their per-signal GPT branches — see the agent module docstrings).
         """
         if phase not in ("P0", "P1"):
             raise ValueError(f"phase must be 'P0' or 'P1', got {phase!r}")
@@ -275,12 +275,10 @@ class GateOrchestrator:
         return await entry_sizer_gate(ctx, conn=self.conn)
 
     async def _wrap_monitor(self, ctx: GateContext) -> GateResult:
-        # Phase contract (ADR-004 §Phase + Day 9 F1 wire):
-        # - P0 = deterministic Python (client=None)
-        # - P1 = GPT-5.5 with the orchestrator-supplied client
-        if self.phase == "P1":
-            return await position_monitor_gate(ctx, client=self.haiku_client)
-        return await position_monitor_gate(ctx, client=None)
+        # ai_conductor P3 (2026-05-30): G6 is now deterministic Python — the
+        # per-position GPT branch was removed (live GPT was HOLD 99.97%; the
+        # hard stop + Q8 swap fast-path already owned every real action).
+        return await position_monitor_gate(ctx)
 
     async def _wrap_exit(self, ctx: GateContext) -> GateResult:
         if self.phase == "P1":
@@ -288,31 +286,11 @@ class GateOrchestrator:
         return await adaptive_exit_gate(ctx, client=None)
 
     async def _wrap_reflector(self, ctx: GateContext) -> GateResult:
-        # Spec invariant: G8 P0 = Python template only (no LLM). The agent
-        # already returns ``model_used="python"`` when ``client is None``,
-        # so we suppress the GPT client at P0 even if the orchestrator
-        # was constructed with one (e.g., for G1/G3/G4). P1 forwards the
-        # client + GPT P1 model id so ``model_used`` honestly reflects
-        # the spec-mandated upgrade (ADR-004 §Phase, post-2026-05-07
-        # Anthropic→OpenAI migration: P1 = gpt-5.5).
-        from polaris.core.pipeline.agents._gpt_client import (
-            GPT_P0_MODEL,
-            GPT_P1_MODEL,
-        )
-
-        if self.phase == "P1":
-            return await post_trade_reflector_gate(
-                ctx,
-                client=self.haiku_client,
-                conn=self.conn,
-                model=GPT_P1_MODEL,
-            )
-        return await post_trade_reflector_gate(
-            ctx,
-            client=None,
-            conn=self.conn,
-            model=GPT_P0_MODEL,  # unused at P0 (client=None) but preserved for symmetry
-        )
+        # ai_conductor P2 (2026-05-30): G8 is now a deterministic Python
+        # template — the P1/GPT lesson branch was removed (the real learning
+        # is posterior NIG + cell EWMA consuming pnl_r/won; ``ai_lessons`` has
+        # zero readers, so the GPT lesson text was a paid no-op).
+        return await post_trade_reflector_gate(ctx, conn=self.conn)
 
     # ------------------------------------------------------------------
     # Failure policy

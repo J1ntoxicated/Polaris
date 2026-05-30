@@ -70,6 +70,7 @@ def _seed_position_and_fill(
     entry_price: float = 80_000.0,
     last_price: float = 80_400.0,
     strategy: str = "vb",
+    tight_bars: bool = False,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
@@ -99,6 +100,13 @@ def _seed_position_and_fill(
     instrument_id = f"{venue}:{symbol}"
     for i in range(20):
         ts = NOW - (20 - i) * 60
+        if tight_bars:
+            # Tight 1-unit range floors ATR (atr_pct → 1e-4), so a price gain
+            # vs entry yields a large +pnl_r (deterministic ADJUST_EXIT band)
+            # that the FSM precise-exit keeps open (protected, not closed).
+            high, low, close = last_price + 1.0, last_price - 1.0, last_price
+        else:
+            high, low, close = last_price + 50.0, entry_price - 50.0, last_price
         conn.execute(
             "INSERT OR REPLACE INTO bars "
             "(instrument_id, underlying_group_id, venue, symbol, bar_interval, "
@@ -107,9 +115,9 @@ def _seed_position_and_fill(
             "VALUES (?, ?, ?, ?, '1m', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rest')",
             (
                 instrument_id, "crypto:BTC", venue, symbol, ts,
-                entry_price, last_price + 50.0, entry_price - 50.0,
-                last_price, 100.0, 100.0 * last_price, 1,
-                last_price, last_price, last_price, 1.0,
+                close, high, low,
+                close, 100.0, 100.0 * close, 1,
+                close, close, close, 1.0,
             ),
         )
 
@@ -157,19 +165,27 @@ def test_load_active_position_rows(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_g6_called_per_active_position(memdb: sqlite3.Connection) -> None:
+    """G6 runs per active position — deterministic (ai_conductor P3, no GPT)."""
     for pid in ("pos-A", "pos-B", "pos-C"):
         _seed_position_and_fill(memdb, position_id=pid)
     state = ProdLoopState()
     state.open_trades = [_trade_for(p) for p in ("pos-A", "pos-B", "pos-C")]
-    haiku = _MockGPTClient(responses=['{"decision":"HOLD","reason":"x"}'] * 5)
+    haiku = _MockGPTClient(responses=['{"decision":"EXIT_NOW","reason":"x"}'] * 5)
     n = await recalc_active_positions(
         memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
     assert n == 3
-    # 3 positions = 3 G6 GPT calls.
-    assert len(haiku.calls) == 3
+    # G6 ran once per position, deterministically.
     assert state.recalc_g6_calls == 3
+    # These are small winners → G6 HOLD → no chain to G7, so NO GPT call is
+    # made for G6 at all (the per-position GPT branch was removed).
+    assert haiku.calls == []
+    # GPT EXIT_NOW was ignored — all three remain open.
+    open_n = memdb.execute(
+        "SELECT COUNT(*) FROM positions WHERE status = 'open'"
+    ).fetchone()[0]
+    assert open_n == 3
 
 
 @pytest.mark.asyncio
@@ -196,40 +212,45 @@ async def test_recalc_5s_cadence_log_each_tick(memdb: sqlite3.Connection) -> Non
 
 
 @pytest.mark.asyncio
-async def test_g6_exit_now_triggers_specific_close(memdb: sqlite3.Connection) -> None:
-    """EXIT_NOW for pos-B must close pos-B specifically (not pos-A oldest)."""
-    _seed_position_and_fill(memdb, position_id="pos-A")
-    _seed_position_and_fill(memdb, position_id="pos-B")
+async def test_exit_now_triggers_specific_close(memdb: sqlite3.Connection) -> None:
+    """A stop-loss close hits the losing position specifically (not FIFO oldest).
+
+    ai_conductor P3 (2026-05-30): G6 GPT is removed; precise stop closes are
+    owned by the FSM precise-exit (the deterministic G6 -1.0R rail is a backstop
+    behind it). Seed pos-A as a small winner and pos-B as a hard loser — only
+    pos-B closes, regardless of state.open_trades order.
+    """
+    # Distinct symbols so each position reads its own bar series (bars key on
+    # instrument_id = venue:symbol — same symbol would share one series).
+    _seed_position_and_fill(
+        memdb, position_id="pos-A", symbol="BTC-USDT",
+        last_price=80_400.0, tight_bars=True,
+    )
+    # pos-B: price below entry → pnl_r << -1.0 → FSM stop close.
+    _seed_position_and_fill(
+        memdb, position_id="pos-B", symbol="ETH-USDT",
+        last_price=79_000.0, tight_bars=True,
+    )
     state = ProdLoopState()
-    state.open_trades = [_trade_for("pos-A"), _trade_for("pos-B")]
-    # First call (pos-A) HOLD; second call (pos-B) EXIT_NOW.
-    # Note: load_active_position_rows ORDERs by opened_ts DESC so pos-B (newer)
-    # comes first if seeded later. We seed them with the same opened_ts so
-    # the order may flip — but the assertion is "the EXIT_NOW position is
-    # the one that closed", regardless of which one fired first.
-    haiku = _MockGPTClient(responses=[
-        '{"decision":"EXIT_NOW","reason":"first one"}',
-        '{"decision":"HOLD","reason":"second"}',
-    ])
+    state.open_trades = [
+        _trade_for("pos-A", symbol="BTC-USDT"),
+        _trade_for("pos-B", symbol="ETH-USDT"),
+    ]
     await recalc_active_positions(
-        memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
+        memdb, state=state, now_ts=NOW, gpt_client=None, phase="P0",
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
-    # Exactly one close happened.
-    assert state.recalc_exit_now == 1
-    # The closed position is the one EXIT_NOW fired for. Find which one.
     rows = memdb.execute(
         "SELECT position_id, status FROM positions ORDER BY position_id"
     ).fetchall()
     closed_ids = [r[0] for r in rows if r[1] == "closed"]
     open_ids = [r[0] for r in rows if r[1] == "open"]
-    # FIFO oldest contract is broken: the closed position is whichever
-    # G6 emitted EXIT_NOW for, not necessarily index 0 of state.open_trades.
-    assert len(closed_ids) == 1
-    assert len(open_ids) == 1
+    # Exactly one close — the loser, specifically (not the FIFO-oldest pos-A).
+    assert closed_ids == ["pos-B"]
+    assert open_ids == ["pos-A"]
     # And the surviving open trade in memory matches the surviving DB row.
-    surviving_in_state = state.open_trades[0]
-    assert surviving_in_state.position_id == open_ids[0]
+    assert len(state.open_trades) == 1
+    assert state.open_trades[0].position_id == "pos-A"
 
 
 # ---------------------------------------------------------------------------
@@ -307,11 +328,19 @@ async def test_swap_strategy_layer6_ssot_called(memdb: sqlite3.Connection) -> No
 
 @pytest.mark.asyncio
 async def test_g6_adjust_exit_chains_g7(memdb: sqlite3.Connection) -> None:
-    _seed_position_and_fill(memdb, position_id="pos-adj")
+    """A strong winner → deterministic G6 ADJUST_EXIT → chains to G7.
+
+    ai_conductor P3 (2026-05-30): G6 is deterministic (pnl_r > 0.7R → ADJUST_EXIT),
+    so the tight-bar winner (pnl_r ≈ +10R, FSM keeps it open) flows G6 → G7.
+    G7 (adaptive exit) still uses GPT at P1, so exactly ONE GPT call is made
+    (G7 only — G6 never calls GPT).
+    """
+    _seed_position_and_fill(
+        memdb, position_id="pos-adj", last_price=80_400.0, tight_bars=True,
+    )
     state = ProdLoopState()
     state.open_trades = [_trade_for("pos-adj")]
     haiku = _MockGPTClient(responses=[
-        '{"decision":"ADJUST_EXIT","reason":"winner"}',  # G6
         '{"decision":"WIDEN","reason":"extend stop","new_exit_atr":2.5}',  # G7
     ])
     await recalc_active_positions(
@@ -320,8 +349,8 @@ async def test_g6_adjust_exit_chains_g7(memdb: sqlite3.Connection) -> None:
     )
     assert state.recalc_g6_calls == 1
     assert state.recalc_g7_calls == 1
-    # Two GPT calls total (G6 + G7).
-    assert len(haiku.calls) == 2
+    # Exactly one GPT call — G7 only (G6 deterministic).
+    assert len(haiku.calls) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -209,20 +209,27 @@ async def test_hold_keeps_position_open_across_ticks(
 
 @pytest.mark.asyncio
 async def test_exit_now_still_closes_position(memdb: sqlite3.Connection) -> None:
-    """A genuine G6 EXIT_NOW closes the position via close_specific_position."""
-    _seed_position_and_fill(memdb, position_id="pos-exit")
+    """A genuine deterministic exit closes the specific position.
+
+    ai_conductor P3 (2026-05-30): G6 GPT is removed. A hard loser
+    (pnl_r << -1.0R) closes within the tick via the deterministic exit path
+    (FSM precise-exit / G6 -1.0R rail backstop) — close_specific_position, never
+    an unconditional/FIFO close. No GPT call is needed.
+    """
+    _seed_position_and_fill(memdb, position_id="pos-exit", last_price=74_000.0)
     state = ProdLoopState()
     state.open_trades = [_trade_for("pos-exit")]
-    haiku = _MockGPTClient(responses=['{"decision":"EXIT_NOW","reason":"signal exit"}'])
+    haiku = _MockGPTClient(responses=['{"decision":"HOLD","reason":"x"}'])
 
     await recalc_active_positions(
         memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
 
-    assert state.recalc_exit_now == 1
     assert len(state.open_trades) == 0
     status = memdb.execute(
         "SELECT status FROM positions WHERE position_id = 'pos-exit'"
     ).fetchone()[0]
     assert status == "closed"
+    # No GPT call closed a deterministic loser.
+    assert haiku.calls == []

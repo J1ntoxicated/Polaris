@@ -62,21 +62,6 @@ class _PromptCapturingGPTClient:
 
         self.messages = _Messages()
 
-    @property
-    def last_user_prompt(self) -> str:
-        msgs = self.calls[-1].get("messages", [])
-        for m in msgs:
-            if m.get("role") == "user":
-                content = m.get("content")
-                if isinstance(content, str):
-                    return content
-                if isinstance(content, list):
-                    return " ".join(
-                        str(blk.get("text", "")) for blk in content
-                        if isinstance(blk, dict)
-                    )
-        return ""
-
 
 def _seed_position_with_volume_ramp(
     conn: sqlite3.Connection,
@@ -183,14 +168,15 @@ def test_load_active_position_rows_exposes_real_volume(
 
 
 @pytest.mark.asyncio
-async def test_g6_prompt_carries_real_volume_and_ticks(
+async def test_g6_recalc_is_deterministic_no_gpt_call(
     memdb: sqlite3.Connection,
 ) -> None:
-    """The P1 G6 GPT prompt must embed a non-zero volume_now + real ticks.
+    """G6 live recalc is deterministic — no GPT call, even at phase=P1.
 
-    Before the fix the prompt always showed ``"volume_now":0.0`` and an empty
-    ``Recent ticks`` list. After the fix the monitor sees the live 5_000-unit
-    volume spike and the recent close series.
+    ai_conductor P3 (2026-05-30) removed the per-position GPT branch. The FIX-2
+    data-correctness loading (real volume_now + recent_ticks into the monitor
+    payload) is unchanged production code, but the monitor no longer ships it to
+    a GPT prompt. A +HOLD open position must stay open with zero GPT calls.
     """
     _seed_position_with_volume_ramp(memdb, position_id="pos-vol")
     state = ProdLoopState()
@@ -202,11 +188,16 @@ async def test_g6_prompt_carries_real_volume_and_ticks(
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
 
-    assert len(gpt.calls) == 1
-    prompt = gpt.last_user_prompt
-    # Real volume reached the prompt — NOT the hardcoded 0.0.
-    assert '"volume_now":0.0' not in prompt
-    assert '"volume_now":0' not in prompt
-    assert "5000" in prompt
-    # Recent ticks are no longer an empty list in the prompt.
-    assert "# Recent ticks (last 0)" not in prompt
+    # G7 (adaptive exit) still uses GPT at P1, but G6 (position monitor) must
+    # NOT — its decision-enum prompt can never appear (the builder was deleted).
+    for call in gpt.calls:
+        for msg in call.get("messages", []):
+            content = msg.get("content")
+            text = content if isinstance(content, str) else str(content)
+            assert "HOLD|ADJUST_EXIT|EXIT_NOW|SWAP_STRATEGY" not in text
+    # The position is still open (deterministic HOLD: small uPnL, no stop hit).
+    row = memdb.execute(
+        "SELECT status FROM positions WHERE position_id = ?", ("pos-vol",),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "open"

@@ -18,6 +18,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Final
 
+from polaris.core.cell_matrix.routing import _quantile
+from polaris.core.cell_matrix.schema import CELL_MIN_LIVE_N
 from polaris.core.pipeline.agents._gpt_client import (
     DEFAULT_TIMEOUT_SEC,
     GPTCallResult,
@@ -52,6 +54,17 @@ MODIFY_MAX: Final[float] = 1.5
 VALIDATOR_MAX_TOKENS: Final[int] = 250
 # Recent same-symbol trades cap surfaced to the validator prompt.
 VALIDATOR_RECENT_TRADES_MAX: Final[int] = 5
+
+# Warm-pool floor for the NEW warm-pool-local-bottom discriminator (mirrors
+# ``payload_builder.CELL_POOL_MIN_N_EFF`` / ``CELL_MIN_LIVE_N`` = 5.0 — the
+# quartile-eligibility n_eff floor). A cell counts toward the local warm pool
+# only at/above this n_eff.
+WARM_POOL_FLOOR_N_EFF: Final[float] = CELL_MIN_LIVE_N
+# Minimum warm-pool size needed to define a bottom quartile locally. Below this
+# the discriminator never fires (no thin-sample quartile is manufactured).
+WARM_POOL_MIN_MEMBERS: Final[int] = 4
+# Bottom-quartile threshold percentile of the warm pool's scores.
+WARM_POOL_BOTTOM_PCT: Final[float] = 0.25
 
 _DECISION_TOKENS = {"PASS", "KILL", "MODIFY"}
 
@@ -96,6 +109,47 @@ def _validate_decision(parsed: dict[str, Any]) -> tuple[GateDecision, float] | N
     return GateDecision.MODIFY, scalar
 
 
+def _warm_pool_local_bottom(
+    conn: sqlite3.Connection,
+    *,
+    regime: str,
+    cell_score: float,
+    cell_n_eff: float,
+) -> bool:
+    """NEW G3 shadow discriminator — is THIS cell in the bottom quartile of the
+    *current warm pool* of its regime?
+
+    Computes the bottom-quartile threshold (25th percentile) of the scores of
+    warm cells (``n_eff >= WARM_POOL_FLOOR_N_EFF``) in the SAME ``regime`` from
+    ``cell_matrix_p0``. Flags True when:
+
+    - the warm pool has ``>= WARM_POOL_MIN_MEMBERS`` members (enough to define a
+      quartile — no thin-sample quartile manufactured), AND
+    - THIS cell is itself warm (``cell_n_eff >= WARM_POOL_FLOOR_N_EFF``), AND
+    - ``cell_score <= threshold`` (bottom quartile of the warm pool).
+
+    This is measured INDEPENDENT of the global ``CELL_MIN_POOL_SIZE=20``
+    cardinality gate (which holds the global quartile label at ``cold`` while
+    < 20 warm cells exist). SHADOW path only — read-only, never writes, and the
+    production payload never carries the result. Any read error → False
+    (behavior-safe: the discriminator simply does not fire).
+    """
+    if cell_n_eff < WARM_POOL_FLOOR_N_EFF:
+        return False
+    try:
+        rows = conn.execute(
+            "SELECT score FROM cell_matrix_p0 WHERE regime = ? AND n_eff >= ?",
+            (regime, WARM_POOL_FLOOR_N_EFF),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    pool = sorted(float(r[0]) for r in rows)
+    if len(pool) < WARM_POOL_MIN_MEMBERS:
+        return False
+    threshold = _quantile(pool, WARM_POOL_BOTTOM_PCT)
+    return cell_score <= threshold
+
+
 def _log_g3_shadow(
     ctx: GateContext,
     shadow_conn: sqlite3.Connection | None,
@@ -107,10 +161,26 @@ def _log_g3_shadow(
     acceptance gate and NEVER returned. ``cold cell = pass-through`` and
     ``net_edge`` is not consulted (both enforced inside the rule). No-op when
     ``shadow_conn`` is None.
+
+    The NEW ``warm_pool_local_bottom`` discriminator is computed here from
+    ``shadow_conn`` (the live cell pool in this regime) and fed into the rule —
+    entirely in the shadow path, so ``build_validator_payload`` / the production
+    payload are untouched (behavior 0).
     """
     if shadow_conn is None:
         return
-    inp = g3_shadow_inputs_from_payload(ctx.payload)
+    cell = ctx.payload.get("cell_routing", {})
+    cell = cell if isinstance(cell, dict) else {}
+    regime = str(ctx.payload.get("regime", ""))
+    local_bottom = _warm_pool_local_bottom(
+        shadow_conn,
+        regime=regime,
+        cell_score=float(cell.get("score", 0.0) or 0.0),
+        cell_n_eff=float(cell.get("n_eff", 0.0) or 0.0),
+    )
+    inp = g3_shadow_inputs_from_payload(
+        ctx.payload, warm_pool_local_bottom=local_bottom
+    )
     technical = technical_validate_decision(inp)
     log_shadow_event(
         shadow_conn,
@@ -119,7 +189,7 @@ def _log_g3_shadow(
         gate_id=GATE_SIGNAL_VALIDATOR,
         venue=ctx.venue,
         symbol=ctx.symbol,
-        regime=str(ctx.payload.get("regime", "")),
+        regime=regime,
         technical=technical,
         gpt_decision=gpt_decision,
         cell_warm=inp.n_eff >= CELL_WARM_MIN_N_EFF,

@@ -41,6 +41,7 @@ __all__ = [
     "ShadowDecision",
     "SPREAD_WIDE_MULT",
     "STALE_TICK_MAX_SEC",
+    "WARM_POOL_LOCAL_BOTTOM_REASON",
     "g3_shadow_inputs_from_payload",
     "g4_shadow_inputs_from_payload",
     "technical_validate_decision",
@@ -68,6 +69,10 @@ SPREAD_WIDE_MULT: Final[float] = 3.0
 # G4 adverse drift FLAG threshold in bps (flag only — never a KILL).
 DRIFT_FLAG_BPS: Final[float] = 100.0
 
+# Reason tag for the warm-pool-local-bottom discriminator KILL (see the NEW
+# rule path in ``technical_validate_decision``).
+WARM_POOL_LOCAL_BOTTOM_REASON: Final[str] = "warm_pool_local_bottom_losing"
+
 
 @dataclass(frozen=True, slots=True)
 class ShadowDecision:
@@ -92,6 +97,14 @@ class G3ShadowInputs:
     BLOCKING). ``quartile`` is the cell-routing label; ``n_eff`` the cell's
     effective sample size (cold < warm threshold). ``recent_trades`` /
     ``spread_bps`` / ``listing_age_hours`` are cell-independent booster inputs.
+
+    ``warm_pool_local_bottom`` (NEW discriminator, default False → byte-identical
+    when not supplied) is computed in the shadow path from the live warm pool: it
+    flags that THIS cell's score sits in the bottom quartile of the *current warm
+    pool* (cells with n_eff >= pool floor in the same regime), measured INDEPENDENT
+    of the global ``CELL_MIN_POOL_SIZE=20`` cardinality gate that holds the global
+    ``quartile`` label at ``cold`` while < 20 warm cells exist. See the matching
+    rule path in :func:`technical_validate_decision`.
     """
 
     n_eff: float
@@ -101,6 +114,7 @@ class G3ShadowInputs:
     spread_bps: float = 0.0
     baseline_p50_spread_bps: float = 0.0
     listing_age_hours: float = 0.0
+    warm_pool_local_bottom: bool = False
 
 
 def _recent_loss_streak(recent_trades: list[dict[str, Any]]) -> int:
@@ -122,8 +136,21 @@ def technical_validate_decision(inp: G3ShadowInputs) -> ShadowDecision:
 
     Rules (in order):
     1. COLD cell (``n_eff < CELL_WARM_MIN_N_EFF``) OR quartile label ``cold`` →
-       NEVER KILL. A losing cold-quartile label gets a conservative MODIFY; an
-       otherwise-cold cell passes through ("모호하면 통과").
+       NEVER KILL on the global-quartile path. A losing cold-quartile label gets a
+       conservative MODIFY; an otherwise-cold cell passes through ("모호하면 통과").
+    1b. NEW DISCRIMINATOR — ``warm_pool_local_bottom``: when the GLOBAL quartile
+       gate is INACTIVE (label == ``cold``, i.e. the pool < CELL_MIN_POOL_SIZE so
+       no real top/mid/bottom label exists) AND the cell is genuinely WARM
+       (``n_eff >= CELL_WARM_MIN_N_EFF``) AND ``avg_pnl_r < 0`` AND the
+       shadow-computed ``warm_pool_local_bottom`` flag is True → narrow KILL.
+       This is a NEW shadow feature (NOT a bug fix): it makes a proven-loser
+       (n>=5, negative EV, bottom of the *current warm pool*) reachable while the
+       global cardinality gate keeps every label ``cold``. It NEVER touches the
+       genuinely cold cell (``n_eff < 5`` → Rule 1's pass-through still owns it),
+       and when ``warm_pool_local_bottom`` is False every existing outcome is
+       byte-identical. When the global gate IS active (label is a real
+       top/mid/bottom) this path does not run — Rules 2-4 own the decision.
+       ``net_edge_r`` is never consulted.
     2. WARM cell AND quartile == 'bottom' AND avg_pnl_r < 0 → narrow KILL.
        Cell-independent boosters (>= 3 consecutive same-symbol losses) only add
        to the reason of an already-qualifying warm KILL.
@@ -135,8 +162,20 @@ def technical_validate_decision(inp: G3ShadowInputs) -> ShadowDecision:
     quartile = inp.quartile.lower()
     warm = inp.n_eff >= CELL_WARM_MIN_N_EFF
 
-    # Rule 1 — cold cell / cold-quartile label = pass-through (no KILL ever).
+    # Rule 1 — cold cell / cold-quartile label = pass-through (no KILL ever on
+    # the global-quartile path).
     if quartile == "cold":
+        # Rule 1b — NEW warm-pool-local-bottom discriminator. Engages ONLY while
+        # the global quartile gate is inactive (label == cold) AND the cell is
+        # genuinely warm + losing + flagged bottom-of-the-current-warm-pool. The
+        # genuinely cold cell (n_eff < 5) skips this and falls through to the
+        # pass-through below — cold = pass-through ALWAYS.
+        if warm and inp.avg_pnl_r < 0.0 and inp.warm_pool_local_bottom:
+            return ShadowDecision(
+                decision=GateDecision.KILL,
+                scalar=0.0,
+                reason=WARM_POOL_LOCAL_BOTTOM_REASON,
+            )
         # A cold-labelled quartile with losing history → conservative trim, not KILL.
         if inp.avg_pnl_r < 0.0:
             return ShadowDecision(
@@ -172,8 +211,15 @@ def technical_validate_decision(inp: G3ShadowInputs) -> ShadowDecision:
     return ShadowDecision(decision=GateDecision.PASS, reason="warm_pass")
 
 
-def g3_shadow_inputs_from_payload(payload: dict[str, Any]) -> G3ShadowInputs:
-    """Project the live G3 ``ctx.payload`` onto the technical-rule inputs."""
+def g3_shadow_inputs_from_payload(
+    payload: dict[str, Any], *, warm_pool_local_bottom: bool = False
+) -> G3ShadowInputs:
+    """Project the live G3 ``ctx.payload`` onto the technical-rule inputs.
+
+    ``warm_pool_local_bottom`` (default False → byte-identical to the legacy
+    projection) is supplied by the shadow path, computed from the live warm pool
+    in the same regime; the production payload never carries it.
+    """
     cell = payload.get("cell_routing", {})
     cell = cell if isinstance(cell, dict) else {}
     recent = payload.get("recent_trades", [])
@@ -188,6 +234,7 @@ def g3_shadow_inputs_from_payload(payload: dict[str, Any]) -> G3ShadowInputs:
             payload.get("baseline_p50_spread_bps", 0.0) or 0.0
         ),
         listing_age_hours=float(payload.get("listing_age_hours", 0.0) or 0.0),
+        warm_pool_local_bottom=bool(warm_pool_local_bottom),
     )
 
 

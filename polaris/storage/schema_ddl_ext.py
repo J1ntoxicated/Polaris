@@ -485,3 +485,68 @@ DDL_LOOP_SESSION_EXIT_EVENTS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_loop_session_exit_events_ts
     ON loop_session_exit_events(ts);
 """
+
+# ---------------------------------------------------------------------------
+# P1 replay / benchmark READ-MODEL (display-only, offline-written).
+#
+# DISPLAY-ONLY, additive, and NEVER read by any live trading path (sizing /
+# gating / rotation / exit). The offline replay+benchmark harness
+# (``scripts/run_replay.py``) persists one ``replay_runs`` row per run and one
+# ``benchmark_results`` row per (run × baseline-comparison) so the dashboard
+# confidence/EDGE tab can surface the real-fee-net edge evidence + 3-tier
+# verdict + CIs. The live loop's main DB (``data/polaris.sqlite``) may carry
+# these tables for the dashboard to read, but the replay engine itself writes
+# its cell-matrix updates only to a throwaway ``:memory:`` sandbox — the live
+# trading state is immutable by construction. A missing table degrades to a
+# zeroed dashboard panel (graceful zero), exactly like the rotation telemetry.
+# ---------------------------------------------------------------------------
+
+DDL_REPLAY_RUNS = """
+CREATE TABLE IF NOT EXISTS replay_runs (
+    run_id TEXT PRIMARY KEY,
+    created_ts INTEGER NOT NULL,
+    bar_interval TEXT NOT NULL DEFAULT '1H',
+    start_ts INTEGER,
+    end_ts INTEGER,
+    fee_model TEXT NOT NULL DEFAULT 'okx_real',
+    instrument_ids TEXT NOT NULL DEFAULT '',
+    n_trades INTEGER NOT NULL DEFAULT 0,
+    net_pnl_real_fee REAL NOT NULL DEFAULT 0.0,
+    sharpe REAL NOT NULL DEFAULT 0.0,
+    max_dd REAL NOT NULL DEFAULT 0.0,
+    win_rate REAL NOT NULL DEFAULT 0.0,
+    profit_factor REAL NOT NULL DEFAULT 0.0,
+    turnover REAL NOT NULL DEFAULT 0.0,
+    fee_drag_real_r REAL NOT NULL DEFAULT 0.0,
+    psr REAL NOT NULL DEFAULT 0.0,
+    deflated_sharpe REAL NOT NULL DEFAULT 0.0,
+    net_pnl_r_lcb REAL NOT NULL DEFAULT 0.0,
+    net_pnl_r_ucb REAL NOT NULL DEFAULT 0.0,
+    is_oos_spread REAL NOT NULL DEFAULT 0.0,
+    verdict TEXT NOT NULL DEFAULT ''
+);
+"""
+
+DDL_REPLAY_RUNS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_replay_runs_created
+    ON replay_runs(created_ts);
+"""
+
+# One row per (replay run × tier/baseline comparison) — the 3-tier breakdown +
+# per-baseline Sharpe spread + the tier verdict note the dashboard chips render.
+DDL_BENCHMARK_RESULTS = """
+CREATE TABLE IF NOT EXISTS benchmark_results (
+    rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    baseline TEXT NOT NULL DEFAULT '',
+    sharpe_spread REAL NOT NULL DEFAULT 0.0,
+    passed INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT ''
+);
+"""
+
+DDL_BENCHMARK_RESULTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_benchmark_results_run
+    ON benchmark_results(run_id, tier);
+"""

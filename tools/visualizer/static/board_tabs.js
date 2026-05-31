@@ -237,6 +237,7 @@
           </div>
           <svg id="eq-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
           <div class="conf-strip" id="b-confidence"></div>
+          <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars — NOT a calendar gate."></div>
         </div>
         <div class="tab-grid-1">${panel('Edge Validation · per (strategy × ticker × regime) posterior', 'edge-body', 'mini')}</div>
       </div>

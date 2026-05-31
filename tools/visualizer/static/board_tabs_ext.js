@@ -197,6 +197,41 @@
     }).join('');
     el.innerHTML = overall + cells;
   }
+  function renderBenchmark(d) {
+    const el = $('b-benchmark'); if (!el) return;
+    const r = (d.confidence && d.confidence.replay) || {};
+    if (!r.present) { el.innerHTML = '<span class="b-flat">benchmark · no offline replay run yet</span>'; return; }
+    const v = (r.verdict || '').toUpperCase();
+    const vcls = v.includes('PASS') ? 'b-pos' : (v.includes('WIDE') || v.includes('EDGE')) ? '' : 'b-neg';
+    const dd = (r.max_dd || 0) * 100;
+    const lcb = (r.net_pnl_r_lcb || 0), ucb = (r.net_pnl_r_ucb || 0);
+    const head =
+      `<span title="Offline replay run id"><span class="ck">Replay</span> <span class="cv">${esc((r.run_id || '').slice(0, 8))}</span></span>` +
+      `<span><span class="ck">Verdict</span> <span class="cv ${vcls}">${esc(v || 'n/a')}</span></span>` +
+      `<span title="Real-fee-net pnl over the replay (real OKX 0.10% taker)"><span class="ck">Net(real)</span> <span class="cv ${pn(r.net_pnl_real_fee || 0)}">${fmtUsd(r.net_pnl_real_fee || 0, 0)}</span></span>` +
+      `<span title="Per-trade Sharpe (real-fee-net, baseline clock)"><span class="ck">Sharpe</span> <span class="cv">${(r.sharpe || 0).toFixed(2)}</span></span>` +
+      `<span title="Probabilistic Sharpe Ratio (prob true Sharpe > 0)"><span class="ck">PSR</span> <span class="cv">${(r.psr || 0).toFixed(2)}</span></span>` +
+      `<span title="Deflated Sharpe (trial-adjusted PSR — anti-overfit)"><span class="ck">DSR</span> <span class="cv">${(r.deflated_sharpe || 0).toFixed(2)}</span></span>` +
+      `<span title="Net-R posterior CI band (NIG LCB..UCB)"><span class="ck">CI(R)</span> <span class="cv ${pn(lcb)}">${lcb.toFixed(2)}..${ucb.toFixed(2)}</span></span>` +
+      `<span title="Max drawdown"><span class="ck">MaxDD</span> <span class="cv b-neg">${dd.toFixed(1)}%</span></span>` +
+      `<span title="Σ notional turned over"><span class="ck">Turn</span> <span class="cv">${fmtUsd(r.turnover || 0, 0)}</span></span>` +
+      `<span title="Real fee drag (USD)"><span class="ck">FeeDrag</span> <span class="cv b-neg">-${(r.fee_drag_real_r || 0).toFixed(1)}</span></span>` +
+      `<span title="In-sample vs out-of-sample Sharpe spread (walk-forward overfit flag; large gap = overfit)"><span class="ck">IS−OOS</span> <span class="cv">${(r.is_oos_spread || 0).toFixed(2)}</span></span>` +
+      `<span><span class="ck">n</span> <span class="cv">${r.n || 0}</span></span>`;
+    const sp = r.sharpe_spreads || {};
+    const spreads = Object.keys(sp).map(k => {
+      const lbl = k.replace('sharpe_spread_vs_', 'Δ');
+      const val = sp[k] || 0;
+      return `<span class="cell ${val > 0 ? 'lcb-pos' : val < 0 ? 'lcb-neg' : ''}" title="Bot Sharpe spread vs ${esc(k.replace('sharpe_spread_vs_', ''))} baseline">
+        <span class="nm">${esc(lbl)}</span><span class="cv ${pn(val)}">${val >= 0 ? '+' : ''}${val.toFixed(2)}</span></span>`;
+    }).join('');
+    const tiers = (r.tiers || []).filter(t => !t.baseline).map(t => {
+      const cls = t.passed ? 'lcb-pos' : '';
+      return `<span class="cell ${cls}" title="${esc(t.note)}"><span class="nm">${esc(t.tier)}</span>
+        <span class="cv ${t.passed ? 'b-pos' : 'b-flat'}">${t.passed ? 'PASS' : '—'}</span></span>`;
+    }).join('');
+    el.innerHTML = head + spreads + tiers;
+  }
   function renderEdge(d) {
     // edge_validation carries an ``exchange`` venue → scope it (E3).
     const rows = venueFilter(d.edge_validation, 'exchange');
@@ -298,6 +333,6 @@
   // ── register EXIT / AI / EDGE / RISK into the shared dispatch ──────────────
   T.register('exit', renderExit);
   T.register('ai', renderAi);
-  T.register('edge', (d) => { renderEquity(d); renderConfidence(d); renderEdge(d); });
+  T.register('edge', (d) => { renderEquity(d); renderConfidence(d); renderBenchmark(d); renderEdge(d); });
   T.register('risk', (d) => { renderRotation(d); renderCells(d); renderAlerts(d); renderRiskAdmit(d); });
 })();

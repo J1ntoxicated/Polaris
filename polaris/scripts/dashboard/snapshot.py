@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from polaris.core.pipeline.agents.confidence import confidence_summary
 from polaris.core.sizing.constants import (
@@ -35,6 +35,7 @@ from polaris.core.sizing.constants import (
 from polaris.scripts.dashboard.snapshot_models import (
     STARTING_CAPITAL,
     AlertRow,
+    BenchmarkTier,
     CellRow,
     ClosedTrade,
     ConfidenceCell,
@@ -46,6 +47,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     LearnerSlot,
     PositionRow,
     RegimeBar,
+    ReplayBenchmarkPanel,
     StrategyStat,
     StreamSummary,
 )
@@ -133,6 +135,46 @@ def _confidence_panel(
         fee_drag_real_r=float(ov["fee_drag_real_r"]),
         fee_drag_demo_r=float(ov["fee_drag_demo_r"]),
         cells=cells,
+        replay=_replay_panel(summary.get("replay", {"present": False})),
+    )
+
+
+def _replay_panel(blk: dict[str, Any]) -> ReplayBenchmarkPanel:
+    """Map the confidence ``replay`` block -> the dashboard ReplayBenchmarkPanel.
+
+    Display-only — ``present=False`` when no offline run has been persisted."""
+    if not blk.get("present"):
+        return ReplayBenchmarkPanel()
+    tiers = [
+        BenchmarkTier(
+            tier=str(t.get("tier", "")),
+            baseline=str(t.get("baseline", "")),
+            sharpe_spread=float(t.get("sharpe_spread", 0.0)),
+            passed=bool(t.get("passed", False)),
+            note=str(t.get("note", "")),
+        )
+        for t in blk.get("tiers", [])
+    ]
+    spreads = {str(k): float(v) for k, v in dict(blk.get("sharpe_spreads", {})).items()}
+    return ReplayBenchmarkPanel(
+        present=True,
+        run_id=str(blk.get("run_id", "")),
+        n=int(blk.get("n", 0)),
+        net_pnl_real_fee=float(blk.get("net_pnl_real_fee", 0.0)),
+        sharpe=float(blk.get("sharpe", 0.0)),
+        max_dd=float(blk.get("max_dd", 0.0)),
+        win_rate=float(blk.get("win_rate", 0.0)),
+        profit_factor=float(blk.get("profit_factor", 0.0)),
+        turnover=float(blk.get("turnover", 0.0)),
+        fee_drag_real_r=float(blk.get("fee_drag_real_r", 0.0)),
+        psr=float(blk.get("psr", 0.0)),
+        deflated_sharpe=float(blk.get("deflated_sharpe", 0.0)),
+        net_pnl_r_lcb=float(blk.get("net_pnl_r_lcb", 0.0)),
+        net_pnl_r_ucb=float(blk.get("net_pnl_r_ucb", 0.0)),
+        is_oos_spread=float(blk.get("is_oos_spread", 0.0)),
+        verdict=str(blk.get("verdict", "")),
+        sharpe_spreads=spreads,
+        tiers=tiers,
     )
 
 

@@ -272,6 +272,51 @@ class ConfidenceCell:
 
 
 @dataclass(slots=True)
+class BenchmarkTier:
+    """One 3-tier benchmark verdict row (relative / risk_adjusted / statistical).
+
+    ``baseline`` is the comparison baseline for relative-tier rows (empty for the
+    aggregate risk/statistical tiers). ``sharpe_spread`` is bot − baseline Sharpe.
+    Display-only — sourced from the offline ``benchmark_results`` read-model."""
+
+    tier: str
+    baseline: str
+    sharpe_spread: float
+    passed: bool
+    note: str
+
+
+@dataclass(slots=True)
+class ReplayBenchmarkPanel:
+    """Offline replay/benchmark run rollup for the EDGE tab — display-only.
+
+    The most-recent deterministic replay run measured under the REAL OKX fee
+    schedule on the baseline clock: real-fee-net pnl, per-trade Sharpe + spread
+    vs each baseline, PSR / deflated-Sharpe, the NIG net-R CI band, the
+    IS-vs-OOS overfit spread, and the 3-tier verdict. ``present=False`` when no
+    run has been persisted (graceful zero). NEVER feeds trading."""
+
+    present: bool = False
+    run_id: str = ""
+    n: int = 0
+    net_pnl_real_fee: float = 0.0
+    sharpe: float = 0.0
+    max_dd: float = 0.0
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    turnover: float = 0.0
+    fee_drag_real_r: float = 0.0
+    psr: float = 0.0
+    deflated_sharpe: float = 0.0
+    net_pnl_r_lcb: float = 0.0
+    net_pnl_r_ucb: float = 0.0
+    is_oos_spread: float = 0.0
+    verdict: str = ""
+    sharpe_spreads: dict[str, float] = field(default_factory=dict)
+    tiers: list[BenchmarkTier] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ConfidencePanel:
     """Go-live confidence rollup (Component A) — real-fee-net edge evidence.
 
@@ -286,6 +331,8 @@ class ConfidencePanel:
     fee_drag_real_r: float = 0.0
     fee_drag_demo_r: float = 0.0
     cells: list[ConfidenceCell] = field(default_factory=list)
+    # P1 offline replay/benchmark run (display-only; graceful empty when none).
+    replay: ReplayBenchmarkPanel = field(default_factory=ReplayBenchmarkPanel)
 
 
 @dataclass(slots=True)

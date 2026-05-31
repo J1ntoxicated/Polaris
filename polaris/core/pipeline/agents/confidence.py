@@ -48,6 +48,7 @@ __all__ = [
     "LCB_Z",
     "PNL_R_USD_DENOM",
     "confidence_summary",
+    "replay_block",
 ]
 
 # Mirrors ``shadow_acceptance.PNL_R_USD_DENOM`` / ``payload_builder`` — the
@@ -85,6 +86,79 @@ def _nig_lcb(samples: list[float]) -> float:
 
 def _sign(x: float) -> str:
     return "+" if x > 0.0 else ("-" if x < 0.0 else "0")
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def replay_block(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Latest offline replay/benchmark run as a read-only display block.
+
+    Reads the ``replay_runs`` + ``benchmark_results`` READ-MODEL tables (written
+    offline by ``scripts/run_replay.py``) and returns the most-recent run's
+    real-fee-net metrics, PSR/deflated-Sharpe, per-baseline Sharpe spreads, the
+    NIG net-R CI band, the IS-vs-OOS overfit spread, and the 3-tier verdict. A
+    missing table / empty read degrades to ``{"present": False}`` (graceful zero
+    — exactly like the rotation telemetry). NEVER touches a trading decision."""
+    if not _table_exists(conn, "replay_runs"):
+        return {"present": False}
+    row = conn.execute(
+        """
+        SELECT run_id, created_ts, bar_interval, n_trades, net_pnl_real_fee,
+               sharpe, max_dd, win_rate, profit_factor, turnover, fee_drag_real_r,
+               psr, deflated_sharpe, net_pnl_r_lcb, net_pnl_r_ucb, is_oos_spread,
+               verdict
+        FROM replay_runs ORDER BY created_ts DESC, run_id DESC LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return {"present": False}
+    run_id = str(row[0])
+    spreads: dict[str, float] = {}
+    tiers: list[dict[str, Any]] = []
+    if _table_exists(conn, "benchmark_results"):
+        for tier, baseline, spread, passed, note in conn.execute(
+            "SELECT tier, baseline, sharpe_spread, passed, note FROM benchmark_results "
+            "WHERE run_id = ? ORDER BY tier, baseline",
+            (run_id,),
+        ):
+            if str(baseline):
+                spreads[f"sharpe_spread_vs_{baseline}"] = float(spread or 0.0)
+            tiers.append({
+                "tier": str(tier),
+                "baseline": str(baseline or ""),
+                "sharpe_spread": float(spread or 0.0),
+                "passed": bool(passed),
+                "note": str(note or ""),
+            })
+    return {
+        "present": True,
+        "run_id": run_id,
+        "created_ts": int(row[1] or 0),
+        "bar_interval": str(row[2] or ""),
+        "n": int(row[3] or 0),
+        "net_pnl_real_fee": float(row[4] or 0.0),
+        "sharpe": float(row[5] or 0.0),
+        "max_dd": float(row[6] or 0.0),
+        "win_rate": float(row[7] or 0.0),
+        "profit_factor": float(row[8] or 0.0),
+        "turnover": float(row[9] or 0.0),
+        "fee_drag_real_r": float(row[10] or 0.0),
+        "psr": float(row[11] or 0.0),
+        "deflated_sharpe": float(row[12] or 0.0),
+        "net_pnl_r_lcb": float(row[13] or 0.0),
+        "net_pnl_r_ucb": float(row[14] or 0.0),
+        "is_oos_spread": float(row[15] or 0.0),
+        "verdict": str(row[16] or ""),
+        "sharpe_spreads": spreads,
+        "tiers": tiers,
+    }
 
 
 def confidence_summary(
@@ -188,6 +262,9 @@ def confidence_summary(
             "fee_drag_demo_r": fee_drag_demo_usd / PNL_R_USD_DENOM,
         },
         "by_strategy_regime": by_cell,
+        # Offline replay/benchmark read-model (display-only; graceful-zero when
+        # no run has been persisted yet). Behaviour 0.
+        "replay": replay_block(conn),
         "notes": {
             "r_conversion": f"pnl_usd / {PNL_R_USD_DENOM} (constant-risk proxy)",
             "lcb": f"NIG posterior μ_n − {LCB_Z}·scale (marginal Student-t on μ)",

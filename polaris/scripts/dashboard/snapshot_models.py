@@ -234,6 +234,41 @@ class StreamSummary:
 
 
 @dataclass(slots=True)
+class ConfidenceCell:
+    """One (strategy × regime) real-fee-net edge row for the confidence panel.
+
+    ``expected_real_fee_net_r`` = mean per-trade R after the REAL fee schedule;
+    ``lcb_real_fee_net_r`` = NIG posterior lower-confidence-bound on that mean
+    (a ``+`` ``lcb_sign`` is the edge-confidence signal). Display-only —
+    sourced from ``confidence.confidence_summary``; never feeds sizing/gating.
+    """
+
+    strategy_id: str
+    regime: str
+    n: int
+    expected_real_fee_net_r: float
+    lcb_real_fee_net_r: float
+    lcb_sign: str
+
+
+@dataclass(slots=True)
+class ConfidencePanel:
+    """Go-live confidence rollup (Component A) — real-fee-net edge evidence.
+
+    The headline overall metrics + per-(strategy×regime) cells Jin watches to
+    judge confidence to open real OKX. ``fee_drag_real_r`` vs ``fee_drag_demo_r``
+    is the real-vs-demo cost wedge (demo is the 7x penalty). Display-only."""
+
+    n_closed: int = 0
+    win_rate_pct: float = 0.0
+    profit_factor: float = 0.0
+    turnover_ratio: float = 0.0
+    fee_drag_real_r: float = 0.0
+    fee_drag_demo_r: float = 0.0
+    cells: list[ConfidenceCell] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class DashboardSnapshot:
     ts_now: int = 0
     starting_capital: float = STARTING_CAPITAL
@@ -258,6 +293,15 @@ class DashboardSnapshot:
     universe_last_refresh: str = "n/a"
     equity_curve: list[float] = field(default_factory=list)   # 24h, oldest→newest
     equity_curve_ts: list[int] = field(default_factory=list)
+    # Component A (Jin 2026-05-31) — go-live confidence signal. The SAME gross
+    # close pnl as ``equity_curve`` (demo-actual), but fees RECOMPUTED at the
+    # REAL OKX schedule (0.10% taker) instead of the stored 0.7% demo fee. This
+    # real-fee-net curve is the headline Jin watches for go-live. Additive — the
+    # demo-actual ``equity_curve`` / ``equity_now`` fields keep their meaning.
+    equity_curve_real_fee_net: list[float] = field(default_factory=list)
+    equity_now_real_fee_net: float = STARTING_CAPITAL
+    real_fee_total: float = 0.0   # Σ real-schedule fees over the session
+    demo_fee_total: float = 0.0   # Σ stored demo fees (the 0.7% drain)
     positions: list[PositionRow] = field(default_factory=list)
     strategy_stats: list[StrategyStat] = field(default_factory=list)
     gate_funnel: list[GateRow] = field(default_factory=list)
@@ -280,3 +324,8 @@ class DashboardSnapshot:
     rotation_count: int = 0
     session_forced_exit_count: int = 0
     last_rotation: RotationEvent | None = None
+    # Component A (Jin 2026-05-31) — go-live confidence panel: real-fee-net
+    # per-(strategy×regime) edge + overall win-rate / profit-factor / turnover /
+    # real-vs-demo fee drag. Display-only; dataclasses.asdict serializes it for
+    # the web board. Graceful zero-panel when there are no closed trades.
+    confidence: ConfidencePanel = field(default_factory=ConfidencePanel)

@@ -39,6 +39,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
@@ -247,10 +248,22 @@ def fee_adjusted_realized_r(conn: sqlite3.Connection) -> dict[str, Any]:
     drag here is the EXPLICIT fee+slippage cost surfaced separately — it makes
     the cost wedge visible (gross can hide churn that net reveals). The R
     conversion is the constant-risk proxy documented at module scope.
+
+    Component A additions (Jin 2026-05-31, go-live confidence) — the existing
+    keys above keep their EXACT meaning; these are ADDITIVE ``real_*`` / ``demo_*``
+    fee-adjusted variants so the real vs demo fee wedge is visible side by side:
+      - ``real_fee_drag_r`` / ``demo_fee_drag_r`` : ROUND-TRIP fee drag (open +
+        close leg, both at the close-fill notional) under the REAL OKX schedule
+        (0.10% taker) vs the DEMO schedule (0.7%), per
+        ``economics.fees``. NOTE: these use the SCHEDULE, not the stored
+        ``fee_usd`` — so they are comparable cost models, not the booked drag.
+      - ``net_realized_real_fee_r`` / ``net_realized_demo_fee_r`` : gross R minus
+        the respective round-trip schedule drag. The real-fee net is the go-live
+        edge signal; the demo-fee net mirrors the punitive demo drain.
     """
     rows = conn.execute(
         """
-        SELECT pnl_usd, fee_usd, slippage_bps, size_usd
+        SELECT pnl_usd, fee_usd, slippage_bps, size_usd, venue
         FROM fills
         WHERE is_close = 1
         """
@@ -261,21 +274,38 @@ def fee_adjusted_realized_r(conn: sqlite3.Connection) -> dict[str, Any]:
             "gross_realized_r": 0.0,
             "fee_slippage_drag_r": 0.0,
             "net_realized_r": 0.0,
+            "real_fee_drag_r": 0.0,
+            "demo_fee_drag_r": 0.0,
+            "net_realized_real_fee_r": 0.0,
+            "net_realized_demo_fee_r": 0.0,
             "n": 0,
             "r_conversion": f"pnl_usd / {PNL_R_USD_DENOM} (constant-risk proxy)",
         }
     gross_usd = 0.0
     drag_usd = 0.0
-    for pnl_usd, fee_usd, slippage_bps, size_usd in rows:
+    real_fee_usd_total = 0.0
+    demo_fee_usd_total = 0.0
+    for pnl_usd, fee_usd, slippage_bps, size_usd, venue in rows:
         gross_usd += float(pnl_usd)
-        slippage_usd = abs(float(size_usd)) * abs(float(slippage_bps)) / 10_000.0
+        notional = abs(float(size_usd))
+        slippage_usd = notional * abs(float(slippage_bps)) / 10_000.0
         drag_usd += abs(float(fee_usd)) + slippage_usd
+        v = str(venue or "")
+        # Round-trip = open + close leg both at this notional.
+        real_fee_usd_total += 2.0 * real_fee_usd(v, notional)
+        demo_fee_usd_total += 2.0 * demo_fee_usd(v, notional)
     gross_r = gross_usd / PNL_R_USD_DENOM
     drag_r = drag_usd / PNL_R_USD_DENOM
+    real_drag_r = real_fee_usd_total / PNL_R_USD_DENOM
+    demo_drag_r = demo_fee_usd_total / PNL_R_USD_DENOM
     return {
         "gross_realized_r": gross_r,
         "fee_slippage_drag_r": drag_r,
         "net_realized_r": gross_r - drag_r,
+        "real_fee_drag_r": real_drag_r,
+        "demo_fee_drag_r": demo_drag_r,
+        "net_realized_real_fee_r": gross_r - real_drag_r,
+        "net_realized_demo_fee_r": gross_r - demo_drag_r,
         "n": n,
         "r_conversion": f"pnl_usd / {PNL_R_USD_DENOM} (constant-risk proxy)",
     }

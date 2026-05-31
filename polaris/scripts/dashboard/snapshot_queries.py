@@ -12,8 +12,9 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Mapping
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
+from polaris.core.economics.fees import real_fee_usd
 from polaris.core.sizing.constants import (
     demo_starting_equity_capital,
     demo_starting_equity_okx,
@@ -194,6 +195,109 @@ def _build_equity_curve(
 
     total_realised = cum - starting_capital
     return bucket_ts, equity, total_realised
+
+
+class DualEquityCurve(NamedTuple):
+    """Two realised-PnL equity curves from ONE fills walk (Component A).
+
+    Both curves use the IDENTICAL gross close ``pnl_usd``; they differ only in
+    the fee schedule deducted on every leg:
+
+    - ``equity_demo`` : stored ``fills.fee_usd`` (the 0.7% OKX demo actually
+      charged) — bit-for-bit the existing ``_build_equity_curve`` curve, which
+      matches the real demo-account drain.
+    - ``equity_real`` : fees RECOMPUTED at the REAL schedule via
+      ``economics.fees.real_fee_usd(venue, size_usd)`` per fill notional — the
+      go-live confidence signal (Jin 2026-05-31).
+
+    ``*_fee_total`` are the session fee sums under each schedule;
+    ``total_realised_*`` are the net realised deltas vs ``starting_capital``.
+    """
+
+    bucket_ts: list[int]
+    equity_demo: list[float]
+    equity_real: list[float]
+    total_realised_demo: float
+    total_realised_real: float
+    demo_fee_total: float
+    real_fee_total: float
+
+
+def _build_dual_equity_curve(
+    conn: sqlite3.Connection, *, now_s: int, starting_capital: float
+) -> DualEquityCurve:
+    """Build demo-actual + real-fee-net equity curves from one fills walk.
+
+    Mirrors ``_build_equity_curve`` exactly for the demo leg (same session
+    anchor, bucketing, base, and ``(pnl if close else 0) − fee`` per-fill delta)
+    so the demo curve is a non-regressing superset. The real leg substitutes the
+    stored ``fee_usd`` with ``real_fee_usd(venue, size_usd)`` on EVERY fill leg
+    (open + close both incur the venue fee). Read-only; trading behavior
+    unchanged.
+    """
+    session_start_ms = _session_start_ms(conn, now_s=now_s)
+    session_start_s = session_start_ms // 1000
+    rows = _safe_query(
+        conn,
+        """SELECT ts_ms,
+                  venue,
+                  size_usd,
+                  (CASE WHEN is_close = 1 THEN COALESCE(pnl_usd, 0.0) ELSE 0.0 END)
+                    AS gross,
+                  COALESCE(fee_usd, 0.0) AS demo_fee
+           FROM fills
+           WHERE ts_ms >= ?
+           ORDER BY ts_ms ASC""",
+        (session_start_ms,),
+    )
+
+    base = starting_capital
+    bucket_ts, _bucket_sec = _session_buckets(session_start_s, now_s)
+    equity_demo = [base] * len(bucket_ts)
+    equity_real = [base] * len(bucket_ts)
+
+    if not rows:
+        return DualEquityCurve(
+            bucket_ts=bucket_ts,
+            equity_demo=equity_demo,
+            equity_real=equity_real,
+            total_realised_demo=0.0,
+            total_realised_real=0.0,
+            demo_fee_total=0.0,
+            real_fee_total=0.0,
+        )
+
+    cum_demo = base
+    cum_real = base
+    demo_fee_total = 0.0
+    real_fee_total = 0.0
+    fill_iter = iter(rows)
+    next_fill = next(fill_iter, None)
+    for i, t in enumerate(bucket_ts):
+        boundary_ms = t * 1000
+        while next_fill is not None and int(next_fill[0]) <= boundary_ms:
+            venue = str(next_fill[1] or "")
+            size_usd = float(next_fill[2] or 0.0)
+            gross = float(next_fill[3] or 0.0)
+            demo_fee = float(next_fill[4] or 0.0)
+            real_fee = real_fee_usd(venue, size_usd)
+            cum_demo += gross - demo_fee
+            cum_real += gross - real_fee
+            demo_fee_total += demo_fee
+            real_fee_total += real_fee
+            next_fill = next(fill_iter, None)
+        equity_demo[i] = cum_demo
+        equity_real[i] = cum_real
+
+    return DualEquityCurve(
+        bucket_ts=bucket_ts,
+        equity_demo=equity_demo,
+        equity_real=equity_real,
+        total_realised_demo=cum_demo - starting_capital,
+        total_realised_real=cum_real - starting_capital,
+        demo_fee_total=demo_fee_total,
+        real_fee_total=real_fee_total,
+    )
 
 
 def _drawdown_and_sharpe(

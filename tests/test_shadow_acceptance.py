@@ -261,6 +261,44 @@ def test_fee_adjusted_realized_r_drag(memdb: sqlite3.Connection) -> None:
     assert out["fee_slippage_drag_r"] >= 0.0
 
 
+def test_fee_adjusted_realized_r_adds_real_and_demo_keys(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Component A: existing keys keep their meaning; real_*/demo_* added."""
+    from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
+
+    _seed_fill(
+        memdb, fill_id="f1", is_close=1, pnl_usd=100.0, fee_usd=7.0,
+        slippage_bps=0.0, size_usd=1000.0, contribution_id="p1", venue="okx",
+    )
+    _seed_fill(
+        memdb, fill_id="f2", is_close=1, pnl_usd=-40.0, fee_usd=14.0,
+        slippage_bps=0.0, size_usd=2000.0, contribution_id="p2", venue="okx",
+    )
+    out = fee_adjusted_realized_r(memdb)
+    denom = 50.0
+    # Existing keys unchanged in meaning (stored-fee + slippage drag).
+    assert out["n"] == 2
+    assert out["gross_realized_r"] == pytest.approx(60.0 / denom)
+    # NEW real-fee keys: real round-trip fee schedule (0.10% taker, both legs).
+    real_drag = (
+        2 * real_fee_usd("okx", 1000.0) + 2 * real_fee_usd("okx", 2000.0)
+    ) / denom
+    demo_drag = (
+        2 * demo_fee_usd("okx", 1000.0) + 2 * demo_fee_usd("okx", 2000.0)
+    ) / denom
+    assert out["real_fee_drag_r"] == pytest.approx(real_drag)
+    assert out["demo_fee_drag_r"] == pytest.approx(demo_drag)
+    assert out["net_realized_real_fee_r"] == pytest.approx(
+        out["gross_realized_r"] - real_drag
+    )
+    assert out["net_realized_demo_fee_r"] == pytest.approx(
+        out["gross_realized_r"] - demo_drag
+    )
+    # Real fee is far cheaper than demo → real net strictly above demo net.
+    assert out["net_realized_real_fee_r"] > out["net_realized_demo_fee_r"]
+
+
 # ===========================================================================
 # gpt_kill_counterfactual
 # ===========================================================================

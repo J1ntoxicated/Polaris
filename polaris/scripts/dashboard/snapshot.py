@@ -26,6 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Final
 
+from polaris.core.pipeline.agents.confidence import confidence_summary
 from polaris.core.sizing.constants import (
     demo_starting_equity_capital,
     demo_starting_equity_okx,
@@ -36,6 +37,8 @@ from polaris.scripts.dashboard.snapshot_models import (
     AlertRow,
     CellRow,
     ClosedTrade,
+    ConfidenceCell,
+    ConfidencePanel,
     DashboardSnapshot,
     EdgeValidationRow,
     GateRow,
@@ -47,7 +50,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     StreamSummary,
 )
 from polaris.scripts.dashboard.snapshot_queries import (
-    _build_equity_curve,
+    _build_dual_equity_curve,
     _cell_mult_lookup,
     _daily_realised_pnl,
     _drawdown_and_sharpe,
@@ -77,6 +80,8 @@ __all__ = [
     "AlertRow",
     "CellRow",
     "ClosedTrade",
+    "ConfidenceCell",
+    "ConfidencePanel",
     "DashboardSnapshot",
     "EdgeValidationRow",
     "GateRow",
@@ -95,6 +100,37 @@ DEFAULT_DB_PATH: Final[Path] = Path("data/polaris.sqlite")
 def _starting_capital() -> float:
     """Resolved live each call so env-overrides (POLARIS_DEMO_STARTING_EQUITY_*) win."""
     return demo_starting_equity_total()
+
+
+def _confidence_panel(
+    conn: sqlite3.Connection, *, starting_equity: float, n_cells: int = 8
+) -> ConfidencePanel:
+    """Build the go-live confidence panel from ``confidence.confidence_summary``.
+
+    Read-only display rollup — the per-(strategy×regime) cells are capped to the
+    top ``n_cells`` (most-sampled first, the summary already sorts them)."""
+    summary = confidence_summary(conn, starting_equity=starting_equity)
+    ov = summary["overall"]
+    cells = [
+        ConfidenceCell(
+            strategy_id=str(c["strategy_id"]),
+            regime=str(c["regime"]),
+            n=int(c["n"]),
+            expected_real_fee_net_r=float(c["expected_real_fee_net_r"]),
+            lcb_real_fee_net_r=float(c["lcb_real_fee_net_r"]),
+            lcb_sign=str(c["lcb_sign"]),
+        )
+        for c in summary["by_strategy_regime"][:n_cells]
+    ]
+    return ConfidencePanel(
+        n_closed=int(ov["n_closed"]),
+        win_rate_pct=float(ov["win_rate_pct"]),
+        profit_factor=float(ov["profit_factor"]),
+        turnover_ratio=float(ov["turnover_ratio"]),
+        fee_drag_real_r=float(ov["fee_drag_real_r"]),
+        fee_drag_demo_r=float(ov["fee_drag_demo_r"]),
+        cells=cells,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +157,15 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = None
     try:
-        bucket_ts, equity, _total_realised = _build_equity_curve(
+        # Component A dual curve: demo-actual (== legacy _build_equity_curve)
+        # + real-fee-net (fees recomputed at the real OKX schedule). One fills
+        # walk produces both; ``equity`` is the demo-actual leg (unchanged).
+        dual = _build_dual_equity_curve(
             conn, now_s=now_s, starting_capital=starting_capital,
         )
+        bucket_ts = dual.bucket_ts
+        equity = dual.equity_demo
+        equity_real = dual.equity_real
         equity_now = equity[-1] if equity else starting_capital
         dd_pct, peak, sharpe = _drawdown_and_sharpe(
             equity, starting_capital=starting_capital,
@@ -148,6 +190,17 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # venue balance probe that lives outside the snapshot path.
         exposed_usd = notional_open
         equity_with_upnl = equity_now + upnl_total
+        # Real-fee-net "now" = real-fee realised curve + the SAME uPnL_total.
+        # uPnL is gross of fees on BOTH curves (the close fee is unrealised until
+        # exit), so the only divergence is the realised fee schedule — the
+        # real-fee-net headline equals demo equity + (demo_fee − real_fee) drag.
+        equity_now_real = (equity_real[-1] if equity_real else starting_capital)
+        equity_with_upnl_real = equity_now_real + upnl_total
+        equity_full_real = (
+            equity_real + [equity_with_upnl_real]
+            if equity_real
+            else [equity_with_upnl_real]
+        )
         # Re-compute DD/Peak with uPnL-included current point
         equity_full = (
             equity + [equity_with_upnl] if equity else [equity_with_upnl]
@@ -170,6 +223,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # Rotation + session-forced-exit telemetry (follow-up #12) — display-only,
         # graceful zero when the telemetry tables are empty/absent.
         rotation = _rotation_telemetry(conn, now_s=now_s)
+        # Component A go-live confidence panel (real-fee-net edge evidence).
+        confidence = _confidence_panel(conn, starting_equity=starting_capital)
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -189,6 +244,10 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             universe_last_refresh=focus_ts,
             equity_curve=equity_full,
             equity_curve_ts=bucket_ts + [now_s],
+            equity_curve_real_fee_net=equity_full_real,
+            equity_now_real_fee_net=equity_with_upnl_real,
+            real_fee_total=dual.real_fee_total,
+            demo_fee_total=dual.demo_fee_total,
             positions=positions,
             strategy_stats=strategy_stats,
             gate_funnel=gate_funnel,
@@ -204,6 +263,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             rotation_count=rotation.rotation_count,
             session_forced_exit_count=rotation.session_forced_exit_count,
             last_rotation=rotation.last_rotation,
+            confidence=confidence,
         )
     finally:
         conn.close()

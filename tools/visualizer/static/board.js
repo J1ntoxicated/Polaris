@@ -145,6 +145,23 @@
   #board .eq-wrap .eq-head .h-title { color: var(--polaris-blue); font-weight: 700; }
   #board .eq-wrap .eq-head .v { color: var(--p-wht); font-weight: 700; }
   #board .eq-wrap svg { display: block; width: 100%; height: 72px; }
+  /* Go-live confidence strip (Component A) — compact real-fee-net edge rollup
+     under the equity curve. Display-only. */
+  #board .conf-strip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+    margin-top: 3px; padding-top: 3px; border-top: 1px dotted rgba(95,135,175,0.14);
+    font-size: 9.5px; letter-spacing: 0.04em; color: var(--p-dim);
+  }
+  #board .conf-strip .ck { color: var(--p-dim); text-transform: uppercase; letter-spacing: 0.10em; }
+  #board .conf-strip .cv { color: var(--p-wht); font-weight: 700; }
+  #board .conf-strip .cell {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 0 5px; border-left: 2px solid var(--ghost);
+  }
+  #board .conf-strip .cell.lcb-pos { border-left-color: var(--p-grn); }
+  #board .conf-strip .cell.lcb-neg { border-left-color: var(--p-red); }
+  #board .conf-strip .cell .nm { color: var(--p-wht); font-weight: 700; }
+  #board .conf-strip .cell .rg { color: var(--p-dim); }
 
   /* Tables row (positions + recent trades side by side) — wide at 70% */
   #board .mid {
@@ -334,12 +351,13 @@
 
     <div class="eq-wrap">
       <div class="eq-head">
-        <span class="h-title">Equity Curve (SESSION)</span>
-        <span>min <span class="v" id="eq-min">—</span></span>
-        <span>max <span class="v" id="eq-max">—</span></span>
-        <span>Δ <span class="v" id="eq-delta">—</span></span>
+        <span class="h-title" title="Headline = REAL-FEE-NET (real OKX 0.10% taker). Dimmed line = demo-actual (0.7% demo drain). Go-live trigger (Jin 2026-05-31) = the real-fee-net curve trending UP.">Equity · REAL-FEE-NET (go-live)</span>
+        <span>real Δ <span class="v" id="eq-real-delta">—</span></span>
+        <span class="b-flat">demo Δ <span class="v" id="eq-demo-delta">—</span></span>
+        <span title="Real-vs-demo fee wedge over the session (demo OKX is a 7x penalty vs real). Recovered if you go live on real OKX.">fee wedge <span class="v" id="eq-fee-wedge">—</span></span>
       </div>
       <svg id="eq-svg" viewBox="0 0 600 84" preserveAspectRatio="none"></svg>
+      <div class="conf-strip" id="b-confidence"></div>
     </div>
 
     <div class="mid">
@@ -474,38 +492,96 @@
       + lastHtml;
   }
 
-  function renderEquity(d) {
-    const svg = $('eq-svg');
-    // Server now delivers the full SESSION curve (session anchor → now), so use
-    // it whole — no frontend slicing (Jin 2026-05-29).
-    const curve = d.equity_curve || [];
-    if (curve.length < 2) { svg.innerHTML = ''; return; }
-    const W = 600, H = 84, pad = 2;
-    const min = Math.min(...curve), max = Math.max(...curve);
-    const span = (max - min) || 1;
+  // Build an SVG line path for ``curve`` on a SHARED [min,max] value scale so
+  // the real-fee-net vs demo-actual divergence is visible on one axis.
+  function eqPath(curve, x, y, withArea) {
     const n = curve.length;
-    const x = i => pad + (i / (n - 1)) * (W - 2 * pad);
-    const y = v => pad + (1 - (v - min) / span) * (H - 2 * pad);
-    let line = '', area = `M ${x(0)} ${H} `;
+    let line = '', area = `M ${x(0)} 84 `;
     curve.forEach((v, i) => {
       const px = x(i).toFixed(1), py = y(v).toFixed(1);
       line += (i === 0 ? 'M' : 'L') + ' ' + px + ' ' + py + ' ';
       area += 'L ' + px + ' ' + py + ' ';
     });
-    area += `L ${x(n - 1)} ${H} Z`;
-    const last = curve[n - 1], first = curve[0];
-    const up = last >= first;
-    const stroke = up ? 'var(--p-grn)' : 'var(--p-red)';
-    const fill = up ? 'rgba(135,215,135,0.12)' : 'rgba(215,135,135,0.12)';
-    svg.innerHTML =
-      `<path d="${area}" fill="${fill}" stroke="none"/>` +
-      `<path d="${line}" fill="none" stroke="${stroke}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`;
-    $('eq-min').textContent = fmtUsd(min, 0);
-    $('eq-max').textContent = fmtUsd(max, 0);
-    const dv = last - first, dp = first ? (dv / first) * 100 : 0;
-    const de = $('eq-delta');
-    de.textContent = fmtUsd(dv, 0) + ' (' + (dp >= 0 ? '+' : '') + dp.toFixed(2) + '%)';
-    de.className = 'v ' + pn(dv);
+    area += `L ${x(n - 1)} 84 Z`;
+    return withArea ? { line, area } : { line, area: '' };
+  }
+
+  function renderEquity(d) {
+    const svg = $('eq-svg');
+    // Headline = real-fee-net (the go-live curve, Jin 2026-05-31). Demo-actual
+    // is overlaid dimmed as the as-charged reference. Both are full SESSION
+    // curves (server-delivered); plotted on a shared value scale.
+    const real = d.equity_curve_real_fee_net || [];
+    const demo = d.equity_curve || [];
+    if (real.length < 2 && demo.length < 2) { svg.innerHTML = ''; return; }
+    const W = 600, H = 84, pad = 2;
+    const all = real.concat(demo);
+    const min = Math.min(...all), max = Math.max(...all);
+    const span = (max - min) || 1;
+    const xN = Math.max(real.length, demo.length);
+    const x = i => pad + (i / (xN - 1)) * (W - 2 * pad);
+    const y = v => pad + (1 - (v - min) / span) * (H - 2 * pad);
+
+    const rUp = real.length >= 2 ? real[real.length - 1] >= real[0] : true;
+    const rStroke = rUp ? 'var(--p-grn)' : 'var(--p-red)';
+    const rFill = rUp ? 'rgba(135,215,135,0.14)' : 'rgba(215,135,135,0.14)';
+    let html = '';
+    if (demo.length >= 2) {
+      const dp = eqPath(demo, x, y, false);
+      // Demo-actual: dimmed dashed reference line (no area).
+      html += `<path d="${dp.line}" fill="none" stroke="rgba(158,158,158,0.55)" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`;
+    }
+    if (real.length >= 2) {
+      const rp = eqPath(real, x, y, true);
+      html += `<path d="${rp.area}" fill="${rFill}" stroke="none"/>`;
+      html += `<path d="${rp.line}" fill="none" stroke="${rStroke}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>`;
+    }
+    svg.innerHTML = html;
+
+    // Headline deltas (real = headline; demo = dimmed reference).
+    if (real.length >= 2) {
+      const dv = real[real.length - 1] - real[0];
+      const el = $('eq-real-delta');
+      el.textContent = fmtUsd(dv, 0);
+      el.className = 'v ' + pn(dv);
+    }
+    if (demo.length >= 2) {
+      const dv = demo[demo.length - 1] - demo[0];
+      $('eq-demo-delta').textContent = fmtUsd(dv, 0);
+    }
+    // Fee wedge = real_fee_net_now − demo_now = demo_fee_total − real_fee_total.
+    const wedge = (d.demo_fee_total || 0) - (d.real_fee_total || 0);
+    const we = $('eq-fee-wedge');
+    we.textContent = '+' + fmtUsd(wedge, 0);
+    we.className = 'v b-pos';
+  }
+
+  // Go-live confidence strip (Component A). Compact: overall edge metrics +
+  // per-(strategy×regime) real-fee-net R with LCB sign. Graceful when an older
+  // snapshot omits d.confidence.
+  function renderConfidence(d) {
+    const el = $('b-confidence');
+    if (!el) return;
+    const c = d.confidence;
+    if (!c || !c.n_closed) { el.innerHTML = ''; return; }
+    const pf = (c.profit_factor >= 9.99) ? '∞' : (c.profit_factor || 0).toFixed(2);
+    const turn = (c.turnover_ratio || 0).toFixed(2) + '×';
+    const overall =
+      `<span><span class="ck">WR</span> <span class="cv">${fmtPct(c.win_rate_pct, 1)}</span></span>` +
+      `<span><span class="ck">PF</span> <span class="cv">${pf}</span></span>` +
+      `<span title="Σ notional / starting equity"><span class="ck">Turn</span> <span class="cv">${turn}</span></span>` +
+      `<span title="Real fee drag (R) — the cost wedge under the REAL OKX schedule"><span class="ck">FeeR(real)</span> <span class="cv b-neg">-${(c.fee_drag_real_r || 0).toFixed(1)}</span></span>` +
+      `<span title="Demo fee drag (R) — the punitive 0.7% demo drain (7x real)"><span class="ck">FeeR(demo)</span> <span class="cv b-flat">-${(c.fee_drag_demo_r || 0).toFixed(1)}</span></span>`;
+    const cells = (c.cells || []).slice(0, 6).map(cell => {
+      const lcb = cell.lcb_real_fee_net_r || 0;
+      const cls = lcb > 0 ? 'lcb-pos' : lcb < 0 ? 'lcb-neg' : '';
+      const er = (cell.expected_real_fee_net_r || 0).toFixed(2);
+      return `<span class="cell ${cls}" title="${esc(cell.strategy_id)} · ${esc(cell.regime)} · n=${cell.n} · E[R]=${er} · LCB=${lcb.toFixed(2)}">
+        <span class="nm">${esc(cell.strategy_id)}</span><span class="rg">${esc(cell.regime)}</span>
+        <span class="cv ${pn(lcb)}">${cell.lcb_sign}${Math.abs(lcb).toFixed(2)}R</span>
+      </span>`;
+    }).join('');
+    el.innerHTML = overall + cells;
   }
 
   function renderPositions(d) {
@@ -699,6 +775,7 @@
     renderStreams(d);
     renderRotation(d);
     renderEquity(d);
+    renderConfidence(d);
     renderPositions(d);
     renderTrades(d);
     renderStrategies(d);

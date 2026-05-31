@@ -161,6 +161,16 @@
       n.hz = gs.cz + Math.sin(ang) * rr;
       n.color = (role === 'pos') ? chainColor(n.pnl) : gs.theme;
       n.base = role === 'pos' ? 3.4 : 1.9;
+      // ── universe shell vs lit-up node ──────────────────────────────────────
+      // Backend now emits the FULL tradable universe as mkt nodes with an
+      // `active` flag (is_active=1 = bot trading focus = lightup candidate). The
+      // huge dormant remainder (hundreds–thousand+) is the dim point-cloud: it
+      // renders in one cheap batched pass (no gradient/glow, no per-node z-sort)
+      // so 60fps holds. A node is "dim" only when it's a mkt node that is NOT
+      // active and NOT firing — active/firing/pos/watch keep the rich drawNode
+      // path (glow/lightup). Display-only; backend `active` flag drives this.
+      n.active = (bn.active === true) || (role !== 'mkt');
+      n.dim = (role === 'mkt') && !n.active && n.state !== 'firing';
       gs.count++;
       gs.pnl += n.pnl;
       nodeByIndex[idx] = n;
@@ -244,8 +254,16 @@
     // satellites revolve around the conductor: recompute their home each frame.
     if (window.PolarisGlobe_satTick) window.PolarisGlobe_satTick(now, dt);
 
-    // collect drawables (nodes + galaxy halos) and z-sort
+    // Collect drawables in TWO passes so the universe shell scales to 1000+
+    // nodes at 60fps:
+    //   • dim[]  — dormant mkt universe (the point-cloud). Cheap: no gradient,
+    //              no z-sort (uniform tiny grey dots → order invisible), LOD-
+    //              culled. Positions are still eased + projected so flows that
+    //              reference them stay correct and the cloud rotates with scene.
+    //   • draw[] — lit/active/firing + pos/watch/satellites. z-sorted, rich
+    //              drawNode (glow/lightup) — the nodes that must "pop".
     const draw = [];
+    const dim = [];
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       // satellites snap faster to their (moving) orbital home; galaxy nodes ease.
@@ -256,12 +274,20 @@
       n.pulse = Math.max(0, n.pulse - dt * 2.0);
       n.flash = Math.max(0, n.flash - dt * 1.4);
       const p = project(n.x, n.y, n.z);
-      draw.push({ kind: 'node', n, p });
+      n._screen = p;     // keep updated so flows/chains can reference any node
+      // A dim node with a transient pulse/flash (e.g. flashTicker hit) is
+      // promoted to the rich pass so its flash actually shows.
+      if (n.dim && n.pulse <= 0.01 && n.flash <= 0.01) dim.push({ n, p });
+      else draw.push({ kind: 'node', n, p });
     }
     draw.sort((a, b) => a.p.depth - b.p.depth);
 
     // galaxy halo + label (behind nodes of that galaxy — draw first, dim)
     drawGalaxyHalos(now);
+
+    // dim universe shell — drawn BEHIND the lit nodes + flows so the bright
+    // signals read on top of the cloud. One batched cheap pass.
+    drawDimCloud(dim);
 
     // Jin E6: 위성 궤도선 제거 (정신없음). drawSatRings 정의는 globe-satellites.js
     // 에 남겨두되 호출하지 않음 — 위성 노드(회전 satTick)는 그대로 유지.
@@ -313,6 +339,54 @@
       ctx.restore();
       gs._screen = p;     // cached for hit-test
       gs._screenR = rad;
+    }
+  }
+
+  // ── Dim universe cloud (cheap batched pass) ─────────────────────────────────
+  // Renders the dormant tradable-universe shell as tiny low-alpha grey-tinted
+  // squares. Cost minimisation:
+  //   • single fillStyle per galaxy theme (≤3 setStyle calls), grouped, so the
+  //     whole cloud is just fillRect calls (no arc/beginPath, no gradient).
+  //   • LOD: when the cloud is large, drop the back hemisphere + off-screen +
+  //     a deterministic fraction, scaling the kept count toward a budget so
+  //     frame time stays flat regardless of universe size.
+  // The dot still tints toward its galaxy so the 3 venues read as filled
+  // galaxies; alpha is low so active/firing nodes pop on top.
+  const DIM_BUDGET = 650;            // target max dim dots actually drawn / frame
+  function drawDimCloud(dim) {
+    if (dim.length === 0) return;
+    // LOD stride: if more dim dots than the budget, draw every Nth (deterministic
+    // by array index → stable, no flicker). Backend already caps Alpaca; this is
+    // the front-stop so any universe size stays 60fps.
+    const stride = dim.length > DIM_BUDGET ? Math.ceil(dim.length / DIM_BUDGET) : 1;
+    // group by galaxy so we set fillStyle at most 3× (one per theme).
+    const buckets = { okx: [], capital: [], alpaca: [] };
+    for (let i = 0; i < dim.length; i += stride) {
+      const d = dim[i];
+      const p = d.p;
+      // cull: behind-camera depth fade + off-screen (cheap rejects before fill).
+      if (p.persp <= 0) continue;
+      if (p.sx < -8 || p.sx > W + 8 || p.sy < -8 || p.sy > H + 8) continue;
+      const b = buckets[d.n.gx];
+      if (b) b.push(d);
+    }
+    for (const k of GALAXY_ORDER) {
+      const b = buckets[k];
+      if (!b || b.length === 0) continue;
+      const theme = galaxyState[k].theme;
+      const dd = dimFor(k);
+      // muted: blend theme toward grey so it reads as background point-cloud.
+      const r = (theme[0] + 150) >> 1, g = (theme[1] + 160) >> 1, bl = (theme[2] + 175) >> 1;
+      for (let i = 0; i < b.length; i++) {
+        const d = b[i];
+        const p = d.p;
+        // depth shading: nearer = slightly brighter/bigger (front hemisphere pop).
+        const depthA = 0.5 + 0.5 * Math.max(-1, Math.min(1, -d.n.z));
+        const a = (0.10 + 0.16 * depthA) * dd;
+        ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
+        const s = Math.max(0.7, 1.15 * zoom * p.persp);
+        ctx.fillRect(p.sx - s * 0.5, p.sy - s * 0.5, s, s);
+      }
     }
   }
 

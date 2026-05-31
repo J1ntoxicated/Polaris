@@ -31,18 +31,29 @@ at least a structural placeholder so the rings always render.
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
+from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.scripts.dashboard.snapshot import collect_snapshot
 from polaris.strategies import STRATEGY_REGISTRY
 from tools.visualizer.polaris_graph_chains import (
     build_lifecycle_paths,
     build_trade_chains,
 )
+
+_LOG = logging.getLogger(__name__)
+
+# Display-only cap for the Alpaca equity galaxy: ~12.9k tradable symbols would
+# choke the render loop, so only the top-N by 24h volume reach the globe (dim
+# market-shell dots). NOT a trading limit — the universe table / focus path is
+# untouched. Overridable via POLARIS_GLOBE_ALPACA_MAX.
+_ALPACA_GLOBE_MAX_DEFAULT = 300
 
 # 13 cluster definitions (id, label, color, tier) — color palette matches the
 # render engine's CLUSTERS table. Order is display-only. tier 4 intentionally
@@ -172,7 +183,7 @@ def _asset_group_for(asset_class: str) -> str:
         return "indices"
     if a in ("commodity", "xau", "gold"):
         return "commodity"
-    if a in ("stock", "shares"):
+    if a in ("stock", "shares", "equity", "equities"):
         return "stock"
     if a == "etf":
         return "etf"
@@ -181,7 +192,13 @@ def _asset_group_for(asset_class: str) -> str:
 
 # ── universe (T8) ────────────────────────────────────────────────────────────
 def _query_universe(db_path: Path) -> list[dict[str, Any]]:
-    """Active universe symbols → galaxy_universe records (display-only)."""
+    """Active (is_active=1) trading-focus subset → galaxy_universe records.
+
+    Retained as the focus-only view (bot trading focus = the rows that light up).
+    The globe shell now renders the FULL tradable universe via
+    :func:`_query_universe_all`; this helper is kept intact so the focus subset
+    stays available unchanged (display-only — no behavior here).
+    """
     if not db_path.exists():
         return []
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -206,6 +223,92 @@ def _query_universe(db_path: Path) -> list[dict[str, Any]]:
                 "asset_group": _asset_group_for(str(asset_class or "crypto")),
                 "n_24h": n_24h,
             }
+        )
+    return out
+
+
+def _alpaca_globe_max() -> int:
+    """Top-N Alpaca cap for the globe (env POLARIS_GLOBE_ALPACA_MAX, default 300)."""
+    raw = os.environ.get("POLARIS_GLOBE_ALPACA_MAX")
+    if raw is None:
+        return _ALPACA_GLOBE_MAX_DEFAULT
+    try:
+        n = int(raw)
+    except ValueError:
+        return _ALPACA_GLOBE_MAX_DEFAULT
+    return max(0, n)
+
+
+def _query_universe_all(db_path: Path) -> list[dict[str, Any]]:
+    """FULL tradable universe → galaxy_universe records (display-only).
+
+    Distinct from :func:`_query_universe` (the is_active=1 trading-focus subset,
+    preserved unchanged): this view emits **every tradable symbol per venue** so
+    the globe shows the real market shell, with an ``active`` flag (is_active=1 =
+    bot focus = lightup candidate) instead of dropping dormant rows.
+
+    Per-venue scope (read-only, no behavior touched):
+      - OKX     : all rows (crypto spot, ~189).
+      - Capital : only stream-whitelisted asset_classes (forex/index/commodity);
+                  crypto is excluded per the stream SSOT
+                  (``asset_class_allowed_for_venue``), matching the bot's
+                  FX/index/commodity trading intent (~201).
+      - Alpaca  : every is_active=1 row (bot focus always lights up) PLUS the
+                  top-N dormant rows by 24h volume, capped at
+                  :func:`_alpaca_globe_max` (default 300) — a render-perf cap on
+                  the dormant shell only, logged when it truncates.
+
+    The ``is_active`` flag and venue scoping are read straight from the universe
+    table; nothing here re-ranks, re-gates, or session-filters.
+    """
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT venue, symbol, asset_class, vol_24h_usd, is_active "
+            "FROM universe ORDER BY vol_24h_usd DESC, symbol ASC"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    alpaca_cap = _alpaca_globe_max()
+    alpaca_emitted = 0
+    alpaca_total = 0
+    out: list[dict[str, Any]] = []
+    for venue, symbol, asset_class, vol_24h, is_active in rows:
+        v = str(venue).lower()
+        ac = str(asset_class or "crypto")
+        active = int(is_active or 0) == 1
+        # Capital: honor the stream asset_class whitelist SSOT (crypto excluded).
+        if v.startswith("cap") and not asset_class_allowed_for_venue(v, ac):
+            continue
+        # Alpaca: render-perf cap on the DORMANT shell only — every active row
+        # (bot focus) is always emitted so its lightup is never truncated.
+        if v.startswith("alp") and not active:
+            alpaca_total += 1
+            if alpaca_emitted >= alpaca_cap:
+                continue
+            alpaca_emitted += 1
+        vol = float(vol_24h or 0.0)
+        n_24h = int(min(500, max(1, vol / 1_000_000.0)))
+        out.append(
+            {
+                "ticker": str(symbol),
+                "exchange": _short_venue(v),
+                "asset_group": _asset_group_for(ac),
+                "n_24h": n_24h,
+                "is_active": int(is_active or 0),
+            }
+        )
+    if alpaca_total > alpaca_emitted:
+        _LOG.info(
+            "globe: Alpaca universe capped at %d/%d by POLARIS_GLOBE_ALPACA_MAX "
+            "(display-only; trading universe untouched)",
+            alpaca_emitted,
+            alpaca_total,
         )
     return out
 
@@ -466,19 +569,26 @@ def _mkt_nodes(
     nodes: list[dict[str, Any]] = []
     for j, u in enumerate(universe):
         i = base_i + j
+        # is_active=1 = bot trading focus = "lit up" candidate; the rest are the
+        # dormant market shell. Until the signals table is wired (signal_count_30m
+        # still 0), this active flag is what drives lightup — a firing/lit node
+        # reads as an active signal in the engine (globe-core.js uses n.state).
+        active = int(u.get("is_active", 0)) == 1
+        ticker = str(u["ticker"]).split(":")[-1].split("-")[0]
         nodes.append(
             {
-                "id": f"mkt_{u['ticker']}",
-                "label": u["ticker"],
-                "ticker": u["ticker"],
+                "id": f"mkt_{u['exchange']}_{u['ticker']}",
+                "label": ticker,
+                "ticker": ticker,
                 "exchange": u["exchange"],
                 "asset_group": u["asset_group"],
+                "active": active,
                 "intensity": round(min(1.0, 0.1 + u["n_24h"] / 500.0), 4),
                 "size_mul": round(min(1.0, 0.6 + u["n_24h"] / 1000.0), 4),
                 "signal_count_30m": 0,
                 "cluster": "mkt",
                 "tier": 8,
-                "state": "dormant",
+                "state": "lit" if active else "dormant",
                 "i": i,
                 "phase": _phase(i),
             }
@@ -742,7 +852,10 @@ def build_graph(
     """
     path = Path(db_path)
     snap = snapshot if snapshot is not None else collect_snapshot(path)
-    universe = _query_universe(path)
+    # Full tradable universe for the market shell (display-only). The trading
+    # focus subset (_query_universe, is_active=1) is preserved unchanged; the
+    # globe shows the whole shell and lights up the active rows.
+    universe = _query_universe_all(path)
     held = {p.symbol for p in snap.positions}
     watch = _query_watch_focus(path, held)
     actions = _query_actions(path)

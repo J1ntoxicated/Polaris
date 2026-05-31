@@ -75,6 +75,14 @@ CREATE INDEX IF NOT EXISTS idx_bars_venue_symbol
     ON bars(venue, symbol, bar_interval, ts DESC);
 """
 
+# Last-price lookup index: the dashboard's per-instrument MAX(ts) close lookup
+# (`_last_prices`) groups by instrument_id; without an (instrument_id, ts) index
+# it scans the whole 10^5-row PK. Read-only/display path.
+DDL_BARS_INSTRUMENT_TS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_bars_instrument_ts
+    ON bars(instrument_id, ts);
+"""
+
 DDL_QUOTE_TICKS = """
 CREATE TABLE IF NOT EXISTS quote_ticks (
     instrument_id TEXT NOT NULL,

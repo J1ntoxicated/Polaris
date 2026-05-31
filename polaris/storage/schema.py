@@ -26,6 +26,7 @@ from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS_KEY_INDEX,
     DDL_BARS,
     DDL_BARS_INDEX,
+    DDL_BARS_INSTRUMENT_TS_INDEX,
     DDL_CELL_MATRIX_P0,
     DDL_CELL_MATRIX_PARENT2,
     DDL_CELL_MATRIX_PARENT3,
@@ -62,6 +63,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_FILLS_INDEX_TS,
     DDL_FILLS_INDEX_VENUE_SYMBOL,
     DDL_GATE_EVENTS,
+    DDL_GATE_EVENTS_DASH_INDEX,
     DDL_GATE_EVENTS_INDEX,
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
@@ -103,6 +105,7 @@ ALL_DDL: tuple[str, ...] = (
     DDL_WATCHLIST_FOCUS,
     DDL_BARS,
     DDL_BARS_INDEX,
+    DDL_BARS_INSTRUMENT_TS_INDEX,
     DDL_QUOTE_TICKS,
     DDL_TICKER_BASELINE_STATE,
     DDL_TICKER_BASELINE_INDEX_GROUP,
@@ -134,6 +137,8 @@ ALL_DDL: tuple[str, ...] = (
     # Layer 2 — Pipeline
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,
+    # DDL_GATE_EVENTS_DASH_INDEX is created in _apply_post_migrations (after the
+    # input_tokens/output_tokens ALTERs it depends on), not here.
     # AI-conductor P0 SHADOW — technical-vs-GPT shadow decision log
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
@@ -379,3 +384,8 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE gate_events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"
         )
+    # Dashboard covering index — created HERE (not in ALL_DDL) because it spans
+    # input_tokens/output_tokens, which the ALTERs above add to legacy DBs only
+    # after ALL_DDL has run. Fresh DBs already have the columns; IF NOT EXISTS
+    # makes this idempotent for both paths.
+    conn.execute(DDL_GATE_EVENTS_DASH_INDEX)

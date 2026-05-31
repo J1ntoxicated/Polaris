@@ -259,6 +259,9 @@ def _daily_realised_pnl(
 
 
 def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
+    # Last close per instrument. Resolved index-only via idx_bars_instrument_ts
+    # (instrument_id, ts) — the GROUP BY MAX(ts) is an index scan, then the close
+    # fetch hits only the matched (instrument_id, ts) rows.
     rows = _safe_query(
         conn,
         """SELECT instrument_id, close FROM bars

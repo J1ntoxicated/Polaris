@@ -36,6 +36,18 @@ CREATE INDEX IF NOT EXISTS idx_gate_events_run
     ON gate_events(run_id, gate_id, created_ts);
 """
 
+# Dashboard covering index: the snapshot's funnel / GPT-stat / per-stream AI-cost
+# aggregates filter by created_ts over a 1h window and read only these thin
+# columns. Without a covering index they scan the fat ``payload_json`` rows
+# (~10s each on a 10^5-row table). Leading ``created_ts`` serves the window and
+# the trailing columns make all three queries index-only. Read-only/display
+# path — no trading behavior depends on it.
+DDL_GATE_EVENTS_DASH_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_gate_events_dash
+    ON gate_events(created_ts, gate_id, decision, model_used, phase,
+                   position_id, input_tokens, output_tokens);
+"""
+
 # AI-conductor P0 SHADOW — deterministic technical rule vs live GPT decision.
 # One row per gate execution that ran a shadow technical rule (G3/G4 in P0).
 # INSTRUMENTATION ONLY — never read by the pipeline; feeds the next-session

@@ -25,6 +25,7 @@
   let chainStreams = [];      // [{nodes:[node...], color, speed, parts:[t...], pnl}]
   let lifecycleArcs = [];     // capital-lifecycle inter-galaxy arcs (north-star)
   const ribbons = [];         // transient entry/exit ribbons (one-shot flares)
+  let _satTick = 0;           // wall-clock accumulator for conductor↔satellite pulses
 
   function lerp(a, b, t) { return a + (b - a) * t; }
 
@@ -61,19 +62,50 @@
   }
 
   // ── Frame draw — called by globe-core before nodes are drawn ────────────────
+  // small white neural pulse: ~1px crisp core + soft 2-3px white glow.
+  function drawNeuralPulse(ctx, rgba, x, y, a) {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 3);
+    g.addColorStop(0, `rgba(255,255,255,${0.55 * a})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(1, 0.95 * a)})`;
+    ctx.beginPath(); ctx.arc(x, y, 1.0, 0, 6.2832); ctx.fill();
+  }
+
   function drawFlows(ctx, project, now, dt, helpers) {
     const rgba = helpers.rgba;
     const conductor = window.PolarisGlobe_conductor;
     const gs = window.PolarisGlobe_galaxyState;
+    const allNodes = window.PolarisGlobe_nodes;
 
-    // 1) conductor ↔ galaxy synapse threads (faint, always present)
+    // 1) conductor ↔ galaxy synapse threads (crisp mesh, always present)
     const cp = project(conductor.x, conductor.y, conductor.z);
     for (const k of ['okx', 'capital', 'alpaca']) {
       const g = gs[k]; if (!g || !g._screen) continue;
-      const beat = 0.12 + g.pulse * 0.5;
+      const beat = 0.22 + g.pulse * 0.55;
       ctx.strokeStyle = rgba(g.theme, beat);
-      ctx.lineWidth = 0.8;
+      ctx.lineWidth = 1.1;
       ctx.beginPath(); ctx.moveTo(cp.sx, cp.sy); ctx.lineTo(g._screen.sx, g._screen.sy); ctx.stroke();
+    }
+
+    // 1b) conductor ↔ satellite synapse mesh + a white pulse riding each thread,
+    //     and a faint satellite → nearest-galaxy link (the hub "wiring" the cloud).
+    if (allNodes && allNodes.length) {
+      _satTick += dt;
+      for (let i = 0; i < allNodes.length; i++) {
+        const n = allNodes[i];
+        if (!n.sat || !n._screen) continue;
+        const sp = n._screen;
+        // conductor → satellite thread (very thin, family-tinted)
+        ctx.strokeStyle = rgba(n.color || [0x9f, 0xc7, 0xff], n.state === 'firing' ? 0.34 : 0.16);
+        ctx.lineWidth = 0.6;
+        ctx.beginPath(); ctx.moveTo(cp.sx, cp.sy); ctx.lineTo(sp.sx, sp.sy); ctx.stroke();
+        // white pulse travelling conductor → satellite (slow neural drip)
+        const t = ((_satTick * 0.18) + (n.phase || 0)) % 1;
+        drawNeuralPulse(ctx, rgba, lerp(cp.sx, sp.sx, t), lerp(cp.sy, sp.sy, t),
+                        0.5 + (n.state === 'firing' ? 0.5 : 0.1));
+      }
     }
 
     // 2) capital-lifecycle arcs (crypto → CFD → Alpaca), travelling particles
@@ -83,8 +115,8 @@
       const b = project(arc.b.cx, arc.b.cy, arc.b.cz);
       const midx = (a.sx + b.sx) / 2, midy = (a.sy + b.sy) / 2 - Math.hypot(b.sx - a.sx, b.sy - a.sy) * 0.28;
       // dotted guide arc (the north-star pathway)
-      ctx.strokeStyle = rgba([0xff, 0xf5, 0xd2], 0.10);
-      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = rgba([0xff, 0xf5, 0xd2], 0.16);
+      ctx.lineWidth = 0.9;
       ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.quadraticCurveTo(midx, midy, b.sx, b.sy); ctx.stroke();
       // travelling capital particles
       for (let i = 0; i < arc.parts.length; i++) {
@@ -98,17 +130,18 @@
       }
     }
 
-    // 3) trade-chain particle flows (the live pathways Jin missed)
+    // 3) trade-chain particle flows — small WHITE neural pulses on a crisp,
+    //    faintly pnl-tinted pathway (Jin: 작은 하얀 신경 입자 + 또렷한 연결).
     for (const s of chainStreams) {
       const pts = s.nodes.map((n) => project(n.x, n.y, n.z));
-      // faint pathway line through the chain
-      ctx.strokeStyle = rgba(s.color, 0.16);
-      ctx.lineWidth = 0.8;
+      // pathway line: clean mesh, very lightly tinted by pnl colour
+      ctx.strokeStyle = rgba(s.color, 0.22);
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
       ctx.moveTo(pts[0].sx, pts[0].sy);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].sx, pts[i].sy);
       ctx.stroke();
-      // particles riding the chain (segmented along the polyline)
+      // particles riding the chain (segmented along the polyline) — white pulses
       const segCount = pts.length - 1;
       for (let pi = 0; pi < s.parts.length; pi++) {
         s.parts[pi] += dt * s.speed;
@@ -123,13 +156,7 @@
         const local = t * segCount - seg;
         const p0 = pts[seg], p1 = pts[seg + 1];
         const x = lerp(p0.sx, p1.sx, local), y = lerp(p0.sy, p1.sy, local);
-        const g2 = ctx.createRadialGradient(x, y, 0, x, y, 5);
-        g2.addColorStop(0, rgba(s.color, 0.9));
-        g2.addColorStop(1, rgba(s.color, 0));
-        ctx.fillStyle = g2;
-        ctx.beginPath(); ctx.arc(x, y, 5, 0, 6.2832); ctx.fill();
-        ctx.fillStyle = rgba(s.color, 0.95);
-        ctx.beginPath(); ctx.arc(x, y, 1.6, 0, 6.2832); ctx.fill();
+        drawNeuralPulse(ctx, rgba, x, y, 0.95);
       }
     }
 

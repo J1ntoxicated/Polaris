@@ -471,8 +471,12 @@
      live particle pathways, capital-lifecycle arcs. Replaces sphere-render.js
      (14-tier nested-sphere → static blob). globe-core = layout + render + camera;
      globe-flows = trade_chain/lifecycle particle flows + SSE entry/exit flashes. -->
-<script src="static/globe-core.js?v=1_e4_galaxy"></script>
-<script src="static/globe-flows.js?v=1_e4_galaxy"></script>
+<script src="static/globe-core.js?v=2_e4_neural"></script>
+<!-- globe-satellites.js: cross-cutting clusters (strat/reg/exit/orbit/axis/obs/
+     action/exit_tally) as conductor-orbiting satellite rings. Loads AFTER core
+     (uses its PolarisGlobe_* exports at init) and before flows. -->
+<script src="static/globe-satellites.js?v=1_e4_neural"></script>
+<script src="static/globe-flows.js?v=2_e4_neural"></script>
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->

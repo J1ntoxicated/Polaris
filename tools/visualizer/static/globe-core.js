@@ -88,20 +88,23 @@
   });
 
   function roleRadius(role) {
-    if (role === 'pos') return 0.18;
-    if (role === 'strat') return 0.34;
-    if (role === 'watch') return 0.50;
-    return 0.64;                       // mkt / universe halo
+    if (role === 'pos') return 0.20;
+    if (role === 'watch') return 0.42;
+    return 0.60;                       // mkt / universe halo
   }
+  // venue-specific clusters live in the 3 galaxies. strat/reg/exit/orbit/axis/
+  // obs/action/exit_tally are cross-cutting → conductor satellites (globe-satellites.js).
   function roleForCluster(cluster) {
     if (cluster === 'pos') return 'pos';
-    if (cluster === 'strat') return 'strat';
     if (cluster === 'watch') return 'watch';
     if (cluster === 'mkt') return 'mkt';
-    return null;                       // infra clusters not shown in galaxies
+    return null;                       // cross-cutting → handled as a satellite
   }
 
   // Deterministic pseudo-random from a string (stable node placement per id).
+  // Used to pin a node's home position to its id ONLY — never to its position in
+  // the backend nodes[] array — so a re-ordered 2s refresh can't drift a node to
+  // a new home (the old "reload backs the node away" glitch).
   function hash01(s) {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -116,16 +119,20 @@
     // reset per-galaxy aggregates
     GALAXY_ORDER.forEach((k) => { galaxyState[k].count = 0; galaxyState[k].pnl = 0; });
 
-    // group nodes per galaxy so we can fan them around a ring evenly
-    const perGalaxyRole = {};   // `${gx}:${role}` → running index
     for (let idx = 0; idx < backendNodes.length; idx++) {
       const bn = backendNodes[idx];
       const role = roleForCluster(bn.cluster);
       const gx = venueKey(bn.exchange);
-      if (role === null || gx === null) { nodeByIndex[idx] = null; continue; }
+      // cross-cutting cluster (or no role) → let the satellites module own it.
+      if (role === null || gx === null) {
+        if (window.PolarisGlobe_satNodeFor) {
+          const sn = window.PolarisGlobe_satNodeFor(bn);
+          if (sn) { liveIds.add(sn.id); nodeByIndex[idx] = sn; continue; }
+        }
+        nodeByIndex[idx] = null;
+        continue;
+      }
       const gs = galaxyState[gx];
-      const rk = `${gx}:${role}`;
-      const order = (perGalaxyRole[rk] = (perGalaxyRole[rk] || 0) + 1) - 1;
       const id = bn.id;
       liveIds.add(id);
       let n = nodeById.get(id);
@@ -134,11 +141,14 @@
         nodeById.set(id, n);
         nodes.push(n);
       }
-      // (re)compute stable home position around the galaxy ring
+      // Stable home position from TWO id-hashes ONLY (order-independent). h1 →
+      // azimuth around the galaxy ring, h2 → tilt + radial jitter, evenly spread.
       const rad = roleRadius(role);
-      const seed = hash01(id);
-      const ang = (order * 2.39996 + seed * 6.283);     // golden-angle fan
-      const tilt = (seed - 0.5) * 0.7;
+      const h1 = hash01(id + '~a');
+      const h2 = hash01(id + '~b');
+      const ang = h1 * 6.283185;                         // uniform azimuth
+      const tilt = (h2 - 0.5) * 1.2;                     // band thickness
+      const rr = rad * (0.82 + h2 * 0.30);               // slight radial spread
       n.gx = gx; n.role = role; n.cluster = bn.cluster;
       n.label = bn.label || bn.ticker || id;
       n.ticker = bn.ticker;
@@ -146,17 +156,20 @@
       n.direction = bn.direction;
       n.intensity = bn.intensity != null ? bn.intensity : 0.4;
       n.state = bn.state || 'lit';
-      n.hx = gs.cx + Math.cos(ang) * rad;
-      n.hy = gs.cy + Math.sin(tilt) * rad * 0.8;
-      n.hz = gs.cz + Math.sin(ang) * rad;
+      n.hx = gs.cx + Math.cos(ang) * rr;
+      n.hy = gs.cy + Math.sin(tilt) * rr * 0.8;
+      n.hz = gs.cz + Math.sin(ang) * rr;
       n.color = (role === 'pos') ? chainColor(n.pnl) : gs.theme;
-      n.base = role === 'pos' ? 3.4 : (role === 'strat' ? 2.8 : 1.9);
+      n.base = role === 'pos' ? 3.4 : 1.9;
       gs.count++;
       gs.pnl += n.pnl;
       nodeByIndex[idx] = n;
     }
-    // drop nodes no longer present
+    // satellites module finalises its own home rings + drops stale sat nodes.
+    if (window.PolarisGlobe_satFinalize) window.PolarisGlobe_satFinalize(liveIds);
+    // drop galaxy nodes no longer present (sat nodes are pruned by satFinalize)
     for (let i = nodes.length - 1; i >= 0; i--) {
+      if (nodes[i].sat) continue;
       if (!liveIds.has(nodes[i].id)) { nodeById.delete(nodes[i].id); nodes.splice(i, 1); }
     }
   }
@@ -166,6 +179,8 @@
   window.PolarisGlobe_nodeByIndex = nodeByIndex;
   window.PolarisGlobe_galaxyState = galaxyState;
   window.PolarisGlobe_conductor = conductor;
+  window.PolarisGlobe_hash01 = hash01;          // shared with globe-satellites.js
+  window.PolarisGlobe_rgba = rgba;
 
   // ── Camera ─────────────────────────────────────────────────────────────────
   let yaw = 0.4, pitch = 0.32, autoSpin = true;
@@ -226,14 +241,18 @@
     conductor.beat = 0.5 + 0.5 * Math.sin(now / 600);
     conductor.pulse = Math.max(0, conductor.pulse - dt * 1.8);
 
+    // satellites revolve around the conductor: recompute their home each frame.
+    if (window.PolarisGlobe_satTick) window.PolarisGlobe_satTick(now, dt);
+
     // collect drawables (nodes + galaxy halos) and z-sort
     const draw = [];
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
-      // ease toward home position (galaxies feel alive, not frozen)
-      n.x += (n.hx - n.x) * Math.min(1, dt * 3);
-      n.y += (n.hy - n.y) * Math.min(1, dt * 3);
-      n.z += (n.hz - n.z) * Math.min(1, dt * 3);
+      // satellites snap faster to their (moving) orbital home; galaxy nodes ease.
+      const k = Math.min(1, dt * (n.sat ? 6 : 3));
+      n.x += (n.hx - n.x) * k;
+      n.y += (n.hy - n.y) * k;
+      n.z += (n.hz - n.z) * k;
       n.pulse = Math.max(0, n.pulse - dt * 2.0);
       n.flash = Math.max(0, n.flash - dt * 1.4);
       const p = project(n.x, n.y, n.z);
@@ -243,6 +262,11 @@
 
     // galaxy halo + label (behind nodes of that galaxy — draw first, dim)
     drawGalaxyHalos(now);
+
+    // satellite orbital ring guides (behind nodes + flows — faint conductor rings)
+    if (window.PolarisGlobe_drawSatRings) {
+      window.PolarisGlobe_drawSatRings(ctx, project, now, { rgba });
+    }
 
     // synapse + particle pathways (globe-flows.js draws between projected nodes)
     if (window.PolarisGlobe_drawFlows) {
@@ -293,14 +317,26 @@
   }
 
   function drawNode(n, p, now) {
-    const d = dimFor(n.gx);
+    const d = n.sat ? (_focus ? 0.6 : 1.0) : dimFor(n.gx);
     let r = n.base * zoom * p.persp;
-    const stateBoost = n.state === 'firing' ? 0.5 : (n.state === 'lit' ? 0.2 : 0);
+    const firing = n.state === 'firing';
+    const stateBoost = firing ? 0.5 : (n.state === 'lit' ? 0.2 : 0);
     let a = (0.35 + stateBoost + n.intensity * 0.3) * d;
     // live pulse / flash from flows
     if (n.pulse > 0) { r *= 1 + n.pulse * 0.9; a = Math.min(1, a + n.pulse * 0.5); }
     if (n.flash > 0) { a = Math.min(1, a + n.flash * 0.6); }
     const c = (n.role === 'pos') ? chainColor(n.pnl) : n.color;
+    // ── signal lightup: a firing node = an ACTIVE signal → breathing halo so the
+    //    holding ticker pops out of the cloud (the original neural-signal concept).
+    if (firing) {
+      const breathe = 0.5 + 0.5 * Math.sin(now / 360 + (n.phase || 0) * 6.283);
+      const gr = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 5);
+      gr.addColorStop(0, rgba(c, (0.30 + breathe * 0.28) * d));
+      gr.addColorStop(0.55, rgba(c, (0.10 + breathe * 0.10) * d));
+      gr.addColorStop(1, rgba(c, 0));
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 5, 0, 6.2832); ctx.fill();
+    }
     if (n.flash > 0.3 || n.pulse > 0.3) {
       const g = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 4);
       g.addColorStop(0, rgba(c, Math.min(0.6, (n.flash + n.pulse) * 0.5 * d)));
@@ -309,7 +345,17 @@
       ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 4, 0, 6.2832); ctx.fill();
     }
     ctx.fillStyle = rgba(c, a);
-    ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(0.6, r), 0, 6.2832); ctx.fill();
+    if (n.shape === 'square') {
+      const s = Math.max(0.8, r * 1.6);
+      ctx.fillRect(p.sx - s / 2, p.sy - s / 2, s, s);
+    } else {
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(0.6, r), 0, 6.2832); ctx.fill();
+    }
+    // firing core: a crisp bright pip on top so the signal reads as "lit".
+    if (firing) {
+      ctx.fillStyle = rgba([0xff, 0xff, 0xff], Math.min(0.95, 0.5 + a) * d);
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(0.5, r * 0.42), 0, 6.2832); ctx.fill();
+    }
     n._screen = p;
   }
 

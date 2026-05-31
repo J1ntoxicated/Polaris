@@ -38,6 +38,17 @@ class PositionRow:
     # as a "[×N]" badge so duplicate-logical-key rows do not silently fill
     # the active-positions slot the way they did pre-2026-05-10.
     row_count: int = 1
+    # E2 expanded-column display (read-only): per-position regime label +
+    # exit-FSM state + stop price + MFE/MAE in R. Sourced from the positions
+    # row (``exit_state`` / ``stop_price`` / ``mfe_r`` / ``mae_r``) + the
+    # regime_state lookup. Graceful zero/empty when columns are NULL. These NEVER
+    # feed sizing/gating — pure board columns.
+    regime: str = ""
+    exit_state: str = "open"
+    stop_price: float = 0.0
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
+    upnl_pct: float = 0.0
 
 
 @dataclass(slots=True)
@@ -93,6 +104,15 @@ class ClosedTrade:
     r_units: float
     held_sec: float
     exit_reason: str
+    # E2 expanded-column display (read-only): per-trade regime label, pnl as a %
+    # of entry notional, and the demo-vs-real fee split for the TRADES tab.
+    # ``fee_usd`` is the stored demo fee (0.7% drain); ``real_fee_usd`` is the
+    # same notional re-priced at the REAL OKX schedule. Graceful zero when the
+    # source row omits them. NEVER feed sizing/gating — pure board columns.
+    regime: str = ""
+    pnl_pct: float = 0.0
+    fee_usd: float = 0.0
+    real_fee_usd: float = 0.0
 
 
 @dataclass(slots=True)
@@ -269,6 +289,98 @@ class ConfidencePanel:
 
 
 @dataclass(slots=True)
+class RegimeStateRow:
+    """One per-(venue, asset-group/symbol) regime row for the REGIME tab.
+
+    Sourced read-only from ``regime_state`` (the live regime classifier output):
+    ``regime`` + ``confidence`` + the layered evidence (``evidence_json`` decoded
+    into L1 macro / L2 asset-class / L3 price-action labels where present) + the
+    2-consecutive-state hysteresis (``consecutive_candidate`` /
+    ``consecutive_count``). Display-only; never feeds sizing/gating."""
+
+    venue: str
+    group_id: str
+    regime: str
+    confidence: float
+    consecutive_candidate: str
+    consecutive_count: int
+    updated_ts: int
+    # Layered evidence labels decoded from evidence_json (best-effort; empty when
+    # a layer is absent). l1 = macro, l2 = asset-class, l3 = price-action.
+    evidence_l1: str = ""
+    evidence_l2: str = ""
+    evidence_l3: str = ""
+
+
+@dataclass(slots=True)
+class ExitReasonBar:
+    """One exit-reason histogram bucket for the EXIT tab (count by reason)."""
+
+    reason: str
+    count: int
+
+
+@dataclass(slots=True)
+class ExitSurface:
+    """Exit-engine observability rollup for the EXIT tab — read-only.
+
+    ``fsm_states`` = distribution of the open positions' ``exit_state`` FSM label
+    (open / touched / protected / harvest / ...). ``loser_timeout_n`` = count of
+    closed trades whose exit_reason is the loser-timeout ('TIME'). ``reasons`` =
+    exit-reason histogram over the recent closed trades. ``g6_decisions`` /
+    ``g7_decisions`` = the G6 Monitor / G7 Adaptive-Exit gate decision tallies
+    (decision → count). Never feeds sizing/gating."""
+
+    fsm_states: dict[str, int] = field(default_factory=dict)
+    loser_timeout_n: int = 0
+    reasons: list[ExitReasonBar] = field(default_factory=list)
+    g6_decisions: dict[str, int] = field(default_factory=dict)
+    g7_decisions: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ShadowAgreementRow:
+    """Conductor shadow agreement for the AI tab — read-only.
+
+    One row per (gate_id, regime) over ``gate_shadow_events``: how often the
+    deterministic technical decision matched the live GPT decision. ``n`` = rows
+    with a known GPT decision; ``mismatch_n`` = where technical != GPT;
+    ``agree_pct`` = (n − mismatch_n)/n. ``n_no_gpt`` = rows where GPT was absent
+    (deterministic-only, excluded from the agreement ratio). Display-only."""
+
+    gate_id: int
+    regime: str
+    n: int
+    mismatch_n: int
+    agree_pct: float
+    n_no_gpt: int
+
+
+@dataclass(slots=True)
+class EntryAdmissionStat:
+    """Entry-admission shadow rollup for the AI tab — read-only.
+
+    Over ``entry_admission_shadow``: per (regime) — total evaluations + how many
+    the edge-first rule WOULD suppress (net of the real round-trip fee). Pure
+    SHADOW telemetry (behavior 0 — never blocks the pipeline)."""
+
+    regime: str
+    n: int
+    would_suppress_n: int
+    suppress_pct: float
+
+
+@dataclass(slots=True)
+class AiShadowPanel:
+    """AI-tab shadow rollup container (conductor agreement + admission shadow)."""
+
+    shadow_agreement: list[ShadowAgreementRow] = field(default_factory=list)
+    admission: list[EntryAdmissionStat] = field(default_factory=list)
+    admission_total_n: int = 0
+    admission_suppress_n: int = 0
+
+
+@dataclass(slots=True)
 class DashboardSnapshot:
     ts_now: int = 0
     starting_capital: float = STARTING_CAPITAL
@@ -329,3 +441,13 @@ class DashboardSnapshot:
     # real-vs-demo fee drag. Display-only; dataclasses.asdict serializes it for
     # the web board. Graceful zero-panel when there are no closed trades.
     confidence: ConfidencePanel = field(default_factory=ConfidencePanel)
+    # E2 IA-rebuild tabs (Jin 2026-05-31) — read-only display additions. Each is
+    # surfaced by a dedicated full-width tab on the web board. All additive;
+    # dataclasses.asdict serializes them for the snapshot. NEVER feed
+    # sizing/gating/exit/strategy/loop — pure board columns.
+    #  REGIME tab — per-(venue, asset-group) live regime + confidence + evidence.
+    regime_states: list[RegimeStateRow] = field(default_factory=list)
+    #  EXIT tab — exit-engine FSM distribution + reason histogram + G6/G7 counts.
+    exit_surface: ExitSurface = field(default_factory=ExitSurface)
+    #  AI tab — conductor shadow agreement + entry-admission would-suppress stats.
+    ai_shadow: AiShadowPanel = field(default_factory=AiShadowPanel)

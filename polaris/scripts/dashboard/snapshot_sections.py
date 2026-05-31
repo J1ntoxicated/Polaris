@@ -13,7 +13,18 @@ import sqlite3
 import time
 from typing import Any, Final
 
+from polaris.core.economics.fees import real_fee_usd
 from polaris.core.learners.posterior import edge_verdict
+
+# E2 IA-rebuild tab queries live in ``snapshot_e2`` to keep this module within
+# the LOC guideline; re-exported here so callers keep a single import surface.
+from polaris.scripts.dashboard.snapshot_e2 import (
+    _ai_shadow_panel,
+    _entry_admission_stats,
+    _exit_surface,
+    _regime_states,
+    _shadow_agreement,
+)
 from polaris.scripts.dashboard.snapshot_models import (
     AlertRow,
     CellRow,
@@ -36,6 +47,14 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _safe_query,
     _symbol_from_inst,
 )
+
+__all__ = [
+    "_ai_shadow_panel",
+    "_entry_admission_stats",
+    "_exit_surface",
+    "_regime_states",
+    "_shadow_agreement",
+]
 
 # ---------------------------------------------------------------------------
 # Section: gate funnel
@@ -166,7 +185,10 @@ def _regime_bars(
 
 
 def _recent_closed_trades(
-    conn: sqlite3.Connection, *, n: int = 10
+    conn: sqlite3.Connection,
+    *,
+    n: int = 10,
+    regime_lookup: dict[tuple[str, str], str] | None = None,
 ) -> list[ClosedTrade]:
     """Pair close fills with their entry fills, exact when possible.
 
@@ -177,12 +199,19 @@ def _recent_closed_trades(
     ``(venue, instrument_id, strategy_id)`` only when ``contribution_id`` is
     NULL (legacy / smoke rows). This eliminates cross-pairing when two open
     positions share the same ``(venue, inst, strat)`` bucket.
+
+    E2 display additions (read-only): each closed trade also carries its
+    ``fee_usd`` (the stored demo close fee), ``real_fee_usd`` (the SAME close
+    notional re-priced at the REAL venue schedule via ``economics.fees``),
+    ``pnl_pct`` (close pnl as a % of entry notional), and a best-effort
+    ``regime`` label (the CURRENT regime_state for the venue, via
+    ``regime_lookup`` keyed on (venue, symbol) → falls back to "" when absent).
     """
     rows = _safe_query(
         conn,
         """SELECT venue, instrument_id, strategy_id, side, fill_price,
                   pnl_usd, ts_ms, base_qty, size_usd, is_close,
-                  contribution_id
+                  contribution_id, fee_usd
            FROM fills
            ORDER BY ts_ms ASC""",
     )
@@ -199,8 +228,10 @@ def _recent_closed_trades(
         pnl = float(r[5] or 0.0)
         ts_ms = int(r[6] or 0)
         qty = float(r[7] or 0.0)
+        size_usd = float(r[8] or 0.0)
         is_close = bool(r[9])
         contrib = r[10]
+        fee = float(r[11] or 0.0)
         contrib_str = str(contrib) if contrib else None
         bucket = (venue, inst, strat)
         if not is_close:
@@ -246,11 +277,21 @@ def _recent_closed_trades(
             reason = "SL" if held_sec < 600 else "TIME"
         else:
             reason = "FLAT"
+        symbol = _symbol_from_inst(inst)
+        # E2 display columns (read-only). real_fee = close notional re-priced
+        # at the real venue schedule; pnl_pct = close pnl / entry notional;
+        # regime = current regime_state for (venue, symbol) when supplied.
+        real_fee = real_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
+        entry_notional = (entry_px or 0.0) * abs(qty)
+        pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
+        regime = (
+            regime_lookup.get((venue, symbol), "") if regime_lookup else ""
+        )
         closed_trades.append(
             ClosedTrade(
                 ts_close=ts_ms // 1000,
                 venue=venue,
-                symbol=_symbol_from_inst(inst),
+                symbol=symbol,
                 strategy_id=strat,
                 side_close=side,
                 entry_price=entry_px,
@@ -259,6 +300,10 @@ def _recent_closed_trades(
                 r_units=pnl / DEFAULT_R_USD,
                 held_sec=held_sec,
                 exit_reason=reason,
+                regime=regime,
+                pnl_pct=pnl_pct,
+                fee_usd=fee,
+                real_fee_usd=real_fee,
             )
         )
     closed_trades.sort(key=lambda t: t.ts_close, reverse=True)

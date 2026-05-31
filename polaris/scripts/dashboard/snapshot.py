@@ -62,14 +62,17 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _strategy_stats,
 )
 from polaris.scripts.dashboard.snapshot_sections import (
+    _ai_shadow_panel,
     _alerts,
     _cell_top_bottom,
     _edge_validation,
+    _exit_surface,
     _gate_funnel,
     _gpt_stats,
     _learner_slots,
     _recent_closed_trades,
     _regime_bars,
+    _regime_states,
     _rotation_telemetry,
     _universe,
 )
@@ -211,7 +214,25 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         strategy_stats = _strategy_stats(conn, now_s=now_s, positions=positions)
         gate_funnel = _gate_funnel(conn, now_s=now_s)
         cell_top, cell_bot, eligible_n = _cell_top_bottom(conn, cell_mult=cell_mult, n=5)
-        recent_trades = _recent_closed_trades(conn, n=10)
+        # E2 REGIME tab — per-(venue, group) live regime + confidence + evidence.
+        # A (venue, symbol)→regime map labels the TRADES tab rows (best-effort:
+        # the group_id is the symbol's underlying group, so symbol==group for
+        # single-symbol groups like BTC/XAU; falls back to "" when unmatched).
+        regime_states = _regime_states(conn)
+        regime_by_venue_symbol = {
+            (rs.venue, rs.group_id): rs.regime for rs in regime_states
+        }
+        # TRADES tab shows more rows than the legacy 10 (full-width tab).
+        recent_trades = _recent_closed_trades(
+            conn, n=40, regime_lookup=regime_by_venue_symbol,
+        )
+        # E2 EXIT tab — FSM distribution + reason histogram (reuses recent_trades)
+        # + G6/G7 gate decision counts.
+        exit_surface = _exit_surface(
+            conn, now_s=now_s, recent_trades=recent_trades,
+        )
+        # E2 AI tab — conductor shadow agreement + entry-admission would-suppress.
+        ai_shadow = _ai_shadow_panel(conn, now_s=now_s)
         learners = _learner_slots(conn, now_s=now_s)
         edge_validation = _edge_validation(conn, n=8)
         gpt_stats = _gpt_stats(conn, now_s=now_s)
@@ -264,6 +285,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             session_forced_exit_count=rotation.session_forced_exit_count,
             last_rotation=rotation.last_rotation,
             confidence=confidence,
+            regime_states=regime_states,
+            exit_surface=exit_surface,
+            ai_shadow=ai_shadow,
         )
     finally:
         conn.close()

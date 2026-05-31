@@ -456,6 +456,10 @@ def _read_positions(
     # NOTE: ``SUM(qty)`` is inflated for legacy drift rows (each accidental
     # duplicate added its own qty); collapses back to a single physical row
     # post A-PR2/A-PR4 so the inflation disappears with migration.
+    # E2: surface the per-position exit-FSM state + protective stop + MFE/MAE-R.
+    # These are aggregated across logical-key duplicates: ``exit_state`` /
+    # ``stop_price`` take the most-recent (MAX(opened_ts)) row's value via a
+    # correlated read, MFE/MAE take the extremes. Display-only columns.
     rows = _safe_query(
         conn,
         """SELECT venue,                                  -- r[0]
@@ -466,7 +470,11 @@ def _read_positions(
                   side,                                   -- r[5]
                   SUM(qty) AS qty,                        -- r[6]
                   MIN(opened_ts) AS opened_ts,            -- r[7]
-                  COUNT(*) AS row_count                   -- r[8]
+                  COUNT(*) AS row_count,                  -- r[8]
+                  MAX(exit_state) AS exit_state,          -- r[9]
+                  MAX(COALESCE(stop_price, 0.0)) AS stop, -- r[10]
+                  MAX(COALESCE(mfe_r, 0.0)) AS mfe_r,     -- r[11]
+                  MIN(COALESCE(mae_r, 0.0)) AS mae_r      -- r[12]
            FROM positions
            WHERE status NOT IN ('closed', 'cancelled')
            GROUP BY venue, symbol, strategy_id, side
@@ -482,6 +490,10 @@ def _read_positions(
         qty = float(r[6] or 0.0)
         opened = int(r[7] or 0)
         row_count = int(r[8] or 1)
+        exit_state = str(r[9] or "open")
+        stop_price = float(r[10] or 0.0)
+        mfe_r = float(r[11] or 0.0)
+        mae_r = float(r[12] or 0.0)
         inst = f"{venue}:{symbol}"
         entry = entry_lookup.get((venue, inst, strat))
         if entry is None or entry <= 0.0:
@@ -491,6 +503,8 @@ def _read_positions(
         delta_pct = ((last - entry) / entry * 100.0) if entry > 0 else 0.0
         upnl = (last - entry) * qty * sign
         size_usd = entry * abs(qty)
+        # uPnL as a % of deployed notional (display-only column).
+        upnl_pct = (upnl / size_usd * 100.0) if size_usd > 0 else 0.0
         regime = regime_lookup.get((venue, group_id), "chop")
         mult = cell_mult.get((venue, strat, symbol, regime), 1.0)
         held_sec = max(0.0, float(now_s - opened))
@@ -509,6 +523,12 @@ def _read_positions(
                 held_sec=held_sec,
                 cell_mult=mult,
                 row_count=row_count,
+                regime=regime,
+                exit_state=exit_state,
+                stop_price=stop_price,
+                mfe_r=mfe_r,
+                mae_r=mae_r,
+                upnl_pct=upnl_pct,
             )
         )
     out.sort(key=lambda p: p.upnl_usd, reverse=True)

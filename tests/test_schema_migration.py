@@ -169,3 +169,47 @@ def test_backfill_does_not_clobber_existing_exit_state(tmp_path: Path) -> None:
         assert row[0] == "harvest"
     finally:
         conn.close()
+
+
+def test_legacy_segments_gets_cell_key_and_index(tmp_path: Path) -> None:
+    """A legacy position_strategy_segments table (no cell_key/lineage cols) must
+    migrate WITHOUT crashing — the cell_key index is created in
+    _apply_post_migrations AFTER the ALTER, never in ALL_DDL (which would run the
+    CREATE INDEX before the column exists and abort startup on any existing DB)."""
+    db = tmp_path / "legacy_seg.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE position_strategy_segments ("
+        "segment_id TEXT PRIMARY KEY, position_id TEXT NOT NULL, "
+        "strategy_id TEXT NOT NULL, regime_at_start TEXT, "
+        "started_ts INTEGER, ended_ts INTEGER, exit_reason TEXT, pnl_r REAL)"
+    )
+    conn.execute(
+        "INSERT INTO position_strategy_segments "
+        "(segment_id, position_id, strategy_id, started_ts) "
+        "VALUES ('seg_legacy', 'p_old', 's1', 1000)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db)  # must not raise OperationalError: no such column: cell_key
+    try:
+        cols = _cols(conn, "position_strategy_segments")
+        for col in ("cell_key", "venue", "ticker", "pnl_usd", "trade_id"):
+            assert col in cols, f"legacy segments missing {col} after migrate"
+        idx = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='position_strategy_segments'"
+            ).fetchall()
+        }
+        assert any("cell" in i for i in idx), "cell_key index not created post-migrate"
+        # legacy row backfills the new NOT NULL columns to their defaults.
+        row = conn.execute(
+            "SELECT cell_key, venue, ticker, pnl_usd FROM "
+            "position_strategy_segments WHERE segment_id = 'seg_legacy'"
+        ).fetchone()
+        assert row == ("", "", "", 0.0)
+    finally:
+        conn.close()

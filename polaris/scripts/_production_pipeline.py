@@ -46,6 +46,8 @@ from polaris.core.isolation.order_keys import (
     payload_hash,
     register_order_intent,
 )
+from polaris.core.lineage import record_segment_open
+from polaris.core.live_recalc.regime_flip import fetch_regime
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.scripts._alpaca_open import real_alpaca_open_fill
@@ -478,6 +480,19 @@ async def reserve_and_submit(
         "entry_price=%.6g notional_usd=%.2f mode=%s",
         venue, symbol, position_id, sig.side, sig.strategy_id,
         fill.fill_price, fill.size_usd, "real" if real_roundtrip else "sim",
+    )
+    # P3 self-evolve lineage (read-model, behaviour 0): record the ticker ↔
+    # strategy ↔ regime open segment. Post-COMMIT + fail-open inside the helper
+    # so a lineage write can never roll back / alter the already-persisted open.
+    # Live trading never reads this row. regime resolved from the (venue,
+    # underlying_group_id) SSOT, '' when unseeded (legacy/smoke).
+    open_regime = fetch_regime(
+        conn, venue=venue, underlying_group_id=underlying_group_id
+    ) or ""
+    record_segment_open(
+        conn, position_id=position_id, trade_id=position_id, venue=venue,
+        ticker=symbol, strategy_id=sig.strategy_id, regime=open_regime,
+        entry_ts=now_ts,
     )
     return trade
 

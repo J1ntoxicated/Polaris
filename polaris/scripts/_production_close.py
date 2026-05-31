@@ -24,6 +24,7 @@ from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
 )
+from polaris.core.lineage import record_segment_close
 from polaris.core.live_recalc.excursion import compute_excursion_r
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
@@ -254,6 +255,7 @@ async def close_specific_position(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    close_reason: str = "",
 ) -> bool:
     """Day 9 F2.b — close a specific position by ``position_id``.
 
@@ -261,6 +263,10 @@ async def close_specific_position(
     for a *specific* position. Returns ``True`` when the close persisted,
     ``False`` when the position was not found in ``state.open_trades`` or
     the persist failed (state preserved).
+
+    ``close_reason`` (lineage read-model only) names the exit trigger the
+    caller fired on (precise-exit fsm / session calendar / rotation / g6); it
+    is recorded onto the lineage segment and changes NO close behaviour.
     """
     target: SimulatedTrade | None = None
     target_idx: int | None = None
@@ -275,7 +281,7 @@ async def close_specific_position(
         conn, state=state, trade=target, trade_idx=target_idx, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session,
+        capital_session=capital_session, close_reason=close_reason,
     )
 
 
@@ -290,6 +296,7 @@ async def close_oldest_with_real_pnl(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    close_reason: str = "",
 ) -> None:
     """F + G8 fix: real mark-to-market PnL + G8 reflector + gate_events log.
 
@@ -314,7 +321,7 @@ async def close_oldest_with_real_pnl(
         now_ts=now_ts, lookup_regime=lookup_regime,
         gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session,
+        capital_session=capital_session, close_reason=close_reason,
     )
 
 
@@ -331,6 +338,7 @@ async def _close_trade_with_real_pnl(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    close_reason: str = "",
 ) -> bool:
     """Shared close path used by FIFO oldest + specific-position closes.
 
@@ -452,6 +460,16 @@ async def _close_trade_with_real_pnl(
     # ``strategy_halts``); ``_safe_record_fault`` swallows that with a log.
     won = pnl_r > 0.0
     regime = _safe_lookup_regime(lookup_regime, conn, trade)
+    # P3 self-evolve lineage (read-model, behaviour 0): stamp exit_ts /
+    # exit_reason / realised pnl onto the open lineage segment. Post-commit +
+    # fail-open inside the helper — never alters the already-committed close.
+    # ``close_reason`` falls back to 'exit' when the caller did not name a
+    # trigger (e.g. plain G6 EXIT_NOW / FIFO close).
+    if trade.position_id:
+        record_segment_close(
+            conn, position_id=trade.position_id, exit_ts=now_ts,
+            exit_reason=close_reason or "exit", pnl_r=pnl_r, pnl_usd=pnl_usd,
+        )
     _safe_update_cell_matrix(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
         state=state,

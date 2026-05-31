@@ -175,19 +175,25 @@ def evaluate_strategy_swap(
         conn, position_id=candidate.position_id
     ):
         entry_seg_id = uuid.uuid4().hex
+        entry_strat = entry_strategy_id or candidate.from_strategy_id
         conn.execute(
             "INSERT INTO position_strategy_segments "
             "(position_id, segment_id, strategy_id, regime_at_start, started_ts, "
-            " ended_ts, entry_reason, exit_reason, attribution_weight, pnl_r) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'entry', 'swap', ?, 0.0)",
+            " ended_ts, entry_reason, exit_reason, attribution_weight, pnl_r, "
+            " trade_id, venue, ticker, pnl_usd, cell_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'entry', 'swap', ?, 0.0, ?, ?, ?, 0.0, ?)",
             (
                 candidate.position_id,
                 entry_seg_id,
-                entry_strategy_id or candidate.from_strategy_id,
+                entry_strat,
                 regime_at_start,
                 opened_ts or now_ts,
                 now_ts,
                 DEFAULT_ENTRY_ATTRIBUTION,
+                candidate.position_id,
+                candidate.venue,
+                candidate.symbol,
+                f"{candidate.venue}:{entry_strat}:{candidate.symbol}:{regime_at_start}",
             ),
         )
     else:
@@ -202,8 +208,9 @@ def evaluate_strategy_swap(
     conn.execute(
         "INSERT INTO position_strategy_segments "
         "(position_id, segment_id, strategy_id, regime_at_start, started_ts, "
-        " ended_ts, entry_reason, exit_reason, attribution_weight, pnl_r) "
-        "VALUES (?, ?, ?, ?, ?, NULL, 'swap', NULL, ?, 0.0)",
+        " ended_ts, entry_reason, exit_reason, attribution_weight, pnl_r, "
+        " trade_id, venue, ticker, pnl_usd, cell_key) "
+        "VALUES (?, ?, ?, ?, ?, NULL, 'swap', NULL, ?, 0.0, ?, ?, ?, 0.0, ?)",
         (
             candidate.position_id,
             seg_id,
@@ -211,6 +218,11 @@ def evaluate_strategy_swap(
             regime_at_start,
             now_ts,
             DEFAULT_ACTIVE_ATTRIBUTION,
+            candidate.position_id,
+            candidate.venue,
+            candidate.symbol,
+            f"{candidate.venue}:{candidate.to_strategy_id}:"
+            f"{candidate.symbol}:{regime_at_start}",
         ),
     )
     logger.info(

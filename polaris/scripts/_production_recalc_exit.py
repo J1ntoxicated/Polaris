@@ -125,7 +125,7 @@ async def run_session_forced_exit(
         conn, state=state, position_id=str(pos["position_id"]), now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session,
+        capital_session=capital_session, close_reason=decision.close_reason,
     )
     state.recalc_session_forced_exit = (
         getattr(state, "recalc_session_forced_exit", 0) + 1
@@ -247,7 +247,7 @@ async def run_precise_exit(
         conn, state=state, position_id=position_id, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session,
+        capital_session=capital_session, close_reason=decision.close_reason,
     )
     state.recalc_precise_exit = getattr(state, "recalc_precise_exit", 0) + 1
     # Precise-exit close (INFO): the decision/거동 visibility Jin asked for —

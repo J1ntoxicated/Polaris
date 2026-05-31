@@ -87,6 +87,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_POSITION_LIVE_RECALC_STATE,
     DDL_POSITION_RISK_STATE,
     DDL_POSITION_STRATEGY_SEGMENTS,
+    DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
@@ -157,6 +158,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_META_LABELS_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
+    # DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX is created in _apply_post_migrations
+    # (after the cell_key ALTER) — it spans cell_key, which legacy DBs only add
+    # post-ALL_DDL; running it here would crash startup on existing DBs.
     # Layer 3 — Sizing risk state
     DDL_STRATEGY_RISK_STATE,
     DDL_POSITION_RISK_STATE,
@@ -282,6 +286,41 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
             "ALTER TABLE position_strategy_segments "
             "ADD COLUMN attribution_weight REAL NOT NULL DEFAULT 0.0"
         )
+    # position_strategy_segments lineage columns (P3 self-evolve read-model) —
+    # ticker↔strategy↔exit lineage. ADDITIVE only: trade_id / venue / ticker /
+    # cell_key default '' and pnl_usd defaults 0.0 so legacy swap-seeded rows
+    # backfill cleanly and existing reads are unaffected. Live trading NEVER
+    # reads this table; recording is INSERT/UPDATE only (behaviour 0). Pragma
+    # guard makes each ALTER idempotent (SQLite has no ADD COLUMN IF NOT EXISTS).
+    if seg_cols and "trade_id" not in seg_cols:
+        conn.execute(
+            "ALTER TABLE position_strategy_segments "
+            "ADD COLUMN trade_id TEXT NOT NULL DEFAULT ''"
+        )
+    if seg_cols and "venue" not in seg_cols:
+        conn.execute(
+            "ALTER TABLE position_strategy_segments "
+            "ADD COLUMN venue TEXT NOT NULL DEFAULT ''"
+        )
+    if seg_cols and "ticker" not in seg_cols:
+        conn.execute(
+            "ALTER TABLE position_strategy_segments "
+            "ADD COLUMN ticker TEXT NOT NULL DEFAULT ''"
+        )
+    if seg_cols and "pnl_usd" not in seg_cols:
+        conn.execute(
+            "ALTER TABLE position_strategy_segments "
+            "ADD COLUMN pnl_usd REAL NOT NULL DEFAULT 0.0"
+        )
+    if seg_cols and "cell_key" not in seg_cols:
+        conn.execute(
+            "ALTER TABLE position_strategy_segments "
+            "ADD COLUMN cell_key TEXT NOT NULL DEFAULT ''"
+        )
+    # cell_key index created HERE (not in ALL_DDL) — legacy DBs add cell_key only
+    # via the ALTER above (post-ALL_DDL), so the index must run after it. IF NOT
+    # EXISTS keeps it idempotent for fresh DBs that already have the column.
+    conn.execute(DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX)
     # universe / positions: product_class + stream_id — added 3-stream
     # architecture P0-1 (stream_architecture_redesign §2.3). ADDITIVE only:
     # all rows backfilled to '' default; venue→product_class/stream_id mapping

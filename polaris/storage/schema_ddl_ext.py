@@ -170,13 +170,26 @@ CREATE TABLE IF NOT EXISTS position_strategy_segments (
     entry_reason TEXT,
     exit_reason TEXT,
     attribution_weight REAL NOT NULL DEFAULT 0.0,
-    pnl_r REAL NOT NULL DEFAULT 0.0
+    pnl_r REAL NOT NULL DEFAULT 0.0,
+    trade_id TEXT NOT NULL DEFAULT '',
+    venue TEXT NOT NULL DEFAULT '',
+    ticker TEXT NOT NULL DEFAULT '',
+    pnl_usd REAL NOT NULL DEFAULT 0.0,
+    cell_key TEXT NOT NULL DEFAULT ''
 );
 """
 
 DDL_POSITION_STRATEGY_SEGMENTS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_position_strategy_segments_pos
     ON position_strategy_segments(position_id, started_ts);
+"""
+
+# Lineage read-model index (P3 self-evolve): cell_key → segments lookup for
+# ``lineage_for_cell`` + recent-lineage scans. Read-only; live trading never
+# reads this table.
+DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_position_strategy_segments_cell
+    ON position_strategy_segments(cell_key, started_ts DESC);
 """
 
 # ---------------------------------------------------------------------------

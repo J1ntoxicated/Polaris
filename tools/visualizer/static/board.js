@@ -425,21 +425,50 @@
     }
     return `<div class="bl-line ${cls}">${esc(line)}</div>`;
   }
-  let _lastLogSig = '';
+  // Rolling tail (Jin: 한 줄씩 차례로 롤링; 페이지 전체 repaint 금지). The /api/botlog
+  // tail overlaps heavily each poll, so we APPEND only the genuinely-new trailing
+  // lines (matched by the last few shown lines as a stable block) instead of
+  // rewriting innerHTML — no flicker, scroll stays pinned, old lines roll off the top.
+  let _logShown = [];
+  const _LOG_CAP = 600;
+  function _newTail(prev, lines) {
+    if (!prev.length) return lines;                 // first paint
+    const k = Math.min(3, prev.length);
+    const sig = prev.slice(prev.length - k);
+    for (let i = lines.length - 1; i >= k - 1; i--) {
+      let ok = true;
+      for (let j = 0; j < k; j++) { if (lines[i - (k - 1) + j] !== sig[j]) { ok = false; break; } }
+      if (ok) return lines.slice(i + 1);            // lines after the matched block
+    }
+    return null;                                    // discontinuity (rotation/gap) → full render
+  }
   async function pollLog() {
     const body = $('botlog-body');
     if (!body) return;
     try {
       const r = await fetch('/api/botlog?t=' + Date.now(), { cache: 'no-store' });
       if (!r.ok) return;
-      const d = await r.json();
-      const lines = d.lines || [];
-      const sig = lines.length + '|' + (lines[lines.length - 1] || '');
-      if (sig === _lastLogSig) return;
-      _lastLogSig = sig;
-      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-      body.innerHTML = lines.map(fmtLogLine).join('');
-      if (atBottom) body.scrollTop = body.scrollHeight;
+      const lines = (await r.json()).lines || [];
+      if (!lines.length) return;
+      const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+      const nt = _newTail(_logShown, lines);
+      let appended = false;
+      if (nt === null) {                            // discontinuity: one full render
+        body.innerHTML = lines.map(fmtLogLine).join('');
+        _logShown = lines.slice();
+        appended = true;
+      } else if (nt.length) {                        // normal: append new lines only
+        body.insertAdjacentHTML('beforeend', nt.map(fmtLogLine).join(''));
+        _logShown = _logShown.concat(nt);
+        appended = true;
+      }
+      if (appended) {
+        while (_logShown.length > _LOG_CAP) {        // roll old lines off the top
+          _logShown.shift();
+          if (body.firstChild) body.removeChild(body.firstChild);
+        }
+        if (atBottom) body.scrollTop = body.scrollHeight;
+      }
     } catch (e) { /* keep last frame */ }
   }
 

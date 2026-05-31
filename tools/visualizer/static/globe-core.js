@@ -263,10 +263,8 @@
     // galaxy halo + label (behind nodes of that galaxy — draw first, dim)
     drawGalaxyHalos(now);
 
-    // satellite orbital ring guides (behind nodes + flows — faint conductor rings)
-    if (window.PolarisGlobe_drawSatRings) {
-      window.PolarisGlobe_drawSatRings(ctx, project, now, { rgba });
-    }
+    // Jin E6: 위성 궤도선 제거 (정신없음). drawSatRings 정의는 globe-satellites.js
+    // 에 남겨두되 호출하지 않음 — 위성 노드(회전 satTick)는 그대로 유지.
 
     // synapse + particle pathways (globe-flows.js draws between projected nodes)
     if (window.PolarisGlobe_drawFlows) {
@@ -361,27 +359,33 @@
 
   function drawConductor(now) {
     const p = project(conductor.x, conductor.y, conductor.z);
-    const beat = conductor.beat;
-    const r = (12 + beat * 4 + conductor.pulse * 14) * zoom * p.persp;
-    // outer aura
-    const g = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 3);
-    g.addColorStop(0, rgba(CONDUCTOR_THEME, 0.32 + conductor.pulse * 0.4));
-    g.addColorStop(0.5, rgba(CONDUCTOR_THEME, 0.10));
-    g.addColorStop(1, rgba(CONDUCTOR_THEME, 0));
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 3, 0, 6.2832); ctx.fill();
-    // core
-    ctx.fillStyle = rgba([0xff, 0xff, 0xff], 0.85);
-    ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(2, r * 0.34), 0, 6.2832); ctx.fill();
-    ctx.strokeStyle = rgba(CONDUCTOR_THEME, 0.6 + beat * 0.3);
-    ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.arc(p.sx, p.sy, r, 0, 6.2832); ctx.stroke();
-    // label
-    ctx.fillStyle = rgba(CONDUCTOR_THEME, 0.9);
-    ctx.font = '700 8px JetBrains Mono, monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('CONDUCTOR', p.sx, p.sy + r + 12);
-    conductor._screen = p;
+    const beat = conductor.beat, pulse = conductor.pulse;
+    const r = (12 + beat*4 + pulse*14) * zoom * p.persp;
+    const rot = now/4000, tilt = 0.42;
+    const HOT=[255,240,210],MID=[255,150,40],COOL=[120,40,90],RING=[200,225,255];
+    ctx.globalCompositeOperation='lighter';
+    for(let i=0;i<3;i++){const rr=r*(1.9-i*0.18);const g=ctx.createRadialGradient(p.sx,p.sy,r*0.95,p.sx,p.sy,rr);
+      g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(0.45,`rgba(${HOT},${0.10-i*0.02})`);g.addColorStop(0.7,`rgba(${MID},${0.14-i*0.03})`);g.addColorStop(1,`rgba(${COOL},0)`);
+      ctx.fillStyle=g;ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,tilt);ctx.rotate(rot);ctx.beginPath();ctx.arc(0,0,rr,Math.PI,Math.PI*2);ctx.fill();ctx.restore();}
+    ctx.globalCompositeOperation='source-over';
+    const core=ctx.createRadialGradient(p.sx,p.sy,0,p.sx,p.sy,r*1.02);
+    core.addColorStop(0,'rgba(2,3,8,1)');core.addColorStop(0.82,'rgba(2,3,8,1)');core.addColorStop(1,'rgba(2,3,8,0)');
+    ctx.fillStyle=core;ctx.beginPath();ctx.arc(p.sx,p.sy,r*1.02,0,6.2832);ctx.fill();
+    ctx.globalCompositeOperation='lighter';
+    ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,0.94);
+    ctx.strokeStyle=`rgba(${RING},${0.85+beat*0.15})`;ctx.lineWidth=Math.max(1,r*0.05);ctx.beginPath();ctx.arc(0,0,r*1.06,0,6.2832);ctx.stroke();
+    ctx.strokeStyle=`rgba(${RING},0.35)`;ctx.lineWidth=Math.max(0.6,r*0.02);ctx.beginPath();ctx.arc(0,0,r*1.13,0,6.2832);ctx.stroke();ctx.restore();
+    for(let i=0;i<3;i++){const rr=r*(1.9-i*0.18);[['left',0.22],['right',0.07]].forEach(([side,baseA])=>{
+      const g=ctx.createRadialGradient(p.sx,p.sy,r*0.95,p.sx,p.sy,rr);g.addColorStop(0,'rgba(0,0,0,0)');
+      g.addColorStop(0.45,`rgba(${HOT},${baseA-i*0.03})`);g.addColorStop(0.7,`rgba(${MID},${baseA*0.9-i*0.03})`);g.addColorStop(1,`rgba(${COOL},0)`);
+      ctx.fillStyle=g;ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,tilt);ctx.rotate(rot);
+      const a0=side==='left'?Math.PI*0.5:Math.PI*1.5,a1=side==='left'?Math.PI*1.5:Math.PI*2.5;ctx.beginPath();ctx.arc(0,0,rr,a0,a1);ctx.fill();ctx.restore();});}
+    const au=ctx.createRadialGradient(p.sx,p.sy,r,p.sx,p.sy,r*3.2);au.addColorStop(0,`rgba(${MID},${0.05+pulse*0.2})`);au.addColorStop(0.5,'rgba(159,199,255,0.04)');au.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=au;ctx.beginPath();ctx.arc(p.sx,p.sy,r*3.2,0,6.2832);ctx.fill();
+    ctx.globalCompositeOperation='source-over';
+    ctx.fillStyle=rgba(CONDUCTOR_THEME,0.9);ctx.font='700 8px JetBrains Mono, monospace';ctx.textAlign='center';
+    ctx.fillText('CONDUCTOR',p.sx,p.sy+r+12);
+    conductor._screen=p;
   }
 
   // ── Interaction: drag orbit, wheel zoom, click galaxy fly-in ─────────────────

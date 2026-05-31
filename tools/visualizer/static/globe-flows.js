@@ -22,17 +22,30 @@
 
   // Live particle streams along trade chains. Each is a polyline through node
   // positions; particles travel 0→1 along it, repeating while the trade is live.
-  let chainStreams = [];      // [{nodes:[node...], color, speed, parts:[t...], pnl}]
+  let chainStreams = [];      // [{key, nodes:[node...], color, speed, parts:[t...], pnl}]
   let lifecycleArcs = [];     // capital-lifecycle inter-galaxy arcs (north-star)
   const ribbons = [];         // transient entry/exit ribbons (one-shot flares)
-  let _satTick = 0;           // wall-clock accumulator for conductor↔satellite pulses
+  const satLasers = [];       // transient satellite → conductor laser beams (one-shot)
+  let _satTick = 0;           // wall-clock accumulator for satellite laser stagger
 
   function lerp(a, b, t) { return a + (b - a) * t; }
 
   // ── Build chain streams from backend graph payload ──────────────────────────
+  // Reload-glitch fix (Jin, repeated): the 2s loadGraph used to discard every
+  // stream and rebuild parts from scratch ([0,1/n,2/n…]) → particles snapped back
+  // to the chain start on every refresh. We now key each stream by a STABLE id
+  // (ticker + first/last node id) and carry the previous parts[] (particle phase)
+  // over when the same stream reappears, so the flow stays continuous across
+  // reloads. New streams get fresh phases; vanished ones simply drop.
+  function streamKey(ticker, seq) {
+    return (ticker || '~') + '|' + seq[0].id + '|' + seq[seq.length - 1].id;
+  }
   function rebuildStreams(d) {
     const nodeByIndex = window.PolarisGlobe_nodeByIndex;
     const chains = d.trade_chains || [];
+    // index existing streams by stable key so we can carry particle phase over.
+    const prev = new Map();
+    for (const s of chainStreams) if (s.key) prev.set(s.key, s);
     const out = [];
     for (const c of chains) {
       const seq = [];
@@ -45,9 +58,18 @@
       const col = pnl > 0.0001 ? [0x87, 0xff, 0xaf] : (pnl < -0.0001 ? [0xff, 0x87, 0x87] : [0xff, 0xff, 0xff]);
       const strength = c.strength != null ? c.strength : 0.6;
       const nParts = 2 + Math.round(strength * 3);
-      const parts = [];
-      for (let i = 0; i < nParts; i++) parts.push(i / nParts);
-      out.push({ nodes: seq, color: col, speed: 0.25 + strength * 0.4, parts, pnl, ticker: c.ticker });
+      const key = streamKey(c.ticker, seq);
+      const old = prev.get(key);
+      let parts;
+      if (old && old.parts) {
+        // carry over particle phase; resize to the new particle count if needed.
+        parts = old.parts.slice(0, nParts);
+        for (let i = parts.length; i < nParts; i++) parts.push(i / nParts);
+      } else {
+        parts = [];
+        for (let i = 0; i < nParts; i++) parts.push(i / nParts);
+      }
+      out.push({ key, nodes: seq, color: col, speed: 0.25 + strength * 0.4, parts, pnl, ticker: c.ticker });
     }
     chainStreams = out;
   }
@@ -62,14 +84,15 @@
   }
 
   // ── Frame draw — called by globe-core before nodes are drawn ────────────────
-  // small white neural pulse: ~1px crisp core + soft 2-3px white glow.
+  // faint grey neural pulse — Jin: "뭔가 지나가는 정도"만 (barely visible). Pale
+  // grey core + very soft glow; trade-chain particles (§3) use this.
   function drawNeuralPulse(ctx, rgba, x, y, a) {
     const g = ctx.createRadialGradient(x, y, 0, x, y, 3);
-    g.addColorStop(0, `rgba(255,255,255,${0.55 * a})`);
-    g.addColorStop(1, 'rgba(255,255,255,0)');
+    g.addColorStop(0, `rgba(200,205,215,${0.14 * a})`);
+    g.addColorStop(1, 'rgba(200,205,215,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(x, y, 3, 0, 6.2832); ctx.fill();
-    ctx.fillStyle = `rgba(255,255,255,${Math.min(1, 0.95 * a)})`;
+    ctx.fillStyle = `rgba(200,205,215,${Math.min(1, 0.30 * a)})`;
     ctx.beginPath(); ctx.arc(x, y, 1.0, 0, 6.2832); ctx.fill();
   }
 
@@ -79,33 +102,55 @@
     const gs = window.PolarisGlobe_galaxyState;
     const allNodes = window.PolarisGlobe_nodes;
 
-    // 1) conductor ↔ galaxy synapse threads (crisp mesh, always present)
+    // 1) conductor ↔ galaxy synapse threads — Jin E6: 아주 옅게, 구조적으로만 희미하게
+    //    (거래 라인이 주역 — 거래만 라인 신경망). The trade chains (§3) are the show.
     const cp = project(conductor.x, conductor.y, conductor.z);
     for (const k of ['okx', 'capital', 'alpaca']) {
       const g = gs[k]; if (!g || !g._screen) continue;
-      const beat = 0.22 + g.pulse * 0.55;
-      ctx.strokeStyle = rgba(g.theme, beat);
-      ctx.lineWidth = 1.1;
+      const beat = 0.05 + g.pulse * 0.12;
+      ctx.strokeStyle = rgba([0x8c, 0x94, 0xa4], beat);   // Jin E6.1: 회색·거의 안보이게
+      ctx.lineWidth = 0.8;
       ctx.beginPath(); ctx.moveTo(cp.sx, cp.sy); ctx.lineTo(g._screen.sx, g._screen.sy); ctx.stroke();
     }
 
-    // 1b) conductor ↔ satellite synapse mesh + a white pulse riding each thread,
-    //     and a faint satellite → nearest-galaxy link (the hub "wiring" the cloud).
+    // 1b) satellite EVENT lasers — Jin E6: 위성은 평소 선 없음. state==='firing' 위성이
+    //     주기적으로(node phase로 stagger) conductor 로 빠른 레이저 빔을 한 발 쏜다
+    //     ("해당 사항 발생 → 레이저"). spawn here, advance/expire below.
     if (allNodes && allNodes.length) {
       _satTick += dt;
       for (let i = 0; i < allNodes.length; i++) {
         const n = allNodes[i];
-        if (!n.sat || !n._screen) continue;
-        const sp = n._screen;
-        // conductor → satellite thread (very thin, family-tinted)
-        ctx.strokeStyle = rgba(n.color || [0x9f, 0xc7, 0xff], n.state === 'firing' ? 0.34 : 0.16);
-        ctx.lineWidth = 0.6;
-        ctx.beginPath(); ctx.moveTo(cp.sx, cp.sy); ctx.lineTo(sp.sx, sp.sy); ctx.stroke();
-        // white pulse travelling conductor → satellite (slow neural drip)
-        const t = ((_satTick * 0.18) + (n.phase || 0)) % 1;
-        drawNeuralPulse(ctx, rgba, lerp(cp.sx, sp.sx, t), lerp(cp.sy, sp.sy, t),
-                        0.5 + (n.state === 'firing' ? 0.5 : 0.1));
+        if (!n.sat || !n._screen || n.state !== 'firing') continue;
+        // fire interval ~2.6-3.8s, staggered per node so beams don't bunch up.
+        const period = 2.6 + (n.phase || 0) * 1.2;
+        if (n._nextLaser == null) n._nextLaser = _satTick + (n.phase || 0) * period;
+        if (_satTick >= n._nextLaser) {
+          n._nextLaser = _satTick + period;
+          satLasers.push({ node: n, color: n.color || [0xb8, 0xbc, 0xc6], t: 0, dur: 0.42 });
+        }
       }
+    }
+    // advance + draw lasers (satellite → conductor sweep, fade out)
+    for (let i = satLasers.length - 1; i >= 0; i--) {
+      const lz = satLasers[i];
+      lz.t += dt / lz.dur;
+      if (lz.t >= 1 || !lz.node._screen) { satLasers.splice(i, 1); continue; }
+      const sp = lz.node._screen;
+      const t = lz.t;
+      // head sweeps from satellite toward the conductor; short trailing tail.
+      const hx = lerp(sp.sx, cp.sx, t), hy = lerp(sp.sy, cp.sy, t);
+      const tt = Math.max(0, t - 0.32);
+      const tx = lerp(sp.sx, cp.sx, tt), ty = lerp(sp.sy, cp.sy, tt);
+      const a = (1 - t) * 0.7;
+      ctx.strokeStyle = rgba(lz.color, a);
+      ctx.lineWidth = 1.0;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy); ctx.stroke();
+      // small glow at the head
+      const gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, 4);
+      gr.addColorStop(0, rgba(lz.color, a));
+      gr.addColorStop(1, rgba(lz.color, 0));
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(hx, hy, 4, 0, 6.2832); ctx.fill();
     }
 
     // 2) capital-lifecycle arcs (crypto → CFD → Alpaca), travelling particles
@@ -134,8 +179,9 @@
     //    faintly pnl-tinted pathway (Jin: 작은 하얀 신경 입자 + 또렷한 연결).
     for (const s of chainStreams) {
       const pts = s.nodes.map((n) => project(n.x, n.y, n.z));
-      // pathway line: clean mesh, very lightly tinted by pnl colour
-      ctx.strokeStyle = rgba(s.color, 0.22);
+      // pathway line: gray, barely visible — just enough to read "something passing"
+      // (Jin E6.1: 신경망 연결선도 회색 거의 안보이게; 색은 위성 노드로 구분).
+      ctx.strokeStyle = rgba([0x96, 0x9c, 0xa8], 0.09);
       ctx.lineWidth = 0.9;
       ctx.beginPath();
       ctx.moveTo(pts[0].sx, pts[0].sy);
@@ -207,7 +253,10 @@
       const d = await r.json();
       setGraph(d);
       rebuildStreams(d);
-      rebuildLifecycleArcs();
+      // Jin E6.1: do NOT rebuild lifecycle arcs every reload — they sit between
+      // fixed galaxy centres, and rebuilding reset their Math.random() phase + parts
+      // each 2s → the arc "line" jumped (the reload glitch Jin kept seeing). Build
+      // once lazily (drawFlows §2 `if (!lifecycleArcs.length)`); never on refresh.
       updateTicker(d);
     } catch (e) {
       // display-only — never break the render loop

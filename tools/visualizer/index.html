@@ -392,66 +392,38 @@
   <div class="topbar">
     <div class="brand"><span class="star">★</span> POLARIS · NEURAL CLOUD</div>
     <div class="legend" style="margin-left:auto">
-      <span class="swatch"><span class="dot hot"></span>FIRING</span>
-      <span class="swatch"><span class="dot lit"></span>LIT</span>
-      <span class="swatch"><span class="dot dim"></span>DORMANT</span>
-      <span class="swatch"><span class="line"></span>SYNAPSE</span>
+      <span class="swatch"><span class="dot" style="background:#5fdfff;box-shadow:0 0 8px #5fdfff"></span>OKX</span>
+      <span class="swatch"><span class="dot" style="background:#a87cff;box-shadow:0 0 8px #a87cff"></span>CAPITAL</span>
+      <span class="swatch"><span class="dot" style="background:#ffc84f;box-shadow:0 0 8px #ffc84f"></span>ALPACA</span>
+      <span class="swatch"><span class="dot" style="background:#9fc7ff;box-shadow:0 0 8px #9fc7ff"></span>CONDUCTOR</span>
+      <span class="swatch"><span class="line"></span>TRADE FLOW</span>
     </div>
   </div>
 
-  <!-- Jin 2026-05-29: 큰 tier 범례 기본 숨김 → 좌측 edge hover/탭 slide-in. 기본 = 글로브만. -->
-  <!-- Pipeline legend (8 sphere data + function inter-tier orbits + outer ring + asset regions) -->
+  <!-- Jin 2026-05-31 E4: galaxy legend (3 exchange galaxies + conductor + flows).
+       Hidden by default → left-edge hover/tab slide-in. -->
   <div class="legend-flyout" id="legend-flyout">
    <div class="legend-tab" id="legend-tab" title="범례 보기 (hover)">LEGEND ▸</div>
    <div class="pipeline-strip">
-    <!-- Jin 2026-04-28 v22 update: layout 정합 — chain 6 layers (data 표면) +
-         13 satellite kinds (function ring, kind-별 distinct color) + outer ring.
-         v16 EXEC/BRAIN sphere 제거 → 위성 흡수. STRAT 색은 group-별 dynamic. -->
-    <div class="ph">Static data · Sphere chain (POS heart → MKT shell)</div>
-    <div class="lg"><span class="dot" style="background:#87d7ff"></span>Live Positions (PnL color)<span class="tier">T0</span></div>
-    <div class="lg"><span class="dot" style="background:#ff87d7"></span>Exit Types<span class="tier">T1</span></div>
-    <div class="lg"><span class="dot" style="background:#d7d787"></span>Regime States<span class="tier">T3</span></div>
-    <div class="lg"><span class="dot" style="background:linear-gradient(90deg,#ffaa55,#5577ff,#aa55ff,#cc7755,#55cc77,#55ccff)"></span>Strategies (group color)<span class="tier">T5</span></div>
-    <div class="lg"><span class="dot" style="background:#87ffd7"></span>Signal Watchlist<span class="tier">T7</span></div>
-    <div class="lg"><span class="dot" style="background:#ffaf87"></span>Market Universe (exchange tint)<span class="tier">T8</span></div>
+    <div class="ph">Galaxies · click to zoom in</div>
+    <div class="lg"><span class="dot" style="background:#5fdfff"></span>OKX — Spot Crypto<span class="tier">cyan</span></div>
+    <div class="lg"><span class="dot" style="background:#a87cff"></span>Capital — CFD long/short<span class="tier">violet</span></div>
+    <div class="lg"><span class="dot" style="background:#ffc84f"></span>Alpaca — US Equity<span class="tier">gold</span></div>
+    <div class="lg"><span class="dot" style="background:#9fc7ff"></span>Conductor — AI hub<span class="tier">centre</span></div>
 
-    <div class="ph" style="margin-top:6px">Function satellites · Inter-tier rings</div>
-    <div class="lg"><span class="dot" style="background:#ff87d7"></span>Exit Engines<span class="tier">POS↔EXIT</span></div>
-    <div class="lg"><span class="dot" style="background:#6fb4e6"></span>Exec Router<span class="tier">POS↔EXIT</span></div>
-    <div class="lg"><span class="dot" style="background:#ff8282"></span>Brain Exit (exit_advise)<span class="tier">POS↔EXIT</span></div>
-    <div class="lg"><span class="dot" style="background:#87afd7"></span>Exec Gate<span class="tier">EXIT↔REG</span></div>
-    <div class="lg"><span class="dot" style="background:#b48cff"></span>Sensor (regime sensing)<span class="tier">REG↔STRAT</span></div>
-    <div class="lg"><span class="dot" style="background:#dcc882"></span>Regime Infra<span class="tier">REG↔STRAT</span></div>
-    <div class="lg"><span class="dot" style="background:#c8dc82"></span>Brain Entry (entry_judge)<span class="tier">REG↔STRAT</span></div>
-    <div class="lg"><span class="dot" style="background:#82e6c8"></span>Hourly Learners<span class="tier">STRAT↔BRAIN</span></div>
-    <div class="lg"><span class="dot" style="background:#ff96dc"></span>AI Judge<span class="tier">STRAT↔BRAIN</span></div>
-    <div class="lg"><span class="dot" style="background:#c8aaff"></span>Brain Data / Tools<span class="tier">STRAT↔WATCH</span></div>
-    <div class="lg"><span class="dot" style="background:#78c8ff"></span>Providers (data feed)<span class="tier">WATCH↔MKT</span></div>
+    <div class="ph" style="margin-top:6px">Live flows</div>
+    <div class="lg"><span class="dot" style="background:#87ffaf"></span>Trade pathway (profit)<span class="tier">flow</span></div>
+    <div class="lg"><span class="dot" style="background:#ff8787"></span>Trade pathway (loss)<span class="tier">flow</span></div>
+    <div class="lg"><span class="dot" style="background:#fff5d2"></span>Capital lifecycle<span class="tier">crypto→cfd→eq</span></div>
 
-    <div class="ph" style="margin-top:6px">Outer ring (떠돌이)</div>
-    <div class="lg"><span class="dot" style="background:#d7d787;border-radius:0"></span>System Health (OBS)<span class="tier">T9</span></div>
-    <div class="lg"><span class="dot" style="background:#d78787;border-radius:0"></span>Action Queue<span class="tier">T10</span></div>
-    <div class="lg"><span class="dot" style="background:#ffd7c7;transform:rotate(45deg)"></span>Dimension Axis (session/liq/crisis)<span class="tier">T12</span></div>
-    <div class="lg"><span class="dot" style="background:#ff87af;border-radius:0"></span>Exit Type Tally<span class="tier">T13</span></div>
-
-    <div class="ph" style="margin-top:6px">Asset group regions (azimuth)</div>
-    <div class="lg"><span class="dot" style="background:#ffaa55"></span>crypto<span class="tier">amber</span></div>
-    <div class="lg"><span class="dot" style="background:#5577ff"></span>forex<span class="tier">blue</span></div>
-    <div class="lg"><span class="dot" style="background:#aa55ff"></span>indices<span class="tier">purple</span></div>
-    <div class="lg"><span class="dot" style="background:#cc7755"></span>commodity<span class="tier">brown</span></div>
-    <div class="lg"><span class="dot" style="background:#55cc77"></span>stock<span class="tier">green</span></div>
-    <div class="lg"><span class="dot" style="background:#55ccff"></span>etf<span class="tier">cyan</span></div>
+    <div class="ph" style="margin-top:6px">Galaxy nodes (ring role)</div>
+    <div class="lg"><span class="dot" style="background:#ffffff"></span>Positions (PnL color, inner)<span class="tier">core</span></div>
+    <div class="lg"><span class="dot" style="background:#bfbfbf"></span>Strategies (mid)<span class="tier">mid</span></div>
+    <div class="lg"><span class="dot" style="background:#8f8f8f"></span>Watch / Universe (halo)<span class="tier">outer</span></div>
 
     <div class="hint" style="margin-top: 4px;">
-      <span style="color:#5fdfff">●</span> OKX
-      <span style="color:#a87cff; margin-left:6px">●</span> Capital
-      <span style="color:#ffc84f; margin-left:6px">●</span> Alpaca
-      <span style="color:#5fe08a; margin-left:6px">●</span> Binance
-    </div>
-    <div class="hint">
-      <span style="color:var(--p-grn)">●</span> profit chain<br/>
-      <span style="color:var(--p-red)">●</span> loss chain<br/>
-      click node · drag · wheel · hover
+      drag = orbit · wheel = zoom · click galaxy = fly in<br/>
+      Esc / R = reset · Space = toggle spin
     </div>
    </div><!-- /.pipeline-strip -->
   </div><!-- /.legend-flyout -->
@@ -465,37 +437,8 @@
 
   <div id="tooltip"></div>
 
-  <!-- Jin 2026-04-27 galaxy sound: subtle Web Audio API synth, default mute (browser autoplay policy).
-       Click toggles _audioEnabled; on → AudioContext init + cues for entry/exit/signal/regime/alert/ai_critical. -->
-  <button id="sound-toggle" type="button"
-          style="position:fixed; bottom:36px; left:8px; z-index:30;
-                 background:rgba(5,7,11,0.85); border:1px solid var(--ghost);
-                 color:var(--p-wht); padding:4px 10px; font-family:var(--font-mono);
-                 font-size:11px; letter-spacing:0.10em; cursor:pointer;
-                 backdrop-filter:blur(3px);">SOUND OFF</button>
-
-  <!-- Jin 2026-04-27 Hans Zimmer space OST: hidden YouTube IFrame audio + visible attribution.
-       Random pick from HANS_ZIMMER_SPACE_TRACKS pool on toggle. Default mute (autoplay policy).
-       Sound toggle button enables both Web Audio synth AND YouTube music together. -->
-  <div id="yt-player-container"
-       style="position:fixed; bottom:64px; left:8px; width:180px; height:0;
-              opacity:0; pointer-events:none; z-index:1; overflow:hidden;">
-    <iframe id="yt-player" width="180" height="100"
-            src="" frameborder="0"
-            allow="autoplay; encrypted-media"
-            allowfullscreen></iframe>
-  </div>
-  <div id="yt-attribution"
-       style="position:fixed; bottom:8px; left:8px; z-index:12;
-              font-family:var(--font-mono); font-size:10px; color:#7a7f8a;
-              opacity:0.7; pointer-events:auto; letter-spacing:0.05em;
-              background:rgba(5,7,11,0.6); padding:2px 8px;
-              border:1px solid rgba(95,135,175,0.15);
-              display:none;">
-    <span id="yt-track-title">Music off</span>
-    <a id="yt-track-link" href="https://www.youtube.com" target="_blank" rel="noopener"
-       style="color:#5fcfff; margin-left:6px; text-decoration:none;">via YouTube</a>
-  </div>
+  <!-- Sound/music player removed (Jin 2026-05-31 E4): Web Audio synth + YouTube
+       OST player + attribution + toggle all deleted per request. -->
 
   <!-- Detail panel (Jin v4: click 시 노드 detail + provenance chain) -->
   <aside id="detail-panel">
@@ -524,7 +467,12 @@
  <div id="board"></div>
 </div>
 
-<script src="static/sphere-render.js?v=9_e3_exchange_focus"></script>
+<!-- E4 galaxy globe (Jin 2026-05-31): 3 exchange galaxies + central AI conductor,
+     live particle pathways, capital-lifecycle arcs. Replaces sphere-render.js
+     (14-tier nested-sphere → static blob). globe-core = layout + render + camera;
+     globe-flows = trade_chain/lifecycle particle flows + SSE entry/exit flashes. -->
+<script src="static/globe-core.js?v=1_e4_galaxy"></script>
+<script src="static/globe-flows.js?v=1_e4_galaxy"></script>
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
@@ -536,7 +484,7 @@
 <script src="static/board_tabs.js?v=2_e3_venue_scope"></script>
 <script src="static/board_tabs_ext.js?v=2_e3_venue_scope"></script>
 <script>
-  // 30/70 split + left column globe(2/3)/log(1/3). sphere engine fits to canvas
+  // 30/70 split + left column globe(2/3)/log(1/3). globe engine fits to canvas
   // clientWidth/Height; after layout settles, nudge resize twice (rAF + delayed) so fit()
   // picks up the 30%-width / two-thirds-height globe pane, not an initial full-size guess.
   window.addEventListener('load', function () {
@@ -551,166 +499,6 @@
     tab.addEventListener('click', function (e) { e.stopPropagation(); fly.classList.add('pinned'); });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') fly.classList.remove('pinned'); });
     fly.addEventListener('mouseleave', function () { fly.classList.remove('pinned'); });
-  })();
-</script>
-<script>
-  // Jin 2026-04-27 Hans Zimmer space OST player + galaxy sound toggle.
-  // Single button toggles both Web Audio synth (sphere-render) and YouTube IFrame music.
-  // Default mute. On enable, picks random track from HANS_ZIMMER_SPACE_TRACKS.
-  (function () {
-    // Cosmic OST mix — Hans Zimmer (Interstellar + Inception) + Daniel Pemberton (Project Hail Mary)
-    // Note: Project Hail Mary 의 composer 는 Hans Zimmer 가 아니라 Daniel Pemberton (정정).
-    const HANS_ZIMMER_SPACE_TRACKS = [
-      // Hans Zimmer — Interstellar
-      { id: 'JuSsvM8B4Jc', title: 'Cornfield Chase',                 album: 'Interstellar',         artist: 'Hans Zimmer' },
-      { id: 'YF1eYbfbH5k', title: 'Full Album',                      album: 'Interstellar OST',     artist: 'Hans Zimmer' },
-      { id: 'oKYn0QAgRys', title: 'Day One + Cornfield (Live)',      album: 'Interstellar Prague', artist: 'Hans Zimmer' },
-      // Hans Zimmer — Inception
-      { id: 'hMQ7VhcCpuY', title: 'Time',                            album: 'Inception',            artist: 'Hans Zimmer' },
-      { id: 'kn_wEjhla-4', title: 'Mombasa',                         album: 'Inception',            artist: 'Hans Zimmer' },
-      { id: 'kFc0T_D36W8', title: 'Dream Within a Dream',            album: 'Inception',            artist: 'Hans Zimmer' },
-      { id: 'N1WTIstPKTY', title: '528491',                          album: 'Inception',            artist: 'Hans Zimmer' },
-      { id: 'hwBDiTqPt-0', title: 'Projections',                     album: 'Inception',            artist: 'Hans Zimmer' },
-      { id: 'NPGvvfPbW20', title: 'We Build Our Own World',          album: 'Inception',            artist: 'Hans Zimmer' },
-      // Daniel Pemberton — Project Hail Mary (2026)
-      { id: 'v-Hb0UknaMg', title: 'Ultimate Suite',                  album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
-      { id: 'FoWcQcys8Zc', title: 'Main Theme EPIC',                 album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
-      { id: 'nR5KY-03xiw', title: '1h Ambient Space',                album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
-      { id: 'LQrKQVAQ_Q4', title: 'You Are the Only One',            album: 'Project Hail Mary',    artist: 'Daniel Pemberton' },
-      // Hans Zimmer — Dune (2021) WaterTower official
-      { id: 'uTmBeR32GRA', title: 'Full Album',                      album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'x2Mc4RTOeLg', title: 'Art and Soul Full Album',         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'BdtiYwSP9ko', title: 'Paul\'s Dream',                   album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'U8HzOPVIqaU', title: 'Armada',                          album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: '2xpVQapRtGw', title: 'The One',                         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'rm6Dncay7Bg', title: 'Eclipse',                         album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'T0P6YDveLsM', title: 'Leaving Caladan',                 album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'AgzE2TeXCl0', title: 'Ripples in the Sand',             album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      { id: 'RpR4ySXm5f0', title: 'Bene Gesserit',                   album: 'Dune (2021)',          artist: 'Hans Zimmer' },
-      // John Murphy — Sunshine (2007 space sci-fi)
-      { id: 'ab3NscEJ80s', title: 'Adagio in D Minor (Extended)',    album: 'Sunshine',             artist: 'John Murphy' },
-      { id: 'FWmCKhBmFVY', title: 'Adagio in D Minor (2021 Remake)', album: 'Sunshine',             artist: 'John Murphy' }
-    ];
-
-    let _ytEnabled = false;
-    let _currentTrack = null;
-
-    function _pickRandomTrack() {
-      return HANS_ZIMMER_SPACE_TRACKS[Math.floor(Math.random() * HANS_ZIMMER_SPACE_TRACKS.length)];
-    }
-
-    // YouTube IFrame Player API for ENDED detection (auto next random track)
-    let _ytPlayer = null;
-    let _ytApiLoaded = false;
-
-    // Load YouTube IFrame API once
-    function _loadYtApi() {
-      if (_ytApiLoaded || window.YT) { _ytApiLoaded = true; return; }
-      _ytApiLoaded = true;
-      const tag = document.createElement('script');
-      tag.src = 'https://www.youtube.com/iframe_api';
-      document.head.appendChild(tag);
-    }
-
-    // Global callback YouTube API calls when ready
-    window.onYouTubeIframeAPIReady = function () {
-      _ytPlayer = new YT.Player('yt-player', {
-        events: {
-          'onStateChange': (event) => {
-            // ENDED (0) → auto-pick next random track (무한 다른 곡 재생)
-            if (event.data === 0 && _ytEnabled) {
-              const next = _pickRandomTrack();
-              _setYtTrack(next, true);  // re-use existing player
-            }
-          },
-        }
-      });
-    };
-
-    function _setYtTrack(track, useApi) {
-      _currentTrack = track;
-      const titleEl  = document.getElementById('yt-track-title');
-      const linkEl   = document.getElementById('yt-track-link');
-      const attrBox  = document.getElementById('yt-attribution');
-      // Use IFrame API if ready (즉시 video 교체, no iframe reload)
-      if (useApi && _ytPlayer && typeof _ytPlayer.loadVideoById === 'function') {
-        _ytPlayer.loadVideoById(track.id);
-      } else {
-        const iframe = document.getElementById('yt-player');
-        if (iframe) {
-          // enablejsapi=1 — IFrame API 가 player control 가능
-          iframe.src = 'https://www.youtube.com/embed/' + track.id +
-                       '?autoplay=1&enablejsapi=1&modestbranding=1&showinfo=0&rel=0&origin=' +
-                       encodeURIComponent(window.location.origin);
-        }
-        _loadYtApi();
-      }
-      if (titleEl) {
-        titleEl.textContent = (track.artist || 'Hans Zimmer') + ' - ' + track.title + ' (' + track.album + ')';
-      }
-      if (linkEl) {
-        linkEl.href = 'https://www.youtube.com/watch?v=' + track.id;
-      }
-      if (attrBox) attrBox.style.display = 'block';
-    }
-
-    function _stopYtTrack() {
-      const iframe  = document.getElementById('yt-player');
-      const titleEl = document.getElementById('yt-track-title');
-      const attrBox = document.getElementById('yt-attribution');
-      if (_ytPlayer && typeof _ytPlayer.stopVideo === 'function') {
-        _ytPlayer.stopVideo();
-      }
-      if (iframe) iframe.src = '';
-      if (titleEl) titleEl.textContent = 'Music off';
-      if (attrBox) attrBox.style.display = 'none';
-      _currentTrack = null;
-    }
-
-    function _toggleYtMusic() {
-      _ytEnabled = !_ytEnabled;
-      if (_ytEnabled) {
-        _setYtTrack(_pickRandomTrack());
-      } else {
-        _stopYtTrack();
-      }
-      return _ytEnabled;
-    }
-
-    function _nextYtTrack() {
-      if (!_ytEnabled) {
-        _ytEnabled = true;
-      }
-      // 같은 곡 안 나오게 재 pick (small pool 일 때 idential pick 방지)
-      let next = _pickRandomTrack();
-      if (_currentTrack && HANS_ZIMMER_SPACE_TRACKS.length > 1) {
-        let tries = 0;
-        while (next.id === _currentTrack.id && tries < 5) {
-          next = _pickRandomTrack();
-          tries++;
-        }
-      }
-      _setYtTrack(next, !!_ytPlayer);
-      return _currentTrack;
-    }
-
-    // Expose to console for manual control
-    window.PolarisCloud = window.PolarisCloud || {};
-    window.PolarisCloud.toggleMusic  = _toggleYtMusic;
-    window.PolarisCloud.nextTrack    = _nextYtTrack;
-    window.PolarisCloud.musicTracks  = HANS_ZIMMER_SPACE_TRACKS;
-
-    // Wire single sound-toggle button to BOTH sphere Web Audio synth + YouTube music
-    const btn = document.getElementById('sound-toggle');
-    if (!btn) return;
-    btn.addEventListener('click', () => {
-      const synthOn = window.PolarisCloud && window.PolarisCloud.toggleSound
-        ? window.PolarisCloud.toggleSound() : false;
-      const musicOn = _toggleYtMusic();
-      const anyOn   = synthOn || musicOn;
-      btn.textContent = anyOn ? 'SOUND ON' : 'SOUND OFF';
-      btn.style.color = anyOn ? '#87ffd7' : '#ffffff';
-    });
   })();
 </script>
 </body>

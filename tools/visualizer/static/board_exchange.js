@@ -4,7 +4,7 @@
  * single client-side ``activeExchange`` state ('all'|'okx'|'capital'|'alpaca',
  * default 'all') that (a) SCOPES every tab below to the selected venue's data
  * (client-side filter — no snapshot/pipeline change) and (b) FOCUSES the globe
- * via ``window.PolarisGlobe.focusExchange`` (sphere-render.js). The 3-stream
+ * via ``window.PolarisGlobe.focusExchange`` (globe-core.js). The 3-stream
  * summary strip itself always shows all 3 lanes; the selection only filters
  * what is BELOW + the globe.
  *
@@ -164,5 +164,8 @@
     selectorMarkup: selectorMarkup,
     initExchangeSelector: initExchangeSelector,
     syncExchangeUi: syncExchangeUi,
+    // E4: globe galaxy click syncs the board scope (calls setActiveExchange,
+    // which in turn re-issues focusExchange — idempotent, no loop).
+    setActiveExchange: setActiveExchange,
   };
 })();

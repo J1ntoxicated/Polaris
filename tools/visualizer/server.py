@@ -129,8 +129,15 @@ def _resolve_bot_log() -> Path | None:
     return cands[0] if cands else None
 
 
-def _tail_botlog(n: int = 160) -> list[str]:
-    """Last n lines of the live bot log (seek-based tail, read-only)."""
+def _tail_botlog(n: int = 320) -> list[str]:
+    """Last n lines of the live bot log (seek-based tail, read-only).
+
+    Larger tail (default 320) so the left-column log pane is a genuine
+    debugging surface — all levels preserved, the client colorizes
+    ERROR/WARN/INFO. ``_resolve_bot_log`` always returns the NEWEST runtime log
+    so a fresh session is picked up automatically. Block grows with ``n`` so a
+    deeper tail is not truncated mid-window.
+    """
     log = _resolve_bot_log()
     if log is None or not log.exists():
         return []
@@ -138,7 +145,8 @@ def _tail_botlog(n: int = 160) -> list[str]:
         with log.open("rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            block = min(size, 200_000)  # ~200KB tail is plenty for n lines
+            # ~600B/line heuristic with headroom so n lines always fit the read.
+            block = min(size, max(400_000, n * 600))
             fh.seek(size - block)
             data = fh.read(block)
         lines = data.decode("utf-8", "replace").splitlines()
@@ -237,7 +245,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/botlog"):
             try:
-                self._json({"lines": _tail_botlog(180), "ts": time.time()})
+                self._json({"lines": _tail_botlog(320), "ts": time.time()})
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"botlog err: {exc}")
             return

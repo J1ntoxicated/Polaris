@@ -39,6 +39,10 @@ from typing import Any
 
 from polaris.scripts.dashboard.snapshot import collect_snapshot
 from polaris.strategies import STRATEGY_REGISTRY
+from tools.visualizer.polaris_graph_chains import (
+    build_lifecycle_paths,
+    build_trade_chains,
+)
 
 # 13 cluster definitions (id, label, color, tier) — color palette matches the
 # render engine's CLUSTERS table. Order is display-only. tier 4 intentionally
@@ -775,6 +779,16 @@ def build_graph(db_path: str | Path = "data/polaris_live.sqlite") -> dict[str, A
         + tally_nodes
     )
 
+    closes = _recent_closes(snap)
+    # Glove pathway restore (was hard-coded []): real chains + lifecycle paths
+    # built from the live trades (open positions) + recent closes, referencing
+    # the node ids already emitted above. Display-only — drawn by sphere-render
+    # (drawTradeChains + highlightLifecycle); no trading behavior touched.
+    trade_chains = build_trade_chains(live_trades, nodes, regime=regime)
+    lifecycle_paths = build_lifecycle_paths(
+        live_trades, closes, nodes, regime=regime
+    )
+
     firing = sum(1 for n in nodes if n.get("state") == "firing")
     lit = sum(1 for n in nodes if n.get("state") == "lit")
     tiers = {n["tier"] for n in nodes}
@@ -797,10 +811,10 @@ def build_graph(db_path: str | Path = "data/polaris_live.sqlite") -> dict[str, A
         "nodes": nodes,
         "clusters": _CLUSTERS,
         "live_trades": live_trades,
-        "recent_closes": _recent_closes(snap),
+        "recent_closes": closes,
         "galaxy_universe": universe,
-        "trade_chains": [],
-        "lifecycle_paths": [],
+        "trade_chains": trade_chains,
+        "lifecycle_paths": lifecycle_paths,
         "exchange_pnl": [],
         "stats": stats,
     }

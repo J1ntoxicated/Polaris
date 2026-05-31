@@ -11,9 +11,10 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    /* header / kpis / streams / rotation / equity (auto) + mid + bottom (bounded flex). minmax(0,..)
-       keeps the sum inside 100vh; long lists scroll inside each panel's .p-body, never the page. */
-    grid-template-rows: auto auto auto auto auto minmax(0, 1fr) minmax(0, 1.35fr);
+    /* header (auto) + tab switcher (auto) + the active tab pane (fills rest).
+       Each tab pane owns its own inner grid; long lists scroll inside each
+       panel's .p-body, never the page. */
+    grid-template-rows: auto auto minmax(0, 1fr);
     gap: 8px;
     padding: 10px 16px;
     box-sizing: border-box;
@@ -22,6 +23,41 @@
     font-family: var(--font-mono);
     font-size: 12px;
     color: var(--p-wht);
+  }
+
+  /* ── Tab switcher (Component E) ──────────────────────────────────────
+     Two buttons toggle which panel group is visible. Default = Trading.
+     Display-only: pure DOM visibility toggle, no data/snapshot change. */
+  #board .b-tabs {
+    display: flex; gap: 6px; align-items: stretch;
+    border-bottom: 1px solid var(--ghost); padding-bottom: 2px;
+  }
+  #board .b-tab {
+    appearance: none; cursor: pointer;
+    background: rgba(15,19,26,0.55);
+    border: 1px solid rgba(95,135,175,0.22); border-bottom: none;
+    color: var(--p-dim);
+    font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 5px 16px;
+  }
+  #board .b-tab:hover { color: var(--p-wht); }
+  #board .b-tab.active {
+    color: var(--polaris-blue);
+    border-color: var(--polaris-blue);
+    background: rgba(95,135,175,0.10);
+  }
+  #board .b-tab .tab-sub { color: var(--p-dim); font-weight: 400; letter-spacing: 0; margin-left: 6px; font-size: 9px; }
+  /* Tab panes: each owns its own row layout; hidden pane removed from flow. */
+  #board .tab-pane { display: none; min-height: 0; }
+  #board .tab-pane.active { display: grid; min-height: 0; }
+  #board .tab-trading {
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    gap: 8px;
+  }
+  #board .tab-analysis {
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 8px;
   }
   #board .b-pos { color: var(--p-grn); }
   #board .b-neg { color: var(--p-red); }
@@ -87,6 +123,11 @@
   #board .lane.lane-c .ln-label { color: var(--stream-c); }
   #board .lane .ln-eq { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums;
     color: var(--p-wht); white-space: nowrap; }
+  /* 3-stream identity tagline under the lane label (product · sides · session). */
+  #board .lane .ln-tagline {
+    font-size: 8px; letter-spacing: 0.06em; color: var(--p-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
+  }
   #board .lane .ln-stats {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; margin-top: 3px;
     font-size: 10px;
@@ -200,15 +241,16 @@
   #board tbody td.tk { color: var(--p-wht); font-weight: 700; }
   #board tbody td.ex { color: var(--p-cyn); font-size: 10px; font-weight: 700; }
   /* per-table column widths (table-layout:fixed) — numeric cols sized, text cols flex+ellipsis */
-  #board .tbl-pos col.c-ven  { width: 8%; }
-  #board .tbl-pos col.c-sym  { width: 22%; }
-  #board .tbl-pos col.c-str  { width: 14%; }
-  #board .tbl-pos col.c-side { width: 9%; }
-  #board .tbl-pos col.c-size { width: 12%; }
-  #board .tbl-pos col.c-upnl { width: 13%; }
-  #board .tbl-pos col.c-dlt  { width: 9%; }
-  #board .tbl-pos col.c-held { width: 8%; }
-  #board .tbl-pos col.c-mult { width: 9%; }
+  #board .tbl-pos col.c-ven   { width: 7%; }
+  #board .tbl-pos col.c-sym   { width: 18%; }
+  #board .tbl-pos col.c-str   { width: 13%; }
+  #board .tbl-pos col.c-side  { width: 9%; }
+  #board .tbl-pos col.c-entry { width: 13%; }
+  #board .tbl-pos col.c-cur   { width: 13%; }
+  #board .tbl-pos col.c-dlt   { width: 9%; }
+  #board .tbl-pos col.c-size  { width: 9%; }
+  #board .tbl-pos col.c-upnl  { width: 9%; }
+  #board .stack-badge { cursor: help; border-bottom: 1px dotted var(--p-dim); }
   #board .tbl-trd col.c-time { width: 13%; }
   #board .tbl-trd col.c-ven  { width: 8%; }
   #board .tbl-trd col.c-sym  { width: 20%; }
@@ -273,6 +315,8 @@
     color: var(--p-dim); background: rgba(15,19,26,0.55);
   }
   #board td.lane-head .ln-cnt { color: var(--p-gry); letter-spacing: 0; font-weight: 400; margin-left: 5px; }
+  /* 3-stream identity tagline (product · sides · session) inside the lane head. */
+  #board td.lane-head .ln-tag { color: var(--p-dim); letter-spacing: 0.06em; font-weight: 400; font-size: 8px; margin-left: 7px; text-transform: none; }
   #board td.lane-head.lane-a { border-left-color: var(--stream-a); color: var(--stream-a); }
   #board td.lane-head.lane-b { border-left-color: var(--stream-b); color: var(--stream-b); }
   #board td.lane-head.lane-c { border-left-color: var(--stream-c); color: var(--stream-c); }
@@ -321,7 +365,16 @@
   // no snapshot/server change (stage-2 adds server-side StreamSummary).
   const VENUE_TO_STREAM = { okx: 'A', capital: 'B', alpaca: 'C' };
   const STREAM_ORDER = ['A', 'B', 'C', 'X'];          // X = unknown venue (lane tail)
-  const STREAM_LABEL = { A: 'Stream A · OKX', B: 'Stream B · Capital', C: 'Stream C · Alpaca', X: 'Other' };
+  const STREAM_LABEL = { A: 'OKX', B: 'CAPITAL', C: 'ALPACA', X: 'OTHER' };
+  // Jin's 3-stream theme — each stream is a distinct trading WORLD. The tagline
+  // is the lane identity (product · sides · session). Capital is the ONLY
+  // stream with shorts, so its tagline calls out LONG/SHORT explicitly.
+  const STREAM_TAGLINE = {
+    A: 'SPOT CRYPTO · long · 24/7',
+    B: 'CFD · LONG/SHORT · sessions',
+    C: 'US EQUITY · long · RTH/PDT',
+    X: 'unmapped venue',
+  };
   function venueStream(venue) {
     return VENUE_TO_STREAM[String(venue || '').toLowerCase()] || 'X';
   }
@@ -343,42 +396,75 @@
       <span class="clock" id="b-clock">--:--:--</span>
     </div>
 
-    <div class="kpis" id="b-kpis"></div>
-
-    <div class="streams-strip" id="b-streams"></div>
-
-    <div class="rot-strip" id="b-rotation"></div>
-
-    <div class="eq-wrap">
-      <div class="eq-head">
-        <span class="h-title" title="Headline = REAL-FEE-NET (real OKX 0.10% taker). Dimmed line = demo-actual (0.7% demo drain). Go-live trigger (Jin 2026-05-31) = the real-fee-net curve trending UP.">Equity · REAL-FEE-NET (go-live)</span>
-        <span>real Δ <span class="v" id="eq-real-delta">—</span></span>
-        <span class="b-flat">demo Δ <span class="v" id="eq-demo-delta">—</span></span>
-        <span title="Real-vs-demo fee wedge over the session (demo OKX is a 7x penalty vs real). Recovered if you go live on real OKX.">fee wedge <span class="v" id="eq-fee-wedge">—</span></span>
-      </div>
-      <svg id="eq-svg" viewBox="0 0 600 84" preserveAspectRatio="none"></svg>
-      <div class="conf-strip" id="b-confidence"></div>
+    <div class="b-tabs" id="b-tabs">
+      <button type="button" class="b-tab active" data-tab="trading">Trading<span class="tab-sub">P&amp;L · streams · positions</span></button>
+      <button type="button" class="b-tab" data-tab="analysis">Analysis<span class="tab-sub">strategies · gates · cells · edge</span></button>
     </div>
 
-    <div class="mid">
-      <div class="panel">
-        <div class="p-head"><span>Open Positions</span><span class="cnt" id="pos-cnt">0</span></div>
-        <div class="p-body" id="pos-body"></div>
+    <!-- TAB 1 · TRADING (default) — headline KPIs + real-fee-net equity +
+         3-stream open positions + recent trades. -->
+    <div class="tab-pane tab-trading active" id="pane-trading">
+      <div class="kpis" id="b-kpis"></div>
+
+      <div class="eq-wrap">
+        <div class="eq-head">
+          <span class="h-title" title="Headline = REAL-FEE-NET (real OKX 0.10% taker). Dimmed line = demo-actual (0.7% demo drain). Go-live trigger (Jin 2026-05-31) = the real-fee-net curve trending UP.">Equity · REAL-FEE-NET (go-live)</span>
+          <span>real Δ <span class="v" id="eq-real-delta">—</span></span>
+          <span class="b-flat">demo Δ <span class="v" id="eq-demo-delta">—</span></span>
+          <span title="Real-vs-demo fee wedge over the session (demo OKX is a 7x penalty vs real). Recovered if you go live on real OKX.">fee wedge <span class="v" id="eq-fee-wedge">—</span></span>
+        </div>
+        <svg id="eq-svg" viewBox="0 0 600 84" preserveAspectRatio="none"></svg>
       </div>
-      <div class="panel">
-        <div class="p-head"><span>Recent Trades</span><span class="cnt" id="trd-cnt">0</span></div>
-        <div class="p-body" id="trd-body"></div>
+
+      <div class="streams-strip" id="b-streams"></div>
+
+      <div class="mid">
+        <div class="panel">
+          <div class="p-head"><span>Open Positions · 3 Streams</span><span class="cnt" id="pos-cnt">0</span></div>
+          <div class="p-body" id="pos-body"></div>
+        </div>
+        <div class="panel">
+          <div class="p-head"><span>Recent Trades</span><span class="cnt" id="trd-cnt">0</span></div>
+          <div class="p-body" id="trd-body"></div>
+        </div>
       </div>
     </div>
 
-    <div class="bottom-grid">
-      <div class="panel"><div class="p-head"><span>Per-Strategy</span></div><div class="p-body mini" id="strat-body"></div></div>
-      <div class="panel" title="8-gate AI pipeline. pass% = signal survival rate at each stage.&#10;G1 Universe · G2 Strategy signal · G3 Validator (main cut) · G4 Pre-Entry · G5 Sizer · G6 Position Monitor · G7 Adaptive Exit · G8 Reflector"><div class="p-head"><span>Gate Funnel</span></div><div class="p-body mini" id="gate-body"></div></div>
-      <div class="panel"><div class="p-head"><span>Cell Matrix</span></div><div class="p-body mini" id="cell-body"></div></div>
-      <div class="panel"><div class="p-head"><span>Edge Validation</span></div><div class="p-body mini" id="edge-body"></div></div>
-      <div class="panel"><div class="p-head"><span>Learners</span></div><div class="p-body mini" id="learn-body"></div></div>
-      <div class="panel"><div class="p-head"><span>Alerts · AI Cost</span></div><div class="p-body mini" id="alert-body"></div></div>
+    <!-- TAB 2 · ANALYSIS — the architecture panels. -->
+    <div class="tab-pane tab-analysis" id="pane-analysis">
+      <div class="conf-strip-wrap eq-wrap">
+        <div class="eq-head"><span class="h-title">Go-Live Confidence · real-fee-net edge</span></div>
+        <div class="conf-strip" id="b-confidence"></div>
+      </div>
+
+      <div class="rot-strip" id="b-rotation"></div>
+
+      <div class="bottom-grid">
+        <div class="panel"><div class="p-head"><span>Per-Strategy</span></div><div class="p-body mini" id="strat-body"></div></div>
+        <div class="panel" title="8-gate AI pipeline. pass% = signal survival rate at each stage.&#10;G1 Universe · G2 Strategy signal · G3 Validator (main cut) · G4 Pre-Entry · G5 Sizer · G6 Position Monitor · G7 Adaptive Exit · G8 Reflector"><div class="p-head"><span>Gate Funnel</span></div><div class="p-body mini" id="gate-body"></div></div>
+        <div class="panel"><div class="p-head"><span>Cell Matrix</span></div><div class="p-body mini" id="cell-body"></div></div>
+        <div class="panel"><div class="p-head"><span>Edge Validation</span></div><div class="p-body mini" id="edge-body"></div></div>
+        <div class="panel"><div class="p-head"><span>Learners</span></div><div class="p-body mini" id="learn-body"></div></div>
+        <div class="panel"><div class="p-head"><span>Alerts · AI Cost</span></div><div class="p-body mini" id="alert-body"></div></div>
+      </div>
     </div>`;
+  }
+
+  // Tab switcher (Component E). Two buttons toggle which pane is visible;
+  // default Trading. Pure DOM visibility — no data/snapshot/trading change.
+  function initTabs() {
+    const tabs = $('b-tabs');
+    if (!tabs) return;
+    tabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('.b-tab');
+      if (!btn) return;
+      const which = btn.getAttribute('data-tab');
+      tabs.querySelectorAll('.b-tab').forEach(b =>
+        b.classList.toggle('active', b === btn));
+      const trading = $('pane-trading'), analysis = $('pane-analysis');
+      if (trading) trading.classList.toggle('active', which === 'trading');
+      if (analysis) analysis.classList.toggle('active', which === 'analysis');
+    });
   }
 
   // ── renderers ─────────────────────────────────────────────────────
@@ -422,7 +508,9 @@
     const rows = d.streams || [];
     if (!rows.length) { el.innerHTML = ''; return; }   // older snapshot → render nothing
     el.innerHTML = rows.map(s => {
-      const lc = venueStream(s.venue).toLowerCase();    // reuse stage-1 venue→stream SSOT
+      const st = venueStream(s.venue);
+      const lc = st.toLowerCase();    // reuse stage-1 venue→stream SSOT
+      const tagline = STREAM_TAGLINE[st] || '';
       const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
       // Cost row (display-only). Graceful when an older snapshot omits the
       // fields: net_after_cost_usd === undefined → skip the row entirely.
@@ -434,11 +522,12 @@
           <span class="s" title="AI cost attributed to this lane only (position-linked gate calls); pre-position G1-G5 LLM spend is unattributable and excluded"><span class="lk">AI$*</span> <span class="lv b-flat">${fmtUsd(s.ai_cost_usd, 4)}</span></span>
           <span class="s"><span class="lk">Net-Cost</span> <span class="lv ${pn(s.net_after_cost_usd)}">${fmtUsd(s.net_after_cost_usd, 2)}</span></span>
         </div>` : '';
-      return `<div class="lane lane-${lc}" title="${esc(s.label)} (${esc(s.product_class)}) · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
+      return `<div class="lane lane-${lc}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
         <div class="ln-top">
           <span class="ln-label">${esc(s.label)}</span>
           <span class="ln-eq">${fmtUsd(s.equity_usd, 0)}</span>
         </div>
+        <div class="ln-tagline">${esc(tagline)}</div>
         <div class="ln-stats">
           <span class="s"><span class="lk">Net PnL</span> <span class="lv ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 2)}</span></span>
           <span class="s"><span class="lk">uPnL</span> <span class="lv ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 2)}</span></span>
@@ -584,6 +673,15 @@
     el.innerHTML = overall + cells;
   }
 
+  // Compact price formatter — adapts dp to magnitude so a $0.0042 alt and a
+  // $68,000 BTC both read cleanly in the ENTRY/CURRENT columns.
+  function fmtPx(v) {
+    if (v == null || isNaN(v) || v <= 0) return '—';
+    const a = Math.abs(v);
+    const dp = a >= 1000 ? 1 : a >= 1 ? 3 : a >= 0.01 ? 5 : 8;
+    return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  }
+
   function renderPositions(d) {
     const rows = d.positions || [];
     $('pos-cnt').textContent = rows.length;
@@ -591,19 +689,28 @@
     const COLS = 9;
     const body = laneGroups(rows).map(g => {
       const s = g.stream, lc = s.toLowerCase();
-      const head = `<tr><td colspan="${COLS}" class="lane-head lane-${lc}">${esc(STREAM_LABEL[s])}<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
+      // Lane identity header: stream name + the trading-world tagline
+      // (product · sides · session). The whole stream is one distinct world.
+      const head = `<tr><td colspan="${COLS}" class="lane-head lane-${lc}" title="${esc(STREAM_TAGLINE[s])}">`
+        + `${esc(STREAM_LABEL[s])} <span class="ln-tag">${esc(STREAM_TAGLINE[s])}</span>`
+        + `<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
       const trs = g.rows.map(p => {
-        const rc = (p.row_count > 1) ? ` <span class="b-flat">×${p.row_count}</span>` : '';
+        // ×N badge = N stacked positions on this (symbol, strategy, side)
+        // logical key (now shrinking post anti-churn). size_usd is the aggregate.
+        const rc = (p.row_count > 1)
+          ? ` <span class="b-flat stack-badge" title="${p.row_count} stacked positions on this (symbol, strategy, side) — shrinking post anti-churn; SIZE$ is the aggregate">×${p.row_count}</span>`
+          : '';
+        const dpc = (p.delta_pct >= 0 ? '+' : '') + (p.delta_pct || 0).toFixed(2) + '%';
         return `<tr class="row-${lc}">
           <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
           <td class="l tk" title="${esc(p.symbol)}${p.row_count>1?' ×'+p.row_count:''}">${esc(p.symbol)}${rc}</td>
           <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
-          <td class="dir ${esc(p.side)}">${esc(p.side)}</td>
+          <td class="dir ${esc(p.side)}" title="${esc(p.side)}${lc==='b'?' (CFD — long/short)':''}">${esc(p.side)}</td>
+          <td class="num b-flat" title="entry ${fmtPx(p.entry_price)}">${fmtPx(p.entry_price)}</td>
+          <td class="num" title="current (last close) ${fmtPx(p.last_price)}">${fmtPx(p.last_price)}</td>
+          <td class="num ${pn(p.delta_pct)}" title="price move since entry">${dpc}</td>
           <td class="num">${fmtUsd(p.size_usd, 0)}</td>
           <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
-          <td class="num ${pn(p.delta_pct)}">${(p.delta_pct >= 0 ? '+' : '') + (p.delta_pct || 0).toFixed(2)}%</td>
-          <td class="num b-flat">${hms(p.held_sec)}</td>
-          <td class="num b-flat">${(p.cell_mult || 1).toFixed(2)}×</td>
         </tr>`;
       }).join('');
       return head + trs;
@@ -611,10 +718,10 @@
     $('pos-body').innerHTML =
       `<table class="tbl-pos"><colgroup>
         <col class="c-ven"><col class="c-sym"><col class="c-str"><col class="c-side">
-        <col class="c-size"><col class="c-upnl"><col class="c-dlt"><col class="c-held"><col class="c-mult">
+        <col class="c-entry"><col class="c-cur"><col class="c-dlt"><col class="c-size"><col class="c-upnl">
        </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th class="l">STRAT</th><th>SIDE</th>
-        <th>SIZE$</th><th>uPnL$</th><th>Δ%</th><th>HELD</th><th>MULT</th>
+        <th>ENTRY</th><th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th>uPnL$</th>
       </tr></thead><tbody>${body}</tbody></table>`;
   }
 
@@ -798,9 +905,16 @@
   // ts (gray) + level/keyword coloring. Auto-scroll to bottom when new lines arrive.
   function classifyLog(line) {
     const l = line.toLowerCase();
-    if (l.includes('[error]') || l.includes('exception') || l.includes('traceback')) return 'bl-err';
-    if (l.includes('[warning]') || l.includes('rejected')) return 'bl-warn';
-    if (l.includes('order resp ok=true') || /\bopen\b/.test(l) || /\[tick \d+\]/.test(l)) return 'bl-hi';
+    // Standard Python-logging level tokens (` ERROR `, `[error]`, `:error:`) +
+    // failure signatures. ERROR/CRITICAL = red, WARNING = amber, the rest fall
+    // through to INFO/DEBUG (dim) with trade-event highlights in cyan.
+    if (/\b(error|critical|fatal)\b/.test(l) || l.includes('exception') || l.includes('traceback'))
+      return 'bl-err';
+    if (/\b(warn|warning)\b/.test(l) || l.includes('rejected') || l.includes('retry'))
+      return 'bl-warn';
+    if (l.includes('order resp ok=true') || /\bopen(ed)?\b/.test(l)
+        || /\bclos(e|ed)\b/.test(l) || /\bfill(ed)?\b/.test(l) || /\[tick \d+\]/.test(l))
+      return 'bl-hi';
     return '';
   }
   function fmtLogLine(line) {
@@ -858,6 +972,7 @@
     const board = $('board');
     if (board) {
       board.innerHTML = skeleton();
+      initTabs();
       setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
       poll();
       setInterval(poll, 1000);

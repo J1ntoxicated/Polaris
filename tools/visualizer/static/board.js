@@ -18,10 +18,13 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    /* header (auto) + exchange summary (auto) + tab strip (auto) + the active
-       tab pane (fills rest). Each tab pane owns its inner layout; long lists
-       scroll inside each panel's .p-body, never the page. */
-    grid-template-rows: auto auto auto minmax(0, 1fr);
+    /* b-head (auto) + KPIs (auto) + exchange summary (auto) + tab strip (auto)
+       + the active tab pane (fills rest = the only 1fr row, so the visible pane
+       lands here and hidden display:none panes take no grid space). 5 rows — the
+       KPIs row is its own element, so this MUST have 5 tracks or the tab strip
+       eats the 1fr and the active pane spills to an implicit bottom row. Each
+       tab pane owns its inner layout; long lists scroll inside .p-body. */
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
     gap: 8px;
     padding: 10px 16px;
     box-sizing: border-box;

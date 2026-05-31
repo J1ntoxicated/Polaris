@@ -16,6 +16,9 @@ from polaris.core.cell_matrix.schema import (
 )
 
 __all__ = [
+    "POSTERIOR_TILT_CEIL",
+    "POSTERIOR_TILT_FLOOR",
+    "POSTERIOR_TILT_MIN_N",
     "REGIME_ALIGN_AMPLIFY",
     "REGIME_ALIGN_DAMPEN",
     "REGIME_ALIGN_NEUTRAL",
@@ -24,6 +27,7 @@ __all__ = [
     "compute_avg_pnl_r",
     "compute_cell_score",
     "decay_factor",
+    "posterior_tilt",
     "regime_alignment_mult",
     "resolve_effective_score",
 ]
@@ -92,6 +96,48 @@ def apply_regime_alignment(score: float, *, strategy: str, regime: str) -> float
     untouched — callers opt in to alignment by wrapping the score with this.
     """
     return score * regime_alignment_mult(strategy=strategy, regime=regime)
+
+
+# ---------------------------------------------------------------------------
+# Posterior tilt → routing-score conviction scale (continuous, bounded)
+# ---------------------------------------------------------------------------
+
+POSTERIOR_TILT_FLOOR: Final[float] = 0.5
+"""Routing-score tilt at p_pos = 0 (max anti-edge evidence) — never 0."""
+
+POSTERIOR_TILT_CEIL: Final[float] = 1.5
+"""Routing-score tilt at p_pos = 1 (max +edge evidence)."""
+
+POSTERIOR_TILT_MIN_N: Final[int] = 20
+"""Below this posterior n_samples the tilt is neutral 1.0 (cold = no claim).
+
+Mirrors ``polaris.core.rotation.POSTERIOR_MIN_N`` — a posterior is only trusted
+to tilt routing once it has seen enough cost-adjusted closes.
+"""
+
+
+def posterior_tilt(*, p_pos: float, n_samples: int) -> float:
+    """Continuous routing-score conviction scale from the learner posterior.
+
+    ``p_pos = P(expectancy > 0)`` (the NIG marginal-t tail, posterior.py). The
+    tilt linearly maps ``p_pos ∈ [0, 1]`` onto ``[FLOOR, CEIL]`` so that:
+
+      * ``p_pos = 0.5`` (no evidence)          → 1.0 (neutral),
+      * ``p_pos → 1``   (validated +edge)      → ``CEIL`` (amplify, ≤ 1.5),
+      * ``p_pos → 0``   (anti-edge)            → ``FLOOR`` (dampen, ≥ 0.5).
+
+    Returns 1.0 EXACTLY when ``n_samples < POSTERIOR_TILT_MIN_N`` (cold / sparse
+    cell — no posterior claim, neither amplified nor suppressed) so exploration
+    of a cold cell is never throttled. Strictly positive, never an off-switch
+    (FLOOR > 0). Out-of-range / non-finite ``p_pos`` clamps to ``[0, 1]`` so a
+    corrupt row degrades to a bounded tilt rather than crashing the router.
+    """
+    if n_samples < POSTERIOR_TILT_MIN_N:
+        return 1.0
+    if not math.isfinite(p_pos):
+        return 1.0
+    p = min(1.0, max(0.0, p_pos))
+    return POSTERIOR_TILT_FLOOR + (POSTERIOR_TILT_CEIL - POSTERIOR_TILT_FLOOR) * p
 
 
 def decay_factor(*, elapsed_sec: float, half_life_sec: float = CELL_DECAY_HALF_LIFE_SEC) -> float:

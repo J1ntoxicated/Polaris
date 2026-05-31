@@ -28,6 +28,8 @@ from polaris.core.cell_matrix.score import (
     compute_avg_pnl_r,
     compute_cell_score,
     decay_factor,
+    posterior_tilt,
+    regime_alignment_mult,
     resolve_effective_score,
 )
 from polaris.core.cell_matrix.update import update_on_trade_close
@@ -42,6 +44,7 @@ __all__ = [
     "fetch_cell_stat",
     "fetch_parent2_score",
     "fetch_parent3_score",
+    "fetch_posterior_tilt",
     "load_eligible_scores",
     "load_eligible_scores_decayed",
     "resolve_routing_for_cell",
@@ -156,8 +159,17 @@ def resolve_routing_for_cell(
     Composes:
       1. Read cell + parent3 + parent2 (decayed to ``now_ts``).
       2. Apply warmup shrinkage 5 ≤ n_eff < 20 (parent3 → parent2 → 0).
-      3. Build the eligible pool from cells with decayed n_eff ≥ min_live_n.
-      4. Classify quartile + return mult.
+      3. Edge-routing tilt of the (warmup-shrunk) effective score — the INPUT to
+         the quartile classifier, NOT a new sizing multiplier:
+           * ``regime_alignment_mult`` (1.25/1.0/0.8, ADR constants) for the
+             regime-aligned/misaligned strategy,
+           * a continuous ``posterior_tilt`` (0.5..1.5) from the cell's
+             ``learner_posterior.p_pos`` (neutral 1.0 below POSTERIOR_TILT_MIN_N).
+         Both are pure multipliers ⇒ sign preserved, never zeroed; the eligible
+         pool (the comparison distribution) is left raw, so the tilt re-ranks the
+         cell against a stable pool. The mult OUTPUT is still {1.5, 1.0, 0.5}.
+      4. Build the eligible pool from cells with decayed n_eff ≥ min_live_n.
+      5. Classify quartile + return mult.
 
     This is the only function strategy code should call. Lower-level helpers
     are exported for tests + observability.
@@ -185,6 +197,15 @@ def resolve_routing_for_cell(
         parent2_score=parent2,
     )
 
+    # Edge-routing tilt of the effective score (the quartile-classifier INPUT).
+    # Pure multipliers on the routing score only — NO new sizing-chain slot, NO
+    # block: regime alignment (existing 1.25/1.0/0.8) + a continuous posterior
+    # tilt (0.5..1.5, neutral 1.0 when the posterior is cold/sparse). Sign is
+    # preserved and the value is never zeroed (flow_not_block).
+    align = regime_alignment_mult(strategy=key.strategy, regime=key.regime)
+    tilt = fetch_posterior_tilt(conn, key)
+    effective = effective * align * tilt
+
     pool = load_eligible_scores_decayed(conn, now_ts=now_ts, min_live_n=min_live_n,
                                         half_life_sec=half_life_sec)
 
@@ -204,13 +225,16 @@ def resolve_routing_for_cell(
         else "cold"
     )
     logger.info(
-        "[cell] %s/%s/%s/%s n_eff=%.1f score=%.3f pool=%d quartile=%s → mult=%.2fx",
+        "[cell] %s/%s/%s/%s n_eff=%.1f score=%.3f (align=%.2f tilt=%.2f) "
+        "pool=%d quartile=%s → mult=%.2fx",
         key.exchange,
         key.strategy,
         key.ticker,
         key.regime,
         cell_n_eff,
         effective,
+        align,
+        tilt,
         len(pool),
         quartile,
         mult,
@@ -298,6 +322,29 @@ def fetch_cell_stat(conn: sqlite3.Connection, key: CellKeyP0) -> CellStat | None
         score=float(row[4]),
         last_closed_ts=int(row[5]),
     )
+
+
+def fetch_posterior_tilt(conn: sqlite3.Connection, key: CellKeyP0) -> float:
+    """Read the cell's posterior conviction tilt for the routing score.
+
+    Reads ``learner_posterior.p_pos`` + ``n_samples`` for this 4-dim cell and
+    maps them through :func:`posterior_tilt` (continuous 0.5..1.5, neutral 1.0
+    below ``POSTERIOR_TILT_MIN_N``). Returns 1.0 (neutral — no tilt) when there
+    is no row OR on any DB error: a cold / unreadable posterior must never
+    amplify or suppress, so the cell routes exactly as it did before the
+    posterior signal existed (fail-open, flow_not_block).
+    """
+    try:
+        row = conn.execute(
+            "SELECT p_pos, n_samples FROM learner_posterior "
+            "WHERE exchange = ? AND strategy = ? AND ticker = ? AND regime = ?",
+            (key.exchange, key.strategy, key.ticker, key.regime),
+        ).fetchone()
+    except sqlite3.Error:
+        return 1.0
+    if row is None:
+        return 1.0
+    return posterior_tilt(p_pos=float(row[0]), n_samples=int(row[1]))
 
 
 def fetch_parent3_score(

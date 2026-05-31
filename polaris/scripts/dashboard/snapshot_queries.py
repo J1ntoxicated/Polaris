@@ -59,8 +59,8 @@ GPT_TOKENS_PER_CALL: Final[int] = 1500       # heuristic — average prompt+comp
 MODEL_PRICE_PER_1K: Final[Mapping[str, float]] = {
     "gpt": 0.000150,            # GPT-mini (P0)
     "gpt-5-mini": 0.000150,
-    "gpt_p1": 0.005,            # GPT-5.5 (P1)
-    "gpt-5.5": 0.005,
+    "gpt_p1": 0.000150,         # P1 tier downgraded to gpt-5-mini (Jin 2026-05-31)
+    "gpt-5.5": 0.005,           # legacy price kept for any pre-downgrade rows
     "haiku": 0.005,             # legacy P1 label — priced at the P1 tier
     "python": 0.0,              # deterministic gate — no LLM call
     "python_fast_path": 0.0,

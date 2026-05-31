@@ -54,7 +54,12 @@ __all__ = [
 # Latest GPT models (Jin verify 2026-05-07: gpt-5.5 + gpt-5.5-2026-04-23 work;
 # gpt-5.5-mini does NOT exist — fall back to gpt-5-mini for P0).
 GPT_P0_MODEL: Final[str] = "gpt-5-mini"
-GPT_P1_MODEL: Final[str] = "gpt-5.5"
+# P1-tier model. Jin 2026-05-31: the bot now has enough data (cell posteriors /
+# EWMA own the real decisions) that the P1 gates do not need top-tier reasoning —
+# the only active P1 caller is G7 exit, which is a HOLD-stamp over the FSM. So the
+# P1 model defaults to the cheap mini tier (gpt-5.5 → gpt-5-mini, ~33x cheaper/token,
+# ~92% of the bot's GPT cost). Env-overridable to restore gpt-5.5 if ever needed.
+GPT_P1_MODEL: Final[str] = os.environ.get("POLARIS_GPT_P1_MODEL", "gpt-5-mini")
 
 GPT_BASE_URL: Final[str] = "https://api.openai.com/v1"
 # Per-call timeout (sec) — keeps each gate under the L2 latency budget.

@@ -428,6 +428,26 @@
     return 'other';
   }
 
+  // ── Exchange focus (E3, Jin 2026-05-31) — display-only globe scoping ───────
+  // board.js calls window.PolarisGlobe.focusExchange('okx'|'capital'|'alpaca'|
+  // 'all'). null = full globe (default). When set, exchange-tagged nodes (pos /
+  // mkt / watch) that DON'T match the focus dim out, the matching wedge stays
+  // bright, and non-exchange infra nodes (regime/brain/orbit/etc.) recede a
+  // little so the selected cluster reads. Reversible — focusExchange('all')
+  // restores the full globe. No engine/data change.
+  let _exchangeFocus = null;       // normalized exchangeKey ('okx'|'cap'|'alp') or null
+  const _EXCHANGE_DIM = 0.16;      // non-matching exchange node alpha mult (mirror of chainDim)
+  const _INFRA_DIM = 0.40;         // non-exchange infra node alpha mult (still legible)
+  function exchangeFocusDim(node) {
+    if (!_exchangeFocus) return 1.0;
+    // Nodes that carry a venue (pos / mkt / watch) → match-or-dim.
+    if (node.exchange) {
+      return exchangeKey(node.exchange) === _exchangeFocus ? 1.0 : _EXCHANGE_DIM;
+    }
+    // Non-exchange infra (regime/brain/orbit/exec/etc.) — recede, don't vanish.
+    return _INFRA_DIM;
+  }
+
   // T8 MKT azimuth-based grouping: each exchange occupies a sector on the shell (Phase 2.5)
   // → activity on one exchange illuminates that whole sphere region distinctly
   const MKT_SECTORS = {
@@ -1504,10 +1524,11 @@
       const bump = n._intensityBump || 0;
       const base = Math.min(1, dataInt + bump);
       const depthFade = 0.35 + 0.65 * ((p.depth + 1) / 2);
+      const exFocus = exchangeFocusDim(n);   // E3 exchange-focus dim (1.0 when no focus)
 
       // Special path: T8 MKT dormant = full universe cloud — guaranteed visible (Phase 2.5)
       if (n.tier === 8 && n.state === 'dormant' && bump < 0.05) {
-        const a = 0.20 + depthFade * 0.30;
+        const a = (0.20 + depthFade * 0.30) * exFocus;
         ctx.fillStyle = `rgba(${cl[0]},${cl[1]},${cl[2]},${a})`;
         ctx.beginPath();
         ctx.arc(p.sx, p.sy, 0.6 + depthFade * 0.45, 0, Math.PI * 2);
@@ -1521,7 +1542,7 @@
       if (chainActive) {
         chainDim = chainNodes.has(i) ? 1.15 : 0.15;
       }
-      const intensity = base * breathe * depthFade * chainDim;
+      const intensity = base * breathe * depthFade * chainDim * exFocus;
       const tierSizeBoost = TIER_SIZE[n.tier] || 1.0;
       // Per-node size_mul (Jin v4: AI tier high/mid/low/tool 차별 + OBS/ACTION sev 차별)
       const sizeMul = n.size_mul || 1.0;
@@ -2165,6 +2186,17 @@
       if (n.cluster === cluster) n._intensityBump = Math.min(1.0, (n._intensityBump || 0) + strength * 0.5);
     }
   };
+
+  // ── E3 exchange-focus hook (Jin 2026-05-31) — called by board.js on select ─
+  // 'all' (or null/empty) restores the full globe; 'okx'|'capital'|'alpaca'
+  // focus the matching cluster + dim the rest. Display-only. The render loop
+  // reads _exchangeFocus via exchangeFocusDim() each frame — no relayout.
+  window.PolarisGlobe = window.PolarisGlobe || {};
+  window.PolarisGlobe.focusExchange = (which) => {
+    const w = (which || 'all').toLowerCase();
+    _exchangeFocus = (w === 'all' || w === '') ? null : exchangeKey(w);
+  };
+  window.PolarisGlobe.getFocusExchange = () => _exchangeFocus;
 
   // Jin 2026-04-27 v4: 전체 cluster pulse — system-wide event 만 (regime change 등)
   // Single linear event (trade/signal) 는 cluster 전체 X, 해당 chain link 만 spark

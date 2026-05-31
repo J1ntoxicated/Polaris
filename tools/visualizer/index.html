@@ -524,13 +524,17 @@
  <div id="board"></div>
 </div>
 
-<script src="static/sphere-render.js?v=8_node_size_bump_20260502"></script>
+<script src="static/sphere-render.js?v=9_e3_exchange_focus"></script>
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
-<script src="static/board.js?v=13_grid_rows_fix"></script>
-<script src="static/board_tabs.js?v=1_e2_ia_rebuild"></script>
-<script src="static/board_tabs_ext.js?v=1_e2_ia_rebuild"></script>
+<script src="static/board.js?v=14_e3_exchange_selector"></script>
+<!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
+     venue scope helpers) loads after board.js (needs window.PolarisBoard) and
+     before the tab modules (which read its scope helpers). -->
+<script src="static/board_exchange.js?v=1_e3_exchange_selector"></script>
+<script src="static/board_tabs.js?v=2_e3_venue_scope"></script>
+<script src="static/board_tabs_ext.js?v=2_e3_venue_scope"></script>
 <script>
   // 30/70 split + left column globe(2/3)/log(1/3). sphere engine fits to canvas
   // clientWidth/Height; after layout settles, nudge resize twice (rAF + delayed) so fit()

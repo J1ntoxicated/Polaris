@@ -18,13 +18,11 @@
   #board {
     height: 100vh; min-height: 0; overflow: hidden;
     display: grid;
-    /* b-head (auto) + KPIs (auto) + exchange summary (auto) + tab strip (auto)
-       + the active tab pane (fills rest = the only 1fr row, so the visible pane
-       lands here and hidden display:none panes take no grid space). 5 rows — the
-       KPIs row is its own element, so this MUST have 5 tracks or the tab strip
-       eats the 1fr and the active pane spills to an implicit bottom row. Each
-       tab pane owns its inner layout; long lists scroll inside .p-body. */
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    /* 6 rows: head + KPIs + exchange selector + summary + tab strip + the active
+       tab pane (the only 1fr — hidden display:none panes take no grid space).
+       MUST be 6 tracks or the tab strip eats the 1fr and the pane spills to an
+       implicit bottom row. Each pane owns its layout; lists scroll in .p-body. */
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
     gap: 8px;
     padding: 10px 16px;
     box-sizing: border-box;
@@ -73,7 +71,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* 3-stream exchange summary strip — ALWAYS visible (Jin: stays on top).
-     server-fed d.streams, 3 venue lanes. Display-only rollup. */
+     server-fed d.streams, 3 venue lanes. E3 lane/chip styles: board_exchange.js. */
   #board .streams-strip {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px;
   }
@@ -260,6 +258,9 @@
 
     <div class="kpis" id="b-kpis"></div>
 
+    <!-- EXCHANGE SELECTOR (E3) — scopes tabs below + globe focus (board_exchange.js). -->
+    ${window.PolarisBoardExchange ? window.PolarisBoardExchange.selectorMarkup() : ''}
+
     <!-- 3-STREAM EXCHANGE SUMMARY — always visible (stays on top). -->
     <div class="streams-strip" id="b-streams"></div>
 
@@ -319,7 +320,8 @@
           <span class="s" title="AI cost attributed to this lane only (position-linked gate calls); pre-position G1-G5 LLM spend is unattributable and excluded"><span class="lk">AI$*</span> <span class="lv b-flat">${fmtUsd(s.ai_cost_usd, 4)}</span></span>
           <span class="s"><span class="lk">Net-Cost</span> <span class="lv ${pn(s.net_after_cost_usd)}">${fmtUsd(s.net_after_cost_usd, 2)}</span></span>
         </div>` : '';
-      return `<div class="lane lane-${lc}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
+      const exKey = String(s.venue || '').toLowerCase();   // E3 click→scope key
+      return `<div class="lane lane-${lc}" data-ex="${esc(exKey)}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · click to scope · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
         <div class="ln-top">
           <span class="ln-label">${esc(s.label)}</span>
           <span class="ln-eq">${fmtUsd(s.equity_usd, 0)}</span>
@@ -335,6 +337,8 @@
         </div>${costRow}${recentClosedRow(s)}
       </div>`;
     }).join('');
+    // Re-apply the active-exchange highlight (innerHTML rewrite cleared it).
+    if (window.PolarisBoardExchange) window.PolarisBoardExchange.syncExchangeUi();
   }
 
   function recentClosedRow(s) {
@@ -376,6 +380,12 @@
 
   // ── poll loop ─────────────────────────────────────────────────────────────
   let _lastFrame = null;
+  // E3: re-render streams highlight + active tab now (called by board_exchange.js).
+  function rerenderActive() {
+    if (!_lastFrame) return;
+    renderStreams(_lastFrame);
+    if (window.PolarisBoardTabs) window.PolarisBoardTabs.renderTab(_activeTab, _lastFrame);
+  }
   function render(d) {
     _lastFrame = d;
     renderHeader(d);
@@ -459,6 +469,9 @@
     fmtPx: fmtPx, fmtR: fmtR, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
+    // E3: re-render hook for exchange-select. The scope helpers
+    // (getActiveExchange/venueMatches/venueFilter) are added by board_exchange.js.
+    rerenderActive: rerenderActive,
   };
 
   function init() {
@@ -467,6 +480,7 @@
     if (board) {
       board.innerHTML = skeleton();
       initTabs();
+      if (window.PolarisBoardExchange) window.PolarisBoardExchange.initExchangeSelector();
       setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
       poll();
       setInterval(poll, 1000);

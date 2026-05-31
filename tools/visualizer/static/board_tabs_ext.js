@@ -13,8 +13,25 @@
   const T = window.PolarisBoardTabs;
   if (!B || !T) { return; }   // board.js + board_tabs.js must load first
   const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, pn, esc, hms, hhmmss,
-    venueStream } = B;
+    venueStream, getActiveExchange, venueMatches, venueFilter } = B;
   const setCnt = T.setCnt;
+
+  // E3 (Jin 2026-05-31): analytics tabs scope where the data carries venue
+  // (EDGE edge_validation.exchange / RISK cell.exchange / last_rotation.venue);
+  // genuinely cross-venue metrics (FSM / exit reasons / GPT / shadow agreement /
+  // admission / alerts / equity / confidence) render with an 'all venues' note
+  // rather than a fabricated per-venue split. ``scopeLabel`` = '' on ALL.
+  function scopeLabel() {
+    const ex = getActiveExchange();
+    return ex === 'all' ? '' : ex.toUpperCase();
+  }
+  // A small 'all venues (cross-venue metric)' note row for global panels.
+  function globalNote() {
+    const sc = scopeLabel();
+    return sc
+      ? `<div class="row" style="grid-template-columns:1fr;color:var(--p-dim);font-size:9px">scope ${esc(sc)} — cross-venue metric (all venues)</div>`
+      : '';
+  }
 
   // ── TAB 5 · EXIT ──────────────────────────────────────────────────────────
   function renderExit(d) {
@@ -40,12 +57,12 @@
     const rbody = $('exit-reasons');
     if (rbody) {
       const max = reasons.reduce((m, r) => Math.max(m, r.count), 1);
-      rbody.innerHTML = reasons.length ? reasons.map(r => `
+      rbody.innerHTML = globalNote() + (reasons.length ? reasons.map(r => `
         <div class="row" style="grid-template-columns:90px 1fr 40px" title="${esc(r.reason)} ×${r.count}">
           <span class="name">${esc(r.reason)}</span>
           <span class="hbar"><i style="width:${(r.count / max * 100).toFixed(0)}%"></i></span>
           <span class="num b-flat">${r.count}</span>
-        </div>`).join('') : '<div class="empty">no closed trades</div>';
+        </div>`).join('') : '<div class="empty">no closed trades</div>');
     }
     // G6 / G7 gate decisions
     const gbody = $('exit-gates');
@@ -68,7 +85,7 @@
     const gpt = d.gpt_stats || [];
     const gbody = $('ai-gpt');
     if (gbody) {
-      gbody.innerHTML = gpt.length ? gpt.map(g => {
+      gbody.innerHTML = globalNote() + (gpt.length ? gpt.map(g => {
         const ok = (g.ok_pct == null) ? 100 : g.ok_pct;
         const okStyle = ok < 50 ? 'color:var(--p-red);font-weight:700'
           : ok < 90 ? 'color:var(--p-ylw);font-weight:700' : 'color:var(--p-grn)';
@@ -80,7 +97,7 @@
           <span class="num" style="${okStyle}">${ok.toFixed(0)}%</span>
           <span class="num b-flat">${fmtUsd(g.cost_24h_proj_usd, 2)}</span>
         </div>`;
-      }).join('') : '<div class="empty">deterministic · no GPT calls (1h)</div>';
+      }).join('') : '<div class="empty">deterministic · no GPT calls (1h)</div>');
     }
     // Conductor shadow agreement + admission summary
     const ai = d.ai_shadow || {};
@@ -181,10 +198,15 @@
     el.innerHTML = overall + cells;
   }
   function renderEdge(d) {
-    const rows = d.edge_validation || [];
+    // edge_validation carries an ``exchange`` venue → scope it (E3).
+    const rows = venueFilter(d.edge_validation, 'exchange');
     const body = $('edge-body'); if (!body) return;
     setCnt('edge-body-cnt', rows.length);
-    if (!rows.length) { body.innerHTML = '<div class="empty">edge validation warming up</div>'; return; }
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">edge validation warming up${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
     body.innerHTML = rows.map(e => {
       const v = (e.verdict || '').toLowerCase();
       const cls = v.includes('anti') ? 'verdict-anti' : v.includes('edge') || v.includes('valid') ? 'verdict-edge' : 'verdict-neutral';
@@ -203,7 +225,10 @@
     const el = $('b-rotation'); if (!el) return;
     const rc = d.rotation_count || 0;
     const sfe = d.session_forced_exit_count || 0;
-    const last = d.last_rotation || null;
+    // Totals are cross-venue session counts (global); the last-rotation detail
+    // carries a venue → hide it when scoped to a different venue (E3).
+    const last = (d.last_rotation && venueMatches(d.last_rotation.venue))
+      ? d.last_rotation : null;
     let lastHtml;
     if (last) {
       const eNew = last.e_new || 0, eHeld = last.e_held || 0;
@@ -212,21 +237,28 @@
         + `<span class="${pn(eNew - eHeld)}">E$new ${eNew.toFixed(1)}</span> vs E$held ${eHeld.toFixed(1)} `
         + `· mgn ${(last.margin || 0).toFixed(1)} · cost ${(last.cost || 0).toFixed(2)}</span>`;
     } else {
-      lastHtml = `<span class="rt-last rt-none">no rotations yet</span>`;
+      const sc = scopeLabel();
+      lastHtml = `<span class="rt-last rt-none">${sc ? 'no recent rotation · ' + esc(sc) : 'no rotations yet'}</span>`;
     }
+    // Totals span all venues; note it when scoped (counts are not per-venue).
+    const sc = scopeLabel();
+    const scopeKv = sc ? `<span class="rt-kv"><span class="lk">scope</span> <span class="lv">${esc(sc)} (totals all venues)</span></span>` : '';
     el.innerHTML =
       `<span class="rt-title" title="capital-rotation = finite-capital opportunity-cost redeploy (display-only telemetry)">Rotation</span>`
       + `<span class="rt-kv"><span class="lk">Rotations</span> <span class="lv">${rc}</span></span>`
       + `<span class="rt-kv"><span class="lk">Session Exits</span> <span class="lv">${sfe}</span></span>`
+      + scopeKv
       + lastHtml;
   }
   function renderCells(d) {
-    const top = (d.cell_top || []).map(c => ({ ...c, _side: 'top' }));
-    const bot = (d.cell_bottom || []).map(c => ({ ...c, _side: 'bot' }));
+    // Cell rows carry an ``exchange`` venue → scope them (E3).
+    const top = venueFilter(d.cell_top, 'exchange').map(c => ({ ...c, _side: 'top' }));
+    const bot = venueFilter(d.cell_bottom, 'exchange').map(c => ({ ...c, _side: 'bot' }));
     const rows = top.concat(bot);
     const body = $('cell-body'); if (!body) return;
     if (!rows.length) {
-      body.innerHTML = '<div class="empty">cold start · building<br><span class="b-flat">(need n≥20 samples)</span></div>';
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">cold start · building${sc ? ' · ' + esc(sc) : ''}<br><span class="b-flat">(need n≥20 samples)</span></div>`;
       return;
     }
     body.innerHTML = rows.map(c => {
@@ -242,17 +274,17 @@
     const alerts = (d.alerts || []).slice(0, 12);
     const body = $('alert-body'); if (!body) return;
     setCnt('alert-body-cnt', alerts.length);
-    body.innerHTML = alerts.length ? alerts.map(a => `
+    body.innerHTML = globalNote() + (alerts.length ? alerts.map(a => `
       <div class="row" style="grid-template-columns:54px 1fr" title="[${esc(a.level)}] ${esc(a.module)} ${hhmmss(a.ts)} — ${esc(a.msg || '')}">
         <span class="lvl-${esc(a.level)}">${esc(a.level)}</span>
         <span class="name b-flat" style="font-weight:400">${esc(a.msg || '')}</span>
-      </div>`).join('') : '<div class="empty">no alerts</div>';
+      </div>`).join('') : '<div class="empty">no alerts</div>');
   }
   function renderRiskAdmit(d) {
     const ai = d.ai_shadow || {};
     const rows = ai.admission || [];
     const body = $('risk-admit'); if (!body) return;
-    body.innerHTML = rows.length ? rows.map(r => {
+    body.innerHTML = globalNote() + (rows.length ? rows.map(r => {
       const sp = r.suppress_pct || 0;
       const barCls = sp >= 50 ? 'bar-neg' : sp >= 20 ? 'bar-warn' : '';
       return `<div class="row" style="grid-template-columns:1fr 1fr 56px" title="${esc(r.regime)} · would-suppress ${r.would_suppress_n}/${r.n} net of the real round-trip fee (SHADOW)">
@@ -260,7 +292,7 @@
         <span class="hbar ${barCls}"><i style="width:${sp.toFixed(0)}%"></i></span>
         <span class="num b-flat">${r.would_suppress_n}/${r.n}</span>
       </div>`;
-    }).join('') : '<div class="empty">no admission-shadow rows (1h)</div>';
+    }).join('') : '<div class="empty">no admission-shadow rows (1h)</div>');
   }
 
   // ── register EXIT / AI / EDGE / RISK into the shared dispatch ──────────────

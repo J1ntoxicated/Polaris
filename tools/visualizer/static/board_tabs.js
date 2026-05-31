@@ -15,7 +15,18 @@
   const B = window.PolarisBoard;
   if (!B) { return; }   // board.js must load first
   const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, pn, esc, hms, hhmmss,
-    venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE } = B;
+    venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
+    getActiveExchange, venueFilter } = B;
+
+  // E3 (Jin 2026-05-31): when an exchange is selected (not 'all'), each tab
+  // scopes its venue-carrying rows to that venue (client-side filter; no data
+  // change). A small inline note is appended to a scoped panel head; tabs whose
+  // data carries no venue render with an 'all venues' note rather than a faked
+  // per-venue split. ``scopeLabel`` = uppercase venue name or '' on ALL.
+  function scopeLabel() {
+    const ex = getActiveExchange();
+    return ex === 'all' ? '' : ex.toUpperCase();
+  }
 
   // ── tab CSS (panel shell + tables + lane heads + inner layouts) ───────────
   // These styles back the tab CONTENT only; the always-visible header / KPIs /
@@ -245,9 +256,10 @@
   // ── tab counts (header badges per tab) ────────────────────────────────────
   function setCnt(id, val) { const el = $(id); if (el) el.textContent = (val === '' || val == null) ? '' : ('· ' + val); }
   function renderTabCounts(d) {
-    setCnt('tabcnt-positions', (d.positions || []).length);
-    setCnt('tabcnt-trades', (d.recent_trades || []).length);
-    setCnt('tabcnt-regime', (d.regime_states || []).length);
+    // Counts reflect the active-exchange scope (venue-carrying tabs).
+    setCnt('tabcnt-positions', venueFilter(d.positions).length);
+    setCnt('tabcnt-trades', venueFilter(d.recent_trades).length);
+    setCnt('tabcnt-regime', venueFilter(d.regime_states).length);
     setCnt('tabcnt-strategy', (d.strategy_stats || []).length);
     const surf = d.exit_surface || {};
     const fsm = surf.fsm_states || {};
@@ -262,10 +274,14 @@
   const POS_COLS = 14;
   const _lastPx = {};   // (venue|symbol|strat|side) → last CURRENT price for flash
   function renderPositions(d) {
-    const rows = d.positions || [];
+    const rows = venueFilter(d.positions);   // E3 venue scope
     const body = $('pos-body'); if (!body) return;
     setCnt('pos-body-cnt', rows.length);
-    if (!rows.length) { body.innerHTML = '<div class="empty">no open positions</div>'; return; }
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no open positions${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
     const groups = laneGroups(rows).map(g => {
       const s = g.stream, lc = s.toLowerCase();
       const head = `<tr><td colspan="${POS_COLS}" class="lane-head lane-${lc}" title="${esc(STREAM_TAGLINE[s])}">`
@@ -322,10 +338,14 @@
   // ── TAB 2 · TRADES (expanded, more rows) ──────────────────────────────────
   const TRD_COLS = 12;
   function renderTrades(d) {
-    const rows = (d.recent_trades || []).slice(0, 40);
+    const rows = venueFilter(d.recent_trades).slice(0, 40);   // E3 venue scope
     const body = $('trd-body'); if (!body) return;
     setCnt('trd-body-cnt', rows.length);
-    if (!rows.length) { body.innerHTML = '<div class="empty">no recent trades</div>'; return; }
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no recent trades${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
     const groups = laneGroups(rows).map(g => {
       const s = g.stream, lc = s.toLowerCase();
       const head = `<tr><td colspan="${TRD_COLS}" class="lane-head lane-${lc}">${esc(STREAM_LABEL[s])}<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
@@ -360,10 +380,14 @@
   // ── TAB 3 · REGIME ────────────────────────────────────────────────────────
   const REGIME_COLS = 8;
   function renderRegime(d) {
-    const rows = d.regime_states || [];
+    const rows = venueFilter(d.regime_states);   // E3 venue scope
     const body = $('regime-body'); if (!body) return;
     setCnt('regime-body-cnt', rows.length);
-    if (!rows.length) { body.innerHTML = '<div class="empty">no regime state yet</div>'; return; }
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no regime state yet${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
     const trs = rows.map(r => {
       const lc = venueStream(r.venue).toLowerCase();
       const confPct = Math.max(0, Math.min(100, (r.confidence || 0) * 100));
@@ -398,10 +422,14 @@
 
   // ── TAB 4 · STRATEGY ──────────────────────────────────────────────────────
   function renderStrategy(d) {
+    // StrategyStat carries no venue — genuinely global. When scoped, show an
+    // 'all venues' note rather than fabricating a per-venue split.
     const rows = d.strategy_stats || [];
     const body = $('strat-body'); if (!body) return;
     setCnt('strat-body-cnt', rows.length);
     if (!rows.length) { body.innerHTML = '<div class="empty">no strategy stats</div>'; return; }
+    const sc = scopeLabel();
+    const note = sc ? `<div class="empty" style="text-align:left;color:var(--p-dim)">scope ${esc(sc)} — strategy stats are cross-venue (all venues)</div>` : '';
     // per-(strategy×regime) confidence cells for the EV column.
     const cells = (d.confidence && d.confidence.cells) || [];
     const cellsByStrat = {};
@@ -427,7 +455,7 @@
         <td class="l" title="per-regime real-fee-net LCB cells">${evHtml}</td>
       </tr>`;
     }).join('');
-    body.innerHTML =
+    body.innerHTML = note +
       `<table><colgroup>
         <col style="width:14%"><col style="width:6%"><col style="width:7%"><col style="width:7%">
         <col style="width:6%"><col style="width:8%"><col style="width:10%"><col style="width:10%">

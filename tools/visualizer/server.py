@@ -141,15 +141,23 @@ def _fresh_snapshot() -> dict[str, Any]:
 
 
 def _resolve_bot_log() -> Path | None:
-    """Newest bot runtime log under data/paper/ (collect_*.log preferred)."""
+    """Newest LIVE bot runtime log under data/paper/.
+
+    Globs every ``*.log`` (the live bot may write any name, e.g.
+    ``production_overhaul_*.log``) and picks the most-recently-modified, excluding
+    non-bot logs (server/dashboard stdout, stderr, diag). The previous glob only
+    matched ``collect_*``/``polaris_runtime*``, so it tailed a stale dead-process
+    log while the live bot wrote elsewhere — the dashboard log pane showed no live
+    activity (Jin: logs must surface at every point)."""
     paper = Path("data/paper")
     if not paper.is_dir():
         return None
-    cands = sorted(
-        [*paper.glob("collect_*.log"), *paper.glob("polaris_runtime*.log")],
-        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
-        reverse=True,
-    )
+    cands = [
+        p for p in paper.glob("*.log")
+        if not p.name.endswith(("_stdout.log", "dashboard.log", "dashboard_e4.log"))
+        and "diag" not in p.name and "stderr" not in p.name
+    ]
+    cands.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
     return cands[0] if cands else None
 
 

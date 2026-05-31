@@ -91,16 +91,19 @@ _SNAPSHOT_TTL = 1.0  # 1s — match the board's 1s poll for live refresh
 
 
 def _fresh_graph() -> dict[str, Any]:
-    now = time.time()
-    with _snapshot_lock:
-        data: dict[str, Any] | None = _snapshot_cache["data"]
-        if data is not None and (now - float(_snapshot_cache["ts"])) < _SNAPSHOT_TTL:
-            return data
+    # Serve-stale-while-revalidate: the single _bg_refresh_loop owns (re)building,
+    # so a request thread NEVER triggers build_graph (that pile-up under the 1s/2s
+    # polls is what inflated a sub-second build to 60s). Return the warm cache
+    # instantly; only build inline on a cold start (cache still None pre-warm).
+    data: dict[str, Any] | None = _snapshot_cache["data"]
+    if data is not None:
+        return data
     fresh = build_graph(_DB_PATH)
     with _snapshot_lock:
-        _snapshot_cache["data"] = fresh
-        _snapshot_cache["ts"] = time.time()
-    return fresh
+        if _snapshot_cache["data"] is None:
+            _snapshot_cache["data"] = fresh
+            _snapshot_cache["ts"] = time.time()
+        return _snapshot_cache["data"]
 
 
 _dash_cache: dict[str, Any] = {"rows": None, "ts": 0.0}
@@ -108,17 +111,16 @@ _dash_lock = threading.Lock()
 
 
 def _fresh_dashboard() -> list[str]:
-    """dashboard_v2 ANSI rows (same view as the terminal), TTL-cached."""
-    now = time.time()
-    with _dash_lock:
-        rows: list[str] | None = _dash_cache["rows"]
-        if rows is not None and (now - float(_dash_cache["ts"])) < _SNAPSHOT_TTL:
-            return rows
+    """dashboard_v2 ANSI rows — served from the bg-refreshed cache (serve-stale)."""
+    rows: list[str] | None = _dash_cache["rows"]
+    if rows is not None:
+        return rows
     fresh = render_dashboard_v2(collect_snapshot(_DB_PATH))
     with _dash_lock:
-        _dash_cache["rows"] = fresh
-        _dash_cache["ts"] = time.time()
-    return fresh
+        if _dash_cache["rows"] is None:
+            _dash_cache["rows"] = fresh
+            _dash_cache["ts"] = time.time()
+        return _dash_cache["rows"]
 
 
 _snap_cache: dict[str, Any] = {"data": None, "ts": 0.0}
@@ -126,17 +128,16 @@ _snap_lock = threading.Lock()
 
 
 def _fresh_snapshot() -> dict[str, Any]:
-    """DashboardSnapshot as a structured JSON dict (native web board), TTL-cached."""
-    now = time.time()
-    with _snap_lock:
-        data: dict[str, Any] | None = _snap_cache["data"]
-        if data is not None and (now - float(_snap_cache["ts"])) < _SNAPSHOT_TTL:
-            return data
+    """DashboardSnapshot JSON dict (native web board) — served from bg cache."""
+    data: dict[str, Any] | None = _snap_cache["data"]
+    if data is not None:
+        return data
     fresh = dataclasses.asdict(collect_snapshot(_DB_PATH))
     with _snap_lock:
-        _snap_cache["data"] = fresh
-        _snap_cache["ts"] = time.time()
-    return fresh
+        if _snap_cache["data"] is None:
+            _snap_cache["data"] = fresh
+            _snap_cache["ts"] = time.time()
+        return _snap_cache["data"]
 
 
 def _resolve_bot_log() -> Path | None:
@@ -316,16 +317,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def _bg_refresh_loop() -> None:
-    """Keep the snapshot cache warm ahead of frontend fetches (30s)."""
+    """Single owner of the expensive snapshot build. Computes ``collect_snapshot``
+    ONCE per cycle and fans it out to all three read-model caches (graph json /
+    snapshot dict / dashboard_v2 rows) so request threads only ever serve a warm
+    cache. This removes the concurrent-rebuild pile-up that, under the board's 1s
+    poll + globe's 2s poll, turned a sub-second build into 60s+ of lock/CPU/SQLite
+    contention. Cadence ≈ build_time + 1s → near-live; never blocks a request."""
     while True:
-        time.sleep(5)
         try:
-            fresh = build_graph(_DB_PATH)
+            snap = collect_snapshot(_DB_PATH)
+            graph = build_graph(_DB_PATH, snapshot=snap)
+            snap_dict = dataclasses.asdict(snap)
+            dash_rows = render_dashboard_v2(snap)
+            now = time.time()
             with _snapshot_lock:
-                _snapshot_cache["data"] = fresh
-                _snapshot_cache["ts"] = time.time()
+                _snapshot_cache["data"] = graph
+                _snapshot_cache["ts"] = now
+            with _snap_lock:
+                _snap_cache["data"] = snap_dict
+                _snap_cache["ts"] = now
+            with _dash_lock:
+                _dash_cache["rows"] = dash_rows
+                _dash_cache["ts"] = now
         except Exception:  # noqa: BLE001 — display-only
             pass
+        time.sleep(1.0)
 
 
 def main() -> None:

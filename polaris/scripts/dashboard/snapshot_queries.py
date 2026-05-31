@@ -368,14 +368,17 @@ def _daily_realised_pnl(
 
 
 def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
-    # Last close per instrument. Resolved index-only via idx_bars_instrument_ts
-    # (instrument_id, ts) — the GROUP BY MAX(ts) is an index scan, then the close
-    # fetch hits only the matched (instrument_id, ts) rows.
+    # Last close per instrument. The previous `WHERE (instrument_id, ts) IN (…)`
+    # row-value form forced a full bars scan (SQLite can't index a row-value IN
+    # against a subquery → ~45s on a multi-M-row table). Rewritten as a JOIN: the
+    # GROUP BY MAX(ts) subquery resolves per-group via idx_bars_instrument_ts
+    # (instrument_id, ts), and the outer JOIN seeks each (instrument_id, ts) row
+    # by the same index → milliseconds.
     rows = _safe_query(
         conn,
-        """SELECT instrument_id, close FROM bars
-           WHERE (instrument_id, ts) IN
-             (SELECT instrument_id, MAX(ts) FROM bars GROUP BY instrument_id)""",
+        """SELECT b.instrument_id, b.close FROM bars b
+           JOIN (SELECT instrument_id, MAX(ts) AS mts FROM bars GROUP BY instrument_id) m
+             ON b.instrument_id = m.instrument_id AND b.ts = m.mts""",
     )
     return {str(r[0]): float(r[1] or 0.0) for r in rows}
 

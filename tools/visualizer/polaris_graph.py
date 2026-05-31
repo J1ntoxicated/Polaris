@@ -729,11 +729,19 @@ def _recent_closes(snap: Any) -> list[dict[str, Any]]:
     return out
 
 
-def build_graph(db_path: str | Path = "data/polaris_live.sqlite") -> dict[str, Any]:
+def build_graph(
+    db_path: str | Path = "data/polaris_live.sqlite",
+    snapshot: Any = None,
+) -> dict[str, Any]:
     """Build the full graph.json payload (display-only). Never raises on
-    missing data — empty lists are valid for every section."""
+    missing data — empty lists are valid for every section.
+
+    ``snapshot`` lets a caller (the server's single bg refresh thread) pass a
+    pre-built ``collect_snapshot`` result so the expensive snapshot is computed
+    once per cycle and fanned out to all read-models instead of rebuilt here.
+    """
     path = Path(db_path)
-    snap = collect_snapshot(path)
+    snap = snapshot if snapshot is not None else collect_snapshot(path)
     universe = _query_universe(path)
     held = {p.symbol for p in snap.positions}
     watch = _query_watch_focus(path, held)

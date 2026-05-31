@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -66,6 +67,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# P4 #2 — WS exit-mark freshness threshold (M6). Judged on ``time.monotonic()``
+# against ``QuoteTickWriter.live_px`` (never venue ts). Set ABOVE the WS reconnect
+# worst-case (BACKOFF_CAP_SEC=30s) so a single reconnect cannot flap the exit
+# mark between the WS tick and the bar close. A tick older than this → bar close
+# fallback (graceful degrade, never halts).
+WS_EXIT_MARK_FRESH_SEC = 35.0
+
 __all__ = [
     "ActivePositionRow",
     "find_open_trade_by_position_id",
@@ -84,9 +92,19 @@ class ActivePositionRow(dict[str, Any]):
 
 
 def load_active_position_rows(
-    conn: sqlite3.Connection, *, limit: int = LIVE_RECALC_MAX_POSITIONS,
+    conn: sqlite3.Connection,
+    *,
+    limit: int = LIVE_RECALC_MAX_POSITIONS,
+    quote_writer: Any = None,
 ) -> list[ActivePositionRow]:
-    """Read active positions + matching entry fill + most-recent bar close."""
+    """Read active positions + matching entry fill + most-recent bar close.
+
+    P4 #2 (LIVE exit mark): when ``quote_writer`` is supplied and carries a FRESH
+    WS tick (monotonic age < ``WS_EXIT_MARK_FRESH_SEC``, M6) for the instrument,
+    ``last_price`` is the live WS mid so the precise-exit engine + G6 react to
+    real-time price. No fresh tick (no WS / stale / reconnecting) → the bar close
+    fallback (graceful degrade, never halts — AGGRESSIVE invariant).
+    """
     rows = conn.execute(
         """
         SELECT p.position_id, p.venue, p.symbol, p.underlying_group_id,
@@ -121,15 +139,29 @@ def load_active_position_rows(
         # FIX-2 (2026-05-30): pull volume too (newest first) so the G6 monitor
         # sees REAL market data — the prior wiring hardcoded volume_now=0.0 and
         # recent_ticks=[] for every position, blinding the monitor.
+        instrument_id = f"{venue}:{symbol}"
         bar_row = conn.execute(
             """
             SELECT ts, close, high, low, volume FROM bars
             WHERE instrument_id = ? AND bar_interval = '1m'
             ORDER BY ts DESC LIMIT 20
             """,
-            (f"{venue}:{symbol}",),
+            (instrument_id,),
         ).fetchall()
-        last_price = float(bar_row[0][1]) if bar_row else entry_price
+        bar_close = float(bar_row[0][1]) if bar_row else entry_price
+        # P4 #2 — prefer a FRESH WS tick mid (M6: monotonic age check), else the
+        # bar close. live_px returns (mid, last_ws_monotonic); a tick older than
+        # the reconnect-proof threshold degrades to the bar (no flap).
+        last_price = bar_close
+        if quote_writer is not None:
+            px = quote_writer.live_px(instrument_id)
+            if px is not None:
+                mid, last_ws_monotonic = px
+                if (
+                    mid > 0.0
+                    and time.monotonic() - last_ws_monotonic < WS_EXIT_MARK_FRESH_SEC
+                ):
+                    last_price = mid
         atr_samples = [
             (float(br[2]) - float(br[3])) / float(br[1])
             for br in bar_row
@@ -477,7 +509,9 @@ async def recalc_active_positions(
     Fault-isolated per position: an exception in one position's G6/G7 chain
     increments ``state.fault_events`` but does not block the sweep.
     """
-    positions = load_active_position_rows(conn, limit=max_positions)
+    positions = load_active_position_rows(
+        conn, limit=max_positions, quote_writer=state.quote_writer
+    )
     if not positions:
         # No open positions — clear the G6 call cache so it never grows stale.
         state.g6_call_cache.prune(set())

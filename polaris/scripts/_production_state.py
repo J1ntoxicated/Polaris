@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from polaris.core.data.quote_writer import QuoteTickWriter
 from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
 from polaris.scripts._smoke_fills import SimulatedTrade
@@ -142,3 +143,9 @@ class ProdLoopState:
     last_entry_by_key: dict[tuple[str, str, str], tuple[int, str]] = field(
         default_factory=dict
     )
+    # P4 — WS real-time price source (shared QuoteTickWriter, in-mem live_px +
+    # ~30-tick ring). Consumers read fresh WS ticks (exit mark #2, G4 tick_window
+    # #3) and fall back to bar close when no fresh tick exists (graceful degrade,
+    # never halt). None until the loop wires it (smoke/replay paths leave it
+    # None → pure bar-close behavior, behavior-identical to pre-P4).
+    quote_writer: QuoteTickWriter | None = None

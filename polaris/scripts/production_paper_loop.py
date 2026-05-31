@@ -26,6 +26,7 @@ from polaris.core.altdata.cache import AltDataCache
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
 from polaris.core.altdata.fred_macro import FredMacroCollector
 from polaris.core.altdata.okx_funding import OKXFundingCollector
+from polaris.core.data.quote_writer import QuoteTickWriter
 from polaris.core.isolation.allocator_fence import (
     get_process_fence,
     reset_process_fence,
@@ -51,6 +52,7 @@ from polaris.scripts._production_tick import (
     _run_tick,
     _strategies_by_timeframe,
 )
+from polaris.scripts._production_ws import start_ws_producers
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
 from polaris.storage.schema import init_db
@@ -353,6 +355,20 @@ async def run_production_paper_loop(
             await capital_session.aclose()
             capital_session = None
 
+    # P4 — WS real-time price producers. One shared QuoteTickWriter (dedicated
+    # conn, 1Hz off-loop flush) fed by one WS client per venue with focus
+    # symbols. Spawned AFTER the Capital session so Capital WS reuses its token
+    # (M4). Tasks are stored + torn down in the finally below (M5). WS is
+    # additive: REST bar ingest stays the fallback, so a WS failure never halts.
+    quote_writer = QuoteTickWriter(target_db)
+    # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
+    # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
+    state.quote_writer = quote_writer
+    ws_tasks, _ws_clients = start_ws_producers(
+        conn, writer=quote_writer, stop_evt=stop_evt,
+        capital_session=capital_session,
+    )
+
     # P0 venue wire: build a single OKX adapter for real-roundtrip runs so the
     # demo order endpoints are reachable across every tick (open + close).
     okx_adapter: OKXAdapter | None = None
@@ -398,6 +414,15 @@ async def run_production_paper_loop(
             await layer0_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
+        # M5 — WS teardown. stop_evt (set above) ends every client.run + the
+        # flush loop cooperatively; cancel then gather(return_exceptions=True)
+        # joins them (final drain happens inside run_flush_loop on stop_evt),
+        # then close the dedicated writer conn AFTER the flush task has ended.
+        for t in ws_tasks:
+            t.cancel()
+        await asyncio.gather(*ws_tasks, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            quote_writer.close()
         if okx_adapter is not None:
             await okx_adapter.aclose()
         if alpaca_adapter is not None:

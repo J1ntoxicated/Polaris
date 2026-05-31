@@ -367,11 +367,24 @@ def _daily_realised_pnl(
 # ---------------------------------------------------------------------------
 
 
+# P4 #1 — dashboard current-price freshness window (wall-clock seconds against
+# quote_ticks.ts). WS ticks stamp ``int(time.time())`` (seconds, like bars.ts).
+# Generous (60s) because the dashboard is display-only: a recent WS mid is always
+# preferable to the last 1m bar close, and there is no exit/sizing risk here. A
+# tick older than this falls back to the bar close (graceful, no flap risk).
+_DASHBOARD_TICK_FRESH_SEC = 60
+
+
 def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
-    # Last close per instrument. The previous `WHERE (instrument_id, ts) IN (…)`
-    # row-value form forced a full bars scan (SQLite can't index a row-value IN
-    # against a subquery → ~45s on a multi-M-row table). Rewritten as a JOIN: the
-    # GROUP BY MAX(ts) subquery resolves per-group via idx_bars_instrument_ts
+    # P4 #1: prefer the latest WS quote tick mid (real-time px-flash) when it is
+    # fresh; otherwise fall back to the last bar close. Bars stay the calc source
+    # everywhere else — this only changes what "current price" the dashboard
+    # shows (behavior 0; positions.last_price reads this same dict downstream).
+    #
+    # bars JOIN: the previous `WHERE (instrument_id, ts) IN (…)` row-value form
+    # forced a full bars scan (SQLite can't index a row-value IN against a
+    # subquery → ~45s on a multi-M-row table). Rewritten as a JOIN: the GROUP BY
+    # MAX(ts) subquery resolves per-group via idx_bars_instrument_ts
     # (instrument_id, ts), and the outer JOIN seeks each (instrument_id, ts) row
     # by the same index → milliseconds.
     rows = _safe_query(
@@ -380,7 +393,21 @@ def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
            JOIN (SELECT instrument_id, MAX(ts) AS mts FROM bars GROUP BY instrument_id) m
              ON b.instrument_id = m.instrument_id AND b.ts = m.mts""",
     )
-    return {str(r[0]): float(r[1] or 0.0) for r in rows}
+    prices = {str(r[0]): float(r[1] or 0.0) for r in rows}
+
+    # Overlay fresh WS quote ticks (mid) on top of the bar-close baseline.
+    fresh_floor = _now_s() - _DASHBOARD_TICK_FRESH_SEC
+    tick_rows = _safe_query(
+        conn,
+        """SELECT q.instrument_id, q.mid FROM quote_ticks q
+           JOIN (SELECT instrument_id, MAX(ts) AS mts FROM quote_ticks GROUP BY instrument_id) m
+             ON q.instrument_id = m.instrument_id AND q.ts = m.mts
+           WHERE q.ts >= ? AND q.mid > 0.0""",
+        (fresh_floor,),
+    )
+    for inst, mid in tick_rows:
+        prices[str(inst)] = float(mid or 0.0)
+    return prices
 
 
 def _entry_price_lookup(conn: sqlite3.Connection) -> dict[tuple[str, str, str], float]:

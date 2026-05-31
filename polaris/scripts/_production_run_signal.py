@@ -301,10 +301,19 @@ async def run_pipeline_for_signal(
         raw_signal=sig, venue=venue, symbol=symbol, instrument_id=instrument_id,
         regime=regime, conn=conn,
     )
+    # P4 #3 — feed the G4 watcher the live WS tick window (last ~30 ticks,
+    # newest-last) so its stale/crossed-book judgement runs on real microstructure
+    # instead of the empty P0 placeholder. No WS history yet (no writer / no ticks)
+    # → [] (G4 treats freshness as unknown, never a manufactured stale KILL).
+    tick_window = (
+        state.quote_writer.recent_ticks(instrument_id)
+        if state.quote_writer is not None
+        else []
+    )
     g4_payload = build_watcher_payload(
         spread_bps=spread_bps_real, baseline_p50_spread_bps=spread_bps_real,
         listing_age_hours=listing_age_h, recent_reject_in_6h=recent_reject,
-        session_open_shock_window=False, tick_window=[],
+        session_open_shock_window=False, tick_window=tick_window,
         # T14 net-edge measurement inputs (DISPLAY/LOG-ONLY). Surfacing these
         # adds payload keys + the log line below; it does NOT change control
         # flow — no early return / no skip (SKIP_ON_NEGATIVE_NET_EDGE is False).

@@ -184,6 +184,44 @@ def capital_market_to_quote_tick(payload: dict[str, Any], *, ts: int) -> QuoteTi
 
 
 # ---------------------------------------------------------------------------
+# Alpaca → canonical
+# ---------------------------------------------------------------------------
+
+
+def alpaca_quote_to_quote_tick(payload: dict[str, Any], *, ts: int) -> QuoteTick:
+    """Convert an Alpaca WS quote message (``T="q"``) to canonical QuoteTick.
+
+    Alpaca v2 quote fields: ``S`` (symbol), ``bp`` (bid price), ``ap`` (ask
+    price), ``bs`` (bid size), ``as`` (ask size). ``ts`` is the canonical epoch
+    seconds supplied by the caller (we keep venue ``t`` parsing out of this pure
+    converter; the WS client passes ``int(time.time())``).
+    """
+    sym = str(payload["S"])  # e.g. "AAPL"
+    bid = _to_float(payload.get("bp"))
+    ask = _to_float(payload.get("ap"))
+    if bid <= 0.0 or ask <= 0.0:
+        raise ValueError(f"Alpaca quote {sym}: non-positive bid/ask ({bid}/{ask})")
+    mid = 0.5 * (bid + ask)
+    spread_bps = ((ask - bid) / mid) * 10_000.0
+
+    return QuoteTick(
+        instrument_id=f"alpaca:{sym}",
+        venue="alpaca",
+        symbol=sym,
+        ts=ts,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+        spread_bps=spread_bps,
+        bid_size=_to_float(payload.get("bs")),
+        ask_size=_to_float(payload.get("as")),
+        last_trade_price=mid,
+        last_trade_size=0.0,
+        source="alpaca_ws",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Market events
 # ---------------------------------------------------------------------------
 

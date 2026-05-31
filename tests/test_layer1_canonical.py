@@ -19,6 +19,7 @@ from polaris.core.data.baseline import (
     upsert_baseline_state,
 )
 from polaris.core.data.canonical import (
+    alpaca_quote_to_quote_tick,
     compute_underlying_group_id,
     make_market_event,
     okx_candle_to_bar,
@@ -104,6 +105,26 @@ def test_okx_ticker_to_quote_tick_basic() -> None:
 def test_okx_ticker_to_quote_tick_rejects_zero_bid() -> None:
     with pytest.raises(ValueError):
         okx_ticker_to_quote_tick({"instId": "X-USDT", "bidPx": "0", "askPx": "0"}, ts=NOW)
+
+
+def test_alpaca_quote_to_quote_tick_basic() -> None:
+    payload = {"S": "AAPL", "bp": 189.50, "ap": 189.60, "bs": 3, "as": 5}
+    qt = alpaca_quote_to_quote_tick(payload, ts=NOW)
+    assert qt.instrument_id == "alpaca:AAPL"
+    assert qt.venue == "alpaca"
+    assert qt.symbol == "AAPL"
+    assert qt.ts == NOW
+    assert qt.bid == 189.50
+    assert qt.ask == 189.60
+    assert math.isclose(qt.mid, 189.55)
+    assert qt.bid_size == 3.0
+    assert qt.ask_size == 5.0
+    assert qt.source == "alpaca_ws"
+
+
+def test_alpaca_quote_to_quote_tick_rejects_zero_ask() -> None:
+    with pytest.raises(ValueError):
+        alpaca_quote_to_quote_tick({"S": "AAPL", "bp": 189.5, "ap": 0}, ts=NOW)
 
 
 def test_okx_candle_to_bar_canonicalizes_ts_and_fields() -> None:

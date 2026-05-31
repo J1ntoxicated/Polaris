@@ -78,6 +78,39 @@ CREATE INDEX IF NOT EXISTS idx_gate_shadow_events_gate
     ON gate_shadow_events(gate_id, regime, cell_warm, created_ts);
 """
 
+# Component C (SHADOW) — edge-first entry admission shadow log. One row per
+# entry-evaluation: the admit / would_suppress decision computed net of the REAL
+# round-trip fee (behavior 0 — logged only, never blocks the pipeline). Mirrors
+# the gate_shadow_events precedent so the acceptance analysis can split the
+# would-suppress population by regime / strategy / basis. See
+# polaris/core/economics/entry_admission.py + .claude/plans/
+# okx_live_confidence_redesign_2026-05-31.md §C.
+DDL_ENTRY_ADMISSION_SHADOW = """
+CREATE TABLE IF NOT EXISTS entry_admission_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_id TEXT,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    regime TEXT NOT NULL DEFAULT '',
+    cell_n_eff REAL NOT NULL DEFAULT 0.0,
+    cell_avg_pnl_r REAL NOT NULL DEFAULT 0.0,
+    expected_move_r REAL NOT NULL DEFAULT 0.0,
+    real_round_trip_cost_r REAL NOT NULL DEFAULT 0.0,
+    admit INTEGER NOT NULL DEFAULT 1,
+    would_suppress INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    basis TEXT NOT NULL DEFAULT '',
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_ENTRY_ADMISSION_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_entry_admission_shadow_regime
+    ON entry_admission_shadow(regime, strategy_id, would_suppress, created_ts);
+"""
+
 DDL_AI_LESSONS = """
 CREATE TABLE IF NOT EXISTS ai_lessons (
     lesson_id TEXT PRIMARY KEY,

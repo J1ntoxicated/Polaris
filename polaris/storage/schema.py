@@ -58,6 +58,8 @@ from polaris.storage.schema_ddl_core import (
 from polaris.storage.schema_ddl_ext import (
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
+    DDL_ENTRY_ADMISSION_SHADOW,
+    DDL_ENTRY_ADMISSION_SHADOW_INDEX,
     DDL_FILLS,
     DDL_FILLS_INDEX_ORDER,
     DDL_FILLS_INDEX_TS,
@@ -142,6 +144,9 @@ ALL_DDL: tuple[str, ...] = (
     # AI-conductor P0 SHADOW — technical-vs-GPT shadow decision log
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
+    # Component C (SHADOW) — edge-first entry admission shadow log
+    DDL_ENTRY_ADMISSION_SHADOW,
+    DDL_ENTRY_ADMISSION_SHADOW_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,

@@ -127,6 +127,88 @@ def _read_universe_state(
     return (spread_bps, listing_age_hours)
 
 
+def _log_entry_admission_shadow(
+    shadow_conn: sqlite3.Connection | None,
+    *,
+    run_id: str,
+    sig: RawSignal,
+    venue: str,
+    symbol: str,
+    regime: str,
+    cell_routing: dict[str, Any],
+    entry_price: float,
+    atr_pct: float,
+) -> None:
+    """Component C (SHADOW): compute the edge-first admission decision + LOG it.
+
+    Behavior 0 — the decision is logged ONLY; the live pipeline admit/skip below
+    is UNCHANGED (this call adds a single ``entry_admission_shadow`` row and
+    returns). No-op when ``shadow_conn`` is None so the gated call is
+    byte-identical to the legacy path (mirrors ``signal_validator._log_g3_shadow``).
+
+    The cost is the REAL OKX round trip (``fees.real_fee_usd`` ×2 legs) expressed
+    in ATR-R (``cost_usd / atr_usd``), where ``atr_usd = entry_price * atr_pct *
+    2.0`` mirrors ``_production_close.py`` — the SAME R unit as the cell's
+    ``avg_pnl_r`` and the expected-move proxy (no $-basis mismatch). The fee leg
+    is sized at a representative $50 risk notional (the cost-R is the per-trade
+    fee fraction of an ATR move, independent of the not-yet-sized live notional).
+    ``net_edge`` is never consulted. Cold cell (n_eff < CELL_POOL_MIN_N_EFF)
+    ALWAYS admits.
+    """
+    if shadow_conn is None:
+        return
+    # Local imports keep this module free of an economics dependency unless the
+    # shadow wire actually fires (and avoid any load-order surprise).
+    from polaris.core.economics.entry_admission import (
+        entry_admission_decision,
+        expected_move_r_from_cell,
+        real_round_trip_cost_r_from_usd,
+    )
+    from polaris.core.economics.entry_admission_shadow import log_entry_admission
+    from polaris.core.economics.fees import real_fee_usd
+
+    n_eff = float(cell_routing.get("n_eff", 0.0) or 0.0)
+    avg_pnl_r = float(cell_routing.get("avg_pnl_r", 0.0) or 0.0)
+    wins_eff = float(cell_routing.get("wins_eff", 0.0) or 0.0)
+    expected_move_r = expected_move_r_from_cell(
+        n_eff=n_eff, wins_eff=wins_eff, avg_pnl_r=avg_pnl_r,
+    )
+    # ATR-R basis: atr_usd mirrors _production_close.py:120 (entry_price * atr_pct
+    # * 2.0) so the cost shares the cell-matrix R unit. A degenerate atr_usd <= 0
+    # makes the cost helper fail-open to 0.0 (never manufactures a would_suppress).
+    from polaris.core.pipeline.payload_builder import PNL_R_USD_DENOM
+
+    atr_usd = entry_price * atr_pct * 2.0
+    # One leg's real fee at a representative $50 risk-unit notional; ×2 legs is
+    # applied inside real_round_trip_cost_r_from_usd, then divided by atr_usd.
+    real_leg_usd = real_fee_usd(venue, PNL_R_USD_DENOM)
+    real_round_trip_cost_r = real_round_trip_cost_r_from_usd(
+        real_fee_one_leg_usd=real_leg_usd,
+        atr_usd=atr_usd,
+    )
+    decision = entry_admission_decision(
+        cell_n_eff=n_eff,
+        cell_avg_pnl_r=avg_pnl_r,
+        regime=regime,
+        expected_move_r=expected_move_r,
+        real_round_trip_cost_r=real_round_trip_cost_r,
+    )
+    log_entry_admission(
+        shadow_conn,
+        run_id=run_id,
+        signal_id=sig.signal_id,
+        venue=venue,
+        symbol=symbol,
+        strategy_id=sig.strategy_id,
+        regime=regime,
+        cell_n_eff=n_eff,
+        cell_avg_pnl_r=avg_pnl_r,
+        expected_move_r=expected_move_r,
+        real_round_trip_cost_r=real_round_trip_cost_r,
+        decision=decision,
+    )
+
+
 def _strategy_recent_reject(
     conn: sqlite3.Connection, *, strategy_id: str, now_ts: int,
     window_sec: int = 6 * 3600,
@@ -265,6 +347,29 @@ async def run_pipeline_for_signal(
         strategy_id=strategy.metadata.strategy_id, payload=payload,
         started_ts=now_ts, state=SignalLifecycle.RAW,
         stream_profile=stream_profile,
+    )
+    # Component C (SHADOW, behavior 0): compute the edge-first entry admission
+    # decision (regime-conditioned cell expectancy + cost-aware move vs REAL
+    # round-trip fee) and LOG it against this run. This NEVER branches the
+    # pipeline — the live admit/skip is owned entirely by the gates below; only a
+    # single entry_admission_shadow row is added. Passing ``conn`` as the shadow
+    # conn means a None conn (never happens on this production path) would be
+    # byte-identical (the helper no-ops). cell_routing lives inside g3_payload.
+    _g3_cell = g3_payload.get("cell_routing", {})
+    _log_entry_admission_shadow(
+        conn,
+        run_id=ctx.run_id,
+        sig=sig,
+        venue=venue,
+        symbol=symbol,
+        regime=regime,
+        cell_routing=_g3_cell if isinstance(_g3_cell, dict) else {},
+        # ATR-R basis: last_price is the entry/ref price (same as the live
+        # entry_price below) and bars_atr_pct is the bar-derived ATR%. atr_usd =
+        # last_price * bars_atr_pct * 2.0 mirrors _production_close.py so the
+        # shadow cost shares the cell-matrix R unit.
+        entry_price=last_price,
+        atr_pct=bars_atr_pct,
     )
     # G1-EFF: share the per-run focus cache so the G1 GPT call is reused across
     # signals/ticks while the universe composition is unchanged (efficiency

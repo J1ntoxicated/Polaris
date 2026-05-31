@@ -272,7 +272,9 @@
     }
 
     for (const d of draw) drawNode(d.n, d.p, now);
-    drawConductor(now);
+    // Jin: 컨덕터 제거(거슬림 — 개념은 알고 있으니 시각화 불필요). 위성은 보이지 않는
+    // 중심(origin)을 돈다. drawConductor 정의는 남겨둠(복원 필요 시 이 줄만 되살리면 됨).
+    // drawConductor(now);
 
     ctx.restore();
     requestAnimationFrame(frame);
@@ -360,11 +362,11 @@
   function drawConductor(now) {
     const p = project(conductor.x, conductor.y, conductor.z);
     const beat = conductor.beat, pulse = conductor.pulse;
-    const r = (12 + beat*4 + pulse*14) * zoom * p.persp;
+    const r = (6 + beat*2 + pulse*6) * zoom * p.persp;   // Jin: 확 축소 — 작은 무게추 코어
     const rot = now/4000, tilt = 0.42;
     const HOT=[255,240,210],MID=[255,150,40],COOL=[120,40,90],RING=[200,225,255];
     ctx.globalCompositeOperation='lighter';
-    for(let i=0;i<3;i++){const rr=r*(1.9-i*0.18);const g=ctx.createRadialGradient(p.sx,p.sy,r*0.95,p.sx,p.sy,rr);
+    for(let i=0;i<3;i++){const rr=r*(1.4-i*0.14);const g=ctx.createRadialGradient(p.sx,p.sy,r*0.95,p.sx,p.sy,rr);
       g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(0.45,`rgba(${HOT},${0.10-i*0.02})`);g.addColorStop(0.7,`rgba(${MID},${0.14-i*0.03})`);g.addColorStop(1,`rgba(${COOL},0)`);
       ctx.fillStyle=g;ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,tilt);ctx.rotate(rot);ctx.beginPath();ctx.arc(0,0,rr,Math.PI,Math.PI*2);ctx.fill();ctx.restore();}
     ctx.globalCompositeOperation='source-over';
@@ -375,13 +377,13 @@
     ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,0.94);
     ctx.strokeStyle=`rgba(${RING},${0.85+beat*0.15})`;ctx.lineWidth=Math.max(1,r*0.05);ctx.beginPath();ctx.arc(0,0,r*1.06,0,6.2832);ctx.stroke();
     ctx.strokeStyle=`rgba(${RING},0.35)`;ctx.lineWidth=Math.max(0.6,r*0.02);ctx.beginPath();ctx.arc(0,0,r*1.13,0,6.2832);ctx.stroke();ctx.restore();
-    for(let i=0;i<3;i++){const rr=r*(1.9-i*0.18);[['left',0.22],['right',0.07]].forEach(([side,baseA])=>{
+    for(let i=0;i<3;i++){const rr=r*(1.4-i*0.14);[['left',0.22],['right',0.07]].forEach(([side,baseA])=>{
       const g=ctx.createRadialGradient(p.sx,p.sy,r*0.95,p.sx,p.sy,rr);g.addColorStop(0,'rgba(0,0,0,0)');
       g.addColorStop(0.45,`rgba(${HOT},${baseA-i*0.03})`);g.addColorStop(0.7,`rgba(${MID},${baseA*0.9-i*0.03})`);g.addColorStop(1,`rgba(${COOL},0)`);
       ctx.fillStyle=g;ctx.save();ctx.translate(p.sx,p.sy);ctx.scale(1,tilt);ctx.rotate(rot);
       const a0=side==='left'?Math.PI*0.5:Math.PI*1.5,a1=side==='left'?Math.PI*1.5:Math.PI*2.5;ctx.beginPath();ctx.arc(0,0,rr,a0,a1);ctx.fill();ctx.restore();});}
-    const au=ctx.createRadialGradient(p.sx,p.sy,r,p.sx,p.sy,r*3.2);au.addColorStop(0,`rgba(${MID},${0.05+pulse*0.2})`);au.addColorStop(0.5,'rgba(159,199,255,0.04)');au.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=au;ctx.beginPath();ctx.arc(p.sx,p.sy,r*3.2,0,6.2832);ctx.fill();
+    const au=ctx.createRadialGradient(p.sx,p.sy,r,p.sx,p.sy,r*1.9);au.addColorStop(0,`rgba(${MID},${0.04+pulse*0.14})`);au.addColorStop(0.5,'rgba(159,199,255,0.04)');au.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=au;ctx.beginPath();ctx.arc(p.sx,p.sy,r*1.9,0,6.2832);ctx.fill();
     ctx.globalCompositeOperation='source-over';
     ctx.fillStyle=rgba(CONDUCTOR_THEME,0.9);ctx.font='700 8px JetBrains Mono, monospace';ctx.textAlign='center';
     ctx.fillText('CONDUCTOR',p.sx,p.sy+r+12);

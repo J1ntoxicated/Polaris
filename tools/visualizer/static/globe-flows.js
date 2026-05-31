@@ -23,7 +23,6 @@
   // Live particle streams along trade chains. Each is a polyline through node
   // positions; particles travel 0→1 along it, repeating while the trade is live.
   let chainStreams = [];      // [{key, nodes:[node...], color, speed, parts:[t...], pnl}]
-  let lifecycleArcs = [];     // capital-lifecycle inter-galaxy arcs (north-star)
   const ribbons = [];         // transient entry/exit ribbons (one-shot flares)
   const satLasers = [];       // transient satellite → conductor laser beams (one-shot)
   let _satTick = 0;           // wall-clock accumulator for satellite laser stagger
@@ -74,26 +73,20 @@
     chainStreams = out;
   }
 
-  // ── Capital-lifecycle arcs: crypto → CFD → Alpaca (north-star flow) ─────────
-  // One persistent arc per leg between galaxy centres; intensity tracks how much
-  // live activity each source galaxy has (open positions in chains).
-  function rebuildLifecycleArcs() {
-    const gs = window.PolarisGlobe_galaxyState;
-    const legs = [['okx', 'capital'], ['capital', 'alpaca']];
-    lifecycleArcs = legs.map(([a, b]) => ({ a: gs[a], b: gs[b], phase: Math.random(), parts: [0, 0.5] }));
-  }
 
   // ── Frame draw — called by globe-core before nodes are drawn ────────────────
   // faint grey neural pulse — Jin: "뭔가 지나가는 정도"만 (barely visible). Pale
   // grey core + very soft glow; trade-chain particles (§3) use this.
+  // Jin: 입자를 아주 작게 → 점이 아니라 "라인이 글로잉하며 신호가 지나가는" 느낌.
+  // 라인과 동일 회색 톤, 작은 코어 + 부드러운 글로우.
   function drawNeuralPulse(ctx, rgba, x, y, a) {
-    const g = ctx.createRadialGradient(x, y, 0, x, y, 3);
-    g.addColorStop(0, `rgba(200,205,215,${0.14 * a})`);
-    g.addColorStop(1, 'rgba(200,205,215,0)');
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 1.5);
+    g.addColorStop(0, `rgba(184,190,202,${0.16 * a})`);
+    g.addColorStop(1, 'rgba(184,190,202,0)');
     ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(x, y, 3, 0, 6.2832); ctx.fill();
-    ctx.fillStyle = `rgba(200,205,215,${Math.min(1, 0.30 * a)})`;
-    ctx.beginPath(); ctx.arc(x, y, 1.0, 0, 6.2832); ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = `rgba(198,204,214,${Math.min(1, 0.30 * a)})`;
+    ctx.beginPath(); ctx.arc(x, y, 0.5, 0, 6.2832); ctx.fill();
   }
 
   function drawFlows(ctx, project, now, dt, helpers) {
@@ -102,16 +95,10 @@
     const gs = window.PolarisGlobe_galaxyState;
     const allNodes = window.PolarisGlobe_nodes;
 
-    // 1) conductor ↔ galaxy synapse threads — Jin E6: 아주 옅게, 구조적으로만 희미하게
-    //    (거래 라인이 주역 — 거래만 라인 신경망). The trade chains (§3) are the show.
+    // Jin: conductor + its synapse lines removed (거래만 라인 신경망). cp = the (now
+    // invisible) cloud centre at origin — satellites still revolve around it and fire
+    // their event lasers toward it.
     const cp = project(conductor.x, conductor.y, conductor.z);
-    for (const k of ['okx', 'capital', 'alpaca']) {
-      const g = gs[k]; if (!g || !g._screen) continue;
-      const beat = 0.05 + g.pulse * 0.12;
-      ctx.strokeStyle = rgba([0x8c, 0x94, 0xa4], beat);   // Jin E6.1: 회색·거의 안보이게
-      ctx.lineWidth = 0.8;
-      ctx.beginPath(); ctx.moveTo(cp.sx, cp.sy); ctx.lineTo(g._screen.sx, g._screen.sy); ctx.stroke();
-    }
 
     // 1b) satellite EVENT lasers — Jin E6: 위성은 평소 선 없음. state==='firing' 위성이
     //     주기적으로(node phase로 stagger) conductor 로 빠른 레이저 빔을 한 발 쏜다
@@ -142,38 +129,19 @@
       const tt = Math.max(0, t - 0.32);
       const tx = lerp(sp.sx, cp.sx, tt), ty = lerp(sp.sy, cp.sy, tt);
       const a = (1 - t) * 0.7;
-      ctx.strokeStyle = rgba(lz.color, a);
+      ctx.strokeStyle = rgba([0x90, 0x96, 0xa2], a);   // Jin: 모든 라인 회색 통일(레이저도)
       ctx.lineWidth = 1.0;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy); ctx.stroke();
       // small glow at the head
       const gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, 4);
-      gr.addColorStop(0, rgba(lz.color, a));
-      gr.addColorStop(1, rgba(lz.color, 0));
+      gr.addColorStop(0, rgba([0x90, 0x96, 0xa2], a));
+      gr.addColorStop(1, rgba([0x90, 0x96, 0xa2], 0));
       ctx.fillStyle = gr;
       ctx.beginPath(); ctx.arc(hx, hy, 4, 0, 6.2832); ctx.fill();
     }
 
-    // 2) capital-lifecycle arcs (crypto → CFD → Alpaca), travelling particles
-    if (!lifecycleArcs.length) rebuildLifecycleArcs();
-    for (const arc of lifecycleArcs) {
-      const a = project(arc.a.cx, arc.a.cy, arc.a.cz);
-      const b = project(arc.b.cx, arc.b.cy, arc.b.cz);
-      const midx = (a.sx + b.sx) / 2, midy = (a.sy + b.sy) / 2 - Math.hypot(b.sx - a.sx, b.sy - a.sy) * 0.28;
-      // dotted guide arc (the north-star pathway)
-      ctx.strokeStyle = rgba([0xff, 0xf5, 0xd2], 0.16);
-      ctx.lineWidth = 0.9;
-      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.quadraticCurveTo(midx, midy, b.sx, b.sy); ctx.stroke();
-      // travelling capital particles
-      for (let i = 0; i < arc.parts.length; i++) {
-        arc.parts[i] += dt * 0.12;
-        if (arc.parts[i] > 1) arc.parts[i] -= 1;
-        const t = arc.parts[i];
-        const x = (1 - t) * (1 - t) * a.sx + 2 * (1 - t) * t * midx + t * t * b.sx;
-        const y = (1 - t) * (1 - t) * a.sy + 2 * (1 - t) * t * midy + t * t * b.sy;
-        ctx.fillStyle = rgba([0xff, 0xf5, 0xd2], 0.7);
-        ctx.beginPath(); ctx.arc(x, y, 1.8, 0, 6.2832); ctx.fill();
-      }
-    }
+    // Jin: capital-lifecycle inter-galaxy arcs removed (거래만 라인; 구조선 거슬림).
+    // The crypto→CFD→Alpaca capital flow gets its own dedicated viz later (#15).
 
     // 3) trade-chain particle flows — small WHITE neural pulses on a crisp,
     //    faintly pnl-tinted pathway (Jin: 작은 하얀 신경 입자 + 또렷한 연결).
@@ -181,7 +149,7 @@
       const pts = s.nodes.map((n) => project(n.x, n.y, n.z));
       // pathway line: gray, barely visible — just enough to read "something passing"
       // (Jin E6.1: 신경망 연결선도 회색 거의 안보이게; 색은 위성 노드로 구분).
-      ctx.strokeStyle = rgba([0x96, 0x9c, 0xa8], 0.09);
+      ctx.strokeStyle = rgba([0x90, 0x96, 0xa2], 0.11);   // Jin: 통일 회색, 가는 글로잉 라인
       ctx.lineWidth = 0.9;
       ctx.beginPath();
       ctx.moveTo(pts[0].sx, pts[0].sy);

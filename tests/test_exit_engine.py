@@ -273,3 +273,46 @@ def test_loser_timeout_not_fired_before_age() -> None:
         atr_pct=ATR_PCT, pnl_r=-0.1, held_seconds=10,
     )
     assert d.close is False
+
+
+# --- Component B: exit horizon ∝ timeframe (loser_timeout_sec override) -----
+
+
+def test_loser_timeout_override_default_is_flat() -> None:
+    # loser_timeout_sec=None keeps the flat EXIT_LOSER_TIMEOUT_SEC default
+    # (back-compat — every existing call site is unchanged).
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.8,
+        atr_pct=ATR_PCT, pnl_r=-0.1,
+        held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) + 1, loser_timeout_sec=None,
+    )
+    assert d.close is True
+    assert d.close_reason == "loser_timeout"
+
+
+def test_loser_timeout_long_horizon_not_closed_at_900() -> None:
+    # A 1H thesis (timeout floor 7200s) losing for 901s must NOT be force-closed
+    # — its horizon is respected. Stays above any stop / not protected so only
+    # the timeout path could fire (and must not).
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.8,
+        atr_pct=ATR_PCT, pnl_r=-0.1,
+        held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) + 1,  # 901s
+        loser_timeout_sec=7200.0,  # 2 bars of 1H
+    )
+    assert d.close is False
+    assert d.close_reason is None
+
+
+def test_loser_timeout_long_horizon_closes_past_its_window() -> None:
+    # The SAME 1H thesis DOES time out once held beyond its own (longer) window.
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=99.8,
+        atr_pct=ATR_PCT, pnl_r=-0.1,
+        held_seconds=7201, loser_timeout_sec=7200.0,
+    )
+    assert d.close is True
+    assert d.close_reason == "loser_timeout"

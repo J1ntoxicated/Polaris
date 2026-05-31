@@ -15,17 +15,21 @@ halt. The G6 -1.0R hard ``stop_hit`` rail lives in the G6 gate and is untouched
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.isolation.reentry import bar_seconds
 from polaris.core.live_recalc.exit_engine import (
+    EXIT_LOSER_TIMEOUT_SEC,
     ExitState,
     evaluate_exit,
     init_exit_state,
 )
 from polaris.core.live_recalc.session_exit_rail import session_forced_exit
 from polaris.core.streams import resolve_stream
+from polaris.strategies import STRATEGY_REGISTRY
 
 if TYPE_CHECKING:
     from polaris.scripts._production_recalc import ActivePositionRow
@@ -36,6 +40,41 @@ __all__ = [
     "run_precise_exit",
     "run_session_forced_exit",
 ]
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+# Component B exit horizon ∝ timeframe. A still-OPEN losing position is given at
+# least this many bars of its strategy timeframe before the stale-loser timeout
+# can fire — so a 1H tsmom thesis is not force-closed at the flat 900s, while a
+# 1m strategy keeps the short 900s timeout (max() floor below). EXPECTANCY (give
+# the thesis its horizon), NOT a defensive throttle — the ATR-trail / MFE stops
+# (the precise exits) are untouched. Env-overridable.
+EXIT_LOSER_TIMEOUT_MIN_BARS: int = _env_int("POLARIS_EXIT_LOSER_TIMEOUT_MIN_BARS", 2)
+
+
+def _loser_timeout_for_strategy(strategy_id: str) -> float:
+    """Stale-loser timeout floor for ``strategy_id``, scaled to its timeframe.
+
+    ``max(EXIT_LOSER_TIMEOUT_SEC, MIN_BARS × bar_seconds(timeframe))``: a fast
+    strategy (1m) keeps the flat 900s; a slow thesis (tsmom 1H → 2×3600=7200s)
+    earns its horizon. An unregistered strategy_id falls back to the flat
+    default (bar_seconds itself fails safe to 300s for an unknown timeframe).
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return EXIT_LOSER_TIMEOUT_SEC
+    tf_floor = float(EXIT_LOSER_TIMEOUT_MIN_BARS * bar_seconds(cls.metadata.timeframe))
+    return max(EXIT_LOSER_TIMEOUT_SEC, tf_floor)
 
 
 def _session_calendar_for_venue(venue: str) -> str:
@@ -172,9 +211,14 @@ async def run_precise_exit(
             ),
             exit_state=str(pos.get("exit_state") or "open"),
         )
+    # Component B exit horizon ∝ timeframe: scale the stale-loser timeout to the
+    # position's ACTIVE strategy timeframe so a 1H thesis is not force-closed at
+    # 900s. The ATR-trail / protected-BEP precise exits are untouched.
+    strategy_id = str(pos.get("active_strategy_id") or pos.get("strategy") or "")
     decision = evaluate_exit(
         prev=prev, side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
+        loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
     if not decision.close:

@@ -317,6 +317,12 @@ async def run_pipeline_for_signal(
     if trade is None:
         return
     state.open_trades.append(trade)
+    # Component B anti-churn: record the LAST actually-submitted entry per
+    # (venue, symbol, strategy_id) so the next tick's novelty test exempts only
+    # a NEW strategy-timeframe bar OR a side flip vs this — never raw strength.
+    state.last_entry_by_key[(venue, symbol, sig.strategy_id)] = (
+        sig.created_at_bar, sig.side,
+    )
 
     # G6 / G7 with real R-multiples.
     pnl_r = compute_unrealized_pnl_r(

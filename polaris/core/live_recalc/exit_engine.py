@@ -174,12 +174,20 @@ def evaluate_exit(
     atr_pct: float,
     pnl_r: float,
     held_seconds: int,
+    loser_timeout_sec: float | None = None,
 ) -> ExitDecision:
     """Advance excursion + stop + FSM for one position; decide close-or-hold.
 
     Returns the NEW ``ExitState`` (to persist) and whether a precise exit
     fired. This NEVER changes size and NEVER blocks an entry — close-or-hold of
     THIS position only. The G6 -1.0R hard stop_hit rail stays in the caller.
+
+    ``loser_timeout_sec`` (Component B): the stale-loser timeout floor for THIS
+    position, scaled to its strategy timeframe by the caller (a 1H thesis is not
+    force-closed at the flat 900s). ``None`` keeps the flat
+    ``EXIT_LOSER_TIMEOUT_SEC`` default (fast strategies stay short). This only
+    moves the TIMEOUT horizon — the ATR-trailing stop and the protected-BEP
+    exit (the precise exits) are untouched.
     """
     # 1. Update price extremes (running peak / trough over the position life).
     peak = max(prev.peak_price, last_price)
@@ -239,7 +247,11 @@ def evaluate_exit(
     #        loser still times out at the BASE EXIT_LOSER_TIMEOUT_SEC). Still a
     #        per-position exit — no size change, no entry block, no halt.
     touched_profit = _STATE_RANK.get(new_state, 0) > _STATE_RANK[EXIT_STATE_OPEN]
-    timeout = EXIT_LOSER_TIMEOUT_SEC
+    timeout = (
+        EXIT_LOSER_TIMEOUT_SEC
+        if loser_timeout_sec is None
+        else loser_timeout_sec
+    )
     if touched_profit:
         timeout *= EXIT_LOSER_TIMEOUT_EXT_MULT
     if pnl_r < 0.0 and held_seconds > timeout:

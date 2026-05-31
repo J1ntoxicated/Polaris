@@ -271,6 +271,62 @@ async def test_loser_timeout_does_not_close_aged_winner(
     assert state.recalc_precise_exit == 0
 
 
+# --- Component B: exit horizon ∝ timeframe ----------------------------------
+
+
+def test_loser_timeout_for_strategy_scales_to_timeframe() -> None:
+    from polaris.scripts._production_recalc_exit import (
+        EXIT_LOSER_TIMEOUT_MIN_BARS,
+        _loser_timeout_for_strategy,
+    )
+
+    # tsmom = 1H → at least MIN_BARS × 3600 (>= 7200s with default 2 bars).
+    tsmom_timeout = _loser_timeout_for_strategy("tsmom")
+    assert tsmom_timeout >= EXIT_LOSER_TIMEOUT_MIN_BARS * 3600
+    assert tsmom_timeout > EXIT_LOSER_TIMEOUT_SEC  # NOT the flat 900s
+    # volume_burst = 1m → max(900, 2×60=120) = 900s (fast strategy stays short).
+    assert _loser_timeout_for_strategy("volume_burst") == EXIT_LOSER_TIMEOUT_SEC
+    # Unregistered id → flat default (back-compat).
+    assert _loser_timeout_for_strategy("vb") == EXIT_LOSER_TIMEOUT_SEC
+
+
+@pytest.mark.asyncio
+async def test_1h_thesis_not_force_closed_at_900s(
+    memdb: sqlite3.Connection,
+) -> None:
+    # A tsmom (1H) loser aged 901s — past the flat 900s but WITHIN its 7200s
+    # horizon — must NOT be force-closed (hold-to-thesis). last_price 99.8 keeps
+    # it a small loser, never touched profit, so only the timeout path applies.
+    opened = NOW - int(EXIT_LOSER_TIMEOUT_SEC) - 1  # 901s held
+    _seed(
+        memdb, position_id="pos-1h", entry_price=100.0, last_price=99.8,
+        opened_ts=opened, strategy="tsmom",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-1h")]
+    await _recalc(memdb, state)
+    assert _pos_row(memdb, "pos-1h")["status"] == "open"  # horizon respected
+    assert state.recalc_precise_exit == 0
+
+
+@pytest.mark.asyncio
+async def test_1m_strategy_still_times_out_at_900s(
+    memdb: sqlite3.Connection,
+) -> None:
+    # A 1m-equivalent loser (unregistered "vb" → flat 900s) past 900s STILL
+    # times out — the short horizon for fast strategies is preserved.
+    opened = NOW - int(EXIT_LOSER_TIMEOUT_SEC) - 60
+    _seed(
+        memdb, position_id="pos-1m", entry_price=100.0, last_price=99.8,
+        opened_ts=opened, strategy="vb",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-1m")]
+    await _recalc(memdb, state)
+    assert _pos_row(memdb, "pos-1m")["status"] == "closed"
+    assert state.recalc_precise_exit == 1
+
+
 # --- G7 EXIT_NOW dropped-decision bug fix: now actually closes -------------
 
 

@@ -21,8 +21,9 @@ from polaris.core.isolation.circuit_breaker import (
     should_allow_new_entry,
 )
 from polaris.core.isolation.reentry import (
-    REENTRY_COOLDOWN_SEC,
-    REENTRY_STRONG_SIGNAL_STRENGTH,
+    bar_seconds,
+    concurrent_same_side_open,
+    is_novel_reentry,
     reentry_cooldown_active,
 )
 from polaris.core.isolation.worker import (
@@ -385,14 +386,40 @@ async def _run_tick(
                 state.signals_by_tf[timeframe] = (
                     state.signals_by_tf.get(timeframe, 0) + 1
                 )
-                # P1 re-entry cooldown — suppress duplicate opens on the same
-                # (venue, symbol, strategy_id) inside REENTRY_COOLDOWN_SEC so
-                # the 5s fan-out can't compound fees (forensic: SOL 20x re-buy).
-                # Strong signals are exempt → flow preserved (AGGRESSIVE bias).
+                # Component B anti-churn (2026-05-31). The entry key + the last
+                # actually-submitted entry on it (created_at_bar, side).
+                entry_key = (venue, symbol, strategy_id)
+                last_entry = state.last_entry_by_key.get(entry_key)
+                last_bar = None if last_entry is None else last_entry[0]
+                last_side = None if last_entry is None else last_entry[1]
+                # No concurrent duplicate: one live position per
+                # (venue, symbol, strategy_id, side). A time cooldown alone
+                # misses the 12-simultaneous-BTC stacking (each clone is on a
+                # distinct, novel bar), so refuse a clone while one same-side
+                # position is open. PRECISION (surgical-strike), not a size
+                # dampen / P&L halt — a side flip / different name is unaffected.
+                if concurrent_same_side_open(
+                    conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
+                    side=sig.side,
+                ):
+                    state.reentry_skips += 1
+                    continue
+                # Re-entry cooldown — suppress duplicate opens on the same
+                # (venue, symbol, strategy_id) within ONE bar of the strategy's
+                # timeframe (tsmom 1H → 3600s) so the 5s fan-out can't compound
+                # fees (forensic: SOL 20x re-buy / BTC 12-stack). Exempt ONLY on
+                # NOVELTY — a NEW strategy-timeframe bar OR a side flip; raw
+                # ``strength`` NEVER exempts (it is momentum, not conviction, and
+                # spikes in chop → the old exemption stacked every tick). A
+                # genuine new opportunity (new bar / flip) still flows.
                 if reentry_cooldown_active(
                     conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
-                    now_ts=now_ts, cooldown_sec=REENTRY_COOLDOWN_SEC,
-                    exempt=sig.strength >= REENTRY_STRONG_SIGNAL_STRENGTH,
+                    now_ts=now_ts,
+                    cooldown_sec=bar_seconds(strategy.metadata.timeframe),
+                    exempt=is_novel_reentry(
+                        created_at_bar=sig.created_at_bar, side=sig.side,
+                        last_entry_bar=last_bar, last_entry_side=last_side,
+                    ),
                 ):
                     state.reentry_skips += 1
                     continue

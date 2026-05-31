@@ -131,3 +131,14 @@ class ProdLoopState:
     rotation_vacated_cooldowns: dict[tuple[str, str, str], int] = field(
         default_factory=dict
     )
+    # Component B (2026-05-31) anti-churn novelty tracking. Per
+    # (venue, symbol, strategy_id) key → the (created_at_bar, side) of the LAST
+    # actually-submitted entry. The re-entry cooldown is exempted ONLY when the
+    # current signal is NOVEL vs this (a NEW strategy-timeframe bar OR a side
+    # flip — is_novel_reentry); raw signal strength NEVER exempts. In-process,
+    # same precedent as ``rotation_vacated_cooldowns``. Updated when an entry is
+    # actually submitted (reserve_and_submit returned a trade). Blocking a
+    # same-bar same-side re-buy is PRECISION (surgical-strike), not a throttle.
+    last_entry_by_key: dict[tuple[str, str, str], tuple[int, str]] = field(
+        default_factory=dict
+    )

@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from typing import Literal
 
 import pytest
 
 from polaris.core.isolation.reentry import (
     REENTRY_COOLDOWN_SEC,
+    bar_seconds,
+    concurrent_same_side_open,
+    is_novel_reentry,
     reentry_cooldown_active,
 )
 from polaris.storage.schema import ALL_DDL
@@ -35,15 +39,16 @@ def _insert_position(
     strategy_id: str,
     opened_ts: int,
     status: str = "open",
+    side: str = "long",
 ) -> None:
     conn.execute(
         "INSERT INTO positions ("
         "position_id, venue, symbol, underlying_group_id, strategy_id, "
         "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts"
-        ") VALUES (?, ?, ?, '', ?, ?, ?, 'long', 1.0, ?, ?)",
+        ") VALUES (?, ?, ?, '', ?, ?, ?, ?, 1.0, ?, ?)",
         (
             uuid.uuid4().hex, venue, symbol, strategy_id,
-            strategy_id, strategy_id, status, opened_ts,
+            strategy_id, strategy_id, side, status, opened_ts,
         ),
     )
 
@@ -158,3 +163,251 @@ def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         monkeypatch.delenv("POLARIS_REENTRY_COOLDOWN_SEC", raising=False)
         importlib.reload(reentry_mod)
+
+
+# --- Component B: timeframe-derived cooldown window (bar_seconds) -----------
+
+
+def test_bar_seconds_known_timeframes() -> None:
+    assert bar_seconds("1m") == 60
+    assert bar_seconds("5m") == 300
+    assert bar_seconds("15m") == 900
+    assert bar_seconds("1H") == 3600  # tsmom → kills the 5-6min stacking.
+
+
+def test_bar_seconds_unknown_falls_back_to_default() -> None:
+    # Never degrade to 0 (which would DISABLE the guard) — fall back to 300s.
+    assert bar_seconds("bogus") == 300
+    assert bar_seconds("") == 300
+
+
+# --- Component B: novelty-gated re-entry (replaces raw-strength exemption) --
+
+
+def test_novelty_first_entry_is_novel() -> None:
+    # No prior entry on the key → always allowed (first entry).
+    assert is_novel_reentry(
+        created_at_bar=100, side="long",
+        last_entry_bar=None, last_entry_side=None,
+    ) is True
+
+
+def test_novelty_same_bar_same_side_is_not_novel() -> None:
+    # CHURN: identical bar id + side (the 5s fan-out re-emitting the same bar)
+    # → NOT novel → cooldown applies → re-entry blocked.
+    assert is_novel_reentry(
+        created_at_bar=100, side="long",
+        last_entry_bar=100, last_entry_side="long",
+    ) is False
+
+
+def test_novelty_new_bar_is_novel() -> None:
+    # FLOW: a new strategy-timeframe bar carries fresh info → novel → allowed.
+    assert is_novel_reentry(
+        created_at_bar=101, side="long",
+        last_entry_bar=100, last_entry_side="long",
+    ) is True
+
+
+def test_novelty_side_flip_is_novel() -> None:
+    # FLOW: thesis reversed (long → short) within the same bar → novel → allowed.
+    assert is_novel_reentry(
+        created_at_bar=100, side="short",
+        last_entry_bar=100, last_entry_side="long",
+    ) is True
+
+
+def test_novelty_does_not_consult_strength() -> None:
+    # The novelty signature has NO strength parameter — raw momentum can never
+    # self-exempt a same-bar same-side re-buy (the backwards exemption is gone).
+    import inspect
+
+    params = set(inspect.signature(is_novel_reentry).parameters)
+    assert "strength" not in params
+    assert params == {
+        "created_at_bar", "side", "last_entry_bar", "last_entry_side",
+    }
+
+
+# --- Component B: no concurrent duplicate (12-concurrent-BTC stacking) ------
+
+
+def test_concurrent_same_side_open_blocks(conn: sqlite3.Connection) -> None:
+    # An already-OPEN same-side position → a clone is refused (one live position
+    # per name/strategy/side). Kills the 12-simultaneous-BTC tsmom stacking that
+    # a time cooldown alone misses (each clone is on a distinct, novel bar).
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, side="long",
+    )
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom", side="long",
+    ) is True
+
+
+def test_concurrent_no_open_allows(conn: sqlite3.Connection) -> None:
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom", side="long",
+    ) is False
+
+
+def test_concurrent_side_flip_allowed(conn: sqlite3.Connection) -> None:
+    # FLOW: holding a long does NOT block a NEW short (the thesis reversed).
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, side="long",
+    )
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom", side="short",
+    ) is False
+
+
+def test_concurrent_closed_position_does_not_block(
+    conn: sqlite3.Connection,
+) -> None:
+    # FLOW: once the held position CLOSES, a re-entry is not blocked by this
+    # guard (the cooldown still governs same-bar timing separately).
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, side="long", status="closed",
+    )
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom", side="long",
+    ) is False
+
+
+def test_concurrent_other_name_strategy_unaffected(
+    conn: sqlite3.Connection,
+) -> None:
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, side="long",
+    )
+    # Different symbol / strategy / venue — unaffected (flow_not_block).
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="ETH-USDT", strategy_id="tsmom", side="long",
+    ) is False
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="volume_burst",
+        side="long",
+    ) is False
+    assert concurrent_same_side_open(
+        conn, venue="capital", symbol="BTC-USDT", strategy_id="tsmom",
+        side="long",
+    ) is False
+
+
+# --- Component B: the entry-seam decision composed (churn vs flow) ---------
+#
+# These mirror the exact composition the _production_tick entry seam runs:
+#   skip = concurrent_same_side_open(...)
+#          OR reentry_cooldown_active(..., exempt=is_novel_reentry(...))
+# using the timeframe-derived window. tsmom = 1H (bar_seconds=3600) so a re-buy
+# inside the SAME 1H bar is blocked, a NEW bar / side flip flows.
+
+
+def _seam_skips(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    strategy_id: str,
+    timeframe: str,
+    side: Literal["long", "short"],
+    created_at_bar: int,
+    now_ts: int,
+    last_bar: int | None,
+    last_side: str | None,
+) -> bool:
+    if concurrent_same_side_open(
+        conn, venue=venue, symbol=symbol, strategy_id=strategy_id, side=side,
+    ):
+        return True
+    return reentry_cooldown_active(
+        conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
+        now_ts=now_ts, cooldown_sec=bar_seconds(timeframe),
+        exempt=is_novel_reentry(
+            created_at_bar=created_at_bar, side=side,
+            last_entry_bar=last_bar, last_entry_side=last_side,
+        ),
+    )
+
+
+def test_seam_blocks_same_bar_high_strength_rebuy(
+    conn: sqlite3.Connection,
+) -> None:
+    # CHURN: tsmom (1H) re-fires the SAME 1H bar 300s later (no new position
+    # open yet — the DB row drives the cooldown). High strength does NOT exempt;
+    # only novelty does, and the bar id is unchanged → SKIPPED.
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, status="closed", side="long",
+    )
+    assert _seam_skips(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
+        last_bar=900, last_side="long",  # same bar, same side → not novel
+    ) is True
+
+
+def test_seam_blocks_concurrent_duplicate(conn: sqlite3.Connection) -> None:
+    # CHURN: an OPEN same-side tsmom on BTC → a clone is refused even on a NEW
+    # bar (the 12-concurrent stacking a time cooldown alone misses).
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, status="open", side="long",
+    )
+    assert _seam_skips(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=901, now_ts=1300,
+        last_bar=900, last_side="long",  # NEW bar, but a clone is still live
+    ) is True
+
+
+def test_seam_allows_new_bar(conn: sqlite3.Connection) -> None:
+    # FLOW: the prior position CLOSED; a NEW 1H bar carries fresh info → the
+    # novelty exemption lets it through even inside the 3600s window.
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, status="closed", side="long",
+    )
+    assert _seam_skips(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=901, now_ts=1300,
+        last_bar=900, last_side="long",  # NEW bar → novel → allowed
+    ) is False
+
+
+def test_seam_allows_side_flip(conn: sqlite3.Connection) -> None:
+    # FLOW: thesis reversed (long → short) within the same bar; no live long
+    # blocks a short → side-flip novelty allows it.
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1000, status="closed", side="long",
+    )
+    assert _seam_skips(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        timeframe="1H", side="short", created_at_bar=900, now_ts=1300,
+        last_bar=900, last_side="long",  # same bar but flipped side → novel
+    ) is False
+
+
+def test_seam_allows_first_entry_and_other_name(
+    conn: sqlite3.Connection,
+) -> None:
+    # FLOW: no prior entry (first entry) → allowed; a different symbol entirely
+    # is unaffected (flow_not_block).
+    assert _seam_skips(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
+        last_bar=None, last_side=None,
+    ) is False
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        opened_ts=1290, status="open", side="long",
+    )
+    assert _seam_skips(
+        conn, venue="okx", symbol="ETH-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
+        last_bar=None, last_side=None,
+    ) is False

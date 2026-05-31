@@ -117,7 +117,7 @@
     nodeByIndex.length = 0;
     const liveIds = new Set();
     // reset per-galaxy aggregates
-    GALAXY_ORDER.forEach((k) => { galaxyState[k].count = 0; galaxyState[k].pnl = 0; });
+    GALAXY_ORDER.forEach((k) => { galaxyState[k].count = 0; galaxyState[k].pnl = 0; galaxyState[k].mktCount = 0; galaxyState[k].activeCount = 0; });
 
     for (let idx = 0; idx < backendNodes.length; idx++) {
       const bn = backendNodes[idx];
@@ -173,6 +173,8 @@
       n.dim = (role === 'mkt') && !n.active && n.state !== 'firing';
       gs.count++;
       gs.pnl += n.pnl;
+      // Jin: 전체 거래가능 티커(mkt universe) + active(불 들어온 봇 focus) 카운트.
+      if (role === 'mkt') { gs.mktCount++; if (bn.active === true) gs.activeCount++; }
       nodeByIndex[idx] = n;
     }
     // satellites module finalises its own home rings + drops stale sat nodes.
@@ -335,7 +337,7 @@
       ctx.font = '8px JetBrains Mono, monospace';
       ctx.fillStyle = rgba([0xa8, 0xa8, 0xa8], 0.8 * d);
       const pnlStr = (gs.pnl >= 0 ? '+' : '') + gs.pnl.toFixed(1);
-      ctx.fillText(`${gs.count} nodes · ${pnlStr}`, p.sx, p.sy + rad + 12);
+      ctx.fillText(`${gs.mktCount} tickers (${gs.activeCount} active) · ${pnlStr}`, p.sx, p.sy + rad + 12);
       ctx.restore();
       gs._screen = p;     // cached for hit-test
       gs._screenR = rad;
@@ -382,9 +384,9 @@
         const p = d.p;
         // depth shading: nearer = slightly brighter/bigger (front hemisphere pop).
         const depthA = 0.5 + 0.5 * Math.max(-1, Math.min(1, -d.n.z));
-        const a = (0.10 + 0.16 * depthA) * dd;
+        const a = (0.22 + 0.22 * depthA) * dd;   // Jin: dust 같지 않게 살짝 밝게
         ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
-        const s = Math.max(0.7, 1.15 * zoom * p.persp);
+        const s = Math.max(0.85, 1.3 * zoom * p.persp);
         ctx.fillRect(p.sx - s * 0.5, p.sy - s * 0.5, s, s);
       }
     }

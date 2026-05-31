@@ -22,6 +22,7 @@ import contextlib
 import dataclasses
 import http.server
 import json
+import os
 import socketserver
 import sqlite3
 
@@ -59,6 +60,28 @@ ROOT = Path(__file__).parent
 
 # Module-level runtime config (set in main()).
 _DB_PATH = Path("data/polaris_live.sqlite")
+
+
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    """Load ``.env`` into ``os.environ`` (existing keys win), best-effort.
+
+    Mirrors ``production_paper_loop._load_dotenv``. The server is started
+    detached (no shell-exported env), so without this the read-only Alpaca
+    account probe in ``snapshot_queries`` would never see the paper keys and the
+    Alpaca lane would render $0. Display-only; never used for orders. Secrets are
+    placed in the process env only and are never logged.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
 
 # graph.json snapshot cache — build is a few-ms SQLite read; a short TTL keeps
 # multi-tab / sub-second reloads from re-querying on every fetch.
@@ -312,6 +335,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8770)
     args = parser.parse_args()
     _DB_PATH = Path(args.db)
+
+    # Load .env so the read-only Alpaca account probe can see the paper keys.
+    _load_dotenv()
 
     # Prewarm so the first browser fetch is instant.
     with contextlib.suppress(Exception):

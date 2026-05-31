@@ -9,6 +9,9 @@ reference it via the original path.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import sqlite3
 import time
 from collections.abc import Mapping
@@ -26,6 +29,8 @@ from polaris.scripts.dashboard.snapshot_models import (
     StrategyStat,
     StreamSummary,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_R_USD: Final[float] = 10.0          # 1 R = $10 (display heuristic)
 EQUITY_BUCKET_SEC: Final[int] = 5 * 60       # legacy 5-min bucket (24h fallback)
@@ -672,6 +677,84 @@ def _recent_closed_by_venue(
     return out
 
 
+# Alpaca paper account equity probe (display-only). Unlike OKX/Capital, Alpaca
+# has NO static starting-equity constant — the paper account is funded directly
+# at the venue, so the only source of truth for its baseline is the live
+# ``GET /v2/account`` call. We probe it once per TTL window and cache the result;
+# the dashboard then shows the real account value instead of a $0 placeholder.
+# Read-only (account query, never an order). Graceful on every failure path:
+# missing keys / network error / non-200 → ``None`` → caller falls back to 0.0.
+ALPACA_EQUITY_PROBE_TTL_SEC: Final[float] = 60.0
+
+
+class _AlpacaEquity(NamedTuple):
+    """Probed Alpaca paper-account values (USD). ``starting`` is the session
+    baseline (``last_equity`` — equity at the prior market close) so the
+    ``equity = starting + net_pnl + upnl`` identity reconciles with DB-tracked
+    session activity exactly like the OKX/Capital lanes."""
+
+    equity: float
+    starting: float
+
+
+# (monotonic_deadline, _AlpacaEquity | None) — None caches a failed/absent probe
+# for the TTL window too, so a creds-less dashboard does not retry every refresh.
+_alpaca_equity_cache: tuple[float, _AlpacaEquity | None] | None = None
+
+
+async def _fetch_alpaca_account(api_key: str, secret: str) -> dict[str, Any]:
+    """Probe ``GET /v2/account`` via the paper adapter (read-only, no order)."""
+    # Lazy import so the dashboard module has no hard dependency on the venue
+    # adapter (and tests that never probe never import httpx via this path).
+    from polaris.venues.alpaca.adapter import AlpacaAdapter
+
+    async with AlpacaAdapter(api_key=api_key, secret=secret) as adapter:
+        return await adapter.fetch_account()
+
+
+def _alpaca_account_equity() -> _AlpacaEquity | None:
+    """Live Alpaca paper-account equity (USD), TTL-cached. ``None`` if unavailable.
+
+    Reads credentials from ``os.environ`` ONLY (it does not load ``.env`` itself
+    — the dashboard server loads it at startup, and the test suite never sets the
+    keys, so tests stay fully offline → this returns ``None`` → the alpaca lane
+    keeps its 0.0 baseline, unchanged behavior). Secrets are never logged. Any
+    error (no keys / transport / non-200 / parse) is swallowed and cached as
+    ``None`` for the TTL window. Display-only; never feeds sizing/gating/orders.
+    """
+    global _alpaca_equity_cache
+    now = time.monotonic()
+    if _alpaca_equity_cache is not None and now < _alpaca_equity_cache[0]:
+        return _alpaca_equity_cache[1]
+
+    result: _AlpacaEquity | None = None
+    # Resolve creds from the environment only (no .env auto-load here). Mirrors
+    # the adapter's PAPER-first / ARCHIVE-fallback order without importing it
+    # when the keys are absent.
+    key = os.environ.get("ALPACA_PAPER_API_KEY") or os.environ.get(
+        "ARCHIVE_ALPACA_PAPER_API_KEY", ""
+    )
+    secret = os.environ.get("ALPACA_PAPER_SECRET") or os.environ.get(
+        "ARCHIVE_ALPACA_PAPER_SECRET", ""
+    )
+    if key and secret:
+        try:
+            account = asyncio.run(_fetch_alpaca_account(key, secret))
+            equity = float(account.get("equity") or account.get("portfolio_value") or 0.0)
+            # ``last_equity`` = equity at the prior market close → session-start
+            # baseline. Fall back to current equity when absent (first session).
+            starting = float(account.get("last_equity") or equity)
+            if equity > 0.0:
+                result = _AlpacaEquity(equity=equity, starting=starting)
+        except Exception as exc:  # noqa: BLE001 — display-only, never crash a refresh
+            # Log the class only — never the keys or full response.
+            logger.warning("[dashboard] alpaca equity probe failed: %s", type(exc).__name__)
+            result = None
+
+    _alpaca_equity_cache = (now + ALPACA_EQUITY_PROBE_TTL_SEC, result)
+    return result
+
+
 def _per_stream_summary(
     conn: sqlite3.Connection,
     *,
@@ -777,12 +860,16 @@ def _per_stream_summary(
         exposed_by_venue[v] = exposed_by_venue.get(v, 0.0) + p.size_usd
         upnl_by_venue[v] = upnl_by_venue.get(v, 0.0) + p.upnl_usd
 
-    # Per-venue starting capital where known (okx / capital split). Alpaca has
-    # no account probe in the snapshot path → 0.0 placeholder.
+    # Per-venue starting capital. OKX/Capital use the static demo-equity SSOT;
+    # Alpaca has NO static constant (the paper account is funded at the venue),
+    # so we probe the live ``/v2/account`` baseline. ``equity = starting +
+    # net_pnl + upnl`` then reconciles with DB session activity for every lane.
+    # Probe unavailable (no keys / error) → 0.0, exactly the prior behavior.
+    alpaca_equity = _alpaca_account_equity()
     starting_by_venue: dict[str, float] = {
         "okx": demo_starting_equity_okx(),
         "capital": demo_starting_equity_capital(),
-        "alpaca": 0.0,
+        "alpaca": alpaca_equity.starting if alpaca_equity is not None else 0.0,
     }
 
     # OPEN vs CLOSED split — per-venue recent-closed trades (newest first).

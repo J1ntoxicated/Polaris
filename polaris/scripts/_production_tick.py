@@ -104,7 +104,20 @@ def equity_session_entry_hold(
         return False
     if not stream_session_gate_active(calendar):
         return False
-    if equity_entry_held_for_session(now_ts):
+    held = equity_entry_held_for_session(now_ts)
+    # Session on↔off transition (INFO): emit a one-shot record when the equity
+    # trading session flips open↔closed (RTH boundary), observability only. The
+    # gate decision below is UNCHANGED — this only watches state.* and logs.
+    session_open = not held
+    prev_open = state.equity_session_open_by_venue.get(venue)
+    if prev_open != session_open:
+        state.equity_session_open_by_venue[venue] = session_open
+        if prev_open is not None:
+            logger.info(
+                "[session] %s calendar=%s session=%s (RTH boundary)",
+                venue, calendar, "open" if session_open else "closed",
+            )
+    if held:
         state.equity_session_holds += 1
         return True
     return False
@@ -374,6 +387,10 @@ async def _run_tick(
                     state.fault_events += 1
                     continue
                 if sig is None:
+                    logger.debug(
+                        "[L1/signal] no-emit %s:%s strategy=%s tf=%s",
+                        venue, symbol, strategy_id, timeframe,
+                    )
                     continue
                 if not _is_finite_signal(sig):
                     record_fault(
@@ -385,6 +402,16 @@ async def _run_tick(
                     continue
                 state.signals_by_tf[timeframe] = (
                     state.signals_by_tf.get(timeframe, 0) + 1
+                )
+                # Signal emit (INFO): a finite raw signal cleared generation —
+                # the decision-visibility surface. The downstream churn skips +
+                # the G1-G8 pipeline still own the lifecycle; this records ONLY
+                # that the strategy emitted. Log only — no gate/sizing change.
+                logger.info(
+                    "[L1/signal] emit %s:%s strategy=%s tf=%s side=%s "
+                    "strength=%.3f sizing_hint=%.3f",
+                    venue, symbol, strategy_id, timeframe, sig.side,
+                    sig.strength, sig.sizing_hint,
                 )
                 # Component B anti-churn (2026-05-31). The entry key + the last
                 # actually-submitted entry on it (created_at_bar, side).
@@ -403,6 +430,11 @@ async def _run_tick(
                     side=sig.side,
                 ):
                     state.reentry_skips += 1
+                    logger.debug(
+                        "[L1/signal] skip %s:%s strategy=%s side=%s "
+                        "reason=concurrent_same_side_open",
+                        venue, symbol, strategy_id, sig.side,
+                    )
                     continue
                 # Re-entry cooldown — suppress duplicate opens on the same
                 # (venue, symbol, strategy_id) within ONE bar of the strategy's
@@ -422,6 +454,11 @@ async def _run_tick(
                     ),
                 ):
                     state.reentry_skips += 1
+                    logger.debug(
+                        "[L1/signal] skip %s:%s strategy=%s side=%s "
+                        "reason=reentry_cooldown",
+                        venue, symbol, strategy_id, sig.side,
+                    )
                     continue
                 # Capital rotation VACATED-SIDE anti-churn (Jin 2026-05-30): a
                 # JUST-rotated-out name cannot re-enter immediately — NO strong-
@@ -431,6 +468,11 @@ async def _run_tick(
                     now_ts=now_ts,
                 ):
                     state.reentry_skips += 1
+                    logger.debug(
+                        "[L1/signal] skip %s:%s strategy=%s side=%s "
+                        "reason=rotation_vacated_cooldown",
+                        venue, symbol, strategy_id, sig.side,
+                    )
                     continue
 
                 # T13/H3 — PDT ranking-down (equity only; A/B no-op). When the

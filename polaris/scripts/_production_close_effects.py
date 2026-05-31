@@ -260,6 +260,16 @@ def _safe_update_posterior(
             conn, exchange=trade.venue, strategy=trade.strategy_id,
             ticker=trade.symbol, regime=regime, pnl_r_net=pnl_r_net, now_ts=now_ts,
         )
+        # Posterior fold (INFO): the cost-adjusted R observation folded into the
+        # NIG bucket (exchange×strategy×ticker×regime) at close — the edge-
+        # validation 거동 record. gross pnl_r vs net (after fees+slippage). This
+        # table is never read by sizing; log only, no decision changed.
+        logger.info(
+            "[edge-validation] posterior %s:%s strategy=%s regime=%s "
+            "pnl_r_gross=%.3f pnl_r_net=%.3f",
+            trade.venue, trade.symbol, trade.strategy_id, regime,
+            pnl_r, pnl_r_net,
+        )
     except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
         logger.warning(
             "[edge-validation] posterior update failed %s:%s: %r",

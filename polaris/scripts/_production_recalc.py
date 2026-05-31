@@ -385,6 +385,14 @@ async def _evaluate_position(
         state.recalc_g6_skipped = getattr(state, "recalc_g6_skipped", 0) + 1
 
     if g6_result.decision == GateDecision.EXIT_NOW:
+        # G6 EXIT_NOW (INFO): the AI-monitor exit decision + its reason, before
+        # the close fires. Log only — does not alter the close path below.
+        logger.info(
+            "[L6/g6] close %s:%s trade_id=%s decision=EXIT_NOW reason=%s "
+            "pnl_r=%.2f model=%s",
+            pos["venue"], pos["symbol"], pos["position_id"],
+            g6_result.payload.get("reason", "-"), pnl_r, g6_result.model_used,
+        )
         # F2.b — specific position close (no FIFO oldest pop).
         await close_specific(
             conn, state=state, position_id=str(pos["position_id"]),
@@ -464,6 +472,14 @@ async def _evaluate_position(
         # 🔴 BUG FIX: G7 EXIT_NOW was SILENTLY DROPPED (only widening_applied was
         # checked). It must now actually close the specific position (no halt).
         if g7_result.decision == GateDecision.EXIT_NOW:
+            # G7 EXIT_NOW (INFO): the adaptive-exit gate decided to close instead
+            # of widen — surface its reason. Log only; close path unchanged.
+            logger.info(
+                "[L6/g7] close %s:%s trade_id=%s decision=EXIT_NOW reason=%s "
+                "pnl_r=%.2f model=%s",
+                pos["venue"], pos["symbol"], pos["position_id"],
+                g7_result.payload.get("reason", "-"), pnl_r, g7_result.model_used,
+            )
             await close_specific(
                 conn, state=state, position_id=str(pos["position_id"]),
                 now_ts=now_ts, lookup_regime=lookup_regime,

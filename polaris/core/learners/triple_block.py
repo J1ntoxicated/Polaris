@@ -73,7 +73,11 @@ def maybe_emit_triple_block(
     expectancy = pnl_sum / n_eff if n_eff > 0 else 0.0
     if wr <= TRIPLE_BLOCK_WR_THRESHOLD and expectancy <= TRIPLE_BLOCK_EXPECTANCY_THRESHOLD:
         until = ts + TRIPLE_BLOCK_DURATION_SEC
-        logger.warning(
+        # Level discipline (logging-observability §3): a triple BLOCK is NORMAL
+        # learning flow (a losing cell down-weighted), not a degraded/fault
+        # condition — log at INFO, never WARNING (WARNING inflated the dashboard
+        # error/warn count with expected learner decisions). Behaviour unchanged.
+        logger.info(
             "[learner %s] triple BLOCK %s|%s|%s wr=%.2f exp=%.2f size_mult=%.2f until=%d",
             learner_id,
             trade.ticker,

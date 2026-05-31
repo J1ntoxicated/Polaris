@@ -15,6 +15,7 @@ halt. The G6 -1.0R hard ``stop_hit`` rail lives in the G6 gate and is untouched
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sqlite3
 from collections.abc import Callable
@@ -34,6 +35,8 @@ from polaris.strategies import STRATEGY_REGISTRY
 if TYPE_CHECKING:
     from polaris.scripts._production_recalc import ActivePositionRow
     from polaris.scripts.production_paper_loop import ProdLoopState
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "persist_exit_state",
@@ -131,6 +134,13 @@ async def run_session_forced_exit(
         conn, now_ts=now_ts, venue=str(pos["venue"]),
         symbol=str(pos.get("symbol", "")),
     )
+    # Session-forced close (INFO): CALENDAR INTEGRITY flat (weekend / RTH close
+    # imminent), TIME-only — never P&L. Log only; the flatten already happened.
+    logger.info(
+        "[L6/exit] close %s:%s trade_id=%s reason=%s calendar=%s pnl_r=%.2f",
+        pos["venue"], pos.get("symbol", ""), pos["position_id"],
+        decision.close_reason, session_calendar, pnl_r,
+    )
     return True
 
 
@@ -221,6 +231,16 @@ async def run_precise_exit(
         loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
+    # FSM state transition (DEBUG): surface the per-tick exit-state advance so
+    # the dashboard can trace open→touched→protected→harvest. Logging only —
+    # the persisted state above is the authority; this never gates anything.
+    if decision.state.exit_state != prev.exit_state:
+        logger.debug(
+            "[L6/exit] fsm %s:%s trade_id=%s %s→%s mfe_r=%.2f mae_r=%.2f pnl_r=%.2f",
+            pos["venue"], pos["symbol"], position_id,
+            prev.exit_state, decision.state.exit_state,
+            decision.state.mfe_r, decision.state.mae_r, pnl_r,
+        )
     if not decision.close:
         return False
     await close_specific(
@@ -230,4 +250,16 @@ async def run_precise_exit(
         capital_session=capital_session,
     )
     state.recalc_precise_exit = getattr(state, "recalc_precise_exit", 0) + 1
+    # Precise-exit close (INFO): the decision/거동 visibility Jin asked for —
+    # close_reason (protected_bep / atr_trail_stop / loser_timeout) + the R-unit
+    # PnL the exit fired on, the venue/ticker, and how long it was held. The
+    # realised pnl_usd/exit_price are logged in close_specific (the close path
+    # owns the actual fill); this is the EXIT-TRIGGER reason record. Log only.
+    logger.info(
+        "[L6/exit] close %s:%s trade_id=%s reason=%s pnl_r=%.2f held=%ds "
+        "fsm=%s side=%s",
+        pos["venue"], pos["symbol"], position_id,
+        decision.close_reason, pnl_r, held_seconds,
+        decision.state.exit_state, side,
+    )
     return True

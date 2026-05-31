@@ -469,6 +469,16 @@ async def reserve_and_submit(
         )
         return None
     state.fills_open += 1
+    # Successful open (INFO): the entry 거동 record — venue/ticker/side, the
+    # entry fill price + notional, strategy, and the position_id that ties the
+    # whole 6-effect close fan-out together (trade_id correlation). "opened" +
+    # "fill" keywords surface it on the dashboard board.js pane. Log only.
+    logger.info(
+        "[L7/open] opened %s:%s trade_id=%s side=%s strategy=%s filled "
+        "entry_price=%.6g notional_usd=%.2f mode=%s",
+        venue, symbol, position_id, sig.side, sig.strategy_id,
+        fill.fill_price, fill.size_usd, "real" if real_roundtrip else "sim",
+    )
     return trade
 
 

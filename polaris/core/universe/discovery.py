@@ -320,6 +320,11 @@ def persist_universe(
         if is_active_set is None
         else is_active_set
     )
+    # Observability (log only): snapshot the PRIOR active instrument_ids for the
+    # venues this refresh touches so we can report the 0↔1 transition counts
+    # below. Pure read — never gates the upsert or the active selection.
+    refreshed_venues = {ins.venue for ins in instruments}
+    prior_active_ids = _read_active_instrument_ids(conn, refreshed_venues)
     rows = []
     for ins in instruments:
         is_active = ins.instrument_id in active_ids
@@ -371,12 +376,52 @@ def persist_universe(
         """,
         rows,
     )
-    _deactivate_off_venue_active_rows(conn, {ins.venue for ins in instruments})
+    off_venue_deactivated = _deactivate_off_venue_active_rows(conn, refreshed_venues)
+    # Universe active 0↔1 transition (INFO): the per-refresh delta of which
+    # instruments newly entered / left the active watchlist, plus how many stale
+    # off-venue (whitelist-violating) active rows this refresh swept. Computed
+    # from the post-upsert active set vs the prior snapshot — log only, no gate.
+    new_active_ids = _read_active_instrument_ids(conn, refreshed_venues)
+    activated = new_active_ids - prior_active_ids
+    deactivated = prior_active_ids - new_active_ids
+    if activated or deactivated or off_venue_deactivated:
+        logger.info(
+            "[L0/universe] persist venues=%s active=%d activated=%d "
+            "deactivated=%d off_venue_swept=%d",
+            ",".join(sorted(refreshed_venues)) or "-",
+            len(new_active_ids), len(activated), len(deactivated),
+            off_venue_deactivated,
+        )
+
+
+def _read_active_instrument_ids(
+    conn: sqlite3.Connection, venues: set[str]
+) -> set[str]:
+    """Active (``is_active=1``) instrument_ids for ``venues`` (observability read).
+
+    Used by :func:`persist_universe` to compute the 0↔1 transition delta around
+    the upsert. Pure read; an empty ``venues`` or any sqlite error degrades to an
+    empty set (no log line) — never affects the active selection or the upsert.
+    """
+    if not venues:
+        return set()
+    placeholders = ",".join("?" for _ in venues)
+    try:
+        return {
+            str(r[0])
+            for r in conn.execute(
+                f"SELECT instrument_id FROM universe "
+                f"WHERE is_active = 1 AND venue IN ({placeholders})",
+                tuple(venues),
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return set()
 
 
 def _deactivate_off_venue_active_rows(
     conn: sqlite3.Connection, venues: set[str]
-) -> None:
+) -> int:
     """Sweep each refreshed venue's stale whitelist-violating active rows.
 
     Live-audit gap (2026-05-30): STEP 2 filters off-venue asset_classes out of a
@@ -397,7 +442,12 @@ def _deactivate_off_venue_active_rows(
     * STEP 3 session-wait rows (off-session FX/index/commodity, ``is_active=0``,
       ``session_wait:*``) keep a *whitelisted* asset_class → never matched here
       (and already inactive), so their reason is preserved.
+
+    Returns the total number of rows flipped to ``is_active=0`` across all
+    venues (observability for ``persist_universe``'s INFO line). The sweep logic
+    is unchanged — only the rowcount is now surfaced.
     """
+    swept = 0
     for venue in venues:
         active_classes = {
             str(r[0])
@@ -413,11 +463,13 @@ def _deactivate_off_venue_active_rows(
         if not off_venue:
             continue
         placeholders = ",".join("?" for _ in off_venue)
-        conn.execute(
+        cur = conn.execute(
             f"UPDATE universe SET is_active = 0, active_reason = 'off_venue_class' "
             f"WHERE venue = ? AND is_active = 1 AND asset_class IN ({placeholders})",
             (venue, *off_venue),
         )
+        swept += max(0, cur.rowcount)
+    return swept
 
 
 # ---------------------------------------------------------------------------

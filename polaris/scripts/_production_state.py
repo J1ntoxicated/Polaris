@@ -105,6 +105,12 @@ class ProdLoopState:
     # blocked. Overnight holds are free; there is no P&L halt, no entry veto.
     pdt_daytrade_count: int = 0
     equity_pdt_rank_downs: int = 0
+    # Observability only (logging-observability 2026-05-31): the LAST observed
+    # us_equity_cal session-open state, keyed per venue, used SOLELY to emit a
+    # one-shot INFO when the equity trading session flips open↔closed (RTH
+    # boundary). None until first observed. NEVER read by any entry/exit/sizing
+    # decision — equity_session_entry_hold's gate logic is unchanged.
+    equity_session_open_by_venue: dict[str, bool] = field(default_factory=dict)
     # #6 — alt-data EVIDENCE producer counters. ``altdata_refreshes`` = successful
     # non-empty collector fetches that updated the cache + snapshot; ``altdata_errors``
     # = collector exceptions swallowed (last cache kept). SIGNAL/EVIDENCE only —

@@ -405,6 +405,16 @@ def compute_and_flip_regime(
         if candidate == "crisis" and price_candidate != "crisis"
         else "price"
     )
+    # Regime candidate (DEBUG): the pre-gate composition — the L3 price candidate,
+    # the (possibly evidence-tilted) composed candidate, its source, and the
+    # dynamic confidence. The 2-consecutive-close confirm gate below is unchanged;
+    # only a confirmed flip emits INFO. Log only — never sizes/blocks/exits.
+    logger.debug(
+        "[L6/regime] candidate %s/%s price=%s tilt=%s source=%s "
+        "price_strength=%.3f confidence=%.3f",
+        venue, underlying_group_id, price_candidate, candidate,
+        candidate_source, price_strength, confidence,
+    )
     decision = detect_regime_flip(
         conn,
         venue=venue,

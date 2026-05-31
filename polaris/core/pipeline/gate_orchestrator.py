@@ -220,11 +220,13 @@ class GateOrchestrator:
                 level = logging.INFO
             logger.log(
                 level,
-                "[G%s %s/%s] decision=%s model=%s latency=%dms %s→%s next=G%s",
+                "[G%s %s/%s] decision=%s reason=%s model=%s latency=%dms "
+                "%s→%s next=G%s",
                 current,
                 ctx.venue,
                 ctx.symbol,
                 result.decision.value,
+                result.payload.get("reason", "-"),
                 result.model_used,
                 result.latency_ms,
                 prev_state,

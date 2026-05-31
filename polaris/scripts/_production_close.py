@@ -431,6 +431,21 @@ async def _close_trade_with_real_pnl(
     state.fills_close += 1
     state.closed_trades.append(trade)
 
+    # Successful close (INFO): the realised-close 거동 record Jin asked for —
+    # the venue/ticker, the close fill price + size, the realised pnl_r/pnl_usd,
+    # the held duration, and whether it was a win. Pairs with the EXIT-TRIGGER
+    # reason INFO in run_precise_exit (correlate on trade_id=position_id). The
+    # "filled" + "close" keywords surface it on the dashboard board.js pane.
+    # Log only — the close already committed above; this changes no behaviour.
+    held_seconds = max(0, now_ts - getattr(trade, "open_ts", now_ts))
+    logger.info(
+        "[close] closed %s:%s trade_id=%s filled exit_price=%.6g size_usd=%.2f "
+        "pnl_r=%.2f pnl_usd=%.2f held=%ds won=%s mode=%s",
+        trade.venue, trade.symbol, trade.position_id or "-",
+        exit_price, close_fill.size_usd, pnl_r, pnl_usd, held_seconds,
+        pnl_r > 0.0, "real" if real_roundtrip else "sim",
+    )
+
     # Day 8 codex R5 P2 fix: every post-commit auxiliary step is wrapped so a
     # downstream failure cannot drop the rest of the fan-out. ``record_fault``
     # itself can raise (it writes to ``strategy_fault_events`` and reads from

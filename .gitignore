@@ -18,7 +18,7 @@ venv/
 *.log
 logs/
 trades/
-data/
+/data/
 data/cache/
 data/candles/
 data/logs/

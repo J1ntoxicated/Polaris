@@ -2,7 +2,7 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-date_updated: 2026-05-31
+date_updated: 2026-06-01
 tags: [now, tier-0]
 ---
 
@@ -10,6 +10,14 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🔴 HANDOVER 2026-06-01 (Jin 자율완성 '전부 라이브' mandate + 세션 리셋[봇 세션 포함]. 다음 세션 여기서 시작. 마스터플랜 SSOT=`.claude/plans/master_overhaul_2026-05-31.md`).**
+**🟢 봇 라이브: PID=`data/paper/production.pid`=46005** (P4 WS + P0 routing + 로깅 전부 라이브, db=`data/polaris_live.sqlite`, --tick 5 --full-pipeline --real-roundtrip; WS는 loop start ~20s 후 재연결; 대시보드 :8770 `./scripts/start_dashboard.sh`).
+**이번 세션 커밋 체인**: P1 하네스 `5055eb1` · 글로브 E4→E6.2+universe731+카운트 `d545842/cea8e7b/97679f6/de7663d/b631ccd/9a25075/3ac6cef/02ad2a9` · **P4 WS 실시간 LIVE** `43797fb/11ea8ca`(+gitignore `data/`→`/data/` repo위생: polaris/core/data 소스가 untracked였음) · **P0 edge-routing** `0c745ac` · **로깅** `77faf35`.
+**✅ LIVE 인프라**: P1 replay/벤치마크 하네스(`polaris/scripts/run_replay.py`=go-live 측정게이트, core/replay+core/benchmark) · P4 WS 실시간가(quote_ticks okx_ws 라이브, 대시보드 실시간px, exit#2/G4#3 tick 소비; Capital/Alpaca 세션게이트 graceful) · 글로브 neural-cloud(731 거래가능 universe dim+active lit+은하별 'N tickers (M active)', 블랙홀/구조선 제거, 라인 회색통일, 리로드 글리치 fix) · 구조화 로깅 전 포인트(server glob fix로 대시보드 surface) · perf 63s→1ms(_last_prices JOIN + serve-stale).
+**🔴 정직한 핵심 — 봇 아직 +EV 아님**: P1 gate verdict=**FAIL**(real-fee-net으로 buy&hold/TSMOM/Bollinger 대비 edge 無, NIG LCB<0). +EV pocket(okx tsmom **bull_trend +0.07**) 존재하나 5 mature 셀 전부 p_pos<0.5=edge 근본 약함. P0 routing은 없는 edge 못 만듦(replay FAIL→FAIL, +0.02%). **진짜 레버 = #13 P3 self-evolve(더 나은 전략/시그널 자가생성) = Jin과 할 큰 작업.**
+**남은 웨이브**(전부 라이브+replay 검증, mandate 준수): **#12 P2** G3/G4 GPT제거 — gate_shadow_events 6107행: deterministic이 GPT KILL 4470 중 257(5.7%)만 재현 → blind 제거=GPT 막던 ~4200 진입 허용 위험 → replay로 GPT on/off 측정해 결정(아마 유지). **#13 P3** self-evolve(리니지 기록 position_strategy_segments[behavior0] + strategy_swap live apply=True + LLM 전략생성기 vault→propose→replay backtest-gate→promote; mk1 차용 `/Users/jinyoon/Projects/auto_invasion_mk1-main` evolver/tournament/router/bayesian; speculative). **#15 P5** lifecycle(% waterfall OKX벌고→CFD증폭→Alpaca저장 [[project_capital_flow_multiplier]]; 각단계+EV[P3선행]·conviction게이트·DEMO notional재배분). **#17** 대시보드 탭 컨셉 declutter. 글로브 signal-driven lightup(signals 기록 후)+Jin 라이브 미관 피드백.
+**mandate 준수(세션 검증)**: DEMO/PAPER·AGGRESSIVE(flow_not_block — P0=edge-routing이지 block-filter 아님, entry_admission block은 SHADOW 유지)·9-stack 불가침(T4 슬롯 추가0)·거부키워드 0·개발GPT 0(Claude 서브에이전트만). 봇 graceful restart만. 리셋: 봇 이미 전 라이브 재시작(46005); DB wipe(새 equity 베이스라인)는 돌이키기 어려워 보류(원하면 archive+reset).
+**(이전 핸드오버 — 참고용)**
 **🔴 HANDOVER 2026-05-30 (Jin 취침 — 자율 완성 mandate. 다음 세션 여기서 이어가기. 핸드오버 digest=[[2026-05-30_handover_3stream]]).**
 **🟢 최신 상태(2026-05-30 후반, 봇 PID=data/paper/production.pid=80589 라이브)**: ✅ **capital rotation(#11) 빌드+라이브**(`polaris/core/rotation/evaluator.py` 순수 evaluator + `_production_rotation.py` 매틱 hook; /debate w1iz37hwt가 FATAL 단위불일치 잡음→**expected $edge 양쪽 동일단위·additive margin·posterior LCB n≥20**로 재설계; winner{protected,harvest} 면제; observability no-fire 로깅 `f37889d`). ✅ **게이트 아키텍처(#13) 결정**=OPTION A(통합 파이프라인 유지+스트림별 정밀도는 StreamProfile DATA 주입, 게이트 fork X; judge panel 8/10) → **Phase 0-3 빌드**(StreamProfile SSOT `core/streams/config.py`+resolve / G4 per-stream guard `_stream_guards.py` / G7 session-forced-exit rail `session_exit_rail.py`[유일 DECISION 분기; A always-on never-fire byte동일] / equity regime evidence `_GROUP_SOURCES`). plan SSOT=`.claude/plans/{capital_rotation,gate_architecture}_2026-05-30.md`. ✅ **OKX deadlock 해소(Jin 승인 "코드로 청산→USDT")**: USDT $0→**$74,882 회복**(`liquidate_okx_orphans.py --live` BTC1+ETH1 청산, us.okx.com)+ghost ETHW-USDT DB 정리+봇 clean 재기동 → **OKX 거래 재개 라이브 증명**(12 order POST buy→12 RESP ok=True, fills 5/open 5, fault 0). ~21 커밋(`cf98ed8`→`f37889d`), ~1247 green. **남은 #12**(데이터 누적 대기): 파라미터 /debate 캘리브(exit 7·Track C 캡·net-edge·rotation 6·CLOSE_BUFFER)+alt-data equity conviction 캘리브(현 FX macro 가중 재사용, conviction<1.5 floor) — 봇이 거래하며 posterior 쌓이면 진행. rotation 기계적 fire는 잔고 막힐 때(시간) 로깅으로 가시화.
 **🟢 AI conductor + stream 교정 진행(2026-05-31, ⚠봇 80589 정지됨 — Jin AI절감 위해 SIGTERM)**: Jin 지시 "technical이 결정, AI는 총괄 지휘" + "레짐 다이나믹(티커/거래소별)" + "다 연결". ① **AI conductor 설계+/debate=PROCEED_WITH_CHANGES**(Claude 4-lens+codex 수렴): per-signal GPT는 rubber-stamp(G7 46/46 HOLD·G6 99.97% HOLD·ai_lessons read 0건; 진짜 결정은 FSM/Python/posterior가 이미 소유), per-signal 토큰 95-99% 절감 가능. plan=[[ai_conductor_architecture_2026-05-30]] · debate=[[ai_conductor_transition_2026-05-30]]. ② **stream/asset_class/regime 통합 교정**(Jin "다 연결"): asset_class 하나가 universe→stream→regime L2→cell→leverage→G1 관통. Capital이 의도(FX/지수/금)와 달리 crypto알트CFD 거래중이던 근원=`StreamConfig.asset_classes` 미강제+세션 비대칭. **Jin 결정=(a) 완전배제**(A=OKX crypto전담, B=Capital FX/지수/금전담). plan=[[stream_regime_integration_2026-05-30]]. ③ **STEP 0-4 완료·커밋**: STEP1 G1 GPT제거→vol-ranker `a2b7ab4`(2850콜→0, 거동 byte동일) · STEP2/3/4 Capital crypto배제+세션watch+coherence guard `460e416`(화이트리스트 SSOT enforce, OKX/Alpaca collateral clean). **1278 green**, fresh adversarial review 통과(blocker 0). ④ **남은 STEP 5/6(다음 세션)**: STEP5=regime 계층 **L1 global macro(VIX/FRED) / L2 asset-class 차등(crypto funding·FX/gold macro·equity gap) / L3 per-ticker(4h EMA20/50+24h ATR+5m-1h eff) 합성** — `regime_flip.py classify_regime` stub(confidence 0.5 고정) 실구현, **/debate 선행**(regime_state 키확장 vs 별도테이블; regime_state/cell/learner 3곳 atomic). STEP6=G1 asset-class-aware(`watchlist.py` 자산군 top-N 쿼터+Capital vol_24h_usd=0.0 채우기). 그 후 G3/G4/G6/G7 deterministic 전환(P3-P5)+conductor tier(P6). ⚠곁가지: Capital 오일주식 CVX/XOM→commodity 오태깅(P0아님 추적). 워크플로 스크립트=`.claude/wf_*.js`(재사용 가능).
@@ -156,4 +164,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-05-31 12:22 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-05-31 17:25 (paper=True, full_pipeline=True)

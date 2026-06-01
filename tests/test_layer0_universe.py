@@ -835,3 +835,98 @@ def test_quota_majors_priority_noop_when_no_majors_present() -> None:
     qmin = focus_min_quota_by_class()["forex"]
     assert len(fx_in_focus) >= min(qmin, len(exotics))
     assert len(focus) == 30
+
+
+# ---------------------------------------------------------------------------
+# Alpaca liquid-equity focus priority (P1.5 — megacaps reach focus; flow_not_block)
+# ---------------------------------------------------------------------------
+# DEMO/PAPER virtual capital. Equity rows carry REAL vol (close×volume) + an
+# intraday-range ATR proxy. Megacaps/top-ETFs have huge dollar-volume but LOW
+# realized ATR%, while penny/small-caps (ADTX/ZCMD) have tiny dollar-volume but
+# HUGE ATR%. The vol+ATR composite + the equity focus quota can let high-ATR
+# penny names seat AHEAD of liquid megacaps. Mirroring the Capital FX-major
+# priority, the equity quota now PRIORITIZES curated liquid equities so megacaps
+# /top-ETFs seat ALONGSIDE (never replacing) the penny names — a FLOW INCREASE,
+# not a throttle, touching no global RANK_SCORE_W_* (OKX byte-identical no-op).
+
+
+def _eq(symbol: str, *, vol: float, atr_pct: float) -> UniverseInstrument:
+    """Alpaca equity row with real vol + ATR (mirrors enriched _alpaca rows)."""
+    return _make_inst(
+        symbol,
+        venue="alpaca",
+        asset_class="equity",
+        quote_ccy="USD",
+        vol=vol,
+        atr_pct=atr_pct,
+        spread_bps=2.0,
+        depth=0.0,
+    )
+
+
+def test_is_liquid_equity_recognizes_megacaps_and_etfs() -> None:
+    from polaris.core.universe.schema import is_liquid_equity
+
+    assert is_liquid_equity("alpaca", "AAPL")
+    assert is_liquid_equity("alpaca", "nvda")  # case-insensitive
+    assert is_liquid_equity("alpaca", "SPY")  # top ETF
+    assert is_liquid_equity("ALPACA", "MSFT")
+    # Not a curated liquid name / not Alpaca → False.
+    assert not is_liquid_equity("alpaca", "ADTX")  # penny small-cap
+    assert not is_liquid_equity("okx", "AAPL")  # OKX is crypto-only; not floored
+
+
+def test_liquid_seed_symbols_are_all_liquid_equity() -> None:
+    """SSOT: every _alpaca seed symbol is recognized by the schema helper."""
+    from polaris.core.universe._alpaca import LIQUID_SEED_SYMBOLS
+    from polaris.core.universe.schema import is_liquid_equity
+
+    for sym in LIQUID_SEED_SYMBOLS:
+        assert is_liquid_equity("alpaca", sym), f"{sym} must be a liquid equity"
+
+
+def test_quota_seats_megacaps_over_penny_names_within_equity_quota() -> None:
+    """Mixed equity active set → the equity quota seats megacaps ahead of high-ATR penny names."""
+    from polaris.core.universe.schema import focus_min_quota_by_class, is_liquid_equity
+
+    # Crypto fills the bulk of the window with the top score.
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    # Penny/small-caps: tiny dollar-volume but HUGE ATR% → they out-score megacaps.
+    penny = [
+        _eq("ADTX", vol=2e6, atr_pct=18.0),
+        _eq("ZCMD", vol=3e6, atr_pct=15.0),
+        _eq("XPON", vol=1e6, atr_pct=14.0),
+        _eq("GNS", vol=2e6, atr_pct=20.0),
+    ]
+    # Megacaps/top-ETFs: huge dollar-volume but LOW ATR% → would lose the score sort.
+    megacaps = [
+        _eq("AAPL", vol=8e9, atr_pct=1.2),
+        _eq("MSFT", vol=7e9, atr_pct=1.1),
+        _eq("NVDA", vol=9e9, atr_pct=2.0),
+        _eq("SPY", vol=2e10, atr_pct=0.8),
+    ]
+    focus = compute_dynamic_focus(crypto + penny + megacaps, cycle_ts=NOW, target_size=30)
+    eq_in_focus = [f for f in focus if f.venue == "alpaca"]
+    qmin = focus_min_quota_by_class()["equity"]
+    assert len(eq_in_focus) >= qmin
+    # The equity quota seats curated megacaps, not just the highest-ATR penny names.
+    liquid_in_focus = sum(1 for f in eq_in_focus if is_liquid_equity("alpaca", f.symbol))
+    assert liquid_in_focus >= 1, "at least one megacap/top-ETF must reach focus via the quota"
+    assert len(focus) == 30  # flow increase, not throttle: total size unchanged
+
+
+def test_quota_equity_priority_noop_when_no_liquid_present() -> None:
+    """All-penny equity universe → quota behaves exactly as before (no megacap to prioritize)."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    penny = [
+        _eq("ADTX", vol=2e6, atr_pct=18.0),
+        _eq("ZCMD", vol=3e6, atr_pct=15.0),
+        _eq("XPON", vol=1e6, atr_pct=14.0),
+        _eq("GNS", vol=2e6, atr_pct=20.0),
+        _eq("CEI", vol=1e6, atr_pct=12.0),
+    ]
+    focus = compute_dynamic_focus(crypto + penny, cycle_ts=NOW, target_size=30)
+    eq_in_focus = [f for f in focus if f.venue == "alpaca"]
+    qmin = focus_min_quota_by_class()["equity"]
+    assert len(eq_in_focus) >= min(qmin, len(penny))
+    assert len(focus) == 30

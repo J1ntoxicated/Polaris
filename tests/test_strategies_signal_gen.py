@@ -235,6 +235,29 @@ def test_fx_breakout_blocks_unsupported_symbol() -> None:
     assert s.generate_raw_signal(mv) is None
 
 
+def test_fx_breakout_emits_for_real_capital_aud_epic() -> None:
+    """Capital's real AUD/USD epic is ``AUDUSD_ZERO`` (live DB: no bare AUDUSD).
+
+    The basket must recognize the venue epic as the AUDUSD major and emit, else
+    fx_breakout_basket never trades AUD despite it reaching the active set/focus.
+    """
+    s = FXBreakoutBasketStrategy()
+    bars = _make_bars(60, base_close=0.66, drift=0.001)
+    bars[-1] = BarView(
+        ts=bars[-1].ts, open=0.70, high=0.73, low=0.69, close=0.72,
+        volume=1500.0,
+    )
+    mv = MarketView(
+        symbol="AUDUSD_ZERO", venue="capital", timeframe="1H",
+        bars=bars, last_price=0.72, spread_bps=1.0,
+        donchian_high_40=0.70, adx_14=28.0,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.symbol == "AUDUSD_ZERO"  # original epic preserved for routing
+    assert sig.correlation_group == "cfd_fx_trend"
+
+
 def test_fx_breakout_emits_short_on_break_below_low() -> None:
     s = FXBreakoutBasketStrategy()
     bars = _make_bars(60, base_close=1.10, drift=0.001)

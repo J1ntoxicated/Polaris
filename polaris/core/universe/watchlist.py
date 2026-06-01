@@ -30,6 +30,7 @@ from polaris.core.universe.schema import (
     UniverseInstrument,
     focus_min_quota_by_class,
     is_capital_fx_major,
+    is_liquid_equity,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,24 +215,33 @@ def _apply_asset_class_quota(
         cls = active_universe[i].asset_class
         in_count[cls] = in_count.get(cls, 0) + 1
 
-    # Promotion candidate order = score-desc, but with curated Capital FX majors
-    # pulled ahead of non-majors (flow_not_block, per-venue): Capital FX rows all
-    # carry vol=0.0, so the quiet MAJORS (EURUSD/USDJPY/...) score below the
-    # high-ATR EXOTIC crosses (USDZAR/NOKSEK). Without this the forex quota would
-    # fill purely with exotics and the majors would never reach focus, starving
-    # fx_breakout_basket / session_breakout. This is a stable secondary priority,
-    # NOT a global weight change: for any non-major row the key is unchanged, so
-    # OKX/Alpaca and all-exotic forex universes are byte-identical (no-op).
+    # Promotion candidate order = score-desc, but with curated per-venue PRIORITY
+    # names pulled ahead of their class peers (flow_not_block, per-venue):
+    #  - Capital FX rows all carry vol=0.0, so the quiet MAJORS (EURUSD/USDJPY/...)
+    #    score below the high-ATR EXOTIC crosses (USDZAR/NOKSEK) — the forex quota
+    #    would fill purely with exotics and the majors never reach focus, starving
+    #    fx_breakout_basket / session_breakout.
+    #  - Alpaca equities carry REAL vol+ATR, but megacaps/top-ETFs have LOW ATR%
+    #    while penny names have HUGE ATR% — the equity quota would fill with penny
+    #    names and the LIQUID megacaps never reach focus, starving equity_rsi_bb /
+    #    equity_tsmom / equity_gap_go at the RTH open.
+    # Both are a stable secondary priority, NOT a global weight change: for any
+    # non-priority row the key is unchanged, so OKX, all-exotic forex, and
+    # all-penny equity universes are byte-identical (no-op). The quota loop below
+    # still gates promotions by each class's own shortfall, so a major/megacap is
+    # promoted ONLY into its own class's quota slots, ALONGSIDE (never replacing)
+    # the exotic/penny rows.
     order_pos = {idx: pos for pos, idx in enumerate(order)}
-    promo_order = sorted(
-        order,
-        key=lambda i: (
-            0 if is_capital_fx_major(active_universe[i].venue, active_universe[i].symbol) else 1,
-            order_pos[i],
-        ),
-    )
+
+    def _priority(i: int) -> int:
+        ins = active_universe[i]
+        if is_capital_fx_major(ins.venue, ins.symbol) or is_liquid_equity(ins.venue, ins.symbol):
+            return 0
+        return 1
+
+    promo_order = sorted(order, key=lambda i: (_priority(i), order_pos[i]))
     promotions: list[int] = []
-    for src_idx in promo_order:  # majors first, then score-desc
+    for src_idx in promo_order:  # priority names (FX majors / liquid equities) first, then score-desc
         if src_idx in selected:
             continue
         cls = active_universe[src_idx].asset_class

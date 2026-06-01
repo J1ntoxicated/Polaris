@@ -33,7 +33,7 @@ import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
-from polaris.core.universe.schema import UniverseInstrument
+from polaris.core.universe.schema import LIQUID_EQUITY_SYMBOLS, UniverseInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +54,9 @@ _SNAPSHOT_BATCH = 100
 # real snapshot even on a day they fall out of the share-volume most-actives,
 # so the largest-cap names are never starved by the alphabetical-tie bug. Also
 # the offline fallback liquidity seed when a live datum is unavailable.
-LIQUID_SEED_SYMBOLS: tuple[str, ...] = (
-    # Megacaps
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
-    "BRK.B", "JPM", "V", "MA", "UNH", "XOM", "LLY", "JNJ", "WMT", "PG", "HD",
-    "COST", "ORCL", "NFLX", "AMD", "ADBE", "CRM", "BAC", "KO", "PEP", "INTC",
-    # Top ETFs by dollar-volume
-    "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "TLT", "GLD", "XLF", "XLE",
-    "XLK", "SMH", "SOXL", "TQQQ", "EEM", "HYG", "ARKK",
-)
+# SSOT = ``schema.LIQUID_EQUITY_SYMBOLS`` (the same set also drives the equity
+# focus-quota priority); sorted here for a deterministic probe order.
+LIQUID_SEED_SYMBOLS: tuple[str, ...] = tuple(sorted(LIQUID_EQUITY_SYMBOLS))
 
 # env: bare name first, ARCHIVE_* fallback (T9 convention — reuse it).
 ALPACA_API_KEY_ENV = "ALPACA_PAPER_API_KEY"

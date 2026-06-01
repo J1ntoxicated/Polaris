@@ -32,6 +32,21 @@ BASKET_SYMBOLS: frozenset[str] = frozenset(
     {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD"}
 )
 
+
+def _normalize_basket_symbol(symbol: str) -> str:
+    """Reduce a Capital venue epic to the bare FX pair for basket matching.
+
+    Capital's real epics carry a suffix (e.g. AUD/USD lists as ``AUDUSD_ZERO``,
+    weekend variants as ``EURUSD_W``), so a plain ``.upper().replace("/", "")``
+    misses the major. Strip a trailing ``_SUFFIX`` so ``AUDUSD_ZERO`` /
+    ``EURUSD_W`` / ``EUR/USD`` all reduce to the bare pair in ``BASKET_SYMBOLS``.
+    Mirrors ``core.universe.schema._normalize_fx_symbol`` (same SSOT intent).
+    """
+    s = symbol.upper().replace("/", "")
+    if "_" in s:
+        s = s.split("_", 1)[0]
+    return s
+
 # Strength curve + venue constraints (frozen v1).
 STRENGTH_BASE = 0.5
 ADX_STRENGTH_DENOM = 40.0
@@ -56,7 +71,7 @@ class FXBreakoutBasketStrategy(BaseStrategy):
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
         if not self.warmup_ok(market_view):
             return None
-        if market_view.symbol.upper().replace("/", "") not in BASKET_SYMBOLS:
+        if _normalize_basket_symbol(market_view.symbol) not in BASKET_SYMBOLS:
             return None
         bars = market_view.bars
         if len(bars) < WINDOW + 1:

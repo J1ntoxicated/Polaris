@@ -170,6 +170,45 @@ def is_capital_fx_major(venue: str, symbol: str) -> bool:
     return (venue or "").lower() == "capital" and _normalize_fx_symbol(symbol) in CAPITAL_FX_MAJORS
 
 
+# ---------------------------------------------------------------------------
+# Alpaca liquid-equity focus priority (P1.5 stream-coverage — flow_not_block, per-venue)
+# ---------------------------------------------------------------------------
+# Equity rows carry REAL liquidity (``vol_24h_usd`` = close×volume) + an intraday-
+# range ATR proxy. Megacaps / top ETFs have HUGE dollar-volume but LOW realized
+# ATR%; penny / small-caps (ADTX, ZCMD) have tiny dollar-volume but HUGE ATR%.
+# The vol+0.45·ATR composite + the equity focus quota can therefore let the
+# high-ATR penny names seat AHEAD of the liquid megacaps — exactly the Alpaca
+# analogue of the Capital exotics-vs-majors problem above. ``equity_rsi_bb`` /
+# ``equity_tsmom`` / ``equity_gap_go`` want the LIQUID names at the RTH open.
+#
+# This is the per-venue EQUITY mirror of ``CAPITAL_FX_MAJORS``: a curated liquid
+# set is PRIORITIZED within the equity focus quota so megacaps/top-ETFs seat
+# ALONGSIDE (never replacing) the penny names — a FLOW INCREASE, not a throttle.
+# SSOT lives here; ``_alpaca.LIQUID_SEED_SYMBOLS`` (ordered tuple for probing) is
+# derived from this set. Touches NO global ranking weight (``RANK_SCORE_W_*``
+# byte-identical → OKX/Capital ranking unchanged; non-Alpaca venue → no-op).
+LIQUID_EQUITY_SYMBOLS: Final[frozenset[str]] = frozenset(
+    {
+        # Megacaps
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
+        "BRK.B", "JPM", "V", "MA", "UNH", "XOM", "LLY", "JNJ", "WMT", "PG", "HD",
+        "COST", "ORCL", "NFLX", "AMD", "ADBE", "CRM", "BAC", "KO", "PEP", "INTC",
+        # Top ETFs by dollar-volume
+        "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "TLT", "GLD", "XLF", "XLE",
+        "XLK", "SMH", "SOXL", "TQQQ", "EEM", "HYG", "ARKK",
+    }
+)
+
+
+def is_liquid_equity(venue: str, symbol: str) -> bool:
+    """True iff ``(venue, symbol)`` is a curated liquid equity (megacap / top ETF).
+
+    Per-venue (Alpaca) and case-insensitive. Equity epics are exact tickers (no
+    FX-style separators), so matching is a simple upper-cased membership test.
+    """
+    return (venue or "").lower() == "alpaca" and symbol.upper() in LIQUID_EQUITY_SYMBOLS
+
+
 FocusBucket = Literal["core", "satellite", "listing_watch"]
 
 

@@ -10,6 +10,19 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🔴 HANDOVER 2026-06-01-night4 (Jin 자러 감 — 자율 mandate "확실히 거래 발생 + 모든 상황서 수익". 봇 PID=`data/paper/production.pid`=85373, **fresh-reset 클린 DB**(이전 reconcile-오염 DB 아카이브=`data/polaris_live_archive_20260601_1617.sqlite`), log=`data/paper/production_p1_5_0601_clean.log`, 대시보드 :8770. **reconcile-import 게이트 오프**=`POLARIS_RECONCILE_VENUE_IMPORT`).**
+**🟢 현재 상태(라이브 검증)**: 클린 재기동 후 **에러루프 0**(deal_id/reconcile/insta-close 사라짐), OKX 거래중·**수수료 10bps**(70bps 데모→real, 라이브확인)·**WS 3거래소 라이브**(okx/capital/alpaca 초당 다틱)·대시보드 실시간. 전체 스위트 **1735 green**, ruff/mypy clean.
+**✅ 이번 세션 커밋체인** (인시던트 캐스케이드 + 실시간/신빙성): `662a1f1`+`55d9d5c`(P3 P0a) · `ff9c997`+`7aef1ba`(OKX 청산 청크<=1000USDT, 51201 출혈 fix) · `60094d1`+`5cd3887`(pnl_r_net 차원fix + orphan reconcile) · `2bc7c76`(real-fee 10bps + Capital +10h바 진짜원인[snapshotTimeUTC] + 트레이딩경로 바-가드 ts<=now + 보유종목 WS union+resubscribe + 대시보드 future-bar) · `40d9604`(reconcile-import 게이트오프=3버그) · `eb398b6`(대시보드 믹스 리스트, 그룹 제거).
+**🔬 P0a 결과(원래 task)** = **`VALIDATION_STARVED`**: 게이트 Tier-3(NIG LCB)가 thin-N서 강한 edge도 못 거름 → "0 pass=피처고갈" 아님. 생성기 P2 보류. SSOT=`.claude/plans/p3_p0a_kill_spike_2026-06-01.md`. 교훈=[[project_validation_starvation_positive_control]]·[[project_exit_decision_vs_close_execution]]·[[feedback_realtime_price_first_principle]].
+**🔴🔴 다음 = FOUNDATION (Jin이 가리킨 진짜 작업, 설계/debate 필요 — 거동변경)**:
+  1. **실시간-틱 의사결정** ([[feedback_realtime_price_first_principle]]): 진입/엑싯 *결정*을 딜레이 바 아니라 **라이브 틱**으로. 현재=전략이 바-클로즈로 신호(딜레이). 바=인디케이터 base, 결정=실시간가. **Jin #1 원칙.**
+  2. **Capital 양방향·레짐별 풍부한 전략**: Capital(CFD 롱/숏)은 "모든 상황 수익"의 핵심 venue=가장 활발해야 하나, 현재 전략이 **돌파/추세형뿐**(fx donchian/xau 모멘텀/session 돌파) → chop/range서 신호0. 평균회귀·레인지·레짐별 양방향 전략 필요.
+  3. **자금-인지 sizing**: `position_risk_state`가 오픈시 미배선 → 0.99 캡 미작동 → over-deploy/churn(틱 35-50s, 85주문/틱 대부분 거부). 가용 USDT/포지션 캡 binding.
+  4. **멀티소스 견고 백데이터 + 티커/테마별 차별화 테크니컬**: 바 단일소스·해상도 제각각(Alpaca 1D만)·Yahoo 등 미동원. 티커불문 동일 테크니컬 → 차별화 필요.
+  5. **reconcile-import 재구현**(게이트오프 중): async-native fetch + entry=current-mark + exit-FSM init + Capital deal_id 포착.
+  6. **모바일 대응 대시보드**(Jin: "모든 거 다 한 뒤").
+**⚠️ 세션 반성**: 곁가지(수수료/슬리피지/회계 정밀도)에 매달려 본체(거래·실시간·edge)를 늦게 봄 → [[feedback_realtime_price_first_principle]]. 우선순위 = 거래발생·실시간·edge 먼저.
+**(↓ 이전 핸드오버)**
 **🔴 HANDOVER 2026-06-01-night3 (Jin steering. **봇 graceful 재기동: PID=`data/paper/production.pid`=45047**, db=polaris_live.sqlite, log=`data/paper/production_p1_5_0601_dustfix.log`, 대시보드 :8770).**
 **✅ 인시던트 follow-up 3건 처리 (커밋 `60094d1`+`5cd3887`, 라이브 검증)**: ① **pnl_r_net 폭발 수정** — 차원 불일치(whole-position cost ÷ per-unit atr_usd)로 저가심볼서 -210040 R → atr_usd를 whole-position 1R 달러값으로 교정(ALGO net -10.22); 측정전용(posterior, sizing 미게이팅). 라이브 |net|>1000 = **0**. ② **orphan reconcile** — 내부 qty가 demo 지갑 보유량 초과(available~dust)면 영구 retry → `CloseOrphan` sentinel(available<=0 OR available×mark<최소주문) → `status='reconciled'`(가짜fill/pnl 없음, exit+hydrate 제외, risk_events 감사). status 쿼리 전수감사(10 사이트 'reconciled' 제외). **라이브: open 52→3, reconciled 18**(ETHW5+ALGO/FIL/SUSHI/ADA/ARB/… phantom 전부 정리), exit 무한retry 종료. 1702 green, behavior-0, 2-스텝 적대리뷰 GO. ③ (close-chunk은 `ff9c997` 이미 라이브).
 **🔶 미해결 (Jin 결정 필요 — "장부≠venue" 무결성 갭 계열)**: ① **per-symbol 오픈 캡 미작동** = `position_risk_state` 테이블이 오픈 시 한 번도 안 채워져 0.99 per-symbol/cluster 캡이 binding 안 됨(36-ALGO pile-up 근원). 고치면 dormant 캡 3개(per-symbol/underlying/cluster)가 동시에 binding=**라이브 진입거동 대폭 변경** + 캡값(0.99)도 pile-up 못 막음 → **trading-param/전략 결정 = debate**. ② **18개 phantom reconcile = 내부 장부가 OKX 지갑과 대규모 drift**(opens 기록됐으나 지갑 미보유) → **주기적 reconciliation 부재**(reconciling-portfolio 미가동?) 근본 감사 권장. ①②는 연결됨(둘 다 내부-venue 정합성). (이전 night3 인시던트 상세 ↓)
@@ -182,4 +195,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-01 11:27 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-01 16:18 (paper=True, full_pipeline=True)

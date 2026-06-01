@@ -12,11 +12,14 @@ import asyncio
 import logging
 import sqlite3
 import time
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
+from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.data.ingest import ingest_bars, persist_bars
-from polaris.core.data.schema import Bar
+from polaris.core.data.schema import BAR_INTERVALS, Bar
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx.adapter import fetch_okx_bars
@@ -31,16 +34,153 @@ CAPITAL_RESOLUTION_BY_INTERVAL: dict[str, str] = {
     "5m": "MINUTE_5",
     "15m": "MINUTE_15",
     "1H": "HOUR",
+    "1D": "DAY",  # canonical-interval coverage; Capital never routes 1D (alpaca-only).
+}
+
+# Alpaca `/v2/stocks/{symbol}/bars` `timeframe` query token per canonical
+# interval. The equity strategies are daily (``1D`` → Alpaca ``1Day``); the
+# intraday tokens are listed for table completeness but equities only use 1D.
+ALPACA_TIMEFRAME_BY_INTERVAL: dict[str, str] = {
+    "1m": "1Min",
+    "5m": "5Min",
+    "15m": "15Min",
+    "1H": "1Hour",
+    "1D": "1Day",
 }
 
 # Per-timeframe fetch cadence — bars only need to be re-pulled when a fresh
-# candle is likely to have closed. Honours BAR_INTERVALS = {1m, 5m, 15m, 1H}.
+# candle is likely to have closed. Honours BAR_INTERVALS = {1m, 5m, 15m, 1H, 1D}.
 TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
     "1m": 5.0,    # every tick
     "5m": 30.0,
     "15m": 60.0,
     "1H": 300.0,
+    "1D": 3600.0,  # daily bars close once/day — hourly re-pull is ample.
 }
+
+
+def _to_float(value: Any) -> float:
+    if value is None or value == "":
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_alpaca_ts(value: Any) -> int:
+    """Alpaca bar ``t`` is RFC3339/ISO-8601 (e.g. ``2024-01-02T05:00:00Z``).
+
+    Return seconds-epoch (UTC). A numeric value passes through; a malformed or
+    missing value returns 0 (the bar is then dropped by the caller). The tz is
+    forced to UTC so a non-UTC host does not shift every bar by its offset
+    (same hardening as ``capital_price_row_to_bar``).
+    """
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str) or not value:
+        return 0
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp())
+
+
+def _alpaca_bar_to_canonical(
+    row: dict[str, Any],
+    *,
+    symbol: str,
+    bar_interval: str,
+    underlying_group_id: str,
+) -> Bar | None:
+    """Convert one raw Alpaca bar dict (``t/o/h/l/c/v/n/vw``) to canonical Bar.
+
+    Mirrors ``okx_candle_to_bar`` / ``capital_price_row_to_bar``: the
+    ``instrument_id`` is ``alpaca:{symbol}``, ts is seconds-epoch UTC, OHLCV is
+    cast via ``float``. Returns ``None`` for an unusable row (bad ts / non-
+    positive open/close) so a single malformed candle never aborts the batch.
+    """
+    if bar_interval not in BAR_INTERVALS:
+        return None
+    ts = _parse_alpaca_ts(row.get("t"))
+    if ts <= 0:
+        return None
+    o = _to_float(row.get("o"))
+    h = _to_float(row.get("h"))
+    low = _to_float(row.get("l"))
+    c = _to_float(row.get("c"))
+    if o <= 0.0 or c <= 0.0:
+        return None
+    vol = _to_float(row.get("v"))
+    return Bar(
+        instrument_id=f"alpaca:{symbol}",
+        underlying_group_id=underlying_group_id,
+        venue="alpaca",
+        symbol=symbol,
+        bar_interval=bar_interval,
+        ts=ts,
+        open=o,
+        high=h,
+        low=low,
+        close=c,
+        volume=vol,
+        notional_usd=c * vol if vol > 0 else 0.0,
+        trade_count=int(_to_float(row.get("n"))),
+        vwap=_to_float(row.get("vw")),
+        bid_close=0.0,
+        ask_close=0.0,
+        spread_bps_close=0.0,
+        source="alpaca_rest",
+    )
+
+
+async def fetch_alpaca_bars(
+    adapter: Any,
+    symbol: str,
+    *,
+    bar_interval: str = "1D",
+    limit: int = 240,
+    asset_class: str = "equity",
+) -> list[Bar]:
+    """Fetch + normalize Alpaca equity bars to canonical Bars (newest last).
+
+    Wraps ``AlpacaAdapter.fetch_bars`` (raw ``list[dict]`` with keys
+    ``t/o/h/l/c/v/n/vw``). The canonical ``bar_interval`` is mapped to the
+    Alpaca ``timeframe`` token (``1D`` → ``1Day``). Alpaca returns bars in
+    chronological ascending order (newest last) — the canonical contract — so
+    no reversal is needed (unlike OKX, which is newest-first). A fetch failure
+    logs + returns ``[]`` (mirror of the OKX / Capital branches).
+    """
+    timeframe = ALPACA_TIMEFRAME_BY_INTERVAL.get(bar_interval)
+    if timeframe is None:
+        logger.warning(
+            "[L1/alpaca] unsupported bar_interval=%r — skipping %s",
+            bar_interval,
+            symbol,
+        )
+        return []
+    try:
+        raw = await adapter.fetch_bars(symbol, timeframe=timeframe, limit=limit)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        logger.debug("[L1/alpaca] %s fetch failed: %r", symbol, exc)
+        return []
+    underlying = compute_underlying_group_id("alpaca", symbol, asset_class=asset_class)
+    out: list[Bar] = []
+    for row in raw:
+        bar = _alpaca_bar_to_canonical(
+            row, symbol=symbol, bar_interval=bar_interval,
+            underlying_group_id=underlying,
+        )
+        if bar is not None:
+            out.append(bar)
+    logger.debug(
+        "[alpaca] bars fetched %s/%s requested=%d got=%d",
+        symbol, bar_interval, limit, len(out),
+    )
+    return out
 
 
 async def fetch_bars_one(
@@ -49,6 +189,7 @@ async def fetch_bars_one(
     asset_class: str,
     *,
     capital_session: CapitalSession | None = None,
+    alpaca_adapter: Any = None,
     limit: int = 240,
     bar_interval: str = "1m",
 ) -> list[Bar]:
@@ -57,6 +198,10 @@ async def fetch_bars_one(
     F10 — Day 9: ``bar_interval`` defaults to ``1m`` for back-compat but the
     production loop now passes the per-strategy ``metadata.timeframe`` so
     Capital strategies (1H bars) no longer eat 1m candles silently.
+
+    Stream-coverage P0: ``venue == 'alpaca'`` (daily equity bars) routes to
+    ``fetch_alpaca_bars`` when an ``alpaca_adapter`` is threaded through; with
+    no adapter it returns ``[]`` (mirror of the capital ``None`` session guard).
     """
     if venue == "okx":
         try:
@@ -97,6 +242,17 @@ async def fetch_bars_one(
             logger.debug("[L1/capital] %s fetch failed: %r", symbol, exc)
             return []
         return bars
+    if venue == "alpaca":
+        if alpaca_adapter is None:
+            return []
+        # Alpaca returns chronological ascending (newest last) — no reversal.
+        return await fetch_alpaca_bars(
+            alpaca_adapter,
+            symbol,
+            bar_interval=bar_interval,
+            limit=limit,
+            asset_class=asset_class,
+        )
     return []
 
 
@@ -108,6 +264,7 @@ async def ingest_bars_per_timeframe(
     last_fetch_monotonic_by_tf: dict[str, float],
     bars_persisted_by_tf: dict[str, int],
     capital_session: CapitalSession | None = None,
+    alpaca_adapter: Any = None,
     limit: int = 240,
     now_mono: float | None = None,
 ) -> dict[str, int]:
@@ -144,6 +301,7 @@ async def ingest_bars_per_timeframe(
                 continue
             result = await ingest_bars_for_focus(
                 conn, focus_for_v, capital_session=capital_session,
+                alpaca_adapter=alpaca_adapter,
                 limit=limit, bar_interval=timeframe,
             )
             total_bars += result["bars"]
@@ -168,6 +326,7 @@ async def ingest_bars_for_focus(
     focus: list[tuple[str, str, str, str]],
     *,
     capital_session: CapitalSession | None = None,
+    alpaca_adapter: Any = None,
     limit: int = 240,
     parallel: int = 8,
     bar_interval: str = "1m",
@@ -191,7 +350,8 @@ async def ingest_bars_for_focus(
         async with sem:
             bars = await fetch_bars_one(
                 venue, symbol, asset_class,
-                capital_session=capital_session, limit=limit,
+                capital_session=capital_session,
+                alpaca_adapter=alpaca_adapter, limit=limit,
                 bar_interval=bar_interval,
             )
         if bars:

@@ -69,6 +69,13 @@ def _mock_client(
     payload: list[dict[str, object]], *, status_code: int = 200
 ) -> httpx.AsyncClient:
     def handler(request: httpx.Request) -> httpx.Response:
+        # The P1 liquidity enrichment also hits the data host (screener +
+        # snapshots) on the shared client; those return empty here so the rows
+        # keep their coarse placeholder (this test pins asset-row building).
+        if request.url.path == "/v1beta1/screener/stocks/most-actives":
+            return httpx.Response(200, json={"most_actives": []})
+        if request.url.path == "/v2/stocks/snapshots":
+            return httpx.Response(200, json={"snapshots": {}})
         assert request.url.path == "/v2/assets"
         # The fetcher narrows server-side via query params.
         return httpx.Response(status_code, json=payload)

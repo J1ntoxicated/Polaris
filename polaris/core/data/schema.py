@@ -15,8 +15,9 @@ ALLOWED_METRICS: Final[frozenset[str]] = frozenset(
     {"atr", "size", "signal", "volume", "pnl_std"}
 )
 
-# Allowed bar intervals for the `bars` table.
-BAR_INTERVALS: Final[frozenset[str]] = frozenset({"1m", "5m", "15m", "1H"})
+# Allowed bar intervals for the `bars` table. ``1D`` carries the equity
+# (Alpaca) daily canvas — the three equity strategies are all ``timeframe=1D``.
+BAR_INTERVALS: Final[frozenset[str]] = frozenset({"1m", "5m", "15m", "1H", "1D"})
 
 # Cold-start neutral ratio (Q4 of L1 spec).
 COLD_START_NEUTRAL: Final[float] = 1.0

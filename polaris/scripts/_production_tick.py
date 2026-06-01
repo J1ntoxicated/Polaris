@@ -302,7 +302,8 @@ async def _run_tick(
         timeframe_to_venues=timeframe_to_venues,
         last_fetch_monotonic_by_tf=state.last_fetch_monotonic_by_tf,
         bars_persisted_by_tf=state.bars_persisted_by_tf,
-        capital_session=capital_session, limit=240, now_mono=now_mono,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        limit=240, now_mono=now_mono,
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]

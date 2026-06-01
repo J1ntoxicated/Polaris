@@ -28,6 +28,7 @@ from polaris.core.universe.schema import (
     UNIVERSE_RANK_TOP_N_DEFAULT,
     UNIVERSE_RANK_TOP_N_ENV,
     UniverseInstrument,
+    is_capital_fx_major,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,12 +145,28 @@ def rank_active_universe(
 
     n = _resolve_rank_top_n(top_n)
     order = sorted(range(len(valid)), key=lambda i: scores[i], reverse=True)
-    out = [valid[i] for i in order[:n]]
+    selected = order[:n]
+
+    # Per-venue Capital FX-majors keep/floor (flow_not_block): Capital exposes no
+    # 24h notional (vol=0), so high-ATR exotic crosses outrank the quiet FX majors
+    # and the majors never reach the active set — starving fx_breakout_basket /
+    # session_breakout. Union in any VALID (state=live) curated major that the
+    # top-N cut dropped, ALONGSIDE the exotics (seat BOTH, remove nothing). This
+    # is a FLOW INCREASE, not a throttle, and touches no global ranking weight —
+    # OKX/Alpaca active sets stay byte-identical (no Capital major present → no-op).
+    chosen = set(selected)
+    kept_majors = [
+        i
+        for i in order
+        if i not in chosen and is_capital_fx_major(valid[i].venue, valid[i].symbol)
+    ]
+    out = [valid[i] for i in selected] + [valid[i] for i in kept_majors]
     logger.info(
-        "[universe] continuous-rank: %d → valid %d → active %d (top_n=%d)",
+        "[universe] continuous-rank: %d → valid %d → active %d (top_n=%d, fx_majors_kept=%d)",
         len(instruments),
         len(valid),
         len(out),
         n,
+        len(kept_majors),
     )
     return out

@@ -132,6 +132,44 @@ def focus_min_quota_by_class() -> dict[str, int]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Capital FX-majors keep/floor (P1 stream-coverage — flow_not_block, per-venue)
+# ---------------------------------------------------------------------------
+# The continuous active-rank score is vol-dominant + 0.45·ATR. Capital exposes
+# NO 24h notional via the nav tree (``vol_24h_usd=0.0``), so FX names rank purely
+# on ATR — and the high-ATR EXOTIC crosses (USDZAR ~0.98%, NOKSEK ~0.80%)
+# outrank the quiet FX MAJORS (USDJPY ~0.078%, EURUSD/GBPUSD/USDCAD). The majors
+# then never reach the active set, so ``fx_breakout_basket`` / ``session_breakout``
+# (BASKET = EURUSD/GBPUSD/AUDUSD/USDJPY/USDCAD) never receive a tradeable symbol.
+#
+# This is a TARGETED, per-venue keep: when a curated Capital FX major is live it
+# is ALWAYS kept in the active set (and prioritized within the forex focus quota)
+# ALONGSIDE the exotics. It is a FLOW INCREASE (seat BOTH majors + exotics,
+# remove nothing), NOT a throttle, and it touches NO global ranking weight
+# (``RANK_SCORE_W_*`` stay byte-identical → OKX/Alpaca ranking unchanged).
+CAPITAL_FX_MAJORS: Final[frozenset[str]] = frozenset(
+    {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD"}
+)
+
+
+def _normalize_fx_symbol(symbol: str) -> str:
+    """Normalize a venue epic to the bare FX pair for major matching.
+
+    Mirrors the strategy-side normalization (``.upper().replace("/", "")``) and
+    additionally strips a ``.``/``_`` separator and a trailing weekend marker so
+    epics like ``EUR/USD``, ``EURUSD.``, ``EURUSD_W`` all reduce to ``EURUSD``.
+    """
+    s = symbol.upper().replace("/", "").replace(".", "")
+    if "_" in s:
+        s = s.split("_", 1)[0]
+    return s
+
+
+def is_capital_fx_major(venue: str, symbol: str) -> bool:
+    """True iff ``(venue, symbol)`` is a curated Capital FX major (case/format-insensitive)."""
+    return (venue or "").lower() == "capital" and _normalize_fx_symbol(symbol) in CAPITAL_FX_MAJORS
+
+
 FocusBucket = Literal["core", "satellite", "listing_watch"]
 
 

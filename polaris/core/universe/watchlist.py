@@ -29,6 +29,7 @@ from polaris.core.universe.schema import (
     FocusSelection,
     UniverseInstrument,
     focus_min_quota_by_class,
+    is_capital_fx_major,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,8 +214,24 @@ def _apply_asset_class_quota(
         cls = active_universe[i].asset_class
         in_count[cls] = in_count.get(cls, 0) + 1
 
+    # Promotion candidate order = score-desc, but with curated Capital FX majors
+    # pulled ahead of non-majors (flow_not_block, per-venue): Capital FX rows all
+    # carry vol=0.0, so the quiet MAJORS (EURUSD/USDJPY/...) score below the
+    # high-ATR EXOTIC crosses (USDZAR/NOKSEK). Without this the forex quota would
+    # fill purely with exotics and the majors would never reach focus, starving
+    # fx_breakout_basket / session_breakout. This is a stable secondary priority,
+    # NOT a global weight change: for any non-major row the key is unchanged, so
+    # OKX/Alpaca and all-exotic forex universes are byte-identical (no-op).
+    order_pos = {idx: pos for pos, idx in enumerate(order)}
+    promo_order = sorted(
+        order,
+        key=lambda i: (
+            0 if is_capital_fx_major(active_universe[i].venue, active_universe[i].symbol) else 1,
+            order_pos[i],
+        ),
+    )
     promotions: list[int] = []
-    for src_idx in order:  # order is score-desc, so this picks best-scored first
+    for src_idx in promo_order:  # majors first, then score-desc
         if src_idx in selected:
             continue
         cls = active_universe[src_idx].asset_class
@@ -244,7 +261,6 @@ def _apply_asset_class_quota(
     room = target_size - len(kept)
     merged = kept + promotions[: max(0, room)]
     # Re-sort the final selection by score order (desc) for a stable ranked list.
-    order_pos = {idx: pos for pos, idx in enumerate(order)}
     merged.sort(key=lambda i: order_pos[i])
     return merged[:target_size]
 

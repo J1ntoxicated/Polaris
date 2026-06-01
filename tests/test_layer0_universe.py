@@ -5,11 +5,16 @@ Spec source: vault/30_components/layer-0-universe-discovery.md.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from polaris.core.universe._capital import _capital_name_matches
+from polaris.core.universe._capital import (
+    _capital_market_row_to_instrument,
+    _capital_name_matches,
+    fetch_capital_instruments,
+)
 from polaris.core.universe.discovery import (
     _filter_failure_reason,
     apply_active_filters,
@@ -603,3 +608,230 @@ def test_quota_capped_by_available_rows_of_class() -> None:
     fx = [f for f in focus if f.venue == "capital"]
     assert len(fx) == 1  # only one exists; quota cannot fabricate rows
     assert ("capital", "EURUSD") in {(f.venue, f.symbol) for f in focus}
+
+
+# ---------------------------------------------------------------------------
+# C2a — Capital commodity mis-classification (oil/energy COMPANY shares)
+# ---------------------------------------------------------------------------
+
+
+def _cap_market_row(epic: str, *, instrument_type: str | None = None) -> dict[str, object]:
+    """Minimal tradeable Capital `markets` row (bid/offer present so it survives)."""
+    row: dict[str, object] = {
+        "epic": epic,
+        "bid": 100.0,
+        "offer": 100.1,
+        "high": 101.0,
+        "low": 99.0,
+        "marketStatus": "TRADEABLE",
+    }
+    if instrument_type is not None:
+        row["instrumentType"] = instrument_type
+    return row
+
+
+def test_oil_company_share_tagged_equity_not_commodity() -> None:
+    """CVX/XOM live under an energy-named node but are SHARES → classify equity.
+
+    Forensic: 67 Capital `commodity` rows were oil/energy COMPANY EQUITY share
+    CFDs (CVX/XOM/COP/SLB...) mis-tagged because their nav node name carries an
+    ``energ``/``oil`` token. The market row's ``instrumentType=SHARES`` is the
+    authoritative signal — it must win over the node-name hint.
+    """
+    for epic in ("CVX", "XOM", "COP", "SLB"):
+        inst = _capital_market_row_to_instrument(
+            _cap_market_row(epic, instrument_type="SHARES"),
+            asset_class_hint="Oil & Gas",  # energy-named node → would mis-tag commodity
+            now_ts=NOW,
+        )
+        assert inst is not None
+        assert inst.asset_class == "equity", f"{epic} should be equity, got {inst.asset_class}"
+
+
+def test_real_commodity_cfd_stays_commodity() -> None:
+    """A real commodity CFD (instrumentType=COMMODITIES) under the same node stays commodity."""
+    inst = _capital_market_row_to_instrument(
+        _cap_market_row("OIL_CRUDE", instrument_type="COMMODITIES"),
+        asset_class_hint="Oil & Gas",
+        now_ts=NOW,
+    )
+    assert inst is not None
+    assert inst.asset_class == "commodity"
+
+
+# ---------------------------------------------------------------------------
+# C2b — Capital real commodities sit 3 levels deep; the nav walk must reach them
+# ---------------------------------------------------------------------------
+
+
+def _cap_mk(epic: str, itype: str) -> dict[str, object]:
+    return {
+        "epic": epic, "instrumentName": epic, "instrumentType": itype,
+        "bid": 100.0, "offer": 100.1, "high": 101.0, "low": 99.0,
+        "marketStatus": "TRADEABLE",
+    }
+
+
+@pytest.mark.asyncio
+async def test_capital_walk_reaches_depth3_commodities() -> None:
+    """Real precious-metals/energy commodities live at nav depth 3 (commodities_group
+    → commodities → precious_metals → markets). The 2-level walk stopped at the
+    empty 'commodities' node and fetched ZERO real commodities (forensic). The walk
+    must descend deeper so GOLD/SILVER/OIL_CRUDE are fetched as commodity, while a
+    depth-2 forex tree (currencies node → markets) stays unchanged."""
+    # nodeId → response body
+    tree: dict[str, dict[str, object]] = {
+        "_root": {"nodes": [
+            {"id": "commodities_group", "name": "commodities_group"},
+            {"id": "forex", "name": "Forex"},
+        ]},
+        # commodities: 3 levels deep
+        "commodities_group": {"markets": [], "nodes": [{"id": "commodities", "name": "Commodities"}]},
+        "commodities": {"markets": [], "nodes": [
+            {"id": "precious_metals", "name": "Precious metals"},
+            {"id": "energies", "name": "Energies"},
+        ]},
+        "precious_metals": {"markets": [_cap_mk("GOLD", "COMMODITIES"), _cap_mk("SILVER", "COMMODITIES")], "nodes": []},
+        "energies": {"markets": [_cap_mk("OIL_CRUDE", "COMMODITIES")], "nodes": []},
+        # forex: 2 levels deep (unchanged path)
+        "forex": {"markets": [], "nodes": [{"id": "currencies.usd", "name": "USD"}]},
+        "currencies.usd": {"markets": [_cap_mk("EURUSD", "CURRENCIES")], "nodes": []},
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/session"):
+            return httpx.Response(200, headers={"CST": "c", "X-SECURITY-TOKEN": "s"}, json={})
+        if path.endswith("/marketnavigation"):
+            return httpx.Response(200, json=tree["_root"])
+        node_id = path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json=tree.get(node_id, {"markets": [], "nodes": []}))
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://demo-api"
+    ) as cli:
+        out = await fetch_capital_instruments(
+            api_key="k", email="e", password="p", client=cli, now_ts=NOW
+        )
+
+    by_sym = {i.symbol: i.asset_class for i in out}
+    assert by_sym.get("GOLD") == "commodity", f"GOLD not fetched: {by_sym}"
+    assert by_sym.get("SILVER") == "commodity"
+    assert by_sym.get("OIL_CRUDE") == "commodity"
+    assert by_sym.get("EURUSD") == "forex"  # depth-2 forex path unchanged
+
+
+# ---------------------------------------------------------------------------
+# Capital FX-majors keep/floor (P1 stream-coverage — flow_not_block, per-venue)
+# ---------------------------------------------------------------------------
+# DEMO/PAPER virtual capital. The vol-dominant + 0.45·ATR rank lets high-ATR
+# EXOTIC FX crosses (USDZAR/NOKSEK) outrank quiet FX MAJORS (EURUSD/USDJPY/...),
+# so the majors never reach the active set and fx_breakout_basket / session_breakout
+# never receive a tradeable symbol. The fix GUARANTEES curated Capital FX majors
+# are seated (active AND, via the forex quota, focus) ALONGSIDE the exotics —
+# a FLOW INCREASE (seat BOTH, remove nothing), never a throttle. OKX/Alpaca
+# ranking stays byte-identical (no global RANK_SCORE_W_* change).
+
+
+def _cap_fx(symbol: str, *, atr_pct: float, spread_bps: float = 1.0, state: str = "live") -> UniverseInstrument:
+    """Capital FX row (vol=0.0 like the real nav tree; ATR is the only score driver)."""
+    return _make_inst(
+        symbol,
+        venue="capital",
+        asset_class="forex",
+        quote_ccy="USD",
+        vol=0.0,
+        atr_pct=atr_pct,
+        spread_bps=spread_bps,
+        depth=0.0,
+        state=state,
+    )
+
+
+def test_is_capital_fx_major_normalizes_format() -> None:
+    from polaris.core.universe.schema import is_capital_fx_major
+
+    assert is_capital_fx_major("capital", "EURUSD")
+    assert is_capital_fx_major("capital", "eur/usd")
+    assert is_capital_fx_major("capital", "EURUSD_W")  # weekend epic variant
+    assert is_capital_fx_major("CAPITAL", "USDJPY")
+    # Not a major / not Capital → False.
+    assert not is_capital_fx_major("capital", "USDZAR")
+    assert not is_capital_fx_major("okx", "EURUSD")  # OKX is crypto-only; not floored
+
+
+def test_rank_keeps_capital_fx_majors_when_exotics_outrank_on_atr() -> None:
+    """Exotic crosses outrank majors on ATR, but the curated majors are STILL seated."""
+    from polaris.core.universe.schema import CAPITAL_FX_MAJORS
+
+    # High-ATR exotic crosses (would win the rank); enough of them to fill top_n.
+    exotics = [
+        _cap_fx(sym, atr_pct=atr)
+        for sym, atr in (
+            ("USDZAR", 0.98), ("NOKSEK", 0.80), ("USDMXN", 0.75),
+            ("USDTRY", 0.90), ("EURNOK", 0.70), ("USDSEK", 0.65),
+        )
+    ]
+    # Quiet majors — lowest ATR, would be cut by a pure top_n rank.
+    majors = [_cap_fx(sym, atr_pct=0.08) for sym in sorted(CAPITAL_FX_MAJORS)]
+    out = rank_active_universe([*exotics, *majors], top_n=5)
+    seated = {ins.symbol for ins in out}
+    # All curated majors are seated DESPITE losing the score sort (flow_not_block).
+    for m in CAPITAL_FX_MAJORS:
+        assert m in seated, f"{m} must be kept in the active set"
+    # Exotics are NOT removed — the highest-ATR exotic still survives (seat BOTH).
+    assert "USDZAR" in seated
+
+
+def test_rank_capital_fx_major_floor_only_when_live() -> None:
+    """A non-live (session-wait) FX major is NOT force-kept — state validity stays hard."""
+    halted_major = _cap_fx("EURUSD", atr_pct=0.08, state="market_closed")
+    live_exotic = _cap_fx("USDZAR", atr_pct=0.98)
+    out = rank_active_universe([halted_major, live_exotic], top_n=5)
+    seated = {ins.symbol for ins in out}
+    assert "EURUSD" not in seated  # non-live major excluded by the hard validity gate
+    assert "USDZAR" in seated
+
+
+def test_rank_capital_floor_does_not_touch_okx_ranking() -> None:
+    """OKX-only crypto universe: the Capital floor is a no-op (byte-identical active set)."""
+    crypto = [_make_inst(f"C{i}-USDT", vol=1e7 + i * 1e7, atr_pct=2.0 + i * 0.1) for i in range(50)]
+    out = rank_active_universe(crypto, top_n=10)
+    assert len(out) == 10
+    assert all(ins.venue == "okx" for ins in out)
+    assert "C49-USDT" in {ins.symbol for ins in out}
+    assert "C0-USDT" not in {ins.symbol for ins in out}
+
+
+def test_quota_seats_majors_over_exotics_within_forex_quota() -> None:
+    """When the forex quota promotes rows, curated MAJORS are prioritized over exotics."""
+    from polaris.core.universe.schema import CAPITAL_FX_MAJORS, focus_min_quota_by_class
+
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    # Exotics score higher (higher ATR); majors score lowest. Mix > the forex quota.
+    exotics = [_cap_fx(sym, atr_pct=atr) for sym, atr in (
+        ("USDZAR", 0.98), ("NOKSEK", 0.80), ("USDMXN", 0.75), ("USDTRY", 0.90),
+    )]
+    majors = [_cap_fx(sym, atr_pct=0.08) for sym in sorted(CAPITAL_FX_MAJORS)]
+    focus = compute_dynamic_focus(crypto + exotics + majors, cycle_ts=NOW, target_size=30)
+    qmin = focus_min_quota_by_class()["forex"]
+    fx_in_focus = [f for f in focus if f.venue == "capital"]
+    assert len(fx_in_focus) >= qmin
+    # The forex quota seats curated majors, not just the highest-ATR exotics.
+    majors_in_focus = sum(1 for f in fx_in_focus if f.symbol in CAPITAL_FX_MAJORS)
+    assert majors_in_focus >= 1, "at least one curated major must reach focus via the quota"
+    # Flow increase, not throttle: total size unchanged.
+    assert len(focus) == 30
+
+
+def test_quota_majors_priority_noop_when_no_majors_present() -> None:
+    """All-exotic forex universe → quota behaves exactly as before (no major to prioritize)."""
+    crypto = [_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(40)]
+    exotics = [_cap_fx(sym, atr_pct=atr) for sym, atr in (
+        ("USDZAR", 0.98), ("NOKSEK", 0.80), ("USDMXN", 0.75), ("USDTRY", 0.90), ("EURNOK", 0.70),
+    )]
+    focus = compute_dynamic_focus(crypto + exotics, cycle_ts=NOW, target_size=30)
+    fx_in_focus = [f for f in focus if f.venue == "capital"]
+    qmin = focus_min_quota_by_class()["forex"]
+    assert len(fx_in_focus) >= min(qmin, len(exotics))
+    assert len(focus) == 30

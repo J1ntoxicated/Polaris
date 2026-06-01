@@ -44,6 +44,14 @@ CAPITAL_P0_CATEGORY_TOKENS: tuple[str, ...] = (
     "oil",  # "oil_markets_group"
 )
 
+# C2b: the nav tree nests real commodities 3 levels deep
+# (commodities_group → commodities → {precious_metals, energies, base_metals} →
+# markets), so the prior fixed 2-level walk fetched ZERO Gold/Silver/Oil/NatGas
+# CFDs (forensic). Descend recursively until markets are found; the depth cap
+# bounds the request count and guards against a pathological cycle. Forex/indices
+# (markets at depth 2) are reached identically — pure coverage increase.
+CAPITAL_NAV_MAX_DEPTH = 4
+
 
 async def fetch_capital_instruments(
     *,
@@ -104,39 +112,24 @@ async def fetch_capital_instruments(
         ]
 
         seen_epics: set[str] = set()
+        seen_nodes: set[str] = set()
         out: list[UniverseInstrument] = []
         for node in p0_nodes:
             node_id = str(node.get("id", ""))
             node_name = str(node.get("name", ""))
             if not node_id:
                 continue
-            child_resp = await cli.get(f"{CAPITAL_NAV_PATH}/{node_id}", headers=auth_headers)
-            if child_resp.status_code != 200:
-                continue
-            child_body = child_resp.json()
-            for market in child_body.get("markets", []) or []:
-                inst = _capital_market_row_to_instrument(
-                    market, asset_class_hint=node_name, now_ts=ts
-                )
-                if inst is None or inst.symbol in seen_epics:
-                    continue
-                seen_epics.add(inst.symbol)
-                out.append(inst)
-            for sub in child_body.get("nodes", []) or []:
-                sub_id = str(sub.get("id", ""))
-                if not sub_id:
-                    continue
-                sub_resp = await cli.get(f"{CAPITAL_NAV_PATH}/{sub_id}", headers=auth_headers)
-                if sub_resp.status_code != 200:
-                    continue
-                for market in sub_resp.json().get("markets", []) or []:
-                    inst = _capital_market_row_to_instrument(
-                        market, asset_class_hint=node_name, now_ts=ts
-                    )
-                    if inst is None or inst.symbol in seen_epics:
-                        continue
-                    seen_epics.add(inst.symbol)
-                    out.append(inst)
+            await _walk_capital_node(
+                cli,
+                node_id=node_id,
+                asset_class_hint=node_name,
+                auth_headers=auth_headers,
+                now_ts=ts,
+                out=out,
+                seen_epics=seen_epics,
+                seen_nodes=seen_nodes,
+                depth=0,
+            )
         logger.info(
             "[universe] Capital fetched: nodes=%d p0_nodes=%d unique_epics=%d",
             len(nodes),
@@ -147,6 +140,59 @@ async def fetch_capital_instruments(
     finally:
         if own_client:
             await cli.aclose()
+
+
+async def _walk_capital_node(
+    cli: httpx.AsyncClient,
+    *,
+    node_id: str,
+    asset_class_hint: str,
+    auth_headers: dict[str, str],
+    now_ts: int,
+    out: list[UniverseInstrument],
+    seen_epics: set[str],
+    seen_nodes: set[str],
+    depth: int,
+) -> None:
+    """Recursively collect a nav node's markets, then descend into its sub-nodes.
+
+    Bounded by ``CAPITAL_NAV_MAX_DEPTH`` (C2b: real commodities sit 3 levels deep;
+    the prior fixed 2-level walk missed them). ``asset_class_hint`` stays the
+    top-level P0 node name (unchanged from the prior walk — it is only a fallback
+    now that the market row's ``instrumentType`` is authoritative, C2a). Dedupes
+    by epic (markets seen across nodes) and by node id (cycle guard). A non-200
+    response is skipped (best-effort, mirrors the prior walk).
+    """
+    if depth >= CAPITAL_NAV_MAX_DEPTH or node_id in seen_nodes:
+        return
+    seen_nodes.add(node_id)
+    resp = await cli.get(f"{CAPITAL_NAV_PATH}/{node_id}", headers=auth_headers)
+    if resp.status_code != 200:
+        return
+    body = resp.json()
+    for market in body.get("markets", []) or []:
+        inst = _capital_market_row_to_instrument(
+            market, asset_class_hint=asset_class_hint, now_ts=now_ts
+        )
+        if inst is None or inst.symbol in seen_epics:
+            continue
+        seen_epics.add(inst.symbol)
+        out.append(inst)
+    for sub in body.get("nodes", []) or []:
+        sub_id = str(sub.get("id", ""))
+        if not sub_id:
+            continue
+        await _walk_capital_node(
+            cli,
+            node_id=sub_id,
+            asset_class_hint=asset_class_hint,
+            auth_headers=auth_headers,
+            now_ts=now_ts,
+            out=out,
+            seen_epics=seen_epics,
+            seen_nodes=seen_nodes,
+            depth=depth + 1,
+        )
 
 
 def _capital_name_matches(node: dict[str, Any], tokens: tuple[str, ...]) -> bool:
@@ -176,7 +222,14 @@ def _capital_market_row_to_instrument(
     low = _to_float(row.get("low"))
     atr_pct = ((high - low) / mid) * 100.0 if mid > 0 else 0.0
 
-    asset_class = _classify_capital_node(asset_class_hint)
+    # C2a: the market row's own ``instrumentType`` is authoritative; the node-name
+    # hint mis-tags oil/energy COMPANY share CFDs (CVX/XOM/COP/SLB...) as
+    # 'commodity' because their nav node carries an energ/oil token. SHARES →
+    # 'equity' (off the Capital forex/index/commodity whitelist → routed out, so
+    # the commodity bucket is not polluted with stocks); only a real COMMODITIES
+    # CFD keeps 'commodity'. Falls back to the node hint when the type is absent.
+    type_class = _classify_capital_instrument_type(str(row.get("instrumentType", "")))
+    asset_class = type_class if type_class is not None else _classify_capital_node(asset_class_hint)
     market_status = str(row.get("marketStatus", "TRADEABLE")).upper()
     state = "live" if market_status == "TRADEABLE" else market_status.lower()
 
@@ -213,3 +266,27 @@ def _classify_capital_node(hint: str) -> str:
     if "commod" in h or "metal" in h or "energ" in h or "oil" in h:
         return "commodity"
     return "other"
+
+
+# Capital ``markets[].instrumentType`` → polaris asset_class. SHARES are company
+# equity (off the Capital forex/index/commodity whitelist → routed out of the
+# Capital active set), so an oil/energy company under an energ/oil-named node is
+# no longer mis-bucketed as 'commodity'. Mirrors the venue instrumentType space
+# in venues/capital/constraint_translator.py.
+_CAPITAL_INSTRUMENT_TYPE_TO_CLASS: dict[str, str] = {
+    "SHARES": "equity",
+    "COMMODITIES": "commodity",
+    "CURRENCIES": "forex",
+    "INDICES": "indices",
+    "CRYPTOCURRENCIES": "crypto",
+}
+
+
+def _classify_capital_instrument_type(instrument_type: str) -> str | None:
+    """Map the market row's ``instrumentType`` to an asset_class, or None if absent/unknown.
+
+    None signals "fall back to the node-name hint" — the type is the authoritative
+    market-level signal when present (C2a re-tag), but the nav-tree walk does not
+    always carry it, so the node hint remains the default path.
+    """
+    return _CAPITAL_INSTRUMENT_TYPE_TO_CLASS.get(instrument_type.strip().upper())

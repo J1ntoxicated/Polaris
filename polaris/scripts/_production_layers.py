@@ -66,6 +66,7 @@ __all__ = [
     "CAPITAL_RESOLUTION_BY_INTERVAL",
     "OKX_REFRESH_SEC",
     "TIMEFRAME_FETCH_CADENCE_SEC",
+    "capital_active_ids_after_collapse_guard",
     "compose_regime_candidate",
     "compute_and_flip_regime",
     "fetch_bars_one",
@@ -84,6 +85,18 @@ __all__ = [
 OKX_REFRESH_SEC = 300
 CAPITAL_REFRESH_SEC = 600
 ALPACA_REFRESH_SEC = 600
+
+# C1 — Capital active-universe collapse guard (forensic 2026-05-31): a healthy
+# Capital fetch but a session-driven validity collapse (only 1 epic TRADEABLE on
+# the weekend) left the active book at exactly 1 closed symbol (EURUSD_W) for 27h
+# — FX is 24/5, so breadth must be preserved across the closure, not handed to a
+# single survivor. When a refresh's active set collapses to ``<= FLOOR`` while the
+# PRIOR book was healthy (``>= PRIOR_MIN``), KEEP the prior active set
+# (flow_not_block: preserve breadth, never zero-out). A genuine FULL closure
+# (active=0) stays the existing session_wait path — the guard does not resurrect
+# it; those rows revive automatically next refresh once TRADEABLE.
+CAPITAL_COLLAPSE_ACTIVE_FLOOR = 1
+CAPITAL_COLLAPSE_PRIOR_MIN = 5
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +119,52 @@ async def refresh_okx_universe_once(
     persist_universe(conn, instruments, is_active_set=active_ids)
     logger.info("[L0/okx] universe %d → active %d", len(instruments), len(active))
     return len(active)
+
+
+def _read_capital_active_ids(conn: sqlite3.Connection) -> set[str]:
+    """Prior Capital active (``is_active=1``) instrument_ids (collapse-guard read)."""
+    try:
+        return {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT instrument_id FROM universe "
+                "WHERE venue = 'capital' AND is_active = 1"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def capital_active_ids_after_collapse_guard(
+    *,
+    new_active_ids: set[str],
+    prior_active_ids: set[str],
+    fetched_count: int,
+) -> set[str]:
+    """Preserve prior Capital breadth when a refresh's active set abnormally collapses.
+
+    Returns the active instrument_id set to persist. The new set is used as-is
+    UNLESS it has collapsed to ``<= CAPITAL_COLLAPSE_ACTIVE_FLOOR`` while the prior
+    book was healthy (``>= CAPITAL_COLLAPSE_PRIOR_MIN``) and the fetch itself was
+    non-empty — the forensic 1-symbol weekend collapse. In that case the PRIOR
+    active set is kept (flow_not_block: breadth preserved across the session
+    closure, never zeroed out to a single stale survivor).
+
+    A genuine full closure (``new_active_ids`` empty) is the legitimate
+    session_wait path and is returned unchanged (the guard never resurrects a
+    zeroed book; those rows revive next refresh once TRADEABLE). Cold start (no
+    prior book) is also a no-op.
+    """
+    if fetched_count <= 0:
+        return new_active_ids
+    if not new_active_ids:
+        return new_active_ids  # full closure → legitimate session_wait, not a collapse
+    if (
+        len(new_active_ids) <= CAPITAL_COLLAPSE_ACTIVE_FLOOR
+        and len(prior_active_ids) >= CAPITAL_COLLAPSE_PRIOR_MIN
+    ):
+        return prior_active_ids
+    return new_active_ids
 
 
 async def refresh_capital_universe_once(
@@ -142,14 +201,29 @@ async def refresh_capital_universe_once(
         logger.warning("[L0/capital] proxy fetch failed: %r", exc)
 
     active = rank_active_universe(instruments)
-    active_ids = {ins.instrument_id for ins in active}
+    new_active_ids = {ins.instrument_id for ins in active}
+    # C1 collapse guard: preserve prior breadth on a session-driven 1-symbol
+    # collapse (read prior BEFORE the upsert overwrites it).
+    prior_active_ids = _read_capital_active_ids(conn)
+    active_ids = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active_ids,
+        prior_active_ids=prior_active_ids,
+        fetched_count=len(instruments),
+    )
+    guarded = active_ids != new_active_ids
     persist_universe(conn, instruments, is_active_set=active_ids)
+    if guarded:
+        logger.info(
+            "[L0/capital] collapse guard: rank→active %d (prior %d) — KEEPING prior "
+            "breadth %d (session-driven 1-symbol collapse, flow_not_block)",
+            len(new_active_ids), len(prior_active_ids), len(active_ids),
+        )
     logger.info(
         "[L0/capital] universe %d → active %d (continuous-rank)",
         len(instruments),
-        len(active),
+        len(active_ids),
     )
-    return len(active)
+    return len(active_ids)
 
 
 async def refresh_alpaca_universe_once(

@@ -145,6 +145,145 @@ async def test_l0_producer_10min_capital_refresh(memdb: sqlite3.Connection) -> N
 
 
 # ---------------------------------------------------------------------------
+# C1 — Capital active-universe collapse guard (27h 1-symbol breadth loss)
+# ---------------------------------------------------------------------------
+
+
+def _cap_inst(symbol: str, *, state: str = "live") -> UniverseInstrument:
+    return UniverseInstrument(
+        venue="capital", symbol=symbol, instrument_id=f"capital:{symbol}",
+        underlying_group_id=f"forex:{symbol}", asset_class="forex",
+        quote_ccy="USD", state=state, vol_24h_usd=1e6, spread_bps=2.0,
+        atr_24h_pct=0.5, depth_10bps_usd=2e4, signal_density_7d=0.0,
+        listing_ts=None, last_seen_ts=int(time.time()),
+    )
+
+
+def test_capital_collapse_guard_preserves_prior_breadth() -> None:
+    """Forensic: a healthy fetch but session-driven validity collapse left the
+    Capital active book at exactly 1 closed symbol (EURUSD_W) for 27h. The guard
+    must KEEP the prior healthy active set instead of seating the single survivor
+    (flow_not_block: preserve breadth, never zero-out)."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    prior = {f"capital:FX{i}" for i in range(20)}  # healthy prior book of 20
+    new_active = {"capital:EURUSD_W"}  # ranking collapsed to 1 weekend survivor
+    fetched = 202  # healthy full fetch (not a partial/zero fetch)
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active, prior_active_ids=prior, fetched_count=fetched
+    )
+    assert out == prior  # prior breadth preserved, not collapsed to 1
+
+
+def test_capital_collapse_guard_noop_when_healthy() -> None:
+    """A healthy new active set is used as-is (guard is a no-op)."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    prior = {f"capital:FX{i}" for i in range(20)}
+    new_active = {f"capital:FX{i}" for i in range(18)}  # normal churn, still broad
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active, prior_active_ids=prior, fetched_count=202
+    )
+    assert out == new_active
+
+
+def test_capital_collapse_guard_noop_full_closure() -> None:
+    """A full session closure (active=0) is the legitimate session_wait path — the
+    guard must NOT resurrect it (rows revive next refresh once TRADEABLE)."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    prior = {f"capital:FX{i}" for i in range(20)}
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=set(), prior_active_ids=prior, fetched_count=202
+    )
+    assert out == set()
+
+
+def test_capital_collapse_guard_noop_cold_start() -> None:
+    """No prior active book (cold start) → use the new set as-is even if small."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    new_active = {"capital:EURUSD"}
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active, prior_active_ids=set(), fetched_count=202
+    )
+    assert out == new_active
+
+
+@pytest.mark.asyncio
+async def test_capital_refresh_collapse_keeps_prior_active(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration: seed a healthy prior Capital active book, then a refresh whose
+    fetch is healthy (202 rows) but only 1 is TRADEABLE → the active book must NOT
+    collapse to 1; the prior 20 stay active."""
+    import os
+
+    import polaris.scripts._production_layers as layers_mod
+
+    # Seed prior healthy active book (20 forex rows, is_active=1).
+    prior_syms = [f"FX{i}" for i in range(20)]
+    from polaris.core.universe.discovery import persist_universe
+    prior_insts = [_cap_inst(s) for s in prior_syms]
+    persist_universe(memdb, prior_insts, is_active_set={i.instrument_id for i in prior_insts})
+    assert memdb.execute(
+        "SELECT COUNT(*) FROM universe WHERE venue='capital' AND is_active=1"
+    ).fetchone()[0] == 20
+
+    # Healthy fetch of 202 rows but only 1 TRADEABLE (weekend session collapse):
+    # the SAME prior epics reappear non-live (session-wait) + a few more, plus the
+    # 1 weekend survivor. The upsert flips the prior rows is_active=0, so without
+    # the guard the book collapses to 1 (the live mechanism). rank → active 1.
+    fetched = (
+        [_cap_inst("EURUSD_W")]
+        + [_cap_inst(s, state="closed") for s in prior_syms]
+        + [_cap_inst(f"WK{i}", state="closed") for i in range(181)]
+    )
+    monkeypatch.setattr(
+        layers_mod, "fetch_capital_instruments", AsyncMock(return_value=fetched)
+    )
+    # Skip the live proxy session entirely (no creds / no network).
+    monkeypatch.setattr(
+        layers_mod, "populate_capital_proxies",
+        AsyncMock(side_effect=lambda insts, **_kw: insts),
+    )
+
+    class _FakeTokens:
+        cst = "cst"
+        security_token = "sec"
+
+    class _FakeSession:
+        def __init__(self, **_kw: object) -> None: ...
+        async def __aenter__(self) -> _FakeSession:
+            return self
+        async def __aexit__(self, *_a: object) -> None: ...
+        async def ensure_tokens(self) -> _FakeTokens:
+            return _FakeTokens()
+
+    monkeypatch.setattr(layers_mod, "CapitalSession", _FakeSession)
+    for k, v in (("CAP_API_KEY", "k"), ("CAP_EMAIL", "e"), ("CAP_PASSWORD", "p")):
+        os.environ[k] = v
+    try:
+        await layers_mod.refresh_capital_universe_once(memdb)
+    finally:
+        for k in ("CAP_API_KEY", "CAP_EMAIL", "CAP_PASSWORD"):
+            os.environ.pop(k, None)
+
+    active_after = memdb.execute(
+        "SELECT COUNT(*) FROM universe WHERE venue='capital' AND is_active=1"
+    ).fetchone()[0]
+    assert active_after == 20, f"breadth lost: only {active_after} active (collapse guard failed)"
+
+
+# ---------------------------------------------------------------------------
 # B — Layer 1 ingest
 # ---------------------------------------------------------------------------
 

@@ -32,6 +32,12 @@ TTL_BARS = 6
 
 
 class SpotDonchianStrategy(BaseStrategy):
+    # Varyable ENTRY-trigger knob (P0a). Class defaults == module constants ==
+    # frozen baseline -> behavior-0 for default instances.
+    adx_threshold: float = ADX_THRESHOLD
+    # ttl_bars intentionally NOT in PARAM_BOUNDS (inert-in-replay). Behavior-0.
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="spot_donchian",
         timeframe="1H",
@@ -61,9 +67,9 @@ class SpotDonchianStrategy(BaseStrategy):
         if not is_finite(market_view.adx_14):
             return None
         adx = market_view.adx_14
-        if adx is None or adx <= ADX_THRESHOLD:
+        if adx is None or adx <= self.adx_threshold:
             return None
-        adx_score = STRENGTH_BASE + (adx - ADX_THRESHOLD) / ADX_STRENGTH_DENOM
+        adx_score = STRENGTH_BASE + (adx - self.adx_threshold) / ADX_STRENGTH_DENOM
         strength = min(1.0, max(STRENGTH_BASE, adx_score))
         return RawSignal(
             signal_id=make_signal_id(),
@@ -72,7 +78,7 @@ class SpotDonchianStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=strength,
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"donchian_40+adx={adx:.1f}",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

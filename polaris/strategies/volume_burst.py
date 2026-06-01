@@ -35,6 +35,14 @@ TTL_BARS = 10
 
 
 class VolumeBurstStrategy(BaseStrategy):
+    # Varyable ENTRY-trigger knobs (P0a). Class defaults == module constants ==
+    # frozen baseline -> behavior-0 for default instances.
+    vol_z_threshold: float = VOL_Z_THRESHOLD
+    atr_floor_pct: float = ATR_FLOOR_PCT
+    # ttl_bars is intentionally NOT in PARAM_BOUNDS (inert-in-replay: the
+    # precise-exit FSM never reads the signal TTL). Kept for behavior-0.
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="volume_burst",
         timeframe="1m",
@@ -51,9 +59,9 @@ class VolumeBurstStrategy(BaseStrategy):
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
         if not self.warmup_ok(market_view):
             return None
-        if not is_finite(market_view.atr_pct) or market_view.atr_pct < ATR_FLOOR_PCT:
+        if not is_finite(market_view.atr_pct) or market_view.atr_pct < self.atr_floor_pct:
             return None
-        if not is_finite(market_view.volume_z) or market_view.volume_z < VOL_Z_THRESHOLD:
+        if not is_finite(market_view.volume_z) or market_view.volume_z < self.vol_z_threshold:
             return None
         bars = market_view.bars
         if len(bars) < LOOKBACK + 1:
@@ -63,7 +71,7 @@ class VolumeBurstStrategy(BaseStrategy):
         if last.close <= prior_high:
             return None
         # Strength scales with vol_z above threshold (clamped 0-1).
-        excess = market_view.volume_z - VOL_Z_THRESHOLD
+        excess = market_view.volume_z - self.vol_z_threshold
         strength = min(1.0, STRENGTH_BASE + STRENGTH_SLOPE * excess)
         return RawSignal(
             signal_id=make_signal_id(),
@@ -72,7 +80,7 @@ class VolumeBurstStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=min(1.0, SIZING_BASE + SIZING_SLOPE * excess),
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"vol_z={market_view.volume_z:.2f}>break",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

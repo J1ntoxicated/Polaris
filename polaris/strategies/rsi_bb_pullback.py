@@ -37,6 +37,12 @@ TTL_BARS = 4
 
 
 class RSIBBPullbackStrategy(BaseStrategy):
+    # Varyable ENTRY-trigger knob (P0a). Class defaults == module constants ==
+    # frozen baseline -> behavior-0 for default instances.
+    rsi_threshold: float = RSI_THRESHOLD
+    # ttl_bars intentionally NOT in PARAM_BOUNDS (inert-in-replay). Behavior-0.
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="rsi_bb_pullback",
         timeframe="15m",
@@ -66,14 +72,14 @@ class RSIBBPullbackStrategy(BaseStrategy):
         if not bars:
             return None
         last = bars[-1]
-        if rsi is None or rsi >= RSI_THRESHOLD:
+        if rsi is None or rsi >= self.rsi_threshold:
             return None
         if bb_lo is None or last.low > bb_lo:
             return None
         if ma200 is None or last.close <= ma200:
             return None
-        # Strength: deeper RSI < 30 → stronger.
-        depth = (RSI_THRESHOLD - rsi) / RSI_THRESHOLD
+        # Strength: deeper RSI < threshold → stronger.
+        depth = (self.rsi_threshold - rsi) / self.rsi_threshold
         strength = min(1.0, max(STRENGTH_FLOOR, depth + STRENGTH_OFFSET))
         return RawSignal(
             signal_id=make_signal_id(),
@@ -82,7 +88,7 @@ class RSIBBPullbackStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=strength,
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"rsi={rsi:.1f}<30+bb_lo+ma200",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

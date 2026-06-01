@@ -39,6 +39,12 @@ LEVERAGE_MAX = 20.0
 
 
 class SessionBreakoutStrategy(BaseStrategy):
+    # Varyable ENTRY-trigger knob (P0a). Class defaults == module constants ==
+    # frozen baseline -> behavior-0 for default instances.
+    atr_mult: float = ATR_MULT
+    # ttl_bars intentionally NOT in PARAM_BOUNDS (inert-in-replay). Behavior-0.
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="session_breakout",
         timeframe="5m",
@@ -69,8 +75,8 @@ class SessionBreakoutStrategy(BaseStrategy):
         atr_val = market_view.session_atr
         if open_price is None or atr_val is None or atr_val <= 0.0:
             return None
-        threshold = open_price + ATR_MULT * atr_val
-        threshold_short = open_price - ATR_MULT * atr_val
+        threshold = open_price + self.atr_mult * atr_val
+        threshold_short = open_price - self.atr_mult * atr_val
         bars = market_view.bars
         if not bars:
             return None
@@ -87,8 +93,8 @@ class SessionBreakoutStrategy(BaseStrategy):
                 side="long",
                 strength=strength,
                 sizing_hint=strength,
-                ttl_bars=TTL_BARS,
-                thesis_tag=f"session_open+ATR×{ATR_MULT}",
+                ttl_bars=self.ttl_bars,
+                thesis_tag=f"session_open+ATR×{self.atr_mult}",
                 correlation_group=self.metadata.correlation_group_id,
                 venue_constraints={"leverage_max": LEVERAGE_MAX},
                 created_at_bar=last.ts,
@@ -110,8 +116,8 @@ class SessionBreakoutStrategy(BaseStrategy):
                 side="short",
                 strength=strength,
                 sizing_hint=strength,
-                ttl_bars=TTL_BARS,
-                thesis_tag=f"session_open-ATR×{ATR_MULT}",
+                ttl_bars=self.ttl_bars,
+                thesis_tag=f"session_open-ATR×{self.atr_mult}",
                 correlation_group=self.metadata.correlation_group_id,
                 venue_constraints={"leverage_max": LEVERAGE_MAX},
                 created_at_bar=last.ts,

@@ -33,6 +33,14 @@ TTL_BARS = 4
 
 
 class TSMOMStrategy(BaseStrategy):
+    # momentum_gain / ttl_bars are intentionally NOT in PARAM_BOUNDS:
+    # momentum_gain is a signal-STRENGTH (sizing) knob (changes notional, not
+    # the trade SET) and ttl_bars is inert-in-replay (the precise-exit FSM never
+    # reads the signal TTL). tsmom has NO entry-set knob (bare momentum>0).
+    # Kept as class defaults for behavior-0.
+    momentum_gain: float = MOMENTUM_GAIN
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="tsmom",
         timeframe="1H",
@@ -63,7 +71,7 @@ class TSMOMStrategy(BaseStrategy):
         if momentum is None or momentum <= 0.0:
             return None
         # Strength scales with raw momentum, capped.
-        scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
+        scored = STRENGTH_BASE + self.momentum_gain * momentum
         strength = min(1.0, max(STRENGTH_FLOOR, scored))
         return RawSignal(
             signal_id=make_signal_id(),
@@ -72,7 +80,7 @@ class TSMOMStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=min(1.0, max(STRENGTH_FLOOR, scored)),
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"tsmom_20bar={momentum:.4f}",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

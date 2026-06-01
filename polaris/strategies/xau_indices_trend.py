@@ -36,6 +36,12 @@ LEVERAGE_MAX = 20.0
 
 
 class XAUIndicesTrendStrategy(BaseStrategy):
+    # momentum_gain (signal-STRENGTH/sizing knob) + ttl_bars (inert-in-replay)
+    # are intentionally NOT in PARAM_BOUNDS — no entry-set knob (bare
+    # momentum trigger). Kept as class defaults for behavior-0.
+    momentum_gain: float = MOMENTUM_GAIN
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="xau_indices_trend",
         timeframe="1H",
@@ -74,7 +80,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
             high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])
         # Long branch first (mutually exclusive with short).
         if high is not None and last.close > high and momentum > 0.0:
-            scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
+            scored = STRENGTH_BASE + self.momentum_gain * momentum
             strength = min(1.0, max(STRENGTH_BASE, scored))
             return RawSignal(
                 signal_id=make_signal_id(),
@@ -83,7 +89,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
                 side="long",
                 strength=strength,
                 sizing_hint=strength,
-                ttl_bars=TTL_BARS,
+                ttl_bars=self.ttl_bars,
                 thesis_tag=f"donchian_30+mom_20={momentum:.4f}",
                 correlation_group=self.metadata.correlation_group_id,
                 venue_constraints={"leverage_max": LEVERAGE_MAX},
@@ -98,7 +104,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
             low = min(b.low for b in bars[-(DONCHIAN_WINDOW + 1):-1])
         # Symmetric short branch: break below 30-bar low with negative momentum.
         if low is not None and last.close < low and momentum < 0.0:
-            scored = STRENGTH_BASE + MOMENTUM_GAIN * (-momentum)
+            scored = STRENGTH_BASE + self.momentum_gain * (-momentum)
             strength = min(1.0, max(STRENGTH_BASE, scored))
             return RawSignal(
                 signal_id=make_signal_id(),
@@ -107,7 +113,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
                 side="short",
                 strength=strength,
                 sizing_hint=strength,
-                ttl_bars=TTL_BARS,
+                ttl_bars=self.ttl_bars,
                 thesis_tag=f"donchian_30_short+mom_20={momentum:.4f}",
                 correlation_group=self.metadata.correlation_group_id,
                 venue_constraints={"leverage_max": LEVERAGE_MAX},

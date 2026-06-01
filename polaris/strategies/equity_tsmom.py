@@ -35,6 +35,12 @@ TTL_BARS = 4
 
 
 class EquityTSMOMStrategy(BaseStrategy):
+    # momentum_gain (signal-STRENGTH/sizing knob) + ttl_bars (inert-in-replay)
+    # are intentionally NOT in PARAM_BOUNDS — no entry-set knob (bare
+    # momentum trigger). Kept as class defaults for behavior-0.
+    momentum_gain: float = MOMENTUM_GAIN
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="equity_tsmom",
         timeframe="1D",
@@ -66,7 +72,7 @@ class EquityTSMOMStrategy(BaseStrategy):
         if momentum is None or momentum <= 0.0:
             return None
         # Strength scales with raw momentum, capped.
-        scored = STRENGTH_BASE + MOMENTUM_GAIN * momentum
+        scored = STRENGTH_BASE + self.momentum_gain * momentum
         strength = min(1.0, max(STRENGTH_FLOOR, scored))
         return RawSignal(
             signal_id=make_signal_id(),
@@ -75,7 +81,7 @@ class EquityTSMOMStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=min(1.0, max(STRENGTH_FLOOR, scored)),
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"equity_tsmom_20bar={momentum:.4f}",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

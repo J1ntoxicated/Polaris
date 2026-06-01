@@ -39,6 +39,14 @@ TTL_BARS = 4
 
 
 class EquityGapGoStrategy(BaseStrategy):
+    # Varyable ENTRY-trigger knob (P0a). Class defaults == module constants ==
+    # frozen baseline -> behavior-0 for default instances.
+    gap_pct: float = GAP_PCT
+    # gap_gain (signal-STRENGTH/sizing knob) + ttl_bars (inert-in-replay) are
+    # intentionally NOT in PARAM_BOUNDS. Kept as class defaults for behavior-0.
+    gap_gain: float = GAP_GAIN
+    ttl_bars: int = TTL_BARS
+
     metadata = StrategyMetadata(
         strategy_id="equity_gap_go",
         timeframe="1D",
@@ -71,12 +79,12 @@ class EquityGapGoStrategy(BaseStrategy):
         last = bars[-1]
         prev_high = bars[-2].high
         # Gap-up continuation: material gap AND open clears the prior high.
-        if last.open < prev_close * (1.0 + GAP_PCT):
+        if last.open < prev_close * (1.0 + self.gap_pct):
             return None
         if last.open <= prev_high:
             return None
         # Strength scales with the realized gap size, floored/capped.
-        scored = STRENGTH_BASE + GAP_GAIN * gap
+        scored = STRENGTH_BASE + self.gap_gain * gap
         strength = min(1.0, max(STRENGTH_FLOOR, scored))
         return RawSignal(
             signal_id=make_signal_id(),
@@ -85,7 +93,7 @@ class EquityGapGoStrategy(BaseStrategy):
             side="long",
             strength=strength,
             sizing_hint=strength,
-            ttl_bars=TTL_BARS,
+            ttl_bars=self.ttl_bars,
             thesis_tag=f"equity_gap_up={gap:.4f}>prev_high",
             correlation_group=self.metadata.correlation_group_id,
             venue_constraints={},

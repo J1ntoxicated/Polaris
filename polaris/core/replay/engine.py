@@ -75,9 +75,14 @@ class _OpenPosition:
 class ReplayEngine:
     """Replay one config over the live-seeded sandbox -> ``ReplayResult``."""
 
-    def __init__(self, config: ReplayConfig) -> None:
+    def __init__(
+        self, config: ReplayConfig, strategies: list[BaseStrategy] | None = None
+    ) -> None:
         self.config = config
-        self.strategies = all_strategies()
+        # behaviour 0: the sole production caller (run_replay.py) passes no
+        # ``strategies=`` -> default None -> ``all_strategies()`` reproduces the
+        # current path. The P0a variant layer injects wrapper instances here.
+        self.strategies = all_strategies() if strategies is None else list(strategies)
 
     # -- public -----------------------------------------------------------
     def run(self) -> ReplayResult:

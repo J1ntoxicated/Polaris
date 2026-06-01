@@ -211,7 +211,8 @@ def _evaluate_swaps(conn: sqlite3.Connection, *, now_ts: int) -> None:
     rows = conn.execute(
         "SELECT position_id, active_strategy_id, venue, symbol, side, "
         "       underlying_group_id "
-        "FROM positions WHERE status NOT IN ('closed', 'cancelled') LIMIT 10"
+        "FROM positions WHERE status NOT IN ('closed', 'cancelled', 'reconciled') "
+        "LIMIT 10"
     ).fetchall()
     for r in rows:
         pos_id, active_strat, venue, symbol, side, group = (

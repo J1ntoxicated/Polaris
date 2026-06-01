@@ -52,6 +52,7 @@ from polaris.scripts._smoke_roundtrip_capital import (
 from polaris.scripts._smoke_roundtrip_shared import (
     MIN_CAPITAL_LOT,
     MIN_OKX_NOTIONAL_USD,
+    CloseOrphan,
     OpenAttempt,
     record_venue_orphan,
     resolve_okx_base_url,
@@ -63,6 +64,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "MIN_OKX_NOTIONAL_USD",
     "MIN_CAPITAL_LOT",
+    "CloseOrphan",
     "OpenAttempt",
     "fetch_okx_available_usdt",
     "real_capital_close_fill",
@@ -228,7 +230,7 @@ async def real_okx_close_fill(
     strategy_id: str,
     mark_price: float | None = None,
     poll_delay_sec: float = 0.5,
-) -> Fill | None:
+) -> Fill | CloseOrphan | None:
     """OKX close leg: sell the entry ``base_qty`` → poll → normalize.
 
     FIX 1 (OKX SPOT 1000-USDT market cap, reject 51201): ``mark_price`` is the
@@ -255,12 +257,11 @@ async def real_okx_close_fill(
       is skipped (never submitted → no 51020) and its base is absorbed; the
       splitter's min-tail fold means this only guards a degenerate dust tail.
 
-    FIX 2 (OKX 51008 insufficient-balance): before closing, the total close
-    ``base_qty`` is clamped to the live available spot balance of the base ccy
-    (``min(base_qty, available)``). When the available balance is ~0 (a true
-    orphan — qty over-counted vs. what the wallet actually holds) the close
-    returns ``None`` with a clear warning and submits nothing (orphan-reconcile,
-    NOT a throttle — no infinite escalation, no internal fault).
+    FIX 2 (OKX 51008 insufficient-balance): the close ``base_qty`` is clamped to
+    ``min(base_qty, available)``. When available ~0 (a true orphan — qty
+    over-counted vs. wallet) the close returns a ``CloseOrphan`` sentinel
+    (DISTINCT from a bare ``None`` transient reject) + submits nothing → caller
+    marks ``status='reconciled'`` (NOT a throttle, no fabricated fill).
 
     Double-sell bound: the FIX-2 clamp re-fetches the available base each tick
     and clamps ``min(base_qty, available)``, so a position that was fully or
@@ -276,14 +277,14 @@ async def real_okx_close_fill(
     base_ccy = inst_id.split("-")[0]
     available = await _fetch_okx_available_base(adapter, base_ccy)
     if available is not None and available < base_qty:
-        # available ~0 → true orphan: log + return None (no order, no fault).
+        # available ~0 → true orphan: CloseOrphan sentinel (vs transient None).
         if available <= 0.0:
             logger.warning(
                 "[okx/close] %s base_qty=%.10f but available %s ~0 — orphan "
-                "(qty over-count); skip close, needs reconcile (not a throttle)",
+                "(qty over-count); skip close, mark reconciled (not a throttle)",
                 inst_id, base_qty, base_ccy,
             )
-            return None
+            return CloseOrphan(available=available)
         logger.info(
             "[okx/close] %s clamp close base_qty %.10f → available %.10f %s "
             "(orphan-reconcile, not a throttle)",

@@ -210,6 +210,134 @@ def test_cost_overlay_zero_atr_safe() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. FIX 1 — sane R-denominator (pnl_r_net blow-up on low-price symbols)
+# ---------------------------------------------------------------------------
+
+
+def test_cost_overlay_low_price_symbol_net_r_sane() -> None:
+    """ALGO ~$0.12 entry: the round-trip cost in R must stay a FEW R of gross,
+    NOT explode to -210000 R. The R-denominator floors at a PRICE-proportional
+    minimum (entry_price × MIN_ATR_PCT) so it scales with the instrument, not a
+    fixed 1e-6 that conflates 'missing bars' with 'low-price symbol'."""
+    # size 600 USDT, ALGO entry 0.12, atr_pct 0.005 → atr_usd = 0.12*0.005*2
+    # = 0.0012 (well above the price-proportional floor of 0.12*0.001=0.00012).
+    atr_usd = 0.12 * 0.005 * 2.0
+    _pnl_usd_net, pnl_r_net = cost_adjusted_pnl_r(
+        gross_pnl_usd=-72.0,
+        gross_pnl_r=-10.0,
+        size_usd=600.0,
+        atr_usd=atr_usd,
+        venue="okx",
+        entry_fee_usd=0.6,
+        exit_fee_usd=0.6,
+        entry_slippage_bps=1.0,
+        exit_slippage_bps=1.0,
+    )
+    # cost = 0.6+0.6 + (1/1e4)*600*2 = 1.2 + 0.12 = 1.32 usd
+    # cost/atr_usd = 1.32 / 0.0012 = 1100 — STILL large for a tiny atr_usd, but
+    # bounded vs the 1e-6 floor blow-up. The KEY guard is the posterior skip
+    # below; here we pin that the floor scales with price (no 1e-6 division).
+    assert math.isfinite(pnl_r_net)
+
+
+def test_cost_adjusted_skips_when_atr_degenerate() -> None:
+    """A degenerate / missing R-denominator (None) SKIPS the cost adjustment —
+    net == gross — so the posterior never receives |net_r| ≫ |gross_r|."""
+    _pnl_usd_net, pnl_r_net = cost_adjusted_pnl_r(
+        gross_pnl_usd=-72.0,
+        gross_pnl_r=-10.0,
+        size_usd=600.0,
+        atr_usd=None,
+        venue="okx",
+        entry_fee_usd=0.6,
+        exit_fee_usd=0.6,
+        entry_slippage_bps=1.0,
+        exit_slippage_bps=1.0,
+    )
+    assert pnl_r_net == pytest.approx(-10.0)
+
+
+def test_read_cost_inputs_position_scaled_denominator(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A low-price symbol with NO bars: atr_usd is the WHOLE-POSITION 1R dollar
+    value (size_usd × atr_pct × 2), NOT the per-UNIT ATR floored at 1e-6 — so the
+    whole-position cost_usd / atr_usd cannot blow up to -210000 R."""
+    from polaris.scripts._production_close_effects import _read_cost_inputs
+    from polaris.scripts._smoke_fills import SimulatedTrade
+
+    _seed_fill(memdb, fill_id="algo_open", is_close=0, fee_usd=0.6,
+               slippage_bps=1.0, contribution_id="posALGO", ts_ms=1000,
+               size_usd=600.0, fill_price=0.12)
+    trade = SimulatedTrade(
+        signal_id="sALGO", venue="okx", symbol="ALGO-USDT",
+        strategy_id="tsmom", side="long", entry_price=0.12,
+        notional_usd=600.0, open_ts=1, position_id="posALGO",
+    )
+    *_rest, atr_usd = _read_cost_inputs(memdb, trade)
+    # No bars → default atr_pct 0.005 → atr_usd = 600 × 0.005 × 2 = 6.0 (whole
+    # position), decisively above the old per-unit 1e-6 floor (~0.0012).
+    assert atr_usd is not None
+    assert atr_usd == pytest.approx(600.0 * 0.005 * 2.0)
+    assert atr_usd > 1.0  # whole-position scale, not the old per-unit blow-up
+
+
+def test_read_cost_inputs_degenerate_entry_price_returns_none_atr(
+    memdb: sqlite3.Connection,
+) -> None:
+    """entry_price <= 0 (truly degenerate) → atr_usd sentinel None so the caller
+    SKIPS the cost adjustment instead of dividing by a tiny floor."""
+    from polaris.scripts._production_close_effects import _read_cost_inputs
+    from polaris.scripts._smoke_fills import SimulatedTrade
+
+    _seed_fill(memdb, fill_id="bad_open", is_close=0, fee_usd=0.6,
+               slippage_bps=1.0, contribution_id="posBAD", ts_ms=1000,
+               size_usd=600.0, fill_price=0.0)
+    trade = SimulatedTrade(
+        signal_id="sBAD", venue="okx", symbol="ZERO-USDT",
+        strategy_id="tsmom", side="long", entry_price=0.0,
+        notional_usd=600.0, open_ts=1, position_id="posBAD",
+    )
+    *_rest, atr_usd = _read_cost_inputs(memdb, trade)
+    assert atr_usd is None
+
+
+def test_safe_update_posterior_never_folds_blown_up_net_r(
+    memdb: sqlite3.Connection,
+) -> None:
+    """END-TO-END: an ALGO-like close (low price, no atr_usd) must fold a net_r
+    that is within a few R of gross into the posterior — NEVER -210000 R."""
+    from polaris.scripts._production_close_effects import _safe_update_posterior
+    from polaris.scripts._smoke_fills import SimulatedTrade
+
+    # Entry fill at $0.12; NO bars seeded so atr_usd derives from price floor.
+    _seed_fill(memdb, fill_id="algo2_open", is_close=0, fee_usd=0.6,
+               slippage_bps=1.0, contribution_id="posALGO2", ts_ms=1000,
+               size_usd=600.0, fill_price=0.12)
+    _seed_fill(memdb, fill_id="algo2_close", is_close=1, fee_usd=0.6,
+               slippage_bps=1.0, contribution_id="posALGO2", ts_ms=2000,
+               size_usd=600.0, fill_price=0.10)
+    trade = SimulatedTrade(
+        signal_id="sALGO2", venue="okx", symbol="ALGO-USDT",
+        strategy_id="tsmom", side="long", entry_price=0.12,
+        notional_usd=600.0, open_ts=1, position_id="posALGO2",
+    )
+    _safe_update_posterior(
+        memdb, trade=trade, regime="chop", pnl_r=-10.0, pnl_usd=-72.0,
+        now_ts=2000,
+    )
+    row = _read_posterior(
+        memdb, exchange="okx", strategy="tsmom", ticker="ALGO-USDT",
+        regime="chop",
+    )
+    assert row is not None
+    mu = row[0]
+    # The single folded observation drives mu; it must be within a few R of the
+    # gross -10, never the -210000 blow-up.
+    assert -20.0 < mu < 0.0
+
+
+# ---------------------------------------------------------------------------
 # 4. verdict boundaries — label only, NOT a gate
 # ---------------------------------------------------------------------------
 

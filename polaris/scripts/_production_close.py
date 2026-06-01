@@ -13,9 +13,11 @@ Split out from ``_production_pipeline.py`` to keep both files under the
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import sqlite3
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
@@ -42,6 +44,7 @@ from polaris.scripts._production_close_helpers import (
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
+    CloseOrphan,
     real_capital_close_fill,
     real_okx_close_fill,
     resolve_okx_base_url,
@@ -72,7 +75,7 @@ async def _real_close_fill(
     fresh_mark: float | None = None,
     okx_adapter: Any = None,
     capital_session: Any = None,
-) -> Fill | None:
+) -> Fill | CloseOrphan | None:
     """Drive the real demo venue close leg → return the exit ``Fill``.
 
     P0 venue wire: OKX sells the entry ``base_qty``; Capital closes by
@@ -200,6 +203,77 @@ async def close_oldest_with_real_pnl(
     )
 
 
+def _reconcile_orphan(
+    conn: sqlite3.Connection,
+    *,
+    state: ProdLoopState,
+    trade: SimulatedTrade,
+    trade_idx: int,
+    available: float,
+    now_ts: int,
+) -> bool:
+    """FIX 2 — mark a true-orphan position terminal so it stops being retried.
+
+    ``status='reconciled'`` denotes VENUE-SIDE STATE-DRIFT RECOVERY (the wallet
+    no longer holds the tracked base_qty — an over-count), NOT a trade outcome:
+    NO close fill is persisted and NO realized PnL is recorded. The position is
+    popped from ``state.open_trades`` (it is NOT appended to ``closed_trades`` —
+    there is no outcome to reflect on), and an ``orphan_reconciled`` audit row is
+    written to ``risk_events``. Returns ``True`` (handled) so the caller does not
+    treat it as a transient reject. Idempotent: a re-attempt on an already
+    reconciled row is a no-op UPDATE. flow_not_block — no fault, no throttle.
+    """
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if trade.position_id:
+            conn.execute(
+                "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
+                "exit_state = 'reconciled' WHERE position_id = ?",
+                (now_ts, trade.position_id),
+            )
+        conn.execute("COMMIT")
+    except sqlite3.Error as exc:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        logger.error(
+            "[close/orphan] %s:%s reconcile UPDATE failed (state preserved): %r",
+            trade.venue, trade.symbol, exc,
+        )
+        state.venue_close_rejects += 1
+        return False
+    # Pop from open_trades by identity (defensive re-find, mirrors the close path).
+    if 0 <= trade_idx < len(state.open_trades) and state.open_trades[trade_idx] is trade:
+        state.open_trades.pop(trade_idx)
+    else:
+        with contextlib.suppress(ValueError):
+            state.open_trades.remove(trade)
+    trade.closed = True
+    # Audit row (best-effort) — durable record of the reconcile for forensics.
+    audit = json.dumps(
+        {
+            "venue": trade.venue, "symbol": trade.symbol,
+            "position_id": trade.position_id, "base_qty": trade.base_qty,
+            "available": available, "reason": "available~0 qty over-count",
+        },
+        separators=(",", ":"),
+    )
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute(
+            "INSERT INTO risk_events "
+            "(risk_event_id, strategy_id, event_type, created_ts, payload_json) "
+            "VALUES (?, ?, 'orphan_reconciled', ?, ?)",
+            (uuid.uuid4().hex, trade.strategy_id, now_ts, audit),
+        )
+    logger.warning(
+        "[close/orphan] %s:%s trade_id=%s reconciled (available=%.10f ~0, "
+        "base_qty=%.10f over-count) — status='reconciled', no fill, no pnl; "
+        "exit engine + hydrate stop retrying (state-drift recovery)",
+        trade.venue, trade.symbol, trade.position_id or "-", available,
+        trade.base_qty,
+    )
+    return True
+
+
 async def _close_trade_with_real_pnl(
     conn: sqlite3.Connection,
     *,
@@ -248,6 +322,16 @@ async def _close_trade_with_real_pnl(
             )
             state.fault_events += 1
             return False
+        if isinstance(real_fill, CloseOrphan):
+            # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still tracks
+            # base_qty, an over-count from the close-chunk fix). Mark the position
+            # terminal (status='reconciled') so the exit engine + hydrate STOP
+            # retrying it forever — WITHOUT fabricating a fill or PnL. This is
+            # venue-side STATE-DRIFT RECOVERY, not a trade outcome.
+            return _reconcile_orphan(
+                conn, state=state, trade=trade, trade_idx=trade_idx,
+                available=real_fill.available, now_ts=now_ts,
+            )
         if real_fill is None:
             # Venue reject / no-fill (EXTERNAL — e.g. 51020 min-order, compliance,
             # market closed) is NOT a strategy fault: preserve the position +

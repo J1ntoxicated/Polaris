@@ -39,6 +39,22 @@ class OpenAttempt:
     reject_msg: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CloseOrphan:
+    """FIX 2 — a TRUE-ORPHAN close signal (venue-side state drift).
+
+    Returned by ``real_okx_close_fill`` when the wallet's available base ccy is
+    ~0 while the internal book still tracks ``base_qty`` (an over-count from the
+    close-chunk fix). DISTINCT from a bare ``None`` (transient reject / no-fill →
+    retry next tick): the caller marks the position ``status='reconciled'`` so
+    the exit engine + hydrate STOP retrying it — WITHOUT fabricating a fill or
+    PnL. State-drift recovery (flow_not_block), NOT a throttle / size dampen /
+    P&L halt. ``available`` is the wallet balance observed (~0) for the audit.
+    """
+
+    available: float
+
+
 def record_venue_orphan(
     conn: sqlite3.Connection,
     *,

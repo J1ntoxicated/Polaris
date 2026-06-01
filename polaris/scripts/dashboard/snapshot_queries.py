@@ -511,7 +511,7 @@ def _read_positions(
                   MAX(COALESCE(mfe_r, 0.0)) AS mfe_r,     -- r[11]
                   MIN(COALESCE(mae_r, 0.0)) AS mae_r      -- r[12]
            FROM positions
-           WHERE status NOT IN ('closed', 'cancelled')
+           WHERE status NOT IN ('closed', 'cancelled', 'reconciled')
            GROUP BY venue, symbol, strategy_id, side
            ORDER BY MIN(opened_ts) DESC""",
     )

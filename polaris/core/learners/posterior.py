@@ -227,7 +227,7 @@ def cost_adjusted_pnl_r(
     gross_pnl_usd: float,
     gross_pnl_r: float,
     size_usd: float,
-    atr_usd: float,
+    atr_usd: float | None,
     venue: str,
     entry_fee_usd: float,
     exit_fee_usd: float,
@@ -240,6 +240,12 @@ def cost_adjusted_pnl_r(
     constant ``COST_BPS_CAPITAL`` stands in on both legs. The R-denominator is
     the same ``atr_usd`` used for the gross R, so ``pnl_r_net = pnl_r -
     cost_usd/atr_usd``. The gross inputs are never mutated.
+
+    FIX 1 (pnl_r_net blow-up): ``atr_usd`` is ``None`` when the R-denominator is
+    DEGENERATE (entry_price missing/<=0). In that case the cost-in-R adjustment
+    is SKIPPED (``pnl_r_net = gross_pnl_r``) — never divide cost by a tiny floor
+    that explodes the net-R (the live NIG posterior was being fed -210000 R).
+    ``pnl_usd_net`` still nets the dollar cost (always finite + sane).
     """
     if venue == "capital":
         cost_usd = 2.0 * (COST_BPS_CAPITAL / 1e4) * abs(size_usd)
@@ -248,7 +254,12 @@ def cost_adjusted_pnl_r(
         slip_exit = (exit_slippage_bps or COST_BPS_OKX_FALLBACK) / 1e4 * abs(size_usd)
         cost_usd = abs(entry_fee_usd) + abs(exit_fee_usd) + slip_entry + slip_exit
     pnl_usd_net = gross_pnl_usd - cost_usd
-    pnl_r_net = gross_pnl_r - cost_usd / atr_usd if atr_usd > 0.0 else gross_pnl_r
+    if atr_usd is None or atr_usd <= 0.0:
+        # Degenerate R-denominator → skip the cost-in-R adjustment (net==gross)
+        # so the posterior never receives |net_r| ≫ |gross_r|.
+        pnl_r_net = gross_pnl_r
+    else:
+        pnl_r_net = gross_pnl_r - cost_usd / atr_usd
     return pnl_usd_net, pnl_r_net
 
 

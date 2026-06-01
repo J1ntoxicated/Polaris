@@ -529,7 +529,8 @@ async def run_recalc_for_active_positions(
     (per-tick price proxy) so the cycle has something to evaluate.
     """
     rows = conn.execute(
-        "SELECT position_id FROM positions WHERE status NOT IN ('closed', 'cancelled')"
+        "SELECT position_id FROM positions "
+        "WHERE status NOT IN ('closed', 'cancelled', 'reconciled')"
     ).fetchall()
     for r in rows:
         mark_position_dirty(

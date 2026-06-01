@@ -51,6 +51,9 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
           ON f.contribution_id = p.position_id
          AND f.is_close = 0
         WHERE p.status = 'open'
+        -- allow-list 'open' only → 'closed'/'cancelled'/'reconciled' (FIX 2
+        -- venue-side state-drift recovery) are all excluded by construction, so
+        -- a reconciled orphan is never re-hydrated + retried on restart.
         GROUP BY p.position_id, p.venue, p.symbol, p.strategy_id, p.side,
                  p.opened_ts, p.underlying_group_id
         ORDER BY p.opened_ts ASC

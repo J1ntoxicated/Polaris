@@ -208,14 +208,19 @@ async def test_close_balance_clamp_caps_to_available() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_balance_zero_returns_none_no_exception() -> None:
-    """A true orphan (available ~0) → None + warning, no order, no exception."""
+async def test_close_balance_zero_returns_orphan_sentinel_no_exception() -> None:
+    """A true orphan (available ~0) → CloseOrphan sentinel + warning, no order, no
+    exception. FIX 2: the sentinel (DISTINCT from a transient None reject) lets
+    the caller mark the position 'reconciled' so it stops being retried."""
+    from polaris.scripts._smoke_real_roundtrip import CloseOrphan
+
     adapter = _CloseSplitOKX(price=10.0, avail=0.0)
-    fill = await real_okx_close_fill(
+    out = await real_okx_close_fill(
         adapter, inst_id="FIL-USDT", base_qty=146.8,
         strategy_id="tsmom", mark_price=10.0, poll_delay_sec=0.0,
     )
-    assert fill is None
+    assert isinstance(out, CloseOrphan)
+    assert out.available == pytest.approx(0.0)
     assert adapter.sell_base_qtys == []  # nothing submitted
 
 

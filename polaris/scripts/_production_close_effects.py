@@ -52,6 +52,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# FIX 1 — minimum ATR-pct floor for the cost-adjusted R-denominator. The old
+# fixed 1e-6 atr_usd floor conflated "missing bars" with "low-price symbol"
+# (ALGO ~$0.12): the WHOLE-POSITION cost_usd divided by the per-UNIT atr_usd
+# (~1e-6) exploded pnl_r_net to ~-210000 R. The R-denominator is now the
+# whole-position 1R dollar value (``size_usd × atr_pct × 2``) with ``atr_pct``
+# floored at MIN_ATR_PCT so a flat bar window cannot drive it to ~0. A truly
+# degenerate entry_price (<=0) yields a ``None`` sentinel and the caller SKIPS
+# the cost-in-R adjustment entirely (measurement-only — never gates sizing).
+MIN_ATR_PCT = 0.001
+
 
 def _safe_record_fault(
     conn: sqlite3.Connection, *, strategy_id: str, phase: str, exc: BaseException,
@@ -179,7 +189,7 @@ def _safe_record_meta_label(
 
 def _read_cost_inputs(
     conn: sqlite3.Connection, trade: SimulatedTrade
-) -> tuple[float, float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, float | None]:
     """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd).
 
     P0-2 fix — BOTH legs are matched by ``contribution_id = position_id`` (the
@@ -190,6 +200,13 @@ def _read_cost_inputs(
     latest ``(strategy, instrument)`` fill. ``atr_usd`` mirrors the
     R-denominator used by the gross calc so ``pnl_r_net = pnl_r -
     cost_usd/atr_usd`` is consistent.
+
+    FIX 1 — the returned ``atr_usd`` is the WHOLE-POSITION 1R dollar value
+    (``size_usd × atr_pct × 2``, atr_pct floored at ``MIN_ATR_PCT``) — the right
+    denominator for the whole-position ``cost_usd``. The old per-UNIT
+    ``entry_price × atr_pct × 2`` floored at ``1e-6`` blew up cost-in-R for
+    low-price symbols. A truly degenerate entry_price (<=0) returns ``None`` so
+    the caller skips the cost adjustment.
     """
     inst = f"{trade.venue}:{trade.symbol}"
     entry: tuple[Any, ...] | None = None
@@ -234,7 +251,22 @@ def _read_cost_inputs(
         (float(r[1]) - float(r[2])) / float(r[0]) for r in bar_rows if float(r[0]) > 0.0
     ]
     atr_pct = sum(atr_pct_samples) / len(atr_pct_samples) if atr_pct_samples else 0.005
-    atr_usd = max(entry_price * atr_pct * 2.0, 1e-6)
+    # FIX 1 — the R-denominator that ``cost_usd`` (a WHOLE-POSITION dollar cost)
+    # is divided by must itself be the WHOLE-POSITION 1R dollar value, not the
+    # per-UNIT ATR. The gross pnl_r divides a per-unit price move by the per-unit
+    # ATR (dimensionless); dividing the whole-position cost_usd by the per-unit
+    # ATR (the prior bug) scaled by base_qty (~size_usd/entry_price), which for a
+    # low-price symbol (ALGO ~$0.12, 5000 coins) blew the cost-in-R into the
+    # thousands of R. Position 1R = base_qty × per_unit_atr = (size_usd/price) ×
+    # (price × atr_pct × 2) = size_usd × atr_pct × 2 — independent of price, so a
+    # cheap coin no longer explodes. ``atr_pct`` floors at MIN_ATR_PCT so a flat
+    # bar window cannot drive the denominator to ~0.
+    if entry_price > 0.0:
+        atr_usd: float | None = abs(size_usd) * max(atr_pct, MIN_ATR_PCT) * 2.0
+    else:
+        # Truly degenerate (entry_price missing/<=0) → sentinel; caller skips the
+        # cost-in-R adjustment (net==gross) rather than feed a garbage net-R.
+        atr_usd = None
     return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd
 
 
@@ -250,6 +282,15 @@ def _safe_update_posterior(
         (
             entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd,
         ) = _read_cost_inputs(conn, trade)
+        if atr_usd is None:
+            # FIX 1 — degenerate R-denominator (entry_price <=0): skip the
+            # cost-in-R adjustment (net==gross) so the NIG posterior never folds
+            # |net_r| ≫ |gross_r|. WARN (not silent) per the no-garbage mandate.
+            logger.warning(
+                "[edge-validation] %s:%s degenerate atr_usd (entry_price<=0) — "
+                "cost-in-R adjustment skipped (net==gross, no posterior blow-up)",
+                trade.venue, trade.symbol,
+            )
         _pnl_usd_net, pnl_r_net = cost_adjusted_pnl_r(
             gross_pnl_usd=pnl_usd, gross_pnl_r=pnl_r, size_usd=size_usd,
             atr_usd=atr_usd, venue=trade.venue,

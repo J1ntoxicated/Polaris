@@ -214,7 +214,7 @@ def load_held_positions(
         FROM positions p
         LEFT JOIN fills f
           ON f.contribution_id = p.position_id AND f.is_close = 0
-        WHERE p.venue = ? AND p.status NOT IN ('closed','cancelled')
+        WHERE p.venue = ? AND p.status NOT IN ('closed','cancelled','reconciled')
         ORDER BY p.opened_ts ASC
         """,
         (venue,),

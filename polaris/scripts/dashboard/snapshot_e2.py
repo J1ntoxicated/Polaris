@@ -147,7 +147,7 @@ def _exit_surface(
         conn,
         """SELECT COALESCE(exit_state, 'open') AS st, COUNT(*)
            FROM positions
-           WHERE status NOT IN ('closed', 'cancelled')
+           WHERE status NOT IN ('closed', 'cancelled', 'reconciled')
            GROUP BY st""",
     )
     fsm_states = {str(r[0] or "open"): int(r[1] or 0) for r in fsm_rows}

@@ -92,7 +92,7 @@ def _read_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         conn,
         """SELECT venue, symbol, strategy_id, side, qty, status, opened_ts
            FROM positions
-           WHERE status NOT IN ('closed','cancelled')
+           WHERE status NOT IN ('closed','cancelled','reconciled')
            ORDER BY opened_ts DESC
            LIMIT 12""",
     )

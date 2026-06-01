@@ -165,7 +165,7 @@ def concurrent_same_side_open(
     12-simultaneous-BTC stacking (each clone opened on a distinct bar passes the
     novelty test), so before building the pipeline spec we also refuse a clone
     while one same-side position is still open. Counts ``positions`` rows with
-    ``status NOT IN ('closed','cancelled')`` for the exact
+    ``status NOT IN ('closed','cancelled','reconciled')`` for the exact
     (venue, symbol, strategy_id, side). One live position per name/strategy/side
     (controlled scale-in is a later component). PRECISION (surgical-strike), not
     a size dampen / P&L halt: a side flip or a different name/strategy is
@@ -176,7 +176,7 @@ def concurrent_same_side_open(
         row = conn.execute(
             "SELECT 1 FROM positions "
             "WHERE venue = ? AND symbol = ? AND strategy_id = ? AND side = ? "
-            "AND status NOT IN ('closed','cancelled') LIMIT 1",
+            "AND status NOT IN ('closed','cancelled','reconciled') LIMIT 1",
             (venue, symbol, strategy_id, side),
         ).fetchone()
     except sqlite3.Error as exc:  # fail-open — never block on DB trouble.

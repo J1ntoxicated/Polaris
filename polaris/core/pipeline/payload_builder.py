@@ -510,7 +510,9 @@ def load_active_positions(
     *,
     limit: int = 50,
 ) -> list[ActivePosition]:
-    """Read ``positions`` rows where status not in {closed, cancelled}."""
+    """Read ``positions`` rows where status not in {closed, cancelled,
+    reconciled}. ``reconciled`` = venue-side state-drift recovery (FIX 2), never
+    a live position to monitor."""
     rows = _safe_query(
         conn,
         """
@@ -518,7 +520,7 @@ def load_active_positions(
                entry_strategy_id, active_strategy_id, side, qty, status,
                opened_ts, swap_count
         FROM positions
-        WHERE status NOT IN ('closed','cancelled')
+        WHERE status NOT IN ('closed','cancelled','reconciled')
         ORDER BY opened_ts DESC
         LIMIT ?
         """,

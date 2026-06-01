@@ -112,7 +112,7 @@ def load_active_position_rows(
                p.side, p.qty, p.opened_ts,
                p.stop_price, p.peak_price, p.trough_price, p.exit_state
         FROM positions p
-        WHERE p.status NOT IN ('closed','cancelled')
+        WHERE p.status NOT IN ('closed','cancelled','reconciled')
         ORDER BY p.opened_ts DESC LIMIT ?
         """,
         (int(limit),),

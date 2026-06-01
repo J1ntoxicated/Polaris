@@ -86,10 +86,11 @@ def _mid(price_block: Any) -> float:
 def _parse_capital_ts(value: Any) -> int:
     """Capital bar ts is ISO-8601 string. Return seconds-epoch (UTC).
 
-    Capital docs document ``snapshotTime`` as timezone-less UTC; on a host
-    whose tz is not UTC, ``datetime.fromisoformat`` would return a naive
-    datetime that ``timestamp()`` interprets in local tz — shifting every bar
-    by the host offset. We force UTC explicitly (codex Day 5 P1 fix).
+    The caller passes ``snapshotTimeUTC`` (the genuinely-UTC field), which is
+    tz-naive in the payload. We force UTC explicitly so ``timestamp()`` does
+    not reinterpret it in the host tz (verified 2026-06-01: account tz = AEST
+    / UTC+10; the sibling ``snapshotTime`` field is account-local and would
+    shift every bar +10h — see ``capital_price_row_to_bar``).
     """
     from datetime import datetime
 
@@ -116,7 +117,12 @@ def capital_price_row_to_bar(
     """Convert one Capital `/prices` row to canonical Bar (or None if invalid)."""
     if bar_interval not in BAR_INTERVALS:
         return None
-    ts = _parse_capital_ts(row.get("snapshotTime") or row.get("snapshotTimeUTC"))
+    # Prefer ``snapshotTimeUTC`` (genuine UTC). The sibling ``snapshotTime`` is
+    # account-local (AEST/UTC+10 on this account) and, parsed as UTC, dates every
+    # bar +10h into the FUTURE — which polluted bars MAX(ts) and made the
+    # dashboard look stale. Verified live 2026-06-01: wall-clock 15:00 UTC →
+    # snapshotTime "…T01:00:00" (+10h), snapshotTimeUTC "…T15:00:00" (correct).
+    ts = _parse_capital_ts(row.get("snapshotTimeUTC") or row.get("snapshotTime"))
     if ts <= 0:
         return None
     o = _mid(row.get("openPrice"))

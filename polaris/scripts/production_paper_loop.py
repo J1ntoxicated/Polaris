@@ -31,7 +31,10 @@ from polaris.core.isolation.allocator_fence import (
     get_process_fence,
     reset_process_fence,
 )
-from polaris.core.lifecycle.recover import hydrate_open_positions
+from polaris.core.lifecycle.recover import (
+    hydrate_open_positions,
+    reconcile_venue_positions,
+)
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
     ALPACA_REFRESH_SEC,
@@ -52,11 +55,15 @@ from polaris.scripts._production_tick import (
     _run_tick,
     _strategies_by_timeframe,
 )
-from polaris.scripts._production_ws import start_ws_producers
+from polaris.scripts._production_ws import (
+    resubscribe_ws_clients,
+    start_ws_producers,
+)
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
 from polaris.storage.schema import init_db
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
+from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx import OKXAdapter
 
@@ -364,7 +371,7 @@ async def run_production_paper_loop(
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
-    ws_tasks, _ws_clients = start_ws_producers(
+    ws_tasks, ws_clients = start_ws_producers(
         conn, writer=quote_writer, stop_evt=stop_evt,
         capital_session=capital_session,
     )
@@ -389,6 +396,34 @@ async def run_production_paper_loop(
                 "also fail)"
             )
 
+    # VENUE startup reconcile-import: after a fresh-DB reset the bot starts FLAT
+    # and is BLIND to real venue holdings (Alpaca/Capital). hydrate (above) only
+    # reads the DB; this fetches live positions via the just-built adapters and
+    # imports any NOT already tracked as status='open' + a synthetic entry fill
+    # at the CURRENT mark (PnL~0). Runs AFTER adapters exist; OKX SPOT dust is
+    # fungible wallet balance, skipped by default (import_okx_spot=False).
+    if real_roundtrip:
+        capital_adapter = (
+            CapitalAdapter(capital_session) if capital_session is not None else None
+        )
+        try:
+            imported = reconcile_venue_positions(
+                conn, okx_adapter=okx_adapter, capital_adapter=capital_adapter,
+                alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+            )
+        except Exception:
+            logger.exception(
+                "[reconcile] reconcile_venue_positions failed — live venue "
+                "holdings not imported (bot stays blind to them this session)"
+            )
+            imported = []
+        if imported:
+            state.open_trades.extend(imported)
+            logger.info(
+                "[reconcile] imported %d untracked live venue positions into "
+                "exit-engine management", len(imported),
+            )
+
     deadline = time.monotonic() + duration_sec
     tick_idx = 0
     try:
@@ -405,6 +440,18 @@ async def run_production_paper_loop(
             except Exception as exc:  # noqa: BLE001
                 logger.error("[tick %d] error: %r", tick_idx, exc)
                 state.fault_events += 1
+            # FIX 2/2 — keep the live WS set = (focus ∪ open positions). The WS
+            # subscription is static-at-startup (clients re-send subscribe only on
+            # reconnect), so push the current union into the live clients every
+            # tick. ``_focus_by_venue`` reads ``get_focus_targets`` which now unions
+            # held symbols, so a HELD position whose symbol left the dynamic focus
+            # stays WS-subscribed (dashboard live price + exit precision) for as
+            # long as it is held. Best-effort + idempotent (never forces a churn).
+            if ws_clients:
+                try:
+                    resubscribe_ws_clients(conn, ws_clients)
+                except Exception:  # noqa: BLE001 — visibility refresh never halts
+                    logger.exception("[ws] resubscribe (focus∪held) refresh failed")
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()

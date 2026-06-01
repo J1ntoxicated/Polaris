@@ -55,6 +55,7 @@ from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
 )
 from polaris.core.streams import resolve_stream_profile
+from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_recalc_exit import (
     run_precise_exit,
@@ -140,13 +141,16 @@ def load_active_position_rows(
         # sees REAL market data — the prior wiring hardcoded volume_now=0.0 and
         # recent_ticks=[] for every position, blinding the monitor.
         instrument_id = f"{venue}:{symbol}"
+        # Exclude FUTURE-dated bars (stale +10h Capital) so the G6 monitor /
+        # exit mark never treats a +10h ghost bar as the current price.
+        ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
         bar_row = conn.execute(
             """
             SELECT ts, close, high, low, volume FROM bars
-            WHERE instrument_id = ? AND bar_interval = '1m'
+            WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
             ORDER BY ts DESC LIMIT 20
             """,
-            (instrument_id,),
+            (instrument_id, ts_upper),
         ).fetchall()
         bar_close = float(bar_row[0][1]) if bar_row else entry_price
         # P4 #2 — prefer a FRESH WS tick mid (M6: monotonic age check), else the

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
+import time
 from collections.abc import Callable
 
 from polaris.core.rotation import (
@@ -26,6 +27,7 @@ from polaris.core.rotation import (
     RotationCandidate,
     held_forward_score,
 )
+from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.strategies import RawSignal
 
 logger = logging.getLogger(__name__)
@@ -273,12 +275,15 @@ def _held_pnl_r(
     """
     if entry_price <= 0.0:
         return 0.0
+    # Exclude FUTURE-dated bars (stale +10h Capital) so the opportunity-cost
+    # unrealized-R drift is measured against a real recent close, not a +10h ghost.
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     try:
         bars = conn.execute(
             "SELECT close, high, low FROM bars "
-            "WHERE instrument_id = ? AND bar_interval='1m' "
+            "WHERE instrument_id = ? AND bar_interval='1m' AND ts <= ? "
             "ORDER BY ts DESC LIMIT 14",
-            (f"{venue}:{symbol}",),
+            (f"{venue}:{symbol}", ts_upper),
         ).fetchall()
     except sqlite3.Error:
         return 0.0

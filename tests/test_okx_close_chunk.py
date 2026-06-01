@@ -100,9 +100,9 @@ async def test_close_over_cap_splits_into_children() -> None:
     # Aggregated base_qty == original (total unchanged — NOT a size cut).
     assert fill.base_qty == pytest.approx(146.8, rel=1e-9)
     assert fill.side == "sell"
-    # size-weighted avg price (uniform here) + summed fee (2 × 0.02).
+    # size-weighted avg price (uniform here) + summed REAL fee (10bps of $1468).
     assert fill.fill_price == pytest.approx(10.0, rel=1e-9)
-    assert fill.fee_usd == pytest.approx(0.04, rel=1e-9)
+    assert fill.fee_usd == pytest.approx(1.468, rel=1e-9)
 
 
 @pytest.mark.asyncio

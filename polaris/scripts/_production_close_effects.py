@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,7 @@ from polaris.core.pipeline.gate_state import (
     SignalLifecycle,
 )
 from polaris.core.streams import resolve_stream, resolve_stream_profile
+from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 if TYPE_CHECKING:
@@ -242,10 +244,13 @@ def _read_cost_inputs(
     entry_price = float(entry[3]) if entry else trade.entry_price
     exit_fee = float(exit_row[0]) if exit_row else 0.0
     exit_slip = float(exit_row[1]) if exit_row else 0.0
+    # Exclude FUTURE-dated bars (stale +10h Capital) from the cost-R ATR window
+    # so the R-denominator reflects real recent volatility, not a +10h ghost bar.
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     bar_rows = conn.execute(
         "SELECT close, high, low FROM bars WHERE instrument_id = ? "
-        "AND bar_interval = '1m' ORDER BY ts DESC LIMIT 14",
-        (inst,),
+        "AND bar_interval = '1m' AND ts <= ? ORDER BY ts DESC LIMIT 14",
+        (inst, ts_upper),
     ).fetchall()
     atr_pct_samples = [
         (float(r[1]) - float(r[2])) / float(r[0]) for r in bar_rows if float(r[0]) > 0.0

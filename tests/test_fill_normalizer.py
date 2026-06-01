@@ -40,7 +40,12 @@ def test_okx_fill_to_unified_quote_ccy() -> None:
     assert f.base_qty == pytest.approx(0.00016667)
     assert f.size_usd == pytest.approx(10.0, rel=1e-3)  # base * avgPx
     assert f.fill_price == 60_000.0
-    assert f.fee_usd == pytest.approx(0.0035)
+    # fee_usd is the REAL OKX taker fee (10 bps of the $10 notional = $0.01),
+    # NOT the raw demo 'fee' field (-0.0035 here). The system measures REAL-venue
+    # viability (replay gate / dashboard real_fee_total all use real_fee_usd); the
+    # 70bps demo charge is sandbox overhead and must not train the NIG posterior.
+    assert f.fee_usd == pytest.approx(f.quote_qty * 0.001, rel=1e-9)  # 10 bps real taker
+    assert f.fee_usd == pytest.approx(0.01, rel=1e-3)  # ≈ 10 bps of ~$10
     assert f.slippage_bps == pytest.approx(0.0)
     assert f.ts_ms == 1_762_476_225_678
     assert f.order_id == "999"
@@ -203,8 +208,33 @@ def test_capital_per_market_leverage_reaches_size_usd(
     assert f.size_usd == pytest.approx(exp_size_usd)
 
 
-def test_fee_slippage_calc_okx_non_usdt_fee() -> None:
-    """When fee is paid in BTC, we convert to USD via avgPx."""
+def test_okx_fee_is_real_taker_not_demo_charge() -> None:
+    """A SUSHI-USDT buy with $1429.31 notional must record the REAL 10 bps taker
+    fee (≈$1.43), NOT the 70 bps OKX-demo charge ($10.005) the venue payload
+    reports. The raw demo 'fee' is sandbox overhead; persisting it trained the
+    NIG posterior / edge-validation on 7x cost (forensic 2026-05-31)."""
+    payload = {
+        "ordId": "5",
+        "instId": "SUSHI-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "1429.31",  # base SUSHI @ $1.00 → $1429.31 notional
+        "avgPx": "1.0",
+        "fee": "-10.00517",  # 70 bps demo charge — must be IGNORED
+        "feeCcy": "USDT",
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="volume_burst")
+    assert f.quote_qty == pytest.approx(1429.31)
+    assert f.fee_usd == pytest.approx(1429.31 * 0.001, rel=1e-6)  # ≈ $1.43
+    assert f.fee_usd < 2.0  # decisively NOT the $10.005 demo charge
+
+
+def test_okx_fee_real_independent_of_fee_ccy() -> None:
+    """The stored fee is the REAL taker fee on notional regardless of the demo
+    payload's feeCcy (BTC vs USDT) — the venue's raw 'fee' field is no longer
+    read. 100 BTC @ $60000 = $6M notional → 10 bps = $6000."""
     payload = {
         "ordId": "1",
         "instId": "BTC-USDT",
@@ -212,11 +242,63 @@ def test_fee_slippage_calc_okx_non_usdt_fee() -> None:
         "tgtCcy": "quote_ccy",
         "accFillSz": "100",
         "avgPx": "60000",
-        "fee": "-0.000001",  # BTC
+        "fee": "-0.000001",  # BTC — IGNORED now
         "feeCcy": "BTC",
         "state": "filled",
         "uTime": "1762476225678",
     }
     f = normalize_okx_fill(payload, strategy_id="volume_burst")
-    # 0.000001 BTC × 60000 USD/BTC = 0.06 USD.
-    assert f.fee_usd == pytest.approx(0.06)
+    # Real taker = 10 bps of the $6,000,000 notional.
+    assert f.fee_usd == pytest.approx(100.0 * 60000.0 * 0.001)
+
+
+def test_capital_fill_stores_real_3bps_fee() -> None:
+    """Capital demo reports fee=0, so the stored fee defaults to the REAL 3 bps
+    proxy (COST_BPS_CAPITAL) of the gross notional — consistent with the rest of
+    the system measuring real-venue viability."""
+    payload = {
+        "dealReference": "R",
+        "dealId": "D",
+        "epic": "EURUSD",
+        "direction": "BUY",
+        "level": 1.10,
+        "size": 1.0,
+        "status": "OPEN",
+        "date": "2026-05-07T00:00:00",
+    }
+    f = normalize_capital_confirm(
+        payload, strategy_id="fx", pip_value_usd=10.0, leverage=30.0
+    )
+    # size_usd = 1 * 10 * 30 = 300; 3 bps → $0.09.
+    assert f.size_usd == pytest.approx(300.0)
+    assert f.fee_usd == pytest.approx(300.0 * 3.0 / 1e4)
+
+
+def test_capital_explicit_fee_is_honored() -> None:
+    """An explicit fee_usd override is still respected (backward-compat)."""
+    payload = {
+        "dealReference": "R", "dealId": "D", "epic": "EURUSD", "direction": "BUY",
+        "level": 1.10, "size": 1.0, "status": "OPEN", "date": "2026-05-07T00:00:00",
+    }
+    f = normalize_capital_confirm(
+        payload, strategy_id="fx", pip_value_usd=10.0, fee_usd=1.23
+    )
+    assert f.fee_usd == pytest.approx(1.23)
+
+
+def test_alpaca_fill_zero_fee() -> None:
+    """Alpaca US equity is commission-free → stored fee is 0."""
+    from polaris.core.data.fill_normalizer import normalize_alpaca_fill
+
+    payload = {
+        "id": "a1",
+        "symbol": "AAPL",
+        "side": "buy",
+        "filled_avg_price": "190.0",
+        "filled_qty": "10",
+        "status": "filled",
+        "filled_at": "2026-05-07T00:00:00Z",
+    }
+    f = normalize_alpaca_fill(payload, strategy_id="x")
+    assert f.venue == "alpaca"
+    assert f.fee_usd == 0.0

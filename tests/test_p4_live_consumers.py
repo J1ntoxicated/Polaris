@@ -139,6 +139,43 @@ def test_last_prices_bar_only_when_no_tick(memdb: sqlite3.Connection) -> None:
     assert prices[inst] == pytest.approx(20.0)
 
 
+def test_last_prices_excludes_future_bar_prefers_fresh_tick(
+    memdb: sqlite3.Connection,
+) -> None:
+    # Capital REST bars can be +10h future-dated (AEST-naive parse bug). A
+    # future-dated bar (ts > now) must NOT be the MAX(ts) price source — the
+    # fresh WS quote_tick is the unambiguous current price.
+    inst = "capital:EURUSD"
+    now = int(time.time())
+    _seed_bar(memdb, inst, close=1.10, ts=now + 36000)  # +10h FUTURE bar
+    _seed_tick(memdb, inst, mid=1.20, ts=now - 2)  # fresh WS tick
+    prices = _last_prices(memdb)
+    assert prices[inst] == pytest.approx(1.20)  # fresh quote wins, future bar excluded
+
+
+def test_last_prices_normal_bar_fallback_when_no_tick(
+    memdb: sqlite3.Connection,
+) -> None:
+    # A normal (past) bar is still the fallback when there is no fresh quote.
+    inst = "capital:GBPUSD"
+    now = int(time.time())
+    _seed_bar(memdb, inst, close=1.30, ts=now - 30)  # normal past bar
+    prices = _last_prices(memdb)
+    assert prices[inst] == pytest.approx(1.30)
+
+
+def test_last_prices_future_bar_excluded_no_tick(
+    memdb: sqlite3.Connection,
+) -> None:
+    # A future-dated bar with NO fresh quote → excluded entirely (no price), so
+    # the dashboard never shows a +10h-stamped future bar as "current".
+    inst = "capital:USDJPY"
+    now = int(time.time())
+    _seed_bar(memdb, inst, close=150.0, ts=now + 36000)  # +10h FUTURE bar only
+    prices = _last_prices(memdb)
+    assert inst not in prices
+
+
 # ---------------------------------------------------------------------------
 # #2 exit — load_active_position_rows uses fresh live_px else bar close
 # ---------------------------------------------------------------------------

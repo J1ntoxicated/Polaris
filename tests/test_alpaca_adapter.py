@@ -82,6 +82,23 @@ def test_resolve_credentials_falls_back_to_archive_when_active_empty(
     assert secret == "ARC_S"
 
 
+def test_resolve_credentials_archive_only_active_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Production-exact: ``.env`` carries ONLY ``ARCHIVE_ALPACA_PAPER_*`` (the
+    # active ``ALPACA_PAPER_*`` vars are absent entirely, not just empty). The
+    # WS gate must still resolve creds so the Alpaca quote WS spawns — this is
+    # why the fresh DB eventually gets alpaca quote_ticks (the resolution is
+    # robust; 0 ticks at restart is a WS-warmup timing artifact, not a gate bug).
+    monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_PAPER_SECRET", raising=False)
+    monkeypatch.setenv("ARCHIVE_ALPACA_PAPER_API_KEY", "ARC_K")
+    monkeypatch.setenv("ARCHIVE_ALPACA_PAPER_SECRET", "ARC_S")
+    key, secret = resolve_alpaca_credentials()
+    assert key == "ARC_K"
+    assert secret == "ARC_S"
+
+
 def test_adapter_refuses_live_base_url() -> None:
     """DEMO/PAPER ONLY — a live trade base must be refused (double safety)."""
     with pytest.raises(ValueError):

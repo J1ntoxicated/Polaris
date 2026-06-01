@@ -17,11 +17,29 @@ Spec: ``vault/50_research/debates/2026-05-10_topic_a_lifecycle_fix.md``
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
 import sqlite3
+from collections.abc import Awaitable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Protocol
 
 from polaris.scripts._smoke_fills import SimulatedTrade
 
-__all__ = ["hydrate_open_positions"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["hydrate_open_positions", "reconcile_venue_positions"]
+
+RECONCILE_STRATEGY_ID = "_reconcile_import"
+
+
+class _AlpacaLike(Protocol):
+    async def fetch_positions(self) -> list[dict[str, Any]]: ...
+
+
+class _CapitalLike(Protocol):
+    async def list_positions(self) -> dict[str, Any]: ...
 
 
 def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
@@ -85,4 +103,223 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
             base_qty=float(r[10] or 0.0),
         )
         out.append(trade)
+    return out
+
+
+def _run_coro[T](coro: Awaitable[T]) -> T:
+    """Drive an adapter coroutine to completion from sync code.
+
+    ``reconcile_venue_positions`` is sync (mirrors ``hydrate_open_positions``)
+    but the venue adapters are async. When called from inside a running event
+    loop (production paper loop) we cannot ``asyncio.run`` directly, so the
+    coroutine is run in a dedicated worker thread with its own loop. With no
+    running loop (tests) the same path works.
+    """
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result()  # type: ignore[arg-type]
+
+
+def _existing_keys(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Set of ``(venue, symbol)`` already tracked as OPEN in the DB."""
+    rows = conn.execute(
+        "SELECT venue, symbol FROM positions WHERE status = 'open'"
+    ).fetchall()
+    return {(str(r[0]), str(r[1])) for r in rows}
+
+
+def _import_one(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    side: str,
+    mark: float,
+    base_qty: float,
+    now_ts: int,
+    deal_id: str | None,
+) -> SimulatedTrade | None:
+    """Persist one reconcile-import position + synthetic entry fill at mark.
+
+    entry_price == current mark, fee_usd == 0, NO fabricated cost basis ⇒
+    unrealized PnL starts ~0. Returns the ``SimulatedTrade`` (hydrate shape)
+    or ``None`` if the venue payload is unusable (non-positive mark / qty).
+    """
+    if mark <= 0.0 or base_qty <= 0.0:
+        logger.warning(
+            "[reconcile] skip %s:%s — non-positive mark=%s qty=%s",
+            venue, symbol, mark, base_qty,
+        )
+        return None
+    notional_usd = base_qty * mark
+    position_id = f"reconcile_{venue}_{symbol}_{now_ts}"
+    fill_id = f"{position_id}:open"
+    instrument_id = f"{venue}:{symbol}"
+    fill_side = "buy" if side == "long" else "sell"
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR REPLACE INTO positions "
+            "(position_id, venue, symbol, underlying_group_id, signal_id, "
+            " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
+            " status, opened_ts, swap_count) "
+            "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'open', ?, 0)",
+            (
+                position_id, venue, symbol, position_id,
+                RECONCILE_STRATEGY_ID, RECONCILE_STRATEGY_ID,
+                RECONCILE_STRATEGY_ID, side, base_qty, now_ts,
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO fills "
+            "(fill_id, venue, instrument_id, strategy_id, side, size_usd, "
+            " fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+            " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, ?, ?, ?, 0.0, 0, ?, ?, "
+            "'filled')",
+            (
+                fill_id, venue, instrument_id, RECONCILE_STRATEGY_ID, fill_side,
+                notional_usd, mark, now_ts * 1000, deal_id or "",
+                position_id, base_qty, notional_usd,
+            ),
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        logger.exception(
+            "[reconcile] import failed for %s:%s — left untracked", venue, symbol
+        )
+        return None
+    logger.info(
+        "[reconcile] imported %s:%s side=%s qty=%.6f mark=%.6f notional=%.2f "
+        "(entry=mark, PnL~0)",
+        venue, symbol, side, base_qty, mark, notional_usd,
+    )
+    return SimulatedTrade(
+        signal_id=position_id,
+        venue=venue,
+        symbol=symbol,
+        strategy_id=RECONCILE_STRATEGY_ID,
+        side=side,
+        entry_price=mark,
+        notional_usd=notional_usd,
+        open_ts=now_ts,
+        position_id=position_id,
+        venue_order_id=deal_id,
+        deal_id=deal_id if venue == "capital" else None,
+        base_qty=base_qty,
+    )
+
+
+def _reconcile_alpaca(
+    conn: sqlite3.Connection,
+    adapter: _AlpacaLike,
+    existing: set[tuple[str, str]],
+    now_ts: int,
+) -> list[SimulatedTrade]:
+    out: list[SimulatedTrade] = []
+    positions = _run_coro(adapter.fetch_positions())
+    for pos in positions or []:
+        symbol = str(pos.get("symbol") or "")
+        if not symbol or ("alpaca", symbol) in existing:
+            continue
+        # current mark: prefer current_price, else market_value/qty.
+        qty = abs(_f(pos.get("qty")))
+        mark = _f(pos.get("current_price"))
+        if mark <= 0.0:
+            mv = _f(pos.get("market_value"))
+            mark = (mv / qty) if qty > 0.0 else 0.0
+        side = "short" if str(pos.get("side") or "long").lower() == "short" else "long"
+        trade = _import_one(
+            conn, venue="alpaca", symbol=symbol, side=side, mark=mark,
+            base_qty=qty, now_ts=now_ts, deal_id=None,
+        )
+        if trade is not None:
+            existing.add(("alpaca", symbol))
+            out.append(trade)
+    return out
+
+
+def _reconcile_capital(
+    conn: sqlite3.Connection,
+    adapter: _CapitalLike,
+    existing: set[tuple[str, str]],
+    now_ts: int,
+) -> list[SimulatedTrade]:
+    out: list[SimulatedTrade] = []
+    body = _run_coro(adapter.list_positions())
+    for entry in body.get("positions", []) or []:
+        pos = entry.get("position", {}) or {}
+        market = entry.get("market", {}) or {}
+        symbol = str(market.get("epic") or "")
+        if not symbol or ("capital", symbol) in existing:
+            continue
+        direction = str(pos.get("direction") or "BUY").upper()
+        side = "short" if direction == "SELL" else "long"
+        base_qty = abs(_f(pos.get("size")))
+        # current mark = mid(bid, offer); fall back to position level.
+        bid = _f(market.get("bid"))
+        offer = _f(market.get("offer"))
+        mark = (bid + offer) / 2.0 if bid > 0.0 and offer > 0.0 else _f(pos.get("level"))
+        deal_id = str(pos.get("dealId")) if pos.get("dealId") else None
+        trade = _import_one(
+            conn, venue="capital", symbol=symbol, side=side, mark=mark,
+            base_qty=base_qty, now_ts=now_ts, deal_id=deal_id,
+        )
+        if trade is not None:
+            existing.add(("capital", symbol))
+            out.append(trade)
+    return out
+
+
+def _f(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def reconcile_venue_positions(
+    conn: sqlite3.Connection,
+    *,
+    okx_adapter: Any | None,
+    capital_adapter: _CapitalLike | None,
+    alpaca_adapter: _AlpacaLike | None,
+    now_ts: int,
+    import_okx_spot: bool = False,
+) -> list[SimulatedTrade]:
+    """Import live venue positions NOT yet tracked in the DB (startup blind-spot).
+
+    After a fresh-DB reset the bot starts FLAT while the real venues still hold
+    positions (e.g. Alpaca AAVEUSD/INTC/ORCL/SPCE ~$44k). ``hydrate`` only reads
+    the DB, so those live holdings are invisible to the exit engine. This pass
+    fetches live positions and, for any ``(venue, symbol)`` not already OPEN in
+    the DB, INSERTs a ``status='open'`` position row + a synthetic ENTRY fill at
+    the **current mark** (``entry_price = current price`` ⇒ unrealized PnL starts
+    ~0; ``fee_usd = 0``; NO fabricated cost basis). ``strategy_id`` is
+    ``_reconcile_import`` so the position is managed by the exit engine normally.
+
+    OKX SPOT dust is SKIPPED by default (``import_okx_spot=False``) — a SPOT
+    wallet balance is fungible cash, not a discrete entry/exit-managed position.
+
+    Returns the imported ``SimulatedTrade`` list (same shape as ``hydrate``) so
+    the caller can ``state.open_trades.extend(...)``. ``None`` adapters are
+    no-ops; a venue fetch failure is logged and skipped (flow_not_block) without
+    aborting the other venues.
+    """
+    existing = _existing_keys(conn)
+    out: list[SimulatedTrade] = []
+    if alpaca_adapter is not None:
+        try:
+            out.extend(_reconcile_alpaca(conn, alpaca_adapter, existing, now_ts))
+        except Exception:  # noqa: BLE001
+            logger.exception("[reconcile] Alpaca fetch/import failed — skipped")
+    if capital_adapter is not None:
+        try:
+            out.extend(_reconcile_capital(conn, capital_adapter, existing, now_ts))
+        except Exception:  # noqa: BLE001
+            logger.exception("[reconcile] Capital fetch/import failed — skipped")
+    if import_okx_spot and okx_adapter is not None:
+        logger.info("[reconcile] import_okx_spot=True is not implemented — SPOT "
+                    "dust is fungible wallet balance, skipped")
     return out

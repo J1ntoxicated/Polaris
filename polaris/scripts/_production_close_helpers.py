@@ -15,12 +15,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.circuit_breaker import FAULT_EXCEPTION, record_fault
 from polaris.core.live_recalc.excursion import compute_excursion_r
+from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 
 if TYPE_CHECKING:
     from polaris.scripts._production_state import ProdLoopState
@@ -76,13 +78,16 @@ def real_pnl_r_from_fills(
     entry_price = float(row[0])
     size_usd = float(row[1])
     trade.entry_price = entry_price
+    # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit mark
+    # and ATR window are derived from real recent data, never a +10h ghost bar.
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     bar_rows = conn.execute(
         """
         SELECT close, high, low FROM bars
-        WHERE instrument_id = ? AND bar_interval = '1m'
+        WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
         ORDER BY ts DESC LIMIT 14
         """,
-        (f"{trade.venue}:{trade.symbol}",),
+        (f"{trade.venue}:{trade.symbol}", ts_upper),
     ).fetchall()
     # P1-6: an override exit price must drive pnl_r/pnl_usd even when there is
     # no bar history (the real close already gives us the true exit level).
@@ -147,13 +152,16 @@ def _close_excursion_r(
         entry_price = float(row[0])
     if entry_price <= 0.0:
         return (0.0, 0.0)
+    # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit mark
+    # and ATR window are derived from real recent data, never a +10h ghost bar.
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     bar_rows = conn.execute(
         """
         SELECT close, high, low FROM bars
-        WHERE instrument_id = ? AND bar_interval = '1m'
+        WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
         ORDER BY ts DESC LIMIT 14
         """,
-        (f"{trade.venue}:{trade.symbol}",),
+        (f"{trade.venue}:{trade.symbol}", ts_upper),
     ).fetchall()
     atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
     # Read tracked extremes; fall back to entry/exit bounds when the tick loop
@@ -188,12 +196,14 @@ def _latest_bar_close(
     """Latest 1m bar close for ``venue:symbol`` (FIX A fresh close-split mark).
 
     Returns ``None`` when there is no bar so the caller falls back to the entry
-    price. Read-only; never raises into the close path.
+    price. Read-only; never raises into the close path. FUTURE-dated bars (stale
+    +10h Capital) are excluded so the close-split mark is a real recent close.
     """
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     row = conn.execute(
         "SELECT close FROM bars WHERE instrument_id = ? AND bar_interval = '1m' "
-        "ORDER BY ts DESC LIMIT 1",
-        (f"{venue}:{symbol}",),
+        "AND ts <= ? ORDER BY ts DESC LIMIT 1",
+        (f"{venue}:{symbol}", ts_upper),
     ).fetchone()
     if row is None or row[0] is None:
         return None

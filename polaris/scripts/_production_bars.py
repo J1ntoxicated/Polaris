@@ -26,6 +26,15 @@ from polaris.venues.okx.adapter import fetch_okx_bars
 
 logger = logging.getLogger(__name__)
 
+# FIX 1/2 — trading-path FUTURE-dated bar guard. The Capital REST ts source-fix
+# only corrects NEW bars; the live DB still holds ~5,793 stale +10h FUTURE-dated
+# Capital bars (the AEST-naive snapshotTime parse). Every trading-path bar read
+# (strategy/regime canvas, exit close-mark, cost-R ATR window) bounds ts at
+# ``now + BAR_TS_CLOCK_SKEW_SLACK_SEC`` so a +10h bar is never the "most recent"
+# canvas. Small slack absorbs legitimate clock skew (a just-closed bar a few
+# seconds ahead stays visible). Mirrors the dashboard ``_last_prices`` guard.
+BAR_TS_CLOCK_SKEW_SLACK_SEC = 120
+
 # F10 — Strategy timeframe → venue resolution + cadence (sec).
 # OKX `bar` query parameter accepts the canonical token directly. Capital
 # `/prices` requires a textual resolution token (MINUTE / MINUTE_5 / ...).
@@ -423,19 +432,24 @@ def read_recent_bars(
     bar_interval: str = "1m",
     limit: int = 240,
 ) -> list[Bar]:
-    """Read the most recent ``limit`` bars from SQLite (newest last)."""
+    """Read the most recent ``limit`` bars from SQLite (newest last).
+
+    FUTURE-dated bars (``ts > now + BAR_TS_CLOCK_SKEW_SLACK_SEC``) are excluded so
+    a stale +10h Capital bar is never returned as the most-recent canvas.
+    """
     instrument_id = f"{venue}:{symbol}"
+    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     rows = conn.execute(
         """
         SELECT instrument_id, underlying_group_id, venue, symbol, bar_interval,
                ts, open, high, low, close, volume, notional_usd, trade_count,
                vwap, bid_close, ask_close, spread_bps_close, source
         FROM bars
-        WHERE instrument_id = ? AND bar_interval = ?
+        WHERE instrument_id = ? AND bar_interval = ? AND ts <= ?
         ORDER BY ts DESC
         LIMIT ?
         """,
-        (instrument_id, bar_interval, int(limit)),
+        (instrument_id, bar_interval, ts_upper, int(limit)),
     ).fetchall()
     bars = [
         Bar(

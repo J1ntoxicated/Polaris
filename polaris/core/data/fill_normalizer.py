@@ -30,7 +30,10 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any, Final, Literal
+
+from polaris.core.economics.fees import real_fee_usd
 
 __all__ = [
     "Fill",
@@ -97,9 +100,6 @@ def normalize_okx_fill(
     fill_sz = _safe_float(payload.get("accFillSz"))
     if fill_sz <= 0.0:
         fill_sz = _safe_float(payload.get("fillSz"))
-    fee = abs(_safe_float(payload.get("fee")))
-    fee_ccy = str(payload.get("feeCcy") or "")
-    fee_usd = fee if fee_ccy.upper() in ("USDT", "USD", "USDC") else fee * avg_px
     # OKX SPOT accFillSz/fillSz is ALWAYS the filled BASE-ccy quantity — even
     # when the *request* sz was quote (tgtCcy=quote_ccy, a $-notional market
     # buy). Only the request sz is quote; the fill qty is base. The prior
@@ -108,6 +108,14 @@ def normalize_okx_fill(
     # recorded as $0.62, under-tracking the position and orphaning the rest).
     base_qty = fill_sz
     quote_qty = fill_sz * avg_px
+    # fee_usd is the REAL OKX taker fee (10 bps of notional) — NOT the raw demo
+    # 'fee' the venue payload reports. OKX demo bills a punitive 70 bps; storing
+    # that drained edge-validation (NIG posterior in cost_adjusted_pnl_r) on 7x
+    # cost. The whole system measures REAL-venue viability via real_fee_usd
+    # (replay gate, dashboard real_fee_total), so the persisted per-fill fee is
+    # made consistent here. The demo charge is recomputable from notional via
+    # fees.demo_fee_usd(venue, size_usd) where the demo-drain curve is shown.
+    fee_usd = real_fee_usd("okx", notional_usd=quote_qty)
     slippage_bps = 0.0
     if expected_price is not None and expected_price > 0.0 and avg_px > 0.0:
         slippage_bps = abs(avg_px - expected_price) / expected_price * 10_000.0
@@ -141,7 +149,7 @@ def normalize_capital_confirm(
     strategy_id: str,
     pip_value_usd: float,
     expected_price: float | None = None,
-    fee_usd: float = 0.0,
+    fee_usd: float | None = None,
     leverage: float = 1.0,
 ) -> Fill:
     """Convert a Capital ``/confirms/{ref}`` payload into a Fill.
@@ -152,6 +160,11 @@ def normalize_capital_confirm(
     for backwards compatibility with the smoke loop's deterministic stub —
     real-venue paths should pass the per-epic leverage from
     :class:`CapitalMarketConstraint`).
+
+    ``fee_usd`` defaults to the REAL Capital cost proxy (3 bps of the gross
+    notional via :func:`fees.real_fee_usd`) — Capital demo reports ``fee=0``, so
+    the stored per-fill fee mirrors the same real-venue cost the rest of the
+    system measures. Pass an explicit value to override.
     """
     status = str(payload.get("status") or payload.get("dealStatus") or "").upper()
     if status not in ("OPEN", "CLOSED", "ACCEPTED"):
@@ -168,6 +181,11 @@ def normalize_capital_confirm(
     pip = pip_value_usd if pip_value_usd > 0.0 else 1.0
     lev = leverage if leverage > 0.0 else 1.0
     size_usd = size * pip * lev
+    # Capital demo reports fee=0 → store the REAL 3 bps proxy on the gross
+    # notional (consistent with OKX storing the real taker fee). Explicit
+    # override honored.
+    if fee_usd is None:
+        fee_usd = real_fee_usd("capital", notional_usd=size_usd)
     slippage_bps = 0.0
     if expected_price is not None and expected_price > 0.0:
         slippage_bps = abs(level - expected_price) / expected_price * 10_000.0
@@ -198,12 +216,12 @@ def _capital_ts_ms(value: Any) -> int:
         # Capital sometimes sends ms ts already.
         return int(value if value > 1e12 else value * 1000)
     if isinstance(value, str):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return int(dt.timestamp() * 1000)
         except ValueError:
             return int(time.time() * 1000)

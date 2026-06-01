@@ -13,7 +13,7 @@ import sqlite3
 import time
 from typing import Any, Final
 
-from polaris.core.economics.fees import real_fee_usd
+from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
 from polaris.core.learners.posterior import edge_verdict
 
 # E2 IA-rebuild tab queries live in ``snapshot_e2`` to keep this module within
@@ -201,17 +201,18 @@ def _recent_closed_trades(
     positions share the same ``(venue, inst, strat)`` bucket.
 
     E2 display additions (read-only): each closed trade also carries its
-    ``fee_usd`` (the stored demo close fee), ``real_fee_usd`` (the SAME close
-    notional re-priced at the REAL venue schedule via ``economics.fees``),
-    ``pnl_pct`` (close pnl as a % of entry notional), and a best-effort
-    ``regime`` label (the CURRENT regime_state for the venue, via
-    ``regime_lookup`` keyed on (venue, symbol) → falls back to "" when absent).
+    ``fee_usd`` (the DEMO close fee — 70 bps OKX sandbox, recomputed from the
+    close notional), ``real_fee_usd`` (the SAME close notional re-priced at the
+    REAL venue schedule via ``economics.fees``), ``pnl_pct`` (close pnl as a % of
+    entry notional), and a best-effort ``regime`` label (the CURRENT
+    regime_state for the venue, via ``regime_lookup`` keyed on (venue, symbol) →
+    falls back to "" when absent).
     """
     rows = _safe_query(
         conn,
         """SELECT venue, instrument_id, strategy_id, side, fill_price,
                   pnl_usd, ts_ms, base_qty, size_usd, is_close,
-                  contribution_id, fee_usd
+                  contribution_id
            FROM fills
            ORDER BY ts_ms ASC""",
     )
@@ -231,7 +232,6 @@ def _recent_closed_trades(
         size_usd = float(r[8] or 0.0)
         is_close = bool(r[9])
         contrib = r[10]
-        fee = float(r[11] or 0.0)
         contrib_str = str(contrib) if contrib else None
         bucket = (venue, inst, strat)
         if not is_close:
@@ -278,10 +278,13 @@ def _recent_closed_trades(
         else:
             reason = "FLAT"
         symbol = _symbol_from_inst(inst)
-        # E2 display columns (read-only). real_fee = close notional re-priced
-        # at the real venue schedule; pnl_pct = close pnl / entry notional;
-        # regime = current regime_state for (venue, symbol) when supplied.
+        # E2 display columns (read-only). Both fees are recomputed from the
+        # close notional via the centralized schedule: demo_fee = 70 bps OKX
+        # sandbox drain (the stored fills.fee_usd now holds the REAL fee, so the
+        # demo column is recomputed), real_fee = real venue schedule. pnl_pct =
+        # close pnl / entry notional; regime = current regime_state when supplied.
         real_fee = real_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
+        demo_fee = demo_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
         entry_notional = (entry_px or 0.0) * abs(qty)
         pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
         regime = (
@@ -302,7 +305,7 @@ def _recent_closed_trades(
                 exit_reason=reason,
                 regime=regime,
                 pnl_pct=pnl_pct,
-                fee_usd=fee,
+                fee_usd=demo_fee,
                 real_fee_usd=real_fee,
             )
         )

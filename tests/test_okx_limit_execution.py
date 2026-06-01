@@ -294,7 +294,7 @@ async def test_market_entry_over_cap_splits_into_children() -> None:
     assert attempt.fill.base_qty == pytest.approx(146.8, rel=1e-6)
     # size-weighted avg price (uniform here) + summed fee.
     assert attempt.fill.fill_price == pytest.approx(10.0, rel=1e-6)
-    assert attempt.fill.fee_usd == pytest.approx(0.04, rel=1e-6)  # 2 × 0.02
+    assert attempt.fill.fee_usd == pytest.approx(1.468, rel=1e-6)  # real 10bps of $1468
 
 
 @pytest.mark.asyncio

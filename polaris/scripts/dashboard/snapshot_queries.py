@@ -17,7 +17,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Final, NamedTuple
 
-from polaris.core.economics.fees import real_fee_usd
+from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
 from polaris.core.sizing.constants import (
     demo_starting_equity_capital,
     demo_starting_equity_okx,
@@ -233,12 +233,13 @@ def _build_dual_equity_curve(
 ) -> DualEquityCurve:
     """Build demo-actual + real-fee-net equity curves from one fills walk.
 
-    Mirrors ``_build_equity_curve`` exactly for the demo leg (same session
-    anchor, bucketing, base, and ``(pnl if close else 0) − fee`` per-fill delta)
-    so the demo curve is a non-regressing superset. The real leg substitutes the
-    stored ``fee_usd`` with ``real_fee_usd(venue, size_usd)`` on EVERY fill leg
-    (open + close both incur the venue fee). Read-only; trading behavior
-    unchanged.
+    Both legs RECOMPUTE the per-fill fee from the centralized schedule by
+    notional: the demo leg via ``demo_fee_usd(venue, size_usd)`` (the 70 bps OKX
+    sandbox drain) and the real leg via ``real_fee_usd(venue, size_usd)`` (the
+    go-live signal). The stored ``fills.fee_usd`` is no longer read here — it now
+    holds the REAL fee (fill_normalizer 2026-06-01), and the demo drain is a pure
+    function of notional, so recomputing keeps the demo curve meaningful without
+    a stored-demo-fee column. Read-only; trading behavior unchanged.
     """
     session_start_ms = _session_start_ms(conn, now_s=now_s)
     session_start_s = session_start_ms // 1000
@@ -248,8 +249,7 @@ def _build_dual_equity_curve(
                   venue,
                   size_usd,
                   (CASE WHEN is_close = 1 THEN COALESCE(pnl_usd, 0.0) ELSE 0.0 END)
-                    AS gross,
-                  COALESCE(fee_usd, 0.0) AS demo_fee
+                    AS gross
            FROM fills
            WHERE ts_ms >= ?
            ORDER BY ts_ms ASC""",
@@ -284,7 +284,7 @@ def _build_dual_equity_curve(
             venue = str(next_fill[1] or "")
             size_usd = float(next_fill[2] or 0.0)
             gross = float(next_fill[3] or 0.0)
-            demo_fee = float(next_fill[4] or 0.0)
+            demo_fee = demo_fee_usd(venue, size_usd)
             real_fee = real_fee_usd(venue, size_usd)
             cum_demo += gross - demo_fee
             cum_real += gross - real_fee
@@ -345,8 +345,12 @@ def _daily_realised_pnl(
     rolling 24h window (Jin 2026-05-29). The ``daily_pnl_usd`` field name is
     kept for schema stability but now carries the session sum.
 
-    Net = Σ(close pnl_usd) − Σ(fee_usd over ALL fills) in-window. Fees on both
-    legs are real deductions (forensic 2026-05-29 P0 — were omitted).
+    Net = Σ(close pnl_usd) − Σ(fee_usd over ALL fills) in-window. ``fills.fee_usd``
+    now holds the REAL fee (fill_normalizer 2026-06-01), so this headline is
+    REAL-fee-net — aligned with the go-live viability signal; the 70 bps demo
+    drain is shown separately by the dual-equity ``equity_demo``/``demo_fee_total``.
+    The per-stream ``net_pnl_usd`` rollup uses the IDENTICAL formula so the
+    reconciliation invariant (Σ streams == this total) holds.
     """
     lookback_ms = _session_start_ms(conn, now_s=now_s)
     rows = _safe_query(
@@ -387,11 +391,20 @@ def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
     # MAX(ts) subquery resolves per-group via idx_bars_instrument_ts
     # (instrument_id, ts), and the outer JOIN seeks each (instrument_id, ts) row
     # by the same index → milliseconds.
+    # Exclude FUTURE-dated bars (ts > now): Capital REST bars can be +10h ahead
+    # (the AEST-naive snapshotTime parse). A future bar must never be the
+    # MAX(ts) "current price" — it makes the dashboard look stale and pollutes
+    # the price source. The fresh WS quote overlay below is the unambiguous
+    # current price when present (the venue ts fix removes the +10h at source;
+    # this guard is the dashboard-side belt-and-suspenders).
+    now_s = _now_s()
     rows = _safe_query(
         conn,
         """SELECT b.instrument_id, b.close FROM bars b
-           JOIN (SELECT instrument_id, MAX(ts) AS mts FROM bars GROUP BY instrument_id) m
+           JOIN (SELECT instrument_id, MAX(ts) AS mts FROM bars
+                 WHERE ts <= ? GROUP BY instrument_id) m
              ON b.instrument_id = m.instrument_id AND b.ts = m.mts""",
+        (now_s,),
     )
     prices = {str(r[0]): float(r[1] or 0.0) for r in rows}
 

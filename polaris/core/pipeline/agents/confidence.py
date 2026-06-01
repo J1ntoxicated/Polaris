@@ -217,17 +217,16 @@ def confidence_summary(
     turnover = 0.0
     fee_drag_real_usd = 0.0
     fee_drag_demo_usd = 0.0
-    for venue, size_usd, fee_usd in conn.execute(
-        "SELECT venue, size_usd, fee_usd FROM fills"
-    ):
+    for venue, size_usd in conn.execute("SELECT venue, size_usd FROM fills"):
         v = str(venue or "")
         notional = abs(float(size_usd or 0.0))
         turnover += notional
         fee_drag_real_usd += real_fee_usd(v, notional)
-        # Demo drag = the fee the venue ACTUALLY stored (fall back to the demo
-        # schedule when a row carries no stored fee).
-        stored = float(fee_usd or 0.0)
-        fee_drag_demo_usd += stored if stored > 0.0 else demo_fee_usd(v, notional)
+        # Both drags recompute from the centralized schedule by notional. The
+        # stored fills.fee_usd now holds the REAL fee (fill_normalizer
+        # 2026-06-01), so the demo (70 bps OKX) drain is recomputed via
+        # demo_fee_usd rather than read from the column.
+        fee_drag_demo_usd += demo_fee_usd(v, notional)
 
     win_rate = (wins / n_closed * 100.0) if n_closed else 0.0
     profit_factor = (

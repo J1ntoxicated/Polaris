@@ -95,6 +95,29 @@ def test_capital_bar_parse_round_trip() -> None:
     assert bar.volume == 50.0
 
 
+def test_capital_bar_prefers_utc_field_no_aest_drift() -> None:
+    # Real Capital /prices rows carry BOTH a tz-naive account-local
+    # ``snapshotTime`` (AEST/UTC+10 on this account) AND a genuinely-UTC
+    # ``snapshotTimeUTC``. Verified live (2026-06-01): wall-clock 15:00 UTC →
+    # snapshotTime "2026-06-02T01:00:00" (+10h), snapshotTimeUTC
+    # "2026-06-01T15:00:00". Parsing must pick the UTC field so the bar ts is
+    # correct UTC (no +10h future drift that polluted MAX(ts)).
+    row = {
+        "snapshotTime": "2026-06-02T01:00:00",  # AEST-naive (+10h) — must NOT win
+        "snapshotTimeUTC": "2026-06-01T15:00:00",  # genuine UTC — must win
+        "openPrice": {"bid": 1.0, "ask": 1.2},
+        "highPrice": {"bid": 1.0, "ask": 1.2},
+        "lowPrice": {"bid": 1.0, "ask": 1.2},
+        "closePrice": {"bid": 1.0, "ask": 1.2},
+    }
+    bar = capital_price_row_to_bar(
+        row, epic="EURUSD", bar_interval="1m", underlying_group_id="forex:EURUSD"
+    )
+    assert bar is not None
+    # 2026-06-01T15:00:00Z == epoch 1780326000 (NOT 1780362000 = +10h)
+    assert bar.ts == 1780326000
+
+
 def test_capital_bar_missing_close_returns_none() -> None:
     row = {
         "snapshotTimeUTC": "2026-05-07T03:00:00",

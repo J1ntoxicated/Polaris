@@ -73,6 +73,7 @@ __all__ = [
     "get_focus_targets",
     "ingest_bars_for_focus",
     "ingest_bars_per_timeframe",
+    "open_position_targets",
     "read_active_universe",
     "read_recent_bars",
     "refresh_alpaca_universe_once",
@@ -313,37 +314,96 @@ def refresh_focus_watchlist(
     return len(focus)
 
 
+def open_position_targets(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str, str, str]]:
+    """Read every OPEN position as a focus-shaped ``(venue, symbol, asset_class,
+    group_id)`` tuple, across ALL venues (OKX / Capital / Alpaca).
+
+    FIX 2/2 — held-position visibility/precision. A position whose symbol is NOT
+    in the dynamic focus still needs LIVE WS quotes + fresh bars (dashboard live
+    price + exit precision). ``asset_class`` is resolved via a LEFT JOIN to
+    ``universe`` (the focus source) and falls back to the ``underlying_group_id``
+    prefix (e.g. ``crypto:HYPE`` → ``crypto``) when the held name has aged out of
+    the active universe. De-duplicated on ``(venue, symbol)`` so multiple
+    positions on one name yield one target. ADD-only (flow_not_block): this never
+    blocks an entry, it only forces a held name to stay watched while held.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.venue, p.symbol, u.asset_class, p.underlying_group_id
+        FROM positions p
+        LEFT JOIN universe u
+          ON p.venue = u.venue AND p.symbol = u.symbol
+        WHERE p.status NOT IN ('closed', 'cancelled', 'reconciled')
+        """
+    ).fetchall()
+    out: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        venue, symbol = str(r[0]), str(r[1])
+        if (venue, symbol) in seen:
+            continue
+        seen.add((venue, symbol))
+        group_id = str(r[3] or "")
+        asset_class = r[2]
+        if not asset_class:
+            # Fall back to the group_id prefix (``crypto:HYPE`` → ``crypto``);
+            # default ``crypto`` mirrors get_focus_targets when neither is known.
+            asset_class = group_id.split(":", 1)[0] if ":" in group_id else "crypto"
+        out.append((venue, symbol, str(asset_class), group_id))
+    return out
+
+
 def get_focus_targets(
     conn: sqlite3.Connection, *, cycle_ts: int | None = None, max_n: int = 30
 ) -> list[tuple[str, str, str, str]]:
     """Read the latest focus cycle as ``(venue, symbol, asset_class, group_id)``.
 
-    Returns up to ``max_n`` entries ordered by focus_rank ascending. Empty list
-    if no cycle has been computed yet (caller falls back to BTC seed).
+    Returns up to ``max_n`` dynamic-focus entries (ordered by focus_rank asc)
+    UNIONED with every OPEN position's symbol (:func:`open_position_targets`).
+    The held symbols are appended AFTER the dynamic picks and are NOT subject to
+    ``max_n`` — a held name can never fall off the watched/subscribed set while
+    its position is open (FIX 2/2: dashboard live price + exit precision). This
+    is the single seam both the bar ingest (``_run_tick``) and the WS
+    subscription (``_focus_by_venue``) read, so the union keeps held symbols
+    bar-ingested AND WS-subscribed for as long as they are held.
+
+    Empty dynamic focus + no open positions → empty list (caller falls back to
+    BTC seed). Union is ADD-only (flow_not_block): never blocks an entry.
     """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
+    focus: list[tuple[str, str, str, str]] = []
     row = conn.execute(
         "SELECT MAX(cycle_ts) FROM watchlist_focus WHERE cycle_ts <= ?", (ts,)
     ).fetchone()
-    if row is None or row[0] is None:
-        return []
-    latest_cycle = int(row[0])
-    rows = conn.execute(
-        """
-        SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
-        FROM watchlist_focus wf
-        LEFT JOIN universe u
-          ON wf.venue = u.venue AND wf.symbol = u.symbol
-        WHERE wf.cycle_ts = ?
-        ORDER BY wf.focus_rank ASC
-        LIMIT ?
-        """,
-        (latest_cycle, int(max_n)),
-    ).fetchall()
-    return [
-        (str(r[0]), str(r[1]), str(r[2] or "crypto"), str(r[3] or ""))
-        for r in rows
-    ]
+    if row is not None and row[0] is not None:
+        latest_cycle = int(row[0])
+        rows = conn.execute(
+            """
+            SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
+            FROM watchlist_focus wf
+            LEFT JOIN universe u
+              ON wf.venue = u.venue AND wf.symbol = u.symbol
+            WHERE wf.cycle_ts = ?
+            ORDER BY wf.focus_rank ASC
+            LIMIT ?
+            """,
+            (latest_cycle, int(max_n)),
+        ).fetchall()
+        focus = [
+            (str(r[0]), str(r[1]), str(r[2] or "crypto"), str(r[3] or ""))
+            for r in rows
+        ]
+    # Force-seat held symbols (additive, not truncated by max_n). De-dup on
+    # (venue, symbol) so a held name already in the dynamic focus is not doubled.
+    seen = {(v, s) for v, s, _ac, _g in focus}
+    for target in open_position_targets(conn):
+        if (target[0], target[1]) in seen:
+            continue
+        seen.add((target[0], target[1]))
+        focus.append(target)
+    return focus
 
 
 

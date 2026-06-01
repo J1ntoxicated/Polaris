@@ -21,6 +21,7 @@ tags: [now, tier-0]
   4. **멀티소스 견고 백데이터 + 티커/테마별 차별화 테크니컬**: 바 단일소스·해상도 제각각(Alpaca 1D만)·Yahoo 등 미동원. 티커불문 동일 테크니컬 → 차별화 필요.
   5. **reconcile-import 재구현**(게이트오프 중): async-native fetch + entry=current-mark + exit-FSM init + Capital deal_id 포착.
   6. **모바일 대응 대시보드**(Jin: "모든 거 다 한 뒤").
+**🔶 마이너 라이브 follow-up(출혈X·루프아님, 다음세션)**: ① **Capital deal_id=None close 에러 산발**(fresh DB·reconcile off인데도 — Capital open이 deal_id 미포착→phantom close; Capital fills=0=실거래 아님). Capital open/close 라이프사이클 점검(open이 deal_id 저장하는지). ② **Alpaca WS 간헐**(startup focus=0이면 build_ws_clients가 Alpaca 클라이언트 미생성→focus 들어와도 못 살림; creds 있는 venue는 항상 클라이언트 생성하게). 둘 다 #2(Capital)·실시간(WS) foundation과 연결.
 **⚠️ 세션 반성**: 곁가지(수수료/슬리피지/회계 정밀도)에 매달려 본체(거래·실시간·edge)를 늦게 봄 → [[feedback_realtime_price_first_principle]]. 우선순위 = 거래발생·실시간·edge 먼저.
 **(↓ 이전 핸드오버)**
 **🔴 HANDOVER 2026-06-01-night3 (Jin steering. **봇 graceful 재기동: PID=`data/paper/production.pid`=45047**, db=polaris_live.sqlite, log=`data/paper/production_p1_5_0601_dustfix.log`, 대시보드 :8770).**

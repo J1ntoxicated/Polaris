@@ -10,6 +10,10 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🔴 HANDOVER 2026-06-01-night3 (Jin steering. **봇 graceful 재기동: PID=`data/paper/production.pid`=6702**, db=polaris_live.sqlite, log=`data/paper/production_p1_5_0601_closefix.log`, 대시보드 :8770).**
+**🚨 P0 LIVE 인시던트 해결 (커밋 `ff9c997`)**: Jin 대시보드서 "-$2.5k인데 안 닫히는 포지션" 발견 → 포렌식: 52개 OKX 포지션(36 ALGO)에서 **엑싯 엔진은 매 틱 청산 판정(5326회)하는데 OKX 청산 *주문*이 51201("market order can't exceed 1000USDT")로 영구 거부** → 출혈 ~-$3.5k. 근본=**진입 경로엔 ≤1000 USDT 청크 분할이 있는데 청산 경로엔 없음**(부차: ETHW/FIL 51008 잔고부족 orphan). **Fix**=청산도 ≤1000 청크 분할+집계 + **fresh 1m-bar mark+하향버퍼**(0.10→900/child, appreciated 포지션 수렴 보장) + **부분청산=open 유지 reduced-qty**(미추적 노출 방지) + min-tail 병합 + 51008 잔고클램프(orphan-reconcile). 2-라운드 적대리뷰(R1 REQUEST_CHANGES→R2 GO). **라이브 검증**(graceful 재기동 6702): open **52→19**, ALGO **36→2**, **51201=0**, real closes 성공, clamp 작동, 부분경로 작동. 1689 green, ruff/mypy clean, behavior-0(진입 무변경), 거부키워드0, 9-stack 무접촉.
+**🔶 인시던트 follow-up (비차단, 측정/reconcile 계열)**: ① `[edge-validation] posterior pnl_r_net` 터무니없음(-210040 R; gross=-10/pnl_usd=-72인데; **측정전용·pre-existing·sizing 미게이팅**) ② 부분청산 pnl_usd 과대표기(텔레메트리 nit) ③ **ETHW/FIL 진짜 orphan(51008, 지갑에 없는 수량)** → 포지션 reconcile 필요(클램프가 None으로 graceful 처리중) ④ **per-symbol 오픈 상한 미작동**(ALGO 36개 쌓임) — 둘 다 추적.
+**(↓ 이전 핸드오버 — 참고용)**
 **🔴 HANDOVER 2026-06-01-night2 (Jin steering. P3 P0a KILL-스파이크 DONE+커밋 `d7cf7f3`. 봇 라이브 PID=`data/paper/production.pid`=34693, db=polaris_live.sqlite, 대시보드 :8770).**
 **① P0a 결과 = `VALIDATION_STARVED`** (build→적대리뷰[방법론 REJECT]→수정→재리뷰[APPROVE/APPROVE_WITH_NITS] 4-워크플로우). **핵심 발견**: 벤치마크 게이트 Tier-3(NIG LCB>0)가 thin OOS N에서 **구조적 통과불가** — positive control(강한 +0.2R·Sharpe2 edge가 *실제 가용 N*에서 게이트 통과?)이 N=53 < 필요 N≥69로 FAIL → **0-pass는 피처 고갈 아니라 검증 기아**. ⇒ 생성기 P2 보류는 맞지만 "피처 병목 증명" 아님; 진짜 병목 = **검증 N 부족**(debate "검증 굶음" 확증). 신규: `ReplayEngine(strategies=)` seam + `polaris/core/evolve/`(param_bounds·variants·registry·evaluator·positive_control) + `scripts/run_p0a_spike.py`·`_p0a_verdict.py`. 적대리뷰가 ttl_bars(replay precise-exit FSM 무효)+momentum_gain/gap_gain(sizing-only) 그리드 phantom·embargo purge 미강제·vacuous 테스트 7개 잡음→전부 수정. **1671 green**, ruff/mypy clean, behavior-0(게이트 무수정·라이브경로 byte-identical), 거부키워드 0, 9-stack 무접촉. SSOT=`.claude/plans/p3_p0a_kill_spike_2026-06-01.md`, 교훈=[[project_validation_starvation_positive_control]].
 **② 다음 순서(재확인)**: 데이터 누적(라이브 봇이 거래 쌓아 OOS N≥~69 도달) → **P0b**(fee/churn 켜기[entry_admission/anti-churn 이미 빌드]+exit recompute 배선[dead stub]+키퍼T0) → **P1**(alt-data→MarketView 전략가시 피처로 피처공간 *실제* 확장) 후 KILL-스파이크 재실행. 별도 발견: 게이트 NIG prior가 per-trade-R 스케일에 과확산(LCB 밴드가 표본std로 수렴) → 게이트 재보정은 **debate 대상**(게이트=라이브 go-live 공유, 함부로 수정 X). P0a follow(low·안전방향, 비차단): positive control per-cell화·honest_dsr run-wide deflation화.
@@ -175,4 +179,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-01 07:31 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-01 09:26 (paper=True, full_pipeline=True)

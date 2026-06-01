@@ -257,17 +257,15 @@ async def real_okx_close_fill(
       is skipped (never submitted → no 51020) and its base is absorbed; the
       splitter's min-tail fold means this only guards a degenerate dust tail.
 
-    FIX 2 (OKX 51008 insufficient-balance): the close ``base_qty`` is clamped to
-    ``min(base_qty, available)``. When available ~0 (a true orphan — qty
-    over-counted vs. wallet) the close returns a ``CloseOrphan`` sentinel
-    (DISTINCT from a bare ``None`` transient reject) + submits nothing → caller
-    marks ``status='reconciled'`` (NOT a throttle, no fabricated fill).
-
-    Double-sell bound: the FIX-2 clamp re-fetches the available base each tick
-    and clamps ``min(base_qty, available)``, so a position that was fully or
-    partially sold then retried can never oversell beyond what the wallet still
-    holds. Combined with the caller's partial-close reduced-qty bookkeeping
-    (FIX B), the double-sell window is bounded to a single in-flight child.
+    FIX 2 (OKX 51008): close ``base_qty`` clamps to ``min(base_qty, available)``.
+    A TRUE orphan is one whose ENTIRE closeable available can never fill one child
+    — ``available <= 0`` OR (fresh ``mark_price`` known AND
+    ``available * mark < MIN_OKX_NOTIONAL_USD``, un-sellable sub-min dust) — and
+    returns a ``CloseOrphan`` sentinel (DISTINCT from a transient ``None`` reject)
+    + submits nothing → caller marks ``status='reconciled'`` (NOT a throttle, no
+    fabricated fill). With ``mark_price`` None/<=0 only ``available <= 0`` applies
+    (no fabricated mark): a dust-positive available then clamps-and-sells (the
+    clamp re-fetches each tick so a retried partial never oversells).
     """
     if base_qty <= 0.0:
         return None
@@ -277,12 +275,14 @@ async def real_okx_close_fill(
     base_ccy = inst_id.split("-")[0]
     available = await _fetch_okx_available_base(adapter, base_ccy)
     if available is not None and available < base_qty:
-        # available ~0 → true orphan: CloseOrphan sentinel (vs transient None).
-        if available <= 0.0:
+        # True orphan: the ENTIRE closeable available can never fill one child —
+        # available<=0 OR (fresh mark known) sub-min dust. No fabricated mark.
+        _mk = mark_price or 0.0
+        if available <= 0.0 or (_mk > 0.0 and available * _mk < MIN_OKX_NOTIONAL_USD):
             logger.warning(
-                "[okx/close] %s base_qty=%.10f but available %s ~0 — orphan "
-                "(qty over-count); skip close, mark reconciled (not a throttle)",
-                inst_id, base_qty, base_ccy,
+                "[okx/close] %s base_qty=%.10f but available %s=%.10f un-sellable "
+                "(<=0 or <min notional) — orphan; skip close, mark reconciled",
+                inst_id, base_qty, base_ccy, available,
             )
             return CloseOrphan(available=available)
         logger.info(

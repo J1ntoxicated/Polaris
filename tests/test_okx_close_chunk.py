@@ -237,6 +237,47 @@ async def test_close_balance_unknown_skips_clamp() -> None:
     assert fill.base_qty == pytest.approx(146.8, rel=1e-9)
 
 
+@pytest.mark.asyncio
+async def test_close_dust_positive_below_min_notional_returns_orphan() -> None:
+    """A dust-POSITIVE available whose ENTIRE closeable notional is below the OKX
+    minimum sellable notional → CloseOrphan (NOT a dust clamp that drops every
+    sub-min child → None → endless retry). e.g. base_qty=5622 but available is
+    0.0000843 base @ mark 0.28 = 0.0000236 USD << MIN_OKX_NOTIONAL_USD."""
+    from polaris.scripts._smoke_real_roundtrip import (
+        MIN_OKX_NOTIONAL_USD,
+        CloseOrphan,
+    )
+
+    dust = 0.0000843
+    mark = 0.28
+    assert dust * mark < MIN_OKX_NOTIONAL_USD  # premise: un-sellable dust
+    adapter = _CloseSplitOKX(price=mark, avail=dust)
+    out = await real_okx_close_fill(
+        adapter, inst_id="ETHW-USDT", base_qty=5622.0,
+        strategy_id="tsmom", mark_price=mark, poll_delay_sec=0.0,
+    )
+    assert isinstance(out, CloseOrphan)
+    assert out.available == pytest.approx(dust)
+    assert adapter.sell_base_qtys == []  # nothing submitted (was: dust clamp → None)
+
+
+@pytest.mark.asyncio
+async def test_close_dust_positive_unknown_mark_falls_back_to_clamp() -> None:
+    """A dust-POSITIVE available with NO fresh mark (mark_price None) must NOT
+    fabricate a mark to test the min-notional → falls back to the available<=0
+    test only (not an orphan): the existing clamp-and-sell path runs (single
+    child, no split since mark unknown)."""
+    dust = 0.0000843
+    adapter = _CloseSplitOKX(price=0.28, avail=dust)  # price irrelevant: no mark
+    out = await real_okx_close_fill(
+        adapter, inst_id="ETHW-USDT", base_qty=5622.0,
+        strategy_id="tsmom", poll_delay_sec=0.0,  # mark_price omitted (None)
+    )
+    # Not an orphan: clamps to the dust available and submits a single child.
+    assert isinstance(out, Fill)
+    assert adapter.sell_base_qtys == pytest.approx([dust])
+
+
 # ---------------------------------------------------------------------------
 # FIX A — fresh mark + downward cap buffer (risen-price closes)
 # ---------------------------------------------------------------------------

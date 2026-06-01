@@ -402,7 +402,13 @@ async def run_production_paper_loop(
     # imports any NOT already tracked as status='open' + a synthetic entry fill
     # at the CURRENT mark (PnL~0). Runs AFTER adapters exist; OKX SPOT dust is
     # fungible wallet balance, skipped by default (import_okx_spot=False).
-    if real_roundtrip:
+    # Gated OFF by default (2026-06-01): the venue reconcile-import had 3 live
+    # bugs — _reconcile_capital crash (sync _run_coro vs running loop), imported
+    # positions insta-closing (entry mark + uninitialised exit FSM), and a
+    # Capital deal_id=None close-error loop. Re-enable only after those are fixed
+    # (POLARIS_RECONCILE_VENUE_IMPORT=1). Until then the bot starts flat and
+    # leaves venue holdings unmanaged (benign on DEMO) — stable trading first.
+    if real_roundtrip and os.environ.get("POLARIS_RECONCILE_VENUE_IMPORT") == "1":
         capital_adapter = (
             CapitalAdapter(capital_session) if capital_session is not None else None
         )

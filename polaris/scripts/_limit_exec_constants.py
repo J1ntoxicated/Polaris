@@ -23,6 +23,7 @@ __all__ = [
     "LIMIT_FILL_WAIT_SEC",
     "LIMIT_POLL_DELAY_SEC",
     "OKX_BALANCE_CLAMP_BUFFER_FRAC",
+    "OKX_CLOSE_CAP_BUFFER_FRAC",
     "OKX_MAX_MARKET_NOTIONAL_USDT",
     "STRONG_SIGNAL_STRENGTH",
     "limit_fill_wait_sec",
@@ -37,6 +38,17 @@ __all__ = [
 # is a bug fix, NOT a sizing-parameter change (the sized notional is unchanged;
 # it is delivered in <=1000 USDT chunks).
 OKX_MAX_MARKET_NOTIONAL_USDT: Final[float] = 1_000.0
+
+# CLOSE-LEG ONLY downward buffer on the 1000-USDT cap. The venue evaluates the
+# 51201 cap on child_base × the LIVE market price at submit time, not the mark
+# we sized the child off. An appreciated long whose price drifts up between
+# split-time and venue-eval can tip a cap-sized child over 1000 → 51201 → the
+# first child Nones → the close never converges (recomputes the same oversized
+# chunks every tick). Sizing each full close child off cap × (1 - this frac)
+# leaves headroom so modest upward drift cannot breach the hard cap. Entry is
+# unbuffered (it sends quote-ccy notional the venue funds exactly). This is a
+# fill-ENABLING headroom (lets a risen-price close actually execute), NOT a cut.
+OKX_CLOSE_CAP_BUFFER_FRAC: Final[float] = 0.10
 
 # When clamping the OKX entry to the live available USDT balance (reject 51008
 # "insufficient balance"), leave this fraction as headroom so OKX's own

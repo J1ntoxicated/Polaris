@@ -25,7 +25,6 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
 )
 from polaris.core.lineage import record_segment_close
-from polaris.core.live_recalc.excursion import compute_excursion_r
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
     _safe_record_meta_label,
@@ -33,6 +32,13 @@ from polaris.scripts._production_close_effects import (
     _safe_run_learners,
     _safe_update_cell_matrix,
     _safe_update_posterior,
+)
+from polaris.scripts._production_close_helpers import (
+    _CLOSE_FULL_FILL_EPS,
+    _close_excursion_r,
+    _latest_bar_close,
+    _persist_partial_close,
+    real_pnl_r_from_fills,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
@@ -48,158 +54,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-def real_pnl_r_from_fills(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade,
-    exit_price_override: float | None = None,
-) -> tuple[float, float, float]:
-    """Read entry fill + most recent bars; compute R-units from real bar drift.
-
-    Returns ``(pnl_r, pnl_usd, exit_price)``. When the bar history is too
-    short the R denominator falls back to ``entry_price × 0.5%`` so the
-    calculation is finite — but the magnitude reflects the *actual* close
-    drift, not a hard-coded sign.
-
-    ``exit_price_override`` (P1-6 venue-wire fix): when set (real-roundtrip
-    close), ``pnl_r`` / ``pnl_usd`` are computed against the **real exit fill
-    price** instead of the most recent bar close, using the same ATR
-    denominator. This keeps Layer 4/5 telemetry consistent with what was
-    actually traded — without it a loss exit could be logged as a win when
-    the seeded bars happened to trend the other way.
-
-    Day 8 codex P0 fix: matches the entry fill by ``contribution_id =
-    position_id`` so two trades on the same (strategy, instrument) can never
-    cross-price. Falls back to the legacy heuristic only when the trade has
-    no ``position_id`` set (legacy callers).
-    """
-    if trade.position_id:
-        row = conn.execute(
-            """
-            SELECT fill_price, size_usd FROM fills
-            WHERE contribution_id = ? AND is_close = 0
-            ORDER BY ts_ms ASC LIMIT 1
-            """,
-            (trade.position_id,),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT fill_price, size_usd FROM fills
-            WHERE strategy_id = ? AND instrument_id = ? AND is_close = 0
-            ORDER BY ts_ms DESC LIMIT 1
-            """,
-            (trade.strategy_id, f"{trade.venue}:{trade.symbol}"),
-        ).fetchone()
-    if row is None:
-        fallback_exit = exit_price_override if exit_price_override else trade.entry_price
-        return (0.0, 0.0, fallback_exit)
-    entry_price = float(row[0])
-    size_usd = float(row[1])
-    trade.entry_price = entry_price
-    bar_rows = conn.execute(
-        """
-        SELECT close, high, low FROM bars
-        WHERE instrument_id = ? AND bar_interval = '1m'
-        ORDER BY ts DESC LIMIT 14
-        """,
-        (f"{trade.venue}:{trade.symbol}",),
-    ).fetchall()
-    # P1-6: an override exit price must drive pnl_r/pnl_usd even when there is
-    # no bar history (the real close already gives us the true exit level).
-    if not bar_rows and exit_price_override is None:
-        return (0.0, 0.0, entry_price)
-    bar_close = float(bar_rows[0][0]) if bar_rows else entry_price
-    exit_price = exit_price_override if exit_price_override else bar_close
-    if entry_price <= 0.0 or exit_price <= 0.0:
-        return (0.0, 0.0, entry_price)
-    atr_pct = _atr_pct_from_bars(bar_rows)
-    pnl_abs = (
-        (exit_price - entry_price)
-        if trade.side == "long"
-        else (entry_price - exit_price)
-    )
-    atr_usd = max(entry_price * atr_pct * 2.0, 1e-6)
-    pnl_r = pnl_abs / atr_usd
-    pnl_usd = (pnl_abs / entry_price) * size_usd
-    pnl_r = max(-10.0, min(10.0, pnl_r))
-    return (pnl_r, pnl_usd, exit_price)
-
-
-def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
-    """Mean (high-low)/close over recent 1m bars; 0.005 fallback when empty.
-
-    Extracted from ``real_pnl_r_from_fills`` so the close-time excursion write
-    shares the *same* ATR-pct denominator the realised-PnL path uses (no drift
-    between pnl_r and mfe_r/mae_r R units). Pure.
-    """
-    samples = [
-        (float(r[1]) - float(r[2])) / float(r[0])
-        for r in bar_rows
-        if float(r[0]) > 0.0
-    ]
-    return sum(samples) / len(samples) if samples else 0.005
-
-
-def _close_excursion_r(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade, exit_price: float,
-) -> tuple[float, float]:
-    """Best-effort ``(mfe_r, mae_r)`` for a position at close time.
-
-    BUILD_SCHEMA prerequisite: the tick loop does not yet populate the
-    ``positions.peak_price`` / ``trough_price`` extremes (a later precise-exit
-    stream owns that). So this reads whatever extremes the position row carries
-    and falls back to the observed entry/exit bounds when they are NULL — a
-    position that only ever recorded its entry and exit still yields a finite,
-    correctly-signed excursion (never *under*-states MFE/MAE relative to the
-    realised move). The R denominator is re-derived from the same entry fill +
-    recent bars as ``real_pnl_r_from_fills`` so pnl_r and mfe_r/mae_r share one
-    risk unit. Returns ``(0.0, 0.0)`` only when entry price is unknowable.
-    """
-    entry_price = trade.entry_price
-    if entry_price <= 0.0:
-        row = conn.execute(
-            "SELECT fill_price FROM fills WHERE contribution_id = ? "
-            "AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
-            (trade.position_id,),
-        ).fetchone() if trade.position_id else None
-        if row is None:
-            return (0.0, 0.0)
-        entry_price = float(row[0])
-    if entry_price <= 0.0:
-        return (0.0, 0.0)
-    bar_rows = conn.execute(
-        """
-        SELECT close, high, low FROM bars
-        WHERE instrument_id = ? AND bar_interval = '1m'
-        ORDER BY ts DESC LIMIT 14
-        """,
-        (f"{trade.venue}:{trade.symbol}",),
-    ).fetchall()
-    atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
-    # Read tracked extremes; fall back to entry/exit bounds when the tick loop
-    # has not populated them. peak = max(entry, exit, tracked_peak); trough =
-    # min(entry, exit, tracked_trough) so the excursion is never under-stated.
-    tracked_peak: float | None = None
-    tracked_trough: float | None = None
-    if trade.position_id:
-        prow = conn.execute(
-            "SELECT peak_price, trough_price FROM positions WHERE position_id = ?",
-            (trade.position_id,),
-        ).fetchone()
-        if prow is not None:
-            tracked_peak = None if prow[0] is None else float(prow[0])
-            tracked_trough = None if prow[1] is None else float(prow[1])
-    peak = max(entry_price, exit_price, tracked_peak or entry_price)
-    trough = min(entry_price, exit_price, tracked_trough or entry_price)
-    return compute_excursion_r(
-        entry_price=entry_price, peak_price=peak, trough_price=trough,
-        side=trade.side, atr_usd=atr_usd,
-    )
+# Explicit re-export: ``real_pnl_r_from_fills`` / ``_close_excursion_r`` live in
+# ``_production_close_helpers`` (line budget) but are part of this module's
+# public surface — ``_production_pipeline`` re-exports the former and the close
+# tests import both via ``from polaris.scripts._production_close import ...``.
+__all__ = [
+    "_close_excursion_r",
+    "close_oldest_with_real_pnl",
+    "close_specific_position",
+    "real_pnl_r_from_fills",
+]
 
 
 async def _real_close_fill(
     *,
     trade: SimulatedTrade,
+    fresh_mark: float | None = None,
     okx_adapter: Any = None,
     capital_session: Any = None,
 ) -> Fill | None:
@@ -209,12 +79,17 @@ async def _real_close_fill(
     ``deal_id``. Adapters are injected for testability; when ``okx_adapter``
     is ``None`` we build one from ``OKX_DEMO_*`` env. Returns ``None`` on
     reject / no-fill so the caller falls back to mark-to-market only.
+
+    ``fresh_mark`` (FIX A): the latest 1m bar close the OKX cap-split sizes
+    against (fall back to ``trade.entry_price`` only when no bar exists) so a
+    risen-price close cannot tip a child over the venue cap.
     """
     if trade.venue == "okx":
+        mark = fresh_mark if fresh_mark and fresh_mark > 0.0 else trade.entry_price
         if okx_adapter is not None:
             return await real_okx_close_fill(
                 okx_adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
-                strategy_id=trade.strategy_id,
+                strategy_id=trade.strategy_id, mark_price=mark,
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -228,7 +103,7 @@ async def _real_close_fill(
         ) as adapter:
             return await real_okx_close_fill(
                 adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
-                strategy_id=trade.strategy_id,
+                strategy_id=trade.strategy_id, mark_price=mark,
             )
     # Capital CFD — close by deal_id captured at open.
     if capital_session is None or not trade.deal_id:
@@ -353,10 +228,11 @@ async def _close_trade_with_real_pnl(
     if real_roundtrip:
         # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
         # computed against the actual exit fill (not the pre-close bar drift).
+        fresh_mark = _latest_bar_close(conn, venue=trade.venue, symbol=trade.symbol)
         real_fill = None
         try:
             real_fill = await _real_close_fill(
-                trade=trade, okx_adapter=okx_adapter,
+                trade=trade, fresh_mark=fresh_mark, okx_adapter=okx_adapter,
                 capital_session=capital_session,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
@@ -393,6 +269,14 @@ async def _close_trade_with_real_pnl(
             conn, trade=trade, exit_price_override=real_fill.fill_price,
         )
         close_fill = real_fill
+        # FIX B: a genuine partial (child reject / within-child) returns less
+        # than the tracked qty — keep the position OPEN with a reduced qty (see
+        # _persist_partial_close); only a ~full fill closes + pops below.
+        if real_fill.base_qty < trade.base_qty * (1.0 - _CLOSE_FULL_FILL_EPS):
+            return _persist_partial_close(
+                conn, state=state, trade=trade, close_fill=real_fill,
+                pnl_usd=pnl_usd, now_ts=now_ts,
+            )
     else:
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(conn, trade=trade)
         close_fill = simulate_close(trade, exit_price=exit_price)

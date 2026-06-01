@@ -32,9 +32,17 @@ from polaris.core.data.fill_normalizer import (
     normalize_okx_fill,
 )
 from polaris.core.data.fills_persist import persist_fill
+from polaris.scripts._limit_exec_constants import (
+    OKX_CLOSE_CAP_BUFFER_FRAC,
+    OKX_MAX_MARKET_NOTIONAL_USDT,
+)
 from polaris.scripts._okx_limit_open import (
     fetch_okx_available_usdt,
     real_okx_open_fill,
+)
+from polaris.scripts._okx_market_chunk import (
+    _aggregate_child_fills,
+    _split_market_notional,
 )
 from polaris.scripts._smoke_roundtrip_capital import (
     real_capital_close_fill,
@@ -107,17 +115,58 @@ def _synthetic_okx_fill(*, is_close: bool) -> Fill:
 
 
 
-async def real_okx_close_fill(
+def _parse_available_base(balance_body: dict[str, Any], base_ccy: str) -> float | None:
+    """Pull ``availBal`` for ``base_ccy`` out of an OKX ``/account/balance`` payload.
+
+    Returns the available base-ccy qty, or ``None`` when the payload has no
+    detail row for that ccy (balance unknown → caller skips the clamp, prior
+    behaviour). Mirrors ``_okx_limit_open._parse_available_usdt`` but keyed on
+    the position's base ccy (the sell-side balance the close consumes).
+    """
+    data = balance_body.get("data") or []
+    if not data:
+        return None
+    details = data[0].get("details") or []
+    target = base_ccy.upper()
+    for ccy_detail in details:
+        if str(ccy_detail.get("ccy") or "").upper() == target:
+            raw = ccy_detail.get("availBal")
+            try:
+                return float(raw) if raw not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+async def _fetch_okx_available_base(adapter: Any, base_ccy: str) -> float | None:
+    """Best-effort live OKX available base-ccy lookup for the close balance clamp.
+
+    Any error returns ``None`` so the close is never blocked by a balance-query
+    failure (fail-safe / flow_not_block): an unknown balance simply skips the
+    clamp and closes the full base_qty.
+    """
+    try:
+        body = await adapter.fetch_balance(base_ccy)
+        return _parse_available_base(body, base_ccy)
+    except Exception as exc:  # noqa: BLE001 — balance query is best-effort
+        logger.warning("[okx/close] available-%s lookup failed %r", base_ccy, exc)
+        return None
+
+
+async def _okx_sell_child(
     adapter: Any,
     *,
     inst_id: str,
     base_qty: float,
     strategy_id: str,
-    poll_delay_sec: float = 0.5,
+    poll_delay_sec: float,
 ) -> Fill | None:
-    """OKX close leg: sell the entry ``base_qty`` → poll → normalize."""
-    if base_qty <= 0.0:
-        return None
+    """One market SELL child (base_qty <= cap/mark): place → poll → normalize.
+
+    Returns the normalized close ``Fill`` on a (partial) fill, or ``None`` when
+    the venue rejected the order or it never filled (EXTERNAL — caller stops
+    splitting and aggregates whatever filled; never raises).
+    """
     sell_resp = await adapter.place_market_order(
         inst_id=inst_id,
         side="sell",
@@ -133,7 +182,144 @@ async def real_okx_close_fill(
     rows = state.get("data", []) or []
     if not rows:
         return None
+    order_state = str(rows[0].get("state") or "").lower()
+    if order_state not in ("filled", "partially_filled"):
+        # Non-fill venue state (e.g. canceled) — EXTERNAL no-fill, not a fault.
+        return None
     return normalize_okx_fill(rows[0], strategy_id=strategy_id)
+
+
+def _split_close_base_qty(base_qty: float, mark_price: float) -> list[float]:
+    """Split a close ``base_qty`` into child base qtys each <= the buffered cap.
+
+    The OKX 51201 cap is on the QUOTE value of a market order, evaluated by the
+    venue against the LIVE price at submit time. We size off a fresh ``mark_price``
+    (the latest 1m bar close, threaded from the close path) and split the quote
+    notional (``base_qty × mark_price``) into <=cap quote chunks via the shared
+    ``_split_market_notional``, passing a DOWNWARD-buffered cap
+    (``cap × (1 - OKX_CLOSE_CAP_BUFFER_FRAC)``) so modest upward drift between
+    split-time and venue-eval cannot tip a child over the hard 1000-USDT cap
+    (the 51201-never-converges bug). Each quote chunk maps back to base qty at
+    ``mark_price``; the LAST child takes the base remainder so the children sum
+    EXACTLY to ``base_qty`` (no rounding loss that would leave dust un-closed).
+    ``mark_price <= 0`` → single chunk (behaviour-0: cannot convert, close all).
+    """
+    if mark_price <= 0.0:
+        return [base_qty]
+    buffered_cap = OKX_MAX_MARKET_NOTIONAL_USDT * (1.0 - OKX_CLOSE_CAP_BUFFER_FRAC)
+    quote_chunks = _split_market_notional(base_qty * mark_price, cap=buffered_cap)
+    if len(quote_chunks) == 1:
+        return [base_qty]
+    base_chunks: list[float] = []
+    allocated = 0.0
+    for quote in quote_chunks[:-1]:
+        child_base = quote / mark_price
+        base_chunks.append(child_base)
+        allocated += child_base
+    base_chunks.append(base_qty - allocated)  # remainder → exact sum
+    return base_chunks
+
+
+async def real_okx_close_fill(
+    adapter: Any,
+    *,
+    inst_id: str,
+    base_qty: float,
+    strategy_id: str,
+    mark_price: float | None = None,
+    poll_delay_sec: float = 0.5,
+) -> Fill | None:
+    """OKX close leg: sell the entry ``base_qty`` → poll → normalize.
+
+    FIX 1 (OKX SPOT 1000-USDT market cap, reject 51201): ``mark_price`` is the
+    FRESH mark (latest 1m bar close, threaded from the close path) — NOT the
+    stale entry; the venue evaluates the cap on child_base × the LIVE price, so a
+    fresh mark + the downward cap buffer in ``_split_close_base_qty`` keeps an
+    appreciated position's children under the hard cap even with modest upward
+    drift (the prior stale-entry sizing tipped a risen-price child over 1000 →
+    first-child-None → never converged). A >buffered-cap notional is sold as
+    SEQUENTIAL child market orders, each polled + normalized, then aggregated
+    into ONE close ``Fill`` (precise-exit loss defence, NOT a throttle). The
+    total closed base_qty is unchanged. behaviour-0: a <=cap close (or unknown
+    ``mark_price``) submits exactly ONE order, identical to the pre-fix path.
+
+    Reject / orphan semantics (never raises — flow_not_block):
+    * No child filled at all → return ``None`` (position preserved + retried).
+    * A later child fails after earlier children filled → return the aggregated
+      Fill of the FILLED children (partial close) and stop; the remaining qty
+      closes next tick. The caller (``_close_trade_with_real_pnl``) compares the
+      filled base_qty to the tracked base_qty: a genuine partial keeps the
+      position OPEN with a reduced qty (no untracked exposure), a ~full fill
+      closes it.
+    * A child whose quote (child_base × mark) is below the OKX minimum notional
+      is skipped (never submitted → no 51020) and its base is absorbed; the
+      splitter's min-tail fold means this only guards a degenerate dust tail.
+
+    FIX 2 (OKX 51008 insufficient-balance): before closing, the total close
+    ``base_qty`` is clamped to the live available spot balance of the base ccy
+    (``min(base_qty, available)``). When the available balance is ~0 (a true
+    orphan — qty over-counted vs. what the wallet actually holds) the close
+    returns ``None`` with a clear warning and submits nothing (orphan-reconcile,
+    NOT a throttle — no infinite escalation, no internal fault).
+
+    Double-sell bound: the FIX-2 clamp re-fetches the available base each tick
+    and clamps ``min(base_qty, available)``, so a position that was fully or
+    partially sold then retried can never oversell beyond what the wallet still
+    holds. Combined with the caller's partial-close reduced-qty bookkeeping
+    (FIX B), the double-sell window is bounded to a single in-flight child.
+    """
+    if base_qty <= 0.0:
+        return None
+
+    # FIX 2 — clamp the close qty to the wallet's available base ccy. The OKX
+    # SPOT inst is ``BASE-QUOTE`` (e.g. ETHW-USDT) → base ccy is the left token.
+    base_ccy = inst_id.split("-")[0]
+    available = await _fetch_okx_available_base(adapter, base_ccy)
+    if available is not None and available < base_qty:
+        # available ~0 → true orphan: log + return None (no order, no fault).
+        if available <= 0.0:
+            logger.warning(
+                "[okx/close] %s base_qty=%.10f but available %s ~0 — orphan "
+                "(qty over-count); skip close, needs reconcile (not a throttle)",
+                inst_id, base_qty, base_ccy,
+            )
+            return None
+        logger.info(
+            "[okx/close] %s clamp close base_qty %.10f → available %.10f %s "
+            "(orphan-reconcile, not a throttle)",
+            inst_id, base_qty, available, base_ccy,
+        )
+        base_qty = available
+
+    chunks = _split_close_base_qty(base_qty, mark_price or 0.0)
+    if len(chunks) == 1:
+        # behaviour-0: single market sell, identical to the pre-fix path.
+        return await _okx_sell_child(
+            adapter, inst_id=inst_id, base_qty=chunks[0],
+            strategy_id=strategy_id, poll_delay_sec=poll_delay_sec,
+        )
+    filled: list[Fill] = []
+    mark = mark_price or 0.0
+    for child_base in chunks:
+        # Defensive (FIX C): never submit a sub-min child (51020). The splitter's
+        # min-tail fold already prevents this for normal splits; this guards a
+        # degenerate dust tail — absorb it rather than churn a guaranteed reject.
+        if mark > 0.0 and child_base * mark < MIN_OKX_NOTIONAL_USD:
+            continue
+        child = await _okx_sell_child(
+            adapter, inst_id=inst_id, base_qty=child_base,
+            strategy_id=strategy_id, poll_delay_sec=poll_delay_sec,
+        )
+        if child is not None:
+            filled.append(child)
+            continue
+        # Child rejected / no-fill — stop (do not churn oversized re-tries). What
+        # filled is returned as a partial close; the rest closes next tick.
+        break
+    if filled:
+        return _aggregate_child_fills(filled)
+    # Nothing filled — preserve the position + retry next tick (no orphan).
+    return None
 
 
 # ---------------------------------------------------------------------------

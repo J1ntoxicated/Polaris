@@ -31,9 +31,12 @@ from polaris.core.data.fill_normalizer import OKX_FILLED_STATES, Fill, normalize
 from polaris.scripts._limit_exec_constants import (
     LIMIT_POLL_DELAY_SEC,
     OKX_BALANCE_CLAMP_BUFFER_FRAC,
-    OKX_MAX_MARKET_NOTIONAL_USDT,
     limit_fill_wait_sec,
     strong_signal_strength,
+)
+from polaris.scripts._okx_market_chunk import (
+    _aggregate_child_fills,
+    _split_market_notional,
 )
 from polaris.scripts._smoke_roundtrip_shared import MIN_OKX_NOTIONAL_USD, OpenAttempt
 
@@ -118,63 +121,6 @@ def _normalize_open_rows(
         row, strategy_id=strategy_id, expected_price=last_price,
     )
     return OpenAttempt(fill=fill)
-
-
-def _split_market_notional(notional_usd: float) -> list[float]:
-    """Split a quote notional into child chunks each <= the OKX 1000-USDT cap.
-
-    OKX SPOT rejects (51201) any single market order whose quote value exceeds
-    ``OKX_MAX_MARKET_NOTIONAL_USDT``. We deliver the FULL sized notional in
-    sequential <=cap chunks so the entry fills (flow_not_block) — the total is
-    unchanged (NOT a size cut). e.g. 1468 → [1000, 468]; 3000 → [1000,1000,1000].
-    """
-    cap = OKX_MAX_MARKET_NOTIONAL_USDT
-    if notional_usd <= cap:
-        return [notional_usd]
-    chunks: list[float] = []
-    remaining = notional_usd
-    while remaining > cap:
-        chunks.append(cap)
-        remaining -= cap
-    if remaining > 0.0:
-        chunks.append(remaining)
-    return chunks
-
-
-def _aggregate_child_fills(fills: list[Fill]) -> Fill:
-    """Aggregate filled market child-orders into one ``Fill``.
-
-    ``base_qty`` / ``quote_qty`` / ``size_usd`` / ``fee_usd`` sum across
-    children; ``fill_price`` is the size-weighted average (weighted by each
-    child's base_qty). Carries the first child's identity fields so the
-    position is tracked under a single order ref.
-    """
-    base_total = sum(f.base_qty for f in fills)
-    quote_total = sum(f.quote_qty for f in fills)
-    fee_total = sum(f.fee_usd for f in fills)
-    if base_total > 0.0:
-        avg_px = sum(f.fill_price * f.base_qty for f in fills) / base_total
-    else:
-        avg_px = fills[0].fill_price
-    head = fills[0]
-    return Fill(
-        venue=head.venue,
-        instrument_id=head.instrument_id,
-        strategy_id=head.strategy_id,
-        side=head.side,
-        size_usd=quote_total,
-        fill_price=avg_px,
-        fee_usd=fee_total,
-        slippage_bps=head.slippage_bps,
-        ts_ms=fills[-1].ts_ms,
-        order_id=head.order_id,
-        client_order_id=head.client_order_id,
-        base_qty=base_total,
-        quote_qty=quote_total,
-        state="partially_filled" if len(fills) > 1 and any(
-            f.state == "partially_filled" for f in fills
-        ) else head.state,
-    )
 
 
 async def _okx_market_child(

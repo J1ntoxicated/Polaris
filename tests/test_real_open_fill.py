@@ -410,6 +410,10 @@ async def test_close_real_roundtrip_okx_sells_base_qty(
     sell_row["side"] = "sell"
     sell_row["ordId"] = "sell_1"
     okx_adapter.fetch_order = AsyncMock(return_value={"data": [sell_row]})
+    # Balance lookup returns no base-ccy detail → close-clamp skipped (the real
+    # adapter returns a plain dict; AsyncMock's auto-coroutine would otherwise
+    # leak an un-awaited coroutine warning).
+    okx_adapter.fetch_balance = AsyncMock(return_value={"data": []})
 
     await close_oldest_with_real_pnl(
         memdb, state=state, now_ts=int(time.time()),
@@ -769,6 +773,7 @@ async def test_real_close_recomputes_pnl_r_from_exit(
     sell_row["side"] = "sell"
     sell_row["ordId"] = "sell_loss"
     okx_adapter.fetch_order = AsyncMock(return_value={"data": [sell_row]})
+    okx_adapter.fetch_balance = AsyncMock(return_value={"data": []})
 
     await close_oldest_with_real_pnl(
         memdb, state=state, now_ts=int(time.time()),

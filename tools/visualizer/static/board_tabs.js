@@ -283,44 +283,45 @@
       body.innerHTML = `<div class="empty">no open positions${sc ? ' · ' + esc(sc) : ''}</div>`;
       return;
     }
-    const groups = laneGroups(rows).map(g => {
-      const s = g.stream, lc = s.toLowerCase();
-      const head = `<tr><td colspan="${POS_COLS}" class="lane-head lane-${lc}" title="${esc(STREAM_TAGLINE[s])}">`
-        + `${esc(STREAM_LABEL[s])} <span class="ln-tag">${esc(STREAM_TAGLINE[s])}</span>`
-        + `<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
-      const trs = g.rows.map(p => {
-        const key = [p.venue, p.symbol, p.strategy_id, p.side].join('|');
-        const prev = _lastPx[key];
-        let flash = '';
-        if (prev != null && p.last_price != null && p.last_price !== prev) {
-          flash = p.last_price > prev ? ' px-flash-up' : ' px-flash-down';
-        }
-        _lastPx[key] = p.last_price;
-        const rc = (p.row_count > 1)
-          ? ` <span class="b-flat stack-badge" title="${p.row_count} stacked positions on this (symbol, strategy, side); SIZE$ is the aggregate">×${p.row_count}</span>`
-          : '';
-        const dpc = fmtSignedPct(p.delta_pct, 2);
-        const upnlPct = fmtSignedPct(p.upnl_pct, 2);
-        const stop = (p.stop_price > 0) ? fmtPx(p.stop_price) : '—';
-        const mfeMae = `${fmtR(p.mfe_r, 1)}/${fmtR(p.mae_r, 1)}`;
-        return `<tr class="row-${lc}">
-          <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
-          <td class="l tk" title="${esc(p.symbol)}${p.row_count > 1 ? ' ×' + p.row_count : ''}">${esc(p.symbol)}${rc}</td>
-          <td class="dir ${esc(p.side)}" title="${esc(p.side)}${lc === 'b' ? ' (CFD — long/short)' : ''}">${esc(p.side)}</td>
-          <td class="num b-flat" title="entry ${fmtPx(p.entry_price)}">${fmtPx(p.entry_price)}</td>
-          <td class="num${flash}" title="current (last close) ${fmtPx(p.last_price)}">${fmtPx(p.last_price)}</td>
-          <td class="num ${pn(p.delta_pct)}" title="price move since entry">${dpc}</td>
-          <td class="num">${fmtUsd(p.size_usd, 0)}</td>
-          <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
-          <td class="num ${pn(p.upnl_pct)}">${upnlPct}</td>
-          <td class="num b-flat" title="time held">${hms(p.held_sec)}</td>
-          <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
-          <td class="l b-flat" title="regime ${esc(p.regime)}">${esc(p.regime || '—')}</td>
-          <td class="num b-flat" title="protective stop ${stop}">${stop}</td>
-          <td class="num b-flat" title="MFE/MAE in R · exit-FSM ${esc(p.exit_state)}">${mfeMae}</td>
-        </tr>`;
-      }).join('');
-      return head + trs;
+    // MIXED list (Jin 2026-06-01): no per-exchange grouping/lane-heads — all
+    // positions in ONE table, sorted by size so venues interleave. The per-row
+    // left-border colour (row-{a/b/c}) stays only as a subtle venue cue; the VEN
+    // column already names the venue. (The streams-strip on top keeps per-venue
+    // summary.)
+    const groups = rows.slice().sort(
+      (a, b) => (b.size_usd || 0) - (a.size_usd || 0)
+    ).map(p => {
+      const lc = venueStream(p.venue).toLowerCase();
+      const key = [p.venue, p.symbol, p.strategy_id, p.side].join('|');
+      const prev = _lastPx[key];
+      let flash = '';
+      if (prev != null && p.last_price != null && p.last_price !== prev) {
+        flash = p.last_price > prev ? ' px-flash-up' : ' px-flash-down';
+      }
+      _lastPx[key] = p.last_price;
+      const rc = (p.row_count > 1)
+        ? ` <span class="b-flat stack-badge" title="${p.row_count} stacked positions on this (symbol, strategy, side); SIZE$ is the aggregate">×${p.row_count}</span>`
+        : '';
+      const dpc = fmtSignedPct(p.delta_pct, 2);
+      const upnlPct = fmtSignedPct(p.upnl_pct, 2);
+      const stop = (p.stop_price > 0) ? fmtPx(p.stop_price) : '—';
+      const mfeMae = `${fmtR(p.mfe_r, 1)}/${fmtR(p.mae_r, 1)}`;
+      return `<tr class="row-${lc}">
+        <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
+        <td class="l tk" title="${esc(p.symbol)}${p.row_count > 1 ? ' ×' + p.row_count : ''}">${esc(p.symbol)}${rc}</td>
+        <td class="dir ${esc(p.side)}" title="${esc(p.side)}${lc === 'b' ? ' (CFD — long/short)' : ''}">${esc(p.side)}</td>
+        <td class="num b-flat" title="entry ${fmtPx(p.entry_price)}">${fmtPx(p.entry_price)}</td>
+        <td class="num${flash}" title="current (last close) ${fmtPx(p.last_price)}">${fmtPx(p.last_price)}</td>
+        <td class="num ${pn(p.delta_pct)}" title="price move since entry">${dpc}</td>
+        <td class="num">${fmtUsd(p.size_usd, 0)}</td>
+        <td class="num ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</td>
+        <td class="num ${pn(p.upnl_pct)}">${upnlPct}</td>
+        <td class="num b-flat" title="time held">${hms(p.held_sec)}</td>
+        <td class="l b-flat" title="${esc(p.strategy_id)}">${esc(p.strategy_id)}</td>
+        <td class="l b-flat" title="regime ${esc(p.regime)}">${esc(p.regime || '—')}</td>
+        <td class="num b-flat" title="protective stop ${stop}">${stop}</td>
+        <td class="num b-flat" title="MFE/MAE in R · exit-FSM ${esc(p.exit_state)}">${mfeMae}</td>
+      </tr>`;
     }).join('');
     body.innerHTML =
       `<table><colgroup>
@@ -347,10 +348,11 @@
       body.innerHTML = `<div class="empty">no recent trades${sc ? ' · ' + esc(sc) : ''}</div>`;
       return;
     }
-    const groups = laneGroups(rows).map(g => {
-      const s = g.stream, lc = s.toLowerCase();
-      const head = `<tr><td colspan="${TRD_COLS}" class="lane-head lane-${lc}">${esc(STREAM_LABEL[s])}<span class="ln-cnt">· ${g.rows.length}</span></td></tr>`;
-      const trs = g.rows.map(t => `<tr class="row-${lc}">
+    // MIXED (Jin 2026-06-01): no per-exchange grouping — recent trades in ONE
+    // time-ordered list (newest first); per-row colour is a subtle venue cue only.
+    const groups = rows.map(t => {
+      const lc = venueStream(t.venue).toLowerCase();
+      return `<tr class="row-${lc}">
           <td class="l b-flat">${hhmmss(t.ts_close)}</td>
           <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
           <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
@@ -363,8 +365,7 @@
           <td class="num ${pn(t.pnl_pct)}">${fmtSignedPct(t.pnl_pct, 2)}</td>
           <td class="num b-flat">${hms(t.held_sec)}</td>
           <td class="l b-flat" title="exit ${esc(t.exit_reason)} · fee real ${fmtUsd(t.real_fee_usd, 4)} | demo ${fmtUsd(t.fee_usd, 4)}">${esc(t.exit_reason)} <span class="b-flat">${fmtUsd(t.real_fee_usd, 2)}|${fmtUsd(t.fee_usd, 2)}</span></td>
-        </tr>`).join('');
-      return head + trs;
+        </tr>`;
     }).join('');
     body.innerHTML =
       `<table><colgroup>

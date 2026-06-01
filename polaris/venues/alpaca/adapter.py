@@ -299,12 +299,23 @@ class AlpacaAdapter:
         *,
         timeframe: str = "1Min",
         limit: int = 300,
+        start: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch up to ``limit`` ``timeframe`` bars for ``symbol`` (data host)."""
+        """Fetch up to ``limit`` ``timeframe`` bars for ``symbol`` (data host).
+
+        ``start`` (ISO date / RFC3339) bounds the lower edge of the window. It
+        is REQUIRED for the v2 bars endpoint to return anything: without a
+        ``start`` the endpoint responds with an empty ``bars`` list (verified
+        live — daily/AAPL returns 0 bars sans start). ``limit`` still caps the
+        count to the most-recent bars within [start, now].
+        """
+        params: dict[str, str] = {"timeframe": timeframe, "limit": str(limit)}
+        if start is not None:
+            params["start"] = start
         body = await self.request_json(
             "GET",
             f"/v2/stocks/{symbol}/bars",
-            params={"timeframe": timeframe, "limit": str(limit)},
+            params=params,
             on_data_host=True,
         )
         if isinstance(body, dict):

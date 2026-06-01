@@ -12,7 +12,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -137,6 +137,26 @@ def _alpaca_bar_to_canonical(
     )
 
 
+# Calendar-day lookback per interval. CRITICAL: the window [start, now] must hold
+# FEWER bars than ``limit`` (240) — Alpaca returns the OLDEST ``limit`` bars after
+# ``start`` (ascending), so a window wider than ``limit`` yields STALE bars (e.g.
+# 800d → oldest 240 ending ~1y ago). 1D=330d ≈ 227 trading days: < 240 limit (so
+# ALL are returned, ending at ~now = recent) AND ≥ the equity MA200 (~205) warmup.
+_ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 330, "1H": 45, "15m": 8, "5m": 4, "1m": 2}
+
+
+def _alpaca_bars_start(bar_interval: str) -> str:
+    """Lower-bound ``start`` date for the Alpaca /bars call — REQUIRED.
+
+    Without ``start`` the v2 bars endpoint returns an empty list (verified live:
+    AAPL/1Day → 0 bars sans start, 240 with start). The lookback is tuned so the
+    window holds < ``limit`` bars → Alpaca returns them all ending at ~now
+    (recent), not the oldest ``limit`` (stale). See ``_ALPACA_LOOKBACK_DAYS``.
+    """
+    days = _ALPACA_LOOKBACK_DAYS.get(bar_interval, 330)
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
 async def fetch_alpaca_bars(
     adapter: Any,
     symbol: str,
@@ -162,8 +182,11 @@ async def fetch_alpaca_bars(
             symbol,
         )
         return []
+    start = _alpaca_bars_start(bar_interval)
     try:
-        raw = await adapter.fetch_bars(symbol, timeframe=timeframe, limit=limit)
+        raw = await adapter.fetch_bars(
+            symbol, timeframe=timeframe, limit=limit, start=start
+        )
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.debug("[L1/alpaca] %s fetch failed: %r", symbol, exc)
         return []

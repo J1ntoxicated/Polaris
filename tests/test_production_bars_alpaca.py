@@ -70,9 +70,16 @@ class _FakeAlpacaAdapter:
         self.calls: list[dict[str, Any]] = []
 
     async def fetch_bars(
-        self, symbol: str, *, timeframe: str = "1Min", limit: int = 300
+        self,
+        symbol: str,
+        *,
+        timeframe: str = "1Min",
+        limit: int = 300,
+        start: str | None = None,
     ) -> list[dict[str, Any]]:
-        self.calls.append({"symbol": symbol, "timeframe": timeframe, "limit": limit})
+        self.calls.append(
+            {"symbol": symbol, "timeframe": timeframe, "limit": limit, "start": start}
+        )
         return self._rows
 
 
@@ -142,6 +149,9 @@ async def test_fetch_alpaca_bars_normalizes_raw_dicts() -> None:
     # token forwarded to the adapter as the Alpaca daily token.
     assert adapter.calls[0]["timeframe"] == "1Day"
     assert adapter.calls[0]["limit"] == 240
+    # 'start' is REQUIRED — Alpaca /bars returns empty without it (verified live).
+    start = adapter.calls[0]["start"]
+    assert start is not None and len(start) == 10 and start[4] == "-" and start[7] == "-"
 
 
 @pytest.mark.asyncio

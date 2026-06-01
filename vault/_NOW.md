@@ -10,6 +10,9 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🔴 HANDOVER 2026-06-01-night3 (Jin steering. **봇 graceful 재기동: PID=`data/paper/production.pid`=45047**, db=polaris_live.sqlite, log=`data/paper/production_p1_5_0601_dustfix.log`, 대시보드 :8770).**
+**✅ 인시던트 follow-up 3건 처리 (커밋 `60094d1`+`5cd3887`, 라이브 검증)**: ① **pnl_r_net 폭발 수정** — 차원 불일치(whole-position cost ÷ per-unit atr_usd)로 저가심볼서 -210040 R → atr_usd를 whole-position 1R 달러값으로 교정(ALGO net -10.22); 측정전용(posterior, sizing 미게이팅). 라이브 |net|>1000 = **0**. ② **orphan reconcile** — 내부 qty가 demo 지갑 보유량 초과(available~dust)면 영구 retry → `CloseOrphan` sentinel(available<=0 OR available×mark<최소주문) → `status='reconciled'`(가짜fill/pnl 없음, exit+hydrate 제외, risk_events 감사). status 쿼리 전수감사(10 사이트 'reconciled' 제외). **라이브: open 52→3, reconciled 18**(ETHW5+ALGO/FIL/SUSHI/ADA/ARB/… phantom 전부 정리), exit 무한retry 종료. 1702 green, behavior-0, 2-스텝 적대리뷰 GO. ③ (close-chunk은 `ff9c997` 이미 라이브).
+**🔶 미해결 (Jin 결정 필요 — "장부≠venue" 무결성 갭 계열)**: ① **per-symbol 오픈 캡 미작동** = `position_risk_state` 테이블이 오픈 시 한 번도 안 채워져 0.99 per-symbol/cluster 캡이 binding 안 됨(36-ALGO pile-up 근원). 고치면 dormant 캡 3개(per-symbol/underlying/cluster)가 동시에 binding=**라이브 진입거동 대폭 변경** + 캡값(0.99)도 pile-up 못 막음 → **trading-param/전략 결정 = debate**. ② **18개 phantom reconcile = 내부 장부가 OKX 지갑과 대규모 drift**(opens 기록됐으나 지갑 미보유) → **주기적 reconciliation 부재**(reconciling-portfolio 미가동?) 근본 감사 권장. ①②는 연결됨(둘 다 내부-venue 정합성). (이전 night3 인시던트 상세 ↓)
 **🔴 HANDOVER 2026-06-01-night3 (Jin steering. **봇 graceful 재기동: PID=`data/paper/production.pid`=6702**, db=polaris_live.sqlite, log=`data/paper/production_p1_5_0601_closefix.log`, 대시보드 :8770).**
 **🚨 P0 LIVE 인시던트 해결 (커밋 `ff9c997`)**: Jin 대시보드서 "-$2.5k인데 안 닫히는 포지션" 발견 → 포렌식: 52개 OKX 포지션(36 ALGO)에서 **엑싯 엔진은 매 틱 청산 판정(5326회)하는데 OKX 청산 *주문*이 51201("market order can't exceed 1000USDT")로 영구 거부** → 출혈 ~-$3.5k. 근본=**진입 경로엔 ≤1000 USDT 청크 분할이 있는데 청산 경로엔 없음**(부차: ETHW/FIL 51008 잔고부족 orphan). **Fix**=청산도 ≤1000 청크 분할+집계 + **fresh 1m-bar mark+하향버퍼**(0.10→900/child, appreciated 포지션 수렴 보장) + **부분청산=open 유지 reduced-qty**(미추적 노출 방지) + min-tail 병합 + 51008 잔고클램프(orphan-reconcile). 2-라운드 적대리뷰(R1 REQUEST_CHANGES→R2 GO). **라이브 검증**(graceful 재기동 6702): open **52→19**, ALGO **36→2**, **51201=0**, real closes 성공, clamp 작동, 부분경로 작동. 1689 green, ruff/mypy clean, behavior-0(진입 무변경), 거부키워드0, 9-stack 무접촉.
 **🔶 인시던트 follow-up (비차단, 측정/reconcile 계열)**: ① `[edge-validation] posterior pnl_r_net` 터무니없음(-210040 R; gross=-10/pnl_usd=-72인데; **측정전용·pre-existing·sizing 미게이팅**) ② 부분청산 pnl_usd 과대표기(텔레메트리 nit) ③ **ETHW/FIL 진짜 orphan(51008, 지갑에 없는 수량)** → 포지션 reconcile 필요(클램프가 None으로 graceful 처리중) ④ **per-symbol 오픈 상한 미작동**(ALGO 36개 쌓임) — 둘 다 추적.
@@ -179,4 +182,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-01 09:26 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-01 11:27 (paper=True, full_pipeline=True)

@@ -40,3 +40,8 @@ v2 dashboard (`polaris/scripts/dashboard_v2.py`, 371 LOC, 5/8 redesign) 가 사�
 
 ## Status
 open · 1차 진단 완료. /debate Topic B 대상.
+
+## 관련
+- [[2026-05-10_topic_b_dashboard_redesign]]
+- [[2026-05-10_position_lifecycle_drift]]
+- [[dashboard]]

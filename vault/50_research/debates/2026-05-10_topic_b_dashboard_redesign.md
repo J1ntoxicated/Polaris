@@ -79,3 +79,9 @@ tags: [debate, dashboard, ux, codex]
 
 ## Status
 round-2 완결 — codex R3 불필요. 4 Jin sign-off 후 /dev 진입 가능.
+
+## 관련
+- [[2026-05-10_dashboard_regression]]
+- [[2026-05-10_topic_a_lifecycle_fix]]
+- [[dashboard]]
+- [[2026-05-07_p1_dashboard_v1_redesign]]

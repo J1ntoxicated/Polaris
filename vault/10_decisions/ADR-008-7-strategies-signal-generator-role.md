@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-008
+aliases: [ADR-008]
 status: active
 date_created: 2026-05-06
 tags: [adr, strategies, signal-generator]

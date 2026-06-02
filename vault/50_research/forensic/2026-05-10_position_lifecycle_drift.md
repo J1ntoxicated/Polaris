@@ -40,3 +40,8 @@ tags: [forensic, lifecycle, dedupe]
 
 ## Status
 open · evidence 1차 완료. F1~F4 디자인 결정은 **codex debate 필수** (`feedback_reasoning_superbrain`). /dev 단독 즉시패치 금지.
+
+## 관련
+- [[2026-05-10_topic_a_lifecycle_fix]]
+- [[2026-05-10_dashboard_regression]]
+- [[layer-7-strategy-isolation]]

@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-002
+aliases: [ADR-002]
 status: active
 date_created: 2026-05-06
 tags: [adr, vision, vision-targets]

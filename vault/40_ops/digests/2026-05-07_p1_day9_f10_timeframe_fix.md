@@ -3,7 +3,7 @@ type: digest
 status: complete
 date_created: 2026-05-07
 tags: [day9, f10, timeframe, capital, root-cause, paper-loop]
-links: [[production_paper_loop]] [[Capital]] [[fx_breakout_basket]] [[xau_indices_trend]] [[session_breakout]] [[tsmom]] [[spot_donchian]] [[rsi_bb_pullback]] [[volume_burst]]
+links: [[fx_breakout_basket]] [[xau_indices_trend]] [[session_breakout]] [[tsmom]] [[spot_donchian]] [[rsi_bb_pullback]] [[volume_burst]]
 ---
 
 # P1 Day 9 — F10 Timeframe Hardcode Fix

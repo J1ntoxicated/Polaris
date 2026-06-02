@@ -3,7 +3,7 @@ type: debate
 status: resolved
 date_created: 2026-05-30
 tags: [debate, architecture, ai-conductor, cost]
-related: [[ai_conductor_architecture_2026-05-30]], [[north-star]], [[2026-05-30_ai_validity_audit]]
+related: [[north-star]], [[2026-05-30_ai_validity_audit]]
 ---
 
 # /debate — AI 아키텍처 "technical-decides + AI-conducts" 전환

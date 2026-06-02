@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-010
+aliases: [ADR-010]
 status: active
 date_created: 2026-05-28
 tags: [adr, venue, roundtrip, demo, fills, p0, isolation]

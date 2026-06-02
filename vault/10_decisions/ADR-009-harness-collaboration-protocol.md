@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-009
+aliases: [ADR-009]
 status: active
 date_created: 2026-05-28
 tags: [adr, harness, collaboration, multi-agent, orchestration]

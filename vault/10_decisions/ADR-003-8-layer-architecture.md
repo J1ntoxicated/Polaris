@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-003
+aliases: [ADR-003]
 status: active
 date_created: 2026-05-06
 tags: [adr, architecture, 8-layer]

@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-001
+aliases: [ADR-001]
 status: active
 date_created: 2026-05-06
 date_updated: 2026-05-06

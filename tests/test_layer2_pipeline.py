@@ -589,7 +589,7 @@ def test_orchestrator_rejects_invalid_phase() -> None:
 async def test_g8_p0_python_template_writes_lesson_row(
     memdb: sqlite3.Connection, tmp_path: object,
 ) -> None:
-    """P0 path (no client) writes ai_lessons row + vault file deterministically."""
+    """P0 path (no client) writes ai_lessons row (SSOT); no vault .md is written."""
     from polaris.core.pipeline.agents.post_trade_reflector import (
         post_trade_reflector_gate,
     )
@@ -617,10 +617,7 @@ async def test_g8_p0_python_template_writes_lesson_row(
     )
     from pathlib import Path as _Path
 
-    lessons_dir = _Path(str(tmp_path)) / "lessons"  # type: ignore[arg-type]
-    res = await post_trade_reflector_gate(
-        ctx, client=None, conn=memdb, lessons_dir=lessons_dir
-    )
+    res = await post_trade_reflector_gate(ctx, client=None, conn=memdb)
     assert res.decision == GateDecision.REFLECTED
     assert res.model_used == "python"
     assert res.payload.get("source") == "python_template"
@@ -631,9 +628,8 @@ async def test_g8_p0_python_template_writes_lesson_row(
         (closed["trade_id"],),
     ).fetchall()
     assert len(rows) == 1
-    # Vault file written.
-    files = list(lessons_dir.glob(f"{closed['trade_id']}_*.md"))
-    assert len(files) == 1
+    # No vault .md written (per-trade export removed 2026-06-02).
+    assert list(_Path(str(tmp_path)).rglob("*.md")) == []
 
 
 async def test_g8_p0_python_template_clamps_delta_to_rail(

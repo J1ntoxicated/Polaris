@@ -17,9 +17,14 @@ unchanged by its removal. Cross-trade synthesis (per-N-closes conductor batch)
 is a separate, future tier (ai_conductor P6) and is out of scope here.
 
 Outputs:
-- ``lesson`` text (markdown) → vault/50_research/lessons/<trade_id>_<date>.md
+- ``ai_lessons`` row (SSOT, A3 raw data) — the cell-matrix delta + lesson_type
+  for every closed trade.
 - ``cell_matrix_delta`` (dict)
 - ``learner_adjustment`` (dict, soft-mode 25% sizing scalar within 100-trade window)
+
+The per-trade vault markdown export was removed (2026-06-02): the 2703 .md files
+were telemetry spam with zero readers — ``ai_lessons`` is the single source of
+truth. The DB INSERT below is the only persistence path.
 
 Fail-open (Q4): errors do not block the pipeline; lesson is dropped.
 """
@@ -29,8 +34,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Final
 
 from polaris.core.pipeline.gate_state import (
@@ -47,11 +50,9 @@ __all__ = [
     "LESSON_SOFT_MODE_TRADE_COUNT",
     "LESSON_SOFT_SCALAR_MAX",
     "post_trade_reflector_gate",
-    "write_lesson_to_vault",
 ]
 
 LESSON_CONFIDENCE_FLOOR: Final[float] = 0.70
-LESSON_DIR_DEFAULT: Final[Path] = Path("vault/50_research/lessons")
 LESSON_SOFT_SCALAR_MAX: Final[float] = 0.25  # Q10: 25% sizing scalar in 100-trade window
 # Soft-mode trade-count window (Q10): until ≥ this many closed trades the
 # learner ingests lessons at ``LESSON_SOFT_SCALAR_MAX`` weight only.
@@ -63,71 +64,6 @@ LESSON_RECENT_TRADES_MAX: Final[int] = 3
 # Q10 P0 delta clamp: ±0.03 cap on cell-matrix delta during soft mode so the
 # Python template cannot move weights faster than spec allows.
 LESSON_DELTA_CLAMP_P0: Final[float] = 0.03
-
-
-def write_lesson_to_vault(
-    *,
-    trade_id: str,
-    lesson_text: str,
-    lessons_dir: Path = LESSON_DIR_DEFAULT,
-    now_ts: int | None = None,
-) -> Path:
-    """Write the lesson markdown to ``vault/50_research/lessons/``.
-
-    Idempotent on (trade_id, date) — rewriting overwrites the same file.
-    """
-    if now_ts is not None:
-        date_str = datetime.fromtimestamp(now_ts, tz=UTC).strftime("%Y-%m-%d")
-    else:
-        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    lessons_dir.mkdir(parents=True, exist_ok=True)
-    fp = lessons_dir / f"{trade_id}_{date_str}.md"
-    fp.write_text(lesson_text, encoding="utf-8")
-    return fp
-
-
-def _format_lesson_markdown(
-    *,
-    trade_id: str,
-    strategy_id: str,
-    regime: str | None,
-    session: str | None,
-    lesson_type: str,
-    confidence: float,
-    soft_mode: bool,
-    delta: dict[str, Any],
-    lesson_text: str,
-) -> str:
-    """Render the canonical lesson markdown body.
-
-    Includes Karpathy-spec frontmatter so vault_lint passes without a
-    post-hoc autofix pass (Phase 1 vault audit, 2026-05-07).
-    """
-    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    safe_strategy = (strategy_id or "unknown").replace(" ", "_")
-    safe_type = (lesson_type or "unknown").replace(" ", "_")
-    frontmatter = (
-        "---\n"
-        "type: research\n"
-        "status: active\n"
-        f"date_created: {today}\n"
-        f"tags: [lesson, p0, strategy/{safe_strategy}, type/{safe_type}]\n"
-        "related: [[ADR-007]], [[ADR-008]]\n"
-        f"lesson_id: {trade_id}\n"
-        "---\n\n"
-    )
-    return (
-        f"{frontmatter}"
-        f"# Lesson — {trade_id}\n"
-        f"- strategy: {strategy_id}\n"
-        f"- regime: {regime}\n"
-        f"- session: {session}\n"
-        f"- type: {lesson_type}\n"
-        f"- confidence: {confidence:.2f}\n"
-        f"- soft_mode: {soft_mode}\n"
-        f"- delta: {delta}\n\n"
-        f"{lesson_text}\n"
-    )
 
 
 def _python_template_lesson(closed: dict[str, Any]) -> dict[str, Any]:
@@ -142,20 +78,16 @@ def _python_template_lesson(closed: dict[str, Any]) -> dict[str, Any]:
     won = bool(closed.get("won", pnl_r > 0.0))
     if won and pnl_r >= 1.0:
         lesson_type = "ok"
-        text = f"Won with {pnl_r:+.2f}R — keep cell routing weight."
     elif (not won) and pnl_r <= -1.0:
         lesson_type = "overtrade"
-        text = f"Lost {pnl_r:+.2f}R — cell routing should dampen."
     else:
         lesson_type = "entry_timing"
-        text = f"Mixed result {pnl_r:+.2f}R — entry timing review."
     return {
         # Confidence is set above the floor so downstream consumers do
         # not drop the deterministic lesson; it's still logged honestly
         # as ``model_used="python"``.
         "confidence": LESSON_CONFIDENCE_FLOOR,
         "lesson_type": lesson_type,
-        "lesson_text": text,
     }
 
 
@@ -230,7 +162,6 @@ async def post_trade_reflector_gate(
     *,
     client: Any | None = None,
     conn: sqlite3.Connection | None = None,
-    lessons_dir: Path = LESSON_DIR_DEFAULT,
     model: str | None = None,
 ) -> GateResult:
     """Gate 8 dispatcher — deterministic Python template (no LLM).
@@ -265,23 +196,9 @@ async def post_trade_reflector_gate(
     # construction.
     py_lesson = _python_template_lesson(closed)
     py_delta = _python_template_delta(closed, soft_mode=soft_mode)
-    # Persist + write to vault so the lesson ledger is populated from day 1;
-    # ADR-007 §learner expects every closed trade to leave a row in
-    # ``ai_lessons``.
-    md = _format_lesson_markdown(
-        trade_id=trade_id,
-        strategy_id=strategy_id,
-        regime=regime,
-        session=session,
-        lesson_type=py_lesson["lesson_type"],
-        confidence=py_lesson["confidence"],
-        soft_mode=soft_mode,
-        delta=py_delta,
-        lesson_text=py_lesson["lesson_text"],
-    )
-    write_lesson_to_vault(
-        trade_id=trade_id, lesson_text=md, lessons_dir=lessons_dir, now_ts=ctx.started_ts
-    )
+    # Persist to the ai_lessons ledger (SSOT, A3 raw data) so Layer 5 receives a
+    # row for every closed trade; ADR-007 §learner expects every closed trade to
+    # leave a row in ``ai_lessons``.
     if conn is not None:
         _persist_lesson(
             conn,

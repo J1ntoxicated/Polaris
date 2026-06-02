@@ -35,3 +35,8 @@ AI=OpenAI/Gemini(가용)·Anthropic(차단) · venue=OKX/Capital/Alpaca/IG(또�
 
 ## 운영
 OKX 스팟 봇 pid 67774 `data/polaris_live.sqlite` 수집중 · 웹 :8770(3:7) · 버그: .gitignore `data/`가 `polaris/core/data/`까지 잡음→신규파일 `git add -f`.
+
+## 관련
+- [[2026-05-30_3stream_live_cutover]]
+- [[trading_params_leverage_trackC_2026-05-30]]
+- [[ai_conductor_transition_2026-05-30]]

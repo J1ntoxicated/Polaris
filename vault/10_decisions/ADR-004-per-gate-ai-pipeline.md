@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-004
+aliases: [ADR-004]
 status: active
 date_created: 2026-05-06
 tags: [adr, ai, pipeline, langgraph, per-gate]

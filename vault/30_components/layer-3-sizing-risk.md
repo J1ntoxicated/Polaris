@@ -35,7 +35,7 @@ final_notional    = final_risk_pct × equity × leverage(venue)
 
 `cell_routing_mult` 는 sizing **factor** (composition 안 깨짐). cap 은 마지막 `min()` 1회. 재-clip 거부 (cell=1.3 일 때 cap 경계 동작 왜곡).
 
-**L5 wire (2026-05-26 [[p0_l5_l3_sizing_wire]])**: `engine.compute_size` 가 `SessionMultLearner` + `RegimeMultLearner.get_mult` + `evaluate_triple_block` 호출 → 각 `clip_individual_mult[0.3,3.0]`, product `clip_product_mult[0.1,5.0]`. sparse / disabled / no-row → NEUTRAL_MULT (1.0). 차단 X, 흐름 유지 (triple block = size_mult 0.3, entry 허용).
+**L5 wire (2026-05-26 `p0_l5_l3_sizing_wire`)**: `engine.compute_size` 가 `SessionMultLearner` + `RegimeMultLearner.get_mult` + `evaluate_triple_block` 호출 → 각 `clip_individual_mult[0.3,3.0]`, product `clip_product_mult[0.1,5.0]`. sparse / disabled / no-row → NEUTRAL_MULT (1.0). 차단 X, 흐름 유지 (triple block = size_mult 0.3, entry 허용).
 
 ### Q2 — Cold start triple (CS-3 + sparse + listing)
 | Layer | 기여 | 효과 |

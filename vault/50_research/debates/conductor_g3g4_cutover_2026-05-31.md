@@ -35,4 +35,4 @@ verdict: PROCEED_WITH_CHANGES (G3 cutover DEFER · G4 cutover after tick wiring)
 1. acceptance-metrics 모듈(read-only 분석, 위 지표) — 미래 컷오버 데이터 grounding.
 2. G3 warm-pool-local discriminator = 신규 shadow variant(behavior 0).
 3. G4 tick source + wire + re-shadow.
-관련: [[ai_conductor_architecture_2026-05-30]] · [[ai_conductor_transition_2026-05-30]] · [[regime_layered_synthesis_2026-05-31]]
+관련: [[ai_conductor_transition_2026-05-30]] · [[regime_layered_synthesis_2026-05-31]]

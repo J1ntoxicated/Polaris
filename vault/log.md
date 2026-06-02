@@ -1158,3 +1158,5 @@
 2026-06-01 16:12 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-01 16:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-02 02:24 [night4: fresh clean DB restart PID85373, reconcile gated off; errorloops=0, OKX trading fee10bps, WS 3venues; commits ff9c997/60094d1/5cd3887/2bc7c76/40d9604/eb398b6; FOUNDATION next=realtime-tick/Capital-strategies/capital-sizing/multisource]
+2026-06-02 06:32 [Edit: /Volumes/Development/Projects/Polaris/vault/_NOW.md]
+2026-06-03 08:37 [vault 3축 second-brain: telemetry 2632 archived→data/lessons_archive (ai_lessons DB=SSOT), ADR alias×10 (~345 [[ADR-NNN]] resolve), MOC A1/A2/A3+INDEX bus-map, islands 8→0 dangling→0, post_trade_reflector DB-only 46 green deploys-on-next-bot-start, bot PID85373 DEAD]

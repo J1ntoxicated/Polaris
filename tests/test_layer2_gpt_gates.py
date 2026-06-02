@@ -15,7 +15,6 @@ import pytest
 
 from polaris.core.pipeline.agents.post_trade_reflector import (
     post_trade_reflector_gate,
-    write_lesson_to_vault,
 )
 from polaris.core.pipeline.agents.pre_entry_watcher import (
     FastPathContext,
@@ -205,13 +204,14 @@ def test_fast_path_eligibility_spread_wide_rejects() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_post_trade_reflector_lesson_write_to_vault(
+async def test_post_trade_reflector_persists_ai_lessons_row(
     memdb: sqlite3.Connection, tmp_path: Path
 ) -> None:
-    """ai_conductor P2: deterministic template writes a lesson + ai_lessons row.
+    """ai_conductor P2: deterministic template persists an ai_lessons row (SSOT).
 
     GPT branch removed — a supplied client is inert. A losing trade
-    (pnl_r=-0.5, mixed) → ``entry_timing`` at the confidence floor.
+    (pnl_r=-0.5, mixed) → ``entry_timing`` at the confidence floor. No vault
+    .md is written (per-trade export removed 2026-06-02).
     """
     haiku = _MockGPTClient(response_text=json.dumps({
         "lesson_type": "GPT_VALUE_IGNORED",
@@ -227,19 +227,15 @@ async def test_post_trade_reflector_lesson_write_to_vault(
         "pnl_r": -0.5,
     }
     ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 50}, gate_id=8)
-    lessons_dir = tmp_path / "lessons"
-    result = await post_trade_reflector_gate(
-        ctx, client=haiku, conn=memdb, lessons_dir=lessons_dir
-    )
+    result = await post_trade_reflector_gate(ctx, client=haiku, conn=memdb)
     assert result.decision == GateDecision.REFLECTED
     assert result.model_used == "python"
     assert haiku.calls == []  # GPT never called
     # Deterministic: mixed result → entry_timing at the confidence floor.
     assert result.payload["lesson_type"] == "entry_timing"
     assert result.payload["confidence"] == 0.70
-    # File should be written.
-    files = list(lessons_dir.glob("trade-1_*.md"))
-    assert len(files) == 1
+    # No vault .md written.
+    assert list(tmp_path.rglob("*.md")) == []
     # ai_lessons row persisted.
     row = memdb.execute("SELECT lesson_type, confidence FROM ai_lessons").fetchone()
     assert row is not None
@@ -247,7 +243,7 @@ async def test_post_trade_reflector_lesson_write_to_vault(
 
 
 async def test_post_trade_reflector_always_persists_no_drop(
-    memdb: sqlite3.Connection, tmp_path: Path
+    memdb: sqlite3.Connection,
 ) -> None:
     """ai_conductor P2: the deterministic template never drops a lesson.
 
@@ -256,9 +252,7 @@ async def test_post_trade_reflector_always_persists_no_drop(
     """
     closed_trade = {"trade_id": "trade-keep", "strategy_id": "vb", "pnl_r": 0.0}
     ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 50}, gate_id=8)
-    result = await post_trade_reflector_gate(
-        ctx, client=None, conn=memdb, lessons_dir=tmp_path
-    )
+    result = await post_trade_reflector_gate(ctx, client=None, conn=memdb)
     assert result.decision == GateDecision.REFLECTED
     assert result.payload["confidence"] == 0.70
     assert "reason" not in result.payload  # not a drop
@@ -267,7 +261,7 @@ async def test_post_trade_reflector_always_persists_no_drop(
 
 
 async def test_post_trade_reflector_soft_mode_dampens_delta(
-    memdb: sqlite3.Connection, tmp_path: Path
+    memdb: sqlite3.Connection,
 ) -> None:
     """Soft mode (n<100) dampens the deterministic Δ to 25% of the P0 rail."""
     closed_trade = {
@@ -275,16 +269,7 @@ async def test_post_trade_reflector_soft_mode_dampens_delta(
         "pnl_r": 1.0, "won": True,
     }
     ctx = _ctx({"closed_trade": closed_trade, "closed_trade_count": 10}, gate_id=8)
-    result = await post_trade_reflector_gate(
-        ctx, client=None, conn=memdb, lessons_dir=tmp_path
-    )
+    result = await post_trade_reflector_gate(ctx, client=None, conn=memdb)
     # Soft mode = 25% of the +0.03 P0 rail = +0.0075.
     assert result.payload["delta"]["vb_x_asia"] == pytest.approx(0.03 * 0.25)
     assert result.payload["soft_mode"] is True
-
-
-def test_write_lesson_to_vault_is_idempotent(tmp_path: Path) -> None:
-    p1 = write_lesson_to_vault(trade_id="t-x", lesson_text="v1", lessons_dir=tmp_path, now_ts=NOW)
-    p2 = write_lesson_to_vault(trade_id="t-x", lesson_text="v2", lessons_dir=tmp_path, now_ts=NOW)
-    assert p1 == p2
-    assert p1.read_text() == "v2"

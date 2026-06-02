@@ -66,3 +66,8 @@ tags: [charter, coding]
 - `feedback_md_max_60_lines_split.md` (memory)
 - `feedback_no_hardcode_in_plans.md` (memory)
 - `feedback_no_quick_patch_ever.md` (memory)
+
+## 관련
+- [[karpathy-workflow]]
+- [[ADR-001-vault-structure]]
+- [[ADR-009-harness-collaboration-protocol]]

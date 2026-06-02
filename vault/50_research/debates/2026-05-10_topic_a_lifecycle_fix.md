@@ -96,3 +96,9 @@ A-PR2 migration 은 A-PR1 merge + loop 1회 hydrate 검증 **후** 실행 권장
 
 ## Status
 round-3 완결. **/dev 진입 OK**. R4 불필요.
+
+## 관련
+- [[2026-05-10_position_lifecycle_drift]]
+- [[2026-05-10_topic_b_dashboard_redesign]]
+- [[layer-3-sizing-risk]]
+- [[layer-7-strategy-isolation]]

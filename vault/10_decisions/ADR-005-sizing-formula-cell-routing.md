@@ -1,6 +1,7 @@
 ---
 type: ADR
 adr_id: ADR-005
+aliases: [ADR-005]
 status: active
 date_created: 2026-05-06
 tags: [adr, sizing, kelly, cell-routing, risk]

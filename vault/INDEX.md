@@ -2,64 +2,29 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-tags: [index, catalog]
+tags: [index, catalog, bus-map]
 ---
 
-# Polaris Vault INDEX
+# Polaris Vault INDEX — 3-Axis Bus Map
 
-## Tier 0 (mandatory first read)
-- [[_NOW]] — live state
-- [[log]] — chronological 1-line append
+Vault = **세컨브레인 버스(bus)**. RAG 처럼 가운데 앉아 세 축을 잇는다:
+**A1**(Claude + Jin — 설계/개발) ↔ **A2**(봇 — 전략/운영/거래) ↔ **A3**(DB — 로우데이터).
+각 축의 허브 MOC 가 진입점이고, 세 MOC 는 서로를 backlink 로 연결한다.
 
-## 00_charter (constitution)
+## 3축 허브 (먼저 여기로)
+- [[MOC-A1-design-dev]] — **A1** 설계 & 개발: 헌장 / ADR / 8-layer 컴포넌트 / 디베이트
+- [[MOC-A2-bot-ops]] — **A2** 봇 전략 & 운영: 7 전략 / 다이제스트 / 대시보드
+- [[MOC-A3-raw-data]] — **A3** DB 로우데이터: ai_lessons / trades / positions / quote_ticks (vault↔SQLite 다리)
+
+## Tier-0 진입점 (mandatory first read)
+- [[_NOW]] — 라이브 상태 (Tier 0, 세션 시작 필독)
 - [[north-star]] — 0.75% primary / 1.25% stretch / aggressive bias
-- [[aggressive-bias]] — defensive 거부 영속 원칙
-- [[active-autonomous-vision]] — per-gate AI / dynamic universe / 자가 진화
-- [[coding-conventions]] — Python style, naming, no hardcode in plans
-- [[karpathy-workflow]] — Ingest / Query / Lint 3 ops
+- [[ADR-003]] — 8-Layer Architecture (아키텍처 척추)
+- [[log]] — chronological 1-line append (NO interpretation)
 
-## 10_decisions (ADRs, creation order)
-- [[ADR-001]] Vault Structure
-- [[ADR-002]] Vision (active autonomous, 0.75%/1.25% target)
-- [[ADR-003]] 8-Layer Architecture
-- [[ADR-004]] Per-Gate AI Pipeline
-- [[ADR-005]] Sizing Formula + Cell Routing
-- [[ADR-006]] Cell Matrix 8-dim (4-dim P0)
-- [[ADR-007]] Learner Network 7 (3 P0)
-- [[ADR-008]] 7 Strategies (signal generator role)
-- [[ADR-009]] Harness Collaboration Protocol (3-layer install)
-- [[ADR-010]] Venue Round-Trip Activation (real demo wire + db 격리)
-
-## 20_strategies (P0 Day 4 — 7 signal generators)
-- [[volume_burst]] — OKX SPOT 1m, vol z>2.5 + prior-high break + ATR floor (corr_group=spot_intraday_event)
-- [[tsmom]] — OKX SPOT 1H, 20-bar return basket momentum (corr_group=spot_cross_sectional_momo)
-- [[rsi_bb_pullback]] — OKX SPOT 15m, RSI<30 + BB lower + ma200 trend filter (corr_group=spot_mean_reversion)
-- [[spot_donchian]] — OKX SPOT 1H, Donchian 40 + ADX>20 (corr_group=spot_breakout)
-- [[fx_breakout_basket]] — Capital CFD 1H, FX 5-pair Donchian 40 + ADX>20 30× lev (corr_group=cfd_fx_trend)
-- [[xau_indices_trend]] — Capital CFD 1H, XAU/US500/US100/GER40 Donchian 30 + 20bar momentum 20× lev (corr_group=cfd_index_commodity_trend)
-- [[session_breakout]] — Capital CFD 5m, 4-sym open ATR×1.5 break 20× lev (corr_group=cfd_session_event)
-
-## 30_components (per-layer, Phase 0 codex round 1 합의)
-- [[layer-0-universe-discovery]] — 4-axis active filter + dynamic focus 12-48 + listing watchdog
-- [[layer-1-canonical-baseline]] — separate bars/quote_ticks + 5-metric (atr_pct/size/signal/vol/pnl_std) + ratio normalize
-- [[layer-2-per-gate-pipeline]] — custom asyncio + Haiku 1/3/4 + Python 2/5-8 + mixed failure + G4 fast-path
-- [[layer-3-sizing-risk]] — T4 + cell mult clip-전 + triple cold start floor 3.0/3.5% + headroom min() + fill-rate 70/60
-- [[layer-4-cell-matrix]] — 4-dim primary + shadow + EWMA 7d + warmup shrinkage + dynamic quartile (>=20)
-- [[layer-5-learner-network]] — incremental + hourly commit + triple block + SQLite snapshot + AI feedback ≠ cell
-- [[layer-6-live-recalc]] — dirty-trigger 5s + venue regime + 1-swap/trade + 3-layer stack + close-only override reset
-- [[layer-7-strategy-isolation]] — asyncio task + central allocator (one Lock) + 4-state breaker + idempotent key
-- [[harness-collab-protocol]] — multi-agent orchestration glue: agent roster + handoff triggers + builder≠reviewer + brain contribution ([[ADR-009]])
-
-## 40_ops
-- daily/, incidents/, digests/, lever_changes/
-- [[2026-05-28_5axis_audit]] — 5-axis P0 venue wire-miss + fix + Capital live 증명
-
-## 50_research
-- forensic/, debates/, lessons/
-- [[t-p0-wire_2026-05-28]] — venue wire-miss (green ≠ safe, builder≠reviewer 실증)
-
-## .templates
-- ADR.md / INSIGHT.md / STRATEGY.md / COMPONENT.md / LESSON.md
-
-## Tags
-- See [[.tag_taxonomy]]
+## 폴더 지도
+- `00_charter/` 헌장 · `10_decisions/` ADR-001..010 · `30_components/` layer-0..7 → **A1**
+- `20_strategies/` 7전략 · `40_ops/` digests·daily·handover · `30_components/dashboard` → **A2**
+- `data/polaris*.sqlite` (vault 밖) + `data/lessons_archive/` → **A3**
+- `50_research/` debates·forensic·lessons → A1 리서치
+- `.templates/` ADR·INSIGHT·STRATEGY·COMPONENT·LESSON · `.tag_taxonomy` 태그

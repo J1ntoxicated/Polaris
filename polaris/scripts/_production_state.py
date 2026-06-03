@@ -45,6 +45,12 @@ class ProdLoopState:
     # Close-leg venue rejects (external — min-order 51020 / compliance / market
     # closed) released WITHOUT a strategy fault; position preserved + retried.
     venue_close_rejects: int = 0
+    # Per-position consecutive IN-SESSION close-reject tally. A position whose
+    # venue close keeps failing while the market is OPEN (the deal expired / was
+    # auto-closed on the demo) is a ZOMBIE — drained to status='reconciled' once
+    # this passes a conservative limit so the exit engine stops retrying forever.
+    # Reset on a successful close; off-session rejects do NOT increment it.
+    close_reject_counts: dict[str, int] = field(default_factory=dict)
     g1_runs: int = 0
     g2_emits: int = 0
     g8_runs: int = 0

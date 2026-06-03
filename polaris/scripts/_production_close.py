@@ -26,6 +26,12 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
 )
 from polaris.core.lineage import record_segment_close
+from polaris.core.live_recalc.session_exit_rail import (
+    _CAL_FX_INDICES,
+    _CAL_US_EQUITY,
+    _fx_in_session,
+)
+from polaris.core.streams import resolve_stream
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
     _safe_record_meta_label,
@@ -51,6 +57,7 @@ from polaris.scripts._smoke_real_roundtrip import (
     resolve_okx_base_url,
 )
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
+from polaris.venues.alpaca.equity_session_gate import stream_session_gate_active
 from polaris.venues.capital import CapitalAdapter
 from polaris.venues.okx import OKXAdapter
 
@@ -58,6 +65,37 @@ if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
 
 logger = logging.getLogger(__name__)
+
+# Zombie-close drain. A venue close that keeps failing while the market is OPEN
+# (the deal expired / was auto-closed on the demo while our book still tracks the
+# position) is un-closeable forever. After this many consecutive IN-SESSION
+# rejects on a position at least this old, mark it terminal (state-drift
+# recovery) so the exit engine stops the infinite retry. Conservative: a
+# transiently-rejected live position (market-closed / momentary) never reaches
+# both bars because off-session rejects do not count toward the tally.
+ZOMBIE_CLOSE_REJECT_LIMIT = 40
+ZOMBIE_MIN_AGE_HOURS = 1.0
+
+
+def _drain_in_session(venue: str, now_ts: int) -> bool:
+    """In-session test for the zombie-close drain tally, dispatched on the venue's
+    stream calendar — a close reject only counts toward terminal while the market
+    is actually OPEN (an off-session reject is EXPECTED, not a zombie). Wiring the
+    Alpaca-only ``stream_session_gate_active`` here was wrong: it recognizes only
+    ``us_equity_cal`` and returns False for Capital's ``fx_indices_cal``, so the
+    tally would have run 24/7 and drained a LIVE Capital position waiting through a
+    weekend. Dispatch correctly: ``fx_indices_cal`` (Capital) → the Fri→Sun 22:00
+    UTC weekend boundary; ``us_equity_cal`` (Alpaca) → the RTH gate; ``always_on``
+    (OKX) / unknown → always in-session (count)."""
+    try:
+        cal = resolve_stream(venue).session_calendar
+    except Exception:  # noqa: BLE001 — unregistered venue → count (fail toward drain)
+        return True
+    if cal == _CAL_FX_INDICES:
+        return _fx_in_session(now_ts)
+    if cal == _CAL_US_EQUITY:
+        return not stream_session_gate_active(cal)
+    return True
 
 # Explicit re-export: ``real_pnl_r_from_fills`` / ``_close_excursion_r`` live in
 # ``_production_close_helpers`` (line budget) but are part of this module's
@@ -274,6 +312,8 @@ async def _close_trade_with_real_pnl(
     keeps the existing mark-to-market drift. PnL_R is always recomputed from
     the entry fill so Layer 4/5 telemetry stays consistent.
     """
+    # Stable key for the zombie-drain reject tally; reset on any forward progress.
+    drain_pid = trade.position_id or f"{trade.venue}:{trade.symbol}:{trade.open_ts}"
     if real_roundtrip:
         # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
         # computed against the actual exit fill (not the pre-close bar drift).
@@ -314,11 +354,38 @@ async def _close_trade_with_real_pnl(
             # circuit breaker (integrity-only philosophy; close failure is
             # self-healing). The prior unconditional FAULT_EXCEPTION here caused
             # a HARD_HALT cascade when a sub-min position kept failing to close.
-            logger.warning(
-                "[close/real] %s:%s close rejected / no-fill — state preserved (external, no fault)",
-                trade.venue, trade.symbol,
-            )
             state.venue_close_rejects += 1
+            # ZOMBIE DRAIN. Tally consecutive rejects ONLY while the venue session
+            # is OPEN — an off-session reject (weekend / off-RTH) is expected and
+            # must never accumulate, else a live position waiting for the open
+            # would be wrongly abandoned. A position that keeps failing to close
+            # in-session AND is old is un-closeable (deal expired / auto-closed on
+            # the demo) — drain it terminal (same state-drift recovery as a true
+            # orphan; live: 5 positions × ~120 rejects = 579, retried forever).
+            in_session = _drain_in_session(trade.venue, now_ts)
+            age_h = (now_ts - int(trade.open_ts)) / 3600.0
+            if in_session:
+                cnt = state.close_reject_counts.get(drain_pid, 0) + 1
+                state.close_reject_counts[drain_pid] = cnt
+            else:
+                cnt = state.close_reject_counts.get(drain_pid, 0)
+            if in_session and cnt >= ZOMBIE_CLOSE_REJECT_LIMIT and age_h >= ZOMBIE_MIN_AGE_HOURS:
+                logger.warning(
+                    "[close/real] %s:%s un-closeable ZOMBIE — %d in-session venue "
+                    "rejects over %.1fh, reconciling terminal (venue-side "
+                    "state-drift recovery)",
+                    trade.venue, trade.symbol, cnt, age_h,
+                )
+                state.close_reject_counts.pop(drain_pid, None)
+                return _reconcile_orphan(
+                    conn, state=state, trade=trade, trade_idx=trade_idx,
+                    available=0.0, now_ts=now_ts,
+                )
+            logger.warning(
+                "[close/real] %s:%s close rejected / no-fill — state preserved "
+                "(external, no fault) [reject #%d in_session=%s %.1fh]",
+                trade.venue, trade.symbol, cnt, in_session, age_h,
+            )
             return False
         # P1-6: recompute pnl_r AND pnl_usd from the real exit price so the
         # Layer 4 cell matrix + Layer 5 learner updates reflect what actually
@@ -332,6 +399,9 @@ async def _close_trade_with_real_pnl(
         # than the tracked qty — keep the position OPEN with a reduced qty (see
         # _persist_partial_close); only a ~full fill closes + pops below.
         if real_fill.base_qty < trade.base_qty * (1.0 - _CLOSE_FULL_FILL_EPS):
+            # Forward progress (a real partial fill) — reset the zombie tally so a
+            # genuinely-filling position is never drained as un-closeable.
+            state.close_reject_counts.pop(drain_pid, None)
             return _persist_partial_close(
                 conn, state=state, trade=trade, close_fill=real_fill,
                 pnl_usd=pnl_usd, now_ts=now_ts,
@@ -391,6 +461,7 @@ async def _close_trade_with_real_pnl(
             state.open_trades.remove(trade)
     trade.closed = True
     trade.pnl_r = pnl_r
+    state.close_reject_counts.pop(drain_pid, None)  # full close — drop the drain tally
     state.fills_close += 1
     state.closed_trades.append(trade)
 

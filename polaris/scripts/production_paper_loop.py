@@ -365,6 +365,8 @@ async def run_production_paper_loop(
     # DELETE + PASSIVE checkpoint run on a throwaway connection in a worker thread
     # every ~15s, off the loop.
     _QUOTE_TICKS_RETAIN_SEC = 7200
+    _WAL_RECLAIM_BUSY_MS = 1200  # short: a reader-present reclaim returns BUSY fast
+    _wal_cycle = [0]
 
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)
@@ -372,7 +374,27 @@ async def run_production_paper_loop(
             cutoff = int(time.time()) - _QUOTE_TICKS_RETAIN_SEC
             ck.execute("DELETE FROM quote_ticks WHERE ts < ?", (cutoff,))
             ck.commit()
-            ck.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            _wal_cycle[0] += 1
+            # PASSIVE every cycle never blocks a reader but also never RECLAIMS the
+            # -wal FILE (it only flushes frames behind no snapshot), so the file
+            # high-water creeps under a near-continuous dashboard reader (live:
+            # +18 MB/h → 700 MB / re-freeze in ~25h). Every ~10th cycle (~2.5min)
+            # attempt a file-reclaiming checkpoint with a SHORT busy_timeout: the
+            # now-small pruned DB makes the dashboard's read GAPS frequent, so a
+            # reclaim usually catches one; if a reader is present it just returns
+            # BUSY in <=1.2s (off the loop, in this worker thread) — NOT the 8s
+            # exclusive-wait on the un-pruned 645k-row DB that wedged the loop
+            # before. So the WAL file is bounded with no deadlock surface.
+            if _wal_cycle[0] % 10 == 0:
+                ck.execute(f"PRAGMA busy_timeout={_WAL_RECLAIM_BUSY_MS}")
+                row = ck.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                # (busy, log_frames, checkpointed). busy=1 means a reader held the
+                # exclusive lock → no reclaim this cycle; logged so a pathological
+                # persistent-reader creep is observable rather than silent.
+                if row is not None and int(row[0]) == 1:
+                    logger.debug("[wal] reclaim checkpoint busy (reader held) %r", row)
+            else:
+                ck.execute("PRAGMA wal_checkpoint(PASSIVE)")
         finally:
             ck.close()
 

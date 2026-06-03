@@ -8,6 +8,7 @@ loop state lives in ``_production_state``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import sqlite3
@@ -333,6 +334,15 @@ async def _run_tick(
     for venue, symbol, asset_class, group_id in focus:
         if not group_id:
             continue
+        # Cooperative yield (event-loop fairness). The per-symbol regime pass
+        # (read_recent_bars + compute_and_flip_regime) over the full focus set is
+        # otherwise a multi-second SYNC block that starves the ~0.5s tick engine
+        # AND the WS recv loop (live: 30-45s loop stalls → WS idle-drop+reconnect
+        # → tick engine telemetry every ~50s, 0 real-time opens). Yielding between
+        # symbols lets the real-time path interleave — same pattern as the learner
+        # tune / WS-recv burst yields. No behavior change: no DB transaction spans
+        # this point (each conn.execute here auto-commits).
+        await asyncio.sleep(0)
         bars_1m = read_recent_bars(conn, venue=venue, symbol=symbol, bar_interval="1m")
         if not bars_1m:
             continue
@@ -370,6 +380,11 @@ async def _run_tick(
                 continue
             if owns_okx and venue in TICK_ENGINE_OWNED_VENUES:
                 continue
+            # Cooperative yield (see the regime loop above). build_real_market_view
+            # (indicators) + read_recent_bars per (symbol, timeframe, strategy) is
+            # the heaviest SYNC stretch in the tick — yield between symbols so the
+            # tick engine + WS are not starved for the duration of the fan-out.
+            await asyncio.sleep(0)
             bars = read_recent_bars(
                 conn, venue=venue, symbol=symbol, bar_interval=timeframe,
             )

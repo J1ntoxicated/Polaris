@@ -356,10 +356,25 @@ async def run_production_paper_loop(
     # a reader and never holds the exclusive lock — it flushes whatever frames sit
     # behind no live snapshot, which the dashboard's sub-second read GAPS make
     # plenty — so the -wal stays bounded with ZERO deadlock surface.
+    # Read-only DASHBOARD MIRROR. The dashboard's 1s collect_snapshot scans the
+    # live DB (quote_ticks ~645k rows) and that concurrent random I/O against the
+    # bot's writes wedged the event loop in UN-state — the bot was rock-solid
+    # ALONE but froze the instant the dashboard attached, regardless of WAL size
+    # or checkpoint mode. Decouple it: maintain a consistent read-only COPY via
+    # the SQLite online-backup API (page-incremental, allows concurrent writes,
+    # releases the GIL) every ~15s off the loop. Point the dashboard at this mirror
+    # (POLARIS_DASH_DB=data/paper/dashboard_mirror.sqlite) → ZERO live contention.
+    dash_mirror = target_db.parent / "dashboard_mirror.sqlite"
+
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)
         try:
             ck.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            mirror = sqlite3.connect(str(dash_mirror), timeout=10.0)
+            try:
+                ck.backup(mirror)
+            finally:
+                mirror.close()
         finally:
             ck.close()
 

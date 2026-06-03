@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import time
 from abc import ABC, abstractmethod
@@ -236,11 +237,16 @@ class BaseLearner(ABC):
         except Exception:
             self.conn.execute("ROLLBACK")
             raise
-        # Disk snapshot (SQLite hot backup + JSON manifest) runs outside the
-        # transaction so it does not deadlock against the writer lock. The
-        # in-DB row snapshot above is the rollback SSOT; the disk pair is
-        # operator-facing and best-effort.
-        self._flush_disk_snapshot()
+        # Disk snapshot (SQLite hot backup + JSON manifest) — DISABLED by default.
+        # A full ``conn.backup()`` of the 215 MB live DB on the SHARED loop conn
+        # blocked the asyncio event loop ~3 min PER learner PER cycle, starving the
+        # real-time tick engine + WS (live: tick engine silent for minutes, WS ping
+        # timeouts). The in-DB row snapshot above (``_write_snapshot``) is the
+        # rollback SSOT — ``rollback`` reads that ROW, and NOTHING reads the disk
+        # .db files. So the disk pair is purely operator-facing. Re-enable with
+        # ``LEARNER_DISK_SNAPSHOT=1`` (accepting the multi-minute loop block).
+        if os.environ.get("LEARNER_DISK_SNAPSHOT") == "1":
+            self._flush_disk_snapshot()
         logger.info(
             "[learner %s] hourly commit — keys_updated=%d snapshot_ts=%s",
             self.learner_id,

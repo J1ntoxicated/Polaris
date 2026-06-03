@@ -34,11 +34,12 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # (as ``PHASE1_VENUES``) and the bar entry path read THIS single frozenset, so
 # the two producers can never drift out of sync (no double-trade).
 # Empirical (2026-06-03): the DEMO OKX WS delivers near-zero ticks (~4 symbols,
-# ~0.03 tick/s — simulated us.okx.com feed), too sparse to fill a feature window;
-# Capital (CFD, bidirectional) streams a dense live tick feed → it is the
-# live-tick-rich venue the microstructure engine needs (and Jin's most-active
-# venue). So Phase 1 = {capital, okx}: Capital carries the signal, OKX fires only
-# when its sparse feed happens to fill a window.
+# ~0.03 tick/s — simulated us.okx.com feed), too sparse to fill a microstructure
+# window; Capital (CFD, bidirectional) streams a dense live tick feed → it is the
+# live-tick-rich venue the engine needs (and Jin's most-active venue). Phase 1 =
+# {capital, okx}: Capital carries the live signal; OKX is owned (so its
+# churn-prone bar strategies vacate) but fires only when its sparse feed happens
+# to fill a window.
 TICK_ENGINE_OWNED_VENUES: frozenset[str] = frozenset({"capital", "okx"})
 
 

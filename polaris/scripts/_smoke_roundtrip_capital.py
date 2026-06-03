@@ -29,6 +29,12 @@ __all__ = [
     "run_capital_round_trip",
 ]
 
+# Capital open returns PENDING immediately; the position dealId only lands in the
+# confirm once the deal finalizes. Poll the confirm up to this many times (×
+# ``poll_delay_sec``) until it is no longer PENDING, so the close-leg deal_id is
+# captured (a single early poll reads PENDING → dealId None → uncloseable).
+_CONFIRM_POLLS = 6
+
 
 def _synthetic_capital_fill(*, is_close: bool) -> Fill:
     direction = "sell" if is_close else "buy"
@@ -86,9 +92,22 @@ async def real_capital_open_fill(
             reject_code=str(open_resp.status) if open_resp.status else "no_fill",
             reject_msg=open_resp.reason or None,
         )
-    await asyncio.sleep(poll_delay_sec)
-    confirm = await adapter.confirm(open_resp.deal_reference)
-    deal_status = str(confirm.get("dealStatus"))
+    # Poll the confirm until the deal finalizes (not PENDING), so the position
+    # deal_id (in ``affectedDeals``) is captured for the close leg. Bounded
+    # retries — degrade-never-halt; a never-finalizing deal falls through to the
+    # reject path below, never hangs.
+    confirm: dict[str, Any] = {}
+    deal_status = ""
+    for _poll in range(_CONFIRM_POLLS):
+        await asyncio.sleep(poll_delay_sec)
+        confirm = await adapter.confirm(open_resp.deal_reference)
+        deal_status = str(confirm.get("dealStatus") or "")
+        logger.debug(
+            "[capital] confirm dealRef=%s status=%s affectedDeals=%s",
+            open_resp.deal_reference, deal_status, confirm.get("affectedDeals"),
+        )
+        if deal_status and deal_status not in ("PENDING", "None"):
+            break
     if deal_status not in ("ACCEPTED", "OPEN"):
         return OpenAttempt(
             fill=None,

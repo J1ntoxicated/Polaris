@@ -10,12 +10,12 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
-**🟢🟢 HANDOVER 2026-06-03 (P5 틱-엔진 LIVE — "실시간-틱 의사결정" 완성·기동).** 봇 PID=`data/paper/production.pid`=17127 LIVE, DB=`data/polaris_live.sqlite`, log=`data/paper/p5_live.log`, 대시보드 :8770. env=`TICK_ENGINE_ENABLED=1`(SHADOW off=live).
-- **무엇**: 라이브 WS 틱 → 미시구조 features(velocity/burst_z/ofi/aggr_flow/overshoot/spread) → 양방향 신호(burst_rider/flow_pressure/micro_reversion) → 실시간 진입/엑싯(모멘텀=ATR-trail, reversion=fast-scalp). 바=인디케이터 base, 틱=결정. 틱-엔진 owns **{capital, okx}**(바 vacate→OKX churn 멈춤), 바=Alpaca. `core/ticks/` + `_production_tick_engine.py`. SSOT=`.claude/plans/p5_tick_decision_engine_2026-06-03.md`.
+**🟢🟢 HANDOVER 2026-06-03 (P5 틱-엔진 LIVE — "실시간-틱 의사결정" 완성·기동).** 봇 PID=`data/paper/production.pid`=60866 LIVE, DB=`data/polaris_live.sqlite`, log=`data/paper/p5_live3.log`, 대시보드 :8770. env=`TICK_ENGINE_ENABLED=1`(SHADOW off=live).
+- **무엇**: 라이브 WS 틱 → 미시구조 features(velocity/burst_z/ofi/aggr_flow/overshoot/spread) → 양방향 신호(burst_rider/flow_pressure/micro_reversion) → 실시간 진입/엑싯(모멘텀=ATR-trail, reversion=fast-scalp). 바=인디케이터 base, 틱=결정. 틱-엔진 owns **{capital}** only(OKX 데모 틱 희박 ~0.03/s+OKX open close 오라우팅 → OKX/Alpaca=바). `core/ticks/` + `_production_tick_engine.py`. SSOT=`.claude/plans/p5_tick_decision_engine_2026-06-03.md`.
 - **라이브 검증(✅ 풀 라운드트립+수익)**: shadow=False, 실주문 다수. **GOLD micro_reversion: open→confirm ACCEPTED dealId→scalp_target→`close_position dealId=`→ +0.51R** (deal_id 캡처+close end-to-end 입증). Capital US30 숏(양방향) 셰도우. tick 에러 0.
 - **커밋체인**: `2854899`(볼트 3축 세컨브레인=텔레메트리 2632 아카이브+ADR alias+MOC) · `6627f1f`(P5 빌드, 적대리뷰 PASS) · `23722f4`(**clock 버그**=epoch초ms오인+monotonic혼선, uptime23.5일이라 전부 stale→수정 후 신호발화 + eval 텔레메트리 30s) · `c1c72a1`(**Capital deal_id 캡처**=open PENDING→confirm 폴링 ACCEPTED까지→affectedDeals[0].dealId) · `8775734`(**틱-엔진 = {capital} ONLY**: OKX 데모 틱 희박+OKX open이 close venue 오라우팅→{capital,okx}→{capital}, OKX/Alpaca는 바).
-- **⚠️ 알려진 deal_id 잔여(다음 세션)**: deal_id가 **in-memory+fills.order_id엔 있으나 positions 테이블엔 컬럼 없음** → **재기동 하이드레이션서 유실**(옛/생존 포지션 close시 deal_id=None). 수정=positions에 deal_id persist OR startup서 fills.order_id로 하이드레이트(fills↔position 링크=contribution_id 확인). **그래서 현재 봇(PID17127, {capital,okx} in-mem) 재기동 보류**(현 열린 Capital 2개 in-session deal_id 보유). `{capital}` 배포=다음 클린 재기동(하이드레이션 수정 후).
-- **남은**: ① **deal_id 크로스-재기동 하이드레이션 수정**(위) ② Phase 2=Alpaca 틱 ③ 임계 캘리브(aggressive θ_burst1.5/θ_ofi0.2/θ_revert1.5, posterior 쌓이면) ④ OKX tick open `trade.venue` 세팅(실거래 dense시). 교훈=[[feedback_realtime_price_first_principle]]·[[project_vault_3axis_secondbrain]]·[[project_exit_decision_vs_close_execution]].
+- **✅ deal_id 완전 해결**: 캡처(`c1c72a1` confirm폴링 PENDING→ACCEPTED) → persist(`cd7f6a0` **positions.deal_id 컬럼**+idempotent ALTER 마이그+open persist) → **재기동 생존**(하이드레이션 + legacy=fill order_id fallback, 적대리뷰 PASS) → un-addressable 고아 **reconcile**(`657e193` no-deal_id→CloseOrphan, error-loop 차단). 라이브 검증: 새 Capital 진입·**deal_id 청산** 정상(scalp +0.51R 등), 하드에러 0, Traceback 0. US100 등 legacy 고아는 엑싯 시 자동 reconcile.
+- **남은(로드맵)**: ① 임계 캘리브(aggressive θ_burst1.5/θ_ofi0.2/θ_revert1.5 → 신호별 승률·EV로, posterior 쌓이면) ② Phase 2=Alpaca 틱(RTH) + OKX tick open `trade.venue`(실거래 dense시) ③ 신호 다양화 ④ **데이터 신빙성**(티커/테마별 차별화 테크니컬+멀티소스 백데이터 Yahoo 등 — Jin 제기, 바/레짐 컨텍스트 질) ⑤ 모바일 대시보드 ⑥ 비전: capital waterfall·self-evolve·AI conductor. 교훈=[[feedback_realtime_price_first_principle]]·[[project_vault_3axis_secondbrain]]·[[project_exit_decision_vs_close_execution]].
 
 **🔴 HANDOVER 2026-06-01-night4 (Jin 자러 감 — 자율 mandate "확실히 거래 발생 + 모든 상황서 수익". 봇 PID=`data/paper/production.pid`=85373, **fresh-reset 클린 DB**(이전 reconcile-오염 DB 아카이브=`data/polaris_live_archive_20260601_1617.sqlite`), log=`data/paper/production_p1_5_0601_clean.log`, 대시보드 :8770. **reconcile-import 게이트 오프**=`POLARIS_RECONCILE_VENUE_IMPORT`).**
 **🟢 현재 상태(라이브 검증)**: 클린 재기동 후 **에러루프 0**(deal_id/reconcile/insta-close 사라짐), OKX 거래중·**수수료 10bps**(70bps 데모→real, 라이브확인)·**WS 3거래소 라이브**(okx/capital/alpaca 초당 다틱)·대시보드 실시간. 전체 스위트 **1735 green**, ruff/mypy clean.
@@ -203,4 +203,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-03 02:31 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-03 05:26 (paper=True, full_pipeline=True)

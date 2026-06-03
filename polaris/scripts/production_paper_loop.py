@@ -342,6 +342,36 @@ async def run_production_paper_loop(
     layer0_task = asyncio.create_task(
         _layer0_producer(conn, state=state, stop_evt=stop_evt)
     )
+
+    # WAL hygiene, from process start. The bot's heavy startup writes (baseline
+    # seed) + the always-present dashboard reader (1s collect_snapshot) kept
+    # SQLite's autocheckpoint perpetually deferred, so the -wal grew unbounded
+    # (live: 729 MB); past a few hundred MB every DB op walks a giant wal-index
+    # and goes multi-minute UN-state slow → the loop + WS + dashboard all froze.
+    # A TRUNCATE checkpoint on a throwaway connection, run in a worker thread
+    # every ~15s, keeps the -wal bounded WITHOUT ever blocking the event loop —
+    # a checkpoint that briefly waits on a reader blocks only its own thread.
+    def _checkpoint_wal_blocking() -> None:
+        ck = sqlite3.connect(str(target_db), timeout=10.0)
+        try:
+            ck.execute("PRAGMA busy_timeout=8000")
+            ck.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            ck.close()
+
+    async def _wal_checkpoint_producer() -> None:
+        while not stop_evt.is_set():
+            try:
+                await asyncio.wait_for(stop_evt.wait(), timeout=15.0)
+                return  # stopped
+            except TimeoutError:
+                pass
+            try:
+                await asyncio.to_thread(_checkpoint_wal_blocking)
+            except Exception:  # noqa: BLE001 — hygiene task, never halts the bot
+                logger.debug("[wal] checkpoint cycle failed (busy)")
+
+    wal_task = asyncio.create_task(_wal_checkpoint_producer())
     # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each
     # source's own TTL cadence; the cache feeds compute_and_flip_regime as
     # read-only regime evidence (SIGNAL only, never a throttle).
@@ -485,20 +515,6 @@ async def run_production_paper_loop(
                     resubscribe_ws_clients(conn, ws_clients)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
-            # WAL hygiene (every ~60s). The bot's constant short reads + a
-            # read-only dashboard connection kept SQLite's autocheckpoint
-            # perpetually deferred, so the -wal grew unbounded (live: 729 MB).
-            # Past a few hundred MB every DB op must walk a huge wal-index and
-            # goes multi-MINUTE UN-state slow → the loop + WS + dashboard all
-            # froze. A PASSIVE checkpoint never blocks on a reader (it flushes
-            # only the frames behind no live snapshot), so it is safe on the loop
-            # and keeps the WAL bounded. RESTART/TRUNCATE would block on the
-            # always-present reader → do not use them here.
-            if tick_idx % 12 == 0:
-                try:
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except sqlite3.Error:
-                    logger.debug("[wal] passive checkpoint skipped (busy)")
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()
@@ -510,10 +526,13 @@ async def run_production_paper_loop(
                 await tick_engine_task
         layer0_task.cancel()
         altdata_task.cancel()
+        wal_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await layer0_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await wal_task
         # M5 — WS teardown. stop_evt (set above) ends every client.run + the
         # flush loop cooperatively; cancel then gather(return_exceptions=True)
         # joins them (final drain happens inside run_flush_loop on stop_evt),

@@ -22,13 +22,17 @@ from polaris.core.ticks.signals import (
 from polaris.core.ticks.types import TickSample
 
 CFG = TickEngineConfig()
-NOW = 1_000.0
+# Realistic epoch-seconds "now" (the real OKX/Capital feed stamps ticks in epoch
+# seconds). Windows below end a few seconds before NOW so the newest tick is
+# fresh (age within fresh_sec) and the per-tick Δt are the real 1s spacing the
+# EWMA decays against.
+NOW = 1_780_451_113.0
 VENUE = "okx"
 SYMBOL = "BTC-USDT"
 
 
 def _tick(
-    ts_ms: int,
+    ts: int,
     mid: float,
     *,
     bid_size: float = 10.0,
@@ -42,7 +46,7 @@ def _tick(
     ask = mid + half
     spread_bps = (ask - bid) / mid * 1e4 if mid > 0 else 0.0
     return TickSample(
-        ts=ts_ms,
+        ts=ts,
         bid=bid,
         ask=ask,
         mid=mid,
@@ -54,7 +58,8 @@ def _tick(
     )
 
 
-_BASE_MS = int((NOW - 1.0) * 1000)  # ~1s before NOW → fresh
+# Window origin: 20 ticks 1s apart end at BASE+19, i.e. ~6s before NOW → fresh.
+_BASE = int(NOW - 25)
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +67,15 @@ _BASE_MS = int((NOW - 1.0) * 1000)  # ~1s before NOW → fresh
 # ---------------------------------------------------------------------------
 
 
-def _burst_window(direction: int) -> list[TickSample]:
-    """16 near-flat ticks (tiny noise) then a sharp directional jump.
+def _burst_window(direction: int, *, final_jump: float = 0.30) -> list[TickSample]:
+    """16 near-flat ticks (tiny noise) then a ramp into a sharp final spike.
 
-    ``direction`` +1 = up burst (buyer-aggressor), -1 = down burst (seller).
-    Trades print on the aggressor side so aggr_flow agrees with the burst.
+    Ticks are 1s apart (epoch seconds). ``direction`` +1 = up burst
+    (buyer-aggressor), -1 = down burst (seller). Trades print on the aggressor
+    side so aggr_flow agrees with the burst. The last step is the sharp velocity
+    spike (``final_jump``) that stands out as a burst_z z-score above the trailing
+    per-step speed baseline; a larger ``final_jump`` → strictly larger burst_z
+    (so the monotone-conviction test is honest, not z-score scale-invariant).
     """
     ticks: list[TickSample] = []
     mid = 100.0
@@ -74,14 +83,15 @@ def _burst_window(direction: int) -> list[TickSample]:
     for i in range(16):
         mid += 0.001 if i % 2 == 0 else -0.001
         # Tiny trades on the same passive level (no strong aggressor).
-        ticks.append(_tick(_BASE_MS + i * 100, mid, last_trade_price=mid, last_trade_size=0.5))
-    # The burst: a big jump in ``direction``, trade prints through the mid.
-    for j in range(4):
-        mid += direction * 0.30
+        ticks.append(_tick(_BASE + i, mid, last_trade_price=mid, last_trade_size=0.5))
+    # The burst: a short ramp then a sharp final-step velocity spike.
+    jumps = [0.08, 0.10, 0.12, final_jump]
+    for j, step in enumerate(jumps):
+        mid += direction * step
         trade_px = mid + direction * 0.05  # aggressor lifts/hits in the burst dir
         ticks.append(
             _tick(
-                _BASE_MS + (16 + j) * 100,
+                _BASE + 16 + j,
                 mid,
                 last_trade_price=trade_px,
                 last_trade_size=8.0,
@@ -131,23 +141,11 @@ def test_burst_rider_blocked_by_wide_spread() -> None:
 
 
 def test_burst_rider_conviction_monotone_in_burst() -> None:
-    # A bigger burst → higher (or equal, if saturated) conviction.
-    small = compute_tick_features(_burst_window(+1), NOW, CFG)
-
-    def _bigger() -> list[TickSample]:
-        ticks: list[TickSample] = []
-        mid = 100.0
-        for i in range(16):
-            mid += 0.001 if i % 2 == 0 else -0.001
-            ticks.append(_tick(_BASE_MS + i * 100, mid, last_trade_size=0.5))
-        for j in range(4):
-            mid += 0.60  # twice the per-tick jump
-            ticks.append(
-                _tick(_BASE_MS + (16 + j) * 100, mid, last_trade_price=mid + 0.05, last_trade_size=8.0)
-            )
-        return ticks
-
-    big = compute_tick_features(_bigger(), NOW, CFG)
+    # A bigger final-spike burst → strictly higher burst_z → higher conviction.
+    small = compute_tick_features(_burst_window(+1, final_jump=0.30), NOW, CFG)
+    big = compute_tick_features(_burst_window(+1, final_jump=0.60), NOW, CFG)
+    assert small.burst_z is not None and big.burst_z is not None
+    assert big.burst_z > small.burst_z  # a real, not scale-invariant, increase
     i_small = burst_rider(small, "trend", venue=VENUE, symbol=SYMBOL, ref_price=1.0, cfg=CFG)
     i_big = burst_rider(big, "trend", venue=VENUE, symbol=SYMBOL, ref_price=1.0, cfg=CFG)
     assert i_small is not None and i_big is not None
@@ -176,7 +174,7 @@ def _imbalance_window(side_sign: int) -> list[TickSample]:
             trade_px = mid - 0.05  # seller hits the bid
         ticks.append(
             _tick(
-                _BASE_MS + i * 100,
+                _BASE + i,
                 mid,
                 bid_size=bid_size,
                 ask_size=ask_size,
@@ -208,7 +206,7 @@ def test_flow_pressure_fires_short_on_ask_imbalance() -> None:
 def test_flow_pressure_silent_on_balanced_book() -> None:
     # Symmetric book, trades at mid → |ofi| ≈ 0 → no signal.
     balanced = [
-        _tick(_BASE_MS + i * 100, 100.0, bid_size=50.0, ask_size=50.0, last_trade_price=100.0)
+        _tick(_BASE + i, 100.0, bid_size=50.0, ask_size=50.0, last_trade_price=100.0)
         for i in range(20)
     ]
     feat = compute_tick_features(balanced, NOW, CFG)
@@ -221,22 +219,29 @@ def test_flow_pressure_silent_on_balanced_book() -> None:
 
 
 def _overshoot_window(direction: int) -> list[TickSample]:
-    """A long calm base then a sharp ``direction`` spike that flow no longer
-    supports (last trade prints against the spike = exhaustion)."""
+    """A long calm base then a ramp into a sharp final ``direction`` spike that
+    flow no longer supports (last trades print against the spike = exhaustion).
+
+    Ticks are 1s apart (epoch seconds). A uniform spike would be z-score
+    scale-invariant (mid-EWMA and std_mid scale together → overshoot_z pinned ≈
+    1.66); the ramp-then-sharp-final-step stretches the latest mid well past its
+    recent 3s EWMA anchor → overshoot_z ≈ 2.2 ≫ θ_r, a real overshoot.
+    """
     ticks: list[TickSample] = []
     mid = 100.0
     for i in range(16):
         mid += 0.0005 if i % 2 == 0 else -0.0005  # near-flat anchor
-        ticks.append(_tick(_BASE_MS + i * 100, mid, last_trade_price=mid, last_trade_size=0.5))
-    # The overshoot: a sharp move in ``direction`` away from the EWMA anchor,
-    # but the final aggressor flow OPPOSES it (the push is spent).
-    for j in range(4):
-        mid += direction * 0.20
+        ticks.append(_tick(_BASE + i, mid, last_trade_price=mid, last_trade_size=0.5))
+    # The overshoot: a short ramp then a sharp final step away from the EWMA
+    # anchor, with the aggressor flow OPPOSING it throughout (the push is spent).
+    steps = [0.10, 0.14, 0.18, 0.34]
+    for j, step in enumerate(steps):
+        mid += direction * step
         # Trade prints AGAINST the spike direction → exhausting flow.
         trade_px = mid - direction * 0.05
         ticks.append(
             _tick(
-                _BASE_MS + (16 + j) * 100,
+                _BASE + 16 + j,
                 mid,
                 last_trade_price=trade_px,
                 last_trade_size=6.0,
@@ -271,11 +276,12 @@ def test_micro_reversion_silent_when_flow_still_supports_overshoot() -> None:
     mid = 100.0
     for i in range(16):
         mid += 0.0005 if i % 2 == 0 else -0.0005
-        ticks.append(_tick(_BASE_MS + i * 100, mid, last_trade_size=0.5))
-    for j in range(4):
-        mid += 0.20
+        ticks.append(_tick(_BASE + i, mid, last_trade_size=0.5))
+    steps = [0.10, 0.14, 0.18, 0.34]
+    for j, step in enumerate(steps):
+        mid += step
         ticks.append(
-            _tick(_BASE_MS + (16 + j) * 100, mid, last_trade_price=mid + 0.05, last_trade_size=6.0)
+            _tick(_BASE + 16 + j, mid, last_trade_price=mid + 0.05, last_trade_size=6.0)
         )
     feat = compute_tick_features(ticks, NOW, CFG)
     assert micro_reversion(feat, "chop", venue=VENUE, symbol=SYMBOL, ref_price=101.0, cfg=CFG) is None

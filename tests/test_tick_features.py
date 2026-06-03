@@ -21,13 +21,15 @@ from polaris.core.ticks.features import TickFeatures, compute_tick_features
 from polaris.core.ticks.types import TickSample
 
 CFG = TickEngineConfig()
-# A monotonic "now" far enough above the synthetic ts origin that windows ending
-# near ts≈0..N seconds read as fresh (age within fresh_sec).
-NOW = 1_000.0
+# A realistic epoch-seconds "now" (the real OKX/Capital feed stamps ticks in
+# epoch seconds). The windows below end a few seconds before NOW so the newest
+# tick reads as fresh (age within fresh_sec); ts are the same epoch-seconds
+# domain as now_ts, 1s apart (the feed's real 1s resolution).
+NOW = 1_780_451_113.0
 
 
 def _tick(
-    ts_ms: int,
+    ts: int,
     mid: float,
     *,
     bid_size: float = 10.0,
@@ -42,7 +44,7 @@ def _tick(
     ask = mid + half
     spread_bps = (ask - bid) / mid * 1e4 if mid > 0 else 0.0
     return TickSample(
-        ts=ts_ms,
+        ts=ts,
         bid=bid,
         ask=ask,
         mid=mid,
@@ -55,9 +57,14 @@ def _tick(
 
 
 def _linear_window(n: int, *, start_mid: float = 100.0, step: float = 0.0) -> list[TickSample]:
-    """n ticks, 100ms apart (ts ms), mid moving ``step`` per tick, anchored near NOW."""
-    base_ms = int((NOW - 1.0) * 1000)  # ~1s before NOW → fresh
-    return [_tick(base_ms + i * 100, start_mid + i * step) for i in range(n)]
+    """n ticks, 1s apart (epoch-seconds ts), mid moving ``step`` per tick.
+
+    Anchored so the NEWEST tick is ~1s before NOW (newest ts = ``int(NOW) - 1``)
+    regardless of ``n`` → always fresh (age within fresh_sec), with the real 1s
+    inter-tick Δt the EWMA decays against.
+    """
+    base = int(NOW) - n  # newest tick at base + (n-1) = int(NOW) - 1 → fresh
+    return [_tick(base + i, start_mid + i * step) for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +92,14 @@ def test_thin_window_is_safe_sentinel(n: int) -> None:
 
 
 def test_stale_window_is_safe_sentinel() -> None:
-    # Newest tick is well older than fresh_sec vs now_mono.
+    # The window's newest tick sits at int(NOW)-1; reading it from a now_ts 100s
+    # later makes the newest-tick age 100s ≫ fresh_sec (35s) → safe-sentinel.
     w = _linear_window(CFG.min_ticks + 5, step=0.1)
-    stale_now = NOW + CFG.fresh_sec + 100.0
+    stale_now = float(int(NOW) - 1 + 100)  # age = stale_now - newest.ts = 100s
     f = compute_tick_features(w, stale_now, CFG)
     assert f.velocity is None
     assert f.age_sec is not None and f.age_sec > CFG.fresh_sec
+    assert f.age_sec == 100.0  # exactly age 100s, genuinely stale
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +114,9 @@ def test_stale_window_is_safe_sentinel() -> None:
 )
 @settings(max_examples=150)
 def test_ofi_within_unit_bounds(n: int, bid_sizes: list[float], ask_sizes: list[float]) -> None:
-    base_ms = int((NOW - 1.0) * 1000)
+    base = int(NOW) - n  # newest tick ~1s before NOW → fresh
     w = [
-        _tick(base_ms + i * 100, 100.0 + i * 0.01, bid_size=bid_sizes[i], ask_size=ask_sizes[i])
+        _tick(base + i, 100.0 + i * 0.01, bid_size=bid_sizes[i], ask_size=ask_sizes[i])
         for i in range(n)
     ]
     f = compute_tick_features(w, NOW, CFG)
@@ -166,9 +175,9 @@ def test_velocity_sign_tracks_direction(step: float) -> None:
 
 
 def test_ofi_sign_tracks_book_imbalance() -> None:
-    base_ms = int((NOW - 1.0) * 1000)
-    bid_heavy = [_tick(base_ms + i * 100, 100.0, bid_size=100.0, ask_size=5.0) for i in range(20)]
-    ask_heavy = [_tick(base_ms + i * 100, 100.0, bid_size=5.0, ask_size=100.0) for i in range(20)]
+    base = int(NOW) - 20  # newest tick ~1s before NOW → fresh
+    bid_heavy = [_tick(base + i, 100.0, bid_size=100.0, ask_size=5.0) for i in range(20)]
+    ask_heavy = [_tick(base + i, 100.0, bid_size=5.0, ask_size=100.0) for i in range(20)]
     f_bid = compute_tick_features(bid_heavy, NOW, CFG)
     f_ask = compute_tick_features(ask_heavy, NOW, CFG)
     assert f_bid.ofi is not None and f_bid.ofi > 0.0

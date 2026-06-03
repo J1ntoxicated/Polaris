@@ -5,11 +5,11 @@ Spec SSOT: ``.claude/plans/p5_tick_decision_engine_2026-06-03.md`` §"신규 모
 ``compute_tick_features`` projects a live tick window (oldest→newest
 ``TickSample`` rows) into the microstructure features the signal module reads:
 velocity / accel / burst_z / ofi / aggr_flow / overshoot_z / spread_bps. It is
-PURE — no I/O, no clock read beyond the injected ``now_mono`` (which is only
+PURE — no I/O, no clock read beyond the injected ``now_ts`` (epoch seconds, only
 used for the staleness gate, never to fabricate a signal).
 
 Safety (no false signal): if the window is too thin (``< cfg.min_ticks``) or
-stale (newest tick older than ``cfg.fresh_sec`` vs ``now_mono``), the
+stale (newest tick older than ``cfg.fresh_sec`` vs ``now_ts``), the
 z-score / EWMA fields are ``None`` and ``n_ticks`` / ``age_sec`` report the raw
 state. A downstream signal therefore CANNOT fire on a starved window — it sees
 ``None`` and returns ``None`` (validation-starvation guard, not a throttle).
@@ -17,12 +17,12 @@ state. A downstream signal therefore CANNOT fire on a starved window — it sees
 EWMA convention: each sample's weight decays with the *time* gap to the next
 sample (``exp(-Δt / span)``), so irregular tick spacing is handled correctly
 (a 2s gap decays more than a 0.1s gap). Spans are the 1/3/10s horizons in
-``cfg``. The intra-window Δt come from each ``TickSample.ts`` (venue ms),
-used only as *relative* gaps between consecutive ticks. Absolute freshness
-(``age_sec``) is ``now_mono`` minus the newest tick's ts-in-seconds: the caller
-passes a monotonic-aligned ``now_mono`` and the engine only rejects *positive*
-staleness past ``cfg.fresh_sec`` (a skewed/negative age is treated as fresh, so
-a synthetic monotonic origin in tests is not spuriously rejected).
+``cfg``. The intra-window Δt come from each ``TickSample.ts`` (epoch SECONDS),
+used as the real second-gaps between consecutive ticks. Absolute freshness
+(``age_sec``) is ``now_ts`` minus the newest tick's ts — both epoch seconds, so
+the age is the real wall-clock staleness; only *positive* staleness past
+``cfg.fresh_sec`` is rejected (a negative age, e.g. a synthetic test origin
+where now precedes the window, is treated as fresh, never spuriously cut).
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ class TickFeatures:
         latest mid is vs its short EWMA anchor (+ = stretched up).
       - ``spread_bps``: latest tick's spread in bps.
       - ``n_ticks``: window length.
-      - ``age_sec``: seconds from the newest tick to ``now_mono`` (freshness).
+      - ``age_sec``: seconds from the newest tick to ``now_ts`` (freshness).
     """
 
     velocity: float | None
@@ -113,12 +113,13 @@ def _ewma_time(values: list[float], dts: list[float], span_sec: float) -> float:
 
 def compute_tick_features(
     window: list[TickSample],
-    now_mono: float,
+    now_ts: float,
     cfg: TickEngineConfig | None = None,
 ) -> TickFeatures:
     """Compute :class:`TickFeatures` from a live tick window (oldest→newest).
 
-    PURE. ``now_mono`` is a ``time.monotonic()`` stamp used solely for the
+    PURE. ``now_ts`` is the caller's EPOCH-SECONDS "now" (same clock domain as
+    ``TickSample.ts``, which is venue event time in epoch seconds) — used for the
     freshness gate (``age_sec``). ``cfg`` supplies the EWMA spans + sufficiency
     thresholds (defaults when omitted).
 
@@ -131,25 +132,23 @@ def compute_tick_features(
     if n == 0:
         return _safe(0, None)
 
-    # Freshness: newest tick's age vs the monotonic clock. ``ts`` is venue ms →
-    # seconds; ``now_mono`` is the caller's monotonic-aligned "now". Only
-    # positive staleness past the ceiling is rejected (a negative/skewed age,
-    # e.g. a synthetic test origin, is treated as fresh, never spuriously cut).
+    # Freshness: newest tick's wall-clock age. Both ``ts`` and ``now_ts`` are
+    # epoch SECONDS (same domain) → ``age_sec`` is the real staleness. A negative
+    # age (a synthetic test origin where now precedes the window) is treated as
+    # fresh; only positive staleness past the ceiling is rejected.
     newest = window[-1]
-    age_sec = now_mono - (newest.ts / 1000.0)
-    # ``age_sec`` can be negative if ts and now_mono are on different epochs
-    # (tests often use a synthetic monotonic origin); freshness only rejects
-    # *positive* staleness past the ceiling.
+    age_sec = now_ts - newest.ts
     if age_sec > cfg.fresh_sec:
         return _safe(n, age_sec)
     if n < cfg.min_ticks:
         return _safe(n, age_sec)
 
     mids = [t.mid for t in window]
-    # Per-step Δt (seconds), floored so a same-ts pair never divides by ~0.
+    # Per-step Δt (seconds; ts is epoch SECONDS), floored so a same-ts pair
+    # never divides by ~0.
     dts: list[float] = []
     for i in range(n - 1):
-        dt = (window[i + 1].ts - window[i].ts) / 1000.0
+        dt = float(window[i + 1].ts - window[i].ts)
         dts.append(dt if dt > _MIN_DT_SEC else _MIN_DT_SEC)
 
     # --- velocity (latest step) + accel (Δvelocity of last two steps) ----

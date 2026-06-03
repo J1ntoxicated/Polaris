@@ -127,6 +127,20 @@ class TickEngineState:
     drops_short: int = 0
     drops_sizing: int = 0
     scalp_exits: int = 0
+    # --- eval telemetry (diagnostic: WHY signals do / don't fire) ---------
+    # ``evaluated`` = symbols that passed freshness+dedup and reached feature
+    # eval; ``thin`` = of those, windows too thin/stale (None features → cannot
+    # fire); ``dry`` = sufficient features but no signal armed. The ``max_*`` are
+    # peak feature magnitudes seen since the last telemetry emit (reset each
+    # interval) so the operator can see how close features get to the thresholds.
+    evaluated: int = 0
+    thin: int = 0
+    dry: int = 0
+    max_n_ticks: int = 0
+    max_burst_z: float = 0.0
+    max_abs_ofi: float = 0.0
+    max_abs_overshoot: float = 0.0
+    tel_mono: float = 0.0
 
 
 def _open_symbols(state: ProdLoopState) -> set[tuple[str, str]]:
@@ -255,15 +269,28 @@ def _collect_intents(
     symbol: str,
     window: list[Any],
     regime: str | None,
-    now_mono: float,
+    now_ts: int,
 ) -> list[TickIntent]:
     """Run the regime-active signal fns over the feature window → intents.
 
     PURE / in-mem: ``compute_tick_features`` + the signal fns read only the
     window (no DB, no I/O). A safe-sentinel (thin / stale) window yields ``None``
     features so no signal fires. ``ref_price`` is the newest mid in the window.
+    ``now_ts`` is epoch seconds (same domain as ``TickSample.ts``) for the
+    feature freshness gate.
     """
-    feat = compute_tick_features(window, now_mono, eng.cfg)
+    feat = compute_tick_features(window, now_ts, eng.cfg)
+    # --- eval telemetry: window sufficiency + peak feature magnitudes -----
+    eng.evaluated += 1
+    if feat.burst_z is None:
+        eng.thin += 1  # thin/stale window → safe-sentinel (no signal possible)
+    else:
+        eng.max_n_ticks = max(eng.max_n_ticks, feat.n_ticks)
+        eng.max_burst_z = max(eng.max_burst_z, feat.burst_z)
+        if feat.ofi is not None:
+            eng.max_abs_ofi = max(eng.max_abs_ofi, abs(feat.ofi))
+        if feat.overshoot_z is not None:
+            eng.max_abs_overshoot = max(eng.max_abs_overshoot, abs(feat.overshoot_z))
     active = active_signals(regime)
     ref_price = float(window[-1].mid) if window else 0.0
     intents: list[TickIntent] = []
@@ -277,6 +304,8 @@ def _collect_intents(
         )
         if intent is not None:
             intents.append(intent)
+    if not intents and feat.burst_z is not None:
+        eng.dry += 1  # had real features but no signal armed (calm / sub-θ)
     return intents
 
 
@@ -414,7 +443,7 @@ async def _run_entries(
             regime_cache[(venue, group_id)] = regime
         intents = _collect_intents(
             eng, venue=venue, symbol=symbol, window=window,
-            regime=regime, now_mono=now_mono,
+            regime=regime, now_ts=now_ts,
         )
         for intent in intents:
             # --- (3) cooldown (per symbol × signal) ---------------------
@@ -658,6 +687,24 @@ async def run_tick_decision_loop(
                 real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
                 capital_session=capital_session, lookup_regime=_lookup_regime_str,
             )
+            # --- periodic eval telemetry (~30s): diagnose fire/no-fire ------
+            if now_mono - eng.tel_mono >= 30.0:
+                logger.info(
+                    "[tick-engine/telemetry] focus_okx_eval=%d thin=%d dry=%d "
+                    "decisions=%d shadow=%d orders=%d | max_n=%d "
+                    "burst_z=%.2f(θ%.2f) |ofi|=%.3f(θ%.2f) |overshoot|=%.2f(θ%.2f) "
+                    "| skips(stale=%d dedup=%d cool=%d) drops(short=%d sizing=%d)",
+                    eng.evaluated, eng.thin, eng.dry, eng.decisions,
+                    eng.shadow_logs, eng.orders, eng.max_n_ticks,
+                    eng.max_burst_z, eng.cfg.theta_burst, eng.max_abs_ofi,
+                    eng.cfg.theta_ofi, eng.max_abs_overshoot, eng.cfg.theta_revert,
+                    eng.skips_stale, eng.skips_dedup, eng.skips_cooldown,
+                    eng.drops_short, eng.drops_sizing,
+                )
+                eng.tel_mono = now_mono
+                eng.max_burst_z = 0.0
+                eng.max_abs_ofi = 0.0
+                eng.max_abs_overshoot = 0.0
         except Exception as exc:  # noqa: BLE001 — degrade-never-halt
             logger.error("[tick-engine] iteration error: %r — continuing", exc)
         # Sleep the remaining cadence; wake early on stop_evt (teardown 0-lag).

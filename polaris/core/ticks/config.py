@@ -30,11 +30,16 @@ __all__ = [
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# P5 coexistence SSOT: the venues the tick-decision engine OWNS in Phase 1 (OKX).
-# BOTH the engine (as ``PHASE1_VENUES``) and the bar entry path read THIS single
-# frozenset, so the two producers can never drift out of sync (no double-trade
-# when Phase 2 appends Capital/Alpaca). Phase 1 = OKX (24/7, long-only).
-TICK_ENGINE_OWNED_VENUES: frozenset[str] = frozenset({"okx"})
+# P5 coexistence SSOT: the venues the tick-decision engine OWNS. BOTH the engine
+# (as ``PHASE1_VENUES``) and the bar entry path read THIS single frozenset, so
+# the two producers can never drift out of sync (no double-trade).
+# Empirical (2026-06-03): the DEMO OKX WS delivers near-zero ticks (~4 symbols,
+# ~0.03 tick/s — simulated us.okx.com feed), too sparse to fill a feature window;
+# Capital (CFD, bidirectional) streams a dense live tick feed → it is the
+# live-tick-rich venue the microstructure engine needs (and Jin's most-active
+# venue). So Phase 1 = {capital, okx}: Capital carries the signal, OKX fires only
+# when its sparse feed happens to fill a window.
+TICK_ENGINE_OWNED_VENUES: frozenset[str] = frozenset({"capital", "okx"})
 
 
 def _env_truthy(env_value: str | None) -> bool:

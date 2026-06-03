@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
+from polaris.core.data.position_risk_persist import delete_position_risk_state
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
@@ -373,6 +374,18 @@ async def _close_trade_with_real_pnl(
         persist_fill(
             conn, close_fill, is_close=True, pnl_usd=pnl_usd,
             contribution_id=trade.position_id,
+        )
+        # P5 gap-b: drop the open-position risk row so the sizer's PortfolioState
+        # reflects only live open risk (frees per-symbol/cluster/track headroom
+        # for the next entry — capital rotation, not a throttle). PK-scoped on
+        # ``open_ts`` == the open's ``opened_ts``, so a concurrent same-name open
+        # at a different ts is untouched.
+        delete_position_risk_state(
+            conn,
+            venue=trade.venue,
+            symbol=trade.symbol,
+            strategy=trade.strategy_id,
+            opened_ts=trade.open_ts,
         )
         if trade.position_id:
             conn.execute(

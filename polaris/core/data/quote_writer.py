@@ -33,15 +33,18 @@ from collections import deque
 from pathlib import Path
 
 from polaris.core.data.schema import QuoteTick
+from polaris.core.ticks.types import TickSample
 from polaris.storage.schema import connect
 
 logger = logging.getLogger(__name__)
 
 # Per-instrument ring-buffer depth for the live tick window. G4's watcher reads
-# the last ~30 ticks (pre_entry_watcher slices ``tick_window[-30:]``), so 30 is
-# the working depth — in-mem only, never persisted (the DB keeps last-write-wins
-# per PK; this ring is the short history G4 needs).
-RING_BUFFER_DEPTH = 30
+# the last ~30 ticks (pre_entry_watcher slices ``tick_window[-30:]``), and the P5
+# tick-decision engine's ``feature_window`` reads the full ring. 600 ticks is
+# ~60-120s of history at ~5-10 ticks/s — enough for the engine's 1/3/10s EWMA
+# microstructure features while staying in-mem only (never persisted; the DB keeps
+# last-write-wins per PK).
+RING_BUFFER_DEPTH = 600
 
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
@@ -138,6 +141,37 @@ class QuoteTickWriter:
             return []
         return [
             {"ts": t.ts, "bid": t.bid, "ask": t.ask, "mid": t.mid}
+            for t in ring
+        ]
+
+    def feature_window(self, instrument_id: str) -> list[TickSample]:
+        """Return the full live ring (oldest→newest) as ``TickSample`` rows.
+
+        Unlike ``recent_ticks`` (4 keys, G4-compatibility frozen), this exposes
+        the full microstructure — bid/ask sizes + last-trade — that the P5
+        tick-decision engine's feature module needs. ``spread_bps`` is the stored
+        value, or ``(ask - bid) / mid * 1e4`` recomputed when the stored value is
+        missing (0.0) and ``mid > 0``. Empty list when no WS history yet.
+        """
+        ring = self._ring.get(instrument_id)
+        if not ring:
+            return []
+        return [
+            TickSample(
+                ts=t.ts,
+                bid=t.bid,
+                ask=t.ask,
+                mid=t.mid,
+                bid_size=t.bid_size,
+                ask_size=t.ask_size,
+                last_trade_price=t.last_trade_price,
+                last_trade_size=t.last_trade_size,
+                spread_bps=(
+                    t.spread_bps
+                    if t.spread_bps
+                    else ((t.ask - t.bid) / t.mid * 1e4 if t.mid > 0 else 0.0)
+                ),
+            )
             for t in ring
         ]
 

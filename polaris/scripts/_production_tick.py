@@ -36,6 +36,7 @@ from polaris.core.live_recalc.strategy_swap import (
 )
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
+from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
 from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_indicators import (
     build_real_market_view,
@@ -79,6 +80,11 @@ from polaris.venues.capital.session import CapitalSession
 logger = logging.getLogger(__name__)
 
 FOCUS_CYCLE_TARGET = 30
+
+# P5 coexistence: ``TICK_ENGINE_OWNED_VENUES`` (imported from core.ticks.config)
+# is the single SSOT for the venues the engine owns in Phase 1. When
+# ``tick_engine_owns_okx()`` is on, the bar entry path yields these venues to the
+# engine (no double-trade); the engine reads the SAME frozenset as PHASE1_VENUES.
 
 
 def equity_session_entry_hold(
@@ -347,10 +353,20 @@ async def _run_tick(
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
     # site that bypassed ``supervise_strategies``.
     pipeline_specs: list[PipelineTaskSpec] = []
+    # P5 coexistence (no double-trade): when the tick-decision engine owns the
+    # Phase-1 OKX symbols it is the SOLE opener for them, so the bar entry path
+    # yields those venues here (keyed by venue ownership). The open-dedup remains
+    # the always-on backstop; this gate just prevents the two producers from
+    # racing the SAME symbol. Flag-gated (default OFF) so the bar pipeline is
+    # byte-identical until the engine is turned on. NOT a throttle — it routes
+    # ownership of a symbol to one producer, never reduces size or blocks edge.
+    owns_okx = tick_engine_owns_okx()
     for timeframe, strategies_for_tf in strategies_by_tf.items():
         venues_for_tf = {s.metadata.venue for s in strategies_for_tf}
         for venue, symbol, asset_class, group_id in focus:
             if venue not in venues_for_tf:
+                continue
+            if owns_okx and venue in TICK_ENGINE_OWNED_VENUES:
                 continue
             bars = read_recent_bars(
                 conn, venue=venue, symbol=symbol, bar_interval=timeframe,

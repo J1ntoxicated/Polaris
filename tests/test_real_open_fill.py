@@ -100,6 +100,14 @@ async def test_reserve_and_submit_real_calls_adapter_and_persists(
     ).fetchone()
     assert res is not None and res[0] == "confirmed"
     assert trade.venue_order_id == "ord_live_1"
+    # P5 gap-b: the open now populates position_risk_state so the sizer's caps
+    # bind on the next entry (was never written → caps never bound).
+    prs = memdb.execute(
+        "SELECT venue, symbol, strategy, open_risk_pct FROM position_risk_state"
+    ).fetchone()
+    assert prs is not None
+    assert prs[0] == "okx" and prs[1] == "BTC-USDT" and prs[2] == "volume_burst"
+    assert prs[3] > 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fills_persist import persist_fill
+from polaris.core.data.position_risk_persist import persist_position_risk_state
 from polaris.core.isolation.allocator_fence import (
     AllocationRequest,
     ReservationConflictError,
@@ -440,6 +441,25 @@ async def reserve_and_submit(
         # contribution_id ties the entry fill back to the position so the
         # close path can read the *exact* entry by position_id (P0 fix).
         persist_fill(conn, fill, is_close=False, contribution_id=position_id)
+        # P5 gap-b: populate the open-position risk row the sizer's
+        # PortfolioState reads, so per-symbol/underlying/cluster/track caps bind
+        # (capital-efficiency / opportunity-cost ceiling — NOT a defensive
+        # throttle). Same txn as the fill so the row never outlives a rolled-back
+        # open. ``opened_ts == now_ts`` is the PK the close path deletes on.
+        persist_position_risk_state(
+            conn,
+            venue=venue,
+            symbol=symbol,
+            instrument_id=fill.instrument_id,
+            underlying_group_id=underlying_group_id,
+            strategy=sig.strategy_id,
+            track=resolve_stream(venue).track,
+            asset_class=asset_class,
+            signal_strength=float(sig.strength),
+            notional_usd=float(fill.size_usd),
+            equity_usd=float(EQUITY_USD_DEMO_DEFAULT),
+            opened_ts=now_ts,
+        )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:
         with contextlib.suppress(sqlite3.Error):

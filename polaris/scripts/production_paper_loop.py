@@ -35,6 +35,7 @@ from polaris.core.lifecycle.recover import (
     hydrate_open_positions,
     reconcile_venue_positions,
 )
+from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
     ALPACA_REFRESH_SEC,
@@ -54,6 +55,10 @@ from polaris.scripts._production_tick import (
     _lookup_regime,
     _run_tick,
     _strategies_by_timeframe,
+)
+from polaris.scripts._production_tick_engine import (
+    TickEngineState,
+    run_tick_decision_loop,
 )
 from polaris.scripts._production_ws import (
     resubscribe_ws_clients,
@@ -430,6 +435,28 @@ async def run_production_paper_loop(
                 "exit-engine management", len(imported),
             )
 
+    # P5 — tick-decision engine. The fast (~500ms) live-WS decision loop runs
+    # ALONGSIDE the bar pipeline below: it trades ONLY symbols with a fresh WS
+    # tick (Phase-1 OKX), reusing compute_size (T4, 9-stack ban intact) +
+    # reserve_and_submit for entries and the precise-exit engine for exits. The
+    # bar pipeline is gated off the engine-owned OKX symbols (TICK_ENGINE_OWNS_OKX
+    # — coexistence: open-dedup + source ownership = no double-trade). Tagged the
+    # same as the WS producers: handle stored, cancelled + gathered in finally.
+    tick_engine_state: TickEngineState | None = None
+    tick_engine_task: asyncio.Task[Any] | None = None
+    if tick_engine_enabled():
+        tick_engine_state = TickEngineState()
+        tick_engine_task = asyncio.create_task(
+            run_tick_decision_loop(
+                conn, state, stop_evt,
+                okx_adapter=okx_adapter, capital_session=capital_session,
+                alpaca_adapter=alpaca_adapter, phase=phase,
+                real_roundtrip=real_roundtrip,
+                tick_engine_state=tick_engine_state,
+            )
+        )
+        logger.info("[loop] P5 tick-decision engine spawned (Phase-1 OKX)")
+
     deadline = time.monotonic() + duration_sec
     tick_idx = 0
     try:
@@ -461,6 +488,12 @@ async def run_production_paper_loop(
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()
+        # P5 — tick-decision engine teardown (cooperative stop via stop_evt, then
+        # cancel + await so the loop's final telemetry log flushes before exit).
+        if tick_engine_task is not None:
+            tick_engine_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await tick_engine_task
         layer0_task.cancel()
         altdata_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

@@ -343,19 +343,23 @@ async def run_production_paper_loop(
         _layer0_producer(conn, state=state, stop_evt=stop_evt)
     )
 
-    # WAL hygiene, from process start. The bot's heavy startup writes (baseline
-    # seed) + the always-present dashboard reader (1s collect_snapshot) kept
-    # SQLite's autocheckpoint perpetually deferred, so the -wal grew unbounded
-    # (live: 729 MB); past a few hundred MB every DB op walks a giant wal-index
-    # and goes multi-minute UN-state slow → the loop + WS + dashboard all froze.
-    # A TRUNCATE checkpoint on a throwaway connection, run in a worker thread
-    # every ~15s, keeps the -wal bounded WITHOUT ever blocking the event loop —
-    # a checkpoint that briefly waits on a reader blocks only its own thread.
+    # WAL hygiene, from process start. The bot's writes kept SQLite's
+    # autocheckpoint deferred, so the -wal grew unbounded (live: 729 MB); past a
+    # few hundred MB every DB op walks a giant wal-index and goes multi-minute
+    # UN-state slow → freeze. A periodic checkpoint on a throwaway connection,
+    # run in a worker thread every ~15s, keeps the -wal bounded.
+    # PASSIVE (not TRUNCATE/RESTART): TRUNCATE takes an EXCLUSIVE lock and waits
+    # for every reader to drain — when the dashboard's 1s ``collect_snapshot`` is
+    # a near-continuous reader, that wait holds the checkpoint lock while the bot's
+    # own writes block on it → the loop wedges in UN-state (the bot was rock-solid
+    # ALONE but froze the instant the dashboard attached). PASSIVE never blocks on
+    # a reader and never holds the exclusive lock — it flushes whatever frames sit
+    # behind no live snapshot, which the dashboard's sub-second read GAPS make
+    # plenty — so the -wal stays bounded with ZERO deadlock surface.
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)
         try:
-            ck.execute("PRAGMA busy_timeout=8000")
-            ck.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            ck.execute("PRAGMA wal_checkpoint(PASSIVE)")
         finally:
             ck.close()
 

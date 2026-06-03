@@ -110,12 +110,22 @@ async def _real_close_fill(
                 strategy_id=trade.strategy_id, mark_price=mark,
             )
     # Capital CFD — close by deal_id captured at open.
-    if capital_session is None or not trade.deal_id:
-        logger.error(
-            "[real-close] Capital close needs session + deal_id (deal_id=%s)",
-            trade.deal_id,
-        )
+    if capital_session is None:
+        # Transient: no session this tick (e.g. token refresh) — retry next tick.
+        logger.error("[real-close] Capital close needs a session — retry next tick")
         return None
+    if not trade.deal_id:
+        # No deal_id anywhere (positions.deal_id NULL + no fill order_id stash):
+        # the open never captured one (a confirm that never left PENDING). The
+        # venue position is un-addressable, so retrying forever just error-loops →
+        # reconcile (terminal) and let the exit engine stop. flow_not_block: no
+        # fault, no throttle; new opens DO capture deal_id (confirm-poll + persist).
+        logger.warning(
+            "[real-close] Capital position %s has no deal_id (un-addressable "
+            "orphan) — reconciling",
+            trade.position_id,
+        )
+        return CloseOrphan(available=0.0)
     cap_adapter = CapitalAdapter(capital_session)
     return await real_capital_close_fill(
         cap_adapter, deal_id=trade.deal_id, strategy_id=trade.strategy_id,

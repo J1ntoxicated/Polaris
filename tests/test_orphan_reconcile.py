@@ -28,7 +28,10 @@ from typing import Any
 
 import pytest
 
-from polaris.scripts._production_close import _close_trade_with_real_pnl
+from polaris.scripts._production_close import (
+    _close_trade_with_real_pnl,
+    _real_close_fill,
+)
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts._smoke_real_roundtrip import (
     CloseOrphan,
@@ -224,6 +227,46 @@ async def test_transient_reject_keeps_position_open(
         "SELECT COUNT(*) FROM risk_events WHERE event_type = 'orphan_reconciled'"
     ).fetchone()
     assert audit[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Layer 2b — Capital deal_id orphan vs transient (no session)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capital_no_deal_id_returns_orphan_sentinel() -> None:
+    """A Capital position with no deal_id (the open never captured one — a confirm
+    that stayed PENDING past the poll budget) is un-addressable on the venue →
+    CloseOrphan (reconcile, terminal), NOT a forever-retry None. New opens DO
+    capture a deal_id (confirm-poll + positions.deal_id persist); this fires only
+    for a legacy/PENDING orphan, which then reconciles instead of error-looping."""
+    trade = SimulatedTrade(
+        signal_id=uuid.uuid4().hex, venue="capital", symbol="US100",
+        strategy_id="micro_reversion", side="long", entry_price=100.0,
+        notional_usd=1000.0, open_ts=NOW, position_id="pos-cap-orphan",
+    )
+    trade.deal_id = None
+    result = await _real_close_fill(
+        trade=trade, fresh_mark=100.0, okx_adapter=None, capital_session=object(),
+    )
+    assert isinstance(result, CloseOrphan)
+
+
+@pytest.mark.asyncio
+async def test_capital_no_session_returns_none_transient() -> None:
+    """No session this tick (e.g. token refresh) is TRANSIENT → None (retry next
+    tick), NOT an orphan reconcile — the deal_id is present, the session returns."""
+    trade = SimulatedTrade(
+        signal_id=uuid.uuid4().hex, venue="capital", symbol="US100",
+        strategy_id="micro_reversion", side="long", entry_price=100.0,
+        notional_usd=1000.0, open_ts=NOW, position_id="pos-cap-live",
+    )
+    trade.deal_id = "00601567-0055-311e-0000-000084b918e3"
+    result = await _real_close_fill(
+        trade=trade, fresh_mark=100.0, okx_adapter=None, capital_session=None,
+    )
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

@@ -21,20 +21,31 @@ The baseline metrics derived per-bar:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from collections.abc import Iterable
 
-from polaris.core.data.baseline import append_sample, update_baseline_from_window
-from polaris.core.data.schema import Bar
+from polaris.core.data.baseline import (
+    _default_lookback,
+    append_sample,
+    compute_baseline,
+    read_samples_window,
+    update_baseline_from_window,
+    upsert_baseline_state,
+)
+from polaris.core.data.schema import Bar, BaselineValue
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "BAR_BASELINE_METRICS",
+    "compute_baselines_batch",
     "ingest_bars",
+    "ingest_bars_async",
     "persist_bars",
     "update_baseline_from_bars",
+    "update_baseline_from_bars_async",
 ]
 
 # Metrics derivable from a closed bar (Q2 spec).
@@ -155,6 +166,115 @@ def update_baseline_from_bars(
     return n
 
 
+# ---------------------------------------------------------------------------
+# Async offload variant — pure-compute (sort/percentile) runs in a worker
+# thread; ALL DB access (append_sample / read_samples_window / upsert) stays
+# on the event-loop thread (shared loop-affine conn — concurrency rule).
+# ---------------------------------------------------------------------------
+
+# A unit of baseline work after the DB read: (instrument_id, group_id, metric,
+# samples, now_ts, lookback_sec). Plain data only — NO sqlite connection.
+BaselineComputeItem = tuple[str, str, str, list[float], int, int]
+
+
+def compute_baselines_batch(
+    items: Iterable[BaselineComputeItem],
+) -> list[tuple[str, str, BaselineValue]]:
+    """PURE compute: sort+percentile each pre-fetched sample window.
+
+    Input is plain data only (no conn) so it is safe to run via
+    ``asyncio.to_thread``. Each result is ``(instrument_id, group_id,
+    BaselineValue)``; empty sample windows are dropped (mirrors the sync
+    ``update_baseline_from_window`` which returns None and writes nothing).
+
+    Identical output to per-item ``compute_baseline`` — only the heavy sort is
+    moved off the loop.
+    """
+    out: list[tuple[str, str, BaselineValue]] = []
+    for instrument_id, group_id, metric, samples, now_ts, lookback in items:
+        if not samples:
+            continue
+        bv = compute_baseline(
+            metric=metric, samples=samples, updated_ts=now_ts, lookback_sec=lookback
+        )
+        out.append((instrument_id, group_id, bv))
+    return out
+
+
+async def update_baseline_from_bars_async(
+    conn: sqlite3.Connection,
+    bars: Iterable[Bar],
+    *,
+    asset_class: str = "",
+) -> int:
+    """Async twin of ``update_baseline_from_bars`` — heavy sort off the loop.
+
+    Phase A (loop): append per-bar samples + read each rolling window.
+    Phase B (thread): ``asyncio.to_thread(compute_baselines_batch, ...)`` —
+        the sort/percentile of every (instrument, metric) window at once.
+    Phase C (loop): upsert each resulting ``BaselineValue``.
+
+    The shared conn never enters the worker thread (read + write both happen on
+    the loop). Output is identical to the synchronous path.
+    """
+    bars_list: list[Bar] = list(bars)
+    n = 0
+    for b in bars_list:
+        atr_value = max(0.0, float(b.high) - float(b.low))
+        notional = float(b.notional_usd) if b.notional_usd > 0 else float(b.close) * float(b.volume)
+        append_sample(
+            conn, instrument_id=b.instrument_id,
+            underlying_group_id=b.underlying_group_id, metric="atr",
+            ts=int(b.ts), value=atr_value,
+        )
+        append_sample(
+            conn, instrument_id=b.instrument_id,
+            underlying_group_id=b.underlying_group_id, metric="size",
+            ts=int(b.ts), value=float(notional),
+        )
+        append_sample(
+            conn, instrument_id=b.instrument_id,
+            underlying_group_id=b.underlying_group_id, metric="volume",
+            ts=int(b.ts), value=float(b.volume),
+        )
+        n += 3
+    # Recompute window per (instrument, metric) at the batch-max ts (same rule
+    # as the sync path: out-of-order/backfill batches don't compute early).
+    instrument_max_ts: dict[tuple[str, str], int] = {}
+    for b in bars_list:
+        key = (b.instrument_id, b.underlying_group_id)
+        ts = int(b.ts)
+        if ts > instrument_max_ts.get(key, 0):
+            instrument_max_ts[key] = ts
+    # Phase A — DB reads stay on the loop (shared conn).
+    work: list[BaselineComputeItem] = []
+    for (instrument_id, group_id), max_ts in instrument_max_ts.items():
+        for metric in BAR_BASELINE_METRICS:
+            lookback = _default_lookback(metric)
+            samples = read_samples_window(
+                conn,
+                instrument_id=instrument_id,
+                metric=metric,
+                window_start_ts=max_ts - lookback,
+            )
+            if samples:
+                work.append((instrument_id, group_id, metric, samples, max_ts, lookback))
+    if not work:
+        return n
+    # Phase B — pure sort/percentile off the loop.
+    results = await asyncio.to_thread(compute_baselines_batch, work)
+    # Phase C — DB writes back on the loop.
+    for instrument_id, group_id, bv in results:
+        upsert_baseline_state(
+            conn,
+            instrument_id=instrument_id,
+            underlying_group_id=group_id,
+            asset_class=asset_class,
+            baseline=bv,
+        )
+    return n
+
+
 def ingest_bars(
     conn: sqlite3.Connection,
     bars: Iterable[Bar],
@@ -168,6 +288,35 @@ def ingest_bars(
     bars_list = list(bars)
     persisted = persist_bars(conn, bars_list)
     baseline_n = update_baseline_from_bars(conn, bars_list, asset_class=asset_class)
+    if bars_list:
+        symbols = {b.symbol for b in bars_list}
+        logger.info(
+            "[ingest] bars=%d baseline_samples=%d symbols=%d (asset_class=%s)",
+            persisted,
+            baseline_n,
+            len(symbols),
+            asset_class or "<unspec>",
+        )
+    return {"bars": persisted, "baseline_samples": baseline_n}
+
+
+async def ingest_bars_async(
+    conn: sqlite3.Connection,
+    bars: Iterable[Bar],
+    *,
+    asset_class: str = "",
+) -> dict[str, int]:
+    """Async twin of ``ingest_bars`` — persist + offloaded baseline recompute.
+
+    ``persist_bars`` (DB write) stays on the loop; the baseline sort/percentile
+    batch is offloaded via ``update_baseline_from_bars_async``. Same return
+    shape as ``ingest_bars``.
+    """
+    bars_list = list(bars)
+    persisted = persist_bars(conn, bars_list)
+    baseline_n = await update_baseline_from_bars_async(
+        conn, bars_list, asset_class=asset_class
+    )
     if bars_list:
         symbols = {b.symbol for b in bars_list}
         logger.info(

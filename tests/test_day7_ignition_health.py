@@ -609,7 +609,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
     Asserts (concrete bounds — codex P1-3 fix):
     - learner trio wired (3 learners)
     - ``LearnerScheduler.run_forever`` actually started (spy-proven)
-    - ``LearnerScheduler.run_once`` ran ≥1 cycle inside ignite (spy-proven)
+    - ``LearnerScheduler.run_once_async`` ran ≥1 cycle inside ignite (spy-proven)
     - fills table reachable + writable (count >= 0 then > 0 after a tick)
     - dashboard snapshot collectible without exception
     - vault writes landed inside ``isolated_vault``, not the repo vault
@@ -676,11 +676,14 @@ async def test_24h_readiness_composite_exercises_all_layers(
     prod_bars.fetch_okx_bars = AsyncMock(return_value=list(reversed(_fake_bars())))
 
     # Spy on run_forever so we can prove it started + counted at least one
-    # run_once cycle within the test window.
+    # tune cycle within the test window. ``run_forever`` now drives the
+    # cooperative-yield ``run_once_async`` (per-learner ``await asyncio.sleep(0)``
+    # so the tick engine/WS interleave during the multi-second cycle), so the
+    # cycle counter spies that path.
     started = asyncio.Event()
     cycles = 0
     real_run_forever = LearnerScheduler.run_forever
-    real_run_once = LearnerScheduler.run_once
+    real_run_once_async = LearnerScheduler.run_once_async
 
     async def _spy_run_forever(
         self: LearnerScheduler, *, interval_sec: int = 3600
@@ -688,13 +691,13 @@ async def test_24h_readiness_composite_exercises_all_layers(
         started.set()
         await real_run_forever(self, interval_sec=interval_sec)
 
-    def _spy_run_once(self: LearnerScheduler, *, now_ts: int | None = None):  # type: ignore[no-untyped-def]
+    async def _spy_run_once_async(self: LearnerScheduler, *, now_ts: int | None = None):  # type: ignore[no-untyped-def]
         nonlocal cycles
         cycles += 1
-        return real_run_once(self, now_ts=now_ts)
+        return await real_run_once_async(self, now_ts=now_ts)
 
     LearnerScheduler.run_forever = _spy_run_forever  # type: ignore[method-assign]
-    LearnerScheduler.run_once = _spy_run_once  # type: ignore[method-assign]
+    LearnerScheduler.run_once_async = _spy_run_once_async  # type: ignore[method-assign]
     try:
         report = await ignite(
             duration_sec=1.5,
@@ -711,7 +714,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
         prod_layers.fetch_capital_instruments = original_cap_fetch
         prod_bars.fetch_okx_bars = original_okx_bars
         LearnerScheduler.run_forever = real_run_forever  # type: ignore[method-assign]
-        LearnerScheduler.run_once = real_run_once  # type: ignore[method-assign]
+        LearnerScheduler.run_once_async = real_run_once_async  # type: ignore[method-assign]
 
     # --- Boot contract
     assert report.learner_count == 3

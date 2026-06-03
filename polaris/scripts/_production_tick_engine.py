@@ -100,6 +100,11 @@ _SIGNAL_FNS: dict[str, Callable[..., TickIntent | None]] = {
 _SCALP_TARGET_R = 0.5
 _SCALP_STOP_R = -0.4
 
+# Loop-heartbeat stall threshold: an iteration gap beyond ``cadence + this``
+# means the loop was starved (e.g. a multi-minute learner full-DB backup /
+# baseline rescan on the shared conn) and is logged as a WARNING on resume.
+STALL_SLACK_SEC: float = 1.0
+
 
 @dataclass(slots=True)
 class TickEngineState:
@@ -141,6 +146,15 @@ class TickEngineState:
     max_abs_ofi: float = 0.0
     max_abs_overshoot: float = 0.0
     tel_mono: float = 0.0
+    # --- loop heartbeat (stall visibility) --------------------------------
+    # ``loop_count`` increments every iteration; ``last_loop_mono`` is the
+    # monotonic stamp at the top of the previous iteration. A gap between
+    # successive ``last_loop_mono`` values that exceeds the cadence by more
+    # than ``STALL_SLACK_SEC`` means the loop was starved (e.g. a 3-min
+    # learner full-DB backup / baseline 7d rescan on the shared conn) and is
+    # surfaced as a WARNING the moment the loop resumes.
+    loop_count: int = 0
+    last_loop_mono: float = 0.0
 
 
 def _open_symbols(state: ProdLoopState) -> set[tuple[str, str]]:
@@ -672,6 +686,26 @@ async def run_tick_decision_loop(
     )
     while not stop_evt.is_set():
         loop_start = time.monotonic()
+        # --- per-iteration heartbeat (stall visibility) --------------------
+        # Always bump the counter + stamp BEFORE the body so a freeze in the
+        # body is detectable on the NEXT resume. A gap beyond cadence+slack
+        # since the prior iteration means the loop was starved (shared-conn
+        # blocker) — log a WARNING the instant it resumes.
+        prev_loop_mono = eng.last_loop_mono
+        eng.loop_count += 1
+        eng.last_loop_mono = loop_start
+        if prev_loop_mono > 0.0:
+            gap = loop_start - prev_loop_mono
+            if gap > cadence_sec + STALL_SLACK_SEC:
+                logger.warning(
+                    "[tick-engine] STALL detected — iteration gap=%.2fs "
+                    "(cadence=%.2fs) at loop=%d; the loop was starved "
+                    "(shared-conn blocker?)",
+                    gap, cadence_sec, eng.loop_count,
+                )
+        logger.debug(
+            "[tick-engine] heartbeat loop=%d mono=%.3f", eng.loop_count, loop_start
+        )
         try:
             now_ts = int(time.time())
             now_mono = time.monotonic()

@@ -96,6 +96,49 @@ class LearnerScheduler:
         )
         return cycle
 
+    async def run_once_async(self, *, now_ts: int | None = None) -> TuneCycleReport:
+        """Cooperative-yield twin of ``run_once`` (keeps the loop responsive).
+
+        The tune is a tight DB+compute blob on the SHARED loop-affine conn
+        (read + ``compute_value_from_stats`` + write + ``conn.backup`` inside
+        ``commit_hourly``). It is NOT safe to push onto a worker thread — the
+        shared conn must stay on the loop. The pure ``nig`` / value math is
+        negligible (96 rows), so threading it would buy nothing. Instead we run
+        the IDENTICAL work on the loop but ``await asyncio.sleep(0)`` between
+        learners so the tick engine + WS interleave during the multi-second
+        cycle (which is dominated by the per-learner full-DB disk backup).
+
+        Same DB mutations + same ``TuneCycleReport`` as ``run_once``.
+        """
+        ts = int(now_ts if now_ts is not None else time.time())
+        cycle = TuneCycleReport(cycle_ts=ts)
+        logger.info(
+            "[scheduler] tune cycle start (async) ts=%d learners=%d",
+            ts,
+            len(self.learners),
+        )
+        for learner in self.learners:
+            try:
+                cycle.reports.append(learner.commit_hourly(now_ts=ts))
+            except Exception as exc:  # noqa: BLE001 — capture for toggle
+                logger.error(
+                    "[scheduler] learner %s commit_hourly failed: %r — disabling",
+                    learner.learner_id,
+                    exc,
+                )
+                learner.enabled = False
+            # Cooperative yield: let the tick engine + WS run between learners
+            # so a slow per-learner backup doesn't monopolize the loop. Safe —
+            # still on the loop thread, no shared-conn race.
+            await asyncio.sleep(0)
+        cycle.expired_blocks = evict_expired_triple_blocks(self.conn, now_ts=ts)
+        logger.info(
+            "[scheduler] tune cycle end (async) keys_updated_total=%d expired_blocks=%d",
+            sum(r.keys_updated for r in cycle.reports),
+            cycle.expired_blocks,
+        )
+        return cycle
+
     async def run_forever(self, *, interval_sec: int = DEFAULT_INTERVAL_SEC) -> None:
         """Long-lived asyncio coroutine — sleeps then triggers cycle.
 
@@ -107,7 +150,7 @@ class LearnerScheduler:
             len(self.learners),
         )
         while True:
-            self.run_once()
+            await self.run_once_async()
             await asyncio.sleep(interval_sec)
 
 

@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
-from polaris.core.data.ingest import ingest_bars, persist_bars
+from polaris.core.data.ingest import ingest_bars_async, persist_bars
 from polaris.core.data.schema import BAR_INTERVALS, Bar
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
@@ -414,7 +414,10 @@ async def ingest_bars_for_focus(
     total_persisted = 0
     total_baseline = 0
     for ac, group in by_class.items():
-        result = ingest_bars(conn, group, asset_class=ac)
+        # Async ingest: persist + sample-append on the loop, baseline
+        # sort/percentile offloaded to a worker thread (shared conn stays on
+        # the loop) so the per-1m-tick recompute doesn't block the engine.
+        result = await ingest_bars_async(conn, group, asset_class=ac)
         total_persisted += result["bars"]
         total_baseline += result["baseline_samples"]
     return {

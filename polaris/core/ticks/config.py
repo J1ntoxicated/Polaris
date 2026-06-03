@@ -37,10 +37,12 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # ~0.03 tick/s — simulated us.okx.com feed), too sparse to fill a microstructure
 # window; Capital (CFD, bidirectional) streams a dense live tick feed → it is the
 # live-tick-rich venue the engine needs (and Jin's most-active venue). Phase 1 =
-# {capital, okx}: Capital carries the live signal; OKX is owned (so its
-# churn-prone bar strategies vacate) but fires only when its sparse feed happens
-# to fill a window.
-TICK_ENGINE_OWNED_VENUES: frozenset[str] = frozenset({"capital", "okx"})
+# {capital} ONLY: Capital is PROVEN end-to-end (open → confirm deal_id → scalp →
+# close, a +0.51R round-trip live). OKX + Alpaca stay on the bar pipeline (their
+# close paths route by venue correctly); the tick engine cannot fill OKX windows
+# anyway, and its OKX opens hit a venue-routing edge on close. Re-add OKX iff a
+# real (non-demo) dense OKX feed lands AND the tick open sets trade.venue='okx'.
+TICK_ENGINE_OWNED_VENUES: frozenset[str] = frozenset({"capital"})
 
 
 def _env_truthy(env_value: str | None) -> bool:

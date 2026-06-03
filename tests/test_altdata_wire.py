@@ -282,7 +282,7 @@ def test_evidence_never_downgrades_price_crisis(memdb: sqlite3.Connection) -> No
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("crisis", 0.9, {})
+        lambda _bars, **_kw: ("crisis", 0.9, {})
     )
     try:
         out = compute_and_flip_regime(
@@ -310,7 +310,7 @@ def test_evidence_tilts_borderline_then_confirms(memdb: sqlite3.Connection) -> N
     orig = pl.compute_real_regime_signal
     # Borderline chop (low strength) → strong bear evidence wins the P3 tilt.
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 0.1, {})
+        lambda _bars, **_kw: ("chop", 0.1, {})
     )
     try:
         bars = _bars_series_chop()
@@ -342,7 +342,7 @@ def test_weak_evidence_below_floor_is_price_only(memdb: sqlite3.Connection) -> N
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 0.5, {})
+        lambda _bars, **_kw: ("chop", 0.5, {})
     )
     try:
         bars = _bars_series_chop()
@@ -368,7 +368,7 @@ def test_equity_macro_populates_evidence_json(memdb: sqlite3.Connection) -> None
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 1.0, {})
+        lambda _bars, **_kw: ("chop", 1.0, {})
     )
     try:
         compute_and_flip_regime(
@@ -391,7 +391,7 @@ def test_equity_neutral_macro_no_override(memdb: sqlite3.Connection) -> None:
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 1.0, {})
+        lambda _bars, **_kw: ("chop", 1.0, {})
     )
     try:
         out = compute_and_flip_regime(
@@ -410,7 +410,7 @@ def test_equity_missing_fred_is_price_only(memdb: sqlite3.Connection) -> None:
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("bull_trend", 0.7, {})
+        lambda _bars, **_kw: ("bull_trend", 0.7, {})
     )
     try:
         out = compute_and_flip_regime(
@@ -444,7 +444,7 @@ def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> 
     # Borderline (low-strength) chop so the strong bull macro evidence wins the
     # P3 conviction tilt; strength 0.1 → price_conviction 0.3 < evidence 2.5.
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 0.1, {})
+        lambda _bars, **_kw: ("chop", 0.1, {})
     )
     try:
         out1 = compute_and_flip_regime(
@@ -622,7 +622,7 @@ def test_wire_writes_no_learner_or_risk_state(memdb: sqlite3.Connection) -> None
 
     orig = pl.compute_real_regime_signal
     pl.compute_real_regime_signal = (  # type: ignore[assignment]
-        lambda _bars: ("chop", 0.5, {})
+        lambda _bars, **_kw: ("chop", 0.5, {})
     )
     try:
         for ts in (1000, 1060):

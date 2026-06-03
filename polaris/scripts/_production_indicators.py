@@ -24,6 +24,9 @@ __all__ = [
     "REGIME_BULL_THRESHOLD_PCT",
     "REGIME_CRISIS_DRAWDOWN_PCT",
     "REGIME_CHOP_EFFICIENCY",
+    "REGIME_TREND_K",
+    "REGIME_CRISIS_M",
+    "REGIME_VOL_FLOOR_BY_CLASS",
     "build_real_market_view",
     "compute_adx_14",
     "compute_atr_pct",
@@ -45,6 +48,63 @@ __all__ = [
 REGIME_BULL_THRESHOLD_PCT: Final[float] = 0.5  # 100-bar return ≥ +0.5% → bull bias
 REGIME_CRISIS_DRAWDOWN_PCT: Final[float] = -3.0  # 100-bar return ≤ -3% → crisis
 REGIME_CHOP_EFFICIENCY: Final[float] = 0.20  # efficiency ratio < 0.20 → chop
+
+# ── Vol-normalized TREND + CRISIS thresholds (per-asset_class) ──
+# The fixed +0.5% bull / -3% crisis thresholds above are crypto-calibrated. FX
+# (EURUSD ~0.5%/day) almost never moves +0.5% over 100 1m bars, so FX/index sat
+# in ``chop`` forever and the tick engine's trend strategies never fired on a
+# real FX/index trend. Fix: scale the TREND + CRISIS *magnitude* thresholds to
+# the instrument's OWN window realized-vol (floored per asset_class) instead of
+# fixed percents. The (already scale-free) efficiency-ratio chop test is kept.
+#
+# scale_pct = max(window realized-vol %, floor%); flip to bull/bear when the
+# signed return ≥ REGIME_TREND_K × scale_pct; crisis when drawdown ≤
+# -REGIME_CRISIS_M × scale_pct. k / m are chosen so the crypto FLOOR reproduces
+# the old fixed thresholds exactly (crypto behavior preserved):
+#   crypto floor 2.0% → bull = 0.25·2.0 = 0.5% ; crisis = -1.5·2.0 = -3.0%.
+# The per-class FLOORS echo ATR_FLOOR_BY_CLASS spirit (a dead-flat window can't
+# trip on micro-noise; a too-thin/zero-vol window falls back to the fixed path).
+REGIME_TREND_K: Final[float] = 0.25  # bull/bear flip at k × vol-scale
+REGIME_CRISIS_M: Final[float] = 1.5  # crisis flip at m × vol-scale
+REGIME_VOL_FLOOR_BY_CLASS: Final[dict[str, float]] = {
+    "crypto": 2.0,
+    "forex": 0.3,
+    "indices": 0.4,
+    "commodity": 0.5,
+    "equity": 1.0,
+    "other": 0.5,
+}
+_REGIME_VOL_FLOOR_DEFAULT: Final[float] = 0.5  # unknown class → generic floor
+
+
+def _regime_vol_floor(asset_class: str) -> float:
+    """Per-asset_class realized-vol floor % (unknown class → generic floor)."""
+    return REGIME_VOL_FLOOR_BY_CLASS.get(
+        (asset_class or "").strip().lower(), _REGIME_VOL_FLOOR_DEFAULT
+    )
+
+
+def compute_window_vol_pct(closes: list[float], *, n: int) -> float:
+    """Window realized-vol % = stdev(per-bar pct returns) × √n × 100.
+
+    Scale-aware magnitude of how far the instrument *typically* travels over the
+    ``n``-bar window. Returns 0.0 on a thin / degenerate window (caller floors
+    it, so a 0 here just defers to the per-class floor — no div-by-zero/NaN)."""
+    if n < 2 or len(closes) < n + 1:
+        return 0.0
+    rets: list[float] = []
+    for i in range(len(closes) - n, len(closes)):
+        prev = closes[i - 1]
+        if prev <= 0.0:
+            continue
+        rets.append((closes[i] - prev) / prev)
+    if len(rets) < 2:
+        return 0.0
+    mu = sum(rets) / len(rets)
+    var = sum((r - mu) ** 2 for r in rets) / (len(rets) - 1)
+    sd = math.sqrt(var) if var > 0.0 else 0.0
+    out = sd * math.sqrt(n) * 100.0
+    return out if math.isfinite(out) else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +293,21 @@ def build_real_market_view(
     bars: Sequence[Bar | BarView],
     spread_bps: float = 5.0,
     session_open_window: bool = False,
+    asset_class: str = "crypto",
 ) -> MarketView:
     """Compute every indicator the 7 strategies need from real bars.
 
     No price boosting / no synthetic z-scores — strategies decide on real
     data. When the bar history is too short for an indicator, that field is
     set to ``None`` so the strategy's own warmup gate suppresses emission.
+
+    The 15 base indicators are unchanged for a given bar set (the 7 strategies
+    depend on them byte-identically). ``asset_class`` adds optional EMPHASIS
+    context only (additive new fields — see ``_asset_class_emphasis``): ema20/
+    ema50/ema_cross for FX & index (trend emphasis), a Kaufman trend_efficiency
+    for commodity, and crypto keeps its momentum_20bar (no new fields). An
+    unknown asset_class degrades to the base view (no new fields). Defaults to
+    ``"crypto"`` so every existing caller is byte-identical.
     """
     if not bars:
         return MarketView(
@@ -286,6 +355,8 @@ def build_real_market_view(
         if prev_close > 0.0:
             gap_pct = (float(bar_views[-1].open) - prev_close) / prev_close
 
+    ema_20, ema_50, ema_cross, trend_eff = _asset_class_emphasis(closes, asset_class)
+
     return MarketView(
         symbol=symbol,
         venue=venue,
@@ -312,7 +383,35 @@ def build_real_market_view(
         is_session_open_window=session_open_window,
         prev_close=prev_close,
         gap_pct=gap_pct,
+        ema_20=ema_20,
+        ema_50=ema_50,
+        ema_cross=ema_cross,
+        trend_efficiency=trend_eff,
     )
+
+
+def _asset_class_emphasis(
+    closes: list[float], asset_class: str
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Per-asset_class EMPHASIS context — additive only, no base-field change.
+
+    Returns ``(ema_20, ema_50, ema_cross, trend_efficiency)``:
+      * FX / index → ema20 + ema50 + ema_cross (+1 fast>slow / -1 / 0). FX & index
+        trades are trend-following on the EMA cross, not crypto momentum bursts.
+      * commodity → trend_efficiency (Kaufman ER over the window), the strength of
+        a directional commodity move.
+      * crypto / unknown → all ``None`` (crypto keeps its momentum_20bar emphasis;
+        an unknown class degrades to the base view).
+    """
+    cls = (asset_class or "").strip().lower()
+    if cls in ("forex", "indices"):
+        ema_fast = compute_ma(closes, min(20, len(closes)))
+        ema_slow = compute_ma(closes, min(50, len(closes)))
+        cross = 1.0 if ema_fast > ema_slow else (-1.0 if ema_fast < ema_slow else 0.0)
+        return ema_fast, ema_slow, cross, None
+    if cls == "commodity":
+        return None, None, None, compute_efficiency_ratio(closes, n=min(30, len(closes) - 1))
+    return None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -321,20 +420,29 @@ def build_real_market_view(
 
 
 def compute_real_regime_signal(
-    bars: Sequence[Bar | BarView], *, lookback: int = 100
+    bars: Sequence[Bar | BarView],
+    *,
+    lookback: int = 100,
+    asset_class: str = "crypto",
 ) -> tuple[str, float, dict[str, float]]:
     """Map bar history → ``(label, strength, evidence)`` (L3 price regime SIGNAL).
 
-    The ``label`` is computed by the SAME deterministic 4-state mapping that
-    ``compute_real_regime`` has always used — P2 does NOT widen any flip
-    condition (label산출 동일). ``strength`` (0..1) is a *magnitude boost only*:
-    a confidence/conviction proxy consumed downstream by the weighted synthesis
-    + dynamic confidence; it never changes which label is produced.
+    ``strength`` (0..1) is a *magnitude boost only*: a confidence/conviction
+    proxy consumed downstream by the weighted synthesis + dynamic confidence; it
+    never changes which label is produced.
 
-    Label algorithm (Layer 6 §Q2 + Day 8 spec H):
-    1. ≤ ``REGIME_CRISIS_DRAWDOWN_PCT`` peak-to-last drawdown → ``crisis``.
-    2. Efficiency ratio < ``REGIME_CHOP_EFFICIENCY`` → ``chop``.
-    3. Else: signed return over ``lookback`` bars chooses bull / bear.
+    Label algorithm (Layer 6 §Q2 + Day 8 spec H), now per-asset_class:
+    1. ≤ ``-REGIME_CRISIS_M × vol_scale`` peak-to-last drawdown → ``crisis``.
+    2. Efficiency ratio < ``REGIME_CHOP_EFFICIENCY`` → ``chop`` (scale-free).
+    3. Else: signed return vs ``±REGIME_TREND_K × vol_scale`` chooses bull / bear.
+
+    The TREND + CRISIS magnitude thresholds are normalized to the instrument's
+    OWN window realized-vol (``compute_window_vol_pct``), floored by
+    ``_regime_vol_floor(asset_class)``, so FX/index flip on their own scale
+    instead of sitting in ``chop`` forever under the crypto-calibrated fixed
+    percents. ``asset_class`` defaults to ``"crypto"``: the crypto floor
+    reproduces the old fixed +0.5% / -3% thresholds exactly (crypto preserved,
+    every existing caller byte-identical). Pure / deterministic; no lookahead.
 
     Strength inputs (보강값 only):
       * |return| vs the bull/bear threshold (directional magnitude),
@@ -342,7 +450,8 @@ def compute_real_regime_signal(
       * EMA20/50 cross alignment with the label,
       * 24h ATR ratio (volatility context — caps strength for crisis high).
 
-    Falls back to ``("chop", 0.0, {})`` when there is too little history.
+    Falls back to ``("chop", 0.0, {})`` when there is too little history (also
+    the safe path on a thin / zero-vol / zero-price window — no div-by-zero/NaN).
     """
     if len(bars) < 30:
         return "chop", 0.0, {}
@@ -363,27 +472,47 @@ def compute_real_regime_signal(
     ema_slow = compute_ma(closes, min(50, len(closes)))
     ema_cross = 1.0 if ema_fast > ema_slow else (-1.0 if ema_fast < ema_slow else 0.0)
 
+    # Per-asset_class vol-normalized magnitude thresholds.
+    #   TREND  → k × max(window realized-vol %, floor): vol-ADAPTIVE so a quietly
+    #            trending FX/index (small move on its own scale) still flips.
+    #   CRISIS → m × floor (the per-class BASELINE vol): a deliberately FIXED
+    #            tail-risk scale. The drawdown leg that defines a crisis is itself
+    #            part of the window, so using the window's (crash-inflated) vol for
+    #            the crisis threshold would let a crash lift its own bar and never
+    #            trip — so crisis is normalized to baseline (floor) vol only. This
+    #            also reproduces crypto's old -3% crisis exactly (m·2.0 = 3.0).
+    floor_pct = _regime_vol_floor(asset_class)
+    vol_pct = compute_window_vol_pct(closes, n=n)
+    trend_scale = max(vol_pct, floor_pct)
+    bull_thresh = REGIME_TREND_K * trend_scale
+    crisis_thresh = -REGIME_CRISIS_M * floor_pct
+
     evidence: dict[str, float] = {
         "ret_pct": ret_pct,
         "efficiency_ratio": er,
         "drawdown_pct": drawdown_pct,
         "atr_ratio": atr_ratio,
         "ema_cross": ema_cross,
+        "vol_scale_pct": trend_scale,
+        "bull_thresh_pct": bull_thresh,
+        "crisis_thresh_pct": crisis_thresh,
     }
 
-    # ── Label (unchanged mapping) ──
-    if drawdown_pct <= REGIME_CRISIS_DRAWDOWN_PCT:
+    # ── Label (vol-normalized magnitudes; chop test scale-free) ──
+    if drawdown_pct <= crisis_thresh:
         label = "crisis"
     elif er < REGIME_CHOP_EFFICIENCY:
         label = "chop"
-    elif ret_pct >= REGIME_BULL_THRESHOLD_PCT:
+    elif ret_pct >= bull_thresh:
         label = "bull_trend"
-    elif ret_pct <= -REGIME_BULL_THRESHOLD_PCT:
+    elif ret_pct <= -bull_thresh:
         label = "bear_trend"
     else:
         label = "chop"
 
-    strength = _regime_strength(label, ret_pct, er, drawdown_pct, ema_cross)
+    strength = _regime_strength(
+        label, ret_pct, er, drawdown_pct, ema_cross, bull_thresh, crisis_thresh
+    )
     evidence["strength"] = strength
     return label, strength, evidence
 
@@ -394,31 +523,46 @@ def _regime_strength(
     er: float,
     drawdown_pct: float,
     ema_cross: float,
+    bull_thresh: float,
+    crisis_thresh: float,
 ) -> float:
-    """Conviction proxy in ``[0, 1]`` — magnitude boost only, never a label gate."""
+    """Conviction proxy in ``[0, 1]`` — magnitude boost only, never a label gate.
+
+    ``bull_thresh`` / ``crisis_thresh`` are the per-instrument vol-normalized flip
+    thresholds, so the magnitude scaling tracks each class's own scale (FX +0.1%
+    is as convincing on FX as crypto +0.5% is on crypto)."""
     if label == "crisis":
         # Deeper-than-threshold drawdown → high conviction (scaled past floor).
-        excess = abs(drawdown_pct) - abs(REGIME_CRISIS_DRAWDOWN_PCT)
-        return min(1.0, 0.8 + max(0.0, excess) / 20.0)
+        excess = abs(drawdown_pct) - abs(crisis_thresh)
+        denom = max(1e-9, abs(crisis_thresh) * (20.0 / 3.0))
+        return min(1.0, 0.8 + max(0.0, excess) / denom)
     if label == "chop":
         # Chop conviction grows as efficiency falls below the chop floor.
         return min(1.0, max(0.0, (REGIME_CHOP_EFFICIENCY - er) / REGIME_CHOP_EFFICIENCY))
     # bull/bear trend: blend return magnitude, efficiency, EMA alignment.
     direction = 1.0 if label == "bull_trend" else -1.0
-    mag = min(1.0, abs(ret_pct) / (REGIME_BULL_THRESHOLD_PCT * 10.0))
+    full_scale = max(1e-9, bull_thresh * 10.0)
+    mag = min(1.0, abs(ret_pct) / full_scale)
     align = 1.0 if (ema_cross == direction) else (0.5 if ema_cross == 0.0 else 0.0)
     raw = 0.55 * mag + 0.25 * min(1.0, er) + 0.20 * align
     return max(0.0, min(1.0, raw))
 
 
-def compute_real_regime(bars: Sequence[Bar | BarView], *, lookback: int = 100) -> str:
+def compute_real_regime(
+    bars: Sequence[Bar | BarView],
+    *,
+    lookback: int = 100,
+    asset_class: str = "crypto",
+) -> str:
     """Label-only wrapper over ``compute_real_regime_signal`` (back-compat).
 
-    Returns just the regime label string — byte-identical to the pre-P2
-    behaviour. New callers wanting strength/evidence use
-    ``compute_real_regime_signal``.
+    Returns just the regime label string. ``asset_class`` defaults to ``"crypto"``
+    → byte-identical to the pre-existing behaviour. New callers wanting
+    strength/evidence use ``compute_real_regime_signal``.
     """
-    label, _, _ = compute_real_regime_signal(bars, lookback=lookback)
+    label, _, _ = compute_real_regime_signal(
+        bars, lookback=lookback, asset_class=asset_class
+    )
     return label
 
 

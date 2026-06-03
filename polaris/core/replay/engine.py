@@ -147,6 +147,11 @@ class ReplayEngine:
     ) -> list[ReplayTrade]:
         venue = bars[0].venue
         symbol = bars[0].symbol
+        # asset_class is the underlying_group_id prefix ("forex:EURUSD" → forex)
+        # so replay regime/MarketView are vol-normalized per-class too. Unknown /
+        # prefixless groups degrade to the generic floor (no crash).
+        group_id = bars[0].underlying_group_id or ""
+        asset_class = group_id.split(":", 1)[0] if ":" in group_id else "crypto"
         try:
             track = resolve_stream(venue).track
         except KeyError:
@@ -161,7 +166,9 @@ class ReplayEngine:
         for i in range(n):
             window = bars[: i + 1]
             # (a) regime signal (pure) + in-memory 2-close confirm.
-            label, _strength, _evi = compute_real_regime_signal(window)
+            label, _strength, _evi = compute_real_regime_signal(
+                window, asset_class=asset_class
+            )
             regime_label, candidate, candidate_count = self._confirm_regime(
                 current=regime_label, signal=label,
                 candidate=candidate, count=candidate_count,
@@ -181,6 +188,7 @@ class ReplayEngine:
                 venue=venue, symbol=symbol,
                 timeframe=self.config.bar_interval, bars=window,
                 spread_bps=max(0.0, cur.spread_bps_close),
+                asset_class=asset_class,
             )
             for strat in self.strategies:
                 if strat.metadata.strategy_id in open_by_strategy:

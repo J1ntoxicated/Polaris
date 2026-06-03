@@ -491,12 +491,19 @@ def compute_and_flip_regime(
     bars: Sequence[Bar],
     now_ts: int,
     altdata_cache: Any = None,
+    asset_class: str = "crypto",
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
     Returns the regime SSOT *after* applying the flip rule so callers using
     the Layer 6 SSOT receive the gated value (matches strategy_swap's
     ``_lookup_regime`` semantics).
+
+    ``asset_class`` (threaded from the focus row) selects the per-class vol floor
+    so the L3 price candidate's TREND/CRISIS thresholds are normalized to the
+    instrument's own scale — FX/index trends now flip to bull/bear instead of
+    sitting in ``chop`` forever. The 2-consecutive-close confirm gate below is
+    unchanged; this only affects which candidate label the L3 signal proposes.
 
     ``altdata_cache`` (#6) supplies alt-data EVIDENCE only. The L3 price signal
     is the base; the fuser's per-label scores tilt a *borderline* candidate via
@@ -513,7 +520,9 @@ def compute_and_flip_regime(
         gate. Evidence is additive context only; it does not size, block,
         exit, or write learner/risk state. SIGNAL-only.
     """
-    price_candidate, price_strength, _price_ev = compute_real_regime_signal(bars)
+    price_candidate, price_strength, _price_ev = compute_real_regime_signal(
+        bars, asset_class=asset_class
+    )
     candidate = price_candidate
     evidence: dict[str, Any] = {}
     evidence_scores: dict[str, float] = {}

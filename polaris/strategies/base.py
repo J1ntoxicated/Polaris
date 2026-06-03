@@ -117,6 +117,16 @@ class MarketView:
     is_session_open_window: bool = False
     prev_close: float | None = None  # equity gap_go (prior session close)
     gap_pct: float | None = None  # equity gap_go ((open - prev_close)/prev_close)
+    # asset_class-aware emphasis (additive context; default None so the 7
+    # strategies + every existing caller are byte-identical). Populated per
+    # asset_class by build_real_market_view: ema20/ema50/ema_cross for FX & index
+    # (trend emphasis); trend_efficiency (Kaufman ER) for commodity. crypto keeps
+    # its momentum_20bar emphasis and leaves these None. Read by the regime layer
+    # + future per-ticker logic; no strategy reads them (no behavior change).
+    ema_20: float | None = None
+    ema_50: float | None = None
+    ema_cross: float | None = None  # +1 fast>slow / -1 fast<slow / 0 equal
+    trend_efficiency: float | None = None  # Kaufman ER over the window (0..1)
     extra: dict[str, Any] = field(default_factory=dict)
 
 

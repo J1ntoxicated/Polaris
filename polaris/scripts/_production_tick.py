@@ -329,7 +329,7 @@ async def _run_tick(
     # Regime is computed off 1m bars (Layer 6 SSOT — keep stable across tf
     # buckets so swap predicate doesn't oscillate with strategy timeframe).
     regime_by_group: dict[tuple[str, str], str] = {}
-    for venue, symbol, _ac, group_id in focus:
+    for venue, symbol, asset_class, group_id in focus:
         if not group_id:
             continue
         bars_1m = read_recent_bars(conn, venue=venue, symbol=symbol, bar_interval="1m")
@@ -338,6 +338,7 @@ async def _run_tick(
         regime_by_group[(venue, group_id)] = compute_and_flip_regime(
             conn, venue=venue, underlying_group_id=group_id,
             bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
+            asset_class=asset_class,
         )
 
     universe_rows: list[dict[str, Any]] = []
@@ -377,6 +378,7 @@ async def _run_tick(
             mv = build_real_market_view(
                 venue=venue, symbol=symbol, timeframe=timeframe, bars=bars,
                 spread_bps=5.0, session_open_window=session_window_now(now_ts),
+                asset_class=asset_class,
             )
             for strategy in strategies_for_tf:
                 if strategy.metadata.venue != venue:

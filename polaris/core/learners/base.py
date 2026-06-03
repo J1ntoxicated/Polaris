@@ -237,16 +237,12 @@ class BaseLearner(ABC):
         except Exception:
             self.conn.execute("ROLLBACK")
             raise
-        # Disk snapshot (SQLite hot backup + JSON manifest) — DISABLED by default.
-        # A full ``conn.backup()`` of the 215 MB live DB on the SHARED loop conn
-        # blocked the asyncio event loop ~3 min PER learner PER cycle, starving the
-        # real-time tick engine + WS (live: tick engine silent for minutes, WS ping
-        # timeouts). The in-DB row snapshot above (``_write_snapshot``) is the
-        # rollback SSOT — ``rollback`` reads that ROW, and NOTHING reads the disk
-        # .db files. So the disk pair is purely operator-facing. Re-enable with
-        # ``LEARNER_DISK_SNAPSHOT=1`` (accepting the multi-minute loop block).
-        if os.environ.get("LEARNER_DISK_SNAPSHOT") == "1":
-            self._flush_disk_snapshot()
+        # Disk snapshot (SQLite hot backup + JSON manifest) runs outside the
+        # transaction. The in-DB row snapshot above is the rollback SSOT; the disk
+        # pair is operator-facing and DISABLED by default — the gate lives INSIDE
+        # ``_flush_disk_snapshot`` so it covers EVERY caller (here + the per-learner
+        # direct calls e.g. max_hold), which a caller-site gate here would miss.
+        self._flush_disk_snapshot()
         logger.info(
             "[learner %s] hourly commit — keys_updated=%d snapshot_ts=%s",
             self.learner_id,
@@ -410,7 +406,20 @@ class BaseLearner(ABC):
         return now_ts
 
     def _flush_disk_snapshot(self) -> None:
-        """Emit the queued on-disk snapshot, then clear the pending slot."""
+        """Emit the queued on-disk snapshot, then clear the pending slot.
+
+        DISABLED by default (gate covers ALL callers — commit_hourly AND the
+        per-learner direct calls e.g. max_hold). A full ``conn.backup()`` of the
+        ~218 MB live DB on the SHARED loop conn blocks the asyncio event loop for
+        MINUTES, starving the real-time tick engine + WS (live: 3-min tune freeze,
+        tick engine idle). The in-DB row snapshot (``_write_snapshot``) is the
+        rollback SSOT — ``rollback`` reads that ROW, nothing reads the disk .db
+        files — so the disk pair is purely operator-facing. ``LEARNER_DISK_SNAPSHOT=1``
+        re-enables it (accepting the multi-minute loop block).
+        """
+        if os.environ.get("LEARNER_DISK_SNAPSHOT") != "1":
+            self._pending_disk_snapshot = None
+            return
         if self._pending_disk_snapshot is None:
             return
         now_ts, payload = self._pending_disk_snapshot

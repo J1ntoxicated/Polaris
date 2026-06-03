@@ -112,8 +112,16 @@ class WSStreamClient:
         raise NotImplementedError
 
     async def _open(self) -> ClientConnection:
-        """Open the websocket. Overridable for venue-specific headers."""
-        return await websockets.connect(self.ws_url)
+        """Open the websocket. Overridable for venue-specific headers.
+
+        ``ping_timeout=None``: keep the library's keepalive PING (server-side
+        idle keepalive) but never close on a slow/blocked PONG. The live event
+        loop is occasionally blocked >20s by the bar pipeline (GPT/DB), which
+        tripped the default 20s pong timeout → recurring 1011 drops that starved
+        the tick engine. Liveness of a TRULY dead socket is owned by the idle
+        watchdog (``_last_msg_monotonic`` → force-reconnect), not the pong clock.
+        """
+        return await websockets.connect(self.ws_url, ping_timeout=None)
 
     # ------------------------------------------------------------------
     # Public driver

@@ -107,7 +107,11 @@ class CapitalMarketWS(WSStreamClient):
         # Long-gap reconnects re-auth here (steady-state reconnects do not).
         await self._ensure_session_fresh()
         self._mark_activity()
-        return await websockets.connect(self.ws_url)
+        # ping_timeout=None: keep keepalive PING, never drop on a slow/blocked
+        # PONG (the loop is occasionally blocked >20s by the bar pipeline → 1011
+        # drops that starved the tick engine). The idle watchdog owns dead-socket
+        # detection.
+        return await websockets.connect(self.ws_url, ping_timeout=None)
 
     # ------------------------------------------------------------------
     # Subscribe / keepalive

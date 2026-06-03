@@ -105,7 +105,10 @@ def real_pnl_r_from_fills(
         if trade.side == "long"
         else (entry_price - exit_price)
     )
-    atr_usd = max(entry_price * atr_pct * 2.0, 1e-6)
+    # Floor the R unit RELATIVE to price (>= 0.01% of entry), never an absolute
+    # 1e-6: a flat/stale-bar atr_pct ~0 on a high-priced instrument (J225 ~38000,
+    # an index CFD) would otherwise collapse atr_usd to ~0 and explode pnl_r/mfe_r.
+    atr_usd = max(entry_price * atr_pct * 2.0, entry_price * 1e-4)
     pnl_r = pnl_abs / atr_usd
     pnl_usd = (pnl_abs / entry_price) * size_usd
     pnl_r = max(-10.0, min(10.0, pnl_r))
@@ -124,7 +127,11 @@ def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
         for r in bar_rows
         if float(r[0]) > 0.0
     ]
-    return sum(samples) / len(samples) if samples else 0.005
+    mean = sum(samples) / len(samples) if samples else 0.005
+    # Flat/stale bars (high==low → samples all ~0) give mean ~0, which collapses
+    # the R-unit denominator downstream and explodes pnl_r/mfe_r. A degenerate
+    # mean falls back to the same 0.005 real R unit the empty case uses.
+    return mean if mean > 1e-5 else 0.005
 
 
 def _close_excursion_r(

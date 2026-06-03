@@ -138,7 +138,19 @@ class WSStreamClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — degrade, never halt
-                attempt += 1
+                # A drop AFTER a successful connect+subscribe (e.g. a keepalive
+                # ping timeout) is NOT a connect-failure: the endpoint IS
+                # reachable, so reconnect forever and do NOT count it toward the
+                # REST-only give-up cap (which is only for an UNREACHABLE
+                # endpoint). ``self.connected`` is still True here — the finally
+                # that resets it runs AFTER this except. Without this, transient
+                # connect-then-drop cycles accumulate across the session and
+                # permanently kill the WS the tick engine depends on (live:
+                # 8 connect-then-drop over ~1h → 'giving up' → tick engine idle).
+                if self.connected:
+                    attempt = 0
+                else:
+                    attempt += 1
                 logger.warning(
                     "[%s ws] connection error (attempt %d/%d): %r",
                     self.venue, attempt, self._max_reconnect_attempts, exc,

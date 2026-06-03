@@ -344,15 +344,19 @@ class AlpacaAdapter:
         *,
         symbol: str,
         side: str,
-        notional_usd: float,
+        notional_usd: float = 0.0,
+        qty: float | None = None,
         client_order_id: str,
         time_in_force: str = "day",
     ) -> AlpacaOrderResponse:
-        """Place a market order sized by ``notional`` (USD) — no share rounding.
+        """Place a market order sized by ``notional`` (USD) or exact ``qty`` shares.
 
         - ``side`` must be 'buy' or 'sell'.
-        - ``notional`` (USD) is used instead of ``qty`` so fractional sizing is
-          exact (AGGRESSIVE: a $-notional always fills at best available).
+        - ``notional`` (USD, the open path) is used by default so fractional
+          sizing is exact (AGGRESSIVE: a $-notional always fills at best
+          available). ``qty`` (share count, the SELL-to-CLOSE path) takes
+          precedence when given so a close sells EXACTLY the tracked shares — no
+          dust left, no oversell. Alpaca accepts exactly one of notional / qty.
         - ``client_order_id`` is the idempotency key (mirrors OKX clOrdId).
         """
         side_l = side.lower()
@@ -363,15 +367,19 @@ class AlpacaAdapter:
             "side": side_l,
             "type": "market",
             "time_in_force": time_in_force,
-            "notional": _format_decimal(notional_usd),
             "client_order_id": client_order_id,
         }
+        if qty is not None:
+            order_body["qty"] = _format_qty(qty)
+        else:
+            order_body["notional"] = _format_decimal(notional_usd)
         # Security: only non-secret order params are logged (never key/secret).
         logger.info(
-            "[alpaca] order POST %s side=%s notional_usd=%.4f clOrdId=%s",
+            "[alpaca] order POST %s side=%s notional_usd=%.4f qty=%s clOrdId=%s",
             symbol,
             side_l,
             notional_usd,
+            qty,
             client_order_id,
         )
         parsed = await self._place_order_with_retry(
@@ -458,6 +466,18 @@ def _format_decimal(value: float) -> str:
     if value <= 0.0:
         return "0"
     txt = f"{value:.2f}".rstrip("0").rstrip(".")
+    return txt or "0"
+
+
+def _format_qty(value: float) -> str:
+    """Render a share quantity (sell-to-close) at fractional precision.
+
+    9 decimals covers Alpaca fractional-share granularity without scientific
+    notation; trailing zeros are trimmed so a whole-share qty renders cleanly.
+    """
+    if value <= 0.0:
+        return "0"
+    txt = f"{value:.9f}".rstrip("0").rstrip(".")
     return txt or "0"
 
 

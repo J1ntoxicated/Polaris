@@ -281,6 +281,70 @@ async def test_deep_winner_capital_still_flattens_at_close(
     assert state.recalc_session_forced_exit == 1
 
 
+# ---------------------------------------------------------------------------
+# STALE-OVERNIGHT (C, Alpaca) — a position that survived ≥1 RTH close (restart
+# gap missed the pre-close flatten), now in-session → flatten at the next open.
+# Wired via opened_ts threaded into run_session_forced_exit.
+# ---------------------------------------------------------------------------
+
+# 2026-07-14 = Tuesday, 2026-07-15 = Wednesday (EDT). RTH 09:30-16:00 ET.
+_RTH_PRIOR_DAY_MIDDAY = _utc_ts(2026, 7, 14, 17, 0)  # 13:00 ET prior day
+_RTH_TODAY_MIDDAY = _utc_ts(2026, 7, 15, 17, 0)  # 13:00 ET, in-session
+
+
+@pytest.mark.asyncio
+async def test_alpaca_stale_overnight_flattens_in_session(
+    memdb: sqlite3.Connection,
+) -> None:
+    """C opened BEFORE the last RTH close, now mid-RTH the next day (in-session)
+    → the rail force-flattens (stale-overnight) even though we are NOT within the
+    pre-close buffer. Routed via close_specific_position."""
+    _seed(
+        memdb, position_id="c-stale", venue="alpaca",
+        opened_ts=_RTH_PRIOR_DAY_MIDDAY, last_price=100.1,
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("c-stale", "alpaca")]
+    await _recalc(memdb, state, now_ts=_RTH_TODAY_MIDDAY)
+    assert _status(memdb, "c-stale") == "closed"  # stale-overnight forced flat
+    assert state.recalc_session_forced_exit == 1
+    assert state.recalc_precise_exit == 0
+
+
+@pytest.mark.asyncio
+async def test_alpaca_fresh_first_session_not_stale_flattened(
+    memdb: sqlite3.Connection,
+) -> None:
+    """C opened TODAY, still in its FIRST RTH session (no RTH close elapsed) and
+    not near the close → the rail does NOT fire (neither stale nor pre-close)."""
+    opened_today = _utc_ts(2026, 7, 15, 14, 0)  # 10:00 ET today
+    _seed(
+        memdb, position_id="c-fresh", venue="alpaca",
+        opened_ts=opened_today, last_price=100.1,
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("c-fresh", "alpaca")]
+    await _recalc(memdb, state, now_ts=_RTH_TODAY_MIDDAY)
+    assert _status(memdb, "c-fresh") == "open"
+    assert state.recalc_session_forced_exit == 0
+
+
+@pytest.mark.asyncio
+async def test_okx_never_stale_flattened(memdb: sqlite3.Connection) -> None:
+    """A (always_on) held across many days never stale-fires — crypto is 24/7,
+    no calendar close to have survived (parity)."""
+    opened = _utc_ts(2026, 7, 1, 12, 0)
+    _seed(
+        memdb, position_id="a-stale", venue="okx",
+        opened_ts=opened, last_price=100.1,
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("a-stale", "okx")]
+    await _recalc(memdb, state, now_ts=_RTH_TODAY_MIDDAY)
+    assert _status(memdb, "a-stale") == "open"
+    assert state.recalc_session_forced_exit == 0
+
+
 @pytest.mark.asyncio
 async def test_mid_session_loser_capital_not_force_closed_by_rail(
     memdb: sqlite3.Connection,

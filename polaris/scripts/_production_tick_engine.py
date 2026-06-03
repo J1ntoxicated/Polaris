@@ -511,6 +511,7 @@ async def _run_exits(
     okx_adapter: Any,
     capital_session: Any,
     lookup_regime: Callable[..., str],
+    alpaca_adapter: Any = None,
 ) -> None:
     """Per-tick exit pass over the engine's positions (step 6).
 
@@ -564,7 +565,8 @@ async def _run_exits(
                 conn, state=state, position_id=position_id, now_ts=now_ts,
                 lookup_regime=lookup_regime, gpt_client=None, phase=phase,
                 real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-                capital_session=capital_session, close_reason=reason,
+                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                close_reason=reason,
             )
             if closed:
                 eng.scalp_exits += 1
@@ -602,6 +604,7 @@ async def _run_exits(
             close_specific=close_specific_position, lookup_regime=lookup_regime,
             gpt_client=None, phase=phase, real_roundtrip=real_roundtrip,
             okx_adapter=okx_adapter, capital_session=capital_session,
+            alpaca_adapter=alpaca_adapter,
         )
         if closed:
             eng.family_by_position.pop(position_id, None)
@@ -685,7 +688,8 @@ async def run_tick_decision_loop(
             await _run_exits(
                 conn, state, eng, now_ts=now_ts, now_mono=now_mono, phase=phase,
                 real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-                capital_session=capital_session, lookup_regime=_lookup_regime_str,
+                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                lookup_regime=_lookup_regime_str,
             )
             # --- periodic eval telemetry (~30s): diagnose fire/no-fire ------
             if now_mono - eng.tel_mono >= 30.0:

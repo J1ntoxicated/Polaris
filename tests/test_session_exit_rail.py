@@ -251,3 +251,102 @@ def test_unknown_calendar_never_fires() -> None:
     no spurious forced flat on a stream with no defined calendar close)."""
     dec = session_forced_exit("mystery_cal", _utc_ts(*_FRIDAY, 21, 55))
     assert dec.close is False
+
+
+# ---------------------------------------------------------------------------
+# STALE-OVERNIGHT — a restart gap around the close means the pre-close-buffer
+# trigger was missed → the position survived ≥1 calendar close. Fire ALSO when
+# a session close occurred between opened_ts and now AND now is IN-SESSION (so
+# the venue can actually fill the flatten). TIME-only; always_on still never.
+# ---------------------------------------------------------------------------
+
+
+def test_equity_stale_overnight_in_session_fires() -> None:
+    """A us_equity position opened BEFORE the last RTH close, now mid-RTH the
+    NEXT day (in-session) → the position survived a calendar close (restart gap
+    missed the pre-close flatten) → flatten now (stale-overnight)."""
+    opened = _utc_ts(2026, 7, 14, 17, 0)  # 2026-07-14 13:00 ET (prior RTH)
+    now = _utc_ts(2026, 7, 15, 17, 0)  # 2026-07-15 13:00 ET (next day, in RTH)
+    dec = session_forced_exit("us_equity_cal", now, opened_ts=opened)
+    assert dec.close is True
+    assert dec.close_reason == "session_close_us_equity_cal"
+
+
+def test_equity_fresh_first_session_does_not_stale_fire() -> None:
+    """A position opened TODAY, still in its FIRST RTH session (no RTH close has
+    elapsed since open) → does NOT stale-fire (and not near the close → the
+    pre-close trigger is silent too)."""
+    opened = _utc_ts(2026, 7, 15, 14, 0)  # 10:00 ET today
+    now = _utc_ts(2026, 7, 15, 17, 0)  # 13:00 ET today, same session
+    dec = session_forced_exit("us_equity_cal", now, opened_ts=opened)
+    assert dec.close is False
+
+
+def test_equity_stale_but_now_out_of_session_holds() -> None:
+    """The position survived an RTH close, but NOW is overnight (out of session)
+    — the venue cannot fill a flatten while closed → do NOT fire on the stale
+    trigger yet (it fires at the next in-session open). Mid-RTH-fresh path keeps
+    the pre-close trigger; here both are silent."""
+    opened = _utc_ts(2026, 7, 14, 17, 0)  # prior-day RTH
+    now = _utc_ts(2026, 7, 15, 3, 0)  # 2026-07-15 overnight (closed)
+    dec = session_forced_exit("us_equity_cal", now, opened_ts=opened)
+    assert dec.close is False
+
+
+def test_equity_stale_overnight_pnl_irrelevant() -> None:
+    """Stale-overnight is TIME-only: a deep loser AND a deep winner both flatten
+    at the next in-session open (never a loss/drawdown reaction)."""
+    opened = _utc_ts(2026, 7, 14, 17, 0)
+    now = _utc_ts(2026, 7, 15, 17, 0)
+    assert session_forced_exit(
+        "us_equity_cal", now, opened_ts=opened, pnl_r=-9.0
+    ).close is True
+    assert session_forced_exit(
+        "us_equity_cal", now, opened_ts=opened, pnl_r=9.0
+    ).close is True
+
+
+def test_equity_pre_close_buffer_still_fires_with_opened_ts() -> None:
+    """The EXISTING pre-close-buffer trigger is preserved when opened_ts is
+    threaded: opened mid-session today, now within the buffer of today's close
+    → fire (existing behaviour, not the stale path)."""
+    opened = _utc_ts(2026, 7, 15, 17, 0)  # 13:00 ET today
+    now = _utc_ts(2026, 7, 15, 19, 55)  # 5 min before 16:00 ET close
+    dec = session_forced_exit("us_equity_cal", now, opened_ts=opened)
+    assert dec.close is True
+
+
+def test_always_on_never_stale_fires() -> None:
+    """always_on (OKX) NEVER fires even with a long-held position spanning many
+    days — crypto is 24/7, there is no calendar close to have survived."""
+    opened = _utc_ts(2026, 7, 1, 12, 0)
+    now = _utc_ts(2026, 7, 15, 17, 0)
+    dec = session_forced_exit("always_on", now, opened_ts=opened)
+    assert dec.close is False
+
+
+def test_fx_stale_over_weekend_in_session_fires() -> None:
+    """An FX position opened before the Friday 22:00 UTC weekend close, now
+    Monday mid-session (in-session, weekend close elapsed) → flatten (survived a
+    calendar close; the restart gap missed the pre-close flatten)."""
+    opened = _utc_ts(2026, 5, 29, 12, 0)  # Friday before the 22:00 UTC close
+    now = _utc_ts(2026, 6, 1, 12, 0)  # Monday midday (FX in-session)
+    dec = session_forced_exit("fx_indices_cal", now, opened_ts=opened)
+    assert dec.close is True
+    assert dec.close_reason == "session_close_fx_indices_cal"
+
+
+def test_fx_fresh_same_session_does_not_stale_fire() -> None:
+    """An FX position opened Wednesday, now Wednesday later the same week (no
+    weekend close elapsed) → does NOT stale-fire."""
+    opened = _utc_ts(*_WEDNESDAY, 9, 0)
+    now = _utc_ts(*_WEDNESDAY, 12, 0)
+    dec = session_forced_exit("fx_indices_cal", now, opened_ts=opened)
+    assert dec.close is False
+
+
+def test_no_opened_ts_keeps_pure_pre_close_behaviour() -> None:
+    """Backward-compat: with no opened_ts the rail is the pre-close-buffer rail
+    only (no stale path) — mid-RTH with no opened_ts holds."""
+    dec = session_forced_exit("us_equity_cal", _utc_ts(2026, 7, 15, 17, 0))
+    assert dec.close is False

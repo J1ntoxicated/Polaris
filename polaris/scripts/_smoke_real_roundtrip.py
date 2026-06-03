@@ -44,6 +44,7 @@ from polaris.scripts._okx_market_chunk import (
     _aggregate_child_fills,
     _split_market_notional,
 )
+from polaris.scripts._smoke_roundtrip_alpaca import real_alpaca_close_fill
 from polaris.scripts._smoke_roundtrip_capital import (
     real_capital_close_fill,
     real_capital_open_fill,
@@ -67,6 +68,7 @@ __all__ = [
     "CloseOrphan",
     "OpenAttempt",
     "fetch_okx_available_usdt",
+    "real_alpaca_close_fill",
     "real_capital_close_fill",
     "real_capital_open_fill",
     "real_okx_close_fill",

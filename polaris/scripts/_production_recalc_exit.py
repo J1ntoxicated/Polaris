@@ -106,26 +106,40 @@ async def run_session_forced_exit(
     real_roundtrip: bool,
     okx_adapter: Any,
     capital_session: Any,
+    alpaca_adapter: Any = None,
 ) -> bool:
     """Phase 3 per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L
     throttle). Keyed on the position's stream ``session_calendar``: ``always_on``
     (A) NEVER fires (byte-identical); ``fx_indices_cal`` (B) forces a flat when
-    the weekend close is imminent; ``us_equity_cal`` (C) forces a flat when the
-    RTH close is imminent (no-overnight). Fires on TIME ONLY — never on pnl /
-    drawdown — and routes through the EXISTING ``close_specific_position`` (the
-    close path is unchanged; this only ADDS a calendar-driven EXIT_NOW on top of
-    the shared #26 FSM / G6 stop / G7 widening). Returns ``True`` when this
-    position was force-flattened (caller skips the rest of the exit/G6 pass).
+    the weekend close is imminent OR the position survived a weekend close
+    (stale-overnight) and is now in-session; ``us_equity_cal`` (C) forces a flat
+    when the RTH close is imminent (no-overnight) OR the position survived an RTH
+    close (a restart gap missed the pre-close flatten) and is now in-session.
+    Fires on TIME ONLY — never on pnl / drawdown — and routes through the EXISTING
+    ``close_specific_position`` (the close path is unchanged; this only ADDS a
+    calendar-driven EXIT_NOW on top of the shared #26 FSM / G6 stop / G7
+    widening). Returns ``True`` when this position was force-flattened (caller
+    skips the rest of the exit/G6 pass).
+
+    ``opened_ts`` (stale-overnight, threaded from the position row): the close
+    can fill ONLY while in-session, so a bot-restart gap around the close misses
+    the pre-close trigger → the position would hold across ≥1 calendar close. The
+    rail re-arms the flatten at the next in-session open.
     """
     session_calendar = _session_calendar_for_venue(str(pos["venue"]))
-    decision = session_forced_exit(session_calendar, now_ts, pnl_r=pnl_r)
+    opened_ts_raw = pos.get("opened_ts")
+    opened_ts = None if opened_ts_raw is None else int(opened_ts_raw)
+    decision = session_forced_exit(
+        session_calendar, now_ts, pnl_r=pnl_r, opened_ts=opened_ts,
+    )
     if not decision.close:
         return False
     await close_specific(
         conn, state=state, position_id=str(pos["position_id"]), now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, close_reason=decision.close_reason,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        close_reason=decision.close_reason,
     )
     state.recalc_session_forced_exit = (
         getattr(state, "recalc_session_forced_exit", 0) + 1
@@ -201,6 +215,7 @@ async def run_precise_exit(
     real_roundtrip: bool,
     okx_adapter: Any,
     capital_session: Any,
+    alpaca_adapter: Any = None,
 ) -> bool:
     """Track excursion + ratchet ATR stop + advance FSM; close if a precise
     exit fired. Returns ``True`` when this position was closed (caller skips
@@ -247,7 +262,8 @@ async def run_precise_exit(
         conn, state=state, position_id=position_id, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, close_reason=decision.close_reason,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        close_reason=decision.close_reason,
     )
     state.recalc_precise_exit = getattr(state, "recalc_precise_exit", 0) + 1
     # Precise-exit close (INFO): the decision/거동 visibility Jin asked for —

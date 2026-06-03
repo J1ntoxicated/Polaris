@@ -324,7 +324,8 @@ async def _run_tick(
         conn, state=state, now_ts=now_ts, gpt_client=haiku, phase=phase,
         lookup_regime=_lookup_regime, close_specific=close_specific_position,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, tick_idx=tick_idx,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        tick_idx=tick_idx,
     )
     # Regime is computed off 1m bars (Layer 6 SSOT — keep stable across tf
     # buckets so swap predicate doesn't oscillate with strategy timeframe).

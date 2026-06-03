@@ -131,6 +131,45 @@ def _minutes_to_fx_weekend_close(ts: int | float) -> float | None:
     return (close - d).total_seconds() / 60.0
 
 
+def _fx_in_session(ts: int | float) -> bool:
+    """Is the FX/indices market in-session at ``ts`` (not the weekend-closed
+    window)? Closed window = Friday 22:00 UTC → Sunday 22:00 UTC (the same
+    boundary _stream_guards.cfd_market_open_at uses). In-session everywhere else.
+    """
+    d = _utc(ts)
+    wd = d.weekday()  # Mon=0 .. Sun=6
+    if wd == 5:  # Saturday — fully closed
+        return False
+    if wd == _FX_FRIDAY_WEEKDAY and d.hour >= _FX_WEEKEND_CLOSE_HOUR_UTC:
+        return False  # Friday at/after 22:00 UTC — closed
+    if wd == 6 and d.hour < _FX_WEEKEND_CLOSE_HOUR_UTC:  # noqa: SIM103
+        return False  # Sunday before 22:00 UTC — not yet reopened
+    return True
+
+
+def _fx_weekend_close_elapsed_since(
+    opened_ts: int | float, now_ts: int | float
+) -> bool:
+    """Did an FX weekend close (Friday 22:00 UTC) fall in ``(opened_ts, now_ts]``?
+
+    The most-recent weekend-close instant at/before ``now`` is the latest Friday
+    22:00 UTC <= now. If that is strictly after ``opened_ts``, the position
+    survived at least one weekend close (a restart gap missed the pre-close
+    flatten). Mirrors _minutes_to_fx_weekend_close's Friday 22:00 UTC boundary.
+    """
+    d = _utc(now_ts)
+    # Walk back to the most-recent Friday at/before now.
+    days_since_fri = (d.weekday() - _FX_FRIDAY_WEEKDAY) % 7
+    last_friday = (d - dt.timedelta(days=days_since_fri)).replace(
+        hour=_FX_WEEKEND_CLOSE_HOUR_UTC, minute=0, second=0, microsecond=0
+    )
+    if last_friday > d:
+        # 'This' Friday's 22:00 UTC is still in the future (now is earlier on
+        # Friday) → step back to the prior Friday's close.
+        last_friday -= dt.timedelta(days=7)
+    return last_friday.timestamp() > float(int(opened_ts))
+
+
 def _minutes_to_rth_close(ts: int | float) -> float | None:
     """Minutes until the US-equity RTH close (16:00 ET, DST-correct).
 
@@ -147,12 +186,57 @@ def _minutes_to_rth_close(ts: int | float) -> float | None:
     return float(_RTH_CLOSE_LOCAL_MINUTES - minute_of_day)
 
 
+def _rth_close_elapsed_since(opened_ts: int | float, now_ts: int | float) -> bool:
+    """Did a US-equity RTH close (16:00 ET) fall in ``(opened_ts, now_ts]``?
+
+    The most-recent RTH-close instant at/just-before ``now`` is 16:00 ET of the
+    latest ET calendar day whose 16:00 is <= now. If that instant is strictly
+    after ``opened_ts``, the position survived at least one RTH close (a restart
+    gap around the close → the pre-close flatten was missed). DST-correct (built
+    in America/New_York local time). Weekend RTH-close instants (Sat/Sun 16:00 ET)
+    do not exist as real sessions, but an open spanning them still survived the
+    prior Friday's real close, so a simple ">=opened" comparison is conservative
+    and correct for the no-overnight intent.
+    """
+    now_local = _utc(now_ts).astimezone(_NY_TZ)
+    # Candidate close = 16:00 ET today; if now is before that, the last real
+    # close was yesterday 16:00 ET.
+    close_today = now_local.replace(
+        hour=16, minute=0, second=0, microsecond=0
+    )
+    last_close = close_today if now_local >= close_today else (
+        close_today - dt.timedelta(days=1)
+    )
+    return last_close.timestamp() > float(int(opened_ts))
+
+
+def _stale_overnight_in_session(cal: str, now_ts: int | float, opened_ts: int) -> bool:
+    """STALE-OVERNIGHT trigger: did the position survive ≥1 calendar close and is
+    NOW in-session (so the venue can actually fill the flatten)?
+
+    A bot-restart gap around the close misses the pre-close-buffer trigger → the
+    position would hold across the close (overnight / over-weekend). We re-arm the
+    flatten at the next IN-SESSION open: a close fell in ``(opened_ts, now]`` AND
+    now is currently in-session. TIME-only. ``always_on`` (A) has no calendar
+    close, so this never applies to it (handled by the caller's early return).
+    """
+    if cal == _CAL_US_EQUITY:
+        in_session = _minutes_to_rth_close(now_ts) is not None
+        return in_session and _rth_close_elapsed_since(opened_ts, now_ts)
+    if cal == _CAL_FX_INDICES:
+        return _fx_in_session(now_ts) and _fx_weekend_close_elapsed_since(
+            opened_ts, now_ts
+        )
+    return False
+
+
 def session_forced_exit(
     session_calendar: str,
     now_ts: int | float,
     *,
     pnl_r: float = 0.0,
     close_buffer_min: float | None = None,
+    opened_ts: int | None = None,
 ) -> SessionExitDecision:
     """Per-stream session-close RAIL — decide a calendar-forced flat (TIME-only).
 
@@ -160,10 +244,18 @@ def session_forced_exit(
 
     - ``always_on`` (A): NEVER fires → byte-identical (no calendar close).
     - ``fx_indices_cal`` (B): force flat when the weekend close (Friday 22:00
-      UTC) is within ``close_buffer_min``.
+      UTC) is within ``close_buffer_min`` OR (stale-overnight) the position
+      survived a weekend close and is now in-session.
     - ``us_equity_cal`` (C): force flat when the RTH close (16:00 ET) is within
-      ``close_buffer_min`` (no-overnight).
+      ``close_buffer_min`` (no-overnight) OR (stale-overnight) the position
+      survived an RTH close and is now in-session.
     - any other token: NEVER fires (safe default).
+
+    ``opened_ts`` (stale-overnight, optional): when threaded, a position that
+    survived ≥1 calendar close (a restart gap missed the pre-close flatten) is
+    flattened at the next IN-SESSION open — the venue can only fill while in
+    session, so we never fire on the stale trigger while the market is closed. No
+    ``opened_ts`` → the pre-close-buffer rail only (backward-compatible).
 
     ``pnl_r`` is ACCEPTED but DELIBERATELY UNUSED in the decision — the rail
     fires on TIME ONLY, never on a loss / drawdown. It is present so callers can
@@ -192,6 +284,14 @@ def session_forced_exit(
         # Unknown / unmapped calendar — never fire (no defined close boundary).
         return SessionExitDecision(close=False)
 
-    if mins is None or mins > buffer_min:
-        return SessionExitDecision(close=False)
-    return SessionExitDecision(close=True, close_reason=f"session_close_{cal}")
+    # Existing pre-close-buffer trigger (flatten while still in-session, close
+    # imminent) — unchanged.
+    if mins is not None and mins <= buffer_min:
+        return SessionExitDecision(close=True, close_reason=f"session_close_{cal}")
+
+    # STALE-OVERNIGHT trigger: the position survived ≥1 calendar close (restart
+    # gap missed the pre-close flatten) and is now in-session → flatten now.
+    if opened_ts is not None and _stale_overnight_in_session(cal, now_ts, opened_ts):
+        return SessionExitDecision(close=True, close_reason=f"session_close_{cal}")
+
+    return SessionExitDecision(close=False)

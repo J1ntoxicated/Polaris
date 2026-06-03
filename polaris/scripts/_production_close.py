@@ -13,11 +13,9 @@ Split out from ``_production_pipeline.py`` to keep both files under the
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import sqlite3
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
@@ -41,15 +39,18 @@ from polaris.scripts._production_close_helpers import (
     _close_excursion_r,
     _latest_bar_close,
     _persist_partial_close,
+    _reconcile_orphan,
     real_pnl_r_from_fills,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
     CloseOrphan,
+    real_alpaca_close_fill,
     real_capital_close_fill,
     real_okx_close_fill,
     resolve_okx_base_url,
 )
+from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital import CapitalAdapter
 from polaris.venues.okx import OKXAdapter
 
@@ -70,24 +71,53 @@ __all__ = [
 ]
 
 
+async def _real_alpaca_close(
+    trade: SimulatedTrade, alpaca_adapter: Any
+) -> Fill | CloseOrphan | None:
+    """Alpaca close leg: SELL the tracked shares (build adapter from PAPER creds
+    when none is injected, mirroring the OKX None-adapter env path). ``None``
+    (transient — market closed / no creds) preserves the position so the rail's
+    stale-overnight trigger re-arms the flatten at the next in-session open.
+    """
+    if alpaca_adapter is None:
+        api_key, secret = resolve_alpaca_credentials()
+        if not (api_key and secret):
+            logger.error("[real-close] ALPACA_PAPER_* creds missing — cannot close")
+            return None
+        async with AlpacaAdapter(api_key=api_key, secret=secret) as adapter:
+            return await real_alpaca_close_fill(
+                adapter, symbol=trade.symbol, base_qty=trade.base_qty,
+                strategy_id=trade.strategy_id,
+            )
+    return await real_alpaca_close_fill(
+        alpaca_adapter, symbol=trade.symbol, base_qty=trade.base_qty,
+        strategy_id=trade.strategy_id,
+    )
+
+
 async def _real_close_fill(
     *,
     trade: SimulatedTrade,
     fresh_mark: float | None = None,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
 ) -> Fill | CloseOrphan | None:
     """Drive the real demo venue close leg → return the exit ``Fill``.
 
-    P0 venue wire: OKX sells the entry ``base_qty``; Capital closes by
-    ``deal_id``. Adapters are injected for testability; when ``okx_adapter``
-    is ``None`` we build one from ``OKX_DEMO_*`` env. Returns ``None`` on
-    reject / no-fill so the caller falls back to mark-to-market only.
+    P0 venue wire: OKX sells the entry ``base_qty``; Alpaca sells the tracked
+    shares; Capital closes by ``deal_id``. Adapters are injected for testability;
+    when ``okx_adapter`` / ``alpaca_adapter`` is ``None`` we build one from env.
+    Returns ``None`` on reject / no-fill so the caller falls back to mark-to-market.
 
     ``fresh_mark`` (FIX A): the latest 1m bar close the OKX cap-split sizes
     against (fall back to ``trade.entry_price`` only when no bar exists) so a
     risen-price close cannot tip a child over the venue cap.
     """
+    if trade.venue == "alpaca":
+        # Alpaca US-equity: SELL the tracked shares (the venue close that was
+        # previously UNWIRED → orphan → shares never sold). BEFORE Capital.
+        return await _real_alpaca_close(trade, alpaca_adapter)
     if trade.venue == "okx":
         mark = fresh_mark if fresh_mark and fresh_mark > 0.0 else trade.entry_price
         if okx_adapter is not None:
@@ -144,6 +174,7 @@ async def close_specific_position(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
     close_reason: str = "",
 ) -> bool:
     """Day 9 F2.b — close a specific position by ``position_id``.
@@ -170,7 +201,8 @@ async def close_specific_position(
         conn, state=state, trade=target, trade_idx=target_idx, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, close_reason=close_reason,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        close_reason=close_reason,
     )
 
 
@@ -185,6 +217,7 @@ async def close_oldest_with_real_pnl(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
     close_reason: str = "",
 ) -> None:
     """F + G8 fix: real mark-to-market PnL + G8 reflector + gate_events log.
@@ -210,79 +243,9 @@ async def close_oldest_with_real_pnl(
         now_ts=now_ts, lookup_regime=lookup_regime,
         gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, close_reason=close_reason,
+        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        close_reason=close_reason,
     )
-
-
-def _reconcile_orphan(
-    conn: sqlite3.Connection,
-    *,
-    state: ProdLoopState,
-    trade: SimulatedTrade,
-    trade_idx: int,
-    available: float,
-    now_ts: int,
-) -> bool:
-    """FIX 2 — mark a true-orphan position terminal so it stops being retried.
-
-    ``status='reconciled'`` denotes VENUE-SIDE STATE-DRIFT RECOVERY (the wallet
-    no longer holds the tracked base_qty — an over-count), NOT a trade outcome:
-    NO close fill is persisted and NO realized PnL is recorded. The position is
-    popped from ``state.open_trades`` (it is NOT appended to ``closed_trades`` —
-    there is no outcome to reflect on), and an ``orphan_reconciled`` audit row is
-    written to ``risk_events``. Returns ``True`` (handled) so the caller does not
-    treat it as a transient reject. Idempotent: a re-attempt on an already
-    reconciled row is a no-op UPDATE. flow_not_block — no fault, no throttle.
-    """
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        if trade.position_id:
-            conn.execute(
-                "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
-                "exit_state = 'reconciled' WHERE position_id = ?",
-                (now_ts, trade.position_id),
-            )
-        conn.execute("COMMIT")
-    except sqlite3.Error as exc:
-        with contextlib.suppress(sqlite3.Error):
-            conn.execute("ROLLBACK")
-        logger.error(
-            "[close/orphan] %s:%s reconcile UPDATE failed (state preserved): %r",
-            trade.venue, trade.symbol, exc,
-        )
-        state.venue_close_rejects += 1
-        return False
-    # Pop from open_trades by identity (defensive re-find, mirrors the close path).
-    if 0 <= trade_idx < len(state.open_trades) and state.open_trades[trade_idx] is trade:
-        state.open_trades.pop(trade_idx)
-    else:
-        with contextlib.suppress(ValueError):
-            state.open_trades.remove(trade)
-    trade.closed = True
-    # Audit row (best-effort) — durable record of the reconcile for forensics.
-    audit = json.dumps(
-        {
-            "venue": trade.venue, "symbol": trade.symbol,
-            "position_id": trade.position_id, "base_qty": trade.base_qty,
-            "available": available, "reason": "available~0 qty over-count",
-        },
-        separators=(",", ":"),
-    )
-    with contextlib.suppress(sqlite3.Error):
-        conn.execute(
-            "INSERT INTO risk_events "
-            "(risk_event_id, strategy_id, event_type, created_ts, payload_json) "
-            "VALUES (?, ?, 'orphan_reconciled', ?, ?)",
-            (uuid.uuid4().hex, trade.strategy_id, now_ts, audit),
-        )
-    logger.warning(
-        "[close/orphan] %s:%s trade_id=%s reconciled (available=%.10f ~0, "
-        "base_qty=%.10f over-count) — status='reconciled', no fill, no pnl; "
-        "exit engine + hydrate stop retrying (state-drift recovery)",
-        trade.venue, trade.symbol, trade.position_id or "-", available,
-        trade.base_qty,
-    )
-    return True
 
 
 async def _close_trade_with_real_pnl(
@@ -298,6 +261,7 @@ async def _close_trade_with_real_pnl(
     real_roundtrip: bool = False,
     okx_adapter: Any = None,
     capital_session: Any = None,
+    alpaca_adapter: Any = None,
     close_reason: str = "",
 ) -> bool:
     """Shared close path used by FIFO oldest + specific-position closes.
@@ -318,7 +282,7 @@ async def _close_trade_with_real_pnl(
         try:
             real_fill = await _real_close_fill(
                 trade=trade, fresh_mark=fresh_mark, okx_adapter=okx_adapter,
-                capital_session=capital_session,
+                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             # Genuine adapter exception (transport/parse) — internal fault.

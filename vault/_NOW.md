@@ -10,6 +10,14 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🟢 HANDOVER 2026-06-04 (FREEZE 해결 — 봇+대시보드 동시 동작).** 봇 PID=`data/paper/production.pid`(현재 72023), DB=`data/polaris_live.sqlite`, log=`data/paper/p5_live16.log`, env=`TICK_ENGINE_ENABLED=1`. 대시보드 :8770 라이브 DB 읽기, **HTTP 200 정상**. 봇 라이브로 거래중(틱+Capital opens, closes 12+), **SPCE 오버나잇 2개 완전 청산**, WAL 안정, stall 1~5s.
+- **증상(Jin)**: 봇이 반복적으로 얼어 → 대시보드 무갱신 + recalc 굶어 SPCE(알파카) 미청산 + phantom 손실 표시.
+- **잡은 freeze 뿌리(커밋체인)**: `b3ccc5b`+`3607205`(러너 218MB 디스크백업=매시간 ~3분 루프블록; `_flush_disk_snapshot` 안에서 게이트 → max_hold 포함 모든 호출자 OFF, `LEARNER_DISK_SNAPSHOT=1`로만 ON. rollback SSOT=in-DB row라 디스크 .db는 아무도 안 읽음) · `5c26018`(바 파이프라인 regime/indicator 45심볼 동기 루프 → 심볼간 `asyncio.sleep(0)` yield) · `7652947`(**position_id 충돌**=틱엔진 generic signal_id(`tick_micro_reversion`)로 동일틱 다종목이 `pos_{sig[:16]}_{ts}` 같은 id → INSERT OR REPLACE로 positions 행 덮어쓰기 + fill을 contribution_id만으로 cross-match → J225 close가 OIL 94.168 entry로 계산 +$145K phantom ~965,000x; venue+symbol 유일화 + close/recalc 4개 매처에 `instrument_id` 필터) · `670f458`(WAL 무한성장 729MB=상시 reader가 autocheckpoint truncate 막음 → DB op이 wal-index 걷느라 UN(uninterruptible) 디스크 I/O freeze; 전용 스레드 재청구 체크포인트 15s, off-loop) · `b00bdf2`(**baseline sort GIL**=`compute_baselines_batch` 순수 Python `sorted()`가 to_thread여도 GIL 보유 → 유니버스 refresh(5min)마다 신규 focus 심볼 7일窗 시딩이 루프 분단위 블록(STALL 225s); 8-window 청크로 await 사이 루프 숨쉼).
+  · `d869874`(**대시보드 freeze 근본**=`quote_ticks` 647K행/215MB라 대시보드 1s `collect_snapshot` read가 무거운 random-IO 스캔→봇 write와 경합→WAL 폭증→UN freeze. 봇이 대시보드 붙는 순간만 얼고 단독은 멀쩡했음. mirror-backup 시도는 역효과(215MB/15s backup이 snapshot 잡아 WAL 712MB로 키움). 근본=`quote_ticks` 2h 캡(틱엔진은 in-mem ring 읽으므로 안전), prune+PASSIVE 체크포인트를 스레드서 15s. 작은 DB→빠른 대시보드 read→WAL 바운드→freeze 없음, 대시보드 라이브 직독).
+- **교훈**: 내 백그라운드 `sqlite3` CLI 진단이 hung reader로 WAL 핀 → freeze 가중+진단 오염. 라이브 DB 쿼리=`python3 -c`(명시적 close)로. + 두 프로세스 SQLite 경합은 테이블 크기에 비례 → 핫 테이블 캡이 근본. + `wal_checkpoint(TRUNCATE)`는 reader와 데드락(PASSIVE 써야). [[feedback_realtime_price_first_principle]].
+- **현재(✅ 동작)**: 봇+대시보드 동시 정상. WAL 안정(~115MB high-water, 不증가), quote_ticks ~13K 캡, SPCE 청산완료, 거래중, stall 1~5s, 영구 freeze 해결. 6개 freeze 뿌리 전부 제거.
+- **남은(폴리시/팔로업)**: ① phantom `fills.pnl_usd` 옛 3행 정정(코스메틱, 새 거래는 OK — 일 PnL 표시만 부풀려짐) ② WAL high-water 115MB는 이번 세션 일회성 대량 prune 스파이크(재기동 시 0서 시작, 이후 점진 prune이라 작게 유지) ③ DB 파일 215M(free page) VACUUM로 축소 가능(선택) ④ startup baseline 시딩 최적화(첫 ~2분 무거움) ⑤ `start_dashboard.sh` 중복기동 레이스(pkill 직후 재기동 시 가끔 2 proc).
+
 **🟢🟢 HANDOVER 2026-06-03 (P5 틱-엔진 LIVE — "실시간-틱 의사결정" 완성·기동).** 봇 PID=`data/paper/production.pid`=2115 LIVE, DB=`data/polaris_live.sqlite`, log=`data/paper/p5_live4.log`, 대시보드 :8770. env=`TICK_ENGINE_ENABLED=1`(SHADOW off=live).
 - **무엇**: 라이브 WS 틱 → 미시구조 features(velocity/burst_z/ofi/aggr_flow/overshoot/spread) → 양방향 신호(burst_rider/flow_pressure/micro_reversion) → 실시간 진입/엑싯(모멘텀=ATR-trail, reversion=fast-scalp). 바=인디케이터 base, 틱=결정. 틱-엔진 owns **{capital}** only(OKX 데모 틱 희박 ~0.03/s+OKX open close 오라우팅 → OKX/Alpaca=바). `core/ticks/` + `_production_tick_engine.py`. SSOT=`.claude/plans/p5_tick_decision_engine_2026-06-03.md`.
 - **라이브 검증(✅ 풀 라운드트립+수익)**: shadow=False, 실주문 다수. **GOLD micro_reversion: open→confirm ACCEPTED dealId→scalp_target→`close_position dealId=`→ +0.51R** (deal_id 캡처+close end-to-end 입증). Capital US30 숏(양방향) 셰도우. tick 에러 0.
@@ -204,4 +212,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-03 09:39 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-03 16:53 (paper=True, full_pipeline=True)

@@ -216,13 +216,15 @@ def _read_cost_inputs(
     if trade.position_id:
         entry = conn.execute(
             "SELECT fee_usd, slippage_bps, size_usd, fill_price FROM fills "
-            "WHERE contribution_id = ? AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
-            (trade.position_id,),
+            "WHERE contribution_id = ? AND instrument_id = ? AND is_close = 0 "
+            "ORDER BY ts_ms ASC LIMIT 1",
+            (trade.position_id, inst),
         ).fetchone()
         exit_row = conn.execute(
             "SELECT fee_usd, slippage_bps FROM fills "
-            "WHERE contribution_id = ? AND is_close = 1 ORDER BY ts_ms DESC LIMIT 1",
-            (trade.position_id,),
+            "WHERE contribution_id = ? AND instrument_id = ? AND is_close = 1 "
+            "ORDER BY ts_ms DESC LIMIT 1",
+            (trade.position_id, inst),
         ).fetchone()
     if entry is None:
         entry = conn.execute(

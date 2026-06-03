@@ -51,19 +51,23 @@ def real_pnl_r_from_fills(
     actually traded — without it a loss exit could be logged as a win when
     the seeded bars happened to trend the other way.
 
-    Day 8 codex P0 fix: matches the entry fill by ``contribution_id =
-    position_id`` so two trades on the same (strategy, instrument) can never
-    cross-price. Falls back to the legacy heuristic only when the trade has
-    no ``position_id`` set (legacy callers).
+    Matches the entry fill by ``contribution_id = position_id`` AND
+    ``instrument_id`` — the position_id alone was not instrument-unique for the
+    tick engine (its signals share a generic signal_id), so a same-tick multi-
+    instrument open produced colliding ids and the close cross-matched a foreign
+    instrument's entry price → exploded pnl_usd/mfe_r (the instrument_id filter
+    disambiguates the already-collided historical fills; the id is now made
+    unique at creation too). Falls back to the legacy heuristic only when the
+    trade has no ``position_id`` set (legacy callers).
     """
     if trade.position_id:
         row = conn.execute(
             """
             SELECT fill_price, size_usd FROM fills
-            WHERE contribution_id = ? AND is_close = 0
+            WHERE contribution_id = ? AND instrument_id = ? AND is_close = 0
             ORDER BY ts_ms ASC LIMIT 1
             """,
-            (trade.position_id,),
+            (trade.position_id, f"{trade.venue}:{trade.symbol}"),
         ).fetchone()
     else:
         row = conn.execute(
@@ -153,8 +157,8 @@ def _close_excursion_r(
     if entry_price <= 0.0:
         row = conn.execute(
             "SELECT fill_price FROM fills WHERE contribution_id = ? "
-            "AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
-            (trade.position_id,),
+            "AND instrument_id = ? AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
+            (trade.position_id, f"{trade.venue}:{trade.symbol}"),
         ).fetchone() if trade.position_id else None
         if row is None:
             return (0.0, 0.0)

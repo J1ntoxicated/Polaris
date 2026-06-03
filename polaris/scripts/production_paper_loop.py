@@ -485,6 +485,20 @@ async def run_production_paper_loop(
                     resubscribe_ws_clients(conn, ws_clients)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
+            # WAL hygiene (every ~60s). The bot's constant short reads + a
+            # read-only dashboard connection kept SQLite's autocheckpoint
+            # perpetually deferred, so the -wal grew unbounded (live: 729 MB).
+            # Past a few hundred MB every DB op must walk a huge wal-index and
+            # goes multi-MINUTE UN-state slow → the loop + WS + dashboard all
+            # froze. A PASSIVE checkpoint never blocks on a reader (it flushes
+            # only the frames behind no live snapshot), so it is safe on the loop
+            # and keeps the WAL bounded. RESTART/TRUNCATE would block on the
+            # always-present reader → do not use them here.
+            if tick_idx % 12 == 0:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except sqlite3.Error:
+                    logger.debug("[wal] passive checkpoint skipped (busy)")
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()

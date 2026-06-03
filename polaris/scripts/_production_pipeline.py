@@ -413,7 +413,16 @@ async def reserve_and_submit(
     # close path operate on the same persistent state Layer 4/5 see. Wrap
     # both writes in a single SQLite transaction so a failure cannot leave
     # half-state.
-    position_id = f"pos_{sig.signal_id[:16]}_{now_ts}"
+    # Instrument-unique. The tick-engine signals share a GENERIC signal_id
+    # (e.g. 'tick_micro_reversion'), so ``sig.signal_id[:16] + now_ts`` ALONE
+    # collided across EVERY instrument opened in the same tick. Two same-tick
+    # opens then (a) overwrote each other's positions row (INSERT OR REPLACE on
+    # the position_id PK below) and (b) cross-matched entry fills by
+    # contribution_id in the close/recalc path → exploding pnl_usd/mfe_r (live:
+    # a J225 close matched OIL_CRUDE's 94.168 entry → +$145k phantom, ~965,000x).
+    # venue+symbol makes the id unique per instrument. Bar strategies already
+    # vary signal_id per instrument, so this only tightens — never changes — them.
+    position_id = f"pos_{sig.signal_id[:16]}_{venue}_{symbol}_{now_ts}"
     trade.position_id = position_id
     trade.correlation_group = sig.correlation_group
     trade.underlying_group_id = underlying_group_id

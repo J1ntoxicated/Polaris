@@ -128,10 +128,10 @@ def load_active_position_rows(
         fill_row = conn.execute(
             """
             SELECT fill_price, size_usd FROM fills
-            WHERE contribution_id = ? AND is_close = 0
+            WHERE contribution_id = ? AND instrument_id = ? AND is_close = 0
             ORDER BY ts_ms ASC LIMIT 1
             """,
-            (position_id,),
+            (position_id, f"{venue}:{symbol}"),
         ).fetchone()
         if fill_row is None:
             continue

@@ -1274,3 +1274,6 @@
 2026-06-03 16:44 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-03 16:53 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-04 — freeze 6-root 제거(러너백업/바동기루프/position_id충돌phantomPnL/WAL폭증/baselineGIL/quote_ticks647K-대시보드경합) → 봇+대시보드 동시동작, SPCE 청산완료. commits b3ccc5b·3607205·5c26018·7652947·670f458·b00bdf2·b600617·d869874
+2026-06-03 23:25 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=84 learners=3 paper=True]
+2026-06-03 23:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=84 learners=3 paper=True]
+2026-06-04 — 라이브 6h 감사(6-agent) → #2 phantom PnL 정정(+144583→-3712 진짜) + #1 좀비-청산 drain(세션게이트, 적대리뷰가 mis-fire 잡음+테스트) + #5b WAL PASSIVE-only 복귀(reclaim이 startup 불안정) + VACUUM 215M→114M + mirror orphan 삭제. 미처리: #3진입다양성·#4 DB-lock STALL·#6 SPCE부분청산·#7 churn·#8 fractionable. commits 4f786b7·69264f1

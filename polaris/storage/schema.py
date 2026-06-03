@@ -380,6 +380,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         # below sets ONLY open rows to 'open'. The fresh-DB DDL still carries
         # ``DEFAULT 'open'`` so new inserts get the lifecycle marker.
         conn.execute("ALTER TABLE positions ADD COLUMN exit_state TEXT")
+    # positions.deal_id — Capital (CFD) close key SSOT. The close path routes
+    # Capital closes by deal_id (captured at open → affectedDeals[0].dealId).
+    # Pre-this-column DBs rebuilt state.open_trades on restart WITHOUT deal_id
+    # (it only lived on the in-memory trade + the entry fill's order_id stash),
+    # so a restarted bot could never close a live Capital position. ADDITIVE:
+    # nullable TEXT DEFAULT NULL — OKX closes by base_qty and leaves it NULL.
+    # Pragma guard = idempotent (SQLite has no ADD COLUMN IF NOT EXISTS).
+    if "deal_id" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN deal_id TEXT")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are

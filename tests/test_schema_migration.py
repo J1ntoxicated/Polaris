@@ -171,6 +171,54 @@ def test_backfill_does_not_clobber_existing_exit_state(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_deal_id_column_exists_on_fresh_db(tmp_path: Path) -> None:
+    """positions.deal_id (Capital close key SSOT) present on a fresh init."""
+    conn = init_db(tmp_path / "deal_fresh.sqlite")
+    try:
+        assert "deal_id" in _cols(conn, "positions")
+        notnull, dflt = _coldef(conn, "positions", "deal_id")
+        assert notnull == 0, "deal_id must be nullable (OKX leaves it NULL)"
+        assert dflt is None, f"deal_id default must be NULL (got {dflt!r})"
+    finally:
+        conn.close()
+
+
+def test_deal_id_legacy_db_gets_alter_idempotent(tmp_path: Path) -> None:
+    """A legacy positions table (no deal_id) is ALTERed in place; re-running
+    init_db / _apply_post_migrations is safe (duplicate-column ALTER guarded)."""
+    db = tmp_path / "deal_legacy.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE positions ("
+        "position_id TEXT PRIMARY KEY, venue TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "strategy_id TEXT NOT NULL, entry_strategy_id TEXT NOT NULL, "
+        "active_strategy_id TEXT NOT NULL, side TEXT NOT NULL, qty REAL NOT NULL, "
+        "status TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status) VALUES "
+        "('p_cap', 'capital', 'GOLD', 's1', 's1', 's1', 'long', 1.0, 'open')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db)
+    try:
+        assert "deal_id" in _cols(conn, "positions"), "legacy DB missing deal_id"
+        # legacy row backfills to NULL (no deal_id known retroactively).
+        row = conn.execute(
+            "SELECT deal_id FROM positions WHERE position_id = 'p_cap'"
+        ).fetchone()
+        assert row[0] is None
+        # re-running migrations must not raise (duplicate-column ALTER guarded).
+        _apply_post_migrations(conn)
+        _apply_post_migrations(conn)
+        assert "deal_id" in _cols(conn, "positions")
+    finally:
+        conn.close()
+
+
 def test_legacy_segments_gets_cell_key_and_index(tmp_path: Path) -> None:
     """A legacy position_strategy_segments table (no cell_key/lineage cols) must
     migrate WITHOUT crashing — the cell_key index is created in

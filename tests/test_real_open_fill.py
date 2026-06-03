@@ -175,6 +175,60 @@ async def test_reserve_and_submit_real_no_fill_row_releases(
 
 
 # ---------------------------------------------------------------------------
+# (c2) Capital open persists the position deal_id into positions.deal_id (SSOT)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_capital_persists_deal_id(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Capital (cfd) open writes the position deal_id into positions.deal_id
+    and tags the in-memory trade — so a restart can still close by deal_id.
+
+    ``_real_open_fill`` (the network leg) is stubbed to return an OpenAttempt
+    carrying a deal_id; no venue call happens.
+    """
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts import _production_pipeline as pipe
+    from polaris.scripts._smoke_roundtrip_shared import OpenAttempt
+
+    reset_process_fence()
+    deal_id = "DIAAAAAA-CAFE-1234"
+    cap_fill = Fill(
+        venue="capital", instrument_id="capital:GOLD", strategy_id="volume_burst",
+        side="buy", size_usd=100.0, fill_price=2000.0, fee_usd=0.1,
+        slippage_bps=0.0, ts_ms=int(time.time() * 1000),
+        order_id=deal_id, base_qty=0.05, quote_qty=100.0, state="filled",
+    )
+
+    async def _stub_open(**_kwargs: Any) -> OpenAttempt:
+        return OpenAttempt(fill=cap_fill, deal_id=deal_id)
+
+    monkeypatch.setattr(pipe, "_real_open_fill", _stub_open)
+    state = ProdLoopState()
+    cap_sig = RawSignal(
+        signal_id="cap_sig", strategy_id="volume_burst", symbol="GOLD",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="cfd_intraday",
+    )
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=cap_sig, venue="capital", symbol="GOLD",
+        asset_class="commodity", underlying_group_id="commodity:GOLD",
+        notional_usd=100.0, last_price=2000.0, now_ts=int(time.time()),
+        real_roundtrip=True, capital_session=object(),
+    )
+    assert trade is not None
+    assert trade.deal_id == deal_id
+    row = memdb.execute(
+        "SELECT deal_id FROM positions WHERE position_id = ?",
+        (trade.position_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == deal_id
+
+
+# ---------------------------------------------------------------------------
 # (d) real_roundtrip=False regression — simulate path only, adapter untouched
 # ---------------------------------------------------------------------------
 

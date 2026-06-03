@@ -426,8 +426,8 @@ async def reserve_and_submit(
             "INSERT OR REPLACE INTO positions "
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
-            " status, opened_ts, swap_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0)",
+            " status, opened_ts, swap_count, deal_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?)",
             (
                 position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
@@ -435,7 +435,7 @@ async def reserve_and_submit(
                     fill.base_qty if fill.base_qty > 0
                     else notional_usd / max(last_price, 1e-6)
                 ),
-                now_ts,
+                now_ts, trade.deal_id,
             ),
         )
         # contribution_id ties the entry fill back to the position so the

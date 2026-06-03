@@ -28,17 +28,18 @@ def _seed_position(
     qty: float,
     opened_ts: int,
     status: str = "open",
+    deal_id: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO positions
             (position_id, venue, symbol, underlying_group_id, strategy_id,
              entry_strategy_id, active_strategy_id, side, qty, status,
-             opened_ts, swap_count)
-        VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0)
+             opened_ts, swap_count, deal_id)
+        VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
         (position_id, venue, symbol, strategy_id, strategy_id, strategy_id,
-         side, qty, status, opened_ts),
+         side, qty, status, opened_ts, deal_id),
     )
 
 
@@ -54,6 +55,7 @@ def _seed_entry_fill(
     fill_price: float,
     contribution_id: str,
     ts_ms: int,
+    order_id: str = "",
 ) -> None:
     conn.execute(
         """
@@ -61,10 +63,10 @@ def _seed_entry_fill(
             (fill_id, venue, instrument_id, strategy_id, side, size_usd,
              fill_price, fee_usd, slippage_bps, ts_ms, order_id,
              contribution_id, pnl_usd, is_close, base_qty, quote_qty, state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, '', ?, 0, 0, ?, ?, 'filled')
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 0, 0, ?, ?, 'filled')
         """,
         (fill_id, venue, instrument_id, strategy_id, side, size_usd,
-         fill_price, ts_ms, contribution_id,
+         fill_price, ts_ms, order_id, contribution_id,
          size_usd / fill_price if fill_price > 0 else 0.0, size_usd),
     )
 
@@ -207,3 +209,75 @@ def test_orders_oldest_first(conn):
                      contribution_id="pos_a", ts_ms=1_000_000)
     trades = hydrate_open_positions(conn)
     assert [t.position_id for t in trades] == ["pos_a", "pos_b"]
+
+
+def test_capital_deal_id_hydrated_from_positions_column(conn):
+    """A Capital (cfd) position persisted with deal_id → hydrate restores it.
+
+    positions.deal_id is the SSOT for the Capital close key.
+    """
+    _seed_position(conn, position_id="pos_cap", venue="capital", symbol="GOLD",
+                   strategy_id="xau", side="long", qty=1.0, opened_ts=1000,
+                   deal_id="DIAAAAAA-1234-5678")
+    _seed_entry_fill(conn, fill_id="f_cap", venue="capital",
+                     instrument_id="capital:GOLD", strategy_id="xau",
+                     side="long", size_usd=100.0, fill_price=2000.0,
+                     contribution_id="pos_cap", ts_ms=1_000_000,
+                     order_id="DIAAAAAA-1234-5678")
+
+    trades = hydrate_open_positions(conn)
+    assert len(trades) == 1
+    assert trades[0].deal_id == "DIAAAAAA-1234-5678"
+
+
+def test_capital_restart_reaches_close_path_with_deal_id(conn):
+    """THE key test: a Capital position persisted with a deal_id, then
+    re-hydrated via the restore path (simulating a restart), has trade.deal_id
+    set → the close path's Capital branch is reached with a NON-None deal_id
+    (no '[real-close] Capital close needs ... deal_id=None' error)."""
+    persisted_deal_id = "DIAAAAAA-DEAD-BEEF"
+    _seed_position(conn, position_id="pos_restart", venue="capital",
+                   symbol="EURUSD", strategy_id="fx", side="short", qty=2.0,
+                   opened_ts=2000, deal_id=persisted_deal_id)
+    _seed_entry_fill(conn, fill_id="f_restart", venue="capital",
+                     instrument_id="capital:EURUSD", strategy_id="fx",
+                     side="short", size_usd=200.0, fill_price=1.08,
+                     contribution_id="pos_restart", ts_ms=2_000_000,
+                     order_id=persisted_deal_id)
+
+    # simulate restart: in-memory state is empty; rebuild from SQLite only.
+    [trade] = hydrate_open_positions(conn)
+    # The close path's Capital branch guards on `not trade.deal_id`; a
+    # non-None deal_id means it is reached and closes by deal_id.
+    assert trade.venue == "capital"
+    assert trade.deal_id is not None
+    assert trade.deal_id == persisted_deal_id
+
+
+def test_okx_hydrate_leaves_deal_id_none(conn):
+    """OKX closes by base_qty — deal_id stays None even if a column exists."""
+    _seed_position(conn, position_id="pos_okx", venue="okx", symbol="BTC-USDT",
+                   strategy_id="tsmom", side="long", qty=0.001, opened_ts=1000,
+                   deal_id=None)
+    _seed_entry_fill(conn, fill_id="f_okx", venue="okx",
+                     instrument_id="okx:BTC-USDT", strategy_id="tsmom",
+                     side="long", size_usd=50.0, fill_price=50_000.0,
+                     contribution_id="pos_okx", ts_ms=1_000_000,
+                     order_id="okx-ord-123")
+    [trade] = hydrate_open_positions(conn)
+    assert trade.deal_id is None
+
+
+def test_capital_legacy_falls_back_to_fill_order_id(conn):
+    """Legacy Capital row (positions.deal_id NULL) falls back to the entry
+    fill's order_id stash so pre-column DBs still close on restart."""
+    _seed_position(conn, position_id="pos_legacy_cap", venue="capital",
+                   symbol="SILVER", strategy_id="xau", side="long", qty=1.0,
+                   opened_ts=1000, deal_id=None)
+    _seed_entry_fill(conn, fill_id="f_legacy_cap", venue="capital",
+                     instrument_id="capital:SILVER", strategy_id="xau",
+                     side="long", size_usd=100.0, fill_price=25.0,
+                     contribution_id="pos_legacy_cap", ts_ms=1_000_000,
+                     order_id="DIAAAAAA-LEGACY-01")
+    [trade] = hydrate_open_positions(conn)
+    assert trade.deal_id == "DIAAAAAA-LEGACY-01"

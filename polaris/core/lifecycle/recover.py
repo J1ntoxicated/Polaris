@@ -63,7 +63,8 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
                SUM(f.fill_price * f.size_usd) / SUM(f.size_usd) AS entry_price,
                SUM(f.size_usd) AS notional_usd,
                MAX(f.order_id) AS venue_order_id,
-               SUM(f.base_qty) AS base_qty
+               SUM(f.base_qty) AS base_qty,
+               p.deal_id AS deal_id
         FROM positions p
         JOIN fills f
           ON f.contribution_id = p.position_id
@@ -73,7 +74,7 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
         -- venue-side state-drift recovery) are all excluded by construction, so
         -- a reconciled orphan is never re-hydrated + retried on restart.
         GROUP BY p.position_id, p.venue, p.symbol, p.strategy_id, p.side,
-                 p.opened_ts, p.underlying_group_id
+                 p.opened_ts, p.underlying_group_id, p.deal_id
         ORDER BY p.opened_ts ASC
         """
     ).fetchall()
@@ -82,6 +83,13 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
         position_id = str(r[0])
         venue = str(r[1])
         venue_order_id = str(r[9]) if r[9] else None
+        # positions.deal_id is the SSOT for the Capital close key (persisted at
+        # open + reconcile-import). Fall back to the entry fill's order_id stash
+        # (``venue_order_id``) for legacy rows written before the column existed.
+        persisted_deal_id = str(r[11]) if r[11] else None
+        deal_id = persisted_deal_id or (
+            venue_order_id if venue == "capital" else None
+        )
         trade = SimulatedTrade(
             signal_id=position_id,
             venue=venue,
@@ -94,12 +102,11 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
             position_id=position_id,
             underlying_group_id=str(r[6] or ""),
             # P0-5 venue-wire: restore the close-relevant venue refs so a
-            # real-roundtrip restart can still close the position. For Capital
-            # the entry fill's ``order_id`` carries the position ``deal_id``
-            # (persisted that way in reserve_and_submit); OKX closes by
-            # ``base_qty`` and needs no deal_id.
+            # real-roundtrip restart can still close the position. Capital closes
+            # by ``deal_id`` (positions.deal_id SSOT, fill order_id fallback);
+            # OKX closes by ``base_qty`` and needs no deal_id.
             venue_order_id=venue_order_id,
-            deal_id=venue_order_id if venue == "capital" else None,
+            deal_id=deal_id,
             base_qty=float(r[10] or 0.0),
         )
         out.append(trade)
@@ -161,12 +168,12 @@ def _import_one(
             "INSERT OR REPLACE INTO positions "
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
-            " status, opened_ts, swap_count) "
-            "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'open', ?, 0)",
+            " status, opened_ts, swap_count, deal_id) "
+            "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?)",
             (
                 position_id, venue, symbol, position_id,
                 RECONCILE_STRATEGY_ID, RECONCILE_STRATEGY_ID,
-                RECONCILE_STRATEGY_ID, side, base_qty, now_ts,
+                RECONCILE_STRATEGY_ID, side, base_qty, now_ts, deal_id,
             ),
         )
         conn.execute(

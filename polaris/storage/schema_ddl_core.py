@@ -352,7 +352,8 @@ CREATE TABLE IF NOT EXISTS positions (
     trough_price REAL,
     mfe_r REAL,
     mae_r REAL,
-    exit_state TEXT DEFAULT 'open'
+    exit_state TEXT DEFAULT 'open',
+    deal_id TEXT
 );
 """
 

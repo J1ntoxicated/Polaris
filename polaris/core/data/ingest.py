@@ -261,8 +261,21 @@ async def update_baseline_from_bars_async(
                 work.append((instrument_id, group_id, metric, samples, max_ts, lookback))
     if not work:
         return n
-    # Phase B — pure sort/percentile off the loop.
-    results = await asyncio.to_thread(compute_baselines_batch, work)
+    # Phase B — pure sort/percentile off the loop, CHUNKED. compute_baselines_batch
+    # is pure-Python sorted()+percentile, so it holds the GIL for its entire run —
+    # a SINGLE to_thread call over the whole work set blocks the event loop (the
+    # tick engine + WS recv) for the full seed, because the worker thread holds the
+    # GIL the whole time (to_thread only helps for I/O-bound work that releases it).
+    # Live: a universe refresh that seeds 30+ fresh symbols' 7-day windows stalled
+    # the loop for minutes (tick-engine STALL gap up to 225s). Chunking + awaiting
+    # each small chunk lets the real-time path run BETWEEN chunks (the GIL is held
+    # only for ~8 windows at a time). Output is identical — same items, same order.
+    results: list[tuple[str, str, BaselineValue]] = []
+    _BASELINE_CHUNK = 8
+    for i in range(0, len(work), _BASELINE_CHUNK):
+        results.extend(
+            await asyncio.to_thread(compute_baselines_batch, work[i : i + _BASELINE_CHUNK])
+        )
     # Phase C — DB writes back on the loop.
     for instrument_id, group_id, bv in results:
         upsert_baseline_state(

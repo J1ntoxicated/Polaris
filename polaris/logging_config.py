@@ -87,7 +87,9 @@ def setup_polaris_logging(
     # a host-local TZ to silently shift a 2026-05-07 trade onto 2026-05-08).
     logging.Formatter.converter = time.gmtime
     # Suppress noisy 3rd-party DEBUG output (httpx/httpcore emit ~30 lines
-    # per OKX REST call). Polaris venue adapters re-log the salient outcome
-    # at DEBUG so we keep observability without drowning the core layer.
-    for noisy in ("httpx", "httpcore", "asyncio"):
+    # per OKX REST call; websockets logs EVERY inbound quote frame — under -vv
+    # that was 95% of the live log, ~2k lines/min, an I/O + logging-lock load
+    # that starved the tick loop on quote floods). Polaris venue adapters re-log
+    # the salient outcome at DEBUG so we keep observability without the drown.
+    for noisy in ("httpx", "httpcore", "asyncio", "websockets"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

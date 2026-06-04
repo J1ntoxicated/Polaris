@@ -220,7 +220,10 @@ def test_alpaca_ws_url_iex() -> None:
     assert c.ws_url == "wss://stream.data.alpaca.markets/v2/iex"
 
 
-def test_alpaca_subscribe_auth_then_quotes_trades() -> None:
+def test_alpaca_subscribe_auth_then_quotes_only() -> None:
+    # Quotes ONLY — parse_message discards every non-"q" frame, so a "trades"
+    # subscription was pure waste AND doubled the IEX subscription count past
+    # the free-feed 30-symbol cap ("symbol limit exceeded").
     c = AlpacaQuoteWS(
         symbols=["AAPL", "MSFT"], api_key="KEY", api_secret="SEC", on_quote=lambda q: None
     )
@@ -231,7 +234,7 @@ def test_alpaca_subscribe_auth_then_quotes_trades() -> None:
     sub = json.loads(msgs[1])
     assert sub["action"] == "subscribe"
     assert sorted(sub["quotes"]) == ["AAPL", "MSFT"]
-    assert sorted(sub["trades"]) == ["AAPL", "MSFT"]
+    assert "trades" not in sub  # the symbol-limit-doubling waste is gone
 
 
 def test_alpaca_parse_quote_array_to_tick() -> None:

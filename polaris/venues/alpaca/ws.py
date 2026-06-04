@@ -67,11 +67,17 @@ class AlpacaQuoteWS(WSStreamClient):
             json.dumps(
                 {"action": "auth", "key": self._api_key, "secret": self._api_secret}
             ),
+            # Quotes ONLY. parse_message discards every non-"q" frame (trades
+            # carry no bid/ask), so a "trades" subscription was pure waste — and
+            # it DOUBLED the IEX subscription count (16 symbols → 32 channels)
+            # past the free-feed 30-symbol cap, tripping "symbol limit exceeded"
+            # → reconnect churn → idle-forced reconnects → tick-loop stalls. One
+            # channel halves both the cap pressure and the inbound quote volume
+            # the quote_writer must persist (easing DB-lock contention).
             json.dumps(
                 {
                     "action": "subscribe",
                     "quotes": self._symbols,
-                    "trades": self._symbols,
                 }
             ),
         ]

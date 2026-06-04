@@ -437,6 +437,11 @@ async def _run_entries(
         await asyncio.sleep(0)  # M1/M2 starvation guard (between symbols)
         if venue not in PHASE1_VENUES:
             continue
+        # FOREX → bar pipeline (its dedicated fx_breakout_basket / session_breakout
+        # strategies). The tick engine's micro-structure signals (burst/ofi) never
+        # trip on low-vol FX, so owning it here only starved it; yield it cleanly.
+        if asset_class == "forex":
+            continue
         instrument_id = f"{venue}:{symbol}"
         px = writer.live_px(instrument_id)
         # --- (1) freshness gate: trade only live-WS symbols -------------

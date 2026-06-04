@@ -365,20 +365,23 @@ async def _run_tick(
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
     # site that bypassed ``supervise_strategies``.
     pipeline_specs: list[PipelineTaskSpec] = []
-    # P5 coexistence (no double-trade): when the tick-decision engine owns the
-    # Phase-1 OKX symbols it is the SOLE opener for them, so the bar entry path
-    # yields those venues here (keyed by venue ownership). The open-dedup remains
-    # the always-on backstop; this gate just prevents the two producers from
-    # racing the SAME symbol. Flag-gated (default OFF) so the bar pipeline is
-    # byte-identical until the engine is turned on. NOT a throttle — it routes
-    # ownership of a symbol to one producer, never reduces size or blocks edge.
+    # P5 coexistence (no double-trade) — ASSET-CLASS-AWARE ROUTING. When the tick
+    # engine owns a venue (Capital), the bar entry path normally yields it so the
+    # two producers never race the SAME symbol. BUT the tick engine only fires its
+    # micro-structure signals (burst/ofi/reversion) on HIGH-vol Capital (indices /
+    # commodities / gold) — on low-vol FOREX those thresholds never trip, so FX got
+    # ZERO entries while its dedicated bar strategies (fx_breakout_basket /
+    # session_breakout) sat DEAD behind this skip (live: forex signals=0, opens=0).
+    # So forex is routed to the BAR pipeline (its real strategies) while the tick
+    # engine keeps the high-vol Capital scalping. flow_not_block: routes ownership
+    # by asset_class to the producer that actually trades it, never blocks edge.
     owns_okx = tick_engine_owns_okx()
     for timeframe, strategies_for_tf in strategies_by_tf.items():
         venues_for_tf = {s.metadata.venue for s in strategies_for_tf}
         for venue, symbol, asset_class, group_id in focus:
             if venue not in venues_for_tf:
                 continue
-            if owns_okx and venue in TICK_ENGINE_OWNED_VENUES:
+            if owns_okx and venue in TICK_ENGINE_OWNED_VENUES and asset_class != "forex":
                 continue
             # Cooperative yield (see the regime loop above). build_real_market_view
             # (indicators) + read_recent_bars per (symbol, timeframe, strategy) is

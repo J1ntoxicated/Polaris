@@ -35,6 +35,7 @@ from polaris.strategies.equity_gap_go import EquityGapGoStrategy
 from polaris.strategies.equity_rsi_bb_pullback import EquityRSIBBPullbackStrategy
 from polaris.strategies.equity_tsmom import EquityTSMOMStrategy
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
+from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
@@ -49,6 +50,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
     SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
+    FXRangeFadeStrategy.metadata.strategy_id: FXRangeFadeStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
     SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
     EquityTSMOMStrategy.metadata.strategy_id: EquityTSMOMStrategy,
@@ -70,6 +72,7 @@ __all__ = [
     "EquityRSIBBPullbackStrategy",
     "EquityTSMOMStrategy",
     "FXBreakoutBasketStrategy",
+    "FXRangeFadeStrategy",
     "MarketView",
     "RSIBBPullbackStrategy",
     "RawSignal",

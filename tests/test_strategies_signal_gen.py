@@ -655,11 +655,11 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     assert len(seen) == len(all_strategies()), (
         f"correlation groups not unique: {seen}"
     )
-    assert len(seen) == 10, f"correlation groups not unique: {seen}"
+    assert len(seen) == 11, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    assert len(STRATEGY_REGISTRY) == 10
+    assert len(STRATEGY_REGISTRY) == 11  # +fx_range_fade (FX mean-reversion)
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

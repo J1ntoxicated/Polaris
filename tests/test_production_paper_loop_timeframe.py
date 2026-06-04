@@ -100,6 +100,7 @@ def test_strategy_metadata_timeframe_used() -> None:
         "rsi_bb_pullback": "15m",
         "spot_donchian": "1H",
         "fx_breakout_basket": "1H",
+        "fx_range_fade": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",
         # Track C — Alpaca US equity (T12, additive).

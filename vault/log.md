@@ -1280,3 +1280,16 @@
 2026-06-04 14:57 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-04 15:40 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-04 — 공격성/asset-class 진입: Alpaca whole-share(non-fractionable 정수재시도) 6030fe9 + FX 라우팅(틱엔진 capital독점→forex는 바파이프라인) 4612b17 + fx_range_fade 신규전략(ADX<20 BB페이드, 엑싯 follow-up) e7416e4 + 위성재배색 e54aeb8. OKX 적게거래=us.okx.com US컴플라이언스 51155 영구blocklist(정당). 다음=FX 배포검증+fx_range_fade 엑싯.
+2026-06-04 16:23 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 16:43 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 16:47 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 16:53 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 17:00 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 17:19 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 23:32 [ignite_p1: bootstrap target_db=ignite_custom.sqlite layer0_focus=1 learners=3 paper=True]
+2026-06-04 23:32 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 23:32 [ignite_p1: bootstrap target_db=fresh.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 23:32 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 23:34 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
+2026-06-04 23:35 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-05 — Jin '차례대로' 4 follow-up: #1 fade 엑싯 target_harvest(29517f3) #2 안정성=WS침묵+Alpaca quotes-only+DB락해소(e48abd8/f7223aa, symbol-limit·db-lock 0, WAL206→59) #3 코모디티 CFTC COT per-contract percentile 신호(69f5e22, blocker→percentile 수정). 각 적대리뷰 통과. 1869 테스트. 다음=#4 OKX venue제약.

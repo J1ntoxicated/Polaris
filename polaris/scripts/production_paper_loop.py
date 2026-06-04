@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from polaris.core.altdata.cache import AltDataCache
+from polaris.core.altdata.cftc_cot import CFTCCotCollector
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
 from polaris.core.altdata.fred_macro import FredMacroCollector
 from polaris.core.altdata.okx_funding import OKXFundingCollector
@@ -207,7 +208,12 @@ def _default_altdata_collectors() -> list[Any]:
     ``FRED_API_KEY`` (no key → graceful ``{}``, no network); OKX funding + alt.me
     F&G need no key.
     """
-    return [OKXFundingCollector(), CryptoFearGreedCollector(), FredMacroCollector()]
+    return [
+        OKXFundingCollector(),
+        CryptoFearGreedCollector(),
+        FredMacroCollector(),
+        CFTCCotCollector(),
+    ]
 
 
 async def _altdata_producer(

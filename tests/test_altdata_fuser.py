@@ -362,3 +362,63 @@ def test_fuse_weighting_preserves_label_outcomes() -> None:
     cache2.set("fred_macro", {"vix": 26.0, "hy_spread": 350.0}, ttl_sec=9999, now_ts=0.0)
     hint2, _, _ = fuse_evidence("forex:GBPUSD", cache2, now_ts=1.0)
     assert hint2 is None  # single mild bear (+1.0 * 1.25 = 1.25) still below 1.5 floor
+
+
+# ── CFTC COT positioning → commodity regime evidence ──────────────────────────
+def test_cot_net_long_extreme_yields_bull_hint() -> None:
+    # Positioning at the 92nd percentile of THIS contract's own range → strong
+    # net-long-for-this-contract → bull (2.0 * 1.25 = 2.5 >= 1.5 floor).
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"OIL_CRUDE": {"net_spec_pctile": 0.92, "net_spec_pct": 0.05}},
+              ttl_sec=1000, now_ts=0.0)
+    hint, conf, ev = fuse_evidence("commodity:OIL_CRUDE", cache, now_ts=1.0)
+    assert hint == "bull_trend"
+    assert ev["cot_net_spec_pctile"] == 0.92
+    assert conf >= 0.3
+
+
+def test_cot_net_short_extreme_yields_bear_hint() -> None:
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"GOLD": {"net_spec_pctile": 0.08, "net_spec_pct": 0.20}},
+              ttl_sec=1000, now_ts=0.0)
+    hint, _conf, ev = fuse_evidence("commodity:GOLD", cache, now_ts=1.0)
+    assert hint == "bear_trend"
+    assert ev["cot_net_spec_pctile"] == 0.08
+
+
+def test_cot_at_own_median_is_neutral_no_override() -> None:
+    # The structural-bias fix: a HIGH raw level sitting at its own median
+    # (pctile ~0.5) yields NO hint — gold at +0.44 is no longer permanently bull.
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"GOLD": {"net_spec_pctile": 0.50, "net_spec_pct": 0.44}},
+              ttl_sec=1000, now_ts=0.0)
+    hint, conf, _ev = fuse_evidence("commodity:GOLD", cache, now_ts=1.0)
+    assert hint is None and conf == 0.0
+
+
+def test_cot_absent_symbol_is_noop_macro_stands() -> None:
+    # COT payload has OIL_CRUDE but the group is GOLD → no COT evidence for GOLD.
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"OIL_CRUDE": {"net_spec_pctile": 0.92}}, ttl_sec=1000, now_ts=0.0)
+    hint, conf, ev = fuse_evidence("commodity:GOLD", cache, now_ts=1.0)
+    assert hint is None and conf == 0.0
+    assert "cot_net_spec_pctile" not in ev
+
+
+def test_cot_mild_extremity_below_floor_no_override() -> None:
+    # Mild (pctile 0.75 in [0.70,0.85)): 1.0 * 1.25 = 1.25 < 1.5 floor → no
+    # override, evidence still surfaced.
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"CORN": {"net_spec_pctile": 0.75, "net_spec_pct": 0.16}},
+              ttl_sec=1000, now_ts=0.0)
+    hint, _conf, ev = fuse_evidence("commodity:CORN", cache, now_ts=1.0)
+    assert hint is None
+    assert ev["cot_net_spec_pctile"] == 0.75
+
+
+def test_cot_does_not_route_to_forex() -> None:
+    # cftc_cot is a commodity-only source; a forex group never sees it.
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"OIL_CRUDE": {"net_spec_pctile": 0.92}}, ttl_sec=1000, now_ts=0.0)
+    sources = cache.get_for_group("forex:EURUSD", now_ts=1.0)
+    assert "cftc_cot" not in sources

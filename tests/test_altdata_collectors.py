@@ -239,3 +239,78 @@ async def test_myfxbook_empty_env_creds_returns_empty_no_network(
     out = await coll.fetch(client=client)
     assert out == {}
     await client.aclose()
+
+
+# ── CFTC COT collector (commodity speculative positioning, keyless) ───────────
+def _cot_row(name: str, net: float, oi: int = 1_000_000, date: str = "2026-05-26") -> dict:
+    # Encode a target net_spec_pct via long/short over a fixed OI.
+    return {
+        "contract_market_name": name,
+        "report_date_as_yyyy_mm_dd": f"{date}T00:00:00",
+        "noncomm_positions_long_all": str(int((0.5 + net / 2) * oi)),
+        "noncomm_positions_short_all": str(int((0.5 - net / 2) * oi)),
+        "open_interest_all": str(oi),
+    }
+
+
+def _cot_series(name: str, latest: float, history: list[float]) -> list[dict]:
+    # Newest-first: latest then the trailing weeks (descending dates).
+    rows = [_cot_row(name, latest, date="2026-05-26")]
+    for i, net in enumerate(history):
+        rows.append(_cot_row(name, net, date=f"2026-0{(i % 4) + 1}-0{(i % 9) + 1}"))
+    return rows
+
+
+def test_cot_derive_pctile_mapping_and_change() -> None:
+    from polaris.core.altdata.cftc_cot import _derive_signals
+
+    # WTI: latest +0.25 above ALL 30 (dispersed) trailing weeks → pctile 1.0.
+    history = [round(0.10 + 0.002 * i, 4) for i in range(30)]  # 0.100..0.158, all < 0.25
+    rows = _cot_series("CRUDE OIL, LIGHT SWEET-WTI", 0.25, history)
+    out = _derive_signals(rows)
+    assert out["OIL_CRUDE"]["net_spec_pctile"] == 1.0
+    assert abs(out["OIL_CRUDE"]["net_spec_pct"] - 0.25) < 1e-9
+    assert abs(out["OIL_CRUDE"]["net_spec_chg"] - 0.15) < 1e-9  # 0.25 - history[0]=0.10
+    assert out["OIL_CRUDE"]["report_date"] == "2026-05-26"
+
+
+def test_cot_pctile_neutral_at_own_median() -> None:
+    from polaris.core.altdata.cftc_cot import _derive_signals
+
+    # GOLD latest +0.44 with history straddling it (half below, half above) →
+    # ~0.5 pctile = neutral, even though the RAW level is high (the bias fix).
+    history = [0.30] * 15 + [0.55] * 15
+    out = _derive_signals(_cot_series("GOLD", 0.44, history))
+    assert abs(out["GOLD"]["net_spec_pctile"] - 0.5) < 1e-9
+
+
+def test_cot_min_history_skipped() -> None:
+    from polaris.core.altdata.cftc_cot import _derive_signals
+
+    # Only 20 trailing weeks (< _MIN_HISTORY_WEEKS=26) → no credible percentile.
+    out = _derive_signals(_cot_series("GOLD", 0.44, [0.30] * 20))
+    assert "GOLD" not in out
+
+
+def test_cot_unmapped_and_bad_rows_skipped() -> None:
+    from polaris.core.altdata.cftc_cot import _derive_signals
+
+    # Unmapped market + a row with missing fields → nothing derived (no mapped
+    # market reaches the min-history threshold).
+    rows = [
+        _cot_row("SOME RANDOM FX FUTURE", 0.1),  # unmapped → absent
+        {"contract_market_name": "CORN"},         # missing fields → skipped
+    ]
+    out = _derive_signals(rows)
+    assert out == {}
+
+
+def test_cot_zero_open_interest_rows_skipped() -> None:
+    from polaris.core.altdata.cftc_cot import _derive_signals
+
+    # 30 SILVER weeks but every row has OI=0 → all unparsable → SILVER absent.
+    rows = _cot_series("SILVER", 0.2, [0.1] * 30)
+    for r in rows:
+        r["open_interest_all"] = "0"
+    out = _derive_signals(rows)
+    assert "SILVER" not in out

@@ -62,7 +62,7 @@ _DEFAULT_WEIGHT = 1.0
 _SOURCE_WEIGHTS: dict[str, dict[str, float]] = {
     "crypto": {"crypto_fg": 1.25, "okx_funding": 1.25},
     "forex": {"fred_macro": 1.25},
-    "commodity": {"fred_macro": 1.25},
+    "commodity": {"fred_macro": 1.25, "cftc_cot": 1.25},
     "index": {"fred_macro": 1.15},
     "equity": {"fred_macro": 1.25},
 }
@@ -83,6 +83,17 @@ _VIX_BEAR = 25.0
 _VIX_BULL = 15.0
 _HY_CRISIS = 500.0
 _HY_BULL = 300.0
+
+# CFTC COT positioning-EXTREMITY thresholds — a percentile of THIS week's net-spec
+# vs the contract's OWN ~3yr distribution (0=most net-short ever, 1=most net-long
+# ever). Per-contract normalisation: a commodity at its own median (~0.5) is
+# neutral; only an extreme vs its own range fires. Speculators unusually net-long
+# for THIS contract confirm an uptrend (BULL); unusually net-short → BEAR. FLAGGED
+# for /debate calibration (momentum-confirmation vs contrarian-at-extreme reading).
+_COT_BULL_STRONG = 0.85
+_COT_BULL_MILD = 0.70
+_COT_BEAR_STRONG = 0.15
+_COT_BEAR_MILD = 0.30
 
 
 def fuse_evidence(
@@ -115,6 +126,19 @@ def fuse_evidence(
         _score_macro(
             sources.get("fred_macro"), scores, evidence, source_weights, prefix
         )
+        if prefix == "commodity":
+            # CFTC COT speculative positioning — a directional conviction signal
+            # for THIS specific commodity, keyed on the group symbol (energy /
+            # metals / ags). Absent for unmapped markets → macro stands (no-op).
+            symbol = (
+                underlying_group_id.split(":", 1)[1]
+                if ":" in underlying_group_id
+                else ""
+            )
+            _score_cot(
+                sources.get("cftc_cot"), symbol, scores, evidence,
+                source_weights, prefix,
+            )
 
     if not evidence:
         return None, 0.0, {}
@@ -223,3 +247,48 @@ def _score_macro(
     low_hy = (not isinstance(hy, (int, float))) or hy < _HY_BULL
     if low_vix and low_hy:
         scores[_BULL] += 2.0 * w
+
+
+def _score_cot(
+    cot: dict[str, Any] | None,
+    symbol: str,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
+) -> None:
+    """CFTC COT speculative positioning for ONE commodity → bull/bear evidence.
+
+    ``cot`` is the collector payload keyed by our universe symbol. We score on
+    ``net_spec_pctile`` — where THIS week's large-spec net position ranks within
+    the contract's OWN ~3yr range (per-contract normalisation, so the structural
+    net-long bias of storables does not pin them permanently bullish). Unusually
+    net-long FOR THIS CONTRACT is trend-confirming BULL evidence; unusually
+    net-short BEAR. Magnitude buckets the score (mild adds context below the
+    conviction floor; strong can carry an override). Absent symbol → no-op.
+    """
+    if not cot or not symbol:
+        return
+    row = cot.get(symbol)
+    if not isinstance(row, dict):
+        return
+    pctile = row.get("net_spec_pctile")
+    if not isinstance(pctile, (int, float)):
+        return
+    evidence["cot_net_spec_pctile"] = pctile
+    raw_pct = row.get("net_spec_pct")
+    if isinstance(raw_pct, (int, float)):
+        evidence["cot_net_spec_pct"] = raw_pct
+    chg = row.get("net_spec_chg")
+    if isinstance(chg, (int, float)):
+        evidence["cot_net_spec_chg"] = chg
+    w = _source_weight(prefix, "cftc_cot")
+    source_weights["cftc_cot"] = w
+    if pctile >= _COT_BULL_STRONG:
+        scores[_BULL] += 2.0 * w
+    elif pctile >= _COT_BULL_MILD:
+        scores[_BULL] += 1.0 * w
+    elif pctile <= _COT_BEAR_STRONG:
+        scores[_BEAR] += 2.0 * w
+    elif pctile <= _COT_BEAR_MILD:
+        scores[_BEAR] += 1.0 * w

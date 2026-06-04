@@ -24,7 +24,7 @@ _GROUP_SOURCES: dict[str, tuple[str, ...]] = {
     "crypto": ("okx_funding", "crypto_fg", "coinglass"),
     "forex": ("fred_macro", "myfxbook"),
     "index": ("fred_macro",),
-    "commodity": ("fred_macro",),
+    "commodity": ("fred_macro", "cftc_cot"),
     "equity": ("fred_macro",),
 }
 

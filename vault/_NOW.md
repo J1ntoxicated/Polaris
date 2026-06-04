@@ -10,6 +10,17 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🟢 HANDOVER 2026-06-04 latest (공격성·asset-class 진입 작업 — Jin 라이브 디자인리뷰).** 봇 PID=`data/paper/production.pid`(현재 28573, log=`data/paper/p5_live20.log`), DB=VACUUM후 114M, 대시보드 :8770 HTTP200. **봇 거래중**(포지션: alpaca 7 + capital 1; OKX/FX 제약은 아래).
+- **증상(Jin)**: "공격성 제로" — 신호 988개 중 7%만 진입, FX/OKX 거래 0~소량.
+- ✅ **Alpaca 공격성 fix**(`6030fe9`): 신호 2/3가 Alpaca인데 **non-fractionable($-notional 거부) 609건**으로 전멸 → `_alpaca_open.py`에 'not fractionable' 거부 시 **floor(notional/price) 정수주식 재시도**. 라이브 검증=Alpaca 진입 7개(이전 0).
+- ✅ **FX 라우팅 fix**(`4612b17`): 틱엔진이 `TICK_ENGINE_OWNED_VENUES={capital}`로 **Capital 전체 독점** → 바 파이프라인이 capital skip → FX 전용 전략(fx_breakout/session_breakout) **죽음**. 틱엔진 micro-signal은 저변동 FX 미발화. → asset-class 라우팅: **바 파이프라인이 capital:forex 처리, 틱엔진은 forex 양보**(`_production_tick.py:384` `asset_class!="forex"`, `_production_tick_engine.py:443` forex skip). 검증=FX가 이제 평가됨(session_breakout no-emit EURUSD/GBPUSD/USDJPY)=구조블로커 제거.
+- ✅ **fx_range_fade 신규 전략**(`e7416e4`): FX는 mid-session 레인지인데 기존 전략은 추세/세션오픈만 발화 → **ADX<20(레인지)서 BB 익스트림 평균회귀 페이드**(양방향, bb_middle 타깃, ADX≥20 추세면 breakout에 양보). 7테스트. **적대리뷰 approve_with_nits** — 진입OK, but **엑싯 미스매치 follow-up**: bb_middle 타깃을 소비하는 코드 없음, ATR-trail(추세용)이라 fade 출혈 위험 → **target-aware 엑싯 배선 필요**(엑싯엔진).
+- ✅ 위성 재배색(`e54aeb8`): 8 family 색상환 분산(red/orange/yellow/green/cyan/blue/violet/pink) — 중복 해소. **하드리로드 필요**.
+- **OKX 거래 적은 이유**(버그 아님): us.okx.com=US데모 → `51155 "local compliance restrictions"`로 변동성 알트 44개 **영구 blocklist**(`venue_blocklist` 44행, 정당함=venue 원천거부, throttle 아님). 거래가능(141페어)∩신호발생 교집합 얇음(전략이 변동성알트에 발화→그게 US제한, 메이저 BTC/ETH는 잔잔→미발화).
+- **⚠️ 미배포**: FX라우팅+fx_range_fade는 **커밋만, 현 봇(28573)은 직전 코드** → 재기동해야 FX 거래 라이브 확인됨. **다음 = 1회 재기동으로 FX 배포 + 검증**.
+- **대시보드 실시간**(Jin): 버퍼OK, 봇 안 얼면 됨(DB 라운드트립 ~1-3s 허용) → 코드변경 불필요.
+- **남은**: ① fx_range_fade 엑싯(target-aware) ② FX 배포+검증 ③ OKX 거래가능 페어 전략튜닝/유니버스(venue제약 근본) ④ 코모디티 싸이클/이벤트(설계됨, 미구현) ⑤ WAL 크리프(PASSIVE-only trade, 일일 재기동) ⑥ Alpaca 페니주 유니버스 정리(startup 무겁게+품질). [[project_ai_conductor_direction]]·[[project_operating_thesis_surgical_strike]].
+
 **🟢 HANDOVER 2026-06-04 (FREEZE 해결 + 라이브 감사·후속 fix).** 봇 PID=`data/paper/production.pid`(현재 20723), DB=`data/polaris_live.sqlite`(VACUUM 215M→114M), log=`data/paper/p5_live18.log`, env=`TICK_ENGINE_ENABLED=1`. 대시보드 :8770 라이브 직독 HTTP 200. 봇 거래중(틱엔진 HK50 숏 등 opens+closes), SPCE 청산완료.
 
 **🔬 라이브 감사(6h 무중단 후, 6-agent read-only fan-out) 판정**: "봇은 살아서 실주문·자가복구하나 아직 surgical-strike 아님". 6h 무중단=freeze 6-fix 검증. 4대 기능결함 발견 → 처리:
@@ -218,4 +229,4 @@ Phase -1 (하네스 build) **완료**. Phase 0 (8 layer codex harden-up) **완�
 - Per-gate AI pipeline: see [[ADR-004]]
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-03 23:47 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-04 15:40 (paper=True, full_pipeline=True)

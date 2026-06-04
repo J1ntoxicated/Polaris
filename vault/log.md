@@ -1277,3 +1277,6 @@
 2026-06-03 23:25 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=84 learners=3 paper=True]
 2026-06-03 23:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=84 learners=3 paper=True]
 2026-06-04 — 라이브 6h 감사(6-agent) → #2 phantom PnL 정정(+144583→-3712 진짜) + #1 좀비-청산 drain(세션게이트, 적대리뷰가 mis-fire 잡음+테스트) + #5b WAL PASSIVE-only 복귀(reclaim이 startup 불안정) + VACUUM 215M→114M + mirror orphan 삭제. 미처리: #3진입다양성·#4 DB-lock STALL·#6 SPCE부분청산·#7 churn·#8 fractionable. commits 4f786b7·69264f1
+2026-06-04 14:57 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 15:40 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
+2026-06-04 — 공격성/asset-class 진입: Alpaca whole-share(non-fractionable 정수재시도) 6030fe9 + FX 라우팅(틱엔진 capital독점→forex는 바파이프라인) 4612b17 + fx_range_fade 신규전략(ADX<20 BB페이드, 엑싯 follow-up) e7416e4 + 위성재배색 e54aeb8. OKX 적게거래=us.okx.com US컴플라이언스 51155 영구blocklist(정당). 다음=FX 배포검증+fx_range_fade 엑싯.

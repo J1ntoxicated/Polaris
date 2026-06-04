@@ -32,17 +32,20 @@
 
   // Family ring definitions. radius = orbit radius around the conductor (scene
   // units), inc = ring inclination, color = subtle family tint, base = node size.
-  // Jin E6.1: 위성 노드는 family별 색 구분(레짐/전략/엑싯/AI 구별 가능) — muted cosmic
-  // tone(네온 X). 전달 입자·연결선은 회색이고 노드 색으로 종류를 읽는다.
+  // Jin (2026-06-01): 위성 노드 = NEON 색으로 family 구분 (muted tone이 헷갈려서 반전).
+  // 밝고 채도 높은 네온 8색 = 레짐/전략/엑싯/AI/축/결정/헬스/탤리 한눈 구별. 전달 입자·연결선은
+  // 회색 유지 — 종류는 네온 노드 색으로 읽는다.
+  // 8색을 색상환에 고르게: red→orange→yellow→green→cyan→blue→violet→pink. 인접쌍도
+  // 명확히 구분(이전엔 orbit/axis=cyan/teal, exit/action/tally=magenta/purple/red로 겹쳤음).
   const FAMILIES = {
-    reg:    { color: [0xe0, 0xc8, 0x70], radius: 0.30, inc: 0.10, base: 2.6, label: 'REGIME',     shape: null },
-    strat:  { color: [0xff, 0xa8, 0x78], radius: 0.40, inc: 0.55, base: 2.6, label: 'STRATEGY',   shape: null },
-    exit:   { color: [0xe8, 0x88, 0xc0], radius: 0.34, inc: -0.85, base: 2.0, label: 'EXIT',      shape: null },
-    orbit:  { color: [0x78, 0xc8, 0xff], radius: 0.50, inc: 0.95, base: 2.2, label: 'AI · LEARN', shape: null },
-    axis:   { color: [0x80, 0xd8, 0xc0], radius: 0.58, inc: -0.35, base: 1.8, label: 'DIMENSION', shape: null },
-    action: { color: [0xb0, 0x90, 0xf0], radius: 0.46, inc: 1.25, base: 2.0, label: 'DECISION',   shape: 'square' },
-    obs:    { color: [0xc8, 0xd8, 0x80], radius: 0.26, inc: -1.30, base: 1.8, label: 'HEALTH',     shape: 'square' },
-    exit_tally: { color: [0xf0, 0x90, 0xa8], radius: 0.66, inc: 0.40, base: 1.6, label: 'TALLY',  shape: 'square' },
+    exit:   { color: [0xf0, 0x22, 0x22], radius: 0.34, inc: -0.85, base: 2.0, label: 'EXIT',      shape: null },        // red
+    strat:  { color: [0xff, 0x7a, 0x00], radius: 0.40, inc: 0.55, base: 2.6, label: 'STRATEGY',   shape: null },        // orange
+    reg:    { color: [0xff, 0xd0, 0x00], radius: 0.30, inc: 0.10, base: 2.6, label: 'REGIME',     shape: null },        // yellow
+    obs:    { color: [0x3d, 0xe8, 0x4a], radius: 0.26, inc: -1.30, base: 1.8, label: 'HEALTH',     shape: 'square' },   // green
+    axis:   { color: [0x12, 0xe5, 0xe5], radius: 0.58, inc: -0.35, base: 1.8, label: 'DIMENSION', shape: null },        // cyan
+    orbit:  { color: [0x3d, 0x6e, 0xff], radius: 0.50, inc: 0.95, base: 2.2, label: 'AI · LEARN', shape: null },        // blue
+    action: { color: [0xb4, 0x3c, 0xff], radius: 0.46, inc: 1.25, base: 2.0, label: 'DECISION',   shape: 'square' },   // violet
+    exit_tally: { color: [0xff, 0x5c, 0xc8], radius: 0.66, inc: 0.40, base: 1.6, label: 'TALLY',  shape: 'square' },   // pink
   };
   const FAMILY_ORDER = ['reg', 'strat', 'exit', 'orbit', 'axis', 'action', 'obs', 'exit_tally'];
   // member ids per family this frame → used to spread nodes evenly on the ring.

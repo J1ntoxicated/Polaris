@@ -316,6 +316,7 @@ class ReplayEngine:
             loser_timeout_sec=_loser_timeout_for_strategy(
                 pos.strategy.metadata.strategy_id
             ),
+            profit_target_r=pos.strategy.metadata.profit_target_r,
         )
         pos.exit_state = decision.state
         if not decision.close:

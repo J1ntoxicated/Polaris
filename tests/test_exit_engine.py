@@ -316,3 +316,104 @@ def test_loser_timeout_long_horizon_closes_past_its_window() -> None:
     )
     assert d.close is True
     assert d.close_reason == "loser_timeout"
+
+
+# --- profit_target_r take-profit (mean-reversion harvest) ------------------
+# A fade strategy opts in to a fixed take-profit so the engine harvests at the
+# target instead of letting the wide ATR trail round-trip a bounded revert.
+def test_target_harvest_long_fires_at_target() -> None:
+    # +1R reached, price still near the peak (trail would NOT fire) → harvest now.
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=102.0,
+        atr_pct=ATR_PCT, pnl_r=1.0, held_seconds=30, profit_target_r=1.0,
+    )
+    assert d.close is True
+    assert d.close_reason == "target_harvest"
+
+
+def test_target_harvest_short_fires_at_target() -> None:
+    st = _fresh("short")
+    d = evaluate_exit(
+        prev=st, side="short", entry_price=ENTRY, last_price=98.0,
+        atr_pct=ATR_PCT, pnl_r=1.0, held_seconds=30, profit_target_r=1.0,
+    )
+    assert d.close is True
+    assert d.close_reason == "target_harvest"
+
+
+def test_target_harvest_holds_below_target() -> None:
+    # Favourable but below the target → no harvest (let it keep reverting).
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=101.0,
+        atr_pct=ATR_PCT, pnl_r=0.5, held_seconds=30, profit_target_r=1.0,
+    )
+    assert d.close is False
+
+
+def test_no_target_default_is_trend_exit() -> None:
+    # profit_target_r=None (default) → a +1R winner is NOT harvested; the trend
+    # exit (let-winners-run) is byte-identical to before this feature.
+    st = _fresh("long")
+    d = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=102.0,
+        atr_pct=ATR_PCT, pnl_r=1.0, held_seconds=30,
+    )
+    assert d.close is False
+    assert d.close_reason is None
+
+
+def test_target_harvest_priority_over_trail_at_peak() -> None:
+    # Position ran to +2R peak then sits at +1R: target harvests at +1R rather
+    # than waiting for the 2-ATR trail to round-trip the move back to entry.
+    st = _fresh("long")
+    ran = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=104.0,
+        atr_pct=ATR_PCT, pnl_r=2.0, held_seconds=10, profit_target_r=1.0,
+    )
+    # (peak push already harvests at +2R >= target; the point is target fires)
+    assert ran.close is True and ran.close_reason == "target_harvest"
+
+
+# --- guard: target HARVESTS before the wide trail can round-trip the revert ---
+def _pnl_r(side: str, entry: float, last: float) -> float:
+    atr_r = entry * ATR_PCT * 2.0
+    return (entry - last) / atr_r if side == "short" else (last - entry) / atr_r
+
+
+def test_target_beats_roundtrip_short_fade() -> None:
+    """A short fade reverts to the mean (+1R) then bounces back to entry.
+
+    WITH the fade target the engine harvests +1R at the mean; WITHOUT it the
+    2-ATR let-winners-run trail rides the bounce back and round-trips to ~0R.
+    Pins the must-fix guard: target_harvest fires BEFORE atr_trail_stop AND
+    beats the status-quo net R on a representative revert→bounce path.
+    """
+    side = "short"
+    # Tick 1: reverts down to the mean (favourable +1R for a short).
+    p1 = 98.0
+    with_target = evaluate_exit(
+        prev=_fresh(side), side=side, entry_price=ENTRY, last_price=p1,
+        atr_pct=ATR_PCT, pnl_r=_pnl_r(side, ENTRY, p1), held_seconds=30,
+        profit_target_r=1.0,
+    )
+    assert with_target.close is True
+    assert with_target.close_reason == "target_harvest"
+    target_net_r = _pnl_r(side, ENTRY, p1)  # banked at the mean
+    assert target_net_r >= 1.0
+
+    # Status quo (no target): tick 1 holds, then price bounces back to entry.
+    sq1 = evaluate_exit(
+        prev=_fresh(side), side=side, entry_price=ENTRY, last_price=p1,
+        atr_pct=ATR_PCT, pnl_r=_pnl_r(side, ENTRY, p1), held_seconds=30,
+    )
+    assert sq1.close is False  # the wide trail does NOT harvest the revert
+    p2 = 100.0  # bounce back to entry (the round-trip the fix targets)
+    sq2 = evaluate_exit(
+        prev=sq1.state, side=side, entry_price=ENTRY, last_price=p2,
+        atr_pct=ATR_PCT, pnl_r=_pnl_r(side, ENTRY, p2), held_seconds=60,
+    )
+    assert sq2.close is True and sq2.close_reason == "atr_trail_stop"
+    status_quo_net_r = _pnl_r(side, ENTRY, p2)  # ~0R round-trip
+    assert target_net_r > status_quo_net_r  # the fix strictly beats status quo

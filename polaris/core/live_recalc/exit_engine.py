@@ -175,6 +175,7 @@ def evaluate_exit(
     pnl_r: float,
     held_seconds: int,
     loser_timeout_sec: float | None = None,
+    profit_target_r: float | None = None,
 ) -> ExitDecision:
     """Advance excursion + stop + FSM for one position; decide close-or-hold.
 
@@ -188,6 +189,16 @@ def evaluate_exit(
     ``EXIT_LOSER_TIMEOUT_SEC`` default (fast strategies stay short). This only
     moves the TIMEOUT horizon — the ATR-trailing stop and the protected-BEP
     exit (the precise exits) are untouched.
+
+    ``profit_target_r``: a fixed take-profit in R for mean-reversion strategies
+    (set per-strategy from ``StrategyMetadata.profit_target_r``). When set and
+    favourable excursion reaches it, the position is HARVESTED immediately —
+    BEFORE the wide let-winners-run ATR trail can give a bounded revert-to-mean
+    gain back (a BB fade reverts extreme→middle ≈ 1 R, then bounces; the 2-ATR
+    trail would round-trip the whole move). ``None`` (default) keeps the trend
+    exit for every momentum strategy — byte-identical. EXPECTANCY, not a
+    throttle: a per-position close target only — size / entry side / halt rail
+    untouched.
     """
     # 1. Update price extremes (running peak / trough over the position life).
     peak = max(prev.peak_price, last_price)
@@ -225,6 +236,16 @@ def evaluate_exit(
     )
 
     # 5. Close decisions (precise exits — per-position only).
+    #    (a0) TAKE-PROFIT at the mean-reversion target FIRST: a strategy that
+    #         opts in with a fixed ``profit_target_r`` (a BB fade) HARVESTS the
+    #         instant current PnL reaches the target — before the wide
+    #         let-winners-run ATR trail can round-trip a bounded revert-to-mean.
+    #         ``None`` keeps every momentum strategy on the trend exit (no fixed
+    #         target). EXPECTANCY — per-position close only; never size / entry /
+    #         halt.
+    if profit_target_r is not None and pnl_r >= profit_target_r:
+        return ExitDecision(state=state, close=True, close_reason="target_harvest")
+
     #    (a) PROTECTED break-even FIRST: a round-tripped winner that gave it all
     #        back closes at break-even — the tighter, more precise exit takes
     #        priority over the wider ATR trail (don't wait for the trail when a

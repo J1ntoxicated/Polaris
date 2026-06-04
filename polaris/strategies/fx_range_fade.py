@@ -37,6 +37,22 @@ ADX_RANGE_MAX = 20.0  # fade only BELOW this (>= is a trend → yield to fx_brea
 STRENGTH_BASE = 0.5
 TTL_BARS = 4
 LEVERAGE_MAX = 30.0
+# Take-profit target (R). A fade enters at the BB extreme and its edge is the
+# revert to the middle band. Harvest there — the wide let-winners-run ATR trail
+# (2 ATR off the peak) would otherwise round-trip the whole mean-reversion as
+# price bounces back off the mean (test_target_beats_roundtrip pins this:
+# target banks +1R, the trail round-trips to ~0R). EXPECTANCY, not a throttle.
+# Consumed by the precise-exit engine via metadata.profit_target_r.
+#
+# CALIBRATION (COARSE HEURISTIC — flag for /debate, like the exit_engine params):
+# extreme→middle = 2σ (BB k=2.0 on 20-bar close stdev); 1 R = 2 ATR_14 (true
+# range). So 1.0 assumes σ_20(close) ≈ ATR_14(true-range) — correlated, not
+# equal. When intrabar ATR materially EXCEEDS close-stdev, +1R overshoots the
+# middle, the target never triggers, and the exit falls back to the 2-ATR trail
+# (a no-op vs status quo — never WORSE, just unhelped in that regime). A future
+# refinement derives the target per-position from the actual bb_extreme→bb_middle
+# distance in R; until calibrated, 1.0 is the principled default.
+FADE_TARGET_R = 1.0
 
 
 class FXRangeFadeStrategy(BaseStrategy):
@@ -55,6 +71,7 @@ class FXRangeFadeStrategy(BaseStrategy):
         asset_class="fx",
         venue="capital",
         correlation_group_id="cfd_fx_range",
+        profit_target_r=FADE_TARGET_R,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

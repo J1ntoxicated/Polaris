@@ -48,6 +48,14 @@ class StrategyMetadata:
     # to "" so existing constructors stay source-compatible; ``asset_class`` is
     # preserved unchanged (it currently doubles as product_class — design §2.2).
     product_class: str = ""
+    # profit_target_r (R-units): when set, the precise-exit engine HARVESTS the
+    # position the moment unrealised PnL reaches +this many R — a take-profit for
+    # mean-reversion strategies whose edge is a bounded revert-to-mean (a BB fade
+    # enters at the band extreme and targets the middle ≈ 2σ ≈ 2 ATR ≈ 1 R), NOT
+    # let-winners-run. None (default) keeps the trend exit (ATR-trail + MFE harvest
+    # FSM, no fixed target) — all existing strategies are unchanged. EXPECTANCY: a
+    # per-position close target, never a size dampen / entry block / halt.
+    profit_target_r: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

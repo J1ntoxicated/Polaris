@@ -80,6 +80,21 @@ def _loser_timeout_for_strategy(strategy_id: str) -> float:
     return max(EXIT_LOSER_TIMEOUT_SEC, tf_floor)
 
 
+def _profit_target_for_strategy(strategy_id: str) -> float | None:
+    """Take-profit target (R) for ``strategy_id``, or ``None`` for trend exits.
+
+    Reads the strategy's declared ``metadata.profit_target_r``: a mean-reversion
+    strategy (a BB fade) opts in to a fixed take-profit so the precise-exit engine
+    harvests at the target instead of letting the wide ATR trail round-trip the
+    bounded revert-to-mean. Every momentum strategy leaves it ``None`` →
+    let-winners-run unchanged. An unregistered id falls back to ``None``.
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return None
+    return cls.metadata.profit_target_r
+
+
 def _session_calendar_for_venue(venue: str) -> str:
     """Resolve a venue's ``session_calendar`` (always_on / fx_indices_cal /
     us_equity_cal). An unknown venue degrades to ``always_on`` so the session
@@ -244,6 +259,7 @@ async def run_precise_exit(
         prev=prev, side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
         loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
+        profit_target_r=_profit_target_for_strategy(strategy_id),
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
     # FSM state transition (DEBUG): surface the per-tick exit-state advance so

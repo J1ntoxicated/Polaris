@@ -71,3 +71,19 @@ def test_capital_epic_suffix_normalizes() -> None:
     mv = _mv("AUDUSD_ZERO", 0.6450, adx=11.0, bb_upper=0.6480, bb_lower=0.6460, bb_middle=0.6470)
     sig = FXRangeFadeStrategy().generate_raw_signal(mv)
     assert sig is not None and sig.side == "long"
+
+
+def test_metadata_opts_in_to_take_profit_target() -> None:
+    # The fade declares a fixed take-profit so the precise-exit engine harvests
+    # the revert-to-mean instead of letting the wide ATR trail give it back.
+    from polaris.strategies.fx_range_fade import FADE_TARGET_R
+    assert FXRangeFadeStrategy.metadata.profit_target_r == FADE_TARGET_R
+    assert FADE_TARGET_R == 1.0
+
+
+def test_profit_target_helper_fade_vs_momentum() -> None:
+    from polaris.scripts._production_recalc_exit import _profit_target_for_strategy
+    assert _profit_target_for_strategy("fx_range_fade") == 1.0
+    # A momentum strategy opts out → None → let-winners-run (trend exit) unchanged.
+    assert _profit_target_for_strategy("tsmom") is None
+    assert _profit_target_for_strategy("does_not_exist") is None

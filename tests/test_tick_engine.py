@@ -431,3 +431,206 @@ async def test_reversion_position_exits_on_flow_reversal(
     assert "pos_rev" not in eng.family_by_position
     # The position is no longer open in the tracked book.
     assert all(t.position_id != "pos_rev" or t.closed for t in state.open_trades)
+
+
+# ---------------------------------------------------------------------------
+# (g) the momentum exit pass resumes the PERSISTED exit state — the ~500ms
+# tick pass must not re-seed stop/peak/trough from entry (that loosened the
+# bar recalc's ratcheted stop and reset the excursion telemetry / FSM).
+# ---------------------------------------------------------------------------
+
+
+def _insert_position_row(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    opened_ts: int,
+    stop_price: float | None,
+    peak_price: float | None,
+    trough_price: float | None,
+    exit_state: str | None,
+) -> None:
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        "strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        "opened_ts, stop_price, peak_price, trough_price, exit_state) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            position_id, VENUE, SYMBOL, GROUP, "burst_rider", "burst_rider",
+            "burst_rider", "long", 0.5, "active", opened_ts,
+            stop_price, peak_price, trough_price, exit_state,
+        ),
+    )
+
+
+def _momentum_setup(
+    memdb: sqlite3.Connection, *, now_ts: int,
+) -> tuple[ProdLoopState, TickEngineState, FakeQuoteWriter]:
+    _seed(memdb, regime="bull_trend", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    state.open_trades.append(
+        SimulatedTrade(
+            signal_id="tick_burst_x", venue=VENUE, symbol=SYMBOL,
+            strategy_id="burst_rider", side="long", entry_price=100.0,
+            notional_usd=50.0, open_ts=now_ts - 60, position_id="pos_mom",
+        )
+    )
+    eng.family_by_position["pos_mom"] = "momentum"
+    eng.entry_ref_by_position["pos_mom"] = 100.0
+    return state, eng, writer
+
+
+def _alternating_window(
+    now_mono: float, *, lo: float, hi: float, last: float,
+) -> list[TickSample]:
+    base_ms = int((now_mono - 1.0) * 1000)
+    window = [
+        _tick(base_ms + i * 50, lo if i % 2 == 0 else hi) for i in range(19)
+    ]
+    window.append(_tick(base_ms + 19 * 50, last))
+    return window
+
+
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_does_not_loosen_ratcheted_stop(
+    memdb: sqlite3.Connection,
+) -> None:
+    """The bar recalc ratcheted stop=104 / peak=106 / FSM=harvest into the
+    positions row; a pullback tick to 104.5 (still ABOVE the stop) must hold
+    the position AND leave the persisted state un-loosened. A from-entry
+    re-seed recomputes stop≈100.7 / peak=104.5 — the ratchet-invariant
+    violation. The FSM seed is HARVEST deliberately: the re-derived target
+    from the restored peak is only "protected" (mfe≈1.57 < 2.0), so the
+    exact-match assert below fails if exit_state restoration is dropped —
+    a "protected" seed would be silently re-derived and mask that mutation."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=104.0, peak_price=106.0, trough_price=99.5,
+        exit_state="harvest",
+    )
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=103.0, hi=105.0, last=104.5),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    row = memdb.execute(
+        "SELECT stop_price, peak_price, trough_price, exit_state "
+        "FROM positions WHERE position_id = 'pos_mom'",
+    ).fetchone()
+    assert row is not None
+    stop_price, peak_price, trough_price, exit_state = row
+    assert stop_price is not None and stop_price >= 104.0, (
+        f"ratchet invariant violated: stop loosened to {stop_price} (< 104.0)"
+    )
+    assert peak_price == pytest.approx(106.0), f"peak reset toward entry: {peak_price}"
+    assert trough_price == pytest.approx(99.5), f"trough reset to entry: {trough_price}"
+    # Exact match: monotone FSM can never re-derive "harvest" from the
+    # restored peak (target tops out at "protected") — only true restoration
+    # of the persisted exit_state keeps it.
+    assert exit_state == "harvest", f"FSM state not restored: {exit_state}"
+    # 104.5 > the 104.0 stop → the position must still be open.
+    assert any(
+        t.position_id == "pos_mom" and not t.closed for t in state.open_trades
+    )
+
+
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_enforces_ratcheted_stop(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A live tick at 102.0 — below the ratcheted stop floor of 104.0 (the
+    restored state can only ratchet it tighter) — must close the position
+    (atr_trail_stop). The from-entry re-seed computed a fresh stop≈100 and
+    held straight through the bar recalc's ratcheted level."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=104.0, peak_price=106.0, trough_price=99.5,
+        exit_state="protected",
+    )
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=101.5, hi=102.5, last=102.0),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    assert "pos_mom" not in eng.family_by_position, (
+        "a tick below the ratcheted stop must close the momentum position"
+    )
+    assert all(t.position_id != "pos_mom" or t.closed for t in state.open_trades)
+
+
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_fresh_position_initialises_state(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A just-opened position (NULL exit columns) seeds from entry exactly as
+    before, and a tracked position with NO positions row degrades gracefully
+    (no crash, stays open) — the DB-resume path must not break first-tick
+    initialisation."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=None, peak_price=None, trough_price=None, exit_state=None,
+    )
+    # A second tracked momentum position with NO positions row (orphan).
+    state.open_trades.append(
+        SimulatedTrade(
+            signal_id="tick_burst_y", venue=VENUE, symbol=SYMBOL,
+            strategy_id="burst_rider", side="long", entry_price=100.0,
+            notional_usd=50.0, open_ts=now_ts - 60, position_id="pos_orphan",
+        )
+    )
+    eng.family_by_position["pos_orphan"] = "momentum"
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=100.1, hi=100.3, last=100.2),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    row = memdb.execute(
+        "SELECT stop_price, peak_price, trough_price FROM positions "
+        "WHERE position_id = 'pos_mom'",
+    ).fetchone()
+    assert row is not None
+    stop_price, peak_price, trough_price = row
+    # First tick seeded the running extremes from entry + live mark.
+    assert peak_price == pytest.approx(100.2)
+    assert trough_price == pytest.approx(100.0)
+    assert stop_price is not None and stop_price < 100.2
+    # Both positions held (no spurious close on a flat window).
+    assert any(
+        t.position_id == "pos_mom" and not t.closed for t in state.open_trades
+    )
+    assert any(
+        t.position_id == "pos_orphan" and not t.closed for t in state.open_trades
+    )

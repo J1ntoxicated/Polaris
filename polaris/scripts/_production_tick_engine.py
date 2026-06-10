@@ -598,8 +598,20 @@ async def _run_exits(
                 )
             continue
         # Momentum family → existing precise-exit engine (ATR trail / BEP /
-        # loser-timeout). Build the ActivePositionRow it reads from the tracked
-        # trade + a live-tick mark.
+        # loser-timeout). Resume the PERSISTED exit state from the positions
+        # row — the 5s bar recalc (and prior tick passes) ratchet
+        # stop/peak/trough/FSM there; re-seeding from entry every ~500ms
+        # loosened the ratcheted stop (the never-loosen invariant) and reset
+        # the excursion telemetry. A missing row falls back to first-tick
+        # init (fresh open) — unchanged behaviour.
+        exit_row = conn.execute(
+            "SELECT stop_price, peak_price, trough_price, exit_state "
+            "FROM positions WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        stop_db, peak_db, trough_db, exit_state_db = (
+            exit_row if exit_row is not None else (None, None, None, None)
+        )
         pos = ActivePositionRow()
         pos.update(
             {
@@ -609,10 +621,10 @@ async def _run_exits(
                 "side": trade.side,
                 "active_strategy_id": trade.strategy_id,
                 "strategy": trade.strategy_id,
-                "peak_price": None,
-                "trough_price": None,
-                "stop_price": None,
-                "exit_state": "open",
+                "peak_price": peak_db,
+                "trough_price": trough_db,
+                "stop_price": stop_db,
+                "exit_state": exit_state_db or "open",
             }
         )
         held_seconds = max(0, now_ts - int(trade.open_ts))

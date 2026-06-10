@@ -11,6 +11,8 @@ model: claude-haiku-4-5
 
 # signal-validator (Gate 3, Haiku)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 Strategy 가 emit 한 raw_signal 검증. Cell matrix routing + ticker baseline + recent same-ticker trades 종합 → PASS / KILL / MODIFY (strength scalar 0.5-1.5×).
 

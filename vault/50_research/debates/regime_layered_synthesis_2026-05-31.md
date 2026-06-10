@@ -3,7 +3,7 @@ type: debate
 status: resolved
 date_created: 2026-05-31
 tags: [debate, regime, ai-conductor, layered]
-related: [[ai_conductor_transition_2026-05-30]], [[project_ai_conductor_direction]]
+related: [[ai_conductor_transition_2026-05-30]], `project_ai_conductor_direction`
 ---
 
 # /debate — Regime 계층 합성 (L1 macro / L2 asset-class / L3 ticker)

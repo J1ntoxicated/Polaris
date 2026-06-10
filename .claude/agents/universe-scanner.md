@@ -11,6 +11,8 @@ model: claude-haiku-4-5
 
 # universe-scanner (Gate 1, Haiku)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 Layer 0 의 active universe (~270-320 instruments) 에서 cell_matrix score + ticker baseline 활용하여 cycle 마다 30-ticker focus watchlist 추출. Cost 최적화 핵심 gate.
 

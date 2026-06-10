@@ -37,6 +37,8 @@ A1 축 = **Claude + Jin 이 함께 설계·개발하는 두뇌**. 헌장 → 결
 - [[p3_self_evolve_2026-06-01]] — self-evolve 설계
 - [[conductor_g3g4_cutover_2026-05-31]] — G3/G4 deterministic 컷오버
 - [[2026-05-29_venue_asset_class_differentiation]] · [[2026-05-29_profit_structure_backlog]]
+- [[capital-pnl-cross-instrument-match_2026-06-04]] — Capital PnL 10^5x = entry-fill cross-instrument match 교훈
+- [[zombie_close_session_gate_wrong_predicate_2026-06-04]] — 세션게이트 predicate 혼동 + builder self-review bias 교훈
 
 ---
 ## 축 연결

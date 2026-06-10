@@ -21,4 +21,4 @@ tags: [lesson, gpt, silent-degradation, observability, gates]
 - **관측성 사각지대 해소(Task #13)**: 대시보드에 **모델별 GPT ok%/에러율 카드** + 세션 digest 에 `gate_events.error_text` 비율 집계. silent degradation 은 P&L 이 아니라 **model 에러율**로만 잡힌다.
 - 외부 의존(LLM API) 계약은 주기적 라이브 프로브로 drift 감시.
 
-[[2026-05-29_loss_forensic_fee_overtrading]] · [[feedback_circuit_breaker_philosophy]]
+[[2026-05-29_loss_forensic_fee_overtrading]] · `feedback_circuit_breaker_philosophy`

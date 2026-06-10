@@ -10,11 +10,13 @@ model: claude-opus-4-7
 
 # codex-debate-partner (Dev/Ops, Opus)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
-Codex external review routing. code-implementer / analyst output → codex (gpt-5.5) 외부 review 의무 dispatch. **Max 5 round** per topic (escalation 방지).
+Codex external debate routing — **on-demand 비-dev 전용** (`/debate` overlay 전용). 대상: 트레이딩 파라미터 변경 / 전략 전환 / 아키텍처 대규모 변경. **dev 리뷰/디베이트 금지** (Jin 2026-05-31 no-dev-GPT — dev 리뷰 = fresh Claude sub-agent, `feedback_review_via_claude_agents`). **Max 5 round** per topic (escalation 방지).
 
 ## Input
-- Topic + draft output (code diff / ADR draft / plan)
+- Topic + draft 결정안 (trade-param 변경안 / 전략안 / 아키텍처안 / ADR draft)
 - 이전 round history (있다면)
 
 ## Output
@@ -36,6 +38,7 @@ Codex external review routing. code-implementer / analyst output → codex (gpt-
 - mcp__sequential-thinking
 
 ## Forbidden
+- Dev 코드/spec/rule 리뷰·디베이트 (NO — fresh Claude sub-agent 책임, `feedback_no_dev_gpt`)
 - Code edit (NO, code-implementer 책임)
 - Order placement (NO)
 - ADR mint (recommendation 만)
@@ -43,6 +46,6 @@ Codex external review routing. code-implementer / analyst output → codex (gpt-
 - 1 round 단정 (`feedback_no_single_review_verdict`)
 
 ## Cross-ref
-- `feedback_code_review_codex_external`
+- `feedback_no_dev_gpt` (dev 리뷰/디베이트에 GPT/codex 금지)
 - `feedback_no_overkill_codex_delegate`
 - `feedback_codex_harness_mediated`

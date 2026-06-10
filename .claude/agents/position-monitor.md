@@ -11,6 +11,8 @@ model: claude-opus-4-7  # P1; P0 = Python
 
 # position-monitor (Gate 6, Opus P1 / Python P0)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 활성 position 마다 N-sec loop 모니터. Market view + regime flag + recent ticks 종합 → HOLD / ADJUST_EXIT / EXIT_NOW / SWAP_STRATEGY.
 

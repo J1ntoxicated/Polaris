@@ -49,8 +49,8 @@ ADR patches 적용:
 - 거부 키워드 sweep: vault charter / ADR / 30_components 모두 anti-pattern documenting hits 만 (real-money 보수 논거 무효 / regulatory cap 거부 / professional risk 거부 / monthly review 거부 등 명시 reject).
 - 코드: `_gpt_client.py` line 101 = "real-money safety bias and over-KILLs" (G3 prompt fix 의 reject context, 정상). `signal_validator.py` line 13 = "no defensive throttle on PASS rate" (positive bias 명시).
 - Hard cap = headroom min() 1회 (T4 cell mult clip-전 + tier amplifier preserve) ✓.
-- Drawdown auto-stop / daily target hard limit / KPI auto-disable / regime auto-throttle 모두 X.
-- Strategy auto-disable X (Jin manual only, learner_blocks 1h auto-unblock).
+- Drawdown 자동정지 / daily target hard limit / KPI 기준 자동 비활성 전환(당시 설계 후보) / regime 기준 자동 감속류 — 모두 X (미도입 확인).
+- Strategy 자동 비활성 전환 X (Jin manual only, learner_blocks 1h auto-unblock).
 
 ## C. DEMO Unlock 모든 영역 — **PASS**
 
@@ -137,7 +137,7 @@ ADR patches 적용:
 
 ## Aggressive Bias 누적 위반
 
-- 0 detected. defensive throttle / daily limit / auto-disable / dampen 모두 미 도입. F4 (D2 Capital 0) 도 block 이 아닌 timeframe mismatch (지표 trigger frequency 약함) — strategy spec 자체 변경 또는 trigger relax 후 검증.
+- 0 detected. defensive throttle / daily limit / 자동 비활성 전환 / dampen 모두 미 도입. F4 (D2 Capital 0) 도 block 이 아닌 timeframe mismatch (지표 trigger frequency 약함) — strategy spec 자체 변경 또는 trigger relax 후 검증.
 
 ## Day 9+ Recommendation
 

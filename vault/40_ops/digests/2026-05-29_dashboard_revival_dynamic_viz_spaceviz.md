@@ -16,7 +16,7 @@ tags: [digest, dashboard, visualization, second-brain]
 - **`5940107`** dashboard_v2 **동적 시각화**: 24h 자산 스파크라인 + DD/노출/AI예산/승률 인라인 바 게이지 + 셀 히트타일. 40행 불변, 7 신규 테스트, mypy/ruff clean.
 
 ## Root cause 해결 — "봇/대시보드 실행이 Claude 창 닫던" 정체
-`start_dashboard.sh` "aggressive tty cleanup"가 `$$` 셸 tty 를 Claude 창으로 오인 → Bash 도구 실행 시 Jin 창을 닫음. **기본 OFF 반전**(opt-in `AGGRESSIVE_TTY_CLEANUP=1`) + 기본 DB → `polaris_live.sqlite`. → [[feedback_never_kill_claude_session]]. 대시보드 PID 7638 라이브 가동.
+`start_dashboard.sh` "aggressive tty cleanup"가 `$$` 셸 tty 를 Claude 창으로 오인 → Bash 도구 실행 시 Jin 창을 닫음. **기본 OFF 반전**(opt-in `AGGRESSIVE_TTY_CLEANUP=1`) + 기본 DB → `polaris_live.sqlite`. → `feedback_never_kill_claude_session`. 대시보드 PID 7638 라이브 가동.
 
 ## 판단 기록
 - **OKX 고아 청산 `--live` SKIP**: USDT 이미 $35,815(고갈 아님), "고아" 5건은 봇 활성 포지션 → 청산 시 라이브 데이터 오염. 봇 정지 후 클린 재시작 시에만 유효.
@@ -31,4 +31,4 @@ vault = 이미 Obsidian vault(`.obsidian` 존재). 세션 작업 = 본 digest + 
 - 스페이스 비주얼 빌드 검증 → 띄우기 → 리뷰.
 - P2 nit: `posterior.py` slippage floor docstring 정합 / `snapshot_sections.py` ORDER BY 주석 정정.
 
-Refs: [[ADR-010]] · [[2026-05-28_5axis_audit]] · [[feedback_never_kill_claude_session]]
+Refs: [[ADR-010]] · [[2026-05-28_5axis_audit]] · `feedback_never_kill_claude_session`

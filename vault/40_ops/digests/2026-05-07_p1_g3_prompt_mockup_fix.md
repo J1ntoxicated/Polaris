@@ -9,7 +9,7 @@ related: [[layer-2-per-gate-pipeline]], [[2026-05-07_p1_1h_audit_real_gpt]]
 # G3 Validator Prompt Mockup + Fix — DEMO Context Unlock
 
 ## Trigger
-PID 9417 1h audit: G3 KILL ratio 44% (12,777/29,272 GPT-only). Hypothesis: GPT defaults to real-money safety bias because system prompt missing DEMO/PAPER context.
+PID 9417 1h audit: G3 KILL ratio 44% (12,777/29,272 GPT-only). Hypothesis: system prompt에 DEMO/PAPER 컨텍스트가 빠져 GPT가 실계좌 기준의 보수 편향을 기본 적용해 over-KILL (당시 진단).
 
 ## Mockup Test (`tools/g3_prompt_mockup.py`)
 40 real production signals replayed (20 origKILL + 20 origPASS) against 5 prompt variants on `gpt-5-mini`:

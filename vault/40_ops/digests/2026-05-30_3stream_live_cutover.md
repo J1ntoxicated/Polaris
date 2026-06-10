@@ -3,7 +3,7 @@ type: digest
 status: active
 date_created: 2026-05-30
 tags: [digest, 3stream, live-cutover, 5axis, milestone]
-related: [[_NOW]], [[north-star]], [[2026-05-30_ai_validity_audit]], [[project_operating_thesis_surgical_strike]]
+related: [[_NOW]], [[north-star]], [[2026-05-30_ai_validity_audit]], `project_operating_thesis_surgical_strike`
 ---
 
 # 3-스트림 라이브 전환 + 5-axis 최종검증 (자율 세션 완료)

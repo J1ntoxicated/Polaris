@@ -9,7 +9,7 @@ tags: [debate, p3, self-evolve, reframe]
 # Debate — P3 Self-Evolve 설계 (2026-06-01)
 
 **Topic**: P3 self-evolve 설계 spec (`.claude/plans/p3_self_evolve_2026-06-01.md`) 충분한가? / 누락·과적합·과설계·mandate 위반? / 확정 or 보강?
-**Sources** (Jin이 이 1건에 한해 [[feedback_no_dev_gpt]] 명시적 해제): Claude 6-lens 적대 디베이트 + codex 외부 리뷰.
+**Sources** (Jin이 이 1건에 한해 `feedback_no_dev_gpt` 명시적 해제): Claude 6-lens 적대 디베이트 + codex 외부 리뷰.
 **Verdict**: Claude = **RECONSIDER** (렌즈 verdict weak/broken/weak/adequate/weak/weak) · codex = **CONFIRM_WITH_CHANGES** → 수렴: **"장치 전에 edge 먼저"**. Jin 수용 → spec REFRAME.
 
 ## 수렴된 핵심 (코드 검증)
@@ -25,4 +25,4 @@ profit-skeptic "net -$4,382 / fees 3.2x / 19min churn"은 **stale `data/polaris.
 
 ## 결정 (REFRAME, Jin 2026-06-01)
 **증명 먼저**: P0a KILL-스파이크(기존 config 변종→기존 게이트 오프라인 통과율, 🚦~0이면 피처가 병목) · P0b fee/churn 켜기 + exit recompute 배선 + 키퍼 T0 · P1 alt-data→MarketView 피처 · P2 생성기(증명 시) · DEFER(RAG·키퍼T1T2·3축·밴딧·C1 라이브).
-SSOT = `.claude/plans/p3_self_evolve_2026-06-01.md`. 관련 [[project_self_evolving_vision]] · [[project_ai_conductor_direction]].
+SSOT = `.claude/plans/p3_self_evolve_2026-06-01.md`. 관련 `project_self_evolving_vision` · `project_ai_conductor_direction` (memory) · [[ai_conductor_transition_2026-05-30]] · [[MOC-A1-design-dev]].

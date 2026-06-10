@@ -11,6 +11,8 @@ model: claude-haiku-4-5
 
 # pre-entry-watcher (Gate 4, Haiku, 30s loop)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 Validated signal 을 받아 30s window 동안 tick stream 모니터. Per-second decision PROCEED / KILL. Default 30s 후 PROCEED → Entry Sizer.
 

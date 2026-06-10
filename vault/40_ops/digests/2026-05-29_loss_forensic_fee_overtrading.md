@@ -19,7 +19,7 @@ Jin "로스 심하다, 이게 맞냐" → 조사 결과: 대시보드 **-$145는
 
 ## 버그
 - **P0 (수정완료 `6d77b5e`)**: 대시보드가 `starting_capital + SUM(pnl_usd)` 만, **fee_usd 미차감** (`snapshot_queries.py` `_build_equity_curve`/`_daily_realised_pnl`). → net 차감으로 수정, 68 test green. 라이브 대시보드 이제 -$1.5K 정직 표시.
-- **P1 (미수정)**: 과매매 — 같은 (strategy, instrument) 미청산 상태에서 매 tick 재진입(SOL 20연속 buy). per-symbol open-중 재진입 skip/쿨다운 부재. 추정 위치 `_production_pipeline.py` 진입 게이트 + 사이징 전 dedup. **aggressive 위반 아님**(중복주문 제거 = turnover 비용 관리, P&L halt 아님 — [[feedback_circuit_breaker_philosophy]] 일치).
+- **P1 (미수정)**: 과매매 — 같은 (strategy, instrument) 미청산 상태에서 매 tick 재진입(SOL 20연속 buy). per-symbol open-중 재진입 skip/쿨다운 부재. 추정 위치 `_production_pipeline.py` 진입 게이트 + 사이징 전 dedup. **aggressive 위반 아님**(중복주문 제거 = turnover 비용 관리, P&L halt 아님 — `feedback_circuit_breaker_philosophy` 일치).
 
 ## 개선 레버 (aggressive 유지)
 1. ✅ 대시보드 fee 반영 (완료).

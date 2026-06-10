@@ -10,6 +10,8 @@ model: none  # Python policy_engine deterministic, LLM 없음 (Round 3 BLOCKER f
 
 # risk-officer (Dev/Ops, Python deterministic — LLM 없음)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 **Round 3 BLOCKER fix**: 모든 risk decision = deterministic Python policy_engine. LLM 결정 금지 (hallucination 위험 = capital risk).
 

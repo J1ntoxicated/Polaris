@@ -11,6 +11,8 @@ model: claude-opus-4-7  # P1; P0 = Python
 
 # adaptive-exit (Gate 7, Opus P1 / Python P0)
 
+> **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
+
 ## Role
 Position Monitor 가 ADJUST_EXIT / EXIT_NOW emit 시, 또는 default ATR×N exit 도달 시 호출. Default ATR exit 위에 AI override layer. **Winner 길게, default 보호**.
 

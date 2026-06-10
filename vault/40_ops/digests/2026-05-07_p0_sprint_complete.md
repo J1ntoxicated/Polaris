@@ -3,7 +3,7 @@ type: runtime
 status: active
 date_created: 2026-05-07
 tags: [digest, p0-sprint, complete, milestone]
-related: [[ADR-001]], [[ADR-002]], [[ADR-003]], [[ADR-004]], [[ADR-005]], [[ADR-006]], [[ADR-007]], [[ADR-008]]
+related: [[ADR-001-vault-structure|ADR-001]], [[ADR-002-vision|ADR-002]], [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 reviewed_by: codex (38+ technical + 17 4-axis = 55 codex calls)
 ---
 

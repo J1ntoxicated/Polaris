@@ -3,7 +3,7 @@ type: lesson
 status: active
 date_created: 2026-05-30
 tags: [lesson, architecture, gates, streams, unified-vs-split, invariant-core]
-related: [[ADR-004]], [[ADR-005]], [[ADR-006]], [[ADR-007]], [[2026-05-30_ai_validity_audit]], [[2026-05-29_venue_asset_class_differentiation]]
+related: [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[2026-05-30_ai_validity_audit]], [[2026-05-29_venue_asset_class_differentiation]]
 ---
 
 # Gate architecture: unified vs per-stream (DEMO/PAPER, read-only analysis)

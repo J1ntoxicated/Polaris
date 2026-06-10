@@ -5,7 +5,7 @@ aliases: [ADR-002]
 status: active
 date_created: 2026-05-06
 tags: [adr, vision, vision-targets]
-related: [[north-star]], [[active-autonomous-vision]], [[ADR-003]]
+related: [[north-star]], [[active-autonomous-vision]], [[ADR-003-8-layer-architecture|ADR-003]]
 reviewed_by: codex+jin (round 2 T1 + round 3 D3 + Jin sign-off)
 ---
 

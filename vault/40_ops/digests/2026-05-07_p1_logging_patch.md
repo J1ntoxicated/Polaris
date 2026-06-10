@@ -5,7 +5,7 @@ phase: P1
 day: ignition
 date_created: 2026-05-07
 tags: [digest, p1, logging, observability, paper-loop, ignite_p1]
-related: [[layer-2-per-gate-pipeline]], [[layer-3-sizing-risk]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[ADR-007]]
+related: [[layer-2-per-gate-pipeline]], [[layer-3-sizing-risk]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[ADR-007-learner-network|ADR-007]]
 ---
 
 # P1 verbose logging patch — every core decision is now observable

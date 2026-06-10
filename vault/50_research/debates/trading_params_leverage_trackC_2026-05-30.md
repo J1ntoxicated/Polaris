@@ -1,5 +1,8 @@
 ---
 type: debate
+status: resolved
+date_created: 2026-05-30
+tags: [debate, trading-params, capital, leverage, track-c]
 date: 2026-05-30
 round: 1
 topic: Capital CFD per-market leverage + Track C (Alpaca US-equity spot) caps

@@ -37,8 +37,8 @@ Source: https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 ## Discipline
 
 ### Wikilinks 필수
-- Entities (예시 syntax — 실제 entity 등장 시 stub 노트 mint): `[[EURUSD]]` `[[BTC-USDT]]` `[[Capital]]` `[[ATR]]` `[[regime_quality_score]]`
-- Decisions: [[ADR-001]] · [[ADR-002]] · [[ADR-003]] · [[ADR-004]] · [[ADR-005]] · [[ADR-006]] · [[ADR-007]] · [[ADR-008]]
+- Entities (예시 syntax — 실제 entity 등장 시 stub 노트 mint): `EURUSD` `BTC-USDT` `Capital` `ATR` `regime_quality_score`
+- Decisions: [[ADR-001-vault-structure|ADR-001]] · [[ADR-002-vision|ADR-002]] · [[ADR-003-8-layer-architecture|ADR-003]] · [[ADR-004-per-gate-ai-pipeline|ADR-004]] · [[ADR-005-sizing-formula-cell-routing|ADR-005]] · [[ADR-006-cell-matrix|ADR-006]] · [[ADR-007-learner-network|ADR-007]] · [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 - Strategies: [[volume_burst]] · [[tsmom]] · [[rsi_bb_pullback]] · [[spot_donchian]] · [[fx_breakout_basket]] · [[xau_indices_trend]] · [[session_breakout]]
 - Components: [[layer-0-universe-discovery]] · [[layer-1-canonical-baseline]] · [[layer-2-per-gate-pipeline]] · [[layer-3-sizing-risk]] · [[layer-4-cell-matrix]] · [[layer-5-learner-network]] · [[layer-6-live-recalc]] · [[layer-7-strategy-isolation]]
 
@@ -71,7 +71,7 @@ Source: https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 - monthly review file — Polaris = continuous trade-driven trigger
 
 ## Cross-ref
-- [[ADR-001]] Vault Structure
+- [[ADR-001-vault-structure|ADR-001]] Vault Structure
 - `tools/vault_lint.py` (P0 build + P1 hardening 2026-05-07: inline-code strip, rejection-context recognition, `--fix` lesson scaffold)
 - [[2026-05-07_p1_vault_audit]] — operational learnings (wave 1)
 

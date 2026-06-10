@@ -3,7 +3,7 @@ type: runtime
 status: active
 date_created: 2026-05-07
 tags: [digest, p0-sprint, cumulative-review, 8-layer-integration, codex]
-related: [[ADR-003]], [[ADR-005]], [[ADR-006]], [[ADR-007]], [[ADR-008]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 reviewed_by: codex (gpt-5.4 round 1)
 ---
 

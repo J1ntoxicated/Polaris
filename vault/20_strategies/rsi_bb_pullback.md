@@ -4,7 +4,7 @@ strategy_id: rsi_bb_pullback
 status: active
 date_created: 2026-05-07
 tags: [strategy, okx, spot, signal-generator, mean-reversion, p0-day4]
-related: [[ADR-008]], [[layer-7-strategy-isolation]]
+related: [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[layer-7-strategy-isolation]]
 ---
 
 # RSI-BB Pullback — OKX SPOT 15m bar

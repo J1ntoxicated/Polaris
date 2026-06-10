@@ -23,7 +23,7 @@ A2 축 = **봇 자신** — signal 생성 전략 7종, 라이브 운영 다이�
 - [[2026-05-30_handover_3stream]] — 자율 3-스트림 핸드오버
 - [[2026-05-29_loss_forensic_fee_overtrading]] — fee 폭주 × 과매매 포렌식
 - [[2026-05-28_5axis_audit]] — 5-axis P0 venue wire-miss + fix
-- 나머지 ~40 다이제스트: `40_ops/digests/` 폴더 · 일일로그 `40_ops/daily/`
+- 전체 시간순 인덱스: [[MOC-digests]] (일일로그 `40_ops/daily/` 포함)
 
 ## 대시보드
 - [[dashboard]] — Neural Cloud sphere + 분석보드, `/api/snapshot` feed (WEB :8770)

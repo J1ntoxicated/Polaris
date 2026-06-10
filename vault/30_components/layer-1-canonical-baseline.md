@@ -4,7 +4,7 @@ component: layer-1-canonical-baseline
 status: active
 date_created: 2026-05-06
 tags: [layer-1, canonical, baseline, normalize, t11]
-related: [[ADR-003]], [[ADR-004]], [[ADR-005]], [[ADR-006]], [[layer-0-universe-discovery]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[layer-0-universe-discovery]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

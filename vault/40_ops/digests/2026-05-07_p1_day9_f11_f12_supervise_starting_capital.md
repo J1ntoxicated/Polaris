@@ -4,7 +4,7 @@ status: active
 phase: P1
 date_created: 2026-05-07
 tags: [digest, p1, day9, layer-7, dashboard, ssot, supervise, starting-capital, f11, f12]
-related: [[ADR-003]], [[layer-7-strategy-isolation]], [[dashboard]], [[_NOW]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[layer-7-strategy-isolation]], [[dashboard]], [[_NOW]]
 reviewed_by: claude (self-audit + tests + codex external review queued)
 ---
 
@@ -211,6 +211,6 @@ Success: no issues found in 8 source files
 ## Cross-refs
 
 - [[layer-7-strategy-isolation]] §Q1 — supervisor + circuit breaker SSOT
-- [[ADR-003]] — 8-layer architecture
+- [[ADR-003-8-layer-architecture|ADR-003]] — 8-layer architecture
 - [[dashboard]] — top-bar fields
 - 2026-05-07 audit (Jin): F11+F12 mandate

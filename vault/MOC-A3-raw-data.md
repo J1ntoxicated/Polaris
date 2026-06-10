@@ -21,8 +21,8 @@ A3 축 = **실제 데이터베이스** = vault 밖 SQLite (`data/polaris*.sqlite
 ## 생산 / 소비 컴포넌트 (vault ↔ DB 다리)
 - [[layer-1-canonical-baseline]] — quote_ticks / bars 를 **쓰는** 정규화 feed
 - [[layer-5-learner-network]] — ai_lessons 를 **읽고 쓰는** 학습기, hourly auto-tune
-- [[ADR-007]] — Learner Network 결정 (ai_lessons 스키마 근거)
-- [[ADR-010]] — Venue Round-Trip + DB 격리 (live vs paper sqlite 분리)
+- [[ADR-007-learner-network|ADR-007]] — Learner Network 결정 (ai_lessons 스키마 근거)
+- [[ADR-010-venue-roundtrip-activation|ADR-010]] — Venue Round-Trip + DB 격리 (live vs paper sqlite 분리)
 
 ---
 ## 축 연결

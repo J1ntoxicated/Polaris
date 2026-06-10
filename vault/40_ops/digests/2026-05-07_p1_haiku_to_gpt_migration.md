@@ -4,7 +4,7 @@ status: active
 phase: P1
 date_created: 2026-05-07
 tags: [digest, p1, migration, haiku, gpt, openai, llm, layer-2]
-related: [[ADR-004]], [[layer-2-per-gate-pipeline]], [[_NOW]]
+related: [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[layer-2-per-gate-pipeline]], [[_NOW]]
 reviewed_by: claude (self-audit + smoke acceptance + codex external review queued)
 ---
 
@@ -98,6 +98,6 @@ P2 cosmetic debt (deferred): `haiku` / `haiku_client` kwarg names still litter `
 
 ## Forward links
 
-- [[ADR-004]] §Phase: P0 LLM tier = OpenAI GPT (was Anthropic Haiku).
+- [[ADR-004-per-gate-ai-pipeline|ADR-004]] §Phase: P0 LLM tier = OpenAI GPT (was Anthropic Haiku).
 - `feedback_anthropic_dev_only_openai_runtime` — new memory rule.
 - Ignite_p1 24h watchdog: pending APPROVE.

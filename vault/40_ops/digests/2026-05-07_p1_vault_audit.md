@@ -4,7 +4,7 @@ status: active
 phase: P1
 date_created: 2026-05-07
 tags: [digest, p1, vault-audit, karpathy, lint, backlink-graph, lifecycle]
-related: [[ADR-001]], [[karpathy-workflow]], [[_NOW]], [[INDEX]]
+related: [[ADR-001-vault-structure|ADR-001]], [[karpathy-workflow]], [[_NOW]], [[INDEX]]
 reviewed_by: claude (self-audit; codex round delegated to next session)
 ---
 
@@ -73,14 +73,14 @@ All 8 ADRs have 4-合奏 trace. Day 4-7 fixes also routed through codex (R1-R7 c
    - `strip_inline_code()` helper applied to wikilink + banned scan.
    - banned-keyword `section_ok_tokens` extended (`Reject`, `Aggressive bias`, `keyword sweep`).
    - banned-keyword `line_ok_tokens` extended (`0 hits`, `Rejected-keyword`, `[x] No`, `no defensive`, `no auto-disable`).
-   - `--fix` scaffolds frontmatter on `50_research/lessons/*.md` (date inferred from filename suffix; tags include `strategy/<id>` + `type/<...>`; outbound links `[[ADR-007]] [[ADR-008]]`).
+   - `--fix` scaffolds frontmatter on `50_research/lessons/*.md` (date inferred from filename suffix; tags include `strategy/<id>` + `type/<...>`; outbound links `[[ADR-007-learner-network|ADR-007]] [[ADR-008-7-strategies-signal-generator-role|ADR-008]]`).
 2. `polaris/core/pipeline/agents/post_trade_reflector.py`:
    - `_format_lesson_markdown()` now writes Karpathy-spec frontmatter (type/status/date_created/tags/related/lesson_id).
    - P1 LLM branch unified to call shared formatter (was duplicate).
    - 8 reflector tests still pass.
 3. `vault/log.md`: 261 `ignite_p1: bootstrap` dupe lines collapsed → 1 curate-line (298 → 40 lines).
-4. `vault/_NOW.md`: broken `[[feedback_okx_region_endpoint]]` wiki-link → backtick ref.
-5. `vault/30_components/layer-1-canonical-baseline.md`: `[[3-step cold-start chain]]` → inline expansion.
+4. `vault/_NOW.md`: broken `feedback_okx_region_endpoint` wiki-link → backtick ref.
+5. `vault/30_components/layer-1-canonical-baseline.md`: `3-step cold-start chain` → inline expansion.
 6. `vault/30_components/layer-7-strategy-isolation.md`: added 7 strategy back-refs (each strategy now has 2+ inbound).
 7. `vault/10_decisions/ADR-008-...`: strategy table cells link to strategy specs.
 8. `vault/00_charter/karpathy-workflow.md`: example wikilinks wrapped in inline-code (lint-skip) + real cross-refs added.

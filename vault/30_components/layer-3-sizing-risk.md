@@ -4,7 +4,7 @@ component: layer-3-sizing-risk
 status: active
 date_created: 2026-05-06
 tags: [layer-3, sizing, risk, t4, kelly, cell-routing, cluster-cap]
-related: [[ADR-003]], [[ADR-005]], [[ADR-006]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 
@@ -82,7 +82,7 @@ cluster cap 은 `T4 제안 size 산출 후`, `order submit 전`, `open positions
 
 ## Implementation notes
 
-### File layout (impl, [[ADR-003]] file map 일치)
+### File layout (impl, [[ADR-003-8-layer-architecture|ADR-003]] file map 일치)
 ```
 polaris/core/sizing/
 ├── engine.py             # compute_proposed + headroom_min + compute_size (T4 SSOT)

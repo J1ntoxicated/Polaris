@@ -40,14 +40,14 @@ vault/
 ## regrets/ 폐기
 - `40_ops/regrets/` 디렉토리 = 보수 위장 메커니즘 (Goodhart 우려)
 - 대체: B' continuous lever_change log + D forensic on checkpoint + C winner-only ELO
-- See [[ADR-002]] §regrets-replacement
+- See [[ADR-002-vision|ADR-002]] §regrets-replacement
 
 ## Frontmatter YAML
 ```yaml
 ---
 type: ADR | strategy | component | runtime | research | charter
 status: active | superseded | abandoned
-related: [[...]]
+related: ...
 date_created: 2026-05-06
 date_updated: 2026-05-06
 tags: [...]

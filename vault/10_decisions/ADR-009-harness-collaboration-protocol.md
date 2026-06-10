@@ -5,7 +5,7 @@ aliases: [ADR-009]
 status: active
 date_created: 2026-05-28
 tags: [adr, harness, collaboration, multi-agent, orchestration]
-related: [[harness-collab-protocol]], [[ADR-003]], [[ADR-001]]
+related: [[harness-collab-protocol]], [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-001-vault-structure|ADR-001]]
 reviewed_by: codex + jin (blanket auth 2026-05-28)
 ---
 
@@ -19,11 +19,11 @@ Jin 의 multi-agent 협업 모델: 메인 Claude = orchestrator + synthesizer, �
 
 협업 모델을 3 layer 에 영속 설치 (Jin blanket auth 2026-05-28, ADR mint 포함 전부 자동 진행 승인):
 
-1. **canonical spec** — 신규 [[harness-collab-protocol]] ([[ADR-003]] 와 동급 component): agent roster · orchestration glue · handoff triggers · brain contribution 의무.
+1. **canonical spec** — 신규 [[harness-collab-protocol]] ([[ADR-003-8-layer-architecture|ADR-003]] 와 동급 component): agent roster · orchestration glue · handoff triggers · brain contribution 의무.
 2. **CLAUDE.md** — Handoff/Agent + Absolute mandates 를 XML 태그로 재구성 (critical 블록 명시화, 3사 권장).
 3. **`.claude/settings.json`** — `polaris.collaboration` 블록 (config-as-state).
 
-**Format 전략 (consumer 별)**: agent instruction = md + XML 태그 / vault = Obsidian md + `[[wikilink]]` (XML·HTML 금지, graph 보존) / config·state = JSON·SQLite / rendered report = HTML (dashboard only).
+**Format 전략 (consumer 별)**: agent instruction = md + XML 태그 / vault = Obsidian md + `wikilink` (XML·HTML 금지, graph 보존) / config·state = JSON·SQLite / rendered report = HTML (dashboard only).
 
 **Builder ≠ Reviewer**: 작성 주체 self-review 금지 (confirmation bias). 신규 작성 → codex 외부 review 의무. 본 buildout = codex 2회 통과 (builder≠reviewer 일관성 + XML 적정성 확인).
 

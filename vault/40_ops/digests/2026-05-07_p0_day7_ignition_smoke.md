@@ -4,7 +4,7 @@ status: active
 phase: P0-Day7
 date_created: 2026-05-07
 tags: [polaris, p0-sprint, day7, ignition-smoke, 24h-readiness, codex-r1-r2-r3]
-related: [[ADR-003]], [[ADR-007]], [[layer-7-strategy-isolation]], [[2026-05-07_p0_day6]], [[2026-05-07_p0_sprint_complete]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-007-learner-network|ADR-007]], [[layer-7-strategy-isolation]], [[2026-05-07_p0_day6]], [[2026-05-07_p0_sprint_complete]]
 ---
 
 # Polaris P0 Day 7 — 30-min Ignition Smoke + 24 h Readiness

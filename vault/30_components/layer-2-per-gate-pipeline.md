@@ -4,7 +4,7 @@ component: layer-2-per-gate-pipeline
 status: active
 date_created: 2026-05-06
 tags: [layer-2, pipeline, ai, langgraph, per-gate, haiku, sonnet]
-related: [[ADR-003]], [[ADR-004]], [[ADR-006]], [[ADR-007]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

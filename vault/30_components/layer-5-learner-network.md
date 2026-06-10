@@ -4,7 +4,7 @@ component: layer-5-learner-network
 status: active
 date_created: 2026-05-06
 tags: [layer-5, learner, t11, auto-tune, adaptive-learner-attack]
-related: [[ADR-003]], [[ADR-006]], [[ADR-007]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

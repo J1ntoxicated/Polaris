@@ -3,7 +3,7 @@ type: digest
 status: active
 date_created: 2026-05-30
 tags: [digest, ai-validity, forensic, p0-bugs]
-related: [[north-star]], [[_NOW]], [[ADR-004]], `project_operating_thesis_surgical_strike`
+related: [[north-star]], [[_NOW]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], `project_operating_thesis_surgical_strike`
 ---
 
 # AI 사용 타당성·정당성 감사 (Jin 명시 요청, #27)

@@ -4,13 +4,13 @@ strategy_id: volume_burst
 status: active
 date_created: 2026-05-07
 tags: [strategy, okx, spot, signal-generator, p0-day4]
-related: [[ADR-008]], [[layer-7-strategy-isolation]], [[layer-2-per-gate-pipeline]]
+related: [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[layer-7-strategy-isolation]], [[layer-2-per-gate-pipeline]]
 ---
 
 # Volume Burst — OKX SPOT 1m bar
 
 ## Role
-**Signal generator only** ([[ADR-008]]). Lifecycle = AI gate pipeline.
+**Signal generator only** ([[ADR-008-7-strategies-signal-generator-role|ADR-008]]). Lifecycle = AI gate pipeline.
 
 ## Trigger
 - ``volume_z >= 2.5``

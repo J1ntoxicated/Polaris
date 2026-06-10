@@ -31,4 +31,4 @@ vault = 이미 Obsidian vault(`.obsidian` 존재). 세션 작업 = 본 digest + 
 - 스페이스 비주얼 빌드 검증 → 띄우기 → 리뷰.
 - P2 nit: `posterior.py` slippage floor docstring 정합 / `snapshot_sections.py` ORDER BY 주석 정정.
 
-Refs: [[ADR-010]] · [[2026-05-28_5axis_audit]] · `feedback_never_kill_claude_session`
+Refs: [[ADR-010-venue-roundtrip-activation|ADR-010]] · [[2026-05-28_5axis_audit]] · `feedback_never_kill_claude_session`

@@ -3,7 +3,7 @@ type: charter
 status: active
 date_created: 2026-05-06
 tags: [charter, vision, active-autonomous]
-related: [[north-star]], [[aggressive-bias]], [[ADR-003]], [[ADR-004]]
+related: [[north-star]], [[aggressive-bias]], [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]]
 ---
 
 # Active Autonomous Evolution Vision
@@ -71,7 +71,7 @@ Default ATR×N exit floor only. AI 가 더 좋은 exit 발견 시 변경 (winner
 
 ## Cross-ref
 - [[north-star]] / [[aggressive-bias]]
-- [[ADR-003]] 8-Layer Architecture / [[ADR-004]] Per-Gate AI / [[ADR-006]] Cell Matrix / [[ADR-007]] Learner
+- [[ADR-003-8-layer-architecture|ADR-003]] 8-Layer Architecture / [[ADR-004-per-gate-ai-pipeline|ADR-004]] Per-Gate AI / [[ADR-006-cell-matrix|ADR-006]] Cell Matrix / [[ADR-007-learner-network|ADR-007]] Learner
 - T11 archive: `~/.claude/archive/polaris_memory_pre_v2_2026-05-06/handoff_unified_2026_04_21_T11_northstar_dynamic.md`
 - R4 리서치: LangGraph / TradingAgents / wen82fastik analyst→risk→executor 패턴
 - Memory: `feedback_active_autonomous_vision.md`

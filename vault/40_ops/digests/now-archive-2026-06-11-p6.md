@@ -36,7 +36,7 @@ tags: [now-archive, handover]
 - [ ] **Day 8 P0 PR (one bundle)**: A2 AllocatorFence wire / A3 supervise_strategies + record_fault wire / A5 ignite_p1 dynamic focus inject / A6 per-tick ingest_bars + persist positions/orders/risk_state
 - [ ] Day 8+ P1: A1 session×regime in T4 / A4 Layer 6 dirty sweep / A7 regime+session SSOT / A8 emitted[:3] cap removal / X1 max_hold consume / X2 idempotent order keys / X3 G6 swap → Layer 6 SSOT
 - [ ] Day 8+ P2 docs: ADR-005 Kelly clarification / sprint-complete digest test name update / `tests/test_integration_p0_pipeline.py`
-- [ ] Vault `regrets/` 폐기 confirm (B'+D+C 대체 — [[ADR-002]])
+- [ ] Vault `regrets/` 폐기 confirm (B'+D+C 대체 — [[ADR-002-vision|ADR-002]])
 - [ ] Live 진입 결정 = 별도 ADR (본 plan 책임 X, Jin 단독)
 - [x] **Vault audit P1 wave 1 (2026-05-07)**: 199→0 lint issues, vault_lint hardened, post_trade_reflector frontmatter inline, log.md 261-dupe collapse, strategy backlink density fix → digest [[2026-05-07_p1_vault_audit]]
 - [ ] Day 9+ vault backlog: 8 component spec split (≤60 line summary + impl/decisions sub-pages) / start_dashboard hook 1-min dedup / ADR-007 provenance back-fill / vault-curator agent pattern (per-Day dispatch)
@@ -44,11 +44,11 @@ tags: [now-archive, handover]
 - [x] **Day 9 24h production loop completed (2026-05-08)**: G6 GPT 27,003 / G7 GPT 20,833 / G8 GPT lessons 1,917 / live_recalc exit_now 95,778 widen 10,645 / OKX PnL +$599.43 / cell pool 201 / fence reservations 5,616. Audit: [[2026-05-08_p1_day9_24h_full_audit]] + [[2026-05-08_p1_day9_24h_audit_detail]].
 - [x] **Day 10 P0 "Capital fills 0 silent drop" — diagnosed 2026-05-26** ([[2026-05-26_p0_capital_silent_drop_diagnosis]]): audit query frame 잘못 (ts_ms 필터가 -10h drift된 ts 못 잡음 — 실제 165 capital fills 정상 persist). 진짜 P0 = `fills.ts_ms` -36000s drift (Sydney AEST naive→UTC artefact, historical only). 현재 코드는 0 drift reproduce — 다음 24h paper run 으로 확정 close.
 - [ ] **Day 10 P0 follow-up**: 다음 24h paper run 후 신규 capital fills 의 ts_ms drift verify (0 → close ; non-0 → remaining naive-ts path hunt)
-- [x] **Day 10 P1 (session×regime in T4) — done 2026-05-26**: [[ADR-005]] T4 chain 에 L5_product wire (`9d3c79d feat(L3) wire L5 learner mults`). plan: `.claude/plans/p0_l5_l3_sizing_wire.md`. 10 new tests, 609 suite pass, mypy strict + ruff clean.
+- [x] **Day 10 P1 (session×regime in T4) — done 2026-05-26**: [[ADR-005-sizing-formula-cell-routing|ADR-005]] T4 chain 에 L5_product wire (`9d3c79d feat(L3) wire L5 learner mults`). plan: `.claude/plans/p0_l5_l3_sizing_wire.md`. 10 new tests, 609 suite pass, mypy strict + ruff clean.
 - [ ] Day 10 P1 remaining: fx_breakout_basket 0 signals all-time / xau_indices_trend US100 ticker mismatch / G3 KILL ratio 73% (target 50%, Variant B v2 + cell_score evidence)
 - [ ] Day 10+ P2: F6 persist signals/orders/quote_ticks / fault_events table empty vs counter 153 reconcile / F8 ignite_p1 bootstrap dedup hook
 ## Active plan
 - Main plan v5: `/Users/jinyoon/.claude/plans/valiant-baking-sutton.md`
 - Detail spec: `/Users/jinyoon/Projects/Polaris/.claude/plans/polaris_v2_plan_final.md` (520줄, 일부 superseded)
-- 8-layer architecture: see [[ADR-003]]
-- Per-gate AI pipeline: see [[ADR-004]]
+- 8-layer architecture: see [[ADR-003-8-layer-architecture|ADR-003]]
+- Per-gate AI pipeline: see [[ADR-004-per-gate-ai-pipeline|ADR-004]]

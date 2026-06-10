@@ -5,7 +5,7 @@ aliases: [ADR-005]
 status: active
 date_created: 2026-05-06
 tags: [adr, sizing, kelly, cell-routing, risk]
-related: [[ADR-003]], [[ADR-006]], [[aggressive-bias]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-006-cell-matrix|ADR-006]], [[aggressive-bias]]
 reviewed_by: codex+jin (round 3 D2 + D4 + Jin sign-off MED/LOW)
 ---
 
@@ -80,7 +80,7 @@ venue daily risk ceiling (8%/9%) 빠른 도달 시:
 - fill-rate ≥ 70% → 가장 약한 signal_strength 부터 즉시 컷
 - 손익 무관
 
-## Cell Routing Mult ([[ADR-006]] 참조)
+## Cell Routing Mult ([[ADR-006-cell-matrix|ADR-006]] 참조)
 
 - top quartile (cell_score 상위 25%): **×1.5 amplify** (Phase 0 L4 patch — 상방 개방, hard cap 체인 보호)
 - bottom quartile (하위 25%): ×0.5 suppress
@@ -89,7 +89,7 @@ venue daily risk ceiling (8%/9%) 빠른 도달 시:
 
 `final_size = T4_size × cell_routing_mult` 후 hard MAX 절단.
 
-## ATR Stop/TP (per-strategy default, AI override 가능 — [[ADR-004]] gate 7)
+## ATR Stop/TP (per-strategy default, AI override 가능 — [[ADR-004-per-gate-ai-pipeline|ADR-004]] gate 7)
 
 | Strategy | Stop ATR | TP ATR | Window |
 |---|---|---|---|

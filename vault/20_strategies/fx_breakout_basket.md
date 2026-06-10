@@ -4,7 +4,7 @@ strategy_id: fx_breakout_basket
 status: active
 date_created: 2026-05-07
 tags: [strategy, capital, fx, signal-generator, breakout, p0-day4]
-related: [[ADR-008]], [[layer-7-strategy-isolation]]
+related: [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[layer-7-strategy-isolation]]
 ---
 
 # FX Breakout Basket — Capital CFD 1H

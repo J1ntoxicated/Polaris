@@ -4,7 +4,7 @@ status: active
 phase: P1
 date_created: 2026-05-07
 tags: [component, dashboard, observability, ui, polaris]
-related: [[ADR-003]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[2026-05-07_p1_dashboard_v1_redesign]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[2026-05-07_p1_dashboard_v1_redesign]]
 ---
 
 # Dashboard component spec — `polaris.scripts.dashboard_v1`

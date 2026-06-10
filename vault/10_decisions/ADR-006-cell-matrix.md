@@ -5,7 +5,7 @@ aliases: [ADR-006]
 status: active
 date_created: 2026-05-06
 tags: [adr, cell-matrix, t11, routing]
-related: [[ADR-003]], [[ADR-005]], [[ADR-007]], [[active-autonomous-vision]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-007-learner-network|ADR-007]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (T11 archive carryover + Jin clarification 21:30)
 ---
 
@@ -136,7 +136,7 @@ ALTER TABLE cell_matrix ADD COLUMN parent2_score REAL DEFAULT 0.0; -- 2-dim pare
 ## Phase
 - P0: 4-dim 압축, 첫 24h 활성 cell 채움
 - P1: 8-dim full, 누적 ≥1000 trades 후 expand
-- P2: cell-level ELO winner-only 증액 (max 3.0×, [[ADR-002]] C 메커니즘)
+- P2: cell-level ELO winner-only 증액 (max 3.0×, [[ADR-002-vision|ADR-002]] C 메커니즘)
 
 ## Sources
 - T11 archive: `~/.claude/archive/polaris_memory_pre_v2_2026-05-06/handoff_unified_2026_04_21_T11_*.md`

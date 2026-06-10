@@ -5,7 +5,7 @@ aliases: [ADR-010]
 status: active
 date_created: 2026-05-28
 tags: [adr, venue, roundtrip, demo, fills, p0, isolation]
-related: [[ADR-003]], [[harness-collab-protocol]], [[layer-3-sizing-risk]], [[ADR-009]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[harness-collab-protocol]], [[layer-3-sizing-risk]], [[ADR-009-harness-collaboration-protocol|ADR-009]]
 reviewed_by: codex(2-pass) + jin (blanket auth 2026-05-28)
 ---
 
@@ -30,7 +30,7 @@ open (`_production_pipeline.py`) + close (`_production_close.py`) 둘 다 simula
 
 검증: builder TDD 618 green → codex 외부 review 가 green 코드에서 실주문 안전
 P0 5건 포착 → 재수정 → codex 재review 7/7 resolved safe=yes → 627 green.
-green ≠ safe, builder≠reviewer 실증 ([[ADR-009]], [[harness-collab-protocol]]).
+green ≠ safe, builder≠reviewer 실증 ([[ADR-009-harness-collaboration-protocol|ADR-009]], [[harness-collab-protocol]]).
 
 ## Consequences
 

@@ -16,13 +16,13 @@ A1 축 = **Claude + Jin 이 함께 설계·개발하는 두뇌**. 헌장 → 결
 - [[coding-conventions]] · [[karpathy-workflow]]
 
 ## 결정 (ADR)
-- [[ADR-001]] Vault Structure · [[ADR-002]] Vision
-- [[ADR-003]] 8-Layer Architecture (척추)
-- [[ADR-004]] Per-Gate AI Pipeline · [[ADR-005]] Sizing + Cell Routing
-- [[ADR-006]] Cell Matrix · [[ADR-007]] Learner Network
-- [[ADR-008]] 7 Strategies (signal-generator role)
-- [[ADR-009]] Harness Collaboration Protocol
-- [[ADR-010]] Venue Round-Trip Activation
+- [[ADR-001-vault-structure|ADR-001]] Vault Structure · [[ADR-002-vision|ADR-002]] Vision
+- [[ADR-003-8-layer-architecture|ADR-003]] 8-Layer Architecture (척추)
+- [[ADR-004-per-gate-ai-pipeline|ADR-004]] Per-Gate AI Pipeline · [[ADR-005-sizing-formula-cell-routing|ADR-005]] Sizing + Cell Routing
+- [[ADR-006-cell-matrix|ADR-006]] Cell Matrix · [[ADR-007-learner-network|ADR-007]] Learner Network
+- [[ADR-008-7-strategies-signal-generator-role|ADR-008]] 7 Strategies (signal-generator role)
+- [[ADR-009-harness-collaboration-protocol|ADR-009]] Harness Collaboration Protocol
+- [[ADR-010-venue-roundtrip-activation|ADR-010]] Venue Round-Trip Activation
 
 ## 컴포넌트 (8-layer spec)
 - [[layer-0-universe-discovery]] · [[layer-1-canonical-baseline]]
@@ -32,11 +32,14 @@ A1 축 = **Claude + Jin 이 함께 설계·개발하는 두뇌**. 헌장 → 결
 - [[harness-collab-protocol]] — 멀티에이전트 오케스트레이션 glue
 
 ## 리서치 / 디베이트
+- [[MOC-lessons]] — 교훈 전체 인덱스 (인시던트·설계·legacy telemetry)
+- [[2026-05-06_p0_day1_codex_review]] — P0 day1 codex 외부 리뷰 (L0/L1)
 - [[ai_conductor_transition_2026-05-30]] — technical-decides + AI-conducts 전환
 - [[regime_layered_synthesis_2026-05-31]] — L1 macro / L2 asset-class / L3 ticker
 - [[p3_self_evolve_2026-06-01]] — self-evolve 설계
 - [[conductor_g3g4_cutover_2026-05-31]] — G3/G4 deterministic 컷오버
 - [[2026-05-29_venue_asset_class_differentiation]] · [[2026-05-29_profit_structure_backlog]]
+- [[venue_integration_unblock_2026-05-29]] — venue-reject 마비 해소 5-결정 codex R1 디베이트 (no-fault reject / compliance blocklist)
 - [[capital-pnl-cross-instrument-match_2026-06-04]] — Capital PnL 10^5x = entry-fill cross-instrument match 교훈
 - [[zombie_close_session_gate_wrong_predicate_2026-06-04]] — 세션게이트 predicate 혼동 + builder self-review bias 교훈
 

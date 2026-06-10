@@ -3,7 +3,7 @@ type: digest
 status: active
 date_created: 2026-05-07
 tags: [polaris, p0-sprint, day6, codex-review, 4-axis]
-related: [[ADR-003]], [[ADR-004]], [[ADR-007]], [[layer-2-per-gate-pipeline]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-007-learner-network|ADR-007]], [[layer-2-per-gate-pipeline]]
 ---
 
 # Polaris P0 Day 6 — 4-axis review (codex external)

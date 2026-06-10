@@ -4,7 +4,7 @@ status: active
 date_created: 2026-05-06
 date_updated: 2026-05-30
 tags: [charter, north-star]
-related: [[aggressive-bias]], [[active-autonomous-vision]], [[ADR-002]]
+related: [[aggressive-bias]], [[active-autonomous-vision]], [[ADR-002-vision|ADR-002]]
 ---
 
 # 북극성 — Polaris North Star
@@ -46,6 +46,6 @@ related: [[aggressive-bias]], [[active-autonomous-vision]], [[ADR-002]]
 - Posture standard / defensive
 
 ## Key decisions (cross-ref)
-- [[ADR-001]] Vault Structure / [[ADR-002]] Vision / [[ADR-003]] 8-Layer Architecture
-- [[ADR-004]] Per-Gate AI Pipeline / [[ADR-005]] Sizing + Cell Routing
-- [[ADR-006]] Cell Matrix / [[ADR-007]] Learner Network / [[ADR-008]] 7 Strategies
+- [[ADR-001-vault-structure|ADR-001]] Vault Structure / [[ADR-002-vision|ADR-002]] Vision / [[ADR-003-8-layer-architecture|ADR-003]] 8-Layer Architecture
+- [[ADR-004-per-gate-ai-pipeline|ADR-004]] Per-Gate AI Pipeline / [[ADR-005-sizing-formula-cell-routing|ADR-005]] Sizing + Cell Routing
+- [[ADR-006-cell-matrix|ADR-006]] Cell Matrix / [[ADR-007-learner-network|ADR-007]] Learner Network / [[ADR-008-7-strategies-signal-generator-role|ADR-008]] 7 Strategies

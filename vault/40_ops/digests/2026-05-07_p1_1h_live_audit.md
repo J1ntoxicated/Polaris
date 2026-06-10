@@ -3,7 +3,7 @@ type: runtime
 status: active
 date_created: 2026-05-07
 tags: [digest, p1, live-audit, ignite-p1]
-related: [[ADR-002]], [[layer-2-per-gate-pipeline]], [[2026-05-07_p1_functional_review]]
+related: [[ADR-002-vision|ADR-002]], [[layer-2-per-gate-pipeline]], [[2026-05-07_p1_functional_review]]
 ---
 
 # P1 24h Paper Loop — 1h Live Audit

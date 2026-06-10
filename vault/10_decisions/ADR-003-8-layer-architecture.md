@@ -5,7 +5,7 @@ aliases: [ADR-003]
 status: active
 date_created: 2026-05-06
 tags: [adr, architecture, 8-layer]
-related: [[active-autonomous-vision]], [[ADR-004]], [[ADR-005]], [[ADR-006]], [[ADR-007]], [[ADR-008]]
+related: [[active-autonomous-vision]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 reviewed_by: codex+jin (round 2 T2 + round 3 D1 isolation + Jin clarification)
 ---
 
@@ -36,7 +36,7 @@ Polaris architecture = **8 layers** (Common Core 5 + Strategy 1 + Isolation 1 + 
 **파일**: `polaris/core/data/{canonical.py, baseline.py, normalize.py}`
 
 ### Layer 2 — Per-Gate AI Agent Pipeline (LangGraph-style)
-See [[ADR-004]] for full spec.
+See [[ADR-004-per-gate-ai-pipeline|ADR-004]] for full spec.
 
 ```
 Universe Scanner [Haiku] → Strategy Signal Gen [Python] → 
@@ -48,7 +48,7 @@ Adaptive Exit [Sonnet/Python P0] → Post-Trade Reflector [Sonnet/Python templat
 **파일**: `polaris/core/pipeline/{gate_orchestrator.py, gate_state.py, agents/*.py}`
 
 ### Layer 3 — Sizing + Risk Engine
-See [[ADR-005]] for full spec.
+See [[ADR-005-sizing-formula-cell-routing|ADR-005]] for full spec.
 
 ```
 notional = base × continuous_scalar(0.75-1.5×) × tier_amplifier(1.5/2/3×) × cell_routing_mult
@@ -59,12 +59,12 @@ final    = clipped × leverage(venue)
 **파일**: `polaris/core/sizing/{engine.py, kelly.py, amplifier.py, cluster_cap.py}`
 
 ### Layer 4 — Cell Matrix
-See [[ADR-006]] for full spec. P0 = 4-dim 압축, P1 = 8-dim full.
+See [[ADR-006-cell-matrix|ADR-006]] for full spec. P0 = 4-dim 압축, P1 = 8-dim full.
 
 **파일**: `polaris/core/cell_matrix/{schema.py, score.py, routing.py}`
 
 ### Layer 5 — Learner Network 7
-See [[ADR-007]] for full spec. 6 T11 + 1 AI feedback. Hourly auto-tune.
+See [[ADR-007-learner-network|ADR-007]] for full spec. 6 T11 + 1 AI feedback. Hourly auto-tune.
 
 **파일**: `polaris/core/learners/{base.py, session.py, regime.py, max_hold.py, profit_target.py, trail.py, bep.py, ai_feedback.py}`
 

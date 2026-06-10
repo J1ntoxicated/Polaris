@@ -3,7 +3,7 @@ type: runtime
 status: active
 date_created: 2026-05-07
 tags: [digest, p1, 1h-audit, real-gpt, day8]
-related: [[ADR-002]], [[active-autonomous-vision]], [[layer-2-per-gate-pipeline]]
+related: [[ADR-002-vision|ADR-002]], [[active-autonomous-vision]], [[layer-2-per-gate-pipeline]]
 ---
 
 # 1H Live Audit — Production Paper Loop (PID 9417, real GPT)

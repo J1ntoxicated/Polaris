@@ -7,7 +7,7 @@ participants: [claude-opus-4-7, codex-gpt-5-4]
 rounds: 1
 verdict_initial: REJECT
 verdict_after_fix: PENDING
-related: [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]], [[ADR-003]]
+related: [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]], [[ADR-003-8-layer-architecture|ADR-003]]
 tags: [debate, codex, p0, layer-0, layer-1, code-review]
 ---
 

@@ -5,7 +5,7 @@ phase: P0
 day: 5
 date_created: 2026-05-07
 tags: [digest, p0, day-5, 4-axis-review, codex, venues, fill-normalizer, dashboard]
-related: [[ADR-003]], [[layer-0-universe-discovery]], [[2026-05-07_p0_day5]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[layer-0-universe-discovery]], [[2026-05-07_p0_day5]]
 reviewed_by: codex (gpt-5.4) R1-R4
 ---
 

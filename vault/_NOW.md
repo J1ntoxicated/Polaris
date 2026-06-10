@@ -37,9 +37,9 @@ tags: [now, tier-0]
 <!-- AUTO-START -->
 - Latest daily: (none yet)
 - Open incidents: 0
-- Recent ADRs (last 7d): [[ADR-001]] [[ADR-002]] [[ADR-003]] [[ADR-004]] [[ADR-005]] [[ADR-006]] [[ADR-007]] [[ADR-008]]
+- Recent ADRs (last 7d): [[ADR-001-vault-structure|ADR-001]] [[ADR-002-vision|ADR-002]] [[ADR-003-8-layer-architecture|ADR-003]] [[ADR-004-per-gate-ai-pipeline|ADR-004]] [[ADR-005-sizing-formula-cell-routing|ADR-005]] [[ADR-006-cell-matrix|ADR-006]] [[ADR-007-learner-network|ADR-007]] [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 - Top touched (7d): vault/10_decisions, .claude/agents, .claude/skills, .claude/hooks, tools/vault_lint.py
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-10 15:19 (paper=False, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-10 15:46 (paper=True, full_pipeline=True)

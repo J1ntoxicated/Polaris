@@ -4,7 +4,7 @@ component: layer-6-live-recalc
 status: active
 date_created: 2026-05-06
 tags: [layer-6, live-recalc, regime-flip, strategy-swap, conviction-stacking, adaptive-exit]
-related: [[ADR-003]], [[ADR-006]], [[layer-2-per-gate-pipeline]], [[layer-3-sizing-risk]], [[layer-4-cell-matrix]], [[layer-1-canonical-baseline]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-006-cell-matrix|ADR-006]], [[layer-2-per-gate-pipeline]], [[layer-3-sizing-risk]], [[layer-4-cell-matrix]], [[layer-1-canonical-baseline]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

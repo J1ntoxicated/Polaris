@@ -5,7 +5,7 @@ phase: P0
 day: 4
 date_created: 2026-05-07
 tags: [digest, p0, day-4, 4-axis-review, codex, layer-5, layer-6, strategies]
-related: [[layer-5-learner-network]], [[layer-6-live-recalc]], [[ADR-007]], [[ADR-008]], [[2026-05-07_p0_day4]]
+related: [[layer-5-learner-network]], [[layer-6-live-recalc]], [[ADR-007-learner-network|ADR-007]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[2026-05-07_p0_day4]]
 reviewed_by: codex (gpt-5.4) R1-R6
 ---
 

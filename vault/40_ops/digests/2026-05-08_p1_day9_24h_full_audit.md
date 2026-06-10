@@ -3,7 +3,7 @@ type: runtime
 status: active
 date_created: 2026-05-08
 tags: [digest, p1, day9, 24h-audit, post-quad-bundle]
-related: [[ADR-002]], [[active-autonomous-vision]], [[layer-2-per-gate-pipeline]], [[layer-6-live-recalc]]
+related: [[ADR-002-vision|ADR-002]], [[active-autonomous-vision]], [[layer-2-per-gate-pipeline]], [[layer-6-live-recalc]]
 ---
 
 # Day 9 24h Production — Full Audit Summary

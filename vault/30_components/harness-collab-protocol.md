@@ -5,7 +5,7 @@ status: active
 date_created: 2026-05-28
 date_updated: 2026-06-11
 tags: [harness, collaboration, multi-agent, orchestration, builder-not-reviewer, workflow, loop]
-related: [[ADR-001]], [[ADR-003]]
+related: [[ADR-001-vault-structure|ADR-001]], [[ADR-003-8-layer-architecture|ADR-003]]
 ---
 
 # Harness Collaboration Protocol (Fable 구조)

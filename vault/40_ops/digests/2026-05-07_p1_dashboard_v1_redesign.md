@@ -5,7 +5,7 @@ phase: P1
 day: dashboard
 date_created: 2026-05-07
 tags: [digest, p1, dashboard, observability, ui, codex-review, trader-grade]
-related: [[dashboard]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[ADR-003]], `feedback_dashboard_periodic_review`
+related: [[dashboard]], [[layer-2-per-gate-pipeline]], [[layer-4-cell-matrix]], [[layer-5-learner-network]], [[ADR-003-8-layer-architecture|ADR-003]], `feedback_dashboard_periodic_review`
 ---
 
 # P1 dashboard_v1 — trader-grade 220×55 redesign (10 panels)
@@ -136,7 +136,7 @@ Actionable for Day 8 P0 wiring fixes (A2 AllocatorFence + A6 ingest persistence)
 
 ## Related
 
-- [[ADR-003]] §Unified Schema — `fills.contribution_id` is the position link key
+- [[ADR-003-8-layer-architecture|ADR-003]] §Unified Schema — `fills.contribution_id` is the position link key
 - [[layer-4-cell-matrix]] — top×1.5 / mid×1.0 / bottom×0.5 quartile mult logic
 - [[layer-5-learner-network]] — 3 P0 learners (session_mult / regime_mult / max_hold)
 - `feedback_dashboard_periodic_review` (memory) — 코드 변경마다 dashboard 영향 review 의무

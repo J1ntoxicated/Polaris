@@ -4,7 +4,7 @@ strategy_id: tsmom
 status: active
 date_created: 2026-05-07
 tags: [strategy, okx, spot, signal-generator, p0-day4, momentum]
-related: [[ADR-008]], [[layer-7-strategy-isolation]]
+related: [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[layer-7-strategy-isolation]]
 ---
 
 # TSMOM 20-bar — OKX SPOT 1H rebalance

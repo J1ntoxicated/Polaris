@@ -3,7 +3,7 @@ type: digest
 status: active
 date_created: 2026-05-07
 tags: [digest, audit, p1, day8, vision-vs-impl]
-related: [[_NOW]], [[active-autonomous-vision]], [[aggressive-bias]], [[ADR-003]], [[ADR-004]], [[ADR-005]], [[ADR-006]], [[ADR-008]]
+related: [[_NOW]], [[active-autonomous-vision]], [[aggressive-bias]], [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]]
 ---
 
 # Polaris v2 — 전수 Audit (Vision vs Implementation, Day 8 P1)
@@ -172,7 +172,7 @@ ADR patches 적용:
 ## Cross-ref
 
 - [[active-autonomous-vision]] §2 §5 §7 / [[aggressive-bias]] / [[north-star]]
-- [[ADR-003]] 8-layer / [[ADR-004]] per-gate AI / [[ADR-005]] sizing / [[ADR-006]] cell matrix / [[ADR-007]] learner / [[ADR-008]] strategies signal-only
+- [[ADR-003-8-layer-architecture|ADR-003]] 8-layer / [[ADR-004-per-gate-ai-pipeline|ADR-004]] per-gate AI / [[ADR-005-sizing-formula-cell-routing|ADR-005]] sizing / [[ADR-006-cell-matrix|ADR-006]] cell matrix / [[ADR-007-learner-network|ADR-007]] learner / [[ADR-008-7-strategies-signal-generator-role|ADR-008]] strategies signal-only
 - [[2026-05-07_p1_day8_production_loop]] / [[2026-05-07_p1_g3_prompt_mockup_fix]] / [[2026-05-07_p1_dashboard_v1_redesign]] / [[2026-05-07_p1_haiku_to_gpt_migration]]
 - production_paper_loop.py:391-419 (G6/G7 entry-only invocation)
 - position_monitor.py:50-99 (model_used="python")

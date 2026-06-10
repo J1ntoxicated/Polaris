@@ -19,12 +19,12 @@ Vault = **세컨브레인 버스(bus)**. RAG 처럼 가운데 앉아 세 축을 
 ## Tier-0 진입점 (mandatory first read)
 - [[_NOW]] — 라이브 상태 (Tier 0, 세션 시작 필독)
 - [[north-star]] — 0.75% primary / 1.25% stretch / aggressive bias
-- [[ADR-003]] — 8-Layer Architecture (아키텍처 척추)
+- [[ADR-003-8-layer-architecture|ADR-003]] — 8-Layer Architecture (아키텍처 척추)
 - [[log]] — chronological 1-line append (NO interpretation)
 
 ## 폴더 지도
 - `00_charter/` 헌장 · `10_decisions/` ADR-001..010 · `30_components/` layer-0..7 → **A1**
-- `20_strategies/` 7전략 · `40_ops/` digests·daily·handover · `30_components/dashboard` → **A2**
+- `20_strategies/` 7전략 · `40_ops/` digests·daily·handover ([[MOC-digests]]) · `30_components/dashboard` → **A2**
 - `data/polaris*.sqlite` (vault 밖) + `data/lessons_archive/` → **A3**
-- `50_research/` debates·forensic·lessons → A1 리서치
-- `.templates/` ADR·INSIGHT·STRATEGY·COMPONENT·LESSON · `.tag_taxonomy` 태그
+- `50_research/` debates·forensic·lessons ([[MOC-lessons]]) → A1 리서치
+- `.templates/` ADR·INSIGHT·STRATEGY·COMPONENT·LESSON · [[.tag_taxonomy]] 태그

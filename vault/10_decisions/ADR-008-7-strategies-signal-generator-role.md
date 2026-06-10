@@ -5,7 +5,7 @@ aliases: [ADR-008]
 status: active
 date_created: 2026-05-06
 tags: [adr, strategies, signal-generator]
-related: [[ADR-003]], [[ADR-004]], [[ADR-005]], [[active-autonomous-vision]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (round 3 D1 + Jin clarification 21:30)
 ---
 
@@ -13,7 +13,7 @@ reviewed_by: codex+jin (round 3 D1 + Jin clarification 21:30)
 
 ## Decision
 
-7 P1 strategies 동시 활성 (P1.0 day 1). 각 strategy 역할 = **`generate_raw_signal(market_view) → RawSignal | None` 만**. Lifecycle 결정 (entry/exit/swap) = AI gate ([[ADR-004]]).
+7 P1 strategies 동시 활성 (P1.0 day 1). 각 strategy 역할 = **`generate_raw_signal(market_view) → RawSignal | None` 만**. Lifecycle 결정 (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]).
 
 ## Role Redefinition
 
@@ -33,7 +33,7 @@ class Strategy(ABC):
     def generate_raw_signal(market_view: MarketView) -> RawSignal | None: ...
 ```
 
-Lifecycle = [[ADR-004]] 8 gate. Strategy 는 signal 만 emit, 나머지는 AI 가 결정.
+Lifecycle = [[ADR-004-per-gate-ai-pipeline|ADR-004]] 8 gate. Strategy 는 signal 만 emit, 나머지는 AI 가 결정.
 
 ## 7 Strategies
 
@@ -119,7 +119,7 @@ polaris/strategies/
 
 ## P1.0 Day 1 동시 활성
 
-7 strategy 모두 day 1 동시 활성 ([[ADR-003]] Layer 7 isolation 보장):
+7 strategy 모두 day 1 동시 활성 ([[ADR-003-8-layer-architecture|ADR-003]] Layer 7 isolation 보장):
 - Per-strategy worker (Layer 7 mechanism 1)
 - Per-strategy circuit breaker (mechanism 4)
 - Idempotent order keys (mechanism 6)
@@ -128,14 +128,14 @@ polaris/strategies/
 ## Anti-pattern (재발 방지)
 - 4-method lifecycle → signal generator only
 - Strategy 가 sizing 결정 → Layer 3 sizing engine 만 (AI Entry Sizer 결정)
-- Strategy 가 exit 결정 → Layer 6 Adaptive Exit AI ([[ADR-004]] gate 7)
+- Strategy 가 exit 결정 → Layer 6 Adaptive Exit AI ([[ADR-004-per-gate-ai-pipeline|ADR-004]] gate 7)
 - 정적 ATR exit → Adaptive Exit override 가능 (winner 길게)
 
 ## Phase
 - P0: 7 strategy raw signal generator + Volume Burst single-ticker smoke
 - P1.0 day 1: 7 동시 활성 + 24h watchdog
-- P1.1: 자연 운영, lever 변경 = [[ADR-002]] §1 trigger 충족 시
-- P2: ELO winner-only sizing 증액 ([[ADR-002]] C 메커니즘)
+- P1.1: 자연 운영, lever 변경 = [[ADR-002-vision|ADR-002]] §1 trigger 충족 시
+- P2: ELO winner-only sizing 증액 ([[ADR-002-vision|ADR-002]] C 메커니즘)
 
 ## Sources
 - Round 3 D1 (7 strategy 동시, isolation)

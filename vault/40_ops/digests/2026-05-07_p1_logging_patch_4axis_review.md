@@ -3,7 +3,7 @@ type: digest
 status: active
 date_created: 2026-05-07
 tags: [polaris, p1-sprint, logging, codex-review, 4-axis, security]
-related: [[ADR-003]], [[ADR-004]], [[layer-2-per-gate-pipeline]], `gate_orchestrator`, `setup_polaris_logging`, [[aggressive-bias]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[layer-2-per-gate-pipeline]], `gate_orchestrator`, `setup_polaris_logging`, [[aggressive-bias]]
 ---
 
 # Polaris P1 verbose-logging patch — 4-axis review (외부 codex)

@@ -3,7 +3,7 @@ type: ops
 status: active
 date_created: 2026-05-07
 tags: [digest, day9, p0, f1, f2, g6, g7, g8, live-recalc, gpt-wire, per-gate-ai]
-related: [[ADR-004]], [[layer-2-per-gate-pipeline]], [[layer-6-live-recalc]], [[2026-05-07_p1_full_audit]]
+related: [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[layer-2-per-gate-pipeline]], [[layer-6-live-recalc]], [[2026-05-07_p1_full_audit]]
 ---
 
 # Day 9 F1+F2 — G6/G7/G8 GPT Decision Wire + Live Recalc Loop

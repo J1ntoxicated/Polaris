@@ -4,7 +4,7 @@ component: layer-7-strategy-isolation
 status: active
 date_created: 2026-05-06
 tags: [layer-7, isolation, circuit-breaker, allocator-fence, idempotent-orders]
-related: [[ADR-003]], [[ADR-005]], [[ADR-008]], [[layer-3-sizing-risk]], [[layer-5-learner-network]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-008-7-strategies-signal-generator-role|ADR-008]], [[layer-3-sizing-risk]], [[layer-5-learner-network]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

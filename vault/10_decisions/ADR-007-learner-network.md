@@ -5,7 +5,7 @@ aliases: [ADR-007]
 status: active
 date_created: 2026-05-06
 tags: [adr, learner, t11, auto-tune]
-related: [[ADR-003]], [[ADR-004]], [[ADR-006]], [[aggressive-bias]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-006-cell-matrix|ADR-006]], [[aggressive-bias]]
 reviewed_by: codex+jin (T11 archive carryover + adaptive_learner_attack 영속 원칙)
 ---
 
@@ -109,7 +109,7 @@ strategy weight × cell routing → next cycle sizing
 - P2: meta-learner (learner of learners, hyperparam tune)
 
 ## Status (2026-05-26)
-- session_mult / regime_mult / triple_block: **wired into T4 sizing** via `polaris.core.sizing.engine.compute_size` ([[ADR-005]] T4 chain + [[layer-3-sizing-risk]] Q1). 이전: spec-only (`resolve_final_size_mult` 호출자 0). 현재: production caller live, fallback NEUTRAL 1.0 (sparse/disabled/no row).
+- session_mult / regime_mult / triple_block: **wired into T4 sizing** via `polaris.core.sizing.engine.compute_size` ([[ADR-005-sizing-formula-cell-routing|ADR-005]] T4 chain + [[layer-3-sizing-risk]] Q1). 이전: spec-only (`resolve_final_size_mult` 호출자 0). 현재: production caller live, fallback NEUTRAL 1.0 (sparse/disabled/no row).
 - max_hold: P0 learner active, sizing 비관여 (exit/G7 path).
 - ai_feedback: P1 stub 유지.
 

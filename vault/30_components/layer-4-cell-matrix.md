@@ -4,7 +4,7 @@ component: layer-4-cell-matrix
 status: active
 date_created: 2026-05-06
 tags: [layer-4, cell-matrix, t11, routing, quartile, ewma]
-related: [[ADR-003]], [[ADR-005]], [[ADR-006]], [[layer-3-sizing-risk]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[layer-3-sizing-risk]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

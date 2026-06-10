@@ -14,7 +14,7 @@ tags: [lesson, gpt, silent-degradation, observability, gates]
 ## 왜 안 잡혔나
 - 폴백이 거래를 막지 않음(AGGRESSIVE) → 손실/halt 신호 없음.
 - 2026-05-07 검증 당시엔 `minimal` 지원됐으나 OpenAI가 gpt-5.5 에서 제거(모델 업데이트로 계약 drift).
-- **green ≠ working**: 테스트는 폴백 경로를 통과시켜 green, 실제 GPT 경로는 죽어 있었음. [[ADR-010]] (green≠safe) 의 런타임 버전.
+- **green ≠ working**: 테스트는 폴백 경로를 통과시켜 green, 실제 GPT 경로는 죽어 있었음. [[ADR-010-venue-roundtrip-activation|ADR-010]] (green≠safe) 의 런타임 버전.
 
 ## 어떻게 적용
 - 모델 family 별 `reasoning_effort` 분기 (`_resolve_reasoning_effort`): gpt-5.5 → minimal=none, gpt-5-mini → minimal 유지. commit `943874d`.

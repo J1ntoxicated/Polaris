@@ -4,7 +4,7 @@ component: layer-0-universe-discovery
 status: active
 date_created: 2026-05-06
 tags: [layer-0, universe, dynamic, discovery]
-related: [[ADR-003]], [[ADR-004]], [[ADR-005]], [[ADR-006]], [[active-autonomous-vision]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 

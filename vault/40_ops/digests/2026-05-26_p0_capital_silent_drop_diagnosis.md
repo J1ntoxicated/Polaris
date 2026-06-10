@@ -1,6 +1,8 @@
 ---
 type: digest
+status: active
 date: 2026-05-26
+date_created: 2026-05-26
 related: [[2026-05-08_p1_day9_24h_audit_detail]], [[layer-1-canonical-baseline]]
 tags: [diagnosis, capital, fills, silent-drop, p0, debunk]
 ---

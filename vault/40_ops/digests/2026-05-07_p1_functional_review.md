@@ -176,8 +176,8 @@ current path.
 
 ## Vault hooks
 
-- `[[functional_review]]` (new tag) — link from layer specs after fixes
+- `functional_review` (new tag) — link from layer specs after fixes
   land.
-- `[[ignite_p1_smoke_gap]]` (new lesson tag) — capture the
+- `ignite_p1_smoke_gap` (new lesson tag) — capture the
   smoke-vs-production caller divergence so future sessions don't mistake
   smoke output for production behavior.

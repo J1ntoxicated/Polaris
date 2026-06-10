@@ -900,3 +900,191 @@ async def test_pipeline_threads_shared_okx_adapter(
         real_roundtrip=True, okx_adapter=sentinel,
     )
     assert captured.get("okx_adapter") is sentinel
+
+
+# ===========================================================================
+# Capital open leg — D-1 honest propagation + B1 confirm-poll exception guard
+# + B2 confirm-stall honest label. Adapters are FAKES; no venue network.
+# ===========================================================================
+
+
+def _cap_deal_resp(
+    *, ok: bool, status: str, deal_ref: str | None = None,
+    reason: str = "", http_status: int = 200,
+) -> Any:
+    from polaris.venues.capital.adapter import CapitalDealResponse
+
+    return CapitalDealResponse(
+        ok=ok, deal_reference=deal_ref, deal_id=None, status=status,
+        reason=reason, raw={}, http_status=http_status,
+    )
+
+
+_CAP_CONFIRM_ACCEPTED: dict[str, Any] = {
+    "epic": "EURUSD", "direction": "BUY", "level": 1.105, "size": 1.0,
+    "dealStatus": "ACCEPTED", "status": "OPEN", "dealId": "deal_top",
+    "affectedDeals": [{"dealId": "deal_pos_1", "status": "OPENED"}],
+    "date": "2026-05-28T00:00:00Z",
+}
+
+
+class _ScriptedCapAdapter:
+    """Fake CapitalAdapter: scripted open response + per-poll confirm script
+    (a dict is returned; an Exception instance is raised). The last script
+    entry repeats once the script is exhausted."""
+
+    def __init__(self, open_resp: Any, confirms: list[Any]) -> None:
+        self._open_resp = open_resp
+        self._confirms = list(confirms)
+        self.confirm_calls = 0
+
+    async def open_position(self, **_kwargs: Any) -> Any:
+        return self._open_resp
+
+    async def confirm(self, _ref: str) -> dict[str, Any]:
+        self.confirm_calls += 1
+        item = self._confirms.pop(0) if len(self._confirms) > 1 else self._confirms[0]
+        if isinstance(item, Exception):
+            raise item
+        return dict(item)
+
+
+@pytest.mark.asyncio
+async def test_real_capital_open_fill_http_error_reject_code() -> None:
+    """D-1 propagation: an adapter HTTP error surfaces its honest label as the
+    OpenAttempt.reject_code — never the fake 'PENDING'."""
+    from polaris.scripts._smoke_roundtrip_capital import real_capital_open_fill
+
+    adapter = _ScriptedCapAdapter(
+        _cap_deal_resp(
+            ok=False, status="HTTP_429",
+            reason="error.too-many.requests", http_status=429,
+        ),
+        confirms=[{}],
+    )
+    attempt = await real_capital_open_fill(
+        adapter, epic="EURUSD", direction="BUY", size=1.0,
+        strategy_id="fx_breakout_basket", poll_delay_sec=0.0,
+    )
+    assert attempt.fill is None
+    assert attempt.reject_code == "HTTP_429"
+    assert attempt.reject_code != "PENDING"
+    assert adapter.confirm_calls == 0  # no confirm poll on an open reject
+
+
+@pytest.mark.asyncio
+async def test_capital_confirm_stall_pending_honest_label() -> None:
+    """B2: a confirm that stays PENDING for the whole poll budget is a venue
+    stall — distinct honest label CONFIRM_STALL_PENDING (external), never the
+    extinct 'PENDING' mislabel."""
+    from polaris.scripts._smoke_roundtrip_capital import real_capital_open_fill
+
+    adapter = _ScriptedCapAdapter(
+        _cap_deal_resp(ok=True, status="PENDING", deal_ref="REF1"),
+        confirms=[{"dealStatus": "PENDING"}],
+    )
+    attempt = await real_capital_open_fill(
+        adapter, epic="EURUSD", direction="BUY", size=1.0,
+        strategy_id="fx_breakout_basket", poll_delay_sec=0.0,
+    )
+    assert attempt.fill is None
+    assert attempt.reject_code == "CONFIRM_STALL_PENDING"
+
+
+@pytest.mark.asyncio
+async def test_capital_open_confirm_httpx_error_never_raises() -> None:
+    """B1: an open-leg confirm poll that fails at the HTTP layer (429 storm /
+    timeout) must NOT escape to the FAULT_EXCEPTION backstop (3/300s →
+    HARD_HALT) — it polls within budget and returns the honest HTTP_CONFIRM."""
+    import httpx
+
+    from polaris.scripts._smoke_roundtrip_capital import real_capital_open_fill
+
+    adapter = _ScriptedCapAdapter(
+        _cap_deal_resp(ok=True, status="PENDING", deal_ref="REF1"),
+        confirms=[httpx.ReadTimeout("slow confirm")],
+    )
+    attempt = await real_capital_open_fill(
+        adapter, epic="EURUSD", direction="BUY", size=1.0,
+        strategy_id="fx_breakout_basket", poll_delay_sec=0.0,
+    )
+    assert attempt.fill is None
+    assert attempt.reject_code == "HTTP_CONFIRM"
+
+
+@pytest.mark.asyncio
+async def test_capital_open_confirm_recovers_after_transient_error() -> None:
+    """A transient confirm failure followed by ACCEPTED still fills — the
+    B1 guard keeps polling instead of aborting on the first error."""
+    import httpx
+
+    from polaris.scripts._smoke_roundtrip_capital import real_capital_open_fill
+
+    adapter = _ScriptedCapAdapter(
+        _cap_deal_resp(ok=True, status="PENDING", deal_ref="REF1"),
+        confirms=[httpx.ReadTimeout("blip"), _CAP_CONFIRM_ACCEPTED],
+    )
+    attempt = await real_capital_open_fill(
+        adapter, epic="EURUSD", direction="BUY", size=1.0,
+        strategy_id="fx_breakout_basket", poll_delay_sec=0.0,
+    )
+    assert attempt.fill is not None
+    assert attempt.deal_id == "deal_pos_1"
+    assert attempt.reject_code is None
+
+
+@pytest.mark.asyncio
+async def test_capital_confirm_timeout_no_fault_e2e(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 e2e: a confirm-leg timeout through reserve_and_submit must release
+    the reservation with NO fault (was: FAULT_EXCEPTION x40 live, 39 with the
+    empty-str timeout signature) and leave the breaker ACTIVE."""
+    import httpx
+
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.core.isolation.circuit_breaker import ACTIVE, current_strategy_mode
+    from polaris.scripts import _production_pipeline as pipe_mod
+
+    reset_process_fence()
+    monkeypatch.setattr(
+        "polaris.scripts._smoke_roundtrip_capital._CONFIRM_POLLS", 1
+    )
+
+    class _FakeCapAdapter:
+        def __init__(self, _session: Any) -> None: ...
+
+        async def open_position(self, **_kwargs: Any) -> Any:
+            return _cap_deal_resp(ok=True, status="PENDING", deal_ref="REF_T")
+
+        async def confirm(self, _ref: str) -> dict[str, Any]:
+            raise httpx.ReadTimeout("confirm timeout")
+
+    monkeypatch.setattr(pipe_mod, "CapitalAdapter", _FakeCapAdapter)
+    state = ProdLoopState()
+    sig = RawSignal(
+        signal_id="cap_to", strategy_id="fx_breakout_basket", symbol="EURUSD",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="fx_intraday",
+    )
+    now = int(time.time())
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=sig, venue="capital", symbol="EURUSD",
+        asset_class="forex", underlying_group_id="forex:EURUSD",
+        notional_usd=100.0, last_price=1.105, now_ts=now,
+        real_roundtrip=True, capital_session=AsyncMock(),
+    )
+    assert trade is None
+    # NO fault of any kind — venue/transport event, flow preserved.
+    assert state.fault_events == 0
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events"
+    ).fetchone()[0]
+    assert int(fault) == 0
+    assert state.venue_rejects_by_code.get("HTTP_CONFIRM") == 1
+    assert current_strategy_mode(memdb, "fx_breakout_basket", now_ts=now + 10) == ACTIVE
+    # Reservation released (not confirmed, not leaked).
+    res = memdb.execute(
+        "SELECT status FROM allocator_reservations WHERE strategy_id='fx_breakout_basket'"
+    ).fetchone()
+    assert res is None or res[0] != "confirmed"

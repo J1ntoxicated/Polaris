@@ -556,3 +556,95 @@ async def test_alpaca_equity_signal_flows_through_reserve_and_submit_to_mock_fil
         "SELECT COUNT(*) FROM positions WHERE venue='alpaca' AND symbol='AAPL'"
     ).fetchone()[0]
     assert int(pos) == 1
+
+
+# ---------------------------------------------------------------------------
+# Part E — Capital HTTP-protocol failures (D-2). The D-1 honest labels
+# (HTTP_429/HTTP_5xx/HTTP_TIMEOUT/HTTP_TRANSPORT/HTTP_CONFIRM) and the
+# confirm-poll stall (CONFIRM_STALL_PENDING) are venue/transport events —
+# the signal already passed G1-G7 + sizing, so they must NOT fault the
+# strategy (integrity-only circuit philosophy). Capital-gated: OKX/Alpaca
+# classification is untouched.
+# ---------------------------------------------------------------------------
+
+
+def _fx_sig(signal_id: str = "fx_sig") -> RawSignal:
+    return RawSignal(
+        signal_id=signal_id, strategy_id="fx_breakout_basket", symbol="EURUSD",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="fx_intraday",
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "HTTP_429", "HTTP_500", "HTTP_TIMEOUT", "HTTP_TRANSPORT",
+        "HTTP_CONFIRM", "CONFIRM_STALL_PENDING",
+    ],
+)
+@pytest.mark.asyncio
+async def test_capital_http_reject_is_external_no_fault(
+    memdb: sqlite3.Connection, code: str
+) -> None:
+    from polaris.scripts._production_reject import _handle_open_reject
+
+    state = ProdLoopState()
+    fence = AsyncMock()
+    await _handle_open_reject(
+        memdb, fence=fence, state=state, sig=_fx_sig(f"e_{code}"),
+        venue="capital", symbol="EURUSD", reservation_id="res1",
+        reject_code=code, reject_msg="venue error", now_ts=int(time.time()),
+    )
+    fence.release_reservation.assert_awaited_once()
+    assert state.fault_events == 0
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events"
+    ).fetchone()[0]
+    assert int(fault) == 0
+    assert state.venue_rejects_by_code.get(code) == 1
+
+
+@pytest.mark.asyncio
+async def test_three_capital_http_rejects_keep_breaker_active(
+    memdb: sqlite3.Connection,
+) -> None:
+    """600s 내 HTTP_429 3건 — the exact live incident shape (fx_breakout_basket
+    SOFT_HALT x9) must now leave the breaker ACTIVE."""
+    from polaris.scripts._production_reject import _handle_open_reject
+
+    state = ProdLoopState()
+    fence = AsyncMock()
+    now = int(time.time())
+    for i in range(3):
+        await _handle_open_reject(
+            memdb, fence=fence, state=state, sig=_fx_sig(f"h429_{i}"),
+            venue="capital", symbol="EURUSD", reservation_id=f"r{i}",
+            reject_code="HTTP_429", reject_msg="rl", now_ts=now + i,
+        )
+    assert state.fault_events == 0
+    assert current_strategy_mode(memdb, "fx_breakout_basket", now_ts=now + 10) == ACTIVE
+    assert state.venue_rejects_by_code.get("HTTP_429") == 3
+
+
+def test_http_prefix_not_external_for_other_venues() -> None:
+    """The HTTP_ gate is Capital-scoped — OKX (numeric sCode) and Alpaca
+    (semantic tokens) classification must be untouched by this fix."""
+    from polaris.scripts._production_reject import _is_external_reject
+
+    assert _is_external_reject("okx", "HTTP_429") is False
+    assert _is_external_reject("alpaca", "HTTP_429") is False
+    assert _is_external_reject("okx", "CONFIRM_STALL_PENDING") is False
+    assert _is_external_reject("alpaca", "CONFIRM_STALL_PENDING") is False
+    # Capital gate is venue-case-insensitive (resolve_stream lower()s too).
+    assert _is_external_reject("capital", "HTTP_429") is True
+    assert _is_external_reject("CAPITAL", "HTTP_429") is True
+    assert _is_external_reject("capital", "CONFIRM_STALL_PENDING") is True
+
+
+def test_capital_bare_pending_still_faults() -> None:
+    """Backstop: a bare 'PENDING' reject_code is now EXTINCT by construction —
+    if it ever reappears it is a code bug and must keep faulting (integrity)."""
+    from polaris.scripts._production_reject import _is_external_reject
+
+    assert _is_external_reject("capital", "PENDING") is False

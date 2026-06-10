@@ -376,3 +376,348 @@ def test_size_usd_to_lots_above_min() -> None:
     # Bug C formula: unit = price × lotSize(1) = $1.10 → raw 2.5 → step 0.1 → 2.5
     # (floor-to-step never exceeds the T4 ask; leverage/pip never enter).
     assert lots == 2.5
+
+
+# ---------------------------------------------------------------------------
+# D-1 — honest non-200 labeling (no fake "PENDING") + D-3 submit backoff.
+# All venue I/O is MockTransport; no real network. DEMO/PAPER only.
+# ---------------------------------------------------------------------------
+
+
+def _mk_adapter(responder: _Responder) -> tuple[CapitalAdapter, CapitalSession, httpx.AsyncClient]:
+    responder.on("POST", CAPITAL_SESSION_PATH, _login_handler(responder))
+    client = httpx.AsyncClient(
+        transport=_MockTransport(responder), base_url="https://demo-api"
+    )
+    sess = CapitalSession(
+        api_key="K", identifier="e@x", password="pw", client=client, auto_ping=False
+    )
+    return CapitalAdapter(sess), sess, client
+
+
+def _posts(responder: _Responder, path: str, method: str = "POST") -> int:
+    return sum(
+        1 for c in responder.calls
+        if c.method.upper() == method and c.url.path == path
+    )
+
+
+@pytest.mark.asyncio
+async def test_parse_deal_http_429_honest_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-200 deal response must carry an honest HTTP_<code> status — never
+    the fake default "PENDING" (D-1: the mislabel chained into SOFT_HALTs)."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0, 0.0)
+    )
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(429, json={"errorCode": "error.too-many.requests"}),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.status == "HTTP_429"
+    assert resp.http_status == 429
+    assert "PENDING" not in resp.status
+    assert "error.too-many.requests" in resp.reason
+
+
+@pytest.mark.asyncio
+async def test_parse_deal_http_500_captures_error_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """5xx error body (errorCode/errorMessage) is captured into reason and a
+    WARNING is logged — the HTTP status/body was previously logged NOWHERE."""
+    import logging as _logging
+
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(
+            500, json={"errorCode": "internal.error", "errorMessage": "boom"}
+        ),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        with caplog.at_level(_logging.WARNING, logger="polaris.venues.capital.adapter"):
+            resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.status == "HTTP_500"
+    assert resp.reason == "internal.error: boom"
+    assert any("HTTP 500" in rec.getMessage() for rec in caplog.records)
+    # 5xx on the OPEN leg is ambiguous (may have executed) → exactly 1 attempt.
+    assert _posts(responder, CAPITAL_POSITIONS_PATH) == 1
+
+
+@pytest.mark.asyncio
+async def test_parse_deal_http_error_ignores_status_like_body_keys() -> None:
+    """Review nit: a status-like key in an ERROR body must not displace the
+    HTTP_ label (it would dodge the startswith("HTTP_") external gate)."""
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(400, json={"status": "FAILURE"}),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.status == "HTTP_400"
+    assert resp.raw.get("status") == "FAILURE"  # original body preserved in raw
+
+
+@pytest.mark.asyncio
+async def test_parse_deal_200_pending_byte_identical() -> None:
+    """REGRESSION GUARD: 200 + dealReference (no dealStatus yet) is the NORMAL
+    Capital open path (422 live fills) — status PENDING, ok True, unchanged."""
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(200, json={"dealReference": "REFP"}),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is True
+    assert resp.status == "PENDING"
+    assert resp.deal_reference == "REFP"
+    assert resp.http_status == 200
+
+
+@pytest.mark.asyncio
+async def test_parse_deal_200_rejected_unchanged() -> None:
+    """A REAL venue rejection still arrives as 200 + dealStatus=REJECTED and
+    keeps its venue status (stream-SSOT external classification unchanged)."""
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(
+            200, json={"dealReference": "R", "dealStatus": "REJECTED", "reason": "margin"}
+        ),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.status == "REJECTED"
+    assert resp.reason == "margin"
+
+
+@pytest.mark.asyncio
+async def test_open_retries_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """429 = rejected BEFORE processing (rate limiter) → safe retry; one 429
+    followed by a 200 must yield exactly 2 POSTs and a final ok."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0, 0.0)
+    )
+    responder = _Responder()
+    state = {"n": 0}
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(429, json={"errorCode": "error.too-many.requests"})
+        return httpx.Response(200, json={"dealReference": "REF_OK"})
+
+    responder.on("POST", CAPITAL_POSITIONS_PATH, handler)
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is True
+    assert resp.deal_reference == "REF_OK"
+    assert _posts(responder, CAPITAL_POSITIONS_PATH) == 2
+
+
+@pytest.mark.asyncio
+async def test_open_never_retries_ambiguous_timeout() -> None:
+    """ReadTimeout AFTER send is AMBIGUOUS (the venue may have executed) — the
+    open leg must NOT retry (duplicate-order risk) and must NOT raise: it
+    returns the synthetic HTTP_TIMEOUT response (external classification)."""
+    responder = _Responder()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow venue", request=req)
+
+    responder.on("POST", CAPITAL_POSITIONS_PATH, handler)
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.status == "HTTP_TIMEOUT"
+    assert resp.http_status == 0  # no HTTP response existed
+    assert _posts(responder, CAPITAL_POSITIONS_PATH) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_retries_connect_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ConnectError fires BEFORE the request reaches the venue → provably not
+    processed → safe to retry even on the open leg (2 failures then 200)."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0, 0.0)
+    )
+    responder = _Responder()
+    state = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        if state["n"] <= 2:
+            raise httpx.ConnectError("refused", request=req)
+        return httpx.Response(200, json={"dealReference": "REF_C"})
+
+    responder.on("POST", CAPITAL_POSITIONS_PATH, handler)
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is True
+    assert _posts(responder, CAPITAL_POSITIONS_PATH) == 3
+
+
+@pytest.mark.asyncio
+async def test_close_retries_5xx_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DELETE /positions/{id} is naturally idempotent (already-closed → absent
+    → CloseOrphan reconcile) — the close leg retries 5xx AND timeouts."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0, 0.0)
+    )
+    # 503 then 200.
+    responder = _Responder()
+    state = {"n": 0}
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(503, json={"errorCode": "unavailable"})
+        return httpx.Response(200, json={"dealReference": "CREF"})
+
+    responder.on("DELETE", f"{CAPITAL_POSITIONS_PATH}/D1", handler)
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.close_position("D1")
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.ok is True
+    assert _posts(responder, f"{CAPITAL_POSITIONS_PATH}/D1", method="DELETE") == 2
+
+    # ReadTimeout then 200.
+    responder2 = _Responder()
+    state2 = {"n": 0}
+
+    def handler2(req: httpx.Request) -> httpx.Response:
+        state2["n"] += 1
+        if state2["n"] == 1:
+            raise httpx.ReadTimeout("slow", request=req)
+        return httpx.Response(200, json={"dealReference": "CREF2"})
+
+    responder2.on("DELETE", f"{CAPITAL_POSITIONS_PATH}/D2", handler2)
+    adapter2, sess2, client2 = _mk_adapter(responder2)
+    try:
+        resp2 = await adapter2.close_position("D2")
+    finally:
+        await sess2.aclose()
+        await client2.aclose()
+    assert resp2.ok is True
+    assert _posts(responder2, f"{CAPITAL_POSITIONS_PATH}/D2", method="DELETE") == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_budget_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All-429 storm: exactly 1 + len(delays) attempts, sleeps == the scheduled
+    delays (bounded, non-blocking — tick-5s pace must never be starved)."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0, 0.0)
+    )
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter.asyncio.sleep", _rec_sleep
+    )
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(429, json={"errorCode": "error.too-many.requests"}),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.status == "HTTP_429"
+    assert _posts(responder, CAPITAL_POSITIONS_PATH) == 3
+    assert sleeps == [0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_honored_within_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A venue Retry-After is honored but CAPPED — the backoff budget (≤1s per
+    wait) is fixed for the 5s tick pace and must never grow past the cap."""
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter._DEAL_RETRY_DELAYS", (0.0,)
+    )
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "polaris.venues.capital.adapter.asyncio.sleep", _rec_sleep
+    )
+    responder = _Responder()
+    responder.on(
+        "POST", CAPITAL_POSITIONS_PATH,
+        lambda _r: httpx.Response(
+            429, json={"errorCode": "rl"}, headers={"Retry-After": "5"}
+        ),
+    )
+    adapter, sess, client = _mk_adapter(responder)
+    try:
+        resp = await adapter.open_position(epic="EURUSD", direction="BUY", size=1.0)
+    finally:
+        await sess.aclose()
+        await client.aclose()
+    assert resp.status == "HTTP_429"
+    assert sleeps == [1.0]  # min(max(0.0, 5), cap=1.0)

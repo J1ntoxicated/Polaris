@@ -64,6 +64,19 @@ def _is_external_reject(venue: str, reject_code: str | None) -> bool:
         return True
     if reject_code in EXTERNAL_NONFAULT_REJECT_CODES:
         return True
+    # D-2: Capital HTTP/protocol-level failures (D-1 honest labels HTTP_429 /
+    # HTTP_5xx / HTTP_TIMEOUT / HTTP_TRANSPORT / HTTP_CONFIRM) and a confirm
+    # poll that never finalized (CONFIRM_STALL_PENDING) are venue/transport
+    # events — the signal already passed G1-G7 + sizing, so halting the
+    # strategy for them violates the integrity-only circuit philosophy (this
+    # exact mislabel chain SOFT_HALTed 4 innocent strategies 55 times). A REAL
+    # venue rejection arrives as 200+REJECTED (stream SSOT below, unchanged).
+    # Capital-gated: OKX sCodes are numeric and Alpaca emits semantic tokens,
+    # so an HTTP_ prefix cannot collide — but the venue gate keeps it explicit.
+    if venue.lower() == "capital" and (
+        reject_code.startswith("HTTP_") or reject_code == "CONFIRM_STALL_PENDING"
+    ):
+        return True
     # Stream SSOT (design §2.1): venue-specific external codes come from the
     # resolved stream's external_reject_codes (A=∅, B=Capital's 4 statuses) —
     # identical to the prior `venue == "capital" and code in <capital set>`.

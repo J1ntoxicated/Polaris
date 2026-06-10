@@ -16,6 +16,8 @@ import time
 import uuid
 from typing import Any
 
+import httpx
+
 from polaris.core.data.fill_normalizer import (
     Fill,
     FillNormalizationError,
@@ -112,9 +114,24 @@ async def real_capital_open_fill(
     # reject path below, never hangs.
     confirm: dict[str, Any] = {}
     deal_status = ""
+    confirm_read_ok = False
     for _poll in range(_CONFIRM_POLLS):
         await asyncio.sleep(poll_delay_sec)
-        confirm = await adapter.confirm(open_resp.deal_reference)
+        try:
+            confirm = await adapter.confirm(open_resp.deal_reference)
+        except httpx.HTTPError as exc:
+            # B1: this poll previously raised straight into the pipeline's
+            # FAULT_EXCEPTION backstop (3/300s → HARD_HALT) on a venue 429
+            # storm / timeout — a confirm READ failure is a venue/transport
+            # event, not a strategy fault. Keep polling within the budget
+            # (mirror of the close leg's try-guard). Non-httpx exceptions
+            # still propagate (genuine code bug → integrity backstop).
+            logger.warning(
+                "[capital] open confirm %s poll failed %r — retrying in budget",
+                open_resp.deal_reference, exc,
+            )
+            continue
+        confirm_read_ok = True
         deal_status = str(confirm.get("dealStatus") or "")
         logger.debug(
             "[capital] confirm dealRef=%s status=%s affectedDeals=%s",
@@ -123,9 +140,26 @@ async def real_capital_open_fill(
         if deal_status and deal_status not in ("PENDING", "None"):
             break
     if deal_status not in ("ACCEPTED", "OPEN"):
+        # Honest reject labels (D-1/B2). Both HTTP_CONFIRM and
+        # CONFIRM_STALL_PENDING can leave a GHOST venue position if the deal
+        # finalizes after we bail — the reconcile pass (position drift) covers
+        # it, same as before this change.
+        if not confirm_read_ok:
+            # Every confirm poll failed at the HTTP/transport layer — the
+            # HTTP_ prefix routes it to the external (non-fault) classifier.
+            reject_code = "HTTP_CONFIRM"
+        elif deal_status == "PENDING":
+            # B2: the deal never finalized inside the poll budget — a venue
+            # stall, NOT the (extinct) D-1 "PENDING" mislabel. Distinct honest
+            # label, classified external (venue-side no-fill).
+            reject_code = "CONFIRM_STALL_PENDING"
+        elif deal_status and deal_status != "None":
+            reject_code = deal_status
+        else:
+            reject_code = "no_fill"
         return OpenAttempt(
             fill=None,
-            reject_code=deal_status if deal_status and deal_status != "None" else "no_fill",
+            reject_code=reject_code,
             reject_msg=str(confirm.get("reason") or "") or None,
         )
     fill = normalize_capital_confirm(

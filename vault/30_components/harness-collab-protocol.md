@@ -3,61 +3,56 @@ type: component
 component: harness-collab-protocol
 status: active
 date_created: 2026-05-28
-date_updated: 2026-05-28
-tags: [harness, collaboration, multi-agent, orchestration, builder-not-reviewer]
+date_updated: 2026-06-11
+tags: [harness, collaboration, multi-agent, orchestration, builder-not-reviewer, workflow, loop]
 related: [[ADR-001]], [[ADR-003]]
 ---
 
-# Harness Collaboration Protocol
+# Harness Collaboration Protocol (Fable 구조)
 
-Multi-agent 협업 글루. 메인 Claude = **orchestrator + synthesizer**. 실무는 sub-agent 위임 (context pollution 방지 + brain contribution). 개별 agent 역할은 `.claude/agents/*.md`, 본 문서는 이들을 묶는 상위 orchestration.
+메인 Claude(Fable) = **orchestrator + synthesizer**. 실무는 Workflow 스크립트의 sub-agent에 위임(context 오염 방지 + brain contribution). 본 문서 = 상위 orchestration SSOT.
 
-## Agent roster
-| agent | 역할 | reviewer? |
+## 작업 모드 (Jin 2026-05-29 mandate — Fable Workflow 도구로 구현)
+기본 = **다이나믹 멀티에이전트 Workflow 스크립트** (단발 Agent 수동 멀티 호출 대체):
+- **fan-out** — parallel(): 차원/항목 병렬 분해 (예: 서브시스템 구조매핑 8-reader)
+- **pipeline** — pipeline(): design → build(TDD) → adversarial review, 항목별 무배리어 흐름
+- **루프** — 아래 § 루프 3계층
+- **adversarial verify** — 발견별 반박 agent. 실증: 2026-06-10 진단서 1000× 단위오독·오진 다수 적발
+- **schema 출력** — 구조화 강제로 메인 종합 비용 최소화
+직접/단발 = trivial·대화·단일 known target·즉각 1-edit만. 토큰 비제약, 큰 웨이브는 Jin 사전 1줄 고지.
+위임 agent = 자율 실행 주체: 하위 agent spawn · skill · vault r·w · sequential-thinking 자유 소환(CLAUDE.md agent-definition과 동일).
+
+## 루프 3계층
+- **Workflow 내 루프**: loop-until-dry(K회 연속 무소득까지 탐색) · loop-until-count · **FixLoop**(적대리뷰 블로커→빌더 수정→3렌즈 재검증, 블로커 0까지, 기본 2라운드 캡)
+- **/loop 세션 루프**: 프롬프트/스킬을 인터벌 or self-paced(ScheduleWakeup) 반복 — 봇 라이브 베이비시팅·CI/배포 등 외부 상태 폴링용
+- **cron 루틴**: 스케줄 원격 agent — 일일 재기동(WAL reset)·주기 vault 리뷰 등 운영 자동화 후보
+
+## Agent roster (Fable)
+| 주체 | 역할 | reviewer? |
 |---|---|---|
-| (main) | 위임 결정 · 결과 종합 · 영속 기록 트리거 | — |
-| `code-implementer` | builder. TDD. **self-review 금지** | ✗ |
-| `codex-debate-partner` | codex 외부 review/debate (max 5 round) | ✓ |
-| `vault-curator` | brain (vault r·w, lint, ADR mint) | — |
-| Explore / Plan / general-purpose | 탐색 · 설계 · 다단계 | — |
+| (main) | 위임 결정 · 종합 · vault 기록 · 비가역 작업(DB 변형 등) 승인 게이트 | — |
+| Workflow 빌더 | TDD 구현. self-review 금지 | ✗ |
+| Workflow 리뷰어 (fresh Claude) | 설계검토 + 3렌즈(technical/policy/livepath) 적대 리뷰 | ✓ |
+| Explore / Plan / general-purpose / code-simplifier | 탐색 · 설계 · 다단계 · 리팩토링 | — |
+| codex | on-demand만 — dev 리뷰/디베이트 금지(Jin 2026-05-31 no-dev-GPT, 메모리 영속) | △ |
 
-## Orchestration glue
-- 메인은 raw read/search dump을 context에 두지 않는다 → 위임 후 **압축 보고만** 회수.
-- 위임받은 agent는 필요 시 하위 agent spawn · advisor(codex) 호출 · skill · vault r·w · sequential-thinking 자유 소환.
-- 병렬 + 유기적: 독립 작업은 동시 dispatch, 결과를 메인이 종합.
+## Builder ≠ Reviewer (개정 2026-05-31)
+작성 주체 self-review 금지(confirmation bias). 신규 코드/spec/rule → **fresh Claude sub-agent 리뷰 의무**(pipeline review 단계 내장). 구 "codex 외부 review 의무" 조항은 Jin 2026-05-31 no-dev-GPT 결정으로 대체(CLAUDE.md 동기 갱신 2026-06-11).
 
 ## Handoff triggers
-- 5+ 파일 read / codebase-wide search → Explore · general-purpose
-- 큰 wave 검수 → **5-axis 병렬** (technical / 4-axis policy / coherence / functional / live audit)
-- 다단계 설계 → Plan · 리팩토링 → code-simplifier
-- 신규 코드 / 거동 변경 → `code-implementer` build → `codex-debate-partner` review
-- 거부 키워드 sweep hit / 9-stack·sizing 변경 / vault write 충돌 → 즉시 전담 agent
-- 오염 신호 (Read 5+ / grep 100+ line / 동일 axis 반복) → 전환
-- 단일 known target → 직접 처리 (위임 overhead 회피)
+- 5+ 파일 read / codebase-wide search → Explore·general-purpose 또는 Workflow reader fan-out
+- 신규 코드·거동 변경 → Workflow pipeline(design→build→adversarial review→FixLoop)
+- 큰 wave 검수 → **5-axis**(technical / 4-axis policy / cumulative coherence / functional / live audit) — functional/live audit은 배포 후 라이브로 완결
+- 거부 키워드 hit / 9-stack·sizing 변경 / vault write 충돌 → 전담 단계 · 오염 신호(Read 5+/grep 100+) → 위임 전환 · 단일 known target → 직접
 
-## Builder ≠ Reviewer
-코드·spec·rule 작성 주체의 self-review 금지 (confirmation bias). 신규 작성 → codex 외부 review **의무**, codex 불가 시에만 별도 Claude reviewer fallback. 다른 brain만이 진짜 검증.
+## Sub-agent 프롬프트 헤더 (의무)
+DEMO/PAPER 명시 + aggressive bias + 거부 키워드 sweep(목록 SSOT = CLAUDE.md rejection-keywords 블록) + vault r·w 권한(brain contribution) + 증거 의무(file:line/SQL 숫자) + 라이브 DB는 ro URI+명시 close(hung-reader 교훈) + length cap.
 
-## Super-brain 4합주 (비-자명 결정)
-vault read → sequential-thinking → codex debate → vault update. 4개 모두 거친 뒤 결정.
+## Super-brain 합주 (비-자명·trade-param 결정)
+vault read → sequential-thinking → /debate(GPT+Gemini — dev 작업 제외) → vault update. 증거 자명한 버그픽스는 비대상, /debate 후보는 플래그·보류(예: min-deal 정책, trail 캘리브, COT 임계).
 
 ## Brain contribution (의무)
-모든 wave 종료 시 vault append (lesson / digest / ADR / `_NOW.md` / `log.md`). sub-agent도 vault r·w 가능, parallel write 충돌은 자기 namespace draft 또는 메인 종합으로 회피.
+wave 종료 시 vault append(lesson/digest/ADR + log.md 1줄 무해석). sub-agent vault write 가능하되 병렬 충돌은 자기 namespace draft 또는 **메인 종합 기록(기본)**으로 회피. 테스트의 실 vault 오염(bootstrap 노이즈)은 결함 — 격리 follow-up.
 
-## Format 규약 (consumer별)
-- agent instruction (CLAUDE.md / agent / skill) = 간결 md + **XML 태그**(critical 블록) — 3사 권장, orchestration 표현 최적
-- vault = md + YAML frontmatter + `[[wikilink]]` (Obsidian-native, XML/HTML 금지 → graph 보존)
-- config/state = JSON / SQLite
-- rendered report = HTML (dashboard only — 실제 렌더되는 유일 layer)
-
----
-
-## Workflow-first 기본 모드 (Jin 2026-05-29 mandate)
-
-작업 기본 = **다이나믹 멀티에이전트 Workflow** 오케스트레이션. 단발 Agent 를 수동으로 여러 개 띄우는 대신 **Workflow 스크립트 하나**로:
-- **fan-out** — 차원/항목 병렬 분해 + 커버
-- **pipeline** — design → build(TDD) → adversarial review (단계 간 배리어 없이 항목별 흐름)
-- **loop-until-dry** — 미지 규모 탐색(버그/엣지/이슈) K회 연속 무소득까지
-- **adversarial verify / judge panel / completeness critic** — 다관점 반박으로 거짓양성 제거
-
-직접/단발 = trivial·대화·단일 known target·즉각 1-edit 만. 토큰 비용은 제약 아님(철저함·정확성 우선), 큰 비용은 Jin 사전 고지. builder≠reviewer 는 pipeline 의 review 단계로 내장. CLAUDE.md `## Workflow` 작업모드 SSOT.
+## Format 규약
+agent instruction = 간결 md+XML 태그 · vault = md+frontmatter+wikilink(XML/HTML 금지, graph 보존) · config/state = JSON/SQLite · rendered report = HTML(대시보드만).

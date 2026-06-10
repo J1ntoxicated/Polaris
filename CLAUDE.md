@@ -60,8 +60,8 @@ L0 Dynamic Universe · L1 Canonical+Baseline · L2 Per-Gate AI (G1-G8) · L3 Siz
 ## Workflow (영속 cycle)
 **작업 모드 기본 = 다이나믹 멀티에이전트 Workflow** (Jin 2026-05-29 mandate): 모든 substantial 작업(설계·구현·리뷰·리서치·감사·sweep·마이그레이션)은 단발 Agent 가 아니라 **Workflow 스크립트로 오케스트레이션**을 기본으로 한다 — fan-out(병렬 분해) / pipeline(design→build→adversarial review) / loop-until-dry(완전 탐색) + 적대적 검증(다관점 반박)을 엮어 가장 철저·정확한 결과를 낸다. 토큰 비용은 제약이 아니다(품질 우선). **직접/단발 처리 = trivial·대화·단일 known target·즉각 1-edit 만.** 단발 Agent 를 여러 개 손으로 띄우는 대신 한 Workflow 로 묶는다. 큰 비용 작업은 Jin 에게 사전 1줄 고지.
 1. **Session start** — read `_NOW.md` + MEMORY.md
-2. **비-자명 결정 = 슈퍼 브레인 4 합주** — vault read + sequential-thinking + codex debate + vault update
-3. **모든 신규 코드 = codex 외부 review** (작성 ≠ 리뷰)
+2. **비-자명 결정 = 슈퍼 브레인 4 합주** — vault read + sequential-thinking + /debate(GPT+Gemini) + vault update
+3. **모든 신규 코드 = fresh Claude sub-agent 외부 review** (작성 ≠ 리뷰; GPT/codex dev 리뷰 금지 — Jin 2026-05-31 no-dev-GPT)
 4. **모든 sub-agent prompt 의무**: DEMO 명시 + Aggressive bias + 거부 키워드 sweep + Vault append
 5. **큰 wave = 5-axis review**: technical / 4-axis policy / cumulative coherence / functional / live audit
 6. **Vault 지속 리뷰** (주 1회 또는 50+ commit) — Karpathy 3-ops + backlink + lifecycle
@@ -80,7 +80,7 @@ tool call · skill · advisor 단독 호출 ≠ agent — agent는 위 권한을
 </handoff-triggers>
 
 <builder-not-reviewer>
-코드·spec·rule 작성 주체 self-review 금지 (confirmation bias). 신규 작성 → codex 외부 review **의무** (codex 불가 시에만 별도 Claude reviewer fallback). Workflow #3 강화.
+코드·spec·rule 작성 주체 self-review 금지 (confirmation bias). 신규 작성 → **fresh Claude sub-agent 리뷰 의무** (GPT/codex dev 리뷰 금지 — Jin 2026-05-31 no-dev-GPT; codex는 on-demand 비-dev 용도만). Workflow #3 강화.
 </builder-not-reviewer>
 
 <sub-agent-prompt-header>

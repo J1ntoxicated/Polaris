@@ -16,6 +16,7 @@ from typing import Any
 from polaris.core.data.quote_writer import QuoteTickWriter
 from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
+from polaris.scripts._production_capital_sizing import CapitalConstraintCache
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 
@@ -155,6 +156,15 @@ class ProdLoopState:
     last_entry_by_key: dict[tuple[str, str, str], tuple[int, str]] = field(
         default_factory=dict
     )
+    # Bug C — per-epic Capital dealing-rule cache (TTL/single-flight/stale-serve)
+    # so the T4 notional is translated to venue lots with ZERO network calls on
+    # a warmed epic. ``capital_constraint_fallbacks`` counts orders that fell
+    # back to the legacy 1-lot path (constraint/rate unavailable) — the entry
+    # still flows (flow_not_block); the counter keeps the gap visible.
+    capital_constraints: CapitalConstraintCache = field(
+        default_factory=CapitalConstraintCache
+    )
+    capital_constraint_fallbacks: int = 0
     # P4 — WS real-time price source (shared QuoteTickWriter, in-mem live_px +
     # ~30-tick ring). Consumers read fresh WS ticks (exit mark #2, G4 tick_window
     # #3) and fall back to bar close when no fresh tick exists (graceful degrade,

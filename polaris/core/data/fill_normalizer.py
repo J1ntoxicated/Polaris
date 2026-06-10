@@ -21,8 +21,9 @@ Capital
 -------
 - ``GET /confirms/{ref}`` returns ``status`` (OPEN/CLOSED/REJECTED), ``level``
   (entry price), ``size``, ``profit``, ``affectedDeals``.
-- ``size_usd`` = ``size × pip_value_usd × leverage`` (we expose
-  ``pip_value_usd`` as a known per-symbol constant from constraint_translator).
+- ``size_usd`` (Bug C): with ``contract_factor_usd`` set = REAL exposure
+  ``size × level × factor`` (factor = lotSize × quote→USD; leverage = margin
+  only, never exposure). Legacy fallback = ``size × pip_value_usd × leverage``.
 """
 
 from __future__ import annotations
@@ -151,15 +152,22 @@ def normalize_capital_confirm(
     expected_price: float | None = None,
     fee_usd: float | None = None,
     leverage: float = 1.0,
+    contract_factor_usd: float | None = None,
 ) -> Fill:
     """Convert a Capital ``/confirms/{ref}`` payload into a Fill.
 
-    ``size_usd`` represents the gross notional (controlled exposure), which
-    Capital prices as ``size × pip_value_usd × leverage`` for CFD positions.
-    Pass ``leverage=1.0`` to record margin-equivalent (default kept at 1.0
-    for backwards compatibility with the smoke loop's deterministic stub —
-    real-venue paths should pass the per-epic leverage from
-    :class:`CapitalMarketConstraint`).
+    ``contract_factor_usd`` (Bug C fix) — when set (> 0), ``size_usd`` is the
+    REAL gross exposure ``size × level × contract_factor_usd`` where the factor
+    is ``lotSize × quote→USD`` from the live market constraint and ``level`` is
+    THIS confirm's own fill price (entry and close each record their actual
+    exposure). Leverage is NOT applied: it scales margin, never exposure (the
+    legacy ``size × pip × leverage`` stamped every live entry $200.00
+    regardless of the sized notional).
+
+    ``contract_factor_usd=None`` keeps the legacy formula byte-identical:
+    ``size_usd = size × pip_value_usd × leverage``. Pass ``leverage=1.0`` to
+    record margin-equivalent (default kept at 1.0 for backwards compatibility
+    with the smoke loop's deterministic stub).
 
     ``fee_usd`` defaults to the REAL Capital cost proxy (3 bps of the gross
     notional via :func:`fees.real_fee_usd`) — Capital demo reports ``fee=0``, so
@@ -178,9 +186,13 @@ def normalize_capital_confirm(
     size = _safe_float(payload.get("size"))
     if level <= 0.0 or size <= 0.0:
         raise FillNormalizationError("Capital confirm missing level/size")
-    pip = pip_value_usd if pip_value_usd > 0.0 else 1.0
-    lev = leverage if leverage > 0.0 else 1.0
-    size_usd = size * pip * lev
+    if contract_factor_usd is not None and contract_factor_usd > 0.0:
+        # Bug C fix: real exposure = size × fill level × (lotSize × quote→USD).
+        size_usd = size * level * contract_factor_usd
+    else:
+        pip = pip_value_usd if pip_value_usd > 0.0 else 1.0
+        lev = leverage if leverage > 0.0 else 1.0
+        size_usd = size * pip * lev
     # Capital demo reports fee=0 → store the REAL 3 bps proxy on the gross
     # notional (consistent with OKX storing the real taker fee). Explicit
     # override honored.

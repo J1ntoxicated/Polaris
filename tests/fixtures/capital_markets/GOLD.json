@@ -1,0 +1,96 @@
+{
+  "dealingRules": {
+    "marketOrderPreference": "AVAILABLE_DEFAULT_ON",
+    "maxDealSize": {
+      "unit": "POINTS",
+      "value": 50000
+    },
+    "maxStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 100
+    },
+    "minDealSize": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minGuaranteedStopDistance": {
+      "unit": "PERCENTAGE",
+      "value": 1
+    },
+    "minSizeIncrement": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minStepDistance": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.001
+    },
+    "trailingStopsPreference": "NOT_AVAILABLE"
+  },
+  "instrument": {
+    "country": "",
+    "currency": "USD",
+    "epic": "GOLD",
+    "expiry": "-",
+    "guaranteedStopAllowed": true,
+    "lotSize": 1,
+    "marginFactor": 100,
+    "marginFactorUnit": "PERCENTAGE",
+    "name": "Gold",
+    "openingHours": {
+      "fri": [
+        "00:00 - 20:59"
+      ],
+      "mon": [
+        "00:00 - 20:59",
+        "22:00 - 00:00"
+      ],
+      "sat": [],
+      "sun": [
+        "22:00 - 00:00"
+      ],
+      "thu": [
+        "00:00 - 20:59",
+        "22:00 - 00:00"
+      ],
+      "tue": [
+        "00:00 - 20:59",
+        "22:00 - 00:00"
+      ],
+      "wed": [
+        "00:00 - 20:59",
+        "22:00 - 00:00"
+      ],
+      "zone": "UTC"
+    },
+    "overnightFee": {
+      "longRate": -0.037932,
+      "shortRate": 0.029712,
+      "swapChargeInterval": 1440,
+      "swapChargeTimestamp": 1781125200000
+    },
+    "streamingPricesAvailable": true,
+    "symbol": "Gold",
+    "type": "COMMODITIES"
+  },
+  "snapshot": {
+    "bid": 4164.52,
+    "decimalPlacesFactor": 2,
+    "delayTime": 0,
+    "high": 4257.14,
+    "low": 4130.43,
+    "marketModes": [
+      "REGULAR"
+    ],
+    "marketStatus": "TRADEABLE",
+    "netChange": -155.93,
+    "offer": 4165.02,
+    "percentageChange": -2.22,
+    "scalingFactor": 1,
+    "updateTime": "2026-06-11T00:23:38.687"
+  }
+}

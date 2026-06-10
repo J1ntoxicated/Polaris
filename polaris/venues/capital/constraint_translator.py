@@ -2,10 +2,14 @@
 
 Spec source:
 - ``GET /api/v1/markets/{epic}`` — returns ``dealingRules`` (minDealSize,
-  minStepDistance, minControlledRiskStopDistance), instrument
-  (lotSize, valueOfOnePip, currencies, type), and snapshot (decimalPlacesFactor).
-- vault/30_components/layer-3-sizing-risk.md (size USD → CFD lot via
-  per-symbol pip value × leverage).
+  minSizeIncrement = the SIZE increment; minStepDistance is a stop/limit
+  PRICE distance, kept only as a fallback), instrument (lotSize,
+  valueOfOnePip, currencies, type), and snapshot (decimalPlacesFactor).
+- tests/fixtures/capital_markets/*.json — REAL demo payload captures (RO GET
+  probe 2026-06-11) that calibrate the size semantics: ``size`` is UNDERLYING
+  UNITS (``lotSize`` = 1, ``valueOfOnePip`` absent on every probed epic), so
+  one size unit's USD exposure = ``price × lotSize × quote→USD``. Leverage
+  scales MARGIN only — it NEVER enters the lot conversion or the exposure.
 
 Pure functions, no I/O beyond ``fetch_market_detail``. P0 leverages:
 - Forex majors: 30:1 (retail) / 100:1 (pro)
@@ -21,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any, Final
 
 import httpx
@@ -31,9 +35,12 @@ from polaris.core.streams import fallback_leverage_for_asset_class
 __all__ = [
     "CAPITAL_MARKET_DETAIL_PATH",
     "CapitalMarketConstraint",
+    "ceil_size_to_step",
     "fetch_market_detail",
+    "payload_to_constraint",
     "round_size_to_step",
     "size_usd_to_lots",
+    "unit_notional_usd",
 ]
 
 CAPITAL_MARKET_DETAIL_PATH: Final[str] = "/api/v1/markets"
@@ -63,6 +70,12 @@ class CapitalMarketConstraint:
     pip_value_usd: float
     base_ccy: str
     quote_ccy: str
+    # Bug C fix (defaults keep every existing constructor byte-identical):
+    # ``lot_size`` = underlying units per 1.0 size (live payloads: always 1);
+    # ``snapshot_mid`` = (bid+offer)/2 at fetch time — the quote→USD rate
+    # fallback when no bars exist for the conversion pair (0.0 = missing).
+    lot_size: float = 1.0
+    snapshot_mid: float = 0.0
 
 
 def round_size_to_step(value: float, step: float) -> float:
@@ -77,26 +90,72 @@ def round_size_to_step(value: float, step: float) -> float:
     return float(quanta * d_step)
 
 
+def ceil_size_to_step(value: float, step: float) -> float:
+    """Round ``value`` UP to the nearest multiple of ``step``."""
+    if step <= 0.0:
+        return value
+    if not math.isfinite(value) or not math.isfinite(step):
+        return 0.0
+    d_val = Decimal(str(value))
+    d_step = Decimal(str(step))
+    quanta = (d_val / d_step).to_integral_value(rounding=ROUND_CEILING)
+    return float(quanta * d_step)
+
+
+def unit_notional_usd(
+    *,
+    constraint: CapitalMarketConstraint,
+    last_price: float,
+    quote_usd_rate: float = 1.0,
+) -> float:
+    """USD gross exposure of ONE size unit: ``price × lotSize × quote→USD``.
+
+    Calibrated on the live demo payloads (tests/fixtures/capital_markets):
+    1.0 size of GOLD@4164 ≈ $4,164; 0.1 size of J225@64,637 JPY ≈ $42.
+    ``leverage`` NEVER enters — it scales margin, not exposure.
+    """
+    if last_price <= 0.0 or quote_usd_rate <= 0.0:
+        return 0.0
+    factor = constraint.lot_size if constraint.lot_size > 0.0 else 1.0
+    return last_price * factor * quote_usd_rate
+
+
 def size_usd_to_lots(
     *,
     constraint: CapitalMarketConstraint,
     notional_usd: float,
     last_price: float,
+    quote_usd_rate: float = 1.0,
 ) -> float:
-    """Convert USD notional to lots respecting ``min_deal_size`` + ``step_size``.
+    """Convert a T4 USD notional into a venue size (lots).
 
-    ``last_price`` may be in non-USD quote — we treat ``pip_value_usd`` as the
-    pre-converted dollar value of one unit, so lot count = notional / price /
-    pip_value_usd. Tests + smoke validate this against Capital's confirm
-    endpoint.
+    ``raw = notional / unit_notional_usd`` — dimensionally exact (the prior
+    ``notional / pip_value_usd`` was a unit mismatch; live payloads carry no
+    ``valueOfOnePip`` at all). Rounding policy (Bug C design §min_deal):
+
+    * raw below ``min_deal_size`` → ceil-to-step(min): the venue floor is
+      EXPRESSED, never skipped (flow_not_block);
+    * otherwise floor-to-step(raw) so the submit never exceeds the T4 target;
+      a floor that lands below min re-surfaces at ceil-to-step(min);
+    * payload-defect edges: min=0 → floor only (a zero floor takes one step);
+      step=0 → raw passes through unquantized.
     """
-    if last_price <= 0.0:
+    unit = unit_notional_usd(
+        constraint=constraint, last_price=last_price, quote_usd_rate=quote_usd_rate
+    )
+    if unit <= 0.0 or notional_usd <= 0.0:
         return 0.0
-    raw_lots = notional_usd / max(last_price, 1e-9)
-    if constraint.pip_value_usd > 0.0:
-        raw_lots = notional_usd / constraint.pip_value_usd
-    lots = max(raw_lots, constraint.min_deal_size)
-    return round_size_to_step(lots, constraint.step_size)
+    raw = notional_usd / unit
+    min_deal = constraint.min_deal_size
+    step = constraint.step_size
+    if min_deal > 0.0 and raw < min_deal:
+        return ceil_size_to_step(min_deal, step)
+    lots = round_size_to_step(raw, step)
+    if min_deal > 0.0 and lots < min_deal:
+        return ceil_size_to_step(min_deal, step)
+    if lots <= 0.0:
+        return step if step > 0.0 else 0.0
+    return lots
 
 
 async def fetch_market_detail(
@@ -138,6 +197,10 @@ def _payload_to_constraint(epic: str, body: dict[str, Any]) -> CapitalMarketCons
         if isinstance(first, dict):
             base_ccy = str(first.get("baseExchangeRate", first.get("code", "")) or "")
             quote_ccy = str(first.get("code", "") or "")
+    if not quote_ccy:
+        # Live payloads carry the quote ccy in ``instrument.currency`` (the
+        # ``currencies`` list is absent) — J225 is JPY-quoted, most are USD.
+        quote_ccy = str(instrument.get("currency") or "")
     leverage = _safe_float(instrument.get("leverage", 0.0))
     if leverage <= 0.0:
         # Some endpoints return ``marginFactor`` instead of ``leverage``.
@@ -151,18 +214,34 @@ def _payload_to_constraint(epic: str, body: dict[str, Any]) -> CapitalMarketCons
         # not a defensive damper.
         asset_class = _INSTRUMENT_TYPE_TO_ASSET_CLASS.get(instrument_type, "")
         leverage = fallback_leverage_for_asset_class(asset_class)
+    lot_size = _safe_float(instrument.get("lotSize", 1.0))
+    bid = _safe_float(snapshot.get("bid"))
+    offer = _safe_float(snapshot.get("offer"))
+    snapshot_mid = (bid + offer) / 2.0 if bid > 0.0 and offer > 0.0 else 0.0
     return CapitalMarketConstraint(
         epic=epic,
         instrument_type=instrument_type,
         min_deal_size=_safe_float(_rule_value(rules, "minDealSize")),
-        step_size=_safe_float(_rule_value(rules, "minStepDistance"))
+        # ``minSizeIncrement`` is the SIZE increment; ``minStepDistance`` is a
+        # stop/limit PRICE distance — they diverge on 5/6 live captures
+        # (EURUSD 100 vs 1e-05). The old chain is kept as fallback only.
+        step_size=_safe_float(_rule_value(rules, "minSizeIncrement"))
+        or _safe_float(_rule_value(rules, "minStepDistance"))
         or _safe_float(instrument.get("lotSize", 1.0)),
         decimal_places=int(_safe_float(snapshot.get("decimalPlacesFactor", 0))),
         leverage=leverage,
         pip_value_usd=_safe_float(instrument.get("valueOfOnePip", 0.0)),
         base_ccy=base_ccy,
         quote_ccy=quote_ccy,
+        lot_size=lot_size if lot_size > 0.0 else 1.0,
+        snapshot_mid=snapshot_mid,
     )
+
+
+# Public alias (Bug C): the production constraint cache parses payloads it
+# fetched through the loop-owned ``CapitalSession``. The private name is KEPT
+# (existing imports in tests/test_stream_config.py target it directly).
+payload_to_constraint = _payload_to_constraint
 
 
 def _rule_value(rules: dict[str, Any], key: str) -> Any:

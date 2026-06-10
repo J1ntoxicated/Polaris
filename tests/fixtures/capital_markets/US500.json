@@ -1,0 +1,96 @@
+{
+  "dealingRules": {
+    "marketOrderPreference": "AVAILABLE_DEFAULT_ON",
+    "maxDealSize": {
+      "unit": "POINTS",
+      "value": 2250
+    },
+    "maxStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 100
+    },
+    "minDealSize": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minGuaranteedStopDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.1
+    },
+    "minSizeIncrement": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minStepDistance": {
+      "unit": "POINTS",
+      "value": 0.1
+    },
+    "minStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.01
+    },
+    "trailingStopsPreference": "NOT_AVAILABLE"
+  },
+  "instrument": {
+    "country": "United States of America",
+    "currency": "USD",
+    "epic": "US500",
+    "expiry": "-",
+    "guaranteedStopAllowed": true,
+    "lotSize": 1,
+    "marginFactor": 100,
+    "marginFactorUnit": "PERCENTAGE",
+    "name": "US 500",
+    "openingHours": {
+      "fri": [
+        "00:00 - 21:00"
+      ],
+      "mon": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "sat": [],
+      "sun": [
+        "22:00 - 00:00"
+      ],
+      "thu": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "tue": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "wed": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "zone": "UTC"
+    },
+    "overnightFee": {
+      "longRate": -0.0215124,
+      "shortRate": -0.0007098,
+      "swapChargeInterval": 1440,
+      "swapChargeTimestamp": 1781125200000
+    },
+    "streamingPricesAvailable": true,
+    "symbol": "US500",
+    "type": "INDICES"
+  },
+  "snapshot": {
+    "bid": 7389.6,
+    "decimalPlacesFactor": 1,
+    "delayTime": 0,
+    "high": 7386.6,
+    "low": 7297.5,
+    "marketModes": [
+      "REGULAR"
+    ],
+    "marketStatus": "TRADEABLE",
+    "netChange": -18.6,
+    "offer": 7390.0,
+    "percentageChange": 0.14,
+    "scalingFactor": 1,
+    "updateTime": "2026-06-11T00:23:44.489"
+  }
+}

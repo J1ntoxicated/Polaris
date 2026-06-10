@@ -52,6 +52,11 @@ from polaris.core.live_recalc.regime_flip import fetch_regime
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.scripts._alpaca_open import real_alpaca_open_fill
+from polaris.scripts._production_capital_sizing import (
+    CapitalOrderPlan,
+    maybe_evict_on_reject,
+    translate_capital_order,
+)
 from polaris.scripts._production_reject import (
     COMPLIANCE_REJECT_CODES as COMPLIANCE_REJECT_CODES,
 )
@@ -148,6 +153,8 @@ async def _real_open_fill(
     okx_adapter: Any = None,
     capital_session: Any = None,
     alpaca_adapter: Any = None,
+    capital_lots: float | None = None,
+    capital_contract_factor_usd: float | None = None,
 ) -> OpenAttempt:
     """Drive the real demo venue entry leg → return an ``OpenAttempt``.
 
@@ -215,13 +222,22 @@ async def _real_open_fill(
         return OpenAttempt(fill=None, reject_code="no_session")
     cap_adapter = CapitalAdapter(capital_session)
     direction = "BUY" if side == "long" else "SELL"
-    # T7: pass the per-market leverage so the normalized fill's gross notional
-    # (size × pip × leverage) matches the sized notional — FX 30 / index 20 /
-    # commodity 20 / crypto 2, not the prior implicit flat default.
+    # Bug C fix: ``capital_lots`` = the T4 notional expressed in per-epic venue
+    # lots; ``capital_contract_factor_usd`` makes the fill record the REAL
+    # submitted exposure (size × level × factor — leverage scales margin only,
+    # never exposure; the prior fixed MIN_CAPITAL_LOT stamped every live entry
+    # $200.00). Degraded plan (None) → legacy 1-lot path byte-identical so the
+    # entry always flows (flow_not_block). See _production_capital_sizing.
     leverage = derive_leverage(resolve_stream(venue), asset_class)
+    size = (
+        capital_lots
+        if capital_lots is not None and capital_lots > 0.0
+        else MIN_CAPITAL_LOT
+    )
     return await real_capital_open_fill(
-        cap_adapter, epic=symbol, direction=direction, size=MIN_CAPITAL_LOT,
+        cap_adapter, epic=symbol, direction=direction, size=size,
         strategy_id=strategy_id, last_price=last_price, leverage=leverage,
+        contract_factor_usd=capital_contract_factor_usd,
     )
 
 
@@ -250,14 +266,29 @@ async def reserve_and_submit(
     payload source changes.
     """
     # T7: asset_class is forwarded to _real_open_fill so Capital derives its
-    # per-market leverage (FX 30 / index 20 / commodity 20 / crypto 2) for the
-    # fill's gross notional. (Layer 5 sizing already used asset_class upstream.)
+    # per-market leverage (FX 30 / index 20 / commodity 20 / crypto 2). Post
+    # Bug C the leverage feeds ONLY the degraded legacy fill maths — the wired
+    # path records exposure as lots × level × contract factor (margin ≠ exposure).
     # Task 3 / D2: skip a runtime-blocklisted (venue, symbol) BEFORE reserving —
     # the venue permanently refuses it (compliance), so reserving + submitting
     # would only churn. No reservation, no fault (it's an external decision).
     if is_blocklisted(conn, venue, symbol):
         logger.info("[L7/blocklist] %s:%s non-tradeable — skipping", venue, symbol)
         return None
+    # Bug C fix: translate the T4 notional into per-epic venue lots BEFORE the
+    # fence reservation so the ledger / order payload / rotation candidate all
+    # carry the notional ACTUALLY submitted (requested == submitted == recorded).
+    # The fence is a ledger (no cap comparison); caps bind at T4 sizing off
+    # position_risk_state — which now records real exposure — so a venue
+    # min-deal bump self-corrects on the next entry. Degraded → None → legacy.
+    capital_plan: CapitalOrderPlan | None = None
+    if real_roundtrip and resolve_stream(venue).product_class == "cfd":
+        capital_plan = await translate_capital_order(
+            state=state, conn=conn, capital_session=capital_session,
+            epic=symbol, notional_usd=notional_usd, last_price=last_price,
+        )
+        if capital_plan is not None:
+            notional_usd = capital_plan.effective_notional_usd
     fence = get_process_fence(conn)
     order_key = build_order_key(
         strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
@@ -317,6 +348,10 @@ async def reserve_and_submit(
                 asset_class=asset_class, strength=sig.strength,
                 okx_adapter=okx_adapter, capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter,
+                capital_lots=capital_plan.lots if capital_plan else None,
+                capital_contract_factor_usd=(
+                    capital_plan.contract_factor_usd if capital_plan else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             logger.error(
@@ -336,6 +371,14 @@ async def reserve_and_submit(
             state.fault_events += 1
             return None
         if attempt.fill is None:
+            # Bug C review fix: a size/step-shaped venue reject means the cached
+            # constraint may be stale — evict it (cooldown bypassed) so the next
+            # attempt re-fetches fresh dealing rules. Flow preserved.
+            if resolve_stream(venue).product_class == "cfd":
+                maybe_evict_on_reject(
+                    state, epic=symbol, reject_code=attempt.reject_code,
+                    reject_msg=attempt.reject_msg,
+                )
             await _handle_open_reject(
                 conn, fence=fence, state=state, sig=sig, venue=venue,
                 symbol=symbol, reservation_id=reservation["reservation_id"],

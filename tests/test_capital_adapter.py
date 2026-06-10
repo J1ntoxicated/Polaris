@@ -344,8 +344,9 @@ def test_size_usd_to_lots_min_floor() -> None:
         base_ccy="EUR",
         quote_ccy="USD",
     )
-    lots = size_usd_to_lots(constraint=c, notional_usd=5.0, last_price=1.10)
-    # 5 USD / 10 USD/pip = 0.5 lots → floored to min 1.0 → step 0.1 → 1.0.
+    lots = size_usd_to_lots(constraint=c, notional_usd=0.5, last_price=1.10)
+    # Bug C formula: unit = price × lotSize(1) = $1.10 → raw 0.4545 < min 1.0
+    # → ceil-to-step(min) = 1.0 (venue floor expression, never a skip).
     assert lots == 1.0
 
 
@@ -371,6 +372,7 @@ def test_size_usd_to_lots_above_min() -> None:
         base_ccy="EUR",
         quote_ccy="USD",
     )
-    lots = size_usd_to_lots(constraint=c, notional_usd=25.0, last_price=1.10)
-    # 25 / 10 = 2.5 → step 0.1 → 2.5.
+    lots = size_usd_to_lots(constraint=c, notional_usd=2.75, last_price=1.10)
+    # Bug C formula: unit = price × lotSize(1) = $1.10 → raw 2.5 → step 0.1 → 2.5
+    # (floor-to-step never exceeds the T4 ask; leverage/pip never enter).
     assert lots == 2.5

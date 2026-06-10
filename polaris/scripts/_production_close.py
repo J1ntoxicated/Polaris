@@ -32,6 +32,7 @@ from polaris.core.live_recalc.session_exit_rail import (
     _fx_in_session,
 )
 from polaris.core.streams import resolve_stream
+from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_effects import (
     _safe_lookup_regime,
     _safe_record_meta_label,
@@ -146,6 +147,7 @@ async def _real_close_fill(
     okx_adapter: Any = None,
     capital_session: Any = None,
     alpaca_adapter: Any = None,
+    capital_contract_factor_usd: float | None = None,
 ) -> Fill | PendingClose | CloseOrphan | None:
     """Drive the real demo venue close leg → return the exit ``Fill``.
 
@@ -201,9 +203,14 @@ async def _real_close_fill(
         )
         return CloseOrphan(available=0.0)
     cap_adapter = CapitalAdapter(capital_session)
+    # Bug C fix: when the constraint cache is warm (usually warmed at entry)
+    # the close fill's size_usd records the REAL exposure (size × level ×
+    # lotSize × quote→USD); a cache miss keeps the legacy maths (current
+    # behaviour) — PnL is keyed off the ENTRY size_usd either way.
     return await real_capital_close_fill(
         cap_adapter, deal_id=trade.deal_id, strategy_id=trade.strategy_id,
         pending_ref=trade.pending_close_ref,
+        contract_factor_usd=capital_contract_factor_usd,
     )
 
 
@@ -325,11 +332,19 @@ async def _close_trade_with_real_pnl(
         # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
         # computed against the actual exit fill (not the pre-close bar drift).
         fresh_mark = _latest_bar_close(conn, venue=trade.venue, symbol=trade.symbol)
+        # Bug C fix: peek-only (no I/O) close-fill exposure factor for the
+        # Capital branch of ``_real_close_fill`` (okx/alpaca never reach it).
+        cap_factor: float | None = None
+        if trade.venue not in ("okx", "alpaca"):
+            cap_factor = capital_close_contract_factor(
+                state=state, conn=conn, epic=trade.symbol,
+            )
         real_fill = None
         try:
             real_fill = await _real_close_fill(
                 trade=trade, fresh_mark=fresh_mark, okx_adapter=okx_adapter,
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                capital_contract_factor_usd=cap_factor,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             # Genuine adapter exception (transport/parse) — internal fault.

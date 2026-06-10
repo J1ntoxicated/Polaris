@@ -1,0 +1,96 @@
+{
+  "dealingRules": {
+    "marketOrderPreference": "AVAILABLE_DEFAULT_ON",
+    "maxDealSize": {
+      "unit": "POINTS",
+      "value": 80000
+    },
+    "maxStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 100
+    },
+    "minDealSize": {
+      "unit": "POINTS",
+      "value": 0.1
+    },
+    "minGuaranteedStopDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.5
+    },
+    "minSizeIncrement": {
+      "unit": "POINTS",
+      "value": 0.01
+    },
+    "minStepDistance": {
+      "unit": "POINTS",
+      "value": 0.1
+    },
+    "minStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.01
+    },
+    "trailingStopsPreference": "NOT_AVAILABLE"
+  },
+  "instrument": {
+    "country": "Japan",
+    "currency": "JPY",
+    "epic": "J225",
+    "expiry": "-",
+    "guaranteedStopAllowed": true,
+    "lotSize": 1,
+    "marginFactor": 100,
+    "marginFactorUnit": "PERCENTAGE",
+    "name": "Japan 225",
+    "openingHours": {
+      "fri": [
+        "00:00 - 21:00"
+      ],
+      "mon": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "sat": [],
+      "sun": [
+        "22:00 - 00:00"
+      ],
+      "thu": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "tue": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "wed": [
+        "00:00 - 21:00",
+        "21:05 - 00:00"
+      ],
+      "zone": "UTC"
+    },
+    "overnightFee": {
+      "longRate": -0.0130494,
+      "shortRate": -0.0091729,
+      "swapChargeInterval": 1440,
+      "swapChargeTimestamp": 1781125200000
+    },
+    "streamingPricesAvailable": true,
+    "symbol": "J225",
+    "type": "INDICES"
+  },
+  "snapshot": {
+    "bid": 64637.4,
+    "decimalPlacesFactor": 1,
+    "delayTime": 0,
+    "high": 65086.1,
+    "low": 63170.2,
+    "marketModes": [
+      "REGULAR"
+    ],
+    "marketStatus": "TRADEABLE",
+    "netChange": -984.3,
+    "offer": 64647.4,
+    "percentageChange": 0.32,
+    "scalingFactor": 1,
+    "updateTime": "2026-06-11T00:23:41.573"
+  }
+}

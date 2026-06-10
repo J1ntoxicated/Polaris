@@ -1,0 +1,96 @@
+{
+  "dealingRules": {
+    "marketOrderPreference": "AVAILABLE_DEFAULT_ON",
+    "maxDealSize": {
+      "unit": "POINTS",
+      "value": 125000
+    },
+    "maxStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 100
+    },
+    "minDealSize": {
+      "unit": "POINTS",
+      "value": 1
+    },
+    "minGuaranteedStopDistance": {
+      "unit": "PERCENTAGE",
+      "value": 1.5
+    },
+    "minSizeIncrement": {
+      "unit": "POINTS",
+      "value": 0.1
+    },
+    "minStepDistance": {
+      "unit": "POINTS",
+      "value": 0.001
+    },
+    "minStopOrProfitDistance": {
+      "unit": "PERCENTAGE",
+      "value": 0.01
+    },
+    "trailingStopsPreference": "NOT_AVAILABLE"
+  },
+  "instrument": {
+    "country": "",
+    "currency": "USD",
+    "epic": "OIL_CRUDE",
+    "expiry": "-",
+    "guaranteedStopAllowed": true,
+    "lotSize": 1,
+    "marginFactor": 100,
+    "marginFactorUnit": "PERCENTAGE",
+    "name": "Crude Oil Spot",
+    "openingHours": {
+      "fri": [
+        "00:00 - 21:00"
+      ],
+      "mon": [
+        "00:00 - 21:00",
+        "22:00 - 00:00"
+      ],
+      "sat": [],
+      "sun": [
+        "22:00 - 00:00"
+      ],
+      "thu": [
+        "00:00 - 21:00",
+        "22:00 - 00:00"
+      ],
+      "tue": [
+        "00:00 - 21:00",
+        "22:00 - 00:00"
+      ],
+      "wed": [
+        "00:00 - 21:00",
+        "22:00 - 00:00"
+      ],
+      "zone": "UTC"
+    },
+    "overnightFee": {
+      "longRate": -0.01096,
+      "shortRate": -0.01096,
+      "swapChargeInterval": 1440,
+      "swapChargeTimestamp": 1781125200000
+    },
+    "streamingPricesAvailable": true,
+    "symbol": "Oil - Crude",
+    "type": "COMMODITIES"
+  },
+  "snapshot": {
+    "bid": 88.566,
+    "decimalPlacesFactor": 3,
+    "delayTime": 0,
+    "high": 89.351,
+    "low": 86.336,
+    "marketModes": [
+      "REGULAR"
+    ],
+    "marketStatus": "TRADEABLE",
+    "netChange": -1.215,
+    "offer": 88.598,
+    "percentageChange": 1.07,
+    "scalingFactor": 1,
+    "updateTime": "2026-06-11T00:23:39.331"
+  }
+}

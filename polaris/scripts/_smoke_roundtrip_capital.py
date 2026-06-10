@@ -86,6 +86,7 @@ async def real_capital_open_fill(
     leverage: float = 1.0,
     last_price: float | None = None,
     poll_delay_sec: float = 0.5,
+    contract_factor_usd: float | None = None,
 ) -> OpenAttempt:
     """Capital entry leg: open → confirm → normalize.
 
@@ -93,6 +94,10 @@ async def real_capital_open_fill(
     ``deal_id`` on success, or the venue reject ``status``/``reason`` (e.g.
     ``"REJECTED"``, market-closed) — falling back to the ``"no_fill"`` sentinel
     — so the caller can classify an EXTERNAL venue reject apart from a fault.
+
+    ``contract_factor_usd`` (Bug C fix): when set, the normalized fill records
+    the REAL exposure ``size × level × factor`` (leverage excluded); ``None``
+    keeps the legacy ``size × pip × leverage`` byte-identical.
     """
     open_resp = await adapter.open_position(epic=epic, direction=direction, size=size)
     if not open_resp.ok or not open_resp.deal_reference:
@@ -126,6 +131,7 @@ async def real_capital_open_fill(
     fill = normalize_capital_confirm(
         confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
         leverage=leverage, expected_price=last_price,
+        contract_factor_usd=contract_factor_usd,
     )
     return OpenAttempt(
         fill=fill, deal_id=_capital_deal_id_from_confirm(confirm, open_resp),
@@ -135,6 +141,7 @@ async def real_capital_open_fill(
 async def _confirm_pending_close(
     adapter: Any, *, pending_ref: str, strategy_id: str,
     pip_value_usd: float, leverage: float,
+    contract_factor_usd: float | None = None,
 ) -> Fill | PendingClose | None:
     """BUG E-b: settle a previously-fired close ``deal_reference`` BEFORE
     firing a new ``close_position`` (the GOLD close-reject re-fire loop).
@@ -160,7 +167,7 @@ async def _confirm_pending_close(
     try:
         return normalize_capital_confirm(
             confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
-            leverage=leverage,
+            leverage=leverage, contract_factor_usd=contract_factor_usd,
         )
     except FillNormalizationError as exc:
         logger.warning(
@@ -198,6 +205,7 @@ async def real_capital_close_fill(
     leverage: float = 1.0,
     poll_delay_sec: float = 0.5,
     pending_ref: str | None = None,
+    contract_factor_usd: float | None = None,
 ) -> Fill | PendingClose | CloseOrphan | None:
     """Capital close leg: close_position(deal_id) → confirm-poll → normalize.
 
@@ -216,6 +224,7 @@ async def real_capital_close_fill(
         settled = await _confirm_pending_close(
             adapter, pending_ref=pending_ref, strategy_id=strategy_id,
             pip_value_usd=pip_value_usd, leverage=leverage,
+            contract_factor_usd=contract_factor_usd,
         )
         if settled is not None:
             return settled
@@ -253,7 +262,7 @@ async def real_capital_close_fill(
     try:
         return normalize_capital_confirm(
             confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
-            leverage=leverage,
+            leverage=leverage, contract_factor_usd=contract_factor_usd,
         )
     except FillNormalizationError as exc:
         # Unknown terminal variant — never blind-re-fire; confirm again next

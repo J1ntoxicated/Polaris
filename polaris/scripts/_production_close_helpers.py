@@ -33,9 +33,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# FIX B: a real close fill within this fraction of the tracked qty counts as a
+# FULL close (rounding/fee dust). Anything below is a genuine partial → the
+# position stays OPEN with a reduced qty so the remainder closes next tick.
+# BUG A reuses the SAME eps for the pnl_usd slice gate so the full/partial
+# classification and the stamping can never diverge.
+_CLOSE_FULL_FILL_EPS = 0.005
+
+
 def real_pnl_r_from_fills(
     conn: sqlite3.Connection, *, trade: SimulatedTrade,
     exit_price_override: float | None = None,
+    close_base_qty: float | None = None,
 ) -> tuple[float, float, float]:
     """Read entry fill + most recent bars; compute R-units from real bar drift.
 
@@ -43,6 +52,17 @@ def real_pnl_r_from_fills(
     short the R denominator falls back to ``entry_price × 0.5%`` so the
     calculation is finite — but the magnitude reflects the *actual* close
     drift, not a hard-coded sign.
+
+    ``close_base_qty`` (BUG A slice fix): the base qty THIS close fill actually
+    sold. When set (real-roundtrip close path), ``pnl_usd`` is scaled to the
+    slice's fraction of the entry qty — clamped to the not-yet-closed remainder
+    (persisted close fills subtracted) so a duplicate/over-sell re-fire stamps
+    ~0 instead of re-booking the position PnL. The legacy stamping put the FULL
+    position pnl_usd on EVERY partial slice (N slices ≈ N× realised PnL — SPCE
+    56/56 fills each carried the whole -579.78). ``pnl_r`` is qty-invariant
+    (move quality for Layer 4/5) and is never scaled. A ~full slice
+    (``frac >= 1 - _CLOSE_FULL_FILL_EPS``) skips the multiply entirely so a
+    single-shot full close stays byte-identical with ``close_base_qty=None``.
 
     ``exit_price_override`` (P1-6 venue-wire fix): when set (real-roundtrip
     close), ``pnl_r`` / ``pnl_usd`` are computed against the **real exit fill
@@ -63,7 +83,7 @@ def real_pnl_r_from_fills(
     if trade.position_id:
         row = conn.execute(
             """
-            SELECT fill_price, size_usd FROM fills
+            SELECT fill_price, size_usd, base_qty FROM fills
             WHERE contribution_id = ? AND instrument_id = ? AND is_close = 0
             ORDER BY ts_ms ASC LIMIT 1
             """,
@@ -72,7 +92,7 @@ def real_pnl_r_from_fills(
     else:
         row = conn.execute(
             """
-            SELECT fill_price, size_usd FROM fills
+            SELECT fill_price, size_usd, base_qty FROM fills
             WHERE strategy_id = ? AND instrument_id = ? AND is_close = 0
             ORDER BY ts_ms DESC LIMIT 1
             """,
@@ -83,6 +103,7 @@ def real_pnl_r_from_fills(
         return (0.0, 0.0, fallback_exit)
     entry_price = float(row[0])
     size_usd = float(row[1])
+    entry_base_qty = float(row[2] or 0.0)
     trade.entry_price = entry_price
     # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit mark
     # and ATR window are derived from real recent data, never a +10h ghost bar.
@@ -115,6 +136,22 @@ def real_pnl_r_from_fills(
     atr_usd = max(entry_price * atr_pct * 2.0, entry_price * 1e-4)
     pnl_r = pnl_abs / atr_usd
     pnl_usd = (pnl_abs / entry_price) * size_usd
+    # BUG A — slice the pnl_usd to THIS close fill's fraction of the entry qty,
+    # clamped to the un-closed remainder (persisted close fills of the SAME
+    # instrument subtracted; foreign-instrument fills sharing the id are the
+    # historical cross-match pollution and must not shrink the remainder).
+    if close_base_qty is not None and trade.position_id and entry_base_qty > 0.0:
+        closed_so_far = float(conn.execute(
+            "SELECT COALESCE(SUM(base_qty), 0.0) FROM fills "
+            "WHERE contribution_id = ? AND instrument_id = ? AND is_close = 1",
+            (trade.position_id, f"{trade.venue}:{trade.symbol}"),
+        ).fetchone()[0])
+        qty_eff = min(close_base_qty, max(0.0, entry_base_qty - closed_so_far))
+        frac = qty_eff / entry_base_qty
+        if frac < 1.0 - _CLOSE_FULL_FILL_EPS:
+            # Genuine partial slice. A ~full close never reaches this multiply,
+            # keeping the single-shot full-close pnl_usd byte-identical.
+            pnl_usd *= frac
     pnl_r = max(-10.0, min(10.0, pnl_r))
     return (pnl_r, pnl_usd, exit_price)
 
@@ -197,10 +234,45 @@ def _close_excursion_r(
         side=trade.side, atr_usd=atr_usd,
     )
 
-# FIX B: a real close fill within this fraction of the tracked qty counts as a
-# FULL close (rounding/fee dust). Anything below is a genuine partial → the
-# position stays OPEN with a reduced qty so the remainder closes next tick.
-_CLOSE_FULL_FILL_EPS = 0.005
+def close_pnl_usd_total(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, fallback: float,
+) -> float:
+    """Cumulative realised ``pnl_usd`` over ALL persisted close fills of the
+    position (the just-committed final slice included).
+
+    The lineage segment must carry the POSITION total: with BUG A's slice
+    stamping the final close fill holds only the LAST slice's pnl, so stamping
+    that alone would under-state every partially-closed position. Fail-open:
+    a read error (or no position_id) returns ``fallback`` (the final slice's
+    own pnl — the legacy behaviour).
+    """
+    if not trade.position_id:
+        return fallback
+    try:
+        row = conn.execute(
+            "SELECT SUM(pnl_usd) FROM fills WHERE contribution_id = ? "
+            "AND instrument_id = ? AND is_close = 1",
+            (trade.position_id, f"{trade.venue}:{trade.symbol}"),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning("[close] cumulative pnl_usd read failed: %r", exc)
+        return fallback
+    if row is None or row[0] is None:
+        return fallback
+    return float(row[0])
+
+
+def _note_pending_close(trade: SimulatedTrade, ref: str) -> None:
+    """BUG E bookkeeping: the close order is LIVE at the venue with its fill
+    unconfirmed — store the ref so the next tick CONFIRMS it first (never
+    re-fires a duplicate sell). The caller then falls into the no-fill tally so
+    the zombie drain keeps its backstop on a forever-pending order."""
+    trade.pending_close_ref = ref
+    logger.info(
+        "[close/real] %s:%s close order PENDING ref=%s — confirm-first next "
+        "tick (no duplicate re-fire)",
+        trade.venue, trade.symbol, ref,
+    )
 
 
 def _latest_bar_close(

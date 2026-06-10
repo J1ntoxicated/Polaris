@@ -20,6 +20,7 @@ loop never aborts; ``dry_run=True`` returns synthetic fills (CI without creds).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sqlite3
@@ -55,6 +56,7 @@ from polaris.scripts._smoke_roundtrip_shared import (
     MIN_OKX_NOTIONAL_USD,
     CloseOrphan,
     OpenAttempt,
+    PendingClose,
     record_venue_orphan,
     resolve_okx_base_url,
 )
@@ -67,6 +69,7 @@ __all__ = [
     "MIN_CAPITAL_LOT",
     "CloseOrphan",
     "OpenAttempt",
+    "PendingClose",
     "fetch_okx_available_usdt",
     "real_alpaca_close_fill",
     "real_capital_close_fill",
@@ -187,6 +190,22 @@ async def _okx_sell_child(
     if not rows:
         return None
     order_state = str(rows[0].get("state") or "").lower()
+    if order_state == "live":
+        # BUG E: a market sell still resting after the poll — CANCEL it so it
+        # cannot fill AFTER the caller re-fires next tick (double sell), then
+        # re-check once for a race fill during the cancel. A market order never
+        # survives to the next tick after this, so OKX needs no PendingClose.
+        with contextlib.suppress(Exception):
+            await adapter.cancel_order(
+                inst_id=inst_id, ord_id=sell_resp.venue_order_id
+            )
+        state = await adapter.fetch_order(
+            inst_id=inst_id, ord_id=sell_resp.venue_order_id
+        )
+        rows = state.get("data", []) or []
+        if not rows:
+            return None
+        order_state = str(rows[0].get("state") or "").lower()
     if order_state not in ("filled", "partially_filled"):
         # Non-fill venue state (e.g. canceled) — EXTERNAL no-fill, not a fault.
         return None

@@ -56,6 +56,13 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
     # size-weighted average so the close path's PnL denominator
     # (``_production_close.py``) matches the true cost basis;
     # ``notional_usd`` is the sum of entry size_usd.
+    # BUG B: ``closed_qty`` subtracts the persisted PARTIAL-close fills
+    # (instrument-id scoped — a foreign instrument's close fill sharing the
+    # contribution_id is historical cross-match pollution and must not shrink
+    # this position) and ``pos_qty`` carries positions.qty (the partial-close
+    # decrement SSOT). Hydrating the raw entry-fills sum re-sold the ORIGINAL
+    # full qty after every restart (SPCE: 552.29 shares sold across 3 sessions
+    # for a 221.29-share entry).
     rows = conn.execute(
         """
         SELECT p.position_id, p.venue, p.symbol, p.strategy_id, p.side,
@@ -64,7 +71,12 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
                SUM(f.size_usd) AS notional_usd,
                MAX(f.order_id) AS venue_order_id,
                SUM(f.base_qty) AS base_qty,
-               p.deal_id AS deal_id
+               p.deal_id AS deal_id,
+               p.qty AS pos_qty,
+               (SELECT COALESCE(SUM(c.base_qty), 0.0) FROM fills c
+                 WHERE c.contribution_id = p.position_id
+                   AND c.instrument_id = p.venue || ':' || p.symbol
+                   AND c.is_close = 1) AS closed_qty
         FROM positions p
         JOIN fills f
           ON f.contribution_id = p.position_id
@@ -74,7 +86,7 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
         -- venue-side state-drift recovery) are all excluded by construction, so
         -- a reconciled orphan is never re-hydrated + retried on restart.
         GROUP BY p.position_id, p.venue, p.symbol, p.strategy_id, p.side,
-                 p.opened_ts, p.underlying_group_id, p.deal_id
+                 p.opened_ts, p.underlying_group_id, p.deal_id, p.qty
         ORDER BY p.opened_ts ASC
         """
     ).fetchall()
@@ -82,6 +94,25 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
     for r in rows:
         position_id = str(r[0])
         venue = str(r[1])
+        entry_qty = float(r[10] or 0.0)
+        pos_qty = float(r[12] or 0.0)
+        closed_qty = float(r[13] or 0.0)
+        # Remaining = min of BOTH remainders so over-restoring (= re-selling)
+        # is blocked from either side: a legacy row whose qty was never
+        # decremented is caught by the fills subtraction; a row whose close
+        # fills were lost is caught by positions.qty.
+        remaining = max(0.0, min(pos_qty, entry_qty - closed_qty))
+        if remaining <= 1e-12:
+            # Fully consumed by persisted closes — never resurrect it as a
+            # sellable trade (the restart re-sell loop). The stale 'open'
+            # status row itself is the correction script's job to flip.
+            logger.warning(
+                "[hydrate] %s %s:%s skipped — entry qty %.10f already consumed "
+                "(closed %.10f, positions.qty %.10f); status row left for the "
+                "correction pass",
+                position_id, venue, str(r[2]), entry_qty, closed_qty, pos_qty,
+            )
+            continue
         venue_order_id = str(r[9]) if r[9] else None
         # positions.deal_id is the SSOT for the Capital close key (persisted at
         # open + reconcile-import). Fall back to the entry fill's order_id stash
@@ -97,7 +128,10 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
             strategy_id=str(r[3]),
             side=str(r[4]),
             entry_price=float(r[7]),
-            notional_usd=float(r[8]),
+            # Scale the rotation/risk-view notional to the REMAINING fraction
+            # so it matches the actual residual venue exposure.
+            notional_usd=float(r[8]) * (remaining / entry_qty)
+            if entry_qty > 0.0 else float(r[8]),
             open_ts=int(r[5]),
             position_id=position_id,
             underlying_group_id=str(r[6] or ""),
@@ -107,7 +141,7 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
             # OKX closes by ``base_qty`` and needs no deal_id.
             venue_order_id=venue_order_id,
             deal_id=deal_id,
-            base_qty=float(r[10] or 0.0),
+            base_qty=remaining,
         )
         out.append(trade)
     return out

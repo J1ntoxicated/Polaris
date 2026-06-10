@@ -44,13 +44,16 @@ from polaris.scripts._production_close_helpers import (
     _CLOSE_FULL_FILL_EPS,
     _close_excursion_r,
     _latest_bar_close,
+    _note_pending_close,
     _persist_partial_close,
     _reconcile_orphan,
+    close_pnl_usd_total,
     real_pnl_r_from_fills,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
     CloseOrphan,
+    PendingClose,
     real_alpaca_close_fill,
     real_capital_close_fill,
     real_okx_close_fill,
@@ -111,11 +114,12 @@ __all__ = [
 
 async def _real_alpaca_close(
     trade: SimulatedTrade, alpaca_adapter: Any
-) -> Fill | CloseOrphan | None:
+) -> Fill | PendingClose | CloseOrphan | None:
     """Alpaca close leg: SELL the tracked shares (build adapter from PAPER creds
     when none is injected, mirroring the OKX None-adapter env path). ``None``
     (transient — market closed / no creds) preserves the position so the rail's
     stale-overnight trigger re-arms the flatten at the next in-session open.
+    ``trade.pending_close_ref`` (BUG E) is settled first — never two live sells.
     """
     if alpaca_adapter is None:
         api_key, secret = resolve_alpaca_credentials()
@@ -126,10 +130,12 @@ async def _real_alpaca_close(
             return await real_alpaca_close_fill(
                 adapter, symbol=trade.symbol, base_qty=trade.base_qty,
                 strategy_id=trade.strategy_id,
+                pending_order_id=trade.pending_close_ref,
             )
     return await real_alpaca_close_fill(
         alpaca_adapter, symbol=trade.symbol, base_qty=trade.base_qty,
         strategy_id=trade.strategy_id,
+        pending_order_id=trade.pending_close_ref,
     )
 
 
@@ -140,7 +146,7 @@ async def _real_close_fill(
     okx_adapter: Any = None,
     capital_session: Any = None,
     alpaca_adapter: Any = None,
-) -> Fill | CloseOrphan | None:
+) -> Fill | PendingClose | CloseOrphan | None:
     """Drive the real demo venue close leg → return the exit ``Fill``.
 
     P0 venue wire: OKX sells the entry ``base_qty``; Alpaca sells the tracked
@@ -197,6 +203,7 @@ async def _real_close_fill(
     cap_adapter = CapitalAdapter(capital_session)
     return await real_capital_close_fill(
         cap_adapter, deal_id=trade.deal_id, strategy_id=trade.strategy_id,
+        pending_ref=trade.pending_close_ref,
     )
 
 
@@ -337,6 +344,14 @@ async def _close_trade_with_real_pnl(
             )
             state.fault_events += 1
             return False
+        if isinstance(real_fill, PendingClose):
+            # BUG E: live-but-unconfirmed close order → confirm-first next tick
+            # (no duplicate re-fire); falls into the no-fill tally below.
+            _note_pending_close(trade, real_fill.ref)
+            real_fill = None
+        elif real_fill is not None:
+            # Fill / CloseOrphan — any pending close order is settled either way.
+            trade.pending_close_ref = None
         if isinstance(real_fill, CloseOrphan):
             # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still tracks
             # base_qty, an over-count from the close-chunk fix). Mark the position
@@ -391,8 +406,12 @@ async def _close_trade_with_real_pnl(
         # Layer 4 cell matrix + Layer 5 learner updates reflect what actually
         # traded (a real loss must not be logged as a win because the seeded
         # bars trended up).
+        # BUG A: pass the slice qty so pnl_usd is THIS fill's share of the
+        # position PnL (full AND partial — the partial-then-remainder final
+        # slice was the residual full-PnL re-stamping path).
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
             conn, trade=trade, exit_price_override=real_fill.fill_price,
+            close_base_qty=real_fill.base_qty,
         )
         close_fill = real_fill
         # FIX B: a genuine partial (child reject / within-child) returns less
@@ -492,9 +511,13 @@ async def _close_trade_with_real_pnl(
     # ``close_reason`` falls back to 'exit' when the caller did not name a
     # trigger (e.g. plain G6 EXIT_NOW / FIFO close).
     if trade.position_id:
+        # Segment pnl_usd = POSITION-cumulative close-fill sum (this final
+        # slice included) — last-slice stamping would under-state every
+        # partially-closed position now that BUG A slices per fill.
         record_segment_close(
             conn, position_id=trade.position_id, exit_ts=now_ts,
-            exit_reason=close_reason or "exit", pnl_r=pnl_r, pnl_usd=pnl_usd,
+            exit_reason=close_reason or "exit", pnl_r=pnl_r,
+            pnl_usd=close_pnl_usd_total(conn, trade=trade, fallback=pnl_usd),
         )
     _safe_update_cell_matrix(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,

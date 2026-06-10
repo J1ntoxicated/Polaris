@@ -268,6 +268,139 @@ def test_okx_hydrate_leaves_deal_id_none(conn):
     assert trade.deal_id is None
 
 
+def _seed_close_fill(
+    conn: sqlite3.Connection,
+    *,
+    fill_id: str,
+    venue: str,
+    instrument_id: str,
+    base_qty: float,
+    fill_price: float,
+    contribution_id: str,
+    ts_ms: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO fills
+            (fill_id, venue, instrument_id, strategy_id, side, size_usd,
+             fill_price, fee_usd, slippage_bps, ts_ms, order_id,
+             contribution_id, pnl_usd, is_close, base_qty, quote_qty, state)
+        VALUES (?, ?, ?, 'tsmom', 'sell', ?, ?, 0, 0, ?, '', ?, 0.0, 1, ?, ?,
+                'filled')
+        """,
+        (fill_id, venue, instrument_id, base_qty * fill_price, fill_price,
+         ts_ms, contribution_id, base_qty, base_qty * fill_price),
+    )
+
+
+# ---------------------------------------------------------------------------
+# BUG B — hydrate must restore the REMAINING qty, not the original entry qty.
+# Live incident: SPCE entered 221.288515406 shares, partially closed 161
+# (positions.qty correctly decremented to 60.288...), but every restart
+# re-hydrated base_qty from the ENTRY fills sum (221.288...) and re-sold the
+# full original qty — 552.29 shares sold across 3 sessions for a 221.29-share
+# position. Hydrate now subtracts the persisted close fills (instrument-id
+# scoped) AND clamps to positions.qty (the partial-close SSOT).
+# ---------------------------------------------------------------------------
+
+
+def test_partial_closed_position_hydrates_remaining_qty(conn):
+    """SPCE shape: entry 221.288..., close fill 161, positions.qty=60.288...
+    → hydrate must restore base_qty 60.288... (NOT the 221.288 entry sum) and
+    scale notional_usd to the remaining fraction."""
+    entry_qty = 221.288515406
+    remaining = entry_qty - 161.0
+    _seed_position(conn, position_id="pos_part", venue="alpaca", symbol="SPCE",
+                   strategy_id="tsmom", side="long", qty=remaining,
+                   opened_ts=1000)
+    _seed_entry_fill(conn, fill_id="f_part_e", venue="alpaca",
+                     instrument_id="alpaca:SPCE", strategy_id="tsmom",
+                     side="long", size_usd=entry_qty * 7.14, fill_price=7.14,
+                     contribution_id="pos_part", ts_ms=1_000_000)
+    _seed_close_fill(conn, fill_id="f_part_c", venue="alpaca",
+                     instrument_id="alpaca:SPCE", base_qty=161.0,
+                     fill_price=4.52, contribution_id="pos_part",
+                     ts_ms=2_000_000)
+
+    [t] = hydrate_open_positions(conn)
+    assert t.base_qty == pytest.approx(remaining, rel=1e-9)
+    assert t.notional_usd == pytest.approx(
+        entry_qty * 7.14 * (remaining / entry_qty), rel=1e-9
+    )
+
+
+def test_legacy_qty_not_decremented_close_fills_still_subtract(conn):
+    """Legacy row whose positions.qty was never decremented (still the full
+    entry qty) but close fills exist — the fills subtraction must win."""
+    _seed_position(conn, position_id="pos_leg", venue="okx", symbol="SOL-USDT",
+                   strategy_id="tsmom", side="long", qty=100.0, opened_ts=1000)
+    _seed_entry_fill(conn, fill_id="f_leg_e", venue="okx",
+                     instrument_id="okx:SOL-USDT", strategy_id="tsmom",
+                     side="long", size_usd=10_000.0, fill_price=100.0,
+                     contribution_id="pos_leg", ts_ms=1_000_000)
+    _seed_close_fill(conn, fill_id="f_leg_c", venue="okx",
+                     instrument_id="okx:SOL-USDT", base_qty=60.0,
+                     fill_price=130.0, contribution_id="pos_leg",
+                     ts_ms=2_000_000)
+
+    [t] = hydrate_open_positions(conn)
+    assert t.base_qty == pytest.approx(40.0, rel=1e-9)
+
+
+def test_over_sold_row_skipped_with_warning(conn, caplog):
+    """Close fills >= entry qty (the over-sold SPCE end-state) — the row must
+    NOT resurrect as a sellable trade on restart; a warning is logged. Status
+    correction is the correction script's job, not hydrate's."""
+    _seed_position(conn, position_id="pos_over", venue="alpaca", symbol="SPCE",
+                   strategy_id="tsmom", side="long", qty=0.0, opened_ts=1000)
+    _seed_entry_fill(conn, fill_id="f_over_e", venue="alpaca",
+                     instrument_id="alpaca:SPCE", strategy_id="tsmom",
+                     side="long", size_usd=1580.0, fill_price=7.14,
+                     contribution_id="pos_over", ts_ms=1_000_000)
+    for i, qty in enumerate((161.0, 161.0, 230.29)):
+        _seed_close_fill(conn, fill_id=f"f_over_c{i}", venue="alpaca",
+                         instrument_id="alpaca:SPCE", base_qty=qty,
+                         fill_price=4.52, contribution_id="pos_over",
+                         ts_ms=2_000_000 + i)
+
+    with caplog.at_level("WARNING"):
+        trades = hydrate_open_positions(conn)
+    assert trades == []
+    assert any("pos_over" in r.message for r in caplog.records)
+
+
+def test_no_close_fills_behaviour_zero_full_entry_qty(conn):
+    """No close fills → base_qty == entry fills sum, notional un-scaled
+    (behaviour-0 for the normal restart path)."""
+    _seed_position(conn, position_id="pos_b0", venue="okx", symbol="BTC-USDT",
+                   strategy_id="tsmom", side="long", qty=0.001, opened_ts=1000)
+    _seed_entry_fill(conn, fill_id="f_b0", venue="okx",
+                     instrument_id="okx:BTC-USDT", strategy_id="tsmom",
+                     side="long", size_usd=50.0, fill_price=50_000.0,
+                     contribution_id="pos_b0", ts_ms=1_000_000)
+    [t] = hydrate_open_positions(conn)
+    assert t.base_qty == pytest.approx(0.001, rel=1e-9)
+    assert t.notional_usd == pytest.approx(50.0)
+
+
+def test_foreign_instrument_close_fill_not_subtracted(conn):
+    """Cross-match pollution guard: a close fill of ANOTHER instrument sharing
+    this contribution_id must not shrink (or skip) this position's remainder."""
+    _seed_position(conn, position_id="pos_fx", venue="okx", symbol="BTC-USDT",
+                   strategy_id="tsmom", side="long", qty=0.001, opened_ts=1000)
+    _seed_entry_fill(conn, fill_id="f_fx_e", venue="okx",
+                     instrument_id="okx:BTC-USDT", strategy_id="tsmom",
+                     side="long", size_usd=50.0, fill_price=50_000.0,
+                     contribution_id="pos_fx", ts_ms=1_000_000)
+    # Foreign-instrument close fill (historic id-collision pollution shape).
+    _seed_close_fill(conn, fill_id="f_fx_c", venue="okx",
+                     instrument_id="okx:ETH-USDT", base_qty=0.001,
+                     fill_price=3000.0, contribution_id="pos_fx",
+                     ts_ms=2_000_000)
+    [t] = hydrate_open_positions(conn)
+    assert t.base_qty == pytest.approx(0.001, rel=1e-9)
+
+
 def test_capital_legacy_falls_back_to_fill_order_id(conn):
     """Legacy Capital row (positions.deal_id NULL) falls back to the entry
     fill's order_id stash so pre-column DBs still close on restart."""

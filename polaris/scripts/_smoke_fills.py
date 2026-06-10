@@ -55,6 +55,12 @@ class SimulatedTrade:
     venue_order_id: str | None = None
     deal_id: str | None = None
     base_qty: float = 0.0
+    # BUG E: venue ref of an UNCONFIRMED close order (Alpaca order_id / Capital
+    # close deal_reference). While set, the close path CONFIRMS this ref first
+    # instead of firing a duplicate close order. In-memory only (a crash right
+    # after order submit loses it — the hydrate remaining-qty restore plus the
+    # venue available/over-count clamps then block the double sell).
+    pending_close_ref: str | None = None
 
 
 def _okx_fill_payload(

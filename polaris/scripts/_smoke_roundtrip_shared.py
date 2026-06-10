@@ -40,6 +40,23 @@ class OpenAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingClose:
+    """BUG E — a close order is LIVE at the venue but its fill is unconfirmed.
+
+    Third semantic next to a ``Fill`` (settled) and ``None`` (no order remains
+    → safe to re-fire next tick): the order may still execute, so the caller
+    must NOT fire a duplicate close. It stores ``ref`` (Alpaca order_id /
+    Capital close deal_reference) on the trade and CONFIRMS that ref first on
+    the next tick. Pins the GOLD close-reject re-fire loop and the SELX
+    missed-late-fill double sell. OKX market sells never survive to the next
+    tick (a still-live order is cancelled + re-checked in-tick), so OKX never
+    returns this.
+    """
+
+    ref: str
+
+
+@dataclass(frozen=True, slots=True)
 class CloseOrphan:
     """FIX 2 — a TRUE-ORPHAN close signal (venue-side state drift).
 

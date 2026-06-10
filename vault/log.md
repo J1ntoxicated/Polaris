@@ -1293,3 +1293,4 @@
 2026-06-04 23:34 [ignite_p1: bootstrap target_db=polaris.sqlite layer0_focus=0 learners=3 paper=False]
 2026-06-04 23:35 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=85 learners=3 paper=True]
 2026-06-05 — Jin '차례대로' 4 follow-up: #1 fade 엑싯 target_harvest(29517f3) #2 안정성=WS침묵+Alpaca quotes-only+DB락해소(e48abd8/f7223aa, symbol-limit·db-lock 0, WAL206→59) #3 코모디티 CFTC COT per-contract percentile 신호(69f5e22, blocker→percentile 수정). 각 적대리뷰 통과. 1869 테스트. 다음=#4 OKX venue제약.
+2026-06-10 13:48 [wave1 회계무결성: 부분청산 PnL 슬라이스 스탬핑(A)+hydrate 잔량복원(B)+pending-close 재발사 패리티(E) fix + correct_close_pnl_stamping.py; 1907 green; DB 보정은 승인 대기]

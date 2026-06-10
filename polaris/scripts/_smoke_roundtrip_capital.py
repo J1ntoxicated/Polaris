@@ -16,9 +16,18 @@ import time
 import uuid
 from typing import Any
 
-from polaris.core.data.fill_normalizer import Fill, normalize_capital_confirm
+from polaris.core.data.fill_normalizer import (
+    Fill,
+    FillNormalizationError,
+    normalize_capital_confirm,
+)
 from polaris.core.data.fills_persist import persist_fill
-from polaris.scripts._smoke_roundtrip_shared import MIN_CAPITAL_LOT, OpenAttempt
+from polaris.scripts._smoke_roundtrip_shared import (
+    MIN_CAPITAL_LOT,
+    CloseOrphan,
+    OpenAttempt,
+    PendingClose,
+)
 from polaris.venues.capital import CapitalAdapter, CapitalSession
 
 logger = logging.getLogger(__name__)
@@ -123,6 +132,63 @@ async def real_capital_open_fill(
     )
 
 
+async def _confirm_pending_close(
+    adapter: Any, *, pending_ref: str, strategy_id: str,
+    pip_value_usd: float, leverage: float,
+) -> Fill | PendingClose | None:
+    """BUG E-b: settle a previously-fired close ``deal_reference`` BEFORE
+    firing a new ``close_position`` (the GOLD close-reject re-fire loop).
+
+    * Settled (ACCEPTED/OPEN/CLOSED) → normalized ``Fill`` — no re-fire.
+    * Still PENDING / confirm read failure → ``PendingClose`` again.
+    * REJECTED (never executed) or an un-normalizable terminal variant →
+      ``None`` — the caller may fire a fresh close.
+    """
+    try:
+        confirm = await adapter.confirm(pending_ref)
+    except Exception as exc:  # noqa: BLE001 — confirm read is best-effort
+        logger.warning(
+            "[capital/close] pending confirm %s failed %r — keep pending",
+            pending_ref, exc,
+        )
+        return PendingClose(ref=pending_ref)
+    status = str(confirm.get("dealStatus") or "")
+    if not status or status in ("PENDING", "None"):
+        return PendingClose(ref=pending_ref)
+    if status == "REJECTED":
+        return None
+    try:
+        return normalize_capital_confirm(
+            confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
+            leverage=leverage,
+        )
+    except FillNormalizationError as exc:
+        logger.warning(
+            "[capital/close] pending confirm %s terminal but un-normalizable "
+            "(%s) %r — treating as dead, fresh close may fire",
+            pending_ref, status, exc,
+        )
+        return None
+
+
+async def _deal_id_absent(adapter: Any, deal_id: str) -> bool:
+    """True only when ``list_positions`` CONFIRMS the deal is gone from the
+    venue book. A listing failure returns False (keep the transient-retry
+    semantics — never fabricate an orphan on a read error)."""
+    try:
+        body = await adapter.list_positions()
+    except Exception as exc:  # noqa: BLE001 — listing is best-effort
+        logger.warning(
+            "[capital/close] list_positions failed %r — keep retrying", exc,
+        )
+        return False
+    for entry in body.get("positions", []) or []:
+        pos = entry.get("position", {}) or {}
+        if str(pos.get("dealId") or "") == deal_id:
+            return False
+    return True
+
+
 async def real_capital_close_fill(
     adapter: Any,
     *,
@@ -131,17 +197,72 @@ async def real_capital_close_fill(
     pip_value_usd: float = 10.0,
     leverage: float = 1.0,
     poll_delay_sec: float = 0.5,
-) -> Fill | None:
-    """Capital close leg: close_position(deal_id) → confirm → normalize."""
+    pending_ref: str | None = None,
+) -> Fill | PendingClose | CloseOrphan | None:
+    """Capital close leg: close_position(deal_id) → confirm-poll → normalize.
+
+    BUG E hardening:
+    * ``pending_ref`` — a prior tick's unconfirmed close deal_reference is
+      CONFIRMED first; only a REJECTED/dead pending close falls through to a
+      fresh ``close_position`` (no duplicate close while one may still fill).
+    * A close REJECT on a deal the venue no longer lists → ``CloseOrphan``
+      (the deal is GONE — expired/auto-closed; it would reject forever, GOLD
+      #1..#17). A still-listed deal keeps the transient ``None`` retry.
+    * The confirm is POLLED up to ``_CONFIRM_POLLS`` (mirror of the open leg);
+      a confirm still PENDING after the budget returns
+      ``PendingClose(deal_reference)`` for the next tick's confirm-first path.
+    """
+    if pending_ref:
+        settled = await _confirm_pending_close(
+            adapter, pending_ref=pending_ref, strategy_id=strategy_id,
+            pip_value_usd=pip_value_usd, leverage=leverage,
+        )
+        if settled is not None:
+            return settled
+        # Pending close is dead (REJECTED) — fall through to a fresh close.
     close_resp = await adapter.close_position(deal_id)
     if not close_resp.ok or not close_resp.deal_reference:
+        if await _deal_id_absent(adapter, deal_id):
+            logger.warning(
+                "[capital/close] dealId=%s rejected AND no longer listed at the "
+                "venue — deal is gone, reconciling (no infinite re-fire)",
+                deal_id,
+            )
+            return CloseOrphan(available=0.0)
         return None
-    await asyncio.sleep(poll_delay_sec)
-    confirm = await adapter.confirm(close_resp.deal_reference)
-    return normalize_capital_confirm(
-        confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
-        leverage=leverage,
-    )
+    deal_ref = str(close_resp.deal_reference)
+    confirm: dict[str, Any] = {}
+    status = ""
+    for _poll in range(_CONFIRM_POLLS):
+        await asyncio.sleep(poll_delay_sec)
+        try:
+            confirm = await adapter.confirm(deal_ref)
+        except Exception as exc:  # noqa: BLE001 — keep pending on uncertainty
+            logger.warning(
+                "[capital/close] confirm %s failed %r — pending (confirm-first "
+                "next tick)", deal_ref, exc,
+            )
+            return PendingClose(ref=deal_ref)
+        status = str(confirm.get("dealStatus") or "")
+        if status and status not in ("PENDING", "None"):
+            break
+    if not status or status in ("PENDING", "None"):
+        return PendingClose(ref=deal_ref)
+    if status == "REJECTED":
+        return None  # close never executed — safe to re-fire next tick
+    try:
+        return normalize_capital_confirm(
+            confirm, strategy_id=strategy_id, pip_value_usd=pip_value_usd,
+            leverage=leverage,
+        )
+    except FillNormalizationError as exc:
+        # Unknown terminal variant — never blind-re-fire; confirm again next
+        # tick via the pending path (it resolves to fresh-close if truly dead).
+        logger.warning(
+            "[capital/close] confirm %s un-normalizable (%s) %r — pending",
+            deal_ref, status, exc,
+        )
+        return PendingClose(ref=deal_ref)
 
 
 async def run_capital_round_trip(

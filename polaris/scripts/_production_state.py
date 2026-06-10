@@ -171,3 +171,11 @@ class ProdLoopState:
     # never halt). None until the loop wires it (smoke/replay paths leave it
     # None → pure bar-close behavior, behavior-identical to pre-P4).
     quote_writer: QuoteTickWriter | None = None
+    # Timeframe-aligned ATR cache for the live recalc exit ruler:
+    # (instrument_id, timeframe) → (atr_pct, computed_ts). TTL =
+    # TIMEFRAME_FETCH_CADENCE_SEC[tf] (a fresh bar cannot arrive faster, so a
+    # cached value is at most one fetch-cycle stale; the trail ratchet already
+    # forbids loosening). Measurement/exit precision only — never sizing.
+    tf_atr_cache: dict[tuple[str, str], tuple[float, int]] = field(
+        default_factory=dict
+    )

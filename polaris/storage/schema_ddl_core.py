@@ -353,7 +353,9 @@ CREATE TABLE IF NOT EXISTS positions (
     mfe_r REAL,
     mae_r REAL,
     exit_state TEXT DEFAULT 'open',
-    deal_id TEXT
+    deal_id TEXT,
+    entry_atr_pct REAL,
+    entry_atr_timeframe TEXT
 );
 """
 

@@ -389,6 +389,18 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # Pragma guard = idempotent (SQLite has no ADD COLUMN IF NOT EXISTS).
     if "deal_id" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN deal_id TEXT")
+    # positions.entry_atr_pct + entry_atr_timeframe — entry-time ATR anchor
+    # (timeframe-aligned exit ruler fix). The R-unit denominator (pnl_r /
+    # mfe_r / mae_r) is anchored at entry so a volatility contraction can no
+    # longer shrink the denominator mid-life and inflate excursions 4-8x.
+    # ``entry_atr_timeframe`` records WHICH timeframe produced the anchor
+    # (provenance + legacy/new discriminator + correction-script idempotency
+    # key). ADDITIVE: nullable, NULL = legacy row (graceful current-ATR
+    # fallback). Pragma guard = idempotent.
+    if "entry_atr_pct" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN entry_atr_pct REAL")
+    if "entry_atr_timeframe" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN entry_atr_timeframe TEXT")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are

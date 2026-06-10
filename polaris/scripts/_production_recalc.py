@@ -55,6 +55,7 @@ from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
 )
 from polaris.core.streams import resolve_stream_profile
+from polaris.scripts._production_atr import strategy_timeframe, timeframe_atr_pct
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_recalc_exit import (
@@ -97,6 +98,7 @@ def load_active_position_rows(
     *,
     limit: int = LIVE_RECALC_MAX_POSITIONS,
     quote_writer: Any = None,
+    tf_atr_cache: dict[tuple[str, str], tuple[float, int]] | None = None,
 ) -> list[ActivePositionRow]:
     """Read active positions + matching entry fill + most-recent bar close.
 
@@ -105,13 +107,21 @@ def load_active_position_rows(
     ``last_price`` is the live WS mid so the precise-exit engine + G6 react to
     real-time price. No fresh tick (no WS / stale / reconnecting) → the bar close
     fallback (graceful degrade, never halts — AGGRESSIVE invariant).
+
+    Timeframe-aligned exit ruler: ``atr_pct`` is read on the ACTIVE strategy's
+    own timeframe (1H tsmom → 1H ATR; unregistered tick-engine ids → the 1m
+    window, byte-identical pre-fix). ``entry_atr_pct`` / ``entry_atr_timeframe``
+    expose the entry-time R anchor; a legacy NULL anchor sets
+    ``anchor_missing=True`` and the consumer denominates by the current
+    timeframe ATR instead (graceful, never halts).
     """
     rows = conn.execute(
         """
         SELECT p.position_id, p.venue, p.symbol, p.underlying_group_id,
                p.strategy_id, p.entry_strategy_id, p.active_strategy_id,
                p.side, p.qty, p.opened_ts,
-               p.stop_price, p.peak_price, p.trough_price, p.exit_state
+               p.stop_price, p.peak_price, p.trough_price, p.exit_state,
+               p.entry_atr_pct, p.entry_atr_timeframe
         FROM positions p
         WHERE p.status NOT IN ('closed','cancelled','reconciled')
         ORDER BY p.opened_ts DESC LIMIT ?
@@ -172,6 +182,26 @@ def load_active_position_rows(
             if float(br[1]) > 0.0
         ]
         atr_pct = sum(atr_samples) / len(atr_samples) if atr_samples else 0.005
+        # Timeframe-aligned ruler: a non-1m strategy reads its OWN timeframe
+        # ATR (trail width / G6 atr_pct / G7 widen step share one ruler). "1m"
+        # keeps the in-hand window above — byte-identical, no second query.
+        active_strategy_id = str(r[6] or r[4])
+        tf = strategy_timeframe(active_strategy_id)
+        if tf != "1m":
+            tf_atr = timeframe_atr_pct(
+                conn, instrument_id=instrument_id, timeframe=tf,
+                now_ts=int(time.time()), cache=tf_atr_cache,
+            )
+            if tf_atr is not None:
+                atr_pct = tf_atr
+        entry_atr_pct = None if r[14] is None else float(r[14])
+        if entry_atr_pct is None:
+            # Legacy row (pre-anchor) — R denominator falls back to the
+            # CURRENT timeframe ATR above. DEBUG-only visibility.
+            logger.debug(
+                "[L6/atr] anchor missing for %s (legacy row) — current %s "
+                "ATR denominates", position_id, tf,
+            )
         market = _recent_market_state(bar_row)
         ap = ActivePositionRow()
         ap.update(
@@ -199,6 +229,10 @@ def load_active_position_rows(
             peak_price=None if r[11] is None else float(r[11]),
             trough_price=None if r[12] is None else float(r[12]),
             exit_state=str(r[13]) if r[13] is not None else "open",
+            # Entry-time ATR anchor (R-unit denominator; NULL = legacy row).
+            entry_atr_pct=entry_atr_pct,
+            entry_atr_timeframe=None if r[15] is None else str(r[15]),
+            anchor_missing=entry_atr_pct is None,
         )
         out.append(ap)
     return out
@@ -300,9 +334,15 @@ async def _evaluate_position(
     entry_price = float(pos.get("entry_price", 0.0))
     last_price = float(pos.get("last_price", entry_price))
     atr_pct = max(float(pos.get("atr_pct", 0.005)), 1e-4)
+    # Entry-time ATR anchor — denominates pnl_r/mfe_r/mae_r so a volatility
+    # contraction cannot shrink the R unit mid-life. Legacy NULL anchor →
+    # the current timeframe ATR (graceful fallback, pre-anchor behaviour).
+    anchor_raw = pos.get("entry_atr_pct")
+    entry_atr_pct = None if anchor_raw is None else max(float(anchor_raw), 1e-4)
     held_seconds = max(0, now_ts - int(pos.get("opened_ts", now_ts)))
     pnl_r = compute_unrealized_pnl_r(
-        side=side, entry_price=entry_price, last_price=last_price, atr_pct=atr_pct,
+        side=side, entry_price=entry_price, last_price=last_price,
+        atr_pct=atr_pct if entry_atr_pct is None else entry_atr_pct,
     )
 
     # Phase 3 — per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L
@@ -328,6 +368,7 @@ async def _evaluate_position(
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        entry_atr_pct=entry_atr_pct,
     )
     if closed:
         return
@@ -533,7 +574,8 @@ async def recalc_active_positions(
     increments ``state.fault_events`` but does not block the sweep.
     """
     positions = load_active_position_rows(
-        conn, limit=max_positions, quote_writer=state.quote_writer
+        conn, limit=max_positions, quote_writer=state.quote_writer,
+        tf_atr_cache=getattr(state, "tf_atr_cache", None),
     )
     if not positions:
         # No open positions — clear the G6 call cache so it never grows stale.

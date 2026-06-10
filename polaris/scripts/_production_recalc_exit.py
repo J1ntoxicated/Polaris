@@ -231,11 +231,16 @@ async def run_precise_exit(
     okx_adapter: Any,
     capital_session: Any,
     alpaca_adapter: Any = None,
+    entry_atr_pct: float | None = None,
 ) -> bool:
     """Track excursion + ratchet ATR stop + advance FSM; close if a precise
     exit fired. Returns ``True`` when this position was closed (caller skips
     the G6/G7 pass for it this tick). EXPECTANCY, not a throttle — per-position
     close-or-hold only; size + entry side untouched; G6 -1.0R rail stays.
+
+    ``entry_atr_pct``: entry-time R anchor forwarded to ``evaluate_exit`` (the
+    mfe/mae denominator). ``None`` (legacy rows / the tick-engine momentum
+    path) keeps the current-ATR denominator — byte-identical pre-anchor.
     """
     position_id = str(pos["position_id"])
     tracked_peak = pos.get("peak_price")
@@ -260,6 +265,7 @@ async def run_precise_exit(
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
         loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
         profit_target_r=_profit_target_for_strategy(strategy_id),
+        entry_atr_pct=entry_atr_pct,
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
     # FSM state transition (DEBUG): surface the per-tick exit-state advance so

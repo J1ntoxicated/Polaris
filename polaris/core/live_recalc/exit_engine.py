@@ -85,6 +85,18 @@ EXIT_LOSER_TIMEOUT_EXT_MULT: Final[float] = _env_float(
 
 _ATR_USD_FLOOR: Final[float] = 1e-6
 
+# RELATIVE floor for the ATR-in-USD unit: ≥0.01% of entry price (the close
+# path's proven ``entry_price * 1e-4`` convention). A flat/stale-bar atr_pct~0
+# on a high-priced instrument collapsed the absolute 1e-6 floor and exploded
+# R (live: -463,734R). With the relative floor max|R| = price-move% / 0.01%.
+# The absolute 1e-6 stays only as the entry_price=0 degenerate last resort.
+_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-4
+
+# Telemetry cap for mfe_r/mae_r (|R| ≤ 100). Behaviour-neutral: the FSM tops
+# out at EXIT_FSM_HARVEST_R=2.0 and pnl_r is clamped ±10 elsewhere — no close
+# or transition branch can reach the cap; it only bounds persisted telemetry.
+_EXCURSION_R_CAP: Final[float] = 100.0
+
 
 @dataclass(slots=True)
 class ExitState:
@@ -113,15 +125,23 @@ class ExitDecision:
 
 
 def _atr_one_usd(*, entry_price: float, atr_pct: float) -> float:
-    """One-ATR distance in price terms (floored finite)."""
-    return max(entry_price * max(atr_pct, 0.0), _ATR_USD_FLOOR)
+    """One-ATR distance in price terms (relative floor, finite)."""
+    return max(
+        entry_price * max(atr_pct, 0.0),
+        entry_price * _ATR_PCT_RELATIVE_FLOOR,
+        _ATR_USD_FLOOR,
+    )
 
 
 def _atr_r_usd(*, entry_price: float, atr_pct: float) -> float:
     """R-unit denominator in price terms — matches the realised-PnL path
     (``entry_price * atr_pct * 2.0`` with the same 2x stop convention as
     ``compute_unrealized_pnl_r`` / ``real_pnl_r_from_fills``)."""
-    return max(entry_price * max(atr_pct, 0.0) * 2.0, _ATR_USD_FLOOR)
+    return max(
+        entry_price * max(atr_pct, 0.0) * 2.0,
+        entry_price * _ATR_PCT_RELATIVE_FLOOR,
+        _ATR_USD_FLOOR,
+    )
 
 
 def init_exit_state(*, entry_price: float, side: str) -> ExitState:
@@ -176,6 +196,7 @@ def evaluate_exit(
     held_seconds: int,
     loser_timeout_sec: float | None = None,
     profit_target_r: float | None = None,
+    entry_atr_pct: float | None = None,
 ) -> ExitDecision:
     """Advance excursion + stop + FSM for one position; decide close-or-hold.
 
@@ -199,19 +220,32 @@ def evaluate_exit(
     exit for every momentum strategy — byte-identical. EXPECTANCY, not a
     throttle: a per-position close target only — size / entry side / halt rail
     untouched.
+
+    ``entry_atr_pct``: the ENTRY-TIME ATR anchor for the R-unit DENOMINATOR
+    (mfe_r/mae_r + the FSM thresholds they drive). The per-tick recomputed
+    ``atr_pct`` shrank during volatility contraction and inflated excursions
+    4-8x; anchoring pins the measuring unit at the entry-time risk. The TRAIL
+    width intentionally keeps the CURRENT ``atr_pct`` — a Chandelier trail
+    tracks today's noise band and the ratchet already forbids loosening.
+    ``None`` (legacy rows / callers) keeps the current-ATR denominator —
+    byte-identical to the pre-anchor behaviour.
     """
     # 1. Update price extremes (running peak / trough over the position life).
     peak = max(prev.peak_price, last_price)
     trough = min(prev.trough_price, last_price)
 
-    # 2. Excursion in R units (favourable >= 0, adverse <= 0).
-    atr_r = _atr_r_usd(entry_price=entry_price, atr_pct=atr_pct)
+    # 2. Excursion in R units (favourable >= 0, adverse <= 0) — denominator
+    #    anchored at entry when available; telemetry capped at |100R|.
+    r_denominator_pct = atr_pct if entry_atr_pct is None else entry_atr_pct
+    atr_r = _atr_r_usd(entry_price=entry_price, atr_pct=r_denominator_pct)
     if side == "long":
         mfe_r = max(0.0, (peak - entry_price) / atr_r)
         mae_r = min(0.0, (trough - entry_price) / atr_r)
     else:
         mfe_r = max(0.0, (entry_price - trough) / atr_r)
         mae_r = min(0.0, (entry_price - peak) / atr_r)
+    mfe_r = min(mfe_r, _EXCURSION_R_CAP)
+    mae_r = max(mae_r, -_EXCURSION_R_CAP)
 
     # 3. FSM advance by MFE (monotone — never regress).
     new_state = _next_fsm_state(prev.exit_state, mfe_r)

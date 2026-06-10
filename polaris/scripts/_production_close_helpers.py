@@ -124,7 +124,10 @@ def real_pnl_r_from_fills(
     exit_price = exit_price_override if exit_price_override else bar_close
     if entry_price <= 0.0 or exit_price <= 0.0:
         return (0.0, 0.0, entry_price)
-    atr_pct = _atr_pct_from_bars(bar_rows)
+    # Entry-time ATR anchor first (the same R denominator the live recalc
+    # uses); legacy NULL anchor → the recent-1m-bars estimate (pre-anchor).
+    anchor = _entry_anchor_atr_pct(conn, trade=trade)
+    atr_pct = anchor if anchor is not None else _atr_pct_from_bars(bar_rows)
     pnl_abs = (
         (exit_price - entry_price)
         if trade.side == "long"
@@ -154,6 +157,31 @@ def real_pnl_r_from_fills(
             pnl_usd *= frac
     pnl_r = max(-10.0, min(10.0, pnl_r))
     return (pnl_r, pnl_usd, exit_price)
+
+
+def _entry_anchor_atr_pct(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade,
+) -> float | None:
+    """Entry-time ATR anchor stamped on the positions row, or ``None``.
+
+    ``None`` (legacy row / pre-anchor DB / degenerate value) keeps the
+    current-bars denominator — the pre-anchor behaviour. A legacy DB without
+    the column degrades the same way (sqlite error swallowed: the close path
+    must never fail on a telemetry read).
+    """
+    if not trade.position_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT entry_atr_pct FROM positions WHERE position_id = ?",
+            (trade.position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or row[0] is None:
+        return None
+    anchor = float(row[0])
+    return anchor if anchor > 1e-5 else None
 
 
 def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
@@ -202,18 +230,24 @@ def _close_excursion_r(
         entry_price = float(row[0])
     if entry_price <= 0.0:
         return (0.0, 0.0)
-    # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit mark
-    # and ATR window are derived from real recent data, never a +10h ghost bar.
-    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
-    bar_rows = conn.execute(
-        """
-        SELECT close, high, low FROM bars
-        WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
-        ORDER BY ts DESC LIMIT 14
-        """,
-        (f"{trade.venue}:{trade.symbol}", ts_upper),
-    ).fetchall()
-    atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
+    # Entry-time ATR anchor first (one R denominator shared with pnl_r);
+    # legacy NULL anchor → the recent-1m-bars estimate (pre-anchor behaviour).
+    anchor = _entry_anchor_atr_pct(conn, trade=trade)
+    if anchor is not None:
+        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-4)
+    else:
+        # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit
+        # mark and ATR window derive from real recent data, never a +10h ghost.
+        ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
+        bar_rows = conn.execute(
+            """
+            SELECT close, high, low FROM bars
+            WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
+            ORDER BY ts DESC LIMIT 14
+            """,
+            (f"{trade.venue}:{trade.symbol}", ts_upper),
+        ).fetchall()
+        atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
     # Read tracked extremes; fall back to entry/exit bounds when the tick loop
     # has not populated them. peak = max(entry, exit, tracked_peak); trough =
     # min(entry, exit, tracked_trough) so the excursion is never under-stated.

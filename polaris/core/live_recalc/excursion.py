@@ -25,8 +25,20 @@ from __future__ import annotations
 from typing import Final
 
 # Floor for the R denominator so excursion is always finite even when ATR is
-# missing / degenerate. Matches ``real_pnl_r_from_fills`` (atr_usd floor 1e-6).
+# missing / degenerate. The RELATIVE floor (≥0.01% of entry price — the close
+# path's ``entry_price * 1e-4`` convention) bounds max|R| at price-move%/0.01%
+# so a flat-bar atr_usd~0 on a high-priced instrument can never explode R
+# (live: -463,734R). The absolute 1e-6 stays only for the entry_price=0
+# degenerate last resort. ``_EXCURSION_R_CAP`` (±100R) is a telemetry-only
+# bound — no FSM/close branch reads anywhere near it.
 _ATR_USD_FLOOR: Final[float] = 1e-6
+_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-4
+_EXCURSION_R_CAP: Final[float] = 100.0
+
+
+def _atr_floor_usd(entry_price: float, atr_usd: float) -> float:
+    """ATR-in-USD denominator with the relative + absolute floors applied."""
+    return max(atr_usd, entry_price * _ATR_PCT_RELATIVE_FLOOR, _ATR_USD_FLOOR)
 
 
 def compute_mfe_r(
@@ -39,12 +51,12 @@ def compute_mfe_r(
     (price down). Clamped at 0.0 — a position that never moved in its
     favour has zero MFE, not a negative one.
     """
-    atr = atr_usd if atr_usd > _ATR_USD_FLOOR else _ATR_USD_FLOOR
+    atr = _atr_floor_usd(entry_price, atr_usd)
     favourable = (
         peak_price - entry_price if side == "long"
         else entry_price - trough_price
     )
-    return max(0.0, favourable / atr)
+    return min(_EXCURSION_R_CAP, max(0.0, favourable / atr))
 
 
 def compute_mae_r(
@@ -57,12 +69,12 @@ def compute_mae_r(
     (price up). Clamped at 0.0 — a position that never moved against
     itself has zero MAE, not a positive one.
     """
-    atr = atr_usd if atr_usd > _ATR_USD_FLOOR else _ATR_USD_FLOOR
+    atr = _atr_floor_usd(entry_price, atr_usd)
     adverse = (
         trough_price - entry_price if side == "long"
         else entry_price - peak_price
     )
-    return min(0.0, adverse / atr)
+    return max(-_EXCURSION_R_CAP, min(0.0, adverse / atr))
 
 
 def compute_excursion_r(

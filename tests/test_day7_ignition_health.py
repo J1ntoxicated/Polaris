@@ -85,10 +85,14 @@ from polaris.venues.okx.adapter import OKX_BASE_DEMO
 
 @pytest.fixture
 def isolated_vault(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, polaris_test_vault: Path,
 ) -> Path:
     """chdir into ``tmp_path`` + stage tmp ``vault/`` + tmp ``.env`` so
     ``ignite()`` cannot touch the repo vault or read the real ``.env``.
+
+    Depends on the conftest autouse ``polaris_test_vault`` so this override of
+    ``POLARIS_VAULT_DIR`` (the read-back assertions below need ignite to write
+    THIS vault, in-process AND in spawned children) deterministically wins.
 
     Returns the tmp working directory (caller can read appended vault rows).
     """
@@ -99,6 +103,7 @@ def isolated_vault(
     (vault / "_NOW.md").write_text(
         "# tmp NOW\n\n## Implementation status\n- placeholder\n"
     )
+    monkeypatch.setenv("POLARIS_VAULT_DIR", str(vault))
     (tmp_path / ".env").write_text("# empty\n")
     (tmp_path / "data").mkdir(exist_ok=True)
     return tmp_path

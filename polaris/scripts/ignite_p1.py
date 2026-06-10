@@ -174,9 +174,20 @@ async def _layer0_producer_start(conn: Any) -> int:
     return okx_active + cap_active
 
 
+def _vault_root() -> Path:
+    """Vault directory the bootstrap stamps write to.
+
+    ``POLARIS_VAULT_DIR`` overrides (test isolation — the pytest suite points
+    it at a per-test tmp vault so a fixture run can never append to the real
+    ``vault/log.md`` / mutate ``vault/_NOW.md``). Unset/empty = the cwd-relative
+    ``vault`` — runtime behaviour byte-identical.
+    """
+    return Path(os.environ.get("POLARIS_VAULT_DIR") or "vault")
+
+
 def _vault_append(text: str) -> str | None:
-    """Append a line to ``vault/log.md``; return relative path on success."""
-    log_path = Path("vault/log.md")
+    """Append a line to ``<vault>/log.md``; return its path on success."""
+    log_path = _vault_root() / "log.md"
     if not log_path.exists():
         return None
     with log_path.open("a", encoding="utf-8") as fh:
@@ -185,8 +196,8 @@ def _vault_append(text: str) -> str | None:
 
 
 def _now_md_update_implementation_status(line: str) -> bool:
-    """Mutate ``vault/_NOW.md`` Implementation status section if present."""
-    p = Path("vault/_NOW.md")
+    """Mutate ``<vault>/_NOW.md`` Implementation status section if present."""
+    p = _vault_root() / "_NOW.md"
     if not p.exists():
         return False
     txt = p.read_text(encoding="utf-8")

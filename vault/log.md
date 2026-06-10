@@ -31,3 +31,4 @@
 2026-06-11 graph-weave [orphan 97→0 dead 22→0 lint warn 5→0, MOC-lessons+MOC-digests 신설, ADR short-link 139파일 pipe화, reflector telemetry stub 73건 status:deprecated 마킹(삭제 없음), frontmatter 보강 2건]
 2026-06-11 bugc-blocker-r1 [constraint_translator step_size minStepDistance→minSizeIncrement 우선 파싱, fixture 6종 grid-정렬 테스트 +13, suite 1957 green / ruff·mypy clean]
 2026-06-10 15:55 [bugc R1: step_size=minSizeIncrement 우선 파싱 교정(minStepDistance는 가격거리 오용, GOLD 우연일치 은폐) — capital_sizing 18 tests, 1957 green; 리뷰 approve×3 blocker 0]
+2026-06-11 tf-exit-ruler [엑싯 자 타임프레임 정합(_production_atr, MIN_TF_BARS=5)+entry ATR 앵커 분모(positions.entry_atr_pct/tf, R 과장 4-8x 제거)+상대 플로어·±100캡, trail=현재 tf-ATR 유지, scalp/tick 1m 폴백 byte-identical, recalc_excursions dry-run 라이브 403행 검증(-463734R→-0.035R), 테스트 vault 격리 POLARIS_VAULT_DIR(autouse)+메타테스트, suite 2007 green(기존 tick 플레이크 2 제외)/ruff·mypy --strict clean]

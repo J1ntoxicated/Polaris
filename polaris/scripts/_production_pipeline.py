@@ -52,6 +52,7 @@ from polaris.core.live_recalc.regime_flip import fetch_regime
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.scripts._alpaca_open import real_alpaca_open_fill
+from polaris.scripts._production_atr import timeframe_anchor_atr_pct
 from polaris.scripts._production_capital_sizing import (
     CapitalOrderPlan,
     maybe_evict_on_reject,
@@ -469,6 +470,22 @@ async def reserve_and_submit(
     trade.position_id = position_id
     trade.correlation_group = sig.correlation_group
     trade.underlying_group_id = underlying_group_id
+    # Entry-time ATR anchor — the R-unit denominator for this position's whole
+    # life (pnl_r / mfe_r / mae_r), read on the strategy's OWN timeframe (tf →
+    # 1m fallback; degenerate flat-bar windows rejected). No usable window →
+    # NULL (legacy-graceful current-ATR fallback) — never a fake 0.005 anchor.
+    entry_atr_pct: float | None = None
+    entry_atr_timeframe: str | None = None
+    try:
+        anchor = timeframe_anchor_atr_pct(
+            conn, instrument_id=f"{venue}:{symbol}",
+            timeframe=_strategy_timeframe(sig.strategy_id), now_ts=now_ts,
+        )
+    except sqlite3.Error as exc:
+        anchor = None
+        logger.warning("[L7/open] entry ATR anchor read failed: %r", exc)
+    if anchor is not None:
+        entry_atr_pct, entry_atr_timeframe = anchor
     try:
         # autocommit-mode connection (init_db uses isolation_level=None) —
         # explicit BEGIN+COMMIT is an atomic boundary in SQLite. ROLLBACK
@@ -478,8 +495,9 @@ async def reserve_and_submit(
             "INSERT OR REPLACE INTO positions "
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
-            " status, opened_ts, swap_count, deal_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?)",
+            " status, opened_ts, swap_count, deal_id, entry_atr_pct, "
+            " entry_atr_timeframe) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?)",
             (
                 position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
@@ -487,7 +505,7 @@ async def reserve_and_submit(
                     fill.base_qty if fill.base_qty > 0
                     else notional_usd / max(last_price, 1e-6)
                 ),
-                now_ts, trade.deal_id,
+                now_ts, trade.deal_id, entry_atr_pct, entry_atr_timeframe,
             ),
         )
         # contribution_id ties the entry fill back to the position so the

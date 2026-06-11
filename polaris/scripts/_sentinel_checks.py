@@ -27,6 +27,7 @@ env-overridable via ``Thresholds.from_env`` (POLARIS_SENTINEL_*).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from typing import Any
@@ -34,6 +35,7 @@ from typing import Any
 from polaris.core.streams.config import VENUE_TO_STREAM
 from polaris.scripts._sentinel_types import (
     SEV_CRITICAL,
+    SEV_INFO,
     SEV_WARN,
     Finding,
     Thresholds,
@@ -314,6 +316,13 @@ def check_s4_stop_ratchet(
     after one pass.) Legacy state rows carry only "stop" — used as the
     watermark seed, so an existing sentinel.sqlite keeps working. Returns
     (findings, new_snapshot); the runner persists it in ``sentinel_state``.
+
+    SANCTIONED loosening: a G7 ADJUST_EXIT with ``widening_applied`` (the
+    adaptive-exit gate deliberately giving a winner more room — live case
+    2026-06-11 capital:J225, widened twice then harvested +0.62R) is NOT a
+    ratchet break. Detected via gate_events; the finding downgrades to info
+    and the watermark REBASES to the widened stop so the new baseline
+    governs future checks. A regression with no recent widen stays critical.
     """
     del th  # no tunable threshold — monotonicity is exact (float-eps only)
     out: list[Finding] = []
@@ -343,6 +352,29 @@ def check_s4_stop_ratchet(
         eps = 1e-9 * max(1.0, abs(hw))
         broke = (stop_f < hw - eps) if is_long else (stop_f > hw + eps)
         if broke:
+            since_ts = now_ts - 3600
+            if isinstance(old, dict):
+                with contextlib.suppress(TypeError, ValueError):
+                    since_ts = int(old.get("ts", since_ts))
+            if _recent_g7_widen(live, pid_s, since_ts):
+                snapshot[pid_s]["hw"] = stop_f  # widened stop = new baseline
+                out.append(
+                    Finding(
+                        check_id="S4",
+                        severity=SEV_INFO,
+                        subject=pid_s,
+                        summary=(
+                            f"stop loosened by sanctioned G7 widen on {pid_s}: "
+                            f"{side_s} stop {stop_f:.10g} (was high-water "
+                            f"{hw:.10g}) — watermark rebased"
+                        ),
+                        detail={
+                            "side": side_s, "high_water": hw, "stop": stop_f,
+                            "g7_widen": True,
+                        },
+                    )
+                )
+                continue
             rel = "below" if is_long else "above"
             out.append(
                 Finding(
@@ -357,6 +389,26 @@ def check_s4_stop_ratchet(
                 )
             )
     return out, snapshot
+
+
+def _recent_g7_widen(
+    live: sqlite3.Connection, position_id: str, since_ts: int,
+) -> bool:
+    """True when a G7 ADJUST_EXIT with ``widening_applied=true`` touched this
+    position since ``since_ts`` (the sanctioned-loosening signature the G7
+    widen path persists via gate_events)."""
+    rows = live.execute(
+        "SELECT payload_json FROM gate_events WHERE position_id = ? "
+        "AND gate_id = 7 AND decision = 'ADJUST_EXIT' AND created_ts >= ?",
+        (position_id, int(since_ts)),
+    ).fetchall()
+    for (payload,) in rows:
+        try:
+            if json.loads(payload or "{}").get("widening_applied") is True:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -442,6 +442,57 @@ def test_s4_refires_while_stop_below_high_water(live_db: Path) -> None:
     assert snap["pos1"]["hw"] == 100.0  # watermark never decays
 
 
+def test_s4_g7_widen_downgrades_to_info_and_rebases(live_db: Path) -> None:
+    """A stop loosened by a SANCTIONED G7 widen (gate_events gate_id=7
+    ADJUST_EXIT with widening_applied=true) is intentional — info, not
+    critical — and the watermark REBASES to the widened stop so the new
+    baseline governs future ratchet checks."""
+    conn = _rw(live_db)
+    _insert_position(conn, "pos1", "capital", "J225", side="long",
+                     stop_price=90.0, opened_ts=NOW_OPEN - 100)
+    conn.execute(
+        "INSERT INTO gate_events (event_id, run_id, signal_id, position_id, "
+        "gate_id, phase, decision, payload_json, created_ts) "
+        "VALUES ('ev1', 'run1', 'pos1', 'pos1', 7, 'success', 'ADJUST_EXIT', "
+        "'{\"stop_price\":90.0,\"widening_applied\":true}', ?)",
+        (NOW_OPEN - 30,),
+    )
+    conn.close()
+    prev = {"pos1": {"side": "long", "hw": 100.0, "stop": 100.0}}
+    live = open_live_ro(live_db)
+    found, snap = check_s4_stop_ratchet(live, NOW_OPEN, TH, prev)
+    live.close()
+    assert [f.severity for f in found] == ["info"], (
+        "sanctioned G7 widen must downgrade to info"
+    )
+    assert "G7 widen" in found[0].summary
+    assert snap["pos1"]["hw"] == 90.0  # rebased to the widened stop
+
+
+def test_s4_no_widen_event_stays_critical(live_db: Path) -> None:
+    """Without a recent G7 widen the same regression is a REAL ratchet break
+    — critical, watermark NOT rebased (mutation guard for the gate_events
+    lookup)."""
+    conn = _rw(live_db)
+    _insert_position(conn, "pos1", "capital", "J225", side="long",
+                     stop_price=90.0, opened_ts=NOW_OPEN - 100)
+    # A G7 row that must NOT suppress: widening_applied=false (a HOLD echo).
+    conn.execute(
+        "INSERT INTO gate_events (event_id, run_id, signal_id, position_id, "
+        "gate_id, phase, decision, payload_json, created_ts) "
+        "VALUES ('ev2', 'run1', 'pos1', 'pos1', 7, 'success', 'HOLD', "
+        "'{\"stop_price\":100.0,\"widening_applied\":false}', ?)",
+        (NOW_OPEN - 30,),
+    )
+    conn.close()
+    prev = {"pos1": {"side": "long", "hw": 100.0, "stop": 100.0}}
+    live = open_live_ro(live_db)
+    found, snap = check_s4_stop_ratchet(live, NOW_OPEN, TH, prev)
+    live.close()
+    assert [f.severity for f in found] == ["critical"]
+    assert snap["pos1"]["hw"] == 100.0  # watermark never decays
+
+
 def test_run_once_s4_violation_persists_then_recovers(
     live_db: Path, sentinel_db: Path,
 ) -> None:

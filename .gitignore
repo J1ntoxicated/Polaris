@@ -76,6 +76,9 @@ data/archive_*
 *.duckdb
 *.duckdb.wal
 
+# Sentinel dashboard panel (W1) — whitelist out of the blanket *.html rule
+!tools/visualizer/sentinel.html
+
 # MSG-072 Phase 1: yahoo_symbol_mapping.json is the committed seed
 # (human-editable + Phase 2 AI append). Whitelist it out of the
 # blanket data/*.json rule above.

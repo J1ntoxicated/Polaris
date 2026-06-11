@@ -60,6 +60,7 @@ ROOT = Path(__file__).parent
 
 # Module-level runtime config (set in main()).
 _DB_PATH = Path("data/polaris_live.sqlite")
+_SENTINEL_DB_PATH = Path("data/sentinel.sqlite")
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -249,6 +250,50 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
     return events
 
 
+def _sentinel_payload() -> dict[str, Any]:
+    """Active sentinel findings + recent heartbeat (sentinel.sqlite, ro).
+
+    Display-only window onto the W1 Sentinel sidecar output. The sentinel DB
+    is SEPARATE from the live bot DB; absence simply means the sidecar has
+    not run yet (``available: false`` — never an error).
+    """
+    if not _SENTINEL_DB_PATH.exists():
+        return {"available": False, "findings": [], "runs": [], "ts": time.time()}
+    try:
+        conn = sqlite3.connect(f"file:{_SENTINEL_DB_PATH}?mode=ro", uri=True)
+        try:
+            frows = conn.execute(
+                "SELECT check_id, severity, subject, summary, detail_json, "
+                "first_ts, last_ts FROM sentinel_findings WHERE status='active' "
+                "ORDER BY CASE severity WHEN 'critical' THEN 0 "
+                "WHEN 'warn' THEN 1 ELSE 2 END, last_ts DESC LIMIT 200"
+            ).fetchall()
+            rrows = conn.execute(
+                "SELECT ts, checks_run, findings_active, duration_ms "
+                "FROM sentinel_runs ORDER BY ts DESC LIMIT 20"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {"available": False, "findings": [], "runs": [], "ts": time.time()}
+    findings = [
+        {
+            "check_id": str(c), "severity": str(sev), "subject": str(subj),
+            "summary": str(summ), "detail_json": str(dj),
+            "first_ts": int(f_ts), "last_ts": int(l_ts),
+        }
+        for c, sev, subj, summ, dj, f_ts, l_ts in frows
+    ]
+    runs = [
+        {
+            "ts": int(ts), "checks_run": int(cr),
+            "findings_active": int(fa), "duration_ms": int(dm),
+        }
+        for ts, cr, fa, dm in rrows
+    ]
+    return {"available": True, "findings": findings, "runs": runs, "ts": time.time()}
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -286,6 +331,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json(_fresh_snapshot())
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"snapshot err: {exc}")
+            return
+        if self.path.startswith("/api/sentinel"):
+            try:
+                self._json(_sentinel_payload())
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"sentinel err: {exc}")
             return
         if self.path.startswith("/api/dashboard"):
             try:
@@ -353,12 +404,14 @@ def _bg_refresh_loop() -> None:
 
 
 def main() -> None:
-    global _DB_PATH
+    global _DB_PATH, _SENTINEL_DB_PATH
     parser = argparse.ArgumentParser(description="Polaris space visualizer server")
     parser.add_argument("--db", default="data/polaris_live.sqlite")
+    parser.add_argument("--sentinel-db", default="data/sentinel.sqlite")
     parser.add_argument("--port", type=int, default=8770)
     args = parser.parse_args()
     _DB_PATH = Path(args.db)
+    _SENTINEL_DB_PATH = Path(args.sentinel_db)
 
     # Load .env so the read-only Alpaca account probe can see the paper keys.
     _load_dotenv()

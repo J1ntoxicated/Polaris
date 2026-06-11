@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polaris Sentinel</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #0b0e14; color: #d6dbe5;
+         font: 14px/1.5 -apple-system, "SF Pro", Segoe UI, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: #7d8595; font-size: 12px; margin-bottom: 14px; }
+  .hb { display: inline-block; padding: 2px 10px; border-radius: 10px;
+        font-size: 12px; margin-left: 8px; }
+  .hb.ok { background: #103a23; color: #4ade80; }
+  .hb.stale { background: #3a2410; color: #fbbf24; }
+  .hb.off { background: #3a1010; color: #f87171; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th { text-align: left; color: #7d8595; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .05em; padding: 6px 8px; border-bottom: 1px solid #1d2330; }
+  td { padding: 7px 8px; border-bottom: 1px solid #141925; vertical-align: top; }
+  tr.critical td:first-child { color: #f87171; font-weight: 600; }
+  tr.warn td:first-child { color: #fbbf24; font-weight: 600; }
+  tr.info td:first-child { color: #60a5fa; }
+  .subj { color: #9aa3b5; font-family: ui-monospace, monospace; font-size: 12px; }
+  .age { color: #7d8595; font-size: 12px; white-space: nowrap; }
+  .empty { padding: 28px 8px; color: #4ade80; }
+  .err { padding: 28px 8px; color: #f87171; }
+  .runs { margin-top: 18px; color: #7d8595; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Polaris Sentinel <span id="hb" class="hb off">connecting…</span></h1>
+<div class="sub">결정론 라이브 감사 — 관측 전용 (S1 신선도 · S2 엑싯패리티 · S3 진입패리티 · S4 ratchet · S6 피처 · S7 drain)</div>
+<div id="body"><div class="empty">로딩…</div></div>
+<div id="runs" class="runs"></div>
+<script>
+function age(ts) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 90) return s + "s";
+  if (s < 5400) return Math.floor(s / 60) + "m";
+  return Math.floor(s / 3600) + "h";
+}
+async function refresh() {
+  const hb = document.getElementById("hb");
+  const body = document.getElementById("body");
+  const runsEl = document.getElementById("runs");
+  try {
+    const r = await fetch("/api/sentinel");
+    const d = await r.json();
+    if (!d.available) {
+      hb.className = "hb off"; hb.textContent = "sidecar off";
+      body.innerHTML = '<div class="err">센티넬 사이드카가 아직 실행되지 않음 (sentinel.sqlite 없음)</div>';
+      return;
+    }
+    const last = d.runs.length ? d.runs[0] : null;
+    if (last && Date.now() / 1000 - last.ts < 120) {
+      hb.className = "hb ok"; hb.textContent = "live · " + age(last.ts) + " ago";
+    } else {
+      hb.className = "hb stale"; hb.textContent = last ? "stale · " + age(last.ts) + " ago" : "no runs";
+    }
+    if (!d.findings.length) {
+      body.innerHTML = '<div class="empty">✓ active finding 없음 — 모든 체크 클린</div>';
+    } else {
+      let html = "<table><tr><th>severity</th><th>check</th><th>subject</th><th>summary</th><th>since</th></tr>";
+      for (const f of d.findings) {
+        html += `<tr class="${f.severity}"><td>${f.severity}</td><td>${f.check_id}</td>` +
+                `<td class="subj">${f.subject}</td><td>${f.summary}</td>` +
+                `<td class="age">${age(f.first_ts)}</td></tr>`;
+      }
+      body.innerHTML = html + "</table>";
+    }
+    runsEl.textContent = last
+      ? `최근 패스: 체크 ${last.checks_run}개 · active ${last.findings_active} · ${last.duration_ms}ms · 45s 주기`
+      : "";
+  } catch (e) {
+    hb.className = "hb off"; hb.textContent = "api error";
+    body.innerHTML = '<div class="err">/api/sentinel 호출 실패: ' + e + "</div>";
+  }
+}
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

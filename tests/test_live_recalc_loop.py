@@ -327,7 +327,12 @@ async def test_swap_strategy_layer6_ssot_called(memdb: sqlite3.Connection) -> No
 
 
 @pytest.mark.asyncio
-async def test_g6_adjust_exit_chains_g7(memdb: sqlite3.Connection) -> None:
+async def test_g6_adjust_exit_chains_g7(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     """A strong winner → deterministic G6 ADJUST_EXIT → chains to G7.
 
     ai_conductor P3 (2026-05-30): G6 is deterministic (pnl_r > 0.7R → ADJUST_EXIT),

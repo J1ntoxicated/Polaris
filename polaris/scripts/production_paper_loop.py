@@ -36,6 +36,7 @@ from polaris.core.lifecycle.recover import (
     hydrate_open_positions,
     reconcile_venue_positions,
 )
+from polaris.core.pipeline.config import ai_free_mode
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
@@ -277,6 +278,40 @@ async def _altdata_producer(
 # ---------------------------------------------------------------------------
 
 
+
+def _resolve_gpt_client(haiku: Any | None) -> Any | None:
+    """Resolve the in-loop GPT client per POLARIS_AI_FREE (W3 cutover).
+
+    flag=1 (default): build NO client at all — G3/G4/G7 run their
+    deterministic primaries (model_used='python'), in-loop LLM calls = 0.
+    flag=0 (legacy opt-out): the 2026-05-07 factory→permissive-Stub fallback,
+    byte-identical. An explicitly injected client passes through untouched
+    (tests / legacy callers).
+    """
+    if haiku is not None:
+        return haiku
+    if ai_free_mode():
+        logger.info(
+            "[loop] AI-FREE mode (POLARIS_AI_FREE) — deterministic "
+            "G3/G4/G7, in-loop GPT calls = 0"
+        )
+        return None
+    try:
+        from polaris.core.pipeline.agents import _gpt_client as _gpt_mod
+
+        client = _gpt_mod.default_gpt_factory()
+        logger.info("[loop] GPT client = real (default_gpt_factory)")
+        return client
+    except RuntimeError as exc:
+        logger.warning(
+            "[loop] GPT factory unavailable (%s) — falling back to "
+            "permissive StubGPTClient. G1/G3/G4 decisions will be "
+            "stubbed PASS until OPENAI_API_KEY is configured.",
+            exc,
+        )
+        return StubGPTClient()
+
+
 async def run_production_paper_loop(
     *,
     duration_sec: float = DEFAULT_DURATION_SEC,
@@ -313,22 +348,7 @@ async def run_production_paper_loop(
         )
     target_db.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(target_db)
-    if haiku is None:
-        # 2026-05-07 Haiku→GPT migration: try real GPT factory first; fall back
-        # to stub only on ImportError or missing OPENAI_API_KEY (logged loud so
-        # operators see when paper mode silently degrades to permissive stub).
-        try:
-            from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
-            haiku = default_gpt_factory()
-            logger.info("[loop] GPT client = real (default_gpt_factory)")
-        except RuntimeError as exc:
-            logger.warning(
-                "[loop] GPT factory unavailable (%s) — falling back to "
-                "permissive StubGPTClient. G1/G3/G4 decisions will be "
-                "stubbed PASS until OPENAI_API_KEY is configured.",
-                exc,
-            )
-            haiku = StubGPTClient()
+    haiku = _resolve_gpt_client(haiku)
     reset_process_fence()
     get_process_fence(conn)
     state = ProdLoopState()

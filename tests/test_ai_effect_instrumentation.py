@@ -23,6 +23,8 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+import pytest
+
 from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.gate_event_log import log_gate_event
 from polaris.core.pipeline.gate_state import (
@@ -40,6 +42,15 @@ NOW = 1_780_000_000
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+
+@pytest.fixture(autouse=True)
+def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
+    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
+    defaults ON). The flag=1 deterministic-primary path is covered by
+    tests/test_ai_free_cutover.py."""
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from polaris.core.cell_matrix import (
     CellContext,
     CellKeyP0,
@@ -180,7 +182,12 @@ async def test_8_gate_sequential_flow_validator_to_sizer(memdb: sqlite3.Connecti
     )
 
 
-async def test_validator_kill_terminates_pipeline(memdb: sqlite3.Connection) -> None:
+async def test_validator_kill_terminates_pipeline(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
     payload = {"raw_signal": {"strategy": "vb", "direction": "long", "score": 0.4}}
     ctx, results = await run_signal_pipeline(
@@ -273,7 +280,12 @@ async def test_fast_path_high_conviction_skip(memdb: sqlite3.Connection) -> None
     assert haiku.calls == []
 
 
-async def test_fast_path_below_strength_floor_calls_gpt(memdb: sqlite3.Connection) -> None:
+async def test_fast_path_below_strength_floor_calls_gpt(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     haiku = _MockGPTClient(response_text='{"decision": "PROCEED"}')
     payload = {
         "validated_signal": {"strength_scalar": 1.0},

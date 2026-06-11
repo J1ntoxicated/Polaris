@@ -28,10 +28,13 @@ from polaris.core.pipeline.agents._gpt_client import (
 )
 from polaris.core.pipeline.agents._shadow_rules import (
     CELL_WARM_MIN_N_EFF,
+    G3ShadowInputs,
+    ShadowDecision,
     g3_shadow_inputs_from_payload,
     technical_validate_decision,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
+from polaris.core.pipeline.config import ai_free_mode
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
@@ -150,6 +153,35 @@ def _warm_pool_local_bottom(
     return cell_score <= threshold
 
 
+def _g3_technical(
+    ctx: GateContext, conn: sqlite3.Connection | None
+) -> tuple[G3ShadowInputs, ShadowDecision]:
+    """Compute the G3 deterministic technical decision from ``ctx.payload``.
+
+    The ``warm_pool_local_bottom`` discriminator reads the live warm pool in
+    this regime from ``conn`` (read-only); ``conn=None`` → the discriminator
+    does not fire. Shared by the legacy shadow logger AND the AI-free primary
+    path so the two can never drift.
+    """
+    cell = ctx.payload.get("cell_routing", {})
+    cell = cell if isinstance(cell, dict) else {}
+    regime = str(ctx.payload.get("regime", ""))
+    local_bottom = (
+        _warm_pool_local_bottom(
+            conn,
+            regime=regime,
+            cell_score=float(cell.get("score", 0.0) or 0.0),
+            cell_n_eff=float(cell.get("n_eff", 0.0) or 0.0),
+        )
+        if conn is not None
+        else False
+    )
+    inp = g3_shadow_inputs_from_payload(
+        ctx.payload, warm_pool_local_bottom=local_bottom
+    )
+    return inp, technical_validate_decision(inp)
+
+
 def _log_g3_shadow(
     ctx: GateContext,
     shadow_conn: sqlite3.Connection | None,
@@ -169,19 +201,8 @@ def _log_g3_shadow(
     """
     if shadow_conn is None:
         return
-    cell = ctx.payload.get("cell_routing", {})
-    cell = cell if isinstance(cell, dict) else {}
+    inp, technical = _g3_technical(ctx, shadow_conn)
     regime = str(ctx.payload.get("regime", ""))
-    local_bottom = _warm_pool_local_bottom(
-        shadow_conn,
-        regime=regime,
-        cell_score=float(cell.get("score", 0.0) or 0.0),
-        cell_n_eff=float(cell.get("n_eff", 0.0) or 0.0),
-    )
-    inp = g3_shadow_inputs_from_payload(
-        ctx.payload, warm_pool_local_bottom=local_bottom
-    )
-    technical = technical_validate_decision(inp)
     log_shadow_event(
         shadow_conn,
         run_id=ctx.run_id,
@@ -201,17 +222,25 @@ async def signal_validator_gate(
     *,
     client: Any | None = None,
     shadow_conn: sqlite3.Connection | None = None,
+    ai_free: bool | None = None,
 ) -> GateResult:
-    """Gate 3 dispatcher (GPT validator).
+    """Gate 3 dispatcher (GPT validator / W3 AI-free deterministic).
 
     Reads inputs from ``ctx.payload``:
         ``raw_signal``, ``cell_routing``, ``baseline``, ``recent_trades``.
     Fail-closed: any unhandled error / non-conformant output → KILL.
 
-    ``shadow_conn`` (AI-conductor P0 SHADOW): when supplied, a deterministic
-    technical rule is computed in parallel and logged against the live GPT
-    decision (behavior 0 — the GPT decision is what this gate returns). None =
-    legacy behavior, byte-identical.
+    ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
+    the env): the deterministic technical rule (former shadow) IS the primary
+    decision — zero GPT calls, ``model_used="python"``, and no shadow row
+    (GPT absent → nothing to compare). ``shadow_conn`` doubles as the
+    read-only conn for the warm-pool-local-bottom discriminator. flag=0 →
+    the legacy GPT path below runs byte-identical.
+
+    ``shadow_conn`` (legacy AI-conductor P0 SHADOW): when supplied on the GPT
+    path, a deterministic technical rule is computed in parallel and logged
+    against the live GPT decision (behavior 0 — the GPT decision is what this
+    gate returns). None = legacy behavior, byte-identical.
     """
     raw_signal = ctx.payload.get("raw_signal", {})
     cell_routing = ctx.payload.get("cell_routing", {})
@@ -223,6 +252,32 @@ async def signal_validator_gate(
             decision=GateDecision.KILL,
             next_gate=None,
             payload={"reason": "missing_raw_signal"},
+            model_used="python",
+        )
+
+    use_ai_free = ai_free if ai_free is not None else ai_free_mode()
+    if use_ai_free:
+        # W3 AI-FREE primary: technical decision drives the pipeline. PASS →
+        # scalar 1.0 / MODIFY → conservative scalar — same semantics the GPT
+        # path emitted (validated_signal carries strength_scalar downstream).
+        _inp, technical = _g3_technical(ctx, shadow_conn)
+        if technical.decision == GateDecision.KILL:
+            return GateResult(
+                decision=GateDecision.KILL,
+                next_gate=None,
+                payload={"reason": technical.reason},
+                model_used="python",
+            )
+        return GateResult(
+            decision=technical.decision,
+            next_gate=GATE_PRE_ENTRY_WATCHER,
+            payload={
+                "validated_signal": {
+                    **raw_signal,
+                    "strength_scalar": technical.scalar,
+                },
+                "reason": technical.reason,
+            },
             model_used="python",
         )
 

@@ -43,6 +43,7 @@ from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
+from polaris.core.pipeline.config import ai_free_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
     GATE_PRE_ENTRY_WATCHER,
@@ -193,14 +194,23 @@ async def pre_entry_watcher_gate(
     client: Any | None = None,
     fast_path_ctx: FastPathContext | None = None,
     shadow_conn: sqlite3.Connection | None = None,
+    ai_free: bool | None = None,
 ) -> GateResult:
     """Gate 4 dispatcher.
 
     Inputs from ``ctx.payload``: ``validated_signal``, ``tick_window``.
 
-    ``shadow_conn`` (AI-conductor P0 SHADOW): when supplied, a deterministic
-    technical rule is computed in parallel and logged against the live GPT
-    decision (behavior 0). None = legacy behavior, byte-identical.
+    ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
+    the env): the deterministic technical rule (former shadow — PROCEED
+    default, KILL only on stale/crossed book, wide-spread/drift = flags) IS
+    the primary decision — zero GPT calls, ``model_used="python"``, no shadow
+    row. The fast-path eligibility short-circuit above it is flag-independent
+    (unchanged either way). flag=0 → legacy GPT path byte-identical.
+
+    ``shadow_conn`` (legacy AI-conductor P0 SHADOW): when supplied on the GPT
+    path, a deterministic technical rule is computed in parallel and logged
+    against the live GPT decision (behavior 0). None = legacy behavior,
+    byte-identical.
     """
     validated = ctx.payload.get("validated_signal", {})
     tick_window = list(ctx.payload.get("tick_window", []))
@@ -241,6 +251,33 @@ async def pre_entry_watcher_gate(
             model_used="python_fast_path",
             latency_ms=0,
             skipped=True,
+        )
+
+    use_ai_free = ai_free if ai_free is not None else ai_free_mode()
+    if use_ai_free:
+        # W3 AI-FREE primary: the technical watch rule drives the pipeline.
+        # KILL only on a stale / crossed book (microstructure broken — the
+        # pre-existing deterministic KILL set, no new block); wide spread /
+        # drift stay FLAGS on a PROCEED, surfaced as ``watch_flags``.
+        now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
+        technical = technical_watch_decision(
+            g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
+        )
+        if technical.decision == GateDecision.KILL:
+            return GateResult(
+                decision=GateDecision.KILL,
+                next_gate=None,
+                payload={"reason": technical.reason},
+                model_used="python",
+            )
+        payload: dict[str, Any] = {"watched_signal": validated, "fast_path": False}
+        if technical.flags:
+            payload["watch_flags"] = list(technical.flags)
+        return GateResult(
+            decision=GateDecision.PROCEED,
+            next_gate=GATE_ENTRY_SIZER,
+            payload=payload,
+            model_used="python",
         )
 
     # Slow-path GPT

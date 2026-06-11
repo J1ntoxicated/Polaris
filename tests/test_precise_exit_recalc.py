@@ -335,7 +335,12 @@ async def test_1m_strategy_still_times_out_at_900s(
 
 
 @pytest.mark.asyncio
-async def test_g7_exit_now_now_closes_position(memdb: sqlite3.Connection) -> None:
+async def test_g7_exit_now_now_closes_position(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     # Strong winner (pnl_r > 0.7R) → deterministic G6 ADJUST_EXIT chains G7;
     # G7 GPT emits EXIT_NOW → position must close now. tight band keeps the
     # precise-exit engine from closing first (winner, harvest, not stopped).

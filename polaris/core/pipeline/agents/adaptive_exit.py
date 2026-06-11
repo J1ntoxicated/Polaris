@@ -42,6 +42,7 @@ from polaris.core.pipeline.agents._gpt_client import (
 )
 from polaris.core.pipeline.agents._shadow_rules import ShadowDecision
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
+from polaris.core.pipeline.config import ai_free_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_POST_TRADE_REFLECTOR,
@@ -261,8 +262,16 @@ async def adaptive_exit_gate(
     client: Any | None = None,
     model: str = GPT_P1_MODEL,
     shadow_conn: sqlite3.Connection | None = None,
+    ai_free: bool | None = None,
 ) -> GateResult:
-    """Gate 7 dispatcher (Python P0 + GPT P1).
+    """Gate 7 dispatcher (Python P0 + GPT P1 + W3 AI-free).
+
+    ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
+    the env): the deterministic Q9 widening rail IS the live decision even
+    when a ``client`` is supplied — ``_p1_decide`` never fires (zero GPT
+    calls, ``model_used="python"``) and no divergence shadow row is written
+    (GPT absent → nothing to compare). flag=0 → legacy P0/P1 split below,
+    byte-identical.
 
     Reads ``ctx.payload`` for the widening proposal; default = HOLD with the
     current stop (floor preserved). Fail-open: errors → HOLD.
@@ -301,7 +310,11 @@ async def adaptive_exit_gate(
             payload={"stop_price": ctx.payload.get("current_stop_price")},
             model_used="python",
         )
-    if client is None:
+    use_ai_free = ai_free if ai_free is not None else ai_free_mode()
+    if client is None or use_ai_free:
+        # P0 / W3 AI-FREE: the deterministic Q9 widening rail is the live
+        # decision (``model_used="python"``); the GPT branch + its shadow
+        # never fire.
         return _python_widen_only(
             proposal=proposal, next_gate_after_exit=next_gate_after_exit,
         )

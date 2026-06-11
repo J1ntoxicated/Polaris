@@ -283,8 +283,13 @@ class _StubGPT:
 
 
 @pytest.mark.asyncio
-async def test_B_closed_session_goes_to_slow_gpt_not_blocked() -> None:
+async def test_B_closed_session_goes_to_slow_gpt_not_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """B during closed session: NOT fast-path -> slow GPT PROCEED (not blocked)."""
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     payload: dict = {
         "validated_signal": {"strategy_id": "fx", "symbol": "XAUUSD",
                              "side": "long", "strength_scalar": 1.4},
@@ -306,7 +311,12 @@ async def test_B_closed_session_goes_to_slow_gpt_not_blocked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_C_outside_rth_goes_to_slow_gpt_not_blocked() -> None:
+async def test_C_outside_rth_goes_to_slow_gpt_not_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     payload: dict = {
         "validated_signal": {"strategy_id": "eq", "symbol": "AAPL",
                              "side": "long", "strength_scalar": 1.4},
@@ -327,7 +337,12 @@ async def test_C_outside_rth_goes_to_slow_gpt_not_blocked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_C_pdt_flagged_goes_to_slow_gpt_not_blocked() -> None:
+async def test_C_pdt_flagged_goes_to_slow_gpt_not_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
+    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
     payload: dict = {
         "validated_signal": {"strategy_id": "eq", "symbol": "AAPL",
                              "side": "long", "strength_scalar": 1.4},

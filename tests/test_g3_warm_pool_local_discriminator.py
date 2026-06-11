@@ -23,6 +23,8 @@ from __future__ import annotations
 import sqlite3
 import uuid
 
+import pytest
+
 from polaris.core.pipeline.agents._shadow_rules import (
     WARM_POOL_LOCAL_BOTTOM_REASON,
     G3ShadowInputs,
@@ -42,6 +44,15 @@ from polaris.core.pipeline.gate_state import (
 
 NOW = 1_780_000_000
 
+
+
+@pytest.fixture(autouse=True)
+def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
+    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
+    defaults ON). The flag=1 deterministic-primary path is covered by
+    tests/test_ai_free_cutover.py."""
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 class _MockGPTClient:
     def __init__(self, response_text: str = "{}") -> None:

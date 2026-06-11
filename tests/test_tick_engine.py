@@ -449,16 +449,18 @@ def _insert_position_row(
     peak_price: float | None,
     trough_price: float | None,
     exit_state: str | None,
+    entry_atr_pct: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
         "strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
-        "opened_ts, stop_price, peak_price, trough_price, exit_state) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "opened_ts, stop_price, peak_price, trough_price, exit_state, "
+        "entry_atr_pct) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             position_id, VENUE, SYMBOL, GROUP, "burst_rider", "burst_rider",
             "burst_rider", "long", 0.5, "active", opened_ts,
-            stop_price, peak_price, trough_price, exit_state,
+            stop_price, peak_price, trough_price, exit_state, entry_atr_pct,
         ),
     )
 
@@ -634,3 +636,93 @@ async def test_momentum_exit_pass_fresh_position_initialises_state(
     assert any(
         t.position_id == "pos_orphan" and not t.closed for t in state.open_trades
     )
+
+
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_uses_entry_anchored_r_units(
+    memdb: sqlite3.Connection,
+) -> None:
+    """positions.entry_atr_pct anchors the R denominator (pnl_r/mfe_r/mae_r +
+    FSM thresholds) in the tick exit pass — the same ruler the bar recalc
+    uses — so the persisted excursion telemetry stops flapping between the
+    live tick-window ruler (500ms) and the entry-anchored ruler (5s).
+
+    entry=100, anchor 4% → atr_r = 100*0.04*2 = 8.0; restored peak 106 →
+    mfe_r = 6/8 = 0.75 → FSM "touched". The ~1.9% tick-window ruler would
+    inflate mfe_r to ≈1.57 and advance the FSM to "protected"."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=104.0, peak_price=106.0, trough_price=99.5,
+        exit_state="open", entry_atr_pct=0.04,
+    )
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=103.0, hi=105.0, last=104.5),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    row = memdb.execute(
+        "SELECT mfe_r, mae_r, exit_state FROM positions "
+        "WHERE position_id = 'pos_mom'",
+    ).fetchone()
+    assert row is not None
+    mfe_r, mae_r, exit_state = row
+    assert mfe_r == pytest.approx(0.75), (
+        f"mfe_r not entry-anchored: {mfe_r} (tick-window ruler would be ≈1.57)"
+    )
+    assert mae_r == pytest.approx(-0.0625), f"mae_r not entry-anchored: {mae_r}"
+    # FSM advances on the ANCHORED ruler: 0.75 ≥ touch(0.5) but < protect(1.0).
+    assert exit_state == "touched", f"FSM advanced on the wrong ruler: {exit_state}"
+    # Held: 104.5 > the 104.0 ratcheted stop.
+    assert any(
+        t.position_id == "pos_mom" and not t.closed for t in state.open_trades
+    )
+
+
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_profit_target_uses_anchored_pnl_r(
+    memdb: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pnl_r fed to the precise-exit close decisions (target_harvest) must
+    be measured on the ENTRY-ANCHORED ruler, not the tick-window ruler. With a
+    0.8R target: anchored pnl_r = 4.5/8 = 0.5625 → HOLD; the inflated window
+    ruler (≈1.18) would falsely harvest. Today's tick momentum signals carry
+    no profit_target_r — this pins the seam for any registered strategy that
+    does."""
+    from polaris.scripts import _production_recalc_exit as rex
+
+    monkeypatch.setattr(rex, "_profit_target_for_strategy", lambda _sid: 0.8)
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=104.0, peak_price=106.0, trough_price=99.5,
+        exit_state="open", entry_atr_pct=0.04,
+    )
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=103.0, hi=105.0, last=104.5),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    # Anchored 0.5625 < 0.8 target → held (window 1.18 would have harvested).
+    assert any(
+        t.position_id == "pos_mom" and not t.closed for t in state.open_trades
+    ), "profit target fired on the inflated tick-window pnl_r ruler"

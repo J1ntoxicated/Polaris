@@ -361,6 +361,8 @@ async def _evaluate_position(
     # #26 — precise exits FIRST (deterministic, every tick): track excursion,
     # ratchet the ATR-trailing stop, advance the MFE FSM, close on trail-stop /
     # protected-BEP / loser-timeout. If it fires, the position is gone — skip G6.
+    # State resume (stop/peak/trough/FSM) is OWNED by run_precise_exit's fresh
+    # row read — the ``pos`` snapshot fields are a no-row fallback only.
     closed = await run_precise_exit(
         conn=conn, state=state, pos=pos, side=side, entry_price=entry_price,
         last_price=last_price, atr_pct=atr_pct, pnl_r=pnl_r,

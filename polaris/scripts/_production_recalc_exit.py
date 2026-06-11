@@ -239,22 +239,38 @@ async def run_precise_exit(
     close-or-hold only; size + entry side untouched; G6 -1.0R rail stays.
 
     ``entry_atr_pct``: entry-time R anchor forwarded to ``evaluate_exit`` (the
-    mfe/mae denominator). ``None`` (legacy rows / the tick-engine momentum
-    path) keeps the current-ATR denominator — byte-identical pre-anchor.
+    mfe/mae denominator). ``None`` (legacy NULL-anchor rows) keeps the
+    current-ATR denominator — byte-identical pre-anchor.
     """
     position_id = str(pos["position_id"])
-    tracked_peak = pos.get("peak_price")
-    if tracked_peak is None:
+    # Resume from the FRESHEST persisted state, not the caller's row: the bar
+    # cycle snapshots ALL positions at cycle start and awaits G6/G7/close
+    # network calls between positions, while the 500ms tick pass ratchets the
+    # same row concurrently — evaluating from the stale snapshot would roll
+    # the ratchet back. There is NO await between this read and the
+    # persist_exit_state below, so the read-modify-write is atomic on the
+    # event loop and the ratchet can never loosen. A missing row (synthetic /
+    # replay callers) keeps the caller-supplied fields — prior behaviour.
+    fresh = conn.execute(
+        "SELECT stop_price, peak_price, trough_price, exit_state "
+        "FROM positions WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if fresh is not None:
+        stop_src, peak_src, trough_src, exit_state_src = fresh
+    else:
+        stop_src = pos.get("stop_price")
+        peak_src = pos.get("peak_price")
+        trough_src = pos.get("trough_price")
+        exit_state_src = pos.get("exit_state")
+    if peak_src is None:
         prev = init_exit_state(entry_price=entry_price, side=side)
     else:
         prev = ExitState(
-            peak_price=float(tracked_peak),
-            trough_price=float(pos.get("trough_price") or entry_price),
-            stop_price=(
-                None if pos.get("stop_price") is None
-                else float(pos["stop_price"])
-            ),
-            exit_state=str(pos.get("exit_state") or "open"),
+            peak_price=float(peak_src),
+            trough_price=float(trough_src or entry_price),
+            stop_price=None if stop_src is None else float(stop_src),
+            exit_state=str(exit_state_src or "open"),
         )
     # Component B exit horizon ∝ timeframe: scale the stale-loser timeout to the
     # position's ACTIVE strategy timeframe so a 1H thesis is not force-closed at

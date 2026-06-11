@@ -23,7 +23,11 @@ import pytest
 
 from polaris.core.live_recalc.exit_engine import EXIT_LOSER_TIMEOUT_SEC
 from polaris.scripts._production_close import close_specific_position
-from polaris.scripts._production_recalc import recalc_active_positions
+from polaris.scripts._production_recalc import (
+    ActivePositionRow,
+    recalc_active_positions,
+)
+from polaris.scripts._production_recalc_exit import run_precise_exit
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts.production_paper_loop import ProdLoopState
 
@@ -373,3 +377,90 @@ async def test_g6_hard_rail_exit_now_unchanged(memdb: sqlite3.Connection) -> Non
     assert _pos_row(memdb, "pos-g6x")["status"] == "closed"
     # No GPT call was needed to close a deterministic loser.
     assert gpt.calls == []
+
+
+# --- stale-snapshot seal: resume from the FRESHEST persisted state -----------
+
+
+def _stale_pos_row(position_id: str) -> ActivePositionRow:
+    """A bar-cycle snapshot taken BEFORE a tick pass ratcheted the DB row —
+    looser stop, lower peak, regressed FSM."""
+    pos = ActivePositionRow()
+    pos.update(
+        {
+            "position_id": position_id,
+            "venue": "okx",
+            "symbol": "BTC-USDT",
+            "side": "long",
+            "active_strategy_id": "vb",
+            "strategy": "vb",
+            "stop_price": 101.0,
+            "peak_price": 104.0,
+            "trough_price": 99.9,
+            "exit_state": "touched",
+        }
+    )
+    return pos
+
+
+async def _run_precise_exit_direct(
+    conn: sqlite3.Connection, pos: ActivePositionRow,
+) -> bool:
+    return await run_precise_exit(
+        conn=conn, state=ProdLoopState(), pos=pos, side="long",
+        entry_price=100.0, last_price=104.5, atr_pct=0.019, pnl_r=1.0,
+        held_seconds=60, now_ts=NOW, close_specific=close_specific_position,
+        lookup_regime=_regime, gpt_client=None, phase="P1",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_precise_exit_resumes_freshest_persisted_state(
+    memdb: sqlite3.Connection,
+) -> None:
+    """run_precise_exit must resume from the FRESHEST persisted positions row,
+    not the caller's snapshot. The bar cycle snapshots ALL positions at cycle
+    start, then awaits G6/G7/close network calls between positions — a 500ms
+    tick pass can ratchet the row in that window, and evaluating from the
+    stale snapshot would roll the ratchet back (stop loosened ≤1 bar-cycle).
+    FSM seed is "harvest" so the exact-match assert cannot be satisfied by
+    re-derivation (the re-derived target tops out at "protected")."""
+    _seed(memdb, position_id="pos-fresh", entry_price=100.0, last_price=104.5)
+    # The DB row carries the freshest ratchet (a tick pass just wrote it).
+    memdb.execute(
+        "UPDATE positions SET stop_price=104.0, peak_price=106.0, "
+        "trough_price=99.5, exit_state='harvest' WHERE position_id='pos-fresh'"
+    )
+
+    closed = await _run_precise_exit_direct(memdb, _stale_pos_row("pos-fresh"))
+
+    assert closed is False  # 104.5 > the 104.0+ stop — held
+    row = _pos_row(memdb, "pos-fresh")
+    assert row["stop_price"] is not None and row["stop_price"] >= 104.0, (
+        f"stale snapshot rolled the ratchet back: {row['stop_price']} < 104.0"
+    )
+    assert row["peak_price"] == pytest.approx(106.0)
+    assert row["trough_price"] == pytest.approx(99.5)
+    assert row["exit_state"] == "harvest"
+
+
+@pytest.mark.asyncio
+async def test_precise_exit_missing_row_uses_caller_fields(
+    memdb: sqlite3.Connection,
+) -> None:
+    """No positions row (synthetic/replay caller) → the caller-supplied pos
+    fields drive the resume; persist is a no-op; never raises.
+
+    last_price 100.9 sits BETWEEN the caller-field stop (101.0 → trail fires,
+    close decision True) and a from-entry re-seeded trail (≈97 → would hold) —
+    so replacing the fallback with init_exit_state() flips this test RED."""
+    pos = _stale_pos_row("pos-ghost")  # not in the DB
+    closed = await run_precise_exit(
+        conn=memdb, state=ProdLoopState(), pos=pos, side="long",
+        entry_price=100.0, last_price=100.9, atr_pct=0.019, pnl_r=0.5,
+        held_seconds=60, now_ts=NOW, close_specific=close_specific_position,
+        lookup_regime=_regime, gpt_client=None, phase="P1",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+    )
+    assert closed is True  # 100.9 ≤ the caller-field 101.0 stop — trail fired

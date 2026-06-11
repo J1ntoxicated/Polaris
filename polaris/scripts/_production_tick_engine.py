@@ -598,20 +598,23 @@ async def _run_exits(
                 )
             continue
         # Momentum family → existing precise-exit engine (ATR trail / BEP /
-        # loser-timeout). Resume the PERSISTED exit state from the positions
-        # row — the 5s bar recalc (and prior tick passes) ratchet
-        # stop/peak/trough/FSM there; re-seeding from entry every ~500ms
-        # loosened the ratcheted stop (the never-loosen invariant) and reset
-        # the excursion telemetry. A missing row falls back to first-tick
-        # init (fresh open) — unchanged behaviour.
-        exit_row = conn.execute(
-            "SELECT stop_price, peak_price, trough_price, exit_state "
-            "FROM positions WHERE position_id = ?",
+        # loser-timeout). ``run_precise_exit`` resumes stop/peak/trough/FSM
+        # from the freshest persisted positions row itself (never loosens the
+        # bar recalc's ratchet); here we only read the entry-time ATR anchor
+        # so the R-unit denominator (pnl_r/mfe_r/mae_r + FSM thresholds)
+        # matches the bar recalc's ruler. NULL anchor / missing row → the
+        # live tick-window denominator (legacy-graceful, pre-anchor).
+        anchor_row = conn.execute(
+            "SELECT entry_atr_pct FROM positions WHERE position_id = ?",
             (position_id,),
         ).fetchone()
-        stop_db, peak_db, trough_db, exit_state_db = (
-            exit_row if exit_row is not None else (None, None, None, None)
-        )
+        anchor_raw = anchor_row[0] if anchor_row is not None else None
+        entry_atr_pct = None if anchor_raw is None else max(float(anchor_raw), 1e-4)
+        if entry_atr_pct is not None:
+            pnl_r = compute_unrealized_pnl_r(
+                side=trade.side, entry_price=entry_price,
+                last_price=last_mid, atr_pct=entry_atr_pct,
+            )
         pos = ActivePositionRow()
         pos.update(
             {
@@ -621,10 +624,12 @@ async def _run_exits(
                 "side": trade.side,
                 "active_strategy_id": trade.strategy_id,
                 "strategy": trade.strategy_id,
-                "peak_price": peak_db,
-                "trough_price": trough_db,
-                "stop_price": stop_db,
-                "exit_state": exit_state_db or "open",
+                # State resume is owned by run_precise_exit's fresh row read;
+                # these caller fields only seed the no-row (orphan) fallback.
+                "peak_price": None,
+                "trough_price": None,
+                "stop_price": None,
+                "exit_state": "open",
             }
         )
         held_seconds = max(0, now_ts - int(trade.open_ts))
@@ -635,7 +640,7 @@ async def _run_exits(
             close_specific=close_specific_position, lookup_regime=lookup_regime,
             gpt_client=None, phase=phase, real_roundtrip=real_roundtrip,
             okx_adapter=okx_adapter, capital_session=capital_session,
-            alpaca_adapter=alpaca_adapter,
+            alpaca_adapter=alpaca_adapter, entry_atr_pct=entry_atr_pct,
         )
         if closed:
             eng.family_by_position.pop(position_id, None)

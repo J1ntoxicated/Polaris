@@ -43,6 +43,10 @@ from polaris.core.streams import (
     resolve_stream,
     resolve_stream_profile,
 )
+from polaris.scripts._production_counterfactual import (
+    backfill_run_position_id,
+    record_pipeline_cohort,
+)
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.strategies import BaseStrategy, RawSignal
 
@@ -391,6 +395,16 @@ async def run_pipeline_for_signal(
     state.pipeline_runs += len(results)
     if any(r.decision == GateDecision.KILL for r in results):
         state.pipeline_kills += 1
+    # Gate→outcome instrumentation (BUILD, behavior 0): one cohort row per
+    # G3/G4 GPT decision — a KILL gets forward-mark counterfactuals (resolved
+    # by the bar-ingest sweep), a G4-cleared PASS shares the same estimator.
+    # Fail-open inside; never branches the pipeline.
+    record_pipeline_cohort(
+        conn, state=state, ctx=ctx, results=results, sig=sig, venue=venue,
+        symbol=symbol, regime=regime, last_price=last_price,
+        atr_pct=bars_atr_pct, timeframe=strategy.metadata.timeframe,
+        now_ts=now_ts,
+    )
     state.g1_runs += 1
     # Cost telemetry: count G1 runs that reused the cached focus (no GPT call).
     # ``model_used == "cached"`` is emitted ONLY by the G1-EFF skip path.
@@ -431,6 +445,11 @@ async def run_pipeline_for_signal(
     if trade is None:
         return
     state.open_trades.append(trade)
+    # Gate→outcome PASS link (BUILD, behavior 0): stamp this run's pre-position
+    # gate_events rows (position_id NULL — G1-G5) with the persisted
+    # position_id so the PASS cohort joins gate_events → positions.pnl_r.
+    # run_id-scoped UPDATE (indexed) + fail-open — open path untouched.
+    backfill_run_position_id(conn, run_id=ctx.run_id, position_id=trade.position_id)
     # Component B anti-churn: record the LAST actually-submitted entry per
     # (venue, symbol, strategy_id) so the next tick's novelty test exempts only
     # a NEW strategy-timeframe bar OR a side flip vs this — never raw strength.

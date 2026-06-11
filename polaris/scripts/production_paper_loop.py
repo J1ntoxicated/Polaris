@@ -596,6 +596,9 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
     venue_rejects = " ".join(
         f"{code}={n}" for code, n in sorted(state.venue_rejects_by_code.items())
     ) or "-"
+    regime_hint = " ".join(
+        f"{k}={n}" for k, n in sorted(state.regime_hint_stats.items())
+    ) or "-"
     fields = [
         ("ticks", tick_idx),
         ("universe_refresh", f"okx={state.universe_refreshes} capital={state.capital_refreshes}"),
@@ -619,6 +622,8 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
         ),
         ("fills open/close", f"{state.fills_open} / {state.fills_close}"),
         ("closed_trades", len(state.closed_trades)),
+        # Altdata hint instrumentation (in-memory counters; display only).
+        ("regime_hint", regime_hint),
     ]
     logger.info("=========== production paper loop summary ===========")
     for name, value in fields:

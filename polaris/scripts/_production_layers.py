@@ -492,6 +492,7 @@ def compute_and_flip_regime(
     now_ts: int,
     altdata_cache: Any = None,
     asset_class: str = "crypto",
+    hint_stats: dict[str, int] | None = None,
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
@@ -519,6 +520,14 @@ def compute_and_flip_regime(
       * The (possibly tilted) candidate STILL clears the unchanged confirm
         gate. Evidence is additive context only; it does not size, block,
         exit, or write learner/risk state. SIGNAL-only.
+
+    ``hint_stats`` (instrumentation only, default None = byte-identical): an
+    in-memory counter dict accumulating how the fuser's conviction-floor hint
+    fared vs the composed candidate / final SSOT label (``hint_total`` /
+    ``hint_tilt_lost_to_price`` / ``hint_final_mismatch``). The hint is a
+    REDUNDANT projection of the same evidence scores compose consumes
+    (intentionally retired as an input — regime_layered debate 2026-05-31);
+    these counters only measure that redundancy. Per-call DB writes: 0.
     """
     price_candidate, price_strength, _price_ev = compute_real_regime_signal(
         bars, asset_class=asset_class
@@ -526,8 +535,9 @@ def compute_and_flip_regime(
     candidate = price_candidate
     evidence: dict[str, Any] = {}
     evidence_scores: dict[str, float] = {}
+    hint: str | None = None
     if altdata_cache is not None:
-        _hint, _conf, ev = fuse_evidence(
+        hint, _conf, ev = fuse_evidence(
             underlying_group_id, altdata_cache, now_ts=now_ts
         )
         evidence = ev
@@ -554,9 +564,9 @@ def compute_and_flip_regime(
     # only a confirmed flip emits INFO. Log only — never sizes/blocks/exits.
     logger.debug(
         "[L6/regime] candidate %s/%s price=%s tilt=%s source=%s "
-        "price_strength=%.3f confidence=%.3f",
+        "price_strength=%.3f confidence=%.3f hint=%s",
         venue, underlying_group_id, price_candidate, candidate,
-        candidate_source, price_strength, confidence,
+        candidate_source, price_strength, confidence, hint,
     )
     decision = detect_regime_flip(
         conn,
@@ -576,6 +586,21 @@ def compute_and_flip_regime(
         "WHERE venue = ? AND underlying_group_id = ?",
         (venue, underlying_group_id),
     ).fetchone()
+    # Hint instrumentation (in-memory counters ONLY — no DB write, no branch):
+    # how often the fuser's floor-cleared hint diverged from the composed
+    # candidate (evidence lost the price-conviction tilt) and from the final
+    # SSOT label (post 2-close gate). hint is None when conviction < floor.
+    if hint_stats is not None and hint is not None:
+        final_label = candidate if row is None else str(row[0])
+        hint_stats["hint_total"] = hint_stats.get("hint_total", 0) + 1
+        if hint != candidate:
+            hint_stats["hint_tilt_lost_to_price"] = (
+                hint_stats.get("hint_tilt_lost_to_price", 0) + 1
+            )
+        if hint != final_label:
+            hint_stats["hint_final_mismatch"] = (
+                hint_stats.get("hint_final_mismatch", 0) + 1
+            )
     if row is None:
         return candidate
     persisted = str(row[0])

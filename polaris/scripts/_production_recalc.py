@@ -499,6 +499,10 @@ async def _evaluate_position(
             seconds_since_last_override=60,
         )
         g7_payload_full = {**monitor_payload, **g7_payload}
+        # G7 divergence SHADOW site tag (instrumentation only): read by the
+        # shadow logger so live-recalc rows are separable from other call
+        # sites in analysis. Never read by any decision.
+        g7_payload_full["g7_shadow_site"] = "live_recalc"
         g7_ctx = GateContext(
             run_id=g6_ctx.run_id,
             signal_id=g6_ctx.signal_id,
@@ -513,7 +517,11 @@ async def _evaluate_position(
             stream_profile=stream_profile,
         )
         g7_client = gpt_client if phase == "P1" else None
-        g7_result = await adaptive_exit_gate(g7_ctx, client=g7_client)
+        # shadow_conn (instrumentation only): rails-vs-GPT divergence row per
+        # P1 GPT call; the returned decision is byte-identical (P0 skips).
+        g7_result = await adaptive_exit_gate(
+            g7_ctx, client=g7_client, shadow_conn=conn,
+        )
         log_gate_event(conn, g7_ctx, g7_result)
         state.recalc_g7_calls = getattr(state, "recalc_g7_calls", 0) + 1
         # 🔴 BUG FIX: G7 EXIT_NOW was SILENTLY DROPPED (only widening_applied was

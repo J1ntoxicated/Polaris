@@ -293,7 +293,11 @@ class GateOrchestrator:
 
     async def _wrap_exit(self, ctx: GateContext) -> GateResult:
         if self.phase == "P1":
-            return await adaptive_exit_gate(ctx, client=self.haiku_client)
+            # G7 divergence SHADOW (instrumentation only): log the Q9 rail
+            # decision vs the live GPT decision; the GPT decision still drives.
+            return await adaptive_exit_gate(
+                ctx, client=self.haiku_client, shadow_conn=self.conn
+            )
         return await adaptive_exit_gate(ctx, client=None)
 
     async def _wrap_reflector(self, ctx: GateContext) -> GateResult:

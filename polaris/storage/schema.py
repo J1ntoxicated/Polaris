@@ -69,6 +69,9 @@ from polaris.storage.schema_ddl_ext import (
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_DASH_INDEX,
     DDL_GATE_EVENTS_INDEX,
+    DDL_GATE_KILL_COUNTERFACTUALS,
+    DDL_GATE_KILL_COUNTERFACTUALS_GATE_INDEX,
+    DDL_GATE_KILL_COUNTERFACTUALS_PENDING_INDEX,
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
     DDL_LEARNER_BLOCKS,
@@ -95,6 +98,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_ROLLBACK_CANDIDATES,
     DDL_STRATEGY_REGIME_PRIOR,
     DDL_STRATEGY_RISK_STATE,
+    DDL_V_G34_COHORT_OUTCOMES,
     DDL_VENUE_BLOCKLIST,
 )
 
@@ -149,6 +153,12 @@ ALL_DDL: tuple[str, ...] = (
     # AI-conductor P0 SHADOW — technical-vs-GPT shadow decision log
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
+    # Gate→outcome instrumentation — G3/G4 KILL/PASS cohort counterfactuals.
+    # The cohort VIEW (DDL_V_G34_COHORT_OUTCOMES) is created in
+    # _apply_post_migrations (after the positions.pnl_r ALTER it reads), not here.
+    DDL_GATE_KILL_COUNTERFACTUALS,
+    DDL_GATE_KILL_COUNTERFACTUALS_PENDING_INDEX,
+    DDL_GATE_KILL_COUNTERFACTUALS_GATE_INDEX,
     # Component C (SHADOW) — edge-first entry admission shadow log
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
@@ -401,6 +411,13 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE positions ADD COLUMN entry_atr_pct REAL")
     if "entry_atr_timeframe" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN entry_atr_timeframe TEXT")
+    # positions.pnl_r — gate→outcome instrumentation (BUILD): the final-close
+    # realised R stamped by ``_close_trade_with_real_pnl`` so the PASS cohort
+    # (gate_events.position_id → positions) reads its outcome in ONE join.
+    # NULL = still open / reconciled-zombie / partial-only / legacy row.
+    # MEASUREMENT ONLY — never read by sizing/gating. Pragma guard = idempotent.
+    if "pnl_r" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN pnl_r REAL")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are
@@ -463,3 +480,7 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # after ALL_DDL has run. Fresh DBs already have the columns; IF NOT EXISTS
     # makes this idempotent for both paths.
     conn.execute(DDL_GATE_EVENTS_DASH_INDEX)
+    # Cohort view — created HERE (not in ALL_DDL, idx_gate_events_dash
+    # precedent) because its SELECT reads positions.pnl_r, which legacy DBs
+    # only gain via the ALTER above. IF NOT EXISTS = idempotent.
+    conn.execute(DDL_V_G34_COHORT_OUTCOMES)

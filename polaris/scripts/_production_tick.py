@@ -39,6 +39,10 @@ from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
 from polaris.scripts import _production_rotation as rotation
+from polaris.scripts._production_counterfactual import (
+    CF_SWEEP_THROTTLE_SEC,
+    sweep_forward_marks,
+)
 from polaris.scripts._production_indicators import (
     build_real_market_view,
     session_window_now,
@@ -318,6 +322,14 @@ async def _run_tick(
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]
 
+    # Gate→outcome counterfactual forward-mark sweep (instrumentation only):
+    # resolves pending G3/G4 KILL/PASS cohort rows from the bars just ingested
+    # (zero new fetches). 60s throttle + LIMIT batch inside the sweep; never
+    # reads/affects any entry/exit/sizing decision.
+    if now_mono - state.last_cf_sweep_monotonic >= CF_SWEEP_THROTTLE_SEC:
+        state.last_cf_sweep_monotonic = now_mono
+        await sweep_forward_marks(conn, now_ts=now_ts)
+
     await run_recalc_for_active_positions(conn, now_ts=now_ts)
     # Day 9 F1+F2 — live recalc loop with G6/G7 GPT per-position invocation.
     # Replaces the entry-time-only G6 wiring + FIFO-oldest close path with a
@@ -351,7 +363,7 @@ async def _run_tick(
         regime_by_group[(venue, group_id)] = compute_and_flip_regime(
             conn, venue=venue, underlying_group_id=group_id,
             bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
-            asset_class=asset_class,
+            asset_class=asset_class, hint_stats=state.regime_hint_stats,
         )
 
     universe_rows: list[dict[str, Any]] = []

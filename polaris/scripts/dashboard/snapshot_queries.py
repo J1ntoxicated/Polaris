@@ -870,9 +870,12 @@ def _per_stream_summary(
 
     # --- AI cost side: gate_events has NO venue column, so attribute each event
     # to a venue via the position_id → positions.venue join (the SSOT venue
-    # source). Pre-position gate_events (NULL position_id — G1..G5 before a
-    # position exists) are UNATTRIBUTABLE and intentionally excluded; their
-    # tokens are not assigned to any stream (documented gap, display-only).
+    # source). NULL-position_id gate_events are UNATTRIBUTABLE and intentionally
+    # excluded; their tokens are not assigned to any stream (documented gap,
+    # display-only). NOTE (gate→outcome instrumentation): a run that ACTUALLY
+    # OPENED now backfills its G1-G5 rows with the position_id, so opened
+    # entries' pre-position tokens DO attribute here; only killed / never-opened
+    # runs remain unattributed (per-venue AI cost is higher + more complete).
     # Cost = Σ (input+output tokens)/1000 × MODEL_PRICE_PER_1K[model_used].
     ai_cost_by_venue: dict[str, float] = {}
     ai_rows = _safe_query(

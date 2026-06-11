@@ -466,11 +466,17 @@ async def _close_trade_with_real_pnl(
             opened_ts=trade.open_ts,
         )
         if trade.position_id:
+            # Gate→outcome instrumentation: ``pnl_r`` (move quality,
+            # qty-invariant — the FINAL full-close slice's R) is stamped onto
+            # the SAME existing UPDATE so the PASS cohort reads its outcome via
+            # gate_events.position_id → positions.pnl_r. Partial closes /
+            # reconciled zombies never reach this statement → stay NULL
+            # (correct: not a completed trade outcome). Measurement only.
             conn.execute(
                 "UPDATE positions SET status = 'closed', closed_ts = ?, "
-                "mfe_r = ?, mae_r = ?, exit_state = 'closed' "
+                "mfe_r = ?, mae_r = ?, exit_state = 'closed', pnl_r = ? "
                 "WHERE position_id = ?",
-                (now_ts, mfe_r, mae_r, trade.position_id),
+                (now_ts, mfe_r, mae_r, pnl_r, trade.position_id),
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:

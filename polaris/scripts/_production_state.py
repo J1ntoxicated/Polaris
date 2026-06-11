@@ -179,3 +179,13 @@ class ProdLoopState:
     tf_atr_cache: dict[tuple[str, str], tuple[float, int]] = field(
         default_factory=dict
     )
+    # Gate→outcome counterfactual sweep throttle — monotonic ts of the last
+    # forward-mark sweep (60s cadence, piggybacks the bar ingest). 0.0 = never
+    # swept. Instrumentation only — never read by any trading decision.
+    last_cf_sweep_monotonic: float = 0.0
+    # Altdata hint instrumentation — IN-MEMORY counters only (hint_total /
+    # hint_tilt_lost_to_price / hint_final_mismatch), accumulated by
+    # compute_and_flip_regime and surfaced in the loop summary. The hint is a
+    # redundant projection of the evidence scores compose already consumes;
+    # per-call DB writes: 0 (focus×tick frequency — STALL-safe).
+    regime_hint_stats: dict[str, int] = field(default_factory=dict)

@@ -100,6 +100,6 @@ DEMO/PAPER 명시 + Aggressive bias + 거부 키워드 sweep + length cap + vaul
 - Smoke harness fixture mode = production 위장 → `production_paper_loop.py` 별도
 
 ## Quick reference
-- **24h paper loop**: `python3 -m polaris.scripts.ignite_p1 --paper --duration 86400 --tick 5 --full-pipeline --real-roundtrip --db data/polaris.sqlite -vv --log-file data/paper/polaris_runtime.log`
+- **Paper loop start**: `./scripts/start_bot.sh` — botctl 단일 경로(멱등 lock·orphan adopt·MANUAL_STOP 해제). 커맨드 SSOT = `tools/ops/ops_config.py`: `ignite_p1 --paper --duration 172800 --tick 5 --full-pipeline --real-roundtrip --db data/polaris_live.sqlite -vv --log-file data/paper/polaris_runtime.log` (일일 재기동이 실제 케이던스, 172800=백스톱). 운영 자동화 = [[ops-automation]] (watchdog 5분/재기동 07:30/다이제스트 10:10 로컬)
 - **Dashboard**: WEB — `./scripts/start_dashboard.sh` launches `tools.visualizer.server` (detached) + opens browser at http://localhost:8770 (left=Neural Cloud sphere, right=analysis board, fed by `/api/snapshot`). Terminal `dashboard_v2` retired 2026-05-29; tty-cleanup removed ([[feedback_never_kill_claude_session]]). Stop: `./scripts/stop_dashboard.sh`.
-- **Stop**: `kill -SIGTERM <PID>` · **Tests**: `python3 -m pytest tests/ -q` · **Vault lint**: `python3 tools/vault_lint.py --karpathy --report`
+- **Stop**: `./scripts/stop_bot.sh` (MANUAL_STOP sentinel → 정확 PID SIGTERM; sentinel 없는 kill은 watchdog이 ≤5분 부활) · **Tests**: `python3 -m pytest tests/ -q` · **Vault lint**: `python3 tools/vault_lint.py --karpathy --report`

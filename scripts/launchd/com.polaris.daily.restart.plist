@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris daily graceful restart — 07:30 LOCAL (machine TZ = Australia/Sydney).
+
+  UTC intent: 21:30 UTC (post-NY-close, pre-Asia-open low-liquidity window).
+  Sydney observes DST (AEDT, Oct-Apr) so the UTC moment drifts to 20:30
+  for part of the year — accepted (window stays low-liquidity).
+
+  Flow: sentinel check -> start.lock -> SIGTERM exact PID -> wait <=60s
+  (timeout = abort + alert, NEVER force-kill) -> rotate log (bot-down
+  window) -> start -> wal before/after line in ops_restart.log.
+  WAL creep (~18MB/h PASSIVE limit) is reclaimed by the restart itself —
+  this job never opens the database.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.daily.restart</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.daily_restart</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/restart.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/restart.err</string>
+</dict>
+</plist>

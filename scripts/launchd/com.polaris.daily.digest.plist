@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris daily auto digest — 10:10 LOCAL (machine TZ = Australia/Sydney).
+
+  UTC intent: 00:10 UTC, right after the previous UTC day completes and
+  after the daily-restart settle window. Digest CONTENT is computed in
+  pure UTC epoch terms, so DST drift only moves the trigger, never the
+  window.
+
+  Read-only: ro-URI SQLite + explicit close, SELECT only. Output =
+  vault/40_ops/digests/daily-auto/YYYY-MM-DD.md (numbers only, runtime
+  rejection-keyword sweep) + 1 line in vault/log.md. Idempotent rerun.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.daily.digest</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.daily_digest</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/digest.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/digest.err</string>
+</dict>
+</plist>

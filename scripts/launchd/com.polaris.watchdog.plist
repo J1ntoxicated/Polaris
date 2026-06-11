@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris watchdog — polling liveness + health check every 5 minutes.
+
+  Deliberately NO KeepAlive: launchd must never own the bot process
+  (KeepAlive is exactly how the old ghost com.polaris.paper.realtime
+  crash-looped). Ownership lives in tools.ops.botctl (pidfile + start.lock).
+
+  Behavior per pass: MANUAL_STOP sentinel → no-op; bot alive → health
+  alerts only (never kills); bot dead → adopt strict-match orphan or
+  restart. A bot killed without the sentinel revives within <=5 min — that
+  is the documented default (continuous operation).
+
+  Install via scripts/install_ops_automation.sh (idempotent).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.watchdog</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/watchdog.err</string>
+</dict>
+</plist>

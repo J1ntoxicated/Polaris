@@ -146,6 +146,18 @@ def main() -> None:
     if egregious:
         flags.append(f"모듈화 부채: {egregious}개 파일 >800 LOC")
 
+    # 용량 상시 감사 — DB/WAL(retention=daily prune, WAL=재기동 시 reclaim, 무한증식 차단).
+    db_mb = wal_mb = 0.0
+    with contextlib.suppress(OSError):
+        db_mb = os.path.getsize(DB) / 1e6
+    with contextlib.suppress(OSError):
+        wal_mb = os.path.getsize(DB + "-wal") / 1e6
+    print(f"\U0001f4be 용량: DB {db_mb:.0f}MB + WAL {wal_mb:.0f}MB")
+    if wal_mb > 200:
+        flags.append(f"WAL creep {wal_mb:.0f}MB (>200 — 재기동 체크포인트 필요)")
+    if db_mb > 900:
+        flags.append(f"DB {db_mb:.0f}MB (>900 — retention 윈도우/VACUUM 검토)")
+
     if flags:
         print("⚠️ 이상:")
         for fl in flags:

@@ -1,0 +1,128 @@
+"""Polaris dashboard v1 — shared snapshot-query helpers + constants.
+
+Low-level DB helpers, session-bucket math, label/price helpers and the
+display-only pricing / lookback constants shared by every ``snapshot_q_*``
+section module. Split out of ``snapshot_queries.py`` to keep each module
+≤500 LOC (move-only; no logic change). All queries best-effort: missing tables
+/ empty data return zero-defaults so the dashboard never crashes a paper loop.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from collections.abc import Mapping
+from typing import Any, Final
+
+from polaris.core.metrics.risk_unit import R_USD_PROXY
+
+# Step M (2026-06-22): the flat ``$10`` display heuristic is retired in favour
+# of the canonical risk$-based R (positions.pnl_r) on every panel, with the ONE
+# shared ``R_USD_PROXY`` as the only fallback for fills that have no matched
+# position. ``DEFAULT_R_USD`` is kept as a backward-compat alias to that single
+# proxy so any external importer resolves to the SAME number (no $10/$50 split).
+DEFAULT_R_USD: Final[float] = R_USD_PROXY
+EQUITY_BUCKET_SEC: Final[int] = 5 * 60       # legacy 5-min bucket (24h fallback)
+EQUITY_LOOKBACK_SEC: Final[int] = 24 * 3600  # legacy 24h window (fallback only)
+GATE_FUNNEL_LOOKBACK_SEC: Final[int] = 3600
+GPT_LOOKBACK_SEC: Final[int] = 3600
+LEARNER_DELTA_LOOKBACK_SEC: Final[int] = 3600
+
+# Session-anchored curve config (Jin 2026-05-29): all PnL/DD/Sharpe lookbacks
+# start at the session anchor (clean restart → DB is the current session), not
+# a rolling 24h window. The session is split into N buckets, floor 60s each.
+EQUITY_TARGET_BUCKETS: Final[int] = 288      # target resolution across the session
+EQUITY_MIN_BUCKET_SEC: Final[int] = 60       # floor bucket size
+
+# GPT pricing (USD per 1K tokens) — gpt-5-mini & gpt-5.5 ballpark for projection.
+GPT_PRICE_PER_1K: Final[Mapping[str, float]] = {
+    "gpt-5-mini": 0.000150,
+    "gpt-5.5": 0.005,
+    "gpt": 0.000150,           # default mini for unlabelled rows
+}
+GPT_TOKENS_PER_CALL: Final[int] = 1500       # heuristic — average prompt+completion
+
+# Per-stream AI-cost price table (USD per 1K tokens). DISPLAY-ONLY: feeds the
+# read-only cost-monitoring breakdown, never sizing/gating. Keyed on the
+# ``gate_events.model_used`` labels the orchestrator actually emits — ``gpt`` =
+# GPT-mini (P0), ``gpt_p1``/``haiku`` = the P1 model, ``python`` /
+# ``python_fast_path`` = deterministic gate (no LLM, $0), ``cached`` = served
+# from cache ($0). This is the AUDIT's price table (Jin /debate-tunable), not a
+# venue billing source of truth. Unknown labels fall back to the mini price
+# (``_model_price``) so a new label is never silently free.
+MODEL_PRICE_PER_1K: Final[Mapping[str, float]] = {
+    "gpt": 0.000150,            # GPT-mini (P0)
+    "gpt-5-mini": 0.000150,
+    "gpt_p1": 0.000150,         # P1 tier downgraded to gpt-5-mini (Jin 2026-05-31)
+    "gpt-5.5": 0.005,           # legacy price kept for any pre-downgrade rows
+    "haiku": 0.005,             # legacy P1 label — priced at the P1 tier
+    "python": 0.0,              # deterministic gate — no LLM call
+    "python_fast_path": 0.0,
+    "cached": 0.0,              # cache hit — no incremental cost
+}
+SLIPPAGE_BPS_DIVISOR: Final[float] = 10_000.0  # bps → fraction of notional
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+
+def _safe_query(
+    conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()
+) -> list[tuple[Any, ...]]:
+    try:
+        return list(conn.execute(sql, params).fetchall())
+    except sqlite3.Error:
+        return []
+
+
+def _now_s() -> int:
+    return int(time.time())
+
+
+def _session_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
+    """Session anchor in ms = earliest fill in the DB (clean restart → the DB is
+    the current session). Falls back to ``now`` when no fills exist yet.
+
+    All session-scoped PnL/equity/DD/Sharpe lookbacks start here instead of a
+    rolling 24h window (Jin 2026-05-29).
+    """
+    rows = _safe_query(conn, "SELECT MIN(ts_ms) FROM fills")
+    if rows and rows[0][0] is not None:
+        return int(rows[0][0])
+    return now_s * 1000
+
+
+def _session_buckets(session_start_s: int, now_s: int) -> tuple[list[int], int]:
+    """Split [session_start, now] into bucket end-timestamps (s) + bucket size.
+
+    Session length is divided into ``EQUITY_TARGET_BUCKETS`` buckets, each at
+    least ``EQUITY_MIN_BUCKET_SEC`` wide. Returns (bucket_ts, bucket_sec).
+    """
+    span = max(1, now_s - session_start_s)
+    bucket_sec = max(EQUITY_MIN_BUCKET_SEC, span // EQUITY_TARGET_BUCKETS)
+    n_buckets = max(1, (span + bucket_sec - 1) // bucket_sec)
+    bucket_ts = [session_start_s + (i + 1) * bucket_sec for i in range(n_buckets)]
+    return bucket_ts, bucket_sec
+
+
+def _strategy_label(s: str | None) -> str:
+    return (s or "?")[:18]
+
+
+def _symbol_from_inst(inst: str | None) -> str:
+    if not inst:
+        return "?"
+    return inst.split(":", 1)[-1] if ":" in inst else inst
+
+
+def _model_price(model: str | None) -> float:
+    """USD per 1K tokens for a ``gate_events.model_used`` label (display only).
+
+    Unknown / unlabelled models fall back to the mini price so a new model id
+    is never silently treated as free. ``python`` / ``cached`` map to 0.0.
+    """
+    if not model:
+        return MODEL_PRICE_PER_1K["gpt"]
+    return MODEL_PRICE_PER_1K.get(str(model), MODEL_PRICE_PER_1K["gpt"])

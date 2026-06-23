@@ -154,14 +154,18 @@ def start_ws_producers(
     return tasks, clients
 
 
-def resubscribe_ws_clients(
+async def resubscribe_ws_clients(
     conn: sqlite3.Connection, clients: list[WSStreamClient]
 ) -> None:
     """Push the latest focus symbols into the live clients (universe change).
 
-    The base ``run`` loop re-sends ``subscribe_messages`` on its next
-    (re)connect, so updating the symbol set here takes effect on reconnect. This
-    is a best-effort refresh (never forces a disconnect — degrade, never churn).
+    Increment 1 (incremental re-subscribe): after updating each client's desired
+    set, ``apply_subscription_delta`` sends the (un)subscribe delta on the LIVE
+    socket — so a focus churn reaches a HEALTHY socket WITHOUT waiting for a
+    reconnect (the audit's 'frozen socket' fix). Best-effort + degrade-never-halt:
+    a disconnected socket / send failure falls back to the next reconnect's full
+    ``subscribe_messages`` (the prior behaviour). flow_not_block: a FLOW INCREASE
+    (the socket FOLLOWS focus), never a forced disconnect/churn.
     """
     by_venue = _focus_by_venue(conn)
     for client in clients:
@@ -174,3 +178,4 @@ def resubscribe_ws_clients(
             client.set_epics(syms)
         elif isinstance(client, AlpacaQuoteWS):
             client.set_symbols(syms)
+        await client.apply_subscription_delta()

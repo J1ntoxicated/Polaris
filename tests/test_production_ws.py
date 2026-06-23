@@ -141,7 +141,8 @@ async def test_start_and_teardown(conn, tmp_path, monkeypatch):
     writer.close()
 
 
-def test_resubscribe_updates_symbols(conn, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_resubscribe_updates_symbols(conn, tmp_path, monkeypatch):
     monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
     _seed_focus(conn, [("okx", "BTC-USDT", "crypto")])
     writer = QuoteTickWriter(tmp_path / "ws_test.sqlite")
@@ -149,7 +150,7 @@ def test_resubscribe_updates_symbols(conn, tmp_path, monkeypatch):
     # Replace focus with a new OKX symbol; resubscribe should pick it up.
     conn.execute("DELETE FROM watchlist_focus")
     _seed_focus(conn, [("okx", "ETH-USDT", "crypto")])
-    resubscribe_ws_clients(conn, clients)
+    await resubscribe_ws_clients(conn, clients)
     import json
 
     args = json.loads(next(iter(clients[0].subscribe_messages())))["args"]
@@ -185,7 +186,8 @@ def test_held_symbol_subscribed_even_when_not_in_focus(conn, tmp_path, monkeypat
     assert "BTC-USDT" in subbed  # focus pick still present
 
 
-def test_held_symbol_drops_from_ws_after_close(conn, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_held_symbol_drops_from_ws_after_close(conn, tmp_path, monkeypatch):
     """Once the held position closes, the resubscribe drops it from the WS set."""
     monkeypatch.delenv("ALPACA_PAPER_API_KEY", raising=False)
     _seed_focus(conn, [("okx", "BTC-USDT", "crypto")])
@@ -194,7 +196,7 @@ def test_held_symbol_drops_from_ws_after_close(conn, tmp_path, monkeypatch):
     clients = build_ws_clients(conn, writer=writer, capital_session=None)
     conn.execute("UPDATE positions SET status = 'closed'")
     conn.commit()
-    resubscribe_ws_clients(conn, clients)
+    await resubscribe_ws_clients(conn, clients)
     import json
 
     args = json.loads(next(iter(clients[0].subscribe_messages())))["args"]

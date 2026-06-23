@@ -354,6 +354,65 @@ async def test_stale_symbol_skipped(memdb: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# (c2) Increment 1 DECOUPLE — a NOT-trade-eligible symbol defers the order-open
+#      (skips_ineligible, no order) while a fresh burst that WOULD have fired is
+#      held to watch. flow_not_block: not a size cut, not a hard block.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ineligible_symbol_defers_order_open(
+    memdb: sqlite3.Connection,
+) -> None:
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    _seed(memdb, regime="bull_trend", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    # A clear up-burst that WOULD open (mirrors test_burst_produces_sized_order)…
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+
+    # …but the symbol is NOT in the trade set → the order-open is deferred.
+    await _run_entries(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
+        okx_adapter=None, capital_session=None, alpaca_adapter=None,
+        real_roundtrip=False, focus=_focus(), regime_cache={},
+        eligible_set=set(),  # empty trade set → (VENUE, SYMBOL) not eligible
+    )
+    assert eng.skips_ineligible == 1
+    assert eng.orders == 0
+    assert state.open_trades == []
+
+
+@pytest.mark.asyncio
+async def test_eligible_symbol_still_opens(memdb: sqlite3.Connection) -> None:
+    # With the symbol IN the trade set, the same burst opens as before — the
+    # decouple narrows the trade set, it does not veto an eligible candidate.
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()  # rebind the process fence to this test's memdb conn
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    _seed(memdb, regime="bull_trend", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+
+    await _run_entries(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
+        okx_adapter=None, capital_session=None, alpaca_adapter=None,
+        real_roundtrip=False, focus=_focus(), regime_cache={},
+        eligible_set={(VENUE, SYMBOL)},
+    )
+    assert eng.skips_ineligible == 0
+    assert eng.orders == 1
+
+
+# ---------------------------------------------------------------------------
 # (d) the bidirectional rule drops a 'short' on long-only venues (OKX/Alpaca)
 #     but keeps it on bidirectional Capital. Tested directly: the tick engine
 #     now owns only Capital (bidirectional), so the drop never fires in the

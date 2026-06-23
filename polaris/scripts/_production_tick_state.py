@@ -49,6 +49,13 @@ class TickEngineState:
     skips_stale: int = 0
     skips_dedup: int = 0
     skips_cooldown: int = 0
+    # Increment 1 (2026-06-24): a candidate the EntranceJudge marked NOT
+    # trade-eligible (low entrance judgment). The symbol is still WATCHED (bar
+    # ingest + WS + dashboard) — only the ORDER-OPEN is deferred (decouple,
+    # flow_not_block: not a size cut, not a hard block). Counts the defensive
+    # per-candidate skip inside ``_run_entries`` (the focus is already the trade
+    # set, so this should normally be 0; it catches a stale-flag race).
+    skips_ineligible: int = 0
     drops_short: int = 0
     drops_sizing: int = 0
     scalp_exits: int = 0

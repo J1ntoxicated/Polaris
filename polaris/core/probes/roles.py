@@ -30,13 +30,25 @@ ProbeRole = Literal["Eligibility", "Signal", "Validate", "Position", "Exit"]
 # SSOT: probe_id -> role. The 4 Slice-1 catalog probes all ride the G6 exit
 # attach, so each is Position or Exit. ProfitTaking / LossDefense / Session are
 # pure exit-timing levers (Exit); Technical describes live position health used
-# for both widen-let-run and exhaustion (Position). DEFER adding new-role
-# (Eligibility/Signal/Validate) entries until the entry seam is built.
+# for both widen-let-run and exhaustion (Position).
+#
+# Entrance seam BUILT (Increment 1, 2026-06-24): the reserved ``Eligibility``
+# seat is now occupied by the 5 EntranceJudge lenses — the deterministic
+# entrance judgment the audit named as ``unbuilt``. They attach at the Layer-0
+# focus pass (G1), score each active-universe candidate, and feed focus rank +
+# a trade-eligibility flag (NEVER a sizing multiplier — 9-stack untouched). The
+# ``ent_`` prefix keeps them distinct from the exit Technical probe.
 PROBE_ROLE_REGISTRY: dict[str, ProbeRole] = {
     "profit_taking": "Exit",
     "loss_defense": "Exit",
     "session_hours": "Exit",
     "technical": "Position",
+    # Entrance (Eligibility / G1) — EntranceJudge multi-lens judgment.
+    "ent_liquidity": "Eligibility",
+    "ent_atr": "Eligibility",
+    "ent_technical": "Eligibility",
+    "ent_regime": "Eligibility",
+    "ent_altdata": "Eligibility",
 }
 
 

@@ -361,6 +361,23 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE universe ADD COLUMN last_price REAL NOT NULL DEFAULT 0.0"
         )
+    # watchlist_focus.opportunity_score / trade_eligible — Increment 1 EntranceJudge
+    # persistence (entrance-judge build 2026-06-24). ADDITIVE only: the score is
+    # nullable (legacy/un-judged rows = NULL) and ``trade_eligible`` DEFAULT 1 keeps
+    # every pre-existing row trade-eligible (flow-preserving — no row is retro-
+    # demoted out of the trade set). Pragma guard = idempotent (no ADD COLUMN IF
+    # NOT EXISTS in SQLite). Neither column feeds sizing (9-stack untouched).
+    wf_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(watchlist_focus)").fetchall()
+    }
+    if wf_cols and "opportunity_score" not in wf_cols:
+        conn.execute("ALTER TABLE watchlist_focus ADD COLUMN opportunity_score REAL")
+    if wf_cols and "trade_eligible" not in wf_cols:
+        conn.execute(
+            "ALTER TABLE watchlist_focus "
+            "ADD COLUMN trade_eligible INTEGER NOT NULL DEFAULT 1"
+        )
     if "product_class" not in cols:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN product_class TEXT NOT NULL DEFAULT ''"

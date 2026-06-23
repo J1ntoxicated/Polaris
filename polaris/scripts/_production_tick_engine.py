@@ -321,6 +321,7 @@ async def _run_entries(
     real_roundtrip: bool,
     focus: list[tuple[str, str, str, str]],
     regime_cache: dict[tuple[str, str], str | None],
+    eligible_set: set[tuple[str, str]] | None = None,
 ) -> None:
     """Entry pass: for each FRESH tick-eligible symbol, decide + (maybe) open.
 
@@ -329,6 +330,15 @@ async def _run_entries(
     sizing are all in-mem (the only DB read is the per-loop-cached
     ``fetch_regime``). A ``sleep(0)`` guard yields between symbols so a wide focus
     cannot starve the loop.
+
+    Increment 1 DECOUPLE: ``eligible_set`` (the EntranceJudge trade set, when
+    supplied) gates the ORDER-OPEN — a candidate NOT in it is skipped to-watch
+    (``skips_ineligible``, ``continue``) BEFORE feature/signal eval. This is NOT a
+    size cut, NOT a hard block: the symbol still streams, still bar-ingests, still
+    shows on the dashboard — only the order-open is deferred (flow_not_block). A
+    HELD symbol is force-seated into the trade set upstream, so it is never
+    starved. ``None`` = no gating (every focus symbol is trade-eligible — the
+    pre-Increment-1 behaviour, kept for the direct-call tests).
     """
     writer = state.quote_writer
     if writer is None:
@@ -337,6 +347,11 @@ async def _run_entries(
     for venue, symbol, asset_class, group_id in focus:
         await asyncio.sleep(0)  # M1/M2 starvation guard (between symbols)
         if venue not in PHASE1_VENUES:
+            continue
+        # DECOUPLE: defer the order-open for a NOT-trade-eligible candidate (still
+        # watched/streamed — only the entry is deferred). flow_not_block.
+        if eligible_set is not None and (venue, symbol) not in eligible_set:
+            eng.skips_ineligible += 1
             continue
         # FOREX → bar pipeline (its dedicated fx_breakout_basket / session_breakout
         # strategies). The tick engine's micro-structure signals (burst/ofi) never
@@ -454,6 +469,15 @@ async def run_tick_decision_loop(
             now_ts = int(time.time())
             now_mono = time.monotonic()
             focus = get_focus_targets(conn, cycle_ts=now_ts)
+            # Increment 1 DECOUPLE: the TRADE set (entrance-judge eligible subset)
+            # gates the order-open; the watch ``focus`` above still streams/ingests
+            # every valid symbol. Two cheap indexed reads of the same focus cycle.
+            eligible_set = {
+                (v, s)
+                for v, s, _ac, _g in get_focus_targets(
+                    conn, cycle_ts=now_ts, eligible_only=True
+                )
+            }
             # Regime is read once per (venue, group) per loop (M1/M2: a cheap
             # indexed read, cached so the hot path does not re-hit the DB).
             regime_cache: dict[tuple[str, str], str | None] = {}
@@ -461,7 +485,7 @@ async def run_tick_decision_loop(
                 conn, state, eng, now_ts=now_ts, now_mono=now_mono,
                 okx_adapter=okx_adapter, capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter, real_roundtrip=real_roundtrip,
-                focus=focus, regime_cache=regime_cache,
+                focus=focus, regime_cache=regime_cache, eligible_set=eligible_set,
             )
             await _run_exits(
                 conn, state, eng, now_ts=now_ts, now_mono=now_mono, phase=phase,
@@ -475,13 +499,14 @@ async def run_tick_decision_loop(
                     "[tick-engine/telemetry] focus_okx_eval=%d thin=%d dry=%d "
                     "decisions=%d shadow=%d orders=%d | max_n=%d "
                     "burst_z=%.2f(θ%.2f) |ofi|=%.3f(θ%.2f) |overshoot|=%.2f(θ%.2f) "
-                    "| skips(stale=%d dedup=%d cool=%d) drops(short=%d sizing=%d)",
+                    "| skips(stale=%d dedup=%d cool=%d inelig=%d) "
+                    "drops(short=%d sizing=%d)",
                     eng.evaluated, eng.thin, eng.dry, eng.decisions,
                     eng.shadow_logs, eng.orders, eng.max_n_ticks,
                     eng.max_burst_z, eng.cfg.theta_burst, eng.max_abs_ofi,
                     eng.cfg.theta_ofi, eng.max_abs_overshoot, eng.cfg.theta_revert,
                     eng.skips_stale, eng.skips_dedup, eng.skips_cooldown,
-                    eng.drops_short, eng.drops_sizing,
+                    eng.skips_ineligible, eng.drops_short, eng.drops_sizing,
                 )
                 eng.tel_mono = now_mono
                 eng.max_burst_z = 0.0
@@ -496,9 +521,9 @@ async def run_tick_decision_loop(
             await asyncio.wait_for(stop_evt.wait(), timeout=remaining)
     logger.info(
         "[tick-engine] stop decisions=%d orders=%d shadow_logs=%d scalp_exits=%d "
-        "skips(stale=%d dedup=%d cooldown=%d) drops(short=%d sizing=%d)",
+        "skips(stale=%d dedup=%d cooldown=%d inelig=%d) drops(short=%d sizing=%d)",
         eng.decisions, eng.orders, eng.shadow_logs, eng.scalp_exits,
         eng.skips_stale, eng.skips_dedup, eng.skips_cooldown,
-        eng.drops_short, eng.drops_sizing,
+        eng.skips_ineligible, eng.drops_short, eng.drops_sizing,
     )
     return eng

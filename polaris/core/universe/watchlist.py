@@ -23,6 +23,7 @@ from polaris.core.universe.schema import (
     RANK_WEIGHT_ATR_Z,
     RANK_WEIGHT_CELL_Z,
     RANK_WEIGHT_DEPTH_Z,
+    RANK_WEIGHT_OPPORTUNITY_Z,
     RANK_WEIGHT_SIGNAL_DENSITY_Z,
     RANK_WEIGHT_VOL_Z,
     FocusBucket,
@@ -95,15 +96,23 @@ def score_focus_candidates(
     instruments: list[UniverseInstrument],
     *,
     cell_scores: dict[str, float] | None = None,
+    opportunity_scores: dict[str, float] | None = None,
 ) -> list[float]:
     """Compute deterministic pre-rank score per instrument (parallel order).
 
     Score = w_vol·z(vol) + w_sig·z(sig_density) + w_atr·z(atr) + w_depth·z(depth)
-            + w_cell·z(cell). Missing cell scores → 0 z.
+            + w_cell·z(cell) + w_opp·z(opportunity). Missing cell / opportunity
+    scores → 0 z (the opportunity term is fully no-op when no scores are passed,
+    so the legacy focus rank is byte-identical).
 
     z-scores are computed PER (venue, asset_class) group, not over the whole mixed
     cross-venue pool — so equities are ranked equity-vs-equity and crypto
     crypto-vs-crypto (flow_not_block ranking-order fix; single-group → no-op).
+
+    Increment 1: ``opportunity_scores`` (the EntranceJudge per-candidate [0,1]
+    multi-lens judgment) adds a grouped-z term so focus rank reflects the entrance
+    JUDGMENT, not just liquidity-z — the audit's "judgment layer unbuilt" fix.
+    RANKING only (flow_not_block): a higher judgment lifts rank, never blocks/sizes.
     """
     if not instruments:
         return []
@@ -118,12 +127,19 @@ def score_focus_candidates(
     cell_raw = [float(cell_scores.get(ins.instrument_id, 0.0)) for ins in instruments]
     cell_z = _grouped_z_score(cell_raw, groups)
 
+    opportunity_scores = opportunity_scores or {}
+    opp_raw = [
+        float(opportunity_scores.get(ins.instrument_id, 0.0)) for ins in instruments
+    ]
+    opp_z = _grouped_z_score(opp_raw, groups)
+
     return [
         RANK_WEIGHT_VOL_Z * vol_z[i]
         + RANK_WEIGHT_SIGNAL_DENSITY_Z * sig_z[i]
         + RANK_WEIGHT_ATR_Z * atr_z[i]
         + RANK_WEIGHT_DEPTH_Z * depth_z[i]
         + RANK_WEIGHT_CELL_Z * cell_z[i]
+        + RANK_WEIGHT_OPPORTUNITY_Z * opp_z[i]
         for i in range(len(instruments))
     ]
 
@@ -406,6 +422,8 @@ def compute_dynamic_focus(
     recent_signal_density_top_q: float = 0.0,
     top_score_concentration: float = 0.5,
     target_size: int | None = None,
+    opportunity_scores: dict[str, float] | None = None,
+    trade_eligible: dict[str, bool] | None = None,
 ) -> list[FocusSelection]:
     """Pure-function focus selection.
 
@@ -416,12 +434,24 @@ def compute_dynamic_focus(
        (guarantees under-represented classes — Capital FX/indices/gold, Alpaca
        equity — a floor of slots; flow_not_block, no-op for single-class venues).
     4. Bucket = listing_watch (<24h) | core (top-quartile cell AND active signal) | satellite.
+
+    Increment 1: ``opportunity_scores`` (EntranceJudge [0,1] judgment) feeds the
+    rank composite AND is persisted per FocusSelection; ``trade_eligible`` (the
+    decoupled trade-set flag, default True per row) is persisted alongside. Both
+    are RANKING / FLAG inputs only (flow_not_block, 9-stack untouched). Absent →
+    score term is no-op and every row defaults trade_eligible=True.
     """
     if not active_universe:
         return []
 
+    opportunity_scores = opportunity_scores or {}
+    trade_eligible = trade_eligible or {}
     ts = cycle_ts if cycle_ts is not None else int(time.time())
-    scores = score_focus_candidates(active_universe, cell_scores=cell_scores)
+    scores = score_focus_candidates(
+        active_universe,
+        cell_scores=cell_scores,
+        opportunity_scores=opportunity_scores or None,
+    )
     order = sorted(range(len(active_universe)), key=lambda i: scores[i], reverse=True)
 
     if target_size is None:
@@ -456,6 +486,8 @@ def compute_dynamic_focus(
             cell_q75=cell_q75,
             sig_q75=sig_q75,
         )
+        iid = inst.instrument_id
+        opp = opportunity_scores.get(iid)
         out.append(
             FocusSelection(
                 cycle_ts=ts,
@@ -464,6 +496,9 @@ def compute_dynamic_focus(
                 focus_score=float(scores[src_idx]),
                 rank=rank_idx,
                 bucket=bucket,
+                opportunity_score=None if opp is None else float(opp),
+                # Flow-preserving default: a row with no judgment stays eligible.
+                trade_eligible=bool(trade_eligible.get(iid, True)),
             )
         )
     bucket_counts: dict[str, int] = {}
@@ -566,18 +601,32 @@ def should_evict_from_focus(
 
 
 def persist_focus(conn: sqlite3.Connection, focus: list[FocusSelection]) -> None:
-    """Upsert focus rows for the given cycle into `watchlist_focus`."""
-    rows = [(f.cycle_ts, f.venue, f.symbol, f.focus_score, f.rank, f.bucket, None) for f in focus]
+    """Upsert focus rows for the given cycle into `watchlist_focus`.
+
+    Increment 1: ``opportunity_score`` + ``trade_eligible`` (the EntranceJudge
+    persistence) are upserted alongside. ``trade_eligible`` is stored as INT
+    (True → 1) and defaults to 1 (flow-preserving) for a row with no judgment.
+    """
+    rows = [
+        (
+            f.cycle_ts, f.venue, f.symbol, f.focus_score, f.rank, f.bucket, None,
+            f.opportunity_score, 1 if f.trade_eligible else 0,
+        )
+        for f in focus
+    ]
     conn.executemany(
         """
         INSERT INTO watchlist_focus
-            (cycle_ts, venue, symbol, focus_score, focus_rank, target_bucket, evict_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (cycle_ts, venue, symbol, focus_score, focus_rank, target_bucket,
+             evict_reason, opportunity_score, trade_eligible)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cycle_ts, venue, symbol) DO UPDATE SET
             focus_score=excluded.focus_score,
             focus_rank=excluded.focus_rank,
             target_bucket=excluded.target_bucket,
-            evict_reason=excluded.evict_reason
+            evict_reason=excluded.evict_reason,
+            opportunity_score=excluded.opportunity_score,
+            trade_eligible=excluded.trade_eligible
         """,
         rows,
     )

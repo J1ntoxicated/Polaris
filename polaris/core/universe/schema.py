@@ -174,6 +174,13 @@ RANK_WEIGHT_SIGNAL_DENSITY_Z: Final[float] = 0.25
 RANK_WEIGHT_ATR_Z: Final[float] = 0.20
 RANK_WEIGHT_DEPTH_Z: Final[float] = 0.10
 RANK_WEIGHT_CELL_Z: Final[float] = 0.10
+# Increment 1 (2026-06-24): the EntranceJudge opportunity term. When the focus
+# pass supplies per-instrument ``opportunity_score`` (the 5-lens entrance
+# judgment), its grouped-z lifts a high-judgment candidate's focus rank — so
+# focus reflects the PROBE JUDGMENT, not just liquidity-z (the audit's "judgment
+# layer unbuilt" fix). RANKING input only (flow_not_block): never a size cut or
+# veto. Defaults to 0-effect when no scores are supplied (byte-identical focus).
+RANK_WEIGHT_OPPORTUNITY_Z: Final[float] = 0.20
 
 # ---------------------------------------------------------------------------
 # Asset-class focus quota (STEP 6 — crypto-monopoly fix; flow_not_block)
@@ -382,7 +389,13 @@ def passes_liquidity_floor(ins: UniverseInstrument) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class FocusSelection:
-    """One row of the focus watchlist for a given cycle."""
+    """One row of the focus watchlist for a given cycle.
+
+    Increment 1 (2026-06-24): ``opportunity_score`` (the [0,1] EntranceJudge
+    multi-lens judgment) + ``trade_eligible`` (decouples the WATCH set from the
+    TRADE set) are keyword-defaulted (None / True) so every existing constructor
+    stays valid and an un-judged row is flow-preservingly trade-eligible.
+    """
 
     cycle_ts: int
     venue: str
@@ -390,3 +403,5 @@ class FocusSelection:
     focus_score: float
     rank: int
     bucket: FocusBucket
+    opportunity_score: float | None = None
+    trade_eligible: bool = True

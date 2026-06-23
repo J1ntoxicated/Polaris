@@ -90,12 +90,54 @@ class OKXTickerWS(WSStreamClient):
         return self._ws_url
 
     def set_symbols(self, symbols: Iterable[str]) -> None:
-        """Replace the subscribed instId set (universe change → re-subscribe)."""
+        """Replace the subscribed instId set (universe change → re-subscribe).
+
+        Updates the desired set ONLY; the LIVE delta is sent by
+        ``apply_subscription_delta`` (called from the loop's resubscribe pass) so
+        a focus churn reaches a HEALTHY socket without waiting for a reconnect.
+        """
         self._symbols = list(dict.fromkeys(symbols))
+
+    def current_subscription(self) -> set[str]:
+        return set(self._symbols)
 
     def subscribe_messages(self) -> Iterable[str]:
         args = [{"channel": "tickers", "instId": s} for s in self._symbols]
         return [json.dumps({"op": "subscribe", "args": args})]
+
+    def subscribe_delta_frames(
+        self, added: set[str], removed: set[str]
+    ) -> list[str]:
+        """OKX op:subscribe (added instIds) + op:unsubscribe (removed instIds).
+
+        Reuses the per-instId ``tickers`` args shape of ``subscribe_messages`` for
+        the delta. A FLOW INCREASE (the socket follows focus), AI-free.
+        """
+        frames: list[str] = []
+        if added:
+            frames.append(
+                json.dumps(
+                    {
+                        "op": "subscribe",
+                        "args": [
+                            {"channel": "tickers", "instId": s} for s in sorted(added)
+                        ],
+                    }
+                )
+            )
+        if removed:
+            frames.append(
+                json.dumps(
+                    {
+                        "op": "unsubscribe",
+                        "args": [
+                            {"channel": "tickers", "instId": s}
+                            for s in sorted(removed)
+                        ],
+                    }
+                )
+            )
+        return frames
 
     def ping_message(self) -> str | None:
         # OKX expects the literal text frame "ping" (it replies "pong").

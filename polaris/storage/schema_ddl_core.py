@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS watchlist_focus (
     focus_rank INTEGER NOT NULL,
     target_bucket TEXT NOT NULL,
     evict_reason TEXT,
+    -- Increment 1 (2026-06-24): EntranceJudge persistence. ``opportunity_score``
+    -- is the [0,1] multi-lens entrance judgment; ``trade_eligible`` (DEFAULT 1 =
+    -- flow-preserving: a row with no judgment yet stays eligible) decouples the
+    -- WATCH set (full focus) from the TRADE set (eligible subset). Neither is a
+    -- sizing input (9-stack untouched). Nullable score = legacy/un-judged rows.
+    opportunity_score REAL,
+    trade_eligible INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (cycle_ts, venue, symbol)
 );
 """

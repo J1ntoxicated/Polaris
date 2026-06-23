@@ -195,7 +195,7 @@ async def _layer0_producer(
     state.capital_refreshes += 1
     await refresh_alpaca_universe_once(conn)
     state.alpaca_refreshes += 1
-    refresh_focus_watchlist(conn)
+    refresh_focus_watchlist(conn, probe_conn=getattr(state, "probe_conn", None))
     last_okx = time.monotonic()
     last_capital = time.monotonic()
     last_alpaca = time.monotonic()
@@ -214,7 +214,7 @@ async def _layer0_producer(
             await refresh_alpaca_universe_once(conn)
             state.alpaca_refreshes += 1
             last_alpaca = now
-        refresh_focus_watchlist(conn)
+        refresh_focus_watchlist(conn, probe_conn=getattr(state, "probe_conn", None))
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +677,7 @@ async def run_production_paper_loop(
             # long as it is held. Best-effort + idempotent (never forces a churn).
             if ws_clients:
                 try:
-                    resubscribe_ws_clients(conn, ws_clients)
+                    await resubscribe_ws_clients(conn, ws_clients)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
 

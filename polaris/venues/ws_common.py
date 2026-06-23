@@ -90,6 +90,11 @@ class WSStreamClient:
         self.rest_only = False
         self.connected = False
         self.messages_received = 0
+        # Increment 1 (incremental re-subscribe): the symbol set LAST sent to the
+        # live socket. Seeded on (re)connect from ``subscribe_messages`` (the
+        # startup subscription) so a delta after connect diffs against what the
+        # socket actually carries. ``apply_subscription_delta`` re-syncs it.
+        self._subscribed: set[str] = set()
 
     # ------------------------------------------------------------------
     # Subclass contract
@@ -110,6 +115,62 @@ class WSStreamClient:
     def parse_message(self, raw: str | bytes) -> QuoteTick | None:
         """Parse one inbound frame to a QuoteTick, or None for control frames."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Incremental re-subscribe (Increment 1 — frozen-socket fix)
+    # ------------------------------------------------------------------
+
+    def current_subscription(self) -> set[str]:
+        """The venue's CURRENT desired symbol/epic set (subclass override).
+
+        Base default = the last set sent to the socket (no-op delta). A venue that
+        supports incremental re-subscribe returns its live ``set_symbols`` /
+        ``set_epics`` set here so ``apply_subscription_delta`` can diff it.
+        """
+        return set(self._subscribed)
+
+    def subscribe_delta_frames(
+        self, added: set[str], removed: set[str]
+    ) -> list[str]:
+        """Frames to (un)subscribe the delta on a LIVE socket (subclass override).
+
+        Default = ``[]`` (no incremental support → the change takes effect on the
+        next reconnect, the pre-Increment-1 behaviour). A venue overrides this to
+        emit its subscribe(added) + unsubscribe(removed) frames.
+        """
+        _ = added, removed
+        return []
+
+    async def apply_subscription_delta(self) -> None:
+        """Send the live (un)subscribe delta on a CONNECTED socket; else no-op.
+
+        Diffs ``current_subscription()`` (the desired set) against ``_subscribed``
+        (what the socket carries) and, when connected, sends the venue delta
+        frames — so a focus churn reaches the LIVE socket WITHOUT a reconnect (the
+        audit's 'frozen socket' fix). Best-effort + degrade-never-halt: a send
+        failure is suppressed (the watchdog/reconnect remains the backstop). When
+        NOT connected the desired set is left for the next reconnect's
+        ``subscribe_messages`` (unchanged fallback). flow_not_block: the socket now
+        FOLLOWS focus — a FLOW INCREASE, never a throttle.
+        """
+        desired = self.current_subscription()
+        if not self.connected or self._ws is None:
+            # Defer to the next reconnect; keep _subscribed as the live truth so a
+            # reconnect re-seeds from subscribe_messages (the latest set).
+            return
+        added = desired - self._subscribed
+        removed = self._subscribed - desired
+        if not added and not removed:
+            return
+        frames = self.subscribe_delta_frames(added, removed)
+        ws = self._ws
+        for frame in frames:
+            with contextlib.suppress(Exception):
+                await ws.send(frame)
+        # Re-sync the live-truth set regardless of per-frame send outcome: the
+        # next delta diffs against the new desired set (a dropped frame is healed
+        # by the next reconnect's full subscribe).
+        self._subscribed = set(desired)
 
     async def _open(self) -> ClientConnection:
         """Open the websocket. Overridable for venue-specific headers.
@@ -183,6 +244,9 @@ class WSStreamClient:
         self._last_msg_monotonic = time.monotonic()
         for msg in self.subscribe_messages():
             await self._ws.send(msg)
+        # Seed the incremental-resubscribe truth set: the socket now carries the
+        # current desired set (a subsequent delta diffs against this).
+        self._subscribed = self.current_subscription()
         logger.info("[%s ws] connected + subscribed", self.venue)
 
         # recv loop runs as its own task so the watchdog can cancel it on stall

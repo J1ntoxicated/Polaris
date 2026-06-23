@@ -36,6 +36,8 @@ from polaris.core.live_recalc.tick_recalc import (
     mark_position_dirty,
     run_live_recalc_cycle,
 )
+from polaris.core.probes.entrance import EntranceJudge
+from polaris.core.probes.tuning_log import log_entrance_judgments
 from polaris.core.universe.discovery import (
     deactivate_stale_active_rows,
     fetch_alpaca_instruments,
@@ -413,7 +415,11 @@ def read_cell_scores_by_instrument(conn: sqlite3.Connection) -> dict[str, float]
 
 
 def refresh_focus_watchlist(
-    conn: sqlite3.Connection, *, cycle_ts: int | None = None
+    conn: sqlite3.Connection,
+    *,
+    cycle_ts: int | None = None,
+    probe_conn: sqlite3.Connection | None = None,
+    run_id: str = "",
 ) -> int:
     """Compute dynamic focus over active universe + persist; return count.
 
@@ -427,6 +433,17 @@ def refresh_focus_watchlist(
     is passed into the focus call — so ~35% of the designed rank weight that sat
     inert (0.0 across all rows) now orders focus. Both are RANKING inputs only
     (flow_not_block): no entry is blocked, no size cut, no veto.
+
+    Increment 1 (2026-06-24): the EntranceJudge ACTIVATES here — it scores every
+    candidate across the deterministic liquidity + ATR lenses (always present from
+    the universe rows; the technical / regime / alt-data lenses default neutral at
+    this Layer-0 cadence) into an ``opportunity_score`` + a ``trade_eligible``
+    flag. The score feeds the focus rank composite AND persists per row; the flag
+    decouples the WATCH set from the TRADE set (consumed at ``_run_entries``).
+    When ``probe_conn`` is supplied the per-candidate judgment (incl. the ambiguous
+    conflict flag) is written to the ``entrance_judgments`` sidecar — PURE
+    TELEMETRY, NO AI call, the deferred Increment-2 advisory seam. AI-free /
+    deterministic; 9-stack untouched (the score is never a sizing multiplier).
     """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
     universe = read_active_universe(conn)
@@ -453,7 +470,21 @@ def refresh_focus_watchlist(
     # recent signal firing; ``concentration`` = top-quartile focus-score mass
     # share. Both are sizing-WIDTH inputs (flow_not_block): they can only widen or
     # tighten the focus list in [12, 48], never block an entry or cut a size.
-    focus_scores = score_focus_candidates(universe, cell_scores=cell_scores or None)
+    # Increment 1 — entrance judgment (deterministic, AI-free). Score every
+    # candidate; feed opportunity_score into the rank composite + persist the
+    # eligibility flag. flow_not_block: a high judgment lifts rank, the permissive
+    # floor keeps MOST symbols trade-eligible (a low judgment narrows priority,
+    # never vetoes — an un-judged/ambiguous row stays eligible).
+    judge = EntranceJudge()
+    judge_readings = judge.judge_universe(universe)
+    opportunity_scores = {
+        iid: r.opportunity_score for iid, r in judge_readings.items()
+    }
+    trade_eligible = {iid: r.trade_eligible for iid, r in judge_readings.items()}
+    focus_scores = score_focus_candidates(
+        universe, cell_scores=cell_scores or None,
+        opportunity_scores=opportunity_scores or None,
+    )
     top_q = compute_recent_signal_density_top_q(universe)
     concentration = compute_top_score_concentration(focus_scores)
     focus = compute_dynamic_focus(
@@ -462,12 +493,24 @@ def refresh_focus_watchlist(
         cycle_ts=ts,
         recent_signal_density_top_q=top_q,
         top_score_concentration=concentration,
+        opportunity_scores=opportunity_scores or None,
+        trade_eligible=trade_eligible or None,
     )
     persist_focus(conn, focus)
+    # Ambiguity seam — write the per-candidate judgment (incl. ambiguous flag) to
+    # the sidecar. PURE TELEMETRY (NO AI, NO runtime consumer; deferred Inc-2).
+    if probe_conn is not None and judge_readings:
+        log_entrance_judgments(
+            probe_conn, ts=ts, run_id=run_id, cycle_ts=ts, readings=judge_readings
+        )
+    n_ineligible = sum(1 for v in trade_eligible.values() if not v)
+    n_ambiguous = sum(1 for r in judge_readings.values() if r.ambiguous)
     logger.info(
         "[L0/focus] universe=%d → focus=%d (signal_density=%d, cell_scores=%d, "
-        "top_q=%.3f concentration=%.3f)",
-        len(universe), len(focus), len(density), len(cell_scores), top_q, concentration,
+        "top_q=%.3f concentration=%.3f | judged=%d trade_ineligible=%d "
+        "ambiguous=%d)",
+        len(universe), len(focus), len(density), len(cell_scores), top_q,
+        concentration, len(judge_readings), n_ineligible, n_ambiguous,
     )
     return len(focus)
 
@@ -517,7 +560,11 @@ def open_position_targets(
 
 
 def get_focus_targets(
-    conn: sqlite3.Connection, *, cycle_ts: int | None = None, max_n: int = 30
+    conn: sqlite3.Connection,
+    *,
+    cycle_ts: int | None = None,
+    max_n: int = 30,
+    eligible_only: bool = False,
 ) -> list[tuple[str, str, str, str]]:
     """Read the latest focus cycle as ``(venue, symbol, asset_class, group_id)``.
 
@@ -530,6 +577,15 @@ def get_focus_targets(
     subscription (``_focus_by_venue``) read, so the union keeps held symbols
     bar-ingested AND WS-subscribed for as long as they are held.
 
+    Increment 1 DECOUPLE: ``eligible_only`` splits WATCH from TRADE at this single
+    seam. ``False`` (default) = the WATCH set — the FULL focus selection, so bar
+    ingest + WS subscription + dashboard keep seeing EVERY valid symbol
+    (flow_not_block; no symbol is dropped from observation). ``True`` = the TRADE
+    set — only rows with ``trade_eligible=1`` (the entry pass calls it this way).
+    Held positions are force-seated into BOTH sets (a held name is never starved
+    out of the trade set by an eligibility downgrade). A NULL ``trade_eligible``
+    (legacy/un-judged row) reads as eligible (COALESCE → 1, flow-preserving).
+
     Empty dynamic focus + no open positions → empty list (caller falls back to
     BTC seed). Union is ADD-only (flow_not_block): never blocks an entry.
     """
@@ -540,13 +596,18 @@ def get_focus_targets(
     ).fetchone()
     if row is not None and row[0] is not None:
         latest_cycle = int(row[0])
+        # DECOUPLE: the trade set filters to eligible rows; the watch set takes
+        # all. COALESCE(trade_eligible,1)=1 keeps a legacy/un-judged row eligible.
+        eligible_clause = (
+            " AND COALESCE(wf.trade_eligible, 1) = 1" if eligible_only else ""
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
             FROM watchlist_focus wf
             LEFT JOIN universe u
               ON wf.venue = u.venue AND wf.symbol = u.symbol
-            WHERE wf.cycle_ts = ?
+            WHERE wf.cycle_ts = ?{eligible_clause}
             ORDER BY wf.focus_rank ASC
             LIMIT ?
             """,

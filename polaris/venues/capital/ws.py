@@ -82,8 +82,43 @@ class CapitalMarketWS(WSStreamClient):
         return CAPITAL_WS_URL
 
     def set_epics(self, epics: Iterable[str]) -> None:
-        """Replace the subscribed epic set (universe change → re-subscribe)."""
+        """Replace the subscribed epic set (universe change → re-subscribe).
+
+        Desired set only; the LIVE delta is sent by ``apply_subscription_delta``.
+        """
         self._epics = list(dict.fromkeys(epics))
+
+    def current_subscription(self) -> set[str]:
+        return set(self._epics)
+
+    def subscribe_delta_frames(
+        self, added: set[str], removed: set[str]
+    ) -> list[str]:
+        """Capital marketData.subscribe(added) + marketData.unsubscribe(removed).
+
+        Chunked ≤ ``CAPITAL_EPIC_CHUNK`` per frame, mirroring ``subscribe_messages``.
+        A FLOW INCREASE (the socket follows focus), AI-free.
+        """
+        cst, sec = self._auth()
+        frames: list[str] = []
+        for destination, epics in (
+            ("marketData.subscribe", sorted(added)),
+            ("marketData.unsubscribe", sorted(removed)),
+        ):
+            for i in range(0, len(epics), CAPITAL_EPIC_CHUNK):
+                chunk = epics[i : i + CAPITAL_EPIC_CHUNK]
+                frames.append(
+                    json.dumps(
+                        {
+                            "destination": destination,
+                            "correlationId": uuid.uuid4().hex,
+                            "cst": cst,
+                            "securityToken": sec,
+                            "payload": {"epics": chunk},
+                        }
+                    )
+                )
+        return frames
 
     # ------------------------------------------------------------------
     # Token freshness (M4)

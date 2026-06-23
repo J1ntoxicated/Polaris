@@ -20,10 +20,12 @@ import uuid
 from pathlib import Path
 
 from polaris.core.probes import EngineDecision, ProbeReading
+from polaris.core.probes.entrance import JudgeReading
 
 __all__ = [
     "PROBE_DDL",
     "backfill_probe_outcome",
+    "log_entrance_judgments",
     "log_probe_decisions",
     "log_probe_readings",
     "open_probe_db",
@@ -105,6 +107,38 @@ PROBE_DDL: tuple[str, ...] = (
            time_to_exit_sec, outcome_ts
     FROM probe_decisions
     WHERE realized_pnl_r IS NOT NULL;
+    """,
+    # Increment 1 — ENTRANCE ambiguity seam (2026-06-24). The EntranceJudge writes
+    # one row per JUDGED candidate carrying the ambiguous flag + score + per-lens
+    # leans (evidence_json). PURE TELEMETRY: NO AI call, NO runtime consumer — the
+    # tick loop falls back to the deterministic ``trade_eligible`` default
+    # (flow-preserving: an ambiguous symbol stays eligible). This table is the
+    # explicit hand-off point for Increment 2's async-advisory consumer (deferred,
+    # Jin confirm) which reads ``ambiguous=1`` rows OUT of the tick loop and posts
+    # advisory, NEVER mutating eligibility synchronously. Mirrors probe_decisions:
+    # ts-stamped (stale-advice TTL), its own sidecar (zero WAL contention).
+    """
+    CREATE TABLE IF NOT EXISTS entrance_judgments (
+        judgment_id       TEXT PRIMARY KEY,
+        ts                INTEGER NOT NULL,
+        run_id            TEXT NOT NULL,
+        cycle_ts          INTEGER NOT NULL,
+        instrument_id     TEXT NOT NULL,
+        venue             TEXT NOT NULL,
+        symbol            TEXT NOT NULL,
+        opportunity_score REAL NOT NULL,
+        trade_eligible    INTEGER NOT NULL,
+        ambiguous         INTEGER NOT NULL DEFAULT 0,
+        judge_margin      REAL,
+        contributing_json TEXT NOT NULL DEFAULT '[]',
+        evidence_json     TEXT NOT NULL DEFAULT '{}'
+    );
+    """,
+    # Partial index over the ambiguous rows the deferred Increment-2 advisory
+    # consumer targets (reads ambiguous=1 OUT of the tick loop).
+    """
+    CREATE INDEX IF NOT EXISTS idx_entrance_judgments_ambiguous
+        ON entrance_judgments(cycle_ts) WHERE ambiguous = 1;
     """,
 )
 
@@ -275,3 +309,56 @@ def backfill_probe_outcome(
                 int(outcome_ts), str(position_id),
             ),
         )
+
+
+def log_entrance_judgments(
+    conn: sqlite3.Connection | None,
+    *,
+    ts: int,
+    run_id: str,
+    cycle_ts: int,
+    readings: dict[str, JudgeReading],
+    venue_symbol_by_iid: dict[str, tuple[str, str]] | None = None,
+) -> None:
+    """Append one ``entrance_judgments`` row per JudgeReading (FAIL-OPEN).
+
+    PURE TELEMETRY for the ambiguity seam — NO AI call, NO runtime consumer (the
+    deferred Increment-2 advisory reads it out of the tick loop). No-op when
+    ``conn`` is None / the table is absent / any sqlite error (cloned from the
+    probe writers — the focus pass must never crash on a log failure).
+    ``venue_symbol_by_iid`` maps instrument_id → (venue, symbol); a missing entry
+    falls back to splitting the instrument_id on ``:`` (the ``venue:symbol`` form).
+    """
+    if conn is None or not readings:
+        return
+    vs = venue_symbol_by_iid or {}
+    rows = []
+    for iid, r in readings.items():
+        venue, symbol = vs.get(iid, _split_iid(iid))
+        rows.append(
+            (
+                uuid.uuid4().hex, int(ts), str(run_id), int(cycle_ts), str(iid),
+                venue, symbol, float(r.opportunity_score),
+                1 if r.trade_eligible else 0, 1 if r.ambiguous else 0,
+                float(r.judge_margin),
+                json.dumps(r.contributing, sort_keys=True),
+                json.dumps(r.evidence, sort_keys=True, default=str),
+            )
+        )
+    with contextlib.suppress(sqlite3.Error):
+        conn.executemany(
+            "INSERT INTO entrance_judgments "
+            "(judgment_id, ts, run_id, cycle_ts, instrument_id, venue, symbol, "
+            " opportunity_score, trade_eligible, ambiguous, judge_margin, "
+            " contributing_json, evidence_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+
+
+def _split_iid(instrument_id: str) -> tuple[str, str]:
+    """Split ``venue:symbol`` → (venue, symbol); ('', iid) when no separator."""
+    if ":" in instrument_id:
+        venue, symbol = instrument_id.split(":", 1)
+        return venue, symbol
+    return "", instrument_id

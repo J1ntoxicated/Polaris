@@ -59,8 +59,33 @@ class AlpacaQuoteWS(WSStreamClient):
         return ALPACA_WS_IEX
 
     def set_symbols(self, symbols: Iterable[str]) -> None:
-        """Replace the subscribed symbol set (universe change → re-subscribe)."""
+        """Replace the subscribed symbol set (universe change → re-subscribe).
+
+        Desired set only; the LIVE delta is sent by ``apply_subscription_delta``.
+        """
         self._symbols = list(dict.fromkeys(symbols))
+
+    def current_subscription(self) -> set[str]:
+        return set(self._symbols)
+
+    def subscribe_delta_frames(
+        self, added: set[str], removed: set[str]
+    ) -> list[str]:
+        """Alpaca subscribe(added quotes) + unsubscribe(removed quotes) frames.
+
+        Quotes-only (mirrors ``subscribe_messages`` — trades are discarded). A
+        FLOW INCREASE (the socket follows focus), AI-free.
+        """
+        frames: list[str] = []
+        if added:
+            frames.append(
+                json.dumps({"action": "subscribe", "quotes": sorted(added)})
+            )
+        if removed:
+            frames.append(
+                json.dumps({"action": "unsubscribe", "quotes": sorted(removed)})
+            )
+        return frames
 
     def subscribe_messages(self) -> Iterable[str]:
         return [

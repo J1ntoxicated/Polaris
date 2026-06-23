@@ -46,7 +46,13 @@ from polaris.core.universe.discovery import (
     rank_active_universe,
 )
 from polaris.core.universe.schema import UniverseInstrument
-from polaris.core.universe.watchlist import compute_dynamic_focus, persist_focus
+from polaris.core.universe.watchlist import (
+    compute_dynamic_focus,
+    compute_recent_signal_density_top_q,
+    compute_top_score_concentration,
+    persist_focus,
+    score_focus_candidates,
+)
 from polaris.scripts._production_asset_class import resolve_asset_class
 from polaris.scripts._production_bars import (
     CAPITAL_RESOLUTION_BY_INTERVAL,
@@ -440,11 +446,28 @@ def refresh_focus_watchlist(
             for ins in universe
         ]
     cell_scores = read_cell_scores_by_instrument(conn)
-    focus = compute_dynamic_focus(universe, cell_scores=cell_scores or None, cycle_ts=ts)
+    # B1+ adaptive-focus wiring (2026-06-24): the two adaptation inputs of
+    # ``compute_dynamic_target_size`` (previously left at their 0.0 / 0.5 defaults
+    # so the focus window was pinned at the baseline 30 every cycle) are now
+    # computed live from the same universe + cell scores. ``top_q`` = breadth of
+    # recent signal firing; ``concentration`` = top-quartile focus-score mass
+    # share. Both are sizing-WIDTH inputs (flow_not_block): they can only widen or
+    # tighten the focus list in [12, 48], never block an entry or cut a size.
+    focus_scores = score_focus_candidates(universe, cell_scores=cell_scores or None)
+    top_q = compute_recent_signal_density_top_q(universe)
+    concentration = compute_top_score_concentration(focus_scores)
+    focus = compute_dynamic_focus(
+        universe,
+        cell_scores=cell_scores or None,
+        cycle_ts=ts,
+        recent_signal_density_top_q=top_q,
+        top_score_concentration=concentration,
+    )
     persist_focus(conn, focus)
     logger.info(
-        "[L0/focus] universe=%d → focus=%d (signal_density=%d, cell_scores=%d)",
-        len(universe), len(focus), len(density), len(cell_scores),
+        "[L0/focus] universe=%d → focus=%d (signal_density=%d, cell_scores=%d, "
+        "top_q=%.3f concentration=%.3f)",
+        len(universe), len(focus), len(density), len(cell_scores), top_q, concentration,
     )
     return len(focus)
 

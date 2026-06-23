@@ -16,38 +16,60 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import sqlite3
-import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.isolation.reentry import bar_seconds
 from polaris.core.live_recalc.exit_engine import (
     EXIT_ADAPTIVE_THESIS_ON,
-    EXIT_BAR_MFE_BEP_R,
-    EXIT_BAR_MFE_LOCK_R,
-    EXIT_BAR_MFE_PROTECT_R,
-    EXIT_EQUITY_MFE_BEP_R,
-    EXIT_EQUITY_MFE_LOCK_R,
-    EXIT_EQUITY_MFE_PROTECT_R,
     EXIT_LOSER_TIMEOUT_SEC,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GIVEBACK_FRAC,
     EXIT_THESIS_GIVEBACK_HARD_FRAC,
-    Bucket,
     ExitState,
     ManagementMode,
     MfeProtectSchedule,
     ThesisGivebackParams,
     assess_thesis,
-    bucket_from_correlation_group,
     evaluate_exit,
     init_exit_state,
 )
-from polaris.core.live_recalc.session_exit_rail import session_forced_exit
-from polaris.core.streams import resolve_stream
+
+# Re-exported (move-only split) with redundant aliases so these resolve as
+# EXPLICIT module attributes (mypy --strict no-implicit-reexport) for the
+# existing import paths + run_precise_exit / _assess_mode_for_position global
+# lookups — all byte-identical to the pre-split single module.
+from polaris.scripts.exit_session_rail import (
+    _persist_session_exit_telemetry as _persist_session_exit_telemetry,
+)
+from polaris.scripts.exit_session_rail import (
+    _session_calendar_for_venue as _session_calendar_for_venue,
+)
+from polaris.scripts.exit_session_rail import (
+    run_session_forced_exit as run_session_forced_exit,
+)
+from polaris.scripts.exit_strategy_config import (
+    BAR_TREND_PEAK_LOCK_ARM_R as BAR_TREND_PEAK_LOCK_ARM_R,
+)
+from polaris.scripts.exit_strategy_config import (
+    BAR_TREND_PEAK_LOCK_FRAC as BAR_TREND_PEAK_LOCK_FRAC,
+)
+from polaris.scripts.exit_strategy_config import (
+    BAR_TREND_TRAIL_MULT as BAR_TREND_TRAIL_MULT,
+)
+from polaris.scripts.exit_strategy_config import (
+    _bucket_for_strategy as _bucket_for_strategy,
+)
+from polaris.scripts.exit_strategy_config import _env_float, _env_int
+from polaris.scripts.exit_strategy_config import (
+    _mfe_protect_for_strategy as _mfe_protect_for_strategy,
+)
+from polaris.scripts.exit_strategy_config import (
+    _trail_mult_for_strategy as _trail_mult_for_strategy,
+)
+from polaris.scripts.exit_venue_stop import arm_okx_venue_stop as arm_okx_venue_stop
 from polaris.strategies import STRATEGY_REGISTRY
 
 if TYPE_CHECKING:
@@ -68,148 +90,6 @@ __all__ = [
 def assess_mode_for_position(**kw: Any) -> ManagementMode | None:
     """Public wrapper for the bar/tick callers to resolve the re-map mode."""
     return _assess_mode_for_position(**kw)
-
-# A resting venue stop is only cancelled+replaced when the trailing stop tightens
-# by at least this fraction of the trigger price — steady ticks where the stop is
-# unchanged (or loosens, which the ratchet forbids) are a no-op (no churn). This
-# bounds the per-tick venue I/O to symbols whose stop actually moved.
-_VENUE_STOP_REPLACE_EPS_FRAC: float = 0.0005  # 5 bps
-
-# When the OKX algo endpoint reports the conditional stop is unavailable for a
-# symbol, that result is cached on the trade for this long so the arm does NOT
-# re-attempt every ~5s recalc tick (XRP-USDT logged ~2 arm attempts/sec → algo
-# rate-limit risk). After the window the arm retries ONCE (the endpoint may have
-# recovered); the software-polled stop is the backstop the whole time (fail-open
-# UNCHANGED — never blocks the trade, never changes size). The marker lives on
-# the per-position trade object, so it clears automatically when the position
-# closes / changes (a fresh symbol carries no cooldown and still arms).
-_VENUE_STOP_UNAVAIL_COOLDOWN_SEC: float = 300.0
-
-
-async def arm_okx_venue_stop(
-    *,
-    trade: Any,
-    okx_adapter: Any,
-    side: str,
-    stop_price: float | None,
-    now_monotonic: Callable[[], float] = time.monotonic,
-) -> None:
-    """Place / replace a VENUE-RESTING conditional stop on OKX for ``trade``.
-
-    The software stop fires only on the next ~5s recalc tick; an OKX SPOT alt can
-    gap through it in that window and the polled market close then fills far below
-    (the -34..-100R orphan). This rests the stop AT the venue so OKX triggers it
-    the instant the trigger crosses — closing the inter-tick gap. PRECISE-EXIT
-    loss-defence, NOT a throttle: it never changes size, never blocks entry, and
-    only mirrors the stop the FSM already computed for THIS position.
-
-    Fully fail-open (flow_not_block): a missing adapter / non-OKX venue / no stop
-    yet / any venue error leaves the in-memory ref untouched and the software
-    stop as the backstop. Cancel-then-replace fires only when the stop TIGHTENED
-    by ``_VENUE_STOP_REPLACE_EPS_FRAC`` (steady ticks are a no-op).
-    """
-    if okx_adapter is None or stop_price is None or stop_price <= 0.0:
-        return
-    if getattr(trade, "venue", "") != "okx":
-        return
-    base_qty = float(getattr(trade, "base_qty", 0.0) or 0.0)
-    if base_qty <= 0.0:
-        return
-    prev_px = getattr(trade, "okx_stop_px", None)
-    prev_algo = getattr(trade, "okx_stop_algo_id", None)
-    # Replace only on a material tighten (SPOT long stop ratchets UP) — a steady
-    # tick where the stop is unchanged (or loosens, which the ratchet forbids) is
-    # a no-op so the per-tick venue I/O is bounded to symbols whose stop moved.
-    if (
-        prev_algo is not None
-        and prev_px is not None
-        and stop_price <= float(prev_px) * (1.0 + _VENUE_STOP_REPLACE_EPS_FRAC)
-    ):
-        return
-    # Rate-defence: if the algo endpoint was already reported unavailable for this
-    # symbol, skip the re-attempt until the cooldown elapses (no per-tick arm spam
-    # → no OKX algo-order rate-limit risk). Software stop stays the backstop.
-    unavail_until = getattr(trade, "okx_stop_unavail_until", None)
-    if unavail_until is not None and now_monotonic() < float(unavail_until):
-        return
-    # OKX SPOT positions are long-only → the protective stop is a SELL.
-    close_side = "sell" if side == "long" else "buy"
-    try:
-        if prev_algo is not None:
-            with contextlib.suppress(Exception):
-                await okx_adapter.cancel_algo_order(
-                    inst_id=trade.symbol, algo_id=prev_algo
-                )
-        resp = await okx_adapter.place_conditional_stop(
-            inst_id=trade.symbol,
-            side=close_side,
-            base_qty=base_qty,
-            trigger_px=stop_price,
-            client_order_id=f"polstop{(trade.position_id or trade.symbol)}",
-        )
-    except Exception as exc:  # noqa: BLE001 — resting stop is best-effort
-        logger.warning(
-            "[L6/exit] venue-stop arm failed %s — software stop holds: %r",
-            getattr(trade, "symbol", "?"), exc,
-        )
-        return
-    if resp.ok and resp.algo_id:
-        trade.okx_stop_algo_id = resp.algo_id
-        trade.okx_stop_px = stop_price
-        # Endpoint healthy → clear any prior unavailable cooldown.
-        trade.okx_stop_unavail_until = None
-        logger.info(
-            "[L6/exit] venue-stop armed %s algoId=%s slTriggerPx=%.6g",
-            trade.symbol, resp.algo_id, stop_price,
-        )
-    else:
-        # Algo endpoint unavailable for this symbol — cache the result so the arm
-        # backs off instead of re-attempting every tick; keep the software stop.
-        trade.okx_stop_unavail_until = (
-            now_monotonic() + _VENUE_STOP_UNAVAIL_COOLDOWN_SEC
-        )
-        logger.info(
-            "[L6/exit] venue-stop unavailable %s (%s) — software stop backstop, "
-            "arm backed off %.0fs",
-            trade.symbol, resp.code, _VENUE_STOP_UNAVAIL_COOLDOWN_SEC,
-        )
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        val = int(float(raw))
-    except (TypeError, ValueError):
-        return default
-    return val if val > 0 else default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return default
-    return val if val > 0.0 else default
-
-
-# Let-winners-run peak-fraction floor for the BAR TREND family
-# ([[ab_letrun_maker_2026-06-24]]). The bar TREND strategies (session_breakout /
-# equity_gap_go / fx_breakout_basket — every TREND-bucket registered strategy)
-# banked their winners at break-even (session_breakout +0.77R MFE → +0.009R). The
-# peak-fraction floor holds ~55% of the reached peak once MFE passes the +0.5R arm
-# (red-team: +0.5R, NOT +2.5R — a higher arm starves the bar common case), on a
-# WIDENED 3.0-ATR trail (was the 2.0 module default). REVERSION / range bucket is
-# UNCHANGED (arm 0.0 → disabled; their edge is a bounded revert-to-mean, never a
-# let-winners-run). EXPECTANCY, not a throttle: it only ratchets the stop toward
-# profit; size / entry side / the G6 -1.0R rail are untouched. Env-tunable.
-BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.5)
-BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.55)
-BAR_TREND_TRAIL_MULT: float = _env_float("POLARIS_BAR_TREND_TRAIL_MULT", 3.0)
 
 
 # Component B exit horizon ∝ timeframe. A still-OPEN losing position is given at
@@ -264,64 +144,6 @@ def _profit_target_for_strategy(strategy_id: str) -> float | None:
     return cls.metadata.profit_target_r
 
 
-def _mfe_protect_for_strategy(strategy_id: str) -> MfeProtectSchedule | None:
-    """MFE-protect harvest schedule for a REGISTERED bar strategy, or ``None``.
-
-    [[harvest_generalization_2026-06-23]]: the harvest floor started equity-ONLY
-    (asset_class=='equity'); the 9 other bar strategies passed
-    ``run_precise_exit`` NO schedule, so below EXIT_FSM_PROTECT_R=1.0R the only
-    floor was the wide 2-ATR trail. MEASURED on the live ledger: 93.5% of trades
-    never reach +1.0R MFE (the dead PROTECT rung), yet 29.2% reach +0.30R and
-    19.7% reach +0.45R — those excursions round-tripped (avg MFE +0.278R,
-    realized -0.947R, giveback 1.225R). This now routes EVERY registered bar
-    strategy — every ``asset_class`` (spot / fx / index / commodity / equity) —
-    to a calibrated schedule so the +0.30R / +0.45R excursions become
-    break-even-or-better exits:
-
-      * equity keeps its OWN proven, separately-named rungs (byte-identical to
-        the prior equity-only behaviour — the 0%-win 1D round-trips it fixed);
-      * every other asset_class uses the shared bar default (the SAME proven
-        +0.30R BEP / +0.45R protect / +0.20R lock, calibrated to the aggregate
-        measured distribution — 29.2% reach +0.30R, 19.7% reach +0.45R).
-
-    EXPECTANCY, not a throttle: it ONLY ratchets the stop toward profit (the
-    let-winners-run ATR trail still runs ABOVE the floor; size / entry side / the
-    G6 -1.0R rail are untouched). Tick-engine ids (flow_pressure / micro_reversion
-    / burst_rider) are NOT registered here — they carry their OWN tick-path
-    schedule — so an unregistered id → ``None`` → byte-identical pre-fix exit.
-    """
-    cls = STRATEGY_REGISTRY.get(strategy_id)
-    if cls is None:
-        return None
-    # Let-winners-run peak-fraction floor — TREND bucket only. A TREND-bucket bar
-    # strategy (session_breakout / equity_gap_go / fx_breakout_basket) arms the
-    # peak-fraction floor at +0.5R / frac 0.55; the REVERSION / range bucket leaves
-    # it DISABLED (arm 0.0 → byte-identical) because its edge is a bounded
-    # revert-to-mean, not a winner to let run. The fixed sub-arm rungs below stay
-    # the BELOW-arm phase for every bucket ([[ab_letrun_maker_2026-06-24]]).
-    is_trend = (
-        bucket_from_correlation_group(cls.metadata.correlation_group_id)
-        is Bucket.TREND
-    )
-    peak_arm = BAR_TREND_PEAK_LOCK_ARM_R if is_trend else 0.0
-    peak_frac = BAR_TREND_PEAK_LOCK_FRAC if is_trend else 0.0
-    if cls.metadata.asset_class == "equity":
-        return MfeProtectSchedule(
-            bep_at_r=EXIT_EQUITY_MFE_BEP_R,
-            protect_at_r=EXIT_EQUITY_MFE_PROTECT_R,
-            lock_r=EXIT_EQUITY_MFE_LOCK_R,
-            peak_lock_arm_r=peak_arm,
-            peak_lock_frac=peak_frac,
-        )
-    return MfeProtectSchedule(
-        bep_at_r=EXIT_BAR_MFE_BEP_R,
-        protect_at_r=EXIT_BAR_MFE_PROTECT_R,
-        lock_r=EXIT_BAR_MFE_LOCK_R,
-        peak_lock_arm_r=peak_arm,
-        peak_lock_frac=peak_frac,
-    )
-
-
 # Shared give-back thresholds for the adaptive thesis re-map (env-tunable; the
 # module defaults are read once at import).
 _THESIS_GIVEBACK = ThesisGivebackParams(
@@ -337,35 +159,6 @@ _THESIS_GIVEBACK = ThesisGivebackParams(
 # guards the fast 500ms tick path from single-tick noise). The tick engine passes
 # its own live streak and overrides this.
 _DEFAULT_BROKEN_STREAK: int = EXIT_THESIS_BROKEN_TICKS
-
-
-def _trail_mult_for_strategy(strategy_id: str) -> float | None:
-    """Let-winners-run ATR-trail width (ATR units) for a REGISTERED bar strategy.
-
-    A TREND-bucket bar strategy widens to ``BAR_TREND_TRAIL_MULT`` (3.0, was the
-    2.0 module default) so a confirmed winner runs and the peak-fraction floor (not
-    a 2-ATR trail) supplies the lock ([[ab_letrun_maker_2026-06-24]]). REVERSION /
-    range bucket and unregistered ids → ``None`` → module default (byte-identical).
-    Only LOOSENS the running trail (lets the winner run); the ratchet / floor /
-    loser-timeout / G6 -1.0R rail are untouched. Tick-engine ids carry their OWN
-    trail and never reach here.
-    """
-    cls = STRATEGY_REGISTRY.get(strategy_id)
-    if cls is None:
-        return None
-    if bucket_from_correlation_group(cls.metadata.correlation_group_id) is Bucket.TREND:
-        return BAR_TREND_TRAIL_MULT
-    return None
-
-
-def _bucket_for_strategy(strategy_id: str) -> Bucket:
-    """Exit archetype (TREND / REVERSION) for ``strategy_id`` from its registered
-    ``correlation_group_id``. Unregistered / unknown → TREND (let-winners-run
-    default — flow_not_block: never force an unmapped strategy tighter)."""
-    cls = STRATEGY_REGISTRY.get(strategy_id)
-    if cls is None:
-        return Bucket.TREND
-    return bucket_from_correlation_group(cls.metadata.correlation_group_id)
 
 
 def _assess_mode_for_position(
@@ -434,103 +227,6 @@ def _find_open_trade(state: Any, position_id: str) -> Any | None:
         if getattr(t, "position_id", None) == position_id:
             return t
     return None
-
-
-def _session_calendar_for_venue(venue: str) -> str:
-    """Resolve a venue's ``session_calendar`` (always_on / fx_indices_cal /
-    us_equity_cal). An unknown venue degrades to ``always_on`` so the session
-    rail NEVER fires for it (no spurious calendar flat) — A's behaviour and any
-    unmapped stream stay byte-identical.
-    """
-    try:
-        return resolve_stream(venue).session_calendar
-    except (KeyError, ValueError):
-        return "always_on"
-
-
-async def run_session_forced_exit(
-    *,
-    conn: sqlite3.Connection,
-    state: ProdLoopState,
-    pos: ActivePositionRow,
-    pnl_r: float,
-    now_ts: int,
-    close_specific: Callable[..., Any],
-    lookup_regime: Callable[[sqlite3.Connection, str, str], str],
-    gpt_client: Any | None,
-    phase: str,
-    real_roundtrip: bool,
-    okx_adapter: Any,
-    capital_session: Any,
-    alpaca_adapter: Any = None,
-) -> bool:
-    """Phase 3 per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L
-    throttle). Keyed on the position's stream ``session_calendar``: ``always_on``
-    (A) NEVER fires (byte-identical); ``fx_indices_cal`` (B) forces a flat when
-    the weekend close is imminent OR the position survived a weekend close
-    (stale-overnight) and is now in-session; ``us_equity_cal`` (C) forces a flat
-    when the RTH close is imminent (no-overnight) OR the position survived an RTH
-    close (a restart gap missed the pre-close flatten) and is now in-session.
-    Fires on TIME ONLY — never on pnl / drawdown — and routes through the EXISTING
-    ``close_specific_position`` (the close path is unchanged; this only ADDS a
-    calendar-driven EXIT_NOW on top of the shared #26 FSM / G6 stop / G7
-    widening). Returns ``True`` when this position was force-flattened (caller
-    skips the rest of the exit/G6 pass).
-
-    ``opened_ts`` (stale-overnight, threaded from the position row): the close
-    can fill ONLY while in-session, so a bot-restart gap around the close misses
-    the pre-close trigger → the position would hold across ≥1 calendar close. The
-    rail re-arms the flatten at the next in-session open.
-    """
-    session_calendar = _session_calendar_for_venue(str(pos["venue"]))
-    opened_ts_raw = pos.get("opened_ts")
-    opened_ts = None if opened_ts_raw is None else int(opened_ts_raw)
-    decision = session_forced_exit(
-        session_calendar, now_ts, pnl_r=pnl_r, opened_ts=opened_ts,
-    )
-    if not decision.close:
-        return False
-    await close_specific(
-        conn, state=state, position_id=str(pos["position_id"]), now_ts=now_ts,
-        lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
-        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        close_reason=decision.close_reason,
-    )
-    state.recalc_session_forced_exit = (
-        getattr(state, "recalc_session_forced_exit", 0) + 1
-    )
-    _persist_session_exit_telemetry(
-        conn, now_ts=now_ts, venue=str(pos["venue"]),
-        symbol=str(pos.get("symbol", "")),
-    )
-    # Session-forced close (INFO): CALENDAR INTEGRITY flat (weekend / RTH close
-    # imminent), TIME-only — never P&L. Log only; the flatten already happened.
-    logger.info(
-        "[L6/exit] close %s:%s trade_id=%s reason=%s calendar=%s pnl_r=%.2f",
-        pos["venue"], pos.get("symbol", ""), pos["position_id"],
-        decision.close_reason, session_calendar, pnl_r,
-    )
-    return True
-
-
-def _persist_session_exit_telemetry(
-    conn: sqlite3.Connection, *, now_ts: int, venue: str, symbol: str
-) -> None:
-    """Append one session-forced-exit row to ``loop_session_exit_events``.
-
-    Display-only observability for the read-only dashboard — the flatten already
-    happened via ``close_specific`` and ``state.recalc_session_forced_exit`` is
-    the authoritative in-memory counter. Best-effort: any sqlite error (older
-    schema lacking the table) is swallowed. Touches ONLY this isolated telemetry
-    table; never positions/fills/sizing/gating.
-    """
-    with contextlib.suppress(sqlite3.Error):
-        conn.execute(
-            "INSERT INTO loop_session_exit_events (ts, venue, symbol) "
-            "VALUES (?,?,?)",
-            (int(now_ts), str(venue), str(symbol)),
-        )
 
 
 def persist_exit_state(

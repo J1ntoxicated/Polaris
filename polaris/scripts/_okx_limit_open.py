@@ -23,21 +23,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from typing import Any
 
-from polaris.core.data.fill_normalizer import OKX_FILLED_STATES, Fill, normalize_okx_fill
+from polaris.core.data.fill_normalizer import Fill
 from polaris.scripts._limit_exec_constants import (
     LIMIT_POLL_DELAY_SEC,
     OKX_BALANCE_CLAMP_BUFFER_FRAC,
-    limit_fill_wait_sec,
     marketable_limit_cap_bps,
     strong_signal_strength,
 )
 from polaris.scripts._okx_market_chunk import (
     _aggregate_child_fills,
     _split_market_notional,
+)
+
+# Re-exported (move-only split) with redundant aliases so the maker / marketable
+# entry-leg helpers stay reachable as module attributes (mypy --strict
+# no-implicit-reexport) and real_okx_open_fill's global lookups resolve
+# byte-identically to the pre-split single module.
+from polaris.scripts._okx_marketable import (
+    _okx_marketable_limit_open as _okx_marketable_limit_open,
+)
+from polaris.scripts._okx_open_shared import _normalize_open_rows
+from polaris.scripts._okx_post_only import (
+    _okx_post_only_open as _okx_post_only_open,
 )
 from polaris.scripts._smoke_roundtrip_shared import MIN_OKX_NOTIONAL_USD, OpenAttempt
 
@@ -79,49 +89,6 @@ async def fetch_okx_available_usdt(adapter: Any) -> float | None:
     except Exception as exc:  # noqa: BLE001 — balance query is best-effort
         logger.warning("[okx/limit] available-USDT lookup failed %r", exc)
         return None
-
-
-def _accfill_qty(row: dict[str, Any]) -> float:
-    """Filled base qty from an OKX order row (accFillSz, fallback fillSz)."""
-    for key in ("accFillSz", "fillSz"):
-        raw = row.get(key)
-        if raw is None or raw == "":
-            continue
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return 0.0
-    return 0.0
-
-
-def _normalize_open_rows(
-    rows: list[dict[str, Any]],
-    *,
-    strategy_id: str,
-    last_price: float | None,
-) -> OpenAttempt | None:
-    """Normalize a polled OKX order row → ``OpenAttempt`` (Fill) or ``None``.
-
-    Returns the filled/partially-filled ``OpenAttempt`` when the order has a
-    real fill, or ``None`` when it is still unfilled (caller decides whether to
-    keep polling or fall back). A 'canceled' order that left a partial fill
-    (accFillSz>0) is a REAL position — normalized so it is tracked and never
-    becomes an untracked orphan (codex review 2026-05-29).
-    """
-    if not rows:
-        return None
-    order_state = str(rows[0].get("state") or "").lower()
-    filled_qty = _accfill_qty(rows[0])
-    if order_state not in OKX_FILLED_STATES and filled_qty <= 0.0:
-        return None
-    row = (
-        rows[0] if order_state in OKX_FILLED_STATES
-        else {**rows[0], "state": "partially_filled"}
-    )
-    fill = normalize_okx_fill(
-        row, strategy_id=strategy_id, expected_price=last_price,
-    )
-    return OpenAttempt(fill=fill)
 
 
 async def _okx_market_child(
@@ -215,179 +182,6 @@ async def _okx_market_open(
         return OpenAttempt(fill=_aggregate_child_fills(filled))
     # No child filled at all → surface the first reject (51201/balance/no_fill).
     return first_reject or OpenAttempt(fill=None, reject_code="no_fill")
-
-
-async def _okx_maker_px(adapter: Any, *, inst_id: str) -> float | None:
-    """Resolve the passive maker touch for a BUY: best bid (post-only, no cross).
-
-    Returns ``None`` when the ticker has no usable bid so the caller falls back
-    to a plain market order (fail-safe — never blocks the entry).
-    """
-    tk = await adapter.fetch_ticker(inst_id)
-    bid = tk.get("bidPx")
-    try:
-        px = float(bid) if bid not in (None, "") else 0.0
-    except (TypeError, ValueError):
-        return None
-    return px if px > 0.0 else None
-
-
-async def _okx_post_only_open(
-    adapter: Any,
-    *,
-    inst_id: str,
-    notional_usd: float,
-    strategy_id: str,
-    last_price: float | None,
-    poll_delay_sec: float,
-) -> OpenAttempt | None:
-    """Post-only limit buy at the touch, poll for fill, cancel on timeout.
-
-    Returns the filled ``OpenAttempt`` on success (incl. partial fill), or
-    ``None`` when the limit could not be placed / did not fill in time (the
-    order is cancelled before returning ``None`` so no live maker order leaks).
-    Raises only on an unexpected adapter error — the caller treats a raise as a
-    fail-safe market fallback.
-    """
-    maker_px = await _okx_maker_px(adapter, inst_id=inst_id)
-    if maker_px is None:
-        return None  # no usable bid → market fallback
-    resp = await adapter.place_market_order(
-        inst_id=inst_id,
-        side="buy",
-        notional_usd=notional_usd,
-        client_order_id=f"polLpo{uuid.uuid4().hex[:8]}",
-        ord_type="post_only",
-        last_price_hint=maker_px,
-    )
-    if not resp.ok or not resp.venue_order_id:
-        # post_only rejected (e.g. would cross) → cancel n/a, market fallback.
-        logger.info(
-            "[okx/limit] %s post_only rejected code=%s — market fallback",
-            inst_id, resp.code,
-        )
-        return None
-    ord_id = resp.venue_order_id
-    deadline = time.monotonic() + limit_fill_wait_sec()
-    while True:
-        await asyncio.sleep(poll_delay_sec)
-        state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
-        rows = state.get("data", []) or []
-        attempt = _normalize_open_rows(
-            rows, strategy_id=strategy_id, last_price=last_price,
-        )
-        if attempt is not None:
-            logger.info("[okx/limit] %s post_only filled ordId=%s", inst_id, ord_id)
-            return attempt
-        if time.monotonic() >= deadline:
-            break
-    # Timed out unfilled — cancel the resting maker order, then poll once more in
-    # case a partial filled during the cancel race (orphan guard: a partial
-    # cancel still leaves a REAL position that must be tracked).
-    try:
-        await adapter.cancel_order(inst_id=inst_id, ord_id=ord_id)
-    except Exception as exc:  # noqa: BLE001 — cancel best-effort; still re-check
-        logger.warning("[okx/limit] %s cancel raised %r", inst_id, exc)
-    state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
-    rows = state.get("data", []) or []
-    attempt = _normalize_open_rows(
-        rows, strategy_id=strategy_id, last_price=last_price,
-    )
-    if attempt is not None:
-        logger.info(
-            "[okx/limit] %s post_only partial-fill on cancel ordId=%s — tracked",
-            inst_id, ord_id,
-        )
-    return attempt
-
-
-async def _okx_marketable_ask(adapter: Any, *, inst_id: str) -> float | None:
-    """Resolve the aggressive touch for a BUY: best ASK (the marketable side).
-
-    Returns ``None`` when the ticker has no usable ask so the caller falls back
-    to a plain market order (fail-safe — never blocks the entry).
-    """
-    tk = await adapter.fetch_ticker(inst_id)
-    ask = tk.get("askPx")
-    try:
-        px = float(ask) if ask not in (None, "") else 0.0
-    except (TypeError, ValueError):
-        return None
-    return px if px > 0.0 else None
-
-
-async def _okx_marketable_limit_open(
-    adapter: Any,
-    *,
-    inst_id: str,
-    notional_usd: float,
-    strategy_id: str,
-    last_price: float | None,
-    poll_delay_sec: float,
-    cap_bps: float,
-) -> OpenAttempt | None:
-    """Marketable-limit BUY: a limit at ``ask × (1 + cap_bps/1e4)``, poll, cancel.
-
-    A momentum/breakout entry crosses the spread (so it fills like a taker and
-    keeps the trade) but with an adverse-fill cap — it can never fill WORSE than
-    ``cap_bps`` past the best ask on a fast tape. Returns the filled
-    ``OpenAttempt`` (incl. a partial fill), or ``None`` when the limit could not
-    be placed / did not fill in time (the order is cancelled before returning
-    ``None`` so no live order leaks). Raises only on an unexpected adapter error
-    — the caller treats a raise as a fail-safe market fallback.
-    """
-    ask_px = await _okx_marketable_ask(adapter, inst_id=inst_id)
-    if ask_px is None:
-        return None  # no usable ask → market fallback
-    cap_px = ask_px * (1.0 + cap_bps / 10_000.0)
-    resp = await adapter.place_market_order(
-        inst_id=inst_id,
-        side="buy",
-        notional_usd=notional_usd,
-        client_order_id=f"polLmk{uuid.uuid4().hex[:8]}",
-        ord_type="limit",
-        last_price_hint=cap_px,
-    )
-    if not resp.ok or not resp.venue_order_id:
-        logger.info(
-            "[okx/limit] %s marketable-limit rejected code=%s — market fallback",
-            inst_id, resp.code,
-        )
-        return None
-    ord_id = resp.venue_order_id
-    deadline = time.monotonic() + limit_fill_wait_sec()
-    while True:
-        await asyncio.sleep(poll_delay_sec)
-        state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
-        rows = state.get("data", []) or []
-        attempt = _normalize_open_rows(
-            rows, strategy_id=strategy_id, last_price=last_price,
-        )
-        if attempt is not None:
-            logger.info(
-                "[okx/limit] %s marketable-limit filled ordId=%s cap_bps=%.1f",
-                inst_id, ord_id, cap_bps,
-            )
-            return attempt
-        if time.monotonic() >= deadline:
-            break
-    # Timed out unfilled — cancel, then re-poll once for a cancel-race partial
-    # (orphan guard: a partial cancel still leaves a REAL position to track).
-    try:
-        await adapter.cancel_order(inst_id=inst_id, ord_id=ord_id)
-    except Exception as exc:  # noqa: BLE001 — cancel best-effort; still re-check
-        logger.warning("[okx/limit] %s marketable cancel raised %r", inst_id, exc)
-    state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
-    rows = state.get("data", []) or []
-    attempt = _normalize_open_rows(
-        rows, strategy_id=strategy_id, last_price=last_price,
-    )
-    if attempt is not None:
-        logger.info(
-            "[okx/limit] %s marketable partial-fill on cancel ordId=%s — tracked",
-            inst_id, ord_id,
-        )
-    return attempt
 
 
 def _clamp_to_available(

@@ -5,6 +5,8 @@ Spec source: vault/30_components/layer-0-universe-discovery.md.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import httpx
 import pytest
 from hypothesis import given, settings
@@ -38,6 +40,8 @@ from polaris.core.universe.schema import (
 from polaris.core.universe.watchlist import (
     compute_dynamic_focus,
     compute_dynamic_target_size,
+    compute_recent_signal_density_top_q,
+    compute_top_score_concentration,
     persist_focus,
     score_focus_candidates,
     should_evict_from_focus,
@@ -252,6 +256,92 @@ def test_dynamic_target_size_within_bounds() -> None:
 def test_dynamic_target_size_low_concentration_shrinks() -> None:
     out = compute_dynamic_target_size(active_count=100, top_score_concentration=0.1)
     assert out <= 30
+
+
+# ---------------------------------------------------------------------------
+# Adaptive-focus input computation (B1+ wiring 2026-06-24)
+# ---------------------------------------------------------------------------
+
+
+def _with_density(symbol: str, density: float, **kw: object) -> UniverseInstrument:
+    return replace(_make_inst(symbol, **kw), signal_density_7d=density)  # type: ignore[arg-type]
+
+
+def test_recent_signal_density_top_q_empty_is_zero() -> None:
+    assert compute_recent_signal_density_top_q([]) == 0.0
+
+
+def test_recent_signal_density_top_q_all_quiet_is_zero() -> None:
+    quiet = [_make_inst(f"Q{i}-USDT") for i in range(20)]  # signal_density_7d=0.0
+    assert compute_recent_signal_density_top_q(quiet) == 0.0
+
+
+def test_recent_signal_density_top_q_dense_is_high() -> None:
+    # 16/20 firing → 0.8 ≥ 0.7 breadth threshold.
+    firing = [_with_density(f"F{i}-USDT", 3.0) for i in range(16)]
+    quiet = [_make_inst(f"Q{i}-USDT") for i in range(4)]
+    universe = firing + quiet
+    top_q = compute_recent_signal_density_top_q(universe)
+    assert top_q == pytest.approx(0.8)
+    # Live meaning: dense tape widens the focus window above the baseline 30.
+    assert compute_dynamic_target_size(
+        active_count=len(universe), recent_signal_density_top_q=top_q
+    ) > 30
+
+
+def test_top_score_concentration_empty_is_neutral() -> None:
+    assert compute_top_score_concentration([]) == 0.5
+
+
+def test_top_score_concentration_no_positive_mass_is_neutral() -> None:
+    assert compute_top_score_concentration([-1.0, -2.0, 0.0]) == 0.5
+
+
+def test_top_score_concentration_concentrated_is_high() -> None:
+    # One dominant leader carries nearly all the mass → high concentration → no shrink.
+    scores = [100.0] + [0.1] * 19
+    conc = compute_top_score_concentration(scores)
+    assert conc > 0.9
+    assert compute_dynamic_target_size(active_count=20, top_score_concentration=conc) >= 30
+
+
+def test_top_score_concentration_flat_is_low_and_shrinks() -> None:
+    # 20 equal scores → top quartile (5 names) holds ~25% of mass → low → shrink.
+    flat = [1.0] * 20
+    conc = compute_top_score_concentration(flat)
+    assert conc == pytest.approx(0.25)
+    out = compute_dynamic_target_size(active_count=20, top_score_concentration=conc)
+    assert out < 30
+    assert out >= FOCUS_TARGET_MIN
+
+
+def test_adaptive_inputs_drive_focus_off_baseline_end_to_end() -> None:
+    # Dense + concentrated leaders → focus EXPANDS toward the max, not pinned at 30.
+    leaders = [_with_density(f"L{i}-USDT", 5.0, vol=9e8 - i * 1e6) for i in range(40)]
+    top_q = compute_recent_signal_density_top_q(leaders)
+    scores = score_focus_candidates(leaders)
+    conc = compute_top_score_concentration(scores)
+    focus = compute_dynamic_focus(
+        leaders,
+        cycle_ts=NOW,
+        recent_signal_density_top_q=top_q,
+        top_score_concentration=conc,
+    )
+    assert len(focus) > 30  # adaptive, NOT the fixed baseline 30
+
+
+def test_degenerate_universe_holds_baseline() -> None:
+    # All-quiet, single uniform score → top_q=0, concentration neutral → baseline 30.
+    quiet = [_make_inst(f"D{i}-USDT", vol=5e8) for i in range(60)]
+    top_q = compute_recent_signal_density_top_q(quiet)
+    scores = score_focus_candidates(quiet)
+    conc = compute_top_score_concentration(scores)
+    assert top_q == 0.0
+    assert compute_dynamic_target_size(
+        active_count=len(quiet),
+        recent_signal_density_top_q=top_q,
+        top_score_concentration=conc,
+    ) == 30
 
 
 def test_compute_dynamic_focus_sorted_desc_and_bounded() -> None:

@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "compute_dynamic_focus",
     "compute_dynamic_target_size",
+    "compute_recent_signal_density_top_q",
+    "compute_top_score_concentration",
     "persist_focus",
     "score_focus_candidate",
     "score_focus_candidates",
@@ -156,6 +158,50 @@ def compute_dynamic_target_size(
         target -= 6
     target = max(min_target, min(max_target, target))
     return target
+
+
+def compute_recent_signal_density_top_q(
+    active_universe: Sequence[UniverseInstrument],
+) -> float:
+    """Breadth of recent signal firing across the active universe, in [0, 1].
+
+    = fraction of active instruments whose ``signal_density_7d > 0`` (i.e. carried
+    at least one recent raw signal in the 7d window). High value ⇒ many names are
+    firing ⇒ a dense, opportunity-rich tape ⇒ ``compute_dynamic_target_size`` widens
+    the focus window (+6 at ≥0.5, +12 at ≥0.7). A flat/quiet tape (few names firing)
+    leaves it at baseline. Empty / all-zero universe ⇒ 0.0 (baseline, no widen).
+
+    Pure ranking/sizing-WIDTH input (flow_not_block): it can only GROW the focus
+    list, never block an entry or cut a size; the 9-stack is untouched.
+    """
+    if not active_universe:
+        return 0.0
+    firing = sum(1 for ins in active_universe if ins.signal_density_7d > 0.0)
+    return firing / len(active_universe)
+
+
+def compute_top_score_concentration(scores: Sequence[float]) -> float:
+    """Top-quartile focus-score mass share over total positive mass, in [0, 1].
+
+    = sum(top-25% positive scores) / sum(all positive scores). High ⇒ a few names
+    dominate the score mass (concentrated leaders) ⇒ no shrink. Low ⇒ score mass is
+    spread thin/flat across many comparable names (broad mass) ⇒
+    ``compute_dynamic_target_size`` shrinks the window (-6 at ≤0.35, -12 at ≤0.2) so
+    focus tightens onto the few real leaders instead of diluting across a flat field.
+
+    Only positive scores count (a focus score can be negative; negative mass is not
+    "concentration"). Degenerate cases — empty, no positive mass — return 0.5 (the
+    neutral baseline, no shrink) so a cold/flat universe stays at the baseline 30.
+
+    Pure sizing-WIDTH input (flow_not_block): width adaptation only, no entry block.
+    """
+    positive = [s for s in scores if s > 0.0]
+    total = sum(positive)
+    if total <= 0.0:
+        return 0.5
+    k = max(1, round(len(positive) * (1.0 - CORE_QUANTILE)))
+    top_k = sorted(positive, reverse=True)[:k]
+    return sum(top_k) / total
 
 
 # ---------------------------------------------------------------------------

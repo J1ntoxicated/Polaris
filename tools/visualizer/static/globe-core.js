@@ -136,6 +136,44 @@
   const R_OUTER = 1.5;          // LARGE outer sphere → spread out, airy, see-through
   window.PolarisGlobe_shellR = { core: R_CORE, middle: R_MIDDLE, outer: R_OUTER };
 
+  // ── ONION GATE SHELLS (Jin 2026-06-24) ──────────────────────────────────────
+  // The 8-gate pipeline rendered as concentric onion rings: G1 (Universe scanner)
+  // is the OUTERMOST shell, G8 (Reflector) the innermost gate shell, and the very
+  // CORE = open positions (a candidate that cleared all 8 gates). A node sits on
+  // the shell of the gate stage it has currently reached; as it's PROMOTED (passes
+  // a gate) it pulses INWARD to the next shell — the pipeline read as an onion.
+  //
+  // The graph has no per-node gate_stage field, so we derive the stage a node has
+  // reached from what IS emitted (cluster/state/active/signal_count): dormant mkt
+  // universe = G1 candidates (outer rim), an active/firing watch node = deep in
+  // the gates, a position = the core. The 8 shells fan between R_OUTER (G1) and
+  // just outside R_CORE (G8) so the silhouette stays one see-through sphere.
+  const GATE_N = 8;
+  const R_GATE_OUT = R_OUTER;          // G1 sits on the existing outer sphere
+  const R_GATE_IN = R_CORE * 1.9;      // G8 sits just outside the core heart
+  // shellR(stage): stage 1..8 → radius (1 = outermost). stage 0 reserved for core.
+  function gateShellR(stage) {
+    if (stage <= 0) return R_CORE;
+    const t = (stage - 1) / (GATE_N - 1);          // 0 at G1 … 1 at G8
+    return R_GATE_OUT + (R_GATE_IN - R_GATE_OUT) * t;
+  }
+  window.PolarisGlobe_gateShellR = gateShellR;
+  // Derive the gate stage (1=G1 outer … 8=G8 inner; 0=core/position) a node has
+  // reached from its live role/state. Display-only heuristic over emitted fields:
+  //   pos                         → 0  (cleared the pipeline → core position)
+  //   watch + firing              → 7  (validated signal under the watcher/exit eye)
+  //   watch                       → 5  (in validation/sizing band)
+  //   mkt + firing/active         → 3  (a real signal caught → entered the gates)
+  //   mkt dormant universe        → 1  (G1 scanner candidate, the outer rim)
+  function gateStageFor(role, state, active, signalCount) {
+    if (role === 'pos') return 0;
+    if (role === 'watch') return (state === 'firing') ? 7 : 5;
+    if (signalCount > 0 || state === 'firing') return 3;
+    if (active) return 3;
+    return 1;
+  }
+  window.PolarisGlobe_gateStageFor = gateStageFor;
+
   // Even-sphere (fibonacci-sphere) direction for the i-th of n points: returns a
   // unit vector spread evenly over the whole sphere. Used for CORE + OUTER shells.
   const GOLDEN = Math.PI * (3 - Math.sqrt(5));
@@ -175,7 +213,7 @@
   // unit dir. Purely id-derived (order-independent) → stable across refreshes.
   const CAP = 1.32;             // half-angle of a venue's cap (rad) — wide = loose
   const SCAT_LATTICE = 512;     // fibonacci lattice size the cap samples from
-  function scatterPos(gxKey, h01, a01, b01) {
+  function scatterPos(gxKey, h01, a01, b01, shellR) {
     const gs = galaxyState[gxKey];
     const pole = gs.pole;
     // even fibonacci point on a cap around +Z, then rotate the cap onto the pole.
@@ -186,9 +224,10 @@
     const lx = Math.cos(phi) * st, ly = Math.sin(phi) * st, lz = ct;        // cap-local (+Z)
     // rotate local +Z frame onto `pole` (Rodrigues toward pole from +Z).
     const d = rotZto(pole, lx, ly, lz);
-    // radial jitter → airy thickness, organically scattered (not a hard wall).
-    const rr = R_OUTER * (0.90 + b01 * 0.20);
-    return { x: d.x * rr, y: d.y * rr, z: d.z * rr, dir: d };
+    // shellR = the node's ONION GATE shell radius (G1 outer → G8 inner). Default
+    // to R_OUTER (G1 rim) when unspecified. Small radial jitter → airy thickness.
+    const base = (shellR || R_OUTER) * (0.94 + b01 * 0.12);
+    return { x: d.x * base, y: d.y * base, z: d.z * base, dir: d };
   }
   // Rotate a vector given in a +Z-up local frame so its +Z aligns with unit `pole`.
   function rotZto(pole, lx, ly, lz) {
@@ -344,7 +383,19 @@
         // spread direction over the venue's spherical cap + angular AND radial jitter →
         // organic, airy, see-through. NOT spiral arms (no starfish). Purely id-derived
         // (order-independent): h1=cap position, h2=angular jitter, h3=radial jitter.
-        const sp = scatterPos(gx, h1, h2, h3);
+        // ONION GATE SHELL (Jin 2026-06-24): the node's CURRENT pipeline stage
+        // (G1 outer … G8 inner) picks which concentric shell it scatters onto. A
+        // freshly-PROMOTED node (stage moved inward since the last refresh) fires an
+        // inward pulse so you SEE it advance through the gates. Stage is derived from
+        // the just-assigned role/state/active/signalCount below (recomputed here from
+        // bn so it reflects this refresh's data).
+        const stage = gateStageFor(role, (bn.signal_count_30m > 0 ? 'firing' : (bn.state || 'lit')),
+          (bn.active === true) || (role !== 'mkt'), bn.signal_count_30m || 0);
+        const sp = scatterPos(gx, h1, h2, h3, gateShellR(stage));
+        // Promotion detection: stage decreased (moved inward) vs the node's last
+        // stage → inward pulse. New nodes (no prior stage) just appear on-shell.
+        if (n._gateStage != null && stage < n._gateStage) { n.pulse = Math.min(1, (n.pulse || 0) + 0.9); }
+        n._gateStage = stage;
         // Jin '프로브는 위성처럼 다른 궤도 가지고 돌게' — the OUTER probe shell now ORBITS
         // as satellites (own distinct orbital path) instead of sitting static. Cache the
         // base scatter pos/dir + a per-node orbital signature (axis tilt + speed/dir,
@@ -515,6 +566,10 @@
     }
     draw.sort((a, b) => a.p.depth - b.p.depth);
 
+    // ONION GATE SHELLS (Jin 2026-06-24): faint concentric guide rings, G1 outer →
+    // G8 inner → core, drawn BEHIND the nodes so the pipeline reads as an onion.
+    drawGateShells(now);
+
     // galaxy halo + label — Jin 2026-06-23: removed the per-cluster white nebula
     // "fog ball" / bright galactic core. Keep only the venue labels (drawn cheaply
     // inside drawGalaxyHalos via the labelsOnly flag) so each cluster is still named.
@@ -546,6 +601,41 @@
   function dimFor(gx) {
     if (!_focus) return 1.0;
     return gx === _focus ? 1.0 : 0.22;
+  }
+
+  // ── Onion gate shells (Jin 2026-06-24) ──────────────────────────────────────
+  // Faint concentric circles around the scene origin, one per gate G1(outer)→
+  // G8(inner) plus the core, so the 8-gate pipeline reads as an onion the nodes
+  // ride. Centred on the projected origin; radius = the shell's world radius times
+  // the same screen scale project() uses (so it tracks zoom + the perspective at
+  // the centre). Display-only guide — no node data touched.
+  function drawGateShells(now) {
+    const o = project(0, 0, 0);
+    const scale = Math.min(W, H) * 0.30 * zoom * o.persp;
+    ctx.save();
+    ctx.lineWidth = 0.6;
+    for (let s = 1; s <= GATE_N; s++) {
+      const rr = gateShellR(s) * scale;
+      if (rr < 2) continue;
+      // outer gates fainter, inner gates a touch brighter (closer to a position).
+      const a = 0.05 + (s / GATE_N) * 0.06;
+      ctx.strokeStyle = rgba([0x8a, 0x94, 0xb0], a);
+      ctx.beginPath(); ctx.arc(o.sx, o.sy, rr, 0, 6.2832); ctx.stroke();
+      // gate label on the right edge of the ring (tiny, only when ring is legible).
+      if (rr > 16) {
+        ctx.fillStyle = rgba([0xa0, 0xaa, 0xc4], 0.34 + (s / GATE_N) * 0.18);
+        ctx.font = '700 7px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('G' + s, o.sx + rr + 2, o.sy + 2);
+      }
+    }
+    // core ring = open positions (cleared all 8 gates).
+    const cr = R_CORE * scale;
+    if (cr > 2) {
+      ctx.strokeStyle = rgba([0xc4, 0xca, 0xd6], 0.14);
+      ctx.beginPath(); ctx.arc(o.sx, o.sy, cr, 0, 6.2832); ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function drawGalaxyHalos(now, labelsOnly) {

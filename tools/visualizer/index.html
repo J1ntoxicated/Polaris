@@ -470,12 +470,12 @@
      live particle pathways, capital-lifecycle arcs. Replaces sphere-render.js
      (14-tier nested-sphere → static blob). globe-core = layout + render + camera;
      globe-flows = trade_chain/lifecycle particle flows + SSE entry/exit flashes. -->
-<script src="static/globe-core.js?v=24_smaller"></script>
+<script src="static/globe-core.js?v=25_onion"></script>
 <!-- globe-satellites.js: cross-cutting clusters (strat/reg/exit/orbit/axis/obs/
      action/exit_tally) as conductor-orbiting satellite rings. Loads AFTER core
      (uses its PolarisGlobe_* exports at init) and before flows. -->
 <script src="static/globe-satellites.js?v=23_layered"></script>
-<script src="static/globe-flows.js?v=23_layered"></script>
+<script src="static/globe-flows.js?v=24_onionsync"></script>
 <!-- globe-funnel.js (P4 activity bindings: gate funnel ring + stream breath +
      regime tide + learner tremor + tick heartbeat + kill sediment). NEW draw
      pass — WRAPS globe-flows' published draw/setGraph hooks (does not modify
@@ -484,7 +484,7 @@
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
-<script src="static/board.js?v=18_pricestream_sse"></script>
+<script src="static/board.js?v=19_globepulsesync"></script>
 <!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
      venue scope helpers) loads after board.js (needs window.PolarisBoard) and
      before the tab modules (which read its scope helpers). -->

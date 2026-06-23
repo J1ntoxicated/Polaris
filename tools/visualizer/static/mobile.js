@@ -118,10 +118,143 @@
     return out;
   }
 
+  // SINCE RESET — forward edge since the latest main-logic reset. Mirrors the
+  // desktop board sinceResetHtml, condensed to one phone line. Hidden when no
+  // reset is stamped. Net/PF colour by winning (pf>=1 or net>=0).
+  function paintSinceReset(s) {
+    var el = $('sreset'); if (!el) return;
+    var sr = s.since_reset;
+    if (!sr) { el.style.display = 'none'; return; }
+    el.style.display = 'flex';
+    var pf = (sr.pf >= 9.99) ? '∞' : (sr.pf || 0).toFixed(2);
+    var winning = (sr.pf != null && sr.pf >= 1) || (sr.net_usd >= 0);
+    var netCls = winning ? 'pos' : 'neg';
+    var lbl = sr.label ? esc(sr.label) : 'reset';
+    el.innerHTML =
+      '<span class="tag">SINCE RESET</span>' +
+      '<span class="lbl" title="' + lbl + '">' + lbl + '</span>' +
+      '<span class="kv">Net<b class="' + netCls + '">' + signed(sr.net_usd) + '</b></span>' +
+      '<span class="kv">Trades<b>' + (sr.n || 0) + '</b></span>' +
+      '<span class="kv">Win<b>' + (sr.win_pct || 0).toFixed(0) + '%</b></span>' +
+      '<span class="kv">PF<b class="' + netCls + '">' + pf + '</b></span>';
+  }
+
+  // Recent Trades — TIME · SYM · side · P&L · R · why (newest first).
+  function paintRecentTrades(s) {
+    var body = $('recenttrades'); if (!body) return;
+    var rt = (s.recent_trades || s.trades || []).slice()
+      .sort(function (a, b) { return (b.ts_close || 0) - (a.ts_close || 0); });
+    if ($('rt-cnt')) $('rt-cnt').textContent = rt.length || '';
+    if (!rt.length) { body.innerHTML = '<div class="empty">no closed trades yet</div>'; return; }
+    var hdr = '<div class="thr rt-grid"><span>TIME</span><span>SYM</span><span class="ta-c">S</span>' +
+      '<span class="ta-r">P&amp;L</span><span class="ta-r">R</span><span class="ta-r">WHY</span></div>';
+    body.innerHTML = hdr + rt.slice(0, 60).map(function (t) {
+      var tstr = t.ts_close ? hhmmss(t.ts_close) : '';
+      var sideTag = (String(t.side_close || '').toLowerCase().charAt(0) === 's') ? 'S' : 'B';
+      var r = (t.r_units != null) ? ((t.r_units >= 0 ? '+' : '') + t.r_units.toFixed(2) + 'R') : '—';
+      return '<div class="tr rt-grid" title="' + esc(t.symbol) + ' ' + esc(t.strategy_id) +
+          ' · ' + esc(t.exit_reason) + ' · ' + esc(tstr) + '">' +
+        '<span class="t num">' + esc(tstr) + '</span>' +
+        '<span class="sym" title="' + esc(t.symbol) + '">' + esc(t.symbol) + '</span>' +
+        '<span class="s ' + (sideTag === 'S' ? 'side-short' : 'side-long') + '">' + sideTag + '</span>' +
+        '<span class="pl num ' + pnlClass(t.pnl_usd) + '">' + signed(t.pnl_usd) + '</span>' +
+        '<span class="r num">' + r + '</span>' +
+        '<span class="why" title="' + esc(t.exit_reason) + '">' + esc(t.exit_reason || '—') + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  // LOGIC tab — per-strategy edge + learners + regime, all from the snapshot.
+  function paintLogic(s) {
+    var sl = $('stratlist');
+    if (sl) {
+      var ss = (s.strategy_stats || []).slice()
+        .sort(function (a, b) { return (b.pnl_usd || 0) - (a.pnl_usd || 0); });
+      if ($('strat-cnt')) $('strat-cnt').textContent = ss.length || '';
+      if (!ss.length) { sl.innerHTML = '<div class="empty">no strategy stats</div>'; }
+      else {
+        var sh = '<div class="thr kv-grid"><span>STRATEGY</span><span class="ta-r">WR</span><span class="ta-r">PF</span><span class="ta-r">P&amp;L</span></div>';
+        sl.innerHTML = sh + ss.map(function (x) {
+          var pf = (x.pf >= 9.99) ? '∞' : (x.pf || 0).toFixed(1);
+          return '<div class="tr kv-grid" title="' + esc(x.strategy_id) + ' · n=' + (x.closed_n || 0) + '">' +
+            '<span class="nm" title="' + esc(x.strategy_id) + '">' + esc(x.strategy_id) + '</span>' +
+            '<span class="a num">' + (x.wr_pct || 0).toFixed(0) + '%</span>' +
+            '<span class="b num">' + pf + '</span>' +
+            '<span class="c num ' + pnlClass(x.pnl_usd) + '">' + signed(x.pnl_usd) + '</span>' +
+            '</div>';
+        }).join('');
+      }
+    }
+    var ll = $('lrnlist');
+    if (ll) {
+      var lr = s.learners || [];
+      if ($('lrn-cnt')) $('lrn-cnt').textContent = lr.length || '';
+      if (!lr.length) { ll.innerHTML = '<div class="empty">no learners</div>'; }
+      else {
+        var lh = '<div class="thr kv-grid"><span>LEARNER</span><span class="ta-r">VAL</span><span class="ta-r">Δ1h</span><span class="ta-r">n</span></div>';
+        ll.innerHTML = lh + lr.map(function (x) {
+          return '<div class="tr kv-grid" title="' + esc(x.learner_id) + ' ' + esc(x.key) + '">' +
+            '<span class="nm" title="' + esc(x.key) + '">' + esc(x.key || x.learner_id) + '</span>' +
+            '<span class="a num">' + (+x.value || 0).toFixed(2) + '</span>' +
+            '<span class="b num ' + pnlClass(x.delta_1h) + '">' + ((x.delta_1h >= 0 ? '+' : '') + (+x.delta_1h || 0).toFixed(2)) + '</span>' +
+            '<span class="c num">' + Math.round(x.n_eff || 0) + '</span>' +
+            '</div>';
+        }).join('');
+      }
+    }
+    var rl = $('rgmlist');
+    if (rl) {
+      var rb = (s.regime_bars || []).slice().sort(function (a, b) { return (b.count || 0) - (a.count || 0); });
+      if ($('rgm-cnt')) $('rgm-cnt').textContent = rb.length || '';
+      if (!rb.length) { rl.innerHTML = '<div class="empty">no regime data</div>'; }
+      else {
+        rl.innerHTML = rb.slice(0, 20).map(function (x) {
+          return '<div class="li"><span class="what">' + esc(x.regime || '—') + '</span>' +
+            '<span class="when num">' + (x.count || 0) + '</span></div>';
+        }).join('');
+      }
+    }
+  }
+
+  // AI tab — admission shadow + gpt stats (AI-free core: these are observe-only).
+  function paintAi(s) {
+    var al = $('ailist'); if (!al) return;
+    var sh = s.ai_shadow || {};
+    var adm = sh.admission || [];
+    if ($('ai-cnt')) $('ai-cnt').textContent = adm.length || '';
+    var html = '';
+    html += '<div class="li"><span class="what">in-loop GPT calls</span><span class="when num">0</span></div>';
+    html += '<div class="li"><span class="what">admission shadow (would-suppress)</span><span class="when num">' +
+      (sh.admission_suppress_n || 0) + ' / ' + (sh.admission_total_n || 0) + '</span></div>';
+    if (adm.length) {
+      html += adm.map(function (a) {
+        return '<div class="tr kv-grid" title="' + esc(a.regime) + '">' +
+          '<span class="nm">' + esc(a.regime || '—') + '</span>' +
+          '<span class="a num">n=' + (a.n || 0) + '</span>' +
+          '<span class="b num">sup ' + (a.would_suppress_n || 0) + '</span>' +
+          '<span class="c num">' + (a.suppress_pct || 0).toFixed(0) + '%</span>' +
+          '</div>';
+      }).join('');
+    }
+    var gs = s.gpt_stats || [];
+    if (gs.length) {
+      html += '<div class="ph-head">GPT calls (dev/debate)</div>';
+      html += gs.map(function (g) {
+        return '<div class="li"><span class="what">' + esc(g.model || g.kind || 'gpt') + '</span>' +
+          '<span class="when num">' + (g.n || g.count || 0) + '</span></div>';
+      }).join('');
+    }
+    al.innerHTML = html;
+  }
+
   function paint(s) {
     // Header status — alive if we have a snapshot.
     $('dot').classList.add('live');
     $('status').textContent = 'live';
+    paintSinceReset(s);
+    paintRecentTrades(s);
+    paintLogic(s);
+    paintAi(s);
 
     // Compact status strip: equity + today P&L (small, not a hero block).
     // Show BOTH: demo (70bps fee-burdened) · real-fee-net (go-live truth at 10bps).
@@ -342,6 +475,12 @@
     _setCell(row.querySelector('.pxc'), fmtPx(p.last_price), 'pxc num', pxDir);
     _setCell(row.querySelector('.sp'), signed(p.upnl_usd), 'sp num ' + pnlClass(p.upnl_usd), upDir);
     _setCell(row.querySelector('.pct'), (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%', 'pct num ' + pnlClass(pct), '');
+    // Jin 2026-06-24 SYNC: a moved cell (flash) → pulse the same symbol's globe
+    // node on the same event. key = venue|symbol|strategy|side. Display-only.
+    if ((pxDir || upDir) && window.PolarisGlobe && window.PolarisGlobe.pulseSymbol) {
+      var parts = String(p.key).split('|');
+      try { window.PolarisGlobe.pulseSymbol(parts[1], parts[0]); } catch (e) { /* display-only */ }
+    }
   }
   var _priceES = null;
   function connectPriceStream() {
@@ -358,7 +497,75 @@
     } catch (e) { /* SSE unavailable — cells fall back to the 1s snapshot poll */ }
   }
 
+  // ── Tabs (Jin 2026-06-24) — Main / Logic / Build / Roadmap / AI ────────────
+  // Main + Logic + AI are fed by the 1s snapshot poll (paint). Build + Roadmap
+  // pull from dedicated fetch-once endpoints (like the desktop reference tabs),
+  // loaded lazily the first time their tab is opened.
+  var _loaded = {};
+  function showTab(name) {
+    var panes = document.querySelectorAll('.tabpane');
+    for (var i = 0; i < panes.length; i++) panes[i].classList.toggle('on', panes[i].id === 'tab-' + name);
+    var btns = document.querySelectorAll('#tabbar button');
+    for (var j = 0; j < btns.length; j++) btns[j].classList.toggle('on', btns[j].getAttribute('data-tab') === name);
+    try { localStorage.setItem('m.tab', name); } catch (e) { /* private mode */ }
+    if (name === 'build') loadBuild();
+    if (name === 'roadmap') loadRoadmap();
+  }
+  function wireTabs() {
+    var bar = $('tabbar'); if (!bar) return;
+    bar.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button[data-tab]') : null;
+      if (b) showTab(b.getAttribute('data-tab'));
+    });
+    var saved = 'main';
+    try { saved = localStorage.getItem('m.tab') || 'main'; } catch (e) { /* private mode */ }
+    showTab(saved);
+  }
+  // Build tab — recent commits + test count (GET /api/buildlog, fetch-once).
+  function loadBuild() {
+    if (_loaded.build) return; _loaded.build = true;
+    var body = $('buildlist'); if (!body) return;
+    body.innerHTML = '<div class="empty">loading…</div>';
+    fetch('/api/buildlog', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        var commits = (d && d.commits) || [];
+        if ($('build-cnt')) $('build-cnt').textContent = d && d.test_count ? (d.test_count + ' tests') : (commits.length || '');
+        if (!commits.length) { body.innerHTML = '<div class="empty">no build log</div>'; return; }
+        body.innerHTML = commits.slice(0, 40).map(function (c) {
+          var when = (c.date || '').slice(5, 10);
+          return '<div class="li"><span class="when">' + esc(when) + '</span>' +
+            '<span class="tg">' + esc((c.type || '').slice(0, 8)) + '</span>' +
+            '<span class="what" title="' + esc(c.subject) + '">' + esc(c.subject) + '</span></div>';
+        }).join('');
+      }).catch(function () { body.innerHTML = '<div class="empty">/api/buildlog unavailable</div>'; _loaded.build = false; });
+  }
+  // Roadmap tab — phase items + next (GET /api/roadmap, fetch-once).
+  function loadRoadmap() {
+    if (_loaded.roadmap) return; _loaded.roadmap = true;
+    var body = $('roadlist'); if (!body) return;
+    body.innerHTML = '<div class="empty">loading…</div>';
+    fetch('/api/roadmap', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        var phases = (d && d.phases) || [];
+        if ($('road-cnt')) $('road-cnt').textContent = phases.length || '';
+        if (!phases.length) { body.innerHTML = '<div class="empty">no roadmap</div>'; return; }
+        var html = '';
+        phases.slice(0, 12).forEach(function (ph) {
+          html += '<div class="ph-head" title="' + esc(ph.phase) + '">' + esc(ph.phase) + '</div>';
+          (ph.items || []).slice(0, 20).forEach(function (it) {
+            var txt = String(it.text || it || '');
+            var tg = /\[DONE\]/i.test(txt) ? 'done' : /\[BUILD\]/i.test(txt) ? 'build' : '';
+            var clean = txt.replace(/\*\*/g, '').replace(/\[(DONE|BUILD|DEBATE|DECISION)\]/ig, '').trim();
+            html += '<div class="li">' + (tg ? '<span class="tg ' + tg + '">' + tg.toUpperCase() + '</span>' : '') +
+              '<span class="what" title="' + esc(clean) + '">' + esc(clean) + '</span></div>';
+          });
+        });
+        body.innerHTML = html;
+      }).catch(function () { body.innerHTML = '<div class="empty">/api/roadmap unavailable</div>'; _loaded.roadmap = false; });
+  }
+
   wireCollapse();
+  wireTabs();
   tick();
   setInterval(tick, POLL_MS);
   connectPriceStream();

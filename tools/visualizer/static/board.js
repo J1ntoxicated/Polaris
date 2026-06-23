@@ -827,6 +827,13 @@
     _setPriceCell(tds[5], fmtSignedPct(p.delta_pct, 2), 'num ' + pn(p.delta_pct), dDir);
     _setPriceCell(tds[7], fmtUsd(p.upnl_usd, 2), 'num ' + pn(p.upnl_usd), upDir);
     _setPriceCell(tds[8], fmtSignedPct(p.upnl_pct, 2), 'num ' + pn(p.upnl_pct), '');
+    // Jin 2026-06-24 SYNC: a streamed cell that moved (price flashed) → pulse the
+    // SAME symbol's node on the globe on the SAME event, so cell flash + cloud
+    // pulse fire together. key = venue|symbol|strategy|side. Display-only.
+    if ((pxDir || upDir) && window.PolarisGlobe && window.PolarisGlobe.pulseSymbol) {
+      const parts = String(key).split('|');
+      try { window.PolarisGlobe.pulseSymbol(parts[1], parts[0]); } catch (e) { /* display-only */ }
+    }
   }
   // Drain a streamed batch of changed cells (each carries its own key).
   function applyPriceStream(changed) {

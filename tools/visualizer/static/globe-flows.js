@@ -447,6 +447,34 @@
   window.PolarisGlobe = window.PolarisGlobe || {};
   window.PolarisGlobe.showProbes = showProbes;
 
+  // ── Cell-flash ↔ globe pulse SYNC (Jin 2026-06-24) ──────────────────────────
+  // When a live-price SSE frame flashes an Open-Positions cell, board.js/mobile.js
+  // also call this so the SAME symbol's node on the globe pulses on the SAME event
+  // — the board cell and the cloud node react together. Matches a node by ticker
+  // (graph tickers may be the bare symbol or a venue-suffixed pair) and pulses it +
+  // softly pulses the owning venue galaxy. Display-only; graceful no-op if unknown.
+  function pulseSymbol(symbol, venue) {
+    const nodes = window.PolarisGlobe_nodes;
+    if (!nodes || !symbol) return;
+    const sym = String(symbol).toUpperCase();
+    let hit = false;
+    for (const n of nodes) {
+      const t = (n.ticker || '').toUpperCase();
+      if (!t) continue;
+      // match the bare symbol or a node ticker that contains it (e.g. BTC-USDT ⊇ BTC).
+      if (t === sym || t.indexOf(sym) === 0 || sym.indexOf(t) === 0) {
+        n.pulse = Math.min(1, (n.pulse || 0) + 0.7);
+        n.flash = Math.min(1, (n.flash || 0) + 0.4);
+        hit = true;
+      }
+    }
+    let gx = venue ? venueKey(venue) : null;
+    if (!gx && /-USD[TC]?$/.test(sym)) gx = 'okx';
+    if (gx) pulseGalaxy(gx, 0.18);
+    return hit;
+  }
+  window.PolarisGlobe.pulseSymbol = pulseSymbol;
+
   // ── Data refresh — frequent for live feel (Jin: "리프레시가 드뭄") ───────────
   let _inflight = false;
   async function loadGraph() {

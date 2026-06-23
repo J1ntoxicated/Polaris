@@ -221,7 +221,33 @@ def _momentum_trail_mult(strategy_id: str) -> float | None:
 # mfe_protect=None, so its measured +0.3R excursions (27% reach +0.30R)
 # round-tripped on the wide ATR trail. micro_reversion is REVERSION family (scalp
 # exit, not run_precise_exit) → it is NOT here; it harvests via its scalp target.
-_MFE_PROTECT_MOMENTUM_SIGNALS: frozenset[str] = frozenset({_FLOW_PRESSURE, _BURST_RIDER})
+# Per-strategy MFE-protect BASE rungs (bep_at_r, protect_at_r, lock_r) BEFORE the
+# Seam3 regime-fit transform. Each momentum signal is calibrated to its OWN
+# excursion mass, so the rungs are strategy-SCOPED — a re-aim of one MUST NOT
+# bleed onto the other.
+#   - flow_pressure: reads the cfg fields (the env-tunable SSOT). RE-AIMED to the
+#     measured flow_pressure +MFE band 0.20/0.30/0.15 ([[flow_pressure_
+#     continuation_gate_2026-06-24]]).
+#   - burst_rider: its ORIGINAL rungs 0.35/0.50/0.25, calibrated to burst_rider's
+#     own measured +0.3R excursion mass ([[harvest_generalization_2026-06-23]]);
+#     pinned here so the flow_pressure re-aim leaves it byte-identical.
+_BURST_RIDER_MFE_RUNGS: tuple[float, float, float] = (0.35, 0.50, 0.25)
+
+
+def _mfe_protect_base_rungs(
+    strategy_id: str, cfg: TickEngineConfig
+) -> tuple[float, float, float] | None:
+    """Per-strategy base MFE-protect rungs (bep_at_r, protect_at_r, lock_r), or None.
+
+    flow_pressure → the env-tunable ``cfg`` SSOT; burst_rider → its own pinned
+    original rungs. An unmapped id → ``None`` (no schedule). Scoped so a re-aim of
+    one strategy's rungs leaves the other byte-identical.
+    """
+    if strategy_id == _FLOW_PRESSURE:
+        return (cfg.mfe_bep_r, cfg.mfe_protect_r, cfg.mfe_protect_lock_r)
+    if strategy_id == _BURST_RIDER:
+        return _BURST_RIDER_MFE_RUNGS
+    return None
 
 
 def _mfe_protect_schedule(
@@ -230,11 +256,14 @@ def _mfe_protect_schedule(
     """MFE-protect harvest schedule for a tick MOMENTUM strategy, or ``None``.
 
     Both momentum tick signals (flow_pressure + burst_rider, routed through
-    ``run_precise_exit``) ratchet the stop to BEP at ``cfg.mfe_bep_r`` and lock
-    ``cfg.mfe_protect_lock_r`` positive R at ``cfg.mfe_protect_r`` — capturing the
-    measured +MFE excursion and cutting the give-back. burst_rider was previously
+    ``run_precise_exit``) ratchet the stop to BEP and lock positive R at their
+    OWN per-strategy rungs (``_mfe_protect_base_rungs``) — capturing the measured
+    +MFE excursion and cutting the give-back. The rungs are strategy-SCOPED:
+    flow_pressure reads the cfg SSOT (re-aimed to its measured band), burst_rider
+    keeps its own original 0.35/0.50/0.25 (calibrated to ITS excursion mass), so a
+    re-aim of one leaves the other byte-identical. burst_rider was previously
     uncovered (→ None) so its +0.3R excursions round-tripped on the wide ATR trail;
-    it now shares the schedule. micro_reversion (reversion family → scalp exit) →
+    it now has its own schedule. micro_reversion (reversion family → scalp exit) →
     ``None`` here (it harvests via its scalp profit target). An unmapped id →
     ``None`` → byte-identical module-default exit. EXPECTANCY, not a throttle: the
     schedule only tightens the stop toward profit.
@@ -247,17 +276,19 @@ def _mfe_protect_schedule(
     (run_precise_exit takes the protection-tighter of trail vs floor). The lock_r
     floor is preserved (a tightened schedule never locks LESS positive R).
     """
-    if strategy_id not in _MFE_PROTECT_MOMENTUM_SIGNALS:
+    rungs = _mfe_protect_base_rungs(strategy_id, cfg)
+    if rungs is None:
         return None
+    bep_r, protect_r, lock_r = rungs
     # Momentum family (only momentum signals reach here). exit_tightness > 1 on a
     # bad fit, < 1 on a good fit, 1.0 neutral / unknown regime → byte-identical.
     t = exit_tightness(regime_fit("momentum", regime))
     return MfeProtectSchedule(
-        bep_at_r=cfg.mfe_bep_r / t,
-        protect_at_r=cfg.mfe_protect_r / t,
+        bep_at_r=bep_r / t,
+        protect_at_r=protect_r / t,
         # Lock AT LEAST the configured positive R — a tighter schedule never banks
         # LESS (ratchet-toward-profit invariant); a looser fit keeps the base lock.
-        lock_r=cfg.mfe_protect_lock_r * max(1.0, t),
+        lock_r=lock_r * max(1.0, t),
     )
 
 
@@ -913,7 +944,13 @@ async def _run_exits(
             if _flow_decay_exit(
                 side=trade.side, ofi=fp_feat.ofi,
                 flow_confirmed=fp_feat.flow_confirmed, pnl_r=pnl_r,
-                mfe_gate_r=eng.cfg.mfe_bep_r,
+                # Gate the OFI-decay banking at the PROTECT rung (0.30, near the
+                # achievable peak) rather than BEP — [[flow_pressure_continuation_
+                # gate_2026-06-24]]. The continuation entry gate keeps the trade
+                # from buying a plateau top, so the decay exit can wait for a
+                # genuine peak before banking on OFI failure. EXPECTANCY, not a
+                # throttle: a per-position close once green; never a size/entry cut.
+                mfe_gate_r=eng.cfg.mfe_protect_r,
             ):
                 closed = await close_specific_position(
                     conn, state=state, position_id=position_id, now_ts=now_ts,

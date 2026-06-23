@@ -372,6 +372,26 @@ def test_flow_pressure_theta_ofi_is_env_tunable() -> None:
             os.environ["POLARIS_TICK_THETA_OFI"] = prev
 
 
+def test_ewma_fast_sec_default_and_env_tunable() -> None:
+    # The fast EWMA horizon is RE-AIMED 1.0 → 2.5s (sustained pressure, not the
+    # 1-tick spike peak) and is a NAMED env-tunable so it can be re-aimed without
+    # a redeploy. Default (unset) = 2.5; an env override takes effect.
+    import os
+
+    from polaris.core.ticks.config import TickEngineConfig
+
+    assert TickEngineConfig().ewma_fast_sec == 2.5
+    prev = os.environ.get("POLARIS_TICK_EWMA_FAST_SEC")
+    os.environ["POLARIS_TICK_EWMA_FAST_SEC"] = "1.0"
+    try:
+        assert TickEngineConfig().ewma_fast_sec == 1.0
+    finally:
+        if prev is None:
+            del os.environ["POLARIS_TICK_EWMA_FAST_SEC"]
+        else:
+            os.environ["POLARIS_TICK_EWMA_FAST_SEC"] = prev
+
+
 # ---------------------------------------------------------------------------
 # flow_pressure ENTRY follow-through confirmation ([[flow_pressure_calibration_
 # ai_2026-06-23]]): the raw-spike entry was buying the TOP of an OFI-positive
@@ -438,6 +458,128 @@ def test_flow_pressure_enters_on_genuine_followthrough() -> None:
     intent = flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL, ref_price=100.0, cfg=CFG)
     assert isinstance(intent, TickIntent)
     assert intent.side == "long"
+
+
+# ---------------------------------------------------------------------------
+# flow_pressure ENTRY continuation requirement ([[flow_pressure_continuation_
+# gate_2026-06-24]]): 61% of trades (706/1162) had MFE~0 — a positive-OFI spike
+# at its PLATEAU TOP / roll-over was being bought because the post-spike gate
+# only checked "the spike has not DIED yet" (OFI stays elevated, bid replenishes,
+# microprice holds, spread stable). It did NOT require the spike to be STILL
+# CLIMBING. A plateau-top book stays bid-heavy and the microprice holds above the
+# tail midpoint, so the OLD four checks all pass — yet the price is no longer
+# extending (velocity has decayed to ~0, latest mid is not a new high). The 5th
+# continuation requirement adds: (a) NOT decelerating across the confirm tail
+# (accel ≥ 0 long / ≤ 0 short), (b) the latest tail mid is a NEW HIGH (long) /
+# NEW LOW (short) — the spike EXTENDS, not rolls over, (c) the last two step
+# velocities persist same-sign. This is TIMING precision — a plateau-top simply
+# DELAYS to a later confirmed (still-climbing) tick; never a veto / size-cut.
+# ---------------------------------------------------------------------------
+
+
+def _bidheavy_tail_window(
+    tail_mids: list[float], side_sign: int = 1
+) -> list[TickSample]:
+    """A persistent bid-heavy (long) / ask-heavy (short) book whose TAIL price
+    path is ``tail_mids``.
+
+    The book stays imbalanced + the bid (long) / ask (short) replenishes + the
+    spread is stable throughout, so the OLD four follow-through checks (OFI
+    elevated, near-touch replenish, microprice-holds, spread-stable) all pass.
+    Only the TAIL PRICE PATH (``tail_mids``, the last 4 mids) decides the new 5th
+    continuation requirement — so these windows isolate the continuation gate.
+    """
+    ticks: list[TickSample] = []
+    # 16-tick imbalanced run climbing toward the tail's first mid (so the tail's
+    # microprice/midpoint checks pass), then the 4 explicit tail mids.
+    run0 = tail_mids[0]
+    for i in range(16):
+        mid = run0 - side_sign * (16 - i) * 0.02
+        bid_size, ask_size = (120.0, 8.0) if side_sign > 0 else (8.0, 120.0)
+        trade_px = mid + side_sign * 0.05
+        ticks.append(
+            _tick(_BASE + i, mid, bid_size=bid_size, ask_size=ask_size,
+                  last_trade_price=trade_px, last_trade_size=4.0)
+        )
+    for j, m in enumerate(tail_mids):
+        bid_size, ask_size = (120.0, 8.0) if side_sign > 0 else (8.0, 120.0)
+        trade_px = m + side_sign * 0.05
+        ticks.append(
+            _tick(_BASE + 16 + j, m, bid_size=bid_size, ask_size=ask_size,
+                  last_trade_price=trade_px, last_trade_size=4.0)
+        )
+    return ticks
+
+
+def test_flow_pressure_no_entry_on_plateau_top() -> None:
+    # Bid-heavy book, but the tail price PLATEAUS then ticks down (roll-over) — the
+    # spike has stopped climbing. OLD gate (still elevated / microprice holds)
+    # would have armed; the continuation gate DELAYS it (latest mid is NOT a new
+    # high + velocity decelerated). flow_not_block: a DELAY, not a veto.
+    plateau = _bidheavy_tail_window([100.30, 100.34, 100.35, 100.33])
+    feat = compute_tick_features(plateau, NOW, CFG)
+    assert feat.ofi is not None and feat.ofi > CFG.theta_ofi  # still ARMS on OFI
+    assert feat.flow_confirmed is False
+    assert flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL,
+                         ref_price=100.0, cfg=CFG) is None
+
+
+def test_flow_pressure_no_entry_on_decelerating_climb() -> None:
+    # Still rising (each tick a new high) BUT DECELERATING into a plateau — the
+    # step velocity shrinks every tick (0.06→0.03→0.012→0.004). Not yet a real
+    # follow-through: continuation requires NON-deceleration. Delayed, not vetoed.
+    decel = _bidheavy_tail_window([100.30, 100.36, 100.39, 100.402])
+    feat = compute_tick_features(decel, NOW, CFG)
+    assert feat.ofi is not None and feat.ofi > CFG.theta_ofi
+    assert feat.flow_confirmed is False
+
+
+def test_flow_pressure_enters_on_extending_spike() -> None:
+    # The spike is STILL CLIMBING — each tail tick a new high, velocity holding /
+    # accelerating (0.03→0.04→0.05→0.06). Genuine continuation → arms → ENTRY.
+    extend = _bidheavy_tail_window([100.30, 100.34, 100.39, 100.45])
+    feat = compute_tick_features(extend, NOW, CFG)
+    assert feat.ofi is not None and feat.ofi > CFG.theta_ofi
+    assert feat.flow_confirmed is True
+    intent = flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL,
+                           ref_price=100.0, cfg=CFG)
+    assert isinstance(intent, TickIntent)
+    assert intent.side == "long"
+
+
+def test_flow_pressure_steady_climb_still_arms() -> None:
+    # A STEADY (constant-velocity) climb is "still climbing" — accel == 0 must
+    # NOT be read as deceleration (flow_not_block: a genuine sustained climb still
+    # arms). Each tail tick a new high, equal +0.03 steps.
+    steady = _bidheavy_tail_window([100.30, 100.33, 100.36, 100.39])
+    feat = compute_tick_features(steady, NOW, CFG)
+    assert feat.flow_confirmed is True
+
+
+def test_flow_pressure_extending_short_arms_bidirectional() -> None:
+    # Mirror: an ask-heavy book whose tail is STILL DROPPING (each tick a new low,
+    # velocity holding) → continuation arms a SHORT (bidirectional preserved).
+    extend_dn = _bidheavy_tail_window(
+        [100.0 - 0.30, 100.0 - 0.34, 100.0 - 0.39, 100.0 - 0.45], side_sign=-1
+    )
+    feat = compute_tick_features(extend_dn, NOW, CFG)
+    assert feat.ofi is not None and feat.ofi < -CFG.theta_ofi
+    assert feat.flow_confirmed is True
+    intent = flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL,
+                           ref_price=100.0, cfg=CFG)
+    assert isinstance(intent, TickIntent)
+    assert intent.side == "short"
+
+
+def test_flow_pressure_short_plateau_bottom_delayed() -> None:
+    # Mirror plateau: ask-heavy book but the tail STOPS dropping and ticks back up
+    # (roll-over at the bottom) → not a new low + decelerated → DELAYED.
+    plateau_dn = _bidheavy_tail_window(
+        [100.0 - 0.30, 100.0 - 0.34, 100.0 - 0.35, 100.0 - 0.33], side_sign=-1
+    )
+    feat = compute_tick_features(plateau_dn, NOW, CFG)
+    assert feat.ofi is not None and feat.ofi < -CFG.theta_ofi
+    assert feat.flow_confirmed is False
 
 
 # ---------------------------------------------------------------------------

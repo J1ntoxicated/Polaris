@@ -217,7 +217,21 @@ class TickEngineConfig:
     theta_spread: float = 8.0  # θ_s — max spread (bps) for burst entry
 
     # --- EWMA horizons (seconds) -----------------------------------------
-    ewma_fast_sec: float = 1.0
+    # ``ewma_fast_sec`` RE-AIMED 1.0 → 2.5 ([[flow_pressure_continuation_gate_
+    # 2026-06-24]]): at 1.0s the ofi / aggr_flow EWMA tracked the SPIKE PEAK so
+    # tightly that flow_pressure armed on the instantaneous top of an OFI burst
+    # (which then reverted — the 61% MFE~0 cohort). 2.5s reads SUSTAINED pressure
+    # instead of a 1-tick book flicker, so a transient imbalance that decays
+    # within a couple of ticks no longer arms. NOT a throttle: a genuine
+    # persistent imbalance still clears θ_o (it just must persist > one tick); the
+    # signal still fires bidirectionally on every real large sustained imbalance.
+    # Named env-tunable (``POLARIS_TICK_EWMA_FAST_SEC``) so the horizon can be
+    # re-aimed after each re-measure WITHOUT a redeploy.
+    ewma_fast_sec: float = field(
+        default_factory=lambda: _env_float(
+            os.getenv("POLARIS_TICK_EWMA_FAST_SEC"), 2.5
+        )
+    )
     ewma_mid_sec: float = 3.0
     ewma_slow_sec: float = 10.0
 
@@ -252,9 +266,17 @@ class TickEngineConfig:
     # exit once green), NOT a throttle: it only RATCHETS the protective stop toward
     # profit on top of the let-winners-run ATR trail — size / entry / the G6 -1.0R
     # rail untouched. Env-tunable; flow_pressure-only (threaded per-position).
-    mfe_bep_r: float = 0.35  # MFE at which the stop ratchets to break-even
-    mfe_protect_r: float = 0.50  # MFE at which a meaningful positive R is locked
-    mfe_protect_lock_r: float = 0.25  # R locked in once mfe_protect_r is reached
+    # RE-AIMED to the MEASURED flow_pressure MFE mass ([[flow_pressure_
+    # continuation_gate_2026-06-24]]): the achievable +MFE cohort straddles
+    # ~0.326R, so the old 0.35/0.50 rungs sat ABOVE the realised excursion and
+    # NEVER armed — 456 winners gave back to −0.049R on the wide ATR trail. Pulling
+    # the rungs down to 0.20 BEP / 0.30 protect / 0.15 lock places them INSIDE the
+    # realised MFE band so the protective stop actually ratchets toward profit
+    # before the give-back. EXPECTANCY (a tighter precise exit once green), NOT a
+    # throttle: size / entry / the G6 -1.0R rail are untouched; flow_pressure-only.
+    mfe_bep_r: float = 0.20  # MFE at which the stop ratchets to break-even
+    mfe_protect_r: float = 0.30  # MFE at which a meaningful positive R is locked
+    mfe_protect_lock_r: float = 0.15  # R locked in once mfe_protect_r is reached
 
     # --- loop knobs (impure loop reads these) ----------------------------
     cooldown_sec: float = 5.0

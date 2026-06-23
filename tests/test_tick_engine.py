@@ -1014,19 +1014,41 @@ def test_mfe_protect_schedule_covers_all_momentum_signals() -> None:
     # ONLY to flow_pressure; burst_rider (the other MOMENTUM tick signal →
     # run_precise_exit) passed mfe_protect=None, so its measured +0.3R excursions
     # (27% reach +0.30R) round-tripped on the wide ATR trail. Both momentum tick
-    # signals now get the cfg MFE-protect schedule. micro_reversion is REVERSION
-    # family (scalp exit, not run_precise_exit) so it has NO mfe_protect schedule
-    # here — it harvests via its own scalp profit target.
+    # signals now get an MFE-protect schedule. micro_reversion is REVERSION family
+    # (scalp exit, not run_precise_exit) so it has NO mfe_protect schedule here —
+    # it harvests via its own scalp profit target.
     cfg = TickEngineConfig()
     for momentum_id in ("flow_pressure", "burst_rider"):
         sched = _mfe_protect_schedule(momentum_id, cfg)
         assert sched is not None, momentum_id
-        assert sched.bep_at_r == cfg.mfe_bep_r
-        assert sched.protect_at_r == cfg.mfe_protect_r
-        assert sched.lock_r == cfg.mfe_protect_lock_r
     # micro_reversion routes through the scalp exit, not the mfe_protect floor.
     assert _mfe_protect_schedule("micro_reversion", cfg) is None
     assert _mfe_protect_schedule("not_a_signal", cfg) is None
+
+
+def test_mfe_protect_schedule_is_per_strategy_scoped() -> None:
+    # [[flow_pressure_continuation_gate_2026-06-24]] scoping fix: the flow_pressure
+    # re-aim pulled the cfg rungs DOWN to 0.20/0.30/0.15 to sit inside the measured
+    # flow_pressure +MFE band. Those cfg fields are the flow_pressure SSOT — they
+    # must NOT bleed onto burst_rider, whose own harvest schedule stays at its
+    # original 0.35/0.50/0.25 rungs (calibrated to its OWN excursion mass). The
+    # schedule is per-strategy scoped: flow_pressure reads cfg; burst_rider reads
+    # its restored constants. Neutral/unknown regime → no Seam3 shaping.
+    cfg = TickEngineConfig()
+    # flow_pressure: the cfg rungs (the env-tunable SSOT, currently the re-aimed
+    # 0.20 / 0.30 / 0.15 band) apply unchanged.
+    fp = _mfe_protect_schedule("flow_pressure", cfg, regime="unknown")
+    assert fp is not None
+    assert fp.bep_at_r == cfg.mfe_bep_r == 0.20
+    assert fp.protect_at_r == cfg.mfe_protect_r == 0.30
+    assert fp.lock_r == cfg.mfe_protect_lock_r == 0.15
+    # burst_rider: UNCHANGED original rungs — the flow_pressure re-aim does NOT
+    # touch it (other-strategy 0-impact invariant).
+    br = _mfe_protect_schedule("burst_rider", cfg, regime="unknown")
+    assert br is not None
+    assert br.bep_at_r == 0.35
+    assert br.protect_at_r == 0.50
+    assert br.lock_r == 0.25
 
 
 def test_mfe_protect_schedule_badfit_tightens_harvest() -> None:
@@ -1060,7 +1082,7 @@ def test_mfe_protect_schedule_ratchets_toward_profit_only() -> None:
 
 
 def test_flow_decay_exit_only_when_green_and_flow_fails() -> None:
-    gate = TickEngineConfig().mfe_bep_r  # the +MFE gate (0.35R)
+    gate = TickEngineConfig().mfe_protect_r  # the +MFE decay-exit gate (0.30R)
     # RED (pnl below the gate) → never exits, regardless of flow (G6 owns red).
     assert _flow_decay_exit(
         side="long", ofi=-0.9, flow_confirmed=False, pnl_r=0.0, mfe_gate_r=gate,

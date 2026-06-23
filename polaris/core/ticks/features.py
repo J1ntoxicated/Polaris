@@ -46,6 +46,14 @@ _MIN_STD = 1e-9
 # widen (the spread blowing out as the spike reverses) is far larger than 5%.
 _SPREAD_WIDEN_TOL = 0.05
 
+# Continuation-gate accel floor: a STEADY (constant-velocity) climb has accel
+# EXACTLY 0 and IS still climbing — it must NOT be read as deceleration. This
+# tiny negative floor absorbs only float-subtraction noise on equal step
+# velocities (e.g. -1e-17), so a genuine sustained climb still arms while a real
+# plateau (velocity decaying toward 0 → materially negative accel for a long)
+# fails. Not a throttle — a numerical guard around the "non-deceleration" test.
+_ACCEL_FLOOR = 1e-9
+
 
 @dataclass(frozen=True, slots=True)
 class TickFeatures:
@@ -71,10 +79,12 @@ class TickFeatures:
       - ``flow_confirmed``: POST-SPIKE follow-through, aligned to ``sign(ofi)`` —
         ``True`` iff the order-flow imbalance is genuine continuation (OFI stays
         elevated over the tail, the bid follows up / replenishes, the microprice
-        HOLDS above the spike midpoint, spread is stable/tightening), ``False``
-        iff the spike is exhausting (an immediate reversal — the 59% top-buy
-        scenario), ``None`` on a balanced book / insufficient tail. Read ONLY by
-        ``flow_pressure`` as the ENTRY confirmation (TIMING precision — an
+        HOLDS above the spike midpoint, spread is stable/tightening, AND the spike
+        is STILL CLIMBING — non-decelerating, latest mid a new high/low, velocity
+        persists same-sign), ``False`` iff the spike is exhausting (an immediate
+        reversal — the 59% top-buy) OR merely plateauing at its peak (the 61%
+        MFE~0 top-buy), ``None`` on a balanced book / insufficient tail. Read ONLY
+        by ``flow_pressure`` as the ENTRY confirmation (TIMING precision — an
         unconfirmed tick is a DELAY, never a veto).
       - ``n_ticks``: window length.
       - ``age_sec``: seconds from the newest tick to ``now_ts`` (freshness).
@@ -162,6 +172,17 @@ def _flow_followthrough(
           midpoint of the tail mid-range; short: ≤) — a reversal back through the
           midpoint is the immediate top-buy reversal we are filtering out,
       (4) the SPREAD is STABLE / TIGHTENING (latest ≤ tail-mean, not widening).
+      (5) the SPIKE is STILL CLIMBING — not merely "not dead yet" but EXTENDING:
+          (a) NON-decelerating across the tail (long: latest accel ≥ 0; short:
+              ≤ 0 — a plateau, whose velocity decays toward 0, fails), (b) the
+              latest tail mid is a NEW HIGH (long) / NEW LOW (short) — a roll-over
+              that prints below the prior tail max (long) is exhaustion, not
+              continuation, (c) the last two step velocities PERSIST same-sign in
+              the OFI direction (a single up-tick into a stalled book is not
+              follow-through). Closes the plateau-top buy: a positive-OFI spike at
+              its peak passes (1)–(4) (book still bid-heavy, microprice still
+              above the midpoint) yet is no longer climbing — (5) DELAYS it to a
+              later still-climbing tick.
     ``confirm_ticks`` is clamped to the available tail (≥3). This is the ENTRY
     TIMING gate — its caller DELAYS to a confirmed tick, never vetoes the flow.
     """
@@ -207,7 +228,30 @@ def _flow_followthrough(
     #     mid drift at a constant absolute spread (spread_bps = spread/mid·1e4
     #     creeps up as the mid drifts down) — only a MATERIAL widen fails.
     mean_spread = sum(t.spread_bps for t in tail) / k
-    return last.spread_bps <= mean_spread * (1.0 + _SPREAD_WIDEN_TOL)
+    if last.spread_bps > mean_spread * (1.0 + _SPREAD_WIDEN_TOL):
+        return False
+    # (5) STILL CLIMBING (extending spike), not just "not dead yet" — folds long
+    #     and short via ``ofi_sign``. Tail step velocities (Δmid/Δt over the same
+    #     tail), with Δt floored so a same-ts pair never divides by ~0.
+    tail_dts: list[float] = []
+    for i in range(k - 1):
+        dt = float(tail[i + 1].ts - tail[i].ts)
+        tail_dts.append(dt if dt > _MIN_DT_SEC else _MIN_DT_SEC)
+    step_vel = [(mids[i + 1] - mids[i]) / tail_dts[i] for i in range(k - 1)]
+    # (5c) last two step velocities persist in the OFI direction.
+    if ofi_sign * step_vel[-1] <= 0.0 or ofi_sign * step_vel[-2] <= 0.0:
+        return False
+    # (5a) NON-decelerating: latest accel in the OFI direction ≥ -float-noise. A
+    #      steady (constant-velocity) climb has accel 0 and PASSES; a plateau
+    #      (velocity decaying toward 0) has accel against the side → fails.
+    accel = step_vel[-1] - step_vel[-2]
+    if ofi_sign * accel < -_ACCEL_FLOOR:
+        return False
+    # (5b) the latest tail mid is a NEW HIGH (long) / NEW LOW (short) — the spike
+    #      EXTENDS, not rolls over.
+    if ofi_sign > 0:
+        return mids[-1] >= max(mids[:-1])
+    return mids[-1] <= min(mids[:-1])
 
 
 def compute_tick_features(

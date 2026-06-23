@@ -207,8 +207,9 @@ def test_positions_carry_regime_exit_stop_mfe_mae(tmp_path: Path) -> None:
         btc = by_sym["BTC-USDT"]
         assert btc.exit_state == "protected"
         assert btc.stop_price == 95.0
-        assert btc.mfe_r == 1.5
-        assert btc.mae_r == -0.4
+        # Hardening #6: excursion R surfaced as the *_atr_r payload fields.
+        assert btc.mfe_atr_r == 1.5
+        assert btc.mae_atr_r == -0.4
         # regime resolved from regime_state on (venue, group)
         assert btc.regime == "bull_trend"
         # upnl_pct present and finite

@@ -470,32 +470,32 @@
      live particle pathways, capital-lifecycle arcs. Replaces sphere-render.js
      (14-tier nested-sphere → static blob). globe-core = layout + render + camera;
      globe-flows = trade_chain/lifecycle particle flows + SSE entry/exit flashes. -->
-<script src="static/globe-core.js?v=22_living"></script>
+<script src="static/globe-core.js?v=24_smaller"></script>
 <!-- globe-satellites.js: cross-cutting clusters (strat/reg/exit/orbit/axis/obs/
      action/exit_tally) as conductor-orbiting satellite rings. Loads AFTER core
      (uses its PolarisGlobe_* exports at init) and before flows. -->
-<script src="static/globe-satellites.js?v=22_living"></script>
-<script src="static/globe-flows.js?v=22_living"></script>
+<script src="static/globe-satellites.js?v=23_layered"></script>
+<script src="static/globe-flows.js?v=23_layered"></script>
 <!-- globe-funnel.js (P4 activity bindings: gate funnel ring + stream breath +
      regime tide + learner tremor + tick heartbeat + kill sediment). NEW draw
      pass — WRAPS globe-flows' published draw/setGraph hooks (does not modify
      core, already at its LOC cap). Loads AFTER flows so the wrap chains. -->
-<script src="static/globe-funnel.js?v=22_living"></script>
+<script src="static/globe-funnel.js?v=23_layered"></script>
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
-<script src="static/board.js?v=12_probebridge"></script>
+<script src="static/board.js?v=18_pricestream_sse"></script>
 <!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
      venue scope helpers) loads after board.js (needs window.PolarisBoard) and
      before the tab modules (which read its scope helpers). -->
 <script src="static/board_exchange.js?v=2_bloomberg_dense"></script>
-<script src="static/board_tabs.js?v=12_gatedecisions"></script>
-<script src="static/board_tabs_ext.js?v=14_gatedecisions"></script>
+<script src="static/board_tabs.js?v=18_gatestab"></script>
+<script src="static/board_tabs_ext.js?v=16_gatestab"></script>
 <!-- board_reference.js (reference-tab renderers: 개발/가야할길/배운것 — static
      fetch-once from /api/buildlog · /api/roadmap · /api/lessons, NOT the 1s
      snapshot poll). Loads LAST so its build/path/learned registrations override
      board_tabs_ext.js's P3 placeholders. Needs window.PolarisBoard(Tabs). -->
-<script src="static/board_reference.js?v=2_detail_lists"></script>
+<script src="static/board_reference.js?v=3_aitab"></script>
 <script>
   // 30/70 split + left column globe(2/3)/log(1/3). globe engine fits to canvas
   // clientWidth/Height; after layout settles, nudge resize twice (rAF + delayed) so fit()

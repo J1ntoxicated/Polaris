@@ -9,7 +9,7 @@
  *   - capital-lifecycle arcs: crypto factory → CFD amplifier → Alpaca vault
  *     (the north-star inter-galaxy flow).
  *   - node pulse on activity, entry/exit FLASH from the live SSE fill stream.
- *   - frequent graph refresh (2s) + 1s lifecycle re-pull so activity shows fast.
+ *   - frequent graph refresh (1s, board-synced) + 1s lifecycle re-pull so activity shows fast.
  *
  * Display-only. Nothing here issues, sizes, gates or throttles a trade.
  */
@@ -70,12 +70,20 @@
     const all = window.PolarisGlobe_nodes || [];
     const out = [];
     const stratSats = [];     // strat-family satellites (the signal layer)
-    const posByTicker = new Map();   // ticker → pos node (the trade heart)
-    const lit = [];           // active watch/mkt nodes that carry a ticker (probes)
+    const gateSats = [];      // gate/layer satellites (the internal gate families)
+    const posList = [];       // open-position nodes (the trade heart)
+    const tickerNodes = new Map();   // ticker → outer node (probe/ticker in the cloud)
     for (const n of all) {
-      if (n.sat) { if (n.fam === 'strat') stratSats.push(n); continue; }
-      if (n.role === 'pos' && n.ticker) posByTicker.set(n.ticker, n);
-      else if ((n.role === 'watch' || n.role === 'mkt') && n.ticker && n.active) lit.push(n);
+      if (n.sat) {
+        if (n.fam === 'strat') stratSats.push(n);
+        else gateSats.push(n);                 // all non-strat satellites = gate families
+        continue;
+      }
+      if (n.role === 'pos') { if (n.ticker) posList.push(n); continue; }
+      // outer probe/ticker node — keep the first per ticker as the link endpoint.
+      if ((n.role === 'watch' || n.role === 'mkt') && n.ticker && !tickerNodes.has(n.ticker)) {
+        tickerNodes.set(n.ticker, n);
+      }
     }
     // ordered gate ids present on the lane (G1..G8) → entry = min, exit = max.
     const anch = window.PolarisGlobe_gateAnchors || {};
@@ -86,32 +94,38 @@
       if (!a || !b || a === b || out.length >= MAX_EDGES) return;
       out.push({ a, b, phase: Math.random(), speed: 0.16 + Math.random() * 0.12, baseA: 0.10, col });
     };
-    // (1) PROBE → SIGNAL : active lit watch/mkt (probe) → its strategy satellite.
     const stratById = new Map();
     for (const s of stratSats) { if (s.ticker) stratById.set(s.ticker, s); }
-    const nearestStrat = (ref) => {
+    const nearestSat = (sats, ref) => {
       let target = null, md = Infinity;
-      for (const s of stratSats) {
+      for (const s of sats) {
         const dd = (s.hx - ref.hx) ** 2 + (s.hy - ref.hy) ** 2 + (s.hz - ref.hz) ** 2;
         if (dd < md) { md = dd; target = s; }
       }
       return target;
     };
-    for (const w of lit) {
-      const sig = (w.strategyId && stratById.get(w.strategyId)) || (stratSats.length ? nearestStrat(w) : null);
-      if (sig) push(w, sig, [0x9a, 0xc4, 0xb0]);   // probe → signal (cyan-green)
-      // (4) TICKER ↔ its TRADE — direct holding link (probe ↔ same-ticker pos).
-      const p = posByTicker.get(w.ticker);
-      if (p) push(w, p, [0x88, 0x9a, 0xc8]);
-    }
-    // (2) SIGNAL → GATE-LANE entry, and (3) GATE-LANE exit → POSITION : each open
-    //     trade is wired through the gate funnel so its path reads probe→signal→
-    //     G1→…→G8→position rather than nearest-neighbour geometry.
-    for (const p of posByTicker.values()) {
-      const sig = (p.strategyId && stratById.get(p.strategyId)) || (stratSats.length ? nearestStrat(p) : null);
-      if (sig && gateEntry) push(sig, gateEntry, [0xff, 0xb0, 0x70]);   // signal → G1
-      else if (sig) push(p, sig, [0xff, 0xb0, 0x70]);                   // no lane → direct
-      if (gateExit) push(gateExit, p, [0xbf, 0xd4, 0xff]);              // G8 → position
+    // ── LINKS ONLY FOR OPEN POSITIONS (Jin '포지션 있는 애들만 선 그어줘, 연결된거
+    //    내부 게이트들에') ──────────────────────────────────────────────────────
+    // The dormant 699-ticker universe gets NO links (too busy). For each OPEN
+    // position we draw ONLY its wiring:
+    //   • position ↔ its TICKER probe (the outer-shell node it holds).
+    //   • position → its internal GATE satellites (the gates it relates to / passed
+    //     through): its strategy's signal satellite, the gate-lane entry/exit
+    //     anchors, plus the nearest gate-family satellite as a representative of the
+    //     internal gates. No universe-wide proximity/mesh edges.
+    for (const p of posList) {
+      // position ↔ its ticker probe (outer shell) — the holding link.
+      const tk = tickerNodes.get(p.ticker);
+      if (tk) push(tk, p, [0x88, 0x9a, 0xc8]);
+      // position → its strategy signal satellite (its gate family entry).
+      const sig = (p.strategyId && stratById.get(p.strategyId)) || (stratSats.length ? nearestSat(stratSats, p) : null);
+      if (sig) push(p, sig, [0x9a, 0xc4, 0xb0]);
+      // position → internal gate lane (signal→G1, …, G8→position).
+      if (sig && gateEntry) push(sig, gateEntry, [0xff, 0xb0, 0x70]);
+      if (gateExit) push(gateExit, p, [0xbf, 0xd4, 0xff]);
+      // position → its nearest internal gate-family satellite (a related gate).
+      const g = gateSats.length ? nearestSat(gateSats, p) : null;
+      if (g) push(p, g, [0xff, 0xb0, 0x70]);
     }
     edges = out;
   }
@@ -119,17 +133,21 @@
   // Cheap signature so we only rebuild edges when the node population changes.
   function edgeSignature() {
     const all = window.PolarisGlobe_nodes || [];
-    let np = 0, ns = 0, nl = 0;
+    // Edges are POSITION-driven now → the signature keys on the set of open-position
+    // tickers (+ satellite count for the gate endpoints). Dormant universe tickers no
+    // longer affect the wiring, so they don't churn the edge rebuild.
+    let ns = 0;
+    const posTk = [];
     for (const n of all) {
       if (n.sat) ns++;
-      else if (n.role === 'pos') np++;
-      else if ((n.role === 'watch' || n.role === 'mkt') && n.active) nl++;
+      else if (n.role === 'pos' && n.ticker) posTk.push(n.ticker);
     }
+    posTk.sort();
     // include gate-lane presence so edges rebuild once the funnel anchors exist
     // (the pipeline hops appear) and when the gate set changes.
     const anch = window.PolarisGlobe_gateAnchors;
     const ng = anch ? Object.keys(anch).length : 0;
-    return np + '|' + ns + '|' + nl + '|' + ng;
+    return posTk.join(',') + '|' + ns + '|' + ng;
   }
 
   // Draw the persistent links + their traveling neurotransmitter pulses. `live` is
@@ -521,6 +539,6 @@
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
   loadGraph();
-  setInterval(loadGraph, 1000);          // Jin E4: 2s graph refresh (was 5s — felt static)
+  setInterval(loadGraph, 1000);          // Jin: 1s graph refresh — sync to the 1s board (smooth realtime, no 2s slideshow)
   connectStream();
 })();

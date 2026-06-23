@@ -153,6 +153,38 @@ EXIT_LETRUN_TRAIL_MULT: Final[float] = _env_float(
     "POLARIS_EXIT_LETRUN_TRAIL_MULT", 4.0
 )
 
+# --- Grace + sustained gate ([[exit_thesis_grace_2026-06-23]]) ----------------
+# ROOT CAUSE (live, PID 351): a JUST-OPENED position opened on positive OFI; the
+# very next tick's OFI noise opposed → _assess_health returned BROKEN → CUT →
+# thesis_cut fast-close at 0-1s hold (pnl_r 0). 73 trades closed in 0-2s; 27
+# thesis_cut in 2h. The thesis was judged on a SINGLE fresh tick with no aging
+# guard. flow_not_block — EXIT-TIMING precision: let a fresh thesis ESTABLISH
+# before judging it. NEVER a throttle / size-cut / entry-block.
+#
+#   * ``EXIT_THESIS_GRACE_SEC`` (default 25.0): a position cannot be CUT or
+#     thesis-HARVESTed until it has aged PAST this minimum held_seconds. Before
+#     the grace, assess_thesis returns HOLD (or a non-closing LET_RUN for a
+#     confirmed green winner) regardless of a momentary BROKEN read. This
+#     directly kills the 0-1s instant cut. Short enough that flow_pressure's
+#     legit ~10-60s scalps are still managed once aged.
+#   * ``EXIT_THESIS_DEADBAND`` (default 1e-3): the adverse momentum/OFI magnitude
+#     a tick must EXCEED to count as opposing — 1-tick noise inside the deadband
+#     never flips the thesis to BROKEN.
+#   * ``EXIT_THESIS_BROKEN_TICKS`` (default 2): consecutive broken reads required
+#     before BROKEN is confirmed. The caller threads ``broken_streak`` (count of
+#     PRIOR consecutive broken reads); a single noisy tick (streak below the
+#     floor) stays INTACT. Omitting ``broken_streak`` (legacy callers / synthetic
+#     replay) defaults to confirmed — back-compatible.
+EXIT_THESIS_GRACE_SEC: Final[float] = _env_float("POLARIS_EXIT_THESIS_GRACE_SEC", 25.0)
+EXIT_THESIS_DEADBAND: Final[float] = _env_float("POLARIS_EXIT_THESIS_DEADBAND", 1e-3)
+EXIT_THESIS_BROKEN_TICKS: Final[int] = int(
+    _env_float("POLARIS_EXIT_THESIS_BROKEN_TICKS", 2.0)
+)
+# Sentinel: a ``broken_streak`` an omitting caller supplies → treated as already
+# confirmed (preserves pre-grace BROKEN behaviour for callers that don't yet
+# thread a consecutive count).
+_BROKEN_STREAK_CONFIRMED: Final[int] = 1 << 30
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -227,6 +259,53 @@ class MfeProtectSchedule:
     bep_at_r: float
     protect_at_r: float
     lock_r: float
+
+
+# Hardening #9 (2026-06-23) — dict<->MfeProtectSchedule wire-point adapter
+# (Slice-2 forward-correctness). The probe ``EngineDecision.mfe_protect`` carries
+# the schedule as a plain ``dict[str, float]`` (JSON-serialisable for the tuning
+# log); ``run_precise_exit`` consumes a typed ``MfeProtectSchedule``. While the
+# engine is sealed (``applied=False``, every mode returns ``None``) this is pure
+# plumbing — but pinning the round-trip now makes the future Slice-2 flip a
+# one-line change instead of a silent dict/dataclass mismatch. PURE/total, no
+# behaviour change (no caller threads a non-None compose schedule yet).
+_MFE_PROTECT_FIELDS: Final[tuple[str, str, str]] = (
+    "bep_at_r", "protect_at_r", "lock_r",
+)
+
+
+def mfe_protect_to_dict(sched: MfeProtectSchedule) -> dict[str, float]:
+    """Serialise an ``MfeProtectSchedule`` to the ``EngineDecision`` dict form."""
+    return {
+        "bep_at_r": sched.bep_at_r,
+        "protect_at_r": sched.protect_at_r,
+        "lock_r": sched.lock_r,
+    }
+
+
+def mfe_protect_from_dict(
+    payload: dict[str, float] | None,
+) -> MfeProtectSchedule | None:
+    """Adapt an ``EngineDecision.mfe_protect`` dict to the typed schedule.
+
+    ``None`` (the observe-mode default — no schedule threaded) → ``None``, so a
+    sealed compose stays byte-identical at the wire point. A dict MUST carry all
+    three rungs (a partial dict is a programming error, raised loudly rather than
+    silently floored). Round-trips with ``mfe_protect_to_dict``.
+    """
+    if payload is None:
+        return None
+    missing = [k for k in _MFE_PROTECT_FIELDS if k not in payload]
+    if missing:
+        raise ValueError(
+            f"mfe_protect dict missing rungs {missing}; got keys "
+            f"{sorted(payload)}"
+        )
+    return MfeProtectSchedule(
+        bep_at_r=float(payload["bep_at_r"]),
+        protect_at_r=float(payload["protect_at_r"]),
+        lock_r=float(payload["lock_r"]),
+    )
 
 
 # --- Adaptive thesis re-map: types + pure assessment -----------------------
@@ -391,6 +470,28 @@ def _giveback_level(
     return 0
 
 
+def tick_micro_broken(
+    *, side: str | None, momentum_drift: float | None, ofi: float | None
+) -> bool:
+    """Does THIS tick's micro signal oppose the position beyond the deadband?
+
+    Pure + total — the streak-tracking caller calls this each tick to maintain the
+    consecutive-broken count fed back as ``broken_streak``. Mirrors the micro-break
+    test inside ``_assess_health`` (deadband-gated momentum/OFI reversal); the
+    regime flip is structural and intentionally NOT part of the per-tick streak.
+    ``None`` inputs degrade to not-broken (no spurious streak).
+    """
+    sign = _side_sign(side)
+    m_drift = 0.0 if momentum_drift is None else momentum_drift
+    drift_dir = sign * m_drift
+    momentum_reversed = drift_dir < 0.0 and abs(m_drift) > EXIT_THESIS_DEADBAND
+    if ofi is None:
+        return momentum_reversed
+    ofi_dir = sign * ofi
+    ofi_opposes = ofi_dir < 0.0 and abs(ofi) > EXIT_THESIS_DEADBAND
+    return momentum_reversed or ofi_opposes
+
+
 def _assess_health(
     *,
     sign: int,
@@ -403,11 +504,17 @@ def _assess_health(
     flow_confirmed: bool | None,
     regime: str | None,
     entry_regime: str | None,
+    broken_streak: int,
 ) -> ThesisHealth:
     """Classify the entry thesis as INTACT / FADING / BROKEN (pure, total).
 
     BROKEN: momentum reversed against the position, OR OFI firmly opposes, OR the
-    regime flipped to the OPPOSITE directional bias of the entry regime.
+    regime flipped to the OPPOSITE directional bias of the entry regime — but ONLY
+    when the adverse signal is SUSTAINED: its magnitude exceeds ``DEADBAND`` (1-tick
+    noise inside the band never breaks) AND the consecutive-broken ``broken_streak``
+    has reached ``EXIT_THESIS_BROKEN_TICKS`` (a single noisy tick never flips a
+    fresh winner). A regime FLIP is structural, not tick noise → it bypasses the
+    streak/deadband (a confirmed opposite-bias regime is a real break).
     FADING: the position was green (mfe armed) but momentum flattened / OFI decayed
     — the edge is leaking.
     INTACT: same-direction momentum / OFI still present (or simply nothing
@@ -416,9 +523,20 @@ def _assess_health(
     drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
     ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
 
-    # --- BROKEN tests (any one) ---
-    momentum_reversed = momentum_drift != 0.0 and drift_dir < 0.0
-    ofi_opposes = ofi_dir is not None and ofi_dir < 0.0
+    # --- adverse micro-signal (deadband-gated): only count an opposition whose
+    #     magnitude clears the small deadband — a tiny 1-tick oscillation inside
+    #     the band is noise, not a thesis break.
+    momentum_reversed = drift_dir < 0.0 and abs(momentum_drift) > EXIT_THESIS_DEADBAND
+    ofi_opposes = (
+        ofi_dir is not None and ofi_dir < 0.0 and abs(ofi_dir) > EXIT_THESIS_DEADBAND
+    )
+    # SUSTAINED confirmation: a micro break (momentum/OFI) only counts once the
+    # consecutive-broken streak has reached the floor — 1-tick noise never breaks.
+    micro_broken = (momentum_reversed or ofi_opposes) and (
+        broken_streak >= EXIT_THESIS_BROKEN_TICKS
+    )
+
+    # --- regime flip (structural — bypasses the micro streak/deadband) ---
     entry_dir = _regime_dir(entry_regime)
     now_dir = _regime_dir(regime)
     regime_flipped_against = (
@@ -427,7 +545,7 @@ def _assess_health(
         and now_dir == -entry_dir
         and sign * now_dir < 0  # the new regime opposes the position
     )
-    if momentum_reversed or ofi_opposes or regime_flipped_against:
+    if micro_broken or regime_flipped_against:
         return ThesisHealth.BROKEN
 
     # --- FADING tests (only meaningful once the position printed MFE) ---
@@ -459,6 +577,7 @@ def assess_thesis(
     held_seconds: int | None,
     horizon_seconds: int | None,
     giveback: ThesisGivebackParams,
+    broken_streak: int = _BROKEN_STREAK_CONFIRMED,
 ) -> ManagementMode:
     """Re-map THIS position's exit schedule from entry-thesis health (pure/total).
 
@@ -466,6 +585,16 @@ def assess_thesis(
     MANAGEMENT-TIMING only — it returns a ``ManagementMode`` the FSM converts to
     exit-param overrides; it touches NO entry, NO size, NO halt. The G6 -1.0R rail
     is owned by the caller.
+
+    GRACE ([[exit_thesis_grace_2026-06-23]]): a position INSIDE the grace window
+    (``held_seconds`` ≤ ``EXIT_THESIS_GRACE_SEC``) can NOT be CUT or thesis-HARVESTed
+    — a momentary BROKEN/give-back read is suppressed to a non-closing decision
+    (HOLD, or LET_RUN for a confirmed green trend winner) so a fresh thesis is let
+    to ESTABLISH before judging it. This kills the live 0-1s instant cut. None /
+    unknown ``held_seconds`` degrades to inside-grace (safest — never an instant cut
+    on an unknown age). ``broken_streak`` (consecutive prior BROKEN reads) feeds the
+    SUSTAINED gate so 1-tick OFI noise never flips a fresh winner to BROKEN; the
+    default treats a non-threading caller as already confirmed (back-compatible).
 
     Precedence (highest first): give-back-hard → CUT(broken + red) → HARVEST
     (give-back / fading / broken-green) → REMODE → LET_RUN(trend intact) → HOLD.
@@ -477,19 +606,39 @@ def assess_thesis(
     m_slope = 0.0 if atr_slope is None else atr_slope
 
     is_red = m_pnl < 0.0
+    # GRACE: a position that has not yet aged past the grace floor cannot be
+    # CLOSED by the thesis re-map (CUT / thesis-HARVEST). None held_seconds →
+    # inside grace (safest). The closing modes are remapped to non-closing below.
+    in_grace = held_seconds is None or held_seconds <= EXIT_THESIS_GRACE_SEC
 
     # 1. Give-back modifier (orthogonal, highest precedence). A position that
     #    reached MFE and handed back too much of it is HARVESTED regardless of
     #    thesis health — but give-back NEVER escalates a green position to CUT.
+    #    Inside grace it is SUPPRESSED (no fast thesis_harvest at 0-1s).
     gb = _giveback_level(mfe_r=m_mfe, pnl_r=m_pnl, giveback=giveback)
-    if gb >= 1:
+    if gb >= 1 and not in_grace:
         return ManagementMode.HARVEST
 
     health = _assess_health(
         sign=sign, bucket=bucket, mfe_r=m_mfe, pnl_r=m_pnl,
         momentum_drift=m_drift, atr_slope=m_slope, ofi=ofi,
         flow_confirmed=flow_confirmed, regime=regime, entry_regime=entry_regime,
+        broken_streak=broken_streak,
     )
+
+    # GRACE gate on the CLOSING health verdicts: inside grace, a BROKEN or FADING
+    # read does NOT close the fresh position. A confirmed green trend winner may
+    # still LET_RUN (non-closing); everything else HOLDs. flow_not_block — let the
+    # thesis establish; the aged path below still CUTs / HARVESTs.
+    if in_grace:
+        if (
+            bucket is Bucket.TREND
+            and health is not ThesisHealth.BROKEN
+            and m_mfe > 0.0
+            and not is_red
+        ):
+            return ManagementMode.LET_RUN
+        return ManagementMode.HOLD
 
     # 2. BROKEN → CUT only when red/flat; a broken-GREEN position is HARVESTED
     #    (bank the gain — never CUT a winner).
@@ -544,14 +693,23 @@ def mode_to_exit_params(
             mfe_protect=base_mfe_protect, profit_target_r=base_profit_target_r
         )
 
+    # Hardening #12 (2026-06-23): the non-HOLD re-map modes synthesise the BAR
+    # MFE-protect floor only when the caller did NOT supply one. A caller-supplied
+    # ``base_mfe_protect`` (e.g. a venue-/timeframe-correct equity schedule) is
+    # PRESERVED so the thesis engine engaging cannot silently clobber it. Latent
+    # today (EXIT_EQUITY_MFE_* == EXIT_BAR_MFE_* and no override → zero delta),
+    # but a future POLARIS_EXIT_EQUITY_MFE_* override would otherwise be lost.
+    # Give-back protect direction (winner protection) is unchanged.
+    bar_mfe_protect = MfeProtectSchedule(
+        bep_at_r=EXIT_BAR_MFE_BEP_R,
+        protect_at_r=EXIT_BAR_MFE_PROTECT_R,
+        lock_r=EXIT_BAR_MFE_LOCK_R,
+    )
+
     if mode is ManagementMode.LET_RUN:
         return ThesisExitParams(
             trail_mult=EXIT_LETRUN_TRAIL_MULT,
-            mfe_protect=MfeProtectSchedule(
-                bep_at_r=EXIT_BAR_MFE_BEP_R,
-                protect_at_r=EXIT_BAR_MFE_PROTECT_R,
-                lock_r=EXIT_BAR_MFE_LOCK_R,
-            ),
+            mfe_protect=base_mfe_protect or bar_mfe_protect,
             profit_target_r=base_profit_target_r,
         )
 
@@ -561,11 +719,7 @@ def mode_to_exit_params(
         # passed (BEP+lock). A HARD give-back closes immediately (thesis_harvest).
         return ThesisExitParams(
             trail_mult=EXIT_HARVEST_TRAIL_MULT,
-            mfe_protect=MfeProtectSchedule(
-                bep_at_r=EXIT_BAR_MFE_BEP_R,
-                protect_at_r=EXIT_BAR_MFE_PROTECT_R,
-                lock_r=EXIT_BAR_MFE_LOCK_R,
-            ),
+            mfe_protect=base_mfe_protect or bar_mfe_protect,
             profit_target_r=base_profit_target_r,
             thesis_harvest=gb >= 2,
         )
@@ -579,11 +733,7 @@ def mode_to_exit_params(
     # strategy swap — exit params only.
     return ThesisExitParams(
         trail_mult=EXIT_HARVEST_TRAIL_MULT,
-        mfe_protect=MfeProtectSchedule(
-            bep_at_r=EXIT_BAR_MFE_BEP_R,
-            protect_at_r=EXIT_BAR_MFE_PROTECT_R,
-            lock_r=EXIT_BAR_MFE_LOCK_R,
-        ),
+        mfe_protect=base_mfe_protect or bar_mfe_protect,
         profit_target_r=base_profit_target_r,
     )
 
@@ -907,9 +1057,12 @@ __all__ = [
     "EXIT_STATE_OPEN",
     "EXIT_STATE_PROTECTED",
     "EXIT_STATE_TOUCHED",
+    "EXIT_THESIS_BROKEN_TICKS",
+    "EXIT_THESIS_DEADBAND",
     "EXIT_THESIS_GIVEBACK_ARM_R",
     "EXIT_THESIS_GIVEBACK_FRAC",
     "EXIT_THESIS_GIVEBACK_HARD_FRAC",
+    "EXIT_THESIS_GRACE_SEC",
     "Bucket",
     "ExitDecision",
     "ExitState",
@@ -922,5 +1075,8 @@ __all__ = [
     "bucket_from_correlation_group",
     "evaluate_exit",
     "init_exit_state",
+    "mfe_protect_from_dict",
+    "mfe_protect_to_dict",
     "mode_to_exit_params",
+    "tick_micro_broken",
 ]

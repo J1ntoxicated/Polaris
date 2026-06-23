@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS universe (
     atr_24h_pct REAL NOT NULL DEFAULT 0.0,
     depth_10bps_usd REAL NOT NULL DEFAULT 0.0,
     signal_density_7d REAL NOT NULL DEFAULT 0.0,
+    last_price REAL NOT NULL DEFAULT 0.0,
     listing_ts INTEGER,
     last_seen_ts INTEGER NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,
@@ -358,7 +359,8 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_atr_timeframe TEXT,
     pnl_r REAL,
     risk_usd REAL,
-    entry_regime TEXT
+    entry_regime TEXT,
+    exit_cadence TEXT
 );
 """
 

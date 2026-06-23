@@ -251,8 +251,13 @@ class GateOrchestrator:
     # ------------------------------------------------------------------
 
     async def _wrap_universe(self, ctx: GateContext) -> GateResult:
-        # G1 is a deterministic scored ranker (AI-conductor P1 cutover) — no GPT
-        # client. ``focus_cache`` gates the RECOMPUTE trigger only.
+        # G1 here = NON-AUTHORITATIVE structural pass-through (B3 #5, audit
+        # 2026-06-23): it always PASSes and emits a display-only focus echo that
+        # NO downstream gate reads. The authoritative G1 universe/eligibility
+        # selection is Layer-0 ``rank_active_universe`` / ``compute_dynamic_focus``
+        # (run in the L0 producers, persisted as ``is_active=1``); this gate does
+        # not select the universe. Deterministic scored ranker — no GPT client.
+        # ``focus_cache`` gates the RECOMPUTE trigger only.
         return await universe_scanner_gate(
             ctx, focus_cache=self.g1_focus_cache,
         )

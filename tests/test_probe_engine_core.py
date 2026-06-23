@@ -184,7 +184,7 @@ def test_observe_mode_all_knobs_none_not_applied() -> None:
     assert dec.widen_atr_mult is None
     assert dec.applied is False
     # ...but it STILL computes the composite + the action it WOULD take (log).
-    assert dec.action in {"HOLD", "WIDEN", "TIGHTEN", "HARVEST", "SWAP"}
+    assert dec.action in {"HOLD", "WIDEN", "TIGHTEN", "HARVEST"}
     assert -1.0 <= dec.composite_lean <= 1.0
 
 
@@ -200,7 +200,7 @@ def test_engine_action_enum_shared_with_log() -> None:
     dec = ExitEngine().compose(
         [ProbeReading("profit_taking", "profit", -0.8, 0.9, {})], mode="observe"
     )
-    assert dec.action in {"HOLD", "WIDEN", "TIGHTEN", "HARVEST", "SWAP"}
+    assert dec.action in {"HOLD", "WIDEN", "TIGHTEN", "HARVEST"}
     # adverse composite → leans toward harvest/tighten, never widen.
     assert dec.action in {"TIGHTEN", "HARVEST", "HOLD"}
 

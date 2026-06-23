@@ -66,6 +66,29 @@ def _z_score(values: Sequence[float]) -> list[float]:
     return [(v - mu) / sigma for v in values]
 
 
+def _grouped_z_score(values: Sequence[float], groups: Sequence[str]) -> list[float]:
+    """Per-group population z-score, returned in the original parallel order.
+
+    Each ``group`` (here ``venue/asset_class``) is z-normalized WITHIN ITSELF, so
+    a $1B equity is ranked against equities and a $251B crypto against crypto —
+    never one mixed population (which let BTC's absolute vol flatten every equity
+    vol-z negative so penny names out-ranked megacaps). A singleton or zero-stdev
+    group collapses to 0 (same guard as :func:`_z_score`). A single-group
+    population is byte-identical to the global :func:`_z_score` (no-op grouping).
+    This is a RANKING-ORDER correction (flow_not_block): it re-orders survivors,
+    it never blocks, size-cuts, or vetoes anything.
+    """
+    by_group: dict[str, list[int]] = {}
+    for i, g in enumerate(groups):
+        by_group.setdefault(g, []).append(i)
+    out = [0.0] * len(values)
+    for idxs in by_group.values():
+        zs = _z_score([values[i] for i in idxs])
+        for pos, i in enumerate(idxs):
+            out[i] = zs[pos]
+    return out
+
+
 def score_focus_candidates(
     instruments: list[UniverseInstrument],
     *,
@@ -75,18 +98,23 @@ def score_focus_candidates(
 
     Score = w_vol·z(vol) + w_sig·z(sig_density) + w_atr·z(atr) + w_depth·z(depth)
             + w_cell·z(cell). Missing cell scores → 0 z.
+
+    z-scores are computed PER (venue, asset_class) group, not over the whole mixed
+    cross-venue pool — so equities are ranked equity-vs-equity and crypto
+    crypto-vs-crypto (flow_not_block ranking-order fix; single-group → no-op).
     """
     if not instruments:
         return []
 
-    vol_z = _z_score([ins.vol_24h_usd for ins in instruments])
-    sig_z = _z_score([ins.signal_density_7d for ins in instruments])
-    atr_z = _z_score([ins.atr_24h_pct for ins in instruments])
-    depth_z = _z_score([ins.depth_10bps_usd for ins in instruments])
+    groups = [f"{ins.venue}/{ins.asset_class}" for ins in instruments]
+    vol_z = _grouped_z_score([ins.vol_24h_usd for ins in instruments], groups)
+    sig_z = _grouped_z_score([ins.signal_density_7d for ins in instruments], groups)
+    atr_z = _grouped_z_score([ins.atr_24h_pct for ins in instruments], groups)
+    depth_z = _grouped_z_score([ins.depth_10bps_usd for ins in instruments], groups)
 
     cell_scores = cell_scores or {}
     cell_raw = [float(cell_scores.get(ins.instrument_id, 0.0)) for ins in instruments]
-    cell_z = _z_score(cell_raw)
+    cell_z = _grouped_z_score(cell_raw, groups)
 
     return [
         RANK_WEIGHT_VOL_Z * vol_z[i]

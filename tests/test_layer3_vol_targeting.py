@@ -21,6 +21,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing import (
     CONT_SCALAR_MAX,
     CONT_SCALAR_MIN,
@@ -29,6 +30,7 @@ from polaris.core.sizing import (
     SignalIntent,
     StrategyRiskState,
     compute_size,
+    continuous_scalar,
     ewma_realized_vol,
     vol_targeted_scalar,
 )
@@ -213,13 +215,17 @@ def test_compute_size_vol_scalar_within_band(memdb: sqlite3.Connection) -> None:
 
 def test_compute_size_no_vol_falls_back_to_strength(memdb: sqlite3.Connection) -> None:
     """When realized_vol is None, the legacy signal_strength ramp is used."""
-    from polaris.core.sizing import continuous_scalar
-
     sized = compute_size(
         memdb, intent=_intent(realized_vol=None, strength=1.4),
         risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
-    assert sized.proposed.continuous_scalar == pytest.approx(continuous_scalar(1.4))
+    # The legacy strength ramp picks the BASE scalar; regime-fit (bull_trend ×
+    # momentum = +1) then folds a boost into the SAME single scalar (seam1).
+    expected = min(
+        CONT_SCALAR_MAX,
+        continuous_scalar(1.4) * regime_scalar(regime_fit("momentum", "bull_trend")),
+    )
+    assert sized.proposed.continuous_scalar == pytest.approx(expected)
 
 
 def test_compute_size_vol_at_target_is_neutral(memdb: sqlite3.Connection) -> None:
@@ -227,7 +233,12 @@ def test_compute_size_vol_at_target_is_neutral(memdb: sqlite3.Connection) -> Non
         memdb, intent=_intent(realized_vol=DEFAULT_TARGET_VOL),
         risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
-    assert sized.proposed.continuous_scalar == pytest.approx(1.0)
+    # Vol-at-target → neutral 1.0 base scalar; regime-fit folds the +1 boost in.
+    expected = min(
+        CONT_SCALAR_MAX,
+        1.0 * regime_scalar(regime_fit("momentum", "bull_trend")),
+    )
+    assert sized.proposed.continuous_scalar == pytest.approx(expected)
 
 
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])

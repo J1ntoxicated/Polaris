@@ -15,6 +15,9 @@ as hard as before; the floor only excludes loss-certain junk (175bp spread >
 
 from __future__ import annotations
 
+import inspect
+import re
+
 import pytest
 
 from polaris.core.universe._ranking import rank_active_universe
@@ -203,3 +206,85 @@ def test_floor_for_venue_defaults() -> None:
     assert alpaca.min_price == 1.0 and alpaca.max_spread_bps == 0.0
     capital = liquidity_floor_for_venue("capital")
     assert capital.max_spread_bps == 40.0 and capital.min_vol_24h_usd == 0.0
+
+
+# ---------------------------------------------------------------------------
+# boundary pin — the floor is a pre-signal-membership *quality* test ONLY.
+#
+# It must read ONLY UniverseInstrument microstructure-quality fields (the venue
+# key + spread_bps / vol_24h_usd / depth_10bps_usd / last_price) and NEVER any
+# signal / size / strength / expectancy / conviction input. These guards pin
+# that boundary so a future edit cannot smuggle expectancy-coupling (a per-
+# signal block / size-cut / entry-veto) into what is meant to be a universe-
+# membership (is-it-tradeable) gate. flow_not_block: the floor decides WHICH
+# instruments are tradeable-quality, never how a signal on an eligible name is
+# sized or whether it fires.
+# ---------------------------------------------------------------------------
+
+# The ONLY instrument attributes the floor is permitted to consult.
+_ALLOWED_FLOOR_FIELDS = frozenset(
+    {"venue", "spread_bps", "vol_24h_usd", "depth_10bps_usd", "last_price"}
+)
+# Attributes that, if ever referenced, would mean expectancy/signal coupling
+# leaked into the pre-signal-membership boundary.
+_FORBIDDEN_FLOOR_TOKENS = frozenset(
+    {
+        "signal_density_7d",
+        "signal_strength",
+        "strength",
+        "conviction",
+        "size",
+        "notional",
+        "expectancy",
+        "edge",
+        "pnl",
+        "risk_pct",
+    }
+)
+
+
+def test_floor_takes_only_a_universe_instrument() -> None:
+    """The predicate's signature accepts ONLY a UniverseInstrument — there is no
+    signal/size/strength parameter for a future edit to thread expectancy in."""
+    sig = inspect.signature(passes_liquidity_floor)
+    params = list(sig.parameters.values())
+    assert len(params) == 1, "the floor must take exactly one argument (the row)"
+    (only,) = params
+    assert only.annotation in ("UniverseInstrument", UniverseInstrument), (
+        "the sole argument must be a UniverseInstrument — never a signal/size input"
+    )
+
+
+def test_floor_source_reads_only_quality_fields() -> None:
+    """The predicate body references ONLY whitelisted quality attributes of the
+    row, and none of the forbidden signal/size/strength/expectancy tokens — a
+    static pin against smuggling expectancy-coupling into the membership gate."""
+    src = inspect.getsource(passes_liquidity_floor)
+    # No forbidden expectancy/signal/size token may appear anywhere in the body.
+    for tok in _FORBIDDEN_FLOOR_TOKENS:
+        assert tok not in src, (
+            f"passes_liquidity_floor must not reference {tok!r} — that would "
+            "couple the pre-signal-membership floor to expectancy/signal/size "
+            "(a block/size-cut/entry-veto), violating the boundary"
+        )
+    # Every `ins.<attr>` access in the body must be a whitelisted quality field.
+    accessed = set(re.findall(r"\bins\.(\w+)", src))
+    leaked = accessed - _ALLOWED_FLOOR_FIELDS
+    assert not leaked, (
+        f"passes_liquidity_floor reads non-quality instrument field(s) {leaked} "
+        "— the floor may consult ONLY venue + spread/vol/depth/price"
+    )
+
+
+def test_floor_verdict_independent_of_signal_density() -> None:
+    """Behavioural pin: varying a NON-quality field (signal_density_7d) never
+    flips the verdict — the floor judges tradeability, not signal richness."""
+    base = _inst("BTC-USDT", vol=8e8, spread_bps=1.0, depth=400_000.0)
+    rich = _inst("BTC-USDT", vol=8e8, spread_bps=1.0, depth=400_000.0)
+    object.__setattr__(rich, "signal_density_7d", 999.0)  # frozen dataclass
+    assert passes_liquidity_floor(base) == passes_liquidity_floor(rich) is True
+    # And on a junk row: signal richness cannot rescue an un-tradeable spread.
+    junk = _inst("BNT-USDT", vol=8e8, spread_bps=175.0, depth=400_000.0)
+    junk_rich = _inst("BNT-USDT", vol=8e8, spread_bps=175.0, depth=400_000.0)
+    object.__setattr__(junk_rich, "signal_density_7d", 999.0)
+    assert passes_liquidity_floor(junk) == passes_liquidity_floor(junk_rich) is False

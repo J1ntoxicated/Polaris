@@ -347,17 +347,11 @@
   // ── CSS for the 5 new sub-renderers (2026-06-22 composite redesign) ───────
   // Uses ONLY the existing #board palette tokens (no new colours). Display-only.
   const EXT_CSS = `
-  /* gate DECISIONS (활동) — G1→G8 one dense line: what each gate decided. */
-  #board .gd { display: grid; grid-template-columns: 116px 1fr 44px; align-items: baseline; gap: 8px; padding: 3px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
-  #board .gd .nm { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #board .gd .nm .sub { color: var(--p-dim); font-size: 9px; font-weight: 400; margin-left: 4px; }
-  #board .gd .hl { color: var(--p-grn); font-variant-numeric: tabular-nums; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #board .gd .cnt { text-align: right; font-variant-numeric: tabular-nums; font-size: 10px; color: var(--p-dim); white-space: nowrap; }
-  /* per-ticker R (퍼포먼스) — sign-tinted sparse rows. */
-  #board .tk-r { display: grid; grid-template-columns: 1fr 70px; align-items: center; gap: 8px; padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
-  #board .tk-r .nm { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #board .tk-r .nm .sub { color: var(--p-dim); font-size: 9px; font-weight: 400; margin-left: 5px; }
-  #board .tk-r .rv { text-align: right; font-variant-numeric: tabular-nums; }
+  /* gate-feed / probe DECISION cell colouring (family-tinted, table cells). */
+  #board td.gv-pass { color: var(--p-grn); font-weight: 700; }
+  #board td.gv-kill { color: var(--p-red); font-weight: 700; }
+  #board td.gv-other { color: var(--p-ylw); font-weight: 700; }
+  #board td.gv-info { color: var(--p-cyn); font-weight: 700; }
   /* learner tremor (로직) — center-anchored |Δ1h| bar. */
   #board .lrn { display: grid; grid-template-columns: 1fr 70px 58px; align-items: center; gap: 8px; padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
   #board .lrn .nm { color: var(--p-wht); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -392,37 +386,6 @@
   #board .pw .flow .sep { color: var(--ghost); margin: 0 5px; }
   #board .pw .mlt { text-align: right; color: var(--p-wht); }
   #board .pw .edge { text-align: right; }
-  /* (g) live gate-activity feed — dense text ticker, newest first.
-     'G# · PASS/KILL · strategy ticker · reason · hh:mm:ss'. PASS green / KILL red.
-     Monospace columns, no card chrome. */
-  #board .gate-feed { font-size: 10.5px; }
-  #board .gf-row { display: grid; grid-template-columns: 30px 38px 1fr 84px;
-    align-items: baseline; gap: 8px; padding: 1.5px 10px;
-    border-bottom: 1px dotted rgba(95,135,175,0.08);
-    white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
-  #board .gf-row .g { color: var(--p-cyn); font-weight: 700; }
-  #board .gf-row .v { font-weight: 700; letter-spacing: 0.06em; }
-  #board .gf-row .v.pass { color: var(--p-grn); }
-  #board .gf-row .v.kill { color: var(--p-red); }
-  #board .gf-row .v.other { color: var(--p-ylw); }
-  #board .gf-row .v.info { color: var(--p-cyn); }
-  #board .gf-row .what .det { color: var(--p-ylw); font-variant-numeric: tabular-nums; font-weight: 600; }
-  #board .gf-row .what { overflow: hidden; text-overflow: ellipsis; color: var(--p-gry); }
-  #board .gf-row .what .sym { color: var(--p-wht); font-weight: 700; }
-  #board .gf-row .what .strat { color: var(--p-cyn); }
-  #board .gf-row .what .why { color: var(--p-dim); }
-  /* enriched detail: gate label + per-symbol venue colour chip in the activity row. */
-  #board .gf-row .what .glbl { color: var(--polaris-blue); font-size: 9px; letter-spacing: 0.04em; }
-  #board .gf-row .what .gv { font-size: 8.5px; font-weight: 700; letter-spacing: 0.06em;
-    padding: 0 3px; border-left: 2px solid var(--p-dim); color: var(--p-dim); }
-  #board .gf-row .what .gv.lane-a { color: var(--stream-a); border-left-color: var(--stream-a); }
-  #board .gf-row .what .gv.lane-b { color: var(--stream-b); border-left-color: var(--stream-b); }
-  #board .gf-row .what .gv.lane-c { color: var(--stream-c); border-left-color: var(--stream-c); }
-  /* probe event INSIDE the gate feed — ⊙ marker in the gate slot + cyan PROBE
-     verdict; probe name reuses the .glbl label style. */
-  #board .gf-row .g.gprobe { color: var(--p-cyn); }
-  #board .gf-row .v.probe { color: var(--p-cyn); }
-  #board .gf-row .t { text-align: right; color: var(--p-dim); }
   /* (h) active-strategy group (로직) — strategy header row + per-regime children.
      Each row binds regime explicitly + shows open count / uPnL / size. The
      strategy description (graceful) sits dim under the header. */
@@ -474,13 +437,18 @@
     const body = $('gate-funnel'); if (!body) return;
     setCnt('gate-funnel-cnt', rows.length);
     if (!rows.length) { body.innerHTML = '<div class="empty">no gate decisions (1h)</div>'; return; }
-    body.innerHTML = rows.map(g => {
-      return `<div class="gd" title="G${g.gate_id} ${esc(g.label)} · ${esc(g.headline)} · n=${g.n}">
-        <span class="nm">G${g.gate_id}<span class="sub">${esc(g.label)}</span></span>
-        <span class="hl">${esc(g.headline || '—')}</span>
-        <span class="cnt">${g.n}</span>
-      </div>`;
-    }).join('');
+    const trs = rows.map(g => `<tr title="G${g.gate_id} ${esc(g.label)} · ${esc(g.headline)} · n=${g.n}">
+        <td class="l tk">G${g.gate_id}</td>
+        <td class="l" style="color:var(--p-dim);font-size:10px">${esc(g.label || '')}</td>
+        <td class="l" style="color:var(--p-grn)">${esc(g.headline || '—')}</td>
+        <td>${g.n}</td>
+      </tr>`).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:9%"><col style="width:24%"><col style="width:55%"><col style="width:12%">
+       </colgroup><thead><tr>
+        <th class="l">GATE</th><th class="l">NAME</th><th class="l">WHAT IT DECIDED</th><th>n</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
   }
 
   // ── NEW · (g) live gate-activity feed (활동) — d.recent_gate_events[] ──────
@@ -539,89 +507,160 @@
   const GF_VENUE_TAG = { a: 'OKX', b: 'CAP', c: 'ALP' };
   function gfVenueTag(lane) { return GF_VENUE_TAG[lane] || ''; }
 
-  // Normalize the OPTIONAL probe stream into gate-feed events. Probe data is being
-  // designed in parallel — read d.probe_events[] first, else d.probes[]. Shape
-  // kept GENERIC: {name|probe, ticker|symbol, reading|value|state, decision?,
-  // reason?, ts, venue?}. Returns [] when absent → feed unchanged (graceful).
-  function probeFeedEvents(d) {
-    const src = d.probe_events || d.probes || [];
-    return src.map(pr => {
-      const rd = (pr.reading != null) ? pr.reading
-        : (pr.value != null) ? pr.value
-        : (pr.state != null) ? pr.state : '';
+  // Clean trading symbol from a probe row. The backend now parses
+  // pos_<hash>_<venue>_<SYMBOL>_<ts> correctly, but defend in JS too so a raw
+  // id never leaks into a cell regardless of restart timing. Returns {venue, sym}.
+  const _POS_ID_RE = /_(okx|capital|alpaca)_(.+)_\d+$/i;
+  function probeVenueSym(pr) {
+    const raw = String(pr.ticker || pr.symbol || '');
+    let venue = pr.venue || '';
+    let sym = raw;
+    const m = raw.match(_POS_ID_RE);
+    if (m) { if (!venue) venue = m[1].toLowerCase(); sym = m[2]; }
+    return { venue, sym };
+  }
+  function probeRows(d) {
+    return (d.probe_events || d.probes || []).map(pr => {
+      const vs = probeVenueSym(pr);
       return {
-        isProbe: true,
         name: pr.name || pr.probe || pr.id || 'probe',
-        symbol: pr.ticker || pr.symbol || '',
-        decision: pr.decision || '',
-        reason: pr.reason || (rd !== '' ? String(rd) : ''),
-        venue: pr.venue || '',
+        sym: vs.sym, venue: vs.venue,
+        kind: pr.kind || '',
+        lean: (pr.lean != null) ? +pr.lean : null,
+        conf: (pr.confidence != null) ? +pr.confidence : null,
+        action: pr.action || '',
+        reason: pr.reason || (pr.reading != null ? String(pr.reading) : ''),
         ts: pr.ts || pr.ts_unix || 0,
+        gate_id: pr.gate_id,
       };
     });
   }
 
   let _lastFeedD = null;   // last snapshot for SSE-driven live re-render
+  // ── Live Gate Activity (활동) — d.recent_gate_events[] + SSE, as a TABLE ───
+  // Probe rows are NOT merged here (they have their own Probe Activity panel).
+  // Columns align row-to-row: TIME | G# | DECISION | STRATEGY | SYMBOL | DETAIL.
   function renderGateFeed(d) {
     _lastFeedD = d;
     const body = $('gate-feed'); if (!body) return;
-    // Gate decisions AND probe events flow through ONE time-sorted stream. Gate
-    // events: every decision (HOLD / ADJUST_EXIT / etc) so live activity always
-    // shows. Probe events (optional d.probe_events / d.probes) merge in tagged as
-    // a PROBE row — graceful: none present → feed looks exactly as before.
-    // Three sources, one time-sorted log-style stream: the 1s snapshot poll
-    // (d.recent_gate_events, the window backfill), the live SSE gate-decision
-    // buffer (window.__gateStream — pushed between polls for the smooth-realtime
-    // feel), and optional probe events. Deduped by (gate_id|ts|symbol|decision)
-    // so a streamed row and its later poll-backfill twin collapse to one line.
+    // Two sources, one time-sorted stream: the 1s snapshot poll
+    // (d.recent_gate_events, the window backfill) + the live SSE gate-decision
+    // buffer (window.__gateStream — pushed between polls for smooth realtime).
+    // Deduped by (gate_id|ts|symbol|decision) so a streamed row and its later
+    // poll-backfill twin collapse to one line.
     const stream = (window.__gateStream || []);
-    const merged = (d.recent_gate_events || []).slice()
-      .concat(stream)
-      .concat(probeFeedEvents(d));
+    const merged = (d.recent_gate_events || []).slice().concat(stream);
     const seen = new Set();
     const rows = [];
     for (const e of merged) {
-      const k = (e.isProbe ? 'p' : '') + (e.gate_id != null ? e.gate_id : '?') + '|'
+      const k = (e.gate_id != null ? e.gate_id : '?') + '|'
         + (e.ts || e.ts_unix || 0) + '|' + (e.symbol || e.ticker || '') + '|'
-        + (e.decision || e.name || '');
+        + (e.decision || '');
       if (seen.has(k)) continue;
       seen.add(k); rows.push(e);
     }
     setCnt('gate-feed-cnt', rows.length || '');
     if (!rows.length) { body.innerHTML = '<div class="empty">no notable gate decisions in window</div>'; return; }
-    // newest first — sort by ts desc when present, else assume given order.
     rows.sort((a, b) => (b.ts || b.ts_unix || 0) - (a.ts || a.ts_unix || 0));
-    body.innerHTML = rows.slice(0, 150).map(e => {
+    const trs = rows.slice(0, 150).map(e => {
       const sym = e.symbol || e.ticker || '';
       const why = e.reason || e.note || '';
       const ts = e.ts || e.ts_unix;
       const tstr = ts ? hhmmss(ts) : '';
-      if (e.isProbe) {
-        // Probe event row — ⊙ in the gate slot, probe name as label. If the probe
-        // carries a decision it honours PASS/KILL colouring, else a cyan PROBE tag.
-        const pv = gateVerdict(e);
-        const verd = e.decision ? `<span class="v ${pv.cls}">${esc(pv.txt)}</span>` : `<span class="v probe">PROBE</span>`;
-        return `<div class="gf-row" title="PROBE ${esc(e.name)} · ${esc(sym)} · ${esc(why)} · ${esc(tstr)}">
-          <span class="g gprobe">⊙</span>
-          ${verd}
-          <span class="what"><span class="glbl">${esc(e.name)}</span> <span class="sym">${esc(sym)}</span> <span class="why">${esc(why)}</span></span>
-          <span class="t">${esc(tstr)}</span>
-        </div>`;
-      }
       const v = gateVerdict(e);
       const g = (e.gate_id != null) ? ('G' + e.gate_id) : 'G?';
-      const label = e.label || e.gate_label || '';   // gate name e.g. 'Monitor'
+      const label = e.label || e.gate_label || '';
       const strat = e.strategy_id || e.strategy || '';
-      const lbl = label ? `<span class="glbl">${esc(label)}</span> ` : '';
       const det = gateDetailStr(e);   // G5 T4 size / G8 lesson / G1 focus inline
-      const detHtml = det ? ` <span class="det">${esc(det)}</span>` : '';
-      return `<div class="gf-row" title="${esc(g)} ${esc(label)} ${esc(v.txt)} · ${esc(strat)} ${esc(sym)} · ${esc(det || why)} · ${esc(tstr)}">
-        <span class="g">${esc(g)}</span>
-        <span class="v ${v.cls}">${esc(v.txt)}</span>
-        <span class="what">${lbl}<span class="strat">${esc(strat)}</span> <span class="sym">${esc(sym)}</span>${detHtml} <span class="why">${esc(why)}</span></span>
-        <span class="t">${esc(tstr)}</span>
-      </div>`;
+      const detail = det || why;
+      return `<tr title="${esc(g)} ${esc(label)} ${esc(v.txt)} · ${esc(strat)} ${esc(sym)} · ${esc(detail)} · ${esc(tstr)}">
+        <td class="l" style="color:var(--p-dim)">${esc(tstr)}</td>
+        <td class="l" style="color:var(--p-cyn);font-weight:700">${esc(g)}</td>
+        <td class="l gv-${v.cls}">${esc(v.txt)}</td>
+        <td class="l" style="color:var(--p-cyn)">${esc(strat || '—')}</td>
+        <td class="l tk">${esc(sym || '—')}</td>
+        <td class="l" style="color:var(--p-gry)">${det ? '<span style=\"color:var(--p-ylw)\">' + esc(det) + '</span>' : esc(why)}</td>
+      </tr>`;
     }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:11%"><col style="width:7%"><col style="width:15%"><col style="width:18%">
+        <col style="width:17%"><col style="width:32%">
+       </colgroup><thead><tr>
+        <th class="l">TIME</th><th class="l">G#</th><th class="l">DECISION</th><th class="l">STRATEGY</th>
+        <th class="l">SYMBOL</th><th class="l">DETAIL</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
+  }
+
+  // ── Probe List (활동) — positions currently under probe, grouped by symbol ──
+  // One row per probed (venue, symbol): #probes · mean lean · mean conf · gate.
+  function renderProbeList(d) {
+    const body = $('probe-list'); if (!body) return;
+    const all = probeRows(d);
+    if (!all.length) { setCnt('probe-list-cnt', ''); body.innerHTML = '<div class="empty">no positions under probe</div>'; return; }
+    const groups = {};
+    all.forEach(p => {
+      const k = p.venue + '|' + p.sym;
+      const g = groups[k] || (groups[k] = { venue: p.venue, sym: p.sym, n: 0, leanSum: 0, leanN: 0, confSum: 0, confN: 0, gate: p.gate_id });
+      g.n += 1;
+      if (p.lean != null) { g.leanSum += p.lean; g.leanN += 1; }
+      if (p.conf != null) { g.confSum += p.conf; g.confN += 1; }
+    });
+    const rows = Object.values(groups).sort((a, b) => b.n - a.n);
+    setCnt('probe-list-cnt', rows.length);
+    const trs = rows.map(g => {
+      const lean = g.leanN ? g.leanSum / g.leanN : null;
+      const conf = g.confN ? g.confSum / g.confN : null;
+      const leanCls = lean == null ? 'b-flat' : pn(lean);
+      return `<tr title="${esc(g.venue)} ${esc(g.sym)} · ${g.n} probes · lean ${lean == null ? '—' : lean.toFixed(2)} · conf ${conf == null ? '—' : conf.toFixed(2)} · G${g.gate}">
+        <td class="l tk">${esc(g.sym)}</td>
+        <td class="l ex">${esc(g.venue || '—')}</td>
+        <td>${g.n}</td>
+        <td class="${leanCls}">${lean == null ? '—' : (lean >= 0 ? '+' : '') + lean.toFixed(2)}</td>
+        <td class="b-flat">${conf == null ? '—' : conf.toFixed(2)}</td>
+        <td>G${g.gate}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:30%"><col style="width:18%"><col style="width:13%"><col style="width:15%">
+        <col style="width:14%"><col style="width:10%">
+       </colgroup><thead><tr>
+        <th class="l">SYMBOL</th><th class="l">VEN</th><th title="probes on this position">#PRB</th>
+        <th title="mean probe lean">LEAN</th><th title="mean probe confidence">CONF</th><th>GATE</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
+  }
+
+  // ── Probe Activity (활동) — per-probe readings stream, newest first, TABLE ──
+  // TIME | PROBE | SYMBOL | KIND | READING (lean/conf) | ACTION.
+  function renderProbeActivity(d) {
+    const body = $('probe-activity'); if (!body) return;
+    const rows = probeRows(d).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    setCnt('probe-activity-cnt', rows.length || '');
+    if (!rows.length) { body.innerHTML = '<div class="empty">no probe readings (1h)</div>'; return; }
+    const trs = rows.slice(0, 120).map(p => {
+      const tstr = p.ts ? hhmmss(p.ts) : '';
+      const reading = (p.lean != null || p.conf != null)
+        ? `${p.lean == null ? '' : (p.lean >= 0 ? '+' : '') + p.lean.toFixed(2)}${p.conf == null ? '' : ' / ' + p.conf.toFixed(2)}`
+        : esc(p.reason);
+      const leanCls = p.lean == null ? 'b-flat' : pn(p.lean);
+      return `<tr title="PROBE ${esc(p.name)} · ${esc(p.sym)} · ${esc(p.kind)} · lean ${p.lean == null ? '—' : p.lean.toFixed(2)} conf ${p.conf == null ? '—' : p.conf.toFixed(2)} · ${esc(p.action || '')} · ${esc(tstr)}">
+        <td class="l" style="color:var(--p-dim)">${esc(tstr)}</td>
+        <td class="l" style="color:var(--p-cyn)">${esc(p.name)}</td>
+        <td class="l tk">${esc(p.sym)}</td>
+        <td class="l" style="color:var(--p-dim)">${esc(p.kind)}</td>
+        <td class="${leanCls}">${reading}</td>
+        <td class="l" style="color:var(--p-ylw)">${esc(p.action || '—')}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:12%"><col style="width:20%"><col style="width:16%"><col style="width:15%">
+        <col style="width:21%"><col style="width:16%">
+       </colgroup><thead><tr>
+        <th class="l">TIME</th><th class="l">PROBE</th><th class="l">SYMBOL</th><th class="l">KIND</th>
+        <th title="lean / confidence">READING</th><th class="l">ACTION</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
   }
 
   // ── NEW · per-ticker R (퍼포먼스) — d.ticker_stats[] cumulative R by symbol ─
@@ -635,13 +674,22 @@
       return;
     }
     const sorted = rows.slice().sort((a, b) => (a.sum_r || 0) - (b.sum_r || 0));   // worst→best
-    body.innerHTML = sorted.map(t => {
+    const trs = sorted.map(t => {
       const r = t.sum_r || 0;
-      return `<div class="tk-r" title="${esc(t.venue)} ${esc(t.symbol)} · n=${t.n} · WR ${(t.wr_pct || 0).toFixed(0)}% · ΣR ${r.toFixed(2)}">
-        <span class="nm">${esc(t.symbol)}<span class="sub">${esc(t.venue)} · ${t.n}t · ${(t.wr_pct || 0).toFixed(0)}%</span></span>
-        <span class="rv ${pn(r)}">${r >= 0 ? '+' : ''}${r.toFixed(2)}R</span>
-      </div>`;
+      return `<tr title="${esc(t.venue)} ${esc(t.symbol)} · n=${t.n} · WR ${(t.wr_pct || 0).toFixed(0)}% · ΣR ${r.toFixed(2)}">
+        <td class="l tk">${esc(t.symbol)}</td>
+        <td class="l ex">${esc(t.venue)}</td>
+        <td class="b-flat">${t.n || 0}</td>
+        <td class="b-flat">${(t.wr_pct || 0).toFixed(0)}%</td>
+        <td class="${pn(r)}">${r >= 0 ? '+' : ''}${r.toFixed(2)}R</td>
+      </tr>`;
     }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:34%"><col style="width:20%"><col style="width:13%"><col style="width:15%"><col style="width:18%">
+       </colgroup><thead><tr>
+        <th class="l">SYMBOL</th><th class="l">VEN</th><th>N</th><th>WR</th><th>ΣR</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
   }
 
   // ── NEW · learner network (로직) — d.learners[] value + Δ1h tremor ─────────
@@ -853,7 +901,12 @@
     const slip = st.reduce((a, s) => a + (s.slippage_usd || 0), 0);
     const fee = st.reduce((a, s) => a + (s.fee_usd || 0), 0);
     const nac = st.reduce((a, s) => a + (s.net_after_cost_usd || 0), 0);
-    const driftUsd = d.reconciled_loss_usd || 0;
+    // Hardening #1: PRIMARY = actual realized Σ pnl_usd over reconciled positions
+    // (real lost $); the mae_r×risk est is the labeled secondary fallback.
+    const driftActual = d.reconciled_realized_usd || 0;
+    const driftEst = d.reconciled_loss_usd || 0;
+    const driftUsd = driftActual !== 0 ? driftActual : driftEst;
+    const driftIsEst = driftActual === 0 && driftEst !== 0;
     const driftN = d.reconciled_loss_n || 0;
     const forced = d.session_forced_exit_count || 0;
     const row = (label, valHtml, tip) =>
@@ -867,8 +920,11 @@
         'execution slippage vs intended price')
       + row('Net profit after all costs', `<span class="${pn(nac)}">${fmtUsd(nac, 0)}</span>`,
         'realized profit after fees and slippage')
-      + row(`Tracking failures, not trades (${driftN})`, `<span class="b-neg">${fmtUsd(-Math.abs(driftUsd), 0)}</span>`,
-        'rough $ estimate of drift from positions reconciled away without a clean exit — excluded from the R ledger / PF / win-rate')
+      + row(`Tracking failures, not trades (${driftN})`, `<span class="b-neg">${fmtUsd(-Math.abs(driftUsd), 0)}${driftIsEst ? ' est' : ''}</span>`,
+        (driftIsEst
+          ? 'rough $ estimate (mae_r × risk) of drift from positions reconciled away without a clean exit'
+          : 'actual realized $ from positions reconciled away without a clean exit')
+        + ' — excluded from the R ledger / PF / win-rate')
       + row('Forced exits', `<span class="b-flat">${forced}</span>`,
         'positions the system was forced to close this session');
   }
@@ -893,10 +949,15 @@
   // a live /api/snapshot value.
   const R = T.renderers;   // { positions, trades, regime, strategy }
   T.register('activity', (d) => {
-    renderGateFunnel(d);
-    renderGateFeed(d);
     R.positions(d);
     R.trades(d);
+  });
+  // Gates tab (Jin 2026-06-24): the gate/probe quad moved out of Activity.
+  T.register('gates', (d) => {
+    renderGateFunnel(d);
+    renderProbeList(d);
+    renderGateFeed(d);
+    renderProbeActivity(d);
   });
   T.register('performance', (d) => {
     renderDualEquity(d); renderConfidence(d); renderBenchmark(d);

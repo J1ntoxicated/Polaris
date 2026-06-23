@@ -313,3 +313,31 @@ async def test_focus_emitted_every_cycle_cached_or_fresh() -> None:
         )
         assert r.decision == GateDecision.PASS
         assert FOCUS_MIN <= len(r.payload["focus"]) <= FOCUS_MAX
+
+
+# ---------------------------------------------------------------------------
+# B3 #5 — documented structural pass-through (vestigial gate honesty)
+# ---------------------------------------------------------------------------
+# The AUTHORITATIVE G1 selection is Layer-0 ``rank_active_universe`` /
+# ``compute_dynamic_focus``; this per-signal gate re-ranks an already-selected
+# active set and emits a focus echo that NO downstream gate consumes. It must
+# stay an always-PASS pass-through and label its focus as non-authoritative so a
+# reader does not mistake it for the real selector. flow_not_block — no KILL.
+
+
+async def test_gate_fresh_focus_marked_nonauthoritative() -> None:
+    from polaris.core.pipeline.agents.universe_scanner import (
+        FOCUS_SOURCE_NONAUTHORITATIVE,
+    )
+
+    uni = _vol_only(40)
+    res = await universe_scanner_gate(_ctx({"universe": uni}), universe=uni)
+    # Fresh emit (no cache) is tagged as a display-only echo, never authoritative.
+    assert res.payload.get("focus_source") == FOCUS_SOURCE_NONAUTHORITATIVE
+
+
+async def test_gate_never_kills_even_on_empty_universe() -> None:
+    # A pass-through never gates selection: empty universe still PASSes forward.
+    res = await universe_scanner_gate(_ctx({"universe": []}), universe=[])
+    assert res.decision == GateDecision.PASS
+    assert res.next_gate == GATE_STRATEGY_SIGNAL

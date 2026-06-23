@@ -32,6 +32,7 @@ from polaris.core.live_recalc.exit_engine import (
     EXIT_EQUITY_MFE_LOCK_R,
     EXIT_EQUITY_MFE_PROTECT_R,
     EXIT_LOSER_TIMEOUT_SEC,
+    EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GIVEBACK_FRAC,
     EXIT_THESIS_GIVEBACK_HARD_FRAC,
@@ -298,6 +299,14 @@ _THESIS_GIVEBACK = ThesisGivebackParams(
     hard_frac=EXIT_THESIS_GIVEBACK_HARD_FRAC,
 )
 
+# Default consecutive-broken streak for callers that do NOT thread a per-tick
+# count (the bar pipeline). A bar-close break is one observation on the slower
+# bar cadence, so it counts as CONFIRMED — set to the broken-ticks floor so an
+# AGED bar position with a broken thesis still CUTs (the SUSTAINED gate only
+# guards the fast 500ms tick path from single-tick noise). The tick engine passes
+# its own live streak and overrides this.
+_DEFAULT_BROKEN_STREAK: int = EXIT_THESIS_BROKEN_TICKS
+
 
 def _bucket_for_strategy(strategy_id: str) -> Bucket:
     """Exit archetype (TREND / REVERSION) for ``strategy_id`` from its registered
@@ -324,6 +333,7 @@ def _assess_mode_for_position(
     entry_regime: str | None,
     held_seconds: int,
     horizon_seconds: int,
+    broken_streak: int = _DEFAULT_BROKEN_STREAK,
 ) -> ManagementMode | None:
     """Resolve the adaptive thesis re-map mode for THIS position (or ``None``).
 
@@ -333,6 +343,12 @@ def _assess_mode_for_position(
     byte-identical. EXIT-timing only; never size / entry / the G6 -1.0R rail.
     Fully fail-open: any unexpected error degrades to ``None`` (no re-map) so a
     bad input can never break the exit pass.
+
+    ``broken_streak``: the caller's consecutive-broken tick count for the SUSTAINED
+    gate (a single noisy tick never flips a fresh winner to BROKEN). The tick engine
+    threads its per-position streak; the bar-pipeline caller (no per-tick streak)
+    leaves the default ``_DEFAULT_BROKEN_STREAK`` so a confirmed bar-close break
+    still cuts an AGED position.
     """
     if not EXIT_ADAPTIVE_THESIS_ON:
         return None
@@ -352,6 +368,7 @@ def _assess_mode_for_position(
             held_seconds=held_seconds,
             horizon_seconds=horizon_seconds,
             giveback=_THESIS_GIVEBACK,
+            broken_streak=broken_streak,
         )
     except Exception as exc:  # noqa: BLE001 — re-map must never break the exit
         logger.warning("[L6/exit] thesis re-map assess failed — no re-map: %r", exc)
@@ -509,6 +526,7 @@ async def run_precise_exit(
     trail_mult: float | None = None,
     mfe_protect: MfeProtectSchedule | None = None,
     mode: ManagementMode | None = None,
+    cadence: str = "bar",
 ) -> bool:
     """Track excursion + ratchet ATR stop + advance FSM; close if a precise
     exit fired. Returns ``True`` when this position was closed (caller skips
@@ -536,6 +554,11 @@ async def run_precise_exit(
     caller byte-identical; for flow_pressure the stop ratchets to BEP at +MFE and
     locks positive R — capturing the +0.67R avg MFE and cutting the 17% give-back.
     Only TIGHTENS the stop (EXPECTANCY, not a throttle).
+
+    ``cadence`` (hardening #7, measurement-only): the exit PASS that owns this
+    call — 'bar' (the ~5s recalc, default) or 'tick' (the sub-second tick pass).
+    Forwarded to ``close_specific`` → stamped on ``positions.exit_cadence`` for
+    the close_reason × cadence rollup. Never alters any close/exit decision.
     """
     position_id = str(pos["position_id"])
     # Resume from the FRESHEST persisted state, not the caller's row: the bar
@@ -632,7 +655,7 @@ async def run_precise_exit(
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        close_reason=decision.close_reason,
+        close_reason=decision.close_reason, cadence=cadence,
     )
     state.recalc_precise_exit = getattr(state, "recalc_precise_exit", 0) + 1
     # Precise-exit close (INFO): the decision/거동 visibility Jin asked for —

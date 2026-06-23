@@ -23,6 +23,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -36,14 +37,17 @@ from polaris.core.live_recalc.tick_recalc import (
     run_live_recalc_cycle,
 )
 from polaris.core.universe.discovery import (
+    deactivate_stale_active_rows,
     fetch_alpaca_instruments,
     fetch_capital_instruments,
     fetch_okx_instruments,
+    merge_listing_timestamps,
     persist_universe,
     rank_active_universe,
 )
 from polaris.core.universe.schema import UniverseInstrument
 from polaris.core.universe.watchlist import compute_dynamic_focus, persist_focus
+from polaris.scripts._production_asset_class import resolve_asset_class
 from polaris.scripts._production_bars import (
     CAPITAL_RESOLUTION_BY_INTERVAL,
     TIMEFRAME_FETCH_CADENCE_SEC,
@@ -74,8 +78,10 @@ __all__ = [
     "get_focus_targets",
     "ingest_bars_for_focus",
     "ingest_bars_per_timeframe",
+    "compute_signal_density_7d",
     "open_position_targets",
     "read_active_universe",
+    "read_cell_scores_by_instrument",
     "read_recent_bars",
     "refresh_alpaca_universe_once",
     "refresh_capital_universe_once",
@@ -247,15 +253,64 @@ async def refresh_alpaca_universe_once(
         return 0
     if not instruments:
         return 0
+    # B2: carry each name's FIRST-seen listing_ts across cycles so the <24h
+    # new-listing watchdog has a real first-seen ts (was NULL for every row →
+    # watchdog never fired). The raw fetch stamps listing_ts=None; merge with the
+    # prior persisted timestamps and stamp `ts` on genuinely new names.
+    prev = _read_alpaca_listing_prev(conn)
+    instruments = merge_listing_timestamps(prev, instruments, now_ts=ts)
     active = rank_active_universe(instruments)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
+    # B2: deactivate the prior-active names that dropped OUT of this fetch (the
+    # 21-day ghost). persist_universe only UPDATEs fetched rows, so a name absent
+    # from Alpaca's churning ~13k /v2/assets set lingers is_active=1 forever — a
+    # universe-membership hygiene correction (a name that LEFT the venue is no
+    # longer eligible), not a defensive throttle (flow_not_block).
+    swept = deactivate_stale_active_rows(
+        conn, venue="alpaca", fetched_ids={ins.instrument_id for ins in instruments}
+    )
     logger.info(
-        "[L0/alpaca] universe %d → active %d (continuous-rank)",
+        "[L0/alpaca] universe %d → active %d (continuous-rank, stale_swept=%d)",
         len(instruments),
         len(active),
+        swept,
     )
     return len(active)
+
+
+def _read_alpaca_listing_prev(conn: sqlite3.Connection) -> list[UniverseInstrument]:
+    """Prior (instrument_id, listing_ts) for Alpaca as merge_listing_timestamps input.
+
+    Only ``instrument_id`` + ``listing_ts`` are consulted by the merge, so this
+    builds minimal carrier rows (other fields are placeholders, never persisted —
+    the merge returns the CURRENT fetch rows with timestamps carried over). Any
+    sqlite error degrades to ``[]`` (every current row is then treated as new and
+    stamped ``now`` — flow_not_block, never breaks the refresh).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT instrument_id, listing_ts FROM universe WHERE venue = 'alpaca'"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        UniverseInstrument(
+            venue="alpaca",
+            symbol="",
+            instrument_id=str(r[0]),
+            underlying_group_id="",
+            asset_class="equity",
+            quote_ccy="USD",
+            state="live",
+            vol_24h_usd=0.0,
+            spread_bps=0.0,
+            atr_24h_pct=0.0,
+            depth_10bps_usd=0.0,
+            listing_ts=int(r[1]) if r[1] is not None else None,
+        )
+        for r in rows
+    ]
 
 
 def read_active_universe(conn: sqlite3.Connection) -> list[UniverseInstrument]:
@@ -264,7 +319,8 @@ def read_active_universe(conn: sqlite3.Connection) -> list[UniverseInstrument]:
         """
         SELECT venue, symbol, instrument_id, underlying_group_id, asset_class,
                quote_ccy, state, vol_24h_usd, spread_bps, atr_24h_pct,
-               depth_10bps_usd, signal_density_7d, listing_ts, last_seen_ts
+               depth_10bps_usd, signal_density_7d, listing_ts, last_seen_ts,
+               last_price
         FROM universe
         WHERE is_active = 1
         """
@@ -285,9 +341,69 @@ def read_active_universe(conn: sqlite3.Connection) -> list[UniverseInstrument]:
             signal_density_7d=float(r[11] or 0.0),
             listing_ts=int(r[12]) if r[12] is not None else None,
             last_seen_ts=int(r[13] or 0),
+            last_price=float(r[14] or 0.0),
         )
         for r in rows
     ]
+
+
+SIGNAL_DENSITY_WINDOW_SEC = 7 * 86_400
+
+
+def compute_signal_density_7d(
+    conn: sqlite3.Connection, *, now_ts: int | None = None
+) -> dict[str, float]:
+    """Per-``instrument_id`` count of EMITTED signals in the trailing 7d window.
+
+    Producer for the ``signal_density_7d`` rank axis (RANK_WEIGHT_SIGNAL_DENSITY_Z
+    = 0.25, the 2nd-largest focus weight) which had NO producer and sat 0.0 across
+    every active row — ~25% of the designed ranking signal was permanently inert.
+    Counts rows in the ``signals`` table (``instrument_id`` = ``venue:symbol``,
+    written by ``persist_emitted_signal``) with ``ts`` inside the window. This is
+    pure focus-RANKING enrichment (flow_not_block): a denser-signal name ranks
+    higher, nothing is blocked, sized, or vetoed. Read-only; empty/missing →
+    ``{}`` (the existing 0.0 default then applies, so focus never breaks).
+    """
+    ts = now_ts if now_ts is not None else int(time.time())
+    cutoff = ts - SIGNAL_DENSITY_WINDOW_SEC
+    try:
+        rows = conn.execute(
+            "SELECT instrument_id, COUNT(*) FROM signals "
+            "WHERE ts >= ? GROUP BY instrument_id",
+            (cutoff,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(r[0]): float(r[1]) for r in rows}
+
+
+def read_cell_scores_by_instrument(conn: sqlite3.Connection) -> dict[str, float]:
+    """Aggregate ``cell_matrix_p0`` into one score per ``instrument_id`` (venue:ticker).
+
+    Producer for the ``cell_scores`` rank axis (RANK_WEIGHT_CELL_Z = 0.10) that the
+    production focus call never populated — the cell-routing learner held live rows
+    but had zero influence on WHICH symbols got focus. ``cell_matrix_p0`` is keyed
+    ``(exchange, strategy, ticker, regime)``; this collapses the strategy/regime
+    fan-out to a single per-(exchange, ticker) **n_eff-weighted mean score** (the
+    same conviction-weighted view the routing layer uses) and keys it as
+    ``f"{exchange}:{ticker}"`` to match ``UniverseInstrument.instrument_id``. Cells
+    with ``n_eff <= 0`` are skipped (no evidence yet). Read-only, flow_not_block:
+    a better-performing cell lifts its symbol's focus rank, never blocks. Empty →
+    ``{}`` (cell axis stays 0.0, focus unaffected).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT exchange, ticker, n_eff, score FROM cell_matrix_p0 WHERE n_eff > 0"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    acc: dict[str, list[float]] = {}
+    for exchange, ticker, n_eff, score in rows:
+        key = f"{exchange}:{ticker}"
+        bucket = acc.setdefault(key, [0.0, 0.0])  # [sum(n*score), sum(n)]
+        bucket[0] += float(n_eff) * float(score)
+        bucket[1] += float(n_eff)
+    return {k: (s / n if n > 0 else 0.0) for k, (s, n) in acc.items()}
 
 
 def refresh_focus_watchlist(
@@ -298,6 +414,13 @@ def refresh_focus_watchlist(
     Task 3 / D2: runtime-blocklisted (venue, symbol) — venue-permanent
     compliance rejects (51155) — are excluded so they never enter focus and
     cannot churn the order path.
+
+    B1 ranking-brain wiring (2026-06-23): the two previously-dead rank axes are
+    fed live here — ``signal_density_7d`` (per-instrument 7d emit count) is merged
+    onto the in-memory rows, and ``cell_scores`` (n_eff-weighted cell_matrix_p0)
+    is passed into the focus call — so ~35% of the designed rank weight that sat
+    inert (0.0 across all rows) now orders focus. Both are RANKING inputs only
+    (flow_not_block): no entry is blocked, no size cut, no veto.
     """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
     universe = read_active_universe(conn)
@@ -310,9 +433,19 @@ def refresh_focus_watchlist(
         ]
         if not universe:
             return 0
-    focus = compute_dynamic_focus(universe, cycle_ts=ts)
+    density = compute_signal_density_7d(conn, now_ts=ts)
+    if density:
+        universe = [
+            replace(ins, signal_density_7d=density.get(ins.instrument_id, 0.0))
+            for ins in universe
+        ]
+    cell_scores = read_cell_scores_by_instrument(conn)
+    focus = compute_dynamic_focus(universe, cell_scores=cell_scores or None, cycle_ts=ts)
     persist_focus(conn, focus)
-    logger.info("[L0/focus] universe=%d → focus=%d", len(universe), len(focus))
+    logger.info(
+        "[L0/focus] universe=%d → focus=%d (signal_density=%d, cell_scores=%d)",
+        len(universe), len(focus), len(density), len(cell_scores),
+    )
     return len(focus)
 
 
@@ -348,12 +481,15 @@ def open_position_targets(
             continue
         seen.add((venue, symbol))
         group_id = str(r[3] or "")
-        asset_class = r[2]
-        if not asset_class:
-            # Fall back to the group_id prefix (``crypto:HYPE`` → ``crypto``);
-            # default ``crypto`` mirrors get_focus_targets when neither is known.
-            asset_class = group_id.split(":", 1)[0] if ":" in group_id else "crypto"
-        out.append((venue, symbol, str(asset_class), group_id))
+        # Hardening #5 (2026-06-23): a NULL universe class OR an unknown group_id
+        # prefix is now a LOUD, validated, venue-correct fallback (WARN + an
+        # idempotent ``asset_class_fallback`` counter), not a silent flat 'crypto'.
+        asset_class = resolve_asset_class(
+            universe_class=None if r[2] is None else str(r[2]),
+            venue=venue, symbol=symbol, group_id=group_id,
+            source="held_position", conn=conn,
+        )
+        out.append((venue, symbol, asset_class, group_id))
     return out
 
 

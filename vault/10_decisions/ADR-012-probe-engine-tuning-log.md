@@ -28,5 +28,10 @@ Slice 1 = engine returns `action=HOLD`, ALL knobs `None` → nothing threads int
 ## /debate flags (calibration — not silent hardcode)
 lean→knob quantization thresholds + knob deltas (giveback_margin_r, lock_tighten_delta_r, widen_trail_max_mult) · cross-probe weights · confidence/HOLD floors · **policy: may alt-data adverse-lean tighten an open WINNER, or is alt-data strictly entry-signal/regime-evidence?** · crisis force-harvest · observe→act promotion gate (measured giveback reduction).
 
+## Scope honesty (hardening 2026-06-23, [[structure_hardening_2026-06-23]])
+- **EXIT-ONLY (G6)**: the probe layer attaches at the SINGLE G6/Position-Monitor exit site only — it is NOT G1/G2-wired. The `ProbeRole` SSOT (`polaris/core/probes/roles.py`: Eligibility/Signal/Validate/Position/Exit, type-enforced) reserves the entry-side seats; today's 4 catalog probes are all Position/Exit. An entry twin reuses the EXACT observe pattern (sidecar log, `applied=False`, knobs `None`) at a new G2/G5 site behind its OWN env flag — a separate future item.
+- **Cadence**: observe runs on BOTH the bar recalc pass (`mark_source='bar'`) AND the tick exit pass (`mark_source='tick'`) — byte-identical, nothing threaded into `run_precise_exit`.
+- **AI-escalation seam (observe-only)**: dead-band decisions are tagged `ambiguous=1` (+ `deadband_margin` / `quantizer_version`) for an OFFLINE reader; the runtime action/knobs are unchanged and GPT calls stay 0. The arbiter consumer is deferred ([[ADR-011-ai-free-cutover|ADR-011]], JIN-SURFACE). `EngineAction` carries no unemittable `SWAP` (L6 owns strategy-swap).
+
 ## Sources
 - Design workflow `wqw4qbm3c` (4-angle: probe-interface/engine/tuning-log/integration → synthesis). [[north-star]] surgical-strike thesis. Generalizes `fuse_evidence`→`detect_regime_flip` evidence/actor split.

@@ -426,6 +426,72 @@ def test_capital_collect_intents_drops_flow_signals_keeps_fade() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# (d3) Upstream long-only short dead-path: a SHORT whose only candidate venue
+#      is long-only (OKX spot / Alpaca equity) is never CONSTRUCTED in
+#      ``_collect_intents`` — the directionality check moved upstream of intent
+#      construction so the loop no longer generates-then-drops it (the L535
+#      ``_drop_for_bidirectional`` stays as a backstop). Direction-neutral:
+#      removes no executable trade (spot/equity shorts are unexecutable);
+#      Capital (bidirectional CFD) still collects the short.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_intents_never_builds_short_on_long_only_venue() -> None:
+    """An overshoot-up window fades SHORT (``micro_reversion``). On OKX (spot,
+    long-only) that short is NEVER collected — gated upstream of construction —
+    while OKX still collects longs and the ``drops_short`` counter records the
+    gate firing. The SAME window on Capital (bidirectional CFD) DOES collect the
+    short."""
+    now_ts = int(time.time())
+    # chop regime → micro_reversion is regime-active on OKX (full signal set).
+    overshoot_up = _overshoot_window(now_ts, +1)
+
+    eng_okx = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    okx_intents = _collect_intents(
+        eng_okx, venue=VENUE, symbol=SYMBOL, window=overshoot_up,
+        regime="chop", now_ts=now_ts,
+    )
+    # No SHORT intent survives construction on the long-only spot venue.
+    assert all(i.side != "short" for i in okx_intents), (
+        "OKX (long-only spot) must never CONSTRUCT a short intent — gated "
+        "upstream of intent construction (not generate-then-drop)"
+    )
+    # The fade WOULD have fired a short here, so the upstream gate registered it.
+    assert eng_okx.drops_short >= 1, (
+        "the upstream long-only short gate must still record the drop in "
+        "drops_short telemetry"
+    )
+
+    # Same window on Capital (bidirectional CFD): the short IS collected.
+    eng_cap = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    cap_intents = _collect_intents(
+        eng_cap, venue=CAP_VENUE, symbol=CAP_SYMBOL, window=overshoot_up,
+        regime="chop", now_ts=now_ts,
+    )
+    assert any(i.side == "short" for i in cap_intents), (
+        "Capital (bidirectional CFD) must still collect the micro_reversion short"
+    )
+    assert eng_cap.drops_short == 0, (
+        "no short is gated on a bidirectional venue"
+    )
+
+
+def test_collect_intents_still_builds_long_on_long_only_venue() -> None:
+    """The upstream gate is direction-neutral: a LONG on OKX (a burst-up window
+    firing ``burst_rider`` long) is unaffected — collected, never gated."""
+    now_ts = int(time.time())
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    intents = _collect_intents(
+        eng, venue=VENUE, symbol=SYMBOL, window=_burst_window(now_ts, +1),
+        regime="bull_trend", now_ts=now_ts,
+    )
+    assert any(i.side == "long" for i in intents), (
+        "a long on a long-only venue must still be collected"
+    )
+    assert eng.drops_short == 0, "a long is never gated by the short check"
+
+
 @pytest.mark.asyncio
 async def test_capital_tick_path_is_fade_only(memdb: sqlite3.Connection) -> None:
     """End-to-end on Capital: an overshoot window in a chop regime opens a
@@ -963,6 +1029,36 @@ def test_mfe_protect_schedule_covers_all_momentum_signals() -> None:
     assert _mfe_protect_schedule("not_a_signal", cfg) is None
 
 
+def test_mfe_protect_schedule_badfit_tightens_harvest() -> None:
+    # Seam3 (regime-fit): a BAD momentum fit (chop, the churn case) TIGHTENS the
+    # harvest — bep/protect pull IN (bank sooner = precise exit); a GOOD fit
+    # (bull_trend) LOOSENS them (LET_RUN). flow_not_block: this is exit-timing
+    # precision on an OPEN position, never a size cut / entry block.
+    cfg = TickEngineConfig()
+    bad = _mfe_protect_schedule("flow_pressure", cfg, regime="chop")
+    good = _mfe_protect_schedule("flow_pressure", cfg, regime="bull_trend")
+    neutral = _mfe_protect_schedule("flow_pressure", cfg, regime="unknown")
+    assert bad is not None and good is not None and neutral is not None
+    # Bad fit banks sooner: lower BEP + protect thresholds than good fit.
+    assert bad.bep_at_r < good.bep_at_r
+    assert bad.protect_at_r < good.protect_at_r
+    # Unknown regime → byte-identical to the base schedule (no shaping).
+    assert neutral.bep_at_r == cfg.mfe_bep_r
+    assert neutral.protect_at_r == cfg.mfe_protect_r
+    assert neutral.lock_r == cfg.mfe_protect_lock_r
+
+
+def test_mfe_protect_schedule_ratchets_toward_profit_only() -> None:
+    # A tightened (bad-fit) schedule NEVER locks LESS positive R than the base —
+    # the ratchet-toward-profit invariant (mandate loss-defense = precise exit).
+    cfg = TickEngineConfig()
+    for regime in ("chop", "crisis", "bull_trend", "bear_trend", "unknown", None):
+        sched = _mfe_protect_schedule("flow_pressure", cfg, regime=regime)
+        assert sched is not None
+        assert sched.lock_r >= cfg.mfe_protect_lock_r
+        assert sched.bep_at_r > 0.0 and sched.protect_at_r > 0.0
+
+
 def test_flow_decay_exit_only_when_green_and_flow_fails() -> None:
     gate = TickEngineConfig().mfe_bep_r  # the +MFE gate (0.35R)
     # RED (pnl below the gate) → never exits, regardless of flow (G6 owns red).
@@ -1184,4 +1280,128 @@ async def test_sub_min_notional_is_sizing_drop_not_submitted(
     )
     assert eng.drops_sizing == 1, (
         "a sub-min notional is a sizing/headroom drop (same class as <=0)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (h) Structural hardening #2 (2026-06-23) — observe_probes threaded into the
+# TICK exit pass (mark_source='tick'). The sidecar is OBSERVE-ONLY: it logs a
+# 'tick'-bucket decision row but threads NOTHING into run_precise_exit, so the
+# live exit (positions row + close outcome) is BYTE-IDENTICAL to a run without
+# it. Upstream of the rank-4 / rank-16 calibration readers (previously the
+# P&L-driving tick half emitted 0 probe rows).
+# ---------------------------------------------------------------------------
+
+
+def _wire_tick_probes(state: ProdLoopState, probe_db: str) -> None:
+    from polaris.core.probes import ExitEngine, ProbeBus
+    from polaris.core.probes.catalog import (
+        LossDefenseProbe,
+        ProfitTakingProbe,
+        SessionHoursProbe,
+        TechnicalProbe,
+    )
+    from polaris.core.probes.tuning_log import open_probe_db
+
+    state.probe_conn = open_probe_db(probe_db)  # type: ignore[attr-defined]
+    state.probe_bus = ProbeBus(  # type: ignore[attr-defined]
+        [ProfitTakingProbe(), LossDefenseProbe(), TechnicalProbe(),
+         SessionHoursProbe()]
+    )
+    state.probe_engine = ExitEngine()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_tick_exit_pass_logs_a_tick_bucket_observe_row(
+    memdb: sqlite3.Connection, tmp_path: Any,
+) -> None:
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=104.0, peak_price=106.0, trough_price=99.5,
+        exit_state="harvest", entry_atr_pct=0.01,
+    )
+    # A pullback tick to 104.5 (above the 104 stop) → the winner HOLDS, so the
+    # exit does not fire and we are sure the probe observed an OPEN position.
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=103.0, hi=105.0, last=104.5),
+        now_mono,
+    )
+    probe_db = f"{tmp_path}/probes_tick.sqlite"
+    _wire_tick_probes(state, probe_db)
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    pconn = state.probe_conn  # type: ignore[attr-defined]
+    n_tick = pconn.execute(
+        "SELECT COUNT(*) FROM probe_decisions WHERE position_id='pos_mom' "
+        "AND mode='observe' AND mark_source='tick' AND applied=0"
+    ).fetchone()[0]
+    assert n_tick == 1, "the tick exit pass must log exactly one 'tick' observe row"
+    # No 'bar' bucket row leaked from the tick pass.
+    n_bar = pconn.execute(
+        "SELECT COUNT(*) FROM probe_decisions WHERE mark_source='bar'"
+    ).fetchone()[0]
+    assert n_bar == 0
+    pconn.close()
+
+
+def test_tick_exit_pass_probe_sidecar_is_byte_identical(
+    tmp_path: Any,
+) -> None:
+    # Same seeded scenario twice — one run with the probe sidecar wired, one
+    # without. The live exit outcome (positions row + open/closed book) must be
+    # IDENTICAL: the observe sidecar threads NOTHING into run_precise_exit.
+    # Synchronous test: each run owns its own asyncio.run loop.
+    import asyncio
+
+    from polaris.storage.schema import init_db
+
+    def _run(with_probes: bool) -> tuple[Any, ...]:
+        db_path = f"{tmp_path}/byteid_{with_probes}.sqlite"
+        c = init_db(db_path)
+        now_ts = int(time.time())
+        now_mono = time.monotonic()
+        state, eng, writer = _momentum_setup(c, now_ts=now_ts)
+        _insert_position_row(
+            c, position_id="pos_mom", opened_ts=now_ts - 60,
+            stop_price=104.0, peak_price=106.0, trough_price=99.5,
+            exit_state="harvest", entry_atr_pct=0.01,
+        )
+        writer.set_stream(
+            INSTRUMENT,
+            _alternating_window(now_mono, lo=103.0, hi=105.0, last=104.5),
+            now_mono,
+        )
+        if with_probes:
+            _wire_tick_probes(state, f"{tmp_path}/p_{with_probes}.sqlite")
+        asyncio.run(_run_exits(
+            c, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+            real_roundtrip=False, okx_adapter=None, capital_session=None,
+            lookup_regime=eng_mod._lookup_regime_str,
+        ))
+        row = c.execute(
+            "SELECT status, stop_price, peak_price, trough_price, mfe_r, mae_r, "
+            "exit_state, pnl_r, closed_ts FROM positions WHERE position_id='pos_mom'",
+        ).fetchone()
+        book = sorted(
+            (t.position_id, t.closed) for t in state.open_trades
+        )
+        if with_probes:
+            state.probe_conn.close()  # type: ignore[attr-defined]
+        c.close()
+        return (row, book)
+
+    baseline = _run(with_probes=False)
+    with_probe = _run(with_probes=True)
+    assert baseline == with_probe, (
+        f"tick observe sidecar changed the live exit: "
+        f"baseline={baseline} with_probe={with_probe}"
     )

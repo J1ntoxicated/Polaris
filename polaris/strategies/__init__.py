@@ -32,6 +32,8 @@ from polaris.strategies.base import (
     RawSignal,
     StrategyMetadata,
 )
+from polaris.strategies.cci_reversion import CCIReversionStrategy
+from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.equity_gap_go import EquityGapGoStrategy
 from polaris.strategies.equity_rsi_bb_pullback import EquityRSIBBPullbackStrategy
@@ -41,6 +43,7 @@ from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
+from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom import TSMOMStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
@@ -59,6 +62,9 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     EquityRSIBBPullbackStrategy.metadata.strategy_id: EquityRSIBBPullbackStrategy,
     EquityGapGoStrategy.metadata.strategy_id: EquityGapGoStrategy,
     EMACrossoverStrategy.metadata.strategy_id: EMACrossoverStrategy,
+    ConnorsRSI2Strategy.metadata.strategy_id: ConnorsRSI2Strategy,
+    SupertrendStrategy.metadata.strategy_id: SupertrendStrategy,
+    CCIReversionStrategy.metadata.strategy_id: CCIReversionStrategy,
 }
 
 
@@ -72,6 +78,8 @@ __all__ = [
     "BarView",
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",
+    "CCIReversionStrategy",
+    "ConnorsRSI2Strategy",
     "EMACrossoverStrategy",
     "EquityGapGoStrategy",
     "EquityRSIBBPullbackStrategy",
@@ -85,6 +93,7 @@ __all__ = [
     "SessionBreakoutStrategy",
     "SpotDonchianStrategy",
     "StrategyMetadata",
+    "SupertrendStrategy",
     "TSMOMStrategy",
     "VolumeBurstStrategy",
     "XAUIndicesTrendStrategy",

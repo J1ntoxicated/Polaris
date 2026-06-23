@@ -63,6 +63,24 @@ PROBE_DDL: tuple[str, ...] = (
         mark_source      TEXT,
         mark_age_ms      INTEGER,
         exit_state       TEXT,
+        -- Hardening #6 (2026-06-23): the R unit of every R column on this row.
+        -- The probe path's pnl_r / mfe_r / mae_r AND the backfilled outcome R
+        -- (realized_pnl_r / mfe_r_final / mae_r_final / giveback_r) are ALL the
+        -- per-trade-ATR EXCURSION ruler — NEVER the per-stream ledger R. The
+        -- rank-4 calibration reader must not join this to stream-R without an
+        -- explicit rescale. DEFAULT tags legacy/backfilled rows too.
+        unit_tag         TEXT NOT NULL DEFAULT 'excursion',
+        -- AI-escalation observe-only seam (hardening #11, 2026-06-23). ambiguous
+        -- = the composite landed in the HOLD dead band (between TIGHTEN and
+        -- WIDEN thresholds) where a future arbiter could escalate. PURE
+        -- TELEMETRY — the runtime action/knobs/applied are unchanged and GPT
+        -- calls stay 0; the consumer (arbiter) is deferred (JIN-SURFACE rank
+        -- 18). deadband_margin = signed distance to the nearer decisive
+        -- threshold (negative = inside the band). quantizer_version stamps the
+        -- threshold set so the offline reader never re-pools across a move.
+        ambiguous        INTEGER NOT NULL DEFAULT 0,
+        deadband_margin  REAL,
+        quantizer_version TEXT,
         -- outcome cols (NULL until the close backfill fills them)
         realized_pnl_r   REAL,
         close_reason     TEXT,
@@ -101,6 +119,39 @@ def open_probe_db(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(p, isolation_level=None, timeout=10.0)
     for stmt in PROBE_DDL:
         conn.execute(stmt)
+    # Hardening #6 (2026-06-23): idempotent ADD COLUMN for an EXISTING probe DB
+    # (CREATE TABLE IF NOT EXISTS never alters a pre-existing table). The
+    # ``DEFAULT 'excursion'`` tags every pre-existing/backfilled row too. A
+    # duplicate-column error (already migrated) is benign.
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute(
+            "ALTER TABLE probe_decisions "
+            "ADD COLUMN unit_tag TEXT NOT NULL DEFAULT 'excursion'"
+        )
+    # Hardening #11 (2026-06-23): idempotent ADD COLUMN for the AI-escalation
+    # observe-only seam on an EXISTING probe DB. ``ambiguous`` DEFAULT 0 leaves
+    # legacy/backfilled rows un-flagged (not retro-escalated); deadband_margin /
+    # quantizer_version are NULL on legacy rows. Duplicate-column = benign.
+    for ddl in (
+        "ALTER TABLE probe_decisions ADD COLUMN ambiguous INTEGER NOT NULL "
+        "DEFAULT 0",
+        "ALTER TABLE probe_decisions ADD COLUMN deadband_margin REAL",
+        "ALTER TABLE probe_decisions ADD COLUMN quantizer_version TEXT",
+    ):
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.execute(ddl)
+    # The ambiguous calibration view is created HERE (after the ALTERs) so a
+    # legacy DB has the ``ambiguous`` column before the view references it.
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute(
+            "CREATE VIEW IF NOT EXISTS v_probe_ambiguous_outcomes AS "
+            "SELECT decision_id, ts, run_id, position_id, mode, composite_lean, "
+            "       action, deadband_margin, quantizer_version, applied, "
+            "       pnl_r_at_decision, pnl_r_truth, exit_state, realized_pnl_r, "
+            "       close_reason, mfe_r_final, mae_r_final, giveback_r, "
+            "       time_to_exit_sec, outcome_ts "
+            "FROM probe_decisions WHERE ambiguous = 1"
+        )
     return conn
 
 
@@ -161,14 +212,19 @@ def log_probe_decisions(
         None if decision.mfe_protect is None
         else json.dumps(decision.mfe_protect, sort_keys=True)
     )
+    # Hardening #11: stamp the quantizer version that produced this row's
+    # ambiguous flag (local import keeps tuning_log free of an engine cycle).
+    from polaris.core.probes.engine import QUANTIZER_VERSION  # noqa: PLC0415
+
     with contextlib.suppress(sqlite3.Error):
         conn.execute(
             "INSERT INTO probe_decisions "
             "(decision_id, eval_id, ts, run_id, position_id, mode, "
             " composite_lean, action, trail_mult, mfe_protect_json, "
             " widen_atr_mult, profit_target_r, applied, pnl_r_at_decision, "
-            " pnl_r_truth, mark_source, mark_age_ms, exit_state) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " pnl_r_truth, mark_source, mark_age_ms, exit_state, unit_tag, "
+            " ambiguous, deadband_margin, quantizer_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 uuid.uuid4().hex,
                 eval_id if eval_id is not None else uuid.uuid4().hex,
@@ -178,6 +234,11 @@ def log_probe_decisions(
                 decision.profit_target_r, 1 if decision.applied else 0,
                 float(pnl_r_at_decision), float(pnl_r_truth), str(mark_source),
                 int(mark_age_ms), str(exit_state),
+                # Hardening #6: probe R is the per-trade-ATR EXCURSION ruler.
+                "excursion",
+                # Hardening #11: observe-only escalation-seam telemetry.
+                1 if decision.ambiguous else 0, decision.deadband_margin,
+                QUANTIZER_VERSION,
             ),
         )
 

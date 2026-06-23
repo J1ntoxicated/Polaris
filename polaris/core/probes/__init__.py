@@ -25,7 +25,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from polaris.core.probes.roles import (
+    PROBE_ROLE_REGISTRY,
+    ProbeRole,
+    role_for_probe,
+)
+
 __all__ = [
+    "PROBE_ROLE_REGISTRY",
     "EngineAction",
     "EngineDecision",
     "EngineMode",
@@ -35,11 +42,18 @@ __all__ = [
     "ProbeContext",
     "ProbeKind",
     "ProbeReading",
+    "ProbeRole",
+    "role_for_probe",
 ]
 
 # The ONE shared action enum — reused by the engine decision AND the tuning log
 # (engine action == log action; there is no second divergent vocabulary).
-EngineAction = Literal["HOLD", "WIDEN", "TIGHTEN", "HARVEST", "SWAP"]
+# Hardening #10 (2026-06-23): SWAP removed — the probe engine is a PARAMETER
+# overlay on the #26 FSM and never strategy-swaps (that path is L6's
+# GateDecision.SWAP_STRATEGY); _quantize never produced "SWAP", so the
+# unemittable dead member is gone. Reserve it again only when a probe-composed
+# strategy-swap producer actually exists.
+EngineAction = Literal["HOLD", "WIDEN", "TIGHTEN", "HARVEST"]
 EngineMode = Literal["observe", "trail_only", "full"]
 # Probe kinds shipped in Slice 1 (news / regime / COT land in later slices).
 ProbeKind = Literal["technical", "volume", "session", "loss", "profit"]
@@ -100,10 +114,17 @@ class ProbeReading:
 
 @runtime_checkable
 class Probe(Protocol):
-    """A probe describes the world. ``evaluate`` returns ``None`` to ABSTAIN."""
+    """A probe describes the world. ``evaluate`` returns ``None`` to ABSTAIN.
+
+    ``role`` (hardening #8) declares WHERE in the gate pipeline the probe may
+    attach (Eligibility/Signal/Validate/Position/Exit) — orthogonal to ``kind``
+    (the observation axis). The role SSOT is ``PROBE_ROLE_REGISTRY``; every
+    catalog probe sets ``role`` from it (a role-missing probe fails import).
+    """
 
     probe_id: str
     kind: ProbeKind
+    role: ProbeRole
 
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None: ...
 
@@ -126,6 +147,15 @@ class EngineDecision:
     widen_atr_mult: float | None = None
     contributing: list[str] = field(default_factory=list)
     applied: bool = False
+    # AI-escalation observe-only seam (hardening #11, 2026-06-23). ``ambiguous``
+    # = the composite landed in the HOLD dead band (between the TIGHTEN and
+    # WIDEN thresholds) where a future arbiter could escalate. PURE TELEMETRY:
+    # the RUNTIME action/knobs/applied above are the existing deterministic
+    # fallback and GPT calls stay 0 — the consumer (arbiter) is deferred
+    # (JIN-SURFACE, rank 18). ``deadband_margin`` = signed distance to the
+    # nearer decisive threshold (negative = inside the band).
+    ambiguous: bool = False
+    deadband_margin: float | None = None
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:

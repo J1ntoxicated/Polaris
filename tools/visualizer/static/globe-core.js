@@ -212,6 +212,57 @@
   }
   window.PolarisGlobe_fibDir = fibDir;
   window.PolarisGlobe_scatterPos = scatterPos;
+
+  // ── OUTER probe shell orbital motion (Jin '프로브는 위성처럼 다른 궤도 가지고 돌게')
+  // The outer probe/ticker nodes orbit on their OWN distinct paths (like the 8 gate
+  // orbits) rather than sitting as static dim dust. Each outer node rotates its base
+  // scatter direction around a per-node tilted axis (id-derived inclination/speed/
+  // direction → all distinct), keeping its radius → it sweeps a small orbit on the
+  // LARGE outer shell. The shell as a whole reads as a slowly rotating layer of
+  // orbiting satellites; still dim when dormant, glowing on real signal. Display-only.
+  // Rotate unit vector v around unit axis u by angle ang (Rodrigues).
+  function rotAxis(ux, uy, uz, vx, vy, vz, ang) {
+    const c = Math.cos(ang), s = Math.sin(ang), dot = ux * vx + uy * vy + uz * vz;
+    const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+    return {
+      x: vx * c + cx * s + ux * dot * (1 - c),
+      y: vy * c + cy * s + uy * dot * (1 - c),
+      z: vz * c + cz * s + uz * dot * (1 - c),
+    };
+  }
+  // CORE shell slow uniform spin about Y → the innermost rotating layer.
+  const CORE_SPIN = 0.05;          // rad/s — gentle
+  function outerTick(now, dt) {
+    const t = now / 1000;
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.sat) continue;
+      // CORE (positions): gentle uniform spin about Y around the origin.
+      const cb = n._cBase;
+      if (cb) {
+        const ca = Math.cos(t * CORE_SPIN), sa = Math.sin(t * CORE_SPIN);
+        const dx = cb.dx * ca + cb.dz * sa, dz = -cb.dx * sa + cb.dz * ca;
+        n.hx = dx * cb.r; n.hy = cb.dy * cb.r; n.hz = dz * cb.r;
+        n.dir = { x: dx, y: cb.dy, z: dz };
+        continue;
+      }
+      const ob = n._oBase;
+      if (!ob) continue;
+      // orbital axis = base dir tilted by _oInc about a fixed lateral axis, so each
+      // node's orbit plane is distinct (different inclinations across the shell).
+      const ci = Math.cos(n._oInc), si = Math.sin(n._oInc);
+      // tilt the base direction itself to define the spin axis (axis ≠ position →
+      // the point actually sweeps an orbit rather than spinning in place).
+      let ax = ob.dx, ay = ob.dy * ci - ob.dz * si, az = ob.dy * si + ob.dz * ci;
+      const am = Math.hypot(ax, ay, az) || 1; ax /= am; ay /= am; az /= am;
+      const ang = t * n._oSpeed;
+      const rr = Math.hypot(ob.x, ob.y, ob.z);          // keep on the outer shell radius
+      const d = rotAxis(ax, ay, az, ob.dx, ob.dy, ob.dz, ang);
+      n.hx = d.x * rr; n.hy = d.y * rr; n.hz = d.z * rr;
+      n.dir = d;                                          // refresh cached dir for links/fade
+    }
+  }
+  window.PolarisGlobe_outerTick = outerTick;
   // venue-specific clusters live in the 3 galaxies. strat/reg/exit/orbit/axis/
   // obs/action/exit_tally are cross-cutting → conductor satellites (globe-satellites.js).
   function roleForCluster(cluster) {
@@ -282,6 +333,10 @@
         dir = fibDir(Math.floor(h1 * LAT), LAT);
         // tiny per-node radial jitter so the heart has a little thickness/depth.
         const rr = R_CORE * (0.86 + h2 * 0.28);
+        // Cache base dir/radius so coreTick can gently rotate the CORE shell as one
+        // (the innermost of the 3 concentric rotating layers) — slow uniform spin so
+        // the trade hearts read as a gently turning core, not a frozen clump.
+        n._cBase = { dx: dir.x, dy: dir.y, dz: dir.z, r: rr };
         n.hx = dir.x * rr; n.hy = dir.y * rr; n.hz = dir.z * rr;
       } else {
         // OUTER: scattered LOOSELY over the LARGE outer sphere surface (Jin "전에 빌드
@@ -290,6 +345,14 @@
         // organic, airy, see-through. NOT spiral arms (no starfish). Purely id-derived
         // (order-independent): h1=cap position, h2=angular jitter, h3=radial jitter.
         const sp = scatterPos(gx, h1, h2, h3);
+        // Jin '프로브는 위성처럼 다른 궤도 가지고 돌게' — the OUTER probe shell now ORBITS
+        // as satellites (own distinct orbital path) instead of sitting static. Cache the
+        // base scatter pos/dir + a per-node orbital signature (axis tilt + speed/dir,
+        // id-derived so it's stable + distinct per node); outerTick() rotates the home
+        // around that axis each frame. hx/hy/hz are seeded here so node 1 starts on-shell.
+        n._oBase = { x: sp.x, y: sp.y, z: sp.z, dx: sp.dir.x, dy: sp.dir.y, dz: sp.dir.z };
+        n._oInc = (h2 - 0.5) * 2.4;                      // orbital-plane tilt (rad) — distinct
+        n._oSpeed = (0.03 + h3 * 0.05) * (h1 < 0.5 ? 1 : -1);  // distinct speed + direction
         n.hx = sp.x; n.hy = sp.y; n.hz = sp.z;
         dir = sp.dir;                                    // unit dir (neural links, depth-fade)
       }
@@ -369,7 +432,7 @@
     let rz = x * sy + z * cy;
     let ry = y * cp - rz * sp;
     rz = y * sp + rz * cp;
-    const scale = Math.min(W, H) * 0.42 * zoom;
+    const scale = Math.min(W, H) * 0.30 * zoom;  // Jin: smaller cloud, full sphere visible (outer 1.5R fits in pane)
     const persp = 1 / (1 + rz * 0.25);
     return { sx: CX + rx * scale * persp, sy: CY + ry * scale * persp, depth: rz, persp };
   }
@@ -421,6 +484,8 @@
 
     // satellites revolve around the conductor: recompute their home each frame.
     if (window.PolarisGlobe_satTick) window.PolarisGlobe_satTick(now, dt);
+    // OUTER probe shell orbits as satellites (distinct per-node orbital paths).
+    outerTick(now, dt);
 
     // Collect drawables in TWO passes so the universe shell scales to 1000+
     // nodes at 60fps:

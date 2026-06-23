@@ -372,8 +372,114 @@
     }
   }
 
+  // ── AI — GET /api/ai_activity ──────────────────────────────────────────────
+  // The truth-first AI tab. Header line states the in-loop trading AI call count
+  // (a hard 0 — W3 AI-free core: tick entry / G3 / G4 / G7 are deterministic).
+  // Below it the only two places AI IS used, neither in the trade loop: dev
+  // debates (GPT + Gemini cross-validation) and the probe escalation seam
+  // (observe-only — flagged would-escalate cases; the advisor is not built so
+  // there is no GPT answer yet). Two dense aligned tables, English, no cards.
+  function aiHeaderHtml(n) {
+    const calls = (typeof n === 'number') ? n : 0;
+    return `<div class="ai-hdr">
+      <span class="ai-hdr-k">In-loop trading AI</span>
+      <span class="ai-hdr-v ${calls === 0 ? 'ai-zero' : ''}">${calls} calls</span>
+      <span class="ai-hdr-note">AI-free core (W3 cutover · tick entry / G3 / G4 / G7 deterministic). AI is used only for: dev debates (GPT/Gemini) + probe escalation (observe-only).</span>
+    </div>`;
+  }
+  function debatesTable(rows) {
+    if (!rows || !rows.length) {
+      return `<div class="ref-sec">${setH(0, 'debates (GPT / Gemini)', 0)}<span class="ref-none">none yet</span></div>`;
+    }
+    const trs = rows.map(d => {
+      const gpt = d.gpt ? mdBold(d.gpt) : noneYet();
+      const gem = d.gemini ? mdBold(d.gemini) : noneYet();
+      const dec = d.decision ? mdBold(d.decision) : noneYet();
+      const q = d.question ? mdBold(d.question) : noneYet();
+      return `<tr>
+        <td class="l ai-date">${esc(shortDate(d.date))}</td>
+        <td class="l ai-topic" title="${esc(d.topic || '')}">${esc(d.topic || '—')}</td>
+        <td class="l ai-q" title="${esc(d.question || '')}">${q}</td>
+        <td class="l ai-gpt" title="${esc(d.gpt || '')}">${gpt}</td>
+        <td class="l ai-gem" title="${esc(d.gemini || '')}">${gem}</td>
+        <td class="l ai-dec" title="${esc(d.decision || '')}">${dec}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="ref-sec">${setH(0, 'debates · GPT / Gemini cross-validation', rows.length)}
+      <table class="ai-tbl"><colgroup>
+        <col style="width:6%"><col style="width:18%"><col style="width:21%">
+        <col style="width:19%"><col style="width:18%"><col style="width:18%">
+       </colgroup><thead><tr>
+        <th class="l">DATE</th><th class="l">TOPIC</th><th class="l">QUESTION</th>
+        <th class="l">GPT</th><th class="l">GEMINI</th><th class="l">DECISION</th>
+      </tr></thead><tbody>${trs}</tbody></table></div>`;
+  }
+  function escalationsTable(rows) {
+    if (!rows || !rows.length) {
+      return `<div class="ref-sec">${setH(0, 'probe escalation · observe-only', 0)}<span class="ref-none">none flagged — no ambiguous (would-escalate) probe decisions yet</span></div>`;
+    }
+    const trs = rows.map(e => {
+      const t = e.ts ? new Date(e.ts).toISOString().slice(11, 19) : '—';
+      return `<tr>
+        <td class="l ai-date">${esc(t)}</td>
+        <td class="l">${esc(e.gate || '—')}</td>
+        <td class="l ai-q" title="${esc(e.case || '')}${e.position_id ? ' · pos ' + esc(e.position_id) : ''}">${esc(e.case || '—')}</td>
+        <td class="l ai-dec" title="${esc(e.reason || '')}">${esc(e.status || '—')}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="ref-sec">${setH(0, 'probe escalation · observe-only (would-escalate · no advisor yet)', rows.length)}
+      <table class="ai-tbl"><colgroup>
+        <col style="width:8%"><col style="width:16%"><col style="width:48%"><col style="width:28%">
+       </colgroup><thead><tr>
+        <th class="l">TIME</th><th class="l">GATE</th><th class="l">CASE</th><th class="l">STATUS</th>
+      </tr></thead><tbody>${trs}</tbody></table></div>`;
+  }
+  function renderAi() {
+    const body = $('ai-activity-body'); if (!body) return;
+    ensure('/api/ai_activity', (d) => {
+      if (!$('ai-activity-body')) return;       // pane re-skeletoned
+      if (d == null) { $('ai-activity-body').innerHTML = errorHtml('/api/ai_activity'); return; }
+      $('ai-activity-body').innerHTML =
+        `<div class="ref">
+          ${aiHeaderHtml(d.in_loop_ai_calls)}
+          ${debatesTable(d.debates)}
+          ${escalationsTable(d.escalations)}
+        </div>`;
+    });
+    if (CACHE['/api/ai_activity'] && CACHE['/api/ai_activity'].state === 'loading' && !body.children.length) {
+      body.innerHTML = loadingHtml();
+    }
+  }
+
+  // AI-tab styles (existing #board palette tokens only — no new colours).
+  (function injectAiStyle() {
+    if (document.getElementById('board-ai-style')) return;
+    const s = document.createElement('style');
+    s.id = 'board-ai-style';
+    s.textContent = `
+    #board .ai-hdr {
+      display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px;
+      border: 1px solid rgba(95,135,175,0.22); border-left: 4px solid var(--p-grn);
+      background: rgba(15,19,26,0.55); padding: 5px 10px; font-size: 11px;
+    }
+    #board .ai-hdr .ai-hdr-k { font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--p-dim); }
+    #board .ai-hdr .ai-hdr-v { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--p-wht); }
+    #board .ai-hdr .ai-hdr-v.ai-zero { color: var(--p-grn); }
+    #board .ai-hdr .ai-hdr-note { color: var(--p-gry); font-size: 10px; }
+    #board table.ai-tbl td { vertical-align: top; white-space: normal; line-height: 1.4; }
+    #board table.ai-tbl td.ai-date { color: var(--p-dim); font-size: 9px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    #board table.ai-tbl td.ai-topic { color: var(--p-wht); font-weight: 700; }
+    #board table.ai-tbl td.ai-q { color: var(--p-gry); }
+    #board table.ai-tbl td.ai-gpt { color: var(--p-cyn); }
+    #board table.ai-tbl td.ai-gem { color: var(--p-mag); }
+    #board table.ai-tbl td.ai-dec { color: var(--p-grn); }
+    `;
+    document.head.appendChild(s);
+  })();
+
   // ── override ext.js's P3 placeholder registrations ─────────────────────────
   T.register('build', renderBuild);
   T.register('path', renderPath);
   T.register('learned', renderLearned);
+  T.register('ai', renderAi);
 })();

@@ -11,6 +11,7 @@ Endpoints:
   GET /static/*            → static assets (sphere-render.js, polaris.css)
   GET /static/graph.json   → regenerated snapshot (cached, TTL refresh)
   GET /stream/events       → SSE live entry/exit stream from new fills
+  GET /stream/prices       → SSE per-cell live-mark push (changed cells only)
 
 Usage: python3 -m tools.visualizer.server --db data/polaris_live.sqlite --port 8770
 """
@@ -145,6 +146,33 @@ def _fresh_snapshot() -> dict[str, Any]:
             _snap_cache["data"] = fresh
             _snap_cache["ts"] = time.time()
         return _snap_cache["data"]
+
+
+def _price_marks() -> dict[str, dict[str, Any]]:
+    """Per-open-position live-mark cells, keyed ``venue|symbol|strategy|side``.
+
+    Display-only, READ-ONLY: reads the warm snapshot cache (``_snap_cache``,
+    kept current by ``_bg_refresh_loop`` — the bot holds live WS marks so its
+    open-position price/uPnL/Δ% are the freshest available) and returns ONLY the
+    four price cells the board flashes. No DB query, no sizing / gate / trade
+    logic. Key matches the board's per-row flash key (board_tabs renderPositions
+    + board.js applyPrices). Used by the ``/stream/prices`` SSE diff loop."""
+    data: dict[str, Any] | None = _snap_cache["data"]
+    if data is None:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for p in data.get("positions", []) or []:
+        key = "|".join(
+            str(p.get(k, "")) for k in ("venue", "symbol", "strategy_id", "side")
+        )
+        out[key] = {
+            "key": key,
+            "last_price": p.get("last_price"),
+            "upnl_usd": p.get("upnl_usd"),
+            "delta_pct": p.get("delta_pct"),
+            "upnl_pct": p.get("upnl_pct"),
+        }
+    return out
 
 
 def _resolve_bot_log() -> Path | None:
@@ -616,6 +644,192 @@ def _build_lessons() -> dict[str, Any]:
     }
 
 
+# ── AI activity (display-only) ──────────────────────────────────────────────
+# /api/ai_activity surfaces the ONLY two places AI is used in Polaris — neither
+# touches the trading loop. (1) dev debates (GPT + Gemini cross-validation, the
+# vault/50_research/debates/*.md files) and (2) the probe AI-escalation seam
+# (hardening #11): decisions the bot flagged ``ambiguous`` (composite landed in
+# the HOLD dead band) where a future arbiter *could* escalate — observe-only,
+# the advisor is not built so there is no GPT answer yet. The in-loop trading
+# AI call count is a hard 0 (W3 AI-free cutover, commit aafb635): tick entry /
+# G3 / G4 / G7 are deterministic. This endpoint is pure read-only display; it
+# never reads/writes sizing/risk/orders. Its own slow cache + the ref loop.
+_ai_activity_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_ai_activity_lock = threading.Lock()
+_AI_ACTIVITY_TTL = 60.0
+
+_PROBE_DB_PATH = Path("data/probes.sqlite")
+
+# Heading classifiers for the loosely-formatted debate files. A debate may use
+# English ('### GPT-Pass-1 Position', '## Final Recommendation') or Korean
+# ('## 안건', '## 결정', '## GPT + Gemini — 만장일치 수렴') headings, so each
+# bucket matches a set of substrings rather than one fixed title.
+_DEBATE_Q_RE = re.compile(r"안건|trigger|grounding|^d\d\b|question", re.IGNORECASE)
+_DEBATE_GPT_RE = re.compile(r"\bgpt\b|codex|pass-1|pass-2", re.IGNORECASE)
+_DEBATE_GEMINI_RE = re.compile(r"gemini", re.IGNORECASE)
+_DEBATE_DECISION_RE = re.compile(
+    r"결정|타결|final recommendation|verdict|판정|conclusion|확정|수렴|합의",
+    re.IGNORECASE,
+)
+_DATE_PREFIX_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _debate_sections(body: str) -> list[tuple[str, str]]:
+    """Split markdown body into (heading_text, section_body) by '#'-headings.
+
+    Front-matter must already be stripped. The pre-heading preamble is captured
+    under an empty heading so a file with prose before its first '##' still
+    contributes that text (used as the question fallback)."""
+    sections: list[tuple[str, str]] = []
+    cur_head = ""
+    cur_lines: list[str] = []
+    for raw in body.splitlines():
+        if raw.lstrip().startswith("#"):
+            sections.append((cur_head, "\n".join(cur_lines).strip()))
+            cur_head = raw.lstrip().lstrip("#").strip()
+            cur_lines = []
+        else:
+            cur_lines.append(raw)
+    sections.append((cur_head, "\n".join(cur_lines).strip()))
+    return sections
+
+
+def _summ(text: str, limit: int = 320) -> str:
+    """Collapse a section body to a compact one-liner for the dense table.
+
+    Drops blockquote/bullet markers + blank lines, joins to a single line, and
+    truncates on a word boundary. Display-only — never load-bearing."""
+    parts: list[str] = []
+    for raw in text.splitlines():
+        s = raw.strip().lstrip("->*•").strip()
+        if s and not s.startswith("#"):
+            parts.append(s)
+    joined = " ".join(parts)
+    if len(joined) <= limit:
+        return joined
+    cut = joined[:limit].rsplit(" ", 1)[0]
+    return cut + "…"
+
+
+def _first_match_section(
+    sections: list[tuple[str, str]], pat: re.Pattern[str]
+) -> str:
+    """First non-empty section whose heading matches ``pat`` (summarised)."""
+    for head, body in sections:
+        if head and pat.search(head) and body:
+            return _summ(body)
+    return ""
+
+
+def _parse_debate(text: str, name: str) -> dict[str, str]:
+    """Best-effort extraction of {topic,date,question,gpt,gemini,decision}.
+
+    Format-tolerant: any heading/section shape that doesn't match simply yields
+    an empty field rather than raising — a malformed file never fails the feed.
+    """
+    fm = _parse_frontmatter(text)
+    body = _FRONTMATTER_RE.sub("", text, count=1)
+    title = fm.get("title") or _first_heading_title(text) or name
+    date = fm.get("date") or fm.get("date_created") or ""
+    if not date:
+        m = _DATE_PREFIX_RE.search(name)
+        date = m.group(1) if m else ""
+
+    sections = _debate_sections(body)
+    question = _first_match_section(sections, _DEBATE_Q_RE)
+    if not question:
+        # Fallback: the pre-heading preamble (empty-heading section).
+        for head, sec in sections:
+            if not head and sec:
+                question = _summ(sec)
+                break
+    gpt = _first_match_section(sections, _DEBATE_GPT_RE)
+    gemini = _first_match_section(sections, _DEBATE_GEMINI_RE)
+    decision = _first_match_section(sections, _DEBATE_DECISION_RE)
+    return {
+        "topic": title, "date": date, "question": question,
+        "gpt": gpt, "gemini": gemini, "decision": decision,
+    }
+
+
+def _read_debates(limit: int = 8) -> list[dict[str, str]]:
+    """Newest ``limit`` debate files parsed into row dicts (read-only).
+
+    Parse every file, then sort newest-first by the parsed date (front-matter
+    or filename date prefix), falling back to file mtime so an undated file
+    still orders sensibly. Filename sort alone is not chronological because the
+    files mix ``YYYY-MM-DD_*`` and topic-named (``topic_*.md``) conventions."""
+    dbg = REPO_ROOT / "vault" / "50_research" / "debates"
+    if not dbg.is_dir():
+        return []
+    parsed: list[tuple[str, float, dict[str, str]]] = []
+    for p in dbg.glob("*.md"):
+        with contextlib.suppress(OSError):
+            row = _parse_debate(
+                p.read_text(encoding="utf-8", errors="replace"), p.stem
+            )
+            mtime = p.stat().st_mtime if p.exists() else 0.0
+            parsed.append((row.get("date", ""), mtime, row))
+    parsed.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [row for _, _, row in parsed[:limit]]
+
+
+def _read_escalations(limit: int = 40) -> list[dict[str, Any]]:
+    """Probe ``ambiguous`` would-escalate rows (hardening #11 seam), read-only.
+
+    The advisor (arbiter) is not built, so every row is status='flagged, no
+    advisor yet' — the bot flagged a HOLD-dead-band decision a future AI could
+    escalate, but GPT calls stay 0. The ``ambiguous`` column is added lazily by
+    the probe runtime; a DB without it (or without the file) yields []."""
+    if not _PROBE_DB_PATH.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{_PROBE_DB_PATH}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(probe_decisions)")}
+        if "ambiguous" not in cols:
+            return []
+        rows = conn.execute(
+            "SELECT ts, mode, action, composite_lean, deadband_margin, "
+            "position_id FROM probe_decisions WHERE ambiguous = 1 "
+            "ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for ts, mode, action, lean, margin, pos_id in rows:
+        case = (
+            f"{str(mode or '')}·{str(action or 'HOLD')} "
+            f"lean={float(lean or 0.0):+.2f}"
+        )
+        if margin is not None:
+            case += f" band={float(margin):+.2f}"
+        out.append({
+            "ts": int(ts or 0),
+            "gate": "G6 EXIT-probe",
+            "case": case,
+            "reason": "composite in HOLD dead band (would-escalate)",
+            "status": "flagged, no advisor yet",
+            "position_id": str(pos_id or "")[:22],
+        })
+    return out
+
+
+def _build_ai_activity() -> dict[str, Any]:
+    """AI usage window: in-loop=0 + dev debates + probe escalations. Read-only."""
+    return {
+        "in_loop_ai_calls": 0,
+        "debates": _read_debates(8),
+        "escalations": _read_escalations(40),
+        "ts": time.time(),
+    }
+
+
 def _serve_ref(
     cache: dict[str, Any], lock: threading.Lock, builder: Any
 ) -> dict[str, Any]:
@@ -652,6 +866,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib casing)
+        if self.path.startswith("/stream/prices"):
+            self._serve_price_sse()
+            return
         if self.path.startswith("/stream/events"):
             self._serve_sse()
             return
@@ -715,7 +932,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"lessons err: {exc}")
             return
+        if self.path.startswith("/api/ai_activity"):
+            try:
+                self._json(
+                    _serve_ref(
+                        _ai_activity_cache, _ai_activity_lock, _build_ai_activity
+                    )
+                )
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"ai_activity err: {exc}")
+            return
         super().do_GET()
+
+    def _serve_price_sse(self) -> None:
+        """Per-cell live-mark PUSH stream — emits ONLY the open-position price
+        cells whose value moved since the last frame, as they change.
+
+        A fast internal loop (~250ms) reads the warm snapshot cache's open marks
+        (``_price_marks`` — read-only; the bot's live WS marks are already the
+        freshest value in that cache) and diffs each ``venue|symbol|strategy|side``
+        key against the previously-sent value. Only changed keys are pushed
+        (``data: {prices:[{key,last_price,upnl_usd,delta_pct,upnl_pct}]}``) so the
+        board flashes just those cells the instant they move — no full-table poll,
+        no snapshot/sizing/gate/trade mutation. Cheap: a dict slice + compare. The
+        first frame sends the full current set so a fresh client paints once."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "keep-alive")
+            super(http.server.SimpleHTTPRequestHandler, self).end_headers()
+            sent: dict[str, dict[str, Any]] = {}
+            first = True
+            idle = 0
+            while True:
+                marks = _price_marks()
+                changed: list[dict[str, Any]] = []
+                for key, cell in marks.items():
+                    prev = sent.get(key)
+                    if first or prev != cell:
+                        changed.append(cell)
+                        sent[key] = cell
+                # drop keys for positions that closed (so a re-open re-sends).
+                for key in list(sent.keys()):
+                    if key not in marks:
+                        del sent[key]
+                if changed:
+                    payload = json.dumps({"prices": changed})
+                    self.wfile.write(f"data: {payload}\n\n".encode())
+                    self.wfile.flush()
+                    idle = 0
+                else:
+                    idle += 1
+                    if idle >= 60:  # ~15s heartbeat keeps the connection warm
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        idle = 0
+                first = False
+                time.sleep(0.25)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:  # noqa: BLE001 — best-effort stream
+            pass
 
     def _serve_sse(self) -> None:
         try:
@@ -795,6 +1074,8 @@ def _ref_refresh_loop() -> None:
         (_buildlog_cache, _buildlog_lock, _build_buildlog, _BUILDLOG_TTL),
         (_roadmap_cache, _roadmap_lock, _build_roadmap, _ROADMAP_TTL),
         (_lessons_cache, _lessons_lock, _build_lessons, _LESSONS_TTL),
+        (_ai_activity_cache, _ai_activity_lock, _build_ai_activity,
+         _AI_ACTIVITY_TTL),
     )
     while True:
         now = time.time()
@@ -812,14 +1093,16 @@ def _ref_refresh_loop() -> None:
 
 
 def main() -> None:
-    global _DB_PATH, _SENTINEL_DB_PATH
+    global _DB_PATH, _SENTINEL_DB_PATH, _PROBE_DB_PATH
     parser = argparse.ArgumentParser(description="Polaris space visualizer server")
     parser.add_argument("--db", default="data/polaris_live.sqlite")
     parser.add_argument("--sentinel-db", default="data/sentinel.sqlite")
+    parser.add_argument("--probe-db", default="data/probes.sqlite")
     parser.add_argument("--port", type=int, default=8770)
     args = parser.parse_args()
     _DB_PATH = Path(args.db)
     _SENTINEL_DB_PATH = Path(args.sentinel_db)
+    _PROBE_DB_PATH = Path(args.probe_db)
 
     # Load .env so the read-only Alpaca account probe can see the paper keys.
     _load_dotenv()

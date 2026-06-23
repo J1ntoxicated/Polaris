@@ -20,6 +20,7 @@ import httpx
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.data.ingest import ingest_bars_async, persist_bars
 from polaris.core.data.schema import BAR_INTERVALS, Bar
+from polaris.scripts._production_asset_class import resolve_bar_asset_class
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx.adapter import fetch_okx_bars
@@ -468,13 +469,13 @@ async def ingest_bars_for_focus(
         # P2.1 fix (2026-06-22): partition by the bar's REAL asset_class — the
         # canonical underlying_group_id prefix (crypto/forex/index/commodity/
         # equity) — instead of the OKX-vs-else venue binary that lumped Capital
-        # commodity/index + Alpaca equity into one "forex" baseline bucket. The
-        # venue binary is the defensive fallback only when the group_id lacks a
-        # canonical prefix (malformed/legacy data).
-        gid = b.underlying_group_id
-        ac = (
-            gid.split(":", 1)[0] if ":" in gid
-            else ("crypto" if b.venue == "okx" else "forex")
+        # commodity/index + Alpaca equity into one "forex" baseline bucket.
+        # Hardening #5 (2026-06-23): the prefix is now VALIDATED against the known
+        # set; a missing/garbage prefix is a LOUD, venue-correct, COUNTED fallback
+        # (was a silent venue binary). A well-formed group_id stays byte-identical.
+        ac = resolve_bar_asset_class(
+            venue=b.venue, symbol=b.symbol,
+            group_id=b.underlying_group_id, conn=conn,
         )
         by_class.setdefault(ac, []).append(b)
     total_persisted = 0

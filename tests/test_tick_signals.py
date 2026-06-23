@@ -10,7 +10,10 @@ Spec SSOT: .claude/plans/p5_tick_decision_engine_2026-06-03.md §"신규 모듈"
 
 from __future__ import annotations
 
-from polaris.core.ticks.config import TickEngineConfig
+from polaris.core.ticks.config import (
+    TickEngineConfig,
+    regime_aware_confirm_cfg,
+)
 from polaris.core.ticks.features import compute_tick_features
 from polaris.core.ticks.regime_gate import active_signals, direction_bias, normalize_regime
 from polaris.core.ticks.signals import (
@@ -211,6 +214,73 @@ def test_flow_pressure_silent_on_balanced_book() -> None:
     ]
     feat = compute_tick_features(balanced, NOW, CFG)
     assert flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL, ref_price=100.0, cfg=CFG) is None
+
+
+# ---------------------------------------------------------------------------
+# Seam2 — regime-aware ENTRY confirmation (bad fit tightens; strong still fires)
+# ---------------------------------------------------------------------------
+
+
+def _decaying_imbalance_window(tail_bid: float, tail_ask: float) -> list[TickSample]:
+    """A strong early bid imbalance that DECAYS to ``(tail_bid, tail_ask)`` over
+    the confirm tail — the exhaustion shape. The EWMA ofi (time-weighted) stays
+    above θ_o so flow_pressure ARMS, but the tail follow-through is only marginal:
+    it clears the BASE confirm floor yet fails the chop-TIGHTENED floor."""
+    ticks: list[TickSample] = []
+    mid = 100.0
+    for i in range(20):
+        mid += 0.002
+        if i < 18:
+            bid_size, ask_size = 140.0, 4.0  # strong early → pumps the EWMA ofi
+        else:
+            bid_size, ask_size = tail_bid, tail_ask  # decaying tail
+        ticks.append(
+            _tick(_BASE + i, mid, bid_size=bid_size, ask_size=ask_size,
+                  last_trade_price=mid + 0.05, last_trade_size=4.0)
+        )
+    return ticks
+
+
+def test_flow_pressure_badfit_tightens_confirmation() -> None:
+    """A MARGINAL follow-through fires under a neutral regime but is DELAYED in
+    chop (momentum × chop = -1 raises the confirm bar). This is TIMING precision,
+    not a veto — the same imbalance simply re-arms on a later confirmed tick."""
+    window = _decaying_imbalance_window(tail_bid=66.0, tail_ask=34.0)
+    base_cfg = regime_aware_confirm_cfg(CFG, "unknown")  # neutral → unchanged
+    chop_cfg = regime_aware_confirm_cfg(CFG, "chop")  # bad momentum fit → tighter
+    feat_base = compute_tick_features(window, NOW, base_cfg)
+    feat_chop = compute_tick_features(window, NOW, chop_cfg)
+    # The imbalance ARMS (EWMA ofi past θ_o) in both — the bar is on confirmation.
+    assert feat_base.ofi is not None and feat_base.ofi > CFG.theta_ofi
+    # Neutral regime: the marginal follow-through clears → fires.
+    assert flow_pressure(feat_base, "unknown", venue=VENUE, symbol=SYMBOL,
+                         ref_price=100.0, cfg=CFG) is not None
+    # Chop (bad fit): the raised bar DELAYS this marginal spike (None this tick).
+    assert flow_pressure(feat_chop, "chop", venue=VENUE, symbol=SYMBOL,
+                         ref_price=100.0, cfg=CFG) is None
+
+
+def test_flow_pressure_strong_still_fires_in_badfit_regime() -> None:
+    """flow_not_block: a GENUINE strong imbalance clears even the chop-tightened
+    bar and fires BIDIRECTIONALLY — the bad fit shapes timing, never blocks."""
+    chop_cfg = regime_aware_confirm_cfg(CFG, "chop")
+    for sign, side in ((+1, "long"), (-1, "short")):
+        feat = compute_tick_features(_imbalance_window(sign), NOW, chop_cfg)
+        intent = flow_pressure(feat, "chop", venue=VENUE, symbol=SYMBOL,
+                               ref_price=100.0, cfg=CFG)
+        assert isinstance(intent, TickIntent)
+        assert intent.side == side
+
+
+def test_flow_pressure_goodfit_relaxes_confirmation() -> None:
+    """A GOOD momentum fit (bull_trend, +1) LOWERS the confirm bar — the same
+    marginal follow-through that chop delayed fires sooner (bidirectional lean)."""
+    window = _decaying_imbalance_window(tail_bid=66.0, tail_ask=34.0)
+    good_cfg = regime_aware_confirm_cfg(CFG, "bull_trend")
+    assert good_cfg.confirm_ofi_frac < CFG.confirm_ofi_frac  # bar relaxed
+    feat_good = compute_tick_features(window, NOW, good_cfg)
+    assert flow_pressure(feat_good, "bull_trend", venue=VENUE, symbol=SYMBOL,
+                         ref_price=100.0, cfg=CFG) is not None
 
 
 # ---------------------------------------------------------------------------

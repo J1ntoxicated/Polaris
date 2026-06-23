@@ -16,7 +16,13 @@ inputs are absent. A probe ONLY describes (signed ``lean`` + ``confidence`` +
 
 from __future__ import annotations
 
-from polaris.core.probes import ProbeContext, ProbeKind, ProbeReading, _clamp
+from polaris.core.probes import (
+    ProbeContext,
+    ProbeKind,
+    ProbeReading,
+    ProbeRole,
+    _clamp,
+)
 
 __all__ = [
     "LossDefenseProbe",
@@ -46,6 +52,7 @@ class ProfitTakingProbe:
 
     probe_id: str = "profit_taking"
     kind: ProbeKind = "profit"
+    role: ProbeRole = "Exit"  # SSOT: PROBE_ROLE_REGISTRY (hardening #8)
 
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
         # ABSTAIN until the position has shown a meaningful favorable excursion.
@@ -76,6 +83,7 @@ class LossDefenseProbe:
 
     probe_id: str = "loss_defense"
     kind: ProbeKind = "loss"
+    role: ProbeRole = "Exit"  # SSOT: PROBE_ROLE_REGISTRY (hardening #8)
 
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
         # ABSTAIN when there is no adverse excursion to defend against.
@@ -109,6 +117,7 @@ class TechnicalProbe:
 
     probe_id: str = "technical"
     kind: ProbeKind = "technical"
+    role: ProbeRole = "Position"  # SSOT: PROBE_ROLE_REGISTRY (hardening #8)
 
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
         ticks = ctx.recent_ticks
@@ -146,6 +155,7 @@ class SessionHoursProbe:
 
     probe_id: str = "session_hours"
     kind: ProbeKind = "session"
+    role: ProbeRole = "Exit"  # SSOT: PROBE_ROLE_REGISTRY (hardening #8)
 
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
         secs = ctx.seconds_to_close

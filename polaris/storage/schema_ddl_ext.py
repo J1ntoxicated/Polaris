@@ -677,3 +677,24 @@ DDL_BENCHMARK_RESULTS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_benchmark_results_run
     ON benchmark_results(run_id, tier);
 """
+
+# Measurement-reset baseline (Jin 2026-06-23) — a FORWARD measurement window that
+# restarts clean at each main-logic change. One row per stamped reset: the ts the
+# new logic went live, the real-fee-net equity baseline at that ts, a human label,
+# and the git sha of the batch. The since-reset rollup measures only trades OPENED
+# at/after the LATEST reset_ts. OBSERVABILITY-ONLY: never read by sizing/gating/
+# exit; old positions/fills are NEVER deleted — only the measurement window moves.
+DDL_MEASUREMENT_RESETS = """
+CREATE TABLE IF NOT EXISTS measurement_resets (
+    reset_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reset_ts INTEGER NOT NULL,
+    equity_baseline_usd REAL NOT NULL DEFAULT 0.0,
+    label TEXT NOT NULL DEFAULT '',
+    git_sha TEXT NOT NULL DEFAULT ''
+);
+"""
+
+DDL_MEASUREMENT_RESETS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_measurement_resets_ts
+    ON measurement_resets(reset_ts DESC);
+"""

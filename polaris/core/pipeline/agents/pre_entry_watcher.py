@@ -18,6 +18,7 @@ Aggressive bias preserved — fast-path PROCEED stays unchanged.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -62,6 +63,8 @@ __all__ = [
     "pre_entry_watcher_gate",
 ]
 
+
+logger = logging.getLogger(__name__)
 
 _DECISION_TOKENS = {"PROCEED", "KILL"}
 # Q6 G4 token guidance — PROCEED|KILL response stays under ~150 tokens.
@@ -262,6 +265,15 @@ async def pre_entry_watcher_gate(
         now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
         technical = technical_watch_decision(
             g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
+        )
+        logger.info(
+            "[gate/G4-watcher] AI-free decision=%s flags=%s reason=%s "
+            "regime=%s sym=%s (deterministic primary, GPT=0)",
+            technical.decision.name,
+            list(technical.flags) if technical.flags else [],
+            technical.reason,
+            str(ctx.payload.get("regime", "")),
+            str(validated.get("symbol", validated.get("ticker", "?"))),
         )
         if technical.decision == GateDecision.KILL:
             return GateResult(

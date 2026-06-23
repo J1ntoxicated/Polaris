@@ -44,18 +44,23 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from polaris.core.live_recalc.exit_engine import MfeProtectSchedule
+from polaris.core.live_recalc.exit_engine import (
+    MfeProtectSchedule,
+    tick_micro_broken,
+)
 from polaris.core.live_recalc.regime_flip import fetch_regime
 from polaris.core.pipeline._sizer_payload import (
     _read_portfolio_state,
     _read_strategy_risk_state,
 )
+from polaris.core.regime_fit import exit_tightness, regime_fit
 from polaris.core.sizing import SignalIntent, compute_size
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import (
     TICK_ENGINE_OWNED_VENUES,
     TickEngineConfig,
+    regime_aware_confirm_cfg,
     venue_allowed_signals,
 )
 from polaris.core.ticks.features import compute_tick_features
@@ -69,6 +74,7 @@ from polaris.core.ticks.signals import (
 from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_pipeline import reserve_and_submit
+from polaris.scripts._production_probe_attach import observe_probes
 from polaris.scripts._production_recalc import ActivePositionRow
 from polaris.scripts._production_recalc_exit import (
     assess_mode_for_position,
@@ -219,7 +225,7 @@ _MFE_PROTECT_MOMENTUM_SIGNALS: frozenset[str] = frozenset({_FLOW_PRESSURE, _BURS
 
 
 def _mfe_protect_schedule(
-    strategy_id: str, cfg: TickEngineConfig
+    strategy_id: str, cfg: TickEngineConfig, *, regime: str | None = None
 ) -> MfeProtectSchedule | None:
     """MFE-protect harvest schedule for a tick MOMENTUM strategy, or ``None``.
 
@@ -232,13 +238,26 @@ def _mfe_protect_schedule(
     ``None`` here (it harvests via its scalp profit target). An unmapped id →
     ``None`` → byte-identical module-default exit. EXPECTANCY, not a throttle: the
     schedule only tightens the stop toward profit.
+
+    Seam3 (regime-fit): a BAD momentum fit (chop churn = -1) TIGHTENS the harvest
+    — the BEP/protect thresholds are pulled IN (divided by ``exit_tightness > 1``)
+    so a mis-regime trade banks its excursion sooner; a GOOD fit LOOSENS them
+    (LET_RUN). This only ratchets the protective stop TOWARD profit — it never
+    reduces size, never blocks/vetoes entry, never loosens below the G6 -1.0R rail
+    (run_precise_exit takes the protection-tighter of trail vs floor). The lock_r
+    floor is preserved (a tightened schedule never locks LESS positive R).
     """
     if strategy_id not in _MFE_PROTECT_MOMENTUM_SIGNALS:
         return None
+    # Momentum family (only momentum signals reach here). exit_tightness > 1 on a
+    # bad fit, < 1 on a good fit, 1.0 neutral / unknown regime → byte-identical.
+    t = exit_tightness(regime_fit("momentum", regime))
     return MfeProtectSchedule(
-        bep_at_r=cfg.mfe_bep_r,
-        protect_at_r=cfg.mfe_protect_r,
-        lock_r=cfg.mfe_protect_lock_r,
+        bep_at_r=cfg.mfe_bep_r / t,
+        protect_at_r=cfg.mfe_protect_r / t,
+        # Lock AT LEAST the configured positive R — a tighter schedule never banks
+        # LESS (ratchet-toward-profit invariant); a looser fit keeps the base lock.
+        lock_r=cfg.mfe_protect_lock_r * max(1.0, t),
     )
 
 
@@ -290,6 +309,12 @@ class TickEngineState:
     cooldowns: dict[tuple[str, str], float] = field(default_factory=dict)
     family_by_position: dict[str, str] = field(default_factory=dict)
     entry_ref_by_position: dict[str, float] = field(default_factory=dict)
+    # Consecutive-broken tick count per position for the adaptive-thesis SUSTAINED
+    # gate: a single noisy tick must not flip a fresh winner to BROKEN, so the
+    # re-map only treats the thesis as broken once the streak clears the floor.
+    # Incremented when this tick's micro signal opposes the position, reset to 0
+    # otherwise; popped on close (alongside family/entry_ref).
+    thesis_broken_streak_by_position: dict[str, int] = field(default_factory=dict)
     decisions: int = 0
     orders: int = 0
     shadow_logs: int = 0
@@ -413,6 +438,7 @@ def _sized_notional(
         leverage=1.0,
         product_class=stream.product_class,
         stream_id=stream.stream_id,
+        signal_family=intent.signal_family,
     )
     equity = production_default_equity_usd()
     risk_state = _read_strategy_risk_state(
@@ -460,7 +486,25 @@ def _collect_intents(
     ``now_ts`` is epoch seconds (same domain as ``TickSample.ts``) for the
     feature freshness gate.
     """
-    feat = compute_tick_features(window, now_ts, eng.cfg)
+    # Seam2 (regime-fit): the flow_pressure ENTRY confirmation bar is regime-aware
+    # — a bad momentum fit (chop churn) raises the post-spike follow-through floor
+    # (a DELAY, not a veto); only ``flow_confirmed`` reads these knobs so the other
+    # signals are untouched. flow_not_block: a strong genuine imbalance still clears.
+    feat_cfg = regime_aware_confirm_cfg(eng.cfg, regime)
+    logger.info(
+        "[regime-fit/seam2-confirm] %s:%s regime=%s momo_fit=%+.2f "
+        "confirm_ticks %d->%d confirm_ofi_frac %.3f->%.3f "
+        "(entry confirmation DELAY, not a veto)",
+        venue,
+        symbol,
+        regime,
+        regime_fit("momentum", regime),
+        eng.cfg.confirm_ticks,
+        feat_cfg.confirm_ticks,
+        eng.cfg.confirm_ofi_frac,
+        feat_cfg.confirm_ofi_frac,
+    )
+    feat = compute_tick_features(window, now_ts, feat_cfg)
     # --- eval telemetry: window sufficiency + peak feature magnitudes -----
     eng.evaluated += 1
     if feat.burst_z is None:
@@ -478,6 +522,14 @@ def _collect_intents(
     # None there anyway (sizes/tape zeroed), so this only skips dead evals, never
     # blocks an edge (flow_not_block). An unlisted venue keeps the full set.
     active = active_signals(regime) & venue_allowed_signals(venue)
+    logger.info(
+        "[tick-gate/regime-active] %s:%s regime=%s active_signals=%s "
+        "(membership only — regime is NOT a tradeable yes/no gate)",
+        venue,
+        symbol,
+        regime,
+        sorted(active),
+    )
     ref_price = float(window[-1].mid) if window else 0.0
     intents: list[TickIntent] = []
     for signal_id in active:
@@ -488,8 +540,36 @@ def _collect_intents(
             feat, regime, venue=venue, symbol=symbol,
             ref_price=ref_price, cfg=eng.cfg,
         )
-        if intent is not None:
-            intents.append(intent)
+        if intent is None:
+            logger.info(
+                "[tick-gate/signal] %s:%s sig=%s verdict=NO_FIRE regime=%s "
+                "(calm / sub-threshold / unconfirmed — DELAY, not a veto)",
+                venue, symbol, signal_id, regime,
+            )
+            continue
+        logger.info(
+            "[tick-gate/signal] %s:%s sig=%s verdict=FIRE side=%s family=%s "
+            "regime=%s",
+            venue, symbol, signal_id, intent.side,
+            intent.signal_family, regime,
+        )
+        # --- upstream long-only short gate (dead-path hygiene) ----------
+        # A 'short' whose only candidate venue is long-only (OKX spot /
+        # Alpaca equity) is UNEXECUTABLE — never build it. Moving the check
+        # here (upstream of construction) stops the loop generating-then-
+        # dropping it (the per-decision drop at _try_open is kept as a
+        # backstop). Direction-neutral: removes no executable trade (spot/
+        # equity shorts cannot be placed); a long is never gated. NOT a
+        # flow_not_block violation — no tradeable edge is suppressed.
+        if _drop_for_bidirectional(venue, intent.side):
+            eng.drops_short += 1
+            logger.debug(
+                "[tick-engine] drop short %s:%s sig=%s (long-only venue, "
+                "pre-construction)",
+                venue, symbol, intent.signal_id,
+            )
+            continue
+        intents.append(intent)
     if not intents and feat.burst_z is not None:
         eng.dry += 1  # had real features but no signal armed (calm / sub-θ)
     return intents
@@ -777,12 +857,13 @@ async def _run_exits(
                 lookup_regime=lookup_regime, gpt_client=None, phase=phase,
                 real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-                close_reason=reason,
+                close_reason=reason, cadence="tick",
             )
             if closed:
                 eng.scalp_exits += 1
                 eng.family_by_position.pop(position_id, None)
                 eng.entry_ref_by_position.pop(position_id, None)
+                eng.thesis_broken_streak_by_position.pop(position_id, None)
                 logger.info(
                     "[tick-engine/scalp-exit] %s:%s trade_id=%s reason=%s "
                     "pnl_r=%.2f", trade.venue, trade.symbol, position_id,
@@ -839,11 +920,12 @@ async def _run_exits(
                     lookup_regime=lookup_regime, gpt_client=None, phase=phase,
                     real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
                     capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-                    close_reason="flow_decay",
+                    close_reason="flow_decay", cadence="tick",
                 )
                 if closed:
                     eng.family_by_position.pop(position_id, None)
                     eng.entry_ref_by_position.pop(position_id, None)
+                    eng.thesis_broken_streak_by_position.pop(position_id, None)
                     logger.info(
                         "[tick-engine/flow-decay-exit] %s:%s trade_id=%s "
                         "pnl_r=%.2f ofi=%s confirmed=%s",
@@ -881,6 +963,17 @@ async def _run_exits(
             tick_regime: str | None = lookup_regime(conn, trade.venue, trade.symbol)
         except Exception:  # noqa: BLE001 — regime read must never break the exit
             tick_regime = None
+        # SUSTAINED gate: maintain the consecutive-broken streak so a single noisy
+        # tick never flips a fresh winner to BROKEN. Increment when THIS tick's
+        # micro signal opposes the position (deadband-gated), reset to 0 otherwise.
+        mode_drift = _window_mid_drift(mode_window)
+        if tick_micro_broken(
+            side=trade.side, momentum_drift=mode_drift, ofi=mode_feat.ofi
+        ):
+            row_streak = eng.thesis_broken_streak_by_position.get(position_id, 0) + 1
+        else:
+            row_streak = 0
+        eng.thesis_broken_streak_by_position[position_id] = row_streak
         mode = assess_mode_for_position(
             strategy_id=trade.strategy_id, side=trade.side,
             mfe_r=row_mfe_r, mae_r=row_mae_r, pnl_r=pnl_r,
@@ -888,12 +981,38 @@ async def _run_exits(
             # (newest-oldest)/oldest — a STABLE direction, not the noisy
             # instantaneous burst_z sign (an oscillation downtick must not flip a
             # drifting winner to BROKEN). 0.0 on an empty window → no break.
-            momentum_drift=_window_mid_drift(mode_window),
+            momentum_drift=mode_drift,
             atr_slope=0.0,
             ofi=mode_feat.ofi, flow_confirmed=mode_feat.flow_confirmed,
             regime=tick_regime, entry_regime=entry_regime,
             held_seconds=held_seconds,
             horizon_seconds=max(held_seconds, 60),
+            broken_streak=row_streak,
+        )
+        _ex_family = eng.family_by_position.get(position_id, "momentum")
+        logger.info(
+            "[regime-fit/seam3-exit] %s:%s trade_id=%s family=%s tick_regime=%s "
+            "fit=%+.2f exit_tightness=%.3f mode=%s pnl_r=%.2f mfe_r=%.2f "
+            "broken_streak=%d (harvest tighten = precise exit, ratchet-to-profit)",
+            trade.venue, trade.symbol, position_id, _ex_family, tick_regime,
+            regime_fit(_ex_family, tick_regime),
+            exit_tightness(regime_fit(_ex_family, tick_regime)),
+            mode, pnl_r, row_mfe_r, row_streak,
+        )
+        # ADR-012 / hardening #2 — PROBE → ENGINE → TUNING-LOG (OBSERVE-ONLY) on
+        # the TICK exit pass, mirroring the bar recalc attach. Pure/sync, called
+        # INLINE here (no await) so the FSM read-modify-write atomicity in
+        # run_precise_exit below is untouched. Threads NOTHING into the exit
+        # (mark_source='tick' is the only difference vs the bar attach) and is
+        # fully fail-open — a None sidecar / raising probe / fail-open writer
+        # never breaks the tick. The hard rails BYPASS this framework. This is
+        # the dataset the rank-4 / rank-16 calibration readers consume.
+        observe_probes(
+            state=state, pos=pos, side=trade.side, entry_price=entry_price,
+            last_price=last_mid, atr_pct=max(atr_pct, 1e-4),
+            entry_atr_pct=entry_atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
+            regime=tick_regime or "chop", now_ts=now_ts, run_id=uuid.uuid4().hex,
+            mark_source="tick",
         )
         closed = await run_precise_exit(
             conn=conn, state=state, pos=pos, side=trade.side,
@@ -909,12 +1028,21 @@ async def _run_exits(
             trail_mult=_momentum_trail_mult(trade.strategy_id),
             # flow_pressure also ratchets the stop to BEP at +MFE and locks
             # positive R (capturing the +0.67R avg MFE, cutting the give-back);
-            # other momentum strategies → None → byte-identical.
-            mfe_protect=_mfe_protect_schedule(trade.strategy_id, eng.cfg),
+            # other momentum strategies → None → byte-identical. Seam3 (regime-fit):
+            # a bad momentum fit (chop) tightens the harvest (bank sooner = precise
+            # exit); good fit loosens (LET_RUN). Ratchets toward profit only.
+            mfe_protect=_mfe_protect_schedule(
+                trade.strategy_id, eng.cfg, regime=tick_regime
+            ),
+            # Hardening #7: this is the sub-second tick exit pass — tag the close
+            # 'tick' so the close_reason × cadence rollup measures the bar-vs-tick
+            # thesis-cut asymmetry. Measurement only; no exit-decision change.
+            cadence="tick",
         )
         if closed:
             eng.family_by_position.pop(position_id, None)
             eng.entry_ref_by_position.pop(position_id, None)
+            eng.thesis_broken_streak_by_position.pop(position_id, None)
 
 
 def _window_atr_pct(writer: Any, instrument_id: str) -> float:

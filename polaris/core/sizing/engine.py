@@ -33,6 +33,7 @@ from polaris.core.learners.base import (
 )
 from polaris.core.learners.regime import RegimeMultLearner
 from polaris.core.learners.session import SessionMultLearner
+from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
@@ -113,6 +114,12 @@ class SignalIntent:
     # a sizing multiplier (9-stack chain untouched).
     product_class: str = ""
     stream_id: str = ""
+    # Signal family (momentum / reversion) for regime-fit conviction shaping.
+    # Default "momentum" (the trend-following majority); the bar path derives it
+    # from the correlation-group bucket, the tick path threads TickIntent.family.
+    # Folded into the SAME single continuous scalar via regime_scalar (seam1) —
+    # NOT a new multiplier (9-stack count unchanged).
+    signal_family: str = "momentum"
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +372,33 @@ def compute_size(
         )
     else:
         cont = continuous_scalar(intent.signal_strength)
+
+    # (1b) regime-fit conviction shaping — bidirectional, folded into the SAME
+    # single continuous scalar (NOT a new multiplier; the 9-stack count is
+    # unchanged). Good (family × regime) fit boosts toward CONT_SCALAR_MAX, bad
+    # fit shrinks toward the CONT_SCALAR_MIN FLOOR (never 0 — anti-collapse). The
+    # re-clamp keeps it inside the existing band, so it sets the VALUE of the one
+    # scalar exactly like signal_strength / vol_targeted_scalar (flow_not_block:
+    # a bad-regime signal still sizes at the 0.75 floor, never zero, never a veto).
+    _rf_cont_pre = cont
+    _rf_fit = regime_fit(intent.signal_family, intent.regime)
+    _rf_scalar = regime_scalar(_rf_fit)
+    cont = max(
+        CONT_SCALAR_MIN,
+        min(CONT_SCALAR_MAX, cont * _rf_scalar),
+    )
+    logger.info(
+        "[regime-fit/seam1-size] sym=%s strat=%s family=%s regime=%s "
+        "fit=%+.2f scalar=%.3f cont %.4f->%.4f (ONE-scalar fold, 9-stack intact)",
+        intent.symbol,
+        intent.strategy,
+        intent.signal_family,
+        intent.regime,
+        _rf_fit,
+        _rf_scalar,
+        _rf_cont_pre,
+        cont,
+    )
 
     # (2) tier amplifier
     tier_amp = resolve_tier_amplifier(

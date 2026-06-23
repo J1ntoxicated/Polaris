@@ -4,6 +4,22 @@ Spec source:
 - vault/30_components/layer-2-per-gate-pipeline.md (Q3 G1 focus selector)
 - vault/10_decisions/ADR-004-per-gate-ai-pipeline.md (Universe Scanner)
 - .claude/plans/ai_conductor_architecture_2026-05-30.md (P1 GPT→deterministic cutover)
+- vault/50_research/g1_universe_gate_audit_2026-06-23.md (B3 #5 — dual-G1 demote)
+
+NON-AUTHORITATIVE STRUCTURAL PASS-THROUGH (B3 #5, audit 2026-06-23).
+The REAL, authoritative G1 universe/eligibility selection lives in **Layer 0** —
+``rank_active_universe`` (continuous-rank active set) feeding
+``compute_dynamic_focus`` (per-venue z-score focus ranking). THIS per-signal gate
+is invoked AFTER a signal already exists for an active-set symbol; it merely
+re-ranks the ≤50-row active set by a *second, different* (log1p-vol) weighting and
+emits a ``focus`` echo under its payload. **No downstream gate consumes that
+focus** (G2 reads only ``raw_signal``), so this gate neither selects the universe
+nor gates the signal — it is an always-PASS structural pass-through kept for the
+display-only ``focus_n`` telemetry. It is labelled ``focus_source=
+"g1_gate_nonauthoritative"`` so a reader never mistakes the vestigial gate for the
+real selector. Demote-and-document is behavior-neutral (the focus payload is
+unchanged); unifying the two G1s into one SSOT is a separate Jin-surface arch
+call. flow_not_block: this gate has never blocked / cut / vetoed anything.
 
 Behavior:
 - Input: active universe rows (``venue`` / ``symbol`` / ``vol_24h_usd`` +
@@ -61,11 +77,18 @@ __all__ = [
     "DEFAULT_FOCUS_N",
     "FOCUS_MAX",
     "FOCUS_MIN",
+    "FOCUS_SOURCE_NONAUTHORITATIVE",
     "RankWeights",
     "deterministic_top_n",
     "scored_top_n",
     "universe_scanner_gate",
 ]
+
+# B3 #5 (audit 2026-06-23): the ``focus_source`` tag on this gate's FRESH emit —
+# marks the focus list as a non-authoritative display echo (the authoritative G1
+# selection is Layer-0 ``rank_active_universe`` / ``compute_dynamic_focus``), so
+# no reader mistakes this vestigial pass-through for the real universe selector.
+FOCUS_SOURCE_NONAUTHORITATIVE: Final[str] = "g1_gate_nonauthoritative"
 
 FOCUS_MIN: Final[int] = 12
 FOCUS_MAX: Final[int] = 48
@@ -249,11 +272,15 @@ async def universe_scanner_gate(
     focus_cache: G1FocusCache | None = None,
     now_ts: int | None = None,
 ) -> GateResult:
-    """Gate 1 dispatcher — deterministic scored-ranker focus selector.
+    """Gate 1 dispatcher — NON-AUTHORITATIVE structural pass-through (B3 #5).
 
     Reads ``universe`` from ``ctx.payload`` if not passed explicitly (test
-    injection). Always returns a ``PASS`` GateResult carrying a ``focus`` list
-    under ``payload`` — the orchestrator passes it forward.
+    injection). ALWAYS returns ``PASS`` carrying a ``focus`` list under
+    ``payload`` — but that focus is a display-only echo (tagged ``focus_source=
+    FOCUS_SOURCE_NONAUTHORITATIVE`` on a fresh emit / ``"cache"`` on reuse) that
+    NO downstream gate consumes; the authoritative G1 universe/eligibility
+    selection is Layer-0 ``rank_active_universe`` / ``compute_dynamic_focus``.
+    This gate selects nothing and gates nothing (it has never KILLed).
 
     RECOMPUTE trigger (efficiency only; reuses ``should_call_gpt_g1``): when a
     ``focus_cache`` is supplied the ranking is recomputed only on a cold cache /
@@ -289,7 +316,7 @@ async def universe_scanner_gate(
     return GateResult(
         decision=GateDecision.PASS,
         next_gate=GATE_STRATEGY_SIGNAL,
-        payload={"focus": focus},
+        payload={"focus": focus, "focus_source": FOCUS_SOURCE_NONAUTHORITATIVE},
         model_used="python",
         latency_ms=0,
     )

@@ -18,13 +18,14 @@ config object carries the whole knob set.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 __all__ = [
     "TICK_ENGINE_OWNED_VENUES",
     "TICK_ENGINE_VENUE_SIGNALS",
     "TickEngineConfig",
     "env_shadow_enabled",
+    "regime_aware_confirm_cfg",
     "tick_engine_enabled",
     "tick_engine_owns_okx",
     "venue_allowed_signals",
@@ -273,3 +274,31 @@ class TickEngineConfig:
         )
     )
     conviction_ref_revert: float = 3.0  # |overshoot_z| this far past θ_r saturates
+
+
+def regime_aware_confirm_cfg(
+    cfg: TickEngineConfig, regime: str | None
+) -> TickEngineConfig:
+    """Return ``cfg`` with the flow_pressure ENTRY-confirmation bar regime-shaped.
+
+    Seam2 of regime-fit (flow_not_block): the EXISTING post-spike follow-through
+    gate (``flow_confirmed``, computed in ``compute_tick_features`` from
+    ``confirm_ofi_frac``/``confirm_ticks``) is made regime-aware. A BAD momentum
+    fit (e.g. momentum × chop = -1, the churn case) RAISES the bar
+    (``confirm_tightness > 1`` → higher tail-OFI floor + a longer confirm window)
+    so a weak spike must show MORE genuine follow-through before it fires — a
+    DELAY to a confirmed tick, NEVER a veto / skip / size-cut. A GOOD fit lowers
+    the bar (fires sooner). Only ``flow_confirmed`` reads these knobs, so
+    burst_rider / micro_reversion are untouched. A genuine strong imbalance still
+    clears the raised bar and fires bidirectionally.
+    """
+    from polaris.core.regime_fit import confirm_tightness, regime_fit
+
+    t = confirm_tightness(regime_fit("momentum", regime))
+    if t == 1.0:
+        return cfg
+    frac = cfg.confirm_ofi_frac * t
+    # confirm_ticks scales with tightness (more ticks of follow-through on a bad
+    # fit); round to an int and keep the ≥3 floor the follow-through reader needs.
+    ticks = max(3, round(cfg.confirm_ticks * t))
+    return replace(cfg, confirm_ofi_frac=frac, confirm_ticks=ticks)

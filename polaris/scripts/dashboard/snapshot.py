@@ -22,6 +22,7 @@ Per-venue values are exposed on the snapshot for the renderer's split label.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Final
@@ -63,7 +64,9 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _per_stream_summary,
     _read_positions,
     _recent_gate_events,
+    _since_reset_rollup,
     _strategy_descriptions,
+    _strategy_since_reset,
     _strategy_stats,
     _ticker_stats,
 )
@@ -139,15 +142,28 @@ def read_probe_events(
     return events[:limit]
 
 
+_POS_ID_RE: Final = re.compile(
+    r"_(okx|capital|alpaca)_(.+)_\d+$", re.IGNORECASE
+)
+
+
 def _venue_ticker(position_id: str) -> tuple[str, str]:
-    """Best-effort (venue, ticker) from ``venue:SYMBOL#n`` — raw id on no match."""
+    """Best-effort (venue, ticker) from a position id — raw id on no match.
+
+    Live position ids are ``pos_<hash>_<venue>_<SYMBOL>_<ts>`` (e.g.
+    ``pos_3397a5959a0044a0_capital_US500_1782200852`` →  ``capital`` / ``US500``;
+    ``pos_tick_flow_pressu_okx_LTC-USDT_1782201222`` → ``okx`` / ``LTC-USDT``).
+    The symbol may itself contain ``_`` (``OIL_CRUDE``), so anchor on the known
+    venue token and the trailing numeric timestamp. Also tolerates the legacy
+    ``venue:SYMBOL#n`` form. Falls back to the raw id when nothing matches."""
     pid = str(position_id)
-    venue = ""
-    ticker = pid
+    m = _POS_ID_RE.search(pid)
+    if m:
+        return m.group(1).lower(), m.group(2)
     if ":" in pid:
         venue, rest = pid.split(":", 1)
-        ticker = rest.split("#", 1)[0]
-    return venue, ticker
+        return venue, rest.split("#", 1)[0]
+    return "", pid
 
 
 def _probe_reading_events(
@@ -359,6 +375,11 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         )
         strategy_stats = _strategy_stats(conn, now_s=now_s, positions=positions)
         ticker_stats = _ticker_stats(conn, now_s=now_s)
+        # Measurement-reset baseline (Jin 2026-06-23) — forward edge over trades
+        # OPENED at/after the latest measurement_resets.reset_ts. None when no
+        # reset stamped → the board falls back to all-time. Display-only.
+        since_reset = _since_reset_rollup(conn)
+        strategy_since_reset = _strategy_since_reset(conn)
         cell_top, cell_bot, eligible_n = _cell_top_bottom(conn, cell_mult=cell_mult, n=5)
         # E2 REGIME tab — per-(venue, group) live regime + confidence + evidence.
         # A (venue, symbol)→regime map labels the TRADES tab rows (best-effort:
@@ -448,8 +469,10 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             streams=streams,
             rotation_count=rotation.rotation_count,
             session_forced_exit_count=rotation.session_forced_exit_count,
+            reconciled_realized_usd=rotation.reconciled_realized_usd,
             reconciled_loss_usd=rotation.reconciled_loss_usd,
             reconciled_loss_n=rotation.reconciled_loss_n,
+            asset_class_fallback_n=rotation.asset_class_fallback_n,
             last_rotation=rotation.last_rotation,
             confidence=confidence,
             regime_states=regime_states,
@@ -458,6 +481,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             recent_gate_events=recent_gate_events,
             strategy_descriptions=strategy_descriptions,
             probe_events=probe_events,
+            since_reset=since_reset,
+            strategy_since_reset=strategy_since_reset,
         )
     finally:
         conn.close()

@@ -20,6 +20,7 @@ tags: [now, tier-0]
 - ✅ **#3 코모디티 이벤트 신호 (`69f5e22`)**: Jin "이벤트 기반(EIA/USDA/OPEC)" 선택. EIA/USDA=키 필요(.env 없음)→**CFTC COT**(무료 Socrata, 키불요, 우리 22종중 19 커버)로 빌드. `CFTCCotCollector`=대형투기(noncomm) 순포지션을 **각 contract 자기 ~3년 분포 대비 percentile**(net_spec_pctile). **per-contract 정규화 load-bearing**: 적대리뷰가 **blocker 적발**(절대임계값은 구조적 net-long 편향→GOLD 영구bull/WTI 영구dead)→percentile 수정+라이브 재검증(GOLD 중앙값→중립, WTI→bear가능, 대칭 7불/4베어). fuser commodity 브랜치만(타 asset-class byte-identical), regime 힌트=signal-only(size/block/halt 없음). 임계값/momentum reading /debate flag.
 - **⏳ #4 OKX 거래 적음** (다음): us.okx.com=US컴플라이언스 `51155`로 변동성알트 44 영구blocklist(정당, throttle아님). 거래가능 페어∩신호 교집합 얇음(전략이 변동성알트 발화=US제한, 메이저 BTC/ETH 잔잔=미발화). **venue 제약 근본**→거래가능 majors 전략튜닝 or 유니버스 재설계 필요(미착수, 오픈 설계).
 - **잔존/후속**: fx_range_fade 1R heuristic & COT 임계값 /debate 캘리브; WAL creep(일일 재기동); Alpaca 페니주 유니버스 품질; 위성 재배색(`e54aeb8`) 하드리로드 필요. `project_ai_conductor_direction`·`project_operating_thesis_surgical_strike`·`project_vault_3axis_secondbrain`.
+- **bar↔tick thesis-break 비대칭 (의도, 하드닝 #7 2026-06-23)**: bar-recalc(~5s)는 broken-바 1개를 confirmed로 카운트(`_DEFAULT_BROKEN_STREAK`=`EXIT_THESIS_BROKEN_TICKS` floor — 느린 케이던스라 단일 바 신호=확증), tick(sub-second)은 SUSTAINED gate로 N개 연속 broken-틱 요구(단일 노이즈 틱이 신선한 winner를 BROKEN으로 안 뒤집게). **측정 우선**: close record에 `positions.exit_cadence`(bar/tick) 태그 + since-reset rollup에 close_reason×cadence split 추가. bar-path thesis_cut율이 tick 대비 확증 elevated일 때만 bar에 2-바 연속-broken streak 스레딩(CUT을 LESS 발화=winner 흐르게, throttle 아님) — 데이터 확증 전까지 보류.
 
 ## 불변 (나침반 — 항상 유효)
 
@@ -46,4 +47,4 @@ tags: [now, tier-0]
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-23 07:00 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-23 14:38 (paper=True, full_pipeline=True)

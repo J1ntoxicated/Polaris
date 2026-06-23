@@ -243,15 +243,18 @@ def _gate_headline(
             m,
         )
 
-    if gid == 6:  # Monitor — N monitored + mode mix.
+    if gid == 6:  # Monitor — LIVE open positions only (was windowed event count).
         counts = _decision_counts(evs)
-        hold = counts.get("HOLD", 0)
         adj = counts.get("ADJUST_EXIT", 0)
         ex = counts.get("EXIT_NOW", 0)
         swap = counts.get("SWAP_STRATEGY", 0)
-        m = {"decisions": counts}
+        open_rows = _safe_query(
+            conn, "SELECT COUNT(*) FROM positions WHERE status = 'open'"
+        )
+        open_n = int(open_rows[0][0]) if open_rows and open_rows[0][0] else 0
+        m = {"decisions": counts, "open_positions": open_n, "window_checks": len(evs)}
         return (
-            f"{len(evs)} monitored · hold {hold} / adjust {adj}"
+            f"{open_n} monitored · {len(evs)} checks · adjust {adj}"
             f" / exit {ex}" + (f" / swap {swap}" if swap else ""),
             m,
         )
@@ -793,10 +796,37 @@ def _rotation_telemetry(
         except (ValueError, TypeError, AttributeError):
             est = 0.0
         reconciled_loss_usd += est
+    # Hardening #1 (2026-06-23): the PRIMARY drift figure is the ACTUAL realized
+    # Σ fills.pnl_usd over the reconciled positions' close legs — real money the
+    # bot lost to tracking failures, not the mae_r×risk estimate above. The est
+    # stays the labeled secondary (some reconciles have no close fill). Still a
+    # SEPARATE counter — never mixed into PF/WR/R; the headline surfaces exclude
+    # these rows (the LEFT JOIN in _daily_realised_pnl et al).
+    realized_rows = _safe_query(
+        conn,
+        """SELECT COALESCE(SUM(f.pnl_usd), 0.0)
+           FROM fills f
+           JOIN positions p
+             ON p.position_id = f.contribution_id AND f.is_close = 1
+           WHERE p.status = 'reconciled'""",
+    )
+    reconciled_realized_usd = (
+        float(realized_rows[0][0] or 0.0) if realized_rows else 0.0
+    )
+    # Hardening #5 (2026-06-23): count of distinct instruments that fell back to a
+    # venue-correct asset_class (the idempotent ``asset_class_fallback`` rows the
+    # held-position / bar-baseline paths append). Graceful zero on older schema.
+    acfb_rows = _safe_query(
+        conn,
+        "SELECT COUNT(*) FROM risk_events WHERE event_type='asset_class_fallback'",
+    )
+    asset_class_fallback_n = int(acfb_rows[0][0] or 0) if acfb_rows else 0
     return RotationTelemetry(
         rotation_count=rotation_count,
         session_forced_exit_count=session_forced_exit_count,
+        reconciled_realized_usd=reconciled_realized_usd,
         reconciled_loss_usd=reconciled_loss_usd,
         reconciled_loss_n=reconciled_loss_n,
+        asset_class_fallback_n=asset_class_fallback_n,
         last_rotation=last,
     )

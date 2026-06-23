@@ -15,6 +15,7 @@ Aggressive bias preserved — no defensive throttle on PASS rate.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any, Final
 
@@ -50,6 +51,8 @@ __all__ = [
     "VALIDATOR_RECENT_TRADES_MAX",
     "signal_validator_gate",
 ]
+
+logger = logging.getLogger(__name__)
 
 MODIFY_MIN: Final[float] = 0.5
 MODIFY_MAX: Final[float] = 1.5
@@ -261,6 +264,15 @@ async def signal_validator_gate(
         # scalar 1.0 / MODIFY → conservative scalar — same semantics the GPT
         # path emitted (validated_signal carries strength_scalar downstream).
         _inp, technical = _g3_technical(ctx, shadow_conn)
+        logger.info(
+            "[gate/G3-validator] AI-free decision=%s scalar=%.2f regime=%s "
+            "reason=%s sym=%s (deterministic primary, GPT=0)",
+            technical.decision.name,
+            technical.scalar,
+            str(ctx.payload.get("regime", "")),
+            technical.reason,
+            str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
+        )
         if technical.decision == GateDecision.KILL:
             return GateResult(
                 decision=GateDecision.KILL,

@@ -11,6 +11,10 @@ import sqlite3
 import time
 from typing import Any, cast
 
+from polaris.core.live_recalc.exit_engine import (
+    Bucket,
+    bucket_from_correlation_group,
+)
 from polaris.core.pipeline._payload_db import _safe_query
 from polaris.core.sizing import (
     PortfolioState,
@@ -159,6 +163,14 @@ def build_sizer_payload(
     translator).
     """
     ts = int(now_ts if now_ts is not None else time.time())
+    # Regime-fit family: derive from the strategy's correlation-group archetype
+    # (REVERSION bucket → "reversion"; everything else → "momentum"). Makes the
+    # BAR entry path regime-aware via seam1 (the ONE T4 continuous scalar).
+    signal_family = (
+        "reversion"
+        if bucket_from_correlation_group(raw_signal.correlation_group) is Bucket.REVERSION
+        else "momentum"
+    )
     intent = SignalIntent(
         signal_id=raw_signal.signal_id,
         venue=venue,
@@ -174,6 +186,7 @@ def build_sizer_payload(
         listing_age_hours=float(listing_age_hours),
         leverage=float(leverage),
         base_risk_pct=float(base_risk_pct) if base_risk_pct is not None else 0.02,
+        signal_family=signal_family,
     )
     if conn is None:
         risk_state = default_strategy_risk_state(

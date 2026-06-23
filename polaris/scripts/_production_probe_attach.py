@@ -134,6 +134,7 @@ def observe_probes(
     regime: str,
     now_ts: int,
     run_id: str,
+    mark_source: str = "bar",
 ) -> None:
     """Run the probe → engine → tuning-log triple in OBSERVE mode (fail-open).
 
@@ -141,6 +142,11 @@ def observe_probes(
     FSM read-modify-write atomicity is untouched. Threads NOTHING into the exit.
     A None sidecar / bus / engine makes this a no-op. Any unexpected error is
     swallowed (the exit must never crash on the observe sidecar).
+
+    Hardening #2 (2026-06-23): ``mark_source`` records WHICH cadence observed —
+    ``'bar'`` (the bar recalc pass, the default) or ``'tick'`` (the tick exit
+    pass). The tick attach is the SAME observe-only sidecar: it threads NOTHING
+    into ``run_precise_exit`` and never enters the FSM critical section.
     """
     bus = getattr(state, "probe_bus", None)
     engine = getattr(state, "probe_engine", None)
@@ -178,6 +184,14 @@ def observe_probes(
         )
         readings = bus.observe(ctx)
         decision = engine.compose(readings, mode="observe")
+        logger.info(
+            "[probe/verdict] %s:%s pos=%s src=%s probes=%s action=%s "
+            "lean=%+.3f applied=%s regime=%s pnl_r=%.2f "
+            "(OBSERVE-ONLY — threads nothing into the exit)",
+            ctx.venue, ctx.symbol, ctx.position_id, mark_source,
+            decision.contributing, decision.action,
+            decision.composite_lean, decision.applied, regime, pnl_r,
+        )
         probe_conn: sqlite3.Connection | None = getattr(state, "probe_conn", None)
         eval_id = uuid.uuid4().hex
         log_probe_readings(
@@ -187,7 +201,7 @@ def observe_probes(
         log_probe_decisions(
             probe_conn, ts=now_ts, run_id=run_id, position_id=ctx.position_id,
             mode="observe", decision=decision, pnl_r_at_decision=pnl_r,
-            pnl_r_truth=pnl_r, mark_source="bar", mark_age_ms=0,
+            pnl_r_truth=pnl_r, mark_source=mark_source, mark_age_ms=0,
             exit_state=ctx.exit_state, eval_id=eval_id,
         )
         state.probe_observe_evals = getattr(state, "probe_observe_evals", 0) + 1

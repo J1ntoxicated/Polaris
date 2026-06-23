@@ -83,6 +83,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_LOOP_ROTATION_EVENTS_INDEX,
     DDL_LOOP_SESSION_EXIT_EVENTS,
     DDL_LOOP_SESSION_EXIT_EVENTS_INDEX,
+    DDL_MEASUREMENT_RESETS,
+    DDL_MEASUREMENT_RESETS_INDEX,
     DDL_META_LABELS,
     DDL_META_LABELS_INDEX,
     DDL_POSITION_CONVICTION_LAYERS,
@@ -206,6 +208,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_REPLAY_RUNS_INDEX,
     DDL_BENCHMARK_RESULTS,
     DDL_BENCHMARK_RESULTS_INDEX,
+    # Measurement-reset baseline (display-only; forward edge window key)
+    DDL_MEASUREMENT_RESETS,
+    DDL_MEASUREMENT_RESETS_INDEX,
 )
 
 
@@ -347,6 +352,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE universe ADD COLUMN stream_id TEXT NOT NULL DEFAULT ''"
         )
+    # universe.last_price — Alpaca last close for the min_price eligibility floor
+    # (B2 floor-persistence). Without the column read_active_universe left it 0.0,
+    # so the min_price floor was inert on the DB-read path compute_dynamic_focus
+    # consumes — pennies re-entered focus after persistence. ADDITIVE only:
+    # backfilled to 0.0 (== unknown → min_price axis skipped, flow_not_block).
+    if uni_cols and "last_price" not in uni_cols:
+        conn.execute(
+            "ALTER TABLE universe ADD COLUMN last_price REAL NOT NULL DEFAULT 0.0"
+        )
     if "product_class" not in cols:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN product_class TEXT NOT NULL DEFAULT ''"
@@ -436,6 +450,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # MEASUREMENT / EXIT-TIMING only — never read by sizing/gating. Idempotent.
     if "entry_regime" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN entry_regime TEXT")
+    # positions.exit_cadence — hardening #7 (2026-06-23): the exit PASS that fired
+    # this close — 'bar' (the ~5s bar recalc) or 'tick' (the sub-second tick exit
+    # pass). MEASUREMENT-FIRST: lets the since-reset rollup split close_reason ×
+    # cadence so the bar-vs-tick thesis-cut asymmetry ([[structure_hardening_
+    # 2026-06-23]]) is measured before any streak threading. ADDITIVE: nullable
+    # TEXT, NULL = legacy/un-stamped row. MEASUREMENT ONLY — never read by
+    # sizing/gating/exit-timing. Pragma guard = idempotent.
+    if "exit_cadence" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN exit_cadence TEXT")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are

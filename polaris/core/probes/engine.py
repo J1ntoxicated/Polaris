@@ -33,6 +33,11 @@ _HARVEST_LEAN: float = -0.55  # strong adverse → harvest EARLIER (worst loss-s
 _TIGHTEN_LEAN: float = -0.20  # mild adverse → tighten the trail
 _WIDEN_LEAN: float = 0.35  # favorable → let the winner run wider
 
+# Hardening #11 (2026-06-23): version-stamp the quantizer so the offline rank-4
+# calibration reader can bucket ``ambiguous`` decisions by the threshold set
+# that produced them (a future threshold move must not silently re-pool rows).
+QUANTIZER_VERSION: str = "v1_2026-06-23"
+
 
 def _quantize(composite_lean: float) -> EngineAction:
     """Map the composite lean to a single overlay action (HOLD by default)."""
@@ -43,6 +48,29 @@ def _quantize(composite_lean: float) -> EngineAction:
     if composite_lean >= _WIDEN_LEAN:
         return "WIDEN"
     return "HOLD"
+
+
+def _deadband_margin(composite_lean: float) -> float:
+    """Signed distance from the composite to the nearer decisive threshold.
+
+    The HOLD dead band is ``(_TIGHTEN_LEAN, _WIDEN_LEAN)``. INSIDE the band the
+    margin is NEGATIVE (= how far the lean must travel to become decisive);
+    on/past a threshold it is >= 0. Pure measurement for the offline reader.
+    """
+    # Distance to the nearer band edge from inside; on the decisive side the
+    # nearer-edge gap goes non-negative.
+    to_tighten = composite_lean - _TIGHTEN_LEAN  # >0 inside band, <=0 at/below
+    to_widen = _WIDEN_LEAN - composite_lean  # >0 inside band, <=0 at/above
+    return -min(to_tighten, to_widen)
+
+
+def _is_ambiguous(composite_lean: float) -> bool:
+    """True when the composite landed in the HOLD dead band (escalation seam).
+
+    Observe-only: flags WHERE a future arbiter could weigh in; the runtime
+    action stays the deterministic HOLD fallback and GPT calls remain 0.
+    """
+    return _TIGHTEN_LEAN < composite_lean < _WIDEN_LEAN
 
 
 class ExitEngine:
@@ -75,6 +103,11 @@ class ExitEngine:
             widen_atr_mult=None,
             contributing=contributing,
             applied=False,
+            # Hardening #11: OBSERVE-ONLY escalation seam. The dead-band flag +
+            # margin are TELEMETRY for the offline rank-4 reader; the action /
+            # knobs / applied above are unchanged and GPT calls stay 0.
+            ambiguous=_is_ambiguous(composite_lean),
+            deadband_margin=_deadband_margin(composite_lean),
         )
 
 

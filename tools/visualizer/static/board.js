@@ -162,9 +162,16 @@
     background: rgba(95,135,175,0.10);
   }
   #board .b-tab .tab-cnt { color: var(--p-cyn); font-weight: 700; letter-spacing: 0; margin-left: 5px; font-size: 10px; }
-  /* Tab panes: only the active one renders; it fills the whole bottom width. */
+  /* Tab panes: only the active one renders; it fills the whole bottom width.
+     The active pane is the whole-page scroll container (Jin 2026-06-24): if its
+     content is taller than the 1fr grid row it scrolls vertically instead of
+     clipping at the bottom. Inner panels with their own .p-body scroll still
+     work; this only adds an outer scroll when the stacked content overflows. */
   #board .tab-pane { display: none; min-height: 0; }
-  #board .tab-pane.active { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  #board .tab-pane.active { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr);
+    overflow-y: auto; overflow-x: hidden; }
+  #board .tab-pane.active::-webkit-scrollbar { width: 6px; }
+  #board .tab-pane.active::-webkit-scrollbar-thumb { background: var(--ghost); }
 
   /* Stream lane color tokens — used by the always-visible streams strip AND
      (in board_tabs.js) by the per-row grouped-table lane heads. */
@@ -234,6 +241,94 @@
     const age = Math.floor(Date.now() / 1000) - ts;
     return { live: age >= 0 && age <= STALE_SEC, ageSec: age };
   }
+
+  // ── Bloomberg per-cell diff updater (Jin 2026-06-24) ──────────────────────
+  // Keeps a live-value <table> as keyed rows (by row key). On each poll the
+  // caller builds a fresh row-spec list; this diffs it against the live DOM and
+  // touches ONLY changed cells (textContent) — unchanged cells keep their DOM,
+  // so the whole table no longer repaints every second. A changed cell briefly
+  // flashes (green up / red down by the cell's flash hint). Rows added/removed
+  // (new position / exit) are the only structural change.
+  //
+  // spec = {
+  //   tableHtml: () => full <table>…<tbody></tbody></table> shell (built ONCE,
+  //              on first paint or when the column structure version changes),
+  //   structKey: string — bump to force a one-time full rebuild (e.g. scope
+  //              change / colgroup change),
+  //   rows: [ { key, cells: [ { html|text, cls, title, flash } ] } ],
+  // }
+  // cell.flash: 'up' | 'down' | '' — when set AND the cell text changed, the
+  // cell gets a fade flash. Pass 'up'/'down' from a numeric compare so only true
+  // movers flash; omit for cells that should update silently.
+  const FLASH_UP = 'px-flash-up', FLASH_DOWN = 'px-flash-down';
+  function syncTable(container, spec) {
+    if (!container) return;
+    const prevStruct = container.__structKey;
+    let tbody = container.querySelector('tbody');
+    // (Re)build the table shell only on first paint or a structure-version bump.
+    if (!tbody || prevStruct !== spec.structKey) {
+      container.innerHTML = spec.tableHtml();
+      container.__structKey = spec.structKey;
+      tbody = container.querySelector('tbody');
+    }
+    if (!tbody) return;
+    const rowSpecs = spec.rows;
+    const have = new Map();           // key → <tr> currently in the DOM
+    for (const tr of tbody.children) { if (tr.dataset.k != null) have.set(tr.dataset.k, tr); }
+    const seen = new Set();
+    let cursor = tbody.firstChild;    // walk to keep DOM order == spec order
+    for (const rs of rowSpecs) {
+      seen.add(rs.key);
+      let tr = have.get(rs.key);
+      if (!tr) {
+        tr = document.createElement('tr');
+        tr.dataset.k = rs.key;
+        if (rs.trCls) tr.className = rs.trCls;
+        rs.cells.forEach(c => {
+          const td = document.createElement('td');
+          applyCell(td, c, false);
+          tr.appendChild(td);
+        });
+      } else {
+        if (rs.trCls != null && tr.className !== rs.trCls) tr.className = rs.trCls;
+        const tds = tr.children;
+        for (let i = 0; i < rs.cells.length; i++) {
+          let td = tds[i];
+          if (!td) { td = document.createElement('td'); tr.appendChild(td); applyCell(td, rs.cells[i], false); continue; }
+          applyCell(td, rs.cells[i], true);
+        }
+        // drop any stale trailing cells (column count shrank within same struct)
+        while (tr.children.length > rs.cells.length) tr.removeChild(tr.lastChild);
+      }
+      // place tr at the cursor position (preserve spec order); advance cursor.
+      if (cursor === tr) { cursor = tr.nextSibling; }
+      else { tbody.insertBefore(tr, cursor); }
+    }
+    // remove rows no longer present (closed positions / venues that dropped off).
+    have.forEach((tr, k) => { if (!seen.has(k)) tbody.removeChild(tr); });
+  }
+  // Apply one cell spec to a <td>. When diff=true, only touches what changed and
+  // flashes on a value change; when diff=false (fresh cell) it just sets state.
+  function applyCell(td, c, diff) {
+    const html = c.html != null ? c.html : null;
+    const text = c.text != null ? String(c.text) : null;
+    const changed = html != null
+      ? td.__html !== html
+      : td.textContent !== (text == null ? '' : text);
+    if (changed) {
+      if (html != null) { td.innerHTML = html; td.__html = html; }
+      else { td.textContent = text == null ? '' : text; td.__html = null; }
+    }
+    const cls = c.cls || '';
+    if (td.__baseCls !== cls) { td.__baseCls = cls; td.className = cls; }
+    if (c.title != null && td.getAttribute('title') !== c.title) td.setAttribute('title', c.title);
+    if (diff && changed && c.flash) {
+      td.classList.remove(FLASH_UP, FLASH_DOWN);
+      // force reflow so re-adding the same class restarts the animation
+      void td.offsetWidth;
+      td.classList.add(c.flash === 'up' ? FLASH_UP : FLASH_DOWN);
+    }
+  }
   // Axis-less Tufte sparkline path for a numeric series into a w×h box.
   function sparkPath(series, w, h, pad) {
     const n = series.length;
@@ -286,11 +381,13 @@
   // UNCHANGED — only the tab-strip content + per-tab pane grouping changed.
   const TABS = [
     { id: 'activity', label: 'Activity' },
+    { id: 'gates', label: 'Gates' },
     { id: 'performance', label: 'Performance' },
     { id: 'logic', label: 'Logic' },
     { id: 'build', label: 'Build' },
     { id: 'path', label: 'Roadmap' },
     { id: 'learned', label: 'Lessons' },
+    { id: 'ai', label: 'AI' },
   ];
 
   function skeleton() {
@@ -380,8 +477,12 @@
     const fr = freshness(d);
     if (!fr.live) out.push('stale price feed' + (fr.ageSec != null ? ' (' + hms(fr.ageSec) + ')' : ''));
     const driftN = d.reconciled_loss_n || 0;
-    const driftUsd = d.reconciled_loss_usd || 0;
-    if (driftN > 0) out.push(driftN + ' tracking failure' + (driftN > 1 ? 's' : '') + ' (~-$' + Math.abs(driftUsd).toFixed(0) + ', not trades)');
+    // Hardening #1: PRIMARY = actual realized Σ pnl_usd over reconciled positions
+    // (real lost $); the mae_r×risk est is the labeled secondary fallback.
+    const driftActual = d.reconciled_realized_usd || 0;
+    const driftEst = d.reconciled_loss_usd || 0;
+    const driftUsd = driftActual !== 0 ? driftActual : driftEst;
+    if (driftN > 0) out.push(driftN + ' tracking failure' + (driftN > 1 ? 's' : '') + ' (-$' + Math.abs(driftUsd).toFixed(0) + (driftActual !== 0 ? '' : ' est') + ', not trades)');
     return out;
   }
 
@@ -403,6 +504,33 @@
   // CLEAN ENGLISH MONEY HEADLINE — no jargon clusters. Row 1 = status (bot /
   // market / updated). Row 2 = labelled money metrics. The old BLEED (worst
   // strategies) + HIDDEN (costs) blocks moved to the Performance tab.
+  // SINCE RESET (new logic) — prominent forward-edge line. Measured only over
+  // trades OPENED after the latest main-logic reset (the edge under the CURRENT
+  // logic). Hidden when no reset has been stamped (all-time metrics stand alone).
+  function sinceResetHtml(d) {
+    const s = d.since_reset;
+    if (!s) return '';
+    const pf = (s.pf >= 9.99) ? '∞' : (s.pf || 0).toFixed(2);
+    const winning = (s.pf != null && s.pf >= 1) || (s.net_usd >= 0);
+    const netCls = winning ? 'b-pos' : 'b-neg';
+    const when = s.reset_ts ? new Date(s.reset_ts * 1000).toLocaleString() : '';
+    const lbl = s.label ? esc(s.label) : 'reset';
+    const sha = s.git_sha ? ' <span class="kk">@' + esc(s.git_sha) + '</span>' : '';
+    const m = (label, valHtml) =>
+      `<span style="display:inline-flex;align-items:baseline;gap:5px">
+        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span></span>`;
+    return `<div title="Forward edge since the latest main-logic reset — counts only trades OPENED under the new logic (opened_ts ≥ reset @ ${esc(when)})"
+        style="display:flex;gap:16px;align-items:baseline;flex-wrap:wrap;padding:5px 8px;margin-top:4px;border:1px solid rgba(95,175,255,.35);border-radius:4px;background:rgba(95,175,255,.07);font-size:13px">
+        <span style="font-weight:800;letter-spacing:.08em;color:var(--p-acc,#5fafff)">SINCE RESET</span>
+        <span class="kk" title="${esc(when)}">${lbl}${sha}</span>
+        ${m('Net', `<span class="${netCls}">${fmtUsd(s.net_usd, 0)}</span>`)}
+        ${m('Trades', `<span class="b-flat">${s.n || 0}</span>`)}
+        ${m('Win', `<span class="b-flat">${(s.win_pct || 0).toFixed(0)}%</span>`)}
+        ${m('PF', `<span class="${winning ? 'b-pos' : 'b-neg'}">${pf}</span>`)}
+        ${m('Avg-R', `<span class="${pn(s.avg_r)}">${fmtR(s.avg_r, 2)}</span>`)}
+      </div>`;
+  }
+
   function renderKpis(d) {
     const el = $('b-kpis'); if (!el) return;
     el.style.display = 'block';
@@ -463,11 +591,11 @@
         ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
         ${metric('Max drawdown', `<span class="b-neg">-${fmtPct(d.drawdown_pct, 1)}</span>`)}
       </div>`;
-    // (j-iii) anomaly strip — only things to watch, else 'all clear'.
-    const anomStrip = anoms.length
-      ? `<div class="anoms">${anoms.map(a => `<span class="ax">${esc(a)}</span>`).join('')}</div>`
-      : `<div class="anoms clear"><span class="ax">all clear — no stuck exits, fresh price, no drift spikes</span></div>`;
-    el.innerHTML = status + metrics + anomStrip;
+    // SINCE RESET (new logic) — the FORWARD edge measured only over trades OPENED
+    // after the latest main-logic reset. This is the headline Jin reads (the edge
+    // under the CURRENT logic), shown above the all-time metrics. Absent (null) =
+    // no reset stamped → the line is hidden and the all-time metrics stand alone.
+    el.innerHTML = status + sinceResetHtml(d) + metrics;
   }
 
   // (f) main-area dual-equity sparkline — equity_curve (demo, dashed dim) vs
@@ -502,36 +630,11 @@
   // chrome / big padding). venue │ equity │ net PnL │ uPnL │ exposure │ open │
   // closed │ fee │ slip │ net-cost · recently-closed inline. Row click → scope
   // (data-ex preserved; board_exchange.js delegates the click + highlights).
-  function renderStreams(d) {
-    const el = $('b-streams');
-    if (!el) return;
-    const rows = d.streams || [];
-    if (!rows.length) { el.innerHTML = ''; return; }
-    const trs = rows.map(s => {
-      const st = venueStream(s.venue);
-      const lc = st.toLowerCase();
-      const tagline = STREAM_TAGLINE[st] || '';
-      const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
-      const closed = (s.closed_n != null ? s.closed_n : (s.daily_trades || 0));
-      const exKey = String(s.venue || '').toLowerCase();   // E3 click→scope key
-      return `<tr class="lane lane-${lc}" data-ex="${esc(exKey)}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · click to scope · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
-        <td class="l ln-label">${esc(s.label)}</td>
-        <td class="l ln-tag b-flat">${esc(tagline)}</td>
-        <td class="num ln-eq">${fmtUsd(s.equity_usd, 0)}</td>
-        <td class="num ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 0)}</td>
-        <td class="num ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 0)}</td>
-        <td class="num b-flat">${fmtUsd(s.exposed_usd, 0)}</td>
-        <td class="num b-flat">${fmtPct(expPct, 0)}</td>
-        <td class="num ${s.open_positions_n ? 'b-pos' : 'b-flat'}">${s.open_positions_n || 0}</td>
-        <td class="num b-flat">${closed}</td>
-        <td class="num b-flat" title="fees this session">${fmtUsd(s.fee_usd, 0)}</td>
-        <td class="num b-flat" title="slippage this session">${fmtUsd(s.slippage_usd, 0)}</td>
-        <td class="num ${pn(s.net_after_cost_usd)}" title="net after fees + slippage">${s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0)}</td>
-        <td class="l ln-rc b-flat">${recentClosedInline(s)}</td>
-      </tr>`;
-    }).join('');
-    el.innerHTML =
-      `<table class="streams-tbl"><colgroup>
+  // Per-cell diff state for the streams strip live values (equity / uPnL).
+  // venue → { eq, upnl } last numeric value, for flash-direction.
+  const _lastStream = {};
+  const STREAMS_SHELL =
+    `<table class="streams-tbl"><colgroup>
         <col style="width:9%"><col style="width:14%"><col style="width:8%"><col style="width:7%">
         <col style="width:7%"><col style="width:7%"><col style="width:4%"><col style="width:4%">
         <col style="width:5%"><col style="width:5%"><col style="width:5%"><col style="width:6%">
@@ -541,8 +644,64 @@
         <th>uPnL</th><th>EXPOSURE</th><th>EXP%</th><th>OPEN</th>
         <th>CLOSED</th><th>FEE</th><th>SLIP</th><th title="net after fees + slippage">NET-COST</th>
         <th class="l">RECENTLY CLOSED</th>
-      </tr></thead><tbody>${trs}</tbody></table>`;
-    // Re-apply the active-exchange highlight (innerHTML rewrite cleared it).
+      </tr></thead><tbody></tbody></table>`;
+  function flashDir(prev, cur) {
+    if (prev == null || cur == null || cur === prev) return '';
+    return cur > prev ? 'up' : 'down';
+  }
+  function renderStreams(d) {
+    const el = $('b-streams');
+    if (!el) return;
+    const rows = d.streams || [];
+    if (!rows.length) { el.innerHTML = ''; el.__structKey = null; return; }
+    const specRows = rows.map(s => {
+      const st = venueStream(s.venue);
+      const lc = st.toLowerCase();
+      const tagline = STREAM_TAGLINE[st] || '';
+      const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
+      const closed = (s.closed_n != null ? s.closed_n : (s.daily_trades || 0));
+      const exKey = String(s.venue || '').toLowerCase();   // E3 click→scope key
+      const key = exKey || String(s.label || st);
+      const prev = _lastStream[key] || {};
+      const eqFlash = flashDir(prev.eq, s.equity_usd);
+      const upFlash = flashDir(prev.upnl, s.upnl_usd);
+      _lastStream[key] = { eq: s.equity_usd, upnl: s.upnl_usd };
+      return {
+        key: key,
+        trCls: 'lane lane-' + lc,
+        trAttrs: { 'data-ex': exKey,
+          title: `${s.label} — ${tagline} (${s.product_class}) · click to scope · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}` },
+        cells: [
+          { text: s.label, cls: 'l ln-label' },
+          { text: tagline, cls: 'l ln-tag b-flat' },
+          { text: fmtUsd(s.equity_usd, 0), cls: 'num ln-eq', flash: eqFlash },
+          { text: fmtUsd(s.net_pnl_usd, 0), cls: 'num ' + pn(s.net_pnl_usd) },
+          { text: fmtUsd(s.upnl_usd, 0), cls: 'num ' + pn(s.upnl_usd), flash: upFlash },
+          { text: fmtUsd(s.exposed_usd, 0), cls: 'num b-flat' },
+          { text: fmtPct(expPct, 0), cls: 'num b-flat' },
+          { text: s.open_positions_n || 0, cls: 'num ' + (s.open_positions_n ? 'b-pos' : 'b-flat') },
+          { text: closed, cls: 'num b-flat' },
+          { text: fmtUsd(s.fee_usd, 0), cls: 'num b-flat', title: 'fees this session' },
+          { text: fmtUsd(s.slippage_usd, 0), cls: 'num b-flat', title: 'slippage this session' },
+          { text: s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0), cls: 'num ' + pn(s.net_after_cost_usd), title: 'net after fees + slippage' },
+          { html: recentClosedInline(s), cls: 'l ln-rc b-flat' },
+        ],
+      };
+    });
+    syncTable(el, { tableHtml: () => STREAMS_SHELL, structKey: 'streams-v1', rows: specRows });
+    // Restore per-row attrs (data-ex / title) that syncTable doesn't manage.
+    const tb = el.querySelector('tbody');
+    if (tb) {
+      specRows.forEach(rs => {
+        const tr = tb.querySelector('tr[data-k="' + (window.CSS && CSS.escape ? CSS.escape(rs.key) : rs.key) + '"]');
+        if (tr && rs.trAttrs) {
+          for (const a in rs.trAttrs) {
+            if (tr.getAttribute(a) !== rs.trAttrs[a]) tr.setAttribute(a, rs.trAttrs[a]);
+          }
+        }
+      });
+    }
+    // Re-apply the active-exchange highlight (syncTable may have rebuilt rows).
     if (window.PolarisBoardExchange) window.PolarisBoardExchange.syncExchangeUi();
   }
 
@@ -592,18 +751,23 @@
   }
   function render(d) {
     _lastFrame = d;
-    renderHeader(d);
-    renderKpis(d);
-    renderStreams(d);
+    // Each section is isolated: a throw in one (e.g. a null field after a
+    // backend change) must NOT blank the rest of the board. Errors surface in
+    // the console instead of being swallowed by poll()'s catch.
+    try { renderHeader(d); } catch (e) { console.error('[render] renderHeader', e); }
+    try { renderKpis(d); } catch (e) { console.error('[render] renderKpis', e); }
+    try { renderStreams(d); } catch (e) { console.error('[render] renderStreams', e); }
     if (window.PolarisBoardTabs) {
-      window.PolarisBoardTabs.renderTabCounts(d, TABS);
+      try { window.PolarisBoardTabs.renderTabCounts(d, TABS); }
+      catch (e) { console.error('[render] renderTabCounts', e); }
       // Render only the visible tab (the rest re-render on switch from cache).
-      window.PolarisBoardTabs.renderTab(_activeTab, d);
+      try { window.PolarisBoardTabs.renderTab(_activeTab, d); }
+      catch (e) { console.error('[render] renderTab', e); }
     }
     // Bridge optional probe data to the Neural Cloud (display-only). Probes pulse
     // their ticker node + venue galaxy on the globe; graceful no-op when absent.
     if (window.PolarisGlobe && window.PolarisGlobe.showProbes) {
-      window.PolarisGlobe.showProbes(d.probe_events || d.probes || []);
+      try { window.PolarisGlobe.showProbes(d.probe_events || d.probes || []); } catch (e) {}
     }
   }
 
@@ -612,6 +776,81 @@
       const r = await fetch('/api/snapshot?t=' + Date.now(), { cache: 'no-store' });
       if (r.ok) render(await r.json());
     } catch (e) { /* keep last frame */ }
+  }
+
+  // ── Live price SSE push (Jin 2026-06-24) ──────────────────────────────────
+  // Open-position price cells flash per-cell in real time as marks STREAM in —
+  // NOT a poll. An EventSource on /stream/prices receives a push the instant a
+  // mark moves; each message carries ONLY the cells that changed, so just those
+  // cells get their textContent updated + a brief up/down flash and that cell
+  // alone reacts (no whole-table repaint, no synchronized full-grid refresh).
+  // diffs ONLY the CURRENT / Δ% / uPnL$ / uPnL% cells of the keyed Open-Positions
+  // rows: a cell whose value moved gets its textContent updated + a brief up/down
+  // flash; unchanged cells are untouched (no repaint). Pure display — no snapshot
+  // mutation, no sizing/gate/trade logic. Graceful no-op when pos-body isn't
+  // mounted (non-Activity tab) or the endpoint is unavailable.
+  // Column indices match renderPositions' cell order (board_tabs.js): 4=CURRENT
+  // (last_price), 5=Δ% (delta_pct), 7=uPnL$ (upnl_usd), 8=uPnL% (upnl_pct).
+  const _priceLast = {};   // key → { px, upnl, delta } last numeric value for flash dir
+  function _flashCell(td, dir) {
+    if (!td || !dir) return;
+    td.classList.remove(FLASH_UP, FLASH_DOWN);
+    void td.offsetWidth;   // restart the animation if re-flashing the same cell
+    td.classList.add(dir === 'up' ? FLASH_UP : FLASH_DOWN);
+  }
+  function _setPriceCell(td, text, cls, dir) {
+    if (!td) return;
+    const changed = td.textContent !== text;
+    if (changed) td.textContent = text;
+    // set the base class BEFORE flashing so the flash animation class is not
+    // wiped by a className reassignment (sign may have flipped: pn class change).
+    if (cls != null && td.className.replace(/ ?px-flash-(up|down)/, '') !== cls) {
+      td.className = cls; td.__baseCls = cls;
+    }
+    if (changed) _flashCell(td, dir);
+  }
+  // Apply ONE streamed price cell (or a fallback keyed map). Touches only the
+  // four price cells of the matching keyed row; unchanged text is left alone so
+  // a single cell reacts in isolation. `p` carries the key inline (SSE form).
+  function _applyPriceCell(tb, p) {
+    const key = p.key;
+    if (!key) return;
+    const tr = tb.querySelector('tr[data-k="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]');
+    if (!tr) return;
+    const prev = _priceLast[key] || {};
+    const pxDir = flashDir(prev.px, p.last_price);
+    const upDir = flashDir(prev.upnl, p.upnl_usd);
+    const dDir = flashDir(prev.delta, p.delta_pct);
+    _priceLast[key] = { px: p.last_price, upnl: p.upnl_usd, delta: p.delta_pct };
+    const tds = tr.children;
+    _setPriceCell(tds[4], fmtPx(p.last_price), null, pxDir);
+    _setPriceCell(tds[5], fmtSignedPct(p.delta_pct, 2), 'num ' + pn(p.delta_pct), dDir);
+    _setPriceCell(tds[7], fmtUsd(p.upnl_usd, 2), 'num ' + pn(p.upnl_usd), upDir);
+    _setPriceCell(tds[8], fmtSignedPct(p.upnl_pct, 2), 'num ' + pn(p.upnl_pct), '');
+  }
+  // Drain a streamed batch of changed cells (each carries its own key).
+  function applyPriceStream(changed) {
+    const body = $('pos-body'); if (!body || !changed || !changed.length) return;
+    const tb = body.querySelector('tbody'); if (!tb) return;
+    for (let i = 0; i < changed.length; i++) _applyPriceCell(tb, changed[i]);
+  }
+  // Subscribe to the live-mark push stream. Each message delivers ONLY the cells
+  // that moved on the server since the last frame — true per-cell streaming, not
+  // a poll. EventSource auto-reconnects; a torn connection just resumes (the
+  // server re-sends the full set as its first frame). Display-only.
+  let _priceES = null;
+  function connectPriceStream() {
+    if (_priceES || typeof EventSource === 'undefined') return;
+    try {
+      _priceES = new EventSource('/stream/prices');
+      _priceES.onmessage = (ev) => {
+        try {
+          const j = JSON.parse(ev.data);
+          if (j && j.prices) applyPriceStream(j.prices);
+        } catch (e) { /* ignore a malformed frame */ }
+      };
+      _priceES.onerror = () => { /* EventSource auto-reconnects */ };
+    } catch (e) { /* SSE unavailable — open-position cells fall back to the 1s snapshot poll */ }
   }
 
   // ── Bot log (bottom-left pane) ────────────────────────────────────────────
@@ -708,6 +947,7 @@
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
     freshness: freshness,
+    syncTable: syncTable,   // Bloomberg per-cell diff updater (live-value tables)
     // E3: re-render hook for exchange-select. The scope helpers
     // (getActiveExchange/venueMatches/venueFilter) are added by board_exchange.js.
     rerenderActive: rerenderActive,
@@ -723,6 +963,11 @@
       setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
       poll();
       setInterval(poll, 1000);
+      // Per-cell price flash via PUSH — subscribe to /stream/prices (SSE). The
+      // server pushes only the open-position cells that moved, so each cell
+      // flashes the instant its mark changes (no poll, no full-grid sync).
+      // Display-only. The 1s snapshot poll still owns structure (adds/removes).
+      connectPriceStream();
     }
     if ($('botlog-body')) {
       pollLog();

@@ -85,11 +85,15 @@ def _is_valid_candidate(ins: UniverseInstrument) -> bool:
         return False
     # Universe-eligibility liquidity floor (Jin-approved 2026-06-22): the SAME
     # KIND of hard keep as the two above — a tradeable-QUALITY membership test on
-    # the instrument, NOT a per-signal block / size-cut / entry-veto. A row whose
-    # venue spread / $-volume / depth / price falls outside its venue floor is
-    # loss-certain (175bp spread > ~0.3R edge) and never reaches the active set,
-    # so it never reaches the focus list, the WS sub, or the tick engine. The
-    # ATR-z signal-richness rank still orders every survivor (flow_not_block).
+    # the instrument (does this instrument's microstructure even permit a clean
+    # round-trip?), NOT a per-signal block / size-cut / entry-veto / expectancy
+    # judgement. A row whose venue spread / $-volume / depth / price falls
+    # outside its venue floor is structurally un-tradeable — its spread exceeds
+    # the executable round-trip cost (the bid/ask alone consumes the trade
+    # before any thesis is tested), so it never reaches the active set, the focus
+    # list, the WS sub, or the tick engine. This is a universe-membership
+    # (is-it-tradeable) boundary, not an edge/0.3R filter — the ATR-z
+    # signal-richness rank still orders every survivor (flow_not_block).
     return passes_liquidity_floor(ins)
 
 
@@ -102,6 +106,26 @@ def _pop_z(values: Sequence[float]) -> list[float]:
     if sigma <= 0.0 or not math.isfinite(sigma):
         return [0.0] * len(values)
     return [(v - mu) / sigma for v in values]
+
+
+def _grouped_pop_z(values: Sequence[float], groups: Sequence[str]) -> list[float]:
+    """Per-group population z-score in parallel order (see watchlist._grouped_z_score).
+
+    Each (venue, asset_class) group is z-normalized within itself BEFORE the single
+    cross-venue top-N cut, so crypto's absolute trillion-scale vol cannot sweep
+    every active-set slot and bury the strongest equity. A single-venue population
+    is one group → byte-identical to :func:`_pop_z` (no-op). Ranking-order only
+    (flow_not_block): hard keep is still validity + the liquidity floor.
+    """
+    by_group: dict[str, list[int]] = {}
+    for i, g in enumerate(groups):
+        by_group.setdefault(g, []).append(i)
+    out = [0.0] * len(values)
+    for idxs in by_group.values():
+        zs = _pop_z([values[i] for i in idxs])
+        for pos, i in enumerate(idxs):
+            out[i] = zs[pos]
+    return out
 
 
 def _resolve_rank_top_n(top_n: int | None) -> int:
@@ -140,10 +164,11 @@ def rank_active_universe(
     if not valid:
         return []
 
-    vol_z = _pop_z([max(0.0, ins.vol_24h_usd) for ins in valid])
-    atr_z = _pop_z([max(0.0, ins.atr_24h_pct) for ins in valid])
-    spread_z = _pop_z([max(0.0, ins.spread_bps) for ins in valid])
-    depth_z = _pop_z([max(0.0, ins.depth_10bps_usd) for ins in valid])
+    groups = [f"{ins.venue}/{ins.asset_class}" for ins in valid]
+    vol_z = _grouped_pop_z([max(0.0, ins.vol_24h_usd) for ins in valid], groups)
+    atr_z = _grouped_pop_z([max(0.0, ins.atr_24h_pct) for ins in valid], groups)
+    spread_z = _grouped_pop_z([max(0.0, ins.spread_bps) for ins in valid], groups)
+    depth_z = _grouped_pop_z([max(0.0, ins.depth_10bps_usd) for ins in valid], groups)
 
     scores = [
         RANK_SCORE_W_VOL * vol_z[i]

@@ -16,12 +16,15 @@ import contextlib
 import logging
 import os
 import sqlite3
+import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.data.position_risk_persist import delete_position_risk_state
 from polaris.core.data.quote_writer import live_or_bar_price
+from polaris.core.economics.fees import real_fee_usd
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
@@ -57,6 +60,7 @@ from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
     CloseOrphan,
     PendingClose,
+    SiblingDrainClose,
     real_alpaca_close_fill,
     real_capital_close_fill,
     real_okx_close_fill,
@@ -81,6 +85,122 @@ logger = logging.getLogger(__name__)
 # both bars because off-session rejects do not count toward the tally.
 ZOMBIE_CLOSE_REJECT_LIMIT = 40
 ZOMBIE_MIN_AGE_HOURS = 1.0
+
+
+def _okx_sibling_base(
+    state: ProdLoopState, trade: SimulatedTrade,
+) -> float:
+    """Sum tracked ``base_qty`` of OTHER still-open OKX positions on the SAME base
+    ccy (POOLED-WALLET FIX). The OKX SPOT demo holds ONE fungible base-ccy balance
+    shared across every concurrent same-ccy position; when ``base_qty`` exceeds the
+    live wallet availBal at close, a non-zero sibling sum means the missing pool is
+    EXPLAINED by a sibling that drained/holds it (book a mark close), vs a genuine
+    over-count when zero (reconcile). Keyed on the OKX base ccy (left of ``-``);
+    EXCLUDES ``trade`` itself (identity). Pure read over in-mem open_trades."""
+    base_ccy = trade.symbol.split("-")[0].upper()
+    total = 0.0
+    for other in state.open_trades:
+        if other is trade or other.venue != "okx":
+            continue
+        if other.symbol.split("-")[0].upper() == base_ccy:
+            total += max(0.0, float(other.base_qty))
+    return total
+
+
+def _has_close_fill(conn: sqlite3.Connection, trade: SimulatedTrade) -> bool:
+    """True when a close fill is already persisted for this position (idempotency).
+
+    The 0.7% second-order base-fee dust a later tick re-flags as un-sellable must
+    NOT churn a duplicate reconcile/orphan when the position SUBSTANTIVELY closed
+    earlier. Keyed on ``contribution_id == position_id`` (the close fill's
+    position link). No position_id (legacy) → False (cannot dedupe → fall through
+    to the normal orphan/drain path). Read-only; never raises into the close path.
+    """
+    if not trade.position_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM fills WHERE contribution_id = ? AND is_close = 1 LIMIT 1",
+            (trade.position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _finalize_already_closed(
+    conn: sqlite3.Connection,
+    *,
+    state: ProdLoopState,
+    trade: SimulatedTrade,
+    trade_idx: int,
+    now_ts: int,
+) -> bool:
+    """Idempotently retire a position that ALREADY has a persisted close fill.
+
+    The residual base-fee dust path: the position closed on a prior tick, a later
+    tick re-detects the sub-min remainder as un-sellable and would otherwise churn
+    a second orphan/reconcile row. Mark it terminal as ``status='closed'`` (it WAS
+    closed), pop it from ``open_trades``, and stop retrying — WITHOUT a second
+    close fill or an orphan audit row. flow_not_block; returns ``True`` (handled).
+    """
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute("BEGIN IMMEDIATE")
+        if trade.position_id:
+            conn.execute(
+                "UPDATE positions SET status = 'closed', closed_ts = ?, "
+                "exit_state = 'closed' WHERE position_id = ? "
+                "AND status NOT IN ('closed', 'reconciled')",
+                (now_ts, trade.position_id),
+            )
+        conn.execute("COMMIT")
+    if 0 <= trade_idx < len(state.open_trades) and state.open_trades[trade_idx] is trade:
+        state.open_trades.pop(trade_idx)
+    else:
+        with contextlib.suppress(ValueError):
+            state.open_trades.remove(trade)
+    trade.closed = True
+    state.close_reject_counts.pop(
+        trade.position_id or f"{trade.venue}:{trade.symbol}:{trade.open_ts}", None
+    )
+    logger.info(
+        "[close/idempotent] %s:%s trade_id=%s already has a close fill — residual "
+        "sub-min dust, retire terminal (no re-churn, no duplicate orphan)",
+        trade.venue, trade.symbol, trade.position_id or "-",
+    )
+    return True
+
+
+def _synth_okx_mark_close(trade: SimulatedTrade, *, mark: float | None) -> Fill:
+    """Synthesize a MARK-to-market close Fill for a pooled-wallet-drain position.
+
+    The shared OKX base wallet was drained by a still-open same-ccy sibling, so no
+    order is submitted (nothing left to sell) — but the base WAS real and its
+    proceeds were realized at the wallet level by the sibling. This books THIS
+    position's close at the REAL fresh ``mark`` on its REAL tracked ``base_qty`` so
+    it keeps its true pnl_r in the R ledger (no survivorship bias). NOT a
+    fabricated price: ``mark`` is the live WS mid / latest 1m bar close the close
+    path already resolved (falls back to the entry price only when no mark exists).
+    """
+    px = mark if mark and mark > 0.0 else trade.entry_price
+    base_qty = max(0.0, float(trade.base_qty))
+    quote_qty = base_qty * px
+    return Fill(
+        venue="okx",
+        instrument_id=f"okx:{trade.symbol}",
+        strategy_id=trade.strategy_id,
+        side="sell",
+        size_usd=quote_qty,
+        fill_price=px,
+        fee_usd=real_fee_usd("okx", notional_usd=quote_qty),
+        slippage_bps=0.0,
+        ts_ms=int(time.time() * 1000),
+        order_id=f"polDrainMark{uuid.uuid4().hex[:8]}",
+        client_order_id=None,
+        base_qty=base_qty,
+        quote_qty=quote_qty,
+        state="filled",
+    )
 
 
 def _drain_in_session(venue: str, now_ts: int) -> bool:
@@ -150,7 +270,8 @@ async def _real_close_fill(
     capital_session: Any = None,
     alpaca_adapter: Any = None,
     capital_contract_factor_usd: float | None = None,
-) -> Fill | PendingClose | CloseOrphan | None:
+    okx_sibling_base: float = 0.0,
+) -> Fill | PendingClose | CloseOrphan | SiblingDrainClose | None:
     """Drive the real demo venue close leg → return the exit ``Fill``.
 
     P0 venue wire: OKX sells the entry ``base_qty``; Alpaca sells the tracked
@@ -172,6 +293,7 @@ async def _real_close_fill(
             return await real_okx_close_fill(
                 okx_adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
                 strategy_id=trade.strategy_id, mark_price=mark,
+                sibling_base=okx_sibling_base,
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -186,6 +308,7 @@ async def _real_close_fill(
             return await real_okx_close_fill(
                 adapter, inst_id=trade.symbol, base_qty=trade.base_qty,
                 strategy_id=trade.strategy_id, mark_price=mark,
+                sibling_base=okx_sibling_base,
             )
     # Capital CFD — close by deal_id captured at open.
     if capital_session is None:
@@ -230,6 +353,7 @@ async def close_specific_position(
     capital_session: Any = None,
     alpaca_adapter: Any = None,
     close_reason: str = "",
+    cadence: str = "bar",
 ) -> bool:
     """Day 9 F2.b — close a specific position by ``position_id``.
 
@@ -241,6 +365,11 @@ async def close_specific_position(
     ``close_reason`` (lineage read-model only) names the exit trigger the
     caller fired on (precise-exit fsm / session calendar / rotation / g6); it
     is recorded onto the lineage segment and changes NO close behaviour.
+
+    ``cadence`` (hardening #7, measurement-only) tags WHICH exit pass fired this
+    close — 'bar' (~5s recalc) or 'tick' (sub-second tick pass) — stamped onto
+    ``positions.exit_cadence`` for the close_reason × cadence rollup. Never reads
+    back into any close/exit/sizing decision.
     """
     target: SimulatedTrade | None = None
     target_idx: int | None = None
@@ -256,7 +385,7 @@ async def close_specific_position(
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        close_reason=close_reason,
+        close_reason=close_reason, cadence=cadence,
     )
 
 
@@ -273,6 +402,7 @@ async def close_oldest_with_real_pnl(
     capital_session: Any = None,
     alpaca_adapter: Any = None,
     close_reason: str = "",
+    cadence: str = "bar",
 ) -> None:
     """F + G8 fix: real mark-to-market PnL + G8 reflector + gate_events log.
 
@@ -298,7 +428,7 @@ async def close_oldest_with_real_pnl(
         gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        close_reason=close_reason,
+        close_reason=close_reason, cadence=cadence,
     )
 
 
@@ -317,6 +447,7 @@ async def _close_trade_with_real_pnl(
     capital_session: Any = None,
     alpaca_adapter: Any = None,
     close_reason: str = "",
+    cadence: str = "bar",
 ) -> bool:
     """Shared close path used by FIFO oldest + specific-position closes.
 
@@ -351,12 +482,19 @@ async def _close_trade_with_real_pnl(
             cap_factor = capital_close_contract_factor(
                 state=state, conn=conn, epic=trade.symbol,
             )
+        # POOLED-WALLET FIX: tracked base of OTHER open same-ccy OKX positions, so
+        # the OKX close can tell a sibling-explained shared-wallet drain (book a
+        # mark close) from a genuine over-count (reconcile). 0 for non-OKX.
+        sibling_base = (
+            _okx_sibling_base(state, trade) if trade.venue == "okx" else 0.0
+        )
         real_fill = None
         try:
             real_fill = await _real_close_fill(
                 trade=trade, fresh_mark=fresh_mark, okx_adapter=okx_adapter,
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
                 capital_contract_factor_usd=cap_factor,
+                okx_sibling_base=sibling_base,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             # Genuine adapter exception (transport/parse) — internal fault.
@@ -379,12 +517,36 @@ async def _close_trade_with_real_pnl(
         elif real_fill is not None:
             # Fill / CloseOrphan — any pending close order is settled either way.
             trade.pending_close_ref = None
+        # IDEMPOTENCY GUARD (0.7% second-order dust): a sub-min orphan/drain signal
+        # on a position that ALREADY has a persisted close fill substantively closed
+        # on a prior tick — the residual base-fee dust a later tick re-flags as
+        # un-sellable must NOT churn a duplicate reconcile/orphan row. Mark it
+        # terminal as 'closed' (it WAS closed) + stop retrying. No second fill, no
+        # orphan audit.
+        if isinstance(real_fill, (CloseOrphan, SiblingDrainClose)) and _has_close_fill(
+            conn, trade
+        ):
+            return _finalize_already_closed(
+                conn, state=state, trade=trade, trade_idx=trade_idx, now_ts=now_ts,
+            )
+        if isinstance(real_fill, SiblingDrainClose):
+            # POOLED-WALLET DRAIN — a still-open same-ccy sibling drained the
+            # SHARED OKX base wallet, so THIS position's availBal reads ~0 even
+            # though its base WAS real and WAS sold into the pool (wallet proceeds
+            # conserved). Book a MARK-to-market close at the fresh mark so the
+            # position keeps its REAL pnl_r and stays in the R ledger / learner
+            # feed — NOT dropped as a tracking failure (the survivorship bias that
+            # excluded ~32% of flow_pressure positions). flow_not_block; no order
+            # is submitted (nothing left to sell), this is a bookkeeping close at
+            # the real live mark on the real tracked qty.
+            real_fill = _synth_okx_mark_close(trade, mark=fresh_mark)
         if isinstance(real_fill, CloseOrphan):
             # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still tracks
-            # base_qty, an over-count from the close-chunk fix). Mark the position
-            # terminal (status='reconciled') so the exit engine + hydrate STOP
-            # retrying it forever — WITHOUT fabricating a fill or PnL. This is
-            # venue-side STATE-DRIFT RECOVERY, not a trade outcome.
+            # base_qty, an over-count from the close-chunk fix) with NO sibling to
+            # explain the drain. Mark the position terminal (status='reconciled')
+            # so the exit engine + hydrate STOP retrying it forever — WITHOUT
+            # fabricating a fill or PnL. Venue-side STATE-DRIFT RECOVERY, not a
+            # trade outcome.
             return _reconcile_orphan(
                 conn, state=state, trade=trade, trade_idx=trade_idx,
                 available=real_fill.available, now_ts=now_ts,
@@ -498,9 +660,10 @@ async def _close_trade_with_real_pnl(
             # (correct: not a completed trade outcome). Measurement only.
             conn.execute(
                 "UPDATE positions SET status = 'closed', closed_ts = ?, "
-                "mfe_r = ?, mae_r = ?, exit_state = 'closed', pnl_r = ? "
+                "mfe_r = ?, mae_r = ?, exit_state = 'closed', pnl_r = ?, "
+                "exit_cadence = ? "
                 "WHERE position_id = ?",
-                (now_ts, mfe_r, mae_r, pnl_r, trade.position_id),
+                (now_ts, mfe_r, mae_r, pnl_r, cadence, trade.position_id),
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:

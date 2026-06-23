@@ -80,6 +80,28 @@ class CloseOrphan:
     available: float
 
 
+@dataclass(frozen=True, slots=True)
+class SiblingDrainClose:
+    """Pooled-wallet drain — NOT a tracking failure (do NOT reconcile-with-NULL).
+
+    Returned by ``real_okx_close_fill`` when the wallet's available base ccy is
+    sub-min/~0 BUT one or more OTHER same-ccy positions are still open and their
+    tracked base accounts for the missing pool. The OKX SPOT demo holds ONE
+    fungible base-ccy balance shared by every concurrent same-ccy position; the
+    first sibling to close drains the shared pool, so a later sibling sees
+    ``availBal~0 < base_qty`` even though ITS base WAS real and WAS sold into the
+    pool (wallet USDT proceeds are conserved). DISTINCT from ``CloseOrphan`` (a
+    genuine over-count with NO sibling to explain the drain → reconcile, PnL
+    NULL): this signals the caller to book a normal MARK-to-market close (real
+    ``pnl_r``, learner feed) so the position is NOT dropped from the R ledger —
+    removing the survivorship bias that orphaned ~32% of flow_pressure positions
+    (heavily the late-closers/losers). flow_not_block, NOT a throttle.
+    ``available`` is the observed pool remainder (~0) for the audit/close fill.
+    """
+
+    available: float
+
+
 def record_venue_orphan(
     conn: sqlite3.Connection,
     *,

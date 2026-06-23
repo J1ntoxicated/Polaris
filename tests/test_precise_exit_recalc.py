@@ -317,7 +317,9 @@ async def test_adaptive_thesis_banks_hard_giveback_on_unregistered(
     state.open_trades = [_trade("pos-gb", strategy="vb")]
     await _recalc(memdb, state)
     _set_last_price(memdb, last_price=100.1, band=0.25)
-    await _recalc(memdb, state, now_ts=NOW + 5)
+    # PAST the thesis grace (~25s): a hard give-back only banks once the position
+    # has aged out of grace — a fresh (<grace) position is never thesis-closed.
+    await _recalc(memdb, state, now_ts=NOW + 30)
     assert _pos_row(memdb, "pos-gb")["status"] == "closed"
     assert state.recalc_precise_exit == 1
 

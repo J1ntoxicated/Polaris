@@ -1,10 +1,9 @@
-"""daily_restart: sentinel respect, stop-timeout abort, rotation, wal line, no-DB."""
+"""daily_restart: sentinel respect, stop-timeout abort, rotation, wal line, retention."""
 
 from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
@@ -99,16 +98,46 @@ def test_lock_held_skips_with_alert(
     assert any(k == "restart_lock_busy" for k, _, _ in alerts)
 
 
-def test_never_opens_the_database(
+def test_never_opens_db_on_stop_timeout_abort(
+    cfg: OpsConfig, monkeypatch: pytest.MonkeyPatch, alerts: list[tuple[str, str, float]]
+) -> None:
+    """The DB is NEVER opened unless the bot is confirmed down.
+
+    The original force-kill-safety invariant: on the stop-timeout abort path
+    (bot may still be live) retention must not run and the DB must not be
+    touched. Retention only ever opens the DB inside the confirmed-down window
+    (after ``botctl.stop`` returns True).
+    """
+    from polaris.storage import retention
+
+    monkeypatch.setattr(botctl, "stop", lambda c, **kw: False)  # stop times out
+    monkeypatch.setattr(
+        retention,
+        "run_retention_job",
+        lambda *a, **kw: pytest.fail("retention ran on the abort path"),
+    )
+    cfg.bot_log.write_text("live\n", encoding="utf-8")
+    assert daily_restart.run(cfg, now=NOW) == "stop_timeout"
+
+
+def test_retention_runs_in_confirmed_down_window(
     cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import sqlite3
+    """Retention runs exactly once, in the down window, before start."""
+    from polaris.storage import retention
 
+    order: list[str] = []
     monkeypatch.setattr(
-        sqlite3, "connect", lambda *a, **kw: pytest.fail("daily_restart opened the DB")
+        botctl, "stop", lambda c, **kw: (order.append("stop"), True)[1]
+    )
+    monkeypatch.setattr(
+        botctl, "start", lambda c, **kw: (order.append("start"),
+                                          botctl.write_pidfile(c, 4242), True)[2]
+    )
+    monkeypatch.setattr(
+        retention, "run_retention_job",
+        lambda *a, **kw: (order.append("retention"), {"bars": 0})[1],
     )
     cfg.wal_path.write_bytes(b"x" * 1024)
     assert daily_restart.run(cfg, now=NOW) == "ok"
-    # and the module source never references sqlite at all
-    src = Path(daily_restart.__file__).read_text(encoding="utf-8")
-    assert "sqlite" not in src
+    assert order == ["stop", "retention", "start"]

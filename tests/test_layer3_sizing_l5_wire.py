@@ -17,17 +17,30 @@ from polaris.core.learners.base import (
     TRIPLE_BLOCK_DURATION_SEC,
     TRIPLE_BLOCK_SIZE_MULT,
 )
+from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing.engine import (
     SignalIntent,
     compute_size,
+    continuous_scalar,
 )
 from polaris.core.sizing.schema import (
+    CONT_SCALAR_MAX,
     PortfolioState,
     StrategyRiskState,
 )
 from polaris.core.sizing.session import derive_session, resolve_venue_session
 
 NOW = 1_715_000_000  # 2024-05-06 09:33:20 UTC → asia/eu overlap territory
+
+# The default _intent uses regime "bull_trend" + the default "momentum" family →
+# regime-fit folds a +1 BOOST into the ONE continuous scalar (seam1). These L5
+# wiring tests assert the EXACT T4 product, so they must carry the same fold;
+# at signal_strength=1.0 the folded scalar is continuous_scalar(1.0)·1.5 clamped
+# to CONT_SCALAR_MAX. (The L5 learner mults remain orthogonal — unchanged.)
+_RF_CONT = min(
+    CONT_SCALAR_MAX,
+    continuous_scalar(1.0) * regime_scalar(regime_fit("momentum", "bull_trend")),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +152,8 @@ def test_compute_size_no_learner_state(memdb: sqlite3.Connection) -> None:
     assert sized.proposed.triple_block_mult == pytest.approx(NEUTRAL_MULT)
     # Sanity: T4 chain identical to pre-wire (base × cont × tier × cell × listing)
     # with NEUTRAL learner product. base=0.02, cont(1.0)=1.0, tier(n=25,ws=0)=1.0,
-    # cell(empty)=1.0, listing(72h)=1.0 → 0.02.
-    assert sized.final_risk_pct == pytest.approx(0.02)
+    # cell(empty)=1.0, listing(72h)=1.0 → 0.02 × regime-fit fold.
+    assert sized.final_risk_pct == pytest.approx(0.02 * _RF_CONT)
 
 
 def test_compute_size_session_mult_promote(memdb: sqlite3.Connection) -> None:
@@ -156,8 +169,8 @@ def test_compute_size_session_mult_promote(memdb: sqlite3.Connection) -> None:
         portfolio=_portfolio(), now_ts=NOW,
     )
     assert sized.proposed.session_mult == pytest.approx(1.1)
-    # 0.02 × 1.0 × 1.0 × 1.0 × 1.0 × 1.1 = 0.022
-    assert sized.final_risk_pct == pytest.approx(0.022)
+    # 0.02 × cont(regime-fit fold) × 1.0 × 1.0 × 1.0 × 1.1
+    assert sized.final_risk_pct == pytest.approx(0.02 * _RF_CONT * 1.1)
 
 
 def test_compute_size_regime_mult_demote(memdb: sqlite3.Connection) -> None:
@@ -171,7 +184,7 @@ def test_compute_size_regime_mult_demote(memdb: sqlite3.Connection) -> None:
         portfolio=_portfolio(), now_ts=NOW,
     )
     assert sized.proposed.regime_mult == pytest.approx(0.9)
-    assert sized.final_risk_pct == pytest.approx(0.02 * 0.9)
+    assert sized.final_risk_pct == pytest.approx(0.02 * _RF_CONT * 0.9)
 
 
 def test_compute_size_triple_block_active(memdb: sqlite3.Connection) -> None:
@@ -185,7 +198,7 @@ def test_compute_size_triple_block_active(memdb: sqlite3.Connection) -> None:
         portfolio=_portfolio(), now_ts=NOW,
     )
     assert sized.proposed.triple_block_mult == pytest.approx(TRIPLE_BLOCK_SIZE_MULT)
-    assert sized.final_risk_pct == pytest.approx(0.02 * TRIPLE_BLOCK_SIZE_MULT)
+    assert sized.final_risk_pct == pytest.approx(0.02 * _RF_CONT * TRIPLE_BLOCK_SIZE_MULT)
     # Critical: entry NOT blocked — final_risk_pct > 0 (aggressive bias preserved).
     assert sized.final_risk_pct > 0.0
 
@@ -246,8 +259,8 @@ def test_compute_size_product_clip(memdb: sqlite3.Connection) -> None:
         memdb, intent=_intent(base_risk_pct=0.001), risk_state=_risk_state(),
         portfolio=_portfolio(), now_ts=NOW,
     )
-    # raw product 9.0 → clipped 5.0 → 0.001 × 5.0 = 0.005
-    assert sized_lo.final_risk_pct == pytest.approx(0.005)
+    # raw product 9.0 → clipped 5.0 → 0.001 × cont(regime-fit fold) × 5.0
+    assert sized_lo.final_risk_pct == pytest.approx(0.001 * _RF_CONT * 5.0)
     assert sized.proposed.session_mult == pytest.approx(3.0)
     assert sized.proposed.regime_mult == pytest.approx(3.0)
 

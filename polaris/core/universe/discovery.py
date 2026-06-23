@@ -36,6 +36,7 @@ from polaris.core.universe.schema import (
     FilterThresholds,
     UniverseInstrument,
     default_thresholds,
+    liquidity_floor_for_venue,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ __all__ = [
     "CAPITAL_P0_CATEGORY_TOKENS",
     "CAPITAL_SESSION_PATH",
     "apply_active_filters",
+    "deactivate_stale_active_rows",
     "detect_listing_changes",
     "fetch_alpaca_instruments",
     "fetch_capital_instruments",
@@ -305,16 +307,25 @@ def persist_universe(
 ) -> None:
     """Upsert UniverseInstrument rows into `universe` table.
 
-    ``is_active_set`` = set of `instrument_id` that survived 4-axis filter; rows
-    not in the set are written with ``is_active=0`` and an ``active_reason``
-    explaining which axis failed (vol / spread / atr / depth / state).
+    ``is_active_set`` = set of `instrument_id` that survived the active-set
+    selection (``rank_active_universe``); rows not in the set are written with
+    ``is_active=0`` and an ``active_reason`` that MIRRORS THE REAL SELECTION PATH
+    (``_active_exclusion_reason``): ``off_venue_class:*`` (stream-whitelist drop),
+    ``session_wait:*`` / ``state=*`` (validity), ``quote_ccy=*`` (OKX quote),
+    ``liqfloor:<axis>`` (eligibility liquidity floor), or ``below_rank_topN``
+    (valid + cleared the floor but fell below the continuous-rank cut) — NOT the
+    legacy hard 4-axis labels, which no longer govern selection.
 
     ``is_active_set=None`` means "no selection ran" → every row is marked active
     (legacy seed/test path). An **empty** set is honored as "nothing active"
     (STEP 3: off-session Capital → all rows persist with ``is_active=0`` and a
     ``session_wait`` reason, reviving next refresh) — it is NOT treated as None.
     """
-    th = thresholds or default_thresholds()
+    # ``thresholds`` is retained for the public spec-API signature but no longer
+    # read here: ``active_reason`` now mirrors the real rank/floor path
+    # (``_active_exclusion_reason``), which keys on the per-venue liquidity floor,
+    # not the legacy 4-axis hard thresholds.
+    _ = thresholds
     active_ids = (
         {ins.instrument_id for ins in instruments}
         if is_active_set is None
@@ -328,7 +339,7 @@ def persist_universe(
     rows = []
     for ins in instruments:
         is_active = ins.instrument_id in active_ids
-        reason = None if is_active else _filter_failure_reason(ins, th)
+        reason = None if is_active else _active_exclusion_reason(ins)
         rows.append(
             (
                 ins.venue,
@@ -343,6 +354,7 @@ def persist_universe(
                 ins.atr_24h_pct,
                 ins.depth_10bps_usd,
                 ins.signal_density_7d,
+                ins.last_price,
                 ins.listing_ts,
                 ins.last_seen_ts,
                 1 if is_active else 0,
@@ -355,9 +367,9 @@ def persist_universe(
             venue, symbol, instrument_id, underlying_group_id,
             asset_class, quote_ccy, state,
             vol_24h_usd, spread_bps, atr_24h_pct, depth_10bps_usd,
-            signal_density_7d, listing_ts, last_seen_ts,
+            signal_density_7d, last_price, listing_ts, last_seen_ts,
             is_active, active_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(venue, symbol) DO UPDATE SET
             instrument_id=excluded.instrument_id,
             underlying_group_id=excluded.underlying_group_id,
@@ -369,6 +381,7 @@ def persist_universe(
             atr_24h_pct=excluded.atr_24h_pct,
             depth_10bps_usd=excluded.depth_10bps_usd,
             signal_density_7d=excluded.signal_density_7d,
+            last_price=excluded.last_price,
             listing_ts=COALESCE(universe.listing_ts, excluded.listing_ts),
             last_seen_ts=excluded.last_seen_ts,
             is_active=excluded.is_active,
@@ -392,6 +405,62 @@ def persist_universe(
             len(new_active_ids), len(activated), len(deactivated),
             off_venue_deactivated,
         )
+
+
+def deactivate_stale_active_rows(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    fetched_ids: set[str],
+) -> int:
+    """Flip a venue's ``is_active=1`` rows that are ABSENT from this fetch to inactive.
+
+    Live-audit gap (2026-06-23): ``persist_universe``'s upsert only touches the
+    rows present in the current fetch's ``instruments`` list. Alpaca's ~13k
+    ``/v2/assets`` set churns, so a name that was ``is_active=1`` in a prior cycle
+    but drops OUT of the current fetch is never re-evaluated and lingers active
+    forever — verified ABVE ($54k vol) sat ``is_active=1`` for 21 days, below the
+    5M Alpaca $vol floor, leading equity focus. OKX/Capital fetch a small stable
+    universe so the ghost does not manifest there; this is an Alpaca-shaped hygiene
+    correction, NOT a defensive throttle: a name that LEFT the venue is no longer
+    eligible (universe membership), not "too risky".
+
+    A name still in ``fetched_ids`` is NEVER swept here — ``persist_universe``
+    already assigned it the correct ``is_active`` (the selection's verdict stands,
+    flow_not_block). Swept rows are tagged ``active_reason='stale_unselected'``.
+
+    Guard: an EMPTY ``fetched_ids`` means "no fetch happened this cycle"
+    (credentials missing / API down) — it is a NO-OP (never zero the book on a
+    non-event). The production caller only invokes this after a non-empty fetch.
+
+    Returns the number of rows flipped (observability for the refresh INFO line).
+    """
+    if not fetched_ids:
+        return 0
+    active_ids = {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT instrument_id FROM universe WHERE venue = ? AND is_active = 1",
+            (venue,),
+        ).fetchall()
+    }
+    stale = active_ids - fetched_ids
+    if not stale:
+        return 0
+    swept = 0
+    # Chunk the IN-list (SQLite caps bound parameters ~999); Alpaca stale sets are
+    # tiny in practice but stay safe.
+    stale_list = sorted(stale)
+    for start in range(0, len(stale_list), 500):
+        chunk = stale_list[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"UPDATE universe SET is_active = 0, active_reason = 'stale_unselected' "
+            f"WHERE venue = ? AND is_active = 1 AND instrument_id IN ({placeholders})",
+            (venue, *chunk),
+        )
+        swept += max(0, cur.rowcount)
+    return swept
 
 
 def _read_active_instrument_ids(
@@ -502,18 +571,30 @@ async def refresh_capital_universe(
 # ---------------------------------------------------------------------------
 
 
-def _filter_failure_reason(ins: UniverseInstrument, th: FilterThresholds) -> str:
-    """First-failing axis name for the 4-axis hard filter (used in `active_reason`).
+def _active_exclusion_reason(ins: UniverseInstrument) -> str:
+    """Why ``ins`` is NOT in the active set, mirroring ``rank_active_universe``.
 
-    STEP 2 (asset-class routing): a row whose ``asset_class`` is off its venue's
-    stream whitelist (e.g. a Capital crypto-CFD) is tagged ``off_venue_class:...``
-    — it never enters the active set (crypto → OKX track A).
+    Observability fix (B3 / audit 2026-06-23): selection is now
+    ``rank_active_universe`` (stream whitelist → validity + liquidity floor →
+    continuous-rank top-N), but ``active_reason`` used to be written by the LEGACY
+    hard 4-axis ``_filter_failure_reason`` (atr<2.0 / vol<30M …) which no longer
+    governs anything — so live G1 forensics reported an axis that does not decide
+    membership (verified ``below_rank`` = 0 rows, ``atr_pct=1.50<2.0`` = 13,149
+    placeholder rows). This walks the ACTUAL exclusion path in order:
 
-    STEP 3 (session asymmetry): a non-live CFD (Capital) row is a **session-wait**
-    — it is persisted (``is_active=0``) and revives automatically the next refresh
-    once the venue reports it TRADEABLE again, so the reason is tagged
-    ``session_wait:<state>`` (not a permanent ``state=...`` reject). Crypto (OKX,
-    24/7) and any genuinely halted/off venue keep the literal state reason.
+    1. ``off_venue_class:<class>`` — dropped by the stream asset-class whitelist
+       (``apply_stream_asset_class_filter``; crypto-CFD → OKX track A).
+    2. validity (``_is_valid_candidate``): non-live state →
+       ``session_wait:<state>`` for Capital (revives next refresh) else
+       ``state=<state>``; OKX non-USDT quote → ``quote_ccy=<q>``.
+    3. ``liqfloor:<axis>`` — failed the venue eligibility liquidity floor
+       (``passes_liquidity_floor``); ``<axis>`` ∈ spread/vol/depth/price.
+    4. ``below_rank_topN`` — valid + cleared the floor but fell below the
+       continuous-rank top-N cut (the ONLY honest "ranking" exclusion).
+
+    Pure observability: zero behavior change (the active SELECTION is unchanged —
+    ``is_active`` is decided upstream by ``is_active_set``). flow_not_block — this
+    only LABELS why a non-selected row is out; it never blocks/cuts/vetoes.
     """
     if not asset_class_allowed_for_venue(ins.venue, ins.asset_class):
         return f"off_venue_class:{ins.asset_class}"
@@ -521,13 +602,44 @@ def _filter_failure_reason(ins: UniverseInstrument, th: FilterThresholds) -> str
         if ins.venue == "capital":
             return f"session_wait:{ins.state}"
         return f"state={ins.state}"
-    if ins.spread_bps > th.max_spread_bps:
-        return f"spread_bps={ins.spread_bps:.1f}>{th.max_spread_bps}"
-    if ins.atr_24h_pct < th.min_atr_24h_pct:
-        return f"atr_pct={ins.atr_24h_pct:.2f}<{th.min_atr_24h_pct}"
-    if ins.vol_24h_usd < th.min_vol_24h_usd:
-        return f"vol_usd={ins.vol_24h_usd:.0f}<{th.min_vol_24h_usd:.0f}"
-    if ins.depth_10bps_usd < th.min_depth_10bps_usd:
-        return f"depth_usd={ins.depth_10bps_usd:.0f}<{th.min_depth_10bps_usd:.0f}"
-    # Valid + clears every soft axis but fell below the continuous-rank cut.
-    return "below_rank"
+    if ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX:
+        return f"quote_ccy={ins.quote_ccy}"
+    axis = _liqfloor_failed_axis(ins)
+    if axis is not None:
+        return f"liqfloor:{axis}"
+    # Valid + cleared the floor but below the continuous-rank top-N cut.
+    return "below_rank_topN"
+
+
+def _liqfloor_failed_axis(ins: UniverseInstrument) -> str | None:
+    """First eligibility-liquidity-floor axis ``ins`` fails, or None if it passes.
+
+    Mirrors ``schema.passes_liquidity_floor`` axis-for-axis (same known-bad-only
+    contract: a missing datum — 0.0 vol/depth/price — is never a failure; only
+    spread applies on any value). Returns the axis name so ``active_reason`` can
+    say WHICH floor a row tripped (spread/vol/depth/price), never a bare pass/fail.
+    """
+    floor = liquidity_floor_for_venue(ins.venue)
+    if floor.max_spread_bps > 0.0 and ins.spread_bps > floor.max_spread_bps:
+        return "spread"
+    if (
+        floor.min_vol_24h_usd > 0.0
+        and ins.vol_24h_usd > 0.0
+        and ins.vol_24h_usd < floor.min_vol_24h_usd
+    ):
+        return "vol"
+    if (
+        floor.min_depth_10bps_usd > 0.0
+        and ins.depth_10bps_usd > 0.0
+        and ins.depth_10bps_usd < floor.min_depth_10bps_usd
+    ):
+        return "depth"
+    if (
+        floor.min_price > 0.0
+        and ins.last_price > 0.0
+        and ins.last_price < floor.min_price
+    ):
+        return "price"
+    return None
+
+

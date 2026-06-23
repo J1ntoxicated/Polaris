@@ -16,7 +16,7 @@ from polaris.core.universe._capital import (
     fetch_capital_instruments,
 )
 from polaris.core.universe.discovery import (
-    _filter_failure_reason,
+    _active_exclusion_reason,
     apply_active_filters,
     detect_listing_changes,
     merge_listing_timestamps,
@@ -368,18 +368,69 @@ def test_persist_universe_writes_active_reason(memdb) -> None:  # type: ignore[n
     assert rmap["DEAD-USDT"][1] is not None and "vol" in rmap["DEAD-USDT"][1]
 
 
-def test_filter_failure_reason_first_axis() -> None:
-    th = default_thresholds()
-    halt = _make_inst("X-USDT", state="halt")
-    spread = _make_inst("X-USDT", spread_bps=99.0)
-    atr = _make_inst("X-USDT", atr_pct=0.1)
-    vol = _make_inst("X-USDT", vol=10.0)
-    depth = _make_inst("X-USDT", depth=10.0)
-    assert _filter_failure_reason(halt, th).startswith("state=")
-    assert _filter_failure_reason(spread, th).startswith("spread_bps=")
-    assert _filter_failure_reason(atr, th).startswith("atr_pct=")
-    assert _filter_failure_reason(vol, th).startswith("vol_usd=")
-    assert _filter_failure_reason(depth, th).startswith("depth_usd=")
+# ---------------------------------------------------------------------------
+# B3 #4 — active_reason mirrors the REAL rank/floor selection path
+# (rank_active_universe), not the legacy hard 4-axis labels.
+# ---------------------------------------------------------------------------
+
+
+def test_active_reason_below_rank_for_valid_floor_passing_loser() -> None:
+    # A valid OKX USDT row that clears the eligibility floor but is NOT in the
+    # active set fell below the continuous-rank top-N cut → 'below_rank_topN'
+    # (the legacy path could NEVER emit this; it always blamed a 4-axis floor).
+    ins = _make_inst("LOSER-USDT", vol=8e8, spread_bps=2.0, atr_pct=4.0, depth=2e5)
+    assert _active_exclusion_reason(ins) == "below_rank_topN"
+
+
+def test_active_reason_liqfloor_vol_axis() -> None:
+    # Below the OKX 20M $vol floor → 'liqfloor:vol' (names the failing axis).
+    ins = _make_inst("THIN-USDT", vol=1e6, spread_bps=2.0, atr_pct=4.0, depth=2e5)
+    assert _active_exclusion_reason(ins) == "liqfloor:vol"
+
+
+def test_active_reason_liqfloor_spread_axis() -> None:
+    # Spread above the OKX 30bps floor → 'liqfloor:spread'.
+    ins = _make_inst("WIDE-USDT", vol=8e8, spread_bps=99.0, atr_pct=4.0, depth=2e5)
+    assert _active_exclusion_reason(ins) == "liqfloor:spread"
+
+
+def test_active_reason_session_wait_for_non_live_capital() -> None:
+    ins = _make_inst(
+        "EURUSD", venue="capital", asset_class="forex", quote_ccy="USD",
+        state="tradeable_off",
+    )
+    assert _active_exclusion_reason(ins) == "session_wait:tradeable_off"
+
+
+def test_active_reason_state_for_non_live_okx() -> None:
+    ins = _make_inst("HALT-USDT", state="halt")
+    assert _active_exclusion_reason(ins) == "state=halt"
+
+
+def test_active_reason_off_venue_class() -> None:
+    # A crypto-CFD on Capital is off Capital's stream whitelist → routed to OKX.
+    ins = _make_inst(
+        "BTCUSD", venue="capital", asset_class="crypto", quote_ccy="USD",
+    )
+    assert _active_exclusion_reason(ins) == "off_venue_class:crypto"
+
+
+def test_active_reason_okx_non_usdt_quote() -> None:
+    ins = _make_inst("FOO-BTC", quote_ccy="BTC")
+    assert _active_exclusion_reason(ins) == "quote_ccy=BTC"
+
+
+def test_persist_universe_active_reason_uses_real_path(memdb) -> None:  # type: ignore[no-untyped-def]
+    # Selection = rank_active_universe; the inactive loser's active_reason must
+    # be a real-path label, NEVER a legacy 4-axis 'atr_pct=…<2.0' string.
+    winner = _make_inst("BTC-USDT", vol=9e8)
+    loser = _make_inst("ETH-USDT", vol=8e8)  # valid + floor-passing, just not picked
+    persist_universe(memdb, [winner, loser], is_active_set={winner.instrument_id})
+    reason = memdb.execute(
+        "SELECT active_reason FROM universe WHERE symbol='ETH-USDT'"
+    ).fetchone()[0]
+    assert reason == "below_rank_topN"
+    assert "atr_pct" not in (reason or "")
 
 
 def test_capital_name_matches_p0_categories() -> None:

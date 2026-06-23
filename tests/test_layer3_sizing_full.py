@@ -20,6 +20,7 @@ from polaris.core.cell_matrix import (
     TradeClose,
     update_on_trade_close,
 )
+from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing import (
     CONT_SCALAR_MAX,
     CONT_SCALAR_MIN,
@@ -513,9 +514,15 @@ def test_t4_compute_size_top_quartile_amplifies(memdb: sqlite3.Connection) -> No
     sized = compute_size(
         memdb, intent=_intent(), risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
-    # base 0.02 × continuous(1.2)≈1.2 × tier(1.0) × cell(1.5) × listing(1.0) ≈ 0.036
+    # base 0.02 × cont × tier(1.0) × cell(1.5) × listing(1.0). cont = the ONE
+    # continuous scalar folded with regime-fit: continuous_scalar(1.2)=1.2 ×
+    # regime_scalar(momentum × bull_trend = +1)=1.5 → 1.8, re-clamped to 1.5.
+    cont = min(
+        CONT_SCALAR_MAX,
+        continuous_scalar(1.2) * regime_scalar(regime_fit("momentum", "bull_trend")),
+    )
     assert sized.proposed.cell_routing_mult == 1.5
-    assert sized.final_risk_pct == pytest.approx(0.02 * 1.2 * 1.0 * 1.5 * 1.0)
+    assert sized.final_risk_pct == pytest.approx(0.02 * cont * 1.0 * 1.5 * 1.0)
     assert sized.final_notional_usd == pytest.approx(sized.final_risk_pct * 10_000.0)
 
 
@@ -578,8 +585,14 @@ def test_t4_weak_signal_flows_when_fill_rate_hot(memdb: sqlite3.Connection) -> N
     sized = compute_size(
         memdb, intent=weak, risk_state=_risk_state(), portfolio=hot, now_ts=NOW + 100,
     )
-    # Normal computed size: base 0.02 × continuous(0.6) × tier(1.0) × cell(1.5).
-    expected = 0.02 * continuous_scalar(0.6) * 1.0 * 1.5
+    # Normal computed size: base 0.02 × cont × tier(1.0) × cell(1.5). cont = the
+    # ONE continuous scalar with regime-fit folded in (still the same single
+    # scalar — flow_not_block: the weak signal still FLOWS, never zeroed).
+    cont = min(
+        CONT_SCALAR_MAX,
+        continuous_scalar(0.6) * regime_scalar(regime_fit("momentum", "bull_trend")),
+    )
+    expected = 0.02 * cont * 1.0 * 1.5
     assert sized.final_risk_pct == pytest.approx(expected)
     assert sized.final_risk_pct > 0.0
     assert sized.binding_cap != "fill_rate_cut"
@@ -645,6 +658,107 @@ def test_property_compute_size_always_finite(
         portfolio=_portfolio(),
         now_ts=NOW + 100,
     )
+    assert math.isfinite(sized.final_risk_pct)
+    assert 0.0 <= sized.final_risk_pct <= SINGLE_TRADE_ABSOLUTE_CEILING_PCT
+
+
+# ---------------------------------------------------------------------------
+# Seam1 — regime-fit folds into the ONE T4 continuous scalar (bidirectional)
+# ---------------------------------------------------------------------------
+
+
+def _intent_rf(
+    *, regime: str, signal_family: str, strength: float = 1.0,
+) -> SignalIntent:
+    return SignalIntent(
+        signal_id="rf", venue="okx", symbol="RF-USDT",
+        instrument_id="okx:RF-USDT", underlying_group_id="crypto:RF",
+        asset_class="crypto", strategy="volume_burst", track="A",
+        regime=regime, direction="long", signal_strength=strength,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+        signal_family=signal_family,
+    )
+
+
+def test_regime_fit_folds_one_scalar_bidirectional(memdb: sqlite3.Connection) -> None:
+    """Good fit boosts, bad fit shrinks — but bad fit is still > 0 (the 0.75
+    floor flows, never zeroed). The fold lives entirely in the ONE continuous
+    scalar; the learner mults (session/regime/triple_block) are untouched."""
+    good = compute_size(
+        memdb, intent=_intent_rf(regime="bull_trend", signal_family="momentum"),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    bad = compute_size(
+        memdb, intent=_intent_rf(regime="chop", signal_family="momentum"),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    # momentum × chop = -1 → 0.75× shrink; momentum × bull_trend = +1 → 1.5× boost.
+    assert bad.final_risk_pct < good.final_risk_pct
+    # flow_not_block: the bad-regime signal STILL FLOWS (never a 0 / veto).
+    assert bad.final_risk_pct > 0.0
+    # The other learner mults are NOT touched by regime-fit (no stacked dampener).
+    assert good.proposed.session_mult == bad.proposed.session_mult
+    assert good.proposed.regime_mult == bad.proposed.regime_mult
+    assert good.proposed.triple_block_mult == bad.proposed.triple_block_mult
+
+
+def test_regime_fit_reversion_inverts_with_family(memdb: sqlite3.Connection) -> None:
+    """The SAME regime is good for one family and bad for the other — proving the
+    lean is (family × regime), not a one-directional defensive cut."""
+    # chop: bad for momentum (-1, shrink) but GOOD for reversion (+1, boost).
+    mom_chop = compute_size(
+        memdb, intent=_intent_rf(regime="chop", signal_family="momentum"),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    rev_chop = compute_size(
+        memdb, intent=_intent_rf(regime="chop", signal_family="reversion"),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert rev_chop.final_risk_pct > mom_chop.final_risk_pct
+
+
+def test_signal_family_default_backcompat_unknown_regime(memdb: sqlite3.Connection) -> None:
+    """For an UNKNOWN regime the fit is 0 → scalar 1.0× → byte-identical to the
+    pre-regime-fit size (no shaping, full flow)."""
+    with_family = compute_size(
+        memdb, intent=_intent_rf(regime="unknown", signal_family="momentum", strength=1.2),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    # Same intent but the default family path (also "momentum") — identical.
+    default = SignalIntent(
+        signal_id="rf", venue="okx", symbol="RF-USDT",
+        instrument_id="okx:RF-USDT", underlying_group_id="crypto:RF",
+        asset_class="crypto", strategy="volume_burst", track="A",
+        regime="unknown", direction="long", signal_strength=1.2,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+    )
+    default_sized = compute_size(
+        memdb, intent=default, risk_state=_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert with_family.final_risk_pct == default_sized.final_risk_pct
+    # And it equals the unshaped continuous_scalar(1.2) path (×cell 1.0 default cell).
+    assert with_family.proposed.continuous_scalar == pytest.approx(continuous_scalar(1.2))
+
+
+@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    family=st.sampled_from(["momentum", "reversion"]),
+    regime=st.sampled_from(["bull_trend", "bear_trend", "chop", "crisis", "unknown"]),
+    strength=st.floats(min_value=0.1, max_value=2.5),
+)
+def test_property_regime_fit_keeps_9stack_invariant(
+    memdb: sqlite3.Connection, family: str, regime: str, strength: float,
+) -> None:
+    """The multiplier COUNT (factor set) is unchanged — regime-fit only sets the
+    VALUE of the single continuous scalar, which stays inside its band; the
+    learner mults and the proposed chain remain finite and the scalar never 0."""
+    sized = compute_size(
+        memdb, intent=_intent_rf(regime=regime, signal_family=family, strength=strength),
+        risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert CONT_SCALAR_MIN <= sized.proposed.continuous_scalar <= CONT_SCALAR_MAX
+    assert sized.proposed.continuous_scalar > 0.0
     assert math.isfinite(sized.final_risk_pct)
     assert 0.0 <= sized.final_risk_pct <= SINGLE_TRADE_ABSOLUTE_CEILING_PCT
 

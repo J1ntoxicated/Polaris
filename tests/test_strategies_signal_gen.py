@@ -732,11 +732,11 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     assert len(seen) == len(all_strategies()), (
         f"correlation groups not unique: {seen}"
     )
-    assert len(seen) == 12, f"correlation groups not unique: {seen}"
+    assert len(seen) == 15, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    assert len(STRATEGY_REGISTRY) == 12  # +ema_crossover (OKX SPOT EMA trend)
+    assert len(STRATEGY_REGISTRY) == 15  # +cci_reversion +connors_rsi2 +supertrend
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

@@ -1,9 +1,10 @@
-"""Daily graceful restart: SIGTERM → wait → rotate log → start. WAL recovery.
+"""Daily graceful restart: SIGTERM → wait → rotate log → retention → start.
 
-Runs at 07:30 local (launchd). Never opens the database (WAL size is read
-via os.stat only); never force-kills: a stop timeout aborts the whole run
-with an alert, leaving the existing process untouched (zero duplicate
-instances by construction).
+Runs at 07:30 local (launchd). The DB is opened ONLY inside the confirmed-down
+window (after ``botctl.stop`` returns True) to prune raw/history streams and
+reclaim the WAL — never on the stop-timeout abort path. Never force-kills: a
+stop timeout aborts the whole run with an alert, leaving the existing process
+untouched (zero duplicate instances by construction).
 """
 
 from __future__ import annotations
@@ -38,6 +39,28 @@ def _rotate_logs(cfg: OpsConfig, *, now: float) -> None:
         old.unlink(missing_ok=True)
 
 
+def _run_retention(cfg: OpsConfig, *, now: float) -> None:
+    """Prune raw/history streams + reclaim the WAL — bot-down window only.
+
+    Non-fatal: any failure is logged + alerted but never aborts the restart
+    (data hygiene must not block bringing the bot back up). The reclaiming WAL
+    checkpoint is safe here because the bot is confirmed stopped (no concurrent
+    writer to contend the exclusive lock).
+    """
+    try:
+        from polaris.storage.retention import run_retention_job
+
+        result = run_retention_job(cfg.db_path, now_ts=int(now))
+        deleted = {k: v for k, v in result.items() if not k.startswith("__")}
+        with open(cfg.restart_log, "a", encoding="utf-8") as fh:
+            fh.write(f"{iso_utc(now)} retention deleted={deleted}\n")
+    except Exception as exc:  # noqa: BLE001 — hygiene must never block restart
+        alerting.notify(
+            cfg, "retention_failed",
+            f"retention/WAL hygiene skipped (non-fatal): {exc}",
+        )
+
+
 def run(cfg: OpsConfig, *, now: float | None = None) -> str:
     now_f = time.time() if now is None else now
 
@@ -58,6 +81,7 @@ def run(cfg: OpsConfig, *, now: float | None = None) -> str:
             )
             return "stop_timeout"
         _rotate_logs(cfg, now=now_f)  # bot confirmed down — safe window
+        _run_retention(cfg, now=now_f)  # prune raw/history streams + reclaim WAL
         if not botctl.start(cfg, manual=False, have_lock=True, now=now_f):
             return "start_failed"
         botctl._sleep(RESTART_SETTLE_SEC)

@@ -43,11 +43,16 @@ class PositionRow:
     # row (``exit_state`` / ``stop_price`` / ``mfe_r`` / ``mae_r``) + the
     # regime_state lookup. Graceful zero/empty when columns are NULL. These NEVER
     # feed sizing/gating — pure board columns.
+    #
+    # Hardening #6 (2026-06-23): ``mfe_atr_r`` / ``mae_atr_r`` are the per-trade
+    # -ATR EXCURSION ruler (``_close_excursion_r`` / ``realised_r``), suffixed so
+    # the tile never confuses them with the per-stream LEDGER R (``pnl_r`` /
+    # ``avg_r`` / ``sum_r`` via ``realised_r_stream``). Two different rulers.
     regime: str = ""
     exit_state: str = "open"
     stop_price: float = 0.0
-    mfe_r: float = 0.0
-    mae_r: float = 0.0
+    mfe_atr_r: float = 0.0
+    mae_atr_r: float = 0.0
     upnl_pct: float = 0.0
 
 
@@ -241,10 +246,19 @@ class RotationTelemetry:
     rotation_count: int = 0
     session_forced_exit_count: int = 0
     # Drift (reconciled) loss is a SEPARATE counter labelled "tracking failures,
-    # not trades" — a rough $ estimate (mae_r × risk_usd), never an R sum (Step
-    # M, 2026-06-22). Excluded from PF/WR/avg_r/ticker R.
+    # not trades" — excluded from PF/WR/avg_r/ticker R (Step M, 2026-06-22).
+    # Hardening #1 (2026-06-23): ``reconciled_realized_usd`` is the PRIMARY figure
+    # = ACTUAL realized Σ fills.pnl_usd over the reconciled positions' close legs.
+    # ``reconciled_loss_usd`` is the labeled 'est' SECONDARY (mae_r × risk_usd,
+    # recorded at reconcile time) kept for when no close fill exists.
+    reconciled_realized_usd: float = 0.0
     reconciled_loss_usd: float = 0.0
     reconciled_loss_n: int = 0
+    # Hardening #5 (2026-06-23): count of DISTINCT instruments that fell back to a
+    # venue-correct asset_class (NULL universe class or unknown group_id prefix).
+    # >0 means a held name aged out of the universe OR an L1 group_id mis-prefixes
+    # — observability, never a throttle.
+    asset_class_fallback_n: int = 0
     last_rotation: RotationEvent | None = None
 
 
@@ -385,6 +399,66 @@ class ConfidencePanel:
     cells: list[ConfidenceCell] = field(default_factory=list)
     # P1 offline replay/benchmark run (display-only; graceful empty when none).
     replay: ReplayBenchmarkPanel = field(default_factory=ReplayBenchmarkPanel)
+
+
+@dataclass(slots=True)
+class SinceResetRollup:
+    """Forward-edge rollup since the LATEST measurement reset (Jin 2026-06-23).
+
+    '실측 위해서 메인로직 바뀌면 pnl 리셋해서 측정해줘.' — the edge measured ONLY over
+    trades OPENED at/after the latest ``measurement_resets.reset_ts`` (so a trade
+    counts only if it was opened under the new logic; ``opened_ts``, not
+    ``closed_ts``). All metrics are over the fills.$ truth (fee-net), excluding
+    RECONCILED tracking-failure rows. ``net_usd`` / ``equity_change_usd`` are the
+    realised fee-net change over the window; ``avg_r`` is the stream-common R.
+    Display-only; the ALL-TIME panels stay available alongside this. The snapshot
+    carries None when no reset has been stamped (clean all-time fallback)."""
+
+    reset_ts: int
+    label: str
+    git_sha: str
+    equity_baseline_usd: float
+    n: int
+    pf: float
+    net_usd: float
+    win_pct: float
+    avg_r: float
+    equity_change_usd: float
+    # Hardening #7 (2026-06-23): close_reason × cadence split over the same
+    # since-reset window — surfaces the bar-vs-tick thesis-cut asymmetry the
+    # streak threading is gated on. Display/measurement-only.
+    cadence_split: list[CadenceReasonRow] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class CadenceReasonRow:
+    """One (close_reason × cadence) cell of the since-reset rollup (hardening #7).
+
+    ``cadence`` is 'bar' / 'tick' / 'unknown' (legacy NULL ``exit_cadence``);
+    ``close_reason`` is the lineage exit_reason (thesis_cut / atr_trail_stop /
+    protected_bep / loser_timeout / ...). ``n`` = closed positions in the cell,
+    ``net_usd`` = fee-net realised $. Measurement-only — never a trading path."""
+
+    close_reason: str
+    cadence: str
+    n: int
+    net_usd: float
+
+
+@dataclass(slots=True)
+class StrategySinceReset:
+    """Per-strategy forward edge since the latest reset (display-only).
+
+    Same window key as ``SinceResetRollup`` (``positions.opened_ts >= reset_ts``),
+    keyed by ``strategy_id`` so the per-strategy table can show the new-logic edge
+    next to the all-time ``StrategyStat`` row. Reconciled rows excluded."""
+
+    strategy_id: str
+    n: int
+    wr_pct: float
+    pf: float
+    avg_r: float
+    net_usd: float
 
 
 @dataclass(slots=True)
@@ -538,8 +612,10 @@ class DashboardSnapshot:
     # ``last_rotation`` (a nested RotationEvent or None) for the web snapshot.
     rotation_count: int = 0
     session_forced_exit_count: int = 0
+    reconciled_realized_usd: float = 0.0
     reconciled_loss_usd: float = 0.0
     reconciled_loss_n: int = 0
+    asset_class_fallback_n: int = 0
     last_rotation: RotationEvent | None = None
     # Component A (Jin 2026-05-31) — go-live confidence panel: real-fee-net
     # per-(strategy×regime) edge + overall win-rate / profit-factor / turnover /
@@ -570,3 +646,11 @@ class DashboardSnapshot:
     # (empty on a missing/locked sidecar). dataclasses.asdict serializes it for
     # the web snapshot. NEVER feeds sizing/gating/exit — pure board column.
     probe_events: list[dict[str, Any]] = field(default_factory=list)
+    # Measurement-reset baseline (Jin 2026-06-23) — the FORWARD edge measured only
+    # over trades OPENED at/after the latest measurement_resets.reset_ts (the new
+    # main-logic window). ``since_reset`` is None when no reset has been stamped
+    # (the board falls back to all-time cleanly); ``strategy_since_reset`` is the
+    # per-strategy slice of the same window. Display-only; ALL-TIME panels stay
+    # available. dataclasses.asdict serializes both for the web snapshot.
+    since_reset: SinceResetRollup | None = None
+    strategy_since_reset: list[StrategySinceReset] = field(default_factory=list)

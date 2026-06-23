@@ -57,6 +57,7 @@ from polaris.scripts._smoke_roundtrip_shared import (
     CloseOrphan,
     OpenAttempt,
     PendingClose,
+    SiblingDrainClose,
     record_venue_orphan,
     resolve_okx_base_url,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "CloseOrphan",
     "OpenAttempt",
     "PendingClose",
+    "SiblingDrainClose",
     "fetch_okx_available_usdt",
     "real_alpaca_close_fill",
     "real_capital_close_fill",
@@ -259,7 +261,8 @@ async def real_okx_close_fill(
     strategy_id: str,
     mark_price: float | None = None,
     poll_delay_sec: float = 0.5,
-) -> Fill | CloseOrphan | None:
+    sibling_base: float = 0.0,
+) -> Fill | CloseOrphan | SiblingDrainClose | None:
     """OKX close leg: sell the entry ``base_qty`` → poll → normalize.
 
     FIX 1 (OKX SPOT 1000-USDT market cap, reject 51201): ``mark_price`` is the
@@ -287,14 +290,26 @@ async def real_okx_close_fill(
       splitter's min-tail fold means this only guards a degenerate dust tail.
 
     FIX 2 (OKX 51008): close ``base_qty`` clamps to ``min(base_qty, available)``.
-    A TRUE orphan is one whose ENTIRE closeable available can never fill one child
-    — ``available <= 0`` OR (fresh ``mark_price`` known AND
-    ``available * mark < MIN_OKX_NOTIONAL_USD``, un-sellable sub-min dust) — and
-    returns a ``CloseOrphan`` sentinel (DISTINCT from a transient ``None`` reject)
-    + submits nothing → caller marks ``status='reconciled'`` (NOT a throttle, no
-    fabricated fill). With ``mark_price`` None/<=0 only ``available <= 0`` applies
-    (no fabricated mark): a dust-positive available then clamps-and-sells (the
-    clamp re-fetches each tick so a retried partial never oversells).
+    A sub-min/zero available (``available <= 0`` OR fresh ``mark_price`` known AND
+    ``available * mark < MIN_OKX_NOTIONAL_USD``) means this position cannot fill
+    one child — but the REASON splits two ways (POOLED-WALLET FIX):
+
+    * ``sibling_base > 0`` — one or more OTHER same-ccy positions are still open
+      and their tracked base accounts for the missing pool. The OKX SPOT demo
+      holds ONE fungible base-ccy balance shared by every concurrent same-ccy
+      position; the first sibling to close drains it, so a later sibling sees
+      ``availBal~0`` even though ITS base WAS real and WAS sold into the pool
+      (wallet proceeds conserved). → ``SiblingDrainClose`` so the caller books a
+      MARK close (real pnl_r, kept in the R ledger), NOT a tracking-failure
+      reconcile that drops it (the survivorship bias on ~32% of flow_pressure).
+    * ``sibling_base == 0`` — NO sibling to explain the drain → a genuine
+      over-count / un-sellable sub-min dust → ``CloseOrphan`` (reconcile, pnl_r
+      NULL), unchanged.
+
+    Both submit nothing (there is nothing left to sell). With ``mark_price``
+    None/<=0 only ``available <= 0`` applies (no fabricated mark): a dust-positive
+    available then clamps-and-sells (the clamp re-fetches each tick so a retried
+    partial never oversells).
     """
     if base_qty <= 0.0:
         return None
@@ -304,10 +319,20 @@ async def real_okx_close_fill(
     base_ccy = inst_id.split("-")[0]
     available = await _fetch_okx_available_base(adapter, base_ccy)
     if available is not None and available < base_qty:
-        # True orphan: the ENTIRE closeable available can never fill one child —
-        # available<=0 OR (fresh mark known) sub-min dust. No fabricated mark.
+        # Un-sellable: available<=0 OR (fresh mark known) sub-min dust. No
+        # fabricated mark.
         _mk = mark_price or 0.0
         if available <= 0.0 or (_mk > 0.0 and available * _mk < MIN_OKX_NOTIONAL_USD):
+            if sibling_base > 0.0:
+                # POOLED-WALLET DRAIN — a still-open same-ccy sibling holds/sold
+                # the shared pool. NOT a tracking failure: book a mark close.
+                logger.info(
+                    "[okx/close] %s base_qty=%.10f available %s=%.10f ~0 but "
+                    "sibling_base=%.10f open same-ccy — pooled-wallet drain, book "
+                    "mark close (kept in R ledger, not reconciled)",
+                    inst_id, base_qty, base_ccy, available, sibling_base,
+                )
+                return SiblingDrainClose(available=available)
             logger.warning(
                 "[okx/close] %s base_qty=%.10f but available %s=%.10f un-sellable "
                 "(<=0 or <min notional) — orphan; skip close, mark reconciled",

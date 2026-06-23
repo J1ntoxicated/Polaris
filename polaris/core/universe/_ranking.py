@@ -20,7 +20,6 @@ from collections.abc import Sequence
 from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.core.universe.schema import (
     ALLOWED_QUOTE_CCY_OKX,
-    FOCUS_TARGET_MAX,
     RANK_PENALTY_W_DEPTH,
     RANK_PENALTY_W_SPREAD,
     RANK_SCORE_W_ATR,
@@ -29,7 +28,7 @@ from polaris.core.universe.schema import (
     UNIVERSE_RANK_TOP_N_ENV,
     UniverseInstrument,
     is_capital_fx_major,
-    passes_liquidity_floor,
+    universe_watch_max,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,10 +65,21 @@ def apply_stream_asset_class_filter(
 
 
 def _is_valid_candidate(ins: UniverseInstrument) -> bool:
-    """Hard validity gate (kept hard): tradeable, live, OKX USDT-quote.
+    """Hard validity gate (basic-valid ONLY): tradeable, live, OKX USDT-quote.
 
     Everything else (vol / spread / depth / atr) is a *ranking* signal, never a
     hard block — weak names still flow and the cell-matrix down-routes them.
+
+    WATCH/TRADE DECOUPLE (Jin 2026-06-24): the universe-eligibility LIQUIDITY
+    FLOOR that USED to live here was strangling breadth — it pre-cut ~176 of 186
+    OKX names BEFORE z-ranking, so they never reached the active set, focus, WS,
+    or the curator (the curator could only judge the surviving ~10, leaving OKX
+    focus pinned at 2). The floor is NOT deleted: it is RE-HOMED to the curator
+    TRADE gate (``EntranceJudge`` floor-aware ``trade_eligible``), so a sub-floor
+    name is now WATCHED / streamed / dashboarded (flow_not_block) but its
+    order-open is deferred (slippage protection preserved at the single
+    ``_run_entries`` eligible_set seam). Basic-valid = state==live + OKX USDT
+    quote; the ATR-z signal-richness rank orders every survivor.
 
     STEP 3 (session asymmetry, Jin 2026-05-30): ``state != 'live'`` excludes a
     row from the *active set*, but for CFD (Capital) this is a **session-wait**,
@@ -81,20 +91,7 @@ def _is_valid_candidate(ins: UniverseInstrument) -> bool:
     """
     if ins.state != "live":
         return False
-    if ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX:
-        return False
-    # Universe-eligibility liquidity floor (Jin-approved 2026-06-22): the SAME
-    # KIND of hard keep as the two above — a tradeable-QUALITY membership test on
-    # the instrument (does this instrument's microstructure even permit a clean
-    # round-trip?), NOT a per-signal block / size-cut / entry-veto / expectancy
-    # judgement. A row whose venue spread / $-volume / depth / price falls
-    # outside its venue floor is structurally un-tradeable — its spread exceeds
-    # the executable round-trip cost (the bid/ask alone consumes the trade
-    # before any thesis is tested), so it never reaches the active set, the focus
-    # list, the WS sub, or the tick engine. This is a universe-membership
-    # (is-it-tradeable) boundary, not an edge/0.3R filter — the ATR-z
-    # signal-richness rank still orders every survivor (flow_not_block).
-    return passes_liquidity_floor(ins)
+    return not (ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX)
 
 
 def _pop_z(values: Sequence[float]) -> list[float]:
@@ -129,7 +126,14 @@ def _grouped_pop_z(values: Sequence[float], groups: Sequence[str]) -> list[float
 
 
 def _resolve_rank_top_n(top_n: int | None) -> int:
-    """Resolve top-N from arg → env → default, capped at FOCUS_TARGET_MAX."""
+    """Resolve top-N from arg → env → default, capped at the WATCH_MAX ceiling.
+
+    WATCH/TRADE DECOUPLE (Jin 2026-06-24): the active/watch ceiling is now
+    ``universe_watch_max()`` (``POLARIS_WATCH_MAX``, default 120), NOT the focus
+    window ``FOCUS_TARGET_MAX`` (48). The old ``min(top_n, FOCUS_TARGET_MAX)``
+    clamp CONFLATED the active set with the focus window and pinned watch at 48;
+    splitting them lets the bot watch dozens+ while focus stays 12-48 downstream.
+    """
     if top_n is None:
         raw = os.environ.get(UNIVERSE_RANK_TOP_N_ENV)
         if raw is not None:
@@ -139,7 +143,7 @@ def _resolve_rank_top_n(top_n: int | None) -> int:
                 top_n = UNIVERSE_RANK_TOP_N_DEFAULT
         else:
             top_n = UNIVERSE_RANK_TOP_N_DEFAULT
-    return max(0, min(top_n, FOCUS_TARGET_MAX))
+    return max(0, min(top_n, universe_watch_max()))
 
 
 def rank_active_universe(
@@ -153,7 +157,8 @@ def rank_active_universe(
     (vol + ATR realized-vol proxy) minus soft penalties (wide spread, thin
     depth) form a z-normalized composite score; the top ``top_n`` rows become
     the active set. ``top_n`` resolves arg → ``POLARIS_UNIVERSE_RANK_TOP_N``
-    env → default 40, capped at FOCUS_TARGET_MAX. Empty input and degenerate
+    env → default 120, capped at the WATCH_MAX ceiling (``POLARIS_WATCH_MAX``,
+    decoupled from the focus window). Empty input and degenerate
     (all-tied) populations are safe — z-scores collapse to 0 and ordering is
     stable by input order.
     """

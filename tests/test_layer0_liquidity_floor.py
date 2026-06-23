@@ -1,16 +1,20 @@
-"""Layer 0 — universe-eligibility liquidity floor (Jin-approved 2026-06-22).
+"""Layer 0 — venue liquidity floor (Jin 2026-06-22; WATCH/TRADE decouple 2026-06-24).
 
-A per-venue *instrument-quality* eligibility floor: an instrument reaches the
-active set only if it clears its venue's liquidity floor (OKX: max-spread + min
-$vol + min depth; Alpaca: min price + min $vol; Capital: max-spread only). This
-is a membership test on WHICH instruments are tradeable-quality — the SAME KIND
-of hard keep as the existing ``state=='live'`` / OKX-USDT gates — NOT a per-signal
-block, size-cut, or entry-veto. The ATR-z signal-richness rank still orders the
-survivors (flow_not_block preserved at the signal/entry level).
+A per-venue *instrument-quality* liquidity floor (OKX: max-spread + min $vol + min
+depth; Alpaca: min price + min $vol; Capital: max-spread only). WATCH/TRADE
+DECOUPLE (2026-06-24): the floor moved OFF the active/WATCH gate (it no longer
+pre-cuts the candidate set — that strangled breadth to OKX 2) and ONTO the curator
+TRADE gate (``EntranceJudge`` floor-aware ``trade_eligible``). A sub-floor name is
+now WATCHED / streamed / dashboarded (flow_not_block, breadth unlock) but its
+order-open is deferred (slippage protection at the single ``_run_entries`` seam).
+The predicate ``passes_liquidity_floor`` itself is UNCHANGED — only its CONSUMER
+moved. NOT a per-signal block, size-cut, or entry-veto; the ATR-z rank still orders
+every watched name.
 
-DEMO/PAPER only. Aggressive bias preserved: on every ELIGIBLE name the bot trades
-as hard as before; the floor only excludes loss-certain junk (175bp spread >
-~0.3R edge = negative-expectancy round-trip). NOT a regulatory/defensive throttle.
+DEMO/PAPER only. Aggressive bias preserved: on every TRADE-eligible name the bot
+trades as hard as before; the floor only gates ORDER-OPEN on loss-certain junk
+(175bp spread > ~0.3R edge = negative-expectancy round-trip), never observation.
+NOT a regulatory/defensive throttle.
 """
 
 from __future__ import annotations
@@ -151,16 +155,25 @@ def test_unknown_venue_no_floor() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_rank_excludes_junk_keeps_majors() -> None:
-    """A 175bp / $0.017-penny / sub-$vol name never reaches the active set."""
+def test_rank_watches_junk_floor_now_trade_gate_not_watch_gate() -> None:
+    """WATCH/TRADE decouple (Jin 2026-06-24): the floor moved OFF the active/watch
+    gate and ONTO the curator TRADE gate. A 175bp / sub-$vol name now REACHES the
+    active set (WATCHED — breadth unlock, flow_not_block), but the floor predicate
+    still marks it trade-ineligible (the curator forces ``trade_eligible=False``,
+    so its order-open is deferred at ``_run_entries`` — slippage protection kept).
+    """
     btc = _inst("BTC-USDT", vol=8e8, spread_bps=1.0, depth=400_000.0)
     eth = _inst("ETH-USDT", vol=6e8, spread_bps=1.5, depth=300_000.0)
     bnt = _inst("BNT-USDT", vol=8e8, spread_bps=175.0, depth=400_000.0)  # wide spread
     gear = _inst("GEAR-USDT", vol=50_000.0, spread_bps=5.0)  # micro vol
     out = rank_active_universe([btc, eth, bnt, gear], top_n=10)
     syms = {i.symbol for i in out}
-    assert "BTC-USDT" in syms and "ETH-USDT" in syms
-    assert "BNT-USDT" not in syms and "GEAR-USDT" not in syms
+    # All four are WATCHED now (the floor no longer pre-cuts breadth).
+    assert syms == {"BTC-USDT", "ETH-USDT", "BNT-USDT", "GEAR-USDT"}
+    # But the sub-floor names are still NOT trade-eligible (curator trade-gate).
+    assert passes_liquidity_floor(bnt) is False
+    assert passes_liquidity_floor(gear) is False
+    assert passes_liquidity_floor(btc) is True and passes_liquidity_floor(eth) is True
 
 
 def test_rank_atr_ordering_preserved_within_eligible_set() -> None:

@@ -587,10 +587,15 @@ def _active_exclusion_reason(ins: UniverseInstrument) -> str:
     2. validity (``_is_valid_candidate``): non-live state →
        ``session_wait:<state>`` for Capital (revives next refresh) else
        ``state=<state>``; OKX non-USDT quote → ``quote_ccy=<q>``.
-    3. ``liqfloor:<axis>`` — failed the venue eligibility liquidity floor
-       (``passes_liquidity_floor``); ``<axis>`` ∈ spread/vol/depth/price.
-    4. ``below_rank_topN`` — valid + cleared the floor but fell below the
-       continuous-rank top-N cut (the ONLY honest "ranking" exclusion).
+    3. ``below_rank_topN`` — basic-valid but fell below the continuous-rank
+       WATCH-cut (the ONLY honest active-exclusion "ranking" reason).
+
+    WATCH/TRADE DECOUPLE (Jin 2026-06-24): the liquidity floor NO LONGER decides
+    active membership — it moved to the curator TRADE gate, so a sub-floor name is
+    now ACTIVE/WATCHED (not excluded). The ``liqfloor:<axis>`` label is therefore
+    NOT an active-exclusion reason here; it is a TRADE-eligibility annotation
+    exposed separately via :func:`liqfloor_trade_annotation`. A basic-valid row
+    that fell below the WATCH-cut reports ``below_rank_topN``.
 
     Pure observability: zero behavior change (the active SELECTION is unchanged —
     ``is_active`` is decided upstream by ``is_active_set``). flow_not_block — this
@@ -604,11 +609,22 @@ def _active_exclusion_reason(ins: UniverseInstrument) -> str:
         return f"state={ins.state}"
     if ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX:
         return f"quote_ccy={ins.quote_ccy}"
-    axis = _liqfloor_failed_axis(ins)
-    if axis is not None:
-        return f"liqfloor:{axis}"
-    # Valid + cleared the floor but below the continuous-rank top-N cut.
+    # Basic-valid but below the continuous-rank WATCH-cut. (The liquidity floor is
+    # NO LONGER an active-exclusion — it is a trade-eligibility annotation now.)
     return "below_rank_topN"
+
+
+def liqfloor_trade_annotation(ins: UniverseInstrument) -> str | None:
+    """Trade-eligibility annotation: ``liqfloor:<axis>`` iff ``ins`` is sub-floor.
+
+    WATCH/TRADE DECOUPLE (Jin 2026-06-24): a sub-floor name is now WATCHED but its
+    curator ``trade_eligible`` is forced FALSE (slippage protection). This labels
+    WHICH floor axis a watched row trips for the TRADE gate — NOT an active-set
+    exclusion (the row IS active/watched). Returns None when the row clears the
+    floor (trade-eligible on the liquidity axis). Pure observability.
+    """
+    axis = _liqfloor_failed_axis(ins)
+    return None if axis is None else f"liqfloor:{axis}"
 
 
 def _liqfloor_failed_axis(ins: UniverseInstrument) -> str | None:

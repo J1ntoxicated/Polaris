@@ -263,3 +263,31 @@ def test_cell_scores_feed_focus_score() -> None:
     scores = score_focus_candidates([a, b], cell_scores={"okx:BTC-USDT": 0.9})
     by_sym = {a.symbol: scores[0], b.symbol: scores[1]}
     assert by_sym["BTC-USDT"] > by_sym["LTC-USDT"]
+
+
+# ---------------------------------------------------------------------------
+# WATCH/TRADE decouple — resource guards (env-tunable watch caps)
+# ---------------------------------------------------------------------------
+
+
+def test_focus_cycle_target_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-cycle bar-ingest watch cap is env-tunable (resource guard)."""
+    from polaris.scripts._production_tick import (
+        FOCUS_CYCLE_TARGET,
+        _focus_cycle_target,
+    )
+
+    monkeypatch.delenv("POLARIS_FOCUS_CYCLE_TARGET", raising=False)
+    assert _focus_cycle_target() == FOCUS_CYCLE_TARGET  # default (widened to 120)
+    assert FOCUS_CYCLE_TARGET > 30  # widened past the old 30 watch bottleneck
+    monkeypatch.setenv("POLARIS_FOCUS_CYCLE_TARGET", "75")
+    assert _focus_cycle_target() == 75
+    monkeypatch.setenv("POLARIS_FOCUS_CYCLE_TARGET", "garbage")
+    assert _focus_cycle_target() == FOCUS_CYCLE_TARGET  # invalid → default
+
+
+def test_ws_cap_unchanged_at_40() -> None:
+    """WS socket stays bounded at top-40 (do NOT widen the socket on watch widen)."""
+    from polaris.scripts._production_ws import WS_SYMBOLS_PER_VENUE
+
+    assert WS_SYMBOLS_PER_VENUE == 40

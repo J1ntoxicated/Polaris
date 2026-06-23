@@ -21,6 +21,7 @@ from polaris.core.universe.discovery import (
     _active_exclusion_reason,
     apply_active_filters,
     detect_listing_changes,
+    liqfloor_trade_annotation,
     merge_listing_timestamps,
     parse_okx_tickers,
     persist_universe,
@@ -32,10 +33,13 @@ from polaris.core.universe.schema import (
     FOCUS_TARGET_MIN,
     UNIVERSE_RANK_TOP_N_DEFAULT,
     UNIVERSE_RANK_TOP_N_ENV,
+    UNIVERSE_WATCH_MAX_DEFAULT,
+    UNIVERSE_WATCH_MAX_ENV,
     FilterThresholds,
     UniverseInstrument,
     default_thresholds,
     focus_min_quota_by_class,
+    universe_watch_max,
 )
 from polaris.core.universe.watchlist import (
     compute_dynamic_focus,
@@ -227,15 +231,40 @@ def test_rank_ties_and_zero_division_safe() -> None:
 
 
 def test_rank_top_n_cap_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    insts = [_make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6) for i in range(60)]
-    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT.
+    # 150 names so the DEFAULT (120) actually caps below the population.
+    insts = [_make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6) for i in range(150)]
+    monkeypatch.delenv(UNIVERSE_WATCH_MAX_ENV, raising=False)
+    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT (120, decoupled from focus 48).
     monkeypatch.delenv(UNIVERSE_RANK_TOP_N_ENV, raising=False)
     assert len(rank_active_universe(insts)) == UNIVERSE_RANK_TOP_N_DEFAULT
-    # Env override is honored and capped at FOCUS_TARGET_MAX.
+    # Env override is honored and capped at the WATCH_MAX ceiling (NOT focus 48).
     monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "9999")
-    assert len(rank_active_universe(insts)) == min(len(insts), FOCUS_TARGET_MAX)
+    assert len(rank_active_universe(insts)) == min(len(insts), UNIVERSE_WATCH_MAX_DEFAULT)
     monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "5")
     assert len(rank_active_universe(insts)) == 5
+
+
+def test_watch_max_decoupled_from_focus_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    # WATCH/TRADE decouple: the active/watch set can exceed FOCUS_TARGET_MAX (48).
+    # 100 names + a raised rank top_n → active set > 48 (was clamped to 48 before).
+    monkeypatch.delenv(UNIVERSE_WATCH_MAX_ENV, raising=False)
+    insts = [_make_inst(f"W{i}-USDT", vol=1e7 + i * 1e6) for i in range(100)]
+    out = rank_active_universe(insts, top_n=100)
+    assert len(out) == 100  # > FOCUS_TARGET_MAX (48) — watch is no longer pinned
+    # POLARIS_WATCH_MAX is the resource guard ceiling, env-tunable.
+    monkeypatch.setenv(UNIVERSE_WATCH_MAX_ENV, "60")
+    assert universe_watch_max() == 60
+    assert len(rank_active_universe(insts, top_n=100)) == 60
+
+
+def test_subfloor_okx_name_now_watched_not_cut() -> None:
+    # WATCH/TRADE decouple: a sub-floor OKX name (thin vol / wide spread) that the
+    # OLD floor pre-cut from the active set now SURVIVES into the watch set — the
+    # floor is a curator trade-gate now, not a watch-gate (breadth unlock).
+    subfloor = _make_inst("JUNK-USDT", vol=1e6, spread_bps=25.0, atr_pct=6.0, depth=1e4)
+    liquid = [_make_inst(f"L{i}-USDT", vol=5e8) for i in range(5)]
+    out = rank_active_universe([subfloor, *liquid], top_n=120)
+    assert any(ins.symbol == "JUNK-USDT" for ins in out)
 
 
 # ---------------------------------------------------------------------------
@@ -446,8 +475,11 @@ def test_persist_universe_marks_filtered_inactive(memdb) -> None:  # type: ignor
 
 
 def test_persist_universe_writes_active_reason(memdb) -> None:  # type: ignore[no-untyped-def]
+    # WATCH/TRADE decouple (2026-06-24): a sub-floor (low-vol) row is NO LONGER
+    # excluded by the liquidity floor — if it is not in the active set it reports
+    # 'below_rank_topN' (the floor is a curator TRADE annotation now, not active).
     good = _make_inst("BTC-USDT", vol=8e8)
-    bad = _make_inst("DEAD-USDT", vol=1.0)  # vol axis fails
+    bad = _make_inst("DEAD-USDT", vol=1.0)  # sub-floor on vol — but still watchable
     persist_universe(memdb, [good, bad], is_active_set={good.instrument_id})
     rows = memdb.execute(
         "SELECT symbol, is_active, active_reason FROM universe ORDER BY symbol"
@@ -455,7 +487,9 @@ def test_persist_universe_writes_active_reason(memdb) -> None:  # type: ignore[n
     rmap = {r[0]: (r[1], r[2]) for r in rows}
     assert rmap["BTC-USDT"][0] == 1 and rmap["BTC-USDT"][1] is None
     assert rmap["DEAD-USDT"][0] == 0
-    assert rmap["DEAD-USDT"][1] is not None and "vol" in rmap["DEAD-USDT"][1]
+    assert rmap["DEAD-USDT"][1] == "below_rank_topN"
+    # The liquidity axis is now a TRADE-eligibility annotation, not active-exclusion.
+    assert liqfloor_trade_annotation(bad) == "liqfloor:vol"
 
 
 # ---------------------------------------------------------------------------
@@ -472,16 +506,26 @@ def test_active_reason_below_rank_for_valid_floor_passing_loser() -> None:
     assert _active_exclusion_reason(ins) == "below_rank_topN"
 
 
-def test_active_reason_liqfloor_vol_axis() -> None:
-    # Below the OKX 20M $vol floor → 'liqfloor:vol' (names the failing axis).
-    ins = _make_inst("THIN-USDT", vol=1e6, spread_bps=2.0, atr_pct=4.0, depth=2e5)
-    assert _active_exclusion_reason(ins) == "liqfloor:vol"
+def test_active_reason_subfloor_now_below_rank_not_liqfloor() -> None:
+    # WATCH/TRADE decouple (2026-06-24): a sub-floor name is NO LONGER excluded by
+    # the liquidity floor — it is WATCHED, so if not selected its active-exclusion
+    # reason is 'below_rank_topN', NOT 'liqfloor:*'. The liqfloor axis moves to the
+    # TRADE-eligibility annotation.
+    thin = _make_inst("THIN-USDT", vol=1e6, spread_bps=2.0, atr_pct=4.0, depth=2e5)
+    wide = _make_inst("WIDE-USDT", vol=8e8, spread_bps=99.0, atr_pct=4.0, depth=2e5)
+    assert _active_exclusion_reason(thin) == "below_rank_topN"
+    assert _active_exclusion_reason(wide) == "below_rank_topN"
 
 
-def test_active_reason_liqfloor_spread_axis() -> None:
-    # Spread above the OKX 30bps floor → 'liqfloor:spread'.
-    ins = _make_inst("WIDE-USDT", vol=8e8, spread_bps=99.0, atr_pct=4.0, depth=2e5)
-    assert _active_exclusion_reason(ins) == "liqfloor:spread"
+def test_liqfloor_trade_annotation_names_axis() -> None:
+    # The re-homed floor is exposed as a TRADE-eligibility annotation: a sub-floor
+    # name (watched) is annotated liqfloor:<axis>; a clearing name → None.
+    thin = _make_inst("THIN-USDT", vol=1e6, spread_bps=2.0, atr_pct=4.0, depth=2e5)
+    wide = _make_inst("WIDE-USDT", vol=8e8, spread_bps=99.0, atr_pct=4.0, depth=2e5)
+    good = _make_inst("GOOD-USDT", vol=8e8, spread_bps=2.0, atr_pct=4.0, depth=2e5)
+    assert liqfloor_trade_annotation(thin) == "liqfloor:vol"
+    assert liqfloor_trade_annotation(wide) == "liqfloor:spread"
+    assert liqfloor_trade_annotation(good) is None
 
 
 def test_active_reason_session_wait_for_non_live_capital() -> None:

@@ -139,6 +139,43 @@ def test_thin_confidence_flags_ambiguous_not_block() -> None:
     assert r.trade_eligible is True
 
 
+def test_subfloor_name_watched_but_trade_ineligible() -> None:
+    # WATCH/TRADE decouple (2026-06-24): a sub-floor OKX name (thin vol) is SCORED
+    # + RANKED (watched) but the floor overlay forces trade_eligible=False — even
+    # if its other lenses score it above the trade floor. Slippage protection.
+    judge = EntranceJudge(trade_floor=0.0)  # score gate wide open → isolate floor
+    universe = [
+        _ins("JUNK-USDT", vol=1e6, spread=2.0, atr=9.0, depth=1e4),  # sub-vol floor
+        _ins("GOOD-USDT", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    # Both are scored (watched); the sub-floor name is NOT trade-eligible.
+    assert out["okx:JUNK-USDT"].opportunity_score >= 0.0  # still judged/watched
+    assert out["okx:JUNK-USDT"].trade_eligible is False  # floor overlay vetoes trade
+    assert out["okx:GOOD-USDT"].trade_eligible is True
+
+
+def test_wide_spread_is_hard_trade_block() -> None:
+    # Spread beyond the venue cap (OKX 30bps) is a HARD trade-block regardless of
+    # score (the dominant slippage term), but the name is still watched/scored.
+    judge = EntranceJudge(trade_floor=0.0)
+    universe = [
+        _ins("WIDE-USDT", vol=5e8, spread=99.0, atr=9.0, depth=1e6),
+        _ins("TIGHT-USDT", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["okx:WIDE-USDT"].trade_eligible is False
+    assert out["okx:TIGHT-USDT"].trade_eligible is True
+
+
+def test_floor_clearing_name_still_score_gated() -> None:
+    # The floor overlay is AND'd with the score gate: a floor-clearing name with a
+    # below-floor score is still trade-ineligible (score gate unchanged).
+    judge = EntranceJudge(trade_floor=0.99)  # score gate nearly impossible
+    out = judge.judge_universe([_ins("MEH-USDT", vol=5e8)])
+    assert out["okx:MEH-USDT"].trade_eligible is False  # cleared floor, failed score
+
+
 def test_judge_is_deterministic() -> None:
     judge = EntranceJudge()
     universe = [_ins("BTC-USDT", vol=9e8), _ins("ETH-USDT", vol=5e8)]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import sqlite3
 import time
 from typing import Any
@@ -95,7 +96,29 @@ from polaris.venues.capital.session import CapitalSession
 
 logger = logging.getLogger(__name__)
 
-FOCUS_CYCLE_TARGET = 30
+# Per-cycle bar-ingest WATCH cap (Jin 2026-06-24 — WATCH/TRADE decouple). This is
+# the REAL per-cycle watch bottleneck (REST bar fan-out + DB writes — the binding
+# resource cost when WATCH widens). Decoupled from the focus window so the bot can
+# bar-ingest dozens+ watched names; env-tunable (``POLARIS_FOCUS_CYCLE_TARGET``)
+# as the resource guard. Default raised 30 → 120 to match the widened watch set
+# (OKX 2 → 100+); lower it via env if REST QPS / DB growth telemetry flags load.
+FOCUS_CYCLE_TARGET = 120
+_FOCUS_CYCLE_TARGET_ENV = "POLARIS_FOCUS_CYCLE_TARGET"
+
+
+def _focus_cycle_target() -> int:
+    """Per-cycle bar-ingest watch cap (env ``POLARIS_FOCUS_CYCLE_TARGET``; >= 1).
+
+    Resource guard: caps how many watched names get a per-cycle bar pull + quote
+    write (the binding REST + DB cost). Invalid/unset → ``FOCUS_CYCLE_TARGET``.
+    """
+    raw = os.environ.get(_FOCUS_CYCLE_TARGET_ENV)
+    if raw is None or raw == "":
+        return FOCUS_CYCLE_TARGET
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return FOCUS_CYCLE_TARGET
 
 # P5 coexistence: ``TICK_ENGINE_OWNED_VENUES`` (imported from core.ticks.config)
 # is the single SSOT for the venues the engine owns in Phase 1. When
@@ -334,7 +357,7 @@ async def _run_tick(
     """
     now_ts = int(time.time())
     now_mono = time.monotonic()
-    focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=FOCUS_CYCLE_TARGET)
+    focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=_focus_cycle_target())
     if not focus:
         logger.warning(
             "[tick %d] focus empty — falling back to BTC/ETH (universe not yet "

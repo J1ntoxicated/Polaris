@@ -153,8 +153,38 @@ def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
 # Hard keep is validity only (state=live; OKX USDT-quote already enforced at
 # parse time). Weak candidates still flow — the downstream cell-matrix
 # down-routes them. Aggressive bias preserved (flow_not_block).
-UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 40
+UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 120
 UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
+
+# Watch-set ceiling (Jin 2026-06-24 — WATCH/TRADE decouple): the active/watch set
+# is now DECOUPLED from the focus window (FOCUS_TARGET_MAX). The liquidity floor
+# moved OFF the WATCH gate (it no longer pre-cuts the candidate set) and ONTO the
+# curator TRADE gate, so the bot WATCHES dozens+ names (was 2 on OKX) while the
+# trade-eligible subset stays slippage-disciplined. ``WATCH_MAX`` caps the active
+# set itself (env-tunable, resource guard); focus/WS stay bounded downstream
+# (FOCUS_CYCLE_TARGET / WS_SYMBOLS_PER_VENUE). Was conflated with FOCUS_TARGET_MAX
+# (48) by the old ``min(top_n, FOCUS_TARGET_MAX)`` clamp — split here so watch can
+# exceed 48 while focus stays 12-48. flow_not_block: widening WATCH = flow up.
+UNIVERSE_WATCH_MAX_DEFAULT: Final[int] = 120
+UNIVERSE_WATCH_MAX_ENV: Final[str] = "POLARIS_WATCH_MAX"
+
+
+def universe_watch_max() -> int:
+    """Active/watch-set ceiling (env ``POLARIS_WATCH_MAX`` → default 120; >= 1).
+
+    The hard cap on how many names the bot WATCHES (active set / bar-poll pool).
+    Decoupled from FOCUS_TARGET_MAX so watch can exceed the focus window. Resource
+    guard: raising it widens REST bar fan-out + DB writes (the binding cost), so
+    it is env-tunable for live calibration. Invalid/unset → default.
+    """
+    raw = os.environ.get(UNIVERSE_WATCH_MAX_ENV)
+    if raw is None or raw == "":
+        return UNIVERSE_WATCH_MAX_DEFAULT
+    try:
+        val = int(float(raw))
+    except ValueError:
+        return UNIVERSE_WATCH_MAX_DEFAULT
+    return max(1, val)
 
 # Composite reward weights (vol + realized-vol proxy), z-normalized population.
 RANK_SCORE_W_VOL: Final[float] = 0.55

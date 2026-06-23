@@ -20,9 +20,13 @@ per-candidate opportunity judgment. This module BUILDS that judgment, AI-free:
   * Each lens yields a SIGNED lean ∈ [-1, +1] + a confidence ∈ [0, 1]; the judge
     fuses them into ONE confidence-weighted composite (mirrors
     ``probes.engine._composite``), squashed to an ``opportunity_score`` ∈ [0, 1].
-  * ``trade_eligible`` = ``opportunity_score >= trade_floor`` (env-tunable,
-    PERMISSIVE so MORE symbols stay eligible — aggressive bias). The default is
-    eligible: a thin/neutral score never drops a symbol from observation.
+  * ``trade_eligible`` = ``passes_liquidity_floor(ins) AND opportunity_score >=
+    trade_floor`` — the venue liquidity floor (re-homed off the WATCH gate, Jin
+    2026-06-24) is a HARD trade-eligibility overlay so a sub-floor name is WATCHED
+    but not traded (slippage protection at the single order-open seam). The score
+    gate is env-tunable + PERMISSIVE (aggressive bias); a thin/neutral score never
+    drops a FLOOR-CLEARING symbol from the trade set, and NO score drops a symbol
+    from OBSERVATION (watch = all valid, flow_not_block).
   * ``ambiguous`` = the 5 lenses CONFLICT (signed disagreement: small composite
     while individual leans are large) OR confidence is THIN (sum below a floor).
     PURE TELEMETRY — the ambiguity flag NEVER mutates eligibility (the deferred
@@ -47,6 +51,7 @@ from typing import Final
 from polaris.core.universe.schema import (
     UniverseInstrument,
     liquidity_floor_for_venue,
+    passes_liquidity_floor,
 )
 
 __all__ = [
@@ -213,16 +218,30 @@ class EntranceJudge:
                 "regime": _clamp_lean(regime_lean.get(iid, 0.0)),
                 "altdata": _clamp_lean(altdata_lean.get(iid, 0.0)),
             }
-            out[iid] = self._compose(iid, leans)
+            out[iid] = self._compose(iid, leans, passes_liquidity_floor(ins))
         return out
 
-    def _compose(self, iid: str, leans: dict[str, float]) -> JudgeReading:
+    def _compose(
+        self, iid: str, leans: dict[str, float], floor_ok: bool
+    ) -> JudgeReading:
         """Confidence-weighted fuse → opportunity_score + eligibility + ambiguity.
 
         Confidence per lens = ``|lean| * weight`` (a lens that abstains, lean 0,
         carries no weight — GPT pitfall-4: no ambiguity inflation from neutral
         lenses). The composite is the confidence-weighted mean ∈ [-1, +1], mapped
         to [0, 1] for the opportunity_score (0.5 = neutral).
+
+        WATCH/TRADE DECOUPLE (Jin 2026-06-24): ``trade_eligible`` is now
+        ``floor_ok AND (score >= floor)`` — the venue liquidity floor (re-homed
+        from the WATCH gate) is a HARD trade-eligibility overlay. A sub-floor name
+        scores + ranks + is WATCHED as before (flow_not_block), but its
+        ``trade_eligible`` is forced FALSE so the single order-open seam
+        (``_run_entries`` eligible_set) defers its entry — slippage protection.
+        Spread is the dominant hard term (``passes_liquidity_floor``: spread
+        beyond the venue cap → not eligible); vol/depth are hard backstops on a
+        KNOWN-bad datum only. This flips a boolean flag, never a sizing multiplier
+        (9-stack untouched). ``opportunity_score`` (the focus-RANK input) is
+        unaffected by the floor — a watched sub-floor name still ranks on merit.
         """
         weights = {
             "liquidity": _W_LIQUIDITY,
@@ -241,7 +260,9 @@ class EntranceJudge:
 
         opportunity_score = (composite + 1.0) / 2.0
         floor = self._trade_floor
-        trade_eligible = opportunity_score >= floor
+        # DECOUPLE: floor_ok (venue liquidity floor) is a HARD overlay AND'd with
+        # the score gate — a sub-floor name is watched/ranked but NOT trade-eligible.
+        trade_eligible = floor_ok and (opportunity_score >= floor)
         judge_margin = opportunity_score - floor
 
         contributing = [k for k in leans if abs(leans[k]) > 0.0] or ["liquidity"]

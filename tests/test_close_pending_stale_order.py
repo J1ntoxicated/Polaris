@@ -80,7 +80,9 @@ class _AlpacaSeqMock:
         return _Clock()
 
     async def fetch_positions(self) -> list[dict[str, Any]]:
-        return [{"symbol": "SELX", "qty": "1000000"}]
+        # Wallet qty UNKNOWN (best-effort read) → both over-count clamps skip →
+        # the close sells the tracked base_qty (the behaviour these tests pin).
+        return [{"symbol": "SELX", "qty": ""}]
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         self.cancel_calls.append(order_id)

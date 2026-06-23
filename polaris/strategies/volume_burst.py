@@ -1,9 +1,22 @@
 """Volume Burst — OKX SPOT, 1m bar (correlation_group=spot_intraday_event).
 
 Spec source: vault/10_decisions/ADR-008-7-strategies-signal-generator-role.md (#1).
+D4 fade-first conversion: /debate vault/50_research/debates/trading_params_audit_2026-06-22.md.
 
-Trigger: ``volume_z >= 2.5`` AND ``close > prior_high`` AND ``atr_pct >= 0.05%``
-(liquidity floor — micro-caps without ATR get blocked).
+Common gate (a real volume burst): ``volume_z >= 2.5`` AND ``atr_pct >= 0.05%``
+(liquidity floor — micro-caps without ATR get blocked). Once the burst is real,
+the *side* is chosen by how the spike interacts with structural resistance
+(``prior_high`` over the lookback window):
+
+  - FADE / SHORT (default): the bar's HIGH pierces resistance but the CLOSE
+    fails to hold above it (close <= prior_high) — a spike rejected at the level
+    (the spike-top that was bleeding when bought blindly). Take the fade.
+  - CONTINUATION / LONG: the CLOSE is decisively above resistance — clear
+    acceptance above the level — so the old long is allowed.
+
+flow_not_block: the strategy still FIRES on every real burst that touches the
+level — it is re-aimed (polarity by structure), not blocked / size-cut.
+Deterministic gates still own the lifecycle decision.
 
 Frozen P0 params (Day 4 task brief):
   - ``vol_z_threshold = 2.5``
@@ -68,26 +81,48 @@ class VolumeBurstStrategy(BaseStrategy):
             return None
         last = bars[-1]
         prior_high = max(b.high for b in bars[-(LOOKBACK + 1):-1])
-        if last.close <= prior_high:
-            return None
         # Strength scales with vol_z above threshold (clamped 0-1).
         excess = market_view.volume_z - self.vol_z_threshold
         strength = min(1.0, STRENGTH_BASE + STRENGTH_SLOPE * excess)
-        return RawSignal(
-            signal_id=make_signal_id(),
-            strategy_id=self.metadata.strategy_id,
-            symbol=market_view.symbol,
-            side="long",
-            strength=strength,
-            sizing_hint=min(1.0, SIZING_BASE + SIZING_SLOPE * excess),
-            ttl_bars=self.ttl_bars,
-            thesis_tag=f"vol_z={market_view.volume_z:.2f}>break",
-            correlation_group=self.metadata.correlation_group_id,
-            venue_constraints={},
-            created_at_bar=last.ts,
-            tags={"vol_z": f"{market_view.volume_z:.2f}",
-                  "atr_pct": f"{market_view.atr_pct:.5f}"},
-        )
+        sizing = min(1.0, SIZING_BASE + SIZING_SLOPE * excess)
+        # CONTINUATION / LONG: clear acceptance — the body CLOSED above resistance.
+        if last.close > prior_high:
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="long",
+                strength=strength,
+                sizing_hint=sizing,
+                ttl_bars=self.ttl_bars,
+                thesis_tag=f"vol_z={market_view.volume_z:.2f}>break",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={},
+                created_at_bar=last.ts,
+                tags={"vol_z": f"{market_view.volume_z:.2f}",
+                      "atr_pct": f"{market_view.atr_pct:.5f}"},
+            )
+        # FADE / SHORT: the HIGH pierced resistance but the CLOSE failed to hold
+        # above it — spike rejected at the level. (high <= prior_high = burst
+        # that never reached resistance: no structure to fade -> no signal.)
+        if last.high > prior_high:
+            return RawSignal(
+                signal_id=make_signal_id(),
+                strategy_id=self.metadata.strategy_id,
+                symbol=market_view.symbol,
+                side="short",
+                strength=strength,
+                sizing_hint=sizing,
+                ttl_bars=self.ttl_bars,
+                thesis_tag=f"vol_z={market_view.volume_z:.2f}>fade_reject",
+                correlation_group=self.metadata.correlation_group_id,
+                venue_constraints={},
+                created_at_bar=last.ts,
+                tags={"vol_z": f"{market_view.volume_z:.2f}",
+                      "atr_pct": f"{market_view.atr_pct:.5f}",
+                      "mode": "fade"},
+            )
+        return None
 
 
 __all__ = [

@@ -38,6 +38,7 @@ from polaris.core.pipeline.gate_state import (
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import (
     StreamConfig,
+    alpaca_equity_entries_halted,
     asset_class_allowed_for_venue,
     derive_leverage,
     resolve_stream,
@@ -279,6 +280,20 @@ async def run_pipeline_for_signal(
             "[stream-coherence] DROP off-venue signal %s asset_class=%r not in "
             "stream %s asset_classes=%s (crypto belongs on OKX track A)",
             instrument_id, asset_class, stream.stream_id, sorted(stream.asset_classes),
+        )
+        return
+    # Alpaca dead-feed HALT (Jin 2026-06-22): when the Alpaca feed is stale/dead
+    # there is no live price to size or exit against, so a NEW equity entry would
+    # become an unexitable zombie. Hold NEW Alpaca entries while the feed is dead.
+    # DATA-HEALTH gate ("no live price = cannot trade"), NOT a defensive throttle:
+    # it touches no sizing, applies only to NEW entries (exits untouched), and
+    # auto-clears the instant a fresh Alpaca bar lands. OKX/Capital are no-ops.
+    if venue == "alpaca" and alpaca_equity_entries_halted(conn, now_ts=now_ts):
+        logger.warning(
+            "[alpaca-health] HOLD new entry %s — Alpaca feed stale/dead "
+            "(no live price; auto-clears on fresh data). flow_not_block: "
+            "data-health gate, not a throttle.",
+            instrument_id,
         )
         return
     track: Any = stream.track

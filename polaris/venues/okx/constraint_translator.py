@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Final
 
 import httpx
@@ -28,9 +28,11 @@ import httpx
 __all__ = [
     "OKX_INSTRUMENTS_PATH",
     "InstrumentConstraint",
+    "clamp_up_to_min",
     "fetch_instruments",
     "round_down_to_step",
     "round_price_to_tick",
+    "round_up_to_step",
     "validate_min_notional",
 ]
 
@@ -66,9 +68,49 @@ def round_down_to_step(value: float, step: float) -> float:
     return float(quanta * d_step)
 
 
+def round_up_to_step(value: float, step: float) -> float:
+    """Round ``value`` UP to the nearest multiple of ``step`` (Decimal-safe).
+
+    The ceil counterpart of ``round_down_to_step`` — used by the min-size
+    clamp-up so the floored-to-min qty is a valid lot multiple that is still
+    ``>= min`` (never rounds the min DOWN below the venue minimum).
+    """
+    if step <= 0.0:
+        return value
+    if not math.isfinite(value) or not math.isfinite(step):
+        return 0.0
+    d_val = Decimal(str(value))
+    d_step = Decimal(str(step))
+    quanta = (d_val / d_step).to_integral_value(rounding=ROUND_UP)
+    return float(quanta * d_step)
+
+
 def round_price_to_tick(price: float, tick_sz: float) -> float:
     """Round price to nearest tick (away from zero on positive prices)."""
     return round_down_to_step(price, tick_sz)
+
+
+def clamp_up_to_min(base_qty: float, *, min_sz: float, lot_sz: float) -> float:
+    """Bump a sub-minimum order size UP to the venue minimum so the order FLOWS.
+
+    Jin 2026-06-23 (flow_not_block, AGGRESSIVE): when the sized base qty is below
+    the instrument minimum (``min_sz``), an OKX order is rejected 51020 below-min
+    and cannot trade. Instead of skipping/cooling-down the symbol, raise the qty
+    UP to ``min_sz`` (rounded UP to the next ``lot_sz`` multiple so it is a valid
+    lot AND still ``>= min``). Slightly larger, never smaller, never blocked.
+
+    This is a venue-constraint FLOOR applied at the LAST step before submit — it
+    is NOT a sizing multiplier and never enters the T4 chain (the 9-stack
+    invariant is intact; a floor is not a ``<=1`` multiplier).
+
+    A qty already ``>= min_sz`` is returned UNCHANGED (no-op above min →
+    byte-identical). ``min_sz <= 0`` (no constraint) is also a no-op.
+    """
+    if min_sz <= 0.0 or base_qty >= min_sz:
+        return base_qty
+    if lot_sz > 0.0:
+        return round_up_to_step(min_sz, lot_sz)
+    return min_sz
 
 
 def validate_min_notional(

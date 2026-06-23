@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.data.position_risk_persist import delete_position_risk_state
+from polaris.core.data.quote_writer import live_or_bar_price
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     record_fault,
@@ -34,6 +35,7 @@ from polaris.core.live_recalc.session_exit_rail import (
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_effects import (
+    _safe_backfill_probe_outcome,
     _safe_lookup_regime,
     _safe_record_meta_label,
     _safe_run_g8,
@@ -331,7 +333,17 @@ async def _close_trade_with_real_pnl(
     if real_roundtrip:
         # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
         # computed against the actual exit fill (not the pre-close bar drift).
-        fresh_mark = _latest_bar_close(conn, venue=trade.venue, symbol=trade.symbol)
+        # Execution-default: the close-split sizing + slippage reference mark at
+        # the LIVE WS mid, falling back to the most-recent bar close only when no
+        # fresh tick (graceful degrade). The venue sell still fills live (market
+        # order); this only stops the delayed bar from sizing the 51201 cap-split
+        # children + the close slippage_bps reference.
+        bar_mark = _latest_bar_close(conn, venue=trade.venue, symbol=trade.symbol)
+        fresh_mark = live_or_bar_price(
+            state.quote_writer,
+            f"{trade.venue}:{trade.symbol}",
+            bar_mark if bar_mark is not None else trade.entry_price,
+        )
         # Bug C fix: peek-only (no I/O) close-fill exposure factor for the
         # Capital branch of ``_real_close_fill`` (okx/alpaca never reach it).
         cap_factor: float | None = None
@@ -441,7 +453,19 @@ async def _close_trade_with_real_pnl(
                 pnl_usd=pnl_usd, now_ts=now_ts,
             )
     else:
-        pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(conn, trade=trade)
+        # SIM exit (non-real-roundtrip): execution-default mark = the LIVE WS mid,
+        # falling back to the bar close inside real_pnl_r_from_fills only when no
+        # fresh tick. A live tick → it drives the sim exit fill/pnl directly (via
+        # exit_price_override); no tick → override stays None and the bar close
+        # remains the graceful fallback. Real-roundtrip already marks at the real
+        # venue fill (above) — untouched.
+        live_override = live_or_bar_price(
+            state.quote_writer, f"{trade.venue}:{trade.symbol}", 0.0,
+        )
+        pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
+            conn, trade=trade,
+            exit_price_override=live_override if live_override > 0.0 else None,
+        )
         close_fill = simulate_close(trade, exit_price=exit_price)
     # BUILD_SCHEMA: persist final MFE/MAE (R units) + exit_state at close.
     # Best-effort from tracked peak/trough vs entry — measurement only, never
@@ -553,6 +577,14 @@ async def _close_trade_with_real_pnl(
     _safe_record_meta_label(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
         state=state,
+    )
+    # ADR-012 — backfill the probe tuning-log outcome cols (giveback / realized
+    # R / time-to-exit) onto the SEPARATE probes.sqlite sidecar so the offline
+    # /debate calibration joins observe-mode would-be decisions to the truth.
+    # Collection-only, fail-open inside the helper; never gates sizing/exits.
+    _safe_backfill_probe_outcome(
+        state=state, trade=trade, pnl_r=pnl_r, mfe_r=mfe_r, mae_r=mae_r,
+        now_ts=now_ts,
     )
     # Edge-validation Phase 1 — cost-adjusted expectancy posterior (measure +
     # display only; never wired into sizing). Fail-open inside the helper.

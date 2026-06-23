@@ -418,6 +418,24 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # MEASUREMENT ONLY — never read by sizing/gating. Pragma guard = idempotent.
     if "pnl_r" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN pnl_r REAL")
+    # positions.risk_usd — the trade's intended 1R in dollars, stamped at entry
+    # (Step M, 2026-06-22). risk_usd = entry_price * clamp(entry_atr_pct) *
+    # STOP_ATR_MULT * base_qty. Realised R is then the dollar truth rescaled by
+    # this unit (pnl_usd / risk_usd) so the R ledger and the fills.pnl_usd dollar
+    # ledger AGREE (same sign, same bleeders) and the SAME trade shows the SAME R
+    # on every panel. NULL = legacy row (the close path re-derives risk_usd from
+    # the persisted entry_atr_pct anchor; consistent fallback, never a flat $10/
+    # $50 proxy). MEASUREMENT ONLY — never read by sizing/gating. Idempotent.
+    if "risk_usd" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN risk_usd REAL")
+    # positions.entry_regime — the regime stamped at OPEN (fetch_regime at fill),
+    # the entry-thesis anchor the adaptive thesis re-map ([[adaptive_thesis_remap_
+    # 2026-06-23]]) compares the LIVE regime against to detect a flip-against-the-
+    # position. ADDITIVE: nullable TEXT, NULL = legacy/unstamped row (the re-map
+    # degrades safe — a missing entry_regime never invalidates the position).
+    # MEASUREMENT / EXIT-TIMING only — never read by sizing/gating. Idempotent.
+    if "entry_regime" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN entry_regime TEXT")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are
@@ -484,3 +502,16 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # precedent) because its SELECT reads positions.pnl_r, which legacy DBs
     # only gain via the ALTER above. IF NOT EXISTS = idempotent.
     conn.execute(DDL_V_G34_COHORT_OUTCOMES)
+    # regime_state.last_advanced_bar_id — bar-close confirm dedup (flip-flop
+    # fix). The 2-consecutive-close confirm gate advanced once per TICK call;
+    # this column records the closed 5m bar that last advanced the count so a
+    # candidate advances AT MOST ONCE per bar (24h had 1233 tick-driven flips).
+    # ADDITIVE: NULL default → first post-migration advance starts clean.
+    rs_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(regime_state)").fetchall()
+    }
+    if rs_cols and "last_advanced_bar_id" not in rs_cols:
+        conn.execute(
+            "ALTER TABLE regime_state ADD COLUMN last_advanced_bar_id INTEGER"
+        )

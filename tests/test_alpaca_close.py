@@ -73,9 +73,11 @@ class _AlpacaMock:
         return _Clock(self._is_open)
 
     async def fetch_positions(self) -> list[dict[str, Any]]:
-        # Default (None) → wallet holds plenty (the over-count clamp passes).
-        qty = 1_000_000.0 if self._positions_qty is None else self._positions_qty
-        return [{"symbol": "AAPL", "qty": str(qty)}]
+        # Default (None) → wallet qty UNKNOWN (best-effort read) → both clamps
+        # skip → the close sells the tracked base_qty (prior behaviour).
+        if self._positions_qty is None:
+            return [{"symbol": "AAPL", "qty": ""}]
+        return [{"symbol": "AAPL", "qty": str(self._positions_qty)}]
 
     async def place_market_order(
         self,
@@ -131,8 +133,10 @@ def _alpaca_trade(base_qty: float = 2.0) -> SimulatedTrade:
 
 @pytest.mark.asyncio
 async def test_alpaca_close_sells_shares_returns_fill() -> None:
-    """Market open + wallet holds the qty → SELL → normalized close Fill."""
-    adapter = _AlpacaMock(is_open=True, fill_qty=2.0, fill_price=101.0)
+    """Market open + wallet holds exactly the qty → SELL → normalized close Fill."""
+    adapter = _AlpacaMock(
+        is_open=True, positions_qty=2.0, fill_qty=2.0, fill_price=101.0,
+    )
     fill = await real_alpaca_close_fill(
         adapter, symbol="AAPL", base_qty=2.0, strategy_id="s",
     )
@@ -183,6 +187,42 @@ async def test_alpaca_close_partial_wallet_clamps_to_available() -> None:
     )
     assert isinstance(out, CloseOrphan)
     assert out.available == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_alpaca_close_over_held_sells_actual_venue_qty() -> None:
+    """SYMMETRIC over-count (latent blind spot): the wallet holds MORE than the
+    tracked base_qty (open-side orphans landed surplus shares on this symbol).
+    The close must SELL the ACTUAL venue-held qty so the surplus is not left
+    orphaned (flow_not_block — flatten what is really there), NOT just base_qty."""
+    adapter = _AlpacaMock(
+        is_open=True, positions_qty=5.0, fill_qty=5.0, fill_price=101.0,
+    )
+    fill = await real_alpaca_close_fill(
+        adapter, symbol="AAPL", base_qty=2.0, strategy_id="s",
+    )
+    assert not isinstance(fill, CloseOrphan)
+    assert fill is not None
+    # Sold the actual 5 shares the venue holds, not the tracked 2.
+    assert len(adapter.sell_orders) == 1
+    assert adapter.sell_orders[0]["qty"] == pytest.approx(5.0)
+    assert fill.base_qty == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_alpaca_close_exact_match_byte_identical() -> None:
+    """available == base_qty → behaviour byte-identical to today: sell base_qty."""
+    adapter = _AlpacaMock(
+        is_open=True, positions_qty=2.0, fill_qty=2.0, fill_price=101.0,
+    )
+    fill = await real_alpaca_close_fill(
+        adapter, symbol="AAPL", base_qty=2.0, strategy_id="s",
+    )
+    assert not isinstance(fill, CloseOrphan)
+    assert fill is not None
+    assert len(adapter.sell_orders) == 1
+    assert adapter.sell_orders[0]["qty"] == pytest.approx(2.0)
+    assert fill.base_qty == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------------------------

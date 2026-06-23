@@ -51,6 +51,7 @@ from polaris.scripts._production_bars import (
     ingest_bars_for_focus,
     ingest_bars_per_timeframe,
     read_recent_bars,
+    staleness_threshold_for,
 )
 from polaris.scripts._production_indicators import compute_real_regime_signal
 from polaris.venues.capital.market_proxy import populate_capital_proxies
@@ -81,6 +82,7 @@ __all__ = [
     "refresh_focus_watchlist",
     "refresh_okx_universe_once",
     "run_recalc_for_active_positions",
+    "staleness_threshold_for",
 ]
 
 OKX_REFRESH_SEC = 300
@@ -392,7 +394,20 @@ def get_focus_targets(
             (latest_cycle, int(max_n)),
         ).fetchall()
         focus = [
-            (str(r[0]), str(r[1]), str(r[2] or "crypto"), str(r[3] or ""))
+            (
+                str(r[0]),
+                str(r[1]),
+                # P2.2 fix (2026-06-22): a NULL asset_class (universe JOIN-miss)
+                # falls back to the canonical group_id prefix (5-class) BEFORE
+                # "crypto" — so an aged-out Alpaca equity / Capital commodity is
+                # not mislabelled crypto (which would apply the wrong 2.0%
+                # regime vol-floor). venue untouched; signal-only, flow_not_block.
+                str(r[2]) if r[2] else (
+                    str(r[3]).split(":", 1)[0]
+                    if r[3] and ":" in str(r[3]) else "crypto"
+                ),
+                str(r[3] or ""),
+            )
             for r in rows
         ]
     # Force-seat held symbols (additive, not truncated by max_n). De-dup on

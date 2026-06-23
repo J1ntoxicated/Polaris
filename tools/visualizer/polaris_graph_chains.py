@@ -32,7 +32,7 @@ def build_trade_chains(
 
     using node ids ``build_graph`` already emits (``strat_{sid}``,
     ``reg_regime_{regime}``, ``watch_{venue}_{ticker}`` / ``mkt_{ticker}``,
-    ``pos_{venue}_{ticker}_{i}``). Only resolvable nodes are included, and the
+    ``pos_{venue}_{ticker}``). Only resolvable nodes are included, and the
     chain always terminates at the trade's own position node. ``strength`` rides
     on |pnl_pct| (display intensity); ``win_rate`` is 0.0 here (no per-trade
     history in the snapshot). Display-only — no trading behavior touched.

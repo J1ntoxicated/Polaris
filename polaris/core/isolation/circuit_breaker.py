@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ACTIVE",
     "CB_EXCEPTION_THRESHOLD",
+    "CB_HARD_HALT_AUTO_UNBLOCK_SEC",
     "CB_NAN_THRESHOLD",
     "CB_REJECT_THRESHOLD",
     "CB_SOFT_HALT_AUTO_UNBLOCK_SEC",
@@ -48,6 +49,7 @@ __all__ = [
     "current_strategy_mode",
     "record_fault",
     "reset_strategy_halt",
+    "resume_stale_permanent_halts",
     "should_allow_new_entry",
 ]
 
@@ -72,6 +74,12 @@ CB_REJECT_THRESHOLD: Final[tuple[int, int]] = (3, 600)
 CB_NAN_THRESHOLD: Final[tuple[int, int]] = (1, 0)
 CB_STALE_DATA_BY_TIMEFRAME: Final[dict[str, int]] = {"1m": 75, "15m": 300, "1H": 900}
 CB_SOFT_HALT_AUTO_UNBLOCK_SEC: Final[int] = 900
+# HARD_HALT is a *bounded* halt, never a permanent block (flow_not_block, Jin
+# 2026-06-22): after this cooldown the strategy auto-resumes and retries on the
+# next signal. Loss-defense stays as precise exit — this is NOT a throttle.
+# RISK_ONLY (open positions) is intentionally excluded: it is exit-only and stays
+# manual-reset so we never re-arm NEW entries while a position is still live.
+CB_HARD_HALT_AUTO_UNBLOCK_SEC: Final[int] = 1800
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +273,17 @@ def current_strategy_mode(
                 continue
             has_soft = True
         elif mode_str == HARD_HALT:
+            # Bounded HARD_HALT auto-resume (flow_not_block): a HARD_HALT now
+            # carries an unblock_ts; once it elapses the strategy resumes and
+            # retries on the next signal — never a permanent block. A legacy
+            # row with unblock_ts=None stays blocked until the startup migration
+            # (resume_stale_permanent_halts) makes it resumable.
+            if unblock_ts is not None and now_ts >= int(unblock_ts):
+                conn.execute(
+                    "UPDATE strategy_halts SET reset_ts = ?, reset_by = 'auto' WHERE halt_id = ?",
+                    (now_ts, halt_id),
+                )
+                continue
             has_hard = True
         elif mode_str == RISK_ONLY:
             has_risk_only = True
@@ -287,6 +306,42 @@ def should_allow_new_entry(
 ) -> bool:
     """True only when the strategy is ACTIVE — every halt mode blocks new entries."""
     return current_strategy_mode(conn, strategy_id, now_ts=now_ts) == ACTIVE
+
+
+def resume_stale_permanent_halts(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int,
+    cooldown_sec: int = CB_HARD_HALT_AUTO_UNBLOCK_SEC,
+) -> int:
+    """One-time migration: make legacy permanent HARD_HALT rows resumable.
+
+    Before the bounded-auto-resume change, a HARD_HALT was written with
+    ``unblock_ts=None`` (permanent block, manual reset only) — which silently
+    stalled entries forever (the tsmom/THETA-USDT & rsi_bb_pullback/CRV-USDT
+    stall). This converts every still-open HARD_HALT with ``unblock_ts IS NULL``
+    to ``unblock_ts = opened_ts + cooldown_sec`` so it auto-resumes like a
+    freshly-written bounded halt (flow_not_block). Idempotent: rows that already
+    carry an unblock_ts, are reset, or are RISK_ONLY (exit-only, manual) are
+    left untouched. Returns the number of rows converted.
+    """
+    cur = conn.execute(
+        """
+        UPDATE strategy_halts
+        SET unblock_ts = opened_ts + ?
+        WHERE mode = ? AND reset_ts IS NULL AND unblock_ts IS NULL
+        """,
+        (cooldown_sec, HARD_HALT),
+    )
+    rows = cur.rowcount or 0
+    if rows:
+        logger.warning(
+            "[circuit] migration: converted %d permanent HARD_HALT row(s) to "
+            "bounded auto-resume (cooldown=%ds)",
+            rows,
+            cooldown_sec,
+        )
+    return rows
 
 
 def reset_strategy_halt(
@@ -353,6 +408,10 @@ def _open_halt(
     unblock_ts: int | None = None
     if mode == SOFT_HALT:
         unblock_ts = now_ts + CB_SOFT_HALT_AUTO_UNBLOCK_SEC
+    elif mode == HARD_HALT:
+        # Bounded auto-resume (flow_not_block). RISK_ONLY stays manual (None):
+        # it is exit-only with a live position and must not re-arm NEW entries.
+        unblock_ts = now_ts + CB_HARD_HALT_AUTO_UNBLOCK_SEC
     conn.execute(
         """
         INSERT INTO strategy_halts

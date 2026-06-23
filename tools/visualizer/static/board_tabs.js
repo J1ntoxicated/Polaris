@@ -45,9 +45,32 @@
     color: var(--polaris-blue); font-size: 10px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
   }
   #board .panel .p-head .cnt { color: var(--p-cyn); letter-spacing: 0; }
+  /* collapsible panel: chevron in the header (down=expanded / right=collapsed). */
+  #board .panel .p-head-toggle { cursor: pointer; user-select: none; gap: 6px; }
+  #board .panel .p-head-toggle .ttl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .panel .p-head-toggle:hover { color: var(--p-cyn); }
+  #board .panel .p-head-toggle:focus-visible { outline: 1px solid var(--p-cyn); outline-offset: -1px; }
+  #board .panel .p-head-toggle .chev {
+    flex: 0 0 auto; width: 0; height: 0; align-self: center;
+    border-left: 4px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+    transform: rotate(90deg); transition: transform 0.12s ease; opacity: 0.85;
+  }
+  #board .panel.collapsed .p-head-toggle .chev { transform: rotate(0deg); }
+  #board .panel.collapsed .p-body { display: none; }
   #board .panel .p-body { overflow: auto; flex: 1 1 0; min-height: 0; }
   #board .panel .p-body::-webkit-scrollbar { width: 5px; height: 5px; }
   #board .panel .p-body::-webkit-scrollbar-thumb { background: var(--ghost); }
+  /* Panels in CONTENT-SIZED grid tracks (auto / min-content) must size their
+     body to its content. With flex-basis:0 (the fill-and-scroll default used by
+     panels in 1fr / min-height tracks) a content-track flex column collapses to
+     header-only — the grow has no definite height to fill, so the body renders
+     at 0px (count shows in the header, content invisible). flex-basis:auto makes
+     the body's natural height the basis so the panel grows to fit. Scoped to the
+     two content-track contexts: the Logic-tab scroll stack + the always-expanded
+     Gate Funnel / Live Gate Activity panels at the top of the Activity stack. */
+  #board .logic-scroll > .panel > .p-body { flex: 1 1 auto; }
+  #board .activity-stack > .gate-feed-panel > .p-body { flex: 1 1 auto; }
+  #board .activity-stack > .collapsible:nth-child(1) > .p-body { flex: 1 1 auto; }
 
   /* Tables (reused by every tab). */
   #board table { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
@@ -101,6 +124,21 @@
   #board .tab-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 0; }
   #board .tab-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; min-height: 0; }
   #board .tab-rows-2 { display: grid; grid-template-rows: auto minmax(0,1fr); gap: 8px; min-height: 0; }
+  /* Activity stack (Bloomberg 2026-06-22): gate funnel (auto) + Open Positions
+     + Recent Trades, all FULL-WIDTH, stacked vertically. Both tables get a 1fr
+     share so each shows more columns/rows than the old side-by-side split. */
+  #board .activity-stack { display: grid; grid-template-rows: auto auto minmax(0,1fr) minmax(0,1fr); gap: 8px; min-height: 0; }
+  /* (g) live gate-activity feed sits between the funnel and the tables; capped
+     height so it stays a dense ticker, not a wall. */
+  #board .activity-stack .gate-feed-panel { max-height: 132px; }
+  /* Open Positions + Recent Trades are now collapsible too. They live in the
+     two minmax(0,1fr) tracks, which would keep stretching a collapsed (body
+     display:none) panel to a full free-space share. When a table panel is
+     collapsed, drop its track to header height (content-min) so the body
+     shrinks to just the chevron header and the remaining table keeps the 1fr. */
+  #board .activity-stack:has(.collapsible.collapsed:nth-child(3)) { grid-template-rows: auto auto min-content minmax(0,1fr); }
+  #board .activity-stack:has(.collapsible.collapsed:nth-child(4)) { grid-template-rows: auto auto minmax(0,1fr) min-content; }
+  #board .activity-stack:has(.collapsible.collapsed:nth-child(3)):has(.collapsible.collapsed:nth-child(4)) { grid-template-rows: auto auto min-content min-content; }
 
   /* mini key/value rows (REGIME / STRATEGY / EXIT / AI / EDGE / RISK panels). */
   #board .mini { font-size: 11px; }
@@ -180,6 +218,21 @@
   #board .verdict-edge { color: var(--p-grn); }
   #board .verdict-anti { color: var(--p-red); }
   #board .verdict-neutral { color: var(--p-ylw); }
+  /* Logic tab — many panels stacked; the pane itself scrolls (the rest fit). */
+  #board .logic-scroll { display: grid; grid-auto-rows: min-content; gap: 8px; min-height: 0; overflow: auto; align-content: start; }
+  #board .logic-scroll::-webkit-scrollbar { width: 5px; }
+  #board .logic-scroll::-webkit-scrollbar-thumb { background: var(--ghost); }
+  #board .logic-scroll .tab-grid-3 { min-height: 130px; }
+  /* Logic 2-up dense rows (Bloomberg 2026-06-22): the small analytics panels
+     pair up; the regime + pathway + learner lists run FULL-WIDTH above. */
+  #board .logic-cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-height: 110px; }
+  /* Performance tab — equity (auto) + a scrolling stack of analytics grids. */
+  #board .perf-scroll { display: grid; grid-auto-rows: min-content; gap: 8px; min-height: 0; overflow: auto; align-content: start; }
+  #board .perf-scroll::-webkit-scrollbar { width: 5px; }
+  #board .perf-scroll::-webkit-scrollbar-thumb { background: var(--ghost); }
+  #board .perf-scroll .tab-grid-3, #board .perf-scroll .tab-grid-2 { min-height: 130px; }
+  /* shared inline label token (eq-head money labels, etc.). */
+  #board .kk { color: var(--p-dim); letter-spacing: 0.06em; text-transform: uppercase; }
   `;
 
   function injectStyle() {
@@ -196,84 +249,192 @@
       + `<div class="p-body ${bodyCls || ''}" id="${bodyId}"></div></div>`;
   }
 
+  // Collapsible full-width panel: a chevron in the header toggles the body and
+  // persists per-panel state in localStorage (default expanded). Used for the
+  // Gate Funnel + Live Gate Activity panels so Jin can fold either away.
+  function collapsiblePanel(title, bodyId, bodyCls, panelCls) {
+    const key = 'pb.collapse.' + bodyId;
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(key) === '1'; } catch (e) { /* private mode */ }
+    return `<div class="panel collapsible${collapsed ? ' collapsed' : ''}${panelCls ? ' ' + panelCls : ''}" data-collapse-key="${esc(key)}">`
+      + `<div class="p-head p-head-toggle" role="button" tabindex="0" aria-expanded="${collapsed ? 'false' : 'true'}">`
+      + `<span class="chev" aria-hidden="true"></span>`
+      + `<span class="ttl">${esc(title)}</span>`
+      + `<span class="cnt" id="${bodyId}-cnt"></span></div>`
+      + `<div class="p-body ${bodyCls || ''}" id="${bodyId}"></div></div>`;
+  }
+
+  // Delegated toggle: one listener on #board handles every collapsible panel.
+  // Click (or Enter/Space on the keyboard-focused header) folds the body and
+  // writes the state to localStorage. Attached once after the skeleton mounts.
+  function wireCollapsibles() {
+    const root = document.getElementById('board');
+    if (!root || root._collapseWired) return;
+    root._collapseWired = true;
+    function toggle(head) {
+      const p = head.closest('.panel.collapsible'); if (!p) return;
+      const collapsed = p.classList.toggle('collapsed');
+      head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      const key = p.getAttribute('data-collapse-key');
+      try { if (key) localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) { /* private mode */ }
+    }
+    root.addEventListener('click', (e) => {
+      const head = e.target.closest('.p-head-toggle');
+      if (head && root.contains(head)) toggle(head);
+    });
+    root.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const head = e.target.closest('.p-head-toggle');
+      if (head && root.contains(head)) { e.preventDefault(); toggle(head); }
+    });
+  }
+
   // ── pane markup (called once by board.js skeleton) ────────────────────────
+  // 6 COMPOSITE panes (2026-06-22 redesign). Every legacy body-id is PRESERVED
+  // (pos-body / trd-body / regime-body / strat-body / eq-svg / b-confidence /
+  // b-benchmark / edge-body / exit-fsm / exit-reasons / exit-gates / ai-gpt /
+  // ai-shadow / cell-body / alert-body / risk-admit / b-rotation) so the
+  // existing renderers bind unchanged — they're just regrouped under the new
+  // tabs, plus 5 new sub-renderer mounts (gate-funnel / ticker-body / learner-
+  // body / aifree-banner / dual-eq). build/path/learned = P3 placeholders.
   function paneMarkup() {
     return `
-    <div class="tab-pane active" id="pane-positions">
-      <div class="tab-grid-1">${panel('Open Positions · 3 Streams', 'pos-body')}</div>
-    </div>
-    <div class="tab-pane" id="pane-trades">
-      <div class="tab-grid-1">${panel('Recent Trades', 'trd-body')}</div>
-    </div>
-    <div class="tab-pane" id="pane-regime">
-      <div class="tab-grid-1">${panel('Regime · venue × asset-group (L1 macro / L2 asset / L3 price-action)', 'regime-body')}</div>
-    </div>
-    <div class="tab-pane" id="pane-strategy">
-      <div class="tab-grid-1">${panel('Per-Strategy · signals / win-rate / real-fee-net R · per-regime cell EV', 'strat-body')}</div>
-    </div>
-    <div class="tab-pane" id="pane-exit">
-      <div class="tab-rows-2">
-        <div class="chips" id="exit-fsm"></div>
-        <div class="tab-grid-2">
-          ${panel('Exit Reasons · histogram', 'exit-reasons', 'mini')}
-          ${panel('Exit Gates · G6 Monitor / G7 Adaptive', 'exit-gates', 'mini')}
-        </div>
+    <!-- TAB 1 · 활동 (activity) — default landing: gate funnel + positions + trades. -->
+    <div class="tab-pane active" id="pane-activity">
+      <div class="activity-stack">
+        ${collapsiblePanel('Gate Decisions · G1→G8 what each gate decided (last 1h)', 'gate-funnel', 'mini')}
+        ${collapsiblePanel('Live Gate Activity · newest first', 'gate-feed', 'gate-feed', 'gate-feed-panel')}
+        ${collapsiblePanel('Open Positions · 3 Streams', 'pos-body')}
+        ${collapsiblePanel('Recent Trades', 'trd-body')}
       </div>
     </div>
-    <div class="tab-pane" id="pane-ai">
-      <div class="tab-grid-2">
-        ${panel('Per-Gate GPT · calls/h · tokens · real cost · ok%', 'ai-gpt', 'mini')}
-        ${panel('Conductor Shadow · technical vs GPT agreement (by gate × regime)', 'ai-shadow', 'mini')}
-      </div>
-    </div>
-    <div class="tab-pane" id="pane-edge">
+
+    <!-- TAB 2 · Performance — equity + strategy + per-ticker + edge + worst + costs. -->
+    <div class="tab-pane" id="pane-performance">
       <div class="tab-rows-2">
         <div class="eq-wrap">
           <div class="eq-head">
-            <span class="h-title" title="Headline = REAL-FEE-NET (real OKX 0.10% taker). Dimmed line = demo-actual (0.7% demo drain). Go-live trigger = the real-fee-net curve trending UP.">Equity · REAL-FEE-NET (go-live)</span>
-            <span>real Δ <span class="v" id="eq-real-delta">—</span></span>
-            <span class="b-flat">demo Δ <span class="v" id="eq-demo-delta">—</span></span>
-            <span title="Real-vs-demo fee wedge over the session (demo OKX is a 7x penalty vs real).">fee wedge <span class="v" id="eq-fee-wedge">—</span></span>
+            <span class="h-title" title="Headline line = profit after REAL OKX fees (0.10% taker). Dimmed line = demo-actual (0.7% demo fee). Go-live trigger = the real-fee line trending up. The gap between the two lines = the honest fee cost.">Equity · after real fees vs demo (gap = honest fee cost)</span>
+            <span><span class="kk">After real fees</span> <span class="v" id="eq-real-delta">—</span></span>
+            <span class="b-flat"><span class="kk">Demo</span> <span class="v" id="eq-demo-delta">—</span></span>
+            <span title="Extra fees the demo charges vs the real OKX schedule (demo is a 7x penalty)."><span class="kk">Demo fee penalty</span> <span class="v" id="eq-fee-wedge">—</span></span>
           </div>
           <svg id="eq-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
           <div class="conf-strip" id="b-confidence"></div>
-          <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars — NOT a calendar gate."></div>
+          <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars."></div>
         </div>
-        <div class="tab-grid-1">${panel('Edge Validation · per (strategy × ticker × regime) posterior', 'edge-body', 'mini')}</div>
+        <div class="perf-scroll">
+          <div class="tab-grid-3">
+            ${panel('Per-Strategy · win rate / net R / per-regime cell value', 'strat-body', 'mini')}
+            ${panel('Per-Ticker · cumulative R by symbol', 'ticker-body', 'mini')}
+            ${panel('Edge Validation · per strategy × ticker × regime', 'edge-body', 'mini')}
+          </div>
+          <div class="tab-grid-2">
+            ${panel('Worst strategies · biggest money losers', 'worst-body', 'mini')}
+            ${panel('Costs & hidden losses', 'costs-body', 'mini')}
+          </div>
+        </div>
       </div>
     </div>
-    <div class="tab-pane" id="pane-risk">
-      <div class="tab-rows-2">
+
+    <!-- TAB 3 · 로직 (logic) — AI-free banner + regime + cell + exit + ai-shadow + learner.
+         Every legacy body-id is mounted here (exit-fsm chips + exit-reasons +
+         exit-gates + ai-gpt + ai-shadow + cell-body + alert-body + risk-admit +
+         b-rotation) so no renderer is orphaned. -->
+    <div class="tab-pane" id="pane-logic">
+      <div class="logic-scroll">
+        <div class="aifree-banner" id="aifree-banner"></div>
         <div class="rot-strip" id="b-rotation"></div>
-        <div class="tab-grid-3">
-          ${panel('Cell Matrix · top / bottom', 'cell-body', 'mini')}
-          ${panel('Alerts · Halts', 'alert-body', 'mini')}
-          ${panel('Admission Shadow · would-suppress (edge-first, net real fee)', 'risk-admit', 'mini')}
+        <div class="chips" id="exit-fsm"></div>
+        ${panel('Active Strategies · grouped by strategy × regime · which is performing how', 'stratgrp-body', 'mini')}
+        ${panel('Active Exits · positions leaving open + why', 'activeexit-body', 'mini')}
+        ${panel('Decision Pathways · strategy → regime → cell → exit → edge (active flows)', 'pathway-body', 'mini')}
+        ${panel('Regime · venue × asset-group · L1·L2·L3 evidence', 'regime-body', 'mini')}
+        ${panel('Learner Network · value · Δ1h tremor', 'learner-body', 'mini')}
+        <div class="logic-cols-2">
+          ${panel('Exit Reasons · histogram', 'exit-reasons', 'mini')}
+          ${panel('Exit Gates · G6 Monitor / G7 Adaptive', 'exit-gates', 'mini')}
         </div>
+        <div class="logic-cols-2">
+          ${panel('Conductor Shadow · technical vs GPT agreement', 'ai-shadow', 'mini')}
+          ${panel('Per-Gate GPT · calls/h · real cost · ok%', 'ai-gpt', 'mini')}
+        </div>
+        <div class="logic-cols-2">
+          ${panel('Admission Shadow · would-suppress (edge-first, net real fee)', 'risk-admit', 'mini')}
+          ${panel('Alerts · Halts', 'alert-body', 'mini')}
+        </div>
+        ${panel('Cell Matrix · top / bottom (per strategy × ticker × regime)', 'cell-body', 'mini')}
       </div>
+    </div>
+
+    <!-- TAB 4 · Build — commit timeline / digest / test-health (GET /api/buildlog). -->
+    <div class="tab-pane" id="pane-build">
+      <div class="tab-grid-1">${panel('Build · commit timeline · wave digest · test-health', 'build-body', 'mini')}</div>
+    </div>
+
+    <!-- TAB 5 · Roadmap — phase ladder / plan kanban / next strikes (GET /api/roadmap). -->
+    <div class="tab-pane" id="pane-path">
+      <div class="tab-grid-1">${panel('Roadmap · phase ladder · plan kanban · next strikes', 'path-body', 'mini')}</div>
+    </div>
+
+    <!-- TAB 6 · Lessons — lessons feed / anti-pattern wall / root-cause (GET /api/lessons). -->
+    <div class="tab-pane" id="pane-learned">
+      <div class="tab-grid-1">${panel('Lessons · lessons feed · anti-pattern wall · root-cause', 'learned-body', 'mini')}</div>
     </div>`;
   }
+
+  // Hidden mounts (exit-fsm / ai-gpt / ai-shadow head / risk-admit / b-rotation)
+  // are legacy body-ids that some renderers still write into. To preserve those
+  // renderers without faking extra panels, the composites that call them target
+  // ids that now live inside the new panes (exit-reasons / exit-gates / ai-shadow
+  // / cell-body). The unused legacy ids (exit-fsm / ai-gpt / risk-admit /
+  // b-rotation) are mounted off-pane so a stray write is a graceful no-op.
 
   // ── tab counts (header badges per tab) ────────────────────────────────────
   function setCnt(id, val) { const el = $(id); if (el) el.textContent = (val === '' || val == null) ? '' : ('· ' + val); }
   function renderTabCounts(d) {
-    // Counts reflect the active-exchange scope (venue-carrying tabs).
-    setCnt('tabcnt-positions', venueFilter(d.positions).length);
-    setCnt('tabcnt-trades', venueFilter(d.recent_trades).length);
-    setCnt('tabcnt-regime', venueFilter(d.regime_states).length);
-    setCnt('tabcnt-strategy', (d.strategy_stats || []).length);
-    const surf = d.exit_surface || {};
-    const fsm = surf.fsm_states || {};
-    setCnt('tabcnt-exit', Object.values(fsm).reduce((a, b) => a + b, 0));
-    const ai = d.ai_shadow || {};
-    setCnt('tabcnt-ai', (ai.shadow_agreement || []).length);
-    setCnt('tabcnt-edge', (d.edge_validation || []).length);
-    setCnt('tabcnt-risk', (d.alerts || []).length);
+    // Counts reflect the active-exchange scope (venue-carrying tabs). New
+    // composite tabs: activity = open positions, performance = strategies,
+    // logic = live regime states. build/path/learned = P3 (no count yet).
+    setCnt('tabcnt-activity', venueFilter(d.positions).length);
+    setCnt('tabcnt-performance', (d.strategy_stats || []).length);
+    setCnt('tabcnt-logic', venueFilter(d.regime_states).length);
+    setCnt('tabcnt-build', '');
+    setCnt('tabcnt-path', '');
+    setCnt('tabcnt-learned', '');
   }
 
   // ── TAB 1 · POSITIONS (expanded columns, flashing CURRENT price) ──────────
   const POS_COLS = 14;
   const _lastPx = {};   // (venue|symbol|strat|side) → last CURRENT price for flash
+  // symbol → human full name (display-only; data has no names). Truncates if long.
+  const SYM_NAME = {
+    BTC:'Bitcoin', ETH:'Ethereum', SOL:'Solana', XRP:'XRP', ADA:'Cardano', DOT:'Polkadot',
+    AVAX:'Avalanche', LINK:'Chainlink', MATIC:'Polygon', ATOM:'Cosmos', UNI:'Uniswap', LTC:'Litecoin',
+    BCH:'Bitcoin Cash', NEAR:'NEAR Protocol', APT:'Aptos', ARB:'Arbitrum', OP:'Optimism', SUI:'Sui',
+    INJ:'Injective', TIA:'Celestia', SEI:'Sei', CRV:'Curve DAO', AAVE:'Aave', MKR:'Maker',
+    SUSHI:'SushiSwap', COMP:'Compound', SNX:'Synthetix', LDO:'Lido DAO', FET:'Fetch.ai', RNDR:'Render',
+    RENDER:'Render', GRT:'The Graph', FIL:'Filecoin', ALGO:'Algorand', XLM:'Stellar', HBAR:'Hedera',
+    VET:'VeChain', THETA:'Theta Network', FLOKI:'Floki', PEPE:'Pepe', SHIB:'Shiba Inu', DOGE:'Dogecoin',
+    WIF:'dogwifhat', BONK:'Bonk', JUP:'Jupiter', PYTH:'Pyth Network', JTO:'Jito', ENA:'Ethena',
+    ONDO:'Ondo', KP3R:'Keep3rV1', SPK:'Spark', HYPE:'Hyperliquid', DEP:'DEAPcoin', LIT:'Litentry',
+    XMR:'Monero', ETC:'Ethereum Classic', TON:'Toncoin', ICP:'Internet Computer', IMX:'Immutable',
+    STX:'Stacks', RUNE:'THORChain', GALA:'Gala', SAND:'The Sandbox', MANA:'Decentraland', NC:'Nano Coin',
+    EURUSD:'Euro / US Dollar', GBPUSD:'Pound / US Dollar', USDJPY:'US Dollar / Yen', AUDUSD:'Aussie / US Dollar',
+    USDCAD:'US Dollar / Loonie', EURGBP:'Euro / Pound', NZDUSD:'Kiwi / US Dollar', USDCHF:'US Dollar / Franc',
+    EURJPY:'Euro / Yen', GBPJPY:'Pound / Yen', AUDUSD_ZERO:'Aussie / US Dollar', USDCNH:'US Dollar / Yuan',
+    US100:'US Tech 100 (Nasdaq)', US500:'S&P 500', US30:'Dow Jones 30', US200:'US 2000 (Russell)',
+    J225:'Nikkei 225', GER40:'DAX 40', UK100:'FTSE 100', HK50:'Hang Seng 50', EU50:'Euro Stoxx 50',
+    VIX:'Volatility Index', OIL_CRUDE:'Crude Oil (WTI)', OIL_BRENT:'Brent Crude', GASOIL:'Gas Oil',
+    NATURALGAS:'Natural Gas', GOLD:'Gold', SILVER:'Silver', PALLADIUM:'Palladium', PLATINUM:'Platinum',
+    COPPER:'Copper', SOXL:'Semis Bull 3x', TQQQ:'Nasdaq Bull 3x', SPXL:'S&P Bull 3x', INTC:'Intel',
+    ADBE:'Adobe', AAPL:'Apple', NVDA:'Nvidia', TSLA:'Tesla', AMD:'AMD', VERU:'Veru Inc',
+  };
+  function symName(p){
+    const s=String(p.symbol||'').toUpperCase();
+    const base=s.split(':').pop().split('-')[0].split('/')[0];
+    return SYM_NAME[s] || SYM_NAME[base] || '';
+  }
   function renderPositions(d) {
     const rows = venueFilter(d.positions);   // E3 venue scope
     const body = $('pos-body'); if (!body) return;
@@ -308,7 +469,7 @@
       const mfeMae = `${fmtR(p.mfe_r, 1)}/${fmtR(p.mae_r, 1)}`;
       return `<tr class="row-${lc}">
         <td class="l ex" title="${esc(p.venue)}">${esc(p.venue)}</td>
-        <td class="l tk" title="${esc(p.symbol)}${p.row_count > 1 ? ' ×' + p.row_count : ''}">${esc(p.symbol)}${rc}</td>
+        <td class="l tk" style="max-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.symbol)}${p.row_count > 1 ? ' ×' + p.row_count : ''}${symName(p) ? ' — ' + esc(symName(p)) : ''}">${esc(p.symbol)}${rc}${symName(p) ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(symName(p))}</span>` : ''}</td>
         <td class="dir ${esc(p.side)}" title="${esc(p.side)}${lc === 'b' ? ' (CFD — long/short)' : ''}">${esc(p.side)}</td>
         <td class="num b-flat" title="entry ${fmtPx(p.entry_price)}">${fmtPx(p.entry_price)}</td>
         <td class="num${flash}" title="current (last close) ${fmtPx(p.last_price)}">${fmtPx(p.last_price)}</td>
@@ -325,10 +486,10 @@
     }).join('');
     body.innerHTML =
       `<table><colgroup>
-        <col style="width:6%"><col style="width:13%"><col style="width:6%"><col style="width:9%">
-        <col style="width:9%"><col style="width:6%"><col style="width:7%"><col style="width:8%">
-        <col style="width:6%"><col style="width:6%"><col style="width:9%"><col style="width:7%">
-        <col style="width:8%"><col style="width:8%">
+        <col style="width:5%"><col style="width:21%"><col style="width:5%"><col style="width:8%">
+        <col style="width:8%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
+        <col style="width:6%"><col style="width:6%"><col style="width:8%"><col style="width:6%">
+        <col style="width:7%"><col style="width:7%">
        </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th>SIDE</th><th>ENTRY</th>
         <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th>uPnL$</th>
@@ -464,17 +625,21 @@
         <col style="width:32%">
        </colgroup><thead><tr>
         <th class="l">STRATEGY</th><th>OPEN</th><th>CLOSED</th><th>WR</th>
-        <th>PF</th><th>AVG-R</th><th>PnL$</th><th>NOTIONAL</th>
+        <th>PF</th><th title="stream-common R: pnl_usd / R_budget (2% of stream starting equity) — comparable across venues; distinct from per-trade MFE/MAE-R">AVG-R</th><th>PnL$</th><th>NOTIONAL</th>
         <th class="l" title="per-regime cell expectancy — real-fee-net LCB (+EV / -EV)">REGIME CELL EV</th>
       </tr></thead><tbody>${trs}</tbody></table>`;
   }
 
 
   // ── dispatch registry ─────────────────────────────────────────────────────
-  // board_tabs.js owns the table tabs; board_tabs_ext.js registers the analytics
-  // tabs (EXIT / AI / EDGE / RISK) via ``register`` so each module stays within
-  // the LOC guideline. Unregistered tabs are a graceful no-op.
-  const RENDERERS = {
+  // board_tabs.js owns the table renderers (positions / trades / regime /
+  // strategy); board_tabs_ext.js owns the analytics renderers (exit / ai / edge
+  // / risk) + the 5 new sub-renderers, and registers the 6 COMPOSITE tab
+  // renderers (activity / performance / logic / build / path / learned) via
+  // ``register``. The base table renderers are exposed on ``renderers`` so the
+  // composites can reuse them. Unregistered tabs are a graceful no-op.
+  const RENDERERS = {};
+  const BASE = {
     positions: renderPositions,
     trades: renderTrades,
     regime: renderRegime,
@@ -482,6 +647,7 @@
   };
   function register(which, fn) { RENDERERS[which] = fn; }
   function renderTab(which, d) {
+    wireCollapsibles();   // idempotent — attaches the collapse listener once
     const fn = RENDERERS[which];
     if (fn) fn(d);
   }
@@ -493,5 +659,6 @@
     renderTabCounts: renderTabCounts,
     register: register,
     setCnt: setCnt,
+    renderers: BASE,   // base table renderers for composite reuse (ext.js)
   };
 })();

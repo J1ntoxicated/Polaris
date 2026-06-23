@@ -51,6 +51,100 @@ ATR_FLOOR_BY_CLASS: Final[dict[str, float]] = {
 ALLOWED_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT"})
 
 # ---------------------------------------------------------------------------
+# Universe-eligibility liquidity floor (Jin-approved 2026-06-22 — flow_not_block)
+# ---------------------------------------------------------------------------
+# A per-venue *instrument-quality* eligibility floor: an instrument is tradeable-
+# quality (eligible for the active set) only if it clears its venue's liquidity
+# floor. This is the SAME KIND of hard keep as the existing ``state=='live'`` and
+# OKX-USDT-quote gates — a membership test on WHICH instruments are tradeable,
+# NOT a per-signal block, size-cut, or entry-veto. Signals + the G3/G4 gate flow
+# freely on whatever passes; the ATR-z signal-richness rank orders the survivors.
+#
+# North-star: an instrument whose round-trip spread (e.g. 175bp) exceeds the
+# strategy edge (~0.3R) is loss-certain — excluding it is QUALITY, not defense.
+# Measured junk it removes: OKX NC-USDT 19912bp / STRK 19871bp / BNT 175bp +
+# vol≈$0 names; Alpaca TNON $0.59 / ADTX $0.017 sub-$1 gappers + $26k-vol pennies.
+#
+# Thresholds are per-venue and env-overridable (``POLARIS_LIQFLOOR_<VENUE>_<KEY>``)
+# so they are a /debate calibration target, never magic-in-place. A threshold of
+# 0 (or unset where the datum is natively 0) disables that axis for the venue —
+# Capital exposes no native vol/depth (==0.0), so its floor keys on SPREAD ONLY
+# (a vol/price floor there would zero the venue). "Unknown" data (price/vol==0)
+# is treated as NOT-floored-out (flow_not_block: never drop on a missing datum).
+LIQFLOOR_ENV_PREFIX: Final[str] = "POLARIS_LIQFLOOR_"
+
+
+@dataclass(frozen=True, slots=True)
+class LiquidityFloor:
+    """Per-venue eligibility floor (0 on an axis = that axis disabled)."""
+
+    max_spread_bps: float = 0.0
+    min_vol_24h_usd: float = 0.0
+    min_depth_10bps_usd: float = 0.0
+    min_price: float = 0.0
+
+
+# Defaults sized to the MEASURED junk (Diagnosis 2026-06-22), generous so they
+# act as a coarse eligibility floor leaving the continuous rank to order the rest
+# (NOT a re-introduction of the 189->6 over-cut hard 4-axis gate).
+_DEFAULT_LIQUIDITY_FLOOR_BY_VENUE: Final[dict[str, LiquidityFloor]] = {
+    # OKX crypto — all axes REAL today (parse_okx_tickers).
+    "okx": LiquidityFloor(
+        max_spread_bps=30.0,
+        min_vol_24h_usd=20_000_000.0,
+        min_depth_10bps_usd=25_000.0,
+        min_price=0.0,
+    ),
+    # Alpaca equity — vol real when enriched; price plumbed via last_price.
+    # spread is a placeholder (2.0) on Alpaca → do NOT floor on it.
+    "alpaca": LiquidityFloor(
+        max_spread_bps=0.0,
+        min_vol_24h_usd=5_000_000.0,
+        min_depth_10bps_usd=0.0,
+        min_price=1.0,
+    ),
+    # Capital CFD — only spread is native (vol/depth==0.0); SPREAD-ONLY floor.
+    "capital": LiquidityFloor(
+        max_spread_bps=40.0,
+        min_vol_24h_usd=0.0,
+        min_depth_10bps_usd=0.0,
+        min_price=0.0,
+    ),
+}
+
+
+def _liqfloor_env_override(venue: str, key: str, default: float) -> float:
+    """Read ``POLARIS_LIQFLOOR_<VENUE>_<KEY>`` → float; default on unset/garbage."""
+    raw = os.environ.get(f"{LIQFLOOR_ENV_PREFIX}{venue.upper()}_{key.upper()}")
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
+    """Per-venue eligibility floor (env-overridable). Unknown venue → no floor.
+
+    Each axis is independently overridable via ``POLARIS_LIQFLOOR_<VENUE>_<KEY>``
+    where KEY ∈ {MAX_SPREAD_BPS, MIN_VOL_24H_USD, MIN_DEPTH_10BPS_USD, MIN_PRICE}.
+    An unregistered venue gets an all-zero floor (permissive — smoke-safe).
+    """
+    base = _DEFAULT_LIQUIDITY_FLOOR_BY_VENUE.get((venue or "").lower())
+    if base is None:
+        return LiquidityFloor()
+    v = (venue or "").lower()
+    return LiquidityFloor(
+        max_spread_bps=_liqfloor_env_override(v, "MAX_SPREAD_BPS", base.max_spread_bps),
+        min_vol_24h_usd=_liqfloor_env_override(v, "MIN_VOL_24H_USD", base.min_vol_24h_usd),
+        min_depth_10bps_usd=_liqfloor_env_override(
+            v, "MIN_DEPTH_10BPS_USD", base.min_depth_10bps_usd
+        ),
+        min_price=_liqfloor_env_override(v, "MIN_PRICE", base.min_price),
+    )
+
+# ---------------------------------------------------------------------------
 # Continuous active-set ranking (flow_not_block — replaces hard 4-axis cut)
 # ---------------------------------------------------------------------------
 # The hard 4-axis gate over-cut the candidate set (189 → 6), starving cold-start
@@ -245,6 +339,45 @@ class UniverseInstrument:
     signal_density_7d: float = 0.0
     listing_ts: int | None = None
     last_seen_ts: int = 0
+    # Last traded price (Alpaca close), for the universe min_price eligibility
+    # floor. 0.0 = unknown (e.g. crypto/CFD venues that don't plumb it) → the
+    # price axis is then skipped for that row (flow_not_block: never drop on a
+    # missing datum). Keyword-default so all existing constructors stay valid.
+    last_price: float = 0.0
+
+
+def passes_liquidity_floor(ins: UniverseInstrument) -> bool:
+    """True iff ``ins`` clears its venue's eligibility liquidity floor.
+
+    Per-axis, each axis is checked ONLY when (a) the venue's floor for it is > 0
+    AND (b) the instrument carries a real datum for it (> 0). A missing datum
+    (0.0 vol/price/depth, common for un-enriched or non-native fields) is NEVER a
+    drop — flow_not_block: we exclude on a KNOWN-bad value, never on an unknown.
+
+    Spread is the exception: a 0.0 spread is the best possible (tightest), so the
+    max-spread axis applies whenever the venue floor is set (>0), comparing the
+    row's spread (any value, incl. its placeholder) against the cap.
+    """
+    floor = liquidity_floor_for_venue(ins.venue)
+    if floor.max_spread_bps > 0.0 and ins.spread_bps > floor.max_spread_bps:
+        return False
+    if (
+        floor.min_vol_24h_usd > 0.0
+        and ins.vol_24h_usd > 0.0
+        and ins.vol_24h_usd < floor.min_vol_24h_usd
+    ):
+        return False
+    if (
+        floor.min_depth_10bps_usd > 0.0
+        and ins.depth_10bps_usd > 0.0
+        and ins.depth_10bps_usd < floor.min_depth_10bps_usd
+    ):
+        return False
+    return not (
+        floor.min_price > 0.0
+        and ins.last_price > 0.0
+        and ins.last_price < floor.min_price
+    )
 
 
 @dataclass(frozen=True, slots=True)

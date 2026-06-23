@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import Final
 
 # --- Exit-state FSM labels (TEXT in positions.exit_state) ------------------
@@ -83,6 +84,87 @@ EXIT_LOSER_TIMEOUT_EXT_MULT: Final[float] = _env_float(
     "POLARIS_EXIT_LOSER_TIMEOUT_EXT_MULT", 2.0
 )
 
+# --- 1D equity MFE-protect schedule ([[equity_exit_harvest_2026-06-23]]) ------
+# The 1D bar-pipeline equity path (equity_tsmom / equity_gap_go / ...) called
+# run_precise_exit WITHOUT a schedule, so the only protective floor below
+# EXIT_FSM_PROTECT_R=1.0R was the wide 2-ATR trail. MEASURED: equity entries are
+# DIRECTIONALLY RIGHT (22/28 closed trades had positive mfe_r, avg +0.27R, peak
+# +0.65R) yet round-tripped to losses (0% win) purely because no floor armed
+# below 1.0R — equity MFE never reaches the FSM PROTECT rung. This schedule is
+# calibrated to that measured distribution (avg ~0.27R, p75 ~0.4R): BEP floor at
+# +0.30R, lock +0.20R once +0.45R is touched. EXPECTANCY, not a throttle — it
+# only ratchets the stop toward profit (size / entry side / the G6 -1.0R rail
+# untouched). Env-tunable; equity-only (None for every other asset_class).
+EXIT_EQUITY_MFE_BEP_R: Final[float] = _env_float("POLARIS_EXIT_EQUITY_MFE_BEP_R", 0.30)
+EXIT_EQUITY_MFE_PROTECT_R: Final[float] = _env_float(
+    "POLARIS_EXIT_EQUITY_MFE_PROTECT_R", 0.45
+)
+EXIT_EQUITY_MFE_LOCK_R: Final[float] = _env_float(
+    "POLARIS_EXIT_EQUITY_MFE_LOCK_R", 0.20
+)
+
+# --- generalized bar-strategy MFE-protect schedule ([[harvest_generalization]]) -
+# The equity harvest above was wired ONLY to asset_class=='equity'; the 9 OTHER
+# bar strategies (spot / fx / index / commodity) passed mfe_protect=None → below
+# EXIT_FSM_PROTECT_R=1.0R the only floor was the wide 2-ATR trail. MEASURED on the
+# live ledger: avg MFE +0.278R, realized -0.947R, giveback 1.225R; 29.2% of trades
+# reach +0.30R and 19.7% reach +0.45R yet round-trip. Only 6.5% ever reach +1.0R
+# (the dead PROTECT rung). This DEFAULT schedule — the SAME proven calibration as
+# equity (BEP +0.30R where ~30% reach, lock +0.20R once +0.45R is touched) — is
+# now applied to EVERY bar asset_class so those positive-MFE round-trips become
+# break-even-or-better exits. EXPECTANCY, not a throttle: it only ratchets the
+# stop toward profit (the let-winners-run ATR trail still runs ABOVE the floor; the
+# size / entry side / the G6 -1.0R rail are untouched). Env-tunable.
+EXIT_BAR_MFE_BEP_R: Final[float] = _env_float("POLARIS_EXIT_BAR_MFE_BEP_R", 0.30)
+EXIT_BAR_MFE_PROTECT_R: Final[float] = _env_float(
+    "POLARIS_EXIT_BAR_MFE_PROTECT_R", 0.45
+)
+EXIT_BAR_MFE_LOCK_R: Final[float] = _env_float("POLARIS_EXIT_BAR_MFE_LOCK_R", 0.20)
+
+# --- Adaptive thesis re-map ([[adaptive_thesis_remap_2026-06-23]]) ------------
+# A per-position EXIT/MANAGEMENT-TIMING re-map driven by whether the ENTRY THESIS
+# is still healthy (same-direction momentum / OFI + regime unchanged), fading, or
+# broken. It NEVER blocks an entry, cuts size, or throttles — it only re-tunes
+# THIS position's exit schedule: LET_RUN widens the trail so a confirmed winner
+# runs (aggressive); HARVEST tightens / banks near the reached peak; CUT closes an
+# INVALIDATED (broken + red) position now; REMODE swaps the trend<->range exit
+# schedule when the regime rotated without invalidating the position. The G6 -1.0R
+# rail + the entry side are untouched. All thresholds env-tunable; the whole
+# re-map is gated behind POLARIS_EXIT_ADAPTIVE_THESIS (default ON).
+#
+#   * ``EXIT_THESIS_GIVEBACK_ARM_R`` (default 0.30): MFE in R the position must
+#     have reached before the give-back modifier can arm.
+#   * ``EXIT_THESIS_GIVEBACK_FRAC`` (default 0.50): fraction of the reached peak
+#     MFE surrendered above which HARVEST is forced (orthogonal to thesis health).
+#   * ``EXIT_THESIS_GIVEBACK_HARD_FRAC`` (default 0.60): fraction surrendered above
+#     which the position is HARVESTED IMMEDIATELY (thesis_harvest fast-close).
+#   * ``EXIT_LETRUN_TRAIL_MULT`` (default 4.0): the WIDE let-winners-run ATR trail
+#     LET_RUN installs (vs the module-default 2.0) so a confirmed thesis runs.
+EXIT_THESIS_GIVEBACK_ARM_R: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_GIVEBACK_ARM_R", 0.30
+)
+EXIT_THESIS_GIVEBACK_FRAC: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_GIVEBACK_FRAC", 0.50
+)
+EXIT_THESIS_GIVEBACK_HARD_FRAC: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_GIVEBACK_HARD_FRAC", 0.60
+)
+EXIT_LETRUN_TRAIL_MULT: Final[float] = _env_float(
+    "POLARIS_EXIT_LETRUN_TRAIL_MULT", 4.0
+)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+# Master gate for the adaptive thesis re-map. Default ON; OFF = every caller is
+# byte-identical (mode is never assessed, evaluate_exit's mode= stays None).
+EXIT_ADAPTIVE_THESIS_ON: Final[bool] = _env_flag("POLARIS_EXIT_ADAPTIVE_THESIS", True)
+
 _ATR_USD_FLOOR: Final[float] = 1e-6
 
 # RELATIVE floor for the ATR-in-USD unit: ≥0.01% of entry price (the close
@@ -122,6 +204,388 @@ class ExitDecision:
     state: ExitState
     close: bool
     close_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MfeProtectSchedule:
+    """MFE-driven protective-stop schedule (flow_pressure EXIT precision).
+
+    Once favourable excursion (``mfe_r``) reaches a rung, the protective stop is
+    RATCHETED toward profit on TOP of the let-winners-run ATR trail (the
+    protection-tighter of the two is taken). EXPECTANCY, not a throttle: it only
+    moves the stop toward profit (never loosens — the ATR ratchet + the
+    protected-BEP / loser-timeout / G6 -1.0R rail are untouched), capturing the
+    +0.67R avg MFE and cutting the 17% >0.5R give-back (late exit).
+
+      - ``bep_at_r``: MFE at which the stop floors at BREAK-EVEN (entry) — leaves
+        initial risk.
+      - ``protect_at_r``: MFE at which a meaningful POSITIVE R is locked.
+      - ``lock_r``: the positive R the stop locks once ``protect_at_r`` is hit
+        (stop floors at entry ± ``lock_r`` in R-units).
+    """
+
+    bep_at_r: float
+    protect_at_r: float
+    lock_r: float
+
+
+# --- Adaptive thesis re-map: types + pure assessment -----------------------
+
+
+class Bucket(Enum):
+    """The exit-archetype the position's strategy belongs to.
+
+    TREND theses (momo / trend / breakout / event / gap / flow_pressure /
+    burst_rider) want to RUN while confirmed; REVERSION theses (mean_reversion /
+    range / micro_reversion) target a BOUNDED revert-to-mean and never widen.
+    """
+
+    TREND = "trend"
+    REVERSION = "reversion"
+
+
+class ThesisHealth(Enum):
+    """Whether the ENTRY thesis is still valid for THIS position.
+
+    INTACT  = same-direction momentum / OFI still present + regime not flipped
+              against the position.
+    FADING  = the position went green but momentum flattened / OFI decayed (the
+              edge is leaking) — bank it.
+    BROKEN  = momentum reversed / OFI firmly opposes / regime flipped against the
+              position / a breakout fell back inside — the entry reason is gone.
+    """
+
+    INTACT = "intact"
+    FADING = "fading"
+    BROKEN = "broken"
+
+
+class ManagementMode(Enum):
+    """The exit-schedule re-map decision for THIS position (EXIT timing only).
+
+    LET_RUN = widen the trail + BEP floor (a confirmed winner runs).
+    HARVEST = tighten to a BEP+lock floor at the reached rung; fast-close if the
+              give-back is hard.
+    CUT     = close now (ONLY a broken + red/flat position — never a green one).
+    REMODE  = swap the trend<->range exit schedule (exit-params only — NOT a
+              strategy swap).
+    HOLD    = keep the existing per-strategy defaults (nothing decisive).
+    """
+
+    LET_RUN = "let_run"
+    HARVEST = "harvest"
+    CUT = "cut"
+    REMODE = "remode"
+    HOLD = "hold"
+
+
+@dataclass(frozen=True, slots=True)
+class ThesisGivebackParams:
+    """MFE give-back thresholds for the orthogonal HARVEST modifier.
+
+    ``arm_r``: MFE in R the position must reach before the modifier can arm.
+    ``frac``: fraction of the reached peak MFE surrendered above which HARVEST is
+        forced (soft).
+    ``hard_frac``: fraction surrendered above which the position is HARVESTED
+        IMMEDIATELY (the thesis_harvest fast-close).
+    """
+
+    arm_r: float
+    frac: float
+    hard_frac: float
+
+
+@dataclass(frozen=True, slots=True)
+class ThesisExitParams:
+    """Exit-schedule overrides a ManagementMode maps to (consumed by the FSM).
+
+    ``trail_mult`` / ``mfe_protect`` / ``profit_target_r`` override the same-named
+    ``evaluate_exit`` knobs (``None`` = leave the caller's value). ``thesis_harvest``
+    / ``thesis_cut`` are TOP-of-ladder immediate-close flags (checked BEFORE the
+    existing close reasons). ``None``/all-default = byte-identical to no re-map.
+    """
+
+    trail_mult: float | None = None
+    mfe_protect: MfeProtectSchedule | None = None
+    profit_target_r: float | None = None
+    thesis_harvest: bool = False
+    thesis_cut: bool = False
+
+
+# A reversion-class strategy targets a bounded revert-to-mean; its
+# correlation_group_id carries one of these substrings. Everything else (momo /
+# trend / breakout / event / gap / ema_trend / flow_pressure / burst_rider) is a
+# TREND archetype that may run while confirmed.
+_REVERSION_GROUP_SUBSTRINGS: Final[tuple[str, ...]] = ("mean_reversion", "range")
+
+
+def bucket_from_correlation_group(correlation_group: str | None) -> Bucket:
+    """Map a strategy's ``correlation_group_id`` to its exit archetype.
+
+    Pure + total: ``None`` / unknown / "" → TREND (the let-winners-run default —
+    flow_not_block: an unmapped group is never forced into a tighter schedule).
+    """
+    if not correlation_group:
+        return Bucket.TREND
+    cg = correlation_group.lower()
+    for sub in _REVERSION_GROUP_SUBSTRINGS:
+        if sub in cg:
+            return Bucket.REVERSION
+    return Bucket.TREND
+
+
+# Regime tokens that mean "directionless / range-bound" — a rotation INTO one of
+# these (from a directional entry regime) is a schedule REMODE, not an
+# invalidation. Substring match keeps it robust to venue-specific labels.
+_RANGE_REGIME_SUBSTRINGS: Final[tuple[str, ...]] = ("chop", "range", "mean")
+# Directional bias of a regime token, used only to test a flip AGAINST the
+# position. Anything not matched is treated as neutral (no directional opinion).
+_UP_REGIME_SUBSTRINGS: Final[tuple[str, ...]] = ("up", "bull")
+_DOWN_REGIME_SUBSTRINGS: Final[tuple[str, ...]] = ("down", "bear")
+
+
+def _regime_dir(regime: str | None) -> int:
+    """+1 up-biased, -1 down-biased, 0 neutral/range/unknown (pure, total)."""
+    if not regime:
+        return 0
+    r = regime.lower()
+    if any(s in r for s in _UP_REGIME_SUBSTRINGS):
+        return 1
+    if any(s in r for s in _DOWN_REGIME_SUBSTRINGS):
+        return -1
+    return 0
+
+
+def _is_range_regime(regime: str | None) -> bool:
+    if not regime:
+        return False
+    r = regime.lower()
+    return any(s in r for s in _RANGE_REGIME_SUBSTRINGS)
+
+
+def _side_sign(side: str | None) -> int:
+    """+1 long, -1 short, 0 unknown (degrade safe — no directional test fires)."""
+    if side == "long":
+        return 1
+    if side == "short":
+        return -1
+    return 0
+
+
+def _giveback_level(
+    *, mfe_r: float, pnl_r: float, giveback: ThesisGivebackParams
+) -> int:
+    """0 = not armed / no give-back, 1 = soft give-back, 2 = hard give-back.
+
+    Armed only once MFE reached ``arm_r``. Surrendered fraction = how much of the
+    reached peak MFE the position has handed back (peak MFE - current favourable
+    PnL) / peak MFE. Pure; a non-positive / tiny peak never arms.
+    """
+    if mfe_r < giveback.arm_r or mfe_r <= 0.0:
+        return 0
+    surrendered = (mfe_r - max(pnl_r, 0.0)) / mfe_r
+    if surrendered > giveback.hard_frac:
+        return 2
+    if surrendered > giveback.frac:
+        return 1
+    return 0
+
+
+def _assess_health(
+    *,
+    sign: int,
+    bucket: Bucket,
+    mfe_r: float,
+    pnl_r: float,
+    momentum_drift: float,
+    atr_slope: float,
+    ofi: float | None,
+    flow_confirmed: bool | None,
+    regime: str | None,
+    entry_regime: str | None,
+) -> ThesisHealth:
+    """Classify the entry thesis as INTACT / FADING / BROKEN (pure, total).
+
+    BROKEN: momentum reversed against the position, OR OFI firmly opposes, OR the
+    regime flipped to the OPPOSITE directional bias of the entry regime.
+    FADING: the position was green (mfe armed) but momentum flattened / OFI decayed
+    — the edge is leaking.
+    INTACT: same-direction momentum / OFI still present (or simply nothing
+    indicating a break).
+    """
+    drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
+    ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
+
+    # --- BROKEN tests (any one) ---
+    momentum_reversed = momentum_drift != 0.0 and drift_dir < 0.0
+    ofi_opposes = ofi_dir is not None and ofi_dir < 0.0
+    entry_dir = _regime_dir(entry_regime)
+    now_dir = _regime_dir(regime)
+    regime_flipped_against = (
+        entry_dir != 0
+        and now_dir != 0
+        and now_dir == -entry_dir
+        and sign * now_dir < 0  # the new regime opposes the position
+    )
+    if momentum_reversed or ofi_opposes or regime_flipped_against:
+        return ThesisHealth.BROKEN
+
+    # --- FADING tests (only meaningful once the position printed MFE) ---
+    if mfe_r >= EXIT_THESIS_GIVEBACK_ARM_R:
+        momentum_flat = abs(momentum_drift) <= 1e-9 or drift_dir <= 0.0
+        ofi_decayed = ofi_dir is not None and ofi_dir <= 0.0
+        flow_lost = flow_confirmed is False
+        if (momentum_flat and (ofi_decayed or flow_lost)) or (
+            ofi_decayed and flow_lost
+        ):
+            return ThesisHealth.FADING
+
+    return ThesisHealth.INTACT
+
+
+def assess_thesis(
+    *,
+    side: str | None,
+    bucket: Bucket,
+    mfe_r: float | None,
+    mae_r: float | None,
+    pnl_r: float | None,
+    momentum_drift: float | None,
+    atr_slope: float | None,
+    ofi: float | None,
+    flow_confirmed: bool | None,
+    regime: str | None,
+    entry_regime: str | None,
+    held_seconds: int | None,
+    horizon_seconds: int | None,
+    giveback: ThesisGivebackParams,
+) -> ManagementMode:
+    """Re-map THIS position's exit schedule from entry-thesis health (pure/total).
+
+    NEVER raises; ``None`` inputs degrade safe (treated as 0.0 / neutral). EXIT /
+    MANAGEMENT-TIMING only — it returns a ``ManagementMode`` the FSM converts to
+    exit-param overrides; it touches NO entry, NO size, NO halt. The G6 -1.0R rail
+    is owned by the caller.
+
+    Precedence (highest first): give-back-hard → CUT(broken + red) → HARVEST
+    (give-back / fading / broken-green) → REMODE → LET_RUN(trend intact) → HOLD.
+    """
+    sign = _side_sign(side)
+    m_mfe = 0.0 if mfe_r is None else mfe_r
+    m_pnl = 0.0 if pnl_r is None else pnl_r
+    m_drift = 0.0 if momentum_drift is None else momentum_drift
+    m_slope = 0.0 if atr_slope is None else atr_slope
+
+    is_red = m_pnl < 0.0
+
+    # 1. Give-back modifier (orthogonal, highest precedence). A position that
+    #    reached MFE and handed back too much of it is HARVESTED regardless of
+    #    thesis health — but give-back NEVER escalates a green position to CUT.
+    gb = _giveback_level(mfe_r=m_mfe, pnl_r=m_pnl, giveback=giveback)
+    if gb >= 1:
+        return ManagementMode.HARVEST
+
+    health = _assess_health(
+        sign=sign, bucket=bucket, mfe_r=m_mfe, pnl_r=m_pnl,
+        momentum_drift=m_drift, atr_slope=m_slope, ofi=ofi,
+        flow_confirmed=flow_confirmed, regime=regime, entry_regime=entry_regime,
+    )
+
+    # 2. BROKEN → CUT only when red/flat; a broken-GREEN position is HARVESTED
+    #    (bank the gain — never CUT a winner).
+    if health is ThesisHealth.BROKEN:
+        return ManagementMode.CUT if is_red else ManagementMode.HARVEST
+
+    # 3. FADING → HARVEST (bank the leaking edge).
+    if health is ThesisHealth.FADING:
+        return ManagementMode.HARVEST
+
+    # 4. REMODE: the regime rotated INTO a range/chop regime from a NON-range
+    #    (trend / directional) entry regime WITHOUT invalidating the position —
+    #    swap the exit schedule (trend<->range) instead of widening. Not a
+    #    strategy swap. (A broken/red position already CUT/HARVESTED above.)
+    if (
+        _is_range_regime(regime)
+        and bool(entry_regime)
+        and not _is_range_regime(entry_regime)
+        and not is_red
+    ):
+        return ManagementMode.REMODE
+
+    # 5. INTACT trend → LET_RUN (widen so the confirmed winner runs). A reversion
+    #    thesis intact does NOT widen — its edge is bounded → HOLD.
+    if bucket is Bucket.TREND and m_mfe > 0.0 and not is_red:
+        return ManagementMode.LET_RUN
+
+    return ManagementMode.HOLD
+
+
+def mode_to_exit_params(
+    mode: ManagementMode,
+    *,
+    bucket: Bucket,
+    mfe_r: float,
+    pnl_r: float,
+    giveback: ThesisGivebackParams,
+    base_mfe_protect: MfeProtectSchedule | None,
+    base_profit_target_r: float | None,
+) -> ThesisExitParams:
+    """Map a ManagementMode to concrete exit-schedule overrides (pure, total).
+
+    LET_RUN widens the trail to ``EXIT_LETRUN_TRAIL_MULT`` + a BEP floor; HARVEST
+    installs a tight BEP+lock floor at the reached rung and fast-closes
+    (thesis_harvest) when the give-back is HARD; CUT requests an immediate
+    thesis_cut close; REMODE swaps the trend<->range schedule (a reversion target
+    for a now-range position, else a tighter harvest floor); HOLD keeps the
+    caller's defaults. EXIT params only — never size / entry / halt.
+    """
+    if mode is ManagementMode.HOLD:
+        return ThesisExitParams(
+            mfe_protect=base_mfe_protect, profit_target_r=base_profit_target_r
+        )
+
+    if mode is ManagementMode.LET_RUN:
+        return ThesisExitParams(
+            trail_mult=EXIT_LETRUN_TRAIL_MULT,
+            mfe_protect=MfeProtectSchedule(
+                bep_at_r=EXIT_BAR_MFE_BEP_R,
+                protect_at_r=EXIT_BAR_MFE_PROTECT_R,
+                lock_r=EXIT_BAR_MFE_LOCK_R,
+            ),
+            profit_target_r=base_profit_target_r,
+        )
+
+    if mode is ManagementMode.HARVEST:
+        gb = _giveback_level(mfe_r=mfe_r, pnl_r=pnl_r, giveback=giveback)
+        # Tight floor at the reached rung: lock positive R once the BEP rung is
+        # passed (BEP+lock). A HARD give-back closes immediately (thesis_harvest).
+        return ThesisExitParams(
+            trail_mult=EXIT_HARVEST_TRAIL_MULT,
+            mfe_protect=MfeProtectSchedule(
+                bep_at_r=EXIT_BAR_MFE_BEP_R,
+                protect_at_r=EXIT_BAR_MFE_PROTECT_R,
+                lock_r=EXIT_BAR_MFE_LOCK_R,
+            ),
+            profit_target_r=base_profit_target_r,
+            thesis_harvest=gb >= 2,
+        )
+
+    if mode is ManagementMode.CUT:
+        return ThesisExitParams(thesis_cut=True)
+
+    # REMODE: swap the trend<->range exit schedule. A now-range position takes a
+    # bounded revert-to-mean target (if the strategy already declares one) plus
+    # the tighter harvest trail; otherwise it tightens to the harvest floor. NOT a
+    # strategy swap — exit params only.
+    return ThesisExitParams(
+        trail_mult=EXIT_HARVEST_TRAIL_MULT,
+        mfe_protect=MfeProtectSchedule(
+            bep_at_r=EXIT_BAR_MFE_BEP_R,
+            protect_at_r=EXIT_BAR_MFE_PROTECT_R,
+            lock_r=EXIT_BAR_MFE_LOCK_R,
+        ),
+        profit_target_r=base_profit_target_r,
+    )
 
 
 def _atr_one_usd(*, entry_price: float, atr_pct: float) -> float:
@@ -197,6 +661,11 @@ def evaluate_exit(
     loser_timeout_sec: float | None = None,
     profit_target_r: float | None = None,
     entry_atr_pct: float | None = None,
+    trail_mult: float | None = None,
+    mfe_protect: MfeProtectSchedule | None = None,
+    mode: ManagementMode | None = None,
+    thesis_bucket: Bucket = Bucket.TREND,
+    thesis_giveback: ThesisGivebackParams | None = None,
 ) -> ExitDecision:
     """Advance excursion + stop + FSM for one position; decide close-or-hold.
 
@@ -229,6 +698,41 @@ def evaluate_exit(
     tracks today's noise band and the ratchet already forbids loosening.
     ``None`` (legacy rows / callers) keeps the current-ATR denominator —
     byte-identical to the pre-anchor behaviour.
+
+    ``trail_mult``: per-position override of the let-winners-run ATR-trail width
+    (in ATR units). ``None`` keeps the module default ``EXIT_ATR_TRAIL_MULT``
+    (=2.0) — byte-identical for every existing caller. A WIDER value lets a
+    favourable drift run further before the trail closes it: the tick engine
+    passes a wider trail for ``flow_pressure`` momentum positions so OFI drift is
+    captured past the old ~75s scalp (honest fee-net retune w02ccvq0q — the
+    longer-hold cohort was the only gross-cost-positive bucket). EXPECTANCY, not
+    a throttle: it only LOOSENS the trail (lets the winner run); the ratchet still
+    forbids loosening the already-set stop, the protected-BEP exit + loser-timeout
+    + the G6 -1.0R hard rail (the loss-defence) are all untouched. HARVEST still
+    tightens to ``EXIT_HARVEST_TRAIL_MULT`` once a big winner is locked.
+
+    ``mfe_protect`` (flow_pressure EXIT precision,
+    [[flow_pressure_calibration_ai_2026-06-23]]): an MFE-driven protective-stop
+    schedule that RATCHETS the stop toward profit once favourable excursion
+    appears (BEP at ``bep_at_r``, lock ``lock_r`` positive R at ``protect_at_r``).
+    The protection-tighter of the ATR trail and the schedule floor is taken, so it
+    only ever tightens — capturing the +0.67R avg MFE and cutting the 17% >0.5R
+    give-back. ``None`` (every existing caller) → byte-identical. EXPECTANCY, not
+    a throttle: size / entry side / the G6 -1.0R rail untouched; it cannot loosen
+    the trail (the ratchet below still maxes/mins against the prior stop).
+
+    ``mode`` (adaptive thesis re-map, [[adaptive_thesis_remap_2026-06-23]]): a
+    ``ManagementMode`` from ``assess_thesis`` that RE-MAPS this position's exit
+    schedule from entry-thesis health. ``None`` (default) → byte-identical for
+    EVERY existing caller (no override applied, no thesis close checked). When set,
+    ``mode_to_exit_params`` resolves trail_mult / mfe_protect / profit_target
+    OVERRIDES (the mode tuple wins over the same-named caller kwargs) and the
+    thesis_harvest / thesis_cut fast-closes are checked at the TOP of the close
+    ladder (before the existing reasons). EXIT timing only — LET_RUN widens (winner
+    runs), HARVEST tightens/banks, CUT closes an invalidated (broken+red) position,
+    REMODE swaps the trend<->range schedule; size / entry / the G6 -1.0R rail
+    untouched. ``thesis_bucket`` / ``thesis_giveback`` feed the param mapping (a
+    None giveback degrades to the module defaults).
     """
     # 1. Update price extremes (running peak / trough over the position life).
     peak = max(prev.peak_price, last_price)
@@ -247,22 +751,79 @@ def evaluate_exit(
     mfe_r = min(mfe_r, _EXCURSION_R_CAP)
     mae_r = max(mae_r, -_EXCURSION_R_CAP)
 
+    # 2b. Adaptive thesis re-map (mode override). ``mode is None`` → NOTHING
+    #     changes (the trail_mult / mfe_protect / profit_target_r below are the
+    #     caller's, and the thesis closes are off) → byte-identical to every
+    #     existing caller. When a mode is supplied, the mode tuple OVERRIDES the
+    #     same-named exit knobs (EXIT timing only — size / entry / G6 rail
+    #     untouched) and arms the thesis_harvest / thesis_cut top-of-ladder closes.
+    thesis_harvest = False
+    thesis_cut = False
+    if mode is not None:
+        giveback = (
+            thesis_giveback
+            if thesis_giveback is not None
+            else ThesisGivebackParams(
+                arm_r=EXIT_THESIS_GIVEBACK_ARM_R,
+                frac=EXIT_THESIS_GIVEBACK_FRAC,
+                hard_frac=EXIT_THESIS_GIVEBACK_HARD_FRAC,
+            )
+        )
+        tp = mode_to_exit_params(
+            mode, bucket=thesis_bucket, mfe_r=mfe_r, pnl_r=pnl_r,
+            giveback=giveback, base_mfe_protect=mfe_protect,
+            base_profit_target_r=profit_target_r,
+        )
+        if tp.trail_mult is not None:
+            trail_mult = tp.trail_mult
+        mfe_protect = tp.mfe_protect
+        profit_target_r = tp.profit_target_r
+        thesis_harvest = tp.thesis_harvest
+        thesis_cut = tp.thesis_cut
+
     # 3. FSM advance by MFE (monotone — never regress).
     new_state = _next_fsm_state(prev.exit_state, mfe_r)
 
     # 4. ATR-trailing stop. Tighter trail once in HARVEST (locks the winner;
     #    still only ratchets toward profit — never loosens).
     atr_one = _atr_one_usd(entry_price=entry_price, atr_pct=atr_pct)
-    trail_mult = (
+    # Let-winners-run trail width: the per-position ``trail_mult`` override (e.g.
+    # a wider flow_pressure trail) when supplied, else the module default. HARVEST
+    # still tightens to EXIT_HARVEST_TRAIL_MULT regardless — a locked big winner
+    # is protected even under a wider running trail.
+    run_trail_mult = EXIT_ATR_TRAIL_MULT if trail_mult is None else trail_mult
+    effective_trail_mult = (
         EXIT_HARVEST_TRAIL_MULT
         if new_state == EXIT_STATE_HARVEST
-        else EXIT_ATR_TRAIL_MULT
+        else run_trail_mult
     )
     anchor = peak if side == "long" else trough
     stop_price = _trailing_stop(
         side=side, anchor_extreme=anchor, atr_one=atr_one,
-        trail_mult=trail_mult, prev_stop=prev.stop_price,
+        trail_mult=effective_trail_mult, prev_stop=prev.stop_price,
     )
+
+    # 4b. MFE-protect floor (flow_pressure EXIT precision): once favourable
+    #     excursion reaches a rung, ratchet the stop toward profit — BEP at
+    #     ``bep_at_r`` (leave initial risk), lock ``lock_r`` positive R at
+    #     ``protect_at_r``. Take the protection-tighter of the ATR trail and the
+    #     floor (long → higher stop, short → lower) so it ONLY tightens; the
+    #     ratchet above already forbids loosening. ``None`` → unchanged.
+    if mfe_protect is not None:
+        protect_floor: float | None = None
+        if mfe_r >= mfe_protect.protect_at_r:
+            offset = mfe_protect.lock_r * atr_r  # positive R locked, in price
+            protect_floor = (
+                entry_price + offset if side == "long" else entry_price - offset
+            )
+        elif mfe_r >= mfe_protect.bep_at_r:
+            protect_floor = entry_price  # break-even: leave initial risk
+        if protect_floor is not None:
+            stop_price = (
+                max(stop_price, protect_floor)
+                if side == "long"
+                else min(stop_price, protect_floor)
+            )
 
     state = ExitState(
         peak_price=peak, trough_price=trough, stop_price=stop_price,
@@ -270,6 +831,17 @@ def evaluate_exit(
     )
 
     # 5. Close decisions (precise exits — per-position only).
+    #    (a-) ADAPTIVE THESIS top-of-ladder closes (checked BEFORE every existing
+    #         reason). ``thesis_cut``: the entry thesis is BROKEN and the position
+    #         is red/flat (assess_thesis only emits CUT then) → close NOW.
+    #         ``thesis_harvest``: a HARD give-back on a once-green position → bank
+    #         it NOW (near the peak). EXIT timing only; ``mode is None`` leaves both
+    #         False → byte-identical.
+    if thesis_cut:
+        return ExitDecision(state=state, close=True, close_reason="thesis_cut")
+    if thesis_harvest:
+        return ExitDecision(state=state, close=True, close_reason="thesis_harvest")
+
     #    (a0) TAKE-PROFIT at the mean-reversion target FIRST: a strategy that
     #         opts in with a fixed ``profit_target_r`` (a BB fade) HARVESTS the
     #         instant current PnL reaches the target — before the wide
@@ -316,19 +888,39 @@ def evaluate_exit(
 
 
 __all__ = [
+    "EXIT_ADAPTIVE_THESIS_ON",
     "EXIT_ATR_TRAIL_MULT",
+    "EXIT_BAR_MFE_BEP_R",
+    "EXIT_BAR_MFE_LOCK_R",
+    "EXIT_BAR_MFE_PROTECT_R",
+    "EXIT_EQUITY_MFE_BEP_R",
+    "EXIT_EQUITY_MFE_LOCK_R",
+    "EXIT_EQUITY_MFE_PROTECT_R",
     "EXIT_FSM_HARVEST_R",
     "EXIT_FSM_PROTECT_R",
     "EXIT_FSM_TOUCH_R",
     "EXIT_HARVEST_TRAIL_MULT",
+    "EXIT_LETRUN_TRAIL_MULT",
     "EXIT_LOSER_TIMEOUT_EXT_MULT",
     "EXIT_LOSER_TIMEOUT_SEC",
     "EXIT_STATE_HARVEST",
     "EXIT_STATE_OPEN",
     "EXIT_STATE_PROTECTED",
     "EXIT_STATE_TOUCHED",
+    "EXIT_THESIS_GIVEBACK_ARM_R",
+    "EXIT_THESIS_GIVEBACK_FRAC",
+    "EXIT_THESIS_GIVEBACK_HARD_FRAC",
+    "Bucket",
     "ExitDecision",
     "ExitState",
+    "ManagementMode",
+    "MfeProtectSchedule",
+    "ThesisExitParams",
+    "ThesisGivebackParams",
+    "ThesisHealth",
+    "assess_thesis",
+    "bucket_from_correlation_group",
     "evaluate_exit",
     "init_exit_state",
+    "mode_to_exit_params",
 ]

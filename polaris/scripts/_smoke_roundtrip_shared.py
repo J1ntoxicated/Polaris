@@ -37,6 +37,14 @@ class OpenAttempt:
     deal_id: str | None = None
     reject_code: str | None = None
     reject_msg: str | None = None
+    # Set on an ACCEPTED-but-unfilled order (the venue holds a LIVE order). Lets
+    # the caller hand the live order to ``record_venue_orphan`` instead of
+    # silently releasing it (the Alpaca open-side orphan leak). ``None`` on a
+    # genuine reject (nothing accepted at the venue → nothing to reconcile).
+    venue_order_id: str | None = None
+    # Submitted share qty for that live unfilled order (whole-share-retry qty),
+    # carried so the orphan record knows the exposure to reconcile.
+    unfilled_qty: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +101,12 @@ def record_venue_orphan(
     (``event_type='venue_orphan'``) so a reconciliation pass can find the
     venue ref (OKX ``ordId`` / Capital ``dealId`` + ``base_qty``) and close
     the orphaned exposure. Best-effort: a failure here is logged, never raised.
+
+    IDEMPOTENT on ``venue_order_id``: the same live order can be handed in more
+    than once (concurrency — two strategies, same symbol, same tick — or a
+    re-fired no_fill), and a reconciler must see ONE row per live order, not a
+    duplicate flood. A non-``None`` ``venue_order_id`` already recorded is a
+    no-op. ``None`` (no venue ref) skips the dedup (nothing to key on).
     """
     payload = json.dumps(
         {
@@ -102,6 +116,22 @@ def record_venue_orphan(
         },
         separators=(",", ":"),
     )
+    if venue_order_id is not None:
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM risk_events WHERE event_type='venue_orphan' "
+                "AND json_extract(payload_json, '$.venue_order_id') = ? LIMIT 1",
+                (venue_order_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            existing = None
+            logger.error("[venue-orphan] dedup lookup failed: %r", exc)
+        if existing is not None:
+            logger.info(
+                "[venue-orphan] %s:%s venue_order_id=%s already recorded — "
+                "skip duplicate", venue, symbol, venue_order_id,
+            )
+            return
     logger.error(
         "[venue-orphan] %s:%s %s phase=%s venue_order_id=%s deal_id=%s "
         "base_qty=%s — real position untracked, needs reconciliation",

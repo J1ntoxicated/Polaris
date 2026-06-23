@@ -30,22 +30,30 @@
   const hash01 = window.PolarisGlobe_hash01;
   const rgba = window.PolarisGlobe_rgba;
 
-  // Family ring definitions. radius = orbit radius around the conductor (scene
-  // units), inc = ring inclination, color = subtle family tint, base = node size.
-  // Jin (2026-06-01): 위성 노드 = NEON 색으로 family 구분 (muted tone이 헷갈려서 반전).
-  // 밝고 채도 높은 네온 8색 = 레짐/전략/엑싯/AI/축/결정/헬스/탤리 한눈 구별. 전달 입자·연결선은
-  // 회색 유지 — 종류는 네온 노드 색으로 읽는다.
-  // 8색을 색상환에 고르게: red→orange→yellow→green→cyan→blue→violet→pink. 인접쌍도
-  // 명확히 구분(이전엔 orbit/axis=cyan/teal, exit/action/tally=magenta/purple/red로 겹쳤음).
+  // Family definitions. Jin 2026-06-23 ORBITAL (per-gate distinct orbits): the 8
+  // gate/layer families NO LONGER share one latitude-banded shell. Each family now
+  // rides its OWN orbital RING — a distinct inclination (tilt), ascending-node
+  // rotation, radius and revolution speed/phase — so the 8 gates read as 8 separate
+  // orbits (an atomic / gyroscope model), and the union of the tilted rings traces
+  // out a SPHERE silhouette that gently floats. Jin '게이트별로 노드 궤도 다르게 …
+  // 그 궤도에서 구 형성하면서 플로팅'. color = NEON family tint (밝고 채도 높은 8색
+  // 한눈 구별), base = node size, shape = dot/square.
+  //   inc   = orbital-plane tilt (rad)   — distinct per gate
+  //   asc   = ascending-node spin (rad)  — rotates the tilted plane around Y
+  //   rscale= ring radius ×R_MIDDLE      — near 1 so all rings co-trace one sphere
+  //   ospeed= revolution speed (rad/s)   — distinct per gate (+ sign = direction)
+  //   phase = starting longitude offset  — distinct per gate
+  const R_MIDDLE = (window.PolarisGlobe_shellR && window.PolarisGlobe_shellR.middle) || 0.55;
+  const PI = Math.PI;
   const FAMILIES = {
-    exit:   { color: [0xf0, 0x22, 0x22], radius: 0.34, inc: -0.85, base: 2.0, label: 'EXIT',      shape: null },        // red
-    strat:  { color: [0xff, 0x7a, 0x00], radius: 0.40, inc: 0.55, base: 2.6, label: 'STRATEGY',   shape: null },        // orange
-    reg:    { color: [0xff, 0xd0, 0x00], radius: 0.30, inc: 0.10, base: 2.6, label: 'REGIME',     shape: null },        // yellow
-    obs:    { color: [0x3d, 0xe8, 0x4a], radius: 0.26, inc: -1.30, base: 1.8, label: 'HEALTH',     shape: 'square' },   // green
-    axis:   { color: [0x12, 0xe5, 0xe5], radius: 0.58, inc: -0.35, base: 1.8, label: 'DIMENSION', shape: null },        // cyan
-    orbit:  { color: [0x3d, 0x6e, 0xff], radius: 0.50, inc: 0.95, base: 2.2, label: 'AI · LEARN', shape: null },        // blue
-    action: { color: [0xb4, 0x3c, 0xff], radius: 0.46, inc: 1.25, base: 2.0, label: 'DECISION',   shape: 'square' },   // violet
-    exit_tally: { color: [0xff, 0x5c, 0xc8], radius: 0.66, inc: 0.40, base: 1.6, label: 'TALLY',  shape: 'square' },   // pink
+    exit:   { color: [0xf0, 0x22, 0x22], base: 2.0, label: 'EXIT',       shape: null,     inc: 0.30, asc: 0.00,        rscale: 1.00, ospeed:  0.16, phase: 0.10 }, // red
+    strat:  { color: [0xff, 0x7a, 0x00], base: 2.6, label: 'STRATEGY',   shape: null,     inc: 1.05, asc: PI * 0.25,   rscale: 0.92, ospeed: -0.13, phase: 0.55 }, // orange
+    reg:    { color: [0xff, 0xd0, 0x00], base: 2.6, label: 'REGIME',     shape: null,     inc: 1.40, asc: PI * 0.50,   rscale: 0.98, ospeed:  0.10, phase: 0.85 }, // yellow
+    obs:    { color: [0x3d, 0xe8, 0x4a], base: 1.8, label: 'HEALTH',     shape: 'square', inc: 0.62, asc: PI * 0.75,   rscale: 0.86, ospeed: -0.19, phase: 0.30 }, // green
+    axis:   { color: [0x12, 0xe5, 0xe5], base: 1.8, label: 'DIMENSION',  shape: null,     inc: 1.18, asc: PI * 1.00,   rscale: 1.04, ospeed:  0.14, phase: 0.65 }, // cyan
+    orbit:  { color: [0x3d, 0x6e, 0xff], base: 2.2, label: 'AI · LEARN', shape: null,     inc: 0.88, asc: PI * 1.25,   rscale: 0.94, ospeed: -0.11, phase: 0.05 }, // blue
+    action: { color: [0xb4, 0x3c, 0xff], base: 2.0, label: 'DECISION',   shape: 'square', inc: 1.30, asc: PI * 1.55,   rscale: 0.90, ospeed:  0.18, phase: 0.45 }, // violet
+    exit_tally: { color: [0xff, 0x5c, 0xc8], base: 1.6, label: 'TALLY',  shape: 'square', inc: 0.46, asc: PI * 1.80,   rscale: 1.02, ospeed: -0.15, phase: 0.75 }, // pink
   };
   const FAMILY_ORDER = ['reg', 'strat', 'exit', 'orbit', 'axis', 'action', 'obs', 'exit_tally'];
   // member ids per family this frame → used to spread nodes evenly on the ring.
@@ -112,7 +120,35 @@
   }
   window.PolarisGlobe_satFinalize = satFinalize;
 
-  // Revolve satellites around the conductor each frame → set their (moving) home.
+  // ── Per-gate orbital placement (Jin 2026-06-23) ──────────────────────────────
+  // Each of the 8 gate/layer families rides its OWN tilted orbital RING (distinct
+  // inclination `inc` + ascending-node rotation `asc` + radius `rscale` + speed
+  // `ospeed`), NOT one shared latitude-banded shell. A point on a family ring is a
+  // circle in the ring plane (radius R), tilted by `inc` then rotated by `asc`
+  // about Y, then offset to the conductor. The union of the 8 rings co-traces one
+  // floating sphere (rscale≈1) while reading as 8 separate orbits (gyroscope).
+  //   ringPoint(F, ang) → {x,y,z} in world space.
+  function ringPoint(F, ang) {
+    const R = R_MIDDLE * (F.rscale || 1.0);
+    // base circle in XZ plane
+    let x = Math.cos(ang) * R;
+    let y = 0;
+    let z = Math.sin(ang) * R;
+    // incline the plane about the X axis by `inc` (tilts the ring)
+    const ci = Math.cos(F.inc), si = Math.sin(F.inc);
+    let y2 = y * ci - z * si;
+    let z2 = y * si + z * ci;
+    y = y2; z = z2;
+    // rotate the (now tilted) plane about Y by `asc` (spreads ascending nodes)
+    const ca = Math.cos(F.asc), sa = Math.sin(F.asc);
+    const x2 = x * ca + z * sa;
+    const z3 = -x * sa + z * ca;
+    return { x: conductor.x + x2, y: conductor.y + y, z: conductor.z + z3 };
+  }
+
+  // Revolve each satellite along its family's distinct orbital ring each frame.
+  // Stable slot + family phase keep members evenly spread and order-independent;
+  // ospeed (per-gate, signed) gives each ring its own revolution rate/direction.
   function satTick(now, dt) {
     const t = now / 1000;
     for (let i = 0; i < nodes.length; i++) {
@@ -120,19 +156,16 @@
       if (!n.sat) continue;
       const fam = FAMILIES[n.fam];
       if (!fam) continue;
-      const ang = (n._slot || 0) * 6.283185 + t * (n._ospeed || 0.08) + (n.phase || 0) * 6.283185;
-      const ci = Math.cos(fam.inc), si = Math.sin(fam.inc);
-      const lx = Math.cos(ang) * fam.radius;
-      const lz = Math.sin(ang) * fam.radius;
-      // tilt the ring around the X axis by the family inclination
-      n.hx = conductor.x + lx;
-      n.hy = conductor.y + lz * si;
-      n.hz = conductor.z + lz * ci;
+      const ang = (n._slot || 0) * 6.283185
+        + t * (fam.ospeed || 0.08)
+        + (fam.phase || 0) * 6.283185;
+      const p = ringPoint(fam, ang);
+      n.hx = p.x; n.hy = p.y; n.hz = p.z;
     }
   }
   window.PolarisGlobe_satTick = satTick;
 
-  // Faint inclined ring guides + a family tick label (behind nodes/flows).
+  // Faint orbital-ring guide per family (full 3D tilt) + a drifting family label.
   function drawSatRings(ctx, project, now, helpers) {
     const rg = (helpers && helpers.rgba) || rgba;
     const t = now / 1000;
@@ -142,30 +175,23 @@
       let any = false;
       for (let i = 0; i < nodes.length; i++) { if (nodes[i].sat && nodes[i].fam === fam) { any = true; break; } }
       if (!any) continue;
-      const ci = Math.cos(F.inc), si = Math.sin(F.inc);
       ctx.strokeStyle = rg(F.color, 0.16);
       ctx.lineWidth = 0.7;
       ctx.beginPath();
-      let started = false, lx0 = 0, ly0 = 0;
-      const STEPS = 48;
+      let started = false;
+      const STEPS = 64;
       for (let s = 0; s <= STEPS; s++) {
         const ang = (s / STEPS) * 6.283185;
-        const x = conductor.x + Math.cos(ang) * F.radius;
-        const zr = Math.sin(ang) * F.radius;
-        const y = conductor.y + zr * si;
-        const z = conductor.z + zr * ci;
-        const p = project(x, y, z);
-        if (!started) { ctx.moveTo(p.sx, p.sy); started = true; lx0 = p.sx; ly0 = p.sy; }
+        const wp = ringPoint(F, ang);
+        const p = project(wp.x, wp.y, wp.z);
+        if (!started) { ctx.moveTo(p.sx, p.sy); started = true; }
         else ctx.lineTo(p.sx, p.sy);
       }
       ctx.stroke();
-      // family label at the ring's leading edge (slow drift so it reads as a dial)
+      // family label drifting slowly along its own ring (reads as a rotating dial)
       const la = t * 0.05 + (FAMILY_ORDER.indexOf(fam) * 0.9);
-      const lp = project(
-        conductor.x + Math.cos(la) * F.radius,
-        conductor.y + Math.sin(la) * F.radius * si,
-        conductor.z + Math.sin(la) * F.radius * ci
-      );
+      const wl = ringPoint(F, la);
+      const lp = project(wl.x, wl.y, wl.z);
       ctx.fillStyle = rg(F.color, 0.5);
       ctx.font = '700 7px JetBrains Mono, monospace';
       ctx.textAlign = 'center';

@@ -9,6 +9,10 @@ caps (headroom_min inputs), entry gates, and adapter dispatch only — the T4
 multiplicative chain is untouched (9-stack collapse stays blocked).
 """
 
+from polaris.core.streams.alpaca_health import (
+    ALPACA_FEED_STALENESS_SEC,
+    alpaca_equity_entries_halted,
+)
 from polaris.core.streams.config import (
     GUARD_TOKEN_BY_PRODUCT_CLASS,
     STREAMS,
@@ -27,6 +31,7 @@ from polaris.core.streams.config import (
 )
 
 __all__ = [
+    "ALPACA_FEED_STALENESS_SEC",
     "GUARD_TOKEN_BY_PRODUCT_CLASS",
     "STREAMS",
     "VENUE_TO_STREAM",
@@ -35,6 +40,7 @@ __all__ = [
     "StreamId",
     "StreamProfile",
     "Track",
+    "alpaca_equity_entries_halted",
     "asset_class_allowed_for_venue",
     "derive_leverage",
     "fallback_leverage_for_asset_class",

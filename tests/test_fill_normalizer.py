@@ -52,7 +52,12 @@ def test_okx_fill_to_unified_quote_ccy() -> None:
 
 
 def test_okx_fill_base_ccy_units_recovered() -> None:
-    """When tgtCcy=base_ccy, accFillSz is base; quote_qty = base × avgPx."""
+    """When tgtCcy=base_ccy, accFillSz is base; quote_qty = base × avgPx.
+
+    The base-ccy taker fee (feeCcy=BTC) is deducted from the tracked holding so
+    base_qty mirrors the wallet credit (0.001 − 0.000001); cost basis (quote_qty
+    / size_usd) is keyed off the GROSS filled base × avgPx.
+    """
     payload = {
         "ordId": "1",
         "instId": "BTC-USDT",
@@ -66,8 +71,8 @@ def test_okx_fill_base_ccy_units_recovered() -> None:
         "uTime": "1762476225678",
     }
     f = normalize_okx_fill(payload, strategy_id="tsmom")
-    assert f.base_qty == pytest.approx(0.001)
-    assert f.quote_qty == pytest.approx(60.0)
+    assert f.base_qty == pytest.approx(0.000999)  # net of base fee
+    assert f.quote_qty == pytest.approx(60.0)  # gross fill × avgPx (cost basis)
     assert f.size_usd == pytest.approx(60.0)
 
 
@@ -91,6 +96,58 @@ def test_okx_fill_quote_ccy_accfillsz_is_base() -> None:
     assert f.base_qty == pytest.approx(0.618)
     assert f.size_usd == pytest.approx(0.618 * 2007.0, rel=1e-6)
     assert f.fill_price == pytest.approx(2007.0)
+
+
+def test_okx_buy_base_fee_deducted_from_tracked_qty() -> None:
+    """OKX SPOT market BUY charges the taker fee in the BASE ccy: the wallet
+    receives ``accFillSz - |fee|``, not the gross ``accFillSz``. The tracked
+    ``base_qty`` MUST be the net wallet credit so the close sells exactly what
+    the wallet holds — else every position over-counts by the fee, the close
+    clamps to ``available < base_qty`` (a fee-sized dust remainder), and the
+    whole position orphans to status='reconciled' with PnL discarded (the live
+    235-reconciled tracking-failure class, 0.7000% demo-fee gap).
+
+    Cost basis (``size_usd`` / ``quote_qty``) stays GROSS — the full USDT spent
+    is ``accFillSz × avgPx`` regardless of the base fee. Only the holding shrinks.
+    """
+    # 1000 XRP @ 1.0, 0.7% demo taker fee charged in XRP (base ccy).
+    payload = {
+        "ordId": "42",
+        "instId": "XRP-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "1000.0",
+        "avgPx": "1.0",
+        "fee": "-7.0",  # 0.7% of 1000 XRP, deducted from the base wallet credit
+        "feeCcy": "XRP",
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="flow_pressure")
+    # Tracked holding = net wallet credit (gross − base fee).
+    assert f.base_qty == pytest.approx(993.0)
+    # Cost basis unchanged — the full notional was still spent.
+    assert f.size_usd == pytest.approx(1000.0)
+    assert f.quote_qty == pytest.approx(1000.0)
+
+
+def test_okx_sell_quote_fee_leaves_base_qty_gross() -> None:
+    """A SELL charges the fee in the QUOTE ccy (USDT) — the base sold is the
+    full ``accFillSz``, so ``base_qty`` is NOT reduced (the deduction lands on
+    the USDT proceeds, captured separately as fee_usd)."""
+    payload = {
+        "ordId": "43",
+        "instId": "XRP-USDT",
+        "side": "sell",
+        "accFillSz": "993.0",
+        "avgPx": "1.0",
+        "fee": "-0.6951",  # quote-ccy fee
+        "feeCcy": "USDT",
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="flow_pressure")
+    assert f.base_qty == pytest.approx(993.0)  # base sold unaffected by quote fee
 
 
 def test_okx_fill_rejects_non_filled() -> None:

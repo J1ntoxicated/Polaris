@@ -59,11 +59,13 @@ def test_no_signal_for_non_fx_symbol() -> None:
     assert FXRangeFadeStrategy().generate_raw_signal(mv) is None
 
 
-def test_disjoint_from_breakout_adx_band() -> None:
-    # fx_breakout fires adx>20; fade fires adx<20 — same bar can't trigger both.
+def test_overlaps_breakout_adx_band() -> None:
+    # Post-widen: breakout fires adx>=15, fade fires adx<25 — the [15,25] mid-ADX
+    # zone is covered by BOTH (the old dead seam is gone). They compete there; the
+    # multi-signal arbitration wave ranks them. Overlap is the intended design.
     from polaris.strategies.fx_breakout_basket import ADX_THRESHOLD
     from polaris.strategies.fx_range_fade import ADX_RANGE_MAX
-    assert ADX_RANGE_MAX <= ADX_THRESHOLD
+    assert ADX_RANGE_MAX > ADX_THRESHOLD
 
 
 def test_capital_epic_suffix_normalizes() -> None:

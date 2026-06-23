@@ -33,9 +33,11 @@ import os
 from typing import Final
 
 __all__ = [
+    "ALPACA_DEMO_STARTING_EQUITY_USD",
     "CAPITAL_DEMO_STARTING_EQUITY_USD",
     "OKX_DEMO_STARTING_EQUITY_USD",
     "TOTAL_DEMO_STARTING_EQUITY_USD",
+    "demo_starting_equity_alpaca",
     "demo_starting_equity_capital",
     "demo_starting_equity_okx",
     "demo_starting_equity_total",
@@ -48,8 +50,18 @@ TOTAL_DEMO_STARTING_EQUITY_USD: Final[float] = (
     OKX_DEMO_STARTING_EQUITY_USD + CAPITAL_DEMO_STARTING_EQUITY_USD
 )
 
+# Alpaca paper-account starting-equity fallback (USD). Unlike OKX/Capital, the
+# Alpaca paper account is funded at the venue, so the live ``/v2/account`` probe
+# (snapshot_queries._alpaca_account_equity) is the display source of truth. But
+# the stream-common R denominator (``R_budget`` in metrics.risk_unit) must be
+# DEFINED even in the loop / tests where no probe runs — so this deterministic
+# constant is the close-path / R-budget fallback (mirrors the OKX/Capital
+# constants). ~$100k matches a typical Alpaca paper baseline; env-overridable.
+ALPACA_DEMO_STARTING_EQUITY_USD: Final[float] = 100_000.0
+
 _ENV_OKX: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_OKX"
 _ENV_CAPITAL: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_CAPITAL"
+_ENV_ALPACA: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_ALPACA"
 _ENV_TOTAL: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_TOTAL"
 _ENV_LEGACY_PRODUCTION: Final[str] = "POLARIS_EQUITY_USD"
 
@@ -144,6 +156,21 @@ def demo_starting_equity_okx() -> float:
 def demo_starting_equity_capital() -> float:
     """Capital CFD demo starting equity (USD-equivalent)."""
     return _resolve_equity_split()[1]
+
+
+def demo_starting_equity_alpaca() -> float:
+    """Alpaca paper-account starting-equity FALLBACK (USD).
+
+    Deterministic constant for the stream-common R denominator when the live
+    ``/v2/account`` probe is unavailable (loop / tests). Env-overridable via
+    ``POLARIS_DEMO_STARTING_EQUITY_ALPACA``. NOT part of the OKX/Capital/total
+    sum invariant — Alpaca is funded at the venue, so its baseline is the probe
+    when present and this constant otherwise.
+    """
+    env = _read_float_env(_ENV_ALPACA)
+    if env is not None:
+        return env
+    return ALPACA_DEMO_STARTING_EQUITY_USD
 
 
 def demo_starting_equity_total() -> float:

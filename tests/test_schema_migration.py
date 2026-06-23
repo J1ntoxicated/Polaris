@@ -219,6 +219,53 @@ def test_deal_id_legacy_db_gets_alter_idempotent(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_entry_regime_column_exists_on_fresh_db(tmp_path: Path) -> None:
+    """positions.entry_regime (adaptive thesis re-map anchor) present + nullable
+    on a fresh init."""
+    conn = init_db(tmp_path / "regime_fresh.sqlite")
+    try:
+        assert "entry_regime" in _cols(conn, "positions")
+        notnull, dflt = _coldef(conn, "positions", "entry_regime")
+        assert notnull == 0, "entry_regime must be nullable (legacy rows NULL)"
+        assert dflt is None, f"entry_regime default must be NULL (got {dflt!r})"
+    finally:
+        conn.close()
+
+
+def test_entry_regime_legacy_db_gets_alter_idempotent(tmp_path: Path) -> None:
+    """A legacy positions table (no entry_regime) is ALTERed in place; legacy rows
+    backfill to NULL; re-running migrations is safe (duplicate-column guarded)."""
+    db = tmp_path / "regime_legacy.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE positions ("
+        "position_id TEXT PRIMARY KEY, venue TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "strategy_id TEXT NOT NULL, entry_strategy_id TEXT NOT NULL, "
+        "active_strategy_id TEXT NOT NULL, side TEXT NOT NULL, qty REAL NOT NULL, "
+        "status TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status) VALUES "
+        "('p_leg', 'okx', 'BTC-USDT', 's1', 's1', 's1', 'long', 1.0, 'open')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db)
+    try:
+        assert "entry_regime" in _cols(conn, "positions"), "missing entry_regime"
+        row = conn.execute(
+            "SELECT entry_regime FROM positions WHERE position_id = 'p_leg'"
+        ).fetchone()
+        assert row[0] is None, "legacy row must backfill entry_regime to NULL"
+        _apply_post_migrations(conn)
+        _apply_post_migrations(conn)
+        assert "entry_regime" in _cols(conn, "positions")
+    finally:
+        conn.close()
+
+
 def test_legacy_segments_gets_cell_key_and_index(tmp_path: Path) -> None:
     """A legacy position_strategy_segments table (no cell_key/lineage cols) must
     migrate WITHOUT crashing — the cell_key index is created in

@@ -128,10 +128,12 @@ def _set_last_price(
     )
 
 
-def _trade(position_id: str, side: str = "long") -> SimulatedTrade:
+def _trade(
+    position_id: str, side: str = "long", strategy: str = "vb"
+) -> SimulatedTrade:
     return SimulatedTrade(
         signal_id=uuid.uuid4().hex, venue="okx", symbol="BTC-USDT",
-        strategy_id="vb", side=side, entry_price=100.0, notional_usd=80.0,
+        strategy_id=strategy, side=side, entry_price=100.0, notional_usd=80.0,
         open_ts=NOW, position_id=position_id, correlation_group="crypto:BTC",
         underlying_group_id="crypto:BTC",
     )
@@ -242,6 +244,84 @@ async def test_protected_bep_closes_round_tripped_winner(
     assert state.recalc_precise_exit == 1
 
 
+# --- generalized harvest: a newly-covered bar strategy banks a sub-1R MFE ---
+
+
+@pytest.mark.asyncio
+async def test_newly_covered_spot_strategy_harvests_sub_protect_excursion(
+    memdb: sqlite3.Connection,
+) -> None:
+    # [[harvest_generalization_2026-06-23]]: a registered SPOT strategy
+    # (volume_burst) that reaches +0.5R MFE — ABOVE the schedule protect rung
+    # (+0.45R, locking +0.20R) but BELOW the dead FSM PROTECT rung (1.0R) — now
+    # has its profit floored. When it round-trips to +0.1R the locked-floor stop
+    # fires instead of giving the excursion back. band 0.25 → atr_one 0.5,
+    # atr_r 1.0; last 100.5 → mfe 0.5R (touched, not FSM-protected).
+    _seed(
+        memdb, position_id="pos-spot", entry_price=100.0, last_price=100.5,
+        band=0.25, strategy="volume_burst",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-spot", strategy="volume_burst")]
+    await _recalc(memdb, state)
+    row = _pos_row(memdb, "pos-spot")
+    assert row["status"] == "open"
+    assert row["exit_state"] == "touched"  # 0.5R < 1.0R FSM PROTECT rung
+    # Schedule locked +0.20R → stop floored at ~100.2. Round-trip to 100.1 (still
+    # a +0.1R winner, never red) → the locked floor fires, banking the excursion.
+    _set_last_price(memdb, last_price=100.1, band=0.25)
+    await _recalc(memdb, state, now_ts=NOW + 5)
+    assert _pos_row(memdb, "pos-spot")["status"] == "closed"
+    assert state.recalc_precise_exit == 1
+
+
+@pytest.mark.asyncio
+async def test_unregistered_strategy_no_schedule_holds_with_remap_off(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CONTROL (re-map OFF, byte-identical pre-fix path): the SAME excursion path on
+    # an UNREGISTERED id ("vb") has NO mfe schedule — the wide 2-ATR trail
+    # (peak 100.5 - 1.0 = 99.5) is the only floor, so a round-trip to 100.1 HOLDS.
+    # POLARIS_EXIT_ADAPTIVE_THESIS=OFF restores this exact baseline.
+    monkeypatch.setattr(
+        "polaris.scripts._production_recalc_exit.EXIT_ADAPTIVE_THESIS_ON", False
+    )
+    _seed(
+        memdb, position_id="pos-unreg", entry_price=100.0, last_price=100.5,
+        band=0.25, strategy="vb",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-unreg", strategy="vb")]
+    await _recalc(memdb, state)
+    _set_last_price(memdb, last_price=100.1, band=0.25)
+    await _recalc(memdb, state, now_ts=NOW + 5)
+    assert _pos_row(memdb, "pos-unreg")["status"] == "open"  # no floor → holds
+    assert state.recalc_precise_exit == 0
+
+
+@pytest.mark.asyncio
+async def test_adaptive_thesis_banks_hard_giveback_on_unregistered(
+    memdb: sqlite3.Connection,
+) -> None:
+    # NEW (re-map ON by default): the adaptive thesis re-map manages EVERY
+    # position (unregistered → bucket=TREND). The same round-trip — peak +0.5R
+    # (band 0.25 → atr_r 1.0; 100.5) handed back to +0.1R (100.1) = 80% give-back
+    # > hard_frac 0.6 — now BANKS the gain (thesis_harvest), instead of riding the
+    # wide trail back to a loss. EXPECTANCY (bank a leaking winner near its peak),
+    # never a size/entry/halt change; the G6 -1.0R rail is untouched.
+    _seed(
+        memdb, position_id="pos-gb", entry_price=100.0, last_price=100.5,
+        band=0.25, strategy="vb",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-gb", strategy="vb")]
+    await _recalc(memdb, state)
+    _set_last_price(memdb, last_price=100.1, band=0.25)
+    await _recalc(memdb, state, now_ts=NOW + 5)
+    assert _pos_row(memdb, "pos-gb")["status"] == "closed"
+    assert state.recalc_precise_exit == 1
+
+
 # --- loser timeout closes a stale loser but NOT a winner -------------------
 
 
@@ -280,27 +360,91 @@ async def test_loser_timeout_does_not_close_aged_winner(
 
 def test_loser_timeout_for_strategy_scales_to_timeframe() -> None:
     from polaris.scripts._production_recalc_exit import (
-        EXIT_LOSER_TIMEOUT_MIN_BARS,
+        LOSER_TIMEOUT_CAP_SEC,
         _loser_timeout_for_strategy,
     )
 
-    # tsmom = 1H → at least MIN_BARS × 3600 (>= 7200s with default 2 bars).
+    # tsmom = 1H → bar-scaled floor (2×3600=7200s) but CAPPED at the named
+    # drift backstop (POLARIS_LOSER_TIMEOUT_SEC, default 3600s): a dead-thesis
+    # drifter is cut faster (precise-exit loss-defense), not left for 2hr.
     tsmom_timeout = _loser_timeout_for_strategy("tsmom")
-    assert tsmom_timeout >= EXIT_LOSER_TIMEOUT_MIN_BARS * 3600
-    assert tsmom_timeout > EXIT_LOSER_TIMEOUT_SEC  # NOT the flat 900s
-    # volume_burst = 1m → max(900, 2×60=120) = 900s (fast strategy stays short).
+    assert tsmom_timeout == LOSER_TIMEOUT_CAP_SEC  # capped 7200 → 3600s
+    assert tsmom_timeout > EXIT_LOSER_TIMEOUT_SEC  # still > the flat 900s
+    # volume_burst = 1m → max(900, 2×60=120) = 900s, under the cap (fast
+    # strategy / tick scalps stay short — unaffected by the cap).
     assert _loser_timeout_for_strategy("volume_burst") == EXIT_LOSER_TIMEOUT_SEC
-    # Unregistered id → flat default (back-compat).
+    # Unregistered id → flat default (back-compat), also under the cap.
     assert _loser_timeout_for_strategy("vb") == EXIT_LOSER_TIMEOUT_SEC
+
+
+def test_mfe_protect_covers_all_registered_strategies() -> None:
+    # [[harvest_generalization_2026-06-23]]: the harvest floor was ONLY wired to
+    # equity (asset_class=='equity'); the 9 other bar strategies passed
+    # mfe_protect=None → below the FSM 1.0R PROTECT rung the only floor was the
+    # wide 2-ATR trail, so the measured +0.3R / +0.45R excursions (29.2% / 19.7%
+    # of trades) round-tripped. _mfe_protect_for_strategy now routes EVERY
+    # registered bar strategy — every asset_class (spot/fx/index/commodity/equity)
+    # — to a calibrated MFE-protect schedule. EXPECTANCY, only ratchets toward
+    # profit; size / entry side / the G6 -1.0R rail untouched.
+    from polaris.core.live_recalc.exit_engine import (
+        EXIT_EQUITY_MFE_BEP_R,
+        EXIT_EQUITY_MFE_LOCK_R,
+        EXIT_EQUITY_MFE_PROTECT_R,
+    )
+    from polaris.scripts._production_recalc_exit import _mfe_protect_for_strategy
+    from polaris.strategies import STRATEGY_REGISTRY
+
+    # Equity keeps its OWN proven, separately-named schedule (byte-identical).
+    for equity_id in ("equity_tsmom", "equity_gap_go", "equity_rsi_bb_pullback"):
+        sched = _mfe_protect_for_strategy(equity_id)
+        assert sched is not None, equity_id
+        assert sched.bep_at_r == EXIT_EQUITY_MFE_BEP_R
+        assert sched.protect_at_r == EXIT_EQUITY_MFE_PROTECT_R
+        assert sched.lock_r == EXIT_EQUITY_MFE_LOCK_R
+    # BEP arms below the equity MFE peak (~0.65R) — the round-trip winners
+    # (ENTX +0.65R, NXTS +0.64R) now reach the floor instead of giving it all back.
+    assert EXIT_EQUITY_MFE_BEP_R < 0.65
+    # Every previously-UNCOVERED registered bar strategy now harvests too: a
+    # calibrated schedule (BEP below where ~30% of trades reach, lock positive R)
+    # — converts the +0.3R excursion into a break-even-or-better exit.
+    for sid in STRATEGY_REGISTRY:
+        sched = _mfe_protect_for_strategy(sid)
+        assert sched is not None, sid
+        assert 0.0 < sched.bep_at_r <= sched.protect_at_r
+        assert sched.lock_r > 0.0
+    # Tick-engine ids (own schedule, routed in the tick engine) + unregistered →
+    # None → byte-identical to the pre-fix exit for the bar path.
+    assert _mfe_protect_for_strategy("flow_pressure") is None  # tick (own sched)
+    assert _mfe_protect_for_strategy("micro_reversion") is None  # tick (own sched)
+    assert _mfe_protect_for_strategy("") is None
+    assert _mfe_protect_for_strategy("not_a_strategy") is None
+
+
+def test_loser_timeout_cap_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # POLARIS_LOSER_TIMEOUT_SEC re-tunes the drift backstop cap. Reload the
+    # module so the module-level env read picks up the override.
+    import importlib
+
+    monkeypatch.setenv("POLARIS_LOSER_TIMEOUT_SEC", "1800")
+    import polaris.scripts._production_recalc_exit as recalc_mod
+
+    recalc_mod = importlib.reload(recalc_mod)
+    try:
+        assert recalc_mod.LOSER_TIMEOUT_CAP_SEC == 1800.0
+        # tsmom (7200s floor) capped at the re-tuned 1800s.
+        assert recalc_mod._loser_timeout_for_strategy("tsmom") == 1800.0
+    finally:
+        monkeypatch.delenv("POLARIS_LOSER_TIMEOUT_SEC", raising=False)
+        importlib.reload(recalc_mod)
 
 
 @pytest.mark.asyncio
 async def test_1h_thesis_not_force_closed_at_900s(
     memdb: sqlite3.Connection,
 ) -> None:
-    # A tsmom (1H) loser aged 901s — past the flat 900s but WITHIN its 7200s
-    # horizon — must NOT be force-closed (hold-to-thesis). last_price 99.8 keeps
-    # it a small loser, never touched profit, so only the timeout path applies.
+    # A tsmom (1H) loser aged 901s — past the flat 900s but WITHIN its capped
+    # 3600s horizon — must NOT be force-closed (hold-to-thesis). last_price 99.8
+    # keeps it a small loser, never touched profit, so only the timeout applies.
     opened = NOW - int(EXIT_LOSER_TIMEOUT_SEC) - 1  # 901s held
     _seed(
         memdb, position_id="pos-1h", entry_price=100.0, last_price=99.8,
@@ -329,6 +473,48 @@ async def test_1m_strategy_still_times_out_at_900s(
     await _recalc(memdb, state)
     assert _pos_row(memdb, "pos-1m")["status"] == "closed"
     assert state.recalc_precise_exit == 1
+
+
+@pytest.mark.asyncio
+async def test_1h_drifter_closes_at_capped_backstop(
+    memdb: sqlite3.Connection,
+) -> None:
+    # A tsmom (1H) sideways-drift loser held past the named drift backstop
+    # (LOSER_TIMEOUT_CAP_SEC=3600s) now closes — was 7200s (the uncapped
+    # 2-bar 1H floor), so a dead-thesis drifter is cut ~1hr faster. Small loser
+    # (99.8 = -0.2%), never touched profit → only the timeout path applies
+    # (the −1R rail / ATR-trail are not the trigger here).
+    from polaris.scripts._production_recalc_exit import LOSER_TIMEOUT_CAP_SEC
+
+    opened = NOW - int(LOSER_TIMEOUT_CAP_SEC) - 60  # 3660s held, past 3600 cap
+    _seed(
+        memdb, position_id="pos-drift", entry_price=100.0, last_price=99.8,
+        opened_ts=opened, strategy="tsmom",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-drift")]
+    await _recalc(memdb, state)
+    assert _pos_row(memdb, "pos-drift")["status"] == "closed"  # cut at 3600s
+    assert state.recalc_precise_exit == 1
+
+
+@pytest.mark.asyncio
+async def test_1h_drifter_within_cap_stays_open(
+    memdb: sqlite3.Connection,
+) -> None:
+    # The same tsmom (1H) drifter still WITHIN the 3600s backstop holds — the
+    # cap shortened the horizon (7200→3600), it did not make exits trigger-happy
+    # before the backstop. 1800s held < 3600s cap → open.
+    opened = NOW - 1800  # well under the 3600s cap
+    _seed(
+        memdb, position_id="pos-drift-young", entry_price=100.0, last_price=99.8,
+        opened_ts=opened, strategy="tsmom",
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade("pos-drift-young")]
+    await _recalc(memdb, state)
+    assert _pos_row(memdb, "pos-drift-young")["status"] == "open"
+    assert state.recalc_precise_exit == 0
 
 
 # --- G7 EXIT_NOW dropped-decision bug fix: now actually closes -------------

@@ -23,6 +23,7 @@ __all__ = [
     "REJECT_FORBIDDEN",
     "REJECT_INSUFFICIENT_BUYING_POWER",
     "REJECT_MARKET_CLOSED",
+    "REJECT_NOT_FRACTIONABLE",
     "REJECT_PDT_BLOCK",
     "REJECT_VALIDATION",
     "classify_reject_code",
@@ -39,6 +40,19 @@ REJECT_INSUFFICIENT_BUYING_POWER: Final[str] = "insufficient_buying_power"
 REJECT_PDT_BLOCK: Final[str] = "pdt_block"
 REJECT_MARKET_CLOSED: Final[str] = "market_closed"
 REJECT_FORBIDDEN: Final[str] = "forbidden"
+# A whole-share-only asset rejects a $-notional order. Alpaca reuses the generic
+# 40310000 / 403 (same as insufficient buying power) but the message says "not
+# fractionable" — so it MUST be discriminated by message, not numeric code, or it
+# masquerades as a buying-power reject and pollutes that signal. It is EXTERNAL
+# (a venue constraint, not a strategy fault) AND recovered by the whole-share
+# retry in ``_alpaca_open`` (flow_not_block), so it stays in the external set.
+REJECT_NOT_FRACTIONABLE: Final[str] = "not_fractionable"
+# A market order on a HALTED symbol is rejected with a 422 "trading halt ...
+# please place a limit order instead". This is an EXTERNAL venue condition (the
+# symbol is halted right now), NOT a strategy fault — recording a FAULT_REJECT
+# for it pollutes the fault signal (live: EHGO halt logged ERROR every tick).
+# Discriminated by message because Alpaca reuses the generic 422.
+REJECT_TRADING_HALT: Final[str] = "trading_halt"
 REJECT_VALIDATION: Final[str] = "validation_rejected"
 
 
@@ -55,6 +69,15 @@ def classify_reject_code(
     """
     code_str = str(numeric_code) if numeric_code is not None else ""
     msg_l = (message or "").lower()
+    # "not fractionable" shares 40310000/403 with insufficient-buying-power, so
+    # the message MUST win before the numeric branch — else it misclassifies as
+    # a buying-power reject. Recovered by the whole-share retry; external.
+    if "not fractionable" in msg_l:
+        return REJECT_NOT_FRACTIONABLE
+    # Halted symbol rejecting a market order — external venue condition, not a
+    # fault. Message wins (Alpaca reuses the generic 422 validation code).
+    if "trading halt" in msg_l or "halt on symbol" in msg_l:
+        return REJECT_TRADING_HALT
     # Numeric code is the most precise signal.
     if code_str == _ALPACA_CODE_PDT:
         return REJECT_PDT_BLOCK

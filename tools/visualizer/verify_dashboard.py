@@ -1,4 +1,4 @@
-"""Playwright item-by-item dashboard verification (E4 globe + 8 tabs + exchange selector).
+"""Playwright item-by-item dashboard verification (E4 globe + 6 tabs + exchange selector).
 
 Run:  python3 tools/visualizer/verify_dashboard.py [URL]
 Loads the live dashboard, captures console/page errors + failed requests, screenshots
@@ -15,7 +15,7 @@ URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8770/"
 OUT = Path("/tmp/dash_verify")
 OUT.mkdir(parents=True, exist_ok=True)
 
-TABS = ["positions", "trades", "regime", "strategy", "exit", "ai", "edge", "risk"]
+TABS = ["activity", "performance", "logic", "build", "path", "lessons"]
 EXCHANGES = ["all", "okx", "capital", "alpaca"]
 
 report = {"url": URL, "console_errors": [], "page_errors": [], "failed_requests": [],
@@ -88,8 +88,8 @@ with sync_playwright() as pw:
         report["tabs"][t] = info
         shot(page, f"tab_{i}_{t}.png")
 
-    # back to positions, then exercise exchange selector
-    pb = page.query_selector('button.b-tab[data-tab="positions"]')
+    # back to the first tab, then exercise exchange selector
+    pb = page.query_selector('button.b-tab[data-tab="activity"]')
     if pb:
         pb.click(); time.sleep(0.5)
     for ex in EXCHANGES:

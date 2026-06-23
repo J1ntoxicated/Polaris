@@ -42,7 +42,8 @@ from polaris.scripts.dashboard.snapshot_models import (
     ConfidencePanel,
     DashboardSnapshot,
     EdgeValidationRow,
-    GateRow,
+    GateDecisionRow,
+    GateEvent,
     GptStat,
     LearnerSlot,
     PositionRow,
@@ -61,7 +62,10 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _now_s,
     _per_stream_summary,
     _read_positions,
+    _recent_gate_events,
+    _strategy_descriptions,
     _strategy_stats,
+    _ticker_stats,
 )
 from polaris.scripts.dashboard.snapshot_sections import (
     _ai_shadow_panel,
@@ -69,7 +73,7 @@ from polaris.scripts.dashboard.snapshot_sections import (
     _cell_top_bottom,
     _edge_validation,
     _exit_surface,
-    _gate_funnel,
+    _gate_decisions,
     _gpt_stats,
     _learner_slots,
     _recent_closed_trades,
@@ -89,7 +93,8 @@ __all__ = [
     "ConfidencePanel",
     "DashboardSnapshot",
     "EdgeValidationRow",
-    "GateRow",
+    "GateDecisionRow",
+    "GateEvent",
     "GptStat",
     "LearnerSlot",
     "PositionRow",
@@ -97,9 +102,108 @@ __all__ = [
     "StreamSummary",
     "StrategyStat",
     "collect_snapshot",
+    "read_probe_events",
 ]
 
 DEFAULT_DB_PATH: Final[Path] = Path("data/polaris.sqlite")
+
+
+def read_probe_events(
+    probe_db_path: Path, *, limit: int = 25
+) -> list[dict[str, Any]]:
+    """ADR-012 — fail-open read of the most-recent probe readings + decisions.
+
+    Reads the SEPARATE ``data/probes.sqlite`` tuning-log sidecar (NOT the live
+    DB) strictly read-only and returns a small list of generic ``probe_events``
+    rows for the dashboard (which is separately wired to render them). Empty list
+    on ANY error (missing / locked / table-less sidecar) — it must never break
+    the snapshot. ``ticker`` / ``venue`` are best-effort parsed from the
+    ``position_id`` (``venue:SYMBOL#n``); they fall back to the raw id.
+    """
+    p = Path(probe_db_path)
+    if not p.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        events.extend(_probe_reading_events(conn, limit=limit))
+        events.extend(_probe_decision_events(conn, limit=limit))
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    events.sort(key=lambda e: int(e.get("ts", 0)), reverse=True)
+    return events[:limit]
+
+
+def _venue_ticker(position_id: str) -> tuple[str, str]:
+    """Best-effort (venue, ticker) from ``venue:SYMBOL#n`` — raw id on no match."""
+    pid = str(position_id)
+    venue = ""
+    ticker = pid
+    if ":" in pid:
+        venue, rest = pid.split(":", 1)
+        ticker = rest.split("#", 1)[0]
+    return venue, ticker
+
+
+def _probe_reading_events(
+    conn: sqlite3.Connection, *, limit: int
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT ts, gate_id, position_id, probe_id, kind, lean, confidence "
+        "FROM probe_readings ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for ts, gate_id, position_id, probe_id, kind, lean, conf in rows:
+        venue, ticker = _venue_ticker(position_id)
+        out.append(
+            {
+                "name": str(probe_id),
+                "ticker": ticker,
+                "venue": venue,
+                "kind": str(kind),
+                "lean": float(lean),
+                "confidence": float(conf),
+                "reading": f"lean={float(lean):+.2f} conf={float(conf):.2f}",
+                "action": None,
+                "ts": int(ts),
+                "gate_id": int(gate_id),
+            }
+        )
+    return out
+
+
+def _probe_decision_events(
+    conn: sqlite3.Connection, *, limit: int
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT ts, position_id, mode, composite_lean, action "
+        "FROM probe_decisions ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for ts, position_id, mode, composite_lean, action in rows:
+        venue, ticker = _venue_ticker(position_id)
+        out.append(
+            {
+                "name": "engine",
+                "ticker": ticker,
+                "venue": venue,
+                "kind": str(mode),
+                "lean": float(composite_lean),
+                "confidence": 0.0,
+                "reading": f"composite={float(composite_lean):+.2f}",
+                "action": str(action),
+                "ts": int(ts),
+                "gate_id": 6,
+            }
+        )
+    return out
 
 
 def _starting_capital() -> float:
@@ -254,7 +358,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             equity_full, starting_capital=starting_capital,
         )
         strategy_stats = _strategy_stats(conn, now_s=now_s, positions=positions)
-        gate_funnel = _gate_funnel(conn, now_s=now_s)
+        ticker_stats = _ticker_stats(conn, now_s=now_s)
         cell_top, cell_bot, eligible_n = _cell_top_bottom(conn, cell_mult=cell_mult, n=5)
         # E2 REGIME tab — per-(venue, group) live regime + confidence + evidence.
         # A (venue, symbol)→regime map labels the TRADES tab rows (best-effort:
@@ -275,11 +379,25 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         )
         # E2 AI tab — conductor shadow agreement + entry-admission would-suppress.
         ai_shadow = _ai_shadow_panel(conn, now_s=now_s)
+        # Live gate-event feed (newest first) + per-strategy one-line descriptions.
+        # recent_gate_events reads gate_events; strategy_descriptions is file-based
+        # (vault notes, no DB). Both display-only, graceful empty.
+        recent_gate_events = _recent_gate_events(conn)
+        strategy_descriptions = _strategy_descriptions()
         learners = _learner_slots(conn, now_s=now_s)
         edge_validation = _edge_validation(conn, n=8)
         gpt_stats = _gpt_stats(conn, now_s=now_s)
         alerts = _alerts(conn, n=3)
         focus_n, focus_ts = _universe(conn)
+        # Per-gate DECISION summary (replaces the pass/kill funnel). Built AFTER
+        # _universe so G1's row can show the live focus count + derived
+        # liquidity-floor exclusion. Read-only; never feeds trading.
+        gate_decisions = _gate_decisions(
+            conn,
+            now_s=now_s,
+            universe_focus_n=focus_n,
+            universe_refresh=focus_ts,
+        )
         # Stage-2 per-stream rollup. ``positions`` is passed so the per-stream
         # open_n / upnl / exposed decompose the global totals exactly.
         streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
@@ -288,6 +406,10 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         rotation = _rotation_telemetry(conn, now_s=now_s)
         # Component A go-live confidence panel (real-fee-net edge evidence).
         confidence = _confidence_panel(conn, starting_equity=starting_capital)
+        # ADR-012 — observe-mode probe events from the SEPARATE probes.sqlite
+        # sidecar (fail-open: empty list on a missing / locked sidecar). Read-only
+        # connective tissue for the dashboard; never feeds sizing/gating/exit.
+        probe_events = read_probe_events(db_path.parent / "probes.sqlite")
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -313,7 +435,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             demo_fee_total=dual.demo_fee_total,
             positions=positions,
             strategy_stats=strategy_stats,
-            gate_funnel=gate_funnel,
+            ticker_stats=ticker_stats,
+            gate_decisions=gate_decisions,
             cell_top=cell_top,
             cell_bottom=cell_bot,
             regime_bars=regime_bars,
@@ -325,11 +448,16 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             streams=streams,
             rotation_count=rotation.rotation_count,
             session_forced_exit_count=rotation.session_forced_exit_count,
+            reconciled_loss_usd=rotation.reconciled_loss_usd,
+            reconciled_loss_n=rotation.reconciled_loss_n,
             last_rotation=rotation.last_rotation,
             confidence=confidence,
             regime_states=regime_states,
             exit_surface=exit_surface,
             ai_shadow=ai_shadow,
+            recent_gate_events=recent_gate_events,
+            strategy_descriptions=strategy_descriptions,
+            probe_events=probe_events,
         )
     finally:
         conn.close()

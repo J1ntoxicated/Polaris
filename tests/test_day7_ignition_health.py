@@ -656,6 +656,10 @@ async def test_24h_readiness_composite_exercises_all_layers(
         # F10 — Day 9: force volume_burst to fire on the final 1m bar so the
         # paper loop persists at least one fill. Earlier bars carry slight
         # volume variation so compute_volume_z has non-zero stdev.
+        # Anchor at NOW so the newest bar is fresh — the recency guard (Jin
+        # 2026-06-22 dead-feed gate) skips a symbol whose newest bar is stale, so
+        # a fixed-2023-epoch fixture would otherwise read as a dead feed → 0 opens.
+        base_ts = int(time.time()) - 60 * 60  # 60 1m bars ending ~now
         out: list[CanonicalBar] = []
         for i in range(60):
             is_breakout = i == 59
@@ -666,7 +670,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
             out.append(CanonicalBar(
                 instrument_id="okx:BTC-USDT", underlying_group_id="crypto:BTC",
                 venue="okx", symbol="BTC-USDT", bar_interval="1m",
-                ts=1_700_000_000 + i * 60,
+                ts=base_ts + i * 60,
                 open=60_000.0 + i * 5, high=high, low=low,
                 close=close, volume=volume,
                 notional_usd=close * volume,

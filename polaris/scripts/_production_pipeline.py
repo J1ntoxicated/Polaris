@@ -49,9 +49,13 @@ from polaris.core.isolation.order_keys import (
 )
 from polaris.core.lineage import record_segment_open
 from polaris.core.live_recalc.regime_flip import fetch_regime
+from polaris.core.metrics.risk_unit import risk_usd_at_entry
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
-from polaris.scripts._alpaca_open import real_alpaca_open_fill
+from polaris.scripts._alpaca_open import (
+    fetch_alpaca_buying_power,
+    real_alpaca_open_fill,
+)
 from polaris.scripts._production_atr import timeframe_anchor_atr_pct
 from polaris.scripts._production_capital_sizing import (
     CapitalOrderPlan,
@@ -156,6 +160,7 @@ async def _real_open_fill(
     alpaca_adapter: Any = None,
     capital_lots: float | None = None,
     capital_contract_factor_usd: float | None = None,
+    prefer_maker: bool = False,
 ) -> OpenAttempt:
     """Drive the real demo venue entry leg → return an ``OpenAttempt``.
 
@@ -182,6 +187,7 @@ async def _real_open_fill(
                 okx_adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
                 available_usdt=await fetch_okx_available_usdt(okx_adapter),
+                prefer_maker=prefer_maker,
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -197,6 +203,7 @@ async def _real_open_fill(
                 adapter, inst_id=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
                 available_usdt=await fetch_okx_available_usdt(adapter),
+                prefer_maker=prefer_maker,
             )
 
     # Track C — Alpaca US equity (additive; OKX/Capital paths above unchanged).
@@ -206,6 +213,7 @@ async def _real_open_fill(
             return await real_alpaca_open_fill(
                 alpaca_adapter, symbol=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, side=side_eq, last_price=last_price,
+                buying_power=await fetch_alpaca_buying_power(alpaca_adapter),
             )
         api_key, secret = resolve_alpaca_credentials()
         if not (api_key and secret):
@@ -215,6 +223,7 @@ async def _real_open_fill(
             return await real_alpaca_open_fill(
                 adapter, symbol=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, side=side_eq, last_price=last_price,
+                buying_power=await fetch_alpaca_buying_power(adapter),
             )
 
     # Capital CFD — close needs the deal_id from the confirm.
@@ -258,6 +267,7 @@ async def reserve_and_submit(
     okx_adapter: Any = None,
     capital_session: Any = None,
     alpaca_adapter: Any = None,
+    prefer_maker: bool = False,
 ) -> SimulatedTrade | None:
     """A2 + K fix: AllocatorFence reservation → idempotent register → submit.
 
@@ -265,6 +275,13 @@ async def reserve_and_submit(
     venue adapter instead of the local synthetic fill. The fence reserve →
     register → confirm → atomic-persist contract is identical; only the fill
     payload source changes.
+
+    ``prefer_maker`` (flow_pressure retune): route the OKX entry through the
+    maker-first (post-only at touch → TAKER fallback) path even for a strong
+    signal that would otherwise go straight to market. Cheaper when it rests at
+    the touch (8 bps maker), never a missed trade (the post-only path always
+    falls back to taker on a would-cross/reject/timeout). Default ``False`` keeps
+    every existing caller byte-identical.
     """
     # T7: asset_class is forwarded to _real_open_fill so Capital derives its
     # per-market leverage (FX 30 / index 20 / commodity 20 / crypto 2). Post
@@ -276,6 +293,13 @@ async def reserve_and_submit(
     if is_blocklisted(conn, venue, symbol):
         logger.info("[L7/blocklist] %s:%s non-tradeable — skipping", venue, symbol)
         return None
+    # NOTE: the prior OKX param/precision per-symbol cooldown SKIP (Jin
+    # 2026-06-22) is REMOVED (Jin 2026-06-23). The root fix is the submit-path
+    # min-size CLAMP-UP (OKXAdapter._round_px_sz → clamp_up_to_min) which bumps a
+    # sub-min order UP to the venue minimum so it FLOWS — so the 51020 below-min
+    # reject that the cooldown reacted to essentially stops occurring. A residual
+    # param reject is still classified EXTERNAL/non-fault (no halt) but with NO
+    # per-symbol skip (flow_not_block: the symbol is never blocked).
     # Bug C fix: translate the T4 notional into per-epic venue lots BEFORE the
     # fence reservation so the ledger / order payload / rotation candidate all
     # carry the notional ACTUALLY submitted (requested == submitted == recorded).
@@ -353,6 +377,7 @@ async def reserve_and_submit(
                 capital_contract_factor_usd=(
                     capital_plan.contract_factor_usd if capital_plan else None
                 ),
+                prefer_maker=prefer_maker,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             logger.error(
@@ -385,6 +410,12 @@ async def reserve_and_submit(
                 symbol=symbol, reservation_id=reservation["reservation_id"],
                 reject_code=attempt.reject_code, reject_msg=attempt.reject_msg,
                 now_ts=now_ts,
+                # ORPHAN NET: an accepted-but-unfilled real order is still LIVE
+                # at the venue → its id is recorded as an orphan for reconcile
+                # (only under real_roundtrip; the simulated path has no venue
+                # order to leak). flow_not_block — tracking, not a throttle.
+                venue_order_id=attempt.venue_order_id if real_roundtrip else None,
+                unfilled_qty=attempt.unfilled_qty,
             )
             # Capital rotation TRIGGER SEAM 2 (Jin 2026-05-30): a venue BALANCE
             # reject (OKX 51008/51131 insufficient_balance) means capital — not
@@ -486,6 +517,28 @@ async def reserve_and_submit(
         logger.warning("[L7/open] entry ATR anchor read failed: %r", exc)
     if anchor is not None:
         entry_atr_pct, entry_atr_timeframe = anchor
+    # The trade's per-trade 1R-in-dollars (stop distance × filled size), stamped
+    # at entry. Step N (2026-06-23): this is NO LONGER the realised-R denominator
+    # (that is now the per-stream R_budget, resolved by venue at read time — the
+    # ATR anchor here is per-strategy-timeframe and was non-comparable across
+    # venues). risk_usd is RETAINED as the per-trade stop-quality / excursion
+    # (mfe_r/mae_r) unit. Measurement only — no sizing/entry change.
+    entry_base_qty = float(
+        fill.base_qty if fill.base_qty > 0 else notional_usd / max(last_price, 1e-6)
+    )
+    risk_usd = risk_usd_at_entry(
+        entry_price=fill.fill_price,
+        entry_atr_pct=entry_atr_pct if entry_atr_pct is not None else 0.0,
+        base_qty=entry_base_qty,
+    ) or None
+    # Entry-regime anchor — the regime stamped at THIS fill (the entry-thesis
+    # reference the adaptive thesis re-map compares the live regime against).
+    # NULL when unseeded (legacy/smoke) so the re-map degrades safe. Resolved
+    # once here and reused for the lineage segment below (no duplicate query).
+    open_regime = (
+        fetch_regime(conn, venue=venue, underlying_group_id=underlying_group_id)
+        or ""
+    )
     try:
         # autocommit-mode connection (init_db uses isolation_level=None) —
         # explicit BEGIN+COMMIT is an atomic boundary in SQLite. ROLLBACK
@@ -496,16 +549,14 @@ async def reserve_and_submit(
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
             " status, opened_ts, swap_count, deal_id, entry_atr_pct, "
-            " entry_atr_timeframe) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?)",
+            " entry_atr_timeframe, risk_usd, entry_regime) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, ?)",
             (
                 position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
-                float(
-                    fill.base_qty if fill.base_qty > 0
-                    else notional_usd / max(last_price, 1e-6)
-                ),
+                entry_base_qty,
                 now_ts, trade.deal_id, entry_atr_pct, entry_atr_timeframe,
+                risk_usd, open_regime,
             ),
         )
         # contribution_id ties the entry fill back to the position so the
@@ -574,11 +625,8 @@ async def reserve_and_submit(
     # P3 self-evolve lineage (read-model, behaviour 0): record the ticker ↔
     # strategy ↔ regime open segment. Post-COMMIT + fail-open inside the helper
     # so a lineage write can never roll back / alter the already-persisted open.
-    # Live trading never reads this row. regime resolved from the (venue,
-    # underlying_group_id) SSOT, '' when unseeded (legacy/smoke).
-    open_regime = fetch_regime(
-        conn, venue=venue, underlying_group_id=underlying_group_id
-    ) or ""
+    # Live trading never reads this row. ``open_regime`` is the SAME (venue,
+    # underlying_group_id) regime already resolved + stamped into entry_regime.
     record_segment_open(
         conn, position_id=position_id, trade_id=position_id, venue=venue,
         ticker=symbol, strategy_id=sig.strategy_id, regime=open_regime,

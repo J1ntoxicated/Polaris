@@ -61,6 +61,19 @@ class SimulatedTrade:
     # after order submit loses it — the hydrate remaining-qty restore plus the
     # venue available/over-count clamps then block the double sell).
     pending_close_ref: str | None = None
+    # OKX venue-resting conditional stop. ``okx_stop_algo_id`` is the live OKX
+    # ``algoId`` of the resting stop that triggers venue-side in the inter-tick
+    # gap; ``okx_stop_px`` is the trigger price it was placed at (so the trailing
+    # ratchet only cancels+replaces when the stop materially tightens). In-memory
+    # only — a crash drops the ref and the software stop remains the backstop.
+    okx_stop_algo_id: str | None = None
+    okx_stop_px: float | None = None
+    # Monotonic deadline (``time.monotonic`` seconds) until which the OKX algo
+    # endpoint is treated as unavailable for this symbol — set when a conditional
+    # stop place returns ``ok=False`` so the arm backs off instead of re-attempting
+    # every tick (no algo-order rate-limit spam). In-memory; cleared on a healthy
+    # place. ``None`` = no cooldown active.
+    okx_stop_unavail_until: float | None = None
 
 
 def _okx_fill_payload(

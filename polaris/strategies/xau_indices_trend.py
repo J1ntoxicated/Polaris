@@ -2,7 +2,7 @@
 
 Spec source: vault/10_decisions/ADR-008-7-strategies-signal-generator-role.md (#6).
 
-Symbols: ``XAUUSD / US500 / US100 / GER40``.
+Symbols: ``XAUUSD / GOLD / US500 / US100 / GER40``.
 Trigger: ``close > donchian_high_30`` AND ``momentum_20bar > 0`` (20d momentum).
 Leverage: 20×.
 
@@ -24,8 +24,12 @@ from polaris.strategies.base import (
 
 DONCHIAN_WINDOW = 30
 MOMENTUM_LOOKBACK = 20
+# 'GOLD' is the LIVE Capital commodity symbol (asset_class=commodity); 'XAUUSD'
+# is kept for safety (additive, not a replace) so any path still carrying the
+# legacy spelling matches too. Without 'GOLD' the symbol gate below rejected the
+# live universe symbol → gold's whole universe was a structural 0%-emit dead end.
 SUPPORTED_SYMBOLS: frozenset[str] = frozenset(
-    {"XAUUSD", "US500", "US100", "DE40", "UK100", "EU50", "US30"}
+    {"XAUUSD", "GOLD", "US500", "US100", "DE40", "UK100", "EU50", "US30"}
 )
 
 # Strength curve + venue constraints (frozen v1).

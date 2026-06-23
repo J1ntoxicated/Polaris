@@ -13,6 +13,7 @@ import pytest
 
 from polaris.venues.okx.adapter import (
     DEFAULT_SLIPPAGE_BPS,
+    OKX_PLACE_ALGO_ORDER_PATH,
     OKX_PLACE_ORDER_PATH,
     OKXAdapter,
     OKXOrderResponse,
@@ -165,6 +166,180 @@ def test_validate_min_notional_pass_fail() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Min-size clamp-up (Jin 2026-06-23) — replaces the param-reject per-symbol
+# cooldown. A sub-min sized qty is BUMPED UP to min_sz (rounded to lotSz) so the
+# order FLOWS at the venue minimum instead of being skipped/rejected. A qty
+# already >= min is byte-identical (clamp is a no-op above min). This is a venue
+# floor applied AFTER sizing — it never enters the T4 multiplier chain.
+# ---------------------------------------------------------------------------
+
+
+def test_clamp_up_to_min_below_min_bumps_to_min_rounded_to_lot() -> None:
+    from polaris.venues.okx.constraint_translator import clamp_up_to_min
+
+    # min_sz 0.01, lot_sz 0.01 — a sub-min qty bumps UP to exactly min.
+    assert clamp_up_to_min(0.003, min_sz=0.01, lot_sz=0.01) == pytest.approx(0.01)
+    # min_sz not a clean lot multiple → round the floor UP to the next lot so the
+    # submitted qty is >= min AND a valid lot multiple (never submits below min).
+    bumped = clamp_up_to_min(0.0005, min_sz=0.0007, lot_sz=0.0005)
+    assert bumped >= 0.0007
+    assert bumped == pytest.approx(0.001)  # 0.0007 → next lot multiple 0.001
+
+
+def test_clamp_up_to_min_above_min_is_noop() -> None:
+    from polaris.venues.okx.constraint_translator import clamp_up_to_min
+
+    # Already >= min → returned UNCHANGED (byte-identical, no clamp).
+    assert clamp_up_to_min(0.05, min_sz=0.01, lot_sz=0.01) == 0.05
+    # Exactly at min → unchanged.
+    assert clamp_up_to_min(0.01, min_sz=0.01, lot_sz=0.01) == 0.01
+    # No constraint (min_sz=0) → unchanged.
+    assert clamp_up_to_min(0.003, min_sz=0.0, lot_sz=0.0) == 0.003
+
+
+@pytest.mark.asyncio
+async def test_round_px_sz_clamps_below_min_up_to_min() -> None:
+    """The submit-path chokepoint ``_round_px_sz`` bumps a sub-min base_qty UP to
+    min_sz (rounded to lotSz) so the order flows at the venue minimum — replaces
+    the per-symbol param-reject cooldown (flow_not_block, aggressive: never
+    smaller, never blocked)."""
+    client = httpx.AsyncClient(
+        transport=_MockTransport(lambda _r: {"code": "0", "data": []}),
+        base_url="https://us.okx.com",
+    )
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    adapter.set_instrument_constraints(
+        {
+            "ADA-USDT": InstrumentConstraint(
+                inst_id="ADA-USDT", base_ccy="ADA", quote_ccy="USDT",
+                lot_sz=0.01, min_sz=0.01, tick_sz=0.0001, state="live",
+            )
+        }
+    )
+    try:
+        # base_qty 0.003 < min_sz 0.01 → clamped UP to 0.01 (the venue minimum).
+        _px, qty = adapter._round_px_sz("ADA-USDT", px=0.5, base_qty=0.003)
+    finally:
+        await client.aclose()
+    assert qty == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_round_px_sz_above_min_byte_identical() -> None:
+    """An order already >= min_sz is rounded to lotSz only (clamp is a no-op)."""
+    client = httpx.AsyncClient(
+        transport=_MockTransport(lambda _r: {"code": "0", "data": []}),
+        base_url="https://us.okx.com",
+    )
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    adapter.set_instrument_constraints(
+        {
+            "ETH-USDT": InstrumentConstraint(
+                inst_id="ETH-USDT", base_ccy="ETH", quote_ccy="USDT",
+                lot_sz=0.01, min_sz=0.01, tick_sz=0.1, state="live",
+            )
+        }
+    )
+    try:
+        _px, qty = adapter._round_px_sz("ETH-USDT", px=3000.0, base_qty=0.12345)
+    finally:
+        await client.aclose()
+    # 0.12345 floored to lotSz 0.01 = 0.12 (well above min 0.01 → no clamp).
+    assert qty == pytest.approx(0.12)
+
+
+@pytest.mark.asyncio
+async def test_ioc_order_submits_clamped_min_sz() -> None:
+    """End-to-end: a sub-min IOC order submits ``sz == min_sz`` (the order flows
+    at the venue minimum) instead of being rejected 51020 below-min."""
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ORDER_PATH:
+            captured["body"] = json.loads(req.content.decode())
+            return {
+                "code": "0", "msg": "",
+                "data": [{"ordId": "1", "clOrdId": captured["body"]["clOrdId"],
+                          "sCode": "0"}],
+            }
+        return httpx.Response(404, json={"code": "1"})
+
+    client = httpx.AsyncClient(
+        transport=_MockTransport(responder), base_url="https://us.okx.com"
+    )
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    adapter.set_instrument_constraints(
+        {
+            "ADA-USDT": InstrumentConstraint(
+                inst_id="ADA-USDT", base_ccy="ADA", quote_ccy="USDT",
+                lot_sz=0.01, min_sz=0.01, tick_sz=0.0001, state="live",
+            )
+        }
+    )
+    try:
+        # notional 0.001 USDT / px ~0.5 → base_qty ~0.002 << min_sz 0.01.
+        resp = await adapter.place_market_order(
+            inst_id="ADA-USDT", side="buy", notional_usd=0.001,
+            client_order_id="polarisclamp", ord_type="ioc", last_price_hint=0.5,
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok
+    assert float(captured["body"]["sz"]) == pytest.approx(0.01)  # clamped UP to min
+
+
+def test_t4_sizing_chain_unchanged_by_min_clamp(memdb: Any) -> None:
+    """The min-size clamp is a VENUE FLOOR applied AFTER the T4 sizing chain — it
+    must NOT alter the T4 sizing output. Proof: the full T4 chain
+    (``compute_size``: continuous_scalar × tier_amplifier × cell_routing × caps ×
+    headroom) yields its ``final_notional_usd`` PURELY from the formula, and the
+    venue floor lives entirely downstream in ``_round_px_sz`` — a pure
+    ``(px, base_qty)`` function with NO path back into sizing (it never
+    imports/calls compute_size, so it cannot enter the multiplier chain → the
+    9-stack invariant is intact). The clamp only raises the SUBMIT ``sz`` toward
+    min; the T4 notional that feeds the adapter is never rewritten."""
+    from polaris.core.sizing.engine import SignalIntent, compute_size
+    from polaris.core.sizing.schema import PortfolioState, StrategyRiskState
+
+    conn = memdb
+    intent = SignalIntent(
+        signal_id="sig-clamp", venue="okx", symbol="ADA-USDT",
+        instrument_id="okx:ADA-USDT", underlying_group_id="crypto:ADA",
+        asset_class="crypto", strategy="tsmom", track="A", regime="bull_trend",
+        direction="long", signal_strength=1.2, listing_age_hours=72.0,
+        leverage=1.0, base_risk_pct=0.02,
+    )
+    risk = StrategyRiskState(
+        venue="okx", strategy="tsmom", closed_trades=25, kelly_p=0.55,
+        kelly_q=0.45, kelly_fraction=0.05, win_streak=2, hit_rate_10=0.55,
+        updated_ts=0,
+    )
+    portfolio = PortfolioState(
+        equity_usd=10_000.0, venue_daily_used_pct=0.0, total_daily_used_pct=0.0,
+        track_used_pct={"A": 0.0, "B": 0.0}, open_positions=[],
+        fill_rate_active_cut=False,
+    )
+    sized = compute_size(
+        conn, intent=intent, risk_state=risk, portfolio=portfolio, now_ts=100,
+    )
+    t4_notional = sized.final_notional_usd
+
+    from polaris.venues.okx.constraint_translator import clamp_up_to_min
+
+    # An ABOVE-min sized qty is byte-identical through the clamp (no-op above min).
+    px = 0.5
+    sized_qty = t4_notional / px  # >> min 0.01 → clamp must NOT touch it
+    assert clamp_up_to_min(sized_qty, min_sz=0.01, lot_sz=0.01) == sized_qty
+    # A genuinely sub-min qty is floored UP to min — and re-running the FULL T4
+    # chain afterwards yields the IDENTICAL notional (the floor never fed back).
+    assert clamp_up_to_min(0.001, min_sz=0.01, lot_sz=0.01) == pytest.approx(0.01)
+    sized_again = compute_size(
+        conn, intent=intent, risk_state=risk, portfolio=portfolio, now_ts=100,
+    )
+    assert sized_again.final_notional_usd == t4_notional  # T4 chain untouched
+
+
+# ---------------------------------------------------------------------------
 # Adapter (mocked HTTP)
 # ---------------------------------------------------------------------------
 
@@ -266,6 +441,86 @@ async def test_market_buy_uses_quote_ccy_for_market_ord_type() -> None:
     finally:
         await client.aclose()
     assert resp.ok
+
+
+@pytest.mark.asyncio
+async def test_conditional_stop_body_omits_tgtccy() -> None:
+    """The venue-resting conditional SELL stop must NOT send ``tgtCcy`` — OKX
+    rejects it with HTTP 400 ``51000 Parameter tgtCcy error`` for an algo SELL
+    (tgtCcy is only valid for a spot market BUY). Confirmed live against
+    us.okx.com demo: with tgtCcy → 400; without → accepted. This locks the
+    correct body so the resting stop actually places (precise-exit restored)."""
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH:
+            sent = json.loads(req.content.decode())
+            assert "tgtCcy" not in sent  # the bug: this triggered the 400
+            assert sent["ordType"] == "conditional"
+            assert sent["side"] == "sell"
+            assert sent["slTriggerPx"] == "98.5"
+            assert sent["slOrdPx"] == "-1"
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "algoId": "777",
+                        "algoClOrdId": sent["algoClOrdId"],
+                        "sCode": "0",
+                        "sMsg": "",
+                    }
+                ],
+                "msg": "",
+            }
+        return httpx.Response(404, json={"code": "1"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_conditional_stop(
+            inst_id="ETH-USDT",
+            side="sell",
+            base_qty=0.8,
+            trigger_px=98.5,
+            client_order_id="polstopeth",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is True
+    assert resp.algo_id == "777"
+
+
+@pytest.mark.asyncio
+async def test_conditional_stop_400_surfaces_real_okx_code() -> None:
+    """An HTTP 400 algo reject carries the real OKX code/msg in the body. The
+    adapter must SURFACE that code (not swallow it behind a generic
+    ``algo_unavailable`` transport label) so the true reason is diagnosable.
+    flow_not_block preserved: still ``ok=False`` → software stop is the backstop."""
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH:
+            return httpx.Response(
+                400,
+                json={"code": "51000", "data": [], "msg": "Parameter tgtCcy error"},
+            )
+        return httpx.Response(404, json={"code": "1"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_conditional_stop(
+            inst_id="ETH-USDT",
+            side="sell",
+            base_qty=0.8,
+            trigger_px=98.5,
+            client_order_id="polstopeth",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False  # flow_not_block: software stop remains the backstop
+    assert resp.code == "51000"  # real OKX code surfaced, not generic swallow
+    assert "tgtCcy" in resp.msg
 
 
 @pytest.mark.asyncio
@@ -519,24 +774,40 @@ async def test_order_persistent_5xx_propagates_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_order_4xx_does_not_retry() -> None:
-    """A 4xx (client error, e.g. bad param) is NOT retried — fail fast."""
+async def test_order_4xx_okx_body_returns_reject_no_retry() -> None:
+    """A 4xx carrying an OKX business body (code 51000) is NOT retried AND is
+    parsed into a venue REJECT (ok=False) rather than raised.
+
+    Entry-stall root-cause fix (Jin 2026-06-22): a precision/param 400 used to
+    re-raise → FAULT_EXCEPTION → permanent HARD_HALT. It now flows as an
+    external no-fill so the strategy keeps flowing (flow_not_block). Still no
+    retry on 4xx.
+    """
     transport = _SequenceTransport(
-        order_responses=[httpx.Response(400, json={"code": "51000", "msg": "param error"})]
+        order_responses=[
+            httpx.Response(
+                400,
+                json={
+                    "code": "1", "msg": "param error",
+                    "data": [{"sCode": "51000", "sMsg": "param error"}],
+                },
+            )
+        ]
     )
     client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
     adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
     try:
-        with pytest.raises(httpx.HTTPStatusError):
-            await adapter.place_market_order(
-                inst_id="BTC-USDT",
-                side="buy",
-                notional_usd=10.0,
-                client_order_id="polarisvb",
-                ord_type="market",
-            )
+        resp = await adapter.place_market_order(
+            inst_id="BTC-USDT",
+            side="buy",
+            notional_usd=10.0,
+            client_order_id="polarisvb",
+            ord_type="market",
+        )
     finally:
         await client.aclose()
+    assert resp.ok is False
+    assert resp.code == "51000"
     assert transport.order_post_count == 1  # no retry on 4xx
 
 
@@ -617,3 +888,151 @@ async def test_signed_request_includes_auth_headers() -> None:
     assert "ok-access-timestamp" in h
     assert "ok-access-passphrase" in h
     assert h.get("x-simulated-trading") == "1"
+
+
+# ---------------------------------------------------------------------------
+# Venue-resting conditional stop (largest unaddressed loss hole — the OKX
+# SPOT inter-tick gap that lets a soft stop get gapped through to a -34..-100R
+# orphan). A resting algo/conditional order triggers VENUE-side before the
+# next software poll. PRECISE-EXIT loss-defence, never a throttle/size-cut.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conditional_stop_submits_resting_order_rounded() -> None:
+    """place_conditional_stop submits an ordType=conditional resting order with
+    slTriggerPx rounded to tickSz and sz floored to lotSz, returns algoId."""
+    from polaris.venues.okx.adapter import (
+        OKX_PLACE_ALGO_ORDER_PATH,
+        OKXAlgoOrderResponse,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH:
+            captured["body"] = json.loads(req.content.decode())
+            return {
+                "code": "0",
+                "msg": "",
+                "data": [{"algoId": "algo-7", "algoClOrdId": "polstopP1", "sCode": "0", "sMsg": ""}],
+            }
+        return httpx.Response(404, json={"code": "1", "msg": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    adapter.set_instrument_constraints(
+        {
+            "ETH-USDT": InstrumentConstraint(
+                inst_id="ETH-USDT", base_ccy="ETH", quote_ccy="USDT",
+                lot_sz=0.01, min_sz=0.01, tick_sz=0.1, state="live",
+            )
+        }
+    )
+    try:
+        resp = await adapter.place_conditional_stop(
+            inst_id="ETH-USDT",
+            side="sell",
+            base_qty=0.12345,
+            trigger_px=2999.97,  # → rounds DOWN to tick 0.1 = 2999.9
+            client_order_id="polstop-P1",
+        )
+    finally:
+        await client.aclose()
+    assert isinstance(resp, OKXAlgoOrderResponse)
+    assert resp.ok is True
+    assert resp.algo_id == "algo-7"
+    body = captured["body"]
+    assert body["ordType"] == "conditional"
+    assert body["side"] == "sell"
+    assert body["tdMode"] == "cash"
+    # trigger px rounded to tickSz (0.1) — 2999.97 → 2999.9
+    assert float(body["slTriggerPx"]) == 2999.9
+    # sz floored to lotSz (0.01) — 0.12345 → 0.12
+    assert float(body["sz"]) == 0.12
+    # market on trigger (never a resting limit that can miss)
+    assert body["slOrdPx"] == "-1"
+    # clOrdId sanitized (no hyphen)
+    assert "-" not in body["algoClOrdId"]
+
+
+@pytest.mark.asyncio
+async def test_conditional_stop_4xx_falls_back_no_raise() -> None:
+    """A 4xx OKX reject (algo unavailable for symbol) returns ok=False WITHOUT
+    raising — the caller keeps the software stop (flow_not_block, never blocks)."""
+    from polaris.venues.okx.adapter import OKX_PLACE_ALGO_ORDER_PATH
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH:
+            return httpx.Response(
+                400,
+                json={"code": "1", "msg": "algo not supported",
+                      "data": [{"sCode": "51280", "sMsg": "algo not supported"}]},
+            )
+        return httpx.Response(404, json={"code": "1", "msg": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_conditional_stop(
+            inst_id="DOGE-USDT", side="sell", base_qty=100.0,
+            trigger_px=0.1, client_order_id="polstopX",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.algo_id is None
+
+
+@pytest.mark.asyncio
+async def test_conditional_stop_transport_error_falls_back_no_raise() -> None:
+    """A transport blip on the algo POST returns ok=False (never raises) so the
+    software stop remains the backstop — the resting stop is best-effort."""
+    from polaris.venues.okx.adapter import OKX_PLACE_ALGO_ORDER_PATH
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(404, json={"code": "1", "msg": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.place_conditional_stop(
+            inst_id="BTC-USDT", side="sell", base_qty=0.001,
+            trigger_px=60000.0, client_order_id="polstopY",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.algo_id is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_algo_order_posts_list() -> None:
+    """cancel_algo_order POSTs a LIST of {instId, algoId} to cancel-algos."""
+    from polaris.venues.okx.adapter import OKX_CANCEL_ALGO_ORDER_PATH
+
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_CANCEL_ALGO_ORDER_PATH:
+            captured["body"] = json.loads(req.content.decode())
+            return {"code": "0", "data": [{"algoId": "algo-7", "sCode": "0"}]}
+        return httpx.Response(404, json={"code": "1", "msg": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        body = await adapter.cancel_algo_order(inst_id="ETH-USDT", algo_id="algo-7")
+    finally:
+        await client.aclose()
+    assert body["code"] == "0"
+    sent = captured["body"]
+    assert isinstance(sent, list)
+    assert sent[0]["algoId"] == "algo-7"
+    assert sent[0]["instId"] == "ETH-USDT"

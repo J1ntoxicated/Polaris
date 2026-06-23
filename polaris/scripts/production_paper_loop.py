@@ -32,6 +32,7 @@ from polaris.core.isolation.allocator_fence import (
     get_process_fence,
     reset_process_fence,
 )
+from polaris.core.isolation.circuit_breaker import resume_stale_permanent_halts
 from polaris.core.lifecycle.recover import (
     hydrate_open_positions,
     reconcile_venue_positions,
@@ -48,6 +49,7 @@ from polaris.scripts._production_layers import (
     refresh_focus_watchlist,
     refresh_okx_universe_once,
 )
+from polaris.scripts._production_probe_attach import wire_probe_sidecar
 from polaris.scripts._production_state import ProdLoopState
 from polaris.scripts._production_tick import (
     FOCUS_CYCLE_TARGET,
@@ -68,11 +70,16 @@ from polaris.scripts._production_ws import (
 )
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
+from polaris.scripts.reconcile_orphans import (
+    flatten_venue_eod,
+    reconcile_venue_orphans,
+)
 from polaris.storage.schema import init_db
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
-from polaris.venues.okx import OKXAdapter
+from polaris.venues.okx import OKXAdapter, fetch_instruments
+from polaris.venues.okx.adapter import DEMO_HEADERS as OKX_DEMO_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +129,29 @@ def _build_okx_adapter() -> OKXAdapter | None:
     )
 
 
+async def _load_okx_constraints(adapter: OKXAdapter) -> None:
+    """Best-effort: fetch OKX SPOT dealing rules → install on the adapter.
+
+    The constraint cache (lotSz / tickSz) lets the entry leg round sz/px before
+    submit, preventing the precision-shaped OKX 400. A failure here is logged
+    and swallowed (flow_not_block): the order path falls back to the prior
+    un-rounded behaviour rather than blocking startup.
+    """
+    try:
+        constraints = await fetch_instruments(
+            base_url=adapter.base_url,
+            client=adapter.client,
+            extra_headers=OKX_DEMO_HEADERS if adapter.demo else None,
+        )
+        adapter.set_instrument_constraints(constraints)
+        logger.info("[okx] loaded %d SPOT instrument constraints", len(constraints))
+    except Exception:
+        logger.exception(
+            "[okx] instrument-constraint load failed — sz/px rounding disabled "
+            "(entry still flows un-rounded)"
+        )
+
+
 def _build_alpaca_adapter() -> AlpacaAdapter | None:
     """Build an Alpaca PAPER adapter from creds, or ``None`` if unset (Track C).
 
@@ -132,6 +162,17 @@ def _build_alpaca_adapter() -> AlpacaAdapter | None:
     if not (api_key and secret):
         return None
     return AlpacaAdapter(api_key=api_key, secret=secret)
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to ``default`` on absent/unparseable."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +405,19 @@ async def run_production_paper_loop(
             "[hydrate] restored %d open trades from prior session",
             len(state.open_trades),
         )
+    # Startup migration (flow_not_block): convert any legacy permanent HARD_HALT
+    # (unblock_ts=None) into a bounded auto-resume so a strategy stalled before
+    # this fix (e.g. tsmom/THETA-USDT, rsi_bb_pullback/CRV-USDT from the OKX 400)
+    # resumes on its next signal instead of staying blocked forever.
+    try:
+        resumed = resume_stale_permanent_halts(conn, now_ts=int(time.time()))
+        if resumed:
+            conn.commit()
+            logger.warning(
+                "[startup] resumed %d stale permanent HARD_HALT(s) → bounded", resumed
+            )
+    except Exception:
+        logger.exception("[startup] resume_stale_permanent_halts failed (non-fatal)")
     stop_evt = asyncio.Event()
     layer0_task = asyncio.create_task(
         _layer0_producer(conn, state=state, stop_evt=stop_evt)
@@ -458,6 +512,11 @@ async def run_production_paper_loop(
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
+    # ADR-012 Slice 1 — open the SEPARATE probe tuning-log sidecar
+    # (data/probes.sqlite, never the live DB → zero WAL contention) + register the
+    # observe-mode probe bus/engine. Fail-open: a wiring failure leaves the attach
+    # a no-op (the live exit is provably byte-identical). OBSERVE-ONLY this slice.
+    wire_probe_sidecar(state, probe_db_path=str(target_db.parent / "probes.sqlite"))
     ws_tasks, ws_clients = start_ws_producers(
         conn, writer=quote_writer, stop_evt=stop_evt,
         capital_session=capital_session,
@@ -475,6 +534,12 @@ async def run_production_paper_loop(
                 "[loop] real_roundtrip requested but OKX_DEMO_* env missing — "
                 "OKX real orders disabled (per-tick env fallback will also fail)"
             )
+        else:
+            # Load per-symbol dealing rules (lotSz / tickSz) once so the entry
+            # leg rounds sz/px before submit — the precision root-cause of the
+            # OKX 400 entry reject. Best-effort: a load failure leaves the cache
+            # empty (prior un-rounded path), never blocking startup.
+            await _load_okx_constraints(okx_adapter)
         alpaca_adapter = _build_alpaca_adapter()
         if alpaca_adapter is None:
             logger.warning(
@@ -482,6 +547,37 @@ async def run_production_paper_loop(
                 "— Alpaca equity real orders disabled (per-tick env fallback will "
                 "also fail)"
             )
+        # CROSS-VENUE SELF-HEAL: close UNTRACKED venue orphans across OKX +
+        # Capital + Alpaca every boot (the bot restarts daily). HARD GUARD: a
+        # symbol/epic/ccy with a live tracked open/active DB row is NEVER touched
+        # (the tracked-open set, re-read at sweep time). Orphans pin margin /
+        # wallet equity → starve entries; this FREES capital to TRADE — not a
+        # throttle (flow_not_block). Kill via POLARIS_ORPHAN_RECONCILE=0.
+        # Best-effort, per-venue isolated — never blocks boot.
+        if real_roundtrip and os.environ.get("POLARIS_ORPHAN_RECONCILE") != "0":
+            boot_capital_adapter = (
+                CapitalAdapter(capital_session)
+                if capital_session is not None else None
+            )
+            try:
+                freed = await reconcile_venue_orphans(
+                    conn, okx_adapter=okx_adapter,
+                    capital_adapter=boot_capital_adapter,
+                    alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+                )
+                total_freed = sum(freed.values())
+                if total_freed:
+                    logger.warning(
+                        "[loop] boot orphan reconcile closed %d untracked venue "
+                        "positions (okx=%d capital=%d alpaca=%d) — capital freed "
+                        "to trade", total_freed, freed["okx"], freed["capital"],
+                        freed["alpaca"],
+                    )
+            except Exception:
+                logger.exception(
+                    "[loop] boot orphan reconcile failed — orphans not freed this "
+                    "boot (entries may still reject; bot continues)"
+                )
 
     # VENUE startup reconcile-import: after a fresh-DB reset the bot starts FLAT
     # and is BLIND to real venue holdings (Alpaca/Capital). hydrate (above) only
@@ -539,6 +635,23 @@ async def run_production_paper_loop(
         )
         logger.info("[loop] P5 tick-decision engine spawned (Phase-1 OKX)")
 
+    # EOD-flatten + periodic orphan-reconcile config (position lifecycle Jin
+    # directed — '청산이 기본 베이스'). A persistent Capital adapter is reused across
+    # ticks (mirrors okx_adapter/alpaca_adapter) for both hooks. flow_not_block:
+    # this is EOD risk discipline + orphan hygiene, never an entry block/size cut.
+    tick_capital_adapter = (
+        CapitalAdapter(capital_session)
+        if (real_roundtrip and capital_session is not None) else None
+    )
+    eod_flatten_on = os.environ.get("POLARIS_EOD_FLATTEN", "1") != "0"
+    eod_lead_sec = _env_int("POLARIS_EOD_FLATTEN_LEAD_SEC", 900)
+    orphan_reconcile_on = os.environ.get("POLARIS_ORPHAN_RECONCILE", "1") != "0"
+    # Periodic re-sweep cadence in ticks (~30 min wall-clock at tick_sec=5 → 360).
+    reconcile_every = max(1, _env_int(
+        "POLARIS_ORPHAN_RECONCILE_EVERY_TICKS",
+        max(1, int(1800 / tick_sec)) if tick_sec > 0 else 360,
+    ))
+
     deadline = time.monotonic() + duration_sec
     tick_idx = 0
     try:
@@ -567,6 +680,35 @@ async def run_production_paper_loop(
                     resubscribe_ws_clients(conn, ws_clients)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
+
+            # EOD FLATTEN (default) — checked every tick (cheap: clock is cached,
+            # window check is arithmetic). Fires only inside a venue's close
+            # window, honours hold_overnight, idempotent (flips trade.closed on
+            # first fill so re-ticks no-op). OKX 24/7 is hard-exempt. Never
+            # flattens blind on a clock error / closed session (skip + defer).
+            if eod_flatten_on and real_roundtrip:
+                try:
+                    await flatten_venue_eod(
+                        conn, state, alpaca_adapter=alpaca_adapter,
+                        capital_adapter=tick_capital_adapter,
+                        lead_sec=eod_lead_sec, now_ts=int(time.time()),
+                    )
+                except Exception:  # noqa: BLE001 — lifecycle pass never halts loop
+                    logger.exception("[eod] flatten pass failed — bot continues")
+
+            # PERIODIC ORPHAN RECONCILE — re-sweep re-accumulated untracked venue
+            # holdings without a restart (boot does the first sweep). Tracked-set
+            # guard protects live positions; per-venue isolated; best-effort.
+            if (orphan_reconcile_on and real_roundtrip
+                    and tick_idx % reconcile_every == 0):
+                try:
+                    await reconcile_venue_orphans(
+                        conn, okx_adapter=okx_adapter,
+                        capital_adapter=tick_capital_adapter,
+                        alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+                    )
+                except Exception:  # noqa: BLE001 — hygiene pass never halts loop
+                    logger.exception("[reconcile] periodic sweep failed — continues")
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()
@@ -594,6 +736,10 @@ async def run_production_paper_loop(
         await asyncio.gather(*ws_tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             quote_writer.close()
+        # ADR-012 — close the probe tuning-log sidecar (separate DB).
+        if state.probe_conn is not None:
+            with contextlib.suppress(Exception):
+                state.probe_conn.close()
         if okx_adapter is not None:
             await okx_adapter.aclose()
         if alpaca_adapter is not None:

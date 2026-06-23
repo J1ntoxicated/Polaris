@@ -17,6 +17,7 @@ Tests cover the 10 panels demanded by Jin 2026-05-07 redesign:
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -53,7 +54,7 @@ from polaris.scripts.dashboard.snapshot import (
     ClosedTrade,
     DashboardSnapshot,
     EdgeValidationRow,
-    GateRow,
+    GateDecisionRow,
     GptStat,
     LearnerSlot,
     PositionRow,
@@ -116,23 +117,28 @@ def _full_snap() -> DashboardSnapshot:
                 avg_r=-0.30, pf=0.80, pnl_usd=-25.0, notional_usd=500.0,
             ),
         ],
-        gate_funnel=[
-            GateRow(gate_id=1, label="Universe", pass_n=100, kill_n=0, other_n=0,
-                    total=100, pass_rate=100.0),
-            GateRow(gate_id=2, label="Strategy", pass_n=80, kill_n=0, other_n=0,
-                    total=80, pass_rate=100.0),
-            GateRow(gate_id=3, label="Validator", pass_n=64, kill_n=16, other_n=0,
-                    total=80, pass_rate=80.0),
-            GateRow(gate_id=4, label="PreEntry", pass_n=50, kill_n=14, other_n=0,
-                    total=64, pass_rate=78.1),
-            GateRow(gate_id=5, label="Sizer", pass_n=50, kill_n=0, other_n=0,
-                    total=50, pass_rate=100.0),
-            GateRow(gate_id=6, label="Monitor", pass_n=100, kill_n=0, other_n=0,
-                    total=100, pass_rate=100.0),
-            GateRow(gate_id=7, label="Exit", pass_n=100, kill_n=0, other_n=0,
-                    total=100, pass_rate=100.0),
-            GateRow(gate_id=8, label="Reflector", pass_n=42, kill_n=0, other_n=0,
-                    total=42, pass_rate=100.0),
+        gate_decisions=[
+            GateDecisionRow(gate_id=1, label="Universe",
+                            headline="focus 30 · excluded 64 below floor · 16:34", n=3,
+                            metrics={"focus_n": 30, "excluded_n": 64}),
+            GateDecisionRow(gate_id=2, label="Strategy",
+                            headline="80 signals fired", n=80, metrics={"fired_n": 80}),
+            GateDecisionRow(gate_id=3, label="Validator",
+                            headline="64 validated · scalar~0.95", n=80, metrics={}),
+            GateDecisionRow(gate_id=4, label="PreEntry",
+                            headline="50 proceeded / 14 holding", n=64, metrics={}),
+            GateDecisionRow(gate_id=5, label="Sizer",
+                            headline="50 sized · risk~1.50% · $24,000 · tier 1x:50", n=50,
+                            metrics={"sized_n": 50, "median_risk_pct": 1.5}),
+            GateDecisionRow(gate_id=6, label="Monitor",
+                            headline="100 monitored · hold 90 / adjust 8 / exit 2", n=100,
+                            metrics={}),
+            GateDecisionRow(gate_id=7, label="Exit",
+                            headline="hold 95 / adjust 3 / exit 2 · above_bep", n=100,
+                            metrics={}),
+            GateDecisionRow(gate_id=8, label="Reflector",
+                            headline="42 lessons · entry_timing:42 · conf~0.70", n=42,
+                            metrics={}),
         ],
         cell_top=[
             CellRow(exchange="okx", strategy="tsmom", ticker="BTC-USDT",
@@ -256,14 +262,14 @@ def test_per_strategy_stats_color_codes_wr_bands() -> None:
     assert NEGATIVE in rsi_row   # <40 red
 
 
-def test_gate_funnel_8_rows_and_pass_rate_visible() -> None:
+def test_gate_decisions_8_rows_and_headline_visible() -> None:
     snap = _full_snap()
     rows = render_gate_panel(snap, width=TARGET_WIDTH)
     assert len(rows) == 9       # 1 hline + 8 gate rows
     assert "G1" in rows[1] and "Universe" in rows[1]
     assert "G8" in rows[8] and "Reflector" in rows[8]
-    # Pass rate text rendered (at least 1 row contains a percent)
-    assert any("%" in r for r in rows[1:])
+    # The meaningful per-gate headline is rendered (G5 size line surfaces).
+    assert any("sized" in r for r in rows[1:])
 
 
 def test_cell_top_panel_renders_5_rows() -> None:
@@ -454,8 +460,8 @@ def test_collect_empty_db_returns_zero_snapshot(tmp_path: Path) -> None:
     assert snap.upnl_total == 0.0
     assert snap.daily_pnl_usd == 0.0
     assert snap.positions == []
-    assert snap.gate_funnel  # 8 zero rows
-    assert len(snap.gate_funnel) == 8
+    assert snap.gate_decisions  # 8 per-gate decision rows
+    assert len(snap.gate_decisions) == 8
 
 
 def test_collect_missing_db_returns_zero_snapshot(tmp_path: Path) -> None:
@@ -706,3 +712,81 @@ def test_gpt_stats_empty_returns_no_rows(tmp_path: Path) -> None:
     stats = _gpt_stats(conn, now_s=int(time.time()))
     conn.close()
     assert stats == []
+
+
+# ---------------------------------------------------------------------------
+# Per-gate DECISION summary (replaces pass/kill funnel) — G5 T4 decode
+# ---------------------------------------------------------------------------
+
+
+def _insert_g5_sized(
+    conn: object, *, risk_pct: float, notional: float, tier: float, ts: int
+) -> None:
+    payload = json.dumps(
+        {
+            "sized": {
+                "final_risk_pct": risk_pct,
+                "final_notional_usd": notional,
+                "leverage": 20.0,
+                "binding_cap": "proposed",
+                "proposal": {
+                    "base_risk_pct": 0.02,
+                    "continuous_scalar": 0.76,
+                    "tier_amplifier": tier,
+                    "cell_routing_mult": 1.0,
+                    "listing_watchdog_mult": 1.0,
+                    "proposed_risk_pct": risk_pct,
+                },
+            }
+        }
+    )
+    conn.execute(  # type: ignore[attr-defined]
+        """INSERT INTO gate_events
+            (event_id, run_id, gate_id, phase, decision, model_used,
+             payload_json, latency_ms, created_ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            f"g5-{ts}-{time.time_ns()}",
+            "run1",
+            5,
+            "success",
+            "SIZED",
+            "python",
+            payload,
+            10,
+            ts,
+        ),
+    )
+
+
+def test_gate_decisions_g5_t4_headline(tmp_path: Path) -> None:
+    """G5 Sizer row aggregates the T4 size: median risk%, notional, tier mix."""
+    from polaris.scripts.dashboard.snapshot_sections import _gate_decisions
+
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    now_s = int(time.time())
+    # Three SIZED decisions: median risk 0.015 → 1.5%, median notional 24000,
+    # tier mix two 1x + one 2x.
+    _insert_g5_sized(conn, risk_pct=0.010, notional=20000.0, tier=1.0, ts=now_s - 3)
+    _insert_g5_sized(conn, risk_pct=0.015, notional=24000.0, tier=1.0, ts=now_s - 2)
+    _insert_g5_sized(conn, risk_pct=0.020, notional=30000.0, tier=2.0, ts=now_s - 1)
+    conn.commit()
+
+    rows = _gate_decisions(
+        conn, now_s=now_s + 1, universe_focus_n=30, universe_refresh="16:34:12"
+    )
+    by_gate = {r.gate_id: r for r in rows}
+    conn.close()
+
+    assert len(rows) == 8
+    g5 = by_gate[5]
+    assert g5.n == 3
+    assert g5.metrics["sized_n"] == 3
+    assert g5.metrics["median_risk_pct"] == pytest.approx(1.5, abs=0.01)
+    assert g5.metrics["median_notional_usd"] == pytest.approx(24000.0)
+    assert g5.metrics["tier_mix"] == {"1x": 2, "2x": 1}
+    assert "sized" in g5.headline and "1.5" in g5.headline
+    # G1 row reflects the passed focus count + derived exclusion (no universe rows
+    # → excluded clamps to 0, focus echoes the input).
+    assert by_gate[1].metrics["focus_n"] == 30

@@ -64,6 +64,10 @@ async def test_ignite_paper_persists_to_caller_db_path(tmp_path: Path) -> None:
     # above prior 20-bar high on the final bar so the strategy emits. Earlier
     # bars carry slightly varied volume so ``compute_volume_z`` has non-zero
     # standard deviation (else vol_z collapses to 0 and the gate filters out).
+    # Anchor at NOW so the newest bar is fresh — the recency guard (Jin
+    # 2026-06-22 dead-feed gate) skips a symbol whose newest bar is stale, so a
+    # fixed-2023-epoch fixture would read as a dead feed → 0 opens → 0 fills.
+    _bars_base_ts = int(_time.time()) - 60 * 60
     fake_bars: list[CanonicalBar] = []
     for i in range(60):
         is_breakout = i == 59
@@ -75,7 +79,7 @@ async def test_ignite_paper_persists_to_caller_db_path(tmp_path: Path) -> None:
             CanonicalBar(
                 instrument_id="okx:BTC-USDT", underlying_group_id="crypto:BTC",
                 venue="okx", symbol="BTC-USDT", bar_interval="1m",
-                ts=1_700_000_000 + i * 60,
+                ts=_bars_base_ts + i * 60,
                 open=60_000.0 + i * 5, high=high, low=low,
                 close=close, volume=volume,
                 notional_usd=close * volume,

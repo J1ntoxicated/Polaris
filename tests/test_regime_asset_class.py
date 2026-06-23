@@ -158,12 +158,15 @@ def test_unknown_asset_class_degrades_safely() -> None:
 
 def test_vol_floor_table_matches_atr_floor_spirit() -> None:
     """The regime vol floors echo ATR_FLOOR_BY_CLASS spirit (crypto 2.0 /
-    forex 0.3 / index 0.4 / commodity 0.5 / equity 1.0)."""
+    forex 0.3 / index 0.4 / commodity 0.5 / equity 2.5).
+
+    equity floor raised 1.0 → 2.5 (D1): the old 1.0 floor pinned equity crisis at
+    -1.5% so routine equity pullbacks tripped crisis (81% mis-bucket)."""
     assert REGIME_VOL_FLOOR_BY_CLASS["crypto"] == 2.0
     assert REGIME_VOL_FLOOR_BY_CLASS["forex"] == 0.3
     assert REGIME_VOL_FLOOR_BY_CLASS["indices"] == 0.4
     assert REGIME_VOL_FLOOR_BY_CLASS["commodity"] == 0.5
-    assert REGIME_VOL_FLOOR_BY_CLASS["equity"] == 1.0
+    assert REGIME_VOL_FLOOR_BY_CLASS["equity"] == 2.5
 
 
 # ── PART 2: asset_class-differentiated MarketView ───────────────────────────

@@ -472,6 +472,7 @@ CREATE TABLE IF NOT EXISTS regime_state (
     evidence_json TEXT NOT NULL DEFAULT '{}',
     consecutive_candidate TEXT,
     consecutive_count INTEGER NOT NULL DEFAULT 0,
+    last_advanced_bar_id INTEGER,
     updated_ts INTEGER NOT NULL,
     PRIMARY KEY (venue, underlying_group_id)
 );

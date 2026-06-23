@@ -33,5 +33,11 @@ else
     echo "✅ web dashboard launched on :$PORT (db=$DASH_DB, log=$LOG)"
 fi
 
-open "http://localhost:$PORT" 2>/dev/null || \
-    echo "   open http://localhost:$PORT in your browser"
+# Jin 2026-06-22: NO auto browser-launch — Jin refreshes his own tab; Claude
+# verifies via the Claude Preview MCP. Set POLARIS_DASH_OPEN=1 to force-open.
+if [ "${POLARIS_DASH_OPEN:-0}" = "1" ]; then
+    open "http://localhost:$PORT" 2>/dev/null || \
+        echo "   open http://localhost:$PORT in your browser"
+else
+    echo "   (browser not auto-opened — refresh http://localhost:$PORT yourself)"
+fi

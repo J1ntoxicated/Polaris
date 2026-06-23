@@ -29,6 +29,7 @@ from polaris.core.universe.schema import (
     UNIVERSE_RANK_TOP_N_ENV,
     UniverseInstrument,
     is_capital_fx_major,
+    passes_liquidity_floor,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,16 @@ def _is_valid_candidate(ins: UniverseInstrument) -> bool:
     """
     if ins.state != "live":
         return False
-    return not (ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX)
+    if ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX:
+        return False
+    # Universe-eligibility liquidity floor (Jin-approved 2026-06-22): the SAME
+    # KIND of hard keep as the two above — a tradeable-QUALITY membership test on
+    # the instrument, NOT a per-signal block / size-cut / entry-veto. A row whose
+    # venue spread / $-volume / depth / price falls outside its venue floor is
+    # loss-certain (175bp spread > ~0.3R edge) and never reaches the active set,
+    # so it never reaches the focus list, the WS sub, or the tick engine. The
+    # ATR-z signal-richness rank still orders every survivor (flow_not_block).
+    return passes_liquidity_floor(ins)
 
 
 def _pop_z(values: Sequence[float]) -> list[float]:

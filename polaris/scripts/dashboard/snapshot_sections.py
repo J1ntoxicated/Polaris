@@ -9,12 +9,14 @@ and lookback constants are imported from ``snapshot_queries``.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Any, Final
 
 from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
 from polaris.core.learners.posterior import edge_verdict
+from polaris.core.metrics.risk_unit import R_USD_PROXY
 
 # E2 IA-rebuild tab queries live in ``snapshot_e2`` to keep this module within
 # the LOC guideline; re-exported here so callers keep a single import surface.
@@ -30,7 +32,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     CellRow,
     ClosedTrade,
     EdgeValidationRow,
-    GateRow,
+    GateDecisionRow,
     GptStat,
     LearnerSlot,
     RegimeBar,
@@ -38,12 +40,12 @@ from polaris.scripts.dashboard.snapshot_models import (
     RotationTelemetry,
 )
 from polaris.scripts.dashboard.snapshot_queries import (
-    DEFAULT_R_USD,
     GATE_FUNNEL_LOOKBACK_SEC,
     GPT_LOOKBACK_SEC,
     GPT_PRICE_PER_1K,
     GPT_TOKENS_PER_CALL,
     LEARNER_DELTA_LOOKBACK_SEC,
+    _as_dict,
     _safe_query,
     _symbol_from_inst,
 )
@@ -57,7 +59,7 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Section: gate funnel
+# Section: per-gate decision summary (replaces the pass/kill funnel)
 # ---------------------------------------------------------------------------
 
 
@@ -73,44 +75,238 @@ _GATE_LABELS: Final[dict[int, str]] = {
 }
 
 
-def _gate_funnel(conn: sqlite3.Connection, *, now_s: int) -> list[GateRow]:
+def _median(vals: list[float]) -> float:
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _decode_payload(payload_json: str | None) -> dict[str, Any]:
+    if not payload_json:
+        return {}
+    try:
+        data = json.loads(payload_json)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _gate_decisions(
+    conn: sqlite3.Connection,
+    *,
+    now_s: int,
+    universe_focus_n: int,
+    universe_refresh: str,
+) -> list[GateDecisionRow]:
+    """Per-gate DECISION-summary rows (flow_not_block → no pass/kill ratio).
+
+    One window read over ``gate_events``; the meaningful per-gate metrics are
+    decoded from ``payload_json`` (G5 T4 size aggregates, G7/G6 action counts, G8
+    lesson mix, G2 signal count) rather than folded into a structurally-100%
+    pass-rate. G1 uses the already-computed focus count + a derived liquidity-floor
+    exclusion (active-universe count − focus). Display-only; never feeds trading."""
+    since = now_s - GATE_FUNNEL_LOOKBACK_SEC
     rows = _safe_query(
         conn,
-        """SELECT gate_id, decision, COUNT(*) FROM gate_events
-           WHERE created_ts >= ?
-           GROUP BY gate_id, decision
-           ORDER BY gate_id""",
-        (now_s - GATE_FUNNEL_LOOKBACK_SEC,),
+        """SELECT gate_id, decision, payload_json FROM gate_events
+           WHERE created_ts >= ?""",
+        (since,),
     )
-    by_gate: dict[int, dict[str, int]] = {}
+    # Bucket raw rows by gate for per-gate roll-up.
+    by_gate: dict[int, list[tuple[str, dict[str, Any]]]] = {}
     for r in rows:
-        gid = int(r[0])
-        dec = str(r[1] or "?").upper()
-        n = int(r[2] or 0)
-        by_gate.setdefault(gid, {})[dec] = n
+        gid = int(r[0] or 0)
+        dec = str(r[1] or "").upper()
+        by_gate.setdefault(gid, []).append((dec, _decode_payload(r[2])))
 
-    out: list[GateRow] = []
+    out: list[GateDecisionRow] = []
     for gid in range(1, 9):
-        d = by_gate.get(gid, {})
-        pass_n = d.get("PASS", 0) + d.get("PROCEED", 0) + d.get("HOLD", 0) + d.get(
-            "SIZED", 0
-        ) + d.get("REFLECTED", 0)
-        kill_n = d.get("KILL", 0) + d.get("EXIT", 0) + d.get("REJECT", 0)
-        total = sum(d.values())
-        other = max(0, total - pass_n - kill_n)
-        rate = (pass_n / total * 100.0) if total else 0.0
+        evs = by_gate.get(gid, [])
+        n = len(evs)
+        headline, metrics = _gate_headline(
+            gid,
+            evs,
+            universe_focus_n=universe_focus_n,
+            universe_refresh=universe_refresh,
+            conn=conn,
+            since=since,
+        )
         out.append(
-            GateRow(
+            GateDecisionRow(
                 gate_id=gid,
                 label=_GATE_LABELS.get(gid, f"G{gid}"),
-                pass_n=pass_n,
-                kill_n=kill_n,
-                other_n=other,
-                total=total,
-                pass_rate=rate,
+                headline=headline,
+                n=n,
+                metrics=metrics,
             )
         )
     return out
+
+
+def _gate_headline(
+    gid: int,
+    evs: list[tuple[str, dict[str, Any]]],
+    *,
+    universe_focus_n: int,
+    universe_refresh: str,
+    conn: sqlite3.Connection,
+    since: int,
+) -> tuple[str, dict[str, Any]]:
+    """The characteristic meaningful (headline, metrics) for one gate's window."""
+    if gid == 1:  # Universe — focus count + derived liquidity-floor exclusions.
+        active_rows = _safe_query(
+            conn, "SELECT COUNT(*) FROM universe WHERE is_active = 1"
+        )
+        active_n = int(active_rows[0][0]) if active_rows and active_rows[0][0] else 0
+        excluded = max(0, active_n - universe_focus_n)
+        m = {
+            "focus_n": universe_focus_n,
+            "excluded_n": excluded,
+            "refresh": universe_refresh,
+        }
+        return (
+            f"focus {universe_focus_n} · excluded {excluded} below floor"
+            f" · {universe_refresh}",
+            m,
+        )
+
+    if gid == 2:  # Strategy — signals fired + top strategies.
+        srows = _safe_query(
+            conn,
+            """SELECT s.strategy_id, COUNT(DISTINCT ge.signal_id)
+               FROM gate_events ge
+               JOIN signals s ON s.signal_id = ge.signal_id
+               WHERE ge.gate_id = 2 AND ge.created_ts >= ?
+               GROUP BY s.strategy_id
+               ORDER BY 2 DESC""",
+            (since,),
+        )
+        fired = sum(int(r[1] or 0) for r in srows) or len(evs)
+        top = ", ".join(str(r[0]) for r in srows[:3])
+        m = {"fired_n": fired, "top_strategies": [str(r[0]) for r in srows[:3]]}
+        return (f"{fired} signals fired" + (f" · {top}" if top else ""), m)
+
+    if gid == 3:  # Validator — verdict mix + median scalar.
+        counts = _decision_counts(evs)
+        scalars = [
+            float(p["scalar"])
+            for _d, p in evs
+            if isinstance(p.get("scalar"), (int, float))
+        ]
+        med = _median(scalars)
+        m = {"decisions": counts, "median_scalar": round(med, 3)}
+        passed = counts.get("PASS", 0)
+        return (
+            f"{passed} validated"
+            + (f" · scalar~{med:.2f}" if scalars else ""),
+            m,
+        )
+
+    if gid == 4:  # PreEntry — proceed / hold counts.
+        counts = _decision_counts(evs)
+        proc = counts.get("PROCEED", 0)
+        hold = counts.get("HOLD", 0)
+        m = {"decisions": counts}
+        return (f"{proc} proceeded / {hold} holding", m)
+
+    if gid == 5:  # Sizer — THE T4 headline (median size + tier mix).
+        risks: list[float] = []
+        notionals: list[float] = []
+        tier_mix: dict[str, int] = {}
+        for _d, p in evs:
+            sized = _as_dict(p.get("sized"))
+            rp = sized.get("final_risk_pct")
+            nt = sized.get("final_notional_usd")
+            if isinstance(rp, (int, float)):
+                risks.append(float(rp))
+            if isinstance(nt, (int, float)):
+                notionals.append(float(nt))
+            prop = _as_dict(sized.get("proposal"))
+            tier = prop.get("tier_amplifier")
+            if isinstance(tier, (int, float)):
+                key = f"{float(tier):g}x"
+                tier_mix[key] = tier_mix.get(key, 0) + 1
+        mrp = _median(risks) * 100.0
+        mnt = _median(notionals)
+        tier_str = " ".join(f"{k}:{v}" for k, v in sorted(tier_mix.items()))
+        m = {
+            "sized_n": len(risks),
+            "median_risk_pct": round(mrp, 3),
+            "median_notional_usd": round(mnt, 1),
+            "tier_mix": tier_mix,
+        }
+        return (
+            f"{len(risks)} sized · risk~{mrp:.2f}% · ${mnt:,.0f}"
+            + (f" · tier {tier_str}" if tier_str else ""),
+            m,
+        )
+
+    if gid == 6:  # Monitor — N monitored + mode mix.
+        counts = _decision_counts(evs)
+        hold = counts.get("HOLD", 0)
+        adj = counts.get("ADJUST_EXIT", 0)
+        ex = counts.get("EXIT_NOW", 0)
+        swap = counts.get("SWAP_STRATEGY", 0)
+        m = {"decisions": counts}
+        return (
+            f"{len(evs)} monitored · hold {hold} / adjust {adj}"
+            f" / exit {ex}" + (f" / swap {swap}" if swap else ""),
+            m,
+        )
+
+    if gid == 7:  # Exit — action mix + top reason.
+        counts = _decision_counts(evs)
+        reasons: dict[str, int] = {}
+        for _d, p in evs:
+            rs = p.get("reason")
+            if isinstance(rs, str) and rs:
+                reasons[rs] = reasons.get(rs, 0) + 1
+        top_reason = max(reasons.items(), key=lambda kv: kv[1])[0] if reasons else ""
+        hold = counts.get("HOLD", 0)
+        adj = counts.get("ADJUST_EXIT", 0)
+        ex = counts.get("EXIT_NOW", 0)
+        m = {"decisions": counts, "top_reason": top_reason}
+        return (
+            f"hold {hold} / adjust {adj} / exit {ex}"
+            + (f" · {top_reason}" if top_reason else ""),
+            m,
+        )
+
+    if gid == 8:  # Reflector — lessons + type mix + avg confidence.
+        types: dict[str, int] = {}
+        confs: list[float] = []
+        for _d, p in evs:
+            lt = p.get("lesson_type")
+            if isinstance(lt, str) and lt:
+                types[lt] = types.get(lt, 0) + 1
+            cf = p.get("confidence")
+            if isinstance(cf, (int, float)):
+                confs.append(float(cf))
+        avg_conf = sum(confs) / len(confs) if confs else 0.0
+        type_str = " ".join(f"{k}:{v}" for k, v in sorted(types.items()))
+        m = {
+            "lessons_n": len(evs),
+            "type_mix": types,
+            "avg_confidence": round(avg_conf, 3),
+        }
+        return (
+            f"{len(evs)} lessons"
+            + (f" · {type_str}" if type_str else "")
+            + (f" · conf~{avg_conf:.2f}" if confs else ""),
+            m,
+        )
+
+    return ("", {})
+
+
+def _decision_counts(evs: list[tuple[str, dict[str, Any]]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for d, _p in evs:
+        if d:
+            counts[d] = counts.get(d, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +380,21 @@ def _regime_bars(
 # ---------------------------------------------------------------------------
 
 
+def _pnl_r_by_contribution(conn: sqlite3.Connection) -> dict[str, float]:
+    """{position_id: canonical pnl_r} for CLOSED positions (Step M lookup).
+
+    Lets a close fill resolve its trade's canonical risk-unit R via
+    ``fills.contribution_id == positions.position_id``, so the recent-closed
+    panel shows the SAME R the ticker / strategy panels do. Reconciled
+    (tracking-failure) rows carry NULL pnl_r → excluded. Graceful empty."""
+    rows = _safe_query(
+        conn,
+        "SELECT position_id, pnl_r FROM positions "
+        "WHERE status = 'closed' AND pnl_r IS NOT NULL",
+    )
+    return {str(r[0]): float(r[1] or 0.0) for r in rows}
+
+
 def _recent_closed_trades(
     conn: sqlite3.Connection,
     *,
@@ -216,6 +427,12 @@ def _recent_closed_trades(
            FROM fills
            ORDER BY ts_ms ASC""",
     )
+    # Step M (2026-06-22): r_units is the canonical risk-unit R, read from the
+    # close's position (positions.pnl_r via contribution_id) so a trade shows the
+    # SAME R on this panel as on the ticker / strategy panels. A fill with no
+    # matched position (legacy / smoke) falls back to the shared $-proxy denom
+    # (one number, not the old $10/$50 split).
+    pnl_r_by_contrib = _pnl_r_by_contribution(conn)
     # Index by exact contribution_id → first open fill (entry)
     open_by_contrib: dict[str, tuple[float, int]] = {}
     open_fifo: dict[tuple[str, str, str], list[tuple[float, int]]] = {}
@@ -300,7 +517,11 @@ def _recent_closed_trades(
                 entry_price=entry_px,
                 exit_price=fill_price,
                 pnl_usd=pnl,
-                r_units=pnl / DEFAULT_R_USD,
+                r_units=(
+                    pnl_r_by_contrib[contrib_str]
+                    if contrib_str and contrib_str in pnl_r_by_contrib
+                    else pnl / R_USD_PROXY
+                ),
                 held_sec=held_sec,
                 exit_reason=reason,
                 regime=regime,
@@ -550,8 +771,32 @@ def _rotation_telemetry(
             margin=float(r[7] or 0.0),
             cost=float(r[8] or 0.0),
         )
+    # Step M (2026-06-22, Jin locked): drift-close (reconciled) loss is a
+    # SEPARATE counter — "tracking failures, not trades" — NEVER mixed into the
+    # R ledger. Count = reconciled positions; the rough DOLLAR estimate is summed
+    # from the ``orphan_reconciled`` audit rows' ``est_drift_usd`` (mae_r ×
+    # risk_usd, recorded at reconcile time). pnl_r is NULL on these rows now, so
+    # this no longer reads R from positions. Graceful zero when absent.
+    cnt_rows = _safe_query(
+        conn,
+        "SELECT COUNT(*) FROM positions WHERE status = 'reconciled'",
+    )
+    reconciled_loss_n = int(cnt_rows[0][0] or 0) if cnt_rows else 0
+    drift_rows = _safe_query(
+        conn,
+        "SELECT payload_json FROM risk_events WHERE event_type = 'orphan_reconciled'",
+    )
+    reconciled_loss_usd = 0.0
+    for (payload_json,) in drift_rows:
+        try:
+            est = float(json.loads(payload_json).get("est_drift_usd", 0.0))
+        except (ValueError, TypeError, AttributeError):
+            est = 0.0
+        reconciled_loss_usd += est
     return RotationTelemetry(
         rotation_count=rotation_count,
         session_forced_exit_count=session_forced_exit_count,
+        reconciled_loss_usd=reconciled_loss_usd,
+        reconciled_loss_n=reconciled_loss_n,
         last_rotation=last,
     )

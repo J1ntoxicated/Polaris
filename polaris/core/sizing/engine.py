@@ -36,7 +36,6 @@ from polaris.core.learners.session import SessionMultLearner
 from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
-from polaris.core.sizing.fill_rate_cut import compute_fill_rate, resolve_cut_state
 from polaris.core.sizing.kelly import kelly_or_cold_start
 from polaris.core.sizing.schema import (
     CONT_SCALAR_MAX,
@@ -64,7 +63,7 @@ from polaris.core.sizing.schema import (
     track_c_gross_pct,
     underlying_group_pct,
 )
-from polaris.core.sizing.session import derive_session
+from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.sizing.vol_target import ewma_realized_vol, vol_targeted_scalar
 from polaris.core.streams import resolve_stream
 
@@ -394,7 +393,15 @@ def compute_size(
     # Aggressive bias preserved: sparse / disabled / no row → NEUTRAL_MULT (1.0).
     # Each mult individually clipped by BaseLearner.get_mult; product re-clip in
     # compute_proposed.
-    session_label = intent.session if intent.session else derive_session(ts)
+    # Venue-native session (D2): the lookup key MUST match the key the close
+    # path records (resolve_venue_session) — otherwise session_mult never finds
+    # its learned row and stays at the neutral floor. An explicit intent.session
+    # still wins for callers that pre-resolve it.
+    session_label = (
+        intent.session
+        if intent.session
+        else resolve_venue_session(intent.venue, ts)
+    )
     session_learner = SessionMultLearner(conn)
     regime_learner = RegimeMultLearner(conn)
     session_mult = session_learner.get_mult(
@@ -460,6 +467,9 @@ def compute_size(
     total_daily_rem = max(0.0, total_daily_risk_ceiling_pct() - portfolio.total_daily_used_pct)
 
     # (8) Single clip
+    # flow_not_block: weak signals flow at their normal computed size. The only
+    # containment is the headroom_min budget caps (cluster/daily/track) below —
+    # there is NO per-signal weak-signal zeroing (removed; defensive throttle).
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
         single_trade_cap=min(single_cap_pct, SINGLE_TRADE_ABSOLUTE_CEILING_PCT),
@@ -470,18 +480,6 @@ def compute_size(
         venue_daily_remaining=venue_daily_rem,
         total_daily_remaining=total_daily_rem,
     )
-
-    # Fill-rate cut: if active, suppress to 0 (caller decides which to drop).
-    fill_rate = compute_fill_rate(
-        used_risk_pct=portfolio.venue_daily_used_pct,
-        venue_daily_ceiling_pct=venue_daily_cap,
-    )
-    cut_active = resolve_cut_state(prev_active=portfolio.fill_rate_active_cut, fill_rate=fill_rate)
-    if cut_active and intent.signal_strength < 1.0:
-        # Weakest signals cut first (Q4 priority); strong (>=1.0) signals
-        # survive even when fill-rate is hot.
-        final_risk_pct = 0.0
-        binding = "fill_rate_cut"
 
     # (9) notional
     notional = final_risk_pct * portfolio.equity_usd * intent.leverage
@@ -511,15 +509,6 @@ def compute_size(
         decision.kelly_fraction,
         decision.cold_start,
     )
-    if cut_active:
-        logger.warning(
-            "[T4] fill-rate cut active venue=%s rate=%.2f%% strength=%.2f → final=%.4f (binding=%s)",
-            intent.venue,
-            fill_rate * 100.0,
-            intent.signal_strength,
-            final_risk_pct,
-            binding,
-        )
     return SizingFinal(
         proposed=proposal,
         final_risk_pct=final_risk_pct,

@@ -249,7 +249,11 @@ def test_session_breakout_atr_mult_changes_entry_set() -> None:
 
     bars: list[Bar] = []
     p = 5000.0
-    rng, jump = 0.001, 0.003
+    # jump sized so it clears open+1.0*ATR (atr_mult=1.0 fires) but not always
+    # open+2.0*ATR (atr_mult=2.0 fires on FEWER bars), measured from the TRUE
+    # session-open anchor (the bar at/after the UTC session-open boundary), not
+    # the legacy bar_views[-60] reference.
+    rng, jump = 0.001, 0.005
     for i in range(140):
         bump = i >= 65 and (i - 65) % 6 == 0
         if bump:

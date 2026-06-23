@@ -15,6 +15,8 @@ import sqlite3
 import time
 from typing import Any
 
+from polaris.core.data.quote_writer import live_or_bar_price
+from polaris.core.data.signal_persist import persist_emitted_signal
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     FAULT_NAN,
@@ -53,6 +55,7 @@ from polaris.scripts._production_layers import (
     ingest_bars_per_timeframe,
     read_recent_bars,
     run_recalc_for_active_positions,
+    staleness_threshold_for,
 )
 from polaris.scripts._production_pipeline import (
     close_specific_position,
@@ -63,6 +66,7 @@ from polaris.scripts._production_recalc import recalc_active_positions
 from polaris.scripts._production_state import ProdLoopState
 from polaris.strategies import (
     BaseStrategy,
+    EMACrossoverStrategy,
     EquityGapGoStrategy,
     EquityRSIBBPullbackStrategy,
     EquityTSMOMStrategy,
@@ -75,6 +79,12 @@ from polaris.strategies import (
     TSMOMStrategy,
     VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
+)
+from polaris.strategies.session_breakout import (
+    SUPPORTED_SYMBOLS as _SESSION_BREAKOUT_SYMBOLS,
+)
+from polaris.strategies.xau_indices_trend import (
+    SUPPORTED_SYMBOLS as _XAU_INDICES_SYMBOLS,
 )
 from polaris.venues.alpaca.equity_session_gate import (
     equity_entry_held_for_session,
@@ -91,6 +101,46 @@ FOCUS_CYCLE_TARGET = 30
 # is the single SSOT for the venues the engine owns in Phase 1. When
 # ``tick_engine_owns_okx()`` is on, the bar entry path yields these venues to the
 # engine (no double-trade); the engine reads the SAME frozenset as PHASE1_VENUES.
+
+# Capital non-forex (index/commodity) symbols that an ENABLED Capital bar
+# strategy actually supports — the UNION of the two enabled index/commodity bar
+# strategies' SUPPORTED_SYMBOLS (xau_indices_trend + session_breakout). Built
+# from the strategy modules so it can never drift from what they accept. The
+# routing carve-out below keeps these on the bar pipeline (donchian/momentum/
+# session) so they get a trend/breakout edge COMPLEMENTARY to the tick engine's
+# flow micro-structure on the SAME symbol. Symbols are the raw live-universe
+# spelling (e.g. ``GOLD`` / ``US100``), upper-cased like the strategy symbol gate.
+CAPITAL_BAR_STRATEGY_SYMBOLS: frozenset[str] = (
+    _XAU_INDICES_SYMBOLS | _SESSION_BREAKOUT_SYMBOLS
+)
+
+
+def keep_on_bar_path(*, asset_class: str, symbol: str) -> bool:
+    """True iff a tick-engine-owned (venue, symbol) should ALSO stay on the bar path.
+
+    PURELY ADDITIVE reachability widen (flow_not_block): the prior asset-class
+    routing skip VACATED every non-forex Capital index/commodity symbol from the
+    bar fan-out, handing it ONLY to the tick engine — so xau_indices_trend (whole
+    universe vacated) had a structural 0%-emit ceiling and session_breakout lost
+    its index legs. This keeps a symbol on the bar pipeline when EITHER:
+
+      * it is forex (the carve-out already done — its micro-structure thresholds
+        never trip so the tick engine gave it zero entries), OR
+      * an ENABLED Capital index/commodity bar strategy supports it
+        (``CAPITAL_BAR_STRATEGY_SYMBOLS``).
+
+    The tick engine STILL trades these symbols (its flow edge is untouched); the
+    bar strategies add a COMPLEMENTARY trend/breakout edge. The cross-producer
+    double-open backstop is the per-symbol RISK cap (sizing
+    ``per_symbol_remaining_pct``) which sums open_risk_pct over ``(venue,
+    symbol)`` across BOTH producers (both persist via the shared
+    ``reserve_and_submit`` → ``position_risk_state`` path). NOT a throttle — the
+    skip is NARROWED, never widened; no block / size-cut is introduced.
+    """
+    if (asset_class or "").strip().lower() == "forex":
+        return True
+    sym = (symbol or "").upper().replace("/", "").replace(".", "")
+    return sym in CAPITAL_BAR_STRATEGY_SYMBOLS
 
 
 def equity_session_entry_hold(
@@ -166,6 +216,7 @@ def _all_strategies() -> list[BaseStrategy]:
         TSMOMStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
+        EMACrossoverStrategy(),
         FXBreakoutBasketStrategy(),
         FXRangeFadeStrategy(),
         XAUIndicesTrendStrategy(),
@@ -357,7 +408,10 @@ async def _run_tick(
         # tune / WS-recv burst yields. No behavior change: no DB transaction spans
         # this point (each conn.execute here auto-commits).
         await asyncio.sleep(0)
-        bars_1m = read_recent_bars(conn, venue=venue, symbol=symbol, bar_interval="1m")
+        bars_1m = read_recent_bars(
+            conn, venue=venue, symbol=symbol, bar_interval="1m",
+            freshness_threshold_sec=staleness_threshold_for("1m"),
+        )
         if not bars_1m:
             continue
         regime_by_group[(venue, group_id)] = compute_and_flip_regime(
@@ -379,23 +433,40 @@ async def _run_tick(
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
     # site that bypassed ``supervise_strategies``.
     pipeline_specs: list[PipelineTaskSpec] = []
-    # P5 coexistence (no double-trade) — ASSET-CLASS-AWARE ROUTING. When the tick
-    # engine owns a venue (Capital), the bar entry path normally yields it so the
-    # two producers never race the SAME symbol. BUT the tick engine only fires its
-    # micro-structure signals (burst/ofi/reversion) on HIGH-vol Capital (indices /
-    # commodities / gold) — on low-vol FOREX those thresholds never trip, so FX got
-    # ZERO entries while its dedicated bar strategies (fx_breakout_basket /
-    # session_breakout) sat DEAD behind this skip (live: forex signals=0, opens=0).
-    # So forex is routed to the BAR pipeline (its real strategies) while the tick
-    # engine keeps the high-vol Capital scalping. flow_not_block: routes ownership
-    # by asset_class to the producer that actually trades it, never blocks edge.
+    # P5 coexistence — COMPLEMENTARY-EDGE ROUTING (Wave 1, ``keep_on_bar_path``).
+    # When the tick engine owns a venue (D3: OKX + Capital) the bar path yields a
+    # symbol ONLY when the tick engine is its sole effective producer. Two
+    # carve-outs keep a symbol ALSO on the bar pipeline (ADDITIVE — the tick
+    # engine still trades it; the bar strategies add a complementary edge):
+    #   * FOREX (Capital FX) — its micro-structure thresholds never trip so the
+    #     tick engine gave FX ZERO entries; its bar strategies (fx_breakout_basket
+    #     / session_breakout) own that edge (carve-out already done pre-Wave-1).
+    #   * Capital INDEX/COMMODITY symbols an ENABLED bar strategy supports
+    #     (``CAPITAL_BAR_STRATEGY_SYMBOLS``) — the prior skip VACATED all of them
+    #     to the tick engine, so xau_indices_trend (whole universe vacated → 0%
+    #     emit ceiling) sat dead and session_breakout lost US500/US100. The tick
+    #     engine's flow edge on these is intact; the bar strategies add the
+    #     donchian/momentum/session trend-breakout edge on the SAME symbol.
+    # Cross-producer double-open backstop = the per-symbol RISK cap (sizing
+    # ``per_symbol_remaining_pct``) which sums open_risk_pct over (venue, symbol)
+    # across BOTH producers (both persist via reserve_and_submit →
+    # position_risk_state). flow_not_block: the skip is NARROWED, never widened —
+    # no block / size-cut introduced.
+    # /DEBATE-FLAGGED (NOT applied this wave): scoping TICK_ENGINE_OWNED_VENUES to
+    # crypto/forex-vs-both-with-dedup (routing-ownership reframe) is a separate
+    # /debate decision — this wave keeps ownership as-is and only widens the bar
+    # carve-out.
     owns_okx = tick_engine_owns_okx()
     for timeframe, strategies_for_tf in strategies_by_tf.items():
         venues_for_tf = {s.metadata.venue for s in strategies_for_tf}
         for venue, symbol, asset_class, group_id in focus:
             if venue not in venues_for_tf:
                 continue
-            if owns_okx and venue in TICK_ENGINE_OWNED_VENUES and asset_class != "forex":
+            if (
+                owns_okx
+                and venue in TICK_ENGINE_OWNED_VENUES
+                and not keep_on_bar_path(asset_class=asset_class, symbol=symbol)
+            ):
                 continue
             # Cooperative yield (see the regime loop above). build_real_market_view
             # (indicators) + read_recent_bars per (symbol, timeframe, strategy) is
@@ -404,6 +475,7 @@ async def _run_tick(
             await asyncio.sleep(0)
             bars = read_recent_bars(
                 conn, venue=venue, symbol=symbol, bar_interval=timeframe,
+                freshness_threshold_sec=staleness_threshold_for(timeframe),
             )
             if len(bars) < 30:
                 continue
@@ -412,6 +484,11 @@ async def _run_tick(
                 venue=venue, symbol=symbol, timeframe=timeframe, bars=bars,
                 spread_bps=5.0, session_open_window=session_window_now(now_ts),
                 asset_class=asset_class,
+                # Alt-data wire (SIGNAL only): read the already-populated cache
+                # snapshot for this group → MarketView.altdata. No network; stale/
+                # absent/keyless → neutral no-op. NOT a block / throttle / size-cut.
+                altdata_cache=altdata_cache, underlying_group_id=group_id,
+                now_ts=now_ts,
             )
             for strategy in strategies_for_tf:
                 if strategy.metadata.venue != venue:
@@ -465,6 +542,16 @@ async def _run_tick(
                     "strength=%.3f sizing_hint=%.3f",
                     venue, symbol, strategy_id, timeframe, sig.side,
                     sig.strength, sig.sizing_hint,
+                )
+                # Persist the EMITTED signal so G2 output is queryable (the table
+                # was log-only → empty). Pure observability, FAIL-OPEN: a write
+                # error never blocks the tick. A no-emit (handled above) writes
+                # nothing. Feeds dashboard G2 visibility + learner expectancy.
+                persist_emitted_signal(
+                    conn, signal_id=sig.signal_id, venue=venue, symbol=symbol,
+                    strategy_id=strategy_id, side=sig.side, strength=sig.strength,
+                    timeframe=timeframe, ts=now_ts,
+                    correlation_group=sig.correlation_group, thesis=sig.thesis_tag,
                 )
                 # Component B anti-churn (2026-05-31). The entry key + the last
                 # actually-submitted entry on it (created_at_bar, side).
@@ -544,7 +631,9 @@ async def _run_tick(
                     _venue: str = venue, _symbol: str = symbol,
                     _asset_class: str = asset_class, _group_id: str = group_id,
                     _regime: str = regime, _atr_pct: float = mv.atr_pct,
-                    _last_price: float = mv.last_price,
+                    _last_price: float = live_or_bar_price(
+                        state.quote_writer, f"{venue}:{symbol}", mv.last_price,
+                    ),
                 ) -> Any:
                     return run_pipeline_for_signal(
                         conn=conn, haiku=haiku, state=state, strategy=_strategy,

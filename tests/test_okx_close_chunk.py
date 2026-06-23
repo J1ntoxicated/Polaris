@@ -383,3 +383,36 @@ async def test_close_dust_tail_no_submin_child_submitted() -> None:
     assert adapter.sell_base_qtys == pytest.approx([45.05, 45.05], rel=1e-9)
     assert all(q * 10.0 >= 10.0 for q in adapter.sell_base_qtys)
     assert fill.base_qty == pytest.approx(90.1, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Slippage stamping (execution-quality KPI — research agenda). The close fill
+# must record how far the realised exit drifted from the intended mark.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_fill_stamps_slippage_bps_against_mark() -> None:
+    """A close that fills at avgPx != mark_price stamps slippage_bps =
+    |avgPx - mark| / mark on the close Fill (was always 0 — KPI unmeasurable)."""
+    # Realised sell avgPx = 9.95 while the close was sized against mark 10.0 →
+    # 0.05/10 = 0.5% = 50 bps of adverse close slippage.
+    adapter = _CloseSplitOKX(price=9.95)
+    fill = await real_okx_close_fill(
+        adapter, inst_id="BTC-USDT", base_qty=50.0,  # single child (<=cap)
+        strategy_id="tsmom", mark_price=10.0, poll_delay_sec=0.0,
+    )
+    assert isinstance(fill, Fill)
+    assert fill.slippage_bps == pytest.approx(50.0, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_close_fill_no_mark_keeps_zero_slippage_behavior_zero() -> None:
+    """No mark_price → slippage stays 0.0 (cannot measure drift) — behaviour-0."""
+    adapter = _CloseSplitOKX(price=9.95)
+    fill = await real_okx_close_fill(
+        adapter, inst_id="BTC-USDT", base_qty=0.5,
+        strategy_id="tsmom", poll_delay_sec=0.0,
+    )
+    assert isinstance(fill, Fill)
+    assert fill.slippage_bps == 0.0

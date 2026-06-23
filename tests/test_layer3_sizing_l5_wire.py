@@ -25,7 +25,7 @@ from polaris.core.sizing.schema import (
     PortfolioState,
     StrategyRiskState,
 )
-from polaris.core.sizing.session import derive_session
+from polaris.core.sizing.session import derive_session, resolve_venue_session
 
 NOW = 1_715_000_000  # 2024-05-06 09:33:20 UTC → asia/eu overlap territory
 
@@ -145,7 +145,8 @@ def test_compute_size_no_learner_state(memdb: sqlite3.Connection) -> None:
 
 def test_compute_size_session_mult_promote(memdb: sqlite3.Connection) -> None:
     """2. session_mult value=1.1 (WR≥55% post-commit) → applied to notional."""
-    session_label = derive_session(NOW)
+    # Venue-native session (D2): the okx default intent buckets on "always_on".
+    session_label = resolve_venue_session("okx", NOW)
     _seed_learner_value(
         memdb, learner_id="session_mult",
         key=f"volume_burst:{session_label}", value=1.1,
@@ -191,7 +192,8 @@ def test_compute_size_triple_block_active(memdb: sqlite3.Connection) -> None:
 
 def test_compute_size_individual_clip(memdb: sqlite3.Connection) -> None:
     """5. Raw session_mult=10.0 → clipped to LEARNER_INDIVIDUAL_MULT_CLIP[1]=3.0."""
-    session_label = derive_session(NOW)
+    # Venue-native session (D2): the okx default intent buckets on "always_on".
+    session_label = resolve_venue_session("okx", NOW)
     # _upsert_state already clips on write, so bypass via direct INSERT with
     # raw 10.0 — but BaseLearner.get_mult also re-clips, so the engine sees 3.0.
     memdb.execute(
@@ -213,7 +215,8 @@ def test_compute_size_product_clip(memdb: sqlite3.Connection) -> None:
 
     Each individually clipped to 3.0, raw product = 27.0 → product clip to 5.0.
     """
-    session_label = derive_session(NOW)
+    # Venue-native session (D2): the okx default intent buckets on "always_on".
+    session_label = resolve_venue_session("okx", NOW)
     # Both learners at top of individual clip (3.0).
     memdb.execute(
         "INSERT INTO learner_state "
@@ -274,16 +277,17 @@ def test_session_derivation_utc_boundaries() -> None:
 
 
 def test_signal_intent_session_default_derived(memdb: sqlite3.Connection) -> None:
-    """8. SignalIntent.session=None → derive_session(now_ts) used at sizing time.
+    """8. SignalIntent.session=None → resolve_venue_session(venue, now_ts) used.
 
-    Seed session_mult for the *derived* session only; lookup should hit.
-    Use a ts deep in asia band (4 AM UTC).
+    Venue-native (D2): the okx intent buckets on "always_on" at every ts. Seed
+    session_mult for that venue-native bucket; lookup should hit regardless of
+    the UTC hour (24/7 crypto venue).
     """
     asia_ts = (NOW // 86400) * 86400 + 4 * 3600  # 04:00 UTC same day
-    assert derive_session(asia_ts) == "asia"
+    assert resolve_venue_session("okx", asia_ts) == "always_on"
     _seed_learner_value(
         memdb, learner_id="session_mult",
-        key="volume_burst:asia", value=1.2,
+        key="volume_burst:always_on", value=1.2,
     )
     sized = compute_size(
         memdb, intent=_intent(session=None), risk_state=_risk_state(),
@@ -302,7 +306,8 @@ def test_compute_size_disabled_learner_neutral(memdb: sqlite3.Connection) -> Non
     """
     from polaris.core.learners.session import SessionMultLearner
 
-    session_label = derive_session(NOW)
+    # Venue-native session (D2): the okx default intent buckets on "always_on".
+    session_label = resolve_venue_session("okx", NOW)
     _seed_learner_value(
         memdb, learner_id="session_mult",
         key=f"volume_burst:{session_label}", value=1.3,
@@ -322,7 +327,8 @@ def test_compute_size_disabled_learner_neutral(memdb: sqlite3.Connection) -> Non
 
 def test_sizing_proposal_audit_fields(memdb: sqlite3.Connection) -> None:
     """10. SizingProposal carries session_mult / regime_mult / triple_block_mult."""
-    session_label = derive_session(NOW)
+    # Venue-native session (D2): the okx default intent buckets on "always_on".
+    session_label = resolve_venue_session("okx", NOW)
     _seed_learner_value(
         memdb, learner_id="session_mult",
         key=f"volume_burst:{session_label}", value=1.15,

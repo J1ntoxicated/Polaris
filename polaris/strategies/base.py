@@ -56,6 +56,14 @@ class StrategyMetadata:
     # FSM, no fixed target) — all existing strategies are unchanged. EXPECTANCY: a
     # per-position close target, never a size dampen / entry block / halt.
     profit_target_r: float | None = None
+    # hold_overnight: EOD-flatten opt-OUT. The DEFAULT (False) flattens every
+    # position this strategy opens before its venue's market close (Jin's
+    # '청산이 기본 베이스' — liquidation is the base case). A strategy whose edge is
+    # genuinely multi-day (swing) sets True to KEEP its positions overnight. NOT
+    # ``expected_holding_bars`` (an advisory exit-timing hint, not a keep contract).
+    # Position lifecycle, never an entry block / size dampen (flow_not_block). OKX
+    # crypto is 24/7 and EOD-exempt regardless of this flag.
+    hold_overnight: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +98,40 @@ class BarView:
     close: float
     volume: float
     notional_usd: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class AltDataView:
+    """STRATEGY-VISIBLE alt-data numerics (additive SIGNAL context).
+
+    The load-bearing numeric alt-data fields the vault flags as edge-relevant,
+    mapped from the ``AltDataCache`` snapshot for the symbol's underlying group
+    by ``build_real_market_view``. Every field defaults to ``None`` = NEUTRAL
+    no-op, so a stale / absent / keyless cache reads as neutral and NEVER drives
+    a decision. These are SIGNAL fields for new-edge discovery + the entry probe
+    ensemble (ADR-013) — never a block / throttle / size-cut. No strategy reads
+    them yet, so populating them is byte-identical for every existing strategy.
+    """
+
+    funding_rate: float | None = None  # mean OKX perp funding (longs pay shorts >0)
+    open_interest: float | None = None  # summed OKX perp open interest (contracts)
+    oi_change_24h: float | None = None  # 24h OI delta (None — OKX public has none)
+    cot_net_spec_pctile: float | None = None  # CFTC large-spec net pctile (0..1)
+    vix: float | None = None  # CBOE VIX level (macro risk-off)
+    crypto_fear_greed: float | None = None  # 0=extreme fear .. 100=extreme greed
+    hy_spread: float | None = None  # ICE BofA US HY OAS (bps)
+
+    def is_neutral(self) -> bool:
+        """True when no field carries a value (a no-op view)."""
+        return (
+            self.funding_rate is None
+            and self.open_interest is None
+            and self.oi_change_24h is None
+            and self.cot_net_spec_pctile is None
+            and self.vix is None
+            and self.crypto_fear_greed is None
+            and self.hy_spread is None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +177,12 @@ class MarketView:
     ema_50: float | None = None
     ema_cross: float | None = None  # +1 fast>slow / -1 fast<slow / 0 equal
     trend_efficiency: float | None = None  # Kaufman ER over the window (0..1)
+    # STRATEGY-VISIBLE alt-data numerics (funding / OI / COT / VIX / fear-greed /
+    # HY). Additive SIGNAL context — default NEUTRAL (all None), so every existing
+    # strategy + caller is byte-identical. Populated per group by
+    # build_real_market_view from the AltDataCache snapshot; stale/absent/keyless
+    # → neutral no-op. No strategy reads it yet (probe-ensemble consumer is later).
+    altdata: AltDataView = field(default_factory=AltDataView)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +224,7 @@ class BaseStrategy(ABC):
 
 
 __all__ = [
+    "AltDataView",
     "BarView",
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",

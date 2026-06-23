@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 
 from polaris.core.isolation import (
     ACTIVE,
+    CB_HARD_HALT_AUTO_UNBLOCK_SEC,
     FAULT_EXCEPTION,
     FAULT_NAN,
     FAULT_REJECT,
@@ -484,8 +485,12 @@ def test_hard_halt_cannot_be_downgraded_by_soft(memdb: sqlite3.Connection) -> No
     for i in range(3):
         record_fault(memdb, strategy_id="vb", fault_type=FAULT_REJECT, now_ts=NOW + 10 + i)
     assert current_strategy_mode(memdb, "vb", now_ts=NOW + 100) == HARD_HALT
-    # And after the 15-min soft auto-unblock window the strategy must STILL be hard-halted.
-    assert current_strategy_mode(memdb, "vb", now_ts=NOW + 2 * 3600) == HARD_HALT
+    # After the 15-min SOFT auto-unblock window the strategy must STILL be
+    # HARD-halted (a later SOFT-tripping reject must never downgrade HARD). The
+    # HARD halt itself is now BOUNDED (flow_not_block) and auto-resumes only
+    # after CB_HARD_HALT_AUTO_UNBLOCK_SEC — assert within that window.
+    within_hard = NOW + CB_HARD_HALT_AUTO_UNBLOCK_SEC - 1
+    assert current_strategy_mode(memdb, "vb", now_ts=within_hard) == HARD_HALT
 
 
 def test_soft_halt_upgrade_to_hard_clears_soft(memdb: sqlite3.Connection) -> None:

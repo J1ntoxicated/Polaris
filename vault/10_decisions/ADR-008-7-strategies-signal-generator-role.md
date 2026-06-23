@@ -4,16 +4,19 @@ adr_id: ADR-008
 aliases: [ADR-008]
 status: active
 date_created: 2026-05-06
+date_updated: 2026-06-22
 tags: [adr, strategies, signal-generator]
 related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (round 3 D1 + Jin clarification 21:30)
 ---
 
-# ADR-008 — 7 Strategies (Signal Generator Role Only)
+# ADR-008 — 11 Strategies (Signal Generator Role Only)
+
+> 📌 **UPDATE 2026-06-22**: live registry는 **11 strategies** (원안 7 + equity 트랙 추가: fx_range_fade, equity_tsmom, equity_rsi_bb, equity_gap_go). SSOT = `polaris/strategies/__init__.py` STRATEGY_REGISTRY.
 
 ## Decision
 
-7 P1 strategies 동시 활성 (P1.0 day 1). 각 strategy 역할 = **`generate_raw_signal(market_view) → RawSignal | None` 만**. Lifecycle 결정 (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]).
+11 strategies 동시 활성 (P1.0 day 1 = 7, 이후 Alpaca equity 트랙 4 추가 → 11). 각 strategy 역할 = **`generate_raw_signal(market_view) → RawSignal | None` 만**. Lifecycle 결정 (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]).
 
 ## Role Redefinition
 
@@ -35,7 +38,7 @@ class Strategy(ABC):
 
 Lifecycle = [[ADR-004-per-gate-ai-pipeline|ADR-004]] 8 gate. Strategy 는 signal 만 emit, 나머지는 AI 가 결정.
 
-## 7 Strategies
+## 11 Strategies
 
 ### Track A — OKX SPOT (4)
 
@@ -53,6 +56,17 @@ Lifecycle = [[ADR-004-per-gate-ai-pipeline|ADR-004]] 8 gate. Strategy 는 signal
 | 5 | [[fx_breakout_basket]] | EURUSD, GBPUSD, AUDUSD, USDJPY, USDCAD | Donchian 40 + ADX>20 | 30× | 12%/pair × 5 = 36% | cfd_fx_trend |
 | 6 | [[xau_indices_trend]] | XAUUSD, US500, US100, GER40 | Donchian 30 + 20d momentum | 20× | 16%/sym × 4 = 40% | cfd_index_commodity_trend |
 | 7 | [[session_breakout]] | US500, US100, EURUSD, GBPUSD | open ATR×1.5 break | 20× | 10%/trade × 20% concurrent | cfd_session_event |
+| 8 | [[fx_range_fade]] | FX majors | BB extreme touch → middle reversion (fade) | per-pair | 12%/pair | cfd_fx_meanrev |
+
+### Track C — Alpaca US equity SPOT (3)
+
+| # | Strategy | Trigger | Timeframe | Per-strategy cap | Correlation group |
+|---|---|---|---|---|---|
+| 9 | [[equity_tsmom]] | cross-sect equity momentum basket | 1D | (registry SSOT) | equity_cross_sectional_momo |
+| 10 | [[equity_rsi_bb]] | RSI<30 + BB lower touch + trend filter | 15m/1D | (registry SSOT) | equity_mean_reversion |
+| 11 | [[equity_gap_go]] | US RTH open gap continuation | open bar | (registry SSOT) | equity_gap_event |
+
+> caps/correlation 정확값 = `polaris/strategies/__init__.py` + StreamConfig SSOT (이 표는 역할/식별 목적).
 
 ## RawSignal Schema
 
@@ -119,7 +133,7 @@ polaris/strategies/
 
 ## P1.0 Day 1 동시 활성
 
-7 strategy 모두 day 1 동시 활성 ([[ADR-003-8-layer-architecture|ADR-003]] Layer 7 isolation 보장):
+7 strategy day 1 동시 활성 → 이후 equity 트랙 4 추가로 **11** ([[ADR-003-8-layer-architecture|ADR-003]] Layer 7 isolation 보장):
 - Per-strategy worker (Layer 7 mechanism 1)
 - Per-strategy circuit breaker (mechanism 4)
 - Idempotent order keys (mechanism 6)

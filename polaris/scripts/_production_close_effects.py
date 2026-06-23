@@ -45,6 +45,7 @@ from polaris.core.pipeline.gate_state import (
     GateContext,
     SignalLifecycle,
 )
+from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams import resolve_stream, resolve_stream_profile
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._smoke_fills import SimulatedTrade
@@ -110,7 +111,11 @@ def _safe_update_cell_matrix(
                     # Stream SSOT (design §2.1): okx→spot, capital→cfd, identical
                     # to the prior venue-binary literal.
                     group=resolve_stream(trade.venue).product_class,
-                    session="asia", direction=trade.side,
+                    # Venue-native session (D2): real per-venue bucket, not a
+                    # hardcoded "asia" — so the cell matrix + session learner
+                    # see a meaningful split instead of a pinned floor.
+                    session=resolve_venue_session(trade.venue, now_ts),
+                    direction=trade.side,
                     liquidity_tier="top",
                 ),
                 pnl_r=pnl_r, won=won, closed_ts=now_ts,
@@ -140,7 +145,10 @@ def _safe_run_learners(
     closed_record = ClosedTrade(
         trade_id=trade.signal_id, strategy_id=trade.strategy_id,
         ticker=trade.symbol, venue=trade.venue, regime=regime,
-        session="asia", pnl_r=pnl_r, won=won, holding_bars=20, closed_ts=now_ts,
+        # Venue-native session (D2): the session_mult learner now buckets on the
+        # REAL per-venue session instead of a constant "asia" floor.
+        session=resolve_venue_session(trade.venue, now_ts),
+        pnl_r=pnl_r, won=won, holding_bars=20, closed_ts=now_ts,
     )
     for learner in sched.learners:
         try:
@@ -185,6 +193,43 @@ def _safe_record_meta_label(
     except Exception as exc:  # noqa: BLE001 — collection-only side effect, fail-open
         logger.warning(
             "[meta-label] label record failed %s:%s: %r",
+            trade.venue, trade.symbol, exc,
+        )
+
+
+def _safe_backfill_probe_outcome(
+    *, state: ProdLoopState, trade: SimulatedTrade, pnl_r: float,
+    mfe_r: float, mae_r: float, now_ts: int,
+) -> None:
+    """ADR-012 — fill the probe tuning-log outcome cols for this closed position.
+
+    Collection-only, FAIL-OPEN (mirrors ``_safe_record_meta_label``): writes to
+    the SEPARATE ``state.probe_conn`` sidecar (never the live DB) so the offline
+    /debate calibration can join the observe-mode would-be decisions to the
+    realized outcome. No-op when there is no position_id / no sidecar. Never
+    gates sizing/exits; a backfill failure must never abort an already-committed
+    close.
+    """
+    probe_conn = getattr(state, "probe_conn", None)
+    position_id = trade.position_id
+    if probe_conn is None or not position_id:
+        return
+    try:
+        from polaris.core.probes.tuning_log import (  # noqa: PLC0415
+            backfill_probe_outcome,
+        )
+
+        time_to_exit = max(0, now_ts - getattr(trade, "open_ts", now_ts))
+        backfill_probe_outcome(
+            probe_conn, position_id=str(position_id), realized_pnl_r=pnl_r,
+            close_reason=getattr(trade, "close_reason", "") or "exit",
+            mfe_r_final=mfe_r, mae_r_final=mae_r,
+            giveback_r=max(0.0, mfe_r - pnl_r), time_to_exit_sec=time_to_exit,
+            outcome_ts=now_ts,
+        )
+    except Exception as exc:  # noqa: BLE001 — collection-only, fail-open
+        logger.warning(
+            "[probe] outcome backfill failed %s:%s — close unaffected: %r",
             trade.venue, trade.symbol, exc,
         )
 

@@ -9,7 +9,9 @@ related: [[ADR-004]]
 model: claude-haiku-4-5
 ---
 
-# pre-entry-watcher (Gate 4, Haiku, 30s loop)
+# pre-entry-watcher (Gate 4, 30s loop)
+
+> ⚠️ **AI-FREE IN-LOOP (W3 cutover, [[ADR-011]])**: G4 runtime = **deterministic Python primary** (the `model: claude-haiku-4-5` field is historical/dev-spawn only — **Anthropic blocked for runtime, in-loop GPT=0**). GPT = shadow/sentinel only.
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

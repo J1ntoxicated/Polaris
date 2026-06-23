@@ -167,12 +167,18 @@ async def _okx_sell_child(
     base_qty: float,
     strategy_id: str,
     poll_delay_sec: float,
+    expected_price: float | None = None,
 ) -> Fill | None:
     """One market SELL child (base_qty <= cap/mark): place → poll → normalize.
 
     Returns the normalized close ``Fill`` on a (partial) fill, or ``None`` when
     the venue rejected the order or it never filled (EXTERNAL — caller stops
     splitting and aggregates whatever filled; never raises).
+
+    ``expected_price`` (the fresh mark the close was sized against) is threaded
+    into ``normalize_okx_fill`` so the close fill stamps ``slippage_bps`` =
+    |avgPx − mark| / mark — the execution-quality KPI (how far the realised exit
+    drifted from the intended mark). ``None`` keeps the prior 0-bps stamping.
     """
     sell_resp = await adapter.place_market_order(
         inst_id=inst_id,
@@ -209,7 +215,9 @@ async def _okx_sell_child(
     if order_state not in ("filled", "partially_filled"):
         # Non-fill venue state (e.g. canceled) — EXTERNAL no-fill, not a fault.
         return None
-    return normalize_okx_fill(rows[0], strategy_id=strategy_id)
+    return normalize_okx_fill(
+        rows[0], strategy_id=strategy_id, expected_price=expected_price
+    )
 
 
 def _split_close_base_qty(base_qty: float, mark_price: float) -> list[float]:
@@ -319,6 +327,7 @@ async def real_okx_close_fill(
         return await _okx_sell_child(
             adapter, inst_id=inst_id, base_qty=chunks[0],
             strategy_id=strategy_id, poll_delay_sec=poll_delay_sec,
+            expected_price=mark_price,
         )
     filled: list[Fill] = []
     mark = mark_price or 0.0
@@ -331,6 +340,7 @@ async def real_okx_close_fill(
         child = await _okx_sell_child(
             adapter, inst_id=inst_id, base_qty=child_base,
             strategy_id=strategy_id, poll_delay_sec=poll_delay_sec,
+            expected_price=mark_price,
         )
         if child is not None:
             filled.append(child)

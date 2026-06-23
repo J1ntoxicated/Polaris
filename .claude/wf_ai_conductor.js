@@ -13,7 +13,7 @@ const HEADER = `[Polaris context — 반드시 준수]
 - 거부 키워드(등장 시 무효, 채택 금지): 12주·90d gate·monthly review·regulatory cap·professional risk·real-money safety·fractional Kelly too aggressive·posture standard·표본부족 risk.
 - 불변: 9-stack collapse 봉쇄(사이징 체인 1 mult 누적 금지)·hard-MAX headroom·DEMO only.
 - AI 제공자: 봇 LLM=GPT(OpenAI, gpt-5-mini P0/gpt-5.5 P1), 교차검증=Gemini. Anthropic/Claude 호출 금지.
-- 코드 경로: /Volumes/Development/Projects/Polaris. 반드시 실제 파일을 Read 해서 근거를 들 것(추측 금지).
+- 코드 경로: /Users/jinyoon/Projects/Polaris. 반드시 실제 파일을 Read 해서 근거를 들 것(추측 금지).
 - 출력은 raw 데이터(return value). 장황한 산문 금지, 핵심만.`
 
 const CONTEXT = `[Jin 핵심 질문] "테크니컬하게 데이터 스트림으로 결정 가능하게 만들고, AI는 총괄 지휘하는 느낌 — 구조상 가능한가?"

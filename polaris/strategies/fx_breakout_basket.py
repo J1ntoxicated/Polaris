@@ -27,7 +27,12 @@ from polaris.strategies.base import (
 
 WINDOW = 40
 ADX_PERIOD = 14
-ADX_THRESHOLD = 20.0
+# /debate-confirmable (Jin veto): widened 20.0 -> 15.0 to cover the mid-ADX
+# [15,25] dead seam where a pair (live: EURUSD 27.3 / GBPUSD 22.7) matched
+# NEITHER breakout (>thresh) nor fade (<max). Lower threshold = MORE breakout
+# signals (aggressive / flow_not_block); the fade max rises to 25.0 in tandem so
+# [15,25] is covered by BOTH (they compete; arbitration ranks them downstream).
+ADX_THRESHOLD = 15.0  # old: 20.0
 BASKET_SYMBOLS: frozenset[str] = frozenset(
     {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD"}
 )

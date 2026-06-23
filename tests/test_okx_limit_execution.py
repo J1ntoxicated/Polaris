@@ -160,6 +160,75 @@ async def test_strong_signal_skips_limit_goes_market() -> None:
 
 
 # ---------------------------------------------------------------------------
+# (3b) flow_pressure RE-AIM (lever 3): prefer_maker forces the maker-first
+# (post-only at touch → TAKER fallback) path EVEN for a strong signal that would
+# otherwise skip straight to market — OFI momentum pays 8 bps when it can rest,
+# and NEVER misses the trade (post-only would-cross/reject → taker fallback).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefer_maker_posts_post_only_even_on_strong_signal() -> None:
+    # Strong strength (1.6) would normally skip to market; prefer_maker routes it
+    # through post_only first, and here the maker rests + fills (8 bps, no cross).
+    adapter = _FakeOKX(place_resp=_resp(), waiting_row=_row(state="filled"))
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="flow_pressure", last_price=60_000.0, strength=1.6,
+        poll_delay_sec=0.0, prefer_maker=True,
+    )
+    assert isinstance(attempt.fill, Fill)
+    # Maker-first: the ONLY place is post_only (it filled at the touch).
+    assert len(adapter.place_calls) == 1
+    assert adapter.place_calls[0]["ord_type"] == "post_only"
+    assert adapter.place_calls[0]["last_price_hint"] == 59_999.0  # best bid touch
+    assert adapter.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_prefer_maker_falls_back_to_taker_on_would_cross() -> None:
+    # post_only rejected (would cross the book) — the trade must STILL fill via the
+    # taker market fallback (flow_not_block: cheaper when possible, never missed).
+    rejected = _resp(ok=False, code="51020")  # post_only would-cross reject
+
+    class _RejectThenMarket(_FakeOKX):
+        async def place_market_order(self, **kwargs: Any) -> Any:
+            self.place_calls.append(kwargs)
+            if kwargs["ord_type"] == "post_only":
+                return rejected
+            self._market_placed = True
+            return _resp(ord_id="mkt_1")
+
+    adapter = _RejectThenMarket(
+        place_resp=_resp(), market_row=_row(state="filled"),
+    )
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="flow_pressure", last_price=60_000.0, strength=1.6,
+        poll_delay_sec=0.0, prefer_maker=True,
+    )
+    # NEVER a no-fill: the post_only would-cross fell back to a taker market fill.
+    assert isinstance(attempt.fill, Fill)
+    ord_types = [c["ord_type"] for c in adapter.place_calls]
+    assert ord_types == ["post_only", "market"]
+
+
+@pytest.mark.asyncio
+async def test_prefer_maker_false_keeps_strong_signal_market_path() -> None:
+    # Default (prefer_maker=False) — a strong signal still skips to market
+    # (byte-identical to the pre-retune behaviour for every other caller).
+    adapter = _FakeOKX(place_resp=_resp(), market_row=_row(state="filled"))
+    attempt = await real_okx_open_fill(
+        adapter, inst_id="BTC-USDT", notional_usd=100.0,
+        strategy_id="burst_rider", last_price=60_000.0, strength=1.6,
+        poll_delay_sec=0.0, prefer_maker=False,
+    )
+    assert isinstance(attempt.fill, Fill)
+    assert len(adapter.place_calls) == 1
+    assert adapter.place_calls[0]["ord_type"] == "market"
+
+
+# ---------------------------------------------------------------------------
 # (4) limit path raises → fail-safe market fallback still fills the entry
 # ---------------------------------------------------------------------------
 

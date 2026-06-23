@@ -12,11 +12,13 @@ import time
 from pathlib import Path
 
 from polaris.core.economics.fees import real_fee_usd
-from polaris.core.pipeline.agents.confidence import (
-    PNL_R_USD_DENOM,
-    confidence_summary,
-)
+from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.pipeline.agents.confidence import confidence_summary
 from polaris.storage.schema import ALL_DDL
+
+# Step N: per-trade R is now the stream-common R_budget(venue), not the flat
+# proxy. All seeded trades below are OKX → R_budget = 0.02 × $79k = $1,580.
+_OKX_R_BUDGET = r_budget_for_venue("okx")
 
 
 def _mkdb(tmp_path: Path) -> Path:
@@ -120,18 +122,21 @@ def test_overall_win_rate_profit_factor_turnover(tmp_path: Path) -> None:
     assert abs(ov["profit_factor"] - 6.0) < 1e-9
     # turnover = Σ all-fill notional = 8 legs * 1000 = 8000; ratio = 8000/100000
     assert abs(ov["turnover_ratio"] - (8000.0 / 100_000.0)) < 1e-9
-    # fee drag: demo = 8 legs * 7.0 / 50 ; real = 8 legs * (10bps*1000=1.0) / 50
-    assert abs(ov["fee_drag_demo_r"] - (8 * 7.0 / PNL_R_USD_DENOM)) < 1e-9
+    # fee drag (Step N, stream-common R_budget(okx)): demo = 8 legs * 7.0 /
+    # R_budget ; real = 8 legs * (10bps*1000=1.0) / R_budget
+    assert abs(ov["fee_drag_demo_r"] - (8 * 7.0 / _OKX_R_BUDGET)) < 1e-9
     real_leg = real_fee_usd("okx", 1000.0)  # 1.0
-    assert abs(ov["fee_drag_real_r"] - (8 * real_leg / PNL_R_USD_DENOM)) < 1e-9
+    assert abs(ov["fee_drag_real_r"] - (8 * real_leg / _OKX_R_BUDGET)) < 1e-9
 
 
 def test_per_strategy_regime_real_fee_net_r_and_lcb(tmp_path: Path) -> None:
     db_path = _mkdb(tmp_path)
     conn = sqlite3.connect(db_path, isolation_level=None)
     base = int(time.time() * 1000)
-    # All tsmom in bull_trend; consistent +$100 gross wins → positive net R and
-    # an LCB that should be positive with enough samples.
+    # All tsmom in bull_trend; consistent +$3200 gross wins → positive net R and
+    # an LCB that should be positive with enough samples. (Step N: R is now
+    # scaled by R_budget(okx)=$1,580, so a meaningful ≈+2R edge needs a ~$3.2k
+    # gross win rather than the old $100 — same edge-confidence intent.)
     for i in range(12):
         pid = f"p{i}"
         _insert_position(conn, pid=pid, venue="okx", symbol="HYPE-USDT",
@@ -143,7 +148,7 @@ def test_per_strategy_regime_real_fee_net_r_and_lcb(tmp_path: Path) -> None:
                      contribution_id=pid)
         _insert_fill(conn, fill_id=f"c{i}", venue="okx", symbol="HYPE-USDT",
                      strategy="tsmom", side="sell", size_usd=1000.0,
-                     pnl_usd=100.0, fee_usd=7.0, is_close=1,
+                     pnl_usd=3200.0, fee_usd=7.0, is_close=1,
                      ts_ms=base + i * 10 + 5, contribution_id=pid)
     _insert_regime(conn, venue="okx", group_id="g1", regime="bull_trend")
     conn.close()
@@ -160,8 +165,8 @@ def test_per_strategy_regime_real_fee_net_r_and_lcb(tmp_path: Path) -> None:
     assert cell["strategy_id"] == "tsmom"
     assert cell["regime"] == "bull_trend"
     assert cell["n"] == 12
-    # net real-fee R per trade = (100 - 2*1.0) / 50 = 1.96
-    assert abs(cell["expected_real_fee_net_r"] - (98.0 / PNL_R_USD_DENOM)) < 1e-6
+    # net real-fee R per trade (Step N) = (3200 - 2*1.0) / R_budget(okx)
+    assert abs(cell["expected_real_fee_net_r"] - (3198.0 / _OKX_R_BUDGET)) < 1e-6
     # consistent positive sample → LCB strictly positive (edge confidence).
     assert cell["lcb_real_fee_net_r"] > 0.0
     assert cell["lcb_real_fee_net_r"] <= cell["expected_real_fee_net_r"] + 1e-9

@@ -32,6 +32,17 @@
       ? `<div class="row" style="grid-template-columns:1fr;color:var(--p-dim);font-size:9px">scope ${esc(sc)} — cross-venue metric (all venues)</div>`
       : '';
   }
+  // in-loop GPT calls/h across all gates (W3 cutover target = 0). When 0 the
+  // core is running AI-free, so GPT/shadow panels are empty BY DESIGN — render
+  // a calm explanatory note instead of a blank panel.
+  function inLoopGptH(d) {
+    return (d.gpt_stats || []).reduce((a, g) => a + (g.calls_per_h || 0), 0);
+  }
+  function aiFreeNote(d) {
+    return inLoopGptH(d) === 0
+      ? '<div class="empty">AI-FREE · in-loop GPT disabled (W3 deterministic cutover) — GPT runs async shadow/sentinel only</div>'
+      : null;
+  }
 
   // ── TAB 5 · EXIT ──────────────────────────────────────────────────────────
   function renderExit(d) {
@@ -97,7 +108,7 @@
           <span class="num" style="${okStyle}">${ok.toFixed(0)}%</span>
           <span class="num b-flat">${fmtUsd(g.cost_24h_proj_usd, 2)}</span>
         </div>`;
-      }).join('') : '<div class="empty">deterministic · no GPT calls (1h)</div>');
+      }).join('') : (aiFreeNote(d) || '<div class="empty">deterministic · no GPT calls (1h)</div>'));
     }
     // Conductor shadow agreement + admission summary
     const ai = d.ai_shadow || {};
@@ -114,7 +125,7 @@
           <span class="hbar ${r.n ? barCls : ''}"><i style="width:${r.n ? ag.toFixed(0) : 0}%"></i></span>
           <span class="num b-flat">${r.n ? ag.toFixed(0) + '%' : '—'}${noGpt}</span>
         </div>`;
-      }).join('') : '<div class="empty">no shadow events (1h)</div>';
+      }).join('') : (aiFreeNote(d) || '<div class="empty">no shadow events (1h)</div>');
       const tot = ai.admission_total_n || 0, sup = ai.admission_suppress_n || 0;
       const supPct = tot ? (sup / tot * 100) : 0;
       html += `<div class="row" style="grid-template-columns:1fr;color:var(--polaris-blue);font-weight:700;margin-top:4px">Entry-Admission Shadow (would-suppress)</div>`
@@ -303,7 +314,10 @@
         <span class="num ${cls}">${(c.score || 0).toFixed(3)}</span>
         <span class="num b-flat">${(c.mult || 1).toFixed(1)}×</span>
       </div>`;
-    }).join('');
+    }).join('')
+      // top cells present but no bottom (low-EV) cells → say so, don't look broken.
+      + (top.length && !bot.length
+        ? '<div class="empty" style="text-align:left">no low-EV cells in window</div>' : '');
   }
   function renderAlerts(d) {
     const alerts = (d.alerts || []).slice(0, 12);
@@ -330,9 +344,588 @@
     }).join('') : '<div class="empty">no admission-shadow rows (1h)</div>');
   }
 
-  // ── register EXIT / AI / EDGE / RISK into the shared dispatch ──────────────
-  T.register('exit', renderExit);
-  T.register('ai', renderAi);
-  T.register('edge', (d) => { renderEquity(d); renderConfidence(d); renderBenchmark(d); renderEdge(d); });
-  T.register('risk', (d) => { renderRotation(d); renderCells(d); renderAlerts(d); renderRiskAdmit(d); });
+  // ── CSS for the 5 new sub-renderers (2026-06-22 composite redesign) ───────
+  // Uses ONLY the existing #board palette tokens (no new colours). Display-only.
+  const EXT_CSS = `
+  /* gate DECISIONS (활동) — G1→G8 one dense line: what each gate decided. */
+  #board .gd { display: grid; grid-template-columns: 116px 1fr 44px; align-items: baseline; gap: 8px; padding: 3px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
+  #board .gd .nm { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .gd .nm .sub { color: var(--p-dim); font-size: 9px; font-weight: 400; margin-left: 4px; }
+  #board .gd .hl { color: var(--p-grn); font-variant-numeric: tabular-nums; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .gd .cnt { text-align: right; font-variant-numeric: tabular-nums; font-size: 10px; color: var(--p-dim); white-space: nowrap; }
+  /* per-ticker R (퍼포먼스) — sign-tinted sparse rows. */
+  #board .tk-r { display: grid; grid-template-columns: 1fr 70px; align-items: center; gap: 8px; padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
+  #board .tk-r .nm { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .tk-r .nm .sub { color: var(--p-dim); font-size: 9px; font-weight: 400; margin-left: 5px; }
+  #board .tk-r .rv { text-align: right; font-variant-numeric: tabular-nums; }
+  /* learner tremor (로직) — center-anchored |Δ1h| bar. */
+  #board .lrn { display: grid; grid-template-columns: 1fr 70px 58px; align-items: center; gap: 8px; padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08); }
+  #board .lrn .nm { color: var(--p-wht); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .lrn .nm .sub { color: var(--p-dim); font-size: 9px; margin-left: 4px; }
+  #board .lrn .trem { position: relative; height: 7px; background: rgba(95,135,175,0.12); }
+  #board .lrn .trem .mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.18); }
+  #board .lrn .trem i { position: absolute; top: 0; bottom: 0; }
+  #board .lrn .trem i.up { left: 50%; background: var(--p-grn); }
+  #board .lrn .trem i.dn { right: 50%; background: var(--p-red); }
+  /* AI-free banner (로직). */
+  #board .aifree-banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    border: 1px solid rgba(95,135,175,0.22); border-left: 4px solid var(--p-grn);
+    background: rgba(15,19,26,0.55); padding: 5px 12px; font-size: 11px; min-width: 0; }
+  #board .aifree-banner.has-gpt { border-left-color: var(--p-ylw); }
+  #board .aifree-banner .af-title { font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--p-grn); }
+  #board .aifree-banner.has-gpt .af-title { color: var(--p-ylw); }
+  #board .aifree-banner .af-kv { white-space: nowrap; }
+  #board .aifree-banner .af-kv .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #board .aifree-banner .af-kv .lv { font-variant-numeric: tabular-nums; color: var(--p-wht); font-weight: 700; }
+  /* decision pathway (로직) — one scannable line per active decision flow.
+     strategy · regime · exit-style · venue · cell mult · edge. Monospace,
+     pipe-separated, dense rows. No card chrome. */
+  #board .pw { display: grid; grid-template-columns: 1fr 56px 64px; align-items: center; gap: 10px;
+    padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08);
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+  #board .pw .flow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--p-gry); }
+  #board .pw .flow .sym { color: var(--p-wht); font-weight: 700; }
+  #board .pw .flow .strat { color: var(--p-cyn); }
+  #board .pw .flow .rgm { color: var(--p-mag); }
+  #board .pw .flow .exit { color: var(--p-ylw); }
+  #board .pw .flow .ven { color: var(--p-dim); }
+  #board .pw .flow .sep { color: var(--ghost); margin: 0 5px; }
+  #board .pw .mlt { text-align: right; color: var(--p-wht); }
+  #board .pw .edge { text-align: right; }
+  /* (g) live gate-activity feed — dense text ticker, newest first.
+     'G# · PASS/KILL · strategy ticker · reason · hh:mm:ss'. PASS green / KILL red.
+     Monospace columns, no card chrome. */
+  #board .gate-feed { font-size: 10.5px; }
+  #board .gf-row { display: grid; grid-template-columns: 30px 38px 1fr 84px;
+    align-items: baseline; gap: 8px; padding: 1.5px 10px;
+    border-bottom: 1px dotted rgba(95,135,175,0.08);
+    white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
+  #board .gf-row .g { color: var(--p-cyn); font-weight: 700; }
+  #board .gf-row .v { font-weight: 700; letter-spacing: 0.06em; }
+  #board .gf-row .v.pass { color: var(--p-grn); }
+  #board .gf-row .v.kill { color: var(--p-red); }
+  #board .gf-row .v.other { color: var(--p-ylw); }
+  #board .gf-row .v.info { color: var(--p-cyn); }
+  #board .gf-row .what .det { color: var(--p-ylw); font-variant-numeric: tabular-nums; font-weight: 600; }
+  #board .gf-row .what { overflow: hidden; text-overflow: ellipsis; color: var(--p-gry); }
+  #board .gf-row .what .sym { color: var(--p-wht); font-weight: 700; }
+  #board .gf-row .what .strat { color: var(--p-cyn); }
+  #board .gf-row .what .why { color: var(--p-dim); }
+  /* enriched detail: gate label + per-symbol venue colour chip in the activity row. */
+  #board .gf-row .what .glbl { color: var(--polaris-blue); font-size: 9px; letter-spacing: 0.04em; }
+  #board .gf-row .what .gv { font-size: 8.5px; font-weight: 700; letter-spacing: 0.06em;
+    padding: 0 3px; border-left: 2px solid var(--p-dim); color: var(--p-dim); }
+  #board .gf-row .what .gv.lane-a { color: var(--stream-a); border-left-color: var(--stream-a); }
+  #board .gf-row .what .gv.lane-b { color: var(--stream-b); border-left-color: var(--stream-b); }
+  #board .gf-row .what .gv.lane-c { color: var(--stream-c); border-left-color: var(--stream-c); }
+  /* probe event INSIDE the gate feed — ⊙ marker in the gate slot + cyan PROBE
+     verdict; probe name reuses the .glbl label style. */
+  #board .gf-row .g.gprobe { color: var(--p-cyn); }
+  #board .gf-row .v.probe { color: var(--p-cyn); }
+  #board .gf-row .t { text-align: right; color: var(--p-dim); }
+  /* (h) active-strategy group (로직) — strategy header row + per-regime children.
+     Each row binds regime explicitly + shows open count / uPnL / size. The
+     strategy description (graceful) sits dim under the header. */
+  #board .sg-head { display: grid; grid-template-columns: 1fr 54px 84px; align-items: baseline; gap: 8px;
+    padding: 3px 10px 1px; border-bottom: 1px solid var(--ghost); }
+  #board .sg-head .nm { color: var(--p-cyn); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #board .sg-head .k { color: var(--p-dim); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; text-align: right; }
+  #board .sg-head .pnl { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+  #board .sg-desc { color: var(--p-dim); font-size: 9px; padding: 0 10px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #board .sg-child { display: grid; grid-template-columns: 14px 1fr 110px 70px; align-items: baseline; gap: 8px;
+    padding: 1px 10px 1px 16px; border-bottom: 1px dotted rgba(95,135,175,0.08);
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+  #board .sg-child .rgm { color: var(--p-mag); overflow: hidden; text-overflow: ellipsis; }
+  #board .sg-child .sym { color: var(--p-wht); font-weight: 700; }
+  #board .sg-child .held { color: var(--p-dim); font-size: 9px; margin-left: 6px; }
+  #board .sg-child .pnl { text-align: right; }
+  #board .sg-child .bullet { color: var(--ghost); }
+  /* (h) active exits (로직) — exit-FSM left 'open' → state + why, regime bound. */
+  #board .ax-row { display: grid; grid-template-columns: 1fr 84px 1fr 70px; align-items: baseline; gap: 8px;
+    padding: 2px 10px; border-bottom: 1px dotted rgba(95,135,175,0.08);
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+  #board .ax-row .sym { color: var(--p-wht); font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+  #board .ax-row .sym .strat { color: var(--p-cyn); font-weight: 400; font-size: 9px; margin-left: 5px; }
+  #board .ax-row .st { color: var(--p-ylw); font-weight: 700; letter-spacing: 0.04em; text-align: right; }
+  #board .ax-row .why { color: var(--p-gry); overflow: hidden; text-overflow: ellipsis; }
+  #board .ax-row .why .rgm { color: var(--p-mag); }
+  #board .ax-row .pnl { text-align: right; }
+  /* P3 placeholder panes (개발 / 가야할길 / 배운것). */
+  #board .ph { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 7px; color: var(--p-dim); text-align: center; }
+  #board .ph .ph-icon { font-size: 20px; color: var(--ghost); letter-spacing: 0.3em; }
+  #board .ph .ph-msg { font-size: 11px; letter-spacing: 0.06em; }
+  #board .ph .ph-ep { font-size: 9px; color: var(--p-dim); letter-spacing: 0.10em; text-transform: uppercase; }
+  `;
+  (function injectExtStyle() {
+    const s = document.createElement('style');
+    s.id = 'board-tabs-ext-style';
+    s.textContent = EXT_CSS;
+    document.head.appendChild(s);
+  })();
+
+  // ── gate DECISIONS (활동) — d.gate_decisions[] per-gate meaningful output ────
+  // Replaces the old pass/kill funnel. The bot is flow_not_block — gates never
+  // block, so a pass/kill ratio was forever 100% / zero-information. Each row now
+  // shows what that gate actually DECIDED for the window: G1 focus/excluded,
+  // G2 signals fired, G5 the SIZE + tier mix, G6 N monitored + mode, G7 exit
+  // action + reason, G8 lesson mix. One dense line per gate (no bar, no card).
+  function renderGateFunnel(d) {
+    const rows = d.gate_decisions || [];
+    const body = $('gate-funnel'); if (!body) return;
+    setCnt('gate-funnel-cnt', rows.length);
+    if (!rows.length) { body.innerHTML = '<div class="empty">no gate decisions (1h)</div>'; return; }
+    body.innerHTML = rows.map(g => {
+      return `<div class="gd" title="G${g.gate_id} ${esc(g.label)} · ${esc(g.headline)} · n=${g.n}">
+        <span class="nm">G${g.gate_id}<span class="sub">${esc(g.label)}</span></span>
+        <span class="hl">${esc(g.headline || '—')}</span>
+        <span class="cnt">${g.n}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · (g) live gate-activity feed (활동) — d.recent_gate_events[] ──────
+  // Graceful when absent (backend builder adds the field later): shows a quiet
+  // 'no gate events yet' line instead of erroring. Format per row:
+  //   G# · PASS/KILL · strategy ticker · reason · hh:mm:ss   (newest first)
+  // KILL red / PASS green. Field names bound defensively (decision|verdict|action,
+  // strategy_id|strategy, symbol|ticker, reason|note, ts|ts_unix).
+  // flow_not_block: gates emit meaningful decisions, not pass/kill. Keep the
+  // verbatim decision verb and colour it by FAMILY — green for pass-through
+  // (PASS/PROCEED/SIZED/REFLECTED), info-cyan for steady HOLD, amber for an
+  // active intervention (ADJUST_EXIT/SWAP), red ONLY for a hard exit (EXIT_NOW).
+  function gateVerdict(e) {
+    const raw = String(e.decision || e.verdict || e.action || '').toUpperCase();
+    if (!raw) return { txt: '—', cls: 'other' };
+    if (/EXIT_NOW|KILL|REJECT|STOP_HIT/.test(raw)) return { txt: raw, cls: 'kill' };
+    if (/ADJUST|WIDEN|SWAP/.test(raw)) return { txt: raw, cls: 'other' };
+    if (/PASS|PROCEED|SIZED|REFLECTED|ADMIT|VALID|ENTER/.test(raw)) return { txt: raw, cls: 'pass' };
+    if (/HOLD/.test(raw)) return { txt: raw, cls: 'info' };
+    return { txt: raw, cls: 'other' };
+  }
+  // Inline per-gate detail string for the feed (G5 T4 size line / G8 lesson /
+  // G1 focus). Returns '' when the event carries no detail → row unchanged.
+  function gateDetailStr(e) {
+    const x = e.detail; if (!x || typeof x !== 'object') return '';
+    if (e.gate_id === 5) {
+      const bits = [];
+      if (x.risk_pct != null) bits.push(`${(+x.risk_pct).toFixed(2)}%`);
+      if (x.notional_usd != null) bits.push('$' + Math.round(+x.notional_usd).toLocaleString());
+      if (x.scalar != null) bits.push('×' + (+x.scalar).toFixed(2));
+      if (x.tier != null) bits.push('t' + (+x.tier) + 'x');
+      if (x.cell != null) bits.push('c' + (+x.cell));
+      return bits.join(' ');
+    }
+    if (e.gate_id === 8) {
+      const bits = [];
+      if (x.lesson_type) bits.push(String(x.lesson_type));
+      if (x.confidence != null) bits.push('conf ' + (+x.confidence).toFixed(2));
+      return bits.join(' ');
+    }
+    if (e.gate_id === 1 && x.focus_n != null) return 'focus ' + x.focus_n;
+    return '';
+  }
+  // Venue lane ('a'/'b'/'c'/'') for a gate-event token. Prefers an explicit venue
+  // string (via venueStream A/B/C → a/b/c); else infers from a crypto symbol
+  // (…-USDT/USDC/USD → okx lane 'a'). Returns '' when unknown (no mis-colour).
+  function gfVenueLane(token) {
+    const t = String(token || '');
+    const st = venueStream(t);   // explicit venue → A/B/C, else 'X'
+    if (st === 'A') return 'a';
+    if (st === 'B') return 'b';
+    if (st === 'C') return 'c';
+    if (/-USDT$|-USDC$|-USD$/.test(t.toUpperCase()) && t.indexOf('-') > 0) return 'a';
+    return '';
+  }
+  const GF_VENUE_TAG = { a: 'OKX', b: 'CAP', c: 'ALP' };
+  function gfVenueTag(lane) { return GF_VENUE_TAG[lane] || ''; }
+
+  // Normalize the OPTIONAL probe stream into gate-feed events. Probe data is being
+  // designed in parallel — read d.probe_events[] first, else d.probes[]. Shape
+  // kept GENERIC: {name|probe, ticker|symbol, reading|value|state, decision?,
+  // reason?, ts, venue?}. Returns [] when absent → feed unchanged (graceful).
+  function probeFeedEvents(d) {
+    const src = d.probe_events || d.probes || [];
+    return src.map(pr => {
+      const rd = (pr.reading != null) ? pr.reading
+        : (pr.value != null) ? pr.value
+        : (pr.state != null) ? pr.state : '';
+      return {
+        isProbe: true,
+        name: pr.name || pr.probe || pr.id || 'probe',
+        symbol: pr.ticker || pr.symbol || '',
+        decision: pr.decision || '',
+        reason: pr.reason || (rd !== '' ? String(rd) : ''),
+        venue: pr.venue || '',
+        ts: pr.ts || pr.ts_unix || 0,
+      };
+    });
+  }
+
+  let _lastFeedD = null;   // last snapshot for SSE-driven live re-render
+  function renderGateFeed(d) {
+    _lastFeedD = d;
+    const body = $('gate-feed'); if (!body) return;
+    // Gate decisions AND probe events flow through ONE time-sorted stream. Gate
+    // events: every decision (HOLD / ADJUST_EXIT / etc) so live activity always
+    // shows. Probe events (optional d.probe_events / d.probes) merge in tagged as
+    // a PROBE row — graceful: none present → feed looks exactly as before.
+    // Three sources, one time-sorted log-style stream: the 1s snapshot poll
+    // (d.recent_gate_events, the window backfill), the live SSE gate-decision
+    // buffer (window.__gateStream — pushed between polls for the smooth-realtime
+    // feel), and optional probe events. Deduped by (gate_id|ts|symbol|decision)
+    // so a streamed row and its later poll-backfill twin collapse to one line.
+    const stream = (window.__gateStream || []);
+    const merged = (d.recent_gate_events || []).slice()
+      .concat(stream)
+      .concat(probeFeedEvents(d));
+    const seen = new Set();
+    const rows = [];
+    for (const e of merged) {
+      const k = (e.isProbe ? 'p' : '') + (e.gate_id != null ? e.gate_id : '?') + '|'
+        + (e.ts || e.ts_unix || 0) + '|' + (e.symbol || e.ticker || '') + '|'
+        + (e.decision || e.name || '');
+      if (seen.has(k)) continue;
+      seen.add(k); rows.push(e);
+    }
+    setCnt('gate-feed-cnt', rows.length || '');
+    if (!rows.length) { body.innerHTML = '<div class="empty">no notable gate decisions in window</div>'; return; }
+    // newest first — sort by ts desc when present, else assume given order.
+    rows.sort((a, b) => (b.ts || b.ts_unix || 0) - (a.ts || a.ts_unix || 0));
+    body.innerHTML = rows.slice(0, 150).map(e => {
+      const sym = e.symbol || e.ticker || '';
+      const why = e.reason || e.note || '';
+      const ts = e.ts || e.ts_unix;
+      const tstr = ts ? hhmmss(ts) : '';
+      if (e.isProbe) {
+        // Probe event row — ⊙ in the gate slot, probe name as label. If the probe
+        // carries a decision it honours PASS/KILL colouring, else a cyan PROBE tag.
+        const pv = gateVerdict(e);
+        const verd = e.decision ? `<span class="v ${pv.cls}">${esc(pv.txt)}</span>` : `<span class="v probe">PROBE</span>`;
+        return `<div class="gf-row" title="PROBE ${esc(e.name)} · ${esc(sym)} · ${esc(why)} · ${esc(tstr)}">
+          <span class="g gprobe">⊙</span>
+          ${verd}
+          <span class="what"><span class="glbl">${esc(e.name)}</span> <span class="sym">${esc(sym)}</span> <span class="why">${esc(why)}</span></span>
+          <span class="t">${esc(tstr)}</span>
+        </div>`;
+      }
+      const v = gateVerdict(e);
+      const g = (e.gate_id != null) ? ('G' + e.gate_id) : 'G?';
+      const label = e.label || e.gate_label || '';   // gate name e.g. 'Monitor'
+      const strat = e.strategy_id || e.strategy || '';
+      const lbl = label ? `<span class="glbl">${esc(label)}</span> ` : '';
+      const det = gateDetailStr(e);   // G5 T4 size / G8 lesson / G1 focus inline
+      const detHtml = det ? ` <span class="det">${esc(det)}</span>` : '';
+      return `<div class="gf-row" title="${esc(g)} ${esc(label)} ${esc(v.txt)} · ${esc(strat)} ${esc(sym)} · ${esc(det || why)} · ${esc(tstr)}">
+        <span class="g">${esc(g)}</span>
+        <span class="v ${v.cls}">${esc(v.txt)}</span>
+        <span class="what">${lbl}<span class="strat">${esc(strat)}</span> <span class="sym">${esc(sym)}</span>${detHtml} <span class="why">${esc(why)}</span></span>
+        <span class="t">${esc(tstr)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · per-ticker R (퍼포먼스) — d.ticker_stats[] cumulative R by symbol ─
+  function renderTickerStats(d) {
+    const rows = venueFilter(d.ticker_stats);   // E3 venue scope (carries venue)
+    const body = $('ticker-body'); if (!body) return;
+    setCnt('ticker-body-cnt', rows.length);
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no per-ticker R yet${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
+    const sorted = rows.slice().sort((a, b) => (a.sum_r || 0) - (b.sum_r || 0));   // worst→best
+    body.innerHTML = sorted.map(t => {
+      const r = t.sum_r || 0;
+      return `<div class="tk-r" title="${esc(t.venue)} ${esc(t.symbol)} · n=${t.n} · WR ${(t.wr_pct || 0).toFixed(0)}% · ΣR ${r.toFixed(2)}">
+        <span class="nm">${esc(t.symbol)}<span class="sub">${esc(t.venue)} · ${t.n}t · ${(t.wr_pct || 0).toFixed(0)}%</span></span>
+        <span class="rv ${pn(r)}">${r >= 0 ? '+' : ''}${r.toFixed(2)}R</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · learner network (로직) — d.learners[] value + Δ1h tremor ─────────
+  function renderLearners(d) {
+    const rows = d.learners || [];
+    const body = $('learner-body'); if (!body) return;
+    setCnt('learner-body-cnt', rows.length);
+    if (!rows.length) { body.innerHTML = '<div class="empty">no learner slots yet</div>'; return; }
+    const maxAbs = rows.reduce((m, l) => Math.max(m, Math.abs(l.delta_1h || 0)), 0) || 1;
+    body.innerHTML = rows.map(l => {
+      const dlt = l.delta_1h || 0;
+      const w = (Math.abs(dlt) / maxAbs) * 50;   // half-width = full tremor
+      const dir = dlt > 0 ? 'up' : dlt < 0 ? 'dn' : '';
+      return `<div class="lrn" title="${esc(l.learner_id)} · ${esc(l.key)} = ${(l.value || 0).toFixed(4)} · Δ1h ${dlt >= 0 ? '+' : ''}${dlt.toFixed(4)} · n_eff ${(l.n_eff || 0).toFixed(0)}">
+        <span class="nm">${esc(l.key)}<span class="sub">${esc(l.learner_id)}</span></span>
+        <span class="trem"><span class="mid"></span>${dir ? `<i class="${dir}" style="width:${w.toFixed(1)}%"></i>` : ''}</span>
+        <span class="num ${pn(dlt)}" style="text-align:right;font-size:10px">${dlt >= 0 ? '+' : ''}${dlt.toFixed(3)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · decision pathways (로직) — one scannable line per active flow ────
+  // Bloomberg de-grid (2026-06-22): the 9-panel Logic grid becomes a pathway
+  // LIST. Each open position is one decision flow rendered inline:
+  //   SYM · strategy · regime · exit-style · venue   [cell mult] [edge ±R]
+  // Reuses live snapshot bindings only (positions = active flows; edge/conf
+  // cells supply the per-(strategy×regime) expectancy; no new data, no mock).
+  const REGIME_PLAIN_PW = {
+    bull_trend: 'trending up', bear_trend: 'trending down', chop: 'choppy',
+    crisis: 'volatile', range: 'range-bound', trend: 'trending',
+    calm: 'calm', quiet: 'quiet', neutral: 'neutral',
+  };
+  function regimePlainPw(r) {
+    if (!r) return '—';
+    const k = String(r).toLowerCase();
+    return REGIME_PLAIN_PW[k] || k.replace(/_/g, ' ');
+  }
+  // exit-style label from the FSM state + whether a protective stop is set.
+  const EXIT_STYLE = {
+    open: 'ATR-trail exit', touched: 'target touched', protected: 'stop locked',
+    harvest: 'harvesting', '': 'ATR-trail exit',
+  };
+  function exitStyle(p) {
+    const st = String(p.exit_state || '').toLowerCase();
+    if (EXIT_STYLE[st]) return EXIT_STYLE[st];
+    return (p.stop_price > 0) ? 'stop-guarded exit' : 'ATR-trail exit';
+  }
+  // Build a (strategy|regime) → expectancy R lookup from confidence cells +
+  // edge_validation (whichever carries the pair). Display-only edge context.
+  function edgeLookup(d) {
+    const map = {};
+    const cells = (d.confidence && d.confidence.cells) || [];
+    cells.forEach(c => {
+      const k = (c.strategy_id + '|' + c.regime).toLowerCase();
+      if (map[k] == null) map[k] = c.lcb_real_fee_net_r;
+    });
+    (d.edge_validation || []).forEach(e => {
+      const k = (e.strategy + '|' + e.regime).toLowerCase();
+      if (map[k] == null) map[k] = e.cost_adj_exp;
+    });
+    return map;
+  }
+  function renderPathways(d) {
+    const body = $('pathway-body'); if (!body) return;
+    const rows = venueFilter(d.positions);   // active flows = open positions (E3 scope)
+    setCnt('pathway-body-cnt', rows.length);
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no active decision flows${sc ? ' · ' + esc(sc) : ''}</div>`;
+      return;
+    }
+    const edge = edgeLookup(d);
+    const flows = rows.slice().sort((a, b) => (b.size_usd || 0) - (a.size_usd || 0));
+    body.innerHTML = flows.map(p => {
+      const sep = '<span class="sep">·</span>';
+      const mlt = (p.cell_mult || 1);
+      const ek = (String(p.strategy_id) + '|' + String(p.regime)).toLowerCase();
+      const er = edge[ek];
+      const edgeHtml = (er == null)
+        ? '<span class="b-flat">—</span>'
+        : `<span class="${pn(er)}">${er >= 0 ? '+' : ''}${er.toFixed(2)}R</span>`;
+      const flow = `<span class="sym">${esc(p.symbol)}</span>${sep}`
+        + `<span class="strat">${esc(p.strategy_id)}</span>${sep}`
+        + `<span class="rgm">${esc(regimePlainPw(p.regime))}</span>${sep}`
+        + `<span class="exit">${esc(exitStyle(p))}</span>${sep}`
+        + `<span class="ven">${esc(p.venue)}</span>`;
+      return `<div class="pw" title="${esc(p.symbol)} · ${esc(p.strategy_id)} · regime ${esc(p.regime || '—')} · ${esc(exitStyle(p))} · ${esc(p.venue)} · cell ${mlt.toFixed(1)}× · edge ${er == null ? 'n/a' : (er >= 0 ? '+' : '') + er.toFixed(2) + 'R'} · uPnL ${fmtUsd(p.upnl_usd, 2)}">
+        <span class="flow">${flow}</span>
+        <span class="mlt">${mlt.toFixed(1)}×</span>
+        <span class="edge">${edgeHtml}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · (h) active strategies grouped (로직) ────────────────────────────
+  // Groups open positions by strategy, then by regime, so at a glance you see
+  // which strategy in which regime is performing how. strategy_descriptions
+  // (graceful — absent until the backend adds it) renders as a one-line dim
+  // caption, omitted when absent. Edge expectancy per (strategy×regime) reused
+  // from the confidence/edge lookup. No new data, no mock.
+  function renderStrategyGroups(d) {
+    const body = $('stratgrp-body'); if (!body) return;
+    const rows = venueFilter(d.positions);
+    if (!rows.length) {
+      const sc = scopeLabel();
+      body.innerHTML = `<div class="empty">no active strategies${sc ? ' · ' + esc(sc) : ''}</div>`;
+      setCnt('stratgrp-body-cnt', '');
+      return;
+    }
+    const desc = d.strategy_descriptions || {};   // graceful: {} when absent
+    const edge = edgeLookup(d);
+    // group: strategy_id → { posList, pnl, size }
+    const groups = {};
+    rows.forEach(p => {
+      const sid = p.strategy_id || '—';
+      const g = groups[sid] || (groups[sid] = { sid, pos: [], pnl: 0, size: 0 });
+      g.pos.push(p); g.pnl += (p.upnl_usd || 0); g.size += (p.size_usd || 0);
+    });
+    const ordered = Object.values(groups).sort((a, b) => b.size - a.size);
+    setCnt('stratgrp-body-cnt', ordered.length);
+    body.innerHTML = ordered.map(g => {
+      const dline = desc[g.sid] ? `<div class="sg-desc" title="${esc(desc[g.sid])}">${esc(desc[g.sid])}</div>` : '';
+      const head =
+        `<div class="sg-head" title="${esc(g.sid)} · ${g.pos.length} open · uPnL ${fmtUsd(g.pnl, 2)} · notional ${fmtUsd(g.size, 0)}">
+          <span class="nm">${esc(g.sid)}</span>
+          <span class="k">${g.pos.length} open</span>
+          <span class="pnl ${pn(g.pnl)}">${fmtUsd(g.pnl, 0)}</span>
+        </div>${dline}`;
+      const kids = g.pos.slice().sort((a, b) => (b.size_usd || 0) - (a.size_usd || 0)).map(p => {
+        const ek = (String(p.strategy_id) + '|' + String(p.regime)).toLowerCase();
+        const er = edge[ek];
+        const eHtml = (er == null) ? '<span class="b-flat">—</span>'
+          : `<span class="${pn(er)}">${er >= 0 ? '+' : ''}${er.toFixed(2)}R</span>`;
+        return `<div class="sg-child" title="${esc(p.symbol)} · regime ${esc(p.regime || '—')} · uPnL ${fmtUsd(p.upnl_usd, 2)} · held ${hms(p.held_sec)} · edge ${er == null ? 'n/a' : (er >= 0 ? '+' : '') + er.toFixed(2) + 'R'}">
+          <span class="bullet">└</span>
+          <span class="rgm">${esc(regimePlainPw(p.regime))} <span class="sym">${esc(p.symbol)}</span><span class="held">${hms(p.held_sec)}</span></span>
+          <span class="pnl ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</span>
+          <span class="pnl">${eHtml}</span>
+        </div>`;
+      }).join('');
+      return head + kids;
+    }).join('');
+  }
+
+  // ── NEW · (h) active exits (로직) — positions leaving 'open' + why ─────────
+  // Active exit = a position whose exit FSM state is NOT 'open' (touched /
+  // protected / harvest …). Shows the FSM state, an English why (exit style +
+  // regime binding), and live uPnL. Empty when all positions are still 'open'.
+  function renderActiveExits(d) {
+    const body = $('activeexit-body'); if (!body) return;
+    const rows = venueFilter(d.positions).filter(p => {
+      const st = String(p.exit_state || '').toLowerCase();
+      return st && st !== 'open';
+    });
+    setCnt('activeexit-body-cnt', rows.length || '');
+    if (!rows.length) { body.innerHTML = '<div class="empty">no active exits — all open positions still riding</div>'; return; }
+    body.innerHTML = rows.slice().sort((a, b) => (b.size_usd || 0) - (a.size_usd || 0)).map(p => {
+      const st = String(p.exit_state || '').toUpperCase();
+      return `<div class="ax-row" title="${esc(p.symbol)} · ${esc(p.strategy_id)} · exit ${esc(st)} · ${esc(exitStyle(p))} · regime ${esc(p.regime || '—')} · uPnL ${fmtUsd(p.upnl_usd, 2)}">
+        <span class="sym">${esc(p.symbol)}<span class="strat">${esc(p.strategy_id)}</span></span>
+        <span class="st">${esc(st)}</span>
+        <span class="why">${esc(exitStyle(p))} · <span class="rgm">${esc(regimePlainPw(p.regime))}</span></span>
+        <span class="pnl ${pn(p.upnl_usd)}">${fmtUsd(p.upnl_usd, 2)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // ── NEW · AI-free banner (로직) — in-loop GPT calls = 0 (W3 cutover) ───────
+  function renderAiFreeBanner(d) {
+    const el = $('aifree-banner'); if (!el) return;
+    const gpt = d.gpt_stats || [];
+    const callsH = gpt.reduce((a, g) => a + (g.calls_per_h || 0), 0);
+    const ai = d.ai_shadow || {};
+    const sa = ai.shadow_agreement || [];
+    const nShadow = sa.reduce((a, r) => a + (r.n || 0), 0);
+    const hasGpt = callsH > 0;
+    el.className = 'aifree-banner' + (hasGpt ? ' has-gpt' : '');
+    el.innerHTML =
+      `<span class="af-title">${hasGpt ? 'in-loop GPT active' : 'AI-FREE CORE · in-loop GPT = 0'}</span>`
+      + `<span class="af-kv" title="GPT calls/h across all gates in the live decision loop (W3 cutover target = 0)"><span class="lk">in-loop GPT/h</span> <span class="lv ${hasGpt ? 'b-neg' : 'b-pos'}">${callsH}</span></span>`
+      + `<span class="af-kv" title="deterministic-vs-GPT shadow comparisons observed (1h) — observe-only, never blocks"><span class="lk">shadow obs (1h)</span> <span class="lv">${nShadow}</span></span>`
+      + `<span class="af-kv"><span class="lk">decisioning</span> <span class="lv">deterministic G3/G4/G7</span></span>`;
+  }
+
+  // ── NEW · worst strategies (Performance) — moved from the old KPI BLEED block.
+  // Strategy PnL, worst (most negative) first. Plain English, no "bleed" jargon.
+  function renderWorst(d) {
+    const body = $('worst-body'); if (!body) return;
+    const rows = (d.strategy_stats || []).slice()
+      .sort((a, b) => (a.pnl_usd || 0) - (b.pnl_usd || 0)).slice(0, 6);
+    setCnt('worst-body-cnt', rows.length);
+    if (!rows.length) { body.innerHTML = '<div class="empty">no strategy stats yet</div>'; return; }
+    body.innerHTML = rows.map(s =>
+      `<div class="row" style="grid-template-columns:1fr 84px 70px 44px"
+        title="${esc(s.strategy_id)} · PnL ${fmtUsd(s.pnl_usd, 2)} · profit factor ${(s.pf == null ? 0 : s.pf).toFixed(2)} · ${s.closed_n || 0} closed trades">
+        <span class="name">${esc(s.strategy_id)}</span>
+        <span class="num ${pn(s.pnl_usd)}">${fmtUsd(s.pnl_usd, 0)}</span>
+        <span class="num b-flat" title="profit factor">PF ${(s.pf == null ? 0 : s.pf).toFixed(2)}</span>
+        <span class="num b-flat" title="closed trades">${s.closed_n || 0}t</span>
+      </div>`).join('');
+  }
+
+  // ── NEW · costs & hidden losses (Performance) — moved from the old KPI HIDDEN
+  // block. Plain English: slippage, net after costs, drift losses from un-exited
+  // positions, forced exits. No "BLEED / orphan-drift / net-after-cost" jargon.
+  function renderCosts(d) {
+    const body = $('costs-body'); if (!body) return;
+    const st = d.streams || [];
+    const slip = st.reduce((a, s) => a + (s.slippage_usd || 0), 0);
+    const fee = st.reduce((a, s) => a + (s.fee_usd || 0), 0);
+    const nac = st.reduce((a, s) => a + (s.net_after_cost_usd || 0), 0);
+    const driftUsd = d.reconciled_loss_usd || 0;
+    const driftN = d.reconciled_loss_n || 0;
+    const forced = d.session_forced_exit_count || 0;
+    const row = (label, valHtml, tip) =>
+      `<div class="row" style="grid-template-columns:1fr 110px" title="${esc(tip || label)}">
+        <span class="name b-flat" style="font-weight:400">${esc(label)}</span>
+        <span class="num">${valHtml}</span></div>`;
+    body.innerHTML =
+      row('Fees paid', `<span class="b-neg">${fmtUsd(fee, 0)}</span>`,
+        'total trading fees paid this session')
+      + row('Slippage', `<span class="b-neg">${fmtUsd(slip, 0)}</span>`,
+        'execution slippage vs intended price')
+      + row('Net profit after all costs', `<span class="${pn(nac)}">${fmtUsd(nac, 0)}</span>`,
+        'realized profit after fees and slippage')
+      + row(`Tracking failures, not trades (${driftN})`, `<span class="b-neg">${fmtUsd(-Math.abs(driftUsd), 0)}</span>`,
+        'rough $ estimate of drift from positions reconciled away without a clean exit — excluded from the R ledger / PF / win-rate')
+      + row('Forced exits', `<span class="b-flat">${forced}</span>`,
+        'positions the system was forced to close this session');
+  }
+
+  // ── NEW · dual equity sparkline (퍼포먼스) ─────────────────────────────────
+  // Reuses the legacy renderEquity (eq-svg / eq-real-delta / eq-demo-delta /
+  // eq-fee-wedge) — it already draws BOTH curves (real-fee-net headline + demo
+  // dashed) with the GAP visible. No duplicate sparkline logic.
+  function renderDualEquity(d) { renderEquity(d); }
+
+  // ── NEW · P3 placeholder (개발 / 가야할길 / 배운것) ────────────────────────
+  function placeholder(bodyId, msg, endpoint) {
+    const body = $(bodyId); if (!body) return;
+    body.innerHTML = `<div class="ph"><div class="ph-icon">· · ·</div>`
+      + `<div class="ph-msg">${esc(msg)}</div>`
+      + `<div class="ph-ep">P3 planned · ${esc(endpoint)}</div></div>`;
+  }
+
+  // ── register the 6 COMPOSITE tab renderers ────────────────────────────────
+  // Each composite reuses the base table renderers (T.renderers) + the legacy
+  // analytics renderers + the new sub-renderers. No mock data — every field is
+  // a live /api/snapshot value.
+  const R = T.renderers;   // { positions, trades, regime, strategy }
+  T.register('activity', (d) => {
+    renderGateFunnel(d);
+    renderGateFeed(d);
+    R.positions(d);
+    R.trades(d);
+  });
+  T.register('performance', (d) => {
+    renderDualEquity(d); renderConfidence(d); renderBenchmark(d);
+    R.strategy(d);
+    renderTickerStats(d);
+    renderEdge(d);
+    renderWorst(d);
+    renderCosts(d);
+  });
+  T.register('logic', (d) => {
+    renderAiFreeBanner(d);
+    renderRotation(d);
+    renderStrategyGroups(d);
+    renderActiveExits(d);
+    renderPathways(d);
+    R.regime(d);
+    renderCells(d);
+    renderLearners(d);
+    renderExit(d);          // exit-fsm chips + exit-reasons + exit-gates
+    renderAi(d);            // ai-gpt + ai-shadow
+    renderRiskAdmit(d);
+    renderAlerts(d);
+  });
+  // SSE-driven live feed re-render: the gate-decision stream (globe-flows.js)
+  // pushes into window.__gateStream then calls this to re-merge between polls.
+  // No-op until the first snapshot has primed _lastFeedD. Display-only.
+  T.renderGateFeedLive = () => { if (_lastFeedD) renderGateFeed(_lastFeedD); };
+
+  T.register('build', () => placeholder('build-body', 'commit timeline · wave digest · activity heat · test-health', 'GET /api/buildlog'));
+  T.register('path', () => placeholder('path-body', 'phase ladder P0→P6 · plan kanban · next strikes · blockers', 'GET /api/roadmap'));
+  T.register('learned', () => placeholder('learned-body', 'lessons feed · anti-pattern wall · root-cause · debate verdicts', 'GET /api/lessons'));
 })();

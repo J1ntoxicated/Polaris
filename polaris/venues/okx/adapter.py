@@ -48,6 +48,12 @@ import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id, okx_candle_to_bar
 from polaris.core.data.schema import Bar
+from polaris.venues.okx.constraint_translator import (
+    InstrumentConstraint,
+    clamp_up_to_min,
+    round_down_to_step,
+    round_price_to_tick,
+)
 from polaris.venues.okx.signing import build_signed_headers
 
 logger = logging.getLogger(__name__)
@@ -58,7 +64,9 @@ __all__ = [
     "OKX_CANCEL_ORDER_PATH",
     "OKX_CANDLES_PATH",
     "OKX_PLACE_ORDER_PATH",
+    "OKX_PLACE_ALGO_ORDER_PATH",
     "OKXAdapter",
+    "OKXAlgoOrderResponse",
     "OKXOrderResponse",
     "fetch_okx_bars",
     "sanitize_clordid",
@@ -69,6 +77,8 @@ OKX_CANDLES_PATH: Final[str] = "/api/v5/market/candles"
 OKX_TICKER_PATH: Final[str] = "/api/v5/market/ticker"
 OKX_PLACE_ORDER_PATH: Final[str] = "/api/v5/trade/order"
 OKX_CANCEL_ORDER_PATH: Final[str] = "/api/v5/trade/cancel-order"
+OKX_PLACE_ALGO_ORDER_PATH: Final[str] = "/api/v5/trade/order-algo"
+OKX_CANCEL_ALGO_ORDER_PATH: Final[str] = "/api/v5/trade/cancel-algos"
 OKX_ACCOUNT_BALANCE_PATH: Final[str] = "/api/v5/account/balance"
 OKX_ACCOUNT_POSITIONS_PATH: Final[str] = "/api/v5/account/positions"
 OKX_TRADE_ORDERS_PENDING_PATH: Final[str] = "/api/v5/trade/orders-pending"
@@ -178,6 +188,24 @@ class OKXOrderResponse:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class OKXAlgoOrderResponse:
+    """Normalized response for ``POST /trade/order-algo`` (conditional stop).
+
+    ``ok=False`` (algo endpoint unavailable for the symbol / venue reject /
+    transport blip) is NOT an error — the caller keeps the existing software
+    stop as the backstop (flow_not_block: a resting-stop miss never blocks the
+    trade, it just degrades to the prior polled exit).
+    """
+
+    ok: bool
+    algo_id: str | None
+    client_order_id: str | None
+    code: str
+    msg: str
+    raw: dict[str, Any]
+
+
 class OKXAdapter:
     """Authenticated wrapper over OKX REST trade endpoints (demo by default)."""
 
@@ -200,6 +228,11 @@ class OKXAdapter:
         self.demo = demo
         self._client = client
         self._owns_client = client is None
+        # Per-symbol dealing rules (lotSz / tickSz) for sz/px rounding. Empty
+        # until ``set_instrument_constraints`` is called from the boot path
+        # (fetch_instruments). When empty the order path is byte-identical to
+        # the prior un-rounded behaviour (no regression on the cache-miss path).
+        self._constraints: dict[str, InstrumentConstraint] = {}
 
     async def __aenter__(self) -> OKXAdapter:
         if self._client is None:
@@ -214,6 +247,55 @@ class OKXAdapter:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    def set_instrument_constraints(
+        self, constraints: dict[str, InstrumentConstraint]
+    ) -> None:
+        """Install the per-symbol dealing rules used for sz/px rounding.
+
+        Called once from the boot path after ``fetch_instruments``. Rounding
+        ``sz`` down to ``lotSz`` and ``px`` to ``tickSz`` BEFORE submit is the
+        precision root-cause fix for the OKX 400 on the limit/ioc entry leg.
+        """
+        self._constraints = dict(constraints)
+
+    def _round_px_sz(
+        self, inst_id: str, *, px: float, base_qty: float
+    ) -> tuple[float, float]:
+        """Round ``px`` to tickSz and ``base_qty`` to lotSz, then CLAMP UP to min.
+
+        Returns ``(px, base_qty)`` unchanged on a cache miss (prior behaviour —
+        flow_not_block: a missing constraint never blocks the entry). ``sz`` is
+        floored to the nearest lot multiple.
+
+        Min-size CLAMP-UP (Jin 2026-06-23, replaces the param-reject per-symbol
+        cooldown): when the lot-rounded qty is below the instrument minimum
+        (``min_sz``), BUMP it UP to ``min_sz`` (rounded up to lotSz) so the order
+        FLOWS at the venue minimum instead of being rejected 51020 below-min.
+        This is the LAST step before submit — a venue-constraint FLOOR applied
+        AFTER the T4 sizing chain, NOT a sizing multiplier (the 9-stack invariant
+        is intact). A qty already ``>= min_sz`` is byte-identical (no-op above
+        min). The clamp only raises TOWARD min, never past the per-order hard-MAX
+        headroom (which binds upstream at T4 sizing); a degenerate instrument
+        whose min itself exceeds the headroom is still submitted at min (below-min
+        cannot trade) and flagged.
+        """
+        c = self._constraints.get(inst_id)
+        if c is None:
+            return px, base_qty
+        rounded_px = round_price_to_tick(px, c.tick_sz) if c.tick_sz > 0.0 else px
+        if rounded_px <= 0.0:
+            rounded_px = px
+        rounded_qty = round_down_to_step(base_qty, c.lot_sz) if c.lot_sz > 0.0 else base_qty
+        if rounded_qty <= 0.0:
+            rounded_qty = base_qty
+        clamped_qty = clamp_up_to_min(rounded_qty, min_sz=c.min_sz, lot_sz=c.lot_sz)
+        if clamped_qty > rounded_qty:
+            logger.info(
+                "[okx/min-clamp] %s sized qty %s < min %s -> clamped UP to %s (flows)",
+                inst_id, rounded_qty, c.min_sz, clamped_qty,
+            )
+        return rounded_px, clamped_qty
 
     # ------------------------------------------------------------------
     # Internals
@@ -232,7 +314,7 @@ class OKXAdapter:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
     ) -> dict[str, Any]:
         if params:
             qs = "&".join(f"{k}={v}" for k, v in params.items())
@@ -313,7 +395,18 @@ class OKXAdapter:
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status < 500:
-                    raise  # client error (4xx) — not transient, fail fast.
+                    # Client error (4xx). OKX returns its business body (code +
+                    # data[].sCode/sMsg) even on a 400 for a param/precision
+                    # reject (bad lotSz/tickSz, sz format). ROOT-CAUSE of the
+                    # entry stall: this used to re-raise → FAULT_EXCEPTION →
+                    # permanent HARD_HALT. Parse the body into a venue REJECT so
+                    # it flows as an EXTERNAL no-fill (flow_not_block), logging
+                    # the exact 400 body + request for diagnosis. A 4xx WITHOUT
+                    # an OKX body (WAF/HTML/opaque) is a real anomaly → re-raise.
+                    parsed = _parse_4xx_reject(exc, cl_ord_id=cl_ord_id, order_body=order_body)
+                    if parsed is not None:
+                        return parsed
+                    raise
                 last_exc = exc
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
@@ -429,6 +522,7 @@ class OKXAdapter:
                 bps_mult = 1.0 + (slippage_bps / 10_000.0) * (1.0 if side_l == "buy" else -1.0)
                 px = ref_price * bps_mult
                 base_qty = notional_usd / max(px, 1e-12)
+                px, base_qty = self._round_px_sz(inst_id, px=px, base_qty=base_qty)
                 order_body["sz"] = _format_decimal(base_qty)
                 order_body["px"] = _format_decimal(px)
         else:
@@ -436,8 +530,9 @@ class OKXAdapter:
             if ref_price is None or ref_price <= 0.0:
                 raise ValueError(f"{ord_type} requires last_price_hint")
             base_qty = notional_usd / max(ref_price, 1e-12)
+            px, base_qty = self._round_px_sz(inst_id, px=ref_price, base_qty=base_qty)
             order_body["sz"] = _format_decimal(base_qty)
-            order_body["px"] = _format_decimal(ref_price)
+            order_body["px"] = _format_decimal(px)
         # Security: only log non-secret order params (clOrdId / sz / px / side).
         # API key, secret, passphrase are NEVER logged.
         logger.info(
@@ -471,6 +566,122 @@ class OKXAdapter:
             "POST",
             OKX_CANCEL_ORDER_PATH,
             json_body={"instId": inst_id, "ordId": ord_id},
+        )
+
+    async def place_conditional_stop(
+        self,
+        *,
+        inst_id: str,
+        side: str,
+        base_qty: float,
+        trigger_px: float,
+        client_order_id: str,
+        td_mode: str = "cash",
+    ) -> OKXAlgoOrderResponse:
+        """Place a VENUE-RESTING conditional (stop) order that triggers on OKX's
+        side BEFORE the next software poll tick.
+
+        This is the precise-exit loss-defence for the inter-tick gap: a SPOT alt
+        can gap through the software stop in the ~5s between recalc passes, and
+        the polled market close then fills far below the stop (the -34..-100R
+        orphan). A resting ``ordType=conditional`` with ``slTriggerPx`` lets OKX
+        trigger the close the instant the trigger is crossed — no poll latency.
+
+        ``trigger_px`` is rounded to the instrument ``tickSz`` and ``base_qty``
+        floored to ``lotSz`` (reusing the entry-leg precision helper) so the
+        algo submit is not rejected for a bad px/sz format. ``slOrdPx="-1"`` =
+        fill at market on trigger (don't leave a resting limit that can miss).
+
+        Graceful (flow_not_block): ANY failure — a 4xx OKX reject, an opaque
+        body, a transport blip — returns ``ok=False`` instead of raising. The
+        caller keeps the existing software stop, so the trade is never blocked
+        and the worst case is simply the prior polled-exit behaviour.
+        """
+        side_l = side.lower()
+        if side_l not in ("buy", "sell"):
+            raise ValueError(f"invalid side: {side!r}")
+        cl_ord_id = sanitize_clordid(client_order_id)
+        px, qty = self._round_px_sz(inst_id, px=trigger_px, base_qty=base_qty)
+        # NB: NO ``tgtCcy``. OKX rejects it on an algo SELL with HTTP 400
+        # ``51000 Parameter tgtCcy error`` (tgtCcy is only valid for a spot
+        # market BUY). Sending it was the bug that made EVERY resting stop fall
+        # back to the software poll. Confirmed live (us.okx.com demo): with
+        # tgtCcy → 400; without → accepted (sCode 0 / balance-bound reject only).
+        order_body: dict[str, Any] = {
+            "instId": inst_id,
+            "tdMode": td_mode,
+            "side": side_l,
+            "ordType": "conditional",
+            "sz": _format_decimal(qty),
+            "slTriggerPx": _format_decimal(px),
+            "slTriggerPxType": "last",
+            "slOrdPx": "-1",  # market on trigger — never a resting limit that misses
+            "algoClOrdId": cl_ord_id,
+        }
+        logger.info(
+            "[okx] algo-stop POST %s side=%s sz=%s slTriggerPx=%s algoClOrdId=%s",
+            inst_id, side_l, order_body["sz"], order_body["slTriggerPx"], cl_ord_id,
+        )
+        try:
+            body = await self._signed_request(
+                "POST", OKX_PLACE_ALGO_ORDER_PATH, json_body=order_body
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            # flow_not_block: a resting-stop failure degrades to the software stop,
+            # never raises. Captures 4xx (HTTPStatusError), transport blips, and a
+            # non-dict payload (RuntimeError from _signed_request).
+            #
+            # OKX returns business rejects (bad param, etc.) as HTTP 400 with the
+            # real {code, msg, data:[{sCode, sMsg}]} in the body — so a 4xx is NOT
+            # opaque. Parse it and SURFACE the true OKX code/msg instead of the
+            # generic ``algo_unavailable`` label (the swallow that hid the 51000
+            # tgtCcy reject for weeks). Only a genuinely unparseable body / pure
+            # transport blip falls through to ``algo_unavailable``.
+            if isinstance(exc, httpx.HTTPStatusError):
+                body_txt = exc.response.text[:200]
+                try:
+                    err_body = exc.response.json()
+                except (ValueError, json.JSONDecodeError):
+                    err_body = None
+                if isinstance(err_body, dict):
+                    parsed = _parse_algo_response(err_body)
+                    logger.warning(
+                        "[okx] algo-stop reject inst=%s code=%s msg=%s — keeping "
+                        "software stop",
+                        inst_id, parsed.code, parsed.msg[:160] if parsed.msg else "-",
+                    )
+                    return parsed
+            else:
+                body_txt = ""
+            logger.warning(
+                "[okx] algo-stop unavailable inst=%s — keeping software stop: %s %s",
+                inst_id, exc, body_txt,
+            )
+            return OKXAlgoOrderResponse(
+                ok=False, algo_id=None, client_order_id=cl_ord_id,
+                code="algo_unavailable", msg=str(exc), raw={},
+            )
+        parsed = _parse_algo_response(body)
+        logger.log(
+            logging.INFO if parsed.ok else logging.WARNING,
+            "[okx] algo-stop RESP ok=%s algoId=%s code=%s msg=%s",
+            parsed.ok, parsed.algo_id, parsed.code,
+            parsed.msg[:160] if parsed.msg else "-",
+        )
+        return parsed
+
+    async def cancel_algo_order(self, *, inst_id: str, algo_id: str) -> dict[str, Any]:
+        """Cancel a resting conditional stop by ``algoId`` (best-effort).
+
+        Used when the trailing stop tightens (cancel-then-replace) or when the
+        software path already closed the position (so the resting stop cannot
+        fire a duplicate sell). ``cancel-algos`` takes a LIST of orders.
+        """
+        logger.info("[okx] cancel_algo inst=%s algoId=%s", inst_id, algo_id)
+        return await self._signed_request(
+            "POST",
+            OKX_CANCEL_ALGO_ORDER_PATH,
+            json_body=[{"instId": inst_id, "algoId": algo_id}],
         )
 
     async def fetch_balance(self, ccy: str | None = None) -> dict[str, Any]:
@@ -535,6 +746,69 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_4xx_reject(
+    exc: httpx.HTTPStatusError, *, cl_ord_id: str, order_body: dict[str, Any]
+) -> OKXOrderResponse | None:
+    """Turn an OKX-bodied HTTP 4xx into a venue reject, or ``None`` if opaque.
+
+    OKX delivers ``{code, msg, data:[{sCode, sMsg}]}`` even on a 400 for a
+    param/precision reject. Parsing it into an ``OKXOrderResponse`` reject lets
+    the entry leg treat it as an EXTERNAL no-fill instead of a strategy crash
+    (the entry-stall root-cause). Logs the exact 400 body + the (non-secret)
+    request so the precise failing field is diagnosable. Returns ``None`` when
+    the body is not OKX JSON (WAF/HTML/opaque) — the caller re-raises.
+    """
+    try:
+        body = exc.response.json()
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if not isinstance(body, dict) or "code" not in body:
+        logger.error(
+            "[okx] order POST %d clOrdId=%s — opaque body (non-OKX), re-raising: %s",
+            exc.response.status_code,
+            cl_ord_id,
+            exc.response.text[:200],
+        )
+        return None
+    # Non-secret request fields only (instId / sz / px / ordType / side).
+    logger.error(
+        "[okx] order POST %d REJECT clOrdId=%s instId=%s sz=%s px=%s ordType=%s "
+        "side=%s body=%s",
+        exc.response.status_code,
+        cl_ord_id,
+        order_body.get("instId"),
+        order_body.get("sz"),
+        order_body.get("px", "-"),
+        order_body.get("ordType"),
+        order_body.get("side"),
+        json.dumps(body, sort_keys=True)[:300],
+    )
+    return _parse_order_response(body)
+
+
+def _parse_algo_response(body: dict[str, Any]) -> OKXAlgoOrderResponse:
+    """Parse ``POST /trade/order-algo`` → ``OKXAlgoOrderResponse``.
+
+    OKX returns ``{code, msg, data:[{algoId, algoClOrdId, sCode, sMsg}]}``. A
+    non-zero ``sCode`` (algo unavailable / param reject) maps to ``ok=False`` —
+    the caller keeps the software stop (flow_not_block).
+    """
+    code = str(body.get("code", "1"))
+    msg = str(body.get("msg", ""))
+    rows = body.get("data") or []
+    row0 = rows[0] if rows else {}
+    inner_code = str(row0.get("sCode", code))
+    ok = code == "0" and inner_code == "0"
+    return OKXAlgoOrderResponse(
+        ok=ok,
+        algo_id=str(row0.get("algoId")) if row0.get("algoId") else None,
+        client_order_id=str(row0.get("algoClOrdId")) if row0.get("algoClOrdId") else None,
+        code=inner_code if inner_code != "0" else code,
+        msg=str(row0.get("sMsg") or msg),
+        raw=body,
+    )
 
 
 def _parse_order_response(body: dict[str, Any]) -> OKXOrderResponse:

@@ -37,12 +37,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from polaris.core.live_recalc.exit_engine import MfeProtectSchedule
 from polaris.core.live_recalc.regime_flip import fetch_regime
 from polaris.core.pipeline._sizer_payload import (
     _read_portfolio_state,
@@ -51,7 +53,11 @@ from polaris.core.pipeline._sizer_payload import (
 from polaris.core.sizing import SignalIntent, compute_size
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
-from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, TickEngineConfig
+from polaris.core.ticks.config import (
+    TICK_ENGINE_OWNED_VENUES,
+    TickEngineConfig,
+    venue_allowed_signals,
+)
 from polaris.core.ticks.features import compute_tick_features
 from polaris.core.ticks.regime_gate import active_signals
 from polaris.core.ticks.signals import (
@@ -64,8 +70,12 @@ from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_pipeline import reserve_and_submit
 from polaris.scripts._production_recalc import ActivePositionRow
-from polaris.scripts._production_recalc_exit import run_precise_exit
+from polaris.scripts._production_recalc_exit import (
+    assess_mode_for_position,
+    run_precise_exit,
+)
 from polaris.scripts._production_state import ProdLoopState
+from polaris.scripts._smoke_roundtrip_shared import MIN_OKX_NOTIONAL_USD
 from polaris.strategies.base import RawSignal
 
 logger = logging.getLogger(__name__)
@@ -74,6 +84,18 @@ __all__ = [
     "TickEngineState",
     "run_tick_decision_loop",
 ]
+
+
+def _env_pos_float(name: str, default: float) -> float:
+    """Positive-float env override (``default`` for unset / non-positive / bad)."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0.0 else default
 
 # Phase 1 = OKX only (24/7, richest, long-only). Phase 2 adds Capital (long &
 # short) + Alpaca (RTH). Aliased to the config SSOT ``TICK_ENGINE_OWNED_VENUES``
@@ -84,13 +106,41 @@ PHASE1_VENUES: frozenset[str] = TICK_ENGINE_OWNED_VENUES
 # DROPPED at the risk gate (bidirectional rule) — Capital CFD (cfd) takes both.
 _LONG_ONLY_PRODUCT_CLASSES: frozenset[str] = frozenset({"spot", "equity"})
 
+# Tick signal_id of the order-flow-imbalance momentum signal (also the
+# strategy_id stamped on the positions it opens) — the retune target.
+_FLOW_PRESSURE = "flow_pressure"
+_MICRO_REVERSION = "micro_reversion"
+_BURST_RIDER = "burst_rider"
+
+# Tick signals routed MAKER-FIRST (post-only at touch → TAKER fallback) on OKX:
+# neither is latency-critical to the tick, so resting at the touch pays the
+# cheaper maker fee when it can rest, NEVER a missed trade (the post-only path
+# always falls back to taker on a would-cross/reject/timeout). flow_pressure
+# (OFI momentum) + micro_reversion (overshoot fade — you are fading an EXHAUSTED
+# move, so resting at the touch is the natural fill) both clear the same honest
+# fee-net diagnosis (gross edge POSITIVE, eaten by the ~20bps round-trip taker
+# cost). flow_not_block: cheaper when possible, never a skipped entry. Other tick
+# signals keep the strength-gated default.
+_MAKER_FIRST_SIGNALS: frozenset[str] = frozenset({_FLOW_PRESSURE, _MICRO_REVERSION})
+
 # The three pure signal functions, keyed by signal_id so the regime gate's
 # active set selects which ones run this tick.
 _SIGNAL_FNS: dict[str, Callable[..., TickIntent | None]] = {
-    "burst_rider": burst_rider,
-    "flow_pressure": flow_pressure,
-    "micro_reversion": micro_reversion,
+    _BURST_RIDER: burst_rider,
+    _FLOW_PRESSURE: flow_pressure,
+    _MICRO_REVERSION: micro_reversion,
 }
+
+# Minimum tradeable notional (USD) for a tick entry. compute_size returns
+# ``final_risk_pct × equity`` which, on an almost-exhausted binding daily/cap
+# headroom, can clip to a POSITIVE-but-sub-minimum residual (e.g. $0.0001). Such
+# an order is unfundable at EVERY venue — OKX rejects it 51020 "below minimum
+# order amount" and Alpaca rejects a $0 notional on validation. Submitting it
+# produced the 4000+ ADA/XRP 51020 flood. The floor is the OKX SPOT minimum (the
+# lowest venue minimum), so a notional below it is treated as a sizing/headroom
+# drop — NOT submitted (flow_not_block at the source: never fire a 100%-reject
+# order). NOT a throttle: flooring up would BREACH the very cap that clipped it.
+_MIN_TICK_NOTIONAL_USD: float = MIN_OKX_NOTIONAL_USD
 
 # A reversion (fast-scalp) position closes on the FIRST of: flow reversal (the
 # book turned against the fade), a micro-stop (adverse R past this floor), or a
@@ -99,6 +149,123 @@ _SIGNAL_FNS: dict[str, Callable[..., TickIntent | None]] = {
 # an entry. R units share ``compute_unrealized_pnl_r``'s ATR-R basis.
 _SCALP_TARGET_R = 0.5
 _SCALP_STOP_R = -0.4
+
+# Per-strategy reversion TAKE-PROFIT override (R) — PROFIT SIDE ONLY.
+# [[harvest_generalization_2026-06-23]]: micro_reversion is the top harvest target
+# (avg MFE +0.523R over 120 trades, realized only -0.148R). Its bounded
+# revert-to-mean reached +0.30R for 57% and +0.45R for 44% of trades, yet the
+# shared +0.50R scalp target sat ABOVE that mass — so the revert peaked and gave
+# back before banking. A LOWER per-strategy target harvests the measured revert
+# (BB-fade enters at the band extreme, targets the middle — a bounded gain, NOT
+# let-winners-run). This ONLY moves the take-profit DOWN (banks sooner); the loss
+# side (``_SCALP_STOP_R``) and the flow-reversal exit are UNTOUCHED — NOT a tighter
+# loss cut / defensive throttle. Env-tunable; an unmapped reversion id keeps the
+# shared ``_SCALP_TARGET_R`` default (byte-identical).
+_MICRO_REVERSION_TARGET_R: float = _env_pos_float(
+    "POLARIS_TICK_MICRO_REVERSION_TARGET_R", 0.35
+)
+
+
+def _scalp_target_for_strategy(strategy_id: str) -> float:
+    """Reversion take-profit (R) for ``strategy_id`` — PROFIT side only.
+
+    micro_reversion harvests its measured bounded revert at the lower
+    ``_MICRO_REVERSION_TARGET_R``; every other reversion id keeps the shared
+    ``_SCALP_TARGET_R`` default (byte-identical). Never touches the loss side.
+    """
+    if strategy_id == _MICRO_REVERSION:
+        return _MICRO_REVERSION_TARGET_R
+    return _SCALP_TARGET_R
+
+# Per-strategy momentum exit trail width (ATR units) override for the precise
+# exit, by tick signal_id. flow_pressure's favourable OFI drift was being closed
+# too fast by the default 2.0-ATR Chandelier trail (honest fee-net retune
+# w02ccvq0q: the longer-hold cohort was the only gross-cost-positive bucket), so
+# it runs on a WIDER trail to capture the drift past the old ~75s scalp.
+# EXPECTANCY, not a throttle: it only LOOSENS the running trail (lets the winner
+# run); the ratchet, protected-BEP, loser-timeout and the G6 -1.0R hard rail (the
+# loss-defence) are all untouched, and HARVEST still tightens. Env-tunable
+# (``POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT``) so it can be re-aimed after the
+# honest-slate re-measure. An unlisted signal_id → None → module default.
+_FLOW_PRESSURE_TRAIL_MULT_DEFAULT = 4.0
+
+
+def _momentum_trail_mult(strategy_id: str) -> float | None:
+    """Let-winners-run ATR-trail override (ATR units) for a tick momentum strategy.
+
+    flow_pressure runs on a WIDER trail so its favourable OFI drift is captured
+    past the old fast scalp; every other tick momentum strategy (burst_rider)
+    returns ``None`` → the module-default trail (byte-identical). Env-overridable.
+    """
+    if strategy_id != _FLOW_PRESSURE:
+        return None
+    raw = os.getenv("POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT")
+    if raw is None or raw.strip() == "":
+        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    return val if val > 0.0 else _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+
+
+# Tick MOMENTUM signals routed through ``run_precise_exit`` — BOTH now carry the
+# MFE-protect harvest schedule. [[harvest_generalization_2026-06-23]]: the harvest
+# was wired ONLY to flow_pressure; burst_rider (also momentum) passed
+# mfe_protect=None, so its measured +0.3R excursions (27% reach +0.30R)
+# round-tripped on the wide ATR trail. micro_reversion is REVERSION family (scalp
+# exit, not run_precise_exit) → it is NOT here; it harvests via its scalp target.
+_MFE_PROTECT_MOMENTUM_SIGNALS: frozenset[str] = frozenset({_FLOW_PRESSURE, _BURST_RIDER})
+
+
+def _mfe_protect_schedule(
+    strategy_id: str, cfg: TickEngineConfig
+) -> MfeProtectSchedule | None:
+    """MFE-protect harvest schedule for a tick MOMENTUM strategy, or ``None``.
+
+    Both momentum tick signals (flow_pressure + burst_rider, routed through
+    ``run_precise_exit``) ratchet the stop to BEP at ``cfg.mfe_bep_r`` and lock
+    ``cfg.mfe_protect_lock_r`` positive R at ``cfg.mfe_protect_r`` — capturing the
+    measured +MFE excursion and cutting the give-back. burst_rider was previously
+    uncovered (→ None) so its +0.3R excursions round-tripped on the wide ATR trail;
+    it now shares the schedule. micro_reversion (reversion family → scalp exit) →
+    ``None`` here (it harvests via its scalp profit target). An unmapped id →
+    ``None`` → byte-identical module-default exit. EXPECTANCY, not a throttle: the
+    schedule only tightens the stop toward profit.
+    """
+    if strategy_id not in _MFE_PROTECT_MOMENTUM_SIGNALS:
+        return None
+    return MfeProtectSchedule(
+        bep_at_r=cfg.mfe_bep_r,
+        protect_at_r=cfg.mfe_protect_r,
+        lock_r=cfg.mfe_protect_lock_r,
+    )
+
+
+def _flow_decay_exit(
+    *, side: str, ofi: float | None, flow_confirmed: bool | None, pnl_r: float,
+    mfe_gate_r: float,
+) -> bool:
+    """True iff a GREEN flow_pressure position should exit on OFI decay / failure.
+
+    Once favourable excursion has appeared (``pnl_r >= mfe_gate_r``), trail on the
+    MICROSTRUCTURE — not just price distance — so the +0.67R MFE is banked near the
+    peak instead of round-tripping the wide ATR trail (the 17% give-back). Exits
+    when the order-flow that drove the entry DECAYS or REVERSES against the side:
+    the book imbalance flips against the position (``ofi`` sign opposes) OR the
+    post-spike follow-through has FAILED (``flow_confirmed`` is False — bid
+    withdrawal / microprice failure / spread widening). EXPECTANCY, not a throttle:
+    a per-position close once green; never a size-cut, an entry-block, or a halt —
+    and it never fires while the trade is red (the G6 -1.0R rail owns that).
+    """
+    if pnl_r < mfe_gate_r:
+        return False
+    if ofi is not None:
+        if side == "long" and ofi < 0.0:
+            return True
+        if side == "short" and ofi > 0.0:
+            return True
+    return flow_confirmed is False
 
 # Loop-heartbeat stall threshold: an iteration gap beyond ``cadence + this``
 # means the loop was starved (e.g. a multi-minute learner full-DB backup /
@@ -305,7 +472,12 @@ def _collect_intents(
             eng.max_abs_ofi = max(eng.max_abs_ofi, abs(feat.ofi))
         if feat.overshoot_z is not None:
             eng.max_abs_overshoot = max(eng.max_abs_overshoot, abs(feat.overshoot_z))
-    active = active_signals(regime)
+    # D3 routing: a signal must be BOTH regime-active AND structurally live on
+    # this venue's feed. OKX (full depth) runs all three; Capital (price quotes
+    # only) runs the overshoot fade only — the flow signals would just return
+    # None there anyway (sizes/tape zeroed), so this only skips dead evals, never
+    # blocks an edge (flow_not_block). An unlisted venue keeps the full set.
+    active = active_signals(regime) & venue_allowed_signals(venue)
     ref_price = float(window[-1].mid) if window else 0.0
     intents: list[TickIntent] = []
     for signal_id in active:
@@ -362,12 +534,18 @@ async def _try_open(
         conn, intent=intent, asset_class=asset_class,
         underlying_group_id=underlying_group_id, regime=regime, now_ts=now_ts,
     )
-    if notional <= 0.0:
+    if notional < _MIN_TICK_NOTIONAL_USD:
+        # <=0 OR positive-but-sub-minimum: the binding daily/cap headroom clipped
+        # final_risk_pct to a residual too small to fund a tradeable order. SKIP
+        # cleanly — submitting it would 100%-reject (OKX 51020 / Alpaca $0
+        # validation). flow_not_block: not a throttle, just never firing an order
+        # that cannot fund (flooring up would breach the cap that clipped it).
         eng.drops_sizing += 1
         logger.debug(
-            "[tick-engine] sizing-zero %s:%s sig=%s (binding cap — capital "
-            "headroom, not a throttle)",
+            "[tick-engine] sizing-sub-min %s:%s sig=%s notional=%.4f<%.2f "
+            "(binding cap — capital headroom, not a throttle)",
             intent.venue, intent.symbol, intent.signal_id,
+            notional, _MIN_TICK_NOTIONAL_USD,
         )
         return False
     # Cooldown is armed at the decision point so a shadow decision also gates
@@ -390,6 +568,13 @@ async def _try_open(
         notional_usd=notional, last_price=intent.ref_price, now_ts=now_ts,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        # flow_pressure OFI momentum + micro_reversion overshoot fade are not
+        # latency-critical to the tick → route their OKX entry maker-first
+        # (post-only at touch → TAKER fallback) to pay 8 bps when they can rest,
+        # NEVER a missed trade (the post-only path always falls back to taker on a
+        # would-cross/reject/timeout). flow_not_block: cheaper when possible, never
+        # a skipped entry. Other tick signals keep the strength-gated default.
+        prefer_maker=(intent.signal_id in _MAKER_FIRST_SIGNALS),
     )
     if trade is None:
         return False
@@ -492,6 +677,7 @@ def _scalp_exit_decision(
     last_mid: float,
     ofi: float | None,
     pnl_r: float,
+    strategy_id: str = "",
 ) -> str | None:
     """Fast-scalp exit for a reversion position — close-reason or None (hold).
 
@@ -500,12 +686,18 @@ def _scalp_exit_decision(
         fade was betting AGAINST continuing (a long fade wanted the down-push to
         exhaust; if ``ofi`` is now firmly negative again, the snap-back failed).
       - ``scalp_stop``: adverse excursion past ``_SCALP_STOP_R`` (micro-stop).
-      - ``scalp_target``: the snap-back banked ``_SCALP_TARGET_R`` (small R).
+      - ``scalp_target``: the snap-back banked the strategy's take-profit (small
+        R). ``strategy_id`` selects a per-strategy PROFIT target — micro_reversion
+        harvests its measured bounded revert at the lower
+        ``_MICRO_REVERSION_TARGET_R`` so the +0.30-0.45R excursion is banked
+        before it gives back; every other reversion id keeps the shared
+        ``_SCALP_TARGET_R`` (byte-identical). PROFIT side only.
     EXPECTANCY (cut a dead scalp fast / bank a small winner fast), NOT a throttle.
+    The loss side (``_SCALP_STOP_R``) is UNCHANGED regardless of strategy_id.
     """
     if pnl_r <= _SCALP_STOP_R:
         return "scalp_stop"
-    if pnl_r >= _SCALP_TARGET_R:
+    if pnl_r >= _scalp_target_for_strategy(strategy_id):
         return "scalp_target"
     if ofi is not None:
         # A long reversion bet wants flow to stop selling; if ofi is firmly
@@ -576,7 +768,7 @@ async def _run_exits(
             feat = compute_tick_features(window, now_mono, eng.cfg)
             reason = _scalp_exit_decision(
                 side=trade.side, entry_price=entry_price, last_mid=last_mid,
-                ofi=feat.ofi, pnl_r=pnl_r,
+                ofi=feat.ofi, pnl_r=pnl_r, strategy_id=trade.strategy_id,
             )
             if reason is None:
                 continue
@@ -605,16 +797,60 @@ async def _run_exits(
         # matches the bar recalc's ruler. NULL anchor / missing row → the
         # live tick-window denominator (legacy-graceful, pre-anchor).
         anchor_row = conn.execute(
-            "SELECT entry_atr_pct FROM positions WHERE position_id = ?",
+            "SELECT entry_atr_pct, mfe_r, mae_r, entry_regime "
+            "FROM positions WHERE position_id = ?",
             (position_id,),
         ).fetchone()
         anchor_raw = anchor_row[0] if anchor_row is not None else None
         entry_atr_pct = None if anchor_raw is None else max(float(anchor_raw), 1e-4)
+        row_mfe_r = (
+            float(anchor_row[1]) if anchor_row and anchor_row[1] is not None else 0.0
+        )
+        row_mae_r = (
+            float(anchor_row[2]) if anchor_row and anchor_row[2] is not None else 0.0
+        )
+        entry_regime = (
+            str(anchor_row[3]) if anchor_row and anchor_row[3] is not None else None
+        )
         if entry_atr_pct is not None:
             pnl_r = compute_unrealized_pnl_r(
                 side=trade.side, entry_price=entry_price,
                 last_price=last_mid, atr_pct=entry_atr_pct,
             )
+        # flow_pressure EXIT precision: once GREEN, trail on the MICROSTRUCTURE —
+        # exit near the peak the instant the OFI that drove the entry decays /
+        # reverses (or the follow-through fails: bid withdrawal / microprice
+        # failure / spread widening), instead of round-tripping the wide ATR
+        # trail (the 17% give-back). EXPECTANCY, not a throttle — a per-position
+        # close once green; the schedule-floored ATR stop below still owns the
+        # price-distance + protected-R exit. Other momentum strategies skip this.
+        if trade.strategy_id == _FLOW_PRESSURE:
+            fp_window = (
+                writer.feature_window(instrument_id) if writer is not None else []
+            )
+            fp_feat = compute_tick_features(fp_window, now_mono, eng.cfg)
+            if _flow_decay_exit(
+                side=trade.side, ofi=fp_feat.ofi,
+                flow_confirmed=fp_feat.flow_confirmed, pnl_r=pnl_r,
+                mfe_gate_r=eng.cfg.mfe_bep_r,
+            ):
+                closed = await close_specific_position(
+                    conn, state=state, position_id=position_id, now_ts=now_ts,
+                    lookup_regime=lookup_regime, gpt_client=None, phase=phase,
+                    real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+                    capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                    close_reason="flow_decay",
+                )
+                if closed:
+                    eng.family_by_position.pop(position_id, None)
+                    eng.entry_ref_by_position.pop(position_id, None)
+                    logger.info(
+                        "[tick-engine/flow-decay-exit] %s:%s trade_id=%s "
+                        "pnl_r=%.2f ofi=%s confirmed=%s",
+                        trade.venue, trade.symbol, position_id, pnl_r,
+                        fp_feat.ofi, fp_feat.flow_confirmed,
+                    )
+                continue
         pos = ActivePositionRow()
         pos.update(
             {
@@ -633,6 +869,32 @@ async def _run_exits(
             }
         )
         held_seconds = max(0, now_ts - int(trade.open_ts))
+        # Adaptive thesis re-map (tick path): gather the FULL microstructure inputs
+        # the tick engine has — ofi / flow_confirmed / burst_z + the live regime —
+        # plus the persisted excursion + entry-regime anchor, and resolve a
+        # ManagementMode. re-map OFF → None → byte-identical. EXIT timing only.
+        mode_window = (
+            writer.feature_window(instrument_id) if writer is not None else []
+        )
+        mode_feat = compute_tick_features(mode_window, now_mono, eng.cfg)
+        try:
+            tick_regime: str | None = lookup_regime(conn, trade.venue, trade.symbol)
+        except Exception:  # noqa: BLE001 — regime read must never break the exit
+            tick_regime = None
+        mode = assess_mode_for_position(
+            strategy_id=trade.strategy_id, side=trade.side,
+            mfe_r=row_mfe_r, mae_r=row_mae_r, pnl_r=pnl_r,
+            # Directional momentum = signed mid drift over the feature window
+            # (newest-oldest)/oldest — a STABLE direction, not the noisy
+            # instantaneous burst_z sign (an oscillation downtick must not flip a
+            # drifting winner to BROKEN). 0.0 on an empty window → no break.
+            momentum_drift=_window_mid_drift(mode_window),
+            atr_slope=0.0,
+            ofi=mode_feat.ofi, flow_confirmed=mode_feat.flow_confirmed,
+            regime=tick_regime, entry_regime=entry_regime,
+            held_seconds=held_seconds,
+            horizon_seconds=max(held_seconds, 60),
+        )
         closed = await run_precise_exit(
             conn=conn, state=state, pos=pos, side=trade.side,
             entry_price=entry_price, last_price=last_mid, atr_pct=max(atr_pct, 1e-4),
@@ -640,7 +902,15 @@ async def _run_exits(
             close_specific=close_specific_position, lookup_regime=lookup_regime,
             gpt_client=None, phase=phase, real_roundtrip=real_roundtrip,
             okx_adapter=okx_adapter, capital_session=capital_session,
-            alpaca_adapter=alpaca_adapter, entry_atr_pct=entry_atr_pct,
+            alpaca_adapter=alpaca_adapter, entry_atr_pct=entry_atr_pct, mode=mode,
+            # flow_pressure rides a WIDER let-winners-run trail so favourable OFI
+            # drift is captured past the old ~75s scalp; every other tick momentum
+            # strategy → None → module-default trail (byte-identical).
+            trail_mult=_momentum_trail_mult(trade.strategy_id),
+            # flow_pressure also ratchets the stop to BEP at +MFE and locks
+            # positive R (capturing the +0.67R avg MFE, cutting the give-back);
+            # other momentum strategies → None → byte-identical.
+            mfe_protect=_mfe_protect_schedule(trade.strategy_id, eng.cfg),
         )
         if closed:
             eng.family_by_position.pop(position_id, None)
@@ -662,6 +932,26 @@ def _window_atr_pct(writer: Any, instrument_id: str) -> float:
     if last <= 0.0:
         return 0.0
     return (max(mids) - min(mids)) / last
+
+
+def _window_mid_drift(window: Any) -> float:
+    """Signed mid drift over the feature window: (newest - oldest) / oldest.
+
+    The adaptive thesis re-map's ``momentum_drift`` input on the tick path — a
+    STABLE directional signal (positive = price rose over the window) rather than
+    the noisy instantaneous ``burst_z`` sign. Empty / single-tick / non-positive
+    oldest → 0.0 (degrade safe → the re-map sees no momentum, never a break).
+    """
+    if not window or len(window) < 2:
+        return 0.0
+    try:
+        first = float(window[0].mid)
+        last = float(window[-1].mid)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+    if first <= 0.0:
+        return 0.0
+    return (last - first) / first
 
 
 def _lookup_regime_str(conn: Any, venue: str, symbol: str) -> str:

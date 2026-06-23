@@ -417,3 +417,83 @@ def test_target_beats_roundtrip_short_fade() -> None:
     assert sq2.close is True and sq2.close_reason == "atr_trail_stop"
     status_quo_net_r = _pnl_r(side, ENTRY, p2)  # ~0R round-trip
     assert target_net_r > status_quo_net_r  # the fix strictly beats status quo
+
+
+# --- flow_pressure RE-AIM: wider let-winners-run trail (lever 2, retune) -----
+# The default 2.0-ATR Chandelier trail closed flow_pressure's favourable OFI
+# drift too fast (honest fee-net retune w02ccvq0q: the longer-hold cohort was the
+# only gross-cost-positive bucket). A WIDER per-position ``trail_mult`` lets the
+# drift run past the old fast scalp. EXPECTANCY, not a throttle: it only LOOSENS
+# the running trail; the ratchet, protected-BEP, loser-timeout + the G6 -1.0R
+# rail (loss-defence) are untouched, and HARVEST still tightens.
+
+
+def test_wider_trail_holds_a_drifting_position_the_default_trail_would_close() -> None:
+    # 4% ATR (atr_one=4.0, atr_r 2x=8.0) so peak 110 → mfe = 10/8 = 1.25R (< 2R
+    # HARVEST), isolating the running-trail width from the harvest-tighten path.
+    atr_pct = 0.04
+    peak = 110.0
+    pull = 101.0
+    # default stop = 110 - 2*4 = 102 → a pull to 101 is BELOW → default closes.
+    st_default = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=peak,
+        atr_pct=atr_pct, pnl_r=2.5, held_seconds=10,
+    )
+    d_default = evaluate_exit(
+        prev=st_default.state, side="long", entry_price=ENTRY, last_price=pull,
+        atr_pct=atr_pct, pnl_r=0.25, held_seconds=20,
+    )
+    assert d_default.close is True
+    assert d_default.close_reason == "atr_trail_stop"
+
+    # Wider trail (4.0 ATR = 16 wide): stop = 110 - 4*4 = 94 → 101 is ABOVE → HOLD.
+    st_wide = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=peak,
+        atr_pct=atr_pct, pnl_r=2.5, held_seconds=10, trail_mult=4.0,
+    )
+    d_wide = evaluate_exit(
+        prev=st_wide.state, side="long", entry_price=ENTRY, last_price=pull,
+        atr_pct=atr_pct, pnl_r=0.25, held_seconds=20, trail_mult=4.0,
+    )
+    assert d_wide.close is False, "the wider flow_pressure trail must HOLD the drift"
+    assert d_wide.state.stop_price is not None and d_wide.state.stop_price < pull
+
+
+def test_trail_mult_none_is_byte_identical_to_default() -> None:
+    # The override defaults to None for every existing caller → identical stop.
+    explicit = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=103.0,
+        atr_pct=ATR_PCT, pnl_r=1.5, held_seconds=10, trail_mult=None,
+    )
+    implicit = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=103.0,
+        atr_pct=ATR_PCT, pnl_r=1.5, held_seconds=10,
+    )
+    assert explicit.state.stop_price == implicit.state.stop_price
+    assert explicit.state.stop_price == 103.0 - EXIT_ATR_TRAIL_MULT * 1.0
+
+
+def test_wider_trail_still_cuts_the_loss_defence_untouched() -> None:
+    # The wider trail ONLY loosens the running trail — the loser-timeout (a
+    # never-profit losing position past its horizon) STILL fires. Loss-defence
+    # is unchanged by the retune.
+    losing = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=99.0,
+        atr_pct=ATR_PCT, pnl_r=-0.5, held_seconds=int(EXIT_LOSER_TIMEOUT_SEC) + 1,
+        trail_mult=4.0,
+    )
+    assert losing.close is True
+    assert losing.close_reason == "loser_timeout"
+
+
+def test_wider_trail_harvest_still_tightens() -> None:
+    # Once a big winner is locked (FSM HARVEST), the trail tightens to the
+    # HARVEST mult regardless of the wider running override — the lock is intact.
+    big = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=106.0,
+        atr_pct=ATR_PCT, pnl_r=3.0, held_seconds=10, trail_mult=4.0,
+    )
+    assert big.state.exit_state == EXIT_STATE_HARVEST
+    # HARVEST trail = EXIT_HARVEST_TRAIL_MULT (1.0), NOT the 4.0 running override.
+    from polaris.core.live_recalc.exit_engine import EXIT_HARVEST_TRAIL_MULT
+    assert big.state.stop_price == 106.0 - EXIT_HARVEST_TRAIL_MULT * 1.0

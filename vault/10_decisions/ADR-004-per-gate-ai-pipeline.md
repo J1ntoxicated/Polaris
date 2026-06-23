@@ -2,12 +2,17 @@
 type: ADR
 adr_id: ADR-004
 aliases: [ADR-004]
-status: active
+status: partially-superseded
+superseded_by: [[ADR-011-ai-free-cutover|ADR-011]]
 date_created: 2026-05-06
+date_updated: 2026-06-22
 tags: [adr, ai, pipeline, langgraph, per-gate]
-related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[active-autonomous-vision]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-011-ai-free-cutover|ADR-011]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (round 2 + Jin clarification 21:30)
 ---
+
+> ⚠️ **PARTIALLY SUPERSEDED (2026-06-22)** by [[ADR-011-ai-free-cutover|ADR-011]].
+> The **in-loop LLM-gate** design below (Anthropic Haiku/Sonnet on G3/G4/G7 and the Sonnet P1 gates) is **no longer live**. W3 cutover = **deterministic Python primary in-loop; in-loop GPT = 0; Anthropic blocked for runtime**. GPT runs **shadow/sentinel only**. The 8-gate *lifecycle structure* still holds; only the per-gate *LLM execution* is replaced by deterministic Python. Read this doc as historical design for the gate topology; see ADR-011 for the live provider/execution reality.
 
 # ADR-004 — Per-Gate AI Agent Pipeline
 

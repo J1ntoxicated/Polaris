@@ -46,6 +46,16 @@ logger = logging.getLogger(__name__)
 # last-write-wins per PK).
 RING_BUFFER_DEPTH = 600
 
+# Execution-default freshness threshold (M6). The LIVE WS mid is the execution
+# default for EVERY trade-execution price (entry fill ref, exit/close sizing
+# mark, sim-exit mark) when its ``time.monotonic()`` age is below this; an older
+# tick (no WS / reconnecting) degrades to the most-recent bar close. Set ABOVE
+# the WS reconnect worst-case (BACKOFF_CAP_SEC=30s) so a single reconnect cannot
+# flap the execution mark between the WS tick and the bar close. The exit-recalc
+# path keeps its own ``WS_EXIT_MARK_FRESH_SEC`` (same value) for the exit TRIGGER
+# mark; this constant is the shared default for the remaining execution prices.
+LIVE_PRICE_FRESH_SEC = 35.0
+
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
     "(instrument_id, venue, symbol, ts, bid, ask, mid, spread_bps, "
@@ -70,6 +80,35 @@ def _row(q: QuoteTick) -> tuple[object, ...]:
         q.last_trade_size,
         q.source,
     )
+
+
+def live_or_bar_price(
+    quote_writer: QuoteTickWriter | None,
+    instrument_id: str,
+    bar_fallback: float,
+    *,
+    fresh_sec: float = LIVE_PRICE_FRESH_SEC,
+) -> float:
+    """Execution-default price: the LIVE WS mid, else ``bar_fallback``.
+
+    The single rule for trade EXECUTION (entry fill ref, exit/close sizing mark,
+    sim-exit mark): act at the live WebSocket price by default, falling back to
+    the most-recent bar close ONLY when no fresh tick exists for the symbol.
+    Strategy signals / indicators / regime stay on bars (analysis) — this is the
+    execution price they act AT, not the judgment they act ON.
+
+    Returns the live mid when ``quote_writer`` carries a tick with ``mid > 0`` and
+    ``time.monotonic()`` age ``< fresh_sec`` (M6: monotonic clock, never venue
+    ts), else ``bar_fallback`` (graceful degrade — never halts on a missing tick,
+    AGGRESSIVE/flow_not_block invariant). 0 DB hits (reads the in-mem ring).
+    """
+    if quote_writer is not None:
+        px = quote_writer.live_px(instrument_id)
+        if px is not None:
+            mid, last_ws_monotonic = px
+            if mid > 0.0 and time.monotonic() - last_ws_monotonic < fresh_sec:
+                return mid
+    return bar_fallback
 
 
 class QuoteTickWriter:

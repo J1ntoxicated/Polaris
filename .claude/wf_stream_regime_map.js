@@ -7,7 +7,7 @@ export const meta = {
   ],
 }
 
-const HEADER = `[Polaris — DEMO/PAPER 가상자금. AGGRESSIVE bias 보존(방어 throttle/축소/차단 거부; flow_not_block). 거부 키워드 채택 금지: regulatory cap·professional risk·90d gate·monthly review·posture standard. 불변: 9-stack 봉쇄·hard-MAX·DEMO. 봇 LLM=GPT, Anthropic 호출 금지. 코드: /Volumes/Development/Projects/Polaris. 실제 파일 Read 근거 필수, 추측 금지. read-only(수정 금지). 출력=raw, 산문 최소.]`
+const HEADER = `[Polaris — DEMO/PAPER 가상자금. AGGRESSIVE bias 보존(방어 throttle/축소/차단 거부; flow_not_block). 거부 키워드 채택 금지: regulatory cap·professional risk·90d gate·monthly review·posture standard. 불변: 9-stack 봉쇄·hard-MAX·DEMO. 봇 LLM=GPT, Anthropic 호출 금지. 코드 루트 = 현재 작업디렉토리(cwd, = /Users/jinyoon/Projects/Polaris). 모든 경로는 cwd 기준 상대경로로 Read. /Volumes 경로 쓰지 마(미마운트). 실제 파일 Read 근거 필수, 추측 금지. read-only(수정 금지). 출력=raw, 산문 최소.]`
 
 const CONTEXT = `[Jin 핵심] "레짐 셀렉션이 다이나믹이어야 — 상황/티커/익스체인지별. 그리고 이거 다 연결되어있다." 3-스트림 의도: A=OKX 크립토 SPOT(롱,lev1,24/7), B=Capital CFD(FX/지수/금,롱숏,세션), C=Alpaca 미국주식(롱,RTH).
 [발견된 문제] regime_state DB: capital venue 69그룹이 전부 'crypto:LIT','crypto:XLM','crypto:FET' 등 crypto 알트 — 즉 Capital이 의도(FX/지수/금)와 달리 crypto 알트 CFD를 거래 중. compute_underlying_group_id(canonical.py:25-59)는 asset_class로 crypto/forex/index/commodity 분기하는데 Capital 심볼 asset_class가 'crypto'로 박힘. classify_regime(regime_flip.py)은 P0 stub(confidence 0.5 고정). alt-data fuser는 prefix(crypto/forex/...)로 자산군별 민감 소스 라우팅(crypto→funding/F&G, forex/commodity→macro, equity→gap).

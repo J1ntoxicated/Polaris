@@ -43,6 +43,11 @@ from typing import Any
 
 from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
 from polaris.core.learners.posterior import NIGPosterior, nig_update
+from polaris.core.metrics.risk_unit import (
+    R_USD_PROXY,
+    r_budget_for_venue,
+    realised_r_stream,
+)
 
 __all__ = [
     "LCB_Z",
@@ -51,9 +56,13 @@ __all__ = [
     "replay_block",
 ]
 
-# Mirrors ``shadow_acceptance.PNL_R_USD_DENOM`` / ``payload_builder`` — the
-# $-risk-per-trade heuristic that projects $-PnL into R. Constant-risk proxy.
-PNL_R_USD_DENOM: float = 50.0
+# Step N (2026-06-23): per-trade R is the STREAM-COMMON realised R
+# (``pnl_usd / R_budget(stream)`` — comparable across venues). The flat
+# ``R_USD_PROXY`` constant is retained ONLY as the fee-drag fallback for fills
+# whose venue has no registered R_budget (unknown venue → keeps a finite, single
+# number rather than a venue split). ``PNL_R_USD_DENOM`` is kept as the exported
+# fallback alias. Display only — never sizes/gates.
+PNL_R_USD_DENOM: float = R_USD_PROXY
 
 # One-sided lower-confidence-bound z. z = 1.0 ≈ one standard error (the simple
 # ``mean − z·stderr`` LCB the spec permits), applied to the NIG marginal-t scale.
@@ -209,24 +218,33 @@ def confidence_summary(
             gross_loss += -gross
         # Round-trip real fee = open leg + close leg, both at this notional.
         rt_real_fee = 2.0 * real_fee_usd(v, notional)
-        net_r = (gross - rt_real_fee) / PNL_R_USD_DENOM
+        # Step N: stream-common R = real-fee-net $ / R_budget(venue) — comparable
+        # across venues. Unknown venue (no R_budget) falls back to the flat proxy.
+        net_pnl = gross - rt_real_fee
+        net_r = realised_r_stream(pnl_usd=net_pnl, venue=v)
+        if net_r == 0.0 and net_pnl != 0.0:
+            net_r = net_pnl / PNL_R_USD_DENOM
         regime = regime_lookup.get((v, str(group or "")), "chop")
         cell_samples.setdefault((strat, regime), []).append(net_r)
 
-    # Turnover + fee drag over ALL fills (both legs).
+    # Turnover + fee drag over ALL fills (both legs). Step N: the fee-drag R is
+    # accumulated PER VENUE so each venue's $ drag is converted on its OWN
+    # R_budget (the stream-common ruler), then summed — an unknown venue falls
+    # back to the flat proxy so the drag is always finite.
     turnover = 0.0
-    fee_drag_real_usd = 0.0
-    fee_drag_demo_usd = 0.0
+    fee_drag_real_r = 0.0
+    fee_drag_demo_r = 0.0
     for venue, size_usd in conn.execute("SELECT venue, size_usd FROM fills"):
         v = str(venue or "")
         notional = abs(float(size_usd or 0.0))
         turnover += notional
-        fee_drag_real_usd += real_fee_usd(v, notional)
+        budget = r_budget_for_venue(v) or PNL_R_USD_DENOM
         # Both drags recompute from the centralized schedule by notional. The
         # stored fills.fee_usd now holds the REAL fee (fill_normalizer
         # 2026-06-01), so the demo (70 bps OKX) drain is recomputed via
         # demo_fee_usd rather than read from the column.
-        fee_drag_demo_usd += demo_fee_usd(v, notional)
+        fee_drag_real_r += real_fee_usd(v, notional) / budget
+        fee_drag_demo_r += demo_fee_usd(v, notional) / budget
 
     win_rate = (wins / n_closed * 100.0) if n_closed else 0.0
     profit_factor = (
@@ -257,15 +275,19 @@ def confidence_summary(
             "win_rate_pct": win_rate,
             "profit_factor": profit_factor,
             "turnover_ratio": turnover_ratio,
-            "fee_drag_real_r": fee_drag_real_usd / PNL_R_USD_DENOM,
-            "fee_drag_demo_r": fee_drag_demo_usd / PNL_R_USD_DENOM,
+            "fee_drag_real_r": fee_drag_real_r,
+            "fee_drag_demo_r": fee_drag_demo_r,
         },
         "by_strategy_regime": by_cell,
         # Offline replay/benchmark read-model (display-only; graceful-zero when
         # no run has been persisted yet). Behaviour 0.
         "replay": replay_block(conn),
         "notes": {
-            "r_conversion": f"pnl_usd / {PNL_R_USD_DENOM} (constant-risk proxy)",
+            "r_conversion": (
+                "pnl_usd / R_budget(stream) where R_budget = 0.02 × stream "
+                "starting equity (OKX $1,580 / Capital $1,020 / Alpaca 2% of "
+                f"probe); unknown venue → flat ${PNL_R_USD_DENOM:.0f} proxy"
+            ),
             "lcb": f"NIG posterior μ_n − {LCB_Z}·scale (marginal Student-t on μ)",
             "join_limitation": (
                 "regime = CURRENT regime_state on (venue, group) via "

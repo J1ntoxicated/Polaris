@@ -58,7 +58,9 @@ from polaris.core.streams import resolve_stream_profile
 from polaris.scripts._production_atr import strategy_timeframe, timeframe_atr_pct
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
+from polaris.scripts._production_probe_attach import observe_probes
 from polaris.scripts._production_recalc_exit import (
+    assess_mode_for_position,
     run_precise_exit,
     run_session_forced_exit,
 )
@@ -121,7 +123,8 @@ def load_active_position_rows(
                p.strategy_id, p.entry_strategy_id, p.active_strategy_id,
                p.side, p.qty, p.opened_ts,
                p.stop_price, p.peak_price, p.trough_price, p.exit_state,
-               p.entry_atr_pct, p.entry_atr_timeframe
+               p.entry_atr_pct, p.entry_atr_timeframe,
+               p.mfe_r, p.mae_r, p.entry_regime
         FROM positions p
         WHERE p.status NOT IN ('closed','cancelled','reconciled')
         ORDER BY p.opened_ts DESC LIMIT ?
@@ -233,6 +236,11 @@ def load_active_position_rows(
             entry_atr_pct=entry_atr_pct,
             entry_atr_timeframe=None if r[15] is None else str(r[15]),
             anchor_missing=entry_atr_pct is None,
+            # Excursion telemetry (last persisted) + entry-regime anchor — the
+            # adaptive thesis re-map inputs. NULL = unstamped/legacy (degrade safe).
+            mfe_r=None if r[16] is None else float(r[16]),
+            mae_r=None if r[17] is None else float(r[17]),
+            entry_regime=None if r[18] is None else str(r[18]),
         )
         out.append(ap)
     return out
@@ -307,6 +315,38 @@ def _atr_slope(
     return recent_mean - older_mean
 
 
+def _recent_tick_drift(recent_ticks: Any) -> float:
+    """Signed price drift over the recent-tick window (newest - oldest) / oldest.
+
+    The adaptive thesis re-map's ``momentum_drift`` input: positive = price rose
+    over the window. Empty / malformed / single-tick → 0.0 (degrade safe → the
+    re-map sees no momentum and never fires a break on missing data).
+    """
+    if not isinstance(recent_ticks, list) or len(recent_ticks) < 2:
+        return 0.0
+    try:
+        first = float(recent_ticks[0]["close"])
+        last = float(recent_ticks[-1]["close"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    if first <= 0.0:
+        return 0.0
+    return (last - first) / first
+
+
+def _horizon_seconds_for(strategy_id: str) -> int:
+    """The strategy's expected holding horizon in seconds (timeframe × expected
+    holding bars), or a 600s fallback for an unknown strategy."""
+    from polaris.core.isolation.reentry import bar_seconds
+    from polaris.strategies import STRATEGY_REGISTRY
+
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return 600
+    bars = max(1, int(cls.metadata.expected_holding_bars))
+    return int(bar_seconds(cls.metadata.timeframe) * bars)
+
+
 # ---------------------------------------------------------------------------
 # Per-position G6/G7 GPT invocation
 # ---------------------------------------------------------------------------
@@ -358,6 +398,38 @@ async def _evaluate_position(
     ):
         return
 
+    # ADR-012 Slice 1 — PROBE → ENGINE → TUNING-LOG (OBSERVE-ONLY). Pure/sync,
+    # called INLINE here (no await) so the FSM read-modify-write atomicity in
+    # run_precise_exit is untouched. In observe mode the engine threads ZERO
+    # knobs into run_precise_exit (its kwargs below stay default) — provably
+    # byte-identical. Fully fail-open: a None sidecar / raising probe / fail-open
+    # writer never breaks the tick. The hard rails BYPASS this framework.
+    observe_probes(
+        state=state, pos=pos, side=side, entry_price=entry_price,
+        last_price=last_price, atr_pct=atr_pct, entry_atr_pct=entry_atr_pct,
+        pnl_r=pnl_r, held_seconds=held_seconds, regime=regime, now_ts=now_ts,
+        run_id=uuid.uuid4().hex,
+    )
+
+    # Adaptive thesis re-map (bar path): gather the entry-thesis-health inputs
+    # available on the bar pipeline (regime / atr_slope / recent-tick drift /
+    # time) and resolve a ManagementMode. OFI / flow_confirmed are tick-only →
+    # None here (degrade safe). re-map OFF → mode=None → byte-identical. EXIT
+    # timing only; never size / entry / the G6 -1.0R rail.
+    strategy_id = str(pos.get("active_strategy_id", pos.get("strategy", "")))
+    mode = assess_mode_for_position(
+        strategy_id=strategy_id, side=side,
+        mfe_r=float(pos.get("mfe_r") or 0.0),
+        mae_r=float(pos.get("mae_r") or 0.0),
+        pnl_r=pnl_r,
+        momentum_drift=_recent_tick_drift(pos.get("recent_ticks")),
+        atr_slope=float(pos.get("atr_slope", 0.0)),
+        ofi=None, flow_confirmed=None,
+        regime=regime, entry_regime=pos.get("entry_regime"),
+        held_seconds=held_seconds,
+        horizon_seconds=_horizon_seconds_for(strategy_id),
+    )
+
     # #26 — precise exits FIRST (deterministic, every tick): track excursion,
     # ratchet the ATR-trailing stop, advance the MFE FSM, close on trail-stop /
     # protected-BEP / loser-timeout. If it fires, the position is gone — skip G6.
@@ -370,7 +442,7 @@ async def _evaluate_position(
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        entry_atr_pct=entry_atr_pct,
+        entry_atr_pct=entry_atr_pct, mode=mode,
     )
     if closed:
         return

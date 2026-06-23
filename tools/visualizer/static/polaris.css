@@ -59,9 +59,9 @@
   --status-danger: var(--p-red);
   --status-info:   var(--p-cyn);
 
-  --exch-okx:      var(--p-cyn);
-  --exch-cap:      var(--p-blu);
-  --exch-alp:      var(--p-ylw);
+  --exch-okx:      var(--p-cyn);   /* OKX  = cyan  #87d7ff */
+  --exch-cap:      #b47cff;        /* Capital = PURPLE (Jin: blue was too close to OKX cyan) */
+  --exch-alp:      var(--p-ylw);   /* Alpaca = yellow #d7d787 */
   --exch-bin:      var(--p-grn);
 
   --divider:       var(--polaris-blue);

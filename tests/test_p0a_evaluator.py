@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from polaris.core.benchmark.baselines import (
     bollinger_baseline,
     buy_and_hold_baseline,
@@ -383,10 +385,25 @@ def _is_strong_oos_loses_bars(*, n_is: int, n_oos: int, start: float = 100.0) ->
 
 
 # --- (5) FIX 7a: REAL overfit fixture — IS PASSES, OOS FAILS (non-vacuous) -----
-def test_overfit_is_passes_oos_fails_same_variant() -> None:
+def test_overfit_is_passes_oos_fails_same_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The SAME variant clears the full IS gate (>=10 winning IS trades, positive
     IS Sharpe) yet FAILS the held-out OOS gate (>=10 trades, net-R centred <= 0).
-    A non-vacuous overfit proof: is_pass True AND oos_pass False AND n_trades>0."""
+    A non-vacuous overfit proof: is_pass True AND oos_pass False AND n_trades>0.
+
+    Hermetic-isolation: this exercises the OVERFIT EVALUATOR (IS-pass / OOS-fail
+    branch), not the production exit tuning. The stale-loser drift-backstop CAP
+    (``POLARIS_LOSER_TIMEOUT_SEC``, an orthogonal exit knob) would otherwise cut
+    the 1H tsmom pullback legs a bar early and fragment the IS edge below the
+    baselines — so we DISABLE the cap here, pinning the bot's IS/OOS trade
+    distribution to the evaluator's known-good geometry independently of that
+    default. No assertion is weakened; the trading code is untouched.
+    """
+    monkeypatch.setattr(
+        "polaris.scripts._production_recalc_exit.LOSER_TIMEOUT_CAP_SEC",
+        float("inf"),
+    )
     bars = _is_strong_oos_loses_bars(n_is=1500, n_oos=600)
     variant = _variant(TSMOMStrategy, {})
     res = evaluate_variant(

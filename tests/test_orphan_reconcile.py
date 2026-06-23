@@ -22,12 +22,14 @@ defensive throttle, no size dampen, no chain multiplier, no P&L halt.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from typing import Any
 
 import pytest
 
+from polaris.core.metrics.risk_unit import r_budget_for_venue
 from polaris.scripts._production_close import (
     _close_trade_with_real_pnl,
     _real_close_fill,
@@ -195,6 +197,61 @@ async def test_orphan_close_reconciles_position(memdb: sqlite3.Connection) -> No
 
 
 @pytest.mark.asyncio
+async def test_orphan_reconcile_leaves_pnl_r_null_records_drift_usd(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Step M (2026-06-22, Jin locked): a reconcile is a TRACKING FAILURE, not a
+    trade. Its ``pnl_r`` is LEFT NULL so it is EXCLUDED from every R aggregation
+    (PF/WR/avg_r/ticker R) — reverting the earlier mae→pnl_r stamp the design
+    audit found INFLATED the R ledger (−211R artefact). The drift is instead
+    surfaced as a SEPARATE rough DOLLAR estimate (mae_r × risk_usd) in the audit
+    row. Still no fabricated close fill, no learner feed."""
+    base_qty = 146.8
+    _seed_open(memdb, position_id="pos-mae", base_qty=base_qty)
+    # recalc had recorded a -5.21R worst adverse excursion + a $300 1R unit
+    # before the venue drifted → rough drift estimate ≈ -5.21 × 300 = -$1563.
+    memdb.execute(
+        "UPDATE positions SET mae_r = -5.21, mfe_r = 0.3, risk_usd = 300.0 "
+        "WHERE position_id = 'pos-mae'"
+    )
+    state = ProdLoopState()
+    trade = _trade("pos-mae", base_qty)
+    state.open_trades = [trade]
+    adapter = _OrphanOKX(avail=0.0)
+
+    ok = await _close_trade_with_real_pnl(
+        memdb, state=state, trade=trade, trade_idx=0, now_ts=NOW,
+        lookup_regime=_regime_stub, gpt_client=None, phase="P0",
+        real_roundtrip=True, okx_adapter=adapter,
+    )
+
+    assert ok is True
+    row = memdb.execute(
+        "SELECT status, exit_state, pnl_r FROM positions "
+        "WHERE position_id = 'pos-mae'"
+    ).fetchone()
+    assert row[0] == "reconciled"
+    assert row[1] == "reconciled"
+    # pnl_r is LEFT NULL — a tracking failure is excluded from the R ledger.
+    assert row[2] is None
+    # The rough $ drift estimate (mae_r × risk_usd) is in the audit row instead.
+    audit = memdb.execute(
+        "SELECT payload_json FROM risk_events WHERE event_type = 'orphan_reconciled' "
+        "AND payload_json LIKE '%pos-mae%'"
+    ).fetchone()
+    assert audit is not None
+    est_drift_usd = json.loads(audit[0])["est_drift_usd"]
+    assert est_drift_usd == pytest.approx(-5.21 * 300.0)
+    # Still no fabricated close fill, and not a learner-fed closed trade.
+    close_rows = memdb.execute(
+        "SELECT COUNT(*) FROM fills WHERE contribution_id = 'pos-mae' "
+        "AND is_close = 1"
+    ).fetchone()
+    assert close_rows[0] == 0
+    assert state.closed_trades == []
+
+
+@pytest.mark.asyncio
 async def test_transient_reject_keeps_position_open(
     memdb: sqlite3.Connection,
 ) -> None:
@@ -302,3 +359,37 @@ def test_load_active_position_rows_excludes_reconciled(
     )
     rows = load_active_position_rows(memdb)
     assert all(r["position_id"] != "pos-rec2" for r in rows)
+
+
+def test_real_pnl_r_records_true_loss_beyond_old_10r_clamp(
+    memdb: sqlite3.Connection,
+) -> None:
+    """No hidden ±10 clamp — the realised R records the TRUE move up to ±100.
+
+    Step N (2026-06-23): realised R is the stream-common ``pnl_usd / R_budget``
+    (OKX R_budget = 0.02 × $79k = $1,580), NOT the per-trade ATR anchor. The old
+    ±10 clamp that HID losses is gone; the unified bound is ±100. A long entered
+    at 100 closing at 30 → pnl_usd −70 → −70/1580 R (a small but HONEST loss),
+    and a truly catastrophic $ loss clamps at −100R (not −10)."""
+    from polaris.scripts._production_close import real_pnl_r_from_fills
+
+    _seed_open(memdb, position_id="pos-clamp", base_qty=1.0, entry_price=100.0)
+    trade = _trade("pos-clamp", 1.0)
+    pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
+        memdb, trade=trade, exit_price_override=30.0
+    )
+    assert exit_price == pytest.approx(30.0)
+    assert pnl_usd == pytest.approx(-70.0)
+    assert pnl_r == pytest.approx(-70.0 / r_budget_for_venue("okx"))
+
+    # A genuinely catastrophic $ loss clamps at −100R (NOT the old −10 ceiling).
+    # base_qty 10k @ entry 100 → $1M notional; exit 1 → ~−$990k → clamp −100R.
+    _seed_open(memdb, position_id="pos-cat", base_qty=10_000.0, entry_price=100.0)
+    memdb.execute(  # ensure fresh recent bars don't trump the override exit
+        "DELETE FROM bars WHERE instrument_id='okx:FIL-USDT'"
+    )
+    cat_r, _u, _e = real_pnl_r_from_fills(
+        memdb, trade=_trade("pos-cat", 10_000.0), exit_price_override=1.0,
+    )
+    assert cat_r == pytest.approx(-100.0)
+    assert cat_r < -10.0

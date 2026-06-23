@@ -606,6 +606,47 @@ async def test_capital_http_reject_is_external_no_fault(
 
 
 @pytest.mark.asyncio
+async def test_okx_51020_min_order_is_external_nonfault_no_cooldown(
+    memdb: sqlite3.Connection,
+) -> None:
+    """OKX 51020 (order below the instrument MINIMUM order amount) is now
+    pre-empted at submit by the min-size CLAMP-UP (the order is bumped to min so
+    it FLOWS — replaces the per-symbol param-reject cooldown skip). A residual /
+    rare 51020 still classifies EXTERNAL (non-fault) so it never trips the
+    circuit breaker — but with NO per-symbol cooldown set (the cooldown
+    machinery is gone)."""
+    from polaris.scripts._production_reject import (
+        OKX_PARAM_REJECT_CODES,
+        _handle_open_reject,
+    )
+
+    assert "51020" in OKX_PARAM_REJECT_CODES
+    state = ProdLoopState()
+    fence = AsyncMock()
+    now = int(time.time())
+    await _handle_open_reject(
+        memdb, fence=fence, state=state, sig=_sig("m51020"),
+        venue="okx", symbol="ADA-USDT", reservation_id="res51020",
+        reject_code="51020",
+        reject_msg="Your order should meet or exceed the minimum order amount.",
+        now_ts=now,
+    )
+    fence.release_reservation.assert_awaited_once()
+    # NO strategy fault → the strategy stays ACTIVE (no 300x FAULT_REJECT flood).
+    assert state.fault_events == 0
+    assert (
+        memdb.execute(
+            "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='tsmom'"
+        ).fetchone()[0]
+        == 0
+    )
+    # Cooldown machinery is GONE: ProdLoopState no longer carries the per-symbol
+    # cooldown map, so no skip can be armed. Classified as EXTERNAL non-fault.
+    assert not hasattr(state, "okx_param_reject_cooldowns")
+    assert state.venue_rejects_by_code.get("51020") == 1
+
+
+@pytest.mark.asyncio
 async def test_three_capital_http_rejects_keep_breaker_active(
     memdb: sqlite3.Connection,
 ) -> None:

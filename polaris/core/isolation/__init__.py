@@ -18,6 +18,7 @@ from polaris.core.isolation.allocator_fence import (
 from polaris.core.isolation.circuit_breaker import (
     ACTIVE,
     CB_EXCEPTION_THRESHOLD,
+    CB_HARD_HALT_AUTO_UNBLOCK_SEC,
     CB_NAN_THRESHOLD,
     CB_REJECT_THRESHOLD,
     CB_SOFT_HALT_AUTO_UNBLOCK_SEC,
@@ -35,6 +36,7 @@ from polaris.core.isolation.circuit_breaker import (
     current_strategy_mode,
     record_fault,
     reset_strategy_halt,
+    resume_stale_permanent_halts,
     should_allow_new_entry,
 )
 from polaris.core.isolation.namespace import (
@@ -68,6 +70,7 @@ __all__ = [
     "AllocationRequest",
     "AllocatorFence",
     "CB_EXCEPTION_THRESHOLD",
+    "CB_HARD_HALT_AUTO_UNBLOCK_SEC",
     "CB_NAN_THRESHOLD",
     "CB_REJECT_THRESHOLD",
     "CB_SOFT_HALT_AUTO_UNBLOCK_SEC",
@@ -101,6 +104,7 @@ __all__ = [
     "reset_process_fence",
     "reset_strategy_halt",
     "resolve_duplicate_intent",
+    "resume_stale_permanent_halts",
     "run_strategy_task",
     "should_allow_new_entry",
     "supervise_pipeline_tasks",

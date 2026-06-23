@@ -270,6 +270,12 @@ STREAMS: dict[StreamId, StreamConfig] = {
                 "pdt_block",
                 "insufficient_buying_power",
                 "market_closed",
+                # Whole-share-only asset rejecting a $-notional order — a venue
+                # constraint recovered by the whole-share retry, not a fault.
+                "not_fractionable",
+                # Market order on a HALTED symbol — an external venue condition
+                # (the symbol is halted), not a strategy fault.
+                "trading_halt",
             }
         ),
     ),

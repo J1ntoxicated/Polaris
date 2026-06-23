@@ -98,13 +98,13 @@ def test_confirmed_flip_persists_evidence(memdb: sqlite3.Connection) -> None:
     )
     detect_regime_flip(
         memdb, venue="okx", underlying_group_id="crypto:BTC",
-        candidate="bear_trend", now_ts=1060,
+        candidate="bear_trend", now_ts=1360,  # bar N (1360//300=4)
         evidence={"avg_funding": -0.002}, confidence=0.55,
     )
     ev2 = {"avg_funding": -0.003, "crypto_fg": 12}
     dec = detect_regime_flip(
         memdb, venue="okx", underlying_group_id="crypto:BTC",
-        candidate="bear_trend", now_ts=1120,
+        candidate="bear_trend", now_ts=1660,  # bar N+1 (1660//300=5) → 2nd close
         evidence=ev2, confidence=0.8,
     )
     assert dec.reason == "confirmed_2x"
@@ -124,15 +124,15 @@ def test_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> None:
     # One close of a hinted bear candidate: must NOT flip yet.
     dec1 = detect_regime_flip(
         memdb, venue="okx", underlying_group_id="crypto:BTC",
-        candidate="bear_trend", now_ts=1060,
+        candidate="bear_trend", now_ts=1360,  # bar N
         evidence={"crypto_fg": 12}, confidence=0.9,
     )
     assert dec1.confirmed is False
     assert _regime_row(memdb, "okx", "crypto:BTC")[0] == "bull_trend"
-    # Second consecutive close → now it flips.
+    # Second consecutive close (DISTINCT bar) → now it flips.
     dec2 = detect_regime_flip(
         memdb, venue="okx", underlying_group_id="crypto:BTC",
-        candidate="bear_trend", now_ts=1120,
+        candidate="bear_trend", now_ts=1660,  # bar N+1
         evidence={"crypto_fg": 11}, confidence=0.9,
     )
     assert dec2.confirmed is True
@@ -323,10 +323,11 @@ def test_evidence_tilts_borderline_then_confirms(memdb: sqlite3.Connection) -> N
         row = _regime_row(memdb, "okx", "crypto:BTC")
         assert row[3] == "bear_trend"  # candidate tracked
         assert json.loads(row[2])  # evidence non-empty after the write
-        # Second close confirms.
+        # Second close (DISTINCT 5m bar) confirms — bar-close dedup means the
+        # confirming close must land in a new bar, not just a later tick.
         out2 = compute_and_flip_regime(
             memdb, venue="okx", underlying_group_id="crypto:BTC",
-            bars=bars, now_ts=1060, altdata_cache=cache,
+            bars=bars, now_ts=1360, altdata_cache=cache,
         )
         assert out2 == "bear_trend"
         row2 = _regime_row(memdb, "okx", "crypto:BTC")
@@ -456,10 +457,11 @@ def test_equity_hint_does_not_skip_two_close_gate(memdb: sqlite3.Connection) -> 
         row = _regime_row(memdb, "alpaca", "equity:AAPL")
         assert row[3] == "bull_trend"  # candidate tracked
         assert json.loads(row[2]).get("vix") == 12.0  # evidence written
-        # Second consecutive close confirms (gate honored, not bypassed).
+        # Second consecutive close (DISTINCT 5m bar) confirms (gate honored,
+        # not bypassed). Bar-close dedup requires a new bar, not a later tick.
         out2 = compute_and_flip_regime(
             memdb, venue="alpaca", underlying_group_id="equity:AAPL",
-            bars=_bars_series_chop(), now_ts=1060, altdata_cache=cache,
+            bars=_bars_series_chop(), now_ts=1360, altdata_cache=cache,
         )
         assert out2 == "bull_trend"
     finally:

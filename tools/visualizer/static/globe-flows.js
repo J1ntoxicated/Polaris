@@ -29,6 +29,146 @@
 
   function lerp(a, b, t) { return a + (b - a) * t; }
 
+  // ── PERSISTENT NEURAL LINKS — the PIPELINE wiring (Jin 2026-06-23 structure) ──
+  // Jin: "프로브·시그널·활동에 맞게 구성 … 지금 중구난방." The old wiring was largely
+  // GEOMETRIC (nearest-K satellite mesh) so it read as chaos. It is replaced by the
+  // ACTUAL data-flow order — L0 probe → signal → G-gate lane → open position — so a
+  // trade's path on the globe IS the pipeline, not random proximity:
+  //   • PROBE → SIGNAL      : an active watch/mkt node (the universe being probed) ↔
+  //                            its strategy satellite (by strategy_id, else nearest).
+  //   • SIGNAL → GATE       : strat satellite ↔ the G-gate lane anchor (G1 entry).
+  //   • GATE → POSITION     : the last gate anchor (G8) ↔ the core trade heart.
+  //   • TICKER ↔ its TRADE  : active lit watch/mkt ↔ same-ticker pos (the holding).
+  // Drawn EVERY frame (permanent circuit) with traveling neurotransmitter pulses.
+  // Budgeted + capped (no N²) so it stays 60fps. Gate anchors come from the funnel
+  // lane (globe-funnel.js); if absent the gate hops are simply skipped (graceful).
+  let edges = [];             // [{a:node, b:node, phase, speed, baseA, col}]
+  let _edgeSig = '';
+  const MAX_EDGES = 240;      // hard cap → stays 60fps regardless of universe size
+
+  // A gate anchor is a {x,y,z} home on the funnel lane (globe-funnel exposes it).
+  // We wrap it in a lightweight pseudo-node carrying a live _screen so the edge
+  // drawer (which reads a._screen) can use it without touching the node array.
+  const _gateProxies = new Map();   // gate_id → {gate:true, gid, _screen}
+  function gateProxy(gid) {
+    let g = _gateProxies.get(gid);
+    if (!g) { g = { gate: true, gid }; _gateProxies.set(gid, g); }
+    return g;
+  }
+  // Refresh every gate proxy's projected screen pos each frame from its lane anchor.
+  function projectGateProxies(project) {
+    const anch = window.PolarisGlobe_gateAnchors;
+    const conductor = window.PolarisGlobe_conductor || { x: 0, y: 0, z: 0 };
+    if (!anch) return;
+    for (const [gid, g] of _gateProxies) {
+      const a = anch[gid];
+      g._screen = a ? project(conductor.x + a.x, conductor.y + a.y, conductor.z + a.z) : null;
+    }
+  }
+
+  function buildEdges() {
+    const all = window.PolarisGlobe_nodes || [];
+    const out = [];
+    const stratSats = [];     // strat-family satellites (the signal layer)
+    const posByTicker = new Map();   // ticker → pos node (the trade heart)
+    const lit = [];           // active watch/mkt nodes that carry a ticker (probes)
+    for (const n of all) {
+      if (n.sat) { if (n.fam === 'strat') stratSats.push(n); continue; }
+      if (n.role === 'pos' && n.ticker) posByTicker.set(n.ticker, n);
+      else if ((n.role === 'watch' || n.role === 'mkt') && n.ticker && n.active) lit.push(n);
+    }
+    // ordered gate ids present on the lane (G1..G8) → entry = min, exit = max.
+    const anch = window.PolarisGlobe_gateAnchors || {};
+    const gateIds = Object.keys(anch).map(Number).filter((x) => !isNaN(x)).sort((x, y) => x - y);
+    const gateEntry = gateIds.length ? gateProxy(gateIds[0]) : null;
+    const gateExit = gateIds.length ? gateProxy(gateIds[gateIds.length - 1]) : null;
+    const push = (a, b, col) => {
+      if (!a || !b || a === b || out.length >= MAX_EDGES) return;
+      out.push({ a, b, phase: Math.random(), speed: 0.16 + Math.random() * 0.12, baseA: 0.10, col });
+    };
+    // (1) PROBE → SIGNAL : active lit watch/mkt (probe) → its strategy satellite.
+    const stratById = new Map();
+    for (const s of stratSats) { if (s.ticker) stratById.set(s.ticker, s); }
+    const nearestStrat = (ref) => {
+      let target = null, md = Infinity;
+      for (const s of stratSats) {
+        const dd = (s.hx - ref.hx) ** 2 + (s.hy - ref.hy) ** 2 + (s.hz - ref.hz) ** 2;
+        if (dd < md) { md = dd; target = s; }
+      }
+      return target;
+    };
+    for (const w of lit) {
+      const sig = (w.strategyId && stratById.get(w.strategyId)) || (stratSats.length ? nearestStrat(w) : null);
+      if (sig) push(w, sig, [0x9a, 0xc4, 0xb0]);   // probe → signal (cyan-green)
+      // (4) TICKER ↔ its TRADE — direct holding link (probe ↔ same-ticker pos).
+      const p = posByTicker.get(w.ticker);
+      if (p) push(w, p, [0x88, 0x9a, 0xc8]);
+    }
+    // (2) SIGNAL → GATE-LANE entry, and (3) GATE-LANE exit → POSITION : each open
+    //     trade is wired through the gate funnel so its path reads probe→signal→
+    //     G1→…→G8→position rather than nearest-neighbour geometry.
+    for (const p of posByTicker.values()) {
+      const sig = (p.strategyId && stratById.get(p.strategyId)) || (stratSats.length ? nearestStrat(p) : null);
+      if (sig && gateEntry) push(sig, gateEntry, [0xff, 0xb0, 0x70]);   // signal → G1
+      else if (sig) push(p, sig, [0xff, 0xb0, 0x70]);                   // no lane → direct
+      if (gateExit) push(gateExit, p, [0xbf, 0xd4, 0xff]);              // G8 → position
+    }
+    edges = out;
+  }
+
+  // Cheap signature so we only rebuild edges when the node population changes.
+  function edgeSignature() {
+    const all = window.PolarisGlobe_nodes || [];
+    let np = 0, ns = 0, nl = 0;
+    for (const n of all) {
+      if (n.sat) ns++;
+      else if (n.role === 'pos') np++;
+      else if ((n.role === 'watch' || n.role === 'mkt') && n.active) nl++;
+    }
+    // include gate-lane presence so edges rebuild once the funnel anchors exist
+    // (the pipeline hops appear) and when the gate set changes.
+    const anch = window.PolarisGlobe_gateAnchors;
+    const ng = anch ? Object.keys(anch).length : 0;
+    return np + '|' + ns + '|' + nl + '|' + ng;
+  }
+
+  // Draw the persistent links + their traveling neurotransmitter pulses. `live` is
+  // a 0..1 global excitement (fresh AI decision flash + venue heat) that brightens
+  // the whole circuit + speeds the pulses on real activity.
+  function drawNeuralLinks(ctx, project, rgba, dt, live) {
+    const sig = edgeSignature();
+    if (sig !== _edgeSig) { _edgeSig = sig; buildEdges(); }
+    // gate proxies aren't in the node array, so project their lane anchors here so
+    // edge endpoints that reference a gate proxy have a fresh _screen this frame.
+    projectGateProxies(project);
+    const speedBoost = 1 + live * 1.6;
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      const a = e.a._screen, b = e.b._screen;
+      if (!a || !b) continue;
+      // persistent faint wire — always visible, brightens on activity.
+      const wa = (e.baseA + live * 0.22);
+      ctx.strokeStyle = rgba(e.col, wa);
+      ctx.lineWidth = 0.6 + live * 0.5;
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+      // neurotransmitter pulse traveling along the link (continuous loop).
+      // Jin 2026-06-23: 입자가 너무 바쁘고 산만 → 아주 작게 + 흐릿하게 (보일듯 말듯).
+      // radius 2.4→0.9, peak alpha 0.85→0.22 so the dots barely register — the
+      // line itself carries the "signal passing" feel, not a busy bead.
+      e.phase += dt * e.speed * speedBoost;
+      if (e.phase >= 1) e.phase -= 1;
+      const t = e.phase;
+      const px = lerp(a.sx, b.sx, t), py = lerp(a.sy, b.sy, t);
+      const pa = 0.5 + live * 0.5;
+      const gr = ctx.createRadialGradient(px, py, 0, px, py, 0.9);
+      gr.addColorStop(0, rgba(e.col, Math.min(1, 0.22 * pa)));
+      gr.addColorStop(1, rgba(e.col, 0));
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(px, py, 0.9, 0, 6.2832); ctx.fill();
+    }
+  }
+  window.PolarisGlobe_invalidateEdges = function () { _edgeSig = ''; };
+
   // ── Build chain streams from backend graph payload ──────────────────────────
   // Reload-glitch fix (Jin, repeated): the 2s loadGraph used to discard every
   // stream and rebuild parts from scratch ([0,1/n,2/n…]) → particles snapped back
@@ -100,6 +240,21 @@
     // their event lasers toward it.
     const cp = project(conductor.x, conductor.y, conductor.z);
 
+    // 0) PERSISTENT NEURAL LINKS + neurotransmitter pulses (Jin '상시 연결 라인 +
+    //    신경전달물질'). The full related-node wiring is drawn EVERY frame so the
+    //    circuit is permanently visible; bright pulses travel along it continuously
+    //    (faster/brighter on a fresh AI decision or venue heat). Drawn first so the
+    //    trade particles + nodes read on top. Budgeted (nearest-K, capped) = 60fps.
+    {
+      const flash = window.PolarisGlobe_decisionFlash || 0;
+      let heat = 0;
+      if (gs) for (const k of ['okx', 'capital', 'alpaca']) {
+        const g = gs[k]; if (g) heat = Math.max(heat, (g.pulse || 0) + (g.hot || 0) * 0.5);
+      }
+      const live = Math.min(1, flash + heat);
+      drawNeuralLinks(ctx, project, rgba, dt, live);
+    }
+
     // 1b) satellite EVENT lasers — Jin E6: 위성은 평소 선 없음. state==='firing' 위성이
     //     주기적으로(node phase로 stagger) conductor 로 빠른 레이저 빔을 한 발 쏜다
     //     ("해당 사항 발생 → 레이저"). spawn here, advance/expire below.
@@ -129,13 +284,16 @@
       const tt = Math.max(0, t - 0.32);
       const tx = lerp(sp.sx, cp.sx, tt), ty = lerp(sp.sy, cp.sy, tt);
       const a = (1 - t) * 0.7;
-      ctx.strokeStyle = rgba([0x90, 0x96, 0xa2], a);   // Jin: 모든 라인 회색 통일(레이저도)
+      // periodic firing-satellite beams stay neutral gray; a REAL exit streak
+      // (fireExitStreak) carries its P&L color so the exit→centre pulse reads.
+      const lc = lz.color || [0x90, 0x96, 0xa2];
+      ctx.strokeStyle = rgba(lc, a);
       ctx.lineWidth = 1.0;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy); ctx.stroke();
       // small glow at the head
       const gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, 4);
-      gr.addColorStop(0, rgba([0x90, 0x96, 0xa2], a));
-      gr.addColorStop(1, rgba([0x90, 0x96, 0xa2], 0));
+      gr.addColorStop(0, rgba(lc, a));
+      gr.addColorStop(1, rgba(lc, 0));
       ctx.fillStyle = gr;
       ctx.beginPath(); ctx.arc(hx, hy, 4, 0, 6.2832); ctx.fill();
     }
@@ -207,6 +365,70 @@
     if (gx) ribbons.push({ gx, color: color || [0x87, 0xff, 0xaf], t: 0, dur: 1.2 });
   }
 
+  // EXIT family → CENTER pulse: on a REAL exit event (SSE exit / kills), the EXIT
+  // satellites SHOOT a streak toward the centre (the trade heart) — Jin concentric
+  // circuit spec #2. Picks every live exit-family satellite and fires one streak
+  // each (color = P&L green/red), advanced + drawn by the satLasers loop in drawFlows.
+  function fireExitStreak(pnl) {
+    const nodes = window.PolarisGlobe_nodes;
+    const col = (pnl >= 0) ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87];
+    let fired = false;
+    for (const n of nodes) {
+      if (n.sat && n.fam === 'exit') {
+        satLasers.push({ node: n, color: col, t: 0, dur: 0.5 });
+        n.flash = 1; n.pulse = 1;
+        fired = true;
+      }
+    }
+    return fired;
+  }
+
+  // ── Probe layer (Jin 2026-06-23: 프로브를 클라우드에 표시) ─────────────────────
+  // Probes are DATA-DRIVEN from the board's /api/snapshot poll (board.js / mobile.js
+  // bridge → showProbes). The cloud reads /static/graph.json for its node graph, so
+  // a probe is represented in the cloud's EXISTING visual language: its ticker node
+  // PULSES (the probe "pinging" its target) and the owning venue galaxy gets a soft
+  // pulse — no new shapes, no new colors (venue colour comes from the existing
+  // galaxy theme). GRACEFUL: empty/absent probe array → nothing happens.
+  //   Generic probe shape: {name|probe, ticker|symbol, reading|value|state,
+  //   decision?, ts?, venue?}. We pulse only on NEW/CHANGED readings (keyed by
+  //   name+ticker+reading) so the cloud stays smooth on the 1s board refresh
+  //   instead of re-pulsing every poll.
+  const _probeSeen = new Map();   // key → last wall-clock seen (for prune)
+  function probeKey(p) {
+    const nm = p.name || p.probe || p.id || '';
+    const tk = p.ticker || p.symbol || '';
+    const rd = (p.reading != null) ? p.reading
+      : (p.value != null) ? p.value
+      : (p.state != null) ? p.state : '';
+    return nm + '|' + tk + '|' + rd;
+  }
+  function showProbes(probes) {
+    if (!Array.isArray(probes) || !probes.length) return;
+    const now = performance.now();
+    for (const p of probes) {
+      if (!p) continue;
+      const key = probeKey(p);
+      const prev = _probeSeen.get(key);
+      _probeSeen.set(key, now);
+      if (prev != null) continue;   // already pulsed this reading — stay smooth
+      const tk = p.ticker || p.symbol || '';
+      // venue: explicit field first (venueKey takes a 3-char prefix), else infer
+      // okx from a crypto pair symbol (…-USDT/USDC/USD) — a bare symbol's first 3
+      // chars are NOT a venue, so never feed the raw symbol to venueKey.
+      let gx = p.venue ? venueKey(p.venue) : null;
+      if (!gx && /-USD[TC]?$/.test(String(tk).toUpperCase())) gx = 'okx';
+      if (tk) flashTicker(tk, null, null);   // pulse the probe's ticker node(s)
+      if (gx) pulseGalaxy(gx, 0.45);         // soft venue-galaxy pulse
+    }
+    // prune keys not seen for a while so a re-fired reading can pulse again.
+    for (const [k, t] of _probeSeen) { if (now - t > 30000) _probeSeen.delete(k); }
+  }
+  // Public hook — board.js (desktop) + mobile.js bridge their snapshot probe data
+  // here each poll. Lives on the shared PolarisGlobe object (display-only).
+  window.PolarisGlobe = window.PolarisGlobe || {};
+  window.PolarisGlobe.showProbes = showProbes;
+
   // ── Data refresh — frequent for live feel (Jin: "리프레시가 드뭄") ───────────
   let _inflight = false;
   async function loadGraph() {
@@ -253,6 +475,19 @@
     es.onmessage = (ev) => {
       let payload;
       try { payload = JSON.parse(ev.data); } catch (e) { return; }
+      // Gate-decision channel (separate payload key) → push into a capped ring
+      // buffer the board's Live Gate Activity feed merges in between 1s polls,
+      // for the smooth-realtime, no-lag feel. Display-only; never touches trading.
+      const gevs = payload.gate_events || [];
+      if (gevs.length) {
+        const buf = (window.__gateStream || []);
+        window.__gateStream = buf.concat(gevs).slice(-200);   // newest 200 kept
+        try {
+          if (window.PolarisBoardTabs && window.PolarisBoardTabs.renderGateFeedLive) {
+            window.PolarisBoardTabs.renderGateFeedLive();
+          }
+        } catch (e) { /* feed optional */ }
+      }
       const events = payload.events || [];
       for (const e of events) {
         const gx = venueKey(e.exchange);
@@ -264,6 +499,7 @@
         } else if (e.type === 'exit') {
           const pnl = parseFloat(e.pnl_usd) || 0;
           flashTicker(e.ticker, gx, pnl >= 0 ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87]);
+          fireExitStreak(pnl);                 // EXIT satellites → centre pulse
           if (gx) pulseGalaxy(gx, 0.9);
           setTickerLine(`CLOSE ${e.ticker} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} · ${(e.exchange || '').toUpperCase()}`);
           scheduleReload(1500);
@@ -285,6 +521,6 @@
 
   // ── Boot ─────────────────────────────────────────────────────────────────────
   loadGraph();
-  setInterval(loadGraph, 2000);          // Jin E4: 2s graph refresh (was 5s — felt static)
+  setInterval(loadGraph, 1000);          // Jin E4: 2s graph refresh (was 5s — felt static)
   connectStream();
 })();

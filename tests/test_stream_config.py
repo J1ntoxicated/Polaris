@@ -155,6 +155,42 @@ def test_constraint_margin_factor_still_wins_over_fallback() -> None:
     assert _payload_to_constraint("EPIC", body).leverage == pytest.approx(20.0)
 
 
+def test_constraint_parses_opening_hours_into_field() -> None:
+    """``_payload_to_constraint`` rides the per-epic ``openingHours`` onto the
+    constraint (US500 Mon close 21:00) — the per-epic EOD probe's source."""
+    from polaris.venues.capital.constraint_translator import _payload_to_constraint
+
+    body = {
+        "instrument": {
+            "type": "INDICES",
+            "openingHours": {
+                "mon": ["00:00 - 21:00", "21:05 - 00:00"],
+                "tue": ["00:00 - 21:00", "21:05 - 00:00"],
+                "wed": ["00:00 - 21:00", "21:05 - 00:00"],
+                "thu": ["00:00 - 21:00", "21:05 - 00:00"],
+                "fri": ["00:00 - 21:00"],
+                "sat": [],
+                "sun": ["22:00 - 00:00"],
+                "zone": "UTC",
+            },
+        },
+        "dealingRules": {},
+        "snapshot": {},
+    }
+    c = _payload_to_constraint("US500", body)
+    assert c.opening_hours is not None
+    assert c.opening_hours[0] == ((0, 21 * 3600), (21 * 3600 + 300, 86400))
+
+
+def test_constraint_opening_hours_none_when_absent() -> None:
+    """No ``openingHours`` in the payload → ``opening_hours`` stays None (the
+    caller then uses the legacy asset-class fallback)."""
+    from polaris.venues.capital.constraint_translator import _payload_to_constraint
+
+    body = {"instrument": {"type": "INDICES"}, "dealingRules": {}, "snapshot": {}}
+    assert _payload_to_constraint("EPIC", body).opening_hours is None
+
+
 # --- registry shape: 3 venues incl. Track C / Alpaca (T11) ------------------
 
 

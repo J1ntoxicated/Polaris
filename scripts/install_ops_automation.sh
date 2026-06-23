@@ -6,7 +6,7 @@
 #    failing/crash-loop-throttled daily. Backed up first, never deleted blind.
 #    bootout is a label-level launchd op; with the modules gone there is no
 #    live process behind either label, so nothing can be terminated by this.
-# 2. Installs com.polaris.{watchdog,daily.restart,daily.digest}.
+# 2. Installs com.polaris.{watchdog,daily.restart,daily.digest,replay.nightly}.
 #
 # Untouchable: the dashboard agent (not referenced anywhere in this script)
 # and every running process — this script sends no signals of any kind.
@@ -21,7 +21,7 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$AGENTS_DIR/_polaris_ghost_backup_$TS"
 
 GHOSTS=(com.polaris.paper.realtime com.polaris.paper.daily)
-OWN=(com.polaris.watchdog com.polaris.daily.restart com.polaris.daily.digest)
+OWN=(com.polaris.watchdog com.polaris.daily.restart com.polaris.daily.digest com.polaris.replay.nightly)
 
 echo "== 1/4 ghost cleanup =="
 for label in "${GHOSTS[@]}"; do

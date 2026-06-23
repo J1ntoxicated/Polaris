@@ -10,9 +10,14 @@ the engine's decision → risk-gate → executor + per-tick exit behaviour:
   (e) no double-open when a position already exists on the symbol,
   (f) a reversion position exits on flow reversal.
 
-The engine-loop tests drive a ``capital:`` focus symbol because the engine now
-OWNS only Capital (``TICK_ENGINE_OWNED_VENUES`` = ``{capital}``): OKX/Alpaca
-stay on the bar pipeline and are filtered out by ``PHASE1_VENUES``.
+D3 (/debate trading_params_audit_2026-06-22): the tick engine OWNS the
+data-rich venues (``TICK_ENGINE_OWNED_VENUES`` = ``{okx, capital}``). OKX
+carries full order-book depth + trade prints → all three microstructure signals
+fire there, so the momentum/burst loop tests drive an ``okx:`` focus symbol.
+Capital streams price quotes only (sizes/tape zeroed) → its tick path is
+restricted to the overshoot fade (``micro_reversion``) — see
+``test_capital_tick_path_is_fade_only``. Alpaca stays on the bar pipeline and is
+filtered out by ``PHASE1_VENUES``.
 
 Runs against the in-memory ``memdb`` fixture + a fake in-mem quote_writer, so no
 WS / demo-venue network happens. Entries use the SIM fill path
@@ -26,31 +31,49 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from typing import Any
 
 import pytest
 
-from polaris.core.ticks.config import TickEngineConfig
+from polaris.core.ticks.config import (
+    TICK_ENGINE_OWNED_VENUES,
+    TickEngineConfig,
+    venue_allowed_signals,
+)
 from polaris.core.ticks.types import TickSample
 from polaris.scripts import _production_tick_engine as eng_mod
 from polaris.scripts._production_state import ProdLoopState
 from polaris.scripts._production_tick_engine import (
+    _FLOW_PRESSURE_TRAIL_MULT_DEFAULT,
     TickEngineState,
+    _collect_intents,
     _drop_for_bidirectional,
+    _flow_decay_exit,
+    _mfe_protect_schedule,
+    _momentum_trail_mult,
     _run_entries,
     _run_exits,
     _scalp_exit_decision,
 )
 from polaris.scripts._smoke_fills import SimulatedTrade
 
-# Capital (CFD, bidirectional) is the sole venue the tick engine OWNS
-# (``TICK_ENGINE_OWNED_VENUES`` = ``{capital}``): OKX/Alpaca stay on the bar
-# pipeline. The engine-loop tests drive a ``capital:`` focus symbol so it passes
-# the ``PHASE1_VENUES={capital}`` filter; 'index' is the CFD asset_class.
-VENUE = "capital"
-SYMBOL = "GOLD"
-GROUP = "cfd:GOLD"
-ASSET_CLASS = "index"
+# OKX (spot, full depth) is the venue the tick engine drives for the momentum /
+# burst loop tests — its WS feed carries the order-book sizes + trade tape every
+# microstructure signal needs, so all three signals are structurally live. It is
+# in ``TICK_ENGINE_OWNED_VENUES`` (D3) so it passes the ``PHASE1_VENUES`` filter.
+VENUE = "okx"
+SYMBOL = "BTC-USDT"
+GROUP = "crypto:BTC"
+ASSET_CLASS = "crypto"
 INSTRUMENT = f"{VENUE}:{SYMBOL}"
+
+# Capital (CFD) — owned, but price-quote-only → its tick path is overshoot-fade
+# (``micro_reversion``) ONLY. Used by ``test_capital_tick_path_is_fade_only``.
+CAP_VENUE = "capital"
+CAP_SYMBOL = "GOLD"
+CAP_GROUP = "cfd:GOLD"
+CAP_ASSET_CLASS = "index"
+CAP_INSTRUMENT = f"{CAP_VENUE}:{CAP_SYMBOL}"
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +101,17 @@ class FakeQuoteWriter:
         return self._window.get(instrument_id, [])
 
 
+# Window ts are EPOCH SECONDS (the same clock domain ``compute_tick_features``
+# compares ``now_ts`` against for its freshness gate). Ticks are spaced 1s and
+# the newest sits at ``now_ts`` so the window reads as FRESH (age = 0). The
+# ``live_px`` freshness uses the separately-supplied monotonic stamp.
+def _ts_at(now_ts: int, i: int, n_ticks: int) -> int:
+    """Epoch-second ts of tick ``i`` (of ``n_ticks``), newest landing on ``now_ts``."""
+    return now_ts - (n_ticks - 1 - i)
+
+
 def _tick(
-    ts_ms: int,
+    ts: int,
     mid: float,
     *,
     bid_size: float = 10.0,
@@ -93,7 +125,7 @@ def _tick(
     ask = mid + half
     spread_bps = (ask - bid) / mid * 1e4 if mid > 0 else 0.0
     return TickSample(
-        ts=ts_ms,
+        ts=ts,
         bid=bid,
         ask=ask,
         mid=mid,
@@ -105,26 +137,26 @@ def _tick(
     )
 
 
-def _burst_window(now_mono: float, direction: int) -> list[TickSample]:
+def _burst_window(now_ts: int, direction: int) -> list[TickSample]:
     """16 near-flat ticks then a sharp directional jump with aggressor flow.
 
     ``direction`` +1 = up burst (buyer-aggressor) → burst_rider long.
-    Ticks are stamped ~1s before ``now_mono`` (fresh). The jump trade prints on
-    the aggressor side so aggr_flow agrees with velocity.
+    The newest tick is stamped at ``now_ts`` (epoch seconds → fresh). The jump
+    trade prints on the aggressor side so aggr_flow agrees with velocity.
     """
-    base_ms = int((now_mono - 1.0) * 1000)
+    n = 19
     ticks: list[TickSample] = []
     mid = 100.0
     for i in range(16):
         mid += 0.001 * (1 if i % 2 == 0 else -1)  # tiny noise baseline
-        ticks.append(_tick(base_ms + i * 50, mid))
+        ticks.append(_tick(_ts_at(now_ts, i, n), mid))
     # Sharp jump on the last 3 ticks, trades printing on the aggressor side.
     for j in range(3):
         mid += direction * 0.5
         ltp = mid + direction * 0.05  # buyer lifts offer (up) / seller hits bid
         ticks.append(
             _tick(
-                base_ms + (16 + j) * 50, mid,
+                _ts_at(now_ts, 16 + j, n), mid,
                 last_trade_price=ltp, last_trade_size=20.0,
                 bid_size=30.0 if direction > 0 else 10.0,
                 ask_size=10.0 if direction > 0 else 30.0,
@@ -133,25 +165,31 @@ def _burst_window(now_mono: float, direction: int) -> list[TickSample]:
     return ticks
 
 
-def _overshoot_window(now_mono: float, direction: int) -> list[TickSample]:
+def _overshoot_window(now_ts: int, direction: int) -> list[TickSample]:
     """A stretched mid with EXHAUSTING flow → micro_reversion fade.
 
     ``direction`` +1 = stretched UP with selling aggressor (flow opposes) →
-    micro_reversion SHORT. Used for the reversion-exit test setup.
+    micro_reversion SHORT. The newest tick is stamped at ``now_ts`` (fresh).
+
+    The stretch is a RAMP-then-sharp-final step (not a uniform jump): a uniform
+    step is z-score scale-invariant (overshoot_z pinned ≈ 1.6), which fell below
+    the re-aimed θ_r=2.0 fat-tail bar; the ramp pushes the latest mid well past
+    its 3s EWMA anchor → overshoot_z ≈ 2.2 ≫ θ_r, a real cost-clearing overshoot.
     """
-    base_ms = int((now_mono - 1.0) * 1000)
+    n = 18
     ticks: list[TickSample] = []
     mid = 100.0
     for i in range(14):
         mid += 0.001 * (1 if i % 2 == 0 else -1)
-        ticks.append(_tick(base_ms + i * 50, mid))
-    # Stretch the mid, but trades print AGAINST the move (exhaustion).
-    for j in range(4):
-        mid += direction * 0.4
+        ticks.append(_tick(_ts_at(now_ts, i, n), mid))
+    # Stretch the mid (ramp into a sharp final step), but trades print AGAINST the
+    # move (exhaustion). overshoot_z ≈ 2.2 > θ_r=2.0 → the fade fires.
+    for j, step in enumerate((0.2, 0.3, 0.4, 0.8)):
+        mid += direction * step
         ltp = mid - direction * 0.1  # opposing aggressor (push exhausting)
         ticks.append(
             _tick(
-                base_ms + (14 + j) * 50, mid,
+                _ts_at(now_ts, 14 + j, n), mid,
                 last_trade_price=ltp, last_trade_size=15.0,
             )
         )
@@ -163,7 +201,19 @@ def _overshoot_window(now_mono: float, direction: int) -> list[TickSample]:
 # ---------------------------------------------------------------------------
 
 
-def _seed(conn: sqlite3.Connection, *, regime: str, now_ts: int) -> None:
+def _seed(
+    conn: sqlite3.Connection,
+    *,
+    regime: str,
+    now_ts: int,
+    venue: str = VENUE,
+    symbol: str = SYMBOL,
+    instrument: str = INSTRUMENT,
+    group: str = GROUP,
+    asset_class: str = ASSET_CLASS,
+    product_class: str = "spot",
+    stream_id: str = "A_okx_crypto",
+) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO universe "
         "(venue, symbol, instrument_id, underlying_group_id, asset_class, "
@@ -171,26 +221,39 @@ def _seed(conn: sqlite3.Connection, *, regime: str, now_ts: int) -> None:
         " atr_24h_pct, depth_10bps_usd, signal_density_7d, last_seen_ts, "
         " is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            VENUE, SYMBOL, INSTRUMENT, GROUP, ASSET_CLASS, "cfd", "B_capital_cfd",
-            "USD", "live", 5e8, 2.0, 1.0, 1e7, 1.0, now_ts, 1,
+            venue, symbol, instrument, group, asset_class, product_class,
+            stream_id, "USD", "live", 5e8, 2.0, 1.0, 1e7, 1.0, now_ts, 1,
         ),
     )
     conn.execute(
         "INSERT OR REPLACE INTO watchlist_focus "
         "(cycle_ts, venue, symbol, focus_score, focus_rank, target_bucket) "
         "VALUES (?,?,?,?,?,?)",
-        (now_ts, VENUE, SYMBOL, 1.0, 1, "focus"),
+        (now_ts, venue, symbol, 1.0, 1, "focus"),
     )
     conn.execute(
         "INSERT OR REPLACE INTO regime_state "
         "(venue, underlying_group_id, regime, confidence, updated_ts) "
         "VALUES (?,?,?,?,?)",
-        (VENUE, GROUP, regime, 0.9, now_ts),
+        (venue, group, regime, 0.9, now_ts),
+    )
+
+
+def _seed_capital(conn: sqlite3.Connection, *, regime: str, now_ts: int) -> None:
+    """Seed the Capital (CFD, price-quote-only) focus symbol."""
+    _seed(
+        conn, regime=regime, now_ts=now_ts, venue=CAP_VENUE, symbol=CAP_SYMBOL,
+        instrument=CAP_INSTRUMENT, group=CAP_GROUP, asset_class=CAP_ASSET_CLASS,
+        product_class="cfd", stream_id="B_capital_cfd",
     )
 
 
 def _focus() -> list[tuple[str, str, str, str]]:
     return [(VENUE, SYMBOL, ASSET_CLASS, GROUP)]
+
+
+def _focus_capital() -> list[tuple[str, str, str, str]]:
+    return [(CAP_VENUE, CAP_SYMBOL, CAP_ASSET_CLASS, CAP_GROUP)]
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +267,7 @@ async def test_burst_produces_sized_order(memdb: sqlite3.Connection) -> None:
     now_mono = time.monotonic()
     _seed(memdb, regime="bull_trend", now_ts=now_ts)
     writer = FakeQuoteWriter()
-    writer.set_stream(INSTRUMENT, _burst_window(now_mono, +1), now_mono)
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
     state = ProdLoopState()
     state.quote_writer = writer  # type: ignore[assignment]
     eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
@@ -243,7 +306,7 @@ async def test_shadow_logs_no_order(memdb: sqlite3.Connection) -> None:
     now_mono = time.monotonic()
     _seed(memdb, regime="bull_trend", now_ts=now_ts)
     writer = FakeQuoteWriter()
-    writer.set_stream(INSTRUMENT, _burst_window(now_mono, +1), now_mono)
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
     state = ProdLoopState()
     state.quote_writer = writer  # type: ignore[assignment]
     eng = TickEngineState(cfg=TickEngineConfig(shadow=True))
@@ -274,7 +337,7 @@ async def test_stale_symbol_skipped(memdb: sqlite3.Connection) -> None:
     # Same burst window, but the live_px monotonic stamp is far in the past →
     # stale past cfg.fresh_sec → the symbol is skipped.
     stale_mono = now_mono - 999.0
-    writer.set_stream(INSTRUMENT, _burst_window(now_mono, +1), stale_mono)
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), stale_mono)
     state = ProdLoopState()
     state.quote_writer = writer  # type: ignore[assignment]
     eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
@@ -312,6 +375,93 @@ def test_bidirectional_rule_drops_short_on_long_only_venues() -> None:
 
 
 # ---------------------------------------------------------------------------
+# (d2) D3 venue routing: OWN both data-rich venues; OKX runs the full signal
+#      set, Capital is restricted to the price-based overshoot fade ONLY (its
+#      WS feed zeroes sizes/tape so the flow signals are structurally dead).
+# ---------------------------------------------------------------------------
+
+
+def test_okx_and_capital_are_owned_okx_full_capital_fade_only() -> None:
+    # D3: the fast loop owns the data-rich venues.
+    assert "okx" in TICK_ENGINE_OWNED_VENUES
+    assert "capital" in TICK_ENGINE_OWNED_VENUES
+    # OKX (full depth + tape) → all three microstructure signals.
+    assert venue_allowed_signals("okx") == frozenset(
+        {"burst_rider", "flow_pressure", "micro_reversion"}
+    )
+    # Capital (price quotes only) → overshoot fade ONLY.
+    assert venue_allowed_signals("capital") == frozenset({"micro_reversion"})
+    # An unlisted venue degrades to the FULL set (flow_not_block — never muted).
+    assert venue_allowed_signals("kraken") == frozenset(
+        {"burst_rider", "flow_pressure", "micro_reversion"}
+    )
+
+
+def test_capital_collect_intents_drops_flow_signals_keeps_fade() -> None:
+    """On Capital, a window that WOULD fire the flow signals (burst_rider /
+    flow_pressure) yields NONE of them — only ``micro_reversion`` can be
+    collected. Driven through ``_collect_intents`` directly so it isolates the
+    venue routing from the entry/sizing path."""
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    now_ts = int(time.time())
+    # A burst window (up) — on OKX this fires ``burst_rider``; on Capital it must
+    # NOT (flow signal, structurally dead on the price-only feed). Regime=trend
+    # so burst_rider IS regime-active — the only thing dropping it is the venue.
+    burst = _burst_window(now_ts, +1)
+    cap_intents = _collect_intents(
+        eng, venue=CAP_VENUE, symbol=CAP_SYMBOL, window=burst,
+        regime="bull_trend", now_ts=now_ts,
+    )
+    assert all(i.signal_id == "micro_reversion" for i in cap_intents), (
+        "Capital tick path must never fire a flow signal (burst/ofi) — fade only"
+    )
+    # The SAME burst window on OKX DOES fire burst_rider (full-depth venue).
+    eng_okx = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    okx_intents = _collect_intents(
+        eng_okx, venue=VENUE, symbol=SYMBOL, window=burst,
+        regime="bull_trend", now_ts=now_ts,
+    )
+    assert any(i.signal_id == "burst_rider" for i in okx_intents), (
+        "OKX (full depth) must still fire the momentum burst signal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_capital_tick_path_is_fade_only(memdb: sqlite3.Connection) -> None:
+    """End-to-end on Capital: an overshoot window in a chop regime opens a
+    reversion (fade) position — and NO momentum/flow entry is ever produced.
+    Proves the restriction routes (does not block): the fade edge still fires."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()  # rebind the process fence to this test's memdb conn
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    _seed_capital(memdb, regime="chop", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    # Stretched-up mid with exhausting (opposing) flow → micro_reversion SHORT
+    # (Capital is bidirectional CFD, so a short is allowed).
+    writer.set_stream(CAP_INSTRUMENT, _overshoot_window(now_ts, +1), now_mono)
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+
+    await _run_entries(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
+        okx_adapter=None, capital_session=None, alpaca_adapter=None,
+        real_roundtrip=False, focus=_focus_capital(), regime_cache={},
+    )
+
+    assert eng.orders == 1, "the overshoot fade must still open on Capital"
+    trade = state.open_trades[0]
+    assert trade.venue == CAP_VENUE and trade.symbol == CAP_SYMBOL
+    assert trade.side == "short", "a stretched-up mid fades short"
+    pid = trade.position_id
+    assert pid is not None
+    # The opened position is the reversion family (drives the fast-scalp exit).
+    assert eng.family_by_position[pid] == "reversion"
+
+
+# ---------------------------------------------------------------------------
 # (e) no double-open when a position already exists on the symbol.
 # ---------------------------------------------------------------------------
 
@@ -322,7 +472,7 @@ async def test_no_double_open_when_already_held(memdb: sqlite3.Connection) -> No
     now_mono = time.monotonic()
     _seed(memdb, regime="bull_trend", now_ts=now_ts)
     writer = FakeQuoteWriter()
-    writer.set_stream(INSTRUMENT, _burst_window(now_mono, +1), now_mono)
+    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
     state = ProdLoopState()
     state.quote_writer = writer  # type: ignore[assignment]
     # A position already open on (capital, GOLD) — the dedup must skip it.
@@ -387,6 +537,55 @@ def test_scalp_exit_decision_flow_reversal() -> None:
             side="long", entry_price=100.0, last_mid=101.0, ofi=0.3, pnl_r=1.0
         )
         == "scalp_target"
+    )
+
+
+def test_micro_reversion_harvests_bounded_revert_at_calibrated_target() -> None:
+    # [[harvest_generalization_2026-06-23]]: micro_reversion (reversion family →
+    # scalp exit) is the top harvest target (avg MFE +0.523R, 120 trades, realized
+    # only -0.148R) — its bounded revert-to-mean reached +0.45R for 44% of trades
+    # yet round-tripped because the scalp target sat at +0.50R. A per-strategy
+    # take-profit harvests the measured +0.30-0.45R revert BEFORE it gives back.
+    # Profit side ONLY — the loss side (_SCALP_STOP_R) is untouched (NOT a tighter
+    # cut). An excursion at the calibrated target banks; below it holds.
+    from polaris.scripts._production_tick_engine import (
+        _MICRO_REVERSION_TARGET_R,
+        _scalp_exit_decision,
+    )
+
+    assert _MICRO_REVERSION_TARGET_R < 0.5  # harvests the revert sooner than 0.5R
+    # At the calibrated target → harvest.
+    assert (
+        _scalp_exit_decision(
+            side="long", entry_price=100.0, last_mid=100.4, ofi=0.3,
+            pnl_r=_MICRO_REVERSION_TARGET_R, strategy_id="micro_reversion",
+        )
+        == "scalp_target"
+    )
+    # Just below the target (and flow still aligned) → hold (no premature exit).
+    assert (
+        _scalp_exit_decision(
+            side="long", entry_price=100.0, last_mid=100.2, ofi=0.3,
+            pnl_r=_MICRO_REVERSION_TARGET_R - 0.05, strategy_id="micro_reversion",
+        )
+        is None
+    )
+    # Loss side UNCHANGED: the micro-stop still fires at the same _SCALP_STOP_R
+    # (no tighter cut — flow_not_block / no defensive throttle).
+    assert (
+        _scalp_exit_decision(
+            side="long", entry_price=100.0, last_mid=99.0, ofi=0.3, pnl_r=-1.0,
+            strategy_id="micro_reversion",
+        )
+        == "scalp_stop"
+    )
+    # An UNMAPPED reversion id keeps the shared default target (byte-identical).
+    assert (
+        _scalp_exit_decision(
+            side="long", entry_price=100.0, last_mid=100.4, ofi=0.3,
+            pnl_r=_MICRO_REVERSION_TARGET_R, strategy_id="other_reversion",
+        )
+        is None
     )
 
 
@@ -726,3 +925,263 @@ async def test_momentum_exit_pass_profit_target_uses_anchored_pnl_r(
     assert any(
         t.position_id == "pos_mom" and not t.closed for t in state.open_trades
     ), "profit target fired on the inflated tick-window pnl_r ruler"
+
+
+# ---------------------------------------------------------------------------
+# (h) flow_pressure RE-AIM (lever 2): the tick momentum exit gives a
+# flow_pressure position a WIDER let-winners-run trail so favourable OFI drift
+# runs past the old fast scalp, while every other tick momentum strategy
+# (burst_rider) keeps the module-default trail. Same drifting tick → flow_pressure
+# HOLDS, burst_rider CLOSES. Not a throttle: only LOOSENS the running trail.
+# ---------------------------------------------------------------------------
+
+
+def test_momentum_trail_mult_routes_flow_pressure_wider_only() -> None:
+    # The router gives flow_pressure the wider trail; burst_rider → None (default).
+    assert _momentum_trail_mult("flow_pressure") == _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    assert _momentum_trail_mult("burst_rider") is None
+    assert _momentum_trail_mult("micro_reversion") is None
+
+
+def test_mfe_protect_schedule_covers_all_momentum_signals() -> None:
+    # [[harvest_generalization_2026-06-23]]: the MFE-protect harvest was wired
+    # ONLY to flow_pressure; burst_rider (the other MOMENTUM tick signal →
+    # run_precise_exit) passed mfe_protect=None, so its measured +0.3R excursions
+    # (27% reach +0.30R) round-tripped on the wide ATR trail. Both momentum tick
+    # signals now get the cfg MFE-protect schedule. micro_reversion is REVERSION
+    # family (scalp exit, not run_precise_exit) so it has NO mfe_protect schedule
+    # here — it harvests via its own scalp profit target.
+    cfg = TickEngineConfig()
+    for momentum_id in ("flow_pressure", "burst_rider"):
+        sched = _mfe_protect_schedule(momentum_id, cfg)
+        assert sched is not None, momentum_id
+        assert sched.bep_at_r == cfg.mfe_bep_r
+        assert sched.protect_at_r == cfg.mfe_protect_r
+        assert sched.lock_r == cfg.mfe_protect_lock_r
+    # micro_reversion routes through the scalp exit, not the mfe_protect floor.
+    assert _mfe_protect_schedule("micro_reversion", cfg) is None
+    assert _mfe_protect_schedule("not_a_signal", cfg) is None
+
+
+def test_flow_decay_exit_only_when_green_and_flow_fails() -> None:
+    gate = TickEngineConfig().mfe_bep_r  # the +MFE gate (0.35R)
+    # RED (pnl below the gate) → never exits, regardless of flow (G6 owns red).
+    assert _flow_decay_exit(
+        side="long", ofi=-0.9, flow_confirmed=False, pnl_r=0.0, mfe_gate_r=gate,
+    ) is False
+    # GREEN long + OFI flipped negative (book turned against) → exit near peak.
+    assert _flow_decay_exit(
+        side="long", ofi=-0.5, flow_confirmed=True, pnl_r=0.6, mfe_gate_r=gate,
+    ) is True
+    # GREEN long + OFI still positive but follow-through FAILED (bid withdrawal /
+    # microprice failure) → exit near peak.
+    assert _flow_decay_exit(
+        side="long", ofi=0.5, flow_confirmed=False, pnl_r=0.6, mfe_gate_r=gate,
+    ) is True
+    # GREEN long + OFI still aligned + follow-through holding → HOLD (let it run).
+    assert _flow_decay_exit(
+        side="long", ofi=0.5, flow_confirmed=True, pnl_r=0.6, mfe_gate_r=gate,
+    ) is False
+    # Symmetric short: green + OFI flipped positive → exit.
+    assert _flow_decay_exit(
+        side="short", ofi=0.5, flow_confirmed=True, pnl_r=0.6, mfe_gate_r=gate,
+    ) is True
+
+
+def _flow_pressure_momentum_setup(
+    memdb: sqlite3.Connection, *, now_ts: int, strategy_id: str,
+) -> tuple[ProdLoopState, TickEngineState, FakeQuoteWriter]:
+    """A tick momentum position tagged with ``strategy_id`` (flow_pressure vs
+    burst_rider) with a high persisted peak but NO ratcheted stop yet — so the
+    trail width on THIS tick decides the stop (and thus hold-vs-close)."""
+    _seed(memdb, regime="bull_trend", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    state.open_trades.append(
+        SimulatedTrade(
+            signal_id=f"tick_{strategy_id}_x", venue=VENUE, symbol=SYMBOL,
+            strategy_id=strategy_id, side="long", entry_price=100.0,
+            notional_usd=50.0, open_ts=now_ts - 60, position_id="pos_fp",
+        )
+    )
+    eng.family_by_position["pos_fp"] = "momentum"
+    eng.entry_ref_by_position["pos_fp"] = 100.0
+    # Persisted peak 114, NO stop yet (first ratchet happens THIS tick), entry-
+    # anchored 4% ATR. The live mark (104) sits ABOVE the MFE-protect lock floor
+    # (entry + 0.25R = 100 + 0.25·8 = 102) so the protect floor is satisfied and
+    # the TRAIL WIDTH alone decides hold-vs-close on this tick (the running trail
+    # is what this test isolates; the give-back protect is covered separately).
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        "strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        "opened_ts, stop_price, peak_price, trough_price, exit_state, "
+        "entry_atr_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "pos_fp", VENUE, SYMBOL, GROUP, strategy_id, strategy_id,
+            strategy_id, "long", 0.5, "active", now_ts - 60,
+            None, 114.0, 101.5, "open", 0.04,
+        ),
+    )
+    return state, eng, writer
+
+
+@pytest.mark.asyncio
+async def test_flow_pressure_momentum_holds_drift_burst_rider_closes(
+    memdb: sqlite3.Connection,
+) -> None:
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+
+    # A drifting tick STILL near its high: peak was 114, now marks ~104 (above the
+    # 102 MFE-protect lock). The live-window ATR% proxy (~3.85% from the lo/hi span
+    # around 104) drives the trail width: the default 2.0-ATR trail (stop ≈ 106.3)
+    # is breached by the 104 mark → CLOSE, while the wider 4.0-ATR flow_pressure
+    # trail (stop ≈ 98.6, floored to the 102 protect lock) HOLDS the 104 mark.
+    window = _alternating_window(now_mono, lo=102.0, hi=106.0, last=104.0)
+
+    # burst_rider (default trail) → the pullback breaches the trail → CLOSE.
+    state_b, eng_b, writer_b = _flow_pressure_momentum_setup(
+        memdb, now_ts=now_ts, strategy_id="burst_rider",
+    )
+    writer_b.set_stream(INSTRUMENT, window, now_mono)
+    await _run_exits(
+        memdb, state_b, eng_b, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+    assert "pos_fp" not in eng_b.family_by_position, (
+        "burst_rider on the DEFAULT trail must close on this drift pullback"
+    )
+
+    # flow_pressure (wider trail) on the SAME drift → HOLD (drift keeps running).
+    memdb.execute("DELETE FROM positions WHERE position_id = 'pos_fp'")
+    state_f, eng_f, writer_f = _flow_pressure_momentum_setup(
+        memdb, now_ts=now_ts, strategy_id="flow_pressure",
+    )
+    writer_f.set_stream(INSTRUMENT, window, now_mono)
+    await _run_exits(
+        memdb, state_f, eng_f, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+    assert "pos_fp" in eng_f.family_by_position, (
+        "flow_pressure on the WIDER trail must HOLD the drift past the old scalp"
+    )
+    assert any(
+        t.position_id == "pos_fp" and not t.closed for t in state_f.open_trades
+    )
+
+
+# ---------------------------------------------------------------------------
+# (i) flow_pressure RE-AIM (lever 3): the entry path routes flow_pressure OKX
+# entries maker-first (prefer_maker=True → post-only at touch → TAKER fallback),
+# while burst_rider keeps the strength-gated default (prefer_maker=False). The
+# taker fallback inside reserve_and_submit/real_okx_open_fill guarantees the
+# trade is never missed — covered in test_okx_limit_execution.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flow_pressure_entry_routes_prefer_maker(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polaris.scripts._production_tick_engine import TickIntent, _try_open
+
+    captured: dict[str, bool] = {}
+
+    async def _fake_submit(**kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
+        captured[kwargs["sig"].strategy_id] = kwargs["prefer_maker"]
+        return None  # no trade object → _try_open returns False cleanly
+
+    monkeypatch.setattr(eng_mod, "reserve_and_submit", _fake_submit)
+    # A non-zero notional so _try_open reaches the executor (compute_size path is
+    # bypassed by stubbing _sized_notional to a fixed positive value).
+    monkeypatch.setattr(eng_mod, "_sized_notional", lambda *a, **k: 100.0)
+
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    _seed(memdb, regime="chop", now_ts=now_ts)
+    state = ProdLoopState()
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+
+    async def _open(signal_id: str) -> None:
+        intent = TickIntent(
+            venue=VENUE, symbol=SYMBOL, side="long", conviction=0.9,
+            signal_id=signal_id, signal_family="momentum", ref_price=100.0,
+        )
+        await _try_open(
+            memdb, state, eng, intent=intent, asset_class=ASSET_CLASS,
+            underlying_group_id=GROUP, regime="chop", now_ts=now_ts,
+            now_mono=now_mono, okx_adapter=object(), capital_session=None,
+            alpaca_adapter=None, real_roundtrip=True,
+        )
+
+    await _open("flow_pressure")
+    await _open("micro_reversion")
+    await _open("burst_rider")
+
+    assert captured["flow_pressure"] is True, (
+        "flow_pressure OKX entry must route maker-first (prefer_maker=True)"
+    )
+    assert captured["micro_reversion"] is True, (
+        "micro_reversion overshoot fade must route maker-first (prefer_maker=True)"
+    )
+    assert captured["burst_rider"] is False, (
+        "burst_rider keeps the strength-gated default (prefer_maker=False)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (j) sub-min sizing drop: a POSITIVE-but-sub-minimum notional (binding daily/
+# cap headroom clipped final_risk_pct to a tiny residual → e.g. $0.0001) must be
+# treated as a clean sizing-drop, NOT submitted. Submitting it produced the OKX
+# 51020 "below minimum order amount" flood (4000+ rejects, ADA/XRP) + the Alpaca
+# notional=$0 validation rejects. flow_not_block AT THE SOURCE: we stop firing
+# orders that 100% reject; a genuinely fundable signal still flows. NOT a
+# throttle — a $0.0001 headroom literally cannot fund a tradeable order, and
+# flooring it up would BREACH the binding daily cap.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sub_min_notional_is_sizing_drop_not_submitted(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polaris.scripts._production_tick_engine import TickIntent, _try_open
+
+    submitted: list[float] = []
+
+    async def _fake_submit(**kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
+        submitted.append(kwargs["notional_usd"])
+        return None
+
+    monkeypatch.setattr(eng_mod, "reserve_and_submit", _fake_submit)
+    # compute_size returns a positive-but-sub-minimum residual (binding cap).
+    monkeypatch.setattr(eng_mod, "_sized_notional", lambda *a, **k: 0.0001)
+
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    _seed(memdb, regime="chop", now_ts=now_ts)
+    state = ProdLoopState()
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    intent = TickIntent(
+        venue=VENUE, symbol=SYMBOL, side="long", conviction=0.9,
+        signal_id="burst_rider", signal_family="momentum", ref_price=100.0,
+    )
+    placed = await _try_open(
+        memdb, state, eng, intent=intent, asset_class=ASSET_CLASS,
+        underlying_group_id=GROUP, regime="chop", now_ts=now_ts,
+        now_mono=now_mono, okx_adapter=object(), capital_session=None,
+        alpaca_adapter=None, real_roundtrip=True,
+    )
+
+    assert placed is False, "a sub-min notional must NOT place an order"
+    assert submitted == [], (
+        "reserve_and_submit must NOT be called with a sub-min (guaranteed-51020) "
+        f"notional; got submissions {submitted}"
+    )
+    assert eng.drops_sizing == 1, (
+        "a sub-min notional is a sizing/headroom drop (same class as <=0)"
+    )

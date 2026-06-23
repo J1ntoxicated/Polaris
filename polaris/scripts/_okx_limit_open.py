@@ -333,6 +333,7 @@ async def real_okx_open_fill(
     strength: float = 0.0,
     poll_delay_sec: float = LIMIT_POLL_DELAY_SEC,
     available_usdt: float | None = None,
+    prefer_maker: bool = False,
 ) -> OpenAttempt:
     """OKX entry leg: post-only limit at touch → market fallback → normalize.
 
@@ -347,6 +348,15 @@ async def real_okx_open_fill(
     submit (prevents the 51008 insufficient-balance churn). ``None`` preserves
     the prior behaviour. A fundable amount below the OKX min notional skips the
     entry cleanly with ``reject_code="insufficient_balance"`` (no re-submit).
+
+    ``prefer_maker`` (flow_pressure retune w02ccvq0q): force the maker-first
+    (post-only at touch → TAKER fallback) path even for a STRONG signal that
+    would otherwise skip straight to market. OFI momentum is not latency-critical
+    to the tick, so it pays the maker fee (8 bps) when it can rest at the touch —
+    and the existing post-only path ALWAYS falls back to a taker market order on a
+    would-cross/reject/timeout, so the entry is NEVER missed (flow_not_block:
+    cheaper when possible, never a skipped trade). Default ``False`` keeps the
+    strength-gated behaviour byte-identical for every other caller.
     """
     clamped = _clamp_to_available(notional_usd, available_usdt)
     if clamped is None:
@@ -364,7 +374,7 @@ async def real_okx_open_fill(
             poll_delay_sec=poll_delay_sec,
         )
 
-    if strength >= strong_signal_strength():
+    if strength >= strong_signal_strength() and not prefer_maker:
         logger.info(
             "[okx/limit] %s strong signal strength=%.3f — market entry (no limit)",
             inst_id, strength,

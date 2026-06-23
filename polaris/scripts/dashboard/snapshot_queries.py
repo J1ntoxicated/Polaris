@@ -10,14 +10,18 @@ reference it via the original path.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
+from polaris.core.metrics.risk_unit import R_USD_PROXY, realised_r_stream
 from polaris.core.sizing.constants import (
     demo_starting_equity_capital,
     demo_starting_equity_okx,
@@ -25,14 +29,21 @@ from polaris.core.sizing.constants import (
 from polaris.core.streams.config import STREAMS
 from polaris.scripts.dashboard.snapshot_models import (
     ClosedTrade,
+    GateEvent,
     PositionRow,
     StrategyStat,
     StreamSummary,
+    TickerStat,
 )
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_R_USD: Final[float] = 10.0          # 1 R = $10 (display heuristic)
+# Step M (2026-06-22): the flat ``$10`` display heuristic is retired in favour
+# of the canonical risk$-based R (positions.pnl_r) on every panel, with the ONE
+# shared ``R_USD_PROXY`` as the only fallback for fills that have no matched
+# position. ``DEFAULT_R_USD`` is kept as a backward-compat alias to that single
+# proxy so any external importer resolves to the SAME number (no $10/$50 split).
+DEFAULT_R_USD: Final[float] = R_USD_PROXY
 EQUITY_BUCKET_SEC: Final[int] = 5 * 60       # legacy 5-min bucket (24h fallback)
 EQUITY_LOOKBACK_SEC: Final[int] = 24 * 3600  # legacy 24h window (fallback only)
 GATE_FUNNEL_LOOKBACK_SEC: Final[int] = 3600
@@ -588,6 +599,78 @@ def _read_positions(
 # ---------------------------------------------------------------------------
 
 
+class _ClosedR(NamedTuple):
+    """One closed position's stream-common realised R + its grouping keys.
+
+    ``r`` is RE-DERIVED at read time from the position's realised
+    ``fills.pnl_usd`` divided by the per-stream ``R_budget`` (Step N), NOT read
+    from the persisted ``positions.pnl_r``. This makes OLD rows (written under
+    the venue-skewed per-trade-ATR denominator) and NEW rows comparable on the
+    SAME stream-common ruler without a destructive migration — the dashboard is
+    self-consistent regardless of when a row was stamped.
+    """
+
+    strategy_id: str
+    venue: str
+    symbol: str
+    pnl_usd: float
+    r: float
+
+
+def _closed_position_r(conn: sqlite3.Connection) -> list[_ClosedR]:
+    """Stream-common realised R per CLOSED position, derived from fills.pnl_usd.
+
+    Joins each ``status='closed'`` position to the cumulative realised
+    ``Σ fills.pnl_usd`` of its close legs (``contribution_id = position_id``,
+    ``is_close = 1``) and rescales by the per-stream ``R_budget(venue)``.
+    RECONCILED (tracking-failure) positions are excluded by the ``status='closed'``
+    filter — a reconcile is not a trade; its drift is a SEPARATE $ counter, never
+    summed into R. A position with no matched close fill is skipped (no $ truth).
+    Graceful empty on a missing table. Read-only; never a trading path."""
+    rows = _safe_query(
+        conn,
+        """SELECT p.strategy_id, p.venue, p.symbol,
+                  COALESCE(SUM(f.pnl_usd), 0.0) AS pnl_usd,
+                  COUNT(f.fill_id) AS n_close
+           FROM positions p
+           JOIN fills f
+             ON f.contribution_id = p.position_id AND f.is_close = 1
+           WHERE p.status = 'closed'
+           GROUP BY p.position_id""",
+    )
+    out: list[_ClosedR] = []
+    for r in rows:
+        if int(r[4] or 0) <= 0:
+            continue
+        venue = str(r[1] or "")
+        pnl_usd = float(r[3] or 0.0)
+        out.append(_ClosedR(
+            strategy_id=str(r[0] or ""),
+            venue=venue,
+            symbol=str(r[2] or ""),
+            pnl_usd=pnl_usd,
+            r=realised_r_stream(pnl_usd=pnl_usd, venue=venue),
+        ))
+    return out
+
+
+def _avg_r_by_strategy(conn: sqlite3.Connection) -> dict[str, float]:
+    """{strategy_id: mean stream-common R} over CLOSED positions (Step N).
+
+    R is the stream-common realised R (``pnl_usd / R_budget(stream)``) re-derived
+    from ``fills.pnl_usd`` per closed position, so the per-strategy avg_r is
+    comparable across venues and matches the per-ticker R + the close path — one
+    definition everywhere, no venue-skewed ATR denominator, no flat proxy.
+    Reconciled (tracking-failure) rows are excluded. Graceful empty when absent."""
+    by_strat: dict[str, list[float]] = {}
+    for row in _closed_position_r(conn):
+        by_strat.setdefault(row.strategy_id, []).append(row.r)
+    return {
+        sid: (sum(rs) / len(rs) if rs else 0.0)
+        for sid, rs in by_strat.items()
+    }
+
+
 def _strategy_stats(
     conn: sqlite3.Connection,
     *,
@@ -608,6 +691,11 @@ def _strategy_stats(
            GROUP BY strategy_id""",
         (lookback_ms,),
     )
+    # Step M (2026-06-22): avg_r is the canonical risk-unit R (pnl_usd/risk_usd),
+    # sourced from positions.pnl_r — the SAME R the ticker panel + close path use,
+    # so a strategy shows ONE consistent R everywhere (not a flat $10 proxy).
+    # Reconciled (tracking-failure) rows are excluded (pnl_r NULL there).
+    avg_r_by_strat = _avg_r_by_strategy(conn)
     by_strat: dict[str, StrategyStat] = {}
     for r in rows:
         sid = str(r[0])
@@ -617,7 +705,7 @@ def _strategy_stats(
         gross_loss = float(r[4] or 0.0)
         pnl_total = float(r[5] or 0.0)
         wr = (wins / closed_n * 100.0) if closed_n else 0.0
-        avg_r = (pnl_total / closed_n / DEFAULT_R_USD) if closed_n else 0.0
+        avg_r = avg_r_by_strat.get(sid, 0.0)
         pf = (gross_win / gross_loss) if gross_loss > 0 else (gross_win and 9.99 or 0.0)
         by_strat[sid] = StrategyStat(
             strategy_id=sid,
@@ -642,6 +730,33 @@ def _strategy_stats(
 
     out = sorted(by_strat.values(), key=lambda s: s.pnl_usd, reverse=True)
     return out
+
+
+def _ticker_stats(
+    conn: sqlite3.Connection, *, now_s: int, limit: int = 14,
+) -> list[TickerStat]:
+    """Step N (2026-06-23): per-ticker cumulative STREAM-COMMON realized R.
+
+    R is the stream-common realised R (``fills.pnl_usd / R_budget(stream)``)
+    re-derived per closed position, so the per-symbol R bleeders AGREE with the
+    dollar bleeders AND are comparable across venues (no venue-skewed ATR
+    denominator). RECONCILED (tracking-failure) positions are EXCLUDED — a
+    reconcile is not a trade; its drift is surfaced as a SEPARATE $ counter,
+    never mixed into R/WR. Sorted worst-first; display-only; never a trading path."""
+    agg: dict[tuple[str, str], list[float]] = {}
+    for row in _closed_position_r(conn):
+        agg.setdefault((row.venue, row.symbol), []).append(row.r)
+    out: list[TickerStat] = []
+    for (venue, symbol), rs in agg.items():
+        n = len(rs)
+        wins = sum(1 for r in rs if r > 0.0)
+        out.append(TickerStat(
+            venue=venue, symbol=symbol, n=n,
+            wr_pct=(wins / n * 100.0) if n else 0.0,
+            sum_r=sum(rs),
+        ))
+    out.sort(key=lambda t: t.sum_r)  # worst (most negative R) first
+    return out[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -676,10 +791,15 @@ def _recent_closed_by_venue(
     the exact entry-pairing logic). Empty venues yield no key → an empty list at
     the call site (graceful zero). Pure read-only.
     """
+    # Step N: each close row's R is the STREAM-COMMON realised R derived from its
+    # OWN venue + ``fills.pnl_usd`` (``pnl_usd / R_budget(venue)``) — the same
+    # ruler every other panel uses, comparable across venues, no stored-pnl_r
+    # read (so OLD venue-skewed rows display on the new ruler too). An unknown
+    # venue yields R_budget 0 → the shared R_USD_PROXY fallback (one number).
     rows = _safe_query(
         conn,
         """SELECT venue, instrument_id, strategy_id, side, fill_price,
-                  pnl_usd, ts_ms, base_qty
+                  pnl_usd, ts_ms, base_qty, contribution_id
            FROM fills
            WHERE is_close = 1
            ORDER BY ts_ms DESC""",
@@ -702,6 +822,10 @@ def _recent_closed_by_venue(
         else:
             entry_px = fill_price
         reason = "TP" if pnl > 0 else ("SL" if pnl < 0 else "FLAT")
+        # Stream-common R from this venue's R_budget; unknown venue → proxy.
+        r_units = realised_r_stream(pnl_usd=pnl, venue=venue)
+        if r_units == 0.0 and pnl != 0.0:
+            r_units = pnl / R_USD_PROXY
         bucket.append(
             ClosedTrade(
                 ts_close=ts_ms // 1000,
@@ -712,7 +836,7 @@ def _recent_closed_by_venue(
                 entry_price=entry_px,
                 exit_price=fill_price,
                 pnl_usd=pnl,
-                r_units=pnl / DEFAULT_R_USD,
+                r_units=r_units,
                 held_sec=0.0,
                 exit_reason=reason,
             )
@@ -972,4 +1096,230 @@ def _per_stream_summary(
                 recent_closed=recent_closed_by_venue.get(venue, []),
             )
         )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section: recent gate-event feed
+# ---------------------------------------------------------------------------
+
+# Gate id → short label, kept LOCAL (snapshot_sections imports from this module,
+# so this module must not import back from it). Mirror of the _GATE_LABELS map.
+_GATE_EVENT_LABELS: Final[Mapping[int, str]] = {
+    1: "Universe",
+    2: "Strategy",
+    3: "Validator",
+    4: "PreEntry",
+    5: "Sizer",
+    6: "Monitor",
+    7: "Exit",
+    8: "Reflector",
+}
+
+RECENT_GATE_EVENTS_N: Final[int] = 60
+
+
+def _payload_strategy_symbol_reason(
+    payload_json: str | None,
+) -> tuple[str, str, str]:
+    """Best-effort (strategy, symbol, reason) from a gate_events ``payload_json``.
+
+    The table has no dedicated strategy/symbol columns — they live nested in the
+    payload, and the shape varies by gate (``raw_signal`` for G2, ``validated_signal``
+    for G3 MODIFY, top-level ``reason`` for G3 KILL / G6/G7, etc.). All lookups
+    are graceful: a missing key / non-dict / bad JSON yields an empty string so
+    the feed never crashes a refresh."""
+    if not payload_json:
+        return "", "", ""
+    try:
+        data = json.loads(payload_json)
+    except (ValueError, TypeError):
+        return "", "", ""
+    if not isinstance(data, dict):
+        return "", "", ""
+    # The signal envelope can be nested under a few known keys.
+    sig: dict[str, Any] = {}
+    for key in ("raw_signal", "validated_signal", "signal", "sized_signal"):
+        inner = data.get(key)
+        if isinstance(inner, dict):
+            sig = inner
+            break
+    strategy = str(sig.get("strategy_id") or data.get("strategy_id") or "")
+    symbol = str(sig.get("symbol") or data.get("symbol") or "")
+    reason = str(data.get("reason") or data.get("thesis_tag") or "")
+    return strategy[:24], symbol[:18], reason[:80]
+
+
+def _as_dict(v: Any) -> dict[str, Any]:
+    """Narrow an arbitrary JSON value to a dict (empty when not a dict)."""
+    return v if isinstance(v, dict) else {}
+
+
+def _payload_detail(gate_id: int, payload_json: str | None) -> dict[str, Any]:
+    """Per-gate rich detail for the live feed (display-only, all keys optional).
+
+    G5 → the T4 size line (risk_pct/notional/scalar/tier/cell/leverage);
+    G8 → the lesson (lesson_type/confidence); G1 → focus count. Other gates carry
+    no extra detail (empty dict). Graceful on bad / absent JSON. NEVER feeds
+    sizing/gating — pure feed chrome."""
+    if not payload_json:
+        return {}
+    try:
+        data = json.loads(payload_json)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if gate_id == 5:
+        sized = _as_dict(data.get("sized"))
+        prop = _as_dict(sized.get("proposal"))
+        out: dict[str, Any] = {}
+        rp = sized.get("final_risk_pct")
+        if isinstance(rp, (int, float)):
+            out["risk_pct"] = round(float(rp) * 100.0, 3)
+        nt = sized.get("final_notional_usd")
+        if isinstance(nt, (int, float)):
+            out["notional_usd"] = round(float(nt), 1)
+        lev = sized.get("leverage")
+        if isinstance(lev, (int, float)):
+            out["leverage"] = float(lev)
+        for k_src, k_dst in (
+            ("continuous_scalar", "scalar"),
+            ("tier_amplifier", "tier"),
+            ("cell_routing_mult", "cell"),
+        ):
+            v = prop.get(k_src)
+            if isinstance(v, (int, float)):
+                out[k_dst] = round(float(v), 3)
+        return out
+    if gate_id == 8:
+        out2: dict[str, Any] = {}
+        lt = data.get("lesson_type")
+        if isinstance(lt, str) and lt:
+            out2["lesson_type"] = lt
+        cf = data.get("confidence")
+        if isinstance(cf, (int, float)):
+            out2["confidence"] = round(float(cf), 3)
+        return out2
+    if gate_id == 1:
+        focus = data.get("focus")
+        if isinstance(focus, list):
+            return {"focus_n": len(focus)}
+    return {}
+
+
+def _recent_gate_events(
+    conn: sqlite3.Connection, *, n: int = RECENT_GATE_EVENTS_N
+) -> list[GateEvent]:
+    """Last ``n`` per-gate decisions (newest first) for the live gate feed.
+
+    Display-only: only rows with a concrete ``decision`` are surfaced (a NULL
+    decision is an in-flight ``request`` phase, not a verdict). strategy/symbol/
+    reason are decoded best-effort from ``payload_json``, then back-filled via the
+    linked position (``position_id``) and signal (``signal_id``) so HOLD/ADJUST
+    monitor/exit events — whose payloads carry no signal envelope — still show a
+    ticker + strategy label. Graceful empty when the table is absent."""
+    # Volume guard (flow_not_block steady state): G6/G7 HOLD repeats every cycle
+    # per open position (measured: G6 HOLD ≈ 99.97% of monitor events) and would
+    # drown the meaningful trade-shaping decisions (G5 size / G6 ADJUST·EXIT·SWAP
+    # / G7 ADJUST·EXIT / G8 lesson). Those repetitive HOLDs are still tallied in
+    # the per-gate decision SUMMARY (``_gate_decisions``); here the feed carries
+    # the notable decisions only.
+    rows = _safe_query(
+        conn,
+        """SELECT ge.gate_id, ge.decision, ge.payload_json, ge.created_ts,
+                  p.symbol, p.strategy_id, s.instrument_id, s.strategy_id
+           FROM gate_events ge
+           LEFT JOIN positions p ON p.position_id = ge.position_id
+           LEFT JOIN signals s ON s.signal_id = ge.signal_id
+           WHERE ge.decision IS NOT NULL
+             AND NOT (ge.gate_id IN (6, 7) AND ge.decision = 'HOLD')
+           ORDER BY ge.created_ts DESC
+           LIMIT ?""",
+        (n,),
+    )
+    out: list[GateEvent] = []
+    for r in rows:
+        gid = int(r[0] or 0)
+        decision = str(r[1] or "").upper()
+        strategy, symbol, reason = _payload_strategy_symbol_reason(r[2])
+        # Back-fill blank labels: payload → positions → signals (display-only).
+        symbol = symbol or str(r[4] or r[6] or "")[:18]
+        strategy = strategy or str(r[5] or r[7] or "")[:24]
+        out.append(
+            GateEvent(
+                gate_id=gid,
+                label=_GATE_EVENT_LABELS.get(gid, f"G{gid}"),
+                decision=decision,
+                strategy=strategy,
+                symbol=symbol,
+                reason=reason,
+                ts=int(r[3] or 0),
+                detail=_payload_detail(gid, r[2]),
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Section: strategy descriptions (vault notes — file-based, no DB)
+# ---------------------------------------------------------------------------
+
+# Repo root: tools live under <repo>/polaris/scripts/dashboard/ → parents[3].
+_STRATEGY_NOTES_DIR: Final[Path] = (
+    Path(__file__).resolve().parents[3] / "vault" / "20_strategies"
+)
+_FRONTMATTER_SID_RE: Final[re.Pattern[str]] = re.compile(
+    r"^strategy_id:\s*(.+)$", re.MULTILINE
+)
+
+
+def _one_line_description(text: str) -> str:
+    """First non-empty prose line under a ``## Role`` heading, else the H1 title.
+
+    The strategy notes put a one-line role summary under ``## Role``; fall back to
+    the ``# …`` H1 (front-matter stripped) when no Role section exists. Returns ''
+    when neither is present."""
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        if raw.strip().lower().startswith("## role"):
+            for follow in lines[i + 1 :]:
+                s = follow.strip()
+                if not s:
+                    continue
+                if s.startswith("#"):  # next heading before any prose
+                    break
+                return s.lstrip("-* ").strip()[:120]
+            break
+    for raw in lines:
+        s = raw.strip()
+        if s.startswith("# "):
+            return s[2:].strip()[:120]
+    return ""
+
+
+def _strategy_descriptions(
+    notes_dir: Path = _STRATEGY_NOTES_DIR,
+) -> dict[str, str]:
+    """{strategy_id: one-line description} from vault/20_strategies/*.md.
+
+    File-based (no DB). Each note's ``strategy_id`` front-matter key supplies the
+    map key (falls back to the file stem); the value is the ``## Role`` one-liner
+    (or the H1). Graceful empty when the directory is absent and per-file
+    best-effort so a single unreadable note never breaks the map. Display-only."""
+    out: dict[str, str] = {}
+    if not notes_dir.is_dir():
+        return out
+    for path in sorted(notes_dir.glob("*.md")):
+        if path.name.startswith("MOC-"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = _FRONTMATTER_SID_RE.search(text)
+        sid = (m.group(1).strip() if m else path.stem).strip()
+        desc = _one_line_description(text)
+        if sid and desc:
+            out[sid] = desc
     return out

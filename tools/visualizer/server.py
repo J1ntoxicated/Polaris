@@ -23,8 +23,10 @@ import dataclasses
 import http.server
 import json
 import os
+import re
 import socketserver
 import sqlite3
+import subprocess
 
 # The ANSI palette decides colour support once at import via sys.stdout.isatty().
 # The server's stdout is a pipe (not a TTY) → it would import the palette with
@@ -57,6 +59,10 @@ finally:
     _sys.stdout = _saved_stdout
 
 ROOT = Path(__file__).parent
+# Repo root for the read-only reference endpoints (buildlog/roadmap/lessons).
+# tools/visualizer/server.py → parents[2] == repo root. Absolute reads only;
+# every reference file is resolved against this so a stray cwd never matters.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Module-level runtime config (set in main()).
 _DB_PATH = Path("data/polaris_live.sqlite")
@@ -250,6 +256,89 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
     return events
 
 
+# Gate-decision SSE channel — newest per-gate DECISIONS pushed between the 1s
+# board polls for the "smooth realtime, no lag" feel. Volume guard mirrors the
+# snapshot feed: the repetitive steady-state G6/G7 HOLD (flow_not_block) is NOT
+# streamed (it would drown the meaningful G5 size / G6 ADJUST·EXIT·SWAP / G7
+# ADJUST·EXIT / G8 lesson decisions) — those HOLDs are tallied in the per-gate
+# summary instead. Display-only; never reads/writes trading state.
+_GATE_SSE_LABELS: dict[int, str] = {
+    1: "Universe", 2: "Strategy", 3: "Validator", 4: "PreEntry",
+    5: "Sizer", 6: "Monitor", 7: "Exit", 8: "Reflector",
+}
+_GATE_SSE_TICK_CAP = 30
+
+
+def _latest_gate_event_ts() -> int:
+    """Max gate_events.created_ts currently in the DB, or 0 if unavailable."""
+    if not _DB_PATH.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT MAX(created_ts) FROM gate_events").fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
+def _gate_events_since(since_s: int) -> list[dict[str, Any]]:
+    """New notable gate decisions (created_ts > since_s) as SSE feed rows.
+
+    Same enrichment as the snapshot feed (symbol/strategy back-fill + per-gate
+    ``detail``), oldest→newest so the client appends in order. Repetitive G6/G7
+    HOLD is excluded (volume guard). Capped per tick. Read-only."""
+    if not _DB_PATH.exists():
+        return []
+    try:
+        from polaris.scripts.dashboard.snapshot_queries import (  # local: avoid web-import cost at boot
+            _payload_detail,
+            _payload_strategy_symbol_reason,
+        )
+    except Exception:  # noqa: BLE001 — display-only stream
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """SELECT ge.gate_id, ge.decision, ge.payload_json, ge.created_ts,
+                          p.symbol, p.strategy_id, s.instrument_id, s.strategy_id
+                   FROM gate_events ge
+                   LEFT JOIN positions p ON p.position_id = ge.position_id
+                   LEFT JOIN signals s ON s.signal_id = ge.signal_id
+                   WHERE ge.decision IS NOT NULL AND ge.created_ts > ?
+                     AND NOT (ge.gate_id IN (6, 7) AND ge.decision = 'HOLD')
+                   ORDER BY ge.created_ts ASC
+                   LIMIT ?""",
+                (since_s, _GATE_SSE_TICK_CAP),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    out: list[dict[str, Any]] = []
+    for gid_raw, dec, payload, ts, p_sym, p_strat, s_inst, s_strat in rows:
+        gid = int(gid_raw or 0)
+        strategy, symbol, reason = _payload_strategy_symbol_reason(payload)
+        symbol = symbol or str(p_sym or s_inst or "")[:18]
+        strategy = strategy or str(p_strat or s_strat or "")[:24]
+        out.append(
+            {
+                "gate_id": gid,
+                "label": _GATE_SSE_LABELS.get(gid, f"G{gid}"),
+                "decision": str(dec or "").upper(),
+                "strategy": strategy,
+                "symbol": symbol,
+                "reason": reason,
+                "ts": int(ts or 0),
+                "detail": _payload_detail(gid, payload),
+            }
+        )
+    return out
+
+
 def _sentinel_payload() -> dict[str, Any]:
     """Active sentinel findings + recent heartbeat (sentinel.sqlite, ro).
 
@@ -294,6 +383,258 @@ def _sentinel_payload() -> dict[str, Any]:
     return {"available": True, "findings": findings, "runs": runs, "ts": time.time()}
 
 
+# ── Reference endpoints (display-only) ──────────────────────────────────────
+# /api/buildlog · /api/roadmap · /api/lessons read git + vault/plans/CLAUDE.md.
+# These are SLOWER than the SQLite snapshot and MUST NOT run inside a request
+# thread: a per-request `git log` under the board poll is exactly the kind of
+# pile-up that once inflated a sub-second build to 60s and contended with the
+# `_bg_refresh_loop` SQLite work. So each has its own cache + lock, is built by
+# the dedicated `_ref_refresh_loop` on a slow cadence, and request handlers only
+# ever serve the warm value (serve-stale). Missing files → graceful empty payload.
+_buildlog_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_buildlog_lock = threading.Lock()
+_BUILDLOG_TTL = 30.0
+
+_roadmap_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_roadmap_lock = threading.Lock()
+_ROADMAP_TTL = 60.0
+
+_lessons_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_lessons_lock = threading.Lock()
+_LESSONS_TTL = 60.0
+
+_SUBJECT_TYPE_RE = re.compile(r"^([a-z]+)(?:\([^)]*\))?!?:")
+# Test count = 'suite NNNN green'; the log also uses the Korean '스위트 NNNN green'
+# (the newest entries), so match either spelling to surface the latest count.
+_SUITE_GREEN_RE = re.compile(r"(?:suite|스위트)\s+([\d,]+)\s+green", re.IGNORECASE)
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _commit_type(subject: str) -> str:
+    """Conventional-commit prefix (feat/fix/docs/…) or 'other'."""
+    m = _SUBJECT_TYPE_RE.match(subject.strip())
+    return m.group(1) if m else "other"
+
+
+def _build_buildlog() -> dict[str, Any]:
+    """git log (last 60) + vault/log.md tail + commits/day heat + test count.
+
+    git is invoked here (background thread only, never a request thread).
+    Read-only: ``git log`` against the repo with no working-tree mutation.
+    """
+    commits: list[dict[str, Any]] = []
+    try:
+        out = subprocess.run(
+            ["git", "log", "-60", "--pretty=format:%H%x1f%cI%x1f%s"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=10,
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 3:
+                continue
+            h, date, subject = parts
+            commits.append({
+                "hash": h[:8], "date": date,
+                "type": _commit_type(subject), "subject": subject,
+            })
+    except (OSError, subprocess.SubprocessError):
+        commits = []
+
+    # commits/day heat — count by calendar day (YYYY-MM-DD prefix of ISO date).
+    heat: dict[str, int] = {}
+    for c in commits:
+        day = str(c["date"])[:10]
+        if day:
+            heat[day] = heat.get(day, 0) + 1
+    heat_list = [{"day": d, "count": n} for d, n in sorted(heat.items())]
+
+    # vault/log.md tail (~40 lines) + newest 'suite NNNN green' test count.
+    log_tail: list[str] = []
+    test_count: int | None = None
+    log_path = REPO_ROOT / "vault" / "log.md"
+    if log_path.exists():
+        with contextlib.suppress(OSError):
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            log_tail = lines[-40:]
+            # Newest test count = last suite-green match scanning bottom-up.
+            for raw in reversed(lines):
+                m = _SUITE_GREEN_RE.search(raw)
+                if m:
+                    test_count = int(m.group(1).replace(",", ""))
+                    break
+
+    return {
+        "commits": commits, "log_tail": log_tail, "heat": heat_list,
+        "test_count": test_count, "ts": time.time(),
+    }
+
+
+def _parse_frontmatter(text: str) -> dict[str, str]:
+    """Minimal YAML front-matter → flat str map (top-level ``key: value`` only)."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+    fm: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ":" in line and not line.lstrip().startswith("#"):
+            k, _, v = line.partition(":")
+            k = k.strip()
+            if k and not k.startswith("-"):
+                fm[k] = v.strip().strip("[]").strip()
+    return fm
+
+
+def _first_heading_title(text: str) -> str:
+    """First markdown H1 (``# …``), front-matter stripped, else ''."""
+    body = _FRONTMATTER_RE.sub("", text, count=1)
+    for line in body.splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            return s[2:].strip()
+    return ""
+
+
+def _build_roadmap() -> dict[str, Any]:
+    """structural_roadmap phases (P0-P6 + DONE/BUILD/DEBATE) + plan kanban + NEXT.
+
+    Read-only absolute reads under REPO_ROOT; missing files → empty sections.
+    """
+    plans_dir = REPO_ROOT / ".claude" / "plans"
+
+    # 1) Phase ladder from structural_roadmap — group bullets under each '## Pn …'.
+    phases: list[dict[str, Any]] = []
+    rm_path = plans_dir / "structural_roadmap_2026-06-22.md"
+    if rm_path.exists():
+        with contextlib.suppress(OSError):
+            cur: dict[str, Any] | None = None
+            for raw in rm_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.rstrip()
+                if line.startswith("## "):
+                    cur = {"phase": line[3:].strip(), "items": []}
+                    phases.append(cur)
+                elif cur is not None and line.lstrip().startswith("- "):
+                    item = line.lstrip()[2:].strip()
+                    tags = [
+                        t for t in ("DONE", "BUILD", "DEBATE", "DECISION")
+                        if t in item
+                    ]
+                    cur["items"].append({"text": item, "tags": tags})
+            phases = [p for p in phases if p["items"]]
+
+    # 2) Plan kanban — front-matter status per plan (no front-matter → 'untracked').
+    plans: list[dict[str, str]] = []
+    if plans_dir.is_dir():
+        for p in sorted(plans_dir.glob("*.md")):
+            status = "untracked"
+            with contextlib.suppress(OSError):
+                fm = _parse_frontmatter(
+                    p.read_text(encoding="utf-8", errors="replace")
+                )
+                status = fm.get("status", "untracked")
+            plans.append({"name": p.stem, "status": status})
+
+    # 3) NEXT order from loop_state.md — capture the '## ▶ NEXT 순서' block.
+    next_lines: list[str] = []
+    ls_path = REPO_ROOT / ".claude" / "loop_state.md"
+    if ls_path.exists():
+        with contextlib.suppress(OSError):
+            in_next = False
+            for raw in ls_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if raw.startswith("## ") and "NEXT" in raw:
+                    in_next = True
+                    continue
+                if in_next:
+                    if raw.startswith("## "):
+                        break
+                    if raw.strip():
+                        next_lines.append(raw.strip())
+
+    return {"phases": phases, "plans": plans, "next": next_lines, "ts": time.time()}
+
+
+def _lesson_first_takeaway(text: str) -> str:
+    """First non-empty bullet/paragraph after the H1 — the lesson takeaway."""
+    body = _FRONTMATTER_RE.sub("", text, count=1)
+    seen_h1 = False
+    for raw in body.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("# "):
+            seen_h1 = True
+            continue
+        if not seen_h1:
+            continue
+        if s.startswith("#"):  # next heading before any prose
+            continue
+        return s.lstrip("-* ").strip()
+    return ""
+
+
+def _collect_md_entries(dir_path: Path, kind: str) -> list[dict[str, str]]:
+    """title (front-matter or H1) + first takeaway for each *.md in dir_path."""
+    entries: list[dict[str, str]] = []
+    if not dir_path.is_dir():
+        return entries
+    for p in sorted(dir_path.glob("*.md")):
+        if p.name.startswith("MOC-"):  # map-of-content index, not a lesson
+            continue
+        with contextlib.suppress(OSError):
+            text = p.read_text(encoding="utf-8", errors="replace")
+            fm = _parse_frontmatter(text)
+            title = fm.get("title") or _first_heading_title(text) or p.stem
+            entries.append({
+                "kind": kind, "name": p.stem, "title": title,
+                "status": fm.get("status", ""),
+                "takeaway": _lesson_first_takeaway(text),
+            })
+    return entries
+
+
+def _build_lessons() -> dict[str, Any]:
+    """lessons + forensic feeds + CLAUDE.md anti-pattern wall. Read-only."""
+    research = REPO_ROOT / "vault" / "50_research"
+    lessons = _collect_md_entries(research / "lessons", "lesson")
+    forensic = _collect_md_entries(research / "forensic", "forensic")
+
+    # Anti-pattern wall — bullets under '## Anti-pattern' in project CLAUDE.md.
+    anti: list[str] = []
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    if claude_md.exists():
+        with contextlib.suppress(OSError):
+            in_sec = False
+            for raw in claude_md.read_text(encoding="utf-8", errors="replace").splitlines():
+                if raw.startswith("## "):
+                    in_sec = raw.startswith("## Anti-pattern")
+                    continue
+                if in_sec and raw.lstrip().startswith("- "):
+                    anti.append(raw.lstrip()[2:].strip())
+
+    return {
+        "lessons": lessons, "forensic": forensic,
+        "anti_patterns": anti, "ts": time.time(),
+    }
+
+
+def _serve_ref(
+    cache: dict[str, Any], lock: threading.Lock, builder: Any
+) -> dict[str, Any]:
+    """Serve-stale read for a reference cache; cold-start builds inline once.
+
+    Mirrors ``_fresh_graph``: the warm value (kept current by ``_ref_refresh_loop``)
+    is returned instantly. Only a cold cache (pre-warm) builds inline, under the
+    lock, so concurrent first requests don't each run git/fs.
+    """
+    data: dict[str, Any] | None = cache["data"]
+    if data is not None:
+        return data
+    with lock:
+        if cache["data"] is None:
+            cache["data"] = builder()
+            cache["ts"] = time.time()
+        return cache["data"]
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -313,6 +654,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib casing)
         if self.path.startswith("/stream/events"):
             self._serve_sse()
+            return
+        # iPhone single-column page (display-only, polls /api/snapshot). Path-only
+        # match so a trailing slash / query is tolerated; serves the static file.
+        if self.path == "/m" or self.path.startswith("/m?") or self.path == "/m/":
+            self.path = "/mobile.html"
+            super().do_GET()
             return
         if self.path.startswith("/static/graph.json"):
             try:
@@ -344,6 +691,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"dashboard err: {exc}")
             return
+        if self.path.startswith("/api/buildlog"):
+            try:
+                self._json(
+                    _serve_ref(_buildlog_cache, _buildlog_lock, _build_buildlog)
+                )
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"buildlog err: {exc}")
+            return
+        if self.path.startswith("/api/roadmap"):
+            try:
+                self._json(
+                    _serve_ref(_roadmap_cache, _roadmap_lock, _build_roadmap)
+                )
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"roadmap err: {exc}")
+            return
+        if self.path.startswith("/api/lessons"):
+            try:
+                self._json(
+                    _serve_ref(_lessons_cache, _lessons_lock, _build_lessons)
+                )
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"lessons err: {exc}")
+            return
         super().do_GET()
 
     def _serve_sse(self) -> None:
@@ -355,12 +726,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             super(http.server.SimpleHTTPRequestHandler, self).end_headers()
             cursor = _latest_fill_ts()
+            gate_cursor = _latest_gate_event_ts()
             while True:
                 events = _fills_since(cursor)
+                gate_events = _gate_events_since(gate_cursor)
+                wrote = False
                 if events:
                     cursor = max(int(e["ts"]) for e in events)
                     payload = json.dumps({"events": events})
                     self.wfile.write(f"data: {payload}\n\n".encode())
+                    wrote = True
+                if gate_events:
+                    gate_cursor = max(int(e["ts"]) for e in gate_events)
+                    gpayload = json.dumps({"gate_events": gate_events})
+                    self.wfile.write(f"data: {gpayload}\n\n".encode())
+                    wrote = True
+                if wrote:
                     self.wfile.flush()
                 else:
                     self.wfile.write(b": heartbeat\n\n")
@@ -403,6 +784,33 @@ def _bg_refresh_loop() -> None:
         time.sleep(1.0)
 
 
+def _ref_refresh_loop() -> None:
+    """Single owner of the reference caches (buildlog / roadmap / lessons).
+
+    Kept SEPARATE from ``_bg_refresh_loop`` so git/fs work never blocks (or
+    contends with) the 1s SQLite snapshot build. Each cache rebuilds only past
+    its own TTL; request threads only ever serve the warm value. Cadence is the
+    shortest TTL (buildlog 30s); roadmap/lessons (60s) skip until due."""
+    builders = (
+        (_buildlog_cache, _buildlog_lock, _build_buildlog, _BUILDLOG_TTL),
+        (_roadmap_cache, _roadmap_lock, _build_roadmap, _ROADMAP_TTL),
+        (_lessons_cache, _lessons_lock, _build_lessons, _LESSONS_TTL),
+    )
+    while True:
+        now = time.time()
+        for cache, lock, builder, ttl in builders:
+            if cache["data"] is not None and now - cache["ts"] < ttl:
+                continue
+            try:
+                fresh = builder()
+            except Exception:  # noqa: BLE001 — display-only, keep stale value
+                continue
+            with lock:
+                cache["data"] = fresh
+                cache["ts"] = time.time()
+        time.sleep(min(_BUILDLOG_TTL, _ROADMAP_TTL, _LESSONS_TTL))
+
+
 def main() -> None:
     global _DB_PATH, _SENTINEL_DB_PATH
     parser = argparse.ArgumentParser(description="Polaris space visualizer server")
@@ -420,6 +828,7 @@ def main() -> None:
     with contextlib.suppress(Exception):
         _fresh_graph()
     threading.Thread(target=_bg_refresh_loop, daemon=True).start()
+    threading.Thread(target=_ref_refresh_loop, daemon=True).start()
 
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("", args.port), Handler) as httpd:

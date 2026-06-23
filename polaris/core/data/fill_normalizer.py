@@ -107,8 +107,25 @@ def normalize_okx_fill(
     # tgtCcy=quote_ccy "flip" mis-treated base accFillSz as quote and corrupted
     # size_usd/base_qty (verified 2026-05-29: a real 0.618-ETH market buy was
     # recorded as $0.62, under-tracking the position and orphaning the rest).
-    base_qty = fill_sz
     quote_qty = fill_sz * avg_px
+    # TRACKING FIX (235-reconciled class, 0.7000% demo-fee gap): an OKX SPOT
+    # market BUY charges the taker fee in the BASE ccy — the wallet is credited
+    # ``accFillSz - |fee|``, not the gross ``accFillSz``. Tracking the gross
+    # over-counts the holding by the fee, so every close clamps to
+    # ``available < base_qty`` (a fee-sized dust remainder), gets classified a
+    # partial, and the whole position orphans to status='reconciled' with PnL
+    # discarded. We deduct the base-ccy fee so the tracked holding mirrors the
+    # wallet and the close sells exactly what is there (flow_not_block — the
+    # close completes cleanly). A SELL charges the fee in the QUOTE ccy, so its
+    # base_qty is untouched (the deduction lands on the USDT proceeds). The cost
+    # basis (quote_qty / size_usd) stays GROSS — the full notional was spent.
+    base_qty = fill_sz
+    base_ccy = inst_id.split("-", 1)[0].upper()
+    fee_ccy = str(payload.get("feeCcy") or "").upper()
+    if fee_ccy and fee_ccy == base_ccy:
+        base_fee = abs(_safe_float(payload.get("fee")))
+        if 0.0 < base_fee < fill_sz:
+            base_qty = fill_sz - base_fee
     # fee_usd is the REAL OKX taker fee (10 bps of notional) — NOT the raw demo
     # 'fee' the venue payload reports. OKX demo bills a punitive 70 bps; storing
     # that drained edge-validation (NIG posterior in cost_adjusted_pnl_r) on 7x

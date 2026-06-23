@@ -11,6 +11,7 @@ from polaris.strategies import (
     STRATEGY_REGISTRY,
     BarView,
     BaseStrategy,
+    EMACrossoverStrategy,
     EquityGapGoStrategy,
     EquityRSIBBPullbackStrategy,
     EquityTSMOMStrategy,
@@ -91,6 +92,80 @@ def test_volume_burst_returns_none_below_atr_floor() -> None:
     mv = MarketView(
         symbol="BTC-USDT", venue="okx", timeframe="1m",
         bars=bars, last_price=100.0, spread_bps=2.0, atr_pct=0.0001,
+        volume_z=3.5,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_volume_burst_fades_spike_failure_at_resistance() -> None:
+    """D4 fade-first: a volume spike whose HIGH pierces resistance (prior high)
+    but whose CLOSE fails to hold above it = rejection at resistance -> SHORT.
+    The strategy still FIRES (flow_not_block) — re-aimed, not silenced."""
+    s = VolumeBurstStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.05)
+    # prior_high over the lookback window ≈ 101.9. Spike: high pierces to 103
+    # (above resistance) but close falls back to 101.0 (<= prior_high) — the
+    # burst was rejected at the level.
+    bars[-1] = BarView(ts=bars[-1].ts + 60, open=101.5, high=103.0, low=100.8,
+                       close=101.0, volume=5000.0, notional_usd=505000.0)
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1m",
+        bars=bars, last_price=101.0, spread_bps=2.0, atr_pct=0.001,
+        volume_z=3.5,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "short"
+    assert sig.correlation_group == "spot_intraday_event"
+
+
+def test_volume_burst_continuation_long_on_clear_acceptance() -> None:
+    """Continuation allowed ONLY on clear acceptance: the spike CLOSES decisively
+    above resistance (body accepted above the level), not just a wick poke."""
+    s = VolumeBurstStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.05)
+    # close=109 is far above prior_high≈101.9 -> accepted -> continuation long.
+    bars[-1] = BarView(ts=bars[-1].ts + 60, open=101.0, high=110.0, low=100.5,
+                       close=109.0, volume=5000.0, notional_usd=545000.0)
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1m",
+        bars=bars, last_price=109.0, spread_bps=2.0, atr_pct=0.001,
+        volume_z=3.5,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.correlation_group == "spot_intraday_event"
+
+
+def test_volume_burst_no_double_fire_fade_vs_continuation() -> None:
+    """A clear-acceptance break (continuation long) must NOT also emit a fade:
+    at most one side fires per bar (close cannot be both above and below level)."""
+    s = VolumeBurstStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.05)
+    bars[-1] = BarView(ts=bars[-1].ts + 60, open=101.0, high=110.0, low=100.5,
+                       close=109.0, volume=5000.0, notional_usd=545000.0)
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1m",
+        bars=bars, last_price=109.0, spread_bps=2.0, atr_pct=0.001,
+        volume_z=3.5,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+
+
+def test_volume_burst_no_pierce_no_fade_still_emits_nothing() -> None:
+    """Burst that never reaches resistance (high stays below prior_high) is
+    neither a failed retest nor an acceptance break -> no signal (no panic)."""
+    s = VolumeBurstStrategy()
+    bars = _make_bars(30, base_close=100.0, drift=0.05)
+    # prior_high ≈ 101.9; this spike's high (101.0) never reaches the level.
+    bars[-1] = BarView(ts=bars[-1].ts + 60, open=100.2, high=101.0, low=99.8,
+                       close=100.5, volume=5000.0, notional_usd=502500.0)
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1m",
+        bars=bars, last_price=100.5, spread_bps=2.0, atr_pct=0.001,
         volume_z=3.5,
     )
     assert s.generate_raw_signal(mv) is None
@@ -298,7 +373,9 @@ def test_fx_breakout_no_double_fire_long_and_short() -> None:
 
 def test_fx_breakout_low_break_blocked_by_low_adx_returns_none() -> None:
     """Negative path: a clean break BELOW the 40-bar low must NOT fire short
-    when adx_14 <= 20. The adx gate (direction-agnostic) blocks both sides."""
+    when adx_14 <= threshold. The adx gate (direction-agnostic) blocks both sides.
+    ADX 12.0 is below the widened 15.0 threshold (range, not trend → fade's turf).
+    """
     s = FXBreakoutBasketStrategy()
     bars = _make_bars(60, base_close=1.10, drift=0.001)
     bars[-1] = BarView(
@@ -308,7 +385,7 @@ def test_fx_breakout_low_break_blocked_by_low_adx_returns_none() -> None:
     mv = MarketView(
         symbol="EURUSD", venue="capital", timeframe="1H",
         bars=bars, last_price=0.95, spread_bps=1.0,
-        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=18.0,  # <= 20
+        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=12.0,  # <= 15 thresh
     )
     assert s.generate_raw_signal(mv) is None
 
@@ -655,11 +732,11 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     assert len(seen) == len(all_strategies()), (
         f"correlation groups not unique: {seen}"
     )
-    assert len(seen) == 11, f"correlation groups not unique: {seen}"
+    assert len(seen) == 12, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    assert len(STRATEGY_REGISTRY) == 11  # +fx_range_fade (FX mean-reversion)
+    assert len(STRATEGY_REGISTRY) == 12  # +ema_crossover (OKX SPOT EMA trend)
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:
@@ -681,3 +758,117 @@ def test_each_strategy_emits_raw_signal_class() -> None:
 def test_strategy_inheritance_baseclass() -> None:
     for cls in STRATEGY_REGISTRY.values():
         assert issubclass(cls, BaseStrategy)
+
+
+# ---------------------------------------------------------------------------
+# EMA Crossover (OKX SPOT, long-only trend)
+# ---------------------------------------------------------------------------
+
+
+def _ema_cross_bars(*, regime_below: bool = False) -> list[BarView]:
+    """A canonical bull-cross setup: a long flat base (fast EMA pinned ON the
+    slow EMA) followed by ONE decisive up-bar that pulls the fast EMA UP through
+    the slow EMA on the LAST bar — the trend inflection. ``regime_below`` shifts
+    the whole series so the last close sits BELOW a 100-level EMA200 regime.
+    """
+    floor = 100.0
+    closes: list[float] = [floor] * 60  # flat base → fast == slow
+    closes.append(floor + 8.0)  # one up-bar → fast crosses UP through slow
+    out: list[BarView] = []
+    for i, c in enumerate(closes):
+        out.append(
+            BarView(
+                ts=1_700_000_000 + i * 3600,
+                open=c - 0.3, high=c + 0.5, low=c - 0.6, close=c,
+                volume=1500.0, notional_usd=1500.0 * c,
+            )
+        )
+    return out
+
+
+def test_ema_crossover_emits_on_confirmed_cross() -> None:
+    s = EMACrossoverStrategy()
+    bars = _ema_cross_bars()
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1H",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        ma_200=100.0, adx_14=30.0,
+    )
+    sig = s.generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.correlation_group == "spot_ema_trend"
+    assert sig.strength >= 0.5
+
+
+def test_ema_crossover_no_signal_on_flat_noise() -> None:
+    """Pure flat chop: no cross event -> no emit (attacks the dead-entry rate)."""
+    s = EMACrossoverStrategy()
+    bars = _make_bars(80, base_close=100.0, drift=0.0)
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1H",
+        bars=bars, last_price=100.0, spread_bps=3.0,
+        ma_200=100.0, adx_14=30.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_ema_crossover_blocks_below_ema200_regime() -> None:
+    """Cross is real but price is below the EMA200 trend filter -> no emit."""
+    s = EMACrossoverStrategy()
+    bars = _ema_cross_bars()
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1H",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        ma_200=bars[-1].close + 50.0, adx_14=30.0,  # price under regime mean
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_ema_crossover_blocks_low_adx_chop() -> None:
+    """Cross + regime OK but ADX below the floor (chop) -> no emit (whipsaw guard)."""
+    s = EMACrossoverStrategy()
+    bars = _ema_cross_bars()
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1H",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        ma_200=100.0, adx_14=12.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_ema_crossover_no_signal_when_already_above() -> None:
+    """A sustained uptrend where fast is ALREADY above slow (no fresh cross this
+    bar) does not re-fire -- only the inflection bar emits, not every bar after."""
+    s = EMACrossoverStrategy()
+    bars = _ema_cross_bars()
+    last_close = bars[-1].close
+    # Extend the up-leg: the cross is now in the PAST, the last bar has fast>slow
+    # on both this AND the prior bar -> not a fresh cross.
+    extra = [
+        BarView(
+            ts=bars[-1].ts + (i + 1) * 3600,
+            open=last_close + 2.0 * i + 1.0, high=last_close + 2.0 * (i + 1) + 0.5,
+            low=last_close + 2.0 * i, close=last_close + 2.0 * (i + 1),
+            volume=1500.0, notional_usd=1500.0,
+        )
+        for i in range(4)
+    ]
+    bars = bars + extra
+    mv = MarketView(
+        symbol="BTC-USDT", venue="okx", timeframe="1H",
+        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
+        ma_200=100.0, adx_14=30.0,
+    )
+    assert s.generate_raw_signal(mv) is None
+
+
+def test_ema_crossover_metadata_harvest_present() -> None:
+    """The harvest target is BAKED IN (profit_target_r set) so the precise-exit
+    engine banks a trend winner before the give-back — and it is long-only OKX."""
+    m = EMACrossoverStrategy.metadata
+    assert m.profit_target_r is not None
+    assert m.profit_target_r > 0.0
+    assert m.asset_class == "spot"
+    assert m.venue == "okx"
+    assert m.timeframe == "1H"

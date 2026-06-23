@@ -192,6 +192,16 @@ def test_rejection_keywords_redacted_at_runtime(
     assert any(k == "digest_keyword_redacted" for k, _, _ in alerts)
 
 
+def test_no_space_sample_variant_is_swept() -> None:
+    """CLAUDE.md SSOT carries the no-space '표본부족' variant; the digest sweep
+    must list AND redact it (audit found it omitted)."""
+    assert "표본부족" in REJECTION_KEYWORDS
+    text, hits = daily_digest.sweep_keywords("전략 사유: 표본부족 으로 진입")
+    assert "표본부족" in hits
+    assert "표본부족" not in text
+    assert "[redacted]" in text
+
+
 def test_template_itself_has_zero_keywords(cfg: OpsConfig) -> None:
     _golden_db(cfg)
     daily_digest.run(cfg, now=NOW)

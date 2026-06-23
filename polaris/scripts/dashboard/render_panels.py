@@ -32,7 +32,7 @@ from polaris.scripts.dashboard.ansi_palette import (
 from polaris.scripts.dashboard.snapshot import (
     DashboardSnapshot,
     EdgeValidationRow,
-    GateRow,
+    GateDecisionRow,
     PositionRow,
 )
 
@@ -150,32 +150,23 @@ def render_gate_panel(
     snap: DashboardSnapshot, *, width: int = TARGET_WIDTH
 ) -> list[str]:
     out: list[str] = []
-    out.append(hline("GATE FUNNEL (last 1h, pass% bar)", width))
-    if not snap.gate_funnel:
+    out.append(hline("GATE DECISIONS (last 1h, what each gate decided)", width))
+    if not snap.gate_decisions:
         out.append(pad(f"  {color('(no gate events yet)', MUTED)}", width))
         for _ in range(7):
             out.append(pad("", width))
         return out
-    bar_w = max(20, width - 80)
-    for g in snap.gate_funnel:
-        out.append(pad(f"  {_gate_row(g, bar_w)}", width))
+    for g in snap.gate_decisions:
+        out.append(pad(f"  {_gate_row(g)}", width))
     return out
 
 
-def _gate_row(g: GateRow, bar_w: int) -> str:
-    pass_c = (
-        POSITIVE if g.pass_rate >= 60 else WARNING if g.pass_rate >= 30 else NEGATIVE
-    )
-    label_c = HIGHLIGHT
-    bar_str = bar(g.pass_rate, bar_w, fill_color=pass_c)
+def _gate_row(g: GateDecisionRow) -> str:
     return (
-        f"{color(f'G{g.gate_id}', label_c + BOLD):<3} "
+        f"{color(f'G{g.gate_id}', HIGHLIGHT + BOLD):<3} "
         f"{color(g.label[:10], NEUTRAL):<11} "
-        f"{bar_str} "
-        f"{color(f'{g.pass_rate:>5.1f}%', pass_c + BOLD)}  "
-        f"{color('PASS', POSITIVE)} {g.pass_n:>5}  "
-        f"{color('KILL', NEGATIVE)} {g.kill_n:>4}  "
-        f"{color('total', MUTED)} {g.total:>6}"
+        f"{color(g.headline, POSITIVE)}  "
+        f"{color(f'n={g.n}', MUTED)}"
     )
 
 

@@ -24,6 +24,7 @@ from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.circuit_breaker import FAULT_EXCEPTION, record_fault
 from polaris.core.live_recalc.excursion import compute_excursion_r
+from polaris.core.metrics.risk_unit import realised_r_stream
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 
 if TYPE_CHECKING:
@@ -124,21 +125,28 @@ def real_pnl_r_from_fills(
     exit_price = exit_price_override if exit_price_override else bar_close
     if entry_price <= 0.0 or exit_price <= 0.0:
         return (0.0, 0.0, entry_price)
-    # Entry-time ATR anchor first (the same R denominator the live recalc
-    # uses); legacy NULL anchor → the recent-1m-bars estimate (pre-anchor).
-    anchor = _entry_anchor_atr_pct(conn, trade=trade)
-    atr_pct = anchor if anchor is not None else _atr_pct_from_bars(bar_rows)
+    # Step N: the realised-R denominator is the per-stream R_budget (resolved by
+    # venue below), so the entry ATR anchor is no longer read here — it remains
+    # the excursion (mfe_r/mae_r) denominator inside ``_close_excursion_r``.
     pnl_abs = (
         (exit_price - entry_price)
         if trade.side == "long"
         else (entry_price - exit_price)
     )
-    # Floor the R unit RELATIVE to price (>= 0.01% of entry), never an absolute
-    # 1e-6: a flat/stale-bar atr_pct ~0 on a high-priced instrument (J225 ~38000,
-    # an index CFD) would otherwise collapse atr_usd to ~0 and explode pnl_r/mfe_r.
-    atr_usd = max(entry_price * atr_pct * 2.0, entry_price * 1e-4)
-    pnl_r = pnl_abs / atr_usd
     pnl_usd = (pnl_abs / entry_price) * size_usd
+    # Step N (2026-06-23, Jin LOCKED): realised R = the dollar truth rescaled by
+    # the per-STREAM R_budget (BASE_RISK_PCT × the stream's starting equity), NOT
+    # the per-trade ATR risk_usd. The ATR denominator was internally consistent
+    # within a venue but NON-COMPARABLE across venues (1D vs 1m ATR anchor → a
+    # −$2 OKX loss read as ~−1.3R while a −$44 Alpaca loss read ~−0.25R, a 123×
+    # risk-unit skew). R_budget is a per-stream CONSTANT, so within a stream R
+    # stays a pure linear rescale of pnl_usd (same sign, same bleeder ranking →
+    # the R and $ ledgers stay reconciled) AND a $X outcome maps to a comparable
+    # R on every venue. pnl_r is computed from the FULL (pre-slice) pnl_usd so it
+    # stays qty-invariant — the partial slicing below only scales the $ stamp.
+    # The ATR ``atr_pct`` above is RETAINED for the excursion (mfe_r/mae_r) path,
+    # a DIFFERENT (per-trade stop-distance) R unit — not the realised R here.
+    pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
     # BUG A — slice the pnl_usd to THIS close fill's fraction of the entry qty,
     # clamped to the un-closed remainder (persisted close fills of the SAME
     # instrument subtracted; foreign-instrument fills sharing the id are the
@@ -155,7 +163,10 @@ def real_pnl_r_from_fills(
             # Genuine partial slice. A ~full close never reaches this multiply,
             # keeping the single-shot full-close pnl_usd byte-identical.
             pnl_usd *= frac
-    pnl_r = max(-10.0, min(10.0, pnl_r))
+    # ``pnl_r`` already carries the unified ±R_CLAMP (inside ``realised_r``); it
+    # is NOT re-clamped here so the realised, excursion and decision paths share
+    # the one telemetry bound (Step M). The old ±10 clamp that HID −34..−100R
+    # losses is gone — G6/G7/precise-exit now see the true loss magnitude.
     return (pnl_r, pnl_usd, exit_price)
 
 
@@ -399,17 +410,35 @@ def _reconcile_orphan(
     """FIX 2 — mark a true-orphan position terminal so it stops being retried.
 
     ``status='reconciled'`` denotes VENUE-SIDE STATE-DRIFT RECOVERY (the wallet
-    no longer holds the tracked base_qty — an over-count), NOT a trade outcome:
-    NO close fill is persisted and NO realized PnL is recorded. The position is
-    popped from ``state.open_trades`` (it is NOT appended to ``closed_trades`` —
-    there is no outcome to reflect on), and an ``orphan_reconciled`` audit row is
-    written to ``risk_events``. Returns ``True`` (handled) so the caller does not
-    treat it as a transient reject. Idempotent: a re-attempt on an already
-    reconciled row is a no-op UPDATE. flow_not_block — no fault, no throttle.
+    no longer holds the tracked base_qty — an over-count), NOT a real-fill close:
+    NO close fill is persisted. Step M (2026-06-22, Jin locked): a reconcile is a
+    TRACKING FAILURE, not a trade — its ``pnl_r`` is LEFT NULL so it is EXCLUDED
+    from every R aggregation (PF/WR/avg_r/ticker R). The drift is instead
+    surfaced as a SEPARATE counter: a rough DOLLAR estimate (``mae_r ×
+    risk_usd``) is recorded in the audit row + ``risk_events`` so the dashboard
+    can show "tracking failures, not trades" alongside (never mixed into) the
+    real-fill ledger. This REVERTS the earlier mae→pnl_r honesty stamp that the
+    design audit found INFLATED the R ledger (−211R artefact). The position is
+    popped from ``state.open_trades`` (NOT appended to ``closed_trades`` — no
+    learner feed), and an ``orphan_reconciled`` audit row is written to
+    ``risk_events``. Returns ``True`` (handled). Idempotent. flow_not_block.
     """
+    est_drift_usd = 0.0
     try:
         conn.execute("BEGIN IMMEDIATE")
         if trade.position_id:
+            # Rough DOLLAR drift estimate (display-only): worst adverse
+            # excursion (mae_r, ≤0) × the persisted 1R-in-dollars. Recorded in
+            # the audit row only — NOT stamped into pnl_r (a tracking failure is
+            # excluded from the R ledger). risk_usd / mae_r NULL → 0.0 estimate.
+            row = conn.execute(
+                "SELECT mae_r, risk_usd FROM positions WHERE position_id = ?",
+                (trade.position_id,),
+            ).fetchone()
+            if row is not None and row[0] is not None and row[1] is not None:
+                est_drift_usd = min(0.0, float(row[0])) * float(row[1])
+            # pnl_r stays NULL — excluded from R sums. Only the lifecycle marker
+            # is written so the position stops being retried.
             conn.execute(
                 "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
                 "exit_state = 'reconciled' WHERE position_id = ?",
@@ -437,7 +466,8 @@ def _reconcile_orphan(
         {
             "venue": trade.venue, "symbol": trade.symbol,
             "position_id": trade.position_id, "base_qty": trade.base_qty,
-            "available": available, "reason": "available~0 qty over-count",
+            "available": available, "est_drift_usd": est_drift_usd,
+            "reason": "available~0 qty over-count",
         },
         separators=(",", ":"),
     )
@@ -450,9 +480,10 @@ def _reconcile_orphan(
         )
     logger.warning(
         "[close/orphan] %s:%s trade_id=%s reconciled (available=%.10f ~0, "
-        "base_qty=%.10f over-count) — status='reconciled', no fill, no pnl; "
-        "exit engine + hydrate stop retrying (state-drift recovery)",
+        "base_qty=%.10f over-count) — status='reconciled', no fill, pnl_r=NULL "
+        "(tracking failure, excluded from R ledger), est_drift_usd=%.2f; exit "
+        "engine + hydrate stop retrying (state-drift recovery)",
         trade.venue, trade.symbol, trade.position_id or "-", available,
-        trade.base_qty,
+        trade.base_qty, est_drift_usd,
     )
     return True

@@ -176,16 +176,27 @@ def test_rank_returns_top_n() -> None:
 
 
 def test_rank_includes_mid_liquidity_previously_spread_rejected() -> None:
-    """A mid-liquidity symbol the hard spread gate would reject still flows."""
+    """A mid-liquidity name the TIGHT smoke spread gate rejects still flows in rank.
+
+    The continuous rank must NOT replicate the over-cut smoke ``apply_active_filters``
+    (tight 10bp spread / 25k depth → the 189->6 over-cut). A name whose 25bp spread
+    trips the smoke gate but clears the COARSE universe-eligibility floor (OKX 30bp /
+    20M$ / 25k depth, Jin-approved 2026-06-22) still reaches the active set — the
+    floor excludes only loss-certain junk, the rank orders everything above it.
+    """
     th = default_thresholds()
-    # Wide spread → old gate hard-rejected. Decent vol + atr → strong reward.
+    # 25bp spread: > smoke 10bp gate (rejected there) but <= 30bp coarse floor (eligible).
+    # Vol 8e7 > 20M floor, depth 50k > 25k floor → clears the coarse eligibility floor.
     mid = _make_inst(
-        "MID-USDT", vol=8e7, atr_pct=5.0, spread_bps=th.max_spread_bps * 3.0, depth=5_000.0
+        "MID-USDT", vol=8e7, atr_pct=5.0, spread_bps=th.max_spread_bps * 2.5, depth=50_000.0
     )
-    # Confirm the old hard gate would have dropped it.
+    # Confirm the old TIGHT smoke gate would have dropped it (on spread).
     assert apply_active_filters([mid]) == []
-    # Fill out the population with weaker rows so MID still ranks into top_n.
-    weak = [_make_inst(f"W{i}-USDT", vol=1e6, atr_pct=0.6, depth=2_000.0) for i in range(20)]
+    # Fill out the population with weaker (but still eligible) rows so MID ranks in.
+    weak = [
+        _make_inst(f"W{i}-USDT", vol=2.5e7, atr_pct=0.6, spread_bps=8.0, depth=30_000.0)
+        for i in range(20)
+    ]
     out = rank_active_universe([mid, *weak], top_n=5)
     assert any(ins.symbol == "MID-USDT" for ins in out)
 
@@ -912,6 +923,60 @@ def test_quota_seats_megacaps_over_penny_names_within_equity_quota() -> None:
     # The equity quota seats curated megacaps, not just the highest-ATR penny names.
     liquid_in_focus = sum(1 for f in eq_in_focus if is_liquid_equity("alpaca", f.symbol))
     assert liquid_in_focus >= 1, "at least one megacap/top-ETF must reach focus via the quota"
+    assert len(focus) == 30  # flow increase, not throttle: total size unchanged
+
+
+def test_quota_seats_megacaps_when_penny_names_fill_the_whole_quota() -> None:
+    """LIVE repro: penny names alone fill the equity quota → megacaps must still seat.
+
+    The earlier ``..._within_equity_quota`` test gave megacaps 100-1000x the penny
+    dollar-volume so their vol z-score floated them into the top-N ``base`` on its
+    own — the quota promotion never even fired. The LIVE failure is different: OKX
+    crypto carries TRILLION-scale 24h notional, which flattens every equity vol
+    z-score to ~the same low value, so ATR decides the equity order and the
+    extreme-ATR penny names (30-380% ATR) out-score the liquid megacaps (~1-4%
+    ATR) AND fill the entire 4-slot equity quota by themselves. With the quota
+    count already satisfied, the priority-promotion loop saw ``need == 0`` and
+    never seated a curated megacap — AAPL/NVDA/SPY never reached focus, so the
+    daily equity strategies had no liquid symbol at the RTH open (Alpaca traded 0
+    while OKX/Capital traded). The curated liquid set must be force-seated within
+    its OWN class quota, DISPLACING the lowest-priority penny rows of the same
+    class (flow_not_block: total size + every other class unchanged).
+    """
+    from polaris.core.universe.schema import focus_min_quota_by_class, is_liquid_equity
+
+    # Crypto with REALISTIC trillion-scale notional (mirrors live BTC/ETH) — this
+    # is what flattens the equity vol z-score so ATR alone orders the equities.
+    crypto = [
+        _cls("BTC-USDT", venue="okx", asset_class="crypto", vol=2.7e14),
+        _cls("ETH-USDT", venue="okx", asset_class="crypto", vol=6.1e12),
+        *[_cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6) for i in range(38)],
+    ]
+    # Penny names: tiny dollar-volume, EXTREME ATR (live: ABVE 377%, NXTS 63%,
+    # EHGO 54%, ADTX 30% … a long high-ATR tail). MANY of them — far more than the
+    # 4-slot equity quota — so the top ~26 fill the entire equity share of the
+    # top-30 ``base`` on ATR alone, and the curated megacaps rank dead-last among
+    # equities (live: AAPL #34/41, NVDA #35, SPY #39). This is what makes the
+    # quota count ``need == 0`` and buries every megacap below the base cut.
+    penny = [_eq(f"PENNY{i}", vol=1e6, atr_pct=80.0 - i * 2.0) for i in range(35)]
+    # Megacaps / top ETFs with LIVE-realistic notional (85M-280M) — three orders
+    # of magnitude below crypto, so their vol z-score does NOT float them into the
+    # base on its own. Low ATR. Only the curated-priority quota path can seat them.
+    megacaps = [
+        _eq("AAPL", vol=8.5e7, atr_pct=1.2),
+        _eq("MSFT", vol=6.8e7, atr_pct=1.1),
+        _eq("NVDA", vol=2.1e8, atr_pct=2.0),
+        _eq("SPY", vol=1.6e8, atr_pct=1.1),
+    ]
+    focus = compute_dynamic_focus(crypto + penny + megacaps, cycle_ts=NOW, target_size=30)
+    eq_in_focus = [f for f in focus if f.venue == "alpaca"]
+    qmin = focus_min_quota_by_class()["equity"]
+    assert len(eq_in_focus) >= qmin
+    liquid_in_focus = sum(1 for f in eq_in_focus if is_liquid_equity("alpaca", f.symbol))
+    assert liquid_in_focus >= 1, (
+        "a curated megacap/top-ETF must reach focus even when penny names fill the "
+        "entire equity quota — else the daily equity strategies get no liquid name"
+    )
     assert len(focus) == 30  # flow increase, not throttle: total size unchanged
 
 

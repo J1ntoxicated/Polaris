@@ -72,7 +72,11 @@ def build_config(argv: list[str]) -> ConfigBundle:
     p.add_argument("--end-ts", type=int, default=None)
     p.add_argument("--equity", type=float, default=10_000.0)
     p.add_argument("--trials", type=int, default=1, help="strategy-search trial count (deflated Sharpe)")
-    p.add_argument("--read-model-db", default="data/polaris.sqlite", help="display DB for the read-model")
+    p.add_argument(
+        "--read-model-db", default="data/polaris_live.sqlite",
+        help="read-model DB for replay_runs/benchmark_results (default = the live "
+        "DB the dashboard reads; the prior data/polaris.sqlite default was unread)",
+    )
     p.add_argument("--no-persist", action="store_true", help="skip read-model write (print only)")
     args = p.parse_args(argv)
     cfg = ReplayConfig(

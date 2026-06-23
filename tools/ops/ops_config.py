@@ -47,6 +47,7 @@ REJECTION_KEYWORDS: tuple[str, ...] = (
     "real-money safety",
     "fractional Kelly is too aggressive in practice",
     "표본 부족 risk",
+    "표본부족",
 )
 
 

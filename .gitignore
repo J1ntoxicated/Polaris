@@ -104,3 +104,10 @@ docs/superpowers/plans/local-*.md
 # Claude Code 로컬 plugin cache (글로벌 ~/.claude/plugins/ 사용)
 .claude/plugins/
 .claude/skills/
+
+# secrets — never commit any .env variant (Jin 복사본 포함) — coherence audit 2026-06-22
+.env
+.env.*
+.env*
+"*.env"
+".env 복사본"

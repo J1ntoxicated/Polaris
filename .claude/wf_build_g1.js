@@ -8,7 +8,7 @@ export const meta = {
   ],
 }
 
-const HEADER = `[Polaris — DEMO/PAPER 가상자금. AGGRESSIVE bias 보존(방어 throttle/사이징축소/진입차단/focus 축소 거부; flow_not_block). 거부 키워드 채택 금지: regulatory cap·professional risk·real-money safety·90d gate·monthly review·posture standard. 불변: 9-stack collapse 봉쇄·hard-MAX·DEMO only. 봇 LLM=OpenAI GPT, Anthropic 호출 금지. 코드: /Volumes/Development/Projects/Polaris, Python 3.13 async, mypy --strict, ruff clean, TDD(실패→구현→pass), pytest. vault 권한 있음. 출력=raw 데이터, 산문 최소.]`
+const HEADER = `[Polaris — DEMO/PAPER 가상자금. AGGRESSIVE bias 보존(방어 throttle/사이징축소/진입차단/focus 축소 거부; flow_not_block). 거부 키워드 채택 금지: regulatory cap·professional risk·real-money safety·90d gate·monthly review·posture standard. 불변: 9-stack collapse 봉쇄·hard-MAX·DEMO only. 봇 LLM=OpenAI GPT, Anthropic 호출 금지. 코드: /Users/jinyoon/Projects/Polaris, Python 3.13 async, mypy --strict, ruff clean, TDD(실패→구현→pass), pytest. vault 권한 있음. 출력=raw 데이터, 산문 최소.]`
 
 const PLAN = `[설계 SSOT] .claude/plans/ai_conductor_architecture_2026-05-30.md (G1 줄 + /debate 교정 정독). /debate 결론=PROCEED_WITH_CHANGES.`
 

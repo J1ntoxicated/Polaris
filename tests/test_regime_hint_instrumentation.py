@@ -66,11 +66,12 @@ def test_hint_final_mismatch_counted(
     # hint == candidate == final → total counts, no mismatch.
     assert out == "bull_trend"
     assert stats == {"hint_total": 1}
-    # Flip the SSOT to chop (price-only, twice → confirmed), then re-run with
-    # the bull hint: candidate tilts to bull but the gate keeps SSOT at chop.
-    for ts in (NOW + 60, NOW + 120):
+    # Flip the SSOT to chop (price-only, twice across DISTINCT 5m bars →
+    # confirmed; bar-close dedup needs separate bars, not later ticks), then
+    # re-run with the bull hint: candidate tilts to bull but gate keeps chop.
+    for ts in (NOW + 300, NOW + 600):
         _run(memdb, cache=_NO_HINT_CACHE, stats=None, now_ts=ts)
-    out2 = _run(memdb, cache=_BULL_HINT_CACHE, stats=stats, now_ts=NOW + 180)
+    out2 = _run(memdb, cache=_BULL_HINT_CACHE, stats=stats, now_ts=NOW + 900)
     assert out2 == "chop"  # gate held — pending 1x only
     assert stats["hint_total"] == 2
     assert stats["hint_final_mismatch"] == 1

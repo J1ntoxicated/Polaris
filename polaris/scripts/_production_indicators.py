@@ -15,10 +15,11 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Sequence
-from typing import Final
+from typing import Any, Final
 
 from polaris.core.data.schema import Bar
-from polaris.strategies.base import BarView, MarketView
+from polaris.core.metrics.risk_unit import clamp_r
+from polaris.strategies.base import AltDataView, BarView, MarketView
 
 __all__ = [
     "REGIME_BULL_THRESHOLD_PCT",
@@ -27,7 +28,10 @@ __all__ = [
     "REGIME_TREND_K",
     "REGIME_CRISIS_M",
     "REGIME_VOL_FLOOR_BY_CLASS",
+    "is_synthetic_bar",
+    "filter_real_bars",
     "build_real_market_view",
+    "map_altdata_to_market_fields",
     "compute_adx_14",
     "compute_atr_pct",
     "compute_bollinger",
@@ -40,6 +44,8 @@ __all__ = [
     "compute_rsi_14",
     "compute_volume_z",
     "compute_unrealized_pnl_r",
+    "session_anchor_index",
+    "session_window_now",
 ]
 
 # Regime classification thresholds (deterministic, learner-tunable in P1).
@@ -58,29 +64,68 @@ REGIME_CHOP_EFFICIENCY: Final[float] = 0.20  # efficiency ratio < 0.20 → chop
 # fixed percents. The (already scale-free) efficiency-ratio chop test is kept.
 #
 # scale_pct = max(window realized-vol %, floor%); flip to bull/bear when the
-# signed return ≥ REGIME_TREND_K × scale_pct; crisis when drawdown ≤
-# -REGIME_CRISIS_M × scale_pct. k / m are chosen so the crypto FLOOR reproduces
-# the old fixed thresholds exactly (crypto behavior preserved):
-#   crypto floor 2.0% → bull = 0.25·2.0 = 0.5% ; crisis = -1.5·2.0 = -3.0%.
+# signed return ≥ REGIME_TREND_K × scale_pct. k is chosen so the crypto FLOOR
+# reproduces the old fixed thresholds exactly (crypto behavior preserved):
+#   crypto floor 2.0% → bull = 0.25·2.0 = 0.5%.
 # The per-class FLOORS echo ATR_FLOOR_BY_CLASS spirit (a dead-flat window can't
 # trip on micro-noise; a too-thin/zero-vol window falls back to the fixed path).
+#
+# CRISIS (D1 calibration — equity was 81% mis-bucketed as crisis):
+# crisis when drawdown ≤ -REGIME_CRISIS_M × crisis_scale. Previously crisis_scale
+# was the FIXED per-class floor, so equity sat at a single -1.5% bucket (floor
+# 1.0 × m 1.5) — a routine -2% equity pullback tripped crisis and the equity
+# label collapsed into crisis. Now crisis_scale is per-class window-vol ADAPTIVE,
+# bounded BOTH ways: clamp(window-vol, floor, CAP). The floor keeps a dead-flat
+# window from tripping on micro-noise; the CAP keeps the threshold triggerable on
+# a real crash (a crash inflates its OWN window vol, so without the cap the crisis
+# threshold could run away past the very drawdown that defines the crisis and
+# never trip — the cap bounds that). Crypto is preserved EXACTLY by setting its
+# crisis CAP == its floor (2.0): clamp pins crypto to -1.5·2.0 = -3.0% regardless
+# of window vol, byte-identical to the old fixed crypto crisis.
 REGIME_TREND_K: Final[float] = 0.25  # bull/bear flip at k × vol-scale
-REGIME_CRISIS_M: Final[float] = 1.5  # crisis flip at m × vol-scale
+REGIME_CRISIS_M: Final[float] = 1.5  # crisis flip at m × crisis-scale
 REGIME_VOL_FLOOR_BY_CLASS: Final[dict[str, float]] = {
     "crypto": 2.0,
     "forex": 0.3,
     "indices": 0.4,
     "commodity": 0.5,
-    "equity": 1.0,
+    "equity": 2.5,
     "other": 0.5,
 }
 _REGIME_VOL_FLOOR_DEFAULT: Final[float] = 0.5  # unknown class → generic floor
+
+# Per-class UPPER CAP on the crisis vol-scale (clamp(window-vol, floor, cap)).
+# crypto cap == crypto floor → crypto crisis frozen at the old fixed -3.0%.
+# Other classes' caps sit above their floors to give the window-vol room to
+# ADAPT (so a genuinely volatile instrument's crisis threshold deepens) while
+# staying low enough that a real crash (≈ -8% drawdown in the golden series)
+# still clears m × cap and trips crisis.
+REGIME_CRISIS_VOL_CAP_BY_CLASS: Final[dict[str, float]] = {
+    "crypto": 2.0,
+    "forex": 2.0,
+    "indices": 2.5,
+    "commodity": 3.0,
+    "equity": 4.0,
+    "other": 3.0,
+}
+_REGIME_CRISIS_VOL_CAP_DEFAULT: Final[float] = 3.0  # unknown class → generic cap
 
 
 def _regime_vol_floor(asset_class: str) -> float:
     """Per-asset_class realized-vol floor % (unknown class → generic floor)."""
     return REGIME_VOL_FLOOR_BY_CLASS.get(
         (asset_class or "").strip().lower(), _REGIME_VOL_FLOOR_DEFAULT
+    )
+
+
+def _regime_crisis_vol_cap(asset_class: str) -> float:
+    """Per-asset_class UPPER CAP on the crisis vol-scale (clamp ceiling).
+
+    Bounds the adaptive crisis threshold so a crash-inflated window cannot push
+    the threshold past its own drawdown (crisis stays triggerable). crypto cap ==
+    crypto floor freezes crypto at the legacy -3.0% crisis exactly."""
+    return REGIME_CRISIS_VOL_CAP_BY_CLASS.get(
+        (asset_class or "").strip().lower(), _REGIME_CRISIS_VOL_CAP_DEFAULT
     )
 
 
@@ -105,6 +150,47 @@ def compute_window_vol_pct(closes: list[float], *, n: int) -> float:
     sd = math.sqrt(var) if var > 0.0 else 0.0
     out = sd * math.sqrt(n) * 100.0
     return out if math.isfinite(out) else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Synthetic / flat-bar data-quality filter (measurement-first, NOT a block)
+# ---------------------------------------------------------------------------
+# The OKX 1m feed forward-fills gaps with FABRICATED flat bars (high==low==
+# open==close) and zero-volume placeholders. Computing vol_z / ATR / donchian
+# on those garbage bars poisons every signal (live DB ≈ 73% flat/zero-vol).
+# This is DATA QUALITY, not an entry-block: a synthetic bar carries no real
+# price action, so we skip it for INDICATOR purposes only. A symbol whose
+# window is ALL-synthetic simply has no valid signal (data ABSENCE) — the
+# strategy warmup gate sees too few real bars and emits nothing; it auto-
+# resumes the instant real bars arrive. No throttle, no size-cut, no reject.
+
+
+def is_synthetic_bar(bar: Bar | BarView) -> bool:
+    """True when a bar is fabricated/flat and carries no real price action.
+
+    Synthetic ⇔ zero (or non-positive) volume OR a zero-range bar where
+    ``open == high == low == close`` (an OKX forward-fill placeholder). Such a
+    bar is excluded from indicator computation so vol_z / ATR / donchian are
+    measured on REAL movement only. Pure / side-effect-free.
+    """
+    o = float(bar.open)
+    h = float(bar.high)
+    low = float(bar.low)
+    c = float(bar.close)
+    v = float(bar.volume)
+    if v <= 0.0:
+        return True
+    return o == h == low == c
+
+
+def filter_real_bars(bars: Sequence[Bar | BarView]) -> list[Bar | BarView]:
+    """Drop synthetic/flat bars, preserving order (newest last).
+
+    Returns a NEW list of the real bars only. An empty result (all-synthetic
+    window) signals data ABSENCE to the caller — handled as "no valid signal",
+    never an error.
+    """
+    return [b for b in bars if not is_synthetic_bar(b)]
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +371,93 @@ def _to_barview(b: Bar | BarView) -> BarView:
     )
 
 
+def map_altdata_to_market_fields(
+    underlying_group_id: str,
+    cache: Any,
+    *,
+    now_ts: float | None = None,
+) -> AltDataView:
+    """Map the FRESH AltDataCache snapshot for a group → STRATEGY-VISIBLE numerics.
+
+    Reads the already-populated cache snapshot (NO network — the collector loop
+    refreshes it on its own cadence). Pulls only the load-bearing numerics the
+    vault flags as edge-relevant: funding / open-interest / COT net-spec
+    percentile / VIX / crypto fear-greed / HY spread. Every absent / stale /
+    keyless source leaves its field ``None`` = NEUTRAL no-op. SIGNAL only — never
+    a block / throttle. Fail-soft: a cache that raises returns the neutral view.
+    """
+    if cache is None:
+        return AltDataView()
+    try:
+        sources = cache.get_for_group(underlying_group_id, now_ts=now_ts)
+    except Exception:  # noqa: BLE001 — fail-soft: any cache fault → neutral no-op
+        return AltDataView()
+    if not sources:
+        return AltDataView()
+
+    funding_rate, open_interest = _funding_oi_from(sources.get("okx_funding"))
+    fg = sources.get("crypto_fg") or {}
+    fg_val = fg.get("value")
+    crypto_fear_greed = float(fg_val) if isinstance(fg_val, (int, float)) else None
+
+    macro = sources.get("fred_macro") or {}
+    vix_raw = macro.get("vix")
+    hy_raw = macro.get("hy_spread")
+    vix = float(vix_raw) if isinstance(vix_raw, (int, float)) else None
+    hy_spread = float(hy_raw) if isinstance(hy_raw, (int, float)) else None
+
+    cot_pctile = _cot_pctile_from(
+        sources.get("cftc_cot"), underlying_group_id
+    )
+
+    return AltDataView(
+        funding_rate=funding_rate,
+        open_interest=open_interest,
+        oi_change_24h=None,  # OKX public OI has no 24h delta → neutral
+        cot_net_spec_pctile=cot_pctile,
+        vix=vix,
+        crypto_fear_greed=crypto_fear_greed,
+        hy_spread=hy_spread,
+    )
+
+
+def _funding_oi_from(
+    funding: dict[str, Any] | None,
+) -> tuple[float | None, float | None]:
+    """Mean funding rate + summed open interest across the perp instruments."""
+    if not funding:
+        return None, None
+    rates = [
+        row["fundingRate"]
+        for row in funding.values()
+        if isinstance(row, dict) and isinstance(row.get("fundingRate"), (int, float))
+    ]
+    ois = [
+        row["oi"]
+        for row in funding.values()
+        if isinstance(row, dict) and isinstance(row.get("oi"), (int, float))
+    ]
+    funding_rate = sum(rates) / len(rates) if rates else None
+    open_interest = float(sum(ois)) if ois else None
+    return funding_rate, open_interest
+
+
+def _cot_pctile_from(
+    cot: dict[str, Any] | None, underlying_group_id: str
+) -> float | None:
+    """CFTC large-spec net percentile for THIS group's symbol, else neutral."""
+    if not cot:
+        return None
+    symbol = (
+        underlying_group_id.split(":", 1)[1] if ":" in underlying_group_id else ""
+    )
+    row = cot.get(symbol)
+    if not isinstance(row, dict):
+        return None
+    pctile = row.get("net_spec_pctile")
+    return float(pctile) if isinstance(pctile, (int, float)) else None
+
+
 def build_real_market_view(
     *,
     venue: str,
@@ -294,6 +467,9 @@ def build_real_market_view(
     spread_bps: float = 5.0,
     session_open_window: bool = False,
     asset_class: str = "crypto",
+    altdata_cache: Any = None,
+    underlying_group_id: str | None = None,
+    now_ts: float | None = None,
 ) -> MarketView:
     """Compute every indicator the 7 strategies need from real bars.
 
@@ -308,8 +484,26 @@ def build_real_market_view(
     for commodity, and crypto keeps its momentum_20bar (no new fields). An
     unknown asset_class degrades to the base view (no new fields). Defaults to
     ``"crypto"`` so every existing caller is byte-identical.
+
+    ``altdata_cache`` (+ ``underlying_group_id``) is the OPTIONAL alt-data wire:
+    when supplied, the cached funding / OI / COT / VIX / fear-greed / HY snapshot
+    for the group is mapped into ``MarketView.altdata`` (STRATEGY-VISIBLE SIGNAL
+    context). Absent / stale / keyless → a NEUTRAL no-op view (all None); a cache
+    fault fails soft to neutral. No network. Every existing caller (no cache) gets
+    the neutral default, so the view is byte-identical for them.
     """
-    if not bars:
+    altdata = map_altdata_to_market_fields(
+        underlying_group_id or f"{asset_class}:{symbol}",
+        altdata_cache,
+        now_ts=now_ts,
+    )
+    # Data-quality gate (measurement-first): compute indicators on REAL price
+    # action only — drop OKX synthetic/flat/zero-vol forward-fill bars so vol_z
+    # / ATR / donchian are not poisoned by fabricated flats. An all-synthetic
+    # window collapses to the empty view → strategy warmup sees no real bars →
+    # no signal (data ABSENCE, not a block; auto-resumes on real bars).
+    real_bars = filter_real_bars(bars)
+    if not real_bars:
         return MarketView(
             symbol=symbol,
             venue=venue,
@@ -317,8 +511,9 @@ def build_real_market_view(
             bars=[],
             last_price=0.0,
             spread_bps=spread_bps,
+            altdata=altdata,
         )
-    bar_views = [_to_barview(b) for b in bars]
+    bar_views = [_to_barview(b) for b in real_bars]
     closes = [float(b.close) for b in bar_views]
     last_price = closes[-1]
 
@@ -332,12 +527,24 @@ def build_real_market_view(
     don30_hi, don30_lo = compute_donchian(bar_views, n=30)
     adx = compute_adx_14(bar_views)
 
-    # Session anchor: oldest bar within the last 6h on a 1m feed (~360 bars)
-    # approximates the session open well enough for the breakout strategy.
-    if session_open_window and len(bar_views) >= 60:
-        session_open_price: float | None = float(bar_views[-60].open)
-        session_open_ts: int | None = int(bar_views[-60].ts)
-        session_atr: float | None = atr_pct * last_price
+    # Session anchor: the TRUE session-open bar (first bar at/after the most-
+    # recent UTC session-open boundary), measured relative to the freshest bar's
+    # timestamp. The old ``bar_views[-60]`` was a 1m-feed assumption (~1h back)
+    # that ran ~5h STALE on the 5m feed session_breakout actually uses, so the
+    # open±ATR breakout band was measured from the wrong reference. ``now`` is the
+    # newest bar's ts (the freshest market clock in this context).
+    session_open_price: float | None
+    session_open_ts: int | None
+    session_atr: float | None
+    anchor_idx = (
+        session_anchor_index(bar_views, now_ts=int(bar_views[-1].ts))
+        if session_open_window
+        else None
+    )
+    if anchor_idx is not None:
+        session_open_price = float(bar_views[anchor_idx].open)
+        session_open_ts = int(bar_views[anchor_idx].ts)
+        session_atr = atr_pct * last_price
     else:
         session_open_price = None
         session_open_ts = None
@@ -387,6 +594,7 @@ def build_real_market_view(
         ema_50=ema_50,
         ema_cross=ema_cross,
         trend_efficiency=trend_eff,
+        altdata=altdata,
     )
 
 
@@ -475,17 +683,20 @@ def compute_real_regime_signal(
     # Per-asset_class vol-normalized magnitude thresholds.
     #   TREND  → k × max(window realized-vol %, floor): vol-ADAPTIVE so a quietly
     #            trending FX/index (small move on its own scale) still flips.
-    #   CRISIS → m × floor (the per-class BASELINE vol): a deliberately FIXED
-    #            tail-risk scale. The drawdown leg that defines a crisis is itself
-    #            part of the window, so using the window's (crash-inflated) vol for
-    #            the crisis threshold would let a crash lift its own bar and never
-    #            trip — so crisis is normalized to baseline (floor) vol only. This
-    #            also reproduces crypto's old -3% crisis exactly (m·2.0 = 3.0).
+    #   CRISIS → m × clamp(window realized-vol %, floor, cap): vol-ADAPTIVE with a
+    #            per-class UPPER CAP (D1). The floor stops a flat window tripping on
+    #            micro-noise; the cap keeps the threshold from running away on a
+    #            crash-inflated window (the crash is part of the window, so an
+    #            uncapped window-vol crisis threshold could outrun its own drawdown
+    #            and never trip). crypto cap == crypto floor (2.0) pins crypto to
+    #            -1.5·2.0 = -3.0% — old crypto crisis preserved byte-identically.
     floor_pct = _regime_vol_floor(asset_class)
+    crisis_cap_pct = _regime_crisis_vol_cap(asset_class)
     vol_pct = compute_window_vol_pct(closes, n=n)
     trend_scale = max(vol_pct, floor_pct)
+    crisis_scale = min(max(vol_pct, floor_pct), crisis_cap_pct)
     bull_thresh = REGIME_TREND_K * trend_scale
-    crisis_thresh = -REGIME_CRISIS_M * floor_pct
+    crisis_thresh = -REGIME_CRISIS_M * crisis_scale
 
     evidence: dict[str, float] = {
         "ret_pct": ret_pct,
@@ -494,6 +705,7 @@ def compute_real_regime_signal(
         "atr_ratio": atr_ratio,
         "ema_cross": ema_cross,
         "vol_scale_pct": trend_scale,
+        "crisis_scale_pct": crisis_scale,
         "bull_thresh_pct": bull_thresh,
         "crisis_thresh_pct": crisis_thresh,
     }
@@ -597,18 +809,77 @@ def compute_unrealized_pnl_r(
     r = pnl_abs / atr_usd
     if not math.isfinite(r):
         return 0.0
-    # Bound to [-10, +10] so a one-tick blowup doesn't kill payload encoding.
-    return max(-10.0, min(10.0, r))
+    # Step M (2026-06-22): the decision path now shares the ONE telemetry clamp
+    # (±R_CLAMP, ±100) with the realised + excursion paths. The old ±10 here HID
+    # catastrophic losses — a −34..−100R move read as −10R, so G6/G7/precise-exit
+    # could not see the true loss magnitude. Measurement fix, not a throttle.
+    return clamp_r(r)
+
+
+# UTC session-open hours (00 = Asia, 07 = London, 13 = NY). SSOT for both the
+# in-window predicate and the true-session-open anchor below.
+_SESSION_OPEN_HOURS: Final[tuple[int, ...]] = (0, 7, 13)
+
+# /debate-confirmable (Jin veto): per-session OPEN-window length in minutes,
+# measured from each ``_SESSION_OPEN_HOURS`` boundary. Widened from a uniform
+# 30-min rule (~90 min/day, 6.25% of the clock) to the real FX/index liquidity
+# opens — London 07:00-08:30 and NY 13:00-14:30 (90 min, where EURUSD/GBPUSD/
+# US500/US100 breakouts actually occur), Asia/midnight 00:00-01:00 (60 min,
+# preserved). ~4-6x the aperture = MORE session_breakout signals (aggressive /
+# flow_not_block). Anchor logic (session_anchor_index) is unchanged: it keys off
+# _SESSION_OPEN_HOURS, not this map. old: uniform 30 min at all three hours.
+_SESSION_WINDOW_MINUTES: Final[dict[int, int]] = {0: 60, 7: 90, 13: 90}
 
 
 def session_window_now(now_ts: int | None = None) -> bool:
-    """Approximate "session open" — first 30 min of UTC hour 00 / 07 / 13.
+    """Approximate "session open" — within each UTC open's liquidity window.
+
+    Asia/midnight 00:00-01:00 (60 min), London 07:00-08:30 (90 min), NY
+    13:00-14:30 (90 min), per ``_SESSION_WINDOW_MINUTES``. A window may run past
+    its open hour (London/NY are 90 min), so this measures minutes-elapsed since
+    the most-recent open boundary, not ``minute < 30`` within the open hour.
 
     Used by build_real_market_view; production loop sets it per ticker via the
-    venue calendar in P1. P0 uses a UTC fallback so SessionBreakoutStrategy can
-    still emit during the first 30 minutes of the major sessions.
+    venue calendar in P1. P0 uses this UTC fallback so SessionBreakoutStrategy
+    can emit across the major liquidity opens.
     """
     ts = now_ts if now_ts is not None else int(time.time())
-    minutes = (ts // 60) % 60
+    minute_of_day = (ts // 60) % 1440
+    for open_hour, window_minutes in _SESSION_WINDOW_MINUTES.items():
+        open_minute = open_hour * 60
+        if 0 <= (minute_of_day - open_minute) < window_minutes:
+            return True
+    return False
+
+
+def session_anchor_index(
+    bar_views: Sequence[BarView], now_ts: int | None = None
+) -> int | None:
+    """Index of the TRUE session-open bar (first bar at/after the open boundary).
+
+    The session-open boundary is the most-recent UTC ``_SESSION_OPEN_HOURS``
+    (00/07/13) timestamp at/before ``now_ts``. The anchor is the FIRST bar whose
+    ``ts >= boundary`` — the actual session-start bar — so the open±ATR breakout
+    band is measured from the real session open, NOT ``bar_views[-60]`` (a ~5h-
+    stale 1m-feed assumption on the 5m feed session_breakout runs). Returns
+    ``None`` when ``bar_views`` is empty or no bar falls at/after the boundary
+    (degrades to no anchor → no signal, not a manufactured one). Pure / no I/O.
+    """
+    if not bar_views:
+        return None
+    ts = now_ts if now_ts is not None else int(time.time())
     hour = (ts // 3600) % 24
-    return hour in (0, 7, 13) and minutes < 30
+    day_start = (ts // 86400) * 86400
+    # Most-recent open-hour boundary at/before ``ts`` (walk back through today's
+    # open hours, else the latest open hour of the prior day).
+    boundary: int | None = None
+    for h in sorted(_SESSION_OPEN_HOURS, reverse=True):
+        if h <= hour:
+            boundary = day_start + h * 3600
+            break
+    if boundary is None:
+        boundary = day_start - 86400 + max(_SESSION_OPEN_HOURS) * 3600
+    for i, bv in enumerate(bar_views):
+        if int(bv.ts) >= boundary:
+            return i
+    return None

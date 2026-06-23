@@ -249,6 +249,55 @@ def _apply_asset_class_quota(
         if need > 0:
             promotions.append(src_idx)
             in_count[cls] = in_count.get(cls, 0) + 1
+
+    # Curated-priority RESERVATION (live bug fix 2026-06-23): the count-based
+    # promotion above only fires when a floored class is SHORT of its quota. But
+    # when a class is dominated by high-ATR junk (live: 35 penny equities, ATR
+    # 30-380%, vs megacaps at ~1-4% — crypto's trillion-scale vol flattens every
+    # equity vol-z so ATR alone orders them), the penny names fill the ENTIRE
+    # class quota in ``base`` (need == 0), so the curated megacaps/FX-majors are
+    # never seated and the daily equity / FX-basket strategies get NO tradeable
+    # symbol (Alpaca traded 0 while OKX/Capital traded). Reserve up to the class
+    # quota for curated names that exist but are unseated, SWAPPING IN each one
+    # for the WORST-scored NON-curated seated row of the SAME class. Pure flow-
+    # routing: total size, every other class, and the per-class count are all
+    # unchanged; it only re-picks WHICH rows of an already-floored class are
+    # seated (curated alongside junk, never below the junk). No-op when a class
+    # has no curated names (all-penny / all-exotic / OKX-only → existing tests
+    # byte-identical) or when curated names already reached ``base``.
+    seated = set(base) | set(promotions)
+    swap_in: list[int] = []
+    swap_out: set[int] = set()
+    for cls, qslots in quota.items():
+        if qslots <= 0:
+            continue
+        curated_unseated = [
+            i for i in promo_order
+            if active_universe[i].asset_class == cls
+            and _priority(i) == 0
+            and i not in seated
+        ]
+        if not curated_unseated:
+            continue
+        # Worst-scored NON-curated seated rows of this class, worst first.
+        junk_seated = [
+            i for i in reversed(order)
+            if i in seated and i not in swap_out
+            and active_universe[i].asset_class == cls
+            and _priority(i) == 1
+        ]
+        # Reserve at most ``qslots`` curated seats for this class (seat the
+        # best-scored curated names; displace the worst-scored junk one-for-one).
+        n = min(len(curated_unseated), len(junk_seated), qslots)
+        for k in range(n):
+            swap_in.append(curated_unseated[k])
+            swap_out.add(junk_seated[k])
+
+    if not promotions and not swap_in:
+        return base
+    if swap_in:
+        base = [i for i in base if i not in swap_out] + swap_in
+        base.sort(key=lambda i: order_pos[i])
     if not promotions:
         return base
 

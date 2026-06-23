@@ -6,8 +6,13 @@ Regime SSOT key: ``(venue, underlying_group_id)``. Cross-venue independence
 preserved (OKX BTC vs Capital BTC may differ).
 
 Confirmation rule:
-  - ``crisis``: 1 close → flip immediately.
-  - others: 2 consecutive 5m closes confirming the same candidate.
+  - ``crisis``: 1 close → flip immediately (PRICE-derived only).
+  - others: 2 consecutive 5m CLOSES confirming the same candidate. ``detect_
+    regime_flip`` runs at TICK cadence (~5-10s); a candidate advances the
+    consecutive count AT MOST ONCE per closed bar (``last_advanced_bar_id``
+    dedup) so the gate measures distinct CLOSES, not ticks. Without this the
+    gate confirmed in ~10s (24h live: 1233 flip-flops). SIGNAL-only — regime
+    never sizes/blocks/exits.
 
 P0 stub: classification logic returns whatever the caller passes in
 (`candidate_regime`). Real 3-axis classifier (trend / vol shock / chop) =
@@ -25,6 +30,12 @@ from typing import Any, Final
 logger = logging.getLogger(__name__)
 
 REGIME_FLIP_CONFIRM_CLOSES: Final[int] = 2
+# Bar-close confirm cadence: a candidate may advance the consecutive count AT
+# MOST ONCE per closed bar of this width. detect_regime_flip runs at TICK
+# cadence (~5-10s) in the production loop; without this dedup the "2-consecutive
+# CLOSE" gate advanced per CALL and confirmed in ~10s (24h live: 1233 flips).
+# Default bar = 5m. Callers may pass an explicit ``bar_id`` to override.
+REGIME_CONFIRM_BAR_SEC: Final[int] = 300
 REGIME_VALUES: Final[tuple[str, ...]] = ("bull_trend", "bear_trend", "chop", "crisis")
 
 
@@ -73,8 +84,21 @@ def detect_regime_flip(
     evidence: dict[str, Any] | None = None,
     confidence: float = 0.5,
     candidate_source: str = "price",
+    bar_id: int | None = None,
 ) -> RegimeFlipDecision:
     """Apply 2-consecutive-close rule (or immediate for a PRICE ``crisis``).
+
+    ``bar_id`` is the CLOSED-bar identity the candidate belongs to. This is the
+    flip-flop fix: ``detect_regime_flip`` runs at TICK cadence (~5-10s) in the
+    production loop, so advancing the consecutive count once per CALL defeated
+    the "2-consecutive-close" hysteresis (24h live: 1233 flips). A candidate may
+    now advance the count AT MOST ONCE per closed bar — a confirm requires the
+    candidate to persist across two DISTINCT bars. ``bar_id`` defaults to
+    ``now_ts // REGIME_CONFIRM_BAR_SEC`` (5m bucket) so every caller threading
+    ``now_ts`` gets bar-close dedup automatically; callers with a real
+    closed-bar timestamp may pass it explicitly. The immediate PRICE-crisis fast
+    path is UNAFFECTED (sharp crash still acts now). SIGNAL-only — this only
+    stabilizes the regime LABEL; it never sizes/blocks/exits (flow_not_block).
 
     State machine on ``regime_state``:
       - row missing → first observation, write row, no flip.
@@ -105,8 +129,13 @@ def detect_regime_flip(
     has_evidence = bool(evidence)
     evidence_json = json.dumps(evidence or {}, separators=(",", ":"))
     conf = float(confidence)
+    # Closed-bar identity (flip-flop fix). Default = 5m bucket of now_ts so any
+    # caller threading now_ts gets bar-close dedup without changes.
+    if bar_id is None:
+        bar_id = now_ts // REGIME_CONFIRM_BAR_SEC
     row = conn.execute(
-        "SELECT regime, consecutive_candidate, consecutive_count "
+        "SELECT regime, consecutive_candidate, consecutive_count, "
+        "last_advanced_bar_id "
         "FROM regime_state WHERE venue = ? AND underlying_group_id = ?",
         (venue, underlying_group_id),
     ).fetchone()
@@ -117,8 +146,9 @@ def detect_regime_flip(
         conn.execute(
             "INSERT INTO regime_state "
             "(venue, underlying_group_id, regime, confidence, evidence_json, "
-            " consecutive_candidate, consecutive_count, updated_ts) "
-            "VALUES (?, ?, ?, ?, ?, NULL, 0, ?)",
+            " consecutive_candidate, consecutive_count, last_advanced_bar_id, "
+            " updated_ts) "
+            "VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?)",
             (venue, underlying_group_id, candidate, conf, evidence_json, now_ts),
         )
         return RegimeFlipDecision(
@@ -133,6 +163,7 @@ def detect_regime_flip(
     cur_regime = row[0]
     cur_candidate = row[1]
     cur_count = int(row[2] or 0)
+    cur_advanced_bar_id = row[3]  # None until a bar has advanced the count
 
     if candidate == cur_regime:
         # N1: an EVIDENCE-LESS tick must NOT wipe evidence/confidence written
@@ -143,14 +174,16 @@ def detect_regime_flip(
             conn.execute(
                 "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
                 "consecutive_candidate = NULL, "
-                "consecutive_count = 0, updated_ts = ? "
+                "consecutive_count = 0, last_advanced_bar_id = NULL, "
+                "updated_ts = ? "
                 "WHERE venue = ? AND underlying_group_id = ?",
                 (conf, evidence_json, now_ts, venue, underlying_group_id),
             )
         else:
             conn.execute(
                 "UPDATE regime_state SET consecutive_candidate = NULL, "
-                "consecutive_count = 0, updated_ts = ? "
+                "consecutive_count = 0, last_advanced_bar_id = NULL, "
+                "updated_ts = ? "
                 "WHERE venue = ? AND underlying_group_id = ?",
                 (now_ts, venue, underlying_group_id),
             )
@@ -171,7 +204,8 @@ def detect_regime_flip(
         conn.execute(
             "UPDATE regime_state SET regime = ?, confidence = ?, "
             "evidence_json = ?, consecutive_candidate = NULL, "
-            "consecutive_count = 0, updated_ts = ? "
+            "consecutive_count = 0, last_advanced_bar_id = NULL, "
+            "updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
             (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
@@ -193,14 +227,49 @@ def detect_regime_flip(
             reason="immediate_crisis",
         )
 
-    # Non-crisis: 2-consecutive confirm
-    new_count = cur_count + 1 if cur_candidate == candidate else 1
+    # Non-crisis: 2-consecutive-CLOSE confirm with BAR-CLOSE dedup.
+    same_candidate = cur_candidate == candidate
+    # A candidate already pending in THIS closed bar must not advance again on a
+    # later tick of the same bar — that is the flip-flop fix. The count holds at
+    # its current value until a DISTINCT bar arrives. Evidence/confidence is
+    # still refreshed (durable G3/G7 context), but the confirm gate does not move.
+    if (
+        same_candidate
+        and cur_advanced_bar_id is not None
+        and int(cur_advanced_bar_id) == bar_id
+    ):
+        if has_evidence:
+            conn.execute(
+                "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
+                "updated_ts = ? "
+                "WHERE venue = ? AND underlying_group_id = ?",
+                (conf, evidence_json, now_ts, venue, underlying_group_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE regime_state SET updated_ts = ? "
+                "WHERE venue = ? AND underlying_group_id = ?",
+                (now_ts, venue, underlying_group_id),
+            )
+        return RegimeFlipDecision(
+            venue=venue,
+            underlying_group_id=underlying_group_id,
+            from_regime=cur_regime,
+            to_regime=candidate,
+            confirmed=False,
+            consecutive_count=cur_count,
+            reason="pending_same_bar",
+        )
+
+    # New bar (or new candidate) → advance the count once, anchored to this bar.
+    new_count = cur_count + 1 if same_candidate else 1
 
     if new_count >= REGIME_FLIP_CONFIRM_CLOSES:
         conn.execute(
             "UPDATE regime_state SET regime = ?, confidence = ?, "
             "evidence_json = ?, consecutive_candidate = NULL, "
-            "consecutive_count = 0, updated_ts = ? "
+            "consecutive_count = 0, last_advanced_bar_id = NULL, "
+            "updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
             (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
@@ -223,22 +292,23 @@ def detect_regime_flip(
         )
     # N1: pending UPDATE preserves prior evidence/confidence on an evidence-less
     # tick (only overwrite when new non-empty evidence is supplied). Counter +
-    # candidate tracking — i.e. the confirm gate — is unchanged either way.
+    # candidate tracking — i.e. the confirm gate — is unchanged either way. The
+    # advancing bar is recorded so further ticks within it do not re-advance.
     if has_evidence:
         conn.execute(
             "UPDATE regime_state SET confidence = ?, evidence_json = ?, "
             "consecutive_candidate = ?, "
-            "consecutive_count = ?, updated_ts = ? "
+            "consecutive_count = ?, last_advanced_bar_id = ?, updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
-            (conf, evidence_json, candidate, new_count, now_ts, venue,
+            (conf, evidence_json, candidate, new_count, bar_id, now_ts, venue,
              underlying_group_id),
         )
     else:
         conn.execute(
             "UPDATE regime_state SET consecutive_candidate = ?, "
-            "consecutive_count = ?, updated_ts = ? "
+            "consecutive_count = ?, last_advanced_bar_id = ?, updated_ts = ? "
             "WHERE venue = ? AND underlying_group_id = ?",
-            (candidate, new_count, now_ts, venue, underlying_group_id),
+            (candidate, new_count, bar_id, now_ts, venue, underlying_group_id),
         )
     return RegimeFlipDecision(
         venue=venue,
@@ -286,6 +356,7 @@ def fetch_regime(
 
 
 __all__ = [
+    "REGIME_CONFIRM_BAR_SEC",
     "REGIME_FLIP_CONFIRM_CLOSES",
     "REGIME_VALUES",
     "RegimeFlipDecision",

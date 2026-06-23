@@ -47,17 +47,17 @@
   #board .xsel .xchip.x-capital.active { color: var(--stream-b); border-color: var(--stream-b); background: rgba(168,124,255,0.10); }
   #board .xsel .xchip.x-alpaca.active  { color: var(--stream-c); border-color: var(--stream-c); background: rgba(255,200,79,0.10); }
 
-  /* Lane cards are clickable selectors. Selected lane = glowing border. */
-  #board .lane { cursor: pointer; transition: box-shadow 0.15s ease, border-color 0.15s ease; }
-  #board .lane.x-active {
-    border-color: var(--polaris-blue);
-    box-shadow: 0 0 0 1px var(--polaris-blue), 0 0 14px rgba(95,135,175,0.35);
-  }
-  #board .lane.lane-a.x-active { box-shadow: 0 0 0 1px var(--stream-a), 0 0 14px rgba(95,223,255,0.40); }
-  #board .lane.lane-b.x-active { box-shadow: 0 0 0 1px var(--stream-b), 0 0 14px rgba(168,124,255,0.40); }
-  #board .lane.lane-c.x-active { box-shadow: 0 0 0 1px var(--stream-c), 0 0 14px rgba(255,200,79,0.40); }
-  /* When a non-ALL exchange is selected, the unselected lanes recede a touch. */
-  #board .streams-strip.x-scoped .lane:not(.x-active) { opacity: 0.55; }
+  /* Lane ROWS (Bloomberg de-card 2026-06-22) are clickable selectors. Selected
+     row = tinted background + brighter left border (no card glow on a <tr>). */
+  #board tr.lane { cursor: pointer; transition: background 0.15s ease; }
+  #board tr.lane:hover td { background: rgba(95,135,175,0.06); }
+  #board tr.lane.x-active td { background: rgba(95,135,175,0.12); }
+  #board tr.lane.lane-a.x-active td { background: rgba(95,223,255,0.10); }
+  #board tr.lane.lane-b.x-active td { background: rgba(168,124,255,0.10); }
+  #board tr.lane.lane-c.x-active td { background: rgba(255,200,79,0.10); }
+  #board tr.lane.x-active td:first-child { box-shadow: inset 2px 0 0 var(--polaris-blue); }
+  /* When a non-ALL exchange is selected, the unselected rows recede a touch. */
+  #board .streams-strip.x-scoped tr.lane:not(.x-active) { opacity: 0.55; }
   `;
   (function injectStyle() {
     const s = document.createElement('style');

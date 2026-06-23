@@ -158,12 +158,24 @@ def flow_pressure(
     ref_price: float,
     cfg: TickEngineConfig | None = None,
 ) -> TickIntent | None:
-    """Momentum: lean with a sustained order-flow imbalance.
+    """Momentum: lean with a sustained order-flow imbalance — AFTER confirmation.
 
     Arms iff (gated active) ∧ ``|ofi| > θ_o`` ∧ aggressor flow agrees with the
-    imbalance sign. side = sign(ofi). Conviction ramps with ``|ofi|`` past
-    ``θ_o``. Returns ``None`` on a safe-sentinel window, a gated-out regime, or
-    any unmet condition.
+    imbalance sign ∧ POST-SPIKE FOLLOW-THROUGH holds (``feat.flow_confirmed``).
+    side = sign(ofi). Conviction ramps with ``|ofi|`` past ``θ_o``. Returns
+    ``None`` on a safe-sentinel window, a gated-out regime, or any unmet
+    condition.
+
+    The ``flow_confirmed`` gate is the ENTRY-TIMING fix
+    ([[flow_pressure_calibration_ai_2026-06-23]]): the raw-spike entry was buying
+    the TOP of an OFI-positive spike that immediately reversed (59% never reached
+    +0.2R — exhaustion mistaken for continuation). Requiring the follow-through
+    means the entry waits for the post-spike confirmation tick (OFI stays
+    elevated, the bid follows / replenishes, the microprice holds above the spike
+    midpoint, spread is stable). An unconfirmed tick returns ``None`` → the symbol
+    is simply re-evaluated next cadence: this is TIMING precision (a DELAY to a
+    confirmed tick), NOT a veto / size-cut — flow_not_block. A genuine
+    follow-through still fires bidirectionally on every real large imbalance.
     """
     cfg = cfg or TickEngineConfig()
     if _FLOW_PRESSURE not in active_signals(regime):
@@ -177,6 +189,12 @@ def flow_pressure(
     # Aggressor flow must agree with the book imbalance (pressure is real, not
     # passive size that is being hit).
     if not _same_sign(feat.aggr_flow, feat.ofi):
+        return None
+    # ENTRY follow-through: do not buy the exhaustion top — wait for the post-
+    # spike confirmation tick. ``flow_confirmed`` is ``False`` while the spike is
+    # reversing (immediate top-buy) → return None this tick (DELAY, not veto);
+    # the next confirmed tick re-arms the same long/short flow.
+    if feat.flow_confirmed is not True:
         return None
     side: Side = "long" if feat.ofi > 0 else "short"
     conviction = _ramp(

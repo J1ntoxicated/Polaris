@@ -43,7 +43,16 @@
     padding-bottom: 4px; border-bottom: 1px solid var(--ghost);
   }
   #board .b-head .title { font-weight: 700; letter-spacing: 0.18em; color: var(--p-wht); font-size: 15px; }
-  #board .b-head .star { color: var(--polaris-blue); }
+  /* (k) Polaris star — bigger; LIVE = soft twinkle/glow shimmer, STALE = dim/calm.
+     Glow built only from existing --polaris-blue token alpha (no new colours). */
+  #board .b-head .star { color: var(--polaris-blue); font-size: 21px; line-height: 1;
+    display: inline-block; transition: opacity .6s ease, text-shadow .6s ease; }
+  #board .b-head .star.live { animation: starTwinkle 2.4s ease-in-out infinite; }
+  #board .b-head .star.stale { opacity: 0.4; text-shadow: none; }
+  @keyframes starTwinkle {
+    0%,100% { opacity: 1;    text-shadow: 0 0 5px rgba(95,135,175,0.55), 0 0 11px rgba(95,135,175,0.30); transform: scale(1); }
+    50%     { opacity: 0.78; text-shadow: 0 0 13px rgba(95,135,175,1), 0 0 26px rgba(95,135,175,0.55); transform: scale(1.10); }
+  }
   #board .b-head .badge {
     font-size: 10px; letter-spacing: 0.18em; font-weight: 700;
     padding: 2px 8px; border: 1px solid var(--polaris-blue); color: var(--polaris-blue);
@@ -51,7 +60,8 @@
   #board .b-head .meta { color: var(--p-gry); font-size: 11px; }
   #board .b-head .meta b { color: var(--p-wht); font-weight: 700; }
   #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 14px; }
-  #board .b-head .regime-tag { color: var(--p-mag); font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase; }
+  #board .b-head .regime-lbl { color: var(--p-gry); font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; margin-right: 5px; }
+  #board .b-head .regime-tag { color: var(--p-mag); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; font-size: 11px; }
 
   /* KPI cards — header strip, all in one row */
   #board .kpis {
@@ -69,59 +79,67 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #board .kpi .sub { color: var(--p-gry); font-size: 9px; margin-top: 1px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* KPI headline labels (clean English money headline — 2026-06-22). */
+  #board #b-kpis .kk { color: var(--p-dim); font-size: 10px; letter-spacing: 0.06em;
+    text-transform: uppercase; }
+  /* (j) HEALTH one-liner — at-a-glance status above the money headline.
+     state-colour comes from existing pnl tokens; no new colours. */
+  #board #b-kpis .health {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 1px 2px 3px; font-size: 11px; border-bottom: 1px dotted rgba(95,135,175,0.14);
+  }
+  #board #b-kpis .health .hl { font-weight: 700; letter-spacing: 0.10em; text-transform: uppercase; }
+  #board #b-kpis .health .dot { font-size: 9px; margin-right: 4px; }
+  #board #b-kpis .health .anom { color: var(--p-ylw); }
+  #board #b-kpis .health .anom.clear { color: var(--p-grn); }
+  /* (f) main-area dual equity sparkline — axis-less Tufte; sits in the KPI block. */
+  #board #b-kpis .eq-spark { display: flex; align-items: center; gap: 10px; }
+  #board #b-kpis .eq-spark svg { display: block; width: 200px; height: 30px; flex: 0 0 auto; }
+  #board #b-kpis .eq-spark .lg { font-size: 9px; color: var(--p-dim); letter-spacing: 0.04em;
+    text-transform: uppercase; white-space: nowrap; }
+  #board #b-kpis .eq-spark .lg .v { font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* (j-iii) anomaly strip — only things to watch, else 'all clear'. */
+  #board #b-kpis .anoms { display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+    font-size: 10px; color: var(--p-ylw); }
+  #board #b-kpis .anoms .ax { white-space: nowrap; }
+  #board #b-kpis .anoms .ax::before { content: '⚠ '; }
+  #board #b-kpis .anoms.clear { color: var(--p-grn); }
+  #board #b-kpis .anoms.clear .ax::before { content: '✓ '; }
 
   /* 3-stream exchange summary strip — ALWAYS visible (Jin: stays on top).
-     server-fed d.streams, 3 venue lanes. E3 lane/chip styles: board_exchange.js. */
+     Bloomberg de-card (2026-06-22): one dense tabular ROW per venue, no card
+     chrome. server-fed d.streams. E3 row click→scope + highlight: board_exchange.js. */
   #board .streams-strip {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px;
+    border: 1px solid rgba(95,135,175,0.22); background: rgba(15,19,26,0.40);
+    overflow: hidden;
   }
-  #board .lane {
-    border: 1px solid rgba(95,135,175,0.22);
-    border-left: 4px solid var(--ghost);
-    background: rgba(15,19,26,0.55);
-    padding: 5px 9px; min-width: 0; overflow: hidden;
+  #board .streams-tbl { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  #board .streams-tbl thead th {
+    color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.06em;
+    padding: 3px 8px; font-size: 9px; text-transform: uppercase;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 1px solid var(--ghost); background: rgba(10,13,18,0.96);
   }
-  #board .lane.lane-a { border-left-color: var(--stream-a); }
-  #board .lane.lane-b { border-left-color: var(--stream-b); }
-  #board .lane.lane-c { border-left-color: var(--stream-c); }
-  #board .lane .ln-top {
-    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-  }
-  #board .lane .ln-label {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+  #board .streams-tbl thead th.l { text-align: left; }
+  #board .streams-tbl tbody td {
+    padding: 3px 8px; text-align: right; font-variant-numeric: tabular-nums;
+    border-bottom: 1px dotted rgba(95,135,175,0.08); color: var(--p-gry);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  #board .lane.lane-a .ln-label { color: var(--stream-a); }
-  #board .lane.lane-b .ln-label { color: var(--stream-b); }
-  #board .lane.lane-c .ln-label { color: var(--stream-c); }
-  #board .lane .ln-eq { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums;
-    color: var(--p-wht); white-space: nowrap; }
-  #board .lane .ln-tagline {
-    font-size: 8px; letter-spacing: 0.06em; color: var(--p-dim);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
-  }
-  #board .lane .ln-stats {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; margin-top: 3px;
-    font-size: 10px;
-  }
-  #board .lane .ln-stats .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #board .lane .ln-stats .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
-  #board .lane .ln-stats .s .lv { font-variant-numeric: tabular-nums; }
-  #board .lane .ln-cost {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px 8px; margin-top: 3px;
-    font-size: 9px; border-top: 1px dotted rgba(255,255,255,0.08); padding-top: 3px;
-  }
-  #board .lane .ln-cost .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #board .lane .ln-cost .s .lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; }
-  #board .lane .ln-cost .s .lv { font-variant-numeric: tabular-nums; }
-  #board .lane .ln-closed {
-    margin-top: 3px; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    border-top: 1px dotted rgba(255,255,255,0.08); padding-top: 3px;
-  }
-  #board .lane .ln-closed .rc-lk { color: var(--p-dim); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; }
-  #board .lane .ln-closed .rc-item { margin-right: 7px; }
-  #board .lane .ln-closed .rc-sym { color: var(--p-gry); }
-  #board .lane .ln-closed .rc-pn { font-variant-numeric: tabular-nums; }
+  #board .streams-tbl tbody td.l { text-align: left; }
+  #board .streams-tbl tbody tr.lane td:first-child { border-left: 3px solid var(--ghost); }
+  #board .streams-tbl tbody tr.lane.lane-a td:first-child { border-left-color: var(--stream-a); }
+  #board .streams-tbl tbody tr.lane.lane-b td:first-child { border-left-color: var(--stream-b); }
+  #board .streams-tbl tbody tr.lane.lane-c td:first-child { border-left-color: var(--stream-c); }
+  #board .streams-tbl td.ln-label { font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+  #board .streams-tbl tr.lane-a td.ln-label { color: var(--stream-a); }
+  #board .streams-tbl tr.lane-b td.ln-label { color: var(--stream-b); }
+  #board .streams-tbl tr.lane-c td.ln-label { color: var(--stream-c); }
+  #board .streams-tbl td.ln-tag { font-size: 9px; letter-spacing: 0.04em; }
+  #board .streams-tbl td.ln-eq { color: var(--p-wht); font-weight: 700; }
+  #board .streams-tbl td.ln-rc .rc-item { margin-right: 6px; }
+  #board .streams-tbl td.ln-rc .rc-sym { color: var(--p-gry); }
+  #board .streams-tbl td.ln-rc .rc-pn { font-variant-numeric: tabular-nums; }
 
   /* ── Tab strip (E2) — full bottom width, 8 tabs, each pane full-width. ──── */
   #board .b-tabs {
@@ -205,6 +223,41 @@
     return (v >= 0 ? '+' : '') + v.toFixed(dp) + 'R';
   }
 
+  // (j/k) Snapshot freshness — LIVE when the latest snapshot tick is recent.
+  // d.ts_now = epoch seconds the snapshot was generated; compared to wall clock.
+  // STALE_SEC = a few poll intervals of slack (poll = 1s, snapshot bg-refresh
+  // is coarser). Returns { live, ageSec }.
+  const STALE_SEC = 30;
+  function freshness(d) {
+    const ts = d && d.ts_now;
+    if (!ts) return { live: false, ageSec: null };
+    const age = Math.floor(Date.now() / 1000) - ts;
+    return { live: age >= 0 && age <= STALE_SEC, ageSec: age };
+  }
+  // Axis-less Tufte sparkline path for a numeric series into a w×h box.
+  function sparkPath(series, w, h, pad) {
+    const n = series.length;
+    if (n < 2) return '';
+    const mn = Math.min(...series), mx = Math.max(...series);
+    const span = (mx - mn) || 1;
+    const x = i => pad + (i / (n - 1)) * (w - 2 * pad);
+    const y = v => pad + (1 - (v - mn) / span) * (h - 2 * pad);
+    let dd = '';
+    series.forEach((v, i) => { dd += (i === 0 ? 'M' : 'L') + ' ' + x(i).toFixed(1) + ' ' + y(v).toFixed(1) + ' '; });
+    return dd;
+  }
+  // Shared min/max across two series so both sparklines share one y-scale.
+  function sparkPathShared(series, mn, mx, w, h, pad) {
+    const n = series.length;
+    if (n < 2) return '';
+    const span = (mx - mn) || 1;
+    const x = i => pad + (i / (n - 1)) * (w - 2 * pad);
+    const y = v => pad + (1 - (v - mn) / span) * (h - 2 * pad);
+    let dd = '';
+    series.forEach((v, i) => { dd += (i === 0 ? 'M' : 'L') + ' ' + x(i).toFixed(1) + ' ' + y(v).toFixed(1) + ' '; });
+    return dd;
+  }
+
   // Client-side venue→stream group-by. A=okx B=capital C=alpaca. Display-only.
   const VENUE_TO_STREAM = { okx: 'A', capital: 'B', alpaca: 'C' };
   const STREAM_ORDER = ['A', 'B', 'C', 'X'];
@@ -228,15 +281,16 @@
   // HEADER (KPIs) + 3-STREAM EXCHANGE SUMMARY (always visible) + full-width
   // TAB STRIP + the 8 tab panes (only the active one renders). board_tabs.js
   // owns each pane's inner markup + render fn.
+  // 6 composite tabs (2026-06-22 redesign). Each tab groups several existing
+  // snapshot panels + new sub-renderers; the 6-row #board grid contract is
+  // UNCHANGED — only the tab-strip content + per-tab pane grouping changed.
   const TABS = [
-    { id: 'positions', label: 'Positions' },
-    { id: 'trades', label: 'Trades' },
-    { id: 'regime', label: 'Regime' },
-    { id: 'strategy', label: 'Strategy' },
-    { id: 'exit', label: 'Exit' },
-    { id: 'ai', label: 'AI' },
-    { id: 'edge', label: 'Edge' },
-    { id: 'risk', label: 'Risk' },
+    { id: 'activity', label: 'Activity' },
+    { id: 'performance', label: 'Performance' },
+    { id: 'logic', label: 'Logic' },
+    { id: 'build', label: 'Build' },
+    { id: 'path', label: 'Roadmap' },
+    { id: 'learned', label: 'Lessons' },
   ];
 
   function skeleton() {
@@ -251,8 +305,8 @@
     <div class="b-head">
       <span class="title"><span class="star">★</span> POLARIS</span>
       <span class="badge">DEMO·PAPER</span>
-      <span class="regime-tag" id="b-regime">—</span>
-      <span class="meta">focus <b id="b-focus">—</b> · cells <b id="b-cells">—</b> · refresh <b id="b-refresh">—</b></span>
+      <span class="regime-lbl">MARKETS</span><span class="regime-tag" id="b-regime">—</span>
+      <span class="meta">Watching <b id="b-focus">—</b> symbols · <b id="b-cells">—</b> active cells · refreshed <b id="b-refresh">—</b></span>
       <span class="clock" id="b-clock">--:--:--</span>
     </div>
 
@@ -271,85 +325,235 @@
   }
 
   // ── shared renderers (header + KPIs + exchange summary) ───────────────────
+  // Per-instrument regime DISTRIBUTION (Jin 2026-06-23): regime is per-market
+  // (60 markets, each own regime in regime_states), NOT one global regime. The
+  // header shows the spread across markets ("39 choppy · 10 volatile · …") so it
+  // never reads as a single global label. regime_bars already counts per-market.
+  function regimeDist(d) {
+    const bars = (d.regime_bars || []).filter(b => (b.count || 0) > 0)
+      .slice().sort((a, b) => b.count - a.count);
+    if (!bars.length) return null;
+    const total = bars.reduce((s, b) => s + (b.count || 0), 0);
+    return { total, parts: bars.map(b => b.count + ' ' + regimePlain(b.regime)) };
+  }
   function renderHeader(d) {
-    const topRegime = (d.regime_bars || []).slice().sort((a, b) => b.count - a.count)[0];
-    $('b-regime').textContent = topRegime ? topRegime.regime.replace(/_/g, ' ') : '—';
+    const dist = regimeDist(d);
+    const tag = $('b-regime');
+    if (dist) {
+      // Jin 2026-06-23: regime notation was too much on screen. Compact to
+      // total + dominant only; full per-regime breakdown stays in the tooltip
+      // (+ the REGIME tab + Open Positions REGIME column).
+      tag.textContent = dist.total + ' mkt · ' + dist.parts[0];
+      tag.title = 'Regime is PER-INSTRUMENT — ' + dist.total
+        + ' markets, each classified on its own. Counts: ' + dist.parts.join(', ')
+        + '. (Per-market detail in the REGIME tab + Open Positions REGIME column.)';
+    } else {
+      tag.textContent = '—';
+      tag.title = '';
+    }
     $('b-focus').textContent = d.universe_focus_n ?? '—';
     $('b-cells').textContent = d.active_cells_n ?? '—';
     $('b-refresh').textContent = d.universe_last_refresh || '—';
+    // (k) star LIVE/STALE — twinkle when the snapshot tick is fresh, dim when stale.
+    const star = document.querySelector('#board .b-head .star');
+    if (star) {
+      const live = freshness(d).live;
+      star.classList.toggle('live', live);
+      star.classList.toggle('stale', !live);
+    }
   }
 
+  // (j) Anomaly scan — only things worth watching. Returns a short string list;
+  // empty list ⇒ 'all clear'. Pure display heuristics off live snapshot fields:
+  //  · stuck exits   = positions whose exit FSM left 'open' but still held long
+  //  · stale price   = snapshot tick itself is stale (ts_now age)
+  //  · drift losses  = positions reconciled away without a clean exit this session
+  const STUCK_EXIT_SEC = 1800;   // 30m past the exit FSM leaving 'open'
+  function scanAnomalies(d) {
+    const out = [];
+    const pos = d.positions || [];
+    const stuck = pos.filter(p => {
+      const st = String(p.exit_state || '').toLowerCase();
+      return st && st !== 'open' && (p.held_sec || 0) > STUCK_EXIT_SEC;
+    }).length;
+    if (stuck) out.push(stuck + ' stuck exit' + (stuck > 1 ? 's' : ''));
+    const fr = freshness(d);
+    if (!fr.live) out.push('stale price feed' + (fr.ageSec != null ? ' (' + hms(fr.ageSec) + ')' : ''));
+    const driftN = d.reconciled_loss_n || 0;
+    const driftUsd = d.reconciled_loss_usd || 0;
+    if (driftN > 0) out.push(driftN + ' tracking failure' + (driftN > 1 ? 's' : '') + ' (~-$' + Math.abs(driftUsd).toFixed(0) + ', not trades)');
+    return out;
+  }
+
+  // Plain-English regime label (Jin 2026-06-22: no CHOP-style abbreviations).
+  // Canonical regimes are bull_trend / bear_trend / chop / crisis (+ range /
+  // trend); anything unmapped falls back to underscores→spaces.
+  const REGIME_PLAIN = {
+    bull_trend: 'trending up', bear_trend: 'trending down', chop: 'choppy',
+    crisis: 'volatile', range: 'range-bound', trend: 'trending',
+    calm: 'calm', quiet: 'quiet', neutral: 'neutral',
+  };
+  function regimePlain(r) {
+    if (!r) return '—';
+    const k = String(r).toLowerCase();
+    return REGIME_PLAIN[k] || k.replace(/_/g, ' ');
+  }
+
+  // Reshaped (2026-06-22, Jin feedback): the always-visible KPI block is now a
+  // CLEAN ENGLISH MONEY HEADLINE — no jargon clusters. Row 1 = status (bot /
+  // market / updated). Row 2 = labelled money metrics. The old BLEED (worst
+  // strategies) + HIDDEN (costs) blocks moved to the Performance tab.
   function renderKpis(d) {
-    let cw = 0, cn = 0;
-    (d.strategy_stats || []).forEach(s => { cw += (s.wr_pct || 0) * (s.closed_n || 0); cn += (s.closed_n || 0); });
-    const wr = cn ? cw / cn : null;
-    const aiCost = (d.gpt_stats || []).reduce((a, g) => a + (g.cost_24h_proj_usd || 0), 0);
-    const expPct = d.equity_now ? (d.exposed_usd / d.equity_now) * 100 : 0;
-    const feeReal = d.real_fee_total || 0, feeDemo = d.demo_fee_total || 0;
-    const cards = [
-      { k: 'Net PnL (session)', v: fmtUsd(d.daily_pnl_usd, 2), cls: pn(d.daily_pnl_usd), sub: (d.daily_trades || 0) + ' trades' },
-      { k: 'Equity', v: fmtUsd(d.equity_now, 0), cls: '', sub: 'start ' + fmtUsd(d.starting_capital, 0) },
-      { k: 'Drawdown', v: '-' + fmtPct(d.drawdown_pct), cls: (d.drawdown_pct > 0 ? 'b-neg' : 'b-flat'), sub: 'peak ' + fmtUsd(d.peak_equity, 0) },
-      { k: 'uPnL', v: fmtUsd(d.upnl_total, 2), cls: pn(d.upnl_total), sub: (d.open_positions_n || 0) + ' pos' },
-      { k: 'Exposure', v: fmtUsd(d.exposed_usd, 0), cls: '', sub: fmtPct(expPct, 1) + ' of eq' },
-      { k: 'Win Rate', v: (wr == null ? '—' : fmtPct(wr, 1)), cls: '', sub: cn + ' closed' },
-      { k: 'Turnover', v: ((d.confidence && d.confidence.turnover_ratio || 0).toFixed(2)) + '×', cls: '', sub: 'Σnotl/eq' },
-      { k: 'FeeDrag real|demo', v: fmtUsd(feeReal, 0), cls: 'b-flat', sub: 'demo ' + fmtUsd(feeDemo, 0) },
-    ];
-    $('b-kpis').innerHTML = cards.map(c =>
-      `<div class="kpi"><div class="k">${esc(c.k)}</div><div class="v num ${c.cls}">${c.v}</div><div class="sub">${esc(c.sub)}</div></div>`
-    ).join('');
+    const el = $('b-kpis'); if (!el) return;
+    el.style.display = 'block';
+    const c = d.confidence || {};
+    const pf = c.profit_factor, wr = c.win_rate_pct;
+    // Regime is per-instrument (60 markets). Show the dominant share + a full
+    // per-market breakdown on hover, never a single global label.
+    const rdist = regimeDist(d);
+    const top = rdist ? (d.regime_bars || []).slice().sort((a, b) => b.count - a.count)[0] : null;
+    const market = rdist
+      ? top.count + '/' + rdist.total + ' ' + regimePlain(top.regime)
+      : '—';
+    const marketTitle = rdist
+      ? 'Per-instrument: ' + rdist.parts.join(', ') + ' (' + rdist.total + ' markets)'
+      : '';
+    // today's % vs starting capital (snapshot carries no daily_pnl_pct).
+    const start = d.starting_capital || 0;
+    const dayPct = start ? (d.daily_pnl_usd / start) * 100 : null;
+    const profitable = (pf != null && pf >= 1);
+    const pfTag = (pf == null) ? ''
+      : profitable
+        ? '<span class="b-pos" style="font-size:9px;letter-spacing:.1em">profitable</span>'
+        : '<span class="b-neg" style="font-size:9px;letter-spacing:.1em">losing</span>';
+    // (j-i) HEALTH one-liner — Bot LIVE/STALE by tick freshness · winning/losing
+    //       · anomaly count. (j-ii) state colour: winning green / losing red.
+    const fr = freshness(d);
+    const botCls = fr.live ? 'b-pos' : 'b-neg';
+    const botTxt = fr.live ? 'LIVE' : 'STALE';
+    const botSub = fr.live ? '' : (fr.ageSec != null ? ' <span class="b-flat" style="font-weight:400">' + hms(fr.ageSec) + ' ago</span>' : '');
+    const winning = (pf != null) ? profitable : (d.daily_pnl_usd >= 0);
+    const winCls = winning ? 'b-pos' : 'b-neg';
+    const winTxt = winning ? 'WINNING' : 'LOSING';
+    const anoms = scanAnomalies(d);
+    const anomTxt = anoms.length
+      ? '<span class="anom">' + anoms.length + ' to watch</span>'
+      : '<span class="anom clear">all clear</span>';
+    const health =
+      `<div class="health">
+        <span><span class="dot ${botCls}">●</span><span class="hl ${botCls}">Bot ${botTxt}</span>${botSub}</span>
+        <span class="hl ${winCls}">${winTxt}</span>
+        ${anomTxt}
+        ${dualSparkHtml(d)}
+      </div>`;
+    const status = health +
+      `<div style="display:flex;gap:18px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;font-size:12px">
+        <span><span class="kk">Bot</span> <span class="${botCls}" style="font-weight:700">${botTxt}</span></span>
+        <span title="${esc(marketTitle)}"><span class="kk">Markets</span> <span style="color:var(--p-wht);font-weight:700">${esc(market)}</span></span>
+        <span style="margin-left:auto"><span class="kk">Updated</span> <span class="b-flat" id="b-kpi-clock">${clockStr()}</span></span>
+      </div>`;
+    const metric = (label, valHtml, tag) =>
+      `<span style="display:inline-flex;align-items:baseline;gap:6px">
+        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span>${tag ? ' ' + tag : ''}</span>`;
+    const metrics =
+      `<div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);font-size:13px">
+        ${metric('Equity', `<span title="OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees"><span class="b-flat">${fmtUsd(d.equity_now, 0)}</span> <span class="kk">demo</span> · <span class="${(start && d.equity_now_real_fee_net >= start) ? 'b-pos' : 'b-neg'}" style="font-weight:700">${fmtUsd(d.equity_now_real_fee_net, 0)}</span> <span class="kk">real-fee-net</span></span>`)}
+        ${metric('Today', `<span class="${pn(d.daily_pnl_usd)}">${fmtUsd(d.daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
+        ${metric('Win rate', `<span class="b-flat">${wr == null ? '—' : wr.toFixed(0) + '%'}</span>`)}
+        ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
+        ${metric('Max drawdown', `<span class="b-neg">-${fmtPct(d.drawdown_pct, 1)}</span>`)}
+      </div>`;
+    // (j-iii) anomaly strip — only things to watch, else 'all clear'.
+    const anomStrip = anoms.length
+      ? `<div class="anoms">${anoms.map(a => `<span class="ax">${esc(a)}</span>`).join('')}</div>`
+      : `<div class="anoms clear"><span class="ax">all clear — no stuck exits, fresh price, no drift spikes</span></div>`;
+    el.innerHTML = status + metrics + anomStrip;
+  }
+
+  // (f) main-area dual-equity sparkline — equity_curve (demo, dashed dim) vs
+  // equity_curve_real_fee_net (headline, green/red by trend). Axis-less, small,
+  // shares one y-scale so the GAP (honest fee cost) reads at a glance. Renders
+  // inline in the HEALTH row; graceful empty when the curves aren't ready.
+  function dualSparkHtml(d) {
+    const real = d.equity_curve_real_fee_net || [];
+    const demo = d.equity_curve || [];
+    if (real.length < 2 && demo.length < 2) return '';
+    const W = 200, H = 30, pad = 2;
+    const all = real.concat(demo);
+    const mn = Math.min(...all), mx = Math.max(...all);
+    const rUp = real.length >= 2 ? real[real.length - 1] >= real[0] : true;
+    const rStroke = rUp ? 'var(--p-grn)' : 'var(--p-red)';
+    let paths = '';
+    if (demo.length >= 2) {
+      paths += `<path d="${sparkPathShared(demo, mn, mx, W, H, pad)}" fill="none" stroke="rgba(158,158,158,0.55)" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`;
+    }
+    if (real.length >= 2) {
+      paths += `<path d="${sparkPathShared(real, mn, mx, W, H, pad)}" fill="none" stroke="${rStroke}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
+    }
+    const dv = real.length >= 2 ? real[real.length - 1] - real[0] : null;
+    const lg = dv == null ? ''
+      : `<span class="lg">trend <span class="v ${pn(dv)}">${fmtUsd(dv, 0)}</span> after real fees</span>`;
+    return `<span class="eq-spark" style="margin-left:auto" title="Equity trend — solid line = profit after REAL OKX fees (green up / red down); dim dashed = demo-actual. Gap = honest fee cost.">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${paths}</svg>${lg}</span>`;
   }
 
   // Per-stream summary strip — ALWAYS visible. Server-fed d.streams.
+  // Bloomberg de-card (2026-06-22): each venue = ONE dense tabular row (no card
+  // chrome / big padding). venue │ equity │ net PnL │ uPnL │ exposure │ open │
+  // closed │ fee │ slip │ net-cost · recently-closed inline. Row click → scope
+  // (data-ex preserved; board_exchange.js delegates the click + highlights).
   function renderStreams(d) {
     const el = $('b-streams');
     if (!el) return;
     const rows = d.streams || [];
     if (!rows.length) { el.innerHTML = ''; return; }
-    el.innerHTML = rows.map(s => {
+    const trs = rows.map(s => {
       const st = venueStream(s.venue);
       const lc = st.toLowerCase();
       const tagline = STREAM_TAGLINE[st] || '';
       const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
-      const hasCost = s.net_after_cost_usd != null;
-      const costRow = hasCost ? `
-        <div class="ln-cost">
-          <span class="s"><span class="lk">Fee</span> <span class="lv b-flat">${fmtUsd(s.fee_usd, 2)}</span></span>
-          <span class="s"><span class="lk">Slip</span> <span class="lv b-flat">${fmtUsd(s.slippage_usd, 2)}</span></span>
-          <span class="s" title="AI cost attributed to this lane only (position-linked gate calls); pre-position G1-G5 LLM spend is unattributable and excluded"><span class="lk">AI$*</span> <span class="lv b-flat">${fmtUsd(s.ai_cost_usd, 4)}</span></span>
-          <span class="s"><span class="lk">Net-Cost</span> <span class="lv ${pn(s.net_after_cost_usd)}">${fmtUsd(s.net_after_cost_usd, 2)}</span></span>
-        </div>` : '';
+      const closed = (s.closed_n != null ? s.closed_n : (s.daily_trades || 0));
       const exKey = String(s.venue || '').toLowerCase();   // E3 click→scope key
-      return `<div class="lane lane-${lc}" data-ex="${esc(exKey)}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · click to scope · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
-        <div class="ln-top">
-          <span class="ln-label">${esc(s.label)}</span>
-          <span class="ln-eq">${fmtUsd(s.equity_usd, 0)}</span>
-        </div>
-        <div class="ln-tagline">${esc(tagline)}</div>
-        <div class="ln-stats">
-          <span class="s"><span class="lk">Net PnL</span> <span class="lv ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 2)}</span></span>
-          <span class="s"><span class="lk">uPnL</span> <span class="lv ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 2)}</span></span>
-          <span class="s"><span class="lk">Exposure</span> <span class="lv b-flat">${fmtUsd(s.exposed_usd, 0)}</span></span>
-          <span class="s" title="currently-open positions"><span class="lk">Open</span> <span class="lv ${s.open_positions_n ? 'b-pos' : 'b-flat'}">${s.open_positions_n || 0}</span></span>
-          <span class="s" title="closed trades this session"><span class="lk">Closed</span> <span class="lv b-flat">${(s.closed_n != null ? s.closed_n : (s.daily_trades || 0))}</span></span>
-          <span class="s"><span class="lk">Exp%</span> <span class="lv b-flat">${fmtPct(expPct, 1)}</span></span>
-        </div>${costRow}${recentClosedRow(s)}
-      </div>`;
+      return `<tr class="lane lane-${lc}" data-ex="${esc(exKey)}" title="${esc(s.label)} — ${esc(tagline)} (${esc(s.product_class)}) · click to scope · start ${fmtUsd(s.starting_capital, 0)} · DD ${fmtPct(s.drawdown_pct)}">
+        <td class="l ln-label">${esc(s.label)}</td>
+        <td class="l ln-tag b-flat">${esc(tagline)}</td>
+        <td class="num ln-eq">${fmtUsd(s.equity_usd, 0)}</td>
+        <td class="num ${pn(s.net_pnl_usd)}">${fmtUsd(s.net_pnl_usd, 0)}</td>
+        <td class="num ${pn(s.upnl_usd)}">${fmtUsd(s.upnl_usd, 0)}</td>
+        <td class="num b-flat">${fmtUsd(s.exposed_usd, 0)}</td>
+        <td class="num b-flat">${fmtPct(expPct, 0)}</td>
+        <td class="num ${s.open_positions_n ? 'b-pos' : 'b-flat'}">${s.open_positions_n || 0}</td>
+        <td class="num b-flat">${closed}</td>
+        <td class="num b-flat" title="fees this session">${fmtUsd(s.fee_usd, 0)}</td>
+        <td class="num b-flat" title="slippage this session">${fmtUsd(s.slippage_usd, 0)}</td>
+        <td class="num ${pn(s.net_after_cost_usd)}" title="net after fees + slippage">${s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0)}</td>
+        <td class="l ln-rc b-flat">${recentClosedInline(s)}</td>
+      </tr>`;
     }).join('');
+    el.innerHTML =
+      `<table class="streams-tbl"><colgroup>
+        <col style="width:9%"><col style="width:14%"><col style="width:8%"><col style="width:7%">
+        <col style="width:7%"><col style="width:7%"><col style="width:4%"><col style="width:4%">
+        <col style="width:5%"><col style="width:5%"><col style="width:5%"><col style="width:6%">
+        <col style="width:13%">
+       </colgroup><thead><tr>
+        <th class="l">VENUE</th><th class="l">TRACK</th><th>EQUITY</th><th>NET P&L</th>
+        <th>uPnL</th><th>EXPOSURE</th><th>EXP%</th><th>OPEN</th>
+        <th>CLOSED</th><th>FEE</th><th>SLIP</th><th title="net after fees + slippage">NET-COST</th>
+        <th class="l">RECENTLY CLOSED</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
     // Re-apply the active-exchange highlight (innerHTML rewrite cleared it).
     if (window.PolarisBoardExchange) window.PolarisBoardExchange.syncExchangeUi();
   }
 
-  function recentClosedRow(s) {
+  // Recently-closed, inline (was a separate row in the old card). Compact.
+  function recentClosedInline(s) {
     const rc = s.recent_closed || [];
-    if (!rc.length) return '';
-    const items = rc.slice(0, 4).map(t => {
-      const cls = pn(t.pnl_usd);
-      return `<span class="rc-item" title="${esc(t.symbol)} ${esc(t.strategy_id)} ${esc(t.exit_reason)} ${fmtUsd(t.pnl_usd, 2)}">`
-        + `<span class="rc-sym">${esc(t.symbol)}</span> <span class="rc-pn ${cls}">${fmtUsd(t.pnl_usd, 1)}</span></span>`;
-    }).join('');
-    return `<div class="ln-closed" title="recently-closed (distinct from currently-open)"><span class="rc-lk">closed:</span> ${items}</div>`;
+    if (!rc.length) return '—';
+    return rc.slice(0, 4).map(t =>
+      `<span class="rc-item" title="${esc(t.symbol)} ${esc(t.strategy_id)} ${esc(t.exit_reason)} ${fmtUsd(t.pnl_usd, 2)}">`
+      + `<span class="rc-sym">${esc(t.symbol)}</span> <span class="rc-pn ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 0)}</span></span>`
+    ).join(' ');
   }
 
   // ── tab switcher ──────────────────────────────────────────────────────────
@@ -395,6 +599,11 @@
       window.PolarisBoardTabs.renderTabCounts(d, TABS);
       // Render only the visible tab (the rest re-render on switch from cache).
       window.PolarisBoardTabs.renderTab(_activeTab, d);
+    }
+    // Bridge optional probe data to the Neural Cloud (display-only). Probes pulse
+    // their ticker node + venue galaxy on the globe; graceful no-op when absent.
+    if (window.PolarisGlobe && window.PolarisGlobe.showProbes) {
+      window.PolarisGlobe.showProbes(d.probe_events || d.probes || []);
     }
   }
 
@@ -498,6 +707,7 @@
     fmtPx: fmtPx, fmtR: fmtR, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
+    freshness: freshness,
     // E3: re-render hook for exchange-select. The scope helpers
     // (getActiveExchange/venueMatches/venueFilter) are added by board_exchange.js.
     rerenderActive: rerenderActive,

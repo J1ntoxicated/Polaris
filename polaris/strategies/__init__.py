@@ -25,12 +25,14 @@ from __future__ import annotations
 
 from polaris.strategies.base import (
     COLD_START_NEUTRAL_STRENGTH,
+    AltDataView,
     BarView,
     BaseStrategy,
     MarketView,
     RawSignal,
     StrategyMetadata,
 )
+from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.equity_gap_go import EquityGapGoStrategy
 from polaris.strategies.equity_rsi_bb_pullback import EquityRSIBBPullbackStrategy
 from polaris.strategies.equity_tsmom import EquityTSMOMStrategy
@@ -56,6 +58,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     EquityTSMOMStrategy.metadata.strategy_id: EquityTSMOMStrategy,
     EquityRSIBBPullbackStrategy.metadata.strategy_id: EquityRSIBBPullbackStrategy,
     EquityGapGoStrategy.metadata.strategy_id: EquityGapGoStrategy,
+    EMACrossoverStrategy.metadata.strategy_id: EMACrossoverStrategy,
 }
 
 
@@ -65,9 +68,11 @@ def all_strategies() -> list[BaseStrategy]:
 
 
 __all__ = [
+    "AltDataView",
     "BarView",
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",
+    "EMACrossoverStrategy",
     "EquityGapGoStrategy",
     "EquityRSIBBPullbackStrategy",
     "EquityTSMOMStrategy",

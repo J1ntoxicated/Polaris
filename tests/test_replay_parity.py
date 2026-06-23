@@ -200,5 +200,8 @@ def test_replay_exit_passes_live_loser_timeout_for_strategy(
     for sid, fed_timeout in pairs:
         assert fed_timeout == _loser_timeout_for_strategy(sid)
     # And a 1H strategy (tsmom/donchian/etc.) was actually exercised at its
-    # scaled 7200s floor — the flat 900s default would be the OLD broken wiring.
-    assert any(fed == 7200.0 for _sid, fed in pairs), pairs
+    # drift-backstop value — capped at the named LOSER_TIMEOUT_CAP_SEC (3600s),
+    # NOT the flat 900s (the OLD broken wiring) and NOT the uncapped 7200s floor.
+    from polaris.scripts._production_recalc_exit import LOSER_TIMEOUT_CAP_SEC
+
+    assert any(fed == LOSER_TIMEOUT_CAP_SEC for _sid, fed in pairs), pairs

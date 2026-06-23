@@ -189,3 +189,16 @@ class ProdLoopState:
     # redundant projection of the evidence scores compose already consumes;
     # per-call DB writes: 0 (focus×tick frequency — STALL-safe).
     regime_hint_stats: dict[str, int] = field(default_factory=dict)
+    # ADR-012 Slice 1 — PROBE → ENGINE → TUNING-LOG sidecar (observe-only).
+    # ``probe_conn`` is the SEPARATE ``data/probes.sqlite`` tuning-log handle (NOT
+    # the live DB — zero WAL contention, mirrors the sentinel sidecar); None until
+    # boot opens it (smoke/replay leave it None → the attach is a fail-open no-op).
+    # ``probe_bus`` runs the four ROW-only probes with per-probe fault isolation;
+    # ``probe_engine`` composes the would-be exit decision. In observe mode the
+    # engine threads ZERO knobs into run_precise_exit (provably byte-identical).
+    probe_conn: Any = None
+    probe_bus: Any = None
+    probe_engine: Any = None
+    # Count of observe-mode probe evaluations logged (telemetry only; never a
+    # throttle / size dampen / entry block).
+    probe_observe_evals: int = 0

@@ -300,16 +300,34 @@ class AlpacaAdapter:
         timeframe: str = "1Min",
         limit: int = 300,
         start: str | None = None,
+        feed: str = "iex",
+        sort: str = "desc",
     ) -> list[dict[str, Any]]:
         """Fetch up to ``limit`` ``timeframe`` bars for ``symbol`` (data host).
 
         ``start`` (ISO date / RFC3339) bounds the lower edge of the window. It
         is REQUIRED for the v2 bars endpoint to return anything: without a
         ``start`` the endpoint responds with an empty ``bars`` list (verified
-        live — daily/AAPL returns 0 bars sans start). ``limit`` still caps the
-        count to the most-recent bars within [start, now].
+        live — daily/AAPL returns 0 bars sans start).
+
+        FRESHNESS FIX (2026-06-22, RTH 0-trade incident). Two params land the
+        FRESHEST bars during US RTH for liquid names; without them the newest
+        returned 1m bar was 1-2.6h STALE (TSLA 2.3h / AMD 1.0h live) so the
+        recency guard rejected every symbol → 0 signals → 0 trades:
+        - ``sort='desc'`` — Alpaca returns the window NEWEST-first, so ``limit``
+          keeps the MOST-RECENT bars. The default (asc) returned the OLDEST
+          ``limit`` bars of a window wider than ``limit`` → provably stale.
+        - ``feed='iex'`` — real-time IEX prints. This account's SIP/default
+          entitlement is DELAYED (15-min), so a SIP bar is structurally late;
+          IEX is live (newest 1m bar ~1 min old, verified live).
+        The caller re-sorts to the canonical newest-LAST contract.
         """
-        params: dict[str, str] = {"timeframe": timeframe, "limit": str(limit)}
+        params: dict[str, str] = {
+            "timeframe": timeframe,
+            "limit": str(limit),
+            "feed": feed,
+            "sort": sort,
+        }
         if start is not None:
             params["start"] = start
         body = await self.request_json(

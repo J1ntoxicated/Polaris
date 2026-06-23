@@ -40,6 +40,12 @@ __all__ = ["TickFeatures", "compute_tick_features"]
 _MIN_DT_SEC = 1e-3
 _MIN_STD = 1e-9
 
+# Spread follow-through tolerance: the latest spread may sit up to this fraction
+# above the tail mean before it counts as "widening against" the entry. Absorbs
+# the bps creep from a falling mid at a constant absolute spread; a real adverse
+# widen (the spread blowing out as the spike reverses) is far larger than 5%.
+_SPREAD_WIDEN_TOL = 0.05
+
 
 @dataclass(frozen=True, slots=True)
 class TickFeatures:
@@ -62,6 +68,14 @@ class TickFeatures:
       - ``overshoot_z``: ``(mid - EWMA_mid) / rolling_std`` — how stretched the
         latest mid is vs its short EWMA anchor (+ = stretched up).
       - ``spread_bps``: latest tick's spread in bps.
+      - ``flow_confirmed``: POST-SPIKE follow-through, aligned to ``sign(ofi)`` —
+        ``True`` iff the order-flow imbalance is genuine continuation (OFI stays
+        elevated over the tail, the bid follows up / replenishes, the microprice
+        HOLDS above the spike midpoint, spread is stable/tightening), ``False``
+        iff the spike is exhausting (an immediate reversal — the 59% top-buy
+        scenario), ``None`` on a balanced book / insufficient tail. Read ONLY by
+        ``flow_pressure`` as the ENTRY confirmation (TIMING precision — an
+        unconfirmed tick is a DELAY, never a veto).
       - ``n_ticks``: window length.
       - ``age_sec``: seconds from the newest tick to ``now_ts`` (freshness).
     """
@@ -73,6 +87,7 @@ class TickFeatures:
     aggr_flow: float | None
     overshoot_z: float | None
     spread_bps: float | None
+    flow_confirmed: bool | None
     n_ticks: int
     age_sec: float | None
 
@@ -87,6 +102,7 @@ def _safe(n_ticks: int, age_sec: float | None) -> TickFeatures:
         aggr_flow=None,
         overshoot_z=None,
         spread_bps=None,
+        flow_confirmed=None,
         n_ticks=n_ticks,
         age_sec=age_sec,
     )
@@ -109,6 +125,89 @@ def _ewma_time(values: list[float], dts: list[float], span_sec: float) -> float:
         acc += weight * values[i]
         norm += weight
     return acc / norm
+
+
+def _microprice(t: TickSample) -> float:
+    """Size-weighted microprice ``(bid*ask_size + ask*bid_size)/(bid+ask sizes)``.
+
+    The book-pressure fair value: heavier bid size pulls it toward the ask (buy
+    pressure), heavier ask size toward the bid. Degrades to the mid when sizes are
+    absent (zero denom) — a price-only feed (Capital) thus has microprice == mid.
+    """
+    denom = t.bid_size + t.ask_size
+    if denom <= 0.0:
+        return t.mid
+    return (t.bid * t.ask_size + t.ask * t.bid_size) / denom
+
+
+def _flow_followthrough(
+    window: list[TickSample],
+    *,
+    ofi_sign: float,
+    theta_ofi: float,
+    confirm_ticks: int,
+    confirm_ofi_frac: float,
+) -> bool:
+    """POST-SPIKE follow-through for a ``sign(ofi)`` imbalance over the window tail.
+
+    PURE. ``True`` iff the imbalance is genuine continuation (not an exhaustion
+    top): over the last ``confirm_ticks`` ticks —
+      (1) OFI STAYS ELEVATED / re-accelerates — both the LATEST instantaneous OFI
+          and the tail MEAN hold ``≥ confirm_ofi_frac × θ_o`` in the sign
+          direction (rejects a one-tick burst that decayed back to ~0),
+      (2) the BID FOLLOWS UP / REPLENISHES (long: latest bid ≥ tail-start bid OR
+          latest bid_size ≥ tail-mean bid_size; mirror on the ask for a short) —
+          bid EVAPORATION = exhaustion,
+      (3) the MICROPRICE HOLDS above the spike midpoint (long: microprice_now ≥
+          midpoint of the tail mid-range; short: ≤) — a reversal back through the
+          midpoint is the immediate top-buy reversal we are filtering out,
+      (4) the SPREAD is STABLE / TIGHTENING (latest ≤ tail-mean, not widening).
+    ``confirm_ticks`` is clamped to the available tail (≥3). This is the ENTRY
+    TIMING gate — its caller DELAYS to a confirmed tick, never vetoes the flow.
+    """
+    n = len(window)
+    k = min(confirm_ticks, n)
+    if k < 3 or ofi_sign == 0.0:
+        return False
+    tail = window[-k:]
+    inst_ofi: list[float] = []
+    for t in tail:
+        denom = t.bid_size + t.ask_size
+        inst_ofi.append((t.bid_size - t.ask_size) / denom if denom > 0 else 0.0)
+    floor = confirm_ofi_frac * theta_ofi
+    # (1) elevated NOW + persisted across the tail (same sign as the EWMA ofi).
+    if ofi_sign * inst_ofi[-1] < floor:
+        return False
+    if ofi_sign * (sum(inst_ofi) / k) < floor:
+        return False
+    last = tail[-1]
+    start = tail[0]
+    # (2) bid follows / replenishes (long) | ask follows / replenishes (short).
+    mean_near_size = (
+        sum(t.bid_size for t in tail) / k
+        if ofi_sign > 0
+        else sum(t.ask_size for t in tail) / k
+    )
+    if ofi_sign > 0:
+        if last.bid < start.bid and last.bid_size < mean_near_size:
+            return False
+    else:
+        if last.ask > start.ask and last.ask_size < mean_near_size:
+            return False
+    # (3) microprice HOLDS above (long) / below (short) the spike midpoint.
+    mids = [t.mid for t in tail]
+    spike_mid = (max(mids) + min(mids)) / 2.0
+    micro_now = _microprice(last)
+    if ofi_sign > 0 and micro_now < spike_mid:
+        return False
+    if ofi_sign < 0 and micro_now > spike_mid:
+        return False
+    # (4) spread stable / tightening (not widening AGAINST the entry). A small
+    #     relative tolerance (``_SPREAD_WIDEN_TOL``) absorbs the bps-from-falling-
+    #     mid drift at a constant absolute spread (spread_bps = spread/mid·1e4
+    #     creeps up as the mid drifts down) — only a MATERIAL widen fails.
+    mean_spread = sum(t.spread_bps for t in tail) / k
+    return last.spread_bps <= mean_spread * (1.0 + _SPREAD_WIDEN_TOL)
 
 
 def compute_tick_features(
@@ -188,6 +287,23 @@ def compute_tick_features(
     std_mid = math.sqrt(var_mid)
     overshoot_z = (mids[-1] - ewma_mid) / std_mid if std_mid > _MIN_STD else 0.0
 
+    # --- ENTRY follow-through (post-spike confirmation, aligned to sign(ofi)) -
+    # ``None`` on a balanced book (no imbalance to confirm); otherwise the pure
+    # tail follow-through bool the ENTRY gate (flow_pressure) reads to DELAY to a
+    # confirmed tick instead of buying the exhaustion top.
+    if ofi > 0.0:
+        flow_confirmed: bool | None = _flow_followthrough(
+            window, ofi_sign=1.0, theta_ofi=cfg.theta_ofi,
+            confirm_ticks=cfg.confirm_ticks, confirm_ofi_frac=cfg.confirm_ofi_frac,
+        )
+    elif ofi < 0.0:
+        flow_confirmed = _flow_followthrough(
+            window, ofi_sign=-1.0, theta_ofi=cfg.theta_ofi,
+            confirm_ticks=cfg.confirm_ticks, confirm_ofi_frac=cfg.confirm_ofi_frac,
+        )
+    else:
+        flow_confirmed = None
+
     return TickFeatures(
         velocity=velocity,
         accel=accel,
@@ -196,6 +312,7 @@ def compute_tick_features(
         aggr_flow=aggr_flow,
         overshoot_z=overshoot_z,
         spread_bps=newest.spread_bps,
+        flow_confirmed=flow_confirmed,
         n_ticks=n,
         age_sec=age_sec,
     )

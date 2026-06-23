@@ -226,6 +226,9 @@ async def test_place_market_order_reject_classification() -> None:
         (401, None, "unauthorized", "forbidden"),
         # Market closed (Alpaca surfaces this on the 403 family) → market_closed.
         (403, None, "market is closed", "market_closed"),
+        # "not fractionable" reuses 40310000/403 (same as buying power) — the
+        # message MUST win so it does NOT masquerade as insufficient_buying_power.
+        (403, 40310000, 'asset "NXTS" is not fractionable', "not_fractionable"),
     ],
 )
 @pytest.mark.asyncio
@@ -287,6 +290,39 @@ async def test_reject_validation_422_normalizes_to_fault_token() -> None:
     # The normalized token must NOT be in the stream's external set → it faults.
     external = resolve_stream("alpaca").external_reject_codes
     assert resp.code not in external
+
+
+@pytest.mark.asyncio
+async def test_not_fractionable_is_external_token() -> None:
+    """A "not fractionable" reject normalizes to its own EXTERNAL token (not
+    insufficient_buying_power), so it never masquerades as a buying-power reject
+    and never faults — it is recovered by the whole-share retry (flow_not_block)."""
+    from polaris.core.streams import resolve_stream
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "POST":
+            return httpx.Response(
+                403, json={"code": 40310000, "message": 'asset "NXTS" is not fractionable'}
+            )
+        if req.url.path == ALPACA_ORDERS_PATH and req.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404, json={"message": "nf"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url=ALPACA_PAPER_BASE)
+    adapter = _adapter(client)
+    try:
+        resp = await adapter.place_market_order(
+            symbol="NXTS", side="buy", notional_usd=1580.0,
+            client_order_id="polaris-notfrac",
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.code == "not_fractionable"
+    # External → does NOT fault (recovered by the whole-share retry).
+    external = resolve_stream("alpaca").external_reject_codes
+    assert resp.code in external
 
 
 # ---------------------------------------------------------------------------

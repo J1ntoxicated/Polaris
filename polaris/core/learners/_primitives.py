@@ -37,6 +37,13 @@ WR_PROMOTE_THRESHOLD: Final[float] = 0.55
 WR_DEMOTE_THRESHOLD: Final[float] = 0.40
 """regime_mult demotion threshold (≤40% → -0.1)."""
 
+EXPECTANCY_PROMOTE_FLOOR: Final[float] = 0.0
+"""Expectancy-aware promotion gate (D2). A WR≥promote bucket is only promoted
+when its mean pnl_r (expectancy) is also > this floor. This WITHHOLDS an
+undeserved +0.1 from a high-WR / negative-expectancy bucket (many tiny wins, a
+few big losses) — it never adds a size cut or block (flow_not_block); the
+demotion path stays WR-driven and unchanged."""
+
 TRIPLE_BLOCK_NEFF_THRESHOLD: Final[float] = 20.0
 """Minimum trades before triple block evaluates."""
 
@@ -163,6 +170,32 @@ def clip_hourly_delta(delta: float) -> float:
     if not math.isfinite(delta):
         return 0.0
     return max(-LEARNER_DELTA_HOURLY_CAP, min(LEARNER_DELTA_HOURLY_CAP, delta))
+
+
+def expectancy_aware_value(stats: dict[str, float]) -> float:
+    """Shared WR + expectancy scoring for session_mult / regime_mult (D2).
+
+    Same WR threshold ladder as before, with one addition: a WR≥promote bucket
+    is promoted ONLY when its expectancy (mean pnl_r) is also positive. A
+    high-WR / negative-expectancy bucket holds at its current value instead of
+    claiming an undeserved +0.1. The demotion path (WR≤demote → −0.1) is
+    unchanged and stays WR-driven.
+
+    flow_not_block: the expectancy gate only WITHHOLDS a promotion (returns the
+    current value); it never pushes below the current value, so it introduces no
+    defensive size cut. Sparse buckets (n_eff < min) are unchanged.
+    """
+    n_eff = stats.get("n_eff", 0.0)
+    cur = stats.get("value", NEUTRAL_MULT)
+    if n_eff < LEARNER_MIN_NEFF_FOR_DELTA or n_eff <= 0:
+        return cur
+    wr = stats.get("wins_eff", 0.0) / n_eff
+    expectancy = stats.get("pnl_r_sum_eff", 0.0) / n_eff
+    if wr >= WR_PROMOTE_THRESHOLD and expectancy > EXPECTANCY_PROMOTE_FLOOR:
+        return clip_individual_mult(cur + 0.1)
+    if wr <= WR_DEMOTE_THRESHOLD:
+        return clip_individual_mult(cur - 0.1)
+    return cur
 
 
 def resolve_final_size_mult(

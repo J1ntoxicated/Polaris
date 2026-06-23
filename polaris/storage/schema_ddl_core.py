@@ -356,7 +356,9 @@ CREATE TABLE IF NOT EXISTS positions (
     deal_id TEXT,
     entry_atr_pct REAL,
     entry_atr_timeframe TEXT,
-    pnl_r REAL
+    pnl_r REAL,
+    risk_usd REAL,
+    entry_regime TEXT
 );
 """
 

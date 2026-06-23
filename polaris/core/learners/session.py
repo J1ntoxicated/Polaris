@@ -12,23 +12,22 @@ Update logic (per close):
   - wins_eff += won?1:0
   - pnl_r_sum_eff += trade.pnl_r
 
-Commit value (hourly) — same threshold ladder as regime_mult:
-  - n_eff < 20 → unchanged (sparse fallback)
-  - WR ≥ 0.55 → ``value + 0.1``
-  - WR ≤ 0.40 → ``value - 0.1``
-  - else      → unchanged
+Commit value (hourly) — same expectancy-aware ladder as regime_mult (D2):
+  - n_eff < 20      → unchanged (sparse fallback)
+  - WR ≥ 0.55 AND expectancy > 0 → ``value + 0.1`` (deserved promotion)
+  - WR ≤ 0.40       → ``value - 0.1`` (WR-driven, unchanged)
+  - else            → unchanged
+A high-WR / negative-expectancy bucket is withheld from promotion (it does not
+get full size) — this is a SCORE change, never a defensive cut (flow_not_block).
 """
 
 from __future__ import annotations
 
+from polaris.core.learners._primitives import expectancy_aware_value
 from polaris.core.learners.base import (
-    LEARNER_MIN_NEFF_FOR_DELTA,
     NEUTRAL_MULT,
-    WR_DEMOTE_THRESHOLD,
-    WR_PROMOTE_THRESHOLD,
     BaseLearner,
     ClosedTrade,
-    clip_individual_mult,
 )
 
 
@@ -65,16 +64,9 @@ class SessionMultLearner(BaseLearner):
         }
 
     def compute_value_from_stats(self, stats: dict[str, float]) -> float:
-        n_eff = stats.get("n_eff", 0.0)
-        if n_eff < LEARNER_MIN_NEFF_FOR_DELTA:
-            return stats.get("value", NEUTRAL_MULT)
-        wr = stats.get("wins_eff", 0.0) / n_eff if n_eff > 0 else 0.0
-        cur = stats.get("value", NEUTRAL_MULT)
-        if wr >= WR_PROMOTE_THRESHOLD:
-            return clip_individual_mult(cur + 0.1)
-        if wr <= WR_DEMOTE_THRESHOLD:
-            return clip_individual_mult(cur - 0.1)
-        return cur
+        # WR + expectancy ladder (D2): a high-WR but negative-expectancy session
+        # bucket is NOT promoted; demotion stays WR-driven. flow_not_block.
+        return expectancy_aware_value(stats)
 
 
 __all__ = ["SessionMultLearner"]

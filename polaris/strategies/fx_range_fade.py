@@ -11,9 +11,12 @@ MarketView (the standard trend-strength classifier), so no new regime infra.
 
 Symbols: EURUSD / GBPUSD / AUDUSD / USDJPY / USDCAD (the active Capital majors,
 shared SSOT with ``fx_breakout_basket.BASKET_SYMBOLS``).
-Trigger: ``adx_14 < 20`` (range) AND (``close >= bb_upper`` → SHORT |
+Trigger: ``adx_14 < 25`` (range) AND (``close >= bb_upper`` → SHORT |
 ``close <= bb_lower`` → LONG). Target (downstream exit): ``bb_middle``.
-ADX bands are disjoint from fx_breakout_basket (>20 trend) → no same-bar conflict.
+ADX bands OVERLAP fx_breakout_basket (breakout >= 15, fade < 25) in the mid-ADX
+[15,25] zone — by design, to cover the old [20,28] dead seam where a pair matched
+NEITHER. Both can be eligible on the same bar there; the multi-signal arbitration
+wave ranks them (aggressive / flow_not_block, bounded by the existing risk caps).
 """
 
 from __future__ import annotations
@@ -33,7 +36,12 @@ from polaris.strategies.fx_breakout_basket import (
     _normalize_basket_symbol,
 )
 
-ADX_RANGE_MAX = 20.0  # fade only BELOW this (>= is a trend → yield to fx_breakout)
+# /debate-confirmable (Jin veto): widened 20.0 -> 25.0 so the mid-ADX [15,25]
+# zone is covered (the fade fires adx < max). Raising the max = MORE fade signals
+# (aggressive / flow_not_block); it now OVERLAPS fx_breakout_basket's lowered
+# 15.0 threshold so the old dead seam at [20,28] is no longer untraded — both
+# strategies compete there and the multi-signal arbitration wave ranks them.
+ADX_RANGE_MAX = 25.0  # old: 20.0  (fade fires adx < max; >= max yields to breakout)
 STRENGTH_BASE = 0.5
 TTL_BARS = 4
 LEVERAGE_MAX = 30.0

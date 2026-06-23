@@ -341,6 +341,18 @@ async def test_pipeline_threads_alpaca_adapter_to_reserve(
     reset_process_fence()
     sentinel = _make_alpaca_adapter()
     captured: dict[str, Any] = {}
+    # Live-feed precondition: the Alpaca dead-feed entry HALT (Jin 2026-06-22)
+    # holds NEW Alpaca entries when the feed is stale. Seed a FRESH Alpaca bar so
+    # the data-health gate passes and the adapter-threading path under test runs.
+    from polaris.core.data.ingest import persist_bars
+    from polaris.core.data.schema import Bar
+    persist_bars(memdb, [Bar(
+        instrument_id="alpaca:AAPL", underlying_group_id="equity:AAPL",
+        venue="alpaca", symbol="AAPL", bar_interval="1D", ts=int(time.time()) - 600,
+        open=189.0, high=191.0, low=188.0, close=190.0, volume=1e6,
+        notional_usd=1.9e8, trade_count=5000, vwap=190.0, bid_close=0.0,
+        ask_close=0.0, spread_bps_close=0.0, source="alpaca_rest",
+    )])
 
     async def _spy_reserve(**kwargs: Any) -> SimulatedTrade | None:
         captured["alpaca_adapter"] = kwargs.get("alpaca_adapter")

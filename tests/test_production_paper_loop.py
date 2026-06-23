@@ -328,9 +328,9 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 11 (+3 equity T12, +fx_range_fade)."""
+    """The strategy list is exactly 12 (+3 equity T12, +fx_range_fade, +ema_crossover)."""
     strategies = _all_strategies()
-    assert len(strategies) == 11
+    assert len(strategies) == 12
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" in ids
     assert "session_breakout" in ids
@@ -406,9 +406,9 @@ async def test_g1_universe_scanner_invoked(memdb: sqlite3.Connection) -> None:
 
 
 def test_g2_emit_no_cap() -> None:
-    """The 11-strategy list is exposed without an emitted[:3] cap (T12)."""
+    """The 12-strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
-    assert len(strategies) == 11  # Day 8 spec D — no cap (+3 equity, +fx_range_fade)
+    assert len(strategies) == 12  # Day 8 spec D — no cap (+3 equity, +fx_range_fade, +ema_crossover)
 
 
 @pytest.mark.asyncio
@@ -613,6 +613,30 @@ def test_g7_widen_proposal_real() -> None:
         atr_pct=0.02, stop_atr_mult=2.0,
     )
     assert pnl < 0.0
+
+
+def test_decision_path_clamp_is_100_not_10() -> None:
+    """Step M (2026-06-22): the decision path shares the ±100 telemetry clamp.
+
+    The old ±10 here HID catastrophic losses — a −34..−100R move read as −10R, so
+    G6/G7/precise-exit could not see the true loss magnitude. A long that lost
+    ~50R must now surface as ~−50R (well past the old −10 wall), and a blow-up
+    saturates at −100, not −10.
+    """
+    # entry 100, last 0 → pnl_abs −100; atr_usd = 100×0.01×2 = 2 → −50R.
+    big_loss = compute_unrealized_pnl_r(
+        side="long", entry_price=100.0, last_price=0.0,
+        atr_pct=0.01, stop_atr_mult=2.0,
+    )
+    assert big_loss == pytest.approx(-50.0)
+    assert big_loss < -10.0  # the old ±10 wall is gone
+
+    # A tiny-ATR blow-up saturates at exactly −100 (the unified clamp).
+    saturated = compute_unrealized_pnl_r(
+        side="long", entry_price=100.0, last_price=1.0,
+        atr_pct=1e-4, stop_atr_mult=2.0,
+    )
+    assert saturated == pytest.approx(-100.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1139,4 +1163,6 @@ def test_compute_unrealized_pnl_r_always_finite(entry: float, last: float, atr: 
         atr_pct=atr, stop_atr_mult=2.0,
     )
     assert math.isfinite(pnl)
-    assert -10.0 <= pnl <= 10.0
+    # Step M (2026-06-22): the decision path now shares the ±100 telemetry clamp
+    # (was ±10, which HID −34..−100R losses from G6/G7/precise-exit).
+    assert -100.0 <= pnl <= 100.0

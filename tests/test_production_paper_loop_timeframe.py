@@ -99,6 +99,7 @@ def test_strategy_metadata_timeframe_used() -> None:
         "tsmom": "1H",
         "rsi_bb_pullback": "15m",
         "spot_donchian": "1H",
+        "ema_crossover": "1H",
         "fx_breakout_basket": "1H",
         "fx_range_fade": "1H",
         "xau_indices_trend": "1H",

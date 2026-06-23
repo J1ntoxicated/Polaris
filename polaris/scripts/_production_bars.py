@@ -35,6 +35,45 @@ logger = logging.getLogger(__name__)
 # seconds ahead stays visible). Mirrors the dashboard ``_last_prices`` guard.
 BAR_TS_CLOCK_SKEW_SLACK_SEC = 120
 
+# Recency guard (Jin 2026-06-22 coherence audit). When a venue feed goes dead
+# the ``bars`` table keeps serving its last-stored candle, so the strategy /
+# regime / exit canvas would make decisions on a price that is provably stale
+# (the live Alpaca feed went 98.7h dark). ``read_recent_bars`` accepts a
+# ``freshness_threshold_sec``: if the NEWEST stored bar is older than the
+# threshold, the accessor returns ``[]`` so the trading path's existing
+# ``if not bars / len(bars) < 30: continue`` skips the symbol. DATA-HEALTH gate
+# (no live price = cannot trade), NOT a defensive throttle — flow_not_block is
+# preserved: a fresh feed is untouched and the guard auto-clears the instant
+# fresh data lands (it is a pure function of the stored ts, not a sticky flag).
+# Applies to ALL venues. The default below (36h) clears a normal daily-bar
+# cadence (≤1 bar/day, plus weekends) yet is far tighter than the 98.7h dead-
+# feed incident; callers pass a tighter window for intraday timeframes.
+BAR_STALENESS_MAX_SEC = 36 * 3600
+
+# Per-timeframe freshness window (sec) for the recency guard. A bar of interval
+# T should be re-published roughly every T; the threshold is a GENEROUS multiple
+# so a normal cadence (plus a weekend gap on daily/equity feeds) never trips,
+# while a dead feed (many missed candles) does. Tuned vs the 98.7h Alpaca
+# incident: 1D=36h (covers a weekend; a 99h gap is caught), intraday windows are
+# tens of minutes (a 99h gap is caught immediately). Unmapped → BAR_STALENESS_MAX_SEC.
+_BAR_STALENESS_BY_INTERVAL: dict[str, float] = {
+    "1m": 30 * 60.0,      # 1m bars: 30min silence = dead
+    "5m": 60 * 60.0,
+    "15m": 120 * 60.0,
+    "1H": 6 * 3600.0,
+    "1D": float(BAR_STALENESS_MAX_SEC),  # 36h — covers a normal weekend gap
+}
+
+
+def staleness_threshold_for(bar_interval: str) -> float:
+    """Recency-guard freshness window (sec) for a canonical ``bar_interval``.
+
+    Generous multiple of the bar cadence so a healthy feed is never flagged, yet
+    a dead feed (the 98.7h Alpaca incident) is. Unmapped interval →
+    ``BAR_STALENESS_MAX_SEC``. Pure; used by the trading-path bar reads.
+    """
+    return _BAR_STALENESS_BY_INTERVAL.get(bar_interval, float(BAR_STALENESS_MAX_SEC))
+
 # F10 — Strategy timeframe → venue resolution + cadence (sec).
 # OKX `bar` query parameter accepts the canonical token directly. Capital
 # `/prices` requires a textual resolution token (MINUTE / MINUTE_5 / ...).
@@ -208,6 +247,11 @@ async def fetch_alpaca_bars(
         )
         if bar is not None:
             out.append(bar)
+    # FRESHNESS FIX (2026-06-22): the adapter now requests ``sort='desc'`` so the
+    # FRESHEST bars survive the ``limit`` cap (the asc default truncated to the
+    # OLDEST 240 → stale canvas). Re-sort ascending to honour the canonical
+    # newest-LAST contract regardless of the venue sort order.
+    out.sort(key=lambda b: b.ts)
     logger.debug(
         "[alpaca] bars fetched %s/%s requested=%d got=%d",
         symbol, bar_interval, limit, len(out),
@@ -400,6 +444,18 @@ async def ingest_bars_for_focus(
     # without recomputing the baseline.
     if bar_interval != "1m":
         total_persisted = persist_bars(conn, out_bars)
+        # Higher-tf ingest visibility (INFO): the 1m path logs ``[ingest]`` from
+        # core.data.ingest, but the 15m/1H/1D/5m batches persist silently here —
+        # so a trade on a 1H bar strategy could not be traced to its bar ingest.
+        # One line per (timeframe, venue) fetch-batch; the caller's per-(tf,venue)
+        # cadence gate already throttles fetches, so this never spams per tick.
+        # Log only — never gates ingest.
+        if out_bars:
+            venues = {b.venue for b in out_bars}
+            logger.info(
+                "[ingest] bars=%d symbols=%d timeframe=%s venues=%s",
+                total_persisted, len(seen), bar_interval, ",".join(sorted(venues)),
+            )
         return {
             "bars": total_persisted,
             "baseline_samples": 0,
@@ -409,7 +465,17 @@ async def ingest_bars_for_focus(
     # the per-class baseline window correctly.
     by_class: dict[str, list[Bar]] = {}
     for b in out_bars:
-        ac = "crypto" if b.venue == "okx" else "forex"
+        # P2.1 fix (2026-06-22): partition by the bar's REAL asset_class — the
+        # canonical underlying_group_id prefix (crypto/forex/index/commodity/
+        # equity) — instead of the OKX-vs-else venue binary that lumped Capital
+        # commodity/index + Alpaca equity into one "forex" baseline bucket. The
+        # venue binary is the defensive fallback only when the group_id lacks a
+        # canonical prefix (malformed/legacy data).
+        gid = b.underlying_group_id
+        ac = (
+            gid.split(":", 1)[0] if ":" in gid
+            else ("crypto" if b.venue == "okx" else "forex")
+        )
         by_class.setdefault(ac, []).append(b)
     total_persisted = 0
     total_baseline = 0
@@ -434,14 +500,24 @@ def read_recent_bars(
     symbol: str,
     bar_interval: str = "1m",
     limit: int = 240,
+    freshness_threshold_sec: float | None = None,
 ) -> list[Bar]:
     """Read the most recent ``limit`` bars from SQLite (newest last).
 
     FUTURE-dated bars (``ts > now + BAR_TS_CLOCK_SKEW_SLACK_SEC``) are excluded so
     a stale +10h Capital bar is never returned as the most-recent canvas.
+
+    Recency guard (Jin 2026-06-22): when ``freshness_threshold_sec`` is given and
+    the NEWEST returned bar is older than ``now - freshness_threshold_sec``, the
+    feed is dead/stale — return ``[]`` so the caller skips the symbol rather than
+    deciding on a provably stale price. DATA-HEALTH gate, not a throttle: it is a
+    pure function of the stored ts, so it auto-clears the instant a fresh bar
+    lands. ``None`` (default) keeps the legacy behaviour for callers that have
+    not opted into the guard.
     """
     instrument_id = f"{venue}:{symbol}"
-    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
+    now = int(time.time())
+    ts_upper = now + BAR_TS_CLOCK_SKEW_SLACK_SEC
     rows = conn.execute(
         """
         SELECT instrument_id, underlying_group_id, venue, symbol, bar_interval,
@@ -478,6 +554,19 @@ def read_recent_bars(
         for r in rows
     ]
     bars.reverse()  # newest last
+    # Recency guard — refuse a provably stale canvas (dead-feed data-health gate).
+    if bars and freshness_threshold_sec is not None:
+        newest_ts = bars[-1].ts
+        if newest_ts < now - freshness_threshold_sec:
+            age_h = (now - newest_ts) / 3600.0
+            logger.warning(
+                "[recency] %s %s newest bar %.1fh old (> %.1fh threshold) — "
+                "feed stale, skipping symbol (no dead-price decision; "
+                "auto-clears on fresh data)",
+                instrument_id, bar_interval, age_h,
+                freshness_threshold_sec / 3600.0,
+            )
+            return []
     return bars
 
 

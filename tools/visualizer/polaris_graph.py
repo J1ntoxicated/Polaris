@@ -313,6 +313,48 @@ def _query_universe_all(db_path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _signal_key(venue: str, symbol: str) -> str:
+    """Stable join key (short-venue + cleaned ticker) shared by signal counts,
+    mkt nodes and watch nodes so the REAL per-instrument signal count binds back
+    onto the right globe ticker node regardless of array order. Display-only."""
+    tk = str(symbol).split(":")[-1].split("-")[0]
+    return f"{_short_venue(venue)}:{tk}"
+
+
+def _query_signal_counts(db_path: Path) -> dict[str, int]:
+    """REAL per-instrument pipeline-catch count over the last ~30m (display-only).
+
+    The globe's lightup was previously driven by ``is_active`` (the universe FOCUS
+    flag) with ``signal_count_30m`` hard-coded 0. This joins the real ``signals``
+    table (per-strategy raw signals already persisted, ``instrument_id`` =
+    ``{venue}:{symbol}``) into a per-instrument count keyed by
+    :func:`_signal_key`, so a ticker glows the moment its pipeline actually caught
+    a signal. Pure view — nothing here gates, sizes or throttles a trade.
+    """
+    if not db_path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    counts: dict[str, int] = {}
+    try:
+        rows = conn.execute(
+            "SELECT instrument_id, COUNT(*) FROM signals "
+            "WHERE ts >= strftime('%s','now') - 1800 "
+            "GROUP BY instrument_id"
+        ).fetchall()
+    except sqlite3.Error:
+        return counts
+    finally:
+        conn.close()
+    for instrument_id, c in rows:
+        inst = str(instrument_id or "")
+        if ":" in inst:
+            venue, symbol = inst.split(":", 1)
+        else:
+            venue, symbol = "okx", inst
+        counts[_signal_key(venue, symbol)] = int(c)
+    return counts
+
+
 def _query_watch_focus(db_path: Path, held: set[str]) -> list[dict[str, Any]]:
     """tier7 'watch' source — latest focus cycle symbols not already open."""
     if not db_path.exists():
@@ -367,6 +409,79 @@ def _query_actions(db_path: Path) -> dict[str, int]:
     return counts
 
 
+def _query_kills_and_heartbeat(
+    db_path: Path,
+) -> tuple[list[dict[str, Any]], int]:
+    """Globe activity source — recent G3/G4 KILL events + decision heartbeat ts.
+
+    Read-only, display-only. Returns:
+      - ``kills``: the most recent KILL gate decisions (ticker + gate + ts),
+        best-effort joined to ``signals.instrument_id``. Feeds the Kill Sediment
+        pass (a transient grey mote that fades outward — *measurement honesty*,
+        NOT a throttle: nothing here blocks or dampens a trade).
+      - ``last_decision_ts``: MAX(gate_events.created_ts), the tick heartbeat the
+        globe watches to fire a one-shot conductor pulse. Snapshot-derived only —
+        the SSE stream is untouched.
+    """
+    if not db_path.exists():
+        return [], 0
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    kills: list[dict[str, Any]] = []
+    last_ts = 0
+    try:
+        row = conn.execute("SELECT MAX(created_ts) FROM gate_events").fetchone()
+        last_ts = int(row[0] or 0) if row else 0
+        for gate_id, signal_id, instrument, ts in conn.execute(
+            "SELECT ge.gate_id, ge.signal_id, s.instrument_id, ge.created_ts "
+            "FROM gate_events ge LEFT JOIN signals s ON s.signal_id = ge.signal_id "
+            "WHERE ge.decision = 'KILL' ORDER BY ge.created_ts DESC LIMIT 12"
+        ).fetchall():
+            # Two signal_id formats live in gate_events: entry-phase rows carry a
+            # hex signal_id that joins to signals.instrument_id; position-phase
+            # rows (G6-G8) carry a synthetic id `pos_{hash}_{venue}_{TICKER}_{ts}`
+            # that embeds the instrument directly. Resolve both so every kill mote
+            # binds to its REAL ticker (was always '?' — the join-NULL bug).
+            ticker = _kill_ticker(str(signal_id or ""), str(instrument or ""))
+            kills.append(
+                {"ticker": ticker, "gate_id": int(gate_id or 0), "ts": int(ts or 0)}
+            )
+    except sqlite3.Error:
+        return kills, last_ts
+    finally:
+        conn.close()
+    return kills, last_ts
+
+
+def _kill_ticker(signal_id: str, instrument: str) -> str:
+    """Resolve a kill mote's REAL ticker from a gate_events row (display-only).
+
+    Prefers the joined ``signals.instrument_id`` (entry-phase hex signal_id). When
+    that is NULL (position-phase synthetic id), parse the embedded instrument from
+    ``pos_{hash}_{venue}_{TICKER}_{ts}`` — strip the ``pos_`` head, the trailing
+    ``_{ts}`` epoch, the leading hash, and the venue token, leaving the symbol
+    (which itself may contain underscores, e.g. ``AUDUSD_ZERO``). Falls back to
+    ``'?'`` only when nothing parses. No trading behavior here.
+    """
+    if instrument:
+        return instrument.split(":")[-1].split("-")[0]
+    sid = signal_id or ""
+    if sid.startswith("pos_"):
+        parts = sid[4:].split("_")
+        # drop trailing epoch token if numeric
+        if parts and parts[-1].isdigit():
+            parts = parts[:-1]
+        # drop leading hash token
+        if len(parts) >= 2:
+            parts = parts[1:]
+        # drop a leading venue token if present (okx/capital/cap/alpaca/alp)
+        if parts and parts[0].lower() in ("okx", "capital", "cap", "alpaca", "alp"):
+            parts = parts[1:]
+        sym = "_".join(parts)
+        if sym:
+            return sym.split(":")[-1].split("-")[0]
+    return "?"
+
+
 def _query_faults(db_path: Path) -> dict[str, int]:
     """tier9 'obs' source — recent strategy fault events by type."""
     if not db_path.exists():
@@ -399,15 +514,24 @@ def _pos_nodes_and_trades(
         trade_id = f"{p.venue}_{ticker}_{int(snap.ts_now)}"
         pnl_pct = round(p.delta_pct, 4)
         intensity = round(min(1.0, abs(pnl_pct) / 5.0 + 0.25), 4)
+        # Per-instrument regime + live exit-FSM state (additive, display-only).
+        # The globe tints the active node by its OWN regime and marks positions
+        # actively in the exit FSM (touched/protected/trailing). Source = the
+        # PositionRow columns already collected (regime_lookup + exit_state);
+        # nothing here gates or sizes — pure view fields the globe mirrors.
+        pos_regime = str(getattr(p, "regime", "") or "neutral")
+        exit_state = str(getattr(p, "exit_state", "") or "open")
         nodes.append(
             {
-                "id": f"pos_{p.venue}_{ticker}_{i}",
+                "id": f"pos_{p.venue}_{ticker}",
                 "label": ticker,
                 "ticker": ticker,
                 "direction": direction,
                 "exchange": _short_venue(p.venue),
                 "trade_id": trade_id,
                 "strategy_id": p.strategy_id,
+                "regime": pos_regime,
+                "exit_state": exit_state,
                 "asset_group": "crypto" if "crypto" in p.symbol else "other",
                 "pnl_usd": round(p.upnl_usd, 4),
                 "pnl_pct": pnl_pct,
@@ -433,7 +557,8 @@ def _pos_nodes_and_trades(
                 "current_price": round(p.last_price, 8),
                 "size_usd": round(p.size_usd, 4),
                 "asset_group": "crypto" if "crypto" in p.symbol else "other",
-                "regime": regime,
+                "regime": pos_regime,
+                "exit_state": exit_state,
                 "pnl_usd": round(p.upnl_usd, 4),
                 "pnl_pct": pnl_pct,
                 "max_profit_pct": max(0.0, pnl_pct),
@@ -535,13 +660,21 @@ def _strat_nodes(snap: Any, base_i: int) -> list[dict[str, Any]]:
     return nodes
 
 
-def _watch_nodes(watch: list[dict[str, Any]], base_i: int) -> list[dict[str, Any]]:
-    """tier7 'watch' nodes — signal-watch focus symbols not yet open."""
+def _watch_nodes(
+    watch: list[dict[str, Any]], signal_counts: dict[str, int], base_i: int,
+) -> list[dict[str, Any]]:
+    """tier7 'watch' nodes — signal-watch focus symbols not yet open.
+
+    Same REAL-signal glow rule as the mkt shell: a watch node with a live 30m
+    signal catch is ``firing``; the core-bucket flag is only a dim fallback.
+    """
     nodes: list[dict[str, Any]] = []
     for j, w in enumerate(watch):
         i = base_i + j
         ticker = w["symbol"].split(":")[-1].split("-")[0]
         is_core = w["bucket"] == "core"
+        sig_n = int(signal_counts.get(_signal_key(w["venue"], w["symbol"]), 0))
+        state = "firing" if sig_n > 0 else ("lit" if is_core else "dormant")
         nodes.append(
             {
                 "id": f"watch_{w['venue']}_{ticker}",
@@ -551,10 +684,10 @@ def _watch_nodes(watch: list[dict[str, Any]], base_i: int) -> list[dict[str, Any
                 "score": round(w["score"], 4),
                 "intensity": round(min(1.0, 0.3 + abs(w["score"]) / 2.0), 4),
                 "size_mul": 1.0,
-                "signal_count_30m": 0,
+                "signal_count_30m": sig_n,
                 "cluster": "watch",
                 "tier": 7,
-                "state": "lit" if is_core else "dormant",
+                "state": state,
                 "i": i,
                 "phase": _phase(i),
             }
@@ -563,18 +696,25 @@ def _watch_nodes(watch: list[dict[str, Any]], base_i: int) -> list[dict[str, Any
 
 
 def _mkt_nodes(
-    universe: list[dict[str, Any]], base_i: int,
+    universe: list[dict[str, Any]], signal_counts: dict[str, int], base_i: int,
 ) -> list[dict[str, Any]]:
-    """tier8 'mkt' market-shell nodes from the universe."""
+    """tier8 'mkt' market-shell nodes from the universe.
+
+    GLOW SOURCE (Jin 2026-06-23): the REAL per-instrument 30m signal count now
+    drives the lightup — a node with ``signal_count_30m > 0`` is ``firing`` (its
+    pipeline actually caught a signal). ``is_active`` (universe FOCUS) is kept ONLY
+    as a secondary dim cue (``active`` flag → not dimmed), NOT the glow source.
+    Display-only — nothing gated/sized here.
+    """
     nodes: list[dict[str, Any]] = []
     for j, u in enumerate(universe):
         i = base_i + j
-        # is_active=1 = bot trading focus = "lit up" candidate; the rest are the
-        # dormant market shell. Until the signals table is wired (signal_count_30m
-        # still 0), this active flag is what drives lightup — a firing/lit node
-        # reads as an active signal in the engine (globe-core.js uses n.state).
         active = int(u.get("is_active", 0)) == 1
         ticker = str(u["ticker"]).split(":")[-1].split("-")[0]
+        sig_n = int(signal_counts.get(_signal_key(u["exchange"], u["ticker"]), 0))
+        # Real signal catch = firing glow. is_active is now only a secondary
+        # "focus" cue (keeps the node un-dimmed) — it no longer fakes lightup.
+        state = "firing" if sig_n > 0 else ("lit" if active else "dormant")
         nodes.append(
             {
                 "id": f"mkt_{u['exchange']}_{u['ticker']}",
@@ -585,10 +725,10 @@ def _mkt_nodes(
                 "active": active,
                 "intensity": round(min(1.0, 0.1 + u["n_24h"] / 500.0), 4),
                 "size_mul": round(min(1.0, 0.6 + u["n_24h"] / 1000.0), 4),
-                "signal_count_30m": 0,
+                "signal_count_30m": sig_n,
                 "cluster": "mkt",
                 "tier": 8,
-                "state": "lit" if active else "dormant",
+                "state": state,
                 "i": i,
                 "phase": _phase(i),
             }
@@ -839,6 +979,77 @@ def _recent_closes(snap: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _gate_funnel(snap: Any) -> list[dict[str, Any]]:
+    """Globe Gate-Activity Ring source — per-gate decision VOLUME (display-only).
+
+    Reshapes the snapshot's ``gate_decisions`` (the per-gate decision summary that
+    replaced the pass/kill funnel — flow_not_block makes a pass/kill ratio
+    structurally ~100% / zero-information) into compact {gate_id,label,total}
+    segments. The globe draws one arc segment per gate around the conductor sized
+    by decision volume — Jin's literal "활동 그래픽화". Nothing gated/sized here.
+    ``pass_n`` is kept = volume / ``kill_n`` = 0 for the existing ring shader; the
+    bot never blocks, so there is no red taper to draw.
+    """
+    out: list[dict[str, Any]] = []
+    for g in getattr(snap, "gate_decisions", []) or []:
+        n = int(getattr(g, "n", 0))
+        out.append(
+            {
+                "gate_id": int(g.gate_id),
+                "label": str(g.label),
+                "pass_n": n,
+                "kill_n": 0,
+                "total": n,
+            }
+        )
+    return out
+
+
+def _galaxy_activity(snap: Any) -> list[dict[str, Any]]:
+    """Per-galaxy (venue) regime + normalized activity (display-only).
+
+    Merges two already-collected snapshot lists the globe ignored:
+      - ``regime_states`` → a dominant regime label per venue (highest-confidence
+        group) for the Regime Tide background wash.
+      - ``streams`` → open_n / daily_trades / exposed_usd per venue, each
+        normalized 0..1 for the Stream Breath halo glow (busy venue = brighter).
+
+    Pure view: normalization is cosmetic (glow intensity), never a sizing/risk
+    input. The trading pipeline never reads this.
+    """
+    # dominant regime per venue: pick the highest-confidence group's regime.
+    best_regime: dict[str, tuple[float, str]] = {}
+    for rs in snap.regime_states:
+        v = _short_venue(rs.venue)
+        conf = float(rs.confidence or 0.0)
+        if v not in best_regime or conf > best_regime[v][0]:
+            best_regime[v] = (conf, str(rs.regime or "neutral"))
+
+    # normalization denominators (max across venues, ≥1 to avoid div-by-zero).
+    max_open = max((s.open_positions_n for s in snap.streams), default=0) or 1
+    max_trades = max((s.daily_trades for s in snap.streams), default=0) or 1
+    max_exposed = max((abs(s.exposed_usd) for s in snap.streams), default=0.0) or 1.0
+
+    out: list[dict[str, Any]] = []
+    for s in snap.streams:
+        v = _short_venue(s.venue)
+        regime = best_regime.get(v, (0.0, "neutral"))[1]
+        out.append(
+            {
+                "venue": v,
+                "regime": regime,
+                "open_n": int(s.open_positions_n),
+                "trades": int(s.daily_trades),
+                "exposed_usd": round(float(s.exposed_usd), 2),
+                # 0..1 activity for halo glow (display-only weight, not a multiplier)
+                "open_norm": round(s.open_positions_n / max_open, 4),
+                "trades_norm": round(s.daily_trades / max_trades, 4),
+                "exposed_norm": round(abs(s.exposed_usd) / max_exposed, 4),
+            }
+        )
+    return out
+
+
 def build_graph(
     db_path: str | Path = "data/polaris_live.sqlite",
     snapshot: Any = None,
@@ -860,6 +1071,8 @@ def build_graph(
     watch = _query_watch_focus(path, held)
     actions = _query_actions(path)
     faults = _query_faults(path)
+    signal_counts = _query_signal_counts(path)
+    kills, last_decision_ts = _query_kills_and_heartbeat(path)
 
     pos_nodes, live_trades = _pos_nodes_and_trades(snap, regime="neutral")
     bi = len(pos_nodes)
@@ -867,14 +1080,17 @@ def build_graph(
     bi += len(exit_nodes)
     reg_nodes, regime = _regime_nodes(snap, base_i=bi)
     bi += len(reg_nodes)
-    # Backfill live_trades regime with the dominant regime label.
+    # Backfill live_trades regime with the dominant regime label ONLY when the
+    # position carries no per-instrument regime (the globe prefers the real
+    # per-position regime now emitted above; dominant is the fallback).
     for tr in live_trades:
-        tr["regime"] = regime
+        if not tr.get("regime") or tr.get("regime") == "neutral":
+            tr["regime"] = regime
     strat_nodes = _strat_nodes(snap, base_i=bi)
     bi += len(strat_nodes)
-    watch_nodes = _watch_nodes(watch, base_i=bi)
+    watch_nodes = _watch_nodes(watch, signal_counts, base_i=bi)
     bi += len(watch_nodes)
-    mkt_nodes = _mkt_nodes(universe, base_i=bi)
+    mkt_nodes = _mkt_nodes(universe, signal_counts, base_i=bi)
     bi += len(mkt_nodes)
     obs_nodes = _obs_nodes(snap, faults, base_i=bi)
     bi += len(obs_nodes)
@@ -928,6 +1144,26 @@ def build_graph(
         "ts": int(time.time()),
     }
 
+    # ── globe activity bindings (display-only, P4) ───────────────────────────
+    # Four small arrays derived from the snapshot the globe previously ignored,
+    # consumed by globe-funnel.js. Each is a *view* — none gate/size/throttle.
+    learner_pulse = round(
+        max((abs(ln.delta_1h or 0.0) for ln in snap.learners), default=0.0), 4
+    )
+
+    # ── Polaris core (celestial-chart centre) — additive, display-only ───────
+    # The celestial navigation globe (globe-core.js) draws Polaris at the chart
+    # centre, glowing green/red by the real-fee-net equity vs starting capital.
+    # We surface those equity scalars HERE so the globe keeps its single
+    # graph.json fetch (no second /api/snapshot poll, no trading-path coupling).
+    polaris_core = {
+        "equity_now": round(float(snap.equity_now), 2),
+        "equity_now_real_fee_net": round(float(snap.equity_now_real_fee_net), 2),
+        "starting_capital": round(float(snap.starting_capital), 2),
+        "peak_equity": round(float(snap.peak_equity), 2),
+        "ts_now": int(snap.ts_now),
+    }
+
     return {
         "nodes": nodes,
         "clusters": _CLUSTERS,
@@ -937,5 +1173,11 @@ def build_graph(
         "trade_chains": trade_chains,
         "lifecycle_paths": lifecycle_paths,
         "exchange_pnl": [],
+        "gate_funnel": _gate_funnel(snap),
+        "galaxy_activity": _galaxy_activity(snap),
+        "kills": kills,
+        "last_decision_ts": last_decision_ts,
+        "learner_pulse": learner_pulse,
+        "polaris_core": polaris_core,
         "stats": stats,
     }

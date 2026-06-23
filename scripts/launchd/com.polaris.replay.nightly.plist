@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris nightly replay — 03:00 LOCAL (machine TZ = Australia/Sydney).
+
+  Offline OOS backtest over stored 1H bars (signal -> regime -> sizing ->
+  exit, real fees, next-bar-open fills); persists one replay_runs row +
+  per-tier benchmark_results to the live DB the dashboard reads. Chosen at
+  03:00 to sit clear of the daily-restart (07:30) and digest (10:10)
+  windows. Replay content is computed in pure UTC epoch terms, so DST drift
+  only moves the trigger, never the window.
+
+  Read-mostly: opens the DB read-only for the bar window, then the harness
+  writes its own replay_runs/benchmark_results rows. flow_not_block: zero
+  live trading behaviour — never signals the bot process, sizing, or gates.
+  Thin python entry (tools.ops.replay_nightly) shells out to
+  scripts/run_replay_nightly.sh so the launchd contract stays uniform.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.replay.nightly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.replay_nightly</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/replay.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/replay.err</string>
+</dict>
+</plist>

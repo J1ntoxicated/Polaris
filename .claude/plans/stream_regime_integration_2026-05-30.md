@@ -14,7 +14,13 @@
 - **STEP 2 (근원, P0)** — Capital universe SCOPE 교정. 옵션A `_capital.py:33-42` "crypto" 제거+"currenc" FX-only / 옵션B persist 직전 `resolve_stream("capital").asset_classes` 화이트리스트.
 - **STEP 3 (P0, STEP2 직후)** — 세션 비대칭 해소. CFD 'closed' = hard-drop 대신 **'세션 대기(watch)'** 라우팅(flow_not_block), 또는 활성셋 자산군별 분리(crypto가 세션슬롯 잠식 방지). `_ranking.py:41`+`_capital.py:166-168`.
 - **STEP 4 (위생, P0 동반)** — coherence guard: 런타임 `asset_class ∈ resolve_stream("capital").asset_classes` 검증. `config.py:207` doc-only→enforced. regression catch.
-- **STEP 5 (regime 계층 L1/L2/L3, P1)** — STEP0 도입 결정 시. 현 (venue,underlying_group_id) 단일 평면 → L1 macro/L2 asset-class(fuser prefix 일부 수행)/L3 ticker. classify_regime stub(conf 0.5)→실분류기. regime_state/cell/learner 3곳 키 atomic.
+- **STEP 5 (regime 계층 L1/L2/L3, P1)** — ✅codex /debate=PROCEED_WITH_CHANGES([[regime_layered_synthesis_2026-05-31]]). **골격 이미 존재**: L3=`compute_real_regime`(_production_indicators.py:322, drawdown/ER/return) · L2/L1=`fuse_evidence`(prefix 분기+conviction floor 1.5) · 합성=`compute_and_flip_regime`(_production_layers.py:307-318, **binary override**) · 키=`regime_state(venue,underlying_group_id)`=per venue×**group**(symbol 아님). **키 확장/별도 테이블 불필요**(소비자는 regime만 읽음, L1/L2는 evidence_json 구조화). 개선 4 + 🔴BLOCKING:
+  - ① 합성 binary→**가중**: `compose_regime_candidate(price_candidate, price_strength, evidence_scores)`를 compute_and_flip_regime 내부에만. price base + evidence conviction 비례 tilt. SIGNAL-only(label만, size/block/exit X), 2-close confirm 그대로.
+  - ② **asset-class 차등 가중**: `fuse_evidence` 내부(routing 소유자). crypto=funding/F&G↑, fx/commodity=macro↑, equity=macro+gap. source-type multiplier 0.75-1.25 제한, 기존 점수 base. routing isolation 테스트로 고정.
+  - ③ **confidence 동적화**: `compute_real_regime`→`compute_real_regime_signal`(label,strength,evidence) 확장(기존 wrapper label-only 호환). confidence 합성=compute_and_flip_regime 내, detect_regime_flip 호출 前. classify_regime은 포맷/검증 역할 유지.
+  - ④ **L3 강화**(선택): EMA20/50 cross+24h ATR ratio = **strength 보강값만**, label flip 조건 즉각 확대 금지(test drift).
+  - 🔴**BLOCKING(Phase 4 前 필수)**: evidence-only crisis가 detect_regime_flip:157-166 즉시 flip → 2-close bypass 충돌. **candidate_source 태그**로 price-crisis(immediate 유지) vs evidence-crisis(2-close) 구분.
+  - **phased**: P1 fuse_evidence(label+scores/weights/asset_class→evidence_json, contract 유지) → P2 compute_real_regime_signal 추가(wrapper 호환) → P3 weighted 합성(size/block/exit 미접촉) → P4 evidence-crisis candidate_source 2-close → P5 confidence 동적화 저장(소비자 regime만, G3/G7만 confidence/evidence).
 - **STEP 6 (G1 asset-class-aware, P1, STEP5 후)** — Jin "레짐 셀렉션 다이나믹·자산군별" 충족. `watchlist.py:184` focus selection에 자산군별 top-N 쿼터. + Capital `vol_24h_usd=0.0`(`_capital.py:178`) G1 배제 별개 이슈 해결.
 
 ## needs_debate (STEP 0 — 아키텍처)

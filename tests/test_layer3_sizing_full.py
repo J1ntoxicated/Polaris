@@ -550,6 +550,70 @@ def test_t4_compute_size_finite_and_bounded(memdb: sqlite3.Connection) -> None:
     assert sized.final_risk_pct <= SINGLE_TRADE_ABSOLUTE_CEILING_PCT
 
 
+def test_t4_weak_signal_flows_when_fill_rate_hot(memdb: sqlite3.Connection) -> None:
+    """flow_not_block: a weak signal (strength<1.0) is NOT zeroed when the venue
+    daily risk budget would have been 'hot'. It flows at its normal computed size;
+    only the headroom_min budget caps may bind. No path zeroes a signal for being
+    weak."""
+    _seed_top_quartile_cell(memdb)
+    weak = SignalIntent(
+        signal_id="sig-weak", venue="okx", symbol="PL24-USDT",
+        instrument_id="okx:PL24-USDT", underlying_group_id="crypto:PL",
+        asset_class="crypto", strategy="volume_burst", track="A",
+        regime="bull_trend", direction="long", signal_strength=0.6,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+    )
+    # Hot fill-rate: venue budget far below the 99% daily ceiling still leaves
+    # headroom, so the budget caps DON'T bind — but fill_rate >= 0.70 used to
+    # zero this weak signal. Set used to 80% of an ample track to make the OLD
+    # cut fire while keeping per-trade headroom open.
+    hot = PortfolioState(
+        equity_usd=10_000.0,
+        venue_daily_used_pct=track_daily_cap("A") * 0.80,
+        total_daily_used_pct=0.0,
+        track_used_pct={"A": 0.0, "B": 0.0},
+        open_positions=[],
+        fill_rate_active_cut=True,
+    )
+    sized = compute_size(
+        memdb, intent=weak, risk_state=_risk_state(), portfolio=hot, now_ts=NOW + 100,
+    )
+    # Normal computed size: base 0.02 × continuous(0.6) × tier(1.0) × cell(1.5).
+    expected = 0.02 * continuous_scalar(0.6) * 1.0 * 1.5
+    assert sized.final_risk_pct == pytest.approx(expected)
+    assert sized.final_risk_pct > 0.0
+    assert sized.binding_cap != "fill_rate_cut"
+    assert sized.binding_cap == "proposed"
+
+
+def test_t4_budget_cap_still_binds_when_over_budget(memdb: sqlite3.Connection) -> None:
+    """The headroom_min budget caps (the 9-stack containment) still bind when
+    genuinely over budget — only the per-signal weak-signal ZEROING is gone."""
+    _seed_top_quartile_cell(memdb)
+    weak = SignalIntent(
+        signal_id="sig-weak2", venue="okx", symbol="PL24-USDT",
+        instrument_id="okx:PL24-USDT", underlying_group_id="crypto:PL",
+        asset_class="crypto", strategy="volume_burst", track="A",
+        regime="bull_trend", direction="long", signal_strength=0.6,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+    )
+    # Venue daily budget nearly exhausted → tiny remaining clips via headroom_min.
+    venue_cap = track_daily_cap("A")
+    over = PortfolioState(
+        equity_usd=10_000.0,
+        venue_daily_used_pct=venue_cap - 0.001,
+        total_daily_used_pct=0.0,
+        track_used_pct={"A": 0.0, "B": 0.0},
+        open_positions=[],
+        fill_rate_active_cut=True,
+    )
+    sized = compute_size(
+        memdb, intent=weak, risk_state=_risk_state(), portfolio=over, now_ts=NOW + 100,
+    )
+    assert sized.final_risk_pct == pytest.approx(0.001)
+    assert sized.binding_cap == "venue_daily"
+
+
 @settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
     base=st.floats(min_value=0.001, max_value=0.20),

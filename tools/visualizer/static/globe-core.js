@@ -34,13 +34,19 @@
   // ── Galaxy definitions ─────────────────────────────────────────────────────
   // venueKey() maps backend `exchange` (3-char short: okx/cap/alp/bin) → galaxy.
   // Binance is crypto data only → folded into the OKX (crypto) galaxy.
+  // Jin 2026-06-23 COLORFUL: drop the grayscale wash — each venue's OUTER cloud
+  // wears its DASHBOARD venue color (polaris.css --exch-okx/cap/alp) so a venue
+  // reads the same hue in cloud + board: OKX cyan #87d7ff · Capital PURPLE #b47cff ·
+  // Alpaca yellow #d7d787. theme IS the venue color now (labels/halo/base dot).
+  // Jin 2026-06-23: Capital is PURPLE #b47cff (NOT blue — the old #87afd7 was
+  // indistinguishable from OKX cyan; polaris.css --exch-cap was bumped to match).
   const GALAXIES = {
-    okx:     { key: 'okx',     label: 'OKX · SPOT CRYPTO',  theme: [0x5f, 0xdf, 0xff], azimuth: -Math.PI * 0.66 },
-    capital: { key: 'capital', label: 'CAPITAL · CFD L/S',  theme: [0xa8, 0x7c, 0xff], azimuth:  Math.PI * 0.5 },
-    alpaca:  { key: 'alpaca',  label: 'ALPACA · US EQUITY', theme: [0xff, 0xc8, 0x4f], azimuth:  Math.PI * 0.06 },
+    okx:     { key: 'okx',     label: 'OKX · SPOT CRYPTO',  theme: [0x87, 0xd7, 0xff], azimuth: -Math.PI * 0.66 },
+    capital: { key: 'capital', label: 'CAPITAL · CFD L/S',  theme: [0xb4, 0x7c, 0xff], azimuth:  Math.PI * 0.5 },
+    alpaca:  { key: 'alpaca',  label: 'ALPACA · US EQUITY', theme: [0xd7, 0xd7, 0x87], azimuth:  Math.PI * 0.06 },
   };
   const GALAXY_ORDER = ['okx', 'capital', 'alpaca'];
-  const CONDUCTOR_THEME = [0x9f, 0xc7, 0xff];
+  const CONDUCTOR_THEME = [0xc4, 0xca, 0xd2];
 
   function venueKey(ex) {
     const e = (ex || '').toLowerCase().slice(0, 3);
@@ -64,6 +70,40 @@
     return [0xff, 0xff, 0xff];                      // flat / white
   }
 
+  // ── Venue light (Jin 2026-06-23) ────────────────────────────────────────────
+  // A WATCH / active node lights up in its EXCHANGE color so you can read which
+  // venue is firing. Open positions ignore this and render as a pure P&L
+  // green/red dot — see drawNode.
+  // Jin 2026-06-23: venue colors are DISTINCT + match the dashboard so each venue
+  // reads the same hue in cloud and board. Capital MUST be PURPLE #b47cff (NOT the
+  // old blue #87afd7 — that was indistinguishable from OKX cyan):
+  //   OKX → cyan #87d7ff · Capital → PURPLE #b47cff · Alpaca → yellow #d7d787
+  const VENUE_LIGHT = {
+    okx:     [0x87, 0xd7, 0xff],   // cyan   --exch-okx
+    capital: [0xb4, 0x7c, 0xff],   // PURPLE --exch-cap
+    alpaca:  [0xd7, 0xd7, 0x87],   // yellow --exch-alp
+  };
+  const NEUTRAL_GRAY = [0xc4, 0xca, 0xd2];
+  function venueLight(gx) { return VENUE_LIGHT[gx] || NEUTRAL_GRAY; }
+  // Per-ticker hue/brightness jitter so individual symbols are distinguishable
+  // inside one venue cloud instead of blobbing into a single flat mass — Jin
+  // "각 노드 색 다 다르게". Deterministic from id (stable across refreshes), kept
+  // small so the venue hue stays unmistakable. h ∈ [0,1] = the node's hash01.
+  function venueShade(base, h) {
+    const bri = 0.82 + h * 0.36;                 // ±18% brightness band
+    const hueShift = (h - 0.5) * 46;             // ±23 channel skew → subtle hue spread
+    const clamp = (v) => v < 24 ? 24 : (v > 255 ? 255 : v);
+    return [
+      clamp(Math.round(base[0] * bri + hueShift * 0.5)),
+      clamp(Math.round(base[1] * bri)),
+      clamp(Math.round(base[2] * bri - hueShift * 0.5)),
+    ];
+  }
+  // Jin 2026-06-23 SIMPLIFY: dropped the per-position regime hue-tint (the broken
+  // one-regime cloud cast), the exit-FSM marker ring, and the strategy glyph. A
+  // watch/active node is just its plain venue light; an open position is just a
+  // pure P&L green/red dot. (REGIME_CAST/activeColor/exitMarker/stratGlyph removed.)
+
   // ── Scene state ────────────────────────────────────────────────────────────
   // Nodes carry a stable home position (galaxy-local) + a current animated
   // position. The conductor sits at the origin. Cluster nodes spiral around
@@ -74,24 +114,104 @@
   const nodeByIndex = [];         // positional index (parallel to backend nodes[])
   const galaxyState = {};         // key → {cx,cy,cz, theme, count, pnl, pulse, hot}
   let conductor = { x: 0, y: 0, z: 0, pulse: 0, beat: 0 };
+  // Jin 2026-06-23: the Polaris North Star was removed ("반짝이는 별은 없애줘").
+  // last_decision_ts is still tracked (decisionTs) to brighten the neural circuit
+  // on a fresh AI decision, but nothing draws a star any more.
+  let decisionTs = 0, decisionFlash = 0;
 
+  // ── SCATTERED SPARSE SPHERE — inside stays visible (Jin 2026-06-23) ──────────
+  // Jin '나선형 불가사리 같다 … 전에 빌드처럼 구 덮으면서 크게 좀 스캐터 되어있게 전체적
+  // 으로 구형 이루면서'. The spiral-arm galaxies read as a STARFISH (불가사리) and the
+  // solid tiled shell HID the inside. This is the proven EARLIER even-sphere build:
+  // the OUTER venue nodes scatter LOOSELY over one LARGE sphere surface (fibonacci
+  // even-spread DIRECTION + per-node angular AND radial jitter → organic, airy, NOT
+  // a regular pattern, NOT spiral arms). Big radius + generous spacing → sparse, you
+  // SEE THROUGH the gaps to the inside. The silhouette reads as ONE SPHERE.
+  //   CORE   r≈0.15 → executed-trade / open-position nodes (pure P&L green/red).
+  //   MIDDLE r≈0.55 → gate/layer SATELLITES (globe-satellites.js families).
+  //   OUTER  r≈1.5  → 3 venue clouds scattered over the LARGE outer sphere, each
+  //                   in its own loose sector (cyan/purple/yellow), see-through.
+  const R_CORE = 0.15;
+  const R_MIDDLE = 0.55;
+  const R_OUTER = 1.5;          // LARGE outer sphere → spread out, airy, see-through
+  window.PolarisGlobe_shellR = { core: R_CORE, middle: R_MIDDLE, outer: R_OUTER };
+
+  // Even-sphere (fibonacci-sphere) direction for the i-th of n points: returns a
+  // unit vector spread evenly over the whole sphere. Used for CORE + OUTER shells.
+  const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+  function fibDir(i, n) {
+    const y = 1 - (i + 0.5) / n * 2;          // y ∈ (1,-1), evenly stepped
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const th = GOLDEN * i;
+    return { x: Math.cos(th) * r, y, z: Math.sin(th) * r };
+  }
+
+  // Each venue owns a loose SECTOR of the outer sphere — a pole direction the
+  // venue's nodes group around (so cyan/purple/yellow read as 3 regions) while the
+  // 3 sectors together still tile the WHOLE sphere (one-sphere silhouette). The
+  // sector poles sit ~120° apart on a slightly tilted ring; cx/cy/cz = the pole on
+  // the outer shell (= label anchor + the OUTER end of the neural links in flows).
+  const VENUE_TILT = 0.30;      // small latitude lift off the equator for poles
   GALAXY_ORDER.forEach((k, i) => {
     const g = GALAXIES[k];
-    // place galaxy centres on a wide ring around the conductor (3D)
-    const az = g.azimuth;
-    const R = 1.0;
+    const az = i * (2 * Math.PI / GALAXY_ORDER.length);
+    const py = Math.sin(VENUE_TILT * ((i % 2) ? -1 : 1));   // alternate hemisphere lift
+    const pr = Math.sqrt(Math.max(0, 1 - py * py));
+    const pole = { x: Math.cos(az) * pr, y: py, z: Math.sin(az) * pr };  // unit
     galaxyState[k] = {
       key: k, theme: g.theme, label: g.label,
-      cx: Math.cos(az) * R, cy: (i - 1) * 0.18, cz: Math.sin(az) * R,
+      pole,
+      // centre = the venue's pole on the LARGE outer sphere (label + link anchor).
+      cx: pole.x * R_OUTER, cy: pole.y * R_OUTER, cz: pole.z * R_OUTER,
       count: 0, pnl: 0, pulse: 0, hot: 0,
     };
   });
 
-  function roleRadius(role) {
-    if (role === 'pos') return 0.20;
-    if (role === 'watch') return 0.42;
-    return 0.60;                       // mkt / universe halo
+  // Scatter one venue node over the LARGE outer sphere, loosely grouped around the
+  // venue's pole. h01 → even fibonacci direction over a spherical CAP around the
+  // pole (the venue's share of the surface); a01 → extra angular jitter so it's
+  // organically scattered, not a tight regular lattice; b01 → small radial jitter
+  // so the shell has airy thickness (not a hard wall). Returns absolute position +
+  // unit dir. Purely id-derived (order-independent) → stable across refreshes.
+  const CAP = 1.32;             // half-angle of a venue's cap (rad) — wide = loose
+  const SCAT_LATTICE = 512;     // fibonacci lattice size the cap samples from
+  function scatterPos(gxKey, h01, a01, b01) {
+    const gs = galaxyState[gxKey];
+    const pole = gs.pole;
+    // even fibonacci point on a cap around +Z, then rotate the cap onto the pole.
+    // cos(theta) ranges over the cap; phi gets a golden-angle base + jitter.
+    const ct = 1 - h01 * (1 - Math.cos(CAP));            // even over cap area
+    const st = Math.sqrt(Math.max(0, 1 - ct * ct));
+    const phi = GOLDEN * Math.floor(h01 * SCAT_LATTICE) + (a01 - 0.5) * 1.4; // jittered
+    const lx = Math.cos(phi) * st, ly = Math.sin(phi) * st, lz = ct;        // cap-local (+Z)
+    // rotate local +Z frame onto `pole` (Rodrigues toward pole from +Z).
+    const d = rotZto(pole, lx, ly, lz);
+    // radial jitter → airy thickness, organically scattered (not a hard wall).
+    const rr = R_OUTER * (0.90 + b01 * 0.20);
+    return { x: d.x * rr, y: d.y * rr, z: d.z * rr, dir: d };
   }
+  // Rotate a vector given in a +Z-up local frame so its +Z aligns with unit `pole`.
+  function rotZto(pole, lx, ly, lz) {
+    // axis = (+Z) × pole, angle = acos(pole.z). Rodrigues rotation of (lx,ly,lz).
+    const ax0 = -pole.y, ay0 = pole.x, az0 = 0;          // (0,0,1)×pole = (-py,px,0)
+    const s = Math.hypot(ax0, ay0, az0);
+    if (s < 1e-6) {                                      // pole ≈ +Z (or −Z)
+      const sign = pole.z >= 0 ? 1 : -1;
+      return { x: lx, y: ly * sign, z: lz * sign };
+    }
+    const ux = ax0 / s, uy = ay0 / s, uz = az0 / s;      // unit axis
+    const c = pole.z, sn = s;                            // cos = pole.z, sin = |axis|
+    const dot = ux * lx + uy * ly + uz * lz;
+    // v*cos + (axis×v)*sin + axis*(axis·v)*(1−cos)
+    const cx = uy * lz - uz * ly, cy = uz * lx - ux * lz, cz = ux * ly - uy * lx;
+    return {
+      x: lx * c + cx * sn + ux * dot * (1 - c),
+      y: ly * c + cy * sn + uy * dot * (1 - c),
+      z: lz * c + cz * sn + uz * dot * (1 - c),
+    };
+  }
+  window.PolarisGlobe_fibDir = fibDir;
+  window.PolarisGlobe_scatterPos = scatterPos;
   // venue-specific clusters live in the 3 galaxies. strat/reg/exit/orbit/axis/
   // obs/action/exit_tally are cross-cutting → conductor satellites (globe-satellites.js).
   function roleForCluster(cluster) {
@@ -114,6 +234,12 @@
   // Rebuild scene nodes from a fresh backend graph payload.
   function setGraph(d) {
     const backendNodes = d.nodes || [];
+    // Fresh AI decision (last_decision_ts advances) → brighten the neural circuit.
+    const lt = +d.last_decision_ts || 0;
+    if (lt && lt !== decisionTs) {
+      if (decisionTs) decisionFlash = 1;        // skip the first load
+      decisionTs = lt;
+    }
     nodeByIndex.length = 0;
     const liveIds = new Set();
     // reset per-galaxy aggregates
@@ -141,26 +267,58 @@
         nodeById.set(id, n);
         nodes.push(n);
       }
-      // Stable home position from TWO id-hashes ONLY (order-independent). h1 →
-      // azimuth around the galaxy ring, h2 → tilt + radial jitter, evenly spread.
-      const rad = roleRadius(role);
+      // Stable home position from id-hashes ONLY (order-independent):
+      //   pos   → CORE shell (r≈0.15), even over the WHOLE small inner sphere.
+      //   watch → scattered LOOSELY over the LARGE outer sphere, in its venue sector.
       const h1 = hash01(id + '~a');
       const h2 = hash01(id + '~b');
-      const ang = h1 * 6.283185;                         // uniform azimuth
-      const tilt = (h2 - 0.5) * 1.2;                     // band thickness
-      const rr = rad * (0.82 + h2 * 0.30);               // slight radial spread
+      const h3 = hash01(id + '~c');
+      let dir;
+      if (role === 'pos') {
+        // CORE: even over the full small sphere. Map the id-hash onto a fibonacci
+        // index drawn from a fixed lattice so points stay spread (not clumped),
+        // while remaining purely id-derived (order-independent).
+        const LAT = 233;                                 // fixed fibonacci lattice size
+        dir = fibDir(Math.floor(h1 * LAT), LAT);
+        // tiny per-node radial jitter so the heart has a little thickness/depth.
+        const rr = R_CORE * (0.86 + h2 * 0.28);
+        n.hx = dir.x * rr; n.hy = dir.y * rr; n.hz = dir.z * rr;
+      } else {
+        // OUTER: scattered LOOSELY over the LARGE outer sphere surface (Jin "전에 빌드
+        // 처럼 구 덮으면서 크게 스캐터 … 전체적으로 구형"). scatterPos = fibonacci even-
+        // spread direction over the venue's spherical cap + angular AND radial jitter →
+        // organic, airy, see-through. NOT spiral arms (no starfish). Purely id-derived
+        // (order-independent): h1=cap position, h2=angular jitter, h3=radial jitter.
+        const sp = scatterPos(gx, h1, h2, h3);
+        n.hx = sp.x; n.hy = sp.y; n.hz = sp.z;
+        dir = sp.dir;                                    // unit dir (neural links, depth-fade)
+      }
       n.gx = gx; n.role = role; n.cluster = bn.cluster;
       n.label = bn.label || bn.ticker || id;
       n.ticker = bn.ticker;
+      n.strategyId = bn.strategy_id || null;             // for ticker↔strat links
       n.pnl = bn.pnl_usd || 0;
       n.direction = bn.direction;
+      n.exitState = bn.exit_state || null;               // open/touched/protected/trailing
       n.intensity = bn.intensity != null ? bn.intensity : 0.4;
       n.state = bn.state || 'lit';
-      n.hx = gs.cx + Math.cos(ang) * rr;
-      n.hy = gs.cy + Math.sin(tilt) * rr * 0.8;
-      n.hz = gs.cz + Math.sin(ang) * rr;
-      n.color = (role === 'pos') ? chainColor(n.pnl) : gs.theme;
-      n.base = role === 'pos' ? 3.4 : 1.9;
+      // ── REAL-signal glow (Jin 2026-06-23) ──────────────────────────────────
+      // The backend now joins the live signals table → per-instrument 30m catch
+      // count (signal_count_30m). A node whose pipeline actually caught a signal
+      // glows BRIGHTLY the instant count>0; dormant tickers stay dim. This is the
+      // true glow source — is_active/`active` is only a secondary un-dim cue. We
+      // OR it client-side too so a real catch always reads as firing regardless of
+      // the backend state string. Display-only.
+      n.signalCount = bn.signal_count_30m || 0;
+      if (n.signalCount > 0) n.state = 'firing';
+      n.dir = dir;                                       // cached unit dir (links)
+      // Color: open positions are a pure P&L green/red dot. Other OUTER exchange
+      // nodes wear their DASHBOARD venue color, per-ticker shaded (venueShade) so
+      // each symbol is individually distinguishable rather than one flat blob.
+      const shaded = venueShade(venueLight(gx), h1);
+      n.color = (role === 'pos') ? chainColor(n.pnl) : shaded;
+      n.venueColor = shaded;
+      n.base = role === 'pos' ? 2.4 : 1.9;   // Jin grayscale: 체결(녹/적) 노드 좀만 더 축소 (3.4→2.4 ~30%)
       // ── universe shell vs lit-up node ──────────────────────────────────────
       // Backend now emits the FULL tradable universe as mkt nodes with an
       // `active` flag (is_active=1 = bot trading focus = lightup candidate). The
@@ -216,15 +374,24 @@
     return { sx: CX + rx * scale * persp, sy: CY + ry * scale * persp, depth: rz, persp };
   }
 
-  // ── Render loop ──────────────────────────────────────────────────────────────
+  // ── Backdrop ─────────────────────────────────────────────────────────────────
+  // Jin 2026-06-23 "그냥 까맣게": the starfield / nebula / cosmic dust / gradient wash
+  // were all removed. The backdrop is now a plain solid near-black fill — see
+  // drawCosmos. driftX/driftY remain only as the gentle parallax driver for the
+  // scene rotation feel (no longer drives any background layer).
   let last = performance.now();
-  let starfield = null;
-  function buildStars() {
-    starfield = [];
-    for (let i = 0; i < 140; i++) {
-      starfield.push({ x: Math.random() * W, y: Math.random() * H,
-                       r: Math.random() * 1.2 + 0.2, tw: Math.random() * 6.28 });
-    }
+  let driftX = 0, driftY = 0;
+
+  // Jin 2026-06-23: backdrop is now a plain black fill — nothing to pre-build.
+  function rebuildBackdrop() { /* solid black void — no starfield/nebula/dust caches */ }
+
+  // Jin 2026-06-23 "그냥 까맣게": the starfield / nebula haze / cosmic dust / gradient
+  // wash were all removed — Jin wants a PLAIN BLACK VOID behind the sphere, nothing
+  // decorative. The backdrop is now a single solid near-black fill. (buildStars /
+  // buildDust / buildNebula / buildBg + their caches are no longer invoked.)
+  function drawCosmos(now, dt) {
+    ctx.fillStyle = '#05070b';
+    ctx.fillRect(0, 0, W, H);
   }
 
   function frame(now) {
@@ -233,6 +400,9 @@
     // for 10s — keep it ticking every frame so a live globe is never killed.
     window.__sphereHB = (window.__sphereHB || 0) + 1;
     if (autoSpin && !dragging) yaw += dt * 0.08;
+    // slow cinematic drift of the cosmos (parallax driver) — floats through space.
+    driftX = Math.sin(now / 23000) * 1.0 + yaw * 0.18;
+    driftY = Math.cos(now / 31000) * 0.6 + pitch * 0.12;
     // ease camera toward zoom / pan targets
     zoom += (targetZoom - zoom) * Math.min(1, dt * 5);
     pan.x += (pan.tx - pan.x) * Math.min(1, dt * 4);
@@ -241,17 +411,13 @@
 
     ctx.save();
     ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, W, H);
-    if (!starfield || starfield.length === 0 || starfield[0].x > W + 50) buildStars();
-    // starfield backdrop
-    for (const s of starfield) {
-      const a = 0.18 + 0.18 * Math.sin(now / 700 + s.tw);
-      ctx.fillStyle = `rgba(150,170,210,${a})`;
-      ctx.fillRect(s.x, s.y, s.r, s.r);
-    }
+    // plain black backdrop — fills canvas (no starfield/nebula/dust).
+    drawCosmos(now, dt);
 
     conductor.beat = 0.5 + 0.5 * Math.sin(now / 600);
     conductor.pulse = Math.max(0, conductor.pulse - dt * 1.8);
+    decisionFlash = Math.max(0, decisionFlash - dt * 0.8);
+    window.PolarisGlobe_decisionFlash = decisionFlash;   // shared → neural-line brighten
 
     // satellites revolve around the conductor: recompute their home each frame.
     if (window.PolarisGlobe_satTick) window.PolarisGlobe_satTick(now, dt);
@@ -284,8 +450,10 @@
     }
     draw.sort((a, b) => a.p.depth - b.p.depth);
 
-    // galaxy halo + label (behind nodes of that galaxy — draw first, dim)
-    drawGalaxyHalos(now);
+    // galaxy halo + label — Jin 2026-06-23: removed the per-cluster white nebula
+    // "fog ball" / bright galactic core. Keep only the venue labels (drawn cheaply
+    // inside drawGalaxyHalos via the labelsOnly flag) so each cluster is still named.
+    drawGalaxyHalos(now, /* labelsOnly */ true);
 
     // dim universe shell — drawn BEHIND the lit nodes + flows so the bright
     // signals read on top of the cloud. One batched cheap pass.
@@ -300,6 +468,8 @@
     }
 
     for (const d of draw) drawNode(d.n, d.p, now);
+    // Jin 2026-06-23: the Polaris North Star was removed entirely ("반짝이는 별은
+    // 없애줘") — drawPolaris + its call + the polaris state object are all gone.
     // Jin: 컨덕터 제거(거슬림 — 개념은 알고 있으니 시각화 불필요). 위성은 보이지 않는
     // 중심(origin)을 돈다. drawConductor 정의는 남겨둠(복원 필요 시 이 줄만 되살리면 됨).
     // drawConductor(now);
@@ -313,20 +483,35 @@
     return gx === _focus ? 1.0 : 0.22;
   }
 
-  function drawGalaxyHalos(now) {
+  function drawGalaxyHalos(now, labelsOnly) {
     for (const k of GALAXY_ORDER) {
       const gs = galaxyState[k];
       gs.pulse = Math.max(0, gs.pulse - 0.016);
+      gs.hot = Math.max(0, gs.hot - 0.01);
       const p = project(gs.cx, gs.cy, gs.cz);
       const d = dimFor(k);
-      const rad = Math.min(W, H) * 0.18 * zoom * p.persp;
-      const grad = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, rad);
-      const glow = (0.10 + gs.pulse * 0.5 + gs.hot * 0.3) * d;
-      grad.addColorStop(0, rgba(gs.theme, glow));
-      grad.addColorStop(1, rgba(gs.theme, 0));
-      ctx.fillStyle = grad;
-      ctx.beginPath(); ctx.arc(p.sx, p.sy, rad, 0, 6.2832); ctx.fill();
-      gs.hot = Math.max(0, gs.hot - 0.01);
+      const rad = Math.min(W, H) * 0.20 * zoom * p.persp;
+      // Jin 2026-06-23: removed the per-cluster white nebula "fog ball" + bright
+      // galactic core. Kept behind the labelsOnly flag (currently always true) so
+      // each cluster is just its stars + label, no foggy glow ball.
+      if (!labelsOnly) {
+        const breathe = 0.5 + 0.5 * Math.sin(now / 2600 + gs.cx * 3);
+        const glow = (0.07 + 0.03 * breathe + gs.pulse * 0.5 + gs.hot * 0.3) * d;
+        ctx.globalCompositeOperation = 'lighter';
+        const grad = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, rad);
+        grad.addColorStop(0, rgba(gs.theme, glow * 1.6));
+        grad.addColorStop(0.4, rgba(gs.theme, glow * 0.6));
+        grad.addColorStop(1, rgba(gs.theme, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(p.sx, p.sy, rad, 0, 6.2832); ctx.fill();
+        const cr = rad * 0.30;
+        const cg = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, cr);
+        cg.addColorStop(0, rgba(gs.theme, (0.18 + gs.pulse * 0.4) * d));
+        cg.addColorStop(1, rgba(gs.theme, 0));
+        ctx.fillStyle = cg;
+        ctx.beginPath(); ctx.arc(p.sx, p.sy, cr, 0, 6.2832); ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+      }
       // galaxy label
       ctx.save();
       ctx.globalAlpha = (0.4 + 0.3 * d) * (_focus && _focus !== k ? 0.4 : 1);
@@ -401,24 +586,53 @@
     // live pulse / flash from flows
     if (n.pulse > 0) { r *= 1 + n.pulse * 0.9; a = Math.min(1, a + n.pulse * 0.5); }
     if (n.flash > 0) { a = Math.min(1, a + n.flash * 0.6); }
-    const c = (n.role === 'pos') ? chainColor(n.pnl) : n.color;
+    // Jin 2026-06-23 SIMPLIFY: an open POSITION is a pure P&L green/red dot — no
+    // venue color, no venue halo. A WATCH / active non-position node lights up in
+    // its plain EXCHANGE color so you can see which venue is firing; the dormant
+    // universe stays neutral gray.
+    const isPos = n.role === 'pos';
+    const isActiveLit = !n.sat && (isPos || n.active || n.state === 'lit' || firing);
+    const venueC = (n.venueColor || venueLight(n.gx));
+    // Jin 2026-06-23 COLORFUL: even a non-active outer node keeps its per-ticker
+    // venue shade (n.color) instead of falling back to neutral gray — the cloud
+    // reads colorful. Satellites keep their family color (n.color).
+    const c = isPos
+      ? chainColor(n.pnl)
+      : (isActiveLit ? venueC : n.color);
+    // halo/glow color: positions glow in their own P&L color; active watch nodes
+    // glow in their venue color.
+    const haloC = isPos ? c : (isActiveLit ? venueC : c);
     // ── signal lightup: a firing node = an ACTIVE signal → breathing halo so the
     //    holding ticker pops out of the cloud (the original neural-signal concept).
     if (firing) {
       const breathe = 0.5 + 0.5 * Math.sin(now / 360 + (n.phase || 0) * 6.283);
       const gr = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 5);
-      gr.addColorStop(0, rgba(c, (0.30 + breathe * 0.28) * d));
-      gr.addColorStop(0.55, rgba(c, (0.10 + breathe * 0.10) * d));
-      gr.addColorStop(1, rgba(c, 0));
+      gr.addColorStop(0, rgba(haloC, (0.30 + breathe * 0.28) * d));
+      gr.addColorStop(0.55, rgba(haloC, (0.10 + breathe * 0.10) * d));
+      gr.addColorStop(1, rgba(haloC, 0));
       ctx.fillStyle = gr;
       ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 5, 0, 6.2832); ctx.fill();
     }
     if (n.flash > 0.3 || n.pulse > 0.3) {
       const g = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 4);
-      g.addColorStop(0, rgba(c, Math.min(0.6, (n.flash + n.pulse) * 0.5 * d)));
-      g.addColorStop(1, rgba(c, 0));
+      g.addColorStop(0, rgba(haloC, Math.min(0.6, (n.flash + n.pulse) * 0.5 * d)));
+      g.addColorStop(1, rgba(haloC, 0));
       ctx.fillStyle = g;
       ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 4, 0, 6.2832); ctx.fill();
+    }
+    // tasteful additive bloom: lit/active galaxy nodes glow like stars inside the
+    // nebula in their VENUE color. Capped so it never blows out. Firing already
+    // has its breathing halo. Pos nodes also bloom so the venue halo wraps the
+    // green/red P&L dot (you read venue + P&L together).
+    if (!firing && isActiveLit && !n.sat) {
+      const bloom = Math.min(0.34, (0.12 + n.intensity * 0.18) * d);
+      ctx.globalCompositeOperation = 'lighter';
+      const bg = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, r * 3.0);
+      bg.addColorStop(0, rgba(haloC, bloom));
+      bg.addColorStop(1, rgba(haloC, 0));
+      ctx.fillStyle = bg;
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, r * 3.0, 0, 6.2832); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
     }
     ctx.fillStyle = rgba(c, a);
     if (n.shape === 'square') {
@@ -431,6 +645,23 @@
     if (firing) {
       ctx.fillStyle = rgba([0xff, 0xff, 0xff], Math.min(0.95, 0.5 + a) * d);
       ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(0.5, r * 0.42), 0, 6.2832); ctx.fill();
+    }
+
+    // EXIT-FSM marker (Jin 2026-06-23 structure): a position actively in the exit
+    // FSM (touched/protected/trailing — emitted by the backend, previously ignored)
+    // wears a thin static ring so the exit lifecycle is visible WITHOUT moving the
+    // dot (no jitter). 'open' = no ring. Position is unchanged — ring only.
+    if (isPos && n.exitState && n.exitState !== 'open') {
+      const ringA = 0.55 * d;
+      ctx.strokeStyle = rgba(c, ringA);
+      ctx.lineWidth = Math.max(0.6, r * 0.22);
+      ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(1.2, r * 2.0), 0, 6.2832); ctx.stroke();
+      // trailing = a second dashed-feel outer tick so it reads distinct from touched.
+      if (n.exitState === 'trailing') {
+        ctx.strokeStyle = rgba(c, ringA * 0.55);
+        ctx.lineWidth = Math.max(0.5, r * 0.14);
+        ctx.beginPath(); ctx.arc(p.sx, p.sy, Math.max(1.6, r * 2.7), 0, 6.2832); ctx.stroke();
+      }
     }
     n._screen = p;
   }
@@ -541,6 +772,10 @@
     if (!window.PolarisCloud[m]) window.PolarisCloud[m] = _noop;
   });
 
-  buildStars();
+  // Jin 2026-06-23: pollEquity removed — it only fed the Polaris North Star core
+  // tint, and Polaris is gone. Net equity P&L still reads on the board + per-venue
+  // cluster labels; the cloud's P&L color lives on the centre trade dots.
+
+  rebuildBackdrop();
   requestAnimationFrame(frame);
 })();

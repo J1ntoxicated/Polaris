@@ -305,7 +305,10 @@ def _snapshot_to_liquidity(snap: Any) -> dict[str, float] | None:
     high = _num(daily.get("h"))
     low = _num(daily.get("l"))
     atr_pct = ((high - low) / close * 100.0) if (high > low and close > 0.0) else 0.0
-    return {"vol_24h_usd": dollar_vol, "atr_24h_pct": atr_pct}
+    # ``price`` (last close) feeds the universe min_price eligibility floor — it
+    # was previously computed and discarded; pennies (TNON $0.59, ADTX $0.017)
+    # gap through stops, so the floor needs the price plumbed onto the row.
+    return {"vol_24h_usd": dollar_vol, "atr_24h_pct": atr_pct, "price": close}
 
 
 def _num(value: Any) -> float:
@@ -355,6 +358,7 @@ def _apply_liquidity(
                 signal_density_7d=ins.signal_density_7d,
                 listing_ts=ins.listing_ts,
                 last_seen_ts=ins.last_seen_ts,
+                last_price=liq.get("price", ins.last_price),
             )
         )
     return out

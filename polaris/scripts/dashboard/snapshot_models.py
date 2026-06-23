@@ -10,7 +10,7 @@ keep working unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from polaris.core.sizing.constants import demo_starting_equity_total
 
@@ -64,14 +64,61 @@ class StrategyStat:
 
 
 @dataclass(slots=True)
-class GateRow:
+class TickerStat:
+    """P0.3 (2026-06-22): per-ticker cumulative realized R from positions.pnl_r
+    (honest — includes drift-close estimates + uncapped catastrophic losses after
+    fix #1 / P0.4). Surfaces where the bot bleeds / wins by symbol. Display-only."""
+
+    venue: str
+    symbol: str
+    n: int
+    wr_pct: float
+    sum_r: float
+
+
+@dataclass(slots=True)
+class GateEvent:
+    """One recent per-gate decision for the live gate-event feed (read-only).
+
+    Sourced from ``gate_events`` (newest first): the gate id + its label, the
+    decision (PASS / KILL / MODIFY / HOLD / …), and the best-effort strategy /
+    symbol / reason decoded from the row's ``payload_json`` (the table has no
+    dedicated strategy/symbol columns — they live nested in the payload, shape
+    varies by gate, so extraction is graceful: empty string when absent). NEVER
+    feeds sizing/gating — pure display feed."""
+
     gate_id: int
     label: str
-    pass_n: int
-    kill_n: int
-    other_n: int
-    total: int
-    pass_rate: float
+    decision: str
+    strategy: str
+    symbol: str
+    reason: str
+    ts: int
+    # Per-gate rich detail decoded from payload_json (display-only). The shape is
+    # gate-specific and all keys are optional: G5 carries the T4 size line
+    # (risk_pct/notional/scalar/tier/cell/leverage), G8 the lesson
+    # (lesson_type/confidence), G1 the focus count. Empty dict for gates with no
+    # extra detail. NEVER feeds sizing/gating — pure feed chrome.
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class GateDecisionRow:
+    """One per-gate DECISION-summary row (replaces the pass/kill GateRow).
+
+    The bot is flow_not_block by absolute mandate — gates emit
+    PASS/SIZED/HOLD/REFLECTED, essentially never KILL — so a pass/kill ratio is
+    forever ~100% (zero information) and visually implies a block-filter
+    architecture the mandate forbids. This row instead carries each gate's
+    CHARACTERISTIC meaningful output for the window: a one-line ``headline`` plus
+    a small typed ``metrics`` dict (gate-specific keys, all optional). Decoded
+    read-only from ``gate_events.payload_json``; NEVER feeds sizing/gating."""
+
+    gate_id: int
+    label: str
+    headline: str
+    n: int
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -193,6 +240,11 @@ class RotationTelemetry:
 
     rotation_count: int = 0
     session_forced_exit_count: int = 0
+    # Drift (reconciled) loss is a SEPARATE counter labelled "tracking failures,
+    # not trades" — a rough $ estimate (mae_r × risk_usd), never an R sum (Step
+    # M, 2026-06-22). Excluded from PF/WR/avg_r/ticker R.
+    reconciled_loss_usd: float = 0.0
+    reconciled_loss_n: int = 0
     last_rotation: RotationEvent | None = None
 
 
@@ -463,7 +515,11 @@ class DashboardSnapshot:
     demo_fee_total: float = 0.0   # Σ stored demo fees (the 0.7% drain)
     positions: list[PositionRow] = field(default_factory=list)
     strategy_stats: list[StrategyStat] = field(default_factory=list)
-    gate_funnel: list[GateRow] = field(default_factory=list)
+    ticker_stats: list[TickerStat] = field(default_factory=list)
+    # Per-gate DECISION summary (replaces the pass/kill funnel — flow_not_block
+    # makes a pass/kill ratio structurally ~100% / zero-information). One row per
+    # gate G1-G8 carrying its characteristic meaningful output for the window.
+    gate_decisions: list[GateDecisionRow] = field(default_factory=list)
     cell_top: list[CellRow] = field(default_factory=list)
     cell_bottom: list[CellRow] = field(default_factory=list)
     regime_bars: list[RegimeBar] = field(default_factory=list)
@@ -482,6 +538,8 @@ class DashboardSnapshot:
     # ``last_rotation`` (a nested RotationEvent or None) for the web snapshot.
     rotation_count: int = 0
     session_forced_exit_count: int = 0
+    reconciled_loss_usd: float = 0.0
+    reconciled_loss_n: int = 0
     last_rotation: RotationEvent | None = None
     # Component A (Jin 2026-05-31) — go-live confidence panel: real-fee-net
     # per-(strategy×regime) edge + overall win-rate / profit-factor / turnover /
@@ -498,3 +556,17 @@ class DashboardSnapshot:
     exit_surface: ExitSurface = field(default_factory=ExitSurface)
     #  AI tab — conductor shadow agreement + entry-admission would-suppress stats.
     ai_shadow: AiShadowPanel = field(default_factory=AiShadowPanel)
+    # Live gate-event feed (newest first) — last ~20 per-gate decisions decoded
+    # from gate_events. Consumed by the desktop board's gate-pathway view.
+    # Additive; dataclasses.asdict serializes it. Graceful empty when absent.
+    recent_gate_events: list[GateEvent] = field(default_factory=list)
+    # Per-strategy one-line descriptions {strategy_id: desc}, extracted from the
+    # vault strategy notes (vault/20_strategies/*.md). Display-only chrome the
+    # desktop board pairs with each strategy row. Graceful empty when missing.
+    strategy_descriptions: dict[str, str] = field(default_factory=dict)
+    # ADR-012 — observe-mode probe events (generic {name, ticker, venue, kind,
+    # lean, confidence, reading, action, ts, gate_id}) from the SEPARATE
+    # data/probes.sqlite sidecar. Display-only connective tissue; read fail-open
+    # (empty on a missing/locked sidecar). dataclasses.asdict serializes it for
+    # the web snapshot. NEVER feeds sizing/gating/exit — pure board column.
+    probe_events: list[dict[str, Any]] = field(default_factory=list)

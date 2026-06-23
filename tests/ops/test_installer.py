@@ -18,6 +18,7 @@ PLISTS = {
     "watchdog": LAUNCHD / "com.polaris.watchdog.plist",
     "restart": LAUNCHD / "com.polaris.daily.restart.plist",
     "digest": LAUNCHD / "com.polaris.daily.digest.plist",
+    "replay": LAUNCHD / "com.polaris.replay.nightly.plist",
 }
 SCRIPTS = [
     PROJECT_ROOT / "scripts" / "install_ops_automation.sh",
@@ -79,6 +80,21 @@ def test_restart_schedule_0730_local() -> None:
 def test_digest_schedule_1010_local() -> None:
     data = _load("digest")
     assert data["StartCalendarInterval"] == {"Hour": 10, "Minute": 10}
+
+
+def test_replay_schedule_0300_local_no_collision() -> None:
+    data = _load("replay")
+    sched = data["StartCalendarInterval"]
+    assert sched == {"Hour": 3, "Minute": 0}
+    # must not collide with daily-restart (07:30) or digest (10:10)
+    assert sched != _load("restart")["StartCalendarInterval"]
+    assert sched != _load("digest")["StartCalendarInterval"]
+
+
+def test_replay_registered_in_installer_and_uninstaller() -> None:
+    for name in ("install_ops_automation.sh", "uninstall_ops_automation.sh"):
+        text = (PROJECT_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "com.polaris.replay.nightly" in text, name
 
 
 def test_installer_never_touches_dashboard() -> None:

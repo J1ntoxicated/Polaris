@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from polaris.core.isolation.blocklist import add_blocklist
 from polaris.core.isolation.circuit_breaker import FAULT_REJECT, record_fault
 from polaris.core.streams import resolve_stream
+from polaris.scripts._smoke_roundtrip_shared import record_venue_orphan
 from polaris.strategies import RawSignal
 
 if TYPE_CHECKING:
@@ -47,6 +48,23 @@ EXTERNAL_NONFAULT_REJECT_CODES: frozenset[str] = frozenset(
 # OKX compliance reject → permanent blocklist (never auto-clears). Balance /
 # no-fill codes are transient and are NOT blocklisted.
 COMPLIANCE_REJECT_CODES: frozenset[str] = frozenset({"51155"})
+# OKX PARAM / PRECISION reject codes (the entry-stall root-cause family): an
+# order whose sz/px/lot-size is malformed for THIS instrument. Jin 2026-06-23:
+# the ROOT fix is the submit-path min-size CLAMP-UP (OKXAdapter._round_px_sz →
+# clamp_up_to_min) which bumps a sub-min order UP to the venue minimum so it
+# FLOWS — so the 51020 below-min flood essentially stops occurring. The prior
+# per-symbol cooldown SKIP is REMOVED (it was a bounded block/skip). A residual /
+# rare param reject is still classified EXTERNAL (non-fault) so it never trips the
+# circuit breaker — but with NO per-symbol skip (flow_not_block: never blocked).
+#   51000 = parameter error  · 51100 = order amount below limit
+#   51020 = order amount below the instrument MINIMUM (now pre-empted by the
+#           clamp-up; a residual is external non-fault, NOT a strategy fault)
+#   51121 = order qty must be a multiple of lotSz (precision)
+#   51127 = available balance/quantity precision · 51820 = px precision
+#   51006 = px outside allowed range (tick/limit)
+OKX_PARAM_REJECT_CODES: frozenset[str] = frozenset(
+    {"51000", "51006", "51020", "51100", "51121", "51127", "51820"}
+)
 # Capital's venue-specific external (non-fault) reject statuses now live in the
 # StreamConfig SSOT (B_capital_cfd.external_reject_codes); _is_external_reject
 # reads them via resolve_stream (design §2.1).
@@ -63,6 +81,13 @@ def _is_external_reject(venue: str, reject_code: str | None) -> bool:
     if reject_code is None:
         return True
     if reject_code in EXTERNAL_NONFAULT_REJECT_CODES:
+        return True
+    # OKX param/precision rejects (sz/px/lot-size malformed for the instrument):
+    # pre-empted at submit by the min-size clamp-up, so a residual is RARE — and
+    # it is a VENUE rule, not a strategy fault. Classify external so it never
+    # trips the breaker (Jin 2026-06-23: replaced the old per-symbol cooldown
+    # skip; no per-symbol block, the strategy keeps flowing).
+    if reject_code in OKX_PARAM_REJECT_CODES:
         return True
     # D-2: Capital HTTP/protocol-level failures (D-1 honest labels HTTP_429 /
     # HTTP_5xx / HTTP_TIMEOUT / HTTP_TRANSPORT / HTTP_CONFIRM) and a confirm
@@ -100,6 +125,8 @@ async def _handle_open_reject(
     reject_code: str | None,
     reject_msg: str | None,
     now_ts: int,
+    venue_order_id: str | None = None,
+    unfilled_qty: float = 0.0,
 ) -> None:
     """Release the reservation + classify a real-open no-fill (Task 2 / D1).
 
@@ -110,6 +137,14 @@ async def _handle_open_reject(
     runtime blocklist. A reject code outside the external set is a possible
     internal/client bug and still records a FAULT_REJECT so real anomalies can
     eventually halt.
+
+    ORPHAN NET (Alpaca open-side leak): when the order was ACCEPTED-but-unfilled
+    (``venue_order_id`` present), the venue holds a LIVE order even after we
+    release the reservation. Record it via ``record_venue_orphan`` (IDEMPOTENT
+    on the order id) so the still-live order is handed to the reconciler/exit
+    engine instead of vanishing — flow_not_block: ENABLE tracking, never a
+    throttle. A GENUINE reject (no ``venue_order_id`` — nothing accepted at the
+    venue) records NO orphan.
     """
     await fence.release_reservation(
         reservation_id, reason="real_open_no_fill", now_ts=now_ts,
@@ -124,6 +159,15 @@ async def _handle_open_reject(
             "released, NO strategy fault",
             venue, symbol, code_key, (reject_msg or "")[:120],
         )
+        if venue_order_id is not None:
+            # Accepted-but-unfilled order is still LIVE at the venue → record a
+            # durable orphan (idempotent) so reconciliation can close it.
+            record_venue_orphan(
+                conn, strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
+                side=sig.side, phase="real_open_no_fill",
+                venue_order_id=venue_order_id, deal_id=None,
+                base_qty=unfilled_qty, now_ts=now_ts,
+            )
         if reject_code in COMPLIANCE_REJECT_CODES:
             add_blocklist(
                 conn, venue, symbol, reason="compliance",
@@ -134,6 +178,11 @@ async def _handle_open_reject(
                 venue, symbol, reject_code,
             )
         return
+    # NOTE: OKX param/precision codes (OKX_PARAM_REJECT_CODES) are now handled by
+    # the EXTERNAL branch above (_is_external_reject returns True for them) — the
+    # min-size clamp-up pre-empts the 51020 flood at submit, so a residual is a
+    # rare venue rule, not a strategy fault, and carries NO per-symbol cooldown
+    # (the cooldown machinery is removed — Jin 2026-06-23, flow_not_block).
     # Anomalous reject code → possible internal/client bug. Keep faulting.
     logger.error(
         "[L7/real] %s:%s anomalous reject code=%s — recording FAULT_REJECT",
@@ -151,6 +200,7 @@ async def _handle_open_reject(
 __all__ = [
     "COMPLIANCE_REJECT_CODES",
     "EXTERNAL_NONFAULT_REJECT_CODES",
+    "OKX_PARAM_REJECT_CODES",
     "_handle_open_reject",
     "_is_external_reject",
 ]

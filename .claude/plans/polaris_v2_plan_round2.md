@@ -35,13 +35,16 @@
   - stretch: ±8% (고출력 구간)
   - ±8%+ : 태깅만, 실행 차단 X (이후 sizing/allocation 조정 근거)
 
-### Miss escalation policy (monthly review, codex round 1)
-1. **Step 1** — 월 실현 < 0.35%/day → sizing scalar +0.25, single-strategy cap +20%
-2. **Step 2** — 2개월 연속 < 0.35%/day → 자금 reallocate (under→over venue)
-3. **Step 3** — 3개월 rolling < 0.4%/day → leverage step-up (Capital 30 → venue ceiling)
-4. **Step 4** — venue gap > 0.2%/day → strategy add (codex debate 후)
+### ~~Escalation policy (periodic cadence, codex round 1)~~ [SUPERSEDED]
 
-순서: `sizing → reallocate → leverage → strategy_add` (codex: "성과 차이가 이미 보이면 자금 이동이 가장 빠른 unlock")
+> ⚠️ **SUPERSEDED (2026-06-22)**: 이 단계적 escalation 래더(주기적 실현률 게이트)는 **폐기**. 현 방향 = 측정 정직화 + 안정화 + /debate 후 단계적 적용([[system_design_audit_2026-06-22]], loop_state.md M→S→D→R). aggressive·flow_not_block 유지 — 주기적 자동 게이트/스로틀로 회귀하지 않음. 아래는 역사 기록.
+
+1. ~~**Step 1** — sizing scalar +0.25, single-strategy cap +20%~~
+2. ~~**Step 2** — 자금 reallocate (under→over venue)~~
+3. ~~**Step 3** — leverage step-up (Capital 30 → venue ceiling)~~
+4. ~~**Step 4** — venue gap > 0.2%/day → strategy add (codex debate 후)~~
+
+순서(역사): `sizing → reallocate → leverage → strategy_add`
 
 ### Drawdown checkpoint snapshot (실행 차단 X, 데이터 가치만)
 - intraday -8% : snapshot + 원인 태깅
@@ -324,7 +327,7 @@ def check(mode, agent, action_class, target, ctx) -> PolicyDecision: ...
 4. `executing-orders` — venue adapter call
 5. `auditing-fills` — reconciliation
 6. `analyzing-pnl` — daily/weekly P&L breakdown
-7. `reviewing-strategies` — Strategy lifecycle (ramp-up, monthly review)
+7. `reviewing-strategies` — Strategy lifecycle (ramp-up, periodic strategy review)
 8. `governing-risk` — checkpoint snapshot, hard cap enforcement
 9. `reconciling-portfolio` (codex 신규) — position/cash/exposure state 합치기
 
@@ -340,7 +343,7 @@ def check(mode, agent, action_class, target, ctx) -> PolicyDecision: ...
 - `10_decisions` — ADR (creation order numbering)
 - `20_strategies` — strategy specs (per Strategy 1 file)
 - `30_components` — code module docs (sizing, risk, harness, etc.)
-- `40_ops` — runtime, monthly review, schedules
+- `40_ops` — runtime, ops digests, schedules
 - `50_research` — forensic, exploration, debate logs
 
 ### Root files

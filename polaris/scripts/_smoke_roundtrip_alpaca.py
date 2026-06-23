@@ -285,6 +285,7 @@ async def real_alpaca_close_fill(
     # OVER-COUNT guard (mirror OKX): the wallet must actually hold the tracked
     # shares. Fewer → state drift → reconcile (orphan), never oversell.
     available = await _alpaca_available_shares(adapter, symbol)
+    sell_qty = base_qty
     if available is not None and available < base_qty:
         logger.warning(
             "[alpaca/close] %s base_qty=%.10f but wallet holds %.10f (over-count) "
@@ -292,10 +293,22 @@ async def real_alpaca_close_fill(
             symbol, base_qty, available,
         )
         return CloseOrphan(available=available)
+    # SYMMETRIC over-count (open-side orphans landed SURPLUS shares on this
+    # symbol): the wallet holds MORE than the tracked base_qty. Sell the ACTUAL
+    # venue-held qty so the surplus is flattened, not left orphaned on close
+    # (flow_not_block — flatten what is really there). ``available == base_qty``
+    # keeps sell_qty == base_qty (byte-identical to the prior behaviour).
+    if available is not None and available > base_qty:
+        logger.warning(
+            "[alpaca/close] %s base_qty=%.10f but wallet holds %.10f (over-held) "
+            "— sell the actual venue qty so the surplus is not left orphaned",
+            symbol, base_qty, available,
+        )
+        sell_qty = available
 
     cl_ord_id = f"polAsell{uuid.uuid4().hex[:10]}"
     resp = await adapter.place_market_order(
-        symbol=symbol, side="sell", qty=base_qty, client_order_id=cl_ord_id,
+        symbol=symbol, side="sell", qty=sell_qty, client_order_id=cl_ord_id,
     )
     if not resp.ok or not resp.venue_order_id:
         # Venue reject (EXTERNAL) — transient, preserve the position + retry.

@@ -1,0 +1,249 @@
+"""Tick MFE-protect / scalp / trail / decay harvest helpers (extracted, move-only).
+
+Split out of ``_production_tick_engine`` to keep each module ≤500 LOC. PURE
+functions + the tick signal-id constants + the harvest tuning constants — no DB,
+no I/O (env reads only). Holds the flow_pressure fix surface the orchestrator
+threads into the exit pass: the per-strategy MFE-protect rung resolver
+(``_mfe_protect_base_rungs`` / ``_BURST_RIDER_MFE_RUNGS`` / ``_mfe_protect_schedule``),
+the OFI decay-gate exit (``_flow_decay_exit``), the let-winners-run trail override
+(``_momentum_trail_mult``) and the reversion scalp exit (``_scalp_exit_decision``).
+Re-exported by ``_production_tick_engine`` so every existing import keeps working
+byte-for-byte.
+"""
+
+from __future__ import annotations
+
+import os
+
+from polaris.core.live_recalc.exit_engine import MfeProtectSchedule
+from polaris.core.regime_fit import exit_tightness, regime_fit
+from polaris.core.ticks.config import TickEngineConfig
+
+
+def _env_pos_float(name: str, default: float) -> float:
+    """Positive-float env override (``default`` for unset / non-positive / bad)."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0.0 else default
+
+
+# Tick signal_id of the order-flow-imbalance momentum signal (also the
+# strategy_id stamped on the positions it opens) — the retune target.
+_FLOW_PRESSURE = "flow_pressure"
+_MICRO_REVERSION = "micro_reversion"
+_BURST_RIDER = "burst_rider"
+
+# A reversion (fast-scalp) position closes on the FIRST of: flow reversal (the
+# book turned against the fade), a micro-stop (adverse R past this floor), or a
+# small-R target (the snap-back banked). EXPECTANCY, not a throttle — it cuts a
+# dead scalp fast and banks a small winner fast; it never reduces size or blocks
+# an entry. R units share ``compute_unrealized_pnl_r``'s ATR-R basis.
+_SCALP_TARGET_R = 0.5
+_SCALP_STOP_R = -0.4
+
+# Per-strategy reversion TAKE-PROFIT override (R) — PROFIT SIDE ONLY.
+# [[harvest_generalization_2026-06-23]]: micro_reversion is the top harvest target
+# (avg MFE +0.523R over 120 trades, realized only -0.148R). Its bounded
+# revert-to-mean reached +0.30R for 57% and +0.45R for 44% of trades, yet the
+# shared +0.50R scalp target sat ABOVE that mass — so the revert peaked and gave
+# back before banking. A LOWER per-strategy target harvests the measured revert
+# (BB-fade enters at the band extreme, targets the middle — a bounded gain, NOT
+# let-winners-run). This ONLY moves the take-profit DOWN (banks sooner); the loss
+# side (``_SCALP_STOP_R``) and the flow-reversal exit are UNTOUCHED — NOT a tighter
+# loss cut / defensive throttle. Env-tunable; an unmapped reversion id keeps the
+# shared ``_SCALP_TARGET_R`` default (byte-identical).
+_MICRO_REVERSION_TARGET_R: float = _env_pos_float(
+    "POLARIS_TICK_MICRO_REVERSION_TARGET_R", 0.35
+)
+
+
+def _scalp_target_for_strategy(strategy_id: str) -> float:
+    """Reversion take-profit (R) for ``strategy_id`` — PROFIT side only.
+
+    micro_reversion harvests its measured bounded revert at the lower
+    ``_MICRO_REVERSION_TARGET_R``; every other reversion id keeps the shared
+    ``_SCALP_TARGET_R`` default (byte-identical). Never touches the loss side.
+    """
+    if strategy_id == _MICRO_REVERSION:
+        return _MICRO_REVERSION_TARGET_R
+    return _SCALP_TARGET_R
+
+
+# Per-strategy momentum exit trail width (ATR units) override for the precise
+# exit, by tick signal_id. flow_pressure's favourable OFI drift was being closed
+# too fast by the default 2.0-ATR Chandelier trail (honest fee-net retune
+# w02ccvq0q: the longer-hold cohort was the only gross-cost-positive bucket), so
+# it runs on a WIDER trail to capture the drift past the old ~75s scalp.
+# EXPECTANCY, not a throttle: it only LOOSENS the running trail (lets the winner
+# run); the ratchet, protected-BEP, loser-timeout and the G6 -1.0R hard rail (the
+# loss-defence) are all untouched, and HARVEST still tightens. Env-tunable
+# (``POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT``) so it can be re-aimed after the
+# honest-slate re-measure. An unlisted signal_id → None → module default.
+_FLOW_PRESSURE_TRAIL_MULT_DEFAULT = 4.0
+
+
+def _momentum_trail_mult(strategy_id: str) -> float | None:
+    """Let-winners-run ATR-trail override (ATR units) for a tick momentum strategy.
+
+    flow_pressure runs on a WIDER trail so its favourable OFI drift is captured
+    past the old fast scalp; every other tick momentum strategy (burst_rider)
+    returns ``None`` → the module-default trail (byte-identical). Env-overridable.
+    """
+    if strategy_id != _FLOW_PRESSURE:
+        return None
+    raw = os.getenv("POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT")
+    if raw is None or raw.strip() == "":
+        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    return val if val > 0.0 else _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+
+
+# Tick MOMENTUM signals routed through ``run_precise_exit`` — BOTH now carry the
+# MFE-protect harvest schedule. [[harvest_generalization_2026-06-23]]: the harvest
+# was wired ONLY to flow_pressure; burst_rider (also momentum) passed
+# mfe_protect=None, so its measured +0.3R excursions (27% reach +0.30R)
+# round-tripped on the wide ATR trail. micro_reversion is REVERSION family (scalp
+# exit, not run_precise_exit) → it is NOT here; it harvests via its scalp target.
+# Per-strategy MFE-protect BASE rungs (bep_at_r, protect_at_r, lock_r) BEFORE the
+# Seam3 regime-fit transform. Each momentum signal is calibrated to its OWN
+# excursion mass, so the rungs are strategy-SCOPED — a re-aim of one MUST NOT
+# bleed onto the other.
+#   - flow_pressure: reads the cfg fields (the env-tunable SSOT). RE-AIMED to the
+#     measured flow_pressure +MFE band 0.20/0.30/0.15 ([[flow_pressure_
+#     continuation_gate_2026-06-24]]).
+#   - burst_rider: its ORIGINAL rungs 0.35/0.50/0.25, calibrated to burst_rider's
+#     own measured +0.3R excursion mass ([[harvest_generalization_2026-06-23]]);
+#     pinned here so the flow_pressure re-aim leaves it byte-identical.
+_BURST_RIDER_MFE_RUNGS: tuple[float, float, float] = (0.35, 0.50, 0.25)
+
+
+def _mfe_protect_base_rungs(
+    strategy_id: str, cfg: TickEngineConfig
+) -> tuple[float, float, float] | None:
+    """Per-strategy base MFE-protect rungs (bep_at_r, protect_at_r, lock_r), or None.
+
+    flow_pressure → the env-tunable ``cfg`` SSOT; burst_rider → its own pinned
+    original rungs. An unmapped id → ``None`` (no schedule). Scoped so a re-aim of
+    one strategy's rungs leaves the other byte-identical.
+    """
+    if strategy_id == _FLOW_PRESSURE:
+        return (cfg.mfe_bep_r, cfg.mfe_protect_r, cfg.mfe_protect_lock_r)
+    if strategy_id == _BURST_RIDER:
+        return _BURST_RIDER_MFE_RUNGS
+    return None
+
+
+def _mfe_protect_schedule(
+    strategy_id: str, cfg: TickEngineConfig, *, regime: str | None = None
+) -> MfeProtectSchedule | None:
+    """MFE-protect harvest schedule for a tick MOMENTUM strategy, or ``None``.
+
+    Both momentum tick signals (flow_pressure + burst_rider, routed through
+    ``run_precise_exit``) ratchet the stop to BEP and lock positive R at their
+    OWN per-strategy rungs (``_mfe_protect_base_rungs``) — capturing the measured
+    +MFE excursion and cutting the give-back. The rungs are strategy-SCOPED:
+    flow_pressure reads the cfg SSOT (re-aimed to its measured band), burst_rider
+    keeps its own original 0.35/0.50/0.25 (calibrated to ITS excursion mass), so a
+    re-aim of one leaves the other byte-identical. burst_rider was previously
+    uncovered (→ None) so its +0.3R excursions round-tripped on the wide ATR trail;
+    it now has its own schedule. micro_reversion (reversion family → scalp exit) →
+    ``None`` here (it harvests via its scalp profit target). An unmapped id →
+    ``None`` → byte-identical module-default exit. EXPECTANCY, not a throttle: the
+    schedule only tightens the stop toward profit.
+
+    Seam3 (regime-fit): a BAD momentum fit (chop churn = -1) TIGHTENS the harvest
+    — the BEP/protect thresholds are pulled IN (divided by ``exit_tightness > 1``)
+    so a mis-regime trade banks its excursion sooner; a GOOD fit LOOSENS them
+    (LET_RUN). This only ratchets the protective stop TOWARD profit — it never
+    reduces size, never blocks/vetoes entry, never loosens below the G6 -1.0R rail
+    (run_precise_exit takes the protection-tighter of trail vs floor). The lock_r
+    floor is preserved (a tightened schedule never locks LESS positive R).
+    """
+    rungs = _mfe_protect_base_rungs(strategy_id, cfg)
+    if rungs is None:
+        return None
+    bep_r, protect_r, lock_r = rungs
+    # Momentum family (only momentum signals reach here). exit_tightness > 1 on a
+    # bad fit, < 1 on a good fit, 1.0 neutral / unknown regime → byte-identical.
+    t = exit_tightness(regime_fit("momentum", regime))
+    return MfeProtectSchedule(
+        bep_at_r=bep_r / t,
+        protect_at_r=protect_r / t,
+        # Lock AT LEAST the configured positive R — a tighter schedule never banks
+        # LESS (ratchet-toward-profit invariant); a looser fit keeps the base lock.
+        lock_r=lock_r * max(1.0, t),
+    )
+
+
+def _flow_decay_exit(
+    *, side: str, ofi: float | None, flow_confirmed: bool | None, pnl_r: float,
+    mfe_gate_r: float,
+) -> bool:
+    """True iff a GREEN flow_pressure position should exit on OFI decay / failure.
+
+    Once favourable excursion has appeared (``pnl_r >= mfe_gate_r``), trail on the
+    MICROSTRUCTURE — not just price distance — so the +0.67R MFE is banked near the
+    peak instead of round-tripping the wide ATR trail (the 17% give-back). Exits
+    when the order-flow that drove the entry DECAYS or REVERSES against the side:
+    the book imbalance flips against the position (``ofi`` sign opposes) OR the
+    post-spike follow-through has FAILED (``flow_confirmed`` is False — bid
+    withdrawal / microprice failure / spread widening). EXPECTANCY, not a throttle:
+    a per-position close once green; never a size-cut, an entry-block, or a halt —
+    and it never fires while the trade is red (the G6 -1.0R rail owns that).
+    """
+    if pnl_r < mfe_gate_r:
+        return False
+    if ofi is not None:
+        if side == "long" and ofi < 0.0:
+            return True
+        if side == "short" and ofi > 0.0:
+            return True
+    return flow_confirmed is False
+
+
+def _scalp_exit_decision(
+    *,
+    side: str,
+    entry_price: float,
+    last_mid: float,
+    ofi: float | None,
+    pnl_r: float,
+    strategy_id: str = "",
+) -> str | None:
+    """Fast-scalp exit for a reversion position — close-reason or None (hold).
+
+    Closes on the FIRST of:
+      - ``flow_reversal``: order-flow imbalance turned to favour the side the
+        fade was betting AGAINST continuing (a long fade wanted the down-push to
+        exhaust; if ``ofi`` is now firmly negative again, the snap-back failed).
+      - ``scalp_stop``: adverse excursion past ``_SCALP_STOP_R`` (micro-stop).
+      - ``scalp_target``: the snap-back banked the strategy's take-profit (small
+        R). ``strategy_id`` selects a per-strategy PROFIT target — micro_reversion
+        harvests its measured bounded revert at the lower
+        ``_MICRO_REVERSION_TARGET_R`` so the +0.30-0.45R excursion is banked
+        before it gives back; every other reversion id keeps the shared
+        ``_SCALP_TARGET_R`` (byte-identical). PROFIT side only.
+    EXPECTANCY (cut a dead scalp fast / bank a small winner fast), NOT a throttle.
+    The loss side (``_SCALP_STOP_R``) is UNCHANGED regardless of strategy_id.
+    """
+    if pnl_r <= _SCALP_STOP_R:
+        return "scalp_stop"
+    if pnl_r >= _scalp_target_for_strategy(strategy_id):
+        return "scalp_target"
+    if ofi is not None:
+        # A long reversion bet wants flow to stop selling; if ofi is firmly
+        # bid-negative (still selling) the fade is failing → exit. Symmetric for
+        # a short reversion (ofi firmly bid-positive = still buying).
+        if side == "long" and ofi < -0.0:
+            return "flow_reversal"
+        if side == "short" and ofi > 0.0:
+            return "flow_reversal"
+    return None

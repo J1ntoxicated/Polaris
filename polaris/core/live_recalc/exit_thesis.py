@@ -19,6 +19,7 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_BAR_MFE_LOCK_R,
     EXIT_BAR_MFE_PROTECT_R,
     EXIT_HARVEST_TRAIL_MULT,
+    EXIT_LETRUN_HARVEST_TRAIL_MULT,
     EXIT_LETRUN_TRAIL_MULT,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
@@ -358,11 +359,29 @@ def mode_to_exit_params(
 
     if mode is ManagementMode.HARVEST:
         gb = _giveback_level(mfe_r=mfe_r, pnl_r=pnl_r, giveback=giveback)
-        # Tight floor at the reached rung: lock positive R once the BEP rung is
-        # passed (BEP+lock). A HARD give-back closes immediately (thesis_harvest).
+        # Let-winners-run gate ([[ab_letrun_maker_2026-06-24]]): when the caller's
+        # schedule carries a PEAK-FRACTION arm AND this winner has reached it, the
+        # peak-fraction floor (in the FSM) already ratchets the stop toward profit
+        # at peak% — so a SOFT give-back must NOT collapse the trail to the 1-ATR
+        # EXIT_HARVEST_TRAIL_MULT (that is the flat-line bug). The WIDE
+        # let-run-harvest trail is held and the floor supplies the lock. The HARD
+        # give-back backstop (gb>=2 → thesis_harvest) STAYS armed regardless — it
+        # is the catastrophic backstop (an ATR-4x expansion could hand a +7R back to
+        # 0 even with the wide trail; red-team keeps it, raised to the 0.75 hard
+        # frac, NOT off). A schedule WITHOUT a peak-arm keeps the original tighten.
+        eff = base_mfe_protect or bar_mfe_protect
+        peak_armed = (
+            eff is not None
+            and eff.peak_lock_arm_r > 0.0
+            and mfe_r >= eff.peak_lock_arm_r
+        )
         return ThesisExitParams(
-            trail_mult=EXIT_HARVEST_TRAIL_MULT,
-            mfe_protect=base_mfe_protect or bar_mfe_protect,
+            trail_mult=(
+                EXIT_LETRUN_HARVEST_TRAIL_MULT
+                if peak_armed
+                else EXIT_HARVEST_TRAIL_MULT
+            ),
+            mfe_protect=eff,
             profit_target_r=base_profit_target_r,
             thesis_harvest=gb >= 2,
         )

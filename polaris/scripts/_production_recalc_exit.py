@@ -197,6 +197,21 @@ def _env_float(name: str, default: float) -> float:
     return val if val > 0.0 else default
 
 
+# Let-winners-run peak-fraction floor for the BAR TREND family
+# ([[ab_letrun_maker_2026-06-24]]). The bar TREND strategies (session_breakout /
+# equity_gap_go / fx_breakout_basket — every TREND-bucket registered strategy)
+# banked their winners at break-even (session_breakout +0.77R MFE → +0.009R). The
+# peak-fraction floor holds ~55% of the reached peak once MFE passes the +0.5R arm
+# (red-team: +0.5R, NOT +2.5R — a higher arm starves the bar common case), on a
+# WIDENED 3.0-ATR trail (was the 2.0 module default). REVERSION / range bucket is
+# UNCHANGED (arm 0.0 → disabled; their edge is a bounded revert-to-mean, never a
+# let-winners-run). EXPECTANCY, not a throttle: it only ratchets the stop toward
+# profit; size / entry side / the G6 -1.0R rail are untouched. Env-tunable.
+BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.5)
+BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.55)
+BAR_TREND_TRAIL_MULT: float = _env_float("POLARIS_BAR_TREND_TRAIL_MULT", 3.0)
+
+
 # Component B exit horizon ∝ timeframe. A still-OPEN losing position is given at
 # least this many bars of its strategy timeframe before the stale-loser timeout
 # can fire — so a 1H tsmom thesis is not force-closed at the flat 900s, while a
@@ -278,16 +293,32 @@ def _mfe_protect_for_strategy(strategy_id: str) -> MfeProtectSchedule | None:
     cls = STRATEGY_REGISTRY.get(strategy_id)
     if cls is None:
         return None
+    # Let-winners-run peak-fraction floor — TREND bucket only. A TREND-bucket bar
+    # strategy (session_breakout / equity_gap_go / fx_breakout_basket) arms the
+    # peak-fraction floor at +0.5R / frac 0.55; the REVERSION / range bucket leaves
+    # it DISABLED (arm 0.0 → byte-identical) because its edge is a bounded
+    # revert-to-mean, not a winner to let run. The fixed sub-arm rungs below stay
+    # the BELOW-arm phase for every bucket ([[ab_letrun_maker_2026-06-24]]).
+    is_trend = (
+        bucket_from_correlation_group(cls.metadata.correlation_group_id)
+        is Bucket.TREND
+    )
+    peak_arm = BAR_TREND_PEAK_LOCK_ARM_R if is_trend else 0.0
+    peak_frac = BAR_TREND_PEAK_LOCK_FRAC if is_trend else 0.0
     if cls.metadata.asset_class == "equity":
         return MfeProtectSchedule(
             bep_at_r=EXIT_EQUITY_MFE_BEP_R,
             protect_at_r=EXIT_EQUITY_MFE_PROTECT_R,
             lock_r=EXIT_EQUITY_MFE_LOCK_R,
+            peak_lock_arm_r=peak_arm,
+            peak_lock_frac=peak_frac,
         )
     return MfeProtectSchedule(
         bep_at_r=EXIT_BAR_MFE_BEP_R,
         protect_at_r=EXIT_BAR_MFE_PROTECT_R,
         lock_r=EXIT_BAR_MFE_LOCK_R,
+        peak_lock_arm_r=peak_arm,
+        peak_lock_frac=peak_frac,
     )
 
 
@@ -306,6 +337,25 @@ _THESIS_GIVEBACK = ThesisGivebackParams(
 # guards the fast 500ms tick path from single-tick noise). The tick engine passes
 # its own live streak and overrides this.
 _DEFAULT_BROKEN_STREAK: int = EXIT_THESIS_BROKEN_TICKS
+
+
+def _trail_mult_for_strategy(strategy_id: str) -> float | None:
+    """Let-winners-run ATR-trail width (ATR units) for a REGISTERED bar strategy.
+
+    A TREND-bucket bar strategy widens to ``BAR_TREND_TRAIL_MULT`` (3.0, was the
+    2.0 module default) so a confirmed winner runs and the peak-fraction floor (not
+    a 2-ATR trail) supplies the lock ([[ab_letrun_maker_2026-06-24]]). REVERSION /
+    range bucket and unregistered ids → ``None`` → module default (byte-identical).
+    Only LOOSENS the running trail (lets the winner run); the ratchet / floor /
+    loser-timeout / G6 -1.0R rail are untouched. Tick-engine ids carry their OWN
+    trail and never reach here.
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return None
+    if bucket_from_correlation_group(cls.metadata.correlation_group_id) is Bucket.TREND:
+        return BAR_TREND_TRAIL_MULT
+    return None
 
 
 def _bucket_for_strategy(strategy_id: str) -> Bucket:
@@ -604,13 +654,22 @@ async def run_precise_exit(
         if mfe_protect is not None
         else _mfe_protect_for_strategy(strategy_id)
     )
+    # Bar TREND family widens the running trail (the tick engine threads its own
+    # explicit trail_mult, never overridden here). A None caller trail → the
+    # registered bar strategy's let-winners-run width (TREND 3.0, else module
+    # default) ([[ab_letrun_maker_2026-06-24]]).
+    effective_trail_mult = (
+        trail_mult
+        if trail_mult is not None
+        else _trail_mult_for_strategy(strategy_id)
+    )
     decision = evaluate_exit(
         prev=prev, side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
         loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
         profit_target_r=_profit_target_for_strategy(strategy_id),
         entry_atr_pct=entry_atr_pct,
-        trail_mult=trail_mult,
+        trail_mult=effective_trail_mult,
         mfe_protect=effective_mfe_protect,
         mode=mode,
         thesis_bucket=_bucket_for_strategy(strategy_id),

@@ -79,31 +79,45 @@ def _scalp_target_for_strategy(strategy_id: str) -> float:
 # too fast by the default 2.0-ATR Chandelier trail (honest fee-net retune
 # w02ccvq0q: the longer-hold cohort was the only gross-cost-positive bucket), so
 # it runs on a WIDER trail to capture the drift past the old ~75s scalp.
+# burst_rider runs on its OWN wide trail (3.5) so its measured +7.33R spike is not
+# flat-lined by the default 2-ATR trail ([[ab_letrun_maker_2026-06-24]]) — the
+# peak-fraction floor (below) supplies the lock above the +1.0R arm.
 # EXPECTANCY, not a throttle: it only LOOSENS the running trail (lets the winner
 # run); the ratchet, protected-BEP, loser-timeout and the G6 -1.0R hard rail (the
-# loss-defence) are all untouched, and HARVEST still tightens. Env-tunable
-# (``POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT``) so it can be re-aimed after the
-# honest-slate re-measure. An unlisted signal_id → None → module default.
+# loss-defence) are all untouched, and HARVEST still tightens. Env-tunable so each
+# can be re-aimed after the honest-slate re-measure. An unlisted signal_id → None
+# → module default.
 _FLOW_PRESSURE_TRAIL_MULT_DEFAULT = 4.0
+_BURST_RIDER_TRAIL_MULT_DEFAULT = 3.5
+
+# Let-winners-run peak-fraction arm/frac for the tick MOMENTUM family
+# ([[ab_letrun_maker_2026-06-24]]). Red-team calibration: arm at +1.0R (NOT +2.5R
+# — only 6.5% of trades ever reach +1R; a higher arm starves the common case),
+# frac 0.50. burst_rider AND flow_pressure both ride it (consistency; the floor
+# only ratchets the stop toward profit — never a throttle). The sub-arm fixed
+# rungs (burst 0.35/0.50/0.25, flow_pressure the cfg band) stay the BELOW-arm
+# phase. Env-tunable.
+_TICK_PEAK_LOCK_ARM_R: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_ARM_R", 1.0)
+_TICK_PEAK_LOCK_FRAC: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_FRAC", 0.50)
 
 
 def _momentum_trail_mult(strategy_id: str) -> float | None:
     """Let-winners-run ATR-trail override (ATR units) for a tick momentum strategy.
 
-    flow_pressure runs on a WIDER trail so its favourable OFI drift is captured
-    past the old fast scalp; every other tick momentum strategy (burst_rider)
-    returns ``None`` → the module-default trail (byte-identical). Env-overridable.
+    flow_pressure (4.0) and burst_rider (3.5) each run on a WIDER trail so a
+    favourable run is captured past the old fast scalp; every other tick strategy
+    returns ``None`` → the module-default trail (byte-identical). Env-overridable
+    per strategy.
     """
-    if strategy_id != _FLOW_PRESSURE:
-        return None
-    raw = os.getenv("POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT")
-    if raw is None or raw.strip() == "":
-        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
-    return val if val > 0.0 else _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+    if strategy_id == _FLOW_PRESSURE:
+        return _env_pos_float(
+            "POLARIS_TICK_FLOW_PRESSURE_TRAIL_MULT", _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
+        )
+    if strategy_id == _BURST_RIDER:
+        return _env_pos_float(
+            "POLARIS_TICK_BURST_RIDER_TRAIL_MULT", _BURST_RIDER_TRAIL_MULT_DEFAULT
+        )
+    return None
 
 
 # Tick MOMENTUM signals routed through ``run_precise_exit`` — BOTH now carry the
@@ -180,6 +194,14 @@ def _mfe_protect_schedule(
         # Lock AT LEAST the configured positive R — a tighter schedule never banks
         # LESS (ratchet-toward-profit invariant); a looser fit keeps the base lock.
         lock_r=lock_r * max(1.0, t),
+        # Let-winners-run peak-fraction floor: above the +1.0R arm the stop holds
+        # ~50% of the REACHED peak MFE so a confirmed big winner (burst_rider's
+        # +7.33R) is locked at peak% instead of the small fixed lock that flat-lined
+        # it ([[ab_letrun_maker_2026-06-24]]). REGIME-INDEPENDENT (the wide trail +
+        # the let-run lock are the aggressive let-winners-run, not a regime tighten),
+        # so the Seam3 transform above does NOT touch the arm/frac.
+        peak_lock_arm_r=_TICK_PEAK_LOCK_ARM_R,
+        peak_lock_frac=_TICK_PEAK_LOCK_FRAC,
     )
 
 

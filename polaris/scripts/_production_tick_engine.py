@@ -136,6 +136,16 @@ PHASE1_VENUES: frozenset[str] = TICK_ENGINE_OWNED_VENUES
 # signals keep the strength-gated default.
 _MAKER_FIRST_SIGNALS: frozenset[str] = frozenset({_FLOW_PRESSURE, _MICRO_REVERSION})
 
+# Tick signals routed MARKETABLE-LIMIT (cross the spread with a cap_bps-capped
+# limit → market fallback) on OKX ([[ab_letrun_maker_2026-06-24]] Build B):
+# burst_rider is a MOMENTUM tick — the price runs while a passive post-only would
+# wait at the touch (non-fill), so it must cross to keep the trade, but with an
+# adverse-fill cap (cap_bps past the ask). MUST NOT be in the post-only
+# (_MAKER_FIRST) set — a momentum entry that cannot rest would mostly non-fill →
+# late market fallback (worse). flow_not_block: a no-fill/reject still market-
+# falls back, so the entry is never missed, only (rarely) a worse taker.
+_MARKETABLE_LIMIT_SIGNALS: frozenset[str] = frozenset({_BURST_RIDER})
+
 # Minimum tradeable notional (USD) for a tick entry. compute_size returns
 # ``final_risk_pct × equity`` which, on an almost-exhausted binding daily/cap
 # headroom, can clip to a POSITIVE-but-sub-minimum residual (e.g. $0.0001). Such
@@ -277,6 +287,10 @@ async def _try_open(
         # would-cross/reject/timeout). flow_not_block: cheaper when possible, never
         # a skipped entry. Other tick signals keep the strength-gated default.
         prefer_maker=(intent.signal_id in _MAKER_FIRST_SIGNALS),
+        # burst_rider (momentum tick) crosses the spread with a cap_bps-capped
+        # limit → market fallback (Build B): it cannot rest passively, so it fills
+        # like a taker but never worse than the cap. NOT in the post-only set.
+        marketable_limit=(intent.signal_id in _MARKETABLE_LIMIT_SIGNALS),
     )
     if trade is None:
         return False

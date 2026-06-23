@@ -1003,9 +1003,12 @@ async def test_momentum_exit_pass_profit_target_uses_anchored_pnl_r(
 
 
 def test_momentum_trail_mult_routes_flow_pressure_wider_only() -> None:
-    # The router gives flow_pressure the wider trail; burst_rider → None (default).
+    # Each momentum tick strategy gets its OWN let-winners-run wide trail
+    # ([[ab_letrun_maker_2026-06-24]]): flow_pressure 4.0, burst_rider 3.5 (was the
+    # 2.0 module default that flat-lined its +7.33R spike). Non-momentum →
+    # None (module default).
     assert _momentum_trail_mult("flow_pressure") == _FLOW_PRESSURE_TRAIL_MULT_DEFAULT
-    assert _momentum_trail_mult("burst_rider") is None
+    assert _momentum_trail_mult("burst_rider") == 3.5
     assert _momentum_trail_mult("micro_reversion") is None
 
 
@@ -1146,58 +1149,52 @@ def _flow_pressure_momentum_setup(
 
 
 @pytest.mark.asyncio
-async def test_flow_pressure_momentum_holds_drift_burst_rider_closes(
+async def test_momentum_peak_fraction_banks_big_winner_at_peak_pct(
     memdb: sqlite3.Connection,
 ) -> None:
+    # let-winners-run peak-fraction floor ([[ab_letrun_maker_2026-06-24]]): a tick
+    # momentum winner that peaked +1.75R (peak 114, entry 100, entry_atr_pct 0.04 →
+    # atr_r=8.0) and retraced toward ~104 (only +0.5R) is BANKED at the peak-fraction
+    # floor (entry + 1.75·0.50·8.0 = 107.0, == +3.5R) instead of round-tripping to
+    # break-even on the wide running trail — the exact burst_rider +7.33R→+0.137R bug.
+    # Both momentum tick signals carry the +1.0R/frac-0.50 arm, so BOTH bank the
+    # winner at ~peak% (the wider 4.0 flow_pressure / 3.5 burst trail no longer
+    # decides it — the floor does). The mark (104) sits BELOW the 107 floor → close
+    # AT the locked +3.5R. flow_not_block: the stop only RATCHETED toward profit.
     now_ts = int(time.time())
     now_mono = time.monotonic()
-
-    # A drifting tick STILL near its high: peak was 114, now marks ~104 (above the
-    # 102 MFE-protect lock). The live-window ATR% proxy (~3.85% from the lo/hi span
-    # around 104) drives the trail width: the default 2.0-ATR trail (stop ≈ 106.3)
-    # is breached by the 104 mark → CLOSE, while the wider 4.0-ATR flow_pressure
-    # trail (stop ≈ 98.6, floored to the 102 protect lock) HOLDS the 104 mark.
     window = _alternating_window(now_mono, lo=102.0, hi=106.0, last=104.0)
 
-    # burst_rider (default trail) → the pullback breaches the trail → CLOSE.
-    state_b, eng_b, writer_b = _flow_pressure_momentum_setup(
-        memdb, now_ts=now_ts, strategy_id="burst_rider",
-    )
-    writer_b.set_stream(INSTRUMENT, window, now_mono)
-    await _run_exits(
-        memdb, state_b, eng_b, now_ts=now_ts, now_mono=now_mono, phase="P0",
-        real_roundtrip=False, okx_adapter=None, capital_session=None,
-        lookup_regime=eng_mod._lookup_regime_str,
-    )
-    assert "pos_fp" not in eng_b.family_by_position, (
-        "burst_rider on the DEFAULT trail must close on this drift pullback"
-    )
-
-    # flow_pressure (wider trail) on the SAME drift → HOLD (drift keeps running).
-    memdb.execute("DELETE FROM positions WHERE position_id = 'pos_fp'")
-    state_f, eng_f, writer_f = _flow_pressure_momentum_setup(
-        memdb, now_ts=now_ts, strategy_id="flow_pressure",
-    )
-    writer_f.set_stream(INSTRUMENT, window, now_mono)
-    await _run_exits(
-        memdb, state_f, eng_f, now_ts=now_ts, now_mono=now_mono, phase="P0",
-        real_roundtrip=False, okx_adapter=None, capital_session=None,
-        lookup_regime=eng_mod._lookup_regime_str,
-    )
-    assert "pos_fp" in eng_f.family_by_position, (
-        "flow_pressure on the WIDER trail must HOLD the drift past the old scalp"
-    )
-    assert any(
-        t.position_id == "pos_fp" and not t.closed for t in state_f.open_trades
-    )
+    for strategy_id in ("burst_rider", "flow_pressure"):
+        memdb.execute("DELETE FROM positions WHERE position_id = 'pos_fp'")
+        state, eng, writer = _flow_pressure_momentum_setup(
+            memdb, now_ts=now_ts, strategy_id=strategy_id,
+        )
+        writer.set_stream(INSTRUMENT, window, now_mono)
+        await _run_exits(
+            memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+            real_roundtrip=False, okx_adapter=None, capital_session=None,
+            lookup_regime=eng_mod._lookup_regime_str,
+        )
+        # The peak-fraction floor (107.0) banked the +3.5R winner — the mark (104)
+        # is below it → closed at the locked positive R, NOT a breakeven round-trip.
+        assert "pos_fp" not in eng.family_by_position, strategy_id
+        row = memdb.execute(
+            "SELECT stop_price FROM positions WHERE position_id = 'pos_fp'"
+        ).fetchone()
+        # entry + peak_mfe_r(1.75) · frac(0.50) · atr_r(8.0) = 107.0.
+        assert row[0] == pytest.approx(107.0, abs=0.01), strategy_id
 
 
 # ---------------------------------------------------------------------------
-# (i) flow_pressure RE-AIM (lever 3): the entry path routes flow_pressure OKX
-# entries maker-first (prefer_maker=True → post-only at touch → TAKER fallback),
-# while burst_rider keeps the strength-gated default (prefer_maker=False). The
-# taker fallback inside reserve_and_submit/real_okx_open_fill guarantees the
-# trade is never missed — covered in test_okx_limit_execution.
+# (i) flow_pressure RE-AIM (lever 3) + Build B momentum cross: the entry path
+# routes flow_pressure / micro_reversion OKX entries maker-first (prefer_maker=
+# True → post-only at touch → TAKER fallback), while burst_rider (momentum tick)
+# routes MARKETABLE-LIMIT (marketable_limit=True → cross with a cap_bps cap →
+# market fallback), NEVER post-only (a momentum entry that cannot rest would
+# non-fill). The fallback inside reserve_and_submit/real_okx_open_fill guarantees
+# the trade is never missed — covered in test_okx_limit_execution /
+# test_okx_marketable_limit. ([[ab_letrun_maker_2026-06-24]])
 # ---------------------------------------------------------------------------
 
 
@@ -1207,10 +1204,12 @@ async def test_flow_pressure_entry_routes_prefer_maker(
 ) -> None:
     from polaris.scripts._production_tick_engine import TickIntent, _try_open
 
-    captured: dict[str, bool] = {}
+    captured: dict[str, tuple[bool, bool]] = {}
 
     async def _fake_submit(**kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
-        captured[kwargs["sig"].strategy_id] = kwargs["prefer_maker"]
+        captured[kwargs["sig"].strategy_id] = (
+            kwargs["prefer_maker"], kwargs["marketable_limit"],
+        )
         return None  # no trade object → _try_open returns False cleanly
 
     monkeypatch.setattr(eng_mod, "reserve_and_submit", _fake_submit)
@@ -1240,14 +1239,17 @@ async def test_flow_pressure_entry_routes_prefer_maker(
     await _open("micro_reversion")
     await _open("burst_rider")
 
-    assert captured["flow_pressure"] is True, (
-        "flow_pressure OKX entry must route maker-first (prefer_maker=True)"
+    assert captured["flow_pressure"] == (True, False), (
+        "flow_pressure OKX entry must route maker-first (prefer_maker=True, "
+        "marketable_limit=False)"
     )
-    assert captured["micro_reversion"] is True, (
-        "micro_reversion overshoot fade must route maker-first (prefer_maker=True)"
+    assert captured["micro_reversion"] == (True, False), (
+        "micro_reversion overshoot fade must route maker-first (prefer_maker=True, "
+        "marketable_limit=False)"
     )
-    assert captured["burst_rider"] is False, (
-        "burst_rider keeps the strength-gated default (prefer_maker=False)"
+    assert captured["burst_rider"] == (False, True), (
+        "burst_rider (momentum tick) must route marketable-limit "
+        "(marketable_limit=True), NOT post-only (prefer_maker=False)"
     )
 
 

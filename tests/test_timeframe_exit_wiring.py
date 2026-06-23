@@ -163,7 +163,9 @@ async def test_1m_ruler_reproduces_noise_cut(memdb: sqlite3.Connection) -> None:
 @pytest.mark.asyncio
 async def test_1h_strategy_trail_uses_1h_atr(memdb: sqlite3.Connection) -> None:
     """RESOLVED: the SAME price action on a tsmom (1H) position survives —
-    the trail is 2×(1H ATR)=8.0 below the peak, not 2×(1m ATR)=0.2."""
+    the trail uses the 1H ATR ruler, not the 1m ATR. tsmom is a TREND-bucket bar
+    strategy so the let-winners-run width is the widened 3.0-ATR trail
+    ([[ab_letrun_maker_2026-06-24]])."""
     _seed_bars(memdb, interval="1m", n=20, band=0.05, close=99.5)
     _seed_bars(memdb, interval="1H", n=20, band=2.0, close=100.0,
                end_ts=NOW - 60)
@@ -173,8 +175,8 @@ async def test_1h_strategy_trail_uses_1h_atr(memdb: sqlite3.Connection) -> None:
     await _recalc(memdb, state)
     row = _row(memdb, "pos-1h")
     assert row["status"] == "open"  # the 1m noise dip no longer stops it
-    # stop = peak(100) - 2.0 × (100 × 0.04) = 92.0 (the 1H ruler).
-    assert row["stop_price"] == pytest.approx(92.0, abs=0.5)
+    # stop = peak(100) - 3.0 × (100 × 0.04) = 88.0 (the 1H ruler × the TREND trail).
+    assert row["stop_price"] == pytest.approx(88.0, abs=0.5)
     # The 1H ATR landed in the recalc TTL cache (one query per cadence).
     assert (IID, "1H") in state.tf_atr_cache
 

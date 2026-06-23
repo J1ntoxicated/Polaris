@@ -61,7 +61,12 @@ _GIVEBACK = ThesisGivebackParams(arm_r=1.0, frac=0.5, hard_frac=0.8)
 def test_mfe_protect_round_trips_schedule_to_dict_and_back() -> None:
     sched = MfeProtectSchedule(bep_at_r=0.30, protect_at_r=0.45, lock_r=0.20)
     payload = mfe_protect_to_dict(sched)
-    assert payload == {"bep_at_r": 0.30, "protect_at_r": 0.45, "lock_r": 0.20}
+    # The wire form now also carries the let-winners-run peak-fraction pair
+    # ([[ab_letrun_maker_2026-06-24]]) — disabled (0.0) on this fixed-only schedule.
+    assert payload == {
+        "bep_at_r": 0.30, "protect_at_r": 0.45, "lock_r": 0.20,
+        "peak_lock_arm_r": 0.0, "peak_lock_frac": 0.0,
+    }
     assert mfe_protect_from_dict(payload) == sched
 
 

@@ -14,6 +14,7 @@ import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.live_recalc.exit_types import Bucket
 from polaris.core.pipeline import (
     GateOrchestrator,
     build_exit_payload,
@@ -49,12 +50,38 @@ from polaris.scripts._production_counterfactual import (
     record_pipeline_cohort,
 )
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
-from polaris.strategies import BaseStrategy, RawSignal
+from polaris.scripts._production_recalc_exit import _bucket_for_strategy
+from polaris.strategies import STRATEGY_REGISTRY, BaseStrategy, RawSignal
 
 if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
 
 logger = logging.getLogger(__name__)
+
+
+def _bar_order_mode(strategy_id: str) -> tuple[bool, bool]:
+    """Per-family OKX order mode for a BAR-pipeline entry → ``(prefer_maker,
+    marketable_limit)`` ([[ab_letrun_maker_2026-06-24]] Build B).
+
+    A breakout/TREND bar strategy CROSSES the spread (marketable-limit, a
+    cap_bps-capped taker-like fill) — the price runs while a passive order waits,
+    so resting post-only would non-fill. A reversion/range bar strategy rests
+    PASSIVELY at the touch (post-only) — you are fading an exhausted move, the
+    touch is the natural fill. An UNREGISTERED id keeps the strength-gated default
+    (both False) so the entry is never blocked. Every mode still falls back to a
+    plain market order on no-fill/reject/timeout (flow_not_block).
+
+    NOTE: the OKX entry path is the only one wired to these flags today; Capital
+    bar entries stay market-default (working-order fill-rate unverified —
+    measurement-shadow first per the design). The tuple is a no-op for them.
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return (False, False)
+    if _bucket_for_strategy(strategy_id) is Bucket.TREND:
+        return (False, True)   # breakout/momentum → cross (marketable-limit)
+    return (True, False)       # reversion/range → rest passively (post-only)
+
 
 # T7: the flat CFD_LEVERAGE_DEFAULT (was 30.0) is RETIRED — Capital leverage is
 # now per-market via derive_leverage(stream, asset_class) (FX 30 / index 20 /
@@ -450,12 +477,18 @@ async def run_pipeline_for_signal(
     notional_usd = max(
         10.0, min(float(sized_payload.get("final_notional_usd", 50.0)), 5_000.0)
     )
+    # Build B: per-family OKX order mode — breakout/TREND bar strategy crosses
+    # the spread (marketable-limit, cap_bps), reversion/range rests post-only.
+    # Every mode falls back to market on no-fill/reject (flow_not_block). Capital
+    # bar entries are unaffected (market-default; OKX-only wire today).
+    bar_prefer_maker, bar_marketable_limit = _bar_order_mode(sig.strategy_id)
     trade = await reserve_and_submit(
         conn=conn, state=state, sig=sig, venue=venue, symbol=symbol,
         asset_class=asset_class, underlying_group_id=underlying_group_id,
         notional_usd=notional_usd, last_price=last_price, now_ts=now_ts,
         real_roundtrip=real_roundtrip, capital_session=capital_session,
         okx_adapter=okx_adapter, alpaca_adapter=alpaca_adapter,
+        prefer_maker=bar_prefer_maker, marketable_limit=bar_marketable_limit,
     )
     if trade is None:
         return

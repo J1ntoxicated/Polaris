@@ -32,6 +32,7 @@ from polaris.scripts._limit_exec_constants import (
     LIMIT_POLL_DELAY_SEC,
     OKX_BALANCE_CLAMP_BUFFER_FRAC,
     limit_fill_wait_sec,
+    marketable_limit_cap_bps,
     strong_signal_strength,
 )
 from polaris.scripts._okx_market_chunk import (
@@ -300,6 +301,95 @@ async def _okx_post_only_open(
     return attempt
 
 
+async def _okx_marketable_ask(adapter: Any, *, inst_id: str) -> float | None:
+    """Resolve the aggressive touch for a BUY: best ASK (the marketable side).
+
+    Returns ``None`` when the ticker has no usable ask so the caller falls back
+    to a plain market order (fail-safe — never blocks the entry).
+    """
+    tk = await adapter.fetch_ticker(inst_id)
+    ask = tk.get("askPx")
+    try:
+        px = float(ask) if ask not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0.0 else None
+
+
+async def _okx_marketable_limit_open(
+    adapter: Any,
+    *,
+    inst_id: str,
+    notional_usd: float,
+    strategy_id: str,
+    last_price: float | None,
+    poll_delay_sec: float,
+    cap_bps: float,
+) -> OpenAttempt | None:
+    """Marketable-limit BUY: a limit at ``ask × (1 + cap_bps/1e4)``, poll, cancel.
+
+    A momentum/breakout entry crosses the spread (so it fills like a taker and
+    keeps the trade) but with an adverse-fill cap — it can never fill WORSE than
+    ``cap_bps`` past the best ask on a fast tape. Returns the filled
+    ``OpenAttempt`` (incl. a partial fill), or ``None`` when the limit could not
+    be placed / did not fill in time (the order is cancelled before returning
+    ``None`` so no live order leaks). Raises only on an unexpected adapter error
+    — the caller treats a raise as a fail-safe market fallback.
+    """
+    ask_px = await _okx_marketable_ask(adapter, inst_id=inst_id)
+    if ask_px is None:
+        return None  # no usable ask → market fallback
+    cap_px = ask_px * (1.0 + cap_bps / 10_000.0)
+    resp = await adapter.place_market_order(
+        inst_id=inst_id,
+        side="buy",
+        notional_usd=notional_usd,
+        client_order_id=f"polLmk{uuid.uuid4().hex[:8]}",
+        ord_type="limit",
+        last_price_hint=cap_px,
+    )
+    if not resp.ok or not resp.venue_order_id:
+        logger.info(
+            "[okx/limit] %s marketable-limit rejected code=%s — market fallback",
+            inst_id, resp.code,
+        )
+        return None
+    ord_id = resp.venue_order_id
+    deadline = time.monotonic() + limit_fill_wait_sec()
+    while True:
+        await asyncio.sleep(poll_delay_sec)
+        state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
+        rows = state.get("data", []) or []
+        attempt = _normalize_open_rows(
+            rows, strategy_id=strategy_id, last_price=last_price,
+        )
+        if attempt is not None:
+            logger.info(
+                "[okx/limit] %s marketable-limit filled ordId=%s cap_bps=%.1f",
+                inst_id, ord_id, cap_bps,
+            )
+            return attempt
+        if time.monotonic() >= deadline:
+            break
+    # Timed out unfilled — cancel, then re-poll once for a cancel-race partial
+    # (orphan guard: a partial cancel still leaves a REAL position to track).
+    try:
+        await adapter.cancel_order(inst_id=inst_id, ord_id=ord_id)
+    except Exception as exc:  # noqa: BLE001 — cancel best-effort; still re-check
+        logger.warning("[okx/limit] %s marketable cancel raised %r", inst_id, exc)
+    state = await adapter.fetch_order(inst_id=inst_id, ord_id=ord_id)
+    rows = state.get("data", []) or []
+    attempt = _normalize_open_rows(
+        rows, strategy_id=strategy_id, last_price=last_price,
+    )
+    if attempt is not None:
+        logger.info(
+            "[okx/limit] %s marketable partial-fill on cancel ordId=%s — tracked",
+            inst_id, ord_id,
+        )
+    return attempt
+
+
 def _clamp_to_available(
     notional_usd: float, available_usdt: float | None
 ) -> float | None:
@@ -334,6 +424,8 @@ async def real_okx_open_fill(
     poll_delay_sec: float = LIMIT_POLL_DELAY_SEC,
     available_usdt: float | None = None,
     prefer_maker: bool = False,
+    marketable_limit: bool = False,
+    thin_market: bool = False,
 ) -> OpenAttempt:
     """OKX entry leg: post-only limit at touch → market fallback → normalize.
 
@@ -357,6 +449,16 @@ async def real_okx_open_fill(
     would-cross/reject/timeout, so the entry is NEVER missed (flow_not_block:
     cheaper when possible, never a skipped trade). Default ``False`` keeps the
     strength-gated behaviour byte-identical for every other caller.
+
+    ``marketable_limit`` ([[ab_letrun_maker_2026-06-24]] Build B): route a
+    momentum/breakout entry through a marketable-limit (a limit at
+    ``ask × (1 + cap_bps/1e4)`` so it crosses the spread and fills like a taker,
+    but never WORSE than ``cap_bps`` past the touch — adverse-fill cap on a fast
+    tape). ``cap_bps`` is liquidity-tiered (BTC/ETH 5 / top-alt 6 / mid 10 /
+    thin 20); ``thin_market`` forces the widest tier. A no-fill / reject / timeout
+    STILL falls back to a plain market order so the entry is never missed
+    (flow_not_block). Takes precedence over ``prefer_maker`` (a momentum entry
+    crosses; it does not rest post-only). Default ``False`` is byte-identical.
     """
     clamped = _clamp_to_available(notional_usd, available_usdt)
     if clamped is None:
@@ -373,6 +475,32 @@ async def real_okx_open_fill(
             strategy_id=strategy_id, last_price=last_price,
             poll_delay_sec=poll_delay_sec,
         )
+
+    # Build B: a momentum/breakout entry crosses the spread with a capped limit
+    # (fills like a taker, never worse than cap_bps past the touch) — applies
+    # even to a strong signal (it does NOT rest post-only). No-fill/reject/raise
+    # → market fallback (flow_not_block: a maker-miss is a worse taker, not a
+    # skip). Precedence: marketable_limit > prefer_maker > strength gate.
+    if marketable_limit:
+        cap_bps = marketable_limit_cap_bps(inst_id, thin=thin_market)
+        try:
+            attempt = await _okx_marketable_limit_open(
+                adapter, inst_id=inst_id, notional_usd=notional_usd,
+                strategy_id=strategy_id, last_price=last_price,
+                poll_delay_sec=poll_delay_sec, cap_bps=cap_bps,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-safe: never block the entry
+            logger.warning(
+                "[okx/limit] %s marketable-limit raised %r — market fallback",
+                inst_id, exc,
+            )
+            return await _market()
+        if attempt is not None:
+            return attempt
+        logger.info(
+            "[okx/limit] %s marketable-limit unfilled — market fallback", inst_id,
+        )
+        return await _market()
 
     if strength >= strong_signal_strength() and not prefer_maker:
         logger.info(

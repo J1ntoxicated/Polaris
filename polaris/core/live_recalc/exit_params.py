@@ -116,10 +116,37 @@ EXIT_THESIS_GIVEBACK_FRAC: Final[float] = _env_float(
     "POLARIS_EXIT_THESIS_GIVEBACK_FRAC", 0.50
 )
 EXIT_THESIS_GIVEBACK_HARD_FRAC: Final[float] = _env_float(
-    "POLARIS_EXIT_THESIS_GIVEBACK_HARD_FRAC", 0.60
+    "POLARIS_EXIT_THESIS_GIVEBACK_HARD_FRAC", 0.75
 )
 EXIT_LETRUN_TRAIL_MULT: Final[float] = _env_float(
     "POLARIS_EXIT_LETRUN_TRAIL_MULT", 4.0
+)
+
+# --- let-winners-run peak-fraction floor ([[ab_letrun_maker_2026-06-24]]) ------
+# Diagnosis: burst_rider peaked +7.33R but realised +0.137R — the small fixed
+# lock (+0.25R) + 60% give-back force-close + the 1-ATR HARVEST trail flat-lined
+# the winner at break-even. The peak-fraction floor RATCHETS the protective stop
+# to a FRACTION of the REACHED peak MFE once an arm rung is passed
+# (``entry ± peak_mfe_r * frac * atr_r``) so a confirmed big winner is locked at
+# ~peak% instead of breakeven. The fixed rungs above stay the SUB-ARM floor (they
+# govern below the arm); the engine composes the two with ``max()`` (phase). The
+# HARD give-back backstop is RAISED 0.60→0.75 (not OFF — red-team: an ATR 4x
+# expansion could otherwise hand a +7R back to 0; the backstop catches that) and
+# is gated while the peak-fraction trail is armed so the two never double-cut.
+#
+# Red-team CALIBRATION (load-bearing): arm at +1.0R for the tick burst family
+# (NOT +2.5R — only 6.5% of trades ever reach +1R; a higher arm starves the
+# common case) and +0.5R for the bar TREND family; frac ~0.50. EXPECTANCY, not a
+# throttle: it ONLY ratchets the stop toward profit; size / entry side / the G6
+# -1.0R rail are untouched. ``arm_r == 0.0`` DISABLES it (byte-identical).
+#
+# The HARVEST trail for a confirmed-momentum TREND winner must NOT collapse to the
+# 1-ATR ``EXIT_HARVEST_TRAIL_MULT`` (that flat-lined the burst); it stays WIDE so
+# the peak-fraction floor (not the trail) supplies the lock.
+EXIT_PEAK_LOCK_ARM_R: Final[float] = _env_float("POLARIS_EXIT_PEAK_LOCK_ARM_R", 1.0)
+EXIT_PEAK_LOCK_FRAC: Final[float] = _env_float("POLARIS_EXIT_PEAK_LOCK_FRAC", 0.50)
+EXIT_LETRUN_HARVEST_TRAIL_MULT: Final[float] = _env_float(
+    "POLARIS_EXIT_LETRUN_HARVEST_TRAIL_MULT", 3.5
 )
 
 # --- Grace + sustained gate ([[exit_thesis_grace_2026-06-23]]) ----------------

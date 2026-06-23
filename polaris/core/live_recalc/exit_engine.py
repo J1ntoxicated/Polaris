@@ -45,9 +45,12 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_FSM_PROTECT_R,
     EXIT_FSM_TOUCH_R,
     EXIT_HARVEST_TRAIL_MULT,
+    EXIT_LETRUN_HARVEST_TRAIL_MULT,
     EXIT_LETRUN_TRAIL_MULT,
     EXIT_LOSER_TIMEOUT_EXT_MULT,
     EXIT_LOSER_TIMEOUT_SEC,
+    EXIT_PEAK_LOCK_ARM_R,
+    EXIT_PEAK_LOCK_FRAC,
     EXIT_STATE_HARVEST,
     EXIT_STATE_OPEN,
     EXIT_STATE_PROTECTED,
@@ -280,14 +283,24 @@ def evaluate_exit(
     atr_one = _atr_one_usd(entry_price=entry_price, atr_pct=atr_pct)
     # Let-winners-run trail width: the per-position ``trail_mult`` override (e.g.
     # a wider flow_pressure trail) when supplied, else the module default. HARVEST
-    # still tightens to EXIT_HARVEST_TRAIL_MULT regardless — a locked big winner
-    # is protected even under a wider running trail.
+    # normally tightens to EXIT_HARVEST_TRAIL_MULT (1-ATR) to lock a big winner —
+    # BUT a confirmed-momentum TREND winner carrying a PEAK-FRACTION schedule must
+    # NOT collapse to the 1-ATR trail (that is exactly what flat-lined the +7.33R
+    # burst at break-even, [[ab_letrun_maker_2026-06-24]]). For those, HARVEST
+    # holds the WIDE let-run-harvest trail and the peak-fraction floor (4b) supplies
+    # the lock instead. A schedule WITHOUT a peak-arm keeps the original tighten.
     run_trail_mult = EXIT_ATR_TRAIL_MULT if trail_mult is None else trail_mult
-    effective_trail_mult = (
-        EXIT_HARVEST_TRAIL_MULT
-        if new_state == EXIT_STATE_HARVEST
-        else run_trail_mult
+    peak_lock_armed = (
+        mfe_protect is not None and mfe_protect.peak_lock_arm_r > 0.0
     )
+    if new_state == EXIT_STATE_HARVEST:
+        effective_trail_mult = (
+            max(EXIT_LETRUN_HARVEST_TRAIL_MULT, run_trail_mult)
+            if peak_lock_armed
+            else EXIT_HARVEST_TRAIL_MULT
+        )
+    else:
+        effective_trail_mult = run_trail_mult
     anchor = peak if side == "long" else trough
     stop_price = _trailing_stop(
         side=side, anchor_extreme=anchor, atr_one=atr_one,
@@ -309,6 +322,32 @@ def evaluate_exit(
             )
         elif mfe_r >= mfe_protect.bep_at_r:
             protect_floor = entry_price  # break-even: leave initial risk
+        # Peak-fraction floor (let-winners-run, [[ab_letrun_maker_2026-06-24]]):
+        # once MFE reaches the arm rung, lock a FRACTION of the REACHED peak MFE —
+        # ``entry ± peak_mfe_r * frac * atr_r`` — so a confirmed big winner is held
+        # near peak% instead of the small fixed lock that flat-lined the +7.33R
+        # burst. PHASE composition: the fixed sub-arm rungs govern BELOW the arm /
+        # the crossover; above it the peak-fraction floor takes over via the
+        # tighter-of (long → max / short → min). The ``mfe_r``-driven peak is the
+        # running max-MFE (the FSM never regresses it), so the floor is monotone.
+        if (
+            mfe_protect.peak_lock_arm_r > 0.0
+            and mfe_r >= mfe_protect.peak_lock_arm_r
+        ):
+            peak_offset = mfe_r * mfe_protect.peak_lock_frac * atr_r
+            peak_floor = (
+                entry_price + peak_offset
+                if side == "long"
+                else entry_price - peak_offset
+            )
+            if protect_floor is None:
+                protect_floor = peak_floor
+            else:
+                protect_floor = (
+                    max(protect_floor, peak_floor)
+                    if side == "long"
+                    else min(protect_floor, peak_floor)
+                )
         if protect_floor is not None:
             stop_price = (
                 max(stop_price, protect_floor)
@@ -391,9 +430,12 @@ __all__ = [
     "EXIT_FSM_PROTECT_R",
     "EXIT_FSM_TOUCH_R",
     "EXIT_HARVEST_TRAIL_MULT",
+    "EXIT_LETRUN_HARVEST_TRAIL_MULT",
     "EXIT_LETRUN_TRAIL_MULT",
     "EXIT_LOSER_TIMEOUT_EXT_MULT",
     "EXIT_LOSER_TIMEOUT_SEC",
+    "EXIT_PEAK_LOCK_ARM_R",
+    "EXIT_PEAK_LOCK_FRAC",
     "EXIT_STATE_HARVEST",
     "EXIT_STATE_OPEN",
     "EXIT_STATE_PROTECTED",

@@ -56,11 +56,24 @@ class MfeProtectSchedule:
       - ``protect_at_r``: MFE at which a meaningful POSITIVE R is locked.
       - ``lock_r``: the positive R the stop locks once ``protect_at_r`` is hit
         (stop floors at entry ± ``lock_r`` in R-units).
+      - ``peak_lock_arm_r`` / ``peak_lock_frac`` (let-winners-run,
+        [[ab_letrun_maker_2026-06-24]]): once MFE reaches ``peak_lock_arm_r`` the
+        floor RATCHETS to a FRACTION of the REACHED peak MFE —
+        ``entry ± peak_mfe_r * peak_lock_frac * atr_r`` (R-units) — so a confirmed
+        big winner (burst_rider peaked +7.33R) is locked at ~peak% instead of being
+        flat-lined at the small fixed ``lock_r``. The fixed rungs above stay the
+        SUB-ARM floor (they govern below the arm); the engine composes the two with
+        ``max()`` (phase: fixed dominates below the arm-crossover, peak-fraction
+        above) and the ratchet keeps it monotone. ``peak_lock_arm_r == 0.0``
+        (default) DISABLES the peak-fraction branch → byte-identical to the
+        fixed-only schedule (every legacy caller).
     """
 
     bep_at_r: float
     protect_at_r: float
     lock_r: float
+    peak_lock_arm_r: float = 0.0
+    peak_lock_frac: float = 0.0
 
 
 # Hardening #9 (2026-06-23) — dict<->MfeProtectSchedule wire-point adapter
@@ -71,6 +84,10 @@ class MfeProtectSchedule:
 # plumbing — but pinning the round-trip now makes the future Slice-2 flip a
 # one-line change instead of a silent dict/dataclass mismatch. PURE/total, no
 # behaviour change (no caller threads a non-None compose schedule yet).
+# The three REQUIRED fixed rungs (a partial dict is a programming error). The
+# let-winners-run ``peak_lock_*`` pair is OPTIONAL on the wire — an older
+# probe/tuning-log dict that predates the peak-fraction floor round-trips to the
+# DISABLED default (0.0/0.0 → fixed-only, byte-identical).
 _MFE_PROTECT_FIELDS: Final[tuple[str, str, str]] = (
     "bep_at_r", "protect_at_r", "lock_r",
 )
@@ -82,6 +99,8 @@ def mfe_protect_to_dict(sched: MfeProtectSchedule) -> dict[str, float]:
         "bep_at_r": sched.bep_at_r,
         "protect_at_r": sched.protect_at_r,
         "lock_r": sched.lock_r,
+        "peak_lock_arm_r": sched.peak_lock_arm_r,
+        "peak_lock_frac": sched.peak_lock_frac,
     }
 
 
@@ -92,8 +111,10 @@ def mfe_protect_from_dict(
 
     ``None`` (the observe-mode default — no schedule threaded) → ``None``, so a
     sealed compose stays byte-identical at the wire point. A dict MUST carry all
-    three rungs (a partial dict is a programming error, raised loudly rather than
-    silently floored). Round-trips with ``mfe_protect_to_dict``.
+    three fixed rungs (a partial dict is a programming error, raised loudly rather
+    than silently floored). The ``peak_lock_*`` pair is optional — an older dict
+    without it defaults to the DISABLED peak-fraction floor (0.0). Round-trips with
+    ``mfe_protect_to_dict``.
     """
     if payload is None:
         return None
@@ -107,6 +128,8 @@ def mfe_protect_from_dict(
         bep_at_r=float(payload["bep_at_r"]),
         protect_at_r=float(payload["protect_at_r"]),
         lock_r=float(payload["lock_r"]),
+        peak_lock_arm_r=float(payload.get("peak_lock_arm_r", 0.0)),
+        peak_lock_frac=float(payload.get("peak_lock_frac", 0.0)),
     )
 
 

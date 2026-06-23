@@ -27,6 +27,7 @@ __all__ = [
     "OKX_MAX_MARKET_NOTIONAL_USDT",
     "STRONG_SIGNAL_STRENGTH",
     "limit_fill_wait_sec",
+    "marketable_limit_cap_bps",
     "strong_signal_strength",
 ]
 
@@ -89,6 +90,65 @@ STRONG_SIGNAL_STRENGTH: Final[float] = _env_float(
 def limit_fill_wait_sec() -> float:
     """Resolve the limit fill-wait at call time (env override honoured)."""
     return _env_float("POLARIS_LIMIT_FILL_WAIT_SEC", LIMIT_FILL_WAIT_SEC)
+
+
+# ---------------------------------------------------------------------------
+# MARKETABLE-LIMIT (momentum / breakout entry) — adverse-fill cap (bps).
+#
+# A momentum/breakout entry CANNOT rest passively (the price runs away while it
+# waits at the touch → non-fill). Instead it crosses the spread with a limit
+# capped ``cap_bps`` past the touch: it fills like a taker (keeps the trade) but
+# can never fill WORSE than ``touch × (1 + cap_bps/1e4)`` (adverse-fill cap on a
+# fast tape). A no-fill / reject / timeout STILL falls back to a plain market
+# order — flow_not_block: a maker-miss is never a skipped entry, only (rarely) a
+# worse taker.
+#
+# Tiered by liquidity ([[ab_letrun_maker_2026-06-24]] red-team): a too-tight cap
+# (e.g. 2 bps) IOC-no-fills on a breakout and the market fallback then fills
+# AFTER the move (worse). BTC/ETH = 5, top-alt = 6, mid = 10, thin/gap = 20.
+# Each tier is env-overridable for a paper sweep; the resolver reads the env at
+# call time so a run can retune without a redeploy.
+# ---------------------------------------------------------------------------
+MARKETABLE_LIMIT_CAP_BPS_MAJOR: Final[float] = 5.0
+MARKETABLE_LIMIT_CAP_BPS_TOP_ALT: Final[float] = 6.0
+MARKETABLE_LIMIT_CAP_BPS_MID: Final[float] = 10.0
+MARKETABLE_LIMIT_CAP_BPS_THIN: Final[float] = 20.0
+
+# OKX bases (split off the inst_id, e.g. ``BTC-USDT`` → ``BTC``) that get the
+# tightest major cap and the next top-alt tier. Everything else defaults to the
+# mid cap; thin/gap is reserved for an explicit caller hint (no cheap depth
+# probe — a future depth-driven bump can route to the thin tier).
+_MAJOR_BASES: Final[frozenset[str]] = frozenset({"BTC", "ETH"})
+_TOP_ALT_BASES: Final[frozenset[str]] = frozenset(
+    {"SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "TON", "TRX"}
+)
+
+
+def _okx_base(inst_id: str) -> str:
+    """Base ccy of an OKX inst_id (``BTC-USDT`` → ``BTC``; bare → itself)."""
+    sym = inst_id.upper()
+    return sym.split("-", 1)[0] if "-" in sym else sym
+
+
+def marketable_limit_cap_bps(inst_id: str, *, thin: bool = False) -> float:
+    """Adverse-fill cap (bps) for a marketable-limit entry on ``inst_id``.
+
+    Tiered by liquidity: BTC/ETH = 5, top-alt = 6, mid = 10, thin/gap = 20.
+    ``thin=True`` forces the widest cap (a gap/illiquid hint from the caller).
+    Each tier honours its env override at call time (paper-run sweep, no
+    redeploy). Never returns <= 0 (a non-positive override falls back to the
+    tier default so the cross is always at least the touch).
+    """
+    if thin:
+        return _env_float("POLARIS_MKTLIMIT_CAP_BPS_THIN", MARKETABLE_LIMIT_CAP_BPS_THIN)
+    base = _okx_base(inst_id)
+    if base in _MAJOR_BASES:
+        return _env_float("POLARIS_MKTLIMIT_CAP_BPS_MAJOR", MARKETABLE_LIMIT_CAP_BPS_MAJOR)
+    if base in _TOP_ALT_BASES:
+        return _env_float(
+            "POLARIS_MKTLIMIT_CAP_BPS_TOP_ALT", MARKETABLE_LIMIT_CAP_BPS_TOP_ALT
+        )
+    return _env_float("POLARIS_MKTLIMIT_CAP_BPS_MID", MARKETABLE_LIMIT_CAP_BPS_MID)
 
 
 def strong_signal_strength() -> float:

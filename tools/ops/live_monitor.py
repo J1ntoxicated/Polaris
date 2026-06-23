@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 import urllib.request
 
@@ -72,6 +73,26 @@ def main() -> None:
         f"net ${net:+.2f} (fee ${fees:.2f}) | 승률 {wr:.0f}% | reconciled제외 {rec}"
     )
 
+    # 경제 상시 감사 — 전략별 gross vs fee vs net, 수수료가 가격엣지 먹는 누수 자동 플래그.
+    print("\U0001f4ca 전략별 (리셋 후, gross/fee/net):")
+    for r in c.execute(
+        f"SELECT p.strategy_id s,COUNT(DISTINCT p.position_id) n,"
+        f"COALESCE(SUM(f.pnl_usd),0) net,COALESCE(SUM(ABS(f.fee_usd)),0) fee "
+        f"FROM positions p JOIN fills f ON f.{pid}=p.position_id AND f.is_close=1 "
+        f"WHERE p.opened_ts>=? AND p.status='closed' GROUP BY p.strategy_id "
+        f"HAVING n>=2 ORDER BY net ASC",
+        (rt,),
+    ):
+        gross = r["net"] + r["fee"]
+        tag = ""
+        if r["fee"] > abs(gross) and r["fee"] > 2:
+            tag = " ⚠️수수료>엣지"
+            flags.append(f"{r['s']} 수수료출혈: fee ${r['fee']:.1f} > gross ${gross:+.1f} (maker 진입 검토)")
+        print(
+            f"   {r['s']:18} n={r['n']:>2} gross ${gross:+.1f} "
+            f"fee ${r['fee']:.1f} net ${r['net']:+.1f}{tag}"
+        )
+
     direct_net = net
     try:
         d = json.load(urllib.request.urlopen(SNAP, timeout=4))  # noqa: S310
@@ -103,6 +124,27 @@ def main() -> None:
             flags.append(f"로그 에러/reject {errs}건 (최근 300줄)")
     except OSError:
         pass
+
+    # 구조 상시 감사 — 500 LOC 규율 부채를 매 iteration 가시화(누적 방지).
+    over = []
+    for root, _, files in os.walk("polaris"):
+        if "test" in root:
+            continue
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            with contextlib.suppress(OSError), open(
+                os.path.join(root, fn), encoding="utf-8", errors="ignore"
+            ) as fh:
+                ln = sum(1 for _ in fh)
+                if ln > 500:
+                    over.append((ln, fn))
+    over.sort(reverse=True)
+    top = ", ".join(f"{fn}:{ln}" for ln, fn in over[:3])
+    print(f"\U0001f3d7️ 구조: 500 LOC 초과 {len(over)}개" + (f" (최대 {top})" if over else " ✅"))
+    egregious = sum(1 for ln, _ in over if ln > 800)
+    if egregious:
+        flags.append(f"모듈화 부채: {egregious}개 파일 >800 LOC")
 
     if flags:
         print("⚠️ 이상:")

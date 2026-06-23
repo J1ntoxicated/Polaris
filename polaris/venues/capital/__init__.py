@@ -28,6 +28,10 @@ from polaris.venues.capital.market_proxy import (
     passes_proxy_4_axis,
     populate_capital_proxies,
 )
+from polaris.venues.capital.opening_hours import (
+    OpeningHoursWeek,
+    seconds_to_next_close,
+)
 from polaris.venues.capital.session import (
     CAPITAL_BASE_LIVE,
     PING_INTERVAL_SEC,
@@ -54,6 +58,7 @@ __all__ = [
     "CapitalSession",
     "CapitalSessionError",
     "CapitalTokens",
+    "OpeningHoursWeek",
     "PING_INTERVAL_SEC",
     "TOKEN_REFRESH_DEADLINE_SEC",
     "capital_price_row_to_bar",
@@ -65,5 +70,6 @@ __all__ = [
     "passes_proxy_4_axis",
     "populate_capital_proxies",
     "round_size_to_step",
+    "seconds_to_next_close",
     "size_usd_to_lots",
 ]

@@ -31,10 +31,12 @@ from typing import Any, Final
 import httpx
 
 from polaris.core.streams import fallback_leverage_for_asset_class
+from polaris.venues.capital.opening_hours import OpeningHoursWeek, parse_opening_hours
 
 __all__ = [
     "CAPITAL_MARKET_DETAIL_PATH",
     "CapitalMarketConstraint",
+    "OpeningHoursWeek",
     "ceil_size_to_step",
     "fetch_market_detail",
     "payload_to_constraint",
@@ -76,6 +78,11 @@ class CapitalMarketConstraint:
     # fallback when no bars exist for the conversion pair (0.0 = missing).
     lot_size: float = 1.0
     snapshot_mid: float = 0.0
+    # Per-epic UTC session windows (``instrument.openingHours`` parsed) — the
+    # source for the per-epic EOD close probe. None = absent/unparseable/non-UTC
+    # → the EOD path uses the legacy asset-class fallback. Defaulted so every
+    # existing constructor stays byte-identical (same pattern as ``lot_size``).
+    opening_hours: OpeningHoursWeek | None = None
 
 
 def round_size_to_step(value: float, step: float) -> float:
@@ -235,6 +242,7 @@ def _payload_to_constraint(epic: str, body: dict[str, Any]) -> CapitalMarketCons
         quote_ccy=quote_ccy,
         lot_size=lot_size if lot_size > 0.0 else 1.0,
         snapshot_mid=snapshot_mid,
+        opening_hours=parse_opening_hours(instrument.get("openingHours") or {}),
     )
 
 

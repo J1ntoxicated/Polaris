@@ -123,8 +123,7 @@ async def test_flush_prunes_stale_ticks_on_writer_conn(tmp_path) -> None:
     real_now = int(time.time())
     w.on_quote(_qt("okx:STALE-USDT", ts=real_now - QUOTE_TICKS_RETAIN_SEC - 120))
     w.on_quote(_qt("okx:FRESH-USDT", ts=real_now))
-    w._last_prune_ts = 0.0  # force the throttled prune to fire on this flush
-    await w._flush_once(loop)
+    await w._flush_once(loop)  # prune runs in-line on every flush (bounded chunk)
     conn = w._ensure_conn()
     syms = [r[0] for r in conn.execute("SELECT symbol FROM quote_ticks").fetchall()]
     w.close()

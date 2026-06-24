@@ -66,9 +66,12 @@ LIVE_PRICE_FRESH_SEC = 35.0
 # be lock-starved the way the old separate-connection checkpoint worker was (its
 # DELETE failed "database is locked" 74×/session and the table grew unbounded).
 QUOTE_TICKS_RETAIN_SEC = 600
-# Prune at most once/min — the DELETE is a small incremental batch, no need to
-# re-scan on every 1 Hz flush.
-_TICK_PRUNE_INTERVAL_SEC = 60.0
+# Prune in BOUNDED chunks per flush. A single full-table DELETE (250k rows) lost
+# the write-lock race "database is locked" for 60s+ against the busy loop conn and
+# the table grew unbounded → ENOSPC; a SMALL chunk slips into the same lock gaps
+# the small batch inserts win. Drains any backlog over successive 1 Hz flushes,
+# then deletes only the steady-state increment.
+_TICK_PRUNE_CHUNK = 2000
 
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
@@ -159,10 +162,6 @@ class QuoteTickWriter:
         self._conn: sqlite3.Connection | None = None
         self.flush_count = 0
         self.rows_written = 0
-        # Last on-disk prune wall-clock (throttle — see _flush_blocking). Seeded to
-        # NOW so the first prune fires ~1 min in, keeping the very first batch flush
-        # a single transaction and letting the startup WAL settle first.
-        self._last_prune_ts = time.time()
 
     # ------------------------------------------------------------------
     # In-mem path (WS recv callback) — M2: NO DB access here.
@@ -284,21 +283,20 @@ class QuoteTickWriter:
             raise
         self.flush_count += 1
         self.rows_written += len(rows)
-        # Prune the transient stream on THIS conn (it just held the write lock for
-        # the insert, so the DELETE can't be lock-starved). Throttled to ~once/min;
-        # best-effort so a rare lock blip never fails the flush (already committed).
-        now = time.time()
-        if now - self._last_prune_ts >= _TICK_PRUNE_INTERVAL_SEC:
-            self._last_prune_ts = now
-            cutoff = int(now) - QUOTE_TICKS_RETAIN_SEC
-            try:
-                conn.execute("BEGIN")
-                conn.execute("DELETE FROM quote_ticks WHERE ts < ?", (cutoff,))
-                conn.execute("COMMIT")
-            except sqlite3.Error:
-                with contextlib.suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-                logger.debug("[quote_writer] tick prune skipped (busy)")
+        # Prune the transient stream on THIS conn in a BOUNDED chunk (see
+        # _TICK_PRUNE_CHUNK). The dedicated writer wins the write lock for its small
+        # inserts, and a small chunked DELETE wins it the same way — a single
+        # full-table DELETE did NOT (it lost the lock race for 60s+ and the table
+        # grew unbounded → ENOSPC). Bare autocommit (no explicit BEGIN/COMMIT) keeps
+        # the batch insert above the single tested transaction; best-effort so a
+        # lock blip just retries on the next flush.
+        cutoff = int(time.time()) - QUOTE_TICKS_RETAIN_SEC
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute(
+                "DELETE FROM quote_ticks WHERE rowid IN "
+                "(SELECT rowid FROM quote_ticks WHERE ts < ? LIMIT ?)",
+                (cutoff, _TICK_PRUNE_CHUNK),
+            )
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:

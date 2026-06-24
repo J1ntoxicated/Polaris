@@ -64,9 +64,8 @@ class RetentionRule:
 #
 # * quote_ticks — backs only the dashboard recent-price view + the gate
 #   decision-mark fallback (MARK_FRESH_SEC=60s); the tick engine reads its
-#   live window from an in-memory ring, NOT this table. So NO consumer reads
-#   past 60s — 10 min (matches the in-loop cap) keeps the live stream transient
-#   instead of persisting hours of it (the old 2h table dominated WAL creep).
+#   live window from an in-memory ring, NOT this table. 2h matches the
+#   in-loop cap already in production_paper_loop.
 #
 # * ticker_baseline_samples — ``baseline.read_samples_window`` reads at most
 #   LOOKBACK_SLOW_SEC=30d (pnl_std) / LOOKBACK_FAST_SEC=7d. 35d = 30d + margin.
@@ -82,8 +81,8 @@ class RetentionRule:
 RETENTION_SPEC: tuple[RetentionRule, ...] = (
     RetentionRule("bars", "ts", 400 * _DAY,
                   "1D lookback 330d + MA200 warmup + gap margin"),
-    RetentionRule("quote_ticks", "ts", 600,
-                  "gate 60s mark fallback + dashboard recent; live=in-mem ring (matches in-loop cap)"),
+    RetentionRule("quote_ticks", "ts", 2 * 3600,
+                  "dashboard recent-price + mark fallback (matches in-loop cap)"),
     RetentionRule("ticker_baseline_samples", "ts", 35 * _DAY,
                   "baseline window 30d (pnl_std) + margin"),
     RetentionRule("watchlist_focus", "cycle_ts", 7 * _DAY,

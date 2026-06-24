@@ -56,23 +56,6 @@ RING_BUFFER_DEPTH = 600
 # mark; this constant is the shared default for the remaining execution prices.
 LIVE_PRICE_FRESH_SEC = 35.0
 
-# On-disk quote_ticks retention. quote_ticks is a TRANSIENT live-stream cache:
-# the live tick engine reads its window from the in-mem ring (above), and the
-# only DB consumers are the gate's 60s mark fallback + the dashboard recent-price
-# view — so 10 min is already generous (Jin 2026-06-24 "틱은 수분만 저장";
-# persisting the full stream for 2h dominated the WAL creep that ENOSPC'd the
-# bot). The dedicated WS-writer prunes its OWN table here, right after a batch
-# write, on the connection that just held the write lock — so the prune can never
-# be lock-starved the way the old separate-connection checkpoint worker was (its
-# DELETE failed "database is locked" 74×/session and the table grew unbounded).
-QUOTE_TICKS_RETAIN_SEC = 600
-# Prune in BOUNDED chunks per flush. A single full-table DELETE (250k rows) lost
-# the write-lock race "database is locked" for 60s+ against the busy loop conn and
-# the table grew unbounded → ENOSPC; a SMALL chunk slips into the same lock gaps
-# the small batch inserts win. Drains any backlog over successive 1 Hz flushes,
-# then deletes only the steady-state increment.
-_TICK_PRUNE_CHUNK = 2000
-
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
     "(instrument_id, venue, symbol, ts, bid, ask, mid, spread_bps, "
@@ -269,25 +252,14 @@ class QuoteTickWriter:
     def _flush_blocking(self, ticks: list[QuoteTick]) -> None:
         """Blocking sqlite write — runs in the executor thread, never the loop.
 
-        Wraps the batch insert AND the bounded retention prune in ONE explicit
-        transaction: the autocommit conn does ONE WAL commit for the batch (M1a,
-        not one per row), and the prune piggybacks the write lock already held for
-        the insert so it can never lose the lock race (a separate-statement DELETE
-        did — "database is locked" for 60s+, table grew unbounded → ENOSPC).
+        Wraps the batch in an explicit transaction so the autocommit conn does
+        ONE WAL commit for the whole batch (M1a), not one per row.
         """
         conn = self._ensure_conn()
         rows = [_row(q) for q in ticks]
-        # Bounded chunk so the in-txn delete stays quick (small lock hold); drains
-        # any backlog over successive 1 Hz flushes, then only the steady increment.
-        cutoff = int(time.time()) - QUOTE_TICKS_RETAIN_SEC
         conn.execute("BEGIN")
         try:
             conn.executemany(_INSERT_SQL, rows)
-            conn.execute(
-                "DELETE FROM quote_ticks WHERE rowid IN "
-                "(SELECT rowid FROM quote_ticks WHERE ts < ? LIMIT ?)",
-                (cutoff, _TICK_PRUNE_CHUNK),
-            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

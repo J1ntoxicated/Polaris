@@ -441,10 +441,14 @@ async def run_production_paper_loop(
     # quote_ticks (645k rows / 215 MB) made every concurrent read a heavy random-IO
     # scan that wedged the loop in UN-state the instant the dashboard attached. The
     # tick engine reads its live window from the in-mem ring (NOT this table), so
-    # quote_ticks only backs the dashboard's recent-price view → keep ~2h. The
-    # DELETE + PASSIVE checkpoint run on a throwaway connection in a worker thread
-    # every ~15s, off the loop.
-    _QUOTE_TICKS_RETAIN_SEC = 7200
+    # quote_ticks only backs the gate's 60s decision-mark fallback + the
+    # dashboard's recent-price view → keep just MINUTES, not hours. Was 2h (7200):
+    # persisting the full live stream for hours is unsustainable on disk (it
+    # dominated the WAL creep that, stacked on a near-full disk, ENOSPC'd the bot
+    # 2026-06-24) and NO consumer reads past 60s, so 10 min is already generous
+    # (Jin 2026-06-24 "틱은 수분만 저장"). The DELETE + PASSIVE checkpoint run on a
+    # throwaway connection in a worker thread every ~15s, off the loop.
+    _QUOTE_TICKS_RETAIN_SEC = 600
 
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)

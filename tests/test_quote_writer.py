@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 
-from polaris.core.data.quote_writer import QuoteTickWriter
+from polaris.core.data.quote_writer import QUOTE_TICKS_RETAIN_SEC, QuoteTickWriter
 from polaris.core.data.schema import QuoteTick
 from polaris.storage.schema import init_db
 
@@ -108,6 +109,26 @@ async def test_flush_is_single_transaction(tmp_path) -> None:
     assert w.rows_written == 10
     conn.set_trace_callback(None)
     w.close()
+
+
+async def test_flush_prunes_stale_ticks_on_writer_conn(tmp_path) -> None:
+    """The dedicated writer prunes its OWN table on flush (no lock-starved worker):
+    ticks older than the retain window are deleted, fresh ones survive. Guards the
+    2026-06-24 fix where the separate checkpoint conn could not win the write lock,
+    so quote_ticks grew unbounded and ENOSPC'd the bot."""
+    db = tmp_path / "q.sqlite"
+    init_db(db).close()
+    w = QuoteTickWriter(db)
+    loop = asyncio.get_running_loop()
+    real_now = int(time.time())
+    w.on_quote(_qt("okx:STALE-USDT", ts=real_now - QUOTE_TICKS_RETAIN_SEC - 120))
+    w.on_quote(_qt("okx:FRESH-USDT", ts=real_now))
+    w._last_prune_ts = 0.0  # force the throttled prune to fire on this flush
+    await w._flush_once(loop)
+    conn = w._ensure_conn()
+    syms = [r[0] for r in conn.execute("SELECT symbol FROM quote_ticks").fetchall()]
+    w.close()
+    assert syms == ["FRESH-USDT"]
 
 
 async def test_insert_or_replace_dedups_same_pk(tmp_path) -> None:

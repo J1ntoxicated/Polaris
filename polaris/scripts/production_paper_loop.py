@@ -436,26 +436,15 @@ async def run_production_paper_loop(
     # a reader and never holds the exclusive lock — it flushes whatever frames sit
     # behind no live snapshot, which the dashboard's sub-second read GAPS make
     # plenty — so the -wal stays bounded with ZERO deadlock surface.
-    # Cap quote_ticks so the live DB stays SMALL. The dashboard's 1s
-    # collect_snapshot + the WAL + any copy all scale with the DB; an unbounded
-    # quote_ticks (645k rows / 215 MB) made every concurrent read a heavy random-IO
-    # scan that wedged the loop in UN-state the instant the dashboard attached. The
-    # tick engine reads its live window from the in-mem ring (NOT this table), so
-    # quote_ticks only backs the gate's 60s decision-mark fallback + the
-    # dashboard's recent-price view → keep just MINUTES, not hours. Was 2h (7200):
-    # persisting the full live stream for hours is unsustainable on disk (it
-    # dominated the WAL creep that, stacked on a near-full disk, ENOSPC'd the bot
-    # 2026-06-24) and NO consumer reads past 60s, so 10 min is already generous
-    # (Jin 2026-06-24 "틱은 수분만 저장"). The DELETE + PASSIVE checkpoint run on a
-    # throwaway connection in a worker thread every ~15s, off the loop.
-    _QUOTE_TICKS_RETAIN_SEC = 600
-
+    # quote_ticks pruning moved to the dedicated WS-writer conn (QuoteTickWriter):
+    # a separate connection HERE could not win the write lock to DELETE — it failed
+    # "database is locked" 74x/session, so the transient stream grew unbounded (an
+    # old 645k rows / 215 MB made every concurrent dashboard read a heavy random-IO
+    # scan that wedged the loop). The writer now prunes on the lock it already holds
+    # for the insert; this worker does ONLY the PASSIVE checkpoint below.
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)
         try:
-            cutoff = int(time.time()) - _QUOTE_TICKS_RETAIN_SEC
-            ck.execute("DELETE FROM quote_ticks WHERE ts < ?", (cutoff,))
-            ck.commit()
             # PASSIVE ONLY. It flushes frames behind no snapshot and NEVER blocks a
             # reader — the behaviour that ran 6h rock-solid. A reclaiming (TRUNCATE)
             # checkpoint forces a FULL checkpoint of every -wal frame; on a large

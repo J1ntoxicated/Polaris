@@ -56,6 +56,20 @@ RING_BUFFER_DEPTH = 600
 # mark; this constant is the shared default for the remaining execution prices.
 LIVE_PRICE_FRESH_SEC = 35.0
 
+# On-disk quote_ticks retention. quote_ticks is a TRANSIENT live-stream cache:
+# the live tick engine reads its window from the in-mem ring (above), and the
+# only DB consumers are the gate's 60s mark fallback + the dashboard recent-price
+# view — so 10 min is already generous (Jin 2026-06-24 "틱은 수분만 저장";
+# persisting the full stream for 2h dominated the WAL creep that ENOSPC'd the
+# bot). The dedicated WS-writer prunes its OWN table here, right after a batch
+# write, on the connection that just held the write lock — so the prune can never
+# be lock-starved the way the old separate-connection checkpoint worker was (its
+# DELETE failed "database is locked" 74×/session and the table grew unbounded).
+QUOTE_TICKS_RETAIN_SEC = 600
+# Prune at most once/min — the DELETE is a small incremental batch, no need to
+# re-scan on every 1 Hz flush.
+_TICK_PRUNE_INTERVAL_SEC = 60.0
+
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
     "(instrument_id, venue, symbol, ts, bid, ask, mid, spread_bps, "
@@ -145,6 +159,10 @@ class QuoteTickWriter:
         self._conn: sqlite3.Connection | None = None
         self.flush_count = 0
         self.rows_written = 0
+        # Last on-disk prune wall-clock (throttle — see _flush_blocking). Seeded to
+        # NOW so the first prune fires ~1 min in, keeping the very first batch flush
+        # a single transaction and letting the startup WAL settle first.
+        self._last_prune_ts = time.time()
 
     # ------------------------------------------------------------------
     # In-mem path (WS recv callback) — M2: NO DB access here.
@@ -266,6 +284,21 @@ class QuoteTickWriter:
             raise
         self.flush_count += 1
         self.rows_written += len(rows)
+        # Prune the transient stream on THIS conn (it just held the write lock for
+        # the insert, so the DELETE can't be lock-starved). Throttled to ~once/min;
+        # best-effort so a rare lock blip never fails the flush (already committed).
+        now = time.time()
+        if now - self._last_prune_ts >= _TICK_PRUNE_INTERVAL_SEC:
+            self._last_prune_ts = now
+            cutoff = int(now) - QUOTE_TICKS_RETAIN_SEC
+            try:
+                conn.execute("BEGIN")
+                conn.execute("DELETE FROM quote_ticks WHERE ts < ?", (cutoff,))
+                conn.execute("COMMIT")
+            except sqlite3.Error:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                logger.debug("[quote_writer] tick prune skipped (busy)")
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:

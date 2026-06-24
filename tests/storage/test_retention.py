@@ -47,14 +47,6 @@ def _insert_bar(conn: sqlite3.Connection, ts: int, *, interval: str = "1D") -> N
     )
 
 
-def _insert_quote(conn: sqlite3.Connection, ts: int) -> None:
-    conn.execute(
-        "INSERT INTO quote_ticks (instrument_id, venue, symbol, ts, bid, ask, "
-        "mid, spread_bps) VALUES ('I','okx','BTC-USDT',?,1,1,1,1)",
-        (ts,),
-    )
-
-
 def _insert_baseline_sample(conn: sqlite3.Connection, ts: int) -> None:
     conn.execute(
         "INSERT INTO ticker_baseline_samples (instrument_id, underlying_group_id, "
@@ -137,12 +129,18 @@ def test_prune_table_rejects_wrong_column() -> None:
 # --- window correctness -----------------------------------------------------
 
 
+def test_quote_ticks_not_in_retention_spec() -> None:
+    """Tick-stream decouple: quote_ticks is single-row LWW (bounded), so the
+    prune-DELETE rule is removed — deleting the lone latest row on age would
+    drop a still-valid price for a quiet instrument."""
+    assert all(rule.table != "quote_ticks" for rule in RETENTION_SPEC)
+
+
 def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
     for rule in RETENTION_SPEC:
         cutoff = NOW - rule.retain_sec
         inserter = {
             "bars": _insert_bar,
-            "quote_ticks": _insert_quote,
             "ticker_baseline_samples": _insert_baseline_sample,
             "watchlist_focus": _insert_focus,
             "gate_events": _insert_gate_event,
@@ -170,13 +168,11 @@ def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
 
 def test_idempotent_second_run_deletes_zero(db: sqlite3.Connection) -> None:
     _insert_bar(db, NOW - 500 * 86_400)         # outside 400d
-    _insert_quote(db, NOW - 3 * 3600)           # outside 2h
     _insert_gate_event(db, NOW - 40 * 86_400)   # outside 30d
     db.commit()
 
     first = run_retention(db, now_ts=NOW)
     assert first["bars"] == 1
-    assert first["quote_ticks"] == 1
     assert first["gate_events"] == 1
 
     second = run_retention(db, now_ts=NOW)
@@ -198,7 +194,7 @@ def test_checkpoint_wal_shrinks_wal(tmp_path: Path) -> None:
     db_path = tmp_path / "wal.sqlite"
     conn = init_db(db_path)
     for i in range(5000):
-        _insert_quote(conn, NOW + i)
+        _insert_bar(conn, NOW + i, interval="1m")
     conn.commit()
     wal_path = Path(str(db_path) + "-wal")
     grew = wal_path.exists() and wal_path.stat().st_size > 0
@@ -218,14 +214,13 @@ def test_run_retention_job_end_to_end(tmp_path: Path) -> None:
     conn = init_db(db_path)
     _insert_bar(conn, NOW - 500 * 86_400)
     _insert_bar(conn, NOW)
-    _insert_quote(conn, NOW - 3 * 3600)
     conn.commit()
     conn.close()
 
     result = run_retention_job(db_path, now_ts=NOW)
 
     assert result["bars"] == 1
-    assert result["quote_ticks"] == 1
+    assert "quote_ticks" not in result
     assert "__wal_checkpointed__" in result
 
     check = sqlite3.connect(str(db_path))

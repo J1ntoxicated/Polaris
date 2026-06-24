@@ -436,22 +436,16 @@ async def run_production_paper_loop(
     # a reader and never holds the exclusive lock — it flushes whatever frames sit
     # behind no live snapshot, which the dashboard's sub-second read GAPS make
     # plenty — so the -wal stays bounded with ZERO deadlock surface.
-    # Cap quote_ticks so the live DB stays SMALL. The dashboard's 1s
-    # collect_snapshot + the WAL + any copy all scale with the DB; an unbounded
-    # quote_ticks (645k rows / 215 MB) made every concurrent read a heavy random-IO
-    # scan that wedged the loop in UN-state the instant the dashboard attached. The
-    # tick engine reads its live window from the in-mem ring (NOT this table), so
-    # quote_ticks only backs the dashboard's recent-price view → keep ~2h. The
-    # DELETE + PASSIVE checkpoint run on a throwaway connection in a worker thread
-    # every ~15s, off the loop.
-    _QUOTE_TICKS_RETAIN_SEC = 7200
-
+    # Tick-stream decouple (vault/50_research/debates/tick_stream_decouple_2026-06-24.md):
+    # quote_ticks is now a single-row LWW table (PK=instrument_id), bounded by
+    # instrument count — it can no longer grow to the 645k-row/215MB state that
+    # wedged the loop. The old 1Hz-INSERT ↔ 15s-DELETE writer lock contention is
+    # structurally gone, so the prune-DELETE here is REMOVED (it would also delete
+    # the lone latest row of a quiet instrument). The checkpoint keeps only the
+    # PASSIVE WAL hygiene below.
     def _checkpoint_wal_blocking() -> None:
         ck = sqlite3.connect(str(target_db), timeout=10.0)
         try:
-            cutoff = int(time.time()) - _QUOTE_TICKS_RETAIN_SEC
-            ck.execute("DELETE FROM quote_ticks WHERE ts < ?", (cutoff,))
-            ck.commit()
             # PASSIVE ONLY. It flushes frames behind no snapshot and NEVER blocks a
             # reader — the behaviour that ran 6h rock-solid. A reclaiming (TRUNCATE)
             # checkpoint forces a FULL checkpoint of every -wal frame; on a large

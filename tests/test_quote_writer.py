@@ -159,3 +159,116 @@ async def test_flush_empty_buffer_is_noop(tmp_path) -> None:
     assert w.flush_count == 0
     assert w.rows_written == 0
     w.close()
+
+
+# ---------------------------------------------------------------------------
+# tick_inflow — per-venue rolling buckets UPSERTed in the SAME flush txn.
+# Design SSOT: vault/50_research/debates/tick_stream_decouple_2026-06-24.md.
+# ---------------------------------------------------------------------------
+
+
+def _qt_v(
+    inst: str, venue: str, *, ts: int = NOW, mid: float = 100.0,
+    bid_size: float = 1.0, ask_size: float = 1.0,
+) -> QuoteTick:
+    return QuoteTick(
+        instrument_id=inst,
+        venue=venue,
+        symbol=inst.split(":", 1)[-1],
+        ts=ts,
+        bid=mid - 0.5,
+        ask=mid + 0.5,
+        mid=mid,
+        spread_bps=10.0,
+        bid_size=bid_size,
+        ask_size=ask_size,
+        source=f"{venue}_ws",
+    )
+
+
+def _read_inflow(db) -> dict[str, tuple[int, int, float, int]]:
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT venue, last_tick_ts, ticks_600s, max_flow_size_600s, "
+        "window_started_at FROM tick_inflow"
+    ).fetchall()
+    conn.close()
+    return {r[0]: (int(r[1]), int(r[2]), float(r[3]), int(r[4])) for r in rows}
+
+
+async def test_flush_upserts_tick_inflow_per_venue(tmp_path) -> None:
+    db = tmp_path / "q.sqlite"
+    init_db(db).close()
+    w = QuoteTickWriter(db)
+    loop = asyncio.get_running_loop()
+    # okx: 3 ticks, max flow size 6.0; capital: 1 tick, flow size 2.0.
+    w.on_quote(_qt_v("okx:BTC-USDT", "okx", ts=NOW, bid_size=1.0, ask_size=1.0))
+    w.on_quote(_qt_v("okx:ETH-USDT", "okx", ts=NOW + 1, bid_size=2.0, ask_size=4.0))
+    w.on_quote(_qt_v("okx:SOL-USDT", "okx", ts=NOW + 2, bid_size=1.0, ask_size=1.0))
+    w.on_quote(_qt_v("capital:US100", "capital", ts=NOW, bid_size=1.0, ask_size=1.0))
+    await w._flush_once(loop)
+    w.close()
+
+    inflow = _read_inflow(db)
+    assert inflow["okx"][0] == NOW + 2            # last_tick_ts = max ts
+    assert inflow["okx"][1] == 3                  # ticks_600s
+    assert inflow["okx"][2] == 6.0                # max(bid_size+ask_size)
+    assert inflow["capital"][1] == 1
+    assert inflow["capital"][2] == 2.0
+
+
+async def test_tick_inflow_in_same_transaction_as_quotes(tmp_path) -> None:
+    """quote rows + tick_inflow UPSERT must share ONE BEGIN..COMMIT (skew 0)."""
+    db = tmp_path / "q.sqlite"
+    init_db(db).close()
+    w = QuoteTickWriter(db)
+    w.on_quote(_qt_v("okx:BTC-USDT", "okx", ts=NOW))
+
+    commits = begins = 0
+
+    def _trace(stmt: str) -> None:
+        nonlocal commits, begins
+        s = stmt.strip().upper()
+        if s.startswith("COMMIT"):
+            commits += 1
+        elif s.startswith("BEGIN"):
+            begins += 1
+
+    conn = w._ensure_conn()
+    conn.set_trace_callback(_trace)
+    loop = asyncio.get_running_loop()
+    await w._flush_once(loop)
+    assert begins == 1 and commits == 1  # quotes + inflow in the one txn
+    conn.set_trace_callback(None)
+    w.close()
+
+
+async def test_tick_inflow_window_started_at_is_first_tick_and_stable(tmp_path) -> None:
+    """window_started_at freezes at the first tick ts per venue (restart marker)."""
+    db = tmp_path / "q.sqlite"
+    init_db(db).close()
+    w = QuoteTickWriter(db)
+    loop = asyncio.get_running_loop()
+    w.on_quote(_qt_v("okx:BTC-USDT", "okx", ts=NOW))
+    await w._flush_once(loop)
+    w.on_quote(_qt_v("okx:BTC-USDT", "okx", ts=NOW + 30))
+    await w._flush_once(loop)
+    w.close()
+    inflow = _read_inflow(db)
+    assert inflow["okx"][3] == NOW            # window_started_at unchanged
+    assert inflow["okx"][0] == NOW + 30       # last_tick_ts advanced
+
+
+async def test_tick_inflow_buckets_drop_outside_600s(tmp_path) -> None:
+    """A tick older than 600s before the latest must not count in ticks_600s."""
+    db = tmp_path / "q.sqlite"
+    init_db(db).close()
+    w = QuoteTickWriter(db)
+    loop = asyncio.get_running_loop()
+    w.on_quote(_qt_v("okx:BTC-USDT", "okx", ts=NOW))
+    w.on_quote(_qt_v("okx:ETH-USDT", "okx", ts=NOW + 700))  # 700s later → old drops
+    await w._flush_once(loop)
+    w.close()
+    inflow = _read_inflow(db)
+    assert inflow["okx"][1] == 1              # only the recent tick in 600s window
+    assert inflow["okx"][0] == NOW + 700

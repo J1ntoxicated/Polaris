@@ -63,6 +63,67 @@ _INSERT_SQL = (
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
+# tick_inflow rollup written in the SAME flush txn as the quote rows (skew 0).
+# Sentinel S6 reads this instead of a COUNT over quote_ticks (which is now a
+# single-row LWW table). Design: vault/50_research/debates/tick_stream_decouple_2026-06-24.md.
+_INFLOW_UPSERT_SQL = (
+    "INSERT INTO tick_inflow "
+    "(venue, last_tick_ts, ticks_600s, max_flow_size_600s, window_started_at) "
+    "VALUES (?, ?, ?, ?, ?) "
+    "ON CONFLICT(venue) DO UPDATE SET "
+    "last_tick_ts=excluded.last_tick_ts, "
+    "ticks_600s=excluded.ticks_600s, "
+    "max_flow_size_600s=excluded.max_flow_size_600s, "
+    "window_started_at=excluded.window_started_at"
+)
+
+# Rolling tick-rate window: 10 buckets × 60s = 600s (matches Sentinel S6's
+# s6_window_sec default). Bounded per venue so the in-mem state is O(venues).
+_INFLOW_WINDOW_SEC = 600
+_INFLOW_BUCKET_SEC = 60
+
+
+class _VenueInflow:
+    """Per-venue rolling tick-rate / flow-size accumulator (in-mem, loop thread).
+
+    Holds 60s buckets keyed on ``ts // 60`` (each: count + max bid+ask size),
+    the max ts ever seen (``last_tick_ts``), and the first ts ever seen
+    (``window_started_at`` — frozen, so a restart resets it and Sentinel S6a can
+    report WARMING until 600s of window has accrued). ``rollup`` prunes buckets
+    older than 600s before the latest tick and returns the durable row Sentinel
+    reads. Pure in-mem; touched only on the loop thread (on_quote + flush
+    snapshot), so it is race-free with the executor-thread DB write.
+    """
+
+    __slots__ = ("buckets", "last_tick_ts", "window_started_at")
+
+    def __init__(self) -> None:
+        self.buckets: dict[int, tuple[int, float]] = {}
+        self.last_tick_ts: int = 0
+        self.window_started_at: int = 0
+
+    def add(self, ts: int, flow_size: float) -> None:
+        if self.window_started_at == 0:
+            self.window_started_at = ts
+        if ts > self.last_tick_ts:
+            self.last_tick_ts = ts
+        key = ts // _INFLOW_BUCKET_SEC
+        count, max_size = self.buckets.get(key, (0, 0.0))
+        self.buckets[key] = (count + 1, max(max_size, flow_size))
+
+    def rollup(self) -> tuple[int, int, float, int]:
+        """Return ``(last_tick_ts, ticks_600s, max_flow_size_600s, window_started_at)``.
+
+        Prunes buckets whose 60s slot ends before ``last_tick_ts - 600s`` so the
+        rate/size reflect only the trailing 600s window.
+        """
+        floor_key = (self.last_tick_ts - _INFLOW_WINDOW_SEC) // _INFLOW_BUCKET_SEC
+        for key in [k for k in self.buckets if k < floor_key]:
+            del self.buckets[key]
+        ticks = sum(c for c, _ in self.buckets.values())
+        max_size = max((s for _, s in self.buckets.values()), default=0.0)
+        return self.last_tick_ts, ticks, max_size, self.window_started_at
+
 
 def _row(q: QuoteTick) -> tuple[object, ...]:
     return (
@@ -140,6 +201,10 @@ class QuoteTickWriter:
         # In-mem only (M2: on_quote never touches the DB); capped at
         # ``RING_BUFFER_DEPTH`` so it stays O(1) per tick and bounded in size.
         self._ring: dict[str, deque[QuoteTick]] = {}
+        # Per-venue rolling tick-rate / flow-size accumulator → tick_inflow row
+        # (Sentinel S6 source). In-mem, loop-thread only; the flush snapshots a
+        # rollup (no await) and UPSERTs it in the SAME txn as the quote rows.
+        self._inflow: dict[str, _VenueInflow] = {}
         # Dedicated WS-writer connection (opened lazily on first flush, in the
         # executor thread — sqlite objects are thread-affine).
         self._conn: sqlite3.Connection | None = None
@@ -151,7 +216,7 @@ class QuoteTickWriter:
     # ------------------------------------------------------------------
 
     def on_quote(self, tick: QuoteTick) -> None:
-        """Record one tick in memory (coalesce + live_px + ring). Never awaits."""
+        """Record one tick in memory (coalesce + live_px + ring + inflow). Never awaits."""
         self._buf[tick.instrument_id] = tick
         self._live_px[tick.instrument_id] = (tick.mid, time.monotonic())
         ring = self._ring.get(tick.instrument_id)
@@ -159,6 +224,13 @@ class QuoteTickWriter:
             ring = deque(maxlen=RING_BUFFER_DEPTH)
             self._ring[tick.instrument_id] = ring
         ring.append(tick)
+        # Per-venue inflow accumulator (tick rate + flow-size death for S6). Keyed
+        # on the venue ts (epoch seconds) so it aligns with Sentinel's now_ts.
+        acc = self._inflow.get(tick.venue)
+        if acc is None:
+            acc = _VenueInflow()
+            self._inflow[tick.venue] = acc
+        acc.add(tick.ts, tick.bid_size + tick.ask_size)
 
     def live_px(self, instrument_id: str) -> tuple[float, float] | None:
         """Return ``(mid, last_ws_monotonic)`` for ``instrument_id`` or None.
@@ -237,29 +309,44 @@ class QuoteTickWriter:
     async def _flush_once(self, loop: asyncio.AbstractEventLoop) -> None:
         # Snapshot + clear with NO await in between → no tick lost to a race:
         # on_quote runs on the same loop thread, so between this dict() copy and
-        # clear() no callback can interleave (single-threaded loop).
+        # clear() no callback can interleave (single-threaded loop). The inflow
+        # rollup is snapshotted in the SAME no-await window so the tick_inflow row
+        # is consistent with the quote rows it ships alongside.
         if not self._buf:
             return
         snapshot = list(self._buf.values())
         self._buf.clear()
+        inflow_rows = [
+            (venue, *acc.rollup()) for venue, acc in self._inflow.items()
+        ]
         try:
-            await loop.run_in_executor(None, self._flush_blocking, snapshot)
+            await loop.run_in_executor(
+                None, self._flush_blocking, snapshot, inflow_rows
+            )
         except Exception:  # noqa: BLE001 — write must never halt the bot (AGGRESSIVE)
             logger.exception(
                 "[quote_writer] flush of %d ticks failed — dropping batch", len(snapshot)
             )
 
-    def _flush_blocking(self, ticks: list[QuoteTick]) -> None:
+    def _flush_blocking(
+        self,
+        ticks: list[QuoteTick],
+        inflow_rows: list[tuple[str, int, int, float, int]],
+    ) -> None:
         """Blocking sqlite write — runs in the executor thread, never the loop.
 
-        Wraps the batch in an explicit transaction so the autocommit conn does
-        ONE WAL commit for the whole batch (M1a), not one per row.
+        Wraps the quote batch AND the per-venue tick_inflow UPSERT in ONE explicit
+        transaction so the autocommit conn does ONE WAL commit for the whole batch
+        (M1a, not one per row) and the inflow row never skews from the quotes it
+        ships with (skew 0 — same BEGIN..COMMIT).
         """
         conn = self._ensure_conn()
         rows = [_row(q) for q in ticks]
         conn.execute("BEGIN")
         try:
             conn.executemany(_INSERT_SQL, rows)
+            if inflow_rows:
+                conn.executemany(_INFLOW_UPSERT_SQL, inflow_rows)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

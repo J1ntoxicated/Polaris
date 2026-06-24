@@ -421,34 +421,38 @@ def check_s6_feature_availability(
 ) -> list[Finding]:
     """Per-venue tick inflow + flow-size availability (OFI proxy liveness).
 
-    - in-session venue with ZERO ticks in the no-inflow window → warn
-      (WS dead / venue never connected — e.g. the alpaca no-connection case).
-    - venue streaming ticks but max(bid_size+ask_size)==0 over the window →
-      warn: flow features (OFI) are structurally dead (2026-06-11 Capital
-      finding — quote stream carries no sizes).
+    Reads the durable per-venue ``tick_inflow`` rollup (writer-maintained, 1Hz
+    UPSERT) instead of a COUNT over ``quote_ticks`` — the latter is now a
+    single-row LWW table so a window-COUNT is meaningless. tick_inflow makes the
+    check durable across a restart (the persisted ``last_tick_ts`` is read
+    immediately, never blind for ~600s) and bounds the read to one row per venue.
+
+    - in-session venue whose latest tick is older than ``s6_no_inflow_sec`` (or
+      that has no tick_inflow row at all) → warn ``no_inflow`` (WS dead / venue
+      never connected — e.g. the alpaca no-connection case).
+    - venue streaming ticks but ``max_flow_size_600s`` == 0 over a FULL 600s
+      window → warn ``size_dead`` (flow/OFI features structurally dead — the
+      2026-06-11 Capital finding). If the window is not yet full (writer just
+      restarted: ``now - window_started_at < s6_window_sec``) the same pattern
+      reports ``warming`` (info) instead — never a silent OK/FAIL (D2).
     """
     out: list[Finding] = []
-    window_counts: dict[str, tuple[int, float | None]] = {}
-    for venue, cnt, max_size in live.execute(
-        "SELECT venue, COUNT(*), MAX(bid_size + ask_size) FROM quote_ticks "
-        "WHERE ts >= ? GROUP BY venue",
-        (now_ts - th.s6_window_sec,),
+    inflow: dict[str, tuple[int, int, float, int]] = {}
+    for venue, last_ts, ticks, max_size, win_start in live.execute(
+        "SELECT venue, last_tick_ts, ticks_600s, max_flow_size_600s, "
+        "window_started_at FROM tick_inflow"
     ).fetchall():
-        window_counts[str(venue)] = (
-            int(cnt),
-            None if max_size is None else float(max_size),
+        inflow[str(venue)] = (
+            int(last_ts), int(ticks), float(max_size), int(win_start)
         )
-    recent_counts: dict[str, int] = {}
-    for venue, cnt in live.execute(
-        "SELECT venue, COUNT(*) FROM quote_ticks WHERE ts >= ? GROUP BY venue",
-        (now_ts - th.s6_no_inflow_sec,),
-    ).fetchall():
-        recent_counts[str(venue)] = int(cnt)
 
     for venue in sorted(VENUE_TO_STREAM):
         cal = _venue_calendar(venue)
         live_session = in_session(cal, now_ts)
-        if live_session and recent_counts.get(venue, 0) == 0:
+        row = inflow.get(venue)
+        last_ts = row[0] if row is not None else 0
+        # no_inflow: no row at all, or the durable latest tick is too old.
+        if live_session and (now_ts - last_ts) > th.s6_no_inflow_sec:
             out.append(
                 Finding(
                     check_id="S6",
@@ -461,22 +465,43 @@ def check_s6_feature_availability(
                     detail={"calendar": cal, "window_sec": th.s6_no_inflow_sec},
                 )
             )
-        cnt, max_size = window_counts.get(venue, (0, None))
-        rate = cnt / float(th.s6_window_sec) if th.s6_window_sec > 0 else 0.0
-        if cnt >= th.s6_min_ticks_for_size and (max_size is None or max_size <= 0.0):
-            out.append(
-                Finding(
-                    check_id="S6",
-                    severity=SEV_WARN,
-                    subject=f"{venue}:size_dead",
-                    summary=(
-                        f"flow size dead on {venue}: {cnt} ticks in "
-                        f"{th.s6_window_sec}s but max(bid_size+ask_size)=0 "
-                        f"(OFI proxy unusable)"
-                    ),
-                    detail={"tick_count": cnt, "tick_rate_per_sec": rate},
+        if row is None:
+            continue
+        _last_ts, ticks, max_size, win_start = row
+        rate = ticks / float(th.s6_window_sec) if th.s6_window_sec > 0 else 0.0
+        if ticks >= th.s6_min_ticks_for_size and max_size <= 0.0:
+            window_full = (now_ts - win_start) >= th.s6_window_sec
+            if window_full:
+                out.append(
+                    Finding(
+                        check_id="S6",
+                        severity=SEV_WARN,
+                        subject=f"{venue}:size_dead",
+                        summary=(
+                            f"flow size dead on {venue}: {ticks} ticks in "
+                            f"{th.s6_window_sec}s but max(bid_size+ask_size)=0 "
+                            f"(OFI proxy unusable)"
+                        ),
+                        detail={"tick_count": ticks, "tick_rate_per_sec": rate},
+                    )
                 )
-            )
+            else:
+                out.append(
+                    Finding(
+                        check_id="S6",
+                        severity=SEV_INFO,
+                        subject=f"{venue}:warming",
+                        summary=(
+                            f"flow-size window warming on {venue}: "
+                            f"{now_ts - win_start}s of {th.s6_window_sec}s "
+                            f"accrued ({ticks} ticks, size 0 so far)"
+                        ),
+                        detail={
+                            "tick_count": ticks,
+                            "window_age_sec": now_ts - win_start,
+                        },
+                    )
+                )
     return out
 
 

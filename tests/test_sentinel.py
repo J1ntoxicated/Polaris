@@ -85,6 +85,24 @@ def _insert_tick(
     )
 
 
+def _insert_inflow(
+    conn: sqlite3.Connection,
+    venue: str,
+    *,
+    last_tick_ts: int,
+    ticks_600s: int = 100,
+    max_flow_size_600s: float = 2.0,
+    window_started_at: int,
+) -> None:
+    """Seed a tick_inflow row (the writer's per-venue rollup S6 now reads)."""
+    conn.execute(
+        "INSERT OR REPLACE INTO tick_inflow "
+        "(venue, last_tick_ts, ticks_600s, max_flow_size_600s, window_started_at) "
+        "VALUES (?,?,?,?,?)",
+        (venue, last_tick_ts, ticks_600s, max_flow_size_600s, window_started_at),
+    )
+
+
 def _insert_position(
     conn: sqlite3.Connection,
     position_id: str,
@@ -535,11 +553,14 @@ def test_run_once_s4_violation_persists_then_recovers(
 
 
 def test_s6_in_session_no_inflow_warn(live_db: Path) -> None:
+    # okx + capital have a FRESH durable last_tick_ts; alpaca has NO tick_inflow
+    # row at all (WS never connected) → only alpaca warns no_inflow (in-session).
     conn = _rw(live_db)
-    for i in range(60):
-        _insert_tick(conn, "okx", "BTC-USDT", NOW_OPEN - 1 - i)
-        _insert_tick(conn, "capital", "US100", NOW_OPEN - 1 - i)
-    conn.close()  # alpaca: zero ticks, RTH in-session at NOW_OPEN
+    _insert_inflow(conn, "okx", last_tick_ts=NOW_OPEN - 1,
+                   window_started_at=NOW_OPEN - 1000)
+    _insert_inflow(conn, "capital", last_tick_ts=NOW_OPEN - 1,
+                   window_started_at=NOW_OPEN - 1000)
+    conn.close()  # alpaca: no tick_inflow row, RTH in-session at NOW_OPEN
     live = open_live_ro(live_db)
     found = check_s6_feature_availability(live, NOW_OPEN, TH)
     live.close()
@@ -549,8 +570,23 @@ def test_s6_in_session_no_inflow_warn(live_db: Path) -> None:
     assert "capital:no_inflow" not in subjects
 
 
+def test_s6_durable_last_tick_ts_stale_warns(live_db: Path) -> None:
+    # Durable freshness: a tick_inflow row whose last_tick_ts is older than the
+    # no-inflow window warns EVEN with the buckets empty (post-restart). This is
+    # the D2 fix — S6b reads the durable last_tick_ts, never blind for ~600s.
+    conn = _rw(live_db)
+    _insert_inflow(conn, "okx", last_tick_ts=NOW_OPEN - 500,  # > 300s stale
+                   window_started_at=NOW_OPEN - 5000)
+    conn.close()
+    live = open_live_ro(live_db)
+    found = check_s6_feature_availability(live, NOW_OPEN, TH)
+    live.close()
+    subjects = {f.subject for f in found}
+    assert "okx:no_inflow" in subjects
+
+
 def test_s6_session_closed_no_inflow_skipped(live_db: Path) -> None:
-    live = open_live_ro(live_db)  # empty quote_ticks for everyone
+    live = open_live_ro(live_db)  # empty tick_inflow for everyone
     found = check_s6_feature_availability(live, NOW_WEEKEND, TH)
     live.close()
     subjects = {f.subject for f in found}
@@ -560,12 +596,14 @@ def test_s6_session_closed_no_inflow_skipped(live_db: Path) -> None:
 
 
 def test_s6_flow_size_dead_warn(live_db: Path) -> None:
+    # Full 600s window (window_started_at old) + ticks but max flow size 0 → dead.
     conn = _rw(live_db)
-    for i in range(60):
-        _insert_tick(conn, "capital", "US100", NOW_OPEN - 1 - i,
-                     bid_size=0.0, ask_size=0.0)
-        _insert_tick(conn, "okx", "BTC-USDT", NOW_OPEN - 1 - i,
-                     bid_size=1.0, ask_size=2.0)
+    _insert_inflow(conn, "capital", last_tick_ts=NOW_OPEN - 1,
+                   ticks_600s=60, max_flow_size_600s=0.0,
+                   window_started_at=NOW_OPEN - 1000)
+    _insert_inflow(conn, "okx", last_tick_ts=NOW_OPEN - 1,
+                   ticks_600s=60, max_flow_size_600s=3.0,
+                   window_started_at=NOW_OPEN - 1000)
     conn.close()
     live = open_live_ro(live_db)
     found = check_s6_feature_availability(live, NOW_OPEN, TH)
@@ -573,6 +611,23 @@ def test_s6_flow_size_dead_warn(live_db: Path) -> None:
     subjects = {f.subject for f in found}
     assert "capital:size_dead" in subjects
     assert "okx:size_dead" not in subjects
+
+
+def test_s6_flow_size_warming_when_window_not_full(live_db: Path) -> None:
+    # Same size-dead pattern but window_started_at is RECENT (window < 600s):
+    # report WARMING (info), NOT a size_dead warn (no silent OK/FAIL, D2 fix).
+    conn = _rw(live_db)
+    _insert_inflow(conn, "capital", last_tick_ts=NOW_OPEN - 1,
+                   ticks_600s=60, max_flow_size_600s=0.0,
+                   window_started_at=NOW_OPEN - 100)  # only 100s of window
+    conn.close()
+    live = open_live_ro(live_db)
+    found = check_s6_feature_availability(live, NOW_OPEN, TH)
+    live.close()
+    by_subject = {f.subject: f for f in found}
+    assert "capital:size_dead" not in by_subject
+    assert "capital:warming" in by_subject
+    assert by_subject["capital:warming"].severity == "info"
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +795,8 @@ def test_check_error_isolated_and_does_not_resolve(
     conn.close()
     run_once(live_db, sentinel_db, now_ts=NOW_OPEN)
     conn = _rw(live_db)
-    conn.execute("DROP TABLE quote_ticks")  # S1/S6 now error
+    conn.execute("DROP TABLE quote_ticks")  # S1 reads quote_ticks → errors
+    conn.execute("DROP TABLE tick_inflow")  # S6 reads tick_inflow → errors
     conn.close()
     res = run_once(live_db, sentinel_db, now_ts=NOW_OPEN + 45)
     assert "S1" in res.errors and "S6" in res.errors
@@ -818,7 +874,7 @@ def test_main_once_exit_1_on_check_errors(
 ) -> None:
     """F8: --once must signal check errors via exit code (cron/CI visibility)."""
     conn = _rw(live_db)
-    conn.execute("DROP TABLE quote_ticks")  # S1/S6 will error
+    conn.execute("DROP TABLE quote_ticks")  # S1 reads quote_ticks → errors
     conn.close()
     rc = main(["--db", str(live_db), "--sentinel-db", str(sentinel_db), "--once"])
     assert rc == 1

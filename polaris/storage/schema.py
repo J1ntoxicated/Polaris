@@ -565,3 +565,60 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE regime_state ADD COLUMN last_advanced_bar_id INTEGER"
         )
+    _migrate_quote_ticks_to_lww(conn)
+
+
+def _migrate_quote_ticks_to_lww(conn: sqlite3.Connection) -> None:
+    """Collapse a legacy append-per-tick quote_ticks to single-row LWW.
+
+    Tick-stream decouple (vault/50_research/debates/tick_stream_decouple_2026-06-24.md):
+    the table moves from PK=(instrument_id, ts) (unbounded append → 645k rows /
+    215MB + a 15s retention DELETE that lock-contends the 1Hz writer) to a single
+    LWW row per instrument (PK=instrument_id). ``CREATE TABLE IF NOT EXISTS`` in
+    ALL_DDL cannot alter an existing PK, so an EXISTING DB needs this rebuild.
+
+    Additive-first / never blind-DROP (Gemini D4): the latest-per-instrument rows
+    are copied into the new shape and committed in ONE transaction BEFORE the old
+    table is dropped — a crash mid-migration leaves the original table intact.
+    Idempotent: a DB already in single-row shape (``ts`` not in the PK) is a
+    no-op, so re-running init_db at every boot is safe. The kept row per
+    instrument is the MAX(ts) tick — exactly what the latest-per-instrument
+    consumers (Dashboard / Sentinel-S1) already read.
+    """
+    pk_cols = [
+        row[1]
+        for row in conn.execute("PRAGMA table_info(quote_ticks)").fetchall()
+        if row[5]  # pk index > 0
+    ]
+    if pk_cols == ["instrument_id"]:
+        return  # already single-row LWW (fresh DB or migrated) — no-op
+    if "ts" not in pk_cols:
+        return  # unexpected shape — leave untouched (fail-safe, never destroy)
+    # Rebuild: new single-row table ← latest (max ts) row per instrument, then
+    # swap. One transaction so the copy is durable before the old table is gone.
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DROP TABLE IF EXISTS quote_ticks_lww_new")
+        conn.execute(
+            DDL_QUOTE_TICKS.replace(
+                "CREATE TABLE IF NOT EXISTS quote_ticks",
+                "CREATE TABLE quote_ticks_lww_new",
+            )
+        )
+        # Keep the row with the greatest ts per instrument (the LWW survivor).
+        conn.execute(
+            """INSERT INTO quote_ticks_lww_new
+               SELECT q.instrument_id, q.venue, q.symbol, q.ts, q.bid, q.ask,
+                      q.mid, q.spread_bps, q.bid_size, q.ask_size,
+                      q.last_trade_price, q.last_trade_size, q.source
+               FROM quote_ticks q
+               JOIN (SELECT instrument_id, MAX(ts) AS mts FROM quote_ticks
+                     GROUP BY instrument_id) m
+                 ON q.instrument_id = m.instrument_id AND q.ts = m.mts"""
+        )
+        conn.execute("DROP TABLE quote_ticks")
+        conn.execute("ALTER TABLE quote_ticks_lww_new RENAME TO quote_ticks")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise

@@ -97,6 +97,14 @@ CREATE INDEX IF NOT EXISTS idx_bars_instrument_ts
     ON bars(instrument_id, ts);
 """
 
+# Tick-stream decouple (design: vault/50_research/debates/tick_stream_decouple_2026-06-24.md).
+# SINGLE-ROW last-write-wins: PK=instrument_id (was (instrument_id, ts)). The old
+# append-per-tick PK grew the table unbounded (645k rows / 215MB → ENOSPC) and
+# forced a 15s retention DELETE that lock-contended the 1Hz INSERT writer. The
+# only consumers (Dashboard + Sentinel-S1) read the LATEST-per-instrument row, so
+# collapsing to one row per instrument is byte-equivalent for them while the
+# table can no longer grow and the prune-DELETE contention is structurally gone.
+# Per-tick rate / flow-size liveness (Sentinel-S6) moved to ``tick_inflow``.
 DDL_QUOTE_TICKS = """
 CREATE TABLE IF NOT EXISTS quote_ticks (
     instrument_id TEXT NOT NULL,
@@ -112,7 +120,7 @@ CREATE TABLE IF NOT EXISTS quote_ticks (
     last_trade_price REAL NOT NULL DEFAULT 0.0,
     last_trade_size REAL NOT NULL DEFAULT 0.0,
     source TEXT NOT NULL DEFAULT 'rest',
-    PRIMARY KEY (instrument_id, ts)
+    PRIMARY KEY (instrument_id)
 );
 """
 

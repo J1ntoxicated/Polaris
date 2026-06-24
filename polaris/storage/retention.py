@@ -62,10 +62,13 @@ class RetentionRule:
 #   counterfactual sweep reads 1m bars only at decision_ts+24h (+3d grace) —
 #   ~4d old, deep inside 400d. SIGNAL LOOKBACK FULLY PRESERVED.
 #
-# * quote_ticks — backs only the dashboard recent-price view + the gate
-#   decision-mark fallback (MARK_FRESH_SEC=60s); the tick engine reads its
-#   live window from an in-memory ring, NOT this table. 2h matches the
-#   in-loop cap already in production_paper_loop.
+# * quote_ticks — NOT pruned. The tick-stream decouple
+#   (vault/50_research/debates/tick_stream_decouple_2026-06-24.md) collapsed it to
+#   a single-row LWW table (PK=instrument_id), so it is bounded by instrument
+#   count and can no longer grow. A prune-DELETE here would delete the LONE latest
+#   row for an instrument that has gone quiet for the window → drop a still-valid
+#   price the dashboard / Sentinel-S1 read. Removing the rule also eliminates the
+#   1Hz-INSERT ↔ retention-DELETE writer lock contention (the disk-safety goal).
 #
 # * ticker_baseline_samples — ``baseline.read_samples_window`` reads at most
 #   LOOKBACK_SLOW_SEC=30d (pnl_std) / LOOKBACK_FAST_SEC=7d. 35d = 30d + margin.
@@ -81,8 +84,7 @@ class RetentionRule:
 RETENTION_SPEC: tuple[RetentionRule, ...] = (
     RetentionRule("bars", "ts", 400 * _DAY,
                   "1D lookback 330d + MA200 warmup + gap margin"),
-    RetentionRule("quote_ticks", "ts", 2 * 3600,
-                  "dashboard recent-price + mark fallback (matches in-loop cap)"),
+    # quote_ticks intentionally absent — single-row LWW table, bounded, never pruned.
     RetentionRule("ticker_baseline_samples", "ts", 35 * _DAY,
                   "baseline window 30d (pnl_std) + margin"),
     RetentionRule("watchlist_focus", "cycle_ts", 7 * _DAY,

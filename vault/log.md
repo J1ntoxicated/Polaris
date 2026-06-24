@@ -143,3 +143,15 @@
 2026-06-24 [research: alpaca-validity — placeholder vol_24h_usd=50e6 stamped on all 13282 tradable rows (_alpaca.py:196), real vol only 131 (most-actives 100 + seed 47 ceiling); /v2/snapshots+screener+bars give real dollar-vol/price/exchange (all wired, cap=candidate set not data); proposal: sentinel vol=0 + full snapshot sweep + primary_exchange + existing 5M/$1 floors → 13282→low-hundreds gradable, WATCH unchanged; data fix needed; vault/50_research/alpaca_validity_2026-06-24.md]
 2026-06-24 02:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
 2026-06-24 04:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 04:41 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 05:15 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=241 learners=3 paper=True]
+2026-06-24 05:41 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=241 learners=3 paper=True]
+2026-06-24 06:09 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=338 learners=3 paper=True]
+2026-06-24 07:42 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=241 learners=3 paper=True]
+- 2026-06-24 ENOSPC 디스크풀 근본=learner_snapshots 20G(722 .db hot-backup, retention無 무한누적) → 옛 720개 삭제 회수(data 22G→2.3G, 디스크 100%→86%) + 영구 retention 가드 _prune_disk_snapshots/LEARNER_SNAPSHOT_KEEP=5 (6d58f37, fresh리뷰 APPROVE_WITH_NITS, 30테스트). watch-all은 3000 bar-ingest 디스크부하 드러나 revert(WATCH_MAX 120, 1c04643)·Jin 결정 대기. 커밋이미지 0개(.git 29M).
+2026-06-24 08:02 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 08:21 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 08:31 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 08:37 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=241 learners=3 paper=True]
+2026-06-24 08:48 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=241 learners=3 paper=True]
+- 2026-06-24 tick-stream decouple 설계 debate-validated(GPT codex+Gemini 2.5-pro): quote_ticks→단일행 LWW(PK=instrument_id)+tick_inflow(venue scalars)로 무한증식·프룬DELETE·락경합 근본제거; S6 cold-start=WARMING+durable last_tick_ts, additive-first 마이그레이션, 별도파일 stage-2 보류, 틱아카이브 out-of-scope. 설계문서 vault/50_research/debates/tick_stream_decouple_2026-06-24.md. 빌드 대기(TDD+fresh리뷰+additive). 선행: 라이브 프룬 4-thrash STALL 회귀→revert(36010b9), 교훈 feedback_db_lock_is_architecture_signal.

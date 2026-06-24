@@ -16,9 +16,6 @@ from collections.abc import Sequence
 from typing import Final
 
 from polaris.core.universe.schema import (
-    FOCUS_TARGET_BASE,
-    FOCUS_TARGET_MAX,
-    FOCUS_TARGET_MIN,
     NEW_LISTING_WATCH_HOURS,
     RANK_WEIGHT_ATR_Z,
     RANK_WEIGHT_CELL_Z,
@@ -28,24 +25,25 @@ from polaris.core.universe.schema import (
     RANK_WEIGHT_VOL_Z,
     FocusBucket,
     FocusSelection,
+    Tier,
     UniverseInstrument,
-    focus_min_quota_by_class,
-    is_capital_fx_major,
-    is_liquid_equity,
+    crowding_lambda,
+    tier_band_boundaries,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "apply_crowding_penalty",
+    "assign_tiers",
+    "cadence_fires",
     "compute_dynamic_focus",
-    "compute_dynamic_target_size",
-    "compute_recent_signal_density_top_q",
-    "compute_top_score_concentration",
     "persist_focus",
     "score_focus_candidate",
     "score_focus_candidates",
     "select_focus_watchlist",
     "should_evict_from_focus",
+    "tier_for_rank",
 ]
 
 # Top quartile cutoff for `core` bucket.
@@ -145,79 +143,89 @@ def score_focus_candidates(
 
 
 # ---------------------------------------------------------------------------
-# Dynamic target size (Q3)
+# Rank-attention gradient — tier band + tier-driven cadence (STAGE 1)
 # ---------------------------------------------------------------------------
 
 
-def compute_dynamic_target_size(
-    *,
-    active_count: int,
-    recent_signal_density_top_q: float = 0.0,
-    top_score_concentration: float = 0.5,
-    baseline: int = FOCUS_TARGET_BASE,
-    min_target: int = FOCUS_TARGET_MIN,
-    max_target: int = FOCUS_TARGET_MAX,
-) -> int:
-    """Resolve focus target_size in [12, 48] (Q3).
+def tier_for_rank(
+    rank: int,
+    total: int,
+    boundaries: tuple[float, float, float] | None = None,
+) -> Tier:
+    """Map a 1-based merit rank to a cadence tier {S,A,B,T} via rank-percentile.
 
-    - High recent signal density (top quartile) → +6 / +12.
-    - Low top-score concentration (broad mass) → -6 / -12.
+    ``rank`` 1 = best merit. ``f = rank/total`` is the cumulative rank-fraction;
+    ``f <= s_cut`` → S, ``<= a_cut`` → A, ``<= b_cut`` → B, else T (boundaries from
+    :func:`tier_band_boundaries`). A lone row (``total<=1``) is S (it IS the best).
+    Pure cadence band (flow_not_block): a worse rank only observes LESS OFTEN, it
+    is never dropped.
     """
-    target = baseline
-    if recent_signal_density_top_q >= 0.7:
-        target += 12
-    elif recent_signal_density_top_q >= 0.5:
-        target += 6
-    if top_score_concentration <= 0.2:
-        target -= 12
-    elif top_score_concentration <= 0.35:
-        target -= 6
-    target = max(min_target, min(max_target, target))
-    return target
+    if total <= 1:
+        return "S"
+    s_cut, a_cut, b_cut = boundaries if boundaries is not None else tier_band_boundaries()
+    f = rank / total
+    if f <= s_cut:
+        return "S"
+    if f <= a_cut:
+        return "A"
+    if f <= b_cut:
+        return "B"
+    return "T"
 
 
-def compute_recent_signal_density_top_q(
-    active_universe: Sequence[UniverseInstrument],
-) -> float:
-    """Breadth of recent signal firing across the active universe, in [0, 1].
+def assign_tiers(
+    total: int,
+    boundaries: tuple[float, float, float] | None = None,
+) -> list[Tier]:
+    """Tier per rank for a merit-ranked list of length ``total`` (rank 1..total)."""
+    b = boundaries if boundaries is not None else tier_band_boundaries()
+    return [tier_for_rank(r, total, b) for r in range(1, total + 1)]
 
-    = fraction of active instruments whose ``signal_density_7d > 0`` (i.e. carried
-    at least one recent raw signal in the 7d window). High value ⇒ many names are
-    firing ⇒ a dense, opportunity-rich tape ⇒ ``compute_dynamic_target_size`` widens
-    the focus window (+6 at ≥0.5, +12 at ≥0.7). A flat/quiet tape (few names firing)
-    leaves it at baseline. Empty / all-zero universe ⇒ 0.0 (baseline, no widen).
 
-    Pure ranking/sizing-WIDTH input (flow_not_block): it can only GROW the focus
-    list, never block an entry or cut a size; the 9-stack is untouched.
+def cadence_fires(tier: Tier, cycle_index: int, k: int, m: int) -> bool:
+    """True iff a row of ``tier`` is polled/eval'd on cycle ``cycle_index``.
+
+    S/A = every cycle (hot/warm); B = every ``k`` cycles; T = every ``m`` cycles
+    (``m`` > ``k`` so the tail is rarer). The tail floor is positive (T fires on
+    ``cycle_index % m == 0``) so even the tail is heartbeat-polled — never starved
+    to zero (flow_not_block).
     """
-    if not active_universe:
-        return 0.0
-    firing = sum(1 for ins in active_universe if ins.signal_density_7d > 0.0)
-    return firing / len(active_universe)
+    if tier in ("S", "A"):
+        return True
+    period = k if tier == "B" else m
+    period = max(1, period)
+    return cycle_index % period == 0
 
 
-def compute_top_score_concentration(scores: Sequence[float]) -> float:
-    """Top-quartile focus-score mass share over total positive mass, in [0, 1].
+def apply_crowding_penalty(
+    scores: Sequence[float],
+    cluster_keys: Sequence[str],
+    lam: float,
+) -> list[float]:
+    """Soft-crowding diversity seam — nudge crowded clusters DOWN the rank.
 
-    = sum(top-25% positive scores) / sum(all positive scores). High ⇒ a few names
-    dominate the score mass (concentrated leaders) ⇒ no shrink. Low ⇒ score mass is
-    spread thin/flat across many comparable names (broad mass) ⇒
-    ``compute_dynamic_target_size`` shrinks the window (-6 at ≤0.35, -12 at ≤0.2) so
-    focus tightens onto the few real leaders instead of diluting across a flat field.
+    Each row's score is reduced by ``lam × (cluster_rank − 1)`` where ``cluster_rank``
+    is the row's position WITHIN its cluster by descending score (the cluster's
+    best row keeps its score; its 2nd, 3rd, ... are nudged progressively down). A
+    lone-in-cluster row is never penalized. ``lam <= 0`` ⇒ returned scores are the
+    input unchanged (DEFAULT OFF — pure merit, byte-identical).
 
-    Only positive scores count (a focus score can be negative; negative mass is not
-    "concentration"). Degenerate cases — empty, no positive mass — return 0.5 (the
-    neutral baseline, no shrink) so a cold/flat universe stays at the baseline 30.
-
-    Pure sizing-WIDTH input (flow_not_block): width adaptation only, no entry block.
+    A RANK nudge ONLY (flow_not_block): it never drops a row, blocks an entry, or
+    cuts a size — it only re-orders WHICH crowded names sit where. It is NOT a slot
+    floor (the removed quota was); diversity here is a soft penalty, never a hard
+    reservation.
     """
-    positive = [s for s in scores if s > 0.0]
-    total = sum(positive)
-    if total <= 0.0:
-        return 0.5
-    k = max(1, round(len(positive) * (1.0 - CORE_QUANTILE)))
-    top_k = sorted(positive, reverse=True)[:k]
-    return sum(top_k) / total
+    if lam <= 0.0 or not scores:
+        return list(scores)
+    # Position of each row within its cluster, ranked by descending score.
+    by_cluster: dict[str, list[int]] = {}
+    for i, key in enumerate(cluster_keys):
+        by_cluster.setdefault(key, []).append(i)
+    cluster_pos = [0] * len(scores)
+    for idxs in by_cluster.values():
+        for pos, i in enumerate(sorted(idxs, key=lambda j: scores[j], reverse=True)):
+            cluster_pos[i] = pos
+    return [scores[i] - lam * cluster_pos[i] for i in range(len(scores))]
 
 
 # ---------------------------------------------------------------------------
@@ -266,180 +274,34 @@ def _bucket_for(
     return "satellite"
 
 
-def _apply_asset_class_quota(
-    order: list[int],
-    active_universe: list[UniverseInstrument],
-    *,
-    target_size: int,
-) -> list[int]:
-    """Guarantee each present asset class its minimum focus-slot quota.
-
-    ``order`` is the global score order (desc). The plain top-``target_size`` cut
-    lets the dominant class (24/7 crypto, huge vol) monopolize the window and
-    starves Capital FX/indices/gold (``vol_24h_usd=0.0`` → lowest score) and
-    Alpaca equity. This promotes the highest-scored *unselected* rows of any
-    under-quota class into the focus, DISPLACING the lowest-scored rows of
-    *over-quota* classes — a FLOW INCREASE (more classes trade), never a
-    throttle: the dominant class keeps the bulk of the window, size is unchanged,
-    no entry is blocked. A single-asset-class universe satisfies every quota
-    trivially → this returns the plain top-``target_size`` cut unchanged (no-op).
-
-    Returns source indices (subset of ``order``) of length
-    ``min(target_size, len(order))``.
-    """
-    base = order[:target_size]
-    quota = focus_min_quota_by_class()
-    # No-op fast paths: nothing floored, or the whole universe is one asset class
-    # (OKX-only crypto / Alpaca-only equity → every quota trivially satisfied).
-    if not any(quota.values()):
-        return base
-    universe_classes = {ins.asset_class for ins in active_universe}
-    if len(universe_classes) <= 1:
-        return base
-    selected = set(base)
-
-    # Per-class shortfall = guaranteed min − already selected (capped by what
-    # exists). Promote the highest-scored unselected rows of short classes.
-    in_count: dict[str, int] = {}
-    for i in base:
-        cls = active_universe[i].asset_class
-        in_count[cls] = in_count.get(cls, 0) + 1
-
-    # Promotion candidate order = score-desc, but with curated per-venue PRIORITY
-    # names pulled ahead of their class peers (flow_not_block, per-venue):
-    #  - Capital FX rows all carry vol=0.0, so the quiet MAJORS (EURUSD/USDJPY/...)
-    #    score below the high-ATR EXOTIC crosses (USDZAR/NOKSEK) — the forex quota
-    #    would fill purely with exotics and the majors never reach focus, starving
-    #    fx_breakout_basket / session_breakout.
-    #  - Alpaca equities carry REAL vol+ATR, but megacaps/top-ETFs have LOW ATR%
-    #    while penny names have HUGE ATR% — the equity quota would fill with penny
-    #    names and the LIQUID megacaps never reach focus, starving equity_rsi_bb /
-    #    equity_tsmom / equity_gap_go at the RTH open.
-    # Both are a stable secondary priority, NOT a global weight change: for any
-    # non-priority row the key is unchanged, so OKX, all-exotic forex, and
-    # all-penny equity universes are byte-identical (no-op). The quota loop below
-    # still gates promotions by each class's own shortfall, so a major/megacap is
-    # promoted ONLY into its own class's quota slots, ALONGSIDE (never replacing)
-    # the exotic/penny rows.
-    order_pos = {idx: pos for pos, idx in enumerate(order)}
-
-    def _priority(i: int) -> int:
-        ins = active_universe[i]
-        if is_capital_fx_major(ins.venue, ins.symbol) or is_liquid_equity(ins.venue, ins.symbol):
-            return 0
-        return 1
-
-    promo_order = sorted(order, key=lambda i: (_priority(i), order_pos[i]))
-    promotions: list[int] = []
-    for src_idx in promo_order:  # priority names (FX majors / liquid equities) first, then score-desc
-        if src_idx in selected:
-            continue
-        cls = active_universe[src_idx].asset_class
-        need = quota.get(cls, 0) - in_count.get(cls, 0)
-        if need > 0:
-            promotions.append(src_idx)
-            in_count[cls] = in_count.get(cls, 0) + 1
-
-    # Curated-priority RESERVATION (live bug fix 2026-06-23): the count-based
-    # promotion above only fires when a floored class is SHORT of its quota. But
-    # when a class is dominated by high-ATR junk (live: 35 penny equities, ATR
-    # 30-380%, vs megacaps at ~1-4% — crypto's trillion-scale vol flattens every
-    # equity vol-z so ATR alone orders them), the penny names fill the ENTIRE
-    # class quota in ``base`` (need == 0), so the curated megacaps/FX-majors are
-    # never seated and the daily equity / FX-basket strategies get NO tradeable
-    # symbol (Alpaca traded 0 while OKX/Capital traded). Reserve up to the class
-    # quota for curated names that exist but are unseated, SWAPPING IN each one
-    # for the WORST-scored NON-curated seated row of the SAME class. Pure flow-
-    # routing: total size, every other class, and the per-class count are all
-    # unchanged; it only re-picks WHICH rows of an already-floored class are
-    # seated (curated alongside junk, never below the junk). No-op when a class
-    # has no curated names (all-penny / all-exotic / OKX-only → existing tests
-    # byte-identical) or when curated names already reached ``base``.
-    seated = set(base) | set(promotions)
-    swap_in: list[int] = []
-    swap_out: set[int] = set()
-    for cls, qslots in quota.items():
-        if qslots <= 0:
-            continue
-        curated_unseated = [
-            i for i in promo_order
-            if active_universe[i].asset_class == cls
-            and _priority(i) == 0
-            and i not in seated
-        ]
-        if not curated_unseated:
-            continue
-        # Worst-scored NON-curated seated rows of this class, worst first.
-        junk_seated = [
-            i for i in reversed(order)
-            if i in seated and i not in swap_out
-            and active_universe[i].asset_class == cls
-            and _priority(i) == 1
-        ]
-        # Reserve at most ``qslots`` curated seats for this class (seat the
-        # best-scored curated names; displace the worst-scored junk one-for-one).
-        n = min(len(curated_unseated), len(junk_seated), qslots)
-        for k in range(n):
-            swap_in.append(curated_unseated[k])
-            swap_out.add(junk_seated[k])
-
-    if not promotions and not swap_in:
-        return base
-    if swap_in:
-        base = [i for i in base if i not in swap_out] + swap_in
-        base.sort(key=lambda i: order_pos[i])
-    if not promotions:
-        return base
-
-    # Displace the lowest-scored rows of OVER-quota classes (worst score first).
-    # ``order`` is desc, so iterate reversed for the worst rows. crypto (quota 0)
-    # is freely displaceable down to its share; a class is never cut below its
-    # own quota.
-    drop: set[int] = set()
-    for src_idx in reversed(base):
-        if len(drop) >= len(promotions):
-            break
-        cls = active_universe[src_idx].asset_class
-        # Only drop rows whose class would still meet its quota afterwards.
-        if in_count.get(cls, 0) - 1 >= quota.get(cls, 0):
-            drop.add(src_idx)
-            in_count[cls] = in_count.get(cls, 0) - 1
-
-    kept = [i for i in base if i not in drop]
-    # Add as many promotions as we freed room for (bounded by target_size).
-    room = target_size - len(kept)
-    merged = kept + promotions[: max(0, room)]
-    # Re-sort the final selection by score order (desc) for a stable ranked list.
-    merged.sort(key=lambda i: order_pos[i])
-    return merged[:target_size]
-
-
 def compute_dynamic_focus(
     active_universe: list[UniverseInstrument],
     *,
     cell_scores: dict[str, float] | None = None,
     cycle_ts: int | None = None,
-    recent_signal_density_top_q: float = 0.0,
-    top_score_concentration: float = 0.5,
     target_size: int | None = None,
     opportunity_scores: dict[str, float] | None = None,
     trade_eligible: dict[str, bool] | None = None,
 ) -> list[FocusSelection]:
-    """Pure-function focus selection.
+    """Pure-function focus selection — rank-attention gradient (STAGE 1).
 
     Steps:
-    1. Score every active instrument deterministically.
-    2. Resolve dynamic target size (12-48).
-    3. Sort desc by score, take top-N, then apply the per-asset-class min quota
-       (guarantees under-represented classes — Capital FX/indices/gold, Alpaca
-       equity — a floor of slots; flow_not_block, no-op for single-class venues).
-    4. Bucket = listing_watch (<24h) | core (top-quartile cell AND active signal) | satellite.
+    1. Score every active instrument by the SINGLE grouped-z merit composite
+       (``score_focus_candidates``, incl. ``RANK_WEIGHT_OPPORTUNITY_Z``).
+    2. Optional soft-crowding nudge (``apply_crowding_penalty``) — DEFAULT OFF
+       (``crowding_lambda()`` == 0 ⇒ pure merit, byte-identical order).
+    3. Sort desc by (penalized) score → ALL active rows become focus rows (no
+       count cap, no asset-class quota: those are GONE — Jin "갯수 제한 X"). The
+       row's rank-percentile assigns its cadence ``tier`` {S,A,B,T}.
+    4. Bucket = listing_watch (<24h) | core (top-quartile cell AND active signal)
+       | satellite (unchanged — orthogonal to the tier band).
 
-    Increment 1: ``opportunity_scores`` (EntranceJudge [0,1] judgment) feeds the
-    rank composite AND is persisted per FocusSelection; ``trade_eligible`` (the
-    decoupled trade-set flag, default True per row) is persisted alongside. Both
-    are RANKING / FLAG inputs only (flow_not_block, 9-stack untouched). Absent →
-    score term is no-op and every row defaults trade_eligible=True.
+    ``target_size`` is OPTIONAL and defaults to None = ALL rows watched (the [12,48]
+    window + ``compute_dynamic_target_size`` are removed). An explicit ``target_size``
+    only caps the EXPLICIT-callers (spec alias / focused tests); production passes
+    None so all 120 active rows are watched and tier-graded. flow_not_block: tier is
+    a cadence band, NEVER a membership cut or sizing input (9-stack untouched);
+    ``trade_eligible`` (Increment 1) still decouples the trade subset downstream.
     """
     if not active_universe:
         return []
@@ -452,18 +314,22 @@ def compute_dynamic_focus(
         cell_scores=cell_scores,
         opportunity_scores=opportunity_scores or None,
     )
-    order = sorted(range(len(active_universe)), key=lambda i: scores[i], reverse=True)
-
-    if target_size is None:
-        target_size = compute_dynamic_target_size(
-            active_count=len(active_universe),
-            recent_signal_density_top_q=recent_signal_density_top_q,
-            top_score_concentration=top_score_concentration,
-        )
-
-    selected = _apply_asset_class_quota(
-        order, active_universe, target_size=target_size
+    # Soft-crowding diversity seam (default OFF → pure merit). Cluster =
+    # underlying_group_id (BTC vs ETH vs ...). A RANK nudge only, never a slot floor.
+    rank_scores = apply_crowding_penalty(
+        scores,
+        [ins.underlying_group_id for ins in active_universe],
+        crowding_lambda(),
     )
+    order = sorted(
+        range(len(active_universe)), key=lambda i: rank_scores[i], reverse=True
+    )
+    if target_size is not None:
+        order = order[:target_size]
+
+    # Tier band per rank-percentile across the watched set (single merit rank).
+    boundaries = tier_band_boundaries()
+    tiers = assign_tiers(len(order), boundaries)
 
     # Top-quartile thresholds across the *active universe* (not the focus subset).
     cell_score_lookup = cell_scores or {}
@@ -473,14 +339,15 @@ def compute_dynamic_focus(
     sig_population = [ins.signal_density_7d for ins in active_universe]
     cell_q75 = _quantile(cell_population, 0.75)
     sig_q75 = _quantile(sig_population, 0.75)
+    total = len(order)
 
     out: list[FocusSelection] = []
-    for rank_idx, src_idx in enumerate(selected, start=1):
+    for rank_idx, src_idx in enumerate(order, start=1):
         inst = active_universe[src_idx]
         bucket = _bucket_for(
             inst,
             rank=rank_idx,
-            target_size=target_size,
+            target_size=total,
             now_ts=ts,
             cell_score=cell_population[src_idx],
             cell_q75=cell_q75,
@@ -499,17 +366,17 @@ def compute_dynamic_focus(
                 opportunity_score=None if opp is None else float(opp),
                 # Flow-preserving default: a row with no judgment stays eligible.
                 trade_eligible=bool(trade_eligible.get(iid, True)),
+                tier=tiers[rank_idx - 1],
             )
         )
-    bucket_counts: dict[str, int] = {}
+    tier_counts: dict[str, int] = {}
     for f in out:
-        bucket_counts[f.bucket] = bucket_counts.get(f.bucket, 0) + 1
+        tier_counts[f.tier] = tier_counts.get(f.tier, 0) + 1
     logger.info(
-        "[universe] dynamic_focus: active=%d → focus=%d target=%d buckets=%s",
+        "[universe] dynamic_focus: active=%d → watched=%d tiers=%s",
         len(active_universe),
         len(out),
-        target_size,
-        bucket_counts,
+        tier_counts,
     )
     return out
 
@@ -606,11 +473,14 @@ def persist_focus(conn: sqlite3.Connection, focus: list[FocusSelection]) -> None
     Increment 1: ``opportunity_score`` + ``trade_eligible`` (the EntranceJudge
     persistence) are upserted alongside. ``trade_eligible`` is stored as INT
     (True → 1) and defaults to 1 (flow-preserving) for a row with no judgment.
+
+    STAGE 1: ``tier`` (the {S,A,B,T} cadence band) is persisted so the consume
+    seam (``get_focus_targets``) can drive tier-cadence polling per cycle.
     """
     rows = [
         (
             f.cycle_ts, f.venue, f.symbol, f.focus_score, f.rank, f.bucket, None,
-            f.opportunity_score, 1 if f.trade_eligible else 0,
+            f.opportunity_score, 1 if f.trade_eligible else 0, f.tier,
         )
         for f in focus
     ]
@@ -618,15 +488,16 @@ def persist_focus(conn: sqlite3.Connection, focus: list[FocusSelection]) -> None
         """
         INSERT INTO watchlist_focus
             (cycle_ts, venue, symbol, focus_score, focus_rank, target_bucket,
-             evict_reason, opportunity_score, trade_eligible)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evict_reason, opportunity_score, trade_eligible, tier)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cycle_ts, venue, symbol) DO UPDATE SET
             focus_score=excluded.focus_score,
             focus_rank=excluded.focus_rank,
             target_bucket=excluded.target_bucket,
             evict_reason=excluded.evict_reason,
             opportunity_score=excluded.opportunity_score,
-            trade_eligible=excluded.trade_eligible
+            trade_eligible=excluded.trade_eligible,
+            tier=excluded.tier
         """,
         rows,
     )

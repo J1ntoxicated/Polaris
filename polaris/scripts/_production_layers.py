@@ -47,13 +47,11 @@ from polaris.core.universe.discovery import (
     persist_universe,
     rank_active_universe,
 )
-from polaris.core.universe.schema import UniverseInstrument
+from polaris.core.universe.schema import Tier, UniverseInstrument, tier_cadence
 from polaris.core.universe.watchlist import (
+    cadence_fires,
     compute_dynamic_focus,
-    compute_recent_signal_density_top_q,
-    compute_top_score_concentration,
     persist_focus,
-    score_focus_candidates,
 )
 from polaris.scripts._production_asset_class import resolve_asset_class
 from polaris.scripts._production_bars import (
@@ -463,13 +461,11 @@ def refresh_focus_watchlist(
             for ins in universe
         ]
     cell_scores = read_cell_scores_by_instrument(conn)
-    # B1+ adaptive-focus wiring (2026-06-24): the two adaptation inputs of
-    # ``compute_dynamic_target_size`` (previously left at their 0.0 / 0.5 defaults
-    # so the focus window was pinned at the baseline 30 every cycle) are now
-    # computed live from the same universe + cell scores. ``top_q`` = breadth of
-    # recent signal firing; ``concentration`` = top-quartile focus-score mass
-    # share. Both are sizing-WIDTH inputs (flow_not_block): they can only widen or
-    # tighten the focus list in [12, 48], never block an entry or cut a size.
+    # STAGE 1 rank-attention gradient (2026-06-24): the focus COUNT-CAP (12-48
+    # window + per-class quota) is GONE — ``compute_dynamic_focus`` now watches
+    # EVERY active row and assigns a cadence tier {S,A,B,T} from the single merit
+    # rank. No [12,48] width inputs remain (flow_not_block: tier differentiates
+    # poll CADENCE, never membership — all active rows are watched).
     # Increment 1 — entrance judgment (deterministic, AI-free). Score every
     # candidate; feed opportunity_score into the rank composite + persist the
     # eligibility flag. flow_not_block: a high judgment lifts rank, the permissive
@@ -481,18 +477,10 @@ def refresh_focus_watchlist(
         iid: r.opportunity_score for iid, r in judge_readings.items()
     }
     trade_eligible = {iid: r.trade_eligible for iid, r in judge_readings.items()}
-    focus_scores = score_focus_candidates(
-        universe, cell_scores=cell_scores or None,
-        opportunity_scores=opportunity_scores or None,
-    )
-    top_q = compute_recent_signal_density_top_q(universe)
-    concentration = compute_top_score_concentration(focus_scores)
     focus = compute_dynamic_focus(
         universe,
         cell_scores=cell_scores or None,
         cycle_ts=ts,
-        recent_signal_density_top_q=top_q,
-        top_score_concentration=concentration,
         opportunity_scores=opportunity_scores or None,
         trade_eligible=trade_eligible or None,
     )
@@ -505,12 +493,14 @@ def refresh_focus_watchlist(
         )
     n_ineligible = sum(1 for v in trade_eligible.values() if not v)
     n_ambiguous = sum(1 for r in judge_readings.values() if r.ambiguous)
+    tier_counts: dict[str, int] = {}
+    for f in focus:
+        tier_counts[f.tier] = tier_counts.get(f.tier, 0) + 1
     logger.info(
-        "[L0/focus] universe=%d → focus=%d (signal_density=%d, cell_scores=%d, "
-        "top_q=%.3f concentration=%.3f | judged=%d trade_ineligible=%d "
-        "ambiguous=%d)",
-        len(universe), len(focus), len(density), len(cell_scores), top_q,
-        concentration, len(judge_readings), n_ineligible, n_ambiguous,
+        "[L0/focus] universe=%d → watched=%d (signal_density=%d, cell_scores=%d, "
+        "tiers=%s | judged=%d trade_ineligible=%d ambiguous=%d)",
+        len(universe), len(focus), len(density), len(cell_scores), tier_counts,
+        len(judge_readings), n_ineligible, n_ambiguous,
     )
     return len(focus)
 
@@ -559,12 +549,21 @@ def open_position_targets(
     return out
 
 
+def _firing_tiers(cycle_index: int, k: int, m: int) -> list[str]:
+    """Tiers whose cadence fires on ``cycle_index`` (S/A always; B@K; T@M)."""
+    tiers: tuple[Tier, ...] = ("S", "A", "B", "T")
+    return [t for t in tiers if cadence_fires(t, cycle_index, k, m)]
+
+
 def get_focus_targets(
     conn: sqlite3.Connection,
     *,
     cycle_ts: int | None = None,
     max_n: int = 30,
     eligible_only: bool = False,
+    cycle_index: int | None = None,
+    cadence_k: int | None = None,
+    cadence_m: int | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Read the latest focus cycle as ``(venue, symbol, asset_class, group_id)``.
 
@@ -586,6 +585,14 @@ def get_focus_targets(
     out of the trade set by an eligibility downgrade). A NULL ``trade_eligible``
     (legacy/un-judged row) reads as eligible (COALESCE → 1, flow-preserving).
 
+    STAGE 1 CADENCE: when ``cycle_index`` is given, the dynamic picks are filtered
+    to the tiers whose cadence FIRES this cycle — S/A every cycle, B every ``K``,
+    T every ``M`` (``cadence_k``/``cadence_m`` default to :func:`tier_cadence`).
+    This is the per-cycle poll set, NOT a membership cut: every active row is still
+    persisted/watched (flow_not_block); cadence only governs HOW OFTEN it is
+    polled. ``cycle_index=None`` (legacy callers, held-position union) → no cadence
+    filter (full watch). Held positions are always force-seated regardless of tier.
+
     Empty dynamic focus + no open positions → empty list (caller falls back to
     BTC seed). Union is ADD-only (flow_not_block): never blocks an entry.
     """
@@ -601,17 +608,30 @@ def get_focus_targets(
         eligible_clause = (
             " AND COALESCE(wf.trade_eligible, 1) = 1" if eligible_only else ""
         )
+        params: list[object] = [latest_cycle]
+        # CADENCE: filter to firing tiers this cycle (legacy/un-tiered row →
+        # COALESCE 'T', so it polls at the tail cadence; flow_not_block).
+        tier_clause = ""
+        if cycle_index is not None:
+            k, m = tier_cadence()
+            k = cadence_k if cadence_k is not None else k
+            m = cadence_m if cadence_m is not None else m
+            firing = _firing_tiers(int(cycle_index), int(k), int(m))
+            placeholders = ", ".join("?" for _ in firing)
+            tier_clause = f" AND COALESCE(wf.tier, 'T') IN ({placeholders})"
+            params.extend(firing)
+        params.append(int(max_n))
         rows = conn.execute(
             f"""
             SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
             FROM watchlist_focus wf
             LEFT JOIN universe u
               ON wf.venue = u.venue AND wf.symbol = u.symbol
-            WHERE wf.cycle_ts = ?{eligible_clause}
+            WHERE wf.cycle_ts = ?{eligible_clause}{tier_clause}
             ORDER BY wf.focus_rank ASC
             LIMIT ?
             """,
-            (latest_cycle, int(max_n)),
+            tuple(params),
         ).fetchall()
         focus = [
             (

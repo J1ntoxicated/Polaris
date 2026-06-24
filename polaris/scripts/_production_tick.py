@@ -357,7 +357,12 @@ async def _run_tick(
     """
     now_ts = int(time.time())
     now_mono = time.monotonic()
-    focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=_focus_cycle_target())
+    # STAGE 1 tier-cadence: ``tick_idx`` is the cycle index, so the per-cycle bar
+    # ingest polls S/A every cycle, B every K, T every M (flow_not_block: every
+    # active row is still watched, cadence only governs HOW OFTEN it is bar-pulled).
+    focus = get_focus_targets(
+        conn, cycle_ts=now_ts, max_n=_focus_cycle_target(), cycle_index=tick_idx
+    )
     if not focus:
         logger.warning(
             "[tick %d] focus empty — falling back to BTC/ETH (universe not yet "

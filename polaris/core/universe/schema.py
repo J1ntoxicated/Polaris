@@ -16,10 +16,6 @@ from typing import Final, Literal
 OKX_UNIVERSE_REFRESH_SEC: Final[int] = 300
 CAPITAL_UNIVERSE_REFRESH_SEC: Final[int] = 600
 
-FOCUS_TARGET_BASE: Final[int] = 30
-FOCUS_TARGET_MIN: Final[int] = 12
-FOCUS_TARGET_MAX: Final[int] = 48
-
 NEW_LISTING_WATCH_HOURS: Final[int] = 24
 NEW_LISTING_SIZE_MULT: Final[float] = 0.5
 NEW_LISTING_MAX_CONCURRENT: Final[int] = 1
@@ -213,63 +209,148 @@ RANK_WEIGHT_CELL_Z: Final[float] = 0.10
 RANK_WEIGHT_OPPORTUNITY_Z: Final[float] = 0.20
 
 # ---------------------------------------------------------------------------
-# Asset-class focus quota (STEP 6 — crypto-monopoly fix; flow_not_block)
+# Rank-attention gradient — tier bands + tier-driven cadence (STAGE 1, flow_not_block)
 # ---------------------------------------------------------------------------
-# DEMO/PAPER virtual capital. The cross-venue focus is sorted globally by score
-# (vol-dominant). 24/7 crypto carries huge 24h notional while Capital CFD rows
-# expose no 24h notional via the nav tree (``vol_24h_usd=0.0``), so a pure score
-# sort lets crypto MONOPOLIZE the focus window and starves FX / indices / gold /
-# equity → those classes never reach the order path.
+# DEMO/PAPER virtual capital. Design SSOT:
+# ``vault/50_research/debates/rank_attention_gradient_2026-06-24.md``.
 #
-# The quota GUARANTEES each present-but-under-represented asset class a minimum
-# number of focus slots, drawn from its own highest-scored rows. This is a FLOW
-# INCREASE (more asset classes trade), NOT a throttle: crypto coverage stays
-# wide (it keeps the bulk of the window), no entry is blocked, no notional is
-# cut. A single-asset-class universe (OKX-only crypto / Alpaca-only equity)
-# satisfies every quota trivially → the quota is a NO-OP there.
+# Jin (2026-06-24): "개수 제한을 왜 걸어. 랭킹은 OK, 갯수 제한은 아니지." The old
+# focus COUNT-CAP (12-48 window + per-asset-class quota) is the WRONG abstraction:
+# it was a hard CUT (top-N + drop the rest) and a slot-floor REDISTRIBUTION needed
+# only because the window was scarce. STAGE 1 replaces both with a FREQUENCY
+# GRADIENT: ALL active rows are watched, and a single grouped-z merit rank →
+# percentile → tier band {S,A,B,T} that differentiates HOW OFTEN each is
+# polled/eval'd — a cadence slope, never a membership cliff. No drop, no hard
+# block, no size cut (flow_not_block); tier is NOT a sizing multiplier (9-stack
+# untouched); the rank is deterministic (in-loop GPT = 0).
 #
-# Defaults are CONSERVATIVE (small guaranteed floors). Each class is
-# env-overridable (``POLARIS_FOCUS_QUOTA_<CLASS>``) — a /debate calibration
-# target.
+#   Tier-S Hot   — WS realtime + every-cycle/every-tick eval (best merit).
+#   Tier-A Warm  — REST bar poll every cycle + every-tick eval.
+#   Tier-B Cool  — REST poll every K cycles (lighter cadence).
+#   Tier-T Tail  — low-freq REST heartbeat every M cycles (f_floor > 0 — the tail
+#                  is STILL watched, just rarely; never dropped).
 #
-# crypto floor (OKX-starve fix 2026-06-24): crypto WINS the score sort outright,
-# but on a SHRUNK focus window the SUMMED other-class floors (forex4+indices3+
-# commodity2+equity4 = 13) displaced crypto down to the tiny remainder — live:
-# watch-all gave OKX 120 active rows yet OKX focus = 2 (Capital 9 + Alpaca 4
-# guaranteed, crypto fought for the leftover slots). A fair crypto floor reserves
-# OKX a guaranteed share alongside the other classes (OKX active breadth ~120 ⇒
-# crypto deserves real coverage). FLOW INCREASE: more OKX names trade; no entry
-# blocked, no notional cut, every other-class floor UNCHANGED.
-FOCUS_QUOTA_ENV_PREFIX: Final[str] = "POLARIS_FOCUS_QUOTA_"
-_DEFAULT_FOCUS_MIN_QUOTA: Final[dict[str, int]] = {
-    "crypto": 8,  # fair floor — OKX is no longer starved to the leftover slots
-    "forex": 4,
-    "indices": 3,
-    "commodity": 2,
-    "equity": 4,
-    "other": 0,
-}
+# Boundaries are CUMULATIVE rank-percentiles (S ≤ s_pct < A ≤ a_pct < B ≤ b_pct,
+# rest = T), env-overridable (``POLARIS_TIER_{S,A,B}_PCT``) — a /debate calibration
+# target, never magic-in-place.
+Tier = Literal["S", "A", "B", "T"]
+
+TIER_S_PCT_DEFAULT: Final[float] = 0.10
+TIER_A_PCT_DEFAULT: Final[float] = 0.30
+TIER_B_PCT_DEFAULT: Final[float] = 0.60
+TIER_PCT_ENV_PREFIX: Final[str] = "POLARIS_TIER_"
 
 
-def focus_min_quota_by_class() -> dict[str, int]:
-    """Per-asset-class minimum focus-slot quota (env-overridable; clamped >= 0).
+def _tier_pct_env(band: str, default: float) -> float:
+    """Read ``POLARIS_TIER_<BAND>_PCT`` → float in (0,1); default on unset/garbage."""
+    raw = os.environ.get(f"{TIER_PCT_ENV_PREFIX}{band}_PCT")
+    if raw is None or raw == "":
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        return default
+    return val if 0.0 < val < 1.0 else default
 
-    Read ``POLARIS_FOCUS_QUOTA_<CLASS>`` (e.g. ``POLARIS_FOCUS_QUOTA_FOREX``) to
-    override a class floor; unset/invalid keeps the conservative default. The
-    guaranteed minimums fit inside the focus window by construction. /debate
-    calibration target.
+
+def tier_band_boundaries() -> tuple[float, float, float]:
+    """Cumulative S/A/B rank-percentile cuts (env-overridable, monotone-clamped).
+
+    Returns ``(s_cut, a_cut, b_cut)``: a row at rank-fraction ``f = rank/total``
+    is S if ``f <= s_cut``, A if ``<= a_cut``, B if ``<= b_cut``, else T. Each cut
+    is read independently; if an override breaks monotonicity the later cut is
+    nudged up to keep ``s_cut < a_cut < b_cut`` (so every band stays well-formed).
     """
-    out: dict[str, int] = {}
-    for cls, default in _DEFAULT_FOCUS_MIN_QUOTA.items():
-        raw = os.environ.get(f"{FOCUS_QUOTA_ENV_PREFIX}{cls.upper()}")
-        val = default
-        if raw is not None and raw != "":
-            try:
-                val = int(float(raw))
-            except ValueError:
-                val = default
-        out[cls] = max(0, val)
-    return out
+    s_cut = _tier_pct_env("S", TIER_S_PCT_DEFAULT)
+    a_cut = _tier_pct_env("A", TIER_A_PCT_DEFAULT)
+    b_cut = _tier_pct_env("B", TIER_B_PCT_DEFAULT)
+    a_cut = max(a_cut, s_cut + 1e-9)
+    b_cut = max(b_cut, a_cut + 1e-9)
+    return s_cut, a_cut, b_cut
+
+
+TIER_CADENCE_K_DEFAULT: Final[int] = 3  # B (Cool) polls every K cycles
+TIER_CADENCE_M_DEFAULT: Final[int] = 6  # T (Tail) polls every M cycles (M > K)
+TIER_CADENCE_K_ENV: Final[str] = "POLARIS_TIER_CADENCE_K"
+TIER_CADENCE_M_ENV: Final[str] = "POLARIS_TIER_CADENCE_M"
+
+
+def tier_cadence() -> tuple[int, int]:
+    """Tier-B / Tier-T poll periods ``(K, M)`` in cycles (env-overridable, >= 1).
+
+    B fires every K cycles, T every M cycles. Defaults K=3, M=6 (tail rarer than
+    cool). Invalid/unset → defaults. A /debate calibration target (never hardcoded
+    at the call site).
+    """
+    def _read(env: str, default: int) -> int:
+        raw = os.environ.get(env)
+        if raw is None or raw == "":
+            return default
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            return default
+
+    return _read(TIER_CADENCE_K_ENV, TIER_CADENCE_K_DEFAULT), _read(
+        TIER_CADENCE_M_ENV, TIER_CADENCE_M_DEFAULT
+    )
+
+
+# Per-venue WS subscription budget (Tier-S realtime subs). Capital's WS genuinely
+# caps ~40 concurrent subscriptions; OKX/Alpaca have headroom (default 60,
+# raisable via ``POLARIS_WS_BUDGET_<VENUE>``). Σ Tier-S subs per venue ≤ budget —
+# a RESOURCE knob (WS frame size), not a membership cut: a name over budget still
+# bar-ingests via REST (flow_not_block). Unknown venue → permissive default.
+WS_BUDGET_DEFAULT: Final[int] = 60
+_WS_BUDGET_BY_VENUE: Final[dict[str, int]] = {
+    "capital": 40,  # genuine Capital WS subscription ceiling
+    "okx": 60,
+    "alpaca": 60,
+}
+WS_BUDGET_ENV_PREFIX: Final[str] = "POLARIS_WS_BUDGET_"
+
+
+def ws_budget_for_venue(venue: str) -> int:
+    """Per-venue Tier-S WS subscription budget (env ``POLARIS_WS_BUDGET_<VENUE>``).
+
+    Capital 40 (hard genuine cap), OKX/Alpaca 60 default — all raisable via env.
+    Unknown venue → ``WS_BUDGET_DEFAULT`` (permissive; never 0 → flow_not_block).
+    """
+    v = (venue or "").lower()
+    default = _WS_BUDGET_BY_VENUE.get(v, WS_BUDGET_DEFAULT)
+    raw = os.environ.get(f"{WS_BUDGET_ENV_PREFIX}{v.upper()}")
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return default
+
+
+# Soft-crowding penalty (diversity seam). A cluster (``underlying_group_id``) that
+# hogs the top of the merit rank can be NUDGED down by ``lambda × cluster
+# attention-share`` so attention spreads. This is a RANK nudge (never a hard slot
+# floor — that was the quota we removed), and it is DEFAULT OFF (lambda 0.0 ⇒ pure
+# merit, Jin's principle). Env ``POLARIS_CROWDING_LAMBDA`` opens it for /debate
+# calibration. flow_not_block: a nudged name is still watched, never dropped/sized.
+CROWDING_LAMBDA_DEFAULT: Final[float] = 0.0
+CROWDING_LAMBDA_ENV: Final[str] = "POLARIS_CROWDING_LAMBDA"
+
+
+def crowding_lambda() -> float:
+    """Soft-crowding penalty strength (env ``POLARIS_CROWDING_LAMBDA``; default 0 = OFF).
+
+    0.0 ⇒ pure merit (byte-identical ordering). A positive value nudges crowded
+    clusters down the rank. Invalid/unset/negative → 0.0 (OFF).
+    """
+    raw = os.environ.get(CROWDING_LAMBDA_ENV)
+    if raw is None or raw == "":
+        return CROWDING_LAMBDA_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError:
+        return CROWDING_LAMBDA_DEFAULT
+    return val if val > 0.0 else CROWDING_LAMBDA_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +515,11 @@ class FocusSelection:
     multi-lens judgment) + ``trade_eligible`` (decouples the WATCH set from the
     TRADE set) are keyword-defaulted (None / True) so every existing constructor
     stays valid and an un-judged row is flow-preservingly trade-eligible.
+
+    STAGE 1 (rank-attention gradient): ``tier`` ∈ {S,A,B,T} is the OBSERVATION-
+    CADENCE band from the single merit rank percentile (``tier_band_boundaries``).
+    It governs HOW OFTEN the row is polled/eval'd, NEVER membership — every active
+    row is watched. Default "T" so a legacy constructor stays valid (flow_not_block).
     """
 
     cycle_ts: int
@@ -444,3 +530,4 @@ class FocusSelection:
     bucket: FocusBucket
     opportunity_score: float | None = None
     trade_eligible: bool = True
+    tier: Tier = "T"

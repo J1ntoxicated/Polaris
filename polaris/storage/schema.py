@@ -378,6 +378,14 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
             "ALTER TABLE watchlist_focus "
             "ADD COLUMN trade_eligible INTEGER NOT NULL DEFAULT 1"
         )
+    # watchlist_focus.tier — STAGE 1 rank-attention gradient (2026-06-24). ADDITIVE
+    # only: DEFAULT 'T' keeps every pre-existing row at the tail cadence band (no
+    # row retro-promoted). The {S,A,B,T} band governs poll cadence, not membership
+    # (flow_not_block); not a sizing input (9-stack untouched).
+    if wf_cols and "tier" not in wf_cols:
+        conn.execute(
+            "ALTER TABLE watchlist_focus ADD COLUMN tier TEXT NOT NULL DEFAULT 'T'"
+        )
     if "product_class" not in cols:
         conn.execute(
             "ALTER TABLE positions ADD COLUMN product_class TEXT NOT NULL DEFAULT ''"

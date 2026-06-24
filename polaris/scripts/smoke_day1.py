@@ -86,13 +86,13 @@ async def run() -> None:
     print(f"           ├─ OKX                  : {len(okx_filtered)}")
     print(f"           └─ Capital              : {len(cap_filtered)}")
 
-    # 4. Dynamic focus watchlist
+    # 4. Dynamic focus watchlist (STAGE 1: all active watched, tier-graded)
     focus = compute_dynamic_focus(filtered, cycle_ts=now_ts)
-    by_bucket: dict[str, int] = {}
+    by_tier: dict[str, int] = {}
     for f in focus:
-        by_bucket[f.bucket] = by_bucket.get(f.bucket, 0) + 1
-    print(f"[focus]    dynamic focus           : {len(focus)} (target 12-48)")
-    print(f"           buckets                 : {by_bucket}")
+        by_tier[f.tier] = by_tier.get(f.tier, 0) + 1
+    print(f"[focus]    watched (all active)     : {len(focus)}")
+    print(f"           tiers                   : {by_tier}")
     if focus:
         top = focus[:5]
         print("           top 5 focus rows:")

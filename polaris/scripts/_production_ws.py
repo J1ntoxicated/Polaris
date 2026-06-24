@@ -24,6 +24,7 @@ import os
 import sqlite3
 from typing import TYPE_CHECKING
 
+from polaris.core.universe.schema import ws_budget_for_venue
 from polaris.scripts._production_layers import get_focus_targets
 from polaris.venues.alpaca.ws import AlpacaQuoteWS
 from polaris.venues.capital.ws import CapitalMarketWS
@@ -36,8 +37,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Subscribe at most this many focus symbols per venue (focus window is ~30).
-WS_SYMBOLS_PER_VENUE = 40
+# Largest per-venue WS budget (Capital 40 / OKX·Alpaca 60 default, raisable) sets
+# how deep to read the focus list before the per-venue cap below trims each venue.
+_WS_READ_DEPTH_MULT = 3
 
 
 def _focus_by_venue(
@@ -46,16 +48,25 @@ def _focus_by_venue(
     """Read the latest focus cycle and group ``symbol`` by ``venue``.
 
     Returns ``{"okx": [...], "capital": [...], "alpaca": [...]}`` (only venues
-    with at least one focus symbol appear).
+    with at least one focus symbol appear). The focus list is ordered by merit
+    rank (focus_rank asc), so the highest-tier (S) names lead each venue's slice.
+
+    STAGE 1: each venue is capped at its OWN WS budget (``ws_budget_for_venue`` —
+    Capital 40 genuine cap, OKX/Alpaca 60 default, env-raisable). flow_not_block:
+    a name beyond the WS budget still bar-ingests via REST, it is not dropped.
     """
-    targets = get_focus_targets(conn, max_n=WS_SYMBOLS_PER_VENUE * 3)
+    # Read deep enough that the largest per-venue budget can be filled.
+    max_budget = max(
+        ws_budget_for_venue(v) for v in ("okx", "capital", "alpaca")
+    )
+    targets = get_focus_targets(conn, max_n=max_budget * _WS_READ_DEPTH_MULT)
     by_venue: dict[str, list[str]] = {}
     for venue, symbol, _asset_class, _group in targets:
         by_venue.setdefault(venue, [])
         if symbol not in by_venue[venue]:
             by_venue[venue].append(symbol)
-    # Cap each venue's subscription to keep frames small.
-    return {v: syms[:WS_SYMBOLS_PER_VENUE] for v, syms in by_venue.items()}
+    # Cap each venue's subscription to its own WS budget (Tier-S leads the list).
+    return {v: syms[: ws_budget_for_venue(v)] for v, syms in by_venue.items()}
 
 
 def build_ws_clients(

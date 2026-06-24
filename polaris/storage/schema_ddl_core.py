@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS watchlist_focus (
     -- sizing input (9-stack untouched). Nullable score = legacy/un-judged rows.
     opportunity_score REAL,
     trade_eligible INTEGER NOT NULL DEFAULT 1,
+    -- STAGE 1 (rank-attention gradient 2026-06-24): ``tier`` ∈ {S,A,B,T} is the
+    -- observation-CADENCE band from the single merit-rank percentile. It governs
+    -- HOW OFTEN a watched row is polled/eval'd (S/A every cycle, B every K, T
+    -- every M), NEVER membership (every active row is watched). DEFAULT 'T' keeps
+    -- a legacy/un-tiered row at the tail cadence (flow_not_block; not a sizing input).
+    tier TEXT NOT NULL DEFAULT 'T',
     PRIMARY KEY (cycle_ts, venue, symbol)
 );
 """

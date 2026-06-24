@@ -286,8 +286,10 @@ def test_focus_cycle_target_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None
     assert _focus_cycle_target() == FOCUS_CYCLE_TARGET  # invalid → default
 
 
-def test_ws_cap_unchanged_at_40() -> None:
-    """WS socket stays bounded at top-40 (do NOT widen the socket on watch widen)."""
-    from polaris.scripts._production_ws import WS_SYMBOLS_PER_VENUE
+def test_ws_budget_per_venue() -> None:
+    """STAGE 1: WS socket budget is per-venue (Capital 40 genuine cap; OKX/Alpaca 60)."""
+    from polaris.core.universe.schema import ws_budget_for_venue
 
-    assert WS_SYMBOLS_PER_VENUE == 40
+    assert ws_budget_for_venue("capital") == 40  # genuine Capital WS ceiling
+    assert ws_budget_for_venue("okx") == 60
+    assert ws_budget_for_venue("alpaca") == 60

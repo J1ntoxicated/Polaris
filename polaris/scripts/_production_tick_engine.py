@@ -476,14 +476,23 @@ async def run_tick_decision_loop(
         try:
             now_ts = int(time.time())
             now_mono = time.monotonic()
-            focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=watch_ceiling)
+            # STAGE 1 tier-cadence: ``eng.loop_count`` is the cycle index, so the
+            # per-loop tick eval set is the tiers that fire this cycle (S/A every
+            # loop; B every K; T every M). flow_not_block: every active row is
+            # still watched/persisted — cadence only governs HOW OFTEN it is eval'd.
+            cycle_idx = eng.loop_count
+            focus = get_focus_targets(
+                conn, cycle_ts=now_ts, max_n=watch_ceiling, cycle_index=cycle_idx
+            )
             # Increment 1 DECOUPLE: the TRADE set (entrance-judge eligible subset)
             # gates the order-open; the watch ``focus`` above still streams/ingests
-            # every valid symbol. Two cheap indexed reads of the same focus cycle.
+            # every valid symbol. Same cadence applies (an order-open only fires on
+            # a name whose tier is being eval'd this cycle).
             eligible_set = {
                 (v, s)
                 for v, s, _ac, _g in get_focus_targets(
-                    conn, cycle_ts=now_ts, max_n=watch_ceiling, eligible_only=True
+                    conn, cycle_ts=now_ts, max_n=watch_ceiling,
+                    eligible_only=True, cycle_index=cycle_idx,
                 )
             }
             # Regime is read once per (venue, group) per loop (M1/M2: a cheap

@@ -228,12 +228,21 @@ RANK_WEIGHT_OPPORTUNITY_Z: Final[float] = 0.20
 # cut. A single-asset-class universe (OKX-only crypto / Alpaca-only equity)
 # satisfies every quota trivially → the quota is a NO-OP there.
 #
-# Defaults are CONSERVATIVE (small guaranteed floors). crypto has NO floor — it
-# dominates the score sort on its own. Each class is env-overridable
-# (``POLARIS_FOCUS_QUOTA_<CLASS>``) — a /debate calibration target.
+# Defaults are CONSERVATIVE (small guaranteed floors). Each class is
+# env-overridable (``POLARIS_FOCUS_QUOTA_<CLASS>``) — a /debate calibration
+# target.
+#
+# crypto floor (OKX-starve fix 2026-06-24): crypto WINS the score sort outright,
+# but on a SHRUNK focus window the SUMMED other-class floors (forex4+indices3+
+# commodity2+equity4 = 13) displaced crypto down to the tiny remainder — live:
+# watch-all gave OKX 120 active rows yet OKX focus = 2 (Capital 9 + Alpaca 4
+# guaranteed, crypto fought for the leftover slots). A fair crypto floor reserves
+# OKX a guaranteed share alongside the other classes (OKX active breadth ~120 ⇒
+# crypto deserves real coverage). FLOW INCREASE: more OKX names trade; no entry
+# blocked, no notional cut, every other-class floor UNCHANGED.
 FOCUS_QUOTA_ENV_PREFIX: Final[str] = "POLARIS_FOCUS_QUOTA_"
 _DEFAULT_FOCUS_MIN_QUOTA: Final[dict[str, int]] = {
-    "crypto": 0,  # never floored — wins the score sort outright (24/7 + high vol)
+    "crypto": 8,  # fair floor — OKX is no longer starved to the leftover slots
     "forex": 4,
     "indices": 3,
     "commodity": 2,

@@ -437,7 +437,15 @@ async def run_tick_decision_loop(
     """
     eng = tick_engine_state if tick_engine_state is not None else TickEngineState()
     # Local import avoids a module-load cycle (tick → layers → tick body).
+    from polaris.core.universe.schema import universe_watch_max
     from polaris.scripts._production_layers import get_focus_targets
+
+    # The focus cycle persists the full watch breadth (watch-all: OKX active ~120);
+    # read the tick path's WATCH/TRADE sets up to that ceiling instead of the
+    # default 30 so the wide watch is bar-ingested + WS-subscribed + eligibility-
+    # gated (flow_not_block: more symbols OBSERVED; the order-open is still gated
+    # by ``eligible_set``, so trade volume is unchanged).
+    watch_ceiling = universe_watch_max()
 
     logger.info(
         "[tick-engine] start phase=%s real_roundtrip=%s shadow=%s cadence=%.2fs",
@@ -468,14 +476,14 @@ async def run_tick_decision_loop(
         try:
             now_ts = int(time.time())
             now_mono = time.monotonic()
-            focus = get_focus_targets(conn, cycle_ts=now_ts)
+            focus = get_focus_targets(conn, cycle_ts=now_ts, max_n=watch_ceiling)
             # Increment 1 DECOUPLE: the TRADE set (entrance-judge eligible subset)
             # gates the order-open; the watch ``focus`` above still streams/ingests
             # every valid symbol. Two cheap indexed reads of the same focus cycle.
             eligible_set = {
                 (v, s)
                 for v, s, _ac, _g in get_focus_targets(
-                    conn, cycle_ts=now_ts, eligible_only=True
+                    conn, cycle_ts=now_ts, max_n=watch_ceiling, eligible_only=True
                 )
             }
             # Regime is read once per (venue, group) per loop (M1/M2: a cheap

@@ -136,3 +136,5 @@
 - 2026-06-24 research: 4-axis granularity audit — regime COARSE(chop 68%/bimodal learner 0.3-vs-1.0), strategy THIN(3 dark + crisis=0 + Alpaca long-only), exit ADEQUATE, learner COARSE+BROKEN(max_hold no-op). 3/4 coarse/thin → [[granularity_audit_4axis_2026-06-24]]
 - 2026-06-24 feat(entrance): Increment 1 — deterministic entrance judgment activated (AI-free). EntranceJudge 5-lens (liquidity/atr/technical/regime/altdata) → opportunity_score + trade_eligible; CONSUME=focus rank + persist; DECOUPLE=watch(full)≠trade(eligible) at get_focus_targets(eligible_only); WS incremental apply_subscription_delta (frozen-socket fix); ambiguity sidecar entrance_judgments (observe-only seam, Inc-2 deferred). in-loop GPT=0, flow_not_block, 9-stack ban. 2948 passed, mypy/ruff clean. branch feat/entrance-judge-increment1
 2026-06-23 23:13 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=53 learners=3 paper=True]
+2026-06-23 23:43 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-23 daily-auto [closes=1151 pnl_usd=-129.25 opens=1200 faults=1 restarts=2]

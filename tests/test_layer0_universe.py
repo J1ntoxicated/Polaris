@@ -704,10 +704,9 @@ def _cls(symbol: str, *, venue: str, asset_class: str, vol: float) -> UniverseIn
 
 
 def test_focus_min_quota_defaults_conservative() -> None:
-    """Defaults: crypto unbounded (no min); FX/indices/commodity/equity floored."""
+    """Defaults: every present trading class floored (crypto included after the OKX-starve fix)."""
     q = focus_min_quota_by_class()
-    assert q.get("crypto", 0) == 0  # crypto never floored — it dominates anyway
-    for cls in ("forex", "indices", "commodity", "equity"):
+    for cls in ("crypto", "forex", "indices", "commodity", "equity"):
         assert q.get(cls, 0) >= 1
     # Conservative: the guaranteed minimums must fit inside the focus window.
     assert sum(q.values()) <= FOCUS_TARGET_MAX
@@ -804,6 +803,114 @@ def test_quota_capped_by_available_rows_of_class() -> None:
     fx = [f for f in focus if f.venue == "capital"]
     assert len(fx) == 1  # only one exists; quota cannot fabricate rows
     assert ("capital", "EURUSD") in {(f.venue, f.symbol) for f in focus}
+
+
+# ---------------------------------------------------------------------------
+# Crypto fair-floor (OKX-starve fix; flow_not_block) — watch-all gives OKX a
+# wide active breadth (120), but the per-class floors for Capital (forex/indices/
+# commodity) + Alpaca (equity) summed to 13 guaranteed slots while crypto had a
+# floor of 0. On a SHRUNK focus window the other-class floors then displaced
+# crypto down to a tiny remainder (live: OKX focus = 2). A crypto floor protects
+# OKX a guaranteed share without touching the other floors (FLOW INCREASE: more
+# OKX names trade; no entry blocked, no notional cut, other classes unchanged).
+# ---------------------------------------------------------------------------
+
+
+def test_focus_min_quota_crypto_floored_fairly() -> None:
+    """Crypto now carries a fair guaranteed floor (>=1), not 0."""
+    q = focus_min_quota_by_class()
+    assert q.get("crypto", 0) >= 1  # OKX gets a guaranteed share, not the remainder
+    # Other-class floors are UNCHANGED (Capital/Alpaca protection intact).
+    assert q["forex"] == 4
+    assert q["indices"] == 3
+    assert q["commodity"] == 2
+    assert q["equity"] == 4
+    # All floors still fit inside the focus window.
+    assert sum(q.values()) <= FOCUS_TARGET_MAX
+
+
+def test_focus_min_quota_crypto_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POLARIS_FOCUS_QUOTA_CRYPTO tunes the crypto floor (/debate calibration)."""
+    monkeypatch.setenv(f"{FOCUS_QUOTA_ENV_PREFIX}CRYPTO", "10")
+    assert focus_min_quota_by_class()["crypto"] == 10
+
+
+def test_crypto_floor_protects_okx_under_shrunk_window() -> None:
+    """The live starve: small window + many Capital/Alpaca rows must NOT cut OKX to 2.
+
+    Reproduces the field symptom — high-vol crypto (highest scores) is squeezed
+    out of a shrunk focus window by the summed other-class floors. The crypto
+    floor guarantees OKX keeps its fair share alongside the other classes.
+    """
+    crypto = [
+        _cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6)
+        for i in range(40)
+    ]
+    # 9 Capital rows (forex/indices/commodity) + 4 Alpaca equities, all guaranteed
+    # by their floors → would displace 13 crypto rows out of a 15-slot window,
+    # leaving crypto = 2 (the live bug) without a crypto floor.
+    capital = (
+        [_cls(f"FX{i}", venue="capital", asset_class="forex", vol=0.0) for i in range(5)]
+        + [_cls(f"IX{i}", venue="capital", asset_class="indices", vol=0.0) for i in range(3)]
+        + [_cls("GOLD", venue="capital", asset_class="commodity", vol=0.0)]
+    )
+    alpaca = [
+        _cls(f"EQ{i}", venue="alpaca", asset_class="equity", vol=4e8 - i * 1e6)
+        for i in range(4)
+    ]
+    focus = compute_dynamic_focus(crypto + capital + alpaca, cycle_ts=NOW, target_size=15)
+    okx_in_focus = sum(1 for f in focus if f.venue == "okx")
+    crypto_floor = focus_min_quota_by_class()["crypto"]
+    assert okx_in_focus >= crypto_floor  # OKX is no longer starved to the remainder
+    assert len(focus) == 15  # window size unchanged (flow, not throttle)
+
+
+def test_crypto_floor_does_not_shrink_other_class_floors() -> None:
+    """The other classes still reach their own floors alongside the crypto floor.
+
+    Window must be large enough to seat every floor; the crypto floor must not
+    cannibalize the Capital/Alpaca guarantees.
+    """
+    crypto = [
+        _cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6)
+        for i in range(40)
+    ]
+    capital = (
+        [_cls(f"FX{i}", venue="capital", asset_class="forex", vol=0.0) for i in range(4)]
+        + [_cls(f"IX{i}", venue="capital", asset_class="indices", vol=0.0) for i in range(3)]
+        + [_cls(f"CM{i}", venue="capital", asset_class="commodity", vol=0.0) for i in range(2)]
+    )
+    alpaca = [
+        _cls(f"EQ{i}", venue="alpaca", asset_class="equity", vol=4e8 - i * 1e6)
+        for i in range(4)
+    ]
+    universe = crypto + capital + alpaca
+    cls_by_key = {(ins.venue, ins.symbol): ins.asset_class for ins in universe}
+    focus = compute_dynamic_focus(universe, cycle_ts=NOW, target_size=30)
+    by_class: dict[str, int] = {}
+    for f in focus:
+        cls = cls_by_key[(f.venue, f.symbol)]
+        by_class[cls] = by_class.get(cls, 0) + 1
+    q = focus_min_quota_by_class()
+    assert by_class.get("forex", 0) >= q["forex"]
+    assert by_class.get("indices", 0) >= q["indices"]
+    assert by_class.get("commodity", 0) >= q["commodity"]
+    assert by_class.get("equity", 0) >= q["equity"]
+    assert by_class.get("crypto", 0) >= q["crypto"]
+    assert len(focus) == 30
+
+
+def test_crypto_floor_noop_for_single_class_okx_crypto() -> None:
+    """OKX-only crypto universe stays a no-op (single class satisfies all floors)."""
+    crypto = [
+        _cls(f"C{i}-USDT", venue="okx", asset_class="crypto", vol=1e9 - i * 1e6)
+        for i in range(50)
+    ]
+    focus = compute_dynamic_focus(crypto, cycle_ts=NOW, target_size=30)
+    assert len(focus) == 30
+    assert all(f.venue == "okx" for f in focus)
+    scores = [f.focus_score for f in focus]
+    assert scores == sorted(scores, reverse=True)  # plain top-N by score, unchanged
 
 
 # ---------------------------------------------------------------------------

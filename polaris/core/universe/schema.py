@@ -44,7 +44,13 @@ ATR_FLOOR_BY_CLASS: Final[dict[str, float]] = {
     "other": 0.5,
 }
 
-ALLOWED_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT"})
+# USD-equivalent (≈$1) OKX quote currencies — admitted DIRECTLY with no FX
+# conversion because ``volCcyQuote24h`` is already ~USD-denominated. STEP 2
+# scope-widen (Jin 2026-06-24 "다 열어야지", flow_not_block): USDC + USD join USDT
+# (~+35 names). Crypto-quoted pairs (BTC-ETH …) are admitted SEPARATELY in
+# ``parse_okx_tickers`` after their vol is normalized to USD via an in-payload
+# quote→USD index — they are NOT in this set (their quote is not USD-equivalent).
+ALLOWED_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT", "USDC", "USD"})
 
 # ---------------------------------------------------------------------------
 # Universe-eligibility liquidity floor (Jin-approved 2026-06-22 — flow_not_block)

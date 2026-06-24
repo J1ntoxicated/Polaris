@@ -45,6 +45,11 @@ from polaris.core.universe.watchlist import (
 NOW = 1_780_000_000
 
 
+async def _no_sleep(*_args: object, **_kwargs: object) -> None:
+    """Patch for asyncio.sleep — zero out retry-backoff / walk-throttle in tests."""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -201,13 +206,17 @@ def test_rank_includes_mid_liquidity_previously_spread_rejected() -> None:
 
 
 def test_rank_keeps_validity_hard() -> None:
-    """Non-live and non-USDT-quote rows are still hard-excluded (validity)."""
+    """Non-live rows are still hard-excluded (validity). STEP 2 scope-widen: a
+    USD-equivalent (USDC/USD) or normalized crypto quote is now VALID — only the
+    non-live (halt) row is dropped; the parser is the OKX admission SSOT now."""
     live = _make_inst("GOOD-USDT", vol=5e8)
     halted = _make_inst("HALT-USDT", state="halt", vol=9e9)  # huge vol but dead
-    nonusdt = _make_inst("BTC-USDC", quote_ccy="USDC", vol=9e9)
-    out = rank_active_universe([live, halted, nonusdt], top_n=10)
+    usdc = _make_inst("BTC-USDC", quote_ccy="USDC", vol=9e9)   # USD-equiv → valid
+    crypto_q = _make_inst("BTC-ETH", quote_ccy="ETH", vol=9e9)  # normalized → valid
+    out = rank_active_universe([live, halted, usdc, crypto_q], top_n=10)
     syms = {ins.symbol for ins in out}
-    assert syms == {"GOOD-USDT"}
+    assert syms == {"GOOD-USDT", "BTC-USDC", "BTC-ETH"}
+    assert "HALT-USDT" not in syms  # non-live still hard-excluded
 
 
 def test_rank_empty_input_safe() -> None:
@@ -424,6 +433,16 @@ def test_liqfloor_trade_annotation_names_axis() -> None:
     assert liqfloor_trade_annotation(good) is None
 
 
+def test_active_reason_crypto_quote_okx_below_rank_not_quote_ccy() -> None:
+    # STEP 2 scope-widen: a crypto-quoted OKX name (BTC-ETH, quote=ETH) that the
+    # parser admitted (it had a USD reference) is VALIDLY quoted — if it is not in
+    # the active set its reason is 'below_rank_topN', NOT a 'quote_ccy=ETH'
+    # exclusion (the parser is the admission SSOT; ETH is a real quote now).
+    ins = _make_inst("BTC-ETH", quote_ccy="ETH", vol=8e8, spread_bps=2.0,
+                     atr_pct=4.0, depth=2e5)
+    assert _active_exclusion_reason(ins) == "below_rank_topN"
+
+
 def test_active_reason_session_wait_for_non_live_capital() -> None:
     ins = _make_inst(
         "EURUSD", venue="capital", asset_class="forex", quote_ccy="USD",
@@ -443,11 +462,6 @@ def test_active_reason_off_venue_class() -> None:
         "BTCUSD", venue="capital", asset_class="crypto", quote_ccy="USD",
     )
     assert _active_exclusion_reason(ins) == "off_venue_class:crypto"
-
-
-def test_active_reason_okx_non_usdt_quote() -> None:
-    ins = _make_inst("FOO-BTC", quote_ccy="BTC")
-    assert _active_exclusion_reason(ins) == "quote_ccy=BTC"
 
 
 def test_persist_universe_active_reason_uses_real_path(memdb) -> None:  # type: ignore[no-untyped-def]
@@ -473,9 +487,13 @@ def test_capital_name_matches_p0_categories() -> None:
     # Crypto is OWNED by OKX track A (Jin 2026-05-30 STEP 0 (a)) — the "crypto"
     # token was removed, so a standalone "Crypto" node no longer matches.
     assert not _capital_name_matches({"name": "Crypto"}, CAPITAL_P0_CATEGORY_TOKENS)
-    # Shares = P2 by spec; must NOT match.
-    assert not _capital_name_matches({"name": "Shares"}, CAPITAL_P0_CATEGORY_TOKENS)
-    assert not _capital_name_matches({"name": "ETFs"}, CAPITAL_P0_CATEGORY_TOKENS)
+    # STEP 2 scope-widen (Jin 2026-06-24 "다 열어야지"): Shares / ETFs / Bonds /
+    # Rates now MATCH so the walk descends into them (FETCH + persist). Active/
+    # trade membership is still gated downstream by the stream asset-class whitelist.
+    assert _capital_name_matches({"name": "Shares"}, CAPITAL_P0_CATEGORY_TOKENS)
+    assert _capital_name_matches({"name": "ETFs"}, CAPITAL_P0_CATEGORY_TOKENS)
+    assert _capital_name_matches({"name": "Bonds"}, CAPITAL_P0_CATEGORY_TOKENS)
+    assert _capital_name_matches({"name": "Rates"}, CAPITAL_P0_CATEGORY_TOKENS)
 
 
 def test_persist_focus_upsert(memdb) -> None:  # type: ignore[no-untyped-def]
@@ -493,35 +511,75 @@ def test_persist_focus_upsert(memdb) -> None:  # type: ignore[no-untyped-def]
 # ---------------------------------------------------------------------------
 
 
-def test_parse_okx_tickers_filters_non_usdt() -> None:
+def test_parse_okx_tickers_admits_usd_equivalent_quotes() -> None:
+    # STEP 2 scope-widen (Jin 2026-06-24 "다 열어야지", flow_not_block): USDC- and
+    # USD-quoted spot pairs are USD-equivalent → admitted alongside USDT with the
+    # SAME vol_24h_usd (volCcyQuote24h is already ~USD for a stablecoin quote).
     rows = [
         {
-            "instId": "BTC-USDT",
-            "last": "60000",
-            "bidPx": "60000",
-            "askPx": "60001",
-            "high24h": "61000",
-            "low24h": "59000",
-            "volCcyQuote24h": "5e8",
-            "bidSz": "1",
-            "askSz": "1",
+            "instId": "BTC-USDT", "last": "60000", "bidPx": "60000",
+            "askPx": "60001", "high24h": "61000", "low24h": "59000",
+            "volCcyQuote24h": "5e8", "bidSz": "1", "askSz": "1",
         },
         {
-            "instId": "BTC-USDC",
-            "last": "60000",
-            "bidPx": "60000",
-            "askPx": "60001",
-            "high24h": "61000",
-            "low24h": "59000",
-            "volCcyQuote24h": "5e8",
-            "bidSz": "1",
-            "askSz": "1",
+            "instId": "BTC-USDC", "last": "60000", "bidPx": "60000",
+            "askPx": "60001", "high24h": "61000", "low24h": "59000",
+            "volCcyQuote24h": "5e8", "bidSz": "1", "askSz": "1",
+        },
+        {
+            "instId": "BTC-USD", "last": "60000", "bidPx": "60000",
+            "askPx": "60001", "high24h": "61000", "low24h": "59000",
+            "volCcyQuote24h": "5e8", "bidSz": "1", "askSz": "1",
         },
     ]
     out = parse_okx_tickers(rows, now_ts=NOW)
-    assert [i.symbol for i in out] == ["BTC-USDT"]
-    assert out[0].vol_24h_usd == pytest.approx(5e8, rel=1e-6)
-    assert out[0].atr_24h_pct == pytest.approx((61000 - 59000) / 60000 * 100.0)
+    assert sorted(i.symbol for i in out) == ["BTC-USD", "BTC-USDC", "BTC-USDT"]
+    for i in out:
+        assert i.vol_24h_usd == pytest.approx(5e8, rel=1e-6)
+        assert i.asset_class == "crypto"
+
+
+def test_parse_okx_tickers_normalizes_crypto_quote_vol_to_usd() -> None:
+    # A crypto-quoted pair (BTC-ETH, quote=ETH) carries vol in ETH units. The
+    # parser builds an in-payload quote→USD index from the USD-equivalent tickers
+    # (ETH-USDT.last = ETH's USD price) and normalizes vol_24h_usd / depth to USD
+    # so the vol-dominant rank compares like-for-like. WRONG normalization =
+    # price error, so this is pinned (flow_not_block: admitted, ranked correctly).
+    rows = [
+        {
+            "instId": "ETH-USDT", "last": "3000", "bidPx": "3000",
+            "askPx": "3001", "high24h": "3100", "low24h": "2900",
+            "volCcyQuote24h": "1e8", "bidSz": "10", "askSz": "10",
+        },
+        {
+            "instId": "BTC-ETH", "last": "20", "bidPx": "20",
+            "askPx": "20.02", "high24h": "21", "low24h": "19",
+            "volCcyQuote24h": "1000",  # 1000 ETH of 24h notional
+            "bidSz": "5", "askSz": "5",
+        },
+    ]
+    out = {i.symbol: i for i in parse_okx_tickers(rows, now_ts=NOW)}
+    assert "BTC-ETH" in out
+    # 1000 ETH × $3000/ETH = $3,000,000 USD notional.
+    assert out["BTC-ETH"].vol_24h_usd == pytest.approx(3_000_000.0, rel=1e-6)
+    assert out["BTC-ETH"].quote_ccy == "ETH"
+    # spread/atr are ratios → unit-free, unchanged by quote ccy.
+    assert out["BTC-ETH"].atr_24h_pct == pytest.approx((21 - 19) / 20 * 100.0)
+
+
+def test_parse_okx_tickers_drops_quote_with_no_usd_reference() -> None:
+    # A pair whose quote has NO USD reference anywhere in the payload cannot be
+    # USD-normalized (vol would be a wrong number) → excluded. This is a
+    # normalization-quality keep, not a defensive block: the row carries no
+    # rankable/priceable USD datum, so it is not a watch candidate.
+    rows = [
+        {
+            "instId": "FOO-BAR", "last": "5", "bidPx": "5", "askPx": "5.01",
+            "high24h": "6", "low24h": "4", "volCcyQuote24h": "1000",
+            "bidSz": "1", "askSz": "1",
+        }
+    ]
+    assert parse_okx_tickers(rows, now_ts=NOW) == []
 
 
 def test_parse_okx_tickers_drops_zero_price() -> None:
@@ -675,6 +733,66 @@ async def test_capital_walk_reaches_depth3_commodities() -> None:
     assert by_sym.get("SILVER") == "commodity"
     assert by_sym.get("OIL_CRUDE") == "commodity"
     assert by_sym.get("EURUSD") == "forex"  # depth-2 forex path unchanged
+
+
+@pytest.mark.asyncio
+async def test_capital_walk_retries_transient_non200(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """STEP 2 coverage protection (Jin 2026-06-24): a transient non-200 on a nav
+    node used to silently drop the whole sub-tree (coverage loss). Retry-backoff
+    recovers it — the node returns 429 once, then 200, and its markets are fetched.
+    NOT a trading defense: this protects UNIVERSE COVERAGE, never an order path."""
+    import polaris.core.universe._capital as cap_mod
+    monkeypatch.setattr(cap_mod.asyncio, "sleep", _no_sleep)  # zero backoff in test
+
+    calls: dict[str, int] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/session"):
+            return httpx.Response(200, headers={"CST": "c", "X-SECURITY-TOKEN": "s"}, json={})
+        if path.endswith("/marketnavigation"):
+            return httpx.Response(200, json={"nodes": [{"id": "forex", "name": "Forex"}]})
+        node_id = path.rsplit("/", 1)[-1]
+        calls[node_id] = calls.get(node_id, 0) + 1
+        if node_id == "forex" and calls[node_id] == 1:
+            return httpx.Response(429, json={})  # transient throttle on first try
+        return httpx.Response(200, json={"markets": [_cap_mk("EURUSD", "CURRENCIES")], "nodes": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://demo-api"
+    ) as cli:
+        out = await fetch_capital_instruments(
+            api_key="k", email="e", password="p", client=cli, now_ts=NOW
+        )
+    assert calls["forex"] >= 2  # retried after the 429
+    assert any(i.symbol == "EURUSD" for i in out)  # recovered the markets
+
+
+@pytest.mark.asyncio
+async def test_capital_walk_admits_shares_node(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """STEP 2 scope-widen: the 'shares' token lets the walk DESCEND into a Shares
+    node so company-share CFDs are FETCHED (classified equity). They are persisted
+    + surfaced; whether they enter the ACTIVE/TRADE set is a separate stream-asset-
+    class decision (Capital stream = forex/index/commodity today)."""
+    import polaris.core.universe._capital as cap_mod
+    monkeypatch.setattr(cap_mod.asyncio, "sleep", _no_sleep)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/session"):
+            return httpx.Response(200, headers={"CST": "c", "X-SECURITY-TOKEN": "s"}, json={})
+        if path.endswith("/marketnavigation"):
+            return httpx.Response(200, json={"nodes": [{"id": "shares", "name": "Shares"}]})
+        return httpx.Response(200, json={"markets": [_cap_mk("AAPL", "SHARES")], "nodes": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://demo-api"
+    ) as cli:
+        out = await fetch_capital_instruments(
+            api_key="k", email="e", password="p", client=cli, now_ts=NOW
+        )
+    by_sym = {i.symbol: i.asset_class for i in out}
+    assert by_sym.get("AAPL") == "equity"  # shares node descended + classified
 
 
 # ---------------------------------------------------------------------------

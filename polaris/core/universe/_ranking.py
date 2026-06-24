@@ -19,7 +19,6 @@ from collections.abc import Sequence
 
 from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.core.universe.schema import (
-    ALLOWED_QUOTE_CCY_OKX,
     RANK_PENALTY_W_DEPTH,
     RANK_PENALTY_W_SPREAD,
     RANK_SCORE_W_ATR,
@@ -160,10 +159,16 @@ def _is_valid_candidate(ins: UniverseInstrument) -> bool:
     the venue reports it TRADEABLE again. Capital trades only when its session is
     open (off-session OKX 24/7 carries the book); the routing here is session
     STATE, not a hard block (flow_not_block). Crypto (24/7) is unaffected.
+
+    STEP 2 scope-widen (Jin 2026-06-24 "다 열어야지"): the OKX quote-currency check
+    is GONE from this hard gate. ``parse_okx_tickers`` is now the OKX admission
+    SSOT — it admits USD-equivalent quotes (USDT/USDC/USD) AND crypto-quoted
+    pairs whose vol normalizes to USD, and excludes only un-normalizable quotes.
+    Any OKX row that reaches here is therefore validly quoted; re-filtering on a
+    USDT-only set would drop the legitimately-widened USDC/USD/crypto-quote names
+    (flow_not_block: the admit range opened, so the gate opens with it).
     """
-    if ins.state != "live":
-        return False
-    return not (ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX)
+    return ins.state == "live"
 
 
 def _pop_z(values: Sequence[float]) -> list[float]:

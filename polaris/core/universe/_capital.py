@@ -8,6 +8,7 @@ keep working. Spec source: vault/30_components/layer-0-universe-discovery.md.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -42,7 +43,67 @@ CAPITAL_P0_CATEGORY_TOKENS: tuple[str, ...] = (
     "metal",
     "energ",
     "oil",  # "oil_markets_group"
+    # STEP 2 scope-widen (Jin 2026-06-24 "다 열어야지"): descend into the broader
+    # Capital catalog. ``share`` opens the company-share CFD tree (~2086 epics →
+    # classified ``equity``); ``etf`` / ``bond`` / ``rate`` open the remaining
+    # categories. These are FETCHED + persisted (surfaced). Whether an ``equity``-
+    # classed row enters the ACTIVE/TRADE set is decided downstream by the Capital
+    # stream asset-class whitelist (today {forex,index,commodity}) — a separate
+    # stream-config decision, NOT this walk's concern (flow_not_block: widen admit).
+    "share",
+    "etf",
+    "bond",
+    "rate",
 )
+
+# STEP 2 coverage protection (Jin 2026-06-24): the ~2086-share walk is ~10× the
+# request volume of the forex/index/commodity walk. A small inter-request throttle
+# (env ``POLARIS_CAPITAL_WALK_THROTTLE_SEC``, default 0.05s) paces the nav GETs so
+# the wider walk does not hammer the demo API. A transient non-200 (429/5xx) is
+# RETRIED with exponential backoff (``_CAPITAL_NAV_RETRIES`` attempts) instead of
+# silently dropping the whole sub-tree (the prior coverage-loss bug). Both protect
+# UNIVERSE COVERAGE only — never an order/trading path.
+CAPITAL_WALK_THROTTLE_ENV = "POLARIS_CAPITAL_WALK_THROTTLE_SEC"
+_CAPITAL_WALK_THROTTLE_DEFAULT = 0.05
+_CAPITAL_NAV_RETRIES = 3
+_CAPITAL_NAV_BACKOFF_BASE_SEC = 0.5
+
+
+def _capital_walk_throttle_sec() -> float:
+    """Inter-request nav-walk throttle (env-overridable, >= 0). Invalid → default."""
+    raw = os.environ.get(CAPITAL_WALK_THROTTLE_ENV)
+    if raw is None or raw == "":
+        return _CAPITAL_WALK_THROTTLE_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _CAPITAL_WALK_THROTTLE_DEFAULT
+
+
+async def _capital_nav_get(
+    cli: httpx.AsyncClient, path: str, auth_headers: dict[str, str]
+) -> httpx.Response | None:
+    """GET a nav node with retry-backoff on a transient non-200 (429/5xx).
+
+    Returns the 200 response, or None when every attempt failed (the caller skips
+    that sub-tree — best-effort, never raises, never halts). A 4xx other than 429
+    is treated as permanent (no retry — the node genuinely does not exist). This
+    protects COVERAGE only; it is not a trading/order path.
+    """
+    backoff = _CAPITAL_NAV_BACKOFF_BASE_SEC
+    for attempt in range(_CAPITAL_NAV_RETRIES):
+        try:
+            resp = await cli.get(path, headers=auth_headers)
+        except httpx.HTTPError:
+            resp = None
+        if resp is not None and resp.status_code == 200:
+            return resp
+        transient = resp is None or resp.status_code == 429 or resp.status_code >= 500
+        if not transient or attempt == _CAPITAL_NAV_RETRIES - 1:
+            return resp if (resp is not None and resp.status_code == 200) else None
+        await asyncio.sleep(backoff)
+        backoff *= 2.0
+    return None
 
 # C2b: the nav tree nests real commodities 3 levels deep
 # (commodities_group → commodities → {precious_metals, energies, base_metals} →
@@ -166,9 +227,14 @@ async def _walk_capital_node(
     if depth >= CAPITAL_NAV_MAX_DEPTH or node_id in seen_nodes:
         return
     seen_nodes.add(node_id)
-    resp = await cli.get(f"{CAPITAL_NAV_PATH}/{node_id}", headers=auth_headers)
-    if resp.status_code != 200:
-        return
+    # Throttle the nav GETs (the wider STEP 2 walk is ~10× requests) + retry a
+    # transient non-200 instead of silently dropping the sub-tree (coverage fix).
+    throttle = _capital_walk_throttle_sec()
+    if throttle > 0.0:
+        await asyncio.sleep(throttle)
+    resp = await _capital_nav_get(cli, f"{CAPITAL_NAV_PATH}/{node_id}", auth_headers)
+    if resp is None:
+        return  # exhausted retries — skip this sub-tree (best-effort, never halts)
     body = resp.json()
     for market in body.get("markets", []) or []:
         inst = _capital_market_row_to_instrument(

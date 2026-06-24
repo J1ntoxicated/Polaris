@@ -110,18 +110,53 @@ async def fetch_okx_instruments(
     return parsed
 
 
-def parse_okx_tickers(rows: list[dict[str, Any]], *, now_ts: int) -> list[UniverseInstrument]:
-    """Convert OKX `/api/v5/market/tickers` rows → UniverseInstrument list (USDT-quote only).
+def _build_okx_quote_usd_index(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Map each base currency → its USD price from the USD-equivalent tickers.
 
-    Pure function; lifted out so tests can feed canned payloads (no network).
+    A USD-equivalent-quoted pair (quote ∈ {USDT, USDC, USD}) gives its BASE's USD
+    price directly via ``last`` (e.g. ``ETH-USDT.last = 3000`` → ETH ≈ $3000). The
+    USD-equivalent quote currencies themselves map to 1.0. This index is what lets
+    a crypto-quoted pair (e.g. ``BTC-ETH``, quote=ETH) convert its quote-denominated
+    24h notional to USD (``× index["ETH"]``). Built once per payload (pure, no
+    network). When several USD-equiv pairs exist for a base, the first wins (they
+    agree to ~peg precision; the rank is robust to the small spread).
     """
+    index: dict[str, float] = {q: 1.0 for q in ALLOWED_QUOTE_CCY_OKX}
+    for row in rows:
+        inst_id = str(row.get("instId", ""))
+        if "-" not in inst_id:
+            continue
+        base, quote = inst_id.split("-", 1)
+        if quote not in ALLOWED_QUOTE_CCY_OKX or base in index:
+            continue
+        last = _to_float(row.get("last"))
+        if last > 0.0:
+            index[base] = last
+    return index
+
+
+def parse_okx_tickers(rows: list[dict[str, Any]], *, now_ts: int) -> list[UniverseInstrument]:
+    """Convert OKX `/api/v5/market/tickers` rows → UniverseInstrument list.
+
+    Admits USD-equivalent-quoted pairs (USDT/USDC/USD) directly, plus crypto-quoted
+    pairs (e.g. ``BTC-ETH``) whose quote currency has a USD reference in the same
+    payload — those have their quote-denominated vol/depth NORMALIZED to USD via
+    ``_build_okx_quote_usd_index`` so the vol-dominant active rank compares
+    like-for-like (a wrong normalization would be a price error; pinned by tests).
+    A pair whose quote has NO USD reference is excluded (un-normalizable → not a
+    rankable/priceable watch candidate, NOT a defensive block). flow_not_block:
+    every name with a derivable USD datum flows. Pure function (no network).
+    """
+    quote_usd = _build_okx_quote_usd_index(rows)
     out: list[UniverseInstrument] = []
     for row in rows:
         inst_id = str(row.get("instId", ""))
         if "-" not in inst_id:
             continue
         base, quote = inst_id.split("-", 1)
-        if quote not in ALLOWED_QUOTE_CCY_OKX:
+        # Admit USD-equivalent quotes, OR a crypto quote that has a USD reference.
+        quote_usd_price = quote_usd.get(quote, 0.0)
+        if quote not in ALLOWED_QUOTE_CCY_OKX and quote_usd_price <= 0.0:
             continue
 
         last = _to_float(row.get("last"))
@@ -133,18 +168,26 @@ def parse_okx_tickers(rows: list[dict[str, Any]], *, now_ts: int) -> list[Univer
         mid = 0.5 * (bid + ask)
         spread_bps = ((ask - bid) / mid) * 10_000.0
 
-        # Notional = volCcy24h (base-volume) × last; or volCcyQuote24h directly if present.
+        # 24h notional in the QUOTE currency (volCcyQuote24h, or volCcy24h × last).
         vol_quote = _to_float(row.get("volCcyQuote24h"))
         if vol_quote <= 0.0:
             vol_quote = _to_float(row.get("volCcy24h")) * last
+        # Normalize quote-denominated notional/depth to USD. For USD-equiv quotes
+        # the factor is 1.0 (no-op); for a crypto quote it is the quote's USD price
+        # so an ETH-quoted vol becomes USD (the like-for-like ranking input).
+        vol_usd = vol_quote * quote_usd_price
 
         high24 = _to_float(row.get("high24h"))
         low24 = _to_float(row.get("low24h"))
         atr_pct = ((high24 - low24) / last) * 100.0 if last > 0 else 0.0
 
-        # Depth proxy: best-of-book volume × mid (top-of-book USD). Real L2 depth
-        # arrives via WebSocket in P1; P0 keeps it conservative and additive.
-        depth_top = (_to_float(row.get("bidSz")) + _to_float(row.get("askSz"))) * mid
+        # Depth proxy: best-of-book volume × mid, then × quote→USD (top-of-book USD).
+        # Real L2 depth arrives via WebSocket in P1; P0 keeps it conservative.
+        depth_top = (
+            (_to_float(row.get("bidSz")) + _to_float(row.get("askSz")))
+            * mid
+            * quote_usd_price
+        )
 
         out.append(
             UniverseInstrument(
@@ -155,7 +198,7 @@ def parse_okx_tickers(rows: list[dict[str, Any]], *, now_ts: int) -> list[Univer
                 asset_class="crypto",
                 quote_ccy=quote,
                 state="live",
-                vol_24h_usd=vol_quote,
+                vol_24h_usd=vol_usd,
                 spread_bps=spread_bps,
                 atr_24h_pct=atr_pct,
                 depth_10bps_usd=depth_top,
@@ -607,8 +650,11 @@ def _active_exclusion_reason(ins: UniverseInstrument) -> str:
         if ins.venue == "capital":
             return f"session_wait:{ins.state}"
         return f"state={ins.state}"
-    if ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX:
-        return f"quote_ccy={ins.quote_ccy}"
+    # NOTE: no OKX quote_ccy exclusion here. STEP 2 scope-widen made
+    # ``parse_okx_tickers`` the admission SSOT — it admits USD-equivalent quotes
+    # AND crypto-quoted pairs that normalize to USD, so any OKX row that reached
+    # the universe is validly quoted. A crypto-quoted name (quote=ETH) is no
+    # longer an exclusion; if not selected it fell below the rank cut, below.
     # Basic-valid but below the continuous-rank WATCH-cut. (The liquidity floor is
     # NO LONGER an active-exclusion — it is a trade-eligibility annotation now.)
     return "below_rank_topN"

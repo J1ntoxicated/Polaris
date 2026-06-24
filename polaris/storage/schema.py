@@ -596,6 +596,11 @@ def _migrate_quote_ticks_to_lww(conn: sqlite3.Connection) -> None:
         return  # unexpected shape — leave untouched (fail-safe, never destroy)
     # Rebuild: new single-row table ← latest (max ts) row per instrument, then
     # swap. One transaction so the copy is durable before the old table is gone.
+    # Flush any open implicit txn first so the explicit BEGIN cannot raise
+    # "cannot start a transaction within a transaction" (the only caller is the
+    # autocommit init_db connection, but this keeps the contract explicit).
+    if conn.in_transaction:
+        conn.execute("COMMIT")
     conn.execute("BEGIN")
     try:
         conn.execute("DROP TABLE IF EXISTS quote_ticks_lww_new")

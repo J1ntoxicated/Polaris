@@ -452,7 +452,8 @@ def check_s6_feature_availability(
         row = inflow.get(venue)
         last_ts = row[0] if row is not None else 0
         # no_inflow: no row at all, or the durable latest tick is too old.
-        if live_session and (now_ts - last_ts) > th.s6_no_inflow_sec:
+        stale = (now_ts - last_ts) > th.s6_no_inflow_sec
+        if live_session and stale:
             out.append(
                 Finding(
                     check_id="S6",
@@ -466,6 +467,14 @@ def check_s6_feature_availability(
                 )
             )
         if row is None:
+            continue
+        # A stale venue's tick_inflow row is FROZEN (last_tick_ts stops advancing,
+        # buckets stop decaying), so its ticks_600s/max_flow_size no longer reflect
+        # a live window — judging flow-size death on it would re-fire size_dead
+        # forever ALONGSIDE no_inflow. The venue is already flagged (no_inflow when
+        # in-session); skip the size axis so a dead venue emits one finding, not
+        # two. (Not a block/cut — flow_not_block; pure de-duplication of alerts.)
+        if stale:
             continue
         _last_ts, ticks, max_size, win_start = row
         rate = ticks / float(th.s6_window_sec) if th.s6_window_sec > 0 else 0.0

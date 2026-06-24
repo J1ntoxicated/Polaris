@@ -613,6 +613,25 @@ def test_s6_flow_size_dead_warn(live_db: Path) -> None:
     assert "okx:size_dead" not in subjects
 
 
+def test_s6_dead_venue_no_double_fire_size_dead(live_db: Path) -> None:
+    # A dead venue's tick_inflow row freezes (last_tick_ts stops advancing,
+    # buckets stop decaying). It must emit no_inflow ONCE, not also keep
+    # re-asserting size_dead forever — the size axis is skipped when the venue
+    # is already stale (flow_not_block: still warn-only, just de-duplicated).
+    conn = _rw(live_db)
+    _insert_inflow(conn, "okx", last_tick_ts=NOW_OPEN - 5000,  # stale → no_inflow
+                   ticks_600s=60, max_flow_size_600s=0.0,
+                   window_started_at=NOW_OPEN - 9000)
+    conn.close()
+    live = open_live_ro(live_db)
+    found = check_s6_feature_availability(live, NOW_OPEN, TH)
+    live.close()
+    subjects = {f.subject for f in found}
+    assert "okx:no_inflow" in subjects
+    assert "okx:size_dead" not in subjects   # not double-fired on a dead venue
+    assert "okx:warming" not in subjects
+
+
 def test_s6_flow_size_warming_when_window_not_full(live_db: Path) -> None:
     # Same size-dead pattern but window_started_at is RECENT (window < 600s):
     # report WARMING (info), NOT a size_dead warn (no silent OK/FAIL, D2 fix).

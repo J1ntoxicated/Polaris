@@ -138,3 +138,5 @@
 2026-06-23 23:13 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=53 learners=3 paper=True]
 2026-06-23 23:43 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
 2026-06-23 daily-auto [closes=1151 pnl_usd=-129.25 opens=1200 faults=1 restarts=2]
+2026-06-24 00:32 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=240 learners=3 paper=True]
+2026-06-24 [design: rank-attention-gradient — count-cap→frequency 경사; 2 cliffs (WATCH_MAX=120, focus[12,48]+quota) → all-watch tier S/A/B/T; quota removed (grouped-z merit); resource=freq knobs (WS budget/REST period/DB downsample); GPT+Gemini CONVERGED; build pending Jin; vault/50_research/debates/rank_attention_gradient_2026-06-24.md]

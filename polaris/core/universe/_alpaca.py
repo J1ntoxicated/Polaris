@@ -54,16 +54,11 @@ _MOST_ACTIVES_TOP_DEFAULT = 100
 _MOST_ACTIVES_TOP_ENV = "POLARIS_ALPACA_MOST_ACTIVES_TOP"
 _SNAPSHOT_BATCH = 100
 
-# Full-sweep flag: snapshot EVERY tradable universe symbol (batched at
+# Full-sweep flag: when set, snapshot EVERY tradable universe symbol (batched at
 # _SNAPSHOT_BATCH) instead of only the bounded screener ∩ seed candidate set, so
-# real dollar-vol reaches ALL rows (not just ~131). Cheap at the 5-10min discovery
-# cadence (~128 batched calls for ~12.8k names; measured 12572/12759 enriched).
-#
-# STAGE 2b (Jin 2026-06-24): this is now the PRODUCTION DEFAULT (ON). Real vol on
-# every row is the precondition for the watch-floor (min_vol $5M / min_price $1)
-# to AUTO-BOUND Alpaca to ~1.5k real-liquid names — the resource bound that makes
-# watch-all-valid (INC2) safe on the 13k-row venue. The bounded screener path is
-# still reachable as an explicit escape hatch (``POLARIS_ALPACA_SNAPSHOT_FULL=0``).
+# real dollar-vol reaches all rows (not just ~131). Cheap at the 5-10min discovery
+# cadence (~133 batched calls for ~13.3k names). Env-gated so the bounded path
+# stays the default; a /debate / live-calibration knob.
 _SNAPSHOT_FULL_ENV = "POLARIS_ALPACA_SNAPSHOT_FULL"
 
 # Gradable listing exchanges — listed US venues only. OTC/pink/blank are kept off
@@ -113,16 +108,8 @@ def _most_actives_top() -> int:
 
 
 def _snapshot_full_sweep() -> bool:
-    """True iff the full-sweep snapshot is active (sweep EVERY universe symbol).
-
-    STAGE 2b: full sweep is the PRODUCTION DEFAULT — unset env ⇒ ON. Only an
-    explicit falsy value (``0``/``false``/``off``/``no``) selects the bounded
-    screener escape hatch. Any other value (incl. ``1``/``true``) ⇒ ON.
-    """
-    raw = os.environ.get(_SNAPSHOT_FULL_ENV)
-    if raw is None or raw.strip() == "":
-        return True
-    return raw.strip().lower() not in {"0", "false", "off", "no"}
+    """True iff ``POLARIS_ALPACA_SNAPSHOT_FULL`` is a truthy flag (sweep all rows)."""
+    return os.environ.get(_SNAPSHOT_FULL_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_creds(

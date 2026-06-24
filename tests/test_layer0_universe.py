@@ -26,6 +26,7 @@ from polaris.core.universe.discovery import (
     rank_active_universe,
 )
 from polaris.core.universe.schema import (
+    UNIVERSE_RANK_TOP_N_DEFAULT,
     UNIVERSE_RANK_TOP_N_ENV,
     UNIVERSE_WATCH_MAX_DEFAULT,
     UNIVERSE_WATCH_MAX_ENV,
@@ -221,14 +222,13 @@ def test_rank_ties_and_zero_division_safe() -> None:
 
 
 def test_rank_top_n_cap_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # STAGE 2b INC2: the COUNT CAP is removed — by default ALL valid are watched.
+    # 150 names so the DEFAULT (120) actually caps below the population.
     insts = [_make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6) for i in range(150)]
     monkeypatch.delenv(UNIVERSE_WATCH_MAX_ENV, raising=False)
-    # Default (no env) → watch ALL valid (no 120 cut); the safety backstop (3000)
-    # is far above the population so it never binds.
+    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT (120, decoupled from focus 48).
     monkeypatch.delenv(UNIVERSE_RANK_TOP_N_ENV, raising=False)
-    assert len(rank_active_universe(insts)) == 150
-    # An explicit env top_n still binds (operator override).
+    assert len(rank_active_universe(insts)) == UNIVERSE_RANK_TOP_N_DEFAULT
+    # Env override is honored and capped at the WATCH_MAX ceiling (NOT focus 48).
     monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "9999")
     assert len(rank_active_universe(insts)) == min(len(insts), UNIVERSE_WATCH_MAX_DEFAULT)
     monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "5")

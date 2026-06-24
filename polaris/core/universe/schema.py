@@ -5,10 +5,9 @@ Spec source: vault/30_components/layer-0-universe-discovery.md (Dataclass + Cons
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 # ---------------------------------------------------------------------------
 # Refresh / focus / listing constants (Q1, Q3, Q6)
@@ -150,13 +149,7 @@ def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
 # Hard keep is validity only (state=live; OKX USDT-quote already enforced at
 # parse time). Weak candidates still flow — the downstream cell-matrix
 # down-routes them. Aggressive bias preserved (flow_not_block).
-# STAGE 2b INC2 (Jin 2026-06-24): the per-venue count cap is REMOVED — the bot
-# WATCHES ALL valid rows (no top-N cliff). Jin: "갯수 제한을 왜 걸어." The default is
-# a GENEROUS safety BACKSTOP (3000), high enough never to bind the real ~1900
-# watched set (OKX ~189 + Capital ~235 + Alpaca floor-bounded ~1.5k), yet a hard
-# guard against a runaway (e.g. an enrichment outage leaving many un-floored rows).
-# flow_not_block: widening WATCH = flow up; the cap only ever clips a pathological tail.
-UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 3000
+UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 120
 UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
 
 # Watch-set ceiling (Jin 2026-06-24 — WATCH/TRADE decouple): the active/watch set
@@ -168,11 +161,7 @@ UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
 # (FOCUS_CYCLE_TARGET / WS_SYMBOLS_PER_VENUE). Was conflated with FOCUS_TARGET_MAX
 # (48) by the old ``min(top_n, FOCUS_TARGET_MAX)`` clamp — split here so watch can
 # exceed 48 while focus stays 12-48. flow_not_block: widening WATCH = flow up.
-# STAGE 2b INC2: was 120 (the cliff that cut OKX 189→120 / Capital 235→120 /
-# Alpaca 13282→120). The cap is REMOVED in practice — the default is now a GENEROUS
-# safety backstop (3000), never the binding ceiling on the real ~1900 watched set.
-# An operator can still set a tighter ``POLARIS_WATCH_MAX`` for a live resource override.
-UNIVERSE_WATCH_MAX_DEFAULT: Final[int] = 3000
+UNIVERSE_WATCH_MAX_DEFAULT: Final[int] = 120
 UNIVERSE_WATCH_MAX_ENV: Final[str] = "POLARIS_WATCH_MAX"
 
 
@@ -362,184 +351,6 @@ def crowding_lambda() -> float:
     except ValueError:
         return CROWDING_LAMBDA_DEFAULT
     return val if val > 0.0 else CROWDING_LAMBDA_DEFAULT
-
-
-# ---------------------------------------------------------------------------
-# STAGE 2b INC5 — staleness SLA (tail-blowup safety; flow_not_block)
-# ---------------------------------------------------------------------------
-# With watch-all-valid the tail (Tier-T, ~40% of ~1900) polls rarely (cadence M).
-# Five deterministic guards keep that safe WITHOUT a membership cut:
-#   1. max_stale_age force-poll — a tail row not seen for ``max_stale_age`` is
-#      polled regardless of cadence (heartbeat ceiling; never starved to silence).
-#   2. recency-decay penalty — an aged datum's rank weight decays so a STALE price
-#      cannot drive a HOT decision (the rank trusts fresh data more).
-#   3. refresh-before-promote — a row promoted to a hotter tier is REST-refreshed
-#      first, so no hot/eval decision runs on stale data at the moment of promotion.
-#   4. tier hysteresis + min-dwell — a row cannot churn tiers until it has dwelt
-#      ``min_dwell`` cycles (anti-flap; the band is stable, not jittery).
-#   5. flash-spike Fast-Path — an extreme move bypasses the cadence band entirely
-#      (an opportunity/risk event is never deferred to the tail cadence).
-# All pure + env-tunable (/debate calibration). flow_not_block: every guard is a
-# CADENCE/RANK nudge, never a drop, block, or size cut.
-
-MAX_STALE_AGE_SEC_DEFAULT: Final[float] = 600.0  # 10min force-poll ceiling
-MAX_STALE_AGE_SEC_ENV: Final[str] = "POLARIS_MAX_STALE_AGE_SEC"
-RECENCY_HALF_LIFE_SEC_DEFAULT: Final[float] = 300.0
-TIER_MIN_DWELL_DEFAULT: Final[int] = 3
-TIER_MIN_DWELL_ENV: Final[str] = "POLARIS_TIER_MIN_DWELL"
-FLASH_SPIKE_PCT_DEFAULT: Final[float] = 0.05  # 5% move → Fast-Path
-FLASH_SPIKE_PCT_ENV: Final[str] = "POLARIS_FLASH_SPIKE_PCT"
-
-# Tier hotness order (higher = hotter) for the promote/hysteresis comparisons.
-_TIER_HOTNESS: Final[dict[str, int]] = {"T": 0, "B": 1, "A": 2, "S": 3}
-
-
-def max_stale_age_sec() -> float:
-    """Force-poll staleness ceiling (env ``POLARIS_MAX_STALE_AGE_SEC``; >0).
-
-    A watched row not polled within this window is force-polled next cycle
-    regardless of its tier cadence — the heartbeat ceiling on the tail. Invalid/
-    unset/non-positive → default 600s.
-    """
-    raw = os.environ.get(MAX_STALE_AGE_SEC_ENV)
-    if raw is None or raw == "":
-        return MAX_STALE_AGE_SEC_DEFAULT
-    try:
-        val = float(raw)
-    except ValueError:
-        return MAX_STALE_AGE_SEC_DEFAULT
-    return val if val > 0.0 else MAX_STALE_AGE_SEC_DEFAULT
-
-
-def is_stale_for_force_poll(
-    *, last_poll_ts: int | None, now_ts: int, max_age_sec: float
-) -> bool:
-    """True iff a row must be force-polled (age past ``max_age_sec``, or never polled).
-
-    A never-polled row (``last_poll_ts is None``) is stale by definition (it must
-    be observed at least once). flow_not_block: this only ADDS a poll, never skips one.
-    """
-    if last_poll_ts is None:
-        return True
-    return (now_ts - int(last_poll_ts)) > max_age_sec
-
-
-def recency_decay_penalty(*, age_sec: float, half_life_sec: float) -> float:
-    """Rank penalty in [0, 1) that GROWS with data age (asymptote 1.0).
-
-    ``1 - 0.5 ** (age / half_life)``: 0 at age 0, ~0.5 at one half-life, →1 as age
-    →∞. Subtracted (scaled) from a candidate's rank so a STALE datum is trusted
-    LESS — a stale price can't drive a hot decision. Non-positive half-life or
-    age → 0 (no penalty). RANK nudge only (flow_not_block).
-    """
-    if half_life_sec <= 0.0 or age_sec <= 0.0:
-        return 0.0
-    return 1.0 - math.pow(0.5, age_sec / half_life_sec)
-
-
-def should_refresh_before_promote(prev_tier: str, new_tier: str) -> bool:
-    """True iff ``new_tier`` is HOTTER than ``prev_tier`` (promotion → REST-refresh first).
-
-    A promotion (e.g. T→S) must refresh the row's data before the hotter eval runs
-    so no hot decision fires on stale data. A demotion or same tier needs no
-    pre-refresh (the slower cadence tolerates the existing datum). Unknown tier → False.
-    """
-    return _TIER_HOTNESS.get(new_tier, -1) > _TIER_HOTNESS.get(prev_tier, -1)
-
-
-def tier_min_dwell() -> int:
-    """Min cycles a row must dwell before it may churn tiers (env; >= 1)."""
-    raw = os.environ.get(TIER_MIN_DWELL_ENV)
-    if raw is None or raw == "":
-        return TIER_MIN_DWELL_DEFAULT
-    try:
-        return max(1, int(float(raw)))
-    except ValueError:
-        return TIER_MIN_DWELL_DEFAULT
-
-
-def tier_with_hysteresis(
-    prev_tier: str, candidate_tier: str, *, dwell_cycles: int, min_dwell: int
-) -> Tier:
-    """Anti-churn tier band: hold ``prev_tier`` until ``min_dwell`` cycles elapse.
-
-    A row that has dwelt fewer than ``min_dwell`` cycles keeps its previous tier
-    even if its merit moved it to a different band — so the cadence band does not
-    flap cycle-to-cycle (which would thrash the poll/WS sets). Once dwell ≥
-    min_dwell (or the candidate equals prev) the new band is adopted. Pure;
-    flow_not_block (a held tier is still watched, only its CADENCE is stabilized).
-    """
-    adopt = candidate_tier == prev_tier or dwell_cycles >= min_dwell
-    out: str = candidate_tier if adopt else prev_tier
-    return cast("Tier", out)
-
-
-def flash_spike_pct() -> float:
-    """Fast-Path |move| threshold (env ``POLARIS_FLASH_SPIKE_PCT``; >0; default 0.05)."""
-    raw = os.environ.get(FLASH_SPIKE_PCT_ENV)
-    if raw is None or raw == "":
-        return FLASH_SPIKE_PCT_DEFAULT
-    try:
-        val = float(raw)
-    except ValueError:
-        return FLASH_SPIKE_PCT_DEFAULT
-    return val if val > 0.0 else FLASH_SPIKE_PCT_DEFAULT
-
-
-def is_flash_spike(*, pct_move: float, threshold: float) -> bool:
-    """True iff ``|pct_move| >= threshold`` (extreme move → bypass cadence band).
-
-    A Tier-T row that just moved 8% is not deferred to the tail cadence — the
-    Fast-Path eval'd it THIS cycle. ADD-only (flow_not_block): it only ever
-    PROMOTES a poll, never suppresses one.
-    """
-    return abs(pct_move) >= threshold
-
-
-# ---------------------------------------------------------------------------
-# STAGE 2b — resource guard: per-cycle poll budget + auto-scaled tail cadence
-# ---------------------------------------------------------------------------
-# watch-all-valid (~1900) must stay wall-clock bounded under the REST Semaphore(8).
-# The binding cost is the per-CYCLE poll set. Two deterministic knobs bound it
-# WITHOUT a membership cut:
-#   * per_cycle_poll_budget — the target ceiling on rows bar-polled in one cycle
-#     (the wall-clock bound; the firing set is read rank-ordered + LIMITed to it,
-#     so the lowest-merit overflow simply waits one cycle — a DEFERRAL, not a drop).
-#   * auto_scale_tail_cadence — M (tail period) GROWS with watched count so the
-#     tail-rows-per-cycle (~0.4·watched / M) stays under the budget. A small watched
-#     set keeps the base M (no spurious slowdown). K (cool period) is unaffected.
-# Both env-tunable. flow_not_block: a deferred tail row is still watched (heartbeat
-# ≥ once per M), never dropped; the budget never zeroes any tier.
-
-PER_CYCLE_POLL_BUDGET_DEFAULT: Final[int] = 200
-PER_CYCLE_POLL_BUDGET_ENV: Final[str] = "POLARIS_PER_CYCLE_POLL_BUDGET"
-_TAIL_FRACTION: Final[float] = 0.40  # Tier-T ≈ 1 - b_cut of the watched set
-
-
-def per_cycle_poll_budget() -> int:
-    """Per-cycle bar-poll wall-clock budget (env ``POLARIS_PER_CYCLE_POLL_BUDGET``; >= 1)."""
-    raw = os.environ.get(PER_CYCLE_POLL_BUDGET_ENV)
-    if raw is None or raw == "":
-        return PER_CYCLE_POLL_BUDGET_DEFAULT
-    try:
-        return max(1, int(float(raw)))
-    except ValueError:
-        return PER_CYCLE_POLL_BUDGET_DEFAULT
-
-
-def auto_scale_tail_cadence(*, watched: int, base_m: int, per_cycle_budget: int) -> int:
-    """Tail period M scaled UP with ``watched`` so tail-rows-per-cycle ≤ budget.
-
-    The tail (~40% of watched) fires once per M cycles, so tail-rows-per-cycle ≈
-    ``0.4·watched / M``. To keep that ≤ ``per_cycle_budget`` we need
-    ``M ≥ 0.4·watched / per_cycle_budget``. Returns ``max(base_m, ceil(that))`` —
-    a small watched set keeps the base M (no spurious slowdown), a large one rarefies
-    the tail. flow_not_block: a larger M only spaces the heartbeat, never drops it.
-    """
-    if watched <= 0 or per_cycle_budget <= 0:
-        return max(1, base_m)
-    needed = math.ceil((_TAIL_FRACTION * watched) / per_cycle_budget)
-    return max(max(1, base_m), needed)
 
 
 # ---------------------------------------------------------------------------

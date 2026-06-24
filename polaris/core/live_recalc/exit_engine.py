@@ -155,6 +155,7 @@ def evaluate_exit(
     loser_timeout_sec: float | None = None,
     profit_target_r: float | None = None,
     entry_atr_pct: float | None = None,
+    trail_atr_pct: float | None = None,
     trail_mult: float | None = None,
     mfe_protect: MfeProtectSchedule | None = None,
     mode: ManagementMode | None = None,
@@ -192,6 +193,22 @@ def evaluate_exit(
     tracks today's noise band and the ratchet already forbids loosening.
     ``None`` (legacy rows / callers) keeps the current-ATR denominator —
     byte-identical to the pre-anchor behaviour.
+
+    ``trail_atr_pct``: the STABLE bar-scale ATR for the TRAIL-WIDTH only
+    ([[g7_tick_trail_atr_scale_2026-06-25]]). The TICK exit pass feeds ``atr_pct``
+    the seconds-scale ``_window_atr_pct`` (mid-range over the few-second feature
+    window) — fine as a live mark, but ~10x narrower than the bar ATR the trail
+    multipliers (2-4x) were calibrated against, so the bare trail sat micro-tight
+    and clipped fresh winners at ~flat on the next sub-tick reversal (live:
+    atr_trail_stop cadence='tick' avg hold 16.6s, +0.14R MFE, realised ~0R). When
+    set, the trail width ``atr_one`` is computed from ``trail_atr_pct`` instead of
+    ``atr_pct`` so the trail distance is anchored to the entry-time bar risk. The
+    R DENOMINATOR (``entry_atr_pct``), the FSM rungs, the peak-fraction floor and
+    the G6 -1.0R rail are UNTOUCHED. ``None`` (every existing caller, incl. the bar
+    recalc) keeps ``atr_pct`` for the trail — byte-identical; the bar Chandelier
+    still tracks today's noise band intentionally. EXPECTANCY (let the winner run),
+    not a throttle: it only WIDENS the tick trail to the correct scale; the ratchet
+    still forbids loosening an already-set stop.
 
     ``trail_mult``: per-position override of the let-winners-run ATR-trail width
     (in ATR units). ``None`` keeps the module default ``EXIT_ATR_TRAIL_MULT``
@@ -279,8 +296,12 @@ def evaluate_exit(
     new_state = _next_fsm_state(prev.exit_state, mfe_r)
 
     # 4. ATR-trailing stop. Tighter trail once in HARVEST (locks the winner;
-    #    still only ratchets toward profit — never loosens).
-    atr_one = _atr_one_usd(entry_price=entry_price, atr_pct=atr_pct)
+    #    still only ratchets toward profit — never loosens). The trail WIDTH is
+    #    measured on ``trail_atr_pct`` when the caller supplies the stable bar-scale
+    #    ATR (the tick path — its ``atr_pct`` is the seconds-scale window range),
+    #    else on ``atr_pct`` (the bar Chandelier default — byte-identical).
+    trail_atr_basis = atr_pct if trail_atr_pct is None else trail_atr_pct
+    atr_one = _atr_one_usd(entry_price=entry_price, atr_pct=trail_atr_basis)
     # Let-winners-run trail width: the per-position ``trail_mult`` override (e.g.
     # a wider flow_pressure trail) when supplied, else the module default. HARVEST
     # normally tightens to EXIT_HARVEST_TRAIL_MULT (1-ATR) to lock a big winner —

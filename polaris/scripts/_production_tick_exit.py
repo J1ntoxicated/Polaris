@@ -285,6 +285,12 @@ async def _run_exits(
             gpt_client=None, phase=phase, real_roundtrip=real_roundtrip,
             okx_adapter=okx_adapter, capital_session=capital_session,
             alpaca_adapter=alpaca_adapter, entry_atr_pct=entry_atr_pct, mode=mode,
+            # G7 fix ([[g7_tick_trail_atr_scale_2026-06-25]]): anchor the TRAIL
+            # WIDTH to the entry-time bar ATR (not the seconds-scale window range
+            # passed as atr_pct) so the let-winners-run trail sits at the calibrated
+            # bar scale instead of clipping a fresh winner at ~flat on the next tick.
+            # NULL anchor (legacy rows) → None → the live-window trail (graceful).
+            trail_atr_pct=entry_atr_pct,
             # flow_pressure rides a WIDER let-winners-run trail so favourable OFI
             # drift is captured past the old ~75s scalp; every other tick momentum
             # strategy → None → module-default trail (byte-identical).

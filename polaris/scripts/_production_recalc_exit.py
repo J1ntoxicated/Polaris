@@ -269,6 +269,7 @@ async def run_precise_exit(
     capital_session: Any,
     alpaca_adapter: Any = None,
     entry_atr_pct: float | None = None,
+    trail_atr_pct: float | None = None,
     trail_mult: float | None = None,
     mfe_protect: MfeProtectSchedule | None = None,
     mode: ManagementMode | None = None,
@@ -287,6 +288,13 @@ async def run_precise_exit(
     ``entry_atr_pct``: entry-time R anchor forwarded to ``evaluate_exit`` (the
     mfe/mae denominator). ``None`` (legacy NULL-anchor rows) keeps the
     current-ATR denominator — byte-identical pre-anchor.
+
+    ``trail_atr_pct``: the stable bar-scale ATR for the TRAIL WIDTH forwarded to
+    ``evaluate_exit`` ([[g7_tick_trail_atr_scale_2026-06-25]]). ``None`` (the bar
+    recalc + every legacy caller) keeps the trail on ``atr_pct`` — byte-identical.
+    The tick exit pass passes the entry-time anchor so the trail distance is
+    measured on the bar risk, not the seconds-scale window range that clipped fresh
+    winners at ~flat. EXIT-timing only — size / entry / the G6 -1.0R rail untouched.
 
     ``trail_mult``: per-position let-winners-run ATR-trail width forwarded to
     ``evaluate_exit``. ``None`` keeps the module default (every existing caller is
@@ -365,6 +373,7 @@ async def run_precise_exit(
         loser_timeout_sec=_loser_timeout_for_strategy(strategy_id),
         profit_target_r=_profit_target_for_strategy(strategy_id),
         entry_atr_pct=entry_atr_pct,
+        trail_atr_pct=trail_atr_pct,
         trail_mult=effective_trail_mult,
         mfe_protect=effective_mfe_protect,
         mode=mode,

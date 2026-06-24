@@ -229,8 +229,11 @@ def test_full_snapshot_sweep_enriches_all_rows(monkeypatch) -> None:  # type: ig
     assert all(i.vol_24h_usd >= 1.0e8 for i in out)
 
 
-def test_full_sweep_off_by_default_bounds_candidates() -> None:
-    """Without the env flag, only screener ∩ seed names are snapshot-probed."""
+def test_full_sweep_explicit_off_bounds_candidates(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """STAGE 2b: full sweep is the DEFAULT — the bounded screener path is now an
+    explicit escape hatch (``POLARIS_ALPACA_SNAPSHOT_FULL=0``). With it set, only
+    the screener ∩ seed names are snapshot-probed (the old default behavior)."""
+    monkeypatch.setenv("POLARIS_ALPACA_SNAPSHOT_FULL", "0")
     rows = [(f"SYM{i:03d}", "NASDAQ") for i in range(250)]
     symbols = [s for s, _ in rows]
     probed: list[str] = []

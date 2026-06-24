@@ -24,10 +24,10 @@ from polaris.core.universe.schema import (
     RANK_PENALTY_W_SPREAD,
     RANK_SCORE_W_ATR,
     RANK_SCORE_W_VOL,
-    UNIVERSE_RANK_TOP_N_DEFAULT,
     UNIVERSE_RANK_TOP_N_ENV,
     UniverseInstrument,
     is_capital_fx_major,
+    passes_liquidity_floor,
     universe_watch_max,
 )
 
@@ -94,6 +94,46 @@ def _is_valid_candidate(ins: UniverseInstrument) -> bool:
     return not (ins.venue == "okx" and ins.quote_ccy not in ALLOWED_QUOTE_CCY_OKX)
 
 
+def apply_alpaca_watch_floor(
+    instruments: list[UniverseInstrument],
+) -> list[UniverseInstrument]:
+    """Per-venue WATCH-set resource bound for Alpaca (the 13k-row equity venue).
+
+    STAGE 2b INC2 (Jin 2026-06-24): with the count cap removed, watch-all-valid on
+    Alpaca would otherwise admit ~12.8k tradable equities. Full-snapshot enrichment
+    (now the default) gives every row a REAL ``vol_24h_usd`` + ``last_price``, so
+    the EXISTING per-venue liquidity floor (min_vol $5M / min_price $1) auto-bounds
+    Alpaca to the real-liquid set (measured ~1.5k). This applies that floor at the
+    WATCH stage **for Alpaca rows only**:
+
+      * A row with a KNOWN sub-floor real datum (vol > 0 and < $5M, or price > 0
+        and < $1) is removed from the watch set — a measured resource cut, never a
+        block on an unknown.
+      * A sentinel/un-enriched row (vol == 0, price == 0) is KEPT (flow_not_block:
+        never drop on a missing datum).
+
+    NON-Alpaca rows pass through BYTE-IDENTICAL: OKX/Capital keep watch-all-valid
+    (their floor stays on the TRADE gate — no re-introduction of the OKX 176/186
+    pre-cut the 2026-06-24 decouple removed). This is the venue-targeted analogue
+    of the Capital FX-major keep: a per-venue policy, not a global ranking change.
+    """
+    out: list[UniverseInstrument] = []
+    dropped = 0
+    for ins in instruments:
+        if ins.venue == "alpaca" and not passes_liquidity_floor(ins):
+            dropped += 1
+            continue
+        out.append(ins)
+    if dropped:
+        logger.info(
+            "[universe] alpaca watch-floor: %d → %d (dropped %d sub-floor real-datum rows)",
+            len(instruments),
+            len(out),
+            dropped,
+        )
+    return out
+
+
 def _pop_z(values: Sequence[float]) -> list[float]:
     """Population z-score; zeros when len<2 or stdev is 0/non-finite (tie-safe)."""
     if len(values) < 2:
@@ -125,25 +165,28 @@ def _grouped_pop_z(values: Sequence[float], groups: Sequence[str]) -> list[float
     return out
 
 
-def _resolve_rank_top_n(top_n: int | None) -> int:
-    """Resolve top-N from arg → env → default, capped at the WATCH_MAX ceiling.
+def _resolve_rank_top_n(top_n: int | None, valid_count: int) -> int:
+    """Resolve the active-set size for ``valid_count`` valid rows.
 
-    WATCH/TRADE DECOUPLE (Jin 2026-06-24): the active/watch ceiling is now
-    ``universe_watch_max()`` (``POLARIS_WATCH_MAX``, default 120), NOT the focus
-    window ``FOCUS_TARGET_MAX`` (48). The old ``min(top_n, FOCUS_TARGET_MAX)``
-    clamp CONFLATED the active set with the focus window and pinned watch at 48;
-    splitting them lets the bot watch dozens+ while focus stays 12-48 downstream.
+    STAGE 2b INC2 (Jin 2026-06-24): the COUNT CAP is removed — by default the bot
+    WATCHES ALL valid rows. With env unset/garbage and ``top_n=None`` the size is
+    ``valid_count`` itself (no cut), bounded only by the GENEROUS safety backstop
+    ``universe_watch_max()`` (default 3000) so a pathological tail (enrichment
+    outage → many un-floored rows) can never explode the watch set. An explicit
+    ``POLARIS_UNIVERSE_RANK_TOP_N`` / ``POLARIS_WATCH_MAX`` / ``top_n`` arg still
+    binds (operator resource override). flow_not_block: the normal path is no-cut.
     """
+    watch_ceiling = universe_watch_max()
     if top_n is None:
         raw = os.environ.get(UNIVERSE_RANK_TOP_N_ENV)
-        if raw is not None:
-            try:
-                top_n = int(raw)
-            except ValueError:
-                top_n = UNIVERSE_RANK_TOP_N_DEFAULT
-        else:
-            top_n = UNIVERSE_RANK_TOP_N_DEFAULT
-    return max(0, min(top_n, universe_watch_max()))
+        if raw is None or raw == "":
+            # No explicit request → watch ALL valid (bounded by the safety backstop).
+            return max(0, min(valid_count, watch_ceiling))
+        try:
+            top_n = int(raw)
+        except ValueError:
+            return max(0, min(valid_count, watch_ceiling))
+    return max(0, min(top_n, watch_ceiling))
 
 
 def rank_active_universe(
@@ -183,7 +226,7 @@ def rank_active_universe(
         for i in range(len(valid))
     ]
 
-    n = _resolve_rank_top_n(top_n)
+    n = _resolve_rank_top_n(top_n, len(valid))
     order = sorted(range(len(valid)), key=lambda i: scores[i], reverse=True)
     selected = order[:n]
 

@@ -38,6 +38,7 @@ from polaris.core.live_recalc.tick_recalc import (
 )
 from polaris.core.probes.entrance import EntranceJudge
 from polaris.core.probes.tuning_log import log_entrance_judgments
+from polaris.core.universe._ranking import apply_alpaca_watch_floor
 from polaris.core.universe.discovery import (
     deactivate_stale_active_rows,
     fetch_alpaca_instruments,
@@ -47,7 +48,13 @@ from polaris.core.universe.discovery import (
     persist_universe,
     rank_active_universe,
 )
-from polaris.core.universe.schema import Tier, UniverseInstrument, tier_cadence
+from polaris.core.universe.schema import (
+    Tier,
+    UniverseInstrument,
+    auto_scale_tail_cadence,
+    per_cycle_poll_budget,
+    tier_cadence,
+)
 from polaris.core.universe.watchlist import (
     cadence_fires,
     compute_dynamic_focus,
@@ -265,7 +272,12 @@ async def refresh_alpaca_universe_once(
     # prior persisted timestamps and stamp `ts` on genuinely new names.
     prev = _read_alpaca_listing_prev(conn)
     instruments = merge_listing_timestamps(prev, instruments, now_ts=ts)
-    active = rank_active_universe(instruments)
+    # STAGE 2b INC2: bound the 13k-row Alpaca watch set by the per-venue liquidity
+    # floor (min_vol $5M / min_price $1) on the now-real (full-sweep enriched) data
+    # — sub-floor real-datum rows are removed, sentinels kept (flow_not_block). With
+    # the count cap removed, this is the resource bound that keeps watch-all-valid
+    # safe (~1.5k real-liquid Alpaca names, not ~12.8k). OKX/Capital are untouched.
+    active = rank_active_universe(apply_alpaca_watch_floor(instruments))
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the
@@ -615,7 +627,23 @@ def get_focus_targets(
         if cycle_index is not None:
             k, m = tier_cadence()
             k = cadence_k if cadence_k is not None else k
-            m = cadence_m if cadence_m is not None else m
+            # STAGE 2b resource guard: auto-scale the tail period M up with the
+            # WATCHED-set size so tail-rows-per-cycle stays under the per-cycle
+            # wall-clock budget (REST Semaphore(8) bound). A small watched set keeps
+            # the base M; ~1900 watched rarefies the tail. An explicit cadence_m
+            # override wins (operator knob). flow_not_block: M only spaces the
+            # heartbeat, it never drops a tail row.
+            if cadence_m is not None:
+                m = cadence_m
+            else:
+                watched = conn.execute(
+                    "SELECT COUNT(*) FROM watchlist_focus WHERE cycle_ts = ?",
+                    (latest_cycle,),
+                ).fetchone()
+                watched_n = int(watched[0]) if watched and watched[0] is not None else 0
+                m = auto_scale_tail_cadence(
+                    watched=watched_n, base_m=m, per_cycle_budget=per_cycle_poll_budget()
+                )
             firing = _firing_tiers(int(cycle_index), int(k), int(m))
             placeholders = ", ".join("?" for _ in firing)
             tier_clause = f" AND COALESCE(wf.tier, 'T') IN ({placeholders})"

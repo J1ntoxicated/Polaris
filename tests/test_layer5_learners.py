@@ -201,11 +201,15 @@ def test_individual_clip_0_3_to_3_0() -> None:
     assert clip_individual_mult(1.0) == 1.0
 
 
-def test_product_clip_0_1_to_5_0() -> None:
+def test_product_clip_floor_0_2_anticascade() -> None:
+    # Floor raised 0.1→0.2 (2026-06-24 G5 audit): a dual-axis learner demotion
+    # (session 0.3 × regime 0.3 = 0.09) must NOT collapse size to 10%. Re-clip to
+    # 0.2 keeps ≥20% of intended (flow_not_block: less throttle, aggressive bias).
     lo, hi = LEARNER_PRODUCT_CLIP
-    assert lo == 0.1
+    assert lo == 0.2
     assert hi == 5.0
-    assert clip_product_mult(0.05) == 0.1
+    assert clip_product_mult(0.09) == 0.2  # dual-axis 0.3×0.3 floored to 0.2, not 0.1
+    assert clip_product_mult(0.05) == 0.2
     assert clip_product_mult(10.0) == 5.0
 
 

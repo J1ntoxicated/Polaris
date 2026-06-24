@@ -28,8 +28,13 @@ LEARNER_DELTA_HOURLY_CAP: Final[float] = 0.1
 LEARNER_INDIVIDUAL_MULT_CLIP: Final[tuple[float, float]] = (0.3, 3.0)
 """ADR-007 individual multiplier clip — saturation guard."""
 
-LEARNER_PRODUCT_CLIP: Final[tuple[float, float]] = (0.1, 5.0)
-"""ADR-007 final composed multiplier clip."""
+LEARNER_PRODUCT_CLIP: Final[tuple[float, float]] = (0.2, 5.0)
+"""ADR-007 final composed multiplier clip. Floor raised 0.1→0.2 (2026-06-24 G5
+audit): two INDEPENDENT learner demotions (session 0.3 × regime 0.3 = 0.09)
+multiplicatively collapsed size to ~10% — a dual-axis 90% cut drifting toward the
+9-stack-collapse the mandate forbids. 0.2 floor caps the cascade at 80% (≥20% of
+intended still flows): per-axis demotion is honored without compounding into a
+defensive size-collapse (flow_not_block, aggressive bias preserved)."""
 
 WR_PROMOTE_THRESHOLD: Final[float] = 0.55
 """regime_mult promotion threshold (≥55% → +0.1)."""

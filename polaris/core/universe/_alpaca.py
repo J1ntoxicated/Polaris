@@ -7,17 +7,18 @@ Mirrors the Capital fetcher contract (``_capital.py``): env creds, returns
 
 US equities are paper-traded via the Alpaca demo (paper) REST API. The fetcher
 lists tradable, active ``us_equity`` assets from ``GET /v2/assets`` (~12.9k
-rows), then injects REAL per-symbol liquidity (P1, forensic w9gq4ueep): the
-old coarse placeholder stamped EVERY row with an identical ``vol_24h_usd=50e6``,
-so in ``rank_active_universe`` all rows tied at z=0 and the stable sort seated
-the first 40 ALPHABETICALLY — every megacap (AAPL/MSFT/NVDA/SPY/TSLA/...) ended
-up ``is_active=0``. To discriminate WITHOUT fetching 12.9k symbols one-by-one,
-a bounded enrichment maps real dollar-volume onto the liquid names via the
-most-actives screener + batched snapshots (plus a curated megacap/top-ETF seed
-so the megacaps are always probed). Symbols with no liquidity datum keep the
-coarse placeholder and still flow (flow_not_block — nothing is removed; the
-liquid names simply out-rank the rest). This is a rank input, never a sizing
-multiplier (9-stack invariant untouched).
+rows) on a LISTED venue (NASDAQ/NYSE/ARCA/AMEX/BATS — OTC/pink dropped), then
+injects REAL per-symbol liquidity. ``/v2/assets`` carries NO vol/price, so an
+un-enriched row reports ``vol_24h_usd=0.0`` — an UNKNOWN SENTINEL, never a fake
+class-constant (the old 50e6 placeholder made 13151 un-enriched rows masquerade
+as liquid: they tied at the rank median and cleared the >5M floor). Sentinel 0
+is non-floored (flow_not_block — never drop on a missing datum) but the grouped-z
+rank no longer sees a phantom liquid slab (unknowns rank LAST). Real dollar-vol
+is mapped on via the most-actives screener (volume ∪ trades axes) + batched
+snapshots + a curated megacap/top-ETF seed; ``POLARIS_ALPACA_SNAPSHOT_FULL=1``
+widens that to a full snapshot sweep over EVERY universe symbol (cheap at the
+5-10min discovery cadence). vol is a rank input, never a sizing multiplier
+(9-stack invariant untouched).
 
 Spec source: vault/30_components/layer-0-universe-discovery.md.
 """
@@ -47,8 +48,26 @@ ALPACA_SNAPSHOTS_PATH = "/v2/stocks/snapshots"
 
 # Screener candidate cap (top liquid names by share-volume) and the per-request
 # snapshot batch size (Alpaca caps the symbols list; chunk to stay well under).
-_MOST_ACTIVES_TOP = 100
+# ``_MOST_ACTIVES_TOP`` is env-tunable (``POLARIS_ALPACA_MOST_ACTIVES_TOP``) — a
+# /debate calibration target, never magic-in-place.
+_MOST_ACTIVES_TOP_DEFAULT = 100
+_MOST_ACTIVES_TOP_ENV = "POLARIS_ALPACA_MOST_ACTIVES_TOP"
 _SNAPSHOT_BATCH = 100
+
+# Full-sweep flag: when set, snapshot EVERY tradable universe symbol (batched at
+# _SNAPSHOT_BATCH) instead of only the bounded screener ∩ seed candidate set, so
+# real dollar-vol reaches all rows (not just ~131). Cheap at the 5-10min discovery
+# cadence (~133 batched calls for ~13.3k names). Env-gated so the bounded path
+# stays the default; a /debate / live-calibration knob.
+_SNAPSHOT_FULL_ENV = "POLARIS_ALPACA_SNAPSHOT_FULL"
+
+# Gradable listing exchanges — listed US venues only. OTC/pink/blank are kept off
+# the gradable equity universe (sub-floor, gap-prone, often un-snapshotted). This
+# is a venue-membership QUALITY test (same kind as state==live), NOT a per-signal
+# block. flow_not_block holds: nothing tradeable-quality is dropped.
+_GRADABLE_EXCHANGES: frozenset[str] = frozenset(
+    {"NASDAQ", "NYSE", "ARCA", "AMEX", "BATS"}
+)
 
 # Curated liquidity prior: megacaps + the most-traded ETFs. Always probed for a
 # real snapshot even on a day they fall out of the share-volume most-actives,
@@ -64,12 +83,33 @@ ALPACA_SECRET_ENV = "ALPACA_PAPER_SECRET"
 ALPACA_API_KEY_ENV_FALLBACK = "ARCHIVE_ALPACA_PAPER_API_KEY"
 ALPACA_SECRET_ENV_FALLBACK = "ARCHIVE_ALPACA_PAPER_SECRET"
 
-# Coarse class-level liquidity placeholder. US large/mid caps clear the
-# continuous-rank cut comfortably; per-symbol bars refine this later. This is a
-# rank input, never a sizing multiplier (9-stack invariant untouched).
-_PLACEHOLDER_VOL_24H_USD = 50_000_000.0
+# Un-enriched liquidity SENTINEL. ``/v2/assets`` carries NO vol/price, so a row
+# with no real snapshot reports ``vol_24h_usd=0.0`` (UNKNOWN) — never a fake
+# class-constant (the old 50e6 phantom made 13151 un-enriched rows masquerade as
+# liquid, tying at the rank median and clearing the >5M floor). Sentinel 0 is
+# treated as non-floored (flow_not_block — never drop on a missing datum) but the
+# grouped-z rank no longer sees a phantom liquid slab: unknowns rank LAST. Spread
+# stays a coarse placeholder (Alpaca exposes none; the venue floor never floors on
+# it), ATR a coarse realized-vol prior until a real snapshot refines it.
+_SENTINEL_VOL_24H_USD = 0.0
 _PLACEHOLDER_SPREAD_BPS = 2.0
 _PLACEHOLDER_ATR_24H_PCT = 1.5
+
+
+def _most_actives_top() -> int:
+    """Screener candidate cap (env ``POLARIS_ALPACA_MOST_ACTIVES_TOP``; default 100)."""
+    raw = os.environ.get(_MOST_ACTIVES_TOP_ENV)
+    if raw is None or raw == "":
+        return _MOST_ACTIVES_TOP_DEFAULT
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return _MOST_ACTIVES_TOP_DEFAULT
+
+
+def _snapshot_full_sweep() -> bool:
+    """True iff ``POLARIS_ALPACA_SNAPSHOT_FULL`` is a truthy flag (sweep all rows)."""
+    return os.environ.get(_SNAPSHOT_FULL_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_creds(
@@ -184,6 +224,11 @@ def _alpaca_asset_row_to_instrument(
         return None
     if str(row.get("status", "")) != "active":
         return None
+    # Listed-venue QUALITY gate: keep OTC/pink/blank-exchange rows off the
+    # gradable equity universe (same kind of membership test as state==live).
+    exchange = str(row.get("exchange", "")).strip().upper()
+    if exchange not in _GRADABLE_EXCHANGES:
+        return None
 
     return UniverseInstrument(
         venue="alpaca",
@@ -193,13 +238,14 @@ def _alpaca_asset_row_to_instrument(
         asset_class="equity",
         quote_ccy="USD",
         state="live",
-        vol_24h_usd=_PLACEHOLDER_VOL_24H_USD,
+        vol_24h_usd=_SENTINEL_VOL_24H_USD,  # UNKNOWN until a real snapshot enriches it
         spread_bps=_PLACEHOLDER_SPREAD_BPS,
         atr_24h_pct=_PLACEHOLDER_ATR_24H_PCT,
         depth_10bps_usd=0.0,  # refined by dashboards/learners (P1 bars)
         signal_density_7d=0.0,
         listing_ts=None,
         last_seen_ts=now_ts,
+        primary_exchange=exchange,
     )
 
 
@@ -219,16 +265,31 @@ async def _fetch_alpaca_liquidity(
     """
     if not symbols:
         return {}
-    try:
-        actives = await _fetch_most_actives(data_cli, headers=headers)
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("[universe] Alpaca most-actives fetch failed: %r", exc)
-        actives = []
-    # Bound the snapshot set to names actually in our universe: top liquid
-    # screener names + the curated seed (so megacaps are always probed).
-    candidates = [s for s in actives if s in symbols]
-    seed = [s for s in LIQUID_SEED_SYMBOLS if s in symbols and s not in set(candidates)]
-    candidates.extend(seed)
+    # Full-sweep mode (env-gated): snapshot EVERY universe symbol so real vol
+    # reaches all rows (not just the bounded screener ∩ seed ~131). Cheap at the
+    # 5-10min discovery cadence (~133 batched calls for ~13.3k names).
+    if _snapshot_full_sweep():
+        candidates = sorted(symbols)
+    else:
+        try:
+            actives = await _fetch_most_actives(data_cli, headers=headers)
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("[universe] Alpaca most-actives fetch failed: %r", exc)
+            actives = []
+        # Bound the snapshot set to names actually in our universe: top liquid
+        # screener names (by share-volume ∪ by trade-count) + the curated seed
+        # (so megacaps are always probed). Two screener axes catch high-turnover
+        # names that the share-volume axis alone misses.
+        seen: set[str] = set()
+        candidates = []
+        for s in actives:
+            if s in symbols and s not in seen:
+                seen.add(s)
+                candidates.append(s)
+        for s in LIQUID_SEED_SYMBOLS:
+            if s in symbols and s not in seen:
+                seen.add(s)
+                candidates.append(s)
     if not candidates:
         return {}
     try:
@@ -243,20 +304,34 @@ async def _fetch_alpaca_liquidity(
 async def _fetch_most_actives(
     data_cli: httpx.AsyncClient, *, headers: dict[str, str]
 ) -> list[str]:
-    """Top liquid symbols (by share-volume) from the most-actives screener."""
-    resp = await data_cli.get(
-        ALPACA_MOST_ACTIVES_PATH,
-        params={"by": "volume", "top": str(_MOST_ACTIVES_TOP)},
-        headers=headers,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    rows = body.get("most_actives", []) if isinstance(body, dict) else []
+    """Top liquid symbols from the most-actives screener (volume ∪ trades axes).
+
+    Queries both ranking axes (``by=volume`` for share-volume and ``by=trades``
+    for trade-count) and unions them, so high-turnover names that the volume axis
+    alone misses still get a real snapshot. ``top`` is env-tunable
+    (``POLARIS_ALPACA_MOST_ACTIVES_TOP``). De-duped, screener order preserved.
+    """
+    top = _most_actives_top()
     out: list[str] = []
-    for row in rows:
-        sym = str(row.get("symbol", "")).strip().upper() if isinstance(row, dict) else ""
-        if sym:
-            out.append(sym)
+    seen: set[str] = set()
+    for axis in ("volume", "trades"):
+        resp = await data_cli.get(
+            ALPACA_MOST_ACTIVES_PATH,
+            params={"by": axis, "top": str(top)},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        rows = body.get("most_actives", []) if isinstance(body, dict) else []
+        for row in rows:
+            sym = (
+                str(row.get("symbol", "")).strip().upper()
+                if isinstance(row, dict)
+                else ""
+            )
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
     return out
 
 

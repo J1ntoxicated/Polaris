@@ -241,7 +241,13 @@ def test_stale_sweep_empty_fetch_is_noop() -> None:
 
 def _assets_payload(symbols: list[str]) -> list[dict[str, object]]:
     return [
-        {"class": "us_equity", "symbol": s, "status": "active", "tradable": True}
+        {
+            "class": "us_equity",
+            "exchange": "NASDAQ",
+            "symbol": s,
+            "status": "active",
+            "tradable": True,
+        }
         for s in symbols
     ]
 

@@ -471,6 +471,11 @@ class UniverseInstrument:
     # price axis is then skipped for that row (flow_not_block: never drop on a
     # missing datum). Keyword-default so all existing constructors stay valid.
     last_price: float = 0.0
+    # Listing exchange (Alpaca ``/v2/assets`` ``exchange``: NASDAQ/NYSE/ARCA/
+    # AMEX/BATS/OTC). Plumbed so OTC/pink rows are kept off the gradable equity
+    # universe (listed venues only). "" = unknown (non-equity venues) → no
+    # restriction (flow_not_block). Keyword-default keeps all constructors valid.
+    primary_exchange: str = ""
 
 
 def passes_liquidity_floor(ins: UniverseInstrument) -> bool:

@@ -222,5 +222,9 @@ def test_enrichment_failure_is_smoke_safe() -> None:
 
     out = asyncio.run(run())
     assert {i.symbol for i in out} == set(symbols)
-    # Placeholder retained (no datum) — every row still flows.
-    assert all(i.vol_24h_usd > 0 for i in out)
+    # Sentinel retained (no datum) — every row still flows (flow_not_block) and a
+    # sentinel vol=0 is non-floored (unknown != known-bad), it just ranks last.
+    assert all(i.vol_24h_usd == 0.0 for i in out)
+    from polaris.core.universe.schema import passes_liquidity_floor
+
+    assert all(passes_liquidity_floor(i) for i in out)

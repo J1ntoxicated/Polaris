@@ -55,6 +55,28 @@ _LOG = logging.getLogger(__name__)
 # untouched. Overridable via POLARIS_GLOBE_ALPACA_MAX.
 _ALPACA_GLOBE_MAX_DEFAULT = 300
 
+# ── tier-LOD node cap (Jin 2026-06-24) ───────────────────────────────────────
+# Neural-Cloud attention gradient: the globe drew EVERY watched mkt row as an
+# individual node, so a growing universe (305 → 1900 watched) made setGraph +
+# the per-frame ease/orbit loops iterate every node every frame → lag. Tier-LOD
+# fixes this WITHOUT touching any data source: only the hottest rows (open
+# positions, watch focus, tier S·A in full + a slice of tier B, plus any row
+# whose pipeline actually caught a live signal) are emitted as individual
+# ``mkt`` nodes, capped at ``POLARIS_GRAPH_NODE_CAP``. The long tail (tier B
+# overflow + the dormant T library) is NOT dropped — it is summarised into
+# per-venue ``tail_aggregate`` descriptors (count + representative density) the
+# globe renders as a cheap, count-independent HAZE. graph.json node count stays
+# ~cap no matter how large the watched universe grows. Pure view: nothing here
+# gates, sizes, ranks or throttles a trade — the universe table is untouched.
+_GRAPH_NODE_CAP_DEFAULT = 180
+
+# tier → attention priority (lower = kept as an individual node first). Open
+# positions / watch nodes are emitted separately (always individual). For the
+# mkt shell: S/A are the curator's hot picks (always individual), B is partial
+# (kept until the cap fills), and the dormant T tail folds into the haze.
+_TIER_PRIORITY: dict[str, int] = {"S": 0, "A": 1, "B": 2}
+_TIER_TAIL_PRIORITY = 5  # T tail + untiered dormant rows
+
 # 13 cluster definitions (id, label, color, tier) — color palette matches the
 # render engine's CLUSTERS table. Order is display-only. tier 4 intentionally
 # empty (engine reserves the index for frame-function compat).
@@ -237,6 +259,50 @@ def _alpaca_globe_max() -> int:
     except ValueError:
         return _ALPACA_GLOBE_MAX_DEFAULT
     return max(0, n)
+
+
+def _graph_node_cap() -> int:
+    """Individual-mkt-node cap for the globe (env POLARIS_GRAPH_NODE_CAP, ~180).
+
+    Display-only LOD budget: how many universe rows reach the globe as their own
+    glowing node before the rest fold into the per-venue tail haze. Trading
+    universe untouched — this only bounds the render node count.
+    """
+    raw = os.environ.get("POLARIS_GRAPH_NODE_CAP")
+    if raw is None:
+        return _GRAPH_NODE_CAP_DEFAULT
+    try:
+        n = int(raw)
+    except ValueError:
+        return _GRAPH_NODE_CAP_DEFAULT
+    return max(0, n)
+
+
+def _query_tier_map(db_path: Path) -> dict[str, str]:
+    """(venue:symbol) → tier (S/A/B/T) from the latest watchlist_focus cycle.
+
+    The Neural-Cloud attention gradient: tier is the curator's hotness label
+    already persisted by the focus cycle. Used display-only to decide which mkt
+    rows stay individual nodes vs fold into the tail haze. Read-only — nothing
+    here re-ranks or re-tiers anything; it mirrors the focus table as-is.
+    """
+    if not db_path.exists():
+        return {}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    out: dict[str, str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT venue, symbol, tier FROM watchlist_focus "
+            "WHERE cycle_ts = (SELECT MAX(cycle_ts) FROM watchlist_focus) "
+            "AND tier IS NOT NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return out
+    finally:
+        conn.close()
+    for venue, symbol, tier in rows:
+        out[_signal_key(str(venue), str(symbol))] = str(tier).upper()
+    return out
 
 
 def _query_universe_all(db_path: Path) -> list[dict[str, Any]]:
@@ -695,25 +761,82 @@ def _watch_nodes(
     return nodes
 
 
-def _mkt_nodes(
-    universe: list[dict[str, Any]], signal_counts: dict[str, int], base_i: int,
-) -> list[dict[str, Any]]:
-    """tier8 'mkt' market-shell nodes from the universe.
+def _mkt_priority(
+    tier: str, active: bool, sig_n: int,
+) -> int:
+    """Attention priority of a universe row (lower = kept as an individual node).
 
-    GLOW SOURCE (Jin 2026-06-23): the REAL per-instrument 30m signal count now
-    drives the lightup — a node with ``signal_count_30m > 0`` is ``firing`` (its
-    pipeline actually caught a signal). ``is_active`` (universe FOCUS) is kept ONLY
-    as a secondary dim cue (``active`` flag → not dimmed), NOT the glow source.
-    Display-only — nothing gated/sized here.
+    Display-only LOD ordering for tier-LOD. A row whose pipeline actually caught
+    a live signal (``sig_n > 0``) is always promoted to the very front so a real
+    catch is never folded into the haze. Otherwise: tier S/A/B by the curator's
+    tier label, then active-but-untiered focus rows, then the dormant T tail.
     """
-    nodes: list[dict[str, Any]] = []
-    for j, u in enumerate(universe):
-        i = base_i + j
+    if sig_n > 0:
+        return -1
+    if tier in _TIER_PRIORITY:
+        return _TIER_PRIORITY[tier]
+    if active:
+        return 3  # focus row with no tier label yet — above the dormant tail
+    return _TIER_TAIL_PRIORITY
+
+
+def _mkt_nodes(
+    universe: list[dict[str, Any]],
+    signal_counts: dict[str, int],
+    tier_map: dict[str, str],
+    node_cap: int,
+    base_i: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """tier8 'mkt' market-shell nodes + the per-venue tail-haze aggregate.
+
+    GLOW SOURCE (Jin 2026-06-23): the REAL per-instrument 30m signal count drives
+    the lightup — a node with ``signal_count_30m > 0`` is ``firing`` (its pipeline
+    actually caught a signal). ``is_active`` (universe FOCUS) is a secondary dim
+    cue only.
+
+    TIER-LOD (Jin 2026-06-24): the Neural-Cloud attention gradient. Only the
+    hottest rows reach the globe as individual nodes — open positions / watch
+    nodes (emitted elsewhere), plus the top ``node_cap`` mkt rows by attention
+    priority (live-signal catches first, then tier S·A in full + a slice of tier
+    B, then active focus rows). The long tail (tier B overflow + the dormant T
+    library) is summarised per venue into ``tail_aggregate`` descriptors the
+    globe renders as a cheap, count-independent haze. graph.json node count stays
+    ~cap regardless of how large the watched universe grows. Display-only —
+    nothing gated/sized/re-ranked here; the universe table is untouched.
+
+    Returns ``(individual_nodes, tail_aggregate)``.
+    """
+    # Stable-sort universe rows by attention priority (the universe list is
+    # already vol-desc, so equal-priority rows keep their volume order). The
+    # first ``node_cap`` rows become individual nodes; the rest feed the haze.
+    enriched: list[tuple[int, dict[str, Any], int, str, bool]] = []
+    for u in universe:
+        key = _signal_key(u["exchange"], u["ticker"])
         active = int(u.get("is_active", 0)) == 1
+        sig_n = int(signal_counts.get(key, 0))
+        tier = tier_map.get(key, "")
+        enriched.append(
+            (_mkt_priority(tier, active, sig_n), u, sig_n, tier, active)
+        )
+    order = sorted(range(len(enriched)), key=lambda k: enriched[k][0])
+
+    nodes: list[dict[str, Any]] = []
+    # per-venue tail accumulator: count + summed n_24h (→ representative density).
+    tail: dict[str, dict[str, float]] = {}
+    for rank, k in enumerate(order):
+        _prio, u, sig_n, tier, active = enriched[k]
+        if rank >= node_cap:
+            # Fold into the per-venue tail haze (count + density proxy). A live
+            # signal catch is never here (priority -1 keeps it individual).
+            ex = str(u["exchange"])
+            slot = tail.setdefault(ex, {"count": 0.0, "n24_sum": 0.0, "active": 0.0})
+            slot["count"] += 1.0
+            slot["n24_sum"] += float(u["n_24h"])
+            if active:
+                slot["active"] += 1.0
+            continue
+        i = base_i + len(nodes)
         ticker = str(u["ticker"]).split(":")[-1].split("-")[0]
-        sig_n = int(signal_counts.get(_signal_key(u["exchange"], u["ticker"]), 0))
-        # Real signal catch = firing glow. is_active is now only a secondary
-        # "focus" cue (keeps the node un-dimmed) — it no longer fakes lightup.
         state = "firing" if sig_n > 0 else ("lit" if active else "dormant")
         nodes.append(
             {
@@ -723,6 +846,7 @@ def _mkt_nodes(
                 "exchange": u["exchange"],
                 "asset_group": u["asset_group"],
                 "active": active,
+                "tier_label": tier or None,
                 "intensity": round(min(1.0, 0.1 + u["n_24h"] / 500.0), 4),
                 "size_mul": round(min(1.0, 0.6 + u["n_24h"] / 1000.0), 4),
                 "signal_count_30m": sig_n,
@@ -733,7 +857,24 @@ def _mkt_nodes(
                 "phase": _phase(i),
             }
         )
-    return nodes
+
+    tail_aggregate: list[dict[str, Any]] = []
+    for ex, slot in tail.items():
+        cnt = int(slot["count"])
+        if cnt <= 0:
+            continue
+        # representative density 0..1 for haze brightness: mean 24h-volume proxy
+        # of the tail rows (display weight only, never a sizing/risk input).
+        density = round(min(1.0, 0.12 + (slot["n24_sum"] / cnt) / 500.0), 4)
+        tail_aggregate.append(
+            {
+                "exchange": ex,
+                "count": cnt,
+                "active": int(slot["active"]),
+                "density": density,
+            }
+        )
+    return nodes, tail_aggregate
 
 
 def _obs_nodes(snap: Any, faults: dict[str, int], base_i: int) -> list[dict[str, Any]]:
@@ -1072,6 +1213,7 @@ def build_graph(
     actions = _query_actions(path)
     faults = _query_faults(path)
     signal_counts = _query_signal_counts(path)
+    tier_map = _query_tier_map(path)
     kills, last_decision_ts = _query_kills_and_heartbeat(path)
 
     pos_nodes, live_trades = _pos_nodes_and_trades(snap, regime="neutral")
@@ -1090,7 +1232,9 @@ def build_graph(
     bi += len(strat_nodes)
     watch_nodes = _watch_nodes(watch, signal_counts, base_i=bi)
     bi += len(watch_nodes)
-    mkt_nodes = _mkt_nodes(universe, signal_counts, base_i=bi)
+    mkt_nodes, mkt_tail = _mkt_nodes(
+        universe, signal_counts, tier_map, _graph_node_cap(), base_i=bi
+    )
     bi += len(mkt_nodes)
     obs_nodes = _obs_nodes(snap, faults, base_i=bi)
     bi += len(obs_nodes)
@@ -1170,6 +1314,7 @@ def build_graph(
         "live_trades": live_trades,
         "recent_closes": closes,
         "galaxy_universe": universe,
+        "tail_aggregate": mkt_tail,
         "trade_chains": trade_chains,
         "lifecycle_paths": lifecycle_paths,
         "exchange_pnl": [],

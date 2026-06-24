@@ -119,6 +119,17 @@
   // on a fresh AI decision, but nothing draws a star any more.
   let decisionTs = 0, decisionFlash = 0;
 
+  // ── TAIL HAZE (Jin 2026-06-24 tier-LOD) ─────────────────────────────────────
+  // The backend tier-LOD now emits only the hottest ~cap rows as individual mkt
+  // nodes; the long tail (tier B overflow + the dormant T library) arrives as a
+  // per-venue AGGREGATE descriptor {exchange,count,active,density}. We render it
+  // as a cheap, COUNT-INDEPENDENT haze: a fixed small budget of procedural motes
+  // scattered over each venue's outer-shell sector, so the cloud reads FULL (the
+  // library is "there", as soft fog) while per-frame cost stays O(venue) — the
+  // mote budget never grows with the watched universe size. Display-only.
+  let tailAgg = [];                 // [{gx, count, active, density}]
+  const HAZE_PER_VENUE = 64;        // fixed mote budget per venue (count-independent)
+
   // ── SCATTERED SPARSE SPHERE — inside stays visible (Jin 2026-06-23) ──────────
   // Jin '나선형 불가사리 같다 … 전에 빌드처럼 구 덮으면서 크게 좀 스캐터 되어있게 전체적
   // 으로 구형 이루면서'. The spiral-arm galaxies read as a STARFISH (불가사리) and the
@@ -331,6 +342,15 @@
       decisionTs = lt;
     }
     nodeByIndex.length = 0;
+    // tier-LOD tail aggregate → per-venue haze descriptors (count-independent).
+    tailAgg = [];
+    const ta = d.tail_aggregate || [];
+    for (let i = 0; i < ta.length; i++) {
+      const t = ta[i];
+      const gx = venueKey(t.exchange);
+      if (!gx) continue;
+      tailAgg.push({ gx, count: +t.count || 0, active: +t.active || 0, density: +t.density || 0.2 });
+    }
     const liveIds = new Set();
     // reset per-galaxy aggregates
     GALAXY_ORDER.forEach((k) => { galaxyState[k].count = 0; galaxyState[k].pnl = 0; galaxyState[k].mktCount = 0; galaxyState[k].activeCount = 0; });
@@ -575,6 +595,11 @@
     // inside drawGalaxyHalos via the labelsOnly flag) so each cluster is still named.
     drawGalaxyHalos(now, /* labelsOnly */ true);
 
+    // tier-LOD TAIL HAZE — the long-tail library as a soft per-venue fog, drawn
+    // BEHIND the lit nodes + flows. Count-independent O(venue) cost (fixed mote
+    // budget per venue) so the cloud reads full at any watched-universe size.
+    drawTailHaze(now);
+
     // dim universe shell — drawn BEHIND the lit nodes + flows so the bright
     // signals read on top of the cloud. One batched cheap pass.
     drawDimCloud(dim);
@@ -727,6 +752,48 @@
         const a = (0.22 + 0.22 * depthA) * dd;   // Jin: dust 같지 않게 살짝 밝게
         ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
         const s = Math.max(0.85, 1.3 * zoom * p.persp);
+        ctx.fillRect(p.sx - s * 0.5, p.sy - s * 0.5, s, s);
+      }
+    }
+  }
+
+  // ── Tail haze (Jin 2026-06-24 tier-LOD) ─────────────────────────────────────
+  // Renders each venue's long-tail library as a soft fog of procedural motes
+  // over the venue's outer-shell sector. COUNT-INDEPENDENT: the per-venue mote
+  // budget is fixed (HAZE_PER_VENUE), only its DENSITY/brightness scales with the
+  // aggregate count — so a 1900-row universe costs exactly the same per frame as
+  // a 300-row one. Motes are static id-free scatter (deterministic angle from the
+  // loop index) so the fog is stable, drifting only with the scene rotation. No
+  // gradients, no z-sort — flat fillRect, like drawDimCloud. Display-only.
+  function drawTailHaze(now) {
+    if (!tailAgg.length) return;
+    const t = now / 1000;
+    for (let v = 0; v < tailAgg.length; v++) {
+      const agg = tailAgg[v];
+      const dd = dimFor(agg.gx);
+      if (dd <= 0.001) continue;
+      const theme = (galaxyState[agg.gx] && galaxyState[agg.gx].theme) || NEUTRAL_GRAY;
+      // muted toward grey so the haze reads as background fog, not lit nodes.
+      const r = (theme[0] + 150) >> 1, g = (theme[1] + 160) >> 1, bl = (theme[2] + 175) >> 1;
+      // how full the fog reads: more tail rows → denser/brighter (log-damped so a
+      // huge universe doesn't blow out). density = backend representative weight.
+      const fill = Math.min(1, Math.log1p(agg.count) / 7) * (0.5 + 0.5 * agg.density);
+      // fixed mote budget; only alpha scales with fill (count-independent cost).
+      const motes = HAZE_PER_VENUE;
+      ctx.fillStyle = `rgba(${r},${g},${bl},${(0.05 + 0.16 * fill) * dd})`;
+      for (let i = 0; i < motes; i++) {
+        const h01 = (i + 0.5) / motes;
+        const a01 = ((i * 0.6180339887) % 1);          // golden-ratio angular spread
+        const b01 = (((i * 7) % 13) / 13);             // pseudo radial jitter
+        const sp = scatterPos(agg.gx, h01, a01, b01, R_OUTER * 1.04);
+        // gentle drift with the scene (rotate the scatter dir slowly about Y).
+        const ca = Math.cos(t * 0.02), sa = Math.sin(t * 0.02);
+        const dx = sp.dir.x * ca + sp.dir.z * sa, dz = -sp.dir.x * sa + sp.dir.z * ca;
+        const rr = R_OUTER * 1.04 * (0.9 + b01 * 0.16);
+        const p = project(dx * rr, sp.dir.y * rr, dz * rr);
+        if (p.persp <= 0) continue;
+        if (p.sx < -8 || p.sx > W + 8 || p.sy < -8 || p.sy > H + 8) continue;
+        const s = Math.max(1.0, 2.0 * zoom * p.persp);
         ctx.fillRect(p.sx - s * 0.5, p.sy - s * 0.5, s, s);
       }
     }

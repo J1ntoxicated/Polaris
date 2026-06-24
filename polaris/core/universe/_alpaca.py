@@ -162,8 +162,13 @@ def _most_actives_top() -> int:
 
 
 def _snapshot_full_sweep() -> bool:
-    """True iff ``POLARIS_ALPACA_SNAPSHOT_FULL`` is a truthy flag (sweep all rows)."""
-    return os.environ.get(_SNAPSHOT_FULL_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    """True unless ``POLARIS_ALPACA_SNAPSHOT_FULL`` is an explicit falsy flag.
+
+    Default ON: grade every tradable row so the reliability guard + floor see real
+    vol across the tail (safe now that 429 backoff + the enrichment-reliability
+    guard bound the active set on a failed/partial sweep). Set =0/off to opt out.
+    """
+    return os.environ.get(_SNAPSHOT_FULL_ENV, "on").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_creds(

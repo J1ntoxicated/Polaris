@@ -269,34 +269,31 @@ class QuoteTickWriter:
     def _flush_blocking(self, ticks: list[QuoteTick]) -> None:
         """Blocking sqlite write — runs in the executor thread, never the loop.
 
-        Wraps the batch in an explicit transaction so the autocommit conn does
-        ONE WAL commit for the whole batch (M1a), not one per row.
+        Wraps the batch insert AND the bounded retention prune in ONE explicit
+        transaction: the autocommit conn does ONE WAL commit for the batch (M1a,
+        not one per row), and the prune piggybacks the write lock already held for
+        the insert so it can never lose the lock race (a separate-statement DELETE
+        did — "database is locked" for 60s+, table grew unbounded → ENOSPC).
         """
         conn = self._ensure_conn()
         rows = [_row(q) for q in ticks]
+        # Bounded chunk so the in-txn delete stays quick (small lock hold); drains
+        # any backlog over successive 1 Hz flushes, then only the steady increment.
+        cutoff = int(time.time()) - QUOTE_TICKS_RETAIN_SEC
         conn.execute("BEGIN")
         try:
             conn.executemany(_INSERT_SQL, rows)
+            conn.execute(
+                "DELETE FROM quote_ticks WHERE rowid IN "
+                "(SELECT rowid FROM quote_ticks WHERE ts < ? LIMIT ?)",
+                (cutoff, _TICK_PRUNE_CHUNK),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         self.flush_count += 1
         self.rows_written += len(rows)
-        # Prune the transient stream on THIS conn in a BOUNDED chunk (see
-        # _TICK_PRUNE_CHUNK). The dedicated writer wins the write lock for its small
-        # inserts, and a small chunked DELETE wins it the same way — a single
-        # full-table DELETE did NOT (it lost the lock race for 60s+ and the table
-        # grew unbounded → ENOSPC). Bare autocommit (no explicit BEGIN/COMMIT) keeps
-        # the batch insert above the single tested transaction; best-effort so a
-        # lock blip just retries on the next flush.
-        cutoff = int(time.time()) - QUOTE_TICKS_RETAIN_SEC
-        with contextlib.suppress(sqlite3.Error):
-            conn.execute(
-                "DELETE FROM quote_ticks WHERE rowid IN "
-                "(SELECT rowid FROM quote_ticks WHERE ts < ? LIMIT ?)",
-                (cutoff, _TICK_PRUNE_CHUNK),
-            )
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:

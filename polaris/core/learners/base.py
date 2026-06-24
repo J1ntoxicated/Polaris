@@ -31,6 +31,7 @@ import sqlite3
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from polaris.core.learners._primitives import (
@@ -40,6 +41,7 @@ from polaris.core.learners._primitives import (
     LEARNER_MIN_NEFF_FOR_DELTA,
     LEARNER_PRODUCT_CLIP,
     LEARNER_SNAPSHOT_DIR,
+    LEARNER_SNAPSHOT_KEEP,
     NEUTRAL_MULT,
     TRIPLE_BLOCK_DURATION_SEC,
     TRIPLE_BLOCK_SIZE_MULT,
@@ -468,6 +470,7 @@ class BaseLearner(ABC):
             manifest_path.write_text(
                 json.dumps(manifest_payload, separators=(",", ":"))
             )
+            _prune_disk_snapshots(base, keep=LEARNER_SNAPSHOT_KEEP)
         except (sqlite3.Error, OSError):
             return
 
@@ -482,6 +485,27 @@ class BaseLearner(ABC):
         )
 
 
+def _prune_disk_snapshots(snapshot_dir: Path, *, keep: int) -> None:
+    """Delete all but the newest ``keep`` on-disk snapshot generations.
+
+    A generation = one ``<ts>.db`` hot backup + its sibling ``<ts>.*`` manifests.
+    These files are operator disaster-recovery only (``rollback`` reads the
+    in-DB ``learner_snapshot`` row, never the disk ``.db``), so pruning old
+    generations is safe. Ordered by ``(mtime, ts)`` so the just-written backup is
+    always in the keep set and equal-mtime ties break deterministically by
+    timestamp (filename stem). ``missing_ok`` keeps it race-safe against a
+    sibling learner's prune in the same flush cycle.
+    """
+    backups = sorted(
+        snapshot_dir.glob("*.db"),
+        key=lambda p: (p.stat().st_mtime, p.stem),
+        reverse=True,
+    )
+    for stale in backups[keep:]:
+        for sibling in snapshot_dir.glob(f"{stale.stem}.*"):
+            sibling.unlink(missing_ok=True)
+
+
 __all__ = [
     "BaseLearner",
     "ClosedTrade",
@@ -492,6 +516,7 @@ __all__ = [
     "LEARNER_MIN_NEFF_FOR_DELTA",
     "LEARNER_PRODUCT_CLIP",
     "LEARNER_SNAPSHOT_DIR",
+    "LEARNER_SNAPSHOT_KEEP",
     "LearnerMultResult",
     "NEUTRAL_MULT",
     "TRIPLE_BLOCK_DURATION_SEC",

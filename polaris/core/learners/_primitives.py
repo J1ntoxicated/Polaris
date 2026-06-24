@@ -69,6 +69,14 @@ LEARNER_SNAPSHOT_DIR: Final[Path] = Path("data/learner_snapshots")
 """Filesystem location of SQLite hot-backup + JSON manifest snapshots
 (spec: vault/30_components/layer-5-learner-network.md §Q3)."""
 
+LEARNER_SNAPSHOT_KEEP: Final[int] = 5
+"""Retention bound — keep only the newest N on-disk snapshot *generations*
+(one ``<ts>.db`` hot backup + its sibling ``<ts>.*`` manifests). Each .db is a
+full ~250 MB DB copy, so without this the operator-facing backups accumulated
+UNBOUNDED to 20 GB / 722 files (2026-06 disk-full incident). The in-DB
+``learner_snapshot`` row is the rollback SSOT, so pruning old disk generations
+is safe (disaster-recovery files only)."""
+
 # ---------------------------------------------------------------------------
 # Edge-validation Phase 1 — cost overlay + verdict thresholds (measure-only,
 # never wired into sizing; aggressive-bias / 9-stack guard preserved).

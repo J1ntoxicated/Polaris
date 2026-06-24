@@ -610,16 +610,16 @@ def _migrate_quote_ticks_to_lww(conn: sqlite3.Connection) -> None:
                 "CREATE TABLE quote_ticks_lww_new",
             )
         )
-        # Keep the row with the greatest ts per instrument (the LWW survivor).
+        # Keep the greatest-ts row per instrument (the LWW survivor). INSERT OR
+        # REPLACE + ORDER BY ts ASC processes oldest→newest so the highest-ts row
+        # wins on the instrument_id PK. Robust to duplicate (instrument_id, ts)
+        # rows in a legacy table — the prior MAX(ts) JOIN raised
+        # "UNIQUE constraint failed: instrument_id" whenever such a tie existed.
         conn.execute(
-            """INSERT INTO quote_ticks_lww_new
-               SELECT q.instrument_id, q.venue, q.symbol, q.ts, q.bid, q.ask,
-                      q.mid, q.spread_bps, q.bid_size, q.ask_size,
-                      q.last_trade_price, q.last_trade_size, q.source
-               FROM quote_ticks q
-               JOIN (SELECT instrument_id, MAX(ts) AS mts FROM quote_ticks
-                     GROUP BY instrument_id) m
-                 ON q.instrument_id = m.instrument_id AND q.ts = m.mts"""
+            """INSERT OR REPLACE INTO quote_ticks_lww_new
+               SELECT instrument_id, venue, symbol, ts, bid, ask, mid, spread_bps,
+                      bid_size, ask_size, last_trade_price, last_trade_size, source
+               FROM quote_ticks ORDER BY ts ASC"""
         )
         conn.execute("DROP TABLE quote_ticks")
         conn.execute("ALTER TABLE quote_ticks_lww_new RENAME TO quote_ticks")

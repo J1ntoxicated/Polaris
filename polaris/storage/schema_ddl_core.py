@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS quote_ticks (
 );
 """
 
+# Tick-stream decouple (design: vault/50_research/debates/tick_stream_decouple_2026-06-24.md).
+# Bounded per-venue inflow scalars for Sentinel S6 (tick-rate + flow-size death),
+# UPSERTed 1Hz by the writer from in-mem rolling buckets — replaces the full-table
+# COUNT-over-quote_ticks scan so quote_ticks can collapse to single-row last-write-wins.
+# window_started_at lets S6a report WARMING for ~600s after a restart (no silent OK/FAIL).
+DDL_TICK_INFLOW = """
+CREATE TABLE IF NOT EXISTS tick_inflow (
+    venue TEXT PRIMARY KEY,
+    last_tick_ts INTEGER NOT NULL,
+    ticks_600s INTEGER NOT NULL DEFAULT 0,
+    max_flow_size_600s REAL NOT NULL DEFAULT 0.0,
+    window_started_at INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 DDL_TICKER_BASELINE_STATE = """
 CREATE TABLE IF NOT EXISTS ticker_baseline_state (
     instrument_id TEXT NOT NULL,

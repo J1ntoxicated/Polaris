@@ -136,7 +136,7 @@ def apply_stream_asset_class_filter(
 
 
 def _is_valid_candidate(ins: UniverseInstrument) -> bool:
-    """Hard validity gate (basic-valid ONLY): tradeable, live, OKX USDT-quote.
+    """Hard validity gate (basic-valid ONLY): the row is tradeable + live.
 
     Everything else (vol / spread / depth / atr) is a *ranking* signal, never a
     hard block — weak names still flow and the cell-matrix down-routes them.
@@ -230,7 +230,8 @@ def rank_active_universe(
 ) -> list[UniverseInstrument]:
     """Continuous-ranking active-set selection (replaces the hard 4-axis cut).
 
-    Hard keep = validity only (state=live, OKX USDT-quote). Liquidity reward
+    Hard keep = validity only (state=live; OKX quote admission is the parser's
+    job now — see ``parse_okx_tickers``). Liquidity reward
     (vol + ATR realized-vol proxy) minus soft penalties (wide spread, thin
     depth) form a z-normalized composite score; the top ``top_n`` rows become
     the active set. ``top_n`` resolves arg → ``POLARIS_UNIVERSE_RANK_TOP_N``

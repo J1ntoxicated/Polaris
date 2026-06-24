@@ -49,10 +49,31 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from polaris.core.universe.schema import (
+    ALLOWED_QUOTE_CCY_OKX,
     UniverseInstrument,
     liquidity_floor_for_venue,
     passes_liquidity_floor,
 )
+
+
+def _okx_quote_trade_eligible(ins: UniverseInstrument) -> bool:
+    """True unless ``ins`` is an OKX pair quoted in a non-USD-equivalent currency.
+
+    STEP 2 scope-widen admits crypto-quoted OKX pairs (e.g. ``BTC-ETH``) to the
+    WATCH set (flow_not_block), but the OKX adapter sizes ``sz = notional_usd``
+    with ``tgtCcy = quote_ccy`` and the fill normalizer stores ``size_usd =
+    fill_sz × avg_px`` (quote-denominated) — both ASSUME a USD-equivalent quote.
+    A non-USD-equivalent quote (e.g. ETH) would mis-size the order ~1000× and
+    corrupt USD accounting. So such a pair is WATCHED/RANKED but its
+    ``trade_eligible`` is forced FALSE until the order/accounting path handles a
+    non-USD quote (a deliberate downstream change). This is a CORRECTNESS overlay
+    at the single trade-eligibility seam — NOT a defensive size-cut (the name
+    still flows through watch/focus; only its ENTRY is deferred). Non-OKX venues
+    (Capital/Alpaca price venue-side in USD) are unaffected (always True).
+    """
+    if ins.venue != "okx":
+        return True
+    return ins.quote_ccy in ALLOWED_QUOTE_CCY_OKX
 
 __all__ = [
     "DEFAULT_TRADE_FLOOR",
@@ -218,7 +239,11 @@ class EntranceJudge:
                 "regime": _clamp_lean(regime_lean.get(iid, 0.0)),
                 "altdata": _clamp_lean(altdata_lean.get(iid, 0.0)),
             }
-            out[iid] = self._compose(iid, leans, passes_liquidity_floor(ins))
+            out[iid] = self._compose(
+                iid,
+                leans,
+                passes_liquidity_floor(ins) and _okx_quote_trade_eligible(ins),
+            )
         return out
 
     def _compose(
@@ -260,8 +285,10 @@ class EntranceJudge:
 
         opportunity_score = (composite + 1.0) / 2.0
         floor = self._trade_floor
-        # DECOUPLE: floor_ok (venue liquidity floor) is a HARD overlay AND'd with
-        # the score gate — a sub-floor name is watched/ranked but NOT trade-eligible.
+        # DECOUPLE: ``floor_ok`` is the combined HARD trade-eligibility overlay
+        # (venue liquidity floor AND the OKX USD-quote correctness guard), AND'd
+        # with the score gate — a sub-floor or non-USD-quote OKX name is watched/
+        # ranked but NOT trade-eligible (entry deferred), never a sizing cut.
         trade_eligible = floor_ok and (opportunity_score >= floor)
         judge_margin = opportunity_score - floor
 

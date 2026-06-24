@@ -82,7 +82,9 @@ async def fetch_okx_instruments(
 ) -> list[UniverseInstrument]:
     """Fetch OKX SPOT tickers via REST and convert to UniverseInstrument list.
 
-    Sets `x-simulated-trading: 1` (demo). USDT-quote only at P0.
+    Sets `x-simulated-trading: 1` (demo). STEP 2 scope-widen: admits USD-equivalent
+    quotes (USDT/USDC/USD) + USD-normalizable crypto-quoted pairs (see
+    ``parse_okx_tickers``), not USDT-only.
     """
     ts = now_ts if now_ts is not None else int(time.time())
     headers = {"x-simulated-trading": "1"}
@@ -103,7 +105,7 @@ async def fetch_okx_instruments(
     rows = body.get("data", [])
     parsed = parse_okx_tickers(rows, now_ts=ts)
     logger.info(
-        "[universe] OKX tickers fetched: raw=%d usdt_quote=%d",
+        "[universe] OKX tickers fetched: raw=%d admitted=%d",
         len(rows),
         len(parsed),
     )

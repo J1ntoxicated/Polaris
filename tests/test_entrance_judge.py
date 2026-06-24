@@ -27,6 +27,7 @@ def _ins(
     *,
     venue: str = "okx",
     asset_class: str = "crypto",
+    quote_ccy: str = "USDT",
     vol: float = 5e8,
     spread: float = 2.0,
     atr: float = 4.0,
@@ -38,7 +39,7 @@ def _ins(
         instrument_id=f"{venue}:{symbol}",
         underlying_group_id=f"{asset_class}:{symbol}",
         asset_class=asset_class,
-        quote_ccy="USDT",
+        quote_ccy=quote_ccy,
         state="live",
         vol_24h_usd=vol,
         spread_bps=spread,
@@ -153,6 +154,39 @@ def test_subfloor_name_watched_but_trade_ineligible() -> None:
     assert out["okx:JUNK-USDT"].opportunity_score >= 0.0  # still judged/watched
     assert out["okx:JUNK-USDT"].trade_eligible is False  # floor overlay vetoes trade
     assert out["okx:GOOD-USDT"].trade_eligible is True
+
+
+def test_okx_non_usd_quote_watched_but_trade_ineligible() -> None:
+    # STEP 2 scope-widen review fix (HIGH): a crypto-quoted OKX pair (BTC-ETH,
+    # quote=ETH) is now ADMITTED + WATCHED (flow_not_block), but the OKX order
+    # path / fill accounting assume a USD-equivalent quote (sz=notional in quote
+    # ccy). So a non-USD-equivalent quote forces trade_eligible=False — the name
+    # is watched/ranked, its ENTRY is deferred (correctness, not a defensive cut).
+    # USD-equivalent quotes (USDT/USDC/USD) stay fully trade-eligible.
+    judge = EntranceJudge(trade_floor=0.0)  # isolate the quote overlay
+    universe = [
+        _ins("BTC-ETH", quote_ccy="ETH", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("BTC-USDC", quote_ccy="USDC", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("BTC-USDT", quote_ccy="USDT", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["okx:BTC-ETH"].opportunity_score >= 0.0          # still watched
+    assert out["okx:BTC-ETH"].trade_eligible is False           # non-USD quote → defer
+    assert out["okx:BTC-USDC"].trade_eligible is True           # USD-equiv → eligible
+    assert out["okx:BTC-USDT"].trade_eligible is True
+
+
+def test_capital_non_usd_quote_unaffected_by_okx_overlay() -> None:
+    # The USD-quote overlay is OKX-specific (it guards the OKX adapter's quote-ccy
+    # sizing). A Capital forex row (quote not USDT/USDC/USD) must NOT be vetoed by
+    # it — Capital CFD pricing is venue-side USD. Only OKX gets the overlay.
+    judge = EntranceJudge(trade_floor=0.0)
+    universe = [
+        _ins("EURUSD", venue="capital", asset_class="forex", quote_ccy="USD",
+             vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["capital:EURUSD"].trade_eligible is True
 
 
 def test_wide_spread_is_hard_trade_block() -> None:

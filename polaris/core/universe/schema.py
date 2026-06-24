@@ -152,9 +152,9 @@ def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
 # The hard 4-axis gate over-cut the candidate set (189 → 6), starving cold-start
 # samples. Liquidity / spread / depth / ATR are no longer hard blocks: they
 # become a continuous composite score and the top-N rows become the active set.
-# Hard keep is validity only (state=live; OKX USDT-quote already enforced at
-# parse time). Weak candidates still flow — the downstream cell-matrix
-# down-routes them. Aggressive bias preserved (flow_not_block).
+# Hard keep is validity only (state=live; OKX quote admission is enforced at
+# parse time — USD-equiv + USD-normalizable crypto quotes). Weak candidates still
+# flow — the downstream cell-matrix down-routes them. Aggressive bias (flow_not_block).
 UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 1500
 UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
 

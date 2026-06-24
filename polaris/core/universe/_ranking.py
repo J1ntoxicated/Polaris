@@ -28,10 +28,82 @@ from polaris.core.universe.schema import (
     UNIVERSE_RANK_TOP_N_ENV,
     UniverseInstrument,
     is_capital_fx_major,
+    liquidity_floor_for_venue,
+    reliability_min_enriched_ratio,
     universe_watch_max,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _venue_expects_vol_datum(venue: str) -> bool:
+    """True iff the venue's liquidity floor keys on a REAL vol datum (vol>0).
+
+    The reliability guard only governs venues where ``vol_24h_usd`` is the expected
+    enrichment datum and a 0.0 means UN-ENRICHED (Alpaca: snapshot-injected; OKX:
+    native from the ticker). Capital exposes NO native vol (floor vol==0) — there a
+    0.0 is structural, not an enrichment miss, so the guard is a NO-OP there (it
+    would otherwise wipe the whole venue). SSOT = the per-venue floor config.
+    """
+    return liquidity_floor_for_venue(venue).min_vol_24h_usd > 0.0
+
+
+def apply_enrichment_reliability_guard(
+    instruments: list[UniverseInstrument],
+    *,
+    min_enriched_ratio: float | None = None,
+) -> list[UniverseInstrument]:
+    """Bar the UN-ENRICHED (sentinel vol==0) slab from the active candidate set when
+    a vol-expecting venue's enrichment came back unreliable (the 429-storm guard).
+
+    Per (venue, asset_class) group, among the venues whose floor expects a real
+    vol datum (:func:`_venue_expects_vol_datum`): if the fraction of rows carrying
+    a REAL datum (``vol_24h_usd > 0``) is BELOW ``min_enriched_ratio``, the group's
+    un-enriched rows are dropped from the ranking candidate set for this cycle.
+    Enough enrichment landed (ratio at/above threshold) → the group is untouched
+    (the sentinel rows still flow and merely rank last, as before).
+
+    This is a DATA-QUALITY gate, NOT a defensive throttle: a row with no real
+    liquidity datum cannot be asserted real-liquid, so it is not yet a WATCH
+    candidate — but it is never order-blocked on a known-bad value and re-enters the
+    instant its snapshot enriches (flow_not_block on every real datum). It is the
+    junk-expansion blocker: with an uncapped watch set + a failed full-sweep, this
+    keeps the active book bounded to the real-liquid names instead of swelling to
+    the ~3000 un-enriched slab that fed the 429 spiral. Venues whose floor does not
+    expect vol (Capital) are passed through unchanged.
+
+    ``min_enriched_ratio`` resolves arg → ``POLARIS_RELIABILITY_MIN_ENRICHED_RATIO``
+    env → default 0.8. A ratio of 0.0 disables the guard.
+    """
+    threshold = (
+        reliability_min_enriched_ratio()
+        if min_enriched_ratio is None
+        else min(1.0, max(0.0, min_enriched_ratio))
+    )
+    if threshold <= 0.0:
+        return instruments
+    groups: dict[str, list[int]] = {}
+    for i, ins in enumerate(instruments):
+        groups.setdefault(f"{ins.venue}/{ins.asset_class}", []).append(i)
+    drop: set[int] = set()
+    for key, idxs in groups.items():
+        venue = key.split("/", 1)[0]
+        if not _venue_expects_vol_datum(venue):
+            continue
+        enriched = sum(1 for i in idxs if instruments[i].vol_24h_usd > 0.0)
+        ratio = enriched / len(idxs) if idxs else 1.0
+        if ratio >= threshold:
+            continue
+        unenriched = [i for i in idxs if instruments[i].vol_24h_usd <= 0.0]
+        drop.update(unenriched)
+        logger.warning(
+            "[universe] reliability guard: %s enriched %d/%d (%.2f < %.2f) — "
+            "barring %d un-enriched rows from active (junk-expansion blocked)",
+            key, enriched, len(idxs), ratio, threshold, len(unenriched),
+        )
+    if not drop:
+        return instruments
+    return [ins for i, ins in enumerate(instruments) if i not in drop]
 
 
 def apply_stream_asset_class_filter(
@@ -166,6 +238,16 @@ def rank_active_universe(
     # ranking (Capital crypto-CFD rows are off-venue → routed to OKX track A).
     scoped = apply_stream_asset_class_filter(instruments)
     valid = [ins for ins in scoped if _is_valid_candidate(ins)]
+    if not valid:
+        return []
+
+    # Junk-expansion blocker (Jin 2026-06-24): when a vol-expecting venue's
+    # enrichment came back unreliable (the data-host 429 storm), bar its
+    # un-enriched (sentinel vol==0) slab from the active candidate set so the watch
+    # book stays bounded to the real-liquid names instead of swelling to ~3000
+    # un-enriched rows. A NO-OP once enough enrichment lands (flow_not_block on
+    # every real datum; Capital, which exposes no native vol, is untouched).
+    valid = apply_enrichment_reliability_guard(valid)
     if not valid:
         return []
 

@@ -600,6 +600,54 @@ async def test_fetch_assets_caches_by_symbol() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Data-host 429 backoff (the bar-ingest half of the universe-swell incident)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_data_host_429_then_success_retries() -> None:
+    """A transient 429 on a data-host read is retried with backoff, then succeeds."""
+    state = {"get": 0}
+
+    def responder(req: httpx.Request) -> Any:
+        state["get"] += 1
+        if state["get"] <= 2:  # 429 twice, then OK
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return {"bars": [{"t": "2024-01-02T05:00:00Z", "o": 1, "h": 2, "l": 1,
+                          "c": 2, "v": 100}]}
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        bars = await adapter.fetch_bars("AAPL", timeframe="1Day", start="2024-01-01")
+    finally:
+        await data_client.aclose()
+    assert state["get"] == 3  # retried past the two 429s
+    assert len(bars) == 1
+
+
+@pytest.mark.asyncio
+async def test_trade_host_429_not_retried() -> None:
+    """A 429 on a TRADE-host read raises immediately (only data host is retried)."""
+    state = {"get": 0}
+
+    def responder(req: httpx.Request) -> Any:
+        state["get"] += 1
+        return httpx.Response(429, json={"message": "slow down"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url=ALPACA_PAPER_BASE)
+    adapter = _adapter(client)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.request_json("GET", "/v2/account", on_data_host=False)
+    finally:
+        await client.aclose()
+    assert state["get"] == 1  # no retry on the trade host
+
+
+# ---------------------------------------------------------------------------
 # Calendar / clock + PDT data provider (T13 gate consumes this; T13 != T9)
 # ---------------------------------------------------------------------------
 

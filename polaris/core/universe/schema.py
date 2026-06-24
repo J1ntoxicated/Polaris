@@ -182,6 +182,47 @@ def universe_watch_max() -> int:
         return UNIVERSE_WATCH_MAX_DEFAULT
     return max(1, val)
 
+
+# ---------------------------------------------------------------------------
+# Enrichment reliability guard (Jin 2026-06-24 — junk-expansion blocker)
+# ---------------------------------------------------------------------------
+# Incident root cause: an UNCAPPED watch set + a FAILED full-sweep liquidity
+# enrichment (data.alpaca.markets 429 storm) left ~3000 un-enriched Alpaca rows
+# carrying the sentinel ``vol_24h_usd=0.0``. The sentinel is non-floored
+# (flow_not_block — never drop on a missing datum) AND ties at vol_z=0 in the
+# grouped rank, so when the floor could not bound the set the active book swelled
+# to 3000, fanning out 3000 bar-ingests that fed the 429 spiral (WAL 509M).
+#
+# The guard is a DATA-QUALITY gate, NOT a defensive throttle: when the fraction
+# of a venue's tradable rows that carry a REAL liquidity datum (vol>0) falls
+# below ``RELIABILITY_MIN_ENRICHED_RATIO``, the venue's UN-ENRICHED (sentinel-0)
+# rows are barred from the *active* set for that cycle — they are still persisted,
+# still watched once a real datum lands, never order-blocked on a known-bad value.
+# This decouples watch/trade exactly like the floor: a name with NO data yet is
+# not yet a watch candidate (we cannot say it is real-liquid), but the moment its
+# snapshot enriches it re-enters. flow_not_block holds for every name that has a
+# real datum; only the unknown slab is held back from swelling the bar fan-out.
+RELIABILITY_MIN_ENRICHED_RATIO_DEFAULT: Final[float] = 0.8
+RELIABILITY_MIN_ENRICHED_RATIO_ENV: Final[str] = "POLARIS_RELIABILITY_MIN_ENRICHED_RATIO"
+
+
+def reliability_min_enriched_ratio() -> float:
+    """Min enriched-fraction before the un-enriched slab is barred from active.
+
+    Env ``POLARIS_RELIABILITY_MIN_ENRICHED_RATIO`` → default 0.8, clamped to
+    ``[0.0, 1.0]``. A ratio of 0.0 disables the guard (every row eligible);
+    1.0 demands full enrichment. /debate calibration knob, never magic-in-place.
+    Invalid/unset → default.
+    """
+    raw = os.environ.get(RELIABILITY_MIN_ENRICHED_RATIO_ENV)
+    if raw is None or raw == "":
+        return RELIABILITY_MIN_ENRICHED_RATIO_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError:
+        return RELIABILITY_MIN_ENRICHED_RATIO_DEFAULT
+    return min(1.0, max(0.0, val))
+
 # Composite reward weights (vol + realized-vol proxy), z-normalized population.
 RANK_SCORE_W_VOL: Final[float] = 0.55
 RANK_SCORE_W_ATR: Final[float] = 0.45

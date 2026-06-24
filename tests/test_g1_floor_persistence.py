@@ -19,6 +19,7 @@ min_price floor was inert on the path ``compute_dynamic_focus`` actually reads.
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 
 import httpx
@@ -272,6 +273,14 @@ def _alpaca_mock_client(symbols: list[str]) -> httpx.AsyncClient:
 
 
 def _refresh_alpaca(conn: sqlite3.Connection, symbols: list[str], *, ts: int) -> int:
+    # These tests feed an ALL-PLACEHOLDER universe (screener/snapshots empty) on
+    # purpose — they exercise the stale-sweep + listing_ts wiring, NOT enrichment
+    # quality. The enrichment reliability guard (which bars an all-un-enriched slab
+    # from active) is therefore disabled here so the placeholder rows seat as
+    # before; its own behavior is covered by tests/test_universe_reliability_guard.
+    prev = os.environ.get("POLARIS_RELIABILITY_MIN_ENRICHED_RATIO")
+    os.environ["POLARIS_RELIABILITY_MIN_ENRICHED_RATIO"] = "0"
+
     async def run() -> int:
         async with _alpaca_mock_client(symbols) as cli:
             # client serves both trade + data hosts (shared MockTransport).
@@ -291,7 +300,13 @@ def _refresh_alpaca(conn: sqlite3.Connection, symbols: list[str], *, ts: int) ->
             finally:
                 pl.fetch_alpaca_instruments = orig  # type: ignore[assignment]
 
-    return asyncio.run(run())
+    try:
+        return asyncio.run(run())
+    finally:
+        if prev is None:
+            os.environ.pop("POLARIS_RELIABILITY_MIN_ENRICHED_RATIO", None)
+        else:
+            os.environ["POLARIS_RELIABILITY_MIN_ENRICHED_RATIO"] = prev
 
 
 def test_refresh_deactivates_ghost_when_name_leaves_fetch() -> None:

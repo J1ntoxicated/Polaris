@@ -65,6 +65,24 @@ REST_TIMEOUT_SEC: Final[float] = 15.0
 ORDER_RETRY_MAX: Final[int] = 2  # extra attempts after the initial POST
 ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
 
+# Data-host 429 backoff (the bar-ingest half of the universe-swell incident). A
+# momentary "Too Many Requests" during the bar fan-out must not drop the bar.
+# Bounded exponential retry (honours Retry-After), data host only. NOT a throttle.
+DATA_RETRY_MAX: Final[int] = 3
+DATA_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # 0.5s, 1.0s, 2.0s
+_DATA_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
+
+
+def _retry_after_sec(resp: httpx.Response, fallback: float) -> float:
+    """Backoff seconds for a 429 — honour ``Retry-After`` if present and sane."""
+    raw = resp.headers.get("Retry-After", "")
+    if raw:
+        try:
+            return min(_DATA_RETRY_MAX_DELAY_SEC, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return min(_DATA_RETRY_MAX_DELAY_SEC, fallback)
+
 # Alpaca order states that mean the order is live/working/done (a real order
 # exists at the venue) — used to classify a lookup hit as ``ok``.
 _ALPACA_LIVE_STATES: Final[frozenset[str]] = frozenset(
@@ -191,13 +209,31 @@ class AlpacaAdapter:
         json_body: dict[str, Any] | None = None,
         on_data_host: bool = False,
     ) -> Any:
-        """Authed request → parsed JSON. Raises on transport / 4xx-5xx."""
+        """Authed request → parsed JSON. Raises on transport / 4xx-5xx.
+
+        Data-host reads (``on_data_host``, e.g. ``fetch_bars``) retry a 429 Too
+        Many Requests with exponential backoff (honouring ``Retry-After``), so a
+        momentary throttle during the bar-ingest fan-out does not silently drop the
+        bar (the 429-storm half of the universe-swell incident). The trade host is
+        unchanged (orders have their own idempotent retry path). A non-429 4xx/5xx
+        still raises immediately (caller's existing handling).
+        """
         cli = self.data_client if on_data_host else self.client
-        resp = await cli.request(
-            method, path, params=params, json=json_body, headers=self._auth_headers
-        )
-        resp.raise_for_status()
-        return resp.json()
+        for attempt in range(DATA_RETRY_MAX + 1):
+            resp = await cli.request(
+                method, path, params=params, json=json_body, headers=self._auth_headers
+            )
+            if not (on_data_host and resp.status_code == 429 and attempt < DATA_RETRY_MAX):
+                resp.raise_for_status()
+                return resp.json()
+            delay = _retry_after_sec(resp, DATA_RETRY_BASE_DELAY_SEC * (2 ** attempt))
+            logger.info(
+                "[alpaca] data 429 %s — backoff %.2fs (retry %d/%d)",
+                path, delay, attempt + 1, DATA_RETRY_MAX,
+            )
+            await _async_sleep(delay)
+        # Unreachable (loop returns on the final attempt) — satisfies the type checker.
+        raise RuntimeError("unreachable")
 
     async def _place_order_with_retry(
         self,

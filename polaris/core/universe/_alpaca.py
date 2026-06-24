@@ -25,6 +25,7 @@ Spec source: vault/30_components/layer-0-universe-discovery.md.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -60,6 +61,59 @@ _SNAPSHOT_BATCH = 100
 # cadence (~133 batched calls for ~13.3k names). Env-gated so the bounded path
 # stays the default; a /debate / live-calibration knob.
 _SNAPSHOT_FULL_ENV = "POLARIS_ALPACA_SNAPSHOT_FULL"
+
+# Rate-limit guard for the data-host enrichment sweep (the 429-storm fix). The
+# full-sweep fans ~133 batched snapshot reads at data.alpaca.markets; without a
+# limiter those + the concurrent bar-ingest tripped 429 Too Many Requests, which
+# starved enrichment (12572 → 2 rows) so the floor could not bound the set →
+# 3000 un-enriched rows watched → more ingest → more 429 (the spiral). Each batch
+# request retries a 429/5xx with EXPONENTIAL backoff (honouring Retry-After when
+# present), and a small inter-batch sleep paces the sweep under Alpaca's limit
+# (burst avoidance). All knobs are env-tunable (/debate calibration), never magic.
+_SNAPSHOT_MAX_RETRIES_ENV = "POLARIS_ALPACA_SNAPSHOT_MAX_RETRIES"
+_SNAPSHOT_MAX_RETRIES_DEFAULT = 4
+_SNAPSHOT_BACKOFF_BASE_ENV = "POLARIS_ALPACA_SNAPSHOT_BACKOFF_BASE_SEC"
+_SNAPSHOT_BACKOFF_BASE_DEFAULT = 0.5
+_SNAPSHOT_INTER_BATCH_SLEEP_ENV = "POLARIS_ALPACA_SNAPSHOT_INTER_BATCH_SLEEP_SEC"
+_SNAPSHOT_INTER_BATCH_SLEEP_DEFAULT = 0.3
+_SNAPSHOT_BACKOFF_MAX_SEC = 30.0
+
+
+async def _async_sleep(delay: float) -> None:
+    """Indirection so tests can monkeypatch the rate-limit sleep to a no-op."""
+    if delay > 0.0:
+        await asyncio.sleep(delay)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return default
+
+
+def _retry_after_sec(resp: httpx.Response, fallback: float) -> float:
+    """Backoff seconds for a throttled response — honour ``Retry-After`` if sane."""
+    raw = resp.headers.get("Retry-After", "")
+    if raw:
+        try:
+            return min(_SNAPSHOT_BACKOFF_MAX_SEC, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return min(_SNAPSHOT_BACKOFF_MAX_SEC, fallback)
 
 # Gradable listing exchanges — listed US venues only. OTC/pink/blank are kept off
 # the gradable equity universe (sub-floor, gap-prone, often un-snapshotted). This
@@ -335,22 +389,71 @@ async def _fetch_most_actives(
     return out
 
 
+async def _snapshot_batch_get(
+    data_cli: httpx.AsyncClient,
+    *,
+    headers: dict[str, str],
+    chunk: list[str],
+) -> httpx.Response | None:
+    """One snapshot batch GET with 429/5xx exponential backoff (rate-limit-aware).
+
+    A 429 (or transient 5xx) is retried up to ``MAX_RETRIES`` with exponential
+    backoff (honouring ``Retry-After``), so a momentary throttle does not starve
+    enrichment (the spiral root cause). Returns the OK response, or ``None`` when
+    every retry was throttled (the batch is then skipped — those rows keep the
+    sentinel and the reliability guard bounds the active set, never a 3000 swell).
+    """
+    max_retries = _env_int(_SNAPSHOT_MAX_RETRIES_ENV, _SNAPSHOT_MAX_RETRIES_DEFAULT)
+    base = _env_float(_SNAPSHOT_BACKOFF_BASE_ENV, _SNAPSHOT_BACKOFF_BASE_DEFAULT)
+    for attempt in range(max_retries + 1):
+        resp = await data_cli.get(
+            ALPACA_SNAPSHOTS_PATH,
+            params={"symbols": ",".join(chunk)},
+            headers=headers,
+        )
+        if resp.status_code != 429 and resp.status_code < 500:
+            resp.raise_for_status()
+            return resp
+        if attempt >= max_retries:
+            logger.warning(
+                "[universe] Alpaca snapshot batch throttled (status=%d) after %d "
+                "retries — skipping %d symbols (reliability guard bounds active)",
+                resp.status_code, max_retries, len(chunk),
+            )
+            return None
+        delay = _retry_after_sec(resp, base * (2 ** attempt))
+        logger.info(
+            "[universe] Alpaca snapshot batch status=%d — backoff %.2fs "
+            "(retry %d/%d, %d symbols)",
+            resp.status_code, delay, attempt + 1, max_retries, len(chunk),
+        )
+        await _async_sleep(delay)
+    return None
+
+
 async def _fetch_snapshots_liquidity(
     data_cli: httpx.AsyncClient,
     *,
     headers: dict[str, str],
     symbols: list[str],
 ) -> dict[str, dict[str, float]]:
-    """Batched ``/v2/stocks/snapshots`` → real dollar-volume + ATR proxy per sym."""
+    """Batched ``/v2/stocks/snapshots`` → real dollar-volume + ATR proxy per sym.
+
+    Each batch is 429/5xx-backoff-aware and the sweep paces itself with a small
+    inter-batch sleep (burst avoidance under Alpaca's rate limit). A throttled
+    batch is skipped (its rows keep the sentinel); partial enrichment is handed to
+    the reliability guard, which bounds the active set to the real-liquid names.
+    """
     out: dict[str, dict[str, float]] = {}
-    for start in range(0, len(symbols), _SNAPSHOT_BATCH):
+    inter_batch_sleep = _env_float(
+        _SNAPSHOT_INTER_BATCH_SLEEP_ENV, _SNAPSHOT_INTER_BATCH_SLEEP_DEFAULT
+    )
+    starts = list(range(0, len(symbols), _SNAPSHOT_BATCH))
+    for n, start in enumerate(starts):
         chunk = symbols[start : start + _SNAPSHOT_BATCH]
-        resp = await data_cli.get(
-            ALPACA_SNAPSHOTS_PATH,
-            params={"symbols": ",".join(chunk)},
-            headers=headers,
-        )
-        resp.raise_for_status()
+        resp = await _snapshot_batch_get(data_cli, headers=headers, chunk=chunk)
+        if resp is None:
+            continue
         body = resp.json()
         # Newer API nests under "snapshots"; older returns the map at top level.
         snaps = body.get("snapshots", body) if isinstance(body, dict) else {}
@@ -360,6 +463,10 @@ async def _fetch_snapshots_liquidity(
             liq = _snapshot_to_liquidity(snap)
             if liq is not None:
                 out[str(sym).strip().upper()] = liq
+        # Pace the sweep between batches (not after the last) to stay under the
+        # rate limit — burst avoidance, the 429-storm fix.
+        if inter_batch_sleep > 0.0 and n < len(starts) - 1:
+            await _async_sleep(inter_batch_sleep)
     return out
 
 

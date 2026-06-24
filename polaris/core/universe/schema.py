@@ -149,7 +149,7 @@ def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
 # Hard keep is validity only (state=live; OKX USDT-quote already enforced at
 # parse time). Weak candidates still flow — the downstream cell-matrix
 # down-routes them. Aggressive bias preserved (flow_not_block).
-UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 3000
+UNIVERSE_RANK_TOP_N_DEFAULT: Final[int] = 120
 UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
 
 # Watch-set ceiling (Jin 2026-06-24 — WATCH/TRADE decouple): the active/watch set
@@ -161,7 +161,7 @@ UNIVERSE_RANK_TOP_N_ENV: Final[str] = "POLARIS_UNIVERSE_RANK_TOP_N"
 # (FOCUS_CYCLE_TARGET / WS_SYMBOLS_PER_VENUE). Was conflated with FOCUS_TARGET_MAX
 # (48) by the old ``min(top_n, FOCUS_TARGET_MAX)`` clamp — split here so watch can
 # exceed 48 while focus stays 12-48. flow_not_block: widening WATCH = flow up.
-UNIVERSE_WATCH_MAX_DEFAULT: Final[int] = 3000
+UNIVERSE_WATCH_MAX_DEFAULT: Final[int] = 120
 UNIVERSE_WATCH_MAX_ENV: Final[str] = "POLARIS_WATCH_MAX"
 
 

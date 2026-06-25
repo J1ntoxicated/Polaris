@@ -502,8 +502,11 @@
     COPPER:'Copper', SOXL:'Semis Bull 3x', TQQQ:'Nasdaq Bull 3x', SPXL:'S&P Bull 3x', INTC:'Intel',
     ADBE:'Adobe', AAPL:'Apple', NVDA:'Nvidia', TSLA:'Tesla', AMD:'AMD', VERU:'Veru Inc',
   };
+  // Accepts a position-like {symbol} OR a raw symbol string (chart.js reuses
+  // this same map for its dropdown labels). Returns '' when unknown (graceful).
   function symName(p){
-    const s=String(p.symbol||'').toUpperCase();
+    const raw = (p && typeof p === 'object') ? p.symbol : p;
+    const s=String(raw||'').toUpperCase();
     const base=s.split(':').pop().split('-')[0].split('/')[0];
     return SYM_NAME[s] || SYM_NAME[base] || '';
   }
@@ -792,5 +795,6 @@
     register: register,
     setCnt: setCnt,
     renderers: BASE,   // base table renderers for composite reuse (ext.js)
+    symName: symName,  // symbol → human name (chart.js dropdown labels reuse it)
   };
 })();

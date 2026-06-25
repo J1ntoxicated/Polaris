@@ -233,13 +233,22 @@
     if (res.includes(prev)) sel.value = prev;
   }
 
+  // Dropdown label = "{symbol} : {name}" when a human name is known (reuses the
+  // board's SYM_NAME map via PolarisBoardTabs.symName), else "{symbol}" alone
+  // (graceful — most tickers have no stored name). The <option> VALUE is left
+  // unchanged (venue␟symbol) so the fetch path is untouched (display-only).
+  function symLabel(symbol) {
+    const name = (T && T.symName) ? T.symName(symbol) : '';
+    return name ? `${symbol} : ${name}` : symbol;
+  }
+
   function populateSymbols() {
     const sel = document.getElementById('chart-symbol');
     if (!sel) return;
     const opts = [];
     _groups.forEach(g => {
       const inner = (g.symbols || []).map(s =>
-        `<option value="${esc(g.venue)}␟${esc(s.symbol)}">${esc(s.symbol)}</option>`).join('');
+        `<option value="${esc(g.venue)}␟${esc(s.symbol)}">${esc(symLabel(s.symbol))}</option>`).join('');
       opts.push(`<optgroup label="${esc(g.venue)}">${inner}</optgroup>`);
     });
     sel.innerHTML = opts.join('');

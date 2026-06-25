@@ -49,6 +49,15 @@
   function loadingHtml() { return '<div class="empty">loading…</div>'; }
   function errorHtml(ep) { return `<div class="empty">fetch failed · ${esc(ep)}</div>`; }
   function noneYet() { return '<span class="ref-none">none yet</span>'; }
+  // Persisted collapse state, DEFAULT COLLAPSED (the debate section starts
+  // folded; only an explicit '0' from a prior un-fold keeps it open). Mirrors
+  // board_tabs.wireCollapsibles' localStorage convention ('1' collapsed / '0'
+  // expanded) so the shared delegated toggle round-trips correctly.
+  function collapseStateDefaultClosed(key) {
+    let collapsed = true;
+    try { collapsed = localStorage.getItem(key) !== '0'; } catch (e) { /* private mode */ }
+    return { cls: collapsed ? ' collapsed' : '', aria: collapsed ? 'false' : 'true' };
+  }
   function shortDate(iso) {
     if (!iso) return '';
     const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -439,11 +448,24 @@
     ensure('/api/ai_activity', (d) => {
       if (!$('ai-activity-body')) return;       // pane re-skeletoned
       if (d == null) { $('ai-activity-body').innerHTML = errorHtml('/api/ai_activity'); return; }
+      // Debate section folds away (default collapsed) via the shared #board
+      // collapsible machinery (.collapsible/.collapse-toggle/.chev/.collapsed —
+      // the delegated toggle is wired by board_tabs.wireCollapsibles). Probe
+      // calls stay expanded inside a scroll box so a long stream never pushes
+      // the pane. Display-only: the inner tables + data are unchanged.
+      const dc = collapseStateDefaultClosed('pb.collapse.ai-debates');
       $('ai-activity-body').innerHTML =
         `<div class="ref">
           ${aiHeaderHtml(d.in_loop_ai_calls)}
-          ${debatesTable(d.debates)}
-          ${escalationsTable(d.escalations)}
+          <div class="ai-fold collapsible${dc.cls}" data-collapse-key="pb.collapse.ai-debates">
+            <div class="ai-fold-h collapse-toggle" role="button" tabindex="0" aria-expanded="${dc.aria}">
+              <span class="chev" aria-hidden="true"></span>
+              <span class="ai-fold-t">debates · GPT / Gemini cross-validation</span>
+              <span class="ai-fold-n">${(d.debates || []).length}</span>
+            </div>
+            <div class="ai-fold-b">${debatesTable(d.debates)}</div>
+          </div>
+          <div class="ai-scroll">${escalationsTable(d.escalations)}</div>
         </div>`;
     });
     if (CACHE['/api/ai_activity'] && CACHE['/api/ai_activity'].state === 'loading' && !body.children.length) {
@@ -473,6 +495,25 @@
     #board table.ai-tbl td.ai-gpt { color: var(--p-cyn); }
     #board table.ai-tbl td.ai-gem { color: var(--p-mag); }
     #board table.ai-tbl td.ai-dec { color: var(--p-grn); }
+    /* debate fold — non-panel collapsible (default closed); chevron rotates,
+       body hides on .collapsed. Reuses the shared #board toggle delegation. */
+    #board .ai-fold { display: flex; flex-direction: column; gap: 3px; }
+    #board .ai-fold .ai-fold-h { display: flex; align-items: baseline; gap: 6px; cursor: pointer; user-select: none;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--p-dim);
+      border-bottom: 1px dotted rgba(95,135,175,0.14); padding-bottom: 2px; }
+    #board .ai-fold .ai-fold-h:hover .ai-fold-t { color: var(--p-cyn); }
+    #board .ai-fold .ai-fold-h:focus-visible { outline: 1px solid var(--p-cyn); outline-offset: 2px; }
+    #board .ai-fold .ai-fold-h .ai-fold-n { color: var(--p-cyn); margin-left: 6px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+    #board .ai-fold .ai-fold-h .chev {
+      flex: 0 0 auto; width: 0; height: 0; align-self: center;
+      border-left: 4px solid var(--p-cyn); border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+      transform: rotate(90deg); transition: transform 0.12s ease; opacity: 0.85; }
+    #board .ai-fold.collapsed .ai-fold-h .chev { transform: rotate(0deg); }
+    #board .ai-fold.collapsed .ai-fold-b { display: none; }
+    /* the fold header IS the debate section title → hide the inner duplicate. */
+    #board .ai-fold .ai-fold-b > .ref-sec > .ref-h { display: none; }
+    /* probe-call section — stays expanded, scrolls if the stream is long. */
+    #board .ai-scroll { max-height: 360px; overflow-y: auto; }
     `;
     document.head.appendChild(s);
   })();

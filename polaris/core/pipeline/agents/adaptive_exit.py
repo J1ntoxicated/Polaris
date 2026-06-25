@@ -58,6 +58,7 @@ __all__ = [
     "MAX_OVERRIDES_PER_TRADE",
     "WIDEN_WINDOW_R",
     "adaptive_exit_gate",
+    "can_tighten_exit",
     "can_widen_exit",
 ]
 
@@ -181,6 +182,91 @@ def _is_widening(side: str, *, current_stop: float, proposed_stop: float) -> boo
     return False
 
 
+def can_tighten_exit(
+    *,
+    side: str,
+    current_stop_price: float,
+    proposed_stop_price: float,
+    overrides_used: int,
+    seconds_since_last_override: int,
+) -> tuple[bool, str]:
+    """Ratchet-safe TIGHTEN check (probe TIGHTEN consumer). Returns (allowed, reason).
+
+    The MIRROR of ``can_widen_exit`` for the opposite direction — used when a probe
+    reads adverse and the consumer feeds a TIGHTER trail to G7 (precise exit TIMING,
+    [[g7_tick_trail_atr_scale_2026-06-25]] sibling). A tighten pulls the stop CLOSER
+    to price (long: stop UP toward the peak; short: stop DOWN). This is flow_not_block:
+    it only adjusts the trail — never a HOLD->EXIT_NOW block, never a size cut, never
+    an entry veto. The G6 -1.0R hard rail / BEP / size / entry side are all untouched.
+
+    Hard rails:
+    - max overrides per trade (reuses ``MAX_OVERRIDES_PER_TRADE``).
+    - ``COOLDOWN_SEC`` debounce after the last override (same-position re-fire gap).
+    - long: proposed_stop > current_stop (closer to price). short: proposed < current.
+      A 'tighten' that would LOOSEN the stop (move it away from price) is rejected so
+      the ratchet (never loosen an already-set stop) is preserved — exactly the
+      inverse rail of ``can_widen_exit``'s ``not_widening_*``.
+
+    No unrealized-PnL window gate (unlike widen's +0.7R): tightening toward profit is
+    ALWAYS safe to allow — the precise-exit value is highest on the adverse positions
+    that never reach the widen window. The ratchet below still forbids loosening.
+    """
+    if overrides_used >= MAX_OVERRIDES_PER_TRADE:
+        return False, "override_cap"
+    if seconds_since_last_override < COOLDOWN_SEC:
+        return False, "cooldown"
+    side_lc = side.lower()
+    if side_lc == "long":
+        # Tighter long stop is HIGHER (closer to price). Equal-or-lower = no tighten.
+        if proposed_stop_price <= current_stop_price:
+            return False, "not_tightening_long"
+    elif side_lc == "short":
+        # Tighter short stop is LOWER (closer to price). Equal-or-higher = no tighten.
+        if proposed_stop_price >= current_stop_price:
+            return False, "not_tightening_short"
+    else:
+        return False, "bad_side"
+    return True, "ok"
+
+
+def _python_tighten(
+    *,
+    proposal: dict[str, Any],
+    next_gate_after_exit: int | None,
+) -> GateResult:
+    """Deterministic ratchet-safe tighten (probe TIGHTEN consumer path).
+
+    ADJUST_EXIT with the tighter stop when ``can_tighten_exit`` allows; HOLD with the
+    current stop otherwise. Mirrors ``_python_widen_only`` (same GateResult shape) so
+    the recalc caller persists ``stop_price`` identically — the next precise-exit tick
+    ratchets toward that tighter stop (and the ratchet still forbids loosening it).
+    """
+    allowed, reason = can_tighten_exit(
+        side=str(proposal.get("side", "long")),
+        current_stop_price=float(proposal.get("current_stop_price", 0.0)),
+        proposed_stop_price=float(proposal.get("proposed_stop_price", 0.0)),
+        overrides_used=int(proposal.get("overrides_used", 0)),
+        seconds_since_last_override=int(
+            proposal.get("seconds_since_last_override", COOLDOWN_SEC + 1)
+        ),
+    )
+    new_stop = (
+        float(proposal["proposed_stop_price"])
+        if allowed
+        else float(proposal["current_stop_price"])
+    )
+    return GateResult(
+        decision=GateDecision.ADJUST_EXIT if allowed else GateDecision.HOLD,
+        next_gate=next_gate_after_exit,
+        payload={
+            "stop_price": new_stop,
+            "tightening_applied": allowed,
+            "reason": f"probe_tighten:{reason}",
+        },
+        model_used="python",
+    )
+
+
 def _format_exit_context(exit_context: dict[str, Any]) -> str:
     """Render the #26 precise-exit context block as readable prompt lines.
 
@@ -302,6 +388,16 @@ async def adaptive_exit_gate(
         if state and state.value in {"EXIT_PENDING", "CLOSED"}
         else None
     )
+    # Probe TIGHTEN consumer (deterministic, P0+P1): a ratchet-safe tighter trail fed
+    # by G6 when a probe reads adverse ([[g7_tick_trail_atr_scale_2026-06-25]] sibling).
+    # flow_not_block — precise exit TIMING only (ADJUST_EXIT-tighten / HOLD), never a
+    # block or size cut; the -1.0R rail / entry / size are untouched. When absent the
+    # widen path below is byte-identical (no tighten_proposal → no behaviour change).
+    tighten_proposal = ctx.payload.get("tighten_proposal")
+    if isinstance(tighten_proposal, dict):
+        return _python_tighten(
+            proposal=tighten_proposal, next_gate_after_exit=next_gate_after_exit,
+        )
     proposal = ctx.payload.get("widen_proposal")
     if not isinstance(proposal, dict):
         return GateResult(

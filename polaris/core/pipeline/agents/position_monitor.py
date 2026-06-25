@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from polaris.core.pipeline.config import g6_probe_tighten_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GateContext,
@@ -77,6 +78,8 @@ def _python_decision(
     pnl_r: float,
     max_loss_r: float,
     candidate: dict[str, Any] | None,
+    probe_action: str | None,
+    tighten_enabled: bool,
 ) -> GateResult:
     """Deterministic decision rules (the sole G6 decision path)."""
     if pnl_r <= -abs(max_loss_r):
@@ -100,6 +103,21 @@ def _python_decision(
             payload={"reason": "widen_window", "pnl_r": pnl_r},
             model_used="python",
         )
+    # Probe TIGHTEN consumer (flag-gated, default OFF): in the adverse HOLD band
+    # (-1R < pnl_r <= +0.7R, past the stop_hit rail and below the widen window) a
+    # latest probe action of TIGHTEN escalates the plain HOLD to ADJUST_EXIT carrying
+    # a ``tighten_intent``. The recalc caller reads the latest probe_decisions row to
+    # synthesise the tighter stop and routes it to G7's deterministic tighten rail.
+    # flow_not_block — precise exit TIMING (a tighter trail), NEVER a HOLD->EXIT_NOW
+    # block or a size cut; the -1.0R rail / swap / widen window / entry / size are all
+    # untouched. Flag OFF (default) → falls through to the byte-identical plain HOLD.
+    if tighten_enabled and probe_action == "TIGHTEN":
+        return GateResult(
+            decision=GateDecision.ADJUST_EXIT,
+            next_gate=GATE_ADAPTIVE_EXIT,
+            payload={"reason": "probe_tighten", "tighten_intent": True, "pnl_r": pnl_r},
+            model_used="python",
+        )
     return GateResult(
         decision=GateDecision.HOLD,
         next_gate=GATE_ADAPTIVE_EXIT,
@@ -115,16 +133,25 @@ async def position_monitor_gate(
     model: str | None = None,
     call_cache: Any | None = None,
     tick_idx: int = 0,
+    tighten_enabled: bool | None = None,
 ) -> GateResult:
     """Gate 6 dispatcher — deterministic Python (no LLM).
 
     Inputs from ``ctx.payload``:
         ``position`` (dict, required), ``unrealized_pnl_r`` (float),
-        ``max_loss_r`` (float), ``swap_candidate`` (dict | None).
+        ``max_loss_r`` (float), ``swap_candidate`` (dict | None),
+        ``probe_action`` (str | None — the latest probe engine action for this
+        position, surfaced by the recalc caller from the probe_decisions sidecar).
 
     The ``client`` / ``model`` / ``call_cache`` / ``tick_idx`` parameters are
     retained for caller compatibility (ai_conductor P3 removed the GPT branch)
     but are inert — no network call is ever made.
+
+    ``tighten_enabled`` (probe TIGHTEN consumer, ``POLARIS_G6_PROBE_TIGHTEN``,
+    default OFF; ``None`` reads the env): when ON an adverse HOLD-band position whose
+    ``probe_action`` is TIGHTEN escalates to ADJUST_EXIT carrying ``tighten_intent``
+    (flow_not_block — a tighter trail to G7, never a block/size cut). OFF →
+    byte-identical to the pre-consumer HOLD.
 
     Fail-open (Q4): missing position → HOLD (never KILL).
     """
@@ -142,6 +169,12 @@ async def position_monitor_gate(
     candidate_dict: dict[str, Any] | None = (
         candidate if isinstance(candidate, dict) else None
     )
+    use_tighten = (
+        tighten_enabled if tighten_enabled is not None else g6_probe_tighten_mode()
+    )
+    probe_action_raw = ctx.payload.get("probe_action")
+    probe_action = str(probe_action_raw) if isinstance(probe_action_raw, str) else None
     return _python_decision(
         pos=pos, pnl_r=pnl_r, max_loss_r=max_loss_r, candidate=candidate_dict,
+        probe_action=probe_action, tighten_enabled=use_tighten,
     )

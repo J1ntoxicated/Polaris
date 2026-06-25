@@ -54,6 +54,12 @@ from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_POSITION_MONITOR,
 )
+from polaris.core.probes.tighten_intent import (
+    TIGHTEN_DEBOUNCE_DEFERRED_OVERRIDES,
+    TIGHTEN_DEBOUNCE_DEFERRED_SECONDS,
+    latest_probe_tighten,
+    synth_tighten_stop,
+)
 from polaris.core.streams import resolve_stream_profile
 from polaris.scripts._production_atr import strategy_timeframe, timeframe_atr_pct
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
@@ -478,6 +484,17 @@ async def _evaluate_position(
     monitor_payload["recent_ticks"] = (
         recent_ticks_obj if isinstance(recent_ticks_obj, list) else []
     )
+    # Probe TIGHTEN consumer (POLARIS_G6_PROBE_TIGHTEN, default OFF): surface the
+    # freshest OPEN probe action for THIS position from the observe-only
+    # ``data/probes.sqlite`` sidecar so G6 can escalate an adverse HOLD to a tighter
+    # trail (precise exit TIMING). FAIL-OPEN read (None handle / missing row → no
+    # key added → byte-identical HOLD). The probe engine stays observe-only — this
+    # only READS its log. ``probe_intent`` is reused below to synthesise the stop.
+    probe_intent = latest_probe_tighten(
+        getattr(state, "probe_conn", None), position_id=str(pos["position_id"]),
+    )
+    if probe_intent is not None:
+        monitor_payload["probe_action"] = probe_intent.action
     # Gate architecture Phase 0: per-stream seam, resolved once from the
     # position's venue and threaded through G6/G7 (read-but-no-decision in P0).
     stream_profile = resolve_stream_profile(str(pos["venue"]))
@@ -551,7 +568,8 @@ async def _evaluate_position(
         # ever WIDENS. last_price fallback when the engine hasn't set a stop yet.
         atr_one = max(entry_price * atr_pct, 1e-6)
         stop_row = conn.execute(
-            "SELECT stop_price FROM positions WHERE position_id = ?",
+            "SELECT stop_price, peak_price, trough_price "
+            "FROM positions WHERE position_id = ?",
             (str(pos["position_id"]),),
         ).fetchone()
         current_stop = (
@@ -559,6 +577,40 @@ async def _evaluate_position(
             else (last_price - 2.0 * atr_one if side == "long"
                   else last_price + 2.0 * atr_one)
         )
+        # Probe TIGHTEN consumer (flag-gated): G6 escalated an adverse HOLD because
+        # the freshest probe action is TIGHTEN. Synthesise a TIGHTER stop from the
+        # position's anchor (peak/trough) using the probe trail_mult (NULL in observe
+        # mode → ATR-N% fallback) and route it to G7's deterministic tighten rail
+        # (``tighten_proposal``). flow_not_block — precise exit TIMING; the synth /
+        # G7 rail both reject any LOOSENING (ratchet preserved). None synth (would
+        # loosen) → fall through to the normal widen proposal below (no-op tighten).
+        tighten_proposal: dict[str, Any] | None = None
+        if g6_result.payload.get("tighten_intent") and probe_intent is not None:
+            anchor = (
+                float(stop_row[1]) if stop_row is not None and stop_row[1] is not None
+                else last_price
+            ) if side == "long" else (
+                float(stop_row[2]) if stop_row is not None and stop_row[2] is not None
+                else last_price
+            )
+            tighter_stop = synth_tighten_stop(
+                side=side, anchor_extreme=anchor, entry_price=entry_price,
+                atr_pct=atr_pct, current_stop_price=current_stop,
+                probe_trail_mult=probe_intent.trail_mult,
+            )
+            if tighter_stop is not None:
+                tighten_proposal = {
+                    "side": side,
+                    "current_stop_price": current_stop,
+                    "proposed_stop_price": tighter_stop,
+                    # 1st-increment debounce placeholders — the per-position override
+                    # counter + last-override timestamp are a deferred positions-schema
+                    # addition, so the local cooldown/override-cap rails are inert this
+                    # increment (safe: the synth + ratchet are monotone — see
+                    # tighten_intent.TIGHTEN_DEBOUNCE_DEFERRED_*).
+                    "overrides_used": TIGHTEN_DEBOUNCE_DEFERRED_OVERRIDES,
+                    "seconds_since_last_override": TIGHTEN_DEBOUNCE_DEFERRED_SECONDS,
+                }
         proposed_stop = (
             current_stop - atr_one if side == "long" else current_stop + atr_one
         )
@@ -573,6 +625,10 @@ async def _evaluate_position(
             seconds_since_last_override=60,
         )
         g7_payload_full = {**monitor_payload, **g7_payload}
+        if tighten_proposal is not None:
+            # tighten_proposal wins in adaptive_exit_gate (consumed before widen);
+            # the widen_proposal stays as the no-tighten fallback shape.
+            g7_payload_full["tighten_proposal"] = tighten_proposal
         # G7 divergence SHADOW site tag (instrumentation only): read by the
         # shadow logger so live-recalc rows are separable from other call
         # sites in analysis. Never read by any decision.
@@ -628,6 +684,20 @@ async def _evaluate_position(
                     (float(new_stop), str(pos["position_id"])),
                 )
             state.recalc_widen_applied = getattr(state, "recalc_widen_applied", 0) + 1
+        elif g7_result.payload.get("tightening_applied"):
+            # Persist the G7-tightened stop (probe TIGHTEN consumer). The synth +
+            # G7's ``can_tighten_exit`` both guaranteed it is TIGHTER (toward price);
+            # the next precise-exit tick ratchets toward it and still forbids
+            # loosening it. flow_not_block — a tighter trail, never a block/size cut.
+            new_stop = g7_result.payload.get("stop_price")
+            if new_stop is not None:
+                conn.execute(
+                    "UPDATE positions SET stop_price = ? WHERE position_id = ?",
+                    (float(new_stop), str(pos["position_id"])),
+                )
+            state.recalc_tighten_applied = (
+                getattr(state, "recalc_tighten_applied", 0) + 1
+            )
 
 
 async def recalc_active_positions(

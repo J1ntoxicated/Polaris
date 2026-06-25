@@ -21,9 +21,15 @@ from __future__ import annotations
 import os
 from typing import Final
 
-__all__ = ["AI_FREE_ENV", "ai_free_mode"]
+__all__ = [
+    "AI_FREE_ENV",
+    "G6_PROBE_TIGHTEN_ENV",
+    "ai_free_mode",
+    "g6_probe_tighten_mode",
+]
 
 AI_FREE_ENV: Final[str] = "POLARIS_AI_FREE"
+G6_PROBE_TIGHTEN_ENV: Final[str] = "POLARIS_G6_PROBE_TIGHTEN"
 _TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
 
@@ -37,4 +43,20 @@ def ai_free_mode(env_value: str | None = None) -> bool:
     raw = os.getenv(AI_FREE_ENV) if env_value is None else env_value
     if raw is None or raw.strip() == "":
         return True
+    return raw.strip().lower() in _TRUTHY
+
+
+def g6_probe_tighten_mode(env_value: str | None = None) -> bool:
+    """True iff G6 consumes a probe TIGHTEN into an ADJUST_EXIT (tighten) directive.
+
+    Default **OFF**: unset/empty → False, so the live loop is byte-identical until a
+    supervised run opts IN via ``POLARIS_G6_PROBE_TIGHTEN=1``. flow_not_block — when
+    ON, an adverse HOLD-band position whose latest probe action is TIGHTEN routes a
+    TIGHTER trail to G7 (precise exit TIMING), never a block or size cut; the -1.0R
+    rail / swap / widen window / entry / size are untouched. ``env_value`` injectable
+    for pure tests; ``None`` reads the process env.
+    """
+    raw = os.getenv(G6_PROBE_TIGHTEN_ENV) if env_value is None else env_value
+    if raw is None or raw.strip() == "":
+        return False
     return raw.strip().lower() in _TRUTHY

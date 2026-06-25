@@ -76,6 +76,9 @@ class ProdLoopState:
     recalc_g6_calls: int = 0
     recalc_g7_calls: int = 0
     recalc_widen_applied: int = 0
+    # Probe TIGHTEN consumer (POLARIS_G6_PROBE_TIGHTEN) — count of G7-tightened stops
+    # persisted (precise exit TIMING; never a block/size cut).
+    recalc_tighten_applied: int = 0
     recalc_exit_now: int = 0
     recalc_swap: int = 0
     # #26 precise-exit engine — count of positions closed by the deterministic

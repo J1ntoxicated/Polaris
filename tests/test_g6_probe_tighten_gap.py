@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from polaris.core.pipeline.agents.position_monitor import position_monitor_gate
 from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
@@ -101,18 +99,14 @@ def test_g6_ignores_probe_tighten_today() -> None:
     assert res.decision == GateDecision.HOLD
 
 
-@pytest.mark.xfail(
-    reason="G6 probe-TIGHTEN consumer not yet built (trading-behaviour change "
-    "pending design: tighten semantics + cooldown + which gate owns it). "
-    "flow_not_block: must feed a TIGHTER trail to G7 (exit timing), not a "
-    "HOLD->EXIT_NOW block or size cut.",
-    strict=True,
-)
 def test_g6_consumes_probe_tighten_into_tighter_exit_FIXSPEC() -> None:
-    """SPEC for the fix: a HOLD-eligible adverse position whose latest probe action
-    is TIGHTEN must NOT plain-HOLD — it must escalate to a tighter-exit directive
-    (ADJUST_EXIT-tighten / EXIT_NOW), routing precise exit timing, never a size cut.
-    The -1.0R hard rail and the entry side stay untouched."""
+    """FIX LANDED (flag-gated): a HOLD-eligible adverse position whose latest probe
+    action is TIGHTEN no longer plain-HOLDs when the ``POLARIS_G6_PROBE_TIGHTEN``
+    consumer is ON — it escalates to ADJUST_EXIT carrying ``tighten_intent`` (precise
+    exit TIMING, a tighter trail to G7), never a size cut, never a HOLD->EXIT_NOW
+    block. The -1.0R hard rail and the entry side stay untouched. The default-OFF gap
+    above (``test_g6_ignores_probe_tighten_today`` with no flag) is still locked so
+    the live loop is byte-identical until a supervised run opts in."""
     res = asyncio.run(
         position_monitor_gate(
             _ctx({
@@ -121,7 +115,9 @@ def test_g6_consumes_probe_tighten_into_tighter_exit_FIXSPEC() -> None:
                 "max_loss_r": 1.0,
                 "probe_action": "TIGHTEN",
                 "probe_composite_lean": -0.49,
-            })
+            }),
+            tighten_enabled=True,
         )
     )
-    assert res.decision != GateDecision.HOLD
+    assert res.decision == GateDecision.ADJUST_EXIT
+    assert res.payload.get("tighten_intent") is True

@@ -62,6 +62,11 @@ class PositionRow:
     # stay USD. Both NEVER feed sizing/gating — pure board columns.
     entry_regime: str = ""
     quote_ccy: str = "USD"
+    # Symbol sparkline (Jin 2026-06-25) — the symbol's most-recent N closes
+    # (oldest→newest) so the board draws a tiny inline trend graph next to the
+    # symbol. Sourced from the read-only bars cache; empty when no bars. NEVER
+    # feeds sizing/gating/exit — pure board chrome.
+    spark: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -87,6 +92,10 @@ class TickerStat:
     n: int
     wr_pct: float
     sum_r: float
+    # Symbol sparkline (Jin 2026-06-25) — recent closes (oldest→newest) for the
+    # inline mini trend graph on the per-ticker panel. Bars-cache sourced; empty
+    # when no bars. Display-only; never feeds sizing/gating/exit.
+    spark: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -187,6 +196,10 @@ class ClosedTrade:
     position_side: str = ""
     entry_regime: str = ""
     quote_ccy: str = "USD"
+    # Symbol sparkline (Jin 2026-06-25) — recent closes (oldest→newest) for the
+    # inline mini trend graph on the recent-trades row. Bars-cache sourced; empty
+    # when no bars. Display-only; never feeds sizing/gating/exit.
+    spark: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)

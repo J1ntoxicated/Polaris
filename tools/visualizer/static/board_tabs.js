@@ -14,8 +14,8 @@
 
   const B = window.PolarisBoard;
   if (!B) { return; }   // board.js must load first
-  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, pn, esc, hms,
-    hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
+  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, sparkline, pn,
+    esc, hms, hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
     getActiveExchange, venueFilter } = B;
 
   // E3 (Jin 2026-05-31): when an exchange is selected (not 'all'), each tab
@@ -96,6 +96,9 @@
   #board tbody tr:hover td { background: rgba(95,135,175,0.06); }
   #board .empty { color: var(--p-dim); padding: 8px; text-align: center; font-size: 10px; }
   #board .stack-badge { cursor: help; border-bottom: 1px dotted var(--p-dim); }
+  /* Symbol sparkline — tiny inline recent-close trend next to the symbol cell.
+     vertical-align middle so it sits on the text baseline; never wraps. */
+  #board svg.spark { vertical-align: middle; margin-left: 6px; opacity: 0.85; flex: 0 0 auto; }
 
   /* Per-cell value-change flash (Bloomberg per-cell diff) — only a cell whose
      live value CHANGED this poll flashes; unchanged cells keep their DOM. ~400ms
@@ -561,7 +564,7 @@
       // the per-stream ledger R (AVG-R below). Fall back to the legacy keys for a
       // stale cached snapshot during rollover.
       const mfeMae = `${fmtR(p.mfe_atr_r ?? p.mfe_r, 1)}/${fmtR(p.mae_atr_r ?? p.mae_r, 1)}`;
-      const symHtml = esc(p.symbol) + rc + (symName(p) ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(symName(p))}</span>` : '');
+      const symHtml = esc(p.symbol) + rc + (symName(p) ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(symName(p))}</span>` : '') + sparkline(p.spark);
       return {
         key: key,
         trCls: 'row-' + lc,
@@ -624,7 +627,7 @@
       return `<tr class="row-${lc}">
           <td class="l b-flat">${hhmmss(t.ts_close)}</td>
           <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
-          <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
+          <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}${sparkline(t.spark)}</td>
           <td class="dir ${esc(dir)}" title="position ${esc(dir || '—')} · close fill ${esc(t.side_close)}">${esc(dir || '—')}</td>
           <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
           <td class="l b-flat" title="entry regime ${esc(reg || '—')}">${esc(reg || '—')}</td>

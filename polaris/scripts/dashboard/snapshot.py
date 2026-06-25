@@ -54,6 +54,7 @@ from polaris.scripts.dashboard.snapshot_models import (
     StreamSummary,
 )
 from polaris.scripts.dashboard.snapshot_queries import (
+    _attach_sparks,
     _build_dual_equity_curve,
     _cell_mult_lookup,
     _daily_realised_pnl,
@@ -394,6 +395,11 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         recent_trades = _recent_closed_trades(
             conn, n=40, regime_lookup=regime_by_venue_symbol,
         )
+        # Symbol sparkline (Jin 2026-06-25) — embed the recent-close mini history
+        # on each positions / ticker / recent-trade row in ONE bars query (no
+        # per-row fetch). Display-only; empty spark when the bars cache has nothing
+        # for a symbol (graceful).
+        _attach_sparks(conn, positions, ticker_stats, recent_trades)
         # E2 EXIT tab — FSM distribution + reason histogram (reuses recent_trades)
         # + G6/G7 gate decision counts.
         exit_surface = _exit_surface(

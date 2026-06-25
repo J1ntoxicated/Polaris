@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Mapping
-from typing import Any, Final
+from collections.abc import Mapping, Sequence
+from typing import Any, Final, Protocol
 
 from polaris.core.metrics.risk_unit import R_USD_PROXY
 
@@ -194,3 +194,127 @@ def _quote_ccy_for_symbol(venue: str, symbol: str, universe_quote: str) -> str:
             return quote
         return "USD"
     return "USD"
+
+
+# ---------------------------------------------------------------------------
+# Symbol sparkline (Jin 2026-06-25) — per-row recent-close mini history
+# ---------------------------------------------------------------------------
+
+# Max closes embedded per row for the inline sparkline. A short series keeps the
+# snapshot payload tiny (the board only draws a ~60px trend), so 30 is plenty.
+SPARK_POINTS: Final[int] = 30
+# Recent-close window per (instrument, interval) the spark query keeps. A bit
+# more than SPARK_POINTS so a downsample has anchors; capped low so the query
+# stays cheap on the display path.
+_SPARK_FETCH_LIMIT: Final[int] = 60
+
+
+def _downsample(series: list[float], n: int) -> list[float]:
+    """Evenly thin ``series`` to at most ``n`` points, keeping first + last.
+
+    Stride sampling (not averaging) so the spark traces the real closes; the
+    oldest and newest anchors are always preserved so the trend direction the
+    board colours on is honest. ``len <= n`` passes through unchanged.
+    """
+    m = len(series)
+    if m <= n or n <= 0:
+        return series
+    if n == 1:
+        return [series[-1]]
+    step = (m - 1) / (n - 1)
+    out = [series[round(i * step)] for i in range(n)]
+    out[-1] = series[-1]  # guarantee the newest anchor survives rounding
+    return out
+
+
+def _spark_series(
+    conn: sqlite3.Connection,
+    instruments: list[str],
+    *,
+    n: int = SPARK_POINTS,
+) -> dict[str, list[float]]:
+    """{instrument_id: recent closes (oldest→newest)} for the row sparklines.
+
+    ONE window query over ``bars`` for the requested instruments (the displayed
+    positions / trades / tickers), bounded to ``_SPARK_FETCH_LIMIT`` rows per
+    (instrument, interval). Per instrument the FRESHEST interval (newest stored
+    ts) wins, so a symbol with both stale daily + fresh intraday bars sparks the
+    fresh series, never a mixed one. FUTURE-dated bars (the +10h Capital
+    AEST-naive bug) are excluded, mirroring ``_last_prices``. The series is then
+    downsampled to ``n`` points. DISPLAY-ONLY — never feeds sizing/gating/exit;
+    a missing/locked bars table or an absent instrument degrades to an empty
+    list (graceful). The bars cache is Yahoo-primary, already populated.
+    """
+    insts = [i for i in dict.fromkeys(instruments) if i]
+    if not insts:
+        return {}
+    placeholders = ",".join("?" for _ in insts)
+    now_s = _now_s()
+    # ROW_NUMBER bounds the scan to the newest few bars per (instrument,
+    # interval) without an unbounded full-history read. SQLite >= 3.25 (the
+    # bundled stdlib build) supports window functions; _safe_query degrades to
+    # [] on any error → empty sparks, never a crash.
+    rows = _safe_query(
+        conn,
+        f"""SELECT instrument_id, bar_interval, ts, close FROM (
+                SELECT instrument_id, bar_interval, ts, close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY instrument_id, bar_interval
+                           ORDER BY ts DESC
+                       ) AS rn
+                FROM bars
+                WHERE instrument_id IN ({placeholders}) AND ts <= ?
+            ) WHERE rn <= ?
+            ORDER BY instrument_id, bar_interval, ts ASC""",
+        (*insts, now_s, _SPARK_FETCH_LIMIT),
+    )
+    # Bucket closes by (instrument, interval), tracking the newest ts per bucket
+    # so we can pick the freshest interval per instrument.
+    by_key: dict[tuple[str, str], list[float]] = {}
+    newest_ts: dict[tuple[str, str], int] = {}
+    for inst, interval, ts, close in rows:
+        key = (str(inst), str(interval))
+        by_key.setdefault(key, []).append(float(close or 0.0))
+        newest_ts[key] = max(newest_ts.get(key, 0), int(ts or 0))
+    # Per instrument pick the interval whose latest bar is newest (tiebreak: the
+    # longer series). The query already ordered ts ASC, so each bucket is
+    # oldest→newest.
+    best: dict[str, tuple[str, int]] = {}
+    for (inst, interval), latest in newest_ts.items():
+        cur = best.get(inst)
+        if cur is None or latest > cur[1] or (
+            latest == cur[1]
+            and len(by_key[(inst, interval)]) > len(by_key[(inst, cur[0])])
+        ):
+            best[inst] = (interval, latest)
+    return {
+        inst: _downsample(by_key[(inst, interval)], n)
+        for inst, (interval, _latest) in best.items()
+    }
+
+
+class _SparkRow(Protocol):
+    """A snapshot row that carries a (venue, symbol) and a mutable ``spark``."""
+
+    venue: str
+    symbol: str
+    spark: list[float]
+
+
+def _attach_sparks(
+    conn: sqlite3.Connection,
+    *row_groups: Sequence[_SparkRow],
+) -> None:
+    """Embed the recent-close sparkline on every (venue, symbol) row in place.
+
+    ONE ``_spark_series`` query covers all groups (positions / ticker_stats /
+    recent_trades) so there is no per-row fetch; each row's ``spark`` is set to
+    the symbol's series (empty when the bars cache has nothing — graceful).
+    Display-only — never feeds sizing/gating/exit.
+    """
+    insts = [f"{r.venue}:{r.symbol}" for grp in row_groups for r in grp]
+    spark_by_inst = _spark_series(conn, insts)
+    for grp in row_groups:
+        for r in grp:
+            r.spark = spark_by_inst.get(f"{r.venue}:{r.symbol}", [])
+

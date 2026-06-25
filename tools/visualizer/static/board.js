@@ -249,6 +249,34 @@
     return (v >= 0 ? '+' : '') + v.toFixed(dp) + 'R';
   }
 
+  // Symbol sparkline (Jin 2026-06-25) — tiny inline SVG trend of a row's recent
+  // closes (d.spark[], oldest→newest). Trend colour: last >= first = green (up),
+  // else red. Returns '' for a missing / too-short series so the cell just shows
+  // the symbol. Display-only chrome; the series comes from the read-only bars
+  // cache embedded on the snapshot row. ~62×16 px, scales the closes to the box.
+  const SPARK_W = 62, SPARK_H = 16, SPARK_PAD = 2;
+  function sparkline(arr) {
+    if (!Array.isArray(arr) || arr.length < 2) return '';
+    const n = arr.length;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of arr) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (!isFinite(lo) || !isFinite(hi)) return '';
+    const span = (hi - lo) || 1;   // flat series → a centred horizontal line
+    const innerW = SPARK_W - SPARK_PAD * 2, innerH = SPARK_H - SPARK_PAD * 2;
+    const pts = arr.map((v, i) => {
+      const x = SPARK_PAD + (n === 1 ? 0 : (i / (n - 1)) * innerW);
+      const y = SPARK_PAD + innerH - ((v - lo) / span) * innerH;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const up = arr[n - 1] >= arr[0];
+    const col = up ? 'var(--p-grn)' : 'var(--p-red)';
+    return `<svg class="spark" width="${SPARK_W}" height="${SPARK_H}" `
+      + `viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none" `
+      + `aria-hidden="true"><polyline points="${pts}" fill="none" `
+      + `stroke="${col}" stroke-width="1" stroke-linejoin="round" `
+      + `stroke-linecap="round"/></svg>`;
+  }
+
   // (j/k) Snapshot freshness — LIVE when the latest snapshot tick is recent.
   // d.ts_now = epoch seconds the snapshot was generated; compared to wall clock.
   // STALE_SEC = a few poll intervals of slack (poll = 1s, snapshot bg-refresh
@@ -972,7 +1000,7 @@
   window.PolarisBoard = {
     $: $, fmtUsd: fmtUsd, fmtPct: fmtPct, fmtSignedPct: fmtSignedPct,
     fmtPx: fmtPx, fmtPxCcy: fmtPxCcy, ccySymbol: ccySymbol,
-    fmtR: fmtR, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
+    fmtR: fmtR, sparkline: sparkline, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
     freshness: freshness,

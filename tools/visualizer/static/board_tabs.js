@@ -14,8 +14,8 @@
 
   const B = window.PolarisBoard;
   if (!B) { return; }   // board.js must load first
-  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, pn, esc, hms, hhmmss,
-    venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
+  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, pn, esc, hms,
+    hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
     getActiveExchange, venueFilter } = B;
 
   // E3 (Jin 2026-05-31): when an exchange is selected (not 'all'), each tab
@@ -552,7 +552,11 @@
         : '';
       const dpc = fmtSignedPct(p.delta_pct, 2);
       const upnlPct = fmtSignedPct(p.upnl_pct, 2);
-      const stop = (p.stop_price > 0) ? fmtPx(p.stop_price) : '—';
+      // issue 4: price cells carry the quote-currency symbol (J225 → ¥); SIZE$ /
+      // uPnL$ stay USD. issue 3: REGIME shows the immutable entry regime.
+      const qccy = p.quote_ccy || 'USD';
+      const stop = (p.stop_price > 0) ? fmtPxCcy(p.stop_price, qccy) : '—';
+      const reg = p.entry_regime || p.regime || '';
       // Hardening #6: the per-trade-ATR EXCURSION ruler (*_atr_r) — distinct from
       // the per-stream ledger R (AVG-R below). Fall back to the legacy keys for a
       // stale cached snapshot during rollover.
@@ -565,15 +569,15 @@
           { text: p.venue, cls: 'l ex', title: p.venue },
           { html: symHtml, cls: 'l tk', title: `${p.symbol}${p.row_count > 1 ? ' ×' + p.row_count : ''}${symName(p) ? ' — ' + symName(p) : ''}` },
           { text: p.side, cls: 'dir ' + p.side, title: `${p.side}${lc === 'b' ? ' (CFD — long/short)' : ''}` },
-          { text: fmtPx(p.entry_price), cls: 'num b-flat', title: 'entry ' + fmtPx(p.entry_price) },
-          { text: fmtPx(p.last_price), cls: 'num', title: 'current (last close) ' + fmtPx(p.last_price), flash: pxFlash },
+          { text: fmtPxCcy(p.entry_price, qccy), cls: 'num b-flat', title: 'entry ' + fmtPxCcy(p.entry_price, qccy) },
+          { text: fmtPxCcy(p.last_price, qccy), cls: 'num', title: 'current (last close) ' + fmtPxCcy(p.last_price, qccy), flash: pxFlash },
           { text: dpc, cls: 'num ' + pn(p.delta_pct), title: 'price move since entry', flash: dFlash },
           { text: fmtUsd(p.size_usd, 0), cls: 'num' },
           { text: fmtUsd(p.upnl_usd, 2), cls: 'num ' + pn(p.upnl_usd), flash: upFlash },
           { text: upnlPct, cls: 'num ' + pn(p.upnl_pct) },
           { text: hms(p.held_sec), cls: 'num b-flat', title: 'time held' },
           { text: p.strategy_id, cls: 'l b-flat', title: p.strategy_id },
-          { text: p.regime || '—', cls: 'l b-flat', title: 'regime ' + (p.regime || '') },
+          { text: reg || '—', cls: 'l b-flat', title: 'entry regime ' + (p.entry_regime || '—') + ' · live ' + (p.regime || '—') },
           { text: stop, cls: 'num b-flat', title: 'protective stop ' + stop },
           { text: mfeMae, cls: 'num b-flat', title: `MFE/MAE in per-trade-ATR excursion R (atr_r) — distinct from the per-stream ledger R · exit-FSM ${p.exit_state}` },
         ],
@@ -590,7 +594,7 @@
   }
 
   // ── TAB 2 · TRADES (expanded, more rows) ──────────────────────────────────
-  const TRD_COLS = 12;
+  const TRD_COLS = 14;
   function renderTrades(d) {
     const rows = venueFilter(d.recent_trades).slice(0, 40);   // E3 venue scope
     const body = $('trd-body'); if (!body) return;
@@ -604,30 +608,47 @@
     // time-ordered list (newest first); per-row colour is a subtle venue cue only.
     const groups = rows.map(t => {
       const lc = venueStream(t.venue).toLowerCase();
+      // issue 2: show the POSITION direction (long/short), NOT the close FILL
+      // side (sell = a long exit) which made longs read as shorts.
+      const dir = t.position_side || '';
+      // issue 3: the immutable ENTRY regime (positions.entry_regime), not "-".
+      const reg = t.entry_regime || t.regime || '';
+      // issue 4: price cells carry the quote-currency symbol (J225 → ¥).
+      const qccy = t.quote_ccy || 'USD';
+      // issue 1: gross / fee / net are SEPARATE columns (Jin "수익이랑 피랑 따로
+      // 적어"). net = gross − real fee is the single truth; FEE = gross − net so
+      // the three columns always reconcile. A small gross that nets negative
+      // once the fee bites reads honestly.
+      const net = (t.net_usd != null) ? t.net_usd : (t.pnl_usd - (t.real_fee_usd || 0));
+      const fee = t.pnl_usd - net;
       return `<tr class="row-${lc}">
           <td class="l b-flat">${hhmmss(t.ts_close)}</td>
           <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
           <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}</td>
-          <td class="dir ${esc(t.side_close)}">${esc(t.side_close)}</td>
+          <td class="dir ${esc(dir)}" title="position ${esc(dir || '—')} · close fill ${esc(t.side_close)}">${esc(dir || '—')}</td>
           <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
-          <td class="l b-flat" title="regime ${esc(t.regime)}">${esc(t.regime || '—')}</td>
-          <td class="num b-flat" title="entry ${fmtPx(t.entry_price)}">${fmtPx(t.entry_price)}</td>
-          <td class="num b-flat" title="exit ${fmtPx(t.exit_price)}">${fmtPx(t.exit_price)}</td>
-          <td class="num ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 2)}</td>
-          <td class="num ${pn(t.pnl_pct)}">${fmtSignedPct(t.pnl_pct, 2)}</td>
+          <td class="l b-flat" title="entry regime ${esc(reg || '—')}">${esc(reg || '—')}</td>
+          <td class="num b-flat" title="entry ${fmtPxCcy(t.entry_price, qccy)}">${fmtPxCcy(t.entry_price, qccy)}</td>
+          <td class="num b-flat" title="exit ${fmtPxCcy(t.exit_price, qccy)}">${fmtPxCcy(t.exit_price, qccy)}</td>
+          <td class="num ${pn(t.pnl_usd)}" title="gross PnL (pre-fee)">${fmtUsd(t.pnl_usd, 2)}</td>
+          <td class="num b-neg" title="real venue fee · demo ${fmtUsd(t.fee_usd, 4)}">${fmtUsd(-fee, 2)}</td>
+          <td class="num ${pn(net)}" title="net = gross − fee">${fmtUsd(net, 2)}</td>
+          <td class="num ${pn(t.pnl_pct)}" title="gross PnL as % of entry notional">${fmtSignedPct(t.pnl_pct, 2)}</td>
           <td class="num b-flat">${hms(t.held_sec)}</td>
-          <td class="l b-flat" title="exit ${esc(t.exit_reason)} · fee real ${fmtUsd(t.real_fee_usd, 4)} | demo ${fmtUsd(t.fee_usd, 4)}">${esc(t.exit_reason)} <span class="b-flat">${fmtUsd(t.real_fee_usd, 2)}|${fmtUsd(t.fee_usd, 2)}</span></td>
+          <td class="l b-flat" title="exit ${esc(t.exit_reason)}">${esc(t.exit_reason)}</td>
         </tr>`;
     }).join('');
     body.innerHTML =
       `<table><colgroup>
-        <col style="width:8%"><col style="width:6%"><col style="width:12%"><col style="width:6%">
-        <col style="width:11%"><col style="width:9%"><col style="width:9%"><col style="width:9%">
-        <col style="width:8%"><col style="width:6%"><col style="width:6%"><col style="width:14%">
+        <col style="width:7%"><col style="width:5%"><col style="width:11%"><col style="width:5%">
+        <col style="width:10%"><col style="width:8%"><col style="width:8%"><col style="width:8%">
+        <col style="width:7%"><col style="width:6%"><col style="width:7%"><col style="width:5%">
+        <col style="width:5%"><col style="width:6%">
        </colgroup><thead><tr>
-        <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th>SIDE</th>
-        <th class="l">STRAT</th><th class="l">REGIME</th><th>ENTRY</th><th>EXIT</th>
-        <th>PnL$</th><th>PnL%</th><th>HELD</th><th class="l" title="exit reason + fee(real|demo)">REASON · FEE(R|D)</th>
+        <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th title="position direction (long/short) — not the close fill side">SIDE</th>
+        <th class="l">STRAT</th><th class="l" title="regime at entry">REGIME</th><th>ENTRY</th><th>EXIT</th>
+        <th title="gross PnL before fees">GROSS$</th><th title="real venue fee">FEE$</th><th title="net = gross − fee">NET$</th>
+        <th title="gross PnL as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
       </tr></thead><tbody>${groups}</tbody></table>`;
   }
 

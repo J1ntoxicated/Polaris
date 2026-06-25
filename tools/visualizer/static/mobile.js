@@ -150,7 +150,13 @@
       '<span class="ta-r">P&amp;L</span><span class="ta-r">R</span><span class="ta-r">WHY</span></div>';
     body.innerHTML = hdr + rt.slice(0, 60).map(function (t) {
       var tstr = t.ts_close ? hhmmss(t.ts_close) : '';
-      var sideTag = (String(t.side_close || '').toLowerCase().charAt(0) === 's') ? 'S' : 'B';
+      // issue 2: tag by POSITION direction (long/short), not the close FILL
+      // side (sell = a long exit, which mislabelled longs as shorts). Fall back
+      // to the close-side inference when position_side is absent (legacy rows).
+      var ps = String(t.position_side || '').toLowerCase();
+      var isShort = ps ? (ps.charAt(0) === 's')
+        : (String(t.side_close || '').toLowerCase().charAt(0) === 'b');
+      var sideTag = isShort ? 'S' : 'L';
       var r = (t.r_units != null) ? ((t.r_units >= 0 ? '+' : '') + t.r_units.toFixed(2) + 'R') : '—';
       return '<div class="tr rt-grid" title="' + esc(t.symbol) + ' ' + esc(t.strategy_id) +
           ' · ' + esc(t.exit_reason) + ' · ' + esc(tstr) + '">' +

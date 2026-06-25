@@ -225,6 +225,25 @@
     const dp = a >= 1000 ? 1 : a >= 1 ? 3 : a >= 0.01 ? 5 : 8;
     return v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
   }
+  // Quote-currency symbol for the price columns (issue 4: J225 71,847 is JPY,
+  // not raw). USD / USDT / USDC and unknown codes get no symbol (the price reads
+  // as-is); only the non-USD quote currencies the venues actually quote in get a
+  // glyph. This labels the price cell ONLY — size_usd / pnl stay USD ($).
+  const CCY_SYMBOL = {
+    JPY: '¥', EUR: '€', GBP: '£', AUD: 'A$', NZD: 'NZ$', CHF: 'CHF ',
+    CAD: 'C$', NOK: 'kr ', SEK: 'kr ', DKK: 'kr ', ZAR: 'R ', SGD: 'S$',
+    HKD: 'HK$', CNH: '¥', PLN: 'zł ',
+  };
+  function ccySymbol(ccy) {
+    return CCY_SYMBOL[String(ccy || '').toUpperCase()] || '';
+  }
+  // Price with its quote-currency symbol prepended (falls back to the bare
+  // fmtPx when the quote is USD-equivalent / unknown).
+  function fmtPxCcy(v, ccy) {
+    const s = fmtPx(v);
+    if (s === '—') return s;
+    return ccySymbol(ccy) + s;
+  }
   function fmtR(v, dp = 2) {
     if (v == null || isNaN(v)) return '—';
     return (v >= 0 ? '+' : '') + v.toFixed(dp) + 'R';
@@ -951,7 +970,8 @@
   // Expose shared helpers for board_tabs.js (loaded after this file).
   window.PolarisBoard = {
     $: $, fmtUsd: fmtUsd, fmtPct: fmtPct, fmtSignedPct: fmtSignedPct,
-    fmtPx: fmtPx, fmtR: fmtR, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
+    fmtPx: fmtPx, fmtPxCcy: fmtPxCcy, ccySymbol: ccySymbol,
+    fmtR: fmtR, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
     freshness: freshness,

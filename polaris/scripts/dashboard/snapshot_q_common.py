@@ -126,3 +126,71 @@ def _model_price(model: str | None) -> float:
     if not model:
         return MODEL_PRICE_PER_1K["gpt"]
     return MODEL_PRICE_PER_1K.get(str(model), MODEL_PRICE_PER_1K["gpt"])
+
+
+# ---------------------------------------------------------------------------
+# Quote-currency display label (issue 4: J225 71,847 is JPY, not raw)
+# ---------------------------------------------------------------------------
+
+# Supported non-USD quote currencies — mirrors the trading path's
+# ``_QUOTE_RATE_EPICS`` keys (``_production_capital_sizing``). A symbol whose
+# derived quote ccy is NOT in this set degrades to "USD" (no special symbol),
+# so a stray label can never imply a currency the venue doesn't quote in. This
+# is a DISPLAY mirror of that set, not a second source of truth for sizing.
+_SUPPORTED_QUOTE_CCY: Final[frozenset[str]] = frozenset({
+    "JPY", "EUR", "GBP", "AUD", "NZD", "CHF", "CAD", "NOK", "SEK", "DKK",
+    "ZAR", "SGD", "HKD", "CNH", "PLN",
+})
+
+# Capital index/CFD epics whose quote ccy is NOT derivable from the symbol
+# string (an FX pair gives its quote in the trailing 3 chars; an index name
+# does not). The true value lives only in the live market-detail payload the
+# read-only dashboard cannot fetch (constraint_translator parses
+# ``instrument.currency`` — e.g. J225 is JPY-quoted). This is the curated
+# display map for the well-known index epics in the live Capital universe;
+# everything not listed defaults to USD (US100/US30/US500/RTY/NYFANG/DXY/VIX
+# are USD-quoted, so the default is correct for them). Display-only.
+_CAPITAL_INDEX_QUOTE_CCY: Final[Mapping[str, str]] = {
+    "J225": "JPY",       # Nikkei 225
+    "EU50": "EUR",       # EuroStoxx 50
+    "DE40": "EUR",       # DAX
+    "FR40": "EUR",       # CAC 40
+    "IT40": "EUR",       # FTSE MIB
+    "NL25": "EUR",       # AEX
+    "SP35": "EUR",       # IBEX 35 (Spain)
+    "UK100": "GBP",      # FTSE 100
+    "HK50": "HKD",       # Hang Seng
+    "CN50": "CNH",       # China A50
+    "AU200AU": "AUD",    # ASX 200
+    "SG25": "SGD",       # Straits Times
+    "SW20": "CHF",       # SMI (Switzerland)
+}
+
+
+def _quote_ccy_for_symbol(venue: str, symbol: str, universe_quote: str) -> str:
+    """Best-effort DISPLAY quote currency for a price label (issue 4).
+
+    OKX: trust ``universe.quote_ccy`` (discovery parses the real pair quote, so
+    USDT/USD/etc are correct). Capital: discovery stamps a "USD" placeholder for
+    every CFD, so derive the true quote from the epic — a 6-char FX pair gives
+    its quote in the trailing 3 chars (AUDJPY → JPY); a known index epic uses the
+    curated map (J225 → JPY); everything else (commodity, equity, USD index)
+    stays USD. Only currencies the venue actually quotes in (the supported set)
+    are returned; anything else degrades to "USD". Never feeds sizing/FX-conv —
+    the price cell symbol only.
+    """
+    v = (venue or "").lower()
+    if v != "capital":
+        q = (universe_quote or "USD").upper()
+        return q if q else "USD"
+    sym = (symbol or "").upper()
+    idx = _CAPITAL_INDEX_QUOTE_CCY.get(sym)
+    if idx is not None:
+        return idx
+    # FX pair: a 6-letter all-alpha epic quotes in its trailing 3 chars.
+    if len(sym) == 6 and sym.isalpha():
+        quote = sym[3:]
+        if quote in _SUPPORTED_QUOTE_CCY:
+            return quote
+        return "USD"
+    return "USD"

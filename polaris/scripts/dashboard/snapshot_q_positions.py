@@ -11,7 +11,20 @@ from __future__ import annotations
 import sqlite3
 
 from polaris.scripts.dashboard.snapshot_models import PositionRow
-from polaris.scripts.dashboard.snapshot_q_common import _now_s, _safe_query
+from polaris.scripts.dashboard.snapshot_q_common import (
+    _now_s,
+    _quote_ccy_for_symbol,
+    _safe_query,
+)
+
+
+def _universe_quote_ccy(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(venue, symbol) → universe.quote_ccy (the raw discovery value).
+
+    OKX rows carry the real pair quote; Capital rows carry a "USD" placeholder
+    that ``_quote_ccy_for_symbol`` corrects from the epic. Display-only."""
+    rows = _safe_query(conn, "SELECT venue, symbol, quote_ccy FROM universe")
+    return {(str(r[0]), str(r[1])): str(r[2] or "USD") for r in rows}
 
 # P4 #1 — dashboard current-price freshness window (wall-clock seconds against
 # quote_ticks.ts). WS ticks stamp ``int(time.time())`` (seconds, like bars.ts).
@@ -164,12 +177,14 @@ def _read_positions(
                   MAX(exit_state) AS exit_state,          -- r[9]
                   MAX(COALESCE(stop_price, 0.0)) AS stop, -- r[10]
                   MAX(COALESCE(mfe_r, 0.0)) AS mfe_r,     -- r[11]
-                  MIN(COALESCE(mae_r, 0.0)) AS mae_r      -- r[12]
+                  MIN(COALESCE(mae_r, 0.0)) AS mae_r,     -- r[12]
+                  MAX(COALESCE(entry_regime, '')) AS entry_regime  -- r[13]
            FROM positions
            WHERE status NOT IN ('closed', 'cancelled', 'reconciled')
            GROUP BY venue, symbol, strategy_id, side
            ORDER BY MIN(opened_ts) DESC""",
     )
+    quote_by_sym = _universe_quote_ccy(conn)
     out: list[PositionRow] = []
     for r in rows:
         venue = str(r[0])
@@ -184,6 +199,10 @@ def _read_positions(
         stop_price = float(r[10] or 0.0)
         mfe_r = float(r[11] or 0.0)
         mae_r = float(r[12] or 0.0)
+        entry_regime = str(r[13] or "")
+        quote_ccy = _quote_ccy_for_symbol(
+            venue, symbol, quote_by_sym.get((venue, symbol), "USD")
+        )
         inst = f"{venue}:{symbol}"
         entry = entry_lookup.get((venue, inst, strat))
         if entry is None or entry <= 0.0:
@@ -221,6 +240,8 @@ def _read_positions(
                 mfe_atr_r=mfe_r,
                 mae_atr_r=mae_r,
                 upnl_pct=upnl_pct,
+                entry_regime=entry_regime,
+                quote_ccy=quote_ccy,
             )
         )
     out.sort(key=lambda p: p.upnl_usd, reverse=True)

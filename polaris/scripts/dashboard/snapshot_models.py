@@ -54,6 +54,14 @@ class PositionRow:
     mfe_atr_r: float = 0.0
     mae_atr_r: float = 0.0
     upnl_pct: float = 0.0
+    # Display-alignment additions (read-only). ``entry_regime`` is the IMMUTABLE
+    # regime stamped at entry (positions.entry_regime — chop/bull_trend/...), so
+    # the board shows the regime the trade was opened in, not just the live one
+    # (``regime`` above). ``quote_ccy`` is the true price-quote currency for the
+    # ENTRY/CURRENT/STOP cells (J225 is JPY, EU50 is EUR); size_usd / upnl_usd
+    # stay USD. Both NEVER feed sizing/gating — pure board columns.
+    entry_regime: str = ""
+    quote_ccy: str = "USD"
 
 
 @dataclass(slots=True)
@@ -165,6 +173,20 @@ class ClosedTrade:
     pnl_pct: float = 0.0
     fee_usd: float = 0.0
     real_fee_usd: float = 0.0
+    # Display-alignment additions (read-only — Jin: "수익이랑 피랑 따로 적어",
+    # "롱인데 셀로 표기", "레짐 다 -"). ``net_usd`` is the single-truth net =
+    # gross (``pnl_usd``) − real fee (``real_fee_usd``); the board shows
+    # gross/fee/net split so a small gross that nets negative reads honestly.
+    # ``position_side`` is the POSITION direction (long/short, from
+    # positions.side) — distinct from ``side_close`` (the close FILL side, e.g.
+    # 'sell' = a long exit) which made longs read as shorts. ``entry_regime`` is
+    # the immutable regime at entry (positions.entry_regime). ``quote_ccy`` is
+    # the true price-quote currency for the ENTRY/EXIT cells (J225 → JPY); pnl /
+    # fee stay USD. NEVER feed sizing/gating — pure board columns.
+    net_usd: float = 0.0
+    position_side: str = ""
+    entry_regime: str = ""
+    quote_ccy: str = "USD"
 
 
 @dataclass(slots=True)

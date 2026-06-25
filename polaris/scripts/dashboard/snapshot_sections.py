@@ -47,6 +47,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
     GPT_TOKENS_PER_CALL,
     LEARNER_DELTA_LOOKBACK_SEC,
     _as_dict,
+    _quote_ccy_for_symbol,
     _safe_query,
     _symbol_from_inst,
 )
@@ -400,6 +401,31 @@ def _pnl_r_by_contribution(conn: sqlite3.Connection) -> dict[str, float]:
     return {str(r[0]): float(r[1] or 0.0) for r in rows}
 
 
+def _position_side_regime_by_id(
+    conn: sqlite3.Connection,
+) -> dict[str, tuple[str, str]]:
+    """{position_id: (side, entry_regime)} for every position.
+
+    Lets a close fill resolve its trade's POSITION direction (long/short, issue
+    2 — distinct from the close FILL side) and the IMMUTABLE entry regime (issue
+    3) via ``fills.contribution_id == positions.position_id``. Display-only."""
+    rows = _safe_query(
+        conn, "SELECT position_id, side, entry_regime FROM positions"
+    )
+    return {
+        str(r[0]): (str(r[1] or ""), str(r[2] or "")) for r in rows
+    }
+
+
+def _universe_quote_ccy_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(venue, symbol) → universe.quote_ccy (raw discovery value).
+
+    Capital rows carry a "USD" placeholder that ``_quote_ccy_for_symbol``
+    corrects from the epic; OKX rows carry the real pair quote. Display-only."""
+    rows = _safe_query(conn, "SELECT venue, symbol, quote_ccy FROM universe")
+    return {(str(r[0]), str(r[1])): str(r[2] or "USD") for r in rows}
+
+
 def _recent_closed_trades(
     conn: sqlite3.Connection,
     *,
@@ -438,6 +464,10 @@ def _recent_closed_trades(
     # matched position (legacy / smoke) falls back to the shared $-proxy denom
     # (one number, not the old $10/$50 split).
     pnl_r_by_contrib = _pnl_r_by_contribution(conn)
+    # Issue 2/3: position direction (long/short) + immutable entry regime, keyed
+    # on contribution_id == position_id. Issue 4: true price-quote currency.
+    side_regime_by_id = _position_side_regime_by_id(conn)
+    quote_by_sym = _universe_quote_ccy_map(conn)
     # Index by exact contribution_id → first open fill (entry)
     open_by_contrib: dict[str, tuple[float, int]] = {}
     open_fifo: dict[tuple[str, str, str], list[tuple[float, int]]] = {}
@@ -512,6 +542,18 @@ def _recent_closed_trades(
         regime = (
             regime_lookup.get((venue, symbol), "") if regime_lookup else ""
         )
+        # Issue 2/3: resolve the POSITION direction + immutable entry regime from
+        # the matched position (contribution_id == position_id). Falls back to
+        # the close FILL side (buy→short-cover, sell→long-exit → infer the
+        # opposite) when the position row is absent (legacy / smoke), so the
+        # column is never blank for a real trade.
+        pos_side, entry_regime = side_regime_by_id.get(contrib_str or "", ("", ""))
+        if not pos_side:
+            pos_side = "long" if side.lower() == "sell" else "short"
+        # Issue 4: true price-quote currency for the ENTRY/EXIT cells.
+        quote_ccy = _quote_ccy_for_symbol(
+            venue, symbol, quote_by_sym.get((venue, symbol), "USD")
+        )
         closed_trades.append(
             ClosedTrade(
                 ts_close=ts_ms // 1000,
@@ -533,6 +575,13 @@ def _recent_closed_trades(
                 pnl_pct=pnl_pct,
                 fee_usd=demo_fee,
                 real_fee_usd=real_fee,
+                # Issue 1: net = gross − real fee is the single truth (real fee
+                # is what fills.fee_usd stores; net subtracts the SAME fee). The
+                # FEE$ column shows gross − net so the three reconcile.
+                net_usd=pnl - real_fee,
+                position_side=pos_side,
+                entry_regime=entry_regime,
+                quote_ccy=quote_ccy,
             )
         )
     closed_trades.sort(key=lambda t: t.ts_close, reverse=True)

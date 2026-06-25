@@ -32,6 +32,29 @@ from polaris.scripts.production_paper_loop import (
 )
 from polaris.strategies.base import BaseStrategy
 
+
+@pytest.fixture(autouse=True)
+def _yahoo_primary_off() -> Generator[None]:
+    """Neutralize the Yahoo-PRIMARY layer for the EXCHANGE-routing tests here.
+
+    Yahoo Finance is now the primary bar-history source (Alpaca 429 root fix);
+    the exchange path is a fallback. These tests verify the exchange routing, so
+    we stub ``fetch_yahoo_bars`` → [] (Yahoo has no bars) and clear the fallback
+    cooldown so the exchange branch is always reached — the exact behaviour these
+    tests were written against. flow_not_block unchanged.
+    """
+    import polaris.scripts._production_bars as pbars
+    import polaris.scripts._yahoo_bars as ybars
+
+    async def _no_yahoo(*args: Any, **kwargs: Any) -> list[Bar]:
+        return []
+
+    ybars._FALLBACK_LAST_MONO.clear()
+    with patch.object(pbars, "fetch_yahoo_bars", new=_no_yahoo):
+        yield
+    ybars._FALLBACK_LAST_MONO.clear()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

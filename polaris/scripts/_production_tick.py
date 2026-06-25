@@ -39,6 +39,7 @@ from polaris.core.live_recalc.strategy_swap import (
     SwapCandidate,
     evaluate_strategy_swap,
 )
+from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
@@ -427,6 +428,7 @@ async def _run_tick(
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
         limit=240, now_mono=now_mono,
         skip_if_current=skip_if_current,
+        gpt_client_factory=default_gpt_factory,
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]

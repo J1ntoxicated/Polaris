@@ -88,9 +88,13 @@ async def test_ignite_paper_persists_to_caller_db_path(tmp_path: Path) -> None:
     original_okx_inst = prod_layers.fetch_okx_instruments
     original_cap_inst = prod_layers.fetch_capital_instruments
     original_okx_bars = prod_bars.fetch_okx_bars
+    # Yahoo is now the PRIMARY bar-history source; stub it empty so this test's
+    # injected OKX exchange bars are reached (the exchange path is the fallback).
+    original_yahoo_bars = prod_bars.fetch_yahoo_bars
     prod_layers.fetch_okx_instruments = AsyncMock(return_value=sample_universe)
     prod_layers.fetch_capital_instruments = AsyncMock(return_value=[])
     prod_bars.fetch_okx_bars = AsyncMock(return_value=list(reversed(fake_bars)))
+    prod_bars.fetch_yahoo_bars = AsyncMock(return_value=[])
     try:
         await ignite(
             duration_sec=0.5,
@@ -105,6 +109,7 @@ async def test_ignite_paper_persists_to_caller_db_path(tmp_path: Path) -> None:
         prod_layers.fetch_okx_instruments = original_okx_inst
         prod_layers.fetch_capital_instruments = original_cap_inst
         prod_bars.fetch_okx_bars = original_okx_bars
+        prod_bars.fetch_yahoo_bars = original_yahoo_bars
     # The custom DB should have at least one fills row (full pipeline path).
     conn = sqlite3.connect(f"file:{custom_db}?mode=ro", uri=True)
     try:

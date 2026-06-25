@@ -22,6 +22,10 @@ from polaris.core.data.ingest import ingest_bars_async, persist_bars
 from polaris.core.data.schema import BAR_INTERVALS, Bar
 from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_asset_class import resolve_bar_asset_class
+from polaris.scripts._yahoo_bars import (
+    fetch_yahoo_bars,
+    should_fetch_exchange_fallback,
+)
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx.adapter import fetch_okx_bars
@@ -373,8 +377,18 @@ async def fetch_bars_one(
     limit: int = 240,
     bar_interval: str = "1m",
     since_ts: int | None = None,
+    gpt_client_factory: Any = None,
 ) -> list[Bar]:
     """Single-instrument bar fetch. Returns canonical Bar list (newest last).
+
+    Yahoo PRIMARY (2026-06-24): bar HISTORY is fetched from Yahoo Finance first
+    (free/unlimited-grade) so the exchange REST bar endpoints stop getting
+    hammered (the Alpaca free-tier 429 storm). The exchange path is a throttled
+    FALLBACK only — reached when Yahoo returns no bars (unmapped symbol / error /
+    empty frame), and then gated by ``should_fetch_exchange_fallback`` so an
+    unmapped symbol cannot REST-storm every cadence tick. The live entry/exit
+    price still flows via the exchange WS quote path — UNTOUCHED; only the
+    bar-HISTORY source changes here. flow_not_block: no entry/size/exit is gated.
 
     F10 — Day 9: ``bar_interval`` defaults to ``1m`` for back-compat but the
     production loop now passes the per-strategy ``metadata.timeframe`` so
@@ -388,7 +402,24 @@ async def fetch_bars_one(
     instrument/interval) is forwarded to the Alpaca branch to tighten the fetch
     window. OKX/Capital ignore it (their windows are already small + healthy) —
     behaviour for those venues is byte-identical.
+
+    ``gpt_client_factory``: forwarded to the Yahoo resolver so a deterministically
+    unmapped symbol can be resolved to its Yahoo ticker via ONE gpt-5-mini lookup
+    (keyless-safe — a missing key just disables the GPT branch, exchange fallback
+    still covers it).
     """
+    # Yahoo PRIMARY — bar HISTORY only (live price WS path untouched).
+    yahoo_bars = await fetch_yahoo_bars(
+        venue, symbol, asset_class,
+        bar_interval=bar_interval, limit=limit,
+        gpt_client_factory=gpt_client_factory,
+    )
+    if yahoo_bars:
+        return yahoo_bars  # already newest-last; no reversal needed.
+    # Yahoo had nothing → exchange FALLBACK, throttled per (venue, symbol) so the
+    # unmapped tail cannot recreate a REST storm (fetch-efficiency, not a block).
+    if not should_fetch_exchange_fallback(venue, symbol, time.monotonic()):
+        return []
     if venue == "okx":
         try:
             bars = await fetch_okx_bars(
@@ -455,6 +486,7 @@ async def ingest_bars_per_timeframe(
     limit: int = 240,
     now_mono: float | None = None,
     skip_if_current: set[tuple[str, str]] | None = None,
+    gpt_client_factory: Any = None,
 ) -> dict[str, int]:
     """F10 — Day 9: drive the per-timeframe ingest fan-out for one tick.
 
@@ -501,6 +533,7 @@ async def ingest_bars_per_timeframe(
                 alpaca_adapter=alpaca_adapter,
                 limit=limit, bar_interval=timeframe,
                 skip_if_current=skip_if_current,
+                gpt_client_factory=gpt_client_factory,
             )
             total_bars += result["bars"]
             total_baseline += result["baseline_samples"]
@@ -542,6 +575,7 @@ async def ingest_bars_for_focus(
     parallel: int = 8,
     bar_interval: str = "1m",
     skip_if_current: set[tuple[str, str]] | None = None,
+    gpt_client_factory: Any = None,
 ) -> dict[str, int]:
     """Fetch + persist + baseline-update bars for every focus entry.
 
@@ -599,6 +633,7 @@ async def ingest_bars_for_focus(
                 alpaca_adapter=alpaca_adapter, limit=limit,
                 bar_interval=bar_interval,
                 since_ts=last_ts,
+                gpt_client_factory=gpt_client_factory,
             )
         if bars:
             out_bars.extend(bars)

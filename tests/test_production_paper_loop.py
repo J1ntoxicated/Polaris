@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -46,6 +47,28 @@ from polaris.scripts.production_paper_loop import (
     _is_finite_signal,
 )
 from polaris.strategies.base import RawSignal
+
+
+@pytest.fixture(autouse=True)
+def _yahoo_primary_off() -> Iterator[None]:
+    """Neutralize the Yahoo-PRIMARY layer for the EXCHANGE-routing tests here.
+
+    Yahoo Finance is now the primary bar-history source (Alpaca 429 root fix);
+    these tests verify the exchange ingest path, so we stub ``fetch_yahoo_bars``
+    → [] (Yahoo has no bars) and clear the fallback cooldown so the exchange
+    branch is always reached. flow_not_block unchanged.
+    """
+    import polaris.scripts._production_bars as pbars
+    import polaris.scripts._yahoo_bars as ybars
+
+    async def _no_yahoo(*args: Any, **kwargs: Any) -> list[Bar]:
+        return []
+
+    ybars._FALLBACK_LAST_MONO.clear()
+    with patch.object(pbars, "fetch_yahoo_bars", new=_no_yahoo):
+        yield
+    ybars._FALLBACK_LAST_MONO.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

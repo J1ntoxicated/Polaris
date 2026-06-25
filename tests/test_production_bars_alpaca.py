@@ -40,6 +40,27 @@ from polaris.scripts._production_bars import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _yahoo_primary_off() -> Generator[None]:
+    """Neutralize the Yahoo-PRIMARY layer for the EXCHANGE-routing tests here.
+
+    Yahoo Finance is now the primary bar-history source (Alpaca 429 root fix);
+    these tests verify the Alpaca/OKX exchange routing, so we stub
+    ``fetch_yahoo_bars`` → [] (Yahoo has no bars) and clear the fallback cooldown
+    so the exchange branch is always reached. flow_not_block unchanged.
+    """
+    import polaris.scripts._production_bars as pbars
+    import polaris.scripts._yahoo_bars as ybars
+
+    async def _no_yahoo(*args: Any, **kwargs: Any) -> list[Bar]:
+        return []
+
+    ybars._FALLBACK_LAST_MONO.clear()
+    with patch.object(pbars, "fetch_yahoo_bars", new=_no_yahoo):
+        yield
+    ybars._FALLBACK_LAST_MONO.clear()
+
+
 def _raw_alpaca_bars(n: int = 3) -> list[dict[str, Any]]:
     """Raw Alpaca ``/v2/stocks/{symbol}/bars`` rows (newest LAST, as the API
     returns chronological ascending). Keys: t/o/h/l/c/v/n/vw."""

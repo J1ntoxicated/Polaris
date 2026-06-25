@@ -680,9 +680,13 @@ async def test_24h_readiness_composite_exercises_all_layers(
     original_okx_fetch = prod_layers.fetch_okx_instruments
     original_cap_fetch = prod_layers.fetch_capital_instruments
     original_okx_bars = prod_bars.fetch_okx_bars
+    # Yahoo is now the PRIMARY bar-history source; stub it empty so this test's
+    # injected OKX exchange bars are reached (the exchange path is the fallback).
+    original_yahoo_bars = prod_bars.fetch_yahoo_bars
     prod_layers.fetch_okx_instruments = AsyncMock(return_value=sample_universe)
     prod_layers.fetch_capital_instruments = AsyncMock(return_value=[])
     prod_bars.fetch_okx_bars = AsyncMock(return_value=list(reversed(_fake_bars())))
+    prod_bars.fetch_yahoo_bars = AsyncMock(return_value=[])
 
     # Spy on run_forever so we can prove it started + counted at least one
     # tune cycle within the test window. ``run_forever`` now drives the
@@ -722,6 +726,7 @@ async def test_24h_readiness_composite_exercises_all_layers(
         prod_layers.fetch_okx_instruments = original_okx_fetch
         prod_layers.fetch_capital_instruments = original_cap_fetch
         prod_bars.fetch_okx_bars = original_okx_bars
+        prod_bars.fetch_yahoo_bars = original_yahoo_bars
         LearnerScheduler.run_forever = real_run_forever  # type: ignore[method-assign]
         LearnerScheduler.run_once_async = real_run_once_async  # type: ignore[method-assign]
 

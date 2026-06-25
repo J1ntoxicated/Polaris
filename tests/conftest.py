@@ -50,10 +50,17 @@ def _reset_log_dedup_caches() -> Iterator[None]:
     per-test keeps the dedup behaviour deterministic without affecting any
     decision path (these sets gate log emission only).
     """
-    from polaris.scripts import _production_asset_class, _production_bars
+    from polaris.scripts import _production_asset_class, _production_bars, _yahoo_bars
 
     _production_bars._RECENCY_STALE_FLAGGED.clear()
     _production_asset_class._FALLBACK_WARNED.clear()
+    # Yahoo-PRIMARY module state (resolution cache + exchange-fallback cooldown)
+    # is process-global; a stale entry from one test would otherwise leak into a
+    # later integration test (e.g. a recorded fallback cooldown could suppress the
+    # exchange bar fetch a downstream test injects). Reset per-test.
+    _yahoo_bars._YAHOO_TICKER_CACHE.clear()
+    _yahoo_bars._FALLBACK_LAST_MONO.clear()
+    _yahoo_bars._YF_FRAME_CACHE.clear()
     yield
 
 

@@ -370,11 +370,27 @@ _INTERVAL_TO_RESOLUTION = {v: k for k, v in _RESOLUTION_TO_INTERVAL.items()}
 _RESOLUTION_ORDER = list(_RESOLUTION_TO_INTERVAL.keys())
 
 
+def _universe_names(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(venue, symbol) → universe.name (human-readable). Read-only, graceful.
+
+    Empty dict when the column/table is absent (legacy DB) — the selector then
+    just shows the bare symbol. Display-only; never feeds gating/sizing/exit.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT venue, symbol, name FROM universe WHERE name != ''"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {(str(r[0]), str(r[1])): str(r[2]) for r in rows}
+
+
 def list_chart_symbols(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Distinct (venue, symbol) with the resolutions each actually has stored.
 
     Drives the Chart-tab selector: venue-grouped symbols, each tagged with the
-    resolution tokens (``1m``/``5m``/…) for which bars exist. Read-only.
+    resolution tokens (``1m``/``5m``/…) for which bars exist + the human-readable
+    ``name`` from ``universe`` (when known; '' otherwise). Read-only.
     """
     try:
         rows = conn.execute(
@@ -382,6 +398,7 @@ def list_chart_symbols(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         ).fetchall()
     except sqlite3.Error:
         return []
+    names = _universe_names(conn)
     by_venue: dict[str, dict[str, set[str]]] = {}
     for venue, symbol, interval in rows:
         token = _INTERVAL_TO_RESOLUTION.get(str(interval))
@@ -393,6 +410,7 @@ def list_chart_symbols(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         symbols = [
             {
                 "symbol": sym,
+                "name": names.get((venue, sym), ""),
                 "resolutions": [r for r in _RESOLUTION_ORDER if r in res],
             }
             for sym, res in sorted(by_venue[venue].items())

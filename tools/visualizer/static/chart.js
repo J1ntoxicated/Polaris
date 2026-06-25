@@ -25,6 +25,9 @@
       <div class="p-head">
         <span>Ticker Chart</span>
         <span class="chart-controls">
+          <select id="chart-venue" class="chart-sel" title="Exchange filter"></select>
+          <input id="chart-search" class="chart-search" type="text" autocomplete="off"
+                 spellcheck="false" placeholder="search symbol / name…" title="Filter symbols by symbol or name">
           <select id="chart-symbol" class="chart-sel" title="Symbol"></select>
           <select id="chart-res" class="chart-sel" title="Resolution"></select>
           <span class="chart-status" id="chart-status"></span>
@@ -44,6 +47,10 @@
     #pane-chart .chart-controls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
     #pane-chart .chart-sel { background: #0e1014; color: #cfd3dc; border: 1px solid #2a2f3a;
       font: 11px ui-monospace, monospace; padding: 2px 4px; border-radius: 3px; }
+    #pane-chart .chart-search { background: #0e1014; color: #cfd3dc; border: 1px solid #2a2f3a;
+      font: 11px ui-monospace, monospace; padding: 2px 6px; border-radius: 3px; width: 150px; }
+    #pane-chart .chart-search::placeholder { color: #5a6068; }
+    #pane-chart .chart-search:focus { outline: none; border-color: #5a6373; }
     #pane-chart .chart-status { font: 10px ui-monospace, monospace; color: #6b7280; }
     #pane-chart .chart-body { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow: hidden; }
     #pane-chart .chart-price { flex: 3 1 0; min-height: 120px; }
@@ -205,6 +212,21 @@
   // ── selectors + fetch ─────────────────────────────────────────────────────
   const RES_LABEL = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '1d': '1d' };
   let _groups = [];
+  // Client-side selector filters (display-only — never touch the fetch path).
+  // _venueFilter: '' = all venues, else the venue name. _searchText: lowercased
+  // substring matched against symbol OR name. Both just hide <option>s.
+  let _venueFilter = '';
+  let _searchText = '';
+
+  // Per-symbol human name from the API list (universe.name), keyed venue␟symbol.
+  function symApiName(venue, symbol) {
+    for (const g of _groups) {
+      if (g.venue !== venue) continue;
+      const m = (g.symbols || []).find(s => s.symbol === symbol);
+      if (m && m.name) return m.name;
+    }
+    return '';
+  }
 
   function currentSymbolMeta() {
     const sel = document.getElementById('chart-symbol');
@@ -233,25 +255,61 @@
     if (res.includes(prev)) sel.value = prev;
   }
 
-  // Dropdown label = "{symbol} : {name}" when a human name is known (reuses the
-  // board's SYM_NAME map via PolarisBoardTabs.symName), else "{symbol}" alone
-  // (graceful — most tickers have no stored name). The <option> VALUE is left
-  // unchanged (venue␟symbol) so the fetch path is untouched (display-only).
-  function symLabel(symbol) {
-    const name = (T && T.symName) ? T.symName(symbol) : '';
+  // Dropdown label = "{symbol} : {name}" when a human name is known. Prefers the
+  // backend universe.name (covers the full Alpaca ~1600 stocks), falling back to
+  // the board's hardcoded SYM_NAME map (PolarisBoardTabs.symName), else the bare
+  // "{symbol}" (graceful). The <option> VALUE is left unchanged (venue␟symbol) so
+  // the fetch path is untouched (display-only).
+  function symNameFor(venue, symbol) {
+    return symApiName(venue, symbol) || ((T && T.symName) ? T.symName(symbol) : '');
+  }
+  function symLabel(venue, symbol) {
+    const name = symNameFor(venue, symbol);
     return name ? `${symbol} : ${name}` : symbol;
+  }
+
+  // True iff (symbol, name) matches the active search text (symbol OR name
+  // substring, case-insensitive). Empty search → everything matches.
+  function symMatches(venue, symbol) {
+    if (!_searchText) return true;
+    const name = symNameFor(venue, symbol).toLowerCase();
+    return symbol.toLowerCase().includes(_searchText) || name.includes(_searchText);
+  }
+
+  // Populate the EXCHANGE filter <select> once (All + each venue present).
+  function populateVenues() {
+    const sel = document.getElementById('chart-venue');
+    if (!sel) return;
+    const prev = sel.value;
+    const venues = _groups.map(g => g.venue);
+    const opts = ['<option value="">All venues</option>'].concat(
+      venues.map(v => `<option value="${esc(v)}">${esc(v)}</option>`));
+    sel.innerHTML = opts.join('');
+    if (venues.includes(prev)) sel.value = prev;
   }
 
   function populateSymbols() {
     const sel = document.getElementById('chart-symbol');
     if (!sel) return;
+    const prev = sel.value;   // preserve the current selection when still visible
     const opts = [];
+    let anyVisible = false;
     _groups.forEach(g => {
-      const inner = (g.symbols || []).map(s =>
-        `<option value="${esc(g.venue)}␟${esc(s.symbol)}">${esc(symLabel(s.symbol))}</option>`).join('');
-      opts.push(`<optgroup label="${esc(g.venue)}">${inner}</optgroup>`);
+      if (_venueFilter && g.venue !== _venueFilter) return;   // ② venue filter
+      const inner = (g.symbols || [])
+        .filter(s => symMatches(g.venue, s.symbol))           // ① search filter
+        .map(s => {
+          anyVisible = true;
+          return `<option value="${esc(g.venue)}␟${esc(s.symbol)}">${esc(symLabel(g.venue, s.symbol))}</option>`;
+        }).join('');
+      if (inner) opts.push(`<optgroup label="${esc(g.venue)}">${inner}</optgroup>`);
     });
     sel.innerHTML = opts.join('');
+    if (!anyVisible) return;   // nothing matches → empty select, leave res as-is
+    // Keep the prior symbol selected if it survived the filter; else fall to the
+    // first visible option (so the chart always shows something coherent).
+    const stillThere = Array.prototype.some.call(sel.options, o => o.value === prev);
+    if (stillThere) sel.value = prev;
   }
 
   function load() {
@@ -269,11 +327,31 @@
       .catch(() => setStatus('fetch error'));
   }
 
+  // Re-filter the symbol list, then reload the chart only if the active symbol
+  // changed because the previous one was filtered out (avoids a redundant fetch
+  // on every keystroke when the selection survives).
+  function applyFilters() {
+    const sel = document.getElementById('chart-symbol');
+    const prev = sel ? sel.value : '';
+    populateSymbols();
+    if (sel && sel.value !== prev) { populateResolutions(); load(); }
+  }
+
   function wireControls() {
     const sym = document.getElementById('chart-symbol');
     const res = document.getElementById('chart-res');
+    const search = document.getElementById('chart-search');
+    const venue = document.getElementById('chart-venue');
     if (sym) sym.addEventListener('change', () => { populateResolutions(); load(); });
     if (res) res.addEventListener('change', load);
+    if (search) search.addEventListener('input', () => {
+      _searchText = search.value.trim().toLowerCase();
+      applyFilters();
+    });
+    if (venue) venue.addEventListener('change', () => {
+      _venueFilter = venue.value;
+      applyFilters();
+    });
   }
 
   let _listLoaded = false;
@@ -284,6 +362,7 @@
       .then(r => r.ok ? r.json() : Promise.reject(new Error('http ' + r.status)))
       .then(d => {
         _groups = (d && d.groups) || [];
+        populateVenues();
         populateSymbols();
         populateResolutions();
         load();

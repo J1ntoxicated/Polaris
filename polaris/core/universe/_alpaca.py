@@ -288,6 +288,9 @@ def _alpaca_asset_row_to_instrument(
     exchange = str(row.get("exchange", "")).strip().upper()
     if exchange not in _GRADABLE_EXCHANGES:
         return None
+    # Human-readable name (display only): Alpaca /v2/assets carries ``name``
+    # ("Apple Inc. Common Stock"). "" when absent → UI falls back to the symbol.
+    name = str(row.get("name", "")).strip()
 
     return UniverseInstrument(
         venue="alpaca",
@@ -305,6 +308,7 @@ def _alpaca_asset_row_to_instrument(
         listing_ts=None,
         last_seen_ts=now_ts,
         primary_exchange=exchange,
+        name=name,
     )
 
 

@@ -892,6 +892,39 @@
       </div>`).join('');
   }
 
+  // ── NEW · Per-Venue breakdown (Performance, Jin 2026-06-26) — the equity-curve
+  // story split per stream lane (OKX / Capital / Alpaca). Pure read off the
+  // already-present d.streams (StreamSummary) rollup — no new endpoint, no sizing
+  // touch. Columns: VEN | NET$ | TRD | OPEN | EXPOSED | uPnL$. Always renders all
+  // three lanes (StreamSummary emits a row per lane even at zero activity).
+  function renderVenueBreakdown(d) {
+    const body = $('venue-body'); if (!body) return;
+    const rows = d.streams || [];
+    setCnt('venue-body-cnt', rows.length || '');
+    if (!rows.length) { body.innerHTML = '<div class="empty">no stream summary</div>'; return; }
+    const trs = rows.map(s => {
+      const lc = venueStream(s.venue).toLowerCase();
+      const net = s.net_pnl_usd || 0;
+      const up = s.upnl_usd || 0;
+      return `<tr class="row-${lc}" title="${esc(s.label || s.venue)} · net ${fmtUsd(net, 2)} · ${s.daily_trades || 0} trades · ${s.open_positions_n || 0} open · exposed ${fmtUsd(s.exposed_usd, 0)} · uPnL ${fmtUsd(up, 2)}">
+          <td class="l ex">${esc(s.label || s.venue)}</td>
+          <td class="num ${pn(net)}">${fmtUsd(net, 2)}</td>
+          <td class="num b-flat">${s.daily_trades || 0}</td>
+          <td class="num b-flat">${s.open_positions_n || 0}</td>
+          <td class="num b-flat">${fmtUsd(s.exposed_usd, 0)}</td>
+          <td class="num ${pn(up)}">${fmtUsd(up, 2)}</td>
+        </tr>`;
+    }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:26%"><col style="width:18%"><col style="width:11%"><col style="width:12%">
+        <col style="width:17%"><col style="width:16%">
+       </colgroup><thead><tr>
+        <th class="l">VEN</th><th title="session realised, net of fees">NET$</th><th title="closed trades">TRD</th>
+        <th title="open positions">OPEN</th><th title="deployed notional">EXPOSED</th><th title="unrealised PnL">uPnL$</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
+  }
+
   // ── NEW · costs & hidden losses (Performance) — moved from the old KPI HIDDEN
   // block. Plain English: slippage, net after costs, drift losses from un-exited
   // positions, forced exits. No "BLEED / orphan-drift / net-after-cost" jargon.
@@ -1008,6 +1041,7 @@
   });
   T.register('performance', (d) => {
     renderDualEquity(d); renderConfidence(d); renderBenchmark(d);
+    renderVenueBreakdown(d);
     R.strategy(d);
     renderTickerStats(d);
     renderEdge(d);

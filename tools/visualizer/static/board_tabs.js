@@ -150,6 +150,18 @@
   #board .gate-quad > .panel { min-width: 0; }
   #board .p-body.gq-state { max-height: 172px; }
   #board .p-body.gq-stream { max-height: 150px; }
+  /* Gates tab TOP/BOTTOM split (Jin 2026-06-26): two stacked labeled sections,
+     each a 2-up row (state | stream). The pane scrolls if both sections overflow. */
+  #board .gate-split { display: grid; grid-auto-rows: min-content; gap: 12px; min-height: 0; overflow: auto; align-content: start; }
+  #board .gate-split::-webkit-scrollbar { width: 5px; }
+  #board .gate-split::-webkit-scrollbar-thumb { background: var(--ghost); }
+  #board .gate-section { display: grid; grid-auto-rows: min-content; gap: 6px; min-width: 0; }
+  #board .gate-section-head {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--polaris-blue); border-left: 3px solid var(--polaris-blue);
+    padding: 2px 8px; background: rgba(15,19,26,0.55);
+  }
+  #board .gate-quad-2up { grid-template-columns: 1fr 1fr; }
   /* Open Positions (always expanded) + Recent Trades (collapsible) share the
      two minmax(0,1fr) tracks. A collapsed Recent Trades (body display:none)
      would keep its full free-space share, so drop its track to header height. */
@@ -260,6 +272,11 @@
   #board .perf-scroll::-webkit-scrollbar { width: 5px; }
   #board .perf-scroll::-webkit-scrollbar-thumb { background: var(--ghost); }
   #board .perf-scroll .tab-grid-3, #board .perf-scroll .tab-grid-2 { min-height: 130px; }
+  /* Performance "Breakdowns" outer fold (Jin 2026-06-26): the wrap body holds the
+     nested analytics grids; let them size to content + scroll inside the body. */
+  #board .perf-analytics-panel { flex: 0 0 auto; }
+  #board .p-body.perf-analytics-body { display: grid; grid-auto-rows: min-content; gap: 8px; padding: 8px; flex: 0 0 auto; }
+  #board .perf-analytics-body .tab-grid-3 { min-height: 130px; }
   /* shared inline label token (eq-head money labels, etc.). */
   #board .kk { color: var(--p-dim); letter-spacing: 0.06em; text-transform: uppercase; }
   `;
@@ -300,6 +317,21 @@
       + `<span class="ttl">${esc(title)}</span>`
       + `<span class="cnt" id="${bodyId}-cnt"></span></div>`
       + `<div class="p-body ${bodyCls || ''}" id="${bodyId}"></div></div>`;
+  }
+
+  // Collapsible WRAP: same chevron/persist mechanics as collapsiblePanel, but the
+  // body holds caller-supplied HTML (nested panels/grids) instead of an empty id
+  // target. Used for the Performance "Breakdowns" outer fold (Jin 2026-06-26).
+  // Default COLLAPSED (space-first) so the equity curve owns the pane until opened.
+  function collapsibleWrap(title, key, innerHtml) {
+    const k = 'pb.collapse.' + key;
+    let collapsed = true;   // space-first default
+    try { const v = localStorage.getItem(k); if (v !== null) collapsed = v === '1'; } catch (e) { /* private mode */ }
+    return `<div class="panel collapsible perf-analytics-panel${collapsed ? ' collapsed' : ''}" data-collapse-key="${esc(k)}">`
+      + `<div class="p-head p-head-toggle" role="button" tabindex="0" aria-expanded="${collapsed ? 'false' : 'true'}">`
+      + `<span class="chev" aria-hidden="true"></span>`
+      + `<span class="ttl">${esc(title)}</span></div>`
+      + `<div class="p-body perf-analytics-body">${innerHtml}</div></div>`;
   }
 
   // Delegated toggle: one listener on #board handles every collapsible panel.
@@ -347,15 +379,26 @@
       </div>
     </div>
 
-    <!-- TAB · Gates — 4-section gate/probe quad (moved out of Activity).
-         Row1 decision/state: Gate Decisions | Probe List. Row2 live streams:
-         Live Gate Activity | Probe Activity. All real aligned tables. -->
+    <!-- TAB · Gates — TOP/BOTTOM split (Jin 2026-06-26). TOP = the gate PIPELINE
+         FLOW (G1→G8 deterministic decisions + live gate stream). BOTTOM = the
+         PROBE / AI ESCALATION lane (EXIT-only G6 observe-only readings). Each
+         section is a 2-up row of the same real aligned tables as the old quad. -->
     <div class="tab-pane" id="pane-gates">
-      <div class="gate-quad">
-        ${collapsiblePanel('Gate Decisions · G1→G8 what each gate decided (1h)', 'gate-funnel', 'gq-state')}
-        ${collapsiblePanel('Probe List · EXIT-ONLY (G6) · positions under probe · lean / conf', 'probe-list', 'gq-state')}
-        ${collapsiblePanel('Live Gate Activity · newest first', 'gate-feed', 'gq-stream')}
-        ${collapsiblePanel('Probe Activity · EXIT-ONLY (G6) observe-only · per-probe readings · newest first', 'probe-activity', 'gq-stream')}
+      <div class="gate-split">
+        <div class="gate-section">
+          <div class="gate-section-head">Gate Pipeline · G1 → G8 deterministic flow</div>
+          <div class="gate-quad gate-quad-2up">
+            ${collapsiblePanel('Gate Decisions · G1→G8 what each gate decided (1h)', 'gate-funnel', 'gq-state')}
+            ${collapsiblePanel('Live Gate Activity · newest first', 'gate-feed', 'gq-stream')}
+          </div>
+        </div>
+        <div class="gate-section">
+          <div class="gate-section-head">Probe / AI Escalation · EXIT-only (G6) observe-only</div>
+          <div class="gate-quad gate-quad-2up">
+            ${collapsiblePanel('Probe List · positions under probe · lean / conf', 'probe-list', 'gq-state')}
+            ${collapsiblePanel('Probe Activity · per-probe readings · newest first', 'probe-activity', 'gq-stream')}
+          </div>
+        </div>
       </div>
     </div>
 
@@ -376,16 +419,22 @@
             <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars."></div>
           </div>
         </div>
+        <!-- Jin 2026-06-26: the whole analytics block below the equity curve folds
+             into ONE outer collapsible panel (reuses wireCollapsibles) so the curve
+             gets the full pane when collapsed. Default collapsed (space-first); the
+             inner panels stay individually foldable when expanded. -->
         <div class="perf-scroll">
-          <div class="tab-grid-3">
-            ${collapsiblePanel('Per-Strategy · win rate / net R / per-regime cell value', 'strat-body', 'mini')}
-            ${collapsiblePanel('Per-Ticker · cumulative R by symbol', 'ticker-body', 'mini')}
-            ${collapsiblePanel('Edge Validation · per strategy × ticker × regime', 'edge-body', 'mini')}
-          </div>
-          <div class="tab-grid-2">
-            ${collapsiblePanel('Worst strategies · biggest money losers', 'worst-body', 'mini')}
-            ${collapsiblePanel('Costs & hidden losses', 'costs-body', 'mini')}
-          </div>
+          ${collapsibleWrap('Breakdowns · per-venue · per-strategy · per-ticker · edge · worst · costs', 'perf-analytics', `
+            <div class="tab-grid-3">
+              ${collapsiblePanel('Per-Venue · net$ · trades · open · exposed · uPnL', 'venue-body', 'mini')}
+              ${collapsiblePanel('Per-Strategy · win rate / net R / per-regime cell value', 'strat-body', 'mini')}
+              ${collapsiblePanel('Per-Ticker · cumulative R by symbol', 'ticker-body', 'mini')}
+            </div>
+            <div class="tab-grid-3">
+              ${collapsiblePanel('Edge Validation · per strategy × ticker × regime', 'edge-body', 'mini')}
+              ${collapsiblePanel('Worst strategies · biggest money losers', 'worst-body', 'mini')}
+              ${collapsiblePanel('Costs & hidden losses', 'costs-body', 'mini')}
+            </div>`)}
         </div>
       </div>
     </div>
@@ -502,9 +551,12 @@
     COPPER:'Copper', SOXL:'Semis Bull 3x', TQQQ:'Nasdaq Bull 3x', SPXL:'S&P Bull 3x', INTC:'Intel',
     ADBE:'Adobe', AAPL:'Apple', NVDA:'Nvidia', TSLA:'Tesla', AMD:'AMD', VERU:'Veru Inc',
   };
-  // Accepts a position-like {symbol} OR a raw symbol string (chart.js reuses
-  // this same map for its dropdown labels). Returns '' when unknown (graceful).
+  // Accepts a position/trade-like {symbol, name?} OR a raw symbol string (chart.js
+  // reuses this same map for its dropdown labels). Prefers the backend-captured
+  // name (universe.name on the row, covers the full Alpaca ~1600 stocks), then the
+  // hardcoded SYM_NAME map. Returns '' when unknown (graceful — UI shows symbol).
   function symName(p){
+    if (p && typeof p === 'object' && p.name) return String(p.name);
     const raw = (p && typeof p === 'object') ? p.symbol : p;
     const s=String(raw||'').toUpperCase();
     const base=s.split(':').pop().split('-')[0].split('/')[0];
@@ -627,10 +679,12 @@
       // once the fee bites reads honestly.
       const net = (t.net_usd != null) ? t.net_usd : (t.pnl_usd - (t.real_fee_usd || 0));
       const fee = t.pnl_usd - net;
+      const nm = symName(t);   // backend universe.name → hardcoded map → '' (graceful)
+      const nmHtml = nm ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(nm)}</span>` : '';
       return `<tr class="row-${lc}">
           <td class="l b-flat">${hhmmss(t.ts_close)}</td>
           <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
-          <td class="l tk" title="${esc(t.symbol)}">${esc(t.symbol)}${sparkline(t.spark)}</td>
+          <td class="l tk" title="${esc(t.symbol)}${nm ? ' — ' + esc(nm) : ''}">${esc(t.symbol)}${nmHtml}${sparkline(t.spark)}</td>
           <td class="dir ${esc(dir)}" title="position ${esc(dir || '—')} · close fill ${esc(t.side_close)}">${esc(dir || '—')}</td>
           <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
           <td class="l b-flat" title="entry regime ${esc(reg || '—')}">${esc(reg || '—')}</td>

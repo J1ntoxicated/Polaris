@@ -298,6 +298,9 @@ def _capital_market_row_to_instrument(
     asset_class = type_class if type_class is not None else _classify_capital_node(asset_class_hint)
     market_status = str(row.get("marketStatus", "TRADEABLE")).upper()
     state = "live" if market_status == "TRADEABLE" else market_status.lower()
+    # Human-readable name (display only): Capital market rows carry
+    # ``instrumentName`` ("Gold", "EUR/USD"). "" when absent → UI falls back to epic.
+    name = str(row.get("instrumentName", "")).strip()
 
     return UniverseInstrument(
         venue="capital",
@@ -314,6 +317,7 @@ def _capital_market_row_to_instrument(
         signal_density_7d=0.0,
         listing_ts=None,
         last_seen_ts=now_ts,
+        name=name,
     )
 
 

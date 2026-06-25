@@ -398,6 +398,7 @@ def persist_universe(
                 ins.depth_10bps_usd,
                 ins.signal_density_7d,
                 ins.last_price,
+                ins.name,
                 ins.listing_ts,
                 ins.last_seen_ts,
                 1 if is_active else 0,
@@ -410,9 +411,9 @@ def persist_universe(
             venue, symbol, instrument_id, underlying_group_id,
             asset_class, quote_ccy, state,
             vol_24h_usd, spread_bps, atr_24h_pct, depth_10bps_usd,
-            signal_density_7d, last_price, listing_ts, last_seen_ts,
+            signal_density_7d, last_price, name, listing_ts, last_seen_ts,
             is_active, active_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(venue, symbol) DO UPDATE SET
             instrument_id=excluded.instrument_id,
             underlying_group_id=excluded.underlying_group_id,
@@ -425,6 +426,7 @@ def persist_universe(
             depth_10bps_usd=excluded.depth_10bps_usd,
             signal_density_7d=excluded.signal_density_7d,
             last_price=excluded.last_price,
+            name=COALESCE(NULLIF(excluded.name, ''), universe.name),
             listing_ts=COALESCE(universe.listing_ts, excluded.listing_ts),
             last_seen_ts=excluded.last_seen_ts,
             is_active=excluded.is_active,

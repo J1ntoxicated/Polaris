@@ -523,6 +523,11 @@ class UniverseInstrument:
     # universe (listed venues only). "" = unknown (non-equity venues) → no
     # restriction (flow_not_block). Keyword-default keeps all constructors valid.
     primary_exchange: str = ""
+    # Human-readable instrument name (display only, never gates anything). Sourced
+    # from the venue discovery meta when present: Alpaca ``/v2/assets`` ``name``
+    # ("Apple Inc. Common Stock"), Capital market ``instrumentName`` ("Gold"). OKX
+    # tickers carry none → "". Keyword-default keeps all constructors valid.
+    name: str = ""
 
 
 def passes_liquidity_floor(ins: UniverseInstrument) -> bool:

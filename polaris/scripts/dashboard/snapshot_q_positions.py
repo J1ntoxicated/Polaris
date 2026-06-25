@@ -26,6 +26,15 @@ def _universe_quote_ccy(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
     rows = _safe_query(conn, "SELECT venue, symbol, quote_ccy FROM universe")
     return {(str(r[0]), str(r[1])): str(r[2] or "USD") for r in rows}
 
+
+def _universe_names(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(venue, symbol) → universe.name (human-readable, display-only).
+
+    Empty for legacy DBs without the column (``_safe_query`` swallows the error)
+    → the board falls back to the bare symbol. Never feeds sizing/gating/exit."""
+    rows = _safe_query(conn, "SELECT venue, symbol, name FROM universe WHERE name != ''")
+    return {(str(r[0]), str(r[1])): str(r[2]) for r in rows}
+
 # P4 #1 — dashboard current-price freshness window (wall-clock seconds against
 # quote_ticks.ts). WS ticks stamp ``int(time.time())`` (seconds, like bars.ts).
 # Generous (60s) because the dashboard is display-only: a recent WS mid is always
@@ -185,6 +194,7 @@ def _read_positions(
            ORDER BY MIN(opened_ts) DESC""",
     )
     quote_by_sym = _universe_quote_ccy(conn)
+    name_by_sym = _universe_names(conn)
     out: list[PositionRow] = []
     for r in rows:
         venue = str(r[0])
@@ -242,6 +252,7 @@ def _read_positions(
                 upnl_pct=upnl_pct,
                 entry_regime=entry_regime,
                 quote_ccy=quote_ccy,
+                name=name_by_sym.get((venue, symbol), ""),
             )
         )
     out.sort(key=lambda p: p.upnl_usd, reverse=True)

@@ -426,6 +426,15 @@ def _universe_quote_ccy_map(conn: sqlite3.Connection) -> dict[tuple[str, str], s
     return {(str(r[0]), str(r[1])): str(r[2] or "USD") for r in rows}
 
 
+def _universe_name_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(venue, symbol) → universe.name (human-readable, display-only).
+
+    Empty for legacy DBs without the column → the board falls back to the bare
+    symbol. Never feeds sizing/gating/exit."""
+    rows = _safe_query(conn, "SELECT venue, symbol, name FROM universe WHERE name != ''")
+    return {(str(r[0]), str(r[1])): str(r[2]) for r in rows}
+
+
 def _recent_closed_trades(
     conn: sqlite3.Connection,
     *,
@@ -468,6 +477,7 @@ def _recent_closed_trades(
     # on contribution_id == position_id. Issue 4: true price-quote currency.
     side_regime_by_id = _position_side_regime_by_id(conn)
     quote_by_sym = _universe_quote_ccy_map(conn)
+    name_by_sym = _universe_name_map(conn)
     # Index by exact contribution_id → first open fill (entry)
     open_by_contrib: dict[str, tuple[float, int]] = {}
     open_fifo: dict[tuple[str, str, str], list[tuple[float, int]]] = {}
@@ -582,6 +592,7 @@ def _recent_closed_trades(
                 position_side=pos_side,
                 entry_regime=entry_regime,
                 quote_ccy=quote_ccy,
+                name=name_by_sym.get((venue, symbol), ""),
             )
         )
     closed_trades.sort(key=lambda t: t.ts_close, reverse=True)

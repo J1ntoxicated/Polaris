@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS universe (
     asset_class TEXT NOT NULL,
     product_class TEXT NOT NULL DEFAULT '',
     stream_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
     quote_ccy TEXT NOT NULL,
     state TEXT NOT NULL,
     vol_24h_usd REAL NOT NULL DEFAULT 0.0,

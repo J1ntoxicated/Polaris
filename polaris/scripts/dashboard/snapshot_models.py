@@ -62,6 +62,9 @@ class PositionRow:
     # stay USD. Both NEVER feed sizing/gating — pure board columns.
     entry_regime: str = ""
     quote_ccy: str = "USD"
+    # Human-readable instrument name (universe.name, display-only): "Apple Inc."
+    # for AAPL. "" when unknown → UI falls back to the symbol. NEVER feeds anything.
+    name: str = ""
     # Symbol sparkline (Jin 2026-06-25) — the symbol's most-recent N closes
     # (oldest→newest) so the board draws a tiny inline trend graph next to the
     # symbol. Sourced from the read-only bars cache; empty when no bars. NEVER
@@ -196,6 +199,9 @@ class ClosedTrade:
     position_side: str = ""
     entry_regime: str = ""
     quote_ccy: str = "USD"
+    # Human-readable instrument name (universe.name, display-only): "Apple Inc."
+    # for AAPL. "" when unknown → UI falls back to the symbol. NEVER feeds anything.
+    name: str = ""
     # Symbol sparkline (Jin 2026-06-25) — recent closes (oldest→newest) for the
     # inline mini trend graph on the recent-trades row. Bars-cache sourced; empty
     # when no bars. Display-only; never feeds sizing/gating/exit.

@@ -366,6 +366,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE universe ADD COLUMN last_price REAL NOT NULL DEFAULT 0.0"
         )
+    # universe.name — human-readable instrument name for the dashboard (display
+    # only). Captured at discovery from the venue meta when present (Alpaca
+    # /v2/assets ``name``, Capital market ``instrumentName``; OKX has none → '').
+    # ADDITIVE only: backfilled to '' for legacy rows (graceful — UI falls back to
+    # the symbol). Never read by sizing/gating/exit. Pragma guard = idempotent.
+    if uni_cols and "name" not in uni_cols:
+        conn.execute(
+            "ALTER TABLE universe ADD COLUMN name TEXT NOT NULL DEFAULT ''"
+        )
     # watchlist_focus.opportunity_score / trade_eligible — Increment 1 EntranceJudge
     # persistence (entrance-judge build 2026-06-24). ADDITIVE only: the score is
     # nullable (legacy/un-judged rows = NULL) and ``trade_eligible`` DEFAULT 1 keeps

@@ -14,7 +14,7 @@
 
   const B = window.PolarisBoard;
   if (!B) { return; }   // board.js must load first
-  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, sparkline, pn,
+  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, sparkline, symCell, pn,
     esc, hms, hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
     getActiveExchange, venueFilter } = B;
 
@@ -100,6 +100,25 @@
      vertical-align middle so it sits on the text baseline; never wraps. */
   #board svg.spark { vertical-align: middle; margin-left: 6px; opacity: 0.85; flex: 0 0 auto; }
 
+  /* Symbol cell grid (Jin 2026-06-26) — SYMBOL │ NAME │ SPARK on a fixed grid so
+     they line up across rows: a fixed-width symbol block, a flex name that
+     truncates, and the spark flush-right at a constant x. The sym block is wide
+     enough for the longest tickers (USDCAD / OIL_CRUDE) so the spark column never
+     shifts. Display-only chrome. */
+  #board td.tk .symcell {
+    display: grid; grid-template-columns: 64px minmax(0, 1fr) 72px;
+    align-items: center; gap: 6px; width: 100%;
+  }
+  #board td.tk .symcell .sym { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #board td.tk .symcell .nm {
+    color: var(--p-dim); font-size: 9px; font-weight: 400;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  #board td.tk .symcell .spk { justify-self: end; display: inline-flex; align-items: center; min-width: 0; }
+  /* Inside the grid the spark already sits in its own column — drop the inline
+     left-margin so it aligns to the column edge, not text. */
+  #board td.tk .symcell .spk svg.spark { margin-left: 0; }
+
   /* Per-cell value-change flash (Bloomberg per-cell diff) — only a cell whose
      live value CHANGED this poll flashes; unchanged cells keep their DOM. ~400ms
      green-up / red-down fade. Used by syncTable() for Open Positions + streams. */
@@ -107,6 +126,12 @@
   #board td.px-flash-down { animation: pxdn 0.42s ease-out; }
   @keyframes pxup { 0% { background: rgba(135,215,135,0.45); } 100% { background: transparent; } }
   @keyframes pxdn { 0% { background: rgba(215,135,135,0.45); } 100% { background: transparent; } }
+
+  /* New-row ease-in (Jin 2026-06-26) — a genuinely-new diffed row (fresh
+     position / trade) fades + slides in individually instead of the whole table
+     repainting as a batch. Applied once by syncTable() AFTER first paint. */
+  #board tbody tr.row-in { animation: rowIn 0.45s ease-out; }
+  @keyframes rowIn { 0% { opacity: 0; transform: translateY(-4px); } 100% { opacity: 1; transform: translateY(0); } }
 
   /* Per-row lane heads + lane left-borders (grouped POSITIONS / TRADES tables). */
   #board td.lane-head {
@@ -619,7 +644,9 @@
       // the per-stream ledger R (AVG-R below). Fall back to the legacy keys for a
       // stale cached snapshot during rollover.
       const mfeMae = `${fmtR(p.mfe_atr_r ?? p.mfe_r, 1)}/${fmtR(p.mae_atr_r ?? p.mae_r, 1)}`;
-      const symHtml = esc(p.symbol) + rc + (symName(p) ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(symName(p))}</span>` : '') + sparkline(p.spark);
+      // Grid-aligned SYMBOL │ NAME │ SPARK cell (symCell escapes sym/name; rc is
+      // the pre-built ×N stack badge HTML rendered inline after the symbol).
+      const symHtml = symCell(p.symbol, symName(p), sparkline(p.spark), rc);
       return {
         key: key,
         trCls: 'row-' + lc,
@@ -653,6 +680,21 @@
 
   // ── TAB 2 · TRADES (expanded, more rows) ──────────────────────────────────
   const TRD_COLS = 14;
+  // Trades table shell (built once by syncTable; the tbody is diffed per poll so
+  // only a genuinely-new closed trade inserts a row — which then eases in via the
+  // row-in animation — instead of the whole list repainting every second).
+  const TRD_SHELL =
+    `<table><colgroup>
+        <col style="width:7%"><col style="width:5%"><col style="width:11%"><col style="width:5%">
+        <col style="width:10%"><col style="width:8%"><col style="width:8%"><col style="width:8%">
+        <col style="width:7%"><col style="width:6%"><col style="width:7%"><col style="width:5%">
+        <col style="width:5%"><col style="width:6%">
+       </colgroup><thead><tr>
+        <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th title="position direction (long/short) — not the close fill side">SIDE</th>
+        <th class="l">STRAT</th><th class="l" title="regime at entry">REGIME</th><th>ENTRY</th><th>EXIT</th>
+        <th title="gross PnL before fees">GROSS$</th><th title="real venue fee">FEE$</th><th title="net = gross − fee">NET$</th>
+        <th title="gross PnL as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
+      </tr></thead><tbody></tbody></table>`;
   function renderTrades(d) {
     const rows = venueFilter(d.recent_trades).slice(0, 40);   // E3 venue scope
     const body = $('trd-body'); if (!body) return;
@@ -660,11 +702,15 @@
     if (!rows.length) {
       const sc = scopeLabel();
       body.innerHTML = `<div class="empty">no recent trades${sc ? ' · ' + esc(sc) : ''}</div>`;
+      body.__structKey = null;   // force a fresh shell when trades return
       return;
     }
     // MIXED (Jin 2026-06-01): no per-exchange grouping — recent trades in ONE
     // time-ordered list (newest first); per-row colour is a subtle venue cue only.
-    const groups = rows.map(t => {
+    // Bloomberg per-cell diff (Jin 2026-06-26): keyed rows so only a NEW closed
+    // trade inserts (and eases in); existing rows keep their DOM — no per-second
+    // full-list repaint/jump. Same columns, values, sort — render mechanism only.
+    const specRows = rows.map(t => {
       const lc = venueStream(t.venue).toLowerCase();
       // issue 2: show the POSITION direction (long/short), NOT the close FILL
       // side (sell = a long exit) which made longs read as shorts.
@@ -680,36 +726,31 @@
       const net = (t.net_usd != null) ? t.net_usd : (t.pnl_usd - (t.real_fee_usd || 0));
       const fee = t.pnl_usd - net;
       const nm = symName(t);   // backend universe.name → hardcoded map → '' (graceful)
-      const nmHtml = nm ? `<span style="color:var(--p-dim);font-size:9px;margin-left:6px">${esc(nm)}</span>` : '';
-      return `<tr class="row-${lc}">
-          <td class="l b-flat">${hhmmss(t.ts_close)}</td>
-          <td class="l ex" title="${esc(t.venue)}">${esc(t.venue)}</td>
-          <td class="l tk" title="${esc(t.symbol)}${nm ? ' — ' + esc(nm) : ''}">${esc(t.symbol)}${nmHtml}${sparkline(t.spark)}</td>
-          <td class="dir ${esc(dir)}" title="position ${esc(dir || '—')} · close fill ${esc(t.side_close)}">${esc(dir || '—')}</td>
-          <td class="l b-flat" title="${esc(t.strategy_id)}">${esc(t.strategy_id)}</td>
-          <td class="l b-flat" title="entry regime ${esc(reg || '—')}">${esc(reg || '—')}</td>
-          <td class="num b-flat" title="entry ${fmtPxCcy(t.entry_price, qccy)}">${fmtPxCcy(t.entry_price, qccy)}</td>
-          <td class="num b-flat" title="exit ${fmtPxCcy(t.exit_price, qccy)}">${fmtPxCcy(t.exit_price, qccy)}</td>
-          <td class="num ${pn(t.pnl_usd)}" title="gross PnL (pre-fee)">${fmtUsd(t.pnl_usd, 2)}</td>
-          <td class="num b-neg" title="real venue fee · demo ${fmtUsd(t.fee_usd, 4)}">${fmtUsd(-fee, 2)}</td>
-          <td class="num ${pn(net)}" title="net = gross − fee">${fmtUsd(net, 2)}</td>
-          <td class="num ${pn(t.pnl_pct)}" title="gross PnL as % of entry notional">${fmtSignedPct(t.pnl_pct, 2)}</td>
-          <td class="num b-flat">${hms(t.held_sec)}</td>
-          <td class="l b-flat" title="exit ${esc(t.exit_reason)}">${esc(t.exit_reason)}</td>
-        </tr>`;
-    }).join('');
-    body.innerHTML =
-      `<table><colgroup>
-        <col style="width:7%"><col style="width:5%"><col style="width:11%"><col style="width:5%">
-        <col style="width:10%"><col style="width:8%"><col style="width:8%"><col style="width:8%">
-        <col style="width:7%"><col style="width:6%"><col style="width:7%"><col style="width:5%">
-        <col style="width:5%"><col style="width:6%">
-       </colgroup><thead><tr>
-        <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th title="position direction (long/short) — not the close fill side">SIDE</th>
-        <th class="l">STRAT</th><th class="l" title="regime at entry">REGIME</th><th>ENTRY</th><th>EXIT</th>
-        <th title="gross PnL before fees">GROSS$</th><th title="real venue fee">FEE$</th><th title="net = gross − fee">NET$</th>
-        <th title="gross PnL as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
-      </tr></thead><tbody>${groups}</tbody></table>`;
+      // Stable per-closed-trade key (a closed trade never mutates → its row never
+      // re-renders once placed; a NEW close is the only insert).
+      const key = [t.ts_close, t.venue, t.symbol, t.strategy_id, t.exit_price].join('|');
+      return {
+        key: key,
+        trCls: 'row-' + lc,
+        cells: [
+          { html: hhmmss(t.ts_close), cls: 'l b-flat' },
+          { html: esc(t.venue), cls: 'l ex', title: t.venue },
+          { html: symCell(t.symbol, nm, sparkline(t.spark)), cls: 'l tk', title: `${t.symbol}${nm ? ' — ' + nm : ''}` },
+          { html: esc(dir || '—'), cls: 'dir ' + esc(dir), title: `position ${dir || '—'} · close fill ${t.side_close}` },
+          { html: esc(t.strategy_id), cls: 'l b-flat', title: t.strategy_id },
+          { html: esc(reg || '—'), cls: 'l b-flat', title: 'entry regime ' + (reg || '—') },
+          { html: fmtPxCcy(t.entry_price, qccy), cls: 'num b-flat', title: 'entry ' + fmtPxCcy(t.entry_price, qccy) },
+          { html: fmtPxCcy(t.exit_price, qccy), cls: 'num b-flat', title: 'exit ' + fmtPxCcy(t.exit_price, qccy) },
+          { html: fmtUsd(t.pnl_usd, 2), cls: 'num ' + pn(t.pnl_usd), title: 'gross PnL (pre-fee)' },
+          { html: fmtUsd(-fee, 2), cls: 'num b-neg', title: 'real venue fee · demo ' + fmtUsd(t.fee_usd, 4) },
+          { html: fmtUsd(net, 2), cls: 'num ' + pn(net), title: 'net = gross − fee' },
+          { html: fmtSignedPct(t.pnl_pct, 2), cls: 'num ' + pn(t.pnl_pct), title: 'gross PnL as % of entry notional' },
+          { html: hms(t.held_sec), cls: 'num b-flat' },
+          { html: esc(t.exit_reason), cls: 'l b-flat', title: 'exit ' + t.exit_reason },
+        ],
+      };
+    });
+    B.syncTable(body, { tableHtml: () => TRD_SHELL, structKey: 'trd-v1', rows: specRows });
   }
 
   // ── TAB 3 · REGIME ────────────────────────────────────────────────────────

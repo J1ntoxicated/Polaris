@@ -12,7 +12,7 @@
   const B = window.PolarisBoard;
   const T = window.PolarisBoardTabs;
   if (!B || !T) { return; }   // board.js + board_tabs.js must load first
-  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, sparkline, pn, esc, hms,
+  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, sparkline, symCell, pn, esc, hms,
     hhmmss, venueStream, getActiveExchange, venueMatches, venueFilter } = B;
   const setCnt = T.setCnt;
 
@@ -677,7 +677,7 @@
     const trs = sorted.map(t => {
       const r = t.sum_r || 0;
       return `<tr title="${esc(t.venue)} ${esc(t.symbol)} · n=${t.n} · WR ${(t.wr_pct || 0).toFixed(0)}% · ΣR ${r.toFixed(2)}">
-        <td class="l tk">${esc(t.symbol)}${sparkline(t.spark)}</td>
+        <td class="l tk">${symCell(t.symbol, t.name, sparkline(t.spark))}</td>
         <td class="l ex">${esc(t.venue)}</td>
         <td class="b-flat">${t.n || 0}</td>
         <td class="b-flat">${(t.wr_pct || 0).toFixed(0)}%</td>

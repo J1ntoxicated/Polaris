@@ -277,6 +277,30 @@
       + `stroke-linecap="round"/></svg>`;
   }
 
+  // Symbol cell (Jin 2026-06-26) — lays a row's SYMBOL + human NAME + sparkline
+  // on a fixed 3-column grid (sym block │ name │ spark, spark flush-right) so
+  // they line up cleanly across rows instead of inline-flowing ragged. Pure
+  // markup/CSS — the spark series + name are the same display-only data as
+  // before. badgeHtml = optional ×N stack badge rendered inline after the
+  // symbol. Returns the inner content for a `td.tk` cell.
+  function symCell(symbol, name, sparkHtml, badgeHtml) {
+    const sym = `<span class="sym">${esc(symbol)}${badgeHtml || ''}</span>`;
+    const nm = `<span class="nm">${name ? esc(name) : ''}</span>`;
+    const spk = `<span class="spk">${sparkHtml || ''}</span>`;
+    return `<span class="symcell">${sym}${nm}${spk}</span>`;
+  }
+  // Live tick-direction recolour (Jin 2026-06-26, req ③) — point an already-
+  // rendered sparkline's stroke at the latest LIVE tick direction (up=green /
+  // down=red) the instant a mark streams in, between the 1s snapshot repaints.
+  // dir = 'up' | 'down' | '' (no-op). Touches the stroke colour ONLY — never the
+  // geometry (the snapshot owns the series); the next poll re-derives colour from
+  // the closes. `scope` = the row <tr> (or any element) that holds the svg.spark.
+  function setSparkDir(scope, dir) {
+    if (!scope || !dir) return;
+    const pl = scope.querySelector('svg.spark polyline');
+    if (pl) pl.setAttribute('stroke', dir === 'up' ? 'var(--p-grn)' : 'var(--p-red)');
+  }
+
   // (j/k) Snapshot freshness — LIVE when the latest snapshot tick is recent.
   // d.ts_now = epoch seconds the snapshot was generated; compared to wall clock.
   // STALE_SEC = a few poll intervals of slack (poll = 1s, snapshot bg-refresh
@@ -323,6 +347,10 @@
     const have = new Map();           // key → <tr> currently in the DOM
     for (const tr of tbody.children) { if (tr.dataset.k != null) have.set(tr.dataset.k, tr); }
     const seen = new Set();
+    // Fade-in only AFTER the first paint — so a genuinely-new row (a fresh
+    // position / trade) eases in individually, but the initial load doesn't
+    // flood every row with the animation (which would read as a batch sweep).
+    const painted = container.__painted === spec.structKey;
     let cursor = tbody.firstChild;    // walk to keep DOM order == spec order
     for (const rs of rowSpecs) {
       seen.add(rs.key);
@@ -336,6 +364,10 @@
           applyCell(td, c, false);
           tr.appendChild(td);
         });
+        if (painted) {   // new row arriving on a live frame → ease it in
+          tr.classList.add('row-in');
+          tr.addEventListener('animationend', () => tr.classList.remove('row-in'), { once: true });
+        }
       } else {
         if (rs.trCls != null && tr.className !== rs.trCls) tr.className = rs.trCls;
         const tds = tr.children;
@@ -353,6 +385,7 @@
     }
     // remove rows no longer present (closed positions / venues that dropped off).
     have.forEach((tr, k) => { if (!seen.has(k)) tbody.removeChild(tr); });
+    container.__painted = spec.structKey;   // subsequent frames may fade new rows
   }
   // Apply one cell spec to a <td>. When diff=true, only touches what changed and
   // flashes on a value change; when diff=false (fresh cell) it just sets state.
@@ -876,6 +909,9 @@
     _setPriceCell(tds[5], fmtSignedPct(p.delta_pct, 2), 'num ' + pn(p.delta_pct), dDir);
     _setPriceCell(tds[7], fmtUsd(p.upnl_usd, 2), 'num ' + pn(p.upnl_usd), upDir);
     _setPriceCell(tds[8], fmtSignedPct(p.upnl_pct, 2), 'num ' + pn(p.upnl_pct), '');
+    // Req ③: recolour THIS row's sparkline to the live tick direction (up=green /
+    // down=red) the instant the mark moves — between the 1s snapshot repaints.
+    if (pxDir) setSparkDir(tr, pxDir);
     // Jin 2026-06-24 SYNC: a streamed cell that moved (price flashed) → pulse the
     // SAME symbol's node on the globe on the SAME event, so cell flash + cloud
     // pulse fire together. key = venue|symbol|strategy|side. Display-only.
@@ -1000,7 +1036,8 @@
   window.PolarisBoard = {
     $: $, fmtUsd: fmtUsd, fmtPct: fmtPct, fmtSignedPct: fmtSignedPct,
     fmtPx: fmtPx, fmtPxCcy: fmtPxCcy, ccySymbol: ccySymbol,
-    fmtR: fmtR, sparkline: sparkline, pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
+    fmtR: fmtR, sparkline: sparkline, symCell: symCell, setSparkDir: setSparkDir,
+    pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
     freshness: freshness,

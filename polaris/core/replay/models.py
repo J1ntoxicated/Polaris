@@ -32,6 +32,16 @@ class ReplayConfig:
 
     instrument_ids: tuple[str, ...]
     bar_interval: str = "1H"
+    # Multi-horizon ensemble (P0). ``None`` = single-interval replay over
+    # ``bar_interval`` (behaviour 0 — every existing caller is unchanged). When
+    # set (e.g. ``("1m", "1H", "1D")`` for scalp / swing / position) the
+    # ``MultiHorizonReplay`` runs one independent sub-book per interval and
+    # synthesises a single SHARED-CAPITAL equity curve — parity with the live
+    # multi-horizon structure (independent position books, one capital base).
+    # Intervals should be DISTINCT (a repeated interval runs a duplicate sub-book
+    # and double-counts that horizon's pnl into the shared curve — honest, but
+    # almost certainly a caller mistake).
+    horizons: tuple[str, ...] | None = None
     start_ts: int | None = None
     end_ts: int | None = None
     fee_model: str = "okx_real"

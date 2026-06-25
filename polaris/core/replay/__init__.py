@@ -12,9 +12,12 @@ driver (bar loop, fill model, sandbox conn).
 from __future__ import annotations
 
 from polaris.core.replay.engine import ReplayEngine
+from polaris.core.replay.ensemble import MultiHorizonReplay, MultiHorizonResult
 from polaris.core.replay.models import ReplayConfig, ReplayResult, ReplayTrade
 
 __all__ = [
+    "MultiHorizonReplay",
+    "MultiHorizonResult",
     "ReplayConfig",
     "ReplayEngine",
     "ReplayResult",

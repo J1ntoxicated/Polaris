@@ -15,7 +15,15 @@ from polaris.core.benchmark.baselines import (
     buy_and_hold_baseline,
     tsmom_baseline,
 )
+from polaris.core.benchmark.cpcv import CPCVSplit, cpcv_splits
 from polaris.core.benchmark.gate import GateResult, TierResult, evaluate_gate
+from polaris.core.benchmark.overfit import (
+    DEFAULT_DSR_ADMIT,
+    DEFAULT_PBO_MAX,
+    OverfitVerdict,
+    admit_strategy,
+    pbo,
+)
 from polaris.core.benchmark.statistics import (
     deflated_sharpe,
     probabilistic_sharpe,
@@ -25,14 +33,21 @@ from polaris.core.benchmark.statistics import (
 from polaris.core.benchmark.walk_forward import WalkForwardSplit, walk_forward_splits
 
 __all__ = [
+    "DEFAULT_DSR_ADMIT",
+    "DEFAULT_PBO_MAX",
     "BaselineCurve",
+    "CPCVSplit",
     "GateResult",
+    "OverfitVerdict",
     "TierResult",
     "WalkForwardSplit",
+    "admit_strategy",
     "bollinger_baseline",
     "buy_and_hold_baseline",
+    "cpcv_splits",
     "deflated_sharpe",
     "evaluate_gate",
+    "pbo",
     "probabilistic_sharpe",
     "sharpe_ratio",
     "sharpe_spread",

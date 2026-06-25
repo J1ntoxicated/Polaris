@@ -8,7 +8,6 @@ from polaris.scripts.dashboard.ansi_palette import (
     sparkline,
     vlen,
 )
-from polaris.scripts.dashboard.render import render_dashboard
 from polaris.scripts.dashboard.snapshot import (
     DashboardSnapshot,
     collect_snapshot,
@@ -21,7 +20,6 @@ __all__ = [
     "DashboardSnapshot",
     "collect_snapshot",
     "color",
-    "render_dashboard",
     "sparkline",
     "vlen",
 ]

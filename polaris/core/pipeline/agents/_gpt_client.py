@@ -30,8 +30,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
@@ -42,7 +42,6 @@ __all__ = [
     "GPT_P0_MODEL",
     "GPT_P1_MODEL",
     "GPTCallResult",
-    "GPTCallSpy",
     "GPTClient",
     "GPTClientFactory",
     "call_gpt",
@@ -434,38 +433,3 @@ async def call_gpt(
     )
 
 
-@dataclass(slots=True)
-class GPTCallSpy:
-    """Test double that records every ``call_gpt`` invocation.
-
-    Use via ``GPTCallSpy().factory()`` and assert on ``spy.calls`` from
-    inside the test.
-    """
-
-    response_text: str = "{}"
-    calls: list[dict[str, Any]] = field(default_factory=list)
-
-    def factory(self) -> Awaitable[Any]:
-        async def _create(**kwargs: Any) -> Any:
-            self.calls.append(kwargs)
-
-            class _LocalBlock:
-                text = self.response_text
-
-            class _Resp:
-                content = [_LocalBlock()]
-                usage = None
-
-            return _Resp()
-
-        class _Messages:
-            async def create(_self, **kwargs: Any) -> Any:
-                return await _create(**kwargs)
-
-        class _Client:
-            messages = _Messages()
-
-        async def _factory() -> Any:
-            return _Client()
-
-        return _factory()

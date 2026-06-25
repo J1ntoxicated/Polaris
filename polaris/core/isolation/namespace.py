@@ -49,28 +49,6 @@ class StrategyNamespace:
     def list_recent_faults(self, *, since_ts: int) -> list[dict[str, Any]]:
         return list_recent_faults(self.conn, self.strategy_id, since_ts=since_ts)
 
-    def list_pending_reservations(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            """
-            SELECT reservation_id, venue, symbol, order_key, status, expires_ts
-            FROM allocator_reservations
-            WHERE strategy_id = ? AND status IN ('pending', 'confirmed')
-            ORDER BY created_ts ASC
-            """,
-            (self.strategy_id,),
-        ).fetchall()
-        return [
-            {
-                "reservation_id": r[0],
-                "venue": r[1],
-                "symbol": r[2],
-                "order_key": r[3],
-                "status": r[4],
-                "expires_ts": r[5],
-            }
-            for r in rows
-        ]
-
 
 # ---------------------------------------------------------------------------
 # Module-level convenience functions

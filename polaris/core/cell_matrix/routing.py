@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "Quartile",
-    "active_eligible_cells",
     "classify_quartile",
     "compute_routing_mult",
     "fetch_cell_stat",
@@ -405,37 +404,6 @@ def fetch_parent2_score(
     elapsed = max(0.0, float(now_ts - last_ts))
     factor = decay_factor(elapsed_sec=elapsed, half_life_sec=half_life_sec)
     return score * math.sqrt(factor)
-
-
-def active_eligible_cells(
-    conn: sqlite3.Connection,
-    *,
-    min_live_n: float = CELL_MIN_LIVE_N,
-) -> list[CellStat]:
-    """Return cell rows currently eligible for the dynamic quartile pool (n_eff ≥ min_live_n)."""
-    rows = conn.execute(
-        """
-        SELECT exchange, strategy, ticker, regime,
-               n_eff, wins_eff, pnl_r_sum_eff, avg_pnl_r, score, last_closed_ts
-        FROM cell_matrix_p0
-        WHERE n_eff >= ?
-        """,
-        (min_live_n,),
-    ).fetchall()
-    out: list[CellStat] = []
-    for r in rows:
-        out.append(
-            CellStat(
-                key=CellKeyP0(exchange=r[0], strategy=r[1], ticker=r[2], regime=r[3]),
-                n_eff=float(r[4]),
-                wins_eff=float(r[5]),
-                pnl_r_sum_eff=float(r[6]),
-                avg_pnl_r=float(r[7]),
-                score=float(r[8]),
-                last_closed_ts=int(r[9]),
-            )
-        )
-    return out
 
 
 def load_eligible_scores(

@@ -24,7 +24,6 @@ __all__ = [
     "REGIME_ALIGN_NEUTRAL",
     "REGIME_RANK_PENALTY_DAMPEN",
     "REGIME_RANK_PENALTY_NEUTRAL",
-    "apply_exponential_decay",
     "apply_regime_alignment",
     "compute_avg_pnl_r",
     "compute_cell_score",
@@ -227,16 +226,6 @@ def decay_factor(*, elapsed_sec: float, half_life_sec: float = CELL_DECAY_HALF_L
     if elapsed_sec <= 0.0:
         return 1.0
     return math.exp(-elapsed_sec * _LN2 / half_life_sec)
-
-
-def apply_exponential_decay(
-    value: float,
-    *,
-    elapsed_sec: float,
-    half_life_sec: float = CELL_DECAY_HALF_LIFE_SEC,
-) -> float:
-    """Decay a scalar by EWMA factor."""
-    return value * decay_factor(elapsed_sec=elapsed_sec, half_life_sec=half_life_sec)
 
 
 def compute_avg_pnl_r(*, pnl_r_sum_eff: float, n_eff: float) -> float:

@@ -21,7 +21,6 @@ from polaris.core.data.baseline import (
 from polaris.core.data.canonical import (
     alpaca_quote_to_quote_tick,
     compute_underlying_group_id,
-    make_market_event,
     okx_candle_to_bar,
     okx_ticker_to_quote_tick,
 )
@@ -150,41 +149,6 @@ def test_okx_candle_to_bar_rejects_unknown_interval() -> None:
             bar_interval="42m",
             underlying_group_id="crypto:X",
         )
-
-
-def test_make_market_event_round_trip() -> None:
-    ev = make_market_event(
-        ts=NOW,
-        event_type="listing",
-        venue="okx",
-        symbol="ZEC-USDT",
-        payload={"reason": "auto-onboard"},
-    )
-    assert ev.type == "listing"
-    assert "auto-onboard" in ev.payload_json
-
-
-def test_make_market_event_rejects_unknown_type() -> None:
-    with pytest.raises(ValueError):
-        make_market_event(ts=NOW, event_type="rogue", venue="okx", symbol="X")
-
-
-def test_signal_dataclass_smoke() -> None:
-    """Spec L1 Q1: `signals` table → `Signal` dataclass exists."""
-    from polaris.core.data.schema import Signal
-
-    sig = Signal(
-        strategy_id="volume_burst",
-        signal_id="abc-123",
-        instrument_id="okx:BTC-USDT",
-        direction="long",
-        score=0.82,
-        thesis="vol expansion 2x baseline",
-        ts=NOW,
-    )
-    assert sig.strategy_id == "volume_burst"
-    assert sig.score == 0.82
-    assert sig.correlation_group is None
 
 
 # ---------------------------------------------------------------------------

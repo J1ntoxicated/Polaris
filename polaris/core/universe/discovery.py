@@ -57,8 +57,6 @@ __all__ = [
     "persist_universe",
     "rank_active_universe",
     "refresh_alpaca_universe",
-    "refresh_capital_universe",
-    "refresh_okx_universe",
 ]
 
 # ---------------------------------------------------------------------------
@@ -584,31 +582,6 @@ def _deactivate_off_venue_active_rows(
         )
         swept += max(0, cur.rowcount)
     return swept
-
-
-# ---------------------------------------------------------------------------
-# Spec API aliases (vault/30_components/layer-0-universe-discovery.md)
-# ---------------------------------------------------------------------------
-
-
-async def refresh_okx_universe(
-    now_ts: int,
-    *,
-    base_url: str = OKX_BASE_DEMO,
-    client: httpx.AsyncClient | None = None,
-) -> list[UniverseInstrument]:
-    """Spec-named alias for `fetch_okx_instruments` (Q1 of L0 spec)."""
-    return await fetch_okx_instruments(base_url=base_url, now_ts=now_ts, client=client)
-
-
-async def refresh_capital_universe(
-    now_ts: int,
-    *,
-    base_url: str = CAPITAL_BASE_DEMO,
-    client: httpx.AsyncClient | None = None,
-) -> list[UniverseInstrument]:
-    """Spec-named alias for `fetch_capital_instruments` (Q1 of L0 spec)."""
-    return await fetch_capital_instruments(base_url=base_url, now_ts=now_ts, client=client)
 
 
 # ---------------------------------------------------------------------------

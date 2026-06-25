@@ -36,7 +36,6 @@ from typing import TYPE_CHECKING
 from polaris.core.sizing.session import derive_session
 from polaris.core.streams import (
     GUARD_TOKEN_BY_PRODUCT_CLASS,
-    guard_token_for_product_class,
 )
 from polaris.venues.alpaca.equity_session_gate import (
     pdt_rank_penalty,
@@ -141,11 +140,6 @@ def equity_fast_path_eligible(fp: FastPathContext) -> bool:
 def equity_session_state_for(ts: int | float) -> str:
     """Thin re-export of the reused us_equity_cal clock (closed/pre/rth/after)."""
     return us_equity_session_state(ts)
-
-
-def guard_token_for(product_class: str) -> str:
-    """Re-export of the streams-config guard-token mapping (single SSOT)."""
-    return guard_token_for_product_class(product_class)
 
 
 # ---------------------------------------------------------------------------

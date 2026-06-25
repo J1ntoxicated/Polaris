@@ -39,9 +39,7 @@ __all__ = [
     "cadence_fires",
     "compute_dynamic_focus",
     "persist_focus",
-    "score_focus_candidate",
     "score_focus_candidates",
-    "select_focus_watchlist",
     "should_evict_from_focus",
     "tier_for_rank",
 ]
@@ -395,53 +393,6 @@ def _quantile(values: list[float], pct: float) -> float:
     hi = min(lo + 1, len(arr) - 1)
     frac = pos - lo
     return arr[lo] * (1.0 - frac) + arr[hi] * frac
-
-
-# ---------------------------------------------------------------------------
-# Spec API aliases (vault/30_components/layer-0-universe-discovery.md)
-# ---------------------------------------------------------------------------
-
-
-def score_focus_candidate(
-    inst: UniverseInstrument,
-    *,
-    cell_score: float,
-    volume_z: float,
-    atr_z: float,
-    signal_density_z: float,
-    depth_z: float,
-    recent_activity_z: float = 0.0,
-) -> float:
-    """Score a single candidate using pre-computed z-scores (Q3 spec signature).
-
-    Mirrors `score_focus_candidates` but operates on one row with externally
-    supplied z-scores so callers can inject their own population.
-    `recent_activity_z` is reserved for the P1 learner-tuned axis; weight 0 at P0.
-    """
-    _ = inst, recent_activity_z  # parameters reserved for future use / introspection
-    return (
-        RANK_WEIGHT_VOL_Z * volume_z
-        + RANK_WEIGHT_SIGNAL_DENSITY_Z * signal_density_z
-        + RANK_WEIGHT_ATR_Z * atr_z
-        + RANK_WEIGHT_DEPTH_Z * depth_z
-        + RANK_WEIGHT_CELL_Z * cell_score
-    )
-
-
-def select_focus_watchlist(
-    active_universe: list[UniverseInstrument],
-    *,
-    target_size: int,
-    cycle_ts: int,
-    cell_scores: dict[str, float] | None = None,
-) -> list[FocusSelection]:
-    """Spec-named alias for `compute_dynamic_focus` with explicit target size."""
-    return compute_dynamic_focus(
-        active_universe,
-        cell_scores=cell_scores,
-        cycle_ts=cycle_ts,
-        target_size=target_size,
-    )
 
 
 # ---------------------------------------------------------------------------

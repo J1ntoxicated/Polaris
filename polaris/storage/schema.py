@@ -98,7 +98,6 @@ from polaris.storage.schema_ddl_ext import (
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
     DDL_REPLAY_RUNS_INDEX,
-    DDL_ROLLBACK_CANDIDATES,
     DDL_STRATEGY_REGIME_PRIOR,
     DDL_STRATEGY_RISK_STATE,
     DDL_V_G34_COHORT_OUTCOMES,
@@ -183,7 +182,6 @@ ALL_DDL: tuple[str, ...] = (
     DDL_LEARNER_BLOCKS,
     DDL_LEARNER_BLOCKS_INDEX,
     DDL_LEARNER_SNAPSHOT,
-    DDL_ROLLBACK_CANDIDATES,
     # Edge-validation Phase 1 — Bayesian posterior (measure-only, no sizing wire)
     DDL_LEARNER_POSTERIOR,
     DDL_STRATEGY_REGIME_PRIOR,

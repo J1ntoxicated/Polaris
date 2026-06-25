@@ -4,8 +4,6 @@ Mimics ``GPTClient`` (Anthropic-shaped ``messages.create``) so every gate
 sees a deterministic permissive JSON response. Used by:
 
 - ``smoke_paper_loop.py`` (Day 5+ smoke loop)
-- ``smoke_production_paper_loop.py`` (Day 8 acceptance smoke when the
-  real ``OPENAI_API_KEY`` is unavailable)
 - ``tests/test_*`` (avoid live OpenAI calls in pytest)
 
 Replaces ``StubHaikuClient`` after the 2026-05-07 Haiku → GPT migration.

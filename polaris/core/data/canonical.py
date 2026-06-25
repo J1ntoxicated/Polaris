@@ -1,4 +1,4 @@
-"""Canonical market model — venue payload → unified `Bar` / `QuoteTick` / `MarketEvent`.
+"""Canonical market model — venue payload → unified `Bar` / `QuoteTick`.
 
 Pure functions only (P6). No I/O. Network adapters live in `polaris/venues/*`.
 
@@ -7,13 +7,11 @@ Spec source: vault/30_components/layer-1-canonical-baseline.md (Q1 + Q4).
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from polaris.core.data.schema import (
     BAR_INTERVALS,
     Bar,
-    MarketEvent,
     QuoteTick,
 )
 
@@ -218,31 +216,6 @@ def alpaca_quote_to_quote_tick(payload: dict[str, Any], *, ts: int) -> QuoteTick
         last_trade_price=mid,
         last_trade_size=0.0,
         source="alpaca_ws",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Market events
-# ---------------------------------------------------------------------------
-
-
-def make_market_event(
-    *,
-    ts: int,
-    event_type: str,
-    venue: str,
-    symbol: str,
-    payload: dict[str, Any] | None = None,
-) -> MarketEvent:
-    """Build a serialized MarketEvent from typed inputs."""
-    if event_type not in {"listing", "delisting", "halt", "regime_flip"}:
-        raise ValueError(f"unsupported event_type={event_type!r}")
-    return MarketEvent(
-        ts=ts,
-        type=event_type,
-        venue=venue,
-        symbol=symbol,
-        payload_json=json.dumps(payload or {}, separators=(",", ":"), sort_keys=True),
     )
 
 

@@ -326,53 +326,6 @@ def test_dashboard_snapshot_dd_calculated_from_correct_base(
     _ = Any  # type-import keeper
 
 
-def test_dashboard_panel_shows_venue_split() -> None:
-    """The renderer's top-bar string must contain OKX/CAP venue split."""
-    from polaris.scripts.dashboard.render import render_top_bar
-    from polaris.scripts.dashboard.snapshot import DashboardSnapshot
-
-    snap = DashboardSnapshot(
-        ts_now=int(time.time()),
-        starting_capital=TOTAL_DEMO_STARTING_EQUITY_USD,
-        starting_capital_okx=OKX_DEMO_STARTING_EQUITY_USD,
-        starting_capital_capital=CAPITAL_DEMO_STARTING_EQUITY_USD,
-        equity_now=TOTAL_DEMO_STARTING_EQUITY_USD,
-        peak_equity=TOTAL_DEMO_STARTING_EQUITY_USD,
-    )
-    line = render_top_bar(snap, width=240)
-    # Strip ANSI escapes for a stable substring match.
-    import re
-
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
-    assert "OKX" in plain
-    assert "CAP" in plain
-    # The 79K OKX figure must be visible.
-    assert "79" in plain
-    # And the 51K Capital figure too.
-    assert "51" in plain
-
-
-def test_dashboard_panel_total_base_label() -> None:
-    """Top bar must surface the $130K base figure for context."""
-    from polaris.scripts.dashboard.render import render_top_bar
-    from polaris.scripts.dashboard.snapshot import DashboardSnapshot
-
-    snap = DashboardSnapshot(
-        ts_now=int(time.time()),
-        starting_capital=TOTAL_DEMO_STARTING_EQUITY_USD,
-        starting_capital_okx=OKX_DEMO_STARTING_EQUITY_USD,
-        starting_capital_capital=CAPITAL_DEMO_STARTING_EQUITY_USD,
-        equity_now=TOTAL_DEMO_STARTING_EQUITY_USD,
-        peak_equity=TOTAL_DEMO_STARTING_EQUITY_USD,
-    )
-    line = render_top_bar(snap, width=240)
-    import re
-
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
-    assert "base" in plain.lower()
-    assert "130" in plain  # 130K base label must be visible
-
-
 def test_production_pipeline_default_equals_okx_ssot() -> None:
     """``EQUITY_USD_DEMO_DEFAULT`` must be sourced from sizing.constants."""
     from polaris.scripts._production_pipeline import EQUITY_USD_DEMO_DEFAULT

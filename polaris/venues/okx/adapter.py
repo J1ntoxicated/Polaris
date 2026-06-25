@@ -81,7 +81,6 @@ OKX_PLACE_ALGO_ORDER_PATH: Final[str] = "/api/v5/trade/order-algo"
 OKX_CANCEL_ALGO_ORDER_PATH: Final[str] = "/api/v5/trade/cancel-algos"
 OKX_ACCOUNT_BALANCE_PATH: Final[str] = "/api/v5/account/balance"
 OKX_ACCOUNT_POSITIONS_PATH: Final[str] = "/api/v5/account/positions"
-OKX_TRADE_ORDERS_PENDING_PATH: Final[str] = "/api/v5/trade/orders-pending"
 OKX_TRADE_ORDER_PATH: Final[str] = "/api/v5/trade/order"
 
 DEMO_HEADERS: Final[dict[str, str]] = {"x-simulated-trading": "1"}
@@ -694,13 +693,6 @@ class OKXAdapter:
         return await self._signed_request(
             "GET",
             OKX_ACCOUNT_POSITIONS_PATH,
-            params={"instType": inst_type},
-        )
-
-    async def fetch_pending_orders(self, inst_type: str = "SPOT") -> dict[str, Any]:
-        return await self._signed_request(
-            "GET",
-            OKX_TRADE_ORDERS_PENDING_PATH,
             params={"instType": inst_type},
         )
 

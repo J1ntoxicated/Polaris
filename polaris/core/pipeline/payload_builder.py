@@ -73,7 +73,6 @@ __all__ = [
     "ActivePosition",
     "CELL_POOL_MIN_N_EFF",
     "PNL_R_USD_DENOM",
-    "TickWindowEntry",
     "build_exit_payload",
     "build_monitor_payload",
     "build_sizer_payload",
@@ -263,10 +262,6 @@ def build_validator_payload(
 # ---------------------------------------------------------------------------
 # G4 — Pre-Entry Watcher payload (validator must have stamped validated_signal)
 # ---------------------------------------------------------------------------
-
-
-class TickWindowEntry(dict[str, Any]):
-    """Lightweight typed alias — bid/ask/mid + ts in a dict shape G4 expects."""
 
 
 def _add_stream_guard_inputs(

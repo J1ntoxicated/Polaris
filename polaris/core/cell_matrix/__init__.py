@@ -5,7 +5,6 @@ Spec source: vault/30_components/layer-4-cell-matrix.md.
 
 from polaris.core.cell_matrix.routing import (
     Quartile,
-    active_eligible_cells,
     classify_quartile,
     compute_routing_mult,
     fetch_cell_stat,
@@ -39,7 +38,6 @@ from polaris.core.cell_matrix.score import (
     REGIME_ALIGN_AMPLIFY,
     REGIME_ALIGN_DAMPEN,
     REGIME_ALIGN_NEUTRAL,
-    apply_exponential_decay,
     apply_regime_alignment,
     compute_avg_pnl_r,
     compute_cell_score,
@@ -70,8 +68,6 @@ __all__ = [
     "CellStat",
     "Quartile",
     "TradeClose",
-    "active_eligible_cells",
-    "apply_exponential_decay",
     "apply_regime_alignment",
     "classify_quartile",
     "compute_avg_pnl_r",

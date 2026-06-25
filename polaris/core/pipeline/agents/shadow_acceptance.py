@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from dataclasses import dataclass
 from typing import Any
 
 from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
@@ -48,7 +47,6 @@ from polaris.core.pipeline.gate_state import (
 __all__ = [
     "LOSER_TIMEOUT_SEC",
     "PNL_R_USD_DENOM",
-    "GateAgreement",
     "chop_churn",
     "fee_adjusted_realized_r",
     "gate_agreement",
@@ -84,19 +82,6 @@ def _pct(num: float, den: float) -> float:
 # ===========================================================================
 # 1. gate_agreement
 # ===========================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class GateAgreement:
-    """Counts for one bucket (a regime or the overall set)."""
-
-    n: int
-    gpt_kill: int
-    technical_kill: int
-    mismatch: int
-    gpt_kill_pct: float
-    technical_kill_pct: float
-    mismatch_pct: float
 
 
 def _agreement_bucket(rows: list[tuple[str, str, int]]) -> dict[str, Any]:

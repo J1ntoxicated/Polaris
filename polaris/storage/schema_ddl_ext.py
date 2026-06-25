@@ -390,17 +390,6 @@ CREATE TABLE IF NOT EXISTS learner_snapshot (
 );
 """
 
-DDL_ROLLBACK_CANDIDATES = """
-CREATE TABLE IF NOT EXISTS rollback_candidates (
-    snapshot_ts INTEGER PRIMARY KEY,
-    learner_scope TEXT NOT NULL,
-    expectancy_pre REAL NOT NULL,
-    expectancy_post REAL NOT NULL,
-    trade_count INTEGER NOT NULL,
-    status TEXT NOT NULL
-);
-"""
-
 # ---------------------------------------------------------------------------
 # Edge-validation Phase 1 — Bayesian posterior on cost-adjusted expectancy.
 # MEASUREMENT + DISPLAY ONLY (never read by Layer 3 sizing). New tables; the

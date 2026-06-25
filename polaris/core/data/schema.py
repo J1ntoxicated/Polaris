@@ -71,35 +71,6 @@ class QuoteTick:
 
 
 @dataclass(frozen=True, slots=True)
-class MarketEvent:
-    """Ad-hoc market event: listing / delisting / halt / regime_flip."""
-
-    ts: int
-    type: str  # listing | delisting | halt | regime_flip
-    venue: str
-    symbol: str
-    payload_json: str
-
-
-@dataclass(frozen=True, slots=True)
-class Signal:
-    """Raw or validated trading signal (separate from market bars).
-
-    Spec source: layer-1-canonical-baseline.md Q1 (`signals` table).
-    """
-
-    strategy_id: str
-    signal_id: str
-    instrument_id: str
-    direction: str  # "long" | "short" | "flat"
-    score: float
-    thesis: str
-    ts: int
-    correlation_group: str | None = None
-    payload_json: str = "{}"
-
-
-@dataclass(frozen=True, slots=True)
 class BaselineValue:
     """In-memory representation of a ticker baseline row."""
 

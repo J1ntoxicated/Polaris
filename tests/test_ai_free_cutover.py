@@ -26,7 +26,6 @@ from polaris.core.pipeline.agents import pre_entry_watcher as g4_mod
 from polaris.core.pipeline.agents import signal_validator as g3_mod
 from polaris.core.pipeline.agents._shadow_rules import (
     MODIFY_CONSERVATIVE_SCALAR,
-    WARM_POOL_LOCAL_BOTTOM_REASON,
 )
 from polaris.core.pipeline.agents.adaptive_exit import adaptive_exit_gate
 from polaris.core.pipeline.agents.pre_entry_watcher import pre_entry_watcher_gate
@@ -320,14 +319,17 @@ async def test_g3_ai_free_warm_mid_modify_scalar(ai_free_on: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_g3_ai_free_warm_bottom_losing_kill(ai_free_on: None) -> None:
+async def test_g3_ai_free_warm_bottom_losing_now_flows(ai_free_on: None) -> None:
+    # flow_not_block: a warm bottom-quartile losing cell is NOT blocked — losing
+    # is never an entry block (loss-defense lives at EXIT). Now PASSES (was the
+    # removed warm_bottom_losing KILL).
     res = await signal_validator_gate(
         _g3_ctx(quartile="bottom", avg_pnl_r=-0.4), client=_ForbiddenClient()
     )
-    assert res.decision == GateDecision.KILL
+    assert res.decision == GateDecision.PASS
     assert res.model_used == "python"
-    assert res.next_gate is None
-    assert res.payload["reason"] == "warm_bottom_losing"
+    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert "losing" not in res.payload["reason"]
 
 
 @pytest.mark.asyncio
@@ -341,25 +343,21 @@ async def test_g3_ai_free_cold_cell_passthrough(ai_free_on: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_g3_ai_free_warm_pool_local_bottom_kill(
+async def test_g3_ai_free_cold_quartile_warm_losing_now_modifies(
     ai_free_on: None, memdb: sqlite3.Connection
 ) -> None:
-    # Warm-pool-local-bottom discriminator stays live as the PRIMARY rule —
-    # the conn (former shadow_conn) feeds the warm-pool read.
-    for i, score in enumerate([-0.5, 0.2, 0.5, 0.9]):
-        memdb.execute(
-            "INSERT INTO cell_matrix_p0 (exchange, strategy, ticker, regime, "
-            "n_eff, avg_pnl_r, score) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("okx", "s1", f"T{i}", "trend_up", 8.0, score, score),
-        )
+    # flow_not_block: a cold-quartile warm losing cell (the former local-bottom
+    # KILL case) now gets a conservative MODIFY trim — never blocked. The conn no
+    # longer feeds any loss-discriminator; the signal flows on.
     res = await signal_validator_gate(
         _g3_ctx(quartile="cold", n_eff=8.0, avg_pnl_r=-0.3, score=-0.5),
         client=_ForbiddenClient(),
         shadow_conn=memdb,
     )
-    assert res.decision == GateDecision.KILL
+    assert res.decision == GateDecision.MODIFY
     assert res.model_used == "python"
-    assert res.payload["reason"] == WARM_POOL_LOCAL_BOTTOM_REASON
+    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert "losing" not in res.payload["reason"]
     assert fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR) == []
 
 

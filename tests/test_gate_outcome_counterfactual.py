@@ -87,7 +87,7 @@ class _ScriptedOrch:
         return self._results
 
 
-def _kill_result(reason: str = "warm_bottom_losing") -> GateResult:
+def _kill_result(reason: str = "validator_kill") -> GateResult:
     return GateResult(
         decision=GateDecision.KILL, next_gate=None,
         payload={"reason": reason}, model_used="gpt",
@@ -159,7 +159,7 @@ async def test_g3_kill_records_counterfactual_row(
     row = rows[0]
     assert row["gate_id"] == 3
     assert row["decision"] == "KILL"
-    assert row["reason"] == "warm_bottom_losing"
+    assert row["reason"] == "validator_kill"
     assert row["model_used"] == "gpt"
     assert row["side"] == "long"
     assert row["regime"] == "bull_trend"

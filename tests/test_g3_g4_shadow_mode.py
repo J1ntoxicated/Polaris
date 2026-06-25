@@ -5,8 +5,9 @@ These tests pin the AI-conductor P0 SHADOW contract (ai_conductor_architecture_
 
 - Real pipeline decision STAYS GPT (behavior 0): the shadow technical rule is
   computed alongside and logged, never returned as the gate decision.
-- G3 cold cell (n_eff < 5) = PASS-through ALWAYS (codex BLOCKING — "모호하면 통과").
-  warm (n_eff >= 5) AND quartile == 'bottom' AND avg_pnl_r < 0 → narrow KILL only.
+- G3 NEVER blocks entry on a cell being "losing" (flow_not_block): a cold cell
+  passes through ("모호하면 통과"); a losing cell flows (PASS) or gets a
+  conservative MODIFY trim. The technical rule raises NO entry-block KILL.
 - G4 PROCEED default; KILL ONLY on stale/crossed book; spread/drift = flag (NOT
   KILL); realized-vol NEVER kills (codex BLOCKING — "expanding=기회").
 - net_edge_r is NEVER read by either technical rule (codex BLOCKING).
@@ -99,114 +100,65 @@ def test_g3_cold_cell_always_pass_even_bottom_quartile() -> None:
         n_eff=2.0,  # cold
         quartile="bottom",
         avg_pnl_r=-1.5,  # losing
-        recent_trades=[{"won": False}, {"won": False}, {"won": False}],
-        spread_bps=50.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=2.0,
     )
     out = technical_validate_decision(inp)
     assert out.decision == GateDecision.PASS
     assert out.scalar == 1.0
 
 
-def test_g3_warm_bottom_losing_narrow_kill() -> None:
-    """WARM (n_eff>=5) AND quartile=bottom AND avg_pnl_r<0 → narrow KILL."""
-    inp = G3ShadowInputs(
-        n_eff=8.0,
-        quartile="bottom",
-        avg_pnl_r=-0.4,
-        recent_trades=[],
-        spread_bps=4.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=1000.0,
-    )
+def test_g3_warm_bottom_losing_now_flows() -> None:
+    """flow_not_block: WARM quartile='bottom' + avg_pnl_r<0 NEVER blocks → PASS.
+
+    Losing is never an entry block (loss-defense lives at EXIT). This pins the
+    removal of the former ``warm_bottom_losing`` KILL.
+    """
+    inp = G3ShadowInputs(n_eff=8.0, quartile="bottom", avg_pnl_r=-0.4)
     out = technical_validate_decision(inp)
-    assert out.decision == GateDecision.KILL
+    assert out.decision == GateDecision.PASS
+    assert "losing" not in out.reason
 
 
-def test_g3_warm_bottom_but_positive_avg_does_not_kill() -> None:
-    """WARM bottom quartile but avg_pnl_r >= 0 must NOT KILL (no losing evidence)."""
-    inp = G3ShadowInputs(
-        n_eff=8.0,
-        quartile="bottom",
-        avg_pnl_r=0.1,
-        recent_trades=[],
-        spread_bps=4.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=1000.0,
-    )
+def test_g3_warm_bottom_positive_avg_also_passes() -> None:
+    """WARM bottom quartile (winning or losing) flows the same — both PASS."""
+    inp = G3ShadowInputs(n_eff=8.0, quartile="bottom", avg_pnl_r=0.1)
     out = technical_validate_decision(inp)
-    assert out.decision != GateDecision.KILL
+    assert out.decision == GateDecision.PASS
 
 
 def test_g3_warm_top_quartile_pass() -> None:
-    inp = G3ShadowInputs(
-        n_eff=12.0,
-        quartile="top",
-        avg_pnl_r=0.6,
-        recent_trades=[],
-        spread_bps=3.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=1000.0,
-    )
+    inp = G3ShadowInputs(n_eff=12.0, quartile="top", avg_pnl_r=0.6)
     out = technical_validate_decision(inp)
     assert out.decision == GateDecision.PASS
 
 
 def test_g3_warm_mid_quartile_conservative_modify() -> None:
     """WARM mid quartile → conservative MODIFY scalar in [MODIFY_MIN, 1.0]."""
-    inp = G3ShadowInputs(
-        n_eff=10.0,
-        quartile="mid",
-        avg_pnl_r=0.0,
-        recent_trades=[],
-        spread_bps=4.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=1000.0,
-    )
+    inp = G3ShadowInputs(n_eff=10.0, quartile="mid", avg_pnl_r=0.0)
     out = technical_validate_decision(inp)
     assert out.decision == GateDecision.MODIFY
     assert 0.5 <= out.scalar <= 1.0
 
 
 def test_g3_cold_quartile_label_conservative_modify_not_kill() -> None:
-    """quartile label 'cold' → conservative MODIFY, never KILL."""
-    inp = G3ShadowInputs(
-        n_eff=3.0,
-        quartile="cold",
-        avg_pnl_r=-2.0,
-        recent_trades=[{"won": False}, {"won": False}],
-        spread_bps=4.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=1000.0,
-    )
+    """quartile label 'cold' + losing → conservative MODIFY, never KILL."""
+    inp = G3ShadowInputs(n_eff=3.0, quartile="cold", avg_pnl_r=-2.0)
     out = technical_validate_decision(inp)
     assert out.decision != GateDecision.KILL
 
 
-def test_g3_booster_only_reinforces_warm_kill_not_cold() -> None:
-    """Cell-independent boosters (consecutive losses) do NOT KILL a COLD cell."""
-    inp = G3ShadowInputs(
-        n_eff=1.0,  # cold
-        quartile="mid",
-        avg_pnl_r=0.0,
-        recent_trades=[{"won": False}, {"won": False}, {"won": False}],
-        spread_bps=80.0,
-        baseline_p50_spread_bps=5.0,
-        listing_age_hours=0.5,
-    )
+def test_g3_warm_cold_quartile_losing_modifies_not_kill() -> None:
+    """WARM cell with a 'cold' quartile label + losing → MODIFY (not a block)."""
+    inp = G3ShadowInputs(n_eff=8.0, quartile="cold", avg_pnl_r=-0.4)
     out = technical_validate_decision(inp)
+    assert out.decision == GateDecision.MODIFY
     assert out.decision != GateDecision.KILL
 
 
 def test_g3_does_not_read_net_edge() -> None:
-    """net_edge_r in payload must never flip the technical decision."""
-    base = dict(
-        n_eff=12.0, quartile="top", avg_pnl_r=0.6, recent_trades=[],
-        spread_bps=3.0, baseline_p50_spread_bps=5.0, listing_age_hours=1000.0,
+    """net_edge_r is NOT a field of G3ShadowInputs — the rule cannot consult it."""
+    out_no_edge = technical_validate_decision(
+        G3ShadowInputs(n_eff=12.0, quartile="top", avg_pnl_r=0.6)
     )
-    out_no_edge = technical_validate_decision(G3ShadowInputs(**base))
-    # net_edge is NOT a field of G3ShadowInputs — the rule cannot consult it.
     assert "net_edge_r" not in G3ShadowInputs.__dataclass_fields__
     assert out_no_edge.decision == GateDecision.PASS
 
@@ -366,22 +318,24 @@ def test_shadow_log_noop_without_conn() -> None:
 # ===========================================================================
 
 
-async def test_g3_real_decision_stays_gpt_pass_even_when_technical_would_kill(
+async def test_g3_real_decision_stays_gpt_pass_on_technical_mismatch(
     memdb: sqlite3.Connection,
 ) -> None:
-    """GPT says PASS; technical (warm bottom losing) would KILL — gate returns GPT PASS."""
+    """GPT says PASS; technical (warm mid) would MODIFY — gate returns GPT PASS.
+
+    Behavior-0: the GPT decision is what the gate returns; the divergent
+    technical decision is only logged. (The G3 technical rule no longer emits
+    any KILL — flow_not_block — so the mismatch exercised here is MODIFY-vs-PASS.)
+    """
     haiku = _MockGPTClient(response_text='{"decision": "PASS", "strength_scalar": 1.0}')
     ctx = _ctx(
         {
             "raw_signal": {"strategy": "vb", "score": 1.0},
             "cell_routing": {
-                "quartile": "bottom",
+                "quartile": "mid",
                 "n_eff": 9.0,
                 "avg_pnl_r": -0.5,
             },
-            "spread_bps": 4.0,
-            "baseline_p50_spread_bps": 5.0,
-            "listing_age_hours": 1000.0,
             "regime": "trend",
             "net_edge_r": -3.0,  # negative — must NOT influence anything
         },
@@ -390,11 +344,11 @@ async def test_g3_real_decision_stays_gpt_pass_even_when_technical_would_kill(
     result = await signal_validator_gate(ctx, client=haiku, shadow_conn=memdb)
     # Real decision = GPT PASS (behavior 0).
     assert result.decision == GateDecision.PASS
-    # Shadow row recorded the technical KILL vs gpt PASS mismatch.
+    # Shadow row recorded the technical MODIFY vs gpt PASS mismatch.
     rows = fetch_shadow_events(memdb)
     assert len(rows) == 1
     assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
-    assert rows[0]["technical_decision"] == "KILL"
+    assert rows[0]["technical_decision"] == "MODIFY"
     assert rows[0]["gpt_decision"] == "PASS"
     assert rows[0]["mismatch"] == 1
     assert rows[0]["cell_warm"] == 1

@@ -19,8 +19,6 @@ import logging
 import sqlite3
 from typing import Any, Final
 
-from polaris.core.cell_matrix.routing import _quantile
-from polaris.core.cell_matrix.schema import CELL_MIN_LIVE_N
 from polaris.core.pipeline.agents._gpt_client import (
     DEFAULT_TIMEOUT_SEC,
     GPTCallResult,
@@ -60,17 +58,6 @@ MODIFY_MAX: Final[float] = 1.5
 VALIDATOR_MAX_TOKENS: Final[int] = 250
 # Recent same-symbol trades cap surfaced to the validator prompt.
 VALIDATOR_RECENT_TRADES_MAX: Final[int] = 5
-
-# Warm-pool floor for the NEW warm-pool-local-bottom discriminator (mirrors
-# ``payload_builder.CELL_POOL_MIN_N_EFF`` / ``CELL_MIN_LIVE_N`` = 5.0 — the
-# quartile-eligibility n_eff floor). A cell counts toward the local warm pool
-# only at/above this n_eff.
-WARM_POOL_FLOOR_N_EFF: Final[float] = CELL_MIN_LIVE_N
-# Minimum warm-pool size needed to define a bottom quartile locally. Below this
-# the discriminator never fires (no thin-sample quartile is manufactured).
-WARM_POOL_MIN_MEMBERS: Final[int] = 4
-# Bottom-quartile threshold percentile of the warm pool's scores.
-WARM_POOL_BOTTOM_PCT: Final[float] = 0.25
 
 _DECISION_TOKENS = {"PASS", "KILL", "MODIFY"}
 
@@ -115,73 +102,15 @@ def _validate_decision(parsed: dict[str, Any]) -> tuple[GateDecision, float] | N
     return GateDecision.MODIFY, scalar
 
 
-def _warm_pool_local_bottom(
-    conn: sqlite3.Connection,
-    *,
-    regime: str,
-    cell_score: float,
-    cell_n_eff: float,
-) -> bool:
-    """NEW G3 shadow discriminator — is THIS cell in the bottom quartile of the
-    *current warm pool* of its regime?
-
-    Computes the bottom-quartile threshold (25th percentile) of the scores of
-    warm cells (``n_eff >= WARM_POOL_FLOOR_N_EFF``) in the SAME ``regime`` from
-    ``cell_matrix_p0``. Flags True when:
-
-    - the warm pool has ``>= WARM_POOL_MIN_MEMBERS`` members (enough to define a
-      quartile — no thin-sample quartile manufactured), AND
-    - THIS cell is itself warm (``cell_n_eff >= WARM_POOL_FLOOR_N_EFF``), AND
-    - ``cell_score <= threshold`` (bottom quartile of the warm pool).
-
-    This is measured INDEPENDENT of the global ``CELL_MIN_POOL_SIZE=20``
-    cardinality gate (which holds the global quartile label at ``cold`` while
-    < 20 warm cells exist). SHADOW path only — read-only, never writes, and the
-    production payload never carries the result. Any read error → False
-    (behavior-safe: the discriminator simply does not fire).
-    """
-    if cell_n_eff < WARM_POOL_FLOOR_N_EFF:
-        return False
-    try:
-        rows = conn.execute(
-            "SELECT score FROM cell_matrix_p0 WHERE regime = ? AND n_eff >= ?",
-            (regime, WARM_POOL_FLOOR_N_EFF),
-        ).fetchall()
-    except sqlite3.Error:
-        return False
-    pool = sorted(float(r[0]) for r in rows)
-    if len(pool) < WARM_POOL_MIN_MEMBERS:
-        return False
-    threshold = _quantile(pool, WARM_POOL_BOTTOM_PCT)
-    return cell_score <= threshold
-
-
-def _g3_technical(
-    ctx: GateContext, conn: sqlite3.Connection | None
-) -> tuple[G3ShadowInputs, ShadowDecision]:
+def _g3_technical(ctx: GateContext) -> tuple[G3ShadowInputs, ShadowDecision]:
     """Compute the G3 deterministic technical decision from ``ctx.payload``.
 
-    The ``warm_pool_local_bottom`` discriminator reads the live warm pool in
-    this regime from ``conn`` (read-only); ``conn=None`` → the discriminator
-    does not fire. Shared by the legacy shadow logger AND the AI-free primary
-    path so the two can never drift.
+    Shared by the legacy shadow logger AND the AI-free primary path so the two
+    can never drift. The technical rule raises NO entry-block KILL — losing is
+    never a block (``flow_not_block``); its only outputs are PASS / conservative
+    MODIFY.
     """
-    cell = ctx.payload.get("cell_routing", {})
-    cell = cell if isinstance(cell, dict) else {}
-    regime = str(ctx.payload.get("regime", ""))
-    local_bottom = (
-        _warm_pool_local_bottom(
-            conn,
-            regime=regime,
-            cell_score=float(cell.get("score", 0.0) or 0.0),
-            cell_n_eff=float(cell.get("n_eff", 0.0) or 0.0),
-        )
-        if conn is not None
-        else False
-    )
-    inp = g3_shadow_inputs_from_payload(
-        ctx.payload, warm_pool_local_bottom=local_bottom
-    )
+    inp = g3_shadow_inputs_from_payload(ctx.payload)
     return inp, technical_validate_decision(inp)
 
 
@@ -196,15 +125,10 @@ def _log_g3_shadow(
     acceptance gate and NEVER returned. ``cold cell = pass-through`` and
     ``net_edge`` is not consulted (both enforced inside the rule). No-op when
     ``shadow_conn`` is None.
-
-    The NEW ``warm_pool_local_bottom`` discriminator is computed here from
-    ``shadow_conn`` (the live cell pool in this regime) and fed into the rule —
-    entirely in the shadow path, so ``build_validator_payload`` / the production
-    payload are untouched (behavior 0).
     """
     if shadow_conn is None:
         return
-    inp, technical = _g3_technical(ctx, shadow_conn)
+    inp, technical = _g3_technical(ctx)
     regime = str(ctx.payload.get("regime", ""))
     log_shadow_event(
         shadow_conn,
@@ -236,9 +160,10 @@ async def signal_validator_gate(
     ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
     the env): the deterministic technical rule (former shadow) IS the primary
     decision — zero GPT calls, ``model_used="python"``, and no shadow row
-    (GPT absent → nothing to compare). ``shadow_conn`` doubles as the
-    read-only conn for the warm-pool-local-bottom discriminator. flag=0 →
-    the legacy GPT path below runs byte-identical.
+    (GPT absent → nothing to compare). The technical rule raises NO entry-block
+    KILL (``flow_not_block`` — losing is never a block), so on the AI-free path
+    G3 emits only PASS / conservative MODIFY. flag=0 → the legacy GPT path below
+    runs byte-identical.
 
     ``shadow_conn`` (legacy AI-conductor P0 SHADOW): when supplied on the GPT
     path, a deterministic technical rule is computed in parallel and logged
@@ -260,10 +185,11 @@ async def signal_validator_gate(
 
     use_ai_free = ai_free if ai_free is not None else ai_free_mode()
     if use_ai_free:
-        # W3 AI-FREE primary: technical decision drives the pipeline. PASS →
-        # scalar 1.0 / MODIFY → conservative scalar — same semantics the GPT
-        # path emitted (validated_signal carries strength_scalar downstream).
-        _inp, technical = _g3_technical(ctx, shadow_conn)
+        # W3 AI-FREE primary: technical decision drives the pipeline. The G3
+        # technical rule emits ONLY PASS / conservative MODIFY (losing is never
+        # an entry block — flow_not_block), so there is no KILL branch here; the
+        # signal always flows on with its strength_scalar downstream.
+        _inp, technical = _g3_technical(ctx)
         logger.info(
             "[gate/G3-validator] AI-free decision=%s scalar=%.2f regime=%s "
             "reason=%s sym=%s (deterministic primary, GPT=0)",
@@ -273,13 +199,6 @@ async def signal_validator_gate(
             technical.reason,
             str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
         )
-        if technical.decision == GateDecision.KILL:
-            return GateResult(
-                decision=GateDecision.KILL,
-                next_gate=None,
-                payload={"reason": technical.reason},
-                model_used="python",
-            )
         return GateResult(
             decision=technical.decision,
             next_gate=GATE_PRE_ENTRY_WATCHER,

@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from polaris.core.universe.schema import (
-    ALLOWED_QUOTE_CCY_OKX,
+    ALLOWED_TRADE_QUOTE_CCY_OKX,
     UniverseInstrument,
     liquidity_floor_for_venue,
     passes_liquidity_floor,
@@ -57,23 +57,31 @@ from polaris.core.universe.schema import (
 
 
 def _okx_quote_trade_eligible(ins: UniverseInstrument) -> bool:
-    """True unless ``ins`` is an OKX pair quoted in a non-USD-equivalent currency.
+    """True unless ``ins`` is an OKX pair whose quote is not settleable on order.
 
-    STEP 2 scope-widen admits crypto-quoted OKX pairs (e.g. ``BTC-ETH``) to the
-    WATCH set (flow_not_block), but the OKX adapter sizes ``sz = notional_usd``
-    with ``tgtCcy = quote_ccy`` and the fill normalizer stores ``size_usd =
-    fill_sz × avg_px`` (quote-denominated) — both ASSUME a USD-equivalent quote.
-    A non-USD-equivalent quote (e.g. ETH) would mis-size the order ~1000× and
-    corrupt USD accounting. So such a pair is WATCHED/RANKED but its
-    ``trade_eligible`` is forced FALSE until the order/accounting path handles a
-    non-USD quote (a deliberate downstream change). This is a CORRECTNESS overlay
-    at the single trade-eligibility seam — NOT a defensive size-cut (the name
-    still flows through watch/focus; only its ENTRY is deferred). Non-OKX venues
-    (Capital/Alpaca price venue-side in USD) are unaffected (always True).
+    STEP 2 scope-widen admits crypto-quoted OKX pairs (e.g. ``BTC-ETH``) AND the
+    nominal ``USD``-quoted pairs (``ETH-USD``) to the WATCH set (flow_not_block),
+    but the OKX adapter sizes ``sz = notional_usd`` with ``tgtCcy = quote_ccy`` and
+    the fill normalizer stores ``size_usd = fill_sz × avg_px`` (quote-denominated)
+    — both ASSUME a settleable USD-stablecoin quote.
+
+    Two un-settleable cases are WATCHED/RANKED but forced ``trade_eligible=False``:
+      * a crypto quote (e.g. ETH) would mis-size the order ~1000× + corrupt USD
+        accounting; and
+      * a nominal ``USD`` quote (#44) has NO settleable wallet balance — OKX
+        rejects the order ``51000 Parameter tradeQuoteCcy error`` because it needs
+        a ``tradeQuoteCcy`` ∈ the instrument's ``tradeQuoteCcyList`` (a real
+        stablecoin USDG/USDC/RLUSD) the USDT-notional path does not send.
+    Both defer ENTRY until the order/accounting path supplies a per-instrument
+    ``tradeQuoteCcy`` (a deliberate downstream change). This is a CORRECTNESS
+    overlay at the single trade-eligibility seam — NOT a defensive size-cut (the
+    name still flows through watch/focus; only its ENTRY is deferred). Settleable
+    OKX quotes (USDT/USDC) and non-OKX venues (Capital/Alpaca price venue-side in
+    USD) are unaffected (always True).
     """
     if ins.venue != "okx":
         return True
-    return ins.quote_ccy in ALLOWED_QUOTE_CCY_OKX
+    return ins.quote_ccy in ALLOWED_TRADE_QUOTE_CCY_OKX
 
 __all__ = [
     "DEFAULT_TRADE_FLOOR",

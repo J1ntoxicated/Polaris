@@ -44,13 +44,28 @@ ATR_FLOOR_BY_CLASS: Final[dict[str, float]] = {
     "other": 0.5,
 }
 
-# USD-equivalent (≈$1) OKX quote currencies — admitted DIRECTLY with no FX
-# conversion because ``volCcyQuote24h`` is already ~USD-denominated. STEP 2
-# scope-widen (Jin 2026-06-24 "다 열어야지", flow_not_block): USDC + USD join USDT
-# (~+35 names). Crypto-quoted pairs (BTC-ETH …) are admitted SEPARATELY in
+# USD-equivalent (≈$1) OKX quote currencies — admitted DIRECTLY to the WATCH set
+# with no FX conversion because ``volCcyQuote24h`` is already ~USD-denominated.
+# STEP 2 scope-widen (Jin 2026-06-24 "다 열어야지", flow_not_block): USDC + USD join
+# USDT (~+35 names). Crypto-quoted pairs (BTC-ETH …) are admitted SEPARATELY in
 # ``parse_okx_tickers`` after their vol is normalized to USD via an in-payload
 # quote→USD index — they are NOT in this set (their quote is not USD-equivalent).
+# This is the WATCH admit range only (ranking/stream), NOT the trade gate.
 ALLOWED_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT", "USDC", "USD"})
+
+# OKX quote currencies that are SETTLEABLE on the demo order path — the trade-
+# eligibility subset of the WATCH admit range above (#44). An OKX SPOT pair whose
+# ``quoteCcy`` is the nominal ``USD`` (e.g. ``ETH-USD``) has NO settleable wallet
+# balance: OKX requires a ``tradeQuoteCcy`` ∈ the instrument's per-symbol
+# ``tradeQuoteCcyList`` (a real stablecoin — USDG/USDC/RLUSD), which the adapter's
+# USDT-notional order path does not supply → ``51000 Parameter tradeQuoteCcy
+# error`` (live night-run reject). USDT (single-entry ``tradeQuoteCcyList=['USDT']``
+# == quoteCcy, the demo's funded balance) and USDC (a real settleable stablecoin)
+# remain eligible. ``USD`` is WATCHED/RANKED/streamed (flow_not_block — admit range
+# stays wide) but its ENTRY is deferred at the single trade-eligibility seam until
+# the adapter supplies a per-instrument ``tradeQuoteCcy`` (a deliberate downstream
+# change). Correctness overlay, NOT a defensive size-cut (9-stack untouched).
+ALLOWED_TRADE_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT", "USDC"})
 
 # ---------------------------------------------------------------------------
 # Universe-eligibility liquidity floor (Jin-approved 2026-06-22 — flow_not_block)

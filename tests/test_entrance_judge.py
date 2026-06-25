@@ -159,10 +159,10 @@ def test_subfloor_name_watched_but_trade_ineligible() -> None:
 def test_okx_non_usd_quote_watched_but_trade_ineligible() -> None:
     # STEP 2 scope-widen review fix (HIGH): a crypto-quoted OKX pair (BTC-ETH,
     # quote=ETH) is now ADMITTED + WATCHED (flow_not_block), but the OKX order
-    # path / fill accounting assume a USD-equivalent quote (sz=notional in quote
-    # ccy). So a non-USD-equivalent quote forces trade_eligible=False — the name
-    # is watched/ranked, its ENTRY is deferred (correctness, not a defensive cut).
-    # USD-equivalent quotes (USDT/USDC/USD) stay fully trade-eligible.
+    # path / fill accounting assume a settleable USD-stablecoin quote (sz=notional
+    # in quote ccy). So a non-settleable quote forces trade_eligible=False — the
+    # name is watched/ranked, its ENTRY is deferred (correctness, not a defensive
+    # cut). Settleable stablecoin quotes (USDT/USDC) stay fully trade-eligible.
     judge = EntranceJudge(trade_floor=0.0)  # isolate the quote overlay
     universe = [
         _ins("BTC-ETH", quote_ccy="ETH", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
@@ -172,8 +172,48 @@ def test_okx_non_usd_quote_watched_but_trade_ineligible() -> None:
     out = judge.judge_universe(universe)
     assert out["okx:BTC-ETH"].opportunity_score >= 0.0          # still watched
     assert out["okx:BTC-ETH"].trade_eligible is False           # non-USD quote → defer
-    assert out["okx:BTC-USDC"].trade_eligible is True           # USD-equiv → eligible
+    assert out["okx:BTC-USDC"].trade_eligible is True           # settleable → eligible
     assert out["okx:BTC-USDT"].trade_eligible is True
+
+
+def test_okx_usd_quote_watched_but_trade_ineligible() -> None:
+    # #44 (live night-run): OKX ``ETH-USD`` market/IOC orders 51000-reject with
+    # ``Parameter tradeQuoteCcy error``. A ``quoteCcy='USD'`` OKX spot pair is a
+    # NOMINAL display quote with NO settleable wallet balance — OKX requires a
+    # ``tradeQuoteCcy`` ∈ its per-instrument ``tradeQuoteCcyList`` (a real
+    # stablecoin: USDG/USDC/RLUSD), which the adapter's USDT-notional order path
+    # does not supply. STEP 2 wrongly admitted USD as "USD-equivalent" → trade
+    # path. Fix (WATCH/TRADE decouple, the fc0684d pattern): a USD-quote OKX pair
+    # is WATCHED / RANKED / streamed (flow_not_block — admit range stays wide) but
+    # its trade_eligible is forced FALSE so the single order-open seam defers its
+    # entry (correctness overlay, NOT a defensive size-cut; 9-stack untouched).
+    # The USDT/USDC settleable-quote paths are unaffected (no regression).
+    judge = EntranceJudge(trade_floor=0.0)  # isolate the quote overlay
+    universe = [
+        _ins("ETH-USD", quote_ccy="USD", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("ETH-USDT", quote_ccy="USDT", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("ETH-USDC", quote_ccy="USDC", vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["okx:ETH-USD"].opportunity_score >= 0.0   # still watched/ranked
+    assert out["okx:ETH-USD"].trade_eligible is False     # USD nominal quote → defer entry
+    assert out["okx:ETH-USDT"].trade_eligible is True     # settleable → no regression
+    assert out["okx:ETH-USDC"].trade_eligible is True     # settleable → no regression
+
+
+def test_capital_usd_quote_unaffected_by_okx_usd_overlay() -> None:
+    # The USD-quote veto is OKX-specific (OKX 'USD' has no settleable wallet ccy).
+    # A Capital/Alpaca row priced venue-side in USD must NOT be vetoed by it.
+    judge = EntranceJudge(trade_floor=0.0)
+    universe = [
+        _ins("EURUSD", venue="capital", asset_class="forex", quote_ccy="USD",
+             vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("AAPL", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["capital:EURUSD"].trade_eligible is True
+    assert out["alpaca:AAPL"].trade_eligible is True
 
 
 def test_capital_non_usd_quote_unaffected_by_okx_overlay() -> None:

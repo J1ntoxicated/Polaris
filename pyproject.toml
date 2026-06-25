@@ -8,6 +8,7 @@ dependencies = [
     "hypothesis>=6.100",
     "pytest>=8.0",
     "websockets>=14.0",
+    "yfinance==1.2.0",
 ]
 
 [tool.ruff]

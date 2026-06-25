@@ -32,8 +32,6 @@ import re
 import time
 from typing import Any
 
-import yfinance as yf
-
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.data.schema import Bar
 from polaris.core.pipeline.agents._gpt_client import (
@@ -41,8 +39,20 @@ from polaris.core.pipeline.agents._gpt_client import (
     call_gpt,
     make_system_prefix,
 )
+from polaris.scripts._yahoo_frame import _yahoo_df_to_bars  # re-export (≤500 LOC split)
 
 logger = logging.getLogger(__name__)
+
+# Degrade-never-crash import guard (incident 2026-06-24): an absent yfinance must
+# NOT raise ModuleNotFoundError at import (that crashed the whole ignite_p1 chain).
+# Absent → ``fetch_yahoo_bars`` short-circuits to [] → exchange fallback (flow_not_block).
+try:
+    import yfinance as yf
+    _YF_AVAILABLE = True
+except ImportError:  # pragma: no cover — exercised via the import-block test
+    yf = None
+    _YF_AVAILABLE = False
+    logger.warning("[L1/yahoo] yfinance unavailable — Yahoo bars off, exchange fallback")
 
 # Canonical bar_interval → yfinance interval token. ``1h`` (not ``60m``) is the
 # yfinance hourly token. Unmapped canonical interval → fetch returns [].
@@ -289,73 +299,6 @@ async def resolve_yahoo_ticker(
     return ticker
 
 
-def _to_float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _yahoo_df_to_bars(
-    df: Any,
-    *,
-    venue: str,
-    symbol: str,
-    bar_interval: str,
-    underlying_group_id: str,
-) -> list[Bar]:
-    """Convert a yfinance OHLCV DataFrame to canonical Bars (newest last).
-
-    The index is a tz-AWARE DatetimeIndex in the instrument's LOCAL tz;
-    ``Timestamp.timestamp()`` yields the correct UTC epoch regardless of display
-    tz. Rows with a bad ts or non-positive open/close are dropped (mirrors
-    ``_alpaca_bar_to_canonical``) so one malformed candle never aborts the batch.
-    The stored Bar is VENUE-NATIVE: ``venue`` / ``symbol`` / ``underlying_group_id``
-    are the exchange identity; only ``source`` flips to ``"yahoo"``.
-    """
-    instrument_id = f"{venue}:{symbol}"
-    out: list[Bar] = []
-    for idx_ts, row in zip(df.index, df.itertuples(index=False), strict=False):
-        try:
-            ts = int(idx_ts.timestamp())
-        except (AttributeError, ValueError, OverflowError):
-            continue
-        if ts <= 0:
-            continue
-        o = _to_float(getattr(row, "Open", None))
-        h = _to_float(getattr(row, "High", None))
-        low = _to_float(getattr(row, "Low", None))
-        c = _to_float(getattr(row, "Close", None))
-        if o <= 0.0 or c <= 0.0:
-            continue
-        vol = _to_float(getattr(row, "Volume", None))
-        out.append(
-            Bar(
-                instrument_id=instrument_id,
-                underlying_group_id=underlying_group_id,
-                venue=venue,
-                symbol=symbol,
-                bar_interval=bar_interval,
-                ts=ts,
-                open=o,
-                high=h,
-                low=low,
-                close=c,
-                volume=vol,
-                notional_usd=c * vol if vol > 0 else 0.0,
-                trade_count=0,
-                vwap=0.0,
-                bid_close=0.0,
-                ask_close=0.0,
-                spread_bps_close=0.0,
-                source="yahoo",
-            )
-        )
-    # yfinance is already ascending; sort to be safe (canonical newest-last).
-    out.sort(key=lambda b: b.ts)
-    return out
-
-
 def _yf_history_blocking(ticker: str, interval: str, period: str) -> Any:
     """SYNCHRONOUS yfinance history fetch (requests-based; releases the GIL on I/O).
 
@@ -426,6 +369,8 @@ async def fetch_yahoo_bars(
     full bar list; the per-call ``limit`` slice is applied on return so a varying
     ``limit`` within the period composes. Empty results are cached too.
     """
+    if not _YF_AVAILABLE:
+        return []  # yfinance absent → exchange fallback (incident 2026-06-24 guard)
     interval = _YF_INTERVAL.get(bar_interval)
     if interval is None:
         return []

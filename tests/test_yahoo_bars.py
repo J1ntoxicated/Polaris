@@ -21,6 +21,7 @@ entry/size/exit decision.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from typing import Any
 
@@ -777,3 +778,102 @@ def test_period_open_buckets() -> None:
     # 1D → hourly bucket (no clean UTC-midnight boundary for the in-progress bar).
     assert ybars._period_open("1D", now) % 3600 == 0
     assert ybars._period_open("1D", now) <= now
+
+
+# ---------------------------------------------------------------------------
+# 10. yfinance import guard — degrade-never-crash dependency hardening
+# ---------------------------------------------------------------------------
+#
+# THE INCIDENT (2026-06-24): yfinance was absent from the env, so the top-level
+# ``import yfinance as yf`` raised ModuleNotFoundError on import, which propagated
+# up the whole ignite_p1 import chain → bot down. The guard makes the module
+# import SUCCEED when yfinance is absent (``_YF_AVAILABLE = False``) and
+# ``fetch_yahoo_bars`` short-circuits to [] BEFORE any ``yf.`` access, so the
+# exchange-fallback path in ``fetch_bars_one`` is reached (flow_not_block). Pure
+# dependency hardening — gates no entry/size/exit decision.
+
+
+@pytest.mark.asyncio
+async def test_fetch_yahoo_bars_yfinance_absent_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When yfinance is unavailable, fetch_yahoo_bars returns [] IMMEDIATELY and
+    never touches the blocking history fn (so ``yf.`` is never accessed)."""
+    def _must_not_run(*a: Any, **k: Any) -> pd.DataFrame:
+        raise AssertionError("_yf_history_blocking must NOT run when yfinance absent")
+
+    monkeypatch.setattr(ybars, "_YF_AVAILABLE", False)
+    monkeypatch.setattr(ybars, "_yf_history_blocking", _must_not_run)
+    bars = await fetch_yahoo_bars(
+        "alpaca", "AAPL", "equity", bar_interval="1D",
+    )
+    assert bars == []
+
+
+def test_module_import_succeeds_when_yfinance_absent() -> None:
+    """Simulate yfinance ABSENT at import: the module must still import (no
+    ModuleNotFoundError propagates) and ``_YF_AVAILABLE`` must be False.
+
+    Blocks ``yfinance`` via a sys.meta_path finder, drops the cached module +
+    package from sys.modules, then ``importlib.reload`` — then restores fully so
+    no other test sees a yfinance-less module.
+    """
+    import builtins
+    import importlib
+
+    blocked = {"yfinance"}
+
+    class _BlockYFinance:
+        def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+            if name in blocked or name.split(".")[0] in blocked:
+                raise ModuleNotFoundError(f"No module named {name!r}")
+            return None
+
+    finder = _BlockYFinance()
+    saved_yf = {k: v for k, v in sys.modules.items() if k.split(".")[0] == "yfinance"}
+    for k in saved_yf:
+        del sys.modules[k]
+    sys.meta_path.insert(0, finder)
+    try:
+        reloaded = importlib.reload(ybars)
+        # The whole point: no exception, and the absence flag flipped off.
+        assert reloaded._YF_AVAILABLE is False
+        assert reloaded.yf is None
+        # The public path degrades to [] (no yf.* access) when absent.
+        import asyncio as _asyncio
+
+        out = _asyncio.run(
+            reloaded.fetch_yahoo_bars("alpaca", "AAPL", "equity", bar_interval="1D"),
+        )
+        assert out == []
+    finally:
+        sys.meta_path.remove(finder)
+        sys.modules.update(saved_yf)
+        # Reload once more WITH yfinance available to restore the real module for
+        # every downstream test (importlib.reload mutates the live module object).
+        importlib.reload(ybars)
+        assert ybars._YF_AVAILABLE is True
+        assert ybars.yf is not None
+        _ = builtins  # keep import referenced (no behaviour)
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_one_exchange_fallback_when_yfinance_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: with yfinance absent, fetch_yahoo_bars → [] so fetch_bars_one
+    routes to the exchange branch (the ``if yahoo_bars:`` is False)."""
+    from polaris.core.data.schema import Bar
+    from polaris.scripts import _production_bars as pbars
+
+    monkeypatch.setattr(ybars, "_YF_AVAILABLE", False)
+
+    calls = {"n": 0}
+
+    async def _okx(*a: Any, **k: Any) -> list[Bar]:
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pbars, "fetch_okx_bars", _okx)
+    await pbars.fetch_bars_one("okx", "BTC-USDT", "crypto", bar_interval="1m")
+    assert calls["n"] == 1, "exchange fallback must run when yfinance is absent"

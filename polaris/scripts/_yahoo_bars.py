@@ -163,8 +163,11 @@ def map_to_yahoo_ticker(venue: str, symbol: str, asset_class: str) -> str | None
     sym = symbol.upper()
 
     if venue == "alpaca":
-        # US equity symbol is Yahoo-native (AAPL → AAPL). 100% coverage.
-        return symbol
+        # US equity symbol is Yahoo-native (AAPL → AAPL). Class shares differ by
+        # ONE char: Alpaca uses a dot (BRK.A, BF.B), Yahoo a dash (BRK-A, BF-B)
+        # (#41 — the verbatim dot crashed the Yahoo fetch → exchange REST fallback
+        # → 429). Plain tickers have no dot → unchanged.
+        return sym.replace(".", "-")
 
     if venue == "okx":
         # Crypto. ONLY a USD-equiv quote on an IDENTITY-VERIFIED base maps to the

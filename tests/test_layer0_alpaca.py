@@ -15,6 +15,7 @@ import pytest
 
 from polaris.core.universe._alpaca import (
     ALPACA_PAPER_BASE,
+    _alpaca_asset_row_to_instrument,
     fetch_alpaca_instruments,
 )
 from polaris.core.universe.discovery import refresh_alpaca_universe
@@ -155,3 +156,119 @@ def test_refresh_alias_passes_through() -> None:
 
     out = asyncio.run(run())
     assert {i.symbol for i in out} == {"AAPL", "TSLA"}
+
+
+# ---------------------------------------------------------------------------
+# #41 — non-tradable derivative junk exclusion (warrants/rights/units).
+# flow_not_block: this is a venue-membership QUALITY gate (same kind as the
+# listed-exchange gate / state==live / bars=0), NOT a per-signal block. The bot
+# cannot meaningfully trade these instruments, and they crash yfinance bar
+# fetches → Alpaca REST 429 storms. Normal common stocks (incl. class shares
+# like BRK.A) are NOT touched.
+# ---------------------------------------------------------------------------
+
+def _row(symbol: str, name: str, *, exchange: str = "NASDAQ") -> dict[str, object]:
+    return {
+        "id": f"id-{symbol}",
+        "class": "us_equity",
+        "exchange": exchange,
+        "symbol": symbol,
+        "name": name,
+        "status": "active",
+        "tradable": True,
+    }
+
+
+def test_warrant_dotted_suffix_excluded() -> None:
+    # .WS / .WS<letter> / .WT = warrant series → excluded.
+    for sym in ("JOBY.WS", "NWAX.WS", "ACME.WSA", "FOO.WT"):
+        assert _alpaca_asset_row_to_instrument(
+            _row(sym, "Some Acquisition Corp Warrant"), now_ts=NOW
+        ) is None, sym
+
+
+def test_warrant_raw_5letter_excluded_by_name() -> None:
+    # Raw NASDAQ 5th-letter form (no dot) — caught via the name field.
+    assert _alpaca_asset_row_to_instrument(
+        _row("BENFW", "Benessere Capital Acquisition Corp Warrant"), now_ts=NOW
+    ) is None
+    assert _alpaca_asset_row_to_instrument(
+        _row("KTTAW", "Pasithea Therapeutics Corp Warrants"), now_ts=NOW
+    ) is None
+
+
+def test_rights_excluded() -> None:
+    assert _alpaca_asset_row_to_instrument(
+        _row("RQI.RT", "RiverNorth Opportunities Fund Inc. Rights"), now_ts=NOW
+    ) is None
+    assert _alpaca_asset_row_to_instrument(
+        _row("ABCDR", "Some SPAC Right"), now_ts=NOW
+    ) is None
+
+
+def test_units_excluded() -> None:
+    assert _alpaca_asset_row_to_instrument(
+        _row("PONO.U", "Pono Capital Three Inc. Units"), now_ts=NOW
+    ) is None
+    assert _alpaca_asset_row_to_instrument(
+        _row("FOO.UN", "Foo Trust Units"), now_ts=NOW
+    ) is None
+    assert _alpaca_asset_row_to_instrument(
+        _row("ABCDU", "Some SPAC Unit"), now_ts=NOW
+    ) is None
+
+
+def test_class_share_kept() -> None:
+    # BRK.A / BF.B are tradable class shares — KEPT (handled by yfinance
+    # dot→dash mapping, NOT excluded). flow_not_block.
+    for sym, name in (
+        ("BRK.A", "Berkshire Hathaway Inc. Class A Common Stock"),
+        ("BRK.B", "Berkshire Hathaway Inc. Class B Common Stock"),
+        ("BF.B", "Brown-Forman Corporation Class B Common Stock"),
+    ):
+        inst = _alpaca_asset_row_to_instrument(_row(sym, name), now_ts=NOW)
+        assert inst is not None, sym
+        assert inst.symbol == sym
+
+
+def test_normal_common_stock_not_dropped_by_name_substring() -> None:
+    # NON-REGRESSION / flow_not_block proof. Two false-positive classes the name
+    # rule must NOT trip:
+    #   (a) glued substrings — "UnitedHealth"/"Unity"/"Wright"/"Rightmove";
+    #   (b) a STANDALONE derivative token at the START of a real common-stock name
+    #       — "Unit Corporation" (UNT, a real NYSE oil & gas common) / "Right Time
+    #       Inc". The name match is anchored to the TRAILING token, and a common
+    #       stock always ends "...Common Stock", so neither is excluded.
+    for sym, name in (
+        ("UNH", "UnitedHealth Group Incorporated Common Stock"),
+        ("U", "Unity Software Inc. Common Stock"),
+        ("WMG", "Wright Medical Group N.V. Common Stock"),
+        ("SNOW", "Snowflake Inc. Class A Common Stock"),
+        ("LOW", "Lowe's Companies, Inc. Common Stock"),
+        ("AAPL", "Apple Inc. Common Stock"),
+        ("UNT", "Unit Corporation Common Stock"),
+        ("RT", "Right Time Inc Common Stock"),
+    ):
+        inst = _alpaca_asset_row_to_instrument(_row(sym, name), now_ts=NOW)
+        assert inst is not None, sym
+        assert inst.symbol == sym
+
+
+def test_fetch_drops_junk_keeps_real() -> None:
+    payload = [
+        _row("AAPL", "Apple Inc. Common Stock"),
+        _row("BRK.A", "Berkshire Hathaway Inc. Class A Common Stock"),
+        _row("JOBY.WS", "Joby Aviation Inc. Warrant"),
+        _row("BENFW", "Benessere Capital Acquisition Corp Warrant"),
+        _row("RQI.RT", "RiverNorth Opportunities Fund Inc. Rights"),
+        _row("PONO.U", "Pono Capital Three Inc. Units"),
+    ]
+
+    async def run() -> list[UniverseInstrument]:
+        async with _mock_client(payload) as cli:
+            return await fetch_alpaca_instruments(
+                api_key="k", secret_key="s", now_ts=NOW, client=cli
+            )
+
+    out = asyncio.run(run())
+    assert {i.symbol for i in out} == {"AAPL", "BRK.A"}

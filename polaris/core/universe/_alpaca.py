@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -122,6 +123,42 @@ def _retry_after_sec(resp: httpx.Response, fallback: float) -> float:
 _GRADABLE_EXCHANGES: frozenset[str] = frozenset(
     {"NASDAQ", "NYSE", "ARCA", "AMEX", "BATS"}
 )
+
+# Non-tradable derivative junk (#41): warrants / rights / units. The bot cannot
+# meaningfully trade these, yfinance has no series for them (→ ERROR), and they
+# fall back to Alpaca REST bars → a 429 Too-Many-Requests storm that starves the
+# whole sweep. Excluding them is a venue-membership QUALITY test (the same kind
+# as the listed-exchange gate, state==live, or the bars=0 active-exclusion) —
+# NOT a per-signal block. flow_not_block holds: every tradeable common stock
+# (incl. class shares like BRK.A — those flow, handled by yfinance dot→dash)
+# still passes untouched. Two complementary, high-precision signals:
+#   1. The reserved dotted suffix in the symbol (``.WS``/``.WSA``/``.WT`` warrant,
+#      ``.RT`` rights, ``.U``/``.UN`` unit). Unambiguous — no common stock or
+#      class share (``.A``/``.B``/``.C``) uses these.
+#   2. A TRAILING instrument-type token in the Alpaca ``name`` (catches the raw
+#      NASDAQ 5th-letter form like ``BENFW``/``KTTAW`` that carries no dot).
+#      Alpaca always places the security-type token LAST — a derivative ends
+#      "...Warrant(s)"/"...Right(s)"/"...Unit(s)", whereas EVERY common stock
+#      (incl. class shares) ends "...Common Stock". Anchoring the match to the
+#      end-of-name is what keeps real commons whose NAME merely starts with the
+#      token — "Unit Corporation Common Stock" (UNT), "Right Time Inc Common
+#      Stock" — as well as glued substrings ("UnitedHealth"/"Unity"/"Wright").
+_DERIV_DOT_SUFFIXES: frozenset[str] = frozenset({"WT", "RT", "U", "UN"})
+_DERIV_NAME_RE = re.compile(r"\b(?:WARRANTS?|RIGHTS?|UNITS?)\b[\s.]*$")
+
+
+def _is_non_tradable_derivative(symbol: str, name: str) -> bool:
+    """True for a warrant/rights/unit row (excluded from the gradable universe).
+
+    ``symbol``/``name`` come straight off the Alpaca ``/v2/assets`` row. Pure +
+    side-effect-free. See ``_DERIV_*`` notes — flow_not_block QUALITY gate, not a
+    signal block; class shares and ordinary common stocks return False.
+    """
+    if "." in symbol:
+        suffix = symbol.rsplit(".", 1)[1]
+        if suffix.startswith("WS") or suffix in _DERIV_DOT_SUFFIXES:
+            return True
+    return bool(name) and _DERIV_NAME_RE.search(name.upper()) is not None
 
 # Curated liquidity prior: megacaps + the most-traded ETFs. Always probed for a
 # real snapshot even on a day they fall out of the share-volume most-actives,
@@ -291,6 +328,11 @@ def _alpaca_asset_row_to_instrument(
     # Human-readable name (display only): Alpaca /v2/assets carries ``name``
     # ("Apple Inc. Common Stock"). "" when absent → UI falls back to the symbol.
     name = str(row.get("name", "")).strip()
+    # Non-tradable derivative junk (#41) QUALITY gate — warrants/rights/units off
+    # the gradable universe (flow_not_block: not a signal block; class shares and
+    # ordinary common stocks pass). Keeps yfinance-less junk out of the bar sweep.
+    if _is_non_tradable_derivative(symbol, name):
+        return None
 
     return UniverseInstrument(
         venue="alpaca",

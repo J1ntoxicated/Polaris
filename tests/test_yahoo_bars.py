@@ -110,6 +110,16 @@ def test_map_alpaca_equity_verbatim() -> None:
     assert map_to_yahoo_ticker("alpaca", "MSFT", "equity") == "MSFT"
 
 
+def test_map_alpaca_class_share_dot_to_dash() -> None:
+    # #41 — yfinance uses a DASH for share classes (BRK.A → BRK-A). A verbatim
+    # passthrough crashed the Yahoo fetch (BRK.A not a Yahoo ticker) → exchange
+    # REST fallback → 429. Non-dotted symbols are unchanged (non-regression).
+    assert map_to_yahoo_ticker("alpaca", "BRK.A", "equity") == "BRK-A"
+    assert map_to_yahoo_ticker("alpaca", "BRK.B", "equity") == "BRK-B"
+    assert map_to_yahoo_ticker("alpaca", "BF.B", "equity") == "BF-B"
+    assert map_to_yahoo_ticker("alpaca", "AAPL", "equity") == "AAPL"
+
+
 def test_map_okx_verified_base_usd_quote_to_base_usd() -> None:
     # Identity-VERIFIED bases only (Yahoo "{base}-USD" == the OKX coin).
     assert map_to_yahoo_ticker("okx", "BTC-USDT", "crypto") == "BTC-USD"

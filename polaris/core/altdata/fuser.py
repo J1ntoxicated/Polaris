@@ -35,6 +35,7 @@ writes to learner/risk state. The hint, if any, is fed into the EXISTING
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # Polaris canonical labels (mirror live_recalc.regime_flip.REGIME_VALUES).
@@ -60,11 +61,11 @@ _DEFAULT_WEIGHT = 1.0
 # 1.0 (behaviour-identical to pre-P1). Only sources actually routed to a group
 # (cache.get_for_group) can appear in ``source_weights`` — routing isolation.
 _SOURCE_WEIGHTS: dict[str, dict[str, float]] = {
-    "crypto": {"crypto_fg": 1.25, "okx_funding": 1.25},
-    "forex": {"fred_macro": 1.25},
-    "commodity": {"fred_macro": 1.25, "cftc_cot": 1.25},
-    "index": {"fred_macro": 1.15},
-    "equity": {"fred_macro": 1.25},
+    "crypto": {"crypto_fg": 1.25, "okx_funding": 1.25, "news_sentiment": 1.1},
+    "forex": {"fred_macro": 1.25, "news_sentiment": 1.0},
+    "commodity": {"fred_macro": 1.25, "cftc_cot": 1.25, "news_sentiment": 1.0},
+    "index": {"fred_macro": 1.15, "news_sentiment": 1.0},
+    "equity": {"fred_macro": 1.25, "news_sentiment": 1.1},
 }
 
 
@@ -95,6 +96,16 @@ _COT_BULL_MILD = 0.70
 _COT_BEAR_STRONG = 0.15
 _COT_BEAR_MILD = 0.30
 
+# News-sentiment thresholds — a SIGNAL-only directional tilt. ``sentiment`` is a
+# relevance-weighted mean over the group's recent headlines (∈ [-1, +1]); the
+# raw contribution is scaled by the headline ``relevance`` so a thin / off-topic
+# datum cannot manufacture conviction. The base weight (1.5) sits at the
+# conviction floor so one strong, on-topic headline cluster is suggestive but a
+# single weak headline never overrides price. flow_not_block: negative sentiment
+# tilts toward BEAR evidence, it never blocks/halts; CRISIS stays price-led.
+_NEWS_SENTIMENT_MIN = 0.15  # below |this| → neutral (evidence-only, no score)
+_NEWS_BASE_SCORE = 1.5
+
 
 def fuse_evidence(
     underlying_group_id: str,
@@ -112,6 +123,9 @@ def fuse_evidence(
     source_weights: dict[str, float] = {}
 
     prefix = underlying_group_id.split(":", 1)[0]
+    group_symbol = (
+        underlying_group_id.split(":", 1)[1] if ":" in underlying_group_id else ""
+    )
     if prefix == "crypto":
         _score_crypto_fg(
             sources.get("crypto_fg"), scores, evidence, source_weights, prefix
@@ -139,6 +153,17 @@ def fuse_evidence(
                 sources.get("cftc_cot"), symbol, scores, evidence,
                 source_weights, prefix,
             )
+
+    # News-sentiment EVIDENCE — routed to ALL asset classes. The collector emits
+    # a per-symbol map; pick THIS group's symbol row (absent → no-op). SIGNAL
+    # only: tilts bull/bear evidence, never blocks/sizes/exits.
+    news_payload = sources.get("news_sentiment")
+    news_row = (
+        news_payload.get(group_symbol)
+        if isinstance(news_payload, dict) and group_symbol
+        else None
+    )
+    _score_news(news_row, scores, evidence, source_weights, prefix)
 
     if not evidence:
         return None, 0.0, {}
@@ -292,3 +317,50 @@ def _score_cot(
         scores[_BEAR] += 2.0 * w
     elif pctile <= _COT_BEAR_MILD:
         scores[_BEAR] += 1.0 * w
+
+
+def _score_news(
+    news: dict[str, Any] | None,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
+) -> None:
+    """News-sentiment headline tone → bull/bear regime EVIDENCE (SIGNAL only).
+
+    ``news`` is the per-GROUP aggregate row (flat ``{"sentiment","relevance",
+    "magnitude","n"}``) the collector emits for this group's symbol. Bullish tone
+    adds BULL evidence, bearish adds BEAR — scaled by ``relevance`` so a thin or
+    off-topic datum contributes little. The raw sentiment is ALWAYS recorded in
+    ``evidence`` (even below the neutral band) so the dashboard / G3-G7 trail
+    always sees it. News NEVER writes CRISIS (that stays price-led) and NEVER
+    blocks/sizes/exits/halts — flow_not_block: a negative datum tilts evidence,
+    it does not stop anything. Absent / empty payload → no-op.
+    """
+    if not news or "sentiment" not in news:
+        return
+    sentiment = news.get("sentiment")
+    if not isinstance(sentiment, (int, float)) or not math.isfinite(float(sentiment)):
+        return  # non-finite (nan/inf) cache value → neutral no-op, never max-tilt
+    sentiment = max(-1.0, min(1.0, float(sentiment)))
+    relevance = news.get("relevance")
+    rel = float(relevance) if isinstance(relevance, (int, float)) else 0.5
+    rel = max(0.0, min(1.0, rel)) if math.isfinite(rel) else 0.5
+    # Evidence is ALWAYS surfaced (even neutral) — read-only context.
+    evidence["news_sentiment"] = round(sentiment, 4)
+    magnitude = news.get("magnitude")
+    if isinstance(magnitude, (int, float)) and math.isfinite(float(magnitude)):
+        evidence["news_magnitude"] = round(max(0.0, min(1.0, float(magnitude))), 4)
+    n = news.get("n")
+    if isinstance(n, (int, float)):
+        evidence["news_n"] = int(n)
+    w = _source_weight(prefix, "news_sentiment")
+    source_weights["news_sentiment"] = w
+    # Neutral band → no regime tilt (evidence recorded above, no conviction).
+    if abs(sentiment) < _NEWS_SENTIMENT_MIN:
+        return
+    contribution = _NEWS_BASE_SCORE * abs(sentiment) * rel * w
+    if sentiment > 0.0:
+        scores[_BULL] += contribution
+    else:
+        scores[_BEAR] += contribution

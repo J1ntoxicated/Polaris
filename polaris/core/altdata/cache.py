@@ -21,11 +21,11 @@ from typing import Any
 
 # Asset-class prefix → source names that inform it.
 _GROUP_SOURCES: dict[str, tuple[str, ...]] = {
-    "crypto": ("okx_funding", "crypto_fg", "coinglass"),
-    "forex": ("fred_macro", "myfxbook"),
-    "index": ("fred_macro",),
-    "commodity": ("fred_macro", "cftc_cot"),
-    "equity": ("fred_macro",),
+    "crypto": ("okx_funding", "crypto_fg", "coinglass", "news_sentiment"),
+    "forex": ("fred_macro", "myfxbook", "news_sentiment"),
+    "index": ("fred_macro", "news_sentiment"),
+    "commodity": ("fred_macro", "cftc_cot", "news_sentiment"),
+    "equity": ("fred_macro", "news_sentiment"),
 }
 
 

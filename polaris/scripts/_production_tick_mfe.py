@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 
+from polaris.core.economics.fees import real_fee_bps
 from polaris.core.live_recalc.exit_engine import MfeProtectSchedule
 from polaris.core.regime_fit import exit_tightness, regime_fit
 from polaris.core.ticks.config import TickEngineConfig
@@ -46,6 +47,33 @@ _BURST_RIDER = "burst_rider"
 _SCALP_TARGET_R = 0.5
 _SCALP_STOP_R = -0.4
 
+# #37 micro_reversion 0-second-hold fix ([[micro_reversion_0sec_hold_2026-06-26]]).
+# The ``flow_reversal`` scalp branch fired the instant the book imbalance ``ofi``
+# MARGINALLY opposed the side (a ZERO deadband). But a freshly-faded overshoot's
+# book is NORMALLY still marginally opposed at entry, so the exit fired at 0.0s —
+# every close a -0.001R micro loss eaten by spread+fee (31% of OKX closes <=2s on a
+# move smaller than the spread). The fix is flow_not_block (DEFER the marginal-flow
+# exit to a meaningful capture, NOT a block / size-cut / wider rail):
+#   - ``_SCALP_FLOW_REVERSAL_OFI`` ([-1,1] book-imbalance magnitude): a GENUINE
+#     break — ``|ofi|`` FIRMLY reversed past this floor — still exits IMMEDIATELY
+#     (misclassification CORRECTION, not deferring a real break). Set on the SAME
+#     [-1,1] scale as the entry ``theta_ofi`` (0.25 default ~ a clearly bid/ask-heavy
+#     ~62/38 book), so a firmly-reversed book is a real reversal while the marginal
+#     post-fade baseline is not. Env-tunable.
+#   - A MARGINAL opposing ``ofi`` (below the floor) only exits once the capture has
+#     cleared the spread+fee cost band (``min_capture_r`` supplied by the caller);
+#     below cost it HOLDS, riding to ``scalp_target`` (a meaningful capture) or the
+#     UNCHANGED ``scalp_stop`` -0.4R rail. ASYMMETRY preserved (loss side untouched).
+_SCALP_FLOW_REVERSAL_OFI: float = _env_pos_float(
+    "POLARIS_TICK_SCALP_FLOW_REVERSAL_OFI", 0.25
+)
+
+# The R-unit ruler the scalp pnl_r shares (compute_unrealized_pnl_r's stop_atr_mult
+# default — 1R == entry x atr_pct x this). Referenced so the spread+fee -> R cost
+# floor below uses the SAME denominator the pnl_r it gates is measured on (no magic
+# 2.0). Env-tunable for parity if the shared stop multiple is ever re-aimed.
+_SCALP_STOP_ATR_MULT: float = _env_pos_float("POLARIS_TICK_SCALP_STOP_ATR_MULT", 2.0)
+
 # Per-strategy reversion TAKE-PROFIT override (R) — PROFIT SIDE ONLY.
 # [[harvest_generalization_2026-06-23]]: micro_reversion is the top harvest target
 # (avg MFE +0.523R over 120 trades, realized only -0.148R). Its bounded
@@ -72,6 +100,36 @@ def _scalp_target_for_strategy(strategy_id: str) -> float:
     if strategy_id == _MICRO_REVERSION:
         return _MICRO_REVERSION_TARGET_R
     return _SCALP_TARGET_R
+
+
+def _scalp_min_capture_r(
+    *, venue: str, spread_bps: float | None, entry_atr_pct: float | None
+) -> float | None:
+    """Spread+fee round-trip cost as a fraction of the scalp R-ruler, or ``None``.
+
+    #37 fix: the meaningful-capture floor below which a MARGINAL flow turn must not
+    bank a reversion (it would only book the round-trip cost = a 0s micro loss). The
+    cost is ``spread_bps + 2 x real_fee_bps(venue)`` (one spread + a real taker fee
+    on each of the two legs), as a fraction of notional, divided by the SAME R-unit
+    price-fraction the scalp ``pnl_r`` is measured on (``entry_atr_pct x
+    _SCALP_STOP_ATR_MULT``) so the floor and the pnl_r it gates share one ruler.
+
+    Uses the REAL fee schedule (the documented go-live edge basis — OKX 10bps), NOT
+    the 70bps OKX demo billing artifact: a demo-fee floor would be ~0.7%+ and
+    effectively block every reversion exit (a defensive throttle). Returns ``None``
+    on a missing / non-positive ATR anchor or spread (capture path disabled →
+    firm-break-only), legacy-graceful, never a divide-by-zero. PURE.
+    """
+    if entry_atr_pct is None or entry_atr_pct <= 0.0:
+        return None
+    if spread_bps is None or spread_bps < 0.0:
+        return None
+    rt_cost_bps = spread_bps + 2.0 * real_fee_bps(venue)
+    cost_frac = rt_cost_bps / 10_000.0
+    r_unit_frac = entry_atr_pct * _SCALP_STOP_ATR_MULT
+    if r_unit_frac <= 0.0:
+        return None
+    return cost_frac / r_unit_frac
 
 
 # Per-strategy momentum exit trail width (ATR units) override for the precise
@@ -265,6 +323,7 @@ def _scalp_exit_decision(
     pnl_r: float,
     strategy_id: str = "",
     peak_r: float | None = None,
+    min_capture_r: float | None = None,
 ) -> str | None:
     """Fast-scalp exit for a reversion position — close-reason or None (hold).
 
@@ -284,12 +343,21 @@ def _scalp_exit_decision(
         32.9%-reach-+0.30R-but-only-18.4%-bank give-back). ``peak_r is None``
         (legacy / momentum callers) DISARMS it (byte-identical). PROFIT side only —
         it NEVER fires on a negative pnl nor banks a fee-negative crumb.
-      - ``flow_reversal``: order-flow imbalance turned to favour the side the
-        fade was betting AGAINST continuing (a long fade wanted the down-push to
-        exhaust; if ``ofi`` is now firmly negative again, the snap-back failed).
+      - ``flow_reversal``: order-flow imbalance turned against the fade. #37 fix:
+        only a GENUINE break exits at 0s — ``|ofi|`` FIRMLY reversed past
+        ``_SCALP_FLOW_REVERSAL_OFI`` (the misclassification CORRECTION: a real big
+        adverse book is exempt from the hold). A MARGINAL opposing ``ofi`` (below
+        that floor) is the baseline post-fade book state, NOT a reversal — it only
+        exits once the capture has cleared the spread+fee cost band
+        (``min_capture_r``); below cost it HOLDS, riding to ``scalp_target`` or the
+        UNCHANGED ``scalp_stop``. ``min_capture_r is None`` (legacy / momentum) →
+        the capture path is disabled (firm-break-only). This kills the 0.0s
+        -0.001R micro-loss churn (flow_not_block — a DEFERRED marginal-flow exit,
+        never a block / size-cut / wider rail).
     EXPECTANCY (cut a dead scalp fast / bank a small winner fast), NOT a throttle.
     The loss side (``_SCALP_STOP_R``) is UNCHANGED regardless of strategy_id /
-    peak_r — asymmetry preserved (the give-back is a positive-only profit catch).
+    peak_r / min_capture_r — asymmetry preserved (every PROFIT-side change above
+    only ever DEFERS a banking; none touches the -0.4R rail).
     """
     if pnl_r <= _SCALP_STOP_R:
         return "scalp_stop"
@@ -307,11 +375,18 @@ def _scalp_exit_decision(
     ):
         return "scalp_giveback"
     if ofi is not None:
-        # A long reversion bet wants flow to stop selling; if ofi is firmly
-        # bid-negative (still selling) the fade is failing → exit. Symmetric for
-        # a short reversion (ofi firmly bid-positive = still buying).
-        if side == "long" and ofi < -0.0:
-            return "flow_reversal"
-        if side == "short" and ofi > 0.0:
-            return "flow_reversal"
+        # A long reversion bet wants flow to stop selling; a short wants it to stop
+        # buying. The opposing-book magnitude decides whether this is a GENUINE
+        # break or just the marginal post-fade baseline (#37).
+        opposing = (side == "long" and ofi < 0.0) or (side == "short" and ofi > 0.0)
+        if opposing:
+            # GENUINE break → exit NOW even at ~0 capture (real adverse book,
+            # exempt from the hold).
+            if abs(ofi) >= _SCALP_FLOW_REVERSAL_OFI:
+                return "flow_reversal"
+            # MARGINAL opposing flow → only bank once the capture cleared spread+fee
+            # (a meaningful capture, not a 0s micro loss). Below cost / no floor →
+            # HOLD (rides to scalp_target or the unchanged scalp_stop).
+            if min_capture_r is not None and pnl_r >= min_capture_r:
+                return "flow_reversal"
     return None

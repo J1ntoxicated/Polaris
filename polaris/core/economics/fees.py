@@ -42,6 +42,7 @@ __all__ = [
     "OKX_REAL_MAKER_BPS",
     "OKX_REAL_TAKER_BPS",
     "demo_fee_usd",
+    "real_fee_bps",
     "real_fee_usd",
 ]
 
@@ -68,6 +69,24 @@ def _bps_to_usd(bps: float, notional_usd: float) -> float:
     if not math.isfinite(notional_usd):
         return 0.0
     return bps / _BPS_DIVISOR * abs(notional_usd)
+
+
+def real_fee_bps(venue: str, is_maker: bool = False) -> float:
+    """REAL per-leg fee in BPS of notional for ``venue`` (the schedule SSOT).
+
+    Same venue mapping as ``real_fee_usd`` (OKX 10/8 taker/maker, Capital 3 bps
+    proxy, Alpaca 0; unknown → OKX real taker), but returns the raw bps so a
+    consumer that reasons in bps (e.g. a spread+fee cost floor) does not have to
+    round-trip through a notional. Pure, no I/O.
+    """
+    v = venue.lower()
+    if v == "okx":
+        return OKX_REAL_MAKER_BPS if is_maker else OKX_REAL_TAKER_BPS
+    if v == "capital":
+        return CAPITAL_REAL_BPS
+    if v == "alpaca":
+        return ALPACA_REAL_BPS
+    return OKX_REAL_TAKER_BPS
 
 
 def real_fee_usd(venue: str, notional_usd: float, is_maker: bool = False) -> float:

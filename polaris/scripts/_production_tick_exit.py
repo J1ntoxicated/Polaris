@@ -41,6 +41,7 @@ from polaris.scripts._production_tick_mfe import (
     _mfe_protect_schedule,
     _momentum_trail_mult,
     _scalp_exit_decision,
+    _scalp_min_capture_r,
 )
 from polaris.scripts._production_tick_state import TickEngineState
 
@@ -133,10 +134,25 @@ async def _run_exits(
                 scalp_pnl_r,
             )
             eng.scalp_peak_r_by_position[position_id] = scalp_peak_r
+            # #37 meaningful-capture floor (spread + real round-trip fee, in the
+            # scalp R-ruler): a MARGINAL opposing ``ofi`` only banks once the capture
+            # has cleared this cost — below it the scalp HOLDS instead of a 0.0s
+            # micro-loss close. Anchored on the SAME entry-bar ATR as ``scalp_pnl_r``
+            # (``rev_anchor_raw``); a NULL anchor / missing spread → None → firm-break
+            # only (legacy-graceful). A GENUINE firm ofi reversal stays exempt.
+            scalp_min_capture_r = _scalp_min_capture_r(
+                venue=trade.venue, spread_bps=feat.spread_bps,
+                # Floor the anchor with the SAME 1e-4 ``scalp_pnl_r`` uses above so
+                # the floor and the pnl_r it gates share ONE ruler (no parity drift
+                # on a degenerate sub-1e-4 entry-bar ATR).
+                entry_atr_pct=(
+                    None if rev_anchor_raw is None else max(float(rev_anchor_raw), 1e-4)
+                ),
+            )
             reason = _scalp_exit_decision(
                 side=trade.side, entry_price=entry_price, last_mid=last_mid,
                 ofi=feat.ofi, pnl_r=scalp_pnl_r, strategy_id=trade.strategy_id,
-                peak_r=scalp_peak_r,
+                peak_r=scalp_peak_r, min_capture_r=scalp_min_capture_r,
             )
             if reason is None:
                 continue

@@ -10,6 +10,8 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🟢 야간 자율 운영 2026-06-26 (Jin 전권 위임·취침, 2 supervised 배포 PID 33073→50083, main `8a36d00`).** 6 fix 배포·라이브 검증: **#1** Alpaca 1D-exit churn 정지(horizon materiality floor) · **#37** micro_reversion 0초단타→spread+fee 넘는 capture까지 hold(라이브 보유 0s→31s, -0.4R 큰손실 0건, 0초 churn 소멸) · **#38** Alpaca SIP 배선(`POLARIS_ALPACA_FEED` 기본 sip→IEX graceful 폴백) · **#43** WS budget 런타임 `_active_feed` 추종(폴백 시 60→30 latch) → **Alpaca WS symbol-limit 근절, 틱 6.5k churning→65k steady** · **#41** 워런트/라이트/유닛 정크 168 제외+yfinance 클래스주 dot→dash → **429 폭주 완전 소멸** · **#39** Capital per-symbol activation(quote_writer in-memory bounded accumulator + 5-component additive blend, flow_not_block/9-stack 준수, /debate GPT-5.5+Gemini-2.5 수렴) → **활성 메이저 GBPUSD/US100/US30/GOLD focus 진입, Capital 진입 ~4배↑**. 봇 흑자 유지(PF 2.11, NET +$2,482, TODAY +$2,303; 야간 give-back은 PF-driven 변동성=큰winner 사이 grind, 손실 다 small=비대칭 정상, 거동 열화 아님). 신규캐치(빌드중) **#44** OKX USD-quote(ETH-USD) 주문 code=51000 tradeQuoteCcy reject(미손실, 미체결+노이즈만). **🔑 #42 Jin 액션**: 유료 SIP 키를 .env active 슬롯(`ALPACA_PAPER_API_KEY/SECRET`, 현재 빈칸) 입력 시 Alpaca 무제한 실시간 자동활성. 남은 큐(비-긴급): #7뉴스패널·#12테크니컬스토어·#13학습오염·#16거버닝프로브·#18fee-net·#32게이트AI·#33AI백테스트·#40대시라벨.
+
 **🟢 DEPLOY 2026-06-25 (84b1822, 봇 PID 13197 graceful restart ~90초 startup).** 대량 wave 배포·검증: ① **G3 losing-셀 진입차단 제거**(`warm_pool_local_bottom_losing` 84%KILL→0 = flow_not_block 위반수정) → G3 PASS 거래재개(Jin "거래 안 들어옴" 근본해결). ② **peak-protect** arm 1.0→0.45R + reversion give-back(피크 100%반납 차단; loss-side bleed은 정밀엑싯 후속). ③ **Yahoo(yfinance) 바 PRIMARY**(AI/결정적 매핑 + OKX collision allowlist + frame캐시) → **Alpaca 429 23k→0**(bars src yahoo 39/47, 익스체인지=폴백). ④ **startup-fix** populate_capital_proxies 1658 epics 순차→병렬(Semaphore12+총timeout) → **15분→90초**. ⑤ 대시보드 정합(gross/fee/net·롱셀·regime·통화) + Chart탭(캔들+테크니컬). 인시던트: yfinance .venv 누락 start크래시→`.venv pip install` 복구(**#26**=requirements+import guard 하드닝 진행중). 남은 큐: #12 테크니컬스토어(야후바 의존)·#18 fee-net·#20 글로브nodes·#23 sparkline·#16 거버닝프로브·#7 D4뉴스·#13 학습오염.
 
 **🔴 AUDIT VERDICT 2026-06-22 ([[system_design_audit_2026-06-22]] · loop_state.md).** 8-서브시스템 멀티에이전트 감사 결론: **아키텍처(8-Layer·8-gate·StreamConfig·AI-free·T4 9-stack 봉쇄)는 sound, 설계대로 wired.** 깨진 건 골격이 아니라 **입력데이터·측정·청산보호·튜닝**. 헤드라인 **−266R/−209.7R은 대부분 측정 아티팩트**(cross-venue R 합산 무의미 + reconciled-mae를 realized로 오기록 −211R = '추적실패' drift 카운터, **손실 아님**). 정직 $ ledger: capital +$431 / okx −$646 / alpaca −$1881. 실행 프로그램 = **M→S→D→R**(측정 재설계→안정화→/debate→리셋, loop_state.md).
@@ -49,4 +51,4 @@ tags: [now, tier-0]
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-25 10:07 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-25 18:33 (paper=True, full_pipeline=True)

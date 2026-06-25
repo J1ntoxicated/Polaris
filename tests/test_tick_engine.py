@@ -758,6 +758,196 @@ async def test_reversion_position_exits_on_flow_reversal(
 
 
 # ---------------------------------------------------------------------------
+# (f2) G7 part 2 — the reversion scalp pnl_r must be re-anchored to the
+# entry-time bar ATR (entry_atr_pct), exactly like the momentum branch. The
+# bug: the reversion scalp fed ``_scalp_exit_decision`` the seconds-scale
+# ``_window_atr_pct`` pnl_r, which is ~90-190x the entry-bar ruler, so a tiny
+# +0.04% move printed pnl_r≈0.40R and instantly tripped the 0.35R scalp_target
+# — banking a winner at real ≈0.017R crumbs (flow_not_block violation). The
+# momentum branch already re-anchored (G7); reversion was missed.
+# ---------------------------------------------------------------------------
+
+
+def _insert_reversion_row(
+    conn: sqlite3.Connection, *, position_id: str, opened_ts: int,
+    entry_atr_pct: float | None,
+) -> None:
+    """Minimal micro_reversion positions row carrying the entry-time ATR anchor."""
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        "strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        "opened_ts, exit_state, entry_atr_pct) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            position_id, VENUE, SYMBOL, GROUP, "micro_reversion",
+            "micro_reversion", "micro_reversion", "long", 0.5, "active",
+            opened_ts, "open", entry_atr_pct,
+        ),
+    )
+
+
+def _tight_range_window(
+    now_mono: float, *, last: float, lo: float = 99.99, hi: float = 100.03,
+) -> list[TickSample]:
+    """A SECONDS-SCALE tiny mid range (a few bps) with a balanced/long-favouring
+    book (ofi >= 0 so a long fade is NOT deemed failing). ``_window_atr_pct`` =
+    (max-min)/last is ~4-5 bps here — the inflated ruler that mis-fires the scalp.
+    The history alternates ``lo``/``hi`` (fixing the range) and ``last`` is the
+    newest mid; keep ``last`` within [lo, hi] so the range stays seconds-scale."""
+    base_ms = int((now_mono - 1.0) * 1000)
+    cyc = (lo, hi)
+    window = [
+        _tick(base_ms + i * 50, cyc[i % 2], bid_size=12.0, ask_size=10.0)
+        for i in range(19)
+    ]
+    window.append(_tick(base_ms + 19 * 50, last, bid_size=12.0, ask_size=10.0))
+    return window
+
+
+def _reversion_exit_setup(
+    memdb: sqlite3.Connection, *, now_ts: int, entry_atr_pct: float | None,
+) -> tuple[ProdLoopState, TickEngineState, FakeQuoteWriter]:
+    _seed(memdb, regime="chop", now_ts=now_ts)
+    writer = FakeQuoteWriter()
+    state = ProdLoopState()
+    state.quote_writer = writer  # type: ignore[assignment]
+    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+    state.open_trades.append(
+        SimulatedTrade(
+            signal_id="tick_micro_reversion_x", venue=VENUE, symbol=SYMBOL,
+            strategy_id="micro_reversion", side="long", entry_price=100.0,
+            notional_usd=50.0, open_ts=now_ts - 30, position_id="pos_rev",
+        )
+    )
+    eng.family_by_position["pos_rev"] = "reversion"
+    eng.entry_ref_by_position["pos_rev"] = 100.0
+    _insert_reversion_row(
+        memdb, position_id="pos_rev", opened_ts=now_ts - 30,
+        entry_atr_pct=entry_atr_pct,
+    )
+    return state, eng, writer
+
+
+def test_window_ruler_inflates_reversion_scalp_pnl_r() -> None:
+    """REPRO (unit): the SAME +0.04% move reads ~0.40R on the seconds-scale
+    window ruler (trips the 0.35R micro_reversion target) but ~0.017R on the
+    entry-bar ruler (holds) — the ~24x ruler mismatch that banks crumbs."""
+    from polaris.scripts._production_indicators import compute_unrealized_pnl_r
+    from polaris.scripts._production_tick_mfe import _MICRO_REVERSION_TARGET_R
+
+    entry, last = 100.0, 100.04
+    window_atr_pct = 0.0005  # (max-min)/last ≈ 5 bps seconds-scale range
+    entry_atr_pct = 0.012    # entry-time bar ATR (~24x the window range)
+
+    pnl_r_window = compute_unrealized_pnl_r(
+        side="long", entry_price=entry, last_price=last, atr_pct=window_atr_pct,
+    )
+    pnl_r_entry = compute_unrealized_pnl_r(
+        side="long", entry_price=entry, last_price=last, atr_pct=entry_atr_pct,
+    )
+    # The window ruler inflates the SAME move above the scalp target …
+    assert pnl_r_window >= _MICRO_REVERSION_TARGET_R
+    # … while the honest entry-bar ruler keeps it well below (a held winner).
+    assert pnl_r_entry < _MICRO_REVERSION_TARGET_R
+    assert pnl_r_window / pnl_r_entry > 10.0  # ~24x ruler mismatch
+
+
+@pytest.mark.asyncio
+async def test_reversion_scalp_target_uses_entry_atr_anchor(
+    memdb: sqlite3.Connection,
+) -> None:
+    """FIX: a tiny +0.04% move must NOT trip the scalp_target — the reversion
+    scalp pnl_r is re-anchored to ``entry_atr_pct`` (entry-bar ruler), so the
+    winner is let to run toward the real revert instead of banked at crumbs.
+
+    Pre-fix the seconds-scale window pnl_r≈0.40R ≥ the 0.35R target → an
+    instant scalp_target close (eng.scalp_exits == 1). Post-fix the entry-bar
+    pnl_r≈0.017R holds. flow_not_block: the winner flows."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _reversion_exit_setup(
+        memdb, now_ts=now_ts, entry_atr_pct=0.012,
+    )
+    writer.set_stream(INSTRUMENT, _tight_range_window(now_mono, last=100.04), now_mono)
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    assert eng.scalp_exits == 0, (
+        "a +0.04% move must NOT trip scalp_target once pnl_r is entry-anchored"
+    )
+    assert "pos_rev" in eng.family_by_position
+    assert any(
+        t.position_id == "pos_rev" and not t.closed for t in state.open_trades
+    )
+
+
+@pytest.mark.asyncio
+async def test_reversion_scalp_stop_uses_entry_atr_anchor(
+    memdb: sqlite3.Connection,
+) -> None:
+    """LOSS side symmetric: an entry-anchored micro-stop must NOT fire on a tiny
+    adverse move that the inflated window ruler would over-read past -0.4R.
+
+    A -0.04% move reads ≈ -0.40R on the window ruler (would trip scalp_stop) but
+    ≈ -0.017R entry-anchored → holds. Normalising the loss side too keeps the
+    scalp symmetric (NOT a one-sided change)."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _reversion_exit_setup(
+        memdb, now_ts=now_ts, entry_atr_pct=0.012,
+    )
+    # A tiny ADVERSE move for the long (-0.04% off entry). Window range fixed at
+    # ~4 bps (99.96/100.00) so the seconds-scale ruler reads ≈ -0.50R (would trip
+    # scalp_stop) while the entry-bar ruler reads ≈ -0.017R (holds).
+    writer.set_stream(
+        INSTRUMENT,
+        _tight_range_window(now_mono, last=99.96, lo=99.96, hi=100.00),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    assert eng.scalp_exits == 0, (
+        "a -0.04% move must NOT trip scalp_stop once pnl_r is entry-anchored"
+    )
+    assert "pos_rev" in eng.family_by_position
+
+
+@pytest.mark.asyncio
+async def test_reversion_null_anchor_falls_back_to_window_ruler(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Graceful degrade: a NULL entry_atr_pct anchor (legacy / pre-anchor rows)
+    keeps the live-window ruler — byte-identical to the pre-fix path. The same
+    inflated +0.04% move then DOES trip the scalp_target (no row to anchor on)."""
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _reversion_exit_setup(
+        memdb, now_ts=now_ts, entry_atr_pct=None,
+    )
+    writer.set_stream(INSTRUMENT, _tight_range_window(now_mono, last=100.04), now_mono)
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    assert eng.scalp_exits == 1, (
+        "NULL anchor must fall back to the window ruler (legacy-graceful)"
+    )
+    assert "pos_rev" not in eng.family_by_position
+
+
+# ---------------------------------------------------------------------------
 # (g) the momentum exit pass resumes the PERSISTED exit state — the ~500ms
 # tick pass must not re-seed stop/peak/trough from entry (that loosened the
 # bar recalc's ratcheted stop and reset the excursion telemetry / FSM).

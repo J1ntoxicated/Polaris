@@ -103,9 +103,30 @@ async def _run_exits(
                 writer.feature_window(instrument_id) if writer is not None else []
             )
             feat = compute_tick_features(window, now_mono, eng.cfg)
+            # G7 part 2 ([[g7_reversion_scalp_ruler_2026-06-25]]): re-anchor the
+            # scalp pnl_r on the entry-time bar ATR — the SAME ruler the momentum
+            # branch uses below (and the SAME the DB pnl_r/mfe_r record). The
+            # seconds-scale _window_atr_pct above is ~90-190x smaller than the
+            # entry-bar ATR, so the shared window pnl_r tripped scalp_target/
+            # scalp_stop at ~0.35R on a real ~0.002R move — banking winners at
+            # crumbs (flow_not_block violation). NULL anchor / missing row → keep
+            # the live-window pnl_r (legacy-graceful, byte-identical pre-anchor).
+            rev_anchor_row = conn.execute(
+                "SELECT entry_atr_pct FROM positions WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            rev_anchor_raw = (
+                rev_anchor_row[0] if rev_anchor_row is not None else None
+            )
+            scalp_pnl_r = pnl_r
+            if rev_anchor_raw is not None:
+                scalp_pnl_r = compute_unrealized_pnl_r(
+                    side=trade.side, entry_price=entry_price,
+                    last_price=last_mid, atr_pct=max(float(rev_anchor_raw), 1e-4),
+                )
             reason = _scalp_exit_decision(
                 side=trade.side, entry_price=entry_price, last_mid=last_mid,
-                ofi=feat.ofi, pnl_r=pnl_r, strategy_id=trade.strategy_id,
+                ofi=feat.ofi, pnl_r=scalp_pnl_r, strategy_id=trade.strategy_id,
             )
             if reason is None:
                 continue
@@ -124,7 +145,7 @@ async def _run_exits(
                 logger.info(
                     "[tick-engine/scalp-exit] %s:%s trade_id=%s reason=%s "
                     "pnl_r=%.2f", trade.venue, trade.symbol, position_id,
-                    reason, pnl_r,
+                    reason, scalp_pnl_r,
                 )
             continue
         # Momentum family → existing precise-exit engine (ATR trail / BEP /

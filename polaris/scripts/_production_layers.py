@@ -534,6 +534,7 @@ def _sweep_focus(
     *,
     opportunity_scores: dict[str, float],
     trade_eligible: dict[str, bool],
+    quote_writer: Any | None = None,
 ) -> list[FocusSelection]:
     """Build focus rows from the STEP② candidate sweep (today's movers).
 
@@ -543,6 +544,11 @@ def _sweep_focus(
     The EntranceJudge ``opportunity_scores`` + ``trade_eligible`` decouple are
     threaded through so the judgment telemetry + WATCH/TRADE split are PRESERVED on
     the sweep path (the sweep changes only focus_rank/bucket ordering).
+
+    ``quote_writer`` (#39) is the per-symbol activation provider — the sweep reads
+    its in-mem accumulator (``activation_metrics``) so an intraday-active major
+    outranks a calm wide-daily name. A missing writer degrades the live-motion
+    activation components to neutral (the name scores on bars+spread alone).
     """
     # Deferred import breaks the _production_layers ⇆ _candidate_sweep_select ⇆
     # _static_ground import cycle (the sweep reads read_ticker_ground from
@@ -559,6 +565,7 @@ def _sweep_focus(
         open_targets=open_targets, prev_focus_symbols=prev_symbols,
         opportunity_scores=opportunity_scores or None,
         trade_eligible=trade_eligible or None,
+        activation_provider=quote_writer,
     )
 
 
@@ -703,6 +710,7 @@ def refresh_focus_watchlist(
             conn, universe, ts,
             opportunity_scores=opportunity_scores,
             trade_eligible=trade_eligible,
+            quote_writer=quote_writer,
         )
     else:
         focus = compute_dynamic_focus(

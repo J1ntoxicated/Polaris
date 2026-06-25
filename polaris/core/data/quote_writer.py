@@ -32,9 +32,18 @@ import time
 from collections import deque
 from pathlib import Path
 
+from polaris.core.data._tick_activation import (
+    ACTIVATION_MAX_SYMBOLS,
+    _SymbolActivation,
+)
 from polaris.core.data.schema import QuoteTick
 from polaris.core.ticks.types import TickSample
 from polaris.storage.schema import connect
+
+# ``ACTIVATION_MAX_SYMBOLS`` is re-exported (the #39 per-symbol accumulator + its
+# cap live in ``_tick_activation`` for the ≤500-LOC split) so the existing
+# ``quote_writer.ACTIVATION_MAX_SYMBOLS`` import surface is unchanged.
+__all__ = ["ACTIVATION_MAX_SYMBOLS", "QuoteTickWriter", "live_or_bar_price"]
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +214,13 @@ class QuoteTickWriter:
         # (Sentinel S6 source). In-mem, loop-thread only; the flush snapshots a
         # rollup (no await) and UPSERTs it in the SAME txn as the quote rows.
         self._inflow: dict[str, _VenueInflow] = {}
+        # Per-SYMBOL rolling motion accumulator (#39) — tick rate / short move /
+        # intraday range the candidate sweep reads to surface ACTIVE majors over
+        # calm wide-daily names. In-mem, loop-thread only; NEVER persisted (the
+        # flush writes quote rows + per-venue tick_inflow only). Keyed on
+        # instrument_id (cross-venue safe) and LRU-capped at ACTIVATION_MAX_SYMBOLS
+        # (no infinite growth — retention guard).
+        self._activation: dict[str, _SymbolActivation] = {}
         # Dedicated WS-writer connection (opened lazily on first flush, in the
         # executor thread — sqlite objects are thread-affine).
         self._conn: sqlite3.Connection | None = None
@@ -231,6 +247,13 @@ class QuoteTickWriter:
             acc = _VenueInflow()
             self._inflow[tick.venue] = acc
         acc.add(tick.ts, tick.bid_size + tick.ask_size)
+        # Per-symbol motion accumulator (#39). Keyed on instrument_id (cross-venue
+        # safe); only mids > 0 carry motion (a 0/negative mid is degenerate).
+        if tick.mid > 0.0:
+            sym = self._activation.get(tick.instrument_id)
+            if sym is None:
+                sym = self._activation_seat(tick.instrument_id)
+            sym.add(tick.ts, tick.mid)
 
     def live_px(self, instrument_id: str) -> tuple[float, float] | None:
         """Return ``(mid, last_ws_monotonic)`` for ``instrument_id`` or None.
@@ -285,6 +308,38 @@ class QuoteTickWriter:
             )
             for t in ring
         ]
+
+    def activation_metrics(self, instrument_id: str) -> dict[str, float | int] | None:
+        """Per-symbol motion snapshot for the candidate sweep, or None (#39).
+
+        Returns ``{ticks_600s, mid_120s_ago, mid_high_600s, mid_low_600s,
+        last_mid, last_ts}`` over the trailing 600s window (stale buckets pruned)
+        — the per-symbol tick rate / short move / intraday range the sweep's
+        activation blend reads. None when no WS tick has been seen for the
+        instrument yet (the sweep then degrades that name's live-motion components
+        to neutral, never an error — flow_not_block). 0 DB hits.
+        """
+        sym = self._activation.get(instrument_id)
+        if sym is None:
+            return None
+        return sym.snapshot()
+
+    def _activation_seat(self, instrument_id: str) -> _SymbolActivation:
+        """Seat a new per-symbol accumulator, LRU-evicting the oldest if at cap.
+
+        The map is bounded at ``ACTIVATION_MAX_SYMBOLS`` — when seating would
+        overflow it, the instrument with the OLDEST ``last_tick_ts`` is evicted
+        first (a name nobody has ticked in longest). This is the retention guard:
+        the in-mem state can NEVER grow without bound over a long run.
+        """
+        if len(self._activation) >= ACTIVATION_MAX_SYMBOLS:
+            oldest = min(
+                self._activation, key=lambda k: self._activation[k].last_tick_ts
+            )
+            del self._activation[oldest]
+        acc = _SymbolActivation()
+        self._activation[instrument_id] = acc
+        return acc
 
     # ------------------------------------------------------------------
     # Flush path (1Hz task) — snapshot (no await between drain+clear) then

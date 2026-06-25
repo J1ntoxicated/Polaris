@@ -40,11 +40,21 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from polaris.core.universe.schema import UniverseInstrument
-from polaris.scripts._candidate_sweep_bars import (
-    confirmed,
-    range_expansion,
-    realized_expected_vol_ratio,
-    trend_direction,
+from polaris.scripts._candidate_sweep_bars import confirmed, trend_direction
+
+# The per-symbol motion components + their normalizer constants live in
+# ``_candidate_sweep_motion`` (split for the ≤500-LOC cap). They are re-exported
+# here (listed in ``__all__`` below) so the ``_candidate_sweep.ACT_*`` /
+# ``activation_components`` import + telemetry surface stays unchanged.
+from polaris.scripts._candidate_sweep_motion import (
+    ACT_DAILY_VOL_HOT_RATIO,
+    ACT_RANGE_HOT_BPS,
+    ACT_SHORT_MOVE_HOT_BPS,
+    ACT_SPREAD_TIGHT_BPS,
+    ACT_SPREAD_WIDE_BPS,
+    ACT_TICK_RATE_FLOOR_600S,
+    ACT_TICK_RATE_HOT_600S,
+    activation_components,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +63,14 @@ logger = logging.getLogger(__name__)
 # (it lives in ``_candidate_sweep_select`` to honor the ≤500-LOC split); it is not
 # listed here because it is not a statically-defined name in this module.
 __all__ = [
+    "ACT_DAILY_VOL_HOT_RATIO",
+    "ACT_RANGE_HOT_BPS",
+    "ACT_SHORT_MOVE_HOT_BPS",
+    "ACT_SPREAD_TIGHT_BPS",
+    "ACT_SPREAD_WIDE_BPS",
+    "ACT_TICK_RATE_FLOOR_600S",
+    "ACT_TICK_RATE_HOT_600S",
+    "activation_components",
     "activation_score",
     "apply_hysteresis",
     "candidate_score",
@@ -88,17 +106,42 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Activation linear-blend weights (sum need not be 1; the result is clamped).
-ACT_W_VOL_RATIO: Final[float] = _env_float("POLARIS_SWEEP_ACT_W_VOL", 0.45)
-ACT_W_RANGE_EXP: Final[float] = _env_float("POLARIS_SWEEP_ACT_W_RANGE", 0.35)
-ACT_W_MICRO: Final[float] = _env_float("POLARIS_SWEEP_ACT_W_MICRO", 0.20)
-# Micro-activity normalizers (venue-level tick pulse → [0,1]).
+# Activation 5-component ADDITIVE blend weights (#39 — debate-converged). The
+# blend is a pure SUM of weight × component (each component already in [0,1]),
+# then clamped — NEVER a stacked ≤1 multiplier (9-stack ban honored; spread is an
+# ADDITIVE term here, never a tradeability multiplier). The five weights sum to
+# 1.0: live per-symbol MOTION = 0.70 (tick/move/range), spread 0.20, the Yahoo
+# daily-vol ratio demoted to 0.10 (was the dominant 0.45 — it could not see the
+# intraday-active majors). All env-overridable /debate-calibration targets.
+ACT_TICK_RATE_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_ACT_TICK_RATE_W", 0.30)
+ACT_SHORT_MOVE_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_ACT_SHORT_MOVE_W", 0.25)
+ACT_RANGE_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_ACT_RANGE_W", 0.15)
+ACT_SPREAD_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_ACT_SPREAD_W", 0.20)
+ACT_DAILY_VOL_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_ACT_DAILY_VOL_W", 0.10)
+
+# Edge linear-blend weights — TECH-DOMINANT (#39): Capital FX/index sentiment/COT
+# is structurally sparse, so technical alignment carries the larger share.
+EDGE_W_SENTIMENT: Final[float] = _env_float("POLARIS_SWEEP_EDGE_W_SENT", 0.35)
+EDGE_W_TECH_ALIGN: Final[float] = _env_float("POLARIS_SWEEP_EDGE_W_TECH", 0.65)
+# A missing edge component (no ground sentiment, no confirmed bars) is NEUTRAL
+# 0.5 — never 0 — so an active major is not dragged below neutral by an empty edge.
+EDGE_MISSING_COMPONENT_DEFAULT: Final[float] = _env_float(
+    "POLARIS_SWEEP_EDGE_MISSING_DEFAULT", 0.5
+)
+
+# Candidate composite weights (#39 — ADDITIVE, NOT a gate multiplier).
+# candidate = cold_start_mult × clamp01(W_ACT × activation + W_EDGE × edge).
+# The ONLY ≤1 multiplier is the pre-existing cold-start term — no new stack.
+CANDIDATE_ACTIVATION_WEIGHT: Final[float] = _env_float(
+    "POLARIS_SWEEP_CAND_ACT_W", 0.75
+)
+CANDIDATE_EDGE_WEIGHT: Final[float] = _env_float("POLARIS_SWEEP_CAND_EDGE_W", 0.25)
+
+# Venue micro-pulse normalizers — used by ``tempo_sweep_period`` (the SWEEP CADENCE
+# modulator, NOT the per-symbol activation blend): the aggregate per-venue tick
+# pulse shortens the sweep period in a hot market. Per-venue (tick_inflow), env-named.
 MICRO_TICKS_FULL: Final[float] = _env_float("POLARIS_SWEEP_MICRO_TICKS_FULL", 20_000.0)
 MICRO_FLOW_FULL: Final[float] = _env_float("POLARIS_SWEEP_MICRO_FLOW_FULL", 5.0)
-
-# Edge linear-blend weights.
-EDGE_W_SENTIMENT: Final[float] = _env_float("POLARIS_SWEEP_EDGE_W_SENT", 0.55)
-EDGE_W_TECH_ALIGN: Final[float] = _env_float("POLARIS_SWEEP_EDGE_W_TECH", 0.45)
 
 # Bucket counts (cap 200 decomposition). /debate calibration targets.
 BUCKET_ANCHOR: Final[int] = _env_int("POLARIS_SWEEP_BUCKET_ANCHOR", 40)
@@ -150,36 +193,39 @@ def _clamp01(x: float) -> float:
 
 def activation_score(
     bars_by_res: Mapping[str, Sequence[Any]],
-    tick_inflow_row: Mapping[str, Any] | None,
+    motion: Mapping[str, Any] | None,
+    spread_bps: float | None,
     now_ts: int,
 ) -> float:
-    """"Will it move today" gate ∈ [0,1] from CONFIRMED bars + venue tick pulse.
+    """Per-symbol activation ∈ [0,1] — 5-component ADDITIVE clamped blend (#39).
 
-    Blend (linear, FIXED weights, clamp):
-    - realized/expected vol ratio: recent 15m/1H true-range vs the ticker's own
-      ~1D ATR baseline (own-baseline → cross-asset comparable);
-    - recent range expansion: last 15m–1H range vs its trailing median;
-    - micro activity: venue ``tick_inflow.ticks_600s`` / ``max_flow_size_600s``
-      normalized (venue-level — per-symbol tick counts are not stored).
+    🚨 9-stack ban: this is a pure SUM of weight × component (each component in
+    [0,1]), then clamped — NEVER a stacked ≤1 multiplier, and ``spread`` is an
+    ADDITIVE term INSIDE the sum, never a tradeability multiplier on the candidate
+    (both /debate signers rejected the multiplier form as a 9-stack violation).
 
-    GATE form: **0 when no movement** (flat bars + no inflow → 0), so a row that
-    will not move today scores ~0 and ``candidate_score`` collapses to 0.
+    Components (weights env-named, sum 1.0):
+    - tick_rate 0.30 — per-symbol ``ticks_600s`` floor→hot normalized;
+    - short_move 0.25 — ``|last_mid - mid_120s_ago| / mid`` bps vs HOT_BPS;
+    - intraday_range 0.15 — ``(mid_high - mid_low) / mid`` 600s bps vs RANGE_HOT_BPS;
+    - spread_tradeability 0.20 — tight→1 wide→0 from per-symbol ``spread_bps``;
+    - daily_vol 0.10 — the Yahoo realized/expected vol ratio (own-baseline).
+
+    The first three live-motion components read ``motion`` (the writer's per-symbol
+    accumulator snapshot); a missing/empty ``motion`` (no WS tick yet) degrades
+    them to 0 (a name with no observed live motion scores on bars/spread alone —
+    never an error, flow_not_block). ``spread_bps`` None → spread component 0.
 
     Look-ahead guard: only bars whose period has fully CLOSED (``ts + interval`` ≤
     ``now_ts``) are consumed — a still-forming bar is dropped by :func:`confirmed`.
     """
-    bars15 = confirmed(bars_by_res.get("15m"), now_ts, "15m")
-    bars1h = confirmed(bars_by_res.get("1H"), now_ts, "1H")
-    bars1d = confirmed(bars_by_res.get("1D"), now_ts, "1D")
-
-    vol_ratio = realized_expected_vol_ratio(bars15, bars1h, bars1d)
-    range_exp = range_expansion(bars15, bars1h)
-    micro = _micro_activity(tick_inflow_row)
-
+    c = activation_components(bars_by_res, motion, spread_bps, now_ts)
     blended = (
-        ACT_W_VOL_RATIO * vol_ratio
-        + ACT_W_RANGE_EXP * range_exp
-        + ACT_W_MICRO * micro
+        ACT_TICK_RATE_WEIGHT * c["tick_rate"]
+        + ACT_SHORT_MOVE_WEIGHT * c["short_move"]
+        + ACT_RANGE_WEIGHT * c["intraday_range"]
+        + ACT_SPREAD_WEIGHT * c["spread_tradeability"]
+        + ACT_DAILY_VOL_WEIGHT * c["daily_vol"]
     )
     return _clamp01(blended)
 
@@ -205,17 +251,20 @@ def edge_score(
     ground: Mapping[str, Any] | None,
     now_ts: int,
 ) -> float:
-    """"Edge when it moves" ∈ [0,1] from ground sentiment + multi-TF alignment.
+    """"Edge when it moves" ∈ [0,1] — TECH-DOMINANT blend (#39).
 
-    Blend (linear, FIXED weights, clamp):
+    Blend (linear, FIXED weights, clamp): ``0.35×sentiment + 0.65×tech`` — tech
+    carries the larger share because Capital FX/index sentiment + COT are
+    structurally sparse, so an active major must not have its edge dragged down by
+    an empty sentiment lens.
     - sentiment direction × strength from the fused ``ground`` (``scores`` /
       ``label``): a clearly-directional ground (bull or bear dominant) → high;
     - multi-TF technical alignment: 15m vs 1H vs 1D trend agreement on confirmed
       bars (all three agreeing → high, conflicting → ~neutral).
 
-    Neutral (≈0.5) when there is no edge — combined with the ``0.5 + 0.5×edge``
-    envelope in :func:`candidate_score`, a strong mover with no edge still scores
-    on activation alone (never zeroed by a neutral edge).
+    A MISSING component (no ground sentiment, no confirmed bars) defaults to the
+    NEUTRAL ``EDGE_MISSING_COMPONENT_DEFAULT`` (0.5) — never 0 — so an active major
+    with empty edge data lands at neutral, not below it.
     """
     bars15 = confirmed(bars_by_res.get("15m"), now_ts, "15m")
     bars1h = confirmed(bars_by_res.get("1H"), now_ts, "1H")
@@ -232,20 +281,22 @@ def _sentiment_strength(ground: Mapping[str, Any] | None) -> float:
     """Directional conviction from fused ground scores → [0,1].
 
     A ground whose dominant directional label (bull_trend / bear_trend) clearly
-    leads the others scores high; a flat/balanced ground (no edge) → ~0.5.
+    leads the others scores high; a flat/balanced ground (no edge) → ~0.5. A
+    MISSING ground returns the NEUTRAL default (never 0 — a sparse-sentiment major
+    stays at neutral).
     """
     if not ground:
-        return 0.5
+        return EDGE_MISSING_COMPONENT_DEFAULT
     scores = ground.get("scores")
     if not isinstance(scores, Mapping) or not scores:
-        return 0.5
+        return EDGE_MISSING_COMPONENT_DEFAULT
     bull = float(scores.get("bull_trend", 0.0) or 0.0)
     bear = float(scores.get("bear_trend", 0.0) or 0.0)
     chop = float(scores.get("chop", 0.0) or 0.0)
     crisis = float(scores.get("crisis", 0.0) or 0.0)
     total = bull + bear + chop + crisis
     if total <= 0.0:
-        return 0.5
+        return EDGE_MISSING_COMPONENT_DEFAULT
     # Directional share = how much of the conviction is a CLEAR up/down trend
     # (vs chop/crisis indecision). 0.5 (neutral) + 0.5×directional_lead.
     directional = max(bull, bear) / total
@@ -255,7 +306,11 @@ def _sentiment_strength(ground: Mapping[str, Any] | None) -> float:
 def _tech_alignment(
     bars15: Sequence[Any], bars1h: Sequence[Any], bars1d: Sequence[Any]
 ) -> float:
-    """Multi-TF trend agreement → [0,1]. All three TFs agree → high; mixed → 0.5."""
+    """Multi-TF trend agreement → [0,1]. All three TFs agree → high; mixed → 0.5.
+
+    No confirmed bars at all (missing technical component) → the NEUTRAL default
+    (never 0) so an un-charted active major is not dragged below neutral.
+    """
     dirs = [
         trend_direction(bars15),
         trend_direction(bars1h),
@@ -263,7 +318,7 @@ def _tech_alignment(
     ]
     nonzero = [d for d in dirs if d != 0]
     if not nonzero:
-        return 0.5
+        return EDGE_MISSING_COMPONENT_DEFAULT
     net = sum(nonzero)
     # |net| / count: 3 agreeing → 1.0; 2-vs-1 → 0.33; balanced → 0.0. Map onto
     # 0.5 (neutral) .. 1.0 (full agreement).
@@ -277,15 +332,18 @@ def _tech_alignment(
 
 
 def candidate_score(activation: float, edge: float) -> float:
-    """``activation × (0.5 + 0.5 × edge)`` — the gate-amplifier composite.
+    """``clamp01(0.75 × activation + 0.25 × edge)`` — ADDITIVE composite (#39).
 
-    A row that will not move today (activation ≈ 0) scores ≈ 0 regardless of edge
-    (the gate). A mover is amplified by its edge: no-edge mover keeps half its
-    activation, full-edge mover keeps all of it. Result ∈ [0,1].
+    🚨 9-stack ban: an ADDITIVE blend, NOT a gate multiplier. The old gate form
+    (``activation × (0.5 + 0.5 × edge)``) zeroed an active major whose edge data
+    was empty; the converged blend keeps a strong mover at 0.75× its activation
+    even with zero edge, so a sparse-edge Capital major is no longer dragged to ~0.
+    The ONLY ≤1 multiplier applied to the candidate is the pre-existing cold-start
+    penalty (applied by the caller) — no new stack is introduced here. Result ∈ [0,1].
     """
     a = _clamp01(activation)
     e = _clamp01(edge)
-    return a * (0.5 + 0.5 * e)
+    return _clamp01(CANDIDATE_ACTIVATION_WEIGHT * a + CANDIDATE_EDGE_WEIGHT * e)
 
 
 # ---------------------------------------------------------------------------

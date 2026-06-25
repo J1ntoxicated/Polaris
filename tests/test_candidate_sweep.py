@@ -118,37 +118,50 @@ def _moving_bars(
 # ---------------------------------------------------------------------------
 
 
-def test_candidate_score_two_stage_formula() -> None:
-    """candidate_score == activation x (0.5 + 0.5 x edge)."""
+def test_candidate_score_additive_blend() -> None:
+    """candidate_score == clamp01(0.75 x activation + 0.25 x edge) (#39 converged).
+
+    The converged design replaced the old gate multiplier (activation x (0.5 +
+    0.5 x edge)) with an ADDITIVE blend so an active major with empty edge is no
+    longer zeroed (9-stack ban: no stacked <=1 multiplier).
+    """
     assert cs.candidate_score(1.0, 1.0) == pytest.approx(1.0)
-    assert cs.candidate_score(1.0, 0.0) == pytest.approx(0.5)
-    assert cs.candidate_score(0.8, 0.5) == pytest.approx(0.8 * 0.75)
-    # A zero-activation row is zero regardless of edge (gate dominates).
-    assert cs.candidate_score(0.0, 1.0) == 0.0
+    assert cs.candidate_score(1.0, 0.0) == pytest.approx(0.75)
+    assert cs.candidate_score(0.0, 1.0) == pytest.approx(0.25)
+    assert cs.candidate_score(0.8, 0.5) == pytest.approx(0.75 * 0.8 + 0.25 * 0.5)
 
 
-def test_activation_gate_zero_movement(conn: sqlite3.Connection) -> None:
-    """Flat bars + no tick inflow -> activation 0 -> candidate_score 0 (GATE)."""
+def test_activation_zero_when_no_motion_no_spread_no_vol(
+    conn: sqlite3.Connection,
+) -> None:
+    """Flat bars + no live motion + no spread -> activation 0 (no movement)."""
     now = int(time.time())
     bars = {
         "15m": _flat_bars("okx", "FLAT-USDT", "15m", 30, now),
         "1H": _flat_bars("okx", "FLAT-USDT", "1H", 30, now),
         "1D": _flat_bars("okx", "FLAT-USDT", "1D", 30, now),
     }
-    act = cs.activation_score(bars, None, now)
+    act = cs.activation_score(bars, None, None, now)
     assert act == 0.0
-    assert cs.candidate_score(act, 1.0) == 0.0
 
 
-def test_activation_positive_when_moving(conn: sqlite3.Connection) -> None:
-    """Range-expanding bars -> activation > 0 (the gate opens for movers)."""
+def test_activation_positive_when_live_motion(conn: sqlite3.Connection) -> None:
+    """Live per-symbol motion lifts activation even on flat bars (the whole #39 point)."""
     now = int(time.time())
     bars = {
-        "15m": _moving_bars("okx", "MOVE-USDT", "15m", 30, now, amp=2.0),
-        "1H": _moving_bars("okx", "MOVE-USDT", "1H", 30, now, amp=2.0),
+        "15m": _flat_bars("okx", "MOVE-USDT", "15m", 30, now),
+        "1H": _flat_bars("okx", "MOVE-USDT", "1H", 30, now),
         "1D": _flat_bars("okx", "MOVE-USDT", "1D", 30, now),
     }
-    act = cs.activation_score(bars, None, now)
+    motion = {
+        "ticks_600s": cs.ACT_TICK_RATE_HOT_600S,
+        "last_mid": 100.0,
+        "mid_120s_ago": 100.0,
+        "mid_high_600s": 100.0,
+        "mid_low_600s": 100.0,
+        "last_ts": now,
+    }
+    act = cs.activation_score(bars, motion, None, now)
     assert act > 0.0
 
 
@@ -206,12 +219,12 @@ def test_lookahead_guard_ignores_future_bars() -> None:
         "1H": _flat_bars("okx", "LA-USDT", "1H", 30, now),
         "1D": _flat_bars("okx", "LA-USDT", "1D", 30, now),
     }
-    act_with_future = cs.activation_score(bars, None, now)
+    act_with_future = cs.activation_score(bars, None, None, now)
     act_clean = cs.activation_score(
         {"15m": past,
          "1H": _flat_bars("okx", "LA-USDT", "1H", 30, now),
          "1D": _flat_bars("okx", "LA-USDT", "1D", 30, now)},
-        None, now,
+        None, None, now,
     )
     # The future spike is ignored -> identical to the future-free read (both ~0).
     assert act_with_future == act_clean == 0.0
@@ -247,13 +260,13 @@ def test_forming_bar_spike_does_not_inflate_activation() -> None:
         "1H": _flat_bars("okx", "F-USDT", "1H", 30, now),
         "1D": _flat_bars("okx", "F-USDT", "1D", 30, now),
     }
-    act_flat = cs.activation_score(closed_hist, None, now)
+    act_flat = cs.activation_score(closed_hist, None, None, now)
     # Append a FORMING 15m bar (opened now-300, closes now+600) with a violent range.
     forming = _bar("okx", "F-USDT", "15m", now - 300,
                    o=100.0, h=900.0, low=10.0, c=850.0)
     with_forming = dict(closed_hist)
     with_forming["15m"] = list(closed_hist["15m"]) + [forming]
-    act_with_forming = cs.activation_score(with_forming, None, now)
+    act_with_forming = cs.activation_score(with_forming, None, None, now)
     # The forming bar is dropped by the guard -> activation unchanged (both ~0).
     assert act_with_forming == act_flat == 0.0
 

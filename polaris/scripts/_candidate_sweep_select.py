@@ -18,7 +18,7 @@ import logging
 import random
 import sqlite3
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Protocol
 
 from polaris.core.universe.schema import (
     FocusBucket,
@@ -50,38 +50,68 @@ logger = logging.getLogger(__name__)
 __all__ = ["select_candidate_focus"]
 
 
-def _read_tick_inflow(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    """Per-venue ``tick_inflow`` rollup keyed by venue (read-only)."""
+class ActivationProvider(Protocol):
+    """The per-symbol motion surface the sweep reads (the quote writer's #39 accumulator).
+
+    Kept as a structural Protocol (not a concrete ``QuoteTickWriter`` import) so the
+    pure sweep module has no dependency on the WS writer — the writer satisfies it
+    by exposing ``activation_metrics``.
+    """
+
+    def activation_metrics(  # pragma: no cover - structural
+        self, instrument_id: str
+    ) -> dict[str, float | int] | None: ...
+
+
+def _read_spread_bps(conn: sqlite3.Connection) -> dict[str, float]:
+    """Per-symbol ``quote_ticks.spread_bps`` keyed by instrument_id (read-only).
+
+    ``quote_ticks`` is single-row LWW, so this is the latest spread per symbol —
+    the spread_tradeability component's source (an ADDITIVE term inside activation,
+    never a multiplier). A read error / missing table → empty (degrade to neutral).
+    """
     try:
         rows = conn.execute(
-            "SELECT venue, last_tick_ts, ticks_600s, max_flow_size_600s, "
-            "window_started_at FROM tick_inflow"
+            "SELECT instrument_id, spread_bps FROM quote_ticks"
         ).fetchall()
     except sqlite3.Error:
         return {}
-    return {
-        str(r[0]): {
-            "venue": str(r[0]),
-            "last_tick_ts": int(r[1] or 0),
-            "ticks_600s": int(r[2] or 0),
-            "max_flow_size_600s": float(r[3] or 0.0),
-            "window_started_at": int(r[4] or 0),
-        }
-        for r in rows
-    }
+    return {str(r[0]): float(r[1] or 0.0) for r in rows}
+
+
+def _activation_metrics(
+    provider: ActivationProvider | None, instrument_id: str
+) -> dict[str, float | int] | None:
+    """Read the per-symbol motion snapshot, degrading to None on any miss.
+
+    A ``None`` provider, a provider that does not expose ``activation_metrics``
+    (a partial surface, e.g. a technical-lean-only stub), or an instrument with no
+    live ticks yet → None (the activation blend's live-motion components stay
+    neutral; the name scores on bars+spread alone — flow_not_block, never an error).
+    """
+    if provider is None or not hasattr(provider, "activation_metrics"):
+        return None
+    return provider.activation_metrics(instrument_id)
 
 
 def _score_universe(
     conn: sqlite3.Connection,
     universe: Sequence[UniverseInstrument],
     now_ts: int,
-    tick_inflow: Mapping[str, Mapping[str, Any]],
+    spread_by_iid: Mapping[str, float],
+    activation_provider: ActivationProvider | None,
 ) -> dict[str, dict[str, float]]:
-    """Per-instrument two-stage scores + cold-start flag (the sweep core).
+    """Per-instrument activation/edge/candidate scores + cold-start flag.
 
     Returns ``{instrument_id: {activation, edge, candidate, has_event,
-    cold_start}}``. Cold-start (thin/absent ground OR < N confirmed bars) carries
-    the 0.5× penalty already APPLIED to ``candidate`` — penalty, NOT exclusion.
+    cold_start}}``. activation reads PER-SYMBOL live motion (the writer's #39
+    accumulator, keyed instrument_id) + per-symbol ``quote_ticks.spread_bps``, so
+    an intraday-active major (EURUSD 9s tick, US100) outranks a calm wide-daily
+    name. A missing writer/quote → those components degrade to neutral (the name
+    scores on bars alone, never an error — flow_not_block). Cold-start (thin/absent
+    ground OR < N confirmed bars) keeps the pre-existing 0.5× penalty APPLIED to
+    ``candidate`` — penalty, NOT exclusion, and the ONLY ≤1 multiplier on the
+    candidate (9-stack ban honored).
     """
     out: dict[str, dict[str, float]] = {}
     for inst in universe:
@@ -91,8 +121,9 @@ def _score_universe(
         ground = ground_row.get("ground") if ground_row else None
         has_event = bool(ground_row and ground_row.get("has_event"))
 
-        inflow = tick_inflow.get(inst.venue)
-        act = activation_score(all_bars, inflow, now_ts)
+        motion = _activation_metrics(activation_provider, iid)
+        spread_bps = spread_by_iid.get(iid)
+        act = activation_score(all_bars, motion, spread_bps, now_ts)
         edge = edge_score(all_bars, ground, now_ts)
         cand = candidate_score(act, edge)
 
@@ -153,6 +184,7 @@ def select_candidate_focus(
     rng: random.Random | None = None,
     opportunity_scores: Mapping[str, float] | None = None,
     trade_eligible: Mapping[str, bool] | None = None,
+    activation_provider: ActivationProvider | None = None,
 ) -> list[FocusSelection]:
     """Bucket-decomposed dynamic focus selection (the sweep producer).
 
@@ -183,8 +215,10 @@ def select_candidate_focus(
     trade_eligible = trade_eligible or {}
     rng = rng or random.Random(now_ts)
     counts = _resolve_bucket_counts(bucket_counts, cap)
-    tick_inflow = _read_tick_inflow(conn)
-    scored = _score_universe(conn, universe, now_ts, tick_inflow)
+    spread_by_iid = _read_spread_bps(conn)
+    scored = _score_universe(
+        conn, universe, now_ts, spread_by_iid, activation_provider
+    )
     cand_by_iid = {iid: s["candidate"] for iid, s in scored.items()}
 
     merit_list = score_focus_candidates(list(universe))

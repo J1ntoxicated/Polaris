@@ -115,28 +115,6 @@ def realized_expected_vol_ratio(
     return min(1.0, ratio / 2.0)
 
 
-def range_expansion(bars15: Sequence[Any], bars1h: Sequence[Any]) -> float:
-    """Recent range vs its own trailing median → [0,1] (clamp).
-
-    Last few bars' range vs the median range of the trailing window. Expansion
-    (recent > median) → high; contraction → low. Per-ticker trailing median (no
-    cross-asset leakage). Empty/degenerate → 0.0.
-    """
-    series = list(bars15) if bars15 else list(bars1h)
-    if len(series) < 4:
-        return 0.0
-    ranges = [_true_range(b) for b in series]
-    median = statistics.median(ranges)
-    if median <= 0.0:
-        return 0.0
-    recent = statistics.fmean(ranges[-3:])
-    ratio = recent / median
-    if ratio <= 0.0:
-        return 0.0
-    # median (no expansion) → 0.5; 2× median → 1.0; collapse → 0.0.
-    return min(1.0, ratio / 2.0)
-
-
 def trend_direction(bars: Sequence[Any]) -> int:
     """Sign of the trend over the confirmed bars: +1 up, -1 down, 0 flat.
 

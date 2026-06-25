@@ -935,6 +935,53 @@
   // dashed) with the GAP visible. No duplicate sparkline logic.
   function renderDualEquity(d) { renderEquity(d); }
 
+  // ── NEW · CONTEXT/INTEL (alt-data inputs the bot weighs) ──────────────────
+  // One Bloomberg-dense line per source from d.context_intel[] (the LATEST
+  // altdata_snapshot row per source, summarised server-side). Shows source ·
+  // asset-class · latest value · freshness (green=fresh / grey=stale) · lean
+  // (bullish/bearish/neutral). Read-only "bot's eyes" — never feeds trading.
+  const _CTX_LABEL = {
+    okx_funding: 'OKX Funding', crypto_fg: 'Crypto Fear&Greed',
+    fred_macro: 'FRED Macro', cftc_cot: 'CFTC COT',
+    news_sentiment: 'News Sentiment', coinglass: 'Coinglass',
+    myfxbook: 'MyFxBook',
+  };
+  function _ctxAge(sec) {
+    const s = Math.max(0, sec | 0);
+    if (s < 90) return s + 's';
+    if (s < 5400) return Math.round(s / 60) + 'm';
+    return Math.round(s / 3600) + 'h';
+  }
+  function renderContextIntel(d) {
+    const rows = d.context_intel || [];
+    const body = $('context-body'); if (!body) return;
+    setCnt('context-body-cnt', rows.length);
+    if (!rows.length) {
+      body.innerHTML = '<div class="empty">no context inputs yet · collectors warming up (funding · F&amp;G · FRED · COT · news)</div>';
+      return;
+    }
+    const trs = rows.map(c => {
+      const sig = String(c.signal || 'neutral');
+      const sigCls = sig === 'bullish' ? 'b-pos' : sig === 'bearish' ? 'b-neg' : 'b-flat';
+      const freshCls = c.fresh ? 'b-pos' : 'b-flat';
+      const freshTxt = (c.fresh ? '● ' : '○ ') + _ctxAge(c.age_sec);
+      const name = _CTX_LABEL[c.source] || c.source;
+      return `<tr title="${esc(c.source)} · ${esc(c.asset_class)} · age ${c.age_sec | 0}s · ${c.fresh ? 'fresh' : 'stale'} · ${esc(sig)}">
+        <td class="l tk">${esc(name)}</td>
+        <td class="l ex">${esc(c.asset_class)}</td>
+        <td class="l">${esc(c.latest_value)}</td>
+        <td class="${freshCls}" style="font-size:9px">${esc(freshTxt)}</td>
+        <td class="${sigCls}">${esc(sig)}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML =
+      `<table><colgroup>
+        <col style="width:18%"><col style="width:11%"><col style="width:45%"><col style="width:12%"><col style="width:14%">
+       </colgroup><thead><tr>
+        <th class="l">SOURCE</th><th class="l">CLASS</th><th class="l">LATEST</th><th>FRESH</th><th>LEAN</th>
+      </tr></thead><tbody>${trs}</tbody></table>`;
+  }
+
   // ── NEW · P3 placeholder (개발 / 가야할길 / 배운것) ────────────────────────
   function placeholder(bodyId, msg, endpoint) {
     const body = $(bodyId); if (!body) return;
@@ -986,6 +1033,7 @@
   // No-op until the first snapshot has primed _lastFeedD. Display-only.
   T.renderGateFeedLive = () => { if (_lastFeedD) renderGateFeed(_lastFeedD); };
 
+  T.register('context', (d) => { renderContextIntel(d); });
   T.register('build', () => placeholder('build-body', 'commit timeline · wave digest · activity heat · test-health', 'GET /api/buildlog'));
   T.register('path', () => placeholder('path-body', 'phase ladder P0→P6 · plan kanban · next strikes · blockers', 'GET /api/roadmap'));
   T.register('learned', () => placeholder('learned-body', 'lessons feed · anti-pattern wall · root-cause · debate verdicts', 'GET /api/lessons'));

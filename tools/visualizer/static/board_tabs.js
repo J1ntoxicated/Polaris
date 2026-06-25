@@ -417,6 +417,14 @@
       </div>
     </div>
 
+    <!-- TAB · CONTEXT/INTEL — every alt-data context input the bot's regime fuser
+         weighs (funding · crypto fear&greed · FRED macro · CFTC COT · news
+         sentiment when present), one Bloomberg-dense line per source. "The bot's
+         eyes" surfaced read-only — never feeds sizing/gating/exit. -->
+    <div class="tab-pane" id="pane-context">
+      <div class="tab-grid-1">${collapsiblePanel('Context / Intel · alt-data inputs the bot weighs · source · latest · freshness · lean', 'context-body', 'mini')}</div>
+    </div>
+
     <!-- TAB 4 · Build — commit timeline / digest / test-health (GET /api/buildlog). -->
     <div class="tab-pane" id="pane-build">
       <div class="tab-grid-1">${collapsiblePanel('Build · commit timeline · wave digest · test-health', 'build-body', 'mini')}</div>
@@ -458,6 +466,7 @@
     setCnt('tabcnt-gates', (d.gate_decisions || []).length || '');
     setCnt('tabcnt-performance', (d.strategy_stats || []).length);
     setCnt('tabcnt-logic', venueFilter(d.regime_states).length);
+    setCnt('tabcnt-context', (d.context_intel || []).length || '');
     setCnt('tabcnt-build', '');
     setCnt('tabcnt-path', '');
     setCnt('tabcnt-learned', '');

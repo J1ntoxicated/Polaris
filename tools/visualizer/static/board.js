@@ -384,6 +384,7 @@
     { id: 'gates', label: 'Gates' },
     { id: 'performance', label: 'Performance' },
     { id: 'logic', label: 'Logic' },
+    { id: 'context', label: 'Context' },
     { id: 'build', label: 'Build' },
     { id: 'path', label: 'Roadmap' },
     { id: 'learned', label: 'Lessons' },

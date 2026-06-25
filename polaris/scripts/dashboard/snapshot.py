@@ -74,6 +74,7 @@ from polaris.scripts.dashboard.snapshot_sections import (
     _ai_shadow_panel,
     _alerts,
     _cell_top_bottom,
+    _collect_context_intel,
     _edge_validation,
     _exit_surface,
     _gate_decisions,
@@ -431,6 +432,10 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # sidecar (fail-open: empty list on a missing / locked sidecar). Read-only
         # connective tissue for the dashboard; never feeds sizing/gating/exit.
         probe_events = read_probe_events(db_path.parent / "probes.sqlite")
+        # CONTEXT/INTEL tab — every alt-data context input the bot weighs, the
+        # latest row per source from the read-only altdata_snapshot audit table.
+        # "The bot's eyes" surfaced for the operator. Never feeds trading.
+        context_intel = _collect_context_intel(conn, now_s=now_s)
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -483,6 +488,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             probe_events=probe_events,
             since_reset=since_reset,
             strategy_since_reset=strategy_since_reset,
+            context_intel=context_intel,
         )
     finally:
         conn.close()

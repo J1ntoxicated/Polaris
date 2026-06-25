@@ -22,6 +22,7 @@ from polaris.core.metrics.risk_unit import R_USD_PROXY
 # the LOC guideline; re-exported here so callers keep a single import surface.
 from polaris.scripts.dashboard.snapshot_e2 import (
     _ai_shadow_panel,
+    _collect_context_intel,
     _entry_admission_stats,
     _exit_surface,
     _regime_states,
@@ -52,6 +53,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
 
 __all__ = [
     "_ai_shadow_panel",
+    "_collect_context_intel",
     "_entry_admission_stats",
     "_exit_surface",
     "_regime_states",

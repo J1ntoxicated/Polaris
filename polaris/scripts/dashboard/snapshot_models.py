@@ -554,6 +554,30 @@ class AiShadowPanel:
 
 
 @dataclass(slots=True)
+class ContextIntelRow:
+    """One alt-data / context input the bot's regime fuser sees — display-only.
+
+    The CONTEXT/INTEL panel collects EVERY context input the bot weighs (funding,
+    crypto fear&greed, FRED macro, CFTC positioning, and — when the news collector
+    lands rows — news sentiment) into one Bloomberg-dense list so the operator sees
+    "the bot's eyes" at a glance. Sourced read-only from the ``altdata_snapshot``
+    audit table (the LATEST row per ``source``); NEVER feeds sizing/gating/exit.
+
+    ``latest_value`` is a one-line human summary of the freshest payload;
+    ``signal`` is the coarse direction (bullish / bearish / neutral) that input
+    leans (read-only label, not a decision); ``age_sec`` + ``fresh`` are the
+    freshness (fresh = within the source's own refresh window → green; else grey).
+    """
+
+    source: str
+    asset_class: str
+    latest_value: str
+    signal: str
+    age_sec: int
+    fresh: bool
+
+
+@dataclass(slots=True)
 class DashboardSnapshot:
     ts_now: int = 0
     starting_capital: float = STARTING_CAPITAL
@@ -654,3 +678,10 @@ class DashboardSnapshot:
     # available. dataclasses.asdict serializes both for the web snapshot.
     since_reset: SinceResetRollup | None = None
     strategy_since_reset: list[StrategySinceReset] = field(default_factory=list)
+    # CONTEXT/INTEL tab (Jin 2026-06-24) — every alt-data / context input the bot's
+    # regime fuser weighs (funding · crypto fear&greed · FRED macro · CFTC COT ·
+    # news sentiment when present), the LATEST row per source from the read-only
+    # ``altdata_snapshot`` audit table, summarised to one display line each. This
+    # is "the bot's eyes" surfaced for the operator. dataclasses.asdict serializes
+    # it for the web snapshot. NEVER feeds sizing/gating/exit — pure board column.
+    context_intel: list[ContextIntelRow] = field(default_factory=list)

@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Final
+from collections.abc import Callable
+from typing import Any, Final
 
 from polaris.scripts.dashboard.snapshot_models import (
     AiShadowPanel,
     ClosedTrade,
+    ContextIntelRow,
     EntryAdmissionStat,
     ExitReasonBar,
     ExitSurface,
@@ -281,3 +283,208 @@ def _ai_shadow_panel(conn: sqlite3.Connection, *, now_s: int) -> AiShadowPanel:
         admission_total_n=total_n,
         admission_suppress_n=suppress_n,
     )
+
+
+# ---------------------------------------------------------------------------
+# CONTEXT/INTEL tab (Jin 2026-06-24)
+# ---------------------------------------------------------------------------
+# Every alt-data / context input the regime fuser weighs, the LATEST row per
+# source from the read-only ``altdata_snapshot`` audit table, summarised to one
+# display line. "The bot's eyes" surfaced for the operator. NEVER feeds trading.
+
+# Per-source freshness window (s) — a row newer than this is "fresh" (green); it
+# mirrors each collector's own ``ttl_sec`` so the panel greys a source out exactly
+# when the bot would treat its cached evidence as stale (cache.py get()). Unknown
+# sources fall back to a generous 2h window (best-effort observability).
+_SOURCE_FRESH_SEC: Final[dict[str, int]] = {
+    "okx_funding": 300,
+    "crypto_fg": 1800,
+    "fred_macro": 3600,
+    "cftc_cot": 21600,
+    "coinglass": 300,
+    "myfxbook": 1800,
+    "news_sentiment": 900,
+}
+_DEFAULT_FRESH_SEC: Final[int] = 7200
+
+
+def _num(v: object) -> float | None:
+    try:
+        if v is None or v == "":
+            return None
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarise_funding(p: dict[str, Any]) -> tuple[str, str]:
+    """OKX funding — average funding rate across the nested per-instrument rows.
+
+    Positive funding = longs paying shorts (crowded long → bullish positioning);
+    deeply negative = crowded short (bearish). Read-only label only."""
+    rates = [
+        f for f in (_num(row.get("fundingRate")) for row in p.values()
+                    if isinstance(row, dict)) if f is not None
+    ]
+    if not rates:
+        return "no funding data", "neutral"
+    avg = sum(rates) / len(rates)
+    sig = "bullish" if avg > 0.00005 else "bearish" if avg < -0.00005 else "neutral"
+    return f"avg funding {avg * 100:+.4f}% · {len(rates)} perp", sig
+
+
+def _summarise_crypto_fg(p: dict[str, Any]) -> tuple[str, str]:
+    """Crypto Fear & Greed (0=extreme fear, 100=extreme greed)."""
+    val = _num(p.get("value"))
+    label = str(p.get("label", "")) or "?"
+    if val is None:
+        return f"F&G {label}", "neutral"
+    sig = "bullish" if val >= 55 else "bearish" if val <= 45 else "neutral"
+    return f"F&G {int(val)} · {label}", sig
+
+
+def _summarise_fred(p: dict[str, Any]) -> tuple[str, str]:
+    """FRED macro — headline on VIX (risk-on/off). Elevated VIX = risk-off."""
+    vix = _num(p.get("vix"))
+    hy = _num(p.get("hy_spread"))
+    parts: list[str] = []
+    if vix is not None:
+        parts.append(f"VIX {vix:.1f}")
+    if hy is not None:
+        parts.append(f"HY {hy:.0f}bps")
+    summary = " · ".join(parts) if parts else "macro"
+    # Risk-off (bearish for risk assets) when VIX is elevated.
+    sig = "neutral"
+    if vix is not None:
+        sig = "bearish" if vix >= 25 else "bullish" if vix <= 15 else "neutral"
+    return summary, sig
+
+
+def _summarise_cot(p: dict[str, Any]) -> tuple[str, str]:
+    """CFTC COT — average speculator net-spec percentile across mapped contracts.
+
+    High percentile (crowded net-long vs the contract's own range) = trend-
+    confirming bull; low = bear. Read-only positioning context label."""
+    pctiles = [
+        v for v in (_num(row.get("net_spec_pctile")) for row in p.values()
+                    if isinstance(row, dict)) if v is not None
+    ]
+    if not pctiles:
+        return "no COT data", "neutral"
+    avg = sum(pctiles) / len(pctiles)
+    sig = "bullish" if avg >= 0.66 else "bearish" if avg <= 0.34 else "neutral"
+    return f"spec net {avg * 100:.0f}%ile · {len(pctiles)} contracts", sig
+
+
+def _summarise_news(p: dict[str, Any]) -> tuple[str, str]:
+    """News sentiment — relevance-weighted mean sentiment + headline count, plus
+    the single most-relevant headline, across the collector's per-symbol payload.
+
+    The ``NewsSentimentCollector`` (built separately) lands rows under
+    source='news_sentiment' shaped per-symbol like funding/COT:
+    ``{"AAPL": {"sentiment": +0.6, "relevance": 0.8, "magnitude": .., "n": 3,
+    "headline": ".."}, ...}``. Fold to one display line; auto-displayed."""
+    wsum = 0.0
+    wt = 0.0
+    total_n = 0
+    best_rel = -1.0
+    best_headline = ""
+    for row in p.values():
+        if not isinstance(row, dict):
+            continue
+        sent = _num(row.get("sentiment"))
+        if sent is None:
+            continue
+        rel = _num(row.get("relevance"))
+        weight = rel if (rel is not None and rel > 0.0) else 0.01
+        wsum += sent * weight
+        wt += weight
+        total_n += int(_num(row.get("n")) or 1)
+        head = str(row.get("headline", "")).strip()
+        if head and (rel if rel is not None else 0.0) > best_rel:
+            best_rel = rel if rel is not None else 0.0
+            best_headline = head
+    if wt <= 0.0:
+        return "news", "neutral"
+    agg = wsum / wt
+    sig = "bullish" if agg > 0.15 else "bearish" if agg < -0.15 else "neutral"
+    bits = [f"sentiment {agg:+.2f}"]
+    if total_n:
+        bits.append(f"{total_n} headlines")
+    prefix = " · ".join(bits)
+    if best_headline:
+        head = best_headline if len(best_headline) <= 70 else best_headline[:67] + "…"
+        return f"{prefix} · {head}", sig
+    return prefix, sig
+
+
+def _summarise_generic(p: dict[str, Any]) -> tuple[str, str]:
+    """Fallback for a source with no bespoke extractor (e.g. a future collector or
+    coinglass/myfxbook stubs): a compact key=value preview, neutral signal."""
+    if not p:
+        return "—", "neutral"
+    parts: list[str] = []
+    for k, v in list(p.items())[:3]:
+        if isinstance(v, (int, float)):
+            parts.append(f"{k}={v:g}")
+        elif isinstance(v, str) and v:
+            parts.append(f"{k}={v}")
+        elif isinstance(v, dict):
+            parts.append(f"{k}[{len(v)}]")
+    return (" · ".join(parts) or "—"), "neutral"
+
+
+_Summariser = Callable[[dict[str, Any]], tuple[str, str]]
+_SUMMARISERS: Final[dict[str, _Summariser]] = {
+    "okx_funding": _summarise_funding,
+    "crypto_fg": _summarise_crypto_fg,
+    "fred_macro": _summarise_fred,
+    "cftc_cot": _summarise_cot,
+    "news_sentiment": _summarise_news,
+}
+
+
+def _collect_context_intel(
+    conn: sqlite3.Connection, *, now_s: int
+) -> list[ContextIntelRow]:
+    """LATEST ``altdata_snapshot`` row per source → one CONTEXT/INTEL line each.
+
+    Read-only roll-up of every context input the bot weighs (funding · F&G · FRED
+    macro · CFTC COT · news sentiment when present). For each distinct ``source``
+    the freshest (max-ts) row is summarised to a one-line value + coarse direction
+    + freshness. Display-only; NEVER read by sizing/gating/exit/strategy/loop.
+    Graceful empty on a missing/empty table (older schema). Sorted by source name
+    so the panel order is stable poll-to-poll."""
+    rows = _safe_query(
+        conn,
+        """SELECT a.source, a.asset_class, a.ts, a.payload_json
+             FROM altdata_snapshot a
+             JOIN (SELECT source, MAX(ts) AS mts
+                     FROM altdata_snapshot GROUP BY source) m
+               ON a.source = m.source AND a.ts = m.mts
+            ORDER BY a.source ASC""",
+    )
+    out: list[ContextIntelRow] = []
+    for source, asset_class, ts, payload_json in rows:
+        src = str(source)
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        fn = _SUMMARISERS.get(src, _summarise_generic)
+        latest_value, signal = fn(payload)
+        age = max(0, int(now_s) - int(ts or 0))
+        window = _SOURCE_FRESH_SEC.get(src, _DEFAULT_FRESH_SEC)
+        out.append(
+            ContextIntelRow(
+                source=src,
+                asset_class=str(asset_class or ""),
+                latest_value=str(latest_value),
+                signal=str(signal),
+                age_sec=age,
+                fresh=age < window,
+            )
+        )
+    return out

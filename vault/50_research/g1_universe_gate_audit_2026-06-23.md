@@ -45,3 +45,13 @@ correlation/cluster(선정 시 무, L3 다운스트림만) · regime_state(테�
 7. **Alpaca stale-active deactivate sweep + listing_ts merge** — NOTE: `wf_fix_stale_deactivate.js`(git status) 진행 중일 수 있음, 중복 전 확인. **[Jin-surface]**
 
 mandate_ok=true · 거부키워드 0 · READ-ONLY.
+
+## 2026-06-25 RESOLUTION — HIGH-1/HIGH-2 already-built in HEAD (no edit needed)
+재배선 의뢰(signal_density+cell_scores 데드로직 / per-venue z-norm) 착수 시 **둘 다 이미 구현 완료** 확인 — 감사(06-23)는 commit `2a9c6c2`(G1 ranking-brain) 이전 스냅샷 기준이라 갭으로 표기됨. fresh-Claude 적대 검증 IMPLEMENTED-CORRECT 판정(file:line 인용).
+- **HIGH-1 (#1+#2)**: `_production_layers.py:457` `compute_signal_density_7d`(real SQL `signals` 7d count) merge `:458-462`, `:463` `read_cell_scores_by_instrument`(real `cell_matrix_p0` n_eff-weighted mean), `:480-486` 둘 다 `compute_dynamic_focus(cell_scores=…)`로 전달. `watchlist.py:120,126,134-141` sig_z(0.25)+cell_z(0.10) 합산 = 설계 35% 활성. 빈 dict→graceful 0(`watchlist.py:65-66` sigma guard), 무crash/무drop. 잔존=데이터 성숙(현 cell.score≈0·signals 1심볼)이지 배선 갭 아님.
+- **HIGH-2 (#3)**: `watchlist.py:70-90` `_grouped_z_score` per-(venue/asset_class) z-norm, single-group=global `_z_score` byte-identical no-op. `:118-132` 6축(vol/sig/atr/depth/cell/opp) 전부 grouped. RANKING-only(flow_not_block) — `core/sizing/` 에 focus_score/opportunity_score 참조 0건(9-stack 무관).
+- 회귀: G1 ranking+z-norm 테스트 전부 green(`test_g1_scored_ranker.py` 25/25). 유일 실패 `test_rank_top_n_cap_default_and_env`=pre-existing(stale 120 vs `schema.py:158`=1500, WATCH-cap 영역, 본 태스크 무관·별도). NOT live-deployed(메인 supervised). 거부키워드 0.
+
+## 2026-06-24 catalog-completeness 측정 (live API, 실측)
+- OKX: us.okx.com tickers=512(public master 518), USDT-quote=246→price>0=186=현재 active 전부. 페이지네이션/region/limit/rank 컷 0(watch_max 1500≫186). 유일 폭 제한 = **USDT-only**(schema.py:47), 512중 266(52%) 제외(BTC59/ETH45/DAI34/USD22/USDC13…). 189=과거 upsert 잔여 3, under-fetch 아님. → watch-all=전체 US-OKX **USDT**-SPOT(의도적 협소, 버그 아님). 첫 확장=USDC(+13).
+- Capital: 전체 nav 무캡 크롤 137req 전부 200, 429/non-200 **0**. TRUE 카탈로그 **2565 epic**(SHARES2113·crypto277·FX115·commod33·indices20). 우리 235=의도 scope(FX/idx/commod) 168/168 **100% 커버**+oil노드 SHARES67(equity 재태깅·inactive). depth-cap4 무손실(max depth3), 429 silent-skip(_capital.py:170) 실측 손실 0. 235→과거492 축소=crypto290 라우팅(OKX)+commod 정정. 큰 미수집=**SHARES2086 의도적 제외**(token 화이트리스트 _capital.py:37). → 의도 scope 내 watch-all=진짜 전체.

@@ -53,7 +53,6 @@ from polaris.core.universe.discovery import (
     rank_active_universe,
 )
 from polaris.core.universe.schema import (
-    CAPITAL_FX_MAJORS,
     Tier,
     UniverseInstrument,
     is_capital_fx_major,
@@ -641,22 +640,28 @@ def fx_major_focus_targets(
     ADD-only (flow_not_block): seats the majors ALONGSIDE the exotics, removes
     nothing, and touches no ranking weight. ``asset_class`` comes from the
     universe row (FX majors are always ``forex``).
+
+    Matching is SUFFIX-INSENSITIVE via ``is_capital_fx_major`` (which normalizes
+    the epic): Capital lists the AUD/USD major as ``AUDUSD_ZERO`` (NOT a bare
+    ``AUDUSD`` row — verified live), so an exact ``symbol IN (majors)`` filter
+    would silently drop AUDUSD. We select all live ``capital`` forex rows and let
+    the normalizing predicate pick the majors — same logic the strategy basket
+    uses (``fx_breakout_basket._normalize_basket_symbol``). ``EURUSD_W`` (weekend
+    variant) is excluded by the ``state='live'`` guard (it lists as ``closed``).
     """
-    placeholders = ", ".join("?" for _ in CAPITAL_FX_MAJORS)
     rows = conn.execute(
-        f"""
+        """
         SELECT venue, symbol, asset_class, underlying_group_id
         FROM universe
-        WHERE venue = 'capital' AND state = 'live' AND symbol IN ({placeholders})
-        """,
-        tuple(sorted(CAPITAL_FX_MAJORS)),
+        WHERE venue = 'capital' AND state = 'live' AND asset_class = 'forex'
+        """
     ).fetchall()
     out: list[tuple[str, str, str, str]] = []
     seen: set[tuple[str, str]] = set()
     for r in rows:
         venue, symbol = str(r[0]), str(r[1])
-        # Defensive: the IN-clause matches the stored symbol; double-check the
-        # curated-major predicate so a near-miss epic is never seated.
+        # Normalizing predicate matches AUDUSD_ZERO / EURUSD / ... → the 5 majors,
+        # and rejects every exotic/cross. De-dup on (venue, symbol).
         if not is_capital_fx_major(venue, symbol) or (venue, symbol) in seen:
             continue
         seen.add((venue, symbol))

@@ -184,12 +184,15 @@ def test_current_period_open_floors_1h() -> None:
     assert open_ts % 3600 == 0
 
 
-def test_current_period_open_floors_1d_to_utc_midnight() -> None:
+def test_current_period_open_1d_returns_now_never_skips() -> None:
+    # 1D is intentionally unmapped: Alpaca daily bars are stamped at the session
+    # open (not UTC midnight), so a daily skip gate would be unsound. The helper
+    # returns ``now`` for 1D → a stored daily bar's ts is always < now → the skip
+    # gate never fires for daily (flow_not_block; daily uses incremental window
+    # only). Same conservative fall-through as any unmapped interval.
     now = 1_700_001_800
-    open_ts = current_period_open_ts("1D", now)
-    assert open_ts <= now
-    assert open_ts % 86400 == 0  # UTC midnight
-    assert now - open_ts < 86400
+    assert current_period_open_ts("1D", now) == now
+    assert current_period_open_ts("4h", now) == now  # unmapped → now
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +410,24 @@ def test_fx_major_focus_targets_seats_live_majors() -> None:
     usdjpy = next(t for t in targets if t[1] == "USDJPY")
     assert usdjpy[0] == "capital"
     assert usdjpy[2] == "forex"
+    conn.close()
+
+
+def test_fx_major_focus_targets_seats_suffixed_audusd_zero() -> None:
+    """REGRESSION: Capital lists the AUD/USD major as ``AUDUSD_ZERO`` (there is NO
+    bare ``AUDUSD`` row in the live universe). An exact ``symbol IN (majors)``
+    filter silently dropped it; the suffix-normalizing predicate must seat it."""
+    conn = _universe_conn()
+    _ins_universe(conn, "capital", "AUDUSD_ZERO", "forex", "live")
+    _ins_universe(conn, "capital", "EURUSD_W", "forex", "closed")  # weekend → not live
+    _ins_universe(conn, "capital", "AUDZAR", "forex", "live")  # exotic → not a major
+    from polaris.scripts._production_layers import fx_major_focus_targets
+
+    targets = fx_major_focus_targets(conn)
+    symbols = {s for _v, s, _ac, _g in targets}
+    assert "AUDUSD_ZERO" in symbols, "the suffixed AUD/USD major must be seated"
+    assert "EURUSD_W" not in symbols, "closed weekend variant excluded by state guard"
+    assert "AUDZAR" not in symbols, "exotic cross is not a curated major"
     conn.close()
 
 

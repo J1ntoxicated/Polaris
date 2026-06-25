@@ -97,22 +97,29 @@ def staleness_threshold_for(bar_interval: str) -> float:
 # INCREMENTAL: skip a re-fetch when the current period's bar is already held, and
 # bound the window at the last stored bar. Pure fetch-efficiency, NOT a throttle
 # (flow_not_block: a missing/rolled period always fetches; no symbol is blocked).
+# INTRADAY only — skip-if-fresh is an intra-period gate and must never be applied
+# to ``1D``. Alpaca daily bars are stamped at the RTH SESSION OPEN (04:00/05:00Z),
+# NOT UTC midnight, so a ``floor(now, 86400)`` boundary would not line up with the
+# stored daily ts. ``1D`` is therefore intentionally ABSENT → ``current_period_
+# open_ts`` returns ``now`` for it → the skip gate never fires for daily (the 1D
+# refetch is hourly, not the 5s storm, so it does not need skip-if-fresh — only
+# the incremental ``since_ts`` window, which is session-open-agnostic).
 _PERIOD_SECONDS_BY_INTERVAL: dict[str, int] = {
     "1m": 60,
     "5m": 5 * 60,
     "15m": 15 * 60,
     "1H": 3600,
-    "1D": 86400,
 }
 
 
 def current_period_open_ts(bar_interval: str, now: int) -> int:
     """Seconds-epoch (UTC) of the OPEN of the in-progress bar for ``bar_interval``.
 
-    ``floor(now / period) * period``. For ``1D`` this is UTC midnight (the epoch
-    is UTC-aligned at 86400 boundaries). Used by the skip-if-fresh gate to decide
-    whether the bar we already hold belongs to the still-open current period.
-    Unmapped interval → ``now`` (never skips — conservative, flow_not_block).
+    ``floor(now / period) * period`` for the INTRADAY intervals (1m/5m/15m/1H),
+    whose stored ts are epoch-aligned to the period. ``1D`` is deliberately
+    unmapped → returns ``now`` (never skips): Alpaca daily bars are stamped at the
+    session open, not a UTC-midnight boundary, so a daily skip gate would be
+    unsound. Unmapped interval → ``now`` (conservative, flow_not_block).
     """
     period = _PERIOD_SECONDS_BY_INTERVAL.get(bar_interval)
     if period is None or period <= 0:
@@ -259,8 +266,11 @@ _ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 330, "1H": 45, "15m": 8, "5m": 4,
 
 # Incremental re-fetch overlap (sec). When history exists we lower-bound the
 # window at the last stored bar MINUS this slack so a just-closed boundary bar is
-# re-captured (Alpaca's ``start`` is inclusive; the small overlap absorbs clock
-# skew + an in-progress→closed bar update). One extra bar, never the full window.
+# re-captured (Alpaca's ``start`` is inclusive; the overlap absorbs clock skew +
+# an in-progress→closed bar update + the weekend gap on 1D). The dominant
+# incremental path is 1D (Alpaca strategies are all daily); ``start`` is
+# day-granular (``%Y-%m-%d``), and ``sort='desc'`` + ``limit`` cap the response,
+# so this stays a small re-pull (a few days of bars), never the full 330d window.
 _ALPACA_INCREMENTAL_OVERLAP_SEC = 2 * 86400  # 2 days — covers a weekend gap on 1D
 
 
@@ -465,11 +475,14 @@ async def ingest_bars_per_timeframe(
     test introspection — it tracks the *latest* per-tf success across all
     venues (max), not the gating predicate (which is per-(tf,venue)).
 
-    Returns aggregate ``{"bars": N, "baseline_samples": M}`` for the tick.
+    Returns aggregate ``{"bars": N, "baseline_samples": M, "skipped_fresh": S}``
+    for the tick (``skipped_fresh`` = symbols whose fetch was skipped because the
+    current-period bar was already cached — the 429-fix effectiveness signal).
     """
     mono = now_mono if now_mono is not None else time.monotonic()
     total_bars = 0
     total_baseline = 0
+    total_skipped = 0
     for timeframe, venues_for_tf in timeframe_to_venues.items():
         cadence = TIMEFRAME_FETCH_CADENCE_SEC.get(timeframe, 5.0)
         # Per-(tf, venue) gate: only fetch venues whose individual cadence
@@ -491,6 +504,7 @@ async def ingest_bars_per_timeframe(
             )
             total_bars += result["bars"]
             total_baseline += result["baseline_samples"]
+            total_skipped += result.get("skipped_fresh", 0)
             bars_persisted_by_tf[timeframe] = (
                 bars_persisted_by_tf.get(timeframe, 0) + result["bars"]
             )
@@ -503,7 +517,19 @@ async def ingest_bars_per_timeframe(
                 # introspection / dashboards can still display "last 1H
                 # ingest 30s ago" rather than tracking 2N keys.
                 last_fetch_monotonic_by_tf[timeframe] = mono
-    return {"bars": total_bars, "baseline_samples": total_baseline}
+    # Cache-skip visibility (Alpaca 429 fix): one DEBUG line when symbols were
+    # skipped this tick, so the runtime log shows the redundant-fetch reduction
+    # (e.g. "~99 Alpaca 1m fetches collapsed to the once-per-minute roll").
+    if total_skipped > 0:
+        logger.debug(
+            "[ingest] skip_if_current skipped %d cached current-period symbol(s)",
+            total_skipped,
+        )
+    return {
+        "bars": total_bars,
+        "baseline_samples": total_baseline,
+        "skipped_fresh": total_skipped,
+    }
 
 
 async def ingest_bars_for_focus(

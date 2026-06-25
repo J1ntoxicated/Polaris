@@ -52,8 +52,9 @@ def _focus_by_venue(
     rank (focus_rank asc), so the highest-tier (S) names lead each venue's slice.
 
     STAGE 1: each venue is capped at its OWN WS budget (``ws_budget_for_venue`` —
-    Capital 40 genuine cap, OKX/Alpaca 60 default, env-raisable). flow_not_block:
-    a name beyond the WS budget still bar-ingests via REST, it is not dropped.
+    Capital 40 genuine cap, OKX 60, Alpaca feed-driven (SIP 60 / IEX 30 cap),
+    env-raisable). flow_not_block: a name beyond the WS budget still bar-ingests
+    via REST, it is not dropped.
     """
     # Read deep enough that the largest per-venue budget can be filled.
     max_budget = max(

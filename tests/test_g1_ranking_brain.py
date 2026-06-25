@@ -286,10 +286,11 @@ def test_focus_cycle_target_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None
     assert _focus_cycle_target() == FOCUS_CYCLE_TARGET  # invalid → default
 
 
-def test_ws_budget_per_venue() -> None:
-    """STAGE 1: WS socket budget is per-venue (Capital 40 genuine cap; OKX/Alpaca 60)."""
+def test_ws_budget_per_venue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """STAGE 1: WS socket budget is per-venue (Capital 40; OKX 60; Alpaca SIP 60)."""
     from polaris.core.universe.schema import ws_budget_for_venue
 
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
     assert ws_budget_for_venue("capital") == 40  # genuine Capital WS ceiling
     assert ws_budget_for_venue("okx") == 60
-    assert ws_budget_for_venue("alpaca") == 60
+    assert ws_budget_for_venue("alpaca") == 60  # SIP default → no symbol cap

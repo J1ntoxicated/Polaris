@@ -336,7 +336,7 @@ class AlpacaAdapter:
         timeframe: str = "1Min",
         limit: int = 300,
         start: str | None = None,
-        feed: str = "iex",
+        feed: str | None = None,
         sort: str = "desc",
     ) -> list[dict[str, Any]]:
         """Fetch up to ``limit`` ``timeframe`` bars for ``symbol`` (data host).
@@ -353,11 +353,16 @@ class AlpacaAdapter:
         - ``sort='desc'`` — Alpaca returns the window NEWEST-first, so ``limit``
           keeps the MOST-RECENT bars. The default (asc) returned the OLDEST
           ``limit`` bars of a window wider than ``limit`` → provably stale.
-        - ``feed='iex'`` — real-time IEX prints. This account's SIP/default
-          entitlement is DELAYED (15-min), so a SIP bar is structurally late;
-          IEX is live (newest 1m bar ~1 min old, verified live).
+        - ``feed`` — the configured Alpaca feed (``POLARIS_ALPACA_FEED``, default
+          ``sip``) when not overridden. Jin's paid SIP entitlement is real-time
+          (the old free account's SIP was 15-min delayed, which is why IEX was
+          forced here before); IEX stays the explicit/fallback option.
         The caller re-sorts to the canonical newest-LAST contract.
         """
+        if feed is None:
+            from polaris.core.universe.schema import alpaca_feed_token
+
+            feed = alpaca_feed_token()
         params: dict[str, str] = {
             "timeframe": timeframe,
             "limit": str(limit),

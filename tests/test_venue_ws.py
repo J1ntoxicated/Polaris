@@ -213,11 +213,83 @@ def test_capital_is_gated_weekend() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_alpaca_ws_url_iex() -> None:
+def test_alpaca_ws_url_sip_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default feed is SIP (paid real-time, no symbol cap) — Jin's entitlement.
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    c = AlpacaQuoteWS(
+        symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    assert c.ws_url == "wss://stream.data.alpaca.markets/v2/sip"
+
+
+def test_alpaca_ws_url_iex_when_env_iex(monkeypatch: pytest.MonkeyPatch) -> None:
+    # POLARIS_ALPACA_FEED=iex pins the free fallback feed (case-insensitive).
+    monkeypatch.setenv("POLARIS_ALPACA_FEED", "IEX")
     c = AlpacaQuoteWS(
         symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None
     )
     assert c.ws_url == "wss://stream.data.alpaca.markets/v2/iex"
+
+
+def test_alpaca_ws_url_garbage_env_falls_back_to_sip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLARIS_ALPACA_FEED", "nonsense")
+    c = AlpacaQuoteWS(
+        symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    assert c.ws_url == "wss://stream.data.alpaca.markets/v2/sip"
+
+
+def test_alpaca_runtime_downgrade_on_auth_error_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # SIP key without entitlement → an auth/subscription error frame downgrades the
+    # live feed to IEX (next reconnect uses the IEX URL). Graceful, never a halt.
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    c = AlpacaQuoteWS(
+        symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    assert c.ws_url.endswith("/sip")
+    err = json.dumps([{"T": "error", "code": 409, "msg": "insufficient subscription"}])
+    assert c.parse_message(err) is None  # control frame → no tick
+    assert c.ws_url == "wss://stream.data.alpaca.markets/v2/iex"  # downgraded
+
+
+def test_alpaca_non_entitlement_error_keeps_sip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-auth error (e.g. a malformed-frame complaint) must NOT downgrade SIP.
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    c = AlpacaQuoteWS(
+        symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    c.parse_message(json.dumps([{"T": "error", "code": 400, "msg": "invalid syntax"}]))
+    assert c.ws_url.endswith("/sip")  # unrelated error → stays on SIP
+
+
+def test_alpaca_iex_caps_subscribe_at_30(monkeypatch: pytest.MonkeyPatch) -> None:
+    # On IEX the subscribe frame is hard-capped at 30 symbols (focus order kept),
+    # so a >30 set never trips "symbol limit exceeded". SIP would send all of them.
+    monkeypatch.setenv("POLARIS_ALPACA_FEED", "iex")
+    syms = [f"SYM{i}" for i in range(40)]
+    c = AlpacaQuoteWS(
+        symbols=syms, api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    sub = json.loads(list(c.subscribe_messages())[1])
+    assert len(sub["quotes"]) == 30
+    assert sub["quotes"] == syms[:30]  # focus order preserved (Tier-S leads)
+    assert c.current_subscription() == set(syms[:30])
+
+
+def test_alpaca_sip_does_not_cap_subscribe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    syms = [f"SYM{i}" for i in range(40)]
+    c = AlpacaQuoteWS(
+        symbols=syms, api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    sub = json.loads(list(c.subscribe_messages())[1])
+    assert len(sub["quotes"]) == 40  # SIP has no symbol cap
 
 
 def test_alpaca_subscribe_auth_then_quotes_only() -> None:

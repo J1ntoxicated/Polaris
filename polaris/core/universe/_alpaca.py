@@ -499,7 +499,23 @@ def _snapshot_to_liquidity(snap: Any) -> dict[str, float] | None:
     # ``price`` (last close) feeds the universe min_price eligibility floor — it
     # was previously computed and discarded; pennies (TNON $0.59, ADTX $0.017)
     # gap through stops, so the floor needs the price plumbed onto the row.
-    return {"vol_24h_usd": dollar_vol, "atr_24h_pct": atr_pct, "price": close}
+    out: dict[str, float] = {
+        "vol_24h_usd": dollar_vol, "atr_24h_pct": atr_pct, "price": close,
+    }
+    # Real spread from the snapshot ``latestQuote`` (bp/ap, same fields as the WS
+    # quote) feeds the venue spread floor — the placeholder (2.0) hid 88%-spread
+    # junk (MGN/WHLR/ARQQ) from the floor. DEGRADE-SAFE (flow_not_block): a
+    # missing/non-dict quote, a non-positive bid/ask, a crossed/locked book
+    # (ask<=bid), or a non-positive mid OMITS the key entirely so the row keeps
+    # its placeholder and still flows — only a real POSITIVE spread is emitted.
+    quote = snap.get("latestQuote")
+    if isinstance(quote, dict):
+        bid = _num(quote.get("bp"))
+        ask = _num(quote.get("ap"))
+        mid = 0.5 * (bid + ask)
+        if bid > 0.0 and ask > bid and mid > 0.0:
+            out["spread_bps"] = (ask - bid) / mid * 1e4
+    return out
 
 
 def _num(value: Any) -> float:
@@ -533,6 +549,10 @@ def _apply_liquidity(
             out.append(ins)
             continue
         atr = liq["atr_24h_pct"] if liq["atr_24h_pct"] > 0.0 else ins.atr_24h_pct
+        # Overwrite spread only when a real POSITIVE datum landed (else keep the
+        # placeholder so an un-enriched/un-quoted row still flows — flow_not_block).
+        real_spread = liq.get("spread_bps", 0.0)
+        spread_bps = real_spread if real_spread > 0.0 else ins.spread_bps
         out.append(
             UniverseInstrument(
                 venue=ins.venue,
@@ -543,7 +563,7 @@ def _apply_liquidity(
                 quote_ccy=ins.quote_ccy,
                 state=ins.state,
                 vol_24h_usd=liq["vol_24h_usd"],
-                spread_bps=ins.spread_bps,
+                spread_bps=spread_bps,
                 atr_24h_pct=atr,
                 depth_10bps_usd=ins.depth_10bps_usd,
                 signal_density_7d=ins.signal_density_7d,

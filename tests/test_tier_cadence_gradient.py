@@ -188,15 +188,28 @@ def test_cadence_tail_floor_positive() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ws_budget_defaults() -> None:
+def test_ws_budget_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
     assert ws_budget_for_venue("capital") == 40
     assert ws_budget_for_venue("okx") == 60
+    # Alpaca SIP (paid, default) has no symbol cap → 60 (focus headroom).
     assert ws_budget_for_venue("alpaca") == 60
+
+
+def test_ws_budget_alpaca_iex_feed_caps_at_30(monkeypatch: pytest.MonkeyPatch) -> None:
+    # IEX free feed hard-caps at 30 symbols (quotes-only = 1 channel/sym), so the
+    # Alpaca budget MUST be 30 on IEX — a >30 subscribe frame trips "symbol limit
+    # exceeded" → reconnect churn → feed death.
+    monkeypatch.setenv("POLARIS_ALPACA_FEED", "iex")
+    assert ws_budget_for_venue("alpaca") == 30
 
 
 def test_ws_budget_env_raisable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLARIS_WS_BUDGET_OKX", "150")
     assert ws_budget_for_venue("okx") == 150
+    # Alpaca is env-raisable too (overrides the feed-driven default).
+    monkeypatch.setenv("POLARIS_WS_BUDGET_ALPACA", "45")
+    assert ws_budget_for_venue("alpaca") == 45
     # Unknown venue → a permissive default (>0), never 0 (flow_not_block).
     assert ws_budget_for_venue("mystery") > 0
 

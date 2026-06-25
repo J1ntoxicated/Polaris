@@ -1,11 +1,22 @@
-"""Alpaca IEX market-data WebSocket client (P4 — Track C).
+"""Alpaca SIP/IEX market-data WebSocket client (P4 — Track C).
 
 Design SSOT: ``.claude/plans/p4_ws_realtime_price_2026-06-01.md``.
 
-Endpoint: ``wss://stream.data.alpaca.markets/v2/iex`` — the IEX feed is free on
-paper accounts and is real-time (the SIP feed needs a paid plan). Auth is a
-post-connect ``{"action":"auth","key":...,"secret":...}`` frame, then a
-``{"action":"subscribe","quotes":[...],"trades":[...]}`` frame.
+Endpoint: ``wss://stream.data.alpaca.markets/v2/{feed}`` where ``feed`` is the
+configured Alpaca data feed (``POLARIS_ALPACA_FEED``, default ``sip``). SIP is the
+paid real-time consolidated feed and has NO per-symbol subscription cap; IEX is
+the free fallback and hard-caps at 30 symbols. Auth is a post-connect
+``{"action":"auth","key":...,"secret":...}`` frame, then a
+``{"action":"subscribe","quotes":[...]}`` frame.
+
+SIP→IEX graceful fallback: a SIP key without the entitlement is accepted at the
+WS handshake but rejected with an ``{"T":"error","msg":"insufficient
+subscription"}`` control frame (verified live). On that frame the client downgrades
+the live feed to IEX (and logs ONE warning); the idle watchdog then reconnects
+onto the IEX URL. The downgrade is permanent for the client's lifetime (an
+entitlement does not appear mid-session), which avoids flapping. A plain connect
+failure is NOT a downgrade trigger — it is a transient (same host for both feeds),
+handled by the base reconnect backoff. Degrade, never halt (AGGRESSIVE).
 
 Alpaca delivers an **array** of messages per frame; each item has a ``T`` type
 discriminator (``q`` quote, ``t`` trade, ``success`` / ``subscription`` /
@@ -25,16 +36,29 @@ from collections.abc import Callable, Iterable
 
 from polaris.core.data.canonical import alpaca_quote_to_quote_tick
 from polaris.core.data.schema import QuoteTick
+from polaris.core.universe.schema import ALPACA_IEX_SYMBOL_CAP, alpaca_feed_token
 from polaris.venues.alpaca.equity_session_gate import us_equity_session_state
 from polaris.venues.ws_common import WSStreamClient
 
 logger = logging.getLogger(__name__)
 
 ALPACA_WS_IEX: str = "wss://stream.data.alpaca.markets/v2/iex"
+ALPACA_WS_SIP: str = "wss://stream.data.alpaca.markets/v2/sip"
+_FEED_URL: dict[str, str] = {"sip": ALPACA_WS_SIP, "iex": ALPACA_WS_IEX}
+
+# Alpaca control-error substrings that signal the key lacks the SIP entitlement
+# (auth rejected / not subscribed to this feed). Matched case-insensitively on the
+# error frame's ``msg`` — a SIP-only failure that the IEX free feed will satisfy.
+_SIP_ENTITLEMENT_ERROR_HINTS: tuple[str, ...] = (
+    "auth failed",
+    "not authenticated",
+    "insufficient subscription",
+    "subscription",
+)
 
 
 class AlpacaQuoteWS(WSStreamClient):
-    """Streams Alpaca IEX quotes/trades for a set of symbols → QuoteTicks."""
+    """Streams Alpaca SIP/IEX quotes for a set of symbols → QuoteTicks."""
 
     venue = "alpaca"
 
@@ -53,10 +77,48 @@ class AlpacaQuoteWS(WSStreamClient):
         self._symbols = list(dict.fromkeys(symbols))
         self._api_key = api_key
         self._api_secret = api_secret
+        # Configured feed (sip default); ``_active_feed`` is the LIVE feed, which a
+        # runtime entitlement failure downgrades to iex. ``_downgraded`` guards the
+        # one-shot warning so we do not log on every reconnect.
+        self._active_feed = alpaca_feed_token()
+        self._downgraded = False
 
     @property
     def ws_url(self) -> str:
-        return ALPACA_WS_IEX
+        return _FEED_URL[self._active_feed]
+
+    def _effective_symbols(self) -> list[str]:
+        """Desired symbols, hard-capped to the IEX 30-symbol ceiling on the IEX feed.
+
+        SIP has no cap → the full desired set is returned. On IEX (the downgrade or
+        an explicit ``POLARIS_ALPACA_FEED=iex``) the set is capped so a >30-symbol
+        subscribe frame never trips "symbol limit exceeded" → reconnect churn. The
+        focus order is preserved (Tier-S leads), so the cap keeps the best names.
+        flow_not_block: a name beyond the cap still bar-ingests via REST.
+        """
+        if self._active_feed == "iex" and len(self._symbols) > ALPACA_IEX_SYMBOL_CAP:
+            return self._symbols[:ALPACA_IEX_SYMBOL_CAP]
+        return self._symbols
+
+    def _downgrade_to_iex(self, reason: str) -> None:
+        """Permanently switch the live feed to IEX (one-shot warn). No-op on IEX.
+
+        Called from ``parse_message`` on a SIP auth/entitlement error frame. Alpaca
+        closes the socket after that error, so the base recv-loop-end path drives
+        the reconnect (the idle watchdog is the backstop); either way the next
+        connect reads ``ws_url`` → the IEX URL. No new reconnect plumbing is needed.
+        """
+        if self._active_feed == "iex":
+            return
+        self._active_feed = "iex"
+        if not self._downgraded:
+            self._downgraded = True
+            logger.warning(
+                "[alpaca ws] SIP feed unavailable (%s) — falling back to IEX "
+                "(free, 30-symbol cap). Set POLARIS_ALPACA_FEED=iex to silence, or "
+                "verify the key's SIP entitlement.",
+                reason,
+            )
 
     def set_symbols(self, symbols: Iterable[str]) -> None:
         """Replace the subscribed symbol set (universe change → re-subscribe).
@@ -66,7 +128,9 @@ class AlpacaQuoteWS(WSStreamClient):
         self._symbols = list(dict.fromkeys(symbols))
 
     def current_subscription(self) -> set[str]:
-        return set(self._symbols)
+        # The effective (IEX-capped) set — so the incremental-resubscribe delta
+        # diffs against what the socket can actually carry (no >30 on IEX).
+        return set(self._effective_symbols())
 
     def subscribe_delta_frames(
         self, added: set[str], removed: set[str]
@@ -98,11 +162,12 @@ class AlpacaQuoteWS(WSStreamClient):
             # past the free-feed 30-symbol cap, tripping "symbol limit exceeded"
             # → reconnect churn → idle-forced reconnects → tick-loop stalls. One
             # channel halves both the cap pressure and the inbound quote volume
-            # the quote_writer must persist (easing DB-lock contention).
+            # the quote_writer must persist (easing DB-lock contention). The set is
+            # IEX-capped (no-op on SIP, where there is no cap).
             json.dumps(
                 {
                     "action": "subscribe",
-                    "quotes": self._symbols,
+                    "quotes": self._effective_symbols(),
                 }
             ),
         ]
@@ -121,7 +186,17 @@ class AlpacaQuoteWS(WSStreamClient):
                 continue
             t = item.get("T")
             if t == "error":
-                logger.warning("[alpaca ws] error: %s", item.get("msg"))
+                emsg = str(item.get("msg", ""))
+                logger.warning("[alpaca ws] error: %s", emsg)
+                # SIP entitlement failure (auth rejected / not subscribed to SIP)
+                # → downgrade to IEX; the reconnect lands on the IEX URL. Guarded by
+                # ``_active_feed == "sip"`` (only the configured-SIP path downgrades)
+                # and the one-shot ``_downgrade_to_iex``, so the broad "subscription"
+                # hint can never mis-fire on an already-IEX socket.
+                if self._active_feed == "sip" and any(
+                    h in emsg.lower() for h in _SIP_ENTITLEMENT_ERROR_HINTS
+                ):
+                    self._downgrade_to_iex(f"error frame: {emsg}")
                 continue
             if t != "q":  # only quotes carry bid/ask; trades/control ignored here
                 continue

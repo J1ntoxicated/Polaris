@@ -40,7 +40,7 @@ class _CapturingAdapter:
         timeframe: str = "1Min",
         limit: int = 300,
         start: str | None = None,
-        feed: str = "iex",
+        feed: str | None = None,
         sort: str = "desc",
     ) -> list[dict[str, Any]]:
         self.calls.append(
@@ -69,12 +69,14 @@ def _desc_rows() -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_fetch_bars_requests_iex_feed() -> None:
-    """The feed MUST be IEX — this account's default/SIP is 15-min delayed, so a
-    delayed feed is the stale-canvas bug. IEX is real-time."""
+async def test_fetch_bars_leaves_feed_to_adapter_env_default() -> None:
+    """The production wrapper does NOT override the feed — it forwards ``None`` so
+    the adapter resolves ``POLARIS_ALPACA_FEED`` (default SIP, Jin's paid real-time
+    entitlement; IEX is the explicit/fallback option). Pre-2026-06-26 this pinned
+    IEX because the old free account's SIP was 15-min delayed."""
     adapter = _CapturingAdapter(_desc_rows())
     await fetch_alpaca_bars(adapter, "AMD", bar_interval="1m", limit=240)
-    assert adapter.calls[0]["feed"] == "iex"
+    assert adapter.calls[0]["feed"] is None  # wrapper leaves the feed env-driven
 
 
 @pytest.mark.asyncio

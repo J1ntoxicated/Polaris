@@ -210,6 +210,52 @@ def test_floor_clearing_name_still_score_gated() -> None:
     assert out["okx:MEH-USDT"].trade_eligible is False  # cleared floor, failed score
 
 
+def test_alpaca_wide_spread_real_junk_trade_ineligible() -> None:
+    # Alpaca penny/warrant junk (MGN 8800bps=88% round-trip) now carries a REAL
+    # spread (plumbed from the snapshot latestQuote). 88% spread physically
+    # exceeds any edge — the curator forces trade_eligible=False (entry deferred),
+    # while the name is still WATCHED/scored. Mirrors the OKX wide-spread block.
+    judge = EntranceJudge(trade_floor=0.0)  # isolate the floor overlay
+    universe = [
+        _ins("MGN", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=5e7, spread=8800.0, atr=9.0, depth=1e6),
+        _ins("GOOD", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=5e8, spread=5.0, atr=9.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["alpaca:MGN"].opportunity_score >= 0.0   # still watched/scored
+    assert out["alpaca:MGN"].trade_eligible is False     # 88% spread → defer entry
+
+
+def test_alpaca_tight_spread_trade_eligible() -> None:
+    # A liquid Alpaca name with a real tight spread (~5bps) and >$1 price clears
+    # the floor and (high-ATR → high score) the score gate → trade_eligible.
+    judge = EntranceJudge(trade_floor=0.0)
+    universe = [
+        _ins("AAPL", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=5e9, spread=3.0, atr=9.0, depth=1e6),
+        _ins("MSFT", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=4e9, spread=4.0, atr=2.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["alpaca:AAPL"].trade_eligible is True
+
+
+def test_alpaca_placeholder_spread_trade_eligible() -> None:
+    # An un-enriched Alpaca row keeps the placeholder spread (2.0, far below the
+    # 100bps cut) → it stays trade-eligible (flow_not_block: never defer on an
+    # unknown/missing datum).
+    judge = EntranceJudge(trade_floor=0.0)
+    universe = [
+        _ins("UNQUOTED", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=5e8, spread=2.0, atr=9.0, depth=1e6),
+        _ins("OTHER", venue="alpaca", asset_class="equity", quote_ccy="USD",
+             vol=4e8, spread=2.0, atr=2.0, depth=1e6),
+    ]
+    out = judge.judge_universe(universe)
+    assert out["alpaca:UNQUOTED"].trade_eligible is True
+
+
 def test_judge_is_deterministic() -> None:
     judge = EntranceJudge()
     universe = [_ins("BTC-USDT", vol=9e8), _ins("ETH-USDT", vol=5e8)]

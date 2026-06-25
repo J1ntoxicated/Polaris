@@ -25,6 +25,8 @@ from polaris.core.universe._alpaca import (
     ALPACA_PAPER_BASE,
     ALPACA_SNAPSHOTS_PATH,
     LIQUID_SEED_SYMBOLS,
+    _apply_liquidity,
+    _snapshot_to_liquidity,
     fetch_alpaca_instruments,
 )
 from polaris.core.universe._ranking import rank_active_universe
@@ -228,3 +230,100 @@ def test_enrichment_failure_is_smoke_safe() -> None:
     from polaris.core.universe.schema import passes_liquidity_floor
 
     assert all(passes_liquidity_floor(i) for i in out)
+
+
+# ---------------------------------------------------------------------------
+# real spread plumbing — _snapshot_to_liquidity + _apply_liquidity (Part A)
+# ---------------------------------------------------------------------------
+
+
+def _snap(close: float, *, bid: float | None, ask: float | None) -> dict[str, object]:
+    """One snapshot dict with a dailyBar/minuteBar + optional latestQuote (bp/ap)."""
+    snap: dict[str, object] = {
+        "dailyBar": {
+            "o": close, "h": close * 1.02, "l": close * 0.98, "c": close,
+            "v": 1_000_000.0,
+        },
+        "minuteBar": {"c": close},
+    }
+    if bid is not None and ask is not None:
+        snap["latestQuote"] = {"bp": bid, "ap": ask}
+    return snap
+
+
+def test_snapshot_extracts_wide_real_spread() -> None:
+    """A latestQuote with a wide bid/ask (MGN-class 8800bps=88%) → real spread.
+
+    mid = 0.5*(bid+ask); spread_bps = (ask-bid)/mid*1e4. bid=1, ask=2.69 →
+    mid=1.845, spread=(1.69/1.845)*1e4 ≈ 9160bps (un-tradeable). Just assert it
+    lands as a large positive spread_bps key (the floor will exclude it).
+    """
+    liq = _snapshot_to_liquidity(_snap(2.0, bid=1.0, ask=2.69))
+    assert liq is not None
+    assert "spread_bps" in liq
+    expected = (2.69 - 1.0) / (0.5 * (1.0 + 2.69)) * 1e4
+    assert abs(liq["spread_bps"] - expected) < 1e-6
+    assert liq["spread_bps"] > 100.0  # clearly past the Alpaca cut
+
+
+def test_snapshot_extracts_tight_real_spread() -> None:
+    """A tight liquid quote (bid 99.99 / ask 100.01) → small positive spread_bps."""
+    liq = _snapshot_to_liquidity(_snap(100.0, bid=99.99, ask=100.01))
+    assert liq is not None
+    expected = (100.01 - 99.99) / (0.5 * (99.99 + 100.01)) * 1e4
+    assert abs(liq["spread_bps"] - expected) < 1e-6
+    assert 0.0 < liq["spread_bps"] < 10.0
+
+
+def test_snapshot_missing_quote_omits_spread() -> None:
+    """No latestQuote → NO spread_bps key (degrade-safe: keep the placeholder)."""
+    liq = _snapshot_to_liquidity(_snap(50.0, bid=None, ask=None))
+    assert liq is not None
+    assert "spread_bps" not in liq
+    # vol/atr/price still plumbed (the quote omission doesn't break enrichment).
+    assert liq["vol_24h_usd"] > 0.0 and liq["price"] == 50.0
+
+
+def test_snapshot_crossed_or_zero_quote_omits_spread() -> None:
+    """Crossed/locked (ask<=bid) or non-positive bid/ask → NO spread_bps key."""
+    crossed = _snapshot_to_liquidity(_snap(50.0, bid=51.0, ask=50.0))  # ask<bid
+    assert crossed is not None and "spread_bps" not in crossed
+    locked = _snapshot_to_liquidity(_snap(50.0, bid=50.0, ask=50.0))   # ask==bid
+    assert locked is not None and "spread_bps" not in locked
+    zero_bid = _snapshot_to_liquidity(_snap(50.0, bid=0.0, ask=50.0))  # bid<=0
+    assert zero_bid is not None and "spread_bps" not in zero_bid
+
+
+def _alpaca_row(symbol: str, *, spread_bps: float = 2.0) -> UniverseInstrument:
+    return UniverseInstrument(
+        venue="alpaca",
+        symbol=symbol,
+        instrument_id=f"alpaca:{symbol}",
+        underlying_group_id=f"equity:{symbol}",
+        asset_class="equity",
+        quote_ccy="USD",
+        state="live",
+        vol_24h_usd=0.0,
+        spread_bps=spread_bps,
+        atr_24h_pct=1.5,
+        depth_10bps_usd=0.0,
+        last_seen_ts=NOW,
+    )
+
+
+def test_apply_liquidity_overwrites_real_spread() -> None:
+    """A row enriched with a real spread datum gets its spread_bps overwritten."""
+    rows = [_alpaca_row("MGN", spread_bps=2.0)]
+    liq = {"MGN": {"vol_24h_usd": 5e7, "atr_24h_pct": 4.0, "price": 4.0,
+                   "spread_bps": 8800.0}}
+    out = _apply_liquidity(rows, liq)
+    assert out[0].spread_bps == 8800.0  # placeholder replaced by the real spread
+
+
+def test_apply_liquidity_keeps_placeholder_when_no_spread_datum() -> None:
+    """A row enriched WITHOUT a spread datum keeps its placeholder spread (2.0)."""
+    rows = [_alpaca_row("AAPL", spread_bps=2.0)]
+    liq = {"AAPL": {"vol_24h_usd": 5e9, "atr_24h_pct": 3.0, "price": 190.0}}
+    out = _apply_liquidity(rows, liq)
+    assert out[0].spread_bps == 2.0  # no real spread → placeholder retained
+    assert out[0].vol_24h_usd == 5e9  # vol still enriched (mirror unchanged)

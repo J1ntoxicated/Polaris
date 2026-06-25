@@ -89,6 +89,13 @@ class LiquidityFloor:
 # Defaults sized to the MEASURED junk (Diagnosis 2026-06-22), generous so they
 # act as a coarse eligibility floor leaving the continuous rank to order the rest
 # (NOT a re-introduction of the 189->6 over-cut hard 4-axis gate).
+#
+# Alpaca spread cut: measured liquid equities run <10bps real spread, while the
+# measured untradeable junk runs 1551-8800bps (.WS warrant 1805, XCH 2853, ARQQ
+# 2913, WHLR 3310, MGN 8800=88%). A ~100bps cut cleanly separates them (a huge gap
+# between ~10 and ~1551), well clear of even mid-liquid small-caps. env-overridable
+# via POLARIS_LIQFLOOR_ALPACA_MAX_SPREAD_BPS — a /debate calibration target.
+_ALPACA_MAX_SPREAD_BPS_DEFAULT: Final[float] = 100.0
 _DEFAULT_LIQUIDITY_FLOOR_BY_VENUE: Final[dict[str, LiquidityFloor]] = {
     # OKX crypto — all axes REAL today (parse_okx_tickers).
     "okx": LiquidityFloor(
@@ -97,10 +104,13 @@ _DEFAULT_LIQUIDITY_FLOOR_BY_VENUE: Final[dict[str, LiquidityFloor]] = {
         min_depth_10bps_usd=25_000.0,
         min_price=0.0,
     ),
-    # Alpaca equity — vol real when enriched; price plumbed via last_price.
-    # spread is a placeholder (2.0) on Alpaca → do NOT floor on it.
+    # Alpaca equity — vol real when enriched; price plumbed via last_price; spread
+    # now REAL too (plumbed from the snapshot latestQuote bid/ask), so the spread
+    # axis is ACTIVE — it excludes 88%-spread junk (MGN/WHLR/ARQQ). The placeholder
+    # (2.0, used only when no real quote landed) is far below the cut, so an
+    # un-enriched row still passes (flow_not_block: never drop on a missing datum).
     "alpaca": LiquidityFloor(
-        max_spread_bps=0.0,
+        max_spread_bps=_ALPACA_MAX_SPREAD_BPS_DEFAULT,
         min_vol_24h_usd=5_000_000.0,
         min_depth_10bps_usd=0.0,
         min_price=1.0,
@@ -343,28 +353,82 @@ def tier_cadence() -> tuple[int, int]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Alpaca market-data feed selection — SSOT (Jin 2026-06-26 — paid SIP entitlement)
+# ---------------------------------------------------------------------------
+# Jin now holds a PAID Alpaca read entitlement (SIP). The SIP feed is real-time
+# AND has no per-symbol subscription cap, so the IEX free-feed 30-symbol ceiling
+# (which tripped "symbol limit exceeded" → reconnect churn → starved tick stream)
+# disappears entirely when SIP is the active feed. ``POLARIS_ALPACA_FEED`` selects
+# the feed (default ``sip``); any value other than ``sip``/``iex`` (or an unset
+# var) falls back to the safe default. The WS client downgrades SIP→IEX at runtime
+# if the key turns out to lack the entitlement (graceful fallback, never a halt).
+# SSOT lives here (core) so both the venue WS layer and the schema-level WS budget
+# read ONE resolver with no cross-layer import inversion.
+ALPACA_FEED_ENV: Final[str] = "POLARIS_ALPACA_FEED"
+ALPACA_FEED_DEFAULT: Final[str] = "sip"
+_ALPACA_FEED_TOKENS: Final[frozenset[str]] = frozenset({"sip", "iex"})
+# IEX free feed hard-caps at 30 symbols (quotes-only sub = 1 channel/symbol, so 30
+# symbols = the ceiling). SIP has no such cap. Used both as the IEX WS budget and
+# as the client-side IEX subscription cap (the runtime-downgrade safety net).
+ALPACA_IEX_SYMBOL_CAP: Final[int] = 30
+# SIP WS budget default (no venue-side symbol cap; sized to the focus window with
+# ample headroom, same as OKX). env-raisable via ``POLARIS_WS_BUDGET_ALPACA``.
+ALPACA_SIP_WS_BUDGET_DEFAULT: Final[int] = 60
+
+
+def alpaca_feed_token() -> str:
+    """Resolve the configured Alpaca data feed token: ``sip`` (default) or ``iex``.
+
+    Reads ``POLARIS_ALPACA_FEED`` (case-insensitive). An unset/empty var or any
+    value outside {sip, iex} → the safe default (``sip``). This is the CONFIGURED
+    feed; the WS client may downgrade to ``iex`` at runtime on an entitlement
+    failure (graceful fallback) without changing this resolver's answer.
+    """
+    raw = os.environ.get(ALPACA_FEED_ENV)
+    if raw is None:
+        return ALPACA_FEED_DEFAULT
+    token = raw.strip().lower()
+    return token if token in _ALPACA_FEED_TOKENS else ALPACA_FEED_DEFAULT
+
+
 # Per-venue WS subscription budget (Tier-S realtime subs). Capital's WS genuinely
-# caps ~40 concurrent subscriptions; OKX/Alpaca have headroom (default 60,
-# raisable via ``POLARIS_WS_BUDGET_<VENUE>``). Σ Tier-S subs per venue ≤ budget —
-# a RESOURCE knob (WS frame size), not a membership cut: a name over budget still
-# bar-ingests via REST (flow_not_block). Unknown venue → permissive default.
+# caps ~40 concurrent subscriptions; OKX has headroom (default 60). Alpaca depends
+# on the active feed: SIP (paid, default) has NO symbol cap → budget 60 (focus
+# headroom); IEX (free fallback) hard-caps at 30 symbols → budget 30. Σ Tier-S
+# subs per venue ≤ budget — a RESOURCE/venue-API ceiling, not a membership cut: a
+# name over budget still bar-ingests via REST (flow_not_block). All raisable via
+# ``POLARIS_WS_BUDGET_<VENUE>``. Unknown venue → permissive default.
 WS_BUDGET_DEFAULT: Final[int] = 60
 _WS_BUDGET_BY_VENUE: Final[dict[str, int]] = {
     "capital": 40,  # genuine Capital WS subscription ceiling
     "okx": 60,
-    "alpaca": 60,
 }
 WS_BUDGET_ENV_PREFIX: Final[str] = "POLARIS_WS_BUDGET_"
+
+
+def _alpaca_ws_budget_default() -> int:
+    """Alpaca WS budget default from the configured feed (SIP 60 / IEX 30)."""
+    return (
+        ALPACA_IEX_SYMBOL_CAP
+        if alpaca_feed_token() == "iex"
+        else ALPACA_SIP_WS_BUDGET_DEFAULT
+    )
 
 
 def ws_budget_for_venue(venue: str) -> int:
     """Per-venue Tier-S WS subscription budget (env ``POLARIS_WS_BUDGET_<VENUE>``).
 
-    Capital 40 (hard genuine cap), OKX/Alpaca 60 default — all raisable via env.
-    Unknown venue → ``WS_BUDGET_DEFAULT`` (permissive; never 0 → flow_not_block).
+    Capital 40 (hard genuine cap), OKX 60 default. Alpaca is feed-driven: SIP
+    (paid, default) → 60, IEX (free fallback) → 30 (the IEX 30-symbol cap). All
+    raisable via env. Unknown venue → ``WS_BUDGET_DEFAULT`` (permissive; never 0
+    → flow_not_block).
     """
     v = (venue or "").lower()
-    default = _WS_BUDGET_BY_VENUE.get(v, WS_BUDGET_DEFAULT)
+    if v == "alpaca":
+        default = _alpaca_ws_budget_default()
+    else:
+        default = _WS_BUDGET_BY_VENUE.get(v, WS_BUDGET_DEFAULT)
     raw = os.environ.get(f"{WS_BUDGET_ENV_PREFIX}{v.upper()}")
     if raw is None or raw == "":
         return default

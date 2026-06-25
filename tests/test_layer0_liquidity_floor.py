@@ -126,12 +126,58 @@ def test_alpaca_unknown_price_not_dropped() -> None:
     assert passes_liquidity_floor(unenriched) is True
 
 
-def test_alpaca_spread_not_floored() -> None:
-    """Alpaca spread is a placeholder (2.0) → the spread axis is OFF for Alpaca."""
-    # A would-be-wide spread on Alpaca must NOT exclude (floor.max_spread_bps==0).
+def test_alpaca_real_wide_spread_is_ineligible() -> None:
+    """Alpaca spread is now REAL (plumbed from snapshot latestQuote) → the spread
+    axis is ON. Measured untradeable junk (MGN 8800bps=88% round-trip, WHLR 3310,
+    ARQQ 2913) physically exceeds any possible edge — it fails the Alpaca spread
+    floor (100bps cut). flow_not_block-coherent: a known-bad spread is excluded as
+    a QUALITY membership test, never a loss/risk-based block."""
+    mgn = _inst("MGN", venue="alpaca", asset_class="equity", quote_ccy="USD",
+                vol=5e7, spread_bps=8800.0, last_price=4.0)
+    whlr = _inst("WHLR", venue="alpaca", asset_class="equity", quote_ccy="USD",
+                 vol=5e7, spread_bps=3310.0, last_price=4.0)
+    assert passes_liquidity_floor(mgn) is False
+    assert passes_liquidity_floor(whlr) is False
+
+
+def test_alpaca_tight_real_spread_passes() -> None:
+    """A liquid Alpaca name with a real tight spread (~5bps) clears the floor."""
     row = _inst("MSFT", venue="alpaca", asset_class="equity", quote_ccy="USD",
-                vol=5e9, spread_bps=999.0, last_price=400.0)
+                vol=5e9, spread_bps=5.0, last_price=400.0)
     assert passes_liquidity_floor(row) is True
+
+
+def test_alpaca_placeholder_spread_passes() -> None:
+    """The no-real-quote placeholder (2.0) is far below the 100bps cut → an
+    un-enriched row still passes (flow_not_block: never drop on a missing datum)."""
+    row = _inst("UNQUOTED", venue="alpaca", asset_class="equity", quote_ccy="USD",
+                vol=5e7, spread_bps=2.0, last_price=4.0)
+    assert passes_liquidity_floor(row) is True
+
+
+def test_alpaca_spread_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POLARIS_LIQFLOOR_ALPACA_MAX_SPREAD_BPS moves the cut (/debate-tunable)."""
+    junk = _inst("ARQQ", venue="alpaca", asset_class="equity", quote_ccy="USD",
+                 vol=5e7, spread_bps=2913.0, last_price=4.0)
+    assert passes_liquidity_floor(junk) is False  # default 100bps excludes
+    monkeypatch.setenv(f"{LIQFLOOR_ENV_PREFIX}ALPACA_MAX_SPREAD_BPS", "5000")
+    assert passes_liquidity_floor(junk) is True  # relaxed → eligible
+
+
+def test_okx_capital_floors_unchanged_by_alpaca_spread_change() -> None:
+    """The Alpaca spread change must NOT leak into OKX/Capital — their spread
+    floors stay 30/40bps (a 50bps OKX row still excluded, a 20bps OKX row passes;
+    a 50bps Capital row still excluded, a 20bps Capital row passes)."""
+    okx_wide = _inst("WIDE-USDT", spread_bps=50.0)
+    okx_tight = _inst("TIGHT-USDT", spread_bps=20.0)
+    assert passes_liquidity_floor(okx_wide) is False  # 50 > 30
+    assert passes_liquidity_floor(okx_tight) is True   # 20 < 30
+    cap_wide = _inst("EXOTIC", venue="capital", asset_class="forex",
+                     quote_ccy="USD", vol=0.0, spread_bps=50.0, depth=0.0)
+    cap_tight = _inst("EURUSD", venue="capital", asset_class="forex",
+                      quote_ccy="USD", vol=0.0, spread_bps=20.0, depth=0.0)
+    assert passes_liquidity_floor(cap_wide) is False  # 50 > 40
+    assert passes_liquidity_floor(cap_tight) is True   # 20 < 40
 
 
 def test_capital_spread_floor_only() -> None:
@@ -216,7 +262,7 @@ def test_floor_for_venue_defaults() -> None:
     okx = liquidity_floor_for_venue("okx")
     assert okx.max_spread_bps == 30.0 and okx.min_vol_24h_usd == 20_000_000.0
     alpaca = liquidity_floor_for_venue("alpaca")
-    assert alpaca.min_price == 1.0 and alpaca.max_spread_bps == 0.0
+    assert alpaca.min_price == 1.0 and alpaca.max_spread_bps == 100.0
     capital = liquidity_floor_for_venue("capital")
     assert capital.max_spread_bps == 40.0 and capital.min_vol_24h_usd == 0.0
 

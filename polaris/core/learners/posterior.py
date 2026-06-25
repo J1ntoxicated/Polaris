@@ -374,11 +374,86 @@ def maybe_update_posterior(
     )
 
 
+def maybe_update_strategy_regime_prior(
+    conn: sqlite3.Connection,
+    *,
+    strategy: str,
+    regime: str,
+    pnl_r: float,
+    now_ts: int,
+) -> None:
+    """Fold one closed-trade R into the strategy×regime parent2 prior.
+
+    Wiring fix (audit ``code_review_2026-06-24``): ``strategy_regime_prior`` had a
+    READER (``_load_parent_prior`` — the parent2 hierarchical seed) but NO runtime
+    writer, so a new (exchange×strategy×ticker×regime) cell was always seeded from
+    the flat weak default. This charges that prior on every close: the bucket's
+    full running NIG state (μ0,κ0,α0,β0 + Welford mean/M2) accumulates the
+    strategy×regime expectancy, so the NEXT new cell in this bucket seeds from
+    real history. Welford-online so N folds equal a single batch update seeded by
+    the default prior (closed-form parity), exactly like ``maybe_update_posterior``.
+
+    This prior is a LEARNING seed only — it is NEVER read by the sizing pipeline
+    (9-stack ban intact; signal-only). Raises ``sqlite3.Error`` on a broken
+    connection so the close-path caller can ``logger.warning`` (fail-open there).
+    """
+    row = conn.execute(
+        "SELECT mu0, kappa0, alpha0, beta0, m2, n_samples "
+        "FROM strategy_regime_prior WHERE strategy=? AND regime=?",
+        (strategy, regime),
+    ).fetchone()
+    if row is None:
+        post = NIGPosterior(
+            mu=_DEFAULT_MU0, kappa=_DEFAULT_KAPPA0,
+            alpha=_DEFAULT_ALPHA0, beta=_DEFAULT_BETA0,
+        )
+    else:
+        n = int(row[5])
+        post = NIGPosterior(
+            mu=float(row[0]), kappa=float(row[1]),
+            alpha=float(row[2]), beta=float(row[3]),
+            n=n, mean=_running_mean_from_default_prior(float(row[0]), n),
+            m2=float(row[4]),
+        )
+    new_post = nig_update(post, pnl_r)
+    conn.execute(
+        "INSERT INTO strategy_regime_prior "
+        "(strategy, regime, mu0, kappa0, alpha0, beta0, m2, n_samples, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(strategy, regime) DO UPDATE SET "
+        " mu0=excluded.mu0, kappa0=excluded.kappa0, alpha0=excluded.alpha0, "
+        " beta0=excluded.beta0, m2=excluded.m2, n_samples=excluded.n_samples, "
+        " updated_ts=excluded.updated_ts",
+        (
+            strategy, regime, new_post.mu, new_post.kappa, new_post.alpha,
+            new_post.beta, new_post.m2, new_post.n, now_ts,
+        ),
+    )
+
+
+def _running_mean_from_default_prior(mu_n: float, n: int) -> float:
+    """Recover the Welford running mean ``xbar`` from a persisted prior row.
+
+    ``strategy_regime_prior`` stores μ_n/κ_n/m2/n (no raw running mean column), but
+    ``nig_update``'s Welford recurrence needs ``post.mean``. Unlike the per-cell
+    ``learner_posterior`` (whose prior is the variable parent2), this table ALWAYS
+    starts from the FIXED default weak prior (μ0=``_DEFAULT_MU0``, κ0=
+    ``_DEFAULT_KAPPA0``), so the sample mean is exactly recoverable from the closed
+    form ``mu_n = (κ0·μ0 + n·xbar)/(κ0 + n)`` →
+    ``xbar = (mu_n·(κ0 + n) − κ0·μ0)/n``. n=0 → mean unused by ``nig_update``'s
+    prior-recovery branch; return μ_n.
+    """
+    if n <= 0:
+        return mu_n
+    return (mu_n * (_DEFAULT_KAPPA0 + n) - _DEFAULT_KAPPA0 * _DEFAULT_MU0) / n
+
+
 __all__ = [
     "NIGPosterior",
     "cost_adjusted_pnl_r",
     "edge_verdict",
     "maybe_update_posterior",
+    "maybe_update_strategy_regime_prior",
     "nig_update",
     "p_expectancy_positive",
     "shrink_with_parent",

@@ -174,6 +174,12 @@ class ProdLoopState:
     # never halt). None until the loop wires it (smoke/replay paths leave it
     # None → pure bar-close behavior, behavior-identical to pre-P4).
     quote_writer: QuoteTickWriter | None = None
+    # Alt-data EVIDENCE cache singleton (#6) — the SAME object fed to
+    # compute_and_flip_regime (Layer 6 regime evidence). Shared onto state so the
+    # Layer-0 focus producer can build the entrance-judge ``altdata_lean`` from the
+    # already-fused tilt (audit code_review_2026-06-24). None until the loop wires
+    # it (smoke/replay leave it None → the alt-data lens degrades to neutral).
+    altdata_cache: Any = None
     # Timeframe-aligned ATR cache for the live recalc exit ruler:
     # (instrument_id, timeframe) → (atr_pct, computed_ts). TTL =
     # TIMEFRAME_FETCH_CADENCE_SEC[tf] (a fresh bar cannot arrive faster, so a

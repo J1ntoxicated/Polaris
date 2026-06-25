@@ -31,12 +31,17 @@ import httpx
 from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.schema import Bar
 from polaris.core.isolation.blocklist import load_blocklist
-from polaris.core.live_recalc.regime_flip import detect_regime_flip
+from polaris.core.live_recalc.regime_flip import detect_regime_flip, fetch_regime
 from polaris.core.live_recalc.tick_recalc import (
     mark_position_dirty,
     run_live_recalc_cycle,
 )
 from polaris.core.probes.entrance import EntranceJudge
+from polaris.core.probes.entrance_leans import (
+    build_altdata_lean,
+    build_regime_lean,
+    build_technical_lean,
+)
 from polaris.core.probes.tuning_log import log_entrance_judgments
 from polaris.core.universe.discovery import (
     deactivate_stale_active_rows,
@@ -412,12 +417,37 @@ def read_cell_scores_by_instrument(conn: sqlite3.Connection) -> dict[str, float]
     return {k: (s / n if n > 0 else 0.0) for k, (s, n) in acc.items()}
 
 
+def _fused_scores(
+    altdata_cache: Any, underlying_group_id: str, now_ts: int
+) -> dict[str, float] | None:
+    """Adapt ``fuse_evidence`` → the per-label score dict the alt-data lens reads.
+
+    Calls the SAME fuser the Layer-6 regime path uses (read-only, no DB write) and
+    returns ``ev["scores"]`` (``{bull_trend, bear_trend, chop, crisis}``) or
+    ``None`` when there is no fresh evidence (keyless / failing collector → the
+    lens degrades to neutral). Fail-soft: any fuser error → None (never blocks the
+    focus refresh — flow_not_block).
+    """
+    try:
+        _hint, _conf, ev = fuse_evidence(
+            underlying_group_id, altdata_cache, now_ts=now_ts
+        )
+    except Exception:  # noqa: BLE001 — evidence is optional; degrade to neutral
+        return None
+    raw = ev.get("scores") if isinstance(ev, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    return {str(k): float(v) for k, v in raw.items()}
+
+
 def refresh_focus_watchlist(
     conn: sqlite3.Connection,
     *,
     cycle_ts: int | None = None,
     probe_conn: sqlite3.Connection | None = None,
     run_id: str = "",
+    quote_writer: Any | None = None,
+    altdata_cache: Any | None = None,
 ) -> int:
     """Compute dynamic focus over active universe + persist; return count.
 
@@ -434,9 +464,16 @@ def refresh_focus_watchlist(
 
     Increment 1 (2026-06-24): the EntranceJudge ACTIVATES here — it scores every
     candidate across the deterministic liquidity + ATR lenses (always present from
-    the universe rows; the technical / regime / alt-data lenses default neutral at
-    this Layer-0 cadence) into an ``opportunity_score`` + a ``trade_eligible``
-    flag. The score feeds the focus rank composite AND persists per row; the flag
+    the universe rows) into an ``opportunity_score`` + a ``trade_eligible`` flag.
+
+    Lean wiring (audit code_review_2026-06-24): the three previously-dead optional
+    lenses are now fed from data the loop already holds — ``technical`` from the
+    live tick mid-drift window (``quote_writer``), ``regime`` from the regime_state
+    SSOT directional bias, ``altdata`` from the already-fused ``fuse_evidence``
+    tilt (``altdata_cache``). SIGNAL-ONLY: the leans tilt the ``opportunity_score``
+    rank only and touch ZERO sizing multiplier (9-stack untouched). A missing
+    writer/cache/regime degrades the affected lens to neutral (flow_not_block).
+    The score feeds the focus rank composite AND persists per row; the flag
     decouples the WATCH set from the TRADE set (consumed at ``_run_entries``).
     When ``probe_conn`` is supplied the per-candidate judgment (incl. the ambiguous
     conflict flag) is written to the ``entrance_judgments`` sidecar — PURE
@@ -471,8 +508,37 @@ def refresh_focus_watchlist(
     # eligibility flag. flow_not_block: a high judgment lifts rank, the permissive
     # floor keeps MOST symbols trade-eligible (a low judgment narrows priority,
     # never vetoes — an un-judged/ambiguous row stays eligible).
+    #
+    # LEAN WIRING (audit code_review_2026-06-24): the 3 optional lenses
+    # (technical / regime / altdata) were never fed → permanently neutral, so the
+    # judge ranked on liquidity+ATR alone. They are now built from data the loop
+    # ALREADY holds — the live tick window (quote_writer), the regime_state SSOT,
+    # and the already-fused alt-data tilt — and threaded as signed per-instrument
+    # leans. SIGNAL-ONLY: leans tilt opportunity_score (rank) only, ZERO sizing
+    # multiplier (9-stack untouched). A missing writer/cache/regime degrades the
+    # affected lens to neutral (flow_not_block — never an error, never a block).
+    technical_lean = build_technical_lean(universe, quote_writer)
+    regime_lean = build_regime_lean(
+        universe,
+        lambda venue, group: fetch_regime(
+            conn, venue=venue, underlying_group_id=group
+        ),
+    )
+    altdata_lean = (
+        build_altdata_lean(
+            universe,
+            lambda group: _fused_scores(altdata_cache, group, ts),
+        )
+        if altdata_cache is not None
+        else {}
+    )
     judge = EntranceJudge()
-    judge_readings = judge.judge_universe(universe)
+    judge_readings = judge.judge_universe(
+        universe,
+        technical_lean=technical_lean or None,
+        regime_lean=regime_lean or None,
+        altdata_lean=altdata_lean or None,
+    )
     opportunity_scores = {
         iid: r.opportunity_score for iid, r in judge_readings.items()
     }

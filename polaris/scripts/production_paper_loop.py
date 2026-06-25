@@ -196,7 +196,12 @@ async def _layer0_producer(
     state.capital_refreshes += 1
     await refresh_alpaca_universe_once(conn)
     state.alpaca_refreshes += 1
-    refresh_focus_watchlist(conn, probe_conn=getattr(state, "probe_conn", None))
+    refresh_focus_watchlist(
+        conn,
+        probe_conn=getattr(state, "probe_conn", None),
+        quote_writer=getattr(state, "quote_writer", None),
+        altdata_cache=getattr(state, "altdata_cache", None),
+    )
     last_okx = time.monotonic()
     last_capital = time.monotonic()
     last_alpaca = time.monotonic()
@@ -215,7 +220,12 @@ async def _layer0_producer(
             await refresh_alpaca_universe_once(conn)
             state.alpaca_refreshes += 1
             last_alpaca = now
-        refresh_focus_watchlist(conn, probe_conn=getattr(state, "probe_conn", None))
+        refresh_focus_watchlist(
+            conn,
+            probe_conn=getattr(state, "probe_conn", None),
+            quote_writer=getattr(state, "quote_writer", None),
+            altdata_cache=getattr(state, "altdata_cache", None),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +490,10 @@ async def run_production_paper_loop(
     # source's own TTL cadence; the cache feeds compute_and_flip_regime as
     # read-only regime evidence (SIGNAL only, never a throttle).
     altdata_cache = AltDataCache()
+    # Share the cache onto state so the Layer-0 focus producer can build the
+    # entrance-judge alt-data lens from the same fused evidence (audit
+    # code_review_2026-06-24); the regime path keeps its direct local reference.
+    state.altdata_cache = altdata_cache
     altdata_task = asyncio.create_task(
         _altdata_producer(conn, cache=altdata_cache, state=state, stop_evt=stop_evt)
     )

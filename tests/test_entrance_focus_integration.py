@@ -93,3 +93,85 @@ def test_watch_superset_of_trade_after_refresh() -> None:
     assert trade <= watch
     assert watch  # non-empty
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Lean wiring (audit code_review_2026-06-24): the technical / regime / altdata
+# lenses now feed opportunity_score from data the loop holds. These prove the
+# leans LAND (change the score) and that absent data degrades to neutral.
+# ---------------------------------------------------------------------------
+
+
+class _RisingWriter:
+    """Quote-writer stub: a monotonically rising tick window for one instrument."""
+
+    def __init__(self, instrument_id: str) -> None:
+        self._iid = instrument_id
+
+    def feature_window(self, instrument_id: str):  # noqa: ANN201
+        if instrument_id != self._iid:
+            return []
+
+        class _T:
+            def __init__(self, mid: float) -> None:
+                self.mid = mid
+
+        return [_T(100.0), _T(103.0), _T(108.0)]
+
+
+def _score_for(conn, symbol: str) -> float:
+    # watchlist_focus PK is (cycle_ts, venue, symbol) — read the LATEST cycle's row.
+    row = conn.execute(
+        "SELECT opportunity_score FROM watchlist_focus WHERE symbol=? "
+        "ORDER BY cycle_ts DESC LIMIT 1",
+        (symbol,),
+    ).fetchone()
+    return float(row[0])
+
+
+def test_technical_lean_lifts_opportunity_score() -> None:
+    # Same universe, judged WITH vs WITHOUT a positive technical lean → the lean
+    # must lift the score (signal-only rank tilt, never a sizing change).
+    conn = init_db(":memory:")
+    _seed_universe(conn, [("okx", "BTC-USDT", 5e8, 4.0), ("okx", "ETH-USDT", 5e8, 4.0)])
+    refresh_focus_watchlist(conn, cycle_ts=2000)
+    base = _score_for(conn, "BTC-USDT")
+    refresh_focus_watchlist(
+        conn, cycle_ts=2001, quote_writer=_RisingWriter("okx:BTC-USDT")
+    )
+    lifted = _score_for(conn, "BTC-USDT")
+    # ETH (no window) is unchanged; BTC (rising window) is lifted.
+    assert lifted > base
+    conn.close()
+
+
+def test_regime_lean_lifts_with_bull_regime() -> None:
+    conn = init_db(":memory:")
+    _seed_universe(conn, [("okx", "BTC-USDT", 5e8, 4.0)])
+    refresh_focus_watchlist(conn, cycle_ts=2000)
+    base = _score_for(conn, "BTC-USDT")
+    # Seed a bull_trend regime for the BTC group (regime_state SSOT).
+    conn.execute(
+        "INSERT OR REPLACE INTO regime_state "
+        "(venue, underlying_group_id, regime, updated_ts) VALUES (?,?,?,?)",
+        ("okx", "crypto:BTC-USDT", "bull_trend", 2000),
+    )
+    conn.commit()
+    refresh_focus_watchlist(conn, cycle_ts=2001)
+    assert _score_for(conn, "BTC-USDT") > base
+    conn.close()
+
+
+def test_absent_leans_neutral_byte_identical() -> None:
+    # No writer, no altdata, no regime row → the wired call must equal the
+    # liquidity+ATR-only baseline (the three lenses degrade to neutral).
+    conn = init_db(":memory:")
+    _seed_universe(conn, [("okx", "BTC-USDT", 9e8, 6.0), ("okx", "ETH-USDT", 3e8, 4.0)])
+    refresh_focus_watchlist(conn, cycle_ts=2000)
+    a = {s: _score_for(conn, s) for s in ("BTC-USDT", "ETH-USDT")}
+    refresh_focus_watchlist(
+        conn, cycle_ts=2001, quote_writer=None, altdata_cache=None
+    )
+    b = {s: _score_for(conn, s) for s in ("BTC-USDT", "ETH-USDT")}
+    assert a == b
+    conn.close()

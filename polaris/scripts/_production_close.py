@@ -751,6 +751,9 @@ async def _close_trade_with_real_pnl(
     )
     # Edge-validation Phase 1 — cost-adjusted expectancy posterior (measure +
     # display only; never wired into sizing). Fail-open inside the helper.
+    # Edge-validation posterior + the strategy×regime parent2 prior (audit
+    # code_review_2026-06-24) are both charged inside this helper from the SAME
+    # cost-adjusted net R — measure/seed only, never read by sizing. Fail-open.
     _safe_update_posterior(
         conn, trade=trade, regime=regime, pnl_r=pnl_r, pnl_usd=pnl_usd,
         now_ts=now_ts,

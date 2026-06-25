@@ -33,6 +33,7 @@ from polaris.core.learners.meta_label import (
 from polaris.core.learners.posterior import (
     cost_adjusted_pnl_r,
     maybe_update_posterior,
+    maybe_update_strategy_regime_prior,
 )
 from polaris.core.pipeline.agents import post_trade_reflector_gate
 from polaris.core.pipeline.agents._gpt_client import (
@@ -353,19 +354,30 @@ def _safe_update_posterior(
             conn, exchange=trade.venue, strategy=trade.strategy_id,
             ticker=trade.symbol, regime=regime, pnl_r_net=pnl_r_net, now_ts=now_ts,
         )
+        # parent2-seed writer (audit code_review_2026-06-24): the
+        # ``strategy_regime_prior`` reader (``_load_parent_prior`` — the
+        # hierarchical seed for a NEW exchange×strategy×ticker×regime cell) had no
+        # runtime writer, so every new cell seeded from the flat default. Charge it
+        # here with the SAME cost-adjusted ``pnl_r_net`` the child cell folds (unit-
+        # consistent: the parent expectancy seeds cost-adjusted children). Learning
+        # seed only — never read by sizing (9-stack intact).
+        maybe_update_strategy_regime_prior(
+            conn, strategy=trade.strategy_id, regime=regime,
+            pnl_r=pnl_r_net, now_ts=now_ts,
+        )
         # Posterior fold (INFO): the cost-adjusted R observation folded into the
-        # NIG bucket (exchange×strategy×ticker×regime) at close — the edge-
-        # validation 거동 record. gross pnl_r vs net (after fees+slippage). This
-        # table is never read by sizing; log only, no decision changed.
+        # NIG bucket (exchange×strategy×ticker×regime) + the strategy×regime parent2
+        # prior at close — the edge-validation 거동 record. gross pnl_r vs net
+        # (after fees+slippage). Neither table is read by sizing; log only.
         logger.info(
-            "[edge-validation] posterior %s:%s strategy=%s regime=%s "
+            "[edge-validation] posterior+prior %s:%s strategy=%s regime=%s "
             "pnl_r_gross=%.3f pnl_r_net=%.3f",
             trade.venue, trade.symbol, trade.strategy_id, regime,
             pnl_r, pnl_r_net,
         )
     except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
         logger.warning(
-            "[edge-validation] posterior update failed %s:%s: %r",
+            "[edge-validation] posterior/prior update failed %s:%s: %r",
             trade.venue, trade.symbol, exc,
         )
 

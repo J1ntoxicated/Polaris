@@ -337,6 +337,43 @@ def test_safe_update_posterior_never_folds_blown_up_net_r(
     assert -20.0 < mu < 0.0
 
 
+def test_safe_update_posterior_also_charges_strategy_regime_prior(
+    memdb: sqlite3.Connection,
+) -> None:
+    """parent2-seed wiring (audit code_review_2026-06-24): one close charges BOTH
+    the child cell posterior AND the strategy×regime parent2 prior from the SAME
+    cost-adjusted net R (unit-consistent). The prior was previously write-less."""
+    from polaris.scripts._production_close_effects import _safe_update_posterior
+    from polaris.scripts._smoke_fills import SimulatedTrade
+
+    _seed_fill(memdb, fill_id="p_open", is_close=0, fee_usd=0.6, slippage_bps=1.0,
+               contribution_id="posP", ts_ms=1000, size_usd=600.0, fill_price=0.12)
+    _seed_fill(memdb, fill_id="p_close", is_close=1, fee_usd=0.6, slippage_bps=1.0,
+               contribution_id="posP", ts_ms=2000, size_usd=600.0, fill_price=0.13)
+    trade = SimulatedTrade(
+        signal_id="sP", venue="okx", symbol="GG-USDT", strategy_id="tsmom",
+        side="long", entry_price=0.12, notional_usd=600.0, open_ts=1,
+        position_id="posP",
+    )
+    # No prior row exists yet (only test fixtures ever wrote this table before).
+    assert memdb.execute(
+        "SELECT COUNT(*) FROM strategy_regime_prior WHERE strategy='tsmom' "
+        "AND regime='bull_trend'"
+    ).fetchone()[0] == 0
+    _safe_update_posterior(
+        memdb, trade=trade, regime="bull_trend", pnl_r=1.0, pnl_usd=6.0,
+        now_ts=2000,
+    )
+    # The close charged the parent2 prior (n_samples == 1) — same bucket key the
+    # child cell folded, so a future new cell seeds from real history.
+    prior = memdb.execute(
+        "SELECT n_samples FROM strategy_regime_prior WHERE strategy='tsmom' "
+        "AND regime='bull_trend'"
+    ).fetchone()
+    assert prior is not None
+    assert int(prior[0]) == 1
+
+
 # ---------------------------------------------------------------------------
 # 4. verdict boundaries — label only, NOT a gate
 # ---------------------------------------------------------------------------

@@ -393,7 +393,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         }
         # TRADES tab shows more rows than the legacy 10 (full-width tab).
         recent_trades = _recent_closed_trades(
-            conn, n=40, regime_lookup=regime_by_venue_symbol,
+            conn, n=100, regime_lookup=regime_by_venue_symbol,
         )
         # Symbol sparkline (Jin 2026-06-25) — embed the recent-close mini history
         # on each positions / ticker / recent-trade row in ONE bars query (no

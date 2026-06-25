@@ -669,7 +669,7 @@
         <th title="gross PnL as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
       </tr></thead><tbody></tbody></table>`;
   function renderTrades(d) {
-    const rows = venueFilter(d.recent_trades).slice(0, 40);   // E3 venue scope
+    const rows = venueFilter(d.recent_trades).slice(0, 100);   // E3 venue scope
     const body = $('trd-body'); if (!body) return;
     setCnt('trd-body-cnt', rows.length);
     if (!rows.length) {

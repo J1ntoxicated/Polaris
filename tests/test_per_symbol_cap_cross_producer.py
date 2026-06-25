@@ -59,6 +59,24 @@ def test_per_symbol_cap_is_strategy_agnostic() -> None:
     assert abs(remaining - max(0.0, cap - 0.10)) < 1e-9
 
 
+def test_okx_tick_scalp_and_bar_swing_share_per_symbol_headroom() -> None:
+    # STEP1 multi-horizon: after the OKX-spot bar carve-out a tick SCALP
+    # (strategy="micro_reversion") and a bar SWING (strategy="tsmom") can both
+    # open on the SAME OKX symbol. The per-symbol risk cap is the resource backstop
+    # — the swing entry sees headroom REDUCED by the live scalp open (summed across
+    # producers regardless of strategy_id), so the two horizons cannot each claim
+    # the full per-symbol budget on one symbol. flow_not_block: neither producer is
+    # throttled; whoever fills uses the shared headroom, the cap is the existing rail.
+    cap = venue_per_symbol_cap("okx")
+    scalp = _pos(venue="okx", symbol="BTC-USDT", strategy="micro_reversion", risk=0.03)
+    swing = _pos(venue="okx", symbol="BTC-USDT", strategy="tsmom", risk=0.03)
+    remaining = per_symbol_remaining_pct(
+        venue="okx", symbol="BTC-USDT", open_positions=[scalp, swing]
+    )
+    assert abs(remaining - max(0.0, cap - 0.06)) < 1e-9
+    assert remaining < cap  # the scalp + swing BOTH consumed the per-symbol budget
+
+
 def test_other_symbol_does_not_consume_headroom() -> None:
     # An open on a DIFFERENT symbol leaves GOLD's headroom untouched.
     other = _pos(venue="capital", symbol="US30", strategy="flow_pressure", risk=0.04)

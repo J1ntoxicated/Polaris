@@ -122,22 +122,35 @@ def keep_on_bar_path(*, asset_class: str, symbol: str) -> bool:
     routing skip VACATED every non-forex Capital index/commodity symbol from the
     bar fan-out, handing it ONLY to the tick engine — so xau_indices_trend (whole
     universe vacated) had a structural 0%-emit ceiling and session_breakout lost
-    its index legs. This keeps a symbol on the bar pipeline when EITHER:
+    its index legs. This keeps a symbol on the bar pipeline when ANY of:
 
       * it is forex (the carve-out already done — its micro-structure thresholds
         never trip so the tick engine gave it zero entries), OR
+      * it is OKX SPOT (asset_class ``crypto`` / ``spot``) — STEP1 multi-horizon
+        activation. The asset-class skip vacated the WHOLE OKX spot universe to
+        the tick engine, so the OKX 1H swing strategies (tsmom / supertrend /
+        spot_donchian / ema_crossover — whole-universe, NO per-symbol whitelist)
+        had a structural 0-entry ceiling (live: 0 swing/position closes, every
+        close <60m). Keeping OKX spot on the bar pipeline gives those 1H trend
+        strategies the SWING horizon while the tick engine still owns the SCALP
+        flow edge on the SAME symbol, OR
       * an ENABLED Capital index/commodity bar strategy supports it
         (``CAPITAL_BAR_STRATEGY_SYMBOLS``).
 
     The tick engine STILL trades these symbols (its flow edge is untouched); the
     bar strategies add a COMPLEMENTARY trend/breakout edge. The cross-producer
-    double-open backstop is the per-symbol RISK cap (sizing
-    ``per_symbol_remaining_pct``) which sums open_risk_pct over ``(venue,
+    double-open is accounted as INDEPENDENT logical positions (no blind netting):
+    ``concurrent_same_side_open`` is strategy-scoped (``WHERE strategy_id = ?``)
+    so a tick scalp and a bar swing on the same (venue, symbol, side) coexist as
+    distinct positions with per-strategy PnL attribution; OKX SPOT has no forced
+    reversal. The risk backstop is the per-symbol RISK cap (sizing
+    ``per_symbol_remaining_pct``) which SUMS open_risk_pct over ``(venue,
     symbol)`` across BOTH producers (both persist via the shared
     ``reserve_and_submit`` → ``position_risk_state`` path). NOT a throttle — the
     skip is NARROWED, never widened; no block / size-cut is introduced.
     """
-    if (asset_class or "").strip().lower() == "forex":
+    cls = (asset_class or "").strip().lower()
+    if cls in ("forex", "crypto", "spot"):
         return True
     sym = (symbol or "").upper().replace("/", "").replace(".", "")
     return sym in CAPITAL_BAR_STRATEGY_SYMBOLS
@@ -433,23 +446,33 @@ async def _run_tick(
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
     # site that bypassed ``supervise_strategies``.
     pipeline_specs: list[PipelineTaskSpec] = []
-    # P5 coexistence — COMPLEMENTARY-EDGE ROUTING (Wave 1, ``keep_on_bar_path``).
+    # P5 coexistence — COMPLEMENTARY-EDGE ROUTING (``keep_on_bar_path``).
     # When the tick engine owns a venue (D3: OKX + Capital) the bar path yields a
-    # symbol ONLY when the tick engine is its sole effective producer. Two
+    # symbol ONLY when the tick engine is its sole effective producer. Three
     # carve-outs keep a symbol ALSO on the bar pipeline (ADDITIVE — the tick
     # engine still trades it; the bar strategies add a complementary edge):
     #   * FOREX (Capital FX) — its micro-structure thresholds never trip so the
     #     tick engine gave FX ZERO entries; its bar strategies (fx_breakout_basket
     #     / session_breakout) own that edge (carve-out already done pre-Wave-1).
+    #   * OKX SPOT (asset_class crypto/spot) — STEP1 multi-horizon. The skip
+    #     vacated the WHOLE OKX spot universe to the tick engine (scalp-only), so
+    #     the OKX 1H swing strategies (tsmom / supertrend / spot_donchian /
+    #     ema_crossover — whole-universe) had a 0-entry ceiling (live: 0 swing/
+    #     position closes). Keeping OKX spot on the bar pipeline gives them the
+    #     SWING horizon; the tick engine keeps the SCALP flow edge on the SAME
+    #     symbol (the two coexist as independent strategy-scoped positions).
     #   * Capital INDEX/COMMODITY symbols an ENABLED bar strategy supports
     #     (``CAPITAL_BAR_STRATEGY_SYMBOLS``) — the prior skip VACATED all of them
     #     to the tick engine, so xau_indices_trend (whole universe vacated → 0%
     #     emit ceiling) sat dead and session_breakout lost US500/US100. The tick
     #     engine's flow edge on these is intact; the bar strategies add the
     #     donchian/momentum/session trend-breakout edge on the SAME symbol.
-    # Cross-producer double-open backstop = the per-symbol RISK cap (sizing
-    # ``per_symbol_remaining_pct``) which sums open_risk_pct over (venue, symbol)
-    # across BOTH producers (both persist via reserve_and_submit →
+    # Cross-producer double-open is accounted as INDEPENDENT logical positions (no
+    # blind netting): concurrent_same_side_open is strategy-scoped, so a tick scalp
+    # + a bar swing on the same (venue, symbol, side) are distinct positions with
+    # per-strategy PnL attribution. The risk backstop is the per-symbol RISK cap
+    # (sizing ``per_symbol_remaining_pct``) which sums open_risk_pct over (venue,
+    # symbol) across BOTH producers (both persist via reserve_and_submit →
     # position_risk_state). flow_not_block: the skip is NARROWED, never widened —
     # no block / size-cut introduced.
     # /DEBATE-FLAGGED (NOT applied this wave): scoping TICK_ENGINE_OWNED_VENUES to

@@ -1,0 +1,346 @@
+"""STEP② candidate sweep — orchestration (bucket decomposition + selection).
+
+Split from ``_candidate_sweep.py`` to keep both files ≤500 LOC. This module reads
+the static ground per ticker, runs the two-stage score (``_candidate_sweep`` pure
+primitives), decomposes the cap-200 active set into buckets, applies venue/session
+allocation + hysteresis + fast-track + open-position force-seat, and emits valid
+``FocusSelection`` rows.
+
+🚨 flow_not_block / 9-stack / aggressive: the output is ``focus_rank``/``tier``/
+``bucket`` ONLY — never a sizing multiplier, never a membership cut. cap WIDENS
+the live set; cold-start = penalty (NOT exclusion); fast-track + exploration fight
+scan-miss/blindness. Deterministic, AI-free. DEMO/PAPER only.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import sqlite3
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from polaris.core.universe.schema import (
+    FocusBucket,
+    FocusSelection,
+    UniverseInstrument,
+    tier_band_boundaries,
+)
+from polaris.core.universe.watchlist import assign_tiers, score_focus_candidates
+from polaris.scripts._candidate_sweep import (
+    BUCKET_ANCHOR,
+    BUCKET_DYNAMIC,
+    BUCKET_EVENT_HOT,
+    BUCKET_EXPLORATION,
+    COLD_START_MIN_BARS,
+    COLD_START_PENALTY,
+    HYST_ENTER_DELTA,
+    HYST_EXIT_DELTA,
+    activation_score,
+    apply_hysteresis,
+    candidate_score,
+    edge_score,
+    fast_track_outliers,
+)
+from polaris.scripts._candidate_sweep_bars import bars_by_resolution, confirmed
+from polaris.scripts._static_ground import read_ticker_ground
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["select_candidate_focus"]
+
+
+def _read_tick_inflow(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Per-venue ``tick_inflow`` rollup keyed by venue (read-only)."""
+    try:
+        rows = conn.execute(
+            "SELECT venue, last_tick_ts, ticks_600s, max_flow_size_600s, "
+            "window_started_at FROM tick_inflow"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        str(r[0]): {
+            "venue": str(r[0]),
+            "last_tick_ts": int(r[1] or 0),
+            "ticks_600s": int(r[2] or 0),
+            "max_flow_size_600s": float(r[3] or 0.0),
+            "window_started_at": int(r[4] or 0),
+        }
+        for r in rows
+    }
+
+
+def _score_universe(
+    conn: sqlite3.Connection,
+    universe: Sequence[UniverseInstrument],
+    now_ts: int,
+    tick_inflow: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Per-instrument two-stage scores + cold-start flag (the sweep core).
+
+    Returns ``{instrument_id: {activation, edge, candidate, has_event,
+    cold_start}}``. Cold-start (thin/absent ground OR < N confirmed bars) carries
+    the 0.5× penalty already APPLIED to ``candidate`` — penalty, NOT exclusion.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for inst in universe:
+        iid = inst.instrument_id
+        all_bars = bars_by_resolution(conn, venue=inst.venue, symbol=inst.symbol)
+        ground_row = read_ticker_ground(conn, iid)
+        ground = ground_row.get("ground") if ground_row else None
+        has_event = bool(ground_row and ground_row.get("has_event"))
+
+        inflow = tick_inflow.get(inst.venue)
+        act = activation_score(all_bars, inflow, now_ts)
+        edge = edge_score(all_bars, ground, now_ts)
+        cand = candidate_score(act, edge)
+
+        n_confirmed = sum(
+            len(confirmed(all_bars.get(res), now_ts, res))
+            for res in ("15m", "1H", "1D")
+        )
+        cold = (not ground) or n_confirmed < COLD_START_MIN_BARS
+        if cold:
+            cand *= COLD_START_PENALTY
+        out[iid] = {
+            "activation": act,
+            "edge": edge,
+            "candidate": cand,
+            "has_event": 1.0 if has_event else 0.0,
+            "cold_start": 1.0 if cold else 0.0,
+        }
+    return out
+
+
+def _venue_seat_allocation(
+    universe: Sequence[UniverseInstrument],
+    venue_weights: Mapping[str, float],
+    total_seats: int,
+) -> dict[str, int]:
+    """Split ``total_seats`` across venues by session-weighted presence.
+
+    A venue's seat share ∝ (its row count × its session weight). A down-weighted
+    (closed-session) venue gets FEWER dynamic seats — allocation, NOT a block:
+    the venue is never zeroed out while it has rows and any positive weight.
+    """
+    by_venue: dict[str, int] = {}
+    for inst in universe:
+        by_venue[inst.venue] = by_venue.get(inst.venue, 0) + 1
+    weighted = {
+        v: n * max(0.0, venue_weights.get(v, 1.0)) for v, n in by_venue.items()
+    }
+    total_w = sum(weighted.values())
+    if total_w <= 0.0:
+        # Degenerate (all weights 0) — fall back to equal split (flow_not_block:
+        # never starve a venue to zero when the market is the only signal).
+        venues = list(by_venue)
+        base = total_seats // len(venues) if venues else 0
+        return {v: base for v in venues}
+    return {v: int(total_seats * (w / total_w)) for v, w in weighted.items()}
+
+
+def select_candidate_focus(
+    conn: sqlite3.Connection,
+    universe: Sequence[UniverseInstrument],
+    *,
+    now_ts: int,
+    cap: int,
+    bucket_counts: Mapping[str, int] | None,
+    venue_weights: Mapping[str, float],
+    open_targets: Sequence[tuple[str, str, str, str]],
+    prev_focus_symbols: set[str],
+    rng: random.Random | None = None,
+    opportunity_scores: Mapping[str, float] | None = None,
+    trade_eligible: Mapping[str, bool] | None = None,
+) -> list[FocusSelection]:
+    """Bucket-decomposed dynamic focus selection (the sweep producer).
+
+    Buckets (env-tunable counts; bucket→FocusBucket-literal mapping documented):
+    - **anchor** — top merit via the EXISTING ``score_focus_candidates`` (the base
+      engine keeps its proven liquid names); → ``"core"``.
+    - **dynamic** — top ``candidate_score``, venue/session allocated (today's
+      movers, the main thrust); → ``"core"``.
+    - **event_hot** — top by event/sentiment spike (``has_event`` + edge); →
+      ``"core"``.
+    - **exploration** — SEEDED-random from the ground (anti-blindness); →
+      ``"satellite"``.
+    De-dup across buckets (highest-priority bucket wins). Open-position symbols are
+    FORCE-SEATED into the active set. ``focus_rank`` 1..K by final ordering; tier
+    via the EXISTING ``assign_tiers``. flow_not_block: a richer ordering, never a
+    membership cut — the producer's output is a different ``focus_rank`` within the
+    SAME schema.
+
+    The EntranceJudge ``opportunity_scores`` + ``trade_eligible`` (the WATCH/TRADE
+    decouple) are PRESERVED through to the emitted rows when supplied — the judge
+    still owns those fields (telemetry + the trade-subset decouple), so the sweep
+    only changes ``focus_rank``/``bucket`` ordering, never the eligibility contract.
+    A row with no judgment keeps the flow-preserving default (None / eligible).
+    """
+    if not universe:
+        return []
+    opportunity_scores = opportunity_scores or {}
+    trade_eligible = trade_eligible or {}
+    rng = rng or random.Random(now_ts)
+    counts = _resolve_bucket_counts(bucket_counts, cap)
+    tick_inflow = _read_tick_inflow(conn)
+    scored = _score_universe(conn, universe, now_ts, tick_inflow)
+    cand_by_iid = {iid: s["candidate"] for iid, s in scored.items()}
+
+    merit_list = score_focus_candidates(list(universe))
+    by_iid = {inst.instrument_id: inst for inst in universe}
+    # Pre-map merit by iid (parallel order) so the anchor sort is O(n log n), not
+    # O(n²) — the 1650-row walk would otherwise rebuild list(by_iid) per compare.
+    merit_by_iid = {
+        inst.instrument_id: merit_list[i] for i, inst in enumerate(universe)
+    }
+
+    # Hysteresis stabilizes WHICH names occupy the dynamic set (anti-flicker).
+    stable = apply_hysteresis(
+        prev_focus_symbols, cand_by_iid, HYST_ENTER_DELTA, HYST_EXIT_DELTA
+    )
+
+    chosen: list[str] = []  # ordered, de-duped instrument_ids
+    seen: set[str] = set()
+
+    def _seat(iids: Sequence[str], limit: int) -> None:
+        added = 0
+        for iid in iids:
+            if added >= limit:
+                break
+            if iid in seen:
+                continue
+            seen.add(iid)
+            chosen.append(iid)
+            added += 1
+
+    # 1) anchor — top merit rank.
+    anchor_order = sorted(by_iid, key=lambda i: merit_by_iid[i], reverse=True)
+    _seat(anchor_order, counts["anchor"])
+
+    # 2) dynamic — top candidate_score, venue/session allocated. Prefer the
+    #    hysteresis-stable names, then fall back to raw candidate order.
+    dynamic_alloc = _venue_seat_allocation(universe, venue_weights, counts["dynamic"])
+    for venue, seats in dynamic_alloc.items():
+        venue_iids = [
+            iid for iid in by_iid
+            if by_iid[iid].venue == venue and iid not in seen
+        ]
+        venue_iids.sort(
+            key=lambda i: (i in stable, cand_by_iid.get(i, 0.0)), reverse=True
+        )
+        _seat(venue_iids, seats)
+
+    # 3) event_hot — event/sentiment spike (has_event then edge).
+    event_order = sorted(
+        by_iid,
+        key=lambda i: (scored[i]["has_event"], scored[i]["edge"]),
+        reverse=True,
+    )
+    _seat(event_order, counts["event_hot"])
+
+    # 4) exploration — SEEDED-random from the ground (anti-blindness).
+    explore_pool = [iid for iid in by_iid if iid not in seen]
+    rng.shuffle(explore_pool)
+    explore_chosen = explore_pool[: counts["exploration"]]
+    _seat(explore_chosen, counts["exploration"])
+
+    # 5) fast-track — out-of-focus spikes WIDEN the active set (never a block).
+    focus_keys = {(by_iid[i].venue, by_iid[i].symbol) for i in chosen}
+    for venue, symbol in fast_track_outliers(universe, cand_by_iid, focus_keys):
+        iid = f"{venue}:{symbol}"
+        if iid not in seen and iid in by_iid:
+            seen.add(iid)
+            chosen.append(iid)
+
+    # 6) open-position force-seat — a held name is ALWAYS in the active set.
+    for venue, symbol, _ac, _grp in open_targets:
+        iid = f"{venue}:{symbol}"
+        if iid in seen:
+            continue
+        if iid in by_iid:
+            seen.add(iid)
+            chosen.append(iid)
+
+    # Final ordering by candidate_score (held names keep their seat; the rank head
+    # is the strongest mover). cap-bounded — held names never trimmed.
+    held_iids = {f"{v}:{s}" for v, s, _a, _g in open_targets}
+    chosen.sort(
+        key=lambda i: (i in held_iids, cand_by_iid.get(i, 0.0)), reverse=True
+    )
+    if len(chosen) > cap:
+        kept_held = [i for i in chosen if i in held_iids]
+        rest = [i for i in chosen if i not in held_iids][: max(0, cap - len(kept_held))]
+        chosen = (kept_held + rest)[:cap]
+
+    bucket_map = _bucket_assignment(chosen, explore_chosen_set=set(explore_chosen))
+    tiers = assign_tiers(len(chosen), tier_band_boundaries())
+    out = [
+        FocusSelection(
+            cycle_ts=now_ts,
+            venue=by_iid[iid].venue,
+            symbol=by_iid[iid].symbol,
+            focus_score=float(cand_by_iid.get(iid, 0.0)),
+            rank=rank_idx,
+            bucket=bucket_map[iid],
+            opportunity_score=(
+                None if iid not in opportunity_scores
+                else float(opportunity_scores[iid])
+            ),
+            # Flow-preserving default: a row with no judgment stays trade-eligible
+            # (the WATCH/TRADE decouple, owned by the judge — never a sweep block).
+            trade_eligible=bool(trade_eligible.get(iid, True)),
+            tier=tiers[rank_idx - 1],
+        )
+        for rank_idx, iid in enumerate(chosen, start=1)
+    ]
+    logger.info(
+        "[sweep] candidate_focus: universe=%d → selected=%d (cap=%d) buckets=%s",
+        len(universe), len(out), cap, _bucket_summary(bucket_map),
+    )
+    return out
+
+
+def _resolve_bucket_counts(
+    bucket_counts: Mapping[str, int] | None, cap: int
+) -> dict[str, int]:
+    """Resolve env defaults, then scale to ``cap`` if the sum overshoots it."""
+    counts = {
+        "anchor": BUCKET_ANCHOR,
+        "dynamic": BUCKET_DYNAMIC,
+        "event_hot": BUCKET_EVENT_HOT,
+        "exploration": BUCKET_EXPLORATION,
+    }
+    if bucket_counts is not None:
+        counts = {k: int(bucket_counts.get(k, counts[k])) for k in counts}
+    total = sum(counts.values())
+    if total > cap and total > 0:
+        # Proportionally scale down so the buckets fit the cap (the dynamic
+        # bucket absorbs the remainder — it is the main thrust).
+        scaled = {k: int(cap * v / total) for k, v in counts.items()}
+        scaled["dynamic"] += cap - sum(scaled.values())
+        return scaled
+    return counts
+
+
+def _bucket_assignment(
+    chosen: Sequence[str], *, explore_chosen_set: set[str]
+) -> dict[str, FocusBucket]:
+    """Map each chosen iid to a VALID FocusBucket literal (schema-safe).
+
+    anchor/dynamic/event_hot/fast-track/held → ``"core"``; exploration →
+    ``"satellite"``. The internal 4-bucket detail is carried only in the log
+    summary — the persisted ``target_bucket`` stays a valid FocusBucket so the
+    schema + ``persist_focus`` are untouched.
+    """
+    out: dict[str, FocusBucket] = {}
+    for iid in chosen:
+        out[iid] = "satellite" if iid in explore_chosen_set else "core"
+    return out
+
+
+def _bucket_summary(bucket_map: Mapping[str, FocusBucket]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for b in bucket_map.values():
+        summary[b] = summary.get(b, 0) + 1
+    return summary

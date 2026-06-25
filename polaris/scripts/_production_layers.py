@@ -53,6 +53,7 @@ from polaris.core.universe.discovery import (
     rank_active_universe,
 )
 from polaris.core.universe.schema import (
+    FocusSelection,
     Tier,
     UniverseInstrument,
     is_capital_fx_major,
@@ -62,6 +63,12 @@ from polaris.core.universe.watchlist import (
     cadence_fires,
     compute_dynamic_focus,
     persist_focus,
+)
+from polaris.scripts._candidate_sweep import (
+    RTH_CLOSE_MIN,
+    RTH_OPEN_MIN,
+    SESSION_DOWNWEIGHT,
+    SESSION_LEAD_SEC,
 )
 from polaris.scripts._production_asset_class import resolve_asset_class
 from polaris.scripts._production_bars import (
@@ -76,6 +83,7 @@ from polaris.scripts._production_bars import (
 from polaris.scripts._production_indicators import compute_real_regime_signal
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
+from polaris.venues.capital.session_calendar import capital_seconds_to_close
 
 logger = logging.getLogger(__name__)
 
@@ -446,6 +454,138 @@ def _fused_scores(
     return {str(k): float(v) for k, v in raw.items()}
 
 
+def _candidate_sweep_enabled() -> bool:
+    """STEP② candidate sweep gate — env ``POLARIS_CANDIDATE_SWEEP`` (default ON).
+
+    ``1`` (default) = the sweep is the focus producer (today's movers). ``0`` =
+    fall back to the legacy ``compute_dynamic_focus`` merit rank (rollback / tests).
+    flow_not_block: the gate only swaps WHICH ordering produces ``focus_rank``;
+    both paths emit valid ``FocusSelection`` rows via the SAME ``persist_focus``.
+    """
+    raw = os.environ.get("POLARIS_CANDIDATE_SWEEP")
+    if raw is None or raw == "":
+        return True
+    return raw.strip() not in ("0", "false", "False", "no", "off")
+
+
+def _build_venue_weights(
+    universe: Sequence[UniverseInstrument], now_ts: int
+) -> dict[str, float]:
+    """Session-modulated per-venue allocation weights (read-only, flow_not_block).
+
+    OKX is 24/7 (steady 1.0). Capital index/commodity/equity rows are weighted
+    DOWN when their cash session is near/at close (``capital_seconds_to_close``);
+    FX majors are 24/5-exempt (None → full weight). Alpaca equities are weighted
+    DOWN outside US RTH. This only re-allocates dynamic SEATS across venues — it
+    never blocks an entry or cuts a size (cap 200 still WIDENS the live set). A
+    venue is never zeroed while it has rows (min floor keeps it observable).
+    """
+    venues = {ins.venue for ins in universe}
+    weights: dict[str, float] = {}
+    # Capital weight = min over its asset classes' session proximity (closest
+    # close dominates). Default 1.0 when exempt/open.
+    cap_classes = {ins.asset_class for ins in universe if ins.venue == "capital"}
+    for venue in venues:
+        if venue == "capital":
+            weights[venue] = _capital_session_weight(cap_classes, now_ts)
+        elif venue == "alpaca":
+            weights[venue] = _alpaca_session_weight(now_ts)
+        else:
+            weights[venue] = 1.0
+    return weights
+
+
+def _capital_session_weight(asset_classes: set[str], now_ts: int) -> float:
+    """Lowest session weight across Capital asset classes.
+
+    Within ``SESSION_LEAD_SEC`` of a cash close → ``SESSION_DOWNWEIGHT`` (fewer
+    seats, never zeroed); 24/5-exempt / unknown class → full weight. Knobs are
+    env-overridable /debate calibration targets (see ``_candidate_sweep``).
+    """
+    weight = 1.0
+    for ac in asset_classes:
+        secs = capital_seconds_to_close(ac, now_ts)
+        if secs is None:
+            continue  # 24/5-exempt or unknown → full weight
+        if secs <= SESSION_LEAD_SEC:
+            weight = min(weight, SESSION_DOWNWEIGHT)  # near/at close — never zero
+    return weight
+
+
+def _alpaca_session_weight(now_ts: int) -> float:
+    """US-equity session weight — 1.0 inside RTH, ``SESSION_DOWNWEIGHT`` outside.
+
+    RTH window = ``[RTH_OPEN_MIN, RTH_CLOSE_MIN]`` UTC minutes-of-day (EDT ref,
+    matches the equity session gate). Never zero (flow_not_block). Env-overridable.
+    """
+    import datetime as _dt
+
+    local = _dt.datetime.fromtimestamp(now_ts, tz=_dt.UTC)
+    if local.weekday() >= 5:  # weekend
+        return SESSION_DOWNWEIGHT
+    minute = local.hour * 60 + local.minute
+    return 1.0 if RTH_OPEN_MIN <= minute <= RTH_CLOSE_MIN else SESSION_DOWNWEIGHT
+
+
+def _sweep_focus(
+    conn: sqlite3.Connection,
+    universe: Sequence[UniverseInstrument],
+    now_ts: int,
+    *,
+    opportunity_scores: dict[str, float],
+    trade_eligible: dict[str, bool],
+) -> list[FocusSelection]:
+    """Build focus rows from the STEP② candidate sweep (today's movers).
+
+    Reads the prior focus cycle for hysteresis, the open positions for force-seat,
+    and the session-modulated venue weights, then delegates to the pure
+    ``select_candidate_focus``. cap = ``POLARIS_FOCUS_CYCLE_TARGET`` (default 200).
+    The EntranceJudge ``opportunity_scores`` + ``trade_eligible`` decouple are
+    threaded through so the judgment telemetry + WATCH/TRADE split are PRESERVED on
+    the sweep path (the sweep changes only focus_rank/bucket ordering).
+    """
+    # Deferred import breaks the _production_layers ⇆ _candidate_sweep_select ⇆
+    # _static_ground import cycle (the sweep reads read_ticker_ground from
+    # _static_ground, which imports read_active_universe from here).
+    from polaris.scripts._candidate_sweep_select import select_candidate_focus
+
+    cap = _sweep_cap()
+    prev_symbols = _prev_focus_symbols(conn, now_ts)
+    open_targets = open_position_targets(conn)
+    venue_weights = _build_venue_weights(universe, now_ts)
+    return select_candidate_focus(
+        conn, universe, now_ts=now_ts, cap=cap,
+        bucket_counts=None, venue_weights=venue_weights,
+        open_targets=open_targets, prev_focus_symbols=prev_symbols,
+        opportunity_scores=opportunity_scores or None,
+        trade_eligible=trade_eligible or None,
+    )
+
+
+def _sweep_cap() -> int:
+    """Candidate-focus cap (env ``POLARIS_FOCUS_CYCLE_TARGET``; default 200)."""
+    raw = os.environ.get("POLARIS_FOCUS_CYCLE_TARGET")
+    if raw is None or raw == "":
+        return 200
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return 200
+
+
+def _prev_focus_symbols(conn: sqlite3.Connection, now_ts: int) -> set[str]:
+    """Instrument-ids of the latest focus cycle ≤ now_ts (hysteresis input)."""
+    row = conn.execute(
+        "SELECT MAX(cycle_ts) FROM watchlist_focus WHERE cycle_ts < ?", (now_ts,)
+    ).fetchone()
+    if row is None or row[0] is None:
+        return set()
+    rows = conn.execute(
+        "SELECT venue, symbol FROM watchlist_focus WHERE cycle_ts = ?", (int(row[0]),)
+    ).fetchall()
+    return {f"{r[0]}:{r[1]}" for r in rows}
+
+
 def refresh_focus_watchlist(
     conn: sqlite3.Connection,
     *,
@@ -549,13 +689,29 @@ def refresh_focus_watchlist(
         iid: r.opportunity_score for iid, r in judge_readings.items()
     }
     trade_eligible = {iid: r.trade_eligible for iid, r in judge_readings.items()}
-    focus = compute_dynamic_focus(
-        universe,
-        cell_scores=cell_scores or None,
-        cycle_ts=ts,
-        opportunity_scores=opportunity_scores or None,
-        trade_eligible=trade_eligible or None,
-    )
+    # STEP② candidate sweep (default ON): the focus PRODUCER becomes the dynamic
+    # two-stage sweep over the static ground (today's movers, cap 200 buckets)
+    # instead of the static liquidity merit rank — so the same high-vol names no
+    # longer monopolize focus. flow_not_block: the sweep emits valid FocusSelection
+    # rows (focus_rank/tier/bucket) via the SAME persist_focus; no entry/size/exit
+    # is gated and 9-stack is untouched (the sweep produces no sizing multiplier).
+    # The legacy merit producer stays intact behind POLARIS_CANDIDATE_SWEEP=0 for
+    # rollback. The EntranceJudge telemetry (opportunity_score/trade_eligible flag
+    # + the ambiguity sidecar) is preserved on both paths.
+    if _candidate_sweep_enabled():
+        focus = _sweep_focus(
+            conn, universe, ts,
+            opportunity_scores=opportunity_scores,
+            trade_eligible=trade_eligible,
+        )
+    else:
+        focus = compute_dynamic_focus(
+            universe,
+            cell_scores=cell_scores or None,
+            cycle_ts=ts,
+            opportunity_scores=opportunity_scores or None,
+            trade_eligible=trade_eligible or None,
+        )
     persist_focus(conn, focus)
     # Ambiguity seam — write the per-candidate judgment (incl. ambiguous flag) to
     # the sidecar. PURE TELEMETRY (NO AI, NO runtime consumer; deferred Inc-2).

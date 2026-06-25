@@ -541,6 +541,50 @@ async def test_fetch_quote_uses_data_base() -> None:
     assert "data" in captured["host"]
 
 
+@pytest.mark.asyncio
+async def test_fetch_bars_defaults_to_iex_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #43: bars do NOT need the paid SIP consolidated tape. A SIP-pinned bar URL on
+    # a key WITHOUT the entitlement 429s (IEX 200/min ceiling), so fetch_bars
+    # defaults to IEX even when POLARIS_ALPACA_FEED=sip. The bar pipeline reads
+    # real-time IEX bars fine; explicit feed= still overrides.
+    monkeypatch.setenv("POLARIS_ALPACA_FEED", "sip")
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        captured["feed"] = req.url.params.get("feed")
+        return {"bars": [{"t": "2026-06-26T13:00:00Z", "c": 191.0}]}
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        bars = await adapter.fetch_bars("AAPL", start="2026-06-26")
+    finally:
+        await data_client.aclose()
+    assert bars  # parsed the canned bar
+    assert captured["feed"] == "iex"  # SIP-pinned default would 429 → IEX instead
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_explicit_feed_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An explicit feed= still wins (operator override / SIP-confirmed caller).
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        captured["feed"] = req.url.params.get("feed")
+        return {"bars": [{"t": "2026-06-26T13:00:00Z", "c": 191.0}]}
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        await adapter.fetch_bars("AAPL", start="2026-06-26", feed="sip")
+    finally:
+        await data_client.aclose()
+    assert captured["feed"] == "sip"
+
+
 # ---------------------------------------------------------------------------
 # Constraint translator (assets)
 # ---------------------------------------------------------------------------

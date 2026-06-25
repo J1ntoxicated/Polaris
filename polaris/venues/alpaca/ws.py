@@ -36,7 +36,11 @@ from collections.abc import Callable, Iterable
 
 from polaris.core.data.canonical import alpaca_quote_to_quote_tick
 from polaris.core.data.schema import QuoteTick
-from polaris.core.universe.schema import ALPACA_IEX_SYMBOL_CAP, alpaca_feed_token
+from polaris.core.universe.schema import (
+    ALPACA_IEX_SYMBOL_CAP,
+    alpaca_feed_token,
+    mark_alpaca_feed_downgraded,
+)
 from polaris.venues.alpaca.equity_session_gate import us_equity_session_state
 from polaris.venues.ws_common import WSStreamClient
 
@@ -107,10 +111,15 @@ class AlpacaQuoteWS(WSStreamClient):
         closes the socket after that error, so the base recv-loop-end path drives
         the reconnect (the idle watchdog is the backstop); either way the next
         connect reads ``ws_url`` → the IEX URL. No new reconnect plumbing is needed.
+
+        Also latches the process-level runtime feed (#43) so the schema WS BUDGET
+        drops 60→30 in lockstep with this socket's 30-symbol cap — the focus
+        partition + re-subscribe then seat 30, not 60, on the IEX socket.
         """
         if self._active_feed == "iex":
             return
         self._active_feed = "iex"
+        mark_alpaca_feed_downgraded()
         if not self._downgraded:
             self._downgraded = True
             logger.warning(

@@ -256,6 +256,46 @@ def test_alpaca_runtime_downgrade_on_auth_error_frame(
     assert c.ws_url == "wss://stream.data.alpaca.markets/v2/iex"  # downgraded
 
 
+def test_alpaca_runtime_downgrade_recaps_subscribe_to_30(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #43: the configured feed is SIP (no cap), so the FIRST subscribe sends the
+    # full set. A runtime entitlement error frame downgrades the live feed to IEX;
+    # the NEXT subscribe (reconnect) MUST re-cap to 30 — otherwise the IEX socket
+    # re-trips "symbol limit exceeded". (The env is unset → configured SIP, so this
+    # exercises the RUNTIME downgrade path, not the env-pinned-IEX path.)
+    from polaris.core.universe.schema import (
+        reset_alpaca_runtime_feed,
+        ws_budget_for_venue,
+    )
+
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    reset_alpaca_runtime_feed()
+    syms = [f"SYM{i}" for i in range(40)]
+    c = AlpacaQuoteWS(
+        symbols=syms, api_key="k", api_secret="s", on_quote=lambda q: None
+    )
+    try:
+        # Pre-downgrade: SIP sends all 40 + the schema budget is the SIP default.
+        sub0 = json.loads(list(c.subscribe_messages())[1])
+        assert len(sub0["quotes"]) == 40
+        assert ws_budget_for_venue("alpaca") == 60
+        # Runtime entitlement failure → downgrade.
+        c.parse_message(
+            json.dumps([{"T": "error", "code": 409, "msg": "insufficient subscription"}])
+        )
+        # Post-downgrade: the re-subscribe (next reconnect) is capped at 30 AND the
+        # schema-level WS budget now tracks IEX (30) — so the focus partition seats
+        # 30, not 60, on the IEX socket.
+        sub1 = json.loads(list(c.subscribe_messages())[1])
+        assert len(sub1["quotes"]) == 30
+        assert sub1["quotes"] == syms[:30]  # focus order preserved (Tier-S leads)
+        assert c.current_subscription() == set(syms[:30])
+        assert ws_budget_for_venue("alpaca") == 30
+    finally:
+        reset_alpaca_runtime_feed()
+
+
 def test_alpaca_non_entitlement_error_keeps_sip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

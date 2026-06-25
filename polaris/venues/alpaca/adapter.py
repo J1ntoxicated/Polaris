@@ -353,16 +353,16 @@ class AlpacaAdapter:
         - ``sort='desc'`` — Alpaca returns the window NEWEST-first, so ``limit``
           keeps the MOST-RECENT bars. The default (asc) returned the OLDEST
           ``limit`` bars of a window wider than ``limit`` → provably stale.
-        - ``feed`` — the configured Alpaca feed (``POLARIS_ALPACA_FEED``, default
-          ``sip``) when not overridden. Jin's paid SIP entitlement is real-time
-          (the old free account's SIP was 15-min delayed, which is why IEX was
-          forced here before); IEX stays the explicit/fallback option.
+        - ``feed`` — defaults to ``iex`` (#43). Bars do NOT need the paid SIP
+          consolidated tape; IEX 1m prints are real-time and adequate for the bar
+          pipeline. A SIP-pinned bar URL on a key WITHOUT the entitlement 429s (the
+          IEX 200/min ceiling), so the WS SIP→IEX downgrade left bars stranded on
+          ``feed=sip`` → 429 storm. Decoupling here ends that at the source; an
+          explicit ``feed='sip'`` still overrides (a SIP-confirmed caller).
         The caller re-sorts to the canonical newest-LAST contract.
         """
         if feed is None:
-            from polaris.core.universe.schema import alpaca_feed_token
-
-            feed = alpaca_feed_token()
+            feed = "iex"
         params: dict[str, str] = {
             "timeframe": timeframe,
             "limit": str(limit),

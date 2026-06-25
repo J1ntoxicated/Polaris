@@ -392,6 +392,39 @@ def alpaca_feed_token() -> str:
     return token if token in _ALPACA_FEED_TOKENS else ALPACA_FEED_DEFAULT
 
 
+# Process-level runtime feed state (#43). The WS client downgrades the LIVE feed
+# SIP→IEX on an entitlement-error frame; that downgrade must also bind the WS
+# BUDGET (60→30) so the focus partition + re-subscribe stop seating 60 symbols on
+# a 30-cap IEX socket ("symbol limit exceeded" re-trigger). A module-level flag is
+# the SSOT both the venue WS layer (writer) and the schema budget (reader) share
+# with no cross-layer import inversion. One-way latch (a SIP entitlement does not
+# appear mid-session) — ``reset`` exists only for test isolation.
+_alpaca_feed_downgraded = False
+
+
+def mark_alpaca_feed_downgraded() -> None:
+    """Latch the process into the runtime IEX feed (called by the WS on downgrade)."""
+    global _alpaca_feed_downgraded
+    _alpaca_feed_downgraded = True
+
+
+def reset_alpaca_runtime_feed() -> None:
+    """Clear the runtime-downgrade latch (test isolation only — never live)."""
+    global _alpaca_feed_downgraded
+    _alpaca_feed_downgraded = False
+
+
+def alpaca_runtime_feed() -> str:
+    """Effective Alpaca feed: ``iex`` once runtime-downgraded, else the configured.
+
+    The WS budget keys on THIS (not ``alpaca_feed_token``) so a SIP→IEX runtime
+    downgrade drops the budget 60→30 in lockstep with the WS subscription cap.
+    """
+    if _alpaca_feed_downgraded:
+        return "iex"
+    return alpaca_feed_token()
+
+
 # Per-venue WS subscription budget (Tier-S realtime subs). Capital's WS genuinely
 # caps ~40 concurrent subscriptions; OKX has headroom (default 60). Alpaca depends
 # on the active feed: SIP (paid, default) has NO symbol cap → budget 60 (focus
@@ -408,10 +441,15 @@ WS_BUDGET_ENV_PREFIX: Final[str] = "POLARIS_WS_BUDGET_"
 
 
 def _alpaca_ws_budget_default() -> int:
-    """Alpaca WS budget default from the configured feed (SIP 60 / IEX 30)."""
+    """Alpaca WS budget default from the RUNTIME feed (SIP 60 / IEX 30).
+
+    Keys on ``alpaca_runtime_feed`` (#43), so a SIP→IEX runtime downgrade drops the
+    budget to 30 in lockstep with the WS subscription cap — the focus partition +
+    re-subscribe then seat 30, not 60, on the IEX socket.
+    """
     return (
         ALPACA_IEX_SYMBOL_CAP
-        if alpaca_feed_token() == "iex"
+        if alpaca_runtime_feed() == "iex"
         else ALPACA_SIP_WS_BUDGET_DEFAULT
     )
 

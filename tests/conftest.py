@@ -50,6 +50,7 @@ def _reset_log_dedup_caches() -> Iterator[None]:
     per-test keeps the dedup behaviour deterministic without affecting any
     decision path (these sets gate log emission only).
     """
+    from polaris.core.universe.schema import reset_alpaca_runtime_feed
     from polaris.scripts import _production_asset_class, _production_bars, _yahoo_bars
 
     _production_bars._RECENCY_STALE_FLAGGED.clear()
@@ -61,6 +62,10 @@ def _reset_log_dedup_caches() -> Iterator[None]:
     _yahoo_bars._YAHOO_TICKER_CACHE.clear()
     _yahoo_bars._FALLBACK_LAST_MONO.clear()
     _yahoo_bars._YF_FRAME_CACHE.clear()
+    # Alpaca runtime SIP→IEX feed latch (#43) is process-global: a test that drives
+    # the WS entitlement-error downgrade would otherwise leave the WS budget pinned
+    # at the IEX 30 for every later budget-asserting test. Reset per-test.
+    reset_alpaca_runtime_feed()
     yield
 
 

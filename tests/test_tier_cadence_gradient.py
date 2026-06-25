@@ -215,6 +215,53 @@ def test_ws_budget_env_raisable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #43 — Alpaca WS budget follows the RUNTIME feed (SIP→IEX downgrade)
+# ---------------------------------------------------------------------------
+
+
+def test_ws_budget_alpaca_follows_runtime_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #43: the configured feed is SIP (budget 60), but a runtime entitlement
+    # failure downgrades the LIVE feed to IEX. The budget MUST follow the runtime
+    # feed → 30, so the focus partition + re-subscribe stop trying to seat 60
+    # symbols on a 30-cap IEX socket ("symbol limit exceeded" re-trigger).
+    from polaris.core.universe.schema import (
+        mark_alpaca_feed_downgraded,
+        reset_alpaca_runtime_feed,
+    )
+
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    reset_alpaca_runtime_feed()
+    assert ws_budget_for_venue("alpaca") == 60  # configured SIP, no downgrade yet
+    mark_alpaca_feed_downgraded()  # the WS observed an insufficient-entitlement frame
+    try:
+        assert ws_budget_for_venue("alpaca") == 30  # budget now tracks IEX
+    finally:
+        reset_alpaca_runtime_feed()
+
+
+def test_ws_budget_alpaca_env_override_wins_over_runtime_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicit POLARIS_WS_BUDGET_ALPACA still wins (operator override) even after
+    # a runtime downgrade — the runtime feed only drives the DEFAULT.
+    from polaris.core.universe.schema import (
+        mark_alpaca_feed_downgraded,
+        reset_alpaca_runtime_feed,
+    )
+
+    monkeypatch.delenv("POLARIS_ALPACA_FEED", raising=False)
+    monkeypatch.setenv("POLARIS_WS_BUDGET_ALPACA", "25")
+    reset_alpaca_runtime_feed()
+    mark_alpaca_feed_downgraded()
+    try:
+        assert ws_budget_for_venue("alpaca") == 25
+    finally:
+        reset_alpaca_runtime_feed()
+
+
+# ---------------------------------------------------------------------------
 # INC4 — quota removed: single merit rank decides order/tier (no class floors)
 # ---------------------------------------------------------------------------
 

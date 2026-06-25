@@ -71,9 +71,9 @@ def _desc_rows() -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 async def test_fetch_bars_leaves_feed_to_adapter_env_default() -> None:
     """The production wrapper does NOT override the feed — it forwards ``None`` so
-    the adapter resolves ``POLARIS_ALPACA_FEED`` (default SIP, Jin's paid real-time
-    entitlement; IEX is the explicit/fallback option). Pre-2026-06-26 this pinned
-    IEX because the old free account's SIP was 15-min delayed."""
+    the adapter resolves the bar feed default (``iex`` since #43: bars do not need
+    the paid SIP tape, and a SIP-pinned bar URL on a non-SIP key 429s). The wrapper
+    stays feed-agnostic; the feed policy lives entirely in the adapter."""
     adapter = _CapturingAdapter(_desc_rows())
     await fetch_alpaca_bars(adapter, "AMD", bar_interval="1m", limit=240)
     assert adapter.calls[0]["feed"] is None  # wrapper leaves the feed env-driven

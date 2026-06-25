@@ -38,6 +38,25 @@ def polaris_test_vault(
     return vault
 
 
+@pytest.fixture(autouse=True)
+def _reset_log_dedup_caches() -> Iterator[None]:
+    """Clear the logging dedup caches before each test.
+
+    ``_production_bars._RECENCY_STALE_FLAGGED`` and
+    ``_production_asset_class._FALLBACK_WARNED`` are module-level sets that
+    suppress repeat WARNINGs (logging-only). They persist across tests in the
+    same process, so a test asserting "the WARN fired" could see a false
+    negative if an earlier test already warned for the same key. Clearing them
+    per-test keeps the dedup behaviour deterministic without affecting any
+    decision path (these sets gate log emission only).
+    """
+    from polaris.scripts import _production_asset_class, _production_bars
+
+    _production_bars._RECENCY_STALE_FLAGGED.clear()
+    _production_asset_class._FALLBACK_WARNED.clear()
+    yield
+
+
 @pytest.fixture
 def memdb() -> Iterator[sqlite3.Connection]:
     """Fresh in-memory SQLite with all DDL applied."""

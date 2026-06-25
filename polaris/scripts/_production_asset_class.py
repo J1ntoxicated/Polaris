@@ -23,7 +23,18 @@ import logging
 import sqlite3
 from typing import Final
 
+from polaris.datastream import emit as datastream_emit
+
 logger = logging.getLogger(__name__)
+
+# Fallback-WARN dedup (logging only). The ``risk_events`` row is already
+# idempotent (``INSERT OR IGNORE`` on ``acfb:source:venue:symbol``), but the
+# WARN re-fired on every read of the same mis-classed instrument (14k identical
+# lines on the live log). This module-level set records which fallbacks have
+# already been WARNed so the runtime log gets ONE per distinct instrument and
+# the per-read detail goes to the datastream sink. Mirrors the DB idempotency
+# key. Single-process loop; does not gate any decision.
+_FALLBACK_WARNED: set[tuple[str, str, str]] = set()
 
 # The canonical asset_class vocabulary (Layer 1 group_id prefixes). A resolved
 # prefix outside this set is a mis-prefix, not a real class.
@@ -62,10 +73,23 @@ def _record_fallback(
     instruments, not a per-read flood. FAIL-OPEN: a missing table / any sqlite
     error is swallowed (a telemetry write must never break the read path).
     """
-    logger.warning(
-        "[asset_class] fallback (%s): %s:%s group_id=%r → %s "
-        "(no universe class / unknown prefix)",
-        source, venue, symbol, group_id, resolved,
+    dedup_key = (source, venue, symbol)
+    # Dedup: ONE WARN per distinct instrument (mirrors the DB idempotency key);
+    # the per-read detail goes to the datastream sink.
+    if dedup_key not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(dedup_key)
+        logger.warning(
+            "[asset_class] fallback (%s): %s:%s group_id=%r → %s "
+            "(no universe class / unknown prefix)",
+            source, venue, symbol, group_id, resolved,
+        )
+    datastream_emit(
+        "asset_class/fallback",
+        source=source,
+        venue=venue,
+        symbol=symbol,
+        group_id=group_id,
+        resolved=resolved,
     )
     if conn is None:
         return

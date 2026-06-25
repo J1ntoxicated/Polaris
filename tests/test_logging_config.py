@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,30 @@ def test_default_format_constants_exposed() -> None:
     assert "%(name)s" in DEFAULT_FORMAT
     assert "%(lineno)d" in DEFAULT_FORMAT
     assert DEFAULT_DATEFMT == "%Y-%m-%dT%H:%M:%S"
+
+
+def test_file_handler_is_rotating(tmp_path: Path) -> None:
+    # Unbounded-growth backstop: the runtime file handler must rotate (the prior
+    # plain FileHandler grew to 128 MB with no cap → ENOSPC risk).
+    setup_polaris_logging(level="INFO", log_file=str(tmp_path / "polaris.log"))
+    file_handlers = [
+        h for h in logging.getLogger().handlers if isinstance(h, RotatingFileHandler)
+    ]
+    assert len(file_handlers) == 1
+    assert file_handlers[0].maxBytes > 0
+    assert file_handlers[0].backupCount > 0
+
+
+def test_runtime_rotation_caps_size(tmp_path: Path) -> None:
+    log_file = tmp_path / "polaris.log"
+    setup_polaris_logging(
+        level="INFO", log_file=str(log_file), max_bytes=512, backup_count=2
+    )
+    lg = logging.getLogger("polaris.test.rotate")
+    for i in range(200):
+        lg.info("rotate-line-%d-padding-padding-padding", i)
+    for h in logging.getLogger().handlers:
+        h.flush()
+
+    backups = list(tmp_path.glob("polaris.log.*"))
+    assert backups, "runtime log must rotate when it exceeds the cap"

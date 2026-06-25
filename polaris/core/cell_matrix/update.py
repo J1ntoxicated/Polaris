@@ -8,7 +8,6 @@ working. Spec source: vault/30_components/layer-4-cell-matrix.md (Q4-Q6).
 
 from __future__ import annotations
 
-import logging
 import math
 import sqlite3
 
@@ -21,8 +20,7 @@ from polaris.core.cell_matrix.score import (
     compute_cell_score,
     decay_factor,
 )
-
-logger = logging.getLogger(__name__)
+from polaris.datastream import emit as datastream_emit
 
 
 def update_on_trade_close(
@@ -57,15 +55,18 @@ def update_on_trade_close(
         conn.execute("ROLLBACK")
         raise
     k = trade.key
-    logger.info(
-        "[cell] update_on_trade_close %s/%s/%s/%s pnl_r=%.3f won=%s closed_ts=%d",
-        k.exchange,
-        k.strategy,
-        k.ticker,
-        k.regime,
-        trade.pnl_r,
-        trade.won,
-        trade.closed_ts,
+    # DATA → datastream sink: a per-trade-close cell update is structured
+    # measurement, not an operator signal. Routed to the JSONL stream for batch
+    # monitoring (no-op when the sink is unconfigured — tests / replay).
+    datastream_emit(
+        "cell/update_on_trade_close",
+        exchange=k.exchange,
+        strategy=k.strategy,
+        ticker=k.ticker,
+        regime=k.regime,
+        pnl_r=round(trade.pnl_r, 4),
+        won=trade.won,
+        closed_ts=trade.closed_ts,
     )
 
 

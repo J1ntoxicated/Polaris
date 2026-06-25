@@ -34,6 +34,7 @@ from polaris.core.ticks.signals import (
     flow_pressure,
     micro_reversion,
 )
+from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_state import ProdLoopState
 from polaris.scripts._production_tick_mfe import (
     _BURST_RIDER,
@@ -151,19 +152,24 @@ def _collect_intents(
     # (a DELAY, not a veto); only ``flow_confirmed`` reads these knobs so the other
     # signals are untouched. flow_not_block: a strong genuine imbalance still clears.
     feat_cfg = regime_aware_confirm_cfg(eng.cfg, regime)
-    logger.info(
-        "[regime-fit/seam2-confirm] %s:%s regime=%s momo_fit=%+.2f "
-        "confirm_ticks %d->%d confirm_ofi_frac %.3f->%.3f "
-        "(entry confirmation DELAY, not a veto)",
-        venue,
-        symbol,
-        regime,
-        regime_fit("momentum", regime),
-        eng.cfg.confirm_ticks,
-        feat_cfg.confirm_ticks,
-        eng.cfg.confirm_ofi_frac,
-        feat_cfg.confirm_ofi_frac,
-    )
+    # DATA → datastream sink, log-on-CHANGE: the confirm cfg only changes when
+    # the regime changes, so emit once per (venue, symbol) regime transition
+    # instead of once per tick (firehose). Logging-only; ``feat_cfg`` is already
+    # computed and used unchanged below.
+    if eng.ds_last_seam2_regime.get((venue, symbol)) != regime:
+        eng.ds_last_seam2_regime[(venue, symbol)] = regime
+        datastream_emit(
+            "regime-fit/seam2-confirm",
+            venue=venue,
+            symbol=symbol,
+            regime=regime,
+            momo_fit=round(regime_fit("momentum", regime), 4),
+            confirm_ticks_base=eng.cfg.confirm_ticks,
+            confirm_ticks_eff=feat_cfg.confirm_ticks,
+            confirm_ofi_frac_base=round(eng.cfg.confirm_ofi_frac, 4),
+            confirm_ofi_frac_eff=round(feat_cfg.confirm_ofi_frac, 4),
+            note="entry confirmation DELAY, not a veto",
+        )
     feat = compute_tick_features(window, now_ts, feat_cfg)
     # --- eval telemetry: window sufficiency + peak feature magnitudes -----
     eng.evaluated += 1
@@ -182,14 +188,21 @@ def _collect_intents(
     # None there anyway (sizes/tape zeroed), so this only skips dead evals, never
     # blocks an edge (flow_not_block). An unlisted venue keeps the full set.
     active = active_signals(regime) & venue_allowed_signals(venue)
-    logger.info(
-        "[tick-gate/regime-active] %s:%s regime=%s active_signals=%s "
-        "(membership only — regime is NOT a tradeable yes/no gate)",
-        venue,
-        symbol,
-        regime,
-        sorted(active),
-    )
+    # DATA → datastream sink, log-on-CHANGE: the active-signal membership is
+    # stable per (venue, symbol) regime, so re-logging it every tick is pure
+    # firehose. Emit only when (regime, active set) changes. Logging-only —
+    # ``active`` is the same set used by the loop below either way.
+    active_sorted = tuple(sorted(active))
+    if eng.ds_last_regime_active.get((venue, symbol)) != (regime, active_sorted):
+        eng.ds_last_regime_active[(venue, symbol)] = (regime, active_sorted)
+        datastream_emit(
+            "tick-gate/regime-active",
+            venue=venue,
+            symbol=symbol,
+            regime=regime,
+            active_signals=list(active_sorted),
+            note="membership only — regime is NOT a tradeable yes/no gate",
+        )
     ref_price = float(window[-1].mid) if window else 0.0
     intents: list[TickIntent] = []
     for signal_id in active:
@@ -201,12 +214,24 @@ def _collect_intents(
             ref_price=ref_price, cfg=eng.cfg,
         )
         if intent is None:
-            logger.info(
-                "[tick-gate/signal] %s:%s sig=%s verdict=NO_FIRE regime=%s "
-                "(calm / sub-threshold / unconfirmed — DELAY, not a veto)",
-                venue, symbol, signal_id, regime,
-            )
+            # DATA → datastream sink, dedup on verdict CHANGE: a calm symbol
+            # repeats NO_FIRE every tick (firehose). Emit only on the FIRE→
+            # NO_FIRE transition. Logging-only; the ``continue`` is unchanged.
+            if eng.ds_last_signal_verdict.get((venue, symbol, signal_id)) != "NO_FIRE":
+                eng.ds_last_signal_verdict[(venue, symbol, signal_id)] = "NO_FIRE"
+                datastream_emit(
+                    "tick-gate/signal",
+                    venue=venue,
+                    symbol=symbol,
+                    sig=signal_id,
+                    verdict="NO_FIRE",
+                    regime=regime,
+                    note="calm / sub-threshold / unconfirmed — DELAY, not a veto",
+                )
             continue
+        # FIRE is rare + operationally salient (a tradeable intent) → keep on the
+        # runtime log (operator surface). Record the verdict change for dedup.
+        eng.ds_last_signal_verdict[(venue, symbol, signal_id)] = "FIRE"
         logger.info(
             "[tick-gate/signal] %s:%s sig=%s verdict=FIRE side=%s family=%s "
             "regime=%s",

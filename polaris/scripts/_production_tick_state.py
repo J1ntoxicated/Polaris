@@ -43,6 +43,18 @@ class TickEngineState:
     # Incremented when this tick's micro signal opposes the position, reset to 0
     # otherwise; popped on close (alongside family/entry_ref).
     thesis_broken_streak_by_position: dict[str, int] = field(default_factory=dict)
+    # --- data-stream log-on-change / dedup caches (logging only) ----------
+    # The per-tick gate DATA (regime-active membership, seam2-confirm cfg,
+    # NO_FIRE verdicts) is firehose volume. These caches let the decision path
+    # emit a data record ONLY when the underlying state CHANGES, instead of
+    # once per tick — purely a logging-emit guard (no decision, intent, or DB
+    # value depends on them). Keyed by (venue, symbol); the value is the last
+    # observed state tuple so an unchanged repeat is suppressed.
+    ds_last_regime_active: dict[tuple[str, str], tuple[str | None, tuple[str, ...]]] = (
+        field(default_factory=dict)
+    )
+    ds_last_seam2_regime: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    ds_last_signal_verdict: dict[tuple[str, str, str], str] = field(default_factory=dict)
     decisions: int = 0
     orders: int = 0
     shadow_logs: int = 0

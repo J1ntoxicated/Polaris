@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from polaris.core.learners import LearnerScheduler
+from polaris.datastream import setup_datastream
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
     refresh_capital_universe_once,
@@ -380,6 +381,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     log_level = "DEBUG" if args.verbose >= 2 else "INFO"
     setup_polaris_logging(level=log_level, log_file=args.log_file)
+    # Per-tick / per-update DATA goes to its own rotating JSONL sink (operator
+    # runtime log stays lean). No-op for callers that never boot via ignite.
+    setup_datastream()
     logger.info(
         "[ignite] CLI invoked level=%s log_file=%s argv=%s",
         log_level,

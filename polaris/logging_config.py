@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Final
 
@@ -34,6 +35,8 @@ __all__ = [
     "DEFAULT_DATEFMT",
     "DEFAULT_FORMAT",
     "DEFAULT_LOG_FILE",
+    "RUNTIME_LOG_BACKUP_COUNT",
+    "RUNTIME_LOG_MAX_BYTES",
     "setup_polaris_logging",
 ]
 
@@ -43,6 +46,14 @@ DEFAULT_FORMAT: Final[str] = (
 DEFAULT_DATEFMT: Final[str] = "%Y-%m-%dT%H:%M:%S"
 DEFAULT_LOG_FILE: Final[str] = "data/paper/polaris_runtime.log"
 
+# Runtime-log rotation ceiling (bytes) + retained backups. The runtime log is
+# now LEAN (the per-tick data firehose is routed to ``polaris.datastream``), so
+# a 64 MB × (5 + 1) = 384 MB on-disk cap is ample. This is the unbounded-growth
+# backstop: the previous plain ``FileHandler`` grew to 128 MB with NO rotation
+# (an ENOSPC risk). Operators keep the same path; only the writer rotates.
+RUNTIME_LOG_MAX_BYTES: Final[int] = 64 * 1024 * 1024
+RUNTIME_LOG_BACKUP_COUNT: Final[int] = 5
+
 
 def setup_polaris_logging(
     level: str = "INFO",
@@ -51,6 +62,8 @@ def setup_polaris_logging(
     fmt: str = DEFAULT_FORMAT,
     datefmt: str = DEFAULT_DATEFMT,
     force: bool = True,
+    max_bytes: int = RUNTIME_LOG_MAX_BYTES,
+    backup_count: int = RUNTIME_LOG_BACKUP_COUNT,
 ) -> None:
     """Install handlers + format on the root logger.
 
@@ -70,11 +83,22 @@ def setup_polaris_logging(
     force
         Forwarded to ``logging.basicConfig`` — drop existing root handlers
         first. Tests rely on this so the latest call wins.
+    max_bytes / backup_count
+        ``RotatingFileHandler`` cap + retained backups for the file handler
+        (unbounded-growth backstop). ``max_bytes=0`` disables size rotation.
     """
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, mode="a", encoding="utf-8"))
+        handlers.append(
+            RotatingFileHandler(
+                log_file,
+                mode="a",
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        )
 
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),

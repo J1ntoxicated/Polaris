@@ -20,12 +20,23 @@ import httpx
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.data.ingest import ingest_bars_async, persist_bars
 from polaris.core.data.schema import BAR_INTERVALS, Bar
+from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_asset_class import resolve_bar_asset_class
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx.adapter import fetch_okx_bars
 
 logger = logging.getLogger(__name__)
+
+# Recency-guard dedup (logging only). A dead feed re-trips the staleness guard on
+# every read (34k+ identical WARNINGs on the live log). This module-level set
+# records which ``(instrument_id, bar_interval)`` are CURRENTLY flagged stale so
+# the runtime log gets ONE WARNING on the fresh→stale transition (operator health
+# signal) and the per-read detail goes to the datastream sink. Cleared per
+# instrument the first read after fresh data lands. Single-process loop, so a
+# plain module set is safe; it does not gate any decision (the ``return []`` is
+# unchanged whether or not we log).
+_RECENCY_STALE_FLAGGED: set[tuple[str, str]] = set()
 
 # FIX 1/2 — trading-path FUTURE-dated bar guard. The Capital REST ts source-fix
 # only corrects NEW bars; the live DB still holds ~5,793 stale +10h FUTURE-dated
@@ -558,16 +569,31 @@ def read_recent_bars(
     # Recency guard — refuse a provably stale canvas (dead-feed data-health gate).
     if bars and freshness_threshold_sec is not None:
         newest_ts = bars[-1].ts
+        key = (instrument_id, bar_interval)
         if newest_ts < now - freshness_threshold_sec:
             age_h = (now - newest_ts) / 3600.0
-            logger.warning(
-                "[recency] %s %s newest bar %.1fh old (> %.1fh threshold) — "
-                "feed stale, skipping symbol (no dead-price decision; "
-                "auto-clears on fresh data)",
-                instrument_id, bar_interval, age_h,
-                freshness_threshold_sec / 3600.0,
+            # Dedup: ONE runtime WARNING on the fresh→stale transition (operator
+            # health signal); the per-read detail goes to the datastream sink.
+            if key not in _RECENCY_STALE_FLAGGED:
+                _RECENCY_STALE_FLAGGED.add(key)
+                logger.warning(
+                    "[recency] %s %s newest bar %.1fh old (> %.1fh threshold) — "
+                    "feed stale, skipping symbol (no dead-price decision; "
+                    "auto-clears on fresh data)",
+                    instrument_id, bar_interval, age_h,
+                    freshness_threshold_sec / 3600.0,
+                )
+            datastream_emit(
+                "bars/recency-stale",
+                instrument_id=instrument_id,
+                bar_interval=bar_interval,
+                age_h=round(age_h, 1),
+                threshold_h=round(freshness_threshold_sec / 3600.0, 1),
             )
             return []
+        # Fresh read — clear any prior stale flag so the next dead-feed event
+        # re-logs a transition WARNING (logging-only state reset).
+        _RECENCY_STALE_FLAGGED.discard(key)
     return bars
 
 

@@ -62,6 +62,7 @@ from polaris.core.learners.triple_block import (
     maybe_emit_triple_block,
     restore_snapshot_from_disk,
 )
+from polaris.datastream import emit as datastream_emit
 
 logger = logging.getLogger(__name__)
 
@@ -133,18 +134,20 @@ class BaseLearner(ABC):
         prior = self._fetch_state(key)
         new_stats = self.observe(prior, trade)
         self._upsert_state(key, new_stats, ts=ts)
-        logger.info(
-            "[learner %s] update key=%s trade=%s pnl_r=%.3f won=%s "
-            "n_eff=%.1f→%.1f wins_eff=%.1f→%.1f",
-            self.learner_id,
-            key,
-            trade.trade_id,
-            trade.pnl_r,
-            trade.won,
-            prior.get("n_eff", 0.0),
-            new_stats.get("n_eff", 0.0),
-            prior.get("wins_eff", 0.0),
-            new_stats.get("wins_eff", 0.0),
+        # DATA → datastream sink: a per-trade-close learner observe is structured
+        # measurement (firehose at scale), not an operator signal. Hourly commit
+        # + rollback below STAY on the runtime log (low-frequency, operational).
+        datastream_emit(
+            "learner/update",
+            learner_id=self.learner_id,
+            key=key,
+            trade_id=trade.trade_id,
+            pnl_r=round(trade.pnl_r, 4),
+            won=trade.won,
+            n_eff_prior=round(prior.get("n_eff", 0.0), 1),
+            n_eff_new=round(new_stats.get("n_eff", 0.0), 1),
+            wins_eff_prior=round(prior.get("wins_eff", 0.0), 1),
+            wins_eff_new=round(new_stats.get("wins_eff", 0.0), 1),
         )
         # adaptive_learner_attack triple block evaluation (specific axis only)
         self._maybe_emit_triple_block(trade, ts)

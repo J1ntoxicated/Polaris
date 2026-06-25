@@ -196,8 +196,17 @@ class TickEngineConfig:
     # just stops firing on the sub-cost band. Named env-tunable
     # (``POLARIS_TICK_THETA_OFI``) so it can be re-aimed after each re-measure
     # WITHOUT a redeploy.
+    # RE-AIMED DOWN 0.40 → 0.25 to admit the BODY of the imbalance distribution
+    # (volume-now retune): the live |ofi| window-max p25=0.63/p50=0.80 are PEAKS;
+    # the per-tick BODY sits far lower, so 0.40 filtered most real ticks and
+    # flow_pressure fired only ~7-12×/30min. 0.25 on the [-1,1] scale still
+    # requires a CLEARLY bid/ask-heavy book (~62/38 size split), not noise — flow
+    # still fires bidirectionally (long on bid-heavy, short on ask-heavy). Measured
+    # fee-vs-flow tension acknowledged: this prioritises flow/volume (the
+    # north-star), with quality managed downstream by precise exits + the gate
+    # pipeline. Env-tunable (``POLARIS_TICK_THETA_OFI``) for the next re-measure.
     theta_ofi: float = field(
-        default_factory=lambda: _env_float(os.getenv("POLARIS_TICK_THETA_OFI"), 0.40)
+        default_factory=lambda: _env_float(os.getenv("POLARIS_TICK_THETA_OFI"), 0.25)
     )
     # θ_r — |overshoot_z| (z-score units). RE-AIMED 1.5 → 2.0 to the cost-clearing
     # fat tail (honest fee-net diagnosis: micro_reversion's gross edge is POSITIVE
@@ -209,9 +218,16 @@ class TickEngineConfig:
     # overshoot, long a down-overshoot) — it just stops firing on the sub-cost
     # band. Named env-tunable (``POLARIS_TICK_THETA_REVERT``) so it can be re-aimed
     # after the next re-measure WITHOUT a redeploy.
+    # RE-AIMED 2.0 → 1.2 to the MEASURED window-max p50 (1.22) of |overshoot_z|
+    # (volume-now retune): at 2.0 only 18% of telemetry windows even REACHED the
+    # bar, so micro_reversion almost never armed (essentially dead). 1.2 lets the
+    # BODY of genuine overshoot extremes fade — flow_not_block. Direction/structure
+    # unchanged: it STILL fires only on a real overshoot OPPOSED by flow (an
+    # exhausting push), bidirectionally (short an up-overshoot, long a down). Env-
+    # tunable (``POLARIS_TICK_THETA_REVERT``) for the next re-measure re-aim.
     theta_revert: float = field(
         default_factory=lambda: _env_float(
-            os.getenv("POLARIS_TICK_THETA_REVERT"), 2.0
+            os.getenv("POLARIS_TICK_THETA_REVERT"), 1.2
         )
     )
     theta_spread: float = 8.0  # θ_s — max spread (bps) for burst entry
@@ -255,8 +271,16 @@ class TickEngineConfig:
     # than a single EWMA tick clearing θ_o), without disturbing the documented
     # fee-net θ_o=0.40 constant. AGGRESSIVE: the confirm is a brief delay, never a
     # block — a genuine follow-through still fires bidirectionally.
-    confirm_ticks: int = 4  # N post-spike ticks the follow-through is read over
-    confirm_ofi_frac: float = 0.6  # tail OFI must hold this fraction of θ_o
+    # confirm_ticks SHORTENED 4 → 3 to the floor the follow-through reader needs
+    # (``_flow_followthrough`` clamps k>=3): confirmation resolves FASTER so more
+    # genuine spikes confirm and fire, without removing the follow-through test.
+    confirm_ticks: int = 3  # N post-spike ticks the follow-through is read over
+    # confirm_ofi_frac LOWERED 0.6 → 0.4: the post-spike confirmation now requires
+    # the tail OFI to hold 40% of θ_o instead of 60% — more genuine spikes confirm
+    # and fire. The anti-exhaustion follow-through STRUCTURE (conditions 1-5) is
+    # preserved; only the required follow-through MAGNITUDE is loosened
+    # (flow_not_block — a shorter/lighter DELAY, never a veto).
+    confirm_ofi_frac: float = 0.4  # tail OFI must hold this fraction of θ_o
 
     # --- flow_pressure EXIT precision (MFE protect schedule) -------------
     # Once favourable excursion appears, tighten protection so the +0.67R avg MFE

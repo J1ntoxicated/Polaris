@@ -29,7 +29,7 @@ from polaris.strategies.base import (
 )
 
 RSI_PERIOD = 14
-RSI_THRESHOLD = 30.0
+RSI_THRESHOLD = 39.0  # relaxed 30 -> 39 (flow_not_block, more emits): a shallower RSI dip now fires
 BB_WINDOW = 20
 BB_STD = 2.0
 TREND_FILTER_MA = 200

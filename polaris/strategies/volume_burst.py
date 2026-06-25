@@ -35,7 +35,7 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-VOL_Z_THRESHOLD = 2.5
+VOL_Z_THRESHOLD = 1.75  # relaxed 2.5 -> 1.75 (flow_not_block, more emits): a smaller volume burst now fires
 LOOKBACK = 20
 ATR_FLOOR_PCT = 0.0005  # 0.05% (fraction)
 

@@ -5,7 +5,7 @@ material upward gap that also clears the prior session's high — the classic
 gap-and-go setup where the open imbalance carries the trend.
 
 Trigger:
-  - ``open >= prev_close * (1 + GAP_PCT)``  (material upward gap; GAP_PCT=0.02)
+  - ``open >= prev_close * (1 + GAP_PCT)``  (material upward gap; GAP_PCT=0.014)
   - AND ``open > prev_high``                (gap clears the prior session high)
 
 ``prev_close`` / ``gap_pct`` are supplied by ``build_real_market_view`` for the
@@ -14,7 +14,7 @@ is unset (defaults None — every non-equity MarketView), the strategy returns
 None and never fires, so the 7 existing strategies are unaffected.
 
 P0 params:
-  - ``GAP_PCT = 0.02``  (2% minimum gap-up)
+  - ``GAP_PCT = 0.014``  (1.4% minimum gap-up; relaxed from 2% for more emits)
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-GAP_PCT = 0.02
+GAP_PCT = 0.014  # relaxed 0.02 -> 0.014 (flow_not_block, more emits): a smaller gap-up now fires
 WARMUP_BARS = 2
 
 # Strength curve (frozen v1): bigger gap → stronger, floored/capped.

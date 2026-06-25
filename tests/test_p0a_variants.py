@@ -92,10 +92,12 @@ def _signal_tuple(sig: object) -> tuple[object, ...]:
 def test_behavior0_volume_burst_default_unchanged() -> None:
     mv = _vol_burst_break_view(volume_z=3.5)
     sig = VolumeBurstStrategy().generate_raw_signal(mv)
-    # Frozen baseline: VOL_Z_THRESHOLD=2.5, excess=1.0 ->
-    # strength=min(1, 0.6+0.1*1.0)=0.7, sizing=min(1,0.5+0.1*1.0)=0.6, ttl=10.
+    # Relaxed baseline: VOL_Z_THRESHOLD=1.75, excess=3.5-1.75=1.75 ->
+    # strength=min(1, 0.6+0.1*1.75)=0.775, sizing=min(1,0.5+0.1*1.75)=0.675, ttl=10.
+    # (strength/sizing curves are unchanged; excess is measured from the relaxed
+    # threshold, so the default strength shifts with the lowered emit floor.)
     assert _signal_tuple(sig) == (
-        "volume_burst", "BTC-USDT", "long", 0.7, 0.6, 10,
+        "volume_burst", "BTC-USDT", "long", 0.775, 0.675, 10,
         "vol_z=3.50>break", "spot_intraday_event",
         (("atr_pct", "0.00100"), ("vol_z", "3.50")),
     )
@@ -128,12 +130,13 @@ def test_behavior0_rsi_bb_default_unchanged() -> None:
         rsi_14=20.0, bb_lower=95.0, ma_200=100.0,
     )
     sig = RSIBBPullbackStrategy().generate_raw_signal(mv)
-    # Frozen: RSI_THRESHOLD=30, depth=(30-20)/30=0.333..,
-    # strength=min(1,max(0.4,0.333+0.5))=0.8333.., ttl=4.
+    # Relaxed: RSI_THRESHOLD=39, depth=(39-20)/39=0.487..,
+    # strength=min(1,max(0.4,0.487+0.5))=0.9872.., ttl=4. (strength curve
+    # unchanged; depth is measured from the relaxed threshold.)
     assert sig is not None
     assert sig.side == "long"
     assert sig.ttl_bars == 4
-    assert round(sig.strength, 6) == round((30.0 - 20.0) / 30.0 + 0.5, 6)
+    assert round(sig.strength, 6) == round((39.0 - 20.0) / 39.0 + 0.5, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -142,13 +145,14 @@ def test_behavior0_rsi_bb_default_unchanged() -> None:
 
 
 def test_variant_threshold_changes_entry_set() -> None:
-    # volume_z=2.2 is BELOW the frozen 2.5 (default -> no signal) but ABOVE a
-    # variant threshold of 2.0 (variant -> signal).
-    mv = _vol_burst_break_view(volume_z=2.2)
+    # volume_z=1.6 is BELOW the relaxed 1.75 default (default -> no signal) but
+    # ABOVE a lower variant threshold of 1.5 (variant -> signal). A variant knob
+    # still changes WHICH bars emit, now anchored to the relaxed default floor.
+    mv = _vol_burst_break_view(volume_z=1.6)
     base = VolumeBurstStrategy()
     assert base.generate_raw_signal(mv) is None
 
-    variant = make_variant(VolumeBurstStrategy, {"vol_z_threshold": 2.0})
+    variant = make_variant(VolumeBurstStrategy, {"vol_z_threshold": 1.5})
     sig = variant.generate_raw_signal(mv)
     assert sig is not None
     assert sig.side == "long"

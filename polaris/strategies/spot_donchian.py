@@ -23,7 +23,7 @@ from polaris.strategies.base import (
 
 WINDOW = 40
 ADX_PERIOD = 14
-ADX_THRESHOLD = 20.0
+ADX_THRESHOLD = 14.0  # relaxed 20 -> 14 (flow_not_block, more emits): a weaker-trend donchian break now fires
 
 # Strength curve (frozen v1).
 STRENGTH_BASE = 0.5

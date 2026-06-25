@@ -35,7 +35,7 @@ from polaris.strategies.base import (
 )
 
 RSI_PERIOD = 2
-RSI_ENTRY = 10.0
+RSI_ENTRY = 13.0  # relaxed 10 -> 13 (flow_not_block, more emits): a shallower RSI(2) oversold dip now fires
 TREND_FILTER_MA = 200
 EXIT_MA = 5
 RSI_EXIT = 65.0

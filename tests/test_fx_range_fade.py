@@ -45,7 +45,8 @@ def test_fade_long_at_lower_band_in_range() -> None:
 
 def test_no_fade_in_trend_high_adx() -> None:
     # At the upper band but ADX is high (trend) → yield to fx_breakout_basket.
-    mv = _mv("EURUSD", 1.1050, adx=28.0, bb_upper=1.1040, bb_lower=1.0960, bb_middle=1.1000)
+    # adx=32 is at/above the relaxed 30.0 range max, so the fade still yields.
+    mv = _mv("EURUSD", 1.1050, adx=32.0, bb_upper=1.1040, bb_lower=1.0960, bb_middle=1.1000)
     assert FXRangeFadeStrategy().generate_raw_signal(mv) is None
 
 

@@ -245,7 +245,10 @@ def test_flow_pressure_badfit_tightens_confirmation() -> None:
     """A MARGINAL follow-through fires under a neutral regime but is DELAYED in
     chop (momentum × chop = -1 raises the confirm bar). This is TIMING precision,
     not a veto — the same imbalance simply re-arms on a later confirmed tick."""
-    window = _decaying_imbalance_window(tail_bid=66.0, tail_ask=34.0)
+    # Tail re-tuned to (56,44) for the loosened confirm floor (frac 0.6→0.4):
+    # the base floor dropped to 0.4×θ_o, so the tail must decay harder to stay
+    # MARGINAL — it clears the base floor yet fails the chop-tightened (×1.5) one.
+    window = _decaying_imbalance_window(tail_bid=56.0, tail_ask=44.0)
     base_cfg = regime_aware_confirm_cfg(CFG, "unknown")  # neutral → unchanged
     chop_cfg = regime_aware_confirm_cfg(CFG, "chop")  # bad momentum fit → tighter
     feat_base = compute_tick_features(window, NOW, base_cfg)
@@ -275,7 +278,7 @@ def test_flow_pressure_strong_still_fires_in_badfit_regime() -> None:
 def test_flow_pressure_goodfit_relaxes_confirmation() -> None:
     """A GOOD momentum fit (bull_trend, +1) LOWERS the confirm bar — the same
     marginal follow-through that chop delayed fires sooner (bidirectional lean)."""
-    window = _decaying_imbalance_window(tail_bid=66.0, tail_ask=34.0)
+    window = _decaying_imbalance_window(tail_bid=56.0, tail_ask=44.0)
     good_cfg = regime_aware_confirm_cfg(CFG, "bull_trend")
     assert good_cfg.confirm_ofi_frac < CFG.confirm_ofi_frac  # bar relaxed
     feat_good = compute_tick_features(window, NOW, good_cfg)
@@ -341,13 +344,13 @@ def test_flow_pressure_still_fires_short_on_opposite_fat_imbalance() -> None:
 
 
 def test_flow_pressure_silent_on_sub_cost_noise_band() -> None:
-    # bid=68/ask=32 → |ofi| ≈ 0.36: inside the 0.32–0.40 band the OLD 0.32 bar
-    # would have fired into the net loss (gross 0.861 < fee 1.143), but BELOW the
-    # new 0.40 bar → must NOT fire. Both directions.
-    long_band = compute_tick_features(_ofi_window(+1, bid_size=68.0, ask_size=32.0), NOW, CFG)
-    short_band = compute_tick_features(_ofi_window(-1, bid_size=32.0, ask_size=68.0), NOW, CFG)
-    assert long_band.ofi is not None and 0.32 < long_band.ofi < CFG.theta_ofi
-    assert short_band.ofi is not None and -CFG.theta_ofi < short_band.ofi < -0.32
+    # bid=60/ask=40 → |ofi| ≈ 0.20: BELOW the re-aimed 0.25 bar (the body re-aim
+    # lowered θ_o 0.40 → 0.25, so the band is re-anchored under the new bar) →
+    # must NOT fire. The bar still filters the genuine noise floor. Both directions.
+    long_band = compute_tick_features(_ofi_window(+1, bid_size=60.0, ask_size=40.0), NOW, CFG)
+    short_band = compute_tick_features(_ofi_window(-1, bid_size=40.0, ask_size=60.0), NOW, CFG)
+    assert long_band.ofi is not None and 0.0 < long_band.ofi < CFG.theta_ofi
+    assert short_band.ofi is not None and -CFG.theta_ofi < short_band.ofi < 0.0
     assert flow_pressure(long_band, "chop", venue=VENUE, symbol=SYMBOL, ref_price=100.0, cfg=CFG) is None
     assert flow_pressure(short_band, "chop", venue=VENUE, symbol=SYMBOL, ref_price=100.0, cfg=CFG) is None
 
@@ -360,7 +363,7 @@ def test_flow_pressure_theta_ofi_is_env_tunable() -> None:
 
     from polaris.core.ticks.config import TickEngineConfig
 
-    assert TickEngineConfig().theta_ofi == 0.40
+    assert TickEngineConfig().theta_ofi == 0.25
     prev = os.environ.get("POLARIS_TICK_THETA_OFI")
     os.environ["POLARIS_TICK_THETA_OFI"] = "0.20"
     try:
@@ -694,10 +697,11 @@ def _overshoot_window_steps(direction: int, steps: list[float]) -> list[TickSamp
     return ticks
 
 
-# A steep ramp → overshoot_z ≈ 2.2 (past the new 2.0 bar = cost-clearing fat tail).
+# A steep ramp → overshoot_z ≈ 2.2 (past the re-aimed 1.2 bar = a fat overshoot).
 _FAT_OVERSHOOT_STEPS = [0.10, 0.14, 0.18, 0.34]
-# A gentle ramp → overshoot_z ≈ 1.82 (inside the 1.5–2.0 sub-cost noise band).
-_SUBCOST_OVERSHOOT_STEPS = [0.12, 0.14, 0.16, 0.18]
+# A ramp that settles back → overshoot_z ≈ 1.02 (BELOW the re-aimed 1.2 bar). The
+# body re-aim lowered θ_r 2.0 → 1.2, so the sub-bar band is re-anchored under it.
+_SUBCOST_OVERSHOOT_STEPS = [0.10, 0.14, 0.18, -0.06]
 
 
 def test_micro_reversion_fades_fat_overshoot_above_new_bar() -> None:
@@ -726,17 +730,17 @@ def test_micro_reversion_still_fades_down_overshoot_bidirectional() -> None:
 
 
 def test_micro_reversion_silent_on_sub_cost_overshoot_band() -> None:
-    # A gentle overshoot → |overshoot_z| ≈ 1.82: ABOVE the OLD 1.5 bar (would have
-    # fired into the net loss) but BELOW the new 2.0 bar → must NOT fire. Both
-    # directions.
+    # A settling overshoot → |overshoot_z| ≈ 1.02: BELOW the re-aimed 1.2 bar → must
+    # NOT fire. The bar still filters the genuine overshoot noise floor below it.
+    # Both directions.
     up_band = compute_tick_features(
         _overshoot_window_steps(+1, _SUBCOST_OVERSHOOT_STEPS), NOW, CFG
     )
     down_band = compute_tick_features(
         _overshoot_window_steps(-1, _SUBCOST_OVERSHOOT_STEPS), NOW, CFG
     )
-    assert up_band.overshoot_z is not None and 1.5 < up_band.overshoot_z < CFG.theta_revert
-    assert down_band.overshoot_z is not None and -CFG.theta_revert < down_band.overshoot_z < -1.5
+    assert up_band.overshoot_z is not None and 0.0 < up_band.overshoot_z < CFG.theta_revert
+    assert down_band.overshoot_z is not None and -CFG.theta_revert < down_band.overshoot_z < 0.0
     assert micro_reversion(up_band, "chop", venue=VENUE, symbol=SYMBOL, ref_price=101.0, cfg=CFG) is None
     assert micro_reversion(down_band, "chop", venue=VENUE, symbol=SYMBOL, ref_price=99.0, cfg=CFG) is None
 
@@ -749,7 +753,7 @@ def test_micro_reversion_theta_revert_is_env_tunable() -> None:
 
     from polaris.core.ticks.config import TickEngineConfig
 
-    assert TickEngineConfig().theta_revert == 2.0
+    assert TickEngineConfig().theta_revert == 1.2
     prev = os.environ.get("POLARIS_TICK_THETA_REVERT")
     os.environ["POLARIS_TICK_THETA_REVERT"] = "1.5"
     try:

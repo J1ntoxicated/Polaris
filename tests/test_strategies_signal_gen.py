@@ -271,7 +271,7 @@ def test_spot_donchian_blocks_low_adx() -> None:
     mv = MarketView(
         symbol="BTC-USDT", venue="okx", timeframe="1H",
         bars=bars, last_price=114.0, spread_bps=3.0,
-        donchian_high_40=110.0, adx_14=15.0,
+        donchian_high_40=110.0, adx_14=12.0,  # below the relaxed 14.0 floor
     )
     assert s.generate_raw_signal(mv) is None
 
@@ -374,7 +374,7 @@ def test_fx_breakout_no_double_fire_long_and_short() -> None:
 def test_fx_breakout_low_break_blocked_by_low_adx_returns_none() -> None:
     """Negative path: a clean break BELOW the 40-bar low must NOT fire short
     when adx_14 <= threshold. The adx gate (direction-agnostic) blocks both sides.
-    ADX 12.0 is below the widened 15.0 threshold (range, not trend → fade's turf).
+    ADX 9.0 is below the relaxed 10.5 threshold (range, not trend → fade's turf).
     """
     s = FXBreakoutBasketStrategy()
     bars = _make_bars(60, base_close=1.10, drift=0.001)
@@ -385,7 +385,7 @@ def test_fx_breakout_low_break_blocked_by_low_adx_returns_none() -> None:
     mv = MarketView(
         symbol="EURUSD", venue="capital", timeframe="1H",
         bars=bars, last_price=0.95, spread_bps=1.0,
-        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=12.0,  # <= 15 thresh
+        donchian_high_40=1.30, donchian_low_40=1.00, adx_14=9.0,  # <= 10.5 thresh
     )
     assert s.generate_raw_signal(mv) is None
 

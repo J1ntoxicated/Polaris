@@ -108,8 +108,11 @@ def test_adx_bands_now_overlap_not_disjoint() -> None:
     from polaris.strategies.fx_breakout_basket import ADX_THRESHOLD
     from polaris.strategies.fx_range_fade import ADX_RANGE_MAX
     assert ADX_RANGE_MAX > ADX_THRESHOLD
-    assert ADX_THRESHOLD == 15.0
-    assert ADX_RANGE_MAX == 25.0
+    # Relaxed (flow_not_block, more emits): breakout floor 15 -> 10.5, fade range
+    # max 25 -> 30. The overlap (fade max ABOVE breakout floor) is preserved, so
+    # the mid-ADX dead seam stays covered by both strategies.
+    assert ADX_THRESHOLD == 10.5
+    assert ADX_RANGE_MAX == 30.0
 
 
 # ── FIX B: session_window_now aperture ──────────────────────────────────────

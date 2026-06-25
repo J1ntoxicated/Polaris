@@ -33,8 +33,8 @@ from polaris.strategies.xau_indices_trend import SUPPORTED_SYMBOLS
 
 CCI_WINDOW = 20
 CCI_CONSTANT = 0.015
-CCI_OVERSOLD = -100.0
-# extreme→mean = -100 CCI revert; 1 R harvested at the bounded target. Same
+CCI_OVERSOLD = -70.0  # relaxed -100 -> -70 (flow_not_block, more emits): a shallower oversold cross-up now fires
+# extreme→mean = -70 CCI revert; 1 R harvested at the bounded target. Same
 # EXPECTANCY rationale as fx_range_fade.FADE_TARGET_R — a per-position close
 # target so the revert is banked, NOT a size dampen / entry block (flow_not_block).
 REVERSION_TARGET_R = 1.0

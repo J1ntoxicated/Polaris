@@ -32,7 +32,7 @@ ADX_PERIOD = 14
 # NEITHER breakout (>thresh) nor fade (<max). Lower threshold = MORE breakout
 # signals (aggressive / flow_not_block); the fade max rises to 25.0 in tandem so
 # [15,25] is covered by BOTH (they compete; arbitration ranks them downstream).
-ADX_THRESHOLD = 15.0  # old: 20.0
+ADX_THRESHOLD = 10.5  # relaxed 15 -> 10.5 (flow_not_block, more breakout emits): a weaker-trend donchian break now fires
 BASKET_SYMBOLS: frozenset[str] = frozenset(
     {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD"}
 )

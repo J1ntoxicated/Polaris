@@ -41,7 +41,7 @@ from polaris.strategies.fx_breakout_basket import (
 # (aggressive / flow_not_block); it now OVERLAPS fx_breakout_basket's lowered
 # 15.0 threshold so the old dead seam at [20,28] is no longer untraded — both
 # strategies compete there and the multi-signal arbitration wave ranks them.
-ADX_RANGE_MAX = 25.0  # old: 20.0  (fade fires adx < max; >= max yields to breakout)
+ADX_RANGE_MAX = 30.0  # relaxed 25 -> 30 (flow_not_block, more fade emits): a conservative +20% that keeps the fade OUT of the strong-trend adx>=30 regime; fade fires adx < max, adx >= max yields to breakout
 STRENGTH_BASE = 0.5
 TTL_BARS = 4
 LEVERAGE_MAX = 30.0

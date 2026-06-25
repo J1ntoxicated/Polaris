@@ -55,7 +55,7 @@ from polaris.strategies.base import (
 EMA_FAST = 20
 EMA_SLOW = 50
 EMA_REGIME = 200
-ADX_THRESHOLD = 20.0
+ADX_THRESHOLD = 14.0  # relaxed 20 -> 14 (flow_not_block, more emits): a weaker-trend EMA cross now fires
 
 # Strength curve (frozen v1): a stronger trend (higher ADX) → stronger signal.
 STRENGTH_BASE = 0.5

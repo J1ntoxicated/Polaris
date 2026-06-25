@@ -26,7 +26,7 @@ from polaris.strategies.base import (
 
 OPEN_WINDOW_MINUTES = 30
 ATR_PERIOD = 14
-ATR_MULT = 1.5
+ATR_MULT = 1.05  # relaxed 1.5 -> 1.05 (flow_not_block, more emits): a closer-to-open breakout now fires
 SUPPORTED_SYMBOLS: frozenset[str] = frozenset(
     {"US500", "US100", "EURUSD", "GBPUSD"}
 )

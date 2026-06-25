@@ -20,6 +20,7 @@ Spec source: vault/30_components/layer-0-universe-discovery.md (Q2 hard filter).
 
 from __future__ import annotations
 
+import asyncio
 import math
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -30,6 +31,8 @@ from polaris.core.universe.schema import UniverseInstrument
 
 __all__ = [
     "CAPITAL_DEPTH_PROXY_FLOOR_USD",
+    "CAPITAL_PROXY_MAX_CONCURRENCY",
+    "CAPITAL_PROXY_TOTAL_TIMEOUT_SEC",
     "CAPITAL_VOL_PROXY_FLOOR_USD",
     "CapitalProxyConfig",
     "compute_depth_proxy",
@@ -42,6 +45,23 @@ __all__ = [
 CAPITAL_BASE_DEMO: Final[str] = "https://demo-api-capital.backend-capital.com"
 CAPITAL_PRICES_PATH: Final[str] = "/api/v1/prices"
 REST_TIMEOUT_SEC: Final[float] = 15.0
+
+# Startup proxy fetch — bounded-concurrency parallel (was a sequential per-epic
+# loop that blocked startup for N×timeout: ~1658 Capital epics each up to 15 s
+# when the API is slow → startup hung for tens of minutes before the tick engine
+# could trade). Capital's published REST ceiling is ~10 requests/sec per account
+# and /prices runs over one shared session token, so a semaphore of 12 keeps the
+# steady-state request rate under that ceiling (concurrency != req/s — each call
+# carries real round-trip latency) while collapsing the walk to ~(N/conc)×timeout.
+# Too-high concurrency risks a 429 ban, hence the conservative cap.
+CAPITAL_PROXY_MAX_CONCURRENCY: Final[int] = 12
+# Degrade-never-halt backstop: the proxy walk may never block startup forever.
+# If the batch can't finish within this cap, unprocessed rows keep their default
+# (zero) metrics and startup proceeds (the tick engine starts trading instead of
+# hanging). Absolute worst case ≈ (1658 / 12) × 15 s ≈ 35 min; this 300 s cap
+# bounds the realistic slow-API case. Universe breadth is NOT narrowed — every
+# epic is still evaluated, just bounded in wall-clock (flow_not_block).
+CAPITAL_PROXY_TOTAL_TIMEOUT_SEC: Final[float] = 300.0
 
 # Proxy threshold tuning — DEMO aggressive, can be relaxed by learner in P1.
 CAPITAL_VOL_PROXY_FLOOR_USD: Final[float] = 30_000_000.0
@@ -175,19 +195,28 @@ async def populate_capital_proxies(
 ) -> list[UniverseInstrument]:
     """Replace ``vol_24h_usd`` + ``depth_10bps_usd`` on every Capital row with proxy values.
 
-    OKX / non-Capital rows pass through untouched. Per-row failure (chart
-    endpoint timeout, malformed payload) leaves that instrument's metrics at
-    zero so the 4-axis filter rejects it cleanly.
+    OKX / non-Capital rows pass through untouched (identity preserved). Capital
+    rows are fetched with **bounded concurrency** (``CAPITAL_PROXY_MAX_CONCURRENCY``
+    over one shared httpx client) instead of a sequential per-epic loop, so the
+    ~1658-epic startup walk no longer blocks the tick engine for tens of minutes.
+
+    Degrade-never-halt: per-row failure (chart timeout, malformed payload) leaves
+    that instrument's metrics at their original (zero) values so the 4-axis filter
+    rejects it cleanly; a whole-batch ``CAPITAL_PROXY_TOTAL_TIMEOUT_SEC`` cap
+    bounds wall-clock — on timeout, already-fetched rows keep their proxy values
+    and unprocessed rows keep their originals (startup proceeds). Input order and
+    universe breadth are preserved end-to-end (flow_not_block).
     """
     cfg = config or CapitalProxyConfig()
     own_client = client is None
     cli = client or httpx.AsyncClient(base_url=base_url, timeout=REST_TIMEOUT_SEC)
-    out: list[UniverseInstrument] = []
-    try:
-        for ins in instruments:
-            if ins.venue != "capital":
-                out.append(ins)
-                continue
+    # Pre-seed with originals so any row we don't (or can't) process falls back to
+    # its default metrics — index-aligned to preserve input order exactly.
+    out: list[UniverseInstrument] = list(instruments)
+    sem = asyncio.Semaphore(CAPITAL_PROXY_MAX_CONCURRENCY)
+
+    async def _one(idx: int, ins: UniverseInstrument) -> None:
+        async with sem:
             try:
                 candles = await fetch_capital_chart_24h(
                     ins.symbol,
@@ -198,19 +227,34 @@ async def populate_capital_proxies(
                     max_candles=cfg.max_candles,
                     client=cli,
                 )
-            except (httpx.HTTPError, ValueError) as exc:  # noqa: PERF203 — explicit per-row guard
-                # Per-row failure must be visible (audit log path); the L0 smoke
-                # script logs the message and the row stays inactive.
-                _ = exc
-                out.append(ins)
-                continue
-            vol_proxy = compute_vol_24h_proxy(candles)
-            depth_proxy = compute_depth_proxy(
-                spread_bps=ins.spread_bps,
-                atr_24h_pct=ins.atr_24h_pct,
-                asset_class=ins.asset_class,
-            )
-            out.append(replace(ins, vol_24h_usd=vol_proxy, depth_10bps_usd=depth_proxy))
+            except (httpx.HTTPError, ValueError):
+                # Per-row failure: leave the pre-seeded original (zeros) in place.
+                return
+        vol_proxy = compute_vol_24h_proxy(candles)
+        depth_proxy = compute_depth_proxy(
+            spread_bps=ins.spread_bps,
+            atr_24h_pct=ins.atr_24h_pct,
+            asset_class=ins.asset_class,
+        )
+        out[idx] = replace(ins, vol_24h_usd=vol_proxy, depth_10bps_usd=depth_proxy)
+
+    tasks = [
+        asyncio.ensure_future(_one(idx, ins))
+        for idx, ins in enumerate(instruments)
+        if ins.venue == "capital"
+    ]
+    try:
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks),
+                    timeout=CAPITAL_PROXY_TOTAL_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                # Total-timeout backstop: drop the rest, return what we have.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         if own_client:
             await cli.aclose()

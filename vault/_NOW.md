@@ -10,6 +10,8 @@ tags: [now, tier-0]
 
 ## What matters now (HAND-WRITTEN)
 
+**🟢 DEPLOY 2026-06-25 (84b1822, 봇 PID 13197 graceful restart ~90초 startup).** 대량 wave 배포·검증: ① **G3 losing-셀 진입차단 제거**(`warm_pool_local_bottom_losing` 84%KILL→0 = flow_not_block 위반수정) → G3 PASS 거래재개(Jin "거래 안 들어옴" 근본해결). ② **peak-protect** arm 1.0→0.45R + reversion give-back(피크 100%반납 차단; loss-side bleed은 정밀엑싯 후속). ③ **Yahoo(yfinance) 바 PRIMARY**(AI/결정적 매핑 + OKX collision allowlist + frame캐시) → **Alpaca 429 23k→0**(bars src yahoo 39/47, 익스체인지=폴백). ④ **startup-fix** populate_capital_proxies 1658 epics 순차→병렬(Semaphore12+총timeout) → **15분→90초**. ⑤ 대시보드 정합(gross/fee/net·롱셀·regime·통화) + Chart탭(캔들+테크니컬). 인시던트: yfinance .venv 누락 start크래시→`.venv pip install` 복구(**#26**=requirements+import guard 하드닝 진행중). 남은 큐: #12 테크니컬스토어(야후바 의존)·#18 fee-net·#20 글로브nodes·#23 sparkline·#16 거버닝프로브·#7 D4뉴스·#13 학습오염.
+
 **🔴 AUDIT VERDICT 2026-06-22 ([[system_design_audit_2026-06-22]] · loop_state.md).** 8-서브시스템 멀티에이전트 감사 결론: **아키텍처(8-Layer·8-gate·StreamConfig·AI-free·T4 9-stack 봉쇄)는 sound, 설계대로 wired.** 깨진 건 골격이 아니라 **입력데이터·측정·청산보호·튜닝**. 헤드라인 **−266R/−209.7R은 대부분 측정 아티팩트**(cross-venue R 합산 무의미 + reconciled-mae를 realized로 오기록 −211R = '추적실패' drift 카운터, **손실 아님**). 정직 $ ledger: capital +$431 / okx −$646 / alpaca −$1881. 실행 프로그램 = **M→S→D→R**(측정 재설계→안정화→/debate→리셋, loop_state.md).
 - **Jin 4 락인 결정(2026-06-22)**: ① **fills.$ = 진실 + positions.pnl_r 재정의**(스트림 공통 R, reconciled mae는 R 제외 → 별도 drift 카운터). ② **Alpaca = equity 신규중단 + 복구**(halt+restore). ③ **D-params /debate 4건 승인 → 적용은 측정+리셋 후**(crisis 적응형 cap / venue-native session+expectancy / 틱엔진 OKX 이동 / volume_burst fade-first; 전부 aggressive·flow_not_block). ④ **데이터 리셋 = M+S 랜딩 후**(고친 메트릭으로 클린 슬레이트, DB 아카이브 보존).
 - ⚠️ 이전 P0.4(클램프)+fix#1(reconciled mae→pnl_r 백필)이 −211R 아티팩트를 키움 → **REVERTED**(realized R ledger에서 제외). builder≠reviewer가 잡아냄.
@@ -47,4 +49,4 @@ tags: [now, tier-0]
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-25 07:09 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-25 10:07 (paper=True, full_pipeline=True)

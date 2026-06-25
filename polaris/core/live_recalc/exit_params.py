@@ -177,6 +177,28 @@ EXIT_LETRUN_HARVEST_TRAIL_MULT: Final[float] = _env_float(
 #     replay) defaults to confirmed — back-compatible.
 EXIT_THESIS_GRACE_SEC: Final[float] = _env_float("POLARIS_EXIT_THESIS_GRACE_SEC", 25.0)
 EXIT_THESIS_DEADBAND: Final[float] = _env_float("POLARIS_EXIT_THESIS_DEADBAND", 1e-3)
+
+# --- Horizon-scoped materiality floor on the momentum-ONLY break --------------
+# [[1d_exit_horizon_fix_2026-06-26]]. The bar-recalc path feeds ``momentum_drift``
+# from the last ~10 1m bars — a ~10-MINUTE intraday window. A 1D (daily-momentum)
+# thesis was therefore declared BROKEN (→ thesis_cut) the instant that intraday
+# window drifted fractionally against it: MEASURED 174/179 Alpaca thesis_cut
+# closes were shallow-red (median -0.03R) at a median hold of 298s (5 min), with
+# the -1.0R rail nowhere near. The flat ``EXIT_THESIS_DEADBAND`` (0.10%) is the
+# universal 1-tick-noise floor; this is the ADDITIONAL, HORIZON-scoped materiality
+# bar (a long-horizon thesis tolerates more intraday wiggle than a scalp): while
+# the position is still within its strategy horizon (``held < horizon``), a
+# momentum-ONLY reversal must clear ``|momentum_drift| >= floor`` to count as
+# BROKEN. It CORRECTS a misclassification (intraday noise faking a daily-thesis
+# break) — it does NOT defer a genuine break: a CORROBORATED break (OFI-opposes /
+# regime-flip-against) is NEVER gated → it still CUTs instantly, and the G6 -1.0R
+# rail (in the caller) is untouched. flow_not_block: it removes churn on healthy
+# 1D theses, never blocks a trade. Measured 10-min |drift|: median 0.40%, p25
+# 0.14% → 0.15% suppresses the noise cluster; real reversals (p75 1.2%, p90 3.1%)
+# pass. Env-tunable.
+EXIT_THESIS_DRIFT_FLOOR: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_DRIFT_FLOOR", 0.0015
+)
 EXIT_THESIS_BROKEN_TICKS: Final[int] = int(
     _env_float("POLARIS_EXIT_THESIS_BROKEN_TICKS", 2.0)
 )

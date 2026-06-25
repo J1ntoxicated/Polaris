@@ -257,3 +257,95 @@ def test_never_cuts_a_green_position_property() -> None:
                     entry_regime=entry,
                 )
                 assert m is not ManagementMode.CUT
+
+
+# --- FIX B: horizon-scoped materiality floor on the momentum-ONLY break ------
+# [[1d_exit_horizon_fix_2026-06-26]]. The bar-recalc feeds momentum_drift from
+# the last ~10 1m bars (a ~10-minute intraday window). A 1D thesis was declared
+# BROKEN+CUT the instant that intraday window drifted fractionally against it
+# (measured: 174/179 thesis_cut closes were shallow-red, median -0.03R, median
+# hold 298s). The fix requires the momentum-ONLY reversal to be MATERIAL
+# (|momentum_drift| >= EXIT_THESIS_DRIFT_FLOOR=0.0015) to count as BROKEN *while
+# still within the strategy horizon*. The probe drift here is -0.0012: it CLEARS
+# the universal EXIT_THESIS_DEADBAND (0.001) — so without this fix it WOULD break
+# — but sits BELOW the 0.0015 horizon floor, so it is the case the fix suppresses.
+# Corroborated breaks (OFI-opposes / regime-flip-against) and large adverse drift
+# are NEVER gated — genuine breaks still CUT instantly (mandate: broken-RED always
+# cuts; the -1.0R rail in the caller is untouched).
+
+
+def test_immaterial_intraday_drift_within_horizon_does_not_cut() -> None:
+    # A 1D thesis, a few minutes in (held << horizon), red by noise (-0.03R), and
+    # the ONLY break signal is a sub-floor adverse drift (-0.0012, above the 0.001
+    # deadband but below the 0.0015 horizon floor): the measured 94%-churn case →
+    # must NOT be classed BROKEN → no CUT.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.03, momentum_drift=-0.0012,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=298, horizon_seconds=2_073_600,  # 24 × 1D bars
+    )
+    assert m is not ManagementMode.CUT
+
+
+def test_material_adverse_drift_within_horizon_still_cuts() -> None:
+    # A genuine, MATERIAL reversal (-0.6 drift) early in the horizon + red still
+    # breaks the thesis → CUT (the floor only rejects noise, never a real break).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.3, momentum_drift=-0.6,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=298, horizon_seconds=2_073_600,
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_immaterial_drift_past_horizon_cuts_unchanged() -> None:
+    # PAST the horizon the gate lifts — the thesis had its full window, so even a
+    # small (but still deadband-clearing) adverse drift + red is treated as the
+    # existing BROKEN+CUT (no change to the post-horizon behaviour).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.03, momentum_drift=-0.0012,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=10_000, horizon_seconds=600,
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_ofi_opposes_is_never_gated_by_floor() -> None:
+    # A corroborated break (OFI firmly opposes) with sub-floor drift, within
+    # horizon, red → CUT. OFI/regime are GENUINE breaks → never noise-gated.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
+        ofi=-0.5, flow_confirmed=False, regime="trend", entry_regime="trend",
+        held_seconds=298, horizon_seconds=2_073_600,
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_regime_flip_against_is_never_gated_by_floor() -> None:
+    # A corroborated break (regime flipped to oppose the long) with sub-floor
+    # drift, within horizon, red → CUT (regime flip is a genuine break).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
+        ofi=None, regime="downtrend", entry_regime="uptrend",
+        held_seconds=298, horizon_seconds=2_073_600,
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_drift_floor_is_env_tunable() -> None:
+    # The floor reads POLARIS_EXIT_THESIS_DRIFT_FLOOR at module import.
+    from polaris.core.live_recalc.exit_engine import EXIT_THESIS_DRIFT_FLOOR
+
+    assert EXIT_THESIS_DRIFT_FLOOR > 0.0
+
+
+def test_floor_only_gates_within_horizon_none_horizon_unchanged() -> None:
+    # horizon_seconds=None (legacy / unknown strategy) → the gate is INERT (no
+    # horizon to be "within"), so behaviour is byte-identical to pre-fix: a
+    # deadband-clearing momentum reversal + red → CUT regardless of the floor.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.03, momentum_drift=-0.0012,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=298, horizon_seconds=None,
+    )
+    assert m is ManagementMode.CUT

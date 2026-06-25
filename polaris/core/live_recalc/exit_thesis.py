@@ -23,6 +23,7 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_LETRUN_TRAIL_MULT,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
+    EXIT_THESIS_DRIFT_FLOOR,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GRACE_SEC,
 )
@@ -149,6 +150,8 @@ def _assess_health(
     regime: str | None,
     entry_regime: str | None,
     broken_streak: int,
+    held_seconds: int | None,
+    horizon_seconds: int | None,
 ) -> ThesisHealth:
     """Classify the entry thesis as INTACT / FADING / BROKEN (pure, total).
 
@@ -163,6 +166,16 @@ def _assess_health(
     — the edge is leaking.
     INTACT: same-direction momentum / OFI still present (or simply nothing
     indicating a break).
+
+    Horizon-scoped materiality floor ([[1d_exit_horizon_fix_2026-06-26]]): while
+    the position is still WITHIN its strategy horizon (``held < horizon``), the
+    momentum-ONLY reversal must additionally be MATERIAL (``|momentum_drift| >=
+    EXIT_THESIS_DRIFT_FLOOR``) to count as BROKEN — a sub-floor adverse drift is
+    intraday NOISE for a long-horizon thesis (the bar path feeds a ~10-min 1m
+    window) and must not fake a daily-thesis break. The CORROBORATED breaks
+    (OFI-opposes / regime-flip-against) are NEVER gated → a genuine break still
+    CUTs instantly. A None horizon (legacy / unknown strategy) leaves the gate
+    inert → byte-identical to pre-fix.
     """
     drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
     ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
@@ -170,7 +183,24 @@ def _assess_health(
     # --- adverse micro-signal (deadband-gated): only count an opposition whose
     #     magnitude clears the small deadband — a tiny 1-tick oscillation inside
     #     the band is noise, not a thesis break.
-    momentum_reversed = drift_dir < 0.0 and abs(momentum_drift) > EXIT_THESIS_DEADBAND
+    # HORIZON-scoped materiality floor: while still within the strategy horizon, a
+    # momentum-ONLY reversal must ALSO clear the (tighter) DRIFT_FLOOR so intraday
+    # noise (the ~10-min 1m window the bar path feeds) cannot fake a break on a
+    # long-horizon thesis. Past horizon — or with no horizon — the floor is inert
+    # (the thesis had its full window). OFI / regime breaks below are unaffected.
+    within_horizon = (
+        held_seconds is not None
+        and horizon_seconds is not None
+        and held_seconds < horizon_seconds
+    )
+    drift_is_material = (
+        not within_horizon or abs(momentum_drift) >= EXIT_THESIS_DRIFT_FLOOR
+    )
+    momentum_reversed = (
+        drift_dir < 0.0
+        and abs(momentum_drift) > EXIT_THESIS_DEADBAND
+        and drift_is_material
+    )
     ofi_opposes = (
         ofi_dir is not None and ofi_dir < 0.0 and abs(ofi_dir) > EXIT_THESIS_DEADBAND
     )
@@ -268,6 +298,7 @@ def assess_thesis(
         momentum_drift=m_drift, atr_slope=m_slope, ofi=ofi,
         flow_confirmed=flow_confirmed, regime=regime, entry_regime=entry_regime,
         broken_streak=broken_streak,
+        held_seconds=held_seconds, horizon_seconds=horizon_seconds,
     )
 
     # GRACE gate on the CLOSING health verdicts: inside grace, a BROKEN or FADING

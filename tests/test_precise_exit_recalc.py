@@ -379,6 +379,31 @@ def test_loser_timeout_for_strategy_scales_to_timeframe() -> None:
     assert _loser_timeout_for_strategy("vb") == EXIT_LOSER_TIMEOUT_SEC
 
 
+def test_loser_timeout_daily_class_exempt_from_1h_cap() -> None:
+    # [[1d_exit_horizon_fix_2026-06-26]] FIX A: a 1D-class strategy's bar-scaled
+    # floor (2×86400=172800s) must NOT be truncated to the 1H LOSER_TIMEOUT_CAP_SEC
+    # (3600s) — that cap is scalp/1H drift logic leaking into a daily thesis. The
+    # ≥4H/1D timeframe-class is EXEMPT so the 1D thesis respects its own horizon
+    # (equity is EOD-flattened → the session rail is the real backstop). The G6
+    # -1.0R rail + the ATR-trail (which cut real losers far earlier) are untouched.
+    from polaris.core.isolation.reentry import bar_seconds
+    from polaris.scripts._production_recalc_exit import (
+        EXIT_LOSER_TIMEOUT_MIN_BARS,
+        LOSER_TIMEOUT_CAP_SEC,
+        _loser_timeout_for_strategy,
+    )
+
+    # equity_tsmom = 1D → exempt → full bar-scaled floor, well ABOVE the 1H cap.
+    daily_floor = float(EXIT_LOSER_TIMEOUT_MIN_BARS * bar_seconds("1D"))
+    for sid in ("equity_tsmom", "equity_gap_go", "equity_rsi_bb_pullback"):
+        t = _loser_timeout_for_strategy(sid)
+        assert t == daily_floor, sid
+        assert t > LOSER_TIMEOUT_CAP_SEC, sid  # NOT truncated to the 1H cap
+    # 1H strategies stay CAPPED (scalp/1H drift backstop unchanged).
+    assert _loser_timeout_for_strategy("tsmom") == LOSER_TIMEOUT_CAP_SEC
+    assert _loser_timeout_for_strategy("xau_indices_trend") == LOSER_TIMEOUT_CAP_SEC
+
+
 def test_mfe_protect_covers_all_registered_strategies() -> None:
     # [[harvest_generalization_2026-06-23]]: the harvest floor was ONLY wired to
     # equity (asset_class=='equity'); the 9 other bar strategies passed

@@ -111,22 +111,38 @@ EXIT_LOSER_TIMEOUT_MIN_BARS: int = _env_int("POLARIS_EXIT_LOSER_TIMEOUT_MIN_BARS
 LOSER_TIMEOUT_CAP_SEC: float = _env_float("POLARIS_LOSER_TIMEOUT_SEC", 3600.0)
 
 
+# Timeframe-class boundary for the 1H drift-backstop cap ([[1d_exit_horizon_fix_
+# 2026-06-26]] FIX A). The cap is scalp/1H drift logic — a strategy whose ONE bar
+# is ≥ this (4H/1D/swing) is EXEMPT so its bar-scaled floor (a 1D thesis →
+# 2×86400=172800s) is NOT truncated to the 1H cap (the live bug: a 1D equity
+# thesis was force-closed at ~1hr, contradicting its declared daily horizon).
+# Equity is EOD-flattened → the session-close rail is the real backstop; the G6
+# -1.0R rail + the ATR-trail (real losers cut far earlier) are untouched.
+_LOSER_TIMEOUT_CAP_TF_FLOOR_SEC: float = float(bar_seconds("4H"))
+
+
 def _loser_timeout_for_strategy(strategy_id: str) -> float:
     """Stale-loser drift-backstop timeout for ``strategy_id``.
 
-    ``min(max(EXIT_LOSER_TIMEOUT_SEC, MIN_BARS × bar_seconds(timeframe)),
-    LOSER_TIMEOUT_CAP_SEC)``: a fast strategy (1m) keeps the flat 900s; a slow
-    thesis (tsmom 1H → floor 2×3600=7200s) is CAPPED at the named
+    ``max(EXIT_LOSER_TIMEOUT_SEC, MIN_BARS × bar_seconds(timeframe))`` then, for a
+    SCALP/1H-class strategy (one bar < 4H), CAPPED at the named
     ``POLARIS_LOSER_TIMEOUT_SEC`` drift backstop (default 3600s) so a dead-thesis
-    drifter is cut faster instead of sitting the full 2hr. An unregistered
-    strategy_id falls back to the flat default (bar_seconds itself fails safe to
-    300s for an unknown timeframe), also under the cap.
+    drifter is cut faster instead of sitting the full 2hr. A ≥4H/1D-class strategy
+    is EXEMPT from that cap (FIX A) so a daily thesis respects its own horizon
+    (tsmom 1H → 3600s capped; equity 1D → 172800s floor, EOD-rail-backstopped). A
+    fast strategy (1m) keeps the flat 900s. An unregistered strategy_id falls back
+    to the flat default (bar_seconds fails safe to 300s for an unknown timeframe),
+    also under the cap.
     """
     cls = STRATEGY_REGISTRY.get(strategy_id)
     if cls is None:
         return min(EXIT_LOSER_TIMEOUT_SEC, LOSER_TIMEOUT_CAP_SEC)
-    tf_floor = float(EXIT_LOSER_TIMEOUT_MIN_BARS * bar_seconds(cls.metadata.timeframe))
-    return min(max(EXIT_LOSER_TIMEOUT_SEC, tf_floor), LOSER_TIMEOUT_CAP_SEC)
+    bar = bar_seconds(cls.metadata.timeframe)
+    tf_floor = float(EXIT_LOSER_TIMEOUT_MIN_BARS * bar)
+    floored = max(EXIT_LOSER_TIMEOUT_SEC, tf_floor)
+    if bar >= _LOSER_TIMEOUT_CAP_TF_FLOOR_SEC:
+        return floored  # ≥4H/1D-class — exempt from the scalp/1H cap.
+    return min(floored, LOSER_TIMEOUT_CAP_SEC)
 
 
 def _profit_target_for_strategy(strategy_id: str) -> float | None:

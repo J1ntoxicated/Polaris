@@ -66,9 +66,15 @@ _ALPACA_GLOBE_MAX_DEFAULT = 300
 # overflow + the dormant T library) is NOT dropped — it is summarised into
 # per-venue ``tail_aggregate`` descriptors (count + representative density) the
 # globe renders as a cheap, count-independent HAZE. graph.json node count stays
-# ~cap no matter how large the watched universe grows. Pure view: nothing here
-# gates, sizes, ranks or throttles a trade — the universe table is untouched.
-_GRAPH_NODE_CAP_DEFAULT = 180
+# ~cap PER VENUE no matter how large the watched universe grows. Pure view:
+# nothing here gates, sizes, ranks or throttles a trade — the universe table is
+# untouched.
+# Jin 2026-06-25: the cap is now PER VENUE (see _mkt_nodes), so 240 lets OKX
+# (~219 active) and Capital (~168 whitelisted) render their FULL tradable shell
+# as individual dots while Alpaca's ~12.9k rows still fold into its own haze.
+# Worst-case individual nodes ≈ 3×240 = 720, within the globe's render envelope
+# (DIM_BUDGET 650 stride-LOD; designed for 1000+ nodes at 60fps).
+_GRAPH_NODE_CAP_DEFAULT = 240
 
 # tier → attention priority (lower = kept as an individual node first). Open
 # positions / watch nodes are emitted separately (always individual). For the
@@ -804,11 +810,20 @@ def _mkt_nodes(
     ~cap regardless of how large the watched universe grows. Display-only —
     nothing gated/sized/re-ranked here; the universe table is untouched.
 
+    PER-VENUE budget (Jin 2026-06-25): ``node_cap`` applies INDEPENDENTLY per
+    exchange, not as one global pool. A single global cap let Alpaca's ~12.9k
+    rows (148 tier-S + 314 tier-A) win every priority slot and starve OKX's 219
+    active rows down to ~4 individual nodes (the rest folded into haze, so the
+    globe showed only ~5 OKX dots). With a per-venue cap each venue's own shell
+    fills before folding to its haze, so OKX/Capital render their full tradable
+    universe while Alpaca's huge tail is still bounded per venue.
+
     Returns ``(individual_nodes, tail_aggregate)``.
     """
     # Stable-sort universe rows by attention priority (the universe list is
     # already vol-desc, so equal-priority rows keep their volume order). The
-    # first ``node_cap`` rows become individual nodes; the rest feed the haze.
+    # first ``node_cap`` rows PER VENUE become individual nodes; the rest feed
+    # that venue's haze.
     enriched: list[tuple[int, dict[str, Any], int, str, bool]] = []
     for u in universe:
         key = _signal_key(u["exchange"], u["ticker"])
@@ -823,18 +838,21 @@ def _mkt_nodes(
     nodes: list[dict[str, Any]] = []
     # per-venue tail accumulator: count + summed n_24h (→ representative density).
     tail: dict[str, dict[str, float]] = {}
-    for rank, k in enumerate(order):
+    # per-venue emitted-node counter → the cap is applied independently per venue.
+    venue_emitted: dict[str, int] = {}
+    for k in order:
         _prio, u, sig_n, tier, active = enriched[k]
-        if rank >= node_cap:
+        ex = str(u["exchange"])
+        if venue_emitted.get(ex, 0) >= node_cap:
             # Fold into the per-venue tail haze (count + density proxy). A live
             # signal catch is never here (priority -1 keeps it individual).
-            ex = str(u["exchange"])
             slot = tail.setdefault(ex, {"count": 0.0, "n24_sum": 0.0, "active": 0.0})
             slot["count"] += 1.0
             slot["n24_sum"] += float(u["n_24h"])
             if active:
                 slot["active"] += 1.0
             continue
+        venue_emitted[ex] = venue_emitted.get(ex, 0) + 1
         i = base_i + len(nodes)
         ticker = str(u["ticker"]).split(":")[-1].split("-")[0]
         state = "firing" if sig_n > 0 else ("lit" if active else "dormant")

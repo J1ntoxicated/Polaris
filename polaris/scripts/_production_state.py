@@ -127,6 +127,17 @@ class ProdLoopState:
     # these never drive sizing/blocking/exits; telemetry for the dashboard.
     altdata_refreshes: int = 0
     altdata_errors: int = 0
+    # STEP① static-ground coverage producer counters (2026-06-25). The background
+    # fill walks the WHOLE active universe so every active ticker gets bars +
+    # per-ticker sentiment/event ground (the candidate-sweep ② input), not just the
+    # focus subset. ``static_ground_instruments``/``_tickers`` = last cycle's
+    # covered counts; ``_bars`` = cumulative bars persisted; ``_cycles``/``_errors``
+    # = walk telemetry. OBSERVATION coverage only — never drives sizing/blocking/exits.
+    static_ground_instruments: int = 0
+    static_ground_tickers: int = 0
+    static_ground_bars: int = 0
+    static_ground_cycles: int = 0
+    static_ground_errors: int = 0
     # Capital rotation (Jin 2026-05-30) — finite-capital opportunity-cost
     # redeploy. A NEW signal blocked *for a capital reason* (entry_sizer
     # ``sizing_zero`` on a binding cap, or OKX ``insufficient_balance``/51008) is

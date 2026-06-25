@@ -20,6 +20,8 @@ from pathlib import Path
 from polaris.storage.schema_ddl_altdata import (
     DDL_ALTDATA_SNAPSHOT,
     DDL_ALTDATA_SNAPSHOT_INDEX,
+    DDL_TICKER_GROUND,
+    DDL_TICKER_GROUND_INDEX,
 )
 from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS,
@@ -198,6 +200,9 @@ ALL_DDL: tuple[str, ...] = (
     # Layer 6 — alt-data EVIDENCE snapshot (#6)
     DDL_ALTDATA_SNAPSHOT,
     DDL_ALTDATA_SNAPSHOT_INDEX,
+    # STEP① static-ground — per-active-ticker sentiment/event ground (②후보 input)
+    DDL_TICKER_GROUND,
+    DDL_TICKER_GROUND_INDEX,
     # Dashboard telemetry — rotation + session-forced-exit (display-only)
     DDL_LOOP_ROTATION_EVENTS,
     DDL_LOOP_ROTATION_EVENTS_INDEX,

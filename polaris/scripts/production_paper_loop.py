@@ -38,6 +38,7 @@ from polaris.core.lifecycle.recover import (
     hydrate_open_positions,
     reconcile_venue_positions,
 )
+from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.pipeline.config import ai_free_mode
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
@@ -71,6 +72,11 @@ from polaris.scripts._production_ws import (
 )
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
+from polaris.scripts._static_ground import (
+    STATIC_GROUND_REFRESH_SEC,
+    ingest_static_ground_bars,
+    refresh_ticker_ground,
+)
 from polaris.scripts.reconcile_orphans import (
     flatten_venue_eod,
     reconcile_venue_orphans,
@@ -326,6 +332,57 @@ async def _altdata_producer(
             state.altdata_refreshes += 1
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_evt.wait(), timeout=poll_sec)
+
+
+# ---------------------------------------------------------------------------
+# STEP① static-ground coverage producer — full-universe bars + per-ticker ground
+# ---------------------------------------------------------------------------
+
+
+async def _static_ground_producer(
+    conn: sqlite3.Connection,
+    *,
+    state: ProdLoopState,
+    stop_evt: asyncio.Event,
+    capital_session: CapitalSession | None = None,
+    alpaca_adapter: Any = None,
+    refresh_sec: float = STATIC_GROUND_REFRESH_SEC,
+) -> None:
+    """Background coverage-fill for the WHOLE active universe (Jin "맨날 들어오는 애들만").
+
+    The 5s hot path (``_run_tick``) bar-ingests only the FOCUS subset, so only the
+    same ~276 of ~1882 active tickers ever get a static ground — the candidate
+    sweep (②) can only see those. This producer runs OFF the tick deadline on its
+    own task and walks ``read_active_universe`` so EVERY active ticker gets {Yahoo
+    multi-resolution bars, technical-capable, fused sentiment, event} ground.
+
+    flow_not_block / non-blocking: it never touches the tick body, gates no
+    entry/size/exit, and is bounded by the Semaphore + per-cycle total-timeout
+    inside ``ingest_static_ground_bars`` (Yahoo IP-block guard, degrade-never-
+    halt). The first walk runs immediately (the one-time fill); subsequent walks
+    are incremental (the within-period Yahoo frame cache means a re-walk only re-
+    fetches symbols whose bar period rolled). A cycle error never halts the loop.
+    """
+    while not stop_evt.is_set():
+        try:
+            bars_result = await ingest_static_ground_bars(
+                conn,
+                capital_session=capital_session,
+                alpaca_adapter=alpaca_adapter,
+                gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
+            )
+            state.static_ground_instruments = bars_result["instruments"]
+            state.static_ground_bars += bars_result["bars"]
+            state.static_ground_cycles += 1
+            tickers = refresh_ticker_ground(
+                conn, cache=getattr(state, "altdata_cache", None),
+            )
+            state.static_ground_tickers = tickers
+        except Exception:  # noqa: BLE001 — coverage fill never halts the bot
+            logger.exception("[ground] static-ground cycle failed (non-fatal)")
+            state.static_ground_errors += 1
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop_evt.wait(), timeout=refresh_sec)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +704,20 @@ async def run_production_paper_loop(
         )
         logger.info("[loop] P5 tick-decision engine spawned (Phase-1 OKX)")
 
+    # STEP① static-ground coverage producer — off the tick deadline, walks the
+    # WHOLE active universe so EVERY active ticker gets bars + per-ticker
+    # sentiment/event ground (the candidate-sweep ② input), not just the focus
+    # subset (Jin "맨날 들어오는 애들만"). Spawned AFTER the adapters + altdata cache
+    # exist so the fill can reuse them. flow_not_block / non-blocking — gates
+    # nothing; bounded by Semaphore + total-timeout (Yahoo IP-block guard).
+    static_ground_task = asyncio.create_task(
+        _static_ground_producer(
+            conn, state=state, stop_evt=stop_evt,
+            capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+        )
+    )
+    logger.info("[loop] STEP① static-ground coverage producer spawned (all active)")
+
     # EOD-flatten + periodic orphan-reconcile config (position lifecycle Jin
     # directed — '청산이 기본 베이스'). A persistent Capital adapter is reused across
     # ticks (mirrors okx_adapter/alpaca_adapter) for both hooks. flow_not_block:
@@ -733,12 +804,15 @@ async def run_production_paper_loop(
         layer0_task.cancel()
         altdata_task.cancel()
         wal_task.cancel()
+        static_ground_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await layer0_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await wal_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await static_ground_task
         # M5 — WS teardown. stop_evt (set above) ends every client.run + the
         # flush loop cooperatively; cancel then gather(return_exceptions=True)
         # joins them (final drain happens inside run_flush_loop on stop_evt),
@@ -782,6 +856,13 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
         ("universe_refresh", f"okx={state.universe_refreshes} capital={state.capital_refreshes}"),
         ("bars_persisted", f"{state.bars_persisted} (baseline_samples={state.bars_baseline_samples})"),
         ("bars_by_tf", bars_by_tf),
+        (
+            "static_ground",
+            f"instruments={state.static_ground_instruments} "
+            f"tickers={state.static_ground_tickers} "
+            f"bars={state.static_ground_bars} cycles={state.static_ground_cycles} "
+            f"errors={state.static_ground_errors}",
+        ),
         ("signals_by_tf", sigs_by_tf),
         ("pipeline_runs", f"{state.pipeline_runs} (kills={state.pipeline_kills})"),
         ("g1/g2/g8 runs", f"{state.g1_runs} / {state.g2_emits} / {state.g8_runs}"),

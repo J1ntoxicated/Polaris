@@ -175,6 +175,37 @@ def _price_marks() -> dict[str, dict[str, Any]]:
     return out
 
 
+def _ticker_chart(path: str) -> dict[str, Any]:
+    """``/api/ticker_chart`` payload — OHLCV bars + technical series (read-only).
+
+    ``?list=symbols`` returns the venue-grouped selector list; otherwise
+    ``?venue=&symbol=&resolution=`` returns the bars + indicator series for one
+    ticker. A missing DB / unknown symbol / unknown resolution yields a graceful
+    empty payload (never an exception that would break the board poll). Opens a
+    fresh read-only SQLite connection per request — user-driven, not 1s-polled,
+    so no cache is needed; nothing here reads or writes sizing/risk/orders.
+    """
+    import urllib.parse
+
+    from tools.visualizer import chart_data
+
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    if not _DB_PATH.exists():
+        return {"available": False, "groups": [], "bars": [], "indicators": {}}
+    conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+    try:
+        if q.get("list", [""])[0] == "symbols":
+            return {"groups": chart_data.list_chart_symbols(conn)}
+        venue = q.get("venue", [""])[0]
+        symbol = q.get("symbol", [""])[0]
+        resolution = q.get("resolution", ["1m"])[0]
+        return chart_data.build_ticker_chart(
+            conn, venue=venue, symbol=symbol, resolution=resolution
+        )
+    finally:
+        conn.close()
+
+
 def _resolve_bot_log() -> Path | None:
     """Newest LIVE bot runtime log under data/paper/.
 
@@ -895,6 +926,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json(_fresh_snapshot())
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"snapshot err: {exc}")
+            return
+        if self.path.startswith("/api/ticker_chart"):
+            try:
+                self._json(_ticker_chart(self.path))
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"ticker_chart err: {exc}")
             return
         if self.path.startswith("/api/sentinel"):
             try:

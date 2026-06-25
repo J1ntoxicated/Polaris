@@ -408,6 +408,7 @@
     { id: 'path', label: 'Roadmap' },
     { id: 'learned', label: 'Lessons' },
     { id: 'ai', label: 'AI' },
+    { id: 'chart', label: 'Chart' },
   ];
 
   function skeleton() {

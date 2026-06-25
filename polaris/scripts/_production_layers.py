@@ -52,7 +52,13 @@ from polaris.core.universe.discovery import (
     persist_universe,
     rank_active_universe,
 )
-from polaris.core.universe.schema import Tier, UniverseInstrument, tier_cadence
+from polaris.core.universe.schema import (
+    CAPITAL_FX_MAJORS,
+    Tier,
+    UniverseInstrument,
+    is_capital_fx_major,
+    tier_cadence,
+)
 from polaris.core.universe.watchlist import (
     cadence_fires,
     compute_dynamic_focus,
@@ -86,6 +92,7 @@ __all__ = [
     "compose_regime_candidate",
     "compute_and_flip_regime",
     "fetch_bars_one",
+    "fx_major_focus_targets",
     "get_focus_targets",
     "ingest_bars_for_focus",
     "ingest_bars_per_timeframe",
@@ -615,6 +622,48 @@ def open_position_targets(
     return out
 
 
+def fx_major_focus_targets(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str, str, str]]:
+    """Every LIVE curated Capital FX major as a focus-shaped target tuple.
+
+    FX-freshness fix (2026-06-24). The curated FX majors (EURUSD / GBPUSD /
+    AUDUSD / USDJPY / USDCAD) are kept in the ACTIVE universe by the rank-side
+    keep-floor (``is_capital_fx_major``), BUT the continuous merit rank still
+    sorts them to the TAIL tier (Tier-T, ``focus_rank`` ~1100-1900 in the live
+    DB) because Capital exposes no 24h notional → they rank on ATR alone and the
+    quiet majors lose to the high-ATR exotics. At Tier-T cadence they are polled
+    so rarely that they never accumulate bars (live DB: USDJPY/EURUSD/GBPUSD/
+    USDCAD = ZERO bars), so the non-USD CFD path had only the snapshot rate.
+
+    This seats every live major into the focus union — exactly like a held
+    position — so the bar ingest ALWAYS fetches them regardless of tier cadence.
+    ADD-only (flow_not_block): seats the majors ALONGSIDE the exotics, removes
+    nothing, and touches no ranking weight. ``asset_class`` comes from the
+    universe row (FX majors are always ``forex``).
+    """
+    placeholders = ", ".join("?" for _ in CAPITAL_FX_MAJORS)
+    rows = conn.execute(
+        f"""
+        SELECT venue, symbol, asset_class, underlying_group_id
+        FROM universe
+        WHERE venue = 'capital' AND state = 'live' AND symbol IN ({placeholders})
+        """,
+        tuple(sorted(CAPITAL_FX_MAJORS)),
+    ).fetchall()
+    out: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        venue, symbol = str(r[0]), str(r[1])
+        # Defensive: the IN-clause matches the stored symbol; double-check the
+        # curated-major predicate so a near-miss epic is never seated.
+        if not is_capital_fx_major(venue, symbol) or (venue, symbol) in seen:
+            continue
+        seen.add((venue, symbol))
+        out.append((venue, symbol, str(r[2] or "forex"), str(r[3] or "")))
+    return out
+
+
 def _firing_tiers(cycle_index: int, k: int, m: int) -> list[str]:
     """Tiers whose cadence fires on ``cycle_index`` (S/A always; B@K; T@M)."""
     tiers: tuple[Tier, ...] = ("S", "A", "B", "T")
@@ -724,6 +773,18 @@ def get_focus_targets(
             continue
         seen.add((target[0], target[1]))
         focus.append(target)
+    # FX-freshness (2026-06-24): force-seat live curated Capital FX majors into
+    # the WATCH set so the bar ingest always fetches them (they rank Tier-T and
+    # would otherwise starve — live DB showed ZERO bars for USDJPY/EURUSD/...).
+    # WATCH-only (``not eligible_only``): this seats them for OBSERVATION/bars,
+    # NOT into the TRADE set — trade-eligibility stays owned by the entrance
+    # judge (decouple preserved). ADD-only, never truncated by max_n.
+    if not eligible_only:
+        for target in fx_major_focus_targets(conn):
+            if (target[0], target[1]) in seen:
+                continue
+            seen.add((target[0], target[1]))
+            focus.append(target)
     return focus
 
 

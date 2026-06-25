@@ -86,6 +86,58 @@ def staleness_threshold_for(bar_interval: str) -> float:
     """
     return _BAR_STALENESS_BY_INTERVAL.get(bar_interval, float(BAR_STALENESS_MAX_SEC))
 
+
+# Incremental-fetch cache layer (Alpaca 429 fix, 2026-06-24). Bars are a CACHE:
+# "have the current period → serve it; missing/rolled → fetch only the gap." The
+# bot previously re-fetched the FULL bar window for EVERY focus symbol on EVERY
+# cadence-due tick. With ~99 Alpaca equity symbols force-seated into the 1m
+# regime bucket (5s cadence), that issued ~99 /v2/stocks/{symbol}/bars requests
+# per tick → Alpaca free-tier 429 → bars 9-50h stale → US-equity track dark. The
+# two helpers below + the ``skip_if_current``/``since_ts`` gates make the fetch
+# INCREMENTAL: skip a re-fetch when the current period's bar is already held, and
+# bound the window at the last stored bar. Pure fetch-efficiency, NOT a throttle
+# (flow_not_block: a missing/rolled period always fetches; no symbol is blocked).
+_PERIOD_SECONDS_BY_INTERVAL: dict[str, int] = {
+    "1m": 60,
+    "5m": 5 * 60,
+    "15m": 15 * 60,
+    "1H": 3600,
+    "1D": 86400,
+}
+
+
+def current_period_open_ts(bar_interval: str, now: int) -> int:
+    """Seconds-epoch (UTC) of the OPEN of the in-progress bar for ``bar_interval``.
+
+    ``floor(now / period) * period``. For ``1D`` this is UTC midnight (the epoch
+    is UTC-aligned at 86400 boundaries). Used by the skip-if-fresh gate to decide
+    whether the bar we already hold belongs to the still-open current period.
+    Unmapped interval → ``now`` (never skips — conservative, flow_not_block).
+    """
+    period = _PERIOD_SECONDS_BY_INTERVAL.get(bar_interval)
+    if period is None or period <= 0:
+        return now
+    return (now // period) * period
+
+
+def last_stored_bar_ts(
+    conn: sqlite3.Connection, instrument_id: str, bar_interval: str
+) -> int | None:
+    """Newest stored bar ts for ``(instrument_id, bar_interval)`` or ``None``.
+
+    ``MAX(ts)`` is an index lookup on the bars PK ``(instrument_id, bar_interval,
+    ts)`` — cheap enough to call per focus symbol each tick. Drives both the
+    skip-if-fresh gate and the incremental ``since_ts`` window.
+    """
+    row = conn.execute(
+        "SELECT MAX(ts) FROM bars WHERE instrument_id = ? AND bar_interval = ?",
+        (instrument_id, bar_interval),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
 # F10 — Strategy timeframe → venue resolution + cadence (sec).
 # OKX `bar` query parameter accepts the canonical token directly. Capital
 # `/prices` requires a textual resolution token (MINUTE / MINUTE_5 / ...).
@@ -205,16 +257,40 @@ def _alpaca_bar_to_canonical(
 _ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 330, "1H": 45, "15m": 8, "5m": 4, "1m": 2}
 
 
-def _alpaca_bars_start(bar_interval: str) -> str:
+# Incremental re-fetch overlap (sec). When history exists we lower-bound the
+# window at the last stored bar MINUS this slack so a just-closed boundary bar is
+# re-captured (Alpaca's ``start`` is inclusive; the small overlap absorbs clock
+# skew + an in-progress→closed bar update). One extra bar, never the full window.
+_ALPACA_INCREMENTAL_OVERLAP_SEC = 2 * 86400  # 2 days — covers a weekend gap on 1D
+
+
+def _alpaca_bars_start(bar_interval: str, *, since_ts: int | None = None) -> str:
     """Lower-bound ``start`` date for the Alpaca /bars call — REQUIRED.
 
     Without ``start`` the v2 bars endpoint returns an empty list (verified live:
     AAPL/1Day → 0 bars sans start, 240 with start). The lookback is tuned so the
     window holds < ``limit`` bars → Alpaca returns them all ending at ~now
     (recent), not the oldest ``limit`` (stale). See ``_ALPACA_LOOKBACK_DAYS``.
+
+    Incremental (2026-06-24): when ``since_ts`` is given (we already hold history)
+    the window is bounded at ``max(fixed_lookback_start, since_ts - overlap)`` —
+    a re-fetch then returns only the few NEW bars since the last stored one
+    (small payload), NOT the full lookback. The ``max(...)`` floor means a
+    ``since_ts`` older than the fixed lookback NEVER widens the window past warmup
+    (we never fetch more than the fixed window needs). First fetch (``since_ts``
+    None) keeps the full fixed-lookback warmup.
     """
     days = _ALPACA_LOOKBACK_DAYS.get(bar_interval, 330)
-    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+    fixed_start_dt = datetime.now(UTC) - timedelta(days=days)
+    if since_ts is not None:
+        incr_start_dt = datetime.fromtimestamp(
+            max(0, since_ts - _ALPACA_INCREMENTAL_OVERLAP_SEC), tz=UTC
+        )
+        # Tighter (more recent) of the two — never widen past the fixed warmup.
+        start_dt = max(fixed_start_dt, incr_start_dt)
+    else:
+        start_dt = fixed_start_dt
+    return start_dt.strftime("%Y-%m-%d")
 
 
 async def fetch_alpaca_bars(
@@ -224,6 +300,7 @@ async def fetch_alpaca_bars(
     bar_interval: str = "1D",
     limit: int = 240,
     asset_class: str = "equity",
+    since_ts: int | None = None,
 ) -> list[Bar]:
     """Fetch + normalize Alpaca equity bars to canonical Bars (newest last).
 
@@ -233,6 +310,11 @@ async def fetch_alpaca_bars(
     chronological ascending order (newest last) — the canonical contract — so
     no reversal is needed (unlike OKX, which is newest-first). A fetch failure
     logs + returns ``[]`` (mirror of the OKX / Capital branches).
+
+    Incremental (2026-06-24): ``since_ts`` (the last stored bar ts) tightens the
+    ``start`` window to just past the held history so a re-fetch returns only the
+    new bars (small payload), cutting the Alpaca 429 pressure. ``None`` → the
+    full fixed-lookback warmup (first fetch). See ``_alpaca_bars_start``.
     """
     timeframe = ALPACA_TIMEFRAME_BY_INTERVAL.get(bar_interval)
     if timeframe is None:
@@ -242,7 +324,7 @@ async def fetch_alpaca_bars(
             symbol,
         )
         return []
-    start = _alpaca_bars_start(bar_interval)
+    start = _alpaca_bars_start(bar_interval, since_ts=since_ts)
     try:
         raw = await adapter.fetch_bars(
             symbol, timeframe=timeframe, limit=limit, start=start
@@ -280,6 +362,7 @@ async def fetch_bars_one(
     alpaca_adapter: Any = None,
     limit: int = 240,
     bar_interval: str = "1m",
+    since_ts: int | None = None,
 ) -> list[Bar]:
     """Single-instrument bar fetch. Returns canonical Bar list (newest last).
 
@@ -290,6 +373,11 @@ async def fetch_bars_one(
     Stream-coverage P0: ``venue == 'alpaca'`` (daily equity bars) routes to
     ``fetch_alpaca_bars`` when an ``alpaca_adapter`` is threaded through; with
     no adapter it returns ``[]`` (mirror of the capital ``None`` session guard).
+
+    Incremental (2026-06-24): ``since_ts`` (the last stored bar ts for this
+    instrument/interval) is forwarded to the Alpaca branch to tighten the fetch
+    window. OKX/Capital ignore it (their windows are already small + healthy) —
+    behaviour for those venues is byte-identical.
     """
     if venue == "okx":
         try:
@@ -340,6 +428,7 @@ async def fetch_bars_one(
             bar_interval=bar_interval,
             limit=limit,
             asset_class=asset_class,
+            since_ts=since_ts,
         )
     return []
 
@@ -355,12 +444,19 @@ async def ingest_bars_per_timeframe(
     alpaca_adapter: Any = None,
     limit: int = 240,
     now_mono: float | None = None,
+    skip_if_current: set[tuple[str, str]] | None = None,
 ) -> dict[str, int]:
     """F10 — Day 9: drive the per-timeframe ingest fan-out for one tick.
 
     Honours ``TIMEFRAME_FETCH_CADENCE_SEC`` so each timeframe bucket only
     fetches when its cadence is due. ``last_fetch_monotonic_by_tf`` and
     ``bars_persisted_by_tf`` are mutated in place (caller owns lifetimes).
+
+    ``skip_if_current`` (Alpaca 429 fix, 2026-06-24): forwarded to
+    ``ingest_bars_for_focus`` — a set of ``(venue, bar_interval)`` whose symbols
+    skip the network re-fetch when the current-period bar is already stored (the
+    regime-only Alpaca 1m bucket). flow_not_block: a rolled/missing period always
+    fetches. See ``ingest_bars_for_focus``.
 
     Codex F10 R2 fix: cadence is tracked per ``(timeframe, venue)`` keyed as
     ``"{tf}:{venue}"``. A partial-bucket failure (OKX 1H succeeds, Capital
@@ -391,6 +487,7 @@ async def ingest_bars_per_timeframe(
                 conn, focus_for_v, capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter,
                 limit=limit, bar_interval=timeframe,
+                skip_if_current=skip_if_current,
             )
             total_bars += result["bars"]
             total_baseline += result["baseline_samples"]
@@ -418,29 +515,64 @@ async def ingest_bars_for_focus(
     limit: int = 240,
     parallel: int = 8,
     bar_interval: str = "1m",
+    skip_if_current: set[tuple[str, str]] | None = None,
 ) -> dict[str, int]:
     """Fetch + persist + baseline-update bars for every focus entry.
 
-    Returns aggregate counts ``{"bars": N, "baseline_samples": M, "symbols": K}``.
+    Returns aggregate counts
+    ``{"bars": N, "baseline_samples": M, "symbols": K, "skipped_fresh": S}``.
     Concurrency capped at ``parallel`` to keep REST burst polite.
 
     F10 — Day 9: ``bar_interval`` is forwarded to every adapter call so the
     production loop can ingest a different timeframe per strategy timeframe
     bucket (1m / 15m / 1H). The persisted ``bars`` row keeps its
     ``bar_interval`` column populated by the adapter.
+
+    Incremental cache (Alpaca 429 fix, 2026-06-24):
+    - ``skip_if_current``: a set of ``(venue, bar_interval)`` for which a symbol
+      is SKIPPED (no network fetch) when its current-period bar is already
+      stored. Used for the regime-only Alpaca 1m bucket, which has no strategy
+      consumer of intra-minute updates, so re-fetching the in-progress equity 1m
+      bar every 5s storms the API for zero canvas benefit. The skip auto-clears
+      the instant the period rolls (pure function of the stored ts) and a
+      missing/rolled period always fetches — flow_not_block, never a throttle.
+      OKX 1m (volume_burst) is NOT in the set, so its intra-minute freshness is
+      untouched.
+    - For every venue, when prior history exists the last stored bar ts is passed
+      as ``since_ts`` so the Alpaca window is incremental (small payload). OKX /
+      Capital ignore ``since_ts`` (byte-identical behaviour).
     """
     sem = asyncio.Semaphore(parallel)
     out_bars: list[Bar] = []
     seen: set[str] = set()
+    skipped_fresh = 0
+    now_s = int(time.time())
 
     async def _one(target: tuple[str, str, str, str]) -> None:
+        nonlocal skipped_fresh
         venue, symbol, asset_class, _group = target
+        instrument_id = f"{venue}:{symbol}"
+        # Cache gate: last stored bar drives both skip-if-fresh and incremental
+        # window. One indexed MAX(ts) lookup per symbol (cheap on the bars PK).
+        last_ts = last_stored_bar_ts(conn, instrument_id, bar_interval)
+        if (
+            skip_if_current is not None
+            and (venue, bar_interval) in skip_if_current
+            and last_ts is not None
+            and last_ts >= current_period_open_ts(bar_interval, now_s)
+        ):
+            # Current-period bar already held → no fetch (flow_not_block: a rolled
+            # or missing period still fetches; this only drops the wasteful
+            # in-progress re-pull that has no strategy consumer).
+            skipped_fresh += 1
+            return
         async with sem:
             bars = await fetch_bars_one(
                 venue, symbol, asset_class,
                 capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter, limit=limit,
                 bar_interval=bar_interval,
+                since_ts=last_ts,
             )
         if bars:
             out_bars.extend(bars)
@@ -448,7 +580,10 @@ async def ingest_bars_for_focus(
 
     await asyncio.gather(*(_one(t) for t in focus))
     if not out_bars:
-        return {"bars": 0, "baseline_samples": 0, "symbols": 0}
+        return {
+            "bars": 0, "baseline_samples": 0, "symbols": 0,
+            "skipped_fresh": skipped_fresh,
+        }
     # Codex F10 R1 P1-2 fix: baselines (ATR/size/volume) are minute-grained;
     # routing 5m/15m/1H bars into ``update_baseline_from_bars`` would
     # contaminate the minute-windowed state. Use the full ``ingest_bars``
@@ -472,6 +607,7 @@ async def ingest_bars_for_focus(
             "bars": total_persisted,
             "baseline_samples": 0,
             "symbols": len(seen),
+            "skipped_fresh": skipped_fresh,
         }
     # 1m path — group by asset_class so update_baseline_from_bars partitions
     # the per-class baseline window correctly.
@@ -502,6 +638,7 @@ async def ingest_bars_for_focus(
         "bars": total_persisted,
         "baseline_samples": total_baseline,
         "symbols": len(seen),
+        "skipped_fresh": skipped_fresh,
     }
 
 

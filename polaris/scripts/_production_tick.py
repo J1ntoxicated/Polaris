@@ -390,7 +390,22 @@ async def _run_tick(
         for tf, strats in strategies_by_tf.items()
     }
     all_focus_venues = {t[0] for t in focus}
+    # Venues that have a REAL 1m strategy (consume intra-minute updates, e.g.
+    # OKX volume_burst) — captured BEFORE the regime-SSOT widen so we can tell
+    # them apart from venues forced into the 1m bucket only for regime.
+    strategy_1m_venues = {s.metadata.venue for s in strategies_by_tf.get("1m", [])}
     timeframe_to_venues.setdefault("1m", set()).update(all_focus_venues)
+    # Alpaca 429 fix (2026-06-24): the regime-only 1m venues (forced into the 1m
+    # bucket but with NO 1m strategy — e.g. Alpaca, whose strategies are all 1D)
+    # re-fetched the in-progress 1m bar for every focus symbol every 5s tick →
+    # ~99 Alpaca /bars requests/tick → free-tier 429 → 9-50h-stale bars → the
+    # US-equity track went dark. Those venues skip the 1m re-fetch when the
+    # current minute's bar is already held: the regime read is idempotent over a
+    # frozen in-progress bar within the minute, and the skip auto-clears the
+    # instant the minute rolls (flow_not_block — missing/rolled always fetches).
+    # OKX 1m (volume_burst) is NOT in the skip set → intra-minute freshness kept.
+    regime_only_1m_venues = all_focus_venues - strategy_1m_venues
+    skip_if_current = {(v, "1m") for v in regime_only_1m_venues}
     ingest_totals = await ingest_bars_per_timeframe(
         conn, focus,
         timeframe_to_venues=timeframe_to_venues,
@@ -398,6 +413,7 @@ async def _run_tick(
         bars_persisted_by_tf=state.bars_persisted_by_tf,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
         limit=240, now_mono=now_mono,
+        skip_if_current=skip_if_current,
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]

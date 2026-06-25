@@ -113,7 +113,11 @@ def setup_polaris_logging(
     # Suppress noisy 3rd-party DEBUG output (httpx/httpcore emit ~30 lines
     # per OKX REST call; websockets logs EVERY inbound quote frame — under -vv
     # that was 95% of the live log, ~2k lines/min, an I/O + logging-lock load
-    # that starved the tick loop on quote floods). Polaris venue adapters re-log
-    # the salient outcome at DEBUG so we keep observability without the drown.
-    for noisy in ("httpx", "httpcore", "asyncio", "websockets"):
+    # that starved the tick loop on quote floods). yfinance + its peewee-backed
+    # tz cache log every history()/get()/_make_request()/SQL at DEBUG — once the
+    # full-universe Yahoo bar fill (STEP①) started, that was 79% of the live log
+    # (1580/2000 lines), the same disk + logging-lock pollution. Polaris venue
+    # adapters re-log the salient outcome at DEBUG so we keep observability
+    # without the drown.
+    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "yfinance", "peewee"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

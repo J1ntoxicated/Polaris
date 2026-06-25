@@ -138,6 +138,26 @@ def test_file_handler_is_rotating(tmp_path: Path) -> None:
     assert file_handlers[0].backupCount > 0
 
 
+def test_noisy_3rd_party_loggers_silenced(tmp_path: Path) -> None:
+    """yfinance/peewee per-call DEBUG flood is suppressed to WARNING.
+
+    Live-probe (2026-06-26): under ``-vv`` (root=DEBUG) the Yahoo bar fetch made
+    yfinance+peewee emit history()/get()/_make_request()/SQL at DEBUG — 79% of the
+    live runtime log (1580/2000 lines). Same hazard the websockets per-frame flood
+    posed (e48abd8): a synchronous FileHandler write + logging-lock load that
+    pollutes disk + drowns Polaris' own trading DEBUG. They must be pinned to
+    WARNING just like httpx/httpcore/asyncio/websockets — Polaris' own DEBUG is
+    untouched (root stays DEBUG under -vv).
+    """
+    setup_polaris_logging(level="DEBUG", log_file=str(tmp_path / "polaris.log"))
+    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "yfinance", "peewee"):
+        assert logging.getLogger(noisy).level == logging.WARNING, (
+            f"{noisy} logger must be pinned to WARNING (3rd-party DEBUG flood guard)"
+        )
+    # Polaris' own logger is NOT throttled — full decision observability survives.
+    assert logging.getLogger("polaris").level in (logging.NOTSET, logging.DEBUG)
+
+
 def test_runtime_rotation_caps_size(tmp_path: Path) -> None:
     log_file = tmp_path / "polaris.log"
     setup_polaris_logging(

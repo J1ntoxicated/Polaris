@@ -73,7 +73,9 @@ from polaris.scripts._production_ws import (
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
 from polaris.scripts._static_ground import (
+    STATIC_GROUND_PARALLEL_DEFAULT,
     STATIC_GROUND_REFRESH_SEC,
+    TICKER_GROUND_REFRESH_SEC,
     ingest_static_ground_bars,
     refresh_ticker_ground,
 )
@@ -347,6 +349,7 @@ async def _static_ground_producer(
     capital_session: CapitalSession | None = None,
     alpaca_adapter: Any = None,
     refresh_sec: float = STATIC_GROUND_REFRESH_SEC,
+    parallel: int = STATIC_GROUND_PARALLEL_DEFAULT,
 ) -> None:
     """Background coverage-fill for the WHOLE active universe (Jin "맨날 들어오는 애들만").
 
@@ -362,11 +365,18 @@ async def _static_ground_producer(
     halt). The first walk runs immediately (the one-time fill); subsequent walks
     are incremental (the within-period Yahoo frame cache means a re-walk only re-
     fetches symbols whose bar period rolled). A cycle error never halts the loop.
+
+    BARS ONLY — the per-ticker sentiment/event ground (EdgeScore input) is now
+    materialized by ``_ticker_ground_producer`` on its OWN faster cadence so an
+    EdgeScore is filled WHILE this multi-minute bar walk is still charging (live
+    probe 2026-06-26: ticker_ground=0 during the first bar walk starved the sweep
+    because the ground refresh sat behind a ~600s bar walk).
     """
     while not stop_evt.is_set():
         try:
             bars_result = await ingest_static_ground_bars(
                 conn,
+                parallel=parallel,
                 capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
@@ -374,12 +384,44 @@ async def _static_ground_producer(
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]
             state.static_ground_cycles += 1
+        except Exception:  # noqa: BLE001 — coverage fill never halts the bot
+            logger.exception("[ground] static-ground cycle failed (non-fatal)")
+            state.static_ground_errors += 1
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop_evt.wait(), timeout=refresh_sec)
+
+
+async def _ticker_ground_producer(
+    conn: sqlite3.Connection,
+    *,
+    state: ProdLoopState,
+    stop_evt: asyncio.Event,
+    refresh_sec: float = TICKER_GROUND_REFRESH_SEC,
+) -> None:
+    """Materialize per-active-ticker sentiment/event ground on a fast cadence.
+
+    Split off ``_static_ground_producer`` (live probe 2026-06-26): the ground
+    refresh used to run only AFTER each ~600s bar walk, so during the first walk
+    ``ticker_ground`` stayed empty and the candidate sweep (②) had no EdgeScore /
+    no direction. ``refresh_ticker_ground`` is pure ``fuse_evidence`` (in-memory)
+    + one INSERT/ticker in a single BEGIN/COMMIT with NO await inside the txn, so
+    a full ~1882-row refresh is cheap and stays atomic w.r.t. the event loop (the
+    tick body's own BEGIN can never interleave). It is also decoupled from the bar
+    walk: it reads the live ``AltDataCache``, not stored bars, so it produces
+    directional ground even before bars finish charging.
+
+    flow_not_block / non-blocking: gates no entry/size/exit; a cache that is not
+    yet warm just yields graceful-empty rows (the sweep can still enumerate them),
+    and a cycle error never halts the loop. The first refresh runs immediately.
+    """
+    while not stop_evt.is_set():
+        try:
             tickers = refresh_ticker_ground(
                 conn, cache=getattr(state, "altdata_cache", None),
             )
             state.static_ground_tickers = tickers
-        except Exception:  # noqa: BLE001 — coverage fill never halts the bot
-            logger.exception("[ground] static-ground cycle failed (non-fatal)")
+        except Exception:  # noqa: BLE001 — ground fill never halts the bot
+            logger.exception("[ground] ticker-ground cycle failed (non-fatal)")
             state.static_ground_errors += 1
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_evt.wait(), timeout=refresh_sec)
@@ -705,18 +747,29 @@ async def run_production_paper_loop(
         logger.info("[loop] P5 tick-decision engine spawned (Phase-1 OKX)")
 
     # STEP① static-ground coverage producer — off the tick deadline, walks the
-    # WHOLE active universe so EVERY active ticker gets bars + per-ticker
-    # sentiment/event ground (the candidate-sweep ② input), not just the focus
-    # subset (Jin "맨날 들어오는 애들만"). Spawned AFTER the adapters + altdata cache
-    # exist so the fill can reuse them. flow_not_block / non-blocking — gates
-    # nothing; bounded by Semaphore + total-timeout (Yahoo IP-block guard).
+    # WHOLE active universe so EVERY active ticker gets bars (the candidate-sweep
+    # ② input), not just the focus subset (Jin "맨날 들어오는 애들만"). Spawned AFTER the
+    # adapters + altdata cache exist so the fill can reuse them. flow_not_block /
+    # non-blocking — gates nothing; bounded by Semaphore + total-timeout (Yahoo
+    # IP-block guard). The per-ticker sentiment/event ground is materialized by a
+    # SEPARATE faster producer below so the sweep gets an EdgeScore while bars are
+    # still charging (live probe 2026-06-26: ground=0 behind a ~600s bar walk).
     static_ground_task = asyncio.create_task(
         _static_ground_producer(
             conn, state=state, stop_evt=stop_evt,
             capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+            parallel=_env_int(
+                "POLARIS_STATIC_GROUND_PARALLEL", STATIC_GROUND_PARALLEL_DEFAULT
+            ),
         )
     )
-    logger.info("[loop] STEP① static-ground coverage producer spawned (all active)")
+    ticker_ground_task = asyncio.create_task(
+        _ticker_ground_producer(conn, state=state, stop_evt=stop_evt)
+    )
+    logger.info(
+        "[loop] STEP① static-ground bars + per-ticker ground producers spawned "
+        "(all active)"
+    )
 
     # EOD-flatten + periodic orphan-reconcile config (position lifecycle Jin
     # directed — '청산이 기본 베이스'). A persistent Capital adapter is reused across
@@ -805,6 +858,7 @@ async def run_production_paper_loop(
         altdata_task.cancel()
         wal_task.cancel()
         static_ground_task.cancel()
+        ticker_ground_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await layer0_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -813,6 +867,8 @@ async def run_production_paper_loop(
             await wal_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await static_ground_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await ticker_ground_task
         # M5 — WS teardown. stop_evt (set above) ends every client.run + the
         # flush loop cooperatively; cancel then gather(return_exceptions=True)
         # joins them (final drain happens inside run_flush_loop on stop_evt),

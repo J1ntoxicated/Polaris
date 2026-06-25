@@ -53,8 +53,18 @@ STATIC_GROUND_RESOLUTIONS: tuple[str, ...] = ("1D", "1H", "15m")
 # Bulk-fill concurrency (Yahoo IP-block guard). Mirrors populate_capital_proxies'
 # Semaphore + total-timeout pattern (startup-fix). Higher than the 8-wide hot-path
 # fan-out because this is off the tick deadline, but bounded so the bulk Yahoo
-# fan-out (1882 × 3 resolutions) cannot trip an IP block. Env-tunable.
-STATIC_GROUND_PARALLEL_DEFAULT = 16
+# fan-out (1882 × 3 resolutions) cannot trip an IP block. Default; the producer
+# call site reads ``POLARIS_STATIC_GROUND_PARALLEL`` so it is env-tunable live.
+#
+# Charge-rate tune (live probe 2026-06-26): at 16-wide a cycle reached only ~435
+# of 1882 instruments before the 600s ceiling (~7.4s per Yahoo history fetch —
+# 1D=2y frames + network). The sweep then scored candidates on partial bars
+# (366/1650). The ONLY lever that raises throughput is the inflight width (the
+# per-interval Semaphore already keeps inflight == parallel), so widen to 32. At
+# ~0.135 fetch/s/slot that is ~4.3 req/s ≈ 260 req/min — well under a Yahoo IP
+# throttle, and the within-period frame cache means a re-walk only re-pulls rolled
+# periods. ~2× the per-cycle reach; flow_not_block (off the tick deadline).
+STATIC_GROUND_PARALLEL_DEFAULT = 32
 # Per-cycle wall-clock ceiling (degrade-never-halt): whatever completed is kept,
 # the rest retries next cycle. The fill is incremental — the within-period frame
 # cache means a re-walk only re-fetches symbols whose bar period rolled.
@@ -64,6 +74,14 @@ STATIC_GROUND_TOTAL_TIMEOUT_SEC = 600.0
 # slow re-walk keeps coverage warm without re-hammering Yahoo. The FIRST walk runs
 # immediately at startup (the one-time fill).
 STATIC_GROUND_REFRESH_SEC = 900.0
+# Per-ticker sentiment/event ground (EdgeScore input) is materialized on its OWN
+# cadence, DECOUPLED from the multi-minute bar walk above. fuse_evidence is pure
+# in-memory + a single INSERT per ticker, so a full ~1882-row refresh is cheap
+# (one BEGIN/COMMIT, no await inside the txn). Running it every 180s — instead of
+# only AFTER each ~600s bar walk — fills EdgeScore early and keeps it warm so the
+# candidate sweep gets directional ground while bars are still charging (live
+# probe 2026-06-26: ticker_ground=0 during the first bar walk starved the sweep).
+TICKER_GROUND_REFRESH_SEC = 180.0
 
 
 async def ingest_static_ground_bars(

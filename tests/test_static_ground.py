@@ -336,3 +336,141 @@ def test_read_ticker_ground_roundtrip(conn: sqlite3.Connection) -> None:
     assert isinstance(ground["ground"], dict)
     # Absent ticker → None (graceful).
     assert sg.read_ticker_ground(conn, "okx:NOPE") is None
+
+
+# ---------------------------------------------------------------------------
+# STEP① charge-rate tune (live probe 2026-06-26) — bars/ground producer split
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_default_widened_for_charge_rate() -> None:
+    """Bulk-fill width is widened (16→32) to ~2× the per-cycle reach.
+
+    Live probe: at 16-wide a cycle reached only ~435/1882 before the 600s ceiling,
+    so the sweep scored on partial bars. Still bounded (IP-block guard) + env-tunable.
+    """
+    assert sg.STATIC_GROUND_PARALLEL_DEFAULT == 32
+    # Ground refresh cadence is decoupled + FASTER than the bar re-walk so the
+    # EdgeScore fills while bars are still charging.
+    assert sg.TICKER_GROUND_REFRESH_SEC < sg.STATIC_GROUND_REFRESH_SEC
+
+
+@pytest.mark.asyncio
+async def test_ticker_ground_producer_runs_independent_of_bars(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ground producer materializes EdgeScore WITHOUT waiting on the bar walk.
+
+    Regression (live probe 2026-06-26): ground refresh sat behind a ~600s bar walk,
+    so ``ticker_ground`` was 0 during the first walk and the sweep had no direction.
+    The split producer must call ``refresh_ticker_ground`` on its own cadence — even
+    if the bar producer never finishes a cycle.
+    """
+    from polaris.scripts import production_paper_loop as ppl
+
+    _seat_active(conn, [("okx", "BTC-USDT", "crypto", "crypto:BTC")])
+
+    calls: list[int] = []
+
+    def _fake_refresh(_conn: Any, *, cache: Any, now_ts: int | None = None) -> int:
+        calls.append(1)
+        return 7
+
+    monkeypatch.setattr(ppl, "refresh_ticker_ground", _fake_refresh)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        # Let the producer's first immediate refresh run, then stop it.
+        await asyncio.sleep(0.02)
+        stop_evt.set()
+
+    await asyncio.gather(
+        ppl._ticker_ground_producer(
+            conn, state=state, stop_evt=stop_evt, refresh_sec=999.0,
+        ),
+        _stop_after_first(),
+    )
+
+    # First refresh ran immediately (no dependency on any bar walk completing).
+    assert calls, "ticker-ground producer must refresh on its first cycle"
+    assert state.static_ground_tickers == 7
+
+
+@pytest.mark.asyncio
+async def test_static_ground_producer_no_longer_refreshes_ticker_ground(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bar producer is BARS-ONLY — ground refresh moved to its own producer.
+
+    Pins the split: the slow bar walk must NOT carry the ground refresh anymore
+    (that coupling is exactly what starved the EdgeScore during the first walk).
+    """
+    from polaris.scripts import production_paper_loop as ppl
+
+    async def _fake_bars(_conn: Any, **_kw: Any) -> dict[str, Any]:
+        return {"instruments": 3, "bars": 12, "timed_out": False}
+
+    ground_calls: list[int] = []
+
+    def _spy_refresh(_conn: Any, *, cache: Any, now_ts: int | None = None) -> int:
+        ground_calls.append(1)
+        return 0
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _fake_bars)
+    monkeypatch.setattr(ppl, "refresh_ticker_ground", _spy_refresh)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        await asyncio.sleep(0.02)
+        stop_evt.set()
+
+    await asyncio.gather(
+        ppl._static_ground_producer(
+            conn, state=state, stop_evt=stop_evt, refresh_sec=999.0,
+        ),
+        _stop_after_first(),
+    )
+
+    # Bars charged on the bar producer; ground refresh was NOT invoked by it.
+    assert state.static_ground_bars == 12
+    assert state.static_ground_instruments == 3
+    assert ground_calls == [], "bar producer must not call refresh_ticker_ground"
+
+
+@pytest.mark.asyncio
+async def test_static_ground_producer_forwards_parallel(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bar producer forwards its ``parallel`` width to the bulk fill.
+
+    Pins the live-tunable charge-rate knob (``POLARIS_STATIC_GROUND_PARALLEL`` is
+    wired at the production call site → producer ``parallel`` → ingest).
+    """
+    from polaris.scripts import production_paper_loop as ppl
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_bars(_conn: Any, *, parallel: int = -1, **_kw: Any) -> dict[str, Any]:
+        seen["parallel"] = parallel
+        return {"instruments": 0, "bars": 0, "timed_out": False}
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _fake_bars)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        await asyncio.sleep(0.02)
+        stop_evt.set()
+
+    await asyncio.gather(
+        ppl._static_ground_producer(
+            conn, state=state, stop_evt=stop_evt, refresh_sec=999.0, parallel=48,
+        ),
+        _stop_after_first(),
+    )
+    assert seen["parallel"] == 48

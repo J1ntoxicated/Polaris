@@ -81,18 +81,42 @@ _COUNTER_TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
 
 _TREND_REGIMES: Final[frozenset[str]] = frozenset({"bull_trend", "bear_trend"})
 _CHOP_REGIME: Final[str] = "chop"
+_BEAR_TREND_REGIME: Final[str] = "bear_trend"
+
+# Long-only venues (OKX SPOT, Alpaca equity) can ONLY hold longs — there is no
+# short leg. A trend strategy in a DOWN-trend (bear_trend) is therefore HEADWIND
+# for these venues, not edge, so it is DAMPENED rather than AMPLIFIED. Capital
+# CFD is long/short, so its trend strategies short the bear and KEEP AMPLIFY
+# (its bear edge is the short leg). Verified long-only: cci_reversion.py side
+# fixed "long"; only Capital strategies emit shorts (fx_range_fade short OK).
+_LONG_ONLY_VENUES: Final[frozenset[str]] = frozenset({"okx", "alpaca"})
 
 
-def regime_alignment_mult(*, strategy: str, regime: str) -> float:
+def regime_alignment_mult(
+    *, strategy: str, regime: str, exchange: str | None = None
+) -> float:
     """Deterministic regime/strategy fit multiplier (MVP — not a full HMM).
 
     Trend strategies are amplified in trend regimes and dampened in chop;
     counter-trend (``rsi_bb_pullback``) is amplified in chop and dampened in
     trend. ``crisis`` and any unknown regime/strategy stay neutral — no edge
     claim. Dampen is a redistribution (strictly positive), never an off-switch.
+
+    Venue/side-aware bear headwind (P-A): in ``bear_trend`` a trend strategy on
+    a long-only venue (``exchange`` in :data:`_LONG_ONLY_VENUES` — OKX SPOT /
+    Alpaca) is DAMPENED, not amplified, because a long-only book cannot short
+    the down-trend (a trend long there is headwind = "going to cash is the
+    edge", a strictly-positive score-tilt, NOT a block / zero). Capital CFD
+    (long/short) keeps AMPLIFY in ``bear_trend`` — its short leg IS the bear
+    edge. ``exchange=None`` / an unknown venue makes no venue-specific claim and
+    preserves the family default (AMPLIFY in bear); the production routing /
+    emit-priority call sites pass the cell's ``exchange``, so the fix fires
+    there. ``bull_trend`` / ``chop`` / ``crisis`` mappings are unchanged.
     """
     if regime in _TREND_REGIMES:
         if strategy in _TREND_STRATEGIES:
+            if regime == _BEAR_TREND_REGIME and exchange in _LONG_ONLY_VENUES:
+                return REGIME_ALIGN_DAMPEN
             return REGIME_ALIGN_AMPLIFY
         if strategy in _COUNTER_TREND_STRATEGIES:
             return REGIME_ALIGN_DAMPEN
@@ -106,14 +130,20 @@ def regime_alignment_mult(*, strategy: str, regime: str) -> float:
     return REGIME_ALIGN_NEUTRAL
 
 
-def apply_regime_alignment(score: float, *, strategy: str, regime: str) -> float:
+def apply_regime_alignment(
+    score: float, *, strategy: str, regime: str, exchange: str | None = None
+) -> float:
     """Scale a cell score by the regime/strategy alignment multiplier.
 
     Purely multiplicative, so sign is preserved (a losing cell stays losing)
     and a zero score stays zero. Existing ``compute_cell_score`` contract is
     untouched — callers opt in to alignment by wrapping the score with this.
+    ``exchange`` threads through to the venue-aware bear headwind (see
+    :func:`regime_alignment_mult`).
     """
-    return score * regime_alignment_mult(strategy=strategy, regime=regime)
+    return score * regime_alignment_mult(
+        strategy=strategy, regime=regime, exchange=exchange
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +169,9 @@ overrides a PDT integrity demotion.
 """
 
 
-def regime_rank_penalty(*, strategy: str, regime: str) -> float:
+def regime_rank_penalty(
+    *, strategy: str, regime: str, exchange: str | None = None
+) -> float:
     """Ticker-tailored G2 emit-priority penalty (regime-first POOL ordering).
 
     Re-encodes the SAME ``regime_alignment_mult`` fitness SSOT as a NON-NEGATIVE
@@ -163,7 +195,7 @@ def regime_rank_penalty(*, strategy: str, regime: str) -> float:
     guaranteed risk-budget reservation order (the gate awaits interleave, so the
     final reservation is still gate-completion-ordered).
     """
-    mult = regime_alignment_mult(strategy=strategy, regime=regime)
+    mult = regime_alignment_mult(strategy=strategy, regime=regime, exchange=exchange)
     if mult >= REGIME_ALIGN_AMPLIFY:
         return 0.0
     if mult <= REGIME_ALIGN_DAMPEN:

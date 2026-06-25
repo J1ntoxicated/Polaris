@@ -715,7 +715,7 @@ async def _run_tick(
                 # (assignment is not a sizing input; 9-stack untouched). Crisis/
                 # unknown → NEUTRAL (an unclassified ticker is not the worst tier).
                 regime_penalty = regime_rank_penalty(
-                    strategy=strategy_id, regime=regime
+                    strategy=strategy_id, regime=regime, exchange=venue
                 )
                 rank_penalty = pdt_penalty + regime_penalty
 

@@ -245,3 +245,156 @@ def test_property_rank_penalty_non_negative_finite_bounded(
     pen = regime_rank_penalty(strategy=strategy, regime=regime)
     assert math.isfinite(pen)
     assert 0.0 <= pen <= REGIME_RANK_PENALTY_DAMPEN  # never a block / sentinel
+
+
+# ---------------------------------------------------------------------------
+# P-A — venue/side-aware bear_trend headwind for long-only trend strategies.
+#
+# bear_trend is a TREND regime, so the family rule AMPLIFIES every trend
+# strategy there. But a long-only venue (OKX SPOT, Alpaca equity) can ONLY go
+# long: a trend long in a DOWN-trend is HEADWIND, not edge. So in bear_trend a
+# trend strategy on a long-only venue is DAMPENED (0.8, strictly-positive
+# redistribution — "going to cash is the edge", never 0 / never blocked).
+# Capital CFD is long/short, so its trend strategies KEEP AMPLIFY in bear_trend
+# (the short leg is the bear edge). bull_trend / chop / crisis are unchanged.
+# ---------------------------------------------------------------------------
+
+LONG_ONLY_VENUES = ("okx", "alpaca")
+LONG_ONLY_TREND_STRATEGIES = (
+    "tsmom",
+    "spot_donchian",
+    "volume_burst",
+    "equity_tsmom",
+    "equity_gap_go",
+)
+CAPITAL_TREND_STRATEGIES = (
+    "fx_breakout_basket",
+    "xau_indices_trend",
+    "session_breakout",
+)
+
+
+def test_bear_trend_long_only_venue_trend_dampened() -> None:
+    # The fix: a long-only-venue trend strategy is DAMPENED in bear_trend
+    # (long-only = no short leg, so a trend long is headwind, not edge).
+    for venue in LONG_ONLY_VENUES:
+        for strat in LONG_ONLY_TREND_STRATEGIES:
+            assert (
+                regime_alignment_mult(
+                    strategy=strat, regime="bear_trend", exchange=venue
+                )
+                == REGIME_ALIGN_DAMPEN
+            )
+
+
+def test_bear_trend_capital_trend_amplified() -> None:
+    # Capital is long/short — its trend strategies short the bear, so AMPLIFY
+    # stays. (The short leg IS the bear edge; do NOT dampen it.)
+    for strat in (*CAPITAL_TREND_STRATEGIES, "fx_breakout_basket"):
+        assert (
+            regime_alignment_mult(
+                strategy=strat, regime="bear_trend", exchange="capital"
+            )
+            == REGIME_ALIGN_AMPLIFY
+        )
+
+
+def test_bull_trend_long_only_venue_trend_amplified_invariant() -> None:
+    # Only bear_trend changes — a long-only trend long in an UP-trend is the
+    # tailwind, so bull_trend stays AMPLIFY for every venue.
+    for venue in (*LONG_ONLY_VENUES, "capital"):
+        for strat in LONG_ONLY_TREND_STRATEGIES:
+            assert (
+                regime_alignment_mult(
+                    strategy=strat, regime="bull_trend", exchange=venue
+                )
+                == REGIME_ALIGN_AMPLIFY
+            )
+
+
+def test_chop_long_only_venue_trend_dampened_invariant() -> None:
+    # chop already DAMPENS trend regardless of venue — unchanged by P-A.
+    for venue in (*LONG_ONLY_VENUES, "capital"):
+        for strat in LONG_ONLY_TREND_STRATEGIES:
+            assert (
+                regime_alignment_mult(strategy=strat, regime="chop", exchange=venue)
+                == REGIME_ALIGN_DAMPEN
+            )
+
+
+def test_bear_long_only_dampen_is_strictly_positive_redistribution() -> None:
+    # flow_not_block: the bear headwind is a DAMPEN (0.8), strictly positive —
+    # never 0, never a block. A losing/winning long signal is down-weighted,
+    # never excluded.
+    mult = regime_alignment_mult(
+        strategy="tsmom", regime="bear_trend", exchange="okx"
+    )
+    assert mult == REGIME_ALIGN_DAMPEN
+    assert mult > 0.0
+
+
+def test_no_exchange_defaults_to_amplify_in_bear_backward_compat() -> None:
+    # No venue supplied = no venue-specific headwind claim → preserves the
+    # pre-P-A family behavior (AMPLIFY in bear_trend). The production routing /
+    # emit-priority call sites DO pass exchange, so the fix fires there.
+    for strat in LONG_ONLY_TREND_STRATEGIES:
+        assert (
+            regime_alignment_mult(strategy=strat, regime="bear_trend")
+            == REGIME_ALIGN_AMPLIFY
+        )
+
+
+def test_counter_trend_bear_unchanged_by_venue() -> None:
+    # Counter-trend is already misaligned in any trend regime (DAMPEN) — venue
+    # does not change that (the P-A headwind only touches the trend family).
+    for venue in (*LONG_ONLY_VENUES, "capital", None):
+        assert (
+            regime_alignment_mult(
+                strategy="rsi_bb_pullback", regime="bear_trend", exchange=venue
+            )
+            == REGIME_ALIGN_DAMPEN
+        )
+
+
+def test_apply_regime_alignment_threads_exchange() -> None:
+    base = 0.8
+    okx_out = apply_regime_alignment(
+        base, strategy="tsmom", regime="bear_trend", exchange="okx"
+    )
+    cap_out = apply_regime_alignment(
+        base, strategy="fx_breakout_basket", regime="bear_trend", exchange="capital"
+    )
+    assert okx_out == base * REGIME_ALIGN_DAMPEN
+    assert 0.0 < okx_out < base  # dampened, strictly positive (flow_not_block)
+    assert cap_out == base * REGIME_ALIGN_AMPLIFY  # capital short keeps amplify
+
+
+def test_rank_penalty_threads_exchange_bear_long_only_ranks_down() -> None:
+    # The emit-priority penalty re-derives from the same SSOT: a long-only bear
+    # trend now ranks DOWN (dampen penalty), while Capital bear trend ranks
+    # first (amplify → 0). Still emits / flows / sized — pure batch ORDER.
+    okx_pen = regime_rank_penalty(
+        strategy="tsmom", regime="bear_trend", exchange="okx"
+    )
+    cap_pen = regime_rank_penalty(
+        strategy="fx_breakout_basket", regime="bear_trend", exchange="capital"
+    )
+    assert okx_pen == REGIME_RANK_PENALTY_DAMPEN
+    assert cap_pen == 0.0
+
+
+@given(
+    venue=st.sampled_from(("okx", "alpaca", "capital", "unknown_venue", None)),
+    strategy=st.sampled_from(
+        (*LONG_ONLY_TREND_STRATEGIES, *CAPITAL_TREND_STRATEGIES, "rsi_bb_pullback")
+    ),
+    regime=st.sampled_from(("bull_trend", "bear_trend", "chop", "crisis", "weird")),
+)
+def test_property_venue_aware_mult_strictly_positive_bounded(
+    venue: str | None, strategy: str, regime: str
+) -> None:
+    mult = regime_alignment_mult(strategy=strategy, regime=regime, exchange=venue)
+    assert math.isfinite(mult)
+    # Strictly positive, never an off-switch, never above the amplify ceiling.
+    assert REGIME_ALIGN_DAMPEN <= mult <= REGIME_ALIGN_AMPLIFY
+    assert mult > 0.0

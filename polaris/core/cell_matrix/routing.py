@@ -201,7 +201,9 @@ def resolve_routing_for_cell(
     # block: regime alignment (existing 1.25/1.0/0.8) + a continuous posterior
     # tilt (0.5..1.5, neutral 1.0 when the posterior is cold/sparse). Sign is
     # preserved and the value is never zeroed (flow_not_block).
-    align = regime_alignment_mult(strategy=key.strategy, regime=key.regime)
+    align = regime_alignment_mult(
+        strategy=key.strategy, regime=key.regime, exchange=key.exchange
+    )
     tilt = fetch_posterior_tilt(conn, key)
     effective = effective * align * tilt
 

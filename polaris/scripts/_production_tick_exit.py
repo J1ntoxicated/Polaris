@@ -124,9 +124,19 @@ async def _run_exits(
                     side=trade.side, entry_price=entry_price,
                     last_price=last_mid, atr_pct=max(float(rev_anchor_raw), 1e-4),
                 )
+            # #19 peak give-back: track the running max favourable R (the engine's
+            # scalp exit is stateless) and feed it as ``peak_r`` so a reversion that
+            # peaked near the target but reverses banks the locked fraction instead
+            # of round-tripping. Monotone (only ratchets up), seeded at this tick's R.
+            scalp_peak_r = max(
+                eng.scalp_peak_r_by_position.get(position_id, scalp_pnl_r),
+                scalp_pnl_r,
+            )
+            eng.scalp_peak_r_by_position[position_id] = scalp_peak_r
             reason = _scalp_exit_decision(
                 side=trade.side, entry_price=entry_price, last_mid=last_mid,
                 ofi=feat.ofi, pnl_r=scalp_pnl_r, strategy_id=trade.strategy_id,
+                peak_r=scalp_peak_r,
             )
             if reason is None:
                 continue
@@ -142,10 +152,11 @@ async def _run_exits(
                 eng.family_by_position.pop(position_id, None)
                 eng.entry_ref_by_position.pop(position_id, None)
                 eng.thesis_broken_streak_by_position.pop(position_id, None)
+                eng.scalp_peak_r_by_position.pop(position_id, None)
                 logger.info(
                     "[tick-engine/scalp-exit] %s:%s trade_id=%s reason=%s "
-                    "pnl_r=%.2f", trade.venue, trade.symbol, position_id,
-                    reason, scalp_pnl_r,
+                    "pnl_r=%.2f peak_r=%.2f", trade.venue, trade.symbol,
+                    position_id, reason, scalp_pnl_r, scalp_peak_r,
                 )
             continue
         # Momentum family → existing precise-exit engine (ATR trail / BEP /

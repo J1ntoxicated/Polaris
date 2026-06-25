@@ -134,16 +134,20 @@ EXIT_LETRUN_TRAIL_MULT: Final[float] = _env_float(
 # expansion could otherwise hand a +7R back to 0; the backstop catches that) and
 # is gated while the peak-fraction trail is armed so the two never double-cut.
 #
-# Red-team CALIBRATION (load-bearing): arm at +1.0R for the tick burst family
-# (NOT +2.5R — only 6.5% of trades ever reach +1R; a higher arm starves the
-# common case) and +0.5R for the bar TREND family; frac ~0.50. EXPECTANCY, not a
-# throttle: it ONLY ratchets the stop toward profit; size / entry side / the G6
-# -1.0R rail are untouched. ``arm_r == 0.0`` DISABLES it (byte-identical).
+# Red-team CALIBRATION (load-bearing): arm at +0.45R — the COMMON-CASE rung
+# (#19 give-back fix, post-reset 2026-06-25 ledger: avg peak +0.39R; only 7.9%
+# of trades ever reach +1.0R but 18.4% reach +0.45R — the old +1.0R arm STARVED
+# the common case, so a small +0.39R peak round-tripped 100% on the wide trail
+# with NOTHING locked). +0.45R is the FEE-SAFE rung: frac 0.50 → the lock is
+# >= +0.225R at the arm (clears fees), and it is 2.3x the +1.0R coverage. frac
+# stays ~0.50. EXPECTANCY, not a throttle: it ONLY ratchets the stop toward
+# profit; size / entry side / the G6 -1.0R rail are untouched. ``arm_r == 0.0``
+# DISABLES it (byte-identical).
 #
 # The HARVEST trail for a confirmed-momentum TREND winner must NOT collapse to the
 # 1-ATR ``EXIT_HARVEST_TRAIL_MULT`` (that flat-lined the burst); it stays WIDE so
 # the peak-fraction floor (not the trail) supplies the lock.
-EXIT_PEAK_LOCK_ARM_R: Final[float] = _env_float("POLARIS_EXIT_PEAK_LOCK_ARM_R", 1.0)
+EXIT_PEAK_LOCK_ARM_R: Final[float] = _env_float("POLARIS_EXIT_PEAK_LOCK_ARM_R", 0.45)
 EXIT_PEAK_LOCK_FRAC: Final[float] = _env_float("POLARIS_EXIT_PEAK_LOCK_FRAC", 0.50)
 EXIT_LETRUN_HARVEST_TRAIL_MULT: Final[float] = _env_float(
     "POLARIS_EXIT_LETRUN_HARVEST_TRAIL_MULT", 3.5

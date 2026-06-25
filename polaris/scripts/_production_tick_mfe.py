@@ -91,14 +91,39 @@ _FLOW_PRESSURE_TRAIL_MULT_DEFAULT = 4.0
 _BURST_RIDER_TRAIL_MULT_DEFAULT = 3.5
 
 # Let-winners-run peak-fraction arm/frac for the tick MOMENTUM family
-# ([[ab_letrun_maker_2026-06-24]]). Red-team calibration: arm at +1.0R (NOT +2.5R
-# — only 6.5% of trades ever reach +1R; a higher arm starves the common case),
-# frac 0.50. burst_rider AND flow_pressure both ride it (consistency; the floor
-# only ratchets the stop toward profit — never a throttle). The sub-arm fixed
-# rungs (burst 0.35/0.50/0.25, flow_pressure the cfg band) stay the BELOW-arm
+# ([[ab_letrun_maker_2026-06-24]]). Red-team calibration: arm at +0.45R — the
+# COMMON-CASE rung (#19 give-back fix, post-reset 2026-06-25 ledger: avg peak
+# +0.39R; only 7.9% reach +1.0R but 18.4% reach +0.45R — the old +1.0R arm
+# STARVED the common case so a small peak round-tripped 100% on the wide trail).
+# +0.45R is FEE-SAFE (frac 0.50 → lock >= +0.225R at the arm) and 2.3x the +1.0R
+# coverage. frac 0.50. burst_rider AND flow_pressure both ride it (consistency;
+# the floor only ratchets the stop toward profit — never a throttle). The sub-arm
+# fixed rungs (burst 0.35/0.50/0.25, flow_pressure the cfg band) stay the BELOW-arm
 # phase. Env-tunable.
-_TICK_PEAK_LOCK_ARM_R: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_ARM_R", 1.0)
+_TICK_PEAK_LOCK_ARM_R: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_ARM_R", 0.45)
 _TICK_PEAK_LOCK_FRAC: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_FRAC", 0.50)
+
+# Reversion scalp peak GIVE-BACK arm/frac (#19, post-reset 2026-06-25 ledger).
+# micro_reversion is 63% of closes (48/76) and is REVERSION family → it exits via
+# ``_scalp_exit_decision`` ONLY (scalp_target / scalp_stop / flow_reversal), with
+# NO peak protection between entry and the 0.35R target. 32.9% of trades reach
+# +0.30R but only 18.4% reach the 0.35R bank — a +0.30R reversion peak that
+# reverses gave it ALL back to scalp_stop (-0.4R) / flow_reversal (~0). This adds
+# a PROFIT-SIDE give-back catch: once the reversion peaked past ``_SCALP_PEAK_ARM_R``
+# (0.25R — just below the 0.35R target, so it only catches a peak that nearly hit
+# the bank) and the live pnl_r surrenders below ``peak_r * _SCALP_PEAK_FRAC`` while
+# STILL POSITIVE, it banks ``scalp_giveback`` instead of round-tripping. frac 0.60
+# (reversion is a bounded revert — a slightly looser give-back than the momentum
+# 0.50 so it banks a meaningful fraction, not a crumb). FEE-SAFE FLOOR: the
+# give-back fires ONLY if the surviving pnl_r still clears ``_SCALP_PEAK_MIN_BANK_R``
+# (0.10R) — a peak that just armed at 0.25R then snapped to ~0 must NOT bank a
+# fee-negative crumb (it rides to scalp_stop / flow_reversal instead). ASYMMETRY:
+# the loss side (``_SCALP_STOP_R`` -0.4R) is UNTOUCHED — the give-back NEVER fires
+# on a negative pnl (positive-only). Env-tunable; ``peak_r`` omitted (legacy /
+# momentum) disarms it (byte-identical).
+_SCALP_PEAK_ARM_R: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_ARM_R", 0.25)
+_SCALP_PEAK_FRAC: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_FRAC", 0.60)
+_SCALP_PEAK_MIN_BANK_R: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_MIN_BANK_R", 0.10)
 
 
 def _momentum_trail_mult(strategy_id: str) -> float | None:
@@ -239,13 +264,11 @@ def _scalp_exit_decision(
     ofi: float | None,
     pnl_r: float,
     strategy_id: str = "",
+    peak_r: float | None = None,
 ) -> str | None:
     """Fast-scalp exit for a reversion position — close-reason or None (hold).
 
     Closes on the FIRST of:
-      - ``flow_reversal``: order-flow imbalance turned to favour the side the
-        fade was betting AGAINST continuing (a long fade wanted the down-push to
-        exhaust; if ``ofi`` is now firmly negative again, the snap-back failed).
       - ``scalp_stop``: adverse excursion past ``_SCALP_STOP_R`` (micro-stop).
       - ``scalp_target``: the snap-back banked the strategy's take-profit (small
         R). ``strategy_id`` selects a per-strategy PROFIT target — micro_reversion
@@ -253,13 +276,36 @@ def _scalp_exit_decision(
         ``_MICRO_REVERSION_TARGET_R`` so the +0.30-0.45R excursion is banked
         before it gives back; every other reversion id keeps the shared
         ``_SCALP_TARGET_R`` (byte-identical). PROFIT side only.
+      - ``scalp_giveback`` (#19 peak give-back): once the reversion has PEAKED past
+        ``_SCALP_PEAK_ARM_R`` (``peak_r``, the running max favourable R) and the
+        live ``pnl_r`` has surrendered below ``peak_r * _SCALP_PEAK_FRAC`` while
+        STILL ABOVE the fee-safe floor ``_SCALP_PEAK_MIN_BANK_R``, bank the locked
+        fraction NOW instead of round-tripping to scalp_stop / flow_reversal (the
+        32.9%-reach-+0.30R-but-only-18.4%-bank give-back). ``peak_r is None``
+        (legacy / momentum callers) DISARMS it (byte-identical). PROFIT side only —
+        it NEVER fires on a negative pnl nor banks a fee-negative crumb.
+      - ``flow_reversal``: order-flow imbalance turned to favour the side the
+        fade was betting AGAINST continuing (a long fade wanted the down-push to
+        exhaust; if ``ofi`` is now firmly negative again, the snap-back failed).
     EXPECTANCY (cut a dead scalp fast / bank a small winner fast), NOT a throttle.
-    The loss side (``_SCALP_STOP_R``) is UNCHANGED regardless of strategy_id.
+    The loss side (``_SCALP_STOP_R``) is UNCHANGED regardless of strategy_id /
+    peak_r — asymmetry preserved (the give-back is a positive-only profit catch).
     """
     if pnl_r <= _SCALP_STOP_R:
         return "scalp_stop"
     if pnl_r >= _scalp_target_for_strategy(strategy_id):
         return "scalp_target"
+    # Peak give-back (PROFIT side only): a reversion that reached an armed peak and
+    # is now surrendering it (still above the fee-safe floor) banks the locked
+    # fraction instead of giving the whole peak back. ``peak_r is None`` → disarmed
+    # (byte-identical). The ``pnl_r >= _SCALP_PEAK_MIN_BANK_R`` floor stops it from
+    # banking a fee-negative crumb when a peak barely armed then snapped to ~0.
+    if (
+        peak_r is not None
+        and peak_r >= _SCALP_PEAK_ARM_R
+        and _SCALP_PEAK_MIN_BANK_R <= pnl_r < peak_r * _SCALP_PEAK_FRAC
+    ):
+        return "scalp_giveback"
     if ofi is not None:
         # A long reversion bet wants flow to stop selling; if ofi is firmly
         # bid-negative (still selling) the fade is failing → exit. Symmetric for

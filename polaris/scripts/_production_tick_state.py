@@ -43,6 +43,12 @@ class TickEngineState:
     # Incremented when this tick's micro signal opposes the position, reset to 0
     # otherwise; popped on close (alongside family/entry_ref).
     thesis_broken_streak_by_position: dict[str, int] = field(default_factory=dict)
+    # Running max favourable R (peak) per REVERSION position, for the #19 scalp
+    # peak give-back: the reversion scalp exit is stateless, so the engine tracks
+    # the peak here (updated each tick to max(prev, scalp_pnl_r)) and feeds it to
+    # ``_scalp_exit_decision`` so a near-target peak that reverses banks a fraction
+    # instead of round-tripping. Popped on close (alongside family/entry_ref).
+    scalp_peak_r_by_position: dict[str, float] = field(default_factory=dict)
     # --- data-stream log-on-change / dedup caches (logging only) ----------
     # The per-tick gate DATA (regime-active membership, seam2-confirm cfg,
     # NO_FIRE verdicts) is firehose volume. These caches let the decision path

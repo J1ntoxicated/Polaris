@@ -123,6 +123,30 @@ def test_key_isolation_other_symbol_and_strategy(
     ) is False
 
 
+def test_okx_tick_scalp_does_not_block_bar_swing_same_symbol_side(
+    conn: sqlite3.Connection,
+) -> None:
+    # STEP1 multi-horizon NO-BLIND-NETTING rail: after the OKX-spot bar carve-out
+    # a tick SCALP (micro_reversion) and a bar SWING (tsmom) coexist on the SAME
+    # OKX symbol+side as INDEPENDENT logical positions. concurrent_same_side_open
+    # is strategy-scoped, so a live scalp must NOT block the swing entry (and vice
+    # versa) — distinct strategy_id = distinct logical position + PnL attribution.
+    _insert_position(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="micro_reversion",
+        opened_ts=1000, side="long",
+    )
+    # The bar swing on the SAME symbol+side is allowed (different strategy_id).
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="tsmom", side="long",
+    ) is False
+    # But a SECOND micro_reversion long IS refused (same strategy/symbol/side =
+    # the duplicate-stack guard, unchanged).
+    assert concurrent_same_side_open(
+        conn, venue="okx", symbol="BTC-USDT", strategy_id="micro_reversion",
+        side="long",
+    ) is True
+
+
 def test_closed_position_still_counts(conn: sqlite3.Connection) -> None:
     # status-agnostic: a recently CLOSED position must also start the cooldown
     # (re-buying right after a close is the over-trading we block).

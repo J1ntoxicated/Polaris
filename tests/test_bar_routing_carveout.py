@@ -38,6 +38,30 @@ def test_forex_still_reaches_bar_path() -> None:
     assert keep_on_bar_path(asset_class="forex", symbol="EURUSD") is True
 
 
+def test_okx_crypto_reaches_bar_path() -> None:
+    # STEP1 multi-horizon: OKX SPOT (asset_class 'crypto') carries the 1H swing
+    # strategies (tsmom / supertrend / spot_donchian / ema_crossover — whole-
+    # universe, NO symbol whitelist). The asset-class skip VACATED the entire OKX
+    # spot universe to the tick engine (scalp-only), giving those swing strategies
+    # a structural 0-entry ceiling (live: 0 swing/position closes, max hold 28m).
+    # They must stay on the bar pipeline for ANY OKX crypto symbol — the tick
+    # engine STILL trades it (scalp); the bar strategies add the COMPLEMENTARY 1H
+    # trend edge on the same symbol.
+    assert keep_on_bar_path(asset_class="crypto", symbol="BTC-USDT") is True
+    assert keep_on_bar_path(asset_class="crypto", symbol="ETH-USDT") is True
+    # Case-insensitive, and ANY OKX spot symbol (no per-symbol gate — these
+    # strategies trade the whole active universe).
+    assert keep_on_bar_path(asset_class="Crypto", symbol="SOL-USDT") is True
+    assert keep_on_bar_path(asset_class="crypto", symbol="DOGE-USDT") is True
+
+
+def test_spot_alias_reaches_bar_path() -> None:
+    # The OKX swing strategy metadata declares asset_class 'spot'; the live
+    # universe row resolves to 'crypto'. Accept BOTH spellings so the carve-out
+    # can never drift from the strategy declaration vs the universe label.
+    assert keep_on_bar_path(asset_class="spot", symbol="BTC-USDT") is True
+
+
 def test_unsupported_capital_symbol_still_vacated() -> None:
     # A Capital index/commodity symbol NO enabled bar strategy supports stays
     # owned by the tick engine (routed as before — no widening beyond support).

@@ -18,8 +18,11 @@ from polaris.core.cell_matrix.score import (
     REGIME_ALIGN_AMPLIFY,
     REGIME_ALIGN_DAMPEN,
     REGIME_ALIGN_NEUTRAL,
+    REGIME_RANK_PENALTY_DAMPEN,
+    REGIME_RANK_PENALTY_NEUTRAL,
     apply_regime_alignment,
     regime_alignment_mult,
+    regime_rank_penalty,
 )
 
 TREND_STRATEGIES = (
@@ -141,3 +144,104 @@ def test_property_apply_finite_and_sign_consistent(
         assert out < 0.0
     else:
         assert out == 0.0
+
+
+# ---------------------------------------------------------------------------
+# regime_rank_penalty — ticker-tailored G2 emit-priority (regime-first POOL).
+#
+# The same (strategy × THIS-ticker's-live-regime) fitness, re-expressed as a
+# NON-NEGATIVE ranking-down penalty (the PipelineTaskSpec.rank_penalty contract):
+# a well-fit strategy on a ticker whose live regime suits it RANKS AHEAD (lower
+# penalty = sorted earlier in the per-tick batch = a head-start into the
+# concurrent gate fan-out, NOT a guaranteed budget-reservation order) of a mis-fit
+# one. NEVER a block, NEVER a size-cut, NEVER a T4 multiplier — pure batch ORDER
+# (flow_not_block, 9-stack untouched). Cold/crisis/unknown → neutral (the
+# cold-start trap the debate flagged: an unclassified ticker is never demoted
+# into oblivion).
+# ---------------------------------------------------------------------------
+
+
+def test_rank_penalty_aligned_is_zero_sorts_first() -> None:
+    # A trend strategy on a ticker in a trend regime is the best-fit POOL member
+    # → the LOWEST penalty (0.0) = sorted first in the per-tick batch.
+    for strat in TREND_STRATEGIES:
+        for regime in TREND_REGIMES:
+            assert regime_rank_penalty(strategy=strat, regime=regime) == 0.0
+    assert regime_rank_penalty(strategy="rsi_bb_pullback", regime="chop") == 0.0
+
+
+def test_rank_penalty_misaligned_ranks_down_but_positive_finite() -> None:
+    # A mis-regime strategy is RANKED DOWN (positive penalty) — still emits,
+    # still flows, still sized normally — just later in the batch.
+    for strat in TREND_STRATEGIES:
+        pen = regime_rank_penalty(strategy=strat, regime="chop")
+        assert pen == REGIME_RANK_PENALTY_DAMPEN
+        assert pen > 0.0
+        assert math.isfinite(pen)
+    for regime in TREND_REGIMES:
+        assert (
+            regime_rank_penalty(strategy="rsi_bb_pullback", regime=regime)
+            == REGIME_RANK_PENALTY_DAMPEN
+        )
+
+
+def test_rank_penalty_neutral_between_aligned_and_misaligned() -> None:
+    # Crisis / unknown regime / unknown strategy → neutral penalty, strictly
+    # BETWEEN best-fit (0.0) and mis-fit (dampen). Ordering: aligned < neutral
+    # < misaligned, so the regime-first POOL is a 3-tier priority, never a gate.
+    neutral = regime_rank_penalty(strategy="tsmom", regime="crisis")
+    assert neutral == REGIME_RANK_PENALTY_NEUTRAL
+    assert 0.0 < REGIME_RANK_PENALTY_NEUTRAL < REGIME_RANK_PENALTY_DAMPEN
+
+
+def test_rank_penalty_cold_unknown_never_demoted_to_oblivion() -> None:
+    # Unknown strategy / unknown regime → neutral (NOT the worst tier): the
+    # cold-start trap. A fresh ticker/strategy competes on neutral footing.
+    assert regime_rank_penalty(strategy="mystery_alpha", regime="bull_trend") == (
+        REGIME_RANK_PENALTY_NEUTRAL
+    )
+    assert regime_rank_penalty(strategy="tsmom", regime="sideways") == (
+        REGIME_RANK_PENALTY_NEUTRAL
+    )
+
+
+def test_rank_penalty_is_below_one_pdt_step_so_pdt_dominates() -> None:
+    # All regime penalties live UNDER one PDT step (1.0) so a PDT-flagged equity
+    # entry (integrity, penalty >= 1.0) always sinks below any non-PDT entry
+    # regardless of regime fit — integrity dominates, regime fit is secondary.
+    assert REGIME_RANK_PENALTY_DAMPEN < 1.0
+    assert REGIME_RANK_PENALTY_NEUTRAL < 1.0
+
+
+def test_rank_penalty_mirrors_alignment_mult_ordering() -> None:
+    # The penalty is a re-encoding of the SAME fitness SSOT: a strategy with a
+    # higher alignment mult must never have a HIGHER penalty (monotone inverse).
+    cases = [
+        ("tsmom", "bull_trend"),
+        ("tsmom", "chop"),
+        ("tsmom", "crisis"),
+        ("rsi_bb_pullback", "chop"),
+        ("rsi_bb_pullback", "bull_trend"),
+        ("mystery", "bull_trend"),
+    ]
+    for strat, regime in cases:
+        mult = regime_alignment_mult(strategy=strat, regime=regime)
+        pen = regime_rank_penalty(strategy=strat, regime=regime)
+        if mult == REGIME_ALIGN_AMPLIFY:
+            assert pen == 0.0
+        elif mult == REGIME_ALIGN_NEUTRAL:
+            assert pen == REGIME_RANK_PENALTY_NEUTRAL
+        else:  # dampen
+            assert pen == REGIME_RANK_PENALTY_DAMPEN
+
+
+@given(
+    strategy=st.sampled_from((*TREND_STRATEGIES, "rsi_bb_pullback", "mystery")),
+    regime=st.sampled_from(("bull_trend", "bear_trend", "chop", "crisis", "weird")),
+)
+def test_property_rank_penalty_non_negative_finite_bounded(
+    strategy: str, regime: str
+) -> None:
+    pen = regime_rank_penalty(strategy=strategy, regime=regime)
+    assert math.isfinite(pen)
+    assert 0.0 <= pen <= REGIME_RANK_PENALTY_DAMPEN  # never a block / sentinel

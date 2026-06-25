@@ -16,6 +16,7 @@ import sqlite3
 import time
 from typing import Any
 
+from polaris.core.cell_matrix.score import regime_rank_penalty
 from polaris.core.data.quote_writer import live_or_bar_price
 from polaris.core.data.signal_persist import persist_emitted_signal
 from polaris.core.isolation.circuit_breaker import (
@@ -654,6 +655,31 @@ async def _run_tick(
                 # T4 multiplier — notional is untouched.
                 pdt_penalty = apply_equity_pdt_rank_down(venue, state=state)
 
+                # G2 ticker-tailored assignment — regime-first POOL priority.
+                # The audited G2 matched a strategy to a ticker by venue/asset-
+                # class ONLY (static). Couple THIS ticker's LIVE ``regime`` into
+                # the emit-time ranking (the /debate "regime-first hybrid"): a
+                # strategy whose edge fits the ticker's current regime is ranked
+                # AHEAD of a mis-regime one via the SAME ``rank_penalty`` channel
+                # the PDT gate uses. ``order_specs_by_rank`` sorts the per-tick
+                # batch by this penalty, so a better-fit spec is *created first*
+                # in the supervised TaskGroup — a structural HEAD-START into the
+                # concurrent gate fan-out, NOT a guaranteed reservation order
+                # (the gate pipeline awaits interleave, so the actual budget
+                # reservation is still gate-completion-ordered — this is a
+                # best-effort priority nudge, not a hard precedence). A mis-
+                # regime strategy STILL emits, STILL flows, STILL sized normally,
+                # just sorted LATER (flow_not_block, exactly like the PDT rank-
+                # down). NON-negative, additive with ``pdt_penalty``, and < one
+                # PDT step so PDT integrity always dominates. NEVER a T4 sizing
+                # multiplier — notional is byte-identical regardless of rank
+                # (assignment is not a sizing input; 9-stack untouched). Crisis/
+                # unknown → NEUTRAL (an unclassified ticker is not the worst tier).
+                regime_penalty = regime_rank_penalty(
+                    strategy=strategy_id, regime=regime
+                )
+                rank_penalty = pdt_penalty + regime_penalty
+
                 def _factory(
                     *, _strategy: Any = strategy, _sig: Any = sig,
                     _venue: str = venue, _symbol: str = symbol,
@@ -679,7 +705,7 @@ async def _run_tick(
                 pipeline_specs.append(
                     PipelineTaskSpec(
                         strategy_id=strategy_id, coro_factory=_factory,
-                        rank_penalty=pdt_penalty,
+                        rank_penalty=rank_penalty,
                     )
                 )
     if pipeline_specs:

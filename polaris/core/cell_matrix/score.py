@@ -22,6 +22,8 @@ __all__ = [
     "REGIME_ALIGN_AMPLIFY",
     "REGIME_ALIGN_DAMPEN",
     "REGIME_ALIGN_NEUTRAL",
+    "REGIME_RANK_PENALTY_DAMPEN",
+    "REGIME_RANK_PENALTY_NEUTRAL",
     "apply_exponential_decay",
     "apply_regime_alignment",
     "compute_avg_pnl_r",
@@ -29,6 +31,7 @@ __all__ = [
     "decay_factor",
     "posterior_tilt",
     "regime_alignment_mult",
+    "regime_rank_penalty",
     "resolve_effective_score",
 ]
 
@@ -112,6 +115,61 @@ def apply_regime_alignment(score: float, *, strategy: str, regime: str) -> float
     untouched — callers opt in to alignment by wrapping the score with this.
     """
     return score * regime_alignment_mult(strategy=strategy, regime=regime)
+
+
+# ---------------------------------------------------------------------------
+# Regime → G2 EMIT-PRIORITY (ticker-tailored, regime-first POOL ordering)
+# ---------------------------------------------------------------------------
+
+REGIME_RANK_PENALTY_NEUTRAL: Final[float] = 0.10
+"""Rank-down for a strategy with NO regime claim (crisis / unknown / cold).
+
+Strictly between the best-fit (0.0) and the mis-fit (DAMPEN) penalty so an
+unclassified ticker/strategy competes on neutral footing — never demoted into
+oblivion (the cold-start trap the /debate flagged). Well UNDER one PDT step
+(1.0), so PDT integrity ranking always dominates regime fit.
+"""
+
+REGIME_RANK_PENALTY_DAMPEN: Final[float] = 0.20
+"""Rank-down for a MIS-regime strategy on this ticker (ranked DOWN, never out).
+
+A mis-fit strategy still emits, still flows, still sized normally — it is just
+sorted LATER in the per-tick batch (a head-start, not a hard precedence — see
+:func:`regime_rank_penalty`). Still well under one PDT step so it never
+overrides a PDT integrity demotion.
+"""
+
+
+def regime_rank_penalty(*, strategy: str, regime: str) -> float:
+    """Ticker-tailored G2 emit-priority penalty (regime-first POOL ordering).
+
+    Re-encodes the SAME ``regime_alignment_mult`` fitness SSOT as a NON-NEGATIVE
+    ranking-down number (the :class:`PipelineTaskSpec.rank_penalty` contract):
+
+      * AMPLIFY (strategy's edge fits THIS ticker's live regime) → ``0.0`` — the
+        best-fit POOL member sorts FIRST in the per-tick batch.
+      * NEUTRAL (crisis / unknown / cold) → ``REGIME_RANK_PENALTY_NEUTRAL``.
+      * DAMPEN (mis-regime)              → ``REGIME_RANK_PENALTY_DAMPEN`` — sorted
+        LATER, but STILL emits / flows / sized (flow_not_block).
+
+    This is the "동적할당 POOL" expressed as a 3-tier PRIORITY, never a gate: no
+    signal is dropped, skipped, or size-cut, and the penalty is NEVER a T4 sizing
+    multiplier (notional is byte-identical for a given signal regardless of its
+    rank — ``focus/assignment`` is not a sizing input, 9-stack untouched). An
+    unknown family/regime degrades to NEUTRAL (total function, never raises).
+
+    Effect is the per-tick batch SORT (``order_specs_by_rank``): a lower penalty
+    is created earlier in the supervised TaskGroup, a structural HEAD-START into
+    the concurrent gate fan-out. It is a best-effort priority nudge, NOT a
+    guaranteed risk-budget reservation order (the gate awaits interleave, so the
+    final reservation is still gate-completion-ordered).
+    """
+    mult = regime_alignment_mult(strategy=strategy, regime=regime)
+    if mult >= REGIME_ALIGN_AMPLIFY:
+        return 0.0
+    if mult <= REGIME_ALIGN_DAMPEN:
+        return REGIME_RANK_PENALTY_DAMPEN
+    return REGIME_RANK_PENALTY_NEUTRAL
 
 
 # ---------------------------------------------------------------------------

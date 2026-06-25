@@ -296,12 +296,6 @@
   #board .perf-scroll { display: grid; grid-auto-rows: min-content; gap: 8px; min-height: 0; overflow: auto; align-content: start; }
   #board .perf-scroll::-webkit-scrollbar { width: 5px; }
   #board .perf-scroll::-webkit-scrollbar-thumb { background: var(--ghost); }
-  #board .perf-scroll .tab-grid-3, #board .perf-scroll .tab-grid-2 { min-height: 130px; }
-  /* Performance "Breakdowns" outer fold (Jin 2026-06-26): the wrap body holds the
-     nested analytics grids; let them size to content + scroll inside the body. */
-  #board .perf-analytics-panel { flex: 0 0 auto; }
-  #board .p-body.perf-analytics-body { display: grid; grid-auto-rows: min-content; gap: 8px; padding: 8px; flex: 0 0 auto; }
-  #board .perf-analytics-body .tab-grid-3 { min-height: 130px; }
   /* shared inline label token (eq-head money labels, etc.). */
   #board .kk { color: var(--p-dim); letter-spacing: 0.06em; text-transform: uppercase; }
   `;
@@ -332,31 +326,16 @@
   // Collapsible full-width panel: a chevron in the header toggles the body and
   // persists per-panel state in localStorage (default expanded). Used for the
   // Gate Funnel + Live Gate Activity panels so Jin can fold either away.
-  function collapsiblePanel(title, bodyId, bodyCls, panelCls) {
+  function collapsiblePanel(title, bodyId, bodyCls, panelCls, defaultCollapsed) {
     const key = 'pb.collapse.' + bodyId;
-    let collapsed = false;
-    try { collapsed = localStorage.getItem(key) === '1'; } catch (e) { /* private mode */ }
+    let collapsed = !!defaultCollapsed;   // first-paint default; saved state wins
+    try { const v = localStorage.getItem(key); if (v !== null) collapsed = v === '1'; } catch (e) { /* private mode */ }
     return `<div class="panel collapsible${collapsed ? ' collapsed' : ''}${panelCls ? ' ' + panelCls : ''}" data-collapse-key="${esc(key)}">`
       + `<div class="p-head p-head-toggle" role="button" tabindex="0" aria-expanded="${collapsed ? 'false' : 'true'}">`
       + `<span class="chev" aria-hidden="true"></span>`
       + `<span class="ttl">${esc(title)}</span>`
       + `<span class="cnt" id="${bodyId}-cnt"></span></div>`
       + `<div class="p-body ${bodyCls || ''}" id="${bodyId}"></div></div>`;
-  }
-
-  // Collapsible WRAP: same chevron/persist mechanics as collapsiblePanel, but the
-  // body holds caller-supplied HTML (nested panels/grids) instead of an empty id
-  // target. Used for the Performance "Breakdowns" outer fold (Jin 2026-06-26).
-  // Default COLLAPSED (space-first) so the equity curve owns the pane until opened.
-  function collapsibleWrap(title, key, innerHtml) {
-    const k = 'pb.collapse.' + key;
-    let collapsed = true;   // space-first default
-    try { const v = localStorage.getItem(k); if (v !== null) collapsed = v === '1'; } catch (e) { /* private mode */ }
-    return `<div class="panel collapsible perf-analytics-panel${collapsed ? ' collapsed' : ''}" data-collapse-key="${esc(k)}">`
-      + `<div class="p-head p-head-toggle" role="button" tabindex="0" aria-expanded="${collapsed ? 'false' : 'true'}">`
-      + `<span class="chev" aria-hidden="true"></span>`
-      + `<span class="ttl">${esc(title)}</span></div>`
-      + `<div class="p-body perf-analytics-body">${innerHtml}</div></div>`;
   }
 
   // Delegated toggle: one listener on #board handles every collapsible panel.
@@ -444,22 +423,16 @@
             <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars."></div>
           </div>
         </div>
-        <!-- Jin 2026-06-26: the whole analytics block below the equity curve folds
-             into ONE outer collapsible panel (reuses wireCollapsibles) so the curve
-             gets the full pane when collapsed. Default collapsed (space-first); the
-             inner panels stay individually foldable when expanded. -->
+        <!-- Jin 2026-06-26 (v2): the 6 breakdowns are FULL-WIDTH collapsible one-
+             liners, stacked + scrolled (NOT 3 narrow columns). Each defaults
+             collapsed so the pane reads as a 6-line index — expand the one you want. -->
         <div class="perf-scroll">
-          ${collapsibleWrap('Breakdowns · per-venue · per-strategy · per-ticker · edge · worst · costs', 'perf-analytics', `
-            <div class="tab-grid-3">
-              ${collapsiblePanel('Per-Venue · net$ · trades · open · exposed · uPnL', 'venue-body', 'mini')}
-              ${collapsiblePanel('Per-Strategy · win rate / net R / per-regime cell value', 'strat-body', 'mini')}
-              ${collapsiblePanel('Per-Ticker · cumulative R by symbol', 'ticker-body', 'mini')}
-            </div>
-            <div class="tab-grid-3">
-              ${collapsiblePanel('Edge Validation · per strategy × ticker × regime', 'edge-body', 'mini')}
-              ${collapsiblePanel('Worst strategies · biggest money losers', 'worst-body', 'mini')}
-              ${collapsiblePanel('Costs & hidden losses', 'costs-body', 'mini')}
-            </div>`)}
+          ${collapsiblePanel('Per-Venue · net$ · trades · open · exposed · uPnL', 'venue-body', 'mini', null, true)}
+          ${collapsiblePanel('Per-Strategy · win rate / net R / per-regime cell value', 'strat-body', 'mini', null, true)}
+          ${collapsiblePanel('Per-Ticker · cumulative R by symbol', 'ticker-body', 'mini', null, true)}
+          ${collapsiblePanel('Edge Validation · per strategy × ticker × regime', 'edge-body', 'mini', null, true)}
+          ${collapsiblePanel('Worst strategies · biggest money losers', 'worst-body', 'mini', null, true)}
+          ${collapsiblePanel('Costs & hidden losses', 'costs-body', 'mini', null, true)}
         </div>
       </div>
     </div>

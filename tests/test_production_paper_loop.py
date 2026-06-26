@@ -351,12 +351,14 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 11: strategy-wave1 un-registered fx_range_fade
+    """The strategy list is exactly 18: strategy-wave1 un-registered fx_range_fade
     and added the 4 verified 1D survivors (okx_donchian_55 / tsmom_12_1 /
     macd_ema / donchian_turtle); volume_burst was then un-registered 2026-06-27
-    (#61 live-churn KILL), dropping the dispatch list 12 → 11."""
+    (#61 live-churn KILL), dropping the dispatch list 12 → 11. strategy-wave2
+    (2026-06-27) added 7 verified research survivors (Capital GOLD/index 5 +
+    Alpaca equity 2) → 18."""
     strategies = _all_strategies()
-    assert len(strategies) == 11
+    assert len(strategies) == 18
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
     assert "session_breakout" in ids
@@ -366,6 +368,10 @@ async def test_l7_supervise_strategies_wired() -> None:
     assert "tsmom_12_1_multiasset" in ids
     assert "macd_ema_trend_pullback" in ids
     assert "donchian_turtle_breakout" in ids
+    # strategy-wave2 dispatch additions.
+    assert "gold_trend_chandelier_1d" in ids
+    assert "index_dual_momentum_rotation" in ids
+    assert "equity_vol_expansion_pocket_pivot" in ids
 
 
 @pytest.mark.asyncio
@@ -441,7 +447,8 @@ def test_g2_emit_no_cap() -> None:
     strategies = _all_strategies()
     # no cap; strategy-wave1: fx_range_fade KILLed, +4 verified 1D survivors = 12;
     # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) → 11.
-    assert len(strategies) == 11
+    # strategy-wave2 (2026-06-27): +7 verified research survivors → 18.
+    assert len(strategies) == 18
 
 
 @pytest.mark.asyncio

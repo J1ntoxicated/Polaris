@@ -191,3 +191,5 @@
 2026-06-25 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=221 learners=3 paper=True]
 2026-06-25 daily-auto [closes=878 pnl_usd=+2607.11 opens=1051 faults=99 restarts=2]
 2026-06-26 [debate: exit/harvest redesign D1/D2/D3 GPT-5.5+Gemini-2.5 → DESIGN-CONVERGED, 1 frac fork → exit_harvest_redesign_2026-06-26.md]
+2026-06-26 04:16 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=365 learners=3 paper=True]
+2026-06-26 deploy+reset main 178dbc0 PID 3042 — 측정 6 fix(#46 NL25 orphan/#49 net entry-fee/#50 ccy conv/#51 ruler+mfe_r) + #47 exit recalib(arm0.30+peak1R disarm) + #48 global session rotation + #32 AI judge-with-info(no-KILL structural, active) + #52 reset(#46 apply·#51 restamp 584·DB archive 924MB); live judge gpt_ok non-block, 42 shadow rows, 22fills/13pos, crash 0

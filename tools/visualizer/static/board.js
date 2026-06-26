@@ -277,6 +277,73 @@
       + `stroke-linecap="round"/></svg>`;
   }
 
+  // uPnL trajectory (Jin 2026-06-27) — "실시간 피 어케 되는지": how a position's
+  // unrealised PnL has MOVED since entry, not just its current value. Derives a
+  // uPnL_t series from the row's own price history (spark[], oldest→newest) +
+  // entry_price + qty + side: uPnL_t = (price_t − entry_price) × qty × (+1 long
+  // / −1 short). The series is a SHAPE (quote-ccy units, auto-scaled), so the
+  // sign vs the zero baseline + the peak/trough markers are honest regardless of
+  // FX conversion (qty×Δprice shares the USD-uPnL sign). DISPLAY-ONLY — derived
+  // purely from already-present row fields; never feeds sizing/gating/exit.
+  function upnlTrajectory(spark, entryPrice, qty, side) {
+    if (!Array.isArray(spark) || spark.length < 2) return null;
+    const e = +entryPrice, q = +qty;
+    if (!isFinite(e) || !isFinite(q) || e === 0 || q === 0) return null;
+    const dir = String(side || '').toLowerCase() === 'short' ? -1 : 1;
+    const series = spark.map(px => (+px - e) * q * dir);
+    let mfeIdx = 0, maeIdx = 0;   // peak (max uPnL) / trough (min uPnL) of the path
+    for (let i = 1; i < series.length; i++) {
+      if (series[i] > series[mfeIdx]) mfeIdx = i;
+      if (series[i] < series[maeIdx]) maeIdx = i;
+    }
+    return { series, mfeIdx, maeIdx, last: series[series.length - 1] };
+  }
+  // Compact inline uPnL-trajectory sparkline for a positions row. Green when the
+  // CURRENT uPnL (last point) is in profit, red when underwater. A dim zero
+  // baseline marks breakeven so you SEE where the path crossed it; a green dot
+  // marks the peak (MFE) and a red dot the trough (MAE) of the path itself. ''
+  // when the series can't be derived (no/short history) → the cell stays blank.
+  const TRAJ_W = 64, TRAJ_H = 16, TRAJ_PAD = 2;
+  // Render a derived uPnL series into the compact trajectory SVG (peak/trough
+  // dots + breakeven baseline). Shared by the snapshot render + the live extend
+  // so both paint identically. '' for a series shorter than 2 points.
+  function _upnlSvgFromSeries(series) {
+    const s = series, n = s.length;
+    if (n < 2) return '';
+    let lo = Infinity, hi = -Infinity, mfeIdx = 0, maeIdx = 0;
+    for (let i = 0; i < n; i++) {
+      const v = s[i];
+      if (v < lo) lo = v; if (v > hi) hi = v;
+      if (v > s[mfeIdx]) mfeIdx = i; if (v < s[maeIdx]) maeIdx = i;
+    }
+    // Always include 0 in the range so the breakeven baseline is on-canvas.
+    lo = Math.min(lo, 0); hi = Math.max(hi, 0);
+    const span = (hi - lo) || 1;
+    const iw = TRAJ_W - TRAJ_PAD * 2, ih = TRAJ_H - TRAJ_PAD * 2;
+    const xOf = i => TRAJ_PAD + (n === 1 ? 0 : (i / (n - 1)) * iw);
+    const yOf = v => TRAJ_PAD + ih - ((v - lo) / span) * ih;
+    const pts = s.map((v, i) => xOf(i).toFixed(1) + ',' + yOf(i).toFixed(1)).join(' ');
+    const col = s[n - 1] >= 0 ? 'var(--p-grn)' : 'var(--p-red)';
+    const zeroY = yOf(0).toFixed(1);
+    const base = `<line x1="${TRAJ_PAD}" y1="${zeroY}" x2="${TRAJ_W - TRAJ_PAD}" `
+      + `y2="${zeroY}" stroke="var(--p-dim)" stroke-width="0.5" `
+      + `stroke-dasharray="2 2"/>`;
+    const peak = `<circle cx="${xOf(mfeIdx).toFixed(1)}" cy="${yOf(s[mfeIdx]).toFixed(1)}" `
+      + `r="1.4" fill="var(--p-grn)"/>`;
+    const trough = `<circle cx="${xOf(maeIdx).toFixed(1)}" cy="${yOf(s[maeIdx]).toFixed(1)}" `
+      + `r="1.4" fill="var(--p-red)"/>`;
+    return `<svg class="traj" width="${TRAJ_W}" height="${TRAJ_H}" `
+      + `viewBox="0 0 ${TRAJ_W} ${TRAJ_H}" preserveAspectRatio="none" `
+      + `aria-hidden="true">${base}<polyline points="${pts}" fill="none" `
+      + `stroke="${col}" stroke-width="1" stroke-linejoin="round" `
+      + `stroke-linecap="round"/>${peak}${trough}</svg>`;
+  }
+  function upnlSparkline(spark, entryPrice, qty, side) {
+    const t = upnlTrajectory(spark, entryPrice, qty, side);
+    if (!t) return '';
+    return _upnlSvgFromSeries(t.series);
+  }
+
   // Symbol cell (Jin 2026-06-26) — lays a row's SYMBOL + human NAME + sparkline
   // on a fixed 3-column grid (sym block │ name │ spark, spark flush-right) so
   // they line up cleanly across rows instead of inline-flowing ragged. Pure
@@ -874,6 +941,40 @@
   // Column indices match renderPositions' cell order (board_tabs.js): 4=CURRENT
   // (last_price), 5=Δ% (delta_pct), 7=uPnL$ (upnl_usd), 8=uPnL% (upnl_pct).
   const _priceLast = {};   // key → { px, upnl, delta } last numeric value for flash dir
+  // uPnL trajectory live-extend (Jin 2026-06-27). renderPositions stashes each
+  // open row's deriving fields (spark seed + entry/qty/side) here per row key;
+  // the price stream appends a live uPnL point from the streamed last_price so
+  // the mini path GROWS smoothly between 1s snapshots. _trajLive caps the live
+  // tail so it never runs away; the next snapshot reseeds geometry from spark.
+  const _posTrajMeta = {};   // key → { spark, entry, qty, side }
+  const _trajLive = {};      // key → array of live derived uPnL points (capped)
+  const TRAJ_LIVE_CAP = 30;
+  // renderPositions calls this each snapshot when it reseeds a row's meta: the
+  // fresh spark[] already incorporates the latest close, so the live tail starts
+  // over from there (no unbounded cross-snapshot accumulation).
+  function resetTrajLive(key) { _trajLive[key] = []; }
+  function _redrawTraj(tr, key, lastPrice) {
+    const m = _posTrajMeta[key];
+    if (!m || lastPrice == null) return;
+    const cell = tr.children[15];   // uPnL TRAJ column (last cell)
+    if (!cell) return;
+    const dir = String(m.side || '').toLowerCase() === 'short' ? -1 : 1;
+    const pt = (+lastPrice - +m.entry) * +m.qty * dir;
+    if (!isFinite(pt)) return;
+    const buf = _trajLive[key] || (_trajLive[key] = []);
+    buf.push(pt);
+    if (buf.length > TRAJ_LIVE_CAP) buf.shift();
+    // Seed series = the snapshot spark-derived path; the live tail extends it.
+    const seed = upnlTrajectory(m.spark, m.entry, m.qty, m.side);
+    const seedSeries = seed ? seed.series : [];
+    const merged = seedSeries.concat(buf);
+    if (merged.length < 2) return;
+    cell.innerHTML = _upnlSvgFromSeries(merged);
+    // Invalidate syncTable's cached html for this cell so the NEXT snapshot poll
+    // always re-asserts the authoritative spark-derived geometry (the live tail
+    // is display-only; the snapshot owns the truth).
+    cell.__html = null;
+  }
   function _flashCell(td, dir) {
     if (!td || !dir) return;
     td.classList.remove(FLASH_UP, FLASH_DOWN);
@@ -912,6 +1013,9 @@
     // Req ③: recolour THIS row's sparkline to the live tick direction (up=green /
     // down=red) the instant the mark moves — between the 1s snapshot repaints.
     if (pxDir) setSparkDir(tr, pxDir);
+    // Extend the uPnL-trajectory mini-graph with the live point so the path
+    // grows smoothly between 1s snapshots (display-only; snapshot owns geometry).
+    _redrawTraj(tr, key, p.last_price);
     // Jin 2026-06-24 SYNC: a streamed cell that moved (price flashed) → pulse the
     // SAME symbol's node on the globe on the SAME event, so cell flash + cloud
     // pulse fire together. key = venue|symbol|strategy|side. Display-only.
@@ -1033,10 +1137,13 @@
   }
 
   // Expose shared helpers for board_tabs.js (loaded after this file).
-  window.PolarisBoard = {
+  if (typeof window !== 'undefined') window.PolarisBoard = {
     $: $, fmtUsd: fmtUsd, fmtPct: fmtPct, fmtSignedPct: fmtSignedPct,
     fmtPx: fmtPx, fmtPxCcy: fmtPxCcy, ccySymbol: ccySymbol,
-    fmtR: fmtR, sparkline: sparkline, symCell: symCell, setSparkDir: setSparkDir,
+    fmtR: fmtR, sparkline: sparkline, upnlSparkline: upnlSparkline,
+    posTrajMeta: _posTrajMeta,   // key → {spark, entry, qty, side} for live extend
+    resetTrajLive: resetTrajLive,   // renderPositions reseeds the live tail per poll
+    symCell: symCell, setSparkDir: setSparkDir,
     pn: pn, esc: esc, hms: hms, hhmmss: hhmmss,
     venueStream: venueStream, laneGroups: laneGroups,
     STREAM_LABEL: STREAM_LABEL, STREAM_TAGLINE: STREAM_TAGLINE,
@@ -1070,9 +1177,17 @@
     startSphereWatchdog();
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
+  // Node export (unit tests) — expose the pure uPnL-trajectory math without the
+  // browser bootstrap. Guarded so the browser path is untouched.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { upnlTrajectory: upnlTrajectory, _upnlSvgFromSeries: _upnlSvgFromSeries };
+  }
+  // Browser bootstrap — only when a real DOM is present (skipped under node).
+  if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
   }
 })();

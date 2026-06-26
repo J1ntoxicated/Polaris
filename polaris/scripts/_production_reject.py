@@ -40,10 +40,16 @@ logger = logging.getLogger(__name__)
 #   insufficient_balance = FIX-2 pre-submit balance-clamp skip (wallet below min
 #           notional → entry skipped cleanly, not a fault)
 #   no_fill = order accepted but unfilled / liquidity / transport no-fill
+#   maker_no_fill = #77 weekend thin-book maker DELIBERATE skip: a post-only that
+#           did not fill in the bounded reprice loop is CANCELLED (no taker
+#           fallback) because the edge IS the passive deep-bid fill (a missed
+#           fill = 0 realised cost). Releases the reservation cleanly, NEVER a
+#           strategy fault (it is the designed behaviour, not an anomaly).
 # A reject code OUTSIDE this set is treated as a possible internal/client bug
 # and still records a FAULT_REJECT so real anomalies can eventually halt.
 EXTERNAL_NONFAULT_REJECT_CODES: frozenset[str] = frozenset(
-    {"51155", "51008", "51131", "51201", "insufficient_balance", "no_fill"}
+    {"51155", "51008", "51131", "51201", "insufficient_balance", "no_fill",
+     "maker_no_fill"}
 )
 # OKX compliance reject → permanent blocklist (never auto-clears). Balance /
 # no-fill codes are transient and are NOT blocklisted.

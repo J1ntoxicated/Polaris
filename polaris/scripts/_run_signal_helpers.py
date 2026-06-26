@@ -55,6 +55,22 @@ def _bar_order_mode(strategy_id: str) -> tuple[bool, bool]:
     return (True, False)       # reversion/range → rest passively (post-only)
 
 
+def _bar_maker_no_fill(strategy_id: str) -> str:
+    """OKX post-only no-fill mode for ``strategy_id`` → ``"cancel"`` | ``"market"``.
+
+    A strategy whose metadata sets ``maker_no_fill_cancel`` (the #77 weekend
+    thin-book maker) resolves a post-only no-fill as a CANCEL/skip — its edge IS
+    the passive deep-bid fill, so a miss is 0 realised cost, NOT a forced taker.
+    Every other registered strategy — and any UNREGISTERED id — resolves to
+    ``"market"`` (the legacy taker fallback, byte-identical so no existing entry
+    is ever blocked; flow_not_block).
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is not None and cls.metadata.maker_no_fill_cancel:
+        return "cancel"
+    return "market"
+
+
 def _maybe_register_rotation_candidate(
     state: ProdLoopState,
     *,

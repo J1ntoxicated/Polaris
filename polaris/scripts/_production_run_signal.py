@@ -57,6 +57,9 @@ from polaris.scripts._run_signal_helpers import (
     _assert_stream_asset_class_coherent as _assert_stream_asset_class_coherent,
 )
 from polaris.scripts._run_signal_helpers import (
+    _bar_maker_no_fill as _bar_maker_no_fill,
+)
+from polaris.scripts._run_signal_helpers import (
     _bar_order_mode as _bar_order_mode,
 )
 from polaris.scripts._run_signal_helpers import (
@@ -335,6 +338,10 @@ async def run_pipeline_for_signal(
     # Every mode falls back to market on no-fill/reject (flow_not_block). Capital
     # bar entries are unaffected (market-default; OKX-only wire today).
     bar_prefer_maker, bar_marketable_limit = _bar_order_mode(sig.strategy_id)
+    # #77: a post-only no-fill is CANCEL/skip only for the weekend thin-book maker
+    # (metadata.maker_no_fill_cancel); every other strategy keeps the market
+    # (taker) fallback (byte-identical — flow_not_block).
+    bar_maker_no_fill = _bar_maker_no_fill(sig.strategy_id)
     trade = await reserve_and_submit(
         conn=conn, state=state, sig=sig, venue=venue, symbol=symbol,
         asset_class=asset_class, underlying_group_id=underlying_group_id,
@@ -342,6 +349,7 @@ async def run_pipeline_for_signal(
         real_roundtrip=real_roundtrip, capital_session=capital_session,
         okx_adapter=okx_adapter, alpaca_adapter=alpaca_adapter,
         prefer_maker=bar_prefer_maker, marketable_limit=bar_marketable_limit,
+        maker_no_fill=bar_maker_no_fill,
     )
     if trade is None:
         return

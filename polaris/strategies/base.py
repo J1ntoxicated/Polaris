@@ -64,6 +64,14 @@ class StrategyMetadata:
     # Position lifecycle, never an entry block / size dampen (flow_not_block). OKX
     # crypto is 24/7 and EOD-exempt regardless of this flag.
     hold_overnight: bool = False
+    # maker_no_fill_cancel: when True, a post-only entry that exhausts the bounded
+    # reprice/repost loop unfilled is CANCELLED/skipped instead of falling back to
+    # a taker market order (#77 weekend thin-book maker). The strategy's edge IS
+    # the passive deep-bid fill — a missed fill is 0 realised cost, never a forced
+    # taker. The DEFAULT (False) keeps the legacy taker-fallback so no existing
+    # entry is ever blocked (flow_not_block). Routing only — never a size/entry
+    # block; applies solely to the OKX prefer-maker post-only path.
+    maker_no_fill_cancel: bool = False
 
 
 @dataclass(frozen=True, slots=True)

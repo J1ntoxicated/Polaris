@@ -25,9 +25,11 @@ __all__ = [
     "OKX_BALANCE_CLAMP_BUFFER_FRAC",
     "OKX_CLOSE_CAP_BUFFER_FRAC",
     "OKX_MAX_MARKET_NOTIONAL_USDT",
+    "POST_ONLY_MAX_REPOSTS",
     "STRONG_SIGNAL_STRENGTH",
     "limit_fill_wait_sec",
     "marketable_limit_cap_bps",
+    "post_only_max_reposts",
     "strong_signal_strength",
 ]
 
@@ -90,6 +92,29 @@ STRONG_SIGNAL_STRENGTH: Final[float] = _env_float(
 def limit_fill_wait_sec() -> float:
     """Resolve the limit fill-wait at call time (env override honoured)."""
     return _env_float("POLARIS_LIMIT_FILL_WAIT_SEC", LIMIT_FILL_WAIT_SEC)
+
+
+# Max RE-POSTs of an unfilled post-only at the FRESH touch within one entry
+# (#77 maker exec layer). The prior path posted ONCE then fell to market — fatal
+# to the weekend thin-book edge (the fill IS the edge; a market fallback reverts
+# to taker cost). A bounded repost loop (re-resolve the touch, cancel the stale
+# rest, re-post) gives a deep passive bid several shots at the flush without ever
+# looping unbounded: total attempts = 1 + POST_ONLY_MAX_REPOSTS, each capped by
+# ``limit_fill_wait_sec``. Env-tunable for a paper sweep. A non-positive override
+# falls back to the default (always ≥1 repost so the loop is meaningful).
+POST_ONLY_MAX_REPOSTS: Final[int] = 3
+
+
+def post_only_max_reposts() -> int:
+    """Resolve the post-only repost bound at call time (env override honoured)."""
+    raw = os.environ.get("POLARIS_POST_ONLY_MAX_REPOSTS")
+    if raw is None or raw == "":
+        return POST_ONLY_MAX_REPOSTS
+    try:
+        val = int(float(raw))
+    except ValueError:
+        return POST_ONLY_MAX_REPOSTS
+    return val if val > 0 else POST_ONLY_MAX_REPOSTS
 
 
 # ---------------------------------------------------------------------------

@@ -162,6 +162,7 @@ async def _real_open_fill(
     capital_contract_factor_usd: float | None = None,
     prefer_maker: bool = False,
     marketable_limit: bool = False,
+    maker_no_fill: str = "market",
 ) -> OpenAttempt:
     """Drive the real demo venue entry leg → return an ``OpenAttempt``.
 
@@ -189,6 +190,7 @@ async def _real_open_fill(
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
                 available_usdt=await fetch_okx_available_usdt(okx_adapter),
                 prefer_maker=prefer_maker, marketable_limit=marketable_limit,
+                maker_no_fill=maker_no_fill,
             )
         api_key = os.environ.get("OKX_DEMO_API_KEY", "")
         secret = os.environ.get("OKX_DEMO_SECRET", "")
@@ -205,6 +207,7 @@ async def _real_open_fill(
                 strategy_id=strategy_id, last_price=last_price, strength=strength,
                 available_usdt=await fetch_okx_available_usdt(adapter),
                 prefer_maker=prefer_maker, marketable_limit=marketable_limit,
+                maker_no_fill=maker_no_fill,
             )
 
     # Track C — Alpaca US equity (additive; OKX/Capital paths above unchanged).
@@ -270,6 +273,7 @@ async def reserve_and_submit(
     alpaca_adapter: Any = None,
     prefer_maker: bool = False,
     marketable_limit: bool = False,
+    maker_no_fill: str = "market",
 ) -> SimulatedTrade | None:
     """A2 + K fix: AllocatorFence reservation → idempotent register → submit.
 
@@ -386,6 +390,7 @@ async def reserve_and_submit(
                     capital_plan.contract_factor_usd if capital_plan else None
                 ),
                 prefer_maker=prefer_maker, marketable_limit=marketable_limit,
+                maker_no_fill=maker_no_fill,
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             logger.error(

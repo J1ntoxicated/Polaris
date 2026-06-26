@@ -111,6 +111,34 @@ CREATE INDEX IF NOT EXISTS idx_entry_admission_shadow_regime
     ON entry_admission_shadow(regime, strategy_id, would_suppress, created_ts);
 """
 
+# Real-fee maker-fill shadow (#77 component C) — one row per maker (post-only)
+# entry fill capturing entry-BASIS (fill vs touch) + the REAL-maker-fee net
+# (OKX demo's flat 70 bps hides the maker edge; the net here is computed off
+# real_fee_bps(is_maker=True) = the only place the weekend maker edge is
+# measurable before go-live). Instrumentation only — never drives a decision.
+DDL_MAKER_FILL_SHADOW = """
+CREATE TABLE IF NOT EXISTS maker_fill_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL DEFAULT '',
+    touch_px REAL NOT NULL DEFAULT 0.0,
+    fill_px REAL NOT NULL DEFAULT 0.0,
+    entry_basis_bps REAL NOT NULL DEFAULT 0.0,
+    real_maker_net_bps REAL NOT NULL DEFAULT 0.0,
+    outcome TEXT NOT NULL DEFAULT '',
+    reposts INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_MAKER_FILL_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_maker_fill_shadow_strategy
+    ON maker_fill_shadow(strategy_id, outcome, created_ts);
+"""
+
 # Gate→outcome instrumentation (BUILD, behavior 0) — one row per G3/G4 GPT
 # decision on the bar entry pipeline. ``decision='KILL'`` rows are the killed
 # signals whose counterfactual forward marks (1h/4h/24h first-1m-bar closes,

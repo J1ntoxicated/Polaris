@@ -589,7 +589,9 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     # strategy-wave2 (2026-06-27): +7 verified fee-beating research survivors
     # (Capital GOLD/index 5 + Alpaca equity 2), each a distinct group: 14 → 21.
     # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): 21 → 20.
-    assert len(seen) == 20, f"correlation groups not unique: {seen}"
+    # +weekend_thin_book_flush_maker (#77 — single verified crypto maker BUILD,
+    # distinct group weekend_thin_book_mean_reversion): 20 → 21.
+    assert len(seen) == 21, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
@@ -597,7 +599,8 @@ def test_strategy_registry_size() -> None:
     # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL): 15 → 14.
     # strategy-wave2 (2026-06-27): +7 verified research survivors → 21.
     # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): 21 → 20.
-    assert len(STRATEGY_REGISTRY) == 20
+    # +weekend_thin_book_flush_maker (#77 — single verified crypto maker BUILD): 21.
+    assert len(STRATEGY_REGISTRY) == 21
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

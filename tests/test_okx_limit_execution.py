@@ -118,9 +118,13 @@ async def test_limit_immediate_fill_no_market() -> None:
 
 
 @pytest.mark.asyncio
-async def test_limit_timeout_cancel_then_market_fallback() -> None:
-    # post_only stays 'live' (unfilled) on every poll; after cancel the re-check
-    # still shows no fill; market fallback then returns a filled row.
+async def test_limit_timeout_cancel_then_market_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # post_only stays 'live' (unfilled) on every poll; after the bounded reprice
+    # loop (1 post here) the resting order is cancelled, then market fallback
+    # returns a filled row. One repost-attempt keeps the assertion deterministic.
+    monkeypatch.setenv("POLARIS_POST_ONLY_MAX_REPOSTS", "1")
     adapter = _FakeOKX(
         place_resp=_resp(ord_id="ord_1"),
         waiting_row=_row(state="live", acc="0"),          # unfilled while resting
@@ -133,11 +137,14 @@ async def test_limit_timeout_cancel_then_market_fallback() -> None:
         poll_delay_sec=0.0,
     )
     assert isinstance(attempt.fill, Fill)
-    # 1 post_only + 1 market fallback.
-    assert len(adapter.place_calls) == 2
-    assert adapter.place_calls[0]["ord_type"] == "post_only"
-    assert adapter.place_calls[1]["ord_type"] == "market"
-    assert len(adapter.cancel_calls) == 1  # cancelled the resting maker order
+    # The bounded reprice loop posts post_only (1 + reposts), cancelling each
+    # resting order, then falls back to ONE market order (the final place).
+    ord_types = [c["ord_type"] for c in adapter.place_calls]
+    assert ord_types[0] == "post_only"
+    assert ord_types[-1] == "market"
+    assert ord_types.count("market") == 1
+    # Every resting post_only was cancelled before the next repost / fallback.
+    assert len(adapter.cancel_calls) == ord_types.count("post_only")
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +193,12 @@ async def test_prefer_maker_posts_post_only_even_on_strong_signal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prefer_maker_falls_back_to_taker_on_would_cross() -> None:
+async def test_prefer_maker_falls_back_to_taker_on_would_cross(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # post_only rejected (would cross the book) — the trade must STILL fill via the
     # taker market fallback (flow_not_block: cheaper when possible, never missed).
+    monkeypatch.setenv("POLARIS_POST_ONLY_MAX_REPOSTS", "1")
     rejected = _resp(ok=False, code="51020")  # post_only would-cross reject
 
     class _RejectThenMarket(_FakeOKX):
@@ -207,10 +217,14 @@ async def test_prefer_maker_falls_back_to_taker_on_would_cross() -> None:
         strategy_id="flow_pressure", last_price=60_000.0, strength=1.6,
         poll_delay_sec=0.0, prefer_maker=True,
     )
-    # NEVER a no-fill: the post_only would-cross fell back to a taker market fill.
+    # NEVER a no-fill: the post_only would-cross (re-tried in the bounded loop)
+    # fell back to a taker market fill — the first place is post_only, the last
+    # is the single market fallback.
     assert isinstance(attempt.fill, Fill)
     ord_types = [c["ord_type"] for c in adapter.place_calls]
-    assert ord_types == ["post_only", "market"]
+    assert ord_types[0] == "post_only"
+    assert ord_types[-1] == "market"
+    assert ord_types.count("market") == 1
 
 
 @pytest.mark.asyncio

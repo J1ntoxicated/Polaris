@@ -11,6 +11,8 @@ Track A — OKX SPOT:
   - ``tsmom_12_1_multiasset``      (correlation_group=tsmom_position_momentum, 1D)
   - ``macd_ema_trend_pullback``    (correlation_group=macd_ema_trend_continuation, 1D)
   - ``donchian_turtle_breakout``   (correlation_group=turtle_donchian_breakout, 1D)
+  - ``weekend_thin_book_flush_maker`` (correlation_group=weekend_thin_book_mean_reversion,
+    1H, WEEKEND-only maker — the single verified crypto maker BUILD #77)
 
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
@@ -90,6 +92,9 @@ from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
+from polaris.strategies.weekend_thin_book_flush_maker import (
+    WeekendThinBookFlushMakerStrategy,
+)
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
 
 # Registry: strategy_id → factory. ``factory()`` returns a fresh instance.
@@ -118,6 +123,14 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     Equity52WkHighBreakoutStrategy.metadata.strategy_id: Equity52WkHighBreakoutStrategy,
     EquityVolExpansionPocketPivotStrategy.metadata.strategy_id: (
         EquityVolExpansionPocketPivotStrategy
+    ),
+    # #77 weekend maker — the SINGLE verified crypto maker BUILD (research
+    # w5xhhz2m9: 1 of 12 net-positive under the real maker fee, +73 bps). OKX
+    # SPOT, weekend (Sat/Sun UTC) thin-book flush, post-only deep bid, no-fill =
+    # cancel/skip (a missed deep bid = 0 cost), bounded +0.30R revert harvest /
+    # -1.0R rail (engine-owned TAKER).
+    WeekendThinBookFlushMakerStrategy.metadata.strategy_id: (
+        WeekendThinBookFlushMakerStrategy
     ),
 }
 
@@ -155,6 +168,7 @@ __all__ = [
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",
+    "WeekendThinBookFlushMakerStrategy",
     "XAUIndicesTrendStrategy",
     "all_strategies",
 ]

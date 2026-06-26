@@ -86,6 +86,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_LOOP_ROTATION_EVENTS_INDEX,
     DDL_LOOP_SESSION_EXIT_EVENTS,
     DDL_LOOP_SESSION_EXIT_EVENTS_INDEX,
+    DDL_MAKER_FILL_SHADOW,
+    DDL_MAKER_FILL_SHADOW_INDEX,
     DDL_MEASUREMENT_RESETS,
     DDL_MEASUREMENT_RESETS_INDEX,
     DDL_META_LABELS,
@@ -167,6 +169,10 @@ ALL_DDL: tuple[str, ...] = (
     # Component C (SHADOW) — edge-first entry admission shadow log
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
+    # Real-fee maker-fill shadow (#77) — entry-BASIS + real-maker net (the only
+    # place the weekend maker edge is visible; OKX demo's flat 70 bps hides it).
+    DDL_MAKER_FILL_SHADOW,
+    DDL_MAKER_FILL_SHADOW_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,

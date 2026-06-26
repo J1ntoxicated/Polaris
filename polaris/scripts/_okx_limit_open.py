@@ -220,6 +220,7 @@ async def real_okx_open_fill(
     prefer_maker: bool = False,
     marketable_limit: bool = False,
     thin_market: bool = False,
+    maker_no_fill: str = "market",
 ) -> OpenAttempt:
     """OKX entry leg: post-only limit at touch → market fallback → normalize.
 
@@ -253,6 +254,17 @@ async def real_okx_open_fill(
     STILL falls back to a plain market order so the entry is never missed
     (flow_not_block). Takes precedence over ``prefer_maker`` (a momentum entry
     crosses; it does not rest post-only). Default ``False`` is byte-identical.
+
+    ``maker_no_fill`` (#77 maker exec layer): how a post-only that exhausts the
+    bounded reprice/repost loop unfilled is resolved. ``"market"`` (default,
+    byte-identical) → market fallback (taker). ``"cancel"`` → the post-only path
+    returns the ``"maker_no_fill"`` sentinel and this leg returns it UNCHANGED
+    (a deliberate SKIP — no market order). Only the weekend thin-book maker uses
+    ``"cancel"`` (its edge IS the passive fill; a missed deep bid is 0 realised
+    cost, NOT a forced taker — flow_not_block never mandates a market order).
+    Applies only to the prefer_maker / strength-gated post-only path; the
+    marketable-limit (momentum) path always market-falls-back (it needs the
+    fill).
     """
     clamped = _clamp_to_available(notional_usd, available_usdt)
     if clamped is None:
@@ -306,7 +318,7 @@ async def real_okx_open_fill(
         attempt = await _okx_post_only_open(
             adapter, inst_id=inst_id, notional_usd=notional_usd,
             strategy_id=strategy_id, last_price=last_price,
-            poll_delay_sec=poll_delay_sec,
+            poll_delay_sec=poll_delay_sec, no_fill=maker_no_fill,
         )
     except Exception as exc:  # noqa: BLE001 — fail-safe: never block the entry
         logger.warning(
@@ -314,6 +326,10 @@ async def real_okx_open_fill(
         )
         return await _market()
     if attempt is not None:
+        # In cancel mode the post-only returns the "maker_no_fill" SKIP sentinel
+        # (an OpenAttempt with fill=None) — return it UNCHANGED, do NOT
+        # market-fallback (the weekend maker thesis: a missed deep bid is a
+        # 0-cost skip, never a forced taker). A real fill is returned as-is.
         return attempt
     # Limit did not fill inside the wait window — market fallback (flow_not_block).
     logger.info("[okx/limit] %s limit unfilled in window — market fallback", inst_id)

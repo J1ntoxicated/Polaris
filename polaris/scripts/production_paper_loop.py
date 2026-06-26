@@ -73,6 +73,8 @@ from polaris.scripts._production_ws import (
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
 from polaris.scripts._smoke_real_roundtrip import resolve_okx_base_url
 from polaris.scripts._static_ground import (
+    SESSION_WARM_CADENCE_SEC,
+    SESSION_WARM_RESOLUTIONS_DEFAULT,
     STATIC_GROUND_PARALLEL_DEFAULT,
     STATIC_GROUND_REFRESH_SEC,
     TICKER_GROUND_REFRESH_SEC,
@@ -350,6 +352,8 @@ async def _static_ground_producer(
     alpaca_adapter: Any = None,
     refresh_sec: float = STATIC_GROUND_REFRESH_SEC,
     parallel: int = STATIC_GROUND_PARALLEL_DEFAULT,
+    warm_resolutions: tuple[str, ...] = (),
+    warm_cadence_sec: float = SESSION_WARM_CADENCE_SEC,
 ) -> None:
     """Background coverage-fill for the WHOLE active universe (Jin "맨날 들어오는 애들만").
 
@@ -371,8 +375,16 @@ async def _static_ground_producer(
     EdgeScore is filled WHILE this multi-minute bar walk is still charging (live
     probe 2026-06-26: ticker_ground=0 during the first bar walk starved the sweep
     because the ground refresh sat behind a ~600s bar walk).
+
+    Session pre-open WARM (#66, Jin "장 열기 전부터 거래가능 바 알아서 채워야"): when
+    ``warm_resolutions`` is set the fill ALSO pulls those (1m) for open-imminent
+    symbols (``session_warm_active``). WHILE ≥1 symbol is warm-active the next
+    re-walk uses the short ``warm_cadence_sec`` (open-imminent precision) instead
+    of the slow ``refresh_sec``; with 0 warm symbols it falls back to the normal
+    cadence (idle degrade). ``warm_resolutions=()`` = warming OFF (kill-switch).
     """
     while not stop_evt.is_set():
+        next_wait = refresh_sec
         try:
             bars_result = await ingest_static_ground_bars(
                 conn,
@@ -380,15 +392,22 @@ async def _static_ground_producer(
                 capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
+                warm_resolutions=warm_resolutions,
             )
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]
+            state.static_ground_warm_bars += bars_result.get("warm_bars", 0)
             state.static_ground_cycles += 1
+            # Open-imminent precision: re-walk soon while any symbol is warm-active
+            # so the next 1m pull lands close to the cash open; else idle-degrade
+            # back to the slow full re-walk cadence.
+            if warm_resolutions and bars_result.get("warm_instruments", 0) > 0:
+                next_wait = warm_cadence_sec
         except Exception:  # noqa: BLE001 — coverage fill never halts the bot
             logger.exception("[ground] static-ground cycle failed (non-fatal)")
             state.static_ground_errors += 1
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop_evt.wait(), timeout=refresh_sec)
+            await asyncio.wait_for(stop_evt.wait(), timeout=next_wait)
 
 
 async def _ticker_ground_producer(
@@ -793,6 +812,19 @@ async def run_production_paper_loop(
     # IP-block guard). The per-ticker sentiment/event ground is materialized by a
     # SEPARATE faster producer below so the sweep gets an EdgeScore while bars are
     # still charging (live probe 2026-06-26: ground=0 behind a ~600s bar walk).
+    #
+    # #66 session pre-open warm (Jin "장 열기 전부터 거래가능 바 알아서 채워야"): the producer
+    # ALSO pulls 1m for open-imminent symbols so the recency gate sees fresh bars
+    # at the cash open. POLARIS_SESSION_WARM_ENABLED=0 = kill-switch (warm OFF =
+    # pre-#66 behavior). POLARIS_SESSION_WARM_RESOLUTIONS picks the warm intervals;
+    # the open-imminent window + lead live in _session_map (single session truth).
+    warm_on = os.environ.get("POLARIS_SESSION_WARM_ENABLED", "1") != "0"
+    warm_resolutions = tuple(
+        r.strip() for r in os.environ.get(
+            "POLARIS_SESSION_WARM_RESOLUTIONS",
+            ",".join(SESSION_WARM_RESOLUTIONS_DEFAULT),
+        ).split(",") if r.strip()
+    ) if warm_on else ()
     static_ground_task = asyncio.create_task(
         _static_ground_producer(
             conn, state=state, stop_evt=stop_evt,
@@ -800,6 +832,10 @@ async def run_production_paper_loop(
             parallel=_env_int(
                 "POLARIS_STATIC_GROUND_PARALLEL", STATIC_GROUND_PARALLEL_DEFAULT
             ),
+            warm_resolutions=warm_resolutions,
+            warm_cadence_sec=float(_env_int(
+                "POLARIS_SESSION_WARM_CADENCE_SEC", int(SESSION_WARM_CADENCE_SEC)
+            )),
         )
     )
     ticker_ground_task = asyncio.create_task(

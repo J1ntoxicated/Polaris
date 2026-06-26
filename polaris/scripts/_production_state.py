@@ -138,6 +138,9 @@ class ProdLoopState:
     static_ground_bars: int = 0
     static_ground_cycles: int = 0
     static_ground_errors: int = 0
+    # #66 session pre-open warm: cumulative 1m bars pre-fetched for open-imminent
+    # symbols (Capital indices + Alpaca US equities). OBSERVATION/warming only.
+    static_ground_warm_bars: int = 0
     # Capital rotation (Jin 2026-05-30) — finite-capital opportunity-cost
     # redeploy. A NEW signal blocked *for a capital reason* (entry_sizer
     # ``sizing_zero`` on a binding cap, or OKX ``insufficient_balance``/51008) is

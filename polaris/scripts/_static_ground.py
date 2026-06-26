@@ -39,6 +39,7 @@ from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.ingest import persist_bars
 from polaris.scripts._production_bars import fetch_bars_one
 from polaris.scripts._production_layers import read_active_universe
+from polaris.scripts._session_map import session_warm_active
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,21 @@ logger = logging.getLogger(__name__)
 # pulling 1m for ~1882 tickers would be the heaviest fetch for the least ground
 # value. A /debate calibration target, never hardcoded at the call site.
 STATIC_GROUND_RESOLUTIONS: tuple[str, ...] = ("1D", "1H", "15m")
+
+# Session pre-open WARM resolutions (#66, Jin "장 열기 전부터 거래가능 바 알아서 채워야").
+# The base resolutions above intentionally OMIT 1m (too heavy for the whole
+# universe). But a symbol whose cash session is about to open (``session_warm_
+# active``) needs its 1m bars fresh AT the open so the recency gate (1m=30min)
+# does not skip it. So for ONLY the open-imminent symbols (Capital indices +
+# Alpaca US equities — never crypto/FX, see ``session_warm_active``) the fill
+# ADDS these resolutions. Decoupled from the base set so 1m stays scoped to the
+# handful of open-imminent names. Default; the producer reads
+# ``POLARIS_SESSION_WARM_RESOLUTIONS`` so it is env-tunable (and '' = OFF).
+SESSION_WARM_RESOLUTIONS_DEFAULT: tuple[str, ...] = ("1m",)
+# Short re-walk cadence used WHILE ≥1 symbol is open-imminent (warm-active), so
+# the 1m pull lands close to the open. With 0 warm symbols the producer falls
+# back to ``STATIC_GROUND_REFRESH_SEC`` (idle degrade). env-tunable default.
+SESSION_WARM_CADENCE_SEC = 60.0
 
 # Bulk-fill concurrency (Yahoo IP-block guard). Mirrors populate_capital_proxies'
 # Semaphore + total-timeout pattern (startup-fix). Higher than the 8-wide hot-path
@@ -94,6 +110,8 @@ async def ingest_static_ground_bars(
     alpaca_adapter: Any = None,
     gpt_client_factory: Any = None,
     limit: int = 240,
+    warm_resolutions: tuple[str, ...] = (),
+    now_ts: int | float | None = None,
 ) -> dict[str, Any]:
     """Fetch + persist Yahoo multi-resolution bars for EVERY active instrument.
 
@@ -110,40 +128,67 @@ async def ingest_static_ground_bars(
     pulled this period is a cache hit here — no double fetch. flow_not_block: this
     only WIDENS observation; it gates nothing.
 
-    Returns ``{"instruments": K, "bars": N, "timed_out": bool}``.
+    Session pre-open WARM (#66, Jin "장 열기 전부터 거래가능 바 알아서 채워야"): if
+    ``warm_resolutions`` is non-empty, every instrument that ``session_warm_active``
+    flags as open-imminent (Capital indices + Alpaca US equities in their
+    ``[open - WARM_LEAD_MIN, close)`` window — never crypto/FX, see the predicate)
+    ALSO gets those resolutions (1m) fetched, so its bars are fresh AT the cash open
+    instead of 0.5h-stale (which the recency gate would skip). DATA-ONLY: warming
+    pre-fills stored bars; entry / sizing / exit are untouched. An overlap with a
+    base resolution is skipped (no double fetch). ``warm_resolutions=()`` (the
+    default / kill-switch) = byte-identical to the pre-#66 behavior. ``now_ts``
+    (UTC epoch) drives the warm-window check (defaults to ``time.time()``).
+
+    Returns ``{"instruments": K, "bars": N, "timed_out": bool,
+    "warm_instruments": W, "warm_bars": M}``.
     """
     active = read_active_universe(conn)
     if not active:
-        return {"instruments": 0, "bars": 0, "timed_out": False}
+        return {"instruments": 0, "bars": 0, "timed_out": False,
+                "warm_instruments": 0, "warm_bars": 0}
 
+    warm_set = frozenset(warm_resolutions)
+    warm_now = int(now_ts) if now_ts is not None else int(time.time())
     sem = asyncio.Semaphore(max(1, parallel))
     persisted_instruments: set[str] = set()
+    warm_instruments: set[str] = set()
     total_bars = 0
+    warm_bars = 0
+
+    async def _fetch_interval(
+        venue: str, symbol: str, asset_class: str, interval: str
+    ) -> list[Any]:
+        async with sem:
+            try:
+                return await fetch_bars_one(
+                    venue, symbol, asset_class,
+                    capital_session=capital_session,
+                    alpaca_adapter=alpaca_adapter,
+                    limit=limit, bar_interval=interval,
+                    gpt_client_factory=gpt_client_factory,
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad ticker never aborts
+                logger.debug(
+                    "[ground] %s:%s/%s fetch failed: %r",
+                    venue, symbol, interval, exc,
+                )
+                return []
 
     async def _one(inst: Any) -> None:
-        nonlocal total_bars
+        nonlocal total_bars, warm_bars
         venue = inst.venue
         symbol = inst.symbol
         asset_class = inst.asset_class
         out: list[Any] = []
         for interval in resolutions:
-            async with sem:
-                try:
-                    bars = await fetch_bars_one(
-                        venue, symbol, asset_class,
-                        capital_session=capital_session,
-                        alpaca_adapter=alpaca_adapter,
-                        limit=limit, bar_interval=interval,
-                        gpt_client_factory=gpt_client_factory,
-                    )
-                except Exception as exc:  # noqa: BLE001 — one bad ticker never aborts
-                    logger.debug(
-                        "[ground] %s:%s/%s fetch failed: %r",
-                        venue, symbol, interval, exc,
-                    )
+            out.extend(await _fetch_interval(venue, symbol, asset_class, interval))
+        # Pre-open WARM: ADD the warm resolutions for open-imminent symbols only
+        # (skip any already pulled as a base resolution — no double fetch).
+        if warm_set and session_warm_active(venue, asset_class, symbol, warm_now):
+            for interval in warm_set:
+                if interval in resolutions:
                     continue
-            if bars:
-                out.extend(bars)
+                out.extend(await _fetch_interval(venue, symbol, asset_class, interval))
         if out:
             # persist_bars is a sync DB write; cheap (INSERT OR REPLACE on the PK).
             # GUARD (live probe 2026-06-25): a real Yahoo frame can carry a malformed
@@ -167,6 +212,10 @@ async def ingest_static_ground_bars(
             if n:
                 total_bars += n
                 persisted_instruments.add(f"{venue}:{symbol}")
+                warm_n = sum(1 for b in out if b.bar_interval in warm_set)
+                if warm_n:
+                    warm_bars += warm_n
+                    warm_instruments.add(f"{venue}:{symbol}")
 
     tasks = [asyncio.ensure_future(_one(inst)) for inst in active]
     timed_out = False
@@ -181,14 +230,18 @@ async def ingest_static_ground_bars(
         conn.commit()
     logger.info(
         "[ground] static-ground bars: %d instrument(s) / %d bars / "
-        "resolutions=%s%s",
+        "resolutions=%s%s%s",
         len(persisted_instruments), total_bars, ",".join(resolutions),
+        (f" + warm {len(warm_instruments)} inst / {warm_bars} bars "
+         f"({','.join(warm_set)})" if warm_set else ""),
         " (timed out — partial, retries next cycle)" if timed_out else "",
     )
     return {
         "instruments": len(persisted_instruments),
         "bars": total_bars,
         "timed_out": timed_out,
+        "warm_instruments": len(warm_instruments),
+        "warm_bars": warm_bars,
     }
 
 

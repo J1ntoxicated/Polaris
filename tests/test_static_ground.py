@@ -474,3 +474,308 @@ async def test_static_ground_producer_forwards_parallel(
         _stop_after_first(),
     )
     assert seen["parallel"] == 48
+
+
+# ---------------------------------------------------------------------------
+# #66 session-predictive pre-warm — pre-open 1m bar warming (Jin "장 열기 전부터
+# 거래가능 바 알아서 채워야"). DATA WARMING ONLY: the bulk-fill additionally pulls
+# the warm resolutions (1m) for symbols whose cash session is about to open so the
+# recency gate sees fresh bars at the open. crypto/FX/commodity/unmapped are never
+# warmed. Entry/sizing/exit are UNTOUCHED — this only pre-fills stored bars.
+# ---------------------------------------------------------------------------
+
+
+def _utc_warm(hour: int, minute: int = 0) -> int:
+    """A known weekday (Wed 2026-06-24) UTC epoch at the given hour/minute."""
+    import datetime as dt
+
+    return int(dt.datetime(2026, 6, 24, hour, minute, tzinfo=dt.UTC).timestamp())
+
+
+@pytest.mark.asyncio
+async def test_warm_adds_1m_for_pre_open_index_only(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the US pre-open window a US index ALSO gets a 1m warm fetch; others don't.
+
+    The base resolutions still walk EVERY active row (unchanged); the warm
+    resolution (1m) is ADDED only for the symbol whose cash session is about to
+    open / is open (US100 at 13:10 UTC, 20 min before the 13:30 open). An Asia
+    index (J225, window 00:00-08:00 UTC) is long closed by 13:10 → no 1m.
+    """
+    _seat_active(
+        conn,
+        [("capital", "US100", "index", "index:US100"),   # US pre-open → +1m
+         ("capital", "J225", "index", "index:J225"),      # Asia long closed → no 1m
+         ("okx", "BTC-USDT", "crypto", "crypto:BTC")],    # crypto → never warmed
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append((symbol, bar_interval))
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    # 1m was fetched ONLY for the pre-open US index (Asia closed, crypto exempt).
+    warmed_1m = {sym for sym, iv in seen if iv == "1m"}
+    assert warmed_1m == {"US100"}
+    # Base 1D still walked every active row (coverage unchanged).
+    base_1d = {sym for sym, iv in seen if iv == "1D"}
+    assert base_1d == {"US100", "J225", "BTC-USDT"}
+    # Result reports the warm fan-out.
+    assert result["warm_instruments"] == 1
+    assert result["warm_bars"] >= 1
+    # The pre-open index now has a stored 1m bar → fresh at the open.
+    n = conn.execute(
+        "SELECT COUNT(*) FROM bars WHERE symbol='US100' AND bar_interval='1m'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_alpaca_equity_pre_open(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Alpaca US equity (the 미장 gap) gets a 1m warm before the US open."""
+    _seat_active(conn, [("alpaca", "AAPL", "equity", "equity:AAPL")])
+    seen: list[tuple[str, str]] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append((symbol, bar_interval))
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    assert ("AAPL", "1m") in seen
+    assert result["warm_instruments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_off_when_no_warm_resolutions(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``warm_resolutions=()`` (kill-switch / default) = NO 1m warm at all.
+
+    Pins the kill-switch path: with warming disabled the fill is byte-identical
+    to the pre-#66 behavior (base resolutions only, no extra 1m fetch).
+    """
+    _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    seen: list[str] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append(bar_interval)
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=(),  # disabled
+        now_ts=_utc_warm(13, 10),  # would be a US warm window if enabled
+    )
+    assert seen == ["1D"]  # base only, no 1m
+    assert result["warm_instruments"] == 0
+    assert result["warm_bars"] == 0
+
+
+@pytest.mark.asyncio
+async def test_warm_skips_when_not_in_window(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside every pre-open window NO symbol is warmed (1m fetch count = 0)."""
+    _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    seen: list[str] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append(bar_interval)
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(3),  # 03:00 UTC — US far from open, Europe/Asia not US100
+    )
+    assert "1m" not in seen
+    assert result["warm_instruments"] == 0
+
+
+@pytest.mark.asyncio
+async def test_warm_fetch_failure_degrades_gracefully(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm 1m fetch that raises never aborts the walk (degrade-never-crash).
+
+    The base resolution still persists for the symbol even if the warm pull blows
+    up — warming is best-effort, the bot loop is untouched.
+    """
+    _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        if bar_interval == "1m":
+            raise RuntimeError("yahoo 1m blew up")
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    # Base 1D survived; warm 1m failed but was swallowed (no crash).
+    assert result["instruments"] == 1
+    assert result["warm_instruments"] == 0  # 1m never persisted
+    base = conn.execute(
+        "SELECT COUNT(*) FROM bars WHERE symbol='US100' AND bar_interval='1D'"
+    ).fetchone()[0]
+    assert base == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_does_not_double_fetch_overlapping_resolution(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If 1m is already a base resolution the warm pass must not re-fetch it."""
+    _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    count_1m = 0
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        nonlocal count_1m
+        if bar_interval == "1m":
+            count_1m += 1
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D", "1m"), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    assert count_1m == 1  # fetched once (base), not twice (base + warm)
+
+
+@pytest.mark.asyncio
+async def test_producer_short_cadence_when_warm_active(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the fill warms ≥1 symbol the producer uses the SHORT warm cadence.
+
+    Open-imminent precision: a cycle that warmed a pre-open symbol sleeps the
+    short ``warm_cadence_sec`` (default 60) instead of the slow 900s re-walk, so
+    the next 1m pull lands close to the open. With 0 warm symbols it falls back
+    to the normal refresh cadence (idle degrade).
+    """
+    from polaris.scripts import production_paper_loop as ppl
+
+    waits: list[float] = []
+
+    async def _warm_bars(_conn: Any, **_kw: Any) -> dict[str, Any]:
+        return {"instruments": 1, "bars": 4, "timed_out": False,
+                "warm_instruments": 1, "warm_bars": 1}
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _warm_bars)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+    real_wait_for = asyncio.wait_for
+
+    async def _spy_wait_for(awaitable: Any, timeout: float) -> Any:
+        waits.append(timeout)
+        stop_evt.set()  # end the loop after observing the first sleep
+        return await real_wait_for(awaitable, timeout=0.001)
+
+    monkeypatch.setattr(ppl.asyncio, "wait_for", _spy_wait_for)
+
+    await ppl._static_ground_producer(
+        conn, state=state, stop_evt=stop_evt,
+        refresh_sec=900.0, warm_cadence_sec=60.0, warm_resolutions=("1m",),
+    )
+    assert waits and waits[0] == 60.0  # short cadence after a warm cycle
+    assert state.static_ground_warm_bars == 1
+
+
+@pytest.mark.asyncio
+async def test_producer_normal_cadence_when_no_warm(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With 0 warm symbols the producer keeps the normal (slow) refresh cadence."""
+    from polaris.scripts import production_paper_loop as ppl
+
+    waits: list[float] = []
+
+    async def _no_warm_bars(_conn: Any, **_kw: Any) -> dict[str, Any]:
+        return {"instruments": 5, "bars": 20, "timed_out": False,
+                "warm_instruments": 0, "warm_bars": 0}
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _no_warm_bars)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+    real_wait_for = asyncio.wait_for
+
+    async def _spy_wait_for(awaitable: Any, timeout: float) -> Any:
+        waits.append(timeout)
+        stop_evt.set()
+        return await real_wait_for(awaitable, timeout=0.001)
+
+    monkeypatch.setattr(ppl.asyncio, "wait_for", _spy_wait_for)
+
+    await ppl._static_ground_producer(
+        conn, state=state, stop_evt=stop_evt,
+        refresh_sec=900.0, warm_cadence_sec=60.0, warm_resolutions=("1m",),
+    )
+    assert waits and waits[0] == 900.0  # normal cadence — nothing to warm
+
+
+@pytest.mark.asyncio
+async def test_producer_forwards_warm_resolutions(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer forwards its configured warm resolutions to the bulk fill."""
+    from polaris.scripts import production_paper_loop as ppl
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_bars(_conn: Any, *, warm_resolutions: Any = None, **_kw: Any
+                         ) -> dict[str, Any]:
+        seen["warm_resolutions"] = warm_resolutions
+        return {"instruments": 0, "bars": 0, "timed_out": False,
+                "warm_instruments": 0, "warm_bars": 0}
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _fake_bars)
+
+    state = ppl.ProdLoopState()
+    stop_evt = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        await asyncio.sleep(0.02)
+        stop_evt.set()
+
+    await asyncio.gather(
+        ppl._static_ground_producer(
+            conn, state=state, stop_evt=stop_evt, refresh_sec=999.0,
+            warm_resolutions=("1m",),
+        ),
+        _stop_after_first(),
+    )
+    assert seen["warm_resolutions"] == ("1m",)

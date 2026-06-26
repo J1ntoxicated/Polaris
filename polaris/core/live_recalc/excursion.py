@@ -25,14 +25,17 @@ from __future__ import annotations
 from typing import Final
 
 # Floor for the R denominator so excursion is always finite even when ATR is
-# missing / degenerate. The RELATIVE floor (≥0.01% of entry price — the close
-# path's ``entry_price * 1e-4`` convention) bounds max|R| at price-move%/0.01%
+# missing / degenerate. The RELATIVE floor (≥0.1% of entry price — the close
+# path's ``entry_price * 1e-3`` convention) bounds max|R| at price-move%/0.1%
 # so a flat-bar atr_usd~0 on a high-priced instrument can never explode R
-# (live: -463,734R). The absolute 1e-6 stays only for the entry_price=0
-# degenerate last resort. ``_EXCURSION_R_CAP`` (±100R) is a telemetry-only
-# bound — no FSM/close branch reads anywhere near it.
+# (live: -463,734R). At 1e-3 it is consistent with the entry anchor sane-band
+# floor (``ENTRY_ATR_PCT_MIN`` 5e-4 × the 2-ATR stop = 1e-3), so a low-anchor
+# instrument no longer inflates mfe_r ~4x off a too-loose excursion floor. The
+# absolute 1e-6 stays only for the entry_price=0 degenerate last resort.
+# ``_EXCURSION_R_CAP`` (±100R) is a telemetry-only bound — no FSM/close branch
+# reads anywhere near it.
 _ATR_USD_FLOOR: Final[float] = 1e-6
-_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-4
+_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-3
 _EXCURSION_R_CAP: Final[float] = 100.0
 
 

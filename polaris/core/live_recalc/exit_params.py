@@ -221,12 +221,15 @@ EXIT_ADAPTIVE_THESIS_ON: Final[bool] = _env_flag("POLARIS_EXIT_ADAPTIVE_THESIS",
 
 _ATR_USD_FLOOR: Final[float] = 1e-6
 
-# RELATIVE floor for the ATR-in-USD unit: ≥0.01% of entry price (the close
-# path's proven ``entry_price * 1e-4`` convention). A flat/stale-bar atr_pct~0
+# RELATIVE floor for the ATR-in-USD unit: ≥0.1% of entry price (the close
+# path's proven ``entry_price * 1e-3`` convention). A flat/stale-bar atr_pct~0
 # on a high-priced instrument collapsed the absolute 1e-6 floor and exploded
-# R (live: -463,734R). With the relative floor max|R| = price-move% / 0.01%.
-# The absolute 1e-6 stays only as the entry_price=0 degenerate last resort.
-_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-4
+# R (live: -463,734R). With the relative floor max|R| = price-move% / 0.1%.
+# At 1e-3 it matches the entry-anchor sane-band floor (5e-4 × the 2-ATR stop),
+# so a low-anchor instrument no longer inflates the FSM-driving mfe_r ~4x off a
+# too-loose excursion floor. The absolute 1e-6 stays only as the entry_price=0
+# degenerate last resort.
+_ATR_PCT_RELATIVE_FLOOR: Final[float] = 1e-3
 
 # Telemetry cap for mfe_r/mae_r (|R| ≤ 100). Behaviour-neutral: the FSM tops
 # out at EXIT_FSM_HARVEST_R=2.0 and pnl_r is clamped ±10 elsewhere — no close

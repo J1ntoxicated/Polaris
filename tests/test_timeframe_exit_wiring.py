@@ -377,6 +377,10 @@ def test_close_excursion_uses_entry_anchor(memdb: sqlite3.Connection) -> None:
     )
     trade = _trade("pos-exc")
     trade.entry_price = 100.0
-    mfe, mae = _close_excursion_r(memdb, trade=trade, exit_price=100.0)
+    mfe, mae, atr_risk_usd = _close_excursion_r(
+        memdb, trade=trade, exit_price=100.0,
+    )
     assert mfe == pytest.approx(3.0 / (100.0 * 0.04 * 2.0))
     assert mae == pytest.approx(-1.0 / (100.0 * 0.04 * 2.0))
+    # whole-position 1R = per-unit atr_usd (100*0.04*2=8.0) × base_qty (0.001).
+    assert atr_risk_usd == pytest.approx(8.0 * 0.001)

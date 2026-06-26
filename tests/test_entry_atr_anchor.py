@@ -103,15 +103,15 @@ def test_short_side_anchor_symmetric() -> None:
 
 
 def test_degenerate_atr_bounds_r_relative_to_price() -> None:
-    """atr_pct→0: |R| is bounded by price-move% / 0.01% (the relative floor),
+    """atr_pct→0: |R| is bounded by price-move% / 0.1% (the relative floor),
     not the absolute 1e-6 floor that produced -463,734R."""
     d = evaluate_exit(
         prev=_state(), side="long", entry_price=100.0, last_price=101.0,
         atr_pct=0.0, pnl_r=0.0, held_seconds=10,
     )
-    # floor = entry*1e-4 → denominator 0.01 → 1.0 move = 100R, capped at 100.
+    # floor = entry*1e-3 → denominator 0.1 → 1.0 move = 10R (well under the cap).
     assert d.state.mfe_r <= 100.0
-    assert d.state.mfe_r == pytest.approx(100.0)
+    assert d.state.mfe_r == pytest.approx(10.0)
 
 
 def test_zero_entry_price_stays_finite() -> None:
@@ -124,12 +124,13 @@ def test_zero_entry_price_stays_finite() -> None:
 
 
 def test_excursion_relative_floor_and_cap() -> None:
-    # atr_usd=0 on a 38000-priced index CFD (J225 class): floor = 3.8.
+    # atr_usd=0 on a 38000-priced index CFD (J225 class): floor = entry * 1e-3 =
+    # 38.0 (the 1e-3 relative floor matches the entry anchor sane-band floor).
     mfe = compute_mfe_r(
         entry_price=38_000.0, peak_price=38_038.0, trough_price=38_000.0,
         side="long", atr_usd=0.0,
     )
-    assert mfe == pytest.approx(38.0 / 3.8)  # = move% / 0.01% = 10R
+    assert mfe == pytest.approx(38.0 / 38.0)  # = move% / 0.1% = 1R
     mae = compute_mae_r(
         entry_price=38_000.0, peak_price=38_000.0, trough_price=0.0,
         side="long", atr_usd=0.0,

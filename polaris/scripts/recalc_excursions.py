@@ -173,7 +173,7 @@ def run_correction(
             conn, instrument_id=instrument_id, timeframe=anchor_tf,
             opened_ts=opened_ts,
         )
-        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-4)
+        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-3)
         new_mfe, new_mae = compute_excursion_r(
             entry_price=entry_price, peak_price=peak, trough_price=trough,
             side=side, atr_usd=atr_usd,

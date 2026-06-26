@@ -35,6 +35,7 @@ from polaris.core.live_recalc.session_exit_rail import (
     _CAL_US_EQUITY,
     _fx_in_session,
 )
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_effects import (
@@ -632,7 +633,15 @@ async def _close_trade_with_real_pnl(
     # BUILD_SCHEMA: persist final MFE/MAE (R units) + exit_state at close.
     # Best-effort from tracked peak/trough vs entry — measurement only, never
     # gates sizing or blocks entry. Computed BEFORE the write txn (pure read).
-    mfe_r, mae_r = _close_excursion_r(conn, trade=trade, exit_price=exit_price)
+    # ``atr_risk_usd`` = the whole-position dollar 1R for the per-trade-ATR
+    # EXCURSION ruler (same unit as mfe_r/mae_r); ``realized_atr_r`` rescales the
+    # dollar pnl into that ruler so the probe-outcome backfill (realized_pnl_r /
+    # giveback_r) reconciles with mfe_r_final. This is the EXCURSION ruler, NOT
+    # the per-stream ledger ``pnl_r`` (which stays on the positions row below).
+    mfe_r, mae_r, atr_risk_usd = _close_excursion_r(
+        conn, trade=trade, exit_price=exit_price,
+    )
+    realized_atr_r = realised_r(pnl_usd=pnl_usd, risk_usd=atr_risk_usd)
     try:
         conn.execute("BEGIN IMMEDIATE")
         persist_fill(
@@ -746,8 +755,8 @@ async def _close_trade_with_real_pnl(
     # /debate calibration joins observe-mode would-be decisions to the truth.
     # Collection-only, fail-open inside the helper; never gates sizing/exits.
     _safe_backfill_probe_outcome(
-        state=state, trade=trade, pnl_r=pnl_r, mfe_r=mfe_r, mae_r=mae_r,
-        now_ts=now_ts,
+        state=state, trade=trade, realized_atr_r=realized_atr_r,
+        mfe_r=mfe_r, mae_r=mae_r, now_ts=now_ts,
     )
     # Edge-validation Phase 1 — cost-adjusted expectancy posterior (measure +
     # display only; never wired into sizing). Fail-open inside the helper.

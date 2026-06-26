@@ -157,10 +157,14 @@ def test_close_excursion_helper_uses_tracked_extremes() -> None:
             notional_usd=100.0, open_ts=int(time.time()), position_id="p1",
         )
         # No bars seeded → atr_pct fallback 0.005 → atr_usd = 100*0.005*2 = 1.0.
-        mfe, mae = _close_excursion_r(conn, trade=trade, exit_price=105.0)
+        mfe, mae, atr_risk_usd = _close_excursion_r(
+            conn, trade=trade, exit_price=105.0,
+        )
         # peak 112 vs entry 100 = +12 / 1.0 = +12R; trough 94 = -6 / 1.0 = -6R.
         assert mfe == pytest.approx(12.0)
         assert mae == pytest.approx(-6.0)
+        # whole-position 1R = per-unit atr_usd (1.0) × entry base_qty (0.001666).
+        assert atr_risk_usd == pytest.approx(1.0 * 0.001666)
     finally:
         conn.close()
 
@@ -178,9 +182,12 @@ def test_close_excursion_falls_back_to_exit_when_no_extremes() -> None:
             notional_usd=100.0, open_ts=int(time.time()), position_id="p2",
         )
         # atr_usd = 1.0. exit 103 above entry → MFE +3R, MAE 0 (never below entry).
-        mfe, mae = _close_excursion_r(conn, trade=trade, exit_price=103.0)
+        mfe, mae, atr_risk_usd = _close_excursion_r(
+            conn, trade=trade, exit_price=103.0,
+        )
         assert mfe == pytest.approx(3.0)
         assert mae == 0.0
+        assert atr_risk_usd == pytest.approx(1.0 * 0.001666)
     finally:
         conn.close()
 

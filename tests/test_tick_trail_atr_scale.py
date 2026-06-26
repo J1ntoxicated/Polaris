@@ -51,31 +51,35 @@ def _fresh(side: str = "long") -> object:
     return init_exit_state(entry_price=ENTRY, side=side)
 
 
-# --- REPRO: the seconds-scale trail clips a fresh winner on the next tick ----
+# --- the relative ATR floor (task #51) already widens the seconds-scale trail --
 
 
-def test_repro_tick_window_atr_trail_clips_fresh_winner() -> None:
-    """CURRENT (buggy) tick behaviour: trail width on the seconds-scale atr_pct.
+def test_relative_floor_widens_seconds_scale_trail_no_clip() -> None:
+    """Task #51 floor (``_ATR_PCT_RELATIVE_FLOOR`` 1e-4 → 1e-3) interaction.
 
-    Up-tick to 100.06 prints +0.25R (entry-anchored). The trail width = 4 * (100 *
-    0.0001) = 0.04, so the stop sits at 100.06 - 0.04 = 100.02. A tiny pullback to
-    100.01 — STILL a +0.04R winner that already showed +0.25R MFE — touches the
-    stop and force-closes via atr_trail_stop. This is the live winner give-back.
+    The seconds-scale tick ``atr_pct`` (0.0001 = 0.01%) is BELOW the 0.1% relative
+    floor, so ``_atr_one_usd`` now floors the trail-width ATR at ``entry * 1e-3 =
+    0.1`` instead of the old ``entry * 1e-4 = 0.01``. The trail width is therefore
+    4 * 0.1 = 0.4 and the stop sits at 100.06 - 0.4 = 99.66 (was the microscopic
+    100.02 under the old 1e-4 floor). The same tiny pullback to 100.01 no longer
+    touches the stop — the floor unification already neutralises the seconds-scale
+    winner give-back this module's ``trail_atr_pct`` fix targets (the two
+    mitigations now overlap; ``trail_atr_pct`` remains a finer refinement).
     """
     up = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.06,
         atr_pct=TICK_ATR_PCT, pnl_r=0.25, held_seconds=5,
         entry_atr_pct=ENTRY_ATR_PCT, trail_mult=TRAIL, mfe_protect=FP_SCHED,
     )
-    assert up.state.stop_price == 100.02  # seconds-scale trail: peak - 0.04
+    assert up.state.stop_price == 99.66  # floored trail: peak - 4*0.1
     pullback = evaluate_exit(
         prev=up.state, side="long", entry_price=ENTRY, last_price=100.01,
         atr_pct=TICK_ATR_PCT, pnl_r=0.04, held_seconds=6,
         entry_atr_pct=ENTRY_ATR_PCT, trail_mult=TRAIL, mfe_protect=FP_SCHED,
     )
-    # The bug: a +0.04R winner is stopped out at ~flat on the very next tick.
-    assert pullback.close is True
-    assert pullback.close_reason == "atr_trail_stop"
+    # The floored trail no longer clips the fresh winner on the next tick.
+    assert pullback.close is False
+    assert pullback.close_reason is None
 
 
 def test_fix_trail_atr_pct_anchors_trail_to_bar_scale() -> None:

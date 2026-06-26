@@ -199,7 +199,7 @@ def _safe_record_meta_label(
 
 
 def _safe_backfill_probe_outcome(
-    *, state: ProdLoopState, trade: SimulatedTrade, pnl_r: float,
+    *, state: ProdLoopState, trade: SimulatedTrade, realized_atr_r: float,
     mfe_r: float, mae_r: float, now_ts: int,
 ) -> None:
     """ADR-012 — fill the probe tuning-log outcome cols for this closed position.
@@ -210,6 +210,14 @@ def _safe_backfill_probe_outcome(
     realized outcome. No-op when there is no position_id / no sidecar. Never
     gates sizing/exits; a backfill failure must never abort an already-committed
     close.
+
+    Hardening #6 ruler honesty: the probe-outcome columns (``realized_pnl_r`` /
+    ``mfe_r_final`` / ``giveback_r``) are ALL the per-trade-ATR EXCURSION ruler
+    (``unit_tag='excursion'``), so ``realized_atr_r`` (the dollar pnl rescaled by
+    the per-trade-ATR whole-position 1R) — NOT the per-stream ledger ``pnl_r`` —
+    is backfilled into ``realized_pnl_r``. ``giveback_r = mfe_r − realized_atr_r``
+    is then a same-ruler subtraction (both EXCURSION) instead of a meaningless
+    cross-ruler one.
     """
     probe_conn = getattr(state, "probe_conn", None)
     position_id = trade.position_id
@@ -222,11 +230,12 @@ def _safe_backfill_probe_outcome(
 
         time_to_exit = max(0, now_ts - getattr(trade, "open_ts", now_ts))
         backfill_probe_outcome(
-            probe_conn, position_id=str(position_id), realized_pnl_r=pnl_r,
+            probe_conn, position_id=str(position_id),
+            realized_pnl_r=realized_atr_r,
             close_reason=getattr(trade, "close_reason", "") or "exit",
             mfe_r_final=mfe_r, mae_r_final=mae_r,
-            giveback_r=max(0.0, mfe_r - pnl_r), time_to_exit_sec=time_to_exit,
-            outcome_ts=now_ts,
+            giveback_r=max(0.0, mfe_r - realized_atr_r),
+            time_to_exit_sec=time_to_exit, outcome_ts=now_ts,
         )
     except Exception as exc:  # noqa: BLE001 — collection-only, fail-open
         logger.warning(

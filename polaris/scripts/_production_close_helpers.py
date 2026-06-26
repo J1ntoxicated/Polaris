@@ -216,8 +216,8 @@ def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
 
 def _close_excursion_r(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, exit_price: float,
-) -> tuple[float, float]:
-    """Best-effort ``(mfe_r, mae_r)`` for a position at close time.
+) -> tuple[float, float, float]:
+    """Best-effort ``(mfe_r, mae_r, atr_risk_usd)`` for a position at close time.
 
     BUILD_SCHEMA prerequisite: the tick loop does not yet populate the
     ``positions.peak_price`` / ``trough_price`` extremes (a later precise-exit
@@ -225,27 +225,42 @@ def _close_excursion_r(
     and falls back to the observed entry/exit bounds when they are NULL — a
     position that only ever recorded its entry and exit still yields a finite,
     correctly-signed excursion (never *under*-states MFE/MAE relative to the
-    realised move). The R denominator is re-derived from the same entry fill +
-    recent bars as ``real_pnl_r_from_fills`` so pnl_r and mfe_r/mae_r share one
-    risk unit. Returns ``(0.0, 0.0)`` only when entry price is unknowable.
+    realised move). The mfe_r/mae_r R denominator is the per-trade-ATR stop
+    distance (``entry_price × anchor × 2``) — the EXCURSION ruler, a DIFFERENT
+    unit from the per-stream realised ``pnl_r``.
+
+    ``atr_risk_usd`` (third return) is the WHOLE-POSITION dollar 1R for that same
+    per-trade-ATR ruler — ``atr_usd(per-unit) × base_qty`` — so the close path can
+    rescale ``pnl_usd`` into the SAME excursion ruler the probe-outcome columns
+    (``realized_pnl_r`` / ``mfe_r_final`` / ``giveback_r``) expect. ``base_qty``
+    is the entry fill's filled size (the open qty is exact); it falls back to
+    ``trade.base_qty`` when the entry fill carries none. ``atr_risk_usd`` is
+    ``0.0`` when entry price / base_qty are unknowable (the caller then keeps the
+    backfilled excursion R at 0). Returns ``(0.0, 0.0, 0.0)`` only when entry
+    price is unknowable.
     """
     entry_price = trade.entry_price
-    if entry_price <= 0.0:
+    base_qty = trade.base_qty
+    if trade.position_id:
         row = conn.execute(
-            "SELECT fill_price FROM fills WHERE contribution_id = ? "
+            "SELECT fill_price, base_qty FROM fills WHERE contribution_id = ? "
             "AND instrument_id = ? AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
             (trade.position_id, f"{trade.venue}:{trade.symbol}"),
-        ).fetchone() if trade.position_id else None
-        if row is None:
-            return (0.0, 0.0)
-        entry_price = float(row[0])
+        ).fetchone()
+        if row is not None:
+            # Entry fill qty is the exact filled size — prefer it over the
+            # in-memory trade.base_qty (which the partial-close path decrements).
+            if entry_price <= 0.0 and row[0] is not None:
+                entry_price = float(row[0])
+            if row[1] is not None and float(row[1]) > 0.0:
+                base_qty = float(row[1])
     if entry_price <= 0.0:
-        return (0.0, 0.0)
+        return (0.0, 0.0, 0.0)
     # Entry-time ATR anchor first (one R denominator shared with pnl_r);
     # legacy NULL anchor → the recent-1m-bars estimate (pre-anchor behaviour).
     anchor = _entry_anchor_atr_pct(conn, trade=trade)
     if anchor is not None:
-        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-4)
+        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-3)
     else:
         # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit
         # mark and ATR window derive from real recent data, never a +10h ghost.
@@ -259,6 +274,9 @@ def _close_excursion_r(
             (f"{trade.venue}:{trade.symbol}", ts_upper),
         ).fetchall()
         atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
+    # Whole-position dollar 1R for the per-trade-ATR excursion ruler. 0.0 when
+    # base_qty is unknowable → the caller keeps the backfilled excursion R at 0.
+    atr_risk_usd = atr_usd * base_qty if base_qty > 0.0 else 0.0
     # Read tracked extremes; fall back to entry/exit bounds when the tick loop
     # has not populated them. peak = max(entry, exit, tracked_peak); trough =
     # min(entry, exit, tracked_trough) so the excursion is never under-stated.
@@ -274,10 +292,11 @@ def _close_excursion_r(
             tracked_trough = None if prow[1] is None else float(prow[1])
     peak = max(entry_price, exit_price, tracked_peak or entry_price)
     trough = min(entry_price, exit_price, tracked_trough or entry_price)
-    return compute_excursion_r(
+    mfe_r, mae_r = compute_excursion_r(
         entry_price=entry_price, peak_price=peak, trough_price=trough,
         side=trade.side, atr_usd=atr_usd,
     )
+    return (mfe_r, mae_r, atr_risk_usd)
 
 def close_pnl_usd_total(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, fallback: float,

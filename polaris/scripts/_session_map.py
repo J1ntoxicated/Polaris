@@ -53,8 +53,10 @@ __all__ = [
     "SESSION_DORMANT",
     "US_CLOSE_MIN",
     "US_OPEN_MIN",
+    "WARM_LEAD_MIN",
     "instrument_session_weight",
     "session_group",
+    "session_warm_active",
 ]
 
 
@@ -92,8 +94,23 @@ US_CLOSE_MIN: Final[int] = _env_int("POLARIS_SESSION_US_CLOSE_MIN", 20 * 60)
 # ``_candidate_sweep.SESSION_DOWNWEIGHT`` so the two session knobs stay aligned.
 SESSION_DORMANT: Final[float] = _env_float("POLARIS_SESSION_DORMANT", 0.3)
 
+# Pre-open bar-warming lead (#66, Jin "장 열기 전부터 거래가능 바 알아서 채워야"). A
+# regional cash-session symbol becomes FETCH-active (its 1m bars are pre-warmed)
+# this many UTC minutes BEFORE its cash open, so the recency gate sees fresh bars
+# at the open instead of a 0.5h-stale feed that skips the symbol. DATA-ONLY: this
+# never advances the TRADE weight (the symbol is still SESSION_DORMANT until the
+# open itself). env-overridable /debate target — mirrors the EOD-flatten lead
+# pattern (``POLARIS_EOD_FLATTEN_LEAD_SEC``), never magic-in-place.
+WARM_LEAD_MIN: Final[int] = _env_int("POLARIS_SESSION_WARM_LEAD_MIN", 30)
+
 # asset_class tokens that mean "FX major" (24/5 — active any weekday hour).
 _FX_CLASSES: Final[frozenset[str]] = frozenset({"forex", "fx"})
+
+# asset_class tokens that mean "US equity" — Alpaca stock symbols (the 미장 gap).
+# They have no ``_SESSION_GROUP`` entry, so FOR WARMING ONLY they are absorbed
+# into the 'us' cash-session window (their cash open IS the US RTH open). The
+# TRADE weight (``instrument_session_weight``) is UNTOUCHED by this mapping.
+_EQUITY_CLASSES: Final[frozenset[str]] = frozenset({"equity", "stock", "us_equity"})
 
 # Symbol → regional session group. Mirrors the Yahoo index map's regional split
 # (``_yahoo_bars._CAPITAL_INDEX_YF``): ^N225/^HSI/^AXJO = Asia, ^GDAXI/^FTSE/
@@ -189,3 +206,61 @@ def instrument_session_weight(
         return SESSION_DORMANT
     open_min, close_min = _GROUP_WINDOW[group]
     return 1.0 if open_min <= minute < close_min else SESSION_DORMANT
+
+
+def session_warm_active(
+    venue: str, asset_class: str, symbol: str, now_ts: int | float
+) -> bool:
+    """Should this instrument's bars be pre-warmed right now? (#66 pre-open warm).
+
+    True when ``now_ts`` (UTC epoch) falls in the symbol's pre-open WARM window
+    ``[open - WARM_LEAD_MIN, close)`` on a weekday — i.e. the symbol's regional
+    cash session is about to open (or is open), so its 1m bars should be fetched
+    ahead of the open and stay fresh through the session. False otherwise.
+
+    DATA WARMING ONLY — this is a SEPARATE predicate from
+    ``instrument_session_weight`` (the TRADE focus weight, untouched). A symbol is
+    FETCH-active ``WARM_LEAD_MIN`` before its open while still TRADE-dormant until
+    the open itself; entry / sizing / exit never read this.
+
+    Warm targets are exactly the symbols that have a discrete cash open to warm
+    toward:
+    - a mapped regional cash index (J225/DE40/US100…) → its group window;
+    - an Alpaca US equity (the 미장 gap; no ``_SESSION_GROUP`` entry) → absorbed
+      into the 'us' window FOR WARMING ONLY.
+    Everything else is NOT warmed (the background grind already covers them):
+    - OKX crypto (24/7, no cash open — the 5s hot path fills its 1m);
+    - FX (24/5) and commodities (24/5, no single cash open);
+    - an unmapped index (no known window → no computable open - LEAD);
+    - any symbol on the weekend (cash books shut).
+    """
+    if venue.strip().lower() == "okx":
+        return False  # crypto 24/7 — no cash open to warm toward (hot path fills 1m)
+
+    try:
+        ts = int(now_ts)
+    except (TypeError, ValueError, OverflowError):
+        return False  # unparseable clock → never warm (degrade to existing grind)
+    if ts < 0:
+        ts = 0
+    local = dt.datetime.fromtimestamp(ts, tz=dt.UTC)
+    if local.weekday() >= 5:
+        return False  # weekend → cash books shut, no warming (weekend-OFF)
+    minute = local.hour * 60 + local.minute
+
+    # Alpaca US equity → 'us' window (warming-only); else the symbol's index group.
+    if (venue.strip().lower() == "alpaca"
+            and asset_class.strip().lower() in _EQUITY_CLASSES):
+        group: str | None = "us"
+    else:
+        group = session_group(symbol)
+    if group is None:
+        return False  # FX / commodity / unmapped — no cash-open window to warm
+
+    open_min, close_min = _GROUP_WINDOW[group]
+    warm_start = open_min - WARM_LEAD_MIN
+    if warm_start <= minute < close_min:
+        return True
+    # Wrap: an open near 00:00 UTC (Asia) pushes warm_start negative — the lead
+    # tail lands in the prior evening's late minutes (e.g. 23:30-24:00 UTC).
+    return warm_start < 0 and minute >= warm_start + 1440

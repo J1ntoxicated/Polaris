@@ -164,3 +164,149 @@ def test_dormant_weight_is_positive_floor_not_zero() -> None:
     """A dormant instrument keeps a POSITIVE weight (deprioritize, never excluded)."""
     w = sm.instrument_session_weight("capital", "index", "US100", _utc(*_WED, 3))
     assert 0.0 < w < 1.0  # strictly between 0 and 1 — present but deprioritized
+
+
+# ---------------------------------------------------------------------------
+# session_warm_active — pre-open bar-warming predicate (#66, Jin "장 열기 전부터
+# 거래가능 바 알아서 채워야"). DATA WARMING ONLY: this picks which symbols get
+# their 1m bars pre-fetched in the [open - WARM_LEAD_MIN, close) window so the
+# recency gate sees fresh bars at the cash open. It NEVER touches the TRADE
+# weight (``instrument_session_weight``) — a symbol is FETCH-active T-X before
+# open while still TRADE-dormant until the open itself.
+# ---------------------------------------------------------------------------
+
+
+def test_warm_active_lead_window_before_us_open() -> None:
+    """A US index is warm-active in the [open - LEAD, open) pre-open window.
+
+    With the default 30-min lead, US cash opens at 13:30 UTC → warming starts at
+    13:00 UTC. At 13:10 the symbol is FETCH-active (warm) even though it is not
+    yet TRADE-active (still dormant by the weight) until 13:30.
+    """
+    pre_open = _utc(*_WED, 13, 10)  # 13:10 UTC — 20 min before the 13:30 US open
+    assert sm.session_warm_active("capital", "index", "US100", pre_open) is True
+    # TRADE weight is UNTOUCHED — still dormant before the open (no lead concept).
+    assert sm.instrument_session_weight("capital", "index", "US100", pre_open) < 1.0
+
+
+def test_warm_active_just_before_lead_window_is_false() -> None:
+    """Outside the lead window (before open - LEAD) the symbol is NOT warm yet."""
+    too_early = _utc(*_WED, 12, 50)  # 12:50 UTC — 40 min before open, lead=30
+    assert sm.session_warm_active("capital", "index", "US100", too_early) is False
+
+
+def test_warm_active_during_session_then_fresh_at_open() -> None:
+    """At and through the cash open the symbol is warm-active (bars stay fresh)."""
+    at_open = _utc(*_WED, 13, 30)  # exactly the US open
+    mid = _utc(*_WED, 15)          # mid-session
+    assert sm.session_warm_active("capital", "index", "US100", at_open) is True
+    assert sm.session_warm_active("capital", "index", "US100", mid) is True
+    # And TRADE-active flips to 1.0 at the open (warming handed off cleanly).
+    assert sm.instrument_session_weight("capital", "index", "US100", at_open) == 1.0
+
+
+def test_warm_active_after_close_is_false() -> None:
+    """After the cash close the symbol drops out of warming automatically."""
+    after = _utc(*_WED, 21)  # 21:00 UTC — past the 20:00 US close
+    assert sm.session_warm_active("capital", "index", "US100", after) is False
+
+
+def test_warm_active_europe_pre_open() -> None:
+    """A Europe index warms before its 07:00 UTC open (06:30 with the 30-min lead)."""
+    pre = _utc(*_WED, 6, 40)  # 06:40 UTC — 20 min before the 07:00 Europe open
+    assert sm.session_warm_active("capital", "index", "DE40", pre) is True
+    # US index is nowhere near its open at 06:40 → not warming.
+    assert sm.session_warm_active("capital", "index", "US100", pre) is False
+
+
+def test_warm_active_alpaca_equity_absorbed_into_us_window() -> None:
+    """Alpaca US equities (the core 미장 gap) warm in the US pre-open window.
+
+    Alpaca stock symbols have no ``_SESSION_GROUP`` entry — they must be absorbed
+    into the 'us' window FOR WARMING so the 미장 case (open 13:30 UTC, 1m bars
+    0.5h stale → recency gate skip) is covered. The TRADE weight's existing
+    None-group behavior is unchanged (warming-only mapping).
+    """
+    pre_open = _utc(*_WED, 13, 10)  # 20 min before the US open
+    assert sm.session_warm_active("alpaca", "equity", "AAPL", pre_open) is True
+    assert sm.session_warm_active("alpaca", "us_equity", "TSLA", pre_open) is True
+    # But NOT outside the US lead window.
+    assert sm.session_warm_active("alpaca", "equity", "AAPL",
+                                  _utc(*_WED, 3)) is False
+
+
+def test_warm_active_alpaca_equity_does_not_touch_trade_weight() -> None:
+    """The Alpaca→'us' warming map must NOT alter ``instrument_session_weight``.
+
+    The weight's prior behavior for an unmapped Alpaca equity (group=None →
+    weekday-active 1.0) is preserved — warming reads a separate predicate.
+    """
+    # 03:00 UTC weekday: warming says NO (US not near open), but the TRADE weight
+    # keeps its existing unmapped-equity weekday-active 1.0 (behavior-invariant).
+    early = _utc(*_WED, 3)
+    assert sm.session_warm_active("alpaca", "equity", "AAPL", early) is False
+    assert sm.instrument_session_weight("alpaca", "equity", "AAPL", early) == 1.0
+
+
+def test_warm_active_crypto_never_warmed() -> None:
+    """OKX crypto is 24/7 — never a pre-open warm target (hot path fills its 1m).
+
+    crypto has no cash open to warm toward; the predicate is False at every hour
+    so the warming fetch never adds a redundant 1m pull for crypto.
+    """
+    for hour in range(0, 24, 4):
+        assert sm.session_warm_active("okx", "crypto", "BTC-USDT",
+                                      _utc(*_WED, hour)) is False
+    # Weekend too.
+    assert sm.session_warm_active("okx", "crypto", "ETH-USDT",
+                                  _utc(*_SAT, 3)) is False
+
+
+def test_warm_active_fx_and_commodity_not_warmed() -> None:
+    """FX (24/5) and commodities (24/5, no cash open) are not pre-open warm targets.
+
+    They have no discrete cash open; the existing background grind keeps them
+    fresh. Only mapped cash-session indices + Alpaca US equities are warmed.
+    """
+    now = _utc(*_WED, 13, 10)  # inside the US lead window — irrelevant for FX/commodity
+    assert sm.session_warm_active("capital", "forex", "EURUSD", now) is False
+    assert sm.session_warm_active("capital", "commodity", "GOLD", now) is False
+
+
+def test_warm_active_unmapped_index_not_warmed() -> None:
+    """An index with no session-group mapping has no known open → not warmed.
+
+    We cannot compute open - LEAD without a window, so an unmapped symbol is not
+    a warm target (the grind still covers it). This is warming-only; the TRADE
+    weight's unmapped→weekday-active behavior is untouched.
+    """
+    assert sm.session_warm_active("capital", "index", "ZZ999",
+                                  _utc(*_WED, 13, 10)) is False
+
+
+def test_warm_active_weekend_off() -> None:
+    """Weekend cash books are shut → warming is OFF (matches weekend-dormant)."""
+    sat = _utc(*_SAT, 13, 10)  # would be a US lead window on a weekday
+    assert sm.session_warm_active("capital", "index", "US100", sat) is False
+    assert sm.session_warm_active("alpaca", "equity", "AAPL", sat) is False
+
+
+def test_warm_lead_min_env_override(monkeypatch: object) -> None:
+    """``POLARIS_SESSION_WARM_LEAD_MIN`` widens/narrows the lead (no-hardcode).
+
+    Reloading the module with a 60-min lead makes 12:40 UTC (50 min before the
+    13:30 US open) warm-active, whereas the default 30-min lead leaves it cold.
+    """
+    import importlib
+
+    import polaris.scripts._session_map as sm_mod
+    monkeypatch.setenv("POLARIS_SESSION_WARM_LEAD_MIN", "60")  # type: ignore[attr-defined]
+    reloaded = importlib.reload(sm_mod)
+    try:
+        assert reloaded.WARM_LEAD_MIN == 60
+        twelve_forty = _utc(*_WED, 12, 40)  # 50 min before US open
+        assert reloaded.session_warm_active("capital", "index", "US100",
+                                            twelve_forty) is True
+    finally:
+        monkeypatch.delenv("POLARIS_SESSION_WARM_LEAD_MIN", raising=False)  # type: ignore[attr-defined]
+        importlib.reload(reloaded)  # restore module-level default for other tests

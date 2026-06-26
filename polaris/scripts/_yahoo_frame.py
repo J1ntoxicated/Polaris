@@ -9,16 +9,30 @@ working. The stored Bar stays VENUE-NATIVE; only ``source`` flips to ``"yahoo"``
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from polaris.core.data.schema import Bar
 
 
 def _to_float(value: Any) -> float:
+    """Coerce a yfinance cell to a finite float (NaN/inf/None → 0.0).
+
+    yfinance hands ``NaN`` OHLCV cells on thin tickers AND on some index epics
+    (J225/HK50/AU200). ``float('nan')`` does NOT raise, and SQLite stores a NaN
+    as NULL — so a NaN that slipped through here would trip the bars NOT NULL
+    constraint downstream. Sanitizing to a finite 0.0 here lets the per-field
+    OHLC guard in ``_yahoo_df_to_bars`` (and the persist-layer guard) drop the
+    bad row instead of poisoning the batch. Mirrors the Capital adapter
+    ``_to_float`` (which already guards with ``math.isfinite``).
+    """
     try:
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError):
         return 0.0
+    if not math.isfinite(f):
+        return 0.0
+    return f
 
 
 def _yahoo_df_to_bars(
@@ -51,7 +65,12 @@ def _yahoo_df_to_bars(
         h = _to_float(getattr(row, "High", None))
         low = _to_float(getattr(row, "Low", None))
         c = _to_float(getattr(row, "Close", None))
-        if o <= 0.0 or c <= 0.0:
+        # Drop a row with ANY non-positive OHLC field — a NaN cell was sanitized
+        # to 0.0 by ``_to_float`` above, so a NaN in open/high/low/close lands
+        # here as 0.0 and is dropped (mirrors ``_alpaca_bar_to_canonical``). High
+        # and low are guarded too: a NaN-high/low row with a valid open/close
+        # would otherwise persist a 0.0 high/low (a corrupt candle).
+        if o <= 0.0 or h <= 0.0 or low <= 0.0 or c <= 0.0:
             continue
         vol = _to_float(getattr(row, "Volume", None))
         out.append(

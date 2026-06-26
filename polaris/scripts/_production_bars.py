@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -793,5 +795,118 @@ def read_recent_bars(
         # re-logs a transition WARNING (logging-only state reset).
         _RECENCY_STALE_FLAGGED.discard(key)
     return bars
+
+
+# On-demand live-refetch cooldown (Jin 2026-06-27 "데이터 proactive"). When the
+# recency guard returns [] (stale/empty store) the trading path used to SKIP the
+# symbol. Instead we now REFETCH live — but a per-(venue, symbol, interval)
+# cooldown spaces those refetches so a stale-symbol storm cannot hammer the
+# venues (the live OKX 660× "Too Many"/429 hazard). Default 60s; env-tunable via
+# ``POLARIS_ONDEMAND_FETCH_COOLDOWN_SEC`` (no-hardcode). Module-level dict =
+# single-process loop, mirrors ``should_fetch_exchange_fallback``. Cleared
+# per-test in conftest. NEVER gates a decision: a never-fetched symbol always
+# fetches immediately; a cooldown'd one degrades to the same skip as before.
+def _ondemand_cooldown_sec() -> float:
+    raw = os.environ.get("POLARIS_ONDEMAND_FETCH_COOLDOWN_SEC")
+    if raw is None or raw.strip() == "":
+        return 60.0
+    try:
+        val = float(raw.strip())
+    except ValueError:
+        return 60.0
+    return val if val > 0 else 60.0
+
+
+ONDEMAND_FETCH_COOLDOWN_SEC: float = _ondemand_cooldown_sec()
+_ONDEMAND_LAST_MONO: dict[tuple[str, str, str], float] = {}
+
+
+def should_fetch_ondemand(
+    venue: str, symbol: str, bar_interval: str, now_mono: float
+) -> bool:
+    """True if an on-demand live refetch may run for this key now.
+
+    True (and records the time) when never-fetched or the cooldown elapsed;
+    False inside the window. Per-(venue, symbol, interval) so a 1m refetch and a
+    1H refetch for the same symbol are independent. STORM GUARD only (OKX 429
+    protection) — never gates a trading decision (flow_not_block)."""
+    key = (venue, symbol, bar_interval)
+    last = _ONDEMAND_LAST_MONO.get(key)
+    if last is None or (now_mono - last) >= ONDEMAND_FETCH_COOLDOWN_SEC:
+        _ONDEMAND_LAST_MONO[key] = now_mono
+        return True
+    return False
+
+
+async def read_recent_bars_ondemand(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    asset_class: str,
+    bar_interval: str = "1m",
+    limit: int = 240,
+    freshness_threshold_sec: float | None = None,
+    capital_session: CapitalSession | None = None,
+    alpaca_adapter: Any = None,
+    gpt_client_factory: Any = None,
+    now_mono: float | None = None,
+    fetch_fn: Callable[..., Awaitable[list[Bar]]] | None = None,
+) -> list[Bar]:
+    """``read_recent_bars`` that, on a STALE read, FETCHES live instead of skipping.
+
+    "데이터 없으면 가져온다" — the data-proactive default. Steps:
+      1. Read with the recency guard. FRESH → return as-is (byte-identical to
+         ``read_recent_bars``; NO fetch, no cost).
+      2. STALE/empty → if the per-(venue, symbol, interval) cooldown allows,
+         refetch live via ``fetch_bars_one`` (Yahoo PRIMARY; its own exchange-
+         fallback cooldown + within-period frame cache further throttle OKX), then
+         ``persist_bars`` the fresh candles and re-read.
+      3. Refetch empty / cooldown'd / raised → return [] (degrade-never-crash;
+         the SAME skip as before — no new block, flow_not_block).
+
+    Storm/OKX-429 guard: the cooldown (``POLARIS_ONDEMAND_FETCH_COOLDOWN_SEC``,
+    default 60s) + dedup. ``fetch_fn`` is injectable for tests (defaults to
+    ``fetch_bars_one``). DATA layer only — no entry/size/exit touched.
+    """
+    bars = read_recent_bars(
+        conn, venue=venue, symbol=symbol, bar_interval=bar_interval,
+        limit=limit, freshness_threshold_sec=freshness_threshold_sec,
+    )
+    if bars:
+        return bars
+    # Stale or empty store → go get fresh data (cooldown-gated).
+    mono = now_mono if now_mono is not None else time.monotonic()
+    if not should_fetch_ondemand(venue, symbol, bar_interval, mono):
+        return []  # within cooldown → degrade to the prior skip (storm guard)
+    fetch = fetch_fn if fetch_fn is not None else fetch_bars_one
+    last_ts = last_stored_bar_ts(conn, f"{venue}:{symbol}", bar_interval)
+    try:
+        fresh = await fetch(
+            venue, symbol, asset_class,
+            capital_session=capital_session,
+            alpaca_adapter=alpaca_adapter,
+            limit=limit, bar_interval=bar_interval,
+            since_ts=last_ts,
+            gpt_client_factory=gpt_client_factory,
+        )
+    except Exception as exc:  # noqa: BLE001 — one symbol's fetch never crashes the tick
+        logger.debug(
+            "[ondemand] %s:%s/%s refetch failed: %r",
+            venue, symbol, bar_interval, exc,
+        )
+        return []
+    if not fresh:
+        return []  # nothing live either → graceful skip (data genuinely absent)
+    # persist_bars already drops any non-finite OHLC row (batch-survivable) and is
+    # idempotent (INSERT OR REPLACE). ``commit`` flushes the write if any caller
+    # left an explicit transaction open; the tick body itself spans none here, so
+    # the subsequent read sees the just-written bars regardless.
+    persist_bars(conn, fresh)
+    conn.commit()
+    return read_recent_bars(
+        conn, venue=venue, symbol=symbol, bar_interval=bar_interval,
+        limit=limit, freshness_threshold_sec=freshness_threshold_sec,
+    )
 
 

@@ -54,6 +54,9 @@ def _reset_log_dedup_caches() -> Iterator[None]:
     from polaris.scripts import _production_asset_class, _production_bars, _yahoo_bars
 
     _production_bars._RECENCY_STALE_FLAGGED.clear()
+    # On-demand refetch cooldown is process-global; a recorded refetch time would
+    # otherwise suppress a downstream test's expected on-demand fetch.
+    _production_bars._ONDEMAND_LAST_MONO.clear()
     _production_asset_class._FALLBACK_WARNED.clear()
     # Yahoo-PRIMARY module state (resolution cache + exchange-fallback cooldown)
     # is process-global; a stale entry from one test would otherwise leak into a

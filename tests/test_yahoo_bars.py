@@ -359,6 +359,44 @@ def test_df_to_bars_drops_bad_rows() -> None:
     assert bars[0].open == 186.0
 
 
+def test_df_to_bars_drops_nan_ohlc_rows() -> None:
+    """yfinance hands NaN OHLCV on thin tickers / some index epics.
+
+    A NaN in any of open/high/low/close must drop the row — SQLite treats a
+    Python ``float('nan')`` as NULL, so a NaN-open (Alpaca) or NaN-close
+    (Capital index J225/HK50/AU200) row would otherwise trip
+    ``NOT NULL constraint failed`` and nuke the whole batch. The finite rows
+    must survive (flow_not_block: good bars still land).
+    """
+    nan = float("nan")
+    idx = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2024-01-02 09:30:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-02 09:31:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-02 09:32:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-02 09:33:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-02 09:34:00", tz="America/New_York"),
+        ]
+    )
+    df = pd.DataFrame(
+        {
+            "Open": [nan, 186.0, 186.0, 186.0, 187.0],   # row 0: NaN open
+            "High": [186.5, nan, 187.0, 187.0, 188.0],   # row 1: NaN high
+            "Low": [184.5, 185.5, nan, 185.5, 186.0],    # row 2: NaN low
+            "Close": [186.0, 186.8, 186.8, nan, 187.5],  # row 3: NaN close
+            "Volume": [1_000, 2_000, 3_000, 4_000, 5_000],
+        },
+        index=idx,
+    )
+    bars = _yahoo_df_to_bars(
+        df, venue="alpaca", symbol="AAPL", bar_interval="1m",
+        underlying_group_id="equity:AAPL",
+    )
+    assert len(bars) == 1, "only the fully-finite row survives"
+    assert bars[0].open == 187.0
+    assert bars[0].close == 187.5
+
+
 def test_df_to_bars_newest_last() -> None:
     # Build a descending-order df → output must be sorted ascending (newest last).
     idx = pd.DatetimeIndex(

@@ -3,7 +3,8 @@
 Proves the bar-recalc + tick-engine resolvers arm the peak-fraction floor for the
 right families and leave the REVERSION / range bucket UNCHANGED:
   * bar TREND family (session_breakout / equity_gap_go / fx_breakout_basket) →
-    peak-fraction arm +0.5R / frac 0.55 + a widened 3.0-ATR trail;
+    peak-fraction arm +0.30R / frac 0.55 + a widened 3.0-ATR trail (arm lowered
+    0.5→0.30 to match the +0.40R avg bar MFE, [[session_giveback_bar_arm]]);
   * bar REVERSION / range bucket → arm 0.0 (disabled) + None trail (byte-identical);
   * tick momentum (burst_rider / flow_pressure) → peak-fraction arm +1.0R / frac
     0.50 + a wide trail (burst 3.5, flow_pressure 4.0), low sub-arm rungs preserved.
@@ -46,7 +47,7 @@ def test_bar_trend_family_arms_peak_fraction_and_wide_trail() -> None:
         assert _bucket_for_strategy(sid) is Bucket.TREND
         sched = _mfe_protect_for_strategy(sid)
         assert sched is not None
-        assert sched.peak_lock_arm_r == BAR_TREND_PEAK_LOCK_ARM_R == 0.5
+        assert sched.peak_lock_arm_r == BAR_TREND_PEAK_LOCK_ARM_R == 0.30
         assert sched.peak_lock_frac == BAR_TREND_PEAK_LOCK_FRAC == 0.55
         assert _trail_mult_for_strategy(sid) == BAR_TREND_TRAIL_MULT == 3.0
 

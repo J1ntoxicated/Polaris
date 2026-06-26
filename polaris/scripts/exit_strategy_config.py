@@ -52,16 +52,24 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Let-winners-run peak-fraction floor for the BAR TREND family
-# ([[ab_letrun_maker_2026-06-24]]). The bar TREND strategies (session_breakout /
-# equity_gap_go / fx_breakout_basket — every TREND-bucket registered strategy)
-# banked their winners at break-even (session_breakout +0.77R MFE → +0.009R). The
-# peak-fraction floor holds ~55% of the reached peak once MFE passes the +0.5R arm
-# (red-team: +0.5R, NOT +2.5R — a higher arm starves the bar common case), on a
-# WIDENED 3.0-ATR trail (was the 2.0 module default). REVERSION / range bucket is
-# UNCHANGED (arm 0.0 → disabled; their edge is a bounded revert-to-mean, never a
-# let-winners-run). EXPECTANCY, not a throttle: it only ratchets the stop toward
-# profit; size / entry side / the G6 -1.0R rail are untouched. Env-tunable.
-BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.5)
+# ([[ab_letrun_maker_2026-06-24]] · arm 0.5→0.30 [[session_giveback_bar_arm]]).
+# The bar TREND strategies (session_breakout / equity_gap_go / fx_breakout_basket
+# — every TREND-bucket registered strategy) banked their winners at break-even
+# (session_breakout +0.77R MFE → +0.009R). The peak-fraction floor holds ~55% of
+# the reached peak once MFE passes the arm.
+#   ARM 0.5 → 0.30: the arm was left at +0.5R when the TICK-path arm was lowered
+#   to +0.30R (#19/#47) — but session_breakout's MEASURED avg peak MFE is only
+#   +0.40R (n=98 across the 06-25/06-26 archives: 48.0% reach +0.30R, 28.6%
+#   reach +0.50R). At the old +0.5R arm the COMMON-case 0.40R winner never armed
+#   the floor and round-tripped on the wide 3.0-ATR trail to break-even (DOLLAR
+#   ruler: armed positions gave back avg 74% of the favourable $ move). +0.30R
+#   arms on the common case (matches the tick arm); a big runner still climbs the
+#   floor on the wide trail (asymmetry). On a WIDENED 3.0-ATR trail (was the 2.0
+#   module default). REVERSION / range bucket is UNCHANGED (arm 0.0 → disabled;
+#   their edge is a bounded revert-to-mean, never a let-winners-run). EXPECTANCY,
+#   not a throttle: it only ratchets the stop toward profit; size / entry side /
+#   the G6 -1.0R rail are untouched. Env-tunable.
+BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.30)
 BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.55)
 BAR_TREND_TRAIL_MULT: float = _env_float("POLARIS_BAR_TREND_TRAIL_MULT", 3.0)
 

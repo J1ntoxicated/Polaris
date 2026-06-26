@@ -72,7 +72,14 @@ from polaris.strategies import (
     BaseStrategy,
     DonchianTurtleBreakoutStrategy,
     EMACrossoverStrategy,
+    Equity52WkHighBreakoutStrategy,
+    EquityVolExpansionPocketPivotStrategy,
     FXBreakoutBasketStrategy,
+    GoldBreakout1HStrategy,
+    GoldRiskoffTrendAmplifyStrategy,
+    GoldTrendChandelier1DStrategy,
+    Index52WHighMomentumStrategy,
+    IndexDualMomentumRotationStrategy,
     MACDEMATrendPullbackStrategy,
     OKXDonchian55BreakoutStrategy,
     RawSignal,
@@ -260,6 +267,16 @@ def _all_strategies() -> list[BaseStrategy]:
         FXBreakoutBasketStrategy(),
         XAUIndicesTrendStrategy(),
         SessionBreakoutStrategy(),
+        # strategy-wave2 — Capital CFD GOLD/index (5, deploy live).
+        GoldTrendChandelier1DStrategy(),
+        GoldRiskoffTrendAmplifyStrategy(),
+        GoldBreakout1HStrategy(),
+        Index52WHighMomentumStrategy(),
+        IndexDualMomentumRotationStrategy(),
+        # strategy-wave2 — Alpaca equity (2, inert until SIP #42 routes bars;
+        # degrade-never-crash: un-routed symbol → no bars → no emit).
+        Equity52WkHighBreakoutStrategy(),
+        EquityVolExpansionPocketPivotStrategy(),
     ]
 
 

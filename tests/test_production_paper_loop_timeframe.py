@@ -132,6 +132,14 @@ def test_strategy_metadata_timeframe_used() -> None:
         "macd_ema_trend_pullback": "1D",
         "donchian_turtle_breakout": "1D",
         # legacy tsmom (cross-sym) + the equity_* strategies (1D) were KILLed.
+        # strategy-wave2 (2026-06-27): 7 verified research survivors dispatched.
+        "gold_trend_chandelier_1d": "1D",
+        "gold_riskoff_trend_amplify": "1D",
+        "gold_breakout_1h": "1H",
+        "index_52w_high_momentum": "1D",
+        "index_dual_momentum_rotation": "1D",
+        "equity_52wk_high_breakout": "1D",
+        "equity_vol_expansion_pocket_pivot": "1D",
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

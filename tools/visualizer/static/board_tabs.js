@@ -14,8 +14,8 @@
 
   const B = window.PolarisBoard;
   if (!B) { return; }   // board.js must load first
-  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, sparkline, symCell, pn,
-    esc, hms, hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
+  const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtPxCcy, fmtR, sparkline, upnlSparkline,
+    symCell, pn, esc, hms, hhmmss, venueStream, laneGroups, STREAM_LABEL, STREAM_TAGLINE,
     getActiveExchange, venueFilter } = B;
 
   // E3 (Jin 2026-05-31): when an exchange is selected (not 'all'), each tab
@@ -99,6 +99,10 @@
   /* Symbol sparkline — tiny inline recent-close trend next to the symbol cell.
      vertical-align middle so it sits on the text baseline; never wraps. */
   #board svg.spark { vertical-align: middle; margin-left: 6px; opacity: 0.85; flex: 0 0 auto; }
+  /* uPnL trajectory sparkline — inline mini graph of a position's unrealised
+     PnL path since entry (green=in profit / red=underwater), in its own column. */
+  #board td.traj-cell { text-align: center; }
+  #board svg.traj { vertical-align: middle; opacity: 0.9; }
 
   /* Symbol cell grid (Jin 2026-06-26) — SYMBOL │ NAME │ SPARK on a fixed grid so
      they line up across rows: a fixed-width symbol block, a flex name that
@@ -562,16 +566,17 @@
   }
   const POS_SHELL =
     `<table><colgroup>
-        <col style="width:5%"><col style="width:18%"><col style="width:5%"><col style="width:7%">
+        <col style="width:5%"><col style="width:13%"><col style="width:5%"><col style="width:7%">
         <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
         <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
-        <col style="width:6%"><col style="width:6%"><col style="width:6%">
+        <col style="width:6%"><col style="width:6%"><col style="width:6%"><col style="width:5%">
        </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th>SIDE</th><th>ENTRY</th>
         <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th title="unrealised gross PnL (pre-fee)">uPnL$</th>
         <th title="uPnL net of the EXPECTED round-trip real fee (entry + expected close) — what this position would book if closed now">uPnLnet$</th>
         <th>uPnL%</th><th>HELD</th><th class="l">STRAT</th><th class="l">REGIME</th>
         <th>STOP</th><th title="max-favorable / max-adverse excursion in per-trade-ATR R (atr_r) — distinct from the per-stream ledger R">MFE/MAE</th>
+        <th title="unrealised-PnL path since entry (green=in profit / red=underwater); dots = peak (MFE) / trough (MAE) of the path, dashed line = breakeven">uPnL TRAJ</th>
       </tr></thead><tbody></tbody></table>`;
   // numeric flash direction for a value that changed since the last poll.
   function _posFlash(prev, cur) {
@@ -618,6 +623,19 @@
       // the per-stream ledger R (AVG-R below). Fall back to the legacy keys for a
       // stale cached snapshot during rollover.
       const mfeMae = `${fmtR(p.mfe_atr_r ?? p.mfe_r, 1)}/${fmtR(p.mae_atr_r ?? p.mae_r, 1)}`;
+      // uPnL trajectory (Jin 2026-06-27) — inline mini graph of HOW the unrealised
+      // PnL moved since entry (derived from the row's own price history + entry +
+      // qty + side). Stash the deriving fields per row key so the live /stream/prices
+      // push can EXTEND the path smoothly between 1s snapshots (board.js). The
+      // snapshot's spark[] reseeds the authoritative geometry every poll.
+      if (B.posTrajMeta) {
+        B.posTrajMeta[key] = {
+          spark: Array.isArray(p.spark) ? p.spark.slice() : [],
+          entry: p.entry_price, qty: p.qty, side: p.side,
+        };
+        B.resetTrajLive && B.resetTrajLive(key);
+      }
+      const trajHtml = upnlSparkline(p.spark, p.entry_price, p.qty, p.side);
       // Grid-aligned SYMBOL │ NAME │ SPARK cell (symCell escapes sym/name; rc is
       // the pre-built ×N stack badge HTML rendered inline after the symbol).
       const symHtml = symCell(p.symbol, symName(p), sparkline(p.spark), rc);
@@ -645,6 +663,7 @@
           { text: reg || '—', cls: 'l b-flat', title: 'entry regime ' + (p.entry_regime || '—') + ' · live ' + (p.regime || '—') },
           { text: stop, cls: 'num b-flat', title: 'protective stop ' + stop },
           { text: mfeMae, cls: 'num b-flat', title: `MFE/MAE in per-trade-ATR excursion R (atr_r) — distinct from the per-stream ledger R · exit-FSM ${p.exit_state}` },
+          { html: trajHtml, cls: 'traj-cell', title: 'unrealised-PnL path since entry — green=in profit / red=underwater; dots = peak (MFE) / trough (MAE), dashed = breakeven' },
         ],
       };
     });

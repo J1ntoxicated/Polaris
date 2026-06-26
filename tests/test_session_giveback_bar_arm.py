@@ -1,39 +1,33 @@
-"""session_breakout exit give-back fix — bar-TREND peak-lock arm lowered 0.5→0.30.
+"""bar-TREND exit give-back recalib — peak-lock arm 0.30→0.20 / frac 0.55→0.65.
 
 DEMO/PAPER · aggressive · flow_not_block: EXIT-TIMING ONLY — size / entry side /
 the G6 -1.0R hard rail are untouched. This only ratchets the protective stop
-toward profit on a confirmed favourable excursion.
+toward profit on a confirmed favourable excursion (asymmetry: the floor RATCHETS
+UP with the peak, the loss side is owned by the G6 rail).
 
-DIAGNOSIS (archive ``polaris_live_archive_2026-06-26`` + ``_2026-06-25``,
-session_breakout, n=98 closed; the n=1 garbage-close outlier pos_bfc4 with a
-1070.63 close_px on US100~29780 excluded):
+DIAGNOSIS (live ``data/polaris_live.sqlite``, position_strategy_segments
+exit_reason join — bar-TREND family: session_breakout / fx_breakout_basket /
+xau_indices_trend / spot_donchian):
 
-  * ENTRY HAS EDGE (category a, NOT a no-edge strategy): avg peak MFE +0.4034R,
-    48.0% reach +0.30R, 28.6% reach +0.50R — the entry IS directional.
-  * REAL exit give-back: in a CONSISTENT dollar ruler (peak/trough price
-    excursion vs realised close $), the armed positions (fav > $0.5, n=14) give
-    back avg 74.4% of the favourable dollar move (pos_e2f2 reached +$16.2,
-    realised +$7.74 = 48% capture; pos_c316 52% capture; pos_37cb 49%).
-  * ROOT CAUSE of the give-back: the bar-TREND family (session_breakout /
-    equity_gap_go / fx_breakout_basket) armed its peak-fraction floor at
-    ``BAR_TREND_PEAK_LOCK_ARM_R`` = 0.50R — ABOVE the strategy's 0.40R avg MFE.
-    The #19/#47 fixes lowered only the TICK-path arm (``_TICK_PEAK_LOCK_ARM_R``
-    0.45→0.30); the SEPARATE bar-TREND constant was left at 0.50, so the
-    common-case 0.30–0.45R bar winner never armed the floor and round-tripped on
-    the wide 3.0-ATR trail to break-even.
+  * ENTRY HAS EDGE (positive MFE): atr_trail_stop closes (n=20) are the biggest
+    leak — big winners round-trip on the wide trail. The peak-fraction floor IS
+    wired and DOES fire (volume_burst locked_R = peak×0.55 confirmed live), but
+    two weaknesses remained:
+      (A) frac 0.55 always EXPOSES 45% of the reached peak on a big winner.
+      (B) arm 0.30R caught the COMMON small winner too late: the live MFE
+          distribution reaches +0.20R for 27.9%, +0.30R for 20%, +0.45R for
+          10.6% — so the frequent +0.20R winner armed nothing and gave it all
+          back to loser_timeout / shallow exit.
 
-  NOTE the AUTOPSY's headline "99.98% giveback" was OVERSTATED by a ruler
-  mismatch (#51 residue): ``mfe_r`` divides by the per-trade ATR risk (~$24.7)
-  while ``pnl_r`` divides by the per-stream R_budget ($1,020) — a 41× skew, so
-  ``(mfe_r − pnl_r)/mfe_r`` is apples-to-oranges. The TRUE dollar give-back is
-  ~74% (armed), still a real harvest defect this fix targets.
-
-FIX: ``BAR_TREND_PEAK_LOCK_ARM_R`` 0.50 → 0.30 so the bar-TREND peak-fraction
-floor arms on the COMMON case (48% reach +0.30R), matching the already-lowered
-tick arm. ASYMMETRY preserved: the floor RATCHETS UP with the peak (a big runner
-— pos_bfc4 +13.8R, pos_e2f2 +1.85R — still runs on the 3.0-ATR trail), and the
-loss side (peak == entry → no profit floor; the G6 -1.0R rail owns it) is
-untouched.
+FIX (surgical, two env-tunable defaults only):
+  * ``BAR_TREND_PEAK_LOCK_ARM_R`` 0.30 → 0.20 — the common +0.20R winner (27.9%
+    reach it) now ARMS the peak-fraction floor instead of round-tripping.
+  * ``BAR_TREND_PEAK_LOCK_FRAC`` 0.55 → 0.65 — a big winner's give-back shrinks
+    from 45% to 35% of the reached peak; the floor is a peak-tracking ratchet, so
+    a higher frac is NOT an early cut (it climbs with the peak, never caps it).
+  * ``BAR_TREND_TRAIL_MULT`` 3.0 UNCHANGED — narrowing it would clip the frequent
+    winner early (a loss); the lock is supplied by the peak-fraction floor, not
+    the trail.
 
 ENTRY=100, ATR_PCT=0.01 -> atr_one=1.0, atr_r (module default)=2.0 -> 1R==2.0 px.
 """
@@ -64,92 +58,76 @@ def _fresh(side: str = "long") -> ExitState:
 
 
 def test_bar_trend_arm_lowered_to_common_case() -> None:
-    # The bar-TREND peak-fraction arm now matches the tick arm (#47): the
-    # common-case 0.40R-avg bar winner arms the floor. 48.0% of session_breakout
-    # closes reach +0.30R vs only 28.6% reaching the old +0.50R arm.
-    assert BAR_TREND_PEAK_LOCK_ARM_R == 0.30
-    assert BAR_TREND_PEAK_LOCK_FRAC == 0.55  # UNCHANGED
+    # The bar-TREND peak-fraction arm now catches the COMMON +0.20R winner
+    # (live MFE distribution: 27.9% reach +0.20R vs only 20% reaching +0.30R).
+    assert BAR_TREND_PEAK_LOCK_ARM_R == 0.20
+    # frac raised 0.55 → 0.65: a big winner now keeps 65% of the reached peak
+    # (give-back 45% → 35%); still a peak-tracking ratchet, never an early cut.
+    assert BAR_TREND_PEAK_LOCK_FRAC == 0.65
     assert BAR_TREND_TRAIL_MULT == 3.0  # UNCHANGED — the runner still runs wide
 
 
-def test_session_breakout_schedule_arms_at_030() -> None:
+def test_session_breakout_schedule_arms_at_020() -> None:
     # session_breakout (correlation_group cfd_session_event → TREND bucket, index
-    # asset_class) routes to the bar default schedule with the lowered arm.
+    # asset_class) routes to the bar default schedule with the lowered arm / raised
+    # fraction.
     sched = _mfe_protect_for_strategy("session_breakout")
     assert sched is not None
-    assert sched.peak_lock_arm_r == 0.30
-    assert sched.peak_lock_frac == 0.55
+    assert sched.peak_lock_arm_r == 0.20
+    assert sched.peak_lock_frac == 0.65
 
 
-# === the give-back is caught at the strategy's AVERAGE peak ======================
+# === (a) the COMMON +0.20R winner now arms a profit floor (was unarmed) =========
 
 
-def test_avg_peak_locks_fraction_not_break_even() -> None:
-    # A session_breakout winner peaks at +0.40R (the MEASURED avg). With the arm
-    # at 0.30R the peak-fraction floor ARMS and locks
-    # entry + 0.40*0.55*atr_r = 100 + 0.44 = 100.44 (+0.22R) — instead of the old
-    # arm-0.50 behaviour that left it at break-even (the give-back).
+def test_common_020_winner_arms_profit_floor() -> None:
+    # A session_breakout long peaks at +0.20R (27.9% of live closes reach it).
+    # With arm 0.20 the peak-fraction floor ARMS and locks a profit stop ABOVE
+    # entry: 100 + 0.20*0.65*atr_r = 100 + 0.26 = 100.26 (stop > entry).
+    # Under the OLD 0.30 arm this +0.20R winner armed NOTHING (0.20 < 0.30 arm AND
+    # < 0.30 BEP rung) → wide trail only → stop <= entry → round-trip.
     sched = _mfe_protect_for_strategy("session_breakout")
     d = evaluate_exit(
-        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.8,
-        atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=20,
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.4,
+        atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=20,
         trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
     )
-    assert d.state.mfe_r == (100.8 - ENTRY) / 2.0  # +0.40R reached
+    assert d.state.mfe_r == (100.4 - ENTRY) / 2.0  # +0.20R reached
     assert d.close is False
-    # peak-fraction floor: 100 + mfe_r * 0.55 * atr_r (the running peak, +0.22R).
-    assert d.state.stop_price == ENTRY + d.state.mfe_r * 0.55 * 2.0
+    assert d.state.stop_price is not None
+    # peak-fraction floor armed: 100 + 0.20 * 0.65 * 2.0 = 100.26 (profit-side).
+    assert d.state.stop_price == ENTRY + d.state.mfe_r * BAR_TREND_PEAK_LOCK_FRAC * 2.0
+    assert d.state.stop_price > ENTRY  # the give-back fix: a PROFIT stop, not BEP
 
 
-def test_avg_peak_give_back_closes_at_locked_fraction() -> None:
-    # Two ticks (a short — session_breakout is 52% short in the archive): peak
-    # +0.40R locks 99.56; a retrace to 99.7 (worse than the floor for a short)
-    # closes AT the locked +0.22R — NOT a flat 100.0 round-trip.
+# === (b) frac 0.65 holds a big winner higher than the old 0.55 ==================
+
+
+def test_big_winner_floor_higher_under_065_frac() -> None:
+    # A big winner (+2.0R MFE) locks entry + 2.0*0.65*atr_r = 100 + 2.6 = 102.6,
+    # strictly ABOVE the old 0.55-frac floor (100 + 2.0*0.55*2.0 = 102.2). The
+    # give-back exposure shrank from 45% to 35% of the reached peak.
     sched = _mfe_protect_for_strategy("session_breakout")
-    d1 = evaluate_exit(
-        prev=_fresh("short"), side="short", entry_price=ENTRY, last_price=99.2,
-        atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=20,
+    d = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=104.0,
+        atr_pct=ATR_PCT, pnl_r=2.0, held_seconds=40,
         trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
     )
-    assert d1.close is False
-    floor = ENTRY - 0.40 * 0.55 * 2.0  # 99.56
-    assert d1.state.stop_price == floor
-    d2 = evaluate_exit(
-        prev=d1.state, side="short", entry_price=ENTRY, last_price=99.7,
-        atr_pct=ATR_PCT, pnl_r=0.15, held_seconds=30,
-        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
-    )
-    assert d2.close is True
-    assert d2.close_reason == "atr_trail_stop"
-    assert d2.state.stop_price == floor  # banked the fraction, not flat BEP
+    assert d.state.mfe_r == 2.0
+    new_floor = ENTRY + 2.0 * 0.65 * 2.0  # 102.6
+    old_floor = ENTRY + 2.0 * 0.55 * 2.0  # 102.2
+    assert d.state.stop_price == new_floor
+    assert new_floor > old_floor  # the give-back-shrink direction
 
 
-# === ASYMMETRY: the runner still runs, the loss side is untouched ===============
-
-
-def test_runner_still_runs_floor_ratchets_up() -> None:
-    # flow_not_block / aggressive: the floor RATCHETS UP with the peak — it never
-    # caps the upside. A runner +0.40R -> +1.85R (pos_e2f2) climbs its floor
-    # 100.44 -> 100 + 1.85*0.55*2.0; it does NOT close while above the floor.
-    sched = _mfe_protect_for_strategy("session_breakout")
-    d1 = evaluate_exit(
-        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.8,
-        atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=20,
-        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
-    )
-    d2 = evaluate_exit(
-        prev=d1.state, side="long", entry_price=ENTRY, last_price=103.7,
-        atr_pct=ATR_PCT, pnl_r=1.85, held_seconds=40,
-        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
-    )
-    assert d2.close is False  # the winner keeps running
-    assert d2.state.stop_price == ENTRY + 1.85 * 0.55 * 2.0  # floor climbed up
+# === (c) -1.0R rail invariance: profit-side ratchet ONLY ========================
 
 
 def test_loss_side_untouched_no_profit_floor() -> None:
-    # ASYMMETRY: a position that never went green (peak == entry) gets NO profit
-    # floor — the wide trail sits below entry and the G6 -1.0R rail (in the
-    # orchestrator) owns the loss side, unchanged by this arm lowering.
+    # ASYMMETRY / -1.0R rail invariant: a position that never went green
+    # (peak == entry) gets NO profit floor — the wide trail sits BELOW entry and
+    # the G6 -1.0R rail (in the orchestrator) owns the loss side, unchanged by the
+    # arm/frac recalib. The peak-fraction floor never pushes the stop below entry.
     sched = _mfe_protect_for_strategy("session_breakout")
     d = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=99.0,
@@ -160,15 +138,88 @@ def test_loss_side_untouched_no_profit_floor() -> None:
     assert d.state.stop_price is not None and d.state.stop_price < ENTRY
 
 
-def test_below_new_arm_is_break_even_only() -> None:
-    # A peak just BELOW the new 0.30 arm (0.25R) still does NOT arm the
-    # peak-fraction floor — only the fixed BEP rung (0.30R) governs, so a
-    # sub-0.30R wiggle is never over-protected (no fee-negative crumb lock).
+def test_below_new_arm_no_premature_profit_floor() -> None:
+    # A peak just BELOW the new 0.20 arm (0.15R) still does NOT arm the
+    # peak-fraction floor (and is below the 0.30 BEP rung) → no profit floor; the
+    # wide trail (< entry) governs. No fee-negative crumb lock below the arm.
     sched = _mfe_protect_for_strategy("session_breakout")
     d = evaluate_exit(
-        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.5,
-        atr_pct=ATR_PCT, pnl_r=0.25, held_seconds=20,
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.3,
+        atr_pct=ATR_PCT, pnl_r=0.15, held_seconds=20,
         trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
     )
-    # 0.25R < 0.30 arm AND < 0.30 BEP rung → no floor; wide trail only (< entry).
+    assert d.state.mfe_r == (100.3 - ENTRY) / 2.0  # +0.15R, below the 0.20 arm
+    assert d.state.mfe_r < BAR_TREND_PEAK_LOCK_ARM_R  # under the arm → no floor
     assert d.state.stop_price is not None and d.state.stop_price < ENTRY
+
+
+# === (d) REVERSION / range bucket UNCHANGED — arm 0.0, peak_lock disabled =======
+
+
+def test_reversion_bucket_arm_zero_unchanged() -> None:
+    # A REVERSION-bucket bar strategy leaves the peak-fraction floor DISABLED
+    # (arm 0.0 → byte-identical) — its edge is a bounded revert-to-mean, never a
+    # let-winners-run. The arm/frac recalib touches the TREND family ONLY.
+    sched = _mfe_protect_for_strategy("rsi_bb_pullback")
+    assert sched is not None
+    assert sched.peak_lock_arm_r == 0.0
+    assert sched.peak_lock_frac == 0.0
+
+
+# === (e) let-run: no premature close while the peak keeps making new highs ======
+
+
+def test_runner_still_runs_floor_ratchets_up() -> None:
+    # flow_not_block / aggressive: the floor RATCHETS UP with the peak — never caps
+    # the upside, never closes while price is above the floor. A runner armed at
+    # +0.20R climbs +0.20R -> +0.40R -> +1.85R; each tick makes a new high (price
+    # well above the climbing floor) so it does NOT close (let-winners-run).
+    sched = _mfe_protect_for_strategy("session_breakout")
+    d1 = evaluate_exit(
+        prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.4,
+        atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=20,
+        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
+    )
+    assert d1.close is False
+    assert d1.state.stop_price == ENTRY + 0.20 * 0.65 * 2.0  # 100.26
+    d2 = evaluate_exit(
+        prev=d1.state, side="long", entry_price=ENTRY, last_price=100.8,
+        atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=30,
+        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
+    )
+    assert d2.close is False
+    assert d2.state.stop_price == ENTRY + 0.40 * 0.65 * 2.0  # 100.52 — climbed up
+    d3 = evaluate_exit(
+        prev=d2.state, side="long", entry_price=ENTRY, last_price=103.7,
+        atr_pct=ATR_PCT, pnl_r=1.85, held_seconds=40,
+        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
+    )
+    assert d3.close is False  # the winner keeps running
+    assert d3.state.stop_price == ENTRY + 1.85 * 0.65 * 2.0  # floor climbed again
+
+
+# === (f) peak-protect fires: a give-back closes AT the locked fraction ===========
+
+
+def test_peak_give_back_closes_at_locked_fraction() -> None:
+    # Two ticks (a short): peak +0.40R locks the 0.65-fraction floor at
+    # 100 - 0.40*0.65*2.0 = 99.48; a retrace to 99.6 (worse than the floor for a
+    # short) closes AT the locked +0.26R via atr_trail_stop — banking the fraction,
+    # NOT a flat 100.0 round-trip.
+    sched = _mfe_protect_for_strategy("session_breakout")
+    d1 = evaluate_exit(
+        prev=_fresh("short"), side="short", entry_price=ENTRY, last_price=99.2,
+        atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=20,
+        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
+    )
+    assert d1.close is False
+    floor = ENTRY - 0.40 * 0.65 * 2.0  # 99.48
+    assert d1.state.stop_price == floor
+    d2 = evaluate_exit(
+        prev=d1.state, side="short", entry_price=ENTRY, last_price=99.6,
+        atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=30,
+        trail_mult=BAR_TREND_TRAIL_MULT, mfe_protect=sched,
+    )
+    assert d2.close is True
+    assert d2.close_reason == "atr_trail_stop"
+    assert d2.state.stop_price == floor  # banked the locked fraction, not flat BEP

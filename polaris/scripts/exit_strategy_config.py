@@ -52,25 +52,33 @@ def _env_float(name: str, default: float) -> float:
 
 
 # Let-winners-run peak-fraction floor for the BAR TREND family
-# ([[ab_letrun_maker_2026-06-24]] · arm 0.5→0.30 [[session_giveback_bar_arm]]).
-# The bar TREND strategies (session_breakout / equity_gap_go / fx_breakout_basket
-# — every TREND-bucket registered strategy) banked their winners at break-even
-# (session_breakout +0.77R MFE → +0.009R). The peak-fraction floor holds ~55% of
-# the reached peak once MFE passes the arm.
-#   ARM 0.5 → 0.30: the arm was left at +0.5R when the TICK-path arm was lowered
-#   to +0.30R (#19/#47) — but session_breakout's MEASURED avg peak MFE is only
-#   +0.40R (n=98 across the 06-25/06-26 archives: 48.0% reach +0.30R, 28.6%
-#   reach +0.50R). At the old +0.5R arm the COMMON-case 0.40R winner never armed
-#   the floor and round-tripped on the wide 3.0-ATR trail to break-even (DOLLAR
-#   ruler: armed positions gave back avg 74% of the favourable $ move). +0.30R
-#   arms on the common case (matches the tick arm); a big runner still climbs the
-#   floor on the wide trail (asymmetry). On a WIDENED 3.0-ATR trail (was the 2.0
-#   module default). REVERSION / range bucket is UNCHANGED (arm 0.0 → disabled;
-#   their edge is a bounded revert-to-mean, never a let-winners-run). EXPECTANCY,
-#   not a throttle: it only ratchets the stop toward profit; size / entry side /
-#   the G6 -1.0R rail are untouched. Env-tunable.
-BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.30)
-BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.55)
+# ([[ab_letrun_maker_2026-06-24]] · arm 0.30→0.20 / frac 0.55→0.65
+# [[session_giveback_bar_arm]]). The bar TREND strategies (session_breakout /
+# fx_breakout_basket / xau_indices_trend / spot_donchian — every TREND-bucket
+# registered strategy) have entry edge (positive MFE) but reap almost none of it:
+# the biggest live leak is atr_trail_stop closes (n=20) where big winners
+# round-trip on the wide 3.0-ATR trail. The peak-fraction floor holds ``frac`` of
+# the reached peak once MFE passes the arm (it IS wired and DOES fire —
+# volume_burst locked_R = peak×frac confirmed live).
+#   ARM 0.30 → 0.20: the live MFE distribution (data/polaris_live.sqlite,
+#   position_strategy_segments.exit_reason join) reaches +0.20R for 27.9% of
+#   closes, +0.30R for 20%, +0.45R for 10.6% — so the COMMON +0.20R winner armed
+#   NOTHING at the old +0.30R arm and round-tripped to a shallow exit
+#   (loser_timeout / exit). +0.20R arms the floor on that common winner.
+#   FRAC 0.55 → 0.65: at 0.55 a big winner always EXPOSED 45% of the reached
+#   peak. 0.65 shrinks that give-back to 35%. The floor is a peak-TRACKING ratchet
+#   (``entry ± peak_mfe_r * frac * atr_r`` climbs with the running max-MFE), so a
+#   higher fraction is NOT an early cut — it never caps the upside, only lifts the
+#   protective stop closer to the reached peak (asymmetry preserved).
+#   TRAIL 3.0 UNCHANGED: narrowing it would clip the FREQUENT winner early (a
+#   loss); the lock is supplied by the peak-fraction floor, not the trail (the
+#   trail stays wide on the WIDENED 3.0-ATR width, was the 2.0 module default).
+#   REVERSION / range bucket is UNCHANGED (arm 0.0 → disabled; their edge is a
+#   bounded revert-to-mean, never a let-winners-run). EXPECTANCY, not a throttle:
+#   it only ratchets the stop toward profit; size / entry side / the G6 -1.0R rail
+#   are untouched. Env-tunable.
+BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.20)
+BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.65)
 BAR_TREND_TRAIL_MULT: float = _env_float("POLARIS_BAR_TREND_TRAIL_MULT", 3.0)
 
 
@@ -104,11 +112,12 @@ def _mfe_protect_for_strategy(strategy_id: str) -> MfeProtectSchedule | None:
     if cls is None:
         return None
     # Let-winners-run peak-fraction floor — TREND bucket only. A TREND-bucket bar
-    # strategy (session_breakout / equity_gap_go / fx_breakout_basket) arms the
-    # peak-fraction floor at +0.5R / frac 0.55; the REVERSION / range bucket leaves
-    # it DISABLED (arm 0.0 → byte-identical) because its edge is a bounded
-    # revert-to-mean, not a winner to let run. The fixed sub-arm rungs below stay
-    # the BELOW-arm phase for every bucket ([[ab_letrun_maker_2026-06-24]]).
+    # strategy (session_breakout / fx_breakout_basket / xau_indices_trend /
+    # spot_donchian) arms the peak-fraction floor at +0.20R / frac 0.65; the
+    # REVERSION / range bucket leaves it DISABLED (arm 0.0 → byte-identical)
+    # because its edge is a bounded revert-to-mean, not a winner to let run. The
+    # fixed sub-arm rungs below stay the BELOW-arm phase for every bucket
+    # ([[ab_letrun_maker_2026-06-24]]).
     is_trend = (
         bucket_from_correlation_group(cls.metadata.correlation_group_id)
         is Bucket.TREND

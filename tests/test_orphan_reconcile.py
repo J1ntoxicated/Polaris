@@ -113,7 +113,7 @@ async def test_transient_reject_returns_none_not_orphan() -> None:
 
 def _seed_open(
     conn: sqlite3.Connection, *, position_id: str, base_qty: float,
-    entry_price: float = 0.12,
+    entry_price: float = 0.12, with_entry_fill: bool = True,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
@@ -124,6 +124,12 @@ def _seed_open(
         " 'tsmom', 'long', ?, 'open', ?, 0)",
         (position_id, base_qty, NOW),
     )
+    # ``with_entry_fill=False`` models a GHOST over-count — a tracked base_qty the
+    # wallet never actually held (no real entry fill). That is the only case that
+    # still reconciles-with-NULL; a position WITH a real entry fill whose pooled
+    # wallet drained is now MARK-closed ([[okx_winner_reconcile_leak_2026-06-26]]).
+    if not with_entry_fill:
+        return
     conn.execute(
         "INSERT INTO fills "
         "(fill_id, ts_ms, strategy_id, instrument_id, venue, side, base_qty, "
@@ -154,10 +160,13 @@ def _regime_stub(conn: sqlite3.Connection, venue: str, symbol: str) -> str:
 
 @pytest.mark.asyncio
 async def test_orphan_close_reconciles_position(memdb: sqlite3.Connection) -> None:
-    """available~0 orphan → status='reconciled', NO close fill row, popped from
-    open_trades, audit event written, 0 realized pnl."""
+    """A GHOST over-count (available~0, NO real entry fill) → status='reconciled',
+    NO close fill row, popped from open_trades, audit event written, 0 realized
+    pnl. (A position WITH a real entry fill is now MARK-closed, not dropped —
+    [[okx_winner_reconcile_leak_2026-06-26]]; this pins the over-count path.)"""
     base_qty = 146.8
-    _seed_open(memdb, position_id="pos-orphan", base_qty=base_qty)
+    _seed_open(memdb, position_id="pos-orphan", base_qty=base_qty,
+               with_entry_fill=False)
     state = ProdLoopState()
     trade = _trade("pos-orphan", base_qty)
     state.open_trades = [trade]
@@ -205,9 +214,12 @@ async def test_orphan_reconcile_leaves_pnl_r_null_records_drift_usd(
     (PF/WR/avg_r/ticker R) — reverting the earlier mae→pnl_r stamp the design
     audit found INFLATED the R ledger (−211R artefact). The drift is instead
     surfaced as a SEPARATE rough DOLLAR estimate (mae_r × risk_usd) in the audit
-    row. Still no fabricated close fill, no learner feed."""
+    row. Still no fabricated close fill, no learner feed. (GHOST over-count — no
+    real entry fill; a real position whose pooled wallet drained is now
+    mark-closed, [[okx_winner_reconcile_leak_2026-06-26]].)"""
     base_qty = 146.8
-    _seed_open(memdb, position_id="pos-mae", base_qty=base_qty)
+    _seed_open(memdb, position_id="pos-mae", base_qty=base_qty,
+               with_entry_fill=False)
     # recalc had recorded a -5.21R worst adverse excursion + a $300 1R unit
     # before the venue drifted → rough drift estimate ≈ -5.21 × 300 = -$1563.
     memdb.execute(

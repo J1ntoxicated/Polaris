@@ -129,6 +129,34 @@ def _has_close_fill(conn: sqlite3.Connection, trade: SimulatedTrade) -> bool:
     return row is not None
 
 
+def _has_entry_fill(conn: sqlite3.Connection, trade: SimulatedTrade) -> bool:
+    """True when a REAL entry fill is persisted for this position.
+
+    Distinguishes a genuinely-tracked position (its base WAS real, opened with a
+    live entry fill) from a GHOST over-count (a close-chunk base_qty the wallet
+    never actually held — no entry fill). The OKX pooled-wallet WINNER leak
+    ([[okx_winner_reconcile_leak_2026-06-26]]) fires for the former: a real
+    position whose shared base-ccy pool was drained by now-CLOSED same-ccy
+    siblings reads availBal~0 with no OPEN sibling, so it fell to CloseOrphan and
+    was reconciled-with-NULL — discarding the winner's edge (SOL 9.75R). A real
+    entry fill means the base WAS sold into the shared USDT pool (proceeds
+    conserved) → it must be MARK-closed (real pnl_r), not dropped. Keyed on
+    ``contribution_id == position_id``. No position_id (legacy) → False (fall
+    through to the existing reconcile). Read-only; never raises into the close
+    path.
+    """
+    if not trade.position_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM fills WHERE contribution_id = ? AND is_close = 0 LIMIT 1",
+            (trade.position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def _finalize_already_closed(
     conn: sqlite3.Connection,
     *,
@@ -542,16 +570,47 @@ async def _close_trade_with_real_pnl(
             # the real live mark on the real tracked qty.
             real_fill = _synth_okx_mark_close(trade, mark=fresh_mark)
         if isinstance(real_fill, CloseOrphan):
-            # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still tracks
-            # base_qty, an over-count from the close-chunk fix) with NO sibling to
-            # explain the drain. Mark the position terminal (status='reconciled')
-            # so the exit engine + hydrate STOP retrying it forever — WITHOUT
-            # fabricating a fill or PnL. Venue-side STATE-DRIFT RECOVERY, not a
-            # trade outcome.
-            return _reconcile_orphan(
-                conn, state=state, trade=trade, trade_idx=trade_idx,
-                available=real_fill.available, now_ts=now_ts,
-            )
+            # OKX POOLED-WALLET WINNER LEAK FIX ([[okx_winner_reconcile_leak_
+            # 2026-06-26]]): the sibling-drain mark-close (above) only fires while a
+            # same-ccy sibling is STILL OPEN (sibling_base>0). But the OKX SPOT demo
+            # shares ONE fungible base wallet, and the draining same-ccy siblings
+            # (the KILLed tick scalpers micro_reversion/flow_pressure/burst_rider)
+            # routinely CLOSED FIRST — so a volume_burst winner's later close saw
+            # availBal~0 with sibling_base==0 and fell here, reconciled-with-NULL,
+            # DISCARDING its edge (SOL 9.75R / ETH 1.77R MFE, 7/18 volume_burst
+            # positions, avg MFE 1.8R = 3x the closed cohort). A position with a
+            # REAL entry fill WAS real and its base WAS sold into the shared USDT
+            # pool (proceeds conserved); dropping it is the SAME survivorship bias
+            # the SiblingDrainClose fix removed, just on the no-open-sibling
+            # timeline. When we can still price it (usable fresh mark), book a
+            # MARK-to-market close so the winner keeps its real pnl_r (exit-capture,
+            # flow_not_block — no order submitted, nothing left to sell). A GHOST
+            # over-count (no real entry fill) or an un-priceable position falls
+            # through to the unchanged reconcile.
+            if (
+                trade.venue == "okx"
+                and fresh_mark is not None
+                and fresh_mark > 0.0
+                and _has_entry_fill(conn, trade)
+            ):
+                logger.info(
+                    "[close/okx] %s:%s trade_id=%s pooled-wallet drain, NO open "
+                    "sibling but REAL entry fill — book mark close (kept in R "
+                    "ledger, not reconciled-with-NULL) [winner-leak fix]",
+                    trade.venue, trade.symbol, trade.position_id or "-",
+                )
+                real_fill = _synth_okx_mark_close(trade, mark=fresh_mark)
+            else:
+                # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still
+                # tracks base_qty, an over-count from the close-chunk fix) with NO
+                # sibling AND no real base to book. Mark the position terminal
+                # (status='reconciled') so the exit engine + hydrate STOP retrying
+                # it forever — WITHOUT fabricating a fill or PnL. Venue-side
+                # STATE-DRIFT RECOVERY, not a trade outcome.
+                return _reconcile_orphan(
+                    conn, state=state, trade=trade, trade_idx=trade_idx,
+                    available=real_fill.available, now_ts=now_ts,
+                )
         if real_fill is None:
             # Venue reject / no-fill (EXTERNAL — e.g. 51020 min-order, compliance,
             # market closed) is NOT a strategy fault: preserve the position +

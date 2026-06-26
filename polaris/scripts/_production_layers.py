@@ -74,6 +74,7 @@ from polaris.scripts._production_asset_class import resolve_asset_class
 from polaris.scripts._production_bars import (
     CAPITAL_RESOLUTION_BY_INTERVAL,
     TIMEFRAME_FETCH_CADENCE_SEC,
+    bar_fetch_limit_for,
     fetch_bars_one,
     ingest_bars_for_focus,
     ingest_bars_per_timeframe,
@@ -96,6 +97,7 @@ __all__ = [
     "CAPITAL_RESOLUTION_BY_INTERVAL",
     "OKX_REFRESH_SEC",
     "TIMEFRAME_FETCH_CADENCE_SEC",
+    "bar_fetch_limit_for",
     "capital_active_ids_after_collapse_guard",
     "compose_regime_candidate",
     "compute_and_flip_regime",

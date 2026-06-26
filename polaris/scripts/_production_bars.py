@@ -183,6 +183,24 @@ TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
     "1D": 3600.0,  # daily bars close once/day — hourly re-pull is ample.
 }
 
+# Default per-fetch bar count. Intraday timeframes keep 240 (the Alpaca free-tier
+# window that avoids stale-tail / 429 pressure). 1D needs MORE: the deepest 1D
+# strategy warmup is equity_52wk_high_breakout (HIGH_LOOKBACK 252 + 1 = 253
+# bars); a 240 cap left ``warmup_ok`` ALWAYS False → that strategy was INERT
+# (no-emit across every equity symbol). Yahoo (the PRIMARY 1D bar source) holds a
+# 2y window (~500 trading bars), so a deeper 1D limit just slices a longer tail —
+# the warmup-depth fix is purely additive (no block / no warmup hurdle lowered;
+# the 252-bar-high edge is untouched). Intraday tf stay 240 so the Alpaca 429
+# avoidance is preserved exactly.
+_DEFAULT_BAR_FETCH_LIMIT = 240
+_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260}
+
+
+def bar_fetch_limit_for(timeframe: str) -> int:
+    """Per-timeframe bar-fetch/read limit. 1D → 260 (clears the 253 equity_52wk
+    warmup); every other timeframe → 240 (Alpaca 429 avoidance preserved)."""
+    return _BAR_FETCH_LIMIT_BY_INTERVAL.get(timeframe, _DEFAULT_BAR_FETCH_LIMIT)
+
 
 def _to_float(value: Any) -> float:
     if value is None or value == "":
@@ -519,6 +537,11 @@ async def ingest_bars_per_timeframe(
     total_skipped = 0
     for timeframe, venues_for_tf in timeframe_to_venues.items():
         cadence = TIMEFRAME_FETCH_CADENCE_SEC.get(timeframe, 5.0)
+        # Per-timeframe fetch depth: 1D pulls 260 bars (clears the 253-bar
+        # equity_52wk warmup that 240 starved → INERT no-emit); intraday tf keep
+        # the caller's limit (240, Alpaca 429 avoidance). max(...) so an explicit
+        # caller limit is never shrunk. flow_not_block — additive depth only.
+        tf_limit = max(limit, bar_fetch_limit_for(timeframe))
         # Per-(tf, venue) gate: only fetch venues whose individual cadence
         # is due. This is the R2 P1 fix that prevents partial-bucket
         # starvation when one venue in a mixed-venue bucket fails.
@@ -533,7 +556,7 @@ async def ingest_bars_per_timeframe(
             result = await ingest_bars_for_focus(
                 conn, focus_for_v, capital_session=capital_session,
                 alpaca_adapter=alpaca_adapter,
-                limit=limit, bar_interval=timeframe,
+                limit=tf_limit, bar_interval=timeframe,
                 skip_if_current=skip_if_current,
                 gpt_client_factory=gpt_client_factory,
             )

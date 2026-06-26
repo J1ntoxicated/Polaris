@@ -18,7 +18,12 @@ from polaris.scripts._production_tick import (
     CAPITAL_BAR_STRATEGY_SYMBOLS,
     keep_on_bar_path,
 )
-from polaris.strategies import session_breakout, xau_indices_trend
+from polaris.strategies import (
+    index_52w_high_momentum,
+    index_dual_momentum_rotation,
+    session_breakout,
+    xau_indices_trend,
+)
 
 
 def test_capital_index_symbol_reaches_bar_path() -> None:
@@ -65,15 +70,21 @@ def test_spot_alias_reaches_bar_path() -> None:
 def test_unsupported_capital_symbol_still_vacated() -> None:
     # A Capital index/commodity symbol NO enabled bar strategy supports stays
     # owned by the tick engine (routed as before — no widening beyond support).
+    # (HK50 moved INTO the carve-out via the wave2 index strategies — see
+    # ``test_inert_strategy_reachability``; GER40 is genuinely unsupported.)
     assert keep_on_bar_path(asset_class="commodity", symbol="NATURALGAS") is False
-    assert keep_on_bar_path(asset_class="index", symbol="HK50") is False
+    assert keep_on_bar_path(asset_class="index", symbol="GER40") is False
 
 
 def test_carveout_symbols_union_matches_enabled_strategies() -> None:
-    # The carve-out set is exactly the union of the two ENABLED Capital
-    # index/commodity bar strategies' SUPPORTED_SYMBOLS (no hand-rolled list).
+    # The carve-out set is exactly the union of ALL FOUR ENABLED Capital
+    # index/commodity bar strategies' SUPPORTED_SYMBOLS (no hand-rolled list) —
+    # wave2 added index_dual_momentum_rotation + index_52w_high_momentum.
     expected = (
-        xau_indices_trend.SUPPORTED_SYMBOLS | session_breakout.SUPPORTED_SYMBOLS
+        xau_indices_trend.SUPPORTED_SYMBOLS
+        | session_breakout.SUPPORTED_SYMBOLS
+        | index_dual_momentum_rotation.SUPPORTED_SYMBOLS
+        | index_52w_high_momentum.SUPPORTED_SYMBOLS
     )
     assert expected == CAPITAL_BAR_STRATEGY_SYMBOLS
     # GOLD + US100 are both present (the two strategies this wave revives).

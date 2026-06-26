@@ -53,6 +53,7 @@ from polaris.scripts._production_indicators import (
     session_window_now,
 )
 from polaris.scripts._production_layers import (
+    bar_fetch_limit_for,
     compute_and_flip_regime,
     get_focus_targets,
     ingest_bars_per_timeframe,
@@ -88,6 +89,12 @@ from polaris.strategies import (
     SpotDonchianStrategy,
     TSMom12_1MultiAssetStrategy,
     XAUIndicesTrendStrategy,
+)
+from polaris.strategies.index_52w_high_momentum import (
+    SUPPORTED_SYMBOLS as _IDX_52W_SYMBOLS,
+)
+from polaris.strategies.index_dual_momentum_rotation import (
+    SUPPORTED_SYMBOLS as _IDX_DUALMOM_SYMBOLS,
 )
 from polaris.strategies.session_breakout import (
     SUPPORTED_SYMBOLS as _SESSION_BREAKOUT_SYMBOLS,
@@ -134,15 +141,24 @@ def _focus_cycle_target() -> int:
 # engine (no double-trade); the engine reads the SAME frozenset as PHASE1_VENUES.
 
 # Capital non-forex (index/commodity) symbols that an ENABLED Capital bar
-# strategy actually supports — the UNION of the two enabled index/commodity bar
-# strategies' SUPPORTED_SYMBOLS (xau_indices_trend + session_breakout). Built
-# from the strategy modules so it can never drift from what they accept. The
-# routing carve-out below keeps these on the bar pipeline (donchian/momentum/
-# session) so they get a trend/breakout edge COMPLEMENTARY to the tick engine's
+# strategy actually supports — the UNION of the FOUR enabled index/commodity bar
+# strategies' SUPPORTED_SYMBOLS (xau_indices_trend + session_breakout +
+# index_dual_momentum_rotation + index_52w_high_momentum). Built from the
+# strategy modules so it can never drift from what they accept. The routing
+# carve-out below keeps these on the bar pipeline (donchian/momentum/session/
+# rotation) so they get a trend/breakout edge COMPLEMENTARY to the tick engine's
 # flow micro-structure on the SAME symbol. Symbols are the raw live-universe
-# spelling (e.g. ``GOLD`` / ``US100``), upper-cased like the strategy symbol gate.
+# spelling (e.g. ``GOLD`` / ``US100`` / ``J225``), upper-cased like the strategy
+# symbol gate. wave2 fix: the two index strategies (dual_momentum + 52w_high)
+# were INERT — their wave2 symbols (J225/HK50/AU200/AU200AU) were NOT in the
+# prior union, so keep_on_bar_path returned False and the bar fan-out vacated
+# them → generate_raw_signal was NEVER reached (live: 0 signals). Unioning their
+# SUPPORTED_SYMBOLS restores reachability (flow_not_block — purely additive).
 CAPITAL_BAR_STRATEGY_SYMBOLS: frozenset[str] = (
-    _XAU_INDICES_SYMBOLS | _SESSION_BREAKOUT_SYMBOLS
+    _XAU_INDICES_SYMBOLS
+    | _SESSION_BREAKOUT_SYMBOLS
+    | _IDX_DUALMOM_SYMBOLS
+    | _IDX_52W_SYMBOLS
 )
 
 
@@ -570,6 +586,11 @@ async def _run_tick(
             bars = await read_recent_bars_ondemand(
                 conn, venue=venue, symbol=symbol, asset_class=asset_class,
                 bar_interval=timeframe,
+                # Per-tf read depth: 1D reads 260 bars so the deepest 1D warmup
+                # (equity_52wk_high_breakout, 253) is satisfied — a 240 read
+                # capped the canvas below warmup → that strategy was INERT. The
+                # ingest persists the same depth; intraday tf keep 240.
+                limit=bar_fetch_limit_for(timeframe),
                 freshness_threshold_sec=staleness_threshold_for(timeframe),
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=default_gpt_factory, now_mono=now_mono,

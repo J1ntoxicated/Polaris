@@ -139,7 +139,7 @@ def _scalp_min_capture_r(
 # it runs on a WIDER trail to capture the drift past the old ~75s scalp.
 # burst_rider runs on its OWN wide trail (3.5) so its measured +7.33R spike is not
 # flat-lined by the default 2-ATR trail ([[ab_letrun_maker_2026-06-24]]) — the
-# peak-fraction floor (below) supplies the lock above the +1.0R arm.
+# peak-fraction floor (below) supplies the lock above the +0.30R arm.
 # EXPECTANCY, not a throttle: it only LOOSENS the running trail (lets the winner
 # run); the ratchet, protected-BEP, loser-timeout and the G6 -1.0R hard rail (the
 # loss-defence) are all untouched, and HARVEST still tightens. Env-tunable so each
@@ -295,7 +295,7 @@ def _mfe_protect_schedule(
         # Lock AT LEAST the configured positive R — a tighter schedule never banks
         # LESS (ratchet-toward-profit invariant); a looser fit keeps the base lock.
         lock_r=lock_r * max(1.0, t),
-        # Let-winners-run peak-fraction floor: above the +1.0R arm the stop holds
+        # Let-winners-run peak-fraction floor: above the +0.30R arm the stop holds
         # ~50% of the REACHED peak MFE so a confirmed big winner (burst_rider's
         # +7.33R) is locked at peak% instead of the small fixed lock that flat-lined
         # it ([[ab_letrun_maker_2026-06-24]]). REGIME-INDEPENDENT (the wide trail +

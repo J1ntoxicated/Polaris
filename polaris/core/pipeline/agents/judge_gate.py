@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from polaris.core.pipeline.agents._shadow_rules import CELL_WARM_MIN_N_EFF
@@ -180,23 +181,85 @@ def _warmth(payload: dict[str, Any]) -> float:
     return min(0.3, n_eff / CELL_WARM_MIN_N_EFF)
 
 
+def _ramp(staleness: float, fresh: float, stale: float) -> float:
+    """1.0 up to ``fresh``, linear down to 0.0 at ``stale`` (clamped)."""
+    if staleness < 0.0:
+        staleness = 0.0
+    if staleness <= fresh:
+        return 1.0
+    if staleness >= stale or stale <= fresh:
+        return 0.0
+    return 1.0 - (staleness - fresh) / (stale - fresh)
+
+
+def _observation_freshness(payload: dict[str, Any], *, now_ts: int) -> float:
+    """Per-SOURCE observation freshness (0..1) — the currency fix.
+
+    The ground ``updated_ts`` is always 'now' (the fuse time), so it can never see
+    that the UNDERLYING evidence (a weekend FRED print / a weekly COT report / a
+    thin-ticker headline) is days-to-weeks old. This reads the per-source observed
+    ages the fuser now surfaces (``macro_age_days`` / ``cot_report_date`` /
+    ``news_max_age_h``) and ramps on the OLDEST one. Thresholds are GENEROUS so a
+    normally-cadenced source (weekend macro, weekly COT) is NOT over-discounted
+    (과도디스카운트 X); only a genuinely stale observation decays.
+
+    No age keys present → 1.0 (non-regression: pre-fix payloads are unaffected).
+    flow_not_block: this only shapes the freshness scalar, it never blocks.
+    """
+    evidence = payload.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    ages_sec: list[float] = []
+    macro_days = evidence.get("macro_age_days")
+    if isinstance(macro_days, (int, float)):
+        ages_sec.append(float(macro_days) * 86400.0)
+    news_h = evidence.get("news_max_age_h")
+    if isinstance(news_h, (int, float)):
+        ages_sec.append(float(news_h) * 3600.0)
+    cot_age = _cot_report_age_sec(evidence.get("cot_report_date"), now_ts)
+    if cot_age is not None:
+        ages_sec.append(cot_age)
+    if not ages_sec:
+        return 1.0
+    fresh = _env_float("POLARIS_JUDGE_OBS_FRESH_SEC", 604800.0)  # 7d
+    stale = _env_float("POLARIS_JUDGE_OBS_STALE_SEC", 2592000.0)  # 30d
+    return _ramp(max(ages_sec), fresh, stale)
+
+
+def _cot_report_age_sec(report_date: Any, now_ts: int) -> float | None:
+    """Seconds between a COT report date (``YYYY-MM-DD``) and ``now``; None if bad."""
+    if not isinstance(report_date, str) or not report_date:
+        return None
+    try:
+        ts = (
+            datetime.strptime(report_date[:10], "%Y-%m-%d")
+            .replace(tzinfo=UTC)
+            .timestamp()
+        )
+    except ValueError:
+        return None
+    age = float(now_ts) - ts
+    return age if age >= 0.0 else 0.0
+
+
 def _freshness(payload: dict[str, Any], *, now_ts: int) -> float:
-    """Ground freshness (0..1). <=FRESH → 1.0; FRESH..STALE linear; over/absent → 0."""
+    """Ground freshness ∧ per-source observation freshness (0..1).
+
+    Ground freshness (the fuse-time stamp) is combined with the per-source
+    observation freshness via ``min`` — a SINGLE continuous scalar, NOT a
+    multiplicative stack (9-stack stays banned). A fresh fuse over a stale
+    underlying source (the audit's stale-as-current case) now reads stale; a fresh
+    fuse over fresh sources stays 1.0.
+    """
     ground = payload.get("ticker_ground")
     ground = ground if isinstance(ground, dict) else {}
     updated = ground.get("updated_ts")
     if updated is None:
         return 0.0  # fail-safe: missing stamp = treat as NOT fresh
     staleness = float(now_ts) - _as_float(updated, 0.0)
-    if staleness < 0.0:
-        staleness = 0.0
     fresh = _env_float("POLARIS_JUDGE_FRESH_SEC", 3600.0)
     stale = _env_float("POLARIS_JUDGE_STALE_SEC", 21600.0)
-    if staleness <= fresh:
-        return 1.0
-    if staleness >= stale or stale <= fresh:
-        return 0.0
-    return 1.0 - (staleness - fresh) / (stale - fresh)
+    ground_fresh = _ramp(staleness, fresh, stale)
+    return min(ground_fresh, _observation_freshness(payload, now_ts=now_ts))
 
 
 def _consistency(payload: dict[str, Any]) -> float:

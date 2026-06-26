@@ -34,6 +34,7 @@ Ref pattern: ``crypto_fg.py`` / ``fred_macro.py`` (collector contract),
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import os
@@ -48,6 +49,12 @@ logger = logging.getLogger(__name__)
 
 ALPACA_DATA_BASE: Final[str] = "https://data.alpaca.markets"
 _NEWS_PATH: Final[str] = "/v1beta1/news"
+
+# Currency: lower-bound the fetch window so a thin ticker's weeks-old headline is
+# not pulled as 'latest'. Env-tunable (no_hardcode_in_plans); default 36h. This is
+# a freshness WINDOW on the request, NOT a per-trade block (flow_not_block).
+_RECENCY_HOURS_ENV: Final[str] = "POLARIS_NEWS_RECENCY_HOURS"
+_RECENCY_HOURS_DEFAULT: Final[float] = 36.0
 
 # Reuse the SAME env keys + ARCHIVE_* fallback as the Alpaca universe fetcher.
 _API_KEY_ENV: Final[str] = "ALPACA_PAPER_API_KEY"
@@ -88,6 +95,35 @@ _BEAR_WORDS: Final[frozenset[str]] = frozenset(
         "low", "lows", "crash", "crashes", "selloff", "outflows", "halt",
     }
 )
+
+
+def _recency_hours() -> float:
+    """Fetch recency-window size in hours (env-tunable; default 36)."""
+    raw = os.environ.get(_RECENCY_HOURS_ENV)
+    if not raw or not raw.strip():
+        return _RECENCY_HOURS_DEFAULT
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return _RECENCY_HOURS_DEFAULT
+    return val if val > 0.0 else _RECENCY_HOURS_DEFAULT
+
+
+def _headline_age_hours(created_at: Any, now: _dt.datetime) -> float | None:
+    """Hours between an Alpaca ``created_at`` ISO8601 stamp and ``now``.
+
+    Returns ``None`` for an absent / unparsable stamp (graceful — no fake age).
+    """
+    if not isinstance(created_at, str) or not created_at:
+        return None
+    try:
+        ts = _dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.UTC)
+    age = (now - ts).total_seconds() / 3600.0
+    return age if age >= 0.0 else 0.0
 
 
 def _resolve_creds(
@@ -168,7 +204,7 @@ class NewsSentimentCollector:
             if not articles:
                 return {}
             scored = await self._classify(articles)
-            return _aggregate(articles, scored)
+            return _aggregate(articles, scored, now=_dt.datetime.now(_dt.UTC))
         except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
             logger.info("[altdata] news_sentiment fetch failed (graceful skip): %s", exc)
             return {}
@@ -179,9 +215,16 @@ class NewsSentimentCollector:
     async def _fetch_headlines(
         self, cli: httpx.AsyncClient, api_key: str, secret_key: str
     ) -> list[dict[str, Any]]:
+        # Currency: ``start`` lower-bounds the window so an inactive ticker's
+        # weeks-old headline can never surface as the 'latest' (the audit's thin-
+        # ticker stale-as-current case). flow_not_block: this is a fetch window,
+        # never a per-trade block.
+        start = (
+            _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=_recency_hours())
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         resp = await cli.get(
             _NEWS_PATH,
-            params={"limit": str(_NEWS_LIMIT), "sort": "desc"},
+            params={"limit": str(_NEWS_LIMIT), "sort": "desc", "start": start},
             headers={
                 "APCA-API-KEY-ID": api_key,
                 "APCA-API-SECRET-KEY": secret_key,
@@ -210,6 +253,9 @@ class NewsSentimentCollector:
                     "summary": str(art.get("summary", "")).strip(),
                     "symbols": symbols,
                     "source": str(art.get("source", "")).strip(),
+                    # Currency: preserve the Alpaca publish timestamp so the
+                    # aggregate can surface per-symbol headline age (recency).
+                    "created_at": str(art.get("created_at", "")).strip(),
                 }
             )
         return out
@@ -368,14 +414,21 @@ def _emit_keys(symbols: list[str]) -> list[str]:
 
 
 def _aggregate(
-    articles: list[dict[str, Any]], scored: dict[Any, dict[str, float]]
+    articles: list[dict[str, Any]],
+    scored: dict[Any, dict[str, float]],
+    *,
+    now: _dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Fold per-article scores into a per-symbol relevance-weighted aggregate.
 
     Each article fans out to all its tagged symbols. Per symbol we keep a
     relevance-weighted mean sentiment, the max relevance/magnitude seen, the
-    headline count ``n``, and the single most-relevant headline (display).
+    headline count ``n``, the single most-relevant headline (display), and the
+    OLDEST contributing headline age in hours (``news_max_age_h``) so a thin
+    ticker's stale headline is visible to the judge (currency). Age is surfaced
+    only when at least one contributing headline carries a parsable timestamp.
     """
+    ref_now = now if now is not None else _dt.datetime.now(_dt.UTC)
     acc: dict[str, dict[str, Any]] = {}
     for a in articles:
         score = scored.get(str(a["id"]))
@@ -384,11 +437,12 @@ def _aggregate(
         sent = float(score["sentiment"])
         rel = float(score["relevance"])
         mag = float(score["magnitude"])
+        age_h = _headline_age_hours(a.get("created_at"), ref_now)
         for sym in _emit_keys(a["symbols"]):
             row = acc.setdefault(
                 sym,
                 {"wsum": 0.0, "wt": 0.0, "relevance": 0.0, "magnitude": 0.0,
-                 "n": 0, "headline": "", "_best_rel": -1.0},
+                 "n": 0, "headline": "", "_best_rel": -1.0, "_max_age_h": None},
             )
             weight = rel if rel > 0.0 else 0.01
             row["wsum"] += sent * weight
@@ -396,6 +450,9 @@ def _aggregate(
             row["relevance"] = max(row["relevance"], rel)
             row["magnitude"] = max(row["magnitude"], mag)
             row["n"] += 1
+            if age_h is not None:
+                prev = row["_max_age_h"]
+                row["_max_age_h"] = age_h if prev is None else max(prev, age_h)
             if rel > row["_best_rel"]:
                 row["_best_rel"] = rel
                 row["headline"] = a["headline"]
@@ -403,13 +460,16 @@ def _aggregate(
     for sym, row in acc.items():
         wt = row["wt"]
         agg_sent = (row["wsum"] / wt) if wt > 0.0 else 0.0
-        out[sym] = {
+        entry: dict[str, Any] = {
             "sentiment": round(max(-1.0, min(1.0, agg_sent)), 4),
             "relevance": round(row["relevance"], 4),
             "magnitude": round(row["magnitude"], 4),
             "n": int(row["n"]),
             "headline": row["headline"],
         }
+        if row["_max_age_h"] is not None:
+            entry["news_max_age_h"] = round(float(row["_max_age_h"]), 2)
+        out[sym] = entry
     return out
 
 

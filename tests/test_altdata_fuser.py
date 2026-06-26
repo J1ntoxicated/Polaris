@@ -422,3 +422,59 @@ def test_cot_does_not_route_to_forex() -> None:
     cache.set("cftc_cot", {"OIL_CRUDE": {"net_spec_pctile": 0.92}}, ttl_sec=1000, now_ts=0.0)
     sources = cache.get_for_group("forex:EURUSD", now_ts=1.0)
     assert "cftc_cot" not in sources
+
+
+# ── Currency: per-source observation-date propagation (age labelling) ─────────
+def test_cot_report_date_propagated_to_evidence() -> None:
+    """Currency fix: the COLLECTOR already keeps ``report_date``; the fuser must
+    PROPAGATE it so the judge prompt + axis-B can age-discount a stale (weekly)
+    COT print. flow_not_block: no drop, only a label.
+    """
+    cache = AltDataCache()
+    cache.set(
+        "cftc_cot",
+        {"OIL_CRUDE": {"net_spec_pctile": 0.92, "net_spec_pct": 0.05,
+                       "report_date": "2026-06-16"}},
+        ttl_sec=1000, now_ts=0.0,
+    )
+    _hint, _conf, ev = fuse_evidence("commodity:OIL_CRUDE", cache, now_ts=1.0)
+    assert ev["cot_report_date"] == "2026-06-16"
+
+
+def test_cot_missing_report_date_is_graceful() -> None:
+    cache = AltDataCache()
+    cache.set("cftc_cot", {"OIL_CRUDE": {"net_spec_pctile": 0.92}}, ttl_sec=1000, now_ts=0.0)
+    _hint, _conf, ev = fuse_evidence("commodity:OIL_CRUDE", cache, now_ts=1.0)
+    # No report_date in the row → key simply absent (no crash, no fake date).
+    assert "cot_report_date" not in ev
+
+
+def test_macro_asof_and_age_surfaced() -> None:
+    """Currency fix: the macro scorer surfaces the FRED observation date(s) and a
+    computed ``macro_age_days`` (oldest present series) so a Friday VIX read over a
+    weekend is visibly stale to the judge.
+    """
+    # now_ts = 2026-06-29 00:00:00 UTC; vix observed 2026-06-26 → 3 days old.
+    import datetime as _dt
+
+    now = _dt.datetime(2026, 6, 29, tzinfo=_dt.timezone.utc).timestamp()
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {"vix": 18.5, "hy_spread": 280.0,
+         "vix_asof": "2026-06-26", "hy_asof": "2026-06-26"},
+        ttl_sec=9999, now_ts=now,  # set + fuse at the same clock (TTL not expired)
+    )
+    _hint, _conf, ev = fuse_evidence("forex:EURUSD", cache, now_ts=now)
+    assert ev["vix_asof"] == "2026-06-26"
+    assert ev["macro_age_days"] == 3
+
+
+def test_macro_no_asof_is_graceful() -> None:
+    # Pre-fix payload with no asof keys → no age surfaced, scorer still runs.
+    cache = AltDataCache()
+    cache.set("fred_macro", {"vix": 18.5, "hy_spread": 280.0}, ttl_sec=9999, now_ts=0.0)
+    _hint, _conf, ev = fuse_evidence("forex:EURUSD", cache, now_ts=1.0)
+    assert "vix_asof" not in ev
+    assert "macro_age_days" not in ev
+    assert ev["vix"] == 18.5  # scorer behaviour unchanged

@@ -35,7 +35,9 @@ writes to learner/risk state. The hint, if any, is fed into the EXISTING
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
+import time
 from typing import Any
 
 # Polaris canonical labels (mirror live_recalc.regime_flip.REGIME_VALUES).
@@ -138,7 +140,8 @@ def fuse_evidence(
         # (Stream C / Alpaca) reuses the SAME FRED macro scorer + conservative
         # conviction floor as the FX/index/commodity branch.
         _score_macro(
-            sources.get("fred_macro"), scores, evidence, source_weights, prefix
+            sources.get("fred_macro"), scores, evidence, source_weights, prefix,
+            now_ts=now_ts,
         )
         if prefix == "commodity":
             # CFTC COT speculative positioning — a directional conviction signal
@@ -241,12 +244,36 @@ def _score_funding(
         scores[_BULL] += 2.0 * w
 
 
+def _macro_age_days(obs_date: Any, now_ts: float | None) -> int | None:
+    """Whole days between a FRED observation date (``YYYY-MM-DD``) and ``now``.
+
+    Currency: the observation date is the day the series was actually printed; a
+    Friday read served over a weekend is 2-3 days stale. Returns ``None`` for an
+    unparsable / absent date (graceful — no fake age).
+    """
+    if not isinstance(obs_date, str) or not obs_date:
+        return None
+    try:
+        obs = _dt.datetime.strptime(obs_date[:10], "%Y-%m-%d").replace(
+            tzinfo=_dt.UTC
+        )
+    except ValueError:
+        return None
+    now = _dt.datetime.fromtimestamp(
+        now_ts if now_ts is not None else time.time(), tz=_dt.UTC
+    )
+    days = (now - obs).days
+    return days if days >= 0 else 0
+
+
 def _score_macro(
     macro: dict[str, Any] | None,
     scores: dict[str, float],
     evidence: dict[str, Any],
     source_weights: dict[str, float],
     prefix: str,
+    *,
+    now_ts: float | None = None,
 ) -> None:
     if not macro:
         return
@@ -256,6 +283,23 @@ def _score_macro(
         evidence["vix"] = vix
     if isinstance(hy, (int, float)):
         evidence["hy_spread"] = hy
+    # Currency: surface the FRED observation date(s) + the oldest-source age in
+    # days so the judge prompt + axis-B can age-discount a stale macro read.
+    # flow_not_block: this is a LABEL, never a drop. Absent asof → no age (the
+    # pre-fix payload renders identically).
+    vix_asof = macro.get("vix_asof")
+    hy_asof = macro.get("hy_asof")
+    if isinstance(vix_asof, str) and isinstance(vix, (int, float)):
+        evidence["vix_asof"] = vix_asof
+    if isinstance(hy_asof, str) and isinstance(hy, (int, float)):
+        evidence["hy_asof"] = hy_asof
+    ages = [
+        a
+        for a in (_macro_age_days(vix_asof, now_ts), _macro_age_days(hy_asof, now_ts))
+        if a is not None
+    ]
+    if ages:
+        evidence["macro_age_days"] = max(ages)
 
     w = _source_weight(prefix, "fred_macro")
     source_weights["fred_macro"] = w
@@ -301,6 +345,13 @@ def _score_cot(
     if not isinstance(pctile, (int, float)):
         return
     evidence["cot_net_spec_pctile"] = pctile
+    # Currency: propagate the COT report date the collector already preserves.
+    # COT is weekly by nature (Tue-as-of, Fri-published) so this is ALWAYS a few
+    # days old — the judge / axis-B age-label it instead of treating a 10-day-old
+    # positioning as 'current'. flow_not_block: a label, never a drop.
+    report_date = row.get("report_date")
+    if isinstance(report_date, str) and report_date:
+        evidence["cot_report_date"] = report_date
     raw_pct = row.get("net_spec_pct")
     if isinstance(raw_pct, (int, float)):
         evidence["cot_net_spec_pct"] = raw_pct

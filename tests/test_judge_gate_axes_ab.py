@@ -220,3 +220,91 @@ def test_empty_payload_score_zero() -> None:
 
 def test_robust_min_default() -> None:
     assert robust_min() == ROBUST_MIN_DEFAULT
+
+
+# ===========================================================================
+# B — per-source OBSERVATION freshness (currency fix). The ground updated_ts is
+# always 'now' (fuse time); the real staleness lives in the per-source observed
+# ages the fuser now surfaces. freshness must reflect the OLDEST source, but must
+# NOT over-discount a normal weekend macro / weekly COT print.
+# ===========================================================================
+
+
+def test_freshness_unaffected_by_fresh_sources() -> None:
+    """A ground that is fresh AND whose underlying sources are recent stays 1.0 —
+    no over-discount of normally-cadenced evidence (fresh는 정상통과)."""
+    now = int(time.time())
+    payload = {
+        "evidence": {
+            "label": "bull_trend",
+            "macro_age_days": 1,          # weekday-fresh macro
+            "news_max_age_h": 3.0,        # recent headline
+        },
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    assert rob.freshness == 1.0
+
+
+def test_freshness_reflects_stale_macro_source() -> None:
+    """A multi-WEEK-old macro observation pulls freshness BELOW the fresh-ground
+    value — the fix's whole point: stale-as-current is now visible to axis B.
+    flow_not_block: it decays the freshness scalar, it never blocks the signal."""
+    now = int(time.time())
+    fresh_only = {
+        "evidence": {"label": "bull_trend"},
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    stale_macro = {
+        "evidence": {"label": "bull_trend", "macro_age_days": 21},  # 3 weeks old
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob_fresh = evidence_robustness(fresh_only, now_ts=now)
+    rob_stale = evidence_robustness(stale_macro, now_ts=now)
+    assert rob_fresh.freshness == 1.0
+    assert rob_stale.freshness < rob_fresh.freshness
+
+
+def test_freshness_normal_weekly_cot_not_over_discounted() -> None:
+    """A normal ~weekly COT report (report date a few days back) is NOT treated as
+    severely stale — COT is weekly by nature (과도디스카운트 X)."""
+    import datetime as _dt
+
+    now_dt = _dt.datetime.now(_dt.timezone.utc)
+    now = int(now_dt.timestamp())
+    report = (now_dt - _dt.timedelta(days=4)).strftime("%Y-%m-%d")
+    payload = {
+        "evidence": {"label": "bull_trend", "cot_report_date": report},
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    # A 4-day-old weekly report should stay strongly fresh (>=0.8), never crater.
+    assert rob.freshness >= 0.8
+
+
+def test_freshness_oldest_source_dominates() -> None:
+    """When several sources are present the OLDEST one sets the observation
+    freshness (worst-case currency)."""
+    now = int(time.time())
+    payload = {
+        "evidence": {
+            "label": "bull_trend",
+            "macro_age_days": 1,           # fresh
+            "news_max_age_h": 24 * 30.0,   # one month old headline → dominates
+        },
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    assert rob.freshness < 1.0
+
+
+def test_freshness_no_observation_ages_falls_back_to_ground() -> None:
+    """Pre-fix payload (no per-source ages) → freshness == the ground-only value
+    (non-regression)."""
+    now = int(time.time())
+    payload = {
+        "evidence": {"label": "bull_trend"},
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    assert rob.freshness == 1.0

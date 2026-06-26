@@ -378,6 +378,48 @@ def test_evidence_block_consumes_real_fuser_output_keys() -> None:
     assert "news_headline" not in rendered  # dead key removed
 
 
+def test_evidence_block_annotates_source_age() -> None:
+    """Currency fix: the judge prompt labels stale evidence with its age so the
+    model can self-discount a weekend macro print or a weekly COT report. The age
+    is appended INLINE on each raw signal — no source is dropped (flow_not_block).
+    """
+    evidence = {
+        "label": "bull_trend",
+        "scores": {"bull_trend": 2.5},
+        "vix": 18.5,
+        "vix_asof": "2026-06-26",
+        "macro_age_days": 3,
+        "cot_net_spec_pctile": 0.82,
+        "cot_report_date": "2026-06-16",
+        "news_sentiment": 0.6,
+        "news_magnitude": 0.7,
+        "news_n": 4,
+        "news_max_age_h": 20.0,
+    }
+    rendered = _evidence_block({"regime": "bull_trend", "evidence": evidence})
+    # Macro age: VIX print labelled with its observed-days-ago.
+    assert "3d" in rendered or "asof 2026-06-26" in rendered
+    # COT report age labelled.
+    assert "2026-06-16" in rendered or "report" in rendered.lower()
+    # News headline age labelled (hours).
+    assert "20" in rendered and ("h" in rendered.lower() or "age" in rendered.lower())
+
+
+def test_evidence_block_no_age_keys_is_unchanged() -> None:
+    """Pre-fix evidence with no age keys renders without any age suffix (no crash,
+    no fabricated 'asof')."""
+    evidence = {
+        "label": "bull_trend",
+        "scores": {"bull_trend": 2.5},
+        "vix": 18.5,
+        "news_sentiment": 0.6,
+        "news_n": 4,
+    }
+    rendered = _evidence_block({"regime": "bull_trend", "evidence": evidence})
+    assert "asof" not in rendered
+    assert "vix" in rendered.lower()
+
+
 def test_evidence_block_graceful_when_no_evidence() -> None:
     """A payload with no fused evidence / ground renders only the regime line.
 

@@ -181,6 +181,36 @@ def parse_exit_verdict(raw: Any) -> ExitJudgeVerdict:
 # ---------------------------------------------------------------------------
 
 
+def _age_suffix_hours(age_h: Any) -> str:
+    """`` (age 20.0h)`` for a numeric headline age; ``""`` when absent/unparsable."""
+    if isinstance(age_h, (int, float)):
+        return f" (age {round(float(age_h), 1)}h)"
+    return ""
+
+
+def _macro_age_suffix(evidence: dict[str, Any]) -> str:
+    """`` (vix asof 2026-06-26, 3d old)`` when the macro observation date/age is
+    present; ``""`` otherwise (pre-fix payload renders unchanged)."""
+    asof = evidence.get("vix_asof") or evidence.get("hy_asof")
+    age = evidence.get("macro_age_days")
+    if asof is None and age is None:
+        return ""
+    parts: list[str] = []
+    if asof is not None:
+        parts.append(f"asof {asof}")
+    if isinstance(age, (int, float)):
+        parts.append(f"{int(age)}d old")
+    return f" (macro {', '.join(parts)})" if parts else ""
+
+
+def _cot_age_suffix(evidence: dict[str, Any]) -> str:
+    """`` (cot report 2026-06-16)`` when the COT report date is present; else ``""``."""
+    report = evidence.get("cot_report_date")
+    if isinstance(report, str) and report:
+        return f" (cot report {report})"
+    return ""
+
+
 def _evidence_block(payload: dict[str, Any]) -> str:
     """Render the bot's own per-ticker information for the judge prompt.
 
@@ -207,10 +237,14 @@ def _evidence_block(payload: dict[str, Any]) -> str:
         lines.append(f"- alt-data evidence: label={label} scores={scores}")
         news_sentiment = evidence.get("news_sentiment")
         if news_sentiment is not None:
+            # Currency: append the OLDEST contributing headline age so the judge
+            # can self-discount a thin-ticker stale-as-current sentiment. Absent
+            # age (no timestamp) → no suffix (graceful, no fabricated freshness).
+            news_age = _age_suffix_hours(evidence.get("news_max_age_h"))
             lines.append(
                 f"- news: sentiment={news_sentiment} "
                 f"magnitude={evidence.get('news_magnitude')} "
-                f"n={evidence.get('news_n')}"
+                f"n={evidence.get('news_n')}{news_age}"
             )
         raw_signals = {
             k: evidence[k]
@@ -221,7 +255,13 @@ def _evidence_block(payload: dict[str, Any]) -> str:
             if k in evidence
         }
         if raw_signals:
-            lines.append(f"- alt-data signals: {raw_signals}")
+            # Currency: per-source observation age (macro days / COT report date)
+            # is surfaced so a weekend macro print or a 10-day-old weekly COT is
+            # visibly stale, never silently treated as 'current'. flow_not_block:
+            # an age label, never a drop.
+            macro_age = _macro_age_suffix(evidence)
+            cot_age = _cot_age_suffix(evidence)
+            lines.append(f"- alt-data signals: {raw_signals}{macro_age}{cot_age}")
     if isinstance(baseline, dict) and baseline:
         lines.append(f"- technicals (baseline atr/size/volume): {baseline}")
     if isinstance(cell, dict) and cell:

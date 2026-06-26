@@ -148,6 +148,90 @@ async def test_news_empty_feed_returns_empty() -> None:
     assert out == {}
 
 
+# ── Currency: recency window + headline-age surfacing ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_news_request_sends_recency_start_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Currency fix: the Alpaca request carries a ``start`` lower-bound so a thin
+    ticker's weeks-old headline is not pulled as 'latest'. flow_not_block: this is
+    a freshness WINDOW on the fetch, not a per-trade block.
+    """
+    monkeypatch.setenv("POLARIS_NEWS_RECENCY_HOURS", "36")
+    seen: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        seen["start"] = req.url.params.get("start")
+        return _alpaca_news_body([])
+
+    coll = NewsSentimentCollector(api_key="k", secret_key="s")
+    await coll.fetch(client=_client(responder))
+    start = seen["start"]
+    assert start is not None and start.endswith("Z")
+    # Parseable ISO8601 within ~36h of now.
+    import datetime as _dt
+
+    parsed = _dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
+    age_h = (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds() / 3600.0
+    assert 35.0 <= age_h <= 37.0
+
+
+@pytest.mark.asyncio
+async def test_news_preserves_created_at_and_surfaces_max_age() -> None:
+    """Currency fix: ``created_at`` is preserved per article and the per-symbol
+    aggregate surfaces the OLDEST contributing headline age (``news_max_age_h``).
+    """
+    import datetime as _dt
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    fresh = (now - _dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale = (now - _dt.timedelta(hours=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    items = [
+        {"id": 1, "headline": "Apple beats earnings", "summary": "",
+         "symbols": ["AAPL"], "source": "x", "created_at": fresh},
+        {"id": 2, "headline": "Apple older note", "summary": "",
+         "symbols": ["AAPL"], "source": "x", "created_at": stale},
+    ]
+
+    def responder(_req: httpx.Request) -> Any:
+        return _alpaca_news_body(items)
+
+    gpt_payload = {
+        "results": [
+            {"id": 1, "sentiment": 0.5, "relevance": 0.8, "magnitude": 0.5},
+            {"id": 2, "sentiment": 0.4, "relevance": 0.6, "magnitude": 0.4},
+        ]
+    }
+    coll = NewsSentimentCollector(
+        api_key="k", secret_key="s",
+        gpt_client_factory=lambda: _StubGPTClient(gpt_payload),
+    )
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None and "AAPL" in out
+    # Oldest contributing headline ≈ 20h → max_age_h reflects the STALEST, not freshest.
+    assert out["AAPL"]["news_max_age_h"] == pytest.approx(20.0, abs=0.5)
+
+
+@pytest.mark.asyncio
+async def test_news_missing_created_at_is_graceful() -> None:
+    """An article with no ``created_at`` still aggregates; max-age is simply absent
+    for a symbol whose headlines all lack a timestamp (no crash, no fake age)."""
+    items = [
+        {"id": 1, "headline": "Gold rallies hard", "summary": "",
+         "symbols": ["XAUUSD"], "source": "x"},  # no created_at
+    ]
+
+    def responder(_req: httpx.Request) -> Any:
+        return _alpaca_news_body(items)
+
+    coll = NewsSentimentCollector(api_key="k", secret_key="s")  # lexicon fallback
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None and "XAUUSD" in out
+    assert out["XAUUSD"].get("news_max_age_h") is None
+
+
 # ── Happy path: GPT classifier → per-symbol flat dict ────────────────────────
 
 

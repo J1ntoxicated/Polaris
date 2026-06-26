@@ -164,6 +164,57 @@ async def test_fred_macro_parses() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fred_macro_preserves_observation_date() -> None:
+    """Currency fix: _latest returns the observation date; fetch surfaces it as
+    ``<key>_asof`` so a stale (weekend/holiday) reading is age-labelable downstream.
+    """
+    series = {
+        "VIXCLS": [{"date": "2026-06-26", "value": "18.5"}],
+        "BAMLH0A0HYM2": [{"date": "2026-06-26", "value": "3.5"}],
+        "MOVE": [{"date": "2026-06-26", "value": "95.0"}],
+        "T10Y2Y": [{"date": "2026-06-26", "value": "0.42"}],
+    }
+
+    def responder(req: httpx.Request) -> Any:
+        sid = req.url.params.get("series_id")
+        return {"observations": series.get(sid, [{"value": "."}])}
+
+    coll = FredMacroCollector(api_key="testkey")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    assert out["vix"] == pytest.approx(18.5)
+    assert out["vix_asof"] == "2026-06-26"
+    assert out["hy_asof"] == "2026-06-26"
+    assert out["move_asof"] == "2026-06-26"
+    assert out["yield_curve_asof"] == "2026-06-26"
+
+
+@pytest.mark.asyncio
+async def test_fred_macro_asof_skips_dot_rows() -> None:
+    """``_latest`` returns the date of the FIRST VALID float, not a '.' placeholder."""
+
+    def responder(req: httpx.Request) -> Any:
+        sid = req.url.params.get("series_id")
+        if sid == "VIXCLS":
+            return {
+                "observations": [
+                    {"date": "2026-06-27", "value": "."},  # not posted yet
+                    {"date": "2026-06-26", "value": "19.0"},  # last real print
+                ]
+            }
+        return {"observations": [{"value": "."}]}
+
+    coll = FredMacroCollector(api_key="testkey")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    assert out["vix"] == pytest.approx(19.0)
+    assert out["vix_asof"] == "2026-06-26"
+    # A series with no valid float surfaces no asof (None value).
+    assert out["hy_spread"] is None
+    assert out.get("hy_asof") is None
+
+
+@pytest.mark.asyncio
 async def test_fred_macro_no_key_returns_empty_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     coll = FredMacroCollector(api_key=None)

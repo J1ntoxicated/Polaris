@@ -37,6 +37,15 @@ _SERIES: Final[dict[str, str]] = {
     "yield_curve": "T10Y2Y",
 }
 
+# Output key → observation-date key. ``hy_spread`` shortens to ``hy_asof`` (the
+# name the fuser / judge prompt expect); the rest are ``<key>_asof``.
+_ASOF_KEY: Final[dict[str, str]] = {
+    "vix": "vix_asof",
+    "hy_spread": "hy_asof",
+    "move": "move_asof",
+    "yield_curve": "yield_curve_asof",
+}
+
 
 class FredMacroCollector:
     """FRED macro indicators (requires ``FRED_API_KEY``)."""
@@ -56,14 +65,20 @@ class FredMacroCollector:
             return {}
         own = client is None
         cli = client or httpx.AsyncClient(base_url=self._base_url, timeout=REST_TIMEOUT_SEC)
-        out: dict[str, float | None] = {}
+        out: dict[str, float | str | None] = {}
         try:
             for key, series_id in _SERIES.items():
-                val = await self._latest(cli, series_id)
+                val, obs_date = await self._latest(cli, series_id)
                 # BAMLH0A0HYM2 is in percent; system-wide unit is bps.
                 if key == "hy_spread" and val is not None:
                     val = val * 100
                 out[key] = val
+                # Currency: preserve the OBSERVATION date (the day FRED actually
+                # printed this value) so a weekend / holiday read served as
+                # 'current' is age-labelable downstream. Surfaced ONLY when a real
+                # value was found (no value → no fake date).
+                if val is not None and obs_date:
+                    out[_ASOF_KEY[key]] = obs_date
         except (httpx.HTTPError, RuntimeError) as exc:
             logger.info("[altdata] fred_macro fetch failed (graceful skip): %s", exc)
             return {}
@@ -72,7 +87,10 @@ class FredMacroCollector:
                 await cli.aclose()
         return out
 
-    async def _latest(self, cli: httpx.AsyncClient, series_id: str) -> float | None:
+    async def _latest(
+        self, cli: httpx.AsyncClient, series_id: str
+    ) -> tuple[float | None, str | None]:
+        """Latest valid (value, observation-date) for a series; ``(None, None)`` if none."""
         resp = await cli.get(
             _OBS_PATH,
             params={
@@ -84,14 +102,17 @@ class FredMacroCollector:
             },
         )
         if resp.status_code in (400, 403, 404):
-            return None
+            return None, None
         resp.raise_for_status()
         body = resp.json()
         for obs in body.get("observations") or []:
             raw = obs.get("value", ".")
             if raw and raw != ".":
                 try:
-                    return float(raw)
+                    value = float(raw)
                 except (TypeError, ValueError):
-                    return None
-        return None
+                    return None, None
+                raw_date = obs.get("date")
+                obs_date = str(raw_date) if raw_date else None
+                return value, obs_date
+        return None, None

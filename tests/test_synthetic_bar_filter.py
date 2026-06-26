@@ -14,6 +14,8 @@ Two correctness fixes from the 2026-06-22 research agenda (B/D):
 
 from __future__ import annotations
 
+import math
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as hyp
@@ -78,6 +80,49 @@ def _zero_vol_bar(*, ts: int, close: float) -> Bar:
     return _real_bar(ts=ts, close=close, volume=0.0)
 
 
+def _capital_fx_bar(*, ts: int, close: float) -> Bar:
+    """A genuine Capital CFD FX bar: REAL OHLC movement, but volume==0.
+
+    Capital's CFD feed carries NO volume (price-only), so EVERY FX bar has
+    volume=0 even though the OHLC is real market action. The synthetic filter
+    must NOT discard these — discarding them emptied the whole FX universe so
+    the FX breakout strategies (fx_breakout_basket / session_breakout FX legs)
+    were permanently INERT (0 real bars → warmup never satisfied → no emit)."""
+    return Bar(
+        instrument_id="capital:EURUSD",
+        underlying_group_id="fx:EURUSD",
+        venue="capital",
+        symbol="EURUSD",
+        bar_interval="1H",
+        ts=ts,
+        open=close * 0.9998,
+        high=close * 1.0003,
+        low=close * 0.9996,
+        close=close,
+        volume=0.0,
+    )
+
+
+def _capital_flat_bar(*, ts: int, price: float) -> Bar:
+    """A Capital zero-RANGE bar (open==high==low==close) — still synthetic.
+
+    Even on a volume-less venue a zero-range bar carries no price action and
+    must stay filtered: only the volume==0 rule is venue-relaxed, never range."""
+    return Bar(
+        instrument_id="capital:EURUSD",
+        underlying_group_id="fx:EURUSD",
+        venue="capital",
+        symbol="EURUSD",
+        bar_interval="1H",
+        ts=ts,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        volume=0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # is_synthetic_bar / filter_real_bars
 # ---------------------------------------------------------------------------
@@ -105,6 +150,78 @@ def test_filter_drops_flat_and_zero_vol_keeps_real() -> None:
     kept = filter_real_bars(bars)
     assert len(kept) == 2
     assert [b.ts for b in kept] == [0, 180]  # order (newest last) preserved
+
+
+# ---------------------------------------------------------------------------
+# Capital CFD: volume==0 is the NORM (price-only feed), NOT a synthetic signal.
+# Only a zero-RANGE bar is synthetic on Capital. (Regression root cause: the
+# whole FX universe was dropped → fx breakout strategies were INERT.)
+# ---------------------------------------------------------------------------
+
+
+def test_capital_fx_zero_volume_bar_is_NOT_synthetic() -> None:
+    # Real OHLC movement with volume==0 on Capital → REAL bar (kept).
+    assert is_synthetic_bar(_capital_fx_bar(ts=0, close=1.1380)) is False
+
+
+def test_capital_flat_bar_is_still_synthetic() -> None:
+    # Zero-range bar on Capital is still synthetic (range rule is venue-agnostic).
+    assert is_synthetic_bar(_capital_flat_bar(ts=0, price=1.1380)) is True
+
+
+def test_okx_zero_volume_bar_stays_synthetic_regression() -> None:
+    # The OKX forward-fill placeholder rule is UNCHANGED (volume==0 → synthetic).
+    assert is_synthetic_bar(_zero_vol_bar(ts=0, close=60_000.0)) is True
+
+
+def test_capital_fx_filter_keeps_real_price_bars() -> None:
+    # A Capital FX window of volume-0 bars with real movement must survive the
+    # filter (only the genuine zero-range bar is dropped).
+    bars = [
+        _capital_fx_bar(ts=0, close=1.1380),
+        _capital_flat_bar(ts=3600, price=1.1380),  # zero-range → dropped
+        _capital_fx_bar(ts=7200, close=1.1395),
+        _capital_fx_bar(ts=10800, close=1.1410),
+    ]
+    kept = filter_real_bars(bars)
+    assert [b.ts for b in kept] == [0, 7200, 10800]
+
+
+def test_capital_fx_market_view_populated_indicators() -> None:
+    # PRODUCTION-path reproduction: a 60-bar Capital FX window (all volume=0,
+    # real movement) must build a NON-empty MarketView with FINITE donchian /
+    # adx so the breakout strategies actually evaluate (no longer 0 real bars).
+    bars = [
+        _capital_fx_bar(ts=i * 3600, close=1.1300 + i * 0.0002) for i in range(60)
+    ]
+    mv = build_real_market_view(
+        venue="capital", symbol="EURUSD", timeframe="1H", bars=bars,
+        asset_class="fx",
+    )
+    assert len(mv.bars) == 60  # NOT emptied by the synthetic filter
+    assert mv.donchian_high_40 is not None and math.isfinite(mv.donchian_high_40)
+    assert mv.adx_14 is not None and math.isfinite(mv.adx_14)
+
+
+def test_fx_breakout_emits_on_capital_volume0_breakout() -> None:
+    # End-to-end: a Capital FX series (volume=0 throughout) that makes a fresh
+    # 40-bar high on the last bar must produce a fx_breakout_basket signal.
+    # Before the fix the window was emptied → permanent no-emit.
+    from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
+
+    # Rising series so the final close clears the 40-bar Donchian high with a
+    # real ADX trend; all bars carry volume=0 (Capital CFD norm).
+    bars = [
+        _capital_fx_bar(ts=i * 3600, close=1.1000 + i * 0.0010) for i in range(60)
+    ]
+    mv = build_real_market_view(
+        venue="capital", symbol="EURUSD", timeframe="1H", bars=bars,
+        asset_class="fx",
+    )
+    sig = FXBreakoutBasketStrategy().generate_raw_signal(mv)
+    assert sig is not None
+    assert sig.side == "long"
+    assert sig.strategy_id == "fx_breakout_basket"
 
 
 # ---------------------------------------------------------------------------

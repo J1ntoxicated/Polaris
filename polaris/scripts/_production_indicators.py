@@ -163,24 +163,43 @@ def compute_window_vol_pct(closes: list[float], *, n: int) -> float:
 # window is ALL-synthetic simply has no valid signal (data ABSENCE) — the
 # strategy warmup gate sees too few real bars and emits nothing; it auto-
 # resumes the instant real bars arrive. No throttle, no size-cut, no reject.
+#
+# VOLUME-LESS VENUES (Capital CFD): the Capital feed is PRICE-ONLY — every bar
+# carries volume=0 by construction even though the OHLC is real market action.
+# Applying the zero-volume rule there discarded the ENTIRE FX universe (live DB:
+# ~106k volume-0-but-MOVING Capital bars), so filter_real_bars returned [] →
+# build_real_market_view yielded an empty MarketView → the FX breakout
+# strategies (fx_breakout_basket / session_breakout FX legs) had 0 real bars,
+# never cleared warmup, and were permanently INERT (0 emit). On these venues a
+# bar is synthetic by the zero-RANGE rule ALONE; volume==0 is the norm, not a
+# placeholder. The range rule stays venue-agnostic (a flat bar is always inert).
+
+# Venues whose price feed carries NO volume (price-only). On these a volume of 0
+# is the NORM, not a forward-fill placeholder, so the zero-volume synthetic rule
+# does not apply — only the zero-range rule does.
+VOLUMELESS_VENUES: Final[frozenset[str]] = frozenset({"capital"})
 
 
 def is_synthetic_bar(bar: Bar | BarView) -> bool:
     """True when a bar is fabricated/flat and carries no real price action.
 
-    Synthetic ⇔ zero (or non-positive) volume OR a zero-range bar where
-    ``open == high == low == close`` (an OKX forward-fill placeholder). Such a
-    bar is excluded from indicator computation so vol_z / ATR / donchian are
-    measured on REAL movement only. Pure / side-effect-free.
+    Synthetic ⇔ a zero-range bar where ``open == high == low == close`` (always),
+    OR — on venues that DO report volume — zero (or non-positive) volume (an OKX
+    forward-fill placeholder). On volume-less venues (Capital CFD, see
+    ``VOLUMELESS_VENUES``) volume==0 is the price-only-feed norm and is NOT a
+    synthetic signal, so only the zero-range rule applies there. Such a bar is
+    excluded from indicator computation so vol_z / ATR / donchian are measured on
+    REAL movement only. Pure / side-effect-free.
     """
     o = float(bar.open)
     h = float(bar.high)
     low = float(bar.low)
     c = float(bar.close)
-    v = float(bar.volume)
-    if v <= 0.0:
-        return True
-    return o == h == low == c
+    if o == h == low == c:
+        return True  # zero-range: no price action (venue-agnostic)
+    # zero-volume placeholder — only where the venue actually reports volume.
+    venue = str(getattr(bar, "venue", "")).lower()
+    return venue not in VOLUMELESS_VENUES and float(bar.volume) <= 0.0
 
 
 def filter_real_bars(bars: Sequence[Bar | BarView]) -> list[Bar | BarView]:

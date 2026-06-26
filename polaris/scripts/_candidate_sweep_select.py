@@ -43,6 +43,7 @@ from polaris.scripts._candidate_sweep import (
     fast_track_outliers,
 )
 from polaris.scripts._candidate_sweep_bars import bars_by_resolution, confirmed
+from polaris.scripts._session_map import instrument_session_weight
 from polaris.scripts._static_ground import read_ticker_ground
 
 logger = logging.getLogger(__name__)
@@ -101,17 +102,23 @@ def _score_universe(
     spread_by_iid: Mapping[str, float],
     activation_provider: ActivationProvider | None,
 ) -> dict[str, dict[str, float]]:
-    """Per-instrument activation/edge/candidate scores + cold-start flag.
+    """Per-instrument activation/edge/candidate scores + cold-start + session flag.
 
     Returns ``{instrument_id: {activation, edge, candidate, has_event,
-    cold_start}}``. activation reads PER-SYMBOL live motion (the writer's #39
-    accumulator, keyed instrument_id) + per-symbol ``quote_ticks.spread_bps``, so
-    an intraday-active major (EURUSD 9s tick, US100) outranks a calm wide-daily
-    name. A missing writer/quote → those components degrade to neutral (the name
-    scores on bars alone, never an error — flow_not_block). Cold-start (thin/absent
-    ground OR < N confirmed bars) keeps the pre-existing 0.5× penalty APPLIED to
-    ``candidate`` — penalty, NOT exclusion, and the ONLY ≤1 multiplier on the
-    candidate (9-stack ban honored).
+    cold_start, session_weight}}``. activation reads PER-SYMBOL live motion (the
+    writer's #39 accumulator, keyed instrument_id) + per-symbol
+    ``quote_ticks.spread_bps``, so an intraday-active major (EURUSD 9s tick, US100)
+    outranks a calm wide-daily name. A missing writer/quote → those components
+    degrade to neutral (the name scores on bars alone, never an error —
+    flow_not_block). Cold-start (thin/absent ground OR < N confirmed bars) keeps
+    the pre-existing 0.5× penalty APPLIED to ``candidate`` — penalty, NOT
+    exclusion, and the ONLY ≤1 multiplier on the candidate (9-stack ban honored).
+
+    ``session_weight`` (#48) is the per-instrument global-session clock ∈ (0, 1]:
+    1.0 = inside its active cash session, ``SESSION_DORMANT`` outside it. It is
+    NOT folded into ``candidate`` (no 9-stack); it is a SEPARATE seat-allocation
+    key the bucket selection reads to ROTATE focus toward whatever market is awake
+    now (deprioritize the dormant, never exclude — flow_not_block).
     """
     out: dict[str, dict[str, float]] = {}
     for inst in universe:
@@ -134,12 +141,16 @@ def _score_universe(
         cold = (not ground) or n_confirmed < COLD_START_MIN_BARS
         if cold:
             cand *= COLD_START_PENALTY
+        session_w = instrument_session_weight(
+            inst.venue, inst.asset_class, inst.symbol, now_ts
+        )
         out[iid] = {
             "activation": act,
             "edge": edge,
             "candidate": cand,
             "has_event": 1.0 if has_event else 0.0,
             "cold_start": 1.0 if cold else 0.0,
+            "session_weight": session_w,
         }
     return out
 
@@ -148,24 +159,33 @@ def _venue_seat_allocation(
     universe: Sequence[UniverseInstrument],
     venue_weights: Mapping[str, float],
     total_seats: int,
+    session_by_iid: Mapping[str, float],
 ) -> dict[str, int]:
     """Split ``total_seats`` across venues by session-weighted presence.
 
-    A venue's seat share ∝ (its row count × its session weight). A down-weighted
-    (closed-session) venue gets FEWER dynamic seats — allocation, NOT a block:
-    the venue is never zeroed out while it has rows and any positive weight.
+    A venue's seat share ∝ Σ(its rows' per-instrument session weight) × its venue
+    weight. The per-instrument session term (#48) means a venue whose names are
+    mostly OUT of session right now (e.g. Capital at an Asia hour, with US/Europe
+    indices dormant) gets FEWER dynamic seats, and those seats ROTATE to whatever
+    venue is awake — allocation, NOT a block: the venue is never zeroed while it
+    has rows and any positive weight (the dormant floor keeps the sum positive).
     """
-    by_venue: dict[str, int] = {}
+    venue_session_sum: dict[str, float] = {}
+    venue_rows: dict[str, int] = {}
     for inst in universe:
-        by_venue[inst.venue] = by_venue.get(inst.venue, 0) + 1
+        venue_rows[inst.venue] = venue_rows.get(inst.venue, 0) + 1
+        venue_session_sum[inst.venue] = venue_session_sum.get(
+            inst.venue, 0.0
+        ) + session_by_iid.get(inst.instrument_id, 1.0)
     weighted = {
-        v: n * max(0.0, venue_weights.get(v, 1.0)) for v, n in by_venue.items()
+        v: venue_session_sum[v] * max(0.0, venue_weights.get(v, 1.0))
+        for v in venue_rows
     }
     total_w = sum(weighted.values())
     if total_w <= 0.0:
         # Degenerate (all weights 0) — fall back to equal split (flow_not_block:
         # never starve a venue to zero when the market is the only signal).
-        venues = list(by_venue)
+        venues = list(venue_rows)
         base = total_seats // len(venues) if venues else 0
         return {v: base for v in venues}
     return {v: int(total_seats * (w / total_w)) for v, w in weighted.items()}
@@ -220,6 +240,7 @@ def select_candidate_focus(
         conn, universe, now_ts, spread_by_iid, activation_provider
     )
     cand_by_iid = {iid: s["candidate"] for iid, s in scored.items()}
+    session_by_iid = {iid: s["session_weight"] for iid, s in scored.items()}
 
     merit_list = score_focus_candidates(list(universe))
     by_iid = {inst.instrument_id: inst for inst in universe}
@@ -252,16 +273,24 @@ def select_candidate_focus(
     anchor_order = sorted(by_iid, key=lambda i: merit_by_iid[i], reverse=True)
     _seat(anchor_order, counts["anchor"])
 
-    # 2) dynamic — top candidate_score, venue/session allocated. Prefer the
-    #    hysteresis-stable names, then fall back to raw candidate order.
-    dynamic_alloc = _venue_seat_allocation(universe, venue_weights, counts["dynamic"])
+    # 2) dynamic — top candidate_score, venue/session allocated. The per-instrument
+    #    session weight (#48) is the PRIMARY sort key so an in-session name seats
+    #    ahead of a dormant one (rotation toward the awake market), then the
+    #    hysteresis-stable names, then raw candidate order. Dormant names are NOT
+    #    dropped — they fall to the seat tail (deprioritize, never exclude).
+    dynamic_alloc = _venue_seat_allocation(
+        universe, venue_weights, counts["dynamic"], session_by_iid
+    )
     for venue, seats in dynamic_alloc.items():
         venue_iids = [
             iid for iid in by_iid
             if by_iid[iid].venue == venue and iid not in seen
         ]
         venue_iids.sort(
-            key=lambda i: (i in stable, cand_by_iid.get(i, 0.0)), reverse=True
+            key=lambda i: (
+                session_by_iid.get(i, 1.0), i in stable, cand_by_iid.get(i, 0.0)
+            ),
+            reverse=True,
         )
         _seat(venue_iids, seats)
 
@@ -296,11 +325,16 @@ def select_candidate_focus(
             seen.add(iid)
             chosen.append(iid)
 
-    # Final ordering by candidate_score (held names keep their seat; the rank head
-    # is the strongest mover). cap-bounded — held names never trimmed.
+    # Final ordering: held names keep their seat, then in-session names lead
+    # (#48 rotation — the rank head is the awake-market mover), then by
+    # candidate_score. cap-bounded — held names never trimmed; dormant names keep
+    # a seat at the tail (deprioritize, never exclude — flow_not_block).
     held_iids = {f"{v}:{s}" for v, s, _a, _g in open_targets}
     chosen.sort(
-        key=lambda i: (i in held_iids, cand_by_iid.get(i, 0.0)), reverse=True
+        key=lambda i: (
+            i in held_iids, session_by_iid.get(i, 1.0), cand_by_iid.get(i, 0.0)
+        ),
+        reverse=True,
     )
     if len(chosen) > cap:
         kept_held = [i for i in chosen if i in held_iids]

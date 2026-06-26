@@ -469,6 +469,127 @@ def test_venue_allocation_respects_session_weight(conn: sqlite3.Connection) -> N
     assert okx_n > cap_n  # the down-weighted venue gets fewer dynamic seats
 
 
+# ---------------------------------------------------------------------------
+# #48 global session-aware focus rotation (per-instrument session map)
+# ---------------------------------------------------------------------------
+
+
+def _utc_hour(hour: int) -> int:
+    """A fixed weekday (Wed 2026-06-24) UTC epoch at ``hour``:00 (session clock)."""
+    import datetime as _dt
+
+    return int(_dt.datetime(2026, 6, 24, hour, 0, tzinfo=_dt.UTC).timestamp())
+
+
+def _seed_session_universe(
+    conn: sqlite3.Connection, now: int
+) -> list[UniverseInstrument]:
+    """Asia (J225/HK50/AU200AU) + US (US100/US500/US30) Capital index rows, all
+    equally MOVING so only the session clock differentiates their seat priority."""
+    asia = [("capital", s, "index", f"index:{s}") for s in ("J225", "HK50", "AU200AU")]
+    us = [("capital", s, "index", f"index:{s}") for s in ("US100", "US500", "US30")]
+    _seat_active(conn, asia + us)
+    for _, symbol, _, _ in asia + us:
+        _seed_bars(conn, "capital", symbol, moving=True, now=now)
+    return [_mk_inst("capital", s, ac="index") for _, s, _, _ in (asia + us)]
+
+
+def test_session_rotation_asia_hour_lifts_asia_indices(
+    conn: sqlite3.Connection,
+) -> None:
+    """At 03:00 UTC (Asia cash) the Asia indices outrank the (dormant) US indices."""
+    now = _utc_hour(3)
+    universe = _seed_session_universe(conn, now)
+    sel = cs.select_candidate_focus(
+        conn, universe, now_ts=now, cap=6,
+        bucket_counts={"anchor": 0, "dynamic": 6, "event_hot": 0, "exploration": 0},
+        venue_weights={"capital": 1.0}, open_targets=[],
+        prev_focus_symbols=set(), rng=random.Random(48),
+    )
+    ranked = [s.symbol for s in sorted(sel, key=lambda r: r.rank)]
+    asia = {"J225", "HK50", "AU200AU"}
+    # The Asia indices fill the rank head; the dormant US indices fall behind.
+    head = ranked[:3]
+    assert all(sym in asia for sym in head), f"Asia must lead at 03:00 UTC: {ranked}"
+
+
+def test_session_rotation_us_hour_lifts_us_indices(
+    conn: sqlite3.Connection,
+) -> None:
+    """At 15:00 UTC (US RTH) the US indices outrank the (dormant) Asia indices —
+    SAME universe, only the clock changed (rotation)."""
+    now = _utc_hour(15)
+    universe = _seed_session_universe(conn, now)
+    sel = cs.select_candidate_focus(
+        conn, universe, now_ts=now, cap=6,
+        bucket_counts={"anchor": 0, "dynamic": 6, "event_hot": 0, "exploration": 0},
+        venue_weights={"capital": 1.0}, open_targets=[],
+        prev_focus_symbols=set(), rng=random.Random(48),
+    )
+    ranked = [s.symbol for s in sorted(sel, key=lambda r: r.rank)]
+    us = {"US100", "US500", "US30"}
+    head = ranked[:3]
+    assert all(sym in us for sym in head), f"US must lead at 15:00 UTC: {ranked}"
+
+
+def test_session_rotation_dormant_still_present_not_excluded(
+    conn: sqlite3.Connection,
+) -> None:
+    """flow_not_block: a dormant-session instrument is DEPRIORITIZED but STILL in
+    the active set (deprioritize, never a membership cut)."""
+    now = _utc_hour(3)  # Asia hour → US indices dormant
+    universe = _seed_session_universe(conn, now)
+    sel = cs.select_candidate_focus(
+        conn, universe, now_ts=now, cap=6,  # cap fits all 6 → dormant ones kept
+        bucket_counts={"anchor": 0, "dynamic": 6, "event_hot": 0, "exploration": 0},
+        venue_weights={"capital": 1.0}, open_targets=[],
+        prev_focus_symbols=set(), rng=random.Random(48),
+    )
+    syms = {s.symbol for s in sel}
+    # The dormant US indices are NOT excluded — they remain watched (just lower rank).
+    assert {"US100", "US500", "US30"} <= syms
+
+
+def test_session_rotation_okx_crypto_always_base_focus(
+    conn: sqlite3.Connection,
+) -> None:
+    """OKX crypto is ALWAYS at full session priority — at an off-hour for every
+    equity session it still leads dormant Capital indices (24/7 base, mandate ③)."""
+    now = _utc_hour(3)  # Asia hour: US/Europe indices dormant, OKX active
+    # Calm OKX crypto vs MOVING but DORMANT US index — OKX session weight 1.0 must
+    # keep crypto competitive (the session boost offsets, never an exclusion).
+    btc = [("okx", "BTC-USDT", "crypto", "crypto:BTC")]
+    us = [("capital", "US100", "index", "index:US100")]
+    _seat_active(conn, btc + us)
+    _seed_bars(conn, "okx", "BTC-USDT", moving=True, now=now)
+    _seed_bars(conn, "capital", "US100", moving=True, now=now)
+    universe = [_mk_inst("okx", "BTC-USDT"), _mk_inst("capital", "US100", ac="index")]
+    sel = cs.select_candidate_focus(
+        conn, universe, now_ts=now, cap=2,
+        bucket_counts={"anchor": 0, "dynamic": 2, "event_hot": 0, "exploration": 0},
+        venue_weights={"okx": 1.0, "capital": 1.0}, open_targets=[],
+        prev_focus_symbols=set(), rng=random.Random(48),
+    )
+    # OKX crypto is present and session-active (never deprioritized off-hours).
+    assert ("okx", "BTC-USDT") in {(s.venue, s.symbol) for s in sel}
+    top = min(sel, key=lambda r: r.rank)
+    assert top.venue == "okx"  # the always-active crypto leads the dormant index
+
+
+def test_session_cold_start_freshly_open_not_penalized(
+    conn: sqlite3.Connection,
+) -> None:
+    """A name entering its FIRST live session is session-active (1.0) — the session
+    map never penalizes a cold-start instrument whose session just opened."""
+    from polaris.scripts import _session_map as sm
+
+    # US100 exactly at the US cash open minute (13:30 UTC) — freshly open.
+    now = int(__import__("datetime").datetime(
+        2026, 6, 24, 13, 30, tzinfo=__import__("datetime").UTC).timestamp())
+    w = sm.instrument_session_weight("capital", "index", "US100", now)
+    assert w == 1.0  # freshly-opened session = active, not penalized
+
+
 def test_1650_scan_completes_under_cap(conn: sqlite3.Connection) -> None:
     """Perf sanity — ~1650 active rows scan + select <= cap without error."""
     now = int(time.time())

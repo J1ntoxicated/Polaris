@@ -57,6 +57,7 @@ import math
 from datetime import UTC, datetime
 from typing import Final
 
+from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -78,17 +79,13 @@ VOL_TARGET: Final[float] = 0.02  # 2% daily realized-vol target
 STRENGTH_FLOOR: Final[float] = 0.5
 TTL_BARS: Final[int] = 3
 
-# Crypto majors core (OKX, live) + a liquid equity-ETF diversifier sleeve
-# (Alpaca, blocked on SIP #42). Flow-safe symbol SET — emits only here.
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {
-        "BTC-USDT",
-        "ETH-USDT",
-        "SPY",
-        "QQQ",
-        "GLD",
-    }
-)
+# OKX-liquid top-N crypto core (env POLARIS_STRAT_SYMBOL_TOP_N, default 60 —
+# widened from the old 2-major pin so the monthly cross-sectional rebalance has
+# real breadth to diversify across; Jin 2026-06-27) + the liquid equity-ETF
+# diversifier sleeve (Alpaca, blocked on SIP #42 — venue-inert until routed).
+# Flow-safe symbol SET — emits only here.
+EQUITY_ETF_LEG: Final[frozenset[str]] = frozenset({"SPY", "QQQ", "GLD"})
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = okx_liquid_top_n() | EQUITY_ETF_LEG
 
 
 def _norm_symbol(symbol: str) -> str:

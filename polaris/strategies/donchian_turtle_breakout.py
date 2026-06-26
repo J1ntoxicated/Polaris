@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -72,23 +73,15 @@ STRENGTH_SYSTEM_1: Final[float] = 0.6
 STRENGTH_SYSTEM_2: Final[float] = 0.85
 TTL_BARS: Final[int] = 3
 
-# Crypto majors + a liquid equity-ETF diversifier basket. Multi-symbol breadth
+# OKX-liquid top-N crypto leg (env POLARIS_STRAT_SYMBOL_TOP_N, default 60 —
+# widened from the old 3-major pin so the turtle channel has real entry breadth;
+# Jin 2026-06-27) + a liquid equity-ETF diversifier basket. Multi-symbol breadth
 # is REQUIRED (the edge must NOT depend on crypto-solo — robustness mandate).
 # The equity-ETF leg is INERT until the Alpaca SIP key (#42) routes equity bars
 # to an alpaca-venue dispatch; this crypto-venue strategy degrades-never-crashes
 # on any symbol it is not routed to. Flow-safe symbol SET (never a universe block).
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {
-        # crypto majors (OKX, live)
-        "BTC-USDT",
-        "ETH-USDT",
-        "SOL-USDT",
-        # liquid equity ETF diversifier basket (Alpaca, blocked on SIP #42)
-        "SPY",
-        "QQQ",
-        "GLD",
-    }
-)
+EQUITY_ETF_LEG: Final[frozenset[str]] = frozenset({"SPY", "QQQ", "GLD"})
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = okx_liquid_top_n() | EQUITY_ETF_LEG
 
 
 def _norm_symbol(symbol: str) -> str:

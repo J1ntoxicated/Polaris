@@ -170,8 +170,9 @@ def test_d55_reuses_prefed_momentum_when_finite() -> None:
 
 
 def test_d55_symbol_gate_is_flow_safe_noop_offset() -> None:
-    # An out-of-set symbol is a no-op (positive symbol-SET match — NOT a block of
-    # the universe; other strategies still emit on DOGE-USDT).
+    # An out-of-roster (thin-alt, below the OKX-liquid top-N) symbol is a no-op
+    # (positive symbol-SET match — NOT a block of the universe; other strategies
+    # still emit on it). THINALT-USDT is not in the liquid roster → excluded.
     s = OKXDonchian55BreakoutStrategy()
     closes = [100.0 + i * 0.5 for i in range(80)]
     bars = _bars(closes)
@@ -181,7 +182,7 @@ def test_d55_symbol_gate_is_flow_safe_noop_offset() -> None:
         ts=last.ts, open=last.open, high=prior_high + 5.0,
         low=last.low, close=prior_high + 4.0, volume=last.volume,
     )
-    assert s.generate_raw_signal(_mv(bars, symbol="DOGE-USDT")) is None
+    assert s.generate_raw_signal(_mv(bars, symbol="THINALT-USDT")) is None
 
 
 def test_d55_metadata_adr008_contract() -> None:
@@ -353,7 +354,9 @@ def test_macd_no_emit_without_volume_confirm() -> None:
 def test_macd_symbol_gate_flow_safe() -> None:
     s = MACDEMATrendPullbackStrategy()
     bars = _macd_uptrend_with_pullback_cross()
-    assert s.generate_raw_signal(_mv(bars, symbol="XRP-USDT")) is None  # XRP excluded
+    # THINALT-USDT is below the OKX-liquid top-N roster → excluded (positive
+    # symbol-SET match, flow-safe — never a universe block).
+    assert s.generate_raw_signal(_mv(bars, symbol="THINALT-USDT")) is None
 
 
 def test_macd_metadata_adr008_contract() -> None:
@@ -440,7 +443,8 @@ def test_tsmom_12_1_skip_math_is_correct() -> None:
 def test_tsmom_symbol_gate_flow_safe() -> None:
     s = TSMom12_1MultiAssetStrategy()
     bars = _tsmom_bars_rebalance(positive_mom=True)
-    assert s.generate_raw_signal(_mv(bars, symbol="DOGE-USDT")) is None
+    # THINALT-USDT is below the OKX-liquid top-N roster → excluded (flow-safe).
+    assert s.generate_raw_signal(_mv(bars, symbol="THINALT-USDT")) is None
 
 
 def test_tsmom_metadata_adr008_contract() -> None:

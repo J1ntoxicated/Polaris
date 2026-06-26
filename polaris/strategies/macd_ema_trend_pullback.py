@@ -52,6 +52,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -71,19 +72,13 @@ STRENGTH_BASE: Final[float] = 0.5
 HIST_STRENGTH_GAIN: Final[float] = 4.0
 TTL_BARS: Final[int] = 3
 
-# Validated symbol subset (per-symbol gate — XRP-class chronic losers excluded).
-# Crypto majors (OKX, live) + a low-beta liquid-ETF sleeve (Alpaca, SIP #42).
-# Flow-safe symbol SET — emits only here, never a universe block.
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {
-        "BTC-USDT",
-        "ETH-USDT",
-        "SOL-USDT",
-        "SPY",
-        "QQQ",
-        "GLD",
-    }
-)
+# OKX-liquid top-N crypto leg (env POLARIS_STRAT_SYMBOL_TOP_N, default 60 —
+# widened from the old 3-major pin so the daily trend-pullback has real entry
+# breadth; Jin 2026-06-27) + a low-beta liquid-ETF sleeve (Alpaca, SIP #42 —
+# venue-inert until routed). Flow-safe symbol SET — emits only here, never a
+# universe block.
+EQUITY_ETF_LEG: Final[frozenset[str]] = frozenset({"SPY", "QQQ", "GLD"})
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = okx_liquid_top_n() | EQUITY_ETF_LEG
 
 
 def _norm_symbol(symbol: str) -> str:

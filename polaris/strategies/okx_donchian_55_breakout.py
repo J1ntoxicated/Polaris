@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -70,11 +71,12 @@ ROC_STRENGTH_GAIN: Final[float] = 4.0
 # AI gates watch it. Inert-in-replay (the FSM owns the live hold).
 TTL_BARS: Final[int] = 3
 
-# Large-cap liquid USDT pairs — daily-horizon depth avoids thin-alt 51155.
+# OKX-liquid top-N USDT pairs (env POLARIS_STRAT_SYMBOL_TOP_N, default 60) —
+# widened from the old 5-major pin so the daily horizon has real entry breadth
+# (Jin 2026-06-27). The upstream universe top-N rank is the true liquidity gate;
+# this roster ∩ that active set = the most-liquid N, thin-alt tail dropped.
 # Flow-safe symbol SET (this strategy emits only here; never blocks others).
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {"BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT"}
-)
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = okx_liquid_top_n()
 
 
 def _norm_symbol(symbol: str) -> str:

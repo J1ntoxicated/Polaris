@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import sqlite3
 
+from polaris.core.economics.fees import real_fee_usd
 from polaris.scripts.dashboard.snapshot_models import PositionRow
 from polaris.scripts.dashboard.snapshot_q_common import (
     _now_s,
     _quote_ccy_for_symbol,
+    _quote_usd_rate,
     _safe_query,
 )
 
@@ -220,10 +222,28 @@ def _read_positions(
         last = last_prices.get(inst, entry)
         sign = 1.0 if side.lower() in {"long", "buy"} else -1.0
         delta_pct = ((last - entry) / entry * 100.0) if entry > 0 else 0.0
-        upnl = (last - entry) * qty * sign
-        size_usd = entry * abs(qty)
+        # #50: entry/last are in the price-quote ccy (J225 = JPY, EU50 = EUR…),
+        # so the raw products are in quote-ccy, not USD. Convert to USD via the
+        # quote→USD rate (USD-equiv → 1.0) so upnl_usd/size_usd are honest USD
+        # and the headline equity/DD/Sharpe (which sum upnl_usd) aren't polluted
+        # by raw-JPY magnitudes. delta_pct is a ratio → unconverted; the price
+        # cells keep their quote-ccy label (#11).
+        rate = _quote_usd_rate(conn, quote_ccy)
+        upnl = (last - entry) * qty * sign * rate
+        size_usd = entry * abs(qty) * rate
         # uPnL as a % of deployed notional (display-only column).
         upnl_pct = (upnl / size_usd * 100.0) if size_usd > 0 else 0.0
+        # Jin 2026-06-26: uPnL NET of the EXPECTED round-trip real fee, the live
+        # mirror of the closed-trade gross/fee/net split. Both legs are re-priced
+        # from the (USD-converted) notionals: entry leg = size_usd (entry×|qty|),
+        # expected close leg = current notional (last×|qty|×rate). So an open
+        # position that is gross-positive but would net-negative once both fees
+        # bite reads as a loss on the board. Display-only — never a trading path.
+        current_notional = last * abs(qty) * rate
+        expected_roundtrip_fee = (
+            real_fee_usd(venue, size_usd) + real_fee_usd(venue, current_notional)
+        )
+        upnl_net = upnl - expected_roundtrip_fee
         regime = regime_lookup.get((venue, group_id), "chop")
         mult = cell_mult.get((venue, strat, symbol, regime), 1.0)
         held_sec = max(0.0, float(now_s - opened))
@@ -250,6 +270,7 @@ def _read_positions(
                 mfe_atr_r=mfe_r,
                 mae_atr_r=mae_r,
                 upnl_pct=upnl_pct,
+                upnl_net_usd=upnl_net,
                 entry_regime=entry_regime,
                 quote_ccy=quote_ccy,
                 name=name_by_sym.get((venue, symbol), ""),

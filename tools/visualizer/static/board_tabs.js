@@ -562,13 +562,14 @@
   }
   const POS_SHELL =
     `<table><colgroup>
-        <col style="width:5%"><col style="width:21%"><col style="width:5%"><col style="width:8%">
-        <col style="width:8%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
-        <col style="width:6%"><col style="width:6%"><col style="width:8%"><col style="width:6%">
-        <col style="width:7%"><col style="width:7%">
+        <col style="width:5%"><col style="width:18%"><col style="width:5%"><col style="width:7%">
+        <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
+        <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
+        <col style="width:6%"><col style="width:6%"><col style="width:6%">
        </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th>SIDE</th><th>ENTRY</th>
-        <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th>uPnL$</th>
+        <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th title="unrealised gross PnL (pre-fee)">uPnL$</th>
+        <th title="uPnL net of the EXPECTED round-trip real fee (entry + expected close) — what this position would book if closed now">uPnLnet$</th>
         <th>uPnL%</th><th>HELD</th><th class="l">STRAT</th><th class="l">REGIME</th>
         <th>STOP</th><th title="max-favorable / max-adverse excursion in per-trade-ATR R (atr_r) — distinct from the per-stream ledger R">MFE/MAE</th>
       </tr></thead><tbody></tbody></table>`;
@@ -631,7 +632,13 @@
           { text: fmtPxCcy(p.last_price, qccy), cls: 'num', title: 'current (last close) ' + fmtPxCcy(p.last_price, qccy), flash: pxFlash },
           { text: dpc, cls: 'num ' + pn(p.delta_pct), title: 'price move since entry', flash: dFlash },
           { text: fmtUsd(p.size_usd, 0), cls: 'num' },
-          { text: fmtUsd(p.upnl_usd, 2), cls: 'num ' + pn(p.upnl_usd), flash: upFlash },
+          { text: fmtUsd(p.upnl_usd, 2), cls: 'num ' + pn(p.upnl_usd), flash: upFlash, title: 'unrealised gross PnL (pre-fee)' },
+          // Jin 2026-06-26: uPnL NET of the expected round-trip real fee — the
+          // live mirror of the closed-trade NET$ column. Coloured by NET sign so
+          // a gross-positive position that would book a loss after both fee legs
+          // reads RED. Falls back to gross − a recompute only if the field is
+          // absent (stale snapshot during rollover).
+          { text: fmtUsd(p.upnl_net_usd != null ? p.upnl_net_usd : p.upnl_usd, 2), cls: 'num ' + pn(p.upnl_net_usd != null ? p.upnl_net_usd : p.upnl_usd), title: 'uPnL net of expected round-trip real fee (entry + expected close)' },
           { text: upnlPct, cls: 'num ' + pn(p.upnl_pct) },
           { text: hms(p.held_sec), cls: 'num b-flat', title: 'time held' },
           { text: p.strategy_id, cls: 'l b-flat', title: p.strategy_id },

@@ -54,6 +54,13 @@ class PositionRow:
     mfe_atr_r: float = 0.0
     mae_atr_r: float = 0.0
     upnl_pct: float = 0.0
+    # uPnL NET of the expected round-trip real fee (entry + expected close) —
+    # the live mirror of the closed-trade gross/fee/net split, so an open
+    # position that is gross-positive but would net-negative once both fee legs
+    # bite reads as a loss on the board (Jin 2026-06-26). ``upnl_usd`` is the
+    # gross (USD-converted) leg; this is gross − expected_roundtrip_real_fee.
+    # Display-only — NEVER feeds sizing/gating/exit.
+    upnl_net_usd: float = 0.0
     # Display-alignment additions (read-only). ``entry_regime`` is the IMMUTABLE
     # regime stamped at entry (positions.entry_regime — chop/bull_trend/...), so
     # the board shows the regime the trade was opened in, not just the live one

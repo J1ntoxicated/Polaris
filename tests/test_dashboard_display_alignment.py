@@ -131,9 +131,14 @@ def test_trade_carries_gross_fee_net_split(tmp_path: Path) -> None:
         t = trades[0]
         # gross is the raw realised pnl from the close fill (pre-fee)
         assert t.pnl_usd == 100.0
-        # net == gross − real fee is the single truth (real fee = the venue fee
-        # the snapshot re-prices on the close notional; net subtracts the SAME).
-        assert t.net_usd == t.pnl_usd - t.real_fee_usd
+        # #49: net = gross − FULL round-trip real fee (entry + close), so it
+        # reconciles with the headline (which nets both legs' fee_usd). The
+        # close-leg fee is surfaced as real_fee_usd; the entry-leg fee is
+        # re-priced from the entry notional (entry_px 100 × qty 10 = 1000).
+        from polaris.core.economics.fees import real_fee_usd
+
+        entry_fee = real_fee_usd("okx", 100.0 * 10.0)
+        assert t.net_usd == t.pnl_usd - t.real_fee_usd - entry_fee
         # honest mirror of live: a small gross can net negative once fee bites.
         assert t.real_fee_usd > 0.0
     finally:

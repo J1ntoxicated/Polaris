@@ -197,6 +197,57 @@ def _quote_ccy_for_symbol(venue: str, symbol: str, universe_quote: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quote→USD conversion rate (#50: a J225 uPnL/notional is JPY, not USD)
+# ---------------------------------------------------------------------------
+
+# DISPLAY mirror of the trading path's ``_QUOTE_RATE_EPICS``
+# (``_production_capital_sizing``): quote ccy → (conversion-pair epic, invert).
+# ``invert`` means the bar quotes USD-per-quote (USDJPY = JPY per USD), so the
+# quote→USD multiplier is ``1/close``; a non-inverted pair (EURUSD) already IS
+# the quote→USD multiplier. Reads the latest ``capital:<PAIR>`` 1m bar close —
+# the SAME source the trading path uses — so the dashboard agrees with sizing.
+# Display-only; never feeds sizing/gating/FX-conversion in a trading path.
+_USD_EQUIVALENT_QUOTES: Final[frozenset[str]] = frozenset({"", "USD", "USDT", "USDC"})
+_QUOTE_RATE_PAIRS: Final[Mapping[str, tuple[str, bool]]] = {
+    "JPY": ("USDJPY", True), "EUR": ("EURUSD", False), "GBP": ("GBPUSD", False),
+    "AUD": ("AUDUSD", False), "NZD": ("NZDUSD", False), "CHF": ("USDCHF", True),
+    "CAD": ("USDCAD", True), "NOK": ("USDNOK", True), "SEK": ("USDSEK", True),
+    "DKK": ("USDDKK", True), "ZAR": ("USDZAR", True), "SGD": ("USDSGD", True),
+    "HKD": ("USDHKD", True), "CNH": ("USDCNH", True), "PLN": ("USDPLN", True),
+}
+
+
+def _quote_usd_rate(conn: sqlite3.Connection, quote_ccy: str) -> float:
+    """quote-ccy → USD multiplier for the display layer (graceful, never raises).
+
+    USD-equivalents (USD/USDT/USDC/"") → 1.0. Otherwise read the latest 1m bar
+    close of the conversion pair (``capital:<PAIR>``) and invert when the pair
+    quotes USD-per-quote (USDJPY). A missing / non-positive / unknown rate
+    degrades to 1.0 — the same graceful fallback the trading path uses, so a
+    new venue/ccy is never silently zeroed (the cell then shows the raw quote
+    magnitude, which is the pre-#50 behaviour, not a crash)."""
+    q = (quote_ccy or "").upper()
+    if q in _USD_EQUIVALENT_QUOTES:
+        return 1.0
+    pair = _QUOTE_RATE_PAIRS.get(q)
+    if pair is None:
+        return 1.0
+    epic, invert = pair
+    rows = _safe_query(
+        conn,
+        "SELECT close FROM bars WHERE instrument_id = ? AND "
+        "bar_interval = '1m' ORDER BY ts DESC LIMIT 1",
+        (f"capital:{epic}",),
+    )
+    if not rows or rows[0][0] is None:
+        return 1.0
+    px = float(rows[0][0])
+    if px <= 0.0:
+        return 1.0
+    return (1.0 / px) if invert else px
+
+
+# ---------------------------------------------------------------------------
 # Symbol sparkline (Jin 2026-06-25) — per-row recent-close mini history
 # ---------------------------------------------------------------------------
 

@@ -48,6 +48,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
     LEARNER_DELTA_LOOKBACK_SEC,
     _as_dict,
     _quote_ccy_for_symbol,
+    _quote_usd_rate,
     _safe_query,
     _symbol_from_inst,
 )
@@ -545,9 +546,29 @@ def _recent_closed_trades(
         # sandbox drain (the stored fills.fee_usd now holds the REAL fee, so the
         # demo column is recomputed), real_fee = real venue schedule. pnl_pct =
         # close pnl / entry notional; regime = current regime_state when supplied.
+        # Issue 4: true price-quote currency for the ENTRY/EXIT cells. Needed
+        # BEFORE the entry fee so a non-USD-quote entry notional (entry_px is in
+        # JPY for J225, EUR for EU50…) is converted to USD; the stored close
+        # ``size_usd`` is already USD (fill_normalizer), so only the recomputed
+        # entry notional needs the rate.
+        quote_ccy = _quote_ccy_for_symbol(
+            venue, symbol, quote_by_sym.get((venue, symbol), "USD")
+        )
         real_fee = real_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
         demo_fee = demo_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
-        entry_notional = (entry_px or 0.0) * abs(qty)
+        # entry_px × qty is in the price-quote ccy → convert to USD (#50 rate;
+        # USD-equiv → 1.0) so the entry notional matches the USD close notional.
+        entry_notional = (entry_px or 0.0) * abs(qty) * _quote_usd_rate(
+            conn, quote_ccy
+        )
+        # #49: the entry-leg real fee. The headline ``daily_pnl_usd`` nets
+        # ``SUM(fee_usd)`` over BOTH legs, so the per-position net must also
+        # subtract the entry leg (re-priced from the USD entry notional) — else
+        # Σ(per-position net) overstates by the entry fee and the TRADES tab
+        # disagrees with the headline. (DB has 0 scale-in, so one entry leg.)
+        entry_real_fee = (
+            real_fee_usd(venue, entry_notional) if entry_notional > 0 else 0.0
+        )
         pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
         regime = (
             regime_lookup.get((venue, symbol), "") if regime_lookup else ""
@@ -560,10 +581,6 @@ def _recent_closed_trades(
         pos_side, entry_regime = side_regime_by_id.get(contrib_str or "", ("", ""))
         if not pos_side:
             pos_side = "long" if side.lower() == "sell" else "short"
-        # Issue 4: true price-quote currency for the ENTRY/EXIT cells.
-        quote_ccy = _quote_ccy_for_symbol(
-            venue, symbol, quote_by_sym.get((venue, symbol), "USD")
-        )
         closed_trades.append(
             ClosedTrade(
                 ts_close=ts_ms // 1000,
@@ -585,10 +602,11 @@ def _recent_closed_trades(
                 pnl_pct=pnl_pct,
                 fee_usd=demo_fee,
                 real_fee_usd=real_fee,
-                # Issue 1: net = gross − real fee is the single truth (real fee
-                # is what fills.fee_usd stores; net subtracts the SAME fee). The
-                # FEE$ column shows gross − net so the three reconcile.
-                net_usd=pnl - real_fee,
+                # #49: net = gross − full round-trip real fee (entry + close).
+                # The headline nets BOTH legs' fee_usd, so the per-position net
+                # must too; the FEE$ column (gross − net) then shows the full
+                # round-trip fee and Σ(net) reconciles with the headline.
+                net_usd=pnl - real_fee - entry_real_fee,
                 position_side=pos_side,
                 entry_regime=entry_regime,
                 quote_ccy=quote_ccy,

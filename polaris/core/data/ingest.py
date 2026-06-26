@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sqlite3
 from collections.abc import Iterable
 
@@ -52,15 +53,60 @@ __all__ = [
 BAR_BASELINE_METRICS: tuple[str, ...] = ("atr", "size", "volume")
 
 
-def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
-    """Idempotent insert into the ``bars`` table.
+def _bar_ohlc_is_persistable(b: Bar) -> bool:
+    """True iff every OHLC field is a finite, positive price.
 
-    Returns the number of bars *processed* — duplicates upsert in place via
-    ``INSERT OR REPLACE``, so the count is "rows seen" not
+    SQLite stores a Python ``float('nan')`` as NULL, so a NaN open/high/low/close
+    (yfinance hands these on thin tickers and some Capital index epics —
+    J225/HK50/AU200) would trip the bars NOT NULL constraint and, unguarded,
+    fail the WHOLE INSERT batch (taking every GOOD bar down with it). This
+    per-row predicate is the VENUE-AGNOSTIC last line of defence: every persist
+    path (focus ingest, static-ground walk, on-demand refetch) flows through
+    ``persist_bars``, so guarding here covers Alpaca/Capital/OKX/Yahoo at once.
+    flow_not_block: it only WIDENS what survives ingest — no entry/size/exit.
+    """
+    return (
+        math.isfinite(b.open) and b.open > 0.0
+        and math.isfinite(b.high) and b.high > 0.0
+        and math.isfinite(b.low) and b.low > 0.0
+        and math.isfinite(b.close) and b.close > 0.0
+    )
+
+
+def _sanitize_aux(value: float) -> float:
+    """Coerce a non-OHLC numeric (volume/notional/vwap/quote) to a finite float.
+
+    A non-finite VOLUME (etc.) must not drop an otherwise-valid OHLC bar nor be
+    stored as NULL — sanitize to 0.0 (mirrors the venue adapters' ``_to_float``).
+    """
+    return value if math.isfinite(value) else 0.0
+
+
+def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
+    """Idempotent insert into the ``bars`` table — per-row, batch-survivable.
+
+    Returns the number of bars *persisted*. Duplicates upsert in place via
+    ``INSERT OR REPLACE``, so the count is "rows written" not
     "rows newly inserted" (codex Day 6 P2 contract clarification).
+
+    Per-row robustness (Jin 2026-06-27 "데이터 proactive"): a row whose OHLC is
+    not finite+positive is SKIPPED (``_bar_ohlc_is_persistable``) so a single
+    malformed candle in a batch never fails the whole INSERT and never rolls back
+    the good bars beside it (the live failure: one NaN-open Alpaca bar / NaN-close
+    Capital index bar nuked the symbol's whole batch → DB held 0 such bars). The
+    auxiliary numerics (volume/notional/vwap/quotes) are sanitized to a finite
+    value rather than dropping the bar. flow_not_block — data layer only.
     """
     n = 0
     for b in bars:
+        if not _bar_ohlc_is_persistable(b):
+            logger.debug(
+                "[ingest] dropped non-finite OHLC bar %s/%s ts=%s "
+                "(o=%r h=%r l=%r c=%r)",
+                b.instrument_id, b.bar_interval, b.ts,
+                b.open, b.high, b.low, b.close,
+            )
+            continue
         conn.execute(
             """
             INSERT OR REPLACE INTO bars
@@ -80,13 +126,13 @@ def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
                 float(b.high),
                 float(b.low),
                 float(b.close),
-                float(b.volume),
-                float(b.notional_usd),
+                _sanitize_aux(float(b.volume)),
+                _sanitize_aux(float(b.notional_usd)),
                 int(b.trade_count),
-                float(b.vwap),
-                float(b.bid_close),
-                float(b.ask_close),
-                float(b.spread_bps_close),
+                _sanitize_aux(float(b.vwap)),
+                _sanitize_aux(float(b.bid_close)),
+                _sanitize_aux(float(b.ask_close)),
+                _sanitize_aux(float(b.spread_bps_close)),
                 b.source,
             ),
         )

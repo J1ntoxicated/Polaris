@@ -78,6 +78,7 @@ from polaris.scripts._production_bars import (
     ingest_bars_for_focus,
     ingest_bars_per_timeframe,
     read_recent_bars,
+    read_recent_bars_ondemand,
     staleness_threshold_for,
 )
 from polaris.scripts._production_indicators import compute_real_regime_signal
@@ -108,6 +109,7 @@ __all__ = [
     "read_active_universe",
     "read_cell_scores_by_instrument",
     "read_recent_bars",
+    "read_recent_bars_ondemand",
     "refresh_alpaca_universe_once",
     "refresh_capital_universe_once",
     "refresh_focus_watchlist",

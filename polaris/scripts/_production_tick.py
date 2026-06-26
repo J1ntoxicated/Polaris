@@ -56,7 +56,7 @@ from polaris.scripts._production_layers import (
     compute_and_flip_regime,
     get_focus_targets,
     ingest_bars_per_timeframe,
-    read_recent_bars,
+    read_recent_bars_ondemand,
     run_recalc_for_active_positions,
     staleness_threshold_for,
 )
@@ -466,9 +466,15 @@ async def _run_tick(
         # tune / WS-recv burst yields. No behavior change: no DB transaction spans
         # this point (each conn.execute here auto-commits).
         await asyncio.sleep(0)
-        bars_1m = read_recent_bars(
-            conn, venue=venue, symbol=symbol, bar_interval="1m",
+        # Data-proactive (Jin 2026-06-27): a STALE 1m store refetches live instead
+        # of skipping the symbol (cooldown-gated; storm/OKX-429 safe). A FRESH read
+        # is byte-identical to the prior ``read_recent_bars`` (no fetch).
+        bars_1m = await read_recent_bars_ondemand(
+            conn, venue=venue, symbol=symbol, asset_class=asset_class,
+            bar_interval="1m",
             freshness_threshold_sec=staleness_threshold_for("1m"),
+            capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+            gpt_client_factory=default_gpt_factory, now_mono=now_mono,
         )
         if not bars_1m:
             continue
@@ -541,9 +547,15 @@ async def _run_tick(
             # the heaviest SYNC stretch in the tick — yield between symbols so the
             # tick engine + WS are not starved for the duration of the fan-out.
             await asyncio.sleep(0)
-            bars = read_recent_bars(
-                conn, venue=venue, symbol=symbol, bar_interval=timeframe,
+            # Data-proactive (Jin 2026-06-27): a STALE strategy-timeframe store
+            # refetches live instead of skipping (cooldown-gated; storm/OKX-429
+            # safe). A FRESH read is byte-identical to the prior path (no fetch).
+            bars = await read_recent_bars_ondemand(
+                conn, venue=venue, symbol=symbol, asset_class=asset_class,
+                bar_interval=timeframe,
                 freshness_threshold_sec=staleness_threshold_for(timeframe),
+                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                gpt_client_factory=default_gpt_factory, now_mono=now_mono,
             )
             if len(bars) < 30:
                 continue

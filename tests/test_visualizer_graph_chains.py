@@ -40,7 +40,7 @@ def _seed_open_position(
     position_id: str,
     venue: str = "okx",
     symbol: str = "SOL-USDT",
-    strategy_id: str = "spot_donchian",
+    strategy_id: str = "ema_crossover",
     side: str = "long",
     qty: float = 10.0,
     opened_ts: int,
@@ -76,7 +76,7 @@ def _seed_close(
     fill_id: str,
     venue: str = "okx",
     symbol: str = "ADA-USDT",
-    strategy_id: str = "spot_donchian",
+    strategy_id: str = "ema_crossover",
     pnl_usd: float,
     ts_ms: int,
 ) -> None:
@@ -105,7 +105,7 @@ def test_live_trades_populate_trade_chains(tmp_path: Path) -> None:
     db_path = _mkdb(tmp_path)
     now = int(time.time())
     _seed_open_position(db_path, position_id="p1", symbol="SOL-USDT",
-                        strategy_id="spot_donchian", opened_ts=now - 300)
+                        strategy_id="ema_crossover", opened_ts=now - 300)
     g = build_graph(db_path)
 
     chains = g["trade_chains"]
@@ -134,7 +134,7 @@ def test_lifecycle_paths_resolvable_node_ids(tmp_path: Path) -> None:
     db_path = _mkdb(tmp_path)
     now = int(time.time())
     _seed_open_position(db_path, position_id="p1", symbol="SOL-USDT",
-                        strategy_id="spot_donchian", opened_ts=now - 300)
+                        strategy_id="ema_crossover", opened_ts=now - 300)
     _seed_close(db_path, fill_id="c1", symbol="ADA-USDT",
                 strategy_id="rsi_bb", pnl_usd=12.0, ts_ms=(now - 120) * 1000)
     g = build_graph(db_path)
@@ -164,10 +164,10 @@ def test_chain_starts_at_strategy_node(tmp_path: Path) -> None:
     db_path = _mkdb(tmp_path)
     now = int(time.time())
     _seed_open_position(db_path, position_id="p1", symbol="SOL-USDT",
-                        strategy_id="spot_donchian", opened_ts=now - 300)
+                        strategy_id="ema_crossover", opened_ts=now - 300)
     g = build_graph(db_path)
     chains = g["trade_chains"]
     assert chains
     head = g["nodes"][chains[0]["chain"][0]]
     assert head["cluster"] == "strat"
-    assert head["label"] == "spot_donchian"
+    assert head["label"] == "ema_crossover"

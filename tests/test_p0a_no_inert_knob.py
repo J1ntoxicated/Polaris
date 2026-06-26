@@ -33,6 +33,7 @@ from polaris.storage.schema import ALL_DDL
 from polaris.strategies import STRATEGY_REGISTRY
 from polaris.strategies.base import BaseStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.tsmom import TSMOMStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 
@@ -186,11 +187,16 @@ def test_retained_knob_changes_trade_set_in_replay(
     """For EVERY replay-firing PARAM_BOUNDS knob: the MIN vs MAX grid value yields
     a DIFFERENT trade SET through ReplayEngine, on a fixture that opens+closes
     trades. This is the guard that would have caught an inert knob."""
-    # volume_burst was un-registered 2026-06-27 (#61 live-churn KILL) but its
-    # module + offline grid are preserved read-only, so resolve it from the module
-    # when the live registry no longer carries it.
-    if strategy_id == "volume_burst":
-        cls: type[BaseStrategy] = VolumeBurstStrategy
+    # volume_burst (#61 live-churn KILL) + spot_donchian (#56 stop-bleeders KILL)
+    # were un-registered 2026-06-27 but their modules + offline grids are preserved
+    # read-only, so resolve them from the module when the live registry no longer
+    # carries them.
+    unregistered: dict[str, type[BaseStrategy]] = {
+        "volume_burst": VolumeBurstStrategy,
+        "spot_donchian": SpotDonchianStrategy,
+    }
+    if strategy_id in unregistered:
+        cls: type[BaseStrategy] = unregistered[strategy_id]
     else:
         cls = STRATEGY_REGISTRY[strategy_id]
     grid = PARAM_BOUNDS[strategy_id][knob]

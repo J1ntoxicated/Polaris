@@ -46,8 +46,8 @@ def _seed_db(db: Path) -> None:
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
         " swap_count, peak_price, trough_price, mfe_r, mae_r) "
-        "VALUES ('pos-distort', 'okx', 'BTC-USDT', 'crypto:BTC', 'spot_donchian', "
-        " 'spot_donchian', 'spot_donchian', 'long', 0.001, 'closed', ?, 0, 103.0, 99.0, "
+        "VALUES ('pos-distort', 'okx', 'BTC-USDT', 'crypto:BTC', 'ema_crossover', "
+        " 'ema_crossover', 'ema_crossover', 'long', 0.001, 'closed', ?, 0, 103.0, 99.0, "
         " 15.0, -5.0)",
         (OPENED,),
     )
@@ -56,7 +56,7 @@ def _seed_db(db: Path) -> None:
         "(fill_id, ts_ms, strategy_id, instrument_id, venue, side, base_qty, "
         " fill_price, size_usd, fee_usd, slippage_bps, pnl_usd, is_close, "
         " contribution_id, order_id, state) "
-        "VALUES (?, ?, 'spot_donchian', 'okx:BTC-USDT', 'okx', 'long', 0.001, 100.0, "
+        "VALUES (?, ?, 'ema_crossover', 'okx:BTC-USDT', 'okx', 'long', 0.001, 100.0, "
         " 80.0, 0.05, 1.0, 0.0, 0, 'pos-distort', ?, 'filled')",
         (uuid.uuid4().hex, OPENED * 1000, uuid.uuid4().hex),
     )
@@ -66,8 +66,8 @@ def _seed_db(db: Path) -> None:
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
         " swap_count) "
-        "VALUES ('pos-noext', 'okx', 'BTC-USDT', 'crypto:BTC', 'spot_donchian', "
-        " 'spot_donchian', 'spot_donchian', 'long', 0.001, 'closed', ?, 0)",
+        "VALUES ('pos-noext', 'okx', 'BTC-USDT', 'crypto:BTC', 'ema_crossover', "
+        " 'ema_crossover', 'ema_crossover', 'long', 0.001, 'closed', ?, 0)",
         (OPENED,),
     )
     # Row with extremes but NO entry fill → skipped_no_fill.
@@ -76,8 +76,8 @@ def _seed_db(db: Path) -> None:
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
         " swap_count, peak_price, trough_price) "
-        "VALUES ('pos-nofill', 'okx', 'BTC-USDT', 'crypto:BTC', 'spot_donchian', "
-        " 'spot_donchian', 'spot_donchian', 'long', 0.001, 'closed', ?, 0, 101.0, 99.5)",
+        "VALUES ('pos-nofill', 'okx', 'BTC-USDT', 'crypto:BTC', 'ema_crossover', "
+        " 'ema_crossover', 'ema_crossover', 'long', 0.001, 'closed', ?, 0, 101.0, 99.5)",
         (OPENED,),
     )
     # Row on an instrument with NO bars → skipped_no_bars.
@@ -86,8 +86,8 @@ def _seed_db(db: Path) -> None:
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
         " swap_count, peak_price, trough_price) "
-        "VALUES ('pos-nobars', 'okx', 'XYZ-USDT', 'crypto:XYZ', 'spot_donchian', "
-        " 'spot_donchian', 'spot_donchian', 'long', 0.001, 'closed', ?, 0, 101.0, 99.5)",
+        "VALUES ('pos-nobars', 'okx', 'XYZ-USDT', 'crypto:XYZ', 'ema_crossover', "
+        " 'ema_crossover', 'ema_crossover', 'long', 0.001, 'closed', ?, 0, 101.0, 99.5)",
         (OPENED,),
     )
     conn.execute(
@@ -95,7 +95,7 @@ def _seed_db(db: Path) -> None:
         "(fill_id, ts_ms, strategy_id, instrument_id, venue, side, base_qty, "
         " fill_price, size_usd, fee_usd, slippage_bps, pnl_usd, is_close, "
         " contribution_id, order_id, state) "
-        "VALUES (?, ?, 'spot_donchian', 'okx:XYZ-USDT', 'okx', 'long', 0.001, 100.0, "
+        "VALUES (?, ?, 'ema_crossover', 'okx:XYZ-USDT', 'okx', 'long', 0.001, 100.0, "
         " 80.0, 0.05, 1.0, 0.0, 0, 'pos-nobars', ?, 'filled')",
         (uuid.uuid4().hex, OPENED * 1000, uuid.uuid4().hex),
     )

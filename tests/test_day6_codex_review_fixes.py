@@ -59,31 +59,33 @@ async def test_ignite_paper_persists_to_caller_db_path(tmp_path: Path) -> None:
     ]
     from polaris.core.data.schema import Bar as CanonicalBar
 
-    # Bars must trigger spot_donchian (OKX SPOT, 1H timeframe) so the full
-    # pipeline persists a fill. Trigger: ``close > donchian_high_40`` (prior-40-
-    # bar high, excl. last) AND ``adx_14 > 14``. A steady 1H uptrend across 60
-    # bars yields a finite high ADX (monotonic up = strong +DI), and the final
-    # bar's +1500 breakout pushes close above the prior-40-bar high. ``bar_interval``
-    # is "1H" so the per-timeframe bar fetch persists/reads them in spot_donchian's
-    # 1H bucket. Volume varies bar-to-bar and is always > 0 so no bar is dropped as
-    # a synthetic/flat OKX forward-fill placeholder.
+    # Bars must trigger okx_donchian_55_breakout (OKX SPOT, 1D timeframe) so the
+    # full pipeline persists a fill. (Vehicle was spot_donchian, the 1H Donchian-40
+    # breakout, un-registered 2026-06-27 in the #56 stop-bleeders KILL — the
+    # surviving registered+dispatched OKX Donchian breakout is the 1D donchian-55.)
+    # Trigger: ``close > donchian_high_55`` (prior-55-bar high, excl. last) AND
+    # ``ROC_20 > 0``. A steady 1D uptrend across 80 bars (> the 76-bar warmup)
+    # yields a positive ROC, and the final bar's +2500 breakout pushes close above
+    # the prior-55-bar high. ``bar_interval`` is "1D" so the per-timeframe bar fetch
+    # persists/reads them in the donchian-55 1D bucket. Volume varies bar-to-bar
+    # and is always > 0 so no bar is dropped as a synthetic/flat forward-fill.
     # Anchor at NOW so the newest bar is fresh — the recency guard (Jin
     # 2026-06-22 dead-feed gate) skips a symbol whose newest bar is stale, so a
     # fixed-2023-epoch fixture would read as a dead feed → 0 opens → 0 fills.
-    _bars_base_ts = int(_time.time()) - 3600 * 60
+    _bars_base_ts = int(_time.time()) - 86400 * 80
     fake_bars: list[CanonicalBar] = []
-    for i in range(60):
-        is_breakout = i == 59
+    for i in range(80):
+        is_breakout = i == 79
         base = 60_000.0 + i * 60.0
-        close = base + (1_500.0 if is_breakout else 0.0)
+        close = base + (2_500.0 if is_breakout else 0.0)
         high = close + 80.0
         low = base - 80.0
         volume = 1_000.0 + (i % 5) * 50.0
         fake_bars.append(
             CanonicalBar(
                 instrument_id="okx:BTC-USDT", underlying_group_id="crypto:BTC",
-                venue="okx", symbol="BTC-USDT", bar_interval="1H",
-                ts=_bars_base_ts + i * 3600,
+                venue="okx", symbol="BTC-USDT", bar_interval="1D",
+                ts=_bars_base_ts + i * 86400,
                 open=base, high=high, low=low,
                 close=close, volume=volume,
                 notional_usd=close * volume,

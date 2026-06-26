@@ -65,8 +65,10 @@ def _seed_bars(
 
 
 def test_strategy_timeframe_resolves_registry() -> None:
-    assert strategy_timeframe("spot_donchian") == "1H"
-    assert strategy_timeframe("volume_burst") == "1m"
+    # ema_crossover = the live OKX 1H registry strategy (spot_donchian, the prior
+    # 1H vehicle, was un-registered 2026-06-27 #56 stop-bleeders KILL → it now
+    # falls back to "1m"; ema_crossover keeps the registry-resolve coverage).
+    assert strategy_timeframe("ema_crossover") == "1H"
     assert strategy_timeframe("connors_rsi2") == "1D"
     assert strategy_timeframe("session_breakout") == "5m"
 

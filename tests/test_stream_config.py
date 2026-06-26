@@ -215,10 +215,11 @@ def test_stream_a_long_only_stream_b_short_allowed_but_encoded() -> None:
 def test_stream_rosters_match_current_strategy_venue_mapping() -> None:
     a = resolve_stream("okx")
     b = resolve_stream("capital")
-    # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL): dropped
-    # from the OKX roster so it stays in sync with STRATEGY_REGISTRY.
+    # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL) +
+    # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): both
+    # dropped from the OKX roster so it stays in sync with STRATEGY_REGISTRY.
     assert a.strategy_roster == frozenset(
-        {"rsi_bb_pullback", "spot_donchian"}
+        {"rsi_bb_pullback"}
     )
     assert b.strategy_roster == frozenset(
         {"fx_breakout_basket", "xau_indices_trend", "session_breakout"}

@@ -119,8 +119,8 @@ def test_strategy_metadata_timeframe_used() -> None:
     by_id: dict[str, BaseStrategy] = {s.metadata.strategy_id: s for s in strats}
     expected: dict[str, str] = {
         # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — dropped.
+        # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — dropped.
         "rsi_bb_pullback": "15m",
-        "spot_donchian": "1H",
         "ema_crossover": "1H",
         "fx_breakout_basket": "1H",
         "xau_indices_trend": "1H",

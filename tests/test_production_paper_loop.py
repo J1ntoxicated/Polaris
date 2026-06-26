@@ -351,16 +351,18 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 18: strategy-wave1 un-registered fx_range_fade
+    """The strategy list is exactly 17: strategy-wave1 un-registered fx_range_fade
     and added the 4 verified 1D survivors (okx_donchian_55 / tsmom_12_1 /
     macd_ema / donchian_turtle); volume_burst was then un-registered 2026-06-27
     (#61 live-churn KILL), dropping the dispatch list 12 → 11. strategy-wave2
     (2026-06-27) added 7 verified research survivors (Capital GOLD/index 5 +
-    Alpaca equity 2) → 18."""
+    Alpaca equity 2) → 18. spot_donchian was then un-registered 2026-06-27
+    (#56 stop-bleeders KILL), dropping the dispatch list 18 → 17."""
     strategies = _all_strategies()
-    assert len(strategies) == 18
+    assert len(strategies) == 17
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
+    assert "spot_donchian" not in ids  # KILLed 2026-06-27 (#56 stop-bleeders)
     assert "session_breakout" in ids
     assert "fx_range_fade" not in ids  # KILLed in strategy-wave1
     assert "bar_breakout_run" in ids
@@ -448,7 +450,8 @@ def test_g2_emit_no_cap() -> None:
     # no cap; strategy-wave1: fx_range_fade KILLed, +4 verified 1D survivors = 12;
     # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) → 11.
     # strategy-wave2 (2026-06-27): +7 verified research survivors → 18.
-    assert len(strategies) == 18
+    # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) → 17.
+    assert len(strategies) == 17
 
 
 @pytest.mark.asyncio

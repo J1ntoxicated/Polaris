@@ -136,16 +136,25 @@ def _sandbox() -> sqlite3.Connection:
     return conn
 
 
-def _uptrend_then_drop_bars(n: int = 95) -> list[Bar]:
-    """1H bars: a long Donchian-breakout uptrend (fires a 1H breakout long, e.g.
-    spot_donchian) then a drop, so the open position is ticked through
+def _uptrend_then_drop_bars(n: int = 130) -> list[Bar]:
+    """1H bars: a long base, a dip, a late trend re-acceleration that fires a 1H
+    trend long (e.g. supertrend — the surviving registered OKX 1H trend strategy
+    after spot_donchian, the prior 1H vehicle, was un-registered 2026-06-27 in the
+    #56 stop-bleeders KILL), then a drop so the open position is ticked through
     ``_tick_exit`` (the FSM is exercised at the 1H capped loser-timeout)."""
     bars: list[Bar] = []
     price = 100.0
-    n_up = 70
     for i in range(n):
-        # uptrend for the first n_up bars, then a steady decline.
-        step = 0.012 if i < n_up else -0.012
+        # Slow base (warmup), a dip, a strong late rally (flips a 1H trend long),
+        # then a decline so the freshly-opened 1H position is ticked as a loser.
+        if i < 60:
+            step = 0.0008
+        elif i < 78:
+            step = -0.012
+        elif i < 95:
+            step = 0.020
+        else:
+            step = -0.012
         nxt = price * (1.0 + step)
         bars.append(
             Bar(
@@ -201,7 +210,7 @@ def test_replay_exit_passes_live_loser_timeout_for_strategy(
     # engine resolved (parity with run_precise_exit).
     for sid, fed_timeout in pairs:
         assert fed_timeout == _loser_timeout_for_strategy(sid)
-    # And a 1H strategy (tsmom/donchian/etc.) was actually exercised at its
+    # And a 1H strategy (supertrend/etc.) was actually exercised at its
     # drift-backstop value — capped at the named LOSER_TIMEOUT_CAP_SEC (3600s),
     # NOT the flat 900s (the OLD broken wiring) and NOT the uncapped 7200s floor.
     from polaris.scripts._production_recalc_exit import LOSER_TIMEOUT_CAP_SEC

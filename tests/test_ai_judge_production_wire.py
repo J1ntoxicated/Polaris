@@ -35,7 +35,11 @@ from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts._static_ground import _persist_ticker_ground
 from polaris.scripts.production_paper_loop import ProdLoopState
 from polaris.storage.schema import ALL_DDL
-from polaris.strategies import RawSignal, SpotDonchianStrategy
+from polaris.strategies import RawSignal
+
+# spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — module
+# preserved read-only; used here as a generic strategy vehicle, import direct.
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 
 NOW = 1_780_000_000
 

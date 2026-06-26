@@ -27,9 +27,12 @@ from polaris.strategies import (
     BarView,
     MarketView,
     RSIBBPullbackStrategy,
-    SpotDonchianStrategy,
     XAUIndicesTrendStrategy,
 )
+
+# spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — module
+# preserved read-only; this variant-seam test uses it directly.
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 
 # volume_burst un-registered 2026-06-27 (#61 KILL) — module preserved read-only.
 from polaris.strategies.volume_burst import VolumeBurstStrategy

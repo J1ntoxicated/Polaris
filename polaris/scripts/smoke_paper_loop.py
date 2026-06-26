@@ -49,9 +49,14 @@ from polaris.strategies import (
     RawSignal,
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
-    SpotDonchianStrategy,
     XAUIndicesTrendStrategy,
 )
+
+# spot_donchian was un-registered 2026-06-27 (#56 stop-bleeders) — removed from
+# STRATEGY_REGISTRY + the production dispatch. The module is preserved read-only;
+# this offline smoke-FIXTURE rig still exercises its signal generator directly
+# (it is NOT the production loop — production_paper_loop.py is separate).
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.venues.okx import fetch_okx_bars
 
 logger = logging.getLogger(__name__)

@@ -612,8 +612,9 @@ def test_pocket_pivot_metadata_and_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_has_21_strategies() -> None:
-    assert len(STRATEGY_REGISTRY) == 21
+def test_registry_has_20_strategies() -> None:
+    # was 21 (strategy-wave2); spot_donchian KILLed 2026-06-27 (#56 stop-bleeders).
+    assert len(STRATEGY_REGISTRY) == 20
 
 
 def test_wave2_all_registered() -> None:

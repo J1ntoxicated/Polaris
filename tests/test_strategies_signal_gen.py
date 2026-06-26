@@ -21,14 +21,15 @@ from polaris.strategies import (
     RawSignal,
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
-    SpotDonchianStrategy,
     StrategyMetadata,
     XAUIndicesTrendStrategy,
     all_strategies,
 )
 
-# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — module preserved
-# read-only, so isolated signal-gen tests import the class directly.
+# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) + spot_donchian
+# un-registered 2026-06-27 (#56 stop-bleeders KILL) — modules preserved
+# read-only, so isolated signal-gen tests import the classes directly.
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 
 # ---------------------------------------------------------------------------
@@ -587,14 +588,16 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     # (#61 — live-churn KILL, net-negative scalp expectancy): 15 → 14.
     # strategy-wave2 (2026-06-27): +7 verified fee-beating research survivors
     # (Capital GOLD/index 5 + Alpaca equity 2), each a distinct group: 14 → 21.
-    assert len(seen) == 21, f"correlation groups not unique: {seen}"
+    # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): 21 → 20.
+    assert len(seen) == 20, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
     # strategy-wave1 (2026-06-27): was 12; −fx_range_fade +4 verified survivors = 15.
     # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL): 15 → 14.
     # strategy-wave2 (2026-06-27): +7 verified research survivors → 21.
-    assert len(STRATEGY_REGISTRY) == 21
+    # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): 21 → 20.
+    assert len(STRATEGY_REGISTRY) == 20
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

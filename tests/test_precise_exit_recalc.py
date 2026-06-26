@@ -252,18 +252,19 @@ async def test_newly_covered_spot_strategy_harvests_sub_protect_excursion(
     memdb: sqlite3.Connection,
 ) -> None:
     # [[harvest_generalization_2026-06-23]]: a registered SPOT strategy
-    # (spot_donchian — volume_burst was un-registered 2026-06-27 in the #61
-    # live-churn KILL) that reaches +0.5R MFE — ABOVE the schedule protect rung
+    # (ema_crossover — spot_donchian was un-registered 2026-06-27 in the #56
+    # stop-bleeders KILL, so the live OKX 1H spot vehicle is ema_crossover) that
+    # reaches +0.5R MFE — ABOVE the schedule protect rung
     # (+0.45R, locking +0.20R) but BELOW the dead FSM PROTECT rung (1.0R) — now
     # has its profit floored. When it round-trips to +0.1R the locked-floor stop
     # fires instead of giving the excursion back. band 0.25 → atr_one 0.5,
     # atr_r 1.0; last 100.5 → mfe 0.5R (touched, not FSM-protected).
     _seed(
         memdb, position_id="pos-spot", entry_price=100.0, last_price=100.5,
-        band=0.25, strategy="spot_donchian",
+        band=0.25, strategy="ema_crossover",
     )
     state = ProdLoopState()
-    state.open_trades = [_trade("pos-spot", strategy="spot_donchian")]
+    state.open_trades = [_trade("pos-spot", strategy="ema_crossover")]
     await _recalc(memdb, state)
     row = _pos_row(memdb, "pos-spot")
     assert row["status"] == "open"
@@ -367,10 +368,10 @@ def test_loser_timeout_for_strategy_scales_to_timeframe() -> None:
         _loser_timeout_for_strategy,
     )
 
-    # spot_donchian = 1H → bar-scaled floor (2×3600=7200s) but CAPPED at the
+    # ema_crossover = 1H → bar-scaled floor (2×3600=7200s) but CAPPED at the
     # named drift backstop (POLARIS_LOSER_TIMEOUT_SEC, default 3600s): a
     # dead-thesis drifter is cut faster (precise-exit loss-defense), not left 2hr.
-    h1_timeout = _loser_timeout_for_strategy("spot_donchian")
+    h1_timeout = _loser_timeout_for_strategy("ema_crossover")
     assert h1_timeout == LOSER_TIMEOUT_CAP_SEC  # capped 7200 → 3600s
     assert h1_timeout > EXIT_LOSER_TIMEOUT_SEC  # still > the flat 900s
     # volume_burst = 1m → max(900, 2×60=120) = 900s, under the cap (fast
@@ -401,7 +402,7 @@ def test_loser_timeout_daily_class_exempt_from_1h_cap() -> None:
         assert t == daily_floor, sid
         assert t > LOSER_TIMEOUT_CAP_SEC, sid  # NOT truncated to the 1H cap
     # 1H strategies stay CAPPED (scalp/1H drift backstop unchanged).
-    assert _loser_timeout_for_strategy("spot_donchian") == LOSER_TIMEOUT_CAP_SEC
+    assert _loser_timeout_for_strategy("ema_crossover") == LOSER_TIMEOUT_CAP_SEC
     assert _loser_timeout_for_strategy("xau_indices_trend") == LOSER_TIMEOUT_CAP_SEC
 
 
@@ -462,7 +463,7 @@ def test_loser_timeout_cap_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
     try:
         assert recalc_mod.LOSER_TIMEOUT_CAP_SEC == 1800.0
         # spot_donchian (1H, 7200s floor) capped at the re-tuned 1800s.
-        assert recalc_mod._loser_timeout_for_strategy("spot_donchian") == 1800.0
+        assert recalc_mod._loser_timeout_for_strategy("ema_crossover") == 1800.0
     finally:
         monkeypatch.delenv("POLARIS_LOSER_TIMEOUT_SEC", raising=False)
         importlib.reload(recalc_mod)
@@ -472,14 +473,14 @@ def test_loser_timeout_cap_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_1h_thesis_not_force_closed_at_900s(
     memdb: sqlite3.Connection,
 ) -> None:
-    # A spot_donchian (1H) loser aged 901s — past the flat 900s but WITHIN its
+    # A ema_crossover (1H) loser aged 901s — past the flat 900s but WITHIN its
     # capped 3600s horizon — must NOT be force-closed (hold-to-thesis). last_price
     # 99.8 keeps it a small loser, never touched profit, so only the timeout
     # applies.
     opened = NOW - int(EXIT_LOSER_TIMEOUT_SEC) - 1  # 901s held
     _seed(
         memdb, position_id="pos-1h", entry_price=100.0, last_price=99.8,
-        opened_ts=opened, strategy="spot_donchian",
+        opened_ts=opened, strategy="ema_crossover",
     )
     state = ProdLoopState()
     state.open_trades = [_trade("pos-1h")]
@@ -510,7 +511,7 @@ async def test_1m_strategy_still_times_out_at_900s(
 async def test_1h_drifter_closes_at_capped_backstop(
     memdb: sqlite3.Connection,
 ) -> None:
-    # A spot_donchian (1H) sideways-drift loser held past the named drift backstop
+    # A ema_crossover (1H) sideways-drift loser held past the named drift backstop
     # (LOSER_TIMEOUT_CAP_SEC=3600s) now closes — was 7200s (the uncapped
     # 2-bar 1H floor), so a dead-thesis drifter is cut ~1hr faster. Small loser
     # (99.8 = -0.2%), never touched profit → only the timeout path applies
@@ -520,7 +521,7 @@ async def test_1h_drifter_closes_at_capped_backstop(
     opened = NOW - int(LOSER_TIMEOUT_CAP_SEC) - 60  # 3660s held, past 3600 cap
     _seed(
         memdb, position_id="pos-drift", entry_price=100.0, last_price=99.8,
-        opened_ts=opened, strategy="spot_donchian",
+        opened_ts=opened, strategy="ema_crossover",
     )
     state = ProdLoopState()
     state.open_trades = [_trade("pos-drift")]
@@ -533,13 +534,13 @@ async def test_1h_drifter_closes_at_capped_backstop(
 async def test_1h_drifter_within_cap_stays_open(
     memdb: sqlite3.Connection,
 ) -> None:
-    # The same spot_donchian (1H) drifter still WITHIN the 3600s backstop holds —
+    # The same ema_crossover (1H) drifter still WITHIN the 3600s backstop holds —
     # the cap shortened the horizon (7200→3600), it did not make exits
     # trigger-happy before the backstop. 1800s held < 3600s cap → open.
     opened = NOW - 1800  # well under the 3600s cap
     _seed(
         memdb, position_id="pos-drift-young", entry_price=100.0, last_price=99.8,
-        opened_ts=opened, strategy="spot_donchian",
+        opened_ts=opened, strategy="ema_crossover",
     )
     state = ProdLoopState()
     state.open_trades = [_trade("pos-drift-young")]

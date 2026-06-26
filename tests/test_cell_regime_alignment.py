@@ -1,7 +1,7 @@
 """TDD — regime→cell-matrix score alignment (MVP, deterministic vol/trend fit).
 
 Spec source: task #9 — couple regime detection into the cell-matrix score input.
-Trend strategies (spot_donchian / breakout family) weighted UP in trend
+Trend strategies (xau_indices_trend / breakout family) weighted UP in trend
 regimes; counter-trend (rsi_bb_pullback) weighted UP in chop. This is a
 REDISTRIBUTION (amplify aligned / dampen misaligned) — never an off-switch, and
 never below the dampen floor. Aggressive bias preserved.
@@ -25,10 +25,10 @@ from polaris.core.cell_matrix.score import (
     regime_rank_penalty,
 )
 
-# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — removed from the
-# live trend-strategy exemplars (it no longer scores via _TREND_STRATEGIES).
+# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) + spot_donchian
+# un-registered 2026-06-27 (#56 stop-bleeders KILL) — both removed from the live
+# trend-strategy exemplars (neither scores via _TREND_STRATEGIES anymore).
 TREND_STRATEGIES = (
-    "spot_donchian",
     "fx_breakout_basket",
     "session_breakout",
     "xau_indices_trend",
@@ -71,7 +71,7 @@ def test_crisis_regime_neutral_for_all() -> None:
 
 
 def test_unknown_regime_neutral() -> None:
-    assert regime_alignment_mult(strategy="spot_donchian", regime="sideways") == REGIME_ALIGN_NEUTRAL
+    assert regime_alignment_mult(strategy="xau_indices_trend", regime="sideways") == REGIME_ALIGN_NEUTRAL
 
 
 def test_unknown_strategy_neutral() -> None:
@@ -94,14 +94,14 @@ def test_dampen_is_redistribution_not_off() -> None:
 
 def test_apply_amplifies_positive_score_in_aligned_regime() -> None:
     base = 0.8
-    out = apply_regime_alignment(base, strategy="spot_donchian", regime="bull_trend")
+    out = apply_regime_alignment(base, strategy="xau_indices_trend", regime="bull_trend")
     assert out == base * REGIME_ALIGN_AMPLIFY
     assert out > base
 
 
 def test_apply_dampens_positive_score_in_misaligned_regime() -> None:
     base = 0.8
-    out = apply_regime_alignment(base, strategy="spot_donchian", regime="chop")
+    out = apply_regime_alignment(base, strategy="xau_indices_trend", regime="chop")
     assert out == base * REGIME_ALIGN_DAMPEN
     assert 0.0 < out < base
 
@@ -110,8 +110,8 @@ def test_apply_preserves_negative_sign() -> None:
     # A losing cell stays losing — amplify must not flip a negative to positive
     # nor dampen lift it toward zero past the router's reach.
     base = -0.5
-    amp = apply_regime_alignment(base, strategy="spot_donchian", regime="bull_trend")
-    damp = apply_regime_alignment(base, strategy="spot_donchian", regime="chop")
+    amp = apply_regime_alignment(base, strategy="xau_indices_trend", regime="bull_trend")
+    damp = apply_regime_alignment(base, strategy="xau_indices_trend", regime="chop")
     assert amp < 0.0
     assert damp < 0.0
     assert amp < base < damp  # amplify pushes more negative, dampen toward zero
@@ -119,12 +119,12 @@ def test_apply_preserves_negative_sign() -> None:
 
 def test_apply_neutral_is_identity() -> None:
     base = 0.42
-    assert apply_regime_alignment(base, strategy="spot_donchian", regime="crisis") == base
+    assert apply_regime_alignment(base, strategy="xau_indices_trend", regime="crisis") == base
 
 
 def test_apply_zero_score_stays_zero() -> None:
     for regime in ("bull_trend", "chop", "crisis"):
-        assert apply_regime_alignment(0.0, strategy="spot_donchian", regime=regime) == 0.0
+        assert apply_regime_alignment(0.0, strategy="xau_indices_trend", regime=regime) == 0.0
 
 
 @given(
@@ -189,7 +189,7 @@ def test_rank_penalty_neutral_between_aligned_and_misaligned() -> None:
     # Crisis / unknown regime / unknown strategy → neutral penalty, strictly
     # BETWEEN best-fit (0.0) and mis-fit (dampen). Ordering: aligned < neutral
     # < misaligned, so the regime-first POOL is a 3-tier priority, never a gate.
-    neutral = regime_rank_penalty(strategy="spot_donchian", regime="crisis")
+    neutral = regime_rank_penalty(strategy="xau_indices_trend", regime="crisis")
     assert neutral == REGIME_RANK_PENALTY_NEUTRAL
     assert 0.0 < REGIME_RANK_PENALTY_NEUTRAL < REGIME_RANK_PENALTY_DAMPEN
 
@@ -200,7 +200,7 @@ def test_rank_penalty_cold_unknown_never_demoted_to_oblivion() -> None:
     assert regime_rank_penalty(strategy="mystery_alpha", regime="bull_trend") == (
         REGIME_RANK_PENALTY_NEUTRAL
     )
-    assert regime_rank_penalty(strategy="spot_donchian", regime="sideways") == (
+    assert regime_rank_penalty(strategy="xau_indices_trend", regime="sideways") == (
         REGIME_RANK_PENALTY_NEUTRAL
     )
 
@@ -217,9 +217,9 @@ def test_rank_penalty_mirrors_alignment_mult_ordering() -> None:
     # The penalty is a re-encoding of the SAME fitness SSOT: a strategy with a
     # higher alignment mult must never have a HIGHER penalty (monotone inverse).
     cases = [
-        ("spot_donchian", "bull_trend"),
-        ("spot_donchian", "chop"),
-        ("spot_donchian", "crisis"),
+        ("xau_indices_trend", "bull_trend"),
+        ("xau_indices_trend", "chop"),
+        ("xau_indices_trend", "crisis"),
         ("rsi_bb_pullback", "chop"),
         ("rsi_bb_pullback", "bull_trend"),
         ("mystery", "bull_trend"),
@@ -262,7 +262,7 @@ def test_property_rank_penalty_non_negative_finite_bounded(
 LONG_ONLY_VENUES = ("okx", "alpaca")
 # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL); removed here
 # so this set lists only live long-only trend strategies.
-LONG_ONLY_TREND_STRATEGIES = ("spot_donchian",)
+LONG_ONLY_TREND_STRATEGIES = ("xau_indices_trend",)
 CAPITAL_TREND_STRATEGIES = (
     "fx_breakout_basket",
     "xau_indices_trend",
@@ -323,7 +323,7 @@ def test_bear_long_only_dampen_is_strictly_positive_redistribution() -> None:
     # never 0, never a block. A losing/winning long signal is down-weighted,
     # never excluded.
     mult = regime_alignment_mult(
-        strategy="spot_donchian", regime="bear_trend", exchange="okx"
+        strategy="xau_indices_trend", regime="bear_trend", exchange="okx"
     )
     assert mult == REGIME_ALIGN_DAMPEN
     assert mult > 0.0
@@ -355,7 +355,7 @@ def test_counter_trend_bear_unchanged_by_venue() -> None:
 def test_apply_regime_alignment_threads_exchange() -> None:
     base = 0.8
     okx_out = apply_regime_alignment(
-        base, strategy="spot_donchian", regime="bear_trend", exchange="okx"
+        base, strategy="xau_indices_trend", regime="bear_trend", exchange="okx"
     )
     cap_out = apply_regime_alignment(
         base, strategy="fx_breakout_basket", regime="bear_trend", exchange="capital"
@@ -370,7 +370,7 @@ def test_rank_penalty_threads_exchange_bear_long_only_ranks_down() -> None:
     # trend now ranks DOWN (dampen penalty), while Capital bear trend ranks
     # first (amplify → 0). Still emits / flows / sized — pure batch ORDER.
     okx_pen = regime_rank_penalty(
-        strategy="spot_donchian", regime="bear_trend", exchange="okx"
+        strategy="xau_indices_trend", regime="bear_trend", exchange="okx"
     )
     cap_pen = regime_rank_penalty(
         strategy="fx_breakout_basket", regime="bear_trend", exchange="capital"

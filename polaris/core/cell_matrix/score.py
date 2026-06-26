@@ -53,11 +53,11 @@ REGIME_ALIGN_DAMPEN: Final[float] = 0.8
 # Ids verified against polaris.strategies.STRATEGY_REGISTRY (all live ids) — so
 # every live trend strategy is regime-scored (an omitted id would be silently
 # scored neutral).
-# (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL — removed
-# here so this set stays in sync with STRATEGY_REGISTRY: no dead id remains.)
+# (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL +
+# spot_donchian un-registered 2026-06-27 in the #56 stop-bleeders KILL — both
+# removed here so this set stays in sync with STRATEGY_REGISTRY: no dead id remains.)
 _TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     {
-        "spot_donchian",
         "fx_breakout_basket",
         "session_breakout",
         "xau_indices_trend",

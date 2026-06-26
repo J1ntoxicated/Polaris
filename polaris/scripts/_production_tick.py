@@ -43,6 +43,7 @@ from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
+from polaris.core.universe.schema import alpaca_runtime_feed
 from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_counterfactual import (
     CF_SWEEP_THROTTLE_SEC,
@@ -86,7 +87,6 @@ from polaris.strategies import (
     RawSignal,
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
-    SpotDonchianStrategy,
     TSMom12_1MultiAssetStrategy,
     XAUIndicesTrendStrategy,
 )
@@ -245,6 +245,32 @@ def equity_session_entry_hold(
     return False
 
 
+def equity_entry_inert_for_feed(strategy: BaseStrategy) -> bool:
+    """Whether an Alpaca-equity strategy is INERT because the active feed is IEX.
+
+    Stop-bleeders (2026-06-27, #56). The two equity strategies
+    (``equity_vol_expansion_pocket_pivot`` / ``equity_52wk_high_breakout``) are
+    designed for the LIQUID SIP feed. With the paid SIP key (#42) blank the WS
+    downgrades SIP→IEX (``alpaca_runtime_feed() == "iex"``) and the strategies
+    bled on IEX junk-symbol fills (-$104.58 / 21 closes). This returns ``True``
+    for an Alpaca-equity strategy ONLY while the active feed is NOT ``sip`` → the
+    caller skips its signal emit (inert, no new entry).
+
+    This is a DATA-CORRECTNESS gate, not a flow block / size-cut / defensive
+    dampen: a strategy whose data feed is wrong cannot trade, exactly like
+    universe-eligibility. It is NOT a permanent KILL — it auto-recovers: the
+    instant Jin routes a real SIP key (no runtime downgrade) ``alpaca_runtime_
+    feed()`` reads ``sip`` again and the strategies fire. It NEVER touches an
+    existing position (entry-emit only) and applies ONLY to Alpaca equity:
+    OKX / Capital strategies always return ``False`` (A/B byte-identical,
+    flow_not_block). degrade-never-crash.
+    """
+    m = strategy.metadata
+    if m.venue != "alpaca" or m.asset_class != "equity":
+        return False
+    return alpaca_runtime_feed() != "sip"
+
+
 def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
     """T13 — PDT ranking-down for an equity entry (RANK DOWN, NEVER a block).
 
@@ -273,7 +299,6 @@ def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
 def _all_strategies() -> list[BaseStrategy]:
     return [
         RSIBBPullbackStrategy(),
-        SpotDonchianStrategy(),
         BarBreakoutRunStrategy(),
         OKXDonchian55BreakoutStrategy(),
         TSMom12_1MultiAssetStrategy(),
@@ -623,6 +648,15 @@ async def _run_tick(
                 # NEW entry is HELD until RTH (integrity, not a P&L throttle).
                 # Existing positions are untouched (this skips only the entry).
                 if equity_session_entry_hold(venue, now_ts=now_ts, state=state):
+                    continue
+                # Stop-bleeders (#56): an Alpaca-equity strategy is INERT while the
+                # active feed is IEX (SIP key #42 blank → downgrade). The equity
+                # strategies are SIP-designed; on IEX they bled junk-symbol fills
+                # (-$104.58 / 21 closes). DATA-CORRECTNESS gate (wrong feed = cannot
+                # trade), like universe-eligibility — NOT a flow block / size-cut.
+                # Auto-recovers the instant a real SIP key is routed. Entry-emit
+                # only; existing positions untouched. A/B venues never gated.
+                if equity_entry_inert_for_feed(strategy):
                     continue
                 try:
                     sig = strategy.generate_raw_signal(mv)

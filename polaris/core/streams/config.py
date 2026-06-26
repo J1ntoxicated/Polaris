@@ -189,9 +189,10 @@ STREAMS: dict[StreamId, StreamConfig] = {
         adapter_ref="OKXAdapter",
         universe_source="okx_tickers",
         strategy_roster=frozenset(
-            # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — kept
-            # in sync with STRATEGY_REGISTRY.
-            {"rsi_bb_pullback", "spot_donchian"}
+            # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) +
+            # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) —
+            # kept in sync with STRATEGY_REGISTRY.
+            {"rsi_bb_pullback"}
         ),
         sizing_profile=SizingProfile(
             leverage_source="fixed_1",

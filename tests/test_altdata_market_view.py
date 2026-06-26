@@ -28,9 +28,12 @@ from polaris.strategies import (
     BarView,
     MarketView,
     RSIBBPullbackStrategy,
-    SpotDonchianStrategy,
 )
 from polaris.strategies.base import AltDataView
+
+# spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — module
+# preserved read-only; this altdata market-view test exercises it directly.
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 
 # ---------------------------------------------------------------------------
 # Stub cache — mirrors AltDataCache.get_for_group contract

@@ -6,7 +6,6 @@ to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
 
 Track A — OKX SPOT:
   - ``rsi_bb_pullback``            (correlation_group=spot_mean_reversion)
-  - ``spot_donchian``              (correlation_group=spot_breakout, 1H)
   - ``bar_breakout_run``           (correlation_group=bar_momentum_breakout, 1D)
   - ``okx_donchian_55_breakout``   (correlation_group=okx_donchian_55_breakout, 1D)
   - ``tsmom_12_1_multiasset``      (correlation_group=tsmom_position_momentum, 1D)
@@ -41,6 +40,14 @@ live churn measured net-negative inverted-asymmetry expectancy (big losses /
 small wins, the only high-frequency churner). Its module + historical fills are
 preserved read-only; behaviour only is severed — no longer registered or
 dispatched.)
+
+(``spot_donchian`` was un-registered 2026-06-27 — KILLed (#56 stop-bleeders):
+OKX 1H Donchian is the fee-fatal intraday class the overnight research REJECTed
+(slippage-fragile), and it kept losing live AFTER the exit fix (-$85.66 / 16
+closes). Same dispatch-level KILL as the autopsy survivors — module + the
+open-position close path are preserved read-only; only the signal-emit
+behaviour is severed. The dead registry/learner rows are swept by the next
+``learner_prune``.)
 
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
@@ -81,7 +88,6 @@ from polaris.strategies.macd_ema_trend_pullback import MACDEMATrendPullbackStrat
 from polaris.strategies.okx_donchian_55_breakout import OKXDonchian55BreakoutStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
-from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
@@ -89,7 +95,6 @@ from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
 # Registry: strategy_id → factory. ``factory()`` returns a fresh instance.
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
-    SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
     BarBreakoutRunStrategy.metadata.strategy_id: BarBreakoutRunStrategy,
     OKXDonchian55BreakoutStrategy.metadata.strategy_id: OKXDonchian55BreakoutStrategy,
     TSMom12_1MultiAssetStrategy.metadata.strategy_id: TSMom12_1MultiAssetStrategy,
@@ -147,7 +152,6 @@ __all__ = [
     "RawSignal",
     "STRATEGY_REGISTRY",
     "SessionBreakoutStrategy",
-    "SpotDonchianStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",

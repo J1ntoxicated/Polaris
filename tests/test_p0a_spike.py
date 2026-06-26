@@ -288,7 +288,10 @@ def test_build_specs_opens_live_db_read_only(tmp_path: Path) -> None:
     try:
         for stmt in ALL_DDL:
             seed.execute(stmt)
-        # one bar row so load_bars returns something for spot_donchian's pool key.
+        # one bar row so load_bars returns something for the strategy's pool key.
+        # (Vehicle was spot_donchian; un-registered 2026-06-27 #56 stop-bleeders
+        # KILL → build_specs skips unregistered ids, so use the live registered
+        # 1H OKX strategy rsi_bb_pullback, whose p0a design pool includes BTC-USDT.)
         seed.execute(
             "INSERT INTO bars (instrument_id, underlying_group_id, venue, symbol, "
             "bar_interval, ts, open, high, low, close, volume, notional_usd, "
@@ -302,8 +305,8 @@ def test_build_specs_opens_live_db_read_only(tmp_path: Path) -> None:
         seed.close()
 
     # build_specs must succeed (read) ...
-    specs = build_specs(str(live), strategies=["spot_donchian"])
-    assert specs and specs[0].strategy_id == "spot_donchian"
+    specs = build_specs(str(live), strategies=["rsi_bb_pullback"])
+    assert specs and specs[0].strategy_id == "rsi_bb_pullback"
 
     # ... and the live DB is a READ-ONLY source: a write via mode=ro fails.
     ro = sqlite3.connect(f"file:{live}?mode=ro", uri=True)

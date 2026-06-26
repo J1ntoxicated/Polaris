@@ -237,6 +237,9 @@ async def run_pipeline_for_signal(
         payload["ticker_ground"] = {
             "has_sentiment": ground_row["has_sentiment"],
             "has_event": ground_row["has_event"],
+            # #32 axis-B freshness input: thread the ground stamp so the judge CALL
+            # gate can score staleness (missing → treated as NOT fresh, fail-safe).
+            "updated_ts": ground_row["updated_ts"],
         }
     # Gate architecture Phase 0 (Option A): resolve the per-stream seam ONCE and
     # thread it through every GateContext. P0 = structural enabler only — no gate

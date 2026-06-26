@@ -199,6 +199,13 @@ class ProdLoopState:
     # ACTS byte-identical). None (no OPENAI_API_KEY / smoke / replay) → judge
     # dormant, every gate byte-identical to the no-judge path (graceful no-op).
     judge_client: Any = None
+    # #32 axis-A G7 EXIT judge cooldown/dedup (anti-flooding). Per position_id →
+    # (last_judge_ts, last_rung). The G7 exit judge fires per-position-per-recalc-tick
+    # (audit #62 = 222 calls); this gate re-escalates the SAME position only when the
+    # FSM rung ADVANCED or the cooldown elapsed (POLARIS_JUDGE_EXIT_COOLDOWN_SEC). The
+    # entry is written on first escalate + the key deleted in the close path (no schema
+    # change, no leak). Telemetry-free control state — never a trading decision.
+    judge_exit_cooldowns: dict[str, tuple[int, int]] = field(default_factory=dict)
     # Timeframe-aligned ATR cache for the live recalc exit ruler:
     # (instrument_id, timeframe) → (atr_pct, computed_ts). TTL =
     # TIMEFRAME_FETCH_CADENCE_SEC[tf] (a fresh bar cannot arrive faster, so a

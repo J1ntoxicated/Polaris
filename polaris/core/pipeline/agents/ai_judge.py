@@ -54,6 +54,11 @@ from polaris.core.pipeline.agents._gpt_client import (
     make_system_prefix,
 )
 from polaris.core.pipeline.agents._shadow_rules import ShadowDecision
+from polaris.core.pipeline.agents.judge_gate import (
+    extend_atr,
+    refine_ttl_sec,
+    tighten_atr,
+)
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
 from polaris.core.pipeline.config import AI_JUDGE_MODE_ACTIVE
 from polaris.core.pipeline.gate_state import GateContext, GateDecision, GateResult
@@ -419,13 +424,22 @@ def apply_entry_verdict(
         "applied": "annotate",
     }
     if verdict is EntryJudgeVerdict.SIZE_UP:
-        # INTENT ONLY — surfaced for the sizer to consider within its OWN hard-MAX
-        # headroom min(); NOT a new multiplier stacked here (9-stack stays sealed).
+        # INTENT ONLY — consumed by the entry sizer as ``judge_conviction`` folded
+        # into the ONE continuous scalar + re-clamped (NOT a new multiplier stacked
+        # here; 9-stack stays sealed). Absent/False → conviction 1.0 (byte-identical).
         payload["ai_judge_size_up_intent"] = True
     if verdict is EntryJudgeVerdict.REFINE_TIMING:
-        # One-shot, time-boxed timing nudge (debate fix ②). Missed-entry cost is
-        # logged by the consumer when the one-shot expires.
-        payload["ai_judge_refine_timing"] = {"one_shot": True}
+        # One-shot, time-boxed timing nudge (debate fix ②). The order submitter waits
+        # ONE window (POLARIS_JUDGE_REFINE_TTL_SEC) for a better fill then PROCEEDS at
+        # market regardless (verdict enum has NO KILL — it can only DELAY, never skip).
+        # Missed-entry cost is logged by the consumer when the one-shot expires.
+        payload["ai_judge_refine_timing"] = {"one_shot": True, "ttl_sec": refine_ttl_sec()}
+    if verdict is EntryJudgeVerdict.STRENGTHEN_EVIDENCE:
+        # PURE annotation — telemetry/dashboard + G8 reflector context. NO behavioral
+        # consumer; deliberately does NOT bump the sizing scalar (SIZE_UP owns the
+        # amplification — STRENGTHEN is the weaker, record-only verdict; avoids
+        # double-counting). Zero size / stop / decision effect.
+        payload["ai_judge_confidence"] = {"strengthened": True}
     # decision + next_gate are copied from the deterministic result UNCHANGED.
     return GateResult(
         decision=deterministic_result.decision,
@@ -465,6 +479,21 @@ def apply_exit_verdict(
         "escalation": outcome.escalation_reason,
         "applied": "annotate",
     }
+    if verdict is ExitJudgeVerdict.EXTEND:
+        # A REQUEST routed THROUGH the deterministic Q9 widen rail (never around it):
+        # adaptive_exit_gate pushes the stop one extra ATR farther and RE-RUNS
+        # can_widen_exit, whose (allowed, reason) is FINAL (further-from-price,
+        # max_loss/-1.0R floor, pnl_r>0.7R, override cap, cooldown). Reject → stop
+        # UNCHANGED. flow_not_block: widen only moves the stop FARTHER, never tightens,
+        # never forces an exit (the verdict enum has no EXIT_NOW).
+        payload["ai_judge_widen_request"] = {"extend_atr": extend_atr()}
+    if verdict is ExitJudgeVerdict.TIGHTEN_ON_CONFIRMED_DECAY:
+        # A REQUEST routed THROUGH the ratchet-safe tighten rail (can_tighten_exit):
+        # adaptive_exit_gate synthesises a stop one ATR-step CLOSER and routes it;
+        # the rail forbids LOOSENING + enforces override cap / cooldown. TIGHTEN moves
+        # the stop TOWARD price = AWAY from the -1.0R floor (strictly safe); it can
+        # never force a cut (no EXIT_NOW member). Reject → stop UNCHANGED.
+        payload["ai_judge_tighten_request"] = {"tighten_atr": tighten_atr()}
     return GateResult(
         decision=deterministic_result.decision,
         next_gate=deterministic_result.next_gate,

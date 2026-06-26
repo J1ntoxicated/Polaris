@@ -46,6 +46,10 @@ from polaris.core.pipeline.agents.ai_judge import (
     judge_exit,
     log_judge_event,
 )
+from polaris.core.pipeline.agents.judge_gate import (
+    evidence_robustness,
+    robust_min,
+)
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
 from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
@@ -363,8 +367,21 @@ async def _maybe_judge_exit(
     member, so a deterministic HOLD / ADJUST_EXIT can never become a forced cut. The
     Q9 widen / can_tighten rails + the -1.0R rail stay deterministic-owned; active
     mode annotates which timing direction the judge preferred, shadow logs only.
+
+    A+B CALL GATE (#32 axes — THE flooding hotspot). G7+judge fires per-position
+    per-recalc-tick, so the judge is consulted only on a DECISION MOMENT. The recalc
+    caller (which owns the per-position cooldown dict + the pre-computed mode / rung /
+    big-move signals) stamps ``payload['judge_exit_escalate']`` — True only when A's
+    exit predicate fired AND the cooldown elapsed / rung advanced. We AND that with B
+    (evidence robustness). Absent key (orchestrator entry-time path / tests) → default
+    True so legacy callers are unchanged. ``escalate=False`` NEVER blocks — the
+    deterministic HOLD / ADJUST_EXIT (Q9 rail) flows unchanged (flow_not_block).
     """
     if judge_client is None:
+        return det_result
+    escalate_a = ctx.payload.get("judge_exit_escalate", True)
+    rob = evidence_robustness(ctx.payload, now_ts=int(ctx.started_ts))
+    if not (bool(escalate_a) and rob.score >= robust_min()):
         return det_result
     outcome = await judge_exit(
         ctx,
@@ -377,6 +394,102 @@ async def _maybe_judge_exit(
         shadow_conn, ctx=ctx, gate_id=GATE_ADAPTIVE_EXIT, outcome=outcome, mode=mode
     )
     return apply_exit_verdict(outcome, deterministic_result=det_result, mode=mode)
+
+
+def _farther_stop(side: str, *, stop: float, atr_step: float) -> float:
+    """Push a stop one ATR-step FARTHER from price (long: down; short: up)."""
+    return stop - atr_step if side.lower() == "long" else stop + atr_step
+
+
+def _closer_stop(side: str, *, stop: float, atr_step: float) -> float:
+    """Pull a stop one ATR-step CLOSER to price (long: up; short: down)."""
+    return stop + atr_step if side.lower() == "long" else stop - atr_step
+
+
+def _apply_exit_request(
+    judged: GateResult,
+    *,
+    proposal: dict[str, Any],
+    next_gate_after_exit: int | None,
+) -> GateResult:
+    """#32 axis-C — route an active-mode EXTEND / TIGHTEN judge REQUEST through the rail.
+
+    Reads the request keys the active-mode ``apply_exit_verdict`` stamped onto the
+    judged payload. NO request (shadow / PROTECT / judge absent / weak evidence) →
+    ``judged`` returned UNCHANGED (byte-identical). When present, the rail's
+    (allowed, reason) is FINAL:
+    - EXTEND → push proposed_stop one extra ATR farther + re-run ``can_widen_exit``
+      (max_loss / -1.0R floor, pnl_r>0.7R, override cap, cooldown). Reject → HOLD,
+      stop unchanged (the verdict enum has no EXIT_NOW — a cut is unrepresentable).
+    - TIGHTEN → synth a stop one ATR-step closer + route ``can_tighten_exit`` (never
+      loosen — ratchet preserved). Reject → HOLD, stop unchanged.
+    flow_not_block: widen only moves the stop farther, tighten only ratchets it
+    closer; neither forces an exit or cuts size, and the -1.0R rail is never bypassed.
+    """
+    payload = judged.payload
+    widen_req = payload.get("ai_judge_widen_request")
+    tighten_req = payload.get("ai_judge_tighten_request")
+    if not isinstance(widen_req, dict) and not isinstance(tighten_req, dict):
+        return judged
+    side = str(proposal.get("side", "long"))
+    entry_price = float(proposal.get("entry_price", 0.0))
+    current_stop = float(proposal.get("current_stop_price", 0.0))
+    # ATR-step in PRICE units: re-derive from the proposal's own widen span (the
+    # deterministic ATR distance current→proposed) so the judge step shares the
+    # rail's ruler; fall back to a 1% entry slice if the span is degenerate.
+    proposed_stop = float(proposal.get("proposed_stop_price", current_stop))
+    atr_one = abs(current_stop - proposed_stop) or max(abs(entry_price) * 0.01, 1e-6)
+
+    if isinstance(widen_req, dict):
+        extra = float(widen_req.get("extend_atr", 1.0))
+        # Start from the deterministic proposed_stop (already one ATR farther) and
+        # push EXTRA*atr farther, then re-run the Q9 rail on that proposal.
+        farther = _farther_stop(side, stop=proposed_stop, atr_step=extra * atr_one)
+        widen_proposal = {**proposal, "proposed_stop_price": farther}
+        rail = _python_widen_only(
+            proposal=widen_proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+        rail.payload["ai_judge_request"] = "EXTEND"
+        return GateResult(
+            decision=rail.decision,
+            next_gate=rail.next_gate,
+            payload={**payload, **rail.payload},
+            model_used=judged.model_used,
+            latency_ms=judged.latency_ms,
+            error=judged.error,
+            skipped=judged.skipped,
+            input_tokens=judged.input_tokens,
+            output_tokens=judged.output_tokens,
+        )
+
+    # TIGHTEN request.
+    assert isinstance(tighten_req, dict)
+    step = float(tighten_req.get("tighten_atr", 0.5))
+    closer = _closer_stop(side, stop=current_stop, atr_step=step * atr_one)
+    tighten_proposal = {
+        "side": side,
+        "current_stop_price": current_stop,
+        "proposed_stop_price": closer,
+        "overrides_used": int(proposal.get("overrides_used", 0)),
+        "seconds_since_last_override": int(
+            proposal.get("seconds_since_last_override", COOLDOWN_SEC + 1)
+        ),
+    }
+    rail = _python_tighten(
+        proposal=tighten_proposal, next_gate_after_exit=next_gate_after_exit,
+    )
+    rail.payload["ai_judge_request"] = "TIGHTEN"
+    return GateResult(
+        decision=rail.decision,
+        next_gate=rail.next_gate,
+        payload={**payload, **rail.payload},
+        model_used=judged.model_used,
+        latency_ms=judged.latency_ms,
+        error=judged.error,
+        skipped=judged.skipped,
+        input_tokens=judged.input_tokens,
+        output_tokens=judged.output_tokens,
+    )
 
 
 async def adaptive_exit_gate(
@@ -457,9 +570,18 @@ async def adaptive_exit_gate(
         # / KILL path exists in its verdict type, so the deterministic HOLD /
         # ADJUST_EXIT (Q9 rail) can never become a forced cut. No-op when
         # ``judge_client`` is None (byte-identical to the rail-only path).
-        return await _maybe_judge_exit(
+        judged = await _maybe_judge_exit(
             ctx, det_result=det_result, proposal=proposal,
             judge_client=judge_client, shadow_conn=shadow_conn,
+        )
+        # #32 axis-C EXIT behaviour: an active-mode EXTEND / TIGHTEN verdict stamped a
+        # REQUEST onto the judged payload. Route it THROUGH the deterministic rail
+        # (can_widen_exit / can_tighten_exit) — never around it. The rail's
+        # (allowed, reason) is FINAL (max_loss/-1.0R floor, pnl window, ratchet,
+        # override cap, cooldown). Reject → stop UNCHANGED (flow_not_block; the verdict
+        # enum has no EXIT_NOW so a forced cut is unrepresentable).
+        return _apply_exit_request(
+            judged, proposal=proposal, next_gate_after_exit=next_gate_after_exit,
         )
     result, gpt_raw = await _p1_decide(
         ctx, proposal=proposal, client=client, model=model,

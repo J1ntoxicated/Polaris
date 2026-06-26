@@ -37,6 +37,11 @@ from polaris.core.pipeline.agents.ai_judge import (
     judge_entry,
     log_judge_event,
 )
+from polaris.core.pipeline.agents.judge_gate import (
+    evidence_robustness,
+    robust_min,
+    should_escalate_entry,
+)
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
 from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
@@ -164,8 +169,33 @@ async def _maybe_judge_entry(
     tracking), and — only in ``active`` mode — annotates the result flow-additively.
     The judge can NEVER turn the deterministic PASS/MODIFY into a KILL (its verdict
     type has no block member). Fail-open: any judge failure → deterministic result.
+
+    A+B CALL GATE (#32 axes): the judge is consulted only when the deterministic G3
+    decision is uncertain/boundary (A) AND the bot's own evidence is robust (B). A
+    clean decisive warm signal with sparse evidence flows deterministically with NO
+    GPT call and NO shadow row (anti-flooding). ``escalate=False`` NEVER blocks — the
+    deterministic PASS/MODIFY flows unchanged (flow_not_block).
     """
     if judge_client is None:
+        return det_result
+    validated = det_result.payload.get("validated_signal", {})
+    scalar = (
+        float(validated.get("strength_scalar", 1.0))
+        if isinstance(validated, dict)
+        else 1.0
+    )
+    cell = ctx.payload.get("cell_routing", {})
+    n_eff = float(cell.get("n_eff", 0.0) or 0.0) if isinstance(cell, dict) else 0.0
+    esc_a, reason_a = should_escalate_entry(
+        gate="G3",
+        decision=det_result.decision.name,
+        scalar=scalar,
+        n_eff=n_eff,
+        recent_reject_in_6h=bool(ctx.payload.get("recent_reject_in_6h", False)),
+    )
+    rob = evidence_robustness(ctx.payload, now_ts=int(ctx.started_ts))
+    if not (esc_a and rob.score >= robust_min()):
+        # A-skip OR B-weak-evidence → deterministic default (no GPT, no shadow row).
         return det_result
     outcome = await judge_entry(
         ctx,

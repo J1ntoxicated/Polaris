@@ -10,8 +10,10 @@ P0: dispatch the validated signal through ``polaris.core.sizing.compute_size``.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from typing import Any
 
+from polaris.core.pipeline.agents.judge_gate import size_up_boost
 from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
     GateContext,
@@ -59,6 +61,18 @@ async def entry_sizer_gate(
             payload={"reason": "missing_risk_or_portfolio"},
             model_used="python",
         )
+
+    # #32 axis-C SIZE_UP: the A+B-gated entry judge (G3/G4) stamps
+    # ``ai_judge_size_up_intent`` into the result payload (merged into ctx.payload by
+    # the orchestrator) ONLY in active mode + robust evidence. Thread its conviction
+    # boost into the SAME single continuous scalar via ``judge_conviction`` — NOT a
+    # post-hoc multiply, NOT a new T4 chain element (the fold + re-clamp happen inside
+    # compute_size, mirroring regime_scalar; the 9-stack count is unchanged). Absent /
+    # shadow / False → conviction 1.0 → byte-identical sizing (flow_not_block: never a
+    # cut). The downstream tier_amp / cell_mult / single-trade cap / headroom_min() all
+    # still bind and clip after, so SIZE_UP can never breach the absolute ceiling.
+    if ctx.payload.get("ai_judge_size_up_intent") and intent_raw.judge_conviction == 1.0:
+        intent_raw = replace(intent_raw, judge_conviction=size_up_boost())
 
     try:
         sized = compute_size(

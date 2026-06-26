@@ -28,15 +28,16 @@ from polaris.strategies import (
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
-    VolumeBurstStrategy,
 )
 from polaris.strategies.base import BarView, MarketView, RawSignal
 from polaris.strategies.cci_reversion import _cci, _typical
 from polaris.strategies.connors_rsi2 import TREND_FILTER_MA, _rsi, _sma
 
-# fx_range_fade was un-registered (KILLed) in strategy-wave1; the module is
-# preserved so this relaxed-threshold unit test still exercises its entry logic.
+# fx_range_fade (strategy-wave1) and volume_burst (#61, 2026-06-27) were
+# un-registered (KILLed); their modules are preserved so this relaxed-threshold
+# unit test still exercises their entry logic.
 from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
+from polaris.strategies.volume_burst import VolumeBurstStrategy
 
 # ---------------------------------------------------------------------------
 # Helpers

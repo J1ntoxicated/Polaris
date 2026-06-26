@@ -80,7 +80,6 @@ from polaris.strategies import (
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
     TSMom12_1MultiAssetStrategy,
-    VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
 from polaris.strategies.session_breakout import (
@@ -250,7 +249,6 @@ def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
 
 def _all_strategies() -> list[BaseStrategy]:
     return [
-        VolumeBurstStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
         BarBreakoutRunStrategy(),

@@ -494,8 +494,9 @@ def test_fx_range_fade_module_preserved() -> None:
 
 def test_other_strategies_not_regressed() -> None:
     # The kill + the 4 new builds must NOT drop the untouched live strategies.
+    # (volume_burst was itself un-registered 2026-06-27 in the #61 live-churn
+    # KILL — no longer a regression sentinel here.)
     for sid in (
-        "volume_burst",
         "rsi_bb_pullback",
         "spot_donchian",
         "bar_breakout_run",

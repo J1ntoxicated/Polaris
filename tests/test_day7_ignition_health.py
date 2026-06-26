@@ -653,25 +653,30 @@ async def test_24h_readiness_composite_exercises_all_layers(
     from polaris.core.data.schema import Bar as CanonicalBar
 
     def _fake_bars() -> list[CanonicalBar]:
-        # F10 — Day 9: force volume_burst to fire on the final 1m bar so the
-        # paper loop persists at least one fill. Earlier bars carry slight
-        # volume variation so compute_volume_z has non-zero stdev.
+        # Force spot_donchian (OKX SPOT, 1H timeframe) to fire on the final bar
+        # so the paper loop persists at least one fill. Trigger: close >
+        # donchian_high_40 (prior-40-bar high, excl. last) AND adx_14 > 14. A
+        # steady 1H uptrend gives a finite high ADX (monotonic up = strong +DI);
+        # the final bar's +1500 breakout clears the prior-40-bar high. bar_interval
+        # is "1H" so the per-timeframe ingest persists/reads them in spot_donchian's
+        # 1H bucket; volume is always > 0 so no bar is dropped as synthetic/flat.
         # Anchor at NOW so the newest bar is fresh — the recency guard (Jin
         # 2026-06-22 dead-feed gate) skips a symbol whose newest bar is stale, so
         # a fixed-2023-epoch fixture would otherwise read as a dead feed → 0 opens.
-        base_ts = int(time.time()) - 60 * 60  # 60 1m bars ending ~now
+        base_ts = int(time.time()) - 3600 * 60  # 60 1H bars ending ~now
         out: list[CanonicalBar] = []
         for i in range(60):
             is_breakout = i == 59
-            close = 60_000.5 + i * 5 + (5_000.0 if is_breakout else 0.0)
-            high = close + 200.0
-            low = (60_000.5 + i * 5) - 200.0
-            volume = 50_000.0 if is_breakout else (1_000.0 + (i % 5) * 50.0)
+            base = 60_000.0 + i * 60.0
+            close = base + (1_500.0 if is_breakout else 0.0)
+            high = close + 80.0
+            low = base - 80.0
+            volume = 1_000.0 + (i % 5) * 50.0
             out.append(CanonicalBar(
                 instrument_id="okx:BTC-USDT", underlying_group_id="crypto:BTC",
-                venue="okx", symbol="BTC-USDT", bar_interval="1m",
-                ts=base_ts + i * 60,
-                open=60_000.0 + i * 5, high=high, low=low,
+                venue="okx", symbol="BTC-USDT", bar_interval="1H",
+                ts=base_ts + i * 3600,
+                open=base, high=high, low=low,
                 close=close, volume=volume,
                 notional_usd=close * volume,
             ))

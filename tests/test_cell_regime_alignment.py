@@ -25,12 +25,13 @@ from polaris.core.cell_matrix.score import (
     regime_rank_penalty,
 )
 
+# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — removed from the
+# live trend-strategy exemplars (it no longer scores via _TREND_STRATEGIES).
 TREND_STRATEGIES = (
     "spot_donchian",
     "fx_breakout_basket",
     "session_breakout",
     "xau_indices_trend",
-    "volume_burst",
 )
 TREND_REGIMES = ("bull_trend", "bear_trend")
 
@@ -259,10 +260,9 @@ def test_property_rank_penalty_non_negative_finite_bounded(
 # ---------------------------------------------------------------------------
 
 LONG_ONLY_VENUES = ("okx", "alpaca")
-LONG_ONLY_TREND_STRATEGIES = (
-    "spot_donchian",
-    "volume_burst",
-)
+# volume_burst un-registered 2026-06-27 (#61 — live-churn KILL); removed here
+# so this set lists only live long-only trend strategies.
+LONG_ONLY_TREND_STRATEGIES = ("spot_donchian",)
 CAPITAL_TREND_STRATEGIES = (
     "fx_breakout_basket",
     "xau_indices_trend",

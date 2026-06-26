@@ -252,17 +252,18 @@ async def test_newly_covered_spot_strategy_harvests_sub_protect_excursion(
     memdb: sqlite3.Connection,
 ) -> None:
     # [[harvest_generalization_2026-06-23]]: a registered SPOT strategy
-    # (volume_burst) that reaches +0.5R MFE — ABOVE the schedule protect rung
+    # (spot_donchian — volume_burst was un-registered 2026-06-27 in the #61
+    # live-churn KILL) that reaches +0.5R MFE — ABOVE the schedule protect rung
     # (+0.45R, locking +0.20R) but BELOW the dead FSM PROTECT rung (1.0R) — now
     # has its profit floored. When it round-trips to +0.1R the locked-floor stop
     # fires instead of giving the excursion back. band 0.25 → atr_one 0.5,
     # atr_r 1.0; last 100.5 → mfe 0.5R (touched, not FSM-protected).
     _seed(
         memdb, position_id="pos-spot", entry_price=100.0, last_price=100.5,
-        band=0.25, strategy="volume_burst",
+        band=0.25, strategy="spot_donchian",
     )
     state = ProdLoopState()
-    state.open_trades = [_trade("pos-spot", strategy="volume_burst")]
+    state.open_trades = [_trade("pos-spot", strategy="spot_donchian")]
     await _recalc(memdb, state)
     row = _pos_row(memdb, "pos-spot")
     assert row["status"] == "open"

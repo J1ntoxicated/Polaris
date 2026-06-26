@@ -5,7 +5,6 @@ Each strategy = ``BaseStrategy`` subclass that emits ``RawSignal | None`` from
 to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
 
 Track A — OKX SPOT:
-  - ``volume_burst``               (correlation_group=spot_intraday_event)
   - ``rsi_bb_pullback``            (correlation_group=spot_mean_reversion)
   - ``spot_donchian``              (correlation_group=spot_breakout, 1H)
   - ``bar_breakout_run``           (correlation_group=bar_momentum_breakout, 1D)
@@ -27,6 +26,12 @@ they are no longer registered or dispatched.)
 (``fx_range_fade`` was un-registered 2026-06-27 — KILLed in the strategy-wave1
 restructure; its module + historical data are preserved read-only, behaviour
 only is severed.)
+
+(``volume_burst`` was un-registered 2026-06-27 — KILLed (#61, autonomous loop):
+live churn measured net-negative inverted-asymmetry expectancy (big losses /
+small wins, the only high-frequency churner). Its module + historical fills are
+preserved read-only; behaviour only is severed — no longer registered or
+dispatched.)
 
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
@@ -59,12 +64,10 @@ from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
-from polaris.strategies.volume_burst import VolumeBurstStrategy
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
 
 # Registry: strategy_id → factory. ``factory()`` returns a fresh instance.
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
-    VolumeBurstStrategy.metadata.strategy_id: VolumeBurstStrategy,
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
     SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
     BarBreakoutRunStrategy.metadata.strategy_id: BarBreakoutRunStrategy,
@@ -109,7 +112,6 @@ __all__ = [
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",
-    "VolumeBurstStrategy",
     "XAUIndicesTrendStrategy",
     "all_strategies",
 ]

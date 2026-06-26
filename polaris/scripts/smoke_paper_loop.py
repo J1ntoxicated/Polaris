@@ -50,7 +50,6 @@ from polaris.strategies import (
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
-    VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
 from polaris.venues.okx import fetch_okx_bars
@@ -134,8 +133,9 @@ def _stub_bars(n: int, *, base: float = 60_000.0, drift: float = 0.5) -> list[Ba
 
 
 def _okx_strategies() -> list[BaseStrategy]:
+    # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — dropped from
+    # the smoke OKX bundle so the harness mirrors the live OKX roster.
     return [
-        VolumeBurstStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
     ]

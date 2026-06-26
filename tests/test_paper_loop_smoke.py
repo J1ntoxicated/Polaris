@@ -159,7 +159,8 @@ async def test_strategies_isolation_no_cross_pollution(tmp_path: Path) -> None:
         results = await asyncio.gather(
             *(_run_strategy_for_focus(s, entry, bars) for s in _okx_strategies())
         )
-        assert len(results) == 3
+        # volume_burst un-registered 2026-06-27 (#61 KILL): OKX bundle 3 → 2.
+        assert len(results) == 2
         # At least one OKX strat emits with the boosted view.
         assert any(r is not None for r in results)
         # Capital strategies on an OKX entry → all None (asset class skip).

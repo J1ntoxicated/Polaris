@@ -37,6 +37,11 @@ from __future__ import annotations
 # ONLY entry-trigger thresholds that change WHICH trades happen (the trade SET).
 PARAM_BOUNDS: dict[str, dict[str, tuple[float, ...]]] = {
     # --- Track A: OKX SPOT (live in replay) ---
+    # (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL — its
+    # live emit/dispatch is severed, but its OFFLINE edge-search grid is preserved
+    # read-only for research, exactly like its strategy module. run_p0a_spike
+    # gracefully skips any id not in STRATEGY_REGISTRY, so this grid is inert in
+    # the live spike CLI.)
     "volume_burst": {
         # bounds [1.5, 3.5] — entry trigger on volume z-score
         "vol_z_threshold": (2.0, 2.5, 3.0),

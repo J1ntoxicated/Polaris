@@ -118,7 +118,7 @@ def test_strategy_metadata_timeframe_used() -> None:
     strats = _all_strategies()
     by_id: dict[str, BaseStrategy] = {s.metadata.strategy_id: s for s in strats}
     expected: dict[str, str] = {
-        "volume_burst": "1m",
+        # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — dropped.
         "rsi_bb_pullback": "15m",
         "spot_donchian": "1H",
         "ema_crossover": "1H",

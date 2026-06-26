@@ -28,9 +28,11 @@ from polaris.strategies import (
     MarketView,
     RSIBBPullbackStrategy,
     SpotDonchianStrategy,
-    VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
+
+# volume_burst un-registered 2026-06-27 (#61 KILL) — module preserved read-only.
+from polaris.strategies.volume_burst import VolumeBurstStrategy
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -221,10 +221,10 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
 
     # Build supervision specs by hand (mimics what _run_tick does) so we
     # can assert siblings continue without spinning up the full DB seed.
-    from polaris.strategies import (
-        SpotDonchianStrategy,
-        VolumeBurstStrategy,
-    )
+    from polaris.strategies import SpotDonchianStrategy
+
+    # volume_burst un-registered 2026-06-27 (#61 KILL) — module preserved.
+    from polaris.strategies.volume_burst import VolumeBurstStrategy
 
     strategies = [VolumeBurstStrategy(), SpotDonchianStrategy()]
     specs: list[PipelineTaskSpec] = []

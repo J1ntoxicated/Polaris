@@ -23,10 +23,13 @@ from polaris.strategies import (
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
     StrategyMetadata,
-    VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
     all_strategies,
 )
+
+# volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — module preserved
+# read-only, so isolated signal-gen tests import the class directly.
+from polaris.strategies.volume_burst import VolumeBurstStrategy
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -580,13 +583,15 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     )
     # strategy-wave1 (2026-06-27): fx_range_fade un-registered (−1) and the 4
     # verified 1D survivors added (+4) on top of the prior 12 → 15, each with a
-    # distinct correlation_group_id.
-    assert len(seen) == 15, f"correlation groups not unique: {seen}"
+    # distinct correlation_group_id. volume_burst un-registered 2026-06-27
+    # (#61 — live-churn KILL, net-negative scalp expectancy): 15 → 14.
+    assert len(seen) == 14, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
     # strategy-wave1 (2026-06-27): was 12; −fx_range_fade +4 verified survivors = 15.
-    assert len(STRATEGY_REGISTRY) == 15
+    # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL): 15 → 14.
+    assert len(STRATEGY_REGISTRY) == 14
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

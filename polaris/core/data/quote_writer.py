@@ -290,6 +290,12 @@ class QuoteTickWriter:
         ring = self._ring.get(instrument_id)
         if not ring:
             return []
+        # Snapshot the deque atomically before iterating (STALL fix #74): the
+        # Layer-0 focus refresh now reads this from a worker thread (offloaded
+        # ``build_technical_lean``) while WS callbacks ``append`` on the loop thread.
+        # ``list(deque)`` is a single C-level copy (atomic under the GIL), so the
+        # comprehension below can never hit "deque mutated during iteration".
+        snapshot = list(ring)
         return [
             TickSample(
                 ts=t.ts,
@@ -306,7 +312,7 @@ class QuoteTickWriter:
                     else ((t.ask - t.bid) / t.mid * 1e4 if t.mid > 0 else 0.0)
                 ),
             )
-            for t in ring
+            for t in snapshot
         ]
 
     def activation_metrics(self, instrument_id: str) -> dict[str, float | int] | None:

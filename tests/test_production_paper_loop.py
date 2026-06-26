@@ -9,6 +9,7 @@ Spec source: Polaris Day 8 task brief (vault/_NOW.md → Day 8 wire).
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -165,6 +166,93 @@ async def test_l0_producer_10min_capital_refresh(memdb: sqlite3.Connection) -> N
         os.environ.pop(k, None)
     active = await refresh_capital_universe_once(memdb)
     assert active == 0
+
+
+# ---------------------------------------------------------------------------
+# A2 — STALL fix: focus refresh is OFFLOADED off the event loop (#74)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_l0_producer_offloads_focus_refresh_off_event_loop() -> None:
+    """The synchronous, multi-second ``refresh_focus_watchlist`` (judge + executemany
+    persist) ran INLINE on the single event loop, starving the tick task → live
+    STALL (gap 6-33s, "shared-conn blocker?"). It must now run via
+    ``asyncio.to_thread`` so the event loop keeps cycling while focus recomputes.
+
+    Pin: the offloaded call runs on a NON-event-loop thread (proves it is off the
+    loop), AND it receives a DEDICATED ``focus_conn`` (NOT the main ``conn``) — a
+    second sqlite3.Connection must never be shared across threads with the loop's
+    own connection. flow_not_block / 9-stack untouched: this changes only WHERE the
+    refresh runs, never WHETHER a symbol is watched or how it is sized."""
+    import threading
+
+    from polaris.scripts import production_paper_loop as ppl
+    from polaris.scripts._production_state import ProdLoopState
+
+    loop_thread_id = threading.get_ident()
+    seen: dict[str, Any] = {}
+
+    def _fake_refresh(passed_conn: object, **kwargs: object) -> int:
+        seen["thread_id"] = threading.get_ident()
+        seen["conn"] = passed_conn
+        return 0
+
+    main_conn = object()  # sentinel — the loop-owned connection
+    focus_conn = object()  # sentinel — the dedicated focus connection
+    state = ProdLoopState()
+    stop_evt = asyncio.Event()
+    stop_evt.set()  # one immediate refresh, then exit before the 15s sleep loop
+
+    with patch.object(ppl, "refresh_focus_watchlist", new=_fake_refresh), \
+        patch.object(ppl, "refresh_okx_universe_once", new=AsyncMock(return_value=0)), \
+        patch.object(ppl, "refresh_capital_universe_once", new=AsyncMock(return_value=0)), \
+        patch.object(ppl, "refresh_alpaca_universe_once", new=AsyncMock(return_value=0)):
+        await ppl._layer0_producer(
+            main_conn,  # type: ignore[arg-type]
+            state=state,
+            stop_evt=stop_evt,
+            focus_conn=focus_conn,  # type: ignore[arg-type]
+        )
+
+    # The refresh ran on a worker thread, NOT the event-loop thread (off the loop).
+    assert seen["thread_id"] != loop_thread_id, (
+        "refresh_focus_watchlist must run via asyncio.to_thread (off the event "
+        "loop), not inline — inline blocking starves the tick task → STALL"
+    )
+    # It used the DEDICATED focus connection, never the loop-owned main conn
+    # (a sqlite3.Connection must not be touched from two threads at once).
+    assert seen["conn"] is focus_conn
+    assert seen["conn"] is not main_conn
+
+
+@pytest.mark.asyncio
+async def test_l0_producer_focus_error_does_not_kill_task() -> None:
+    """2nd-defense (#74): an UNHANDLED error in the offloaded focus refresh must NOT
+    propagate out of the Layer-0 producer (a dead layer0_task → frozen focus →
+    stale watchlist → trade degrade). The producer logs + continues; this proves the
+    initial refresh raising does not crash ``_layer0_producer`` (flow_not_block)."""
+    from polaris.scripts import production_paper_loop as ppl
+    from polaris.scripts._production_state import ProdLoopState
+
+    def _boom(passed_conn: object, **kwargs: object) -> int:
+        raise RuntimeError("focus refresh exploded")
+
+    state = ProdLoopState()
+    stop_evt = asyncio.Event()
+    stop_evt.set()  # one immediate (exploding) refresh, then exit
+
+    with patch.object(ppl, "refresh_focus_watchlist", new=_boom), \
+        patch.object(ppl, "refresh_okx_universe_once", new=AsyncMock(return_value=0)), \
+        patch.object(ppl, "refresh_capital_universe_once", new=AsyncMock(return_value=0)), \
+        patch.object(ppl, "refresh_alpaca_universe_once", new=AsyncMock(return_value=0)):
+        # Must return cleanly despite the refresh raising — no exception escapes.
+        await ppl._layer0_producer(
+            object(),  # type: ignore[arg-type]
+            state=state,
+            stop_evt=stop_evt,
+            focus_conn=object(),  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------

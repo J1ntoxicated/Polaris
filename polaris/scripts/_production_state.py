@@ -237,6 +237,13 @@ class ProdLoopState:
     probe_conn: Any = None
     probe_bus: Any = None
     probe_engine: Any = None
+    # STALL fix (#74) — DEDICATED probes.sqlite handle for the OFFLOADED Layer-0
+    # focus refresh (``refresh_focus_watchlist`` runs on a worker thread). The
+    # focus-judgment telemetry write must NOT touch ``probe_conn`` (the main-thread
+    # tick/recalc/close path also writes it) — a sqlite3.Connection is unsafe to
+    # share across threads. None until boot opens it (smoke/replay leave it None →
+    # the focus-judgment sidecar write is a no-op, behavior-identical).
+    focus_probe_conn: Any = None
     # Count of observe-mode probe evaluations logged (telemetry only; never a
     # throttle / size dampen / entry block).
     probe_observe_evals: int = 0

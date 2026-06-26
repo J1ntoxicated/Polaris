@@ -85,7 +85,7 @@ from polaris.scripts.reconcile_orphans import (
     flatten_venue_eod,
     reconcile_venue_orphans,
 )
-from polaris.storage.schema import init_db
+from polaris.storage.schema import connect, init_db
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
@@ -192,26 +192,39 @@ def _env_int(name: str, default: int) -> int:
 
 
 async def _layer0_producer(
-    conn: sqlite3.Connection, *, state: ProdLoopState, stop_evt: asyncio.Event,
+    conn: sqlite3.Connection,
+    *,
+    state: ProdLoopState,
+    stop_evt: asyncio.Event,
+    focus_conn: sqlite3.Connection | None = None,
 ) -> None:
     """OKX (5min) + Capital (10min) + Alpaca (10min) refresh + focus recompute.
 
     Alpaca (Track C / US-equity) is an added producer; OKX/Capital cadence and
     behavior are unchanged. ``refresh_alpaca_universe_once`` is smoke-safe (no
     creds → 0 active, no rows persisted).
+
+    STALL fix (#74): ``refresh_focus_watchlist`` is a PURE-SYNC, multi-second call
+    (EntranceJudge over every active row + a large ``persist_focus`` executemany).
+    Running it INLINE on this single event loop froze the loop for 6-33s every 15s
+    → the tick task was starved (live: "[tick-engine] STALL gap=7.31s … shared-conn
+    blocker?"). It is now OFFLOADED via ``asyncio.to_thread`` so the loop keeps
+    cycling. The offloaded call uses a DEDICATED ``focus_conn`` (NOT the loop-owned
+    ``conn``): a single ``sqlite3.Connection`` must never be touched from two
+    threads at once, and ``_layer0_producer`` awaits each refresh before the next,
+    so only ONE worker ever touches ``focus_conn`` at a time (WAL: 1-writer safe).
+    The async universe refreshes (httpx I/O) stay on the loop (they already yield).
+    flow_not_block / 9-stack untouched: only WHERE focus runs changes, never which
+    symbol is watched or how it is sized.
     """
+    fconn = focus_conn if focus_conn is not None else conn
     await refresh_okx_universe_once(conn)
     state.universe_refreshes += 1
     await refresh_capital_universe_once(conn)
     state.capital_refreshes += 1
     await refresh_alpaca_universe_once(conn)
     state.alpaca_refreshes += 1
-    refresh_focus_watchlist(
-        conn,
-        probe_conn=getattr(state, "probe_conn", None),
-        quote_writer=getattr(state, "quote_writer", None),
-        altdata_cache=getattr(state, "altdata_cache", None),
-    )
+    await _refresh_focus_offloaded(fconn, state)
     last_okx = time.monotonic()
     last_capital = time.monotonic()
     last_alpaca = time.monotonic()
@@ -230,11 +243,37 @@ async def _layer0_producer(
             await refresh_alpaca_universe_once(conn)
             state.alpaca_refreshes += 1
             last_alpaca = now
-        refresh_focus_watchlist(
-            conn,
-            probe_conn=getattr(state, "probe_conn", None),
+        await _refresh_focus_offloaded(fconn, state)
+
+
+async def _refresh_focus_offloaded(
+    focus_conn: sqlite3.Connection, state: ProdLoopState
+) -> None:
+    """Run the blocking focus refresh on a worker thread (STALL-safe, #74).
+
+    Uses the DEDICATED ``focus_conn`` and the DEDICATED ``focus_probe_conn`` sidecar
+    (both thread-confined to this single offloaded path) so no ``sqlite3.Connection``
+    is ever shared with the live tick loop. ``quote_writer`` / ``altdata_cache`` are
+    in-mem read-only here (lean inputs); their reads are snapshot-safe (atomic
+    ``list(...)`` copies — #74) + fail-soft.
+
+    2nd-defense (#74): the offloaded body is wrapped so an UNHANDLED error in the
+    worker can never propagate out of ``layer0_task`` and kill it permanently — a
+    dead Layer-0 task would freeze focus → stale watchlist → trade degrade. On error
+    we log + continue; the next 15s tick retries (flow_not_block: never a hard stop).
+    """
+    try:
+        await asyncio.to_thread(
+            refresh_focus_watchlist,
+            focus_conn,
+            probe_conn=getattr(state, "focus_probe_conn", None),
             quote_writer=getattr(state, "quote_writer", None),
             altdata_cache=getattr(state, "altdata_cache", None),
+        )
+    except Exception:  # noqa: BLE001 — must NOT kill layer0_task (focus must survive)
+        logger.exception(
+            "[layer0] offloaded focus refresh failed — skipping this cycle, "
+            "retrying next tick (focus task stays alive)"
         )
 
 
@@ -590,8 +629,14 @@ async def run_production_paper_loop(
     except Exception:
         logger.exception("[startup] resume_stale_permanent_halts failed (non-fatal)")
     stop_evt = asyncio.Event()
+    # STALL fix (#74) — DEDICATED live-DB handle for the OFFLOADED focus refresh.
+    # The Layer-0 producer runs ``refresh_focus_watchlist`` on a worker thread
+    # (asyncio.to_thread); it must use its OWN connection so the loop-owned ``conn``
+    # is never touched from two threads at once. WAL (set by ``connect``) is
+    # 1-writer/N-reader safe, and only one offloaded refresh runs at a time.
+    focus_conn = connect(target_db)
     layer0_task = asyncio.create_task(
-        _layer0_producer(conn, state=state, stop_evt=stop_evt)
+        _layer0_producer(conn, state=state, stop_evt=stop_evt, focus_conn=focus_conn)
     )
 
     # WAL hygiene, from process start. The bot's writes kept SQLite's
@@ -686,6 +731,18 @@ async def run_production_paper_loop(
     # observe-mode probe bus/engine. Fail-open: a wiring failure leaves the attach
     # a no-op (the live exit is provably byte-identical). OBSERVE-ONLY this slice.
     wire_probe_sidecar(state, probe_db_path=str(target_db.parent / "probes.sqlite"))
+    # STALL fix (#74) — DEDICATED probes.sqlite handle for the OFFLOADED focus
+    # judgment telemetry. The offloaded ``refresh_focus_watchlist`` writes the
+    # entrance-judgment sidecar; it must NOT reuse ``state.probe_conn`` (the
+    # main-thread G6/close path also writes it) — separate connection per thread.
+    # Fail-open: any error leaves it None (the focus-judgment write becomes a no-op).
+    try:
+        state.focus_probe_conn = connect(target_db.parent / "probes.sqlite")
+    except Exception:  # noqa: BLE001 — telemetry sidecar is optional, never halts
+        state.focus_probe_conn = None
+        logger.warning(
+            "[probe] focus-judgment sidecar conn failed — focus telemetry off"
+        )
     ws_tasks, ws_clients = start_ws_producers(
         conn, writer=quote_writer, stop_evt=stop_evt,
         capital_session=capital_session,
@@ -936,6 +993,10 @@ async def run_production_paper_loop(
         ticker_ground_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await layer0_task
+        # STALL fix (#74) — the offloaded focus refresh has ended with layer0_task;
+        # close its dedicated live-DB handle (no worker thread touches it now).
+        with contextlib.suppress(Exception):
+            focus_conn.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -957,6 +1018,10 @@ async def run_production_paper_loop(
         if state.probe_conn is not None:
             with contextlib.suppress(Exception):
                 state.probe_conn.close()
+        # STALL fix (#74) — close the dedicated focus-judgment sidecar handle.
+        if state.focus_probe_conn is not None:
+            with contextlib.suppress(Exception):
+                state.focus_probe_conn.close()
         if okx_adapter is not None:
             await okx_adapter.aclose()
         if alpaca_adapter is not None:

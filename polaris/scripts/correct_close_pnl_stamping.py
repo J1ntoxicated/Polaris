@@ -35,6 +35,14 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polaris.scripts.correct_close_pnl_orphans import (
+    analyze_capped_excursions,
+    analyze_cross_instrument_orphans,
+    apply_excursion_corrections,
+    apply_orphan_corrections,
+    print_orphan_excursion,
+)
+
 # Single full-close gate: one close fill covering >= this fraction of the
 # entry qty keeps its stamped pnl_usd byte-identical (runtime parity with
 # 1 - _CLOSE_FULL_FILL_EPS). The quote-notional twin catches sim-shaped full
@@ -382,10 +390,14 @@ def run(
     try:
         reports = analyze(conn, tol_usd=tol_usd)
         dup_fanout = audit_dup_close_fanout(conn)
+        orphans = analyze_cross_instrument_orphans(conn, tol_usd=tol_usd)
+        excursions = analyze_capped_excursions(conn)
         _print_report(reports, dup_fanout)
+        print_orphan_excursion(orphans, excursions)
         n_fixes = sum(len(r.fixes) for r in reports)
         if not apply:
-            print(f"\n[dry-run] {n_fixes} fill corrections planned across "
+            print(f"\n[dry-run] {n_fixes} fill corrections + {len(orphans)} "
+                  f"orphan + {len(excursions)} mfe_r corrections planned across "
                   f"{sum(1 for r in reports if r.fixes)} positions. "
                   f"Re-run with --apply (bot stopped).")
             return 0
@@ -394,12 +406,20 @@ def run(
             conn, reports, fix_status=fix_status, backup_path=backup_path,
             now_ts=now_ts,
         )
+        n_orphan = apply_orphan_corrections(
+            conn, orphans, backup_path=backup_path, now_ts=now_ts,
+        )
+        n_excursion = apply_excursion_corrections(
+            conn, excursions, backup_path=backup_path, now_ts=now_ts,
+        )
         # Run-level audit row.
         summary = json.dumps(
             {
                 "positions_corrected": n_pos,
                 "fills_corrected": n_fixes,
                 "status_fixed": n_status,
+                "orphan_fills_corrected": n_orphan,
+                "mfe_r_rows_recomputed": n_excursion,
                 "venue_delta": {
                     v: round(sum(
                         r.corrected_sum - r.stamped_sum
@@ -419,7 +439,8 @@ def run(
         )
         conn.commit()
         print(f"\n[apply] corrected {n_fixes} fills across {n_pos} positions; "
-              f"status fixed: {n_status}")
+              f"status fixed: {n_status}; orphan fills: {n_orphan}; "
+              f"mfe_r rows: {n_excursion}")
         return 0
     finally:
         conn.close()

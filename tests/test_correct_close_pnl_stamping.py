@@ -26,6 +26,8 @@ import pytest
 
 from polaris.scripts.correct_close_pnl_stamping import (
     analyze,
+    analyze_capped_excursions,
+    analyze_cross_instrument_orphans,
     audit_dup_close_fanout,
     main,
 )
@@ -123,6 +125,71 @@ def _seed_fixture(conn: sqlite3.Connection) -> None:
             "VALUES (?, 'r1', 'p_cap', 'p_cap', 8, 'P0', 'reflect', ?)",
             (f"ge_{i}", 3000 + i),
         )
+    # 6) CROSS-INSTRUMENT ORPHAN (the live NL25/US100 corruption class): a
+    # close fill whose instrument_id != its contribution_id position's
+    # instrument. Pre-instrument-unique-id code cross-matched a FOREIGN
+    # instrument's entry → an exploded pnl_usd (+4794.46) + a fallback size_usd
+    # (3.1). The position row carries US100; the orphan close fill is NL25 and
+    # shares its order_id with the NL25 SHORT entry, so the true slice pnl is
+    # recoverable from that same-instrument same-order open fill.
+    _pos(conn, pid="p_us100", venue="capital", symbol="US100", side="short",
+         qty=0.0, status="closed")
+    # US100's own legit entry (kept clean — must stay untouched).
+    _fill(conn, fill_id="us100_e", venue="capital", symbol="US100",
+          pid="p_us100", is_close=False, base_qty=0.167, fill_price=29780.0,
+          size_usd=4973.26, pnl_usd=0.0, ts_ms=1_500_000)
+    # The NL25 SHORT entry sharing order_id ord0673 (size_usd carries quote→USD).
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+        " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+        "VALUES ('nl25_open', 'capital', 'capital:NL25', 's', 'sell', "
+        " 377.7172, 1070.28, 0, 0, 1600000, 'ord0673', 'p_us100', 0.0, 0, "
+        " 0.31, 377.7172, 'filled')",
+    )
+    # The orphan CLOSE: instrument_id=NL25 but contribution_id=US100 position;
+    # pnl_usd exploded, size_usd/quote_qty are the cache-miss fallback (3.1).
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+        " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+        "VALUES ('nl25_orphan', 'capital', 'capital:NL25', 's', 'buy', "
+        " 3.1, 1070.63, 0, 0, 1700000, 'ord0673', 'p_us100', 4794.46, 1, "
+        " 0.31, 3.1, 'closed')",
+    )
+    # 7) mfe_r CAPPED on the same US100 position — an impossible 100.0
+    # telemetry-cap value from the pre-floor excursion code, recomputable from
+    # the row's own entry_atr_pct + peak/trough with the CURRENT excursion math.
+    conn.execute(
+        "UPDATE positions SET peak_price = 29780.0, trough_price = 29191.6, "
+        " entry_atr_pct = 0.000714813034193443, mfe_r = 100.0, mae_r = 0.0 "
+        "WHERE position_id = 'p_us100'",
+    )
+    # 8) LONG-trade cross-instrument orphan — the sign-source guard. The open is
+    # a 'buy' (long) sharing order_id ordLONG; a winning long close ('sell' at a
+    # HIGHER price) must yield a POSITIVE corrected pnl. Reading the close fill's
+    # side ('sell') would mis-key the short branch and sign-invert it.
+    _pos(conn, pid="p_btc", venue="capital", symbol="GER40", side="long",
+         qty=0.0, status="closed")
+    _fill(conn, fill_id="ger40_e", venue="capital", symbol="GER40",
+          pid="p_btc", is_close=False, base_qty=1.0, fill_price=18000.0,
+          size_usd=18000.0, pnl_usd=0.0, ts_ms=1_550_000)
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+        " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+        "VALUES ('jpn225_open', 'capital', 'capital:JPN225', 's', 'buy', "
+        " 22000.0, 22000.0, 0, 0, 1560000, 'ordLONG', 'p_btc', 0.0, 0, "
+        " 1.0, 22000.0, 'filled')",
+    )
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
+        " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
+        "VALUES ('jpn225_orphan', 'capital', 'capital:JPN225', 's', 'sell', "
+        " 5.0, 22330.0, 0, 0, 1570000, 'ordLONG', 'p_btc', 9999.0, 1, "
+        " 1.0, 5.0, 'closed')",
+    )
     conn.commit()
 
 
@@ -274,3 +341,134 @@ def test_dup_close_fanout_audit_uses_position_id(db_path: Path) -> None:
     assert [(r[0], r[1]) for r in rows] == [("p_cap", 2)]
     # The polluted cell bucket is named for the follow-up rebuild call.
     assert rows[0][3] == ["capital:s:EURUSD:chop"]
+
+
+# True NL25 slice pnl in USD: SHORT, the SAME formula the runtime close path
+# uses — (Δpx / entry_px) × entry_size_usd × frac. entry_size_usd (377.7172)
+# carries the EUR→USD conversion, so this is the FX-correct USD pnl
+# (≈ -0.1235), NOT the raw EUR-quote Δpx×qty (-0.1085).
+NL25_TRUE_PNL = ((1070.28 - 1070.63) / 1070.28) * 377.7172  # ≈ -0.12352
+# True NL25 close size_usd: same USD-per-unit as the entry (377.7172 / 0.31).
+NL25_TRUE_SIZE = (377.7172 / 0.31) * 0.31  # = 377.7172 (qty equal → entry size)
+# True LONG-orphan pnl: open buy @22000, close sell @22330 → long WIN (positive).
+JPN225_TRUE_PNL = ((22330.0 - 22000.0) / 22000.0) * 22000.0  # = +330.0
+JPN225_TRUE_SIZE = 22000.0  # entry USD-per-unit × close qty (qty equal)
+# US100 short MFE recompute: (entry - trough) / (entry × atr_pct × 2).
+US100_ENTRY = 29780.0
+US100_ATR_USD = max(US100_ENTRY * 0.000714813034193443 * 2.0, US100_ENTRY * 1e-4)
+US100_TRUE_MFE = (US100_ENTRY - 29191.6) / US100_ATR_USD  # ≈ 13.82
+
+
+def test_cross_instrument_orphan_detected_and_recomputed(db_path: Path) -> None:
+    """A close fill whose instrument_id != its position's instrument is the
+    live NL25/US100 corruption — the instrument-scoped slice path is blind to
+    it. analyze() must surface it as an orphan fix with the true same-order
+    same-instrument slice pnl + entry-consistent size_usd."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        orphans = {o.fill_id: o for o in
+                   analyze_cross_instrument_orphans(conn, tol_usd=0.01)}
+    finally:
+        conn.close()
+    assert set(orphans) == {"nl25_orphan", "jpn225_orphan"}
+    o = orphans["nl25_orphan"]
+    assert o.stamped_pnl == pytest.approx(4794.46)
+    assert o.corrected_pnl == pytest.approx(NL25_TRUE_PNL, abs=1e-6)
+    assert o.corrected_size_usd == pytest.approx(NL25_TRUE_SIZE, rel=1e-9)
+    assert o.stamped_size_usd == pytest.approx(3.1)
+    # LONG orphan — side read from the OPEN fill (buy→long): a winning long
+    # close yields a POSITIVE pnl. Reading the close side ('sell') would invert it.
+    lo = orphans["jpn225_orphan"]
+    assert lo.corrected_pnl == pytest.approx(JPN225_TRUE_PNL, rel=1e-9)
+    assert lo.corrected_pnl > 0.0  # the sign-source guard
+    assert lo.corrected_size_usd == pytest.approx(JPN225_TRUE_SIZE, rel=1e-9)
+
+
+def test_apply_corrects_orphan_and_leaves_clean_fills(db_path: Path) -> None:
+    rc = main(["--db", str(db_path), "--apply", "--fix-status"])
+    assert rc == 0
+    conn = sqlite3.connect(db_path)
+    try:
+        # Orphan pnl + size_usd + quote_qty corrected to the true NL25 short slice.
+        row = conn.execute(
+            "SELECT pnl_usd, size_usd, quote_qty FROM fills "
+            "WHERE fill_id = 'nl25_orphan'"
+        ).fetchone()
+        assert row[0] == pytest.approx(NL25_TRUE_PNL, abs=1e-6)
+        assert row[1] == pytest.approx(NL25_TRUE_SIZE, rel=1e-9)
+        assert row[2] == pytest.approx(NL25_TRUE_SIZE, rel=1e-9)
+        # The LONG orphan is sign-correct (positive) + size_usd reset.
+        lrow = conn.execute(
+            "SELECT pnl_usd, size_usd FROM fills WHERE fill_id = 'jpn225_orphan'"
+        ).fetchone()
+        assert lrow[0] == pytest.approx(JPN225_TRUE_PNL, rel=1e-9)
+        assert lrow[1] == pytest.approx(JPN225_TRUE_SIZE, rel=1e-9)
+        # The clean US100 entry fill is untouched.
+        assert _pnl(conn, "us100_e") == 0.0
+        # The NL25 open fill is untouched (only the close was corrupt).
+        assert _pnl(conn, "nl25_open") == 0.0
+        # One orphan audit row per corrected fill.
+        n = conn.execute(
+            "SELECT COUNT(*) FROM risk_events "
+            "WHERE event_type = 'pnl_orphan_correction'"
+        ).fetchone()[0]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_apply_recomputes_capped_mfe_r(db_path: Path) -> None:
+    """A stored mfe_r/mae_r at the ±100 telemetry cap is the pre-floor
+    excursion artefact — recompute from the row's own entry_atr_pct +
+    peak/trough with the current excursion math."""
+    rc = main(["--db", str(db_path), "--apply", "--fix-status"])
+    assert rc == 0
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT mfe_r, mae_r FROM positions WHERE position_id = 'p_us100'"
+        ).fetchone()
+        assert row[0] == pytest.approx(US100_TRUE_MFE, abs=1e-6)
+        assert row[0] < 100.0  # no longer the impossible cap
+        assert row[1] == pytest.approx(0.0, abs=1e-9)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM risk_events "
+            "WHERE event_type = 'mfe_r_cap_recompute'"
+        ).fetchone()[0]
+        assert n == 1
+    finally:
+        conn.close()
+
+
+def test_orphan_and_mfe_correction_idempotent(db_path: Path) -> None:
+    assert main(["--db", str(db_path), "--apply", "--fix-status"]) == 0
+    conn = sqlite3.connect(db_path)
+    snap_fills = conn.execute(
+        "SELECT fill_id, pnl_usd, size_usd FROM fills ORDER BY fill_id"
+    ).fetchall()
+    snap_pos = conn.execute(
+        "SELECT position_id, mfe_r FROM positions ORDER BY position_id"
+    ).fetchall()
+    conn.close()
+    assert main(["--db", str(db_path), "--apply", "--fix-status"]) == 0
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT fill_id, pnl_usd, size_usd FROM fills ORDER BY fill_id"
+        ).fetchall() == snap_fills
+        assert conn.execute(
+            "SELECT position_id, mfe_r FROM positions ORDER BY position_id"
+        ).fetchall() == snap_pos
+        # No further orphan/mfe corrections planned.
+        assert analyze_cross_instrument_orphans(conn, tol_usd=0.01) == []
+        assert analyze_capped_excursions(conn) == []
+    finally:
+        conn.close()
+
+
+def test_dry_run_byte_identical_with_orphan_and_cap(db_path: Path) -> None:
+    """The orphan + mfe_r additions must not break the dry-run no-write
+    invariant (the whole fixture now contains both corruption classes)."""
+    before = _sha(db_path)
+    assert main(["--db", str(db_path)]) == 0
+    assert _sha(db_path) == before

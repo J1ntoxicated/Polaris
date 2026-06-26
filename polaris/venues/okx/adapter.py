@@ -48,6 +48,7 @@ import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id, okx_candle_to_bar
 from polaris.core.data.schema import Bar
+from polaris.core.ratelimit import AsyncTokenBucket
 from polaris.venues.okx.constraint_translator import (
     InstrumentConstraint,
     clamp_up_to_min,
@@ -93,6 +94,39 @@ DEFAULT_SLIPPAGE_BPS: Final[float] = 5.0  # 0.05 %, R2 aggressive cap
 ORDER_RETRY_MAX: Final[int] = 2  # extra attempts after the initial POST
 ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
 
+# Candles ("Too Many" storm root-cause fix). OKX market-data is capped at
+# 20 req / 2 s per IP; the yfinance-PRIMARY exchange-fallback fan-out used to
+# exceed that with no client-side pacing, producing the live 18k× 429 storm.
+# A module-level token bucket PACES every candles GET to stay under the cap
+# (flow_not_block: the call WAITS for a token, it is never rejected — the live
+# entry/size/exit price rides the WS quote path, untouched). A residual 429 is
+# then absorbed by a bounded backoff (honouring Retry-After) so the bar still
+# flows. The bucket is shared per-process: every fetch_okx_bars call paces
+# through the SAME limiter, so the concurrent gather cannot burst past the cap.
+CANDLES_RATE: Final[int] = 20  # tokens per CANDLES_PER_SEC window
+CANDLES_PER_SEC: Final[float] = 2.0  # OKX market-data window
+CANDLES_RETRY_MAX: Final[int] = 3  # extra attempts after a 429
+CANDLES_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s, 2.0s
+_CANDLES_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
+# Bound the in-bucket pacing wait so a fully drained bucket cannot stall a
+# bar-ingest coroutine indefinitely (defers to the next cadence instead).
+CANDLES_ACQUIRE_TIMEOUT_SEC: Final[float] = 5.0
+
+_CANDLES_BUCKET: AsyncTokenBucket = AsyncTokenBucket(
+    rate=CANDLES_RATE, per_sec=CANDLES_PER_SEC
+)
+
+
+def _candles_retry_after_sec(resp: httpx.Response, fallback: float) -> float:
+    """Backoff seconds for a candles 429 — honour ``Retry-After`` if sane."""
+    raw = resp.headers.get("Retry-After", "")
+    if raw:
+        try:
+            return min(_CANDLES_RETRY_MAX_DELAY_SEC, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return min(_CANDLES_RETRY_MAX_DELAY_SEC, fallback)
+
 
 async def _async_sleep(delay: float) -> None:
     """Indirection so tests can monkeypatch the backoff sleep to a no-op."""
@@ -129,17 +163,21 @@ async def fetch_okx_bars(
     asset_class: str = "crypto",
     client: httpx.AsyncClient | None = None,
 ) -> list[Bar]:
-    """Fetch up to ``limit`` ``bar_interval`` candles from OKX SPOT (no auth)."""
+    """Fetch up to ``limit`` ``bar_interval`` candles from OKX SPOT (no auth).
+
+    PACED + 429-resilient (the OKX "Too Many" storm fix): every request first
+    takes a token from the shared candles bucket (≤ 20 / 2 s per IP), so the
+    bar-ingest fan-out cannot burst past the cap. A residual 429 is retried with
+    bounded backoff (honouring Retry-After). Exhausting the retries re-raises so
+    the caller degrades to ``[]`` (flow_not_block — the live price path is
+    untouched; the symbol simply has no fresh history this cadence).
+    """
     own = client is None
     cli = client or httpx.AsyncClient(base_url=base_url, timeout=REST_TIMEOUT_SEC)
     try:
-        resp = await cli.get(
-            OKX_CANDLES_PATH,
-            params={"instId": inst_id, "bar": bar_interval, "limit": str(limit)},
-            headers=DEMO_HEADERS,
+        body = await _get_candles_with_pacing(
+            cli, inst_id=inst_id, bar_interval=bar_interval, limit=limit
         )
-        resp.raise_for_status()
-        body = resp.json()
     finally:
         if own:
             await cli.aclose()
@@ -168,6 +206,44 @@ async def fetch_okx_bars(
         len(out),
     )
     return out
+
+
+async def _get_candles_with_pacing(
+    cli: httpx.AsyncClient, *, inst_id: str, bar_interval: str, limit: int
+) -> dict[str, Any]:
+    """GET candles, paced by the token bucket + bounded 429 backoff.
+
+    Returns the parsed JSON body. A non-429 HTTP error or an exhausted-429 path
+    re-raises (caller degrades to ``[]``). The token bucket ``acquire`` WAITS for
+    a slot (pacing, not rejection). The bounded ``CANDLES_ACQUIRE_TIMEOUT_SEC``
+    caps that wait so a saturated bucket cannot stall the ingest coroutine past
+    one tick — if the wait elapses the GET proceeds token-less (a SOFT cap, not a
+    drop: flow_not_block keeps the bar flowing). The residual 429 backoff below is
+    the safety net for that rare over-cap pass.
+    """
+    params = {"instId": inst_id, "bar": bar_interval, "limit": str(limit)}
+    for attempt in range(CANDLES_RETRY_MAX + 1):
+        # Return value intentionally unused: a False (timed-out) acquire still
+        # proceeds (soft cap) rather than dropping the bar — see docstring.
+        await _CANDLES_BUCKET.acquire(timeout=CANDLES_ACQUIRE_TIMEOUT_SEC)
+        resp = await cli.get(OKX_CANDLES_PATH, params=params, headers=DEMO_HEADERS)
+        if resp.status_code == 429 and attempt < CANDLES_RETRY_MAX:
+            delay = _candles_retry_after_sec(
+                resp, CANDLES_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+            )
+            logger.info(
+                "[okx] candles 429 %s/%s — backoff %.2fs (retry %d/%d)",
+                inst_id, bar_interval, delay, attempt + 1, CANDLES_RETRY_MAX,
+            )
+            await _async_sleep(delay)
+            continue
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise RuntimeError(f"OKX candles unexpected payload: {type(body).__name__}")
+        return body
+    # Unreachable: the final attempt either returns or raise_for_status raises.
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------

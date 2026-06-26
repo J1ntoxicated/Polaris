@@ -672,6 +672,68 @@ async def test_data_host_429_then_success_retries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_data_host_paces_through_token_bucket() -> None:
+    """Data-host reads acquire a token before the GET (pre-throttle pacing).
+
+    ROOT-CAUSE half: the per-symbol /bars fan-out fired ~6× the 200 req/min cap,
+    so backoff alone retried INTO the same overage (17k× 429). The data bucket
+    PACES every data GET so the burst stays under the cap (flow_not_block — the
+    call waits for a token, never rejected).
+    """
+    events: list[str] = []
+
+    class _StubBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            events.append("acquire")
+            return True
+
+    def responder(req: httpx.Request) -> Any:
+        events.append("get")
+        return {"bars": [{"t": "2024-01-02T05:00:00Z", "o": 1, "h": 2, "l": 1,
+                          "c": 2, "v": 100}]}
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    adapter._data_bucket = _StubBucket()  # type: ignore[assignment]
+    try:
+        bars = await adapter.fetch_bars("AAPL", timeframe="1Day", start="2024-01-01")
+    finally:
+        await data_client.aclose()
+    assert len(bars) == 1
+    assert events == ["acquire", "get"]  # paced once, before the network GET
+
+
+@pytest.mark.asyncio
+async def test_trade_host_does_not_pace_through_data_bucket() -> None:
+    """A trade-host read NEVER touches the data bucket (orders are never paced).
+
+    Aggressive bias: the order path must not be slowed by the data limiter —
+    pacing is data-fan-out only. A drained data bucket would otherwise stall an
+    order; this proves the order path bypasses it entirely.
+    """
+    acquired = {"n": 0}
+
+    class _StubBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            acquired["n"] += 1
+            return True
+
+    def responder(req: httpx.Request) -> Any:
+        return {"id": "1", "status": "filled"}
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url=ALPACA_PAPER_BASE)
+    adapter = _adapter(client)
+    adapter._data_bucket = _StubBucket()  # type: ignore[assignment]
+    try:
+        await adapter.request_json("GET", "/v2/account", on_data_host=False)
+    finally:
+        await client.aclose()
+    assert acquired["n"] == 0  # trade host never paced
+
+
+@pytest.mark.asyncio
 async def test_trade_host_429_not_retried() -> None:
     """A 429 on a TRADE-host read raises immediately (only data host is retried)."""
     state = {"get": 0}

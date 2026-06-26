@@ -1036,3 +1036,167 @@ async def test_cancel_algo_order_posts_list() -> None:
     assert isinstance(sent, list)
     assert sent[0]["algoId"] == "algo-7"
     assert sent[0]["instId"] == "ETH-USDT"
+
+
+# ---------------------------------------------------------------------------
+# Candles 429 pacing + backoff (the OKX "Too Many" storm root-cause fix)
+# ---------------------------------------------------------------------------
+
+
+def _candles_ok(rows: list[list[str]] | None = None) -> httpx.Response:
+    data = rows if rows is not None else [
+        ["1700000000000", "100", "110", "90", "105", "12", "1200"],
+    ]
+    return httpx.Response(200, json={"code": "0", "data": data})
+
+
+@pytest.fixture
+def _reset_candles_bucket() -> Any:
+    """Give each test a fresh, full candles bucket (no cross-test drain)."""
+    import polaris.venues.okx.adapter as okx_adapter
+    from polaris.core.ratelimit import AsyncTokenBucket
+
+    prev = okx_adapter._CANDLES_BUCKET
+    okx_adapter._CANDLES_BUCKET = AsyncTokenBucket(
+        rate=okx_adapter.CANDLES_RATE, per_sec=okx_adapter.CANDLES_PER_SEC
+    )
+    yield
+    okx_adapter._CANDLES_BUCKET = prev
+
+
+@pytest.mark.asyncio
+async def test_candles_429_then_success_retries(
+    monkeypatch: pytest.MonkeyPatch, _reset_candles_bucket: Any
+) -> None:
+    """A 429 on candles is absorbed by bounded backoff; the retry succeeds.
+
+    ROOT CAUSE of the OKX storm: a 429 used to raise straight through to the
+    bar-ingest caller, which dropped the bar with no retry. Now fetch_okx_bars
+    retries with backoff (honouring Retry-After) so the bar flows.
+    """
+    import polaris.venues.okx.adapter as okx_adapter
+    from polaris.venues.okx.adapter import fetch_okx_bars
+
+    sleeps: list[float] = []
+
+    async def _capture_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(okx_adapter, "_async_sleep", _capture_sleep)
+
+    seq = [
+        httpx.Response(429, headers={"Retry-After": "0.7"}, text="Too Many Requests"),
+        _candles_ok(),
+    ]
+
+    def responder(req: httpx.Request) -> Any:
+        return seq.pop(0)
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    try:
+        bars = await fetch_okx_bars("BTC-USDT", bar_interval="1D", limit=240, client=client)
+    finally:
+        await client.aclose()
+    assert len(bars) == 1  # the retry delivered the bar
+    assert sleeps == [0.7]  # honoured Retry-After, exactly one backoff
+
+
+@pytest.mark.asyncio
+async def test_candles_persistent_429_raises_for_caller_degrade(
+    monkeypatch: pytest.MonkeyPatch, _reset_candles_bucket: Any
+) -> None:
+    """Exhausted 429 retries re-raise so the caller degrades to [] (no crash).
+
+    The bar-ingest caller (_production_bars) catches HTTPError → returns [] →
+    the symbol simply has no fresh history this cadence (flow_not_block). The
+    live price path is untouched.
+    """
+    import polaris.venues.okx.adapter as okx_adapter
+    from polaris.venues.okx.adapter import fetch_okx_bars
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(okx_adapter, "_async_sleep", _no_sleep)
+
+    def responder(req: httpx.Request) -> Any:
+        return httpx.Response(429, text="Too Many Requests")
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_okx_bars("BTC-USDT", bar_interval="1D", limit=240, client=client)
+    finally:
+        await client.aclose()
+    # initial + CANDLES_RETRY_MAX attempts all 429.
+    assert len(transport.calls) == okx_adapter.CANDLES_RETRY_MAX + 1
+
+
+@pytest.mark.asyncio
+async def test_candles_acquires_token_before_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fetch_okx_bars paces through the candles token bucket before the GET.
+
+    Proves the bucket is on the hot path: a stub bucket records each acquire and
+    the GET only fires after the token is taken (pacing precedes the network).
+    """
+    import polaris.venues.okx.adapter as okx_adapter
+    from polaris.venues.okx.adapter import fetch_okx_bars
+
+    events: list[str] = []
+
+    class _StubBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            events.append("acquire")
+            return True
+
+    monkeypatch.setattr(okx_adapter, "_CANDLES_BUCKET", _StubBucket())
+
+    def responder(req: httpx.Request) -> Any:
+        events.append("get")
+        return _candles_ok()
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    try:
+        bars = await fetch_okx_bars("ETH-USDT", bar_interval="1D", limit=240, client=client)
+    finally:
+        await client.aclose()
+    assert len(bars) == 1
+    assert events == ["acquire", "get"]  # paced once, before the network GET
+
+
+@pytest.mark.asyncio
+async def test_candles_soft_cap_proceeds_token_less_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drained bucket (acquire→False) still issues the GET (soft cap, no drop).
+
+    flow_not_block: when the bounded pacing wait elapses with no token, the bar
+    fetch PROCEEDS token-less rather than dropping the bar. Proves the False
+    return is treated as a soft cap, not a hard defer — the bar still flows.
+    """
+    import polaris.venues.okx.adapter as okx_adapter
+    from polaris.venues.okx.adapter import fetch_okx_bars
+
+    class _DrainedBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            return False  # always "timed out" — no token ever available
+
+    monkeypatch.setattr(okx_adapter, "_CANDLES_BUCKET", _DrainedBucket())
+
+    got = {"n": 0}
+
+    def responder(req: httpx.Request) -> Any:
+        got["n"] += 1
+        return _candles_ok()
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    try:
+        bars = await fetch_okx_bars("BTC-USDT", bar_interval="1D", limit=240, client=client)
+    finally:
+        await client.aclose()
+    assert got["n"] == 1  # GET fired despite no token (soft cap)
+    assert len(bars) == 1  # bar still delivered (flow_not_block)

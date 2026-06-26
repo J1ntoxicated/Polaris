@@ -29,6 +29,7 @@ from typing import Any, Final
 
 import httpx
 
+from polaris.core.ratelimit import AsyncTokenBucket
 from polaris.venues.alpaca.reject_codes import classify_reject_code
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,18 @@ ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
 DATA_RETRY_MAX: Final[int] = 3
 DATA_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # 0.5s, 1.0s, 2.0s
 _DATA_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
+
+# Data-host PACING (the storm root-cause fix). Backoff alone retried INTO the
+# same overage: the per-symbol /bars fan-out fires ~6× the basic-plan cap, so
+# 17k× 429 piled up. A per-adapter token bucket paces every data GET to stay
+# UNDER the cap (200 req / 60 s, basic plan), so the burst never overshoots in
+# the first place (flow_not_block: the call WAITS for a token, never rejected;
+# the order/trade host is NEVER paced — aggressive bias intact). The bounded
+# in-bucket wait lets a fully drained bucket defer a non-urgent bar re-fetch to
+# the next cadence rather than stall the ingest coroutine.
+DATA_RATE: Final[int] = 200  # tokens per DATA_PER_SEC window (basic-plan cap)
+DATA_PER_SEC: Final[float] = 60.0
+DATA_ACQUIRE_TIMEOUT_SEC: Final[float] = 5.0
 
 
 def _retry_after_sec(resp: httpx.Response, fallback: float) -> float:
@@ -158,6 +171,12 @@ class AlpacaAdapter:
         self._owns_client = client is None
         self._data_client = data_client
         self._owns_data_client = data_client is None
+        # Data-host pacing bucket (200 req / 60 s, basic plan). Per-adapter so
+        # every data GET on this instance paces through the SAME limiter — the
+        # concurrent /bars fan-out cannot burst past the cap. Trade host bypasses.
+        self._data_bucket: AsyncTokenBucket = AsyncTokenBucket(
+            rate=DATA_RATE, per_sec=DATA_PER_SEC
+        )
         # ~1 min clock cache (calendar): (monotonic_deadline, AlpacaClock).
         self._clock_cache: tuple[float, Any] | None = None
 
@@ -220,6 +239,14 @@ class AlpacaAdapter:
         """
         cli = self.data_client if on_data_host else self.client
         for attempt in range(DATA_RETRY_MAX + 1):
+            if on_data_host:
+                # Pace BEFORE the GET so the fan-out stays under the cap (this is
+                # what prevents the 429 rather than retrying into it). The bounded
+                # acquire is a SOFT cap: if the wait elapses the GET still proceeds
+                # token-less (flow_not_block — the bar is never dropped; the 429
+                # backoff below is the safety net). The trade host is never paced —
+                # orders flow at full speed (aggressive bias intact).
+                await self._data_bucket.acquire(timeout=DATA_ACQUIRE_TIMEOUT_SEC)
             resp = await cli.request(
                 method, path, params=params, json=json_body, headers=self._auth_headers
             )

@@ -69,6 +69,14 @@ def _reset_log_dedup_caches() -> Iterator[None]:
     # the WS entitlement-error downgrade would otherwise leave the WS budget pinned
     # at the IEX 30 for every later budget-asserting test. Reset per-test.
     reset_alpaca_runtime_feed()
+    # OKX candles pacing bucket is a process-global singleton; a test that drains
+    # it (many fetch_okx_bars calls) could otherwise make a later test's first
+    # fetch WAIT for a refill. Hand each test a fresh, full bucket.
+    import polaris.venues.okx.adapter as _okx_adapter
+
+    _okx_adapter._CANDLES_BUCKET = _okx_adapter.AsyncTokenBucket(
+        rate=_okx_adapter.CANDLES_RATE, per_sec=_okx_adapter.CANDLES_PER_SEC
+    )
     yield
 
 

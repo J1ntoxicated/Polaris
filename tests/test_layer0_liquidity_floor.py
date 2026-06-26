@@ -70,11 +70,13 @@ def _inst(
 
 
 def test_okx_wide_spread_junk_is_ineligible() -> None:
-    """BNT-class 175bp spread (and 19912bp NC-USDT) fail the OKX spread floor."""
+    """A REAL wide spread (BNT-class 175bp) fails the OKX spread floor. The
+    degenerate ~19912bp NC-USDT value is a top-of-book DATA ERROR (above the
+    abnormal sentinel) → UNKNOWN, the spread axis is skipped (flow_not_block:
+    never block on a broken datum); it is covered by
+    ``test_okx_abnormal_spread_is_unknown_not_blocked``."""
     bnt = _inst("BNT-USDT", spread_bps=175.0)
-    nc = _inst("NC-USDT", spread_bps=19912.0)
     assert passes_liquidity_floor(bnt) is False
-    assert passes_liquidity_floor(nc) is False
 
 
 def test_okx_micro_volume_junk_is_ineligible() -> None:
@@ -83,10 +85,38 @@ def test_okx_micro_volume_junk_is_ineligible() -> None:
     assert passes_liquidity_floor(micro) is False
 
 
-def test_okx_no_depth_junk_is_ineligible() -> None:
-    """A name with a real book but $1-50 top-of-book depth fails the depth floor."""
+def test_okx_depth_floor_disabled_broken_metric_never_blocks() -> None:
+    """The OKX depth axis is DISABLED (default floor 0) because ``depth_10bps_usd``
+    is a BROKEN top-of-book single-quote proxy ($6-19 for BTC/ETH/SOL — the world's
+    deepest books), not a real 10bps depth. A live-DB measurement showed every OKX
+    major (BTC=$14k, ETH=$6.8k, SOL=$9.9k) under the old $25k floor → 0 trade-
+    eligible. With the axis off, a thin top-of-book number can no longer drop a
+    liquid name (flow_not_block: never block on a broken metric — vol/spread carry
+    the OKX quality gate; real L2 depth arrives in P1)."""
+    # ID-USDT live top-of-book proxy ($50) used to FAIL the old $25k floor.
     thin = _inst("ID-USDT", vol=5e8, spread_bps=5.0, depth=50.0)
-    assert passes_liquidity_floor(thin) is False
+    assert passes_liquidity_floor(thin) is True
+    # The world's deepest book (BTC $14k live proxy) is now eligible (was blocked).
+    btc_live = _inst("BTC-USDT", vol=8e8, spread_bps=1.0, depth=14_398.0)
+    assert passes_liquidity_floor(btc_live) is True
+
+
+def test_okx_depth_floor_default_is_zero() -> None:
+    """The OKX venue depth floor default is 0 (axis disabled) — the broken-metric
+    block is gone. vol + spread remain the OKX quality gate."""
+    assert liquidity_floor_for_venue("okx").min_depth_10bps_usd == 0.0
+
+
+def test_okx_abnormal_spread_is_unknown_not_blocked() -> None:
+    """A degenerate ~19900bps spread (NC-USDT live: 19904bps) is a top-of-book DATA
+    ERROR (bid≈0 → (ask-bid)/mid≈20000bps), not a real round-trip cost. It is
+    treated as UNKNOWN — the spread axis is SKIPPED (flow_not_block: never block on
+    a broken datum), so a name with a real $vol still flows. A REAL wide spread
+    (175bps BNT) below the abnormal sentinel still blocks (genuine quality cut)."""
+    nc = _inst("NC-USDT", vol=3.1e7, spread_bps=19904.0, depth=200_000.0)
+    assert passes_liquidity_floor(nc) is True  # data error → unknown, flows
+    bnt = _inst("BNT-USDT", vol=8e8, spread_bps=175.0, depth=400_000.0)
+    assert passes_liquidity_floor(bnt) is False  # real wide spread still blocked
 
 
 def test_okx_liquid_major_passes() -> None:

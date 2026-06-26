@@ -90,6 +90,23 @@ ALLOWED_TRADE_QUOTE_CCY_OKX: Final[frozenset[str]] = frozenset({"USDT", "USDC"})
 # is treated as NOT-floored-out (flow_not_block: never drop on a missing datum).
 LIQFLOOR_ENV_PREFIX: Final[str] = "POLARIS_LIQFLOOR_"
 
+# Abnormal-spread sentinel (flow_not_block): a top-of-book ``spread_bps`` at/above
+# this is a DATA ERROR, not a real round-trip cost. The proxy ``(ask-bid)/mid×1e4``
+# degenerates to ≈20000bps when a venue returns a near-zero/garbage best bid
+# (live OKX: NC-USDT 19904, BAL-OKB 19999, USDT-USD 19960 — a tight cluster just
+# under 20000bps = the 200% ceiling of the formula). Treating such a value as a
+# real wide spread would defensively BLOCK an otherwise-liquid name on a broken
+# datum. At/above this sentinel the spread axis is SKIPPED (the value is UNKNOWN,
+# never a drop); a genuine wide-but-real spread is gated normally.
+#
+# 15000bps cleanly isolates the ~20000bps data-error cluster while leaving every
+# MEASURED-junk real spread BELOW it still blocked — OKX BNT 175, and the Alpaca
+# untradeable cohort (MGN 8800=88% round-trip, WHLR 3310, ARQQ 2913) — so the
+# real-spread quality cut (Task #35) is fully preserved; only the degenerate
+# ~20000 data error is exempted. env-overridable (/debate).
+ABNORMAL_SPREAD_BPS: Final[float] = 15_000.0
+_ABNORMAL_SPREAD_ENV: Final[str] = "POLARIS_ABNORMAL_SPREAD_BPS"
+
 
 @dataclass(frozen=True, slots=True)
 class LiquidityFloor:
@@ -112,11 +129,18 @@ class LiquidityFloor:
 # via POLARIS_LIQFLOOR_ALPACA_MAX_SPREAD_BPS — a /debate calibration target.
 _ALPACA_MAX_SPREAD_BPS_DEFAULT: Final[float] = 100.0
 _DEFAULT_LIQUIDITY_FLOOR_BY_VENUE: Final[dict[str, LiquidityFloor]] = {
-    # OKX crypto — all axes REAL today (parse_okx_tickers).
+    # OKX crypto — vol + spread are REAL today (parse_okx_tickers); DEPTH IS NOT.
+    # ``depth_10bps_usd`` is a BROKEN top-of-book single-quote proxy ((bidSz+askSz)
+    # ×mid), ~$6-19 for BTC/ETH/SOL — the world's deepest books — NOT a real 10bps
+    # depth. A $25k floor on it rejected every OKX major (live: BTC=$14k, ETH=$6.8k,
+    # SOL=$9.9k → 0 trade-eligible, the root of "거래 안됨"). The depth axis is
+    # DISABLED (0) until P1 wires real L2-orderbook depth via WebSocket; vol +
+    # spread carry the OKX quality gate (the curated okx_liquid_top_n already
+    # guarantees liquidity). flow_not_block: never gate on a broken metric.
     "okx": LiquidityFloor(
         max_spread_bps=30.0,
         min_vol_24h_usd=20_000_000.0,
-        min_depth_10bps_usd=25_000.0,
+        min_depth_10bps_usd=0.0,
         min_price=0.0,
     ),
     # Alpaca equity — vol real when enriched; price plumbed via last_price; spread
@@ -149,6 +173,21 @@ def _liqfloor_env_override(venue: str, key: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def abnormal_spread_bps() -> float:
+    """Spread at/above which ``spread_bps`` is a DATA ERROR (UNKNOWN, not a block).
+
+    Env-overridable via ``POLARIS_ABNORMAL_SPREAD_BPS`` (/debate-tunable);
+    default ``ABNORMAL_SPREAD_BPS``. Garbage/unset → default.
+    """
+    raw = os.environ.get(_ABNORMAL_SPREAD_ENV)
+    if raw is None or raw == "":
+        return ABNORMAL_SPREAD_BPS
+    try:
+        return float(raw)
+    except ValueError:
+        return ABNORMAL_SPREAD_BPS
 
 
 def liquidity_floor_for_venue(venue: str) -> LiquidityFloor:
@@ -660,7 +699,15 @@ def passes_liquidity_floor(ins: UniverseInstrument) -> bool:
     row's spread (any value, incl. its placeholder) against the cap.
     """
     floor = liquidity_floor_for_venue(ins.venue)
-    if floor.max_spread_bps > 0.0 and ins.spread_bps > floor.max_spread_bps:
+    # Spread axis. A value at/above the abnormal sentinel is a top-of-book DATA
+    # ERROR (e.g. OKX ~19900bps from a garbage best-bid) → treated as UNKNOWN, the
+    # axis is SKIPPED (flow_not_block: never drop on a broken datum). A real wide
+    # spread (below the sentinel, above the venue cap) is gated as before.
+    if (
+        floor.max_spread_bps > 0.0
+        and ins.spread_bps > floor.max_spread_bps
+        and ins.spread_bps < abnormal_spread_bps()
+    ):
         return False
     if (
         floor.min_vol_24h_usd > 0.0

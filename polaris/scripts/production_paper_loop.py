@@ -38,8 +38,8 @@ from polaris.core.lifecycle.recover import (
     hydrate_open_positions,
     reconcile_venue_positions,
 )
-from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
-from polaris.core.pipeline.config import ai_free_mode
+from polaris.core.pipeline.agents._gpt_client import GPT_P0_MODEL, default_gpt_factory
+from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_layers import (
@@ -466,6 +466,40 @@ def _resolve_gpt_client(haiku: Any | None) -> Any | None:
         return StubGPTClient()
 
 
+def _resolve_judge_client() -> Any | None:
+    """Build the #32 AI-JUDGE client (gpt-5-mini) for the live loop, or None.
+
+    The judge runs over the bot's OWN information (technicals + fused alt-data
+    evidence + regime + ground) and emits a STRUCTURALLY non-blocking verdict.
+    It is INDEPENDENT of ``POLARIS_AI_FREE`` (the deterministic G3/G4/G7 still
+    own the live decision) — the judge is a parallel measurement/refinement
+    layer whose MODE is governed by ``POLARIS_AI_JUDGE_MODE`` (shadow default:
+    log only, deterministic acts byte-identical).
+
+    Graceful no-op: a missing ``OPENAI_API_KEY`` / any factory error → None, so
+    the judge is simply DORMANT (the gates stay byte-identical to the no-judge
+    path). The factory must never crash the loop. ``POLARIS_AI_JUDGE=0`` is an
+    explicit opt-out (judge fully off).
+    """
+    if os.environ.get("POLARIS_AI_JUDGE", "1").strip().lower() in ("0", "false", "no", "off"):
+        logger.info("[loop] AI-JUDGE disabled (POLARIS_AI_JUDGE=0) — judge dormant")
+        return None
+    try:
+        client = default_gpt_factory(GPT_P0_MODEL)
+    except Exception as exc:  # noqa: BLE001 — judge is additive; never crash the loop
+        logger.warning(
+            "[loop] AI-JUDGE client unavailable (%r) — judge dormant "
+            "(deterministic gates byte-identical)",
+            exc,
+        )
+        return None
+    logger.info(
+        "[loop] AI-JUDGE client = gpt-5-mini (mode=%s; deterministic decision acts)",
+        ai_judge_mode(),
+    )
+    return client
+
+
 async def run_production_paper_loop(
     *,
     duration_sec: float = DEFAULT_DURATION_SEC,
@@ -506,6 +540,11 @@ async def run_production_paper_loop(
     reset_process_fence()
     get_process_fence(conn)
     state = ProdLoopState()
+    # #32 — wire the AI-JUDGE client onto state so the G3/G4 orchestrator + the
+    # G7 live-recalc exit run the per-ticker judge alongside the deterministic
+    # decision (shadow default: logs only; deterministic acts byte-identical).
+    # None when no OPENAI_API_KEY / opted out → judge dormant (graceful no-op).
+    state.judge_client = _resolve_judge_client()
     try:
         state.open_trades.extend(hydrate_open_positions(conn))
     except Exception:

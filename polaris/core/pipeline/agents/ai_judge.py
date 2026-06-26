@@ -192,12 +192,31 @@ def _evidence_block(payload: dict[str, Any]) -> str:
     ground = payload.get("ticker_ground")
     lines = [f"- regime: {regime}"]
     if isinstance(evidence, dict) and evidence:
+        # Consume the keys ``altdata.fuser.fuse_evidence`` ACTUALLY emits (there is
+        # no ``news_headline`` key — that was a dead read). ``label``/``scores`` are
+        # the fused regime synthesis; ``news_*`` is the headline-tone tilt; and the
+        # raw alt-data datapoints (fear-greed / funding / macro / COT) are surfaced
+        # so the judge sees the underlying signal strength, not just the verdict.
         label = evidence.get("label")
         scores = evidence.get("scores")
-        headline = evidence.get("news_headline")
         lines.append(f"- alt-data evidence: label={label} scores={scores}")
-        if headline:
-            lines.append(f"- news: {headline}")
+        news_sentiment = evidence.get("news_sentiment")
+        if news_sentiment is not None:
+            lines.append(
+                f"- news: sentiment={news_sentiment} "
+                f"magnitude={evidence.get('news_magnitude')} "
+                f"n={evidence.get('news_n')}"
+            )
+        raw_signals = {
+            k: evidence[k]
+            for k in (
+                "crypto_fg", "avg_funding", "vix", "hy_spread",
+                "cot_net_spec_pctile",
+            )
+            if k in evidence
+        }
+        if raw_signals:
+            lines.append(f"- alt-data signals: {raw_signals}")
     if isinstance(baseline, dict) and baseline:
         lines.append(f"- technicals (baseline atr/size/volume): {baseline}")
     if isinstance(cell, dict) and cell:

@@ -191,6 +191,14 @@ class ProdLoopState:
     # already-fused tilt (audit code_review_2026-06-24). None until the loop wires
     # it (smoke/replay leave it None → the alt-data lens degrades to neutral).
     altdata_cache: Any = None
+    # #32 AI JUDGE client (gpt-5-mini). The per-ticker, STRUCTURALLY non-blocking
+    # judge over the bot's OWN info (technicals + fused alt-data evidence + regime
+    # + ground). Threaded into the G3/G4 orchestrator + the G7 live-recalc exit so
+    # the judge actually RUNS in production (shadow by default per
+    # POLARIS_AI_JUDGE_MODE — it logs vs the deterministic decision, which still
+    # ACTS byte-identical). None (no OPENAI_API_KEY / smoke / replay) → judge
+    # dormant, every gate byte-identical to the no-judge path (graceful no-op).
+    judge_client: Any = None
     # Timeframe-aligned ATR cache for the live recalc exit ruler:
     # (instrument_id, timeframe) → (atr_pct, computed_ts). TTL =
     # TIMEFRAME_FETCH_CADENCE_SEC[tf] (a fresh bar cannot arrive faster, so a

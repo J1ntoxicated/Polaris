@@ -23,6 +23,7 @@ from polaris.core.pipeline.agents.ai_judge import (
     EntryJudgeVerdict,
     ExitJudgeVerdict,
     JudgeOutcome,
+    _evidence_block,
     apply_entry_verdict,
     apply_exit_verdict,
     judge_entry,
@@ -98,10 +99,16 @@ def _ctx() -> GateContext:
         strategy_id="s1",
         payload={
             "regime": "trend_up",
+            # The keys ``altdata.fuser.fuse_evidence`` ACTUALLY emits (no
+            # ``news_headline`` — that key never existed in the fuser output).
             "evidence": {
-                "label": "BULL",
-                "scores": {"BULL": 2.1, "BEAR": 0.2},
-                "news_headline": "ETF inflows accelerate",
+                "label": "bull_trend",
+                "scores": {"bull_trend": 2.1, "bear_trend": 0.2},
+                "news_sentiment": 0.42,
+                "news_magnitude": 0.8,
+                "news_n": 5,
+                "crypto_fg": 78,
+                "avg_funding": 0.004,
             },
             "baseline": {"atr": {"p50": 1.2}, "volume": {"p50": 1000.0}},
             "cell_routing": {"quartile": "top", "avg_pnl_r": 0.4, "n_eff": 12.0},
@@ -314,14 +321,72 @@ async def test_entry_prompt_consumes_full_info() -> None:
     finally:
         mod.call_gpt = orig  # type: ignore[assignment]
     prompt = captured["prompt"]
-    # technicals + alt-data evidence + regime + ground all reach the judge.
+    # technicals + alt-data evidence + regime + ground all reach the judge, all
+    # via the keys the fuser ACTUALLY emits (no dead ``news_headline`` read).
     assert "trend_up" in prompt  # regime
-    assert "BULL" in prompt  # alt-data evidence label
-    assert "ETF inflows" in prompt  # news headline
+    assert "bull_trend" in prompt  # alt-data evidence label + scores
+    assert "sentiment=0.42" in prompt  # fused news tone (real key)
+    assert "crypto_fg" in prompt  # raw alt-data signal surfaced
     assert "technicals" in prompt  # baseline technicals
     assert "has_sentiment" in prompt  # ground coverage
     # The prompt explicitly forbids blocking.
     assert "cannot block" in prompt.lower()
+    # The dead ``news_headline`` key must NOT appear (it was never fuser output).
+    assert "news_headline" not in prompt
+
+
+def test_evidence_block_consumes_real_fuser_output_keys() -> None:
+    """``_evidence_block`` renders the keys ``fuse_evidence`` ACTUALLY emits.
+
+    Drives the REAL fuser over a crypto group with fresh fear-greed + funding +
+    news sources, then feeds its evidence dict to ``_evidence_block`` — proving
+    the renderer consumes the genuine emit keys (label / scores / news_sentiment /
+    news_magnitude / news_n / crypto_fg / avg_funding) and NOT the dead
+    ``news_headline`` key. This is the info-completeness contract: the judge sees
+    the bot's own information, byte-for-byte from the fuser.
+    """
+    from polaris.core.altdata.fuser import fuse_evidence
+
+    class _Cache:
+        def get_for_group(self, gid: str, *, now_ts: Any = None) -> dict[str, Any]:
+            return {
+                "crypto_fg": {"value": 80},
+                "okx_funding": {"BTC-USDT-SWAP": {"fundingRate": 0.004}},
+                "news_sentiment": {
+                    "BTC": {
+                        "sentiment": 0.6, "relevance": 0.9,
+                        "magnitude": 0.7, "n": 4,
+                    }
+                },
+            }
+
+    _hint, _conf, evidence = fuse_evidence("crypto:BTC", _Cache())
+    # The fuser DID emit the real keys (sanity — guards against a fuser rename).
+    assert "news_sentiment" in evidence
+    assert "crypto_fg" in evidence
+    assert "news_headline" not in evidence  # never a fuser key
+
+    rendered = _evidence_block(
+        {"regime": "bull_trend", "evidence": evidence,
+         "ticker_ground": {"has_sentiment": True, "has_event": True}}
+    )
+    assert "label=" in rendered  # fused regime label line
+    assert "scores=" in rendered
+    assert "sentiment=" in rendered  # fused news tone (real key)
+    assert "crypto_fg" in rendered  # raw alt-data signal
+    assert "has_sentiment=True" in rendered  # ground coverage
+    assert "news_headline" not in rendered  # dead key removed
+
+
+def test_evidence_block_graceful_when_no_evidence() -> None:
+    """A payload with no fused evidence / ground renders only the regime line.
+
+    Mirrors the production hot path BEFORE the ticker-ground producer covers a
+    name: absent ``evidence`` / ``ticker_ground`` keys → graceful (no n/a crash,
+    no manufactured judgment), only the regime is surfaced.
+    """
+    rendered = _evidence_block({"regime": "chop"})
+    assert rendered == "- regime: chop"
 
 
 # ===========================================================================

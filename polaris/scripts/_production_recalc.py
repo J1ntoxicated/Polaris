@@ -70,6 +70,7 @@ from polaris.scripts._production_recalc_exit import (
     run_precise_exit,
     run_session_forced_exit,
 )
+from polaris.scripts._static_ground import read_ticker_ground
 
 if TYPE_CHECKING:
     from polaris.scripts._smoke_fills import SimulatedTrade
@@ -625,6 +626,21 @@ async def _evaluate_position(
             seconds_since_last_override=60,
         )
         g7_payload_full = {**monitor_payload, **g7_payload}
+        # #32 — stamp the bot's OWN fused alt-data + ground coverage + regime so the
+        # per-ticker EXIT-timing AI JUDGE (G7) SEES the same information the entry
+        # judge does, instead of ``n/a``. REUSES the already-materialized per-ticker
+        # ground (``refresh_ticker_ground`` producer) via ``read_ticker_ground`` — no
+        # re-fuse on the recalc path. Absent row → keys unset (judge renders n/a).
+        # EVIDENCE only: no rail/decision branches on these keys (the judge reads
+        # them; G7's widen/tighten rails are owned by the deterministic FSM).
+        g7_payload_full["regime"] = regime
+        _ground_row = read_ticker_ground(conn, f"{pos['venue']}:{pos['symbol']}")
+        if _ground_row is not None:
+            g7_payload_full["evidence"] = _ground_row["ground"]
+            g7_payload_full["ticker_ground"] = {
+                "has_sentiment": _ground_row["has_sentiment"],
+                "has_event": _ground_row["has_event"],
+            }
         if tighten_proposal is not None:
             # tighten_proposal wins in adaptive_exit_gate (consumed before widen);
             # the widen_proposal stays as the no-tighten fallback shape.
@@ -649,8 +665,12 @@ async def _evaluate_position(
         g7_client = gpt_client if phase == "P1" else None
         # shadow_conn (instrumentation only): rails-vs-GPT divergence row per
         # P1 GPT call; the returned decision is byte-identical (P0 skips).
+        # #32 judge_client: the per-ticker EXIT-timing judge runs alongside the
+        # deterministic G7 (shadow default logs only; the rail decision still
+        # acts). None → byte-identical no-judge path.
         g7_result = await adaptive_exit_gate(
             g7_ctx, client=g7_client, shadow_conn=conn,
+            judge_client=state.judge_client,
         )
         log_gate_event(conn, g7_ctx, g7_result)
         state.recalc_g7_calls = getattr(state, "recalc_g7_calls", 0) + 1

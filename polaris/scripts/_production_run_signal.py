@@ -71,6 +71,7 @@ from polaris.scripts._run_signal_helpers import (
 from polaris.scripts._run_signal_helpers import (
     _strategy_recent_reject as _strategy_recent_reject,
 )
+from polaris.scripts._static_ground import read_ticker_ground
 from polaris.strategies import BaseStrategy, RawSignal
 
 if TYPE_CHECKING:
@@ -222,6 +223,21 @@ async def run_pipeline_for_signal(
         "raw_signal": g3_payload["raw_signal"],
         **g3_payload, **g4_payload, **g5_payload,
     }
+    # #32 — stamp the bot's OWN fused alt-data + ground coverage so the per-ticker
+    # AI JUDGE (G3/G4) actually SEES the information it judges over, instead of
+    # ``n/a``. The fuser output (news / COT / macro / funding / fear-greed) is
+    # ALREADY materialized per active ticker by ``refresh_ticker_ground`` (the
+    # background ticker-ground producer), so we REUSE it via ``read_ticker_ground``
+    # rather than re-fusing on the hot path. Absent ground row (not yet covered) →
+    # the keys are simply not stamped (the judge renders ``n/a`` gracefully).
+    # EVIDENCE only: no gate branches on these keys (only the judge reads them).
+    ground_row = read_ticker_ground(conn, instrument_id)
+    if ground_row is not None:
+        payload["evidence"] = ground_row["ground"]
+        payload["ticker_ground"] = {
+            "has_sentiment": ground_row["has_sentiment"],
+            "has_event": ground_row["has_event"],
+        }
     # Gate architecture Phase 0 (Option A): resolve the per-stream seam ONCE and
     # thread it through every GateContext. P0 = structural enabler only — no gate
     # reads it for a decision yet, so A/B/C stay byte-identical (P1+ enriches it).
@@ -262,6 +278,10 @@ async def run_pipeline_for_signal(
     orch = GateOrchestrator(
         conn=conn, haiku_client=haiku, phase=phase,
         g1_focus_cache=state.g1_focus_cache,
+        # #32 — the per-ticker AI JUDGE (G3/G4) runs alongside the deterministic
+        # decision. None (no client) → byte-identical no-judge loop. Shadow mode
+        # (default) logs the verdict; the deterministic decision still acts.
+        judge_client=state.judge_client,
     )
     results = await orch.run(ctx, start_gate=GATE_UNIVERSE_SCANNER)
     state.pipeline_runs += len(results)

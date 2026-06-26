@@ -120,6 +120,13 @@ class SignalIntent:
     # Folded into the SAME single continuous scalar via regime_scalar (seam1) —
     # NOT a new multiplier (9-stack count unchanged).
     signal_family: str = "momentum"
+    # #32 axis-C SIZE_UP conviction. When the A+B-gated entry judge emits SIZE_UP
+    # (robust + active), the entry sizer threads a >1.0 boost here; it is folded
+    # into the SAME single continuous scalar then re-clamped to [MIN, MAX] — exactly
+    # the regime_scalar precedent (NOT a new T4 multiplier; the 9-stack count is
+    # unchanged). Default 1.0 = byte-identical (no SIZE_UP / shadow / absent intent).
+    # flow_not_block: it can only push the scalar toward its band ceiling, never cut.
+    judge_conviction: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +394,18 @@ def compute_size(
         CONT_SCALAR_MIN,
         min(CONT_SCALAR_MAX, cont * _rf_scalar),
     )
+    # (1c) #32 axis-C SIZE_UP — fold the A+B-gated judge conviction into the SAME
+    # single continuous scalar then RE-CLAMP to the existing band, identical to the
+    # regime-fit fold above (NOT a new T4 multiplier; the 9-stack count is unchanged).
+    # judge_conviction defaults 1.0 (byte-identical); >1.0 only ever pushes cont
+    # TOWARD CONT_SCALAR_MAX, never cuts (flow_not_block) — a cont already at the
+    # ceiling stays at the ceiling (the re-clamp binds). Downstream tier_amp /
+    # cell_mult / single-trade cap / headroom_min() all still bind and clip after.
+    if intent.judge_conviction != 1.0:
+        cont = max(
+            CONT_SCALAR_MIN,
+            min(CONT_SCALAR_MAX, cont * intent.judge_conviction),
+        )
     logger.info(
         "[regime-fit/seam1-size] sym=%s strat=%s family=%s regime=%s "
         "fit=%+.2f scalar=%.3f cont %.4f->%.4f (ONE-scalar fold, 9-stack intact)",

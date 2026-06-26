@@ -544,7 +544,16 @@ def _g3_gate_ctx() -> GateContext:
         payload={
             "raw_signal": {"symbol": "BTC-USDT", "side": "long", "strength": 1.2},
             "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5, "score": 0.5},
-            "baseline": {},
+            # Robust evidence so the #32 A+B call gate ESCALATES (B passes); the
+            # PASS scalar (1.0) lands in the G3 boundary band → A fires.
+            "evidence": {
+                "label": "bull_trend",
+                "news_sentiment": 0.4,
+                "news_n": 5,
+                "crypto_fg": 78,
+            },
+            "baseline": {"atr": {"p50": 1.2}},
+            "ticker_ground": {"has_sentiment": True, "updated_ts": int(time.time()) - 60},
             "recent_trades": [],
             "regime": "trend_up",
         },
@@ -621,6 +630,17 @@ def _g7_gate_ctx() -> GateContext:
         strategy_id="s1",
         payload={
             "regime": "trend_up",
+            # Robust evidence so the #32 A+B call gate ESCALATES (B passes); no
+            # ``judge_exit_escalate`` key → A defaults True (orchestrator path).
+            "evidence": {
+                "label": "bull_trend",
+                "news_sentiment": 0.4,
+                "news_n": 5,
+                "crypto_fg": 78,
+            },
+            "baseline": {"atr": {"p50": 1.2}},
+            "cell_routing": {"n_eff": 12.0},
+            "ticker_ground": {"has_sentiment": True, "updated_ts": int(time.time()) - 60},
             "widen_proposal": {
                 "side": "long",
                 "current_stop_price": 95.0,

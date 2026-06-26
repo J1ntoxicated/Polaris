@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.live_recalc.exit_params import _STATE_RANK as _EXIT_STATE_RANK
 from polaris.core.live_recalc.strategy_swap import (
     SwapCandidate,
     evaluate_strategy_swap,
@@ -48,6 +49,10 @@ from polaris.core.pipeline import (
 from polaris.core.pipeline.agents import (
     adaptive_exit_gate,
     position_monitor_gate,
+)
+from polaris.core.pipeline.agents.judge_gate import (
+    judge_exit_cooldown_sec,
+    should_escalate_exit,
 )
 from polaris.core.pipeline.gate_orchestrator import log_gate_event
 from polaris.core.pipeline.gate_state import (
@@ -640,11 +645,44 @@ async def _evaluate_position(
             g7_payload_full["ticker_ground"] = {
                 "has_sentiment": _ground_row["has_sentiment"],
                 "has_event": _ground_row["has_event"],
+                # #32 axis-B freshness input (see run_signal stamp).
+                "updated_ts": _ground_row["updated_ts"],
             }
         if tighten_proposal is not None:
             # tighten_proposal wins in adaptive_exit_gate (consumed before widen);
             # the widen_proposal stays as the no-tighten fallback shape.
             g7_payload_full["tighten_proposal"] = tighten_proposal
+        # #32 axis-A — G7 EXIT judge CALL gate (anti-flooding, decision-moment-only +
+        # per-position cooldown). All inputs are ALREADY computed this tick (mode /
+        # stop-near / big-move / rung) → zero new fetch. ``judge_exit_escalate`` is
+        # AND-composed with B (evidence robustness) inside adaptive_exit_gate; when
+        # False the judge is NOT consulted and the deterministic Q9 rail flows
+        # unchanged (flow_not_block). Cooldown/dedup: re-escalate the SAME position
+        # only if the FSM rung advanced OR the cooldown elapsed.
+        atr_one_exit = max(entry_price * atr_pct, 1e-6)
+        current_rung = _EXIT_STATE_RANK.get(str(pos.get("exit_state", "open")), 0)
+        last_seen = state.judge_exit_cooldowns.get(str(pos["position_id"]))
+        rung_advanced = last_seen is None or current_rung > last_seen[1]
+        esc_a, esc_reason = should_escalate_exit(
+            mode=mode.value if mode is not None else None,
+            exit_state_crossed=rung_advanced,
+            last_price=last_price,
+            current_stop=current_stop,
+            atr_one=atr_one_exit,
+            momentum_drift=_recent_tick_drift(pos.get("recent_ticks")),
+            atr_slope=float(pos.get("atr_slope", 0.0)),
+            volume_z=float(pos.get("volume_z", 0.0)),
+        )
+        cooldown_ok = (
+            last_seen is None
+            or rung_advanced
+            or (now_ts - last_seen[0]) >= judge_exit_cooldown_sec()
+        )
+        escalate = esc_a and cooldown_ok
+        g7_payload_full["judge_exit_escalate"] = escalate
+        if escalate:
+            # Record this decision-moment so the SAME rung within cooldown is deduped.
+            state.judge_exit_cooldowns[str(pos["position_id"])] = (now_ts, current_rung)
         # G7 divergence SHADOW site tag (instrumentation only): read by the
         # shadow logger so live-recalc rows are separable from other call
         # sites in analysis. Never read by any decision.
@@ -752,9 +790,16 @@ async def recalc_active_positions(
     if not positions:
         # No open positions — clear the G6 call cache so it never grows stale.
         state.g6_call_cache.prune(set())
+        # #32 — drop all G7-judge cooldown anchors (no open position to dedup).
+        state.judge_exit_cooldowns.clear()
         return 0
     # #15 — drop cache anchors for positions that closed since the last sweep.
-    state.g6_call_cache.prune({str(p["position_id"]) for p in positions})
+    live_ids = {str(p["position_id"]) for p in positions}
+    state.g6_call_cache.prune(live_ids)
+    # #32 — prune the G7-judge cooldown dict for positions closed since the last
+    # sweep (no schema change, no leak — the entry is written on first escalate).
+    for stale_id in [k for k in state.judge_exit_cooldowns if k not in live_ids]:
+        del state.judge_exit_cooldowns[stale_id]
     for pos in positions:
         position_id = str(pos["position_id"])
         try:

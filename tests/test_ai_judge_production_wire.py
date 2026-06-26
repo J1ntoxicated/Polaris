@@ -160,7 +160,9 @@ async def test_entry_production_payload_stamps_fused_evidence_and_ground(
     payload = captured["payload"]
     # The judge's two info inputs are present, sourced from the ticker_ground row.
     assert payload["evidence"] == _FUSED_EVIDENCE
-    assert payload["ticker_ground"] == {"has_sentiment": True, "has_event": True}
+    assert payload["ticker_ground"] == {
+        "has_sentiment": True, "has_event": True, "updated_ts": NOW,
+    }
     # The fused evidence carries the REAL fuser keys (not the dead news_headline).
     assert "news_sentiment" in payload["evidence"]
     assert "news_headline" not in payload["evidence"]
@@ -270,7 +272,9 @@ async def test_exit_recalc_payload_stamps_evidence_and_threads_judge_client(
     payload = captured["payload"]
     assert payload["regime"] == "bull_trend"
     assert payload["evidence"] == _FUSED_EVIDENCE
-    assert payload["ticker_ground"] == {"has_sentiment": True, "has_event": True}
+    assert payload["ticker_ground"] == {
+        "has_sentiment": True, "has_event": True, "updated_ts": NOW,
+    }
     assert captured["judge_client"] is sentinel
 
 

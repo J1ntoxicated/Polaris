@@ -45,6 +45,11 @@ from polaris.core.pipeline.agents.ai_judge import (
     judge_entry,
     log_judge_event,
 )
+from polaris.core.pipeline.agents.judge_gate import (
+    evidence_robustness,
+    robust_min,
+    should_escalate_entry,
+)
 from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
 )
@@ -211,8 +216,25 @@ async def _maybe_judge_timing(
     a PROCEED can never become a KILL. Only the objective crossed/stale-book KILL
     (deterministic microstructure validity) reaches here as a non-PROCEED, and the
     caller does NOT route that through the judge. Active mode annotates; shadow logs.
+
+    A+B CALL GATE (#32 axes): only a FLAGGED PROCEED (watch_flags ∈ {spread_wide,
+    drift}) with robust evidence escalates; a clean non-flagged PROCEED skips the GPT
+    call (anti-flooding). ``escalate=False`` NEVER blocks — the PROCEED flows
+    unchanged (flow_not_block). The fast-path PROCEED never reaches here.
     """
     if judge_client is None:
+        return det_result
+    watch_flags = det_result.payload.get("watch_flags", ())
+    esc_a, _reason_a = should_escalate_entry(
+        gate="G4",
+        decision=det_result.decision.name,
+        scalar=1.0,
+        n_eff=0.0,
+        watch_flags=tuple(watch_flags) if isinstance(watch_flags, (list, tuple)) else (),
+        recent_reject_in_6h=bool(ctx.payload.get("recent_reject_in_6h", False)),
+    )
+    rob = evidence_robustness(ctx.payload, now_ts=int(ctx.started_ts))
+    if not (esc_a and rob.score >= robust_min()):
         return det_result
     outcome = await judge_entry(
         ctx,

@@ -149,16 +149,17 @@ _FLOW_PRESSURE_TRAIL_MULT_DEFAULT = 4.0
 _BURST_RIDER_TRAIL_MULT_DEFAULT = 3.5
 
 # Let-winners-run peak-fraction arm/frac for the tick MOMENTUM family
-# ([[ab_letrun_maker_2026-06-24]]). Red-team calibration: arm at +0.45R — the
-# COMMON-CASE rung (#19 give-back fix, post-reset 2026-06-25 ledger: avg peak
-# +0.39R; only 7.9% reach +1.0R but 18.4% reach +0.45R — the old +1.0R arm
-# STARVED the common case so a small peak round-tripped 100% on the wide trail).
-# +0.45R is FEE-SAFE (frac 0.50 → lock >= +0.225R at the arm) and 2.3x the +1.0R
-# coverage. frac 0.50. burst_rider AND flow_pressure both ride it (consistency;
-# the floor only ratchets the stop toward profit — never a throttle). The sub-arm
-# fixed rungs (burst 0.35/0.50/0.25, flow_pressure the cfg band) stay the BELOW-arm
-# phase. Env-tunable.
-_TICK_PEAK_LOCK_ARM_R: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_ARM_R", 0.45)
+# ([[ab_letrun_maker_2026-06-24]] · #47 recalib [[exit_recalib_2026-06-26]]).
+# Red-team calibration: arm at +0.30R — the COMMON-CASE rung. Post-reset
+# 2026-06-25 ledger: 32.9% of trades reach +0.30R but only 18.4% reach +0.45R, so
+# the old +0.45R arm STILL starved a third of the common case — a +0.30-0.45R peak
+# round-tripped on the wide trail with NOTHING locked. +0.30R arms the EARLIEST
+# common peak and is FEE-SAFE (frac 0.50 → lock >= +0.15R at the arm, above the OKX
+# spread+fee band). frac 0.50 UNCHANGED. burst_rider AND flow_pressure both ride it
+# (consistency; the floor only ratchets the stop toward profit — never a throttle).
+# The sub-arm fixed rungs (burst 0.35/0.50/0.25, flow_pressure the cfg band) stay
+# the BELOW-arm phase. Env-tunable.
+_TICK_PEAK_LOCK_ARM_R: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_ARM_R", 0.30)
 _TICK_PEAK_LOCK_FRAC: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_FRAC", 0.50)
 
 # Reversion scalp peak GIVE-BACK arm/frac (#19, post-reset 2026-06-25 ledger).
@@ -169,7 +170,7 @@ _TICK_PEAK_LOCK_FRAC: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_FRAC", 0.50
 # reverses gave it ALL back to scalp_stop (-0.4R) / flow_reversal (~0). This adds
 # a PROFIT-SIDE give-back catch: once the reversion peaked past ``_SCALP_PEAK_ARM_R``
 # (0.25R — just below the 0.35R target, so it only catches a peak that nearly hit
-# the bank) and the live pnl_r surrenders below ``peak_r * _SCALP_PEAK_FRAC`` while
+# the bank) and the live pnl_r surrenders below ``peak_r * _scalp_peak_frac()`` while
 # STILL POSITIVE, it banks ``scalp_giveback`` instead of round-tripping. frac 0.60
 # (reversion is a bounded revert — a slightly looser give-back than the momentum
 # 0.50 so it banks a meaningful fraction, not a crumb). FEE-SAFE FLOOR: the
@@ -179,9 +180,26 @@ _TICK_PEAK_LOCK_FRAC: float = _env_pos_float("POLARIS_TICK_PEAK_LOCK_FRAC", 0.50
 # the loss side (``_SCALP_STOP_R`` -0.4R) is UNTOUCHED — the give-back NEVER fires
 # on a negative pnl (positive-only). Env-tunable; ``peak_r`` omitted (legacy /
 # momentum) disarms it (byte-identical).
+#
+# #47 ([[exit_recalib_2026-06-26]]): the give-back FRAC is read FRESH per call from
+# ``POLARIS_SCALP_PEAK_FRAC`` (default 0.60) — NOT cached at import — so the live
+# A/B can inject 0.75 (banks a larger fraction sooner) on the RUNNING bot via env
+# without a restart. ``_SCALP_PEAK_ARM_R`` 0.25 UNCHANGED. A tighter frac never
+# touches the loss side (still profit-side-only above the fee-safe floor).
 _SCALP_PEAK_ARM_R: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_ARM_R", 0.25)
-_SCALP_PEAK_FRAC: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_FRAC", 0.60)
 _SCALP_PEAK_MIN_BANK_R: float = _env_pos_float("POLARIS_TICK_SCALP_PEAK_MIN_BANK_R", 0.10)
+
+
+def _scalp_peak_frac() -> float:
+    """Reversion peak give-back fraction, READ FRESH (no import-time cache).
+
+    ``POLARIS_SCALP_PEAK_FRAC`` (default 0.60). Read per scalp-exit call so the live
+    A/B can inject 0.75 on the running bot via env without a restart. The live
+    ``pnl_r`` surrendering below ``peak_r * this`` (while above the fee-safe floor)
+    banks ``scalp_giveback``; a tighter frac only banks a larger fraction SOONER —
+    PROFIT-side only, the -0.4R loss rail is untouched.
+    """
+    return _env_pos_float("POLARIS_SCALP_PEAK_FRAC", 0.60)
 
 
 def _momentum_trail_mult(strategy_id: str) -> float | None:
@@ -337,7 +355,7 @@ def _scalp_exit_decision(
         ``_SCALP_TARGET_R`` (byte-identical). PROFIT side only.
       - ``scalp_giveback`` (#19 peak give-back): once the reversion has PEAKED past
         ``_SCALP_PEAK_ARM_R`` (``peak_r``, the running max favourable R) and the
-        live ``pnl_r`` has surrendered below ``peak_r * _SCALP_PEAK_FRAC`` while
+        live ``pnl_r`` has surrendered below ``peak_r * _scalp_peak_frac()`` while
         STILL ABOVE the fee-safe floor ``_SCALP_PEAK_MIN_BANK_R``, bank the locked
         fraction NOW instead of round-tripping to scalp_stop / flow_reversal (the
         32.9%-reach-+0.30R-but-only-18.4%-bank give-back). ``peak_r is None``
@@ -371,7 +389,7 @@ def _scalp_exit_decision(
     if (
         peak_r is not None
         and peak_r >= _SCALP_PEAK_ARM_R
-        and _SCALP_PEAK_MIN_BANK_R <= pnl_r < peak_r * _SCALP_PEAK_FRAC
+        and _SCALP_PEAK_MIN_BANK_R <= pnl_r < peak_r * _scalp_peak_frac()
     ):
         return "scalp_giveback"
     if ofi is not None:

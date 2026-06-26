@@ -92,21 +92,44 @@ def test_cut_closes_immediately_on_broken_red() -> None:
 
 
 def test_harvest_hard_giveback_closes_near_peak() -> None:
-    # ratchet a peak first, then a hard give-back HARVEST → thesis_harvest close.
+    # ratchet a COMMON sub-1.0R peak first, then a hard give-back HARVEST →
+    # thesis_harvest close. #47: the peak must stay BELOW the +1.0R runner-disarm
+    # rung — a >=1.0R peak now DISARMS the give-back harvest (the rare runner runs);
+    # this asserts the COMMON-peak give-back is UNCHANGED. peak +0.80R (last 101.6,
+    # atr_r 2.0); then back to +0.20R surrenders 0.75 frac > hard 0.60.
+    st = _fresh("long")
+    d1 = evaluate_exit(
+        prev=st, side="long", entry_price=ENTRY, last_price=101.6,
+        atr_pct=ATR_PCT, pnl_r=0.80, held_seconds=10,
+    )
+    d2 = evaluate_exit(
+        prev=d1.state, side="long", entry_price=ENTRY, last_price=100.4,
+        atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=20,
+        mode=ManagementMode.HARVEST, thesis_bucket=Bucket.TREND,
+        thesis_giveback=GB,
+    )
+    assert d2.close is True
+    assert d2.close_reason == "thesis_harvest"
+
+
+def test_harvest_giveback_disarmed_above_1R_runner_runs() -> None:
+    # #47 ([[exit_recalib_2026-06-26]]): a RARE runner whose peak cleared +1.0R is
+    # NOT thesis_harvested even on a hard give-back — the give-back force-close is
+    # DISARMED so it rides the floor + wide trail (ASYMMETRY: small peak banks, rare
+    # runner runs). peak +3.0R (last 106.0); back to +0.6R surrenders 0.8 > hard 0.6
+    # but the +3.0R peak >= +1.0R disarm rung → NOT thesis_harvest.
     st = _fresh("long")
     d1 = evaluate_exit(
         prev=st, side="long", entry_price=ENTRY, last_price=106.0,
         atr_pct=ATR_PCT, pnl_r=3.0, held_seconds=10,
     )
-    # now back to +0.6R (peak was +3R → surrendered 0.8 frac > hard 0.6).
     d2 = evaluate_exit(
         prev=d1.state, side="long", entry_price=ENTRY, last_price=100.6,
         atr_pct=ATR_PCT, pnl_r=0.6, held_seconds=20,
         mode=ManagementMode.HARVEST, thesis_bucket=Bucket.TREND,
         thesis_giveback=GB,
     )
-    assert d2.close is True
-    assert d2.close_reason == "thesis_harvest"
+    assert d2.close_reason != "thesis_harvest"  # disarmed — the runner runs
 
 
 def test_harvest_soft_does_not_fast_close_but_tightens() -> None:

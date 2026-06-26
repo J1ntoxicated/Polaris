@@ -66,7 +66,7 @@ def test_bar_reversion_bucket_unchanged() -> None:
         assert _trail_mult_for_strategy(sid) is None  # module-default trail
 
 
-# --- tick momentum arms +0.45R / frac 0.50, keeps low sub-arm rungs -------------
+# --- tick momentum arms +0.30R / frac 0.50, keeps low sub-arm rungs (#47) -------
 
 
 def test_tick_burst_rider_peak_fraction_keeps_sub_arm_rungs() -> None:
@@ -78,9 +78,9 @@ def test_tick_burst_rider_peak_fraction_keeps_sub_arm_rungs() -> None:
     assert sched.bep_at_r == bep
     assert sched.protect_at_r == protect
     assert sched.lock_r == lock
-    # Peak-fraction arm +0.45R (#19 common-case rung) / frac 0.50 on a 3.5-ATR
-    # wide trail.
-    assert sched.peak_lock_arm_r == _TICK_PEAK_LOCK_ARM_R == 0.45
+    # Peak-fraction arm +0.30R (#47 earlier common-case rung) / frac 0.50 on a
+    # 3.5-ATR wide trail.
+    assert sched.peak_lock_arm_r == _TICK_PEAK_LOCK_ARM_R == 0.30
     assert sched.peak_lock_frac == _TICK_PEAK_LOCK_FRAC == 0.50
     assert _momentum_trail_mult("burst_rider") == 3.5
 
@@ -93,9 +93,9 @@ def test_tick_flow_pressure_peak_fraction_armed() -> None:
     assert sched.bep_at_r == cfg.mfe_bep_r
     assert sched.protect_at_r == cfg.mfe_protect_r
     assert sched.lock_r == cfg.mfe_protect_lock_r
-    # Same peak-fraction arm (+0.45R, #19); the wide flow_pressure trail (4.0)
+    # Same peak-fraction arm (+0.30R, #47); the wide flow_pressure trail (4.0)
     # is unchanged.
-    assert sched.peak_lock_arm_r == _TICK_PEAK_LOCK_ARM_R == 0.45
+    assert sched.peak_lock_arm_r == _TICK_PEAK_LOCK_ARM_R == 0.30
     assert sched.peak_lock_frac == _TICK_PEAK_LOCK_FRAC == 0.50
     assert _momentum_trail_mult("flow_pressure") == 4.0
 

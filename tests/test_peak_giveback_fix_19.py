@@ -37,11 +37,11 @@ from polaris.core.live_recalc.exit_engine import (
 )
 from polaris.scripts._production_tick_mfe import (
     _SCALP_PEAK_ARM_R,
-    _SCALP_PEAK_FRAC,
     _SCALP_PEAK_MIN_BANK_R,
     _SCALP_STOP_R,
     _TICK_PEAK_LOCK_ARM_R,
     _scalp_exit_decision,
+    _scalp_peak_frac,
 )
 
 ENTRY = 100.0
@@ -63,11 +63,14 @@ def _sched() -> MfeProtectSchedule:
 
 
 def test_peak_arm_lowered_to_fee_safe_common_rung() -> None:
-    # The arm must drop from the dead +1.0R (only 7.9% reach) to the fee-safe
+    # The BAR arm dropped from the dead +1.0R (only 7.9% reach) to the fee-safe
     # +0.45R rung (18.4% reach) so the avg +0.39R peak is actually protected.
     # frac stays 0.50 -> at the arm the lock is +0.225R (clears fees).
     assert EXIT_PEAK_LOCK_ARM_R == 0.45
-    assert _TICK_PEAK_LOCK_ARM_R == 0.45
+    # #47 ([[exit_recalib_2026-06-26]]): the TICK arm dropped further to +0.30R —
+    # 32.9% of trades reach +0.30R but only 18.4% reach +0.45R, so the tick momentum
+    # floor now arms on the earliest common peak (frac 0.50 -> lock +0.15R, fee-safe).
+    assert _TICK_PEAK_LOCK_ARM_R == 0.30
     assert EXIT_PEAK_LOCK_FRAC == 0.50
 
 
@@ -166,7 +169,7 @@ def test_reversion_peak_give_back_banks_positive_fraction() -> None:
 def test_reversion_peak_give_back_holds_near_peak() -> None:
     # Still near the peak (pnl_r above peak*frac) -> HOLD (do not bank early; let it
     # reach for the target). peak 0.30, frac 0.60 -> threshold 0.18; pnl 0.25 > 0.18.
-    assert _SCALP_PEAK_FRAC == 0.60
+    assert _scalp_peak_frac() == 0.60
     assert (
         _scalp_exit_decision(
             side="long", entry_price=100.0, last_mid=100.25, ofi=0.3, pnl_r=0.25,

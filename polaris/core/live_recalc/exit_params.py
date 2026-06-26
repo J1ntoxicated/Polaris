@@ -153,6 +153,21 @@ EXIT_LETRUN_HARVEST_TRAIL_MULT: Final[float] = _env_float(
     "POLARIS_EXIT_LETRUN_HARVEST_TRAIL_MULT", 3.5
 )
 
+# --- #47 runner give-back disarm ([[exit_recalib_2026-06-26]]) -----------------
+# BINARY let-the-runner-run: once a position's REACHED peak MFE clears this rung
+# (+1.0R), the HARD give-back force-close (``thesis_harvest``) is DISARMED so the
+# RARE big winner rides on the peak-fraction floor + the wide ATR trail instead of
+# being banked at the hard-frac surrender point. ASYMMETRY (the let-winners-run
+# core): a COMMON small peak (< 1.0R) keeps the give-back catch (it round-trips
+# otherwise); the RARE runner (>= 1.0R) is let to run (the floor already locks
+# ~peak% so it is protected, not naked). EXPECTANCY, not a throttle: it only
+# REMOVES a profit-side fast-close — size / entry side / the protected-BEP /
+# loser-timeout / -1.0R rail are all untouched (a red runner still closes on those).
+# Env-tunable; a huge value effectively disables the disarm (give-back always on).
+EXIT_PEAK_GIVEBACK_DISARM_R: Final[float] = _env_float(
+    "POLARIS_EXIT_PEAK_GIVEBACK_DISARM_R", 1.0
+)
+
 # --- Grace + sustained gate ([[exit_thesis_grace_2026-06-23]]) ----------------
 # ROOT CAUSE (live, PID 351): a JUST-OPENED position opened on positive OFI; the
 # very next tick's OFI noise opposed → _assess_health returned BROKEN → CUT →

@@ -28,19 +28,9 @@ from polaris.core.ticks.config import (
 )
 from polaris.core.ticks.features import compute_tick_features
 from polaris.core.ticks.regime_gate import active_signals
-from polaris.core.ticks.signals import (
-    TickIntent,
-    burst_rider,
-    flow_pressure,
-    micro_reversion,
-)
+from polaris.core.ticks.signals import TickIntent
 from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_state import ProdLoopState
-from polaris.scripts._production_tick_mfe import (
-    _BURST_RIDER,
-    _FLOW_PRESSURE,
-    _MICRO_REVERSION,
-)
 from polaris.scripts._production_tick_state import TickEngineState
 from polaris.strategies.base import RawSignal
 
@@ -50,13 +40,11 @@ logger = logging.getLogger("polaris.scripts._production_tick_engine")
 # DROPPED at the risk gate (bidirectional rule) — Capital CFD (cfd) takes both.
 _LONG_ONLY_PRODUCT_CLASSES: frozenset[str] = frozenset({"spot", "equity"})
 
-# The three pure signal functions, keyed by signal_id so the regime gate's
-# active set selects which ones run this tick.
-_SIGNAL_FNS: dict[str, Callable[..., TickIntent | None]] = {
-    _BURST_RIDER: burst_rider,
-    _FLOW_PRESSURE: flow_pressure,
-    _MICRO_REVERSION: micro_reversion,
-}
+# Tick signal dispatch table — keyed by signal_id. The three generators
+# (burst_rider / flow_pressure / micro_reversion) were KILLed 2026-06-26 for
+# gross-negative entry expectancy, so this table is EMPTY: ``_collect_intents``
+# iterates the (now-empty) regime-active set, finds no fn, and emits nothing.
+_SIGNAL_FNS: dict[str, Callable[..., TickIntent | None]] = {}
 
 
 def _open_symbols(state: ProdLoopState) -> set[tuple[str, str]]:

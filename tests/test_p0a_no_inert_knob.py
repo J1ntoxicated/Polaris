@@ -159,28 +159,6 @@ def _rsi_dip_bars(*, iid: str, venue: str, sym: str, interval: str) -> list[Bar]
     return out
 
 
-def _equity_gap_bars() -> list[Bar]:
-    """alpaca 1D, periodic ~2.2% gap-ups (between the 0.015 and 0.03 grid points):
-    the 0.015 floor admits the gaps, 0.03 blocks them."""
-    out: list[Bar] = []
-    p = 100.0
-    g = 0.022
-    for i in range(40):
-        gapup = i >= 3 and i % 4 == 0
-        if gapup:
-            o = p * (1 + g)
-            c = o * 1.001
-            out.append(_bar(i, o, c * 1.001, p * 0.999, c, 1000.0 + i,
-                            iid="alpaca:AAPL", venue="alpaca", sym="AAPL", interval="1D"))
-        else:
-            o = p * 0.999
-            c = p * 0.999
-            out.append(_bar(i, o, p * 1.0005, c * 0.999, c, 1000.0 + i,
-                            iid="alpaca:AAPL", venue="alpaca", sym="AAPL", interval="1D"))
-        p = c
-    return out
-
-
 # (strategy_id, knob) -> (strategy_cls, bars, interval). Covers EVERY replay-firing
 # knob in PARAM_BOUNDS. session_breakout (atr_mult) is tested separately (cannot
 # fire through the generic replay engine).
@@ -194,9 +172,6 @@ def _replay_knob_cases() -> list[tuple[str, str, list[Bar], str]]:
          _adx_trend_bars(iid="capital:EURUSD", venue="capital", sym="EURUSD", base=1.1), "1H"),
         ("rsi_bb_pullback", "rsi_threshold",
          _rsi_dip_bars(iid="okx:BTC-USDT", venue="okx", sym="BTC-USDT", interval="1H"), "1H"),
-        ("equity_rsi_bb_pullback", "rsi_threshold",
-         _rsi_dip_bars(iid="alpaca:AAPL", venue="alpaca", sym="AAPL", interval="1D"), "1D"),
-        ("equity_gap_go", "gap_pct", _equity_gap_bars(), "1D"),
     ]
 
 

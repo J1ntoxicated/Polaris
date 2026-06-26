@@ -23,10 +23,10 @@ the entry-trigger thresholds. Everything else is EXCLUDED:
     Tuning sizing is not a P0a ENTRY-search target, so they are intentionally
     NOT searched here.
 
-Strategies with NO entry-set knob (``tsmom``, ``xau_indices_trend``,
-``equity_tsmom``: a bare ``momentum_20bar > 0`` trigger) therefore have an empty
-grid — their DEFAULT config is still evaluated (1 trial), but they contribute 0
-entry-search breadth (reported honestly).
+Strategies with NO entry-set knob (``xau_indices_trend``: a bare
+``momentum_20bar > 0`` trigger) therefore have an empty grid — their DEFAULT
+config is still evaluated (1 trial), but they contribute 0 entry-search breadth
+(reported honestly).
 
 Grid points stay <=3 per param, within the design bounds.
 """
@@ -60,18 +60,9 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, ...]]] = {
         # bounds [1, 2.5] — multiplier on the session_atr VALUE -> entry level
         "atr_mult": (1.0, 1.5, 2.0),
     },
-    # --- Track C: Alpaca equity (data-unavailable in replay -> 0 trades) ---
-    "equity_rsi_bb_pullback": {
-        # bounds [20, 40] — entry trigger on RSI level
-        "rsi_threshold": (25.0, 30.0, 35.0),
-    },
-    "equity_gap_go": {
-        # bounds [0.01, 0.05] — entry trigger on the gap-up size
-        "gap_pct": (0.015, 0.02, 0.03),
-    },
-    # tsmom / xau_indices_trend / equity_tsmom: bare ``momentum_20bar > 0``
-    # trigger — NO entry-set knob (momentum_gain is a strength/sizing knob, not
-    # an entry trigger). Empty grid -> default-only evaluation, 0 search breadth.
+    # xau_indices_trend: bare ``momentum_20bar > 0`` trigger — NO entry-set knob
+    # (momentum_gain is a strength/sizing knob, not an entry trigger). Empty grid
+    # -> default-only evaluation, 0 search breadth.
 }
 
 

@@ -140,7 +140,7 @@ async def test_5s_tick_cycle_smoke(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_7_strategies_isolation_no_cross_pollution(tmp_path: Path) -> None:
+async def test_strategies_isolation_no_cross_pollution(tmp_path: Path) -> None:
     """A failing strategy must not crash its peers — verify by injecting a
     bad market view that only one strategy can handle."""
     db_path = tmp_path / "polaris.sqlite"
@@ -154,12 +154,12 @@ async def test_7_strategies_isolation_no_cross_pollution(tmp_path: Path) -> None
 
         bars = _stub_bars(50, base=60_000.0)
         entry = FocusEntry("okx", "BTC-USDT", "1m", "crypto")
-        # Run all 7 strategies → expect at least one OKX strategy to emit
-        # something while no exception aborts the gather.
+        # Run all OKX strategies → expect at least one to emit something while
+        # no exception aborts the gather.
         results = await asyncio.gather(
             *(_run_strategy_for_focus(s, entry, bars) for s in _okx_strategies())
         )
-        assert len(results) == 4
+        assert len(results) == 3
         # At least one OKX strat emits with the boosted view.
         assert any(r is not None for r in results)
         # Capital strategies on an OKX entry → all None (asset class skip).

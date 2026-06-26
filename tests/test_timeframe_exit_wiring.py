@@ -1,7 +1,7 @@
 """Timeframe-aligned exit wiring — recalc / open-stamp / close-path integration.
 
 DEMO/PAPER. Proves the two-part bug fix end to end:
-#1 timeframe-blind ruler: a 1H tsmom position is now trailed on the 1H ATR
+#1 timeframe-blind ruler: a 1H spot_donchian position is now trailed on the 1H ATR
    (reproduce the 11-minute noise cut on the 1m ruler → resolved on 1H);
 #2 anchorless denominator: mfe_r/mae_r/pnl_r are denominated by the ENTRY-time
    anchor stamped at open (volatility contraction can no longer inflate them).
@@ -111,7 +111,7 @@ def _seed_position(
     )
 
 
-def _trade(position_id: str, strategy: str = "tsmom") -> SimulatedTrade:
+def _trade(position_id: str, strategy: str = "spot_donchian") -> SimulatedTrade:
     return SimulatedTrade(
         signal_id=uuid.uuid4().hex, venue="okx", symbol="BTC-USDT",
         strategy_id=strategy, side="long", entry_price=100.0,
@@ -162,14 +162,14 @@ async def test_1m_ruler_reproduces_noise_cut(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_1h_strategy_trail_uses_1h_atr(memdb: sqlite3.Connection) -> None:
-    """RESOLVED: the SAME price action on a tsmom (1H) position survives —
-    the trail uses the 1H ATR ruler, not the 1m ATR. tsmom is a TREND-bucket bar
+    """RESOLVED: the SAME price action on a spot_donchian (1H) position survives —
+    the trail uses the 1H ATR ruler, not the 1m ATR. spot_donchian is a TREND-bucket bar
     strategy so the let-winners-run width is the widened 3.0-ATR trail
     ([[ab_letrun_maker_2026-06-24]])."""
     _seed_bars(memdb, interval="1m", n=20, band=0.05, close=99.5)
     _seed_bars(memdb, interval="1H", n=20, band=2.0, close=100.0,
                end_ts=NOW - 60)
-    _seed_position(memdb, position_id="pos-1h", strategy="tsmom")
+    _seed_position(memdb, position_id="pos-1h", strategy="spot_donchian")
     state = ProdLoopState()
     state.open_trades = [_trade("pos-1h")]
     await _recalc(memdb, state)
@@ -212,7 +212,7 @@ async def test_anchor_denominates_persisted_excursion(
     _seed_bars(memdb, interval="1H", n=20, band=2.0, close=100.0,
                end_ts=NOW - 60)
     _seed_position(
-        memdb, position_id="pos-anchor", strategy="tsmom",
+        memdb, position_id="pos-anchor", strategy="spot_donchian",
         entry_atr_pct=0.08, entry_atr_timeframe="1H",
     )
     state = ProdLoopState()
@@ -232,7 +232,7 @@ async def test_legacy_null_anchor_falls_back_to_current_tf_atr(
     _seed_bars(memdb, interval="1m", n=20, band=0.05, close=99.5)
     _seed_bars(memdb, interval="1H", n=20, band=2.0, close=100.0,
                end_ts=NOW - 60)
-    _seed_position(memdb, position_id="pos-legacy", strategy="tsmom")
+    _seed_position(memdb, position_id="pos-legacy", strategy="spot_donchian")
     state = ProdLoopState()
     state.open_trades = [_trade("pos-legacy")]
     await _recalc(memdb, state)
@@ -246,10 +246,10 @@ def test_load_rows_exposes_anchor_and_missing_flag(
 ) -> None:
     _seed_bars(memdb, interval="1m", n=20, band=0.05, close=100.0)
     _seed_position(
-        memdb, position_id="pos-a", strategy="tsmom",
+        memdb, position_id="pos-a", strategy="spot_donchian",
         entry_atr_pct=0.03, entry_atr_timeframe="1H",
     )
-    _seed_position(memdb, position_id="pos-b", strategy="tsmom")
+    _seed_position(memdb, position_id="pos-b", strategy="spot_donchian")
     rows = {
         r["position_id"]: r for r in load_active_position_rows(memdb)
     }
@@ -271,7 +271,7 @@ async def test_open_path_stamps_entry_anchor(memdb: sqlite3.Connection) -> None:
     reset_process_fence()
     _seed_bars(memdb, interval="1H", n=20, band=2.0, close=100.0)
     sig = RawSignal(
-        signal_id="sig-anchor", strategy_id="tsmom", symbol="BTC-USDT",
+        signal_id="sig-anchor", strategy_id="spot_donchian", symbol="BTC-USDT",
         side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
         thesis_tag="t", correlation_group="spot_cross_sectional_momo",
     )
@@ -301,7 +301,7 @@ async def test_open_path_stamps_null_when_no_bars(
 
     reset_process_fence()
     sig = RawSignal(
-        signal_id="sig-nobars", strategy_id="tsmom", symbol="ETH-USDT",
+        signal_id="sig-nobars", strategy_id="spot_donchian", symbol="ETH-USDT",
         side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
         thesis_tag="t", correlation_group="spot_cross_sectional_momo",
     )
@@ -331,7 +331,7 @@ def test_close_pnl_r_is_stream_common_not_atr_anchor(memdb: sqlite3.Connection) 
     # realised R (it drives only the excursion mfe_r/mae_r path).
     _seed_bars(memdb, interval="1m", n=14, band=0.05, close=100.0)
     _seed_position(
-        memdb, position_id="pos-close", strategy="tsmom",
+        memdb, position_id="pos-close", strategy="spot_donchian",
         entry_atr_pct=0.04, entry_atr_timeframe="1H",
     )
     trade = _trade("pos-close")
@@ -350,10 +350,10 @@ def test_close_pnl_r_independent_of_atr_anchor_presence(
     # the stream-common R is IDENTICAL (the anchor no longer touches realised R).
     _seed_bars(memdb, interval="1m", n=14, band=0.25, close=100.0)
     _seed_position(
-        memdb, position_id="pos-anch", strategy="tsmom",
+        memdb, position_id="pos-anch", strategy="spot_donchian",
         entry_atr_pct=0.04, entry_atr_timeframe="1H",
     )
-    _seed_position(memdb, position_id="pos-null", strategy="tsmom")
+    _seed_position(memdb, position_id="pos-null", strategy="spot_donchian")
     r_anch, _u1, _e1 = real_pnl_r_from_fills(
         memdb, trade=_trade("pos-anch"), exit_price_override=99.0,
     )
@@ -368,7 +368,7 @@ def test_close_pnl_r_independent_of_atr_anchor_presence(
 def test_close_excursion_uses_entry_anchor(memdb: sqlite3.Connection) -> None:
     _seed_bars(memdb, interval="1m", n=14, band=0.05, close=100.0)
     _seed_position(
-        memdb, position_id="pos-exc", strategy="tsmom",
+        memdb, position_id="pos-exc", strategy="spot_donchian",
         entry_atr_pct=0.04, entry_atr_timeframe="1H",
     )
     memdb.execute(

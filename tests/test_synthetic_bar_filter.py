@@ -190,9 +190,11 @@ def test_filter_keeps_exactly_real_count(n_real: int, n_synth: int) -> None:
 # score.py regime-alignment id coverage
 # ---------------------------------------------------------------------------
 
-# The 4 ids the agenda found silently excluded (verified vs STRATEGY_REGISTRY).
-_NEWLY_COVERED_TREND = ("equity_tsmom", "equity_gap_go")
-_NEWLY_COVERED_COUNTER = ("equity_rsi_bb_pullback", "fx_range_fade")
+# Ids the agenda found silently excluded from regime alignment, now covered
+# (verified vs STRATEGY_REGISTRY). The equity ids that were here (equity_tsmom /
+# equity_gap_go / equity_rsi_bb_pullback) were KILLed; fx_range_fade remains.
+_NEWLY_COVERED_TREND: tuple[str, ...] = ()
+_NEWLY_COVERED_COUNTER = ("fx_range_fade",)
 
 
 def test_every_registry_id_has_an_alignment_classification() -> None:

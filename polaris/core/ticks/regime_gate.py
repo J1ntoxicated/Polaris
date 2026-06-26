@@ -2,43 +2,30 @@
 
 Spec SSOT: ``.claude/plans/p5_tick_decision_engine_2026-06-03.md`` §"신규 모듈".
 
-The regime decides WHICH tick signals are allowed to fire (the AI conductor
-directs; technical decides) — it never throttles sizing. A momentum signal in a
-chop regime is simply not in the active set (mis-aligned, not "too risky"); a
-reversion signal in a strong trend is likewise gated out. This keeps each
-regime trading the edge that actually exists there — degrade-never-halt: an
-unknown regime still has an active signal (``flow_pressure``), so the engine is
-never silenced.
+The three tick signals this gate selected (``burst_rider`` / ``flow_pressure`` /
+``micro_reversion``) were KILLed 2026-06-26 — gross-negative entry expectancy
+(negative BEFORE fees, cross-validated over two windows). ``active_signals``
+now returns the empty set for every regime, so the engine dispatches no tick
+signal. This is the removal of a no-edge generator, NOT a defensive throttle:
+there is no edge left here to throttle.
+
+``normalize_regime`` and ``direction_bias`` are retained — they are consumed by
+``regime_fit`` and the entrance-leans probe (independent of tick dispatch).
 
 Regime vocabulary: the codebase SSOT (``regime_flip.REGIME_VALUES``) is
 ``bull_trend`` / ``bear_trend`` / ``chop`` / ``crisis``. The spec phrases the
 gate in generic buckets (trend / range-chop / crisis / unknown); this module
 maps the canonical labels (and the generic aliases) onto those buckets so it
 accepts whatever ``fetch_regime`` returns. Any unrecognized / None label →
-the ``unknown`` bucket (never an error — an unclassified regime still trades
-flow pressure).
+the ``unknown`` bucket (never an error).
 """
 
 from __future__ import annotations
 
 __all__ = ["active_signals", "direction_bias", "normalize_regime"]
 
-# Active-signal sets per regime bucket (spec §regime_gate):
-#   trend       → burst_rider + flow_pressure   (momentum edge)
-#   range/chop  → micro_reversion + flow_pressure (mean-reversion edge)
-#   crisis      → micro_reversion only           (fade the spike; no chasing)
-#   unknown     → flow_pressure                  (always-on imbalance edge)
-_TREND: frozenset[str] = frozenset({"burst_rider", "flow_pressure"})
-_RANGE: frozenset[str] = frozenset({"micro_reversion", "flow_pressure"})
-_CRISIS: frozenset[str] = frozenset({"micro_reversion"})
-_UNKNOWN: frozenset[str] = frozenset({"flow_pressure"})
-
-_ACTIVE_BY_BUCKET: dict[str, frozenset[str]] = {
-    "trend": _TREND,
-    "range": _RANGE,
-    "crisis": _CRISIS,
-    "unknown": _UNKNOWN,
-}
+# Tick signals KILLed 2026-06-26 → no signal is active in any regime.
+_EMPTY: frozenset[str] = frozenset()
 
 # Canonical + generic label → bucket. ``bull_trend``/``bear_trend`` and the
 # generic ``trend`` collapse to "trend"; ``chop``/``range`` → "range".
@@ -75,18 +62,15 @@ def normalize_regime(regime: str | None) -> str:
 
 
 def active_signals(regime: str | None) -> frozenset[str]:
-    """Return the signal ids allowed to fire in ``regime``.
+    """Return the signal ids allowed to fire in ``regime`` — now always empty.
 
-    Pure lookup via :func:`normalize_regime`:
-      - trend       → ``{burst_rider, flow_pressure}``
-      - range/chop  → ``{micro_reversion, flow_pressure}``
-      - crisis      → ``{micro_reversion}``
-      - unknown     → ``{flow_pressure}``
-
-    An unknown regime is never empty — the engine always has at least
-    ``flow_pressure`` (degrade-never-halt).
+    The three tick signals were KILLed (gross-negative entry expectancy), so no
+    signal is active in any regime; the engine dispatch loop iterates an empty
+    set and emits nothing. ``regime`` is accepted (and normalized for symmetry)
+    but no longer selects a signal subset.
     """
-    return _ACTIVE_BY_BUCKET[normalize_regime(regime)]
+    normalize_regime(regime)
+    return _EMPTY
 
 
 def direction_bias(regime: str | None) -> int:

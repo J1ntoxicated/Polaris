@@ -70,16 +70,12 @@ from polaris.scripts._production_state import ProdLoopState
 from polaris.strategies import (
     BaseStrategy,
     EMACrossoverStrategy,
-    EquityGapGoStrategy,
-    EquityRSIBBPullbackStrategy,
-    EquityTSMOMStrategy,
     FXBreakoutBasketStrategy,
     FXRangeFadeStrategy,
     RawSignal,
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
-    TSMOMStrategy,
     VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
@@ -251,7 +247,6 @@ def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
 def _all_strategies() -> list[BaseStrategy]:
     return [
         VolumeBurstStrategy(),
-        TSMOMStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
         EMACrossoverStrategy(),
@@ -259,9 +254,6 @@ def _all_strategies() -> list[BaseStrategy]:
         FXRangeFadeStrategy(),
         XAUIndicesTrendStrategy(),
         SessionBreakoutStrategy(),
-        EquityTSMOMStrategy(),
-        EquityRSIBBPullbackStrategy(),
-        EquityGapGoStrategy(),
     ]
 
 

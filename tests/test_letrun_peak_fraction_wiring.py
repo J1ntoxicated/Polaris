@@ -33,9 +33,9 @@ from polaris.scripts._production_tick_mfe import (
 )
 
 # The design-named bar TREND family.
-_BAR_TREND = ("session_breakout", "equity_gap_go", "fx_breakout_basket")
+_BAR_TREND = ("session_breakout", "fx_breakout_basket")
 # REVERSION-bucket bar strategies (their edge is a bounded revert-to-mean).
-_BAR_REVERSION = ("rsi_bb_pullback", "fx_range_fade", "equity_rsi_bb_pullback")
+_BAR_REVERSION = ("rsi_bb_pullback", "fx_range_fade")
 
 
 # --- bar TREND family arms the peak-fraction floor + wide trail -----------------

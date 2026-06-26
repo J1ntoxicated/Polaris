@@ -24,8 +24,6 @@ from polaris.strategies import (
     CCIReversionStrategy,
     ConnorsRSI2Strategy,
     EMACrossoverStrategy,
-    EquityGapGoStrategy,
-    EquityRSIBBPullbackStrategy,
     FXBreakoutBasketStrategy,
     FXRangeFadeStrategy,
     RSIBBPullbackStrategy,
@@ -357,68 +355,9 @@ def test_fx_breakout_still_none_below_relaxed_adx_band() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. equity_rsi_bb_pullback — RSI_THRESHOLD 30.0 -> 39.0
-# ---------------------------------------------------------------------------
-
-
-def _equity_rsi_bb_mv(rsi: float) -> MarketView:
-    bars = _bars(220, base_close=100.0, drift=0.10)
-    last = bars[-1]
-    bars[-1] = BarView(ts=last.ts, open=last.open, high=last.high,
-                       low=85.0, close=88.0, volume=last.volume)
-    return MarketView(
-        symbol="MSFT", venue="alpaca", timeframe="1D",
-        bars=bars, last_price=88.0, spread_bps=3.0,
-        rsi_14=rsi, bb_lower=90.0, ma_200=80.0,
-    )
-
-
-def test_equity_rsi_bb_pullback_newly_emits_in_relaxed_rsi_band() -> None:
-    # rsi=35 above OLD 30 ceiling (blocked), below NEW 39 ceiling.
-    sig = EquityRSIBBPullbackStrategy().generate_raw_signal(_equity_rsi_bb_mv(35.0))
-    assert sig is not None
-    assert sig.side == "long"  # equity dip-buy in uptrend = long, thesis-aligned
-    _assert_strength_bounded(sig, 0.4)
-
-
-def test_equity_rsi_bb_pullback_still_none_above_relaxed_rsi_band() -> None:
-    # rsi=42 above even NEW 39 ceiling -> no emit.
-    assert EquityRSIBBPullbackStrategy().generate_raw_signal(_equity_rsi_bb_mv(42.0)) is None
-
-
-# ---------------------------------------------------------------------------
-# 10. equity_gap_go — GAP_PCT 0.02 -> 0.014
-# ---------------------------------------------------------------------------
-
-
-def _equity_gap_mv(gap: float) -> MarketView:
-    bars = _bars(30, base_close=100.0, drift=0.0)
-    prev = bars[-2]
-    open_px = prev.close * (1.0 + gap)
-    bars[-1] = BarView(ts=bars[-1].ts, open=open_px, high=open_px + 3.0,
-                       low=open_px - 1.0, close=open_px + 2.0, volume=2000.0)
-    return MarketView(
-        symbol="NVDA", venue="alpaca", timeframe="1D",
-        bars=bars, last_price=open_px + 2.0, spread_bps=3.0,
-        prev_close=prev.close, gap_pct=gap,
-    )
-
-
-def test_equity_gap_go_newly_emits_in_relaxed_gap_band() -> None:
-    # gap=0.016 below the OLD 0.02 floor (blocked) but above the NEW 0.014 floor.
-    sig = EquityGapGoStrategy().generate_raw_signal(_equity_gap_mv(0.016))
-    assert sig is not None
-    assert sig.side == "long"  # gap-up continuation = long, thesis-aligned
-    _assert_strength_bounded(sig, 0.4)
-
-
-def test_equity_gap_go_still_none_below_relaxed_gap_band() -> None:
-    # gap=0.01 below even the NEW 0.014 floor -> no emit.
-    assert EquityGapGoStrategy().generate_raw_signal(_equity_gap_mv(0.01)) is None
-
-
-# ---------------------------------------------------------------------------
-# 11. connors_rsi2 — RSI_ENTRY 10.0 -> 13.0
+# 9. connors_rsi2 — RSI_ENTRY 10.0 -> 13.0
+# (equity_rsi_bb_pullback + equity_gap_go relax-band tests removed — both
+#  strategies KILLed 2026-06-26 for gross-negative entry expectancy.)
 # ---------------------------------------------------------------------------
 
 

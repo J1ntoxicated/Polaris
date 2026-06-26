@@ -283,19 +283,25 @@ async def test_ingest_bars_for_focus_alpaca_daily_persists(
 # ---------------------------------------------------------------------------
 
 
-def test_daily_routing_maps_1D_to_alpaca() -> None:
+def test_strategies_bucket_by_metadata_timeframe_no_filter() -> None:
     """The production loop buckets strategies by metadata.timeframe with NO
-    BAR_INTERVALS filter — the three equity strategies (1D/alpaca) therefore
-    produce a ``timeframe_to_venues['1D'] == {'alpaca'}`` route."""
+    BAR_INTERVALS filter — every active strategy lands in a bucket keyed on its
+    OWN timeframe (none silently dropped), and each bucket's timeframe→venue
+    route is faithful to the strategies' metadata. (The 1D/alpaca equity route
+    no longer exists — the equity_* strategies were KILLed.)"""
     from polaris.scripts.production_paper_loop import (
         _all_strategies,
         _strategies_by_timeframe,
     )
 
-    by_tf = _strategies_by_timeframe(_all_strategies())
-    assert "1D" in by_tf
-    venues_1d = {s.metadata.venue for s in by_tf["1D"]}
-    assert venues_1d == {"alpaca"}
+    strats = _all_strategies()
+    by_tf = _strategies_by_timeframe(strats)
+    # No filter: every strategy is bucketed under its declared timeframe.
+    flat = [s for group in by_tf.values() for s in group]
+    assert len(flat) == len(strats)
+    for tf, group in by_tf.items():
+        for s in group:
+            assert s.metadata.timeframe == tf
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ from polaris.scripts.backfill_gate_outcome_links import (
 )
 from polaris.scripts.production_paper_loop import ProdLoopState
 from polaris.storage.schema import init_db
-from polaris.strategies import RawSignal, TSMOMStrategy
+from polaris.strategies import RawSignal, SpotDonchianStrategy
 
 NOW = 1_780_000_000
 
@@ -127,7 +127,7 @@ async def _run_pipeline(
     monkeypatch.setattr(run_signal_mod, "position_monitor_gate", _fake_gate)
     monkeypatch.setattr(run_signal_mod, "adaptive_exit_gate", _fake_gate)
     await run_signal_mod.run_pipeline_for_signal(
-        conn=conn, haiku=None, state=state, strategy=TSMOMStrategy(),
+        conn=conn, haiku=None, state=state, strategy=SpotDonchianStrategy(),
         sig=sig or _sig(), venue="okx", symbol="BTC-USDT", asset_class="crypto",
         underlying_group_id="crypto:BTC", regime="bull_trend",
         bars_atr_pct=0.01, last_price=100.0, universe_rows=[], now_ts=NOW,

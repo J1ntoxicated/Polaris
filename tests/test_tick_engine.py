@@ -1,23 +1,21 @@
 """P5 tick-decision engine — integration TDD.
 
 Replays a synthetic live tick stream into a fake ``quote_writer`` and asserts
-the engine's decision → risk-gate → executor + per-tick exit behaviour:
+the engine's entry / risk-gate + per-tick exit behaviour:
 
-  (a) a clear burst produces an entry intent → sized order (non-shadow),
-  (b) shadow mode logs the decision but places NO order,
+  (a) after the 2026-06-26 signal KILL a clear burst opens NO order — the three
+      generators (burst_rider / flow_pressure / micro_reversion) were removed for
+      gross-negative entry expectancy, so the dispatch table + regime-active set
+      are empty and the entry pass emits nothing,
+  (b) ``_collect_intents`` is empty in every regime/venue after the KILL,
   (c) the freshness gate skips a stale symbol,
   (d) the bidirectional rule drops a 'short' on a long-only venue (direct),
   (e) no double-open when a position already exists on the symbol,
-  (f) a reversion position exits on flow reversal.
+  (f) a reversion position (historical, pre-KILL) still exits on flow reversal.
 
-D3 (/debate trading_params_audit_2026-06-22): the tick engine OWNS the
-data-rich venues (``TICK_ENGINE_OWNED_VENUES`` = ``{okx, capital}``). OKX
-carries full order-book depth + trade prints → all three microstructure signals
-fire there, so the momentum/burst loop tests drive an ``okx:`` focus symbol.
-Capital streams price quotes only (sizes/tape zeroed) → its tick path is
-restricted to the overshoot fade (``micro_reversion``) — see
-``test_capital_tick_path_is_fade_only``. Alpaca stays on the bar pipeline and is
-filtered out by ``PHASE1_VENUES``.
+The EXIT-side tests (reversion fast-scalp, momentum trail/MFE-protect) are
+retained: they close out any historical tick position and are independent of the
+KILLed entry generators.
 
 Runs against the in-memory ``memdb`` fixture + a fake in-mem quote_writer, so no
 WS / demo-venue network happens. Entries use the SIM fill path
@@ -262,7 +260,14 @@ def _focus_capital() -> list[tuple[str, str, str, str]]:
 
 
 @pytest.mark.asyncio
-async def test_burst_produces_sized_order(memdb: sqlite3.Connection) -> None:
+async def test_burst_window_opens_no_order_after_kill(
+    memdb: sqlite3.Connection,
+) -> None:
+    # KILL 2026-06-26: the three tick generators (burst_rider / flow_pressure /
+    # micro_reversion) were removed for gross-negative entry expectancy. A clear
+    # up-burst that used to open exactly one position now opens NONE — the
+    # dispatch table is empty, so the entry pass emits nothing. This guards the
+    # KILL: no tick entry is produced from a real signal window.
     now_ts = int(time.time())
     now_mono = time.monotonic()
     _seed(memdb, regime="bull_trend", now_ts=now_ts)
@@ -278,49 +283,30 @@ async def test_burst_produces_sized_order(memdb: sqlite3.Connection) -> None:
         real_roundtrip=False, focus=_focus(), regime_cache={},
     )
 
-    assert eng.orders == 1, "a clear up-burst should open exactly one position"
-    assert len(state.open_trades) == 1
-    trade = state.open_trades[0]
-    assert trade.side == "long"
-    assert trade.venue == VENUE and trade.symbol == SYMBOL
-    assert trade.notional_usd > 0.0, "the order must be sized via compute_size"
-    position_id = trade.position_id
-    assert position_id is not None, "the opened position must carry a persisted id"
-    # The opened position is tagged with the tick signal_family (momentum here).
-    assert eng.family_by_position[position_id] == "momentum"
-    # A persisted positions row exists (entry path wrote it, not the hot path).
-    row = memdb.execute(
-        "SELECT status FROM positions WHERE position_id = ?", (position_id,)
-    ).fetchone()
-    assert row is not None and row[0] == "open"
-
-
-# ---------------------------------------------------------------------------
-# (b) shadow mode logs the decision but places NO order.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_shadow_logs_no_order(memdb: sqlite3.Connection) -> None:
-    now_ts = int(time.time())
-    now_mono = time.monotonic()
-    _seed(memdb, regime="bull_trend", now_ts=now_ts)
-    writer = FakeQuoteWriter()
-    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
-    state = ProdLoopState()
-    state.quote_writer = writer  # type: ignore[assignment]
-    eng = TickEngineState(cfg=TickEngineConfig(shadow=True))
-
-    await _run_entries(
-        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
-        okx_adapter=None, capital_session=None, alpaca_adapter=None,
-        real_roundtrip=False, focus=_focus(), regime_cache={},
-    )
-
-    assert eng.shadow_logs >= 1, "shadow mode must LOG the decision"
-    assert eng.orders == 0, "shadow mode must NOT place an order"
+    assert eng.orders == 0, "no tick entry may open after the signal KILL"
     assert state.open_trades == []
     assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# (b) collected intents are empty in every regime/venue after the KILL.
+# ---------------------------------------------------------------------------
+
+
+def test_collect_intents_is_empty_after_kill() -> None:
+    # The dispatch loop iterates the (now-empty) regime-active set → no fn → no
+    # intent, for a window that used to fire each signal, on every owned venue.
+    now_ts = int(time.time())
+    burst = _burst_window(now_ts, +1)
+    over = _overshoot_window(now_ts, +1)
+    for venue, symbol in ((VENUE, SYMBOL), (CAP_VENUE, CAP_SYMBOL)):
+        for regime in ("bull_trend", "chop", "crisis"):
+            for window in (burst, over):
+                eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
+                assert _collect_intents(
+                    eng, venue=venue, symbol=symbol, window=window,
+                    regime=regime, now_ts=now_ts,
+                ) == []
 
 
 # ---------------------------------------------------------------------------
@@ -386,32 +372,6 @@ async def test_ineligible_symbol_defers_order_open(
     assert state.open_trades == []
 
 
-@pytest.mark.asyncio
-async def test_eligible_symbol_still_opens(memdb: sqlite3.Connection) -> None:
-    # With the symbol IN the trade set, the same burst opens as before — the
-    # decouple narrows the trade set, it does not veto an eligible candidate.
-    from polaris.core.isolation.allocator_fence import reset_process_fence
-
-    reset_process_fence()  # rebind the process fence to this test's memdb conn
-    now_ts = int(time.time())
-    now_mono = time.monotonic()
-    _seed(memdb, regime="bull_trend", now_ts=now_ts)
-    writer = FakeQuoteWriter()
-    writer.set_stream(INSTRUMENT, _burst_window(now_ts, +1), now_mono)
-    state = ProdLoopState()
-    state.quote_writer = writer  # type: ignore[assignment]
-    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
-
-    await _run_entries(
-        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
-        okx_adapter=None, capital_session=None, alpaca_adapter=None,
-        real_roundtrip=False, focus=_focus(), regime_cache={},
-        eligible_set={(VENUE, SYMBOL)},
-    )
-    assert eng.skips_ineligible == 0
-    assert eng.orders == 1
-
-
 # ---------------------------------------------------------------------------
 # (d) the bidirectional rule drops a 'short' on long-only venues (OKX/Alpaca)
 #     but keeps it on bidirectional Capital. Tested directly: the tick engine
@@ -454,136 +414,6 @@ def test_okx_and_capital_are_owned_okx_full_capital_fade_only() -> None:
     assert venue_allowed_signals("kraken") == frozenset(
         {"burst_rider", "flow_pressure", "micro_reversion"}
     )
-
-
-def test_capital_collect_intents_drops_flow_signals_keeps_fade() -> None:
-    """On Capital, a window that WOULD fire the flow signals (burst_rider /
-    flow_pressure) yields NONE of them — only ``micro_reversion`` can be
-    collected. Driven through ``_collect_intents`` directly so it isolates the
-    venue routing from the entry/sizing path."""
-    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
-    now_ts = int(time.time())
-    # A burst window (up) — on OKX this fires ``burst_rider``; on Capital it must
-    # NOT (flow signal, structurally dead on the price-only feed). Regime=trend
-    # so burst_rider IS regime-active — the only thing dropping it is the venue.
-    burst = _burst_window(now_ts, +1)
-    cap_intents = _collect_intents(
-        eng, venue=CAP_VENUE, symbol=CAP_SYMBOL, window=burst,
-        regime="bull_trend", now_ts=now_ts,
-    )
-    assert all(i.signal_id == "micro_reversion" for i in cap_intents), (
-        "Capital tick path must never fire a flow signal (burst/ofi) — fade only"
-    )
-    # The SAME burst window on OKX DOES fire burst_rider (full-depth venue).
-    eng_okx = TickEngineState(cfg=TickEngineConfig(shadow=False))
-    okx_intents = _collect_intents(
-        eng_okx, venue=VENUE, symbol=SYMBOL, window=burst,
-        regime="bull_trend", now_ts=now_ts,
-    )
-    assert any(i.signal_id == "burst_rider" for i in okx_intents), (
-        "OKX (full depth) must still fire the momentum burst signal"
-    )
-
-
-# ---------------------------------------------------------------------------
-# (d3) Upstream long-only short dead-path: a SHORT whose only candidate venue
-#      is long-only (OKX spot / Alpaca equity) is never CONSTRUCTED in
-#      ``_collect_intents`` — the directionality check moved upstream of intent
-#      construction so the loop no longer generates-then-drops it (the L535
-#      ``_drop_for_bidirectional`` stays as a backstop). Direction-neutral:
-#      removes no executable trade (spot/equity shorts are unexecutable);
-#      Capital (bidirectional CFD) still collects the short.
-# ---------------------------------------------------------------------------
-
-
-def test_collect_intents_never_builds_short_on_long_only_venue() -> None:
-    """An overshoot-up window fades SHORT (``micro_reversion``). On OKX (spot,
-    long-only) that short is NEVER collected — gated upstream of construction —
-    while OKX still collects longs and the ``drops_short`` counter records the
-    gate firing. The SAME window on Capital (bidirectional CFD) DOES collect the
-    short."""
-    now_ts = int(time.time())
-    # chop regime → micro_reversion is regime-active on OKX (full signal set).
-    overshoot_up = _overshoot_window(now_ts, +1)
-
-    eng_okx = TickEngineState(cfg=TickEngineConfig(shadow=False))
-    okx_intents = _collect_intents(
-        eng_okx, venue=VENUE, symbol=SYMBOL, window=overshoot_up,
-        regime="chop", now_ts=now_ts,
-    )
-    # No SHORT intent survives construction on the long-only spot venue.
-    assert all(i.side != "short" for i in okx_intents), (
-        "OKX (long-only spot) must never CONSTRUCT a short intent — gated "
-        "upstream of intent construction (not generate-then-drop)"
-    )
-    # The fade WOULD have fired a short here, so the upstream gate registered it.
-    assert eng_okx.drops_short >= 1, (
-        "the upstream long-only short gate must still record the drop in "
-        "drops_short telemetry"
-    )
-
-    # Same window on Capital (bidirectional CFD): the short IS collected.
-    eng_cap = TickEngineState(cfg=TickEngineConfig(shadow=False))
-    cap_intents = _collect_intents(
-        eng_cap, venue=CAP_VENUE, symbol=CAP_SYMBOL, window=overshoot_up,
-        regime="chop", now_ts=now_ts,
-    )
-    assert any(i.side == "short" for i in cap_intents), (
-        "Capital (bidirectional CFD) must still collect the micro_reversion short"
-    )
-    assert eng_cap.drops_short == 0, (
-        "no short is gated on a bidirectional venue"
-    )
-
-
-def test_collect_intents_still_builds_long_on_long_only_venue() -> None:
-    """The upstream gate is direction-neutral: a LONG on OKX (a burst-up window
-    firing ``burst_rider`` long) is unaffected — collected, never gated."""
-    now_ts = int(time.time())
-    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
-    intents = _collect_intents(
-        eng, venue=VENUE, symbol=SYMBOL, window=_burst_window(now_ts, +1),
-        regime="bull_trend", now_ts=now_ts,
-    )
-    assert any(i.side == "long" for i in intents), (
-        "a long on a long-only venue must still be collected"
-    )
-    assert eng.drops_short == 0, "a long is never gated by the short check"
-
-
-@pytest.mark.asyncio
-async def test_capital_tick_path_is_fade_only(memdb: sqlite3.Connection) -> None:
-    """End-to-end on Capital: an overshoot window in a chop regime opens a
-    reversion (fade) position — and NO momentum/flow entry is ever produced.
-    Proves the restriction routes (does not block): the fade edge still fires."""
-    from polaris.core.isolation.allocator_fence import reset_process_fence
-
-    reset_process_fence()  # rebind the process fence to this test's memdb conn
-    now_ts = int(time.time())
-    now_mono = time.monotonic()
-    _seed_capital(memdb, regime="chop", now_ts=now_ts)
-    writer = FakeQuoteWriter()
-    # Stretched-up mid with exhausting (opposing) flow → micro_reversion SHORT
-    # (Capital is bidirectional CFD, so a short is allowed).
-    writer.set_stream(CAP_INSTRUMENT, _overshoot_window(now_ts, +1), now_mono)
-    state = ProdLoopState()
-    state.quote_writer = writer  # type: ignore[assignment]
-    eng = TickEngineState(cfg=TickEngineConfig(shadow=False))
-
-    await _run_entries(
-        memdb, state, eng, now_ts=now_ts, now_mono=now_mono,
-        okx_adapter=None, capital_session=None, alpaca_adapter=None,
-        real_roundtrip=False, focus=_focus_capital(), regime_cache={},
-    )
-
-    assert eng.orders == 1, "the overshoot fade must still open on Capital"
-    trade = state.open_trades[0]
-    assert trade.venue == CAP_VENUE and trade.symbol == CAP_SYMBOL
-    assert trade.side == "short", "a stretched-up mid fades short"
-    pid = trade.position_id
-    assert pid is not None
-    # The opened position is the reversion family (drives the fast-scalp exit).
-    assert eng.family_by_position[pid] == "reversion"
 
 
 # ---------------------------------------------------------------------------

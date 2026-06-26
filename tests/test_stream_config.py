@@ -216,7 +216,7 @@ def test_stream_rosters_match_current_strategy_venue_mapping() -> None:
     a = resolve_stream("okx")
     b = resolve_stream("capital")
     assert a.strategy_roster == frozenset(
-        {"volume_burst", "tsmom", "rsi_bb_pullback", "spot_donchian"}
+        {"volume_burst", "rsi_bb_pullback", "spot_donchian"}
     )
     assert b.strategy_roster == frozenset(
         {"fx_breakout_basket", "xau_indices_trend", "session_breakout"}

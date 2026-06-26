@@ -20,7 +20,7 @@ from polaris.core.pipeline.gate_state import GateDecision, GateResult
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts.production_paper_loop import ProdLoopState
 from polaris.storage.schema import ALL_DDL
-from polaris.strategies import RawSignal, TSMOMStrategy
+from polaris.strategies import RawSignal, SpotDonchianStrategy
 
 NOW = 1_780_000_000
 
@@ -85,7 +85,7 @@ async def _run(
         return trade
 
     await run_signal_mod.run_pipeline_for_signal(
-        conn=conn, haiku=None, state=state, strategy=TSMOMStrategy(), sig=sig,
+        conn=conn, haiku=None, state=state, strategy=SpotDonchianStrategy(), sig=sig,
         venue="okx", symbol="BTC-USDT", asset_class="crypto",
         underlying_group_id="crypto:BTC", regime="bull_trend",
         bars_atr_pct=0.01, last_price=100.0, universe_rows=[], now_ts=NOW,

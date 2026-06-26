@@ -28,8 +28,8 @@ from polaris.strategies import (
     MarketView,
     RSIBBPullbackStrategy,
     SpotDonchianStrategy,
-    TSMOMStrategy,
     VolumeBurstStrategy,
+    XAUIndicesTrendStrategy,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,22 +100,6 @@ def test_behavior0_volume_burst_default_unchanged() -> None:
         "volume_burst", "BTC-USDT", "long", 0.775, 0.675, 10,
         "vol_z=3.50>break", "spot_intraday_event",
         (("atr_pct", "0.00100"), ("vol_z", "3.50")),
-    )
-
-
-def test_behavior0_tsmom_default_unchanged() -> None:
-    bars = _make_bars(30, base_close=100.0, drift=1.0)
-    mv = MarketView(
-        symbol="ETH-USDT", venue="okx", timeframe="1H",
-        bars=bars, last_price=bars[-1].close, spread_bps=3.0,
-        momentum_20bar=0.10,
-    )
-    sig = TSMOMStrategy().generate_raw_signal(mv)
-    # Frozen: MOMENTUM_GAIN=5.0, scored=0.5+5*0.1=1.0, strength=1.0, ttl=4.
-    assert _signal_tuple(sig) == (
-        "tsmom", "ETH-USDT", "long", 1.0, 1.0, 4,
-        "tsmom_20bar=0.1000", "spot_cross_sectional_momo",
-        (("momentum_20", "0.1000"),),
     )
 
 
@@ -233,12 +217,12 @@ def test_grid_full_when_under_cap() -> None:
 
 
 def test_strategy_with_no_entry_knob_has_empty_grid() -> None:
-    # tsmom / xau_indices_trend / equity_tsmom have a bare momentum>0 trigger:
-    # NO entry-set knob -> empty grid (default-only evaluation downstream).
-    variants, truncated = enumerate_grid(TSMOMStrategy, cap=GRID_TOTAL_CAP)
+    # xau_indices_trend has a bare momentum>0 trigger: NO entry-set knob ->
+    # empty grid (default-only evaluation downstream).
+    variants, truncated = enumerate_grid(XAUIndicesTrendStrategy, cap=GRID_TOTAL_CAP)
     assert variants == []
     assert truncated is False
-    assert varyable_params("tsmom") == ()
+    assert varyable_params("xau_indices_trend") == ()
 
 
 def test_grid_values_within_bounds() -> None:
@@ -297,7 +281,7 @@ def test_make_variant_rejects_removed_knobs() -> None:
     # must never silently no-op).
     for cls, key in (
         (VolumeBurstStrategy, "ttl_bars"),
-        (TSMOMStrategy, "momentum_gain"),
+        (XAUIndicesTrendStrategy, "momentum_gain"),
     ):
         with pytest.raises(ValueError):
             make_variant(cls, {key: 1.0})
@@ -317,7 +301,6 @@ def test_varyable_params_helper_matches_class_attrs() -> None:
     # (so make_variant can override it via subclassing).
     name_to_cls = {
         "volume_burst": VolumeBurstStrategy,
-        "tsmom": TSMOMStrategy,
         "rsi_bb_pullback": RSIBBPullbackStrategy,
         "spot_donchian": SpotDonchianStrategy,
     }

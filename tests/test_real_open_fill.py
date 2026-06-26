@@ -363,9 +363,10 @@ async def test_pipeline_threads_alpaca_adapter_to_reserve(
         trade.position_id = "pos_eq_spy"
         return trade
 
-    equity_strat = next(
-        s for s in _all_strategies() if s.metadata.strategy_id == "equity_tsmom"
-    )
+    # The Alpaca adapter is threaded by VENUE, not by the strategy object — the
+    # equity_* strategies were KILLed, so any preserved strategy carries the
+    # alpaca/equity signal through the pipeline for this adapter-threading check.
+    carrier_strat = _all_strategies()[0]
     eq_sig = RawSignal(
         signal_id="eq_thread", strategy_id="equity_tsmom", symbol="AAPL",
         side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
@@ -373,7 +374,7 @@ async def test_pipeline_threads_alpaca_adapter_to_reserve(
     )
     await run_pipeline_for_signal(
         conn=memdb, haiku=StubGPTClient(), state=ProdLoopState(),
-        strategy=equity_strat, sig=eq_sig, venue="alpaca",
+        strategy=carrier_strat, sig=eq_sig, venue="alpaca",
         symbol="AAPL", asset_class="equity",
         underlying_group_id="equity:AAPL", regime="bull_trend",
         bars_atr_pct=0.02, last_price=190.0,

@@ -50,7 +50,6 @@ from polaris.strategies import (
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
-    TSMOMStrategy,
     VolumeBurstStrategy,
     XAUIndicesTrendStrategy,
 )
@@ -137,7 +136,6 @@ def _stub_bars(n: int, *, base: float = 60_000.0, drift: float = 0.5) -> list[Ba
 def _okx_strategies() -> list[BaseStrategy]:
     return [
         VolumeBurstStrategy(),
-        TSMOMStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
     ]

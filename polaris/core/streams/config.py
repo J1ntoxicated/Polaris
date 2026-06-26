@@ -189,7 +189,7 @@ STREAMS: dict[StreamId, StreamConfig] = {
         adapter_ref="OKXAdapter",
         universe_source="okx_tickers",
         strategy_roster=frozenset(
-            {"volume_burst", "tsmom", "rsi_bb_pullback", "spot_donchian"}
+            {"volume_burst", "rsi_bb_pullback", "spot_donchian"}
         ),
         sizing_profile=SizingProfile(
             leverage_source="fixed_1",
@@ -245,9 +245,12 @@ STREAMS: dict[StreamId, StreamConfig] = {
         allow_short=False,  # P0 long-only
         adapter_ref="AlpacaAdapter",
         universe_source="alpaca_assets",
-        strategy_roster=frozenset(
-            {"equity_tsmom", "equity_rsi_bb_pullback", "equity_gap_go"}
-        ),
+        # Track-C equity strategies (equity_tsmom / equity_rsi_bb_pullback /
+        # equity_gap_go) were KILLed; the roster is now empty. The C stream
+        # registration (leverage / caps / dispatch / reject codes) stays so
+        # resolve_stream("alpaca") keeps resolving — only the roster metadata is
+        # emptied.
+        strategy_roster=frozenset(),
         sizing_profile=SizingProfile(
             leverage_source="fixed_1",
             leverage=1.0,  # cash equity — INVARIANT, no leverage

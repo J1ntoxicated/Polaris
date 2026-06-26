@@ -136,14 +136,16 @@ def _sandbox() -> sqlite3.Connection:
     return conn
 
 
-def _uptrend_then_drop_bars(n: int = 60) -> list[Bar]:
-    """1H bars: a long uptrend (fires tsmom long) then a drop, so the open
-    position is ticked through ``_tick_exit`` (the FSM is exercised)."""
+def _uptrend_then_drop_bars(n: int = 95) -> list[Bar]:
+    """1H bars: a long Donchian-breakout uptrend (fires a 1H breakout long, e.g.
+    spot_donchian) then a drop, so the open position is ticked through
+    ``_tick_exit`` (the FSM is exercised at the 1H capped loser-timeout)."""
     bars: list[Bar] = []
     price = 100.0
+    n_up = 70
     for i in range(n):
-        # uptrend for the first 40 bars, then a steady decline.
-        step = 0.01 if i < 40 else -0.01
+        # uptrend for the first n_up bars, then a steady decline.
+        step = 0.012 if i < n_up else -0.012
         nxt = price * (1.0 + step)
         bars.append(
             Bar(
@@ -164,7 +166,7 @@ def test_replay_exit_passes_live_loser_timeout_for_strategy(
 ) -> None:
     """Divergence guard: every ``evaluate_exit`` the replay engine fires must be
     passed ``loser_timeout_sec`` == the LIVE recalc value for that position's
-    strategy (1H tsmom -> 7200s, NOT the flat 900s default).
+    strategy (a 1H strategy -> capped drift backstop, NOT the flat 900s default).
 
     We spy on BOTH seams the engine imports: ``_loser_timeout_for_strategy``
     (records which strategy_id the engine resolved) and ``evaluate_exit``

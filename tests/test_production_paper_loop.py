@@ -351,13 +351,13 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 12 (+3 equity T12, +fx_range_fade, +ema_crossover)."""
+    """The strategy list is exactly 8 (equity + tsmom strategies were KILLed)."""
     strategies = _all_strategies()
-    assert len(strategies) == 12
+    assert len(strategies) == 8
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" in ids
     assert "session_breakout" in ids
-    assert "equity_gap_go" in ids
+    assert "fx_range_fade" in ids
 
 
 @pytest.mark.asyncio
@@ -429,9 +429,9 @@ async def test_g1_universe_scanner_invoked(memdb: sqlite3.Connection) -> None:
 
 
 def test_g2_emit_no_cap() -> None:
-    """The 12-strategy list is exposed without an emitted[:3] cap (T12)."""
+    """The strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
-    assert len(strategies) == 12  # Day 8 spec D — no cap (+3 equity, +fx_range_fade, +ema_crossover)
+    assert len(strategies) == 8  # no cap; equity + tsmom strategies KILLed
 
 
 @pytest.mark.asyncio

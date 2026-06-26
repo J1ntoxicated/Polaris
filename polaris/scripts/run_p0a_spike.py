@@ -86,11 +86,6 @@ DEFAULT_INSTRUMENTS: dict[str, tuple[tuple[str, ...], str]] = {
         ("okx:BTC-USDT", "okx:ALGO-USDT", "okx:INJ-USDT", "okx:NEAR-USDT", "okx:ETH-USDT"),
         "1m",
     ),
-    "tsmom": (
-        ("okx:BTC-USDT", "okx:FLOKI-USDT", "okx:HYPE-USDT", "okx:ALGO-USDT",
-         "okx:ETH-USDT", "okx:INJ-USDT", "okx:ADA-USDT"),
-        "1H",
-    ),
     "rsi_bb_pullback": (
         ("okx:BTC-USDT", "okx:ETH-USDT", "okx:ALGO-USDT", "okx:INJ-USDT", "okx:ADA-USDT"),
         "1H",

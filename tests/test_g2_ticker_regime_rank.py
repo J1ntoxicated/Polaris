@@ -53,16 +53,16 @@ def test_trend_regime_ticker_ranks_trend_strategy_ahead_of_counter_trend() -> No
     best-fit POOL member → it ranks AHEAD of a counter-trend strategy on the
     SAME ticker. Both still run (flow_not_block) — only ORDER changes."""
     regime = "bull_trend"
-    trend_pen = regime_rank_penalty(strategy="tsmom", regime=regime)
+    trend_pen = regime_rank_penalty(strategy="spot_donchian", regime=regime)
     counter_pen = regime_rank_penalty(strategy="rsi_bb_pullback", regime=regime)
 
     specs = [
         _spec("rsi_bb_pullback", counter_pen),  # mis-fit, intentionally first
-        _spec("tsmom", trend_pen),  # best-fit
+        _spec("spot_donchian", trend_pen),  # best-fit
     ]
     ordered = order_specs_by_rank(specs)
 
-    assert [s.strategy_id for s in ordered] == ["tsmom", "rsi_bb_pullback"]
+    assert [s.strategy_id for s in ordered] == ["spot_donchian", "rsi_bb_pullback"]
     # flow_not_block: nothing dropped — the mis-fit strategy is still in the batch.
     assert len(ordered) == 2
 
@@ -72,35 +72,35 @@ def test_chop_regime_ticker_ranks_counter_trend_ahead_of_trend() -> None:
     strategy is now the best fit → it ranks ahead. Proves per-ticker tailoring:
     the order depends on the ticker's live regime, not a fixed per-strategy rule."""
     regime = "chop"
-    trend_pen = regime_rank_penalty(strategy="tsmom", regime=regime)
+    trend_pen = regime_rank_penalty(strategy="spot_donchian", regime=regime)
     counter_pen = regime_rank_penalty(strategy="rsi_bb_pullback", regime=regime)
 
     specs = [
-        _spec("tsmom", trend_pen),
+        _spec("spot_donchian", trend_pen),
         _spec("rsi_bb_pullback", counter_pen),
     ]
     ordered = order_specs_by_rank(specs)
 
-    assert [s.strategy_id for s in ordered] == ["rsi_bb_pullback", "tsmom"]
+    assert [s.strategy_id for s in ordered] == ["rsi_bb_pullback", "spot_donchian"]
     assert len(ordered) == 2
 
 
 def test_same_strategy_two_tickers_different_regime_ranks_differently() -> None:
-    """The per-ticker-tailored claim: one strategy (tsmom) on TWO tickers — one
+    """The per-ticker-tailored claim: one strategy (spot_donchian) on TWO tickers — one
     in a trend regime, one in chop — gets DIFFERENT priority. The trend-ticker
     instance ranks ahead of the chop-ticker instance (better fit = first claim)."""
-    trend_pen = regime_rank_penalty(strategy="tsmom", regime="bull_trend")
-    chop_pen = regime_rank_penalty(strategy="tsmom", regime="chop")
+    trend_pen = regime_rank_penalty(strategy="spot_donchian", regime="bull_trend")
+    chop_pen = regime_rank_penalty(strategy="spot_donchian", regime="chop")
     assert trend_pen < chop_pen  # tailored: same strategy, different ticker regime
 
     specs = [
-        _spec("tsmom@CHOPTICKER", chop_pen),
-        _spec("tsmom@TRENDTICKER", trend_pen),
+        _spec("spot_donchian@CHOPTICKER", chop_pen),
+        _spec("spot_donchian@TRENDTICKER", trend_pen),
     ]
     ordered = order_specs_by_rank(specs)
     assert [s.strategy_id for s in ordered] == [
-        "tsmom@TRENDTICKER",
-        "tsmom@CHOPTICKER",
+        "spot_donchian@TRENDTICKER",
+        "spot_donchian@CHOPTICKER",
     ]
 
 
@@ -114,7 +114,7 @@ def test_pdt_flagged_entry_sinks_below_any_regime_misfit() -> None:
     mere regime mis-fit (penalty < 1.0) even when the PDT entry is otherwise a
     perfect regime fit. Integrity > regime-fit secondary sort (additive scale)."""
     pdt_plus_perfect_fit = 1.0 + regime_rank_penalty(
-        strategy="tsmom", regime="bull_trend"
+        strategy="spot_donchian", regime="bull_trend"
     )  # 1.0 + 0.0
     regime_misfit_no_pdt = 0.0 + REGIME_RANK_PENALTY_DAMPEN  # < 1.0
 
@@ -185,7 +185,7 @@ def test_lower_penalty_spec_coroutine_is_started_first_and_none_dropped() -> Non
 
     regime = "bull_trend"
     specs = [
-        _spec_recording("tsmom", regime_rank_penalty(strategy="tsmom", regime=regime)),
+        _spec_recording("spot_donchian", regime_rank_penalty(strategy="spot_donchian", regime=regime)),
         _spec_recording(
             "rsi_bb_pullback",
             regime_rank_penalty(strategy="rsi_bb_pullback", regime=regime),
@@ -200,7 +200,7 @@ def test_lower_penalty_spec_coroutine_is_started_first_and_none_dropped() -> Non
     conn.close()
 
     # Both ran (flow_not_block — the mis-fit was not dropped/skipped).
-    assert {r["strategy_id"] for r in results} == {"tsmom", "rsi_bb_pullback"}
+    assert {r["strategy_id"] for r in results} == {"spot_donchian", "rsi_bb_pullback"}
     assert all(r["exception"] is None for r in results)
-    # The best-fit (tsmom in a trend regime) was CREATED/STARTED first.
-    assert start_order[0] == "tsmom"
+    # The best-fit (spot_donchian in a trend regime) was CREATED/STARTED first.
+    assert start_order[0] == "spot_donchian"

@@ -50,31 +50,24 @@ REGIME_ALIGN_DAMPEN: Final[float] = 0.8
 """Misaligned strategy/regime — down-weighted, never zeroed (redistribution)."""
 
 # Trend-following / breakout family: edge is captured when price trends.
-# Ids verified against polaris.strategies.STRATEGY_REGISTRY (all live ids).
-# equity_tsmom (cross-sectional momentum) and equity_gap_go (gap-and-go
-# CONTINUATION) are trend-family; previously omitted so the equity strategies
-# got NO regime alignment (silently scored neutral). Added so every live
-# strategy is regime-scored.
+# Ids verified against polaris.strategies.STRATEGY_REGISTRY (all live ids) — so
+# every live trend strategy is regime-scored (an omitted id would be silently
+# scored neutral).
 _TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     {
-        "tsmom",
         "spot_donchian",
         "fx_breakout_basket",
         "session_breakout",
         "xau_indices_trend",
         "volume_burst",
-        "equity_tsmom",
-        "equity_gap_go",
     }
 )
 # Counter-trend / mean-reversion: edge is captured in range-bound chop.
-# equity_rsi_bb_pullback (equity mean-reversion) and fx_range_fade (FX
-# Bollinger fade in low-ADX ranges) are counter-trend; previously omitted so
-# they too were scored neutral regardless of regime. Added per registry.
+# fx_range_fade (FX Bollinger fade in low-ADX ranges) is counter-trend; verified
+# per registry so every live counter-trend strategy is regime-scored.
 _COUNTER_TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     {
         "rsi_bb_pullback",
-        "equity_rsi_bb_pullback",
         "fx_range_fade",
     }
 )

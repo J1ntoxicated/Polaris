@@ -1,24 +1,23 @@
-"""Polaris strategy registry — 7 P0 signal generators (ADR-008).
+"""Polaris strategy registry — signal generators (ADR-008).
 
 Each strategy = ``BaseStrategy`` subclass that emits ``RawSignal | None`` from
 ``generate_raw_signal(market_view)``. Lifecycle (entry / exit / swap) belongs
 to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
 
-Track A — OKX SPOT (4):
+Track A — OKX SPOT:
   - ``volume_burst``           (correlation_group=spot_intraday_event)
-  - ``tsmom``                  (correlation_group=spot_cross_sectional_momo)
   - ``rsi_bb_pullback``        (correlation_group=spot_mean_reversion)
   - ``spot_donchian``          (correlation_group=spot_breakout)
 
-Track B — Capital CFD (3):
+Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
   - ``xau_indices_trend``      (correlation_group=cfd_index_commodity_trend)
   - ``session_breakout``       (correlation_group=cfd_session_event)
 
-Track C — Alpaca US equity (3, additive — A/B unchanged):
-  - ``equity_tsmom``           (correlation_group=equity_cross_sectional_momo)
-  - ``equity_rsi_bb_pullback`` (correlation_group=equity_mean_reversion)
-  - ``equity_gap_go``          (correlation_group=equity_gap)
+(``tsmom``, ``equity_tsmom``, ``equity_rsi_bb_pullback``, ``equity_gap_go`` were
+KILLed 2026-06-26 — gross-negative entry expectancy (negative BEFORE fees,
+cross-validated over two windows). Their modules stay read-only for research;
+they are no longer registered or dispatched.)
 """
 
 from __future__ import annotations
@@ -35,32 +34,24 @@ from polaris.strategies.base import (
 from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
-from polaris.strategies.equity_gap_go import EquityGapGoStrategy
-from polaris.strategies.equity_rsi_bb_pullback import EquityRSIBBPullbackStrategy
-from polaris.strategies.equity_tsmom import EquityTSMOMStrategy
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
-from polaris.strategies.tsmom import TSMOMStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
 
 # Registry: strategy_id → factory. ``factory()`` returns a fresh instance.
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     VolumeBurstStrategy.metadata.strategy_id: VolumeBurstStrategy,
-    TSMOMStrategy.metadata.strategy_id: TSMOMStrategy,
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
     SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
     FXRangeFadeStrategy.metadata.strategy_id: FXRangeFadeStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
     SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
-    EquityTSMOMStrategy.metadata.strategy_id: EquityTSMOMStrategy,
-    EquityRSIBBPullbackStrategy.metadata.strategy_id: EquityRSIBBPullbackStrategy,
-    EquityGapGoStrategy.metadata.strategy_id: EquityGapGoStrategy,
     EMACrossoverStrategy.metadata.strategy_id: EMACrossoverStrategy,
     ConnorsRSI2Strategy.metadata.strategy_id: ConnorsRSI2Strategy,
     SupertrendStrategy.metadata.strategy_id: SupertrendStrategy,
@@ -81,9 +72,6 @@ __all__ = [
     "CCIReversionStrategy",
     "ConnorsRSI2Strategy",
     "EMACrossoverStrategy",
-    "EquityGapGoStrategy",
-    "EquityRSIBBPullbackStrategy",
-    "EquityTSMOMStrategy",
     "FXBreakoutBasketStrategy",
     "FXRangeFadeStrategy",
     "MarketView",
@@ -94,7 +82,6 @@ __all__ = [
     "SpotDonchianStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",
-    "TSMOMStrategy",
     "VolumeBurstStrategy",
     "XAUIndicesTrendStrategy",
     "all_strategies",

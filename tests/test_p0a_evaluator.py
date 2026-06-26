@@ -399,10 +399,39 @@ def test_overfit_is_passes_oos_fails_same_variant(
     baselines — so we DISABLE the cap here, pinning the bot's IS/OOS trade
     distribution to the evaluator's known-good geometry independently of that
     default. No assertion is weakened; the trading code is untouched.
+
+    ``tsmom`` was de-registered from ``STRATEGY_REGISTRY`` (KILL) but its module
+    stays a read-only research asset; the overfit-evaluator proof still uses the
+    class directly. The exit FSM resolves the stale-loser timeout from the
+    strategy's timeframe via the registry, so a de-registered id falls back to
+    the flat 900s default and re-fragments the IS geometry. We therefore pin the
+    loser-timeout to the strategy's OWN 1H horizon (the pre-KILL value), keeping
+    the evaluator's known-good IS/OOS geometry exactly as before.
     """
+    from polaris.scripts._production_recalc_exit import _loser_timeout_for_strategy
+
     monkeypatch.setattr(
         "polaris.scripts._production_recalc_exit.LOSER_TIMEOUT_CAP_SEC",
         float("inf"),
+    )
+
+    def _tsmom_1h_loser_timeout(strategy_id: str) -> float:
+        # tsmom is de-registered → resolve its 1H horizon via the preserved class
+        # (identical to the pre-KILL registry value); other ids unchanged.
+        if strategy_id == "tsmom":
+            from polaris.core.isolation.reentry import bar_seconds
+            from polaris.scripts._production_recalc_exit import (
+                EXIT_LOSER_TIMEOUT_MIN_BARS,
+                EXIT_LOSER_TIMEOUT_SEC,
+            )
+
+            tf = TSMOMStrategy.metadata.timeframe
+            return max(EXIT_LOSER_TIMEOUT_SEC, EXIT_LOSER_TIMEOUT_MIN_BARS * bar_seconds(tf))
+        return _loser_timeout_for_strategy(strategy_id)
+
+    monkeypatch.setattr(
+        "polaris.core.replay.engine._loser_timeout_for_strategy",
+        _tsmom_1h_loser_timeout,
     )
     bars = _is_strong_oos_loses_bars(n_is=1500, n_oos=600)
     variant = _variant(TSMOMStrategy, {})

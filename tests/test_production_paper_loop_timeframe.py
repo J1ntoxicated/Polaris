@@ -119,7 +119,6 @@ def test_strategy_metadata_timeframe_used() -> None:
     by_id: dict[str, BaseStrategy] = {s.metadata.strategy_id: s for s in strats}
     expected: dict[str, str] = {
         "volume_burst": "1m",
-        "tsmom": "1H",
         "rsi_bb_pullback": "15m",
         "spot_donchian": "1H",
         "ema_crossover": "1H",
@@ -127,10 +126,7 @@ def test_strategy_metadata_timeframe_used() -> None:
         "fx_range_fade": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",
-        # Track C — Alpaca US equity (T12, additive).
-        "equity_tsmom": "1D",
-        "equity_rsi_bb_pullback": "1D",
-        "equity_gap_go": "1D",
+        # tsmom + the equity_* strategies (1D) were KILLed.
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

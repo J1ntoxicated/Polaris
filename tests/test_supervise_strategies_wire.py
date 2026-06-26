@@ -214,19 +214,19 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
     ) -> None:
         sid = strategy.metadata.strategy_id
         call_log.append(sid)
-        if sid == "tsmom":
-            raise RuntimeError("simulated TSMOM crash")
+        if sid == "spot_donchian":
+            raise RuntimeError("simulated spot_donchian crash")
 
     monkeypatch.setattr(tick, "run_pipeline_for_signal", _fake_pipeline)
 
     # Build supervision specs by hand (mimics what _run_tick does) so we
     # can assert siblings continue without spinning up the full DB seed.
     from polaris.strategies import (
-        TSMOMStrategy,
+        SpotDonchianStrategy,
         VolumeBurstStrategy,
     )
 
-    strategies = [VolumeBurstStrategy(), TSMOMStrategy()]
+    strategies = [VolumeBurstStrategy(), SpotDonchianStrategy()]
     specs: list[PipelineTaskSpec] = []
     for s in strategies:
         sid = s.metadata.strategy_id
@@ -239,13 +239,13 @@ async def test_full_loop_one_strategy_failure_does_not_kill_others(
     results = await supervise_pipeline_tasks(specs, conn=memdb, now_ts=NOW)
     by_id = {r["strategy_id"]: r for r in results}
     assert by_id["volume_burst"]["exception"] is None
-    assert by_id["tsmom"]["exception"] is not None
-    # Both strategies were invoked — TSMOM's failure didn't cancel VB.
+    assert by_id["spot_donchian"]["exception"] is not None
+    # Both strategies were invoked — spot_donchian's failure didn't cancel VB.
     assert "volume_burst" in call_log
-    assert "tsmom" in call_log
-    # Fault recorded against tsmom specifically.
+    assert "spot_donchian" in call_log
+    # Fault recorded against spot_donchian specifically.
     n = memdb.execute(
-        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id = 'tsmom'"
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id = 'spot_donchian'"
     ).fetchone()[0]
     assert int(n) == 1
     _ = state

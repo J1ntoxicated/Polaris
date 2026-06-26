@@ -65,9 +65,9 @@ def _seed_bars(
 
 
 def test_strategy_timeframe_resolves_registry() -> None:
-    assert strategy_timeframe("tsmom") == "1H"
+    assert strategy_timeframe("spot_donchian") == "1H"
     assert strategy_timeframe("volume_burst") == "1m"
-    assert strategy_timeframe("equity_tsmom") == "1D"
+    assert strategy_timeframe("connors_rsi2") == "1D"
     assert strategy_timeframe("session_breakout") == "5m"
 
 

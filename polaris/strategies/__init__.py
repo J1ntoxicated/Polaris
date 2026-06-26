@@ -7,7 +7,8 @@ to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
 Track A — OKX SPOT:
   - ``volume_burst``           (correlation_group=spot_intraday_event)
   - ``rsi_bb_pullback``        (correlation_group=spot_mean_reversion)
-  - ``spot_donchian``          (correlation_group=spot_breakout)
+  - ``spot_donchian``          (correlation_group=spot_breakout, 1H)
+  - ``bar_breakout_run``       (correlation_group=bar_momentum_breakout, 1D position)
 
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
@@ -22,6 +23,7 @@ they are no longer registered or dispatched.)
 
 from __future__ import annotations
 
+from polaris.strategies.bar_breakout_run import BarBreakoutRunStrategy
 from polaris.strategies.base import (
     COLD_START_NEUTRAL_STRENGTH,
     AltDataView,
@@ -48,6 +50,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     VolumeBurstStrategy.metadata.strategy_id: VolumeBurstStrategy,
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
     SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
+    BarBreakoutRunStrategy.metadata.strategy_id: BarBreakoutRunStrategy,
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
     FXRangeFadeStrategy.metadata.strategy_id: FXRangeFadeStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
@@ -66,6 +69,7 @@ def all_strategies() -> list[BaseStrategy]:
 
 __all__ = [
     "AltDataView",
+    "BarBreakoutRunStrategy",
     "BarView",
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",

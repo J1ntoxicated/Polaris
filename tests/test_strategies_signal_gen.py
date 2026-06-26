@@ -579,13 +579,14 @@ def test_correlation_group_id_unique_per_strategy() -> None:
         f"correlation groups not unique: {seen}"
     )
     # 11 = 15 minus the 4 edgeless strategies KILLed 2026-06-26
-    # (tsmom, equity_tsmom, equity_rsi_bb_pullback, equity_gap_go).
-    assert len(seen) == 11, f"correlation groups not unique: {seen}"
+    # (tsmom, equity_tsmom, equity_rsi_bb_pullback, equity_gap_go); +1 for
+    # bar_breakout_run (daily Donchian-40 breakout) = 12.
+    assert len(seen) == 12, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    # 11 after the 4 edgeless KILLs 2026-06-26 (was 15).
-    assert len(STRATEGY_REGISTRY) == 11
+    # 11 after the 4 edgeless KILLs 2026-06-26 (was 15); +bar_breakout_run = 12.
+    assert len(STRATEGY_REGISTRY) == 12
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

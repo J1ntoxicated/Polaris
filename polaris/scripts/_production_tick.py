@@ -68,6 +68,7 @@ from polaris.scripts._production_pipeline import (
 from polaris.scripts._production_recalc import recalc_active_positions
 from polaris.scripts._production_state import ProdLoopState
 from polaris.strategies import (
+    BarBreakoutRunStrategy,
     BaseStrategy,
     EMACrossoverStrategy,
     FXBreakoutBasketStrategy,
@@ -249,6 +250,7 @@ def _all_strategies() -> list[BaseStrategy]:
         VolumeBurstStrategy(),
         RSIBBPullbackStrategy(),
         SpotDonchianStrategy(),
+        BarBreakoutRunStrategy(),
         EMACrossoverStrategy(),
         FXBreakoutBasketStrategy(),
         FXRangeFadeStrategy(),

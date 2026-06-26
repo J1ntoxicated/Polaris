@@ -126,6 +126,7 @@ def test_strategy_metadata_timeframe_used() -> None:
         "fx_range_fade": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",
+        "bar_breakout_run": "1D",  # daily/position horizon (Donchian-40 breakout)
         # tsmom + the equity_* strategies (1D) were KILLed.
     }
     assert set(by_id) == set(expected)

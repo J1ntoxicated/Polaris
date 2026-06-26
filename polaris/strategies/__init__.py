@@ -5,10 +5,14 @@ Each strategy = ``BaseStrategy`` subclass that emits ``RawSignal | None`` from
 to the AI gate pipeline (Layer 2) and the live-recalc engine (Layer 6).
 
 Track A — OKX SPOT:
-  - ``volume_burst``           (correlation_group=spot_intraday_event)
-  - ``rsi_bb_pullback``        (correlation_group=spot_mean_reversion)
-  - ``spot_donchian``          (correlation_group=spot_breakout, 1H)
-  - ``bar_breakout_run``       (correlation_group=bar_momentum_breakout, 1D position)
+  - ``volume_burst``               (correlation_group=spot_intraday_event)
+  - ``rsi_bb_pullback``            (correlation_group=spot_mean_reversion)
+  - ``spot_donchian``              (correlation_group=spot_breakout, 1H)
+  - ``bar_breakout_run``           (correlation_group=bar_momentum_breakout, 1D)
+  - ``okx_donchian_55_breakout``   (correlation_group=okx_donchian_55_breakout, 1D)
+  - ``tsmom_12_1_multiasset``      (correlation_group=tsmom_position_momentum, 1D)
+  - ``macd_ema_trend_pullback``    (correlation_group=macd_ema_trend_continuation, 1D)
+  - ``donchian_turtle_breakout``   (correlation_group=turtle_donchian_breakout, 1D)
 
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
@@ -19,6 +23,16 @@ Track B — Capital CFD:
 KILLed 2026-06-26 — gross-negative entry expectancy (negative BEFORE fees,
 cross-validated over two windows). Their modules stay read-only for research;
 they are no longer registered or dispatched.)
+
+(``fx_range_fade`` was un-registered 2026-06-27 — KILLed in the strategy-wave1
+restructure; its module + historical data are preserved read-only, behaviour
+only is severed.)
+
+The four 1D OKX strategies above are the verified fee-beating survivors built in
+the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
+legs deploy live now; the multi-asset strategies' equity-ETF legs (tsmom / macd /
+turtle) are inert until the Alpaca SIP key (#42) routes equity bars
+(degrade-never-crash: an un-routed symbol → no emit, never a crash).
 """
 
 from __future__ import annotations
@@ -35,13 +49,16 @@ from polaris.strategies.base import (
 )
 from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
+from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
-from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
+from polaris.strategies.macd_ema_trend_pullback import MACDEMATrendPullbackStrategy
+from polaris.strategies.okx_donchian_55_breakout import OKXDonchian55BreakoutStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
+from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 from polaris.strategies.xau_indices_trend import XAUIndicesTrendStrategy
 
@@ -51,8 +68,11 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     RSIBBPullbackStrategy.metadata.strategy_id: RSIBBPullbackStrategy,
     SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
     BarBreakoutRunStrategy.metadata.strategy_id: BarBreakoutRunStrategy,
+    OKXDonchian55BreakoutStrategy.metadata.strategy_id: OKXDonchian55BreakoutStrategy,
+    TSMom12_1MultiAssetStrategy.metadata.strategy_id: TSMom12_1MultiAssetStrategy,
+    MACDEMATrendPullbackStrategy.metadata.strategy_id: MACDEMATrendPullbackStrategy,
+    DonchianTurtleBreakoutStrategy.metadata.strategy_id: DonchianTurtleBreakoutStrategy,
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
-    FXRangeFadeStrategy.metadata.strategy_id: FXRangeFadeStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
     SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
     EMACrossoverStrategy.metadata.strategy_id: EMACrossoverStrategy,
@@ -75,10 +95,12 @@ __all__ = [
     "COLD_START_NEUTRAL_STRENGTH",
     "CCIReversionStrategy",
     "ConnorsRSI2Strategy",
+    "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
     "FXBreakoutBasketStrategy",
-    "FXRangeFadeStrategy",
+    "MACDEMATrendPullbackStrategy",
     "MarketView",
+    "OKXDonchian55BreakoutStrategy",
     "RSIBBPullbackStrategy",
     "RawSignal",
     "STRATEGY_REGISTRY",
@@ -86,6 +108,7 @@ __all__ = [
     "SpotDonchianStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",
+    "TSMom12_1MultiAssetStrategy",
     "VolumeBurstStrategy",
     "XAUIndicesTrendStrategy",
     "all_strategies",

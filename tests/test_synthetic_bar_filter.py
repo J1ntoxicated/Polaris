@@ -309,9 +309,13 @@ def test_filter_keeps_exactly_real_count(n_real: int, n_synth: int) -> None:
 
 # Ids the agenda found silently excluded from regime alignment, now covered
 # (verified vs STRATEGY_REGISTRY). The equity ids that were here (equity_tsmom /
-# equity_gap_go / equity_rsi_bb_pullback) were KILLed; fx_range_fade remains.
+# equity_gap_go / equity_rsi_bb_pullback) were KILLed, and fx_range_fade was
+# un-registered in the strategy-wave1 restructure (removed from the counter-trend
+# set too), so both newly-covered tuples are now empty — the invariant guarded by
+# test_alignment_ids_are_real_registry_ids (every alignment id is a live registry
+# id) still holds against the trimmed sets.
 _NEWLY_COVERED_TREND: tuple[str, ...] = ()
-_NEWLY_COVERED_COUNTER = ("fx_range_fade",)
+_NEWLY_COVERED_COUNTER: tuple[str, ...] = ()
 
 
 def test_every_registry_id_has_an_alignment_classification() -> None:

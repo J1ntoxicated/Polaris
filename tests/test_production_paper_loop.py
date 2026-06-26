@@ -351,15 +351,20 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 9 (equity + tsmom strategies were KILLed;
-    +bar_breakout_run daily breakout)."""
+    """The strategy list is exactly 12: strategy-wave1 un-registered fx_range_fade
+    and added the 4 verified 1D survivors (okx_donchian_55 / tsmom_12_1 /
+    macd_ema / donchian_turtle)."""
     strategies = _all_strategies()
-    assert len(strategies) == 9
+    assert len(strategies) == 12
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" in ids
     assert "session_breakout" in ids
-    assert "fx_range_fade" in ids
+    assert "fx_range_fade" not in ids  # KILLed in strategy-wave1
     assert "bar_breakout_run" in ids
+    assert "okx_donchian_55_breakout" in ids
+    assert "tsmom_12_1_multiasset" in ids
+    assert "macd_ema_trend_pullback" in ids
+    assert "donchian_turtle_breakout" in ids
 
 
 @pytest.mark.asyncio
@@ -433,8 +438,8 @@ async def test_g1_universe_scanner_invoked(memdb: sqlite3.Connection) -> None:
 def test_g2_emit_no_cap() -> None:
     """The strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
-    # no cap; equity + tsmom strategies KILLed; +bar_breakout_run = 9.
-    assert len(strategies) == 9
+    # no cap; strategy-wave1: fx_range_fade KILLed, +4 verified 1D survivors = 12.
+    assert len(strategies) == 12
 
 
 @pytest.mark.asyncio

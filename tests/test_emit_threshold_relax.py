@@ -25,7 +25,6 @@ from polaris.strategies import (
     ConnorsRSI2Strategy,
     EMACrossoverStrategy,
     FXBreakoutBasketStrategy,
-    FXRangeFadeStrategy,
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     SpotDonchianStrategy,
@@ -34,6 +33,10 @@ from polaris.strategies import (
 from polaris.strategies.base import BarView, MarketView, RawSignal
 from polaris.strategies.cci_reversion import _cci, _typical
 from polaris.strategies.connors_rsi2 import TREND_FILTER_MA, _rsi, _sma
+
+# fx_range_fade was un-registered (KILLed) in strategy-wave1; the module is
+# preserved so this relaxed-threshold unit test still exercises its entry logic.
+from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
 
 # ---------------------------------------------------------------------------
 # Helpers

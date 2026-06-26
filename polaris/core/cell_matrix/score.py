@@ -63,12 +63,12 @@ _TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     }
 )
 # Counter-trend / mean-reversion: edge is captured in range-bound chop.
-# fx_range_fade (FX Bollinger fade in low-ADX ranges) is counter-trend; verified
-# per registry so every live counter-trend strategy is regime-scored.
+# (fx_range_fade was un-registered in the strategy-wave1 restructure — removed
+# here so this set stays in sync with STRATEGY_REGISTRY: every live counter-trend
+# strategy is regime-scored, and no dead id remains.)
 _COUNTER_TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     {
         "rsi_bb_pullback",
-        "fx_range_fade",
     }
 )
 

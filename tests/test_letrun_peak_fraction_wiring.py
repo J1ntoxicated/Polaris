@@ -36,7 +36,10 @@ from polaris.scripts._production_tick_mfe import (
 # The design-named bar TREND family.
 _BAR_TREND = ("session_breakout", "fx_breakout_basket")
 # REVERSION-bucket bar strategies (their edge is a bounded revert-to-mean).
-_BAR_REVERSION = ("rsi_bb_pullback", "fx_range_fade")
+# (fx_range_fade was un-registered in the strategy-wave1 restructure → its
+# registry-backed bucket now defaults to the let-run TREND default, so it is no
+# longer a live REVERSION bar strategy; rsi_bb_pullback is the remaining one.)
+_BAR_REVERSION = ("rsi_bb_pullback",)
 
 
 # --- bar TREND family arms the peak-fraction floor + wide trail -----------------

@@ -578,15 +578,15 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     assert len(seen) == len(all_strategies()), (
         f"correlation groups not unique: {seen}"
     )
-    # 11 = 15 minus the 4 edgeless strategies KILLed 2026-06-26
-    # (tsmom, equity_tsmom, equity_rsi_bb_pullback, equity_gap_go); +1 for
-    # bar_breakout_run (daily Donchian-40 breakout) = 12.
-    assert len(seen) == 12, f"correlation groups not unique: {seen}"
+    # strategy-wave1 (2026-06-27): fx_range_fade un-registered (−1) and the 4
+    # verified 1D survivors added (+4) on top of the prior 12 → 15, each with a
+    # distinct correlation_group_id.
+    assert len(seen) == 15, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
-    # 11 after the 4 edgeless KILLs 2026-06-26 (was 15); +bar_breakout_run = 12.
-    assert len(STRATEGY_REGISTRY) == 12
+    # strategy-wave1 (2026-06-27): was 12; −fx_range_fade +4 verified survivors = 15.
+    assert len(STRATEGY_REGISTRY) == 15
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

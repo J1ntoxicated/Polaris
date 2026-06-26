@@ -123,11 +123,15 @@ def test_strategy_metadata_timeframe_used() -> None:
         "spot_donchian": "1H",
         "ema_crossover": "1H",
         "fx_breakout_basket": "1H",
-        "fx_range_fade": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",
         "bar_breakout_run": "1D",  # daily/position horizon (Donchian-40 breakout)
-        # tsmom + the equity_* strategies (1D) were KILLed.
+        # strategy-wave1: fx_range_fade KILLed; 4 verified 1D survivors added.
+        "okx_donchian_55_breakout": "1D",
+        "tsmom_12_1_multiasset": "1D",
+        "macd_ema_trend_pullback": "1D",
+        "donchian_turtle_breakout": "1D",
+        # legacy tsmom (cross-sym) + the equity_* strategies (1D) were KILLed.
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

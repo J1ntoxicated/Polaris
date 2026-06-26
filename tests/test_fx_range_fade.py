@@ -4,8 +4,11 @@ guard that keeps it from fading a trending tape (the design-review requirement).
 
 from __future__ import annotations
 
-from polaris.strategies import FXRangeFadeStrategy
+# fx_range_fade was un-registered (KILLed) in the strategy-wave1 restructure; its
+# MODULE is preserved (data/research) so these unit tests still exercise the pure
+# entry logic via the module path (it is no longer exported from the package).
 from polaris.strategies.base import BarView, MarketView
+from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
 
 
 def _bars(n: int, close: float) -> list[BarView]:
@@ -86,7 +89,10 @@ def test_metadata_opts_in_to_take_profit_target() -> None:
 
 def test_profit_target_helper_fade_vs_momentum() -> None:
     from polaris.scripts._production_recalc_exit import _profit_target_for_strategy
-    assert _profit_target_for_strategy("fx_range_fade") == 1.0
-    # A momentum strategy opts out → None → let-winners-run (trend exit) unchanged.
-    assert _profit_target_for_strategy("tsmom") is None
+    # fx_range_fade was un-registered (KILLed) in the strategy-wave1 restructure,
+    # so the registry-backed helper now falls back to None for it (the documented
+    # unregistered-id fallback) even though its module still declares the target.
+    assert _profit_target_for_strategy("fx_range_fade") is None
+    # A REGISTERED momentum strategy opts out → None → let-winners-run unchanged.
+    assert _profit_target_for_strategy("bar_breakout_run") is None
     assert _profit_target_for_strategy("does_not_exist") is None

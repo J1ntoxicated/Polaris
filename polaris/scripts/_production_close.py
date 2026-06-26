@@ -232,6 +232,43 @@ def _synth_okx_mark_close(trade: SimulatedTrade, *, mark: float | None) -> Fill:
     )
 
 
+def _synth_capital_mark_close(trade: SimulatedTrade, *, mark: float | None) -> Fill:
+    """Synthesize a MARK-to-market close Fill for an externally-closed Capital
+    position ([[capital_external_close_reconcile_leak_2026-06-26]]).
+
+    The Capital CFD demo closed the deal itself (EOD flatten / demo expiry /
+    a venue-side stop) before our ``close_position`` order — the venue rejected
+    our close AND no longer lists the dealId. The position WAS real (a persisted
+    entry fill) and DID realise a close at the venue; only OUR booking is missing.
+    No order is submitted (the venue already closed it) — this books THIS
+    position's close at the REAL fresh ``mark`` on its REAL tracked ``base_qty``
+    so it keeps its realised pnl_r in the R ledger (no survivorship bias). The
+    realised PnL itself is recomputed in ``real_pnl_r_from_fills`` from the entry
+    fill's persisted ``size_usd`` (the true CFD exposure) vs this ``fill_price``
+    — the homologous Capital twin of ``_synth_okx_mark_close``. ``mark`` is the
+    live WS mid / latest 1m bar close the close path already resolved.
+    """
+    px = mark if mark and mark > 0.0 else trade.entry_price
+    base_qty = max(0.0, float(trade.base_qty))
+    quote_qty = base_qty * px
+    return Fill(
+        venue="capital",
+        instrument_id=f"capital:{trade.symbol}",
+        strategy_id=trade.strategy_id,
+        side="sell" if trade.side == "long" else "buy",
+        size_usd=quote_qty,
+        fill_price=px,
+        fee_usd=real_fee_usd("capital", notional_usd=quote_qty),
+        slippage_bps=0.0,
+        ts_ms=int(time.time() * 1000),
+        order_id=f"polCapExtMark{uuid.uuid4().hex[:8]}",
+        client_order_id=None,
+        base_qty=base_qty,
+        quote_qty=quote_qty,
+        state="filled",
+    )
+
+
 def _drain_in_session(venue: str, now_ts: int) -> bool:
     """In-session test for the zombie-close drain tally, dispatched on the venue's
     stream calendar — a close reject only counts toward terminal while the market
@@ -504,6 +541,16 @@ async def _close_trade_with_real_pnl(
             f"{trade.venue}:{trade.symbol}",
             bar_mark if bar_mark is not None else trade.entry_price,
         )
+        # Capital external-close fix: did a REAL recent price source (1m bar OR
+        # live WS tick) exist, independent of the entry-price fallback? Re-resolve
+        # with a 0.0 fallback so ``> 0`` is true ONLY for a genuine fresh mark —
+        # the Capital mark-close reconcile-leak fix books only on a real price,
+        # else it stays conservative (reconcile). 0 extra I/O (same in-mem read).
+        has_fresh_mark = live_or_bar_price(
+            state.quote_writer,
+            f"{trade.venue}:{trade.symbol}",
+            bar_mark if bar_mark is not None else 0.0,
+        ) > 0.0
         # Bug C fix: peek-only (no I/O) close-fill exposure factor for the
         # Capital branch of ``_real_close_fill`` (okx/alpaca never reach it).
         cap_factor: float | None = None
@@ -600,6 +647,35 @@ async def _close_trade_with_real_pnl(
                     trade.venue, trade.symbol, trade.position_id or "-",
                 )
                 real_fill = _synth_okx_mark_close(trade, mark=fresh_mark)
+            elif (
+                trade.venue == "capital"
+                and has_fresh_mark
+                and _has_entry_fill(conn, trade)
+            ):
+                # CAPITAL EXTERNAL-CLOSE LEAK FIX ([[capital_external_close_
+                # reconcile_leak_2026-06-26]]): ``real_capital_close_fill`` returns
+                # CloseOrphan when our ``close_position`` is rejected AND the dealId
+                # is "no longer listed" — the Capital CFD demo CLOSED THE DEAL ITSELF
+                # (EOD flatten / demo expiry / a venue-side stop) before our order.
+                # The position WAS real (a persisted entry fill) and DID realise a
+                # close at the venue — only OUR booking is missing. DB-proven leak:
+                # 3/6 Capital closes ended status='reconciled' / pnl_r=NULL (EURUSD
+                # fx_breakout_basket / fx_range_fade, each with a real entry fill).
+                # Dropping it is the SAME survivorship bias the OKX winner-leak fix
+                # removed, just on the Capital track. With a REAL entry fill AND a
+                # genuine fresh mark (1m bar / live tick — NOT the stale entry
+                # fallback), book a MARK-to-market close so the position keeps its
+                # realised pnl_r (exit-capture, flow_not_block — no order submitted,
+                # the venue already closed it). No entry fill (un-addressable orphan)
+                # or no real fresh mark falls through to the conservative reconcile.
+                logger.info(
+                    "[close/capital] %s:%s trade_id=%s close rejected AND deal no "
+                    "longer listed (external close) but REAL entry fill + fresh "
+                    "mark — book mark close (kept in R ledger, not reconciled-with-"
+                    "NULL) [external-close leak fix]",
+                    trade.venue, trade.symbol, trade.position_id or "-",
+                )
+                real_fill = _synth_capital_mark_close(trade, mark=fresh_mark)
             else:
                 # FIX 2 — TRUE ORPHAN (wallet available ~0 while the book still
                 # tracks base_qty, an over-count from the close-chunk fix) with NO

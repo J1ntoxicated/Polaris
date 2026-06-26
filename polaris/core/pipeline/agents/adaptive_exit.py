@@ -41,8 +41,13 @@ from polaris.core.pipeline.agents._gpt_client import (
     make_system_prefix,
 )
 from polaris.core.pipeline.agents._shadow_rules import ShadowDecision
+from polaris.core.pipeline.agents.ai_judge import (
+    apply_exit_verdict,
+    judge_exit,
+    log_judge_event,
+)
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
-from polaris.core.pipeline.config import ai_free_mode
+from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_POST_TRADE_REFLECTOR,
@@ -342,6 +347,38 @@ def _coerce_g7_decision(text: str) -> str | None:
     return None
 
 
+async def _maybe_judge_exit(
+    ctx: GateContext,
+    *,
+    det_result: GateResult,
+    proposal: dict[str, Any],
+    judge_client: Any | None,
+    shadow_conn: sqlite3.Connection | None,
+) -> GateResult:
+    """Run the #32 AI exit-TIMING judge over the deterministic G7 result (non-blocking).
+
+    No-op when ``judge_client`` is None (deterministic result returned byte-identical).
+    The judge reads the bot's own info + exit_context and judges PROTECT / EXTEND /
+    TIGHTEN_ON_CONFIRMED_DECAY — TIMING only. Its verdict type has NO EXIT_NOW / KILL
+    member, so a deterministic HOLD / ADJUST_EXIT can never become a forced cut. The
+    Q9 widen / can_tighten rails + the -1.0R rail stay deterministic-owned; active
+    mode annotates which timing direction the judge preferred, shadow logs only.
+    """
+    if judge_client is None:
+        return det_result
+    outcome = await judge_exit(
+        ctx,
+        deterministic=det_result.decision,
+        subject=proposal,
+        client=judge_client,
+    )
+    mode = ai_judge_mode()
+    log_judge_event(
+        shadow_conn, ctx=ctx, gate_id=GATE_ADAPTIVE_EXIT, outcome=outcome, mode=mode
+    )
+    return apply_exit_verdict(outcome, deterministic_result=det_result, mode=mode)
+
+
 async def adaptive_exit_gate(
     ctx: GateContext,
     *,
@@ -349,6 +386,7 @@ async def adaptive_exit_gate(
     model: str = GPT_P1_MODEL,
     shadow_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
+    judge_client: Any | None = None,
 ) -> GateResult:
     """Gate 7 dispatcher (Python P0 + GPT P1 + W3 AI-free).
 
@@ -411,8 +449,17 @@ async def adaptive_exit_gate(
         # P0 / W3 AI-FREE: the deterministic Q9 widening rail is the live
         # decision (``model_used="python"``); the GPT branch + its shadow
         # never fire.
-        return _python_widen_only(
+        det_result = _python_widen_only(
             proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+        )
+        # #32 AI JUDGE (exit-timing): a per-ticker, STRUCTURALLY non-blocking
+        # exit-timing judgment over the bot's own info + exit_context. No EXIT_NOW
+        # / KILL path exists in its verdict type, so the deterministic HOLD /
+        # ADJUST_EXIT (Q9 rail) can never become a forced cut. No-op when
+        # ``judge_client`` is None (byte-identical to the rail-only path).
+        return await _maybe_judge_exit(
+            ctx, det_result=det_result, proposal=proposal,
+            judge_client=judge_client, shadow_conn=shadow_conn,
         )
     result, gpt_raw = await _p1_decide(
         ctx, proposal=proposal, client=client, model=model,

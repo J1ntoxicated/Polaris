@@ -103,6 +103,7 @@ class GateOrchestrator:
         handlers: dict[int, GateHandler] | None = None,
         phase: str = "P0",
         g1_focus_cache: G1FocusCache | None = None,
+        judge_client: Any | None = None,
     ) -> None:
         """Build a P0/P1 orchestrator.
 
@@ -121,6 +122,11 @@ class GateOrchestrator:
         self.conn = conn
         self.haiku_client = haiku_client
         self.phase = phase
+        # #32 AI JUDGE client (gpt-5-mini). When supplied, G3/G4/G7 run a per-ticker
+        # STRUCTURALLY non-blocking judge over the bot's own information alongside
+        # the deterministic decision (shadow logs / active annotates per
+        # POLARIS_AI_JUDGE_MODE). None (default) → no judge, byte-identical loop.
+        self.judge_client = judge_client
         # G1-EFF: shared on-change-only focus cache. When supplied (production
         # loop), the G1 GPT call is reused across signals/ticks while the
         # universe composition is unchanged (efficiency only; focus DECISION
@@ -270,14 +276,16 @@ class GateOrchestrator:
         # rule is computed + logged vs the live GPT decision (behavior 0 — the
         # GPT decision is still what drives the pipeline).
         return await signal_validator_gate(
-            ctx, client=self.haiku_client, shadow_conn=self.conn
+            ctx, client=self.haiku_client, shadow_conn=self.conn,
+            judge_client=self.judge_client,
         )
 
     async def _wrap_watcher(self, ctx: GateContext) -> GateResult:
         # ai_conductor P0 SHADOW: same as G3 — G4 technical rule logged in
         # parallel (PROCEED default / stale-crossed KILL only); GPT still decides.
         return await pre_entry_watcher_gate(
-            ctx, client=self.haiku_client, shadow_conn=self.conn
+            ctx, client=self.haiku_client, shadow_conn=self.conn,
+            judge_client=self.judge_client,
         )
 
     async def _wrap_sizer(self, ctx: GateContext) -> GateResult:
@@ -301,9 +309,12 @@ class GateOrchestrator:
             # G7 divergence SHADOW (instrumentation only): log the Q9 rail
             # decision vs the live GPT decision; the GPT decision still drives.
             return await adaptive_exit_gate(
-                ctx, client=self.haiku_client, shadow_conn=self.conn
+                ctx, client=self.haiku_client, shadow_conn=self.conn,
+                judge_client=self.judge_client,
             )
-        return await adaptive_exit_gate(ctx, client=None)
+        return await adaptive_exit_gate(
+            ctx, client=None, shadow_conn=self.conn, judge_client=self.judge_client,
+        )
 
     async def _wrap_reflector(self, ctx: GateContext) -> GateResult:
         # ai_conductor P2 (2026-05-30): G8 is now a deterministic Python
@@ -451,6 +462,7 @@ async def run_signal_pipeline(
     start_gate: int = GATE_UNIVERSE_SCANNER,
     initial_state: SignalLifecycle | None = None,
     phase: str = "P0",
+    judge_client: Any | None = None,
 ) -> tuple[GateContext, list[GateResult]]:
     """One-shot pipeline run helper for tests / smoke / scripts.
 
@@ -493,6 +505,8 @@ async def run_signal_pipeline(
         started_ts=int(time.time()),
         state=initial_state,
     )
-    orch = GateOrchestrator(conn=conn, haiku_client=haiku_client, phase=phase)
+    orch = GateOrchestrator(
+        conn=conn, haiku_client=haiku_client, phase=phase, judge_client=judge_client,
+    )
     results = await orch.run(ctx, start_gate=start_gate)
     return ctx, results

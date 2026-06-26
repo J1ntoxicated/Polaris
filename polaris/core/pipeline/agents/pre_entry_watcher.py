@@ -40,11 +40,16 @@ from polaris.core.pipeline.agents._stream_guards import (
     cfd_fast_path_eligible,
     equity_fast_path_eligible,
 )
+from polaris.core.pipeline.agents.ai_judge import (
+    apply_entry_verdict,
+    judge_entry,
+    log_judge_event,
+)
 from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
-from polaris.core.pipeline.config import ai_free_mode
+from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
     GATE_PRE_ENTRY_WATCHER,
@@ -191,6 +196,37 @@ def _log_g4_shadow(
     )
 
 
+async def _maybe_judge_timing(
+    ctx: GateContext,
+    *,
+    det_result: GateResult,
+    judge_client: Any | None,
+    shadow_conn: sqlite3.Connection | None,
+) -> GateResult:
+    """Run the #32 AI entry-TIMING judge over a deterministic G4 PROCEED (non-blocking).
+
+    No-op when ``judge_client`` is None (deterministic result returned byte-identical).
+    The judge reads the bot's own information + tick context and can REFINE_TIMING
+    (one-shot, time-boxed) but NEVER KILL — its verdict type has no block member, so
+    a PROCEED can never become a KILL. Only the objective crossed/stale-book KILL
+    (deterministic microstructure validity) reaches here as a non-PROCEED, and the
+    caller does NOT route that through the judge. Active mode annotates; shadow logs.
+    """
+    if judge_client is None:
+        return det_result
+    outcome = await judge_entry(
+        ctx,
+        deterministic=det_result.decision,
+        subject=det_result.payload.get("watched_signal", {}),
+        client=judge_client,
+    )
+    mode = ai_judge_mode()
+    log_judge_event(
+        shadow_conn, ctx=ctx, gate_id=GATE_PRE_ENTRY_WATCHER, outcome=outcome, mode=mode
+    )
+    return apply_entry_verdict(outcome, deterministic_result=det_result, mode=mode)
+
+
 async def pre_entry_watcher_gate(
     ctx: GateContext,
     *,
@@ -198,6 +234,7 @@ async def pre_entry_watcher_gate(
     fast_path_ctx: FastPathContext | None = None,
     shadow_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
+    judge_client: Any | None = None,
 ) -> GateResult:
     """Gate 4 dispatcher.
 
@@ -285,11 +322,21 @@ async def pre_entry_watcher_gate(
         payload: dict[str, Any] = {"watched_signal": validated, "fast_path": False}
         if technical.flags:
             payload["watch_flags"] = list(technical.flags)
-        return GateResult(
+        det_result = GateResult(
             decision=GateDecision.PROCEED,
             next_gate=GATE_ENTRY_SIZER,
             payload=payload,
             model_used="python",
+        )
+        # #32 AI JUDGE (entry-timing): a per-ticker, STRUCTURALLY non-blocking
+        # timing judgment over the bot's own info + tick context. Only the PROCEED
+        # path is judged (the objective crossed/stale-book KILL above is
+        # deterministic microstructure validity, never AI). The judge has no KILL
+        # path; shadow logs, active annotates (one-shot REFINE_TIMING). No-op when
+        # ``judge_client`` is None (byte-identical).
+        return await _maybe_judge_timing(
+            ctx, det_result=det_result, judge_client=judge_client,
+            shadow_conn=shadow_conn,
         )
 
     # Slow-path GPT

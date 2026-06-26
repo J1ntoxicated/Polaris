@@ -32,8 +32,13 @@ from polaris.core.pipeline.agents._shadow_rules import (
     g3_shadow_inputs_from_payload,
     technical_validate_decision,
 )
+from polaris.core.pipeline.agents.ai_judge import (
+    apply_entry_verdict,
+    judge_entry,
+    log_judge_event,
+)
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
-from polaris.core.pipeline.config import ai_free_mode
+from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
@@ -144,12 +149,44 @@ def _log_g3_shadow(
     )
 
 
+async def _maybe_judge_entry(
+    ctx: GateContext,
+    *,
+    det_result: GateResult,
+    judge_client: Any | None,
+    shadow_conn: sqlite3.Connection | None,
+) -> GateResult:
+    """Run the #32 AI entry judge over the deterministic G3 result (non-blocking).
+
+    No-op when ``judge_client`` is None (the deterministic result is returned
+    byte-identical — judge absent). Otherwise the judge runs over the bot's own
+    information, logs a ``gate_shadow_events`` row (measurement + pass-through
+    tracking), and — only in ``active`` mode — annotates the result flow-additively.
+    The judge can NEVER turn the deterministic PASS/MODIFY into a KILL (its verdict
+    type has no block member). Fail-open: any judge failure → deterministic result.
+    """
+    if judge_client is None:
+        return det_result
+    outcome = await judge_entry(
+        ctx,
+        deterministic=det_result.decision,
+        subject=det_result.payload.get("validated_signal", {}),
+        client=judge_client,
+    )
+    mode = ai_judge_mode()
+    log_judge_event(
+        shadow_conn, ctx=ctx, gate_id=GATE_SIGNAL_VALIDATOR, outcome=outcome, mode=mode
+    )
+    return apply_entry_verdict(outcome, deterministic_result=det_result, mode=mode)
+
+
 async def signal_validator_gate(
     ctx: GateContext,
     *,
     client: Any | None = None,
     shadow_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
+    judge_client: Any | None = None,
 ) -> GateResult:
     """Gate 3 dispatcher (GPT validator / W3 AI-free deterministic).
 
@@ -199,7 +236,7 @@ async def signal_validator_gate(
             technical.reason,
             str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
         )
-        return GateResult(
+        det_result = GateResult(
             decision=technical.decision,
             next_gate=GATE_PRE_ENTRY_WATCHER,
             payload={
@@ -210,6 +247,15 @@ async def signal_validator_gate(
                 "reason": technical.reason,
             },
             model_used="python",
+        )
+        # #32 AI JUDGE (entry-rationale): a per-ticker, STRUCTURALLY non-blocking
+        # judgment over the bot's OWN info (technicals + alt-data evidence + regime
+        # + ground). The judge has no KILL path; shadow (default) logs only, active
+        # annotates flow-additively. When ``judge_client`` is None the deterministic
+        # result is returned byte-identical (judge absent → no-op).
+        return await _maybe_judge_entry(
+            ctx, det_result=det_result, judge_client=judge_client,
+            shadow_conn=shadow_conn,
         )
 
     if client is None:

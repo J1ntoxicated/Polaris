@@ -1,0 +1,606 @@
+"""#32 — AI per-ticker JUDGE over the bot's own information (structurally non-blocking).
+
+DEMO/PAPER paper bot. The judge consumes technicals + alt-data evidence + regime +
+ground and emits a per-ticker verdict that HELPS THE FLOW, never blocks it. These
+tests PROVE the structural no-KILL guarantee + the shadow/active mode mechanism +
+deterministic fallback + full-info consumption + 9-stack non-regression + the -1.0R /
+pass-through preservation invariants.
+
+flow_not_block: the judge's verdict vocabulary has NO block member; no GPT output (incl.
+the literal strings "KILL"/"BLOCK"/"EXIT_NOW") can manufacture a block; and verdict
+application is flow-additive only.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from typing import Any
+
+import pytest
+
+from polaris.core.pipeline.agents.ai_judge import (
+    EntryJudgeVerdict,
+    ExitJudgeVerdict,
+    JudgeOutcome,
+    apply_entry_verdict,
+    apply_exit_verdict,
+    judge_entry,
+    judge_exit,
+    log_judge_event,
+    parse_entry_verdict,
+    parse_exit_verdict,
+)
+from polaris.core.pipeline.agents.shadow_log import fetch_shadow_events
+from polaris.core.pipeline.config import (
+    AI_JUDGE_MODE_ACTIVE,
+    AI_JUDGE_MODE_SHADOW,
+    ai_judge_mode,
+)
+from polaris.core.pipeline.gate_state import (
+    GATE_PRE_ENTRY_WATCHER,
+    GATE_SIGNAL_VALIDATOR,
+    GateContext,
+    GateDecision,
+    GateResult,
+    SignalLifecycle,
+)
+
+# ---------------------------------------------------------------------------
+# Fakes / fixtures
+# ---------------------------------------------------------------------------
+
+
+class _FakeGPT:
+    """Anthropic-shaped client returning a fixed response (counts calls)."""
+
+    def __init__(self, response_text: str) -> None:
+        self.call_count = 0
+        outer = self
+
+        class _Block:
+            text = response_text
+
+        class _Resp:
+            content = [_Block()]
+            usage = None
+
+        class _Messages:
+            async def create(self, **kwargs: Any) -> Any:
+                outer.call_count += 1
+                return _Resp()
+
+        self.messages = _Messages()
+
+
+class _BoomGPT:
+    """A client whose create() raises — exercises the deterministic fallback."""
+
+    def __init__(self) -> None:
+        outer = self
+
+        class _Messages:
+            async def create(self, **kwargs: Any) -> Any:
+                raise RuntimeError("gpt down")  # noqa: TRY003
+
+        self.messages = _Messages()
+        _ = outer
+
+
+def _ctx() -> GateContext:
+    return GateContext(
+        run_id="run-judge",
+        signal_id="sig-1",
+        position_id=None,
+        gate_id=GATE_SIGNAL_VALIDATOR,
+        venue="okx",
+        symbol="BTC-USDT",
+        strategy_id="s1",
+        payload={
+            "regime": "trend_up",
+            "evidence": {
+                "label": "BULL",
+                "scores": {"BULL": 2.1, "BEAR": 0.2},
+                "news_headline": "ETF inflows accelerate",
+            },
+            "baseline": {"atr": {"p50": 1.2}, "volume": {"p50": 1000.0}},
+            "cell_routing": {"quartile": "top", "avg_pnl_r": 0.4, "n_eff": 12.0},
+            "ticker_ground": {"has_sentiment": True, "has_event": True},
+        },
+        started_ts=int(time.time()),
+        state=SignalLifecycle.RAW,
+    )
+
+
+def _det_pass() -> GateResult:
+    return GateResult(
+        decision=GateDecision.PASS,
+        next_gate=GATE_PRE_ENTRY_WATCHER,
+        payload={"validated_signal": {"symbol": "BTC-USDT", "strength_scalar": 1.0}},
+        model_used="python",
+    )
+
+
+def _det_hold() -> GateResult:
+    return GateResult(
+        decision=GateDecision.HOLD,
+        next_gate=None,
+        payload={"stop_price": 95.0},
+        model_used="python",
+    )
+
+
+# ===========================================================================
+# 1. STRUCTURAL no-KILL guarantee — the verdict vocabulary has no block member.
+# ===========================================================================
+
+
+def test_entry_verdict_enum_has_no_block_member() -> None:
+    members = {v.value for v in EntryJudgeVerdict}
+    for forbidden in ("KILL", "BLOCK", "INVALID", "VETO", "REJECT", "EXIT_NOW", "SKIP"):
+        assert forbidden not in members
+
+
+def test_exit_verdict_enum_has_no_block_member() -> None:
+    members = {v.value for v in ExitJudgeVerdict}
+    for forbidden in ("KILL", "BLOCK", "INVALID", "VETO", "EXIT_NOW", "SKIP"):
+        assert forbidden not in members
+
+
+@pytest.mark.parametrize(
+    "hostile", ["KILL", "BLOCK", "INVALID", "VETO", "broken premise", "", None, "garbage"]
+)
+def test_entry_parse_hostile_collapses_to_proceed(hostile: Any) -> None:
+    # No hostile / unrecognized token can manufacture a block — it flows.
+    assert parse_entry_verdict(hostile) is EntryJudgeVerdict.PROCEED
+
+
+@pytest.mark.parametrize(
+    "hostile", ["EXIT_NOW", "KILL", "CUT", "", None, "broken premise"]
+)
+def test_exit_parse_hostile_collapses_to_protect(hostile: Any) -> None:
+    # No forced-cut token is honored — exit stays PROTECT (hold the floor).
+    assert parse_exit_verdict(hostile) is ExitJudgeVerdict.PROTECT
+
+
+def test_apply_entry_never_kills_for_any_verdict_or_hostile_input() -> None:
+    """apply_entry_verdict is TOTAL: across every enum member AND hostile tokens,
+    in active mode, the result is NEVER KILL and next_gate is NEVER stripped."""
+    det = _det_pass()
+    candidates = [v.value for v in EntryJudgeVerdict] + ["KILL", "BLOCK", "garbage"]
+    for token in candidates:
+        outcome = JudgeOutcome(
+            verdict=token, deterministic=GateDecision.PASS, escalation_reason="t"
+        )
+        res = apply_entry_verdict(
+            outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE
+        )
+        assert res.decision == GateDecision.PASS
+        assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+        assert res.decision != GateDecision.KILL
+
+
+def test_apply_exit_never_exit_now_for_any_verdict() -> None:
+    det = _det_hold()
+    candidates = [v.value for v in ExitJudgeVerdict] + ["EXIT_NOW", "KILL"]
+    for token in candidates:
+        outcome = JudgeOutcome(
+            verdict=token, deterministic=GateDecision.HOLD, escalation_reason="t"
+        )
+        res = apply_exit_verdict(
+            outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE
+        )
+        assert res.decision == GateDecision.HOLD
+        assert res.decision not in {GateDecision.EXIT_NOW, GateDecision.KILL}
+
+
+# ===========================================================================
+# 2. MODE toggle — shadow (default) = deterministic acts; active = annotate.
+# ===========================================================================
+
+
+def test_mode_default_is_shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POLARIS_AI_JUDGE_MODE", raising=False)
+    assert ai_judge_mode() == AI_JUDGE_MODE_SHADOW
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, AI_JUDGE_MODE_SHADOW),
+        ("", AI_JUDGE_MODE_SHADOW),
+        ("shadow", AI_JUDGE_MODE_SHADOW),
+        ("garbage", AI_JUDGE_MODE_SHADOW),  # unknown → safe shadow (never silent-activate)
+        ("ACTIVE", AI_JUDGE_MODE_ACTIVE),
+        ("active", AI_JUDGE_MODE_ACTIVE),
+    ],
+)
+def test_mode_parse(raw: str | None, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POLARIS_AI_JUDGE_MODE", raising=False)
+    assert ai_judge_mode(raw) == expected
+
+
+def test_shadow_mode_returns_deterministic_verbatim() -> None:
+    """Pass-through preservation: in shadow mode the deterministic result is
+    returned byte-identical (same object) — the judge never touches the loop."""
+    det = _det_pass()
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.SIZE_UP.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    res = apply_entry_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_SHADOW)
+    assert res is det  # identity — no copy, no mutation
+
+
+def test_active_mode_annotates_but_preserves_decision() -> None:
+    det = _det_pass()
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.STRENGTHEN_EVIDENCE.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    res = apply_entry_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE)
+    assert res.decision == GateDecision.PASS
+    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert res.payload["ai_judge"]["verdict"] == "STRENGTHEN_EVIDENCE"
+    # The original validated_signal is preserved.
+    assert res.payload["validated_signal"]["strength_scalar"] == 1.0
+
+
+# ===========================================================================
+# 3. 9-stack non-regression — SIZE_UP is an INTENT flag, NOT a sizing multiplier.
+# ===========================================================================
+
+
+def test_size_up_does_not_touch_strength_scalar() -> None:
+    """SIZE_UP must NOT fold a ≤1 (or any) multiplier into the sizing chain — it
+    is an intent flag only (9-stack permanently sealed)."""
+    det = _det_pass()
+    original_scalar = det.payload["validated_signal"]["strength_scalar"]
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.SIZE_UP.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    res = apply_entry_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE)
+    # strength_scalar is UNCHANGED — the judge added an intent flag, not a mult.
+    assert res.payload["validated_signal"]["strength_scalar"] == original_scalar
+    assert res.payload["ai_judge_size_up_intent"] is True
+
+
+def test_refine_timing_is_one_shot_flag() -> None:
+    det = _det_pass()
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.REFINE_TIMING.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    res = apply_entry_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE)
+    assert res.payload["ai_judge_refine_timing"]["one_shot"] is True
+    assert res.decision == GateDecision.PASS  # still flows
+
+
+# ===========================================================================
+# 4. Full-info consumption — the prompt carries the bot's own information.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_entry_prompt_consumes_full_info() -> None:
+    captured: dict[str, Any] = {}
+
+    async def _spy(**kwargs: Any) -> Any:
+        captured["prompt"] = kwargs["user_prompt"]
+        from polaris.core.pipeline.agents._gpt_client import GPTCallResult
+
+        return GPTCallResult(
+            text='{"verdict":"PROCEED"}',
+            parsed={"verdict": "PROCEED"},
+            latency_ms=5,
+        )
+
+    import polaris.core.pipeline.agents.ai_judge as mod
+
+    orig = mod.call_gpt
+    mod.call_gpt = _spy  # type: ignore[assignment]
+    try:
+        await judge_entry(
+            _ctx(),
+            deterministic=GateDecision.PASS,
+            subject={"symbol": "BTC-USDT", "side": "long"},
+            client=_FakeGPT('{"verdict":"PROCEED"}'),
+        )
+    finally:
+        mod.call_gpt = orig  # type: ignore[assignment]
+    prompt = captured["prompt"]
+    # technicals + alt-data evidence + regime + ground all reach the judge.
+    assert "trend_up" in prompt  # regime
+    assert "BULL" in prompt  # alt-data evidence label
+    assert "ETF inflows" in prompt  # news headline
+    assert "technicals" in prompt  # baseline technicals
+    assert "has_sentiment" in prompt  # ground coverage
+    # The prompt explicitly forbids blocking.
+    assert "cannot block" in prompt.lower()
+
+
+# ===========================================================================
+# 5. Deterministic fallback — GPT error / no-client never degrades flow.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_no_client_falls_back_to_safe_verdict() -> None:
+    outcome = await judge_entry(
+        _ctx(),
+        deterministic=GateDecision.PASS,
+        subject={"symbol": "BTC-USDT"},
+        client=None,
+    )
+    assert outcome.verdict == EntryJudgeVerdict.PROCEED.value
+    assert outcome.deterministic == GateDecision.PASS
+    assert outcome.escalation_reason == "no_client"
+
+
+@pytest.mark.asyncio
+async def test_gpt_error_falls_back_to_safe_verdict() -> None:
+    outcome = await judge_exit(
+        _ctx(),
+        deterministic=GateDecision.HOLD,
+        subject={"symbol": "BTC-USDT"},
+        client=_BoomGPT(),
+    )
+    # The error path returns the SAFE non-blocking verdict + deterministic decision.
+    assert outcome.verdict == ExitJudgeVerdict.PROTECT.value
+    assert outcome.deterministic == GateDecision.HOLD
+    assert outcome.escalation_reason == "gpt_error"
+
+
+@pytest.mark.asyncio
+async def test_gpt_kill_output_cannot_block() -> None:
+    """Even if the model returns a hostile {"verdict":"KILL"}, the judge parses it
+    to the safe non-blocking verdict — a block is structurally impossible."""
+    outcome = await judge_entry(
+        _ctx(),
+        deterministic=GateDecision.PASS,
+        subject={"symbol": "BTC-USDT"},
+        client=_FakeGPT('{"verdict":"KILL","reason":"broken premise"}'),
+    )
+    assert outcome.verdict == EntryJudgeVerdict.PROCEED.value
+    # And applying it still flows.
+    res = apply_entry_verdict(
+        outcome, deterministic_result=_det_pass(), mode=AI_JUDGE_MODE_ACTIVE
+    )
+    assert res.decision == GateDecision.PASS
+    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+
+
+@pytest.mark.asyncio
+async def test_well_formed_verdict_is_honored() -> None:
+    outcome = await judge_entry(
+        _ctx(),
+        deterministic=GateDecision.PASS,
+        subject={"symbol": "BTC-USDT"},
+        client=_FakeGPT('{"verdict":"STRENGTHEN_EVIDENCE","reason":"news confirms"}'),
+    )
+    assert outcome.verdict == EntryJudgeVerdict.STRENGTHEN_EVIDENCE.value
+    assert outcome.escalation_reason == "gpt_ok"
+
+
+# ===========================================================================
+# 6. Measurement — gate_shadow_events row + pass-through tracking.
+# ===========================================================================
+
+
+def test_log_judge_event_writes_shadow_row(memdb: sqlite3.Connection) -> None:
+    ctx = _ctx()
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.SIZE_UP.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    log_judge_event(
+        memdb,
+        ctx=ctx,
+        gate_id=GATE_SIGNAL_VALIDATOR,
+        outcome=outcome,
+        mode=AI_JUDGE_MODE_SHADOW,
+    )
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    row = rows[0]
+    # The deterministic decision is what the live loop acts on (pass-through).
+    assert row["technical_decision"] == "PASS"
+    # The judge verdict + mode + escalation are recorded in the flags column.
+    flags = row["technical_flags"]
+    assert "judge:SIZE_UP" in flags
+    assert "mode:shadow" in flags
+    assert "escalation:gpt_ok" in flags
+    # No GPT GateDecision to compare → empty (excluded from legacy agreement).
+    assert row["gpt_decision"] == ""
+
+
+def test_log_judge_event_none_conn_is_noop() -> None:
+    # Must never crash the hot path when there is no shadow conn.
+    outcome = JudgeOutcome(
+        verdict=EntryJudgeVerdict.PROCEED.value,
+        deterministic=GateDecision.PASS,
+        escalation_reason="gpt_ok",
+    )
+    log_judge_event(
+        None, ctx=_ctx(), gate_id=GATE_PRE_ENTRY_WATCHER, outcome=outcome,
+        mode=AI_JUDGE_MODE_SHADOW,
+    )  # no exception
+
+
+# ===========================================================================
+# 7. -1.0R rail / deterministic ownership — the judge never sees the rail.
+# ===========================================================================
+
+
+def test_judge_module_does_not_reference_gate_decision_kill() -> None:
+    """The judge module's verdict types must not be able to emit GateDecision.KILL
+    or GateDecision.EXIT_NOW. Confirm no verdict member maps to either."""
+    entry_values = {v.value for v in EntryJudgeVerdict}
+    exit_values = {v.value for v in ExitJudgeVerdict}
+    assert GateDecision.KILL.value not in entry_values | exit_values
+    assert GateDecision.EXIT_NOW.value not in entry_values | exit_values
+
+
+def test_apply_preserves_exit_hold_floor_and_stop_price() -> None:
+    """An EXTEND verdict in active mode does NOT mutate the deterministic stop or
+    decision here — the widen/tighten timing rails stay G7-owned (-1.0R untouched)."""
+    det = _det_hold()
+    outcome = JudgeOutcome(
+        verdict=ExitJudgeVerdict.EXTEND.value,
+        deterministic=GateDecision.HOLD,
+        escalation_reason="gpt_ok",
+    )
+    res = apply_exit_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE)
+    assert res.decision == GateDecision.HOLD
+    assert res.payload["stop_price"] == 95.0  # deterministic stop preserved
+    assert res.payload["ai_judge"]["verdict"] == "EXTEND"
+
+
+# ===========================================================================
+# 8. Gate wiring — G3/G4/G7 byte-identical when judge_client=None; judged when set.
+# ===========================================================================
+
+
+def _g3_gate_ctx() -> GateContext:
+    return GateContext(
+        run_id="run-w",
+        signal_id="sig-w",
+        position_id=None,
+        gate_id=GATE_SIGNAL_VALIDATOR,
+        venue="okx",
+        symbol="BTC-USDT",
+        strategy_id="s1",
+        payload={
+            "raw_signal": {"symbol": "BTC-USDT", "side": "long", "strength": 1.2},
+            "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5, "score": 0.5},
+            "baseline": {},
+            "recent_trades": [],
+            "regime": "trend_up",
+        },
+        started_ts=int(time.time()),
+        state=SignalLifecycle.RAW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_g3_judge_client_none_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    """G3 with judge_client=None is byte-identical to the pre-#32 deterministic path."""
+    from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
+
+    monkeypatch.setenv("POLARIS_AI_FREE", "1")
+    res = await signal_validator_gate(_g3_gate_ctx(), client=None, judge_client=None)
+    assert res.decision == GateDecision.PASS
+    assert res.model_used == "python"
+    assert "ai_judge" not in res.payload
+
+
+@pytest.mark.asyncio
+async def test_g3_active_judge_kill_output_still_passes(
+    monkeypatch: pytest.MonkeyPatch, memdb: sqlite3.Connection
+) -> None:
+    """Even with a hostile judge KILL output in ACTIVE mode, G3 still PASSES — the
+    deterministic decision is structurally preserved (no AI block path)."""
+    from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
+
+    monkeypatch.setenv("POLARIS_AI_FREE", "1")
+    monkeypatch.setenv("POLARIS_AI_JUDGE_MODE", "active")
+    judge = _FakeGPT('{"verdict":"KILL","reason":"broken premise"}')
+    res = await signal_validator_gate(
+        _g3_gate_ctx(), client=None, judge_client=judge, shadow_conn=memdb
+    )
+    assert res.decision == GateDecision.PASS  # NOT KILL — structurally impossible
+    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert res.payload["ai_judge"]["verdict"] == "PROCEED"  # KILL parsed to safe verdict
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    assert "judge:PROCEED" in rows[0]["technical_flags"]
+
+
+@pytest.mark.asyncio
+async def test_g3_shadow_mode_deterministic_unaffected(
+    monkeypatch: pytest.MonkeyPatch, memdb: sqlite3.Connection
+) -> None:
+    """Shadow mode (default): judge logs but the deterministic decision acts and the
+    payload is NOT annotated (pass-through preservation)."""
+    from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
+
+    monkeypatch.setenv("POLARIS_AI_FREE", "1")
+    monkeypatch.delenv("POLARIS_AI_JUDGE_MODE", raising=False)  # default shadow
+    judge = _FakeGPT('{"verdict":"SIZE_UP"}')
+    res = await signal_validator_gate(
+        _g3_gate_ctx(), client=None, judge_client=judge, shadow_conn=memdb
+    )
+    assert res.decision == GateDecision.PASS
+    assert "ai_judge" not in res.payload  # shadow = no annotation, deterministic acts
+    assert res.payload["validated_signal"]["strength_scalar"] == 1.0
+    # The judge row IS logged for measurement.
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    assert "mode:shadow" in rows[0]["technical_flags"]
+
+
+def _g7_gate_ctx() -> GateContext:
+    return GateContext(
+        run_id="run-w",
+        signal_id="sig-w",
+        position_id="pos-1",
+        gate_id=7,
+        venue="okx",
+        symbol="BTC-USDT",
+        strategy_id="s1",
+        payload={
+            "regime": "trend_up",
+            "widen_proposal": {
+                "side": "long",
+                "current_stop_price": 95.0,
+                "proposed_stop_price": 93.0,
+                "entry_price": 100.0,
+                "unrealized_pnl_r": 1.0,
+                "max_loss_r": 1.0,
+                "overrides_used": 0,
+                "seconds_since_last_override": 60,
+                "initial_stop_price": 90.0,
+            },
+        },
+        started_ts=int(time.time()),
+        state=SignalLifecycle.MONITORED,
+    )
+
+
+@pytest.mark.asyncio
+async def test_g7_judge_client_none_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    from polaris.core.pipeline.agents.adaptive_exit import adaptive_exit_gate
+
+    monkeypatch.setenv("POLARIS_AI_FREE", "1")
+    res = await adaptive_exit_gate(_g7_gate_ctx(), client=None, judge_client=None)
+    assert res.decision == GateDecision.ADJUST_EXIT
+    assert res.model_used == "python"
+    assert "ai_judge" not in res.payload
+
+
+@pytest.mark.asyncio
+async def test_g7_active_judge_exit_now_output_cannot_force_cut(
+    monkeypatch: pytest.MonkeyPatch, memdb: sqlite3.Connection
+) -> None:
+    """A hostile {"verdict":"EXIT_NOW"} judge output in ACTIVE mode cannot turn the
+    deterministic G7 decision into a forced cut — exit stays on the Q9 rail."""
+    from polaris.core.pipeline.agents.adaptive_exit import adaptive_exit_gate
+
+    monkeypatch.setenv("POLARIS_AI_FREE", "1")
+    monkeypatch.setenv("POLARIS_AI_JUDGE_MODE", "active")
+    judge = _FakeGPT('{"verdict":"EXIT_NOW"}')
+    res = await adaptive_exit_gate(
+        _g7_gate_ctx(), client=None, judge_client=judge, shadow_conn=memdb
+    )
+    # The deterministic Q9 widen rail (ADJUST_EXIT) is preserved; EXIT_NOW parsed to
+    # the safe PROTECT verdict, never a cut.
+    assert res.decision == GateDecision.ADJUST_EXIT
+    assert res.decision != GateDecision.EXIT_NOW
+    assert res.payload["stop_price"] == 93.0
+    assert res.payload["ai_judge"]["verdict"] == "PROTECT"

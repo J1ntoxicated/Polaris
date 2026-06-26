@@ -567,16 +567,15 @@
   const POS_SHELL =
     `<table><colgroup>
         <col style="width:5%"><col style="width:13%"><col style="width:5%"><col style="width:7%">
-        <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
-        <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
-        <col style="width:6%"><col style="width:6%"><col style="width:6%"><col style="width:5%">
+        <col style="width:7%"><col style="width:5%"><col style="width:6%"><col style="width:5%">
+        <col style="width:7%"><col style="width:7%"><col style="width:5%"><col style="width:6%">
+        <col style="width:7%"><col style="width:6%"><col style="width:6%"><col style="width:6%">
        </colgroup><thead><tr>
         <th class="l">VEN</th><th class="l">SYMBOL</th><th>SIDE</th><th>ENTRY</th>
-        <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th title="unrealised gross PnL (pre-fee)">uPnL$</th>
+        <th>CURRENT</th><th>Δ%</th><th>SIZE$</th><th title="unrealised-PnL path since entry (green=in profit / red=underwater); dots = peak (MFE) / trough (MAE) of the path, dashed line = breakeven">uPnL TRAJ</th><th title="unrealised gross PnL (pre-fee)">uPnL$</th>
         <th title="uPnL net of the EXPECTED round-trip real fee (entry + expected close) — what this position would book if closed now">uPnLnet$</th>
         <th>uPnL%</th><th>HELD</th><th class="l">STRAT</th><th class="l">REGIME</th>
         <th>STOP</th><th title="max-favorable / max-adverse excursion in per-trade-ATR R (atr_r) — distinct from the per-stream ledger R">MFE/MAE</th>
-        <th title="unrealised-PnL path since entry (green=in profit / red=underwater); dots = peak (MFE) / trough (MAE) of the path, dashed line = breakeven">uPnL TRAJ</th>
       </tr></thead><tbody></tbody></table>`;
   // numeric flash direction for a value that changed since the last poll.
   function _posFlash(prev, cur) {
@@ -650,6 +649,7 @@
           { text: fmtPxCcy(p.last_price, qccy), cls: 'num', title: 'current (last close) ' + fmtPxCcy(p.last_price, qccy), flash: pxFlash },
           { text: dpc, cls: 'num ' + pn(p.delta_pct), title: 'price move since entry', flash: dFlash },
           { text: fmtUsd(p.size_usd, 0), cls: 'num' },
+          { html: trajHtml, cls: 'traj-cell', title: 'unrealised-PnL path since entry — green=in profit / red=underwater; dots = peak (MFE) / trough (MAE), dashed = breakeven' },
           { text: fmtUsd(p.upnl_usd, 2), cls: 'num ' + pn(p.upnl_usd), flash: upFlash, title: 'unrealised gross PnL (pre-fee)' },
           // Jin 2026-06-26: uPnL NET of the expected round-trip real fee — the
           // live mirror of the closed-trade NET$ column. Coloured by NET sign so
@@ -663,7 +663,6 @@
           { text: reg || '—', cls: 'l b-flat', title: 'entry regime ' + (p.entry_regime || '—') + ' · live ' + (p.regime || '—') },
           { text: stop, cls: 'num b-flat', title: 'protective stop ' + stop },
           { text: mfeMae, cls: 'num b-flat', title: `MFE/MAE in per-trade-ATR excursion R (atr_r) — distinct from the per-stream ledger R · exit-FSM ${p.exit_state}` },
-          { html: trajHtml, cls: 'traj-cell', title: 'unrealised-PnL path since entry — green=in profit / red=underwater; dots = peak (MFE) / trough (MAE), dashed = breakeven' },
         ],
       };
     });

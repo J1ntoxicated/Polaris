@@ -939,7 +939,9 @@
   // mutation, no sizing/gate/trade logic. Graceful no-op when pos-body isn't
   // mounted (non-Activity tab) or the endpoint is unavailable.
   // Column indices match renderPositions' cell order (board_tabs.js): 4=CURRENT
-  // (last_price), 5=Δ% (delta_pct), 7=uPnL$ (upnl_usd), 8=uPnL% (upnl_pct).
+  // (last_price), 5=Δ% (delta_pct); uPnL TRAJ moved to 7 (next to SIZE$), so
+  // 8=uPnL$ (upnl_usd), 10=uPnL% (upnl_pct). (Previously uPnL% wrote to 8 =
+  // uPnLnet$ — fixed here while reindexing.)
   const _priceLast = {};   // key → { px, upnl, delta } last numeric value for flash dir
   // uPnL trajectory live-extend (Jin 2026-06-27). renderPositions stashes each
   // open row's deriving fields (spark seed + entry/qty/side) here per row key;
@@ -956,7 +958,7 @@
   function _redrawTraj(tr, key, lastPrice) {
     const m = _posTrajMeta[key];
     if (!m || lastPrice == null) return;
-    const cell = tr.children[15];   // uPnL TRAJ column (last cell)
+    const cell = tr.children[7];   // uPnL TRAJ column (moved next to SIZE$)
     if (!cell) return;
     const dir = String(m.side || '').toLowerCase() === 'short' ? -1 : 1;
     const pt = (+lastPrice - +m.entry) * +m.qty * dir;
@@ -1008,8 +1010,8 @@
     const tds = tr.children;
     _setPriceCell(tds[4], fmtPx(p.last_price), null, pxDir);
     _setPriceCell(tds[5], fmtSignedPct(p.delta_pct, 2), 'num ' + pn(p.delta_pct), dDir);
-    _setPriceCell(tds[7], fmtUsd(p.upnl_usd, 2), 'num ' + pn(p.upnl_usd), upDir);
-    _setPriceCell(tds[8], fmtSignedPct(p.upnl_pct, 2), 'num ' + pn(p.upnl_pct), '');
+    _setPriceCell(tds[8], fmtUsd(p.upnl_usd, 2), 'num ' + pn(p.upnl_usd), upDir);
+    _setPriceCell(tds[10], fmtSignedPct(p.upnl_pct, 2), 'num ' + pn(p.upnl_pct), '');
     // Req ③: recolour THIS row's sparkline to the live tick direction (up=green /
     // down=red) the instant the mark moves — between the 1s snapshot repaints.
     if (pxDir) setSparkDir(tr, pxDir);

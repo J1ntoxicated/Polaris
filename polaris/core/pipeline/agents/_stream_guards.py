@@ -33,13 +33,13 @@ from __future__ import annotations
 import datetime as dt
 from typing import TYPE_CHECKING
 
-from polaris.core.sizing.session import derive_session
-from polaris.core.streams import (
-    GUARD_TOKEN_BY_PRODUCT_CLASS,
-)
 from polaris.core.sessions.equity_session_gate import (
     pdt_rank_penalty,
     us_equity_session_state,
+)
+from polaris.core.sizing.session import derive_session
+from polaris.core.streams import (
+    GUARD_TOKEN_BY_PRODUCT_CLASS,
 )
 
 if TYPE_CHECKING:

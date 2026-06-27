@@ -341,11 +341,12 @@ def _all_strategies() -> list[BaseStrategy]:
     registry-add dispatches iff its flag says so — no second list to hand-sync, so
     the drift is structurally impossible (asserted by the dispatch-SSOT guard test).
 
-    ``dispatch_eligible=False`` strategies (fee-fatal rsi_bb_pullback / ema_crossover
-    + unvalidated supertrend / connors_rsi2 / cci_reversion) are EXCLUDED here — a
-    KILL is no-emit (``generate_raw_signal`` is never called), NOT module removal:
-    they stay REGISTERED, and the recalc/exit loop still closes any open position
-    they hold (flow_not_block — an excluded strategy never cuts another's size).
+    ``dispatch_eligible=False`` strategies (fee-fatal rsi_bb_pullback + unvalidated
+    supertrend / connors_rsi2 / cci_reversion) are EXCLUDED here — a KILL is no-emit
+    (``generate_raw_signal`` is never called), NOT module removal: they stay
+    REGISTERED, and the recalc/exit loop still closes any open position they hold
+    (flow_not_block — an excluded strategy never cuts another's size). ema_crossover
+    stays eligible (firing) — its KILL call is DEFERRED (Jin 2026-06-28).
     """
     return [
         cls() for cls in STRATEGY_REGISTRY.values() if cls.metadata.dispatch_eligible

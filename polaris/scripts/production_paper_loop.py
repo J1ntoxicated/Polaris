@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from polaris.core.altdata.cache import AltDataCache
 from polaris.core.altdata.cftc_cot import CFTCCotCollector
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
@@ -162,6 +164,48 @@ async def _load_okx_constraints(adapter: OKXAdapter) -> None:
             "[okx] instrument-constraint load failed — sz/px rounding disabled "
             "(entry still flows un-rounded)"
         )
+
+
+async def _okx_signed_health_check(adapter: OKXAdapter) -> bool:
+    """Probe OKX SIGNED auth once at boot → True healthy, False on auth failure.
+
+    The single live blocker behind a 0-order weekend was a SILENT OKX demo
+    credential regression (every signed call — orders AND ``/account/balance`` —
+    returned 50105 / HTTP 401), while boot only exercised the PUBLIC (unsigned)
+    market-data path, so the bot looked "healthy" while every real order rejected
+    for hours. This calls ``fetch_balance`` (a signed call) once and, on an auth
+    failure, emits a loud ``OKX AUTH FAIL`` banner naming the credential remedy.
+
+    Pure DIAGNOSTIC — never blocks boot, never throttles, never cancels an order
+    (flow_not_block): a failed probe only LOGS. Returns True on success, False on
+    any failure (best-effort — never raises into the boot path).
+    """
+    try:
+        await adapter.fetch_balance("USDT")
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            logger.error(
+                "[loop] 🔴 OKX AUTH FAIL — boot signed health check rejected "
+                "(HTTP %d / likely 50105). The OKX_DEMO API key/passphrase is "
+                "invalid/rotated/expired: ALL real OKX orders will REJECT until "
+                "the credentials are refreshed (this is NOT a strategy/code "
+                "fault). Refresh OKX_DEMO_* in .env and restart.",
+                exc.response.status_code,
+            )
+            return False
+        logger.warning(
+            "[loop] OKX boot health check HTTP %d (non-auth) — orders may still "
+            "flow; continuing", exc.response.status_code,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 — best-effort probe, never blocks boot
+        logger.warning(
+            "[loop] OKX boot health check failed %r — could not confirm signed "
+            "auth; continuing (orders will surface any real auth reject)", exc,
+        )
+        return False
+    logger.info("[loop] OKX signed auth health check OK (balance reachable)")
+    return True
 
 
 def _build_alpaca_adapter() -> AlpacaAdapter | None:
@@ -781,6 +825,12 @@ async def run_production_paper_loop(
             # OKX 400 entry reject. Best-effort: a load failure leaves the cache
             # empty (prior un-rounded path), never blocking startup.
             await _load_okx_constraints(okx_adapter)
+            # SIGNED auth health check: the public constraint load above succeeds
+            # even when the demo credentials are invalid (50105/401), so a silent
+            # credential regression would otherwise look "healthy" while every
+            # real order rejects. Probe a signed call once and loudly surface an
+            # auth failure (flow_not_block — diagnostic only, never blocks boot).
+            await _okx_signed_health_check(okx_adapter)
         alpaca_adapter = _build_alpaca_adapter()
         if alpaca_adapter is None:
             logger.warning(

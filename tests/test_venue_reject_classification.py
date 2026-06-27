@@ -274,6 +274,60 @@ async def test_anomalous_reject_code_does_record_fault(
 
 
 # ---------------------------------------------------------------------------
+# Part B2 — OKX auth/credential rejects (50105 family) are EXTERNAL, not faults
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", ["50105", "50100", "50102", "50113", "50114"])
+def test_okx_auth_codes_classify_external(code: str) -> None:
+    """OKX credential/auth/system rejects (50100-50114) are a VENUE-side auth
+    failure (invalid/rotated key/passphrase, stale timestamp), NOT a strategy or
+    client bug — they must classify EXTERNAL so a global credential regression
+    never trips every strategy's circuit breaker (flow_not_block)."""
+    from polaris.scripts._production_reject import _is_external_reject
+
+    assert _is_external_reject("okx", code) is True
+
+
+@pytest.mark.parametrize("code", ["50105", "50113"])
+@pytest.mark.asyncio
+async def test_okx_auth_reject_does_not_fault(
+    memdb: sqlite3.Connection, code: str
+) -> None:
+    """A 50105/50113 auth reject must NOT record a FAULT_REJECT (the whole bot
+    sees it on every signed call during a credential regression — faulting would
+    spuriously SOFT_HALT every strategy). Telemetry counter still increments."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+
+    reset_process_fence()
+    state = ProdLoopState()
+    adapter = _make_okx_reject_adapter(code)
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=_sig(f"auth_{code}"), venue="okx",
+        symbol="SOL-USDT", asset_class="crypto",
+        underlying_group_id="crypto:SOL", notional_usd=100.0,
+        last_price=150.0, now_ts=int(time.time()),
+        real_roundtrip=True, okx_adapter=adapter,
+    )
+    assert trade is None
+    assert state.fault_events == 0
+    fault = memdb.execute(
+        "SELECT COUNT(*) FROM strategy_fault_events WHERE strategy_id='tsmom'"
+    ).fetchone()[0]
+    assert int(fault) == 0
+    assert state.venue_rejects_by_code.get(code) == 1
+
+
+def test_okx_auth_code_not_blocklisted() -> None:
+    """An auth reject is a global credential issue — it must NOT blocklist the
+    (venue, symbol) like a 51155 compliance reject does (it is not symbol-specific
+    and clears the moment the credentials are refreshed)."""
+    from polaris.scripts._production_reject import COMPLIANCE_REJECT_CODES
+
+    assert "50105" not in COMPLIANCE_REJECT_CODES
+
+
+# ---------------------------------------------------------------------------
 # Part C — OKX entry uses market order + non-filled state → no_fill (not fault)
 # ---------------------------------------------------------------------------
 

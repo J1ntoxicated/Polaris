@@ -71,6 +71,21 @@ COMPLIANCE_REJECT_CODES: frozenset[str] = frozenset({"51155"})
 OKX_PARAM_REJECT_CODES: frozenset[str] = frozenset(
     {"51000", "51006", "51020", "51100", "51121", "51127", "51820"}
 )
+# OKX AUTH / SYSTEM reject codes (the 50100-50114 credential family): a signed
+# request the VENUE rejected for an authentication reason — an invalid /
+# rotated / expired API key or passphrase, a stale request timestamp, or a
+# demo↔live key mismatch. This is NEVER a strategy or client logic fault: when
+# the demo credentials rotate, EVERY signed call (open AND /account/balance) on
+# EVERY symbol gets the same code, so faulting would spuriously SOFT_HALT every
+# strategy at once (the exact noise this fix removes). Classify EXTERNAL so the
+# breaker stays ACTIVE — the entries resume the instant the credentials are
+# refreshed (no per-strategy block to clear). The boot signed health-check
+# (production_paper_loop) surfaces the credential regression to the operator.
+#   50105 = OK-ACCESS-PASSPHRASE incorrect (the observed live regression)
+#   50100-50104 / 50106-50114 = the surrounding auth/timestamp/system family
+OKX_AUTH_REJECT_CODES: frozenset[str] = frozenset(
+    {f"501{n:02d}" for n in range(0, 15)}
+)
 # Capital's venue-specific external (non-fault) reject statuses now live in the
 # StreamConfig SSOT (B_capital_cfd.external_reject_codes); _is_external_reject
 # reads them via resolve_stream (design §2.1).
@@ -94,6 +109,11 @@ def _is_external_reject(venue: str, reject_code: str | None) -> bool:
     # trips the breaker (Jin 2026-06-23: replaced the old per-symbol cooldown
     # skip; no per-symbol block, the strategy keeps flowing).
     if reject_code in OKX_PARAM_REJECT_CODES:
+        return True
+    # OKX auth/credential rejects (50100-50114): a venue-side authentication
+    # failure (invalid/rotated/expired key or passphrase). Not a strategy fault —
+    # classify external so a global credential regression never trips the breaker.
+    if reject_code in OKX_AUTH_REJECT_CODES:
         return True
     # D-2: Capital HTTP/protocol-level failures (D-1 honest labels HTTP_429 /
     # HTTP_5xx / HTTP_TIMEOUT / HTTP_TRANSPORT / HTTP_CONFIRM) and a confirm
@@ -165,6 +185,19 @@ async def _handle_open_reject(
             "released, NO strategy fault",
             venue, symbol, code_key, (reject_msg or "")[:120],
         )
+        # Credential-root-cause log: an OKX auth code (50100-50114) means EVERY
+        # signed call is being rejected by the venue — a credential regression
+        # blocking all real orders, not a one-symbol blip. Surface it as a loud
+        # ERROR (credential_root_cause_log) so the operator refreshes the demo
+        # key/passphrase; the entries resume the instant they are valid again.
+        if reject_code in OKX_AUTH_REJECT_CODES:
+            logger.error(
+                "[L7/CREDENTIAL] OKX AUTH FAIL code=%s — signed orders are being "
+                "REJECTED venue-side (invalid/rotated/expired OKX_DEMO key or "
+                "passphrase). ALL real OKX orders blocked until credentials are "
+                "refreshed; this is NOT a strategy/code fault.",
+                reject_code,
+            )
         if venue_order_id is not None:
             # Accepted-but-unfilled order is still LIVE at the venue → record a
             # durable orphan (idempotent) so reconciliation can close it.
@@ -206,6 +239,7 @@ async def _handle_open_reject(
 __all__ = [
     "COMPLIANCE_REJECT_CODES",
     "EXTERNAL_NONFAULT_REJECT_CODES",
+    "OKX_AUTH_REJECT_CODES",
     "OKX_PARAM_REJECT_CODES",
     "_handle_open_reject",
     "_is_external_reject",

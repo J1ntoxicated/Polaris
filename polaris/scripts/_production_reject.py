@@ -185,6 +185,23 @@ async def _handle_open_reject(
             "released, NO strategy fault",
             venue, symbol, code_key, (reject_msg or "")[:120],
         )
+        # ③ anti-churn: a TRANSIENT external reject (buying_power / market_closed
+        # / no_fill …) must STAMP the novelty key, exactly as a successful fill
+        # would. The novelty key was previously written ONLY on a real fill
+        # (_production_run_signal), so a reject left it None → every next tick saw
+        # is_novel_reentry True (last_entry_bar is None → always novel) → the
+        # re-entry cooldown was exempted → the SAME signal re-fired indefinitely
+        # (42x churn; a reject INSERTs no positions row, so the cooldown / same-
+        # side guards could not catch it either). Stamping (created_at_bar, side)
+        # makes a same-bar same-side re-fire NOT novel → the cooldown applies →
+        # churn stops. A NEW bar or a side flip is still novel (entry resumes) —
+        # flow_not_block, never a permanent block. The PERMANENT-blocklist
+        # compliance reject (51155) is EXCLUDED: the blocklist is its mechanism
+        # (the symbol is skipped before novelty), so stamping it would mislead.
+        if reject_code not in COMPLIANCE_REJECT_CODES:
+            state.last_entry_by_key[(venue, symbol, sig.strategy_id)] = (
+                sig.created_at_bar, sig.side,
+            )
         # Credential-root-cause log: an OKX auth code (50100-50114) means EVERY
         # signed call is being rejected by the venue — a credential regression
         # blocking all real orders, not a one-symbol blip. Surface it as a loud

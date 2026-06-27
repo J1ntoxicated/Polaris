@@ -22,9 +22,13 @@ Alpaca delivers an **array** of messages per frame; each item has a ``T`` type
 discriminator (``q`` quote, ``t`` trade, ``success`` / ``subscription`` /
 ``error`` control). We map the first quote in the array to a QuoteTick.
 
-Gating: RTH only — outside US regular trading hours the venue rejects orders, so
-we do not even hold a socket open. Wired via ``equity_session_gate``
-(``us_equity_session_state`` → RTH check) so it matches the entry-hold gate.
+Gating: RTH + a weekday pre-open WARM lead — outside US regular trading hours the
+venue produces no quotes (and rejects orders), so we do not even hold a socket
+open. Wired via ``equity_session_gate`` (``us_equity_session_state`` RTH check —
+now WEEKEND-AWARE — OR ``equity_ws_warm_active`` pre-open lead) so it matches the
+entry-hold gate and reconnects ahead of the open. On the weekend the cash book is
+shut all day, so the socket stays gated (this stops the idle-forced-reconnect
+loop that fired when the old time-of-day clock read Sat ET-RTH-hours as 'rth').
 """
 
 from __future__ import annotations
@@ -41,7 +45,10 @@ from polaris.core.universe.schema import (
     alpaca_feed_token,
     mark_alpaca_feed_downgraded,
 )
-from polaris.venues.alpaca.equity_session_gate import us_equity_session_state
+from polaris.venues.alpaca.equity_session_gate import (
+    equity_ws_warm_active,
+    us_equity_session_state,
+)
 from polaris.venues.ws_common import WSStreamClient
 
 logger = logging.getLogger(__name__)
@@ -216,11 +223,27 @@ class AlpacaQuoteWS(WSStreamClient):
         return None
 
     # ------------------------------------------------------------------
-    # Gating — RTH only.
+    # Gating — RTH + pre-open warm lead (weekend/overnight = no socket).
     # ------------------------------------------------------------------
 
     @staticmethod
     def _gated_at(*, ts: int | float | None = None) -> bool:
-        """True outside US regular trading hours (gate = hold, never a halt)."""
+        """True when the Alpaca equity WS must NOT hold a socket open.
+
+        UNGATED (return ``False``, keep/open the socket) in exactly two windows:
+        - RTH (``us_equity_session_state == "rth"``) — the live quote stream; and
+        - the weekday pre-open WARM lead (``equity_ws_warm_active``) — so the
+          socket RECONNECTS ~WS_WARM_LEAD_MINUTES ahead of the 09:30-ET open and
+          quotes are already flowing at the open (#66 pre-open warm intent).
+
+        GATED (return ``True``, no connect) otherwise: the weekend (the cash book
+        is shut ALL weekend — ``us_equity_session_state`` is now weekend-aware, so
+        Sat ET-RTH-hours no longer reads 'rth' and the WS stops the idle-reconnect
+        loop on a closed market), deep overnight, and after-hours. flow_not_block:
+        the gate is "the market is closed, don't hold a socket", not a throttle —
+        the instant RTH/warm returns the socket reconnects automatically.
+        """
         t = ts if ts is not None else time.time()
-        return us_equity_session_state(t) != "rth"
+        if us_equity_session_state(t) == "rth":
+            return False
+        return not equity_ws_warm_active(t)

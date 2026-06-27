@@ -4,7 +4,7 @@ Spec source: research selection ``index_52w_high_momentum`` (rank-3, DEMO/PAPER,
 NET +58bps verified, both OOS halves + (+97/+20bps), 722-trade backtest). The
 George/Hwang anchoring-continuation edge: buy a FRESH 252-bar (52-week) high within
 2% of the high WITH a 3-month momentum confirm, and let the new-high leg run.
-Adds the Asia-Pacific index complex (J225/HK50/AU200) that currently has ZERO
+Adds the Asia-Pacific index complex (J225/HK50/SG25) that currently has ZERO
 strategy coverage. Distinct from ``xau_indices_trend`` (30-bar Donchian) and from
 ``index_dual_momentum_rotation`` (monthly cross-sectional rotation) — orthogonal:
 this is an event-driven per-symbol breakout on each index's own 252-bar history.
@@ -62,10 +62,32 @@ ROC_STRENGTH_GAIN: Final[float] = 4.0
 TTL_BARS: Final[int] = 3
 LEVERAGE_MAX: Final[float] = 20.0
 
-# Live Capital bare index epics (AU200AU alias accepted). Yahoo ^GSPC/^NDX/^N225/
-# ^HSI/^AXJO are internal fetch details only — NEVER the RawSignal.symbol.
+# Live Capital bare index epics. Phase2 fan-out (wajecs9ct): the 52wk-high
+# momentum let-run GENERALIZES across persistent-bull index majors — the proven
+# US500/US100/J225/HK50 baseline holds OOS and the new US/UK/Asia/Iberia/EU-core
+# epics confirm OOS (capital_cfd INDICES run = 12/19 OOS-positive). DROP AU200
+# (both runs flag it a live LOSER, -0.28R) — the ONE removal in this fan-out.
+# 🚫 HARD EXCLUDE (mom52w OOS-negative — choppy continental-EU + small-cap):
+# RTY, DE40, FR40, IT40, SW20, CN50 — do NOT add (structural mean-revert weak
+# region; the learner deprioritizes naturally). long-only (short/new-low mirror
+# REJECTED 1/15). NOTE: IN50/KS200 are in this set but ABSENT from the Capital demo
+# universe → they emit no bars (silent no-emit, harmless/inert) until Capital lists
+# them. Yahoo ^GSPC/^NDX/^N225/^HSI etc. are fetch details only — NEVER the symbol.
 SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {"US500", "US100", "J225", "HK50", "AU200", "AU200AU"}
+    {
+        "US500",
+        "US100",
+        "J225",
+        "HK50",
+        "US30",
+        "UK100",
+        "SP35",
+        "NL25",
+        "EU50",
+        "IN50",
+        "KS200",
+        "SG25",
+    }
 )
 
 

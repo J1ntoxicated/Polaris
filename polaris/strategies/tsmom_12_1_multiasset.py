@@ -85,7 +85,21 @@ TTL_BARS: Final[int] = 3
 # diversifier sleeve (Alpaca, blocked on SIP #42 — venue-inert until routed).
 # Flow-safe symbol SET — emits only here.
 EQUITY_ETF_LEG: Final[frozenset[str]] = frozenset({"SPY", "QQQ", "GLD"})
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = okx_liquid_top_n() | EQUITY_ETF_LEG
+# Phase2 fan-out (wajecs9ct): tsmom 12-1 is the ONLY FX archetype that selectively
+# GENERALIZES OOS. SELECTIVE 6 both-OOS-positive ONLY — trending-USD majors
+# (USDJPY/USDCAD/NZDUSD) + cross (GBPJPY) + carry/directional EM (USDZAR/USDTRY).
+# 🚫 NOT a 23-wide basket — class-wide FX never exceeds 6/23 (26%) OOS, so this is
+# a tiny targeted port by design. Live Capital forex epics are the bare pair
+# spelling (no slash). NOTE: these are venue=capital epics; tsmom's dispatch matches
+# metadata.venue=="okx", so the FX leg is venue-INERT until the dispatcher routes
+# Capital to tsmom (out of scope here — SUPPORTED_SYMBOLS widen only, no dispatch
+# change). The cell/learner per-ticker plumbing is already wired (keys on ticker).
+FX_TSMOM_LEG: Final[frozenset[str]] = frozenset(
+    {"USDJPY", "USDCAD", "NZDUSD", "GBPJPY", "USDZAR", "USDTRY"}
+)
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = (
+    okx_liquid_top_n() | EQUITY_ETF_LEG | FX_TSMOM_LEG
+)
 
 
 def _norm_symbol(symbol: str) -> str:

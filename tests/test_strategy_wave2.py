@@ -384,11 +384,24 @@ def test_index_52w_out_of_universe() -> None:
     assert s.generate_raw_signal(_mv(bars, symbol="BTC-USDT", venue="okx")) is None
 
 
-def test_index_52w_au200au_alias() -> None:
+def test_index_52w_au200_dropped_loser() -> None:
+    # Phase2 fan-out (wajecs9ct): AU200/AU200AU = live LOSER (-0.28R, both runs)
+    # → dropped from this strategy's SUPPORTED_SYMBOLS. They must NO LONGER emit
+    # here (the 52w leg vacates them; index_dual_momentum_rotation still trades
+    # them, but that is a different strategy).
     s = Index52WHighMomentumStrategy()
     bars = _bars(260, base_close=4000.0, drift=2.0)
     _fresh_252_high(bars, IDX_ROC)
-    assert s.generate_raw_signal(_mv(bars, symbol="AU200AU", venue="capital")) is not None
+    assert s.generate_raw_signal(_mv(bars, symbol="AU200", venue="capital")) is None
+    assert s.generate_raw_signal(_mv(bars, symbol="AU200AU", venue="capital")) is None
+
+
+def test_index_52w_emits_on_new_phase2_epic() -> None:
+    # A newly-added OOS-confirmed epic (SP35) now emits on a fresh 252-high.
+    s = Index52WHighMomentumStrategy()
+    bars = _bars(260, base_close=4000.0, drift=2.0)
+    _fresh_252_high(bars, IDX_ROC)
+    assert s.generate_raw_signal(_mv(bars, symbol="SP35", venue="capital")) is not None
 
 
 def test_index_52w_metadata_and_registry() -> None:

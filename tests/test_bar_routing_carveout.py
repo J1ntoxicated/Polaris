@@ -19,6 +19,7 @@ from polaris.scripts._production_tick import (
     keep_on_bar_path,
 )
 from polaris.strategies import (
+    gold_trend_chandelier_1d,
     index_52w_high_momentum,
     index_dual_momentum_rotation,
     session_breakout,
@@ -77,14 +78,16 @@ def test_unsupported_capital_symbol_still_vacated() -> None:
 
 
 def test_carveout_symbols_union_matches_enabled_strategies() -> None:
-    # The carve-out set is exactly the union of ALL FOUR ENABLED Capital
+    # The carve-out set is exactly the union of ALL FIVE ENABLED Capital
     # index/commodity bar strategies' SUPPORTED_SYMBOLS (no hand-rolled list) —
-    # wave2 added index_dual_momentum_rotation + index_52w_high_momentum.
+    # wave2 added index_dual_momentum_rotation + index_52w_high_momentum; Phase2
+    # fan-out (wajecs9ct) added gold_trend_chandelier_1d (metals+energy widen).
     expected = (
         xau_indices_trend.SUPPORTED_SYMBOLS
         | session_breakout.SUPPORTED_SYMBOLS
         | index_dual_momentum_rotation.SUPPORTED_SYMBOLS
         | index_52w_high_momentum.SUPPORTED_SYMBOLS
+        | gold_trend_chandelier_1d.SUPPORTED_SYMBOLS
     )
     assert expected == CAPITAL_BAR_STRATEGY_SYMBOLS
     # GOLD + US100 are both present (the two strategies this wave revives).

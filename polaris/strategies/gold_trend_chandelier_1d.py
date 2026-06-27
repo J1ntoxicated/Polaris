@@ -26,8 +26,11 @@ bars])`` (Donchian-55 prior-high breakout; window EXCLUDES the current closing b
 filters out the persistent-uptrend breakouts that carry). Donchian-55 is NOT
 pre-fed (only Donchian 40 & 30 are) so the prior-high is recomputed in-module from
 ``market_view.bars`` with the ``okx_donchian_55_breakout`` is_finite() fallback
-pattern. Single-symbol GOLD — do NOT generalize to SI/CL/HG (the robustness is
-GOLD-specific; each other commodity flips one OOS half negative).
+pattern. Phase2 fan-out (wajecs9ct): the GOLD anchor was the validation seed, but
+the D-55 chandelier let-run archetype GENERALIZES across persistent-trend physical
+commodities (two independent OOS runs + both-calendar-half). ``SUPPORTED_SYMBOLS``
+is widened to the both-OOS-confirmed metals + select-energy set (see below);
+🚫 the OVERFIT energy/grain (WTI/NATGAS/HEATINGOIL/WHEAT — OOS sign-flip) stay OUT.
 
 Verified params are named Final constants (no magic numbers):
   - ``DONCHIAN_WINDOW = 55``
@@ -59,10 +62,27 @@ BREAKOUT_STRENGTH_GAIN: Final[float] = 4.0
 TTL_BARS: Final[int] = 3
 LEVERAGE_MAX: Final[float] = 20.0
 
-# 'GOLD' is the LIVE Capital commodity epic; 'XAUUSD' is the legacy alias (kept
-# additive so any path still carrying the old spelling matches). GC=F is the
-# Yahoo fetch detail only — NEVER the RawSignal.symbol. Flow-safe symbol SET.
-SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset({"GOLD", "XAUUSD"})
+# Live Capital commodity epics. Phase2 fan-out (wajecs9ct): the D-55 chandelier
+# let-run archetype GENERALIZES across persistent-trend physical commodities — the
+# strongest GENERALIZES verdict in the whole sweep (two independent OOS runs +
+# both-calendar-half). Tier-1 = the 6 both-OOS-confirmed precious+base metals +
+# select energy; Tier-2 = admit-with-learner-watch (one run both-OOS+ / marginal
+# 2nd). Per-instrument learner tunes trail/stop, NOT entry — adding instruments
+# spawns new per-ticker L4 cells / L5 NIG posteriors automatically (no new code).
+# 🚨 EPIC SPELLING = the live Capital bear epic (verified vs the universe table):
+# OIL_BRENT (not "BRENT"), SOYBEANOIL (not "SOYOIL"); the Yahoo SI=F/HG=F/BZ=F
+# series are internal FETCH details only — NEVER the RawSignal.symbol. 'XAUUSD'
+# legacy alias kept additive. 🚫 HARD EXCLUDE (OVERFIT — OOS sign-flip + fat-tail):
+# WTI_CRUDE, NATGAS, HEATINGOIL, WHEAT — do NOT add. Flow-safe symbol SET.
+_COMMODITY_TIER1: Final[frozenset[str]] = frozenset(
+    {"GOLD", "SILVER", "PALLADIUM", "COPPER", "OIL_BRENT", "GASOLINE"}
+)
+_COMMODITY_TIER2_LEARNER_WATCH: Final[frozenset[str]] = frozenset(
+    {"PLATINUM", "SOYBEAN", "ALUMINUM", "SOYBEANOIL"}
+)
+SUPPORTED_SYMBOLS: Final[frozenset[str]] = (
+    _COMMODITY_TIER1 | _COMMODITY_TIER2_LEARNER_WATCH | frozenset({"XAUUSD"})
+)
 
 
 def _norm_symbol(symbol: str) -> str:

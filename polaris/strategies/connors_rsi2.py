@@ -107,6 +107,11 @@ class ConnorsRSI2Strategy(BaseStrategy):
         correlation_group_id="equity_connors_reversion",
         product_class="equity",
         profit_target_r=REVERT_TARGET_R,
+        # UNVALIDATED — the docstring cites an external "documented 65-75% win"
+        # claim only; no in-system OOS / fee validation. Stays OUT of NEW-ENTRY
+        # dispatch (it was already absent from the prior literal); this flag makes
+        # the KILL explicit + structurally enforced (registered, not dispatched).
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

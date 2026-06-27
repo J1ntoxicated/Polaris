@@ -26,7 +26,14 @@ from polaris.core.cell_matrix import CellContext, CellKeyP0
 from polaris.core.cell_matrix.schema import TradeClose
 from polaris.core.cell_matrix.update import update_on_trade_close
 from polaris.core.data.schema import Bar
+from polaris.core.indicators.production import (
+    build_real_market_view,
+    compute_real_regime_signal,
+)
 from polaris.core.live_recalc.exit_engine import ExitState, evaluate_exit, init_exit_state
+from polaris.core.live_recalc.loser_timeout import (
+    loser_timeout_for_strategy as _loser_timeout_for_strategy,
+)
 from polaris.core.pipeline._sizer_payload import build_sizer_payload
 from polaris.core.replay.equity_curve import build_equity_curve, summarize_metrics
 from polaris.core.replay.fill_model import (
@@ -39,11 +46,6 @@ from polaris.core.replay.models import ReplayConfig, ReplayResult, ReplayTrade
 from polaris.core.replay.sandbox_db import seed_sandbox
 from polaris.core.sizing import SignalIntent, compute_size
 from polaris.core.streams import resolve_stream
-from polaris.scripts._production_indicators import (
-    build_real_market_view,
-    compute_real_regime_signal,
-)
-from polaris.scripts._production_recalc_exit import _loser_timeout_for_strategy
 from polaris.strategies import all_strategies
 from polaris.strategies.base import BaseStrategy, RawSignal
 

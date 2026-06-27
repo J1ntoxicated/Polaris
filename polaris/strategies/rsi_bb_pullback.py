@@ -54,6 +54,12 @@ class RSIBBPullbackStrategy(BaseStrategy):
         asset_class="spot",
         venue="okx",
         correlation_group_id="spot_mean_reversion",
+        # KILLed from NEW-ENTRY dispatch (#56 stop-bleeders): 15m intraday crypto
+        # mean-reversion is the fee-fatal / slippage-fragile class the autopsy
+        # flagged (same family as the KILLed micro_reversion / spot_donchian); no
+        # OOS / fee-hurdle evidence. Stays registered so its open positions still
+        # exit via the recalc loop — KILL is no-emit, not module removal.
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

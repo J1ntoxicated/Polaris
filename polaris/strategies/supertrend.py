@@ -164,6 +164,11 @@ class SupertrendStrategy(BaseStrategy):
         # trailing stop; the natural exit is the band-flip-down, taken by the
         # let-winners-run ATR-trail + MFE-harvest exit FSM. A fixed +R target would
         # CLIP the trend this strategy exists to ride — so it opts OUT.
+        # UNVALIDATED — design rationale only (no OOS / fee-hurdle evidence), so it
+        # stays OUT of NEW-ENTRY dispatch (unvalidated live = churn risk). It was
+        # already absent from the prior dispatch literal; this flag makes the KILL
+        # explicit + structurally enforced (registered, not dispatched).
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

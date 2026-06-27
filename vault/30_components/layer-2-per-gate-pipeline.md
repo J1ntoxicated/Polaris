@@ -4,11 +4,13 @@ component: layer-2-per-gate-pipeline
 status: active
 date_created: 2026-05-06
 tags: [layer-2, pipeline, ai, langgraph, per-gate, haiku, sonnet]
-related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
+related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-006-cell-matrix|ADR-006]], [[ADR-007-learner-network|ADR-007]], [[ADR-011-ai-free-cutover|ADR-011]], [[layer-0-universe-discovery]], [[layer-1-canonical-baseline]]
 reviewed_by: codex+jin (round 1, gpt-5.4)
 ---
 
 # Layer 2 — Per-Gate AI Agent Pipeline
+
+> 📌 **SUPERSEDED IN PART by [[ADR-011-ai-free-cutover|ADR-011]] (W3 AI-Free In-Loop Cutover, 2026-06-22)**: in-loop trading decisions are now **deterministic Python PRIMARY**; in-loop GPT calls = 0, Anthropic = blocked for runtime (Claude Code dev-tooling only). The G3 Signal Validator / G4 Pre-Entry Watcher / G7 Adaptive Exit gates — Haiku/Sonnet below — are now **deterministic Python primary**; the prior deterministic *shadow* is the live decision path. GPT (OpenAI) = shadow-agreement + sentinel/live-audit sidecar (observe-only, telemetry — never gates a live trade). The model-split table + fallback-chain below describe the ORIGINAL ADR-004 design; read them as the historical record, with ADR-011 as the live override.
 
 ## Decision (codex 합의 R1)
 
@@ -43,7 +45,7 @@ P0 단일 dev / read·debug simplicity / dependency 0 / crash surface 축소. La
 | G7 Adaptive Exit | **Python** | Sonnet |
 | G8 Post-Trade Reflector | **Python template** | Sonnet |
 
-**Fallback chain**: 2단만 (`LLM gate primary → Python deterministic`). Sonnet→Haiku→Python 3단 거부 (latency/cost/state 폭발).
+**Fallback chain** (ORIGINAL ADR-004 design): 2단 (`LLM gate primary → Python deterministic`). **Per [[ADR-011-ai-free-cutover|ADR-011]] this is now INVERTED — Python deterministic is PRIMARY, GPT shadow/sentinel observe-only; in-loop LLM gate = 0.** Sonnet→Haiku→Python 3단 거부 stays (latency/cost/state 폭발).
 
 ### Q4 — Failure mode (mixed policy)
 **원칙**: new-risk-creation gates (3/4/5) = fail-closed. position-management gates (6/7/8) = protective fail-open.

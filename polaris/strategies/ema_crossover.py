@@ -106,6 +106,13 @@ class EMACrossoverStrategy(BaseStrategy):
         venue="okx",
         correlation_group_id="spot_ema_trend",
         profit_target_r=EMA_TREND_TARGET_R,
+        # KILLed from NEW-ENTRY dispatch (#56 stop-bleeders): design-rationale-only
+        # docstring, no OOS / fee-hurdle numbers — the SAME evidence tier as the
+        # excluded supertrend / connors_rsi2 / cci_reversion. It had been dispatched
+        # only by an implicit accident of the hand-synced literal; the registry-
+        # derived SSOT makes the (un)validated status EXPLICIT. Stays registered so
+        # its open positions still exit via the recalc loop — KILL is no-emit.
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

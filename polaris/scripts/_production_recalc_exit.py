@@ -20,10 +20,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from polaris.core.isolation.reentry import bar_seconds
 from polaris.core.live_recalc.exit_engine import (
     EXIT_ADAPTIVE_THESIS_ON,
-    EXIT_LOSER_TIMEOUT_SEC,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GIVEBACK_FRAC,
@@ -35,6 +33,22 @@ from polaris.core.live_recalc.exit_engine import (
     assess_thesis,
     evaluate_exit,
     init_exit_state,
+)
+
+# Re-exported (move-only) with the redundant-alias idiom so these stay EXPLICIT
+# module attributes (mypy no-implicit-reexport) for the external importers — they
+# were used by ``_loser_timeout_for_strategy`` before it moved to core.
+from polaris.core.live_recalc.exit_engine import (
+    EXIT_LOSER_TIMEOUT_SEC as EXIT_LOSER_TIMEOUT_SEC,
+)
+from polaris.core.live_recalc.loser_timeout import (
+    EXIT_LOSER_TIMEOUT_MIN_BARS as EXIT_LOSER_TIMEOUT_MIN_BARS,
+)
+from polaris.core.live_recalc.loser_timeout import (
+    LOSER_TIMEOUT_CAP_SEC as LOSER_TIMEOUT_CAP_SEC,
+)
+from polaris.core.live_recalc.loser_timeout import (
+    loser_timeout_for_strategy as _loser_timeout_for_strategy,
 )
 
 # Re-exported (move-only split) with redundant aliases so these resolve as
@@ -62,7 +76,6 @@ from polaris.scripts.exit_strategy_config import (
 from polaris.scripts.exit_strategy_config import (
     _bucket_for_strategy as _bucket_for_strategy,
 )
-from polaris.scripts.exit_strategy_config import _env_float, _env_int
 from polaris.scripts.exit_strategy_config import (
     _mfe_protect_for_strategy as _mfe_protect_for_strategy,
 )
@@ -90,59 +103,6 @@ __all__ = [
 def assess_mode_for_position(**kw: Any) -> ManagementMode | None:
     """Public wrapper for the bar/tick callers to resolve the re-map mode."""
     return _assess_mode_for_position(**kw)
-
-
-# Component B exit horizon ∝ timeframe. A still-OPEN losing position is given at
-# least this many bars of its strategy timeframe before the stale-loser timeout
-# can fire — so a 1H tsmom thesis is not force-closed at the flat 900s, while a
-# 1m strategy keeps the short 900s timeout (max() floor below). EXPECTANCY (give
-# the thesis its horizon), NOT a defensive throttle — the ATR-trail / MFE stops
-# (the precise exits) are untouched. Env-overridable.
-EXIT_LOSER_TIMEOUT_MIN_BARS: int = _env_int("POLARIS_EXIT_LOSER_TIMEOUT_MIN_BARS", 2)
-
-# Named drift-backstop CEILING (POLARIS_LOSER_TIMEOUT_SEC, default 3600s = 1hr).
-# A sideways-drifting dead-thesis loser is cut faster: the bar-scaled floor for a
-# slow strategy (tsmom 1H → 2×3600=7200s) is capped here so a drifter is closed at
-# ~1hr instead of sitting 2hr tying up capital. PRECISE-EXIT loss-defense
-# (flow_not_block): it only shortens the sideways-drift timeout — the G6 −1R hard
-# rail and the ATR-trail (which cut REAL fast losers far earlier) are untouched,
-# and fast strategies / tick scalps (≤900s floor, already under the cap) are
-# unaffected. Re-tunable via the env var.
-LOSER_TIMEOUT_CAP_SEC: float = _env_float("POLARIS_LOSER_TIMEOUT_SEC", 3600.0)
-
-
-# Timeframe-class boundary for the 1H drift-backstop cap ([[1d_exit_horizon_fix_
-# 2026-06-26]] FIX A). The cap is scalp/1H drift logic — a strategy whose ONE bar
-# is ≥ this (4H/1D/swing) is EXEMPT so its bar-scaled floor (a 1D thesis →
-# 2×86400=172800s) is NOT truncated to the 1H cap (the live bug: a 1D equity
-# thesis was force-closed at ~1hr, contradicting its declared daily horizon).
-# Equity is EOD-flattened → the session-close rail is the real backstop; the G6
-# -1.0R rail + the ATR-trail (real losers cut far earlier) are untouched.
-_LOSER_TIMEOUT_CAP_TF_FLOOR_SEC: float = float(bar_seconds("4H"))
-
-
-def _loser_timeout_for_strategy(strategy_id: str) -> float:
-    """Stale-loser drift-backstop timeout for ``strategy_id``.
-
-    ``max(EXIT_LOSER_TIMEOUT_SEC, MIN_BARS × bar_seconds(timeframe))`` then, for a
-    SCALP/1H-class strategy (one bar < 4H), CAPPED at the named
-    ``POLARIS_LOSER_TIMEOUT_SEC`` drift backstop (default 3600s) so a dead-thesis
-    drifter is cut faster instead of sitting the full 2hr. A ≥4H/1D-class strategy
-    is EXEMPT from that cap (FIX A) so a daily thesis respects its own horizon
-    (tsmom 1H → 3600s capped; equity 1D → 172800s floor, EOD-rail-backstopped). A
-    fast strategy (1m) keeps the flat 900s. An unregistered strategy_id falls back
-    to the flat default (bar_seconds fails safe to 300s for an unknown timeframe),
-    also under the cap.
-    """
-    cls = STRATEGY_REGISTRY.get(strategy_id)
-    if cls is None:
-        return min(EXIT_LOSER_TIMEOUT_SEC, LOSER_TIMEOUT_CAP_SEC)
-    bar = bar_seconds(cls.metadata.timeframe)
-    tf_floor = float(EXIT_LOSER_TIMEOUT_MIN_BARS * bar)
-    floored = max(EXIT_LOSER_TIMEOUT_SEC, tf_floor)
-    if bar >= _LOSER_TIMEOUT_CAP_TF_FLOOR_SEC:
-        return floored  # ≥4H/1D-class — exempt from the scalp/1H cap.
-    return min(floored, LOSER_TIMEOUT_CAP_SEC)
 
 
 def _profit_target_for_strategy(strategy_id: str) -> float | None:

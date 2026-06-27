@@ -78,6 +78,11 @@ class CCIReversionStrategy(BaseStrategy):
         venue="capital",
         correlation_group_id="cfd_commodity_reversion",
         profit_target_r=REVERSION_TARGET_R,
+        # UNVALIDATED — gap-filling design rationale only (no OOS / fee evidence).
+        # Stays OUT of NEW-ENTRY dispatch (it was already absent from the prior
+        # literal); this flag makes the KILL explicit + structurally enforced
+        # (registered, not dispatched).
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

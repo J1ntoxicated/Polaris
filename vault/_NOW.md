@@ -2,13 +2,15 @@
 type: runtime
 status: active
 date_created: 2026-05-06
-date_updated: 2026-06-11
+date_updated: 2026-06-27
 tags: [now, tier-0]
 ---
 
 # Polaris _NOW (Tier 0 — read first)
 
 ## What matters now (HAND-WRITTEN)
+
+**🟢 OKX 인증 살림 + 3-wave 통합 배포 2026-06-27 Sat (Jin "로그 모니터링·알파카 휴장 핑·OKX 리밋·OKX 집중 주말거래", 봇 PID 18206, main `81584d4`).** 🎉 **OKX 13시간 "거래0" 미스터리 = 자격증명 만료 아니라 변수명 맵핑 불일치** — Jin이 OKX 키페이지 라벨 `apikey/secretkey/Passpharse`(오타) 그대로 .env에 넣었고 봇은 `OKX_DEMO_API_KEY/SECRET/PASSPHRASE`로 read → 이름만 정렬(값 무접촉)→**인증 200, 50105=0**. 값은 처음부터 맞았음. boot signed health-check가 이런 사일런트 회귀 부팅때 가시화. **6-Workflow 오케스트레이션**(altdata-max→rebase→ops→okx-exec→integrate, 각 fresh 적대리뷰) 3-wave 통합·라이브검증: ①**okx-exec settle-ability 게이트**(`d6f645f`) — bar 파이프라인(`_production_tick.py:442`)이 fc0684d `trade_eligible` 미참조[**2-path enforcement 갭**: tick-engine만 enforce]→크립토-쿼터 SOL-ETH가 주문경로 leak→`51201`(sz를 quote-ccy 단위 오해)/`51008`(데모 USDT-only, ETH로 SOL매수 불가) **100% reject·체결0**; fix=bar producer에 `okx_quote_settleable` 게이트(emit AFTER/dispatch BEFORE defer, 🚨**score-floor 안쓰고 quote-guard만**=USDT thin-score도 주문도달=aggressive 보존). **라이브검증: 51201/51008 30→0, SOL-ETH 주문 30→0 + 여전히 watched(focus 436)=flow_not_block, unsettleable defer 8.** ②**altdata 최대확장**(`f0f2a5e`) — FRED **4→32 series**(금리/물가/고용/성장/통화/신용/주택/달러/소비/원자재/스트레스/변동성, `<key>_asof` #69) + **binance_deriv.py 신규 키리스 컬렉터**(funding/OI 24h델타/global+top long-short[retail vs 스마트머니]/taker imbalance=봇이 0이던 포지셔닝축) + coinglass/myfxbook activation-ready(키 게이트 inert) + **ai_judge `_evidence_block` allowlist gap fix**(positioning + curated FRED 10패널 렌더, 5-key 하드코드가 drop하던 것 = "데이터 다 들고와" 목적인 judge 도달 완성). ③**equity 세션-게이트**(`1f29856` #84) — 주식 fetch가 휴장에도 24/7 fan-out→**Alpaca data 429 1323/3000줄** + yfinance storm; fix=`equity_fetch_active` 술어(휴장 skip·crypto/Capital 무게이팅·#66 pre-warm **def-before-binding 사일런트킬 방지+회귀테스트**). **라이브검증: Alpaca 429 1323→0.** **OKX limiter 감사=이미 존재**(candles bucket 20/2s soft-cap, 🚨주문host 의도적 무페이싱=aggressive). 풀스위트 **3813 pass**, mypy strict+ruff clean, 거부키워드 0, sizing/9-stack/-1.0R rail 무접촉. ★남은: **USDT 페어 실체결**(경로 깨끗·주말 일봉돌파 신호 대기, 드묾) + **Capital 키**(#83: API 서버 정상[/time 200]이나 CAP_API_KEY 값 무효→재발급 월요일, Jin "사이트 다운"=웹 대시보드일 수) + 미push(Jin 승인 대기). 부수: score-floor 0.30이 tick-engine서 OKX 74/79 zero(bar path 무관, 별도검토) · fuser 710/ai_judge 678 LOC>500(분리 후속).
 
 **🟢 maker+weekend+Capital wave 2026-06-27 Sat (Jin "활발하면서 안 잃는 봇·주말 OKX 집중·수백 instance 티커별 튜닝", 봇 PID 40143, main `bd99788`).** "거래 거의 없다" 분노 진단 → 운영 막힘 2 근본해소: **OKX 0-eligible**(discovery depth_10bps_usd proxy=top-of-book $6-19를 $25k floor와 비교→BTC/ETH/SOL까지 FAIL_DEPTH=모든 OKX 진입차단의 진짜 근본→floor 비활성+abnormal-spread sentinel, eligible 0→1440, `0e21491`) + **STALL**(_layer0_producer가 refresh_focus 동기 inline→event loop 6~33s 기아→to_thread offload+전용 focus_conn+_SymbolActivation dict-race 박멸, `cb8c929`). 전략 wave: **maker 실행레이어**(post_only-first+reprice/repost bounded 루프+no-fill cancel[weekend]/taker[기타] 모드, 🚨**rail=G6 taker 불변**[maker는 entry-only, 미체결 스톱 방지], `bc23e54`) + **주말 OKX 2직교축**: weekend_thin_book_flush_maker(price-axis flush RSI<25+wick, +73bps real-fee, #77) + weekend_funding_capitulation_maker(positioning-axis 극단음펀딩≤p10→spot long bounded+1R, +83bps, okx_funding p10 8h캐시, shadow-first, #80) + **Capital fan-out**(gold_chandelier 2→11 원자재·index_52w 6→12·tsmom FX 6선별, OOS검증, L4 cell key=ticker/L5 NIG posterior가 **티커별 자동튜닝**[신규학습코드 0], overfit 제외 WTI/NATGAS/RTY/DE40, `9cad38b`). ★정직결론: **크립토 intraday 우물 말랐음**(maker는 비용만 뒤집고 엣지 못만듦 11/12 net-neg, 주말 2직교축이 전부 — 방향성 6변종+OI 다 REJECT[신호부재]) · **IG 보류**(Capital과 중복 NO-GO) · **"수백 instance"=Capital 도메인 선별적**(~30 OOS검증, 무작정 아님) · anti-overfit=cold-cell n_eff<5 ×1.0중립+shrinkage(flow_not_block). 🚨 demo flat 70bps라 **maker엣지는 `maker_fill_shadow` real-fee로만 보임**(demo P&L 화면 아님). 적대리뷰 전부 rail_safe 검증. 거래시점: 주말=OKX flush/funding(조건 대기, 드묾), **월요일=Capital 원자재 8~10 깨어남(진짜 활발 시작)**. 남은: #79 FX tsmom dispatch·#81 funding 피드 다심볼 확장·#73 wave2 추적·#42 SIP키.
 
@@ -59,4 +61,4 @@ tags: [now, tier-0]
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-06-27 03:15 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-06-27 08:17 (paper=True, full_pipeline=True)

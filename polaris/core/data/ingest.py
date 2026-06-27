@@ -26,6 +26,7 @@ import logging
 import math
 import sqlite3
 from collections.abc import Iterable
+from pathlib import Path
 
 from polaris.core.data.baseline import (
     _default_lookback,
@@ -36,6 +37,7 @@ from polaris.core.data.baseline import (
     upsert_baseline_state,
 )
 from polaris.core.data.schema import Bar, BaselineValue
+from polaris.storage.schema import connect
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,9 @@ __all__ = [
     "compute_baselines_batch",
     "ingest_bars",
     "ingest_bars_async",
+    "ingest_bars_offloaded",
     "persist_bars",
+    "persist_bars_offloaded",
     "update_baseline_from_bars",
     "update_baseline_from_bars_async",
 ]
@@ -386,3 +390,122 @@ async def ingest_bars_async(
             asset_class or "<unspec>",
         )
     return {"bars": persisted, "baseline_samples": baseline_n}
+
+
+# ---------------------------------------------------------------------------
+# Full off-loop ingest — STALL residual fix (#90). The ENTIRE per-1m-tick
+# persist + baseline-append DB write is moved to a worker thread on a DEDICATED
+# connection, so the event loop (tick engine + WS recv) is never held for the
+# 29k-60k row-by-row sqlite executes the live log brackets to the STALL gap.
+#
+# This is the #74 / #88 / retention_producer pattern: ``asyncio.to_thread`` +
+# a thread-confined conn opened from the db PATH (never the loop-owned conn) +
+# snapshot inputs (the bars list is already materialized). Behaviour-identical
+# to ``ingest_bars`` — same bars, same baselines, same order — only WHERE the
+# write runs changes (worker thread instead of the loop). WAL single-writer is
+# safe because the caller awaits each batch sequentially, so only one ingest
+# worker ever touches the dedicated conn at a time. degrade-never-crash: a
+# sqlite fault is swallowed and ``{}`` returned so the next tick retries.
+# ---------------------------------------------------------------------------
+
+
+def _db_path_from_conn(conn: sqlite3.Connection) -> str | None:
+    """Return the on-disk path of a file-backed conn, or ``None`` for in-memory.
+
+    ``PRAGMA database_list`` reports the path SQLite itself uses to open the
+    ``main`` database, so a dedicated ``connect(path)`` re-opens the SAME
+    physical file (WAL makes committed writes visible to the loop conn). An
+    in-memory DB (``:memory:`` / tests) reports an EMPTY path → ``None``, which
+    signals the caller to keep the write on the loop (no offload possible).
+    """
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list").fetchall():
+            if name == "main":
+                return str(file) if file else None
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _ingest_blocking(
+    db_path: str | Path,
+    bars: list[Bar],
+    *,
+    asset_class: str = "",
+) -> dict[str, int]:
+    """Blocking persist + baseline ingest on a DEDICATED conn (worker thread).
+
+    Opens its OWN WAL connection from ``db_path`` (never the loop-owned conn —
+    sqlite handles are thread-affine), runs the FULL synchronous ingest
+    (``persist_bars`` + ``update_baseline_from_bars``), and closes the handle.
+    Returns the same ``{"bars": N, "baseline_samples": M}`` shape as
+    ``ingest_bars``. Any sqlite fault returns ``{"bars": 0, "baseline_samples":
+    0}`` (degrade-never-crash) so the offload caller never raises into the loop.
+    """
+    try:
+        conn = connect(db_path)
+    except sqlite3.Error as exc:
+        logger.warning("[ingest] offload conn open failed (degrade): %r", exc)
+        return {"bars": 0, "baseline_samples": 0}
+    try:
+        return ingest_bars(conn, bars, asset_class=asset_class)
+    except sqlite3.Error as exc:
+        logger.warning("[ingest] offload write failed (degrade): %r", exc)
+        return {"bars": 0, "baseline_samples": 0}
+    finally:
+        conn.close()
+
+
+async def ingest_bars_offloaded(
+    db_path: str | Path,
+    bars: Iterable[Bar],
+    *,
+    asset_class: str = "",
+) -> dict[str, int]:
+    """Off-loop twin of ``ingest_bars`` — persist + baseline on a worker thread.
+
+    The bars list is snapshotted before hand-off (plain data, no conn), then the
+    whole DB write runs via ``asyncio.to_thread`` on a dedicated connection so
+    the event loop stays free to service the tick engine / WS recv during the
+    write. Same return shape and identical persisted rows as ``ingest_bars``.
+    """
+    bars_list = list(bars)
+    if not bars_list:
+        return {"bars": 0, "baseline_samples": 0}
+    return await asyncio.to_thread(
+        _ingest_blocking, db_path, bars_list, asset_class=asset_class
+    )
+
+
+def _persist_blocking(db_path: str | Path, bars: list[Bar]) -> int:
+    """Blocking ``persist_bars`` on a DEDICATED conn (worker thread).
+
+    The higher-timeframe (non-1m) path persists bars WITHOUT a baseline
+    recompute (minute-windowed baselines must not see 15m/1H/1D bars). Mirrors
+    ``_ingest_blocking`` minus the baseline append. Fail-open: a sqlite fault
+    returns 0 so the next tick retries.
+    """
+    try:
+        conn = connect(db_path)
+    except sqlite3.Error as exc:
+        logger.warning("[ingest] offload persist conn open failed (degrade): %r", exc)
+        return 0
+    try:
+        return persist_bars(conn, bars)
+    except sqlite3.Error as exc:
+        logger.warning("[ingest] offload persist failed (degrade): %r", exc)
+        return 0
+    finally:
+        conn.close()
+
+
+async def persist_bars_offloaded(db_path: str | Path, bars: Iterable[Bar]) -> int:
+    """Off-loop twin of ``persist_bars`` — higher-timeframe persist off the loop.
+
+    Snapshots the bars and hands the DB write to a worker thread on a dedicated
+    connection. Same return value (rows persisted) as ``persist_bars``.
+    """
+    bars_list = list(bars)
+    if not bars_list:
+        return 0
+    return await asyncio.to_thread(_persist_blocking, db_path, bars_list)

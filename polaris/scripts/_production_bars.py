@@ -20,7 +20,13 @@ from typing import Any
 import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
-from polaris.core.data.ingest import ingest_bars_async, persist_bars
+from polaris.core.data.ingest import (
+    _db_path_from_conn,
+    ingest_bars_async,
+    ingest_bars_offloaded,
+    persist_bars,
+    persist_bars_offloaded,
+)
 from polaris.core.data.schema import BAR_INTERVALS, Bar
 from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_asset_class import resolve_bar_asset_class
@@ -704,13 +710,23 @@ async def ingest_bars_for_focus(
             "bars": 0, "baseline_samples": 0, "symbols": 0,
             "skipped_fresh": skipped_fresh,
         }
+    # STALL residual fix (#90): the per-tick persist + baseline-append DB write
+    # is the dominant on-loop blocker (29k-60k row executes bracketing the live
+    # tick-engine STALL gap). Offload the WHOLE write to a worker thread on a
+    # DEDICATED conn opened from the loop conn's db path (the #74/#88 pattern).
+    # An in-memory loop conn (tests) has no path → keep the write on the loop
+    # (``db_path is None``), behaviour-identical.
+    db_path = _db_path_from_conn(conn)
     # Codex F10 R1 P1-2 fix: baselines (ATR/size/volume) are minute-grained;
     # routing 5m/15m/1H bars into ``update_baseline_from_bars`` would
     # contaminate the minute-windowed state. Use the full ``ingest_bars``
     # pipeline only for 1m batches; for higher timeframes, persist the bars
     # without recomputing the baseline.
     if bar_interval != "1m":
-        total_persisted = persist_bars(conn, out_bars)
+        if db_path is not None:
+            total_persisted = await persist_bars_offloaded(db_path, out_bars)
+        else:
+            total_persisted = persist_bars(conn, out_bars)
         # Higher-tf ingest visibility (INFO): the 1m path logs ``[ingest]`` from
         # core.data.ingest, but the 15m/1H/1D/5m batches persist silently here —
         # so a trade on a 1H bar strategy could not be traced to its bar ingest.
@@ -748,10 +764,18 @@ async def ingest_bars_for_focus(
     total_persisted = 0
     total_baseline = 0
     for ac, group in by_class.items():
-        # Async ingest: persist + sample-append on the loop, baseline
-        # sort/percentile offloaded to a worker thread (shared conn stays on
-        # the loop) so the per-1m-tick recompute doesn't block the engine.
-        result = await ingest_bars_async(conn, group, asset_class=ac)
+        # STALL residual fix (#90): persist + sample-append + baseline recompute
+        # ALL run off the loop on a dedicated conn (``ingest_bars_offloaded``) so
+        # the per-1m-tick write never holds the event loop. Awaited sequentially
+        # per asset_class → only one ingest worker touches the dedicated conn at
+        # a time (WAL single-writer safe). Identical persisted rows/baselines to
+        # the prior ``ingest_bars_async``; only WHERE the write runs changed. The
+        # in-mem (tests, ``db_path is None``) fallback keeps the on-loop async
+        # path (still offloads the heavy sort, byte-identical output).
+        if db_path is not None:
+            result = await ingest_bars_offloaded(db_path, group, asset_class=ac)
+        else:
+            result = await ingest_bars_async(conn, group, asset_class=ac)
         total_persisted += result["bars"]
         total_baseline += result["baseline_samples"]
     return {

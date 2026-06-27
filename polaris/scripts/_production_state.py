@@ -108,6 +108,16 @@ class ProdLoopState:
     # INTEGRITY hold (the venue would reject a closed-market order), NOT a P&L
     # throttle and NOT a size dampener — existing positions are never touched.
     equity_session_holds: int = 0
+    # OKX settle-ability — NEW bar-path entries DEFERRED because the OKX pair's
+    # quote ccy is not settleable on the demo SPOT wallet (quote ∉ {USDT, USDC}
+    # — e.g. a crypto-quote ETH pair or a nominal-USD pair). The order would
+    # 100% reject at the venue (51201 sz mis-unit / 51008 no quote-ccy balance),
+    # so ENTRY is deferred while the name stays WATCHED/SIGNALED/streamed
+    # (flow_not_block: flow is redirected to settleable USDT pairs, not blocked).
+    # Mirrors the tick engine's ``skips_ineligible`` for the bar producer. NOT a
+    # size dampener and NOT a P&L throttle — a held position is never touched
+    # (exits run via the recalc loop, not this entry seam).
+    okx_unsettleable_entry_defers: int = 0
     # T13 — PDT rolling-day day-trade count (sourced from Alpaca
     # /v2/account.daytrade_count via parse_account_pdt; defaults 0 until a live
     # account read populates it). ``equity_pdt_rank_downs`` counts equity entries

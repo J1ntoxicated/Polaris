@@ -43,6 +43,7 @@ from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
+from polaris.core.universe.schema import ALLOWED_TRADE_QUOTE_CCY_OKX
 from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_counterfactual import (
     CF_SWEEP_THROTTLE_SEC,
@@ -208,6 +209,44 @@ def keep_on_bar_path(*, asset_class: str, symbol: str) -> bool:
         return True
     sym = (symbol or "").upper().replace("/", "").replace(".", "")
     return sym in CAPITAL_BAR_STRATEGY_SYMBOLS
+
+
+def okx_quote_settleable(venue: str, quote_ccy: str) -> bool:
+    """True unless ``(venue, quote_ccy)`` is an OKX pair whose quote can't settle.
+
+    The OKX SPOT demo wallet holds only USD-stablecoins, and the order/accounting
+    path sizes ``sz = notional_usd`` with ``tgtCcy = quote_ccy`` (i.e. it ASSUMES
+    the quote ≈ USD). For an OKX pair whose quote ∉ {USDT, USDC} — a crypto quote
+    (e.g. ``SOL-ETH``, quote=ETH) or a nominal-``USD`` pair (#44) — that order 100%
+    rejects at the venue (51201 ``sz`` mis-interpreted as N quote-ccy ≈ $millions /
+    51008 no quote-ccy balance / 51000 ``tradeQuoteCcy`` error). Non-OKX venues
+    (Capital/Alpaca) price venue-side in USD → always settleable. This mirrors the
+    structural quote-ccy half of ``entrance._okx_quote_trade_eligible`` (shared SSOT
+    ``ALLOWED_TRADE_QUOTE_CCY_OKX``) WITHOUT the opportunity-score floor — so a
+    settleable USDT pair is NEVER deferred on a thin score (aggressive bias).
+    """
+    if venue != "okx":
+        return True
+    return quote_ccy in ALLOWED_TRADE_QUOTE_CCY_OKX
+
+
+def okx_unsettleable_set(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Active OKX ``(venue, symbol)`` whose quote ccy can't settle on the demo wallet.
+
+    One indexed read per tick. The bar dispatch defers ENTRY (only) for a name in
+    this set — it stays WATCHED/SIGNALED/streamed (flow_not_block: flow is
+    redirected to settleable USDT/USDC pairs, not blocked). Held positions are
+    unaffected: exits run via the recalc loop, not this entry seam.
+    """
+    rows = conn.execute(
+        "SELECT venue, symbol, quote_ccy FROM universe "
+        "WHERE venue = 'okx' AND is_active = 1"
+    ).fetchall()
+    return {
+        (str(r[0]), str(r[1]))
+        for r in rows
+        if not okx_quote_settleable(str(r[0]), str(r[2] or ""))
+    }
 
 
 def equity_session_entry_hold(
@@ -558,6 +597,19 @@ async def _run_tick(
         universe_rows.append(
             {"venue": r[0], "symbol": r[1], "vol_24h_usd": float(r[2] or 0.0)}
         )
+    # OKX settle-ability TRADE gate (bar producer) — the twin of the tick engine's
+    # ``eligible_set`` (``_production_tick_engine`` :: ``get_focus_targets(
+    # eligible_only=True)``). ``entrance._okx_quote_trade_eligible`` correctly forces
+    # ``trade_eligible=0`` for an OKX pair whose quote ∉ {USDT, USDC}, but that flag
+    # was enforced ONLY on the tick-engine entry path — the bar pipeline dispatched
+    # ``bar_breakout_run`` over the FULL watch set and never read it, so crypto-quote
+    # names (e.g. SOL-ETH) reached the OKX order path and 100% rejected at the venue
+    # (51201 sz mis-unit / 51008 no quote-ccy balance). Build the unsettleable set
+    # once per tick; the dispatch loop DEFERS only the ENTRY for a name in it (the
+    # signal still emits/persists/streams — flow_not_block: flow is redirected to
+    # settleable USDT/USDC pairs, not blocked). ONLY the structural quote-ccy guard
+    # (NOT the score floor), so a thin-score USDT breakout still reaches orders.
+    okx_unsettleable = okx_unsettleable_set(conn)
     # Day 9 F11 fix: build PipelineTaskSpec list + delegate execution to
     # ``supervise_pipeline_tasks`` (Layer 7 SSOT). Replaces the bare
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
@@ -712,6 +764,23 @@ async def _run_tick(
                     timeframe=timeframe, ts=now_ts,
                     correlation_group=sig.correlation_group, thesis=sig.thesis_tag,
                 )
+                # OKX settle-ability — DEFER the ENTRY (only) for an OKX pair whose
+                # quote ccy can't settle on the demo SPOT wallet (quote ∉ {USDT,
+                # USDC}). The signal is ALREADY emitted+persisted above (the name
+                # stays WATCHED/SIGNALED/streamed); only the order is deferred. The
+                # order would 100% reject at the venue (51201/51008/51000), so this
+                # REDIRECTS flow to settleable USDT/USDC pairs (live fills were 0) —
+                # NOT a defensive throttle, NOT a size dampen, and held positions are
+                # untouched (exits run via the recalc loop). Mirrors the tick
+                # engine's eligible_set gate on the bar producer (flow_not_block).
+                if (venue, symbol) in okx_unsettleable:
+                    state.okx_unsettleable_entry_defers += 1
+                    logger.debug(
+                        "[L1/signal] defer-entry %s:%s strategy=%s side=%s "
+                        "reason=okx_quote_unsettleable (watched, order redirected)",
+                        venue, symbol, strategy_id, sig.side,
+                    )
+                    continue
                 # Component B anti-churn (2026-05-31). The entry key + the last
                 # actually-submitted entry on it (created_at_bar, side).
                 entry_key = (venue, symbol, strategy_id)

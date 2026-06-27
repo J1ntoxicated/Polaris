@@ -120,9 +120,10 @@ def test_strategy_metadata_timeframe_used() -> None:
     expected: dict[str, str] = {
         # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — dropped.
         # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — dropped.
-        # rsi_bb_pullback (fee-fatal 15m crypto reversion) + ema_crossover (no
-        # OOS/fee evidence) set dispatch_eligible=False (dual-SSOT KILL) — dropped
-        # from dispatch (registered, open-position close path preserved).
+        # rsi_bb_pullback (fee-fatal 15m crypto reversion) set dispatch_eligible=False
+        # (dual-SSOT KILL) — dropped from dispatch (registered, open-position close
+        # path preserved). ema_crossover stays FIRING (KILL deferred — Jin 2026-06-28).
+        "ema_crossover": "1H",
         "fx_breakout_basket": "1H",
         "xau_indices_trend": "1H",
         "session_breakout": "5m",

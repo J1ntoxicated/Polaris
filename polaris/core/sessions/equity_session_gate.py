@@ -45,7 +45,9 @@ __all__ = [
     "RTH_OPEN_LOCAL_MINUTES",
     "RTH_OPEN_UTC_MINUTES",
     "US_EQUITY_CALENDAR",
+    "WS_WARM_LEAD_MINUTES",
     "equity_entry_held_for_session",
+    "equity_ws_warm_active",
     "pdt_rank_penalty",
     "stream_session_gate_active",
     "us_equity_session_state",
@@ -89,6 +91,16 @@ RTH_CLOSE_UTC_MINUTES: Final[int] = 20 * 60  # 20:00 UTC (EDT reference only)
 PDT_DAYTRADE_THRESHOLD: Final[int] = 3
 PDT_RANK_PENALTY_STEP: Final[float] = 1.0
 
+# WS pre-open WARM lead (minutes). The Alpaca equity WS UNGATES this many minutes
+# before the 09:30-ET open on a WEEKDAY so the socket reconnects ahead of the open
+# (quotes flowing at RTH), preserving the #66 pre-open warm intent. Mirrors the
+# _session_map WARM_LEAD_MIN default; env-overridable /debate calibration target.
+WS_WARM_LEAD_MINUTES: Final[int] = 30
+
+# Saturday/Sunday weekday() values (Mon=0 … Sun=6). The US cash book is shut all
+# weekend, so a weekend timestamp is ALWAYS ``closed`` regardless of clock-of-day.
+_WEEKEND_WEEKDAYS: Final[frozenset[int]] = frozenset({5, 6})
+
 SessionState = Literal["closed", "pre_market", "rth", "after_hours"]
 
 
@@ -102,9 +114,18 @@ def us_equity_session_state(ts: int | float) -> SessionState:
     ET) / ``after_hours`` (16:00-20:00 ET) bracket RTH; outside that envelope is
     ``closed``. Non-finite / negative input clamps to epoch (→ closed).
 
+    🔴 WEEKEND-AWARE: the cash book is shut ALL weekend, so a Saturday/Sunday
+    timestamp is ALWAYS ``closed`` — even at a clock-of-day that WOULD be RTH on
+    a weekday (Sat 10:08 ET). Before this guard the clock was a pure time-of-day
+    map: it read 'rth' on Sat ET-RTH-hours, so the WS gate (``_gated_at``) and
+    the entry-hold gate (``equity_entry_held_for_session``) — both of which read
+    this SSOT — were wrongly OPEN on the weekend (the idle-reconnect loop +
+    weekend-entry buying-power drain). This single guard shuts both gaps.
+
     This is a deterministic clock, not a venue call. The authoritative,
     holiday-aware ``is_open`` comes from the venue ``/v2/clock`` at the adapter
-    layer; this helper is the per-tick gate input (no HTTP per tick).
+    layer (the weekday HOLIDAY case); this helper is the per-tick gate input (no
+    HTTP per tick), and the weekday-holiday override stays at the adapter layer.
     """
     try:
         ts_int = int(ts)
@@ -113,6 +134,8 @@ def us_equity_session_state(ts: int | float) -> SessionState:
     if ts_int < 0:
         ts_int = 0
     local = dt.datetime.fromtimestamp(ts_int, tz=NY_TZ)
+    if local.weekday() in _WEEKEND_WEEKDAYS:
+        return "closed"  # cash book shut all weekend — never RTH/pre/after
     minute_of_day = local.hour * 60 + local.minute
     if RTH_OPEN_LOCAL_MINUTES <= minute_of_day < RTH_CLOSE_LOCAL_MINUTES:
         return "rth"
@@ -124,6 +147,35 @@ def us_equity_session_state(ts: int | float) -> SessionState:
     if RTH_CLOSE_LOCAL_MINUTES <= minute_of_day < AFTER_HOURS_CLOSE_LOCAL_MINUTES:
         return "after_hours"
     return "closed"
+
+
+def equity_ws_warm_active(ts: int | float) -> bool:
+    """Is ``ts`` inside the Alpaca equity WS pre-open WARM lead? (weekday only).
+
+    ``True`` in the half-open window ``[09:30 ET - WS_WARM_LEAD_MINUTES, 09:30 ET)``
+    on a WEEKDAY — i.e. the socket should reconnect AHEAD of the open so quotes
+    are flowing at RTH (the #66 pre-open warm intent, applied to the realtime WS).
+    ``False`` on the weekend (cash book shut), deep overnight, during RTH itself
+    (``us_equity_session_state`` handles RTH), and after-hours.
+
+    Pure deterministic clock (NY-local, DST-correct), no HTTP. This is a WS-gate
+    helper ONLY — it never touches entry / sizing / exit (those use the session
+    state / entry-hold). flow_not_block: a warm reconnect ENABLES early data, it
+    is not a throttle. Non-finite / negative input degrades to ``False`` (no warm
+    on doubt → the gate simply waits for RTH).
+    """
+    try:
+        ts_int = int(ts)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if ts_int < 0:
+        return False
+    local = dt.datetime.fromtimestamp(ts_int, tz=NY_TZ)
+    if local.weekday() in _WEEKEND_WEEKDAYS:
+        return False  # weekend → no cash open to warm toward
+    minute_of_day = local.hour * 60 + local.minute
+    warm_start = RTH_OPEN_LOCAL_MINUTES - WS_WARM_LEAD_MINUTES
+    return warm_start <= minute_of_day < RTH_OPEN_LOCAL_MINUTES
 
 
 def equity_entry_held_for_session(ts: int | float) -> bool:

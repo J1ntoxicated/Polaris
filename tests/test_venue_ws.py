@@ -383,3 +383,46 @@ def test_alpaca_is_gated_outside_rth() -> None:
     assert c._gated_at(ts=1780747200) is True
     # Wednesday 2026-06-03 17:00 UTC = 13:00 ET → RTH → not gated.
     assert c._gated_at(ts=1780506000) is False
+
+
+def test_alpaca_is_gated_saturday_during_et_rth_hours() -> None:
+    """🔴 weekend-blind root cause: the cash book is shut ALL weekend, so the WS
+    must stay GATED on Saturday even at a clock-of-day that would be RTH on a
+    weekday. Before the fix, ``us_equity_session_state`` (a pure time-of-day
+    clock) returned 'rth' for Sat 10:08 ET, so ``_gated_at`` was False → the WS
+    connected to a closed market → no data → idle watchdog → infinite
+    idle-forced-reconnect loop. Now Sat ET-RTH-hours is gated (no connect)."""
+    c = AlpacaQuoteWS(symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None)
+    # Saturday 2026-06-06 14:08 UTC = 10:08 ET (inside the [09:30,16:00) RTH band).
+    assert c._gated_at(ts=1780754880) is True
+    # Sunday 2026-06-07 17:00 UTC = 13:00 ET (also inside the RTH band).
+    assert c._gated_at(ts=1780851600) is True
+
+
+def test_alpaca_ungated_in_warm_window_before_open() -> None:
+    """#66 pre-warm preservation: the WS UNGATES in the pre-open WARM lead
+    (open - WARM_LEAD_MIN) on a WEEKDAY so the socket reconnects ahead of the
+    open (quotes flowing at RTH), not only at RTH sharp. Monday 2026-06-08
+    13:10 UTC = 09:10 ET, 20min before the 09:30 ET open (inside the 30min warm
+    lead) → not gated (reconnect)."""
+    import datetime as dt
+
+    c = AlpacaQuoteWS(symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None)
+    mon_warm = int(dt.datetime(2026, 6, 8, 13, 10, tzinfo=dt.UTC).timestamp())
+    assert c._gated_at(ts=mon_warm) is False
+    # Same clock-of-day on the WEEKEND (Sat 2026-06-06 13:10 UTC = 09:10 ET) is
+    # STILL gated — the warm lead never opens a socket on a closed weekend.
+    sat_warm = int(dt.datetime(2026, 6, 6, 13, 10, tzinfo=dt.UTC).timestamp())
+    assert c._gated_at(ts=sat_warm) is True
+
+
+def test_alpaca_gated_deep_overnight_weekday_outside_warm() -> None:
+    """A weekday deep-overnight instant (well outside both RTH and the warm
+    lead) stays gated — the fix only ungates RTH + the pre-open warm lead, it
+    does NOT hold the socket open all night. Tuesday 2026-06-09 04:00 UTC =
+    00:00 ET."""
+    import datetime as dt
+
+    c = AlpacaQuoteWS(symbols=["AAPL"], api_key="k", api_secret="s", on_quote=lambda q: None)
+    tue_overnight = int(dt.datetime(2026, 6, 9, 4, 0, tzinfo=dt.UTC).timestamp())
+    assert c._gated_at(ts=tue_overnight) is True

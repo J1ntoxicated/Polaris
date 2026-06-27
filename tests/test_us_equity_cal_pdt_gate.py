@@ -462,3 +462,107 @@ def test_run_tick_consumes_pdt_penalty_into_spec_ordering() -> None:
         "T13/H3: the PDT penalty must be attached to the PipelineTaskSpec, not "
         "discarded at the call site."
     )
+
+
+# ---------------------------------------------------------------------------
+# H — WEEKEND-AWARE clock (root-cause fix). The cash book is shut ALL weekend,
+#     so Sat/Sun ET-RTH-hours must read CLOSED, not 'rth'. This closes the SSOT
+#     consumed by BOTH the WS gate (_gated_at) and the entry-hold gate
+#     (equity_entry_held_for_session) — one fix shuts both gaps. flow_not_block:
+#     weekend = market actually closed (the venue rejects), not a throttle.
+# ---------------------------------------------------------------------------
+
+
+def _sat_et_rth() -> int:
+    """Saturday 2026-06-06 14:08 UTC = 10:08 ET — inside the [09:30,16:00) RTH
+    band BUT on the weekend (the exact reproduced root-cause instant)."""
+    return int(dt.datetime(2026, 6, 6, 14, 8, tzinfo=dt.UTC).timestamp())
+
+
+def _sun_et_rth() -> int:
+    """Sunday 2026-06-07 17:00 UTC = 13:00 ET — inside the RTH band, weekend."""
+    return int(dt.datetime(2026, 6, 7, 17, 0, tzinfo=dt.UTC).timestamp())
+
+
+def test_saturday_et_rth_hours_is_closed_not_rth() -> None:
+    """🔴 Root cause: a pure time-of-day clock returned 'rth' for Sat 10:08 ET.
+    The market is shut all weekend → the state MUST be 'closed'."""
+    assert us_equity_session_state(_sat_et_rth()) == "closed"
+
+
+def test_sunday_et_rth_hours_is_closed_not_rth() -> None:
+    assert us_equity_session_state(_sun_et_rth()) == "closed"
+
+
+def test_weekday_rth_unchanged_by_weekend_guard() -> None:
+    """The weekend guard must NOT change weekday behaviour: a Wednesday inside
+    RTH is still 'rth' (byte-identical to pre-fix)."""
+    # Wednesday 2026-06-03 17:00 UTC = 13:00 ET.
+    assert us_equity_session_state(_utc_ts_on(2026, 6, 3, 17, 0)) == "rth"
+
+
+def test_saturday_pre_and_after_hours_clock_are_closed() -> None:
+    """Sat pre-market / after-hours clock-of-day also collapse to 'closed' —
+    the extended-hours envelope does not run on the weekend either."""
+    # Sat 2026-06-06 12:00 UTC = 08:00 ET (weekday: pre_market) → closed.
+    assert us_equity_session_state(_utc_ts_on(2026, 6, 6, 12, 0)) == "closed"
+    # Sat 2026-06-06 21:00 UTC = 17:00 ET (weekday: after_hours) → closed.
+    assert us_equity_session_state(_utc_ts_on(2026, 6, 6, 21, 0)) == "closed"
+
+
+def test_equity_entry_held_on_saturday_et_rth_hours() -> None:
+    """② entry-hold gap: the SAME weekend-blind clock let a Saturday equity
+    entry through (held=False → order reached Alpaca → closed-market reject →
+    buying-power drain). Now a Saturday ET-RTH-hours entry is HELD."""
+    assert equity_entry_held_for_session(_sat_et_rth()) is True
+    assert equity_entry_held_for_session(_sun_et_rth()) is True
+
+
+def test_equity_entry_allowed_weekday_rth_after_weekend_guard() -> None:
+    """The weekend guard must not hold a legit weekday RTH entry (flow_not_block
+    — open returns, entries resume automatically)."""
+    assert equity_entry_held_for_session(_utc_ts_on(2026, 6, 3, 17, 0)) is False
+
+
+def test_equity_ws_warm_active_weekday_pre_open_lead() -> None:
+    """#66 pre-warm WS predicate: True in the weekday pre-open WARM lead so the
+    socket reconnects ahead of the open. Monday 2026-06-08 13:10 UTC = 09:10 ET,
+    20min before the 09:30 ET open (inside the 30min lead)."""
+    from polaris.venues.alpaca.equity_session_gate import equity_ws_warm_active
+
+    assert equity_ws_warm_active(_utc_ts_on(2026, 6, 8, 13, 10)) is True
+
+
+def test_equity_ws_warm_active_false_on_weekend_and_overnight() -> None:
+    """The warm predicate is weekday-only and lead-scoped: False on the weekend
+    (same pre-open clock-of-day) and False deep-overnight on a weekday."""
+    from polaris.venues.alpaca.equity_session_gate import equity_ws_warm_active
+
+    # Sat 2026-06-06 13:10 UTC = 09:10 ET (weekend) → no warm.
+    assert equity_ws_warm_active(_utc_ts_on(2026, 6, 6, 13, 10)) is False
+    # Tue 2026-06-09 04:00 UTC = 00:00 ET (deep overnight, outside lead) → no warm.
+    assert equity_ws_warm_active(_utc_ts_on(2026, 6, 9, 4, 0)) is False
+
+
+def test_equity_ws_warm_active_false_during_and_after_rth() -> None:
+    """The warm predicate only covers the PRE-open lead, not RTH itself (RTH is
+    handled by us_equity_session_state) nor after-hours. Weekday mid-RTH and
+    after-hours both return False."""
+    from polaris.venues.alpaca.equity_session_gate import equity_ws_warm_active
+
+    # Wed 2026-06-03 17:00 UTC = 13:00 ET (mid-RTH) → not a pre-open lead.
+    assert equity_ws_warm_active(_utc_ts_on(2026, 6, 3, 17, 0)) is False
+    # Wed 2026-06-03 21:00 UTC = 17:00 ET (after-hours) → no warm.
+    assert equity_ws_warm_active(_utc_ts_on(2026, 6, 3, 21, 0)) is False
+
+
+def test_wire_equity_entry_held_on_weekend_et_rth_hours() -> None:
+    """End-to-end ② wiring: the production entry-hold seam holds an Alpaca
+    equity entry on a Saturday ET-RTH-hours instant (the closed-market /
+    buying-power-drain case) and bumps the telemetry counter."""
+    from polaris.scripts._production_tick import equity_session_entry_hold
+
+    st = _state()
+    held = equity_session_entry_hold("alpaca", now_ts=_sat_et_rth(), state=st)  # type: ignore[arg-type]
+    assert held is True
+    assert st.equity_session_holds == 1  # type: ignore[attr-defined]

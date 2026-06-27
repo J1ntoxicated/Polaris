@@ -297,9 +297,9 @@ def _warm_inactive(
 
 
 _session_warm_active: Callable[[str, str, str, int | float], bool]
-try:  # pragma: no cover - import-time binding, both arms exercised across branches
-    _session_warm_active = session_warm_active  # type: ignore[name-defined]
-except NameError:
+try:  # pragma: no cover - import-time binding; session_warm_active is defined above
+    _session_warm_active = session_warm_active
+except NameError:  # defensive parity only — the name is always bound in this tree
     _session_warm_active = _warm_inactive
 
 

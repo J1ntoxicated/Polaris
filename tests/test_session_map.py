@@ -397,3 +397,68 @@ def test_equity_fetch_active_warm_window_overrides_closed(monkeypatch) -> None:
 def test_equity_fetch_active_unparseable_ts_active() -> None:
     """A non-finite clock degrades to ACTIVE (flow_not_block: never skip on doubt)."""
     assert sm.equity_fetch_active("alpaca", "equity", "AAPL", float("nan")) is True
+
+
+# ---------------------------------------------------------------------------
+# #66 ⟷ #84 INTEGRATION (silent-kill regression). At integration the #66
+# ``session_warm_active`` (this module) and the #84 ``equity_fetch_active`` gate
+# (this module) coexist. ``equity_fetch_active`` ORs in the LIVE warm predicate
+# via the module-level ``_session_warm_active`` binding, which resolves at import:
+#     try:    _session_warm_active = session_warm_active   # the real #66 fn
+#     except NameError: _session_warm_active = _warm_inactive  # always-False stub
+# The binding is load-bearing on DEFINITION ORDER: ``def session_warm_active`` MUST
+# precede the binding block. If it followed, the ``try`` would NameError, bind the
+# stub (always-False), and ``equity_fetch_active`` would SILENTLY KILL the #66
+# pre-open warm in the closed-but-warm window — and NO pre-existing test catches
+# the import-order regression (each side's suite passes either way). These two
+# tests pin the live behaviour so the regression can never re-land unnoticed.
+# ---------------------------------------------------------------------------
+
+
+def test_warm_binding_resolves_to_real_session_warm_active() -> None:
+    """``_session_warm_active`` binds the REAL #66 fn, not the always-False stub.
+
+    Direct proof of the import-order: a wrong order (def AFTER the binding) would
+    bind ``_warm_inactive`` and this identity would fail.
+    """
+    assert sm._session_warm_active is sm.session_warm_active  # the real #66 fn
+    assert sm._session_warm_active is not sm._warm_inactive   # never the stub
+
+
+def test_equity_closed_but_warm_survives_gate_via_live_binding(
+    monkeypatch: object,
+) -> None:
+    """closed equity + LIVE warm window True → ``equity_fetch_active`` True.
+
+    The exact silent-kill scenario, exercised through the REAL binding (NOT a
+    monkeypatched stub — that would mask the very bug). With a 360-min warm lead
+    the US warm window opens at 07:30 UTC = 03:30 ET, BEFORE pre-market (04:00 ET),
+    so 07:30-08:00 UTC Wed is genuinely ``us_equity_session_state == 'closed'`` yet
+    inside the #66 warm window. The gate's first branch (not-closed) is False here,
+    so ONLY the warm OR — fed by the live ``_session_warm_active`` — can keep fetch
+    alive. If the binding were the stub, this would be False (the #66 pre-open
+    backfill silently killed). flow_not_block: the pre-open warm must survive.
+    """
+    import importlib
+
+    import polaris.scripts._session_map as sm_mod
+    monkeypatch.setenv("POLARIS_SESSION_WARM_LEAD_MIN", "360")  # type: ignore[attr-defined]
+    reloaded = importlib.reload(sm_mod)
+    try:
+        # Re-prove the binding survived the reload (still the real fn, not stub).
+        assert reloaded._session_warm_active is reloaded.session_warm_active
+        closed_warm = _utc(*_WED, 7, 45)  # 07:45 UTC Wed = closed (03:45 ET) + warm
+        from polaris.venues.alpaca.equity_session_gate import (
+            us_equity_session_state,
+        )
+        assert us_equity_session_state(closed_warm) == "closed"  # premise: closed
+        assert reloaded.session_warm_active(
+            "alpaca", "equity", "AAPL", closed_warm
+        ) is True  # premise: #66 warm window active
+        # The integration claim: the #84 gate keeps fetch ALIVE via the warm OR.
+        assert reloaded.equity_fetch_active(
+            "alpaca", "equity", "AAPL", closed_warm
+        ) is True
+    finally:
+        monkeypatch.delenv("POLARIS_SESSION_WARM_LEAD_MIN", raising=False)  # type: ignore[attr-defined]
+        importlib.reload(reloaded)  # restore module-level default for other tests

@@ -94,6 +94,23 @@ CLUSTER_XAU_INDICES_PCT: Final[float] = 0.99
 CLUSTER_FX_MAJORS_PCT: Final[float] = 0.99
 """Cluster cap — FX majors (env: ``POLARIS_CAP_CLUSTER_FX_MAJORS_PCT``)."""
 
+EQUITY_SHADOW_CAP_DEFAULT_PCT: Final[float] = 0.02
+"""Shadow validation cap — small per-trade %-of-equity ceiling applied ONLY to the
+two UNVALIDATED daily-equity strategies (``equity_vol_expansion_pocket_pivot`` /
+``equity_52wk_high_breakout``) while their live edge is being verified.
+
+This is prudent ALLOCATION sizing of a brand-new, not-yet-validated strategy — NOT
+a defensive dampen of an edge strategy. It is a pure ``min()`` containment in the
+SAME ``headroom_min`` slot as ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` (it adds NO
+multiplier to the T4 base×continuous×tier×cell chain — the 9-stack ban / tier
+amplifier / cell mult / -1.0R rail are all untouched). Alpaca equity is
+commission-free so the live demo P&L is the clean true-edge measurement; bounding
+each entry small means a repeat of the prior -$104.58 stays negligible while the
+edge is judged. env: ``POLARIS_EQUITY_SHADOW_CAP_PCT`` — Jin raises it (or unsets
+toward the absolute ceiling) to full size once the edge clears."""
+
+EQUITY_SHADOW_CAP_ENV: Final[str] = "POLARIS_EQUITY_SHADOW_CAP_PCT"
+
 
 # ---------------------------------------------------------------------------
 # Env-override resolvers (read at call time so operator can dial caps without a
@@ -166,6 +183,15 @@ def cluster_xau_indices_pct() -> float:
 
 def cluster_fx_majors_pct() -> float:
     return _cap_env("POLARIS_CAP_CLUSTER_FX_MAJORS_PCT", CLUSTER_FX_MAJORS_PCT)
+
+
+def equity_shadow_cap_pct() -> float:
+    """Shadow validation cap %-of-equity (env: ``POLARIS_EQUITY_SHADOW_CAP_PCT``).
+
+    Read at call time so Jin can raise it without a code change. Non-numeric /
+    missing / empty → the small default. Applied only to the two unvalidated
+    daily-equity strategies via ``equity_shadow_validation_cap`` (engine)."""
+    return _cap_env(EQUITY_SHADOW_CAP_ENV, EQUITY_SHADOW_CAP_DEFAULT_PCT)
 
 
 def target_vol() -> float:

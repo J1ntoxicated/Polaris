@@ -43,7 +43,6 @@ from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
-from polaris.core.universe.schema import alpaca_runtime_feed
 from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_counterfactual import (
     CF_SWEEP_THROTTLE_SEC,
@@ -254,29 +253,30 @@ def equity_session_entry_hold(
 
 
 def equity_entry_inert_for_feed(strategy: BaseStrategy) -> bool:
-    """Whether an Alpaca-equity strategy is INERT because the active feed is IEX.
+    """Equity-feed entry gate — RELAXED to a no-op (2026-06-27, equity-gate-relax).
 
-    Stop-bleeders (2026-06-27, #56). The two equity strategies
-    (``equity_vol_expansion_pocket_pivot`` / ``equity_52wk_high_breakout``) are
-    designed for the LIQUID SIP feed. With the paid SIP key (#42) blank the WS
-    downgrades SIP→IEX (``alpaca_runtime_feed() == "iex"``) and the strategies
-    bled on IEX junk-symbol fills (-$104.58 / 21 closes). This returns ``True``
-    for an Alpaca-equity strategy ONLY while the active feed is NOT ``sip`` → the
-    caller skips its signal emit (inert, no new entry).
+    History: the stop-bleeders build (#56) made the two daily-equity strategies
+    (``equity_vol_expansion_pocket_pivot`` / ``equity_52wk_high_breakout``) INERT
+    whenever the Alpaca ACTIVE feed was not ``sip`` — premised on "wrong feed =
+    bad data = cannot trade" (a data-correctness gate like universe-eligibility).
 
-    This is a DATA-CORRECTNESS gate, not a flow block / size-cut / defensive
-    dampen: a strategy whose data feed is wrong cannot trade, exactly like
-    universe-eligibility. It is NOT a permanent KILL — it auto-recovers: the
-    instant Jin routes a real SIP key (no runtime downgrade) ``alpaca_runtime_
-    feed()`` reads ``sip`` again and the strategies fire. It NEVER touches an
-    existing position (entry-emit only) and applies ONLY to Alpaca equity:
-    OKX / Capital strategies always return ``False`` (A/B byte-identical,
-    flow_not_block). degrade-never-crash.
+    RELAX (Jin 2026-06-27): that premise conflated the REALTIME tick feed with the
+    SIGNAL data source. Both strategies are DAILY (1D bar-close) — their entry
+    signal is computed from yfinance daily bars (#21 PRIMARY: free, full US market,
+    feed-agnostic), NOT the Alpaca SIP/IEX realtime quote stream. The SIP/IEX
+    distinction only governs intraday realtime quotes, which a 1D-close strategy
+    never consumes. So the data-quality concern the gate guarded is ALREADY solved
+    by the yfinance daily signal: the strategies can trade correctly on ``iex`` (or
+    any feed). This returns ``False`` for EVERY strategy — flow ACTIVATED, not
+    blocked (flow_not_block). The -$104.58 prior bleed is now bounded by the small
+    shadow validation cap (``equity_shadow_validation_cap``) so the live demo run
+    (Alpaca commission-free → clean true-edge P&L) verifies the edge instead.
+
+    Kept as a no-op predicate (not deleted) so the call-site stays a documented
+    seam: a future genuine feed-correctness need has a named hook. Entry-emit only;
+    A/B venues unaffected. degrade-never-crash.
     """
-    m = strategy.metadata
-    if m.venue != "alpaca" or m.asset_class != "equity":
-        return False
-    return alpaca_runtime_feed() != "sip"
+    return False
 
 
 def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
@@ -657,13 +657,12 @@ async def _run_tick(
                 # Existing positions are untouched (this skips only the entry).
                 if equity_session_entry_hold(venue, now_ts=now_ts, state=state):
                     continue
-                # Stop-bleeders (#56): an Alpaca-equity strategy is INERT while the
-                # active feed is IEX (SIP key #42 blank → downgrade). The equity
-                # strategies are SIP-designed; on IEX they bled junk-symbol fills
-                # (-$104.58 / 21 closes). DATA-CORRECTNESS gate (wrong feed = cannot
-                # trade), like universe-eligibility — NOT a flow block / size-cut.
-                # Auto-recovers the instant a real SIP key is routed. Entry-emit
-                # only; existing positions untouched. A/B venues never gated.
+                # Equity-feed gate (equity-gate-relax): now a documented no-op
+                # seam. The daily-equity strategies derive their entry signal from
+                # yfinance daily bars (#21 PRIMARY, feed-agnostic), so the SIP/IEX
+                # realtime distinction no longer gates a 1D-close strategy — flow is
+                # ACTIVATED on any feed (flow_not_block). The prior -$104.58 bleed is
+                # instead bounded by the shadow validation cap in the T4 engine.
                 if equity_entry_inert_for_feed(strategy):
                     continue
                 try:

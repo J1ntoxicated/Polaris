@@ -11,13 +11,14 @@ A. ``spot_donchian`` KILL — OKX 1H Donchian = the fee-fatal intraday class the
    ``learner_prune``.
 
 B. equity SIP-gate — ``equity_vol_expansion_pocket_pivot`` +
-   ``equity_52wk_high_breakout`` are designed for the liquid SIP feed but bleed on
-   the IEX fallback (paid SIP key #42 blank → junk-symbol fills, -$104.58). They
-   fire ONLY when the Alpaca ACTIVE feed is ``sip``; on IEX they are inert. This
-   is a data-correctness gate (a strategy whose data source is wrong cannot
-   trade) — like universe-eligibility, NOT a flow block. Auto-recovers: the
-   instant Jin routes a real SIP key (no runtime downgrade) the gate re-arms and
-   the strategies fire again. degrade-never-crash. This is NOT a permanent KILL.
+   ``equity_52wk_high_breakout``. NOTE (equity-gate-relax 2026-06-27): the
+   SIP-feed gate this file originally asserted (inert on IEX) was RELAXED to a
+   no-op — the daily-equity strategies derive their entry signal from yfinance
+   daily bars (feed-agnostic), so the SIP/IEX realtime distinction never gated a
+   1D-close strategy. The bounded-bleed concern moved to the shadow validation
+   cap. The remaining Part-B tests here assert only the unchanged invariants
+   (non-equity never gated, equity stay registered + dispatched); the relax
+   firing behavior is covered in ``tests/test_equity_gate_relax.py``.
 """
 
 from __future__ import annotations
@@ -88,14 +89,17 @@ def _equity_strats() -> list[object]:
     ]
 
 
-def test_equity_inert_when_runtime_feed_iex() -> None:
-    # Runtime SIP→IEX downgrade latched (the #42-blank-key live scenario) → the
-    # equity strategies are inert (no emit), so the IEX junk-symbol bleed stops.
+def test_equity_fires_on_iex_after_relax() -> None:
+    # SUPERSEDED by equity-gate-relax (2026-06-27): the daily-equity strategies
+    # derive their signal from yfinance daily bars (feed-agnostic), so a runtime
+    # SIP→IEX downgrade no longer makes them inert — they FIRE on iex (flow
+    # activated). The prior IEX bleed is now bounded by the shadow validation cap.
+    # (Full relax coverage lives in tests/test_equity_gate_relax.py.)
     reset_alpaca_runtime_feed()
     mark_alpaca_feed_downgraded()  # active feed is now iex
     try:
         for s in _equity_strats():
-            assert equity_entry_inert_for_feed(s) is True
+            assert equity_entry_inert_for_feed(s) is False
     finally:
         reset_alpaca_runtime_feed()
 

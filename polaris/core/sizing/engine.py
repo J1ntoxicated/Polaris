@@ -51,6 +51,7 @@ from polaris.core.sizing.schema import (
     SizingProposal,
     StrategyRiskState,
     Track,
+    equity_shadow_cap_pct,
     per_symbol_cfd_pct,
     per_symbol_equity_pct,
     per_symbol_spot_pct,
@@ -71,10 +72,12 @@ from polaris.core.streams import resolve_stream
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "EQUITY_SHADOW_CAP_STRATEGIES",
     "SignalIntent",
     "compute_proposed",
     "compute_size",
     "continuous_scalar",
+    "equity_shadow_validation_cap",
     "ewma_realized_vol",
     "headroom_min",
     "venue_per_symbol_cap",
@@ -215,6 +218,31 @@ def track_daily_cap(track: Track) -> float:
     elif track == "C":
         return track_c_daily_venue_pct()
     return track_b_daily_venue_pct()
+
+
+# The two UNVALIDATED daily-equity strategies (equity-gate-relax). Their feed-gate
+# was relaxed so they trade live on yfinance daily signal; a small shadow cap
+# bounds the unvalidated bleed while the edge is verified. Membership is explicit
+# (not a venue/asset_class wildcard) so the cap can NEVER reach an edge strategy —
+# this is allocation sizing of new strategies, not a defensive dampen.
+EQUITY_SHADOW_CAP_STRATEGIES: frozenset[str] = frozenset(
+    {"equity_vol_expansion_pocket_pivot", "equity_52wk_high_breakout"}
+)
+
+
+def equity_shadow_validation_cap(strategy: str) -> float:
+    """Per-trade %-of-equity ceiling for the unvalidated daily-equity strategies.
+
+    Returns the small ``equity_shadow_cap_pct()`` for the two shadow-validation
+    equity strategies, else ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` (a no-op — every
+    other strategy keeps the existing absolute ceiling). Folded into the SAME
+    ``headroom_min`` single-trade slot as the absolute ceiling via ``min()`` — it
+    is NOT a T4 chain multiplier (9-stack / tier / cell / -1.0R rail untouched).
+    flow_not_block: the signal still flows and trades, just bounded small until the
+    edge clears (Jin lifts the env to full size)."""
+    if strategy in EQUITY_SHADOW_CAP_STRATEGIES:
+        return equity_shadow_cap_pct()
+    return SINGLE_TRADE_ABSOLUTE_CEILING_PCT
 
 
 # ---------------------------------------------------------------------------
@@ -523,9 +551,17 @@ def compute_size(
     # flow_not_block: weak signals flow at their normal computed size. The only
     # containment is the headroom_min budget caps (cluster/daily/track) below —
     # there is NO per-signal weak-signal zeroing (removed; defensive throttle).
+    # The single-trade slot folds in (a) the Kelly/cold-start cap, (b) the hard
+    # absolute ceiling, and (c) the equity shadow validation cap (a no-op for every
+    # non-equity-validation strategy). All three are pure min() terms in the SAME
+    # slot — no new T4 multiplier, 9-stack ban + -1.0R rail intact.
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
-        single_trade_cap=min(single_cap_pct, SINGLE_TRADE_ABSOLUTE_CEILING_PCT),
+        single_trade_cap=min(
+            single_cap_pct,
+            SINGLE_TRADE_ABSOLUTE_CEILING_PCT,
+            equity_shadow_validation_cap(intent.strategy),
+        ),
         per_symbol_remaining=per_symbol_remaining,
         underlying_remaining=underlying_remaining,
         cluster_remaining=cluster_rem,

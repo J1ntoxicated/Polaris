@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from polaris.venues.alpaca.equity_session_gate import us_equity_session_state
+from polaris.core.sessions.equity_session_gate import us_equity_session_state
 
 __all__ = ["derive_session", "resolve_venue_session", "SESSION_LABELS"]
 

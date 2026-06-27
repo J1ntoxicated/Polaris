@@ -152,14 +152,18 @@ async def test_strategies_isolation_no_cross_pollution(tmp_path: Path) -> None:
             _run_strategy_for_focus,
         )
 
-        bars = _stub_bars(50, base=60_000.0)
+        # 80 bars ≥ the daily-breakout warmup (bar_breakout_run = 51): the OKX
+        # smoke bundle is now the two REGISTERED + dispatch_eligible bar strategies
+        # (bar_breakout_run / okx_donchian_55_breakout) — rsi_bb_pullback (fee-fatal
+        # KILL) + the un-registered spot_donchian were dropped from the rig.
+        bars = _stub_bars(80, base=60_000.0)
         entry = FocusEntry("okx", "BTC-USDT", "1m", "crypto")
         # Run all OKX strategies → expect at least one to emit something while
         # no exception aborts the gather.
         results = await asyncio.gather(
             *(_run_strategy_for_focus(s, entry, bars) for s in _okx_strategies())
         )
-        # volume_burst un-registered 2026-06-27 (#61 KILL): OKX bundle 3 → 2.
+        # Two dispatch_eligible OKX bar strategies in the smoke bundle.
         assert len(results) == 2
         # At least one OKX strat emits with the boosted view.
         assert any(r is not None for r in results)

@@ -4,19 +4,19 @@ adr_id: ADR-008
 aliases: [ADR-008]
 status: active
 date_created: 2026-05-06
-date_updated: 2026-06-22
+date_updated: 2026-06-28
 tags: [adr, strategies, signal-generator]
 related: [[ADR-003-8-layer-architecture|ADR-003]], [[ADR-004-per-gate-ai-pipeline|ADR-004]], [[ADR-005-sizing-formula-cell-routing|ADR-005]], [[active-autonomous-vision]]
 reviewed_by: codex+jin (round 3 D1 + Jin clarification 21:30)
 ---
 
-# ADR-008 — 11 Strategies (Signal Generator Role Only)
+# ADR-008 — 22 Strategies (Signal Generator Role Only)
 
-> 📌 **UPDATE 2026-06-22**: live registry는 **11 strategies** (원안 7 + equity 트랙 추가: fx_range_fade, equity_tsmom, equity_rsi_bb, equity_gap_go). SSOT = `polaris/strategies/__init__.py` STRATEGY_REGISTRY.
+> 📌 **UPDATE 2026-06-28 (dual-SSOT dispatch fix)**: registry = **22 strategies**; LIVE bar dispatch = the **17** whose `metadata.dispatch_eligible=True`, DERIVED from STRATEGY_REGISTRY (no hand-synced literal — drift structurally impossible). SSOT = `polaris/strategies/__init__.py`. KILL = `dispatch_eligible=False` (no-emit, NOT un-register — open-position close path preserved): rsi_bb_pullback (fee-fatal 15m crypto reversion) + ema_crossover / supertrend / connors_rsi2 / cci_reversion (no OOS/fee evidence). UN-registered (module read-only, not in registry): volume_burst, tsmom (cross-sym), spot_donchian, fx_range_fade, equity_tsmom, equity_rsi_bb, equity_gap_go.
 
 ## Decision
 
-11 strategies 동시 활성 (P1.0 day 1 = 7, 이후 Alpaca equity 트랙 4 추가 → 11). 각 strategy 역할 = **`generate_raw_signal(market_view) → RawSignal | None` 만**. Lifecycle 결정 (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]).
+22 strategies registered; 17 dispatch-eligible (validated fee-beaters). Each strategy's role = **`generate_raw_signal(market_view) → RawSignal | None` only**. Lifecycle (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]). Dispatch eligibility = the per-strategy `dispatch_eligible` flag (the single source of truth; the bar pipeline filters the registry on it).
 
 ## Role Redefinition
 
@@ -38,35 +38,48 @@ class Strategy(ABC):
 
 Lifecycle = [[ADR-004-per-gate-ai-pipeline|ADR-004]] 8 gate. Strategy 는 signal 만 emit, 나머지는 AI 가 결정.
 
-## 11 Strategies
+## 22 Strategies (registry) — 17 dispatch-eligible
 
-### Track A — OKX SPOT (4)
+DISPATCH = registry filtered on `metadata.dispatch_eligible` (no separate literal).
 
-| # | Strategy | Trigger | Timeframe | Per-strategy cap | Correlation group |
-|---|---|---|---|---|---|
-| 1 | [[volume_burst]] | vol z>2.5 + price break + liquidity floor | 1m bar | 24% | spot_intraday_event |
-| 2 | [[tsmom]] 20-bar | cross-sect basket momentum | 1H rebalance | 32% | spot_cross_sectional_momo |
-| 3 | [[rsi_bb_pullback]] | RSI<30 + BB lower touch + trend filter | 15m bar | 18% | spot_mean_reversion |
-| 4 | [[spot_donchian]] | 40-bar high break + ADX>20 | 1H | 20% | spot_breakout |
+### Track A — OKX SPOT/crypto
 
-### Track B — Capital CFD (3)
+| Strategy | tf | dispatch | note |
+|---|---|---|---|
+| bar_breakout_run | 1D | ✅ | Donchian-40 + ROC-10 breakout (wave1) |
+| okx_donchian_55_breakout | 1D | ✅ | wave1 fee-beating survivor |
+| tsmom_12_1_multiasset | 1D | ✅ | wave1 (equity legs inert until SIP) |
+| macd_ema_trend_pullback | 1D | ✅ | wave1 |
+| donchian_turtle_breakout | 1D | ✅ | wave1 turtle |
+| weekend_thin_book_flush_maker | 1H | ✅ | #77 verified crypto maker |
+| weekend_funding_capitulation_maker | 1H | ✅ | #80 funding edge (shadow-first) |
+| rsi_bb_pullback | 15m | ❌ KILL | fee-fatal 15m crypto reversion |
+| ema_crossover | 1H | ❌ KILL | no OOS/fee evidence |
+| supertrend | 1H | ❌ KILL | unvalidated |
 
-| # | Strategy | Symbols | Trigger | Lev | Per-strategy cap | Correlation group |
-|---|---|---|---|---|---|---|
-| 5 | [[fx_breakout_basket]] | EURUSD, GBPUSD, AUDUSD, USDJPY, USDCAD | Donchian 40 + ADX>20 | 30× | 12%/pair × 5 = 36% | cfd_fx_trend |
-| 6 | [[xau_indices_trend]] | XAUUSD, US500, US100, GER40 | Donchian 30 + 20d momentum | 20× | 16%/sym × 4 = 40% | cfd_index_commodity_trend |
-| 7 | [[session_breakout]] | US500, US100, EURUSD, GBPUSD | open ATR×1.5 break | 20× | 10%/trade × 20% concurrent | cfd_session_event |
-| 8 | [[fx_range_fade]] | FX majors | BB extreme touch → middle reversion (fade) | per-pair | 12%/pair | cfd_fx_meanrev |
+### Track B — Capital CFD
 
-### Track C — Alpaca US equity SPOT (3)
+| Strategy | tf | dispatch | note |
+|---|---|---|---|
+| fx_breakout_basket | 1H | ✅ | named verified FX leg (maker-entry fix pending) |
+| xau_indices_trend | 1H | ✅ | |
+| session_breakout | 5m | ✅ | edge real, exit-capture FIX #64 pending |
+| gold_trend_chandelier_1d | 1D | ✅ | wave2 |
+| gold_riskoff_trend_amplify | 1D | ✅ | wave2 |
+| gold_breakout_1h | 1H | ✅ | wave2 |
+| index_52w_high_momentum | 1D | ✅ | wave2 |
+| index_dual_momentum_rotation | 1D | ✅ | wave2 |
+| cci_reversion | 1H | ❌ KILL | unvalidated |
 
-| # | Strategy | Trigger | Timeframe | Per-strategy cap | Correlation group |
-|---|---|---|---|---|---|
-| 9 | [[equity_tsmom]] | cross-sect equity momentum basket | 1D | (registry SSOT) | equity_cross_sectional_momo |
-| 10 | [[equity_rsi_bb]] | RSI<30 + BB lower touch + trend filter | 15m/1D | (registry SSOT) | equity_mean_reversion |
-| 11 | [[equity_gap_go]] | US RTH open gap continuation | open bar | (registry SSOT) | equity_gap_event |
+### Track C — Alpaca US equity (inert until SIP #42)
 
-> caps/correlation 정확값 = `polaris/strategies/__init__.py` + StreamConfig SSOT (이 표는 역할/식별 목적).
+| Strategy | tf | dispatch | note |
+|---|---|---|---|
+| equity_52wk_high_breakout | 1D | ✅ | wave2 (inert-data, degrade-never-crash) |
+| equity_vol_expansion_pocket_pivot | 1D | ✅ | wave2 (inert-data) |
+| connors_rsi2 | 1D | ❌ KILL | unvalidated |
+
+> caps/correlation 정확값 = `polaris/strategies/__init__.py` + StreamConfig SSOT (이 표는 역할/식별 + dispatch 상태 목적).
 
 ## RawSignal Schema
 
@@ -99,59 +112,48 @@ class StrategyMetadata:
     per_symbol_cap: float        # per-symbol % within strategy
     expected_holding_bars: int
     asset_class: str             # "spot" / "fx" / "index" / "commodity"
-    venue: str                   # "okx" / "capital"
+    venue: str                   # "okx" / "capital" / "alpaca"
     correlation_group_id: str
+    dispatch_eligible: bool = True   # SSOT — bar pipeline dispatches iff True;
+                                     # False = no-emit KILL (still registered,
+                                     # open-position close path preserved)
 ```
 
 ## Correlation Group → Concurrent Caps
 
-| Group | Strategy | Max concurrent positions |
-|---|---|---|
-| spot_intraday_event | Volume Burst | 3 |
-| spot_cross_sectional_momo | TSMOM | 5 |
-| spot_mean_reversion | RSI-BB Pullback | 4 |
-| spot_breakout | Spot Donchian | 3 |
-| cfd_fx_trend | FX Breakout | 5 |
-| cfd_index_commodity_trend | XAU/Indices | 4 |
-| cfd_session_event | Session Breakout | 2 |
+Per-group concurrent caps + correlation_group_id = `metadata` per strategy (the
+SSOT). Each registry strategy declares its own `correlation_group_id`; see the
+roster table above for the active set (KILLed groups' strategies stay registered,
+no-emit). Live concurrency is governed by the per-symbol/per-strategy risk caps
+([[layer-3-sizing-risk]]).
 
 ## File Layout
 
 ```
 polaris/strategies/
-├── base.py           # Strategy ABC + RawSignal + StrategyMetadata
-├── volume_burst.py   (~50 LOC)
-├── tsmom.py          (~70 LOC)
-├── rsi_bb.py         (~60 LOC)
-├── spot_donchian.py  (~50 LOC)
-├── fx_breakout.py    (~60 LOC, basket logic)
-├── xau_indices.py    (~60 LOC)
-└── session_breakout.py (~50 LOC)
+├── base.py           # Strategy ABC + RawSignal + StrategyMetadata (dispatch_eligible)
+├── __init__.py       # STRATEGY_REGISTRY (22) — the dispatch SSOT
+└── <one module per strategy>  # each ≤ ~100 LOC, signal-gen only (lifecycle X)
 ```
 
-각 strategy ≤ 100 LOC (signal gen only, lifecycle X).
+## Dispatch (dual-SSOT fix 2026-06-28)
 
-## P1.0 Day 1 동시 활성
-
-7 strategy day 1 동시 활성 → 이후 equity 트랙 4 추가로 **11** ([[ADR-003-8-layer-architecture|ADR-003]] Layer 7 isolation 보장):
-- Per-strategy worker (Layer 7 mechanism 1)
-- Per-strategy circuit breaker (mechanism 4)
-- Idempotent order keys (mechanism 6)
-- 첫 24h watchdog focus = segregation/wiring 검증 (성능 평가 X)
+Live bar dispatch (`_production_tick._all_strategies`) is DERIVED from the
+registry: `[cls() for cls in STRATEGY_REGISTRY.values() if cls.metadata.dispatch_eligible]`.
+No second hand-synced literal → registry-add + flag is the single source; drift
+(registered ≠ dispatched INERT, or kill ≠ removal zombie) is structurally
+impossible and guarded by `tests/test_dispatch_ssot.py`. Layer 7 isolation
+(per-strategy worker / circuit breaker / idempotent keys) is unchanged.
 
 ## Anti-pattern (재발 방지)
 - 4-method lifecycle → signal generator only
 - Strategy 가 sizing 결정 → Layer 3 sizing engine 만 (AI Entry Sizer 결정)
 - Strategy 가 exit 결정 → Layer 6 Adaptive Exit AI ([[ADR-004-per-gate-ai-pipeline|ADR-004]] gate 7)
 - 정적 ATR exit → Adaptive Exit override 가능 (winner 길게)
-
-## Phase
-- P0: 7 strategy raw signal generator + Volume Burst single-ticker smoke
-- P1.0 day 1: 7 동시 활성 + 24h watchdog
-- P1.1: 자연 운영, lever 변경 = [[ADR-002-vision|ADR-002]] §1 trigger 충족 시
-- P2: ELO winner-only sizing 증액 ([[ADR-002-vision|ADR-002]] C 메커니즘)
+- 별도 dispatch 리터럴 (registry ≠ dispatch) → silent INERT / kill≠removal 좀비. 봉쇄 = `dispatch_eligible` SSOT + `test_dispatch_ssot.py`.
 
 ## Sources
-- Round 3 D1 (7 strategy 동시, isolation)
+- Round 3 D1 (signal generator only, isolation)
 - Jin clarification 21:30 (signal generator only role)
 - T11 archive: per-gate AI lifecycle 결정
+- 2026-06-28 dual-SSOT dispatch fix (#56 strategy restructure)

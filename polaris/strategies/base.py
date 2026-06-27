@@ -72,6 +72,20 @@ class StrategyMetadata:
     # entry is ever blocked (flow_not_block). Routing only — never a size/entry
     # block; applies solely to the OKX prefer-maker post-only path.
     maker_no_fill_cancel: bool = False
+    # dispatch_eligible: the SINGLE source of truth for whether the LIVE bar
+    # pipeline invokes ``generate_raw_signal`` on this strategy. The dispatch set
+    # is DERIVED from ``STRATEGY_REGISTRY`` filtered on this flag (see
+    # ``_production_tick._all_strategies``), so a registered strategy dispatches
+    # iff its flag is True — the prior hand-synced 19-id literal could (and did)
+    # DRIFT from the registry (silent INERT: registered ≠ dispatched). The DEFAULT
+    # (True) keeps every validated strategy dispatching unchanged. Set False to
+    # KILL a strategy from NEW-ENTRY dispatch (fee-fatal / unvalidated): it stays
+    # REGISTERED (module + open-position close path preserved — KILL is no-emit,
+    # NOT module removal; the recalc/exit loop still closes its open positions) but
+    # ``generate_raw_signal`` is never called, so it opens no new position. NOT a
+    # size dampen / halt / block (flow_not_block) — an excluded strategy simply
+    # does not emit; it never cuts another strategy's size.
+    dispatch_eligible: bool = True
 
 
 @dataclass(frozen=True, slots=True)

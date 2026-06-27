@@ -452,20 +452,26 @@ def test_mfe_protect_covers_all_registered_strategies() -> None:
 
 
 def test_loser_timeout_cap_env_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
-    # POLARIS_LOSER_TIMEOUT_SEC re-tunes the drift backstop cap. Reload the
-    # module so the module-level env read picks up the override.
+    # POLARIS_LOSER_TIMEOUT_SEC re-tunes the drift backstop cap. The constant +
+    # the helper now live in ``core.live_recalc.loser_timeout`` (the module read
+    # is there); ``_production_recalc_exit`` re-exports them. Reload the CORE
+    # module so its module-level env read picks up the override, then reload the
+    # scripts re-export so its binding refreshes too.
     import importlib
 
     monkeypatch.setenv("POLARIS_LOSER_TIMEOUT_SEC", "1800")
+    import polaris.core.live_recalc.loser_timeout as loser_mod
     import polaris.scripts._production_recalc_exit as recalc_mod
 
+    loser_mod = importlib.reload(loser_mod)
     recalc_mod = importlib.reload(recalc_mod)
     try:
         assert recalc_mod.LOSER_TIMEOUT_CAP_SEC == 1800.0
-        # spot_donchian (1H, 7200s floor) capped at the re-tuned 1800s.
+        # ema_crossover (1H, 7200s floor) capped at the re-tuned 1800s.
         assert recalc_mod._loser_timeout_for_strategy("ema_crossover") == 1800.0
     finally:
         monkeypatch.delenv("POLARIS_LOSER_TIMEOUT_SEC", raising=False)
+        importlib.reload(loser_mod)
         importlib.reload(recalc_mod)
 
 

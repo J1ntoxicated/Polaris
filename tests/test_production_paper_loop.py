@@ -439,19 +439,16 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_l7_supervise_strategies_wired() -> None:
-    """The strategy list is exactly 19: strategy-wave1 un-registered fx_range_fade
-    and added the 4 verified 1D survivors (okx_donchian_55 / tsmom_12_1 /
-    macd_ema / donchian_turtle); volume_burst was then un-registered 2026-06-27
-    (#61 live-churn KILL), dropping the dispatch list 12 → 11. strategy-wave2
-    (2026-06-27) added 7 verified research survivors (Capital GOLD/index 5 +
-    Alpaca equity 2) → 18. spot_donchian was then un-registered 2026-06-27
-    (#56 stop-bleeders KILL), dropping the dispatch list 18 → 17. The
-    weekend-maker dispatch fix then wired the two VALIDATED weekend OKX makers
-    (#77 thin-book flush + #80 funding capitulation) that were registered but
-    silent-INERT (registry ≠ dispatch) → 19. The registered-but-unvalidated
-    supertrend / connors_rsi2 / cci_reversion stay OUT of dispatch."""
+    """The dispatch list is now DERIVED from STRATEGY_REGISTRY filtered on
+    ``metadata.dispatch_eligible`` (dual-SSOT fix). The prior hand-synced literal
+    was 19; the fee-fatal / unvalidated KILL set rsi_bb_pullback (15m crypto
+    reversion) + ema_crossover (no OOS/fee evidence) to dispatch_eligible=False →
+    17 dispatched survivors. The registered-but-unvalidated supertrend /
+    connors_rsi2 / cci_reversion stay OUT (already absent + now flag-enforced).
+    A KILL = no-emit, not removal: all five stay registered (open-position close
+    path preserved)."""
     strategies = _all_strategies()
-    assert len(strategies) == 19
+    assert len(strategies) == 17
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
     assert "spot_donchian" not in ids  # KILLed 2026-06-27 (#56 stop-bleeders)
@@ -466,10 +463,12 @@ async def test_l7_supervise_strategies_wired() -> None:
     assert "gold_trend_chandelier_1d" in ids
     assert "index_dual_momentum_rotation" in ids
     assert "equity_vol_expansion_pocket_pivot" in ids
-    # weekend-maker dispatch fix — the two VALIDATED weekend OKX makers.
+    # weekend-maker dispatch — the two VALIDATED weekend OKX makers.
     assert "weekend_thin_book_flush_maker" in ids
     assert "weekend_funding_capitulation_maker" in ids
-    # registered-but-unvalidated stay OUT (churn risk — no OOS/fee evidence).
+    # fee-fatal / unvalidated KILL set — dispatch_eligible=False, all OUT.
+    assert "rsi_bb_pullback" not in ids  # fee-fatal 15m crypto reversion
+    assert "ema_crossover" not in ids  # no OOS/fee evidence
     assert "supertrend" not in ids
     assert "connors_rsi2" not in ids
     assert "cci_reversion" not in ids
@@ -546,12 +545,12 @@ async def test_g1_universe_scanner_invoked(memdb: sqlite3.Connection) -> None:
 def test_g2_emit_no_cap() -> None:
     """The strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
-    # no cap; strategy-wave1: fx_range_fade KILLed, +4 verified 1D survivors = 12;
-    # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) → 11.
-    # strategy-wave2 (2026-06-27): +7 verified research survivors → 18.
-    # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) → 17.
-    # weekend-maker dispatch fix: +2 VALIDATED weekend OKX makers (#77/#80) → 19.
-    assert len(strategies) == 19
+    # Registry-derived dispatch (dispatch_eligible SSOT). The prior literal was 19;
+    # the dual-SSOT fix set rsi_bb_pullback (fee-fatal 15m crypto reversion) and
+    # ema_crossover (no OOS/fee evidence — same tier as the excluded supertrend/
+    # connors/cci) to dispatch_eligible=False → 17 dispatched survivors. KILL =
+    # no-emit, not removal: both stay registered (open-position close path kept).
+    assert len(strategies) == 17
 
 
 @pytest.mark.asyncio

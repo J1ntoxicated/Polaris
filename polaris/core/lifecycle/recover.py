@@ -25,7 +25,7 @@ from collections.abc import Awaitable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
-from polaris.scripts._smoke_fills import SimulatedTrade
+from polaris.core.lifecycle.trade import SimulatedTrade
 
 logger = logging.getLogger(__name__)
 

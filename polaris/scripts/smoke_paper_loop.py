@@ -42,21 +42,16 @@ from polaris.scripts._smoke_real_roundtrip import (
 from polaris.scripts._smoke_state import FOCUS, FocusEntry, LoopState
 from polaris.storage.schema import init_db
 from polaris.strategies import (
+    BarBreakoutRunStrategy,
     BarView,
     BaseStrategy,
     FXBreakoutBasketStrategy,
     MarketView,
+    OKXDonchian55BreakoutStrategy,
     RawSignal,
-    RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     XAUIndicesTrendStrategy,
 )
-
-# spot_donchian was un-registered 2026-06-27 (#56 stop-bleeders) — removed from
-# STRATEGY_REGISTRY + the production dispatch. The module is preserved read-only;
-# this offline smoke-FIXTURE rig still exercises its signal generator directly
-# (it is NOT the production loop — production_paper_loop.py is separate).
-from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.venues.okx import fetch_okx_bars
 
 logger = logging.getLogger(__name__)
@@ -138,11 +133,15 @@ def _stub_bars(n: int, *, base: float = 60_000.0, drift: float = 0.5) -> list[Ba
 
 
 def _okx_strategies() -> list[BaseStrategy]:
-    # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) — dropped from
-    # the smoke OKX bundle so the harness mirrors the live OKX roster.
+    # Offline smoke FIXTURE rig (NOT the production loop — production_paper_loop.py
+    # is separate). Two REGISTERED + dispatch_eligible OKX bar strategies that emit
+    # on the boosted breakout view, so the harness mirrors a live-dispatched OKX
+    # roster (no KILLed/un-registered strategy). rsi_bb_pullback (fee-fatal KILL)
+    # and the un-registered spot_donchian were dropped — they are no longer
+    # dispatched live, so the smoke rig no longer references them.
     return [
-        RSIBBPullbackStrategy(),
-        SpotDonchianStrategy(),
+        BarBreakoutRunStrategy(),
+        OKXDonchian55BreakoutStrategy(),
     ]
 
 

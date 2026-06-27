@@ -150,6 +150,70 @@ def test_okx_sell_quote_fee_leaves_base_qty_gross() -> None:
     assert f.base_qty == pytest.approx(993.0)  # base sold unaffected by quote fee
 
 
+def test_okx_maker_fill_stamps_real_maker_fee() -> None:
+    """A post-only (maker) fill carries ``execType=='M'`` in the OKX order
+    payload — fee_usd MUST be the REAL maker schedule (8 bps), NOT the taker
+    default (10 bps). The maker edge (2 bps/leg) is otherwise invisible: a maker
+    fill stamped as taker over-charges every NIG/cell observation and hides the
+    weekend-maker thesis. The fee is stamped per-fill at the truth boundary so
+    every fills.fee_usd consumer (posterior / cell / dashboard net) reflects the
+    real maker tier without re-deriving it."""
+    payload = {
+        "ordId": "100",
+        "instId": "BTC-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "0.001",
+        "avgPx": "60000",
+        "execType": "M",  # maker (post-only rested + filled passively)
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="weekend_thin_book_flush_maker")
+    # 8 bps real maker of the $60 notional = $0.048 (NOT 10 bps taker = $0.06).
+    assert f.fee_usd == pytest.approx(f.quote_qty * 0.0008, rel=1e-9)
+    assert f.fee_usd == pytest.approx(60.0 * 0.0008, rel=1e-6)
+
+
+def test_okx_taker_fill_stamps_real_taker_fee() -> None:
+    """An explicit ``execType=='T'`` (taker / market cross) stamps the REAL
+    taker schedule (10 bps) — byte-identical to the no-execType default so the
+    maker wiring never changes a taker fill."""
+    payload = {
+        "ordId": "101",
+        "instId": "BTC-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "0.001",
+        "avgPx": "60000",
+        "execType": "T",  # taker (market / marketable-limit cross)
+        "state": "filled",
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="tsmom")
+    assert f.fee_usd == pytest.approx(f.quote_qty * 0.001, rel=1e-9)  # 10 bps taker
+    assert f.fee_usd == pytest.approx(60.0 * 0.001, rel=1e-6)
+
+
+def test_okx_missing_exectype_defaults_taker() -> None:
+    """No ``execType`` in the payload (legacy / unknown) falls back to TAKER —
+    degrade-safe: the maker tier is never silently assumed, so a fill whose
+    aggressor side is unknown is conservatively the more expensive taker (no
+    edge over-statement). Byte-identical to the pre-wiring behaviour."""
+    payload = {
+        "ordId": "102",
+        "instId": "BTC-USDT",
+        "side": "buy",
+        "tgtCcy": "quote_ccy",
+        "accFillSz": "0.001",
+        "avgPx": "60000",
+        "state": "filled",  # no execType
+        "uTime": "1762476225678",
+    }
+    f = normalize_okx_fill(payload, strategy_id="tsmom")
+    assert f.fee_usd == pytest.approx(f.quote_qty * 0.001, rel=1e-9)  # taker default
+
+
 def test_okx_fill_rejects_non_filled() -> None:
     payload = {"state": "live", "instId": "BTC-USDT", "side": "buy"}
     with pytest.raises(FillNormalizationError):

@@ -332,33 +332,74 @@ def _read_cost_inputs(
     return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd
 
 
-def _safe_update_posterior(
-    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
-    pnl_r: float, pnl_usd: float, now_ts: int,
-) -> None:
-    """Edge-validation Phase 1 — fold the cost-adjusted R into the bucket
-    posterior. Fail-open (``logger.warning``): a posterior failure must never
-    abort an already-committed close. This table is never read by sizing.
+def compute_net_pnl_r(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade,
+    gross_pnl_r: float, gross_pnl_usd: float,
+) -> tuple[float, float]:
+    """REAL-fee-net ``(pnl_usd_net, pnl_r_net)`` for one closed position.
+
+    REAL-FEE CANONICAL (FIX 1): reads the per-fill REAL fee (``fills.fee_usd``,
+    stamped real at the truth boundary) + slippage for BOTH legs (entry is_close=0
+    + exit is_close=1 → leg-once, no double-count) and subtracts the round-trip
+    cost via :func:`cost_adjusted_pnl_r`. This is the SAME net the NIG posterior
+    already used — lifted into ONE place so the close path computes it ONCE and
+    feeds the IDENTICAL net R to the cell matrix, the Layer-5 learners, the
+    meta-label, the posterior, AND the ``won`` verdict. Without this the cell /
+    learners folded the fee-FREE gross R while only the posterior was net — a
+    fee≈gross scalp looked like a winner to the cell stats and a loss to the
+    posterior (the inconsistency this fix removes).
+
+    #46 single-truth preserved: ``fills.pnl_usd`` (GROSS) + ``fills.fee_usd``
+    (REAL) remain the truth; the net is an in-memory derivation only (no new truth
+    column). Degenerate R-denominator (entry_price <=0 → atr_usd None) → the
+    cost-in-R adjustment is SKIPPED (net R == gross R) so the learners never fold
+    |net_r| ≫ |gross_r| (the −210000R blow-up guard). ``pnl_usd_net`` always nets
+    the dollar cost (finite + sane). NEVER read by sizing (measurement/learning
+    only — the 9-stack ban + −1.0R rail are untouched).
+
+    Fail-open: any read/compute error returns ``(gross_pnl_usd, gross_pnl_r)`` so
+    the already-committed close still folds a value (best-effort learning).
     """
     try:
         (
             entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd,
         ) = _read_cost_inputs(conn, trade)
         if atr_usd is None:
-            # FIX 1 — degenerate R-denominator (entry_price <=0): skip the
-            # cost-in-R adjustment (net==gross) so the NIG posterior never folds
-            # |net_r| ≫ |gross_r|. WARN (not silent) per the no-garbage mandate.
+            # Degenerate R-denominator (entry_price <=0): skip the cost-in-R
+            # adjustment (net==gross) so no learner folds |net_r| ≫ |gross_r|.
+            # WARN (not silent) per the no-garbage mandate.
             logger.warning(
-                "[edge-validation] %s:%s degenerate atr_usd (entry_price<=0) — "
-                "cost-in-R adjustment skipped (net==gross, no posterior blow-up)",
+                "[close/net] %s:%s degenerate atr_usd (entry_price<=0) — "
+                "cost-in-R adjustment skipped (net==gross, no blow-up)",
                 trade.venue, trade.symbol,
             )
-        _pnl_usd_net, pnl_r_net = cost_adjusted_pnl_r(
-            gross_pnl_usd=pnl_usd, gross_pnl_r=pnl_r, size_usd=size_usd,
+        return cost_adjusted_pnl_r(
+            gross_pnl_usd=gross_pnl_usd, gross_pnl_r=gross_pnl_r, size_usd=size_usd,
             atr_usd=atr_usd, venue=trade.venue,
             entry_fee_usd=entry_fee, exit_fee_usd=exit_fee,
             entry_slippage_bps=entry_slip, exit_slippage_bps=exit_slip,
         )
+    except Exception as exc:  # noqa: BLE001 — measure-only; fail-open to gross
+        logger.warning(
+            "[close/net] %s:%s real-fee net compute failed — gross fallback: %r",
+            trade.venue, trade.symbol, exc,
+        )
+        return gross_pnl_usd, gross_pnl_r
+
+
+def _safe_update_posterior(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
+    pnl_r_net: float, pnl_r_gross: float, now_ts: int,
+) -> None:
+    """Edge-validation Phase 1 — fold the (pre-computed) cost-adjusted R into the
+    bucket posterior. ``pnl_r_net`` is the SHARED real-fee net the close path
+    computed once via :func:`compute_net_pnl_r` (no second DB read / recompute
+    here — the cell matrix, learners, posterior + ``won`` all fold the identical
+    value). ``pnl_r_gross`` is logged for the gross-vs-net 거동 record. Fail-open
+    (``logger.warning``): a posterior failure must never abort an already-committed
+    close. This table is never read by sizing.
+    """
+    try:
         maybe_update_posterior(
             conn, exchange=trade.venue, strategy=trade.strategy_id,
             ticker=trade.symbol, regime=regime, pnl_r_net=pnl_r_net, now_ts=now_ts,
@@ -382,7 +423,7 @@ def _safe_update_posterior(
             "[edge-validation] posterior+prior %s:%s strategy=%s regime=%s "
             "pnl_r_gross=%.3f pnl_r_net=%.3f",
             trade.venue, trade.symbol, trade.strategy_id, regime,
-            pnl_r, pnl_r_net,
+            pnl_r_gross, pnl_r_net,
         )
     except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
         logger.warning(

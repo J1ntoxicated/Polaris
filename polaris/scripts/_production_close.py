@@ -46,6 +46,7 @@ from polaris.scripts._production_close_effects import (
     _safe_run_learners,
     _safe_update_cell_matrix,
     _safe_update_posterior,
+    compute_net_pnl_r,
 )
 from polaris.scripts._production_close_helpers import (
     _CLOSE_FULL_FILL_EPS,
@@ -855,7 +856,21 @@ async def _close_trade_with_real_pnl(
     # downstream failure cannot drop the rest of the fan-out. ``record_fault``
     # itself can raise (it writes to ``strategy_fault_events`` and reads from
     # ``strategy_halts``); ``_safe_record_fault`` swallows that with a log.
-    won = pnl_r > 0.0
+    #
+    # REAL-FEE CANONICAL (FIX 1): compute the real-fee NET R/USD ONCE here (reads
+    # the per-fill REAL fees.fee_usd for both legs, leg-once) and feed the SAME net
+    # to the cell matrix, the Layer-5 learners, the meta-label, the posterior AND
+    # the ``won`` verdict. Previously only the posterior subtracted the fee while
+    # cell/learners folded the fee-FREE gross R — a fee≈gross scalp looked like a
+    # winner to the cell stats and a loss to the posterior. ``won`` is now the NET
+    # sign. fills.pnl_usd (GROSS) + fills.fee_usd (REAL) stay the single truth
+    # (#46); net is an in-memory derivation. Degenerate atr_usd → net==gross
+    # (no blow-up). Measurement/learning only — never read by sizing, the 9-stack
+    # ban + -1.0R rail are untouched. Fail-open inside compute_net_pnl_r.
+    _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
+        conn, trade=trade, gross_pnl_r=pnl_r, gross_pnl_usd=pnl_usd,
+    )
+    won = pnl_r_net > 0.0
     regime = _safe_lookup_regime(lookup_regime, conn, trade)
     # P3 self-evolve lineage (read-model, behaviour 0): stamp exit_ts /
     # exit_reason / realised pnl onto the open lineage segment. Post-commit +
@@ -871,18 +886,21 @@ async def _close_trade_with_real_pnl(
             exit_reason=close_reason or "exit", pnl_r=pnl_r,
             pnl_usd=close_pnl_usd_total(conn, trade=trade, fallback=pnl_usd),
         )
+    # FIX 1 — cell matrix learns the REAL-fee NET R (not gross): the same net the
+    # posterior folds, so the edge statistics + the posterior agree on every close.
     _safe_update_cell_matrix(
-        conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won, now_ts=now_ts,
         state=state,
     )
+    # FIX 1 — Layer-5 learner network folds the SAME net R + net ``won``.
     _safe_run_learners(
-        conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won, now_ts=now_ts,
         state=state,
     )
     # Meta-labeling (#10) — collection-only triple-barrier label per close.
-    # Never gates sizing/exits; fail-open inside the helper.
+    # Never gates sizing/exits; fail-open inside the helper. FIX 1 — net R + won.
     _safe_record_meta_label(
-        conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won, now_ts=now_ts,
         state=state,
     )
     # ADR-012 — backfill the probe tuning-log outcome cols (giveback / realized
@@ -899,11 +917,14 @@ async def _close_trade_with_real_pnl(
     # code_review_2026-06-24) are both charged inside this helper from the SAME
     # cost-adjusted net R — measure/seed only, never read by sizing. Fail-open.
     _safe_update_posterior(
-        conn, trade=trade, regime=regime, pnl_r=pnl_r, pnl_usd=pnl_usd,
+        conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net, pnl_r_gross=pnl_r,
         now_ts=now_ts,
     )
+    # FIX 1 — G8 post-trade reflector folds the SAME net R + net ``won`` as the
+    # cell/learners/posterior so the reflection lesson is fee-coherent (a gross R
+    # with a net won verdict would contradict). Measurement/learning only.
     await _safe_run_g8(
-        conn, trade=trade, regime=regime, pnl_r=pnl_r, won=won, now_ts=now_ts,
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won, now_ts=now_ts,
         state=state, gpt_client=gpt_client, phase=phase,
     )
     return True

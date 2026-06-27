@@ -41,6 +41,26 @@ from polaris.scripts._production_bars import (
 
 
 @pytest.fixture(autouse=True)
+def _equity_session_open() -> Generator[None]:
+    """Pin ``ingest_bars_for_focus``'s wall-clock to a weekday RTH instant.
+
+    The Alpaca-equity exchange-routing tests here assume the equity fetch path
+    runs (they predate the #84 equity data-fetch session gate, which reads
+    ``time.time`` once per call and skips equity when the US market is fully
+    closed). Freeze the module clock to Wed 2026-06-24 15:00 UTC (= RTH in EDT)
+    so the gate is open regardless of the actual run-day. The gate itself is
+    tested in ``test_session_map`` / ``test_static_ground``.
+    """
+    import datetime as _dt
+
+    import polaris.scripts._production_bars as pbars
+
+    rth_ts = int(_dt.datetime(2026, 6, 24, 15, 0, tzinfo=_dt.UTC).timestamp())
+    with patch.object(pbars.time, "time", lambda: rth_ts):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _yahoo_primary_off() -> Generator[None]:
     """Neutralize the Yahoo-PRIMARY layer for the EXCHANGE-routing tests here.
 

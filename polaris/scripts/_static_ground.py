@@ -39,7 +39,7 @@ from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.ingest import persist_bars
 from polaris.scripts._production_bars import fetch_bars_one
 from polaris.scripts._production_layers import read_active_universe
-from polaris.scripts._session_map import session_warm_active
+from polaris.scripts._session_map import equity_fetch_active, session_warm_active
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +179,18 @@ async def ingest_static_ground_bars(
         venue = inst.venue
         symbol = inst.symbol
         asset_class = inst.asset_class
+        # #84 equity data-fetch gate: when the US-equity cash market is fully
+        # closed (overnight / weekend) AND no #66 pre-open warm window is active,
+        # SKIP the whole resolution walk for this equity — the closed market
+        # produces no new bars, so fetching only storms Alpaca/yfinance (the
+        # weekend 429 flood). OKX crypto (24/7) + Capital FX/index/commodity are
+        # never gated (equity_fetch_active returns True for them). flow_not_block:
+        # this is "don't fetch absent data", not a trade block; RTH/warm resumes it.
+        # Uses ``warm_now`` — the SAME clock as the #66 warm window below (the
+        # ``now_ts`` param, else ``time.time()``) — so the gate and the warm OR
+        # never disagree on "what time is it" (a 13:10 pre-open warm survives).
+        if not equity_fetch_active(venue, asset_class, symbol, warm_now):
+            return
         out: list[Any] = []
         for interval in resolutions:
             out.extend(await _fetch_interval(venue, symbol, asset_class, interval))

@@ -310,3 +310,90 @@ def test_warm_lead_min_env_override(monkeypatch: object) -> None:
     finally:
         monkeypatch.delenv("POLARIS_SESSION_WARM_LEAD_MIN", raising=False)  # type: ignore[attr-defined]
         importlib.reload(reloaded)  # restore module-level default for other tests
+
+
+# ---------------------------------------------------------------------------
+# #84 equity_fetch_active — DATA-FETCH session gate (NOT a trade gate).
+#
+# Gates ONLY Alpaca US-equity bar fetches when the equity market is fully closed
+# (weekend / overnight) AND no pre-open warm window is active. flow_not_block:
+# this is "don't fetch data the closed market is not producing", never a trade
+# block. OKX crypto (24/7) and Capital FX/index/commodity are NEVER gated by it.
+# ---------------------------------------------------------------------------
+
+
+# 2026-06-24 is a Wed in EDT (UTC-4) → RTH 13:30-20:00 UTC, pre-market 08:00 UTC,
+# after-hours runs to 00:00 UTC next day. 03:00 UTC Wed = 23:00 ET Tue = CLOSED.
+def test_equity_fetch_active_rth_true() -> None:
+    """Alpaca equity DURING RTH (15:00 UTC Wed) → fetch active."""
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", _utc(*_WED, 15)) is True
+
+
+def test_equity_fetch_active_closed_overnight_false() -> None:
+    """Alpaca equity deep-closed overnight (03:00 UTC Wed = 23:00 ET Tue) → SKIP."""
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", _utc(*_WED, 3)) is False
+
+
+def test_equity_fetch_active_weekend_false() -> None:
+    """Alpaca equity on Saturday (market shut all day) → SKIP fetch."""
+    assert sm.equity_fetch_active("alpaca", "equity", "MSFT", _utc(*_SAT, 12)) is False
+    assert sm.equity_fetch_active("alpaca", "equity", "MSFT", _utc(*_SAT, 18)) is False
+
+
+def test_equity_fetch_active_extended_hours_true() -> None:
+    """Pre-market (08:00 UTC) + after-hours (23:00 UTC) → fetch active.
+
+    Paid SIP delivers extended-hours bars, so the data IS changing; only the
+    fully-closed window is skipped. ``us_equity_session_state != 'closed'``.
+    """
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", _utc(*_WED, 8)) is True
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", _utc(*_WED, 23)) is True
+
+
+def test_equity_fetch_active_okx_crypto_never_gated() -> None:
+    """OKX crypto is 24/7 — fetch ALWAYS active, every hour, weekend included."""
+    for hour in range(0, 24, 3):
+        assert sm.equity_fetch_active("okx", "crypto", "BTC-USDT", _utc(*_WED, hour)) is True
+    assert sm.equity_fetch_active("okx", "crypto", "ETH-USDT", _utc(*_SAT, 3)) is True
+
+
+def test_equity_fetch_active_capital_never_gated() -> None:
+    """Capital FX / index / commodity are NOT equity-gated — always fetch active.
+
+    (FX/index session de-prioritisation lives in ``instrument_session_weight``,
+    NOT in this equity-only data-fetch gate. This task is equity-scoped only.)
+    """
+    closed_equity_ts = _utc(*_WED, 3)  # US equity closed here
+    assert sm.equity_fetch_active("capital", "forex", "EURUSD", closed_equity_ts) is True
+    assert sm.equity_fetch_active("capital", "index", "DE40", closed_equity_ts) is True
+    assert sm.equity_fetch_active("capital", "commodity", "GOLD", _utc(*_SAT, 12)) is True
+
+
+def test_equity_fetch_active_alpaca_crypto_not_equity_gated() -> None:
+    """An Alpaca CRYPTO symbol (asset_class=crypto) is 24/7 — never equity-gated.
+
+    Only ``asset_class ∈ {equity,stock,us_equity}`` is gated; Alpaca crypto
+    (BTC/USD on the equity venue) keeps fetching through the equity-closed window.
+    """
+    assert sm.equity_fetch_active("alpaca", "crypto", "BTCUSD", _utc(*_WED, 3)) is True
+    assert sm.equity_fetch_active("alpaca", "crypto", "BTCUSD", _utc(*_SAT, 12)) is True
+
+
+def test_equity_fetch_active_warm_window_overrides_closed(monkeypatch) -> None:
+    """When a pre-open WARM window is active, a CLOSED equity still fetches.
+
+    Forward-compat with #66 pre-warm: ``equity_fetch_active`` must OR in
+    ``session_warm_active`` so the gate never kills the pre-open backfill. We
+    stub the warm predicate True to prove the OR is wired even on a base without
+    #66 merged (where the live ``session_warm_active`` is absent / returns False).
+    """
+    monkeypatch.setattr(
+        sm, "_session_warm_active", lambda *a, **k: True, raising=True
+    )
+    # 03:00 UTC Wed = equity CLOSED, but warm=True → fetch active (pre-warm alive).
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", _utc(*_WED, 3)) is True
+
+
+def test_equity_fetch_active_unparseable_ts_active() -> None:
+    """A non-finite clock degrades to ACTIVE (flow_not_block: never skip on doubt)."""
+    assert sm.equity_fetch_active("alpaca", "equity", "AAPL", float("nan")) is True

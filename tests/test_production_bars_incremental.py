@@ -53,6 +53,28 @@ from polaris.scripts._production_bars import (
 
 
 @pytest.fixture(autouse=True)
+def _equity_session_open() -> Generator[None]:
+    """Pin ``ingest_bars_for_focus``'s wall-clock to a weekday RTH instant.
+
+    These tests pin the EXCHANGE incremental / skip-if-current semantics for
+    Alpaca equity and assume the equity fetch path runs (they predate the #84
+    equity data-fetch session gate). The gate reads ``time.time`` once per call,
+    so a run on a weekend / out-of-hours would (correctly) skip the equity fetch
+    and mask the behaviour under test. Freeze the module clock to Wed 2026-06-24
+    15:00 UTC (= 11:00 ET, RTH in EDT) so the gate is open and these tests stay
+    deterministic regardless of the actual run-day. (The gate itself is tested
+    independently in ``test_session_map`` / ``test_static_ground``.)
+    """
+    import datetime as _dt
+
+    import polaris.scripts._production_bars as pbars
+
+    rth_ts = int(_dt.datetime(2026, 6, 24, 15, 0, tzinfo=_dt.UTC).timestamp())
+    with patch.object(pbars.time, "time", lambda: rth_ts):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _yahoo_primary_off() -> Generator[None]:
     """Neutralize the Yahoo-PRIMARY layer for the EXCHANGE-routing tests here.
 
@@ -328,6 +350,53 @@ async def test_no_skip_set_preserves_legacy_behaviour(
         bar_interval="1m",
     )
     assert len(adapter.calls) == 1, "no skip set -> legacy full fetch"
+
+
+# ---------------------------------------------------------------------------
+# 3b. #84 equity data-fetch session gate on the HOT PATH (ingest_bars_for_focus)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_focus_skips_closed_equity_fetches_crypto(
+    memdb: sqlite3.Connection,
+) -> None:
+    """On a US-equity-closed instant the hot path skips Alpaca equity, fetches OKX.
+
+    Covers EVERY timeframe incl. the 1m regime bucket. OKX crypto is 24/7 and
+    must keep fetching at the SAME instant (crypto 무게이팅). flow_not_block:
+    only the fetch is skipped; the focus list / WS / dashboard are untouched.
+    """
+    import datetime as _dt
+
+    import polaris.scripts._production_bars as pbars
+
+    # Sat 2026-06-27 12:00 UTC — US equity shut all day, OKX never closes.
+    sat_ts = int(_dt.datetime(2026, 6, 27, 12, 0, tzinfo=_dt.UTC).timestamp())
+
+    adapter = _RecordingAlpacaAdapter([_raw_alpaca_bar(2)])
+    okx_called: dict[str, Any] = {}
+
+    async def _fake_okx(*args: Any, **kwargs: Any) -> list[Bar]:
+        okx_called["called"] = True
+        return [_bar("okx", "BTC-USDT", "1m", sat_ts)]
+
+    with (
+        patch.object(pbars.time, "time", lambda: sat_ts),
+        patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake_okx),
+    ):
+        result = await ingest_bars_for_focus(
+            memdb,
+            [("alpaca", "AAPL", "equity", "equity:AAPL"),
+             ("okx", "BTC-USDT", "crypto", "crypto:BTC")],
+            alpaca_adapter=adapter,
+            bar_interval="1m",
+        )
+
+    assert adapter.calls == [], "closed-equity Alpaca fetch must be SKIPPED"
+    assert okx_called.get("called") is True, "OKX crypto must STILL fetch (24/7)"
+    # The equity skip is counted in skipped_fresh (flow_not_block telemetry).
+    assert result["skipped_fresh"] == 1
 
 
 # ---------------------------------------------------------------------------

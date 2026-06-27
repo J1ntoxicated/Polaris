@@ -261,6 +261,78 @@ async def test_fill_per_symbol_error_is_swallowed(
 
 
 # ---------------------------------------------------------------------------
+# #84 equity data-fetch session gate — the static-ground walk skips a closed
+# US-equity, but keeps fetching OKX crypto (24/7) at the SAME instant.
+# 2026-06-27 is a Saturday — US equity is shut all day, OKX crypto never closes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_static_ground_skips_closed_equity_keeps_crypto(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a US-equity-closed Saturday the walk skips Alpaca equity, fetches OKX."""
+    _seat_active(
+        conn,
+        [("alpaca", "AAPL", "equity", "equity:AAPL"),
+         ("alpaca", "MSFT", "equity", "equity:MSFT"),
+         ("okx", "BTC-USDT", "crypto", "crypto:BTC"),
+         ("capital", "GOLD", "commodity", "commodity:GOLD")],
+    )
+
+    fetched: list[str] = []
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **_kw: Any) -> list[Bar]:
+        fetched.append(symbol)
+        return [_mk_bar(venue, symbol, "1D", int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    # Pin the walk's clock to a closed-equity Saturday (UTC). The gate reads
+    # ``time.time`` once at the top of the fetch; freeze it deterministically.
+    monkeypatch.setattr(sg.time, "time", lambda: _utc_sat_noon())
+
+    await sg.ingest_static_ground_bars(conn, resolutions=("1D",))
+
+    # Alpaca equity is SKIPPED (closed market, no warm window); OKX crypto +
+    # Capital commodity still fetch (never equity-gated).
+    assert "AAPL" not in fetched
+    assert "MSFT" not in fetched
+    assert "BTC-USDT" in fetched
+    assert "GOLD" in fetched
+
+
+def _utc_sat_noon() -> int:
+    """A Saturday 12:00 UTC epoch (US equity fully closed)."""
+    import datetime as _dt
+
+    return int(_dt.datetime(2026, 6, 27, 12, 0, tzinfo=_dt.UTC).timestamp())
+
+
+@pytest.mark.asyncio
+async def test_static_ground_fetches_equity_during_rth(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """During RTH the gate is open — Alpaca equity fetches normally (no skip)."""
+    _seat_active(conn, [("alpaca", "AAPL", "equity", "equity:AAPL")])
+
+    fetched: list[str] = []
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **_kw: Any) -> list[Bar]:
+        fetched.append(symbol)
+        return [_mk_bar(venue, symbol, "1D", int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    # 2026-06-24 Wed 15:00 UTC = 11:00 ET = RTH (EDT) → equity fetch active.
+    import datetime as _dt
+
+    rth_ts = int(_dt.datetime(2026, 6, 24, 15, 0, tzinfo=_dt.UTC).timestamp())
+    monkeypatch.setattr(sg.time, "time", lambda: rth_ts)
+
+    await sg.ingest_static_ground_bars(conn, resolutions=("1D",))
+    assert "AAPL" in fetched
+
+
+# ---------------------------------------------------------------------------
 # STEP①.2 — per-active-ticker sentiment/event ground (built on the fuser)
 # ---------------------------------------------------------------------------
 

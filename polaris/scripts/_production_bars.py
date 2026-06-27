@@ -24,6 +24,7 @@ from polaris.core.data.ingest import ingest_bars_async, persist_bars
 from polaris.core.data.schema import BAR_INTERVALS, Bar
 from polaris.datastream import emit as datastream_emit
 from polaris.scripts._production_asset_class import resolve_bar_asset_class
+from polaris.scripts._session_map import equity_fetch_active
 from polaris.scripts._yahoo_bars import (
     fetch_yahoo_bars,
     should_fetch_exchange_fallback,
@@ -637,6 +638,16 @@ async def ingest_bars_for_focus(
         nonlocal skipped_fresh
         venue, symbol, asset_class, _group = target
         instrument_id = f"{venue}:{symbol}"
+        # #84 equity data-fetch gate (covers EVERY timeframe incl. the 1m regime
+        # bucket): when the US-equity cash market is fully closed (overnight /
+        # weekend) AND no #66 pre-open warm window is active, SKIP the fetch for
+        # this equity — the closed market makes no new bars, so a fetch only storms
+        # Alpaca/yfinance. OKX crypto (24/7) + Capital are never gated. flow_not_block:
+        # not a trade block (focus list / WS / dashboard unchanged) — only the fetch
+        # is skipped, and RTH / the warm window resumes it automatically.
+        if not equity_fetch_active(venue, asset_class, symbol, now_s):
+            skipped_fresh += 1
+            return
         # Cache gate: last stored bar drives both skip-if-fresh and incremental
         # window. One indexed MAX(ts) lookup per symbol (cheap on the bars PK).
         last_ts = last_stored_bar_ts(conn, instrument_id, bar_interval)

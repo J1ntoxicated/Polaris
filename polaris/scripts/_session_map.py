@@ -43,7 +43,10 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+from collections.abc import Callable
 from typing import Final
+
+from polaris.venues.alpaca.equity_session_gate import us_equity_session_state
 
 __all__ = [
     "ASIA_CLOSE_MIN",
@@ -54,6 +57,7 @@ __all__ = [
     "US_CLOSE_MIN",
     "US_OPEN_MIN",
     "WARM_LEAD_MIN",
+    "equity_fetch_active",
     "instrument_session_weight",
     "session_group",
     "session_warm_active",
@@ -107,9 +111,12 @@ WARM_LEAD_MIN: Final[int] = _env_int("POLARIS_SESSION_WARM_LEAD_MIN", 30)
 _FX_CLASSES: Final[frozenset[str]] = frozenset({"forex", "fx"})
 
 # asset_class tokens that mean "US equity" — Alpaca stock symbols (the 미장 gap).
-# They have no ``_SESSION_GROUP`` entry, so FOR WARMING ONLY they are absorbed
-# into the 'us' cash-session window (their cash open IS the US RTH open). The
-# TRADE weight (``instrument_session_weight``) is UNTOUCHED by this mapping.
+# Two consumers: (1) #66 warming — they have no ``_SESSION_GROUP`` entry, so FOR
+# WARMING ONLY they are absorbed into the 'us' cash-session window (their cash open
+# IS the US RTH open); (2) the #84 data-fetch gate — the ONLY class it touches (a
+# discrete RTH cash session that goes fully dark out of hours). OKX crypto / Capital
+# FX / index / commodity are never equity-gated. The TRADE weight
+# (``instrument_session_weight``) is UNTOUCHED by this mapping.
 _EQUITY_CLASSES: Final[frozenset[str]] = frozenset({"equity", "stock", "us_equity"})
 
 # Symbol → regional session group. Mirrors the Yahoo index map's regional split
@@ -264,3 +271,88 @@ def session_warm_active(
     # Wrap: an open near 00:00 UTC (Asia) pushes warm_start negative — the lead
     # tail lands in the prior evening's late minutes (e.g. 23:30-24:00 UTC).
     return warm_start < 0 and minute >= warm_start + 1440
+
+
+# Bound to the real #66 ``session_warm_active`` defined directly ABOVE — so the
+# warm OR in ``equity_fetch_active`` keeps the pre-open backfill alive. The
+# try/except keeps signature parity with the sibling-branch base (where #66 lived
+# on another branch and this fell back to ``_warm_inactive``); now #66 is present
+# in the tree the ``try`` arm binds the real predicate at import. The ordering is
+# load-bearing: ``def session_warm_active`` MUST precede this block, else the name
+# is unbound here, the ``except NameError`` fires, the stub (always-False) binds,
+# and the #84 gate would SILENTLY KILL the #66 pre-open warm (no test catches the
+# import-order regression — the integration test below pins the live behaviour).
+def _warm_inactive(
+    venue: str, asset_class: str, symbol: str, now_ts: int | float
+) -> bool:
+    """Always-False fallback if the #66 ``session_warm_active`` is ever absent.
+
+    Retained as the ``except NameError`` arm of the binding below for parity with
+    the build's sibling-branch base. With #66 present in this tree the ``try`` arm
+    binds the real predicate and this stub is never used. Args unused (signature
+    parity with the real warm predicate).
+    """
+    del venue, asset_class, symbol, now_ts
+    return False
+
+
+_session_warm_active: Callable[[str, str, str, int | float], bool]
+try:  # pragma: no cover - import-time binding, both arms exercised across branches
+    _session_warm_active = session_warm_active  # type: ignore[name-defined]
+except NameError:
+    _session_warm_active = _warm_inactive
+
+
+def equity_fetch_active(
+    venue: str, asset_class: str, symbol: str, now_ts: int | float
+) -> bool:
+    """Should this instrument's bars be FETCHED right now? (#84 equity data gate).
+
+    A DATA-FETCH gate, NOT a trade gate. It answers one question: "is the market
+    that produces this instrument's bars actually open (or about to open) right
+    now?" — so the bulk + focus bar walks stop hammering Alpaca / yfinance for
+    US-equity bars the closed market is not producing (the weekend 429 storm).
+
+    Scope — EQUITY ONLY (``venue == 'alpaca'`` AND ``asset_class ∈
+    {equity,stock,us_equity}``). Everything else returns ``True`` unconditionally:
+    - OKX crypto (24/7 — never gated, mandate ③);
+    - Capital FX / index / commodity (24/5 — their focus de-prioritisation lives
+      in ``instrument_session_weight``, not in this equity-scoped fetch gate);
+    - an Alpaca CRYPTO symbol (asset_class crypto on the equity venue — 24/7).
+
+    For a US equity, fetch is active when EITHER:
+    - the equity session is not fully closed (``us_equity_session_state`` is
+      ``rth`` / ``pre_market`` / ``after_hours`` — paid SIP delivers extended-hours
+      bars, so the data is still moving), OR
+    - the #66 pre-open WARM window is active (``session_warm_active``) — so this
+      gate NEVER kills the pre-open backfill that fills fresh bars before the open.
+
+    🚨 flow_not_block: a ``False`` here means "the cash market is shut and is
+    producing no new bars, so don't fetch", NOT a trade block. It never touches
+    entry / size / exit / a held position; the instant RTH (or the warm window)
+    returns, fetch resumes automatically. A non-finite clock degrades to ``True``
+    (never skip on doubt).
+    """
+    if venue.strip().lower() != "alpaca":
+        return True  # OKX crypto + Capital — not equity, never gated here
+    if asset_class.strip().lower() not in _EQUITY_CLASSES:
+        return True  # Alpaca crypto (24/7) — not the RTH-bound equity class
+
+    try:
+        ts = int(now_ts)
+    except (TypeError, ValueError, OverflowError):
+        return True  # unparseable clock → fetch active (flow_not_block, never skip)
+
+    # ``us_equity_session_state`` is a pure time-of-day clock — it does not know
+    # the weekday, so on Sat/Sun 08:00-09:30 ET it would still read 'pre_market'.
+    # The cash book is shut all weekend, so treat the weekend as fully closed (the
+    # weekend 429 storm this gate targets is precisely a Saturday). Holiday
+    # weekdays are still covered: the live ``/v2/clock`` is_open (AlpacaClock,
+    # holiday-aware) overrides at the adapter layer when available — this
+    # deterministic clock is the per-walk floor.
+    is_weekend = dt.datetime.fromtimestamp(max(0, ts), tz=dt.UTC).weekday() >= 5
+    if not is_weekend and us_equity_session_state(ts) != "closed":
+        return True  # weekday RTH / pre-market / after-hours — SIP bars still moving
+    # Fully closed (overnight / weekend) → only the #66 pre-open warm window may
+    # keep the backfill alive; otherwise skip (the market is producing no bars).
+    return _session_warm_active(venue, asset_class, symbol, ts)

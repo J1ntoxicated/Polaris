@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from polaris.core.data.quote_writer import QuoteTickWriter
+from polaris.core.data.technical_store_writer import TechnicalStoreWriter
 from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
 from polaris.scripts._production_capital_sizing import CapitalConstraintCache
@@ -198,6 +199,15 @@ class ProdLoopState:
     # never halt). None until the loop wires it (smoke/replay paths leave it
     # None → pure bar-close behavior, behavior-identical to pre-P4).
     quote_writer: QuoteTickWriter | None = None
+    # STALL fix #88 — technical-store write OFF-LOADER (mirrors quote_writer). The
+    # ④ #12 technical store previously wrote SYNCHRONOUSLY on the loop thread via
+    # the shared tick conn (``upsert_technicals(conn, ...)`` inline in the focus
+    # fan-out) → WAL-lock contention with the 1Hz quote flush → tick STALL (#74
+    # 'shared-conn blocker' re-introduced). The tick body now ``record``s the
+    # just-extracted indicator snapshot in-mem here and a 1Hz flush off-loads the
+    # write on a dedicated conn. None until the loop wires it (smoke/replay leave it
+    # None → the tick body keeps the inline upsert, behavior-identical to pre-#88).
+    tech_store_writer: TechnicalStoreWriter | None = None
     # Alt-data EVIDENCE cache singleton (#6) — the SAME object fed to
     # compute_and_flip_regime (Layer 6 regime evidence). Shared onto state so the
     # Layer-0 focus producer can build the entrance-judge ``altdata_lean`` from the

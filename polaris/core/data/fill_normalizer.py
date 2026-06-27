@@ -126,25 +126,20 @@ def normalize_okx_fill(
         base_fee = abs(_safe_float(payload.get("fee")))
         if 0.0 < base_fee < fill_sz:
             base_qty = fill_sz - base_fee
-    # fee_usd is the REAL OKX fee — NOT the raw demo 'fee' the venue payload
-    # reports. OKX demo bills a punitive flat 70 bps (taker == maker); storing
+    # fee_usd is the REAL OKX taker fee (10 bps of notional) — NOT the raw demo
+    # 'fee' the venue payload reports. OKX demo bills a punitive 70 bps; storing
     # that drained edge-validation (NIG posterior in cost_adjusted_pnl_r) on 7x
     # cost. The whole system measures REAL-venue viability via real_fee_usd
     # (replay gate, dashboard real_fee_total), so the persisted per-fill fee is
     # made consistent here. The demo charge is recomputable from notional via
     # fees.demo_fee_usd(venue, size_usd) where the demo-drain curve is shown.
     #
-    # MAKER/TAKER per-fill: the OKX order object carries ``execType`` ('M'=maker,
-    # 'T'=taker). A post-only fill that rested + filled passively is a MAKER
-    # (8 bps), so stamping the taker 10 bps default over-charges every
-    # fills.fee_usd consumer (NIG posterior / cell matrix / dashboard real-fee-net)
-    # and hides the maker edge (+2 bps/leg — the weekend-maker thesis). We read
-    # execType at the truth boundary so the per-fill fee is correct everywhere
-    # downstream without any consumer re-deriving the tier. Missing/unknown
-    # execType → TAKER (degrade-safe: the more expensive tier, never an edge
-    # over-statement).
-    is_maker = str(payload.get("execType") or "").upper() == "M"
-    fee_usd = real_fee_usd("okx", notional_usd=quote_qty, is_maker=is_maker)
+    # Per-fill maker/taker is NOT derived here: the production OKX open path
+    # (adapter.fetch_order → order-details) does not supply ``execType``, so a
+    # prior execType→is_maker read was a no-op that always fell through to taker.
+    # Per-fill maker/taker is deferred to #87 (order-mode wiring). Default = taker
+    # (the more expensive tier — never an edge over-statement).
+    fee_usd = real_fee_usd("okx", notional_usd=quote_qty)
     slippage_bps = 0.0
     if expected_price is not None and expected_price > 0.0 and avg_px > 0.0:
         slippage_bps = abs(avg_px - expected_price) / expected_price * 10_000.0

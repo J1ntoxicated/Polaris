@@ -837,26 +837,6 @@ async def _close_trade_with_real_pnl(
     state.fills_close += 1
     state.closed_trades.append(trade)
 
-    # Successful close (INFO): the realised-close 거동 record Jin asked for —
-    # the venue/ticker, the close fill price + size, the realised pnl_r/pnl_usd,
-    # the held duration, and whether it was a win. Pairs with the EXIT-TRIGGER
-    # reason INFO in run_precise_exit (correlate on trade_id=position_id). The
-    # "filled" + "close" keywords surface it on the dashboard board.js pane.
-    # Log only — the close already committed above; this changes no behaviour.
-    held_seconds = max(0, now_ts - getattr(trade, "open_ts", now_ts))
-    logger.info(
-        "[close] closed %s:%s trade_id=%s filled exit_price=%.6g size_usd=%.2f "
-        "pnl_r=%.2f pnl_usd=%.2f held=%ds won=%s mode=%s",
-        trade.venue, trade.symbol, trade.position_id or "-",
-        exit_price, close_fill.size_usd, pnl_r, pnl_usd, held_seconds,
-        pnl_r > 0.0, "real" if real_roundtrip else "sim",
-    )
-
-    # Day 8 codex R5 P2 fix: every post-commit auxiliary step is wrapped so a
-    # downstream failure cannot drop the rest of the fan-out. ``record_fault``
-    # itself can raise (it writes to ``strategy_fault_events`` and reads from
-    # ``strategy_halts``); ``_safe_record_fault`` swallows that with a log.
-    #
     # REAL-FEE CANONICAL (FIX 1): compute the real-fee NET R/USD ONCE here (reads
     # the per-fill REAL fees.fee_usd for both legs, leg-once) and feed the SAME net
     # to the cell matrix, the Layer-5 learners, the meta-label, the posterior AND
@@ -866,11 +846,36 @@ async def _close_trade_with_real_pnl(
     # sign. fills.pnl_usd (GROSS) + fills.fee_usd (REAL) stay the single truth
     # (#46); net is an in-memory derivation. Degenerate atr_usd → net==gross
     # (no blow-up). Measurement/learning only — never read by sizing, the 9-stack
-    # ban + -1.0R rail are untouched. Fail-open inside compute_net_pnl_r.
+    # ban + -1.0R rail are untouched. Fail-open inside compute_net_pnl_r. Computed
+    # before the close INFO log so the logged ``won`` matches the net verdict the
+    # cell/learners/posterior fold (the log otherwise reported the gross sign).
     _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
         conn, trade=trade, gross_pnl_r=pnl_r, gross_pnl_usd=pnl_usd,
     )
     won = pnl_r_net > 0.0
+
+    # Successful close (INFO): the realised-close 거동 record Jin asked for —
+    # the venue/ticker, the close fill price + size, the realised pnl_r/pnl_usd,
+    # the held duration, and whether it was a win. ``won`` is the real-fee NET
+    # sign (== the cell/learner/posterior verdict), not the fee-free gross sign;
+    # pnl_r/pnl_usd stay the realised GROSS price-drift values. Pairs with the
+    # EXIT-TRIGGER reason INFO in run_precise_exit (correlate on
+    # trade_id=position_id). The "filled" + "close" keywords surface it on the
+    # dashboard board.js pane. Log only — the close already committed above; this
+    # changes no behaviour.
+    held_seconds = max(0, now_ts - getattr(trade, "open_ts", now_ts))
+    logger.info(
+        "[close] closed %s:%s trade_id=%s filled exit_price=%.6g size_usd=%.2f "
+        "pnl_r=%.2f pnl_usd=%.2f held=%ds won=%s mode=%s",
+        trade.venue, trade.symbol, trade.position_id or "-",
+        exit_price, close_fill.size_usd, pnl_r, pnl_usd, held_seconds,
+        won, "real" if real_roundtrip else "sim",
+    )
+
+    # Day 8 codex R5 P2 fix: every post-commit auxiliary step is wrapped so a
+    # downstream failure cannot drop the rest of the fan-out. ``record_fault``
+    # itself can raise (it writes to ``strategy_fault_events`` and reads from
+    # ``strategy_halts``); ``_safe_record_fault`` swallows that with a log.
     regime = _safe_lookup_regime(lookup_regime, conn, trade)
     # P3 self-evolve lineage (read-model, behaviour 0): stamp exit_ts /
     # exit_reason / realised pnl onto the open lineage segment. Post-commit +

@@ -140,6 +140,10 @@ def test_strategy_metadata_timeframe_used() -> None:
         "index_dual_momentum_rotation": "1D",
         "equity_52wk_high_breakout": "1D",
         "equity_vol_expansion_pocket_pivot": "1D",
+        # weekend-maker dispatch fix — the two VALIDATED weekend OKX makers (#77
+        # thin-book flush + #80 funding capitulation), both OKX SPOT 1H.
+        "weekend_thin_book_flush_maker": "1H",
+        "weekend_funding_capitulation_maker": "1H",
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

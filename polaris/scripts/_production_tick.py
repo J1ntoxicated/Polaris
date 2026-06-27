@@ -88,6 +88,8 @@ from polaris.strategies import (
     RSIBBPullbackStrategy,
     SessionBreakoutStrategy,
     TSMom12_1MultiAssetStrategy,
+    WeekendFundingCapitulationMakerStrategy,
+    WeekendThinBookFlushMakerStrategy,
     XAUIndicesTrendStrategy,
 )
 from polaris.strategies.gold_trend_chandelier_1d import (
@@ -355,6 +357,19 @@ def _all_strategies() -> list[BaseStrategy]:
         FXBreakoutBasketStrategy(),
         XAUIndicesTrendStrategy(),
         SessionBreakoutStrategy(),
+        # weekend OKX makers — the two VALIDATED weekend edges (#77 thin-book
+        # flush +73 bps real-fee, #80 funding capitulation +0.83R shadow-first).
+        # Both are OKX SPOT 1H, weekend-gated (Sat/Sun UTC), kept on the bar path by
+        # ``keep_on_bar_path`` (crypto/spot). They were in STRATEGY_REGISTRY but
+        # MISSING here → ``generate_raw_signal`` was never invoked (silent INERT,
+        # feedback_verify_firing_after_build "등록 ≠ 발화"). Adding them restores
+        # dispatch; the shadow / maker-economics layer (maker_no_fill_cancel +
+        # REVERSION post-only entry mode) is keyed off the registry + metadata
+        # DOWNSTREAM of the emit, so it activates automatically — no extra wiring.
+        # (The registered-but-unvalidated supertrend / connors_rsi2 / cci_reversion
+        # stay OUT of dispatch — no OOS/fee evidence, unvalidated live = churn.)
+        WeekendThinBookFlushMakerStrategy(),
+        WeekendFundingCapitulationMakerStrategy(),
         # strategy-wave2 — Capital CFD GOLD/index (5, deploy live).
         GoldTrendChandelier1DStrategy(),
         GoldRiskoffTrendAmplifyStrategy(),

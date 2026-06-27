@@ -53,6 +53,7 @@ from polaris.storage.schema_ddl_core import (
     DDL_TICKER_BASELINE_INDEX_GROUP,
     DDL_TICKER_BASELINE_SAMPLES,
     DDL_TICKER_BASELINE_STATE,
+    DDL_TICKER_TECHNICALS,
     DDL_UNIVERSE,
     DDL_UNIVERSE_INDEX_ACTIVE,
     DDL_UNIVERSE_INDEX_GROUP,
@@ -129,6 +130,8 @@ ALL_DDL: tuple[str, ...] = (
     DDL_TICKER_BASELINE_INDEX_GROUP,
     DDL_TICKER_BASELINE_INDEX_CLASS,
     DDL_TICKER_BASELINE_SAMPLES,
+    # ④ #12 technical store — write-after-compute LWW indicator persistence.
+    DDL_TICKER_TECHNICALS,
     DDL_MARKET_EVENTS,
     DDL_SIGNALS,
     # Layer 4 — Cell Matrix

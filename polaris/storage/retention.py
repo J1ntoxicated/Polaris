@@ -45,25 +45,47 @@ _DAY = 86_400
 
 @dataclass(frozen=True)
 class RetentionRule:
-    """One prunable stream: delete rows whose ``ts_column`` < now - retain_sec."""
+    """One prunable stream: delete rows whose ``ts_column`` < now - retain_sec.
+
+    ``bar_interval`` (NIT-A, 2026-06-27): when set, the DELETE is additionally
+    scoped to ``AND bar_interval = ?`` so the SAME allowlisted table (``bars``)
+    can carry a DIFFERENT window per interval — the dense intraday streams
+    (1m/5m/15m) prune short while the deep 1D/4H canvas keeps its long backfill
+    window. ``None`` = the whole table (the pre-NIT behaviour, unchanged for every
+    non-``bars`` rule). The allowlist guard is on ``(table, ts_column)`` only;
+    ``bar_interval`` is a pure value filter that can only NARROW a delete already
+    proven safe, never widen it to another table.
+    """
 
     table: str
     ts_column: str
     retain_sec: int
     note: str
+    bar_interval: str | None = None
 
 
 # --- The frozen prune allowlist. ANY table absent here is UNTOUCHABLE. --------
 #
 # Windows derive from the live consumer code, NOT guesses:
 #
-# * bars — deepest read is the Alpaca 1D canvas lookback
-#   (``_production_bars._ALPACA_LOOKBACK_DAYS["1D"] = 330``) plus the equity
-#   MA200 (~205-bar) warmup. 400d covers 330d + warmup + weekend/session gaps
-#   with margin. Intraday intervals (1m/5m/15m/1H) need far less, so a single
-#   400d ts cutoff keeps every interval's decision window intact. The
-#   counterfactual sweep reads 1m bars only at decision_ts+24h (+3d grace) —
-#   ~4d old, deep inside 400d. SIGNAL LOOKBACK FULLY PRESERVED.
+# * bars — PER-INTERVAL windows (NIT-A, 2026-06-27). The deep ③ 1D/4H backfill
+#   needs a multi-year window, but the dense intraday streams (1m/5m/15m) are the
+#   disk-growth driver and need only a few days of decision lookback — a single
+#   1200d cutoff over the WHOLE table would retain ~3.3y of 1m rows (Jin's disk
+#   concern). Each interval's window = its consumer lookback
+#   (``_production_bars._ALPACA_LOOKBACK_DAYS``: 1D=330, 1H=45, 15m=8, 5m=4, 1m=2)
+#   + margin for the counterfactual sweep (reads 1m at decision_ts+24h +3d grace
+#   ≈ 4d old) and weekend/session gaps. SIGNAL LOOKBACK FULLY PRESERVED:
+#     - 1m/5m/15m → 30d (≫ the ≤8d read + ~4d CF sweep; bounds the dense streams);
+#     - 1H        → 90d (≫ the 45d read);
+#     - 1D / 4H   → 1200d (~3.3y): the deep one-shot OKX /history-candles backfill
+#       (the daily/4H swing canvas for future learning / indicator depth) is NOT
+#       pruned; OKX caps daily depth at ~2-3y so 1200d keeps the full available
+#       history. These two are low-row-count (≤1200 daily/4H rows per instrument)
+#       so the long window costs little disk vs the 1m stream now bounded at 30d.
+#   Over-retention stays the SAFE direction (never below a decision's need); a bar
+#   in an interval NOT listed here is retained by the catch-all ``bars`` rule
+#   (1200d, whole-table) so a new interval can never be silently over-pruned.
 #
 # * quote_ticks — NOT pruned. The tick-stream decouple
 #   (vault/50_research/debates/tick_stream_decouple_2026-06-24.md) collapsed it to
@@ -85,8 +107,26 @@ class RetentionRule:
 #   (positions/fills) is independent and untouched, so pruning past 30d only
 #   drops a join-convenience field on month-old analysis rows.
 RETENTION_SPEC: tuple[RetentionRule, ...] = (
-    RetentionRule("bars", "ts", 400 * _DAY,
-                  "1D lookback 330d + MA200 warmup + gap margin"),
+    # bars — PER-INTERVAL (NIT-A): dense intraday short, deep 1D/4H canvas long.
+    RetentionRule("bars", "ts", 30 * _DAY,
+                  "1m intraday: 2d read + ~4d CF sweep + margin", bar_interval="1m"),
+    RetentionRule("bars", "ts", 30 * _DAY,
+                  "5m intraday: 4d read + margin", bar_interval="5m"),
+    RetentionRule("bars", "ts", 30 * _DAY,
+                  "15m intraday: 8d read + margin", bar_interval="15m"),
+    RetentionRule("bars", "ts", 90 * _DAY,
+                  "1H: 45d read + margin", bar_interval="1H"),
+    RetentionRule("bars", "ts", 1200 * _DAY,
+                  "4H swing canvas: deep ③ OKX-native backfill (~3.3y)",
+                  bar_interval="4H"),
+    RetentionRule("bars", "ts", 1200 * _DAY,
+                  "1D canvas: 330d + MA200 warmup + deep ③ backfill (~3.3y)",
+                  bar_interval="1D"),
+    # Catch-all: any interval NOT enumerated above keeps the deep 1200d window
+    # (never silently over-pruned). bar_interval=None → whole-table; idempotent
+    # against the per-interval deletes already applied this pass.
+    RetentionRule("bars", "ts", 1200 * _DAY,
+                  "catch-all for any unenumerated interval (~3.3y, safe default)"),
     # quote_ticks intentionally absent — single-row LWW table, bounded, never pruned.
     RetentionRule("ticker_baseline_samples", "ts", 35 * _DAY,
                   "baseline window 30d (pnl_std) + margin"),
@@ -135,6 +175,7 @@ def prune_table(
     *,
     now_ts: int,
     allowed: dict[str, str] | None = None,
+    bar_interval: str | None = None,
 ) -> int:
     """Delete rows older than the retention window. Returns rows deleted.
 
@@ -143,6 +184,11 @@ def prune_table(
     guarantee that no ledger/state table can ever be deleted through here. The
     ``allowed`` map defaults to the live-DB ``_ALLOWED``; the probe path passes
     ``_PROBE_ALLOWED`` so the two DBs can never cross-prune each other's tables.
+
+    ``bar_interval`` (NIT-A): when set, the DELETE is additionally scoped to
+    ``AND bar_interval = ?`` (a BOUND parameter, never an f-string), so the same
+    allowlisted ``bars`` table can carry a per-interval window. It can only NARROW
+    a delete the allowlist already proved safe — it never reaches another table.
     """
     allow = _ALLOWED if allowed is None else allowed
     allowed_col = allow.get(table)
@@ -155,11 +201,13 @@ def prune_table(
         raise ValueError(f"retain_sec must be positive, got {retain_sec}")
     cutoff = int(now_ts) - int(retain_sec)
     # table/column are allowlist-validated literals (never user input) → the
-    # f-string identifiers are safe; the cutoff is a bound parameter.
-    cur = conn.execute(
-        f"DELETE FROM {table} WHERE {ts_column} < ?",  # noqa: S608 (validated)
-        (cutoff,),
-    )
+    # f-string identifiers are safe; the cutoff + bar_interval are bound parameters.
+    sql = f"DELETE FROM {table} WHERE {ts_column} < ?"  # noqa: S608 (validated)
+    params: tuple[object, ...] = (cutoff,)
+    if bar_interval is not None:
+        sql += " AND bar_interval = ?"
+        params = (cutoff, bar_interval)
+    cur = conn.execute(sql, params)
     return int(cur.rowcount or 0)
 
 
@@ -176,9 +224,15 @@ def run_retention(
     now = int(time.time()) if now_ts is None else int(now_ts)
     deleted: dict[str, int] = {}
     for rule in RETENTION_SPEC:
-        deleted[rule.table] = prune_table(
-            conn, rule.table, rule.ts_column, rule.retain_sec, now_ts=now
+        rows = prune_table(
+            conn, rule.table, rule.ts_column, rule.retain_sec, now_ts=now,
+            bar_interval=rule.bar_interval,
         )
+        # Several rules can target the SAME table (bars per-interval, NIT-A) →
+        # ACCUMULATE so the report total is the table's full delete count, not the
+        # last rule's. The whole-table catch-all runs last; its rows are the
+        # already-pruned-elsewhere remainder (0 for enumerated intervals).
+        deleted[rule.table] = deleted.get(rule.table, 0) + rows
     conn.commit()
     return deleted
 

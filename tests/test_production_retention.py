@@ -30,12 +30,14 @@ NOW = 1_782_000_000
 def _seed_live(db_path: Path) -> None:
     conn = init_db(db_path)
     try:
-        # Old bar (outside 400d) → pruned; recent bar kept.
-        for ts in (NOW - 500 * 86_400, NOW):
+        # Old 1m bar (outside the NIT-A 30d intraday window) → pruned; recent kept.
+        # 1m (not 1D): the deep 1D/4H canvas now keeps a 1200d window, so only the
+        # dense intraday streams prune on this timescale.
+        for ts in (NOW - 40 * 86_400, NOW):
             conn.execute(
                 "INSERT INTO bars (instrument_id, underlying_group_id, venue, "
                 "symbol, bar_interval, ts, open, high, low, close, volume) "
-                "VALUES ('I','G','okx','BTC-USDT','1D',?,1,1,1,1,1)",
+                "VALUES ('I','G','okx','BTC-USDT','1m',?,1,1,1,1,1)",
                 (ts,),
             )
         # Ledger rows with ANCIENT ts — must survive (allowlist protection).

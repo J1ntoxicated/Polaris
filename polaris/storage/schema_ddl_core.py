@@ -176,6 +176,26 @@ CREATE TABLE IF NOT EXISTS ticker_baseline_samples (
 );
 """
 
+# ④ #12 technical store (2026-06-27). SINGLE-ROW last-write-wins per
+# (instrument_id, bar_interval, indicator): the rich indicator set already
+# computed by build_real_market_view is PERSISTED here (write-after-compute) so
+# the AI judge / probes can read RSI/ADX/BB/Donchian/EMA/momentum as evidence
+# (previously only the 3-metric atr/size/volume baseline reached the judge). LWW
+# PK bounds the table (instruments × intervals × indicators), so it can never grow
+# unbounded — no retention rule needed. ``computed_ts`` + ``source_bar_ts`` carry
+# the value's currency (evidence-currency #68/#69). EVIDENCE-ONLY, flow_not_block.
+DDL_TICKER_TECHNICALS = """
+CREATE TABLE IF NOT EXISTS ticker_technicals (
+    instrument_id TEXT NOT NULL,
+    bar_interval TEXT NOT NULL,
+    indicator TEXT NOT NULL,
+    value REAL NOT NULL,
+    computed_ts INTEGER NOT NULL,
+    source_bar_ts INTEGER NOT NULL,
+    PRIMARY KEY (instrument_id, bar_interval, indicator)
+);
+"""
+
 DDL_MARKET_EVENTS = """
 CREATE TABLE IF NOT EXISTS market_events (
     ts INTEGER NOT NULL,

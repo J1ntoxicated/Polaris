@@ -39,6 +39,10 @@ from polaris.core.pipeline.agents._gpt_client import (
     call_gpt,
     make_system_prefix,
 )
+from polaris.scripts._okx_native_routing import (
+    build_okx_native_preferred,
+    okx_symbol_base_quote,
+)
 from polaris.scripts._yahoo_frame import _yahoo_df_to_bars  # re-export (≤500 LOC split)
 
 logger = logging.getLogger(__name__)
@@ -137,6 +141,38 @@ _OKX_YAHOO_VERIFIED_BASES: frozenset[str] = frozenset({
     "RENDER", "TIA", "SEI", "BNB",
 })
 
+# ① OKX-NATIVE source-routing — the ordered-major / env-cap machinery lives in
+# ``_okx_native_routing`` (≤500 LOC split). Here we keep only the live-resolved
+# preferred SET (rebuilt from the env via ``build_okx_native_preferred`` against
+# THIS module's verified-base set) plus the two thin accessors the bar pipeline
+# uses. flow_not_block + #21 guard: see that module's docstring.
+_OKX_NATIVE_PREFERRED: frozenset[str] = build_okx_native_preferred(
+    _OKX_YAHOO_VERIFIED_BASES
+)
+
+
+def _refresh_okx_native_preferred() -> None:
+    """Re-read the env cap and rebuild the preferred set (test / ops hook)."""
+    global _OKX_NATIVE_PREFERRED
+    _OKX_NATIVE_PREFERRED = build_okx_native_preferred(_OKX_YAHOO_VERIFIED_BASES)
+
+
+def okx_native_preferred_bases() -> frozenset[str]:
+    """The current OKX-native-preferred base set (read-only accessor)."""
+    return _OKX_NATIVE_PREFERRED
+
+
+def is_okx_native_preferred(symbol: str) -> bool:
+    """True when an OKX symbol's base is in the native-preferred set.
+
+    Uses the same parse as ``map_to_yahoo_ticker``'s OKX branch so the routing
+    decision and the cooldown-bypass decision can never disagree. A non-USD quote /
+    unparseable symbol → False (unchanged routing). Pure / no I/O.
+    """
+    base, quote = okx_symbol_base_quote(symbol)
+    return quote in ("USDT", "USDC", "USD") and base in _OKX_NATIVE_PREFERRED
+
+
 _FOREX_CLEAN6 = re.compile(r"^[A-Z]{6}$")
 _HK_NUMERIC = re.compile(r"^\d{1,5}$")
 # A plausible Yahoo ticker from the GPT fallback: alnum + the symbol chars Yahoo
@@ -183,6 +219,13 @@ def map_to_yahoo_ticker(venue: str, symbol: str, asset_class: str) -> str | None
         else:
             return None
         if not base:
+            return None
+        # ① OKX-NATIVE routing: a top-N major returns None so the exchange
+        # fallback supplies its OWN fresher candles (instead of Yahoo's集計지연
+        # BASE-USD). The fallback for a preferred symbol BYPASSES the 300s cooldown
+        # in ``fetch_bars_one`` (see ``is_okx_native_preferred``) so this is a
+        # freshness GAIN, never the 5-min-stale starvation a naive None would cause.
+        if quote in ("USDT", "USDC", "USD") and base in _OKX_NATIVE_PREFERRED:
             return None
         if quote in ("USDT", "USDC", "USD") and base in _OKX_YAHOO_VERIFIED_BASES:
             return f"{base}-USD"

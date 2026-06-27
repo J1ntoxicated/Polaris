@@ -141,10 +141,15 @@ def test_quote_ticks_not_in_retention_spec() -> None:
 
 
 def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
-    for rule in RETENTION_SPEC:
+    # The non-bars rules are 1:1 with a table; bars is now PER-INTERVAL (NIT-A),
+    # so each bars rule must seed with ITS interval (a 1m row never matches the
+    # 4H rule). The catch-all bars rule (bar_interval=None) is the whole-table
+    # safety net — exercised separately by test_bars_unenumerated_interval below.
+    non_bars = [r for r in RETENTION_SPEC if r.table != "bars"]
+    bars_rules = [r for r in RETENTION_SPEC if r.table == "bars" and r.bar_interval]
+    for rule in non_bars:
         cutoff = NOW - rule.retain_sec
         inserter = {
-            "bars": _insert_bar,
             "ticker_baseline_samples": _insert_baseline_sample,
             "watchlist_focus": _insert_focus,
             "gate_events": _insert_gate_event,
@@ -153,11 +158,18 @@ def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
         inserter(db, cutoff)       # exactly at cutoff -> kept (< is the test)
         inserter(db, cutoff + 1)   # newer -> kept
         inserter(db, NOW)          # now -> kept
+    for rule in bars_rules:
+        cutoff = NOW - rule.retain_sec
+        assert rule.bar_interval is not None  # narrowed for mypy
+        _insert_bar(db, cutoff - 1, interval=rule.bar_interval)  # older -> deleted
+        _insert_bar(db, cutoff, interval=rule.bar_interval)      # at cutoff -> kept
+        _insert_bar(db, cutoff + 1, interval=rule.bar_interval)  # newer -> kept
+        _insert_bar(db, NOW, interval=rule.bar_interval)         # now -> kept
     db.commit()
 
     deleted = run_retention(db, now_ts=NOW)
 
-    for rule in RETENTION_SPEC:
+    for rule in non_bars:
         cutoff = NOW - rule.retain_sec
         assert deleted[rule.table] == 1, f"{rule.table}: exactly one old row"
         rows = [
@@ -169,9 +181,55 @@ def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
         assert cutoff - 1 not in rows, f"{rule.table}: old row gone"
         assert sorted(rows) == [cutoff, cutoff + 1, NOW], f"{rule.table}: in-window kept"
 
+    # bars: each interval dropped exactly its one out-of-window row → the
+    # accumulated count is one per enumerated interval.
+    assert deleted["bars"] == len(bars_rules), "bars: one old row per interval"
+    for rule in bars_rules:
+        cutoff = NOW - rule.retain_sec
+        rows = sorted(
+            r[0] for r in db.execute(
+                "SELECT ts FROM bars WHERE bar_interval = ?", (rule.bar_interval,)
+            ).fetchall()
+        )
+        assert rows == [cutoff, cutoff + 1, NOW], f"bars/{rule.bar_interval}: kept window"
+
+
+def test_bars_unenumerated_interval_uses_catchall(db: sqlite3.Connection) -> None:
+    """NIT-A safety net: a bar in an interval NOT enumerated per-interval is held
+    by the whole-table catch-all (1200d), never silently over-pruned by a short
+    intraday window. A 100d-old '30m' bar (no per-interval rule) survives; a
+    1300d-old one (outside the catch-all) is pruned."""
+    _insert_bar(db, NOW - 100 * 86_400, interval="30m")   # inside 1200d catch-all
+    _insert_bar(db, NOW - 1300 * 86_400, interval="30m")  # outside catch-all
+    db.commit()
+    run_retention(db, now_ts=NOW)
+    kept = sorted(
+        r[0] for r in db.execute(
+            "SELECT ts FROM bars WHERE bar_interval = '30m'"
+        ).fetchall()
+    )
+    assert kept == [NOW - 100 * 86_400], "catch-all keeps 100d, prunes 1300d"
+
+
+def test_bars_intraday_short_window_prunes_dense_stream(db: sqlite3.Connection) -> None:
+    """NIT-A core: a 1m bar past the 30d intraday window is pruned even though a
+    1D bar at the SAME age is kept (the dense intraday stream is the disk driver;
+    the deep 1D canvas is preserved). Directly guards Jin's disk-growth concern."""
+    age = NOW - 40 * 86_400  # 40d: past 1m's 30d window, inside 1D's 1200d window
+    _insert_bar(db, age, interval="1m")
+    _insert_bar(db, age, interval="1D")
+    db.commit()
+    run_retention(db, now_ts=NOW)
+    assert db.execute(
+        "SELECT COUNT(*) FROM bars WHERE bar_interval = '1m'"
+    ).fetchone()[0] == 0, "1m intraday pruned at 40d (>30d)"
+    assert db.execute(
+        "SELECT COUNT(*) FROM bars WHERE bar_interval = '1D'"
+    ).fetchone()[0] == 1, "1D canvas kept at 40d (≪1200d)"
+
 
 def test_idempotent_second_run_deletes_zero(db: sqlite3.Connection) -> None:
-    _insert_bar(db, NOW - 500 * 86_400)         # outside 400d
+    _insert_bar(db, NOW - 1300 * 86_400)        # outside the 1200d bars window
     _insert_gate_event(db, NOW - 40 * 86_400)   # outside 30d
     db.commit()
 
@@ -235,7 +293,7 @@ def test_checkpoint_wal_shrinks_wal(tmp_path: Path) -> None:
 def test_run_retention_job_end_to_end(tmp_path: Path) -> None:
     db_path = tmp_path / "job.sqlite"
     conn = init_db(db_path)
-    _insert_bar(conn, NOW - 500 * 86_400)
+    _insert_bar(conn, NOW - 1300 * 86_400)  # outside the 1200d bars window
     _insert_bar(conn, NOW)
     conn.commit()
     conn.close()
@@ -263,8 +321,8 @@ def test_run_retention_live_prunes_and_keeps_ledger(db: sqlite3.Connection) -> N
     live path does NOT run the reclaiming WAL checkpoint (the loop's PASSIVE
     producer owns that), so it never contends the writer lock.
     """
-    _insert_bar(db, NOW - 500 * 86_400)  # outside 400d -> deleted
-    _insert_bar(db, NOW)                  # kept
+    _insert_bar(db, NOW - 40 * 86_400, interval="1m")  # outside 30d 1m -> deleted
+    _insert_bar(db, NOW, interval="1m")                # kept
     db.execute(
         "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
         "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts) "

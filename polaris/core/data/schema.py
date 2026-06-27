@@ -17,7 +17,14 @@ ALLOWED_METRICS: Final[frozenset[str]] = frozenset(
 
 # Allowed bar intervals for the `bars` table. ``1D`` carries the equity
 # (Alpaca) daily canvas — the three equity strategies are all ``timeframe=1D``.
-BAR_INTERVALS: Final[frozenset[str]] = frozenset({"1m", "5m", "15m", "1H", "1D"})
+# ``4H`` (added 2026-06-27) is the OKX-native swing canvas: yfinance has no 4h
+# token, so 4H rides the exchange-fallback path (OKX ``bar=4H``, UTC+8 boundary)
+# and never collides with the Yahoo-PRIMARY intraday/daily routing. ADDITIVE: a
+# frozenset membership add leaves every existing interval's convert/persist/read
+# path byte-identical (no key removed; strategy regression 0).
+BAR_INTERVALS: Final[frozenset[str]] = frozenset(
+    {"1m", "5m", "15m", "1H", "4H", "1D"}
+)
 
 # Cold-start neutral ratio (Q4 of L1 spec).
 COLD_START_NEUTRAL: Final[float] = 1.0

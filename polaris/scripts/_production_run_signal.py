@@ -14,6 +14,7 @@ import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.data.technical_store import technicals_summary
 from polaris.core.pipeline import (
     GateOrchestrator,
     build_exit_payload,
@@ -244,6 +245,18 @@ async def run_pipeline_for_signal(
             # gate can score staleness (missing → treated as NOT fresh, fail-safe).
             "updated_ts": ground_row["updated_ts"],
         }
+    # ④ #12 — stamp the FULL technical set (rsi/adx/bb/donchian/ema/momentum) the
+    # tick loop just persisted via the technical store so the per-ticker AI JUDGE
+    # sees the rich indicators, not only the 3-metric atr/size/volume baseline.
+    # REUSES the already-computed/stored values (write-after-compute) — no recompute
+    # on the hot path, no network. ``source_bar_ts`` rides along as the currency
+    # stamp. Absent (not yet stored) → key not stamped → judge renders nothing.
+    # EVIDENCE only: no gate branches on it (only the judge reads it). flow_not_block.
+    technicals = technicals_summary(
+        conn, instrument_id=instrument_id, bar_interval=strategy.metadata.timeframe
+    )
+    if technicals:
+        payload["technicals"] = technicals
     # Gate architecture Phase 0 (Option A): resolve the per-stream seam ONCE and
     # thread it through every GateContext. P0 = structural enabler only — no gate
     # reads it for a decision yet, so A/B/C stay byte-identical (P1+ enriches it).

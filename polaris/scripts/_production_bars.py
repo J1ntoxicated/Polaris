@@ -27,6 +27,7 @@ from polaris.scripts._production_asset_class import resolve_bar_asset_class
 from polaris.scripts._session_map import equity_fetch_active
 from polaris.scripts._yahoo_bars import (
     fetch_yahoo_bars,
+    is_okx_native_preferred,
     should_fetch_exchange_fallback,
 )
 from polaris.venues.capital.adapter import fetch_capital_bars
@@ -80,6 +81,7 @@ _BAR_STALENESS_BY_INTERVAL: dict[str, float] = {
     "5m": 60 * 60.0,
     "15m": 120 * 60.0,
     "1H": 6 * 3600.0,
+    "4H": 8 * 3600.0,     # 4h cadence → 8h silence = dead (generous 2x cadence)
     "1D": float(BAR_STALENESS_MAX_SEC),  # 36h — covers a normal weekend gap
 }
 
@@ -116,6 +118,11 @@ _PERIOD_SECONDS_BY_INTERVAL: dict[str, int] = {
     "5m": 5 * 60,
     "15m": 15 * 60,
     "1H": 3600,
+    # 4H period = 14400s. NB: the UTC floor here does NOT line up with OKX's
+    # UTC+8 4H boundary, so 4H is NOT placed in any ``skip_if_current`` set —
+    # the period is mapped only so ``current_period_open_ts`` returns a sane
+    # floor (never the now-fallback) for incremental-window bookkeeping.
+    "4H": 4 * 3600,
 }
 
 
@@ -160,6 +167,7 @@ CAPITAL_RESOLUTION_BY_INTERVAL: dict[str, str] = {
     "5m": "MINUTE_5",
     "15m": "MINUTE_15",
     "1H": "HOUR",
+    "4H": "HOUR_4",  # canonical-interval coverage; 4H is OKX-only (crypto swing).
     "1D": "DAY",  # canonical-interval coverage; Capital never routes 1D (alpaca-only).
 }
 
@@ -175,12 +183,17 @@ ALPACA_TIMEFRAME_BY_INTERVAL: dict[str, str] = {
 }
 
 # Per-timeframe fetch cadence — bars only need to be re-pulled when a fresh
-# candle is likely to have closed. Honours BAR_INTERVALS = {1m, 5m, 15m, 1H, 1D}.
+# candle is likely to have closed. Honours BAR_INTERVALS = {1m,5m,15m,1H,4H,1D}.
+# 🚨 4H MUST be explicit here: without it the ``.get(tf, 5.0)`` fallback would
+# re-fetch 4H every 5s (≈ 31 req/s across the OKX focus list) = the #21 candles
+# "Too Many" storm + the #74 tick-engine STALL. A 4H bar closes once / 4h, so an
+# hourly re-pull is already generous; this single entry is the storm guard.
 TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
     "1m": 5.0,    # every tick
     "5m": 30.0,
     "15m": 60.0,
     "1H": 300.0,
+    "4H": 3600.0,  # 4H closes once/4h — hourly re-pull is ample (storm guard).
     "1D": 3600.0,  # daily bars close once/day — hourly re-pull is ample.
 }
 
@@ -439,7 +452,17 @@ async def fetch_bars_one(
         return yahoo_bars  # already newest-last; no reversal needed.
     # Yahoo had nothing → exchange FALLBACK, throttled per (venue, symbol) so the
     # unmapped tail cannot recreate a REST storm (fetch-efficiency, not a block).
-    if not should_fetch_exchange_fallback(venue, symbol, time.monotonic()):
+    #
+    # ① OKX-NATIVE preferred BYPASS (🚨 freshness-regression trap): a top-N major is
+    # INTENTIONALLY routed OKX-native (map_to_yahoo_ticker → None), so it must NOT be
+    # held by the 300s unmapped-tail cooldown — that would starve BTC 1m to a 5-min
+    # refetch (the精밀도↑ intent flipping to신선도↓). The cooldown exists to stop the
+    # genuinely-UNMAPPED tail from re-storming the exchange; a preferred symbol is
+    # the deliberate native path, and the OKX candles bucket already guards the
+    # storm, so the cooldown is bypassed for it. Non-preferred symbols keep it.
+    if not (
+        venue == "okx" and is_okx_native_preferred(symbol)
+    ) and not should_fetch_exchange_fallback(venue, symbol, time.monotonic()):
         return []
     if venue == "okx":
         try:

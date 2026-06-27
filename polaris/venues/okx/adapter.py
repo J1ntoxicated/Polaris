@@ -69,12 +69,18 @@ __all__ = [
     "OKXAdapter",
     "OKXAlgoOrderResponse",
     "OKXOrderResponse",
+    "OKX_HISTORY_CANDLES_PATH",
     "fetch_okx_bars",
+    "fetch_okx_history_bars",
     "sanitize_clordid",
 ]
 
 OKX_BASE_DEMO: Final[str] = "https://us.okx.com"
 OKX_CANDLES_PATH: Final[str] = "/api/v5/market/candles"
+# ③ deep backfill — ``/candles`` only serves the NEWEST N (no paging);
+# ``/history-candles`` is the paginated deep-history endpoint walked backward by
+# the ``after`` (older-than) cursor.
+OKX_HISTORY_CANDLES_PATH: Final[str] = "/api/v5/market/history-candles"
 OKX_TICKER_PATH: Final[str] = "/api/v5/market/ticker"
 OKX_PLACE_ORDER_PATH: Final[str] = "/api/v5/trade/order"
 OKX_CANCEL_ORDER_PATH: Final[str] = "/api/v5/trade/cancel-order"
@@ -88,33 +94,39 @@ DEMO_HEADERS: Final[dict[str, str]] = {"x-simulated-trading": "1"}
 REST_TIMEOUT_SEC: Final[float] = 15.0
 DEFAULT_SLIPPAGE_BPS: Final[float] = 5.0  # 0.05 %, R2 aggressive cap
 
-# #12 — absorb transient OKX order-placement outages (5xx / timeout). AGGRESSIVE:
-# a momentary venue/network blip should not drop a trade. Retries are bounded
-# and idempotent (clOrdId state-check before each retry → never double-submit).
-ORDER_RETRY_MAX: Final[int] = 2  # extra attempts after the initial POST
-ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
-
-# Candles ("Too Many" storm root-cause fix). OKX market-data is capped at
-# 20 req / 2 s per IP; the yfinance-PRIMARY exchange-fallback fan-out used to
-# exceed that with no client-side pacing, producing the live 18k× 429 storm.
-# A module-level token bucket PACES every candles GET to stay under the cap
-# (flow_not_block: the call WAITS for a token, it is never rejected — the live
-# entry/size/exit price rides the WS quote path, untouched). A residual 429 is
+# Candles ("Too Many" storm root-cause fix + ③ #21 deep-backfill storm guard).
+# OKX market-data is capped at 20 req / 2 s per IP; the yfinance-PRIMARY exchange-
+# fallback fan-out used to exceed that with no client-side pacing, producing the
+# live 18k× 429 storm. A module-level token bucket PACES every candles GET to stay
+# under the cap (flow_not_block: the call WAITS for a token, never rejected — the
+# live entry/size/exit price rides the WS quote path, untouched). A residual 429 is
 # then absorbed by a bounded backoff (honouring Retry-After) so the bar still
-# flows. The bucket is shared per-process: every fetch_okx_bars call paces
-# through the SAME limiter, so the concurrent gather cannot burst past the cap.
+# flows. The bucket is shared per-process (a single instance): every fetch_okx_bars
+# AND the deep /history-candles backfill paces through the SAME limiter, so the
+# concurrent gather (or the one-shot deep walk) cannot burst past the cap.
 CANDLES_RATE: Final[int] = 20  # tokens per CANDLES_PER_SEC window
-CANDLES_PER_SEC: Final[float] = 2.0  # OKX market-data window
+CANDLES_PER_SEC: Final[float] = 2.0  # OKX market-data window → 10 req/s sustained
 CANDLES_RETRY_MAX: Final[int] = 3  # extra attempts after a 429
 CANDLES_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s, 2.0s
 _CANDLES_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
+# History-backfill page parameters (③): max rows / page on /history-candles, and
+# the inter-page pause that keeps the one-shot deep walk comfortably under the cap.
+HISTORY_CANDLES_PAGE_LIMIT: Final[int] = 100
+HISTORY_PAGE_PAUSE_SEC: Final[float] = 1.5
 # Bound the in-bucket pacing wait so a fully drained bucket cannot stall a
-# bar-ingest coroutine indefinitely (defers to the next cadence instead).
+# bar-ingest coroutine (or a backfill page) indefinitely; on a timeout the call
+# proceeds token-less (SOFT cap, flow_not_block) rather than dropping the bar.
 CANDLES_ACQUIRE_TIMEOUT_SEC: Final[float] = 5.0
 
 _CANDLES_BUCKET: AsyncTokenBucket = AsyncTokenBucket(
     rate=CANDLES_RATE, per_sec=CANDLES_PER_SEC
 )
+
+# #12 — absorb transient OKX order-placement outages (5xx / timeout). AGGRESSIVE:
+# a momentary venue/network blip should not drop a trade. Retries are bounded
+# and idempotent (clOrdId state-check before each retry → never double-submit).
+ORDER_RETRY_MAX: Final[int] = 2  # extra attempts after the initial POST
+ORDER_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s
 
 
 def _candles_retry_after_sec(resp: httpx.Response, fallback: float) -> float:
@@ -244,6 +256,95 @@ async def _get_candles_with_pacing(
         return body
     # Unreachable: the final attempt either returns or raise_for_status raises.
     raise RuntimeError("unreachable")  # pragma: no cover
+
+
+async def fetch_okx_history_bars(
+    inst_id: str,
+    *,
+    bar_interval: str = "1D",
+    target_bars: int,
+    base_url: str = OKX_BASE_DEMO,
+    asset_class: str = "crypto",
+    client: httpx.AsyncClient | None = None,
+    page_pause_sec: float = HISTORY_PAGE_PAUSE_SEC,
+) -> list[Bar]:
+    """Deep PAGINATED backfill from OKX ``/history-candles`` (newest→oldest).
+
+    ``/market/candles`` only returns the newest N rows with NO paging, so deep
+    history needs ``/market/history-candles`` walked BACKWARD by the ``after``
+    cursor (rows OLDER than the cursor ts). This collects up to ``target_bars``
+    bars by requesting successive older pages until the target is met or a page
+    comes back empty (history exhausted). Returns canonical ``Bar``s ASCENDING
+    (newest LAST — the persist contract), de-duplicated by ts.
+
+    STORM-SAFE (#21): SEQUENTIAL (never a concurrent gather) + each page takes a
+    token from the shared ``_CANDLES_BUCKET`` + a ``page_pause_sec`` inter-page
+    pause. A one-shot, paced deep walk — ~0.7 req/s at the default pause, far under
+    the 10 req/s cap. flow_not_block: a page error degrades to "stop, return what
+    we have" (never raises into the caller); the live price path is untouched.
+    """
+    own = client is None
+    cli = client or httpx.AsyncClient(base_url=base_url, timeout=REST_TIMEOUT_SEC)
+    underlying = compute_underlying_group_id("okx", inst_id, asset_class=asset_class)
+    collected: dict[int, Bar] = {}
+    after: str | None = None
+    try:
+        while len(collected) < target_bars:
+            await _CANDLES_BUCKET.acquire(timeout=CANDLES_ACQUIRE_TIMEOUT_SEC)
+            params: dict[str, str] = {
+                "instId": inst_id,
+                "bar": bar_interval,
+                "limit": str(HISTORY_CANDLES_PAGE_LIMIT),
+            }
+            if after is not None:
+                params["after"] = after
+            try:
+                resp = await cli.get(
+                    OKX_HISTORY_CANDLES_PATH, params=params, headers=DEMO_HEADERS
+                )
+                resp.raise_for_status()
+                body = resp.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning(
+                    "[okx] history-candles %s/%s page failed — stopping: %r",
+                    inst_id, bar_interval, exc,
+                )
+                break
+            if str(body.get("code", "0")) != "0":
+                logger.warning(
+                    "[okx] history-candles %s/%s error code=%s msg=%s — stopping",
+                    inst_id, bar_interval, body.get("code"), body.get("msg"),
+                )
+                break
+            page = body.get("data", []) or []
+            if not page:
+                break  # history exhausted
+            oldest_ts_ms: int | None = None
+            for row in page:
+                try:
+                    bar = okx_candle_to_bar(
+                        row, inst_id=inst_id, bar_interval=bar_interval,
+                        underlying_group_id=underlying,
+                    )
+                except (ValueError, IndexError):
+                    continue
+                collected[bar.ts] = bar
+                ts_ms = int(row[0])
+                oldest_ts_ms = ts_ms if oldest_ts_ms is None else min(oldest_ts_ms, ts_ms)
+            if oldest_ts_ms is None:
+                break  # no parseable rows → cannot advance the cursor
+            after = str(oldest_ts_ms)  # next page: rows OLDER than this
+            if page_pause_sec > 0.0:
+                await _async_sleep(page_pause_sec)
+    finally:
+        if own:
+            await cli.aclose()
+    bars = sorted(collected.values(), key=lambda b: b.ts)  # ascending (newest last)
+    logger.info(
+        "[okx] history backfill %s/%s target=%d got=%d",
+        inst_id, bar_interval, target_bars, len(bars),
+    )
+    return bars
 
 
 # ---------------------------------------------------------------------------

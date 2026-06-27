@@ -19,6 +19,10 @@ from typing import Any
 from polaris.core.cell_matrix.score import regime_rank_penalty
 from polaris.core.data.quote_writer import live_or_bar_price
 from polaris.core.data.signal_persist import persist_emitted_signal
+from polaris.core.data.technical_store import (
+    extract_technicals_from_mv,
+    upsert_technicals,
+)
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     FAULT_NAN,
@@ -708,6 +712,32 @@ async def _run_tick(
                 altdata_cache=altdata_cache, underlying_group_id=group_id,
                 now_ts=now_ts,
             )
+            # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full
+            # indicator set just computed in ``mv`` (rsi/adx/bb/donchian/ema/
+            # momentum) so the AI judge / probes can read it as evidence (the judge
+            # previously saw only the 3-metric atr/size/volume baseline). EXTRACTED
+            # from this same mv — never re-computed (no double source of truth) and
+            # never a network call (the OKX candles bucket is untouched). Single-row
+            # LWW → bounded table. EVIDENCE-ONLY (flow_not_block: no entry/size/exit
+            # gated). best-effort: a write fault NEVER blocks emit/judge (the upsert
+            # already degrades to a no-op on a missing table; this try/except is the
+            # belt-and-braces for any other sqlite error on the hot path).
+            try:
+                tech_values = extract_technicals_from_mv(mv)
+                if tech_values:
+                    upsert_technicals(
+                        conn,
+                        instrument_id=f"{venue}:{symbol}",
+                        bar_interval=timeframe,
+                        values=tech_values,
+                        computed_ts=now_ts,
+                        source_bar_ts=int(bars[-1].ts),
+                    )
+            except Exception as exc:  # noqa: BLE001 — store is advisory, never blocks
+                logger.debug(
+                    "[technicals] write skipped %s:%s/%s: %r",
+                    venue, symbol, timeframe, exc,
+                )
             for strategy in strategies_for_tf:
                 if strategy.metadata.venue != venue:
                     continue

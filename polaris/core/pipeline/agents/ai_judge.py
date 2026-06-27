@@ -293,6 +293,7 @@ def _evidence_block(payload: dict[str, Any]) -> str:
     regime = payload.get("regime", "n/a")
     evidence = payload.get("evidence")
     baseline = payload.get("baseline")
+    technicals = payload.get("technicals")
     cell = payload.get("cell_routing")
     ground = payload.get("ticker_ground")
     lines = [f"- regime: {regime}"]
@@ -344,6 +345,12 @@ def _evidence_block(payload: dict[str, Any]) -> str:
             lines.append(macro_panel)
     if isinstance(baseline, dict) and baseline:
         lines.append(f"- technicals (baseline atr/size/volume): {baseline}")
+    if isinstance(technicals, dict) and technicals:
+        # ④ #12 — the FULL indicator set from the technical store (rsi/adx/bb/
+        # donchian/ema/momentum) the judge could not previously see. EVIDENCE-ONLY:
+        # read-only context, never a block/size. ``source_bar_ts`` is the currency
+        # stamp (#68/#69) so a stale technical set is visibly stale to the judge.
+        lines.append(f"- full technicals (bar-indicators): {technicals}")
     if isinstance(cell, dict) and cell:
         lines.append(
             f"- cell expectancy: quartile={cell.get('quartile')} "

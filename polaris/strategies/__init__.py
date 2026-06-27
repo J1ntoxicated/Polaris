@@ -13,6 +13,9 @@ Track A — OKX SPOT:
   - ``donchian_turtle_breakout``   (correlation_group=turtle_donchian_breakout, 1D)
   - ``weekend_thin_book_flush_maker`` (correlation_group=weekend_thin_book_mean_reversion,
     1H, WEEKEND-only maker — the single verified crypto maker BUILD #77)
+  - ``weekend_funding_capitulation_maker`` (correlation_group=
+    weekend_funding_positioning_mean_reversion, 1H, WEEKEND-only maker — the 2nd
+    weekend edge, positioning-axis, shadow-first #80)
 
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
@@ -92,6 +95,9 @@ from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
+from polaris.strategies.weekend_funding_capitulation_maker import (
+    WeekendFundingCapitulationMakerStrategy,
+)
 from polaris.strategies.weekend_thin_book_flush_maker import (
     WeekendThinBookFlushMakerStrategy,
 )
@@ -132,6 +138,14 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     WeekendThinBookFlushMakerStrategy.metadata.strategy_id: (
         WeekendThinBookFlushMakerStrategy
     ),
+    # #80 weekend funding — the 2nd weekend OKX edge (positioning-axis,
+    # ORTHOGONAL to the flush). OKX SPOT, weekend (Sat/Sun UTC), extreme-negative
+    # per-symbol perp funding (<= p10 = crowded-short capitulation), post-only
+    # SPOT long, no-fill = cancel/skip, bounded +1R squeeze-unwind harvest /
+    # -1.0R rail (engine-owned TAKER). Shadow-first (95d single-period sample).
+    WeekendFundingCapitulationMakerStrategy.metadata.strategy_id: (
+        WeekendFundingCapitulationMakerStrategy
+    ),
 }
 
 
@@ -168,6 +182,7 @@ __all__ = [
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",
+    "WeekendFundingCapitulationMakerStrategy",
     "WeekendThinBookFlushMakerStrategy",
     "XAUIndicesTrendStrategy",
     "all_strategies",

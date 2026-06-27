@@ -627,8 +627,9 @@ def test_pocket_pivot_metadata_and_registry() -> None:
 
 def test_registry_has_20_strategies() -> None:
     # was 21 (strategy-wave2); spot_donchian KILLed 2026-06-27 (#56 stop-bleeders);
-    # +weekend_thin_book_flush_maker (#77, single verified crypto maker BUILD) → 21.
-    assert len(STRATEGY_REGISTRY) == 21
+    # +weekend_thin_book_flush_maker (#77, single verified crypto maker BUILD) → 21;
+    # +weekend_funding_capitulation_maker (#80, 2nd weekend edge, positioning) → 22.
+    assert len(STRATEGY_REGISTRY) == 22
 
 
 def test_wave2_all_registered() -> None:

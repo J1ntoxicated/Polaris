@@ -128,6 +128,13 @@ class AltDataView:
     vix: float | None = None  # CBOE VIX level (macro risk-off)
     crypto_fear_greed: float | None = None  # 0=extreme fear .. 100=extreme greed
     hy_spread: float | None = None  # ICE BofA US HY OAS (bps)
+    # PER-SYMBOL funding (weekend_funding_capitulation_maker): the funding rate
+    # for THIS symbol's perp (not the group mean above), plus that perp's p10
+    # threshold from funding-rate-history. A current funding <= p10 (and < 0) =
+    # extreme-negative crowded-short capitulation. Both default None = NEUTRAL
+    # (a symbol with no funding row reads neutral → the strategy no-emits).
+    funding_rate_symbol: float | None = None  # THIS symbol's perp funding rate
+    funding_rate_p10: float | None = None  # THIS symbol's perp funding p10 (history)
 
     def is_neutral(self) -> bool:
         """True when no field carries a value (a no-op view)."""
@@ -139,6 +146,8 @@ class AltDataView:
             and self.vix is None
             and self.crypto_fear_greed is None
             and self.hy_spread is None
+            and self.funding_rate_symbol is None
+            and self.funding_rate_p10 is None
         )
 
 

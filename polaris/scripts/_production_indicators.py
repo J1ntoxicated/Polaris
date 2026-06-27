@@ -395,6 +395,7 @@ def map_altdata_to_market_fields(
     cache: Any,
     *,
     now_ts: float | None = None,
+    symbol: str = "",
 ) -> AltDataView:
     """Map the FRESH AltDataCache snapshot for a group → STRATEGY-VISIBLE numerics.
 
@@ -404,6 +405,13 @@ def map_altdata_to_market_fields(
     percentile / VIX / crypto fear-greed / HY spread. Every absent / stale /
     keyless source leaves its field ``None`` = NEUTRAL no-op. SIGNAL only — never
     a block / throttle. Fail-soft: a cache that raises returns the neutral view.
+
+    ``symbol`` (the spot symbol under evaluation, e.g. ``BTC-USDT``) selects the
+    PER-SYMBOL funding + p10 for the weekend_funding_capitulation_maker edge: the
+    spot symbol maps to its perp instId (``BTC-USDT-SWAP``) and the matching
+    okx_funding row's funding + p10 populate ``funding_rate_symbol`` /
+    ``funding_rate_p10``. An empty ``symbol`` / no matching row leaves them None
+    (neutral). The legacy group-MEAN ``funding_rate`` is unchanged (additive).
     """
     if cache is None:
         return AltDataView()
@@ -415,6 +423,9 @@ def map_altdata_to_market_fields(
         return AltDataView()
 
     funding_rate, open_interest = _funding_oi_from(sources.get("okx_funding"))
+    funding_rate_symbol, funding_rate_p10 = _per_symbol_funding_from(
+        sources.get("okx_funding"), symbol
+    )
     fg = sources.get("crypto_fg") or {}
     fg_val = fg.get("value")
     crypto_fear_greed = float(fg_val) if isinstance(fg_val, (int, float)) else None
@@ -437,7 +448,32 @@ def map_altdata_to_market_fields(
         vix=vix,
         crypto_fear_greed=crypto_fear_greed,
         hy_spread=hy_spread,
+        funding_rate_symbol=funding_rate_symbol,
+        funding_rate_p10=funding_rate_p10,
     )
+
+
+def _per_symbol_funding_from(
+    funding: dict[str, Any] | None, symbol: str
+) -> tuple[float | None, float | None]:
+    """THIS spot symbol's perp funding + p10 from the okx_funding rows.
+
+    The okx_funding source is keyed by perp instId (``BTC-USDT-SWAP``); the spot
+    symbol (``BTC-USDT``) maps to it by appending ``-SWAP``. A symbol already
+    carrying ``-SWAP`` is used as-is. No match / no symbol → ``(None, None)``
+    (neutral no-op). Pure, no I/O.
+    """
+    if not funding or not symbol:
+        return None, None
+    inst = symbol if symbol.upper().endswith("-SWAP") else f"{symbol}-SWAP"
+    row = funding.get(inst)
+    if not isinstance(row, dict):
+        return None, None
+    fr = row.get("fundingRate")
+    p10 = row.get("p10")
+    fr_out = float(fr) if isinstance(fr, (int, float)) else None
+    p10_out = float(p10) if isinstance(p10, (int, float)) else None
+    return fr_out, p10_out
 
 
 def _funding_oi_from(
@@ -515,6 +551,7 @@ def build_real_market_view(
         underlying_group_id or f"{asset_class}:{symbol}",
         altdata_cache,
         now_ts=now_ts,
+        symbol=symbol,
     )
     # Data-quality gate (measurement-first): compute indicators on REAL price
     # action only — drop OKX synthetic/flat/zero-vol forward-fill bars so vol_z

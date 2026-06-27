@@ -52,6 +52,7 @@ from polaris.scripts._production_layers import (
     refresh_okx_universe_once,
 )
 from polaris.scripts._production_probe_attach import wire_probe_sidecar
+from polaris.scripts._production_retention import retention_producer
 from polaris.scripts._production_state import ProdLoopState
 from polaris.scripts._production_tick import (
     FOCUS_CYCLE_TARGET,
@@ -688,6 +689,20 @@ async def run_production_paper_loop(
                 logger.debug("[wal] checkpoint cycle failed (busy)")
 
     wal_task = asyncio.create_task(_wal_checkpoint_producer())
+    # Data-stream RETENTION producer (root fix for unbounded growth: the
+    # retention DELETEs existed but nothing in the loop ever called them, so
+    # data/ grew to 12 GB + the probe sidecar to 2.2 GB). Every 30 min it
+    # OFFLOADS the prune to a worker thread (its own dedicated live-DB + probe-DB
+    # handles, never the loop conn) — allowlist-bounded (ledger untouchable),
+    # degrade-never-crash, NO exclusive lock (WAL hygiene stays with the PASSIVE
+    # producer above). Prunes BOTH the live DB and data/probes.sqlite.
+    retention_task = asyncio.create_task(
+        retention_producer(
+            live_db=target_db,
+            probe_db=target_db.parent / "probes.sqlite",
+            stop_evt=stop_evt,
+        )
+    )
     # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each
     # source's own TTL cadence; the cache feeds compute_and_flip_regime as
     # read-only regime evidence (SIGNAL only, never a throttle).
@@ -989,6 +1004,7 @@ async def run_production_paper_loop(
         layer0_task.cancel()
         altdata_task.cancel()
         wal_task.cancel()
+        retention_task.cancel()
         static_ground_task.cancel()
         ticker_ground_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1001,6 +1017,8 @@ async def run_production_paper_loop(
             await altdata_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await wal_task
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await retention_task
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await static_ground_task
         with contextlib.suppress(asyncio.CancelledError, Exception):

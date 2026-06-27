@@ -29,10 +29,13 @@ All operations are idempotent: a second run in the same window deletes 0 rows.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Day in seconds. All DB timestamps in the pruned tables are UNIX *seconds*
 # (verified live: bars.ts / quote_ticks.ts / ticker_baseline_samples.ts /
@@ -93,9 +96,35 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
                   "dashboard 24h + counterfactual analysis join window"),
 )
 
+# --- The probe-sidecar prune allowlist (data/probes.sqlite). -----------------
+#
+# The observe-only AI-judge sidecar grows without bound (live: 2.2 GB). It is a
+# SEPARATE DB file (never the live trading DB) and holds NO ledger/state — only
+# telemetry rows, every one ``ts``-stamped (epoch-seconds):
+#
+# * probe_readings — one row per probe per G6 evaluation (the densest stream).
+# * probe_decisions — one composed engine decision per evaluation; the close
+#   backfill fills its outcome columns in-place, so a pruned row only drops
+#   month-old calibration telemetry, never an open position's record.
+# * entrance_judgments — one row per judged entrance candidate (Increment-1 seam).
+#
+# 45d covers the calibration/acceptance analysis read window (>= the live-DB
+# gate_events 30d, with margin so a probe decision still joins its 30d gate
+# event). Its OWN allowlist (not the live-DB ``_ALLOWED``) so neither path can
+# ever cross-prune the other's tables.
+PROBE_RETENTION_SPEC: tuple[RetentionRule, ...] = (
+    RetentionRule("probe_readings", "ts", 45 * _DAY,
+                  "observe-only readings; densest probe stream"),
+    RetentionRule("probe_decisions", "ts", 45 * _DAY,
+                  "composed engine decisions + in-place outcome backfill"),
+    RetentionRule("entrance_judgments", "ts", 45 * _DAY,
+                  "judged entrance candidates (Increment-1 telemetry seam)"),
+)
+
 # Frozen lookup of allowed (table -> ts_column). The DELETE builder accepts
 # ONLY pairs in this map; anything else raises before any SQL is formed.
 _ALLOWED: dict[str, str] = {r.table: r.ts_column for r in RETENTION_SPEC}
+_PROBE_ALLOWED: dict[str, str] = {r.table: r.ts_column for r in PROBE_RETENTION_SPEC}
 
 
 def prune_table(
@@ -105,18 +134,22 @@ def prune_table(
     retain_sec: int,
     *,
     now_ts: int,
+    allowed: dict[str, str] | None = None,
 ) -> int:
     """Delete rows older than the retention window. Returns rows deleted.
 
     Idempotent: rerunning in the same window deletes 0. Raises ``ValueError``
     if ``(table, ts_column)`` is not in the frozen allowlist — the structural
-    guarantee that no ledger/state table can ever be deleted through here.
+    guarantee that no ledger/state table can ever be deleted through here. The
+    ``allowed`` map defaults to the live-DB ``_ALLOWED``; the probe path passes
+    ``_PROBE_ALLOWED`` so the two DBs can never cross-prune each other's tables.
     """
-    allowed_col = _ALLOWED.get(table)
+    allow = _ALLOWED if allowed is None else allowed
+    allowed_col = allow.get(table)
     if allowed_col is None or allowed_col != ts_column:
         raise ValueError(
             f"refusing prune of non-allowlisted target ({table!r}, {ts_column!r}); "
-            f"allowlist={_ALLOWED!r}"
+            f"allowlist={allow!r}"
         )
     if retain_sec <= 0:
         raise ValueError(f"retain_sec must be positive, got {retain_sec}")
@@ -148,6 +181,69 @@ def run_retention(
         )
     conn.commit()
     return deleted
+
+
+def run_retention_live(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int | None = None,
+) -> dict[str, int]:
+    """LIVE-loop variant of ``run_retention`` — DEGRADE-NEVER-CRASH.
+
+    Same allowlist deletes as ``run_retention`` (ledger untouchable by
+    construction) but wrapped so any sqlite error (a busy DB, a closed handle)
+    returns ``{}`` instead of propagating into the running loop. NO reclaiming
+    WAL checkpoint here: the loop's PASSIVE ``_wal_checkpoint_producer`` owns WAL
+    hygiene, so this never takes the exclusive lock that would contend the 1 Hz
+    writer ([[feedback_db_lock_is_architecture_signal]]). Intended to be called
+    on a worker thread with its OWN dedicated connection so the loop-owned
+    handle is never touched from two threads.
+    """
+    try:
+        return run_retention(conn, now_ts=now_ts)
+    except sqlite3.Error as exc:
+        logger.warning("[retention] live prune skipped (degrade): %r", exc)
+        return {}
+    except Exception as exc:  # noqa: BLE001 — hygiene must never halt the loop
+        logger.warning("[retention] live prune unexpected error (degrade): %r", exc)
+        return {}
+
+
+def run_probe_retention(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int | None = None,
+    _only_table: str | None = None,
+) -> dict[str, int]:
+    """Prune the observe-only probe sidecar (``data/probes.sqlite``).
+
+    Applies ``PROBE_RETENTION_SPEC`` via the probe allowlist — telemetry tables
+    only, NO ledger/state (the probe DB holds none). DEGRADE-NEVER-CRASH: any
+    sqlite error returns ``{}``. ``_only_table`` is a test seam to drive a single
+    rule (and prove the allowlist rejects a non-probe table name).
+    """
+    now = int(time.time()) if now_ts is None else int(now_ts)
+    rules = PROBE_RETENTION_SPEC
+    if _only_table is not None:
+        # Force the requested (possibly non-allowlisted) name through the guard.
+        rules = (RetentionRule(_only_table, "ts", _DAY, "test seam"),)
+    deleted: dict[str, int] = {}
+    try:
+        for rule in rules:
+            deleted[rule.table] = prune_table(
+                conn, rule.table, rule.ts_column, rule.retain_sec,
+                now_ts=now, allowed=_PROBE_ALLOWED,
+            )
+        conn.commit()
+        return deleted
+    except ValueError:
+        raise  # allowlist rejection is a programming error — surface it
+    except sqlite3.Error as exc:
+        logger.warning("[retention] probe prune skipped (degrade): %r", exc)
+        return {}
+    except Exception as exc:  # noqa: BLE001 — hygiene must never halt the loop
+        logger.warning("[retention] probe prune unexpected error (degrade): %r", exc)
+        return {}
 
 
 def checkpoint_wal(db_path: Path | str, *, timeout_sec: float = 30.0) -> tuple[int, int, int]:

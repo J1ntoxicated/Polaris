@@ -7,21 +7,23 @@ a *different* host family, so ``resolve_okx_ws_url`` maps the same env value to
 the matching public WS endpoint:
 
     REST host             → public WS host
-    us.okx.com (default)  → wss://wspap.okx.com:8443/ws/v5/public   (demo)
-    wspap.okx.com (demo)  → wss://wspap.okx.com:8443/ws/v5/public   (demo)
-    www.okx.com (prod)    → wss://ws.okx.com:8443/ws/v5/public      (prod)
+    us.okx.com (default)  → wss://wsuspap.okx.com:8443/ws/v5/public  (US demo)
+    wspap.okx.com (demo)  → wss://wspap.okx.com:8443/ws/v5/public    (global demo)
+    www.okx.com (prod)    → wss://ws.okx.com:8443/ws/v5/public        (prod)
 
-M3 verification (2026-06-01 live DNS + handshake): the design's assumed
-``ws.us.okx.com`` host **does NOT resolve** — OKX publishes no US-region WS
-subdomain. The ``tickers`` channel is **unauthenticated public market data**
-(no signing, region-agnostic), so the US-region demo *trading* keys map to the
-**demo public WS** (``wspap.okx.com``), which serves live BTC-USDT ticks and
-matches the simulated-trading context. ``ws.okx.com`` (prod) was also verified
-live. OKX drops a connection after 30 s of silence and expects a literal text
-``"ping"`` keepalive (replies ``"pong"``); we send it every <25 s. Connection
-success itself is the availability check (no separate smoke) — if connects fail
-``max_reconnect_attempts`` in a row the base client transitions to ``rest_only``
-and REST bar ingest remains the fallback.
+Endpoint reconciliation (Jin official US reference): the US-region demo WS host is
+``wsuspap.okx.com`` — it EXISTS and is live-verified (BTC-USDT ticker received;
+region-consistent with the ``us.okx.com`` REST host, prices match). The earlier
+``ws.us.okx.com`` guess does not resolve, but that does NOT mean OKX has no
+US-region WS — ``wsuspap.okx.com`` is the correct one. So the US-region demo
+*trading* keys map to the **US demo public WS** (``wsuspap.okx.com``), region-
+matching the REST endpoint and the simulated-trading context. The GLOBAL demo WS
+(``wspap.okx.com``) is reserved for an explicit global-demo REST host only.
+``ws.okx.com`` (prod) was also verified live. OKX drops a connection after 30 s
+of silence and expects a literal text ``"ping"`` keepalive (replies ``"pong"``);
+we send it every <25 s. Connection success itself is the availability check (no
+separate smoke) — if connects fail ``max_reconnect_attempts`` in a row the base
+client transitions to ``rest_only`` and REST bar ingest remains the fallback.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from polaris.venues.ws_common import WSStreamClient
 
 logger = logging.getLogger(__name__)
 
+OKX_WS_US_DEMO: str = "wss://wsuspap.okx.com:8443/ws/v5/public"
 OKX_WS_DEMO: str = "wss://wspap.okx.com:8443/ws/v5/public"
 OKX_WS_PROD: str = "wss://ws.okx.com:8443/ws/v5/public"
 
@@ -50,20 +53,25 @@ OKX_PING_INTERVAL_SEC: float = 20.0
 def resolve_okx_ws_url(rest_env_value: str | None) -> str:
     """Map the OKX REST base-URL env value to the matching public WS host.
 
-    The public ``tickers`` feed is unauthenticated + region-agnostic and OKX has
-    NO US WS subdomain (``ws.us.okx.com`` does not resolve — M3 verified). So the
-    US-region demo REST host (default / ``us.okx.com``) maps to the **demo** WS
-    (``wspap.okx.com``), matching the simulated-trading context. Only an explicit
-    prod REST host (``www.okx.com``) maps to the prod WS (``ws.okx.com``).
+    Region-consistent with the REST resolver (``resolve_okx_base_url``): the
+    US-region demo REST host (default / ``us.okx.com`` / any ``*.us.okx.com``)
+    maps to the **US demo** WS (``wsuspap.okx.com`` — Jin official, live-verified
+    BTC-USDT ticker). The GLOBAL demo WS (``wspap.okx.com``) is reserved for an
+    explicit global-demo REST host, and only the international prod host
+    (``www.okx.com``) maps to the prod WS (``ws.okx.com``).
     """
     if not rest_env_value:
-        return OKX_WS_DEMO
+        return OKX_WS_US_DEMO
     host = (urlparse(rest_env_value).netloc or "").lower().split(":")[0]
     if host == "www.okx.com":
         # Explicit international prod host → prod public WS.
         return OKX_WS_PROD
-    # us.okx.com (US demo) and wspap.okx.com (demo) both → demo public WS.
-    return OKX_WS_DEMO
+    if host == "wspap.okx.com":
+        # Explicit GLOBAL demo host → global demo public WS.
+        return OKX_WS_DEMO
+    # us.okx.com (default US demo) and any *.us.okx.com sub-domain → US demo WS,
+    # region-matching the us.okx.com REST endpoint.
+    return OKX_WS_US_DEMO
 
 
 class OKXTickerWS(WSStreamClient):

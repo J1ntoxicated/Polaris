@@ -225,6 +225,16 @@ ALL_DDL: tuple[str, ...] = (
 )
 
 
+# -wal autocheckpoint page threshold. SQLite checks this at the end of each write
+# txn and folds the -wal back into the main DB when it crosses the bound, so the
+# -wal cannot grow without limit between the loop's PASSIVE checkpoints (live: the
+# -wal had ballooned to 1.4 GB). 1000 pages × the default 4 KB page = ~4 MB — tight
+# but never 0 (0 DISABLES autocheckpoint, the unbounded-growth state). PASSIVE
+# semantics: it never blocks on a reader and never takes the exclusive lock, so it
+# does NOT contend the 1 Hz writer ([[feedback_db_lock_is_architecture_signal]]).
+WAL_AUTOCHECKPOINT_PAGES: int = 1000
+
+
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Open a SQLite connection in WAL mode with foreign keys enabled."""
     path = Path(db_path)
@@ -234,6 +244,7 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES};")
     return conn
 
 

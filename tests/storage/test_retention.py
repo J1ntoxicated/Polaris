@@ -19,14 +19,18 @@ from pathlib import Path
 
 import pytest
 
+from polaris.core.probes.tuning_log import open_probe_db
 from polaris.storage.retention import (
+    PROBE_RETENTION_SPEC,
     RETENTION_SPEC,
     checkpoint_wal,
     prune_table,
+    run_probe_retention,
     run_retention,
     run_retention_job,
+    run_retention_live,
 )
-from polaris.storage.schema import init_db
+from polaris.storage.schema import connect, init_db
 
 NOW = 1_782_000_000  # fixed reference epoch-seconds
 
@@ -187,6 +191,25 @@ def test_signal_lookback_bars_preserved(db: sqlite3.Connection) -> None:
     assert db.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1
 
 
+# --- WAL autocheckpoint (bounds the -wal between explicit checkpoints) ------
+
+
+def test_connect_sets_wal_autocheckpoint(tmp_path: Path) -> None:
+    """connect() arms an EXPLICIT PRAGMA wal_autocheckpoint so the -wal can never
+    grow unbounded between the loop's PASSIVE checkpoints (live: 1.4 GB -wal).
+    Asserting the exact value guards against a silent regression to 0 (disabled)
+    or to the implicit default."""
+    from polaris.storage.schema import WAL_AUTOCHECKPOINT_PAGES
+
+    conn = connect(tmp_path / "auto.sqlite")
+    try:
+        pages = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+        assert pages == WAL_AUTOCHECKPOINT_PAGES
+        assert pages > 0  # 0 would DISABLE autocheckpoint → unbounded -wal
+    finally:
+        conn.close()
+
+
 # --- WAL checkpoint ---------------------------------------------------------
 
 
@@ -228,3 +251,134 @@ def test_run_retention_job_end_to_end(tmp_path: Path) -> None:
         assert check.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1
     finally:
         check.close()
+
+
+# --- LIVE retention (called periodically INSIDE the running loop) ----------
+
+
+def test_run_retention_live_prunes_and_keeps_ledger(db: sqlite3.Connection) -> None:
+    """The live path prunes old stream rows but NEVER the trading ledger.
+
+    Same allowlist guarantee as the down-window job — the only difference is the
+    live path does NOT run the reclaiming WAL checkpoint (the loop's PASSIVE
+    producer owns that), so it never contends the writer lock.
+    """
+    _insert_bar(db, NOW - 500 * 86_400)  # outside 400d -> deleted
+    _insert_bar(db, NOW)                  # kept
+    db.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts) "
+        "VALUES ('p1','okx','BTC-USDT','s','s','s','long',1,'closed',1)"
+    )
+    db.execute(
+        "INSERT INTO signals (strategy_id, signal_id, instrument_id, direction, "
+        "score, thesis, ts) VALUES ('s','sig1','I','long',1,'t',1)"  # ancient ts
+    )
+    db.commit()
+
+    deleted = run_retention_live(db, now_ts=NOW)
+
+    assert deleted["bars"] == 1
+    assert db.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1
+    assert db.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+    assert db.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 1
+
+
+def test_run_retention_live_degrades_never_crashes() -> None:
+    """A broken/closed connection returns {} rather than raising into the loop."""
+    conn = sqlite3.connect(":memory:")
+    conn.close()  # any op now raises ProgrammingError
+    assert run_retention_live(conn, now_ts=NOW) == {}
+
+
+# --- PROBE sidecar retention (data/probes.sqlite, 2.2 GB unbounded) ---------
+
+
+def _probe_db(tmp_path: Path) -> sqlite3.Connection:
+    return open_probe_db(tmp_path / "probes.sqlite")
+
+
+def _insert_probe_reading(conn: sqlite3.Connection, ts: int) -> None:
+    conn.execute(
+        "INSERT INTO probe_readings (reading_id, ts, gate_id, position_id, "
+        "probe_id, kind, lean, confidence) VALUES (?,?,6,'p','pr','k',0.0,0.0)",
+        (f"r-{ts}", ts),
+    )
+
+
+def _insert_probe_decision(conn: sqlite3.Connection, ts: int) -> None:
+    conn.execute(
+        "INSERT INTO probe_decisions (decision_id, eval_id, ts, run_id, "
+        "position_id, mode, composite_lean, action) "
+        "VALUES (?,?,?,'run','p','observe',0.0,'hold')",
+        (f"d-{ts}", f"e-{ts}", ts),
+    )
+
+
+def _insert_entrance_judgment(conn: sqlite3.Connection, ts: int) -> None:
+    conn.execute(
+        "INSERT INTO entrance_judgments (judgment_id, ts, run_id, cycle_ts, "
+        "instrument_id, venue, symbol, opportunity_score, trade_eligible) "
+        "VALUES (?,?,'run',?,'I','okx','BTC-USDT',1.0,1)",
+        (f"j-{ts}", ts, ts),
+    )
+
+
+def test_probe_retention_spec_covers_the_three_growth_tables() -> None:
+    assert {r.table for r in PROBE_RETENTION_SPEC} == {
+        "probe_readings",
+        "probe_decisions",
+        "entrance_judgments",
+    }
+    assert all(r.ts_column == "ts" for r in PROBE_RETENTION_SPEC)
+
+
+def test_probe_retention_prunes_old_keeps_recent(tmp_path: Path) -> None:
+    conn = _probe_db(tmp_path)
+    try:
+        for inserter in (
+            _insert_probe_reading,
+            _insert_probe_decision,
+            _insert_entrance_judgment,
+        ):
+            inserter(conn, NOW - 60 * 86_400)  # outside 45d -> deleted
+            inserter(conn, NOW)                 # kept
+
+        deleted = run_probe_retention(conn, now_ts=NOW)
+
+        for table in ("probe_readings", "probe_decisions", "entrance_judgments"):
+            assert deleted[table] == 1
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {table}"  # noqa: S608 test-local
+            ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_probe_retention_idempotent(tmp_path: Path) -> None:
+    conn = _probe_db(tmp_path)
+    try:
+        _insert_probe_decision(conn, NOW - 60 * 86_400)
+        run_probe_retention(conn, now_ts=NOW)
+        second = run_probe_retention(conn, now_ts=NOW)
+        assert all(v == 0 for v in second.values()), second
+    finally:
+        conn.close()
+
+
+def test_probe_retention_rejects_non_allowlisted(tmp_path: Path) -> None:
+    """prune_table's allowlist is the live-DB spec; probe pruning has its OWN
+    allowlist, so a live-DB ledger name can never be pruned through either path."""
+    conn = _probe_db(tmp_path)
+    try:
+        for bad in ("positions", "fills", "signals", "v_probe_outcomes"):
+            with pytest.raises(ValueError, match="non-allowlisted"):
+                run_probe_retention(conn, now_ts=NOW, _only_table=bad)
+    finally:
+        conn.close()
+
+
+def test_probe_retention_degrades_never_crashes() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.close()
+    assert run_probe_retention(conn, now_ts=NOW) == {}

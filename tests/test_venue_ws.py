@@ -25,18 +25,30 @@ from polaris.venues.okx.ws import (
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_okx_ws_url_us_default_maps_to_demo() -> None:
-    # M3 verified: ws.us.okx.com does NOT resolve. The public tickers feed is
-    # unauthenticated + region-agnostic, so the US-region demo REST host (and the
-    # absent default) map to the demo public WS (wspap.okx.com).
-    assert resolve_okx_ws_url(None) == "wss://wspap.okx.com:8443/ws/v5/public"
+def test_resolve_okx_ws_url_us_default_maps_to_us_demo() -> None:
+    # Jin official reference: us.okx.com → wsuspap.okx.com (US-region demo WS,
+    # live-verified BTC-USDT ticker, region-consistent with the REST host). The
+    # global-demo wspap.okx.com is NOT the US endpoint; ws.us.okx.com does not
+    # exist but wsuspap.okx.com does.
+    assert resolve_okx_ws_url(None) == "wss://wsuspap.okx.com:8443/ws/v5/public"
     assert (
         resolve_okx_ws_url("https://us.okx.com")
-        == "wss://wspap.okx.com:8443/ws/v5/public"
+        == "wss://wsuspap.okx.com:8443/ws/v5/public"
     )
 
 
-def test_resolve_okx_ws_url_demo_and_prod() -> None:
+def test_resolve_okx_ws_url_us_subdomain_maps_to_us_demo() -> None:
+    # A us.okx.com sub-domain (REST resolver permits *.us.okx.com) stays on the
+    # US demo WS — never silently downgraded to the global demo.
+    assert (
+        resolve_okx_ws_url("https://aws.us.okx.com")
+        == "wss://wsuspap.okx.com:8443/ws/v5/public"
+    )
+
+
+def test_resolve_okx_ws_url_global_demo_and_prod() -> None:
+    # An explicit GLOBAL demo REST host stays on the global demo WS; only the
+    # international prod host (www.okx.com) maps to the prod WS.
     assert (
         resolve_okx_ws_url("https://wspap.okx.com")
         == "wss://wspap.okx.com:8443/ws/v5/public"

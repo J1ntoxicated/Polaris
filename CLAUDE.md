@@ -76,7 +76,7 @@ tool call · skill · advisor 단독 호출 ≠ agent — agent는 위 권한을
 </agent-definition>
 
 <handoff-triggers>
-**기본 = Workflow 오케스트레이션** (위 작업모드). substantial 다단계·구현·리서치·감사·sweep → **Workflow**(design→build(TDD)→adversarial review pipeline, 또는 find→verify fan-out, 또는 loop-until-dry). 5+ 파일 read·codebase-wide search → Explore·general-purpose(또는 Workflow 내 reader fan-out) · 큰 wave 검수 → 5-axis 병렬 · 다단계 설계 → Plan, 리팩토링 → code-simplifier · 신규 코드·거동 변경 → builder→adversarial review(Workflow 단계) · 거부키워드 sweep hit·9-stack/sizing 변경·vault write 충돌 → 전담 agent/Workflow 단계 · 오염 신호(Read 5+/grep 100+ line/반복 search) → 전환 · 단일 known target·trivial → 직접 처리
+**기본 = Workflow 오케스트레이션** (위 작업모드). substantial 다단계·구현·리서치·감사·sweep → **Workflow**(design→build(TDD)→adversarial review pipeline, 또는 find→verify fan-out, 또는 loop-until-dry). 5+ 파일 read·codebase-wide search → **graph-first**(codebase-memory `search_graph`/`trace_path`/`get_architecture`로 LOCATE → 볼트로 JUDGE; 그래프=CACHE·dev-time-only·실행봇 미접촉, 의심시 실파일 재확인 — [[ADR-014-graph-index-reference-bridge|ADR-014]]) → 부족시 Explore·general-purpose(또는 Workflow 내 reader fan-out) · 큰 wave 검수 → 5-axis 병렬 · 다단계 설계 → Plan, 리팩토링 → code-simplifier · 신규 코드·거동 변경 → builder→adversarial review(Workflow 단계) · 거부키워드 sweep hit·9-stack/sizing 변경·vault write 충돌 → 전담 agent/Workflow 단계 · 오염 신호(Read 5+/grep 100+ line/반복 search) → 전환 · 단일 known target·trivial → 직접 처리
 </handoff-triggers>
 
 <builder-not-reviewer>

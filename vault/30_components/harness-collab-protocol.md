@@ -40,10 +40,11 @@ related: [[ADR-001-vault-structure|ADR-001]], [[ADR-003-8-layer-architecture|ADR
 작성 주체 self-review 금지(confirmation bias). 신규 코드/spec/rule → **fresh Claude sub-agent 리뷰 의무**(pipeline review 단계 내장). 구 "codex 외부 review 의무" 조항은 Jin 2026-05-31 no-dev-GPT 결정으로 대체(CLAUDE.md 동기 갱신 2026-06-11).
 
 ## Handoff triggers
-- 5+ 파일 read / codebase-wide search → Explore·general-purpose 또는 Workflow reader fan-out
+- 5+ 파일 read / codebase-wide search → **graph-first**(codebase-memory `search_graph`/`trace_path`/`get_architecture`로 LOCATE), 부족 시 Explore·general-purpose·Workflow reader fan-out + 실 read
 - 신규 코드·거동 변경 → Workflow pipeline(design→build→adversarial review→FixLoop)
 - 큰 wave 검수 → **5-axis**(technical / 4-axis policy / cumulative coherence / functional / live audit) — functional/live audit은 배포 후 라이브로 완결
-- 거부 키워드 hit / 9-stack·sizing 변경 / vault write 충돌 → 전담 단계 · 오염 신호(Read 5+/grep 100+) → 위임 전환 · 단일 known target → 직접
+- 거부 키워드 hit / 9-stack·sizing 변경 / vault write 충돌 → 전담 단계 · 오염 신호(Read 5+/grep 100+) → **graph-first** 후 위임 전환 · 단일 known target → 직접
+- **Graph↔Vault 라우팅** ([[ADR-014-graph-index-reference-bridge|ADR-014]]): **그래프로 LOCATE, 볼트로 JUDGE.** investigator=그래프 먼저(`search_graph`/`trace_path`)→볼트 why · builder=볼트 mandate 먼저→그래프 blast-radius(`detect_changes`) · reviewer=`detect_changes`+`trace_path` 발화경로 증명→볼트 policy. 🚨 그래프=**CACHE·dev-time-only**(실행 봇 미접촉·trade path 무관), 의심 시 `get_code_snippet`/실파일 재확인. 충돌 시 볼트 승.
 
 ## Sub-agent 프롬프트 헤더 (의무)
 DEMO/PAPER 명시 + aggressive bias + 거부 키워드 sweep(목록 SSOT = CLAUDE.md rejection-keywords 블록) + vault r·w 권한(brain contribution) + 증거 의무(file:line/SQL 숫자) + 라이브 DB는 ro URI+명시 close(hung-reader 교훈) + length cap.

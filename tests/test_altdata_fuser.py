@@ -8,6 +8,8 @@ no early-exit, no halt. A None hint means "no override" — the price-only
 
 from __future__ import annotations
 
+import pytest
+
 from polaris.core.altdata.cache import AltDataCache
 from polaris.core.altdata.fuser import fuse_evidence
 
@@ -457,7 +459,7 @@ def test_macro_asof_and_age_surfaced() -> None:
     # now_ts = 2026-06-29 00:00:00 UTC; vix observed 2026-06-26 → 3 days old.
     import datetime as _dt
 
-    now = _dt.datetime(2026, 6, 29, tzinfo=_dt.timezone.utc).timestamp()
+    now = _dt.datetime(2026, 6, 29, tzinfo=_dt.UTC).timestamp()
     cache = AltDataCache()
     cache.set(
         "fred_macro",
@@ -478,3 +480,188 @@ def test_macro_no_asof_is_graceful() -> None:
     assert "vix_asof" not in ev
     assert "macro_age_days" not in ev
     assert ev["vix"] == 18.5  # scorer behaviour unchanged
+
+
+# ── Binance derivatives: positioning / order-flow routing + scoring ───────────
+
+
+def test_cache_routes_binance_deriv_to_crypto_only() -> None:
+    cache = AltDataCache()
+    cache.set("binance_deriv", {"BTCUSDT": {"top_long_short": 1.4}}, ttl_sec=1000, now_ts=0.0)
+    crypto = cache.get_for_group("crypto:BTC", now_ts=1.0)
+    assert "binance_deriv" in crypto
+    for gid in ("forex:EURUSD", "index:US500", "commodity:XAUUSD", "equity:AAPL"):
+        assert "binance_deriv" not in cache.get_for_group(gid, now_ts=1.0)
+
+
+def test_fuse_binance_smart_money_net_long_suggests_bull() -> None:
+    """Top-trader net-long + taker buy pressure → BULL evidence reaching the judge."""
+    cache = AltDataCache()
+    cache.set(
+        "binance_deriv",
+        {
+            "BTCUSDT": {"top_long_short": 1.6, "taker_buy_sell": 1.2, "oi_asof": "2026-06-26T00:00:00+00:00"},
+            "ETHUSDT": {"top_long_short": 1.5, "taker_buy_sell": 1.15},
+        },
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, conf, ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint == "bull_trend"
+    assert ev["binance_top_long_short"] > 1.3
+    assert ev["binance_taker_buy_sell"] > 1.1
+    # Currency label reached the evidence.
+    assert ev["binance_oi_asof"] == "2026-06-26T00:00:00+00:00"
+    assert "binance_deriv" in ev["source_weights"]
+
+
+def test_fuse_binance_smart_money_net_short_suggests_bear() -> None:
+    cache = AltDataCache()
+    cache.set(
+        "binance_deriv",
+        {"BTCUSDT": {"top_long_short": 0.6, "taker_buy_sell": 0.85}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint == "bear_trend"
+    assert ev["binance_top_long_short"] < 0.77
+
+
+def test_fuse_binance_neutral_positioning_no_override() -> None:
+    """Balanced positioning stays below the conviction floor; evidence surfaced."""
+    cache = AltDataCache()
+    cache.set(
+        "binance_deriv",
+        {"BTCUSDT": {"top_long_short": 1.0, "taker_buy_sell": 1.0, "oi_change_24h": 0.05}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint is None  # no tilt → no override
+    assert ev["binance_top_long_short"] == 1.0
+    assert ev["binance_oi_change_24h"] == pytest.approx(0.05)
+
+
+# ── Coinglass: aggregated liquidation cascade → bull/bear evidence ────────────
+
+
+def test_fuse_coinglass_long_flush_suggests_bear() -> None:
+    """Heavy long liquidations (capitulation flush) → BEAR evidence."""
+    cache = AltDataCache()
+    cache.set(
+        "coinglass",
+        {
+            "BTC": {
+                "long_liquidation_usd": 8_000_000.0,
+                "short_liquidation_usd": 500_000.0,
+                "liquidation_asof": "2026-06-26T00:00:00+00:00",
+            }
+        },
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint == "bear_trend"
+    assert ev["cg_long_liq_usd"] == pytest.approx(8_000_000.0)
+    assert ev["cg_liquidation_asof"] == "2026-06-26T00:00:00+00:00"
+
+
+def test_fuse_coinglass_short_squeeze_suggests_bull() -> None:
+    cache = AltDataCache()
+    cache.set(
+        "coinglass",
+        {"ETH": {"long_liquidation_usd": 300_000.0, "short_liquidation_usd": 9_000_000.0}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("crypto:ETH", cache, now_ts=1.0)
+    assert hint == "bull_trend"
+    assert ev["cg_short_liq_usd"] == pytest.approx(9_000_000.0)
+
+
+def test_fuse_coinglass_balanced_liq_no_override() -> None:
+    """Balanced liquidations (no clear cascade) → no override; evidence surfaced."""
+    cache = AltDataCache()
+    cache.set(
+        "coinglass",
+        {"BTC": {"long_liquidation_usd": 1_000_000.0, "short_liquidation_usd": 900_000.0}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("crypto:BTC", cache, now_ts=1.0)
+    assert hint is None
+    assert ev["cg_long_liq_usd"] == pytest.approx(1_000_000.0)
+
+
+# ── MyFxBook: contrarian retail FX positioning → bull/bear evidence ───────────
+
+
+def test_fuse_myfxbook_crowd_net_long_suggests_bear_contrarian() -> None:
+    """Retail crowd extremely net-long → contrarian BEAR evidence for that pair."""
+    cache = AltDataCache()
+    cache.set(
+        "myfxbook",
+        {"EURUSD": {"long_pct": 82.0, "short_pct": 18.0, "asof": "2026-06-26T12:00:00+00:00"}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("forex:EURUSD", cache, now_ts=1.0)
+    assert hint == "bear_trend"
+    assert ev["fxb_long_pct"] == pytest.approx(82.0)
+    assert ev["fxb_asof"] == "2026-06-26T12:00:00+00:00"
+
+
+def test_fuse_myfxbook_crowd_net_short_suggests_bull_contrarian() -> None:
+    cache = AltDataCache()
+    cache.set(
+        "myfxbook",
+        {"GBPUSD": {"long_pct": 20.0, "short_pct": 80.0}},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("forex:GBPUSD", cache, now_ts=1.0)
+    assert hint == "bull_trend"
+    assert ev["fxb_short_pct"] == pytest.approx(80.0)
+
+
+def test_fuse_myfxbook_routes_to_forex_only_not_crypto() -> None:
+    cache = AltDataCache()
+    cache.set("myfxbook", {"EURUSD": {"long_pct": 82.0}}, ttl_sec=9999, now_ts=0.0)
+    assert "myfxbook" not in cache.get_for_group("crypto:BTC", now_ts=1.0)
+    assert "myfxbook" in cache.get_for_group("forex:EURUSD", now_ts=1.0)
+
+
+# ── Expanded FRED panel surfaced as read-only evidence (not scored) ───────────
+
+
+def test_fuse_macro_panel_surfaced_as_evidence_with_currency() -> None:
+    """New FRED series reach the judge as evidence + carry their asof; scoring is
+    unchanged (still vix/hy only)."""
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {
+            "vix": 18.0,
+            "hy_spread": 350.0,
+            "dollar_index": 120.4,
+            "dollar_index_asof": "2026-06-18",
+            "yield_curve_10y3m": 0.55,
+            "yield_curve_10y3m_asof": "2026-06-26",
+            "oil_vol": 46.96,
+            "cpi": 320.1,
+            "cpi_asof": "2026-05-01",
+        },
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, ev = fuse_evidence("commodity:XAUUSD", cache, now_ts=1.0)
+    # New panel surfaced as evidence
+    assert ev["dollar_index"] == pytest.approx(120.4)
+    assert ev["dollar_index_asof"] == "2026-06-18"
+    assert ev["yield_curve_10y3m"] == pytest.approx(0.55)
+    assert ev["oil_vol"] == pytest.approx(46.96)
+    assert ev["cpi"] == pytest.approx(320.1)
+    assert ev["cpi_asof"] == "2026-05-01"  # monthly-lag observation date preserved
+    # Scoring is unchanged: VIX 18 / HY 350 is neutral → no override.
+    assert hint is None

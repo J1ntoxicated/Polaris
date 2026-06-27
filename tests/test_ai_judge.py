@@ -431,6 +431,129 @@ def test_evidence_block_graceful_when_no_evidence() -> None:
     assert rendered == "- regime: chop"
 
 
+# ── Allowlist-gap fix: max-expand altdata granular keys reach the judge ───────
+def test_evidence_block_renders_binance_positioning() -> None:
+    """The altdata expansion adds keyless Binance derivative positioning to the
+    fused evidence. The judge prompt MUST surface the granular keys (smart-money
+    long/short ratio, taker imbalance, OI delta) — previously dropped by the
+    hardcoded 5-key allowlist. flow_not_block: pure read-only context.
+    """
+    evidence = {
+        "label": "bull_trend",
+        "scores": {"bull_trend": 3.0},
+        "binance_top_long_short": 1.42,
+        "binance_taker_buy_sell": 1.18,
+        "binance_global_long_short": 2.1,
+        "binance_oi_change_24h": 0.057,
+        "binance_oi_asof": "2026-06-26T12:00:00Z",
+    }
+    rendered = _evidence_block({"regime": "bull_trend", "evidence": evidence})
+    assert "binance_top_long_short" in rendered
+    assert "1.42" in rendered
+    assert "binance_taker_buy_sell" in rendered
+    # Currency: the OI observation date is age-labelled, never silently 'current'.
+    assert "2026-06-26" in rendered
+
+
+def test_evidence_block_renders_coinglass_and_myfxbook() -> None:
+    """Coinglass liquidation cascade + MyFxBook retail crowd positioning reach the
+    judge prompt (granular keys), each carrying its asof currency label."""
+    evidence = {
+        "label": "crisis",
+        "scores": {"crisis": 2.0},
+        "cg_long_liq_usd": 4.2e7,
+        "cg_short_liq_usd": 3.1e6,
+        "cg_liquidation_asof": "2026-06-26T10:00:00Z",
+        "fxb_long_pct": 82.0,
+        "fxb_short_pct": 18.0,
+        "fxb_asof": "2026-06-26T11:00:00Z",
+    }
+    rendered = _evidence_block({"regime": "crisis", "evidence": evidence})
+    assert "cg_long_liq_usd" in rendered
+    assert "fxb_long_pct" in rendered
+    assert "82" in rendered
+    # Both positioning sources carry their currency label.
+    assert rendered.count("2026-06-26") >= 2
+
+
+def test_evidence_block_renders_curated_fred_panel() -> None:
+    """The FRED 4->32 expansion surfaces a curated macro panel as evidence-only
+    (no scoring). The judge prompt MUST render the DECISION-relevant subset (yield
+    curve / rates / breakevens / dollar / credit spread / vol term-structure) with
+    age labels — NOT a 32-number dump (prompt bloat). Off-curate series (e.g.
+    housing_starts) stay out of the prompt even when present in evidence.
+    """
+    evidence = {
+        "label": "bull_trend",
+        "scores": {"bull_trend": 2.0},
+        "yield_curve": -0.18,
+        "yield_curve_asof": "2026-06-26",
+        "ust_10y": 4.31,
+        "breakeven_10y": 2.34,
+        "dollar_index": 121.5,
+        "dollar_index_asof": "2026-06-25",
+        "ig_spread": 95.0,
+        "vix_3m": 20.1,
+        # Off-curate panel members present but should NOT bloat the prompt.
+        "housing_starts": 1.42,
+        "nonfarm_payrolls": 159000.0,
+    }
+    rendered = _evidence_block({"regime": "bull_trend", "evidence": evidence})
+    assert "yield_curve" in rendered
+    assert "-0.18" in rendered
+    assert "dollar_index" in rendered
+    assert "breakeven_10y" in rendered
+    # Currency label present on at least one curated panel member.
+    assert "2026-06-26" in rendered or "2026-06-25" in rendered
+    # Bloat guard: off-curate members are NOT dumped into the prompt.
+    assert "housing_starts" not in rendered
+    assert "nonfarm_payrolls" not in rendered
+
+
+def test_evidence_block_no_new_keys_is_unchanged() -> None:
+    """Pre-expansion evidence (only the original 5 allowlist keys) renders with no
+    binance/coinglass/myfxbook/panel lines — no fabricated content, no crash."""
+    evidence = {
+        "label": "bull_trend",
+        "scores": {"bull_trend": 2.5},
+        "crypto_fg": 80,
+        "avg_funding": 0.004,
+    }
+    rendered = _evidence_block({"regime": "bull_trend", "evidence": evidence})
+    assert "binance_" not in rendered
+    assert "cg_" not in rendered
+    assert "fxb_" not in rendered
+    assert "yield_curve" not in rendered
+    # Original signals still surfaced.
+    assert "crypto_fg" in rendered
+
+
+def test_entry_and_exit_prompts_both_carry_new_evidence() -> None:
+    """Both the ENTRY and EXIT prompt paths consume ``_evidence_block`` — the new
+    granular positioning + panel evidence reaches the model on BOTH legs (the
+    allowlist gap fix is single-source, so neither path can diverge)."""
+    from polaris.core.pipeline.agents.ai_judge import (
+        _build_entry_prompt,
+        _build_exit_prompt,
+    )
+
+    payload = {
+        "regime": "bull_trend",
+        "evidence": {
+            "label": "bull_trend",
+            "scores": {"bull_trend": 3.0},
+            "binance_top_long_short": 1.42,
+            "yield_curve": -0.18,
+        },
+    }
+    subject = {"symbol": "BTC-USDT", "side": "buy"}
+    entry = _build_entry_prompt(payload, subject=subject)
+    exit_ = _build_exit_prompt(payload, subject=subject)
+    for rendered in (entry, exit_):
+        assert "binance_top_long_short" in rendered
+        assert "yield_curve" in rendered
+
+
 # ===========================================================================
 # 5. Deterministic fallback — GPT error / no-client never degrades flow.
 # ===========================================================================

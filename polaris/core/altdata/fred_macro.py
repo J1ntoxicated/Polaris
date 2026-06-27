@@ -1,15 +1,38 @@
-"""FRED macro collector (EVIDENCE only) — VIX / HY spread / MOVE / yield curve.
+"""FRED macro collector (EVIDENCE only) — comprehensive macro panel.
 
 DEMO/PAPER. Reads slow-moving macro series from the St. Louis Fed (FRED) using
 ``FRED_API_KEY`` (present in .env). Elevated VIX / HY spread = risk-off /
 crisis evidence for the regime fuser of non-crypto (forex/index/commodity)
 groups. Graceful ``{}`` if the key is missing — no network call, no throttle.
 
-Series:
-  vix          = VIXCLS       (CBOE VIX, EOD)
-  hy_spread    = BAMLH0A0HYM2 (ICE BofA US High Yield OAS, percent → bps)
-  move         = MOVE         (ICE BofAML MOVE bond-vol index)
-  yield_curve  = T10Y2Y       (10Y-2Y Treasury spread)
+This collector was expanded from the original 4-series probe (vix / hy_spread /
+move / yield_curve) to a curated ~30-series macro panel spanning rates / prices
+/ employment / growth / money / credit / housing / dollar / consumer /
+commodities / volatility. Every series is FREE-tier and live-200 verified. The
+4 original output keys (``vix`` / ``hy_spread`` / ``move`` / ``yield_curve``)
+keep IDENTICAL names + units so the existing fuser scorer + tests are
+unaffected; the new series are PURE additive EVIDENCE surfaced to the AI judge
+(no scorer change required — they enrich ``evidence_json`` context).
+
+Unit normalisation: ICE BofA OAS series (``hy_spread`` / ``ig_spread``) are
+published by FRED in PERCENT; the system-wide spread unit is bps, so those two
+are ×100. Every other series passes through raw (FRED's native unit).
+
+Currency (#69): each emitted value carries its FRED OBSERVATION date as
+``<key>_asof`` (the day FRED actually printed the value) so a weekend / holiday
+/ monthly-lag read served as 'current' is age-labelable downstream. Monthly /
+quarterly series (CPI, payrolls, GDP, M2 …) are observation-dated weeks-to-months
+in the past BY NATURE — the asof lets the judge age-discount, never a block
+(flow_not_block).
+
+Rate-limit: FRED allows 120 req/min/key. The full panel is ~30 GET calls fired
+once per ``ttl_sec`` (3600s) cadence — a single hourly batch, far under the
+limit. No token bucket needed; the AltDataCache TTL is the throttle.
+
+MOVE (ICE BofAML bond-vol) is NOT redistributed by FRED (proprietary) and
+returns HTTP 400 'series does not exist'; ``_latest`` swallows that to None so
+``move`` is permanently absent (no crash). It is retained as a key for output
+stability — the bond-vol axis is simply unfilled.
 
 Ref: ~/Projects/auto_invasion_mk1-main/invasion/data/collectors/fred_macro.py
 """
@@ -29,22 +52,71 @@ logger = logging.getLogger(__name__)
 FRED_BASE: Final[str] = "https://api.stlouisfed.org"
 _OBS_PATH: Final[str] = "/fred/series/observations"
 
-# Output key → FRED series id.
+# Output key → FRED series id. Curated, FREE-tier, live-200-verified panel.
+# ── ORIGINAL 4 (unchanged names + units — fuser scorer + tests depend on these)
+# ── plus the additive macro panel (pure EVIDENCE for the AI judge).
 _SERIES: Final[dict[str, str]] = {
-    "vix": "VIXCLS",
-    "hy_spread": "BAMLH0A0HYM2",
-    "move": "MOVE",
-    "yield_curve": "T10Y2Y",
+    # — Original 4 (scored by the fuser macro scorer) —
+    "vix": "VIXCLS",  # CBOE VIX (EOD)
+    "hy_spread": "BAMLH0A0HYM2",  # ICE BofA US HY OAS (percent → bps)
+    "move": "MOVE",  # ICE BofAML MOVE (proprietary — FRED 400, stays None)
+    "yield_curve": "T10Y2Y",  # 10Y-2Y Treasury spread
+    # — Rates (daily) —
+    "fed_funds": "DFF",  # effective Fed funds rate
+    "ust_10y": "DGS10",  # 10Y Treasury yield
+    "ust_2y": "DGS2",  # 2Y Treasury yield
+    "yield_curve_10y3m": "T10Y3M",  # 10Y-3M spread (standard recession signal)
+    "sofr": "SOFR",  # secured overnight financing rate
+    # — Inflation —
+    "cpi": "CPIAUCSL",  # CPI all items (monthly)
+    "core_cpi": "CPILFESL",  # CPI ex food & energy (monthly)
+    "pce": "PCEPI",  # PCE price index (monthly)
+    "breakeven_5y": "T5YIE",  # 5Y breakeven inflation (daily, market expectation)
+    "breakeven_10y": "T10YIE",  # 10Y breakeven inflation (daily)
+    # — Employment —
+    "unemployment": "UNRATE",  # unemployment rate (monthly)
+    "nonfarm_payrolls": "PAYEMS",  # total nonfarm payrolls (monthly)
+    "initial_claims": "ICSA",  # initial jobless claims (weekly)
+    # — Growth —
+    "real_gdp": "GDPC1",  # real GDP (quarterly)
+    "industrial_production": "INDPRO",  # industrial production (monthly)
+    # — Money / liquidity —
+    "m2": "M2SL",  # M2 money stock (monthly)
+    "fed_balance_sheet": "WALCL",  # Fed total assets (weekly)
+    # — Credit —
+    "ig_spread": "BAMLC0A0CM",  # ICE BofA US IG OAS (percent → bps)
+    # — Housing —
+    "housing_starts": "HOUST",  # housing starts (monthly)
+    "home_price_index": "CSUSHPISA",  # Case-Shiller national HPI (monthly)
+    # — Dollar / FX —
+    "dollar_index": "DTWEXBGS",  # broad trade-weighted USD index (daily)
+    "eur_usd": "DEXUSEU",  # USD per EUR (daily, ~1wk lag)
+    "usd_jpy": "DEXJPUS",  # JPY per USD (daily)
+    # — Consumer —
+    "consumer_sentiment": "UMCSENT",  # U-Mich consumer sentiment (monthly)
+    # — Commodities —
+    "wti_crude": "DCOILWTICO",  # WTI crude spot (daily)
+    "brent_crude": "DCOILBRENTEU",  # Brent crude spot (daily)
+    # — Financial-stress composites —
+    "stl_stress": "STLFSI4",  # St. Louis Fed financial stress (weekly)
+    "nfci": "NFCI",  # Chicago Fed national financial conditions (weekly)
+    # — Volatility family —
+    "vix_3m": "VXVCLS",  # 3M VIX (term structure)
+    "oil_vol": "OVXCLS",  # CBOE crude-oil VIX
+    "gold_vol": "GVZCLS",  # CBOE gold VIX
 }
 
+# Series published by FRED in PERCENT that the system uses in bps (×100).
+_PERCENT_TO_BPS: Final[frozenset[str]] = frozenset({"hy_spread", "ig_spread"})
+
 # Output key → observation-date key. ``hy_spread`` shortens to ``hy_asof`` (the
-# name the fuser / judge prompt expect); the rest are ``<key>_asof``.
-_ASOF_KEY: Final[dict[str, str]] = {
-    "vix": "vix_asof",
-    "hy_spread": "hy_asof",
-    "move": "move_asof",
-    "yield_curve": "yield_curve_asof",
-}
+# name the fuser / judge prompt expect); every other key is ``<key>_asof``.
+_ASOF_SPECIAL: Final[dict[str, str]] = {"hy_spread": "hy_asof"}
+
+
+def _asof_key(key: str) -> str:
+    """Observation-date key for an output key (``hy_spread`` → ``hy_asof``)."""
+    return _ASOF_SPECIAL.get(key, f"{key}_asof")
 
 
 class FredMacroCollector:
@@ -69,16 +141,16 @@ class FredMacroCollector:
         try:
             for key, series_id in _SERIES.items():
                 val, obs_date = await self._latest(cli, series_id)
-                # BAMLH0A0HYM2 is in percent; system-wide unit is bps.
-                if key == "hy_spread" and val is not None:
+                # ICE BofA OAS series are in percent; system-wide unit is bps.
+                if key in _PERCENT_TO_BPS and val is not None:
                     val = val * 100
                 out[key] = val
                 # Currency: preserve the OBSERVATION date (the day FRED actually
-                # printed this value) so a weekend / holiday read served as
-                # 'current' is age-labelable downstream. Surfaced ONLY when a real
-                # value was found (no value → no fake date).
+                # printed this value) so a weekend / holiday / monthly-lag read
+                # served as 'current' is age-labelable downstream. Surfaced ONLY
+                # when a real value was found (no value → no fake date).
                 if val is not None and obs_date:
-                    out[_ASOF_KEY[key]] = obs_date
+                    out[_asof_key(key)] = obs_date
         except (httpx.HTTPError, RuntimeError) as exc:
             logger.info("[altdata] fred_macro fetch failed (graceful skip): %s", exc)
             return {}

@@ -4,7 +4,7 @@ DEMO/PAPER. Holds the latest payload per source with its own TTL. ``get`` return
 ``None`` once stale; ``get_for_group`` returns only the FRESH sources relevant to
 a given ``underlying_group_id`` by asset-class prefix:
 
-  - ``crypto:*``                 → okx_funding + crypto_fg + coinglass
+  - ``crypto:*``                 → okx_funding + binance_deriv + crypto_fg + coinglass
   - ``forex:* / index:* / commodity:*`` → fred_macro + myfxbook (forex only)
   - ``equity:*``                 → fred_macro (Stream C / Alpaca US equity is
                                    MACRO-sensitive: VIX / HY / risk-on-off)
@@ -21,7 +21,7 @@ from typing import Any
 
 # Asset-class prefix → source names that inform it.
 _GROUP_SOURCES: dict[str, tuple[str, ...]] = {
-    "crypto": ("okx_funding", "crypto_fg", "coinglass", "news_sentiment"),
+    "crypto": ("okx_funding", "binance_deriv", "crypto_fg", "coinglass", "news_sentiment"),
     "forex": ("fred_macro", "myfxbook", "news_sentiment"),
     "index": ("fred_macro", "news_sentiment"),
     "commodity": ("fred_macro", "cftc_cot", "news_sentiment"),

@@ -24,10 +24,13 @@ from typing import Any
 
 import httpx
 
+from polaris.core.altdata.binance_deriv import BinanceDerivCollector
 from polaris.core.altdata.cache import AltDataCache
 from polaris.core.altdata.cftc_cot import CFTCCotCollector
+from polaris.core.altdata.coinglass import CoinglassCollector
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
 from polaris.core.altdata.fred_macro import FredMacroCollector
+from polaris.core.altdata.myfxbook import MyfxbookCollector
 from polaris.core.altdata.news_sentiment import NewsSentimentCollector
 from polaris.core.altdata.okx_funding import OKXFundingCollector
 from polaris.core.data.quote_writer import QuoteTickWriter
@@ -350,19 +353,25 @@ def persist_altdata_snapshot(
 def _default_altdata_collectors() -> list[Any]:
     """The live alt-data EVIDENCE collectors (keyless/keyed graceful-skip).
 
-    Keyless sources (Coinglass / MyFxBook) are intentionally omitted until keys
-    are present — their stubs would only ever return ``{}``. FRED uses
-    ``FRED_API_KEY`` (no key → graceful ``{}``, no network); OKX funding + alt.me
-    F&G need no key. News reuses the Alpaca paper creds (no creds → graceful
-    ``{}``, no network) and classifies headlines via an async GPT call on its own
-    15min cadence (in-loop GPT = 0 holds — off the per-tick hot path).
+    Every collector is registered; a missing key/creds yields a graceful ``{}``
+    with NO network call (no throttle). FRED uses ``FRED_API_KEY``; OKX funding +
+    Binance derivatives are keyless public market data; alt.me F&G needs no key.
+    Coinglass (``COINGLASS_API_KEY``) + MyFxBook (``MYFXBOOK_EMAIL`` /
+    ``MYFXBOOK_PASSWORD``) are activation-ready and key/creds-gated — they sit
+    inert (``{}``, no network) until Jin adds credentials, then activate with no
+    code change. News reuses the Alpaca paper creds (no creds → graceful ``{}``,
+    no network) and classifies headlines via an async GPT call on its own 15min
+    cadence (in-loop GPT = 0 holds — off the per-tick hot path).
     """
     return [
         OKXFundingCollector(),
+        BinanceDerivCollector(),
         CryptoFearGreedCollector(),
         FredMacroCollector(),
         CFTCCotCollector(),
         NewsSentimentCollector(),
+        CoinglassCollector(),
+        MyfxbookCollector(),
     ]
 
 

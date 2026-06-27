@@ -211,6 +211,76 @@ def _cot_age_suffix(evidence: dict[str, Any]) -> str:
     return ""
 
 
+# Granular positioning / order-flow keys the altdata expansion adds to the fused
+# evidence (Binance derivs / Coinglass liquidations / MyFxBook retail crowd). The
+# 5-key allowlist used to DROP these from the judge prompt; now they are rendered
+# as read-only context (flow_not_block). Each source's ``*_asof`` carries its
+# observation date for inline age labelling (#69 currency).
+_POSITIONING_KEYS: tuple[str, ...] = (
+    "binance_top_long_short", "binance_taker_buy_sell", "binance_global_long_short",
+    "binance_funding", "binance_oi_change_24h",
+    "cg_long_liq_usd", "cg_short_liq_usd", "cg_funding_mean", "cg_funding_dispersion",
+    "fxb_long_pct", "fxb_short_pct",
+)
+# Per-source observation-date keys → the suffix label shown after the block.
+_POSITIONING_ASOF: tuple[str, ...] = (
+    "binance_oi_asof", "cg_liquidation_asof", "fxb_asof",
+)
+
+# Curated, DECISION-relevant subset of the FRED 4->32 panel surfaced to the judge.
+# The full 32-series panel is evidence-only in the fuser; dumping all 32 numbers
+# would bloat the prompt, so only the macro axes that move a trade decision are
+# rendered: yield-curve shape, rate level, inflation expectations, the dollar,
+# the credit-spread, and the vol term-structure. Off-curate series (housing /
+# payrolls / GDP / money …) stay out of the prompt (still in evidence_json).
+_FRED_PANEL_CURATED: tuple[str, ...] = (
+    "yield_curve", "yield_curve_10y3m", "ust_10y", "ust_2y", "fed_funds",
+    "breakeven_5y", "breakeven_10y", "dollar_index", "ig_spread", "vix_3m",
+)
+
+
+def _positioning_line(evidence: dict[str, Any]) -> str | None:
+    """`` - positioning (binance/coinglass/myfxbook): {…} (asof …)`` or ``None``.
+
+    Surfaces the granular Binance / Coinglass / MyFxBook positioning keys the
+    altdata expansion adds — previously dropped by the hardcoded allowlist. Each
+    present source's observation date is appended as a currency label (never a
+    drop). Absent on all keys → ``None`` (the line is simply omitted).
+    """
+    present = {k: evidence[k] for k in _POSITIONING_KEYS if k in evidence}
+    if not present:
+        return None
+    asof_parts = [
+        f"{k} {evidence[k]}" for k in _POSITIONING_ASOF
+        if isinstance(evidence.get(k), str) and evidence[k]
+    ]
+    asof = f" (asof {', '.join(asof_parts)})" if asof_parts else ""
+    return f"- positioning (binance/coinglass/myfxbook): {present}{asof}"
+
+
+def _macro_panel_line(evidence: dict[str, Any]) -> str | None:
+    """`` - macro panel (curated): {…}`` or ``None``.
+
+    Renders the DECISION-relevant FRED panel subset (yield curve / rates /
+    breakevens / dollar / credit / vol term) with each present series' ``*_asof``
+    observation date inline. Off-curate panel members are intentionally excluded
+    (prompt-bloat guard). Absent on all curated keys → ``None``.
+    """
+    parts: list[str] = []
+    for key in _FRED_PANEL_CURATED:
+        val = evidence.get(key)
+        if not isinstance(val, (int, float)):
+            continue
+        asof = evidence.get(f"{key}_asof")
+        if isinstance(asof, str) and asof:
+            parts.append(f"{key}={val} (asof {asof})")
+        else:
+            parts.append(f"{key}={val}")
+    if not parts:
+        return None
+    return f"- macro panel (curated): {', '.join(parts)}"
+
+
 def _evidence_block(payload: dict[str, Any]) -> str:
     """Render the bot's own per-ticker information for the judge prompt.
 
@@ -262,6 +332,16 @@ def _evidence_block(payload: dict[str, Any]) -> str:
             macro_age = _macro_age_suffix(evidence)
             cot_age = _cot_age_suffix(evidence)
             lines.append(f"- alt-data signals: {raw_signals}{macro_age}{cot_age}")
+        # Max-expand altdata: granular positioning (Binance / Coinglass /
+        # MyFxBook) + the curated FRED macro panel reach the judge here. Without
+        # these the hardcoded 5-key allowlist dropped everything the expansion
+        # surfaced as evidence-only. flow_not_block: read-only context, age-labelled.
+        positioning = _positioning_line(evidence)
+        if positioning is not None:
+            lines.append(positioning)
+        macro_panel = _macro_panel_line(evidence)
+        if macro_panel is not None:
+            lines.append(macro_panel)
     if isinstance(baseline, dict) and baseline:
         lines.append(f"- technicals (baseline atr/size/volume): {baseline}")
     if isinstance(cell, dict) and cell:

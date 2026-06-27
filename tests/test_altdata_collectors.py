@@ -17,6 +17,10 @@ import httpx
 import pytest
 
 from polaris.core.altdata._base import AltDataCollector
+from polaris.core.altdata.binance_deriv import (
+    BinanceDerivCollector,
+    compute_oi_change_24h,
+)
 from polaris.core.altdata.coinglass import CoinglassCollector
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
 from polaris.core.altdata.fred_macro import FredMacroCollector
@@ -365,3 +369,324 @@ def test_cot_zero_open_interest_rows_skipped() -> None:
         r["open_interest_all"] = "0"
     out = _derive_signals(rows)
     assert "SILVER" not in out
+
+
+# ── FRED macro expansion (4 → comprehensive panel) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fred_macro_expanded_panel_parses() -> None:
+    """The expanded panel fetches the new macro series + preserves their asof.
+
+    The original 4 keys keep IDENTICAL names + units; the new series pass through
+    raw (except ig_spread which, like hy_spread, is percent → bps).
+    """
+    series = {
+        "VIXCLS": "18.5",
+        "BAMLH0A0HYM2": "3.5",  # → 350 bps
+        "T10Y2Y": "0.42",
+        "DGS10": "4.40",
+        "DGS2": "4.09",
+        "T10Y3M": "0.55",
+        "DFF": "3.63",
+        "CPIAUCSL": "320.1",
+        "T5YIE": "2.21",
+        "UNRATE": "4.3",
+        "DTWEXBGS": "120.40",
+        "BAMLC0A0CM": "0.76",  # IG OAS percent → 76 bps
+        "STLFSI4": "-0.96",
+        "VXVCLS": "20.33",
+        "OVXCLS": "46.96",
+    }
+
+    def responder(req: httpx.Request) -> Any:
+        sid = req.url.params.get("series_id")
+        val = series.get(sid, ".")
+        return {"observations": [{"date": "2026-06-26", "value": val}]}
+
+    coll = FredMacroCollector(api_key="testkey")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    # Original keys unchanged
+    assert out["vix"] == pytest.approx(18.5)
+    assert out["hy_spread"] == pytest.approx(350.0)
+    assert out["yield_curve"] == pytest.approx(0.42)
+    # New rates / inflation / employment / dollar
+    assert out["ust_10y"] == pytest.approx(4.40)
+    assert out["ust_2y"] == pytest.approx(4.09)
+    assert out["yield_curve_10y3m"] == pytest.approx(0.55)
+    assert out["fed_funds"] == pytest.approx(3.63)
+    assert out["cpi"] == pytest.approx(320.1)
+    assert out["breakeven_5y"] == pytest.approx(2.21)
+    assert out["unemployment"] == pytest.approx(4.3)
+    assert out["dollar_index"] == pytest.approx(120.40)
+    # IG spread is percent → bps like HY
+    assert out["ig_spread"] == pytest.approx(76.0)
+    # Stress + volatility family
+    assert out["stl_stress"] == pytest.approx(-0.96)
+    assert out["vix_3m"] == pytest.approx(20.33)
+    assert out["oil_vol"] == pytest.approx(46.96)
+    # Currency preserved for the new series (non-hy uses <key>_asof)
+    assert out["ust_10y_asof"] == "2026-06-26"
+    assert out["cpi_asof"] == "2026-06-26"
+    assert out["ig_spread_asof"] == "2026-06-26"
+
+
+@pytest.mark.asyncio
+async def test_fred_macro_panel_has_at_least_25_series() -> None:
+    """The expansion is real: ≥25 distinct FRED series are requested."""
+    from polaris.core.altdata.fred_macro import _SERIES
+
+    assert len(_SERIES) >= 25
+    # The original 4 are still present with their exact ids.
+    assert _SERIES["vix"] == "VIXCLS"
+    assert _SERIES["hy_spread"] == "BAMLH0A0HYM2"
+    assert _SERIES["move"] == "MOVE"
+    assert _SERIES["yield_curve"] == "T10Y2Y"
+
+
+@pytest.mark.asyncio
+async def test_fred_macro_dead_move_series_degrades() -> None:
+    """MOVE (FRED 400) degrades to None without dropping the rest of the panel."""
+
+    def responder(req: httpx.Request) -> Any:
+        sid = req.url.params.get("series_id")
+        if sid == "MOVE":
+            return httpx.Response(400, json={"error_message": "series does not exist"})
+        return {"observations": [{"date": "2026-06-26", "value": "1.0"}]}
+
+    coll = FredMacroCollector(api_key="testkey")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    assert out["move"] is None
+    assert out.get("move_asof") is None
+    # The rest of the panel still resolves (degrade-never-crash, not a halt).
+    assert out["vix"] == pytest.approx(1.0)
+    assert out["dollar_index"] == pytest.approx(1.0)
+
+
+# ── Binance derivatives collector (keyless public) ────────────────────────────
+
+
+def _binance_responder(
+    *,
+    funding: str = "0.0001",
+    mark: str = "60000",
+    oi_old: float = 1_000_000.0,
+    oi_new: float = 1_200_000.0,
+    glob_ls: str = "2.05",
+    top_ls: str = "1.40",
+    taker: str = "1.20",
+) -> Callable[[httpx.Request], Any]:
+    def responder(req: httpx.Request) -> Any:
+        path = req.url.path
+        if "premiumIndex" in path:
+            return [{"lastFundingRate": funding, "markPrice": mark}]
+        if "openInterestHist" in path:
+            return [
+                {"sumOpenInterestValue": str(oi_old), "timestamp": 1_700_000_000_000},
+                {"sumOpenInterestValue": str(oi_new), "timestamp": 1_700_086_400_000},
+            ]
+        if "globalLongShortAccountRatio" in path:
+            return [{"longShortRatio": glob_ls}]
+        if "topLongShortPositionRatio" in path:
+            return [{"longShortRatio": top_ls}]
+        if "takerlongshortRatio" in path:
+            return [{"buySellRatio": taker}]
+        return httpx.Response(404, json={})
+
+    return responder
+
+
+def test_binance_compute_oi_change_24h() -> None:
+    rows = [
+        {"sumOpenInterestValue": "1000000", "timestamp": 1_700_000_000_000},
+        {"sumOpenInterestValue": "1200000", "timestamp": 1_700_086_400_000},
+    ]
+    change, latest, iso = compute_oi_change_24h(rows)
+    assert change == pytest.approx(0.2)  # (1.2M - 1.0M) / 1.0M
+    assert latest == pytest.approx(1_200_000.0)
+    assert iso is not None and iso.startswith("2023-")  # ms → ISO UTC
+
+
+def test_binance_compute_oi_change_degrades_on_short_or_zero() -> None:
+    # Single row → no change, but latest value + asof still returned.
+    change, latest, iso = compute_oi_change_24h(
+        [{"sumOpenInterestValue": "5", "timestamp": 1_700_000_000_000}]
+    )
+    assert change is None
+    assert latest == pytest.approx(5.0)
+    assert iso is not None
+    # Zero oldest → no divide-by-zero.
+    change2, _, _ = compute_oi_change_24h(
+        [
+            {"sumOpenInterestValue": "0", "timestamp": 1},
+            {"sumOpenInterestValue": "9", "timestamp": 2},
+        ]
+    )
+    assert change2 is None
+    # Empty → all None.
+    assert compute_oi_change_24h([]) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_binance_deriv_parses_positioning_and_flow() -> None:
+    coll = BinanceDerivCollector(symbols=("BTCUSDT",))
+    out = await coll.fetch(client=_client(_binance_responder()))
+    assert out is not None
+    row = out["BTCUSDT"]
+    assert row["funding_rate"] == pytest.approx(0.0001)
+    assert row["mark_price"] == pytest.approx(60000.0)
+    assert row["oi_value_usd"] == pytest.approx(1_200_000.0)
+    assert row["oi_change_24h"] == pytest.approx(0.2)  # the gap okx_funding leaves
+    assert row["global_long_short"] == pytest.approx(2.05)
+    assert row["top_long_short"] == pytest.approx(1.40)
+    assert row["taker_buy_sell"] == pytest.approx(1.20)
+    # Currency: OI observation date preserved.
+    assert isinstance(row["oi_asof"], str) and row["oi_asof"]
+
+
+@pytest.mark.asyncio
+async def test_binance_deriv_is_keyless_uses_no_credentials() -> None:
+    """The collector signs nothing — no API key/secret header on any request."""
+    captured: list[httpx.Request] = []
+
+    def responder(req: httpx.Request) -> Any:
+        captured.append(req)
+        return _binance_responder()(req)
+
+    coll = BinanceDerivCollector(symbols=("ETHUSDT",))
+    await coll.fetch(client=_client(responder))
+    assert captured  # requests were made
+    for req in captured:
+        assert "X-MBX-APIKEY" not in req.headers
+        assert "signature" not in req.url.params
+
+
+@pytest.mark.asyncio
+async def test_binance_deriv_degrades_on_partial_failure() -> None:
+    """A failing sub-endpoint leaves only that field absent (never a crash)."""
+
+    def responder(req: httpx.Request) -> Any:
+        if "openInterestHist" in req.url.path:
+            return httpx.Response(500, json={})  # OI leg fails
+        return _binance_responder()(req)
+
+    coll = BinanceDerivCollector(symbols=("BTCUSDT",))
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    row = out["BTCUSDT"]
+    assert "oi_value_usd" not in row  # OI degraded
+    assert row["funding_rate"] == pytest.approx(0.0001)  # other axes intact
+    assert row["top_long_short"] == pytest.approx(1.40)
+
+
+@pytest.mark.asyncio
+async def test_binance_deriv_network_error_returns_empty() -> None:
+    def responder(req: httpx.Request) -> Any:
+        raise httpx.ConnectError("boom")
+
+    coll = BinanceDerivCollector(symbols=("BTCUSDT",))
+    out = await coll.fetch(client=_client(responder))
+    assert out == {}
+
+
+def test_binance_deriv_metadata() -> None:
+    coll = BinanceDerivCollector()
+    assert coll.name == "binance_deriv"
+    assert coll.asset_classes == ("crypto",)
+    assert coll.ttl_sec > 0
+
+
+# ── Coinglass activation (key-gated; tested with an injected key) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_coinglass_activates_with_key_and_parses_liquidation() -> None:
+    """With a key, Coinglass reads aggregated liquidation + cross-exchange funding."""
+
+    def responder(req: httpx.Request) -> Any:
+        # Verify the CG-API-KEY header is sent on every authenticated call.
+        assert req.headers.get("CG-API-KEY") == "ck"
+        if "liquidation" in req.url.path:
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "aggregated_long_liquidation_usd": "5000000",
+                        "aggregated_short_liquidation_usd": "1000000",
+                        "time": 1_700_086_400_000,
+                    }
+                ],
+            }
+        if "funding-rate/exchange-list" in req.url.path:
+            return {
+                "code": "0",
+                "data": [
+                    {"funding_rate": "0.0001"},
+                    {"funding_rate": "0.0003"},
+                ],
+            }
+        return httpx.Response(404, json={})
+
+    coll = CoinglassCollector(api_key="ck", coins=("BTC",))
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    row = out["BTC"]
+    assert row["long_liquidation_usd"] == pytest.approx(5_000_000.0)
+    assert row["short_liquidation_usd"] == pytest.approx(1_000_000.0)
+    assert row["funding_mean"] == pytest.approx(0.0002)
+    # Currency: liquidation observation date preserved.
+    assert isinstance(row["liquidation_asof"], str) and row["liquidation_asof"]
+
+
+@pytest.mark.asyncio
+async def test_coinglass_with_key_degrades_on_error() -> None:
+    def responder(req: httpx.Request) -> Any:
+        return httpx.Response(401, json={"code": "401", "msg": "API key missing."})
+
+    coll = CoinglassCollector(api_key="ck", coins=("BTC",))
+    out = await coll.fetch(client=_client(responder))
+    assert out == {}  # no usable data → empty (no crash)
+
+
+# ── MyFxBook activation (creds-gated; tested with injected creds) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_myfxbook_activates_with_creds_and_parses_outlook() -> None:
+    """With creds, MyFxBook logs in then parses per-pair retail long/short %."""
+
+    def responder(req: httpx.Request) -> Any:
+        if "login" in req.url.path:
+            return {"error": False, "session": "S123"}
+        if "get-community-outlook" in req.url.path:
+            assert req.url.params.get("session") == "S123"
+            return {
+                "error": False,
+                "symbols": [
+                    {"name": "EURUSD", "longPercentage": "78.0", "shortPercentage": "22.0"},
+                    {"name": "GBPUSD", "longPercentage": "40.0", "shortPercentage": "60.0"},
+                ],
+            }
+        return httpx.Response(404, json={})
+
+    coll = MyfxbookCollector(email="e@x.com", password="pw")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    assert out["EURUSD"]["long_pct"] == pytest.approx(78.0)
+    assert out["GBPUSD"]["short_pct"] == pytest.approx(60.0)
+    # Currency: each row carries a fetch-time asof.
+    assert isinstance(out["EURUSD"]["asof"], str) and out["EURUSD"]["asof"]
+
+
+@pytest.mark.asyncio
+async def test_myfxbook_with_creds_failed_login_returns_empty() -> None:
+    def responder(req: httpx.Request) -> Any:
+        if "login" in req.url.path:
+            return {"error": True, "message": "bad creds"}
+        raise AssertionError("must not call outlook after a failed login")
+
+    coll = MyfxbookCollector(email="e@x.com", password="pw")
+    out = await coll.fetch(client=_client(responder))
+    assert out == {}

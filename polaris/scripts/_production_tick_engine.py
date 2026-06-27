@@ -157,6 +157,13 @@ _MARKETABLE_LIMIT_SIGNALS: frozenset[str] = frozenset({_BURST_RIDER})
 # order). NOT a throttle: flooring up would BREACH the very cap that clipped it.
 _MIN_TICK_NOTIONAL_USD: float = MIN_OKX_NOTIONAL_USD
 
+# Heartbeat throttle (seconds). The per-loop heartbeat DEBUG was a 0.5s firehose
+# (~2.8% of the live log). It is a per-decision trace, NOT the stall signal — the
+# STALL WARNING is computed independently from ``last_loop_mono`` every loop — so
+# the heartbeat is throttled to at most one line per this window. Normal-state
+# quiet, abnormal (stall) still loud.
+_HEARTBEAT_THROTTLE_SEC: float = 60.0
+
 
 def _sized_notional(
     conn: Any,
@@ -470,9 +477,14 @@ async def run_tick_decision_loop(
                     "(shared-conn blocker?)",
                     gap, cadence_sec, eng.loop_count,
                 )
-        logger.debug(
-            "[tick-engine] heartbeat loop=%d mono=%.3f", eng.loop_count, loop_start
-        )
+        # Heartbeat DEBUG is 60s-throttled (was a per-loop firehose). This guard
+        # is on the DEBUG LINE ONLY — the STALL WARNING above already ran this
+        # loop, so throttling here never dims stall visibility (stall = loud).
+        if loop_start - eng.hb_mono >= _HEARTBEAT_THROTTLE_SEC:
+            eng.hb_mono = loop_start
+            logger.debug(
+                "[tick-engine] heartbeat loop=%d mono=%.3f", eng.loop_count, loop_start
+            )
         try:
             now_ts = int(time.time())
             now_mono = time.monotonic()

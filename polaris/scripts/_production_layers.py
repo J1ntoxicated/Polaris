@@ -83,11 +83,52 @@ from polaris.scripts._production_bars import (
     staleness_threshold_for,
 )
 from polaris.scripts._production_indicators import compute_real_regime_signal
+from polaris.scripts._session_map import session_group, session_transitions
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.capital.session_calendar import capital_seconds_to_close
 
 logger = logging.getLogger(__name__)
+
+# Session-edge log dedup: the monotonic-ish UTC epoch of the last focus cycle
+# that ran the ``[session]`` OPEN/CLOSE edge check. The edge detector fires only
+# when a regional cash boundary falls in ``(prev, now]``, so a per-cycle call
+# emits a ``[session]`` line ONLY on the actual open/close transition (never
+# per-tick). ``None`` until the first cycle (which seeds the baseline, no edge).
+_LAST_SESSION_CYCLE_TS: int | None = None
+
+
+def _emit_session_edges(universe: Sequence[Any], now_ts: int) -> None:
+    """Log ``[session] {region} OPEN/CLOSE symbols=N`` for any boundary just crossed.
+
+    Operational narrative (INFO) — the global session clock turning over. Pure
+    log: never gates trading (the TRADE weight is ``instrument_session_weight``,
+    untouched). Edge-trigger only via ``session_transitions`` (no per-tick spam).
+    ``symbols`` counts the watched universe rows mapped to that region's session
+    group. Fail-open: any error here is swallowed (logging must never break the
+    focus cycle).
+    """
+    global _LAST_SESSION_CYCLE_TS
+    prev = _LAST_SESSION_CYCLE_TS
+    _LAST_SESSION_CYCLE_TS = now_ts
+    if prev is None:
+        return  # first cycle seeds the baseline; no edge to report yet
+    try:
+        edges = session_transitions(prev, now_ts)
+        if not edges:
+            return
+        region_counts: dict[str, int] = {}
+        for ins in universe:
+            grp = session_group(ins.symbol)
+            if grp is not None:
+                region_counts[grp] = region_counts.get(grp, 0) + 1
+        for region, kind in edges:
+            logger.info(
+                "[session] %s %s symbols=%d",
+                region, kind, region_counts.get(region, 0),
+            )
+    except Exception:  # noqa: BLE001 — a log helper must never break the cycle
+        logger.debug("[session] edge-log skipped (non-fatal)")
 
 # Layer 1 bar-ingest helpers + timeframe constants now live in ``_production_bars``;
 # re-exported here so existing ``_production_layers`` import paths keep working.
@@ -736,6 +777,10 @@ def refresh_focus_watchlist(
     tier_counts: dict[str, int] = {}
     for f in focus:
         tier_counts[f.tier] = tier_counts.get(f.tier, 0) + 1
+    # Operational narrative: surface regional session OPEN/CLOSE edges (the global
+    # session clock turning over). Edge-trigger only — emits nothing on a normal
+    # mid-session cycle. Log only; never gates trading.
+    _emit_session_edges(universe, ts)
     logger.info(
         "[L0/focus] universe=%d → watched=%d (signal_density=%d, cell_scores=%d, "
         "tiers=%s | judged=%d trade_ineligible=%d ambiguous=%d)",

@@ -743,10 +743,13 @@ async def _run_tick(
                     state.fault_events += 1
                     continue
                 if sig is None:
-                    logger.debug(
-                        "[L1/signal] no-emit %s:%s strategy=%s tf=%s",
-                        venue, symbol, strategy_id, timeframe,
-                    )
+                    # A strategy that produced no signal this tick is the dominant
+                    # normal state (most symbols stay quiet most ticks). The former
+                    # per-symbol DEBUG line was 88% of the live log; its count is
+                    # already aggregated by the per-tick ``[tick N] focus=…
+                    # bars_by_tf=…`` INFO summary below + the per-emit INFO lines
+                    # (emit-vs-focus IS the quiet rate), so the individual line
+                    # carried zero extra signal. Dropped — log only, flow untouched.
                     continue
                 if not _is_finite_signal(sig):
                     record_fault(

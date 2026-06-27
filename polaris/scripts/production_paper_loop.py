@@ -419,6 +419,14 @@ async def _altdata_producer(
                 continue
             cache.set(name, payload, ttl_sec=int(ttl) or 1, now_ts=time.time())
             asset_class = (getattr(coll, "asset_classes", ()) or ("",))[0]
+            # Operational narrative (INFO): a SUCCESSFUL evidence refresh. Only
+            # the failure path logged before (WARNING), so the brain's live
+            # FRED/funding/binance intake was invisible. One line per fetched
+            # source surfaces the collection cadence (log only — no behaviour).
+            logger.info(
+                "[altdata] %s refreshed asset=%s ttl=%ds",
+                name, asset_class or "-", int(ttl),
+            )
             try:
                 persist_altdata_snapshot(
                     conn, ts=int(time.time()), source=name,

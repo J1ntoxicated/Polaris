@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from tools.ops import alerting, botctl
 from tools.ops.ops_config import (
@@ -29,14 +30,33 @@ def _wal_mb(cfg: OpsConfig) -> float:
         return 0.0
 
 
-def _rotate_logs(cfg: OpsConfig, *, now: float) -> None:
-    """Only called in the bot-down window — no live-write mv race possible."""
-    day = datetime.fromtimestamp(now, tz=UTC).strftime("%Y%m%d")
-    if cfg.bot_log.exists():
-        os.replace(cfg.bot_log, cfg.bot_log.with_name(f"{cfg.bot_log.name}.{day}"))
-    rotated = sorted(cfg.bot_log.parent.glob(cfg.bot_log.name + ".*"))
+def _rotate_one_log(base: Path, *, day: str) -> None:
+    """Date-rotate ``base`` (if present) + prune its dated backups to LOG_KEEP.
+
+    Bot-down window only — no live-write mv race. The dated rotation preserves
+    content (never a truncate/delete of the live file), so unique tracebacks in
+    ``bot_spawn.log`` survive.
+    """
+    if base.exists():
+        os.replace(base, base.with_name(f"{base.name}.{day}"))
+    rotated = sorted(base.parent.glob(base.name + ".*"))
     for old in rotated[:-LOG_KEEP]:
         old.unlink(missing_ok=True)
+
+
+def _rotate_logs(cfg: OpsConfig, *, now: float) -> None:
+    """Only called in the bot-down window — no live-write mv race possible.
+
+    Rotates BOTH the runtime log (``bot_log``) and the spawn log
+    (``spawn_log``). ``bot_spawn.log`` is the subprocess stdout/stderr sink
+    (``botctl._spawn`` opens it append-only) and previously had NO rotation
+    wired — it leaked to 1.5 G on the live box. It carries unique
+    pre-logging-init crash tracebacks, so it is date-rotated (content-preserving)
+    on the same LOG_KEEP cap as runtime, never truncated.
+    """
+    day = datetime.fromtimestamp(now, tz=UTC).strftime("%Y%m%d")
+    _rotate_one_log(cfg.bot_log, day=day)
+    _rotate_one_log(cfg.spawn_log, day=day)
 
 
 def _run_retention(cfg: OpsConfig, *, now: float) -> None:

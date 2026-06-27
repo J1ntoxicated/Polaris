@@ -249,3 +249,29 @@ def test_tick_gate_independent_symbols_each_log(
                      regime="bull_trend", now_ts=now)
     # Distinct symbols are tracked independently → each logs its first state.
     assert len([c for c in calls if c[0] == "tick-gate/regime-active"]) == 2
+
+
+# --- no-emit firehose removed: per-symbol DEBUG dropped, aggregate is SSOT -----
+
+
+def test_no_emit_per_symbol_debug_line_is_removed() -> None:
+    """The per-symbol ``[L1/signal] no-emit`` DEBUG line is GONE.
+
+    Live (2026-06-26): that line was 88% of the runtime log — one per
+    strategy×symbol×tick where the strategy emitted no signal (the dominant
+    normal state). Its count is fully recoverable from the per-tick
+    ``[tick N] focus=…`` INFO aggregate + the per-emit INFO lines (emit-vs-focus
+    IS the no-emit rate), so the individual line carried zero extra signal and
+    was dropped. This guards against a re-introduction of the firehose.
+    """
+    import inspect
+
+    from polaris.scripts import _production_tick
+
+    src = inspect.getsource(_production_tick)
+    assert "[L1/signal] no-emit" not in src, (
+        "the per-symbol no-emit DEBUG firehose must stay removed "
+        "(count is aggregated by the per-tick [tick N] INFO summary)"
+    )
+    # The aggregate summary that REPLACES it is still present (the SSOT).
+    assert "[tick %d]" in src, "the per-tick aggregate summary must remain"

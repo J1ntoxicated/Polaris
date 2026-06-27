@@ -72,6 +72,42 @@ def test_rotation_after_stop_and_prune_to_14(
     assert cfg.bot_log.with_name(cfg.bot_log.name + ".20260510") not in rotated_files
 
 
+def test_spawn_log_rotated_and_pruned_like_runtime(
+    cfg: OpsConfig, stop_start: dict[str, list[str]]
+) -> None:
+    """bot_spawn.log is rotated + pruned to LOG_KEEP in the same down window.
+
+    The 1.5 G live leak was bot_spawn.log: ``botctl._spawn`` appends subprocess
+    stdout/stderr forever and ``_rotate_logs`` only rotated ``bot_log``. The
+    spawn log carries unique pre-logging-init crash tracebacks, so it must be
+    DATE-ROTATED (never silently truncated) on the same LOG_KEEP cap as runtime.
+    """
+    cfg.ops_dir.mkdir(parents=True, exist_ok=True)
+    cfg.spawn_log.write_text("live spawn traceback\n", encoding="utf-8")
+    for i in range(16):
+        old = cfg.spawn_log.with_name(f"{cfg.spawn_log.name}.202605{i + 10:02d}")
+        old.write_text("x\n", encoding="utf-8")
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    rotated = sorted(cfg.spawn_log.parent.glob(cfg.spawn_log.name + ".*"))
+    assert len(rotated) == 14  # pruned to LOG_KEEP
+    # today's rotation present (the 1.5 G live file got rolled, not deleted)
+    assert cfg.spawn_log.with_name(cfg.spawn_log.name + ".20260611") in rotated
+    # oldest pruned
+    assert cfg.spawn_log.with_name(cfg.spawn_log.name + ".20260510") not in rotated
+    # the live spawn_log was rolled away (its content preserved in the dated file)
+    assert not cfg.spawn_log.exists()
+
+
+def test_spawn_log_rotation_absent_file_is_noop(
+    cfg: OpsConfig, stop_start: dict[str, list[str]]
+) -> None:
+    """A missing bot_spawn.log must not break the restart (first-run / fresh box)."""
+    cfg.bot_log.write_text("live\n", encoding="utf-8")
+    # no spawn_log written
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert not cfg.spawn_log.exists()
+
+
 def test_wal_line_format(cfg: OpsConfig, stop_start: dict[str, list[str]]) -> None:
     cfg.wal_path.write_bytes(b"x" * (3 * 1024 * 1024))
     assert daily_restart.run(cfg, now=NOW) == "ok"

@@ -119,5 +119,12 @@ def setup_polaris_logging(
     # (1580/2000 lines), the same disk + logging-lock pollution. Polaris venue
     # adapters re-log the salient outcome at DEBUG so we keep observability
     # without the drown.
-    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "yfinance", "peewee"):
+    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "peewee"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # yfinance is pinned harder: it emits "$X: possibly delisted; no price data
+    # found" at ERROR from inside its own history() for an unmapped/delisted
+    # ticker, and ERROR ≥ WARNING leaks past the WARNING pin above (one line per
+    # bar-period per such symbol). The Polaris wrapper (_yahoo_bars) already
+    # fallbacks + per-period caches (degrade-never-crash), so CRITICAL silences
+    # the library noise with zero behaviour change — the bar still flows.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)

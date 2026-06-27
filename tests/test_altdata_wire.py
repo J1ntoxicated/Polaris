@@ -563,6 +563,46 @@ async def test_producer_interruptible_and_persists(memdb: sqlite3.Connection) ->
 
 
 @pytest.mark.asyncio
+async def test_producer_logs_info_on_successful_refresh(
+    memdb: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A successful evidence refresh surfaces an INFO ``[altdata]`` narrative line.
+
+    Previously only the failure path logged (WARNING) — the brain's FRED/funding/
+    binance SUCCESS collection was invisible. The refresh now emits an INFO line
+    naming the source + asset_class + ttl so the operational log shows live
+    evidence intake (log only — cadence / cache / persistence untouched).
+    """
+    import logging
+
+    cache = AltDataCache()
+    state = ProdLoopState()
+    stop_evt = asyncio.Event()
+    coll = _StubCollector("fred_macro", {"vix": 15.0}, asset_class="forex")
+    coll.ttl_sec = 100  # one fetch in the window → exactly one refresh line
+    with caplog.at_level(
+        logging.INFO, logger="polaris.scripts.production_paper_loop"
+    ):
+        task = asyncio.create_task(
+            _altdata_producer(
+                memdb, cache=cache, state=state, stop_evt=stop_evt,
+                collectors=[coll], poll_sec=0.01,
+            )
+        )
+        await asyncio.sleep(0.05)
+        stop_evt.set()
+        await asyncio.wait_for(task, timeout=2.0)
+    refresh_lines = [
+        r for r in caplog.records
+        if "[altdata]" in r.message and "refreshed" in r.message
+    ]
+    assert len(refresh_lines) == 1, "exactly one refresh INFO per fetched source"
+    msg = refresh_lines[0].getMessage()
+    assert "fred_macro" in msg
+    assert "forex" in msg
+
+
+@pytest.mark.asyncio
 async def test_producer_survives_collector_error(memdb: sqlite3.Connection) -> None:
     """A raising collector is caught (log + keep last cache); loop keeps running."""
     cache = AltDataCache()

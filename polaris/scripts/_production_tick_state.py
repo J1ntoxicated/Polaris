@@ -100,3 +100,9 @@ class TickEngineState:
     # surfaced as a WARNING the moment the loop resumes.
     loop_count: int = 0
     last_loop_mono: float = 0.0
+    # ``hb_mono`` is the monotonic stamp of the LAST emitted heartbeat. The
+    # heartbeat DEBUG line is a per-decision trace, not a stall signal (the STALL
+    # WARNING above is computed independently from ``last_loop_mono`` every loop),
+    # so it is 60s-throttled against this stamp to drop the 0.5s firehose. Starts
+    # at 0.0 → the first loop always emits one heartbeat.
+    hb_mono: float = 0.0

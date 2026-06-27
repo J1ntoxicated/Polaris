@@ -139,23 +139,40 @@ def test_file_handler_is_rotating(tmp_path: Path) -> None:
 
 
 def test_noisy_3rd_party_loggers_silenced(tmp_path: Path) -> None:
-    """yfinance/peewee per-call DEBUG flood is suppressed to WARNING.
+    """httpx/httpcore/asyncio/websockets/peewee per-call DEBUG flood → WARNING.
 
     Live-probe (2026-06-26): under ``-vv`` (root=DEBUG) the Yahoo bar fetch made
     yfinance+peewee emit history()/get()/_make_request()/SQL at DEBUG — 79% of the
     live runtime log (1580/2000 lines). Same hazard the websockets per-frame flood
     posed (e48abd8): a synchronous FileHandler write + logging-lock load that
-    pollutes disk + drowns Polaris' own trading DEBUG. They must be pinned to
-    WARNING just like httpx/httpcore/asyncio/websockets — Polaris' own DEBUG is
-    untouched (root stays DEBUG under -vv).
+    pollutes disk + drowns Polaris' own trading DEBUG. They are pinned to WARNING —
+    Polaris' own DEBUG is untouched (root stays DEBUG under -vv). yfinance is
+    pinned harder (CRITICAL) — see ``test_yfinance_logger_pinned_to_critical``.
     """
     setup_polaris_logging(level="DEBUG", log_file=str(tmp_path / "polaris.log"))
-    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "yfinance", "peewee"):
+    for noisy in ("httpx", "httpcore", "asyncio", "websockets", "peewee"):
         assert logging.getLogger(noisy).level == logging.WARNING, (
             f"{noisy} logger must be pinned to WARNING (3rd-party DEBUG flood guard)"
         )
     # Polaris' own logger is NOT throttled — full decision observability survives.
     assert logging.getLogger("polaris").level in (logging.NOTSET, logging.DEBUG)
+
+
+def test_yfinance_logger_pinned_to_critical(tmp_path: Path) -> None:
+    """yfinance is pinned to CRITICAL, not just WARNING.
+
+    yfinance emits ``$X: possibly delisted; no price data found`` at ERROR from
+    inside its own ``history()`` (yfinance/scrapers/history.py). ERROR ≥ WARNING,
+    so a WARNING pin let those per-period delisted-symbol lines leak into the
+    runtime log for unmapped tickers. The Polaris wrapper (``_yahoo_bars``) already
+    fallbacks + per-period caches (degrade-never-crash), so CRITICAL silences the
+    library noise without touching behaviour. The other 3rd-party loggers stay at
+    WARNING (their floods are DEBUG, already covered).
+    """
+    setup_polaris_logging(level="DEBUG", log_file=str(tmp_path / "polaris.log"))
+    assert logging.getLogger("yfinance").level == logging.CRITICAL, (
+        "yfinance must be CRITICAL so its ERROR delisted-symbol lines are suppressed"
+    )
 
 
 def test_runtime_rotation_caps_size(tmp_path: Path) -> None:

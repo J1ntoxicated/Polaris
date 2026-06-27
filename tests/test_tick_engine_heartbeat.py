@@ -66,12 +66,37 @@ async def test_heartbeat_advances_loop_count(memdb: sqlite3.Connection) -> None:
 async def test_heartbeat_debug_line_emitted(
     memdb: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Each iteration emits a debug 'alive' heartbeat."""
+    """The FIRST iteration still emits a debug 'alive' heartbeat.
+
+    The heartbeat is now 60s-THROTTLED (it was a per-loop 0.5s firehose, 2.8% of
+    the live log). The throttle window starts at 0.0, so the first iteration is
+    always emitted; subsequent rapid iterations inside the window are suppressed
+    (``test_heartbeat_throttled_within_window``).
+    """
     eng = TickEngineState()
     with caplog.at_level(logging.DEBUG, logger="polaris.scripts._production_tick_engine"):
         await _run_n_iterations(memdb, eng, n=2, cadence=0.0)
     assert any("heartbeat" in r.message for r in caplog.records), (
-        "expected a per-iteration heartbeat debug line"
+        "expected the first-iteration heartbeat debug line"
+    )
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_throttled_within_window(
+    memdb: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rapid iterations inside the throttle window emit AT MOST one heartbeat.
+
+    Many 0.5s loops used to each log a heartbeat (firehose). With the 60s
+    throttle, a burst of fast iterations collapses to a single heartbeat line.
+    """
+    eng = TickEngineState()
+    with caplog.at_level(logging.DEBUG, logger="polaris.scripts._production_tick_engine"):
+        await _run_n_iterations(memdb, eng, n=8, cadence=0.0)
+    heartbeats = [r for r in caplog.records if "heartbeat" in r.message]
+    assert len(heartbeats) == 1, (
+        f"expected exactly one throttled heartbeat across 8 fast loops, "
+        f"got {len(heartbeats)}"
     )
 
 

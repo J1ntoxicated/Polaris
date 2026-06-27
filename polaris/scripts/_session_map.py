@@ -60,6 +60,7 @@ __all__ = [
     "equity_fetch_active",
     "instrument_session_weight",
     "session_group",
+    "session_transitions",
     "session_warm_active",
 ]
 
@@ -356,3 +357,65 @@ def equity_fetch_active(
     # Fully closed (overnight / weekend) → only the #66 pre-open warm window may
     # keep the backfill alive; otherwise skip (the market is producing no bars).
     return _session_warm_active(venue, asset_class, symbol, ts)
+
+
+def session_transitions(
+    prev_ts: int | float, now_ts: int | float
+) -> list[tuple[str, str]]:
+    """Regional cash-session OPEN/CLOSE edges crossed in ``(prev_ts, now_ts]``.
+
+    PURE, no I/O. Returns ``[(region, "OPEN"|"CLOSE"), …]`` for every group window
+    boundary whose absolute UTC epoch falls in the half-open interval after
+    ``prev_ts`` up to and including ``now_ts`` — i.e. the regional market just
+    opened or closed since the previous call. The caller logs these as the
+    ``[session]`` operational-narrative line; this never gates trading (the TRADE
+    weight is ``instrument_session_weight``, untouched).
+
+    Edge-trigger only: a quiet mid-session gap returns ``[]`` (no per-tick spam).
+    Boundaries are anchored to BOTH the UTC day of ``prev_ts`` and the UTC day of
+    ``now_ts`` (NIT-B midnight-anchor guard): a focus gap that straddles UTC
+    midnight — or any over-long gap (a stall-recovery, a restart) — would, under a
+    now-day-only anchor, recompute a boundary that physically fell on the prior UTC
+    day one day forward and MISS it; checking the prev-day anchor too catches that
+    edge. Each ``(region, edge)`` is de-duplicated, so a same-day gap (the common
+    case, both anchors equal) still emits each edge once. A midnight-anchored open
+    (Asia 00:00 = ``day_start + 0``) is detected via the same epoch compare.
+    Weekend boundaries are suppressed (cash books shut all weekend). A reversed or
+    zero gap (``now_ts <= prev_ts``) returns ``[]``.
+    """
+    try:
+        p = int(prev_ts)
+        n = int(now_ts)
+    except (TypeError, ValueError, OverflowError):
+        return []
+    if n <= p:
+        return []
+
+    # Anchor to the prev-day midnight AND the now-day midnight (NIT-B): a gap that
+    # crosses UTC midnight needs both day origins so a prior-day boundary is not
+    # shifted a day forward and skipped. ``dict.fromkeys`` collapses the {p_day,
+    # n_day} pair to a unique, ordered set of day starts (1 entry when same day).
+    day_starts: list[int] = []
+    for anchor in (p, n):
+        d = dt.datetime.fromtimestamp(max(0, anchor), tz=dt.UTC)
+        midnight = dt.datetime(d.year, d.month, d.day, tzinfo=dt.UTC)
+        day_starts.append(int(midnight.timestamp()))
+
+    events: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for day_start in dict.fromkeys(day_starts):
+        # The window's calendar day is the day_start's weekday — a prev-day anchor
+        # that is a weekend day contributes no edges (cash books shut), so the
+        # weekend guard is applied PER day_start, not once on ``now_ts``.
+        if dt.datetime.fromtimestamp(day_start, tz=dt.UTC).weekday() >= 5:
+            continue  # weekend → cash books shut, no session edges
+        for region, (open_min, close_min) in _GROUP_WINDOW.items():
+            open_epoch = day_start + open_min * 60
+            close_epoch = day_start + close_min * 60
+            if p < open_epoch <= n and (region, "OPEN") not in seen:
+                events.append((region, "OPEN"))
+                seen.add((region, "OPEN"))
+            if p < close_epoch <= n and (region, "CLOSE") not in seen:
+                events.append((region, "CLOSE"))
+                seen.add((region, "CLOSE"))
+    return events

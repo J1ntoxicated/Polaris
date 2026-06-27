@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from polaris.scripts import _session_map as sm
 
 
@@ -462,3 +464,150 @@ def test_equity_closed_but_warm_survives_gate_via_live_binding(
     finally:
         monkeypatch.delenv("POLARIS_SESSION_WARM_LEAD_MIN", raising=False)  # type: ignore[attr-defined]
         importlib.reload(reloaded)  # restore module-level default for other tests
+
+
+# ---------------------------------------------------------------------------
+# session_transitions — pure edge detector (OPEN/CLOSE crossings only).
+# ---------------------------------------------------------------------------
+
+
+def test_transitions_us_open_edge_fires_once() -> None:
+    """A cycle straddling 13:30 UTC reports exactly the US OPEN edge."""
+    prev = _utc(*_WED, 13, 29)
+    now = _utc(*_WED, 13, 31)
+    events = sm.session_transitions(prev, now)
+    assert ("us", "OPEN") in events
+    assert ("us", "CLOSE") not in events
+    # Asia/Europe boundaries are not in this window.
+    assert all(region == "us" for region, _ in events)
+
+
+def test_transitions_europe_close_edge() -> None:
+    """A cycle straddling 16:00 UTC reports the Europe CLOSE edge."""
+    prev = _utc(*_WED, 15, 59)
+    now = _utc(*_WED, 16, 1)
+    assert ("europe", "CLOSE") in sm.session_transitions(prev, now)
+
+
+def test_transitions_asia_open_edge_at_midnight() -> None:
+    """Asia opens at 00:00 UTC — a cycle straddling midnight reports the edge."""
+    prev = _utc(2026, 6, 24, 23, 59)  # Wed 23:59 → just before Thu 00:00
+    now = _utc(2026, 6, 25, 0, 1)  # Thu 00:01 (still a weekday)
+    assert ("asia", "OPEN") in sm.session_transitions(prev, now)
+
+
+def test_transitions_none_when_no_boundary_crossed() -> None:
+    """A quiet mid-session cycle reports no transitions (edge-trigger only)."""
+    prev = _utc(*_WED, 15, 0)
+    now = _utc(*_WED, 15, 2)
+    assert sm.session_transitions(prev, now) == []
+
+
+def test_transitions_weekend_boundaries_suppressed() -> None:
+    """No cash-session edges on the weekend (the books are shut)."""
+    prev = _utc(*_SAT, 13, 29)
+    now = _utc(*_SAT, 13, 31)
+    assert sm.session_transitions(prev, now) == []
+
+
+def test_transitions_zero_gap_is_empty() -> None:
+    """prev == now (first cycle / no elapsed time) reports nothing."""
+    now = _utc(*_WED, 13, 31)
+    assert sm.session_transitions(now, now) == []
+
+
+def test_transitions_prev_day_boundary_caught_across_midnight() -> None:
+    """NIT-B: a gap straddling UTC midnight still catches the prior UTC day's
+    edges (a now-day-only anchor would shift them a day forward and miss them).
+
+    Wed 19:59 → Thu 00:01 spans the Wed US CLOSE (20:00) AND the Thu Asia OPEN
+    (00:00). The prev-day anchor (Wed) must surface the US CLOSE; the now-day
+    anchor (Thu) the Asia OPEN. Both weekdays, so neither is weekend-suppressed.
+    """
+    prev = _utc(2026, 6, 24, 19, 59)  # Wed 19:59 (just before Wed 20:00 US close)
+    now = _utc(2026, 6, 25, 0, 1)  # Thu 00:01 (just after Thu 00:00 Asia open)
+    events = sm.session_transitions(prev, now)
+    assert ("us", "CLOSE") in events  # prev-day (Wed) boundary
+    assert ("asia", "OPEN") in events  # now-day (Thu) boundary
+
+
+def test_transitions_per_day_weekend_suppression() -> None:
+    """NIT-B: the weekend guard is applied PER day_start, not once on now_ts.
+
+    Fri 19:59 → Sat 00:01: the Fri US CLOSE (20:00, a weekday) must still fire,
+    while the Sat Asia OPEN (a weekend day) is suppressed. 2026-06-26 is a Friday.
+    """
+    prev = _utc(2026, 6, 26, 19, 59)  # Fri 19:59 (weekday)
+    now = _utc(2026, 6, 27, 0, 1)  # Sat 00:01 (weekend)
+    events = sm.session_transitions(prev, now)
+    assert ("us", "CLOSE") in events  # Friday weekday close — not suppressed
+    assert ("asia", "OPEN") not in events  # Saturday — weekend-suppressed
+
+
+def test_transitions_edge_deduped_when_same_day() -> None:
+    """NIT-B: a same-day gap (both anchors equal) emits each edge exactly once."""
+    prev = _utc(*_WED, 13, 29)
+    now = _utc(*_WED, 13, 31)
+    events = sm.session_transitions(prev, now)
+    assert events.count(("us", "OPEN")) == 1  # no double-count from the dedup pass
+
+
+# ---------------------------------------------------------------------------
+# _emit_session_edges — focus-cycle wiring (INFO narrative, edge-only, log-only).
+# ---------------------------------------------------------------------------
+
+
+class _StubInstrument:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+
+def test_emit_session_edges_logs_open_with_symbol_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A focus cycle straddling US open emits one ``[session] us OPEN`` with count."""
+    import logging
+
+    import polaris.scripts._production_layers as pl
+
+    pl._LAST_SESSION_CYCLE_TS = _utc(*_WED, 13, 29)  # baseline just before open
+    universe = [_StubInstrument("US100"), _StubInstrument("US500"),
+                _StubInstrument("J225")]  # 2 US, 1 Asia
+    with caplog.at_level(
+        logging.INFO, logger="polaris.scripts._production_layers"
+    ):
+        pl._emit_session_edges(universe, _utc(*_WED, 13, 31))
+    lines = [r.getMessage() for r in caplog.records if "[session]" in r.message]
+    assert any("us OPEN symbols=2" in m for m in lines), lines
+
+
+def test_emit_session_edges_first_cycle_is_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The first cycle seeds the baseline (no prior ts) → no edge line."""
+    import logging
+
+    import polaris.scripts._production_layers as pl
+
+    pl._LAST_SESSION_CYCLE_TS = None  # fresh process
+    with caplog.at_level(
+        logging.INFO, logger="polaris.scripts._production_layers"
+    ):
+        pl._emit_session_edges([_StubInstrument("US100")], _utc(*_WED, 13, 31))
+    assert not [r for r in caplog.records if "[session]" in r.message]
+
+
+def test_emit_session_edges_mid_session_is_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A quiet mid-session cycle (no boundary crossed) emits nothing."""
+    import logging
+
+    import polaris.scripts._production_layers as pl
+
+    pl._LAST_SESSION_CYCLE_TS = _utc(*_WED, 15, 0)
+    with caplog.at_level(
+        logging.INFO, logger="polaris.scripts._production_layers"
+    ):
+        pl._emit_session_edges([_StubInstrument("US100")], _utc(*_WED, 15, 2))
+    assert not [r for r in caplog.records if "[session]" in r.message]

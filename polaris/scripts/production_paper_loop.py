@@ -34,6 +34,7 @@ from polaris.core.altdata.myfxbook import MyfxbookCollector
 from polaris.core.altdata.news_sentiment import NewsSentimentCollector
 from polaris.core.altdata.okx_funding import OKXFundingCollector
 from polaris.core.data.quote_writer import QuoteTickWriter
+from polaris.core.data.technical_store_writer import TechnicalStoreWriter
 from polaris.core.isolation.allocator_fence import (
     get_process_fence,
     reset_process_fence,
@@ -802,6 +803,18 @@ async def run_production_paper_loop(
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
+    # STALL fix #88 — technical-store write OFF-LOADER (mirrors quote_writer). The
+    # ④ #12 technical store wrote SYNCHRONOUSLY on the loop thread via the SHARED
+    # tick conn (the focus fan-out's inline ``upsert_technicals``) → WAL-lock
+    # contention with the 1Hz quote flush → tick STALL (#74 re-introduced). The
+    # tick body now ``record``s the indicator snapshot in-mem; this 1Hz flush task
+    # off-loads the write on a dedicated conn (its own thread). Torn down in the
+    # finally below alongside the WS writer. Evidence keeps flowing (flow_not_block).
+    tech_store_writer = TechnicalStoreWriter(target_db)
+    state.tech_store_writer = tech_store_writer
+    tech_store_flush_task = asyncio.create_task(
+        tech_store_writer.run_flush_loop(stop_evt)
+    )
     # ADR-012 Slice 1 — open the SEPARATE probe tuning-log sidecar
     # (data/probes.sqlite, never the live DB → zero WAL contention) + register the
     # observe-mode probe bus/engine. Fail-open: a wiring failure leaves the attach
@@ -1099,6 +1112,14 @@ async def run_production_paper_loop(
         await asyncio.gather(*ws_tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
             quote_writer.close()
+        # STALL fix #88 — technical-store writer teardown. stop_evt (set above)
+        # makes run_flush_loop do its FINAL DRAIN then return; await it (the loop is
+        # cooperative — final flush happens on stop_evt) so the dedicated conn is
+        # closed only AFTER the last batch has been written.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await tech_store_flush_task
+        with contextlib.suppress(Exception):
+            tech_store_writer.close()
         # ADR-012 — close the probe tuning-log sidecar (separate DB).
         if state.probe_conn is not None:
             with contextlib.suppress(Exception):

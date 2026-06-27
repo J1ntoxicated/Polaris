@@ -684,20 +684,38 @@ async def _run_tick(
             # from this same mv — never re-computed (no double source of truth) and
             # never a network call (the OKX candles bucket is untouched). Single-row
             # LWW → bounded table. EVIDENCE-ONLY (flow_not_block: no entry/size/exit
-            # gated). best-effort: a write fault NEVER blocks emit/judge (the upsert
-            # already degrades to a no-op on a missing table; this try/except is the
-            # belt-and-braces for any other sqlite error on the hot path).
+            # gated).
+            # STALL fix #88 — the WRITE is OFF-LOADED off the loop thread: extract
+            # (pure CPU) here, then ``record`` the snapshot into the dedicated
+            # ``tech_store_writer`` (in-mem coalesce; its 1Hz flush writes on a
+            # dedicated conn). This removes the synchronous ``upsert_technicals``
+            # the loop thread used to run on the SHARED tick conn — the WAL-lock
+            # contention with the 1Hz quote flush that re-introduced the #74 STALL.
+            # When no writer is wired (smoke/replay/direct _run_tick callers) it
+            # degrades to the inline upsert (behavior-identical to pre-#88). The
+            # store keeps being written either way (judge evidence — flow_not_block).
+            # best-effort: a write fault NEVER blocks emit/judge.
             try:
                 tech_values = extract_technicals_from_mv(mv)
                 if tech_values:
-                    upsert_technicals(
-                        conn,
-                        instrument_id=f"{venue}:{symbol}",
-                        bar_interval=timeframe,
-                        values=tech_values,
-                        computed_ts=now_ts,
-                        source_bar_ts=int(bars[-1].ts),
-                    )
+                    tech_writer = getattr(state, "tech_store_writer", None)
+                    if tech_writer is not None:
+                        tech_writer.record(
+                            instrument_id=f"{venue}:{symbol}",
+                            bar_interval=timeframe,
+                            values=tech_values,
+                            computed_ts=now_ts,
+                            source_bar_ts=int(bars[-1].ts),
+                        )
+                    else:
+                        upsert_technicals(
+                            conn,
+                            instrument_id=f"{venue}:{symbol}",
+                            bar_interval=timeframe,
+                            values=tech_values,
+                            computed_ts=now_ts,
+                            source_bar_ts=int(bars[-1].ts),
+                        )
             except Exception as exc:  # noqa: BLE001 — store is advisory, never blocks
                 logger.debug(
                     "[technicals] write skipped %s:%s/%s: %r",

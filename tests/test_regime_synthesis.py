@@ -223,3 +223,61 @@ def test_compute_and_flip_regime_still_signal_only(memdb: sqlite3.Connection) ->
     assert isinstance(regime, str)
     # nothing was written to positions/orders by regime synthesis
     assert memdb.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# STALL fix #88 — per-candidate DEBUG removed (it fired every (venue,group)
+# pre-gate composition → log flood). The confirmed-flip INFO stays (operator
+# signal). Pure logging cleanup — regime behaviour is byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_no_per_candidate_regime_debug_emitted(
+    memdb: sqlite3.Connection, caplog
+) -> None:  # type: ignore[no-untyped-def]
+    """The pre-gate ``[L6/regime] candidate ...`` DEBUG line is gone (log flood)."""
+    import logging
+
+    bars = _series(120, drift=40.0)  # strong bull → a definite candidate
+    with caplog.at_level(logging.DEBUG, logger="polaris.scripts._production_layers"):
+        compute_and_flip_regime(
+            memdb, venue="okx", underlying_group_id="crypto:BTC",
+            bars=bars, now_ts=int(time.time()),
+        )
+    assert not any(
+        "[L6/regime] candidate" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_confirmed_flip_info_preserved(
+    memdb: sqlite3.Connection, caplog
+) -> None:  # type: ignore[no-untyped-def]
+    """A CONFIRMED flip still emits the ``[L6/regime] flip ...`` INFO (operator signal).
+
+    Seed a contrary regime, then drive a stable bull candidate across two DISTINCT
+    closed 5m bars so the 2-consecutive-close confirm gate flips → INFO fires.
+    """
+    import logging
+
+    from polaris.core.live_recalc.regime_flip import REGIME_CONFIRM_BAR_SEC
+
+    # Seed the SSOT regime to something the bull bars will flip away from.
+    detect_regime_flip(
+        memdb, venue="okx", underlying_group_id="crypto:BTC",
+        candidate="bear_trend", now_ts=0,
+    )
+    bars = _series(120, drift=40.0)  # strong bull candidate
+    base = 1_000_000
+    with caplog.at_level(logging.INFO, logger="polaris.scripts._production_layers"):
+        # Two distinct closed bars (ts spaced by ≥ one confirm bar) → confirm.
+        compute_and_flip_regime(
+            memdb, venue="okx", underlying_group_id="crypto:BTC",
+            bars=bars, now_ts=base,
+        )
+        compute_and_flip_regime(
+            memdb, venue="okx", underlying_group_id="crypto:BTC",
+            bars=bars, now_ts=base + REGIME_CONFIRM_BAR_SEC + 1,
+        )
+    assert any(
+        "[L6/regime] flip" in rec.getMessage() for rec in caplog.records
+    )

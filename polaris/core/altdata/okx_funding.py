@@ -34,7 +34,19 @@ _FUNDING_PATH: Final[str] = "/api/v5/public/funding-rate"
 _OI_PATH: Final[str] = "/api/v5/public/open-interest"
 _FUNDING_HISTORY_PATH: Final[str] = "/api/v5/public/funding-rate-history"
 
-DEFAULT_INSTRUMENTS: Final[tuple[str, ...]] = ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
+# Liquid OKX USDT-margined perp roster (#81 weekend funding feed expansion).
+# Funding is a PUBLIC endpoint (no key — unaffected by the order-auth path), so
+# widening the roster is independent work that purely enlarges the weekend
+# funding-capitulation opportunity surface: each perp's funding + per-symbol p10
+# lets the strategy fire on that spot symbol (the spot→perp mapper appends
+# ``-SWAP``). Per-instId p10 is cached ~8h so the extra history pulls are rare
+# (429-safe). Top OKX SWAP liquidity majors beyond BTC/ETH.
+DEFAULT_INSTRUMENTS: Final[tuple[str, ...]] = (
+    "BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "XRP-USDT-SWAP",
+    "DOGE-USDT-SWAP", "AVAX-USDT-SWAP", "LINK-USDT-SWAP", "LTC-USDT-SWAP",
+    "BCH-USDT-SWAP", "ADA-USDT-SWAP", "DOT-USDT-SWAP", "NEAR-USDT-SWAP",
+    "TON-USDT-SWAP", "TRX-USDT-SWAP",
+)
 
 # OKX history page cap (100 rows/page = ~33 days at the 8h funding cadence —
 # the broadest single-request window the public endpoint serves).

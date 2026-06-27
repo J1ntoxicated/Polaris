@@ -26,9 +26,29 @@ import httpx
 import pytest
 
 from polaris.core.altdata.okx_funding import (
+    DEFAULT_INSTRUMENTS,
     OKXFundingCollector,
     compute_funding_p10,
 )
+
+# ── funding feed roster (#81 — weekend funding opportunity surface) ───────────
+
+
+def test_default_instruments_expanded_to_liquid_roster() -> None:
+    """#81: the weekend funding feed must cover the liquid OKX SWAP roster (≥12),
+    not just BTC/ETH — every extra perp is another symbol the weekend funding
+    capitulation edge can fire on (positioning-axis opportunity surface). Funding
+    is a PUBLIC endpoint (no key) so this is independent of the order auth path."""
+    assert len(DEFAULT_INSTRUMENTS) >= 12
+    # BTC/ETH preserved (no regression of the existing feed).
+    assert "BTC-USDT-SWAP" in DEFAULT_INSTRUMENTS
+    assert "ETH-USDT-SWAP" in DEFAULT_INSTRUMENTS
+    # Every entry is a USDT-margined perp (the funding endpoint instId shape; the
+    # spot→perp mapper appends -SWAP so the strategy resolves each by spot symbol).
+    for inst in DEFAULT_INSTRUMENTS:
+        assert inst.endswith("-USDT-SWAP"), inst
+    # No duplicate instruments (a dup would double-weight the group-mean funding).
+    assert len(set(DEFAULT_INSTRUMENTS)) == len(DEFAULT_INSTRUMENTS)
 
 
 class _MockTransport(httpx.AsyncBaseTransport):

@@ -35,9 +35,7 @@ writes to learner/risk state. The hint, if any, is fed into the EXISTING
 
 from __future__ import annotations
 
-import datetime as _dt
 import math
-import time
 from typing import Any
 
 # Polaris canonical labels (mirror live_recalc.regime_flip.REGIME_VALUES).
@@ -195,8 +193,7 @@ def fuse_evidence(
         # (Stream C / Alpaca) reuses the SAME FRED macro scorer + conservative
         # conviction floor as the FX/index/commodity branch.
         _score_macro(
-            sources.get("fred_macro"), scores, evidence, source_weights, prefix,
-            now_ts=now_ts,
+            sources.get("fred_macro"), scores, evidence, source_weights, prefix
         )
         if prefix == "commodity":
             # CFTC COT speculative positioning — a directional conviction signal
@@ -307,26 +304,227 @@ def _score_funding(
         scores[_BULL] += 2.0 * w
 
 
-def _macro_age_days(obs_date: Any, now_ts: float | None) -> int | None:
-    """Whole days between a FRED observation date (``YYYY-MM-DD``) and ``now``.
+def _avg_field(rows: list[dict[str, Any]], field: str) -> float | None:
+    """Roster average of a numeric ``field`` across rows (``None`` if absent)."""
+    vals = [
+        float(r[field])
+        for r in rows
+        if isinstance(r, dict)
+        and isinstance(r.get(field), (int, float))
+        and math.isfinite(float(r[field]))
+    ]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
 
-    Currency: the observation date is the day the series was actually printed; a
-    Friday read served over a weekend is 2-3 days stale. Returns ``None`` for an
-    unparsable / absent date (graceful — no fake age).
+
+def _score_binance_deriv(
+    deriv: dict[str, Any] | None,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
+) -> None:
+    """Binance public positioning / order-flow → bull/bear regime EVIDENCE.
+
+    ``deriv`` is the per-symbol map the collector emits. We average each axis
+    across the perp roster (a market-wide positioning read, not a single name):
+
+      top_long_short  smart-money position ratio → the PRIMARY conviction leg
+                      (>1.30 net-long = BULL, <0.77 net-short = BEAR)
+      taker_buy_sell  aggressive taker imbalance → a same-direction flow CONFIRM
+      global_long_short / oi_change_24h  recorded as EVIDENCE (shape the judge's
+                      read) but NOT scored — retail crowd is noisier and OI delta
+                      is directionless without a price pairing.
+
+    Every averaged axis is surfaced in ``evidence`` (read-only context for
+    G3/G7) even when below a tilt threshold. Currency (#69): the newest OI
+    observation ISO date is propagated as ``binance_oi_asof`` so a stale read is
+    age-labelable. flow_not_block: tilts evidence, never blocks/sizes/exits;
+    CRISIS stays price/macro-led. Absent / empty payload → no-op.
     """
-    if not isinstance(obs_date, str) or not obs_date:
-        return None
-    try:
-        obs = _dt.datetime.strptime(obs_date[:10], "%Y-%m-%d").replace(
-            tzinfo=_dt.UTC
-        )
-    except ValueError:
-        return None
-    now = _dt.datetime.fromtimestamp(
-        now_ts if now_ts is not None else time.time(), tz=_dt.UTC
-    )
-    days = (now - obs).days
-    return days if days >= 0 else 0
+    if not deriv:
+        return
+    rows = [r for r in deriv.values() if isinstance(r, dict)]
+    if not rows:
+        return
+    top_ls = _avg_field(rows, "top_long_short")
+    taker = _avg_field(rows, "taker_buy_sell")
+    glob_ls = _avg_field(rows, "global_long_short")
+    funding = _avg_field(rows, "funding_rate")
+    oi_chg = _avg_field(rows, "oi_change_24h")
+    # Nothing parseable on any axis → no evidence, no weight (true no-op).
+    if all(v is None for v in (top_ls, taker, glob_ls, funding, oi_chg)):
+        return
+    # Evidence is ALWAYS surfaced (read-only context), scored or not.
+    if top_ls is not None:
+        evidence["binance_top_long_short"] = round(top_ls, 4)
+    if taker is not None:
+        evidence["binance_taker_buy_sell"] = round(taker, 4)
+    if glob_ls is not None:
+        evidence["binance_global_long_short"] = round(glob_ls, 4)
+    if funding is not None:
+        evidence["binance_funding"] = funding
+    if oi_chg is not None:
+        evidence["binance_oi_change_24h"] = round(oi_chg, 6)
+    # Currency: carry the newest OI observation date (any row that has one).
+    for r in rows:
+        asof = r.get("oi_asof")
+        if isinstance(asof, str) and asof:
+            evidence["binance_oi_asof"] = asof
+            break
+
+    w = _source_weight(prefix, "binance_deriv")
+    source_weights["binance_deriv"] = w
+    # Smart-money positioning = primary conviction leg.
+    if top_ls is not None:
+        if top_ls >= _BNC_TOP_LS_BULL:
+            scores[_BULL] += _BNC_TOP_LS_SCORE * w
+        elif top_ls <= _BNC_TOP_LS_BEAR:
+            scores[_BEAR] += _BNC_TOP_LS_SCORE * w
+    # Aggressive taker imbalance = same-direction order-flow confirm (secondary).
+    if taker is not None:
+        if taker >= _BNC_TAKER_BULL:
+            scores[_BULL] += _BNC_TAKER_SCORE * w
+        elif taker <= _BNC_TAKER_BEAR:
+            scores[_BEAR] += _BNC_TAKER_SCORE * w
+
+
+def _score_coinglass(
+    cg: dict[str, Any] | None,
+    symbol: str,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
+) -> None:
+    """Coinglass aggregated liquidation CASCADE → bull/bear regime EVIDENCE.
+
+    ``cg`` is the per-coin map the collector emits; pick THIS group's coin row.
+    Heavy LONG liquidations (longs forced out) = capitulation flush → BEAR;
+    heavy SHORT liquidations (shorts squeezed) = squeeze → BULL. We tilt only on
+    a clear directional cascade (one side ≥ ``_CG_LIQ_RATIO`` × the other AND the
+    dominant side ≥ ``_CG_LIQ_MIN_USD``). Cross-exchange funding fields are
+    surfaced as EVIDENCE only. Currency (#69): the collector's ``liquidation_asof``
+    is propagated. flow_not_block: an evidence tilt, never a block. Absent coin /
+    payload → no-op (key-gated stub yields ``{}`` → no-op today).
+    """
+    if not cg or not symbol:
+        return
+    row = cg.get(symbol)
+    if not isinstance(row, dict):
+        return
+    long_liq = row.get("long_liquidation_usd")
+    short_liq = row.get("short_liquidation_usd")
+    funding_mean = row.get("funding_mean")
+    funding_disp = row.get("funding_dispersion")
+    if not any(
+        isinstance(v, (int, float))
+        for v in (long_liq, short_liq, funding_mean, funding_disp)
+    ):
+        return
+    # Evidence is ALWAYS surfaced (read-only context).
+    if isinstance(long_liq, (int, float)):
+        evidence["cg_long_liq_usd"] = float(long_liq)
+    if isinstance(short_liq, (int, float)):
+        evidence["cg_short_liq_usd"] = float(short_liq)
+    if isinstance(funding_mean, (int, float)):
+        evidence["cg_funding_mean"] = float(funding_mean)
+    if isinstance(funding_disp, (int, float)):
+        evidence["cg_funding_dispersion"] = float(funding_disp)
+    asof = row.get("liquidation_asof")
+    if isinstance(asof, str) and asof:
+        evidence["cg_liquidation_asof"] = asof
+
+    w = _source_weight(prefix, "coinglass")
+    source_weights["coinglass"] = w
+    if not (isinstance(long_liq, (int, float)) and isinstance(short_liq, (int, float))):
+        return
+    ll = float(long_liq)
+    sl = float(short_liq)
+    # Long flush (longs liquidated dominate) → BEAR capitulation evidence.
+    if ll >= _CG_LIQ_MIN_USD and ll >= _CG_LIQ_RATIO * max(sl, 1.0):
+        scores[_BEAR] += _CG_LIQ_SCORE * w
+    # Short squeeze (shorts liquidated dominate) → BULL evidence.
+    elif sl >= _CG_LIQ_MIN_USD and sl >= _CG_LIQ_RATIO * max(ll, 1.0):
+        scores[_BULL] += _CG_LIQ_SCORE * w
+
+
+def _score_myfxbook(
+    fxb: dict[str, Any] | None,
+    symbol: str,
+    scores: dict[str, float],
+    evidence: dict[str, Any],
+    source_weights: dict[str, float],
+    prefix: str,
+) -> None:
+    """MyFxBook retail community-outlook → CONTRARIAN FX positioning EVIDENCE.
+
+    ``fxb`` is the per-pair map the collector emits; pick THIS group's pair row.
+    Retail FX crowds are persistently wrong at extremes: an overwhelmingly
+    net-long crowd (``long_pct`` ≥ ``_FXB_CROWD_EXTREME``) is contrarian BEAR
+    evidence, an overwhelmingly net-short crowd is contrarian BULL. Only fires
+    past an extreme (noisy near 50/50). Currency (#69): the collector's per-row
+    fetch-time ``asof`` is propagated. flow_not_block: a contrarian tilt, never a
+    block. Absent pair / creds → no-op (creds-gated stub yields ``{}`` today).
+    """
+    if not fxb or not symbol:
+        return
+    row = fxb.get(symbol)
+    if not isinstance(row, dict):
+        return
+    long_pct = row.get("long_pct")
+    short_pct = row.get("short_pct")
+    if not (isinstance(long_pct, (int, float)) or isinstance(short_pct, (int, float))):
+        return
+    if isinstance(long_pct, (int, float)):
+        evidence["fxb_long_pct"] = float(long_pct)
+    if isinstance(short_pct, (int, float)):
+        evidence["fxb_short_pct"] = float(short_pct)
+    asof = row.get("asof")
+    if isinstance(asof, str) and asof:
+        evidence["fxb_asof"] = asof
+
+    w = _source_weight(prefix, "myfxbook")
+    source_weights["myfxbook"] = w
+    lp = float(long_pct) if isinstance(long_pct, (int, float)) else None
+    sp = float(short_pct) if isinstance(short_pct, (int, float)) else None
+    # Crowd extremely net-long → contrarian BEAR; extremely net-short → BULL.
+    if lp is not None and lp >= _FXB_CROWD_EXTREME:
+        scores[_BEAR] += _FXB_SCORE * w
+    elif sp is not None and sp >= _FXB_CROWD_EXTREME:
+        scores[_BULL] += _FXB_SCORE * w
+
+
+# Expanded FRED panel keys surfaced as read-only EVIDENCE (NOT scored). vix /
+# hy_spread are already surfaced + scored above, so they are excluded here.
+_MACRO_PANEL_KEYS: tuple[str, ...] = (
+    "yield_curve", "yield_curve_10y3m", "fed_funds", "ust_10y", "ust_2y", "sofr",
+    "cpi", "core_cpi", "pce", "breakeven_5y", "breakeven_10y",
+    "unemployment", "nonfarm_payrolls", "initial_claims",
+    "real_gdp", "industrial_production", "m2", "fed_balance_sheet", "ig_spread",
+    "housing_starts", "home_price_index", "dollar_index", "eur_usd", "usd_jpy",
+    "consumer_sentiment", "wti_crude", "brent_crude", "stl_stress", "nfci",
+    "vix_3m", "oil_vol", "gold_vol",
+)
+
+
+def _surface_macro_panel(macro: dict[str, Any], evidence: dict[str, Any]) -> None:
+    """Surface the expanded FRED panel as read-only EVIDENCE (no scoring).
+
+    Each present numeric series is copied into ``evidence`` along with its
+    ``<key>_asof`` observation date (preserved by the collector) so the AI judge
+    sees both the value AND its currency (#69). flow_not_block: pure context,
+    never a score / block. Absent series are simply skipped.
+    """
+    for key in _MACRO_PANEL_KEYS:
+        val = macro.get(key)
+        if not isinstance(val, (int, float)):
+            continue
+        evidence[key] = val
+        asof = macro.get(f"{key}_asof")
+        if isinstance(asof, str) and asof:
+            evidence[f"{key}_asof"] = asof
 
 
 def _avg_field(rows: list[dict[str, Any]], field: str) -> float | None:
@@ -558,8 +756,6 @@ def _score_macro(
     evidence: dict[str, Any],
     source_weights: dict[str, float],
     prefix: str,
-    *,
-    now_ts: float | None = None,
 ) -> None:
     if not macro:
         return
@@ -569,23 +765,13 @@ def _score_macro(
         evidence["vix"] = vix
     if isinstance(hy, (int, float)):
         evidence["hy_spread"] = hy
-    # Currency: surface the FRED observation date(s) + the oldest-source age in
-    # days so the judge prompt + axis-B can age-discount a stale macro read.
-    # flow_not_block: this is a LABEL, never a drop. Absent asof → no age (the
-    # pre-fix payload renders identically).
-    vix_asof = macro.get("vix_asof")
-    hy_asof = macro.get("hy_asof")
-    if isinstance(vix_asof, str) and isinstance(vix, (int, float)):
-        evidence["vix_asof"] = vix_asof
-    if isinstance(hy_asof, str) and isinstance(hy, (int, float)):
-        evidence["hy_asof"] = hy_asof
-    ages = [
-        a
-        for a in (_macro_age_days(vix_asof, now_ts), _macro_age_days(hy_asof, now_ts))
-        if a is not None
-    ]
-    if ages:
-        evidence["macro_age_days"] = max(ages)
+
+    # Expanded FRED panel → additive EVIDENCE (read-only context for the AI
+    # judge). NOT scored (scoring stays vix/hy only — surgical); these enrich
+    # the macro picture the judge reasons over. Each value carries its FRED
+    # observation date (``<key>_asof``) preserved by the collector so a
+    # monthly-lag / weekend read is age-labelable (#69 currency, flow_not_block).
+    _surface_macro_panel(macro, evidence)
 
     # Expanded FRED panel → additive EVIDENCE (read-only context for the AI
     # judge). NOT scored (scoring stays vix/hy only — surgical); these enrich
@@ -638,13 +824,6 @@ def _score_cot(
     if not isinstance(pctile, (int, float)):
         return
     evidence["cot_net_spec_pctile"] = pctile
-    # Currency: propagate the COT report date the collector already preserves.
-    # COT is weekly by nature (Tue-as-of, Fri-published) so this is ALWAYS a few
-    # days old — the judge / axis-B age-label it instead of treating a 10-day-old
-    # positioning as 'current'. flow_not_block: a label, never a drop.
-    report_date = row.get("report_date")
-    if isinstance(report_date, str) and report_date:
-        evidence["cot_report_date"] = report_date
     raw_pct = row.get("net_spec_pct")
     if isinstance(raw_pct, (int, float)):
         evidence["cot_net_spec_pct"] = raw_pct

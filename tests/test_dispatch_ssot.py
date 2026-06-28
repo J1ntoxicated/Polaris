@@ -28,13 +28,16 @@ from polaris.strategies import STRATEGY_REGISTRY
 # The KILLed / unvalidated strategies: registered (module + close path preserved)
 # but dispatch_eligible=False so they emit no NEW entry.
 #   rsi_bb_pullback — fee-fatal intraday crypto (no OOS/fee hurdle), confirmed KILL.
+#   ema_crossover — fee-fatal 1H crypto trend-template (gross +$0.12 < fee $2.37 per
+#     round-trip): the cross edge does not clear the OKX taker fee. KILLed 2026-06-28
+#     once the live read landed (the judgement Jin had DEFERRED), same dispatch-level
+#     no-emit pattern as rsi_bb_pullback — module + open-position close path preserved.
 #   supertrend / connors_rsi2 / cci_reversion — unvalidated (design rationale only),
 #     and never in the old dispatch literal (False = unchanged behaviour).
-# ema_crossover is NOT here: its KILL judgement is DEFERRED (Jin 2026-06-28) — it
-# stays dispatch_eligible=True (firing) until that call lands.
 KILLED_IDS = frozenset(
     {
         "rsi_bb_pullback",
+        "ema_crossover",
         "supertrend",
         "connors_rsi2",
         "cci_reversion",

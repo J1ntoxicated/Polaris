@@ -106,15 +106,19 @@ class EMACrossoverStrategy(BaseStrategy):
         venue="okx",
         correlation_group_id="spot_ema_trend",
         profit_target_r=EMA_TREND_TARGET_R,
-        # FIRING — Jin KILL judgement DEFERRED (2026-06-28). The #56 stop-bleeders
-        # autopsy KILLed rsi_bb_pullback for a confirmed fee-fatal edge; ema_crossover
-        # was grouped into the same cull, but Jin held that call pending its own
-        # live read (the trend-continuation geometry is distinct from the scalp
-        # autopsy set). So it STAYS dispatch-eligible (fires on new-entry) until that
-        # judgement lands. The registry-derived SSOT keeps this status EXPLICIT — the
-        # KILL set is rsi_bb_pullback only; supertrend / connors_rsi2 / cci_reversion
-        # were never in the dispatch literal (False = unchanged behaviour, not a new KILL).
-        dispatch_eligible=True,
+        # KILL fee-fatal (2026-06-28). The #56 stop-bleeders autopsy KILLed
+        # rsi_bb_pullback for a confirmed fee-fatal edge; ema_crossover was grouped
+        # into the same cull but Jin DEFERRED its call pending its own live read.
+        # That read landed: the 1H crypto cross is gross-positive but fee-fatal —
+        # gross +$0.12 per round-trip < the OKX taker fee $2.37, so the edge never
+        # clears the fee. So it now joins the no-emit KILL set, the SAME dispatch-
+        # level pattern as rsi_bb_pullback: dispatch_eligible=False means
+        # generate_raw_signal is never called (no NEW entry), while the module +
+        # the open-position close path stay REGISTERED (KILL != removal — open
+        # positions still exit via the recalc loop). flow_not_block-safe: an edgeless
+        # strategy is retired at the source, it neither halts nor dampens any other
+        # strategy's size.
+        dispatch_eligible=False,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

@@ -441,14 +441,15 @@ async def test_l1_baseline_update_from_bars(memdb: sqlite3.Connection) -> None:
 async def test_l7_supervise_strategies_wired() -> None:
     """The dispatch list is now DERIVED from STRATEGY_REGISTRY filtered on
     ``metadata.dispatch_eligible`` (dual-SSOT fix). The prior hand-synced literal
-    was 19; the fee-fatal KILL rsi_bb_pullback (15m crypto reversion) set
-    dispatch_eligible=False → 18 dispatched survivors. ema_crossover stays FIRING
-    (dispatch_eligible=True) — its KILL judgement is DEFERRED (Jin 2026-06-28).
+    was 19; the fee-fatal KILLs rsi_bb_pullback (15m crypto reversion) + ema_crossover
+    (1H crypto trend-template: gross +$0.12 < fee $2.37 per round-trip) set
+    dispatch_eligible=False → 17 dispatched survivors. ema_crossover's deferred KILL
+    judgement landed 2026-06-28 once the live read confirmed it is fee-fatal.
     The registered-but-unvalidated supertrend / connors_rsi2 / cci_reversion stay
     OUT (already absent + now flag-enforced). A KILL = no-emit, not removal: all
     stay registered (open-position close path preserved)."""
     strategies = _all_strategies()
-    assert len(strategies) == 18
+    assert len(strategies) == 17
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
     assert "spot_donchian" not in ids  # KILLed 2026-06-27 (#56 stop-bleeders)
@@ -471,8 +472,8 @@ async def test_l7_supervise_strategies_wired() -> None:
     assert "supertrend" not in ids
     assert "connors_rsi2" not in ids
     assert "cci_reversion" not in ids
-    # ema_crossover stays FIRING — KILL judgement DEFERRED (Jin 2026-06-28).
-    assert "ema_crossover" in ids
+    # ema_crossover KILLed 2026-06-28 — fee-fatal 1H crypto (gross +$0.12 < fee $2.37).
+    assert "ema_crossover" not in ids
 
 
 @pytest.mark.asyncio
@@ -547,11 +548,11 @@ def test_g2_emit_no_cap() -> None:
     """The strategy list is exposed without an emitted[:3] cap (T12)."""
     strategies = _all_strategies()
     # Registry-derived dispatch (dispatch_eligible SSOT). The prior literal was 19;
-    # the dual-SSOT fix set rsi_bb_pullback (fee-fatal 15m crypto reversion) to
-    # dispatch_eligible=False → 18 dispatched survivors. ema_crossover stays FIRING
-    # (KILL deferred — Jin 2026-06-28). KILL = no-emit, not removal: it stays
-    # registered (open-position close path kept).
-    assert len(strategies) == 18
+    # the dual-SSOT fix set rsi_bb_pullback (fee-fatal 15m crypto reversion) +
+    # ema_crossover (fee-fatal 1H crypto trend-template, gross +$0.12 < fee $2.37) to
+    # dispatch_eligible=False → 17 dispatched survivors. KILL = no-emit, not removal:
+    # both stay registered (open-position close path kept).
+    assert len(strategies) == 17
 
 
 @pytest.mark.asyncio

@@ -12,11 +12,11 @@ reviewed_by: codex+jin (round 3 D1 + Jin clarification 21:30)
 
 # ADR-008 — 22 Strategies (Signal Generator Role Only)
 
-> 📌 **UPDATE 2026-06-28 (dual-SSOT dispatch fix)**: registry = **22 strategies**; LIVE bar dispatch = the **18** whose `metadata.dispatch_eligible=True`, DERIVED from STRATEGY_REGISTRY (no hand-synced literal — drift structurally impossible). SSOT = `polaris/strategies/__init__.py`. KILL = `dispatch_eligible=False` (no-emit, NOT un-register — open-position close path preserved): rsi_bb_pullback (fee-fatal 15m crypto reversion) + supertrend / connors_rsi2 / cci_reversion (no OOS/fee evidence). ema_crossover is FIRING — its KILL judgement is DEFERRED (Jin 2026-06-28); it stays `dispatch_eligible=True` pending its own live read. UN-registered (module read-only, not in registry): volume_burst, tsmom (cross-sym), spot_donchian, fx_range_fade, equity_tsmom, equity_rsi_bb, equity_gap_go.
+> 📌 **UPDATE 2026-06-28 (dual-SSOT dispatch fix)**: registry = **22 strategies**; LIVE bar dispatch = the **17** whose `metadata.dispatch_eligible=True`, DERIVED from STRATEGY_REGISTRY (no hand-synced literal — drift structurally impossible). SSOT = `polaris/strategies/__init__.py`. KILL = `dispatch_eligible=False` (no-emit, NOT un-register — open-position close path preserved): rsi_bb_pullback (fee-fatal 15m crypto reversion) + ema_crossover (fee-fatal 1H crypto cross: gross +$0.12 < OKX taker fee $2.37/round-trip) + supertrend / connors_rsi2 / cci_reversion (no OOS/fee evidence). ema_crossover's DEFERRED KILL judgement LANDED 2026-06-28 once its live read confirmed it is fee-fatal — same no-emit dispatch pattern as rsi_bb_pullback. UN-registered (module read-only, not in registry): volume_burst, tsmom (cross-sym), spot_donchian, fx_range_fade, equity_tsmom, equity_rsi_bb, equity_gap_go.
 
 ## Decision
 
-22 strategies registered; 18 dispatch-eligible (validated fee-beaters + ema_crossover firing, KILL deferred). Each strategy's role = **`generate_raw_signal(market_view) → RawSignal | None` only**. Lifecycle (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]). Dispatch eligibility = the per-strategy `dispatch_eligible` flag (the single source of truth; the bar pipeline filters the registry on it).
+22 strategies registered; 17 dispatch-eligible (validated fee-beaters; ema_crossover KILLed 2026-06-28, fee-fatal). Each strategy's role = **`generate_raw_signal(market_view) → RawSignal | None` only**. Lifecycle (entry/exit/swap) = AI gate ([[ADR-004-per-gate-ai-pipeline|ADR-004]]). Dispatch eligibility = the per-strategy `dispatch_eligible` flag (the single source of truth; the bar pipeline filters the registry on it).
 
 ## Role Redefinition
 
@@ -54,7 +54,7 @@ DISPATCH = registry filtered on `metadata.dispatch_eligible` (no separate litera
 | weekend_thin_book_flush_maker | 1H | ✅ | #77 verified crypto maker |
 | weekend_funding_capitulation_maker | 1H | ✅ | #80 funding edge (shadow-first) |
 | rsi_bb_pullback | 15m | ❌ KILL | fee-fatal 15m crypto reversion |
-| ema_crossover | 1H | ✅ | firing — Jin KILL judgement deferred (2026-06-28) |
+| ema_crossover | 1H | ❌ KILL | fee-fatal 1H crypto cross (gross +$0.12 < fee $2.37); deferred KILL landed 2026-06-28 |
 | supertrend | 1H | ❌ KILL | unvalidated |
 
 ### Track B — Capital CFD

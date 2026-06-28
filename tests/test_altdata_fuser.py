@@ -665,3 +665,46 @@ def test_fuse_macro_panel_surfaced_as_evidence_with_currency() -> None:
     assert ev["cpi_asof"] == "2026-05-01"  # monthly-lag observation date preserved
     # Scoring is unchanged: VIX 18 / HY 350 is neutral → no override.
     assert hint is None
+
+
+def test_macro_age_and_panel_asof_coexist_disjoint() -> None:
+    """Additive-coexistence invariant: the #69 vix/hy currency keys (``vix_asof`` /
+    ``macro_age_days``) and the expanded-panel ``<key>_asof`` keys both land in the
+    SAME macro evidence dict with no collision — vix/hy are surfaced once by the
+    dedicated scorer path and are NOT re-emitted by ``_surface_macro_panel`` (the
+    panel excludes them by design). Locks the disjoint-additive layering so a
+    future panel widen cannot silently double-surface vix/hy or clobber the age.
+    """
+    import datetime as _dt
+
+    # now_ts = 2026-06-29 UTC; oldest present series (cpi 2026-05-01) drives nothing
+    # here (macro_age_days is computed from vix/hy asof only) → vix 3 days old.
+    now = _dt.datetime(2026, 6, 29, tzinfo=_dt.UTC).timestamp()
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {
+            "vix": 18.0,
+            "hy_spread": 280.0,
+            "vix_asof": "2026-06-26",
+            "hy_asof": "2026-06-26",
+            "dollar_index": 120.4,
+            "dollar_index_asof": "2026-06-18",
+            "cpi": 320.1,
+            "cpi_asof": "2026-05-01",
+        },
+        ttl_sec=9999,
+        now_ts=now,
+    )
+    _hint, _conf, ev = fuse_evidence("forex:EURUSD", cache, now_ts=now)
+    # #69 currency keys present (vix/hy + computed age over vix/hy asof only).
+    assert ev["vix_asof"] == "2026-06-26"
+    assert ev["hy_asof"] == "2026-06-26"
+    assert ev["macro_age_days"] == 3
+    # Panel asof keys coexist in the SAME dict — disjoint, no collision.
+    assert ev["dollar_index_asof"] == "2026-06-18"
+    assert ev["cpi_asof"] == "2026-05-01"
+    # vix / hy are surfaced exactly once (not re-emitted by the panel) and the
+    # panel never computes its own aggregate age key.
+    assert ev["vix"] == pytest.approx(18.0)
+    assert ev["hy_spread"] == pytest.approx(280.0)

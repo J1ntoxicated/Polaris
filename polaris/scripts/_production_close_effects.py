@@ -96,6 +96,53 @@ def _safe_lookup_regime(
         return "chop"
 
 
+def fold_close_slice(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, lookup_regime: Any,
+    slice_pnl_r: float, slice_pnl_usd: float, now_ts: int, state: ProdLoopState,
+) -> None:
+    """P2 R-ledger-leak fix — fold ONE close SLICE into the learning layer.
+
+    The PARTIAL-close path used to persist the slice's ``pnl_usd`` to ``fills``
+    but feed NOTHING to the cell matrix / Layer-5 learners / posterior, so a
+    position that closed predominantly via partials (LUNA / DOT, 2026-06-23 g1
+    audit: −$14.85 NET, 93% of the gross loss) never trained the learners — the
+    learning layer under-recognised the loss (optimism bias). This folds the
+    slice with the SAME real-fee NET pipeline the full close uses, so partial +
+    remainder sum to exactly ONE whole-position fold (``realised_r_stream`` is
+    linear in ``pnl_usd`` → a slice's R is its fraction of the whole; the full
+    close folds only its final-slice R).
+
+    Folds the cell matrix, the Layer-5 learners, the meta-label and the posterior
+    (the SAME four the full close folds). It does NOT fire G8 (a post-TRADE
+    reflector — terminal-only, fires once when the position fully closes) nor the
+    segment / excursion writes (terminal-only). ``won`` is the real-fee NET sign,
+    identical to the full close. Measurement/learning only — never read by sizing
+    (the 9-stack ban + −1.0R rail are untouched). Each ``_safe_*`` helper is
+    independently fail-open, mirroring the full-close fan-out.
+    """
+    _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
+        conn, trade=trade, gross_pnl_r=slice_pnl_r, gross_pnl_usd=slice_pnl_usd,
+    )
+    won = pnl_r_net > 0.0
+    regime = _safe_lookup_regime(lookup_regime, conn, trade)
+    _safe_update_cell_matrix(
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won,
+        now_ts=now_ts, state=state,
+    )
+    _safe_run_learners(
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won,
+        now_ts=now_ts, state=state,
+    )
+    _safe_record_meta_label(
+        conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won,
+        now_ts=now_ts, state=state,
+    )
+    _safe_update_posterior(
+        conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net,
+        pnl_r_gross=slice_pnl_r, now_ts=now_ts,
+    )
+
+
 def _safe_update_cell_matrix(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, regime: str,
     pnl_r: float, won: bool, now_ts: int, state: ProdLoopState,

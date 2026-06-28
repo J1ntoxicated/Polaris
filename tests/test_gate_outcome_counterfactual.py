@@ -552,7 +552,11 @@ async def test_full_close_stamps_positions_pnl_r(memdb: sqlite3.Connection) -> N
     assert row[1] > 0.0  # bar drift 100 → 130 is a win
 
 
-def test_partial_close_leaves_pnl_r_null(memdb: sqlite3.Connection) -> None:
+def test_partial_close_stamps_slice_pnl_r(memdb: sqlite3.Connection) -> None:
+    """P2 R-ledger-leak fix: a partial close ACCUMULATES the slice's R onto
+    positions.pnl_r (status stays 'open'). Previously left NULL — the LUNA / DOT
+    leak where a partial-only close never trained the R ledger. Two slices
+    accumulate; ``slice_pnl_r`` defaults to 0.0 so a legacy caller is harmless."""
     from polaris.core.data.fill_normalizer import Fill
     from polaris.scripts._production_close_helpers import _persist_partial_close
 
@@ -571,14 +575,29 @@ def test_partial_close_leaves_pnl_r_null(memdb: sqlite3.Connection) -> None:
     )
     ok = _persist_partial_close(
         memdb, state=ProdLoopState(), trade=trade, close_fill=fill,
-        pnl_usd=100.0, now_ts=NOW + 60,
+        pnl_usd=100.0, now_ts=NOW + 60, slice_pnl_r=0.3,
     )
     assert ok is True
     row = memdb.execute(
         "SELECT status, pnl_r FROM positions WHERE position_id = 'pos-part'",
     ).fetchone()
-    assert row[0] == "open"
-    assert row[1] is None  # partial slice never stamps the final pnl_r
+    assert row[0] == "open"  # partial keeps the position open
+    assert row[1] == pytest.approx(0.3)  # slice R stamped (no longer NULL)
+    # A second partial slice accumulates onto the first.
+    fill2 = Fill(
+        venue="okx", instrument_id="okx:SOL-USDT", strategy_id="tsmom",
+        side="sell", size_usd=25.0 * 130.0, fill_price=130.0, fee_usd=0.05,
+        slippage_bps=0.0, ts_ms=(NOW + 120) * 1000, order_id=uuid.uuid4().hex,
+        base_qty=25.0,
+    )
+    _persist_partial_close(
+        memdb, state=ProdLoopState(), trade=trade, close_fill=fill2,
+        pnl_usd=50.0, now_ts=NOW + 120, slice_pnl_r=0.2,
+    )
+    row2 = memdb.execute(
+        "SELECT pnl_r FROM positions WHERE position_id = 'pos-part'",
+    ).fetchone()
+    assert row2[0] == pytest.approx(0.5)  # 0.3 + 0.2 accumulated
 
 
 # ---------------------------------------------------------------------------

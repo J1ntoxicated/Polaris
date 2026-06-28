@@ -368,6 +368,7 @@ def _persist_partial_close(
     close_fill: Fill,
     pnl_usd: float,
     now_ts: int,
+    slice_pnl_r: float = 0.0,
 ) -> bool:
     """FIX B — persist a partial close that left the position OPEN.
 
@@ -379,6 +380,14 @@ def _persist_partial_close(
     next tick. The trade is NOT popped from ``state.open_trades``. Returns
     ``True`` on durable persist (state preserved + reduced), ``False`` on a DB
     error (no mutation — retry next tick).
+
+    P2 R-ledger-leak fix — ``slice_pnl_r`` (this slice's stream-common R) is
+    ACCUMULATED onto ``positions.pnl_r`` in the SAME txn (``COALESCE(pnl_r,0) +
+    slice``). A position that closes predominantly via partials (LUNA / DOT) no
+    longer leaves ``pnl_r`` NULL — the realised R sums across slices to the
+    whole-position R (``realised_r_stream`` is linear in pnl_usd, so the slice
+    stamps sum exactly). Atomic with the fill persist + qty decrement so the
+    durable R never diverges from the persisted slice $. Measurement only.
     """
     filled = close_fill.base_qty
     remaining = max(0.0, trade.base_qty - filled)
@@ -390,8 +399,9 @@ def _persist_partial_close(
         )
         if trade.position_id:
             conn.execute(
-                "UPDATE positions SET qty = ? WHERE position_id = ?",
-                (remaining, trade.position_id),
+                "UPDATE positions SET qty = ?, "
+                "pnl_r = COALESCE(pnl_r, 0.0) + ? WHERE position_id = ?",
+                (remaining, slice_pnl_r, trade.position_id),
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:

@@ -35,7 +35,7 @@ from polaris.core.live_recalc.session_exit_rail import (
     _CAL_US_EQUITY,
     _fx_in_session,
 )
-from polaris.core.metrics.risk_unit import realised_r
+from polaris.core.metrics.risk_unit import realised_r, realised_r_stream
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_effects import (
@@ -47,6 +47,7 @@ from polaris.scripts._production_close_effects import (
     _safe_update_cell_matrix,
     _safe_update_posterior,
     compute_net_pnl_r,
+    fold_close_slice,
 )
 from polaris.scripts._production_close_helpers import (
     _CLOSE_FULL_FILL_EPS,
@@ -747,10 +748,27 @@ async def _close_trade_with_real_pnl(
             # Forward progress (a real partial fill) — reset the zombie tally so a
             # genuinely-filling position is never drained as un-closeable.
             state.close_reject_counts.pop(drain_pid, None)
-            return _persist_partial_close(
+            # P2 R-ledger-leak fix: the slice's stream-common R (linear in the
+            # sliced pnl_usd, so it is the slice's fraction of the whole-position
+            # R). Stamped cumulatively onto positions.pnl_r inside the persist txn
+            # so a partial-only close (LUNA / DOT) is no longer NULL.
+            slice_pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
+            persisted = _persist_partial_close(
                 conn, state=state, trade=trade, close_fill=real_fill,
-                pnl_usd=pnl_usd, now_ts=now_ts,
+                pnl_usd=pnl_usd, now_ts=now_ts, slice_pnl_r=slice_pnl_r,
             )
+            if persisted:
+                # Fold the slice into the cell matrix / learners / meta-label /
+                # posterior with the SAME real-fee NET pipeline the full close
+                # uses — so partial + remainder sum to exactly ONE whole-position
+                # fold (no double-count). G8 + segment + excursion stay terminal-
+                # only (fire once at the full close). Measurement/learning only.
+                fold_close_slice(
+                    conn, trade=trade, lookup_regime=lookup_regime,
+                    slice_pnl_r=slice_pnl_r, slice_pnl_usd=pnl_usd,
+                    now_ts=now_ts, state=state,
+                )
+            return persisted
     else:
         # SIM exit (non-real-roundtrip): execution-default mark = the LIVE WS mid,
         # falling back to the bar close inside real_pnl_r_from_fills only when no
@@ -778,6 +796,17 @@ async def _close_trade_with_real_pnl(
         conn, trade=trade, exit_price=exit_price,
     )
     realized_atr_r = realised_r(pnl_usd=pnl_usd, risk_usd=atr_risk_usd)
+    # P2 R-ledger-leak fix: this FINAL slice's stream-common R. ``pnl_usd`` is
+    # already sliced to the un-closed remainder (real_pnl_r_from_fills with
+    # close_base_qty); ``realised_r_stream`` is LINEAR in pnl_usd, so this is the
+    # remainder's fraction of the whole-position R. For a SINGLE-SHOT full close
+    # (no prior partial) the slice IS the whole → final_slice_pnl_r == ``pnl_r``
+    # exactly (same function, same input), so the fold + stamp below stay
+    # byte-identical. For a partial-then-full close, the partials already folded
+    # + stamped their fractions, so folding only this remainder makes
+    # partial + remainder sum to exactly ONE whole-position fold (no double-count)
+    # and the accumulated positions.pnl_r reaches the whole-position R.
+    final_slice_pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
     try:
         conn.execute("BEGIN IMMEDIATE")
         persist_fill(
@@ -797,18 +826,23 @@ async def _close_trade_with_real_pnl(
             opened_ts=trade.open_ts,
         )
         if trade.position_id:
-            # Gate→outcome instrumentation: ``pnl_r`` (move quality,
-            # qty-invariant — the FINAL full-close slice's R) is stamped onto
-            # the SAME existing UPDATE so the PASS cohort reads its outcome via
-            # gate_events.position_id → positions.pnl_r. Partial closes /
-            # reconciled zombies never reach this statement → stay NULL
-            # (correct: not a completed trade outcome). Measurement only.
+            # Gate→outcome instrumentation: the realised R is stamped onto the
+            # SAME existing UPDATE so the PASS cohort reads its outcome via
+            # gate_events.position_id → positions.pnl_r. P2 R-ledger-leak fix —
+            # ACCUMULATE this final slice's R onto any prior partial-slice stamps
+            # (``COALESCE(pnl_r,0) + final_slice``) so the durable pnl_r reaches
+            # the whole-position R whether the position closed single-shot (prior
+            # = NULL → 0 + whole = whole, byte-identical) or via partials
+            # (Σ partials + remainder = whole). Reconciled zombies never reach
+            # this statement → stay NULL (correct: tracking failure, not a trade
+            # outcome). Measurement only.
             conn.execute(
                 "UPDATE positions SET status = 'closed', closed_ts = ?, "
-                "mfe_r = ?, mae_r = ?, exit_state = 'closed', pnl_r = ?, "
+                "mfe_r = ?, mae_r = ?, exit_state = 'closed', "
+                "pnl_r = COALESCE(pnl_r, 0.0) + ?, "
                 "exit_cadence = ? "
                 "WHERE position_id = ?",
-                (now_ts, mfe_r, mae_r, pnl_r, cadence, trade.position_id),
+                (now_ts, mfe_r, mae_r, final_slice_pnl_r, cadence, trade.position_id),
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:
@@ -849,8 +883,13 @@ async def _close_trade_with_real_pnl(
     # ban + -1.0R rail are untouched. Fail-open inside compute_net_pnl_r. Computed
     # before the close INFO log so the logged ``won`` matches the net verdict the
     # cell/learners/posterior fold (the log otherwise reported the gross sign).
+    # P2 R-ledger-leak fix: fold ONLY this FINAL slice's gross R (== ``pnl_r`` for
+    # a single-shot full close, so byte-identical; the remainder fraction for a
+    # partial-then-full close, so partial folds + this fold sum to exactly ONE
+    # whole-position fold — no double-count). ``gross_pnl_usd`` is already this
+    # slice's pnl_usd, so the R and $ folded here are consistent.
     _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
-        conn, trade=trade, gross_pnl_r=pnl_r, gross_pnl_usd=pnl_usd,
+        conn, trade=trade, gross_pnl_r=final_slice_pnl_r, gross_pnl_usd=pnl_usd,
     )
     won = pnl_r_net > 0.0
 
@@ -922,8 +961,8 @@ async def _close_trade_with_real_pnl(
     # code_review_2026-06-24) are both charged inside this helper from the SAME
     # cost-adjusted net R — measure/seed only, never read by sizing. Fail-open.
     _safe_update_posterior(
-        conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net, pnl_r_gross=pnl_r,
-        now_ts=now_ts,
+        conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net,
+        pnl_r_gross=final_slice_pnl_r, now_ts=now_ts,
     )
     # FIX 1 — G8 post-trade reflector folds the SAME net R + net ``won`` as the
     # cell/learners/posterior so the reflection lesson is fee-coherent (a gross R

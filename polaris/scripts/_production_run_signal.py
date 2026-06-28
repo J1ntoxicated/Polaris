@@ -15,6 +15,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.technical_store import technicals_summary
+from polaris.core.economics.shadow_order import log_shadow_order
 from polaris.core.pipeline import (
     GateOrchestrator,
     build_exit_payload,
@@ -64,6 +65,9 @@ from polaris.scripts._run_signal_helpers import (
     _bar_order_mode as _bar_order_mode,
 )
 from polaris.scripts._run_signal_helpers import (
+    _is_shadow_first as _is_shadow_first,
+)
+from polaris.scripts._run_signal_helpers import (
     _log_entry_admission_shadow as _log_entry_admission_shadow,
 )
 from polaris.scripts._run_signal_helpers import (
@@ -76,7 +80,7 @@ from polaris.scripts._run_signal_helpers import (
     _strategy_recent_reject as _strategy_recent_reject,
 )
 from polaris.scripts._static_ground import read_ticker_ground
-from polaris.strategies import BaseStrategy, RawSignal
+from polaris.strategies import STRATEGY_REGISTRY, BaseStrategy, RawSignal
 
 if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
@@ -355,6 +359,30 @@ async def run_pipeline_for_signal(
     # (metadata.maker_no_fill_cancel); every other strategy keeps the market
     # (taker) fallback (byte-identical — flow_not_block).
     bar_maker_no_fill = _bar_maker_no_fill(sig.strategy_id)
+    # SHADOW-FIRST ([[weekend_maker_honest_rerun_2026-06-28]]): for a shadow_first
+    # strategy (the two weekend OKX makers), the SIGNAL has now flowed the FULL
+    # pipeline (G1-G5 + sizing + the gate-cohort counterfactual recorded above) — we
+    # record the WOULD-BE entry (sized notional + decision mark + exit target) and
+    # SUPPRESS the real order (return BEFORE reserve_and_submit → no venue order, no
+    # position, no fill → zero capital at risk). flow_not_block: the order is
+    # deferred, NEVER the signal. degrade-never-crash: the log is fail-open inside;
+    # every OTHER strategy skips this branch and reserves+submits as before.
+    if _is_shadow_first(sig.strategy_id):
+        cls = STRATEGY_REGISTRY.get(sig.strategy_id)
+        target_r = cls.metadata.profit_target_r if cls is not None else None
+        log_shadow_order(
+            conn, run_id=ctx.run_id, strategy_id=sig.strategy_id, venue=venue,
+            symbol=symbol, side=sig.side, entry_mark=last_price,
+            notional_usd=notional_usd, atr_pct=max(bars_atr_pct, 1e-4),
+            profit_target_r=target_r, now_ts=now_ts,
+        )
+        state.shadow_orders_logged = getattr(state, "shadow_orders_logged", 0) + 1
+        logger.info(
+            "[L7/shadow-first] %s:%s %s would-be notional=%.2f mark=%.6f "
+            "target_r=%s — order SUPPRESSED (signal flowed, P&L logged)",
+            venue, symbol, sig.strategy_id, notional_usd, last_price, target_r,
+        )
+        return
     trade = await reserve_and_submit(
         conn=conn, state=state, sig=sig, venue=venue, symbol=symbol,
         asset_class=asset_class, underlying_group_id=underlying_group_id,

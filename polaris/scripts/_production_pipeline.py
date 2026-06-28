@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.data.position_risk_persist import persist_position_risk_state
+from polaris.core.economics.maker_fill_shadow import log_maker_fill
 from polaris.core.isolation.allocator_fence import (
     AllocationRequest,
     ReservationConflictError,
@@ -102,6 +103,44 @@ def _strategy_timeframe(strategy_id: str) -> str:
     if cls is None:
         return "1m"
     return cls.metadata.timeframe
+
+
+def _persist_maker_fill_shadow(
+    conn: sqlite3.Connection | None,
+    *,
+    attempt: OpenAttempt | None,
+    run_id: str,
+    strategy_id: str,
+    venue: str,
+    symbol: str,
+    side: str,
+    fill_price: float,
+) -> None:
+    """Persist ONE maker_fill_shadow row for a post-only ENTRY fill (FIX-EXEC).
+
+    The persisting ``log_maker_fill`` was never wired into production, so the shadow
+    table stayed empty live despite real maker fills. This writes the row from the
+    ENTRY open path (the conn IS held, the fill happens exactly once → no
+    double-count; the close path is untouched). A maker-only no-op: ``attempt`` None
+    or carrying no ``maker_touch_px`` (a taker / sim fill) writes NOTHING — a taker
+    entry never fabricates a maker shadow row. Entry leg is always a BUY (OKX
+    post-only buy). Measurement only — degrade-never-crash (log_maker_fill swallows
+    a sqlite error); the trade decision / sizing / the −1.0R rail are never touched.
+    """
+    if attempt is None or attempt.maker_touch_px is None:
+        return
+    log_maker_fill(
+        conn,
+        run_id=run_id,
+        strategy_id=strategy_id,
+        venue=venue,
+        symbol=symbol,
+        side="buy",
+        touch_px=attempt.maker_touch_px,
+        fill_px=fill_price,
+        outcome=attempt.maker_outcome or "clean_fill",
+        reposts=attempt.maker_reposts,
+    )
 
 
 # OKX venue BALANCE rejects that mean capital (not signal) blocked the fill —
@@ -372,6 +411,12 @@ async def reserve_and_submit(
         state.fault_events += 1
         return None
     deal_id: str | None = None
+    # FIX-EXEC ([[weekend_maker_honest_rerun_2026-06-28]]): carry the OKX post-only
+    # maker-fill metadata (touch / reposts / outcome) from the real open leg to the
+    # ENTRY persist below so ONE maker_fill_shadow row is written per maker fill.
+    # ``None`` for the simulate path + a taker/market fill (no maker row → no
+    # double-count). Measurement only — never touches the trade decision.
+    maker_attempt: OpenAttempt | None = None
     if real_roundtrip:
         # P0 venue wire: real demo order via adapter. On reject / no-fill we
         # release the reservation + record a fault (orphan-free) and bail.
@@ -444,6 +489,7 @@ async def reserve_and_submit(
             )
             return None
         fill, deal_id = attempt.fill, attempt.deal_id
+        maker_attempt = attempt  # carries the maker touch/reposts/outcome (if any)
         # P0-5 fix: persist the close-relevant venue ref so a restart can
         # reconstruct it. For Capital the close needs the position ``deal_id``
         # (which differs from the top-level confirm dealId); persist it as the
@@ -575,6 +621,17 @@ async def reserve_and_submit(
         # contribution_id ties the entry fill back to the position so the
         # close path can read the *exact* entry by position_id (P0 fix).
         persist_fill(conn, fill, is_close=False, contribution_id=position_id)
+        # FIX-EXEC ([[weekend_maker_honest_rerun_2026-06-28]]): persist the maker-fill
+        # shadow row HERE (the conn IS held, the fill happens exactly once → no
+        # double-count; the close path is NOT touched). A taker/sim fill carries no
+        # maker_touch_px → no-op (the persist is maker-only). Inside the open txn so
+        # the row never outlives a rolled-back open. Measurement only — the dollar
+        # truth / sizing / the −1.0R rail are never altered.
+        _persist_maker_fill_shadow(
+            conn, attempt=maker_attempt, run_id=sig.signal_id,
+            strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
+            side=sig.side, fill_price=fill.fill_price,
+        )
         # P5 gap-b: populate the open-position risk row the sizer's
         # PortfolioState reads, so per-symbol/underlying/cluster/track caps bind
         # (capital-efficiency / opportunity-cost ceiling — NOT a defensive

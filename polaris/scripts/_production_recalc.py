@@ -71,6 +71,7 @@ from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_probe_attach import observe_probes
 from polaris.scripts._production_recalc_exit import (
+    _stop_atr_mult_for_strategy,
     assess_mode_for_position,
     run_precise_exit,
     run_session_forced_exit,
@@ -392,9 +393,17 @@ async def _evaluate_position(
     anchor_raw = pos.get("entry_atr_pct")
     entry_atr_pct = None if anchor_raw is None else max(float(anchor_raw), 1e-4)
     held_seconds = max(0, now_ts - int(pos.get("opened_ts", now_ts)))
+    # FIX-EXIT ([[weekend_maker_honest_rerun_2026-06-28]]): the R-unit ATR
+    # multiplier the pnl_r the −1.0R rail reads is denominated in. The weekend OKX
+    # makers widen to 3.0 (wider R-unit distance); every other strategy keeps the
+    # SSOT 2.0 → byte-identical. 🚨 The rail COEFFICIENT (max_loss_r=1.0, G6 monitor)
+    # is untouched — a wider ATR unit just makes −1.0R a wider price stop.
     pnl_r = compute_unrealized_pnl_r(
         side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct if entry_atr_pct is None else entry_atr_pct,
+        stop_atr_mult=_stop_atr_mult_for_strategy(
+            str(pos.get("active_strategy_id") or pos.get("strategy") or "")
+        ),
     )
 
     # Phase 3 — per-stream session-close RAIL (CALENDAR INTEGRITY, not a P&L

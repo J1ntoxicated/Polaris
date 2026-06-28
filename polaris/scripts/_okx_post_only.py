@@ -41,6 +41,7 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from polaris.scripts._limit_exec_constants import (
@@ -234,11 +235,10 @@ async def _okx_post_only_open(
             poll_delay_sec=poll_delay_sec, maker_px=maker_px,
         )
         if attempt is not None:
-            _log_maker_fill_basis(
+            return _log_maker_fill_basis(
                 strategy_id=strategy_id, inst_id=inst_id, touch_px=maker_px,
                 attempt=attempt, reposts=attempt_idx,
             )
-            return attempt
         # Unfilled (or submit-rejected) — cancel any resting order before the
         # next repost / before resolving the no-fill (no leaked maker order).
         if resting_ord_id is not None:
@@ -248,11 +248,10 @@ async def _okx_post_only_open(
             )
             resting_ord_id = None
             if partial is not None:
-                _log_maker_fill_basis(
+                return _log_maker_fill_basis(
                     strategy_id=strategy_id, inst_id=inst_id, touch_px=maker_px,
                     attempt=partial, reposts=attempt_idx,
                 )
-                return partial
     # Exhausted the bounded repost loop with no fill — resolve per no-fill mode.
     attempts = max_reposts + 1
     if no_fill == "cancel":
@@ -288,19 +287,22 @@ def _log_maker_fill_basis(
     touch_px: float,
     attempt: OpenAttempt,
     reposts: int,
-) -> None:
-    """Best-effort real-fee maker-fill shadow (entry-BASIS + real-maker net).
+) -> OpenAttempt:
+    """Log the real-fee maker-fill basis + STAMP the maker metadata onto the attempt.
 
     Component C (#77): OKX demo's flat 70 bps hides the maker edge, so we record
     fill-vs-touch basis + a clean_fill/pick_off label per maker fill (the net is
-    computed off real_fee_bps(is_maker=True) inside the shadow module). The DB
-    conn is loop-owned and not threaded here, so this logs at INFO for the live
-    shadow tail; the persisted row is written from the production close/fill path
-    that DOES hold the conn. Never raises (degrade-never-crash).
+    computed off real_fee_bps(is_maker=True) inside the shadow module). The DB conn
+    is loop-owned and NOT threaded here, so this only LOGS at INFO; the persisted
+    ``maker_fill_shadow`` row is written from the ENTRY open path (FIX-EXEC,
+    [[weekend_maker_honest_rerun_2026-06-28]]) which DOES hold the conn. To carry
+    the touch / reposts / outcome OUT to that path, this STAMPS them onto a copy of
+    the (frozen) ``OpenAttempt`` and returns it. Never raises (degrade-never-crash):
+    on any failure the ORIGINAL attempt is returned unchanged (the fill is intact).
     """
     fill = attempt.fill
     if fill is None:
-        return
+        return attempt
     try:
         from polaris.core.economics.maker_fill_shadow import (
             compute_entry_basis_bps,
@@ -316,5 +318,10 @@ def _log_maker_fill_basis(
             strategy_id, inst_id, basis, fill.fill_price, touch_px, reposts,
             outcome,
         )
+        return replace(
+            attempt, maker_touch_px=touch_px, maker_reposts=reposts,
+            maker_outcome=outcome,
+        )
     except Exception as exc:  # noqa: BLE001 — shadow is best-effort, never blocks
         logger.debug("[maker-fill-shadow] basis log skipped: %r", exc)
+        return attempt

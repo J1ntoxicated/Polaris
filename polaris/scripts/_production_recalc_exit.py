@@ -80,6 +80,9 @@ from polaris.scripts.exit_strategy_config import (
     _mfe_protect_for_strategy as _mfe_protect_for_strategy,
 )
 from polaris.scripts.exit_strategy_config import (
+    _stop_atr_mult_for_strategy as _stop_atr_mult_for_strategy,
+)
+from polaris.scripts.exit_strategy_config import (
     _trail_mult_for_strategy as _trail_mult_for_strategy,
 )
 from polaris.scripts.exit_venue_stop import arm_okx_venue_stop as arm_okx_venue_stop
@@ -343,6 +346,12 @@ async def run_precise_exit(
         if trail_mult is not None
         else _trail_mult_for_strategy(strategy_id)
     )
+    # FIX-EXIT ([[weekend_maker_honest_rerun_2026-06-28]]): the R-unit ATR
+    # multiplier the mfe_r / mae_r excursion FSM is denominated in. The weekend OKX
+    # makers widen to 3.0 (wider R-unit distance → a fixed-$ maker fee shrinks in R,
+    # the bounded revert gets room); every other strategy keeps the SSOT 2.0 →
+    # byte-identical. 🚨 The −1.0R rail coefficient (G6 monitor) is UNTOUCHED — only
+    # the measurement unit widens (size / entry / the rail are never changed here).
     decision = evaluate_exit(
         prev=prev, side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
@@ -355,6 +364,7 @@ async def run_precise_exit(
         mode=mode,
         thesis_bucket=_bucket_for_strategy(strategy_id),
         thesis_giveback=_THESIS_GIVEBACK,
+        stop_atr_mult=_stop_atr_mult_for_strategy(strategy_id),
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
     # FSM state transition (DEBUG): surface the per-tick exit-state advance so

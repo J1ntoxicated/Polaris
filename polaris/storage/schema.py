@@ -107,6 +107,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_STRATEGY_RISK_STATE,
     DDL_V_G34_COHORT_OUTCOMES,
     DDL_VENUE_BLOCKLIST,
+    DDL_WEEKEND_SHADOW_ORDERS,
+    DDL_WEEKEND_SHADOW_ORDERS_INDEX,
 )
 
 # ---------------------------------------------------------------------------
@@ -176,6 +178,11 @@ ALL_DDL: tuple[str, ...] = (
     # place the weekend maker edge is visible; OKX demo's flat 70 bps hides it).
     DDL_MAKER_FILL_SHADOW,
     DDL_MAKER_FILL_SHADOW_INDEX,
+    # Shadow-first would-be orders (#94) — SUPPRESSED order on a shadow_first
+    # strategy (the two weekend OKX makers); the signal flowed + the would-be P&L
+    # is logged (zero capital at risk; durability of the thin sample accrues live).
+    DDL_WEEKEND_SHADOW_ORDERS,
+    DDL_WEEKEND_SHADOW_ORDERS_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,

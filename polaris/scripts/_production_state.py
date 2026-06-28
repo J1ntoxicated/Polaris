@@ -56,6 +56,9 @@ class ProdLoopState:
     g1_runs: int = 0
     g2_emits: int = 0
     g8_runs: int = 0
+    # Shadow-first (#94) — would-be entries logged for a shadow_first strategy
+    # (the two weekend OKX makers); the order was SUPPRESSED (no real position).
+    shadow_orders_logged: int = 0
     # Meta-labeling (#10) — triple-barrier labels recorded (collection-only).
     meta_labels: int = 0
     bars_persisted: int = 0

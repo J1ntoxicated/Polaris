@@ -94,6 +94,12 @@ class WeekendFundingCapitulationMakerStrategy(BaseStrategy):
         # no-fill = CANCEL/skip: the missed passive bid is 0 realised cost, the
         # edge IS the passive fill — never a forced taker fallback.
         maker_no_fill_cancel=True,
+        # SHADOW-FIRST ([[weekend_maker_honest_rerun_2026-06-28]]): this is the
+        # ORIGINAL #80 shadow-first intent realised at the ORDER level. The edge is
+        # real but OPTIMISTIC (OOS +1.69R regime-amplified; conservative ≈+0.2-0.4R)
+        # on a THIN 96d single period — durability INCONCLUSIVE. So the order is
+        # SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
+        shadow_first=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

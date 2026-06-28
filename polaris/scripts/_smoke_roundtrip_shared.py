@@ -45,6 +45,18 @@ class OpenAttempt:
     # Submitted share qty for that live unfilled order (whole-share-retry qty),
     # carried so the orphan record knows the exposure to reconcile.
     unfilled_qty: float = 0.0
+    # Maker-fill shadow metadata (FIX-EXEC, [[weekend_maker_honest_rerun_2026-06-28]]):
+    # the post-only ENTRY leg's touch (the price the passive bid was posted at), its
+    # repost count, and the clean_fill/pick_off outcome. Carried OUT of the OKX
+    # post-only path so the ENTRY open transaction (which DOES hold the conn) can
+    # persist ONE maker_fill_shadow row per fill (the persisting log_maker_fill was
+    # never wired before → the shadow table stayed empty live). ``None`` / 0 on a
+    # TAKER / market fill — every existing caller is byte-identical, and a taker
+    # entry persists NO maker row (the persist is maker-only). Measurement only —
+    # never touches sizing / the trade decision / the −1.0R rail.
+    maker_touch_px: float | None = None
+    maker_reposts: int = 0
+    maker_outcome: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

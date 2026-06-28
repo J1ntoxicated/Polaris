@@ -71,6 +71,21 @@ def _bar_maker_no_fill(strategy_id: str) -> str:
     return "market"
 
 
+def _is_shadow_first(strategy_id: str) -> bool:
+    """True when ``strategy_id`` is a shadow_first strategy (SUPPRESS the order).
+
+    A strategy whose metadata sets ``shadow_first`` (the two weekend OKX makers,
+    [[weekend_maker_honest_rerun_2026-06-28]]) has its REAL venue order SUPPRESSED —
+    the signal still FLOWS the full pipeline (G1-G5 + sizing) and the would-be entry
+    is RECORDED, but no order is submitted (zero capital at risk on a thin sample).
+    Every other registered strategy — and any UNREGISTERED id — returns ``False``
+    (the live order path, byte-identical; flow_not_block — the order is deferred,
+    never the signal).
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    return cls is not None and cls.metadata.shadow_first
+
+
 def _maybe_register_rotation_candidate(
     state: ProdLoopState,
     *,

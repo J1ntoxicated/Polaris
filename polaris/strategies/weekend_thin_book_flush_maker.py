@@ -79,6 +79,12 @@ class WeekendThinBookFlushMakerStrategy(BaseStrategy):
         # no-fill = CANCEL/skip: the missed deep bid is 0 realised cost, the
         # edge IS the passive fill — never a forced taker fallback.
         maker_no_fill_cancel=True,
+        # SHADOW-FIRST ([[weekend_maker_honest_rerun_2026-06-28]]): the signal edge
+        # is real (+0.43R over a random-weekend baseline) but as-deployed loses
+        # every block (WIN 5.4%) and the FIX-EXIT 3×ATR R-unit only flips the
+        # MEDIAN positive (mean still −0.105R, single ~20wk period). So the order
+        # is SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
+        shadow_first=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

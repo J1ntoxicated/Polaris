@@ -139,6 +139,36 @@ CREATE INDEX IF NOT EXISTS idx_maker_fill_shadow_strategy
     ON maker_fill_shadow(strategy_id, outcome, created_ts);
 """
 
+# Shadow-first would-be orders ([[weekend_maker_honest_rerun_2026-06-28]]) — one
+# row per SUPPRESSED order on a shadow_first strategy (the two weekend OKX makers).
+# The SIGNAL still flowed the full pipeline (G1-G5 + sizing); this records the
+# would-be entry (sized notional + decision-time mark + the exit target) so the
+# live edge can be measured WITHOUT capital at risk. The forward would-be P&L is
+# resolved offline from already-ingested bars at entry_mark + atr_pct (the same
+# ATR-R basis the counterfactual sweep uses). Instrumentation only — no position /
+# fill / venue order is ever written. flow_not_block: the order is deferred, never
+# the signal.
+DDL_WEEKEND_SHADOW_ORDERS = """
+CREATE TABLE IF NOT EXISTS weekend_shadow_orders (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL DEFAULT '',
+    entry_mark REAL NOT NULL DEFAULT 0.0,
+    notional_usd REAL NOT NULL DEFAULT 0.0,
+    atr_pct REAL NOT NULL DEFAULT 0.0,
+    profit_target_r REAL,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_WEEKEND_SHADOW_ORDERS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_weekend_shadow_orders_strategy
+    ON weekend_shadow_orders(strategy_id, created_ts);
+"""
+
 # Gate→outcome instrumentation (BUILD, behavior 0) — one row per G3/G4 GPT
 # decision on the bar entry pipeline. ``decision='KILL'`` rows are the killed
 # signals whose counterfactual forward marks (1h/4h/24h first-1m-bar closes,

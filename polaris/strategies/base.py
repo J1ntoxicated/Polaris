@@ -86,6 +86,18 @@ class StrategyMetadata:
     # size dampen / halt / block (flow_not_block) — an excluded strategy simply
     # does not emit; it never cuts another strategy's size.
     dispatch_eligible: bool = True
+    # shadow_first: SUPPRESS the real venue order while the SIGNAL still FLOWS the
+    # full pipeline (G1-G5 + sizing) and the would-be entry is RECORDED for live
+    # edge measurement (FIX, [[weekend_maker_honest_rerun_2026-06-28]]). ORTHOGONAL
+    # to ``dispatch_eligible``: a shadow_first strategy STILL dispatches + emits +
+    # is sized — ONLY the order leg is not submitted (zero capital at risk). The
+    # two weekend OKX makers ship this way because their edge rests on a THIN
+    # single market period (flush ~20wk / funding 96d) — durability INCONCLUSIVE —
+    # so the live would-be P&L accrues before any real fill. The DEFAULT (False)
+    # keeps the live order path for every other strategy — byte-identical.
+    # flow_not_block: it never blocks the SIGNAL; it only defers the ORDER (the
+    # signal + would-be P&L are logged, not dropped). NOT a size dampen / halt.
+    shadow_first: bool = False
 
 
 @dataclass(frozen=True, slots=True)

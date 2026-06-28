@@ -93,12 +93,20 @@ def _atr_one_usd(*, entry_price: float, atr_pct: float) -> float:
     )
 
 
-def _atr_r_usd(*, entry_price: float, atr_pct: float) -> float:
+def _atr_r_usd(
+    *, entry_price: float, atr_pct: float, stop_atr_mult: float = 2.0
+) -> float:
     """R-unit denominator in price terms — matches the realised-PnL path
-    (``entry_price * atr_pct * 2.0`` with the same 2x stop convention as
-    ``compute_unrealized_pnl_r`` / ``real_pnl_r_from_fills``)."""
+    (``entry_price * atr_pct * stop_atr_mult`` with the same stop convention as
+    ``compute_unrealized_pnl_r`` / ``real_pnl_r_from_fills``).
+
+    ``stop_atr_mult`` defaults to 2.0 (the module SSOT convention) → byte-identical
+    for every existing caller. The weekend OKX makers thread 3.0 (FIX-EXIT,
+    [[weekend_maker_honest_rerun_2026-06-28]]): a WIDER R-unit ATR distance — the
+    −1.0R rail COEFFICIENT (in the G6 monitor) is untouched; only the denominator
+    the excursion is measured against widens."""
     return max(
-        entry_price * max(atr_pct, 0.0) * 2.0,
+        entry_price * max(atr_pct, 0.0) * stop_atr_mult,
         entry_price * _ATR_PCT_RELATIVE_FLOOR,
         _ATR_USD_FLOOR,
     )
@@ -163,6 +171,7 @@ def evaluate_exit(
     mode: ManagementMode | None = None,
     thesis_bucket: Bucket = Bucket.TREND,
     thesis_giveback: ThesisGivebackParams | None = None,
+    stop_atr_mult: float = 2.0,
 ) -> ExitDecision:
     """Advance excursion + stop + FSM for one position; decide close-or-hold.
 
@@ -246,6 +255,15 @@ def evaluate_exit(
     REMODE swaps the trend<->range schedule; size / entry / the G6 -1.0R rail
     untouched. ``thesis_bucket`` / ``thesis_giveback`` feed the param mapping (a
     None giveback degrades to the module defaults).
+
+    ``stop_atr_mult`` (FIX-EXIT, [[weekend_maker_honest_rerun_2026-06-28]]): the
+    R-unit ATR multiplier that denominates mfe_r / mae_r (the excursion FSM ruler).
+    ``2.0`` (default) is the module SSOT convention → byte-identical for every
+    existing caller. The two validated weekend OKX makers thread ``3.0`` (the
+    R-unit ATR distance WIDENS) so a fixed-$ maker fee shrinks as a fraction of R
+    and the bounded revert has more room. 🚨 EXIT-MEASURE only: the −1.0R rail
+    COEFFICIENT (max_loss_r in the G6 monitor) and the size / entry side are
+    UNTOUCHED — a wider ATR unit simply makes the SAME rung a wider price stop.
     """
     # 1. Update price extremes (running peak / trough over the position life).
     peak = max(prev.peak_price, last_price)
@@ -254,7 +272,10 @@ def evaluate_exit(
     # 2. Excursion in R units (favourable >= 0, adverse <= 0) — denominator
     #    anchored at entry when available; telemetry capped at |100R|.
     r_denominator_pct = atr_pct if entry_atr_pct is None else entry_atr_pct
-    atr_r = _atr_r_usd(entry_price=entry_price, atr_pct=r_denominator_pct)
+    atr_r = _atr_r_usd(
+        entry_price=entry_price, atr_pct=r_denominator_pct,
+        stop_atr_mult=stop_atr_mult,
+    )
     if side == "long":
         mfe_r = max(0.0, (peak - entry_price) / atr_r)
         mae_r = min(0.0, (trough - entry_price) / atr_r)

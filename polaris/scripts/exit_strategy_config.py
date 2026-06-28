@@ -26,6 +26,7 @@ from polaris.core.live_recalc.exit_engine import (
     MfeProtectSchedule,
     bucket_from_correlation_group,
 )
+from polaris.core.metrics.risk_unit import STOP_ATR_MULT
 from polaris.strategies import STRATEGY_REGISTRY
 
 
@@ -80,6 +81,26 @@ def _env_float(name: str, default: float) -> float:
 BAR_TREND_PEAK_LOCK_ARM_R: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_ARM_R", 0.20)
 BAR_TREND_PEAK_LOCK_FRAC: float = _env_float("POLARIS_BAR_TREND_PEAK_LOCK_FRAC", 0.65)
 BAR_TREND_TRAIL_MULT: float = _env_float("POLARIS_BAR_TREND_TRAIL_MULT", 3.0)
+
+# Weekend-maker R-unit ATR multiplier (FIX-EXIT, [[weekend_maker_honest_rerun_2026-06-28]]).
+# The two VALIDATED weekend OKX makers (weekend_thin_book_flush_maker #77,
+# weekend_funding_capitulation_maker #80) lose as-deployed because one maker
+# round-trip eats >½ R at the median ATR% on the tight default 2-ATR R-unit. The
+# honest OOS re-run (§3 "rail fixed −1.0R, only R-unit ATR mult widens") shows a
+# 3.0×ATR R-unit flips the median positive (flush +0.065, funding +0.722): a wider
+# ATR DENOMINATOR makes the SAME −1.0R rung a WIDER price stop (more room for the
+# bounded revert — aggressive / flow_not_block) and shrinks the fixed-$ fee as a
+# fraction of R. 🚨 The −1.0R rail COEFFICIENT is UNCHANGED; only the R-unit
+# ATR-distance widens. Sizing / the 9-stack / the trade path are UNTOUCHED. Every
+# OTHER strategy keeps the module SSOT default (STOP_ATR_MULT=2.0) → byte-identical.
+# Env-tunable.
+WEEKEND_MAKER_STOP_ATR_MULT: float = _env_float(
+    "POLARIS_WEEKEND_MAKER_STOP_ATR_MULT", 3.0
+)
+# The two validated weekend OKX makers whose R-unit ATR distance widens to 3×ATR.
+_WEEKEND_MAKER_STRATEGY_IDS: frozenset[str] = frozenset(
+    {"weekend_thin_book_flush_maker", "weekend_funding_capitulation_maker"}
+)
 
 
 def _mfe_protect_for_strategy(strategy_id: str) -> MfeProtectSchedule | None:
@@ -158,6 +179,27 @@ def _trail_mult_for_strategy(strategy_id: str) -> float | None:
     if bucket_from_correlation_group(cls.metadata.correlation_group_id) is Bucket.TREND:
         return BAR_TREND_TRAIL_MULT
     return None
+
+
+def _stop_atr_mult_for_strategy(strategy_id: str) -> float:
+    """R-unit ATR multiplier (the pnl_r / mfe_r DENOMINATOR distance) for ``strategy_id``.
+
+    The two validated weekend OKX makers widen to ``WEEKEND_MAKER_STOP_ATR_MULT``
+    (3.0, was the module SSOT 2.0) per the FIX-EXIT finding
+    ([[weekend_maker_honest_rerun_2026-06-28]] §3 — "rail fixed −1.0R, only R-unit
+    ATR mult widens" flips the OOS median positive). EVERY OTHER strategy (and any
+    UNREGISTERED id) keeps ``STOP_ATR_MULT`` (2.0) → the R ruler is byte-identical
+    for every existing position.
+
+    🚨 This widens ONLY the R-unit ATR-DISTANCE (the denominator). The −1.0R rail
+    COEFFICIENT (max_loss_r=1.0 in the G6 monitor) is UNTOUCHED — a wider ATR unit
+    simply makes the SAME −1.0R rung correspond to a WIDER price stop (MORE room for
+    the bounded revert — aggressive / flow_not_block) and shrinks the fixed-$ fee as
+    a fraction of R. Sizing / the 9-stack / the trade path are NEVER touched.
+    """
+    if strategy_id in _WEEKEND_MAKER_STRATEGY_IDS:
+        return WEEKEND_MAKER_STOP_ATR_MULT
+    return STOP_ATR_MULT
 
 
 def _bucket_for_strategy(strategy_id: str) -> Bucket:

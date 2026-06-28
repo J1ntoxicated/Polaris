@@ -861,6 +861,80 @@ def _build_ai_activity() -> dict[str, Any]:
     }
 
 
+# ── Weekend ops board (display-only) ────────────────────────────────────────
+# /api/weekend serves the four-section weekend operations board: ① last-7d
+# real-fee-net settlement, ② the weekend_shadow_orders would-be P&L (resolved
+# OFFLINE against stored bars) + maker-fill-shadow status, ③ Monday-readiness
+# session-open countdown + bar freshness, ④ the recent weekend research notes.
+# The would-be resolution scans the forward bars for every shadow order (≈1.4s on
+# the live DB), so — like buildlog/lessons — it MUST NOT run inside a request
+# thread under the 1s board poll. It has its own slow cache + the ref loop; the
+# request handler only ever serves the warm value. The DB read is ?mode=ro and
+# nothing here touches sizing/risk/orders. Weekend data moves slowly (shadow
+# orders accrue over the weekend; the 7d window is coarse) → a 60s TTL is ample.
+_weekend_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_weekend_lock = threading.Lock()
+_WEEKEND_TTL = 60.0
+
+# Recent weekend research notes (section ④) — vault/50_research/*weekend*.md +
+# the capital-weekend FX note, surfaced by filename-substring so a new note is
+# picked up automatically. Read-only display chrome.
+_WEEKEND_NOTE_SUBSTR = ("weekend", "alpaca_weekend")
+
+
+def _build_weekend() -> dict[str, Any]:
+    """Four-section weekend ops payload + recent research notes. Read-only.
+
+    Opens a fresh ?mode=ro connection, builds the four sections via
+    ``weekend_data.build_weekend`` (settlement / shadow / readiness), then attaches
+    the recent weekend research notes for the housekeeping queue. A missing DB or a
+    builder failure degrades to an empty-but-shaped payload (never an exception)."""
+    from tools.visualizer import weekend_data
+
+    now_ts = int(time.time())
+    payload: dict[str, Any] = {
+        "ts_now": now_ts, "is_weekend": weekend_data.is_weekend_utc(now_ts),
+        "settlement": {"rows": [], "best": None, "worst": None,
+                       "total_net_usd": 0.0},
+        "shadow": {"strategies": [], "order_n": 0, "maker_fill_shadow_n": 0,
+                   "maker_persist_wired": False},
+        "readiness": {"session_opens": weekend_data.next_session_opens(now_ts),
+                      "bar_freshness": []},
+        "funding_strategy": "weekend_funding_capitulation_maker",
+        "notes": _weekend_notes(),
+        "ts": time.time(),
+    }
+    if not _DB_PATH.exists():
+        return payload
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            built = weekend_data.build_weekend(conn, now_ts=now_ts)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return payload
+    payload.update(built)
+    payload["notes"] = _weekend_notes()
+    payload["ts"] = time.time()
+    return payload
+
+
+def _weekend_notes() -> list[dict[str, str]]:
+    """Recent weekend research notes (title + first takeaway), newest-first.
+
+    Reuses the ``_collect_md_entries`` reader over vault/50_research, keeping only
+    files whose name carries a weekend substring. Read-only; empty when absent."""
+    research = REPO_ROOT / "vault" / "50_research"
+    entries = _collect_md_entries(research, "research")
+    notes = [
+        e for e in entries
+        if any(s in e["name"].lower() for s in _WEEKEND_NOTE_SUBSTR)
+    ]
+    notes.sort(key=lambda e: e["name"], reverse=True)
+    return notes[:8]
+
+
 def _serve_ref(
     cache: dict[str, Any], lock: threading.Lock, builder: Any
 ) -> dict[str, Any]:
@@ -978,6 +1052,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"ai_activity err: {exc}")
+            return
+        if self.path.startswith("/api/weekend"):
+            try:
+                self._json(
+                    _serve_ref(_weekend_cache, _weekend_lock, _build_weekend)
+                )
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"weekend err: {exc}")
             return
         super().do_GET()
 
@@ -1113,6 +1195,7 @@ def _ref_refresh_loop() -> None:
         (_lessons_cache, _lessons_lock, _build_lessons, _LESSONS_TTL),
         (_ai_activity_cache, _ai_activity_lock, _build_ai_activity,
          _AI_ACTIVITY_TTL),
+        (_weekend_cache, _weekend_lock, _build_weekend, _WEEKEND_TTL),
     )
     while True:
         now = time.time()

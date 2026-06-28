@@ -537,6 +537,7 @@
     { id: 'learned', label: 'Lessons' },
     { id: 'ai', label: 'AI' },
     { id: 'chart', label: 'Chart' },
+    { id: 'weekend', label: 'Weekend' },
   ];
 
   function skeleton() {

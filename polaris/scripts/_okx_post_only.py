@@ -15,6 +15,18 @@ with a BOUNDED reprice/repost loop:
     (the weekend thin-book edge IS the passive fill — a miss is 0 realised cost,
     NOT a forced taker; flow_not_block never mandates a market order).
 
+#91 maker fill-rate levers (all env-gated, DEFAULT-OFF → byte-identical):
+
+  * TOUCH-WARD repost (``POLARIS_POST_ONLY_REPOST_STEP_BPS``) — each repost
+    advances the post-only price from the deep touch toward the ask (clamped
+    strictly below it → stays a maker), so a thin book that never trades back to
+    the deep bid still fills at a price that crept toward where it trades;
+  * WEEKEND taker fallback (``POLARIS_WEEKEND_MAKER_TAKER_FALLBACK`` /
+    ``POLARIS_WEEKEND_MAKER_TAKER_AFTER_N``) — a ``"cancel"`` strategy can fall
+    back to a TAKER market order (returns ``None``) after the loop is exhausted
+    instead of skipping, a deliberate fill-guarantee-vs-edge knob (the maker_fill
+    shadow keeps measuring the edge so the trade-off stays visible).
+
 ``_okx_limit_open`` calls it and, on ``None``, falls back to a market order; on
 the ``"maker_no_fill"`` sentinel it returns the sentinel unchanged (skip).
 
@@ -35,6 +47,8 @@ from polaris.scripts._limit_exec_constants import (
     LIMIT_POLL_DELAY_SEC,
     limit_fill_wait_sec,
     post_only_max_reposts,
+    post_only_repost_step_bps,
+    weekend_maker_taker_after_n,
 )
 from polaris.scripts._okx_open_shared import _normalize_open_rows
 from polaris.scripts._smoke_roundtrip_shared import OpenAttempt
@@ -47,11 +61,21 @@ logger = logging.getLogger(__name__)
 MAKER_NO_FILL_SENTINEL = "maker_no_fill"
 
 
-async def _okx_maker_px(adapter: Any, *, inst_id: str) -> float | None:
-    """Resolve the passive maker touch for a BUY: best bid (post-only, no cross).
+async def _okx_maker_px(
+    adapter: Any, *, inst_id: str, attempt_idx: int = 0
+) -> float | None:
+    """Resolve the post-only BUY price: best bid, advanced toward the ask by the
+    TOUCH-WARD step (#91 lever a) on each repost.
 
-    Returns ``None`` when the ticker has no usable bid so the caller falls back
-    to a plain market order (fail-safe — never blocks the entry).
+    ``attempt_idx`` is the 0-based repost index. With the step OFF (default 0 bps)
+    every attempt posts at the bare best bid (post-only, no cross — #77). With the
+    step ON, attempt ``k`` posts at ``bid × (1 + step_bps × k / 1e4)``, CLAMPED
+    strictly below the best ask so the order stays a maker (a price at/over the
+    ask would be a would-cross post_only reject). A thin book that never trades
+    back to the deep bid then fills at a price that crept toward where it trades.
+
+    Returns ``None`` when the ticker has no usable bid so the caller falls back to
+    a plain market order (fail-safe — never blocks the entry).
     """
     tk = await adapter.fetch_ticker(inst_id)
     bid = tk.get("bidPx")
@@ -59,7 +83,24 @@ async def _okx_maker_px(adapter: Any, *, inst_id: str) -> float | None:
         px = float(bid) if bid not in (None, "") else 0.0
     except (TypeError, ValueError):
         return None
-    return px if px > 0.0 else None
+    if px <= 0.0:
+        return None
+    step_bps = post_only_repost_step_bps()
+    if step_bps <= 0.0 or attempt_idx <= 0:
+        return px  # OFF, or the first post — bare touch (byte-identical to #77).
+    advanced = px * (1.0 + step_bps * float(attempt_idx) / 10_000.0)
+    # Clamp STRICTLY below the ask so the post_only never crosses (stays maker).
+    ask_raw = tk.get("askPx")
+    try:
+        ask = float(ask_raw) if ask_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        ask = 0.0
+    if ask > 0.0:
+        max_px = ask * (1.0 - 1e-4)  # one tick-fraction below the ask
+        if max_px <= px:
+            return px  # degenerate/crossed book → never go below the touch
+        advanced = min(advanced, max_px)
+    return advanced
 
 
 async def _post_and_poll_once(
@@ -166,7 +207,12 @@ async def _okx_post_only_open(
         caller falls back to a market order (byte-identical to the legacy path);
       * ``OpenAttempt(reject_code="maker_no_fill")`` when ``no_fill="cancel"``
         and no attempt filled — a deliberate SKIP (the weekend thin-book thesis:
-        a missed deep bid is 0 realised cost, never a forced taker).
+        a missed deep bid is 0 realised cost, never a forced taker) — UNLESS the
+        #91 weekend taker-fallback knob is met, in which case it returns ``None``
+        so the caller market-falls-back (a guaranteed taker fill).
+
+    The repost price progression honours the #91 touch-ward step (each repost
+    creeps from the deep touch toward the ask, clamped below it → stays a maker).
 
     Raises only on an unexpected adapter error — the caller treats a raise as a
     fail-safe market fallback.
@@ -175,7 +221,11 @@ async def _okx_post_only_open(
     resting_ord_id: str | None = None
     # 1 initial post + up to max_reposts re-posts (bounded — never infinite).
     for attempt_idx in range(max_reposts + 1):
-        maker_px = await _okx_maker_px(adapter, inst_id=inst_id)
+        # TOUCH-WARD (#91 lever a): attempt_idx advances the post-only price from
+        # the deep touch toward the ask each repost (OFF by default → bare touch).
+        maker_px = await _okx_maker_px(
+            adapter, inst_id=inst_id, attempt_idx=attempt_idx
+        )
         if maker_px is None:
             break  # no usable bid → resolve no-fill (market / cancel)
         attempt, resting_ord_id = await _post_and_poll_once(
@@ -204,15 +254,29 @@ async def _okx_post_only_open(
                 )
                 return partial
     # Exhausted the bounded repost loop with no fill — resolve per no-fill mode.
+    attempts = max_reposts + 1
     if no_fill == "cancel":
+        # WEEKEND TAKER FALLBACK (#91 lever b): a cancel-mode strategy normally
+        # SKIPS (a missed deep bid = 0 realised cost — the weekend maker thesis).
+        # With the opt-in knob, once the loop has taken >= N attempts it instead
+        # falls back to a TAKER market order (returns None → the caller markets).
+        # The maker_fill shadow keeps measuring the edge, so the fill-guarantee
+        # vs maker-edge trade-off stays visible. Default (knob OFF) = skip.
+        taker_after_n = weekend_maker_taker_after_n()
+        if taker_after_n is not None and attempts >= taker_after_n:
+            logger.info(
+                "[okx/limit] %s post_only no-fill after %d attempt(s) — WEEKEND "
+                "taker fallback (knob N=%d met)", inst_id, attempts, taker_after_n,
+            )
+            return None
         logger.info(
             "[okx/limit] %s post_only no-fill after %d attempt(s) — CANCEL/skip "
-            "(maker thesis: missed deep bid = 0 cost)", inst_id, max_reposts + 1,
+            "(maker thesis: missed deep bid = 0 cost)", inst_id, attempts,
         )
         return OpenAttempt(fill=None, reject_code=MAKER_NO_FILL_SENTINEL)
     logger.info(
         "[okx/limit] %s post_only no-fill after %d attempt(s) — market fallback",
-        inst_id, max_reposts + 1,
+        inst_id, attempts,
     )
     return None
 

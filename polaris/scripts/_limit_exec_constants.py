@@ -26,11 +26,14 @@ __all__ = [
     "OKX_CLOSE_CAP_BUFFER_FRAC",
     "OKX_MAX_MARKET_NOTIONAL_USDT",
     "POST_ONLY_MAX_REPOSTS",
+    "POST_ONLY_REPOST_STEP_BPS",
     "STRONG_SIGNAL_STRENGTH",
     "limit_fill_wait_sec",
     "marketable_limit_cap_bps",
     "post_only_max_reposts",
+    "post_only_repost_step_bps",
     "strong_signal_strength",
+    "weekend_maker_taker_after_n",
 ]
 
 # OKX SPOT VENUE RULE (not our choice, not tunable): a single market order's
@@ -70,6 +73,22 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return val if val > 0.0 else default
+
+
+def _env_float_nonneg(name: str, default: float) -> float:
+    """Like ``_env_float`` but ``0.0`` is a VALID value (an explicit OFF knob).
+
+    Used for the touch-ward step where ``0.0`` means "post at the bare touch"
+    (the #77 default), distinct from a malformed override that must fall back.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        return default
+    return val if val >= 0.0 else default
 
 
 # Max seconds to wait for the post-only limit to fill before cancel + market
@@ -115,6 +134,56 @@ def post_only_max_reposts() -> int:
     except ValueError:
         return POST_ONLY_MAX_REPOSTS
     return val if val > 0 else POST_ONLY_MAX_REPOSTS
+
+
+# TOUCH-WARD REPOST step (#91 maker fill-rate lever a). On a thin weekend book a
+# post-only resting at the bare deep bid can sit unfilled forever — the price
+# never trades back down to it. This bps step advances each repost's post-only
+# price from the deep touch TOWARD the mid (BUY: bid → bid × (1 + step×idx/1e4)),
+# clamped STRICTLY below the ask so the order stays a maker (no would-cross). The
+# fill still pays the maker fee; it just rests progressively closer to where the
+# book actually trades. ``0.0`` (default) = OFF = post at the bare touch every
+# repost (byte-identical to #77). Env-tunable for a paper sweep; combine with a
+# higher POST_ONLY_MAX_REPOSTS so each extra shot creeps nearer the ask. The
+# maker_fill shadow records the worse fill_px so the edge cost stays measured.
+POST_ONLY_REPOST_STEP_BPS: Final[float] = _env_float_nonneg(
+    "POLARIS_POST_ONLY_REPOST_STEP_BPS", 0.0
+)
+
+
+def post_only_repost_step_bps() -> float:
+    """Resolve the touch-ward repost step (bps) at call time. 0.0 = OFF."""
+    return _env_float_nonneg("POLARIS_POST_ONLY_REPOST_STEP_BPS", 0.0)
+
+
+def weekend_maker_taker_after_n() -> int | None:
+    """Resolve the weekend cancel-mode taker-fallback threshold at call time.
+
+    Returns the minimum attempt count (1 initial post + reposts) at/above which a
+    ``no_fill="cancel"`` strategy falls back to a TAKER market order instead of
+    skipping (#91 lever b). Resolution order:
+
+      * ``POLARIS_WEEKEND_MAKER_TAKER_FALLBACK`` truthy → ``1`` (fall back after
+        ANY exhausted loop — the unconditional taker-guarantee knob);
+      * else ``POLARIS_WEEKEND_MAKER_TAKER_AFTER_N`` → that int (graduated: only
+        after N attempts; lets a deep-bid rest for the first few shots, then
+        guarantees a fill);
+      * else ``None`` = OFF (default) = the #77 skip sentinel (a missed deep bid
+        is 0 realised cost — the weekend maker thesis, byte-identical).
+
+    A non-positive / malformed value is OFF (no fallback) — the knob is opt-in.
+    """
+    raw_flag = os.environ.get("POLARIS_WEEKEND_MAKER_TAKER_FALLBACK", "")
+    if raw_flag.strip().lower() in ("1", "true", "yes", "on"):
+        return 1
+    raw_n = os.environ.get("POLARIS_WEEKEND_MAKER_TAKER_AFTER_N")
+    if raw_n is None or raw_n == "":
+        return None
+    try:
+        val = int(float(raw_n))
+    except ValueError:
+        return None
+    return val if val > 0 else None
 
 
 # ---------------------------------------------------------------------------

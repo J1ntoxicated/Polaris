@@ -83,6 +83,13 @@ _GRAPH_NODE_CAP_DEFAULT = 240
 _TIER_PRIORITY: dict[str, int] = {"S": 0, "A": 1, "B": 2}
 _TIER_TAIL_PRIORITY = 5  # T tail + untiered dormant rows
 
+# Capital weekend-shell DISPLAY floor (Jin 2026-06-28) — see _mkt_nodes. Pure
+# globe render weight (never a sizing/risk/gating input): keeps the Capital venue
+# shell visible on weekends when its instruments go market-closed (is_active=0,
+# tiny/zero vol) instead of collapsing to near-invisible grey dust.
+_SHELL_INTENSITY_FLOOR = 0.30
+_SHELL_SIZE_FLOOR = 0.85
+
 # 13 cluster definitions (id, label, color, tier) — color palette matches the
 # render engine's CLUSTERS table. Order is display-only. tier 4 intentionally
 # empty (engine reserves the index for frame-function compat).
@@ -856,6 +863,25 @@ def _mkt_nodes(
         i = base_i + len(nodes)
         ticker = str(u["ticker"]).split(":")[-1].split("-")[0]
         state = "firing" if sig_n > 0 else ("lit" if active else "dormant")
+        intensity = round(min(1.0, 0.1 + u["n_24h"] / 500.0), 4)
+        size_mul = round(min(1.0, 0.6 + u["n_24h"] / 1000.0), 4)
+        # ── Capital weekend-shell visibility floor (Jin 2026-06-28, display-only) ──
+        # On weekends Capital's venue marketStatus turns ~all its instruments
+        # is_active=0 → state="dormant", and their forex/commodity/index 24h vol is
+        # tiny or zero, so the vol-driven intensity/size collapse to the bottom
+        # (~0.102 / 0.6). The client then folds them into the cheap dim point-cloud
+        # which (for shell_floor nodes) reads these fields — without a floor they
+        # render as near-invisible grey dust and the whole Capital galaxy looks
+        # "empty/off". We stamp a ``shell_floor`` hint + lift the DISPLAY weight to
+        # a visible minimum so the venue shell still shows ("asleep but present").
+        # Scoped to Capital dormant only → OKX/Alpaca untouched; the node STAYS
+        # dormant (no glow, no active spoof) — market-closed is the truth, only its
+        # on-globe visibility changes. Pure render weight: nothing gated/sized/
+        # re-ranked, the universe table is never read or mutated here.
+        shell_floor = state == "dormant" and str(u["exchange"]).lower().startswith("cap")
+        if shell_floor:
+            intensity = max(intensity, _SHELL_INTENSITY_FLOOR)
+            size_mul = max(size_mul, _SHELL_SIZE_FLOOR)
         nodes.append(
             {
                 "id": f"mkt_{u['exchange']}_{u['ticker']}",
@@ -865,8 +891,9 @@ def _mkt_nodes(
                 "asset_group": u["asset_group"],
                 "active": active,
                 "tier_label": tier or None,
-                "intensity": round(min(1.0, 0.1 + u["n_24h"] / 500.0), 4),
-                "size_mul": round(min(1.0, 0.6 + u["n_24h"] / 1000.0), 4),
+                "intensity": intensity,
+                "size_mul": size_mul,
+                "shell_floor": shell_floor,
                 "signal_count_30m": sig_n,
                 "cluster": "mkt",
                 "tier": 8,

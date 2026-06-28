@@ -435,6 +435,12 @@
       n.direction = bn.direction;
       n.exitState = bn.exit_state || null;               // open/touched/protected/trailing
       n.intensity = bn.intensity != null ? bn.intensity : 0.4;
+      n.sizeMul = bn.size_mul != null ? bn.size_mul : 0.6;
+      // Capital weekend-shell visibility floor (Jin 2026-06-28, display-only): the
+      // backend stamps shell_floor + lifts intensity/size_mul on Capital dormant
+      // nodes so the dim-cloud renders the venue shell instead of grey dust. The
+      // node STAYS dormant (no glow) — drawDimCloud just reads these for shell nodes.
+      n.shellFloor = bn.shell_floor === true;
       n.state = bn.state || 'lit';
       // ── REAL-signal glow (Jin 2026-06-23) ──────────────────────────────────
       // The backend now joins the live signals table → per-instrument 30m catch
@@ -747,11 +753,21 @@
       for (let i = 0; i < b.length; i++) {
         const d = b[i];
         const p = d.p;
+        const n = d.n;
         // depth shading: nearer = slightly brighter/bigger (front hemisphere pop).
-        const depthA = 0.5 + 0.5 * Math.max(-1, Math.min(1, -d.n.z));
-        const a = (0.22 + 0.22 * depthA) * dd;   // Jin: dust 같지 않게 살짝 밝게
+        const depthA = 0.5 + 0.5 * Math.max(-1, Math.min(1, -n.z));
+        let a = (0.22 + 0.22 * depthA) * dd;   // Jin: dust 같지 않게 살짝 밝게
+        let s = Math.max(0.85, 1.3 * zoom * p.persp);
+        // Capital weekend-shell floor (Jin 2026-06-28, display-only): a shell_floor
+        // dormant node (Capital market-closed) reads its backend-floored
+        // intensity/size so the venue shell stays visible — brighter dot + a touch
+        // larger — instead of collapsing to grey dust. Still dormant (no glow); only
+        // OKX/Alpaca dim dots keep the original depth-only weight (untouched).
+        if (n.shellFloor) {
+          a = Math.min(0.6, a + (n.intensity || 0) * 0.35);
+          s = Math.max(s, (n.sizeMul || 0) * 1.6 * zoom * p.persp);
+        }
         ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
-        const s = Math.max(0.85, 1.3 * zoom * p.persp);
         ctx.fillRect(p.sx - s * 0.5, p.sy - s * 0.5, s, s);
       }
     }

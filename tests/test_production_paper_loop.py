@@ -302,6 +302,26 @@ def test_capital_collapse_guard_noop_when_healthy() -> None:
     assert out == new_active
 
 
+def test_capital_collapse_guard_preserves_breadth_at_4() -> None:
+    """Forensic 2026-06-30/07-01: a healthy fetch (2419 rows) but a session-driven
+    validity collapse left the active book at 4 fringe commodity/index epics
+    (OIL_BRENT/GASOIL/NYFANG/SG25 — none of the wave2 strategies' core symbols)
+    for 31h+, silencing every Capital strategy (0 signals). The prior FLOOR=1
+    only caught the single-symbol 2026-05-31 incident; a 4-symbol collapse from
+    a healthy 134-symbol prior book must ALSO be caught (flow_not_block:
+    preserve breadth, never let it get stuck at a tiny fringe set)."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    prior = {f"capital:FX{i}" for i in range(134)}  # healthy prior book
+    new_active = {"capital:OIL_BRENT", "capital:GASOIL", "capital:NYFANG", "capital:SG25"}
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active, prior_active_ids=prior, fetched_count=2419
+    )
+    assert out == prior  # prior breadth preserved, not collapsed to the 4 fringe survivors
+
+
 def test_capital_collapse_guard_noop_full_closure() -> None:
     """A full session closure (active=0) is the legitimate session_wait path — the
     guard must NOT resurrect it (rows revive next refresh once TRADEABLE)."""

@@ -165,16 +165,24 @@ OKX_REFRESH_SEC = 300
 CAPITAL_REFRESH_SEC = 600
 ALPACA_REFRESH_SEC = 600
 
-# C1 — Capital active-universe collapse guard (forensic 2026-05-31): a healthy
-# Capital fetch but a session-driven validity collapse (only 1 epic TRADEABLE on
-# the weekend) left the active book at exactly 1 closed symbol (EURUSD_W) for 27h
-# — FX is 24/5, so breadth must be preserved across the closure, not handed to a
-# single survivor. When a refresh's active set collapses to ``<= FLOOR`` while the
-# PRIOR book was healthy (``>= PRIOR_MIN``), KEEP the prior active set
+# C1 — Capital active-universe collapse guard (forensic 2026-05-31, widened
+# 2026-07-02 #P1-5): a healthy Capital fetch but a session-driven validity
+# collapse (only a handful of epics TRADEABLE) left the active book stuck at a
+# tiny fringe set — first exactly 1 closed symbol (EURUSD_W) for 27h, then later
+# 4 fringe commodity/index epics (OIL_BRENT/GASOIL/NYFANG/SG25 — none of the
+# wave2 strategies' core symbols) for 31h+, silencing every Capital strategy (0
+# emits). The original absolute ``FLOOR = 1`` only caught the first (literal
+# single-symbol) incident; the second collapse (new=4) was `> FLOOR` so the guard
+# never fired and the tiny fringe set got persisted verbatim, overwriting the
+# healthy prior breadth. FX/index/commodity is effectively always-on across a
+# demo-account session hiccup, so breadth must be preserved across ANY such
+# collapse, not just a 1-symbol one. The guard now compares the new count
+# RELATIVE to the healthy prior book (``<= RATIO`` of it) instead of an absolute
+# magic number, so it generalizes to any similarly-shaped collapse
 # (flow_not_block: preserve breadth, never zero-out). A genuine FULL closure
 # (active=0) stays the existing session_wait path — the guard does not resurrect
 # it; those rows revive automatically next refresh once TRADEABLE.
-CAPITAL_COLLAPSE_ACTIVE_FLOOR = 1
+CAPITAL_COLLAPSE_ACTIVE_RATIO = 0.10
 CAPITAL_COLLAPSE_PRIOR_MIN = 5
 
 
@@ -223,11 +231,12 @@ def capital_active_ids_after_collapse_guard(
     """Preserve prior Capital breadth when a refresh's active set abnormally collapses.
 
     Returns the active instrument_id set to persist. The new set is used as-is
-    UNLESS it has collapsed to ``<= CAPITAL_COLLAPSE_ACTIVE_FLOOR`` while the prior
-    book was healthy (``>= CAPITAL_COLLAPSE_PRIOR_MIN``) and the fetch itself was
-    non-empty — the forensic 1-symbol weekend collapse. In that case the PRIOR
-    active set is kept (flow_not_block: breadth preserved across the session
-    closure, never zeroed out to a single stale survivor).
+    UNLESS it has collapsed to ``<= CAPITAL_COLLAPSE_ACTIVE_RATIO`` of the prior
+    book while that prior book was healthy (``>= CAPITAL_COLLAPSE_PRIOR_MIN``) and
+    the fetch itself was non-empty — a session-driven validity collapse (the
+    forensic 1-symbol weekend collapse, and the later 4-fringe-epic collapse). In
+    that case the PRIOR active set is kept (flow_not_block: breadth preserved
+    across the session closure, never handed to a tiny stale-survivor fringe).
 
     A genuine full closure (``new_active_ids`` empty) is the legitimate
     session_wait path and is returned unchanged (the guard never resurrects a
@@ -239,8 +248,8 @@ def capital_active_ids_after_collapse_guard(
     if not new_active_ids:
         return new_active_ids  # full closure → legitimate session_wait, not a collapse
     if (
-        len(new_active_ids) <= CAPITAL_COLLAPSE_ACTIVE_FLOOR
-        and len(prior_active_ids) >= CAPITAL_COLLAPSE_PRIOR_MIN
+        len(prior_active_ids) >= CAPITAL_COLLAPSE_PRIOR_MIN
+        and len(new_active_ids) <= CAPITAL_COLLAPSE_ACTIVE_RATIO * len(prior_active_ids)
     ):
         return prior_active_ids
     return new_active_ids

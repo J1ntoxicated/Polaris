@@ -322,6 +322,25 @@ def test_capital_collapse_guard_preserves_breadth_at_4() -> None:
     assert out == prior  # prior breadth preserved, not collapsed to the 4 fringe survivors
 
 
+def test_capital_collapse_guard_catches_small_prior_book_collapse() -> None:
+    """Regression: ratio-only threshold has a dead zone for prior in [5,9] —
+    0.10 * prior < 1 there, so the only new-count that satisfies the ratio is 0,
+    which is already routed to the full-closure branch. A collapse to a single
+    symbol from a healthy small prior book (the exact 2026-05-31 forensic
+    incident shape: 8 FX symbols -> 1 survivor) must still be caught (the guard
+    must OR the ratio with the original absolute FLOOR=1, not replace it)."""
+    from polaris.scripts._production_layers import (
+        capital_active_ids_after_collapse_guard,
+    )
+
+    prior = {f"capital:FX{i}" for i in range(8)}  # healthy small prior book (>= PRIOR_MIN=5)
+    new_active = {"capital:EURUSD_W"}  # collapsed to 1 survivor
+    out = capital_active_ids_after_collapse_guard(
+        new_active_ids=new_active, prior_active_ids=prior, fetched_count=100
+    )
+    assert out == prior  # prior breadth preserved, not collapsed to 1
+
+
 def test_capital_collapse_guard_noop_full_closure() -> None:
     """A full session closure (active=0) is the legitimate session_wait path — the
     guard must NOT resurrect it (rows revive next refresh once TRADEABLE)."""

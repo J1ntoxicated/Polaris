@@ -41,6 +41,7 @@ def _seed_trade(
     pnl_usd: float,
     opened_ts: int,
     fee_usd: float = 0.0,
+    entry_fee_usd: float = 0.0,
     symbol: str = "BTC",
     venue: str = "okx",
     strategy: str = "s",
@@ -51,7 +52,8 @@ def _seed_trade(
 
     The close fill's ``ts_ms`` is the dollar truth; the position's ``opened_ts``
     is the since-reset window key (a trade counts only if it was OPENED under the
-    new logic).
+    new logic). ``entry_fee_usd`` seeds the OPEN leg's (is_close=0) own real fee
+    (audit2 P0-2 ③ — the since-reset net must count BOTH legs, not close-only).
     """
     conn.execute(
         "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
@@ -61,6 +63,15 @@ def _seed_trade(
         (pid, venue, symbol, f"crypto:{symbol}", strategy, strategy, strategy,
          status, opened_ts, opened_ts + 100),
     )
+    if entry_fee_usd:
+        conn.execute(
+            "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+            " size_usd, fill_price, fee_usd, ts_ms, order_id, contribution_id, "
+            " base_qty, pnl_usd, is_close) "
+            "VALUES (?, ?, ?, ?, 'buy', 1000.0, 100.0, ?, ?, ?, ?, 1.0, 0.0, 0)",
+            (f"{pid}_o", venue, f"{venue}:{symbol}", strategy, entry_fee_usd,
+             opened_ts, f"{pid}_oord", pid),
+        )
     if with_close_fill:
         conn.execute(
             "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
@@ -166,6 +177,39 @@ def test_since_reset_net_is_fee_net(memdb: sqlite3.Connection) -> None:
     roll = _since_reset_rollup(memdb)
     assert roll is not None
     assert roll.net_usd == pytest.approx(1900.0)
+
+
+def test_since_reset_net_counts_entry_leg_fee_too(memdb: sqlite3.Connection) -> None:
+    """audit2 P0-2 ③: the since-reset net$ was 'close-leg fee only' (a THIRD net
+    definition disagreeing with the headline/strategy NET). Repro: gross +6.05,
+    close fee 57.47, entry fee 57.48 → true net ≈ -108.90, matching the digest
+    headline fix (①) and the strategy win/PF fix (②) — one NET everywhere."""
+    stamp_measurement_reset(memdb, label="W4", git_sha="sha",
+                            reset_ts=5000, equity_baseline_usd=100_000.0)
+    _seed_trade(memdb, pid="n1", pnl_usd=6.05, fee_usd=57.47,
+                entry_fee_usd=57.48, opened_ts=6000)
+    roll = _since_reset_rollup(memdb)
+    assert roll is not None
+    assert roll.net_usd == pytest.approx(6.05 - 57.47 - 57.48, abs=1e-2)
+
+
+def test_since_reset_win_pf_are_fee_net(memdb: sqlite3.Connection) -> None:
+    """audit2 P0-2 ③: win_rate/PF in the since-reset rollup must also be fee-net
+    (matching ① and ②), not classify on GROSS close pnl."""
+    stamp_measurement_reset(memdb, label="W4", git_sha="sha",
+                            reset_ts=5000, equity_baseline_usd=100_000.0)
+    # Small +gross scalp, round-trip fee > gross pnl → net LOSS (was a GROSS win).
+    _seed_trade(memdb, pid="n1", pnl_usd=6.0, fee_usd=5.0, entry_fee_usd=5.0,
+                opened_ts=6000)
+    # Real net winner.
+    _seed_trade(memdb, pid="n2", pnl_usd=300.0, fee_usd=1.0, entry_fee_usd=1.0,
+                opened_ts=6500)
+    roll = _since_reset_rollup(memdb)
+    assert roll is not None
+    # GROSS would show 2/2 wins (100%); NET is 1/2 (50%).
+    assert roll.win_pct == pytest.approx(50.0)
+    # PF net: win $ = 298; loss $ = 4.
+    assert roll.pf == pytest.approx(298.0 / 4.0)
 
 
 def test_since_reset_excludes_reconciled(memdb: sqlite3.Connection) -> None:

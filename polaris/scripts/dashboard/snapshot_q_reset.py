@@ -24,9 +24,12 @@ from polaris.storage.measurement_reset import MeasurementReset, latest_reset
 class _SinceResetRow(NamedTuple):
     """One CLOSED position opened AT/AFTER the reset_ts + its fee-net realised $.
 
-    ``net_usd`` = Σ(close pnl) − Σ(close fee) over the position's close legs (the
-    fills.$ truth). ``r`` = stream-common realised R from the GROSS close pnl
-    (matches every other R panel — R is a pure rescale of the gross $)."""
+    ``net_usd`` = Σ(close pnl) − Σ(fee over BOTH legs — entry + close, the SAME
+    round-trip-fee definition the daily-digest headline and the strategy
+    win/PF query use — audit2 P0-2 ③: one NET everywhere, not a third
+    close-leg-only definition). ``r`` = stream-common realised R from the GROSS
+    close pnl (matches every other R panel — R is a pure rescale of the gross
+    $)."""
 
     strategy_id: str
     venue: str
@@ -44,13 +47,19 @@ def _closed_since_reset(
     counts only if it was OPENED under the new logic (not merely closed under it).
     RECONCILED (tracking-failure) rows are excluded by ``status='closed'`` exactly
     like the all-time ticker/strategy rollups (a reconcile is not a trade). A
-    position with no matched close fill is skipped (no $ truth). Read-only."""
+    position with no matched close fill is skipped (no $ truth). ``net_usd``
+    subtracts the fee on BOTH legs (entry ``is_close=0`` + this close leg) via the
+    ``entry_fee`` correlated sum, matching the digest/strategy NET (audit2 P0-2
+    ③). Read-only."""
     rows = _safe_query(
         conn,
         """SELECT p.strategy_id, p.venue,
                   COALESCE(SUM(f.pnl_usd), 0.0) AS gross_pnl,
-                  COALESCE(SUM(f.fee_usd), 0.0) AS fee_total,
-                  COUNT(f.fill_id) AS n_close
+                  COALESCE(SUM(f.fee_usd), 0.0) AS close_fee,
+                  COUNT(f.fill_id) AS n_close,
+                  COALESCE((SELECT SUM(e.fee_usd) FROM fills e
+                            WHERE e.contribution_id = p.position_id
+                              AND e.is_close = 0), 0.0) AS entry_fee
            FROM positions p
            JOIN fills f
              ON f.contribution_id = p.position_id AND f.is_close = 1
@@ -64,7 +73,7 @@ def _closed_since_reset(
             continue
         venue = str(r[1] or "")
         gross = float(r[2] or 0.0)
-        fee = float(r[3] or 0.0)
+        fee = float(r[3] or 0.0) + float(r[5] or 0.0)
         out.append(_SinceResetRow(
             strategy_id=str(r[0] or ""),
             venue=venue,
@@ -119,19 +128,21 @@ def _rollup_metrics(
 ) -> tuple[int, float, float, float, float]:
     """(n, pf, net_usd, win_pct, avg_r) over a since-reset row list.
 
-    PF is over the GROSS close pnl (Σ win / Σ loss), matching the all-time
-    confidence/strategy PF. net_usd is the fee-net realised $. win_pct counts a
-    trade a win on positive GROSS pnl. avg_r is the mean stream-common R."""
+    audit2 P0-2 ③: PF/win_pct are now over the fee-NET realised $ (Σ win / Σ
+    loss on ``net_usd``), matching the core ``won = pnl_r_net > 0`` verdict
+    direction and the digest headline (①) / strategy stats (②) fix — a fee≈gross
+    scalp no longer counts as a win. avg_r stays the mean stream-common R
+    (unchanged — R is a pure GROSS $ rescale, per [[ADR-005]])."""
     n = len(rows)
     if n == 0:
         return 0, 0.0, 0.0, 0.0, 0.0
-    gross_win = sum(x.gross_pnl for x in rows if x.gross_pnl > 0.0)
-    gross_loss = sum(-x.gross_pnl for x in rows if x.gross_pnl < 0.0)
-    wins = sum(1 for x in rows if x.gross_pnl > 0.0)
+    net_win = sum(x.net_usd for x in rows if x.net_usd > 0.0)
+    net_loss = sum(-x.net_usd for x in rows if x.net_usd < 0.0)
+    wins = sum(1 for x in rows if x.net_usd > 0.0)
     net_usd = sum(x.net_usd for x in rows)
     avg_r = sum(x.r for x in rows) / n
     win_pct = wins / n * 100.0
-    pf = (gross_win / gross_loss) if gross_loss > 0.0 else (9.99 if gross_win > 0.0 else 0.0)
+    pf = (net_win / net_loss) if net_loss > 0.0 else (9.99 if net_win > 0.0 else 0.0)
     return n, pf, net_usd, win_pct, avg_r
 
 

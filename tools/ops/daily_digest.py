@@ -36,6 +36,7 @@ class DigestData:
     db_name: str
     closes: int = 0
     pnl_usd: float = 0.0
+    pnl_usd_gross: float = 0.0
     fees_usd: float = 0.0
     opens: int = 0
     faults_total: int = 0
@@ -63,25 +64,41 @@ def _collect(
 ) -> None:
     start_s, end_s = start_ms // 1000, end_ms // 1000
     close_where = "is_close = 1 AND ts_ms >= ? AND ts_ms < ?"
+    window_where = "ts_ms >= ? AND ts_ms < ?"
+    # NET headline (audit2 P0-2 ①): the entry (is_close=0) leg pays its own real
+    # fee that the old close-leg-only SUM never counted, so a small +gross close
+    # pnl could mask a net loss once the round-trip fee is included (2026-06-30:
+    # +6.05 shown vs real net ≈ -108.9). ``pnl_usd`` (net) and ``fees_usd`` now
+    # both sum over ALL fills in the window (both legs; is_close=0 legs carry
+    # pnl_usd=0.0 so SUM(pnl_usd) is still exactly the close-leg gross) — same
+    # convention as the equity headline (_daily_realised_pnl in
+    # snapshot_q_equity.py). ``closes``/``pnl_usd_gross`` stay close-leg-only.
     row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(pnl_usd), 0), COALESCE(SUM(fee_usd), 0)"
+        "SELECT COUNT(*), COALESCE(SUM(pnl_usd), 0)"
         f" FROM fills WHERE {close_where}", (start_ms, end_ms),
     ).fetchone()
-    data.closes, data.pnl_usd, data.fees_usd = int(row[0]), float(row[1]), float(row[2])
+    data.closes, data.pnl_usd_gross = int(row[0]), float(row[1])
+    data.fees_usd = float(conn.execute(
+        f"SELECT COALESCE(SUM(fee_usd), 0) FROM fills WHERE {window_where}",
+        (start_ms, end_ms),
+    ).fetchone()[0])
+    data.pnl_usd = data.pnl_usd_gross - data.fees_usd
     data.venues = [
-        (str(v), int(n), float(p), float(f))
+        (str(v), int(n), float(p) - float(f), float(f))
         for v, n, p, f in conn.execute(
-            "SELECT venue, COUNT(*), SUM(pnl_usd), SUM(fee_usd) FROM fills"
-            f" WHERE {close_where} GROUP BY venue ORDER BY venue LIMIT ?",
+            "SELECT venue, SUM(is_close), SUM(pnl_usd), SUM(fee_usd) FROM fills"
+            f" WHERE {window_where} GROUP BY venue"
+            " HAVING SUM(is_close) > 0 ORDER BY venue LIMIT ?",
             (start_ms, end_ms, VENUE_ROWS),
         )
     ]
     data.strategies = [
         (str(s), int(n), float(p))
         for s, n, p in conn.execute(
-            "SELECT strategy_id, COUNT(*), SUM(pnl_usd) FROM fills"
-            f" WHERE {close_where} GROUP BY strategy_id"
-            " ORDER BY ABS(SUM(pnl_usd)) DESC LIMIT ?",
+            "SELECT strategy_id, SUM(is_close), SUM(pnl_usd) - SUM(fee_usd) FROM fills"
+            f" WHERE {window_where} GROUP BY strategy_id"
+            " HAVING SUM(is_close) > 0"
+            " ORDER BY ABS(SUM(pnl_usd) - SUM(fee_usd)) DESC LIMIT ?",
             (start_ms, end_ms, STRATEGY_ROWS),
         )
     ]
@@ -149,6 +166,7 @@ def render(data: DigestData) -> str:
         "| --- | --- |",
         f"| closes | {data.closes} |",
         f"| pnl_usd | {data.pnl_usd:+.2f} |",
+        f"| pnl_usd_gross | {data.pnl_usd_gross:+.2f} |",
         f"| fees_usd | {data.fees_usd:.2f} |",
         f"| opens | {data.opens} |",
         f"| faults | {data.faults_total} |",
@@ -161,11 +179,12 @@ def render(data: DigestData) -> str:
     ]
     if data.venues:
         lines += ["", "## Closes by venue",
-                  "| venue | closes | pnl_usd | fees_usd |", "| --- | --- | --- | --- |"]
+                  "| venue | closes | pnl_usd_net | fees_usd |",
+                  "| --- | --- | --- | --- |"]
         lines += [f"| {v} | {n} | {p:+.2f} | {f:.2f} |" for v, n, p, f in data.venues]
     if data.strategies:
         lines += ["", f"## Closes by strategy (top {STRATEGY_ROWS})",
-                  "| strategy | closes | pnl_usd |", "| --- | --- | --- |"]
+                  "| strategy | closes | pnl_usd_net |", "| --- | --- | --- |"]
         lines += [f"| {s} | {n} | {p:+.2f} |" for s, n, p in data.strategies]
     if data.faults:
         lines += ["", "## Faults by type", "| fault_type | count |", "| --- | --- |"]

@@ -248,6 +248,25 @@ def test_fuse_conviction_floor_respected() -> None:
     assert evidence["vix"] == 26.0
 
 
+def test_fuse_below_floor_still_records_label_for_consistency_leg() -> None:
+    """#32 axis-B fix: a below-floor score must NOT override the regime (hint
+    stays None — unchanged), but ``evidence['label']`` should still record the
+    best-scoring candidate so the exit judge's consistency leg (which reads
+    ``evidence.get('label')``) is not starved to 0.0 by a merely-sub-floor
+    (not absent) signal. The OVERRIDE gate (hint) is untouched — only the
+    informational label recording is relaxed."""
+    cache = AltDataCache()
+    cache.set(
+        "fred_macro",
+        {"vix": 26.0, "hy_spread": 350.0, "move": 80.0, "yield_curve": 0.5},
+        ttl_sec=9999,
+        now_ts=0.0,
+    )
+    hint, _conf, evidence = fuse_evidence("forex:GBPUSD", cache, now_ts=1.0)
+    assert hint is None  # override gate unchanged
+    assert evidence.get("label") == "bear_trend"
+
+
 def test_fuse_label_in_polaris_four() -> None:
     """Any non-None hint must be one of Polaris' 4 canonical labels."""
     cache = AltDataCache()

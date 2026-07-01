@@ -423,6 +423,10 @@ def build_exit_payload(
     peak_price: float | None = None,
     recent_closes: list[float] | None = None,
     stream_profile: StreamProfile | None = None,
+    conn: sqlite3.Connection | None = None,
+    venue: str | None = None,
+    strategy: str | None = None,
+    symbol: str | None = None,
 ) -> dict[str, Any]:
     """Compose G7 widen proposal payload (+ optional precise-exit context).
 
@@ -444,6 +448,13 @@ def build_exit_payload(
 
     Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
     but NOT read in P0 — output is byte-identical with or without it.
+
+    #32 axis-B fix: when ``conn`` (+ ``venue``/``strategy``/``symbol``/``regime``)
+    is supplied, a ``cell_routing`` summary is stamped via the SAME
+    ``_cell_routing_summary`` helper G3's ``build_validator_payload`` already
+    uses — this is what feeds ``evidence_robustness``'s warmth leg (previously
+    always 0.0 on the G7 payload, since no caller ever set the key). Omitting
+    ``conn`` leaves the payload byte-identical to the pre-fix shape.
     """
     del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     proposal: dict[str, Any] = {
@@ -488,6 +499,15 @@ def build_exit_payload(
         exit_context["recent_close_n"] = len(closes)
     if exit_context:
         payload["exit_context"] = exit_context
+    if conn is not None and venue is not None and strategy is not None and symbol is not None:
+        payload["cell_routing"] = _cell_routing_summary(
+            conn,
+            venue=venue,
+            strategy=strategy,
+            symbol=symbol,
+            regime=str(regime) if regime is not None else "",
+            now_ts=int(time.time()),
+        )
     return payload
 
 

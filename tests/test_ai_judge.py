@@ -586,6 +586,55 @@ async def test_gpt_error_falls_back_to_safe_verdict() -> None:
     assert outcome.escalation_reason == "gpt_error"
 
 
+class _TricklingGPT:
+    """A client whose ``create()`` hangs past the per-op timeout.
+
+    Reproduces the audited defect: ``httpx``'s ``timeout=`` kwarg only bounds
+    EACH connect/read/write phase, not the total call — a trickling response
+    (partial reads that each individually stay under the per-op timeout) can
+    occupy the gate far longer than ``JUDGE_TIMEOUT_SEC`` (audited max 495s).
+    This fake just sleeps past any per-op bound to stand in for that failure
+    mode without a real slow socket.
+    """
+
+    def __init__(self, sleep_sec: float) -> None:
+        self._sleep_sec = sleep_sec
+        outer = self
+
+        class _Messages:
+            async def create(self, **kwargs: Any) -> Any:
+                await __import__("asyncio").sleep(outer._sleep_sec)
+                raise AssertionError("should never complete — deadline must cut in first")
+
+        self.messages = _Messages()
+
+
+@pytest.mark.asyncio
+async def test_judge_call_wall_clock_deadline_falls_back_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32 wall-clock fix: a trickling GPT response must NOT occupy the gate
+    past a bounded TOTAL deadline, even though the per-op ``httpx`` timeout
+    alone cannot see it (audited max 495s vs JUDGE_TIMEOUT_SEC=8.0). The
+    deadline is env-tunable so this test runs fast (no real 8s+ wait) and the
+    fallback is the SAME deterministic safe-verdict path as any other error."""
+    import time as _time
+
+    monkeypatch.setenv("POLARIS_JUDGE_WALL_CLOCK_DEADLINE_SEC", "0.05")
+    started = _time.monotonic()
+    outcome = await judge_exit(
+        _ctx(),
+        deterministic=GateDecision.HOLD,
+        subject={"symbol": "BTC-USDT"},
+        client=_TricklingGPT(sleep_sec=5.0),
+    )
+    elapsed = _time.monotonic() - started
+    assert elapsed < 1.0  # bounded by the 0.05s deadline, NOT the 5s trickle
+    assert outcome.verdict == ExitJudgeVerdict.PROTECT.value
+    assert outcome.deterministic == GateDecision.HOLD
+    assert outcome.escalation_reason == "gpt_timeout"
+
+
 @pytest.mark.asyncio
 async def test_gpt_kill_output_cannot_block() -> None:
     """Even if the model returns a hostile {"verdict":"KILL"}, the judge parses it
@@ -603,6 +652,61 @@ async def test_gpt_kill_output_cannot_block() -> None:
     )
     assert res.decision == GateDecision.PASS
     assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+
+
+@pytest.mark.asyncio
+async def test_truncated_reason_salvages_verdict_from_before_the_cut() -> None:
+    """#32 fix: [[judge-probe-reality]] audited gpt_parse_fallback at 10.6%
+    (984/9,327) — root cause is MAX_TOKENS=180 cutting the response mid the
+    free-text ``reason`` field, which is emitted AFTER ``verdict`` in the
+    prompt's requested JSON shape. Since ``reason`` is NEVER consumed
+    downstream (only ``verdict`` drives behaviour), a truncated-but-otherwise-
+    well-formed response should salvage the ALREADY-COMPLETE verdict instead
+    of discarding the whole call as a parse failure."""
+    truncated = (
+        '{"verdict": "STRENGTHEN_EVIDENCE", "reason": "The alt-data evidence '
+        "shows strong bullish alignment with crypto fear-greed at 78 and "
+        "positive funding, while the cell expectancy for this quartile has "
+        "historically produced positive avg_pnl_r, and the ground coverage "
+        "confirms sentiment pres"  # cut mid-word — no closing quote/brace
+    )
+    outcome = await judge_entry(
+        _ctx(),
+        deterministic=GateDecision.PASS,
+        subject={"symbol": "BTC-USDT"},
+        client=_FakeGPT(truncated),
+    )
+    assert outcome.verdict == EntryJudgeVerdict.STRENGTHEN_EVIDENCE.value
+    assert outcome.escalation_reason == "gpt_ok_salvaged"
+
+
+@pytest.mark.asyncio
+async def test_truncated_with_no_recoverable_verdict_still_falls_back() -> None:
+    """A truncation that cuts BEFORE the verdict value is complete has nothing
+    to salvage — falls back to the safe verdict exactly as before."""
+    truncated = '{"verd'
+    outcome = await judge_exit(
+        _ctx(),
+        deterministic=GateDecision.HOLD,
+        subject={"symbol": "BTC-USDT"},
+        client=_FakeGPT(truncated),
+    )
+    assert outcome.verdict == ExitJudgeVerdict.PROTECT.value
+    assert outcome.escalation_reason == "gpt_parse_fallback"
+
+
+@pytest.mark.asyncio
+async def test_truncated_hostile_verdict_salvage_cannot_block() -> None:
+    """Salvage reuses the SAME hostile-input-safe ``parse`` — a truncated
+    response claiming a hostile verdict still collapses to the safe one."""
+    truncated = '{"verdict": "KILL", "reason": "trunc'
+    outcome = await judge_entry(
+        _ctx(),
+        deterministic=GateDecision.PASS,
+        subject={"symbol": "BTC-USDT"},
+        client=_FakeGPT(truncated),
+    )
+    assert outcome.verdict == EntryJudgeVerdict.PROCEED.value
 
 
 @pytest.mark.asyncio

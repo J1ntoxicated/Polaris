@@ -491,6 +491,44 @@ def test_build_exit_payload_partial_context_only_includes_supplied() -> None:
     assert "recent_close_first" not in ctx
 
 
+def test_build_exit_payload_no_conn_omits_cell_routing() -> None:
+    """No ``conn`` supplied -> byte-identical (no cell_routing key added)."""
+    p = build_exit_payload(
+        side="long", current_stop_price=80.0, proposed_stop_price=78.0,
+        entry_price=85.0, unrealized_pnl_r=0.9, max_loss_r=1.0,
+    )
+    assert "cell_routing" not in p
+
+
+def test_build_exit_payload_wires_cell_routing_from_conn(tmp_path: Path) -> None:
+    """#32 axis-B fix: G7's evidence_robustness warmth leg reads
+    ``payload['cell_routing']['n_eff']`` — previously always absent on the G7
+    payload (warmth stuck at 0.0). Supplying ``conn``+venue/strategy/symbol/
+    regime now stamps the SAME cell summary G3 already computes, via the
+    shared ``_cell_routing_summary`` helper (no new query shape)."""
+    db_path = tmp_path / "polaris.sqlite"
+    conn = init_db(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO cell_matrix_p0 "
+            "(exchange, strategy, ticker, regime, n_eff, wins_eff, "
+            "pnl_r_sum_eff, avg_pnl_r, score, last_closed_ts) "
+            "VALUES ('okx', 'tsmom', 'BTC-USDT', 'bull_trend', 25.0, 15.0, "
+            "5.0, 0.2, 1.4, ?)",
+            (int(time.time()),),
+        )
+        p = build_exit_payload(
+            side="long", current_stop_price=80.0, proposed_stop_price=78.0,
+            entry_price=85.0, unrealized_pnl_r=0.9, max_loss_r=1.0,
+            conn=conn, venue="okx", strategy="tsmom", symbol="BTC-USDT",
+            regime="bull_trend",
+        )
+        assert p["cell_routing"]["n_eff"] == 25.0
+        assert p["cell_routing"]["quartile"] in {"mid", "top", "bottom", "cold"}
+    finally:
+        conn.close()
+
+
 @pytest.mark.asyncio
 async def test_g6_to_g7_chain_widening_allowed() -> None:
     """G7 with above-window pnl + valid widening -> ADJUST_EXIT."""

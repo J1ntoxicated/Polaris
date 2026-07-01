@@ -27,6 +27,10 @@ Output contract:
   - ``confidence`` = ``(best - runner) / best + 0.3`` floor, clamped to
     ``[0.3, 1.0]``; ``0.0`` when there is no hint.
   - ``evidence`` = the raw values used (read-only context for G3/G7).
+    ``evidence['label']`` is stamped whenever ANY scorer produced a
+    directional score (>0), even below the conviction floor — informational
+    only (feeds the exit judge's consistency leg); the override (``regime_hint``)
+    stays floor-gated.
 
 This returns a SUGGESTION + evidence. It NEVER sizes, blocks, exits, halts, or
 writes to learner/risk state. The hint, if any, is fed into the EXISTING
@@ -245,11 +249,22 @@ def fuse_evidence(
     evidence["scores"] = dict(scores)
     evidence["source_weights"] = source_weights
 
+    # #32 axis-B fix: record the best-scoring label whenever there IS a
+    # directional score (best_score > 0), even below the conviction floor —
+    # this is what feeds the exit judge's consistency leg
+    # (``judge_gate._consistency`` reads ``evidence['label']``), which was
+    # previously starved to 0.0 on every sub-floor tick even though a real
+    # (just not floor-clearing) directional read existed. All-zero scores
+    # (no scorer fired — e.g. neutral-only news) stay unlabelled (an
+    # arbitrary tie-break label would be a false signal). The OVERRIDE gate
+    # (the returned ``regime_hint``) is UNCHANGED — still floor-gated below.
+    if best_score > 0.0:
+        evidence["label"] = best_label
+
     if best_score < CONVICTION_FLOOR:
         # Below conviction floor → no override. Evidence still surfaced.
         return None, 0.0, evidence
 
-    evidence["label"] = best_label
     confidence = _confidence(best_score, runner_score)
     return best_label, confidence, evidence
 

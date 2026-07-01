@@ -610,6 +610,28 @@ CREATE TABLE IF NOT EXISTS venue_blocklist (
 );
 """
 
+# Reject-anchor anti-churn (audit1 P0-4 ①): the re-entry cooldown window
+# (``reentry_cooldown_active``) reads ``MAX(opened_ts)`` off ``positions`` —
+# a venue reject or a pre-submit clamp (e.g. Alpaca insufficient_buying_power)
+# NEVER writes a ``positions`` row, so the cooldown window had no anchor and
+# ``reentry_cooldown_active`` fell through to "no prior row → allow" even
+# though the in-process novelty stamp (``state.last_entry_by_key``) correctly
+# marked the re-fire as NOT novel (PANW: 58 intents/6.1h — every reject reset
+# the cooldown to zero). This table gives the cooldown a PERSISTENT anchor per
+# (venue, symbol, strategy_id) that survives a reject/clamp AND a process
+# restart. Same TTL semantics as ``venue_blocklist``: UPSERT bumps ``last_ts``;
+# a novel signal (new bar / side flip) still exempts via ``is_novel_reentry`` —
+# this only fixes the window CHECK, never widens a block (flow_not_block).
+DDL_REENTRY_ANCHOR = """
+CREATE TABLE IF NOT EXISTS reentry_anchor (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    last_ts INTEGER NOT NULL,
+    PRIMARY KEY (venue, symbol, strategy_id)
+);
+"""
+
 # ---------------------------------------------------------------------------
 # Dashboard telemetry — capital-rotation + session-forced-exit observability.
 #

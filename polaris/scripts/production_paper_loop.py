@@ -235,6 +235,28 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def alpaca_reconcile_import_enabled() -> bool:
+    """True unless ``POLARIS_RECONCILE_VENUE_IMPORT=0`` — Alpaca ledger-venue
+    re-sync (audit1 P0-4 ②).
+
+    The startup VENUE reconcile-import (``reconcile_venue_positions``) was
+    gated OFF by default (2026-06-01) behind 3 documented bugs: (1) a sync
+    ``_run_coro`` crash inside a running event loop — FIXED (now runs the
+    adapter coroutine on a dedicated ``ThreadPoolExecutor`` thread); (2)
+    imported-position insta-close — the exit engine reads ``positions``/
+    ``fills`` directly (``load_active_position_rows``), not any uninitialised
+    FSM, so an imported row recalcs exactly like a hydrated one; (3) a Capital
+    ``deal_id=None`` close-error loop — Capital-SPECIFIC, so this flip scopes
+    to ALPACA ONLY (``capital_adapter`` stays unwired at the call site) —
+    Capital's own gap is untouched. ADOPT is the default (flow_not_block: a
+    reconciled venue holding is put under exit-engine management, never
+    liquidated) — 6 Alpaca positions ($73.6k: BB/ABBV/RMBI/WHG/TPCS/SEVN) sat
+    venue-untracked, pinning buying power. Kill via ``=0`` if a regression
+    surfaces.
+    """
+    return os.environ.get("POLARIS_RECONCILE_VENUE_IMPORT") != "0"
+
+
 # ---------------------------------------------------------------------------
 # Layer 0 — background producer
 # ---------------------------------------------------------------------------
@@ -901,24 +923,22 @@ async def run_production_paper_loop(
                 )
 
     # VENUE startup reconcile-import: after a fresh-DB reset the bot starts FLAT
-    # and is BLIND to real venue holdings (Alpaca/Capital). hydrate (above) only
-    # reads the DB; this fetches live positions via the just-built adapters and
+    # and is BLIND to real venue holdings (Alpaca). hydrate (above) only reads
+    # the DB; this fetches live Alpaca positions via the just-built adapter and
     # imports any NOT already tracked as status='open' + a synthetic entry fill
     # at the CURRENT mark (PnL~0). Runs AFTER adapters exist; OKX SPOT dust is
     # fungible wallet balance, skipped by default (import_okx_spot=False).
-    # Gated OFF by default (2026-06-01): the venue reconcile-import had 3 live
-    # bugs — _reconcile_capital crash (sync _run_coro vs running loop), imported
-    # positions insta-closing (entry mark + uninitialised exit FSM), and a
-    # Capital deal_id=None close-error loop. Re-enable only after those are fixed
-    # (POLARIS_RECONCILE_VENUE_IMPORT=1). Until then the bot starts flat and
-    # leaves venue holdings unmanaged (benign on DEMO) — stable trading first.
-    if real_roundtrip and os.environ.get("POLARIS_RECONCILE_VENUE_IMPORT") == "1":
-        capital_adapter = (
-            CapitalAdapter(capital_session) if capital_session is not None else None
-        )
+    # ADOPT-BY-DEFAULT (audit1 P0-4 ②, see alpaca_reconcile_import_enabled):
+    # was gated OFF (2026-06-01) behind 3 documented bugs; #1 (sync _run_coro
+    # crash) is fixed, #2 (insta-close) does not reproduce (the exit engine
+    # reads positions/fills directly), and #3 (Capital deal_id=None) is scoped
+    # OUT by leaving capital_adapter unwired here — Capital's own gap is a
+    # separate, untouched concern. flow_not_block: ADOPT into exit-engine
+    # management, never liquidate.
+    if real_roundtrip and alpaca_reconcile_import_enabled():
         try:
             imported = reconcile_venue_positions(
-                conn, okx_adapter=okx_adapter, capital_adapter=capital_adapter,
+                conn, okx_adapter=None, capital_adapter=None,
                 alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
             )
         except Exception:

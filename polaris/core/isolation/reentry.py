@@ -38,6 +38,7 @@ __all__ = [
     "concurrent_same_side_open",
     "is_novel_reentry",
     "reentry_cooldown_active",
+    "stamp_reentry_anchor",
 ]
 
 _ENV_COOLDOWN: Final[str] = "POLARIS_REENTRY_COOLDOWN_SEC"
@@ -112,6 +113,38 @@ def _resolve_cooldown_sec() -> int:
 REENTRY_COOLDOWN_SEC: Final[int] = _resolve_cooldown_sec()
 
 
+def stamp_reentry_anchor(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    strategy_id: str,
+    now_ts: int,
+) -> None:
+    """UPSERT the persistent reject-anchor for (venue, symbol, strategy_id).
+
+    A venue reject or a pre-submit clamp (e.g. Alpaca insufficient_buying_power)
+    never writes a ``positions`` row, so :func:`reentry_cooldown_active`'s
+    ``positions``-only lookup had no anchor and fell through to "allow" even
+    when the in-process novelty stamp correctly marked the re-fire as NOT
+    novel (PANW: 58 intents/6.1h — every reject reset the cooldown window to
+    zero). Callers stamp this on EVERY submit attempt (fill or reject) so the
+    window persists across a reject and a process restart. Any DB error is
+    swallowed (best-effort telemetry-adjacent write — never blocks the entry
+    loop the caller is already inside).
+    """
+    try:
+        conn.execute(
+            "INSERT INTO reentry_anchor (venue, symbol, strategy_id, last_ts) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(venue, symbol, strategy_id) DO UPDATE SET "
+            "last_ts = excluded.last_ts",
+            (venue, symbol, strategy_id, now_ts),
+        )
+    except sqlite3.Error as exc:  # fail-open — never block on DB trouble.
+        logger.warning("reentry anchor stamp failed: %s", exc)
+
+
 def reentry_cooldown_active(
     conn: sqlite3.Connection,
     *,
@@ -126,10 +159,14 @@ def reentry_cooldown_active(
 
     - ``exempt=True`` (NOVELTY: new bar OR side flip — see
       :func:`is_novel_reentry`) → always ``False`` (allow entry).
-    - Otherwise look up the most recent ``opened_ts`` for the exact
-      (venue, symbol, strategy_id) key (status-agnostic). If one exists and
-      ``now_ts - last_open < cooldown_sec`` → ``True`` (skip).
-    - No prior row (first entry) → ``False``.
+    - Otherwise the cooldown anchor is ``MAX`` of the most recent ``opened_ts``
+      on ``positions`` (an actual fill) AND ``last_ts`` on ``reentry_anchor``
+      (a reject/clamp stamped via :func:`stamp_reentry_anchor`) for the exact
+      (venue, symbol, strategy_id) key — a reject/clamp anchors the window
+      exactly like a fill does, so a repeatedly-rejected signal cannot re-fire
+      with zero anti-churn memory. If either exists and
+      ``now_ts - anchor < cooldown_sec`` → ``True`` (skip).
+    - No prior row on either table (first entry) → ``False``.
     - ``cooldown_sec <= 0`` disables the guard → ``False``.
     - Any DB error / NULL is fail-open (``False`` = allow) so the guard can
       never wedge the entry loop.
@@ -145,10 +182,24 @@ def reentry_cooldown_active(
     except sqlite3.Error as exc:  # fail-open — never block on DB trouble.
         logger.warning("reentry cooldown lookup failed: %s", exc)
         return False
-    if row is None or row[0] is None:
+    last_open = int(row[0]) if row is not None and row[0] is not None else None
+    try:
+        anchor_row = conn.execute(
+            "SELECT last_ts FROM reentry_anchor "
+            "WHERE venue = ? AND symbol = ? AND strategy_id = ?",
+            (venue, symbol, strategy_id),
+        ).fetchone()
+    except sqlite3.Error as exc:  # fail-open — never block on DB trouble.
+        logger.warning("reentry anchor lookup failed: %s", exc)
+        anchor_row = None
+    last_anchor = (
+        int(anchor_row[0]) if anchor_row is not None and anchor_row[0] is not None
+        else None
+    )
+    candidates = [v for v in (last_open, last_anchor) if v is not None]
+    if not candidates:
         return False
-    last_open = int(row[0])
-    return (now_ts - last_open) < cooldown_sec
+    return (now_ts - max(candidates)) < cooldown_sec
 
 
 def concurrent_same_side_open(

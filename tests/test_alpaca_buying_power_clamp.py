@@ -113,3 +113,22 @@ async def test_open_skips_when_unfundable() -> None:
     assert attempt.fill is None
     assert attempt.reject_code == "insufficient_buying_power"
     assert adapter.submitted_notional is None, "no unfundable order submitted"
+
+
+@pytest.mark.asyncio
+async def test_open_skip_logs_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # audit1 P0-4 ②: the full-vacate clamp path (requested notional rounds
+    # below the dust floor) previously returned silently with no reason
+    # logged. Assert a reason line is emitted so the skip is diagnosable.
+    adapter = _OrderAdapter()
+    with caplog.at_level("INFO", logger="polaris.scripts._alpaca_open"):
+        await real_alpaca_open_fill(
+            adapter, symbol="AMD", notional_usd=5000.0, strategy_id="s",
+            buying_power=0.5,
+        )
+    messages = [rec.message for rec in caplog.records]
+    assert any(
+        "AMD" in m and "insufficient_buying_power" in m for m in messages
+    ), f"expected a clamp-skip reason log, got: {messages}"

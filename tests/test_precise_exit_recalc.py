@@ -207,9 +207,12 @@ async def test_atr_stop_ratchets_across_ticks(memdb: sqlite3.Connection) -> None
 
 @pytest.mark.asyncio
 async def test_fsm_advances_to_protected(memdb: sqlite3.Connection) -> None:
-    # band 0.05 → atr_one 0.1, atr_r 0.2; last 100.3 → mfe 1.5R → PROTECTED.
+    # band 0.05 → atr_one ~0.1, atr_r ~0.2%; last 101.0 → mfe ~1.67R → PROTECTED.
+    # (last_price widened from 100.3 to 101.0, [[fee_aware_runit_floor_2026-07-02]]
+    # P0-1: the fee-aware floor now lifts this tight-ATR R-unit to cover the OKX
+    # real round-trip fee, so a smaller price move no longer crosses +1.0R.)
     _seed(
-        memdb, position_id="pos-fsm", entry_price=100.0, last_price=100.3,
+        memdb, position_id="pos-fsm", entry_price=100.0, last_price=101.0,
         band=0.05,
     )
     state = ProdLoopState()
@@ -227,8 +230,9 @@ async def test_fsm_advances_to_protected(memdb: sqlite3.Connection) -> None:
 async def test_protected_bep_closes_round_tripped_winner(
     memdb: sqlite3.Connection,
 ) -> None:
+    # last_price widened from 100.3 to 101.0 — see test_fsm_advances_to_protected.
     _seed(
-        memdb, position_id="pos-rt", entry_price=100.0, last_price=100.3,
+        memdb, position_id="pos-rt", entry_price=100.0, last_price=101.0,
         band=0.05,
     )
     state = ProdLoopState()

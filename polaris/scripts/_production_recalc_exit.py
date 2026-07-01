@@ -364,7 +364,10 @@ async def run_precise_exit(
         mode=mode,
         thesis_bucket=_bucket_for_strategy(strategy_id),
         thesis_giveback=_THESIS_GIVEBACK,
-        stop_atr_mult=_stop_atr_mult_for_strategy(strategy_id),
+        stop_atr_mult=_stop_atr_mult_for_strategy(
+            strategy_id,
+            atr_pct=atr_pct if entry_atr_pct is None else entry_atr_pct,
+        ),
     )
     persist_exit_state(conn, position_id=position_id, st=decision.state)
     # FSM state transition (DEBUG): surface the per-tick exit-state advance so

@@ -13,8 +13,10 @@ are untouched.
 
 from __future__ import annotations
 
+import math
 import os
 
+from polaris.core.economics.fees import real_fee_bps
 from polaris.core.live_recalc.exit_engine import (
     EXIT_BAR_MFE_BEP_R,
     EXIT_BAR_MFE_LOCK_R,
@@ -102,6 +104,47 @@ _WEEKEND_MAKER_STRATEGY_IDS: frozenset[str] = frozenset(
     {"weekend_thin_book_flush_maker", "weekend_funding_capitulation_maker"}
 )
 
+# Fee-aware R-unit floor — GENERALIZED (trade_mess_full_audit_2026-07-02 P0-1).
+# The weekend-maker 3xATR fix above only widened the R-unit for the two
+# frozenset ids; every OTHER strategy stayed on the plain 2xATR SSOT default,
+# which the audit found sits BELOW the REAL round-trip fee on tight-ATR
+# instruments (Capital FX raw 2xATR = 3.4-17.4bps vs a 6bps round trip →
+# fee-in-R 0.30-1.76R). Because the BEP/lock/peak-lock rungs (exit_engine.py)
+# and the G6 rail (compute_unrealized_pnl_r) all denominate against THIS SAME
+# stop_atr_mult, every protective exit fired at a rung that was structurally
+# BELOW the cost of the round trip — a guaranteed realised loss, not a
+# protected gain. FEE_FLOOR_K is the number of REAL round trips (per
+# `economics.fees.real_fee_bps`, taker) the R-unit must cover: the floor
+# WIDENS stop_atr_mult (never narrows) so that
+#   stop_atr_mult * atr_pct >= FEE_FLOOR_K * round_trip_fee_pct(venue).
+# k=3.0 mirrors the weekend-maker calibration (3xATR flipped the OOS median
+# positive at OKX's fee schedule) generalized as a ROUND-TRIP multiple rather
+# than a fixed ATR count, so it self-scales to each venue's REAL fee (not the
+# demo 70bps OKX penalty — see fees.py: judging structural viability against
+# the punitive demo billing would over-widen 7x; every existing cost-in-R
+# comparison in the codebase — entry_admission / maker_fill_shadow /
+# _production_tick_mfe / _production_counterfactual — already uses REAL fees
+# for this exact purpose). max() composition: a strategy whose OWN base
+# multiplier (2xATR default or the weekend-maker 3xATR) already clears the
+# floor is UNCHANGED (no-op) — this ONLY lifts a too-tight R-unit, never
+# narrows one. flow_not_block / aggressive: this widens the stop DISTANCE
+# (more room), never blocks an entry or cuts size. Env-tunable.
+FEE_FLOOR_K: float = _env_float("POLARIS_FEE_FLOOR_K", 3.0)
+
+
+def _fee_round_trip_pct_for_venue(venue: str) -> float:
+    """Two REAL taker legs (entry + exit) for ``venue``, as a fraction (not bps).
+
+    Uses ``economics.fees.real_fee_bps`` (taker) — the SAME real-fee schedule
+    every other cost-in-R comparison in the codebase reads (entry_admission /
+    maker_fill_shadow / tick_mfe / counterfactual) — NOT the punitive OKX demo
+    70bps billing quirk, which would over-widen the floor ~7x on a venue
+    quirk rather than the trading structure. An unknown venue falls back to
+    the OKX real-taker bps (``real_fee_bps`` convention) so the floor is a
+    GLOBAL invariant, never venue-optional.
+    """
+    return 2.0 * real_fee_bps(venue) / 10_000.0
+
 
 def _mfe_protect_for_strategy(strategy_id: str) -> MfeProtectSchedule | None:
     """MFE-protect harvest schedule for a REGISTERED bar strategy, or ``None``.
@@ -181,25 +224,45 @@ def _trail_mult_for_strategy(strategy_id: str) -> float | None:
     return None
 
 
-def _stop_atr_mult_for_strategy(strategy_id: str) -> float:
+def _stop_atr_mult_for_strategy(strategy_id: str, *, atr_pct: float) -> float:
     """R-unit ATR multiplier (the pnl_r / mfe_r DENOMINATOR distance) for ``strategy_id``.
 
     The two validated weekend OKX makers widen to ``WEEKEND_MAKER_STOP_ATR_MULT``
     (3.0, was the module SSOT 2.0) per the FIX-EXIT finding
     ([[weekend_maker_honest_rerun_2026-06-28]] §3 — "rail fixed −1.0R, only R-unit
     ATR mult widens" flips the OOS median positive). EVERY OTHER strategy (and any
-    UNREGISTERED id) keeps ``STOP_ATR_MULT`` (2.0) → the R ruler is byte-identical
-    for every existing position.
+    UNREGISTERED id) starts from ``STOP_ATR_MULT`` (2.0).
+
+    GENERALIZED fee-aware floor (trade_mess_full_audit_2026-07-02 P0-1): the base
+    multiplier above is then WIDENED (never narrowed, ``max()``) so the R-unit
+    ALWAYS covers ``FEE_FLOOR_K`` REAL round trips for this strategy's venue —
+    ``base_mult * atr_pct >= FEE_FLOOR_K * round_trip_fee_pct`` — by solving for
+    the multiplier: ``fee_floor_mult = FEE_FLOOR_K * round_trip_fee_pct / atr_pct``.
+    A degenerate ``atr_pct`` (<=0, non-finite) skips the floor (fail-open — the
+    caller passed a bad anchor, never divide-by-zero) and returns the base
+    unchanged. An UNREGISTERED strategy_id resolves its venue via
+    ``real_fee_bps``'s own OKX-real-taker fallback, so the floor is a GLOBAL
+    invariant, not a per-strategy opt-in.
 
     🚨 This widens ONLY the R-unit ATR-DISTANCE (the denominator). The −1.0R rail
     COEFFICIENT (max_loss_r=1.0 in the G6 monitor) is UNTOUCHED — a wider ATR unit
     simply makes the SAME −1.0R rung correspond to a WIDER price stop (MORE room for
     the bounded revert — aggressive / flow_not_block) and shrinks the fixed-$ fee as
-    a fraction of R. Sizing / the 9-stack / the trade path are NEVER touched.
+    a fraction of R. Sizing / the 9-stack / the trade path are NEVER touched. Every
+    BEP / lock / peak-lock rung (exit_engine.py) reads its R-unit from THIS SAME
+    multiplier, so they inherit the floor automatically — no rung math changes.
     """
     if strategy_id in _WEEKEND_MAKER_STRATEGY_IDS:
-        return WEEKEND_MAKER_STOP_ATR_MULT
-    return STOP_ATR_MULT
+        base_mult = WEEKEND_MAKER_STOP_ATR_MULT
+    else:
+        base_mult = STOP_ATR_MULT
+    if not (atr_pct > 0.0) or not math.isfinite(atr_pct):
+        return base_mult
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    venue = cls.metadata.venue if cls is not None else ""
+    round_trip_pct = _fee_round_trip_pct_for_venue(venue)
+    fee_floor_mult = FEE_FLOOR_K * round_trip_pct / atr_pct
+    return max(base_mult, fee_floor_mult)
 
 
 def _bucket_for_strategy(strategy_id: str) -> Bucket:

@@ -310,7 +310,7 @@ def test_freshness_normal_weekly_cot_not_over_discounted() -> None:
     severely stale — COT is weekly by nature (과도디스카운트 X)."""
     import datetime as _dt
 
-    now_dt = _dt.datetime.now(_dt.timezone.utc)
+    now_dt = _dt.datetime.now(_dt.UTC)
     now = int(now_dt.timestamp())
     report = (now_dt - _dt.timedelta(days=4)).strftime("%Y-%m-%d")
     payload = {

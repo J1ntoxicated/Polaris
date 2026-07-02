@@ -691,7 +691,7 @@
         <th class="l">TIME</th><th class="l">VEN</th><th class="l">SYMBOL</th><th title="position direction (long/short) — not the close fill side">SIDE</th>
         <th class="l">STRAT</th><th class="l" title="regime at entry">REGIME</th><th>ENTRY</th><th>EXIT</th>
         <th title="gross PnL before fees">GROSS$</th><th title="real venue fee">FEE$</th><th title="net = gross − fee">NET$</th>
-        <th title="gross PnL as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
+        <th title="net PnL (both-leg fees) as % of entry notional">PnL%</th><th>HELD</th><th class="l">REASON</th>
       </tr></thead><tbody></tbody></table>`;
   function renderTrades(d) {
     const rows = venueFilter(d.recent_trades).slice(0, 100);   // E3 venue scope
@@ -742,7 +742,7 @@
           { html: fmtUsd(t.pnl_usd, 2), cls: 'num ' + pn(t.pnl_usd), title: 'gross PnL (pre-fee)' },
           { html: fmtUsd(-fee, 2), cls: 'num b-neg', title: 'real venue fee · demo ' + fmtUsd(t.fee_usd, 4) },
           { html: fmtUsd(net, 2), cls: 'num ' + pn(net), title: 'net = gross − fee' },
-          { html: fmtSignedPct(t.pnl_pct, 2), cls: 'num ' + pn(t.pnl_pct), title: 'gross PnL as % of entry notional' },
+          { html: fmtSignedPct(t.pnl_pct, 2), cls: 'num ' + pn(t.pnl_pct), title: 'net PnL (both-leg fees) as % of entry notional' },
           { html: hms(t.held_sec), cls: 'num b-flat' },
           { html: esc(t.exit_reason), cls: 'l b-flat', title: 'exit ' + t.exit_reason },
         ],

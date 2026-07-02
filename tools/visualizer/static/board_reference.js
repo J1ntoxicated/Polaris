@@ -428,7 +428,7 @@
       return `<div class="ref-sec">${setH(0, 'probe escalation · observe-only', 0)}<span class="ref-none">none flagged — no ambiguous (would-escalate) probe decisions yet</span></div>`;
     }
     const trs = rows.map(e => {
-      const t = e.ts ? new Date(e.ts).toISOString().slice(11, 19) : '—';
+      const t = e.ts ? new Date(e.ts * 1000).toISOString().slice(11, 19) : '—';
       return `<tr>
         <td class="l ai-date">${esc(t)}</td>
         <td class="l">${esc(e.gate || '—')}</td>

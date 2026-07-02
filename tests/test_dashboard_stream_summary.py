@@ -328,12 +328,13 @@ def test_unattributed_gate_event_not_counted(tmp_path: Path) -> None:
 
 
 def test_net_after_cost_reconciliation(tmp_path: Path) -> None:
-    """net_after_cost_usd == net_pnl_usd - slippage_usd - ai_cost_usd.
+    """net_after_cost_usd == net_pnl_usd - ai_cost_usd.
 
-    ``net_pnl_usd`` is ALREADY net of fees (Σ close pnl − Σ fee), so the
-    fee leg must NOT be subtracted a second time. The economic identity the
-    column reports is gross_close_pnl − fee − slippage − ai_cost, which equals
-    net_pnl − slippage − ai_cost since net_pnl == gross − fee.
+    ``net_pnl_usd`` is ALREADY net of fees AND slippage (``fills.pnl_usd`` is
+    derived from the actual fill price, so slippage vs. the expected price is
+    already baked in) — ``slippage_usd`` is a separate, informational-only
+    model estimate and must NOT be subtracted a second time. Only ai_cost (a
+    real extra deduction not reflected in fills.pnl_usd) is subtracted.
     """
     conn = _seeded_db(tmp_path)
     try:
@@ -341,15 +342,14 @@ def test_net_after_cost_reconciliation(tmp_path: Path) -> None:
     finally:
         conn.close()
     for s in streams:
-        expected = s.net_pnl_usd - s.slippage_usd - s.ai_cost_usd
+        expected = s.net_pnl_usd - s.ai_cost_usd
         assert round(s.net_after_cost_usd, 9) == round(expected, 9)
 
 
-def test_net_after_cost_economic_identity_no_double_fee(tmp_path: Path) -> None:
-    """Regression guard: net_after_cost must equal gross_close_pnl − fee −
-    slippage − ai_cost (fees counted EXACTLY ONCE), matching the canonical
-    cost model in posterior.py:_apply_cost. Catches re-introducing the
-    fee double-subtraction the reviewer flagged.
+def test_net_after_cost_economic_identity_no_double_slippage(tmp_path: Path) -> None:
+    """Regression guard: net_after_cost must equal net_pnl − ai_cost (fees AND
+    slippage already reflected in net_pnl, counted EXACTLY ONCE). Catches
+    re-introducing the slippage double-subtraction.
 
     Seeded gross close pnl: okx +50 (fees 2, slip 2.05, ai 0.000225),
     capital −20 (fees 3, slip 1.99, ai 0.015). alpaca all-zero.
@@ -361,14 +361,14 @@ def test_net_after_cost_economic_identity_no_double_fee(tmp_path: Path) -> None:
         conn.close()
     by_id = {s.stream_id: s for s in streams}
     okx = by_id["A_okx_crypto"]
-    # gross 50 − fee 2 − slip 2.05 − ai 0.000225 = 45.949775
+    # gross 50 − fee 2 (== net_pnl) − ai 0.000225 = 47.999775 (slip NOT subtracted)
     assert round(okx.net_after_cost_usd, 6) == round(
-        50.0 - okx.fee_usd - okx.slippage_usd - okx.ai_cost_usd, 6
+        50.0 - okx.fee_usd - okx.ai_cost_usd, 6
     )
     cap = by_id["B_capital_cfd"]
-    # gross −20 − fee 3 − slip 1.99 − ai 0.015 = −25.005
+    # gross −20 − fee 3 (== net_pnl) − ai 0.015 = −23.015 (slip NOT subtracted)
     assert round(cap.net_after_cost_usd, 6) == round(
-        -20.0 - cap.fee_usd - cap.slippage_usd - cap.ai_cost_usd, 6
+        -20.0 - cap.fee_usd - cap.ai_cost_usd, 6
     )
 
 
@@ -397,9 +397,10 @@ def test_collect_snapshot_populates_cost_fields(tmp_path: Path) -> None:
     snap = collect_snapshot(db_path)
     assert len(snap.streams) == 3
     for s in snap.streams:
-        # net_pnl already nets fees; net_after_cost subtracts only the
-        # remaining cost legs (slippage + ai) — fees counted exactly once.
-        expected = s.net_pnl_usd - s.slippage_usd - s.ai_cost_usd
+        # net_pnl already nets fees AND slippage (real fill price); only ai_cost
+        # (not reflected in fills.pnl_usd) is subtracted — fees/slippage counted
+        # exactly once, slippage_usd stays informational-only.
+        expected = s.net_pnl_usd - s.ai_cost_usd
         assert round(s.net_after_cost_usd, 9) == round(expected, 9)
     by_id = {s.stream_id: s for s in snap.streams}
     assert round(by_id["A_okx_crypto"].fee_usd, 6) == 2.0

@@ -326,7 +326,9 @@ def _cell_top_bottom(
     *,
     cell_mult: dict[tuple[str, str, str, str], float],
     n: int = 5,
-) -> tuple[list[CellRow], list[CellRow], int]:
+) -> tuple[list[CellRow], list[CellRow], int, int]:
+    total_rows = _safe_query(conn, "SELECT COUNT(*) FROM cell_matrix_p0")
+    total_cells_n = int(total_rows[0][0] or 0) if total_rows else 0
     rows = _safe_query(
         conn,
         """SELECT exchange, strategy, ticker, regime, n_eff, score
@@ -335,7 +337,7 @@ def _cell_top_bottom(
            ORDER BY score DESC""",
     )
     if not rows:
-        return [], [], 0
+        return [], [], 0, total_cells_n
     eligible_n = len(rows)
     top_rows = rows[:n]
     bot_rows = list(reversed(rows[-n:]))
@@ -356,7 +358,7 @@ def _cell_top_bottom(
             mult=cell_mult.get(key, 1.0),
         )
 
-    return [_build(r) for r in top_rows], [_build(r) for r in bot_rows], eligible_n
+    return [_build(r) for r in top_rows], [_build(r) for r in bot_rows], eligible_n, total_cells_n
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +366,21 @@ def _cell_top_bottom(
 # ---------------------------------------------------------------------------
 
 
+_REGIME_STALE_SEC = 86_400  # 24h — a group's regime unrefreshed this long is dead
+
+
 def _regime_bars(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, *, now_s: int,
 ) -> tuple[list[RegimeBar], dict[tuple[str, str], str]]:
+    # Exclude STALE rows (updated_ts older than 24h): a group whose live-recalc
+    # tick stopped refreshing it (delisted / venue-dropped / stalled loop) would
+    # otherwise sit in the distribution forever with a frozen regime label,
+    # skewing the bar counts toward stale data. Display-only.
     rows = _safe_query(
         conn,
-        """SELECT venue, underlying_group_id, regime FROM regime_state""",
+        """SELECT venue, underlying_group_id, regime FROM regime_state
+           WHERE updated_ts > ?""",
+        (now_s - _REGIME_STALE_SEC,),
     )
     counts: dict[str, int] = {}
     lookup: dict[tuple[str, str], str] = {}

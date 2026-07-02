@@ -708,7 +708,19 @@
       ctx.font = '8px JetBrains Mono, monospace';
       ctx.fillStyle = rgba([0xa8, 0xa8, 0xa8], 0.8 * d);
       const pnlStr = (gs.pnl >= 0 ? '+' : '') + gs.pnl.toFixed(1);
-      ctx.fillText(`${gs.mktCount} tickers (${gs.activeCount} active) · ${pnlStr}`, p.sx, p.sy + rad + 12);
+      // True active count = emitted-node active + the tail-haze active rows the
+      // per-venue node cap folded away (Alpaca's ~1500-row universe far exceeds
+      // the render cap, so most of its active focus lives only in tail_aggregate;
+      // without adding it back the label under-reports active by ~6x).
+      let tailActive = 0;
+      for (let ti = 0; ti < tailAgg.length; ti++) {
+        if (tailAgg[ti].gx === k) tailActive += tailAgg[ti].active;
+      }
+      const trueActive = gs.activeCount + tailActive;
+      const shownLabel = trueActive > gs.mktCount
+        ? `${trueActive} active (${gs.mktCount} shown)`
+        : `${gs.mktCount} tickers (${gs.activeCount} active)`;
+      ctx.fillText(`${shownLabel} · ${pnlStr}`, p.sx, p.sy + rad + 12);
       ctx.restore();
       gs._screen = p;     // cached for hit-test
       gs._screenR = rad;

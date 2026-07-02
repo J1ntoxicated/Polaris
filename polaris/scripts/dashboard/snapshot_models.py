@@ -348,12 +348,14 @@ class StreamSummary:
     drawdown_pct: float = 0.0
     # Cost monitoring (display-only — "근거 있는 수익 추적"): track the real
     # deductions per stream so profit is evidence-based. ``fee_usd`` = Σ venue
-    # fills.fee_usd; ``slippage_usd`` = Σ derived from fills.slippage_bps;
-    # ``ai_cost_usd`` = Σ gate_events tokens × model-price (attributed via the
-    # position_id→venue join); ``net_after_cost_usd`` = net_pnl − slippage −
-    # ai_cost (net_pnl ALREADY nets fees, so fees are counted exactly once;
-    # economic identity = gross_close_pnl − fee − slippage − ai_cost). These
-    # NEVER feed sizing/gating — pure read-only telemetry.
+    # fills.fee_usd; ``slippage_usd`` = Σ derived from fills.slippage_bps — a
+    # separate unsigned (model) estimate, INFORMATIONAL only, since actual
+    # slippage is already baked into fills.pnl_usd (real fill price); ``ai_cost_usd``
+    # = Σ gate_events tokens × model-price (attributed via the position_id→venue
+    # join); ``net_after_cost_usd`` = net_pnl − ai_cost (net_pnl ALREADY nets
+    # fees + slippage since both are reflected in the real fill price; economic
+    # identity = gross_close_pnl − fee − ai_cost). These NEVER feed
+    # sizing/gating — pure read-only telemetry.
     fee_usd: float = 0.0
     slippage_usd: float = 0.0
     ai_cost_usd: float = 0.0
@@ -365,6 +367,14 @@ class StreamSummary:
     # lane's most-recent closed trades (newest first), an empty list when none.
     closed_n: int = 0
     recent_closed: list[ClosedTrade] = field(default_factory=list)
+    # Alpaca-only mark-freshness label (empty for OKX/Capital, which are 24/7
+    # markets). When the RTH session is open, ``upnl_usd`` is the live venue
+    # probe and this stays "". When the session is closed (weeknight/weekend/
+    # holiday), Alpaca stops streaming quotes, so ``upnl_usd`` is derived from
+    # the last internal mark (stale bar/tick) instead — this label + age make
+    # that explicit rather than silently showing a live-looking number.
+    marks_label: str = ""
+    marks_age_sec: int = 0
 
 
 @dataclass(slots=True)
@@ -639,6 +649,13 @@ class DashboardSnapshot:
     # ``exposed_usd`` and let the renderer label it ``EXPOSED$``.
     exposed_usd: float = 0.0
     upnl_total: float = 0.0
+    # Mark-freshness flag for ``upnl_total`` (Alpaca-only contributor): "" when
+    # every venue's marks are live (OKX/Capital 24/7 + Alpaca RTH open); else
+    # "internal marks (venue closed)" when Alpaca's RTH session is shut and its
+    # slice of upnl_total comes from a stale internal bar/tick instead of the
+    # live venue probe. ``upnl_marks_age_sec`` is that mark's staleness.
+    upnl_marks_label: str = ""
+    upnl_marks_age_sec: int = 0
     daily_pnl_usd: float = 0.0
     daily_trades: int = 0
     drawdown_pct: float = 0.0
@@ -646,6 +663,7 @@ class DashboardSnapshot:
     sharpe_24h: float = 0.0
     open_positions_n: int = 0
     active_cells_n: int = 0
+    total_cells_n: int = 0
     universe_focus_n: int = 0
     universe_last_refresh: str = "n/a"
     equity_curve: list[float] = field(default_factory=list)   # 24h, oldest→newest

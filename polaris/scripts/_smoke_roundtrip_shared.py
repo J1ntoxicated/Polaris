@@ -45,6 +45,11 @@ class OpenAttempt:
     # Submitted share qty for that live unfilled order (whole-share-retry qty),
     # carried so the orphan record knows the exposure to reconcile.
     unfilled_qty: float = 0.0
+    # Our own client order id for the ACCEPTED-but-unfilled order (open-confirm
+    # fix) — carried alongside ``venue_order_id`` so a pending-open carryover
+    # record has both refs. ``None`` when no order was accepted, or for a
+    # caller that does not track it (byte-identical elsewhere).
+    client_order_id: str | None = None
     # Maker-fill shadow metadata (FIX-EXEC, [[weekend_maker_honest_rerun_2026-06-28]]):
     # the post-only ENTRY leg's touch (the price the passive bid was posted at), its
     # repost count, and the clean_fill/pick_off outcome. Carried OUT of the OKX

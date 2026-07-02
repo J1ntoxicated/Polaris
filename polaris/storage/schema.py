@@ -38,6 +38,7 @@ from polaris.storage.schema_ddl_core import (
     DDL_ORDER_INTENTS_INDEX,
     DDL_ORDERS,
     DDL_ORDERS_INDEX,
+    DDL_PENDING_OPENS,
     DDL_POSITIONS,
     DDL_POSITIONS_INDEX,
     DDL_QUOTE_TICKS,
@@ -157,6 +158,7 @@ ALL_DDL: tuple[str, ...] = (
     DDL_ORDERS_INDEX,
     DDL_RISK_EVENTS,
     DDL_RISK_EVENTS_INDEX,
+    DDL_PENDING_OPENS,
     DDL_VENUE_BLOCKLIST,
     # Reject-anchor anti-churn (audit1 P0-4 ①) — persistent cooldown anchor that
     # survives a venue reject/clamp (no positions row) and a process restart.

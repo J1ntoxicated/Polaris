@@ -462,3 +462,27 @@ DDL_RISK_EVENTS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_risk_events_strategy
     ON risk_events(strategy_id, created_ts DESC);
 """
+
+# Alpaca OPEN-side pending-confirm carryover (open-confirm fix). A market order
+# accepted at the venue but unconfirmed within the poll budget lands here (one
+# row per (venue, symbol, strategy_id, side)) so the NEXT tick confirms that
+# exact order FIRST instead of submitting a duplicate — and so the ref survives
+# a process restart between ticks (unlike the close leg's in-memory-only
+# ``pending_close_ref``, an open pre-fill has no ``positions``/``SimulatedTrade``
+# row yet to anchor a venue available/over-count clamp). Cleared on fill,
+# terminal reject, or cancel.
+DDL_PENDING_OPENS = """
+CREATE TABLE IF NOT EXISTS pending_opens (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    venue_order_id TEXT NOT NULL,
+    client_order_id TEXT,
+    notional_usd REAL NOT NULL,
+    last_price REAL,
+    created_ts INTEGER NOT NULL,
+    updated_ts INTEGER NOT NULL,
+    PRIMARY KEY (venue, symbol, strategy_id, side)
+);
+"""

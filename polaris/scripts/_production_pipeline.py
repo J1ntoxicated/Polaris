@@ -57,6 +57,12 @@ from polaris.scripts._alpaca_open import (
     fetch_alpaca_buying_power,
     real_alpaca_open_fill,
 )
+from polaris.scripts._alpaca_pending_open import (
+    PendingOpenRef,
+    clear_pending_open,
+    read_pending_open,
+    upsert_pending_open,
+)
 from polaris.scripts._production_atr import timeframe_anchor_atr_pct
 from polaris.scripts._production_capital_sizing import (
     CapitalOrderPlan,
@@ -203,8 +209,14 @@ async def _real_open_fill(
     prefer_maker: bool = False,
     marketable_limit: bool = False,
     maker_no_fill: str = "market",
+    alpaca_pending_order_id: str | None = None,
+    alpaca_pending_client_order_id: str | None = None,
 ) -> OpenAttempt:
     """Drive the real demo venue entry leg → return an ``OpenAttempt``.
+
+    ``alpaca_pending_order_id`` (open-confirm fix): a prior tick's carried-over
+    unconfirmed Alpaca open ref, resolved before any fresh submit. ``None`` for
+    every other venue/path (byte-identical).
 
     P0 venue wire: replaces the synthetic fill source with a live adapter
     response. OKX places a market buy then polls the order; Capital opens a
@@ -258,6 +270,8 @@ async def _real_open_fill(
                 alpaca_adapter, symbol=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, side=side_eq, last_price=last_price,
                 buying_power=await fetch_alpaca_buying_power(alpaca_adapter),
+                pending_order_id=alpaca_pending_order_id,
+                pending_client_order_id=alpaca_pending_client_order_id,
             )
         api_key, secret = resolve_alpaca_credentials()
         if not (api_key and secret):
@@ -268,6 +282,8 @@ async def _real_open_fill(
                 adapter, symbol=symbol, notional_usd=notional_usd,
                 strategy_id=strategy_id, side=side_eq, last_price=last_price,
                 buying_power=await fetch_alpaca_buying_power(adapter),
+                pending_order_id=alpaca_pending_order_id,
+                pending_client_order_id=alpaca_pending_client_order_id,
             )
 
     # Capital CFD — close needs the deal_id from the confirm.
@@ -345,6 +361,17 @@ async def reserve_and_submit(
     if is_blocklisted(conn, venue, symbol):
         logger.info("[L7/blocklist] %s:%s non-tradeable — skipping", venue, symbol)
         return None
+    # OPEN-CONFIRM FIX: an Alpaca open accepted (``pending_new``) but not yet
+    # confirmed within a PRIOR tick's poll budget carries its venue_order_id
+    # here. DUPLICATE-SUBMIT GUARD: while that ref is live, no fresh order is
+    # placed on the SAME (venue, symbol, strategy_id, side) — the pending ref
+    # is resolved (confirm-first) via ``alpaca_pending_order_id`` below instead.
+    alpaca_pending: PendingOpenRef | None = None
+    if real_roundtrip and venue == "alpaca":
+        alpaca_pending = read_pending_open(
+            conn, venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
+            side=sig.side,
+        )
     # NOTE: the prior OKX param/precision per-symbol cooldown SKIP (Jin
     # 2026-06-22) is REMOVED (Jin 2026-06-23). The root fix is the submit-path
     # min-size CLAMP-UP (OKXAdapter._round_px_sz → clamp_up_to_min) which bumps a
@@ -437,6 +464,12 @@ async def reserve_and_submit(
                 ),
                 prefer_maker=prefer_maker, marketable_limit=marketable_limit,
                 maker_no_fill=maker_no_fill,
+                alpaca_pending_order_id=(
+                    alpaca_pending.venue_order_id if alpaca_pending else None
+                ),
+                alpaca_pending_client_order_id=(
+                    alpaca_pending.client_order_id if alpaca_pending else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — venue I/O must not escape
             logger.error(
@@ -464,6 +497,31 @@ async def reserve_and_submit(
                     state, epic=symbol, reject_code=attempt.reject_code,
                     reject_msg=attempt.reject_msg,
                 )
+            # OPEN-CONFIRM FIX: still ACCEPTED-but-unfilled after this tick's poll
+            # budget (fresh submit OR a carried-over pending ref that is still
+            # live) → persist/refresh the pending ref so the NEXT tick confirms
+            # this SAME order first instead of submitting a duplicate. A GENUINE
+            # reject (no venue_order_id) clears any stale ref — nothing live
+            # remains to carry forward.
+            if real_roundtrip and venue == "alpaca":
+                if attempt.venue_order_id:
+                    upsert_pending_open(
+                        conn, venue=venue, symbol=symbol,
+                        strategy_id=sig.strategy_id, side=sig.side,
+                        venue_order_id=attempt.venue_order_id,
+                        client_order_id=attempt.client_order_id,
+                        notional_usd=notional_usd, last_price=last_price,
+                        now_ts=now_ts,
+                    )
+                    logger.info(
+                        "[alpaca/open] pending confirm carryover %s:%s order=%s",
+                        symbol, sig.strategy_id, attempt.venue_order_id,
+                    )
+                else:
+                    clear_pending_open(
+                        conn, venue=venue, symbol=symbol,
+                        strategy_id=sig.strategy_id, side=sig.side,
+                    )
             await _handle_open_reject(
                 conn, fence=fence, state=state, sig=sig, venue=venue,
                 symbol=symbol, reservation_id=reservation["reservation_id"],
@@ -491,6 +549,14 @@ async def reserve_and_submit(
             return None
         fill, deal_id = attempt.fill, attempt.deal_id
         maker_attempt = attempt  # carries the maker touch/reposts/outcome (if any)
+        # OPEN-CONFIRM FIX: a fill landed (fresh submit or a resolved carryover)
+        # — clear any pending ref for this key so a future tick's dedup check
+        # does not skip on a stale row.
+        if real_roundtrip and venue == "alpaca":
+            clear_pending_open(
+                conn, venue=venue, symbol=symbol,
+                strategy_id=sig.strategy_id, side=sig.side,
+            )
         # P0-5 fix: persist the close-relevant venue ref so a restart can
         # reconstruct it. For Capital the close needs the position ``deal_id``
         # (which differs from the top-level confirm dealId); persist it as the

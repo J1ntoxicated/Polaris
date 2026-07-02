@@ -80,6 +80,7 @@ from polaris.scripts._run_signal_helpers import (
     _strategy_recent_reject as _strategy_recent_reject,
 )
 from polaris.scripts._static_ground import read_ticker_ground
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 from polaris.strategies import STRATEGY_REGISTRY, BaseStrategy, RawSignal
 
 if TYPE_CHECKING:
@@ -222,6 +223,8 @@ async def run_pipeline_for_signal(
         asset_class=asset_class, regime=regime, track=track,
         listing_age_hours=listing_age_h, leverage=leverage,
         equity_usd=equity_usd, conn=conn,
+        entry_price=last_price, atr_pct=bars_atr_pct,
+        stop_atr_mult=_stop_atr_mult_for_strategy(sig.strategy_id, atr_pct=bars_atr_pct),
     )
     payload: dict[str, Any] = {
         "signal_id": sig.signal_id,

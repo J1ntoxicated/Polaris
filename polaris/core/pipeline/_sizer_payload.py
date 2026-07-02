@@ -154,13 +154,22 @@ def build_sizer_payload(
     equity_usd: float = 10_000.0,
     conn: sqlite3.Connection | None = None,
     now_ts: int | None = None,
+    entry_price: float = 0.0,
+    atr_pct: float = 0.0,
+    stop_atr_mult: float = 0.0,
 ) -> dict[str, Any]:
     """Compose the G5 payload — SignalIntent + StrategyRiskState + PortfolioState.
 
     ``equity_usd`` defaults to a paper-account proxy ($10k); the smoke loop
     overrides with the real demo balance once we wire ``fetch_balance`` in
     Day 7. ``leverage`` is venue-set (OKX SPOT = 1, Capital from constraint
-    translator).
+    translator). ``entry_price``/``atr_pct``/``stop_atr_mult`` default 0.0
+    (byte-identical no-op — Wave B agenda ① R-budget shadow compute in
+    ``compute_size`` treats <=0 as data-integrity/module-default fallback);
+    callers that have a live last price / bar ATR% / fee-floored stop mult
+    (``exit_strategy_config._stop_atr_mult_for_strategy`` — scripts-layer
+    only, core must not import it) thread them so the shadow observation
+    fires with the real fee-floor.
     """
     ts = int(now_ts if now_ts is not None else time.time())
     # Regime-fit family: derive from the strategy's correlation-group archetype
@@ -187,6 +196,9 @@ def build_sizer_payload(
         leverage=float(leverage),
         base_risk_pct=float(base_risk_pct) if base_risk_pct is not None else 0.02,
         signal_family=signal_family,
+        entry_price=float(entry_price),
+        atr_pct=float(atr_pct),
+        stop_atr_mult=float(stop_atr_mult),
     )
     if conn is None:
         risk_state = default_strategy_risk_state(

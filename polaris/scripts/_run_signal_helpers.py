@@ -175,11 +175,15 @@ def _log_entry_admission_shadow(
     byte-identical to the legacy path (mirrors ``signal_validator._log_g3_shadow``).
 
     The cost is the REAL OKX round trip (``fees.real_fee_usd`` ×2 legs) expressed
-    in ATR-R (``cost_usd / atr_usd``), where ``atr_usd = entry_price * atr_pct *
-    2.0`` mirrors ``_production_close.py`` — the SAME R unit as the cell's
-    ``avg_pnl_r`` and the expected-move proxy (no $-basis mismatch). The fee leg
-    is sized at a representative $50 risk notional (the cost-R is the per-trade
-    fee fraction of an ATR move, independent of the not-yet-sized live notional).
+    in ATR-R (``cost_usd / atr_usd``), where ``atr_usd = PNL_R_USD_DENOM *
+    atr_pct * 2.0`` mirrors the close-path WHOLE-POSITION convention
+    (``_production_close_effects.py`` FIX 1: ``atr_usd = size_usd * atr_pct *
+    2.0``) — the SAME R unit as the cell's ``avg_pnl_r`` and the expected-move
+    proxy (no $-basis mismatch). The fee leg AND the R-denominator both use the
+    same representative $50 risk notional (``PNL_R_USD_DENOM``), so cost_r is
+    independent of the symbol's per-unit price (a per-unit ``entry_price *
+    atr_pct * 2.0`` basis blew a low-price symbol's cost_r up relative to a
+    high-price symbol's at identical risk — GBPUSD 92.3R vs J225 0.0R observed).
     ``net_edge`` is never consulted. Cold cell (n_eff < CELL_POOL_MIN_N_EFF)
     ALWAYS admits.
     """
@@ -201,14 +205,20 @@ def _log_entry_admission_shadow(
     expected_move_r = expected_move_r_from_cell(
         n_eff=n_eff, wins_eff=wins_eff, avg_pnl_r=avg_pnl_r,
     )
-    # ATR-R basis: atr_usd mirrors _production_close.py:120 (entry_price * atr_pct
-    # * 2.0) so the cost shares the cell-matrix R unit. A degenerate atr_usd <= 0
-    # makes the cost helper fail-open to 0.0 (never manufactures a would_suppress).
+    # ATR-R basis: atr_usd mirrors the close-path WHOLE-POSITION convention
+    # (_production_close_effects.py FIX 1: atr_usd = size_usd * atr_pct * 2.0),
+    # NOT the per-unit entry_price * atr_pct * 2.0 (that basis is price-dependent
+    # and blows up cost_r for low-price symbols — see the docstring above). Both
+    # the fee leg and this R-denominator use the SAME representative $50 risk
+    # notional (PNL_R_USD_DENOM) so cost_r is symbol-price-invariant. A degenerate
+    # atr_usd <= 0 makes the cost helper fail-open to 0.0 (never manufactures a
+    # would_suppress).
     from polaris.core.pipeline.payload_builder import PNL_R_USD_DENOM
 
-    atr_usd = entry_price * atr_pct * 2.0
-    # One leg's real fee at a representative $50 risk-unit notional; ×2 legs is
-    # applied inside real_round_trip_cost_r_from_usd, then divided by atr_usd.
+    atr_usd = PNL_R_USD_DENOM * atr_pct * 2.0
+    # One leg's real fee at the SAME representative $50 risk-unit notional; ×2
+    # legs is applied inside real_round_trip_cost_r_from_usd, then divided by
+    # atr_usd.
     real_leg_usd = real_fee_usd(venue, PNL_R_USD_DENOM)
     real_round_trip_cost_r = real_round_trip_cost_r_from_usd(
         real_fee_one_leg_usd=real_leg_usd,

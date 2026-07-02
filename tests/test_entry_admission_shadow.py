@@ -356,6 +356,43 @@ def test_wire_warm_negative_logs_would_suppress(memdb: sqlite3.Connection) -> No
     assert rows[0]["real_round_trip_cost_r"] > 0.0
 
 
+def test_wire_cost_r_is_price_invariant_whole_position_basis(
+    memdb: sqlite3.Connection,
+) -> None:
+    """entry seam cost_r must match the close-path WHOLE-POSITION convention
+    (``_production_close_effects.py`` FIX 1: ``atr_usd = size_usd * atr_pct *
+    2.0``), so at the SAME representative notional (``PNL_R_USD_DENOM``) and the
+    SAME ``atr_pct``, ``real_round_trip_cost_r`` is IDENTICAL regardless of the
+    symbol's per-unit price (GBPUSD ~1.27 vs J225 ~40000) — the prior per-unit
+    ``entry_price * atr_pct * 2.0`` basis let a low-price symbol's cost_r explode
+    relative to a high-price symbol's at identical risk (92.3R vs 0.0R observed).
+    """
+    atr_pct = 0.004
+    _log_entry_admission_shadow(
+        memdb,
+        run_id="run-lo", sig=_sig(), venue="okx", symbol="GBPUSD",
+        regime="chop",
+        cell_routing={"n_eff": 15.0, "avg_pnl_r": -0.6, "wins_eff": 3.0},
+        entry_price=1.27,  # low per-unit price
+        atr_pct=atr_pct,
+    )
+    _log_entry_admission_shadow(
+        memdb,
+        run_id="run-hi", sig=_sig(), venue="okx", symbol="J225",
+        regime="chop",
+        cell_routing={"n_eff": 15.0, "avg_pnl_r": -0.6, "wins_eff": 3.0},
+        entry_price=40_000.0,  # high per-unit price
+        atr_pct=atr_pct,
+    )
+    rows = {
+        r["symbol"]: r["real_round_trip_cost_r"]
+        for r in fetch_entry_admission_shadow(memdb)
+    }
+    assert rows["GBPUSD"] > 0.0
+    assert rows["J225"] > 0.0
+    assert abs(rows["GBPUSD"] - rows["J225"]) < 1e-12
+
+
 def test_wire_noop_without_conn_byte_identical() -> None:
     """shadow_conn=None → no-op (byte-identical legacy path; never raises)."""
     _log_entry_admission_shadow(

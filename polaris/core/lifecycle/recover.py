@@ -29,7 +29,11 @@ from polaris.core.lifecycle.trade import SimulatedTrade
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["hydrate_open_positions", "reconcile_venue_positions"]
+__all__ = [
+    "hydrate_last_entry_by_key",
+    "hydrate_open_positions",
+    "reconcile_venue_positions",
+]
 
 RECONCILE_STRATEGY_ID = "_reconcile_import"
 
@@ -145,6 +149,41 @@ def hydrate_open_positions(conn: sqlite3.Connection) -> list[SimulatedTrade]:
         )
         out.append(trade)
     return out
+
+
+def hydrate_last_entry_by_key(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str, str], tuple[int, str]]:
+    """Restore the anti-churn novelty anchor from persisted ``positions``.
+
+    P0-2 boot-refire fix: ``state.last_entry_by_key`` (Component B anti-churn,
+    2026-05-31) is in-memory only, so a paper-loop restart wiped it —
+    ``last_entry_bar=None`` made ``is_novel_reentry`` return ``True``
+    unconditionally, which exempted the re-entry cooldown entirely, which
+    refired the SAME (venue, symbol, strategy, side) within seconds of every
+    boot (3x observed incidents, including the daily 07:30 restart). Every
+    (venue, symbol, strategy_id) key maps to the ``(opened_ts, side)`` of its
+    MOST RECENT ``positions`` row — status-agnostic (a position closed
+    seconds before the restart is exactly the refire this guards against, so
+    ``status='closed'`` rows are included, not just ``'open'``).
+
+    ``opened_ts`` substitutes for the live ``created_at_bar`` (the strategy
+    bar timestamp is not persisted) — it is a conservative proxy: entries
+    always land at-or-after their signal bar, so ``opened_ts >=
+    created_at_bar`` and a genuinely NEW bar after restart still compares
+    strictly greater (novel), while the boot-adjacent duplicate no longer
+    free-passes on ``last_entry_bar is None``. The DB-side
+    ``reentry_cooldown_active`` timestamp check is the same-magnitude
+    fallback for any edge slop, unchanged by this fix.
+    """
+    rows = conn.execute(
+        "SELECT venue, symbol, strategy_id, side, MAX(opened_ts) "
+        "FROM positions GROUP BY venue, symbol, strategy_id"
+    ).fetchall()
+    return {
+        (str(r[0]), str(r[1]), str(r[2])): (int(r[4]), str(r[3]))
+        for r in rows
+    }
 
 
 def _run_coro[T](coro: Awaitable[T]) -> T:

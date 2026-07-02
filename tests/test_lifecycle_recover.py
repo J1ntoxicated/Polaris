@@ -12,7 +12,10 @@ from collections.abc import Iterable
 
 import pytest
 
-from polaris.core.lifecycle.recover import hydrate_open_positions
+from polaris.core.lifecycle.recover import (
+    hydrate_last_entry_by_key,
+    hydrate_open_positions,
+)
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.storage.schema import init_db
 
@@ -414,3 +417,81 @@ def test_capital_legacy_falls_back_to_fill_order_id(conn):
                      order_id="DIAAAAAA-LEGACY-01")
     [trade] = hydrate_open_positions(conn)
     assert trade.deal_id == "DIAAAAAA-LEGACY-01"
+
+
+# ---------------------------------------------------------------------------
+# P0-2 boot refire block — hydrate_last_entry_by_key.
+#
+# ``state.last_entry_by_key`` (anti-churn novelty anchor) was in-memory only:
+# a paper-loop restart wiped it, so ``last_entry_bar=None`` made every signal
+# "novel" (is_novel_reentry) and the re-entry cooldown was exempted
+# unconditionally — the same (venue, symbol, strategy, side) refired within
+# seconds of every boot (3x observed: 21:32 6-way simultaneous refire, 02:51
+# J225/AU200AU 48s-cooldown refire, every 07:30 daily restart). Hydrating the
+# key from the persisted ``positions`` row (MAX opened_ts per
+# venue/symbol/strategy) restores the anchor so a same-bar same-side signal
+# is correctly NOT novel across a restart.
+# ---------------------------------------------------------------------------
+
+
+def test_hydrate_last_entry_by_key_empty_db_returns_empty(
+    conn: sqlite3.Connection,
+) -> None:
+    assert hydrate_last_entry_by_key(conn) == {}
+
+
+def test_hydrate_last_entry_by_key_single_position(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_position(conn, position_id="pos_1", venue="okx", symbol="BTC-USDT",
+                   strategy_id="tsmom", side="long", qty=0.001, opened_ts=1000)
+    keyed = hydrate_last_entry_by_key(conn)
+    assert keyed == {("okx", "BTC-USDT", "tsmom"): (1000, "long")}
+
+
+def test_hydrate_last_entry_by_key_picks_most_recent_opened_ts(
+    conn: sqlite3.Connection,
+) -> None:
+    """Two entries on the SAME key — hydrate must anchor to the LATEST one
+    (the one the live novelty check would have compared against pre-restart),
+    not an arbitrary row."""
+    _seed_position(conn, position_id="pos_old", venue="capital", symbol="J225",
+                   strategy_id="xau_indices_trend", side="long", qty=1.0,
+                   opened_ts=1000)
+    _seed_position(conn, position_id="pos_new", venue="capital", symbol="J225",
+                   strategy_id="xau_indices_trend", side="short", qty=1.0,
+                   opened_ts=2000)
+    keyed = hydrate_last_entry_by_key(conn)
+    assert keyed == {
+        ("capital", "J225", "xau_indices_trend"): (2000, "short"),
+    }
+
+
+def test_hydrate_last_entry_by_key_includes_closed_positions(
+    conn: sqlite3.Connection,
+) -> None:
+    """A position that was OPENED then CLOSED before the restart is still the
+    correct novelty anchor — the anti-churn key is NOT scoped to open status
+    (a closed trade a few seconds ago is exactly the refire this guards)."""
+    _seed_position(conn, position_id="pos_closed", venue="okx",
+                   symbol="ETH-USDT", strategy_id="tsmom", side="long",
+                   qty=0.01, opened_ts=500, status="closed")
+    keyed = hydrate_last_entry_by_key(conn)
+    assert keyed == {("okx", "ETH-USDT", "tsmom"): (500, "long")}
+
+
+def test_hydrate_last_entry_by_key_multiple_distinct_keys(
+    conn: sqlite3.Connection,
+) -> None:
+    _seed_position(conn, position_id="pos_a", venue="okx", symbol="BTC-USDT",
+                   strategy_id="tsmom", side="long", qty=0.001, opened_ts=100)
+    _seed_position(conn, position_id="pos_b", venue="okx", symbol="ETH-USDT",
+                   strategy_id="tsmom", side="short", qty=0.01, opened_ts=200)
+    _seed_position(conn, position_id="pos_c", venue="capital", symbol="GOLD",
+                   strategy_id="xau", side="long", qty=1.0, opened_ts=300)
+    keyed = hydrate_last_entry_by_key(conn)
+    assert keyed == {
+        ("okx", "BTC-USDT", "tsmom"): (100, "long"),
+        ("okx", "ETH-USDT", "tsmom"): (200, "short"),
+        ("capital", "GOLD", "xau"): (300, "long"),
+    }

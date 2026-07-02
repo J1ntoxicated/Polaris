@@ -41,6 +41,7 @@ from polaris.core.isolation.allocator_fence import (
 )
 from polaris.core.isolation.circuit_breaker import resume_stale_permanent_halts
 from polaris.core.lifecycle.recover import (
+    hydrate_last_entry_by_key,
     hydrate_open_positions,
     reconcile_venue_positions,
 )
@@ -701,6 +702,20 @@ async def run_production_paper_loop(
         logger.info(
             "[hydrate] restored %d open trades from prior session",
             len(state.open_trades),
+        )
+    # P0-2 boot-refire fix: restore the anti-churn novelty anchor
+    # (state.last_entry_by_key) from persisted ``positions`` so a restart
+    # does not present every (venue, symbol, strategy, side) as "novel"
+    # (last_entry_bar=None → is_novel_reentry always True → the re-entry
+    # cooldown is exempted unconditionally) and refire the same signal within
+    # seconds of boot. flow_not_block: a genuinely NEW bar or a side flip is
+    # still novel and flows — this only restores the comparison anchor.
+    try:
+        state.last_entry_by_key.update(hydrate_last_entry_by_key(conn))
+    except Exception:
+        logger.exception(
+            "[hydrate] hydrate_last_entry_by_key failed — anti-churn anchor "
+            "not restored (non-fatal, novelty falls back to always-novel)"
         )
     # Startup migration (flow_not_block): convert any legacy permanent HARD_HALT
     # (unblock_ts=None) into a bounded auto-resume so a strategy stalled before

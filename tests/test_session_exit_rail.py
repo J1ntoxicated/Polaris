@@ -350,3 +350,103 @@ def test_no_opened_ts_keeps_pure_pre_close_behaviour() -> None:
     only (no stale path) — mid-RTH with no opened_ts holds."""
     dec = session_forced_exit("us_equity_cal", _utc_ts(2026, 7, 15, 17, 0))
     assert dec.close is False
+
+
+# ---------------------------------------------------------------------------
+# P1-5(b) — us_equity_cal weekday-awareness: a Saturday clock-of-day inside
+# what WOULD be RTH minute-of-day on a weekday must NOT read as in-session
+# (mirrors _fx_in_session's Sat/Sun closed-window guard). Without this guard
+# the RTH-close pre-close AND stale-overnight triggers can both misfire on a
+# weekend (2026-07-18 is a Saturday, 2026-07-19 a Sunday).
+# ---------------------------------------------------------------------------
+
+
+def test_equity_not_flat_saturday_mid_rth_clock() -> None:
+    """Saturday 13:00 ET (inside the weekday RTH minute-of-day window) → the
+    cash book is shut all weekend, so the pre-close trigger must NOT fire."""
+    saturday_rth_clock = _utc_ts(2026, 7, 18, 17, 0)  # 13:00 ET Saturday
+    dec = session_forced_exit("us_equity_cal", saturday_rth_clock)
+    assert dec.close is False
+
+
+def test_equity_not_flat_saturday_just_before_rth_close_clock() -> None:
+    """Saturday 19:55 UTC (== 15:55 ET, 5 min before the weekday 16:00 ET
+    close-of-day) must NOT force-flatten — no real close exists on Saturday."""
+    saturday_near_close_clock = _utc_ts(2026, 7, 18, 19, 55)
+    dec = session_forced_exit("us_equity_cal", saturday_near_close_clock)
+    assert dec.close is False
+
+
+def test_equity_stale_overnight_does_not_fire_on_saturday() -> None:
+    """A position opened before Friday's real RTH close, now Saturday mid-RTH
+    clock-of-day: Saturday is NOT in-session (weekend), so the stale-overnight
+    re-arm must NOT fire — it re-arms only at the next REAL in-session open
+    (Monday)."""
+    opened = _utc_ts(2026, 7, 17, 17, 0)  # Friday 13:00 ET (prior real RTH)
+    saturday_rth_clock = _utc_ts(2026, 7, 18, 17, 0)  # Saturday 13:00 ET
+    dec = session_forced_exit(
+        "us_equity_cal", saturday_rth_clock, opened_ts=opened
+    )
+    assert dec.close is False
+
+
+def test_equity_stale_overnight_fires_monday_after_saturday_gap() -> None:
+    """Same position as above, now Monday mid-RTH (the next REAL in-session
+    open) → fires (weekend gap does not suppress the eventual re-arm)."""
+    opened = _utc_ts(2026, 7, 17, 17, 0)  # Friday 13:00 ET
+    monday_rth = _utc_ts(2026, 7, 20, 17, 0)  # Monday 13:00 ET
+    dec = session_forced_exit("us_equity_cal", monday_rth, opened_ts=opened)
+    assert dec.close is True
+
+
+# ---------------------------------------------------------------------------
+# P1-5(a) — hold_overnight input: a strategy that opts INTO overnight holds
+# (StrategyMetadata.hold_overnight=True, e.g. equity_52wk_high_breakout, 1D
+# timeframe) is EXEMPT from the RTH-close pre-close AND stale-overnight
+# triggers — mirrors reconcile_orphans.py's eod_flatten (_is_held_overnight):
+# hold_overnight=True strategies are NOT flattened. always_on/fx_indices_cal
+# are unaffected (calendar-scoped exemption is us_equity_cal only, since B/A
+# have no per-strategy hold_overnight consumer in this rail's spec).
+# ---------------------------------------------------------------------------
+
+
+def test_equity_hold_overnight_exempt_from_pre_close_buffer() -> None:
+    """A hold_overnight=True equity position is NOT flattened even when the RTH
+    close is imminent — it is meant to survive the close (e.g. 1D swing)."""
+    dec = session_forced_exit(
+        "us_equity_cal", _utc_ts(2026, 7, 15, 19, 55), hold_overnight=True
+    )
+    assert dec.close is False
+
+
+def test_equity_hold_overnight_exempt_from_stale_overnight() -> None:
+    """A hold_overnight=True equity position that survived an RTH close is NOT
+    flattened at the next in-session open — it is DESIGNED to hold overnight,
+    unlike the default (flatten) strategy."""
+    opened = _utc_ts(2026, 7, 14, 17, 0)
+    now = _utc_ts(2026, 7, 15, 17, 0)
+    dec = session_forced_exit(
+        "us_equity_cal", now, opened_ts=opened, hold_overnight=True
+    )
+    assert dec.close is False
+
+
+def test_equity_default_hold_overnight_false_still_flattens() -> None:
+    """Backward-compat: hold_overnight defaults to False, so an un-threaded
+    caller (or a default-flatten strategy) keeps the existing flatten
+    behaviour byte-identical."""
+    dec = session_forced_exit("us_equity_cal", _utc_ts(2026, 7, 15, 19, 55))
+    assert dec.close is True
+
+
+def test_always_on_hold_overnight_still_never_fires() -> None:
+    """always_on ignores hold_overnight entirely — it never fires regardless
+    (no calendar close exists for crypto either way)."""
+    dec = session_forced_exit(
+        "always_on", _utc_ts(2026, 7, 15, 19, 55), hold_overnight=True
+    )
+    assert dec.close is False
+    dec2 = session_forced_exit(
+        "always_on", _utc_ts(2026, 7, 15, 19, 55), hold_overnight=False
+    )
+    assert dec2.close is False

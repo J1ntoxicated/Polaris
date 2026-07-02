@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.live_recalc.session_exit_rail import session_forced_exit
 from polaris.core.streams import resolve_stream
+from polaris.strategies import STRATEGY_REGISTRY
 
 if TYPE_CHECKING:
     from polaris.scripts._production_recalc import ActivePositionRow
@@ -37,6 +38,18 @@ def _session_calendar_for_venue(venue: str) -> str:
         return resolve_stream(venue).session_calendar
     except (KeyError, ValueError):
         return "always_on"
+
+
+def _hold_overnight_for_strategy(strategy_id: str) -> bool:
+    """Resolve a position's ``StrategyMetadata.hold_overnight`` (DEFAULT False —
+    flatten). Mirrors ``reconcile_orphans._is_held_overnight``: True ONLY if the
+    strategy is registered AND its metadata opts in; an unknown strategy_id
+    degrades to False (flatten — the directive's base case, same as eod_flatten).
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return False
+    return bool(getattr(getattr(cls, "metadata", None), "hold_overnight", False))
 
 
 async def run_session_forced_exit(
@@ -72,12 +85,21 @@ async def run_session_forced_exit(
     can fill ONLY while in-session, so a bot-restart gap around the close misses
     the pre-close trigger → the position would hold across ≥1 calendar close. The
     rail re-arms the flatten at the next in-session open.
+
+    ``hold_overnight`` (resolved from the position's ACTIVE strategy metadata,
+    mirrors ``reconcile_orphans._is_held_overnight``'s eod_flatten opt-out): a
+    strategy that opts IN to holding across the close (e.g. a 1D swing) is
+    exempt from the ``us_equity_cal`` RTH-close pre-close + stale-overnight
+    triggers — see ``session_forced_exit``. Default-False strategies keep the
+    existing flatten behaviour byte-identical.
     """
     session_calendar = _session_calendar_for_venue(str(pos["venue"]))
     opened_ts_raw = pos.get("opened_ts")
     opened_ts = None if opened_ts_raw is None else int(opened_ts_raw)
+    strategy_id = str(pos.get("active_strategy_id") or pos.get("strategy") or "")
     decision = session_forced_exit(
         session_calendar, now_ts, pnl_r=pnl_r, opened_ts=opened_ts,
+        hold_overnight=_hold_overnight_for_strategy(strategy_id),
     )
     if not decision.close:
         return False

@@ -59,6 +59,11 @@ CAP_DOMINATED_REALIZATION_THRESHOLD: Final[float] = 0.33
 SHADOW_FLIP_N_DEFAULT: Final[int] = 100
 SHADOW_FLIP_HOURS_DEFAULT: Final[float] = 24.0
 
+# R_budget itself is NOT redefined here — the engine wire (compute_size) reuses
+# the ALREADY-CANONICAL ``polaris.core.metrics.risk_unit.r_budget_for_venue``
+# SSOT (``BASE_RISK_PCT(0.02) × venue starting equity``, Step N) rather than a
+# second competing "2%-of-equity" constant in this module.
+
 _ENV_MODE: Final[str] = "POLARIS_RBUDGET_SIZING_MODE"
 _ENV_SHADOW_N: Final[str] = "POLARIS_RBUDGET_SHADOW_N"
 _ENV_SHADOW_HOURS: Final[str] = "POLARIS_RBUDGET_SHADOW_HOURS"

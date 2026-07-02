@@ -33,12 +33,20 @@ from polaris.core.learners.base import (
 )
 from polaris.core.learners.regime import RegimeMultLearner
 from polaris.core.learners.session import SessionMultLearner
+from polaris.core.metrics.risk_unit import STOP_ATR_MULT, r_budget_for_venue
 from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
-from polaris.core.sizing.r_budget_sizer import fold_strength_scalar
+from polaris.core.sizing.r_budget_sizer import (
+    CapQtyInputs,
+    compute_r_budget_qty,
+    fold_strength_scalar,
+    record_shadow_observation,
+    resolve_sizing_mode,
+    stop_dist_usd,
+)
 from polaris.core.sizing.schema import (
     CONT_SCALAR_MAX,
     CONT_SCALAR_MIN,
@@ -139,6 +147,22 @@ class SignalIntent:
     # (absent / non-MODIFY / stale-cycle). Valid only within the SAME decision
     # cycle that produced it — callers must not carry a stale value forward.
     strength_scalar: float = 1.0
+    # Wave B agenda ① R-budget shadow-compute inputs (waveB_sizing_params_2026-07-02.md).
+    # Both default 0.0 — the R-budget qty shadow path treats <=0 as "not supplied"
+    # (data-integrity fallback: skip shadow-compute, log the fallback, existing
+    # %-of-equity path is UNCHANGED). Callers that don't thread these stay
+    # byte-identical (no shadow observation recorded for them).
+    entry_price: float = 0.0
+    atr_pct: float = 0.0
+    # Fee-floored R-unit ATR multiplier (risk_unit.py STOP_ATR_MULT distance),
+    # the SAME per-strategy value ``_stop_atr_mult_for_strategy`` resolves —
+    # threaded in by the scripts-layer caller (core must not import scripts;
+    # test_core_layering.py) since only that layer has both the ATR% and the
+    # strategy-registry context to resolve the fee floor. Default 0.0 → the
+    # shadow wire falls back to the plain module ``STOP_ATR_MULT`` (2.0)
+    # default, never the fee-aware floor — callers that care about the floor
+    # MUST thread the real value.
+    stop_atr_mult: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +296,185 @@ def notional_ceiling_pct(*, venue: str, equity_usd: float, leverage: float) -> f
     if denom <= 0.0:
         return 0.0
     return notional_hard_cap_usd(venue) / denom
+
+
+# ---------------------------------------------------------------------------
+# Wave B agenda ① — R-budget qty shadow wire
+# (vault/50_research/debates/waveB_sizing_params_2026-07-02.md)
+#
+# Runs the qty-aimed R-budget compute IN PARALLEL to the %-of-equity T4 chain
+# above — SHADOW mode logs + persists an observation but never alters
+# ``final_risk_pct`` / ``notional``; ACTIVE mode (only reached once the
+# shadow-verify gate has flipped, or via the operator env override) makes the
+# R-budget qty PRIMARY and demotes every existing exposure cap to a
+# qty-converted min() term. Data-integrity fallback (ATR zero/stale/absent
+# entry_price) ALWAYS falls through to the existing %-of-equity result
+# unchanged, in both modes — this wire never blocks an order.
+# ---------------------------------------------------------------------------
+
+
+def _cap_qty_inputs_from_pcts(
+    *,
+    single_trade_cap_pct: float,
+    per_symbol_remaining_pct: float,
+    margin_qty_basis_pct: float,
+    underlying_remaining_pct: float | None,
+    cluster_remaining_pct: float | None,
+    track_remaining_pct: float,
+    venue_daily_remaining_pct: float,
+    total_daily_remaining_pct: float,
+    env_ceiling_pct: float,
+    equity_usd: float,
+    leverage: float,
+    entry_price: float,
+) -> CapQtyInputs:
+    """Convert the SAME %-of-equity caps already resolved in ``compute_size``
+    into qty ceilings — ``qty = pct × equity × leverage / entry_price``, the
+    identical basis ``notional_ceiling_pct`` composes on. No new cap concept:
+    this only re-expresses caps already computed for the %-chain in units
+    (debate spec agenda ① — symbol/cluster/track/margin/env-ceiling, ALL
+    existing caps, single min()).
+
+    ``margin_qty_basis_pct`` (caller passes ``1.0``) is ``avail_margin × lev ÷
+    price`` — this repo tracks no separate available-margin balance
+    (``PortfolioState`` has no margin field), so ``equity × leverage`` (the
+    ``_to_qty`` basis itself, at 100%) IS the deployable-capital proxy; not a
+    duplicate of ``single_trade_cap_pct``, a distinct basis re-used because no
+    second margin ledger exists. ``env_ceiling_pct`` is the operator
+    ``POLARIS_NOTIONAL_CAP_<VENUE>_USD`` ceiling (``notional_ceiling_pct``),
+    kept as its own cap term distinct from the margin basis.
+    """
+    basis = equity_usd * leverage
+    def _to_qty(pct: float) -> float:
+        return (pct * basis) / entry_price
+    def _to_qty_opt(pct: float | None) -> float | None:
+        return None if pct is None else _to_qty(pct)
+    return CapQtyInputs(
+        single_trade_qty=_to_qty(single_trade_cap_pct),
+        per_symbol_qty=_to_qty(per_symbol_remaining_pct),
+        margin_qty=_to_qty(margin_qty_basis_pct),
+        underlying_qty=_to_qty_opt(underlying_remaining_pct),
+        cluster_qty=_to_qty_opt(cluster_remaining_pct),
+        track_qty=_to_qty(track_remaining_pct),
+        venue_daily_qty=_to_qty(venue_daily_remaining_pct),
+        total_daily_qty=_to_qty(total_daily_remaining_pct),
+        env_ceiling_qty=_to_qty(env_ceiling_pct),
+    )
+
+
+def _run_r_budget_shadow(
+    conn: sqlite3.Connection,
+    *,
+    intent: SignalIntent,
+    proposal: SizingProposal,
+    single_trade_cap_pct: float,
+    per_symbol_remaining: float,
+    underlying_remaining: float | None,
+    cluster_remaining: float | None,
+    track_remaining: float,
+    venue_daily_remaining: float,
+    total_daily_remaining: float,
+    env_ceiling_pct: float,
+    portfolio: PortfolioState,
+    ts: int,
+) -> float | None:
+    """Shadow/active R-budget qty compute.
+
+    SHADOW (default): computes + logs + records an observation but returns
+    ``None`` — the caller's %-equity ``final_notional_usd`` is UNCHANGED.
+    ACTIVE (only once the shadow-verify gate has flipped, or via operator env
+    override): returns the R-budget qty result converted to notional USD
+    (``qty_after_caps × entry_price``) — the caller substitutes this as
+    PRIMARY, demoting the %-equity caps below it (per the debate spec, this
+    is the ONE swap point; no new multiplier stack).
+
+    Data-integrity fallback (never a sizing judgment, never active in this
+    branch): ``entry_price``/``atr_pct`` <= 0, non-positive ``base_risk_pct``,
+    or stale/zero ATR (``compute_r_budget_qty`` → ``None``) → returns ``None``
+    in EITHER mode, so the existing %-equity path always wins on a data gap.
+    """
+    if intent.entry_price <= 0.0 or intent.atr_pct <= 0.0:
+        logger.info(
+            "[T4/rbudget-shadow] %s/%s sid=%s SKIP data-integrity-fallback "
+            "entry_price=%.6f atr_pct=%.6f (existing %%-equity path unchanged)",
+            intent.venue, intent.symbol, intent.signal_id,
+            intent.entry_price, intent.atr_pct,
+        )
+        return None
+    if intent.base_risk_pct <= 0.0:
+        return None
+
+    # ``intent.stop_atr_mult`` is threaded by the scripts-layer caller (the ONLY
+    # layer with both the ATR% and the strategy-registry context to resolve the
+    # fee-aware floor via ``_stop_atr_mult_for_strategy`` — core must not import
+    # scripts, test_core_layering.py). <=0 (not supplied) falls back to the
+    # plain module default — still correct (never a crash), just not
+    # fee-floor-aware for callers that haven't threaded it yet.
+    stop_atr_mult = intent.stop_atr_mult if intent.stop_atr_mult > 0.0 else STOP_ATR_MULT
+    t4_mult = proposal.proposed_risk_pct / intent.base_risk_pct
+    # SSOT R_budget (risk_unit.py Step N) = BASE_RISK_PCT(0.02) × venue starting
+    # equity — the SAME per-venue equity resolver this repo already treats as
+    # canonical (realised_r_stream's denominator), avoiding a second competing
+    # "2%-of-equity" definition.
+    r_budget_usd = r_budget_for_venue(intent.venue)
+    if r_budget_usd <= 0.0:
+        logger.info(
+            "[T4/rbudget-shadow] %s/%s sid=%s SKIP unknown-venue-r-budget "
+            "(existing %%-equity path unchanged)",
+            intent.venue, intent.symbol, intent.signal_id,
+        )
+        return None
+    caps = _cap_qty_inputs_from_pcts(
+        single_trade_cap_pct=single_trade_cap_pct,
+        per_symbol_remaining_pct=per_symbol_remaining,
+        margin_qty_basis_pct=1.0,
+        underlying_remaining_pct=underlying_remaining,
+        cluster_remaining_pct=cluster_remaining,
+        track_remaining_pct=track_remaining,
+        venue_daily_remaining_pct=venue_daily_remaining,
+        total_daily_remaining_pct=total_daily_remaining,
+        env_ceiling_pct=env_ceiling_pct,
+        equity_usd=portfolio.equity_usd,
+        leverage=intent.leverage,
+        entry_price=intent.entry_price,
+    )
+    result = compute_r_budget_qty(
+        r_budget_usd=r_budget_usd,
+        t4_mult=t4_mult,
+        entry_price=intent.entry_price,
+        atr_pct=intent.atr_pct,
+        stop_atr_mult=stop_atr_mult,
+        caps=caps,
+    )
+    if result is None:
+        logger.info(
+            "[T4/rbudget-shadow] %s/%s sid=%s SKIP stop_dist<=0 "
+            "(stale/zero ATR — existing %%-equity path unchanged)",
+            intent.venue, intent.symbol, intent.signal_id,
+        )
+        return None
+
+    mode = resolve_sizing_mode(conn)
+    legacy_qty = (
+        (proposal.proposed_risk_pct * portfolio.equity_usd * intent.leverage) / intent.entry_price
+    )
+    logger.info(
+        "[T4/rbudget-shadow] %s/%s sid=%s mode=%s legacy_qty=%.6f rbudget_qty=%.6f "
+        "unclipped=%.6f binding=%s target_realization=%.4f CAP_DOMINATED=%s "
+        "r_budget_usd=%.2f t4_mult=%.4f stop_dist_usd=%.6f",
+        intent.venue, intent.symbol, intent.signal_id, mode,
+        legacy_qty, result.qty_after_caps, result.qty_unclipped, result.binding_cap,
+        result.realization, result.cap_dominated, r_budget_usd, t4_mult,
+        stop_dist_usd(
+            entry_price=intent.entry_price, atr_pct=intent.atr_pct, stop_atr_mult=stop_atr_mult,
+        ),
+    )
+    if mode == "off":
+        return None
+    record_shadow_observation(conn, now_ts=ts)
+    if mode == "active":
+        return max(0.0, result.qty_after_caps * intent.entry_price)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +845,39 @@ def compute_size(
         decision.kelly_fraction,
         decision.cold_start,
     )
+
+    # Wave B agenda ① — R-budget qty shadow/active wire (never runs when the
+    # %-equity path already zeroed out; nothing to compare a dead signal
+    # against, and it would just log noise on every KILL).
+    if notional > 0.0:
+        rbudget_notional = _run_r_budget_shadow(
+            conn,
+            intent=intent,
+            proposal=proposal,
+            single_trade_cap_pct=single_trade_cap,
+            per_symbol_remaining=per_symbol_remaining,
+            underlying_remaining=underlying_remaining,
+            cluster_remaining=cluster_rem,
+            track_remaining=track_rem,
+            venue_daily_remaining=venue_daily_rem,
+            total_daily_remaining=total_daily_rem,
+            env_ceiling_pct=notional_cap_pct,
+            portfolio=portfolio,
+            ts=ts,
+        )
+        if rbudget_notional is not None:
+            # ACTIVE mode: R-budget qty is PRIMARY — swap the notional/risk_pct
+            # output to the qty-aimed value (the ONE swap point; no new T4
+            # multiplier stack, the pre-cap ``proposal`` audit trail is
+            # unchanged for attribution).
+            notional = rbudget_notional
+            final_risk_pct = (
+                notional / (portfolio.equity_usd * intent.leverage)
+                if portfolio.equity_usd * intent.leverage > 0.0
+                else 0.0
+            )
+            binding = "r_budget_active"
+
     return SizingFinal(
         proposed=proposal,
         final_risk_pct=final_risk_pct,

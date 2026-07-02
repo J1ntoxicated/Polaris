@@ -326,3 +326,94 @@ def test_shadow_mode_notional_byte_identical_to_pct_equity_path(
     )
     assert r1.final_notional_usd == pytest.approx(r2.final_notional_usd)
     assert r1.final_risk_pct == pytest.approx(r2.final_risk_pct)
+
+
+# ---------------------------------------------------------------------------
+# Regression (fresh-fixer blocker fix): every existing exposure cap — not just
+# single_trade/per_symbol — must be threaded into CapQtyInputs and able to
+# bind in ACTIVE mode. Before this fix, track/venue_daily/total_daily/cluster/
+# underlying were left at the CapQtyInputs dataclass ``None`` default, which
+# qty_headroom_min treats as "not configured" and silently excludes from
+# min() — these caps were unenforced on the R-budget-active qty path.
+# ---------------------------------------------------------------------------
+
+
+def test_active_mode_track_gross_cap_binds_when_track_nearly_exhausted(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave a tiny sliver of track-A headroom (legacy %-path still > 0, so
+    the shadow wire actually runs) — the R-budget qty side must clip to that
+    sliver, proving track_qty is threaded (pre-fix: always None -> never
+    binding, so an exhausted track cap had ZERO effect on active-mode qty)."""
+    from polaris.core.sizing.schema import track_a_gross_pct
+
+    monkeypatch.setenv("POLARIS_RBUDGET_SIZING_MODE", "active")
+    sliver = 1e-5
+    portfolio = replace(
+        _portfolio(equity_usd=1_000_000.0),
+        track_used_pct={"A": track_a_gross_pct() - sliver, "B": 0.0},
+    )
+    result = compute_size(
+        memdb, intent=_intent(entry_price=100.0, atr_pct=0.02), risk_state=_risk_state(),
+        portfolio=portfolio, now_ts=NOW,
+    )
+    assert result.binding_cap == "r_budget_active"
+    # qty-equivalent of the sliver: sliver × equity × leverage / price
+    expected_notional_ceiling = sliver * portfolio.equity_usd * 1.0
+    assert result.final_notional_usd <= expected_notional_ceiling + 1e-6
+
+
+def test_active_mode_total_daily_ceiling_binds_when_daily_budget_nearly_exhausted(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave a tiny sliver of total-daily headroom -> R-budget active qty
+    must clip to that sliver. Pre-fix this cap was never threaded
+    (CapQtyInputs.total_daily_qty stayed None) so an exhausted daily risk
+    ceiling had ZERO effect on the active R-budget qty output."""
+    from polaris.core.sizing.schema import total_daily_risk_ceiling_pct
+
+    monkeypatch.setenv("POLARIS_RBUDGET_SIZING_MODE", "active")
+    sliver = 1e-5
+    portfolio = replace(
+        _portfolio(equity_usd=1_000_000.0),
+        total_daily_used_pct=total_daily_risk_ceiling_pct() - sliver,
+    )
+    result = compute_size(
+        memdb, intent=_intent(entry_price=100.0, atr_pct=0.02), risk_state=_risk_state(),
+        portfolio=portfolio, now_ts=NOW,
+    )
+    assert result.binding_cap == "r_budget_active"
+    expected_notional_ceiling = sliver * portfolio.equity_usd * 1.0
+    assert result.final_notional_usd <= expected_notional_ceiling + 1e-6
+
+
+def test_cap_qty_inputs_populates_all_seven_cap_fields() -> None:
+    """Direct unit check on the converter: every CapQtyInputs field the debate
+    spec named (symbol/cluster/track/margin/env-ceiling, plus underlying/
+    venue_daily/total_daily) must be non-None after conversion — the exact
+    gap the blocker flagged (only single_trade/per_symbol/margin were wired)."""
+    from polaris.core.sizing.engine import _cap_qty_inputs_from_pcts
+
+    caps = _cap_qty_inputs_from_pcts(
+        single_trade_cap_pct=0.05,
+        per_symbol_remaining_pct=0.10,
+        margin_qty_basis_pct=1.0,
+        underlying_remaining_pct=0.08,
+        cluster_remaining_pct=0.20,
+        track_remaining_pct=0.30,
+        venue_daily_remaining_pct=0.40,
+        total_daily_remaining_pct=0.50,
+        env_ceiling_pct=0.60,
+        equity_usd=10_000.0,
+        leverage=1.0,
+        entry_price=100.0,
+    )
+    assert caps.single_trade_qty > 0.0
+    assert caps.per_symbol_qty > 0.0
+    assert caps.margin_qty > 0.0
+    assert caps.underlying_qty is not None and caps.underlying_qty > 0.0
+    assert caps.cluster_qty is not None and caps.cluster_qty > 0.0
+    assert caps.track_qty is not None and caps.track_qty > 0.0
+    assert caps.venue_daily_qty is not None and caps.venue_daily_qty > 0.0
+    assert caps.total_daily_qty is not None and caps.total_daily_qty > 0.0
+    assert caps.env_ceiling_qty is not None and caps.env_ceiling_qty > 0.0

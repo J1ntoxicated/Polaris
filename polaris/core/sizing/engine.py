@@ -318,6 +318,12 @@ def _cap_qty_inputs_from_pcts(
     single_trade_cap_pct: float,
     per_symbol_remaining_pct: float,
     margin_qty_basis_pct: float,
+    underlying_remaining_pct: float | None,
+    cluster_remaining_pct: float | None,
+    track_remaining_pct: float,
+    venue_daily_remaining_pct: float,
+    total_daily_remaining_pct: float,
+    env_ceiling_pct: float,
     equity_usd: float,
     leverage: float,
     entry_price: float,
@@ -325,15 +331,34 @@ def _cap_qty_inputs_from_pcts(
     """Convert the SAME %-of-equity caps already resolved in ``compute_size``
     into qty ceilings — ``qty = pct × equity × leverage / entry_price``, the
     identical basis ``notional_ceiling_pct`` composes on. No new cap concept:
-    this only re-expresses caps already computed for the %-chain in units.
+    this only re-expresses caps already computed for the %-chain in units
+    (debate spec agenda ① — symbol/cluster/track/margin/env-ceiling, ALL
+    existing caps, single min()).
+
+    ``margin_qty_basis_pct`` (caller passes ``1.0``) is ``avail_margin × lev ÷
+    price`` — this repo tracks no separate available-margin balance
+    (``PortfolioState`` has no margin field), so ``equity × leverage`` (the
+    ``_to_qty`` basis itself, at 100%) IS the deployable-capital proxy; not a
+    duplicate of ``single_trade_cap_pct``, a distinct basis re-used because no
+    second margin ledger exists. ``env_ceiling_pct`` is the operator
+    ``POLARIS_NOTIONAL_CAP_<VENUE>_USD`` ceiling (``notional_ceiling_pct``),
+    kept as its own cap term distinct from the margin basis.
     """
     basis = equity_usd * leverage
     def _to_qty(pct: float) -> float:
         return (pct * basis) / entry_price
+    def _to_qty_opt(pct: float | None) -> float | None:
+        return None if pct is None else _to_qty(pct)
     return CapQtyInputs(
         single_trade_qty=_to_qty(single_trade_cap_pct),
         per_symbol_qty=_to_qty(per_symbol_remaining_pct),
         margin_qty=_to_qty(margin_qty_basis_pct),
+        underlying_qty=_to_qty_opt(underlying_remaining_pct),
+        cluster_qty=_to_qty_opt(cluster_remaining_pct),
+        track_qty=_to_qty(track_remaining_pct),
+        venue_daily_qty=_to_qty(venue_daily_remaining_pct),
+        total_daily_qty=_to_qty(total_daily_remaining_pct),
+        env_ceiling_qty=_to_qty(env_ceiling_pct),
     )
 
 
@@ -344,6 +369,12 @@ def _run_r_budget_shadow(
     proposal: SizingProposal,
     single_trade_cap_pct: float,
     per_symbol_remaining: float,
+    underlying_remaining: float | None,
+    cluster_remaining: float | None,
+    track_remaining: float,
+    venue_daily_remaining: float,
+    total_daily_remaining: float,
+    env_ceiling_pct: float,
     portfolio: PortfolioState,
     ts: int,
 ) -> float | None:
@@ -396,7 +427,13 @@ def _run_r_budget_shadow(
     caps = _cap_qty_inputs_from_pcts(
         single_trade_cap_pct=single_trade_cap_pct,
         per_symbol_remaining_pct=per_symbol_remaining,
-        margin_qty_basis_pct=single_trade_cap_pct,
+        margin_qty_basis_pct=1.0,
+        underlying_remaining_pct=underlying_remaining,
+        cluster_remaining_pct=cluster_remaining,
+        track_remaining_pct=track_remaining,
+        venue_daily_remaining_pct=venue_daily_remaining,
+        total_daily_remaining_pct=total_daily_remaining,
+        env_ceiling_pct=env_ceiling_pct,
         equity_usd=portfolio.equity_usd,
         leverage=intent.leverage,
         entry_price=intent.entry_price,
@@ -819,6 +856,12 @@ def compute_size(
             proposal=proposal,
             single_trade_cap_pct=single_trade_cap,
             per_symbol_remaining=per_symbol_remaining,
+            underlying_remaining=underlying_remaining,
+            cluster_remaining=cluster_rem,
+            track_remaining=track_rem,
+            venue_daily_remaining=venue_daily_rem,
+            total_daily_remaining=total_daily_rem,
+            env_ceiling_pct=notional_cap_pct,
             portfolio=portfolio,
             ts=ts,
         )

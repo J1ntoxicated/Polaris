@@ -40,7 +40,7 @@ from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_effects import (
     _safe_backfill_probe_outcome,
-    _safe_lookup_regime,
+    _safe_lookup_entry_regime,
     _safe_record_meta_label,
     _safe_run_g8,
     _safe_run_learners,
@@ -915,7 +915,10 @@ async def _close_trade_with_real_pnl(
     # downstream failure cannot drop the rest of the fan-out. ``record_fault``
     # itself can raise (it writes to ``strategy_fault_events`` and reads from
     # ``strategy_halts``); ``_safe_record_fault`` swallows that with a log.
-    regime = _safe_lookup_regime(lookup_regime, conn, trade)
+    # P1-10 fix — fold key is the ADMITTING regime (positions.entry_regime),
+    # not the live SSOT at close time (a cell can flip between entry and close,
+    # crediting/blaming a different cell than the one that sized the entry).
+    regime = _safe_lookup_entry_regime(lookup_regime, conn, trade)
     # P3 self-evolve lineage (read-model, behaviour 0): stamp exit_ts /
     # exit_reason / realised pnl onto the open lineage segment. Post-commit +
     # fail-open inside the helper — never alters the already-committed close.

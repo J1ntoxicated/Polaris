@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +34,7 @@ from polaris.core.learners.posterior import (
     maybe_update_posterior,
     maybe_update_strategy_regime_prior,
 )
+from polaris.core.metrics.risk_unit import r_budget_for_venue
 from polaris.core.pipeline.agents import post_trade_reflector_gate
 from polaris.core.pipeline.agents._gpt_client import (
     GPT_P0_MODEL,
@@ -48,23 +48,12 @@ from polaris.core.pipeline.gate_state import (
 )
 from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams import resolve_stream, resolve_stream_profile
-from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 if TYPE_CHECKING:
     from polaris.scripts.production_paper_loop import ProdLoopState
 
 logger = logging.getLogger(__name__)
-
-# FIX 1 — minimum ATR-pct floor for the cost-adjusted R-denominator. The old
-# fixed 1e-6 atr_usd floor conflated "missing bars" with "low-price symbol"
-# (ALGO ~$0.12): the WHOLE-POSITION cost_usd divided by the per-UNIT atr_usd
-# (~1e-6) exploded pnl_r_net to ~-210000 R. The R-denominator is now the
-# whole-position 1R dollar value (``size_usd × atr_pct × 2``) with ``atr_pct``
-# floored at MIN_ATR_PCT so a flat bar window cannot drive it to ~0. A truly
-# degenerate entry_price (<=0) yields a ``None`` sentinel and the caller SKIPS
-# the cost-in-R adjustment entirely (measurement-only — never gates sizing).
-MIN_ATR_PCT = 0.001
 
 
 def _safe_record_fault(
@@ -96,6 +85,34 @@ def _safe_lookup_regime(
         return "chop"
 
 
+def _safe_lookup_entry_regime(
+    lookup_regime: Any, conn: sqlite3.Connection, trade: SimulatedTrade,
+) -> str:
+    """P1-10 fix — fold key is the regime the position was ADMITTED under.
+
+    ``_safe_lookup_regime`` reads the LIVE Layer 6 SSOT (``regime_state``),
+    which can have flipped between entry and close. Folding a close under the
+    close-time regime credits/blames a DIFFERENT cell than the one that
+    actually sized the entry (2026-07-02 audit: 6 of 14 folds mismatched),
+    corrupting the exact learning signal the cell matrix exists to produce.
+    ``positions.entry_regime`` is stamped once at open (immutable) and is the
+    correct fold key. Fails open to ``_safe_lookup_regime`` (live SSOT) when
+    there is no ``position_id`` or the column is NULL (legacy rows / pre-stamp
+    positions) — never blocks a fold, only re-keys it.
+    """
+    if trade.position_id:
+        try:
+            row = conn.execute(
+                "SELECT entry_regime FROM positions WHERE position_id = ?",
+                (trade.position_id,),
+            ).fetchone()
+            if row is not None and row[0]:
+                return str(row[0])
+        except Exception as exc:  # noqa: BLE001 — fail-open to live SSOT lookup
+            logger.error("[L4] entry_regime lookup raised: %r", exc)
+    return _safe_lookup_regime(lookup_regime, conn, trade)
+
+
 def fold_close_slice(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, lookup_regime: Any,
     slice_pnl_r: float, slice_pnl_usd: float, now_ts: int, state: ProdLoopState,
@@ -124,7 +141,9 @@ def fold_close_slice(
         conn, trade=trade, gross_pnl_r=slice_pnl_r, gross_pnl_usd=slice_pnl_usd,
     )
     won = pnl_r_net > 0.0
-    regime = _safe_lookup_regime(lookup_regime, conn, trade)
+    # P1-10 fix — fold key is the ADMITTING regime (positions.entry_regime),
+    # not the live SSOT at close time (see _safe_lookup_entry_regime).
+    regime = _safe_lookup_entry_regime(lookup_regime, conn, trade)
     _safe_update_cell_matrix(
         conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won,
         now_ts=now_ts, state=state,
@@ -294,23 +313,27 @@ def _safe_backfill_probe_outcome(
 def _read_cost_inputs(
     conn: sqlite3.Connection, trade: SimulatedTrade
 ) -> tuple[float, float, float, float, float, float | None]:
-    """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd).
+    """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd).
 
     P0-2 fix — BOTH legs are matched by ``contribution_id = position_id`` (the
     close fill is persisted with ``contribution_id=trade.position_id`` in
     ``_close_trade_with_real_pnl``). This stops a sibling position on the same
     (strategy, instrument) from having its close fee/slippage cross-applied.
     Only when ``position_id`` is unset (legacy callers) do we fall back to the
-    latest ``(strategy, instrument)`` fill. ``atr_usd`` mirrors the
-    R-denominator used by the gross calc so ``pnl_r_net = pnl_r -
-    cost_usd/atr_usd`` is consistent.
+    latest ``(strategy, instrument)`` fill.
 
-    FIX 1 — the returned ``atr_usd`` is the WHOLE-POSITION 1R dollar value
-    (``size_usd × atr_pct × 2``, atr_pct floored at ``MIN_ATR_PCT``) — the right
-    denominator for the whole-position ``cost_usd``. The old per-UNIT
-    ``entry_price × atr_pct × 2`` floored at ``1e-6`` blew up cost-in-R for
-    low-price symbols. A truly degenerate entry_price (<=0) returns ``None`` so
-    the caller skips the cost adjustment.
+    FIX 2 (unit boundary, 2026-07-02 audit) — the returned denominator is now
+    ``r_budget_for_venue(trade.venue)``, the SAME per-stream R_budget constant
+    (OKX $1,580 / Capital $1,020 / ...) that ``gross_pnl_r`` (passed in by the
+    caller as ``realised_r_stream = pnl_usd / R_budget``) is already denominated
+    in. The PRIOR denominator (a 1m-bar-ATR-derived whole-position 1R,
+    ``size_usd × atr_pct × 2``) was a COMPLETELY DIFFERENT unit — dividing the
+    R_budget-unit gross by an ATR-unit cost pinned Capital scratches to a
+    uniform −0.30R and blew OKX cost-in-R out to −0.69..−1.79R (a fee-rate /
+    ATR-floor artefact, not real edge). ``pnl_r_net = gross_pnl_r -
+    cost_usd/r_budget_usd`` is now a same-unit subtraction. An unknown venue
+    (``r_budget_for_venue`` → 0.0) returns ``None`` so the caller SKIPS the
+    cost-in-R adjustment entirely (measurement-only — never gates sizing).
     """
     inst = f"{trade.venue}:{trade.symbol}"
     entry: tuple[Any, ...] | None = None
@@ -345,38 +368,14 @@ def _read_cost_inputs(
     entry_fee = float(entry[0]) if entry else 0.0
     entry_slip = float(entry[1]) if entry else 0.0
     size_usd = float(entry[2]) if entry else trade.notional_usd
-    entry_price = float(entry[3]) if entry else trade.entry_price
     exit_fee = float(exit_row[0]) if exit_row else 0.0
     exit_slip = float(exit_row[1]) if exit_row else 0.0
-    # Exclude FUTURE-dated bars (stale +10h Capital) from the cost-R ATR window
-    # so the R-denominator reflects real recent volatility, not a +10h ghost bar.
-    ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
-    bar_rows = conn.execute(
-        "SELECT close, high, low FROM bars WHERE instrument_id = ? "
-        "AND bar_interval = '1m' AND ts <= ? ORDER BY ts DESC LIMIT 14",
-        (inst, ts_upper),
-    ).fetchall()
-    atr_pct_samples = [
-        (float(r[1]) - float(r[2])) / float(r[0]) for r in bar_rows if float(r[0]) > 0.0
-    ]
-    atr_pct = sum(atr_pct_samples) / len(atr_pct_samples) if atr_pct_samples else 0.005
-    # FIX 1 — the R-denominator that ``cost_usd`` (a WHOLE-POSITION dollar cost)
-    # is divided by must itself be the WHOLE-POSITION 1R dollar value, not the
-    # per-UNIT ATR. The gross pnl_r divides a per-unit price move by the per-unit
-    # ATR (dimensionless); dividing the whole-position cost_usd by the per-unit
-    # ATR (the prior bug) scaled by base_qty (~size_usd/entry_price), which for a
-    # low-price symbol (ALGO ~$0.12, 5000 coins) blew the cost-in-R into the
-    # thousands of R. Position 1R = base_qty × per_unit_atr = (size_usd/price) ×
-    # (price × atr_pct × 2) = size_usd × atr_pct × 2 — independent of price, so a
-    # cheap coin no longer explodes. ``atr_pct`` floors at MIN_ATR_PCT so a flat
-    # bar window cannot drive the denominator to ~0.
-    if entry_price > 0.0:
-        atr_usd: float | None = abs(size_usd) * max(atr_pct, MIN_ATR_PCT) * 2.0
-    else:
-        # Truly degenerate (entry_price missing/<=0) → sentinel; caller skips the
-        # cost-in-R adjustment (net==gross) rather than feed a garbage net-R.
-        atr_usd = None
-    return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd
+    # FIX 2 — same R_budget constant the caller's gross_pnl_r already divides by
+    # (realised_r_stream). A venue with no configured budget → None sentinel;
+    # the caller skips the cost-in-R adjustment rather than divide by 0.
+    budget = r_budget_for_venue(trade.venue)
+    r_budget_usd: float | None = budget if budget > 0.0 else None
+    return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd
 
 
 def compute_net_pnl_r(
@@ -398,31 +397,36 @@ def compute_net_pnl_r(
 
     #46 single-truth preserved: ``fills.pnl_usd`` (GROSS) + ``fills.fee_usd``
     (REAL) remain the truth; the net is an in-memory derivation only (no new truth
-    column). Degenerate R-denominator (entry_price <=0 → atr_usd None) → the
-    cost-in-R adjustment is SKIPPED (net R == gross R) so the learners never fold
-    |net_r| ≫ |gross_r| (the −210000R blow-up guard). ``pnl_usd_net`` always nets
-    the dollar cost (finite + sane). NEVER read by sizing (measurement/learning
-    only — the 9-stack ban + −1.0R rail are untouched).
+    column). FIX 2 (unit boundary) — the cost-in-R denominator is now the SAME
+    per-stream R_budget constant ``gross_pnl_r`` is already denominated in (see
+    ``_read_cost_inputs``), so ``pnl_r_net = gross_pnl_r - cost_usd/R_budget`` is
+    a same-unit subtraction (previously an ATR-unit cost was subtracted from an
+    R_budget-unit gross — a unit mismatch that pinned Capital scratches to a
+    uniform −0.30R and inflated OKX cost-in-R to −0.69..−1.79R). An unknown venue
+    (no configured R_budget) → the cost-in-R adjustment is SKIPPED (net R ==
+    gross R) so the learners never fold a divide-by-zero artefact. ``pnl_usd_net``
+    always nets the dollar cost (finite + sane). NEVER read by sizing
+    (measurement/learning only — the 9-stack ban + −1.0R rail are untouched).
 
     Fail-open: any read/compute error returns ``(gross_pnl_usd, gross_pnl_r)`` so
     the already-committed close still folds a value (best-effort learning).
     """
     try:
         (
-            entry_fee, entry_slip, exit_fee, exit_slip, size_usd, atr_usd,
+            entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd,
         ) = _read_cost_inputs(conn, trade)
-        if atr_usd is None:
-            # Degenerate R-denominator (entry_price <=0): skip the cost-in-R
-            # adjustment (net==gross) so no learner folds |net_r| ≫ |gross_r|.
-            # WARN (not silent) per the no-garbage mandate.
+        if r_budget_usd is None:
+            # Unknown venue (no configured R_budget): skip the cost-in-R
+            # adjustment (net==gross) rather than divide by zero. WARN (not
+            # silent) per the no-garbage mandate.
             logger.warning(
-                "[close/net] %s:%s degenerate atr_usd (entry_price<=0) — "
-                "cost-in-R adjustment skipped (net==gross, no blow-up)",
+                "[close/net] %s:%s no R_budget for venue — "
+                "cost-in-R adjustment skipped (net==gross)",
                 trade.venue, trade.symbol,
             )
         return cost_adjusted_pnl_r(
             gross_pnl_usd=gross_pnl_usd, gross_pnl_r=gross_pnl_r, size_usd=size_usd,
-            atr_usd=atr_usd, venue=trade.venue,
+            atr_usd=r_budget_usd, venue=trade.venue,
             entry_fee_usd=entry_fee, exit_fee_usd=exit_fee,
             entry_slippage_bps=entry_slip, exit_slippage_bps=exit_slip,
         )

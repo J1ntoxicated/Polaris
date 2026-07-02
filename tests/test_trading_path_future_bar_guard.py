@@ -3,8 +3,8 @@
 The Capital REST ts source-fix only corrects NEW bars; the live DB still holds
 ~5,793 stale +10h FUTURE-dated Capital bars (the AEST-naive snapshotTime parse).
 The trading-path bar readers had NO upper-ts bound, so on restart Capital
-strategies / regime / exit / ATR / cost-R would consume a +10h bar as the
-"most recent" canvas for ~10h.
+strategies / regime / exit / ATR would consume a +10h bar as the "most
+recent" canvas for ~10h.
 
 These tests pin the guard (mirrors the dashboard ``_last_prices`` ts<=now belt):
 no bar with ``ts > now + CLOCK_SKEW_SLACK_SEC`` is ever returned to the
@@ -24,10 +24,8 @@ from collections.abc import Generator
 import pytest
 
 from polaris.scripts._production_bars import read_recent_bars
-from polaris.scripts._production_close_effects import _read_cost_inputs
 from polaris.scripts._production_close_helpers import _latest_bar_close
 from polaris.scripts._production_rotation_reader import _held_pnl_r
-from polaris.scripts._smoke_fills import SimulatedTrade
 
 _VENUE = "capital"
 _SYMBOL = "GOLD"
@@ -132,51 +130,6 @@ def test_latest_bar_close_returns_past_bar(memdb: sqlite3.Connection) -> None:
     _insert_bar(memdb, ts=now - 60, close=2010.0)
     px = _latest_bar_close(memdb, venue=_VENUE, symbol=_SYMBOL)
     assert px == 2010.0
-
-
-# ---------------------------------------------------------------------------
-# _read_cost_inputs — cost-in-R ATR window (must skip the +10h bar)
-# ---------------------------------------------------------------------------
-
-
-def test_read_cost_inputs_atr_window_excludes_future_bar(
-    memdb: sqlite3.Connection,
-) -> None:
-    # The ATR window must derive from PAST bars only. A single far-future bar
-    # with a huge H-L range must not contaminate the 14-bar ATR average.
-    now = int(time.time())
-    for i in range(14):
-        _insert_bar(memdb, ts=now - (i + 1) * 60, close=2000.0)
-    # +10h bar with a 200-wide range (close 2000 → atr_pct 0.1) — poison.
-    memdb.execute(
-        """
-        INSERT INTO bars (
-            instrument_id, underlying_group_id, venue, symbol, bar_interval,
-            ts, open, high, low, close, volume
-        ) VALUES (?, ?, ?, ?, '1m', ?, ?, ?, ?, ?, ?)
-        """,
-        (_INST, "commodity:GOLD", _VENUE, _SYMBOL, now + _TEN_HOURS,
-         2000.0, 2100.0, 1900.0, 2000.0, 100.0),
-    )
-    memdb.commit()
-    trade = SimulatedTrade(
-        signal_id="sig1",
-        strategy_id="s1",
-        venue=_VENUE,
-        symbol=_SYMBOL,
-        side="long",
-        base_qty=1.0,
-        notional_usd=2000.0,
-        entry_price=2000.0,
-        open_ts=now,
-        position_id=None,
-    )
-    *_, atr_usd = _read_cost_inputs(memdb, trade)
-    assert atr_usd is not None
-    # Each PAST bar: (2001-1999)/2000 = 0.001 → atr_pct 0.001 → atr_usd =
-    # 2000 * 0.001 * 2 = 4.0. The poison +10h bar (atr_pct 0.1) would blow this
-    # to ~28; the guard keeps it at the clean PAST value.
-    assert atr_usd == pytest.approx(4.0, rel=0.01)
 
 
 # ---------------------------------------------------------------------------

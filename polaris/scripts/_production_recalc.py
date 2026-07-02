@@ -66,7 +66,12 @@ from polaris.core.probes.tighten_intent import (
     synth_tighten_stop,
 )
 from polaris.core.streams import resolve_stream_profile
-from polaris.scripts._production_atr import strategy_timeframe, timeframe_atr_pct
+from polaris.scripts._production_atr import (
+    MIN_TF_BARS,
+    strategy_timeframe,
+    timeframe_atr_pct,
+    timeframe_bar_rows,
+)
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_probe_attach import observe_probes
@@ -203,6 +208,15 @@ def load_active_position_rows(
         # keeps the in-hand window above — byte-identical, no second query.
         active_strategy_id = str(r[6] or r[4])
         tf = strategy_timeframe(active_strategy_id)
+        # Drift-measurement window ([[1d_exit_horizon_fix_2026-07-02]] follow-up):
+        # momentum_drift (assess_thesis's break signal) is judged against a
+        # timeframe-scaled floor, so the SIGNAL itself must be measured on the
+        # SAME timeframe — else a 1D floor is compared against a 1m-window
+        # drift (always sub-floor, silently disabling the CUT path). "1m"
+        # reuses the in-hand ``bar_row`` (byte-identical); a non-1m strategy
+        # reads its own timeframe bars, falling back to the 1m window when too
+        # few timeframe bars exist yet (graceful, never halts).
+        drift_bar_row = bar_row
         if tf != "1m":
             tf_atr = timeframe_atr_pct(
                 conn, instrument_id=instrument_id, timeframe=tf,
@@ -210,6 +224,12 @@ def load_active_position_rows(
             )
             if tf_atr is not None:
                 atr_pct = tf_atr
+            tf_bars = timeframe_bar_rows(
+                conn, instrument_id=instrument_id, timeframe=tf,
+                now_ts=int(time.time()), min_bars=MIN_TF_BARS,
+            )
+            if tf_bars is not None:
+                drift_bar_row = tf_bars
         entry_atr_pct = None if r[14] is None else float(r[14])
         if entry_atr_pct is None:
             # Legacy row (pre-anchor) — R denominator falls back to the
@@ -218,7 +238,7 @@ def load_active_position_rows(
                 "[L6/atr] anchor missing for %s (legacy row) — current %s "
                 "ATR denominates", position_id, tf,
             )
-        market = _recent_market_state(bar_row)
+        market = _recent_market_state(drift_bar_row)
         ap = ActivePositionRow()
         ap.update(
             position_id=position_id,

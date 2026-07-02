@@ -216,14 +216,22 @@ EXIT_THESIS_DRIFT_FLOOR: Final[float] = _env_float(
 )
 
 # --- Timeframe-scaled drift floor ([[1d_exit_horizon_fix_2026-07-02]]) --------
-# P0-2 follow-up: Wave A scoped the drift-measurement bar to the strategy's OWN
-# timeframe (``strategy_timeframe`` — 1H tsmom reads 1H bars, 1D reads 1D bars),
-# but the flat 0.0015 floor above was CALIBRATED on the OLD 1m/10-min window. A
-# 1D bar-to-bar span routinely drifts several PERCENT — the flat floor passed
-# through unconditionally, so a 1D thesis was cut on its first recalc (LIVE,
-# 2026-07-02: index_dual_momentum_rotation J225/AU200AU thesis_cut at 48s hold,
-# momentum-drift path, corroborated-break gate never engaged since this was an
-# UNCORROBORATED momentum-only break).
+# P0-2 follow-up: Wave A scoped ATR (trail width / R denominator) to the
+# strategy's OWN timeframe, but the drift-measurement bar feeding
+# ``momentum_drift`` (``load_active_position_rows``'s ``bar_row`` ->
+# ``_recent_market_state`` -> ``_recent_tick_drift``) was STILL hardcoded to
+# the last 20x1m bars for EVERY strategy — a review BLOCKER caught this: this
+# floor and the earlier P0-2(4) ratio calibration below were both measured
+# against GENUINE per-timeframe bars, but the RUNTIME signal compared against
+# them was not. Fixed alongside this floor
+# (``_production_atr.timeframe_bar_rows`` — the missing counterpart to
+# ``timeframe_atr_pct``, wired into ``load_active_position_rows``) so the
+# SIGNAL and the FLOOR are now commensurate. Pre-signal-fix the flat 0.0015
+# floor (calibrated on the OLD 1m/10-min window) passed through unconditionally
+# against a 1D bar-to-bar span (routinely several PERCENT), so a 1D thesis was
+# cut on its first recalc (LIVE, 2026-07-02: index_dual_momentum_rotation
+# J225/AU200AU thesis_cut at 48s hold, momentum-drift path, corroborated-break
+# gate never engaged since this was an UNCORROBORATED momentum-only break).
 #
 # Each rung = ``EXIT_THESIS_DRIFT_FLOOR`` (the proven 1m floor) scaled by the
 # ratio of that timeframe's measured 10-bar |drift| q65 to the 1m q65, computed

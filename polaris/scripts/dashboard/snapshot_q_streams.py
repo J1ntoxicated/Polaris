@@ -18,6 +18,7 @@ from typing import Any, Final, NamedTuple
 
 from polaris.core.metrics.risk_unit import R_USD_PROXY, realised_r_stream
 from polaris.core.sizing.constants import (
+    demo_starting_equity_alpaca_display,
     demo_starting_equity_capital,
     demo_starting_equity_okx,
 )
@@ -31,8 +32,8 @@ from polaris.scripts.dashboard.snapshot_q_common import (
     SLIPPAGE_BPS_DIVISOR,
     _model_price,
     _safe_query,
-    _session_start_ms,
     _symbol_from_inst,
+    _today_start_ms,
 )
 from polaris.scripts.dashboard.snapshot_q_positions import (
     _cell_mult_lookup,
@@ -241,9 +242,10 @@ def _per_stream_summary(
         )
 
     # --- fills side: net realised pnl + closed-trade count, GROUP BY venue.
-    # Same formula + session lookback as ``_daily_realised_pnl`` so the per-venue
-    # sum reconciles to the global total exactly.
-    lookback_ms = _session_start_ms(conn, now_s=now_s)
+    # Same formula + 'Today' lookback as ``_daily_realised_pnl`` (P0-2, Jin
+    # 2026-07-02 — floored at max(session_start, AEST midnight)) so the
+    # per-venue sum reconciles to the global 'Today' headline exactly.
+    lookback_ms = _today_start_ms(conn, now_s=now_s)
     # ``net_pnl`` already nets fees (Σ close pnl − Σ all fees) so it reconciles
     # to the global ``_daily_realised_pnl``. ``fee_total`` + ``slip_total`` are
     # display-only cost breakdowns surfaced alongside it. slippage_usd is derived
@@ -318,15 +320,22 @@ def _per_stream_summary(
         upnl_by_venue[v] = upnl_by_venue.get(v, 0.0) + p.upnl_usd
 
     # Per-venue starting capital. OKX/Capital use the static demo-equity SSOT;
-    # Alpaca has NO static constant (the paper account is funded at the venue),
-    # so we probe the live ``/v2/account`` baseline. ``equity = starting +
-    # net_pnl + upnl`` then reconciles with DB session activity for every lane.
-    # Probe unavailable (no keys / error) → 0.0, exactly the prior behavior.
+    # Alpaca prefers the live ``/v2/account`` probe baseline (the venue-funded
+    # truth) and falls back to the P0-2 display-baseline constant
+    # (``demo_starting_equity_alpaca_display()``) when the probe is unavailable
+    # (no keys / error) — this keeps the per-stream lane reconciled with the
+    # header ``starting_capital`` (== okx + capital + alpaca display leg) instead
+    # of silently zeroing the lane. ``equity = starting + net_pnl + upnl`` then
+    # reconciles with DB session activity for every lane.
     alpaca_equity = _alpaca_account_equity()
     starting_by_venue: dict[str, float] = {
         "okx": demo_starting_equity_okx(),
         "capital": demo_starting_equity_capital(),
-        "alpaca": alpaca_equity.starting if alpaca_equity is not None else 0.0,
+        "alpaca": (
+            alpaca_equity.starting
+            if alpaca_equity is not None
+            else demo_starting_equity_alpaca_display()
+        ),
     }
 
     # OPEN vs CLOSED split — per-venue recent-closed trades (newest first).

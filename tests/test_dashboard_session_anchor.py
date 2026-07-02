@@ -69,9 +69,13 @@ def test_session_start_is_earliest_fill(tmp_path: Path) -> None:
 
 
 def test_session_pnl_counts_fills_older_than_24h(tmp_path: Path) -> None:
-    """A round-trip opened 30h ago (this session) must still be in session PnL.
+    """A round-trip opened 30h ago (this session) must still be in SESSION PnL.
 
     Pre-change this would have been excluded by the rolling 24h window.
+    P0-2 (Jin 2026-07-02): the whole-session sum now lives on
+    ``session_pnl_usd`` ('SESSION' on the board) — ``daily_pnl_usd`` ('Today')
+    is separately floored at the latest AEST midnight, so a >24h-old fill may
+    or may not count there depending on wall-clock (not asserted here).
     """
     db_path = _mkdb(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -84,11 +88,11 @@ def test_session_pnl_counts_fills_older_than_24h(tmp_path: Path) -> None:
                  fee_usd=10.0, is_close=1, ts_ms=close_ms)
 
     snap = collect_snapshot(db_path=db_path)
-    assert abs(snap.daily_pnl_usd - 80.0) < 1e-6, (
+    assert abs(snap.session_pnl_usd - 80.0) < 1e-6, (
         f"session PnL must include >24h-old in-session fills: "
-        f"got {snap.daily_pnl_usd}, expected 80.0"
+        f"got {snap.session_pnl_usd}, expected 80.0"
     )
-    assert snap.daily_trades == 1
+    assert snap.session_trades == 1
 
 
 def test_session_curve_spans_only_session(tmp_path: Path) -> None:

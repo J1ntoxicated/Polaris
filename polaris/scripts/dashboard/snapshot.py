@@ -29,6 +29,7 @@ from typing import Any, Final
 
 from polaris.core.pipeline.agents.confidence import confidence_summary
 from polaris.core.sizing.constants import (
+    demo_starting_equity_alpaca_display,
     demo_starting_equity_capital,
     demo_starting_equity_okx,
     demo_starting_equity_total,
@@ -65,6 +66,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _per_stream_summary,
     _read_positions,
     _recent_gate_events,
+    _session_realised_pnl,
     _since_reset_rollup,
     _strategy_descriptions,
     _strategy_since_reset,
@@ -310,12 +312,14 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
     starting_capital = _starting_capital()
     starting_okx = demo_starting_equity_okx()
     starting_capital_cap = demo_starting_equity_capital()
+    starting_capital_alp = demo_starting_equity_alpaca_display()
     if not db_path.exists():
         return DashboardSnapshot(
             ts_now=_now_s(),
             starting_capital=starting_capital,
             starting_capital_okx=starting_okx,
             starting_capital_capital=starting_capital_cap,
+            starting_capital_alpaca=starting_capital_alp,
             equity_now=starting_capital,
             peak_equity=starting_capital,
         )
@@ -338,6 +342,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             equity, starting_capital=starting_capital,
         )
         daily_pnl, daily_n = _daily_realised_pnl(conn, now_s=now_s)
+        session_pnl, session_n = _session_realised_pnl(conn, now_s=now_s)
         last_prices = _last_prices(conn)
         entry_lookup = _entry_price_lookup(conn)
         cell_mult = _cell_mult_lookup(conn)
@@ -447,11 +452,14 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             starting_capital=starting_capital,
             starting_capital_okx=starting_okx,
             starting_capital_capital=starting_capital_cap,
+            starting_capital_alpaca=starting_capital_alp,
             equity_now=equity_with_upnl,
             exposed_usd=exposed_usd,
             upnl_total=upnl_total,
             daily_pnl_usd=daily_pnl,
             daily_trades=daily_n,
+            session_pnl_usd=session_pnl,
+            session_trades=session_n,
             drawdown_pct=dd_pct,
             peak_equity=peak,
             sharpe_24h=sharpe,

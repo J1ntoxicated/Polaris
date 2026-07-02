@@ -16,7 +16,9 @@ from polaris.scripts.dashboard.snapshot_q_common import (
     _safe_query,
     _session_buckets,
     _session_start_ms,
+    _today_start_ms,
 )
+from polaris.storage.measurement_reset import latest_reset
 
 
 def _build_equity_curve(
@@ -108,6 +110,24 @@ class DualEquityCurve(NamedTuple):
     real_fee_total: float
 
 
+def _trend_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
+    """TREND curve anchor (ms) = max(session_start, latest stamped reset_ts).
+
+    ``_session_start_ms`` alone anchors on the DB-restart / earliest fill. But a
+    stamped ``measurement_resets`` row marks a main-logic batch that should
+    restart the FORWARD measurement window (Jin 2026-06-23) — before this fix
+    the TREND sparkline ignored that anchor and kept pre-reset fills baked into
+    the curve. Falls back to the plain session anchor when no reset is stamped
+    (the common case) or when the reset predates the session (already
+    dominated by ``max``). Display-only; never a trading path.
+    """
+    session_start_ms = _session_start_ms(conn, now_s=now_s)
+    reset = latest_reset(conn)
+    if reset is None:
+        return session_start_ms
+    return max(session_start_ms, reset.reset_ts * 1000)
+
+
 def _build_dual_equity_curve(
     conn: sqlite3.Connection, *, now_s: int, starting_capital: float
 ) -> DualEquityCurve:
@@ -120,8 +140,13 @@ def _build_dual_equity_curve(
     holds the REAL fee (fill_normalizer 2026-06-01), and the demo drain is a pure
     function of notional, so recomputing keeps the demo curve meaningful without
     a stored-demo-fee column. Read-only; trading behavior unchanged.
+
+    Lookback anchors at ``_trend_start_ms`` (P0-2, Jin 2026-07-02) — the later of
+    the session start or the latest stamped measurement-reset — so the TREND
+    sparkline restarts at a main-logic reset instead of always spanning the
+    whole session.
     """
-    session_start_ms = _session_start_ms(conn, now_s=now_s)
+    session_start_ms = _trend_start_ms(conn, now_s=now_s)
     session_start_s = session_start_ms // 1000
     # Hardening #1 (2026-06-23): exclude RECONCILED (tracking-failure) fills (both
     # legs) so both fee-schedule curves match the daily headline + R ledger.
@@ -221,29 +246,23 @@ def _drawdown_and_sharpe(
     return max_dd, peak, sharpe
 
 
-def _daily_realised_pnl(
-    conn: sqlite3.Connection, *, now_s: int
+def _realised_pnl_since(
+    conn: sqlite3.Connection, *, lookback_ms: int
 ) -> tuple[float, int]:
-    """Realised PnL (NET of fees) & closed-trade count over the SESSION.
-
-    Lookback starts at the session anchor (``MIN(fills.ts_ms)``) instead of a
-    rolling 24h window (Jin 2026-05-29). The ``daily_pnl_usd`` field name is
-    kept for schema stability but now carries the session sum.
+    """Realised PnL (NET of fees) & closed-trade count since ``lookback_ms``.
 
     Net = Σ(close pnl_usd) − Σ(fee_usd over ALL fills) in-window. ``fills.fee_usd``
-    now holds the REAL fee (fill_normalizer 2026-06-01), so this headline is
-    REAL-fee-net — aligned with the go-live viability signal; the 70 bps demo
-    drain is shown separately by the dual-equity ``equity_demo``/``demo_fee_total``.
-    The per-stream ``net_pnl_usd`` rollup uses the IDENTICAL formula so the
-    reconciliation invariant (Σ streams == this total) holds.
+    now holds the REAL fee (fill_normalizer 2026-06-01), so this is REAL-fee-net
+    — aligned with the go-live viability signal; the 70 bps demo drain is shown
+    separately by the dual-equity ``equity_demo``/``demo_fee_total``.
+
+    Hardening #1 (2026-06-23): excludes RECONCILED (tracking-failure) fills —
+    both legs — via a LEFT JOIN to ``positions`` gated on
+    ``status != 'reconciled'`` (orphan fills with no matched position are KEPT).
+    Matches the exclusion the R column (``_closed_position_r``) already applies,
+    so the dollar headline and the R ledger agree. Display-only; the per-fill
+    ``pnl_usd`` dollar truth is untouched.
     """
-    lookback_ms = _session_start_ms(conn, now_s=now_s)
-    # Hardening #1 (2026-06-23): exclude RECONCILED (tracking-failure) fills from
-    # the headline — both legs — via a LEFT JOIN to ``positions`` gated on
-    # ``status != 'reconciled'`` (orphan fills with no matched position are KEPT).
-    # Matches the exclusion the R column (``_closed_position_r``) already applies,
-    # so the dollar headline and the R ledger agree. Display-only; the per-fill
-    # ``pnl_usd`` dollar truth is untouched.
     rows = _safe_query(
         conn,
         """SELECT COALESCE(SUM(CASE WHEN f.is_close = 1 THEN f.pnl_usd ELSE 0.0 END), 0.0)
@@ -258,3 +277,32 @@ def _daily_realised_pnl(
     if not rows:
         return 0.0, 0
     return float(rows[0][0] or 0.0), int(rows[0][1] or 0)
+
+
+def _daily_realised_pnl(
+    conn: sqlite3.Connection, *, now_s: int
+) -> tuple[float, int]:
+    """Realised PnL (NET of fees) & closed-trade count over 'TODAY' (P0-2).
+
+    'Today' floors the lookback at ``max(session_start, latest AEST midnight)``
+    (``_today_start_ms``) so this headline never spans more than ~24h even
+    after multi-day bot uptime (Jin 2026-07-02) — before this fix a multi-day
+    session silently accumulated days of PnL under the "Today" label. The raw
+    whole-session sum is preserved separately by ``_session_realised_pnl``.
+    The per-stream ``net_pnl_usd`` rollup uses the IDENTICAL lookback so the
+    reconciliation invariant (Σ streams == this total) holds.
+    """
+    lookback_ms = _today_start_ms(conn, now_s=now_s)
+    return _realised_pnl_since(conn, lookback_ms=lookback_ms)
+
+
+def _session_realised_pnl(
+    conn: sqlite3.Connection, *, now_s: int
+) -> tuple[float, int]:
+    """Realised PnL (NET of fees) & closed-trade count over the whole SESSION.
+
+    Lookback starts at the session anchor (``MIN(fills.ts_ms)``) — the pre-P0-2
+    behavior of ``_daily_realised_pnl``, preserved under its own name/field
+    ('SESSION' on the board) now that 'Today' floors at AEST midnight."""
+    lookback_ms = _session_start_ms(conn, now_s=now_s)
+    return _realised_pnl_since(conn, lookback_ms=lookback_ms)

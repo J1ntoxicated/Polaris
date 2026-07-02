@@ -155,7 +155,9 @@ def test_snapshot_exposes_dual_curve_fields(tmp_path: Path) -> None:
 
     turnover = n * 2 * notional
     gross = n * gross_each
-    start = TOTAL_DEMO_STARTING_EQUITY_USD
+    # P0-2: collect_snapshot's base is the 3-venue total (OKX + Capital +
+    # Alpaca display leg), not the OKX+Capital-only module constant.
+    start = snap.starting_capital
 
     # real-fee-net curve + headline scalars present and additive (no break to demo).
     assert len(snap.equity_curve_real_fee_net) >= 1

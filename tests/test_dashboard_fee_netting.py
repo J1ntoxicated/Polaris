@@ -13,7 +13,6 @@ import sqlite3
 import time
 from pathlib import Path
 
-from polaris.core.sizing.constants import TOTAL_DEMO_STARTING_EQUITY_USD
 from polaris.scripts.dashboard.snapshot import collect_snapshot
 from polaris.storage.schema import ALL_DDL
 
@@ -87,7 +86,8 @@ def test_equity_now_is_net_of_demo_fees(tmp_path: Path) -> None:
                  fee_usd=35.0, is_close=1, ts_ms=now_ms - 60_000)
 
     snap = collect_snapshot(db_path=db_path)
-    expected = TOTAL_DEMO_STARTING_EQUITY_USD - 9.0
+    # P0-2: base is the 3-venue total (OKX + Capital + Alpaca display leg).
+    expected = snap.starting_capital - 9.0
     assert abs(snap.equity_now - expected) < 1e-6, (
         f"equity_now must net demo fees: got {snap.equity_now}, expected {expected}"
     )

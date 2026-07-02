@@ -34,10 +34,12 @@ from typing import Final
 
 __all__ = [
     "ALPACA_DEMO_STARTING_EQUITY_USD",
+    "ALPACA_DISPLAY_STARTING_EQUITY_USD",
     "CAPITAL_DEMO_STARTING_EQUITY_USD",
     "OKX_DEMO_STARTING_EQUITY_USD",
     "TOTAL_DEMO_STARTING_EQUITY_USD",
     "demo_starting_equity_alpaca",
+    "demo_starting_equity_alpaca_display",
     "demo_starting_equity_capital",
     "demo_starting_equity_okx",
     "demo_starting_equity_total",
@@ -60,9 +62,20 @@ TOTAL_DEMO_STARTING_EQUITY_USD: Final[float] = (
 # constants). ~$100k matches a typical Alpaca paper baseline; env-overridable.
 ALPACA_DEMO_STARTING_EQUITY_USD: Final[float] = 100_000.0
 
+# Alpaca DISPLAY-baseline (USD) — the actual funded balance of the Alpaca paper
+# account (P0-2, Jin 2026-07-02), distinct from ``ALPACA_DEMO_STARTING_EQUITY_USD``
+# above (the R-budget/close-path fallback used when no live probe runs). This
+# constant is what ``demo_starting_equity_total()`` sums into the header total so
+# the 3-venue header (OKX + Capital + Alpaca) reconciles — it is DISPLAY-ONLY and
+# must NEVER be read by sizing/gating/exit (grep-verified: only
+# ``demo_starting_equity_total`` / ``demo_starting_equity_alpaca_display`` /
+# dashboard snapshot modules reference it).
+ALPACA_DISPLAY_STARTING_EQUITY_USD: Final[float] = 30_181.75
+
 _ENV_OKX: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_OKX"
 _ENV_CAPITAL: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_CAPITAL"
 _ENV_ALPACA: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_ALPACA"
+_ENV_ALPACA_DISPLAY: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_ALPACA_DISPLAY"
 _ENV_TOTAL: Final[str] = "POLARIS_DEMO_STARTING_EQUITY_TOTAL"
 _ENV_LEGACY_PRODUCTION: Final[str] = "POLARIS_EQUITY_USD"
 
@@ -174,15 +187,32 @@ def demo_starting_equity_alpaca() -> float:
     return ALPACA_DEMO_STARTING_EQUITY_USD
 
 
-def demo_starting_equity_total() -> float:
-    """Total demo starting equity (USD).
+def demo_starting_equity_alpaca_display() -> float:
+    """Alpaca DISPLAY-baseline (USD) — P0-2 header total leg.
 
-    Codex F12 round 2 fix: ``demo_starting_equity_total()`` always equals
-    ``demo_starting_equity_okx() + demo_starting_equity_capital()`` regardless
-    of envvar configuration (sum invariant). Resolution rules in
-    ``_resolve_equity_split`` docstring.
+    Distinct from ``demo_starting_equity_alpaca()`` (the R-budget/close-path
+    fallback): this is the actual funded Alpaca paper balance used ONLY to make
+    the 3-venue header total (``demo_starting_equity_total()``) reconcile.
+    Env-overridable via ``POLARIS_DEMO_STARTING_EQUITY_ALPACA_DISPLAY``.
+    DISPLAY-ONLY — never read by sizing/gating/exit.
     """
-    return _resolve_equity_split()[2]
+    env = _read_float_env(_ENV_ALPACA_DISPLAY)
+    if env is not None:
+        return env
+    return ALPACA_DISPLAY_STARTING_EQUITY_USD
+
+
+def demo_starting_equity_total() -> float:
+    """Total demo starting equity across all 3 venues (USD).
+
+    ``demo_starting_equity_okx() + demo_starting_equity_capital()`` (Codex F12
+    round 2 sum invariant, env-configurable per ``_resolve_equity_split``) PLUS
+    the Alpaca display-baseline (P0-2, Jin 2026-07-02) — Alpaca is funded at the
+    venue so its live equity is shown separately, but the header total includes
+    its starting balance so the 3-venue sum reconciles.
+    """
+    okx, capital, _legacy_okx_capital_total = _resolve_equity_split()
+    return okx + capital + demo_starting_equity_alpaca_display()
 
 
 def production_default_equity_usd() -> float:

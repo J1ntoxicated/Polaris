@@ -12,9 +12,16 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any, Final, Protocol
+from zoneinfo import ZoneInfo
 
 from polaris.core.metrics.risk_unit import R_USD_PROXY
+
+# 'Today' KPI boundary (P0-2, Jin 2026-07-02) — the dashboard operates on
+# Sydney local time (per feedback_sydney_timezone), so "Today" resets at AEST
+# midnight, not UTC midnight.
+_SYDNEY_TZ: Final[ZoneInfo] = ZoneInfo("Australia/Sydney")
 
 # Step M (2026-06-22): the flat ``$10`` display heuristic is retired in favour
 # of the canonical risk$-based R (positions.pnl_r) on every panel, with the ONE
@@ -92,6 +99,27 @@ def _session_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
     if rows and rows[0][0] is not None:
         return int(rows[0][0])
     return now_s * 1000
+
+
+def _today_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
+    """'Today' KPI boundary (ms) = max(session_start, latest AEST midnight).
+
+    ``_session_start_ms`` alone (the whole-uptime session anchor) is correct
+    for the equity curve / DD / Sharpe / strategy-stats lookbacks (Jin
+    2026-05-29 — those intentionally span the full session, however long).
+    But the "Today" headline (``daily_pnl_usd`` on the board) previously used
+    the SAME anchor, which after multi-day uptime silently accumulates days of
+    PnL under a "Today" label. This floors that ONE lookback at the later of
+    the session start or the most recent Sydney-local midnight, so "Today"
+    never spans more than ~24h. The raw session-wide sum is preserved
+    separately (``session_pnl_usd`` / ``session_trades`` on the snapshot).
+    """
+    session_start_ms = _session_start_ms(conn, now_s=now_s)
+    aest_midnight = datetime.fromtimestamp(now_s, tz=_SYDNEY_TZ).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    aest_midnight_ms = int(aest_midnight.timestamp() * 1000)
+    return max(session_start_ms, aest_midnight_ms)
 
 
 def _session_buckets(session_start_s: int, now_s: int) -> tuple[list[int], int]:

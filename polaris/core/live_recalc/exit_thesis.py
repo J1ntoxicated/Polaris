@@ -25,9 +25,9 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_THESIS_BREAK_HOLD_FRAC,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
-    EXIT_THESIS_DRIFT_FLOOR,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GRACE_SEC,
+    drift_floor_for_timeframe,
 )
 from polaris.core.live_recalc.exit_types import (
     Bucket,
@@ -154,6 +154,7 @@ def _assess_health(
     broken_streak: int,
     held_seconds: int | None,
     horizon_seconds: int | None,
+    timeframe: str | None,
 ) -> ThesisHealth:
     """Classify the entry thesis as INTACT / FADING / BROKEN (pure, total).
 
@@ -170,25 +171,27 @@ def _assess_health(
     INTACT: same-direction momentum / OFI still present (or simply nothing
     indicating a break).
 
-    Horizon-scoped materiality floor ([[1d_exit_horizon_fix_2026-06-26]]): while
-    the position is still WITHIN its strategy horizon (``held < horizon``), the
-    momentum-ONLY reversal must additionally be MATERIAL (``|momentum_drift| >=
-    EXIT_THESIS_DRIFT_FLOOR``) to count as BROKEN — a sub-floor adverse drift is
-    intraday NOISE for a long-horizon thesis (the bar path feeds a ~10-min 1m
-    window) and must not fake a daily-thesis break. A None horizon (legacy /
-    unknown strategy) leaves this gate inert → byte-identical to pre-fix.
+    Horizon-scoped materiality floor ([[1d_exit_horizon_fix_2026-06-26]],
+    timeframe-scaled 2026-07-02): while the position is still WITHIN its strategy
+    horizon (``held < horizon``), the momentum-ONLY reversal must additionally be
+    MATERIAL (``|momentum_drift| >= drift_floor_for_timeframe(timeframe)``) to
+    count as BROKEN — a sub-floor adverse drift is intraday NOISE for a
+    long-horizon thesis and must not fake a daily-thesis break. The floor SCALES
+    with ``timeframe`` (a 1D thesis tolerates the 1D noise band, not the 1m one);
+    an unregistered/``None`` timeframe falls back to the proven 1m floor
+    (conservative). A None horizon (legacy / unknown strategy) leaves the gate
+    inert → byte-identical to pre-fix.
 
-    Corroborated-break hold-time floor ([[trade_mess_full_audit_2026-07-02_fixplan]]
-    P0-2): a CORROBORATED break (OFI-opposes / regime-flip-against) is a genuine
-    signal, not tick noise — but it must still be given a MINIMUM development
-    time proportional to the strategy's own timeframe before it can flip the
-    thesis to BROKEN, so a 1D/1H thesis is not CUT off a single 1m-tick wobble
-    the instant it opens (measured live: a 1D thesis thesis_cut at 0.7min held).
-    Below ``EXIT_THESIS_BREAK_HOLD_FRAC × horizon_seconds`` held, a corroborated
-    break does NOT count toward BROKEN (it still falls through to the FADING /
-    INTACT tests below, same as a sub-floor momentum-only reversal). Past that
-    floor — or with no horizon — a corroborated break flips BROKEN instantly,
-    unchanged.
+    Maturity (hold-time) gate — BOTH break flavours
+    ([[trade_mess_full_audit_2026-07-02_fixplan]] P0-2 + verification audit P0-1):
+    below ``EXIT_THESIS_BREAK_HOLD_FRAC`` (default 5%) of ``horizon_seconds``
+    held, NEITHER a corroborated break (OFI-opposes / regime-flip-against, live:
+    1D thesis_cut at 0.7min) NOR a momentum-only material drift may flip the
+    thesis to BROKEN — a fresh long-horizon thesis gets real development time
+    first (it still falls through to the FADING / INTACT tests below). Past that
+    floor — or with no horizon — both flavours flip BROKEN exactly as before.
+    The -1.0R hard rail / ATR trail / G6 crisis exits are a SEPARATE layer and
+    are never gated by any of this.
     """
     drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
     ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
@@ -197,22 +200,30 @@ def _assess_health(
     #     magnitude clears the small deadband — a tiny 1-tick oscillation inside
     #     the band is noise, not a thesis break.
     # HORIZON-scoped materiality floor: while still within the strategy horizon, a
-    # momentum-ONLY reversal must ALSO clear the (tighter) DRIFT_FLOOR so intraday
-    # noise (the ~10-min 1m window the bar path feeds) cannot fake a break on a
-    # long-horizon thesis. Past horizon — or with no horizon — the floor is inert
-    # (the thesis had its full window). OFI / regime breaks below are unaffected.
+    # momentum-ONLY reversal must ALSO clear the (timeframe-scaled) DRIFT floor so
+    # intraday noise cannot fake a break on a long-horizon thesis. Past horizon —
+    # or with no horizon — the floor is inert (the thesis had its full window).
+    # OFI / regime breaks below are unaffected.
     within_horizon = (
         held_seconds is not None
         and horizon_seconds is not None
         and held_seconds < horizon_seconds
     )
-    drift_is_material = (
-        not within_horizon or abs(momentum_drift) >= EXIT_THESIS_DRIFT_FLOOR
+    drift_floor = drift_floor_for_timeframe(timeframe)
+    drift_is_material = not within_horizon or abs(momentum_drift) >= drift_floor
+    # MATURITY gate: within horizon, a momentum-ONLY break additionally requires
+    # the position to have aged past the hold-frac floor of its horizon. Inert
+    # when not within_horizon (which already covers horizon_seconds is None).
+    drift_is_mature = not within_horizon or (
+        held_seconds is not None
+        and horizon_seconds is not None
+        and held_seconds >= horizon_seconds * EXIT_THESIS_BREAK_HOLD_FRAC
     )
     momentum_reversed = (
         drift_dir < 0.0
         and abs(momentum_drift) > EXIT_THESIS_DEADBAND
         and drift_is_material
+        and drift_is_mature
     )
 
     # CORROBORATED-break hold-time floor (audit P0-2): OFI-opposes / regime-flip
@@ -289,6 +300,7 @@ def assess_thesis(
     horizon_seconds: int | None,
     giveback: ThesisGivebackParams,
     broken_streak: int = _BROKEN_STREAK_CONFIRMED,
+    timeframe: str | None = None,
 ) -> ManagementMode:
     """Re-map THIS position's exit schedule from entry-thesis health (pure/total).
 
@@ -306,6 +318,9 @@ def assess_thesis(
     on an unknown age). ``broken_streak`` (consecutive prior BROKEN reads) feeds the
     SUSTAINED gate so 1-tick OFI noise never flips a fresh winner to BROKEN; the
     default treats a non-threading caller as already confirmed (back-compatible).
+    ``timeframe`` (default ``None``) scales the horizon drift-materiality floor
+    ([[1d_exit_horizon_fix_2026-07-02]]) — ``None``/unregistered → the proven 1m
+    floor (byte-identical to every existing caller that doesn't thread it).
 
     Precedence (highest first): give-back-hard → CUT(broken + red) → HARVEST
     (give-back / fading / broken-green) → REMODE → LET_RUN(trend intact) → HOLD.
@@ -336,6 +351,7 @@ def assess_thesis(
         flow_confirmed=flow_confirmed, regime=regime, entry_regime=entry_regime,
         broken_streak=broken_streak,
         held_seconds=held_seconds, horizon_seconds=horizon_seconds,
+        timeframe=timeframe,
     )
 
     # GRACE gate on the CLOSING health verdicts: inside grace, a BROKEN or FADING

@@ -210,35 +210,83 @@ EXIT_THESIS_DEADBAND: Final[float] = _env_float("POLARIS_EXIT_THESIS_DEADBAND", 
 EXIT_THESIS_DRIFT_FLOOR: Final[float] = _env_float(
     "POLARIS_EXIT_THESIS_DRIFT_FLOOR", 0.0015
 )
+
+# --- Timeframe-scaled drift floor ([[1d_exit_horizon_fix_2026-07-02]]) --------
+# P0-2 follow-up: Wave A scoped ATR (trail width / R denominator) to the
+# strategy's OWN timeframe, but the drift-measurement bar feeding
+# ``momentum_drift`` (``load_active_position_rows``'s ``bar_row`` ->
+# ``_recent_market_state`` -> ``_recent_tick_drift``) was STILL hardcoded to
+# the last 20x1m bars for EVERY strategy — a review BLOCKER caught this: this
+# floor and the earlier P0-2(4) ratio calibration below were both measured
+# against GENUINE per-timeframe bars, but the RUNTIME signal compared against
+# them was not. Fixed alongside this floor
+# (``_production_atr.timeframe_bar_rows`` — the missing counterpart to
+# ``timeframe_atr_pct``, wired into ``load_active_position_rows``) so the
+# SIGNAL and the FLOOR are now commensurate. Pre-signal-fix the flat 0.0015
+# floor (calibrated on the OLD 1m/10-min window) passed through unconditionally
+# against a 1D bar-to-bar span (routinely several PERCENT), so a 1D thesis was
+# cut on its first recalc (LIVE, 2026-07-02: index_dual_momentum_rotation
+# J225/AU200AU thesis_cut at 48s hold, momentum-drift path, corroborated-break
+# gate never engaged since this was an UNCORROBORATED momentum-only break).
+#
+# Each rung = ``EXIT_THESIS_DRIFT_FLOOR`` (the proven 1m floor) scaled by the
+# ratio of that timeframe's measured 10-bar |drift| q65 to the 1m q65, computed
+# read-only from the live OKX+Capital bar table (``bars``, non-Alpaca — the
+# venue mix the exit engine actually trades) with the SAME (last-first)/first
+# 10-bar-window estimator ``_recent_tick_drift``/``bars_atr_pct`` use elsewhere.
+# See ``tools/research/drift_floor_quantiles.py`` for the derivation script.
+# Measured q65 (2026-07-02 snapshot, non-Alpaca): 1m 0.00061, 5m 0.00066,
+# 15m 0.00349, 1H 0.00833, 1D 0.04549 → ratio-to-1m 1.00 / 1.08 / 5.74 / 13.68 /
+# 74.71. "1m" is PINNED to the existing constant (ratio 1.0 by construction) so
+# the tick-engine / 1m-strategy exit behaviour stays byte-identical; every other
+# timeframe scales up so a long-horizon thesis is judged against ITS OWN
+# noise band instead of the 1m band. Unregistered strategy id → ``strategy_timeframe``
+# already degrades to "1m" (byte-identical); a timeframe missing from this map
+# (future new interval) falls back to ``EXIT_THESIS_DRIFT_FLOOR`` unscaled
+# (conservative — never LOOSER than the proven 1m floor).
+EXIT_THESIS_DRIFT_FLOOR_RATIO: Final[dict[str, float]] = {
+    "1m": 1.0,
+    "5m": 1.083,
+    "15m": 5.738,
+    "1H": 13.676,
+    "1D": 74.711,
+}
+
+
+def drift_floor_for_timeframe(timeframe: str | None) -> float:
+    """Timeframe-scaled materiality floor for a momentum-ONLY thesis break.
+
+    ``None`` / unregistered timeframe → the unscaled ``EXIT_THESIS_DRIFT_FLOOR``
+    (the pre-fix 1m calibration — conservative fallback, never looser).
+    """
+    ratio = EXIT_THESIS_DRIFT_FLOOR_RATIO.get(timeframe or "", 1.0)
+    return EXIT_THESIS_DRIFT_FLOOR * ratio
+
+
+# --- Thesis-break maturity gate — BOTH break flavours -------------------------
+# ([[trade_mess_full_audit_2026-07-02_fixplan]] P0-2 ② + verification audit
+# P0-1, merged 2026-07-02). The flat ``EXIT_THESIS_GRACE_SEC`` (25s) kills the
+# 0-1s instant cut but is ~0.00003 of a 21-day horizon. This gate scales WITH
+# the strategy horizon: below ``EXIT_THESIS_BREAK_HOLD_FRAC`` (default 5%) of
+# ``horizon_seconds`` held, NEITHER a momentum-ONLY material drift NOR a
+# corroborated break (OFI-opposes / regime-flip-against — live: 1D thesis_cut
+# at 0.7min) may flip the thesis BROKEN — a fresh long-horizon thesis gets real
+# development time first (~1 day for a 21-bar 1D strategy; <1-3min for 1m/5m =
+# near-identical to prior behaviour). Past the floor — or with a None horizon
+# (legacy/unknown strategy → gate INERT, byte-identical pre-fix) — both
+# flavours flip BROKEN exactly as before. The G6 -1.0R hard rail / ATR trail /
+# G6 EXIT_NOW crisis path are OWNED by the caller and completely untouched (a
+# real loss is still cut on those layers regardless of thesis maturity).
+# flow_not_block: removes premature CUTs on healthy long-horizon winners —
+# asymmetric payoff strengthened. Env-tunable.
+EXIT_THESIS_BREAK_HOLD_FRAC: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC", 0.05
+)
+
 EXIT_THESIS_BROKEN_TICKS: Final[int] = int(
     _env_float("POLARIS_EXIT_THESIS_BROKEN_TICKS", 2.0)
 )
 
-# --- Corroborated-break horizon floor (audit P0-2 (2)) -------------------------
-# [[trade_mess_full_audit_2026-07-02_fixplan]] P0-2. The prior design let a
-# CORROBORATED break (OFI-opposes / regime-flip-against) bypass the horizon floor
-# above UNCONDITIONALLY — the exact pathology the audit flags: a 1D/1H thesis
-# judged and CUT off a single 1m-tick OFI wobble, with zero minimum development
-# time. LIVE (2026-07-02 00:26): index_dual_momentum_rotation (1D, horizon ≈21
-# bars) opened and was thesis_cut at 0.7min and 2.6min held — a daily-rotation
-# thesis killed by intraday tick noise before it had ANY time to develop.
-# FIX: a corroborated break must ALSO clear a hold-time floor that is
-# PROPORTIONAL TO THE STRATEGY TIMEFRAME — ``EXIT_THESIS_BREAK_HOLD_FRAC`` of
-# ``horizon_seconds`` (both already strategy-timeframe-derived via
-# ``_horizon_seconds_for``/``bar_seconds``, so the floor scales with the
-# strategy's own bar size with ZERO new plumbing). At the default 5%: a 1m/5m
-# scalp floor is <1-3min (≈ its current, near-immediate behaviour — UNCHANGED in
-# practice), while a 1H/1D swing/trend thesis gets roughly one bar's worth of
-# genuine development time (~1-2.5h / ~1-1.5 days) before a corroborated break
-# can CUT it. Past the floor — or with no horizon (legacy) — a corroborated
-# break still CUTs instantly (unchanged). The G6 -1.0R hard rail and the
-# momentum-ONLY drift-materiality floor above are BOTH untouched; this ONLY
-# gates the corroborated-break bypass. flow_not_block / aggressive-preserving:
-# it removes a premature CUT on a healthy long-horizon winner — asymmetric
-# payoff strengthened, not a defensive throttle. Env-tunable.
-EXIT_THESIS_BREAK_HOLD_FRAC: Final[float] = _env_float(
-    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC", 0.05
-)
 # Sentinel: a ``broken_streak`` an omitting caller supplies → treated as already
 # confirmed (preserves pre-grace BROKEN behaviour for callers that don't yet
 # thread a consecutive count).

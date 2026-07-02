@@ -40,6 +40,7 @@ __all__ = [
     "strategy_timeframe",
     "timeframe_anchor_atr_pct",
     "timeframe_atr_pct",
+    "timeframe_bar_rows",
 ]
 
 # Minimum bars for a non-1m timeframe window to count as usable. NEVER raise
@@ -64,6 +65,40 @@ def strategy_timeframe(strategy_id: str) -> str:
     """
     cls = STRATEGY_REGISTRY.get(strategy_id)
     return cls.metadata.timeframe if cls is not None else "1m"
+
+
+def timeframe_bar_rows(
+    conn: Any,
+    *,
+    instrument_id: str,
+    timeframe: str,
+    now_ts: int,
+    min_bars: int = 1,
+) -> list[tuple[Any, ...]] | None:
+    """Last ≤20 ``timeframe`` bars (``ts, close, high, low, volume``, newest
+    first) for ``instrument_id`` at/before ``now_ts``.
+
+    Same shape/query pattern as the recalc's pre-fix 1m ``bar_row`` read (see
+    ``_production_recalc.load_active_position_rows``) so ``_recent_market_state``
+    / ``_recent_tick_drift`` (momentum_drift) can be scoped to the ACTIVE
+    strategy's OWN timeframe — the missing counterpart to ``bars_atr_pct``
+    ([[1d_exit_horizon_fix_2026-07-02]] follow-up: the drift FLOOR was
+    timeframe-scaled but the drift SIGNAL itself was still always read from 1m
+    bars). Returns ``None`` when fewer than ``min_bars`` rows exist so the
+    caller can fall back to the 1m window (graceful, never halts).
+    """
+    ts_upper = int(now_ts) + BAR_TS_CLOCK_SKEW_SLACK_SEC
+    rows = conn.execute(
+        """
+        SELECT ts, close, high, low, volume FROM bars
+        WHERE instrument_id = ? AND bar_interval = ? AND ts <= ?
+        ORDER BY ts DESC LIMIT 20
+        """,
+        (instrument_id, timeframe, ts_upper),
+    ).fetchall()
+    if len(rows) < max(1, min_bars):
+        return None
+    return list(rows)
 
 
 def bars_atr_pct(

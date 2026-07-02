@@ -23,6 +23,7 @@ from polaris.scripts._production_atr import (
     strategy_timeframe,
     timeframe_anchor_atr_pct,
     timeframe_atr_pct,
+    timeframe_bar_rows,
 )
 
 NOW = 1_780_000_000
@@ -157,6 +158,77 @@ def test_bars_atr_pct_min_bars_contract(memdb: sqlite3.Connection) -> None:
     assert bars_atr_pct(
         memdb, instrument_id=IID, timeframe="1H", now_ts=NOW, min_bars=3,
     ) == pytest.approx(0.04)
+
+
+# --- timeframe_bar_rows -------------------------------------------------------
+# [[1d_exit_horizon_fix_2026-07-02]] follow-up (review BLOCKER): the drift
+# FLOOR was timeframe-scaled but the drift SIGNAL (momentum_drift, sourced from
+# recalc's ``bar_row``) was still always read off the 1m window for EVERY
+# strategy — an 11.2% 1D floor compared against a ~10-minute 1m drift never
+# fires. ``timeframe_bar_rows`` is the missing counterpart to
+# ``timeframe_atr_pct`` that scopes the drift SIGNAL itself to the strategy's
+# own timeframe.
+
+
+def _seed_drift_bars(
+    conn: sqlite3.Connection,
+    *,
+    interval: str,
+    closes: list[float],
+    end_ts: int = NOW,
+    step: int | None = None,
+    instrument_id: str = IID,
+) -> None:
+    """Insert one bar per entry in ``closes`` (oldest first), ending at
+    ``end_ts`` — lets a test construct a KNOWN (last-first)/first drift."""
+    venue, _, symbol = instrument_id.partition(":")
+    sec = {"1m": 60, "5m": 300, "15m": 900, "1H": 3600, "1D": 86400}[interval]
+    step = step or sec
+    n = len(closes)
+    for i, c in enumerate(closes):
+        ts = end_ts - (n - 1 - i) * step
+        conn.execute(
+            "INSERT OR REPLACE INTO bars "
+            "(instrument_id, underlying_group_id, venue, symbol, bar_interval, "
+            " ts, open, high, low, close, volume, notional_usd, trade_count, "
+            " vwap, bid_close, ask_close, spread_bps_close, source) "
+            "VALUES (?, 'crypto:BTC', ?, ?, ?, ?, ?, ?, ?, ?, 100.0, 1e4, 1, "
+            " ?, ?, ?, 1.0, 'rest')",
+            (instrument_id, venue, symbol, interval, ts, c, c, c, c, c, c, c),
+        )
+
+
+def test_tf_bar_rows_returns_own_timeframe_window(memdb: sqlite3.Connection) -> None:
+    # 1m closes drift +1% over the window; 1D closes drift +15% — the two
+    # windows must resolve to DIFFERENT, non-conflated rows.
+    _seed_drift_bars(memdb, interval="1m", closes=[100.0] * 9 + [101.0])
+    _seed_drift_bars(memdb, interval="1D", closes=[100.0] * 9 + [115.0])
+    rows = timeframe_bar_rows(memdb, instrument_id=IID, timeframe="1D", now_ts=NOW)
+    assert rows is not None
+    newest_close = float(rows[0][1])
+    oldest_close = float(rows[-1][1])
+    assert newest_close == pytest.approx(115.0)
+    assert oldest_close == pytest.approx(100.0)
+
+
+def test_tf_bar_rows_thin_window_returns_none(memdb: sqlite3.Connection) -> None:
+    _seed_bars(memdb, interval="1H", n=MIN_TF_BARS - 1, band=2.0)
+    assert timeframe_bar_rows(
+        memdb, instrument_id=IID, timeframe="1H", now_ts=NOW, min_bars=MIN_TF_BARS,
+    ) is None
+
+
+def test_tf_bar_rows_no_bars_returns_none(memdb: sqlite3.Connection) -> None:
+    assert timeframe_bar_rows(
+        memdb, instrument_id=IID, timeframe="1H", now_ts=NOW
+    ) is None
+
+
+def test_tf_bar_rows_excludes_future_ghost_bars(memdb: sqlite3.Connection) -> None:
+    _seed_bars(memdb, interval="1H", n=20, band=2.0, end_ts=NOW + 36_000, step=60)
+    assert timeframe_bar_rows(
+        memdb, instrument_id=IID, timeframe="1H", now_ts=NOW, min_bars=MIN_TF_BARS,
+    ) is None
 
 
 # --- anchor variant (provenance) ---------------------------------------------

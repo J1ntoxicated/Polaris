@@ -205,17 +205,39 @@ EXIT_THESIS_DEADBAND: Final[float] = _env_float("POLARIS_EXIT_THESIS_DEADBAND", 
 # the position is still within its strategy horizon (``held < horizon``), a
 # momentum-ONLY reversal must clear ``|momentum_drift| >= floor`` to count as
 # BROKEN. It CORRECTS a misclassification (intraday noise faking a daily-thesis
-# break) — it does NOT defer a genuine break: a CORROBORATED break (OFI-opposes /
-# regime-flip-against) is NEVER gated → it still CUTs instantly, and the G6 -1.0R
-# rail (in the caller) is untouched. flow_not_block: it removes churn on healthy
-# 1D theses, never blocks a trade. Measured 10-min |drift|: median 0.40%, p25
-# 0.14% → 0.15% suppresses the noise cluster; real reversals (p75 1.2%, p90 3.1%)
-# pass. Env-tunable.
+# break). Measured 10-min |drift|: median 0.40%, p25 0.14% → 0.15% suppresses the
+# noise cluster; real reversals (p75 1.2%, p90 3.1%) pass. Env-tunable.
 EXIT_THESIS_DRIFT_FLOOR: Final[float] = _env_float(
     "POLARIS_EXIT_THESIS_DRIFT_FLOOR", 0.0015
 )
 EXIT_THESIS_BROKEN_TICKS: Final[int] = int(
     _env_float("POLARIS_EXIT_THESIS_BROKEN_TICKS", 2.0)
+)
+
+# --- Corroborated-break horizon floor (audit P0-2 (2)) -------------------------
+# [[trade_mess_full_audit_2026-07-02_fixplan]] P0-2. The prior design let a
+# CORROBORATED break (OFI-opposes / regime-flip-against) bypass the horizon floor
+# above UNCONDITIONALLY — the exact pathology the audit flags: a 1D/1H thesis
+# judged and CUT off a single 1m-tick OFI wobble, with zero minimum development
+# time. LIVE (2026-07-02 00:26): index_dual_momentum_rotation (1D, horizon ≈21
+# bars) opened and was thesis_cut at 0.7min and 2.6min held — a daily-rotation
+# thesis killed by intraday tick noise before it had ANY time to develop.
+# FIX: a corroborated break must ALSO clear a hold-time floor that is
+# PROPORTIONAL TO THE STRATEGY TIMEFRAME — ``EXIT_THESIS_BREAK_HOLD_FRAC`` of
+# ``horizon_seconds`` (both already strategy-timeframe-derived via
+# ``_horizon_seconds_for``/``bar_seconds``, so the floor scales with the
+# strategy's own bar size with ZERO new plumbing). At the default 5%: a 1m/5m
+# scalp floor is <1-3min (≈ its current, near-immediate behaviour — UNCHANGED in
+# practice), while a 1H/1D swing/trend thesis gets roughly one bar's worth of
+# genuine development time (~1-2.5h / ~1-1.5 days) before a corroborated break
+# can CUT it. Past the floor — or with no horizon (legacy) — a corroborated
+# break still CUTs instantly (unchanged). The G6 -1.0R hard rail and the
+# momentum-ONLY drift-materiality floor above are BOTH untouched; this ONLY
+# gates the corroborated-break bypass. flow_not_block / aggressive-preserving:
+# it removes a premature CUT on a healthy long-horizon winner — asymmetric
+# payoff strengthened, not a defensive throttle. Env-tunable.
+EXIT_THESIS_BREAK_HOLD_FRAC: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC", 0.05
 )
 # Sentinel: a ``broken_streak`` an omitting caller supplies → treated as already
 # confirmed (preserves pre-grace BROKEN behaviour for callers that don't yet

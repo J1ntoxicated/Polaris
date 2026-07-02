@@ -22,6 +22,7 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_LETRUN_HARVEST_TRAIL_MULT,
     EXIT_LETRUN_TRAIL_MULT,
     EXIT_PEAK_GIVEBACK_DISARM_R,
+    EXIT_THESIS_BREAK_HOLD_FRAC,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
     EXIT_THESIS_DRIFT_FLOOR,
@@ -162,7 +163,8 @@ def _assess_health(
     noise inside the band never breaks) AND the consecutive-broken ``broken_streak``
     has reached ``EXIT_THESIS_BROKEN_TICKS`` (a single noisy tick never flips a
     fresh winner). A regime FLIP is structural, not tick noise → it bypasses the
-    streak/deadband (a confirmed opposite-bias regime is a real break).
+    streak/deadband (a confirmed opposite-bias regime is a real break). Both OFI
+    and regime-flip breaks additionally require the hold-time floor below.
     FADING: the position was green (mfe armed) but momentum flattened / OFI decayed
     — the edge is leaking.
     INTACT: same-direction momentum / OFI still present (or simply nothing
@@ -173,10 +175,20 @@ def _assess_health(
     momentum-ONLY reversal must additionally be MATERIAL (``|momentum_drift| >=
     EXIT_THESIS_DRIFT_FLOOR``) to count as BROKEN — a sub-floor adverse drift is
     intraday NOISE for a long-horizon thesis (the bar path feeds a ~10-min 1m
-    window) and must not fake a daily-thesis break. The CORROBORATED breaks
-    (OFI-opposes / regime-flip-against) are NEVER gated → a genuine break still
-    CUTs instantly. A None horizon (legacy / unknown strategy) leaves the gate
-    inert → byte-identical to pre-fix.
+    window) and must not fake a daily-thesis break. A None horizon (legacy /
+    unknown strategy) leaves this gate inert → byte-identical to pre-fix.
+
+    Corroborated-break hold-time floor ([[trade_mess_full_audit_2026-07-02_fixplan]]
+    P0-2): a CORROBORATED break (OFI-opposes / regime-flip-against) is a genuine
+    signal, not tick noise — but it must still be given a MINIMUM development
+    time proportional to the strategy's own timeframe before it can flip the
+    thesis to BROKEN, so a 1D/1H thesis is not CUT off a single 1m-tick wobble
+    the instant it opens (measured live: a 1D thesis thesis_cut at 0.7min held).
+    Below ``EXIT_THESIS_BREAK_HOLD_FRAC × horizon_seconds`` held, a corroborated
+    break does NOT count toward BROKEN (it still falls through to the FADING /
+    INTACT tests below, same as a sub-floor momentum-only reversal). Past that
+    floor — or with no horizon — a corroborated break flips BROKEN instantly,
+    unchanged.
     """
     drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
     ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
@@ -202,8 +214,30 @@ def _assess_health(
         and abs(momentum_drift) > EXIT_THESIS_DEADBAND
         and drift_is_material
     )
+
+    # CORROBORATED-break hold-time floor (audit P0-2): OFI-opposes / regime-flip
+    # are genuine breaks (unlike momentum-only, which already has its own
+    # ``drift_is_material`` horizon gate above), but each still needs a MINIMUM
+    # hold proportional to the strategy's own timeframe before it can flip
+    # BROKEN — else a 1D/1H thesis is executed off a single 1m-tick wobble the
+    # instant it opens. The floor is a small fraction of ``horizon_seconds``
+    # (already timeframe-derived), so a 1m/5m scalp floor is <3min
+    # (near-immediate, unchanged in practice) while a 1H/1D thesis gets ~1-1.5
+    # bars of genuine development time. Past the floor — or no horizon (legacy)
+    # — corroborated breaks fire instantly, unchanged.
+    break_hold_floor = (
+        EXIT_THESIS_BREAK_HOLD_FRAC * horizon_seconds
+        if horizon_seconds is not None
+        else 0.0
+    )
+    corroborated_break_matured = (
+        held_seconds is not None and held_seconds >= break_hold_floor
+    )
     ofi_opposes = (
-        ofi_dir is not None and ofi_dir < 0.0 and abs(ofi_dir) > EXIT_THESIS_DEADBAND
+        ofi_dir is not None
+        and ofi_dir < 0.0
+        and abs(ofi_dir) > EXIT_THESIS_DEADBAND
+        and corroborated_break_matured
     )
     # SUSTAINED confirmation: a micro break (momentum/OFI) only counts once the
     # consecutive-broken streak has reached the floor — 1-tick noise never breaks.
@@ -211,7 +245,8 @@ def _assess_health(
         broken_streak >= EXIT_THESIS_BROKEN_TICKS
     )
 
-    # --- regime flip (structural — bypasses the micro streak/deadband) ---
+    # --- regime flip (structural — bypasses the micro streak/deadband, still
+    #     gated by the corroborated-break hold-time floor above) ---
     entry_dir = _regime_dir(entry_regime)
     now_dir = _regime_dir(regime)
     regime_flipped_against = (
@@ -219,6 +254,7 @@ def _assess_health(
         and now_dir != 0
         and now_dir == -entry_dir
         and sign * now_dir < 0  # the new regime opposes the position
+        and corroborated_break_matured
     )
     if micro_broken or regime_flipped_against:
         return ThesisHealth.BROKEN

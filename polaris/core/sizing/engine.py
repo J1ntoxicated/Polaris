@@ -416,39 +416,27 @@ def compute_size(
     else:
         cont = continuous_scalar(intent.signal_strength)
 
-    # (1b) regime-fit conviction shaping — bidirectional, folded into the SAME
-    # single continuous scalar (NOT a new multiplier; the 9-stack count is
-    # unchanged). Good (family × regime) fit boosts toward CONT_SCALAR_MAX, bad
-    # fit shrinks toward the CONT_SCALAR_MIN FLOOR (never 0 — anti-collapse). The
-    # re-clamp keeps it inside the existing band, so it sets the VALUE of the one
-    # scalar exactly like signal_strength / vol_targeted_scalar (flow_not_block:
-    # a bad-regime signal still sizes at the 0.75 floor, never zero, never a veto).
+    # (1b)+(1c)+(1d) regime-fit / #32 axis-C judge_conviction / Wave B agenda ②
+    # strength_scalar — THREE shaping folds into the SAME single continuous
+    # scalar (NOT new multipliers; the 9-stack count is unchanged), combined as
+    # ONE raw pre-clip product and clamped to [CONT_SCALAR_MIN, CONT_SCALAR_MAX]
+    # EXACTLY ONCE at the end via fold_strength_scalar. Clamping after each fold
+    # individually (as (1b) and (1c) used to) and THEN multiplying the next
+    # factor onto the already-clamped result loses information asymmetrically at
+    # the 0.75/1.50 boundary — the Wave B R2 BREAK #2 pathology
+    # (waveB_sizing_params_2026-07-02.md) fold_strength_scalar's own contract
+    # forbids ("raw_cont_preclip MUST be the pre-clip value, before any existing
+    # clamp is applied"). Good (family × regime) fit / SIZE_UP conviction / a
+    # >1.0 strength_scalar all push the raw product up; a bad fit / weak
+    # strength_scalar shrinks it — the single trailing clamp is the only floor/
+    # ceiling (never 0 — anti-collapse; flow_not_block). Defaults (fit=0 →
+    # regime_scalar=1.0, judge_conviction=1.0, strength_scalar=1.0) reproduce
+    # the pre-Wave-B byte-identical chain.
     _rf_cont_pre = cont
     _rf_fit = regime_fit(intent.signal_family, intent.regime)
     _rf_scalar = regime_scalar(_rf_fit)
-    cont = max(
-        CONT_SCALAR_MIN,
-        min(CONT_SCALAR_MAX, cont * _rf_scalar),
-    )
-    # (1c) #32 axis-C SIZE_UP — fold the A+B-gated judge conviction into the SAME
-    # single continuous scalar then RE-CLAMP to the existing band, identical to the
-    # regime-fit fold above (NOT a new T4 multiplier; the 9-stack count is unchanged).
-    # judge_conviction defaults 1.0 (byte-identical); >1.0 only ever pushes cont
-    # TOWARD CONT_SCALAR_MAX, never cuts (flow_not_block) — a cont already at the
-    # ceiling stays at the ceiling (the re-clamp binds). Downstream tier_amp /
-    # cell_mult / single-trade cap / headroom_min() all still bind and clip after.
-    if intent.judge_conviction != 1.0:
-        cont = max(
-            CONT_SCALAR_MIN,
-            min(CONT_SCALAR_MAX, cont * intent.judge_conviction),
-        )
-    # (1d) Wave B agenda ② — G3 strength_scalar fold into the SAME single
-    # continuous scalar (waveB_sizing_params_2026-07-02.md). fold_strength_scalar
-    # performs the ONE clamp on cont×strength_scalar (identical idiom to (1b)/(1c)
-    # above — NOT a new T4 multiplier slot; 9-stack count unchanged). Default 1.0
-    # = byte-identical no-op.
-    if intent.strength_scalar != 1.0:
-        cont = fold_strength_scalar(cont, strength_scalar=intent.strength_scalar)
+    raw_cont_preclip = cont * _rf_scalar * intent.judge_conviction
+    cont = fold_strength_scalar(raw_cont_preclip, strength_scalar=intent.strength_scalar)
     logger.info(
         "[regime-fit/seam1-size] sym=%s strat=%s family=%s regime=%s "
         "fit=%+.2f scalar=%.3f cont %.4f->%.4f (ONE-scalar fold, 9-stack intact)",

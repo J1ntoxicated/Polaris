@@ -54,7 +54,8 @@ from polaris.core.pipeline._sizer_payload import (
 )
 from polaris.core.sizing import SignalIntent, compute_size
 from polaris.core.sizing.constants import production_default_equity_usd
-from polaris.core.streams import resolve_stream
+from polaris.core.sizing.schema import clip_entry_notional_ceiling_usd
+from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.core.ticks.config import (
     TICK_ENGINE_OWNED_VENUES,
     TickEngineConfig,
@@ -184,6 +185,12 @@ def _sized_notional(
     """
     stream = resolve_stream(intent.venue)
     strength = _conviction_to_strength(intent.conviction)
+    # P1-11 item 2 (T7 parity): the SAME venue-aware leverage the bar path
+    # derives (_production_pipeline.py / payload_builder.py) — OKX spot stays
+    # fixed 1.0 (leverage_source="fixed_1"); Capital CFD resolves per-market
+    # (FX 30 / index+commodity 20 / crypto 2) instead of a hardcoded 1.0 that
+    # silently under-sized every Capital tick entry.
+    leverage = derive_leverage(stream, asset_class)
     sizing_intent = SignalIntent(
         signal_id=intent.signal_id,
         venue=intent.venue,
@@ -197,7 +204,7 @@ def _sized_notional(
         direction=intent.side,
         signal_strength=strength,
         listing_age_hours=24 * 365.0,
-        leverage=1.0,
+        leverage=leverage,
         product_class=stream.product_class,
         stream_id=stream.stream_id,
         signal_family=intent.signal_family,
@@ -211,7 +218,12 @@ def _sized_notional(
         conn, intent=sizing_intent, risk_state=risk_state,
         portfolio=portfolio, now_ts=now_ts,
     )
-    return float(sized.final_notional_usd)
+    # P1-11 item 3: the SAME shared entry-notional ceiling the bar path applies
+    # (clip_entry_notional_usd's ceiling half in _production_run_signal.py) —
+    # was bar-only ($5k cap), leaving the tick path uncapped. Ceiling-only (no
+    # floor-bump): a sub-minimum residual still falls through to _try_open's
+    # existing drop-not-bump handling below (_MIN_TICK_NOTIONAL_USD).
+    return clip_entry_notional_ceiling_usd(float(sized.final_notional_usd))
 
 
 async def _try_open(

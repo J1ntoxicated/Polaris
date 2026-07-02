@@ -202,6 +202,60 @@ def target_vol() -> float:
     v = _cap_env("POLARIS_TARGET_VOL", DEFAULT_TARGET_VOL)
     return v if v > 0.0 else DEFAULT_TARGET_VOL
 
+
+# ---------------------------------------------------------------------------
+# P1-11 item 3 — single post-T4 entry-notional clip slot, shared by the bar
+# path (``_production_run_signal.py``) and the tick path
+# (``_production_tick_engine.py``). Prior to this the bar path alone applied a
+# $5,000 ceiling before submit while the tick path submitted the raw T4
+# ``final_notional_usd`` uncapped — a bar/tick cap asymmetry, not a new
+# multiplier (this is a downstream ``min()``/``max()`` clamp on the T4 OUTPUT,
+# the same slot family as ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` / headroom_min,
+# not an added stack entry). env-tunable so Jin can raise/lower without a code
+# change (aggressive bias: default MERELY restores bar-path parity, it does not
+# newly throttle either path).
+# ---------------------------------------------------------------------------
+
+ENTRY_NOTIONAL_FLOOR_USD: Final[float] = 10.0
+"""Minimum submitted entry notional (env: ``POLARIS_ENTRY_NOTIONAL_FLOOR_USD``)."""
+
+ENTRY_NOTIONAL_CEILING_USD: Final[float] = 5_000.0
+"""Maximum submitted entry notional (env: ``POLARIS_ENTRY_NOTIONAL_CEILING_USD``)."""
+
+
+def entry_notional_floor_usd() -> float:
+    return _cap_env("POLARIS_ENTRY_NOTIONAL_FLOOR_USD", ENTRY_NOTIONAL_FLOOR_USD)
+
+
+def entry_notional_ceiling_usd() -> float:
+    return _cap_env("POLARIS_ENTRY_NOTIONAL_CEILING_USD", ENTRY_NOTIONAL_CEILING_USD)
+
+
+def clip_entry_notional_usd(notional_usd: float) -> float:
+    """Clamp a T4 ``final_notional_usd`` into ``[floor, ceiling]`` before submit.
+
+    The bar path's clip (was an inline ``max(10.0, min(final_notional_usd,
+    5_000.0))`` in ``_production_run_signal.py``) — floor-BUMPS a small residual
+    up to a submittable minimum. The tick path intentionally does NOT reuse the
+    floor half (its own sub-minimum handling is a DROP, not a bump — "flooring
+    up would breach the binding cap that clipped it"); it reuses only
+    ``entry_notional_ceiling_usd()`` via ``clip_entry_notional_ceiling_usd``
+    below, so the two paths share the SAME ceiling slot without disturbing the
+    tick path's deliberate sub-min drop-not-bump semantics.
+    """
+    return max(entry_notional_floor_usd(), min(notional_usd, entry_notional_ceiling_usd()))
+
+
+def clip_entry_notional_ceiling_usd(notional_usd: float) -> float:
+    """Ceiling-only half of :func:`clip_entry_notional_usd` (P1-11 item 3).
+
+    Applies the SAME shared ``entry_notional_ceiling_usd()`` slot the bar path's
+    ``clip_entry_notional_usd`` uses, without the floor-bump — for callers (the
+    tick path) whose own sub-minimum handling is a drop, not a bump.
+    """
+    return min(notional_usd, entry_notional_ceiling_usd())
+
+
 # Tier amplifier triggers
 TIER_3WIN_AMP: Final[float] = 1.5
 TIER_5WIN_AMP: Final[float] = 2.0

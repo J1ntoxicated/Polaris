@@ -348,6 +348,29 @@ def evaluate_exit(
         )
     else:
         effective_trail_mult = run_trail_mult
+    # 🚨 FIX-EXIT protect-floor/trail desync ([[trade_mess_full_audit_2026-07-02]]):
+    # the MFE-protect BEP rung (4b below) arms at price distance
+    # ``mfe_protect.bep_at_r * atr_r`` — a distance that WIDENS with
+    # ``stop_atr_mult`` (the FIX-EXIT fee-shrink R-unit ruler,
+    # [[weekend_maker_honest_rerun_2026-06-28]]) — vs. the running-trail distance
+    # ``effective_trail_mult * atr_one`` (no stop_atr_mult term). Divide by
+    # ``effective_trail_mult`` — the mult ACTUALLY applied below — NOT the
+    # pre-HARVEST ``run_trail_mult``: a REVERSION-bucket schedule
+    # (``peak_lock_arm_r=0.0``) tightens to ``EXIT_HARVEST_TRAIL_MULT`` on
+    # HARVEST while ``run_trail_mult`` stays wider; widening against the wrong
+    # (wider) divisor under-widens ``atr_one`` and the desync reopens exactly in
+    # HARVEST — the state the ladder exists to protect. Widening the trail basis
+    # to the BEP arm's own raw-ATR equivalent (only when it EXCEEDS the existing
+    # basis) guarantees ``trail_dist >= bep_at_r * atr_r`` — the ladder always
+    # gets a chance to arm before the raw trail alone would have closed the
+    # position. Rung R-THRESHOLDS (``mfe_r >= bep_at_r`` etc., derived from the
+    # ``atr_r`` at step 2) are untouched — only the TRAIL's own width widens.
+    # No-op (byte-identical) whenever ``mfe_protect is None`` (every caller
+    # without a schedule) or the arm distance already sits inside the trail
+    # (every existing SSOT / weekend-maker 2x/3x caller today).
+    if mfe_protect is not None and mfe_protect.bep_at_r > 0.0:
+        _bep_arm_atr_one = (mfe_protect.bep_at_r * atr_r) / effective_trail_mult
+        atr_one = max(atr_one, _bep_arm_atr_one)
     anchor = peak if side == "long" else trough
     stop_price = _trailing_stop(
         side=side, anchor_extreme=anchor, atr_one=atr_one,
@@ -359,7 +382,9 @@ def evaluate_exit(
     #     ``bep_at_r`` (leave initial risk), lock ``lock_r`` positive R at
     #     ``protect_at_r``. Take the protection-tighter of the ATR trail and the
     #     floor (long → higher stop, short → lower) so it ONLY tightens; the
-    #     ratchet above already forbids loosening. ``None`` → unchanged.
+    #     ratchet above already forbids loosening. ``None`` → unchanged. The trail
+    #     basis (``atr_one``, step 4) is pre-widened above so the BEP arm distance
+    #     can never outrun it — the ladder below always gets a chance to bind.
     if mfe_protect is not None:
         protect_floor: float | None = None
         if mfe_r >= mfe_protect.protect_at_r:

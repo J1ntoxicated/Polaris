@@ -101,6 +101,10 @@ class _FillOnRepostFakeOKX(_RepostFakeOKX):
 def _fast(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLARIS_LIMIT_FILL_WAIT_SEC", "0.02")
     monkeypatch.setenv("POLARIS_POST_ONLY_MAX_REPOSTS", "3")
+    # Hermetic vs ambient env: production .env now ships REPOST_STEP_BPS=4 (#91
+    # knob restored 2026-07-02) and dotenv-loading entrypoint tests can leak it
+    # into the process — pin bare-touch default here (same as fillrate suite).
+    monkeypatch.delenv("POLARIS_POST_ONLY_REPOST_STEP_BPS", raising=False)
 
 
 # ---------------------------------------------------------------------------

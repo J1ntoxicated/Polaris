@@ -25,7 +25,9 @@ from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.circuit_breaker import FAULT_EXCEPTION, record_fault
 from polaris.core.live_recalc.excursion import compute_excursion_r
 from polaris.core.metrics.risk_unit import realised_r_stream
+from polaris.core.streams import resolve_stream
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
+from polaris.scripts._production_capital_sizing import _peek_quote_usd_rate
 
 if TYPE_CHECKING:
     from polaris.scripts._production_state import ProdLoopState
@@ -216,6 +218,7 @@ def _atr_pct_from_bars(bar_rows: list[Any]) -> float:
 
 def _close_excursion_r(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, exit_price: float,
+    state: ProdLoopState | None = None,
 ) -> tuple[float, float, float]:
     """Best-effort ``(mfe_r, mae_r, atr_risk_usd)`` for a position at close time.
 
@@ -227,7 +230,9 @@ def _close_excursion_r(
     correctly-signed excursion (never *under*-states MFE/MAE relative to the
     realised move). The mfe_r/mae_r R denominator is the per-trade-ATR stop
     distance (``entry_price × anchor × 2``) — the EXCURSION ruler, a DIFFERENT
-    unit from the per-stream realised ``pnl_r``.
+    unit from the per-stream realised ``pnl_r``. mfe_r/mae_r are RATIOS of two
+    quote-ccy quantities (peak/trough/entry all share the instrument's quote
+    ccy), so they are quote-ccy-invariant and need no conversion.
 
     ``atr_risk_usd`` (third return) is the WHOLE-POSITION dollar 1R for that same
     per-trade-ATR ruler — ``atr_usd(per-unit) × base_qty`` — so the close path can
@@ -238,6 +243,13 @@ def _close_excursion_r(
     ``0.0`` when entry price / base_qty are unknowable (the caller then keeps the
     backfilled excursion R at 0). Returns ``(0.0, 0.0, 0.0)`` only when entry
     price is unknowable.
+
+    ``atr_risk_usd`` is a raw dollar figure in the instrument's QUOTE currency
+    (audit rank 4, companion bug to ``risk_usd_at_entry``'s stamping-site fix —
+    same un-converted quote-ccy pattern, [[trade_mess_full_audit_2026-07-02_verdict]]).
+    ``state`` (optional, ``None`` for legacy/test callers → rate 1.0,
+    byte-identical) resolves the quote→USD rate peek-only (no network) via the
+    same trading-path helper the entry stamp and #50 dashboard fix use.
     """
     entry_price = trade.entry_price
     base_qty = trade.base_qty
@@ -276,7 +288,16 @@ def _close_excursion_r(
         atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
     # Whole-position dollar 1R for the per-trade-ATR excursion ruler. 0.0 when
     # base_qty is unknowable → the caller keeps the backfilled excursion R at 0.
-    atr_risk_usd = atr_usd * base_qty if base_qty > 0.0 else 0.0
+    quote_usd_rate = 1.0
+    if state is not None and resolve_stream(trade.venue).product_class == "cfd":
+        constraint = state.capital_constraints.peek(trade.symbol)
+        quote_ccy = constraint.quote_ccy if constraint is not None else ""
+        rate = _peek_quote_usd_rate(state.capital_constraints, conn, quote_ccy)
+        if rate is not None and rate > 0.0:
+            quote_usd_rate = rate
+    atr_risk_usd = (
+        atr_usd * base_qty * quote_usd_rate if base_qty > 0.0 else 0.0
+    )
     # Read tracked extremes; fall back to entry/exit bounds when the tick loop
     # has not populated them. peak = max(entry, exit, tracked_peak); trough =
     # min(entry, exit, tracked_trough) so the excursion is never under-stated.

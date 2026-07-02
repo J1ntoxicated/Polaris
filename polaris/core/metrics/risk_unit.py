@@ -166,26 +166,35 @@ def clamp_r(r: float) -> float:
 
 def risk_usd_at_entry(
     *, entry_price: float, entry_atr_pct: float, base_qty: float,
-    stop_atr_mult: float = STOP_ATR_MULT,
+    stop_atr_mult: float = STOP_ATR_MULT, quote_usd_rate: float = 1.0,
 ) -> float:
     """Intended 1R in dollars = stop distance × filled size, FLOORED.
 
     ``risk_usd = entry_price * clamp(entry_atr_pct) * stop_atr_mult * base_qty``,
     then lifted to ``max(risk_usd, RISK_USD_ABS_FLOOR,
     RISK_USD_NOTIONAL_PCT * notional)`` where ``notional = entry_price *
-    base_qty``. The ATR% is clamped into the sane band first so a flat/stale
-    anchor cannot collapse the unit; the notional floor then guards against a
-    tiny-notional collapse (a $130 OKX order → ~$0.0058 risk_usd → phantom
-    multi-R on a -$2 loss). The floor only ever RAISES a degenerate-small unit —
-    a real (ATR × size) risk_usd is far above it. Returns 0.0 only when entry
-    price / qty are non-positive (an unknowable risk unit) — the caller keeps R
-    at 0. Measurement-only; the ``pnl_usd`` dollar truth is never altered.
+    base_qty`` — all in the price's QUOTE currency — then converted to USD via
+    ``quote_usd_rate`` (default 1.0 = already-USD-quoted, e.g. OKX USDT pairs).
+    A non-USD-quoted Capital instrument (USDJPY, J225=JPY, EU50=EUR, …) MUST
+    pass the real quote→USD rate or ``risk_usd`` inflates/deflates by the raw FX
+    level (live: J225 risk_usd stamped $47,615.89 vs real ≈$317, USDJPY ~40×) —
+    audit [[trade_mess_full_audit_2026-07-02_verdict]] rank 4. The ATR% is
+    clamped into the sane band first so a flat/stale anchor cannot collapse the
+    unit; the notional floor then guards against a tiny-notional collapse (a
+    $130 OKX order → ~$0.0058 risk_usd → phantom multi-R on a -$2 loss). The
+    floor only ever RAISES a degenerate-small unit — a real (ATR × size)
+    risk_usd is far above it. Returns 0.0 only when entry price / qty / rate are
+    non-positive (an unknowable risk unit) — the caller keeps R at 0.
+    Measurement-only; the ``pnl_usd`` dollar truth is never altered.
     """
-    if entry_price <= 0.0 or base_qty <= 0.0 or stop_atr_mult <= 0.0:
+    if (
+        entry_price <= 0.0 or base_qty <= 0.0 or stop_atr_mult <= 0.0
+        or quote_usd_rate <= 0.0
+    ):
         return 0.0
     atr_pct = clamp_entry_atr_pct(entry_atr_pct)
-    risk = entry_price * atr_pct * stop_atr_mult * base_qty
-    notional = entry_price * base_qty
+    risk = entry_price * atr_pct * stop_atr_mult * base_qty * quote_usd_rate
+    notional = entry_price * base_qty * quote_usd_rate
     return max(risk, RISK_USD_ABS_FLOOR, RISK_USD_NOTIONAL_PCT * notional)
 
 

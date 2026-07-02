@@ -793,7 +793,7 @@ async def _close_trade_with_real_pnl(
     # giveback_r) reconciles with mfe_r_final. This is the EXCURSION ruler, NOT
     # the per-stream ledger ``pnl_r`` (which stays on the positions row below).
     mfe_r, mae_r, atr_risk_usd = _close_excursion_r(
-        conn, trade=trade, exit_price=exit_price,
+        conn, trade=trade, exit_price=exit_price, state=state,
     )
     realized_atr_r = realised_r(pnl_usd=pnl_usd, risk_usd=atr_risk_usd)
     # P2 R-ledger-leak fix: this FINAL slice's stream-common R. ``pnl_usd`` is

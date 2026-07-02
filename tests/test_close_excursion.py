@@ -169,6 +169,67 @@ def test_close_excursion_helper_uses_tracked_extremes() -> None:
         conn.close()
 
 
+def test_close_excursion_converts_quote_ccy_atr_risk_usd_to_usd() -> None:
+    # USDJPY-style entry: entry_price/exit_price are JPY, so atr_risk_usd (a
+    # raw dollar figure) must be converted via quote_usd_rate — mfe_r/mae_r are
+    # ratios (quote-ccy cancels) and stay unchanged. Audit rank 4 companion bug
+    # to risk_usd_at_entry (same un-converted quote-ccy pattern).
+    from polaris.scripts.production_paper_loop import ProdLoopState
+    from polaris.venues.capital.constraint_translator import CapitalMarketConstraint
+
+    conn = _memdb()
+    try:
+        _seed_entry(
+            conn, position_id="pjpy", side="long",
+            entry_price=150.0, peak=165.0, trough=140.0,
+        )
+        conn.execute(
+            "UPDATE positions SET venue='capital', symbol='USDJPY' "
+            "WHERE position_id='pjpy'"
+        )
+        conn.execute(
+            "UPDATE fills SET venue='capital', instrument_id='capital:USDJPY' "
+            "WHERE contribution_id='pjpy'"
+        )
+        conn.commit()
+        trade = SimulatedTrade(
+            signal_id="sjpy", venue="capital", symbol="USDJPY",
+            strategy_id="volume_burst", side="long", entry_price=150.0,
+            notional_usd=150_000.0, open_ts=int(time.time()), position_id="pjpy",
+        )
+        state = ProdLoopState()
+        state.capital_constraints._entries["USDJPY"] = (
+            CapitalMarketConstraint(
+                epic="USDJPY", instrument_type="CURRENCIES", min_deal_size=1000.0,
+                step_size=1000.0, decimal_places=0, leverage=30.0,
+                pip_value_usd=0.1, base_ccy="USD", quote_ccy="JPY",
+            ),
+            time.monotonic(),
+        )
+        conn.execute(
+            "INSERT INTO bars (instrument_id, underlying_group_id, venue, "
+            " symbol, bar_interval, ts, open, high, low, close, volume) VALUES "
+            " ('capital:USDJPY', 'fx:USDJPY', 'capital', 'USDJPY', '1m', ?, "
+            " 150.0, 150.0, 150.0, 150.0, 0.0)",
+            (int(time.time()),),
+        )
+        conn.commit()
+        mfe_no_rate, mae_no_rate, atr_risk_usd_raw = _close_excursion_r(
+            conn, trade=trade, exit_price=155.0,
+        )
+        mfe, mae, atr_risk_usd = _close_excursion_r(
+            conn, trade=trade, exit_price=155.0, state=state,
+        )
+        # mfe_r/mae_r are quote-ccy-invariant ratios — unchanged by the fix.
+        assert mfe == pytest.approx(mfe_no_rate)
+        assert mae == pytest.approx(mae_no_rate)
+        # atr_risk_usd must shrink by ~1/150 (JPY -> USD) vs the unconverted call.
+        assert atr_risk_usd < atr_risk_usd_raw / 100.0
+        assert atr_risk_usd > 0.0
+    finally:
+        conn.close()
+
+
 def test_close_excursion_falls_back_to_exit_when_no_extremes() -> None:
     conn = _memdb()
     try:

@@ -60,6 +60,7 @@ from polaris.scripts._alpaca_open import (
 from polaris.scripts._production_atr import timeframe_anchor_atr_pct
 from polaris.scripts._production_capital_sizing import (
     CapitalOrderPlan,
+    _peek_quote_usd_rate,
     maybe_evict_on_reject,
     translate_capital_order,
 )
@@ -585,10 +586,27 @@ async def reserve_and_submit(
     entry_base_qty = float(
         fill.base_qty if fill.base_qty > 0 else notional_usd / max(last_price, 1e-6)
     )
+    # Quote-ccy → USD conversion (audit rank 4, [[trade_mess_full_audit_2026-07-02_verdict]]):
+    # ``fill.fill_price`` is in the instrument's QUOTE currency (Capital
+    # USDJPY=JPY, J225=JPY, EU50=EUR, ...), so risk_usd_at_entry's raw product
+    # inflates/deflates by the FX level unless converted (live: J225 risk_usd
+    # stamped $47,615.89 vs real ≈$317). OKX/Alpaca are always USD-quoted →
+    # rate stays 1.0. Peek-only (no network) — matches the #50 uPnL dashboard
+    # fix's read pattern (bars first, cached constraint snapshot second); a
+    # cold/degraded rate leaves risk_usd at the pre-fix raw-quote value rather
+    # than blocking the entry (flow_not_block, measurement-only).
+    quote_usd_rate = 1.0
+    if resolve_stream(venue).product_class == "cfd":
+        constraint = state.capital_constraints.peek(symbol)
+        quote_ccy = constraint.quote_ccy if constraint is not None else ""
+        rate = _peek_quote_usd_rate(state.capital_constraints, conn, quote_ccy)
+        if rate is not None and rate > 0.0:
+            quote_usd_rate = rate
     risk_usd = risk_usd_at_entry(
         entry_price=fill.fill_price,
         entry_atr_pct=entry_atr_pct if entry_atr_pct is not None else 0.0,
         base_qty=entry_base_qty,
+        quote_usd_rate=quote_usd_rate,
     ) or None
     # Entry-regime anchor — the regime stamped at THIS fill (the entry-thesis
     # reference the adaptive thesis re-map compares the live regime against).

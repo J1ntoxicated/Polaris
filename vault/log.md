@@ -244,3 +244,5 @@
 2026-07-02 00:29 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=369 learners=3 paper=True]
 2026-07-02 02:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=373 learners=3 paper=True]
 - 2026-07-02 audit+fix(검증사이클): 검증감사(wf_780e55cf 29conf — 무음$5k클램프·부팅refire·drift우회 P0 3) → fix wave C(wf_acf9db2c 9그룹 전부 APPROVE — 클램프제거+T4단일캡/refire hydrate/세션레일/recover async/rung기하/학습폴드/tick정합/shadow단위/close_reason) + drift-floor timeframe 정합(wf_d095a6a2) 머지. 교차회귀 4건 머지자 수동 중재(의미충돌 테스트가 표면화). vault: post-deploy-verification-audit-2026-07-02
+2026-07-02 05:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=328 learners=3 paper=True]
+2026-07-02 15:40 debate(waveB): R-budget조준 qty PRIMARY+단일min()+CAP_DOMINATED·strength preclip 직접곱 단일clamp·hold_frac 0.10/0.05+floor_bars(2|1) — codex 3R 합의, Gemini UNAVAILABLE

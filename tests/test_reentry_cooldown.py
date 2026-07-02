@@ -20,6 +20,7 @@ from polaris.core.isolation.reentry import (
     is_novel_reentry,
     reentry_cooldown_active,
 )
+from polaris.core.lifecycle.recover import hydrate_last_entry_by_key
 from polaris.storage.schema import ALL_DDL
 
 
@@ -432,6 +433,99 @@ def test_seam_allows_first_entry_and_other_name(
     )
     assert _seam_skips(
         conn, venue="okx", symbol="ETH-USDT", strategy_id="tsmom",
+        timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
+        last_bar=None, last_side=None,
+    ) is False
+
+
+# --- P0-2 boot-refire fix: hydrate_last_entry_by_key restores the anchor ----
+#
+# Forensic: state.last_entry_by_key is in-memory only, so a paper-loop
+# restart wiped it — last_entry_bar=None made is_novel_reentry always True,
+# which exempted the cooldown unconditionally, refiring the SAME signal
+# within seconds of every boot (3x observed, incl. daily 07:30 restart).
+# These tests drive the exact entry seam composition through a simulated
+# boot (open → close → restart → hydrate) to prove the anchor is restored.
+
+
+def test_boot_refire_same_1d_bar_same_side_skipped_after_hydrate(
+    conn: sqlite3.Connection,
+) -> None:
+    # Open then close a 1D-bar position (gold_trend_chandelier_1d shape).
+    _insert_position(
+        conn, venue="capital", symbol="XAUUSD",
+        strategy_id="gold_trend_chandelier_1d", opened_ts=100_000,
+        status="closed", side="long",
+    )
+    # Simulate a process restart: rebuild the anchor purely from SQLite (no
+    # in-memory state survives), exactly as production_paper_loop's boot
+    # sequence does.
+    restored = hydrate_last_entry_by_key(conn)
+    last_bar, last_side = restored[("capital", "XAUUSD", "gold_trend_chandelier_1d")]
+    assert (last_bar, last_side) == (100_000, "long")
+    # A same-1D-bar, same-side signal fires 48s after the restart (the
+    # observed J225/AU200AU shape) — WITHOUT the fix last_bar would be None
+    # (always novel) and this would flow straight through; WITH the fix the
+    # bar id (100_000, unchanged — no new 1D bar yet) + same side is NOT
+    # novel → the cooldown applies → skipped.
+    assert _seam_skips(
+        conn, venue="capital", symbol="XAUUSD",
+        strategy_id="gold_trend_chandelier_1d", timeframe="1D", side="long",
+        created_at_bar=100_000, now_ts=100_048,
+        last_bar=last_bar, last_side=last_side,
+    ) is True
+
+
+def test_boot_refire_new_bar_after_restart_still_flows(
+    conn: sqlite3.Connection,
+) -> None:
+    # Same boot simulation, but the signal now carries a genuinely NEW
+    # 1D-bar id (created_at_bar advanced) — novelty exemption must still
+    # flow (flow_not_block preserved by the fix, not a new block).
+    _insert_position(
+        conn, venue="capital", symbol="XAUUSD",
+        strategy_id="gold_trend_chandelier_1d", opened_ts=100_000,
+        status="closed", side="long",
+    )
+    restored = hydrate_last_entry_by_key(conn)
+    last_bar, last_side = restored[("capital", "XAUUSD", "gold_trend_chandelier_1d")]
+    assert _seam_skips(
+        conn, venue="capital", symbol="XAUUSD",
+        strategy_id="gold_trend_chandelier_1d", timeframe="1D", side="long",
+        created_at_bar=186_400, now_ts=200_000,  # a full day later, new bar
+        last_bar=last_bar, last_side=last_side,
+    ) is False
+
+
+def test_boot_refire_side_flip_after_restart_still_flows(
+    conn: sqlite3.Connection,
+) -> None:
+    # Same boot simulation, but the signal flips side within the same bar —
+    # the thesis reversed, so novelty must still exempt it.
+    _insert_position(
+        conn, venue="capital", symbol="AU200AU",
+        strategy_id="xau_indices_trend", opened_ts=100_000,
+        status="closed", side="long",
+    )
+    restored = hydrate_last_entry_by_key(conn)
+    last_bar, last_side = restored[("capital", "AU200AU", "xau_indices_trend")]
+    assert _seam_skips(
+        conn, venue="capital", symbol="AU200AU", strategy_id="xau_indices_trend",
+        timeframe="1D", side="short", created_at_bar=100_000, now_ts=100_048,
+        last_bar=last_bar, last_side=last_side,
+    ) is False
+
+
+def test_boot_refire_no_prior_position_still_first_entry_allowed(
+    conn: sqlite3.Connection,
+) -> None:
+    # A key with NO persisted positions row (genuinely first-ever entry) must
+    # still be allowed post-restart — hydrate returning an empty dict is not
+    # itself a block.
+    restored = hydrate_last_entry_by_key(conn)
+    assert ("okx", "NEW-USDT", "tsmom") not in restored
+    assert _seam_skips(
+        conn, venue="okx", symbol="NEW-USDT", strategy_id="tsmom",
         timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
         last_bar=None, last_side=None,
     ) is False

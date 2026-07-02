@@ -33,7 +33,7 @@
   const PANE_HTML = `
     <div class="panel wk-panel">
       <div class="p-head">
-        <span>Weekend Ops</span>
+        <span id="wk-title">Weekend Ops</span>
         <span class="wk-badge" id="wk-badge"></span>
         <span class="wk-status" id="wk-status"></span>
       </div>
@@ -262,6 +262,12 @@
 
   // ── badge + section dispatch ──────────────────────────────────────────────
   function renderBadge(d) {
+    const titleEl = document.getElementById('wk-title');
+    // Day-aware panel title: "Weekend Ops" only literally applies Sat/Sun —
+    // on a weekday this is a review of the last/next weekend cycle, not live
+    // weekend ops, so the heading should say so rather than always claiming
+    // "Weekend Ops" regardless of what day it actually is.
+    if (titleEl) titleEl.textContent = d.is_weekend ? 'Weekend Ops' : 'Weekend Ops (review)';
     const el = document.getElementById('wk-badge');
     if (!el) return;
     if (d.is_weekend) {

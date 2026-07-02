@@ -247,7 +247,12 @@
   }
   function fmtR(v, dp = 2) {
     if (v == null || isNaN(v)) return '—';
-    return (v >= 0 ? '+' : '') + v.toFixed(dp) + 'R';
+    // Adaptive significant figures: a tiny-but-nonzero R (e.g. 4.4e-05) rounds
+    // to "0.00R" at the default 2dp and reads as exactly flat — widen dp until
+    // the value shows at least one significant digit (capped at 6dp).
+    let d = dp;
+    while (d < 6 && v !== 0 && Math.abs(v).toFixed(d) === (0).toFixed(d)) d++;
+    return (v >= 0 ? '+' : '') + v.toFixed(d) + 'R';
   }
 
   // Symbol sparkline (Jin 2026-06-25) — tiny inline SVG trend of a row's recent
@@ -554,7 +559,7 @@
       <span class="title"><span class="star">★</span> POLARIS</span>
       <span class="badge">DEMO·PAPER</span>
       <span class="regime-lbl">MARKETS</span><span class="regime-tag" id="b-regime">—</span>
-      <span class="meta">Watching <b id="b-focus">—</b> symbols · <b id="b-cells">—</b> active cells · refreshed <b id="b-refresh">—</b></span>
+      <span class="meta">Watching <b id="b-focus">—</b> symbols · <b id="b-cells">—</b> mature cells (n_eff&ge;20) · refreshed <b id="b-refresh">—</b></span>
       <span class="clock" id="b-clock">--:--:--</span>
     </div>
 
@@ -602,7 +607,8 @@
       tag.title = '';
     }
     $('b-focus').textContent = d.universe_focus_n ?? '—';
-    $('b-cells').textContent = d.active_cells_n ?? '—';
+    $('b-cells').textContent = d.active_cells_n != null && d.total_cells_n
+      ? `${d.active_cells_n}/${d.total_cells_n}` : (d.active_cells_n ?? '—');
     $('b-refresh').textContent = d.universe_last_refresh || '—';
     // (k) star LIVE/STALE — twinkle when the snapshot tick is fresh, dim when stale.
     const star = document.querySelector('#board .b-head .star');
@@ -630,12 +636,23 @@
   //  · stale price   = snapshot tick itself is stale (ts_now age)
   //  · drift losses  = positions reconciled away without a clean exit this session
   const STUCK_EXIT_SEC = 1800;   // 30m past the exit FSM leaving 'open'
+  // FSM states a position can legitimately SIT in for a long time by design —
+  // not stuck, just trailing/harvesting. Only a state OUTSIDE this set (and
+  // outside 'open') held past STUCK_EXIT_SEC is a genuine stuck-exit signal.
+  const EXIT_STATE_HELD_LEGIT = new Set(['protected', 'harvest']);
   function scanAnomalies(d) {
     const out = [];
     const pos = d.positions || [];
+    // Non-24/7 venues (alpaca/capital) can't advance their exit FSM while the
+    // venue itself is shut (weekend) — a position sitting there isn't stuck,
+    // the market is. OKX (crypto, 24/7) always applies the check normally.
+    const utcDay = new Date((d.ts_now || 0) * 1000).getUTCDay();
+    const isWeekend = utcDay === 0 || utcDay === 6;
     const stuck = pos.filter(p => {
       const st = String(p.exit_state || '').toLowerCase();
-      return st && st !== 'open' && (p.held_sec || 0) > STUCK_EXIT_SEC;
+      if (!st || st === 'open' || EXIT_STATE_HELD_LEGIT.has(st)) return false;
+      if (isWeekend && String(p.venue || '').toLowerCase() !== 'okx') return false;
+      return (p.held_sec || 0) > STUCK_EXIT_SEC;
     }).length;
     if (stuck) out.push(stuck + ' stuck exit' + (stuck > 1 ? 's' : ''));
     const fr = freshness(d);
@@ -766,7 +783,7 @@
         ${sessionDiffers ? metric('Session', `<span title="whole bot-uptime sum — not reset daily" class="${pn(d.session_pnl_usd)}">${fmtUsd(d.session_pnl_usd, 0)}${sessionPct == null ? '' : ' (' + fmtSignedPct(sessionPct, 2) + ')'}</span>`) : ''}
         ${metric('Win rate', `<span class="b-flat">${wr == null ? '—' : wr.toFixed(0) + '%'}</span>`)}
         ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
-        ${metric('Max drawdown', `<span class="b-neg">-${fmtPct(d.drawdown_pct, 1)}</span>`)}
+        ${metric('Max drawdown', `<span class="b-neg" title="measured on the demo-fee curve (70bps demo fee, not the 10bps real-fee-net curve)">-${fmtPct(d.drawdown_pct, 1)}</span> <span class="kk">demo-fee curve</span>`)}
       </div>`;
     // SINCE RESET (new logic) — the FORWARD edge measured only over trades OPENED
     // after the latest main-logic reset. This is the headline Jin reads (the edge
@@ -819,7 +836,7 @@
        </colgroup><thead><tr>
         <th class="l">VENUE</th><th class="l">TRACK</th><th>EQUITY</th><th>NET P&L</th>
         <th>uPnL</th><th>EXPOSURE</th><th>EXP%</th><th>OPEN</th>
-        <th>CLOSED</th><th>FEE</th><th>SLIP</th><th title="net after fees + slippage">NET-COST</th>
+        <th>CLOSED</th><th>FEE</th><th title="model-derived estimate, informational only — not subtracted in NET-COST">SLIP (model, informational)</th><th title="net after fees + AI cost (slippage already reflected in fill price)">NET-COST</th>
         <th class="l">RECENTLY CLOSED</th>
       </tr></thead><tbody></tbody></table>`;
   function flashDir(prev, cur) {
@@ -855,14 +872,16 @@
           { text: tagline, cls: 'l ln-tag b-flat' },
           { text: fmtUsd(s.equity_usd, 0), cls: 'num ln-eq', flash: eqFlash },
           { text: fmtUsd(s.net_pnl_usd, 0), cls: 'num ' + pn(s.net_pnl_usd) },
-          { text: fmtUsd(s.upnl_usd, 0), cls: 'num ' + pn(s.upnl_usd), flash: upFlash },
+          { text: fmtUsd(s.upnl_usd, 0) + (s.marks_label ? ' · stale' : ''),
+            cls: 'num ' + pn(s.upnl_usd), flash: upFlash,
+            title: s.marks_label ? `${s.marks_label} · age ${Math.round((s.marks_age_sec || 0) / 60)}m` : undefined },
           { text: fmtUsd(s.exposed_usd, 0), cls: 'num b-flat' },
           { text: fmtPct(expPct, 0), cls: 'num b-flat' },
           { text: s.open_positions_n || 0, cls: 'num ' + (s.open_positions_n ? 'b-pos' : 'b-flat') },
           { text: closed, cls: 'num b-flat', title: (s.daily_trades || 0) + ' close fills this session' },
           { text: fmtUsd(s.fee_usd, 0), cls: 'num b-flat', title: 'fees this session' },
-          { text: fmtUsd(s.slippage_usd, 0), cls: 'num b-flat', title: 'slippage this session' },
-          { text: s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0), cls: 'num ' + pn(s.net_after_cost_usd), title: 'net after fees + slippage' },
+          { text: fmtUsd(s.slippage_usd, 0), cls: 'num b-flat', title: 'model-derived slippage estimate this session (informational, not subtracted below)' },
+          { text: s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0), cls: 'num ' + pn(s.net_after_cost_usd), title: 'net after fees + AI cost (slippage already reflected in fill price)' },
           { html: recentClosedInline(s), cls: 'l ln-rc b-flat' },
         ],
       };

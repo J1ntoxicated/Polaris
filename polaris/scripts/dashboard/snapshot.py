@@ -346,7 +346,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         last_prices = _last_prices(conn)
         entry_lookup = _entry_price_lookup(conn)
         cell_mult = _cell_mult_lookup(conn)
-        regime_bars, regime_lookup = _regime_bars(conn)
+        regime_bars, regime_lookup = _regime_bars(conn, now_s=now_s)
         positions = _read_positions(
             conn,
             now_s=now_s,
@@ -387,7 +387,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # reset stamped → the board falls back to all-time. Display-only.
         since_reset = _since_reset_rollup(conn)
         strategy_since_reset = _strategy_since_reset(conn)
-        cell_top, cell_bot, eligible_n = _cell_top_bottom(conn, cell_mult=cell_mult, n=5)
+        cell_top, cell_bot, eligible_n, total_cells_n = _cell_top_bottom(
+            conn, cell_mult=cell_mult, n=5,
+        )
         # E2 REGIME tab — per-(venue, group) live regime + confidence + evidence.
         # A (venue, symbol)→regime map labels the TRADES tab rows (best-effort:
         # the group_id is the symbol's underlying group, so symbol==group for
@@ -434,6 +436,14 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # Stage-2 per-stream rollup. ``positions`` is passed so the per-stream
         # open_n / upnl / exposed decompose the global totals exactly.
         streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
+        # Surface the Alpaca lane's mark-freshness label (if any) on the
+        # headline ``upnl_total`` too — it is the ONLY stream that can go
+        # stale (OKX/Capital are 24/7), so this is unambiguous.
+        alpaca_stream = next(
+            (s for s in streams if s.stream_id == "C_alpaca_equity"), None
+        )
+        upnl_marks_label = alpaca_stream.marks_label if alpaca_stream else ""
+        upnl_marks_age_sec = alpaca_stream.marks_age_sec if alpaca_stream else 0
         # Rotation + session-forced-exit telemetry (follow-up #12) — display-only,
         # graceful zero when the telemetry tables are empty/absent.
         rotation = _rotation_telemetry(conn, now_s=now_s)
@@ -456,6 +466,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             equity_now=equity_with_upnl,
             exposed_usd=exposed_usd,
             upnl_total=upnl_total,
+            upnl_marks_label=upnl_marks_label,
+            upnl_marks_age_sec=upnl_marks_age_sec,
             daily_pnl_usd=daily_pnl,
             daily_trades=daily_n,
             session_pnl_usd=session_pnl,
@@ -465,6 +477,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             sharpe_24h=sharpe,
             open_positions_n=len(positions),
             active_cells_n=eligible_n,
+            total_cells_n=total_cells_n,
             universe_focus_n=focus_n,
             universe_last_refresh=focus_ts,
             equity_curve=equity_full,

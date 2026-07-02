@@ -18,6 +18,7 @@ from typing import Any, Final, NamedTuple
 
 from polaris.core.economics.fees import real_fee_usd
 from polaris.core.metrics.risk_unit import R_USD_PROXY, realised_r_stream
+from polaris.core.sessions.equity_session_gate import us_equity_session_state
 from polaris.core.sizing.constants import (
     demo_starting_equity_alpaca_display,
     demo_starting_equity_capital,
@@ -217,6 +218,17 @@ def _alpaca_account_equity() -> _AlpacaEquity | None:
     return result
 
 
+def _alpaca_marks_age_sec(conn: sqlite3.Connection, *, now_s: int) -> int:
+    """Age (seconds) of the freshest ``alpaca:*`` bar close, for the RTH-closed
+    stale-mark label. 0 when no alpaca bars exist yet (nothing to be stale)."""
+    rows = _safe_query(
+        conn,
+        "SELECT MAX(ts) FROM bars WHERE instrument_id LIKE 'alpaca:%'",
+    )
+    latest_ts = int(rows[0][0] or 0) if rows and rows[0][0] is not None else 0
+    return max(0, now_s - latest_ts) if latest_ts > 0 else 0
+
+
 def _per_stream_summary(
     conn: sqlite3.Connection,
     *,
@@ -374,6 +386,15 @@ def _per_stream_summary(
     # OPEN vs CLOSED split — per-venue recent-closed trades (newest first).
     recent_closed_by_venue = _recent_closed_by_venue(conn)
 
+    # Alpaca RTH session state (weekday+holiday-aware SSOT) drives the
+    # marks label below: "rth" → the live venue equity probe is trustworthy;
+    # anything else (closed/pre_market/after_hours) → uPnL is computed from
+    # the last internal mark (stale bars/ticks), so label it explicitly.
+    alpaca_session = us_equity_session_state(now_s)
+    alpaca_marks_age = (
+        _alpaca_marks_age_sec(conn, now_s=now_s) if alpaca_session != "rth" else 0
+    )
+
     out: list[StreamSummary] = []
     # Stable lane order = SSOT registration order (A, B, C).
     for stream_id, cfg in STREAMS.items():
@@ -392,12 +413,21 @@ def _per_stream_summary(
         slippage = slip_by_venue.get(venue, 0.0)
         ai_cost = ai_cost_by_venue.get(venue, 0.0)
         # Display-only "evidence-based profit". ``net_pnl`` is ALREADY net of
-        # fees (Σ close pnl − Σ fee, line above), so only the remaining cost
-        # legs (slippage + ai_cost) are subtracted here — fees are NOT counted
-        # twice. The economic identity reported = gross_close_pnl − fee −
-        # slippage − ai_cost (matches posterior.py:_apply_cost, the canonical
-        # gross-minus-costs model). Never feeds sizing/gating.
-        net_after_cost = net_pnl - slippage - ai_cost
+        # fees AND slippage — ``fills.pnl_usd`` is derived from the actual fill
+        # price, so any slippage vs. the expected price is already baked into
+        # it; ``slippage_usd`` here is a separate, unsigned (model) estimate
+        # from ``slippage_bps`` and would double-count if subtracted again.
+        # Only ai_cost (a real extra deduction not reflected in fills.pnl_usd)
+        # is subtracted. Never feeds sizing/gating.
+        net_after_cost = net_pnl - ai_cost
+        # Alpaca-only: label uPnL as a stale internal mark when the RTH session
+        # is closed (probe equity is only live during "rth"). OKX/Capital are
+        # 24/7 markets → always "" (no label).
+        marks_label = ""
+        marks_age_sec = 0
+        if stream_id == "C_alpaca_equity" and alpaca_session != "rth":
+            marks_label = "internal marks (venue closed)"
+            marks_age_sec = alpaca_marks_age
         out.append(
             StreamSummary(
                 stream_id=stream_id,
@@ -426,6 +456,8 @@ def _per_stream_summary(
                 # lane's most-recent closed trades (empty list when none).
                 closed_n=closed_positions_by_venue.get(venue, 0),
                 recent_closed=recent_closed_by_venue.get(venue, []),
+                marks_label=marks_label,
+                marks_age_sec=marks_age_sec,
             )
         )
     return out

@@ -194,7 +194,7 @@ def test_positions_carry_regime_exit_stop_mfe_mae(tmp_path: Path) -> None:
         now_s = _now_s()
         from polaris.scripts.dashboard.snapshot_sections import _regime_bars
 
-        _bars, regime_lookup = _regime_bars(conn)
+        _bars, regime_lookup = _regime_bars(conn, now_s=now_s)
         positions = _read_positions(
             conn,
             now_s=now_s,

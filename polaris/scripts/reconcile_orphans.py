@@ -57,7 +57,26 @@ __all__ = [
     "EOD_EXEMPT_VENUES",
     "flatten_venue_eod",
     "reconcile_venue_orphans",
+    "reset_alpaca_liquidation_guard",
 ]
+
+# Our own client_order_id prefix (mirrors ``_alpaca_open.py`` / ``recover.py`` /
+# this module's own ``polAliq*`` close tag) — an untracked venue symbol whose
+# most recent closed order carries this prefix is OUR OWN order (adopt),
+# never a foreign/manual one (which alone is liquidation-eligible).
+_ALPACA_OWN_COID_PREFIX: Final[str] = "polA"
+
+# Consecutive sweep-cycle miss threshold before an unattributed-but-foreign
+# Alpaca orphan is liquidated (spec item C). Module-level, reset per process
+# (mirrors ``allocator_fence``'s ``get_process_fence``/``reset_process_fence``
+# singleton pattern) — this is sweep-hygiene bookkeeping, not trade state.
+_ALPACA_LIQUIDATION_MISS_THRESHOLD: Final[int] = 2
+_alpaca_unattributed_miss_counts: dict[str, int] = {}
+
+
+def reset_alpaca_liquidation_guard() -> None:
+    """Clear the per-symbol miss counter (test isolation, mirrors the fence)."""
+    _alpaca_unattributed_miss_counts.clear()
 
 # OKX crypto SPOT is 24/7 — there is NO market close, so it is HARD-EXEMPT from
 # EOD flatten. Asserted as a constant the flatten path checks so a future edit
@@ -116,10 +135,65 @@ def _audit(conn: sqlite3.Connection, *, event_type: str, strategy_id: str,
 # ---------------------------------------------------------------------------
 
 
+def _has_pending_open_ref(conn: sqlite3.Connection, *, symbol: str) -> bool:
+    """True iff ANY still-live ``pending_opens`` row names this Alpaca symbol.
+
+    Sweep-time guard (spec item C): a symbol with a carried-over unconfirmed
+    or partial-trueup open ref is NOT yet a liquidation candidate — the
+    open-confirm / true-up path owns it, and closing it out from under that
+    ref would fire a stray sell against an order still being resolved.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM pending_opens WHERE venue = 'alpaca' AND symbol = ? "
+            "LIMIT 1",
+            (symbol,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.error("[reconcile/alpaca] pending_opens guard read failed: %r", exc)
+        return False
+    return row is not None
+
+
+async def _alpaca_owns_symbol(adapter: Any, *, symbol: str) -> bool:
+    """True iff the symbol's most recent CLOSED order is our own ``polA*`` coid.
+
+    Best-effort venue lookup: a read failure or empty history returns
+    ``False`` (never assumed ours on missing evidence — falls through to the
+    miss-counter path instead of a blind adopt).
+    """
+    try:
+        orders = await adapter.fetch_orders(symbol=symbol, status="closed", limit=1)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blind-adopt
+        logger.warning(
+            "[reconcile/alpaca] %s coid-ownership lookup failed %r", symbol, exc,
+        )
+        return False
+    if not orders:
+        return False
+    coid = str(orders[0].get("client_order_id") or "")
+    return coid.startswith(_ALPACA_OWN_COID_PREFIX)
+
+
 async def _reconcile_alpaca(
     conn: sqlite3.Connection, adapter: Any, *, dry_run: bool, now_ts: int,
 ) -> int:
-    """Close every UNTRACKED Alpaca venue position (lifted guard contract)."""
+    """Close every UNTRACKED, coid-FOREIGN Alpaca venue position.
+
+    Guard contract (spec item C, live incident: a self-sell of our OWN
+    ``polAliq*`` — sic, our own open-side ``polA*`` — orders was misread as a
+    foreign orphan and liquidated 7 times without an R-ledger update):
+    (1) a symbol with a live ``pending_opens`` ref is skipped outright (the
+        open-confirm/true-up path owns it).
+    (2) an untracked symbol whose most recent closed order carries OUR OWN
+        ``polA*`` client_order_id prefix is NOT liquidated on sight — it is a
+        fold/adopt candidate for the qty-drift (B) / import (adopt) paths,
+        tracked via a per-symbol miss counter instead.
+    (3) only a symbol that is EITHER confirmed coid-foreign OR has missed
+        attribution for ``_ALPACA_LIQUIDATION_MISS_THRESHOLD`` (2) CONSECUTIVE
+        sweep cycles is liquidated.
+    A successfully-closed or now-tracked symbol clears its miss counter.
+    """
     try:
         positions = await adapter.fetch_positions()
     except Exception as exc:  # noqa: BLE001 — read failed → skip, never blind
@@ -136,19 +210,50 @@ async def _reconcile_alpaca(
             continue
         if symbol in tracked:
             logger.info("[reconcile/alpaca] %s TRACKED — not closed", symbol)
+            _alpaca_unattributed_miss_counts.pop(symbol, None)
+            continue
+        if _has_pending_open_ref(conn, symbol=symbol):
+            logger.info(
+                "[reconcile/alpaca] %s has a pending_opens ref — not closed "
+                "(open-confirm/true-up owns it)", symbol,
+            )
             continue
         is_crypto = str(pos.get("asset_class") or "").lower() == "crypto"
         orphans.append((symbol, qty, is_crypto))
     if not orphans:
         return 0
+
+    liquidation_candidates: list[tuple[str, float, bool]] = []
+    for symbol, qty, is_crypto in orphans:
+        if await _alpaca_owns_symbol(adapter, symbol=symbol):
+            # coid-owned but untracked — a fold/adopt concern (B / import),
+            # NEVER a self-sell. Miss counter reset; not a liquidation target.
+            _alpaca_unattributed_miss_counts.pop(symbol, None)
+            logger.info(
+                "[reconcile/alpaca] %s untracked but coid=polA* (our own) — "
+                "adopt candidate, NOT liquidated this sweep", symbol,
+            )
+            continue
+        miss = _alpaca_unattributed_miss_counts.get(symbol, 0) + 1
+        _alpaca_unattributed_miss_counts[symbol] = miss
+        if miss < _ALPACA_LIQUIDATION_MISS_THRESHOLD:
+            logger.info(
+                "[reconcile/alpaca] %s unattributed miss %d/%d — deferred, "
+                "not liquidated yet", symbol, miss,
+                _ALPACA_LIQUIDATION_MISS_THRESHOLD,
+            )
+            continue
+        liquidation_candidates.append((symbol, qty, is_crypto))
+    if not liquidation_candidates:
+        return 0
     if dry_run:
-        for symbol, qty, _c in orphans:
+        for symbol, qty, _c in liquidation_candidates:
             logger.info("[reconcile/alpaca] would-close %s qty=%.9f", symbol, qty)
-        return len(orphans)
+        return len(liquidation_candidates)
 
     equity_open = await _alpaca_market_open(adapter)
     closed = 0
-    for symbol, qty, is_crypto in orphans:
+    for symbol, qty, is_crypto in liquidation_candidates:
         if not is_crypto and not equity_open:
             logger.info("[reconcile/alpaca] %s equity closed — defer", symbol)
             continue
@@ -168,6 +273,7 @@ async def _reconcile_alpaca(
             logger.warning("[reconcile/alpaca] %s close rejected — skip", symbol)
             continue
         closed += 1
+        _alpaca_unattributed_miss_counts.pop(symbol, None)
         _audit(conn, event_type="alpaca_orphan_liquidated", strategy_id="equity",
                now_ts=now_ts, payload={
                    "venue": "alpaca", "symbol": symbol, "side": side,

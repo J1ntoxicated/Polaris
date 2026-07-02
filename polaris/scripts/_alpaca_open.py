@@ -273,19 +273,33 @@ async def real_alpaca_open_fill(
     # still-LIVE BUY filled seconds later → a permanent untracked orphan. Poll up
     # to the budget; the FIRST filled/partially_filled state captures the SAME
     # shares the venue actually holds (more confirmed entries — aggressive-aligned).
+    # PARTIAL-FILL TRUE-UP FIX: ``partially_filled`` is NOT terminal — a market
+    # order can keep filling across subsequent prints (GVH 206/250, AAL 35/82.60
+    # sh, ... — 6 live positions silently truncated at the FIRST partial
+    # observation because it sat in ``ALPACA_FILLED_STATES`` and broke the loop
+    # here). Only ``status == "filled"`` ends the loop early; a partial keeps
+    # polling the REST of the budget so a late full fill is captured directly.
     row: dict[str, Any] | None = None
     state = ""
     for _poll in range(ALPACA_OPEN_CONFIRM_POLLS):
         await asyncio.sleep(poll_delay_sec)
         row = await adapter.fetch_order(order_id=venue_order_id)
         state = str((row or {}).get("status") or "").lower()
-        if state in ALPACA_FILLED_STATES:
+        if state == "filled":
             break
-    if not row or state not in ALPACA_FILLED_STATES:
+    if not row or state == "":
         # Accepted but unfilled across the WHOLE budget — the order is still LIVE
         # at the venue. Carry the venue_order_id + submitted qty so the caller
         # records an orphan (idempotent) instead of leaking the live order. NOT a
         # throttle — an order that already left our hands made trackable.
+        return OpenAttempt(
+            fill=None, reject_code="no_fill", reject_msg=f"state={state}",
+            venue_order_id=venue_order_id, unfilled_qty=submitted_qty,
+            client_order_id=cl_ord_id,
+        )
+    if state not in ALPACA_FILLED_STATES:
+        # A genuine non-fill terminal state (canceled/rejected/expired/...)
+        # after having been accepted — nothing filled, same shape as before.
         return OpenAttempt(
             fill=None, reject_code="no_fill", reject_msg=f"state={state}",
             venue_order_id=venue_order_id, unfilled_qty=submitted_qty,
@@ -297,4 +311,13 @@ async def real_alpaca_open_fill(
         )
     except FillNormalizationError as exc:
         return OpenAttempt(fill=None, reject_code="no_fill", reject_msg=str(exc))
+    if state == "partially_filled":
+        # Budget expired while still partial: persist the snapshot fill as the
+        # position's entry (flow — never drop the confirmed shares) but flag the
+        # caller to keep a ``partial_trueup`` pending ref so the NEXT tick fetches
+        # the FINAL filled_qty and folds the delta in (see ``_alpaca_pending_open``).
+        return OpenAttempt(
+            fill=fill, venue_order_id=venue_order_id, client_order_id=cl_ord_id,
+            partial_trueup=True,
+        )
     return OpenAttempt(fill=fill)

@@ -471,6 +471,11 @@ CREATE INDEX IF NOT EXISTS idx_risk_events_strategy
 # ``pending_close_ref``, an open pre-fill has no ``positions``/``SimulatedTrade``
 # row yet to anchor a venue available/over-count clamp). Cleared on fill,
 # terminal reject, or cancel.
+# ``state`` (added for the partial-fill true-up fix): 'no_fill' (default — the
+# accepted order has zero confirmed qty yet) or 'partial_trueup' (the order
+# already filled SOME qty, persisted as the position entry, and the ref is kept
+# only so the NEXT tick reconciles the final filled_qty — see
+# ``_alpaca_pending_open`` / ``_alpaca_open.real_alpaca_open_fill``).
 DDL_PENDING_OPENS = """
 CREATE TABLE IF NOT EXISTS pending_opens (
     venue TEXT NOT NULL,
@@ -481,6 +486,8 @@ CREATE TABLE IF NOT EXISTS pending_opens (
     client_order_id TEXT,
     notional_usd REAL NOT NULL,
     last_price REAL,
+    state TEXT NOT NULL DEFAULT 'no_fill',
+    position_id TEXT,
     created_ts INTEGER NOT NULL,
     updated_ts INTEGER NOT NULL,
     PRIMARY KEY (venue, symbol, strategy_id, side)

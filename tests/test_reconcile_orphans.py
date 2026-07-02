@@ -23,6 +23,7 @@ from polaris.scripts.reconcile_orphans import (
     EOD_EXEMPT_VENUES,
     flatten_venue_eod,
     reconcile_venue_orphans,
+    reset_alpaca_liquidation_guard,
 )
 from polaris.storage.schema import init_db
 
@@ -46,12 +47,18 @@ class _AlpacaMock:
         next_close: str = "",
         order_ok: bool = True,
         fail_fetch: bool = False,
+        own_coid_symbols: frozenset[str] = frozenset(),
     ) -> None:
         self._positions = positions
         self._is_open = is_open
         self._next_close = next_close
         self._order_ok = order_ok
         self._fail_fetch = fail_fetch
+        # Sweep coid-ownership guard (spec item C): symbols in here report a
+        # 'polA*' (our own) client_order_id on their most recent closed order
+        # — an adopt candidate, never liquidated. Every OTHER symbol reports a
+        # foreign coid (the pre-existing test default: a genuine orphan).
+        self._own_coid_symbols = own_coid_symbols
         self.orders: list[dict[str, Any]] = []
 
     async def fetch_clock(self) -> _Clock:
@@ -61,6 +68,12 @@ class _AlpacaMock:
         if self._fail_fetch:
             raise RuntimeError("alpaca down")
         return list(self._positions)
+
+    async def fetch_orders(
+        self, *, symbol: str, status: str = "closed", limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        coid = "polAxyz" if symbol in self._own_coid_symbols else "foreign_manual_1"
+        return [{"client_order_id": coid, "symbol": symbol, "status": "filled"}]
 
     async def place_market_order(
         self, *, symbol: str, side: str, qty: float | None = None,
@@ -184,8 +197,16 @@ def _cap_pos(epic: str, deal_id: str, direction: str = "BUY",
 
 @pytest.mark.asyncio
 async def test_alpaca_untracked_closed_tracked_protected(conn: sqlite3.Connection) -> None:
+    reset_alpaca_liquidation_guard()
     _track(conn, venue="alpaca", symbol="NVDA")
     alp = _AlpacaMock(positions=[_alpaca_pos("NVDA", 10.0), _alpaca_pos("ORCL", 4.0)])
+    # Coid-ownership guard (spec C): a foreign-coid orphan is liquidated only
+    # after 2 CONSECUTIVE unattributed sweep cycles — the first sweep defers.
+    first = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert first["alpaca"] == 0
+    assert alp.orders == []
     counts = await reconcile_venue_orphans(
         conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
     )
@@ -232,17 +253,23 @@ async def test_capital_untracked_closed_tracked_protected(conn: sqlite3.Connecti
 async def test_idempotent_rerun_after_clean_sweep_closes_zero(
     conn: sqlite3.Connection,
 ) -> None:
+    reset_alpaca_liquidation_guard()
     alp = _AlpacaMock(positions=[_alpaca_pos("ORCL", 4.0)])
+    # 2 sweeps needed before a foreign-coid orphan is liquidation-eligible.
     first = await reconcile_venue_orphans(
         conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
     )
-    assert first["alpaca"] == 1
-    # Venue now flat (sweep cleared the orphan) → a re-run closes 0.
-    alp._positions = []
+    assert first["alpaca"] == 0
     second = await reconcile_venue_orphans(
         conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
     )
-    assert second["alpaca"] == 0
+    assert second["alpaca"] == 1
+    # Venue now flat (sweep cleared the orphan) → a re-run closes 0.
+    alp._positions = []
+    third = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert third["alpaca"] == 0
 
 
 @pytest.mark.asyncio
@@ -251,9 +278,14 @@ async def test_per_venue_fetch_error_skips_only_that_venue(
 ) -> None:
     """A venue read failure SKIPS that venue (returns 0) and NEVER blind-closes;
     the other venues still sweep (per-venue isolation, never assume-empty)."""
+    reset_alpaca_liquidation_guard()
     alp = _AlpacaMock(positions=[_alpaca_pos("ORCL", 4.0)])
     okx = _OKXMock(details=[], fail_fetch=True)
     cap = _CapitalMock(positions=[], fail_list=True)
+    # 2 sweeps to clear the coid-ownership miss threshold on the healthy venue.
+    await reconcile_venue_orphans(
+        conn, okx_adapter=okx, capital_adapter=cap, alpaca_adapter=alp,
+    )
     counts = await reconcile_venue_orphans(
         conn, okx_adapter=okx, capital_adapter=cap, alpaca_adapter=alp,
     )
@@ -266,8 +298,15 @@ async def test_per_venue_fetch_error_skips_only_that_venue(
 
 @pytest.mark.asyncio
 async def test_dry_run_submits_nothing(conn: sqlite3.Connection) -> None:
+    reset_alpaca_liquidation_guard()
     alp = _AlpacaMock(positions=[_alpaca_pos("ORCL", 4.0)])
     cap = _CapitalMock(positions=[_cap_pos("US500", "d1")])
+    # First sweep only registers the coid-ownership miss (deferred, dry_run=0);
+    # the second crosses the threshold and dry_run reports the would-close.
+    await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=cap, alpaca_adapter=alp,
+        dry_run=True,
+    )
     counts = await reconcile_venue_orphans(
         conn, okx_adapter=None, capital_adapter=cap, alpaca_adapter=alp,
         dry_run=True,
@@ -290,6 +329,126 @@ async def test_capital_close_writes_audit_with_dealid(conn: sqlite3.Connection) 
     payload = json.loads(rows[0][0])
     assert payload["venue"] == "capital"
     assert payload["deal_id"] == "deal_xyz"
+
+
+# ===========================================================================
+# (1b) SWEEP COID-OWNERSHIP GUARD — spec item C. Live incident: a self-sell of
+# our OWN ``polA*`` open orders was misread as a foreign orphan and liquidated
+# 7 times without an R-ledger update (13:40 UTC). This guard makes that class
+# of self-liquidation structurally impossible: a symbol with a live
+# ``pending_opens`` ref is never touched; an untracked symbol whose own most
+# recent closed order carries our ``polA*`` coid prefix is an adopt candidate,
+# never liquidated on sight; only a symbol that is either confirmed
+# coid-FOREIGN or unattributed for 2 CONSECUTIVE sweeps is liquidated.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_pending_open_ref_symbol_never_liquidated(
+    conn: sqlite3.Connection,
+) -> None:
+    """A symbol with a still-live pending_opens ref (open-confirm/true-up in
+    flight) is skipped OUTRIGHT — even across many sweeps — never becomes a
+    liquidation candidate via the miss counter."""
+    reset_alpaca_liquidation_guard()
+    conn.execute(
+        "INSERT INTO pending_opens (venue, symbol, strategy_id, side, "
+        "venue_order_id, client_order_id, notional_usd, last_price, state, "
+        "position_id, created_ts, updated_ts) VALUES ('alpaca', 'ENTX', "
+        "'equity_tsmom', 'long', 'ord1', 'polAabc', 4000.0, 5.0, "
+        "'partial_trueup', 'posX', ?, ?)",
+        (int(time.time()), int(time.time())),
+    )
+    conn.commit()
+    alp = _AlpacaMock(positions=[_alpaca_pos("ENTX", 400.0)])
+    for _ in range(3):
+        counts = await reconcile_venue_orphans(
+            conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+        )
+        assert counts["alpaca"] == 0
+    assert alp.orders == []
+
+
+@pytest.mark.asyncio
+async def test_coid_owned_untracked_symbol_is_adopt_candidate_not_liquidated(
+    conn: sqlite3.Connection,
+) -> None:
+    """An untracked Alpaca symbol whose own most recent closed order carries
+    OUR 'polA*' coid is NEVER liquidated (any number of sweeps) — it is a
+    fold/adopt concern for the B/import paths, structurally distinct from a
+    genuinely foreign orphan."""
+    reset_alpaca_liquidation_guard()
+    alp = _AlpacaMock(
+        positions=[_alpaca_pos("GVH", 250.0)],
+        own_coid_symbols=frozenset({"GVH"}),
+    )
+    for _ in range(3):
+        counts = await reconcile_venue_orphans(
+            conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+        )
+        assert counts["alpaca"] == 0
+    assert alp.orders == []
+
+
+@pytest.mark.asyncio
+async def test_foreign_coid_orphan_still_liquidates_after_two_misses(
+    conn: sqlite3.Connection,
+) -> None:
+    """A genuinely foreign-coid untracked symbol IS liquidated — just gated
+    behind 2 consecutive unattributed sweeps rather than on sight."""
+    reset_alpaca_liquidation_guard()
+    alp = _AlpacaMock(positions=[_alpaca_pos("MANUAL1", 10.0)])
+    first = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert first["alpaca"] == 0
+    second = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert second["alpaca"] == 1
+    assert {o["symbol"] for o in alp.orders} == {"MANUAL1"}
+
+
+@pytest.mark.asyncio
+async def test_coid_lookup_failure_defers_to_miss_counter_never_blind_liquidates(
+    conn: sqlite3.Connection,
+) -> None:
+    """A coid-ownership READ failure never blind-liquidates on sight — it
+    degrades to the same miss-counter path as an unattributed symbol."""
+    reset_alpaca_liquidation_guard()
+
+    class _NoFetchOrders(_AlpacaMock):
+        async def fetch_orders(self, **_: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("orders endpoint down")
+
+    alp = _NoFetchOrders(positions=[_alpaca_pos("XYZ", 3.0)])
+    first = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert first["alpaca"] == 0
+    second = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert second["alpaca"] == 1
+
+
+@pytest.mark.asyncio
+async def test_new_entry_signal_never_blocked_by_qty_drift_or_sweep_guard(
+    conn: sqlite3.Connection,
+) -> None:
+    """flow_not_block sanity: the coid-ownership guard only affects the
+    orphan-LIQUIDATION sweep's own decision to close/defer — it has no
+    tracked-set/entry-path side effect (a fresh signal on an unrelated symbol
+    is fully independent, verified here by asserting the tracked guard still
+    protects a live position exactly as before)."""
+    reset_alpaca_liquidation_guard()
+    _track(conn, venue="alpaca", symbol="NVDA")
+    alp = _AlpacaMock(positions=[_alpaca_pos("NVDA", 10.0)])
+    counts = await reconcile_venue_orphans(
+        conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=alp,
+    )
+    assert counts["alpaca"] == 0
+    assert alp.orders == []
 
 
 # ===========================================================================

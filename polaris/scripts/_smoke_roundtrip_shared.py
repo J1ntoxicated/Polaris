@@ -62,6 +62,14 @@ class OpenAttempt:
     maker_touch_px: float | None = None
     maker_reposts: int = 0
     maker_outcome: str | None = None
+    # PARTIAL-FILL TRUE-UP (Alpaca open-confirm poll budget expiring while the
+    # order is still ``partially_filled``): ``True`` alongside a non-``None``
+    # ``fill`` means the fill is a SNAPSHOT, not the final filled_qty — the
+    # caller persists it as the position entry AND keeps a ``partial_trueup``
+    # pending ref (``venue_order_id``/``client_order_id`` above) so the next
+    # tick re-fetches the order and folds the delta. ``False`` for every other
+    # path (byte-identical).
+    partial_trueup: bool = False
 
 
 @dataclass(frozen=True, slots=True)

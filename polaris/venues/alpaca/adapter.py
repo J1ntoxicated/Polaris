@@ -523,6 +523,23 @@ class AlpacaAdapter:
         row = _first_order_row(body)
         return row if row is not None else {}
 
+    async def fetch_orders(
+        self, *, symbol: str, status: str = "closed", limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List recent orders for one symbol (coid-ownership lookup, sweep guard).
+
+        ``status='closed'`` (Alpaca's filled/canceled/rejected/expired
+        superset) by default — the sweep guard uses this to test whether an
+        UNTRACKED venue holding traces back to OUR OWN ``polA*``-prefixed
+        client_order_id (adopt) vs a genuinely foreign order (liquidate
+        candidate). Read-only; a malformed/empty body degrades to ``[]``.
+        """
+        body = await self.request_json(
+            "GET", ALPACA_ORDERS_PATH,
+            params={"symbols": symbol, "status": status, "limit": limit},
+        )
+        return list(body) if isinstance(body, list) else []
+
     async def fetch_clock(self) -> Any:
         """Session state (``/v2/clock``), cached ~1 min on the adapter."""
         # Imported here to avoid a module-level cycle (calendar is data-only).

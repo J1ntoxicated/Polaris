@@ -42,6 +42,8 @@ from __future__ import annotations
 
 from polaris.core.live_recalc.exit_engine import (
     EXIT_ATR_TRAIL_MULT,
+    EXIT_FSM_HARVEST_R,
+    EXIT_STATE_HARVEST,
     ExitState,
     MfeProtectSchedule,
     evaluate_exit,
@@ -59,6 +61,17 @@ def _fresh(side: str = "long") -> ExitState:
 
 def _sched() -> MfeProtectSchedule:
     return MfeProtectSchedule(bep_at_r=0.30, protect_at_r=0.45, lock_r=0.20)
+
+
+def _reversion_sched() -> MfeProtectSchedule:
+    # REVERSION-bucket shape (peak_lock_arm_r=0.0) — the registered weekend-maker
+    # strategies (weekend_thin_book_flush_maker / weekend_funding_capitulation_maker,
+    # mean_reversion correlation group) get exactly this schedule shape from
+    # ``_mfe_protect_for_strategy``. Same bep/protect/lock rungs as ``_sched()``.
+    return MfeProtectSchedule(
+        bep_at_r=0.30, protect_at_r=0.45, lock_r=0.20,
+        peak_lock_arm_r=0.0, peak_lock_frac=0.0,
+    )
 
 
 # --- the invariant itself: BEP arm price-distance never exceeds the trail ----
@@ -153,6 +166,32 @@ def test_no_schedule_byte_identical_trail_untouched() -> None:
         atr_pct=ATR_PCT, pnl_r=1.5, held_seconds=10, stop_atr_mult=WIDE_MULT,
     )
     assert d.state.stop_price == 103.0 - EXIT_ATR_TRAIL_MULT * 1.0
+
+
+def test_harvest_state_reversion_bucket_lock_never_exceeds_trail_at_wide_mult() -> None:
+    # Root-cause regression (2026-07-02 fresh-fixer audit): the FIRST widen (step
+    # 4) divided by ``run_trail_mult`` (the PRE-harvest mult), but once
+    # ``new_state == EXIT_STATE_HARVEST`` for a REVERSION-bucket schedule
+    # (``peak_lock_arm_r=0.0`` — no peak-lock arm), the trail mult that is
+    # ACTUALLY applied (``effective_trail_mult``) tightens to
+    # ``EXIT_HARVEST_TRAIL_MULT`` (1.0, strictly tighter than the 2.0-3.0 SSOT /
+    # weekend-maker ``run_trail_mult``). Widening against the wrong (wider)
+    # divisor under-widens ``atr_one``, so the lock floor's price distance can
+    # exceed the trail's OWN (now-tighter) distance — the exact "ladder goes
+    # inert" failure mode reopening inside HARVEST. Fixed by dividing by
+    # ``effective_trail_mult`` (the mult that is actually applied below).
+    mfe_r = EXIT_FSM_HARVEST_R + 0.01  # past HARVEST threshold (float-safe margin).
+    peak = ENTRY + mfe_r * ATR_PCT * ENTRY * WIDE_MULT
+    d = evaluate_exit(
+        prev=_fresh(), side="long", entry_price=ENTRY, last_price=peak,
+        atr_pct=ATR_PCT, pnl_r=mfe_r, held_seconds=20,
+        mfe_protect=_reversion_sched(), stop_atr_mult=WIDE_MULT,
+    )
+    assert d.state.exit_state == EXIT_STATE_HARVEST
+    lock_dist = 0.20 * ATR_PCT * ENTRY * WIDE_MULT
+    assert d.state.stop_price is not None
+    stop_dist = peak - d.state.stop_price
+    assert stop_dist >= lock_dist - 1e-9
 
 
 def test_short_side_bep_arm_never_exceeds_trail_symmetric() -> None:

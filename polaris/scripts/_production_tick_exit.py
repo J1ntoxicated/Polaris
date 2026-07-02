@@ -25,7 +25,7 @@ from polaris.core.ticks.features import compute_tick_features
 from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_indicators import compute_unrealized_pnl_r
 from polaris.scripts._production_probe_attach import observe_probes
-from polaris.scripts._production_recalc import ActivePositionRow
+from polaris.scripts._production_recalc import ActivePositionRow, _horizon_seconds_for
 from polaris.scripts._production_recalc_exit import (
     assess_mode_for_position,
     run_precise_exit,
@@ -297,7 +297,10 @@ async def _run_exits(
             ofi=mode_feat.ofi, flow_confirmed=mode_feat.flow_confirmed,
             regime=tick_regime, entry_regime=entry_regime,
             held_seconds=held_seconds,
-            horizon_seconds=max(held_seconds, 60),
+            # P1-11 item 1: the SAME per-strategy horizon the bar recalc uses
+            # (_production_recalc.py:451) — a held-time floor (max(held, 60)) was
+            # a manufactured guess, not the strategy's real expected horizon.
+            horizon_seconds=_horizon_seconds_for(trade.strategy_id),
             broken_streak=row_streak,
         )
         _ex_family = eng.family_by_position.get(position_id, "momentum")

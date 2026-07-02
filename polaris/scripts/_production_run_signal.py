@@ -38,6 +38,7 @@ from polaris.core.pipeline.gate_state import (
     SignalLifecycle,
 )
 from polaris.core.sizing.constants import production_default_equity_usd
+from polaris.core.sizing.schema import clip_entry_notional_usd
 from polaris.core.streams import (
     alpaca_equity_entries_halted,
     derive_leverage,
@@ -347,8 +348,11 @@ async def run_pipeline_for_signal(
         )
         return
 
-    notional_usd = max(
-        10.0, min(float(sized_payload.get("final_notional_usd", 50.0)), 5_000.0)
+    # P1-11 item 3: single shared clip slot (was a bar-only inline clamp) — the
+    # tick path (_production_tick_engine._sized_notional) now routes through
+    # the SAME clip_entry_notional_usd, so the bar/tick entry ceiling matches.
+    notional_usd = clip_entry_notional_usd(
+        float(sized_payload.get("final_notional_usd", 50.0))
     )
     # Build B: per-family OKX order mode — breakout/TREND bar strategy crosses
     # the spread (marketable-limit, cap_bps), reversion/range rests post-only.

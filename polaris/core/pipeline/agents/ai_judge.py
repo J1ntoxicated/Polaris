@@ -41,8 +41,12 @@ entry side are never read.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
@@ -66,6 +70,7 @@ from polaris.core.pipeline.gate_state import GateContext, GateDecision, GateResu
 __all__ = [
     "JUDGE_MAX_TOKENS",
     "JUDGE_TIMEOUT_SEC",
+    "JUDGE_WALL_CLOCK_DEADLINE_SEC_DEFAULT",
     "EntryJudgeVerdict",
     "ExitJudgeVerdict",
     "JudgeOutcome",
@@ -73,6 +78,7 @@ __all__ = [
     "apply_exit_verdict",
     "judge_entry",
     "judge_exit",
+    "judge_wall_clock_deadline_sec",
     "parse_entry_verdict",
     "parse_exit_verdict",
 ]
@@ -83,6 +89,27 @@ logger = logging.getLogger(__name__)
 # an ADD-ON over a decision that already exists, so it must not extend latency.
 JUDGE_TIMEOUT_SEC: Final[float] = 8.0
 JUDGE_MAX_TOKENS: Final[int] = 180
+
+# [[judge-probe-reality]] audit: httpx's ``timeout=`` kwarg on ``call_gpt`` bounds
+# EACH connect/read/write phase, not the TOTAL call — a trickling response can
+# occupy the gate far past JUDGE_TIMEOUT_SEC (audited max 495s). This is a
+# SEPARATE, outer wall-clock deadline wrapped around the whole ``call_gpt`` await
+# via ``asyncio.wait_for``; on expiry the SAME deterministic safe-verdict
+# fallback fires immediately (never a block — matches every other failure mode).
+# Slightly above JUDGE_TIMEOUT_SEC so a well-behaved (non-trickling) call that
+# legitimately needs the full per-op budget is not cut off early.
+JUDGE_WALL_CLOCK_DEADLINE_SEC_DEFAULT: Final[float] = 10.0
+
+
+def judge_wall_clock_deadline_sec() -> float:
+    """Env-tunable TOTAL wall-clock deadline for one judge call (no_hardcode_in_plans)."""
+    raw = os.getenv("POLARIS_JUDGE_WALL_CLOCK_DEADLINE_SEC")
+    if raw is None or raw.strip() == "":
+        return JUDGE_WALL_CLOCK_DEADLINE_SEC_DEFAULT
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return JUDGE_WALL_CLOCK_DEADLINE_SEC_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +434,29 @@ def _build_exit_prompt(payload: dict[str, Any], *, subject: dict[str, Any]) -> s
 # Judge calls — bounded, structured-JSON, deterministic-fallback on any failure.
 # ---------------------------------------------------------------------------
 
+# [[judge-probe-reality]] audit: gpt_parse_fallback measured at 10.6%
+# (984/9,327) — root cause is JUDGE_MAX_TOKENS=180 cutting the response mid
+# the free-text ``reason`` field, which the prompt places AFTER ``verdict``.
+# ``reason`` is decorative (never read from ``res.parsed`` by any caller —
+# only ``verdict`` drives behaviour), so a truncation that lands inside
+# ``reason`` still has a COMPLETE, already-closed ``verdict`` value sitting
+# before the cut. This regex salvages just that value instead of discarding
+# the whole call. Anchored to the exact ``"verdict": "..."`` shape our own
+# prompts request; a merely-different quoting style is never force-matched.
+_VERDICT_SALVAGE_RE: Final[re.Pattern[str]] = re.compile(
+    r'"verdict"\s*:\s*"([A-Za-z_]+)"'
+)
+
+
+def _salvage_verdict(text: str) -> str | None:
+    """Best-effort recovery of a COMPLETE ``verdict`` value from truncated JSON.
+
+    Returns ``None`` when the truncation cut before the verdict value closed
+    (nothing to salvage) — the caller falls back exactly as before.
+    """
+    match = _VERDICT_SALVAGE_RE.search(text)
+    return match.group(1) if match else None
+
 
 async def _call_and_log(
     *,
@@ -437,15 +487,55 @@ async def _call_and_log(
         baseline_summary="",
         recent_trades_summary="",
     )
-    res: GPTCallResult = await call_gpt(
-        client=client,
-        system_prefix=system,
-        user_prompt=prompt,
-        max_tokens=JUDGE_MAX_TOKENS,
-        model=GPT_P0_MODEL,
-        timeout_sec=JUDGE_TIMEOUT_SEC,
-    )
+    started = time.monotonic()
+    try:
+        # Outer TOTAL wall-clock deadline — the per-op ``timeout_sec`` below
+        # only bounds each connect/read/write phase inside ``call_gpt``/httpx
+        # (audited gap: a trickling response can occupy the gate for minutes
+        # even though no single phase ever exceeds JUDGE_TIMEOUT_SEC).
+        res: GPTCallResult = await asyncio.wait_for(
+            call_gpt(
+                client=client,
+                system_prefix=system,
+                user_prompt=prompt,
+                max_tokens=JUDGE_MAX_TOKENS,
+                model=GPT_P0_MODEL,
+                timeout_sec=JUDGE_TIMEOUT_SEC,
+            ),
+            timeout=judge_wall_clock_deadline_sec(),
+        )
+    except TimeoutError:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "[ai-judge] %s → fallback (det=%s) escalation=gpt_timeout "
+            "wall_clock_ms=%d",
+            system_role, deterministic.value, elapsed_ms,
+        )
+        return JudgeOutcome(
+            verdict=safe_verdict,
+            deterministic=deterministic,
+            escalation_reason="gpt_timeout",
+            latency_ms=elapsed_ms,
+        )
     if res.error or res.parsed is None:
+        if res.error is None:
+            salvaged = _salvage_verdict(res.text)
+            if salvaged is not None:
+                verdict = parse(salvaged)
+                logger.info(
+                    "[ai-judge] %s verdict=%s (det=%s) escalation=gpt_ok_salvaged "
+                    "latency=%dms (truncated response, reason field cut)",
+                    system_role, verdict.value, deterministic.value, res.latency_ms,
+                )
+                return JudgeOutcome(
+                    verdict=verdict.value,
+                    deterministic=deterministic,
+                    escalation_reason="gpt_ok_salvaged",
+                    raw=res.text[:120],
+                    latency_ms=res.latency_ms,
+                    input_tokens=res.input_tokens,
+                    output_tokens=res.output_tokens,
+                )
         reason = "gpt_error" if res.error else "gpt_parse_fallback"
         logger.info(
             "[ai-judge] %s → fallback (det=%s) escalation=%s err=%s",

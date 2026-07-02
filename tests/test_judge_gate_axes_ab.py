@@ -222,6 +222,46 @@ def test_robust_min_default() -> None:
     assert robust_min() == ROBUST_MIN_DEFAULT
 
 
+def test_g7_lockout_regression_reproduces_audited_0_41_ceiling() -> None:
+    """[[judge-probe-reality]] audited G7's live evidence_robustness ceiling at
+    0.41 (< robust_min 0.50): cell_routing absent from the recalc payload ->
+    warmth=0.0, and a sub-floor fuser score meant evidence['label'] was never
+    stamped -> consistency=0.0. This locks in the EXACT audited ceiling so a
+    regression is caught if either leg silently goes dark again."""
+    now = int(time.time())
+    payload = {
+        "evidence": {
+            "vix": 26.0, "hy_spread": 350.0,
+            "news_sentiment": 0.1, "news_n": 2,
+        },
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    assert rob.score == pytest.approx(0.41)
+    assert rob.score < ROBUST_MIN_DEFAULT
+
+
+def test_g7_cell_routing_and_label_wiring_clears_robust_min() -> None:
+    """The fix: once the recalc payload carries a real ``cell_routing`` (P0-1
+    G7 wiring) and the fuser records ``evidence['label']`` even below its
+    conviction floor (P0-1 fuser relax), the SAME evidence shape now clears
+    robust_min -> the exit judge (EXTEND/TIGHTEN) can finally fire."""
+    now = int(time.time())
+    payload = {
+        "evidence": {
+            "vix": 26.0, "hy_spread": 350.0,
+            "news_sentiment": 0.1, "news_n": 2,
+            "label": "bear_trend",
+        },
+        "cell_routing": {"n_eff": 22.0},
+        "ticker_ground": {"has_sentiment": True, "updated_ts": now - 60},
+    }
+    rob = evidence_robustness(payload, now_ts=now)
+    assert rob.warmth == 1.0
+    assert rob.consistency > 0.0
+    assert rob.score >= robust_min()
+
+
 # ===========================================================================
 # B — per-source OBSERVATION freshness (currency fix). The ground updated_ts is
 # always 'now' (fuse time); the real staleness lives in the per-source observed

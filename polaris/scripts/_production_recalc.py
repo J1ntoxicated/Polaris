@@ -661,6 +661,14 @@ async def _evaluate_position(
             max_loss_r=1.0,
             overrides_used=0,
             seconds_since_last_override=60,
+            # #32 axis-B fix: wire the SAME cell summary G3 already computes so
+            # the exit judge's evidence_robustness warmth leg is no longer stuck
+            # at 0.0 (the G7 payload never carried a cell_routing key before).
+            conn=conn,
+            venue=str(pos["venue"]),
+            strategy=strategy_id,
+            symbol=str(pos["symbol"]),
+            regime=regime,
         )
         g7_payload_full = {**monitor_payload, **g7_payload}
         # #32 — stamp the bot's OWN fused alt-data + ground coverage + regime so the

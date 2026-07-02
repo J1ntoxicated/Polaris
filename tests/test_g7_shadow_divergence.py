@@ -287,3 +287,80 @@ async def test_live_recalc_site_passes_shadow_conn_and_site_tag(
     )
     assert captured["shadow_conn"] is memdb
     assert captured["site"] == "live_recalc"
+
+
+async def test_live_recalc_wires_cell_routing_into_g7_payload(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32 axis-B fix: the live-recalc G7 payload now carries a real
+    ``cell_routing`` summary (was always absent -> warmth stuck at 0.0,
+    capping ``evidence_robustness`` at 0.41 < robust_min 0.50)."""
+    import polaris.scripts._production_recalc as recalc_mod
+    from polaris.core.pipeline.gate_state import GateResult
+    from polaris.scripts._production_recalc import recalc_active_positions
+    from polaris.scripts.production_paper_loop import ProdLoopState
+
+    captured: dict = {}
+
+    async def _capture_exit(ctx: GateContext, **kwargs: object) -> GateResult:
+        captured["cell_routing"] = ctx.payload.get("cell_routing")
+        return GateResult(
+            decision=GateDecision.HOLD, next_gate=None,
+            payload={"stop_price": 1.0, "widening_applied": False},
+        )
+
+    async def _g6_adjust(ctx: GateContext, **_: object) -> GateResult:
+        return GateResult(
+            decision=GateDecision.ADJUST_EXIT, next_gate=GATE_ADAPTIVE_EXIT,
+            payload={"reason": "test"},
+        )
+
+    async def _no_precise_exit(**_: object) -> bool:
+        return False
+
+    async def _no_session_exit(**_: object) -> bool:
+        return False
+
+    monkeypatch.setattr(recalc_mod, "adaptive_exit_gate", _capture_exit)
+    monkeypatch.setattr(recalc_mod, "position_monitor_gate", _g6_adjust)
+    monkeypatch.setattr(recalc_mod, "run_precise_exit", _no_precise_exit)
+    monkeypatch.setattr(recalc_mod, "run_session_forced_exit", _no_session_exit)
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, "
+        "underlying_group_id, strategy_id, entry_strategy_id, "
+        "active_strategy_id, side, qty, status, opened_ts) "
+        "VALUES ('pos-rc2', 'okx', 'BTC-USDT', 'crypto:BTC', 'tsmom', 'tsmom', "
+        "'tsmom', 'long', 1.0, 'open', ?)",
+        (NOW,),
+    )
+    memdb.execute(
+        "INSERT INTO fills (fill_id, ts_ms, strategy_id, instrument_id, venue, "
+        "side, base_qty, fill_price, size_usd, fee_usd, slippage_bps, pnl_usd, "
+        "is_close, contribution_id, order_id, state) "
+        "VALUES ('f2', ?, 'tsmom', 'okx:BTC-USDT', 'okx', 'long', 1.0, 100.0, "
+        "100.0, 0.0, 0.0, 0.0, 0, 'pos-rc2', 'o2', 'filled')",
+        (NOW * 1000,),
+    )
+    memdb.execute(
+        "INSERT OR REPLACE INTO bars (instrument_id, underlying_group_id, "
+        "venue, symbol, bar_interval, ts, open, high, low, close, volume) "
+        "VALUES ('okx:BTC-USDT', 'crypto:BTC', 'okx', 'BTC-USDT', '1m', ?, "
+        "100.0, 101.0, 99.0, 100.5, 10.0)",
+        (NOW - 60,),
+    )
+    memdb.execute(
+        "INSERT INTO cell_matrix_p0 "
+        "(exchange, strategy, ticker, regime, n_eff, wins_eff, "
+        "pnl_r_sum_eff, avg_pnl_r, score, last_closed_ts) "
+        "VALUES ('okx', 'tsmom', 'BTC-USDT', 'bull_trend', 22.0, 13.0, "
+        "4.0, 0.18, 1.3, ?)",
+        (NOW,),
+    )
+    state = ProdLoopState()
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=object(), phase="P1",
+        lookup_regime=lambda _c, _v, _s: "bull_trend",
+        close_specific=lambda **_: None,
+    )
+    assert captured["cell_routing"] is not None
+    assert captured["cell_routing"]["n_eff"] == 22.0

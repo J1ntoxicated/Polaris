@@ -699,6 +699,11 @@
     // today's % vs starting capital (snapshot carries no daily_pnl_pct).
     const start = d.starting_capital || 0;
     const dayPct = start ? (d.daily_pnl_usd / start) * 100 : null;
+    // SESSION (whole-uptime sum) vs Today (AEST-midnight-floored) — P0-2. Shown
+    // only when they diverge (multi-day uptime) so the common single-day case
+    // stays uncluttered.
+    const sessionPct = start ? (d.session_pnl_usd / start) * 100 : null;
+    const sessionDiffers = Math.abs((d.session_pnl_usd || 0) - (d.daily_pnl_usd || 0)) > 0.005;
     const profitable = (pf != null && pf >= 1);
     const pfTag = (pf == null) ? ''
       : profitable
@@ -736,7 +741,8 @@
     const metrics =
       `<div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);font-size:13px">
         ${metric('Equity', `<span title="OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees"><span class="b-flat">${fmtUsd(d.equity_now, 0)}</span> <span class="kk">demo</span> · <span class="${(start && d.equity_now_real_fee_net >= start) ? 'b-pos' : 'b-neg'}" style="font-weight:700">${fmtUsd(d.equity_now_real_fee_net, 0)}</span> <span class="kk">real-fee-net</span></span>`)}
-        ${metric('Today', `<span class="${pn(d.daily_pnl_usd)}">${fmtUsd(d.daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
+        ${metric('Today', `<span title="AEST-midnight-floored — resets daily" class="${pn(d.daily_pnl_usd)}">${fmtUsd(d.daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
+        ${sessionDiffers ? metric('Session', `<span title="whole bot-uptime sum — not reset daily" class="${pn(d.session_pnl_usd)}">${fmtUsd(d.session_pnl_usd, 0)}${sessionPct == null ? '' : ' (' + fmtSignedPct(sessionPct, 2) + ')'}</span>`) : ''}
         ${metric('Win rate', `<span class="b-flat">${wr == null ? '—' : wr.toFixed(0) + '%'}</span>`)}
         ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
         ${metric('Max drawdown', `<span class="b-neg">-${fmtPct(d.drawdown_pct, 1)}</span>`)}
@@ -771,7 +777,7 @@
     const dv = real.length >= 2 ? real[real.length - 1] - real[0] : null;
     const lg = dv == null ? ''
       : `<span class="lg">trend <span class="v ${pn(dv)}">${fmtUsd(dv, 0)}</span> after real fees</span>`;
-    return `<span class="eq-spark" style="margin-left:auto" title="Equity trend — solid line = profit after REAL OKX fees (green up / red down); dim dashed = demo-actual. Gap = honest fee cost.">
+    return `<span class="eq-spark" style="margin-left:auto" title="Equity trend — solid line = profit after REAL fees across all 3 venues (OKX 10bps / Capital 3bps / Alpaca 0bps; green up / red down); dim dashed = demo-actual. Gap = honest fee cost.">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${paths}</svg>${lg}</span>`;
   }
 

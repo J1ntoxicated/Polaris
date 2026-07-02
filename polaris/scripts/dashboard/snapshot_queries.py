@@ -38,6 +38,7 @@ from polaris.scripts.dashboard.snapshot_q_common import (
     _spark_series,
     _strategy_label,
     _symbol_from_inst,
+    _today_start_ms,
 )
 from polaris.scripts.dashboard.snapshot_q_equity import (
     DualEquityCurve,
@@ -45,6 +46,7 @@ from polaris.scripts.dashboard.snapshot_q_equity import (
     _build_equity_curve,
     _daily_realised_pnl,
     _drawdown_and_sharpe,
+    _session_realised_pnl,
 )
 from polaris.scripts.dashboard.snapshot_q_gate_feed import (
     RECENT_GATE_EVENTS_N,
@@ -137,6 +139,7 @@ __all__ = [
     "_rollup_metrics",
     "_safe_query",
     "_session_buckets",
+    "_session_realised_pnl",
     "_session_start_ms",
     "_since_reset_rollup",
     "_spark_series",
@@ -146,4 +149,5 @@ __all__ = [
     "_strategy_stats",
     "_symbol_from_inst",
     "_ticker_stats",
+    "_today_start_ms",
 ]

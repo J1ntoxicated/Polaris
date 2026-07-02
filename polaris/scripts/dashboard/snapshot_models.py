@@ -632,6 +632,9 @@ class DashboardSnapshot:
     # Day 9 F12 fix — venue-split starting equity (OKX SPOT + Capital CFD).
     starting_capital_okx: float = 0.0
     starting_capital_capital: float = 0.0
+    # P0-2 (Jin 2026-07-02) — Alpaca display-baseline leg, so the header
+    # starting_capital (== okx + capital + alpaca) reconciles to the 3-venue sum.
+    starting_capital_alpaca: float = 0.0
     equity_now: float = STARTING_CAPITAL
     # Codex P0 fix: ``cash_now`` was mislabelled — it's actually deployed
     # notional across open positions, not free cash / margin headroom (we
@@ -639,8 +642,15 @@ class DashboardSnapshot:
     # ``exposed_usd`` and let the renderer label it ``EXPOSED$``.
     exposed_usd: float = 0.0
     upnl_total: float = 0.0
+    # 'Today' — floored at max(session_start, latest AEST midnight) (P0-2, Jin
+    # 2026-07-02) so this never spans more than ~24h even on multi-day uptime.
     daily_pnl_usd: float = 0.0
     daily_trades: int = 0
+    # 'SESSION' — the whole-uptime sum (the pre-P0-2 ``daily_pnl_usd`` meaning),
+    # preserved separately so no information is lost; rendered under its own
+    # 'SESSION' label, never folded into the 'Today' KPI.
+    session_pnl_usd: float = 0.0
+    session_trades: int = 0
     drawdown_pct: float = 0.0
     peak_equity: float = STARTING_CAPITAL
     sharpe_24h: float = 0.0

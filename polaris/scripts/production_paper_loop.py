@@ -243,9 +243,9 @@ def alpaca_reconcile_import_enabled() -> bool:
     re-sync (audit1 P0-4 ②).
 
     The startup VENUE reconcile-import (``reconcile_venue_positions``) was
-    gated OFF by default (2026-06-01) behind 3 documented bugs: (1) a sync
-    ``_run_coro`` crash inside a running event loop — FIXED (now runs the
-    adapter coroutine on a dedicated ``ThreadPoolExecutor`` thread); (2)
+    gated OFF by default (2026-06-01) behind 3 documented bugs: (1) a
+    cross-event-loop crash — FIXED (P1-6: ``reconcile_venue_positions`` is
+    async and awaits adapters on the caller's own loop); (2)
     imported-position insta-close — the exit engine reads ``positions``/
     ``fills`` directly (``load_active_position_rows``), not any uninitialised
     FSM, so an imported row recalcs exactly like a hydrated one; (3) a Capital
@@ -946,17 +946,17 @@ async def run_production_paper_loop(
     # at the CURRENT mark (PnL~0). Runs AFTER adapters exist; OKX SPOT dust is
     # fungible wallet balance, skipped by default (import_okx_spot=False).
     # ADOPT-BY-DEFAULT (audit1 P0-4 ②, see alpaca_reconcile_import_enabled):
-    # was gated OFF (2026-06-01) behind 3 documented bugs; #1 (sync _run_coro
-    # crash) is fixed, #2 (insta-close) does not reproduce (the exit engine
+    # was gated OFF (2026-06-01) behind 3 documented bugs; #1 (cross-event-loop
+    # crash) is fixed (P1-6: reconcile_venue_positions is now async and awaits
+    # adapters on the caller's own loop), #2 (insta-close) does not reproduce (the exit engine
     # reads positions/fills directly), and #3 (Capital deal_id=None) is scoped
     # OUT by leaving capital_adapter unwired here — Capital's own gap is a
     # separate, untouched concern. flow_not_block: ADOPT into exit-engine
     # management, never liquidate.
     if real_roundtrip and alpaca_reconcile_import_enabled():
         try:
-            imported = reconcile_venue_positions(
-                conn, okx_adapter=None, capital_adapter=None,
-                alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+            imported = await reconcile_venue_positions(
+                conn, okx_adapter=None, capital_adapter=None,                alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
             )
         except Exception:
             logger.exception(

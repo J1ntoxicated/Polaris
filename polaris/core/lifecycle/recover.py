@@ -17,12 +17,9 @@ Spec: ``vault/50_research/debates/2026-05-10_topic_a_lifecycle_fix.md``
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 import sqlite3
-from collections.abc import Awaitable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 
 from polaris.core.lifecycle.trade import SimulatedTrade
@@ -184,21 +181,6 @@ def hydrate_last_entry_by_key(
         (str(r[0]), str(r[1]), str(r[2])): (int(r[4]), str(r[3]))
         for r in rows
     }
-
-
-def _run_coro[T](coro: Awaitable[T]) -> T:
-    """Drive an adapter coroutine to completion from sync code.
-
-    ``reconcile_venue_positions`` is sync (mirrors ``hydrate_open_positions``)
-    but the venue adapters are async. When called from inside a running event
-    loop (production paper loop) we cannot ``asyncio.run`` directly, so the
-    coroutine is run in a dedicated worker thread with its own loop. With no
-    running loop (tests) the same path works.
-    """
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        return ex.submit(asyncio.run, coro).result()  # type: ignore[arg-type]
-
-
 def _existing_keys(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     """Set of ``(venue, symbol)`` already tracked as OPEN in the DB."""
     rows = conn.execute(
@@ -291,14 +273,14 @@ def _import_one(
     )
 
 
-def _reconcile_alpaca(
+async def _reconcile_alpaca(
     conn: sqlite3.Connection,
     adapter: _AlpacaLike,
     existing: set[tuple[str, str]],
     now_ts: int,
 ) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
-    positions = _run_coro(adapter.fetch_positions())
+    positions = await adapter.fetch_positions()
     for pos in positions or []:
         symbol = str(pos.get("symbol") or "")
         if not symbol or ("alpaca", symbol) in existing:
@@ -320,14 +302,14 @@ def _reconcile_alpaca(
     return out
 
 
-def _reconcile_capital(
+async def _reconcile_capital(
     conn: sqlite3.Connection,
     adapter: _CapitalLike,
     existing: set[tuple[str, str]],
     now_ts: int,
 ) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
-    body = _run_coro(adapter.list_positions())
+    body = await adapter.list_positions()
     for entry in body.get("positions", []) or []:
         pos = entry.get("position", {}) or {}
         market = entry.get("market", {}) or {}
@@ -359,7 +341,7 @@ def _f(value: Any) -> float:
         return 0.0
 
 
-def reconcile_venue_positions(
+async def reconcile_venue_positions(
     conn: sqlite3.Connection,
     *,
     okx_adapter: Any | None,
@@ -386,17 +368,31 @@ def reconcile_venue_positions(
     the caller can ``state.open_trades.extend(...)``. ``None`` adapters are
     no-ops; a venue fetch failure is logged and skipped (flow_not_block) without
     aborting the other venues.
+
+    ``async`` (P1-6 fix): the venue adapters (``AlpacaAdapter`` /
+    ``CapitalSession``) hold a persistent ``httpx.AsyncClient`` bound to the
+    caller's event loop (the production paper-loop main loop). Driving the
+    adapter coroutine via ``ThreadPoolExecutor.submit(asyncio.run, coro)`` in a
+    worker thread reused a main-loop-bound connection-pool primitive from a
+    DIFFERENT loop, raising ``RuntimeError: ... is bound to a different event
+    loop`` on the 2nd+ boot (adapters already warmed on the main loop) — the
+    whole reconcile-import silently failed. Awaiting directly on the SAME loop
+    that owns the adapters removes the cross-loop bind entirely.
     """
     existing = _existing_keys(conn)
     out: list[SimulatedTrade] = []
     if alpaca_adapter is not None:
         try:
-            out.extend(_reconcile_alpaca(conn, alpaca_adapter, existing, now_ts))
+            out.extend(
+                await _reconcile_alpaca(conn, alpaca_adapter, existing, now_ts)
+            )
         except Exception:  # noqa: BLE001
             logger.exception("[reconcile] Alpaca fetch/import failed — skipped")
     if capital_adapter is not None:
         try:
-            out.extend(_reconcile_capital(conn, capital_adapter, existing, now_ts))
+            out.extend(
+                await _reconcile_capital(conn, capital_adapter, existing, now_ts)
+            )
         except Exception:  # noqa: BLE001
             logger.exception("[reconcile] Capital fetch/import failed — skipped")
     if import_okx_spot and okx_adapter is not None:

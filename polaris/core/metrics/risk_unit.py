@@ -65,12 +65,31 @@ import math
 from collections.abc import Callable
 from typing import Final
 
-from polaris.core.sizing.constants import (
-    demo_starting_equity_alpaca,
-    demo_starting_equity_capital,
-    demo_starting_equity_okx,
-)
 from polaris.core.streams.config import VENUE_TO_STREAM
+
+# NOTE(순환 절단 2026-07-03): sizing.constants를 모듈 레벨에서 import하면
+# ``polaris.core.sizing`` 패키지 __init__(→ engine → 다시 risk_unit)이 발동해
+# lifecycle-first import 순서(recover.py:risk_usd_at_entry)에서 부분초기화
+# ImportError가 난다(테스트 수집 순서로 실증). 아래 dict는 함수 참조만 저장하고
+# 호출은 런타임이므로, import를 호출 시점으로 지연해 back-edge를 제거한다.
+
+
+def _equity_okx() -> float:
+    from polaris.core.sizing.constants import demo_starting_equity_okx
+
+    return demo_starting_equity_okx()
+
+
+def _equity_capital() -> float:
+    from polaris.core.sizing.constants import demo_starting_equity_capital
+
+    return demo_starting_equity_capital()
+
+
+def _equity_alpaca() -> float:
+    from polaris.core.sizing.constants import demo_starting_equity_alpaca
+
+    return demo_starting_equity_alpaca()
 
 __all__ = [
     "BASE_RISK_PCT",
@@ -217,9 +236,9 @@ def realised_r(*, pnl_usd: float, risk_usd: float) -> float:
 # the demo equity flows straight through to the R denominator. OKX $1,580 /
 # Capital $1,020 / Alpaca 0.02 × (probe-or-fallback). Display/measurement only.
 _R_BUDGET_EQUITY_BY_STREAM: Final[dict[str, Callable[[], float]]] = {
-    "A_okx_crypto": demo_starting_equity_okx,
-    "B_capital_cfd": demo_starting_equity_capital,
-    "C_alpaca_equity": demo_starting_equity_alpaca,
+    "A_okx_crypto": _equity_okx,
+    "B_capital_cfd": _equity_capital,
+    "C_alpaca_equity": _equity_alpaca,
 }
 
 

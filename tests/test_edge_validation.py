@@ -257,12 +257,15 @@ def test_cost_adjusted_skips_when_atr_degenerate() -> None:
     assert pnl_r_net == pytest.approx(-10.0)
 
 
-def test_read_cost_inputs_position_scaled_denominator(
+def test_read_cost_inputs_denominator_is_venue_r_budget(
     memdb: sqlite3.Connection,
 ) -> None:
-    """A low-price symbol with NO bars: atr_usd is the WHOLE-POSITION 1R dollar
-    value (size_usd × atr_pct × 2), NOT the per-UNIT ATR floored at 1e-6 — so the
-    whole-position cost_usd / atr_usd cannot blow up to -210000 R."""
+    """FIX 2 (unit boundary) — the returned denominator is the SAME per-stream
+    R_budget constant ``gross_pnl_r`` (realised_r_stream) is already denominated
+    in, NOT a 1m-bar-ATR-derived whole-position 1R. A low-price symbol (ALGO
+    ~$0.12) with no bars seeded gets the identical OKX R_budget as any other OKX
+    close — price/ATR no longer participate in the denominator at all."""
+    from polaris.core.metrics.risk_unit import r_budget_for_venue
     from polaris.scripts._production_close_effects import _read_cost_inputs
     from polaris.scripts._smoke_fills import SimulatedTrade
 
@@ -274,32 +277,29 @@ def test_read_cost_inputs_position_scaled_denominator(
         strategy_id="tsmom", side="long", entry_price=0.12,
         notional_usd=600.0, open_ts=1, position_id="posALGO",
     )
-    *_rest, atr_usd = _read_cost_inputs(memdb, trade)
-    # No bars → default atr_pct 0.005 → atr_usd = 600 × 0.005 × 2 = 6.0 (whole
-    # position), decisively above the old per-unit 1e-6 floor (~0.0012).
-    assert atr_usd is not None
-    assert atr_usd == pytest.approx(600.0 * 0.005 * 2.0)
-    assert atr_usd > 1.0  # whole-position scale, not the old per-unit blow-up
+    *_rest, r_budget_usd = _read_cost_inputs(memdb, trade)
+    assert r_budget_usd is not None
+    assert r_budget_usd == pytest.approx(r_budget_for_venue("okx"))
 
 
-def test_read_cost_inputs_degenerate_entry_price_returns_none_atr(
+def test_read_cost_inputs_unknown_venue_returns_none_denominator(
     memdb: sqlite3.Connection,
 ) -> None:
-    """entry_price <= 0 (truly degenerate) → atr_usd sentinel None so the caller
-    SKIPS the cost adjustment instead of dividing by a tiny floor."""
+    """An unconfigured venue (no R_budget) → None sentinel so the caller SKIPS
+    the cost adjustment instead of dividing by zero."""
     from polaris.scripts._production_close_effects import _read_cost_inputs
     from polaris.scripts._smoke_fills import SimulatedTrade
 
     _seed_fill(memdb, fill_id="bad_open", is_close=0, fee_usd=0.6,
                slippage_bps=1.0, contribution_id="posBAD", ts_ms=1000,
-               size_usd=600.0, fill_price=0.0)
+               size_usd=600.0, fill_price=60_000.0)
     trade = SimulatedTrade(
-        signal_id="sBAD", venue="okx", symbol="ZERO-USDT",
-        strategy_id="tsmom", side="long", entry_price=0.0,
+        signal_id="sBAD", venue="unknown_venue", symbol="ZERO-USDT",
+        strategy_id="tsmom", side="long", entry_price=60_000.0,
         notional_usd=600.0, open_ts=1, position_id="posBAD",
     )
-    *_rest, atr_usd = _read_cost_inputs(memdb, trade)
-    assert atr_usd is None
+    *_rest, r_budget_usd = _read_cost_inputs(memdb, trade)
+    assert r_budget_usd is None
 
 
 def test_safe_update_posterior_never_folds_blown_up_net_r(

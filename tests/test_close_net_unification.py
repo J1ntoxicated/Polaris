@@ -95,40 +95,46 @@ def test_compute_net_won_flips_when_fee_eats_gross() -> None:
     """A scalp whose gross PnL is a hair positive becomes a NET LOSS once the real
     round-trip fee is charged — the close path's ``won = pnl_r_net > 0`` must then
     be False (the cell/learner verdict matches the posterior, not the fee-free
-    gross sign)."""
+    gross sign). FIX 2 — the fee-in-R is now cost_usd/R_budget (OKX $1,580), so
+    the gross_pnl_r must be within that (small, correct) margin to flip; picking
+    an arbitrarily tiny gross (the pre-fix test used +0.001) no longer flips
+    since the ATR-unit blow-up that made $1.08 huge in R terms is gone."""
     conn = init_db(":memory:")
     _persist_legs(conn, venue="okx", symbol="BTC-USDT", entry_fee=0.48, exit_fee=0.6)
     _seed_bars(conn, venue="okx", symbol="BTC-USDT")
+    # cost_usd ≈ 1.08 fee + tiny slip; R_budget(okx) = $1,580 →
+    # cost_in_r ≈ 1.08/1580 ≈ 0.00068. A gross just above that flips net negative.
     _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
-        conn, trade=_trade(), gross_pnl_r=0.001, gross_pnl_usd=0.6,
+        conn, trade=_trade(), gross_pnl_r=0.0005, gross_pnl_usd=0.6,
     )
-    # gross_pnl_r was +0.001 (a win by the gross sign) but the fee in R pushes it
+    # gross_pnl_r was +0.0005 (a win by the gross sign) but the fee in R pushes it
     # negative → the NET verdict is a loss.
     assert pnl_r_net < 0.0
     assert (pnl_r_net > 0.0) is False
 
 
 def test_compute_net_degenerate_atr_falls_back_to_gross() -> None:
-    """No bars + a degenerate entry price (<=0) → the cost-in-R denominator is the
-    None sentinel, so pnl_r_net falls back to gross (never an exploded net-R). The
-    dollar net still subtracts the fee."""
+    """FIX 2 — an UNKNOWN venue (no configured R_budget) → the cost-in-R
+    denominator is the None sentinel, so pnl_r_net falls back to gross (never a
+    divide-by-zero). The dollar net still subtracts the fee. (Pre-fix this
+    degenerate path was keyed on entry_price<=0; the denominator is now the
+    venue R_budget, which no longer depends on entry_price at all.)"""
     conn = init_db(":memory:")
-    inst = "okx:BTC-USDT"
-    # Entry fill with fill_price 0 → _read_cost_inputs returns atr_usd=None.
+    inst = "unknown_venue:BTC-USDT"
     entry = Fill(
-        venue="okx", instrument_id=inst, strategy_id="tsmom", side="buy",
-        size_usd=600.0, fill_price=0.0, fee_usd=0.48, slippage_bps=0.0,
+        venue="unknown_venue", instrument_id=inst, strategy_id="tsmom", side="buy",
+        size_usd=600.0, fill_price=60_000.0, fee_usd=0.48, slippage_bps=0.0,
         ts_ms=1_780_000_000_000, order_id="e1", base_qty=0.01, quote_qty=600.0,
     )
     exit_fill = Fill(
-        venue="okx", instrument_id=inst, strategy_id="tsmom", side="sell",
+        venue="unknown_venue", instrument_id=inst, strategy_id="tsmom", side="sell",
         size_usd=600.0, fill_price=60_060.0, fee_usd=0.6, slippage_bps=0.0,
         ts_ms=1_780_000_060_000, order_id="x1", base_qty=0.01, quote_qty=600.6,
     )
     persist_fill(conn, entry, is_close=False, contribution_id="pos1")
     persist_fill(conn, exit_fill, is_close=True, pnl_usd=0.6, contribution_id="pos1")
     _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
-        conn, trade=_trade(), gross_pnl_r=-5.0, gross_pnl_usd=0.6,
+        conn, trade=_trade(venue="unknown_venue"), gross_pnl_r=-5.0, gross_pnl_usd=0.6,
     )
     assert pnl_r_net == pytest.approx(-5.0)  # net == gross (cost-in-R skipped)
 

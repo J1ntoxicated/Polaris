@@ -237,6 +237,15 @@ def _import_one(
     # + fail-open (a cold/missing bars window, or no injected resolver, leaves
     # both NULL — the existing legacy-graceful degrade, never a fabricated
     # anchor).
+    #
+    # ``risk_usd_at_entry`` FLOORS to a nonzero value on ANY valid
+    # (price, qty) pair regardless of ``entry_atr_pct`` (notional-pct /
+    # abs-$ floor, [[risk_unit.py]] RISK_USD_ABS_FLOOR) — so feeding it a
+    # placeholder 0.0 when no anchor resolved would silently fabricate a
+    # positive, ATR-disconnected risk_usd and defeat the dashboard's
+    # 'n/a' render gate (``snapshot_q_positions.py`` mfe_atr_r/mae_atr_r).
+    # risk_usd is therefore ONLY computed when a REAL anchor resolved;
+    # no anchor ⇒ risk_usd stays NULL (honest, matches entry_atr_pct).
     entry_atr_pct: float | None = None
     entry_atr_timeframe: str | None = None
     if atr_anchor_fn is not None:
@@ -247,11 +256,14 @@ def _import_one(
             logger.warning("[reconcile] entry ATR anchor read failed: %r", exc)
         if anchor is not None:
             entry_atr_pct, entry_atr_timeframe = anchor
-    risk_usd = risk_usd_at_entry(
-        entry_price=mark,
-        entry_atr_pct=entry_atr_pct if entry_atr_pct is not None else 0.0,
-        base_qty=base_qty,
-    ) or None
+    risk_usd = (
+        risk_usd_at_entry(
+            entry_price=mark, entry_atr_pct=entry_atr_pct, base_qty=base_qty,
+        )
+        or None
+        if entry_atr_pct is not None
+        else None
+    )
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(

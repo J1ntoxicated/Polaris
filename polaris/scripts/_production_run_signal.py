@@ -37,8 +37,7 @@ from polaris.core.pipeline.gate_state import (
     GateDecision,
     SignalLifecycle,
 )
-from polaris.core.sizing.constants import production_default_equity_usd
-from polaris.core.sizing.schema import clip_entry_notional_usd
+from polaris.core.sizing.constants import equity_usd_for_venue
 from polaris.core.streams import (
     alpaca_equity_entries_halted,
     derive_leverage,
@@ -172,7 +171,10 @@ async def run_pipeline_for_signal(
     # constraint_translator layer; here we use the asset_class fallback because
     # the per-symbol constraint is not loaded on this path.)
     leverage = derive_leverage(stream, asset_class)
-    equity_usd = production_default_equity_usd()
+    # P1-7 fix: venue-aware equity (was production_default_equity_usd(), which
+    # always returned the OKX $79k figure even for Capital signals — sizing a
+    # Capital CFD entry against 55% more equity than its $51k demo balance).
+    equity_usd = equity_usd_for_venue(venue)
 
     # Day 8 codex P1 fix: read spread/listing/recent-reject from real state
     # (universe + bars + strategy_fault_events) instead of hard-coded fixtures.
@@ -348,12 +350,17 @@ async def run_pipeline_for_signal(
         )
         return
 
-    # P1-11 item 3: single shared clip slot (was a bar-only inline clamp) — the
-    # tick path (_production_tick_engine._sized_notional) now routes through
-    # the SAME clip_entry_notional_usd, so the bar/tick entry ceiling matches.
-    notional_usd = clip_entry_notional_usd(
-        float(sized_payload.get("final_notional_usd", 50.0))
-    )
+    # P0-3 fix: the silent post-hoc ``min(x, 5_000.0)`` ceiling is REMOVED — it
+    # re-clipped T4's already-correct ``final_notional_usd`` unlogged, collapsing
+    # every signal above $5k to the same $5,000 regardless of the continuous
+    # scalar / tier amplifier (cont=0.75 and cont=1.50 converged identically
+    # since 2026-05-29 ee82437). The equivalent hard cap now lives INSIDE T4's
+    # single ``headroom_min()`` clip as a venue-aware %-of-equity term
+    # (``notional_ceiling_pct`` in ``polaris.core.sizing.engine``) with a
+    # structured ``binding=`` log when it clips — no new T4 multiplier, 9-stack
+    # ban intact. Only a non-negative floor guard remains here (never expected
+    # to bind — entry_sizer_gate already KILLs at final_risk_pct<=0).
+    notional_usd = max(10.0, float(sized_payload.get("final_notional_usd", 50.0)))
     # Build B: per-family OKX order mode — breakout/TREND bar strategy crosses
     # the spread (marketable-limit, cap_bps), reversion/range rests post-only.
     # Every mode falls back to market on no-fill/reject (flow_not_block). Capital

@@ -114,21 +114,36 @@ def test_sized_notional_okx_spot_leverage_stays_fixed_one(
 # ---------------------------------------------------------------------------
 
 
-def test_clip_entry_notional_usd_applies_floor_and_ceiling() -> None:
+def test_clip_entry_notional_usd_applies_floor_and_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Merge 2026-07-02 (P0-3 × P1-11 unification): the DEFAULT ceiling is
+    # UNBOUNDED — the venue-aware notional cap is owned by T4's single
+    # headroom_min() clip slot (engine.py notional_ceiling_pct, binding= log),
+    # and a second silent $5k re-clip here was the exact P0-3 pathology. The
+    # env knob remains as a manual ops override — clip mechanics verified with
+    # it set.
     from polaris.core.sizing.schema import clip_entry_notional_usd
 
-    assert clip_entry_notional_usd(1.0) == pytest.approx(10.0)
-    assert clip_entry_notional_usd(50_000.0) == pytest.approx(5_000.0)
+    assert clip_entry_notional_usd(1.0) == pytest.approx(10.0)  # floor-bump 유지
+    assert clip_entry_notional_usd(50_000.0) == pytest.approx(50_000.0)  # 기본 무상한
+    monkeypatch.setenv("POLARIS_ENTRY_NOTIONAL_CEILING_USD", "5000")
+    assert clip_entry_notional_usd(50_000.0) == pytest.approx(5_000.0)  # 수동 오버라이드만 클립
     assert clip_entry_notional_usd(2_500.0) == pytest.approx(2_500.0)
 
 
-def test_clip_entry_notional_ceiling_usd_has_no_floor_bump() -> None:
+def test_clip_entry_notional_ceiling_usd_has_no_floor_bump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The tick-path variant applies ONLY the shared ceiling — a tiny residual
     must pass through unchanged (no floor-bump) so the tick engine's existing
-    sub-minimum drop-not-bump semantics stay intact."""
+    sub-minimum drop-not-bump semantics stay intact. Ceiling default is
+    unbounded (T4-owned cap); env override exercises the clip."""
     from polaris.core.sizing.schema import clip_entry_notional_ceiling_usd
 
     assert clip_entry_notional_ceiling_usd(0.0001) == pytest.approx(0.0001)
+    assert clip_entry_notional_ceiling_usd(50_000.0) == pytest.approx(50_000.0)
+    monkeypatch.setenv("POLARIS_ENTRY_NOTIONAL_CEILING_USD", "5000")
     assert clip_entry_notional_ceiling_usd(50_000.0) == pytest.approx(5_000.0)
     assert clip_entry_notional_ceiling_usd(2_500.0) == pytest.approx(2_500.0)
 
@@ -136,10 +151,11 @@ def test_clip_entry_notional_ceiling_usd_has_no_floor_bump() -> None:
 def test_tick_sized_notional_is_ceiling_clipped_same_as_bar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same physical T4 output (e.g. $50k) must clip to the SAME $5k ceiling on
-    the tick path the bar path already enforces (``_production_run_signal.py``
-    ``max(10.0, min(final_notional_usd, 5_000.0))``) — no bar/tick cap asymmetry.
-    """
+    """Bar/tick cap SYMMETRY (P1-11 item 3, unified 2026-07-02 with P0-3): the
+    venue-aware notional cap is owned by T4's headroom_min() slot, so a T4
+    output passes the tick path UNCLIPPED by default (no silent second $5k
+    re-clip — the exact P0-3 pathology). The shared env override still clips
+    BOTH paths identically."""
     def _fake_compute_size(conn: Any, *, intent: Any, risk_state: Any,
                             portfolio: Any, now_ts: int) -> Any:
         class _Sized:
@@ -159,15 +175,15 @@ def test_tick_sized_notional_is_ceiling_clipped_same_as_bar(
         venue="okx", symbol="BTC-USDT", side="long", conviction=0.9,
         signal_id="burst_rider", signal_family="momentum", ref_price=60000.0,
     )
-    notional = eng_mod._sized_notional(
-        None, intent=intent, asset_class="crypto",
+    kwargs = dict(
+        intent=intent, asset_class="crypto",
         underlying_group_id="crypto:BTC", regime="trend", now_ts=int(time.time()),
     )
-
-    assert notional == pytest.approx(5_000.0), (
-        f"tick path must clip a $50k T4 output to the shared $5k ceiling, "
-        f"got {notional} — bar/tick cap asymmetry (P1-11 item 3)."
-    )
+    # 기본: T4 산출이 그대로 통과 (엔진 소유 캡 외 무음 재캡 없음)
+    assert eng_mod._sized_notional(None, **kwargs) == pytest.approx(50_000.0)
+    # 수동 오버라이드: 양 경로 공유 슬롯이 동일하게 클립
+    monkeypatch.setenv("POLARIS_ENTRY_NOTIONAL_CEILING_USD", "5000")
+    assert eng_mod._sized_notional(None, **kwargs) == pytest.approx(5_000.0)
 
 
 # ---------------------------------------------------------------------------

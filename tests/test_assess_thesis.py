@@ -310,24 +310,71 @@ def test_immaterial_drift_past_horizon_cuts_unchanged() -> None:
     assert m is ManagementMode.CUT
 
 
-def test_ofi_opposes_is_never_gated_by_floor() -> None:
-    # A corroborated break (OFI firmly opposes) with sub-floor drift, within
-    # horizon, red → CUT. OFI/regime are GENUINE breaks → never noise-gated.
+# REVERSED 2026-07-02 (audit P0-2 (2), [[trade_mess_full_audit_2026-07-02_fixplan]]):
+# these two tests used to assert the corroborated-break path (OFI-opposes /
+# regime-flip-against) was NEVER gated by ANY hold-time floor — that "never
+# gated" was itself the pathology the audit flagged: it let a single 1m-tick
+# OFI wobble or regime blip instantly CUT a 1D/1H thesis with ZERO development
+# time. LIVE EVIDENCE (2026-07-02 00:26): index_dual_momentum_rotation (1D,
+# horizon ≈21 bars) opened and was thesis_cut at 0.7min and 2.6min held — a
+# daily-rotation thesis killed by intraday noise before it could develop.
+# The fix adds a corroborated-break hold-time floor proportional to the
+# strategy's own timeframe (``EXIT_THESIS_BREAK_HOLD_FRAC × horizon_seconds``):
+# a FRESH 1D-horizon position (held << floor) can no longer be CUT by OFI/regime
+# alone; the same signal past the floor still CUTs instantly (asserted below).
+def test_ofi_opposes_fresh_1d_position_below_floor_is_not_cut() -> None:
+    # 1D thesis (horizon ≈21 bars ≈ 1,814,400s), held 298s — far below the 5%
+    # hold-time floor (~90,720s) — OFI alone must NOT cut a fresh thesis.
     m = _assess(
         bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
         ofi=-0.5, flow_confirmed=False, regime="trend", entry_regime="trend",
-        held_seconds=298, horizon_seconds=2_073_600,
+        held_seconds=298, horizon_seconds=1_814_400,
+    )
+    assert m is not ManagementMode.CUT
+
+
+def test_ofi_opposes_past_floor_still_cuts() -> None:
+    # Same 1D thesis, held PAST the hold-time floor (~90,720s) — the
+    # corroborated OFI break is genuine and still CUTs (unchanged behaviour).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
+        ofi=-0.5, flow_confirmed=False, regime="trend", entry_regime="trend",
+        held_seconds=100_000, horizon_seconds=1_814_400,
     )
     assert m is ManagementMode.CUT
 
 
-def test_regime_flip_against_is_never_gated_by_floor() -> None:
-    # A corroborated break (regime flipped to oppose the long) with sub-floor
-    # drift, within horizon, red → CUT (regime flip is a genuine break).
+def test_regime_flip_against_fresh_1d_position_below_floor_is_not_cut() -> None:
+    # Same 1D horizon, held 298s (far below the hold-time floor) — a regime
+    # flip alone must NOT cut a fresh thesis either.
     m = _assess(
         bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
         ofi=None, regime="downtrend", entry_regime="uptrend",
-        held_seconds=298, horizon_seconds=2_073_600,
+        held_seconds=298, horizon_seconds=1_814_400,
+    )
+    assert m is not ManagementMode.CUT
+
+
+def test_regime_flip_against_past_floor_still_cuts() -> None:
+    # Held PAST the hold-time floor — a confirmed opposite-bias regime flip is
+    # a genuine break and still CUTs (unchanged behaviour).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
+        ofi=None, regime="downtrend", entry_regime="uptrend",
+        held_seconds=100_000, horizon_seconds=1_814_400,
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_ofi_opposes_1m_strategy_cuts_immediately() -> None:
+    # A 1m-timeframe strategy's hold-time floor is <1min (5% of a ~900s
+    # horizon ≈ 45s) — practically unchanged: even a fresh (held=60s) position
+    # clears the floor and OFI-opposes still CUTs immediately, same as before
+    # the fix (1m/5m scalps keep their existing behaviour).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.0012,
+        ofi=-0.5, flow_confirmed=False, regime="trend", entry_regime="trend",
+        held_seconds=60, horizon_seconds=900,
     )
     assert m is ManagementMode.CUT
 

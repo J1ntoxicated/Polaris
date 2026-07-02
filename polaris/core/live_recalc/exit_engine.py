@@ -57,6 +57,8 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_STATE_PROTECTED,
     EXIT_STATE_TOUCHED,
     EXIT_THESIS_BREAK_HOLD_FRAC,
+    EXIT_THESIS_BREAK_HOLD_FRAC_DAILY,
+    EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
     EXIT_THESIS_DRIFT_FLOOR,
@@ -66,6 +68,8 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_THESIS_GIVEBACK_HARD_FRAC,
     EXIT_THESIS_GRACE_SEC,
     drift_floor_for_timeframe,
+    hold_frac_for_timeframe,
+    required_bars_for_horizon,
 )
 from polaris.core.live_recalc.exit_thesis import (
     assess_thesis,
@@ -514,6 +518,8 @@ __all__ = [
     "EXIT_STATE_PROTECTED",
     "EXIT_STATE_TOUCHED",
     "EXIT_THESIS_BREAK_HOLD_FRAC",
+    "EXIT_THESIS_BREAK_HOLD_FRAC_DAILY",
+    "EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY",
     "EXIT_THESIS_BROKEN_TICKS",
     "EXIT_THESIS_DEADBAND",
     "EXIT_THESIS_DRIFT_FLOOR",
@@ -534,9 +540,11 @@ __all__ = [
     "bucket_from_correlation_group",
     "drift_floor_for_timeframe",
     "evaluate_exit",
+    "hold_frac_for_timeframe",
     "init_exit_state",
     "mfe_protect_from_dict",
     "mfe_protect_to_dict",
     "mode_to_exit_params",
+    "required_bars_for_horizon",
     "tick_micro_broken",
 ]

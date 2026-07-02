@@ -411,11 +411,11 @@ def test_floor_only_gates_within_horizon_none_horizon_unchanged() -> None:
 # momentum-only break). Two independent fixes:
 #   (1) the materiality floor SCALES per ``timeframe`` (1D positions are judged
 #       against the 1D noise band, not the 1m one);
-#   (2) an uncorroborated (momentum-only) BROKEN read additionally requires the
-#       position to have aged past ``EXIT_THESIS_BREAK_HOLD_FRAC`` (5%) of its
-#       horizon — however large the drift, a fresh long-horizon thesis gets real
-#       development time. CORROBORATED breaks (OFI / regime-flip) bypass BOTH
-#       gates — always real, cross-signal-confirmed, never noise.
+#   (2) a BROKEN read (momentum-only OR corroborated) additionally requires the
+#       position to have aged past the maturity floor of its horizon
+#       (``hold_frac_for_timeframe`` — daily-or-slower 10% / intraday 5%,
+#       [[waveB_sizing_params_2026-07-02]] agenda 3) — however large the drift,
+#       a fresh long-horizon thesis gets real development time first.
 # The -1.0R hard rail / ATR trail / G6 crisis path are OWNED by the caller and
 # are UNTOUCHED by either gate — layer separation proven by
 # ``test_maturity_gate_never_touches_the_pnl_rail_layer`` below.
@@ -435,12 +435,14 @@ def test_1d_typical_bar_drift_does_not_cut_below_materiality_floor() -> None:
 
 def test_1d_genuinely_material_drift_still_cuts_once_mature() -> None:
     # A LARGE 1D drift (-15%, clears even the scaled 1D floor) AFTER the position
-    # has aged past the 5%-of-horizon maturity floor still breaks the thesis.
+    # has aged past the daily-or-slower 10%-of-horizon maturity floor
+    # ([[waveB_sizing_params_2026-07-02]] agenda 3 — daily-or-slower raised
+    # 5%->10%) still breaks the thesis.
     horizon = 21 * 86400
     m = _assess(
         bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.3, momentum_drift=-0.15,
         ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
-        held_seconds=int(horizon * 0.06), horizon_seconds=horizon, timeframe="1D",
+        held_seconds=int(horizon * 0.11), horizon_seconds=horizon, timeframe="1D",
     )
     assert m is ManagementMode.CUT
 

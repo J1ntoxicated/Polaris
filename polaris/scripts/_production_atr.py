@@ -37,6 +37,7 @@ __all__ = [
     "DEGENERATE_ATR_PCT",
     "MIN_TF_BARS",
     "bars_atr_pct",
+    "native_bars_seen_since",
     "strategy_timeframe",
     "timeframe_anchor_atr_pct",
     "timeframe_atr_pct",
@@ -136,6 +137,30 @@ def bars_atr_pct(
         return None
     mean = sum(samples) / len(samples)
     return mean if mean > DEGENERATE_ATR_PCT else None
+
+
+def native_bars_seen_since(
+    conn: Any, *, instrument_id: str, timeframe: str, open_ts: int, now_ts: int
+) -> int:
+    """Count of ``timeframe`` bars closed STRICTLY AFTER ``open_ts`` (and at/
+    before ``now_ts``) — the exit maturity gate's bars-seen measure
+    ([[waveB_sizing_params_2026-07-02]] agenda 3). Same ``bars`` table +
+    venue/symbol/bar_interval query shape as ``bars_atr_pct`` — no new infra.
+    Wall-clock is NEVER used for this count: a session close / data gap would
+    otherwise fake elapsed development the thesis never actually lived
+    through. The bar forming/closed AT open does not count as "seen since
+    open" (``ts > open_ts``, not ``>=``). FUTURE-dated bars beyond ``now_ts``
+    are excluded via the same clock-skew bound every bar-read path uses.
+    """
+    venue, _, symbol = instrument_id.partition(":")
+    ts_upper = int(now_ts) + BAR_TS_CLOCK_SKEW_SLACK_SEC
+    row = conn.execute(
+        "SELECT COUNT(*) FROM bars "
+        "WHERE venue = ? AND symbol = ? AND bar_interval = ? "
+        "AND ts > ? AND ts <= ?",
+        (venue, symbol, timeframe, int(open_ts), ts_upper),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def timeframe_anchor_atr_pct(

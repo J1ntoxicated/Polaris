@@ -158,6 +158,10 @@ def _assess_mode_for_position(
     held_seconds: int,
     horizon_seconds: int,
     broken_streak: int = _DEFAULT_BROKEN_STREAK,
+    native_bars_seen: int | None = None,
+    native_bar_interval_seconds: int | None = None,
+    horizon_bars: int | None = None,
+    position_id: str | None = None,
 ) -> ManagementMode | None:
     """Resolve the adaptive thesis re-map mode for THIS position (or ``None``).
 
@@ -179,6 +183,12 @@ def _assess_mode_for_position(
     forwarded so the horizon drift-materiality floor scales to THIS strategy's own
     bar cadence — unregistered/tick-engine ids resolve to "1m" (the pre-fix
     calibration, byte-identical).
+
+    ``native_bars_seen`` / ``native_bar_interval_seconds`` / ``horizon_bars``
+    ([[waveB_sizing_params_2026-07-02]] agenda 3): the bars-seen maturity gate —
+    see ``exit_thesis._has_matured``. ``None`` (default) leaves that gate on the
+    pre-existing wall-clock fallback → byte-identical for a caller that has not
+    migrated yet.
     """
     if not EXIT_ADAPTIVE_THESIS_ON:
         return None
@@ -200,6 +210,10 @@ def _assess_mode_for_position(
             giveback=_THESIS_GIVEBACK,
             broken_streak=broken_streak,
             timeframe=strategy_timeframe(strategy_id),
+            native_bars_seen=native_bars_seen,
+            native_bar_interval_seconds=native_bar_interval_seconds,
+            horizon_bars=horizon_bars,
+            position_id=position_id,
         )
     except Exception as exc:  # noqa: BLE001 — re-map must never break the exit
         logger.warning("[L6/exit] thesis re-map assess failed — no re-map: %r", exc)

@@ -254,3 +254,5 @@
 2026-07-02 fix(alpaca/open-confirm): pending_new 개장경매 미체결 포기→베뉴엔 존재 내부블라인드 근본수정 — pending_opens 테이블(venue×symbol×strategy×side PK) 신설, real_alpaca_open_fill pending_order_id confirm-first(mirror close leg), reserve_and_submit 듀플리케이트 제출 0건 가드+fill시 clear+no_fill시 upsert(venue_order_id+clOrdId+sized intent). OKX/Capital 무접촉, 즉시-fill byte-identical. 테스트 5건 신규(test_alpaca_open_pending_confirm.py) all pass, mypy --strict/ruff clean. 브랜치 alpaca-open-confirm.
 - 2026-07-02 audit+fix(dashboard-content): 콘텐츠 감사(wf_65147bd5 25conf — stale서버 4일/Alpaca누락 equity/5일누계 Today/REASON 날조/GROSS자/편입 유령MFE) → wave D 5그룹 전부 APPROVE 머지·마이그레이션(baseline 160,181.75)·서버 SHA스탬프+자동재기동 배선. 재기동 후 정직 헤드라인: NET -$338/PF 0.24/WIN 8%, Today(AEST) -$52 vs SESSION -$341 분리
 2026-07-02 11:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=384 learners=3 paper=True]
+2026-07-02 14:13 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=388 learners=3 paper=True]
+2026-07-02 15:10 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/alpaca-qty-truth/tests/test_alpaca_open_pending_confirm.py]

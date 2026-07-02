@@ -1023,6 +1023,34 @@ def get_focus_targets(
     return focus
 
 
+def trade_ineligible_set(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Latest-cycle ``(venue, symbol)`` rows EntranceJudge marked NOT trade-eligible.
+
+    The exact inverse predicate of :func:`get_focus_targets`'s
+    ``eligible_only=True`` clause (``COALESCE(wf.trade_eligible, 1) = 1``): this
+    returns every row from the latest ``watchlist_focus`` cycle where that
+    COALESCE reads ``0``. It is the twin of ``okx_unsettleable_set`` for the bar
+    pipeline's entry seam — the bar dispatch (``_production_tick._run_tick``)
+    calls ``get_focus_targets`` WITHOUT ``eligible_only`` (the WATCH set, i.e.
+    every row) but never re-checked ``trade_eligible`` before submitting an
+    order, so a name EntranceJudge already failed (venue liquidity floor and/or
+    opportunity-score floor) still reached the order path. The caller DEFERS
+    only the ENTRY for a name in this set — it stays WATCHED/SIGNALED/streamed
+    (flow_not_block). A held position is unaffected (force-seated by
+    ``get_focus_targets` regardless of eligibility; exits run via the recalc
+    loop, not this entry seam).
+    """
+    row = conn.execute("SELECT MAX(cycle_ts) FROM watchlist_focus").fetchone()
+    if row is None or row[0] is None:
+        return set()
+    latest_cycle = int(row[0])
+    rows = conn.execute(
+        "SELECT venue, symbol FROM watchlist_focus "
+        "WHERE cycle_ts = ? AND COALESCE(trade_eligible, 1) = 0",
+        (latest_cycle,),
+    ).fetchall()
+    return {(str(r[0]), str(r[1])) for r in rows}
+
 
 # ---------------------------------------------------------------------------
 # Layer 6 — recalc + regime flip

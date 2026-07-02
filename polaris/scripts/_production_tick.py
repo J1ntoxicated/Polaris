@@ -65,6 +65,7 @@ from polaris.scripts._production_layers import (
     read_recent_bars_ondemand,
     run_recalc_for_active_positions,
     staleness_threshold_for,
+    trade_ineligible_set,
 )
 from polaris.scripts._production_pipeline import (
     close_specific_position,
@@ -596,6 +597,16 @@ async def _run_tick(
     # settleable USDT/USDC pairs, not blocked). ONLY the structural quote-ccy guard
     # (NOT the score floor), so a thin-score USDT breakout still reaches orders.
     okx_unsettleable = okx_unsettleable_set(conn)
+    # trade_eligible bar-path TRADE gate — the twin of the tick engine's
+    # ``eligible_set`` gate (``get_focus_targets(eligible_only=True)``) for
+    # EntranceJudge's ``trade_eligible`` verdict. ``get_focus_targets`` above is
+    # called WITHOUT ``eligible_only`` (the WATCH set — every valid symbol, so
+    # bar ingest/WS/dashboard keep observing everything), so a name EntranceJudge
+    # already failed (venue liquidity floor and/or opportunity-score floor) was
+    # never re-checked before the bar path submitted its order. Build the
+    # ineligible set once per tick; the dispatch loop DEFERS only the ENTRY for a
+    # name in it (flow_not_block — same shape as ``okx_unsettleable``).
+    trade_ineligible = trade_ineligible_set(conn)
     # Day 9 F11 fix: build PipelineTaskSpec list + delegate execution to
     # ``supervise_pipeline_tasks`` (Layer 7 SSOT). Replaces the bare
     # ``asyncio.create_task`` + ``asyncio.gather(..., return_exceptions=True)``
@@ -811,6 +822,21 @@ async def _run_tick(
                     logger.debug(
                         "[L1/signal] defer-entry %s:%s strategy=%s side=%s "
                         "reason=okx_quote_unsettleable (watched, order redirected)",
+                        venue, symbol, strategy_id, sig.side,
+                    )
+                    continue
+                # trade_eligible — DEFER the ENTRY (only) for a name EntranceJudge
+                # already marked ineligible (venue liquidity floor and/or
+                # opportunity-score floor). The signal is ALREADY emitted+
+                # persisted above (stays WATCHED/SIGNALED/streamed); only the
+                # order is deferred (flow_not_block). Mirrors the tick engine's
+                # ``eligible_set`` gate on the bar producer, same as the OKX
+                # settle-ability defer immediately above.
+                if (venue, symbol) in trade_ineligible:
+                    state.trade_ineligible_entry_defers += 1
+                    logger.debug(
+                        "[L1/signal] defer-entry %s:%s strategy=%s side=%s "
+                        "reason=trade_ineligible (watched, order deferred)",
                         venue, symbol, strategy_id, sig.side,
                     )
                     continue

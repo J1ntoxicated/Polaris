@@ -41,6 +41,7 @@ __all__ = [
     "demo_starting_equity_capital",
     "demo_starting_equity_okx",
     "demo_starting_equity_total",
+    "equity_usd_for_venue",
     "production_default_equity_usd",
 ]
 
@@ -196,4 +197,26 @@ def production_default_equity_usd() -> float:
     legacy = _read_float_env(_ENV_LEGACY_PRODUCTION)
     if legacy is not None:
         return legacy
+    return demo_starting_equity_okx()
+
+
+def equity_usd_for_venue(venue: str) -> float:
+    """Venue-aware equity for Layer 5 sizing (P1-7 fix).
+
+    ``production_default_equity_usd()`` always returned the OKX starting
+    equity ($79,000) regardless of which venue the signal was actually
+    sizing for — a Capital CFD signal ($51,000 demo balance) was silently
+    sized against 55% more equity than it actually has. This dispatches by
+    venue instead, honouring the same legacy ``POLARIS_EQUITY_USD`` override
+    (test/smoke escape hatch) before falling back to the per-venue starting
+    equity. Unknown venue → OKX default (never a silent zero; flow_not_block).
+    """
+    legacy = _read_float_env(_ENV_LEGACY_PRODUCTION)
+    if legacy is not None:
+        return legacy
+    v = venue.lower()
+    if v == "capital":
+        return demo_starting_equity_capital()
+    if v == "alpaca":
+        return demo_starting_equity_alpaca()
     return demo_starting_equity_okx()

@@ -52,6 +52,7 @@ from polaris.core.sizing.schema import (
     StrategyRiskState,
     Track,
     equity_shadow_cap_pct,
+    notional_hard_cap_usd,
     per_symbol_cfd_pct,
     per_symbol_equity_pct,
     per_symbol_spot_pct,
@@ -243,6 +244,26 @@ def equity_shadow_validation_cap(strategy: str) -> float:
     if strategy in EQUITY_SHADOW_CAP_STRATEGIES:
         return equity_shadow_cap_pct()
     return SINGLE_TRADE_ABSOLUTE_CEILING_PCT
+
+
+def notional_ceiling_pct(*, venue: str, equity_usd: float, leverage: float) -> float:
+    """Venue notional hard cap (USD), expressed as %-of-equity for the SAME
+    ``headroom_min`` single-trade min() slot (P0-3 fix — replaces the silent
+    post-hoc ``max(10, min(x, 5_000))`` dollar clamp formerly applied AFTER
+    T4 in ``_production_run_signal.py``, which clipped an already-correct
+    ``final_notional_usd`` and made the continuous scalar / tier amplifier
+    inert above $5k). ``notional = final_risk_pct × equity × leverage``, so
+    dividing the dollar cap by ``equity × leverage`` yields the equivalent
+    %-of-equity ceiling that composes inside the single min() clip instead of
+    fighting it — no new T4 multiplier, 9-stack ban intact.
+
+    A non-positive ``equity_usd × leverage`` denominator (never expected on the
+    live path) returns 0.0 so the term never explodes into an unbounded cap.
+    """
+    denom = equity_usd * leverage
+    if denom <= 0.0:
+        return 0.0
+    return notional_hard_cap_usd(venue) / denom
 
 
 # ---------------------------------------------------------------------------
@@ -552,16 +573,24 @@ def compute_size(
     # containment is the headroom_min budget caps (cluster/daily/track) below —
     # there is NO per-signal weak-signal zeroing (removed; defensive throttle).
     # The single-trade slot folds in (a) the Kelly/cold-start cap, (b) the hard
-    # absolute ceiling, and (c) the equity shadow validation cap (a no-op for every
-    # non-equity-validation strategy). All three are pure min() terms in the SAME
-    # slot — no new T4 multiplier, 9-stack ban + -1.0R rail intact.
+    # absolute ceiling, (c) the equity shadow validation cap (a no-op for every
+    # non-equity-validation strategy), and (d) the venue notional hard cap
+    # (P0-3 fix — replaces the old post-hoc dollar clamp; see
+    # ``notional_ceiling_pct`` docstring). All four are pure min() terms in the
+    # SAME slot — no new T4 multiplier, 9-stack ban + -1.0R rail intact.
+    notional_cap_pct = notional_ceiling_pct(
+        venue=intent.venue, equity_usd=portfolio.equity_usd, leverage=intent.leverage,
+    )
+    single_trade_sub_terms: list[tuple[str, float]] = [
+        ("kelly_cold_start", single_cap_pct),
+        ("absolute_ceiling", SINGLE_TRADE_ABSOLUTE_CEILING_PCT),
+        ("equity_shadow_cap", equity_shadow_validation_cap(intent.strategy)),
+        ("notional_hard_cap", notional_cap_pct),
+    ]
+    single_trade_name, single_trade_cap = min(single_trade_sub_terms, key=lambda t: t[1])
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
-        single_trade_cap=min(
-            single_cap_pct,
-            SINGLE_TRADE_ABSOLUTE_CEILING_PCT,
-            equity_shadow_validation_cap(intent.strategy),
-        ),
+        single_trade_cap=single_trade_cap,
         per_symbol_remaining=per_symbol_remaining,
         underlying_remaining=underlying_remaining,
         cluster_remaining=cluster_rem,
@@ -569,6 +598,18 @@ def compute_size(
         venue_daily_remaining=venue_daily_rem,
         total_daily_remaining=total_daily_rem,
     )
+    if binding == "single_trade":
+        # Structured binding log (P0-3 test requirement): name the SPECIFIC
+        # sub-term that clipped inside the single-trade slot, not just the
+        # opaque "single_trade" audit string — makes the venue notional hard
+        # cap (and every sibling sub-term) visible in the log, unlike the old
+        # silent post-hoc clamp it replaces.
+        logger.info(
+            "[T4/single-trade-clip] %s/%s sid=%s binding=%s cap_pct=%.4f "
+            "notional_hard_cap_usd=%.2f",
+            intent.venue, intent.symbol, intent.signal_id, single_trade_name,
+            single_trade_cap, notional_hard_cap_usd(intent.venue),
+        )
 
     # (9) notional
     notional = final_risk_pct * portfolio.equity_usd * intent.leverage

@@ -111,6 +111,24 @@ toward the absolute ceiling) to full size once the edge clears."""
 
 EQUITY_SHADOW_CAP_ENV: Final[str] = "POLARIS_EQUITY_SHADOW_CAP_PCT"
 
+# Per-trade absolute notional hard cap (USD), venue-keyed. This REPLACES the
+# silent post-hoc ``max(10.0, min(x, 5_000.0))`` clamp formerly applied in
+# ``_production_run_signal.py`` AFTER T4 had already computed a correct
+# ``final_notional_usd`` — that clamp was unlogged and collapsed every signal
+# above $5k (e.g. cont=0.75 and cont=1.50 converged to the identical $5,000,
+# silently voiding the 1.5/2/3x tier amplifier since 2026-05-29 ee82437). This
+# constant instead enters the SAME single ``headroom_min()`` min() slot as
+# ``SINGLE_TRADE_ABSOLUTE_CEILING_PCT`` (no new T4 multiplier, 9-stack ban
+# intact) — expressed in %-of-equity terms via ``notional_ceiling_pct`` (engine)
+# so it composes with leverage instead of silently fighting it. Values are
+# generous (not a defensive throttle): OKX spot cash notional vs Capital's
+# leveraged CFD notional differ by construction, so the ceiling is per-venue.
+# env: ``POLARIS_NOTIONAL_CAP_<VENUE>_USD`` (Jin raises per venue on demand).
+NOTIONAL_HARD_CAP_OKX_USD: Final[float] = 50_000.0
+NOTIONAL_HARD_CAP_CAPITAL_USD: Final[float] = 50_000.0
+NOTIONAL_HARD_CAP_ALPACA_USD: Final[float] = 50_000.0
+NOTIONAL_HARD_CAP_DEFAULT_USD: Final[float] = 50_000.0
+
 
 # ---------------------------------------------------------------------------
 # Env-override resolvers (read at call time so operator can dial caps without a
@@ -192,6 +210,22 @@ def equity_shadow_cap_pct() -> float:
     missing / empty → the small default. Applied only to the two unvalidated
     daily-equity strategies via ``equity_shadow_validation_cap`` (engine)."""
     return _cap_env(EQUITY_SHADOW_CAP_ENV, EQUITY_SHADOW_CAP_DEFAULT_PCT)
+
+
+def notional_hard_cap_usd(venue: str) -> float:
+    """Per-trade absolute notional hard cap (USD) for ``venue``.
+
+    Env: ``POLARIS_NOTIONAL_CAP_<VENUE>_USD`` (venue upper-cased), e.g.
+    ``POLARIS_NOTIONAL_CAP_OKX_USD``. Unknown venue falls back to the
+    generous default (never a silent zero — flow_not_block).
+    """
+    default_by_venue = {
+        "okx": NOTIONAL_HARD_CAP_OKX_USD,
+        "capital": NOTIONAL_HARD_CAP_CAPITAL_USD,
+        "alpaca": NOTIONAL_HARD_CAP_ALPACA_USD,
+    }
+    default = default_by_venue.get(venue.lower(), NOTIONAL_HARD_CAP_DEFAULT_USD)
+    return _cap_env(f"POLARIS_NOTIONAL_CAP_{venue.upper()}_USD", default)
 
 
 def target_vol() -> float:

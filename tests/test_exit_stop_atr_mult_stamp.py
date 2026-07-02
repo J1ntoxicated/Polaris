@@ -117,7 +117,9 @@ async def test_weekend_maker_floor_bound_strategy_stamps_widened_mult(
     stamped = _stamped_mult(memdb, "pos-weekend")
     assert stamped == WEEKEND_MAKER_STOP_ATR_MULT == 3.0
     assert stamped != STOP_ATR_MULT  # distinguishable from the SSOT binding
-    assert stamped == _stop_atr_mult_for_strategy(WEEKEND_STRATEGY_ID)
+    # fee-aware 시그니처(atr_pct 의무 kwarg, Wave A): healthy ATR(1%)에서 fee
+    # floor(≈0.6×)는 weekend 3.0× 아래 → max()가 3.0 유지, 스탬프와 일치.
+    assert stamped == _stop_atr_mult_for_strategy(WEEKEND_STRATEGY_ID, atr_pct=0.01)
 
 
 def test_persist_exit_state_none_leaves_column_untouched(

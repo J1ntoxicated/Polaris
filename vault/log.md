@@ -261,3 +261,8 @@
 2026-07-02 15:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=387 learners=3 paper=True]
 - 2026-07-03 hotfix(schema): live pending_opens에 state/position_id 컬럼 누락(IF NOT EXISTS가 컬럼 진화 미반영) → 수동 ALTER 2건, 'no such column' 에러 0 확인. 부팅 컬럼-드리프트 가드 chip 분리(task_56390a9b). Haiku 틱이 적발
 - 2026-07-03 05:10 관찰(WAL creep 재발): 13h 러닝에 WAL 4.9GB, PASSIVE 체크포인트 3%만 통과(346/53695) — 봇 자신의 장수 리더가 스냅샷 고정(대시 재시작으로 배제 확인). 드랍 4~9/h 평탄. 07:30 재기동이 임시 해소 — DB writer/reader 분리(P1, 2회 이월)를 다음 빌드 안건으로 승격, 근거: 리더 스냅샷 고정 실측
+2026-07-02 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=388 learners=3 paper=True]
+2026-07-02 21:56 [Write: /Users/jinyoon/Projects/Polaris/tools/model_usage_stats.py]
+2026-07-02 21:56 [Edit: /Users/jinyoon/Projects/Polaris/.claude/hooks/session_end.py]
+2026-07-02 21:57 [Edit: /Users/jinyoon/Projects/Polaris/tools/model_usage_stats.py]
+- 2026-07-03 harness(tier+stats): 모델 티어 재편(Jin) — Opus 4.8=리뷰(code-reviewer)+어드바이저(codex-debate-partner), Fable 5=오케스트레이터(메인루프 settings.json model)+리서치검증+Jin대화, Sonnet=코딩 불변 · 모델사용 워터마크 통계 랜딩(tools/model_usage_stats.py 340LOC 18tests+영속원장 data/runtime/model_usage_ledger.json+vault/40_ops/model-usage-stats.md 자동갱신 session_end 훅, Sonnet 빌드→Opus 적대리뷰 APPROVE_WITH_NITS=신티어 첫 가동)

@@ -15,8 +15,10 @@ Detection (P0 stub):
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,11 +45,22 @@ def append_log(summary: str) -> None:
         fh.write(line)
 
 
+def refresh_model_usage_stats() -> None:
+    """Best-effort model-usage watermark regen. Never affects hook exit code."""
+    with contextlib.suppress(Exception):
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "tools" / "model_usage_stats.py"), "--write"],
+            timeout=45,
+            capture_output=True,
+        )
+
+
 def main() -> int:
     summary = read_dirty()
     if not summary:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionEnd",
                                                   "info": "no material change, skip log append"}}))
+        refresh_model_usage_stats()
         return 0
     append_log(summary)
     try:
@@ -56,6 +69,7 @@ def main() -> int:
         pass
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionEnd",
                                               "info": f"appended log: {summary}"}}))
+    refresh_model_usage_stats()
     return 0
 
 

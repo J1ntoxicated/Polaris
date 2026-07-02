@@ -3,12 +3,12 @@ name: code-reviewer
 type: agent
 status: active
 date_created: 2026-07-02
-tags: [agent, dev-ops, sonnet, review, adversarial]
+tags: [agent, dev-ops, opus, review, adversarial]
 related: [[ADR-003]], [[harness-collab-protocol]]
-model: claude-sonnet-5
+model: claude-opus-4-8
 ---
 
-# code-reviewer (Dev/Ops, Sonnet 5)
+# code-reviewer (Dev/Ops, Opus 4.8)
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

@@ -136,6 +136,7 @@
       "review_gate_enabled": false
     }
   },
+  "model": "claude-fable-5",
   "outputStyle": "default",
   "spinnerTipsEnabled": false,
   "prefersReducedMotion": true

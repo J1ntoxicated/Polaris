@@ -10,6 +10,7 @@ No network: adapters are mocked. NO order placement.
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Iterable
 from typing import Any
@@ -99,10 +100,10 @@ def test_imports_new_alpaca_position(conn: sqlite3.Connection) -> None:
     capital = _MockCapital({"positions": []})
     okx = _MockOKX()
 
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
         now_ts=5000,
-    )
+    ))
 
     # one SimulatedTrade returned (same shape as hydrate)
     assert len(imported) == 1
@@ -149,10 +150,10 @@ def test_already_tracked_not_double_imported(conn: sqlite3.Connection) -> None:
     capital = _MockCapital({"positions": []})
     okx = _MockOKX()
 
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
         now_ts=5000,
-    )
+    ))
 
     assert imported == []
     # still exactly one position (the pre-existing one); no reconcile import row
@@ -188,10 +189,10 @@ def test_imports_new_capital_position(conn: sqlite3.Connection) -> None:
     capital = _MockCapital(capital_body)
     okx = _MockOKX()
 
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
         now_ts=5000,
-    )
+    ))
 
     assert len(imported) == 1
     t = imported[0]
@@ -213,10 +214,10 @@ def test_okx_dust_skipped_by_default(conn: sqlite3.Connection) -> None:
     capital = _MockCapital({"positions": []})
     okx = _MockOKX()
 
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
         now_ts=5000,
-    )
+    ))
 
     assert imported == []
     # OKX adapter never touched when import_okx_spot=False
@@ -228,18 +229,18 @@ def test_empty_venues_noop(conn: sqlite3.Connection) -> None:
     capital = _MockCapital({"positions": []})
     okx = _MockOKX()
 
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
         now_ts=5000,
-    )
+    ))
     assert imported == []
     assert conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
 
 
 def test_none_adapters_noop(conn: sqlite3.Connection) -> None:
-    imported = reconcile_venue_positions(
+    imported = asyncio.run(reconcile_venue_positions(
         conn, okx_adapter=None, capital_adapter=None, alpaca_adapter=None,
         now_ts=5000,
-    )
+    ))
     assert imported == []

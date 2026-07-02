@@ -907,17 +907,20 @@ async def run_production_paper_loop(
     # at the CURRENT mark (PnL~0). Runs AFTER adapters exist; OKX SPOT dust is
     # fungible wallet balance, skipped by default (import_okx_spot=False).
     # Gated OFF by default (2026-06-01): the venue reconcile-import had 3 live
-    # bugs — _reconcile_capital crash (sync _run_coro vs running loop), imported
-    # positions insta-closing (entry mark + uninitialised exit FSM), and a
-    # Capital deal_id=None close-error loop. Re-enable only after those are fixed
-    # (POLARIS_RECONCILE_VENUE_IMPORT=1). Until then the bot starts flat and
-    # leaves venue holdings unmanaged (benign on DEMO) — stable trading first.
+    # bugs — cross-event-loop crash reusing a main-loop-bound adapter client
+    # (P1-6, FIXED 2026-07-02 — reconcile_venue_positions is now async and
+    # awaits adapters on the caller's own loop instead of a worker-thread
+    # ``asyncio.run``), imported positions insta-closing (entry mark +
+    # uninitialised exit FSM), and a Capital deal_id=None close-error loop.
+    # Re-enable only after ALL are fixed (POLARIS_RECONCILE_VENUE_IMPORT=1).
+    # Until then the bot starts flat and leaves venue holdings unmanaged
+    # (benign on DEMO) — stable trading first.
     if real_roundtrip and os.environ.get("POLARIS_RECONCILE_VENUE_IMPORT") == "1":
         capital_adapter = (
             CapitalAdapter(capital_session) if capital_session is not None else None
         )
         try:
-            imported = reconcile_venue_positions(
+            imported = await reconcile_venue_positions(
                 conn, okx_adapter=okx_adapter, capital_adapter=capital_adapter,
                 alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
             )

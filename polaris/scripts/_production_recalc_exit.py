@@ -50,6 +50,7 @@ from polaris.core.live_recalc.loser_timeout import (
 from polaris.core.live_recalc.loser_timeout import (
     loser_timeout_for_strategy as _loser_timeout_for_strategy,
 )
+from polaris.scripts._production_atr import strategy_timeframe
 
 # Re-exported (move-only split) with redundant aliases so these resolve as
 # EXPLICIT module attributes (mypy --strict no-implicit-reexport) for the
@@ -171,6 +172,12 @@ def _assess_mode_for_position(
     threads its per-position streak; the bar-pipeline caller (no per-tick streak)
     leaves the default ``_DEFAULT_BROKEN_STREAK`` so a confirmed bar-close break
     still cuts an AGED position.
+
+    ``timeframe`` ([[1d_exit_horizon_fix_2026-07-02]]): resolved from
+    ``strategy_timeframe(strategy_id)`` (SAME lookup the ATR ruler uses) and
+    forwarded so the horizon drift-materiality floor scales to THIS strategy's own
+    bar cadence — unregistered/tick-engine ids resolve to "1m" (the pre-fix
+    calibration, byte-identical).
     """
     if not EXIT_ADAPTIVE_THESIS_ON:
         return None
@@ -191,6 +198,7 @@ def _assess_mode_for_position(
             horizon_seconds=horizon_seconds,
             giveback=_THESIS_GIVEBACK,
             broken_streak=broken_streak,
+            timeframe=strategy_timeframe(strategy_id),
         )
     except Exception as exc:  # noqa: BLE001 — re-map must never break the exit
         logger.warning("[L6/exit] thesis re-map assess failed — no re-map: %r", exc)

@@ -288,12 +288,14 @@ def test_immaterial_intraday_drift_within_horizon_does_not_cut() -> None:
 
 
 def test_material_adverse_drift_within_horizon_still_cuts() -> None:
-    # A genuine, MATERIAL reversal (-0.6 drift) early in the horizon + red still
-    # breaks the thesis → CUT (the floor only rejects noise, never a real break).
+    # A genuine, MATERIAL reversal (-0.6 drift) PAST the maturity floor (5% of
+    # the 2_073_600s horizon = 103_680s) + red still breaks the thesis → CUT
+    # (the materiality floor only rejects noise, never a real break; maturity
+    # only delays the momentum-only cut, never suppresses a mature one).
     m = _assess(
         bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.3, momentum_drift=-0.6,
         ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
-        held_seconds=298, horizon_seconds=2_073_600,
+        held_seconds=110_000, horizon_seconds=2_073_600,
     )
     assert m is ManagementMode.CUT
 
@@ -349,3 +351,164 @@ def test_floor_only_gates_within_horizon_none_horizon_unchanged() -> None:
         held_seconds=298, horizon_seconds=None,
     )
     assert m is ManagementMode.CUT
+
+
+# --- P0-2 (4): timeframe-scaled drift floor + uncorroborated-break maturity --
+# [[1d_exit_horizon_fix_2026-07-02]]. Wave A scoped the drift-measurement bar to
+# the strategy's OWN timeframe, but the flat 0.0015 floor stayed calibrated on
+# the OLD 1m/10-min window — a 1D bar-to-bar span routinely drifts several
+# PERCENT, so the flat floor passed through unconditionally and a 1D thesis was
+# cut on its FIRST recalc cycle (LIVE 2026-07-02: index_dual_momentum_rotation
+# J225/AU200AU thesis_cut at 48s hold, momentum-drift path — the
+# corroborated-break gate never engaged since this was an UNCORROBORATED
+# momentum-only break). Two independent fixes:
+#   (1) the materiality floor SCALES per ``timeframe`` (1D positions are judged
+#       against the 1D noise band, not the 1m one);
+#   (2) an uncorroborated (momentum-only) BROKEN read additionally requires the
+#       position to have aged past ``EXIT_THESIS_BREAK_HOLD_FRAC`` (5%) of its
+#       horizon — however large the drift, a fresh long-horizon thesis gets real
+#       development time. CORROBORATED breaks (OFI / regime-flip) bypass BOTH
+#       gates — always real, cross-signal-confirmed, never noise.
+# The -1.0R hard rail / ATR trail / G6 crisis path are OWNED by the caller and
+# are UNTOUCHED by either gate — layer separation proven by
+# ``test_maturity_gate_never_touches_the_pnl_rail_layer`` below.
+
+
+def test_1d_typical_bar_drift_does_not_cut_below_materiality_floor() -> None:
+    # A "typical" 1D bar-to-bar drift (~1.3%, well inside the measured 1D noise
+    # band) on a freshly-filled 1D position must NOT be material under the
+    # timeframe-scaled floor — pre-fix (flat 0.0015 = 0.15%) this would CUT.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.02, momentum_drift=-0.013,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=48, horizon_seconds=21 * 86400, timeframe="1D",
+    )
+    assert m is not ManagementMode.CUT
+
+
+def test_1d_genuinely_material_drift_still_cuts_once_mature() -> None:
+    # A LARGE 1D drift (-15%, clears even the scaled 1D floor) AFTER the position
+    # has aged past the 5%-of-horizon maturity floor still breaks the thesis.
+    horizon = 21 * 86400
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.3, momentum_drift=-0.15,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=int(horizon * 0.06), horizon_seconds=horizon, timeframe="1D",
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_1d_large_drift_suppressed_before_maturity_floor() -> None:
+    # The SAME large -15% drift, but the position is still fresh (48s held, far
+    # below the 5%-of-horizon maturity floor ~90,720s) — the momentum-ONLY break
+    # must be suppressed regardless of drift magnitude (mandate: "drift가 아무리
+    # 커도 발달시간 전엔 컷 불가").
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.3, momentum_drift=-0.15,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=48, horizon_seconds=21 * 86400, timeframe="1D",
+    )
+    assert m is not ManagementMode.CUT
+
+
+def test_maturity_gate_does_not_apply_to_corroborated_ofi_break() -> None:
+    # A CORROBORATED break (OFI firmly opposes) on a fresh (48s) 1D position
+    # bypasses BOTH the materiality floor and the maturity gate — it is a real,
+    # cross-signal-confirmed reversal, not developing-thesis noise.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.013,
+        ofi=-0.5, flow_confirmed=False, regime="trend", entry_regime="trend",
+        held_seconds=48, horizon_seconds=21 * 86400, timeframe="1D",
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_maturity_gate_does_not_apply_to_corroborated_regime_flip() -> None:
+    # A CORROBORATED break (regime flipped against the long) on a fresh 1D
+    # position also bypasses the maturity gate — structural, not noise.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.2, momentum_drift=-0.013,
+        ofi=None, regime="downtrend", entry_regime="uptrend",
+        held_seconds=48, horizon_seconds=21 * 86400, timeframe="1D",
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_1m_timeframe_floor_is_byte_identical_to_pre_fix_constant() -> None:
+    # timeframe="1m" (ratio 1.0 by construction) resolves to EXACTLY the
+    # pre-existing flat EXIT_THESIS_DRIFT_FLOOR — the scaled floor never loosens
+    # or tightens the proven 1m/tick-engine calibration.
+    from polaris.core.live_recalc.exit_engine import (
+        EXIT_THESIS_DRIFT_FLOOR,
+        drift_floor_for_timeframe,
+    )
+
+    assert drift_floor_for_timeframe("1m") == EXIT_THESIS_DRIFT_FLOOR
+
+
+def test_no_timeframe_falls_back_to_1m_floor_conservative() -> None:
+    # An unregistered/None timeframe (legacy caller, tick-engine synthetic
+    # signal) falls back to the unscaled 1m floor — never LOOSER than pre-fix.
+    from polaris.core.live_recalc.exit_engine import (
+        EXIT_THESIS_DRIFT_FLOOR,
+        drift_floor_for_timeframe,
+    )
+
+    assert drift_floor_for_timeframe(None) == EXIT_THESIS_DRIFT_FLOOR
+    assert drift_floor_for_timeframe("unknown_tf") == EXIT_THESIS_DRIFT_FLOOR
+
+
+def test_1m_strategy_grace_behaviour_unchanged_by_maturity_gate() -> None:
+    # A 1m/tick-scale thesis (horizon_seconds=600, the tick-engine's typical
+    # 10-min window) with a genuine deadband-clearing drift break PAST both the
+    # flat GRACE (25s) and the tiny 5%-of-600s=30s maturity floor still CUTs —
+    # the maturity gate is proportionally tiny at 1m scale and does not block
+    # the existing fast-scalp exit responsiveness.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.03, momentum_drift=-0.6,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=60, horizon_seconds=600, timeframe="1m",
+    )
+    assert m is ManagementMode.CUT
+
+
+def test_maturity_gate_never_touches_the_pnl_rail_layer() -> None:
+    # LAYER SEPARATION proof: assess_thesis (the maturity/materiality gate) is
+    # EXIT-TIMING only and knows nothing about the G6 -1.0R hard rail — a deeply
+    # red (-1.0R) fresh 1D position with ONLY a sub-floor immaterial drift as the
+    # break signal returns a non-CUT thesis mode (the rail is a SEPARATE
+    # caller-owned layer that still fires on pnl_r <= -1.0R regardless of this
+    # mode). This test asserts the re-map's OWN scope: it does not escalate to
+    # CUT off pnl_r alone without a genuine break signal.
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-1.0, momentum_drift=-0.0005,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=48, horizon_seconds=21 * 86400, timeframe="1D",
+    )
+    assert m is not ManagementMode.CUT
+
+
+# --- Live incident fixture: J225/AU200AU 48s thesis_cut (2026-07-02) ---------
+
+
+def test_j225_live_incident_fixture_no_longer_cuts_at_48s() -> None:
+    # Reproduces the LIVE regression: index_dual_momentum_rotation (1D,
+    # horizon 21 bars), J225/AU200AU. fill 02:52:20 UTC -> first recalc cycle
+    # 02:52:28 -> thesis_cut 02:52:29 (held ~9-48s per the live log trace). The
+    # ONLY break signal was the bar-recalc momentum_drift (no OFI on the bar
+    # path -> None; no regime flip logged) — an UNCORROBORATED momentum-only
+    # break on a position that had not even completed ONE full bar of its 1D
+    # horizon. With the timeframe-scaled floor + maturity gate this scenario
+    # must HOLD, not CUT.
+    horizon_seconds = 21 * 86400  # index_dual_momentum_rotation expected_holding_bars
+    held_seconds = 48
+    # A representative adverse 1D drift measured over the bar-recalc window
+    # (~1.5% — well inside the measured 1D noise band, well below the ~11.2%
+    # scaled 1D materiality floor).
+    m = _assess(
+        bucket=Bucket.TREND, mfe_r=0.0, pnl_r=-0.05, momentum_drift=-0.015,
+        ofi=None, flow_confirmed=None, regime="trend", entry_regime="trend",
+        held_seconds=held_seconds, horizon_seconds=horizon_seconds,
+        timeframe="1D",
+    )
+    assert m is not ManagementMode.CUT

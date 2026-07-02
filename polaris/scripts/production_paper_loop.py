@@ -88,6 +88,7 @@ from polaris.scripts._static_ground import (
     ingest_static_ground_bars,
     refresh_ticker_ground,
 )
+from polaris.scripts.reconcile_alpaca_zombies import reconcile_alpaca_venue_drift
 from polaris.scripts.reconcile_orphans import (
     flatten_venue_eod,
     reconcile_venue_orphans,
@@ -952,6 +953,30 @@ async def run_production_paper_loop(
             logger.info(
                 "[reconcile] imported %d untracked live venue positions into "
                 "exit-engine management", len(imported),
+            )
+
+    # VENUE DRIFT reconcile (audit1 P0-4 ②, inverse of the adopt-import above):
+    # the DB tracks a status='open' Alpaca position the LIVE venue no longer
+    # holds (closed/liquidated externally — a demo auto-close, manual close
+    # outside the bot, or a prior reset) and our ledger never learned about it.
+    # Same gate + adapter as the import above (real_roundtrip + ALPACA-only
+    # opt-out flag); a venue read failure inside reconcile_alpaca_venue_drift
+    # already skips the WHOLE pass (fail-safe), so this call adds only a
+    # graceful skip on an unexpected raise — never blocks boot.
+    if real_roundtrip and alpaca_reconcile_import_enabled() and alpaca_adapter is not None:
+        try:
+            drifted = await reconcile_alpaca_venue_drift(
+                conn, alpaca_adapter, now_ts=int(time.time()),
+            )
+            if drifted:
+                logger.warning(
+                    "[reconcile] alpaca venue-drift reconciled %d stale internal "
+                    "open row(s) absent from the live venue book", drifted,
+                )
+        except Exception:
+            logger.exception(
+                "[reconcile] reconcile_alpaca_venue_drift failed — internal "
+                "ledger drift not cleared this boot (non-fatal)"
             )
 
     # P5 — tick-decision engine. The fast (~500ms) live-WS decision loop runs

@@ -1310,3 +1310,61 @@ def test_compute_unrealized_pnl_r_always_finite(entry: float, last: float, atr: 
     # Step M (2026-06-22): the decision path now shares the ±100 telemetry clamp
     # (was ±10, which HID −34..−100R losses from G6/G7/precise-exit).
     assert -100.0 <= pnl <= 100.0
+
+
+# ---------------------------------------------------------------------------
+# reconcile_alpaca_venue_drift boot wire (2026-07-02: was implemented +
+# unit-tested but never called from the boot sequence — registered ≠ fired).
+# ---------------------------------------------------------------------------
+
+
+def _read_paper_loop_boot_source() -> str:
+    """Read the boot-sequence source (same file this module tests)."""
+    from pathlib import Path
+
+    return Path("polaris/scripts/production_paper_loop.py").read_text()
+
+
+def test_boot_wires_reconcile_alpaca_venue_drift() -> None:
+    """The boot sequence must import AND call ``reconcile_alpaca_venue_drift``
+    — an implemented + unit-tested reconcile that sat dead (never invoked from
+    ``run_production_paper_loop``) is the same silent-INERT pattern as an
+    unwired gate: registered code that never fires live."""
+    src = _read_paper_loop_boot_source()
+    assert "reconcile_alpaca_venue_drift" in src, (
+        "production_paper_loop.py must import reconcile_alpaca_venue_drift "
+        "from polaris.scripts.reconcile_alpaca_zombies"
+    )
+    assert "await reconcile_alpaca_venue_drift(" in src, (
+        "the boot sequence must actually AWAIT reconcile_alpaca_venue_drift, "
+        "not just import it (registered != fired)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_alpaca_venue_drift_reachable_from_boot_module(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Smoke: the imported symbol is the real reconcile function and is
+    directly callable against a DB connection + a fake venue adapter (no
+    real network) — guards against a stale/renamed import silently no-op'ing."""
+    from polaris.scripts.production_paper_loop import reconcile_alpaca_venue_drift
+
+    class _FakeAlpaca:
+        async def fetch_positions(self) -> list[dict[str, Any]]:
+            return []
+
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
+        "exit_state) VALUES ('p1', 'alpaca', 'UPC', 'equity_tsmom', "
+        "'equity_tsmom', 'equity_tsmom', 'long', 10.0, 'open', ?, 'open')",
+        (int(time.time()) - 100 * 3600,),
+    )
+    memdb.commit()
+    n = await reconcile_alpaca_venue_drift(memdb, _FakeAlpaca())
+    assert n == 1
+    status = memdb.execute(
+        "SELECT status FROM positions WHERE position_id = 'p1'"
+    ).fetchone()[0]
+    assert status == "reconciled"

@@ -247,7 +247,8 @@ def test_positions_risk_usd_unstamped_renders_mfe_mae_na(tmp_path: Path) -> None
         )
         from polaris.scripts.dashboard.snapshot_sections import _regime_bars
 
-        _bars, regime_lookup = _regime_bars(conn)
+        # (wave D 병렬 병합: misc-batch가 _regime_bars에 now_s kwarg 추가)
+        _bars, regime_lookup = _regime_bars(conn, now_s=now_s)
         positions = _read_positions(
             conn,
             now_s=now_s,

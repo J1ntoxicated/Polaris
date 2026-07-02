@@ -62,6 +62,7 @@
   #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 14px; }
   #board .b-head .regime-lbl { color: var(--p-gry); font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; margin-right: 5px; }
   #board .b-head .regime-tag { color: var(--p-mag); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; font-size: 11px; }
+  #board .b-footer { color: var(--p-dim); font-size: 9px; letter-spacing: 0.04em; text-align: right; padding: 3px 8px; opacity: 0.6; }
 
   /* KPI cards — header strip, all in one row */
   #board .kpis {
@@ -568,7 +569,9 @@
     <!-- FULL-WIDTH TAB STRIP — POSITIONS default. -->
     <div class="b-tabs" id="b-tabs">${tabBtns}</div>
 
-    ${panes}`;
+    ${panes}
+
+    <div class="b-footer" id="b-footer"></div>`;
   }
 
   // ── shared renderers (header + KPIs + exchange summary) ───────────────────
@@ -608,6 +611,17 @@
       star.classList.toggle('live', live);
       star.classList.toggle('stale', !live);
     }
+  }
+
+  // P0-1 — stale-server detection aid: small footer showing the running
+  // server's git SHA + boot time (server.py stamps ``meta`` on every
+  // /api/snapshot response). Bloomberg density: one dim line, no card.
+  function renderFooter(d) {
+    const el = $('b-footer'); if (!el) return;
+    const m = d.meta;
+    if (!m) { el.textContent = ''; return; }
+    const boot = m.boot_ts ? new Date(m.boot_ts * 1000).toLocaleString() : '—';
+    el.textContent = 'server ' + (m.git_sha || 'unknown') + ' · up since ' + boot;
   }
 
   // (j) Anomaly scan — only things worth watching. Returns a short string list;
@@ -907,6 +921,7 @@
     try { renderHeader(d); } catch (e) { console.error('[render] renderHeader', e); }
     try { renderKpis(d); } catch (e) { console.error('[render] renderKpis', e); }
     try { renderStreams(d); } catch (e) { console.error('[render] renderStreams', e); }
+    try { renderFooter(d); } catch (e) { console.error('[render] renderFooter', e); }
     if (window.PolarisBoardTabs) {
       try { window.PolarisBoardTabs.renderTabCounts(d, TABS); }
       catch (e) { console.error('[render] renderTabCounts', e); }

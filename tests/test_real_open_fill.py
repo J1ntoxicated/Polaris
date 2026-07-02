@@ -229,6 +229,90 @@ async def test_reserve_and_submit_capital_persists_deal_id(
 
 
 # ---------------------------------------------------------------------------
+# (c3) quote-ccy entry converts risk_usd to USD (audit rank 4: J225/USDJPY
+# stamped raw-quote-ccy risk_usd, ~40-150x inflated).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_capital_jpy_quote_converts_risk_usd(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JPY-quoted Capital entry (USDJPY) must stamp risk_usd in USD terms,
+    not the raw JPY notional. Without the quote->USD conversion, entry_price
+    ~150 (JPY) inflates risk_usd ~150x vs the true USD risk unit.
+    """
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts import _production_pipeline as pipe
+    from polaris.scripts._smoke_roundtrip_shared import OpenAttempt
+    from polaris.venues.capital.constraint_translator import CapitalMarketConstraint
+
+    reset_process_fence()
+    # Seed the USDJPY conversion pair bar (bars-first, no-network rate source
+    # shared with the trading path's _peek_quote_usd_rate).
+    now = int(time.time())
+    memdb.execute(
+        "INSERT INTO bars (instrument_id, underlying_group_id, venue, symbol, "
+        " bar_interval, ts, open, high, low, close, volume) VALUES "
+        " ('capital:USDJPY', 'fx:USDJPY', 'capital', 'USDJPY', '1m', ?, "
+        " 150.0, 150.0, 150.0, 150.0, 0.0)",
+        (now,),
+    )
+    memdb.commit()
+    fill_price = 150.0  # JPY per USD — raw price is NOT in USD
+    jpy_fill = Fill(
+        venue="capital", instrument_id="capital:USDJPY",
+        strategy_id="volume_burst", side="buy", size_usd=1000.0,
+        fill_price=fill_price, fee_usd=0.1, slippage_bps=0.0,
+        ts_ms=int(time.time() * 1000), order_id="deal_jpy_1",
+        base_qty=1000.0, quote_qty=150_000.0, state="filled",
+    )
+
+    async def _stub_open(**_kwargs: Any) -> OpenAttempt:
+        return OpenAttempt(fill=jpy_fill, deal_id="deal_jpy_1")
+
+    monkeypatch.setattr(pipe, "_real_open_fill", _stub_open)
+    state = ProdLoopState()
+    # Warm the constraint cache the way a successful translate_capital_order
+    # fetch would (real production: the constraint is cached before this
+    # stamping site runs) — no network in this unit test.
+    import time as _time_mod
+
+    state.capital_constraints._entries["USDJPY"] = (
+        CapitalMarketConstraint(
+            epic="USDJPY", instrument_type="CURRENCIES", min_deal_size=1000.0,
+            step_size=1000.0, decimal_places=0, leverage=30.0,
+            pip_value_usd=0.1, base_ccy="USD", quote_ccy="JPY",
+        ),
+        _time_mod.monotonic(),
+    )
+    jpy_sig = RawSignal(
+        signal_id="jpy_sig", strategy_id="volume_burst", symbol="USDJPY",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="cfd_intraday",
+    )
+    trade = await _reserve_and_submit(
+        conn=memdb, state=state, sig=jpy_sig, venue="capital", symbol="USDJPY",
+        asset_class="fx", underlying_group_id="fx:USDJPY",
+        notional_usd=1000.0, last_price=fill_price, now_ts=now,
+        real_roundtrip=True, capital_session=object(),
+    )
+    assert trade is not None
+    row = memdb.execute(
+        "SELECT risk_usd FROM positions WHERE position_id = ?",
+        (trade.position_id,),
+    ).fetchone()
+    assert row is not None and row[0] is not None
+    risk_usd = float(row[0])
+    # Raw (unconverted) would be >= 150 * 0.005 (notional floor pct) * 1000 =
+    # 750+ (JPY-scale). USD-converted (rate ~1/150) must be well under $50 —
+    # the notional is $1000, and 0.5% of that is $5, comfortably below the
+    # raw-JPY-scale value.
+    assert risk_usd < 50.0
+    assert risk_usd > 0.0
+
+
+# ---------------------------------------------------------------------------
 # (d) real_roundtrip=False regression — simulate path only, adapter untouched
 # ---------------------------------------------------------------------------
 

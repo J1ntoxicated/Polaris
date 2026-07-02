@@ -88,6 +88,37 @@ def test_risk_usd_floored_against_phantom_r() -> None:
     assert big == pytest.approx(100.0 * 0.02 * STOP_ATR_MULT * 50.0)  # = $200, unfloored
 
 
+def test_risk_usd_converts_quote_ccy_to_usd() -> None:
+    # USDJPY-style quote-ccy entry: price/notional are in JPY, so risk_usd must
+    # be scaled by the quote->USD rate (~1/150 for JPY) — NOT left raw-JPY.
+    # Large enough notional that neither floor binds, isolating the conversion.
+    # entry 15000 (JPY), atr% 1%, 2 ATR, 1000 units, rate 1/150 -> USD terms:
+    # (15000*0.01*2*1000) * (1/150) = 2000.0
+    rate = 1.0 / 150.0
+    risk = risk_usd_at_entry(
+        entry_price=15_000.0, entry_atr_pct=0.01, base_qty=1_000.0,
+        quote_usd_rate=rate,
+    )
+    unconverted = risk_usd_at_entry(
+        entry_price=15_000.0, entry_atr_pct=0.01, base_qty=1_000.0,
+    )
+    assert risk == pytest.approx(unconverted * rate)
+    assert risk == pytest.approx(2_000.0)
+
+
+def test_risk_usd_default_rate_is_byte_identical_to_pre_fix() -> None:
+    # Default quote_usd_rate=1.0 (USD-quoted OKX/Alpaca) must be unchanged.
+    assert risk_usd_at_entry(
+        entry_price=100.0, entry_atr_pct=0.01, base_qty=3.0
+    ) == pytest.approx(6.0)
+
+
+def test_risk_usd_zero_on_nonpositive_rate() -> None:
+    assert risk_usd_at_entry(
+        entry_price=100.0, entry_atr_pct=0.01, base_qty=1.0, quote_usd_rate=0.0
+    ) == 0.0
+
+
 def test_risk_usd_abs_floor_backstops_micro_notional() -> None:
     # An ultra-small notional where even the pct floor is sub-cent → the absolute
     # floor is the binding minimum (never returns ~0 for a positive position).

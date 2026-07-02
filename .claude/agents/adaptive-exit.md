@@ -4,14 +4,14 @@ type: agent
 gate: 7
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, opus-p1, python-p0, realtime]
+tags: [agent, gate, fable-p1, python-p0, realtime]
 related: [[ADR-004]], [[ADR-005]], [[active-autonomous-vision]]
-model: claude-opus-4-7  # P1; P0 = Python
+model: claude-fable-5  # P1; P0 = Python
 ---
 
 # adaptive-exit (Gate 7)
 
-> ⚠️ **AI-FREE IN-LOOP (W3 cutover, [[ADR-011]])**: G7 runtime = **deterministic Python primary** (the `model: claude-opus-4-7` field is historical/dev-spawn only — **Anthropic blocked for runtime, in-loop GPT=0**). GPT = shadow/sentinel only.
+> ⚠️ **AI-FREE IN-LOOP (W3 cutover, [[ADR-011]])**: G7 runtime = **deterministic Python primary** (the `model: claude-fable-5` field is historical/dev-spawn only — **Anthropic blocked for runtime, in-loop GPT=0**). GPT = shadow/sentinel only.
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

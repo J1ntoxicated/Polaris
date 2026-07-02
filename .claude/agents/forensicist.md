@@ -3,12 +3,12 @@ name: forensicist
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, opus, incident]
+tags: [agent, dev-ops, fable, incident]
 related: [[ADR-002]]
-model: claude-opus-4-7
+model: claude-fable-5
 ---
 
-# forensicist (Dev/Ops, Opus)
+# forensicist (Dev/Ops, Fable 5)
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

@@ -4,12 +4,12 @@ type: agent
 gate: 5
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, opus-p1, python-p0, realtime]
+tags: [agent, gate, fable-p1, python-p0, realtime]
 related: [[ADR-004]], [[ADR-005]], [[ADR-006]]
-model: claude-opus-4-7  # P1; P0 = Python deterministic
+model: claude-fable-5  # P1; P0 = Python deterministic
 ---
 
-# entry-sizer (Gate 5, Opus P1 / Python P0)
+# entry-sizer (Gate 5, Fable P1 / Python P0)
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

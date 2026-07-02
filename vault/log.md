@@ -223,3 +223,19 @@
 2026-06-28 weekend-maker OOS backtest: both edges REAL (flush +0.44R/funding +0.2-0.9R over random-weekend beta, OOS) — loss=EXIT(-1R rail too tight for 1H ATR R-unit, kills winners-that-dip)+EXEC(live 0 maker fills, taker slippage), NOT signal. Verdict FIX-EXIT+FIX-EXEC, not KILL. note weekend_maker_oos_backtest_2026-06-28.md
 2026-06-28 07:54 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=156 learners=3 paper=True]
 2026-06-28 weekend maker honest re-run: signal edge SOLID (flush +0.43/funding +0.85 over real random-weekend baseline, now coded); prior §1 baseline faked + §3 'win 64%'=hit_target 0.736 misread (real pnl>0 win 5.4% flush); maker persist unwired (log_maker_fill test-only, 0 live rows) but live DID maker-fill basis~0; verdict FIX-EXIT(R-unit widen)+FIX-EXEC(wire persist), not KILL — _weekend_baseline_honest.py
+2026-06-28 09:13 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=154 learners=3 paper=True]
+2026-06-28 20:25 [Write: /tmp/polaris_onepager.html]
+2026-06-28 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=261 learners=3 paper=True]
+2026-06-28 daily-auto [closes=12 pnl_usd=-29.09 opens=11 faults=0 restarts=2]
+- 2026-06-29 forensic(funnel-#96): 평일검증엣지 깔때기 사망지점 — 게이트는 무죄(G3/G4 all PASS, G5 all SIZED, KILL 0). 사망은 (1)신호생성 부재 (bar_breakout/equity/donchian last emit Sat 06-27; 1D전략이라 일봉당 1회+포커스축소) (2)SOL-ETH 1288× churn(동일 daily bar 재발화, anchoring fill없어 anti-churn novelty 미스탬프) (3)venue submit reject: OKX 50105 credential-fail(bar_breakout 15 SOL-ETH), Alpaca market-closed/no_fill(equity Sat, external→fault 미기록·invisible). order_intents 전건 'created'+NULL venue_oid = 로깅갭(제출경로 아님). 결론: 깔때기 붕괴≠게이트 학살, =신호희소+주말타이밍+venue자격/세션. lifetime fills 51 중 평일엣지≈0은 캡처윈도우가 주말이라.
+- 2026-06-29 forensic(workstreamA-#96): OKX 바추세 36h침묵 = 정상(버그아님). 40개 OKX 포커스 전부 Donchian-40 prior-high 미달(BTC-11.5%/ETH-27%/SOL-6%/WIF-4.4%) → generate_raw_signal 호출되나 close≤prior-high로 None. 1D dispatch 매틱 도달(tick1912 1D=88659 fresh), 주말1H메이커 RAY-USDT 04:14 emit=바경로 생존. halt: 전건 auto-reset(06-27 06:39), ACTIVE/re-arm 완료. 06-27 1297발화=in-progress 일봉 intraday-high 일시초과→마감시 복귀. SOL-ETH 50105 self-halt=okx_unsettleable_set defer로 이미해결(quote=ETH). 잔여 flow_not_block tension: CB_REJECT_THRESHOLD=(3,600) per-symbol reject가 strategy-wide SOFT_HALT 유발(per-symbol isolation이 순수해법, 현 침묵원인 아님). data hygiene: 19504 dup-date 1D bar groups.
+2026-06-29 09:34 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_fd573083-32d-4/tests/test_supervise_strategies_wire.py]
+2026-06-29 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=150 learners=3 paper=True]
+2026-06-29 daily-auto [closes=32 pnl_usd=-10.88 opens=34 faults=1 restarts=2]
+2026-06-30 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=156 learners=3 paper=True]
+2026-06-30 daily-auto [closes=39 pnl_usd=+6.05 opens=39 faults=0 restarts=2]
+2026-07-01 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=224 learners=3 paper=True]
+2026-07-01 22:48 [Edit: /Users/jinyoon/.claude/projects/-Users-jinyoon-Projects-Polaris/memory/MEMORY.md]
+2026-07-01 23:12 [Edit: /Users/jinyoon/.claude/projects/-Users-jinyoon-Projects-Polaris/memory/MEMORY.md]
+- 2026-07-02 audit(전수x2): 거래개판(wf_c5006d0d 43conf) + AI후킹(wf_c66a0f03 20conf) → vault/50_research 9문서(trade_mess_full_audit_2026-07-02_{verdict,fixplan} + ai-hooks-audit-{verdict,fixplan} + judge-probe-reality/gate-pipeline-value-audit/altdata-reachability-map/store-graveyard-census/metrics-canon-status) · 하네스 tier 재편(Sonnet5=코딩·리뷰 독립, Fable5=어드바이저·리서치, code-reviewer 신설)
+2026-07-01 daily-auto [closes=12 pnl_usd=-33.26 opens=12 faults=4 restarts=2]

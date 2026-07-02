@@ -106,8 +106,10 @@ def _seed_position_and_fill(
         ),
     )
     instrument_id = f"{venue}:{symbol}"
+    # [P0-5] Anchored so the newest bar lands AT opened_ts (NOW) — pre-entry
+    # bars are now excluded from load_active_position_rows's window.
     for i in range(20):
-        ts = NOW - (20 - i) * 60
+        ts = NOW - (19 - i) * 60
         conn.execute(
             "INSERT OR REPLACE INTO bars "
             "(instrument_id, underlying_group_id, venue, symbol, bar_interval, "

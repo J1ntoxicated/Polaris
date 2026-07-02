@@ -92,8 +92,13 @@ def _seed(
             position_id, uuid.uuid4().hex,
         ),
     )
+    # [P0-5] Bars anchored so the newest one lands AT ``opened_ts`` (never
+    # before it) — ``load_active_position_rows`` now excludes ts < opened_ts
+    # (pre-entry bars must never feed the peak/trough/MFE-MAE window), so a
+    # fixture whose whole window predates the position's own open would
+    # starve every assertion below back to the entry-price fallback.
     for i in range(20):
-        ts = NOW - (20 - i) * 60
+        ts = opened_ts - (19 - i) * 60
         conn.execute(
             "INSERT OR REPLACE INTO bars "
             "(instrument_id, underlying_group_id, venue, symbol, bar_interval, "

@@ -56,22 +56,22 @@ def _seed(conn: sqlite3.Connection) -> None:
         #  stream_id, signal_id, strategy_id, entry_strategy_id,
         #  active_strategy_id, side, qty, status, opened_ts, closed_ts,
         #  swap_count, stop_price, peak_price, trough_price, mfe_r, mae_r,
-        #  exit_state)
+        #  exit_state, risk_usd)
         ("p1", "okx", "BTC-USDT", "BTC", "spot", "A_okx_crypto", "s1", "tsmom",
          "tsmom", "tsmom", "long", 0.1, "open", now_s - 300, None, 0,
-         95.0, 110.0, 98.0, 1.5, -0.4, "protected"),
+         95.0, 110.0, 98.0, 1.5, -0.4, "protected", 10.0),
         ("p2", "capital", "XAUUSD", "XAU", "cfd", "B_capital_cfd", "s2",
          "xau_indices_trend", "xau_indices_trend", "xau_indices_trend",
          "long", 1.0, "open", now_s - 120, None, 0,
-         1880.0, 1920.0, 1895.0, 0.8, -0.2, "touched"),
+         1880.0, 1920.0, 1895.0, 0.8, -0.2, "touched", 20.0),
     ]
     conn.executemany(
         "INSERT INTO positions (position_id, venue, symbol, "
         "underlying_group_id, product_class, stream_id, signal_id, "
         "strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
         "status, opened_ts, closed_ts, swap_count, stop_price, peak_price, "
-        "trough_price, mfe_r, mae_r, exit_state) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "trough_price, mfe_r, mae_r, exit_state, risk_usd) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         positions,
     )
 
@@ -214,6 +214,57 @@ def test_positions_carry_regime_exit_stop_mfe_mae(tmp_path: Path) -> None:
         assert btc.regime == "bull_trend"
         # upnl_pct present and finite
         assert isinstance(btc.upnl_pct, float)
+    finally:
+        conn.close()
+
+
+def test_positions_risk_usd_unstamped_renders_mfe_mae_na(tmp_path: Path) -> None:
+    """[P0-5] a row with NO ``risk_usd`` (unstamped — e.g. a reconcile-import
+    row before the ATR anchor resolves) must surface ``mfe_atr_r``/
+    ``mae_atr_r`` as ``None`` ('n/a' on the board), NEVER a fabricated 0.0R
+    that reads as a real (flat) excursion measurement."""
+    conn = _conn(tmp_path)
+    try:
+        now_s = _now_s()
+        conn.execute(
+            "INSERT INTO positions (position_id, venue, symbol, "
+            "underlying_group_id, strategy_id, entry_strategy_id, "
+            "active_strategy_id, side, qty, status, opened_ts, swap_count, "
+            "peak_price, trough_price, mfe_r, mae_r, exit_state) "
+            "VALUES ('p3', 'alpaca', 'ABBV', 'ABBV', '_reconcile_import', "
+            "'_reconcile_import', '_reconcile_import', 'long', 1.0, 'open', "
+            "?, 0, 251.0, 251.0, 1.47, 0.0, 'open')",
+            (now_s - 60,),
+        )
+        conn.execute(
+            "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, "
+            "side, size_usd, fill_price, fee_usd, slippage_bps, ts_ms, "
+            "order_id, contribution_id, pnl_usd, is_close, base_qty, "
+            "quote_qty, state) VALUES ('f9', 'alpaca', 'alpaca:ABBV', "
+            "'_reconcile_import', 'buy', 251.0, 251.0, 0.0, 0.0, ?, 'o9', "
+            "'p3', 0.0, 0, 1.0, 251.0, 'filled')",
+            (now_s * 1000,),
+        )
+        from polaris.scripts.dashboard.snapshot_sections import _regime_bars
+
+        _bars, regime_lookup = _regime_bars(conn)
+        positions = _read_positions(
+            conn,
+            now_s=now_s,
+            last_prices=_last_prices(conn),
+            entry_lookup=_entry_price_lookup(conn),
+            cell_mult=_cell_mult_lookup(conn),
+            regime_lookup=regime_lookup,
+        )
+        by_sym = {p.symbol: p for p in positions}
+        abbv = by_sym["ABBV"]
+        assert abbv.mfe_atr_r is None
+        assert abbv.mae_atr_r is None
+        # A normal row with risk_usd stamped keeps its real value (no
+        # collateral change — byte-identical for the existing p1 fixture).
+        btc = by_sym["BTC-USDT"]
+        assert btc.mfe_atr_r == 1.5
+        assert btc.mae_atr_r == -0.4
     finally:
         conn.close()
 

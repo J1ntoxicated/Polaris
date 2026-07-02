@@ -216,7 +216,10 @@ def _seed_position(
         " ?, ?, 'filled')",
         (uuid.uuid4().hex, NOW * 1000, inst, venue, position_id, uuid.uuid4().hex),
     )
-    _seed_bar(conn, inst, close=bar_close, ts=NOW - 30)
+    # [P0-5] ts=NOW (>= opened_ts) — load_active_position_rows now excludes
+    # pre-entry bars, so a bar older than the position's own open would fall
+    # back to the entry-price fallback instead of the intended bar_close.
+    _seed_bar(conn, inst, close=bar_close, ts=NOW)
     return position_id
 
 

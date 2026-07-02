@@ -104,7 +104,13 @@ def test_tick_engine_position_keeps_1m_drift_window_byte_identical(
     _seed_bars(memdb, interval="1m", n=20, start_close=100.5, step=-0.05)
     _seed_bars(memdb, interval="1H", n=20, start_close=91.0, step=1.0,
                end_ts=NOW - 60)
-    _seed_position(memdb, position_id="pos-tick", strategy="micro_reversion")
+    # [P0-5] opened_ts must be <= the window's OLDEST 1m bar (NOW - 19*60) —
+    # load_active_position_rows now excludes ts < opened_ts, so a position
+    # opened AT NOW would collapse the 20-bar drift window to 1 bar.
+    _seed_position(
+        memdb, position_id="pos-tick", strategy="micro_reversion",
+        opened_ts=NOW - 19 * 60,
+    )
     rows = {r["position_id"]: r for r in load_active_position_rows(memdb)}
     ticks = rows["pos-tick"]["recent_ticks"]
     first_close = ticks[0]["close"]

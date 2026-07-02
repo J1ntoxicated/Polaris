@@ -189,7 +189,8 @@ def _read_positions(
                   MAX(COALESCE(stop_price, 0.0)) AS stop, -- r[10]
                   MAX(COALESCE(mfe_r, 0.0)) AS mfe_r,     -- r[11]
                   MIN(COALESCE(mae_r, 0.0)) AS mae_r,     -- r[12]
-                  MAX(COALESCE(entry_regime, '')) AS entry_regime  -- r[13]
+                  MAX(COALESCE(entry_regime, '')) AS entry_regime, -- r[13]
+                  MAX(COALESCE(risk_usd, 0.0)) AS risk_usd -- r[14]
            FROM positions
            WHERE status NOT IN ('closed', 'cancelled', 'reconciled')
            GROUP BY venue, symbol, strategy_id, side
@@ -212,6 +213,7 @@ def _read_positions(
         mfe_r = float(r[11] or 0.0)
         mae_r = float(r[12] or 0.0)
         entry_regime = str(r[13] or "")
+        risk_usd = float(r[14] or 0.0)
         quote_ccy = _quote_ccy_for_symbol(
             venue, symbol, quote_by_sym.get((venue, symbol), "USD")
         )
@@ -267,8 +269,12 @@ def _read_positions(
                 stop_price=stop_price,
                 # Hardening #6: positions.mfe_r/mae_r are the per-trade-ATR
                 # EXCURSION ruler → surfaced as the *_atr_r payload fields.
-                mfe_atr_r=mfe_r,
-                mae_atr_r=mae_r,
+                # [P0-5] risk_usd == 0 (unstamped, e.g. a reconcile-import row
+                # before the ATR anchor resolves) means mfe_r/mae_r have no
+                # honest R denominator — show 'n/a' (None), never a fabricated
+                # 0.0R/stale-anchor R that reads as a real measurement.
+                mfe_atr_r=mfe_r if risk_usd > 0.0 else None,
+                mae_atr_r=mae_r if risk_usd > 0.0 else None,
                 upnl_pct=upnl_pct,
                 upnl_net_usd=upnl_net,
                 entry_regime=entry_regime,

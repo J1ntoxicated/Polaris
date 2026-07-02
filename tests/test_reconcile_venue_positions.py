@@ -244,3 +244,73 @@ def test_none_adapters_noop(conn: sqlite3.Connection) -> None:
         now_ts=5000,
     ))
     assert imported == []
+
+
+def test_import_stamps_risk_usd_anchor_and_flat_excursion(
+    conn: sqlite3.Connection,
+) -> None:
+    """[P0-5] a reconcile-import row must NOT be an R-measurement blind spot.
+
+    Injects a stub ``atr_anchor_fn`` (the DI seam ``production_paper_loop``
+    wires to the real ``timeframe_anchor_atr_pct`` — kept out of ``core`` per
+    the layering rail) so the import resolves ``entry_atr_pct`` the same way
+    a normal entry does — then asserts ``risk_usd`` / ``entry_atr_pct`` are
+    stamped (not NULL) and ``peak_price`` / ``trough_price`` start AT the
+    entry mark (a flat/zero excursion at t=0, never inherited from the
+    venue's historical cost basis or pre-entry market noise).
+    """
+    now_ts = 100_000
+
+    def _stub_anchor(
+        conn: sqlite3.Connection, instrument_id: str, now_ts: int,
+    ) -> tuple[float, str] | None:
+        assert instrument_id == "alpaca:SPCE"
+        return (0.02, "1m")
+
+    alpaca = _MockAlpaca([_alpaca_spce()])
+    capital = _MockCapital({"positions": []})
+    okx = _MockOKX()
+
+    imported = asyncio.run(reconcile_venue_positions(
+        conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
+        now_ts=now_ts, atr_anchor_fn=_stub_anchor,
+    ))
+    assert len(imported) == 1
+
+    row = conn.execute(
+        "SELECT risk_usd, entry_atr_pct, peak_price, trough_price, exit_state "
+        "FROM positions WHERE venue='alpaca' AND symbol='SPCE'"
+    ).fetchone()
+    risk_usd, entry_atr_pct, peak_price, trough_price, exit_state = row
+    assert risk_usd is not None and risk_usd > 0.0
+    assert entry_atr_pct is not None and entry_atr_pct > 0.0
+    # entry mark = 7.15 (current_price) — peak/trough must start there, not
+    # at the ignored historical avg_entry_price (3.10) or any stale bar.
+    assert peak_price == pytest.approx(7.15)
+    assert trough_price == pytest.approx(7.15)
+    assert exit_state == "open"
+
+
+def test_import_no_bars_leaves_atr_anchor_null_but_risk_usd_floored(
+    conn: sqlite3.Connection,
+) -> None:
+    """No bars window for the symbol → NULL ``entry_atr_pct`` (no fabricated
+    ATR read), but ``risk_usd`` still gets the SAME notional-pct FLOOR every
+    normal entry gets (``risk_usd_at_entry``'s existing floor, unchanged) —
+    so the row is never left at the pre-fix NULL/0 R-measurement blind spot.
+    """
+    alpaca = _MockAlpaca([_alpaca_spce()])
+    capital = _MockCapital({"positions": []})
+    okx = _MockOKX()
+
+    imported = asyncio.run(reconcile_venue_positions(
+        conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
+        now_ts=5000,
+    ))
+    assert len(imported) == 1
+    row = conn.execute(
+        "SELECT risk_usd, entry_atr_pct FROM positions "
+        "WHERE venue='alpaca' AND symbol='SPCE'"
+    ).fetchone()
+    assert row[0] is not None and row[0] > 0.0
+    assert row[1] is None

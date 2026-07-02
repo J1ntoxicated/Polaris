@@ -50,6 +50,7 @@ from polaris.core.live_recalc.loser_timeout import (
 from polaris.core.live_recalc.loser_timeout import (
     loser_timeout_for_strategy as _loser_timeout_for_strategy,
 )
+from polaris.core.metrics.risk_unit import STOP_ATR_MULT
 
 # Re-exported (move-only split) with redundant aliases so these resolve as
 # EXPLICIT module attributes (mypy --strict no-implicit-reexport) for the
@@ -210,19 +211,37 @@ def _find_open_trade(state: Any, position_id: str) -> Any | None:
 
 def persist_exit_state(
     conn: sqlite3.Connection, *, position_id: str, st: ExitState,
+    stop_atr_mult: float | None = None,
 ) -> None:
     """Persist the tracked precise-exit state back to the ``positions`` row.
 
     Measurement + adaptive-stop state only — these columns NEVER gate sizing,
     NEVER block an entry, and NEVER trigger a P&L / strategy / bot halt.
+
+    ``stop_atr_mult`` ([P1-8] observability, [[trade_mess_full_audit_2026-07-02]]):
+    the resolved R-unit ATR multiplier THIS position's exit ruler is bound to
+    (``_stop_atr_mult_for_strategy``) — stamped so a floor-bound / wide-ruler
+    position is readable directly off the row. ``None`` (a caller that never
+    resolves it) leaves the column untouched — byte-identical.
     """
+    if stop_atr_mult is None:
+        conn.execute(
+            "UPDATE positions SET stop_price = ?, peak_price = ?, "
+            "trough_price = ?, mfe_r = ?, mae_r = ?, exit_state = ? "
+            "WHERE position_id = ?",
+            (
+                st.stop_price, st.peak_price, st.trough_price,
+                st.mfe_r, st.mae_r, st.exit_state, position_id,
+            ),
+        )
+        return
     conn.execute(
         "UPDATE positions SET stop_price = ?, peak_price = ?, "
-        "trough_price = ?, mfe_r = ?, mae_r = ?, exit_state = ? "
-        "WHERE position_id = ?",
+        "trough_price = ?, mfe_r = ?, mae_r = ?, exit_state = ?, "
+        "stop_atr_mult = ? WHERE position_id = ?",
         (
             st.stop_price, st.peak_price, st.trough_price,
-            st.mfe_r, st.mae_r, st.exit_state, position_id,
+            st.mfe_r, st.mae_r, st.exit_state, stop_atr_mult, position_id,
         ),
     )
 
@@ -352,6 +371,18 @@ async def run_precise_exit(
     # the bounded revert gets room); every other strategy keeps the SSOT 2.0 →
     # byte-identical. 🚨 The −1.0R rail coefficient (G6 monitor) is UNTOUCHED — only
     # the measurement unit widens (size / entry / the rail are never changed here).
+    resolved_stop_atr_mult = _stop_atr_mult_for_strategy(strategy_id)
+    # [P1-8] observability ([[trade_mess_full_audit_2026-07-02]]): a non-SSOT
+    # binding (weekend maker / any future widened ruler) is logged once per tick
+    # so a floor-bound / wide-ruler position is traceable in the runtime log, not
+    # just re-derivable from the stamped column below. Log-only — never gates.
+    if resolved_stop_atr_mult != STOP_ATR_MULT:
+        logger.debug(
+            "[L6/exit] stop_atr_mult bind %s:%s trade_id=%s strategy=%s mult=%.2f "
+            "(SSOT=%.2f)",
+            pos["venue"], pos["symbol"], position_id, strategy_id,
+            resolved_stop_atr_mult, STOP_ATR_MULT,
+        )
     decision = evaluate_exit(
         prev=prev, side=side, entry_price=entry_price, last_price=last_price,
         atr_pct=atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
@@ -364,9 +395,12 @@ async def run_precise_exit(
         mode=mode,
         thesis_bucket=_bucket_for_strategy(strategy_id),
         thesis_giveback=_THESIS_GIVEBACK,
-        stop_atr_mult=_stop_atr_mult_for_strategy(strategy_id),
+        stop_atr_mult=resolved_stop_atr_mult,
     )
-    persist_exit_state(conn, position_id=position_id, st=decision.state)
+    persist_exit_state(
+        conn, position_id=position_id, st=decision.state,
+        stop_atr_mult=resolved_stop_atr_mult,
+    )
     # FSM state transition (DEBUG): surface the per-tick exit-state advance so
     # the dashboard can trace open→touched→protected→harvest. Logging only —
     # the persisted state above is the authority; this never gates anything.

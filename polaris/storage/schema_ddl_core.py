@@ -417,7 +417,8 @@ CREATE TABLE IF NOT EXISTS positions (
     pnl_r REAL,
     risk_usd REAL,
     entry_regime TEXT,
-    exit_cadence TEXT
+    exit_cadence TEXT,
+    stop_atr_mult REAL
 );
 """
 

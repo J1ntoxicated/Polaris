@@ -525,6 +525,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # sizing/gating/exit-timing. Pragma guard = idempotent.
     if "exit_cadence" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN exit_cadence TEXT")
+    # positions.stop_atr_mult — [P1-8] observability: the resolved R-unit ATR
+    # multiplier (``_stop_atr_mult_for_strategy``) THIS position's exit ruler was
+    # bound to, stamped at first precise-exit tick. Lets a floor-bound / wide-ruler
+    # position be read directly off the row instead of re-derived — the exact gap
+    # ([[trade_mess_full_audit_2026-07-02]]) that let the BEP-arm/trail desync go
+    # unnoticed. ADDITIVE: nullable REAL, NULL = legacy/un-stamped row. MEASUREMENT
+    # ONLY — never read by sizing/gating/exit-timing. Pragma guard = idempotent.
+    if "stop_atr_mult" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN stop_atr_mult REAL")
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are

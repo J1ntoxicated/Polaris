@@ -18,10 +18,7 @@ LOG="data/paper/spaceviz.log"
 
 cd "$POLARIS_DIR"
 
-# Already listening? Just (re)open the browser.
-if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "✅ web dashboard already running on :$PORT"
-else
+_start_server() {
     mkdir -p data/paper
     nohup python3 -m tools.visualizer.server --db "$DASH_DB" --port "$PORT" \
         > "$LOG" 2>&1 &
@@ -31,6 +28,31 @@ else
         sleep 0.5
     done
     echo "✅ web dashboard launched on :$PORT (db=$DASH_DB, log=$LOG)"
+}
+
+# P0-1: stale-server guard. If already listening, compare the RUNNING server's
+# git SHA (meta.git_sha off /api/snapshot) against this checkout's HEAD — a
+# server started before the latest deploy silently serves old code with no
+# visible signal. Mismatch → stop + restart; match → no-op (never a spurious
+# restart mid-session).
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    HEAD_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    RUNNING_SHA="$(curl -s --max-time 3 "http://localhost:$PORT/api/snapshot" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("meta",{}).get("git_sha","unknown"))' \
+        2>/dev/null || echo unknown)"
+    if [ "$HEAD_SHA" != "unknown" ] && [ "$RUNNING_SHA" != "unknown" ] && [ "$HEAD_SHA" != "$RUNNING_SHA" ]; then
+        echo "⚠️  stale dashboard server (running=$RUNNING_SHA, HEAD=$HEAD_SHA) — restarting"
+        ./scripts/stop_dashboard.sh
+        for _ in $(seq 1 20); do
+            lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
+            sleep 0.5
+        done
+        _start_server
+    else
+        echo "✅ web dashboard already running on :$PORT (sha=$RUNNING_SHA)"
+    fi
+else
+    _start_server
 fi
 
 # Jin 2026-06-22: NO auto browser-launch — Jin refreshes his own tab; Claude

@@ -65,6 +65,32 @@ ROOT = Path(__file__).parent
 # every reference file is resolved against this so a stray cwd never matters.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
+def _git_sha() -> str:
+    """Short HEAD SHA of the running server's checkout, ``unknown`` on failure.
+
+    Computed once at import (the server is restarted, not hot-reloaded, on
+    deploy) so a stale-server-vs-new-code drift is detectable by comparing
+    this against ``git rev-parse --short HEAD`` from the caller's shell
+    (P0-1: start_dashboard.sh auto-restart-on-mismatch).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        sha = out.stdout.strip()
+        return sha if out.returncode == 0 and sha else "unknown"
+    except Exception:
+        return "unknown"
+
+
+_GIT_SHA = _git_sha()
+_BOOT_TS = time.time()
+
 # Module-level runtime config (set in main()).
 _DB_PATH = Path("data/polaris_live.sqlite")
 _SENTINEL_DB_PATH = Path("data/sentinel.sqlite")
@@ -136,16 +162,21 @@ _snap_lock = threading.Lock()
 
 
 def _fresh_snapshot() -> dict[str, Any]:
-    """DashboardSnapshot JSON dict (native web board) — served from bg cache."""
+    """DashboardSnapshot JSON dict (native web board) — served from bg cache.
+
+    ``meta`` (git_sha + boot_ts) is stamped on every request rather than baked
+    into the cached dict — it's server-identity, not DB-derived state, and
+    must never go stale behind the 1s snapshot cache TTL.
+    """
     data: dict[str, Any] | None = _snap_cache["data"]
-    if data is not None:
-        return data
-    fresh = dataclasses.asdict(collect_snapshot(_DB_PATH))
-    with _snap_lock:
-        if _snap_cache["data"] is None:
-            _snap_cache["data"] = fresh
-            _snap_cache["ts"] = time.time()
-        return _snap_cache["data"]
+    if data is None:
+        fresh = dataclasses.asdict(collect_snapshot(_DB_PATH))
+        with _snap_lock:
+            if _snap_cache["data"] is None:
+                _snap_cache["data"] = fresh
+                _snap_cache["ts"] = time.time()
+            data = _snap_cache["data"]
+    return {**data, "meta": {"git_sha": _GIT_SHA, "boot_ts": _BOOT_TS}}
 
 
 def _price_marks() -> dict[str, dict[str, Any]]:

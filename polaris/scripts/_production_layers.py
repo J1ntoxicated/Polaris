@@ -165,15 +165,27 @@ OKX_REFRESH_SEC = 300
 CAPITAL_REFRESH_SEC = 600
 ALPACA_REFRESH_SEC = 600
 
-# C1 — Capital active-universe collapse guard (forensic 2026-05-31): a healthy
-# Capital fetch but a session-driven validity collapse (only 1 epic TRADEABLE on
-# the weekend) left the active book at exactly 1 closed symbol (EURUSD_W) for 27h
-# — FX is 24/5, so breadth must be preserved across the closure, not handed to a
-# single survivor. When a refresh's active set collapses to ``<= FLOOR`` while the
-# PRIOR book was healthy (``>= PRIOR_MIN``), KEEP the prior active set
-# (flow_not_block: preserve breadth, never zero-out). A genuine FULL closure
-# (active=0) stays the existing session_wait path — the guard does not resurrect
-# it; those rows revive automatically next refresh once TRADEABLE.
+# C1 — Capital active-universe collapse guard (forensic 2026-05-31, widened
+# 2026-07-02 #P1-5, floor restored 2026-07-02 review-fix): a healthy Capital
+# fetch but a session-driven validity collapse (only a handful of epics
+# TRADEABLE) left the active book stuck at a tiny fringe set — first exactly 1
+# closed symbol (EURUSD_W) for 27h, then later 4 fringe commodity/index epics
+# (OIL_BRENT/GASOIL/NYFANG/SG25 — none of the wave2 strategies' core symbols)
+# for 31h+, silencing every Capital strategy (0 emits). The original absolute
+# ``FLOOR = 1`` only caught the first (literal single-symbol) incident; the
+# second collapse (new=4) was `> FLOOR` so the guard never fired. The ratio-only
+# replacement (``<= RATIO`` of prior) generalized that but opened a dead zone:
+# for any healthy prior book of 5-9 symbols, ``RATIO * prior < 1``, so the only
+# new-count that can satisfy the ratio is 0 — already routed to the full-closure
+# branch below — meaning a collapse to even a single symbol from a small prior
+# book (the exact 2026-05-31 shape) went uncaught. The guard now ORs the
+# absolute ``FLOOR`` back in alongside the ``RATIO`` so both the small-book
+# (literal single/near-empty survivor) and large-book (relative fringe
+# collapse) shapes are caught (flow_not_block: preserve breadth, never
+# zero-out). A genuine FULL closure (active=0) stays the existing session_wait
+# path — the guard does not resurrect it; those rows revive automatically next
+# refresh once TRADEABLE.
+CAPITAL_COLLAPSE_ACTIVE_RATIO = 0.10
 CAPITAL_COLLAPSE_ACTIVE_FLOOR = 1
 CAPITAL_COLLAPSE_PRIOR_MIN = 5
 
@@ -223,11 +235,16 @@ def capital_active_ids_after_collapse_guard(
     """Preserve prior Capital breadth when a refresh's active set abnormally collapses.
 
     Returns the active instrument_id set to persist. The new set is used as-is
-    UNLESS it has collapsed to ``<= CAPITAL_COLLAPSE_ACTIVE_FLOOR`` while the prior
-    book was healthy (``>= CAPITAL_COLLAPSE_PRIOR_MIN``) and the fetch itself was
-    non-empty — the forensic 1-symbol weekend collapse. In that case the PRIOR
+    UNLESS it has collapsed — either to ``<= CAPITAL_COLLAPSE_ACTIVE_FLOOR`` in
+    absolute terms, or to ``<= CAPITAL_COLLAPSE_ACTIVE_RATIO`` of the prior book
+    — while that prior book was healthy (``>= CAPITAL_COLLAPSE_PRIOR_MIN``) and
+    the fetch itself was non-empty — a session-driven validity collapse (the
+    forensic 1-symbol weekend collapse, and the later 4-fringe-epic collapse).
+    The FLOOR and RATIO are ORed (not one replacing the other) because RATIO
+    alone has a dead zone for small healthy prior books (5-9 symbols, where
+    ``RATIO * prior < 1``) that the FLOOR still covers. In that case the PRIOR
     active set is kept (flow_not_block: breadth preserved across the session
-    closure, never zeroed out to a single stale survivor).
+    closure, never handed to a tiny stale-survivor fringe).
 
     A genuine full closure (``new_active_ids`` empty) is the legitimate
     session_wait path and is returned unchanged (the guard never resurrects a
@@ -238,9 +255,9 @@ def capital_active_ids_after_collapse_guard(
         return new_active_ids
     if not new_active_ids:
         return new_active_ids  # full closure → legitimate session_wait, not a collapse
-    if (
+    if len(prior_active_ids) >= CAPITAL_COLLAPSE_PRIOR_MIN and (
         len(new_active_ids) <= CAPITAL_COLLAPSE_ACTIVE_FLOOR
-        and len(prior_active_ids) >= CAPITAL_COLLAPSE_PRIOR_MIN
+        or len(new_active_ids) <= CAPITAL_COLLAPSE_ACTIVE_RATIO * len(prior_active_ids)
     ):
         return prior_active_ids
     return new_active_ids

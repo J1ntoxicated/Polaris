@@ -1072,6 +1072,51 @@ async def test_momentum_exit_pass_profit_target_uses_anchored_pnl_r(
     ), "profit target fired on the inflated tick-window pnl_r ruler"
 
 
+@pytest.mark.asyncio
+async def test_momentum_exit_pass_pnl_r_uses_fee_aware_floor(
+    memdb: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """trade_mess_full_audit_2026-07-02 gap: the TICK exit pass's ``pnl_r``
+    (fed into ``evaluate_exit`` for the profit-target / loser-timeout checks)
+    must denominate on the SAME fee-aware-floored ``stop_atr_mult`` the bar
+    recalc (``_production_recalc.py``) and ``evaluate_exit``'s OWN internal
+    mfe_r/mae_r already use via ``_stop_atr_mult_for_strategy`` — not the
+    default unfloored 2xATR ``compute_unrealized_pnl_r`` ships with. At a tight
+    entry-anchored ATR% (5bps) a +0.05 move reads pnl_r=0.5 on the plain 2xATR
+    ruler (>= a 0.3R profit target -> false harvest) but pnl_r~=0.083 once the
+    fee floor widens the R-unit (< 0.3R -> HOLD, the correct call once a REAL
+    round-trip fee is priced into the denominator). One decision, one ruler."""
+    from polaris.scripts import _production_recalc_exit as rex
+
+    monkeypatch.setattr(rex, "_profit_target_for_strategy", lambda _sid: 0.3)
+    now_ts = int(time.time())
+    now_mono = time.monotonic()
+    state, eng, writer = _momentum_setup(memdb, now_ts=now_ts)
+    _insert_position_row(
+        memdb, position_id="pos_mom", opened_ts=now_ts - 60,
+        stop_price=None, peak_price=None, trough_price=None,
+        exit_state="open", entry_atr_pct=0.0005,
+    )
+    writer.set_stream(
+        INSTRUMENT,
+        _alternating_window(now_mono, lo=99.98, hi=100.02, last=100.05),
+        now_mono,
+    )
+
+    await _run_exits(
+        memdb, state, eng, now_ts=now_ts, now_mono=now_mono, phase="P0",
+        real_roundtrip=False, okx_adapter=None, capital_session=None,
+        lookup_regime=eng_mod._lookup_regime_str,
+    )
+
+    # Fee-floored pnl_r (~0.083) stays below the 0.3R target -> HELD. The
+    # unfloored 2xATR ruler (pnl_r=0.5) would have falsely harvested here.
+    assert any(
+        t.position_id == "pos_mom" and not t.closed for t in state.open_trades
+    ), "profit target fired on the fee-unaware tick pnl_r ruler"
+
+
 # ---------------------------------------------------------------------------
 # (h) flow_pressure RE-AIM (lever 2): the tick momentum exit gives a
 # flow_pressure position a WIDER let-winners-run trail so favourable OFI drift

@@ -417,6 +417,9 @@ async def test_evaluate_fires_closes_victim_and_does_not_reopen_same_tick(
     )
     assert n == 1
     close_mock.assert_awaited_once()
+    # P2-12: victim close names its trigger (lineage exit_reason='rotation'),
+    # not the 'exit' fallback.
+    assert close_mock.await_args.kwargs["close_reason"] == "rotation"
     # CRITICAL ordering: the winner must NOT be submitted this tick (settle gate).
     reserve_mock.assert_not_awaited()
     # Telemetry recorded.

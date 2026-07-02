@@ -42,8 +42,10 @@ not persist per-trade MFE in P0. A cold cell never reaches the cost-aware test
 
 ``real_round_trip_cost_r`` (documented per spec): two real fee legs
 (``fees.real_fee_usd`` entry + exit) divided by the SAME ``atr_usd`` that defines
-the cell-matrix R unit (``atr_usd = entry_price * atr_pct * 2.0``; per-trade
-``pnl_r = pnl_abs / atr_usd`` in ``_production_close.py``). So the cost is ATR-R
+the cell-matrix R unit — the WHOLE-POSITION basis (``atr_usd = notional_usd *
+atr_pct * 2.0``; per-trade ``pnl_r = pnl_abs / atr_usd`` in
+``_production_close_effects.py`` FIX 1), NOT a per-unit ``entry_price * atr_pct``
+basis (which is symbol-price-dependent and was the P0 bug). So the cost is ATR-R
 (``cost_usd / atr_usd``) — the exact convention of ``_production_close_effects``'s
 ``pnl_r_net = pnl_r - cost_usd / atr_usd`` — and shares ONE R unit with the
 regime-conditioned ``cell_avg_pnl_r`` and the cost-aware ``expected_move_r``.
@@ -129,8 +131,9 @@ def real_round_trip_cost_r_from_usd(
 
     ``real_fee_one_leg_usd`` is ``fees.real_fee_usd(venue, notional)`` for a
     single leg; a round trip is two legs. The round-trip $ cost is divided by the
-    SAME ``atr_usd`` (= ``entry_price * atr_pct * 2.0``) that defines the
-    cell-matrix R unit — per-trade ``pnl_r = pnl_abs / atr_usd`` — so this returns
+    SAME ``atr_usd`` (whole-position basis, = ``notional_usd * atr_pct * 2.0``)
+    that defines the cell-matrix R unit — per-trade ``pnl_r = pnl_abs /
+    atr_usd`` — so this returns
     ATR-R (``cost_usd / atr_usd``), the exact convention of
     ``_production_close_effects.py``'s ``pnl_r_net = pnl_r - cost_usd / atr_usd``.
     Cost and ``cell_avg_pnl_r`` therefore share ONE unit (no $-basis mismatch).
@@ -169,7 +172,8 @@ def entry_admission_decision(
 
     UNIT INVARIANT: ``cell_avg_pnl_r``, ``expected_move_r`` and
     ``real_round_trip_cost_r`` are ALL ATR-R (each divides by the same
-    ``atr_usd = entry_price * atr_pct * 2.0``), so Rule 2's subtraction and
+    whole-position ``atr_usd = notional_usd * atr_pct * 2.0``), so Rule 2's
+    subtraction and
     Rule 3's comparison are unit-consistent (no $-basis cancellation).
 
     ``regime`` is carried for the shadow row (the cell is already

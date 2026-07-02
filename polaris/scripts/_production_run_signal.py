@@ -288,10 +288,10 @@ async def run_pipeline_for_signal(
         symbol=symbol,
         regime=regime,
         cell_routing=_g3_cell if isinstance(_g3_cell, dict) else {},
-        # ATR-R basis: last_price is the entry/ref price (same as the live
-        # entry_price below) and bars_atr_pct is the bar-derived ATR%. atr_usd =
-        # last_price * bars_atr_pct * 2.0 mirrors _production_close.py so the
-        # shadow cost shares the cell-matrix R unit.
+        # entry_price is carried for the call signature; the shadow cost's
+        # atr_usd uses the whole-position PNL_R_USD_DENOM basis (NOT
+        # entry_price) so cost_r is symbol-price-invariant — see
+        # _log_entry_admission_shadow's docstring.
         entry_price=last_price,
         atr_pct=bars_atr_pct,
     )

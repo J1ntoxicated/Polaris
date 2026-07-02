@@ -120,6 +120,17 @@ async def real_alpaca_open_fill(
     # the venue rejects with insufficient_buying_power.
     clamped = _clamp_to_buying_power(notional_usd, buying_power)
     if clamped is None:
+        # audit1 P0-4 ②: this full-vacate branch (fundable notional below the
+        # dust floor) previously returned silently — no venue call, no log, so
+        # the skip was invisible in the runtime log (indistinguishable from a
+        # transport stall). Log the reason (requested vs the live buying_power
+        # that produced it) so the skip is diagnosable without a debugger.
+        logger.info(
+            "[alpaca] %s entry skipped notional=%.2f buying_power=%s — "
+            "fundable amount below dust floor (reason=insufficient_buying_power, "
+            "no order submitted)",
+            symbol, notional_usd, buying_power,
+        )
         return OpenAttempt(fill=None, reject_code="insufficient_buying_power")
     if clamped < notional_usd:
         logger.info(

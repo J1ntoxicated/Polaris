@@ -19,6 +19,7 @@ from polaris.core.isolation.reentry import (
     concurrent_same_side_open,
     is_novel_reentry,
     reentry_cooldown_active,
+    stamp_reentry_anchor,
 )
 from polaris.storage.schema import ALL_DDL
 
@@ -167,6 +168,136 @@ def test_cooldown_disabled_when_zero(conn: sqlite3.Connection) -> None:
     )
     assert reentry_cooldown_active(
         conn, venue="okx", symbol="SOL-USDT", strategy_id="volume_burst",
+        now_ts=1010, cooldown_sec=0, exempt=False,
+    ) is False
+
+
+# --- Reject-anchor anti-churn (audit1 P0-4 ①) -------------------------------
+# A venue reject/clamp never writes a ``positions`` row, so the cooldown had no
+# anchor to check against (PANW: 58 intents/6.1h — every reject reset the
+# window to zero even though the novelty stamp correctly flagged "not novel").
+# ``stamp_reentry_anchor`` gives the cooldown a persistent anchor that survives
+# a reject and a process restart.
+
+
+def test_reject_anchor_blocks_without_positions_row(
+    conn: sqlite3.Connection,
+) -> None:
+    # NO positions row exists (every attempt on this key was rejected/clamped) —
+    # only the persisted reject-anchor. The cooldown must still engage.
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1040, cooldown_sec=300, exempt=False,
+    ) is True
+
+
+def test_reject_anchor_expires_after_window(conn: sqlite3.Connection) -> None:
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1000 + 300, cooldown_sec=300, exempt=False,
+    ) is False
+
+
+def test_reject_anchor_repeated_stamp_advances_window(
+    conn: sqlite3.Connection,
+) -> None:
+    # Each repeated reject re-stamps last_ts (UPSERT), so the window keeps
+    # sliding forward exactly like a repeated fill would.
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1200,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1499, cooldown_sec=300, exempt=False,
+    ) is True
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1500, cooldown_sec=300, exempt=False,
+    ) is False
+
+
+def test_reject_anchor_exempt_on_novelty_still_allows(
+    conn: sqlite3.Connection,
+) -> None:
+    # FLOW: novelty (new bar / side flip) still exempts even with a live
+    # reject-anchor — the anchor tightens the WINDOW check only, it never
+    # overrides the novelty exemption (flow_not_block).
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1040, cooldown_sec=300, exempt=True,
+    ) is False
+
+
+def test_reject_anchor_key_isolation(conn: sqlite3.Connection) -> None:
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    # Different symbol / strategy / venue keys are unaffected.
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="ABBV",
+        strategy_id="equity_52wk_high_breakout",
+        now_ts=1010, cooldown_sec=300, exempt=False,
+    ) is False
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW", strategy_id="tsmom",
+        now_ts=1010, cooldown_sec=300, exempt=False,
+    ) is False
+
+
+def test_reject_anchor_combines_with_positions_row_max(
+    conn: sqlite3.Connection,
+) -> None:
+    # An OLDER reject-anchor must not shadow a MORE RECENT positions open (the
+    # cooldown check uses the max of the two anchors). The reject anchor alone
+    # (ts=1000) would have expired by now_ts=1300 (300s window), but the
+    # positions row (ts=1250) is still within ITS 300s window at ts=1300.
+    stamp_reentry_anchor(
+        conn, venue="okx", symbol="SOL-USDT", strategy_id="volume_burst",
+        now_ts=1000,
+    )
+    _insert_position(
+        conn, venue="okx", symbol="SOL-USDT", strategy_id="volume_burst",
+        opened_ts=1250,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="okx", symbol="SOL-USDT", strategy_id="volume_burst",
+        now_ts=1300, cooldown_sec=300, exempt=False,
+    ) is True
+
+
+def test_reject_anchor_disabled_when_cooldown_zero(
+    conn: sqlite3.Connection,
+) -> None:
+    stamp_reentry_anchor(
+        conn, venue="alpaca", symbol="PANW", strategy_id="equity_52wk_high_breakout",
+        now_ts=1000,
+    )
+    assert reentry_cooldown_active(
+        conn, venue="alpaca", symbol="PANW",
+        strategy_id="equity_52wk_high_breakout",
         now_ts=1010, cooldown_sec=0, exempt=False,
     ) is False
 

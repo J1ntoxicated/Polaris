@@ -100,6 +100,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_POSITION_STRATEGY_SEGMENTS,
     DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
+    DDL_REENTRY_ANCHOR,
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
     DDL_REPLAY_RUNS_INDEX,
@@ -157,6 +158,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_RISK_EVENTS,
     DDL_RISK_EVENTS_INDEX,
     DDL_VENUE_BLOCKLIST,
+    # Reject-anchor anti-churn (audit1 P0-4 ①) — persistent cooldown anchor that
+    # survives a venue reject/clamp (no positions row) and a process restart.
+    DDL_REENTRY_ANCHOR,
     # Layer 2 — Pipeline
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,

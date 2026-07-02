@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.isolation.blocklist import add_blocklist
 from polaris.core.isolation.circuit_breaker import FAULT_REJECT, record_fault
+from polaris.core.isolation.reentry import stamp_reentry_anchor
 from polaris.core.streams import resolve_stream
 from polaris.scripts._smoke_roundtrip_shared import record_venue_orphan
 from polaris.strategies import RawSignal
@@ -201,6 +202,18 @@ async def _handle_open_reject(
         if reject_code not in COMPLIANCE_REJECT_CODES:
             state.last_entry_by_key[(venue, symbol, sig.strategy_id)] = (
                 sig.created_at_bar, sig.side,
+            )
+            # ① audit1 P0-4: the novelty stamp above only fixes the EXEMPTION
+            # check — reentry_cooldown_active's WINDOW check still reads
+            # ``MAX(opened_ts)`` off ``positions``, which a reject never
+            # writes, so the window itself had no anchor (PANW: 58 intents/
+            # 6.1h — every reject reset the cooldown to zero even though
+            # novelty correctly said "not novel"). Persist the reject as a
+            # cooldown anchor too (survives this process AND a restart) so
+            # the window actually engages on a repeatedly-rejected signal.
+            stamp_reentry_anchor(
+                conn, venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
+                now_ts=now_ts,
             )
         # Credential-root-cause log: an OKX auth code (50100-50114) means EVERY
         # signed call is being rejected by the venue — a credential regression

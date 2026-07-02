@@ -107,17 +107,34 @@ def _strategy_stats(
         # Hardening #1 (2026-06-23): exclude RECONCILED close fills (tracking
         # failures) from the per-strategy WR/PF/count/$ so they match the avg_r
         # ledger (which already excludes them). LEFT JOIN; orphan fills KEPT.
-        """SELECT f.strategy_id,
+        # audit2 P0-2 ②: win_rate/PF are now NET of the REAL round-trip fee
+        # (``entry_fee`` CTE sums the position's is_close=0 leg fee, subtracted
+        # alongside this close leg's own fee), matching the core
+        # ``won = pnl_r_net > 0`` verdict direction. The old GROSS
+        # ``f.pnl_usd > 0`` classifier showed a fee≈gross scalp as a winner (live
+        # 2026-07-02 audit: gross 29 wins vs net 9 wins on the same 105 closes).
+        # ``pnl_total`` stays GROSS (the fills.pnl_usd truth column, unchanged)
+        # — only the win/PF classification is fee-net.
+        """WITH entry_fee AS (
+             SELECT contribution_id AS pid, SUM(fee_usd) AS fee
+             FROM fills WHERE is_close = 0 GROUP BY contribution_id
+           ), net AS (
+             SELECT f.strategy_id AS strategy_id,
+                    f.pnl_usd - f.fee_usd - COALESCE(ef.fee, 0.0) AS net_pnl,
+                    f.pnl_usd AS gross_pnl
+             FROM fills f
+             LEFT JOIN positions p ON p.position_id = f.contribution_id
+             LEFT JOIN entry_fee ef ON ef.pid = f.contribution_id
+             WHERE f.is_close = 1 AND f.ts_ms >= ?
+               AND (p.status IS NULL OR p.status != 'reconciled')
+           )
+           SELECT strategy_id,
                   COUNT(*) AS closed_n,
-                  SUM(CASE WHEN f.pnl_usd > 0 THEN 1 ELSE 0 END) AS wins,
-                  COALESCE(SUM(CASE WHEN f.pnl_usd > 0 THEN f.pnl_usd ELSE 0 END), 0.0) AS gross_win,
-                  COALESCE(SUM(CASE WHEN f.pnl_usd < 0 THEN -f.pnl_usd ELSE 0 END), 0.0) AS gross_loss,
-                  COALESCE(SUM(f.pnl_usd), 0.0) AS pnl_total
-           FROM fills f
-           LEFT JOIN positions p ON p.position_id = f.contribution_id
-           WHERE f.is_close = 1 AND f.ts_ms >= ?
-             AND (p.status IS NULL OR p.status != 'reconciled')
-           GROUP BY f.strategy_id""",
+                  SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  COALESCE(SUM(CASE WHEN net_pnl > 0 THEN net_pnl ELSE 0 END), 0.0) AS net_win,
+                  COALESCE(SUM(CASE WHEN net_pnl < 0 THEN -net_pnl ELSE 0 END), 0.0) AS net_loss,
+                  COALESCE(SUM(gross_pnl), 0.0) AS pnl_total
+           FROM net GROUP BY strategy_id""",
         (lookback_ms,),
     )
     # Step M (2026-06-22): avg_r is the canonical risk-unit R (pnl_usd/risk_usd),
@@ -130,12 +147,12 @@ def _strategy_stats(
         sid = str(r[0])
         closed_n = int(r[1] or 0)
         wins = int(r[2] or 0)
-        gross_win = float(r[3] or 0.0)
-        gross_loss = float(r[4] or 0.0)
+        net_win = float(r[3] or 0.0)
+        net_loss = float(r[4] or 0.0)
         pnl_total = float(r[5] or 0.0)
         wr = (wins / closed_n * 100.0) if closed_n else 0.0
         avg_r = avg_r_by_strat.get(sid, 0.0)
-        pf = (gross_win / gross_loss) if gross_loss > 0 else (gross_win and 9.99 or 0.0)
+        pf = (net_win / net_loss) if net_loss > 0 else (net_win and 9.99 or 0.0)
         by_strat[sid] = StrategyStat(
             strategy_id=sid,
             open_n=0,

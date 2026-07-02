@@ -86,9 +86,11 @@ def test_strategy_stats_excludes_reconciled(memdb: sqlite3.Connection) -> None:
 
     assert s1.closed_n == 2  # reconciled close-fill not counted
     assert s1.wr_pct == pytest.approx(50.0)  # 1 win / 2 — not 1/3
-    # PF = gross_win / gross_loss = 300 / 100 = 3.0 (reconciled −9000 excluded).
-    assert s1.pf == pytest.approx(3.0)
-    assert s1.pnl_usd == pytest.approx(200.0)  # 300 − 100, no −9000
+    # audit2 P0-2 ②: PF is fee-NET (win $ = 300−2 fee legs = 298; loss $ =
+    # 100+2 fee legs = 102), matching the core won-verdict direction
+    # (reconciled −9000 excluded either way).
+    assert s1.pf == pytest.approx((300.0 - 2.0) / (100.0 + 2.0))
+    assert s1.pnl_usd == pytest.approx(200.0)  # 300 − 100, no −9000 (GROSS truth col)
 
 
 def test_equity_curve_excludes_reconciled(memdb: sqlite3.Connection) -> None:

@@ -35,6 +35,8 @@ def _seed(
     strategy: str,
     pnl_usd: float,
     status: str = "closed",
+    entry_fee_usd: float = 0.0,
+    close_fee_usd: float = 0.0,
 ) -> None:
     conn.execute(
         "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
@@ -45,12 +47,24 @@ def _seed(
         "VALUES (?, ?, ?, ?, ?, ?, ?, 'long', 1.0, ?, 1000, 2000, 0, -999.0)",
         (pid, venue, symbol, f"g:{symbol}", strategy, strategy, strategy, status),
     )
+    if entry_fee_usd:
+        # The OPEN leg (is_close=0) — carries its own real fee, zero pnl (pnl
+        # only realizes on the close leg). audit2 P0-2 ②: win/PF must count it.
+        conn.execute(
+            "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+            " size_usd, fill_price, ts_ms, order_id, contribution_id, base_qty, "
+            " pnl_usd, fee_usd, is_close) "
+            "VALUES (?, ?, ?, ?, 'buy', 1000.0, 100.0, 1000, ?, ?, 1.0, 0.0, ?, 0)",
+            (f"{pid}_o", venue, f"{venue}:{symbol}", strategy, f"{pid}_ord",
+             pid, entry_fee_usd),
+        )
     conn.execute(
         "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
         " size_usd, fill_price, ts_ms, order_id, contribution_id, base_qty, "
         " pnl_usd, fee_usd, is_close) "
-        "VALUES (?, ?, ?, ?, 'sell', 1000.0, 100.0, 1500, ?, ?, 1.0, ?, 0.0, 1)",
-        (f"{pid}_c", venue, f"{venue}:{symbol}", strategy, f"{pid}_ord", pid, pnl_usd),
+        "VALUES (?, ?, ?, ?, 'sell', 1000.0, 100.0, 1500, ?, ?, 1.0, ?, ?, 1)",
+        (f"{pid}_c", venue, f"{venue}:{symbol}", strategy, f"{pid}_ord", pid,
+         pnl_usd, close_fee_usd),
     )
 
 
@@ -93,7 +107,8 @@ def test_reconciled_excluded_from_every_r_surface(memdb: sqlite3.Connection) -> 
 
 
 def test_strategy_pf_is_dollar_based_and_matches_fills(memdb: sqlite3.Connection) -> None:
-    # PF is $-based (gross_win/gross_loss) → denominator-agnostic, already correct.
+    # $-based (gross_win/gross_loss) → denominator-agnostic. No fees seeded here,
+    # so NET == GROSS (see test_strategy_win_pf_are_fee_net below for the fee case).
     _seed(memdb, pid="w1", venue="okx", symbol="BTC", strategy="s", pnl_usd=300.0)
     _seed(memdb, pid="w2", venue="okx", symbol="ETH", strategy="s", pnl_usd=100.0)
     _seed(memdb, pid="l1", venue="okx", symbol="SOL", strategy="s", pnl_usd=-200.0)
@@ -111,3 +126,28 @@ def test_strategy_pf_is_dollar_based_and_matches_fills(memdb: sqlite3.Connection
         "SELECT SUM(pnl_usd) FROM fills WHERE is_close=1 AND strategy_id='s'"
     ).fetchone()[0]
     assert s.pnl_usd == pytest.approx(fills_sum)
+
+
+def test_strategy_win_pf_are_fee_net(memdb: sqlite3.Connection) -> None:
+    """audit2 P0-2 ②: win_rate/PF must count the real fee on BOTH legs (entry +
+    close), matching the core ``won = pnl_r_net > 0`` verdict direction — not the
+    fee-free GROSS ``fills.pnl_usd > 0`` the old query used. Repro shape of the
+    live 2026-07-02 audit finding (gross 29 wins vs net 9 wins): three small
+    +gross-pnl closes that are actually net losses once round-trip fee is
+    counted, alongside one real net winner."""
+    # Small +gross scalp, round-trip fee > gross pnl → net LOSS.
+    _seed(memdb, pid="s1", venue="okx", symbol="BTC", strategy="s", pnl_usd=6.0,
+          entry_fee_usd=5.0, close_fee_usd=5.0)
+    _seed(memdb, pid="s2", venue="okx", symbol="ETH", strategy="s", pnl_usd=4.0,
+          entry_fee_usd=5.0, close_fee_usd=5.0)
+    _seed(memdb, pid="s3", venue="okx", symbol="SOL", strategy="s", pnl_usd=2.0,
+          entry_fee_usd=5.0, close_fee_usd=5.0)
+    # One real net winner: gross pnl comfortably exceeds the round-trip fee.
+    _seed(memdb, pid="w1", venue="okx", symbol="DOGE", strategy="s", pnl_usd=300.0,
+          entry_fee_usd=1.0, close_fee_usd=1.0)
+    stats = {st.strategy_id: st for st in _strategy_stats(memdb, now_s=3000, positions=[])}
+    s = stats["s"]
+    # GROSS would have shown 4/4 wins (100%); NET is 1/4 (25%).
+    assert s.wr_pct == pytest.approx(25.0)
+    # PF net: win $ = (300-2)=298; loss $ = (6-10)+(4-10)+(2-10) → abs = 4+6+8=18.
+    assert s.pf == pytest.approx(298.0 / 18.0)

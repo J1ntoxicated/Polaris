@@ -46,6 +46,29 @@ def _fill(
     )
 
 
+def _entry_fill(
+    conn: sqlite3.Connection,
+    fill_id: str,
+    *,
+    contribution_id: str,
+    venue: str = "okx",
+    strategy_id: str = "tsmom",
+    fee: float = 0.0,
+    ts_ms: int = DAY_START_MS + 500,
+) -> None:
+    """The OPEN leg (is_close=0) of a position — carries its own real fee but
+    zero pnl (pnl only realizes on the close leg). Omitted from every existing
+    fixture in this file, which is exactly why the close-leg-only fee bug went
+    undetected."""
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side,"
+        " size_usd, fill_price, fee_usd, ts_ms, order_id, contribution_id,"
+        " pnl_usd, is_close)"
+        " VALUES (?, ?, 'BTC-USDT', ?, 'buy', 100.0, 1.0, ?, ?, 'o1', ?, 0.0, 0)",
+        (fill_id, venue, strategy_id, fee, ts_ms, contribution_id),
+    )
+
+
 def _fault(conn: sqlite3.Connection, event_id: str, fault_type: str, ts_s: int) -> None:
     conn.execute(
         "INSERT INTO strategy_fault_events (event_id, strategy_id, fault_type, event_ts)"
@@ -60,6 +83,14 @@ def _golden_db(cfg: OpsConfig) -> None:
     _fill(conn, "f2", venue="okx", strategy_id="tsmom", pnl=-2.5, fee=0.2)
     _fill(conn, "f3", venue="capital", strategy_id="fx_range_fade", pnl=5.0, fee=0.5)
     _fill(conn, "f4", strategy_id="volume_burst", is_close=0)
+    # Entry (open) legs of f1/f2/f3 — each position pays a real fee on ENTRY too,
+    # not only on close. audit2 P0-2 ①: the digest must count both legs.
+    _entry_fill(conn, "f1_open", contribution_id="f1", venue="okx",
+                strategy_id="tsmom", fee=0.3)
+    _entry_fill(conn, "f2_open", contribution_id="f2", venue="okx",
+                strategy_id="tsmom", fee=0.2)
+    _entry_fill(conn, "f3_open", contribution_id="f3", venue="capital",
+                strategy_id="fx_range_fade", fee=0.5)
     _fault(conn, "e1", "reject", DAY_START_MS // 1000 + 60)
     _fault(conn, "e2", "reject", DAY_START_MS // 1000 + 120)
     conn.execute(
@@ -104,9 +135,10 @@ tags: [digest, daily-auto, ops]
 | metric | value |
 | --- | --- |
 | closes | 3 |
-| pnl_usd | +15.00 |
-| fees_usd | 1.00 |
-| opens | 1 |
+| pnl_usd | +13.00 |
+| pnl_usd_gross | +15.00 |
+| fees_usd | 2.00 |
+| opens | 4 |
 | faults | 2 |
 | risk_events | 1 |
 | open_positions_now | 2 |
@@ -116,16 +148,16 @@ tags: [digest, daily-auto, ops]
 | ops_alerts | 2 |
 
 ## Closes by venue
-| venue | closes | pnl_usd | fees_usd |
+| venue | closes | pnl_usd_net | fees_usd |
 | --- | --- | --- | --- |
-| capital | 1 | +5.00 | 0.50 |
-| okx | 2 | +10.00 | 0.50 |
+| capital | 1 | +4.00 | 1.00 |
+| okx | 2 | +9.00 | 1.00 |
 
 ## Closes by strategy (top 12)
-| strategy | closes | pnl_usd |
+| strategy | closes | pnl_usd_net |
 | --- | --- | --- |
-| tsmom | 2 | +10.00 |
-| fx_range_fade | 1 | +5.00 |
+| tsmom | 2 | +9.00 |
+| fx_range_fade | 1 | +4.00 |
 
 ## Faults by type
 | fault_type | count |
@@ -141,8 +173,25 @@ def test_golden_output(cfg: OpsConfig) -> None:
     assert out == GOLDEN
     log_line = (cfg.vault_dir / "log.md").read_text(encoding="utf-8").strip()
     assert log_line == (
-        "2026-06-09 daily-auto [closes=3 pnl_usd=+15.00 opens=1 faults=2 restarts=1]"
+        "2026-06-09 daily-auto [closes=3 pnl_usd=+13.00 opens=4 faults=2 restarts=1]"
     )
+
+
+def test_net_headline_survives_entry_leg_fee_2026_06_30_case(cfg: OpsConfig) -> None:
+    """audit2 P0-2 ①: 2026-06-30-style case — small +gross close pnl masked a real
+    round-trip-fee loss because the entry leg's fee was never summed. Repro:
+    close-leg gross +6.05, close-leg fee 57.47, entry-leg fee 57.48 (round-trip
+    fee 114.95 total) → true net ≈ -108.90, not the old +6.05 "profit" look."""
+    conn = _seed_db(cfg.db_path)
+    _fill(conn, "c1", pnl=6.05, fee=57.47)
+    _entry_fill(conn, "c1_open", contribution_id="c1", fee=57.48)
+    conn.commit()
+    conn.close()
+    assert daily_digest.run(cfg, now=NOW) == 0
+    out = (cfg.digest_dir / "2026-06-09.md").read_text(encoding="utf-8")
+    assert "| pnl_usd | -108.90 |" in out
+    assert "| pnl_usd_gross | +6.05 |" in out
+    assert "| fees_usd | 114.95 |" in out
 
 
 def test_window_boundaries_exact(cfg: OpsConfig) -> None:

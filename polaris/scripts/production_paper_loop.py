@@ -107,6 +107,7 @@ __all__ = [
     "ProdLoopState",
     "main",
     "persist_altdata_snapshot",
+    "reconcile_alpaca_venue_drift",
     "run_production_paper_loop",
     "_all_strategies",
     "_altdata_producer",

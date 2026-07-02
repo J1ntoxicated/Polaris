@@ -906,10 +906,11 @@
       const lc = venueStream(s.venue).toLowerCase();
       const net = s.net_pnl_usd || 0;
       const up = s.upnl_usd || 0;
-      return `<tr class="row-${lc}" title="${esc(s.label || s.venue)} · net ${fmtUsd(net, 2)} · ${s.daily_trades || 0} trades · ${s.open_positions_n || 0} open · exposed ${fmtUsd(s.exposed_usd, 0)} · uPnL ${fmtUsd(up, 2)}">
+      const closed = (s.closed_n != null ? s.closed_n : (s.daily_trades || 0));
+      return `<tr class="row-${lc}" title="${esc(s.label || s.venue)} · net ${fmtUsd(net, 2)} · ${closed} trades (${s.daily_trades || 0} close fills) · ${s.open_positions_n || 0} open · exposed ${fmtUsd(s.exposed_usd, 0)} · uPnL ${fmtUsd(up, 2)}">
           <td class="l ex">${esc(s.label || s.venue)}</td>
           <td class="num ${pn(net)}">${fmtUsd(net, 2)}</td>
-          <td class="num b-flat">${s.daily_trades || 0}</td>
+          <td class="num b-flat">${closed}</td>
           <td class="num b-flat">${s.open_positions_n || 0}</td>
           <td class="num b-flat">${fmtUsd(s.exposed_usd, 0)}</td>
           <td class="num ${pn(up)}">${fmtUsd(up, 2)}</td>

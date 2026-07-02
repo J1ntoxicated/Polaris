@@ -16,6 +16,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Final, NamedTuple
 
+from polaris.core.economics.fees import real_fee_usd
 from polaris.core.metrics.risk_unit import R_USD_PROXY, realised_r_stream
 from polaris.core.sizing.constants import (
     demo_starting_equity_alpaca_display,
@@ -30,6 +31,7 @@ from polaris.scripts.dashboard.snapshot_models import (
 )
 from polaris.scripts.dashboard.snapshot_q_common import (
     SLIPPAGE_BPS_DIVISOR,
+    _exit_reason_by_position,
     _model_price,
     _safe_query,
     _symbol_from_inst,
@@ -72,6 +74,9 @@ def _recent_closed_by_venue(
     the exact entry-pairing logic). Empty venues yield no key → an empty list at
     the call site (graceful zero). Pure read-only.
     """
+    # P0-4 ①: real exit_reason via the SAME positions⋈segments lineage SSOT the
+    # global recent_trades panel uses (no separate pnl-sign TP/SL/FLAT guess).
+    exit_reason_by_id = _exit_reason_by_position(conn)
     # Step N: each close row's R is the STREAM-COMMON realised R derived from its
     # OWN venue + ``fills.pnl_usd`` (``pnl_usd / R_budget(venue)``) — the same
     # ruler every other panel uses, comparable across venues, no stored-pnl_r
@@ -80,7 +85,7 @@ def _recent_closed_by_venue(
     rows = _safe_query(
         conn,
         """SELECT venue, instrument_id, strategy_id, side, fill_price,
-                  pnl_usd, ts_ms, base_qty, contribution_id
+                  pnl_usd, ts_ms, base_qty, contribution_id, size_usd
            FROM fills
            WHERE is_close = 1
            ORDER BY ts_ms DESC""",
@@ -97,12 +102,19 @@ def _recent_closed_by_venue(
         pnl = float(r[5] or 0.0)
         ts_ms = int(r[6] or 0)
         qty = float(r[7] or 0.0)
+        contrib = r[8]
+        contrib_str = str(contrib) if contrib else None
+        size_usd = float(r[9] or 0.0)
         if qty > 0 and fill_price > 0:
             sign = 1.0 if side.lower() == "sell" else -1.0
             entry_px = fill_price - (pnl / qty) * sign
         else:
             entry_px = fill_price
-        reason = "TP" if pnl > 0 else ("SL" if pnl < 0 else "FLAT")
+        reason = exit_reason_by_id.get(contrib_str or "", "exit")
+        # P0-4 ②: real (not demo) close-leg fee, so this chip's fee/net agree
+        # with the TRADES tab's same trade (single real-fee schedule, one net).
+        real_fee = real_fee_usd(venue, size_usd) if size_usd > 0 else 0.0
+        net_usd = pnl - real_fee
         # Stream-common R from this venue's R_budget; unknown venue → proxy.
         r_units = realised_r_stream(pnl_usd=pnl, venue=venue)
         if r_units == 0.0 and pnl != 0.0:
@@ -120,6 +132,8 @@ def _recent_closed_by_venue(
                 r_units=r_units,
                 held_sec=0.0,
                 exit_reason=reason,
+                real_fee_usd=real_fee,
+                net_usd=net_usd,
             )
         )
     return out
@@ -218,7 +232,11 @@ def _per_stream_summary(
     - ``Σ net_pnl_usd`` == global ``daily_pnl_usd`` (``_daily_realised_pnl``):
       both use the identical session lookback + ``Σ(close pnl) − Σ(all fees)``
       formula, grouped by venue here.
-    - ``Σ daily_trades`` == global closed-trade count.
+    - ``Σ daily_trades`` == global closed-FILL count (``_daily_realised_pnl``'s
+      own count leg; a partial-close trade emits >1 close fill, so this can
+      exceed the closed-POSITION count — kept for the tooltip, P0-4 ③).
+    - ``Σ closed_n`` == global closed-POSITION count over the same window — the
+      TRADES counter the board displays (one row per trade, not per fill).
     - ``Σ open_positions_n`` / ``upnl_usd`` / ``exposed_usd`` decompose the same
       ``positions`` list the global snapshot aggregates, so they sum exactly.
 
@@ -319,6 +337,21 @@ def _per_stream_summary(
         exposed_by_venue[v] = exposed_by_venue.get(v, 0.0) + p.size_usd
         upnl_by_venue[v] = upnl_by_venue.get(v, 0.0) + p.upnl_usd
 
+    # P0-4 ③: TRADES counter = ONE closed POSITION, not one closed FILL (a
+    # partial-close position emits >1 close fill, so the fills count over-counts
+    # trades). Same session lookback + RECONCILED exclusion as the fills query
+    # above; ``positions.closed_ts`` is in SECONDS (fills.ts_ms is ms).
+    closed_pos_rows = _safe_query(
+        conn,
+        """SELECT venue, COUNT(*) FROM positions
+           WHERE status = 'closed' AND closed_ts >= ?
+           GROUP BY venue""",
+        (lookback_ms // 1000,),
+    )
+    closed_positions_by_venue: dict[str, int] = {
+        str(r[0] or "").lower(): int(r[1] or 0) for r in closed_pos_rows
+    }
+
     # Per-venue starting capital. OKX/Capital use the static demo-equity SSOT;
     # Alpaca prefers the live ``/v2/account`` probe baseline (the venue-funded
     # truth) and falls back to the P0-2 display-baseline constant
@@ -384,11 +417,14 @@ def _per_stream_summary(
                 slippage_usd=slippage,
                 ai_cost_usd=ai_cost,
                 net_after_cost_usd=net_after_cost,
-                # OPEN vs CLOSED split: closed_n == this lane's closed-trade
-                # count (same is_close sum as daily_trades — one source of
-                # truth, surfaced under a clearer name). recent_closed is the
+                # P0-4 ③: closed_n = closed POSITIONS (one row per trade), the
+                # TRADES counter the board displays. ``daily_trades`` stays the
+                # fills.is_close count (a partial-close trade emits >1 close
+                # fill, so it can exceed closed_n) — kept for the tooltip and
+                # for its OWN reconciliation invariant (Σ daily_trades == the
+                # global fills-based daily_n), unchanged. recent_closed is the
                 # lane's most-recent closed trades (empty list when none).
-                closed_n=trades_by_venue.get(venue, 0),
+                closed_n=closed_positions_by_venue.get(venue, 0),
                 recent_closed=recent_closed_by_venue.get(venue, []),
             )
         )

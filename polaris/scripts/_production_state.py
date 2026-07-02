@@ -122,6 +122,15 @@ class ProdLoopState:
     # size dampener and NOT a P&L throttle — a held position is never touched
     # (exits run via the recalc loop, not this entry seam).
     okx_unsettleable_entry_defers: int = 0
+    # trade_eligible bar-path defer — mirrors ``okx_unsettleable_entry_defers``
+    # for EntranceJudge's ``trade_eligible=0`` verdict (venue liquidity floor
+    # and/or opportunity-score floor). The tick engine's entry path already
+    # enforced this via ``get_focus_targets(eligible_only=True)``; the bar
+    # pipeline's WATCH-set dispatch did not re-check it before submitting an
+    # order. ENTRY (only) is deferred while the name stays WATCHED/SIGNALED/
+    # streamed (flow_not_block) — not a size dampener, not a P&L throttle, and
+    # a held position is never touched (exits run via the recalc loop).
+    trade_ineligible_entry_defers: int = 0
     # T13 — PDT rolling-day day-trade count (sourced from Alpaca
     # /v2/account.daytrade_count via parse_account_pdt; defaults 0 until a live
     # account read populates it). ``equity_pdt_rank_downs`` counts equity entries

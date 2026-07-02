@@ -98,9 +98,11 @@ def _seed_position_and_fill(
         ),
     )
     # Provide bars so live recalc sees a real last_price.
+    # [P0-5] Anchored so the newest bar lands AT opened_ts (NOW) — pre-entry
+    # bars are now excluded from load_active_position_rows's window.
     instrument_id = f"{venue}:{symbol}"
     for i in range(20):
-        ts = NOW - (20 - i) * 60
+        ts = NOW - (19 - i) * 60
         if tight_bars:
             # Tight 1-unit range floors ATR (atr_pct → 1e-4), so a price gain
             # vs entry yields a large +pnl_r (deterministic ADJUST_EXIT band)

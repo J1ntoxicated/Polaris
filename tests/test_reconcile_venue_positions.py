@@ -244,3 +244,121 @@ def test_none_adapters_noop(conn: sqlite3.Connection) -> None:
         now_ts=5000,
     ))
     assert imported == []
+
+
+def test_import_stamps_risk_usd_anchor_and_flat_excursion(
+    conn: sqlite3.Connection,
+) -> None:
+    """[P0-5] a reconcile-import row must NOT be an R-measurement blind spot.
+
+    Injects a stub ``atr_anchor_fn`` (the DI seam ``production_paper_loop``
+    wires to the real ``timeframe_anchor_atr_pct`` — kept out of ``core`` per
+    the layering rail) so the import resolves ``entry_atr_pct`` the same way
+    a normal entry does — then asserts ``risk_usd`` / ``entry_atr_pct`` are
+    stamped (not NULL) and ``peak_price`` / ``trough_price`` start AT the
+    entry mark (a flat/zero excursion at t=0, never inherited from the
+    venue's historical cost basis or pre-entry market noise).
+    """
+    now_ts = 100_000
+
+    def _stub_anchor(
+        conn: sqlite3.Connection, instrument_id: str, now_ts: int,
+    ) -> tuple[float, str] | None:
+        assert instrument_id == "alpaca:SPCE"
+        return (0.02, "1m")
+
+    alpaca = _MockAlpaca([_alpaca_spce()])
+    capital = _MockCapital({"positions": []})
+    okx = _MockOKX()
+
+    imported = asyncio.run(reconcile_venue_positions(
+        conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
+        now_ts=now_ts, atr_anchor_fn=_stub_anchor,
+    ))
+    assert len(imported) == 1
+
+    row = conn.execute(
+        "SELECT risk_usd, entry_atr_pct, peak_price, trough_price, exit_state "
+        "FROM positions WHERE venue='alpaca' AND symbol='SPCE'"
+    ).fetchone()
+    risk_usd, entry_atr_pct, peak_price, trough_price, exit_state = row
+    assert risk_usd is not None and risk_usd > 0.0
+    assert entry_atr_pct is not None and entry_atr_pct > 0.0
+    # entry mark = 7.15 (current_price) — peak/trough must start there, not
+    # at the ignored historical avg_entry_price (3.10) or any stale bar.
+    assert peak_price == pytest.approx(7.15)
+    assert trough_price == pytest.approx(7.15)
+    assert exit_state == "open"
+
+
+def test_import_no_bars_leaves_atr_anchor_and_risk_usd_null(
+    conn: sqlite3.Connection,
+) -> None:
+    """No bars window for the symbol (no ``atr_anchor_fn`` injected) → NULL
+    ``entry_atr_pct`` (no fabricated ATR read) AND NULL ``risk_usd`` — the
+    dashboard's 'n/a' render gate (``snapshot_q_positions.py``
+    ``mfe_atr_r``/``mae_atr_r``) keys off ``risk_usd IS NULL``, so stamping
+    a floored-but-ATR-disconnected ``risk_usd`` here would fabricate an
+    honest-looking R value with no real ATR anchor behind it. ``risk_usd``
+    is only ever computed when a REAL anchor resolved (see the anchor-hit
+    test above, which asserts ``risk_usd > 0.0``).
+    """
+    alpaca = _MockAlpaca([_alpaca_spce()])
+    capital = _MockCapital({"positions": []})
+    okx = _MockOKX()
+
+    imported = asyncio.run(reconcile_venue_positions(
+        conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
+        now_ts=5000,
+    ))
+    assert len(imported) == 1
+    row = conn.execute(
+        "SELECT risk_usd, entry_atr_pct FROM positions "
+        "WHERE venue='alpaca' AND symbol='SPCE'"
+    ).fetchone()
+    assert row[0] is None
+    assert row[1] is None
+
+
+def test_import_no_bars_row_renders_mfe_mae_na_on_dashboard(
+    conn: sqlite3.Connection,
+) -> None:
+    """End-to-end audit-spec item ④: a REAL reconcile-import row (no injected
+    ``atr_anchor_fn``, i.e. no bars) must render 'n/a' (``None``) for
+    ``mfe_atr_r``/``mae_atr_r`` on the POSITIONS board — through the actual
+    ``_import_one`` persist path, not a hand-crafted SQL fixture that the
+    real code can no longer produce.
+    """
+    from polaris.scripts.dashboard.snapshot_queries import (
+        _cell_mult_lookup,
+        _entry_price_lookup,
+        _last_prices,
+        _now_s,
+        _read_positions,
+    )
+    from polaris.scripts.dashboard.snapshot_sections import _regime_bars
+
+    alpaca = _MockAlpaca([_alpaca_spce()])
+    capital = _MockCapital({"positions": []})
+    okx = _MockOKX()
+    now_s = _now_s()
+
+    imported = asyncio.run(reconcile_venue_positions(
+        conn, okx_adapter=okx, capital_adapter=capital, alpaca_adapter=alpaca,
+        now_ts=now_s,
+    ))
+    assert len(imported) == 1
+
+    _bars, regime_lookup = _regime_bars(conn)
+    positions = _read_positions(
+        conn,
+        now_s=now_s,
+        last_prices=_last_prices(conn),
+        entry_lookup=_entry_price_lookup(conn),
+        cell_mult=_cell_mult_lookup(conn),
+        regime_lookup=regime_lookup,
+    )
+    by_sym = {p.symbol: p for p in positions}
+    spce = by_sym["SPCE"]
+    assert spce.mfe_atr_r is None
+    assert spce.mae_atr_r is None

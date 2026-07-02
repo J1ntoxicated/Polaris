@@ -170,6 +170,7 @@ def load_active_position_rows(
             continue
         entry_price = float(fill_row[0])
         size_usd = float(fill_row[1])
+        opened_ts_raw = int(r[9])
         # FIX-2 (2026-05-30): pull volume too (newest first) so the G6 monitor
         # sees REAL market data — the prior wiring hardcoded volume_now=0.0 and
         # recent_ticks=[] for every position, blinding the monitor.
@@ -177,13 +178,23 @@ def load_active_position_rows(
         # Exclude FUTURE-dated bars (stale +10h Capital) so the G6 monitor /
         # exit mark never treats a +10h ghost bar as the current price.
         ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
+        # [P0-5] Exclude PRE-ENTRY bars (ts < opened_ts) so a reconcile-import
+        # (or any restart-hydrated) position never pulls stale market-closed
+        # bars from before it opened into the MFE/MAE peak/trough window —
+        # a session-gap window (e.g. an equity position imported after the
+        # close, while the 20-bar lookback still reaches into the PRIOR
+        # session) fabricated multi-R excursion off pre-entry noise. A
+        # position with no bar at/after its own open (this tick, before the
+        # next bar closes) degrades to the entry-price fallback below
+        # (graceful, never halts).
         bar_row = conn.execute(
             """
             SELECT ts, close, high, low, volume FROM bars
-            WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
+            WHERE instrument_id = ? AND bar_interval = '1m'
+              AND ts >= ? AND ts <= ?
             ORDER BY ts DESC LIMIT 20
             """,
-            (instrument_id, ts_upper),
+            (instrument_id, opened_ts_raw, ts_upper),
         ).fetchall()
         bar_close = float(bar_row[0][1]) if bar_row else entry_price
         # P4 #2 — prefer a FRESH WS tick mid (M6: monotonic age check), else the
@@ -252,7 +263,7 @@ def load_active_position_rows(
             active_strategy_id=str(r[6] or r[4]),
             side=str(r[7]),
             qty=float(r[8]),
-            opened_ts=int(r[9]),
+            opened_ts=opened_ts_raw,
             entry_price=entry_price,
             last_price=last_price,
             size_usd=size_usd,

@@ -20,9 +20,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import sqlite3
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from polaris.core.lifecycle.trade import SimulatedTrade
+from polaris.core.metrics.risk_unit import risk_usd_at_entry
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,15 @@ __all__ = [
 ]
 
 RECONCILE_STRATEGY_ID = "_reconcile_import"
+
+# [P0-5] Entry-time ATR anchor resolver — ``(instrument_id, now_ts) ->
+# (atr_pct, timeframe) | None``. Injected by the ``scripts``-layer caller
+# (``polaris.scripts._production_atr.timeframe_anchor_atr_pct``) so
+# ``polaris.core`` never imports UP into ``scripts`` (layering rail,
+# ``test_core_layering.py``). ``None`` (the default) keeps the pre-fix
+# graceful degrade — a caller that does not inject a resolver simply leaves
+# ``entry_atr_pct`` NULL, exactly like a cold/missing bars window would.
+AtrAnchorFn = Callable[[sqlite3.Connection, str, int], "tuple[float, str] | None"]
 
 
 class _AlpacaLike(Protocol):
@@ -199,6 +210,7 @@ def _import_one(
     base_qty: float,
     now_ts: int,
     deal_id: str | None,
+    atr_anchor_fn: AtrAnchorFn | None = None,
 ) -> SimulatedTrade | None:
     """Persist one reconcile-import position + synthetic entry fill at mark.
 
@@ -217,18 +229,57 @@ def _import_one(
     fill_id = f"{position_id}:open"
     instrument_id = f"{venue}:{symbol}"
     fill_side = "buy" if side == "long" else "sell"
+    # [P0-5] Entry-time ATR anchor + risk_usd, stamped AT IMPORT (mirrors the
+    # normal-entry stamp site in ``_production_pipeline.py``) — a reconcile
+    # -import row previously left both NULL, so the exit-FSM R denominator
+    # fell back to the CURRENT (possibly stale/pre-entry) ATR and the
+    # excursion (mfe_r/mae_r) ledger had no risk_usd unit at all. Best-effort
+    # + fail-open (a cold/missing bars window, or no injected resolver, leaves
+    # both NULL — the existing legacy-graceful degrade, never a fabricated
+    # anchor).
+    #
+    # ``risk_usd_at_entry`` FLOORS to a nonzero value on ANY valid
+    # (price, qty) pair regardless of ``entry_atr_pct`` (notional-pct /
+    # abs-$ floor, [[risk_unit.py]] RISK_USD_ABS_FLOOR) — so feeding it a
+    # placeholder 0.0 when no anchor resolved would silently fabricate a
+    # positive, ATR-disconnected risk_usd and defeat the dashboard's
+    # 'n/a' render gate (``snapshot_q_positions.py`` mfe_atr_r/mae_atr_r).
+    # risk_usd is therefore ONLY computed when a REAL anchor resolved;
+    # no anchor ⇒ risk_usd stays NULL (honest, matches entry_atr_pct).
+    entry_atr_pct: float | None = None
+    entry_atr_timeframe: str | None = None
+    if atr_anchor_fn is not None:
+        try:
+            anchor = atr_anchor_fn(conn, instrument_id, now_ts)
+        except sqlite3.Error as exc:
+            anchor = None
+            logger.warning("[reconcile] entry ATR anchor read failed: %r", exc)
+        if anchor is not None:
+            entry_atr_pct, entry_atr_timeframe = anchor
+    risk_usd = (
+        risk_usd_at_entry(
+            entry_price=mark, entry_atr_pct=entry_atr_pct, base_qty=base_qty,
+        )
+        or None
+        if entry_atr_pct is not None
+        else None
+    )
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT OR REPLACE INTO positions "
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
-            " status, opened_ts, swap_count, deal_id) "
-            "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?)",
+            " status, opened_ts, swap_count, deal_id, entry_atr_pct, "
+            " entry_atr_timeframe, risk_usd, peak_price, trough_price, "
+            " exit_state) "
+            "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, "
+            "?, ?, 'open')",
             (
                 position_id, venue, symbol, position_id,
                 RECONCILE_STRATEGY_ID, RECONCILE_STRATEGY_ID,
                 RECONCILE_STRATEGY_ID, side, base_qty, now_ts, deal_id,
+                entry_atr_pct, entry_atr_timeframe, risk_usd, mark, mark,
             ),
         )
         conn.execute(
@@ -278,6 +329,7 @@ async def _reconcile_alpaca(
     adapter: _AlpacaLike,
     existing: set[tuple[str, str]],
     now_ts: int,
+    atr_anchor_fn: AtrAnchorFn | None,
 ) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
     positions = await adapter.fetch_positions()
@@ -294,7 +346,7 @@ async def _reconcile_alpaca(
         side = "short" if str(pos.get("side") or "long").lower() == "short" else "long"
         trade = _import_one(
             conn, venue="alpaca", symbol=symbol, side=side, mark=mark,
-            base_qty=qty, now_ts=now_ts, deal_id=None,
+            base_qty=qty, now_ts=now_ts, deal_id=None, atr_anchor_fn=atr_anchor_fn,
         )
         if trade is not None:
             existing.add(("alpaca", symbol))
@@ -307,6 +359,7 @@ async def _reconcile_capital(
     adapter: _CapitalLike,
     existing: set[tuple[str, str]],
     now_ts: int,
+    atr_anchor_fn: AtrAnchorFn | None,
 ) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
     body = await adapter.list_positions()
@@ -327,6 +380,7 @@ async def _reconcile_capital(
         trade = _import_one(
             conn, venue="capital", symbol=symbol, side=side, mark=mark,
             base_qty=base_qty, now_ts=now_ts, deal_id=deal_id,
+            atr_anchor_fn=atr_anchor_fn,
         )
         if trade is not None:
             existing.add(("capital", symbol))
@@ -349,6 +403,7 @@ async def reconcile_venue_positions(
     alpaca_adapter: _AlpacaLike | None,
     now_ts: int,
     import_okx_spot: bool = False,
+    atr_anchor_fn: AtrAnchorFn | None = None,
 ) -> list[SimulatedTrade]:
     """Import live venue positions NOT yet tracked in the DB (startup blind-spot).
 
@@ -378,20 +433,31 @@ async def reconcile_venue_positions(
     loop`` on the 2nd+ boot (adapters already warmed on the main loop) — the
     whole reconcile-import silently failed. Awaiting directly on the SAME loop
     that owns the adapters removes the cross-loop bind entirely.
+
+    ``atr_anchor_fn`` ([P0-5]): optional entry-time ATR-anchor resolver
+    injected by the ``scripts``-layer caller (``timeframe_anchor_atr_pct`` in
+    ``polaris.scripts._production_atr`` — kept OUT of ``polaris.core`` per the
+    layering rail, ``test_core_layering.py``). ``None`` (the default) leaves
+    every imported row's ``entry_atr_pct``/``risk_usd`` at the legacy-graceful
+    NULL/floor degrade — byte-identical for a caller that does not inject one.
     """
     existing = _existing_keys(conn)
     out: list[SimulatedTrade] = []
     if alpaca_adapter is not None:
         try:
             out.extend(
-                await _reconcile_alpaca(conn, alpaca_adapter, existing, now_ts)
+                await _reconcile_alpaca(
+                    conn, alpaca_adapter, existing, now_ts, atr_anchor_fn,
+                )
             )
         except Exception:  # noqa: BLE001
             logger.exception("[reconcile] Alpaca fetch/import failed — skipped")
     if capital_adapter is not None:
         try:
             out.extend(
-                await _reconcile_capital(conn, capital_adapter, existing, now_ts)
+                await _reconcile_capital(
+                    conn, capital_adapter, existing, now_ts, atr_anchor_fn,
+                )
             )
         except Exception:  # noqa: BLE001
             logger.exception("[reconcile] Capital fetch/import failed — skipped")

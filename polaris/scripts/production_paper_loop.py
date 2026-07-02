@@ -49,6 +49,7 @@ from polaris.core.pipeline.agents._gpt_client import GPT_P0_MODEL, default_gpt_f
 from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
+from polaris.scripts._production_atr import strategy_timeframe, timeframe_anchor_atr_pct
 from polaris.scripts._production_layers import (
     ALPACA_REFRESH_SEC,
     CAPITAL_REFRESH_SEC,
@@ -258,6 +259,22 @@ def alpaca_reconcile_import_enabled() -> bool:
     surfaces.
     """
     return os.environ.get("POLARIS_RECONCILE_VENUE_IMPORT") != "0"
+
+
+def _reconcile_import_atr_anchor(
+    conn: sqlite3.Connection, instrument_id: str, now_ts: int,
+) -> tuple[float, str] | None:
+    """[P0-5] Entry-time ATR-anchor resolver injected into
+    ``reconcile_venue_positions`` — lives in ``scripts`` (not ``core``) so
+    ``polaris.core.lifecycle.recover`` stays free of the ``scripts`` import
+    (layering rail, ``test_core_layering.py``). Same tf→1m fallback chain the
+    normal entry-stamp path uses; ``_reconcile_import`` is unregistered so
+    ``strategy_timeframe`` resolves "1m" (measurement-only, graceful).
+    """
+    return timeframe_anchor_atr_pct(
+        conn, instrument_id=instrument_id,
+        timeframe=strategy_timeframe("_reconcile_import"), now_ts=now_ts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -956,7 +973,9 @@ async def run_production_paper_loop(
     if real_roundtrip and alpaca_reconcile_import_enabled():
         try:
             imported = await reconcile_venue_positions(
-                conn, okx_adapter=None, capital_adapter=None,                alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+                conn, okx_adapter=None, capital_adapter=None,
+                alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
+                atr_anchor_fn=_reconcile_import_atr_anchor,
             )
         except Exception:
             logger.exception(

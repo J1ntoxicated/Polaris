@@ -77,6 +77,9 @@ def _seed_position_with_volume_ramp(
     ``volume_now`` (and volume z-score) is unmistakably non-zero — proving the
     monitor reads live data rather than the hardcoded 0.0.
     """
+    # [P0-5] Opened at the FIRST bar's ts (not NOW) so all 20 bars below stay
+    # >= opened_ts — a position seen mid volume-ramp, not one that just this
+    # instant opened (load_active_position_rows excludes ts < opened_ts).
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
@@ -84,7 +87,8 @@ def _seed_position_with_volume_ramp(
         " opened_ts, swap_count) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, 'long', 0.001, 'open', ?, 0)",
         (
-            position_id, venue, symbol, "crypto:BTC", "vb", "vb", "vb", NOW,
+            position_id, venue, symbol, "crypto:BTC", "vb", "vb", "vb",
+            NOW - 19 * 60,
         ),
     )
     conn.execute(
@@ -100,8 +104,10 @@ def _seed_position_with_volume_ramp(
         ),
     )
     instrument_id = f"{venue}:{symbol}"
+    # [P0-5] Anchored so the newest bar lands AT opened_ts (NOW) — pre-entry
+    # bars are now excluded from load_active_position_rows's window.
     for i in range(20):
-        ts = NOW - (20 - i) * 60
+        ts = NOW - (19 - i) * 60
         # Price drifts up slightly each bar; last bar volume spikes.
         close = entry_price + i * 20.0
         volume = 100.0 if i < 19 else 5_000.0

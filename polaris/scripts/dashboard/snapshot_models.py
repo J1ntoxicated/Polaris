@@ -51,8 +51,12 @@ class PositionRow:
     regime: str = ""
     exit_state: str = "open"
     stop_price: float = 0.0
-    mfe_atr_r: float = 0.0
-    mae_atr_r: float = 0.0
+    # [P0-5] ``None`` (not 0.0) when the row has no ``risk_usd`` R denominator
+    # yet (e.g. a freshly reconcile-imported position before the ATR anchor
+    # resolves) — the renderer shows 'n/a', never a fabricated 0.0R that reads
+    # as a real (flat) excursion measurement.
+    mfe_atr_r: float | None = 0.0
+    mae_atr_r: float | None = 0.0
     upnl_pct: float = 0.0
     # uPnL NET of the expected round-trip real fee (entry + expected close) —
     # the live mirror of the closed-trade gross/fee/net split, so an open

@@ -38,6 +38,7 @@ from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
+from polaris.core.sizing.r_budget_sizer import fold_strength_scalar
 from polaris.core.sizing.schema import (
     CONT_SCALAR_MAX,
     CONT_SCALAR_MIN,
@@ -130,6 +131,13 @@ class SignalIntent:
     # unchanged). Default 1.0 = byte-identical (no SIZE_UP / shadow / absent intent).
     # flow_not_block: it can only push the scalar toward its band ceiling, never cut.
     judge_conviction: float = 1.0
+    # Wave B agenda ② (vault/50_research/debates/waveB_sizing_params_2026-07-02.md):
+    # G3 signal_validator's MODIFY strength_scalar in [0.5, 1.5]. Folded into the
+    # SAME single continuous scalar via fold_strength_scalar (clamp ONCE on the
+    # pre-clip product — NOT a new T4 multiplier slot). Default 1.0 = byte-identical
+    # (absent / non-MODIFY / stale-cycle). Valid only within the SAME decision
+    # cycle that produced it — callers must not carry a stale value forward.
+    strength_scalar: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +442,13 @@ def compute_size(
             CONT_SCALAR_MIN,
             min(CONT_SCALAR_MAX, cont * intent.judge_conviction),
         )
+    # (1d) Wave B agenda ② — G3 strength_scalar fold into the SAME single
+    # continuous scalar (waveB_sizing_params_2026-07-02.md). fold_strength_scalar
+    # performs the ONE clamp on cont×strength_scalar (identical idiom to (1b)/(1c)
+    # above — NOT a new T4 multiplier slot; 9-stack count unchanged). Default 1.0
+    # = byte-identical no-op.
+    if intent.strength_scalar != 1.0:
+        cont = fold_strength_scalar(cont, strength_scalar=intent.strength_scalar)
     logger.info(
         "[regime-fit/seam1-size] sym=%s strat=%s family=%s regime=%s "
         "fit=%+.2f scalar=%.3f cont %.4f->%.4f (ONE-scalar fold, 9-stack intact)",

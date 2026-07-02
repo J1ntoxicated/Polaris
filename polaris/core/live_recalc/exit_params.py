@@ -10,6 +10,7 @@ See ``exit_engine`` for the orchestrator docstring describing each knob's role.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Final
 
@@ -265,23 +266,94 @@ def drift_floor_for_timeframe(timeframe: str | None) -> float:
 
 # --- Thesis-break maturity gate — BOTH break flavours -------------------------
 # ([[trade_mess_full_audit_2026-07-02_fixplan]] P0-2 ② + verification audit
-# P0-1, merged 2026-07-02). The flat ``EXIT_THESIS_GRACE_SEC`` (25s) kills the
-# 0-1s instant cut but is ~0.00003 of a 21-day horizon. This gate scales WITH
-# the strategy horizon: below ``EXIT_THESIS_BREAK_HOLD_FRAC`` (default 5%) of
+# P0-1, merged 2026-07-02; per-timeframe hold_frac + bars-seen counting per
+# [[waveB_sizing_params_2026-07-02]] agenda 3). The flat ``EXIT_THESIS_GRACE_SEC``
+# (25s) kills the 0-1s instant cut but is ~0.00003 of a 21-day horizon. This gate
+# scales WITH the strategy horizon: below ``hold_frac_for_timeframe(...)`` of
 # ``horizon_seconds`` held, NEITHER a momentum-ONLY material drift NOR a
 # corroborated break (OFI-opposes / regime-flip-against — live: 1D thesis_cut
 # at 0.7min) may flip the thesis BROKEN — a fresh long-horizon thesis gets real
-# development time first (~1 day for a 21-bar 1D strategy; <1-3min for 1m/5m =
-# near-identical to prior behaviour). Past the floor — or with a None horizon
-# (legacy/unknown strategy → gate INERT, byte-identical pre-fix) — both
-# flavours flip BROKEN exactly as before. The G6 -1.0R hard rail / ATR trail /
-# G6 EXIT_NOW crisis path are OWNED by the caller and completely untouched (a
-# real loss is still cut on those layers regardless of thesis maturity).
-# flow_not_block: removes premature CUTs on healthy long-horizon winners —
-# asymmetric payoff strengthened. Env-tunable.
-EXIT_THESIS_BREAK_HOLD_FRAC: Final[float] = _env_float(
-    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC", 0.05
+# development time first. Past the floor — or with a None horizon (legacy/unknown
+# strategy → gate INERT, byte-identical pre-fix) — both flavours flip BROKEN
+# exactly as before. The G6 -1.0R hard rail / ATR trail / G6 EXIT_NOW crisis path
+# are OWNED by the caller and completely untouched (a real loss is still cut on
+# those layers regardless of thesis maturity). flow_not_block: removes premature
+# CUTs on healthy long-horizon winners — asymmetric payoff strengthened.
+#
+# hold_frac is TIMEFRAME-DIFFERENTIATED: daily-or-slower (native bar >= 1D) =
+# 0.10 (raised from the flat 5% — a 1D thesis needs more than 1 bar-fraction of
+# development before a break judgement is trusted); intraday (< 1D) keeps the
+# proven 0.05. ``POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC`` is a single global
+# override — unset = timeframe-differentiated; set = wins for EVERY timeframe
+# (back-compat one-knob emergency override / existing tuning workflows).
+EXIT_THESIS_BREAK_HOLD_FRAC_DAILY: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC_DAILY", 0.10
 )
+EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY: Final[float] = _env_float(
+    "POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY", 0.05
+)
+# None (default) = use the timeframe-differentiated pair above; set = overrides
+# BOTH buckets with one value (also still read directly by legacy wall-clock
+# call sites as the flat fraction).
+_hold_frac_override_raw = os.environ.get("POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC")
+EXIT_THESIS_BREAK_HOLD_FRAC: Final[float | None] = (
+    None
+    if _hold_frac_override_raw is None
+    else _env_float("POLARIS_EXIT_THESIS_BREAK_HOLD_FRAC", 0.05)
+)
+# One native-timeframe bar of 1D (86400s) is the daily-or-slower threshold — any
+# native bar interval AT OR ABOVE this counts as "daily-or-slower".
+_DAILY_BAR_INTERVAL_SEC: Final[int] = 86400
+
+
+def hold_frac_for_timeframe(native_timeframe: str | None) -> float:
+    """The maturity-gate hold_frac for a strategy's OWN (native) timeframe.
+
+    ``EXIT_THESIS_BREAK_HOLD_FRAC`` (single global env override) wins when set.
+    Otherwise: daily-or-slower (native bar interval >= 86400s) uses the DAILY
+    frac (0.10); everything else (intraday, or an unrecognised/None token —
+    ``bar_seconds`` falls back to the flat 300s default, well under 1D) uses the
+    INTRADAY frac (0.05). Pure + total — never raises.
+    """
+    if EXIT_THESIS_BREAK_HOLD_FRAC is not None:
+        return EXIT_THESIS_BREAK_HOLD_FRAC
+    from polaris.core.isolation.reentry import bar_seconds
+
+    if bar_seconds(native_timeframe or "") >= _DAILY_BAR_INTERVAL_SEC:
+        return EXIT_THESIS_BREAK_HOLD_FRAC_DAILY
+    return EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY
+
+
+def required_bars_for_horizon(
+    *, horizon_seconds: int, native_bar_interval_seconds: int, horizon_bars: int
+) -> int:
+    """Minimum NATIVE bars a position must have SEEN before a break can close it.
+
+    ``required_bars = max(ceil(horizon_seconds * hold_frac / native_bar_interval),
+    floor_bars)``, ``floor_bars = 2 if horizon_bars >= 10 else 1`` — a short
+    (<10-bar) horizon strategy takes the 1-bar floor so the maturity gate never
+    eats 25%+ of its whole horizon (a flat 2-bar floor on e.g. a 5-bar horizon
+    would suppress 40% of it); a 1-bar floor still kills the 0-bar instant-cut.
+    ``hold_frac`` resolves via the same daily/intraday split as
+    ``hold_frac_for_timeframe``, keyed off the bar interval directly (no
+    timeframe-string re-derivation needed). Pure + total; a non-positive
+    interval degrades to the floor only (never raises, never returns 0 — a 0
+    required_bars would disable the gate outright).
+    """
+    floor_bars = 2 if horizon_bars >= 10 else 1
+    if native_bar_interval_seconds <= 0:
+        return max(1, floor_bars)
+    hold_frac = (
+        EXIT_THESIS_BREAK_HOLD_FRAC
+        if EXIT_THESIS_BREAK_HOLD_FRAC is not None
+        else (
+            EXIT_THESIS_BREAK_HOLD_FRAC_DAILY
+            if native_bar_interval_seconds >= _DAILY_BAR_INTERVAL_SEC
+            else EXIT_THESIS_BREAK_HOLD_FRAC_INTRADAY
+        )
+    )
+    frac_bars = math.ceil(horizon_seconds * hold_frac / native_bar_interval_seconds)
+    return max(frac_bars, floor_bars, 1)
 
 EXIT_THESIS_BROKEN_TICKS: Final[int] = int(
     _env_float("POLARIS_EXIT_THESIS_BROKEN_TICKS", 2.0)

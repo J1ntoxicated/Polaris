@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.isolation.reentry import bar_seconds
 from polaris.core.live_recalc.exit_params import _STATE_RANK as _EXIT_STATE_RANK
 from polaris.core.live_recalc.strategy_swap import (
     SwapCandidate,
@@ -68,6 +69,7 @@ from polaris.core.probes.tighten_intent import (
 from polaris.core.streams import resolve_stream_profile
 from polaris.scripts._production_atr import (
     MIN_TF_BARS,
+    native_bars_seen_since,
     strategy_timeframe,
     timeframe_atr_pct,
     timeframe_bar_rows,
@@ -380,6 +382,20 @@ def _horizon_seconds_for(strategy_id: str) -> int:
     return int(bar_seconds(cls.metadata.timeframe) * bars)
 
 
+def _horizon_bars_for(strategy_id: str) -> int | None:
+    """``StrategyMetadata.expected_holding_bars`` for the maturity gate's
+    ``required_bars_for_horizon`` (``floor_bars`` short-horizon carve-out).
+    ``None`` for an unregistered strategy (tick-engine signals) — the maturity
+    gate's bars-seen path stays inert for those (mirrors ``_horizon_seconds_for``'s
+    600s fallback: no bars-seen count is meaningful without a registered horizon)."""
+    from polaris.strategies import STRATEGY_REGISTRY
+
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return None
+    return max(1, int(cls.metadata.expected_holding_bars))
+
+
 # ---------------------------------------------------------------------------
 # Per-position G6/G7 GPT invocation
 # ---------------------------------------------------------------------------
@@ -460,6 +476,17 @@ async def _evaluate_position(
     # None here (degrade safe). re-map OFF → mode=None → byte-identical. EXIT
     # timing only; never size / entry / the G6 -1.0R rail.
     strategy_id = str(pos.get("active_strategy_id", pos.get("strategy", "")))
+    # Maturity gate ([[waveB_sizing_params_2026-07-02]] agenda 3): NATIVE bars
+    # closed on the strategy's own timeframe since this position opened — NOT
+    # wall-clock (session closes / data gaps distort wall-clock "elapsed").
+    # Reuses the same ``bars`` table the timeframe ATR read already queries; a
+    # missing bar row / unregistered strategy degrades to 0 seen (safest — the
+    # gate suppresses rather than risks judging an unmeasured thesis).
+    native_tf = strategy_timeframe(strategy_id)
+    native_bars_seen = native_bars_seen_since(
+        conn, instrument_id=f"{pos['venue']}:{pos['symbol']}", timeframe=native_tf,
+        open_ts=int(pos.get("opened_ts", now_ts)), now_ts=now_ts,
+    )
     mode = assess_mode_for_position(
         strategy_id=strategy_id, side=side,
         mfe_r=float(pos.get("mfe_r") or 0.0),
@@ -471,6 +498,10 @@ async def _evaluate_position(
         regime=regime, entry_regime=pos.get("entry_regime"),
         held_seconds=held_seconds,
         horizon_seconds=_horizon_seconds_for(strategy_id),
+        native_bars_seen=native_bars_seen,
+        native_bar_interval_seconds=bar_seconds(native_tf),
+        horizon_bars=_horizon_bars_for(strategy_id),
+        position_id=str(pos.get("position_id") or ""),
     )
 
     # #26 — precise exits FIRST (deterministic, every tick): track excursion,

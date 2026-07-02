@@ -11,6 +11,7 @@ The G6 -1.0R rail + the entry side are owned by the caller.
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
 from polaris.core.live_recalc.exit_params import (
@@ -22,12 +23,13 @@ from polaris.core.live_recalc.exit_params import (
     EXIT_LETRUN_HARVEST_TRAIL_MULT,
     EXIT_LETRUN_TRAIL_MULT,
     EXIT_PEAK_GIVEBACK_DISARM_R,
-    EXIT_THESIS_BREAK_HOLD_FRAC,
     EXIT_THESIS_BROKEN_TICKS,
     EXIT_THESIS_DEADBAND,
     EXIT_THESIS_GIVEBACK_ARM_R,
     EXIT_THESIS_GRACE_SEC,
     drift_floor_for_timeframe,
+    hold_frac_for_timeframe,
+    required_bars_for_horizon,
 )
 from polaris.core.live_recalc.exit_types import (
     Bucket,
@@ -37,6 +39,8 @@ from polaris.core.live_recalc.exit_types import (
     ThesisGivebackParams,
     ThesisHealth,
 )
+
+logger = logging.getLogger(__name__)
 
 # A reversion-class strategy targets a bounded revert-to-mean; its
 # correlation_group_id carries one of these substrings. Everything else (momo /
@@ -139,6 +143,66 @@ def tick_micro_broken(
     return momentum_reversed or ofi_opposes
 
 
+def _has_matured(
+    *,
+    held_seconds: int | None,
+    horizon_seconds: int | None,
+    timeframe: str | None,
+    native_bars_seen: int | None,
+    native_bar_interval_seconds: int | None,
+    horizon_bars: int | None,
+    position_id: str | None,
+) -> bool:
+    """Has this position developed enough to trust a break judgement?
+
+    Two measures, bars-seen PREFERRED over wall-clock ([[waveB_sizing_params_2026-07-02]]
+    agenda 3): when the caller threads ``native_bars_seen`` +
+    ``native_bar_interval_seconds`` + ``horizon_bars`` (all three non-None), maturity
+    is judged in NATIVE BARS the strategy's OWN timeframe has SEEN since the
+    position opened (via ``required_bars_for_horizon``) — wall-clock is NEVER used
+    in this path, since a session close / weekend gap would otherwise fake elapsed
+    development the thesis never actually lived through. When any of the three is
+    ``None`` (a caller that has not migrated to bars-seen yet), this degrades to
+    the pre-existing WALL-CLOCK fraction (``held_seconds >= horizon_seconds *
+    hold_frac_for_timeframe(timeframe)``) — byte-identical to the prior behaviour
+    for that call site. ``horizon_seconds is None`` (legacy/unknown strategy) →
+    gate INERT (matured=True) in both paths. Logs a one-line suppression record
+    (elapsed/seen-or-na/required) when the gate fires.
+    """
+    if horizon_seconds is None:
+        return True
+    bars_seen_path = (
+        native_bars_seen is not None
+        and native_bar_interval_seconds is not None
+        and horizon_bars is not None
+    )
+    if bars_seen_path:
+        assert native_bars_seen is not None
+        assert native_bar_interval_seconds is not None
+        assert horizon_bars is not None
+        required = required_bars_for_horizon(
+            horizon_seconds=horizon_seconds,
+            native_bar_interval_seconds=native_bar_interval_seconds,
+            horizon_bars=horizon_bars,
+        )
+        matured = native_bars_seen >= required
+        seen_desc = str(native_bars_seen)
+    else:
+        if held_seconds is None:
+            return True
+        required = 0  # wall-clock path has no bar count; logged as n/a below
+        matured = held_seconds >= horizon_seconds * hold_frac_for_timeframe(timeframe)
+        seen_desc = "n/a"
+    if not matured:
+        logger.info(
+            "[L6/exit] maturity-gate suppressed break pos=%s elapsed=%ss "
+            "seen=%s required=%s",
+            position_id or "?", held_seconds, seen_desc,
+            required if bars_seen_path else "n/a",
+        )
+    return matured
+
+
 def _assess_health(
     *,
     sign: int,
@@ -155,6 +219,10 @@ def _assess_health(
     held_seconds: int | None,
     horizon_seconds: int | None,
     timeframe: str | None,
+    native_bars_seen: int | None,
+    native_bar_interval_seconds: int | None,
+    horizon_bars: int | None,
+    position_id: str | None,
 ) -> ThesisHealth:
     """Classify the entry thesis as INTACT / FADING / BROKEN (pure, total).
 
@@ -182,16 +250,17 @@ def _assess_health(
     (conservative). A None horizon (legacy / unknown strategy) leaves the gate
     inert → byte-identical to pre-fix.
 
-    Maturity (hold-time) gate — BOTH break flavours
-    ([[trade_mess_full_audit_2026-07-02_fixplan]] P0-2 + verification audit P0-1):
-    below ``EXIT_THESIS_BREAK_HOLD_FRAC`` (default 5%) of ``horizon_seconds``
-    held, NEITHER a corroborated break (OFI-opposes / regime-flip-against, live:
-    1D thesis_cut at 0.7min) NOR a momentum-only material drift may flip the
-    thesis to BROKEN — a fresh long-horizon thesis gets real development time
-    first (it still falls through to the FADING / INTACT tests below). Past that
-    floor — or with no horizon — both flavours flip BROKEN exactly as before.
-    The -1.0R hard rail / ATR trail / G6 crisis exits are a SEPARATE layer and
-    are never gated by any of this.
+    Maturity gate — BOTH break flavours ([[trade_mess_full_audit_2026-07-02_fixplan]]
+    P0-2 + verification audit P0-1; per-timeframe hold_frac + bars-seen counting
+    [[waveB_sizing_params_2026-07-02]] agenda 3): below the maturity floor (see
+    ``_has_matured`` — bars-seen when threaded, else the pre-existing wall-clock
+    fraction of ``horizon_seconds``), NEITHER a corroborated break (OFI-opposes /
+    regime-flip-against, live: 1D thesis_cut at 0.7min) NOR a momentum-only
+    material drift may flip the thesis to BROKEN — a fresh long-horizon thesis
+    gets real development time first (it still falls through to the FADING /
+    INTACT tests below). Past that floor — or with no horizon — both flavours
+    flip BROKEN exactly as before. The -1.0R hard rail / ATR trail / G6 crisis
+    exits are a SEPARATE layer and are never gated by any of this.
     """
     drift_dir = sign * momentum_drift  # >0 = momentum WITH the position
     ofi_dir = None if ofi is None else sign * ofi  # >0 = flow WITH the position
@@ -211,14 +280,18 @@ def _assess_health(
     )
     drift_floor = drift_floor_for_timeframe(timeframe)
     drift_is_material = not within_horizon or abs(momentum_drift) >= drift_floor
-    # MATURITY gate: within horizon, a momentum-ONLY break additionally requires
-    # the position to have aged past the hold-frac floor of its horizon. Inert
-    # when not within_horizon (which already covers horizon_seconds is None).
-    drift_is_mature = not within_horizon or (
-        held_seconds is not None
-        and horizon_seconds is not None
-        and held_seconds >= horizon_seconds * EXIT_THESIS_BREAK_HOLD_FRAC
+    # MATURITY gate ([[waveB_sizing_params_2026-07-02]] agenda 3): within horizon,
+    # BOTH break flavours additionally require the position to have matured — see
+    # ``_has_matured`` (bars-seen when threaded, else the pre-existing wall-clock
+    # fraction). Computed ONCE and shared by the momentum-only and corroborated
+    # paths below (both flavours are gated uniformly).
+    has_matured = _has_matured(
+        held_seconds=held_seconds, horizon_seconds=horizon_seconds,
+        timeframe=timeframe, native_bars_seen=native_bars_seen,
+        native_bar_interval_seconds=native_bar_interval_seconds,
+        horizon_bars=horizon_bars, position_id=position_id,
     )
+    drift_is_mature = not within_horizon or has_matured
     momentum_reversed = (
         drift_dir < 0.0
         and abs(momentum_drift) > EXIT_THESIS_DEADBAND
@@ -226,24 +299,14 @@ def _assess_health(
         and drift_is_mature
     )
 
-    # CORROBORATED-break hold-time floor (audit P0-2): OFI-opposes / regime-flip
-    # are genuine breaks (unlike momentum-only, which already has its own
-    # ``drift_is_material`` horizon gate above), but each still needs a MINIMUM
-    # hold proportional to the strategy's own timeframe before it can flip
+    # CORROBORATED-break maturity gate (audit P0-2, bars-seen 2026-07-02 agenda 3):
+    # OFI-opposes / regime-flip are genuine breaks (unlike momentum-only, which
+    # already has its own ``drift_is_material`` horizon gate above), but each
+    # still needs the SAME maturity floor as momentum-only before it can flip
     # BROKEN — else a 1D/1H thesis is executed off a single 1m-tick wobble the
-    # instant it opens. The floor is a small fraction of ``horizon_seconds``
-    # (already timeframe-derived), so a 1m/5m scalp floor is <3min
-    # (near-immediate, unchanged in practice) while a 1H/1D thesis gets ~1-1.5
-    # bars of genuine development time. Past the floor — or no horizon (legacy)
-    # — corroborated breaks fire instantly, unchanged.
-    break_hold_floor = (
-        EXIT_THESIS_BREAK_HOLD_FRAC * horizon_seconds
-        if horizon_seconds is not None
-        else 0.0
-    )
-    corroborated_break_matured = (
-        held_seconds is not None and held_seconds >= break_hold_floor
-    )
+    # instant it opens. Past the floor — or no horizon (legacy) — corroborated
+    # breaks fire instantly, unchanged.
+    corroborated_break_matured = not within_horizon or has_matured
     ofi_opposes = (
         ofi_dir is not None
         and ofi_dir < 0.0
@@ -301,6 +364,10 @@ def assess_thesis(
     giveback: ThesisGivebackParams,
     broken_streak: int = _BROKEN_STREAK_CONFIRMED,
     timeframe: str | None = None,
+    native_bars_seen: int | None = None,
+    native_bar_interval_seconds: int | None = None,
+    horizon_bars: int | None = None,
+    position_id: str | None = None,
 ) -> ManagementMode:
     """Re-map THIS position's exit schedule from entry-thesis health (pure/total).
 
@@ -321,6 +388,12 @@ def assess_thesis(
     ``timeframe`` (default ``None``) scales the horizon drift-materiality floor
     ([[1d_exit_horizon_fix_2026-07-02]]) — ``None``/unregistered → the proven 1m
     floor (byte-identical to every existing caller that doesn't thread it).
+
+    ``native_bars_seen`` / ``native_bar_interval_seconds`` / ``horizon_bars``
+    ([[waveB_sizing_params_2026-07-02]] agenda 3, default ``None``): the maturity
+    gate's bars-seen measure — see ``_has_matured``. All three default ``None`` →
+    the gate falls back to the pre-existing WALL-CLOCK maturity fraction
+    (byte-identical for every caller that has not migrated to bars-seen yet).
 
     Precedence (highest first): give-back-hard → CUT(broken + red) → HARVEST
     (give-back / fading / broken-green) → REMODE → LET_RUN(trend intact) → HOLD.
@@ -352,6 +425,10 @@ def assess_thesis(
         broken_streak=broken_streak,
         held_seconds=held_seconds, horizon_seconds=horizon_seconds,
         timeframe=timeframe,
+        native_bars_seen=native_bars_seen,
+        native_bar_interval_seconds=native_bar_interval_seconds,
+        horizon_bars=horizon_bars,
+        position_id=position_id,
     )
 
     # GRACE gate on the CLOSING health verdicts: inside grace, a BROKEN or FADING

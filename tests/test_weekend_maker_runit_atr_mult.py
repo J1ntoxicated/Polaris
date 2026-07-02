@@ -29,17 +29,22 @@ WEEKEND_STOP_ATR_MULT = 3.0
 
 
 def test_weekend_makers_widen_to_3x_atr() -> None:
-    assert _stop_atr_mult_for_strategy(THIN_BOOK_ID) == WEEKEND_STOP_ATR_MULT
-    assert _stop_atr_mult_for_strategy(FUNDING_ID) == WEEKEND_STOP_ATR_MULT
+    # atr_pct=0.01 (1%) is well above the fee floor for every venue (see
+    # test_fee_aware_runit_floor.py), so the base weekend-maker multiplier is
+    # returned unchanged — the fee floor is a no-op at this ATR%.
+    assert _stop_atr_mult_for_strategy(THIN_BOOK_ID, atr_pct=0.01) == WEEKEND_STOP_ATR_MULT
+    assert _stop_atr_mult_for_strategy(FUNDING_ID, atr_pct=0.01) == WEEKEND_STOP_ATR_MULT
 
 
 def test_every_other_strategy_keeps_2x_default_byte_identical() -> None:
     # The module SSOT default (= the realised/excursion 2-ATR convention). Any
     # non-weekend-maker registered strategy AND any unregistered id resolve to it
-    # → the R ruler is byte-identical for every existing position.
-    assert _stop_atr_mult_for_strategy("spot_donchian_breakout") == STOP_ATR_MULT
-    assert _stop_atr_mult_for_strategy("session_breakout") == STOP_ATR_MULT
-    assert _stop_atr_mult_for_strategy("__not_a_strategy__") == STOP_ATR_MULT
+    # → the R ruler is byte-identical for every existing position at this ATR%
+    # (0.01, above the fee floor for every venue — see
+    # test_fee_aware_runit_floor.py for the floor's OWN widening behaviour).
+    assert _stop_atr_mult_for_strategy("spot_donchian_breakout", atr_pct=0.01) == STOP_ATR_MULT
+    assert _stop_atr_mult_for_strategy("session_breakout", atr_pct=0.01) == STOP_ATR_MULT
+    assert _stop_atr_mult_for_strategy("__not_a_strategy__", atr_pct=0.01) == STOP_ATR_MULT
     assert STOP_ATR_MULT == 2.0  # the SSOT default is the legacy 2-ATR convention
 
 

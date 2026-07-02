@@ -44,6 +44,7 @@ from polaris.scripts._production_tick_mfe import (
     _scalp_min_capture_r,
 )
 from polaris.scripts._production_tick_state import TickEngineState
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 
 logger = logging.getLogger("polaris.scripts._production_tick_engine")
 
@@ -202,6 +203,18 @@ async def _run_exits(
             pnl_r = compute_unrealized_pnl_r(
                 side=trade.side, entry_price=entry_price,
                 last_price=last_mid, atr_pct=entry_atr_pct,
+                # Fee-aware R-unit floor, generalized (trade_mess_full_audit_
+                # 2026-07-02 gap): this pnl_r feeds evaluate_exit's
+                # profit_target_r / loser-timeout checks directly (not
+                # recomputed inside run_precise_exit), while evaluate_exit's
+                # OWN mfe_r/mae_r already denominate on this SAME floored
+                # stop_atr_mult (run_precise_exit threads it below) — an
+                # unfloored pnl_r here was a second, tighter R-unit inside one
+                # exit decision. Mirrors the bar recalc's identical choke
+                # point (_production_recalc.py).
+                stop_atr_mult=_stop_atr_mult_for_strategy(
+                    trade.strategy_id, atr_pct=entry_atr_pct
+                ),
             )
         # flow_pressure EXIT precision: once GREEN, trail on the MICROSTRUCTURE —
         # exit near the peak the instant the OFI that drove the entry decays /

@@ -61,6 +61,7 @@ from polaris.scripts._alpaca_pending_open import (
     PendingOpenRef,
     clear_pending_open,
     read_pending_open,
+    true_up_alpaca_partial,
     upsert_pending_open,
 )
 from polaris.scripts._production_atr import timeframe_anchor_atr_pct
@@ -372,6 +373,27 @@ async def reserve_and_submit(
             conn, venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
             side=sig.side,
         )
+        # PARTIAL-FILL TRUE-UP: a position from a snapshot fill already exists
+        # for this ref — fold the final venue qty into it here (best-effort,
+        # never blocks this tick's fresh signal below) instead of routing it
+        # through the fresh-submit dedup path (which would treat it as a new
+        # open ready to duplicate-persist).
+        if alpaca_pending is not None and alpaca_pending.state == "partial_trueup":
+            adapter_for_trueup = alpaca_adapter
+            if adapter_for_trueup is None:
+                api_key, secret = resolve_alpaca_credentials()
+                if api_key and secret:
+                    async with AlpacaAdapter(api_key=api_key, secret=secret) as ad:
+                        await true_up_alpaca_partial(
+                            conn, ad, alpaca_pending, venue=venue, symbol=symbol,
+                            strategy_id=sig.strategy_id, side=sig.side,
+                        )
+            else:
+                await true_up_alpaca_partial(
+                    conn, adapter_for_trueup, alpaca_pending, venue=venue,
+                    symbol=symbol, strategy_id=sig.strategy_id, side=sig.side,
+                )
+            alpaca_pending = None  # never fed into the fresh-submit dedup path
     # NOTE: the prior OKX param/precision per-symbol cooldown SKIP (Jin
     # 2026-06-22) is REMOVED (Jin 2026-06-23). The root fix is the submit-path
     # min-size CLAMP-UP (OKXAdapter._round_px_sz → clamp_up_to_min) which bumps a
@@ -766,6 +788,25 @@ async def reserve_and_submit(
         )
         return None
     state.fills_open += 1
+    # PARTIAL-FILL TRUE-UP: the persisted fill is a SNAPSHOT (poll budget
+    # expired while still ``partially_filled``) — keep a ``partial_trueup``
+    # pending ref naming THIS position so the next tick folds the final
+    # venue qty in (see ``true_up_alpaca_partial``). No duplicate submit risk:
+    # the fresh-submit dedup path above already routes a ``partial_trueup``
+    # ref straight into the true-up, never back into ``_real_open_fill``.
+    if real_roundtrip and venue == "alpaca" and maker_attempt is not None \
+            and maker_attempt.partial_trueup and maker_attempt.venue_order_id:
+        upsert_pending_open(
+            conn, venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
+            side=sig.side, venue_order_id=maker_attempt.venue_order_id,
+            client_order_id=maker_attempt.client_order_id,
+            notional_usd=fill.size_usd, last_price=fill.fill_price,
+            now_ts=now_ts, state="partial_trueup", position_id=position_id,
+        )
+        logger.info(
+            "[alpaca/trueup] %s position=%s snapshot qty=%.9f — pending "
+            "true-up ref kept for next tick", symbol, position_id, fill.base_qty,
+        )
     # Successful open (INFO): the entry 거동 record — venue/ticker/side, the
     # entry fill price + notional, strategy, and the position_id that ties the
     # whole 6-effect close fan-out together (trade_id correlation). "opened" +

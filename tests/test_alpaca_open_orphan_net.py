@@ -93,6 +93,67 @@ async def test_open_fills_after_poll_loop_returns_fill() -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_partial_fill_keeps_polling_and_captures_full_fill() -> None:
+    """status=new, then partially_filled, then filled at the LAST poll — the
+    prior bug broke on the FIRST partially_filled observation and would have
+    returned only the partial snapshot as final; the fix must keep polling and
+    capture the eventual FULL fill (base_qty from the terminal 'filled' row)."""
+
+    class _GrowingAdapter:
+        def __init__(self) -> None:
+            self.statuses = ["new", "partially_filled", "filled"]
+            self._i = 0
+
+        async def place_market_order(self, **kwargs: Any) -> _Resp:
+            return _Resp(True, venue_order_id="entx_ord_1")
+
+        async def fetch_order(self, *, order_id: str) -> dict[str, Any]:
+            status = self.statuses[min(self._i, len(self.statuses) - 1)]
+            self._i += 1
+            row: dict[str, Any] = {"status": status, "symbol": "ENTX", "side": "buy"}
+            if status in ("filled", "partially_filled"):
+                qty = "400" if status == "partially_filled" else "797"
+                row["filled_qty"] = qty
+                row["filled_avg_price"] = "5.00"
+            return row
+
+    res = await real_alpaca_open_fill(
+        _GrowingAdapter(), symbol="ENTX", notional_usd=4000.0, strategy_id="s",
+        side="buy", last_price=5.0, poll_delay_sec=0.0,
+    )
+    assert res.fill is not None
+    assert res.fill.base_qty == pytest.approx(797.0)  # the FINAL fill, not 400
+    assert res.partial_trueup is False
+
+
+@pytest.mark.asyncio
+async def test_open_partial_fill_budget_exhausted_returns_snapshot_flagged() -> None:
+    """Every poll across the WHOLE budget reports partially_filled (never
+    reaches 'filled') — the snapshot fill IS returned (never dropped) but
+    flagged ``partial_trueup=True`` + carries the venue ref so the caller can
+    persist it as the entry and true-up the remainder next tick."""
+
+    class _StuckPartialAdapter:
+        async def place_market_order(self, **kwargs: Any) -> _Resp:
+            return _Resp(True, venue_order_id="entx_ord_1")
+
+        async def fetch_order(self, *, order_id: str) -> dict[str, Any]:
+            return {
+                "status": "partially_filled", "symbol": "ENTX", "side": "buy",
+                "filled_qty": "400", "filled_avg_price": "5.00",
+            }
+
+    res = await real_alpaca_open_fill(
+        _StuckPartialAdapter(), symbol="ENTX", notional_usd=4000.0,
+        strategy_id="s", side="buy", last_price=5.0, poll_delay_sec=0.0,
+    )
+    assert res.fill is not None
+    assert res.fill.base_qty == pytest.approx(400.0)
+    assert res.partial_trueup is True
+    assert res.venue_order_id == "entx_ord_1"
+
+
+@pytest.mark.asyncio
 async def test_open_never_fills_carries_venue_order_id_for_orphan() -> None:
     """Order accepted but never fills within the whole budget → no_fill BUT the
     OpenAttempt now carries the venue_order_id + the submitted qty so the caller

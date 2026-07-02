@@ -90,7 +90,10 @@ from polaris.scripts._static_ground import (
     ingest_static_ground_bars,
     refresh_ticker_ground,
 )
-from polaris.scripts.reconcile_alpaca_zombies import reconcile_alpaca_venue_drift
+from polaris.scripts.reconcile_alpaca_zombies import (
+    reconcile_alpaca_qty_drift,
+    reconcile_alpaca_venue_drift,
+)
 from polaris.scripts.reconcile_orphans import (
     flatten_venue_eod,
     reconcile_venue_orphans,
@@ -109,6 +112,7 @@ __all__ = [
     "ProdLoopState",
     "main",
     "persist_altdata_snapshot",
+    "reconcile_alpaca_qty_drift",
     "reconcile_alpaca_venue_drift",
     "run_production_paper_loop",
     "_all_strategies",
@@ -924,6 +928,27 @@ async def run_production_paper_loop(
                 "— Alpaca equity real orders disabled (per-tick env fallback will "
                 "also fail)"
             )
+        # QTY-DRIFT FOLD/CLAMP — MUST run BEFORE the liquidation sweep below
+        # (spec item C: fold/adopt precedes any close so a partial-fill-
+        # truncated position is folded to its TRUE venue qty first; only what
+        # remains genuinely untracked is a liquidation candidate). Same
+        # best-effort / never-blocks-boot contract as the venue-drift pass.
+        if (real_roundtrip and alpaca_reconcile_import_enabled()
+                and alpaca_adapter is not None):
+            try:
+                touched = await reconcile_alpaca_qty_drift(
+                    conn, alpaca_adapter, now_ts=int(time.time()),
+                )
+                if touched:
+                    logger.warning(
+                        "[reconcile] alpaca qty-drift folded/clamped %d "
+                        "position(s) before the orphan sweep", touched,
+                    )
+            except Exception:
+                logger.exception(
+                    "[reconcile] reconcile_alpaca_qty_drift failed — qty drift "
+                    "not corrected this boot (non-fatal)"
+                )
         # CROSS-VENUE SELF-HEAL: close UNTRACKED venue orphans across OKX +
         # Capital + Alpaca every boot (the bot restarts daily). HARD GUARD: a
         # symbol/epic/ccy with a live tracked open/active DB row is NEVER touched
@@ -1138,6 +1163,23 @@ async def run_production_paper_loop(
                     )
                 except Exception:  # noqa: BLE001 — lifecycle pass never halts loop
                     logger.exception("[eod] flatten pass failed — bot continues")
+
+            # PERIODIC QTY-DRIFT FOLD/CLAMP — same cadence as the periodic
+            # orphan sweep below, and runs FIRST in this pass (spec item C:
+            # fold/adopt precedes liquidation) so a partial-fill drift that
+            # re-accumulates mid-session is corrected before any close.
+            if (orphan_reconcile_on and real_roundtrip
+                    and alpaca_reconcile_import_enabled()
+                    and alpaca_adapter is not None
+                    and tick_idx % reconcile_every == 0):
+                try:
+                    await reconcile_alpaca_qty_drift(
+                        conn, alpaca_adapter, now_ts=int(time.time()),
+                    )
+                except Exception:  # noqa: BLE001 — hygiene pass never halts loop
+                    logger.exception(
+                        "[reconcile] periodic qty-drift pass failed — continues"
+                    )
 
             # PERIODIC ORPHAN RECONCILE — re-sweep re-accumulated untracked venue
             # holdings without a restart (boot does the first sweep). Tracked-set

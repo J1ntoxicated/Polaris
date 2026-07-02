@@ -271,6 +271,127 @@ async def test_immediate_fill_open_unaffected_by_pending_wiring(
 
 
 # ---------------------------------------------------------------------------
+# (f) partial-fill true-up — the confirmed RCA fix (spec A'): a poll budget
+# expiring on ``partially_filled`` must persist the snapshot as the position
+# entry AND true-up the final venue qty on the NEXT tick (no permanent
+# truncation, e.g. live GVH 206/250 / AAL 35/82.60 sh).
+# ---------------------------------------------------------------------------
+
+
+def _partial_row(qty: str = "400", px: str = "5.00") -> dict[str, Any]:
+    return {"id": "entx_ord_1", "symbol": "ENTX", "side": "buy",
+            "status": "partially_filled", "filled_qty": qty,
+            "filled_avg_price": px}
+
+
+def _adapter_stuck_partial() -> AsyncMock:
+    """Every poll (submit + pending-resolve) reports the SAME partial qty —
+    the order never progresses past 400/797 within this test's ticks."""
+    adapter = AsyncMock()
+    adapter.place_market_order = AsyncMock(return_value=_RespOk())
+    adapter.fetch_order = AsyncMock(return_value=_partial_row("400"))
+    adapter.fetch_account = AsyncMock(return_value={"buying_power": "100000"})
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_persists_snapshot_and_keeps_trueup_ref(
+    memdb: sqlite3.Connection,
+) -> None:
+    reset_process_fence()
+    state = ProdLoopState()
+    now = int(time.time())
+
+    tick1_adapter = _adapter_stuck_partial()
+    trade1 = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig("sig1"), venue="alpaca",
+        symbol="ENTX", asset_class="equity", underlying_group_id="equity:ENTX",
+        notional_usd=4000.0, last_price=5.0, now_ts=now,
+        real_roundtrip=True, alpaca_adapter=tick1_adapter,
+    )
+    # The snapshot fill (400 shares) IS persisted as the position entry — never
+    # dropped (flow_not_block: some confirmed shares beat zero tracked shares).
+    assert trade1 is not None
+    pos_row = memdb.execute(
+        "SELECT qty, risk_usd FROM positions WHERE position_id = ?",
+        (trade1.position_id,),
+    ).fetchone()
+    assert pos_row is not None
+    assert float(pos_row[0]) == pytest.approx(400.0)
+    pending = read_pending_open(
+        memdb, venue="alpaca", symbol="ENTX", strategy_id="equity_tsmom",
+        side="long",
+    )
+    assert pending is not None
+    assert pending.state == "partial_trueup"
+    assert pending.position_id == trade1.position_id
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_trueup_folds_final_qty_next_tick(
+    memdb: sqlite3.Connection,
+) -> None:
+    reset_process_fence()
+    state = ProdLoopState()
+    now = int(time.time())
+
+    tick1_adapter = _adapter_stuck_partial()
+    trade1 = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig("sig1"), venue="alpaca",
+        symbol="ENTX", asset_class="equity", underlying_group_id="equity:ENTX",
+        notional_usd=4000.0, last_price=5.0, now_ts=now,
+        real_roundtrip=True, alpaca_adapter=tick1_adapter,
+    )
+    assert trade1 is not None
+    old_risk_usd = memdb.execute(
+        "SELECT risk_usd FROM positions WHERE position_id = ?",
+        (trade1.position_id,),
+    ).fetchone()[0]
+
+    # Tick 2: the SAME order now reports the FULL 797 filled — a fresh signal
+    # fires on the same key; the true-up runs FIRST (position row folded to
+    # 797) and does NOT block the fresh signal's own flow.
+    tick2_adapter = AsyncMock()
+    tick2_adapter.fetch_order = AsyncMock(return_value=_partial_row("797"))
+    with_final = dict(_partial_row("797"))
+    with_final["status"] = "filled"
+    tick2_adapter.fetch_order = AsyncMock(return_value=with_final)
+    tick2_adapter.place_market_order = AsyncMock(return_value=_RespOk("entx_ord_2"))
+    tick2_adapter.fetch_account = AsyncMock(return_value={"buying_power": "100000"})
+    trade2 = await _reserve_and_submit(
+        conn=memdb, state=state, sig=_eq_sig("sig2"), venue="alpaca",
+        symbol="ENTX", asset_class="equity", underlying_group_id="equity:ENTX",
+        notional_usd=4000.0, last_price=5.0, now_ts=now + 5,
+        real_roundtrip=True, alpaca_adapter=tick2_adapter,
+    )
+    folded_qty = memdb.execute(
+        "SELECT qty, risk_usd FROM positions WHERE position_id = ?",
+        (trade1.position_id,),
+    ).fetchone()
+    assert float(folded_qty[0]) == pytest.approx(797.0)
+    # risk_usd rescaled proportionally to the qty growth (entry anchor kept).
+    if old_risk_usd is not None:
+        assert float(folded_qty[1]) == pytest.approx(
+            float(old_risk_usd) * (797.0 / 400.0)
+        )
+    fill_row = memdb.execute(
+        "SELECT base_qty, size_usd, quote_qty FROM fills "
+        "WHERE order_id = 'entx_ord_1' AND is_close = 0"
+    ).fetchone()
+    assert fill_row is not None
+    assert float(fill_row[0]) == pytest.approx(797.0)
+    assert float(fill_row[1]) == pytest.approx(797.0 * 5.0)
+    # Pending ref cleared — nothing left to true up.
+    assert read_pending_open(
+        memdb, venue="alpaca", symbol="ENTX", strategy_id="equity_tsmom",
+        side="long",
+    ) is None
+    # The fresh tick-2 signal was NOT blocked by the true-up (flow_not_block).
+    assert trade2 is not None
+    assert trade2.position_id != trade1.position_id
+
+
+# ---------------------------------------------------------------------------
 # (e) OKX / Capital open paths never touch pending_opens.
 # ---------------------------------------------------------------------------
 

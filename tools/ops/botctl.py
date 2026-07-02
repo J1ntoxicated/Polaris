@@ -237,7 +237,11 @@ def in_backoff(cfg: OpsConfig, *, now: float | None = None) -> bool:
 def _spawn(cfg: OpsConfig) -> int:
     cfg.ops_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["TICK_ENGINE_ENABLED"] = "1"
+    # 2026-07-03 명시 INERT (RCA wf_acf9db2c): tick 시그널 로스터(_SIGNAL_FNS)가
+    # 06-26 KILL 이후 빈 dict → 엔진이 6일째 decisions=0 순수 공회전(44만 평가/일,
+    # CPU만 소모 — Jin 컨퍼런스콜 간섭). 로스터 재건 시 "1" 복귀. 호출 셸의
+    # TICK_ENGINE_ENABLED로 오버라이드 가능.
+    env["TICK_ENGINE_ENABLED"] = os.environ.get("TICK_ENGINE_ENABLED", "0")
     with open(cfg.spawn_log, "ab") as out:
         proc = subprocess.Popen(
             cfg.start_cmd,

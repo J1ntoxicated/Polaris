@@ -258,3 +258,5 @@
 2026-07-02 15:10 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/alpaca-qty-truth/tests/test_alpaca_open_pending_confirm.py]
 2026-07-02 15:43 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=387 learners=3 paper=True]
 - 2026-07-03 fix(alpaca-qty-truth): 머지 29b626f — partial true-up(A')+qty-fold/clamp(B)+sweep coid가드(C) 배포. RCA(wf_538fdd31 CONFIRMED): 13:40 셀프청산 7건=sweep 소유권 미확인, qty 절단=confirm-poll partial 종결오판(미추적 $4,042). + 잠복 순환import(recover→risk_unit→sizing→engine) 지연래퍼 절단. 봇 재기동
+2026-07-02 15:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=387 learners=3 paper=True]
+- 2026-07-03 hotfix(schema): live pending_opens에 state/position_id 컬럼 누락(IF NOT EXISTS가 컬럼 진화 미반영) → 수동 ALTER 2건, 'no such column' 에러 0 확인. 부팅 컬럼-드리프트 가드 chip 분리(task_56390a9b). Haiku 틱이 적발

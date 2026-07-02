@@ -349,7 +349,8 @@ def test_import_no_bars_row_renders_mfe_mae_na_on_dashboard(
     ))
     assert len(imported) == 1
 
-    _bars, regime_lookup = _regime_bars(conn)
+    # (wave D 병렬 병합: misc-batch가 _regime_bars에 now_s kwarg 추가 — stale 필터)
+    _bars, regime_lookup = _regime_bars(conn, now_s=now_s)
     positions = _read_positions(
         conn,
         now_s=now_s,

@@ -4,8 +4,8 @@ and session-forced-exit telemetry surfaced into the read-only snapshot.
 DEMO/PAPER, virtual funds. READ-ONLY display layer: these tests seed a temp
 SQLite DB and assert the snapshot query layer surfaces
 
-  - per-stream ``closed_n`` (closed-fill count) + a recent-closed list, distinct
-    from the already-present ``open_positions_n``;
+  - per-stream ``closed_n`` (closed-POSITION count, P0-4 ③) + a recent-closed
+    list, distinct from the already-present ``open_positions_n``;
   - rotation telemetry (count + last victim / E$_new / E$_held / margin / cost)
     read from the ``loop_rotation_events`` table the wire persists;
   - session-forced-exit counter read from ``loop_session_exit_events``;
@@ -61,6 +61,16 @@ def _seed_fills_positions(conn: sqlite3.Connection) -> None:
         ("rp2", "capital", "EURUSD", "", "cfd", "B_capital_cfd",
          "fx_breakout_basket", "fx_breakout_basket", "fx_breakout_basket",
          "long", 1000.0, "open", now_s - 80, None, 0),
+        # P0-4 ③: closed POSITION rows matching the 3 close fills above (the
+        # closed_n TRADES counter is positions-based, not fills-based) — one
+        # row per contribution_id the close fills reference.
+        ("rp_open_okx", "okx", "BTC-USDT", "", "spot", "A_okx_crypto", "tsmom",
+         "tsmom", "tsmom", "long", 10.0, "closed", now_s - 100, now_s - 8, 0),
+        ("rp_sol", "okx", "SOL-USDT", "", "spot", "A_okx_crypto", "tsmom",
+         "tsmom", "tsmom", "long", 10.0, "closed", now_s - 90, now_s - 7, 0),
+        ("rp_xau", "capital", "XAUUSD", "", "cfd", "B_capital_cfd",
+         "xau_indices_trend", "xau_indices_trend", "xau_indices_trend",
+         "long", 1.0, "closed", now_s - 90, now_s - 6, 0),
     ]
     conn.executemany(
         "INSERT INTO positions (position_id, venue, symbol, "
@@ -128,9 +138,11 @@ def test_per_stream_closed_n_counts_closed_fills(tmp_path: Path) -> None:
     assert by_id["C_alpaca_equity"].open_positions_n == 0
 
 
-def test_per_stream_closed_n_reconciles_to_daily_trades(tmp_path: Path) -> None:
-    """closed_n is exactly the existing daily_trades count per lane (no new
-    source of truth — same is_close sum, just surfaced under a clearer name)."""
+def test_per_stream_closed_n_reconciles_to_closed_positions(tmp_path: Path) -> None:
+    """closed_n (P0-4 ③: the TRADES counter) is the closed-POSITION count per
+    lane; ``daily_trades`` stays the closed-FILL count (tooltip only). Both
+    counts agree in this seed (one close fill per closed position), but they
+    are DIFFERENT sources — this asserts closed_n reads the positions table."""
     db = tmp_path / "polaris.sqlite"
     conn = init_db(db)
     _seed_fills_positions(conn)
@@ -138,8 +150,10 @@ def test_per_stream_closed_n_reconciles_to_daily_trades(tmp_path: Path) -> None:
         streams = _per_stream_summary(conn, now_s=_now_s())
     finally:
         conn.close()
-    for s in streams:
-        assert s.closed_n == s.daily_trades
+    by_id = {s.stream_id: s for s in streams}
+    assert by_id["A_okx_crypto"].closed_n == 2
+    assert by_id["B_capital_cfd"].closed_n == 1
+    assert by_id["C_alpaca_equity"].closed_n == 0
 
 
 def test_per_stream_recent_closed_list(tmp_path: Path) -> None:
@@ -251,6 +265,10 @@ def test_collect_snapshot_exposes_rotation_telemetry(tmp_path: Path) -> None:
     # per-stream open/closed split present + reconciles.
     by_id = {s.stream_id: s for s in snap.streams}
     assert by_id["A_okx_crypto"].closed_n == 2
+    # This seed pairs each close fill 1:1 with its own closed position, so the
+    # positions-based closed_n sum happens to equal the fills-based daily_trades
+    # sum here — NOT a general invariant (a partial-close trade would diverge,
+    # see test_dashboard_exit_reason_and_pf_unification.py).
     assert sum(s.closed_n for s in snap.streams) == snap.daily_trades
 
 

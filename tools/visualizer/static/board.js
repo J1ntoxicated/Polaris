@@ -684,8 +684,15 @@
   function renderKpis(d) {
     const el = $('b-kpis'); if (!el) return;
     el.style.display = 'block';
+    // P0-4 ③: WINNING/LOSING + the headline PF/win-rate judge off the SAME
+    // ledger the SINCE RESET line shows (since_reset.pf, both legs net of fee) —
+    // not the all-time confidence panel (a stale pre-reset PF used to disagree
+    // with the SINCE RESET line on the same screen). Falls back to all-time
+    // confidence only when no reset has been stamped yet (since_reset is null).
     const c = d.confidence || {};
-    const pf = c.profit_factor, wr = c.win_rate_pct;
+    const sr = d.since_reset || null;
+    const pf = sr ? sr.pf : c.profit_factor;
+    const wr = sr ? sr.win_pct : c.win_rate_pct;
     // Regime is per-instrument (60 markets). Show the dominant share + a full
     // per-market breakdown on hover, never a single global label.
     const rdist = regimeDist(d);
@@ -809,6 +816,8 @@
       const lc = st.toLowerCase();
       const tagline = STREAM_TAGLINE[st] || '';
       const expPct = s.equity_usd ? (s.exposed_usd / s.equity_usd) * 100 : 0;
+      // P0-4 ③: TRADES = closed POSITIONS (closed_n); the closed-FILL count
+      // (daily_trades — can run higher on a partial-close trade) is tooltip-only.
       const closed = (s.closed_n != null ? s.closed_n : (s.daily_trades || 0));
       const exKey = String(s.venue || '').toLowerCase();   // E3 click→scope key
       const key = exKey || String(s.label || st);
@@ -830,7 +839,7 @@
           { text: fmtUsd(s.exposed_usd, 0), cls: 'num b-flat' },
           { text: fmtPct(expPct, 0), cls: 'num b-flat' },
           { text: s.open_positions_n || 0, cls: 'num ' + (s.open_positions_n ? 'b-pos' : 'b-flat') },
-          { text: closed, cls: 'num b-flat' },
+          { text: closed, cls: 'num b-flat', title: (s.daily_trades || 0) + ' close fills this session' },
           { text: fmtUsd(s.fee_usd, 0), cls: 'num b-flat', title: 'fees this session' },
           { text: fmtUsd(s.slippage_usd, 0), cls: 'num b-flat', title: 'slippage this session' },
           { text: s.net_after_cost_usd == null ? '—' : fmtUsd(s.net_after_cost_usd, 0), cls: 'num ' + pn(s.net_after_cost_usd), title: 'net after fees + slippage' },
@@ -856,13 +865,16 @@
   }
 
   // Recently-closed, inline (was a separate row in the old card). Compact.
+  // P0-4 ②: shows NET$ (gross − real fee), same sign/number the TRADES tab's
+  // NET$ column shows for the same trade — not the pre-fee gross.
   function recentClosedInline(s) {
     const rc = s.recent_closed || [];
     if (!rc.length) return '—';
-    return rc.slice(0, 4).map(t =>
-      `<span class="rc-item" title="${esc(t.symbol)} ${esc(t.strategy_id)} ${esc(t.exit_reason)} ${fmtUsd(t.pnl_usd, 2)}">`
-      + `<span class="rc-sym">${esc(t.symbol)}</span> <span class="rc-pn ${pn(t.pnl_usd)}">${fmtUsd(t.pnl_usd, 0)}</span></span>`
-    ).join(' ');
+    return rc.slice(0, 4).map(t => {
+      const net = (t.net_usd != null) ? t.net_usd : t.pnl_usd;
+      return `<span class="rc-item" title="${esc(t.symbol)} ${esc(t.strategy_id)} ${esc(t.exit_reason)} net ${fmtUsd(net, 2)}">`
+      + `<span class="rc-sym">${esc(t.symbol)}</span> <span class="rc-pn ${pn(net)}">${fmtUsd(net, 0)}</span></span>`;
+    }).join(' ');
   }
 
   // ── tab switcher ──────────────────────────────────────────────────────────

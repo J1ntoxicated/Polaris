@@ -344,6 +344,37 @@ def _spark_series(
     }
 
 
+# ---------------------------------------------------------------------------
+# Exit-reason SSOT (P0-4) — one lineage lookup for every closed-trade panel
+# ---------------------------------------------------------------------------
+
+
+def _exit_reason_by_position(conn: sqlite3.Connection) -> dict[str, str]:
+    """{position_id: real exit_reason} via the positions⋈segments lineage join.
+
+    The ONE source of truth for "why did this trade close" (``atr_trail_stop`` /
+    ``thesis_cut`` / ``loser_timeout`` / ``exit`` / ``thesis_harvest`` /
+    ``target_harvest`` — ``position_strategy_segments.exit_reason``), so every
+    closed-trade panel (recent_trades, streams.recent_closed) shows the SAME
+    reason for the SAME trade instead of each re-deriving a TP/SL/FLAT guess
+    from the close pnl sign. A position with multiple segments (strategy swaps)
+    keeps the LAST-ended segment's reason (the one that actually closed the
+    position). Falls back to "exit" when no segment row matches (legacy /
+    smoke). Read-only; never a trading path."""
+    rows = _safe_query(
+        conn,
+        """SELECT position_id, exit_reason FROM position_strategy_segments
+           WHERE ended_ts IS NOT NULL
+           ORDER BY ended_ts ASC""",
+    )
+    out: dict[str, str] = {}
+    for position_id, exit_reason in rows:
+        reason = str(exit_reason or "").strip()
+        if reason:
+            out[str(position_id)] = reason  # last-ended wins (ORDER BY ASC)
+    return out
+
+
 class _SparkRow(Protocol):
     """A snapshot row that carries a (venue, symbol) and a mutable ``spark``."""
 

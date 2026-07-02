@@ -359,10 +359,12 @@ class StreamSummary:
     ai_cost_usd: float = 0.0
     net_after_cost_usd: float = 0.0
     # OPEN vs CLOSED split (follow-up #12) — additive. ``open_positions_n`` above
-    # is the currently-open count; ``closed_n`` is this lane's closed-fill count
-    # (== ``daily_trades``, surfaced under a clearer name so the board can show a
-    # distinct open-vs-closed view per exchange lane). ``recent_closed`` is the
-    # lane's most-recent closed trades (newest first), an empty list when none.
+    # is the currently-open count; ``closed_n`` is this lane's closed-POSITION
+    # count (P0-4 ③ — one row per trade; may differ from ``daily_trades``, the
+    # closed-FILL count, when a trade partial-closes across >1 fill). The board
+    # shows ``closed_n`` as TRADES and ``daily_trades`` in the tooltip only.
+    # ``recent_closed`` is the lane's most-recent closed trades (newest first),
+    # an empty list when none.
     closed_n: int = 0
     recent_closed: list[ClosedTrade] = field(default_factory=list)
 

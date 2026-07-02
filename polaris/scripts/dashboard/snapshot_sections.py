@@ -47,6 +47,7 @@ from polaris.scripts.dashboard.snapshot_queries import (
     GPT_TOKENS_PER_CALL,
     LEARNER_DELTA_LOOKBACK_SEC,
     _as_dict,
+    _exit_reason_by_position,
     _quote_ccy_for_symbol,
     _quote_usd_rate,
     _safe_query,
@@ -474,6 +475,10 @@ def _recent_closed_trades(
     # matched position (legacy / smoke) falls back to the shared $-proxy denom
     # (one number, not the old $10/$50 split).
     pnl_r_by_contrib = _pnl_r_by_contribution(conn)
+    # P0-4: real exit_reason via the positions⋈segments lineage SSOT (replaces
+    # the old pnl-sign TP/SL/TIME/FLAT guess — the same lookup streams.recent_closed
+    # uses, so a trade shows the SAME reason everywhere).
+    exit_reason_by_id = _exit_reason_by_position(conn)
     # Issue 2/3: position direction (long/short) + immutable entry regime, keyed
     # on contribution_id == position_id. Issue 4: true price-quote currency.
     side_regime_by_id = _position_side_regime_by_id(conn)
@@ -534,18 +539,18 @@ def _recent_closed_trades(
             held_sec = 0.0
         else:
             held_sec = max(0.0, (ts_ms - open_ts_ms) / 1000.0)
-        if pnl > 0:
-            reason = "TP"
-        elif pnl < 0:
-            reason = "SL" if held_sec < 600 else "TIME"
-        else:
-            reason = "FLAT"
+        # P0-4: real exit_reason from the lineage SSOT (contribution_id ==
+        # position_id); falls back to "exit" for legacy/smoke rows with no
+        # matched segment (no more pnl-sign TP/SL/TIME/FLAT synthesis).
+        reason = exit_reason_by_id.get(contrib_str or "", "exit")
         symbol = _symbol_from_inst(inst)
         # E2 display columns (read-only). Both fees are recomputed from the
         # close notional via the centralized schedule: demo_fee = 70 bps OKX
         # sandbox drain (the stored fills.fee_usd now holds the REAL fee, so the
         # demo column is recomputed), real_fee = real venue schedule. pnl_pct =
-        # close pnl / entry notional; regime = current regime_state when supplied.
+        # NET pnl / entry notional (P0-4 ②: matches the net$ sign so the %-color
+        # and the NET$-color never disagree on the same row); regime = current
+        # regime_state when supplied.
         # Issue 4: true price-quote currency for the ENTRY/EXIT cells. Needed
         # BEFORE the entry fee so a non-USD-quote entry notional (entry_px is in
         # JPY for J225, EUR for EU50…) is converted to USD; the stored close
@@ -569,7 +574,11 @@ def _recent_closed_trades(
         entry_real_fee = (
             real_fee_usd(venue, entry_notional) if entry_notional > 0 else 0.0
         )
-        pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 0 else 0.0
+        # #49: net = gross − full round-trip real fee (entry + close). Computed
+        # here (not just at the ClosedTrade call site) so pnl_pct below can share
+        # the SAME net$ the NET$ column renders — one number, one sign.
+        net_usd = pnl - real_fee - entry_real_fee
+        pnl_pct = (net_usd / entry_notional * 100.0) if entry_notional > 0 else 0.0
         regime = (
             regime_lookup.get((venue, symbol), "") if regime_lookup else ""
         )
@@ -606,7 +615,7 @@ def _recent_closed_trades(
                 # The headline nets BOTH legs' fee_usd, so the per-position net
                 # must too; the FEE$ column (gross − net) then shows the full
                 # round-trip fee and Σ(net) reconciles with the headline.
-                net_usd=pnl - real_fee - entry_real_fee,
+                net_usd=net_usd,
                 position_side=pos_side,
                 entry_regime=entry_regime,
                 quote_ccy=quote_ccy,

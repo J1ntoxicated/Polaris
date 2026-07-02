@@ -177,8 +177,18 @@ def _minutes_to_rth_close(ts: int | float) -> float | None:
     flatten while still in-session; an already-closed/overnight position is the
     #26 FSM / G6 concern, not this rail). Mirrors the 16:00-ET close boundary of
     us_equity_session_state (which uses the same America/New_York local clock).
+
+    WEEKDAY-AWARE (mirrors ``_fx_in_session``'s Sat/Sun closed-window guard):
+    the cash book is shut all weekend, so a Saturday/Sunday clock-of-day that
+    WOULD fall inside RTH minute-of-day on a weekday is NOT in-session — the
+    minute-of-day check alone cannot tell a weekday from a weekend. Without
+    this guard a Saturday 09:30-16:00 ET timestamp reads as "in RTH", which
+    wrongly arms both the pre-close-buffer trigger and (via the caller) the
+    stale-overnight re-arm on a day with no real close to pre-empt.
     """
     local = _utc(ts).astimezone(_NY_TZ)
+    if local.weekday() >= 5:  # Sat=5, Sun=6 — cash book shut all weekend
+        return None
     minute_of_day = local.hour * 60 + local.minute
     # RTH is [09:30, 16:00) ET; only inside RTH can a close be "imminent".
     if not (_RTH_OPEN_LOCAL_MINUTES <= minute_of_day < _RTH_CLOSE_LOCAL_MINUTES):
@@ -237,6 +247,7 @@ def session_forced_exit(
     pnl_r: float = 0.0,
     close_buffer_min: float | None = None,
     opened_ts: int | None = None,
+    hold_overnight: bool = False,
 ) -> SessionExitDecision:
     """Per-stream session-close RAIL — decide a calendar-forced flat (TIME-only).
 
@@ -248,8 +259,18 @@ def session_forced_exit(
       survived a weekend close and is now in-session.
     - ``us_equity_cal`` (C): force flat when the RTH close (16:00 ET) is within
       ``close_buffer_min`` (no-overnight) OR (stale-overnight) the position
-      survived an RTH close and is now in-session.
+      survived an RTH close and is now in-session — UNLESS ``hold_overnight``
+      is True (see below).
     - any other token: NEVER fires (safe default).
+
+    ``hold_overnight`` (the strategy's ``StrategyMetadata.hold_overnight``,
+    mirrors ``reconcile_orphans._is_held_overnight``'s eod_flatten opt-out):
+    when True, ``us_equity_cal`` skips BOTH the RTH-close pre-close-buffer
+    trigger and the stale-overnight re-arm — a strategy that opts INTO holding
+    across the close (e.g. a 1D swing) is not the no-overnight default. Default
+    False keeps every existing caller byte-identical. Scoped to ``us_equity_cal``
+    only (the no-overnight/EOD-flatten policy this exemption inverts is a C-only
+    concept; A never fires and B's weekend close is unaffected by this flag).
 
     ``opened_ts`` (stale-overnight, optional): when threaded, a position that
     survived ≥1 calendar close (a restart gap missed the pre-close flatten) is
@@ -274,6 +295,11 @@ def session_forced_exit(
 
     if cal == _CAL_ALWAYS_ON:
         # A — OKX crypto, 24/7: no calendar close exists → byte-identical.
+        return SessionExitDecision(close=False)
+
+    if cal == _CAL_US_EQUITY and hold_overnight:
+        # C opt-out: this strategy is DESIGNED to hold across the RTH close —
+        # neither the pre-close-buffer nor the stale-overnight trigger applies.
         return SessionExitDecision(close=False)
 
     if cal == _CAL_FX_INDICES:

@@ -569,12 +569,14 @@ async def _evaluate_position(
             g6_result.payload.get("reason", "-"), pnl_r, g6_result.model_used,
         )
         # F2.b — specific position close (no FIFO oldest pop).
+        # P2-12: name the trigger so the lineage exit_reason isn't the 'exit'
+        # fallback (observability only — no close-path behaviour change).
         await close_specific(
             conn, state=state, position_id=str(pos["position_id"]),
             now_ts=now_ts, lookup_regime=lookup_regime,
             gpt_client=gpt_client, phase=phase,
             real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-            capital_session=capital_session,
+            capital_session=capital_session, close_reason="g6_stop_hit",
         )
         state.recalc_exit_now = getattr(state, "recalc_exit_now", 0) + 1
         return
@@ -762,12 +764,14 @@ async def _evaluate_position(
                 pos["venue"], pos["symbol"], pos["position_id"],
                 g7_result.payload.get("reason", "-"), pnl_r, g7_result.model_used,
             )
+            # P2-12: name the trigger (observability only — no behaviour change).
             await close_specific(
                 conn, state=state, position_id=str(pos["position_id"]),
                 now_ts=now_ts, lookup_regime=lookup_regime,
                 gpt_client=gpt_client, phase=phase,
                 real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                close_reason="g7_exit_now",
             )
             state.recalc_exit_now = getattr(state, "recalc_exit_now", 0) + 1
             return

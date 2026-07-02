@@ -20,6 +20,7 @@ import uuid
 
 import pytest
 
+from polaris.core.lineage import record_segment_open
 from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_recalc import (
     find_open_trade_by_position_id,
@@ -253,6 +254,52 @@ async def test_exit_now_triggers_specific_close(memdb: sqlite3.Connection) -> No
     assert state.open_trades[0].position_id == "pos-A"
 
 
+@pytest.mark.asyncio
+async def test_g6_stop_hit_names_lineage_reason(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G6's own -1.0R ``stop_hit`` rail (the backstop BEHIND the FSM precise-exit
+    — see ``position_monitor.py``) closes the position and names its trigger in
+    the lineage ``exit_reason`` (P2-12), not the 'exit' fallback.
+
+    ``run_precise_exit`` is stubbed to no-op (returns False / does not close)
+    so this test isolates G6's own EXIT_NOW branch from the FSM ATR-trail
+    stop that normally fires first in a real tick (see
+    ``test_exit_now_triggers_specific_close``). Observability only — no
+    close-path behaviour change.
+    """
+    async def _no_op_precise_exit(**kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "polaris.scripts._production_recalc.run_precise_exit",
+        _no_op_precise_exit,
+    )
+    _seed_position_and_fill(
+        memdb, position_id="pos-stophit", symbol="ETH-USDT",
+        last_price=79_000.0, tight_bars=True,
+    )
+    record_segment_open(
+        memdb, position_id="pos-stophit", trade_id="pos-stophit", venue="okx",
+        ticker="ETH-USDT", strategy_id="vb", regime="bull_trend", entry_ts=NOW,
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade_for("pos-stophit", symbol="ETH-USDT")]
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
+    )
+    status = memdb.execute(
+        "SELECT status FROM positions WHERE position_id = ?", ("pos-stophit",),
+    ).fetchone()[0]
+    assert status == "closed"
+    exit_reason = memdb.execute(
+        "SELECT exit_reason FROM position_strategy_segments WHERE position_id = ?",
+        ("pos-stophit",),
+    ).fetchone()[0]
+    assert exit_reason == "g6_stop_hit"
+
+
 # ---------------------------------------------------------------------------
 # Close path specific contribution_id (FIFO 폐기)
 # ---------------------------------------------------------------------------
@@ -356,6 +403,42 @@ async def test_g6_adjust_exit_chains_g7(
     assert state.recalc_g7_calls == 1
     # Exactly one GPT call — G7 only (G6 deterministic).
     assert len(haiku.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_g7_exit_now_closes_and_names_lineage_reason(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G6 ADJUST_EXIT chains to G7; G7 EXIT_NOW closes the position specifically
+    (P2-12: the close names 'g7_exit_now' in the lineage exit_reason, not the
+    'exit' fallback). Observability only — no close-path behaviour change.
+    """
+    monkeypatch.setenv("POLARIS_AI_FREE", "0")
+    _seed_position_and_fill(
+        memdb, position_id="pos-g7exit", last_price=80_400.0, tight_bars=True,
+    )
+    record_segment_open(
+        memdb, position_id="pos-g7exit", trade_id="pos-g7exit", venue="okx",
+        ticker="BTC-USDT", strategy_id="vb", regime="bull_trend", entry_ts=NOW,
+    )
+    state = ProdLoopState()
+    state.open_trades = [_trade_for("pos-g7exit")]
+    haiku = _MockGPTClient(responses=[
+        '{"decision":"EXIT_NOW","reason":"reversal"}',  # G7
+    ])
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
+        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
+    )
+    status = memdb.execute(
+        "SELECT status FROM positions WHERE position_id = ?", ("pos-g7exit",),
+    ).fetchone()[0]
+    assert status == "closed"
+    exit_reason = memdb.execute(
+        "SELECT exit_reason FROM position_strategy_segments WHERE position_id = ?",
+        ("pos-g7exit",),
+    ).fetchone()[0]
+    assert exit_reason == "g7_exit_now"
 
 
 # ---------------------------------------------------------------------------

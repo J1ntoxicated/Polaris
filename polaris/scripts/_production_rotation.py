@@ -361,11 +361,13 @@ async def _rotate_one_venue(
     # CLOSE the victim FIRST (capital is freed by the close sell; the winner is
     # NOT submitted this tick — settle ordering). A failed close means rotation
     # did not happen: no telemetry, no cooldown.
+    # P2-12: name the trigger so the lineage exit_reason isn't the 'exit'
+    # fallback (observability only — no close-path behaviour change).
     closed = await close_specific(
         conn, state=state, position_id=victim.position_id, now_ts=now_ts,
         lookup_regime=lookup_regime, gpt_client=gpt_client, phase=phase,
         real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session,
+        capital_session=capital_session, close_reason="rotation",
     )
     if not closed:
         logger.info(

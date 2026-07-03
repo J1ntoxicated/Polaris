@@ -56,6 +56,12 @@ class SessionBreakoutStrategy(BaseStrategy):
         asset_class="index",
         venue="capital",
         correlation_group_id="cfd_session_event",
+        # bars-EXTERNAL input: is_session_open_window is a wall-clock minute
+        # window (session_window_now(now_ts)) that can flip mid-bar — the
+        # bar-advance dispatch gate must not suppress a re-eval on an
+        # unchanged 5m bar (compute-scheduling exemption, never a size/entry
+        # gate — see StrategyMetadata.evaluates_in_progress_bar).
+        evaluates_in_progress_bar=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

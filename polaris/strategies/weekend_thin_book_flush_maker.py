@@ -85,6 +85,11 @@ class WeekendThinBookFlushMakerStrategy(BaseStrategy):
         # MEDIAN positive (mean still −0.105R, single ~20wk period). So the order
         # is SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
         shadow_first=True,
+        # bars-EXTERNAL input: the weekend thin-book edge is a live orderbook/
+        # fill-path condition, not solely the 1H bar close — the bar-advance
+        # dispatch gate must not suppress a re-eval (compute-scheduling
+        # exemption only, see StrategyMetadata.evaluates_in_progress_bar).
+        evaluates_in_progress_bar=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

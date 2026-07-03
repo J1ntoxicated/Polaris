@@ -277,3 +277,4 @@
 2026-07-03 01:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=364 learners=3 paper=True]
 2026-07-03 01:23 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_69d45124-c28-1/polaris/core/sizing/engine.py]
 - 2026-07-03 deploy(ladder): Profit-Sweep 사다리 랜딩 — 전 트랙 실현익 50%→Alpaca 버킷(append-only CREDIT/DRAW/RELEASE, 핫패스 무write, 불가침, threshold=0 auto-draw, min() 항 확장만). codex 3라운드 합의+Opus 리뷰 blocker 3 수정(instrument_id scope·per-signal RELEASE). Jin 사다리 비전 배관 완성(1단→3단; 2단=기존 T4/judge)
+2026-07-03 01:39 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=364 learners=3 paper=True]

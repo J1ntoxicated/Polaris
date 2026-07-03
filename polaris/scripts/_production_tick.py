@@ -34,6 +34,7 @@ from polaris.core.isolation.reentry import (
     concurrent_same_side_open,
     is_novel_reentry,
     reentry_cooldown_active,
+    tailored_concurrent_cap,
 )
 from polaris.core.isolation.worker import (
     PipelineTaskSpec,
@@ -847,14 +848,23 @@ async def _run_tick(
                 last_bar = None if last_entry is None else last_entry[0]
                 last_side = None if last_entry is None else last_entry[1]
                 # No concurrent duplicate: one live position per
-                # (venue, symbol, strategy_id, side). A time cooldown alone
-                # misses the 12-simultaneous-BTC stacking (each clone is on a
-                # distinct, novel bar), so refuse a clone while one same-side
-                # position is open. PRECISION (surgical-strike), not a size
-                # dampen / P&L halt — a side flip / different name is unaffected.
+                # (venue, symbol, strategy_id, side) — TAILORED per-name (P0 OKX
+                # entry-gating relax): a (venue, symbol, strategy_id) with a
+                # PROVEN own win-rate (>= CS3_N_THRESHOLD closed trades, same
+                # sample floor as sizing's Cold-Start CS-3) earns a controlled
+                # 2nd concurrent slot via ``tailored_concurrent_cap`` — a thin-
+                # sample or weak-edge name keeps the original cap of 1 (NOT a
+                # uniform loosening). A time cooldown alone misses the
+                # 12-simultaneous-BTC stacking (each clone is on a distinct,
+                # novel bar), so refuse a clone once the tailored cap is
+                # reached. PRECISION (surgical-strike), not a size dampen / P&L
+                # halt — a side flip / different name is unaffected.
                 if concurrent_same_side_open(
                     conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
                     side=sig.side,
+                    cap=tailored_concurrent_cap(
+                        conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
+                    ),
                 ):
                     state.reentry_skips += 1
                     logger.debug(

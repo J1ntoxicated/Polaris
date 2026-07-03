@@ -29,16 +29,21 @@ import os
 import sqlite3
 from typing import Final, Literal
 
+from polaris.core.sizing.schema import CS3_N_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "REENTRY_COOLDOWN_SEC",
     "REENTRY_STRONG_SIGNAL_STRENGTH",
+    "TAILORED_CAP_CEILING",
+    "TAILORED_CAP_WIN_RATE_FLOOR",
     "bar_seconds",
     "concurrent_same_side_open",
     "is_novel_reentry",
     "reentry_cooldown_active",
     "stamp_reentry_anchor",
+    "tailored_concurrent_cap",
 ]
 
 _ENV_COOLDOWN: Final[str] = "POLARIS_REENTRY_COOLDOWN_SEC"
@@ -202,6 +207,86 @@ def reentry_cooldown_active(
     return (now_ts - max(candidates)) < cooldown_sec
 
 
+_ENV_TAILORED_CAP_CEILING: Final[str] = "POLARIS_TAILORED_CAP_CEILING"
+_ENV_TAILORED_CAP_WIN_RATE_FLOOR: Final[str] = "POLARIS_TAILORED_CAP_WIN_RATE_FLOOR"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Controlled scale-in ceiling — never uncontrolled (2 is the widen-from-1 step;
+# raising it further is a /debate-scoped decision, not a code default).
+TAILORED_CAP_CEILING: Final[int] = _env_int(_ENV_TAILORED_CAP_CEILING, 2)
+
+# A strategy's own (venue, symbol, strategy_id) win-rate must clear this floor
+# (on CS3_N_THRESHOLD+ closed trades — same SSOT as sizing's Cold-Start CS-3
+# boundary) before a SECOND concurrent same-side position is allowed. Below the
+# sample floor or below this win-rate, the cap stays at the existing 1 (no
+# uniform loosening — this is per-(venue,symbol,strategy) tailored, data-gated).
+TAILORED_CAP_WIN_RATE_FLOOR: Final[float] = _env_float(
+    _ENV_TAILORED_CAP_WIN_RATE_FLOOR, 0.55
+)
+
+
+def tailored_concurrent_cap(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    strategy_id: str,
+) -> int:
+    """Per-(venue, symbol, strategy_id) concurrent-same-side cap from its OWN
+    closed-trade history — never a uniform raise.
+
+    Reads ``positions`` closed rows for the EXACT key: ``n`` = sample size,
+    win-rate = fraction with ``pnl_r > 0``. Below ``CS3_N_THRESHOLD`` closed
+    trades (the same sample floor sizing's Cold-Start CS-3 uses) the sample is
+    too thin to trust — cap stays ``1`` (byte-identical to pre-tailoring
+    behaviour). At/above the floor, a win-rate >= ``TAILORED_CAP_WIN_RATE_FLOOR``
+    widens the cap to ``TAILORED_CAP_CEILING`` (default 2 — a controlled
+    scale-in, not unbounded stacking); below the win-rate floor the cap stays
+    ``1`` (a saturated/weak-edge name gets NO extra room). Any DB error or NULL
+    pnl_r degrades to cap ``1`` (fail-safe toward the existing guard).
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN pnl_r > 0 THEN 1 ELSE 0 END) "
+            "FROM positions "
+            "WHERE venue = ? AND symbol = ? AND strategy_id = ? "
+            "AND status = 'closed' AND pnl_r IS NOT NULL",
+            (venue, symbol, strategy_id),
+        ).fetchone()
+    except sqlite3.Error as exc:  # fail-safe — never widen on DB trouble.
+        logger.warning("tailored-cap lookup failed: %s", exc)
+        return 1
+    n = int(row[0]) if row is not None and row[0] is not None else 0
+    if n < CS3_N_THRESHOLD:
+        return 1
+    wins = int(row[1]) if row is not None and row[1] is not None else 0
+    win_rate = wins / n
+    if win_rate >= TAILORED_CAP_WIN_RATE_FLOOR:
+        return TAILORED_CAP_CEILING
+    return 1
+
+
 def concurrent_same_side_open(
     conn: sqlite3.Connection,
     *,
@@ -209,28 +294,32 @@ def concurrent_same_side_open(
     symbol: str,
     strategy_id: str,
     side: str,
+    cap: int = 1,
 ) -> bool:
-    """True when a LIVE position already exists for this (key, side).
+    """True when LIVE same-side positions on this key are AT/OVER ``cap``.
 
     Component B no-concurrent-duplicate guard: a time cooldown alone misses the
     12-simultaneous-BTC stacking (each clone opened on a distinct bar passes the
     novelty test), so before building the pipeline spec we also refuse a clone
-    while one same-side position is still open. Counts ``positions`` rows with
-    ``status NOT IN ('closed','cancelled','reconciled')`` for the exact
-    (venue, symbol, strategy_id, side). One live position per name/strategy/side
-    (controlled scale-in is a later component). PRECISION (surgical-strike), not
-    a size dampen / P&L halt: a side flip or a different name/strategy is
-    unaffected. Any DB error is fail-open (``False`` = allow) — never wedge the
-    entry loop.
+    once ``cap`` same-side positions are already open. Counts ``positions`` rows
+    with ``status NOT IN ('closed','cancelled','reconciled')`` for the exact
+    (venue, symbol, strategy_id, side). ``cap`` defaults to ``1`` (the original
+    one-live-position rule, byte-identical for every caller that does not pass
+    it); a caller may pass :func:`tailored_concurrent_cap`'s per-symbol result to
+    allow a data-proven name a controlled 2nd concurrent entry. PRECISION
+    (surgical-strike), not a size dampen / P&L halt: a side flip or a different
+    name/strategy is unaffected. Any DB error is fail-open (``False`` = allow) —
+    never wedge the entry loop.
     """
     try:
         row = conn.execute(
-            "SELECT 1 FROM positions "
+            "SELECT COUNT(*) FROM positions "
             "WHERE venue = ? AND symbol = ? AND strategy_id = ? AND side = ? "
-            "AND status NOT IN ('closed','cancelled','reconciled') LIMIT 1",
+            "AND status NOT IN ('closed','cancelled','reconciled')",
             (venue, symbol, strategy_id, side),
         ).fetchone()
     except sqlite3.Error as exc:  # fail-open — never block on DB trouble.
         logger.warning("concurrent-duplicate lookup failed: %s", exc)
         return False
-    return row is not None
+    live_count = int(row[0]) if row is not None and row[0] is not None else 0
+    return live_count >= max(1, cap)

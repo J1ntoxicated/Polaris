@@ -51,6 +51,9 @@ from polaris.core.sizing.ladder import materialize_credits, release_stale_draws
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_atr import strategy_timeframe, timeframe_anchor_atr_pct
+from polaris.scripts._production_boot_classes import (
+    boot_hydrate_and_bootstrap_strategy_class,
+)
 from polaris.scripts._production_layers import (
     ALPACA_REFRESH_SEC,
     CAPITAL_REFRESH_SEC,
@@ -715,6 +718,13 @@ async def run_production_paper_loop(
     # decision (shadow default: logs only; deterministic acts byte-identical).
     # None when no OPENAI_API_KEY / opted out → judge dormant (graceful no-op).
     state.judge_client = _resolve_judge_client()
+    # pts-classes (group WIRE) — hydrate the persisted strategy_class table +
+    # bootstrap-replay every registered candidate on a completely empty table
+    # (fresh DB / this feature's first boot). Fail-open inside the helper —
+    # boot must never crash on a classification-layer failure; a failure
+    # leaves strategy_class as-is (G5's resolve_strategy_class falls back to
+    # EARN per-row on a missing row, byte-identical to pre-pts-classes).
+    boot_hydrate_and_bootstrap_strategy_class(conn, now_ts=int(time.time()))
     try:
         state.open_trades.extend(hydrate_open_positions(conn))
     except Exception:

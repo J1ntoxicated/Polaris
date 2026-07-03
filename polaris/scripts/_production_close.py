@@ -39,6 +39,7 @@ from polaris.core.live_recalc.session_exit_rail import (
 from polaris.core.metrics.risk_unit import realised_r, realised_r_stream
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
+from polaris.scripts._production_close_classes import update_strategy_class_on_close
 from polaris.scripts._production_close_effects import (
     _safe_backfill_probe_outcome,
     _safe_lookup_entry_regime,
@@ -996,4 +997,11 @@ async def _close_trade_with_real_pnl(
         conn, trade=trade, regime=regime, pnl_r=pnl_r_net, won=won, now_ts=now_ts,
         state=state, gpt_client=gpt_client, phase=phase,
     )
+    # pts-classes (group WIRE) — the ONE real close-confirmation point: rolls
+    # up score_F for this track and evaluates the transition state machine,
+    # persisting any class change to strategy_class. Terminal-only (never
+    # fires on a partial-close slice — fold_close_slice does not call this).
+    # Fail-open inside the helper (mirrors every _safe_* sibling above) — a
+    # classification failure must never unwind this already-committed close.
+    update_strategy_class_on_close(conn, trade=trade, now_ts=now_ts, state=state)
     return True

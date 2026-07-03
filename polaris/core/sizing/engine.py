@@ -25,7 +25,9 @@ import time
 from dataclasses import dataclass
 
 from polaris.core.cell_matrix import CellKeyP0, fetch_learner_anti_edge
+from polaris.core.classes.probe_fee import accrue_probe_fee
 from polaris.core.classes.r_pool import allocate_r_pool
+from polaris.core.classes.shadow_fill import record_shadow_fill
 from polaris.core.learners.base import (
     NEUTRAL_MULT,
     clip_individual_mult,
@@ -1041,10 +1043,26 @@ def compute_size(
             notional = final_risk_pct * basis
             if binding == "proposed":
                 binding = "prove_probe_notional"
+            # pts-classes (group WIRE) — accrue this fired probe's expected
+            # round-trip fee onto strategy_class.probe_fee_24h (bookkeeping
+            # only; the daily reranker enforces the 24h fee cap downstream).
+            accrue_probe_fee(
+                conn, venue=intent.venue, strategy_id=intent.strategy,
+                notional_usd=notional,
+            )
         else:
             notional = 0.0
             final_risk_pct = 0.0
             binding = "prove_shadow"
+            # pts-classes (group WIRE) — record the pessimistic shadow fill so
+            # the BENCH reentry ladder has evidence to read later. order_style
+            # defaults to "market" (sizing does not know the execution-layer
+            # order style yet) — the conservative, more-pessimistic choice.
+            record_shadow_fill(
+                conn, venue=intent.venue, strategy_id=intent.strategy,
+                ticker=intent.symbol, regime=intent.regime,
+                order_style="market", atr_pct=intent.atr_pct,
+            )
         logger.info(
             "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s shadow=%s "
             "stop_dist_pct=%.6f binding=%s notional=%.2f",
@@ -1058,6 +1076,13 @@ def compute_size(
         notional = 0.0
         final_risk_pct = 0.0
         binding = "bench_shadow"
+        # pts-classes (group WIRE) — same shadow-fill recording as the PROVE
+        # shadow branch above (BENCH is shadow-routed unconditionally).
+        record_shadow_fill(
+            conn, venue=intent.venue, strategy_id=intent.strategy,
+            ticker=intent.symbol, regime=intent.regime,
+            order_style="market", atr_pct=intent.atr_pct,
+        )
         logger.info(
             "[T4/pts-class] %s/%s sid=%s class=%s -> bench_shadow (routing, "
             "not a block — signal fully computed above for learning)",

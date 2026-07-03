@@ -651,6 +651,20 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE regime_state ADD COLUMN last_advanced_bar_id INTEGER"
         )
+    # strategy_class.last_promotion_ts — pts-classes (group WIRE) close-hook
+    # glue needs a promotion-only timestamp to enforce the 24h promotion rate
+    # limit (transition.py's own last_transition_ts is bumped on EVERY
+    # transition including demotions, so it cannot double as this). ADDITIVE,
+    # NULL default = "never promoted" (transition.py treats None as never
+    # rate-limited, matching a fresh/bootstrapped row).
+    sc_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(strategy_class)").fetchall()
+    }
+    if sc_cols and "last_promotion_ts" not in sc_cols:
+        conn.execute(
+            "ALTER TABLE strategy_class ADD COLUMN last_promotion_ts INTEGER"
+        )
     _migrate_quote_ticks_to_lww(conn)
 
 

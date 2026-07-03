@@ -632,6 +632,26 @@ CREATE TABLE IF NOT EXISTS reentry_anchor (
 );
 """
 
+# Capital market-closed delay-route (P0 timetable-aware submit gap): a reject
+# during a closed window (SG25 '16/16 reject') stamps the venue's own
+# per-epic ``seconds_to_next_open`` countdown here — ``reopen_at_ts`` — so the
+# NEXT submit attempt on the exact (venue, symbol, strategy_id, side) key is
+# suppressed until that instant, instead of re-submitting/re-rejecting every
+# tick. flow_not_block: a DEFERRAL, never a permanent block — the row simply
+# stops suppressing once ``now_ts >= reopen_at_ts`` (see
+# ``polaris.venues.capital.reopen_route``).
+DDL_CAPITAL_REOPEN_PENDING = """
+CREATE TABLE IF NOT EXISTS capital_reopen_pending (
+    venue TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    reopen_at_ts INTEGER NOT NULL,
+    created_ts INTEGER NOT NULL,
+    PRIMARY KEY (venue, symbol, strategy_id, side)
+);
+"""
+
 # ---------------------------------------------------------------------------
 # Dashboard telemetry — capital-rotation + session-forced-exit observability.
 #

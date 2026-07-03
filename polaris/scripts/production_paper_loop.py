@@ -47,6 +47,7 @@ from polaris.core.lifecycle.recover import (
 )
 from polaris.core.pipeline.agents._gpt_client import GPT_P0_MODEL, default_gpt_factory
 from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
+from polaris.core.sizing.ladder import materialize_credits, release_stale_draws
 from polaris.core.ticks.config import tick_engine_enabled
 from polaris.logging_config import DEFAULT_LOG_FILE, setup_polaris_logging
 from polaris.scripts._production_atr import strategy_timeframe, timeframe_anchor_atr_pct
@@ -111,9 +112,11 @@ __all__ = [
     "FOCUS_CYCLE_TARGET",
     "ProdLoopState",
     "main",
+    "materialize_credits",
     "persist_altdata_snapshot",
     "reconcile_alpaca_qty_drift",
     "reconcile_alpaca_venue_drift",
+    "release_stale_draws",
     "run_production_paper_loop",
     "_all_strategies",
     "_altdata_producer",
@@ -981,6 +984,18 @@ async def run_production_paper_loop(
                     "boot (entries may still reject; bot continues)"
                 )
 
+        # LADDER RELEASE reconcile (boot pass, spec: "startup + periodic") —
+        # a DRAW whose funding signal never opened (or already closed) a
+        # position releases its headroom immediately on restart, mirroring the
+        # boot orphan reconcile above. DB-only, best-effort.
+        if os.environ.get("POLARIS_LADDER_SWEEP", "1") != "0":
+            try:
+                release_stale_draws(conn, now_ts=int(time.time()))
+            except Exception:
+                logger.exception(
+                    "[loop] boot ladder RELEASE reconcile failed — continues"
+                )
+
     # VENUE startup reconcile-import: after a fresh-DB reset the bot starts FLAT
     # and is BLIND to real venue holdings (Alpaca). hydrate (above) only reads
     # the DB; this fetches live Alpaca positions via the just-built adapter and
@@ -1119,6 +1134,16 @@ async def run_production_paper_loop(
         "POLARIS_ORPHAN_RECONCILE_EVERY_TICKS",
         max(1, int(1800 / tick_sec)) if tick_sec > 0 else 360,
     ))
+    # Profit-sweep ladder sweeper cadence (vault/50_research/debates/
+    # profit_sweep_ladder_2026-07-03.md §build-spec item 2): a ~5-minute
+    # fallback pass so CREDIT materialization does not depend on an Alpaca
+    # signal happening to arrive (the on-demand path inside compute_size only
+    # runs then). ~5 min wall-clock at tick_sec=5 → 60 ticks.
+    ladder_sweep_on = os.environ.get("POLARIS_LADDER_SWEEP", "1") != "0"
+    ladder_sweep_every = max(1, _env_int(
+        "POLARIS_LADDER_SWEEP_EVERY_TICKS",
+        max(1, int(300 / tick_sec)) if tick_sec > 0 else 60,
+    ))
 
     deadline = time.monotonic() + duration_sec
     tick_idx = 0
@@ -1194,6 +1219,28 @@ async def run_production_paper_loop(
                     )
                 except Exception:  # noqa: BLE001 — hygiene pass never halts loop
                     logger.exception("[reconcile] periodic sweep failed — continues")
+
+            # PROFIT-SWEEP LADDER — periodic fallback sweep (~5min). Runs on
+            # the SAME loop-owned ``conn`` as the reconcile passes above (pure
+            # SQLite reads/writes, no venue I/O — unlike the multi-second focus
+            # refresh, no dedicated offload connection is needed here). Never
+            # inline in the close hot path (source-linted separately); this is
+            # the ONLY periodic caller of materialize_credits/
+            # release_stale_draws — the on-demand call inside compute_size
+            # remains for the immediate-draw case. Best-effort, log-and-continue.
+            if ladder_sweep_on and tick_idx % ladder_sweep_every == 0:
+                try:
+                    materialize_credits(conn, now_ts=int(time.time()))
+                except Exception:  # noqa: BLE001 — hygiene pass never halts loop
+                    logger.exception(
+                        "[ladder] periodic CREDIT materialize failed — continues"
+                    )
+                try:
+                    release_stale_draws(conn, now_ts=int(time.time()))
+                except Exception:  # noqa: BLE001 — hygiene pass never halts loop
+                    logger.exception(
+                        "[ladder] periodic RELEASE reconcile failed — continues"
+                    )
             await asyncio.sleep(tick_sec)
     finally:
         stop_evt.set()

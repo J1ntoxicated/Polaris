@@ -742,12 +742,20 @@ async def _run_tick(
             # Strategies in this (venue, timeframe) bucket that are NOT exempt
             # from the bar-advance gate (spec_a). When the bucket is entirely
             # close-only AND the newest stored bar for this instrument/interval
-            # has not advanced past every one of their last-eval marks, the
-            # WHOLE prefetch (240-row read + build_real_market_view + technical
-            # write) is redundant — skip it before paying that cost. A bucket
-            # with >=1 exempt strategy always proceeds (session/orderbook/
-            # funding/VIX-driven strategies may need a fresh view even on an
-            # unchanged bar).
+            # has not advanced past EVERY one of their (per-strategy) last-eval
+            # marks, the WHOLE prefetch (240-row read + build_real_market_view +
+            # technical write) is redundant — skip it before paying that cost.
+            # A bucket with >=1 exempt strategy always proceeds (session/
+            # orderbook/funding/VIX-driven strategies may need a fresh view
+            # even on an unchanged bar). The check is keyed PER-STRATEGY (4-
+            # tuple incl. strategy_id) and requires ALL close-only siblings to
+            # already be up to date — if even one sibling has not yet been
+            # evaluated on this bar (e.g. a freshly-focused symbol, or a
+            # strategy added after another already advanced), the prefetch
+            # must proceed so that sibling still gets its turn below. Using a
+            # shared bucket-only key here previously let the FIRST strategy's
+            # per-strategy write starve every sibling (they'd never even reach
+            # the per-strategy loop to get their own mark bumped).
             bucket_strategies = [
                 s for s in strategies_for_tf if s.metadata.venue == venue
             ]
@@ -757,10 +765,14 @@ async def _run_tick(
             if not bucket_has_exempt:
                 instrument_id = f"{venue}:{symbol}"
                 latest_stored_ts = last_stored_bar_ts(conn, instrument_id, timeframe)
-                bucket_key = (venue, symbol, timeframe)
-                if latest_stored_ts is not None and not bar_advance_due(
-                    last_eval_ts=state.last_eval_bar_ts_by_key.get(bucket_key),
-                    latest_bar_ts=latest_stored_ts,
+                if latest_stored_ts is not None and all(
+                    not bar_advance_due(
+                        last_eval_ts=state.last_eval_bar_ts_by_key.get(
+                            (venue, symbol, timeframe, s.metadata.strategy_id)
+                        ),
+                        latest_bar_ts=latest_stored_ts,
+                    )
+                    for s in bucket_strategies
                 ):
                     continue
             # Cooperative yield (see the regime loop above). build_real_market_view
@@ -872,8 +884,14 @@ async def _run_tick(
                 # MarketView.bars — ADR-008 — so this is a redundant
                 # recomputation, never a missed signal). The eval mark is
                 # bumped regardless of emit/None so the NEXT unchanged-bar
-                # tick also skips (only a genuine advance re-fires).
-                strategy_key = (venue, symbol, timeframe)
+                # tick also skips (only a genuine advance re-fires). The key
+                # MUST include strategy_id (4-tuple, not 3): multiple
+                # close-only strategies routinely share the same (venue,
+                # symbol, timeframe) bucket (e.g. OKX 1D has 5), and a shared
+                # 3-tuple key means the FIRST strategy's bump starves every
+                # sibling permanently (they'd see the mark already advanced
+                # and skip forever, on every future bar too).
+                strategy_key = (venue, symbol, timeframe, strategy_id)
                 latest_mv_bar_ts = int(bars[-1].ts)
                 if not strategy.metadata.evaluates_in_progress_bar:
                     if not bar_advance_due(

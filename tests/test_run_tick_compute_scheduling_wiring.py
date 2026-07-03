@@ -133,3 +133,36 @@ def test_prefetch_pregate_precedes_bar_read() -> None:
     gate_idx = _SRC.index("bucket_has_exempt")
     read_idx = _SRC.index("bars = await read_recent_bars_ondemand(")
     assert gate_idx < read_idx
+
+
+def test_bar_gate_keys_include_strategy_id_not_just_venue_symbol_timeframe() -> None:
+    """BLOCKER regression: a 3-tuple ``(venue, symbol, timeframe)`` key lets
+    the FIRST close-only strategy sharing a bucket permanently starve every
+    sibling (their generate_raw_signal is never called again). Both the
+    per-strategy gate AND the bucket-level prefetch pre-gate must key on a
+    4-tuple that includes strategy_id."""
+    strategy_key_idx = _SRC.index("strategy_key = (venue, symbol, timeframe")
+    strategy_key_line = _SRC[strategy_key_idx : _SRC.index("\n", strategy_key_idx)]
+    assert "strategy_id" in strategy_key_line, (
+        "the per-strategy bar-advance gate key must include strategy_id "
+        "(4-tuple), else siblings sharing a bucket starve each other"
+    )
+
+    # The bucket-level prefetch pre-gate must not use a bare 3-tuple key
+    # either — it must derive its due-ness from the SAME per-strategy marks
+    # (checked across ALL bucket strategies), never a single shared key that
+    # the per-strategy loop's writes could clobber.
+    pregate_start = _SRC.index("bucket_has_exempt = any(")
+    read_idx = _SRC.index("bars = await read_recent_bars_ondemand(")
+    pregate_segment = _SRC[pregate_start:read_idx]
+    assert "bucket_key = (venue, symbol, timeframe)" not in pregate_segment, (
+        "the bucket prefetch pre-gate must not read/write a shared 3-tuple "
+        "key that a per-strategy write can clobber — it must check ALL "
+        "close-only siblings' own (4-tuple) marks before skipping the fetch"
+    )
+    assert "strategy.metadata.strategy_id" in pregate_segment or (
+        "s.metadata.strategy_id" in pregate_segment
+    ), (
+        "the bucket pre-gate must consult each bucket strategy's own "
+        "strategy_id-keyed mark, not a bucket-only key"
+    )

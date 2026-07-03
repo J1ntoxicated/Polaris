@@ -19,7 +19,7 @@ def test_last_eval_bar_ts_by_key_is_independent_per_instance() -> None:
     dataclass shared-mutable-default bug)."""
     a = ProdLoopState()
     b = ProdLoopState()
-    a.last_eval_bar_ts_by_key[("okx", "BTC-USDT", "1D")] = 1_000
+    a.last_eval_bar_ts_by_key[("okx", "BTC-USDT", "1D", "bar_breakout_run")] = 1_000
     assert b.last_eval_bar_ts_by_key == {}
 
 

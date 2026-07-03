@@ -280,13 +280,18 @@ class ProdLoopState:
     # throttle / size dampen / entry block).
     probe_observe_evals: int = 0
     # Bar-advance dispatch gate (compute scheduling only — see
-    # ``_production_bar_gate.bar_advance_due``). Per (venue, symbol, timeframe)
-    # key → the ts of the bar this key was LAST evaluated on for a close-only
-    # (``evaluates_in_progress_bar=False``) strategy bucket. Absent key = never
-    # observed → the gate always fires once (reboot-catchup: no missed-bar gap
-    # across a process restart). Never read by any trading decision — only
-    # gates whether ``generate_raw_signal`` is RE-invoked on an unchanged bar.
-    last_eval_bar_ts_by_key: dict[tuple[str, str, str], int] = field(
+    # ``_production_bar_gate.bar_advance_due``). Per (venue, symbol, timeframe,
+    # strategy_id) key → the ts of the bar this key was LAST evaluated on for a
+    # close-only (``evaluates_in_progress_bar=False``) strategy. strategy_id is
+    # part of the key (NOT a 3-tuple) so multiple close-only strategies sharing
+    # a (venue, symbol, timeframe) bucket each get their own independent mark —
+    # otherwise the first strategy's write starves every sibling on the same
+    # bucket (they would see the mark already bumped and skip forever). Absent
+    # key = never observed → the gate always fires once (reboot-catchup: no
+    # missed-bar gap across a process restart). Never read by any trading
+    # decision — only gates whether ``generate_raw_signal`` is RE-invoked on an
+    # unchanged bar.
+    last_eval_bar_ts_by_key: dict[tuple[str, str, str, str], int] = field(
         default_factory=dict
     )
     # Idle fanout backoff (compute scheduling only — see

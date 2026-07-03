@@ -25,6 +25,7 @@ from polaris.venues.capital.opening_hours import (
     OpeningHoursWeek,
     parse_opening_hours,
     seconds_to_next_close,
+    seconds_to_next_open,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "capital_markets"
@@ -185,3 +186,67 @@ def test_min_break_default_admits_index_settlement_break() -> None:
     # The 5-min break (300s) >= default floor → 21:00 is honored as the close.
     now = _ts(2026, 6, 22, 20, 55)
     assert seconds_to_next_close(h, now, is_fx=False) == 5 * 60
+
+
+# ---------------------------------------------------------------------------
+# seconds_to_next_open — timetable-aware delay-route counterpart (P0 Capital
+# venue-reject wave). Symmetric to seconds_to_next_close: None while INSIDE an
+# open window (nothing to route — the caller submits now), a non-negative
+# countdown to the next window's start while OUTSIDE all windows (weekend /
+# daily break / after-close) — the SG25-style "16/16 reject" case.
+# ---------------------------------------------------------------------------
+
+
+def test_us500_mid_session_already_open_returns_none() -> None:
+    """Inside an open window → None (nothing to route, submit now)."""
+    h = _hours("US500")
+    now = _ts(2026, 6, 22, 18, 0)  # Mon, inside 00:00-21:00
+    assert seconds_to_next_open(h, now, is_fx=False) is None
+
+
+def test_gold_in_daily_break_counts_to_reopen() -> None:
+    """GOLD Mon 21:30 (inside the 20:59-22:00 break) → 30min to 22:00 reopen."""
+    h = _hours("GOLD")
+    now = _ts(2026, 6, 22, 21, 30)
+    assert seconds_to_next_open(h, now, is_fx=False) == 30 * 60
+
+
+def test_sg25_weekend_closed_window_routes_to_monday_open() -> None:
+    """SG25-style weekend closed-window simulation: every reject during the
+    Sat/Sun dead window (index closed) resolves to a finite countdown to the
+    next open window (Sun 22:00 US500 reopen) — never None-forever, never a
+    block. Simulates the spec's '16/16 reject' scenario at several points
+    across the closed window; each must resolve, and all must agree on the
+    SAME absolute open instant (monotonic countdown)."""
+    h = _hours("US500")
+    sat_noon = _ts(2026, 6, 27, 12, 0)  # Sat — fully closed (h[5] == ())
+    sun_morning = _ts(2026, 6, 28, 8, 0)  # Sun — before the 22:00 reopen
+    target_open = _ts(2026, 6, 28, 22, 0)  # Sun 22:00 reopen (h[6])
+    for probe_ts in (sat_noon, sun_morning):
+        secs = seconds_to_next_open(h, probe_ts, is_fx=False)
+        assert secs is not None
+        assert secs == target_open - probe_ts
+
+
+def test_weekend_saturday_finite_countdown_to_sunday_reopen() -> None:
+    h = _hours("US500")
+    now = _ts(2026, 6, 27, 12, 0)  # Sat
+    secs = seconds_to_next_open(h, now, is_fx=False)
+    assert secs is not None and secs > 0
+    assert isinstance(secs, int)
+
+
+def test_fx_is_exempt_returns_none() -> None:
+    """FX (24/5) never routes — the legacy Friday-weekly branch owns it."""
+    h = _hours("EURUSD")
+    now = _ts(2026, 6, 27, 12, 0)  # Sat, deep in FX's weekly closure
+    assert seconds_to_next_open(h, now, is_fx=True) is None
+
+
+def test_no_open_window_anywhere_in_lookahead_returns_none() -> None:
+    """A week with zero open windows anywhere → no next-open found → None
+    (defer — the caller must NOT block forever on a malformed table, but also
+    must not fabricate a bogus countdown)."""
+    empty_week: OpeningHoursWeek = tuple(() for _ in range(7))  # type: ignore[assignment]
+    now = _ts(2026, 6, 27, 12, 0)
+    assert seconds_to_next_open(empty_week, now, is_fx=False) is None

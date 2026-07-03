@@ -77,15 +77,20 @@ def sweep_pct() -> float:
 # ---------------------------------------------------------------------------
 
 
-def _net_pnl_usd_for_position(conn: sqlite3.Connection, position_id: str) -> float:
+def _net_pnl_usd_for_position(
+    conn: sqlite3.Connection, position_id: str, *, venue: str, symbol: str
+) -> float:
     """Per-position NET realized ``pnl_usd`` — SUM over ALL close fills of the
     position (partial-fill slices net against each other; +100/-150 → -50).
-    Mirrors ``_production_close_helpers.close_pnl_usd_total``'s query (core
-    cannot import that scripts-layer helper — ``SimulatedTrade``-coupled)."""
+    Mirrors ``_production_close_helpers.close_pnl_usd_total``'s query exactly,
+    including the ``instrument_id`` scope (core cannot import that
+    scripts-layer helper — ``SimulatedTrade``-coupled): without it, a foreign
+    instrument's close fill sharing the same ``contribution_id`` pollutes the
+    sum (documented cross-match bug in ``recover.py``)."""
     row = conn.execute(
         "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM fills "
-        "WHERE contribution_id = ? AND is_close = 1",
-        (position_id,),
+        "WHERE contribution_id = ? AND instrument_id = ? AND is_close = 1",
+        (position_id, f"{venue}:{symbol}"),
     ).fetchone()
     return float(row[0]) if row is not None else 0.0
 
@@ -107,7 +112,7 @@ def materialize_credits(conn: sqlite3.Connection, *, now_ts: int) -> int:
     watermark = int(checkpoint_row[0]) if checkpoint_row is not None else 0
 
     positions = conn.execute(
-        "SELECT position_id, venue FROM positions "
+        "SELECT position_id, venue, symbol FROM positions "
         "WHERE status = 'closed' AND closed_ts IS NOT NULL AND closed_ts >= ? "
         "ORDER BY closed_ts ASC",
         (watermark,),
@@ -116,8 +121,8 @@ def materialize_credits(conn: sqlite3.Connection, *, now_ts: int) -> int:
     inserted = 0
     max_closed_ts = watermark
     pct = sweep_pct()
-    for position_id, venue in positions:
-        net_pnl = _net_pnl_usd_for_position(conn, position_id)
+    for position_id, venue, symbol in positions:
+        net_pnl = _net_pnl_usd_for_position(conn, position_id, venue=venue or "", symbol=symbol or "")
         if net_pnl > 0.0:
             amount = net_pnl * pct
             event_id = f"credit-{position_id}"
@@ -228,7 +233,27 @@ def draw_for_signal(
 # ---------------------------------------------------------------------------
 
 
-def _has_open_position(conn: sqlite3.Connection, *, venue: str, symbol: str, strategy_id: str) -> bool:
+def _has_open_position(
+    conn: sqlite3.Connection, *, venue: str, symbol: str, strategy_id: str, signal_id: str
+) -> bool:
+    """True if a position this SPECIFIC draw could have funded is still open.
+
+    ``positions.signal_id`` links a position back to the exact signal that
+    opened it — when the DRAW carries a non-empty ``signal_id`` (the normal
+    case; every ``draw_for_signal`` call is threaded one), scope to it so two
+    draws sharing the same ``(venue, symbol, strategy_id)`` triple (re-entry
+    before the first position closed) don't alias onto each other's release
+    check (each draw's own open/closed position governs ITS OWN release —
+    no cross-pinning, no double-release of a still-open sibling's headroom).
+    Falls back to the coarse triple only when ``signal_id`` is empty (legacy
+    rows / unknown linkage) — same behaviour as before this scoping."""
+    if signal_id:
+        row = conn.execute(
+            "SELECT 1 FROM positions WHERE venue = ? AND symbol = ? AND strategy_id = ? "
+            "AND signal_id = ? AND status = 'open' LIMIT 1",
+            (venue, symbol, strategy_id, signal_id),
+        ).fetchone()
+        return row is not None
     row = conn.execute(
         "SELECT 1 FROM positions WHERE venue = ? AND symbol = ? AND strategy_id = ? "
         "AND status = 'open' LIMIT 1",
@@ -247,24 +272,36 @@ def _has_pending_order(conn: sqlite3.Connection, *, venue: str, symbol: str, str
 
 def release_stale_draws(conn: sqlite3.Connection, *, now_ts: int) -> int:
     """Reconcile pass (startup + periodic): release every open DRAW whose
-    (venue, symbol, strategy_id) has neither an open position NOR a live/
-    pending order. Covers reject/cancel/expiry too — those paths never open
-    a position, so they satisfy the SAME predicate immediately. Idempotent —
-    a DRAW already released (has a RELEASE row keyed on the same ``draw_id``)
-    is skipped. NEVER creates credit: the RELEASE amount is exactly the
-    matching DRAW's ``amount_usd`` (restores headroom, manufactures nothing).
+    funding signal has neither an open position NOR a live/pending order.
+    Covers reject/cancel/expiry too — those paths never open a position, so
+    they satisfy the SAME predicate immediately. Idempotent — a DRAW already
+    released (has a RELEASE row keyed on the same ``draw_id``) is skipped.
+    NEVER creates credit: the RELEASE amount is exactly the matching DRAW's
+    ``amount_usd`` (restores headroom, manufactures nothing).
+
+    The open-position half is scoped per-DRAW via ``signal_id`` (see
+    ``_has_open_position``) so two draws sharing one ``(venue, symbol,
+    strategy_id)`` triple — e.g. a strategy re-entering before its first
+    position closed — each release independently instead of aliasing onto
+    whichever position happens to still be open on the shared triple.
+    ``pending_opens`` has no ``signal_id`` column (PK is the triple itself),
+    so that half stays triple-scoped — a live pending order on the triple
+    still holds ALL of that triple's draws, which is the conservative
+    (never-release-too-early) direction.
 
     Returns the count of NEW RELEASE rows inserted."""
     open_draws = conn.execute(
-        "SELECT draw_id, venue, symbol, strategy_id, amount_usd FROM ladder_ledger "
+        "SELECT draw_id, venue, symbol, strategy_id, signal_id, amount_usd FROM ladder_ledger "
         "WHERE event_type = 'DRAW' AND draw_id NOT IN ("
         "  SELECT draw_id FROM ladder_ledger WHERE event_type = 'RELEASE'"
         ")"
     ).fetchall()
 
     released = 0
-    for draw_id, venue, symbol, strategy_id, amount_usd in open_draws:
-        if _has_open_position(conn, venue=venue, symbol=symbol, strategy_id=strategy_id):
+    for draw_id, venue, symbol, strategy_id, signal_id, amount_usd in open_draws:
+        if _has_open_position(
+            conn, venue=venue, symbol=symbol, strategy_id=strategy_id, signal_id=signal_id or ""
+        ):
             continue
         if _has_pending_order(conn, venue=venue, symbol=symbol, strategy_id=strategy_id):
             continue

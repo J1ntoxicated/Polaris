@@ -46,13 +46,14 @@ def _insert_position(
     strategy_id: str = "s1",
     status: str = "closed",
     closed_ts: int | None = NOW,
+    signal_id: str = "",
 ) -> None:
     conn.execute(
         "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
-        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, closed_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'long', 1.0, ?, ?, ?)",
+        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, closed_ts, signal_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'long', 1.0, ?, ?, ?, ?)",
         (position_id, venue, symbol, strategy_id, strategy_id, strategy_id,
-         status, NOW - 3600, closed_ts),
+         status, NOW - 3600, closed_ts, signal_id),
     )
     conn.commit()
 
@@ -140,6 +141,30 @@ def test_partial_fill_net_pnl_offsets_within_position() -> None:
         "SELECT COUNT(*) FROM ladder_ledger WHERE event_type='CREDIT' AND source_position_id='p2'"
     ).fetchone()
     assert row[0] == 0
+    conn.close()
+
+
+def test_credit_ignores_foreign_instrument_fill_sharing_contribution_id() -> None:
+    """A close fill for a DIFFERENT instrument sharing the same contribution_id
+    (documented cross-match pollution, see recover.py BUG B) must NOT be
+    summed into this position's net PnL — instrument_id scope required."""
+    conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    conn.commit()
+    _insert_position(conn, position_id="p3", venue="okx", symbol="BTC-USDT")
+    _insert_close_fill(conn, position_id="p3", venue="okx", symbol="BTC-USDT",
+                        pnl_usd=200.0, fill_id="f-real")
+    # Polluting fill: same contribution_id (p3) but a FOREIGN instrument.
+    _insert_close_fill(conn, position_id="p3", venue="okx", symbol="ETH-USDT",
+                        pnl_usd=9000.0, fill_id="f-foreign")
+
+    n = materialize_credits(conn, now_ts=NOW)
+    assert n == 1
+    amount = conn.execute(
+        "SELECT amount_usd FROM ladder_ledger WHERE event_type='CREDIT' AND source_position_id='p3'"
+    ).fetchone()[0]
+    assert amount == pytest.approx(100.0)  # 0.50 * 200 — the foreign 9000 excluded
     conn.close()
 
 
@@ -321,9 +346,9 @@ def test_release_holds_when_position_open() -> None:
         strategy_id="s1", needed_usd=100.0, fresh_bp_usd=1000.0,
         pending_usd=0.0, now_ts=NOW,
     )
-    # Open position on the drawn (venue, symbol, strategy_id) tuple → NOT released.
+    # Position funded by this draw's signal is open → NOT released.
     _insert_position(conn, position_id="pos_alpaca", venue="alpaca", symbol="AAPL",
-                      strategy_id="s1", status="open", closed_ts=None)
+                      strategy_id="s1", status="open", closed_ts=None, signal_id="sig-1")
 
     released = release_stale_draws(conn, now_ts=NOW + 100)
     assert released == 0
@@ -398,6 +423,52 @@ def test_release_reject_cancel_path_also_releases() -> None:
     )
     released = release_stale_draws(conn, now_ts=NOW + 1)
     assert released == 1
+
+
+def test_release_two_draws_same_triple_release_independently() -> None:
+    """Two draws on the SAME (venue, symbol, strategy_id) triple funding
+    DIFFERENT signals must not alias: closing signal A's position releases
+    ONLY draw A while signal B's position is still open, and vice versa —
+    neither draw pins the other's headroom (double-use / leak regression)."""
+    conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    conn.commit()
+    _insert_position(conn, position_id="src")
+    _insert_close_fill(conn, position_id="src", venue="okx", symbol="BTC-USDT", pnl_usd=2000.0)
+    materialize_credits(conn, now_ts=NOW)
+
+    _drawn_a, draw_id_a = draw_for_signal(
+        conn, signal_id="sig-A", venue="alpaca", symbol="AAPL",
+        strategy_id="s1", needed_usd=100.0, fresh_bp_usd=1000.0,
+        pending_usd=0.0, now_ts=NOW,
+    )
+    # Position A opens for sig-A, funded by draw_id_a.
+    _insert_position(conn, position_id="pos_A", venue="alpaca", symbol="AAPL",
+                      strategy_id="s1", status="open", closed_ts=None, signal_id="sig-A")
+
+    _drawn_b, draw_id_b = draw_for_signal(
+        conn, signal_id="sig-B", venue="alpaca", symbol="AAPL",
+        strategy_id="s1", needed_usd=100.0, fresh_bp_usd=1000.0,
+        pending_usd=0.0, now_ts=NOW + 1,
+    )
+    # Position B opens for sig-B on the SAME (venue, symbol, strategy_id) triple.
+    _insert_position(conn, position_id="pos_B", venue="alpaca", symbol="AAPL",
+                      strategy_id="s1", status="open", closed_ts=None, signal_id="sig-B")
+
+    # Position A closes; B is still open. Only draw A should release.
+    conn.execute("UPDATE positions SET status='closed', closed_ts=? WHERE position_id='pos_A'", (NOW + 2,))
+    conn.commit()
+    released = release_stale_draws(conn, now_ts=NOW + 3)
+    assert released == 1
+    a_released = conn.execute(
+        "SELECT COUNT(*) FROM ladder_ledger WHERE event_type='RELEASE' AND draw_id=?", (draw_id_a,),
+    ).fetchone()[0]
+    b_released = conn.execute(
+        "SELECT COUNT(*) FROM ladder_ledger WHERE event_type='RELEASE' AND draw_id=?", (draw_id_b,),
+    ).fetchone()[0]
+    assert a_released == 1
+    assert b_released == 0  # B's own position is still open — must NOT release
 
 
 def test_release_is_idempotent() -> None:

@@ -283,3 +283,8 @@
 2026-07-03 14:23 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_2b96b854-21e-1/tests/test_ops_probe_reranker.py]
 2026-07-03 14:25 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=373 learners=3 paper=True]
 - 2026-07-04 /debate 부트스트랩 경계 2R FINAL CONSENSUS(codex gpt-5.5 xhigh): BENCH 시딩 2-밴드 증거 floor(score_F≤-4→n≥8/8/5, -4<score_F≤-1→n≥12/8/5, 미달=PROVE) · EARN 비대칭 유지 · fx_breakout BENCH 유지 · zero-fee 분모 재정의 별도 사이클 필수 큐잉 — prove_then_scale_classes_2026-07-03.md append
+2026-07-03 14:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=329 learners=3 paper=True]
+- 2026-07-04 PtS 라이브 가동: main 머지 128faec(8그룹, 풀스위트 4621)→부트스트랩 25종 첫 분류→결함 2건 즉시 수정 51d0552(2-밴드 floor+DDL last_promotion_ts, fresh Opus APPROVE 케이스 6/6)→3행 정정 — 최종 EARN 7/PROVE 14/BENCH 4(tsmom·fx_breakout·session_breakout·funding_maker), 재기동 후 pts 에러 0
+- 2026-07-04 그룹F 노트 갭 즉시 팔로업: G5 probe slot/24h fee cap 소비 미배선(PROVE admission 무제한) → wf_91e207ed 빌드+fresh 리뷰 발사
+- 2026-07-04 그룹F 팔로업 완료: engine.py compute_size PROVE 분기가 probe_slot_assignment(slot_active, 신선도 172800s)+strategy_class.probe_fee_24h vs 6/4/2xF_track_cap 실제 소비(신규 core/sizing/probe_cap.py, read-only) — 초과=기존 shadow swap 재사용+[pts-classes] probe_cap 로그, 스냅샷 부재=open-position count fallback, EARN/BENCH 회귀 불변, 테스트 310 pass, mypy --strict+ruff clean
+2026-07-03 15:06 [Edit: /Users/jinyoon/Projects/Polaris/vault/log.md]

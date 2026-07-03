@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from polaris.core.cell_matrix import CellKeyP0, fetch_learner_anti_edge
 from polaris.core.classes.probe_fee import accrue_probe_fee
 from polaris.core.classes.r_pool import allocate_r_pool
+from polaris.core.classes.score_f import f_track_cap
 from polaris.core.classes.shadow_fill import record_shadow_fill
 from polaris.core.learners.base import (
     NEUTRAL_MULT,
@@ -43,6 +44,7 @@ from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
 from polaris.core.sizing.ladder import draw_for_signal
+from polaris.core.sizing.probe_cap import probe_cap_check
 from polaris.core.sizing.probe_notional import (
     bottom_cell_shadow_hit,
     probe_notional_usd,
@@ -191,6 +193,13 @@ class SignalIntent:
     # (core sizing does not read it directly — no new coupling to the group A
     # storage module from this dataclass).
     strategy_class: str = "EARN"
+
+
+# score_f.f_track_cap's own rolling window — same value as
+# tools/ops/probe_reranker.py's ``_F_TRACK_CAP_WINDOW_W`` (mirrors
+# ``strategy_class.window_w``'s DDL default of 20) so this per-signal cap
+# read and the 07:30 snapshot's own cap basis agree on the same lookback.
+_F_TRACK_CAP_WINDOW_W = 20
 
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1031,31 @@ def compute_size(
         shadow_triggered = bottom_cell_shadow_hit(cell_mult) or fetch_learner_anti_edge(
             conn, cell_key
         )
+        # pts-classes group F followup — actually CONSUME the 07:30 reranker's
+        # concurrent-probe-slot snapshot + the 24h probe fee cap here (the
+        # reranker's own docstring named this read the "separate,
+        # out-of-scope for this module" consumer). Read-only: no hot-path
+        # write, cap-miss is folded into the SAME shadow_triggered swap below
+        # (a cap-exhausted PROVE candidate is routed exactly like a bottom-
+        # cell/anti-edge shadow trigger — capital ROUTING, never a block).
+        probe_fee_row = conn.execute(
+            "SELECT probe_fee_24h FROM strategy_class WHERE venue = ? AND strategy_id = ?",
+            (intent.venue, intent.strategy),
+        ).fetchone()
+        cap_result = probe_cap_check(
+            conn,
+            track=intent.track,
+            venue=intent.venue,
+            strategy_id=intent.strategy,
+            probe_fee_24h_usd=float(probe_fee_row[0]) if probe_fee_row is not None else 0.0,
+            f_track_cap_usd=f_track_cap(
+                conn, venue=intent.venue, strategy_id=intent.strategy,
+                window_w=_F_TRACK_CAP_WINDOW_W,
+                prove_fallback_usd=probe_notional_usd(intent.venue),
+            ).f_track_cap_usd,
+            now_ts=ts,
+        )
+        shadow_triggered = shadow_triggered or not cap_result.admitted
         if admitted and not shadow_triggered:
             basis = portfolio.equity_usd * intent.leverage
             probe_risk_pct = probe_notional_usd(intent.venue) / basis if basis > 0.0 else 0.0

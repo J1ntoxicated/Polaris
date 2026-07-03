@@ -225,6 +225,92 @@ def test_prove_anti_edge_learner_shadow_routes_even_if_admitted(memdb: sqlite3.C
 
 
 # ---------------------------------------------------------------------------
+# PROVE — group F followup: probe cap consumption (slots + 24h fee)
+# ---------------------------------------------------------------------------
+
+
+def _admitted_prove_intent(symbol: str = "CAP-USDT") -> SignalIntent:
+    floor = prove_stop_dist_floor_pct("okx")
+    return _intent(
+        strategy_class="PROVE", symbol=symbol, atr_pct=floor * 10.0, stop_atr_mult=1.0,
+    )
+
+
+def test_prove_within_slot_and_fee_cap_fires_probe(memdb: sqlite3.Connection) -> None:
+    """Fresh snapshot says slot_active=True, no fee history -> probe fires
+    (byte-identical to the pre-cap-consumer PROVE admitted path)."""
+    _seed_mid_cell(memdb, symbol="CAP1-USDT")
+    memdb.execute(
+        "INSERT INTO probe_slot_assignment (run_ts, track, venue, strategy_id, rank, "
+        "slot_active, reason) VALUES (?, 'A', 'okx', 'volume_burst', 1, 1, 'SLOT_ACTIVE')",
+        (NOW,),
+    )
+    sized = compute_size(
+        memdb, intent=_admitted_prove_intent("CAP1-USDT"), risk_state=_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert sized.final_notional_usd == pytest.approx(venue_min_notional_usd("okx"))
+    assert sized.binding_cap == "prove_probe_notional"
+
+
+def test_prove_slot_exhausted_shadow_routes(memdb: sqlite3.Connection) -> None:
+    """Latest snapshot says slot_active=False (concurrency cap exhausted for
+    this track) -> shadow-routed even though admission + cell/anti-edge would
+    otherwise pass."""
+    _seed_mid_cell(memdb, symbol="CAP2-USDT")
+    memdb.execute(
+        "INSERT INTO probe_slot_assignment (run_ts, track, venue, strategy_id, rank, "
+        "slot_active, reason) VALUES (?, 'A', 'okx', 'volume_burst', 4, 0, "
+        "'CONCURRENCY_CAP_EXHAUSTED')",
+        (NOW,),
+    )
+    sized = compute_size(
+        memdb, intent=_admitted_prove_intent("CAP2-USDT"), risk_state=_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert sized.final_notional_usd == 0.0
+    assert sized.binding_cap == "prove_shadow"
+
+
+def test_prove_fee_cap_exhausted_shadow_routes(memdb: sqlite3.Connection) -> None:
+    """slot_active=True but this strategy's own probe_fee_24h already exceeds
+    6xF_track_cap (track A) -> shadow-routed, not fired."""
+    _seed_mid_cell(memdb, symbol="CAP3-USDT")
+    memdb.execute(
+        "INSERT INTO probe_slot_assignment (run_ts, track, venue, strategy_id, rank, "
+        "slot_active, reason) VALUES (?, 'A', 'okx', 'volume_burst', 1, 1, 'SLOT_ACTIVE')",
+        (NOW,),
+    )
+    memdb.execute(
+        "INSERT INTO strategy_class (venue, strategy_id, strategy_class, probe_fee_24h) "
+        "VALUES ('okx', 'volume_burst', 'PROVE', 999999.0) "
+        "ON CONFLICT(venue, strategy_id) DO UPDATE SET probe_fee_24h = excluded.probe_fee_24h",
+    )
+    sized = compute_size(
+        memdb, intent=_admitted_prove_intent("CAP3-USDT"), risk_state=_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert sized.final_notional_usd == 0.0
+    assert sized.binding_cap == "prove_shadow"
+
+
+def test_prove_no_snapshot_fallback_still_admits_under_open_position_cap(
+    memdb: sqlite3.Connection,
+) -> None:
+    """No reranker snapshot has EVER run for this track -> fallback counts
+    currently-open PROVE positions (zero here) against the track cap -> still
+    admits (the cap must stay alive before the reranker's first run, it must
+    not silently go inert)."""
+    _seed_mid_cell(memdb, symbol="CAP4-USDT")
+    sized = compute_size(
+        memdb, intent=_admitted_prove_intent("CAP4-USDT"), risk_state=_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert sized.final_notional_usd == pytest.approx(venue_min_notional_usd("okx"))
+    assert sized.binding_cap == "prove_probe_notional"
+
+
+# ---------------------------------------------------------------------------
 # BENCH — always shadow
 # ---------------------------------------------------------------------------
 

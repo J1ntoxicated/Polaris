@@ -6,8 +6,9 @@ Split into its own module (new feature, own file) per the file-size cap.
 ``strategy_class`` is the SSOT for capital-routing tier state: which class
 (EARN/PROVE/BENCH/KILL — enum owned by the classifier group, not this
 storage layer) a (venue, strategy_id) currently occupies, its track_R cap,
-dwell/epoch bookkeeping for hysteresis, and lifecycle accounting (qty,
-cumulative fees/pnl). This is a **routing** record, not a block/reject
+dwell/epoch bookkeeping for hysteresis, and lifecycle accounting
+(``open_lifecycle_id`` anchor + qty, cumulative fees/pnl accrued against
+that open lifecycle). This is a **routing** record, not a block/reject
 filter — BENCH-classed strategies keep signaling/learning/shadow-pricing;
 only capital allocation reads this table (aggressive_always_profit /
 no_block_filter_architecture preserved).
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS strategy_class (
     last_transition_ts INTEGER NOT NULL DEFAULT 0,
     kill_state TEXT NOT NULL DEFAULT 'ACTIVE',
     ladder_step INTEGER NOT NULL DEFAULT 0,
+    open_lifecycle_id TEXT NOT NULL DEFAULT '',
     qty REAL NOT NULL DEFAULT 0.0,
     cum_fees REAL NOT NULL DEFAULT 0.0,
     cum_pnl REAL NOT NULL DEFAULT 0.0,

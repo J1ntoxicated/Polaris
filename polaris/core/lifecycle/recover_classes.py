@@ -42,6 +42,7 @@ class StrategyClassRow:
     last_transition_ts: int
     kill_state: str
     ladder_step: int
+    open_lifecycle_id: str
     qty: float
     cum_fees: float
     cum_pnl: float
@@ -66,7 +67,8 @@ def hydrate_strategy_class(
         """
         SELECT venue, strategy_id, strategy_class, window_w, f_track_cap,
                dwell, epoch_id, last_transition_ts, kill_state, ladder_step,
-               qty, cum_fees, cum_pnl, intent_ring, shadow_ring, probe_fee_24h
+               open_lifecycle_id, qty, cum_fees, cum_pnl, intent_ring,
+               shadow_ring, probe_fee_24h
         FROM strategy_class
         """
     ).fetchall()
@@ -84,12 +86,13 @@ def hydrate_strategy_class(
             last_transition_ts=int(r[7]),
             kill_state=str(r[8]),
             ladder_step=int(r[9]),
-            qty=float(r[10]),
-            cum_fees=float(r[11]),
-            cum_pnl=float(r[12]),
-            intent_ring=_decode_ring(r[13]),
-            shadow_ring=_decode_ring(r[14]),
-            probe_fee_24h=float(r[15]),
+            open_lifecycle_id=str(r[10]),
+            qty=float(r[11]),
+            cum_fees=float(r[12]),
+            cum_pnl=float(r[13]),
+            intent_ring=_decode_ring(r[14]),
+            shadow_ring=_decode_ring(r[15]),
+            probe_fee_24h=float(r[16]),
         )
     return out
 
@@ -114,6 +117,18 @@ ScoreFFn = Callable[[sqlite3.Connection, str, str, int], float]
 # via its own constant if score_F's scale changes.
 _BOOTSTRAP_EARN_THRESHOLD = 0.0
 
+# score_F < this seeds the strategy straight into BENCH at bootstrap (a
+# proven loser over the replay window must not enter the live-probe/PROVE
+# pool and consume probe fee budget — fee-bleed disease this feature exists
+# to cure). Set strictly below _BOOTSTRAP_EARN_THRESHOLD so a genuine PROVE
+# band exists between the two (SSOT S8 three-way outcome: current earner ->
+# EARN, proven loser -> BENCH, everyone else in the middle -> PROVE — never
+# a two-outcome EARN/PROVE collapse). -1.0 is a placeholder break-even-minus
+# margin on score_F's own break-even-at-0.0 scale; the classifier group
+# owns re-tuning this (and the EARN threshold) via its own constants once
+# score_F's real distribution/scale is established.
+_BOOTSTRAP_BENCH_THRESHOLD = -1.0
+
 
 def bootstrap_replay_strategy_class(
     conn: sqlite3.Connection,
@@ -127,10 +142,14 @@ def bootstrap_replay_strategy_class(
 
     Bootstrap replay: for every ``(venue, strategy_id)`` candidate without an
     existing row, replays ``lookback_days`` of history through the injected
-    ``score_f`` and seeds EARN immediately when the score clears
-    ``_BOOTSTRAP_EARN_THRESHOLD`` (a currently-proven earner is never held
-    back in probation), else PROVE (default — no all-candidates-flattened-to
-    -PROVE reset; each candidate is judged independently on its own score).
+    ``score_f`` and seeds a three-way outcome (SSOT S8) — EARN immediately
+    when the score clears ``_BOOTSTRAP_EARN_THRESHOLD`` (a currently-proven
+    earner is never held back in probation), BENCH when the score falls
+    below ``_BOOTSTRAP_BENCH_THRESHOLD`` (a proven loser must never enter
+    the live-probe/PROVE pool and consume probe fee budget), else PROVE for
+    everyone in the middle band — no all-candidates-flattened-to-PROVE or
+    -to-two-classes reset; each candidate is judged independently on its own
+    score.
 
     NEVER clobbers an existing row (idempotent bootstrap — a
     live-tracked class/epoch/dwell survives every restart untouched; this
@@ -147,7 +166,12 @@ def bootstrap_replay_strategy_class(
         if (venue, strategy_id) in existing:
             continue
         score = score_f(conn, venue, strategy_id, lookback_days)
-        klass = "EARN" if score > _BOOTSTRAP_EARN_THRESHOLD else "PROVE"
+        if score > _BOOTSTRAP_EARN_THRESHOLD:
+            klass = "EARN"
+        elif score < _BOOTSTRAP_BENCH_THRESHOLD:
+            klass = "BENCH"
+        else:
+            klass = "PROVE"
         conn.execute(
             """
             INSERT INTO strategy_class

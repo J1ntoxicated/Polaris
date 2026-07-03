@@ -279,3 +279,25 @@ class ProdLoopState:
     # Count of observe-mode probe evaluations logged (telemetry only; never a
     # throttle / size dampen / entry block).
     probe_observe_evals: int = 0
+    # Bar-advance dispatch gate (compute scheduling only — see
+    # ``_production_bar_gate.bar_advance_due``). Per (venue, symbol, timeframe)
+    # key → the ts of the bar this key was LAST evaluated on for a close-only
+    # (``evaluates_in_progress_bar=False``) strategy bucket. Absent key = never
+    # observed → the gate always fires once (reboot-catchup: no missed-bar gap
+    # across a process restart). Never read by any trading decision — only
+    # gates whether ``generate_raw_signal`` is RE-invoked on an unchanged bar.
+    last_eval_bar_ts_by_key: dict[tuple[str, str, str], int] = field(
+        default_factory=dict
+    )
+    # Idle fanout backoff (compute scheduling only — see
+    # ``_production_bar_gate.idle_backoff_next_due``). Per-venue monotonic ts
+    # of the next allowed dispatch-fanout wake; absent = due now (first tick).
+    # Never gates ingest (which stays on the 5s cadence every tick — the sole
+    # channel for fresh bars/session edges to reset the backoff) — only skips
+    # the regime pass (for symbols with no open position) + strategy fan-out
+    # for a venue that produced zero new bars/signals this tick.
+    fanout_next_due_by_venue: dict[str, float] = field(default_factory=dict)
+    # Per-venue count of CONSECUTIVE idle ticks (zero new bars + zero signals)
+    # — drives the exponential backoff interval. Resets to 0 the instant a
+    # venue ingests a bar, emits a signal, or its session flips OPEN.
+    fanout_idle_streak_by_venue: dict[str, int] = field(default_factory=dict)

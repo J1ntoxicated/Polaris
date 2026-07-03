@@ -49,6 +49,14 @@ from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
 from polaris.core.universe.schema import ALLOWED_TRADE_QUOTE_CCY_OKX
 from polaris.scripts import _production_rotation as rotation
+from polaris.scripts._production_bar_gate import (
+    bar_advance_due,
+    idle_backoff_next_due,
+    idle_backoff_reset,
+    newest_bar_ts_by_venue,
+    venues_with_new_bars,
+)
+from polaris.scripts._production_bars import last_stored_bar_ts
 from polaris.scripts._production_counterfactual import (
     CF_SWEEP_THROTTLE_SEC,
     sweep_forward_marks,
@@ -62,6 +70,7 @@ from polaris.scripts._production_layers import (
     compute_and_flip_regime,
     get_focus_targets,
     ingest_bars_per_timeframe,
+    open_position_targets,
     read_recent_bars_ondemand,
     run_recalc_for_active_positions,
     staleness_threshold_for,
@@ -74,6 +83,7 @@ from polaris.scripts._production_pipeline import (
 )
 from polaris.scripts._production_recalc import recalc_active_positions
 from polaris.scripts._production_state import ProdLoopState
+from polaris.scripts._session_map import entry_fanout_active
 from polaris.strategies import (
     STRATEGY_REGISTRY,
     BaseStrategy,
@@ -510,6 +520,12 @@ async def _run_tick(
     # OKX 1m (volume_burst) is NOT in the skip set → intra-minute freshness kept.
     regime_only_1m_venues = all_focus_venues - strategy_1m_venues
     skip_if_current = {(v, "1m") for v in regime_only_1m_venues}
+    # spec_c idle backoff — snapshot BEFORE ingest so the post-ingest diff can
+    # detect a per-venue new bar THIS tick (ingest is the only channel through
+    # which fresh information arrives, and it runs unconditionally below —
+    # ordering is load-bearing: a same-tick new bar must be visible before the
+    # idle-skip decision is made, else the venue stays "idle" one extra tick).
+    _bar_snapshot_before = newest_bar_ts_by_venue(conn, bar_interval="1m")
     ingest_totals = await ingest_bars_per_timeframe(
         conn, focus,
         timeframe_to_venues=timeframe_to_venues,
@@ -522,6 +538,35 @@ async def _run_tick(
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]
+
+    # spec_c idle backoff — per-venue "should the dispatch fan-out (regime pass
+    # for no-position symbols + strategy dispatch) run THIS tick" decision. The
+    # decision uses the streak/next-due state carried from the PRIOR tick (so a
+    # venue idle last tick stays skipped until its backoff interval elapses);
+    # the reset for THIS tick's idle/active classification is computed after
+    # the fan-out below (using this tick's actual bars/signals), so it takes
+    # effect starting NEXT tick. Ingest itself NEVER reads this — it stays on
+    # the unconditional 5s cadence (the sole channel for fresh bars/session
+    # edges), so this can never suppress the very information that would
+    # reset it (flow_not_block: a backed-off venue's bars/regime/positions are
+    # still watched — only the compute-heavy re-scan is deferred).
+    _bar_snapshot_after = newest_bar_ts_by_venue(conn, bar_interval="1m")
+    venues_new_bar_this_tick = venues_with_new_bars(
+        _bar_snapshot_before, _bar_snapshot_after
+    )
+    venues_fanout_due = {
+        venue
+        for venue in all_focus_venues
+        if venue in venues_new_bar_this_tick
+        or now_mono >= state.fanout_next_due_by_venue.get(venue, 0.0)
+    }
+    venues_had_signal_this_tick: set[str] = set()
+    # spec_c — snapshot the equity session open/closed state BEFORE the
+    # dispatch fan-out (which is what actually flips it, via
+    # equity_session_entry_hold -> equity_session_entry_hold's internal
+    # state.equity_session_open_by_venue write) so the tail-of-tick bookkeeping
+    # below can detect a genuine OPEN transition THIS tick, not just "is open".
+    _session_open_before = dict(state.equity_session_open_by_venue)
 
     # Gate→outcome counterfactual forward-mark sweep (instrumentation only):
     # resolves pending G3/G4 KILL/PASS cohort rows from the bars just ingested
@@ -543,12 +588,32 @@ async def _run_tick(
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
         tick_idx=tick_idx,
     )
+    # spec_b — symbols with an OPEN position are NEVER session/idle-skipped in
+    # the regime pass below (their regime must keep updating for the live
+    # exit/swap path regardless of session or fanout-idle state). Computed
+    # once per tick (indexed query); the entry-fanout gate below applies only
+    # to symbols NOT in this set.
+    open_position_symbols = {
+        (venue, symbol) for venue, symbol, _ac, _gid in open_position_targets(conn)
+    }
+
     # Regime is computed off 1m bars (Layer 6 SSOT — keep stable across tf
     # buckets so swap predicate doesn't oscillate with strategy timeframe).
     regime_by_group: dict[tuple[str, str], str] = {}
     for venue, symbol, asset_class, group_id in focus:
         if not group_id:
             continue
+        if (venue, symbol) not in open_position_symbols:
+            # spec_b — a closed venue book produces no new bars for a symbol
+            # with no open position; skip its regime refresh (compute
+            # scheduling only). spec_c — an idle venue's regime pass is also
+            # deferred until its backoff interval elapses. Either skip is
+            # ADDITIVE-narrowing only: a held position (checked above) or a
+            # genuinely due venue always runs.
+            if not entry_fanout_active(venue, asset_class, symbol, now_ts):
+                continue
+            if venue not in venues_fanout_due:
+                continue
         # Cooperative yield (event-loop fairness). The per-symbol regime pass
         # (read_recent_bars + compute_and_flip_regime) over the full focus set is
         # otherwise a multi-second SYNC block that starves the ~0.5s tick engine
@@ -657,6 +722,47 @@ async def _run_tick(
                 and not keep_on_bar_path(asset_class=asset_class, symbol=symbol)
             ):
                 continue
+            has_open_position = (venue, symbol) in open_position_symbols
+            # spec_b — a closed venue book produces no new bars/orders for a
+            # NEW-entry candidate; skip the dispatch fan-out for it (compute
+            # scheduling only — the exit/recalc lane above never consults this
+            # predicate, so a held position is unaffected regardless. A held
+            # position itself is exempted here too — conservative: it stays
+            # eligible for anti-churn/rotation signal bookkeeping on its own
+            # symbol, unchanged from pre-gate behaviour).
+            if not has_open_position and not entry_fanout_active(
+                venue, asset_class, symbol, now_ts
+            ):
+                continue
+            # spec_c — an idle venue (zero new bars + zero signals recently)
+            # defers its dispatch fan-out until its backoff interval elapses.
+            # A held position is exempt (same conservative carve-out as above).
+            if not has_open_position and venue not in venues_fanout_due:
+                continue
+            # Strategies in this (venue, timeframe) bucket that are NOT exempt
+            # from the bar-advance gate (spec_a). When the bucket is entirely
+            # close-only AND the newest stored bar for this instrument/interval
+            # has not advanced past every one of their last-eval marks, the
+            # WHOLE prefetch (240-row read + build_real_market_view + technical
+            # write) is redundant — skip it before paying that cost. A bucket
+            # with >=1 exempt strategy always proceeds (session/orderbook/
+            # funding/VIX-driven strategies may need a fresh view even on an
+            # unchanged bar).
+            bucket_strategies = [
+                s for s in strategies_for_tf if s.metadata.venue == venue
+            ]
+            bucket_has_exempt = any(
+                s.metadata.evaluates_in_progress_bar for s in bucket_strategies
+            )
+            if not bucket_has_exempt:
+                instrument_id = f"{venue}:{symbol}"
+                latest_stored_ts = last_stored_bar_ts(conn, instrument_id, timeframe)
+                bucket_key = (venue, symbol, timeframe)
+                if latest_stored_ts is not None and not bar_advance_due(
+                    last_eval_ts=state.last_eval_bar_ts_by_key.get(bucket_key),
+                    latest_bar_ts=latest_stored_ts,
+                ):
+                    continue
             # Cooperative yield (see the regime loop above). build_real_market_view
             # (indicators) + read_recent_bars per (symbol, timeframe, strategy) is
             # the heaviest SYNC stretch in the tick — yield between symbols so the
@@ -758,6 +864,24 @@ async def _run_tick(
                 # instead bounded by the shadow validation cap in the T4 engine.
                 if equity_entry_inert_for_feed(strategy):
                     continue
+                # spec_a bar-advance gate (per-strategy). Exempt strategies
+                # (evaluates_in_progress_bar=True) always re-evaluate — their
+                # signal can depend on something that changed since the bar
+                # closed. A close-only strategy skips a repeat call on an
+                # unchanged bar (generate_raw_signal is a pure function of
+                # MarketView.bars — ADR-008 — so this is a redundant
+                # recomputation, never a missed signal). The eval mark is
+                # bumped regardless of emit/None so the NEXT unchanged-bar
+                # tick also skips (only a genuine advance re-fires).
+                strategy_key = (venue, symbol, timeframe)
+                latest_mv_bar_ts = int(bars[-1].ts)
+                if not strategy.metadata.evaluates_in_progress_bar:
+                    if not bar_advance_due(
+                        last_eval_ts=state.last_eval_bar_ts_by_key.get(strategy_key),
+                        latest_bar_ts=latest_mv_bar_ts,
+                    ):
+                        continue
+                    state.last_eval_bar_ts_by_key[strategy_key] = latest_mv_bar_ts
                 try:
                     sig = strategy.generate_raw_signal(mv)
                 except Exception as exc:  # noqa: BLE001 — must isolate
@@ -788,6 +912,7 @@ async def _run_tick(
                 state.signals_by_tf[timeframe] = (
                     state.signals_by_tf.get(timeframe, 0) + 1
                 )
+                venues_had_signal_this_tick.add(venue)
                 # Signal emit (INFO): a finite raw signal cleared generation —
                 # the decision-visibility surface. The downstream churn skips +
                 # the G1-G8 pipeline still own the lifecycle; this records ONLY
@@ -982,6 +1107,33 @@ async def _run_tick(
         state.supervised_tasks_failed += sum(
             1 for r in results if r["exception"] is not None
         )
+
+    # spec_c — per-venue idle-streak bookkeeping for THIS tick's activity, so
+    # NEXT tick's ``venues_fanout_due`` reflects it. A venue resets to 0 (immediate
+    # 5s-cadence resume) when it got a new bar, emitted a signal, or its session
+    # just flipped open (state.equity_session_open_by_venue, set above by
+    # equity_session_entry_hold — only Track C ever flips True here); otherwise
+    # the streak increments and the next-due wake backs off exponentially
+    # (capped). This NEVER affects ingest (unconditional every tick) or the
+    # exit/recalc lane (structurally separate) — compute scheduling only.
+    for venue in all_focus_venues:
+        session_opened_edge = (
+            _session_open_before.get(venue) is not True
+            and state.equity_session_open_by_venue.get(venue) is True
+        )
+        if idle_backoff_reset(
+            bars_persisted=1 if venue in venues_new_bar_this_tick else 0,
+            had_signal=venue in venues_had_signal_this_tick,
+            session_opened=session_opened_edge,
+        ):
+            state.fanout_idle_streak_by_venue[venue] = 0
+            state.fanout_next_due_by_venue[venue] = now_mono
+        else:
+            streak = state.fanout_idle_streak_by_venue.get(venue, 0)
+            state.fanout_idle_streak_by_venue[venue] = streak + 1
+            state.fanout_next_due_by_venue[venue] = idle_backoff_next_due(
+                now_mono=now_mono, streak=streak
+            )
 
     # Capital rotation HOOK SEAM (Jin 2026-05-30): rotate one per-venue from the
     # capital-blocked candidates the fan-out populated (close weakest loser,

@@ -100,6 +100,12 @@ class WeekendFundingCapitulationMakerStrategy(BaseStrategy):
         # on a THIN 96d single period — durability INCONCLUSIVE. So the order is
         # SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
         shadow_first=True,
+        # bars-EXTERNAL input: the funding rate (MarketView.altdata) refreshes
+        # on its own intraday cadence independent of the 1H bar close — the
+        # bar-advance dispatch gate must not suppress a re-eval (compute-
+        # scheduling exemption only, see
+        # StrategyMetadata.evaluates_in_progress_bar).
+        evaluates_in_progress_bar=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

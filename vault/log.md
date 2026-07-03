@@ -271,3 +271,5 @@
 2026-07-02 23:28 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=354 learners=3 paper=True]
 2026-07-02 23:57 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=354 learners=3 paper=True]
 2026-07-02 daily-auto [closes=36 pnl_usd=-154.62 opens=51 faults=0 restarts=2]
+2026-07-03 debate [profit-sweep 3단 사다리: codex 3R 합의 — X=50%(unlock-rate) / on-close 프로젝션 credit / auto-draw threshold=0 / 불가침, ledger=append-only 이벤트 행] → vault/50_research/debates/profit_sweep_ladder_2026-07-03.md
+2026-07-03 01:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=364 learners=3 paper=True]

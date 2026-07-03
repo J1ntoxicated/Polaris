@@ -274,3 +274,5 @@
 2026-07-03 debate [profit-sweep 3단 사다리: codex 3R 합의 — X=50%(unlock-rate) / on-close 프로젝션 credit / auto-draw threshold=0 / 불가침, ledger=append-only 이벤트 행] → vault/50_research/debates/profit_sweep_ladder_2026-07-03.md
 2026-07-03 01:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=364 learners=3 paper=True]
 - 2026-07-03 deploy(dynamic-compute+부활P0): bar-advance 4-튜플 게이팅(dry-eval 99.9%↓, Opus가 형제기아 blocker 적발)+세션 레인슬립+idle 백오프 / OKX tailored cap(이력 기반 per-key)+Alpaca 장외 retry defer / Capital 지수 세션 force-seat(US500 bar 0 기아 해소)+timetable 라우팅 primitive / Yahoo 폴백 tf-키 / chandelier=시장조건 기아(무죄). 활동 실측: flow는 Capital 35>OKX 14>Alpaca 6(기대 순위 일치), 오픈북 쏠림=보유기간 비대칭
+2026-07-03 01:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=364 learners=3 paper=True]
+2026-07-03 01:23 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_69d45124-c28-1/polaris/core/sizing/engine.py]

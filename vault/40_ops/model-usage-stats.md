@@ -5,7 +5,7 @@ tags: [model-stats, harness]
 
 # Model Usage Stats
 
-AUTO-GENERATED — do not hand-edit. Generated 2026-07-03 11:07 AEST.
+AUTO-GENERATED — do not hand-edit. Generated 2026-07-03 11:23 AEST.
 
 Tier map (Jin 2026-07-03): Opus=review/advisor · Fable=orchestrator/research-verify/Jin-dialogue · Sonnet=coding · Haiku=realtime.
 
@@ -13,12 +13,12 @@ Tier map (Jin 2026-07-03): Opus=review/advisor · Fable=orchestrator/research-ve
 
 | model | turns (main+side) | out_tok | in_tok | last_seen |
 |---|---|---|---|---|
-| claude-opus-4-8 | 8691+62786 | 47.3M | 10641.6M | 2026-07-03 |
-| claude-fable-5 | 960+2286 | 2.5M | 619.9M | 2026-07-03 |
+| claude-opus-4-8 | 8691+62889 | 47.3M | 10647.5M | 2026-07-03 |
+| claude-fable-5 | 985+2294 | 2.5M | 643.2M | 2026-07-03 |
 | claude-opus-4-7 | 180+0 | 40.4k | 10.0M | 2026-05-11 |
 | claude-haiku-4-5-20251001 | 0+5222 | 675.9k | 253.1M | 2026-07-03 |
 | claude-sonnet-4-6 | 0+11 | 9.1k | 194.6k | 2026-06-26 |
-| claude-sonnet-5 | 0+15560 | 2.5M | 1548.6M | 2026-07-03 |
+| claude-sonnet-5 | 0+15902 | 2.6M | 1606.0M | 2026-07-03 |
 
 ## Daily iteration frequency (last 14d)
 
@@ -37,7 +37,7 @@ Tier map (Jin 2026-07-03): Opus=review/advisor · Fable=orchestrator/research-ve
 | 2026-06-28 | 0 | 4095 | 0 | 0 | 0 | 0 |
 | 2026-06-29 | 0 | 1050 | 0 | 0 | 0 | 0 |
 | 2026-07-02 | 0 | 6 | 0 | 0 | 2535 | 13646 |
-| 2026-07-03 | 0 | 549 | 154 | 0 | 711 | 1914 |
+| 2026-07-03 | 0 | 652 | 154 | 0 | 744 | 2256 |
 
 ## Spawn matrix
 

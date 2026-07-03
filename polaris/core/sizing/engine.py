@@ -567,6 +567,7 @@ def headroom_min(
     track_remaining: float,
     venue_daily_remaining: float,
     total_daily_remaining: float,
+    r_pool_remaining: float | None = None,
 ) -> tuple[float, str]:
     """Single-pass ``min()`` over proposed + every available cap.
 
@@ -578,6 +579,16 @@ def headroom_min(
         single → per-symbol → underlying → cluster → track → venue → total
     None values for underlying / cluster mean "not configured" — they do not
     participate in the min().
+
+    ``r_pool_remaining`` (pts-classes group E) is a NEW pure min() SLOT —
+    ``0.5 x track_gross_cap(intent.track)`` at the ``compute_size`` call site
+    — bounding how much of the R-pool's BENCH-freed capital
+    (``polaris.core.classes.r_pool.allocate_r_pool``) a single signal can draw
+    on. It is a min() term exactly like every existing slot here, NOT a T4
+    chain multiplier (9-stack ban intact); ``None`` (default) means "not
+    configured" and never participates, matching ``underlying_remaining`` /
+    ``cluster_remaining``'s existing opt-in shape — every pre-group-E caller
+    is byte-identical.
     """
     candidates: list[tuple[str, float]] = [
         ("proposed", proposed_risk_pct),
@@ -592,6 +603,8 @@ def headroom_min(
     if cluster_remaining is not None:
         candidates.insert(4 if underlying_remaining is not None else 3,
                           ("cluster", cluster_remaining))
+    if r_pool_remaining is not None:
+        candidates.append(("r_pool", r_pool_remaining))
 
     final_name, final_val = min(candidates, key=lambda c: c[1])
     return max(0.0, final_val), final_name
@@ -855,6 +868,13 @@ def compute_size(
                     intent.venue, intent.symbol, intent.signal_id, draw_id,
                     draw_used_usd, cap_base, single_trade_cap,
                 )
+    # R-pool slot (pts-classes group E) — 0.5 x track_R bounds how much of the
+    # R-pool's BENCH-freed capital (allocate_r_pool) this signal's track can
+    # draw on. track_R = track_gross_cap(intent.track) — the SAME pct-of-
+    # equity cap already used for the "track" slot above, just halved for
+    # this NEW min() term (pure min() composition, no new T4 multiplier —
+    # 9-stack ban intact).
+    r_pool_remaining = 0.5 * track_gross_cap(intent.track)
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
         single_trade_cap=single_trade_cap,
@@ -864,6 +884,7 @@ def compute_size(
         track_remaining=track_rem,
         venue_daily_remaining=venue_daily_rem,
         total_daily_remaining=total_daily_rem,
+        r_pool_remaining=r_pool_remaining,
     )
     if binding == "single_trade":
         # Structured binding log (P0-3 test requirement): name the SPECIFIC

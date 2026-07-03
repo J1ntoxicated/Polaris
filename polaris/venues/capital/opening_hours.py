@@ -40,6 +40,7 @@ __all__ = [
     "OpeningHoursWeek",
     "parse_opening_hours",
     "seconds_to_next_close",
+    "seconds_to_next_open",
 ]
 
 # 7-tuple Mon..Sun; each weekday = a tuple of (start_sec, end_sec) UTC windows
@@ -198,4 +199,52 @@ def seconds_to_next_close(
         )
         if next_close is not None:
             return (days_ahead * _SECONDS_PER_DAY - sod) + next_close
+    return None
+
+
+def seconds_to_next_open(
+    hours: OpeningHoursWeek,
+    now_ts: int | float,
+    *,
+    is_fx: bool,
+) -> int | None:
+    """Seconds from ``now_ts`` (UTC epoch) to THIS epic's next open window.
+
+    Delay-route counterpart to ``seconds_to_next_close`` (P0 Capital
+    timetable-aware emit wave): a venue reject during a closed window (weekend
+    / daily break / after-close) resolves to a finite countdown to the NEXT
+    open window instead of being retried blind or dropped — flow_not_block,
+    never a permanent block.
+
+    Return contract: None when ``now`` is ALREADY inside an open window
+    (nothing to route — submit now) or when FX (24/5, exempt by type — the
+    legacy Friday-weekly branch owns it) or when no open window exists
+    anywhere in the ``WEEKDAY_LOOKAHEAD_DAYS`` forward walk (malformed/empty
+    table — defer, never fabricate a countdown). Otherwise a non-negative int
+    counting down to the next window's start second.
+    """
+    if is_fx:
+        return None
+    try:
+        ts = int(now_ts)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    now = dt.datetime.fromtimestamp(ts, tz=dt.UTC)
+    wd = now.weekday()  # Mon=0 … Sun=6
+    sod = now.hour * 3600 + now.minute * 60 + now.second
+
+    if _inside_a_window(hours[wd], sod):
+        return None  # already open — nothing to route
+
+    # Today may still have a LATER window (e.g. GOLD's 20:59-22:00 break).
+    for start, _end in hours[wd]:
+        if start >= sod:
+            return start - sod
+
+    # No more windows today — walk forward to the next weekday with one.
+    for days_ahead in range(1, WEEKDAY_LOOKAHEAD_DAYS + 1):
+        day = hours[(wd + days_ahead) % 7]
+        if day:
+            next_start = day[0][0]
+            return (days_ahead * _SECONDS_PER_DAY - sod) + next_start
     return None

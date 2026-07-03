@@ -97,6 +97,11 @@ from polaris.scripts._smoke_real_roundtrip import (
 from polaris.strategies import STRATEGY_REGISTRY, RawSignal
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital import CapitalAdapter
+from polaris.venues.capital.reopen_route import (
+    clear_reopen_stamp,
+    maybe_stamp_delayed_reopen,
+    submit_suppressed_until_reopen,
+)
 from polaris.venues.okx import OKXAdapter
 
 if TYPE_CHECKING:
@@ -362,6 +367,24 @@ async def reserve_and_submit(
     if is_blocklisted(conn, venue, symbol):
         logger.info("[L7/blocklist] %s:%s non-tradeable — skipping", venue, symbol)
         return None
+    # CAPITAL TIMETABLE DELAY-ROUTE (P0 venue-reject wave): a prior tick's
+    # market-closed reject on this EXACT (venue, symbol, strategy_id, side)
+    # stamped the venue's own next-open instant (maybe_stamp_delayed_reopen,
+    # called from the reject path below) — skip resubmitting until that
+    # instant has passed instead of re-rejecting every tick (SG25 '16/16
+    # reject'). flow_not_block: a DEFERRAL, never a permanent block — the
+    # SAME signal flows again the instant the stamp expires. No reservation,
+    # no fault (an external timing decision, not a strategy fault).
+    if venue == "capital" and submit_suppressed_until_reopen(
+        conn, venue=venue, symbol=symbol, strategy_id=sig.strategy_id,
+        side=sig.side, now_ts=now_ts,
+    ):
+        logger.info(
+            "[capital/reopen-route] %s:%s sid=%s side=%s still inside the "
+            "closed window — deferring submit", venue, symbol,
+            sig.strategy_id, sig.side,
+        )
+        return None
     # OPEN-CONFIRM FIX: an Alpaca open accepted (``pending_new``) but not yet
     # confirmed within a PRIOR tick's poll budget carries its venue_order_id
     # here. DUPLICATE-SUBMIT GUARD: while that ref is live, no fresh order is
@@ -519,6 +542,20 @@ async def reserve_and_submit(
                     state, epic=symbol, reject_code=attempt.reject_code,
                     reject_msg=attempt.reject_msg,
                 )
+                # CAPITAL TIMETABLE DELAY-ROUTE: a market-closed/offline
+                # reject stamps this key's next-open instant (computed from
+                # the SAME cached constraint the sizing path already warmed —
+                # zero new network) so reserve_and_submit's pre-submit gate
+                # (top of this function) defers the next attempt instead of
+                # re-rejecting every tick. No-op for every other reject code.
+                if venue == "capital":
+                    maybe_stamp_delayed_reopen(
+                        conn, venue=venue, symbol=symbol,
+                        strategy_id=sig.strategy_id, side=sig.side,
+                        reject_code=attempt.reject_code,
+                        constraint=state.capital_constraints.peek(symbol),
+                        now_ts=now_ts,
+                    )
             # OPEN-CONFIRM FIX: still ACCEPTED-but-unfilled after this tick's poll
             # budget (fresh submit OR a carried-over pending ref that is still
             # live) → persist/refresh the pending ref so the NEXT tick confirms
@@ -576,6 +613,13 @@ async def reserve_and_submit(
         # does not skip on a stale row.
         if real_roundtrip and venue == "alpaca":
             clear_pending_open(
+                conn, venue=venue, symbol=symbol,
+                strategy_id=sig.strategy_id, side=sig.side,
+            )
+        # A fresh Capital fill landed on this key — clear any stale
+        # delay-route stamp (best-effort; a no-op if none existed).
+        if venue == "capital":
+            clear_reopen_stamp(
                 conn, venue=venue, symbol=symbol,
                 strategy_id=sig.strategy_id, side=sig.side,
             )

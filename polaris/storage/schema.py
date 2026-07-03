@@ -65,6 +65,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_AI_LESSONS_INDEX,
     DDL_BENCHMARK_RESULTS,
     DDL_BENCHMARK_RESULTS_INDEX,
+    DDL_CAPITAL_REOPEN_PENDING,
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
     DDL_FILLS,
@@ -168,6 +169,10 @@ ALL_DDL: tuple[str, ...] = (
     # Reject-anchor anti-churn (audit1 P0-4 ①) — persistent cooldown anchor that
     # survives a venue reject/clamp (no positions row) and a process restart.
     DDL_REENTRY_ANCHOR,
+    # Capital market-closed delay-route — stamps the venue's own next-open
+    # countdown so a closed-window reject (SG25 '16/16 reject') defers the
+    # next submit instead of re-rejecting every tick (flow_not_block).
+    DDL_CAPITAL_REOPEN_PENDING,
     # Layer 2 — Pipeline
     DDL_GATE_EVENTS,
     DDL_GATE_EVENTS_INDEX,

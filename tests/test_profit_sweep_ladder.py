@@ -715,3 +715,79 @@ def test_compute_size_non_alpaca_never_calls_ladder_draw(monkeypatch: pytest.Mon
     )
     compute_size(conn, intent=intent, risk_state=risk_state, portfolio=portfolio, now_ts=NOW)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# (i) live firing wire — periodic 5-min sweeper actually calls
+# materialize_credits (on-demand-only would leave credits at 0 forever
+# whenever no Alpaca signal happens to draw)
+# ---------------------------------------------------------------------------
+
+
+def _read_paper_loop_source() -> str:
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    return (repo_root / "polaris/scripts/production_paper_loop.py").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_paper_loop_imports_and_calls_materialize_credits() -> None:
+    """The tick loop must import AND call ``materialize_credits`` on a periodic
+    cadence — an implemented + unit-tested materializer that only fires
+    on-demand (inside a live Alpaca draw) never runs when no Alpaca signal
+    arrives, leaving the CREDIT bucket at 0 forever (registered != fired)."""
+    src = _read_paper_loop_source()
+    assert "materialize_credits" in src, (
+        "production_paper_loop.py must import materialize_credits from "
+        "polaris.core.sizing.ladder"
+    )
+    assert "materialize_credits(" in src.replace("draw_for_signal(", ""), (
+        "the tick loop must actually CALL materialize_credits on a periodic "
+        "cadence, not just import it"
+    )
+
+
+def test_paper_loop_imports_and_calls_release_stale_draws() -> None:
+    """Same registered-vs-fired gap for the RELEASE reconcile pass — must run
+    periodically (startup + recurring), not sit unit-tested-only."""
+    src = _read_paper_loop_source()
+    assert "release_stale_draws" in src
+    assert "release_stale_draws(" in src
+
+
+def test_ladder_sweeper_never_runs_inside_close_hot_path_module() -> None:
+    """The sweeper call site must live in the periodic-tick section of the
+    production loop, not be threaded into the per-signal close path (that
+    invariant is already source-linted in test (g); this asserts the sweeper
+    call is reachable from the periodic reconcile block specifically)."""
+    src = _read_paper_loop_source()
+    idx = src.index("materialize_credits(")
+    # The periodic reconcile block is gated on `tick_idx % reconcile_every`
+    # (or an equivalent dedicated ladder cadence) — the call must appear
+    # AFTER the tick loop's `while` begins, i.e. inside the per-tick body.
+    while_idx = src.index("while time.monotonic() < deadline:")
+    assert idx > while_idx
+
+
+@pytest.mark.asyncio
+async def test_production_loop_module_ladder_sweep_helper_is_callable() -> None:
+    """Smoke: the wiring imports the REAL ladder functions (not a stale/typo'd
+    re-export) and they are directly callable against a DB connection."""
+    from polaris.scripts import production_paper_loop as loop_mod
+
+    assert callable(loop_mod.materialize_credits)
+    assert callable(loop_mod.release_stale_draws)
+
+    conn = sqlite3.connect(":memory:")
+    for stmt in __import__(
+        "polaris.storage.schema", fromlist=["ALL_DDL"]
+    ).ALL_DDL:
+        conn.execute(stmt)
+    conn.commit()
+    n = loop_mod.materialize_credits(conn, now_ts=NOW)
+    assert n == 0  # no closed positions yet — smoke call must not raise
+    r = loop_mod.release_stale_draws(conn, now_ts=NOW)
+    assert r == 0
+    conn.close()

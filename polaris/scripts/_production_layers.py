@@ -57,6 +57,7 @@ from polaris.core.universe.schema import (
     Tier,
     UniverseInstrument,
     is_capital_fx_major,
+    is_capital_index_major,
     tier_cadence,
 )
 from polaris.core.universe.watchlist import (
@@ -83,7 +84,11 @@ from polaris.scripts._production_bars import (
     staleness_threshold_for,
 )
 from polaris.scripts._production_indicators import compute_real_regime_signal
-from polaris.scripts._session_map import session_group, session_transitions
+from polaris.scripts._session_map import (
+    instrument_session_weight,
+    session_group,
+    session_transitions,
+)
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.capital.session_calendar import capital_seconds_to_close
@@ -899,6 +904,51 @@ def fx_major_focus_targets(
     return out
 
 
+def capital_index_major_focus_targets(
+    conn: sqlite3.Connection, *, now_ts: int | float | None = None
+) -> list[tuple[str, str, str, str]]:
+    """Live Capital index majors currently INSIDE their own cash session, as
+    focus-shaped target tuples (P0 fix — index-major bar-ingest starvation).
+
+    Same rank-starvation shape as :func:`fx_major_focus_targets`: Capital's
+    continuous rank scores on ATR alone (no 24h notional), so the high-ATR
+    exotic FX crosses outrank the quiet major cash indices (US500/US100/DE40/
+    UK100) — the live DB showed ZERO ``watchlist_focus`` rows for all four
+    (crowded out by names like CADZAR/AUDHKD/CHFHKD) and US500 correspondingly
+    had ZERO 5m bars ever ingested. Session re-ranking is the wrong lever (it
+    would perturb the byte-identical global merit score for every other venue);
+    this instead force-seats the major DIRECTLY, exactly like a held position.
+
+    Unlike the FX majors (24/5, always seated), an index major is seated ONLY
+    while :func:`~polaris.scripts._session_map.instrument_session_weight` reads
+    ``1.0`` for it at ``now_ts`` — i.e. its own regional cash session
+    (``_session_map.session_group``) is live right now. Outside that window the
+    major is left to the normal rank (still watched if it ranks in; never force-
+    seated), so an Asia-hours name does not permanently squat a Capital focus
+    seat during the US/Europe session. ADD-only (flow_not_block): seats the
+    major alongside the exotics, removes nothing, touches no ranking weight.
+    """
+    ts = now_ts if now_ts is not None else time.time()
+    rows = conn.execute(
+        """
+        SELECT venue, symbol, asset_class, underlying_group_id
+        FROM universe
+        WHERE venue = 'capital' AND state = 'live' AND asset_class = 'indices'
+        """
+    ).fetchall()
+    out: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        venue, symbol = str(r[0]), str(r[1])
+        if not is_capital_index_major(venue, symbol) or (venue, symbol) in seen:
+            continue
+        if instrument_session_weight(venue, "indices", symbol, ts) != 1.0:
+            continue  # outside its own cash session — leave to the normal rank
+        seen.add((venue, symbol))
+        out.append((venue, symbol, str(r[2] or "indices"), str(r[3] or "")))
+    return out
+
+
 def _firing_tiers(cycle_index: int, k: int, m: int) -> list[str]:
     """Tiers whose cadence fires on ``cycle_index`` (S/A always; B@K; T@M)."""
     tiers: tuple[Tier, ...] = ("S", "A", "B", "T")
@@ -1016,6 +1066,20 @@ def get_focus_targets(
     # judge (decouple preserved). ADD-only, never truncated by max_n.
     if not eligible_only:
         for target in fx_major_focus_targets(conn):
+            if (target[0], target[1]) in seen:
+                continue
+            seen.add((target[0], target[1]))
+            focus.append(target)
+    # Index-major session seat (P0 fix, 2026-07-03): force-seat live curated
+    # Capital index majors (US500/US100/DE40/UK100) into the WATCH set WHILE
+    # their own cash session is live — they rank Tier-T behind high-ATR exotic
+    # FX crosses and would otherwise starve (live DB: ZERO watchlist_focus rows,
+    # US500 ZERO 5m bars ever). Session-scoped (not 24/5 like FX majors): outside
+    # its own window a major is left to the normal rank, so it never permanently
+    # squats a Capital focus seat. WATCH-only + ADD-only, same shape as the FX
+    # seat directly above.
+    if not eligible_only:
+        for target in capital_index_major_focus_targets(conn, now_ts=ts):
             if (target[0], target[1]) in seen:
                 continue
             seen.add((target[0], target[1]))

@@ -560,3 +560,81 @@ def test_get_focus_targets_force_seats_fx_majors() -> None:
     assert "BTC-USDT" in symbols
     assert "USDJPY" in symbols, "FX major must be force-seated even outside max_n"
     conn.close()
+
+
+# Wednesday 2026-07-01 15:00 UTC -- inside the US cash session (13:30-20:00 UTC).
+_IN_US_SESSION_TS = 1782918000
+# Wednesday 2026-07-01 03:00 UTC -- outside every regional cash session window.
+_OUT_OF_SESSION_TS = 1782874800
+
+
+def test_capital_index_major_focus_targets_seats_in_session_major() -> None:
+    """P0 fix: US500 had ZERO ``watchlist_focus`` rows and ZERO 5m bars ever in
+    the live DB (crowded out by high-ATR exotic FX crosses on the ATR-only
+    Capital rank). Inside its own cash session it must be force-seated."""
+    conn = _universe_conn()
+    _ins_universe(conn, "capital", "US500", "indices", "live")
+    _ins_universe(conn, "capital", "AU200AU", "indices", "live")  # Asia session -> not seated now
+    from polaris.scripts._production_layers import capital_index_major_focus_targets
+
+    targets = capital_index_major_focus_targets(conn, now_ts=_IN_US_SESSION_TS)
+    symbols = {s for _v, s, _ac, _g in targets}
+    assert "US500" in symbols, "US500 must be seated during its own US cash session"
+    assert "AU200AU" not in symbols, "not a curated index major -> not seated"
+    us500 = next(t for t in targets if t[1] == "US500")
+    assert us500[0] == "capital"
+    assert us500[2] == "indices"
+    conn.close()
+
+
+def test_capital_index_major_focus_targets_skips_outside_own_session() -> None:
+    """Session-scoped, NOT 24/5 like the FX majors: outside its own cash window
+    the major is left to the normal rank (never permanently squats a seat)."""
+    conn = _universe_conn()
+    _ins_universe(conn, "capital", "US500", "indices", "live")
+    from polaris.scripts._production_layers import capital_index_major_focus_targets
+
+    targets = capital_index_major_focus_targets(conn, now_ts=_OUT_OF_SESSION_TS)
+    assert targets == [], "US500 outside its own cash session must not be force-seated"
+    conn.close()
+
+
+def test_capital_index_major_focus_targets_skips_non_live() -> None:
+    """A suspended/expired index major is NOT seated (only live epics get bars)."""
+    conn = _universe_conn()
+    _ins_universe(conn, "capital", "US500", "indices", "suspended")
+    from polaris.scripts._production_layers import capital_index_major_focus_targets
+
+    targets = capital_index_major_focus_targets(conn, now_ts=_IN_US_SESSION_TS)
+    assert targets == []
+    conn.close()
+
+
+def test_get_focus_targets_force_seats_index_majors_in_session() -> None:
+    """``get_focus_targets`` unions in-session index majors the same additive
+    way it unions FX majors and held positions (flow_not_block, never truncated
+    by ``max_n``)."""
+    from polaris.storage.schema_ddl_core import (
+        DDL_POSITIONS,
+        DDL_UNIVERSE,
+        DDL_WATCHLIST_FOCUS,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(DDL_UNIVERSE)
+    conn.executescript(DDL_WATCHLIST_FOCUS)
+    conn.executescript(DDL_POSITIONS)
+    _ins_universe(conn, "capital", "US500", "indices", "live")
+    # A focus cycle whose single top pick is NOT US500 (an exotic FX cross).
+    conn.execute(
+        "INSERT INTO watchlist_focus (cycle_ts, venue, symbol, focus_score, "
+        "focus_rank, target_bucket, tier) VALUES (?,?,?,?,?,?,?)",
+        (_IN_US_SESSION_TS, "capital", "CADZAR", 0.9, 1, "satellite", "A"),
+    )
+    from polaris.scripts._production_layers import get_focus_targets
+
+    focus = get_focus_targets(conn, cycle_ts=_IN_US_SESSION_TS, max_n=1)
+    symbols = {s for _v, s, _ac, _g in focus}
+    assert "CADZAR" in symbols
+    assert "US500" in symbols, "index major must be force-seated during its own session"
+    conn.close()

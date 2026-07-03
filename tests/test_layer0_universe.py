@@ -834,6 +834,18 @@ def test_is_capital_fx_major_normalizes_format() -> None:
     assert not is_capital_fx_major("okx", "EURUSD")  # OKX is crypto-only; not floored
 
 
+def test_is_capital_index_major_matches_curated_set() -> None:
+    from polaris.core.universe.schema import is_capital_index_major
+
+    assert is_capital_index_major("capital", "US500")
+    assert is_capital_index_major("capital", "us100")
+    assert is_capital_index_major("CAPITAL", "DE40")
+    assert is_capital_index_major("capital", "UK100")
+    # Not a curated major / not Capital → False.
+    assert not is_capital_index_major("capital", "J225")
+    assert not is_capital_index_major("okx", "US500")
+
+
 def test_rank_keeps_capital_fx_majors_when_exotics_outrank_on_atr() -> None:
     """Exotic crosses outrank majors on ATR, but the curated majors are STILL seated."""
     from polaris.core.universe.schema import CAPITAL_FX_MAJORS

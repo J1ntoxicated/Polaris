@@ -19,6 +19,7 @@ PLISTS = {
     "restart": LAUNCHD / "com.polaris.daily.restart.plist",
     "digest": LAUNCHD / "com.polaris.daily.digest.plist",
     "replay": LAUNCHD / "com.polaris.replay.nightly.plist",
+    "reranker": LAUNCHD / "com.polaris.probe.reranker.plist",
 }
 SCRIPTS = [
     PROJECT_ROOT / "scripts" / "install_ops_automation.sh",
@@ -95,6 +96,21 @@ def test_replay_registered_in_installer_and_uninstaller() -> None:
     for name in ("install_ops_automation.sh", "uninstall_ops_automation.sh"):
         text = (PROJECT_ROOT / "scripts" / name).read_text(encoding="utf-8")
         assert "com.polaris.replay.nightly" in text, name
+
+
+def test_reranker_schedule_0735_local_no_collision() -> None:
+    data = _load("reranker")
+    sched = data["StartCalendarInterval"]
+    assert sched == {"Hour": 7, "Minute": 35}
+    # must not collide with daily-restart (07:30) or digest (10:10)
+    assert sched != _load("restart")["StartCalendarInterval"]
+    assert sched != _load("digest")["StartCalendarInterval"]
+
+
+def test_reranker_registered_in_installer_and_uninstaller() -> None:
+    for name in ("install_ops_automation.sh", "uninstall_ops_automation.sh"):
+        text = (PROJECT_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "com.polaris.probe.reranker" in text, name
 
 
 def test_installer_never_touches_dashboard() -> None:

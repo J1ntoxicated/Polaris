@@ -124,6 +124,10 @@ from polaris.storage.schema_ddl_ext import (
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
 )
+from polaris.storage.schema_ddl_reranker import (
+    DDL_PROBE_SLOT_ASSIGNMENT,
+    DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
+)
 
 # ---------------------------------------------------------------------------
 # Paths / constants
@@ -270,6 +274,10 @@ ALL_DDL: tuple[str, ...] = (
     DDL_SCORE_F_EVENTS,
     DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
     DDL_SCORE_F_CHECKPOINT,
+    # Probe reranker (pts-classes 2026-07-03, group F) — append-only per-run
+    # snapshot of which PROVE candidates hold a track's concurrent probe slot.
+    DDL_PROBE_SLOT_ASSIGNMENT,
+    DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
 )
 
 

@@ -488,7 +488,7 @@ async def test_l7_supervise_strategies_wired() -> None:
     OUT (already absent + now flag-enforced). A KILL = no-emit, not removal: all
     stay registered (open-position close path preserved)."""
     strategies = _all_strategies()
-    assert len(strategies) == 17
+    assert len(strategies) == 20
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
     assert "spot_donchian" not in ids  # KILLed 2026-06-27 (#56 stop-bleeders)
@@ -506,6 +506,10 @@ async def test_l7_supervise_strategies_wired() -> None:
     # weekend-maker dispatch — the two VALIDATED weekend OKX makers.
     assert "weekend_thin_book_flush_maker" in ids
     assert "weekend_funding_capitulation_maker" in ids
+    # Opus-spec 3-clone build — per-symbol gold_breakout_1h clones.
+    assert "silver_breakout_1h" in ids
+    assert "us100_breakout_1h" in ids
+    assert "uk100_breakout_1h" in ids
     # fee-fatal / unvalidated KILL set — dispatch_eligible=False, all OUT.
     assert "rsi_bb_pullback" not in ids  # fee-fatal 15m crypto reversion
     assert "supertrend" not in ids
@@ -591,7 +595,8 @@ def test_g2_emit_no_cap() -> None:
     # ema_crossover (fee-fatal 1H crypto trend-template, gross +$0.12 < fee $2.37) to
     # dispatch_eligible=False → 17 dispatched survivors. KILL = no-emit, not removal:
     # both stay registered (open-position close path kept).
-    assert len(strategies) == 17
+    # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h → 20.
+    assert len(strategies) == 20
 
 
 @pytest.mark.asyncio

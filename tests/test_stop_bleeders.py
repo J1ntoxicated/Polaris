@@ -57,7 +57,8 @@ def test_registry_drops_to_20() -> None:
     # Was 21 (strategy-wave2); spot_donchian KILL → 20; +1 weekend_thin_book_
     # flush_maker (#77, the single verified crypto maker BUILD) → 21; +1
     # weekend_funding_capitulation_maker (#80, 2nd weekend edge, positioning) → 22.
-    assert len(STRATEGY_REGISTRY) == 22
+    # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h → 25.
+    assert len(STRATEGY_REGISTRY) == 25
 
 
 def test_dispatch_is_subset_of_registry_no_zombie() -> None:

@@ -559,6 +559,36 @@ def test_fallback_cooldown_per_symbol() -> None:
     assert should_fetch_exchange_fallback("capital", "B", now) is True
 
 
+def test_fallback_cooldown_is_per_timeframe_not_shared_across_intervals() -> None:
+    """Regression (P0 multi-tf starvation): the cooldown key must include
+    ``bar_interval``. Before the fix, a 1m fallback fetch for a symbol
+    seized the ONLY (venue, symbol) cooldown slot, so the SAME symbol's 15m
+    (and 1H) fallback fetch was starved for the full 300s window — 15m saw
+    100% starvation, 1H partial (whichever bucket lost the race that tick).
+    """
+    now = 3_000_000.0
+    # 1m bucket consumes the cooldown slot for this symbol.
+    assert should_fetch_exchange_fallback(
+        "capital", "EXOTIC", now, bar_interval="1m",
+    ) is True
+    # A DIFFERENT timeframe for the SAME (venue, symbol) must be independent —
+    # it must NOT be starved by the 1m bucket's cooldown.
+    assert should_fetch_exchange_fallback(
+        "capital", "EXOTIC", now + 1.0, bar_interval="15m",
+    ) is True
+    assert should_fetch_exchange_fallback(
+        "capital", "EXOTIC", now + 1.0, bar_interval="1H",
+    ) is True
+    # Re-calling the SAME (venue, symbol, bar_interval) inside the window is
+    # still correctly cooled down (per-interval cooldown preserved).
+    assert should_fetch_exchange_fallback(
+        "capital", "EXOTIC", now + 2.0, bar_interval="1m",
+    ) is False
+    assert should_fetch_exchange_fallback(
+        "capital", "EXOTIC", now + 2.0, bar_interval="15m",
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # 7. live-price WS path is UNTOUCHED — guard against source-file imports
 # ---------------------------------------------------------------------------

@@ -468,21 +468,37 @@ async def fetch_yahoo_bars(
 # the exchange REST path is the only bar source. Without spacing, those symbols
 # would re-hit the exchange every cadence-due tick and could recreate the very
 # REST storm this work kills. ``should_fetch_exchange_fallback`` spaces those
-# redundant bar-HISTORY re-fetches per (venue, symbol). The live entry/exit price
-# still flows via the WS quote path — UNTOUCHED — so no entry / size / exit is
-# ever gated (flow_not_block). A never-fetched symbol always fetches immediately.
+# redundant bar-HISTORY re-fetches per (venue, symbol, bar_interval). The live
+# entry/exit price still flows via the WS quote path — UNTOUCHED — so no entry /
+# size / exit is ever gated (flow_not_block). A never-fetched symbol always
+# fetches immediately.
+#
+# P0 fix (multi-tf starvation, 2026-07-03): the key MUST include
+# ``bar_interval`` — it mirrors ``fetch_yahoo_bars``'s own timeframe-aware
+# ``_YF_FRAME_CACHE`` key (``(venue, symbol, bar_interval)``, see above).
+# ``fetch_bars_one`` is called once per (timeframe, venue) focus bucket per
+# tick, so the SAME (venue, symbol) can hit the fallback for 1m, 15m, and 1H
+# within the same tick. A ``(venue, symbol)``-only key let whichever timeframe
+# fired FIRST seize the single 300s slot for that symbol, starving every other
+# timeframe of that symbol's fallback fetch (measured: 15m 100% starved, 1H
+# 8/25 partially starved) — a bug, not a throttle, since the intent was only to
+# rate-limit re-fetches of the SAME (symbol, timeframe) pair.
 FALLBACK_COOLDOWN_SEC = 300.0
-_FALLBACK_LAST_MONO: dict[tuple[str, str], float] = {}
+_FALLBACK_LAST_MONO: dict[tuple[str, str, str], float] = {}
 
 
-def should_fetch_exchange_fallback(venue: str, symbol: str, now_mono: float) -> bool:
-    """True if the exchange bar fallback may re-fetch this symbol now.
+def should_fetch_exchange_fallback(
+    venue: str, symbol: str, now_mono: float, *, bar_interval: str = "1m",
+) -> bool:
+    """True if the exchange bar fallback may re-fetch this (symbol, timeframe) now.
 
     True (and records the time) when never-fetched or the cooldown has elapsed;
     False inside the cooldown window. FETCH-EFFICIENCY only — spaces out redundant
     bar-HISTORY re-fetches for the unmapped tail; never gates a trading decision.
+    Keyed per ``(venue, symbol, bar_interval)`` so one timeframe's fallback fetch
+    never starves another timeframe's fallback fetch for the same symbol.
     """
-    key = (venue, symbol)
+    key = (venue, symbol, bar_interval)
     last = _FALLBACK_LAST_MONO.get(key)
     if last is None or (now_mono - last) >= FALLBACK_COOLDOWN_SEC:
         _FALLBACK_LAST_MONO[key] = now_mono

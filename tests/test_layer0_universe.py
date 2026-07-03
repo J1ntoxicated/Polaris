@@ -231,14 +231,17 @@ def test_rank_ties_and_zero_division_safe() -> None:
 
 
 def test_rank_top_n_cap_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 150 names so the DEFAULT (120) actually caps below the population.
-    insts = [_make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6) for i in range(150)]
+    # Population above the DEFAULT (1500) so the default cap actually binds.
+    insts = [
+        _make_inst(f"E{i}-USDT", vol=1e7 + i * 1e6)
+        for i in range(UNIVERSE_RANK_TOP_N_DEFAULT + 100)
+    ]
     monkeypatch.delenv(UNIVERSE_WATCH_MAX_ENV, raising=False)
-    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT (120, decoupled from focus 48).
+    # Default (no env) → UNIVERSE_RANK_TOP_N_DEFAULT (1500, decoupled from focus 48).
     monkeypatch.delenv(UNIVERSE_RANK_TOP_N_ENV, raising=False)
     assert len(rank_active_universe(insts)) == UNIVERSE_RANK_TOP_N_DEFAULT
     # Env override is honored and capped at the WATCH_MAX ceiling (NOT focus 48).
-    monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "9999")
+    monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "99999")
     assert len(rank_active_universe(insts)) == min(len(insts), UNIVERSE_WATCH_MAX_DEFAULT)
     monkeypatch.setenv(UNIVERSE_RANK_TOP_N_ENV, "5")
     assert len(rank_active_universe(insts)) == 5

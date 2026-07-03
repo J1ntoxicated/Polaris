@@ -229,8 +229,9 @@ def test_full_snapshot_sweep_enriches_all_rows(monkeypatch) -> None:  # type: ig
     assert all(i.vol_24h_usd >= 1.0e8 for i in out)
 
 
-def test_full_sweep_off_by_default_bounds_candidates() -> None:
-    """Without the env flag, only screener ∩ seed names are snapshot-probed."""
+def test_full_sweep_opt_out_bounds_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit opt-out (=0) bounds probing to screener ∩ seed (default is ON)."""
+    monkeypatch.setenv("POLARIS_ALPACA_SNAPSHOT_FULL", "0")
     rows = [(f"SYM{i:03d}", "NASDAQ") for i in range(250)]
     symbols = [s for s, _ in rows]
     probed: list[str] = []

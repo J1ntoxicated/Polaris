@@ -906,11 +906,15 @@ def compute_size(
     if r_pool_addon_pct > 0.0:
         r_pool_cap_base = single_trade_cap
         single_trade_cap = r_pool_cap_base + r_pool_addon_pct
+        # pts-classes group G — name the NEW ``0.5 x track_R`` ceiling term
+        # explicitly (not just the resulting cap_effective) so the
+        # binding-cap audit trail shows WHICH new term widened this signal's
+        # headroom, falsifiable by a human/alert reading the log.
         logger.info(
             "[T4/r-pool-addon] %s/%s sid=%s track=%s addon_pct=%.6f "
-            "cap_base=%.4f cap_effective=%.4f",
+            "track_r_ceiling=%.4f cap_base=%.4f cap_effective=%.4f",
             intent.venue, intent.symbol, intent.signal_id, intent.track,
-            r_pool_addon_pct, r_pool_cap_base, single_trade_cap,
+            r_pool_addon_pct, r_pool_addon_ceiling, r_pool_cap_base, single_trade_cap,
         )
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
@@ -1063,11 +1067,16 @@ def compute_size(
                 ticker=intent.symbol, regime=intent.regime,
                 order_style="market", atr_pct=intent.atr_pct,
             )
+        # pts-classes group G — name the fixed PROVE probe constant
+        # (probe_notional_usd_source) driving this size, not just the final
+        # (possibly cap-clipped) notional — makes the T4-chain-external
+        # constant itself falsifiable in the audit trail.
         logger.info(
             "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s shadow=%s "
-            "stop_dist_pct=%.6f binding=%s notional=%.2f",
+            "stop_dist_pct=%.6f binding=%s probe_notional_usd=%.2f notional=%.2f",
             intent.venue, intent.symbol, intent.signal_id, admitted,
-            shadow_triggered, stop_dist_pct, binding, notional,
+            shadow_triggered, stop_dist_pct, binding,
+            probe_notional_usd(intent.venue), notional,
         )
     else:
         # BENCH (and any unrecognized/KILL class) — always shadow. Fail-safe

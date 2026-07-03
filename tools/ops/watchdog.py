@@ -60,6 +60,19 @@ def health_checks(cfg: OpsConfig, *, now: float | None = None) -> list[str]:
                             " violated) — restart recovers WS")
     if counts["ws_error"] >= 5:
         alert("ws_flapping", f"{counts['ws_error']} WS connection errors this cycle")
+    # pts-classes group G — telemetry only, no burst threshold: each
+    # occurrence is its own falsifiable capital-routing signal (not a flap
+    # pattern like ws_error/stall), so >=1 alerts (mirrors ws_gave_up).
+    if counts["exec_starved"] >= 1:
+        alert("exec_starved", f"{counts['exec_starved']} EXEC_STARVED transition"
+                              " no-ops this cycle — a (venue,strategy) track has"
+                              " too little fill evidence to judge (observation"
+                              " only, never blocks the strategy)")
+    if counts["probe_fee_exhausted"] >= 1:
+        alert("probe_fee_exhausted",
+              f"{counts['probe_fee_exhausted']} PROVE candidate(s) lost a probe"
+              " slot to the 24h fee budget this cycle (capital-routing outcome,"
+              " never a block — unslotted candidates keep signaling/learning)")
 
     try:
         wal = os.stat(cfg.wal_path).st_size

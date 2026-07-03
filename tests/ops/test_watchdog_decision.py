@@ -170,3 +170,55 @@ def test_health_wal_oversize(
     monkeypatch.setattr(watchdog, "WAL_ALERT_BYTES", 1024)
     watchdog.run_once(cfg, now=time.time())
     assert any(k == "wal_oversize" for k, _, _ in alerts)
+
+
+# --- pts-classes group G: EXEC_STARVED + probe-fee-exhaustion telemetry -----
+
+
+def test_health_exec_starved_fires_on_single_occurrence(
+    cfg: OpsConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    alerts: list[tuple[str, str, float]],
+) -> None:
+    """A single EXEC_STARVED close-hook line already means one (venue,
+    strategy) track's transition is frozen for lack of fill evidence — no
+    burst threshold (unlike stall/db_lock) since each occurrence is its own
+    falsifiable capital-routing-stuck signal."""
+    _healthy_setup(cfg, monkeypatch)
+    cfg.bot_log.write_text(
+        "[pts-classes] okx/gold_breakout_1h transition unchanged (EXEC_STARVED)\n",
+        encoding="utf-8",
+    )
+    watchdog.run_once(cfg, now=time.time())
+    keys = {k for k, _, _ in alerts}
+    assert "exec_starved" in keys
+
+
+def test_health_probe_fee_exhausted_fires_on_single_occurrence(
+    cfg: OpsConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    alerts: list[tuple[str, str, float]],
+) -> None:
+    _healthy_setup(cfg, monkeypatch)
+    cfg.bot_log.write_text(
+        "[probe-reranker] okx/gold_breakout_1h rank=2 FEE_CAP_EXHAUSTED\n",
+        encoding="utf-8",
+    )
+    watchdog.run_once(cfg, now=time.time())
+    keys = {k for k, _, _ in alerts}
+    assert "probe_fee_exhausted" in keys
+
+
+def test_health_no_new_markers_silence_preserved(
+    cfg: OpsConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    alerts: list[tuple[str, str, float]],
+) -> None:
+    """Clean log (no EXEC_STARVED / probe-fee-exhausted lines) never fires
+    either new key — additive telemetry, zero false positives on silence."""
+    _healthy_setup(cfg, monkeypatch)
+    cfg.bot_log.write_text("[boot] ok\n", encoding="utf-8")
+    watchdog.run_once(cfg, now=time.time())
+    keys = {k for k, _, _ in alerts}
+    assert "exec_starved" not in keys
+    assert "probe_fee_exhausted" not in keys

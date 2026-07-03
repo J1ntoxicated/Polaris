@@ -26,6 +26,7 @@ one bad row).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 
@@ -37,6 +38,8 @@ from polaris.core.classes.probe_reranker import (
 from polaris.core.classes.score_f import f_track_cap
 from polaris.core.sizing.probe_notional import probe_notional_usd, round_trip_fee_rate
 from polaris.core.streams.config import Track, resolve_stream
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["run_rerank"]
 
@@ -161,6 +164,20 @@ def run_rerank(conn: sqlite3.Connection, *, now_ts: int) -> int:
             )
             if cur.rowcount > 0:
                 inserted += 1
+            # pts-classes group G — structured log for the shared 24h
+            # probe-fee-BUDGET exhaustion (a real capital-constraint outcome
+            # the ops watchdog keys on, see tools/ops/log_scan.py). This is
+            # observation only — the row above already persisted the
+            # routing decision unconditionally; CONCURRENCY_CAP_EXHAUSTED is
+            # a routine every-cycle outcome and intentionally not logged
+            # here (would be noise, not a signal).
+            if a.reason == "FEE_CAP_EXHAUSTED":
+                logger.info(
+                    "[probe-reranker] %s/%s rank=%d FEE_CAP_EXHAUSTED "
+                    "run_ts=%d track=%s",
+                    venue_by_strategy[a.strategy_id], a.strategy_id, a.rank,
+                    now_ts, track,
+                )
     conn.commit()
     return inserted
 

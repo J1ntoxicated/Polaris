@@ -44,3 +44,15 @@ related: ["[[ADR-005-sizing-formula-cell-routing|ADR-005]]", "[[layer-3-sizing-r
 6. probe slot 랭커: 07:30 일일 rerank, pessimistic-shadow score_F desc(사다리 충족자만), tie-break fill_rate→expected fee→대기 age.
 7. 부트스트랩: 기존 5주 라이브 히스토리를 동일 score_F 규칙으로 replay해 초기 계급 산정(현 earner=EARN 즉시 — all-PROVE 리셋 금지).
 8. 텔레메트리: EXEC_STARVED·binding cap 항·probe fee 소진 로그 — 모든 파라미터 데이터 반증 가능하게.
+
+## 부트스트랩 경계 (2026-07-04 추가)
+> codex 2라운드(R1 ①④ MODIFY → R2 전항 CONFIRM), FINAL CONSENSUS. 갭 = 부트스트랩 BENCH 시딩 최소 증거 미정의(라이브 강등은 증거 요구, 부트스트랩은 n=2로 강등 — gold_breakout_1h net +$21.87→BENCH).
+
+| 쟁점 | 합의 | 값 |
+|---|---|---|
+| ① BENCH 최소 증거 | 강도-매칭 2-밴드 floor(라이브 증거 단위 재사용, 루트 역추적 대신 score 강도 매칭). 미달=PROVE(스키마 기본값) 유지. n≥W 자동충족은 score_F≤-1 구간 한정 | 밴드A score_F≤-4: n≥tripwire 8/8/5 · 밴드B -4<score_F≤-1: n≥0.4W=12/8/5 |
+| ② EARN 시딩 | 비대칭 유지(현 earner=EARN 즉시 불변). 오류 EARN=라이브 강등 무제한+tripwire ≤8 closes 회수, 오류 BENCH=승자 자본 회수+사다리 복귀 지연 | weekend_thin_book n=2 +2.41→EARN 유지 |
+| ③ fx_breakout | 산식 의도대로 BENCH 유지 — fee 대비 효율 나쁜 승자=자본 재배치 대상, net+는 풀 T4 배정 근거 아님 | n=14≥밴드B 8 충족, score -3.14 |
+| ④ zero-fee 분모 | 당장은 2-밴드 floor로 완화 + zero-fee venue 분모 재정의(modeled cost) 별도 사이클 **필수 큐잉**(floor 초과 n에서 폭발 재발 가능) | pocket_pivot -1192 n=4→PROVE, 산식 수정 이번 범위 외 |
+
+케이스 판정: gold_breakout_1h n=2→PROVE · pocket_pivot n=4→PROVE · index_dual n=4→PROVE · equity_tsmom n=6(1D+, -6.0)→BENCH · fx_breakout n=14→BENCH · weekend_thin_book n=2→EARN.

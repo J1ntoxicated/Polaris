@@ -664,7 +664,13 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # limit (transition.py's own last_transition_ts is bumped on EVERY
     # transition including demotions, so it cannot double as this). ADDITIVE,
     # NULL default = "never promoted" (transition.py treats None as never
-    # rate-limited, matching a fresh/bootstrapped row).
+    # rate-limited, matching a fresh/bootstrapped row). The column now also
+    # lives directly in DDL_STRATEGY_CLASS (schema_ddl_classes.py) so a DB
+    # built from ALL_DDL alone (no _apply_post_migrations pass — e.g. the
+    # run_p0a_spike.py in-memory sandbox) has it from the start; this ALTER
+    # guard stays only to backfill a pre-existing (legacy) DB file that
+    # predates the column (2026-07-03T14:23 OperationalError: no such column
+    # 'last_promotion_ts' — schema-drift precedent, pending_opens incident).
     sc_cols = {
         row[1]
         for row in conn.execute("PRAGMA table_info(strategy_class)").fetchall()

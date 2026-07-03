@@ -124,9 +124,41 @@ def test_all_required_columns_present(conn):
         "venue", "strategy_id", "strategy_class", "window_w", "f_track_cap",
         "dwell", "epoch_id", "last_transition_ts", "kill_state", "ladder_step",
         "open_lifecycle_id", "qty", "cum_fees", "cum_pnl", "intent_ring",
-        "shadow_ring", "probe_fee_24h",
+        "shadow_ring", "probe_fee_24h", "last_promotion_ts",
     }
     assert required.issubset(cols)
+
+
+def test_all_ddl_alone_has_last_promotion_ts_column(tmp_path):
+    """Regression (2026-07-03T14:23 live OperationalError x4): a DB built
+    from ``ALL_DDL`` alone — no ``_apply_post_migrations`` pass, e.g.
+    ``run_p0a_spike.py``'s ``_sandbox_factory`` in-memory sandbox — must
+    already carry ``last_promotion_ts`` from ``DDL_STRATEGY_CLASS`` itself,
+    not rely on the legacy-DB ALTER guard in ``_apply_post_migrations``."""
+    from polaris.storage.schema import ALL_DDL
+
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(strategy_class)")}
+    assert "last_promotion_ts" in cols
+
+    # The close-hook's own promotion-ts UPDATE (mirrors
+    # _production_close_classes._persist_transition) must run without
+    # OperationalError against this ALL_DDL-only connection.
+    conn.execute(
+        "INSERT INTO strategy_class (venue, strategy_id) VALUES ('okx', 'a')"
+    )
+    conn.execute(
+        "UPDATE strategy_class SET "
+        "last_promotion_ts = CASE WHEN ? THEN ? ELSE last_promotion_ts END "
+        "WHERE venue = ? AND strategy_id = ?",
+        (True, 1_700_000_000, "okx", "a"),
+    )
+    row = conn.execute(
+        "SELECT last_promotion_ts FROM strategy_class WHERE venue='okx' AND strategy_id='a'"
+    ).fetchone()
+    assert row[0] == 1_700_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +355,165 @@ def test_bootstrap_replay_multiple_candidates_independent(conn):
     assert len(out) == 2
     assert out[("okx", "a")].epoch_id == 1
     assert out[("capital", "b")].epoch_id == 1
+
+
+# ---------------------------------------------------------------------------
+# bootstrap_replay_strategy_class — BENCH minimum-evidence floor
+# STRENGTH-MATCHED 2-BAND (codex FINAL CONSENSUS 2026-07-04,
+# vault/50_research/debates/prove_then_scale_classes_2026-07-03.md
+# "부트스트랩 경계" section): Band A (score_F<=-4, tripwire-strength) needs
+# n>=tripwire window (8/8/5 intraday/swing/1d_plus); Band B
+# (-4<score_F<=-1, Schmitt-strength) needs n>=ceil(0.4*W) (12/8/5). Below
+# either band's floor -> PROVE (schema default), never BENCH. EARN seeding
+# (score>0 -> EARN immediately) is never floored.
+# ---------------------------------------------------------------------------
+
+
+def _fake_n_closed_factory(counts: dict[tuple[str, str], int]):
+    def _n_closed(
+        conn: sqlite3.Connection, venue: str, strategy_id: str, lookback_days: int,
+    ) -> int:
+        return counts.get((venue, strategy_id), 0)
+    return _n_closed
+
+
+def _fake_timeframe_bucket_factory(buckets: dict[str, str]):
+    def _bucket(strategy_id: str) -> str:
+        return buckets.get(strategy_id, "intraday")
+    return _bucket
+
+
+def test_bootstrap_bench_floor_band_b_intraday_below_floor_seeds_prove(conn):
+    """gold_breakout_1h reproduction (2026-07-04): n=2 closed lifecycles,
+    net +$21.87, score_F -1.10 -> Band B (-4 < -1.10 <= -1), intraday floor
+    ceil(0.4*30)=12 -> n=2 < 12 -> PROVE, not BENCH. Wrongly BENCHing a
+    net-positive strategy off 2 data points is exactly the winner-capital-
+    recall/ladder-delay bug this floor exists to prevent."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("capital", "gold_breakout_1h")],
+        score_f=_fake_score_f_factory({("capital", "gold_breakout_1h"): -1.10}),
+        n_closed_fn=_fake_n_closed_factory({("capital", "gold_breakout_1h"): 2}),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"gold_breakout_1h": "intraday"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("capital", "gold_breakout_1h")]
+    assert row.strategy_class == "PROVE"
+
+
+def test_bootstrap_bench_floor_band_a_deeply_negative_below_floor_seeds_prove(conn):
+    """pocket_pivot reproduction: n=4, score_F -1192 -> Band A (<=-4), 1d_plus
+    floor=5 -> n=4 < 5 -> PROVE. However deeply negative the score, an
+    under-evidenced candidate still seeds PROVE, never BENCH — the floor is
+    about evidence volume, not score magnitude (zero-fee-denominator variance
+    blowup is a separate follow-up, not fixed by this floor)."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("capital", "equity_vol_expansion_pocket_pivot")],
+        score_f=_fake_score_f_factory(
+            {("capital", "equity_vol_expansion_pocket_pivot"): -1192.0}
+        ),
+        n_closed_fn=_fake_n_closed_factory(
+            {("capital", "equity_vol_expansion_pocket_pivot"): 4}
+        ),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"equity_vol_expansion_pocket_pivot": "1d_plus"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("capital", "equity_vol_expansion_pocket_pivot")]
+    assert row.strategy_class == "PROVE"
+
+
+def test_bootstrap_bench_floor_band_b_below_floor_seeds_prove_index_dual(conn):
+    """index_dual reproduction: n=4, score_F -2.25 -> Band B, floor=12
+    (intraday) -> n=4 < 12 -> PROVE."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("capital", "index_dual")],
+        score_f=_fake_score_f_factory({("capital", "index_dual"): -2.25}),
+        n_closed_fn=_fake_n_closed_factory({("capital", "index_dual"): 4}),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"index_dual": "intraday"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("capital", "index_dual")]
+    assert row.strategy_class == "PROVE"
+
+
+def test_bootstrap_bench_floor_band_a_1d_plus_floor_met_benches(conn):
+    """equity_tsmom reproduction: n=6, score_F -6.0 (1D+) -> Band A, floor=5
+    -> n=6 >= 5 -> BENCH stands (ample evidence for this score's own
+    strength band)."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("capital", "equity_tsmom")],
+        score_f=_fake_score_f_factory({("capital", "equity_tsmom"): -6.0}),
+        n_closed_fn=_fake_n_closed_factory({("capital", "equity_tsmom"): 6}),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"equity_tsmom": "1d_plus"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("capital", "equity_tsmom")]
+    assert row.strategy_class == "BENCH"
+
+
+def test_bootstrap_bench_floor_band_a_intraday_ample_evidence_benches(conn):
+    """session_breakout reproduction: n=87 (>> intraday Band A floor of 8),
+    score_F -4.76 -> Band A, ample evidence -> BENCH stands (the floor only
+    rescues UNDER-evidenced candidates)."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("capital", "session_breakout")],
+        score_f=_fake_score_f_factory({("capital", "session_breakout"): -4.76}),
+        n_closed_fn=_fake_n_closed_factory({("capital", "session_breakout"): 87}),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"session_breakout": "intraday"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("capital", "session_breakout")]
+    assert row.strategy_class == "BENCH"
+
+
+def test_bootstrap_bench_floor_earn_path_unaffected(conn):
+    """EARN seeding (score > 0 -> EARN immediately) must stay untouched by
+    the BENCH floor even when n_closed_fn/timeframe_bucket_fn are supplied
+    and n is tiny (n=1) — the floor only ever downgrades the BENCH branch."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("okx", "fresh_earner")],
+        score_f=_fake_score_f_factory({("okx", "fresh_earner"): 0.05}),
+        n_closed_fn=_fake_n_closed_factory({("okx", "fresh_earner"): 1}),
+        timeframe_bucket_fn=_fake_timeframe_bucket_factory(
+            {"fresh_earner": "intraday"}
+        ),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("okx", "fresh_earner")]
+    assert row.strategy_class == "EARN"
+
+
+def test_bootstrap_bench_floor_omitted_callables_preserve_pre_floor_behavior(conn):
+    """Existing callers that never pass n_closed_fn/timeframe_bucket_fn (both
+    default None) reproduce the exact pre-floor behavior — a strongly
+    negative score BENCHes regardless of evidence volume, unchanged."""
+    bootstrap_replay_strategy_class(
+        conn,
+        candidates=[("okx", "no_floor_wired")],
+        score_f=_fake_score_f_factory({("okx", "no_floor_wired"): -5.0}),
+        lookback_days=35,
+        now_ts=1_700_000_000,
+    )
+    row = hydrate_strategy_class(conn)[("okx", "no_floor_wired")]
+    assert row.strategy_class == "BENCH"

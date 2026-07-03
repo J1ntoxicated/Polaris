@@ -27,7 +27,11 @@ The injected ``score_f`` callable aggregates group B's ``compute_score_f``
 ``lookback_days`` window ending ``now_ts`` — group B's function returns the
 full unbounded history; this lookback-windowed SUM is WIRE's own assembly
 (the same "no separate SSOT specifies HOW to source this" precedent as the
-close-hook module).
+close-hook module). ``n_closed_fn``/``timeframe_bucket_fn`` wire group A's
+BENCH minimum-evidence floor (recover_classes.py) the same way — the
+lookback-windowed COUNT behind ``_lookback_score_f`` and the strategy-
+metadata timeframe mapping already used by the close-hook module
+(``_production_close_classes.py``'s own ``_TIMEFRAME_BUCKET``).
 """
 
 from __future__ import annotations
@@ -40,6 +44,8 @@ from polaris.core.lifecycle.recover import (
     bootstrap_replay_strategy_class,
     hydrate_strategy_class,
 )
+from polaris.core.lifecycle.recover_classes import Timeframe
+from polaris.scripts._production_atr import strategy_timeframe
 from polaris.strategies import STRATEGY_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,21 @@ __all__ = ["boot_hydrate_and_bootstrap_strategy_class"]
 # history" bootstrap-replay basis (prove_then_scale_classes_2026-07-03.md
 # 빌드 스펙 #7).
 _BOOTSTRAP_LOOKBACK_DAYS = 35
+
+# Mirrors _production_close_classes.py's own _TIMEFRAME_BUCKET (duplicated
+# rather than imported — that module lives in polaris/scripts too, but
+# importing it here would pull in its close-hook dependencies; this is the
+# same small literal-dict precedent, not a new pattern).
+_TIMEFRAME_BUCKET: dict[str, Timeframe] = {
+    "5m": "intraday",
+    "15m": "intraday",
+    "1H": "intraday",
+    "1D": "1d_plus",
+}
+
+
+def _timeframe_bucket_fn(strategy_id: str) -> Timeframe:
+    return _TIMEFRAME_BUCKET.get(strategy_timeframe(strategy_id), "intraday")
 
 
 def _lookback_score_f(
@@ -63,6 +84,19 @@ def _lookback_score_f(
         return 0.0
     cutoff = max(r.closed_ts for r in results) - lookback_days * 86_400
     return sum(r.score_contrib for r in results if r.closed_ts >= cutoff)
+
+
+def _lookback_n_closed(
+    conn: sqlite3.Connection, venue: str, strategy_id: str, lookback_days: int
+) -> int:
+    """Closed-lifecycle COUNT over the same trailing ``lookback_days`` window
+    ``_lookback_score_f`` sums (the ``NClosedFn`` signature group A's BENCH
+    minimum-evidence floor expects)."""
+    results = compute_score_f(conn, venue=venue, strategy_id=strategy_id)
+    if not results:
+        return 0
+    cutoff = max(r.closed_ts for r in results) - lookback_days * 86_400
+    return sum(1 for r in results if r.closed_ts >= cutoff)
 
 
 def _registry_candidates() -> list[tuple[str, str]]:
@@ -99,6 +133,8 @@ def boot_hydrate_and_bootstrap_strategy_class(
             score_f=_lookback_score_f,
             lookback_days=_BOOTSTRAP_LOOKBACK_DAYS,
             now_ts=now_ts,
+            n_closed_fn=_lookback_n_closed,
+            timeframe_bucket_fn=_timeframe_bucket_fn,
         )
         conn.commit()
         logger.info(

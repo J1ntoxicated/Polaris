@@ -15,14 +15,25 @@ reset this state (hydrate reads the persisted row verbatim, mirroring
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from polaris.core.classes.transition import (
+    _SCHMITT_PARTIAL_WINDOW_FRAC,
+    _TRIPWIRE_1D_PLUS_N,
+    _TRIPWIRE_INTRADAY_N,
+    Timeframe,
+)
+
 __all__ = [
+    "NClosedFn",
     "ScoreFFn",
     "StrategyClassRow",
+    "Timeframe",
+    "TimeframeBucketFn",
     "bootstrap_replay_strategy_class",
     "hydrate_strategy_class",
 ]
@@ -110,6 +121,20 @@ def _decode_ring(raw: Any) -> list[float]:
 # Signature: (conn, venue, strategy_id, lookback_days) -> float score.
 ScoreFFn = Callable[[sqlite3.Connection, str, str, int], float]
 
+# Closed-lifecycle COUNT over the same lookback window ``score_f`` scores —
+# injected the same way (zero import coupling to group B's counting logic).
+# Signature: (conn, venue, strategy_id, lookback_days) -> int n_closed.
+# Optional: a caller that never passes this (or passes None) gets the
+# pre-existing behavior byte-for-byte (BENCH floor below is skipped).
+NClosedFn = Callable[[sqlite3.Connection, str, str, int], int]
+
+# Track/timeframe classifier for the BENCH minimum-evidence floor below —
+# injected the same way (mirrors _production_close_classes.py's own
+# strategy-metadata-timeframe -> Timeframe mapping; this module has zero
+# import coupling to that scripts-layer helper, only to transition.py's pure
+# tripwire constants). Signature: (strategy_id) -> Timeframe.
+TimeframeBucketFn = Callable[[str], Timeframe]
+
 # score_F > this seeds the strategy straight into EARN at bootstrap (the
 # "current earner = EARN immediately" mandate) rather than a probation
 # class. 0.0 is the natural break-even boundary for a score already scaled
@@ -129,6 +154,67 @@ _BOOTSTRAP_EARN_THRESHOLD = 0.0
 # score_F's real distribution/scale is established.
 _BOOTSTRAP_BENCH_THRESHOLD = -1.0
 
+# BENCH minimum-evidence floor — STRENGTH-MATCHED 2-BAND (codex FINAL
+# CONSENSUS, vault/50_research/debates/prove_then_scale_classes_2026-07-03.md
+# "부트스트랩 경계 (2026-07-04 추가)" section, superseding an earlier
+# single-tripwire-floor draft of this same gap). A score below
+# _BOOTSTRAP_BENCH_THRESHOLD still seeds PROVE (not BENCH) unless the
+# candidate's closed-lifecycle count n clears the evidence floor matching
+# its score's OWN strength band — reusing the two live evidence units
+# transition.py already defines (tripwire window / Schmitt 0.4W partial
+# window), never a bespoke bootstrap-only number:
+#   Band A (score_F <= -4, tripwire-strength): n >= tripwire window
+#     (_TRIPWIRE_INTRADAY_N=8 intraday/swing, _TRIPWIRE_1D_PLUS_N=5 1d_plus)
+#     — this score magnitude is exactly what LIVE tripwire demotes on, so
+#     bootstrap requires the same n the live tripwire would.
+#   Band B (-4 < score_F <= -1, Schmitt-strength): n >= ceil(0.4 * W)
+#     (12 intraday / 8 swing / 5 1d_plus, W = 30/20/12 per track) — this
+#     score magnitude is what LIVE Schmitt EARN->BENCH demotes on (0.4W
+#     partial-window mean < -4), so bootstrap requires that same partial-
+#     window evidence count.
+# A score this deeply negative on TOO FEW closes is exactly the fee-formula
+# variance this floor exists to guard against (a single lifecycle with a
+# near-zero fee denominator can swing score_F into the hundreds — the
+# fee-normalization variance blowup this same debate flags as a separate
+# follow-up, not fixed here). Below either band's floor -> PROVE (schema
+# default), never BENCH. Rationale for asymmetric treatment vs EARN seeding
+# (score > 0 -> EARN immediately, never floored): the LIVE demotion rules
+# (tripwire, Schmitt) already require this much evidence before demoting a
+# TRACKED strategy out of EARN/PROVE — letting bootstrap's one-shot score_F
+# skip straight to BENCH with fewer closes than that same live bar would
+# ever accept is a shortcut with no live-rule counterpart, and it is
+# asymmetric in the WORSE direction: a wrongly-BENCHed net-positive strategy
+# loses capital routing and re-enters only through the slow reentry ladder.
+# Concrete miss this guards against (2026-07-04): gold_breakout_1h
+# bootstrapped at n=2 closed lifecycles, net +$21.87, score_F -1.10 (Band B)
+# -> would BENCH a net-positive strategy on two data points.
+_BOOTSTRAP_BENCH_BAND_A_THRESHOLD = -4.0
+_BOOTSTRAP_BENCH_BAND_A_MIN_N = {
+    "intraday": _TRIPWIRE_INTRADAY_N,
+    "swing": _TRIPWIRE_INTRADAY_N,
+    "1d_plus": _TRIPWIRE_1D_PLUS_N,
+}
+# Per-track W feeding Band B's ceil(0.4*W) — debate §① W: intraday 30 /
+# swing 20 / 1d_plus 12 (calendar-agnostic trade-count window, timeframe-
+# scaled for low-frequency earners; distinct from the persisted per-row
+# strategy_class.window_w, which defaults to 20 for every track today).
+_BOOTSTRAP_BENCH_BAND_B_W = {"intraday": 30, "swing": 20, "1d_plus": 12}
+
+
+def _bootstrap_bench_min_n(bucket: Timeframe, score: float) -> int:
+    """Strength-matched BENCH evidence floor for one candidate's own score.
+
+    Band A (``score <= _BOOTSTRAP_BENCH_BAND_A_THRESHOLD``, tripwire-strength)
+    needs the track's tripwire-window n; Band B (everyone else below
+    ``_BOOTSTRAP_BENCH_THRESHOLD`` — the only callers of this helper) needs
+    the track's ``ceil(0.4 * W)`` Schmitt-partial-window n. Both bands reuse
+    live evidence units (transition.py's tripwire window / Schmitt fraction),
+    never a bespoke bootstrap-only threshold.
+    """
+    if score <= _BOOTSTRAP_BENCH_BAND_A_THRESHOLD:
+        return _BOOTSTRAP_BENCH_BAND_A_MIN_N[bucket]
+    return math.ceil(_SCHMITT_PARTIAL_WINDOW_FRAC * _BOOTSTRAP_BENCH_BAND_B_W[bucket])
+
 
 def bootstrap_replay_strategy_class(
     conn: sqlite3.Connection,
@@ -137,6 +223,8 @@ def bootstrap_replay_strategy_class(
     score_f: ScoreFFn,
     lookback_days: int,
     now_ts: int,
+    n_closed_fn: NClosedFn | None = None,
+    timeframe_bucket_fn: TimeframeBucketFn | None = None,
 ) -> None:
     """Seed an initial ``strategy_class`` row for each NOT-YET-TRACKED candidate.
 
@@ -151,12 +239,26 @@ def bootstrap_replay_strategy_class(
     -to-two-classes reset; each candidate is judged independently on its own
     score.
 
+    BENCH minimum-evidence floor: when both ``n_closed_fn`` and
+    ``timeframe_bucket_fn`` are supplied, a score below
+    ``_BOOTSTRAP_BENCH_THRESHOLD`` is downgraded to PROVE instead of BENCH
+    unless the candidate's closed-lifecycle count clears the STRENGTH-MATCHED
+    evidence floor for its own score band — Band A (score_F <= -4) needs
+    the track's tripwire-window n, Band B (-4 < score_F <= -1) needs the
+    track's ceil(0.4*W) Schmitt-partial-window n (see the
+    ``_BOOTSTRAP_BENCH_BAND_*`` constants above for the full rationale).
+    EARN seeding is never floored. Either callable omitted (``None``, the
+    default) reproduces the exact pre-floor behavior — existing callers are
+    unaffected.
+
     NEVER clobbers an existing row (idempotent bootstrap — a
     live-tracked class/epoch/dwell survives every restart untouched; this
     guards the same "restart must not reset" invariant as ``hydrate_*``
-    above). ``score_f`` is the classifier group's function (group B); this
-    module only calls it through the injected signature — zero import
-    coupling.
+    above). ``score_f`` / ``n_closed_fn`` are the classifier group's
+    functions (group B); this module only calls them through the injected
+    signatures — zero import coupling (``timeframe_bucket_fn`` is the one
+    exception: it may reuse ``transition.py``'s own ``Timeframe`` literal,
+    which this module already imports for the tripwire constants).
     """
     existing = {
         (r[0], r[1])
@@ -170,6 +272,12 @@ def bootstrap_replay_strategy_class(
             klass = "EARN"
         elif score < _BOOTSTRAP_BENCH_THRESHOLD:
             klass = "BENCH"
+            if n_closed_fn is not None and timeframe_bucket_fn is not None:
+                bucket = timeframe_bucket_fn(strategy_id)
+                min_n = _bootstrap_bench_min_n(bucket, score)
+                n_closed = n_closed_fn(conn, venue, strategy_id, lookback_days)
+                if n_closed < min_n:
+                    klass = "PROVE"
         else:
             klass = "PROVE"
         conn.execute(

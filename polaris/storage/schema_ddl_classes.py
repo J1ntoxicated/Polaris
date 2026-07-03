@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS strategy_class (
     intent_ring TEXT NOT NULL DEFAULT '[]',
     shadow_ring TEXT NOT NULL DEFAULT '[]',
     probe_fee_24h REAL NOT NULL DEFAULT 0.0,
+    last_promotion_ts INTEGER,
     PRIMARY KEY (venue, strategy_id)
 );
 """

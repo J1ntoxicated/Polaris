@@ -4,10 +4,13 @@ Spec source: vault/30_components/layer-4-cell-matrix.md.
 """
 
 from polaris.core.cell_matrix.routing import (
+    ANTI_EDGE_MIN_N,
+    ANTI_EDGE_P_POS_MAX,
     Quartile,
     classify_quartile,
     compute_routing_mult,
     fetch_cell_stat,
+    fetch_learner_anti_edge,
     fetch_parent2_score,
     fetch_parent3_score,
     fetch_posterior_tilt,
@@ -48,6 +51,8 @@ from polaris.core.cell_matrix.score import (
 )
 
 __all__ = [
+    "ANTI_EDGE_MIN_N",
+    "ANTI_EDGE_P_POS_MAX",
     "CELL_BASELINE_N",
     "CELL_DECAY_HALF_LIFE_SEC",
     "CELL_MIN_LIVE_N",
@@ -75,6 +80,7 @@ __all__ = [
     "compute_routing_mult",
     "decay_factor",
     "fetch_cell_stat",
+    "fetch_learner_anti_edge",
     "fetch_parent2_score",
     "fetch_parent3_score",
     "fetch_posterior_tilt",

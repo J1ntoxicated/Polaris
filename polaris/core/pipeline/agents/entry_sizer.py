@@ -26,6 +26,7 @@ from polaris.core.sizing import (
     StrategyRiskState,
     compute_size,
 )
+from polaris.core.sizing.probe_notional import resolve_strategy_class
 
 __all__ = ["entry_sizer_gate"]
 
@@ -73,6 +74,14 @@ async def entry_sizer_gate(
     # still bind and clip after, so SIZE_UP can never breach the absolute ceiling.
     if ctx.payload.get("ai_judge_size_up_intent") and intent_raw.judge_conviction == 1.0:
         intent_raw = replace(intent_raw, judge_conviction=size_up_boost())
+
+    # pts-classes (group D): thread the live EARN/PROVE/BENCH class for this
+    # (venue, strategy) — a missing row (bootstrap hasn't run yet) resolves to
+    # EARN, byte-identical to pre-pts-classes sizing.
+    strategy_class = resolve_strategy_class(
+        conn, venue=intent_raw.venue, strategy_id=intent_raw.strategy
+    )
+    intent_raw = replace(intent_raw, strategy_class=strategy_class)
 
     try:
         sized = compute_size(

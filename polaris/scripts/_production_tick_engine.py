@@ -54,6 +54,7 @@ from polaris.core.pipeline._sizer_payload import (
 )
 from polaris.core.sizing import SignalIntent, compute_size
 from polaris.core.sizing.constants import production_default_equity_usd
+from polaris.core.sizing.probe_notional import resolve_strategy_class
 from polaris.core.sizing.schema import clip_entry_notional_ceiling_usd
 from polaris.core.streams import derive_leverage, resolve_stream
 from polaris.core.ticks.config import (
@@ -191,6 +192,9 @@ def _sized_notional(
     # (FX 30 / index+commodity 20 / crypto 2) instead of a hardcoded 1.0 that
     # silently under-sized every Capital tick entry.
     leverage = derive_leverage(stream, asset_class)
+    # pts-classes (group D): class-aware, same (venue, strategy) key the
+    # risk_state/portfolio reads below already use.
+    strategy_class = resolve_strategy_class(conn, venue=intent.venue, strategy_id=intent.signal_id)
     sizing_intent = SignalIntent(
         signal_id=intent.signal_id,
         venue=intent.venue,
@@ -208,6 +212,7 @@ def _sized_notional(
         product_class=stream.product_class,
         stream_id=stream.stream_id,
         signal_family=intent.signal_family,
+        strategy_class=strategy_class,
     )
     equity = production_default_equity_usd()
     risk_state = _read_strategy_risk_state(

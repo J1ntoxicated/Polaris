@@ -24,7 +24,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-from polaris.core.cell_matrix import CellKeyP0
+from polaris.core.cell_matrix import CellKeyP0, fetch_learner_anti_edge
 from polaris.core.learners.base import (
     NEUTRAL_MULT,
     clip_individual_mult,
@@ -40,6 +40,11 @@ from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
 from polaris.core.sizing.ladder import draw_for_signal
+from polaris.core.sizing.probe_notional import (
+    bottom_cell_shadow_hit,
+    probe_notional_usd,
+    prove_admission_ok,
+)
 from polaris.core.sizing.r_budget_sizer import (
     CapQtyInputs,
     compute_r_budget_qty,
@@ -174,6 +179,15 @@ class SignalIntent:
     # so an absent value is byte-identical to pre-ladder sizing).
     ladder_fresh_bp_usd: float = -1.0
     ladder_pending_usd: float = -1.0
+    # pts-classes (group D) — Performance-Tiered Strategy class this signal's
+    # (venue, strategy) currently holds (``strategy_class`` table, group A
+    # storage). Default "EARN" == byte-identical for every existing caller
+    # that hasn't threaded a real class yet (no_block_filter_architecture:
+    # this is a capital-ROUTING input, never a defensive throttle). Callers
+    # resolve the live class from the ``strategy_class`` table themselves
+    # (core sizing does not read it directly — no new coupling to the group A
+    # storage module from this dataclass).
+    strategy_class: str = "EARN"
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +938,72 @@ def compute_size(
                 else 0.0
             )
             binding = "r_budget_active"
+
+    # pts-classes (group D) — EARN/PROVE/BENCH class-aware routing. LAST step
+    # before SizingFinal: overrides only the FINAL notional/risk_pct/binding
+    # output for PROVE/BENCH (no new T4 multiplier — 9-stack ban intact).
+    # EARN takes NONE of this branch — byte-identical to the pre-existing
+    # chain above. flow_not_block / aggressive_always_profit /
+    # no_block_filter_architecture: PROVE/BENCH shadow-routing NEVER stops the
+    # signal from being fully computed above (proposal/cell/tier all still
+    # resolved for learning) — it only zeroes the PLACED size.
+    if intent.strategy_class == "EARN":
+        pass
+    elif intent.strategy_class == "PROVE":
+        stop_dist_pct = intent.atr_pct * (
+            intent.stop_atr_mult if intent.stop_atr_mult > 0.0 else STOP_ATR_MULT
+        )
+        admitted = prove_admission_ok(venue=intent.venue, stop_dist_pct=stop_dist_pct)
+        cell_key = CellKeyP0(
+            exchange=intent.venue, strategy=intent.strategy,
+            ticker=intent.symbol, regime=intent.regime,
+        )
+        shadow_triggered = bottom_cell_shadow_hit(cell_mult) or fetch_learner_anti_edge(
+            conn, cell_key
+        )
+        if admitted and not shadow_triggered:
+            basis = portfolio.equity_usd * intent.leverage
+            probe_risk_pct = probe_notional_usd(intent.venue) / basis if basis > 0.0 else 0.0
+            # Defense in depth: the fixed probe constant still passes through
+            # the SAME already-computed headroom_min caps (no new cap slot —
+            # reuses the exact per_symbol/cluster/track/venue/total remaining
+            # values from step 7 above) so a genuinely cap-exhausted portfolio
+            # still clips a probe, same as it would clip an EARN trade.
+            final_risk_pct, binding = headroom_min(
+                proposed_risk_pct=probe_risk_pct,
+                single_trade_cap=single_trade_cap,
+                per_symbol_remaining=per_symbol_remaining,
+                underlying_remaining=underlying_remaining,
+                cluster_remaining=cluster_rem,
+                track_remaining=track_rem,
+                venue_daily_remaining=venue_daily_rem,
+                total_daily_remaining=total_daily_rem,
+            )
+            notional = final_risk_pct * basis
+            if binding == "proposed":
+                binding = "prove_probe_notional"
+        else:
+            notional = 0.0
+            final_risk_pct = 0.0
+            binding = "prove_shadow"
+        logger.info(
+            "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s shadow=%s "
+            "stop_dist_pct=%.6f binding=%s notional=%.2f",
+            intent.venue, intent.symbol, intent.signal_id, admitted,
+            shadow_triggered, stop_dist_pct, binding, notional,
+        )
+    else:
+        # BENCH (and any unrecognized/KILL class) — always shadow. Fail-safe
+        # toward shadow rather than silently defaulting an unknown class to
+        # full EARN size.
+        notional = 0.0
+        final_risk_pct = 0.0
+        binding = "bench_shadow"
+        logger.info(
+            "[T4/pts-class] %s/%s sid=%s class=%s -> bench_shadow (routing, "
+            "not a block — signal fully computed above for learning)",
+            intent.venue, intent.symbol, intent.signal_id, intent.strategy_class,
+        )
 
     return SizingFinal(
         proposed=proposal,

@@ -9,7 +9,7 @@ import logging
 import math
 import sqlite3
 from collections.abc import Sequence
-from typing import Literal
+from typing import Final, Literal
 
 from polaris.core.cell_matrix.schema import (
     CELL_DECAY_HALF_LIFE_SEC,
@@ -37,10 +37,13 @@ from polaris.core.cell_matrix.update import update_on_trade_close
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ANTI_EDGE_MIN_N",
+    "ANTI_EDGE_P_POS_MAX",
     "Quartile",
     "classify_quartile",
     "compute_routing_mult",
     "fetch_cell_stat",
+    "fetch_learner_anti_edge",
     "fetch_parent2_score",
     "fetch_parent3_score",
     "fetch_posterior_tilt",
@@ -49,6 +52,13 @@ __all__ = [
     "resolve_routing_for_cell",
     "update_on_trade_close",
 ]
+
+# pts-classes (group D) PROVE shadow-routing anti-edge thresholds. Distinct
+# from ``learners.posterior.EDGE_VERDICT_TAU_LO`` (0.15, the dashboard
+# display-label threshold) — this is the sizing-routing threshold's own
+# constant (task-header value, 0.20/n>=20).
+ANTI_EDGE_P_POS_MAX: Final[float] = 0.20
+ANTI_EDGE_MIN_N: Final[int] = 20
 
 Quartile = Literal["top", "bottom", "mid", "cold"]
 
@@ -323,6 +333,34 @@ def fetch_cell_stat(conn: sqlite3.Connection, key: CellKeyP0) -> CellStat | None
         score=float(row[4]),
         last_closed_ts=int(row[5]),
     )
+
+
+def fetch_learner_anti_edge(conn: sqlite3.Connection, key: CellKeyP0) -> bool:
+    """True iff this cell's learner posterior is a trusted anti-edge read.
+
+    pts-classes (group D) PROVE shadow-routing trigger. ``p_pos <=
+    ANTI_EDGE_P_POS_MAX`` AND ``n_samples >= ANTI_EDGE_MIN_N`` (both inclusive
+    boundaries). Lives HERE (not in ``polaris.core.sizing``) because sizing
+    must never read ``learner_posterior`` directly (SSOT guard,
+    ``test_edge_validation.test_sizing_does_not_import_posterior`` —
+    posterior is display/routing-only, sizing consumes it only through the
+    cell_routing_mult this package already resolves) — the sizing engine
+    calls this cell_matrix-level check, never the raw table itself. No row /
+    any DB error -> False (fail-open, same contract as ``fetch_posterior_tilt``
+    below — a cold/unreadable posterior must never suppress).
+    """
+    try:
+        row = conn.execute(
+            "SELECT p_pos, n_samples FROM learner_posterior "
+            "WHERE exchange = ? AND strategy = ? AND ticker = ? AND regime = ?",
+            (key.exchange, key.strategy, key.ticker, key.regime),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    p_pos, n_samples = float(row[0]), int(row[1])
+    return p_pos <= ANTI_EDGE_P_POS_MAX and n_samples >= ANTI_EDGE_MIN_N
 
 
 def fetch_posterior_tilt(conn: sqlite3.Connection, key: CellKeyP0) -> float:

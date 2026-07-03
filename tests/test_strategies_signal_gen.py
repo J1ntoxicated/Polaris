@@ -593,7 +593,9 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     # distinct group weekend_thin_book_mean_reversion): 20 → 21.
     # +weekend_funding_capitulation_maker (#80 — 2nd weekend edge, distinct group
     # weekend_funding_positioning_mean_reversion): 21 → 22.
-    assert len(seen) == 22, f"correlation groups not unique: {seen}"
+    # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h, each its OWN
+    # correlation_group_id (per_ticker_tailored): 22 → 25.
+    assert len(seen) == 25, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
@@ -603,7 +605,8 @@ def test_strategy_registry_size() -> None:
     # spot_donchian un-registered 2026-06-27 (#56 — stop-bleeders KILL): 21 → 20.
     # +weekend_thin_book_flush_maker (#77 — single verified crypto maker BUILD): 21.
     # +weekend_funding_capitulation_maker (#80 — 2nd weekend edge, positioning): 22.
-    assert len(STRATEGY_REGISTRY) == 22
+    # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h: 22 → 25.
+    assert len(STRATEGY_REGISTRY) == 25
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

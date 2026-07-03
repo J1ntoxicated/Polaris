@@ -26,6 +26,12 @@ Track B — Capital CFD:
   - ``gold_breakout_1h``              (correlation_group=cfd_gold_breakout_1h, 1H)
   - ``index_52w_high_momentum``       (correlation_group=cfd_index_52w_high_momentum, 1D)
   - ``index_dual_momentum_rotation``  (correlation_group=cfd_index_dual_momentum, 1D monthly)
+  - ``silver_breakout_1h``            (correlation_group=cfd_silver_breakout_1h, 1H —
+    per-symbol clone of gold_breakout_1h on SILVER)
+  - ``us100_breakout_1h``             (correlation_group=cfd_us100_breakout_1h, 1H —
+    per-symbol clone of gold_breakout_1h on US100, session-gated)
+  - ``uk100_breakout_1h``             (correlation_group=cfd_uk100_breakout_1h, 1H —
+    per-symbol clone of gold_breakout_1h on UK100, session-gated, probe cap)
 
 Track C — Alpaca US equity (INERT until SIP key #42 routes equity bars):
   - ``equity_52wk_high_breakout``         (correlation_group=equity_52wk_high_breakout, 1D)
@@ -93,8 +99,11 @@ from polaris.strategies.macd_ema_trend_pullback import MACDEMATrendPullbackStrat
 from polaris.strategies.okx_donchian_55_breakout import OKXDonchian55BreakoutStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
+from polaris.strategies.silver_breakout_1h import SilverBreakout1HStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
+from polaris.strategies.uk100_breakout_1h import UK100Breakout1HStrategy
+from polaris.strategies.us100_breakout_1h import US100Breakout1HStrategy
 from polaris.strategies.weekend_funding_capitulation_maker import (
     WeekendFundingCapitulationMakerStrategy,
 )
@@ -146,6 +155,11 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     WeekendFundingCapitulationMakerStrategy.metadata.strategy_id: (
         WeekendFundingCapitulationMakerStrategy
     ),
+    # Opus CONFIRMED backtest spec — 3 per-symbol clones of gold_breakout_1h
+    # (per_ticker_tailored: each its OWN correlation_group_id, no shared logic).
+    SilverBreakout1HStrategy.metadata.strategy_id: SilverBreakout1HStrategy,
+    US100Breakout1HStrategy.metadata.strategy_id: US100Breakout1HStrategy,
+    UK100Breakout1HStrategy.metadata.strategy_id: UK100Breakout1HStrategy,
 }
 
 
@@ -179,9 +193,12 @@ __all__ = [
     "RawSignal",
     "STRATEGY_REGISTRY",
     "SessionBreakoutStrategy",
+    "SilverBreakout1HStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",
+    "UK100Breakout1HStrategy",
+    "US100Breakout1HStrategy",
     "WeekendFundingCapitulationMakerStrategy",
     "WeekendThinBookFlushMakerStrategy",
     "XAUIndicesTrendStrategy",

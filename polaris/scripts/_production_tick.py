@@ -102,6 +102,15 @@ from polaris.strategies.index_dual_momentum_rotation import (
 from polaris.strategies.session_breakout import (
     SUPPORTED_SYMBOLS as _SESSION_BREAKOUT_SYMBOLS,
 )
+from polaris.strategies.silver_breakout_1h import (
+    SUPPORTED_SYMBOLS as _SILVER_BREAKOUT_SYMBOLS,
+)
+from polaris.strategies.uk100_breakout_1h import (
+    SUPPORTED_SYMBOLS as _UK100_BREAKOUT_SYMBOLS,
+)
+from polaris.strategies.us100_breakout_1h import (
+    SUPPORTED_SYMBOLS as _US100_BREAKOUT_SYMBOLS,
+)
 from polaris.strategies.xau_indices_trend import (
     SUPPORTED_SYMBOLS as _XAU_INDICES_SYMBOLS,
 )
@@ -160,13 +169,17 @@ def _focus_cycle_target() -> int:
 # (SILVER/PALLADIUM/COPPER/OIL_BRENT/GASOLINE + Tier-2), so its module is now
 # unioned to keep those NEW commodity epics reachable (else same vacate-skip INERT
 # recurrence). Unioning their SUPPORTED_SYMBOLS restores reachability (flow_not_
-# block — purely additive).
+# block — purely additive). Opus-spec 3-clone build: silver/us100/uk100_breakout_1h
+# are unioned in too — same vacate-skip recurrence would otherwise apply to them.
 CAPITAL_BAR_STRATEGY_SYMBOLS: frozenset[str] = (
     _XAU_INDICES_SYMBOLS
     | _SESSION_BREAKOUT_SYMBOLS
     | _IDX_DUALMOM_SYMBOLS
     | _IDX_52W_SYMBOLS
     | _GOLD_TREND_SYMBOLS
+    | _SILVER_BREAKOUT_SYMBOLS
+    | _US100_BREAKOUT_SYMBOLS
+    | _UK100_BREAKOUT_SYMBOLS
 )
 
 

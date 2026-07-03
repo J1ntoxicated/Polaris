@@ -146,6 +146,10 @@ def test_strategy_metadata_timeframe_used() -> None:
         # thin-book flush + #80 funding capitulation), both OKX SPOT 1H.
         "weekend_thin_book_flush_maker": "1H",
         "weekend_funding_capitulation_maker": "1H",
+        # Opus-spec 3-clone build — per-symbol gold_breakout_1h clones, 1H.
+        "silver_breakout_1h": "1H",
+        "us100_breakout_1h": "1H",
+        "uk100_breakout_1h": "1H",
     }
     assert set(by_id) == set(expected)
     for sid, tf in expected.items():

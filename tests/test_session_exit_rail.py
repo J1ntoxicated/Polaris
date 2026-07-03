@@ -29,6 +29,7 @@ import datetime as dt
 from polaris.core.live_recalc.session_exit_rail import (
     SESSION_CLOSE_BUFFER_ENV,
     SESSION_CLOSE_BUFFER_MIN,
+    alpaca_close_retry_should_defer,
     session_forced_exit,
 )
 
@@ -450,3 +451,62 @@ def test_always_on_hold_overnight_still_never_fires() -> None:
         "always_on", _utc_ts(2026, 7, 15, 19, 55), hold_overnight=False
     )
     assert dec2.close is False
+
+
+# ---------------------------------------------------------------------------
+# alpaca_close_retry_should_defer — P0 fix: a decided #26/G6/G7 close on an
+# off-session Alpaca position must be DEFERRED (no venue call, no reject
+# counted) rather than retried every ~5s recalc tick (observed 825
+# retries/symbol — the zombie-drain tally deliberately never counts
+# off-session rejects, so the retry was unbounded).
+# ---------------------------------------------------------------------------
+
+
+def test_equity_defers_pre_market() -> None:
+    # 08:00 ET on a weekday is before the 09:30 RTH open — off-session.
+    assert alpaca_close_retry_should_defer(
+        "us_equity_cal", _utc_ts(2026, 7, 15, 12, 0)  # 08:00 ET
+    ) is True
+
+
+def test_equity_defers_after_hours() -> None:
+    # 19:55 UTC on 2026-07-15 is 15:55 ET — still inside RTH, so use a clearly
+    # after-hours instant instead (16:05 ET == 20:05 UTC in July/EDT).
+    assert alpaca_close_retry_should_defer(
+        "us_equity_cal", _utc_ts(2026, 7, 15, 20, 5)
+    ) is True
+
+
+def test_equity_defers_weekend() -> None:
+    # Saturday — cash book shut all weekend regardless of clock-of-day.
+    assert alpaca_close_retry_should_defer(
+        "us_equity_cal", _utc_ts(2026, 7, 18, 15, 0)
+    ) is True
+
+
+def test_equity_does_not_defer_mid_rth() -> None:
+    # 19:55 UTC on 2026-07-15 == 15:55 ET — inside RTH → retry as before.
+    assert alpaca_close_retry_should_defer(
+        "us_equity_cal", _utc_ts(2026, 7, 15, 19, 55)
+    ) is False
+
+
+def test_fx_never_defers() -> None:
+    # Capital has its OWN weekend rail (session_forced_exit) — this predicate
+    # must never touch B, even at the exact weekend-closed instant.
+    assert alpaca_close_retry_should_defer(
+        "fx_indices_cal", _utc_ts(*_FRIDAY, 23, 0)
+    ) is False
+
+
+def test_always_on_never_defers() -> None:
+    # OKX is 24/7 — never deferred, at any instant.
+    assert alpaca_close_retry_should_defer(
+        "always_on", _utc_ts(2026, 7, 18, 15, 0)
+    ) is False
+
+
+def test_unknown_calendar_never_defers() -> None:
+    assert alpaca_close_retry_should_defer(
+        "bogus_cal", _utc_ts(2026, 7, 15, 12, 0)
+    ) is False

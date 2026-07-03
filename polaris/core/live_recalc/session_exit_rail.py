@@ -49,6 +49,7 @@ __all__ = [
     "SESSION_CLOSE_BUFFER_ENV",
     "SESSION_CLOSE_BUFFER_MIN",
     "SessionExitDecision",
+    "alpaca_close_retry_should_defer",
     "session_forced_exit",
 ]
 
@@ -238,6 +239,36 @@ def _stale_overnight_in_session(cal: str, now_ts: int | float, opened_ts: int) -
             opened_ts, now_ts
         )
     return False
+
+
+def alpaca_close_retry_should_defer(session_calendar: str, now_ts: int | float) -> bool:
+    """True when a DECIDED Alpaca close (#26 FSM / G6 / G7) should be DEFERRED
+    to the next in-session open rather than retried this tick.
+
+    P0 fix: ``run_precise_exit``'s #26 FSM decides close/hold on price/ATR
+    alone, with NO session awareness, every ~5s recalc tick. For a
+    ``us_equity_cal`` position held off-RTH (overnight / weekend / a
+    stale-overnight gap) a decided close called the venue every tick — Alpaca
+    rejects (market closed) EVERY time, and the zombie-drain tally
+    deliberately does NOT count off-session rejects (a live position waiting
+    for the reopen must never be abandoned as a phantom zombie — see
+    ``_production_close._drain_in_session``), so the retry was UNBOUNDED
+    forever off-session (observed 825 retries/symbol). REUSES the existing
+    RTH predicate (``_minutes_to_rth_close`` — the SAME boundary
+    ``session_forced_exit`` and ``equity_session_gate.us_equity_session_state``
+    use): off-RTH → defer (skip the venue call entirely, no reject counted,
+    position preserved — retried once, at the next in-session tick). Only
+    ``us_equity_cal`` (Alpaca) defers; ``always_on`` (OKX, 24/7) and
+    ``fx_indices_cal`` (Capital, continuous ~24/5 with its OWN weekend rail)
+    are unaffected — this NEVER widens/narrows anything for A/B (byte-
+    identical). NOT a throttle: an IN-SESSION close still fires (and retries)
+    every tick exactly as before; this only suppresses the off-session no-op
+    spam.
+    """
+    cal = (session_calendar or "").strip().lower()
+    if cal != _CAL_US_EQUITY:
+        return False
+    return _minutes_to_rth_close(now_ts) is None
 
 
 def session_forced_exit(

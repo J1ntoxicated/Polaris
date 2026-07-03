@@ -34,6 +34,7 @@ from polaris.core.live_recalc.session_exit_rail import (
     _CAL_FX_INDICES,
     _CAL_US_EQUITY,
     _fx_in_session,
+    alpaca_close_retry_should_defer,
 )
 from polaris.core.metrics.risk_unit import realised_r, realised_r_stream
 from polaris.core.streams import resolve_stream
@@ -529,6 +530,27 @@ async def _close_trade_with_real_pnl(
     """
     # Stable key for the zombie-drain reject tally; reset on any forward progress.
     drain_pid = trade.position_id or f"{trade.venue}:{trade.symbol}:{trade.open_ts}"
+    # P0 off-session close-retry defer (Alpaca only): a decided close (#26 FSM /
+    # G6 / G7 / session-forced-exit) called the venue EVERY tick even while the
+    # US-equity market is closed — Alpaca rejects every time, and the zombie-
+    # drain tally deliberately never counts an off-session reject (a live
+    # position waiting for the reopen must not be abandoned), so the retry ran
+    # UNBOUNDED forever off-session (observed 825 retries/symbol). Skip the
+    # venue call entirely this tick — NO reject counted, position PRESERVED,
+    # retried once at the next in-session tick (flow_not_block: the close still
+    # fires the moment the market reopens; this only suppresses the off-session
+    # no-op spam). Reuses the existing RTH predicate; Capital/OKX unaffected.
+    if (
+        real_roundtrip
+        and trade.venue == "alpaca"
+        and alpaca_close_retry_should_defer(_CAL_US_EQUITY, now_ts)
+    ):
+        logger.debug(
+            "[close/real] %s:%s trade_id=%s close deferred — off-session "
+            "(no venue call, state preserved)",
+            trade.venue, trade.symbol, trade.position_id or "-",
+        )
+        return False
     if real_roundtrip:
         # P0 venue wire: drive the real close leg FIRST so pnl_r/pnl_usd are
         # computed against the actual exit fill (not the pre-close bar drift).

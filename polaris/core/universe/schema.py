@@ -595,6 +595,31 @@ def is_capital_fx_major(venue: str, symbol: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Capital index-majors keep/floor (P0 — flow_not_block, per-venue, session-scoped)
+# ---------------------------------------------------------------------------
+# Same starvation shape as ``CAPITAL_FX_MAJORS`` above, on the index book: Capital
+# exposes no 24h notional, so the continuous rank scores indices on ATR alone and
+# high-ATR exotic FX crosses outrank the major cash indices — US500 (0 5m bars
+# live) / US100 / DE40 / UK100 fell out of the ranked focus (watchlist_focus had
+# ZERO rows for all four in the live DB), so the bar ingest never fetched their 5m
+# feed and ``session_breakout``/``xau_indices_trend`` starved on the SAME symbols.
+# UNLIKE FX (24/5, always kept), an index major only needs a seat while its OWN
+# regional cash session is live (``_session_map.session_group`` /
+# ``_GROUP_WINDOW``) — seating it 24/7 would be a blanket keep-floor, not the
+# session-aware fix Jin asked for. This is a FLOW INCREASE (seat the major
+# alongside the exotics during its window, remove nothing) and touches NO global
+# ranking weight.
+CAPITAL_INDEX_MAJORS: Final[frozenset[str]] = frozenset(
+    {"US500", "US100", "DE40", "UK100"}
+)
+
+
+def is_capital_index_major(venue: str, symbol: str) -> bool:
+    """True iff ``(venue, symbol)`` is a curated Capital index major (case-insensitive)."""
+    return (venue or "").lower() == "capital" and symbol.strip().upper() in CAPITAL_INDEX_MAJORS
+
+
+# ---------------------------------------------------------------------------
 # Alpaca liquid-equity focus priority (P1.5 stream-coverage — flow_not_block, per-venue)
 # ---------------------------------------------------------------------------
 # Equity rows carry REAL liquidity (``vol_24h_usd`` = close×volume) + an intraday-

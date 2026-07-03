@@ -31,6 +31,7 @@ from polaris.venues.capital.market_proxy import (
 from polaris.venues.capital.opening_hours import (
     OpeningHoursWeek,
     seconds_to_next_close,
+    seconds_to_next_open,
 )
 from polaris.venues.capital.session import (
     CAPITAL_BASE_LIVE,
@@ -71,5 +72,6 @@ __all__ = [
     "populate_capital_proxies",
     "round_size_to_step",
     "seconds_to_next_close",
+    "seconds_to_next_open",
     "size_usd_to_lots",
 ]

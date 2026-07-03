@@ -468,7 +468,9 @@ async def fetch_bars_one(
     # storm, so the cooldown is bypassed for it. Non-preferred symbols keep it.
     if not (
         venue == "okx" and is_okx_native_preferred(symbol)
-    ) and not should_fetch_exchange_fallback(venue, symbol, time.monotonic()):
+    ) and not should_fetch_exchange_fallback(
+        venue, symbol, time.monotonic(), bar_interval=bar_interval,
+    ):
         return []
     if venue == "okx":
         try:

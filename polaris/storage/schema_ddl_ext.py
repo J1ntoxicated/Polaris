@@ -767,3 +767,67 @@ DDL_MEASUREMENT_RESETS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_measurement_resets_ts
     ON measurement_resets(reset_ts DESC);
 """
+
+# ---------------------------------------------------------------------------
+# Profit-sweep ladder (vault/50_research/debates/profit_sweep_ladder_2026-07-03.md
+# — codex 3-round consensus). Append-only event ledger for the 1단(close)→3단
+# (Alpaca auto-draw) capital-recycling pipeline. Balance is a SUM() projection
+# over these rows — no aggregate/mutable balance column (crash/replay safe).
+#
+# event_type: 'CREDIT' (position closed net profit × sweep_pct, one row per
+# position — source_position_id UNIQUE makes materialize idempotent),
+# 'DRAW' (3단 auto-draw consumed some bucket_available, draw_id UNIQUE),
+# 'RELEASE' (a DRAW's reservation released back to the bucket — open position
+# AND live/pending order both absent, OR reject/cancel/expiry; NEVER creates
+# credit — loss_debit=0 invariant). amount_usd is ALWAYS >= 0; sign is implied
+# by event_type when computing the SUM (CREDIT/RELEASE add, DRAW subtracts —
+# see ladder.bucket_available_usd). closed_ts=1 dedupe hot-path stays
+# write-free at position-close time — CREDIT rows are materialized by a
+# separate on-demand (pre-DRAW) + 5-min sweeper pass, never inline in the
+# close transaction (feedback_db_lock_is_architecture_signal).
+# ---------------------------------------------------------------------------
+
+DDL_LADDER_LEDGER = """
+CREATE TABLE IF NOT EXISTS ladder_ledger (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    source_position_id TEXT,
+    draw_id TEXT,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    signal_id TEXT NOT NULL DEFAULT '',
+    amount_usd REAL NOT NULL DEFAULT 0.0,
+    reason TEXT NOT NULL DEFAULT '',
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_LADDER_LEDGER_CREDIT_UNIQUE = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ladder_ledger_credit_position
+    ON ladder_ledger(source_position_id)
+    WHERE event_type = 'CREDIT';
+"""
+
+DDL_LADDER_LEDGER_DRAW_UNIQUE = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ladder_ledger_draw_id
+    ON ladder_ledger(draw_id)
+    WHERE event_type = 'DRAW';
+"""
+
+DDL_LADDER_LEDGER_TS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_ladder_ledger_ts
+    ON ladder_ledger(event_type, created_ts);
+"""
+
+# Materializer checkpoint — how far the CREDIT scan has progressed (closed_ts
+# watermark). Advances ONLY after a scan batch's INSERTs all succeeded (never
+# rewound on partial failure — a crash mid-batch just re-scans the same
+# window next pass, safe because source_position_id UNIQUE makes the INSERT
+# idempotent).
+DDL_LADDER_CREDIT_CHECKPOINT = """
+CREATE TABLE IF NOT EXISTS ladder_credit_checkpoint (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_scanned_closed_ts INTEGER NOT NULL DEFAULT 0
+);
+"""

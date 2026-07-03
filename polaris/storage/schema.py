@@ -79,6 +79,11 @@ from polaris.storage.schema_ddl_ext import (
     DDL_GATE_KILL_COUNTERFACTUALS_PENDING_INDEX,
     DDL_GATE_SHADOW_EVENTS,
     DDL_GATE_SHADOW_EVENTS_INDEX,
+    DDL_LADDER_CREDIT_CHECKPOINT,
+    DDL_LADDER_LEDGER,
+    DDL_LADDER_LEDGER_CREDIT_UNIQUE,
+    DDL_LADDER_LEDGER_DRAW_UNIQUE,
+    DDL_LADDER_LEDGER_TS_INDEX,
     DDL_LEARNER_BLOCKS,
     DDL_LEARNER_BLOCKS_INDEX,
     DDL_LEARNER_POSTERIOR,
@@ -238,6 +243,13 @@ ALL_DDL: tuple[str, ...] = (
     # Measurement-reset baseline (display-only; forward edge window key)
     DDL_MEASUREMENT_RESETS,
     DDL_MEASUREMENT_RESETS_INDEX,
+    # Profit-sweep ladder (profit_sweep_ladder_2026-07-03.md) — append-only
+    # CREDIT/DRAW/RELEASE event ledger + materializer checkpoint.
+    DDL_LADDER_LEDGER,
+    DDL_LADDER_LEDGER_CREDIT_UNIQUE,
+    DDL_LADDER_LEDGER_DRAW_UNIQUE,
+    DDL_LADDER_LEDGER_TS_INDEX,
+    DDL_LADDER_CREDIT_CHECKPOINT,
 )
 
 

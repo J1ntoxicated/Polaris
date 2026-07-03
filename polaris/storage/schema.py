@@ -23,7 +23,12 @@ from polaris.storage.schema_ddl_altdata import (
     DDL_TICKER_GROUND,
     DDL_TICKER_GROUND_INDEX,
 )
-from polaris.storage.schema_ddl_classes import DDL_STRATEGY_CLASS
+from polaris.storage.schema_ddl_classes import (
+    DDL_SCORE_F_CHECKPOINT,
+    DDL_SCORE_F_EVENTS,
+    DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
+    DDL_STRATEGY_CLASS,
+)
 from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS,
     DDL_ALLOCATOR_RESERVATIONS_KEY_INDEX,
@@ -260,6 +265,11 @@ ALL_DDL: tuple[str, ...] = (
     # capital-routing tier record (which class/track_R cap a strategy holds),
     # NOT a block filter. See schema_ddl_classes.py docstring.
     DDL_STRATEGY_CLASS,
+    # score_F classification (pts-classes 2026-07-03, group B) — append-only
+    # per-lifecycle fee-normalized-edge event ledger + sweeper checkpoint.
+    DDL_SCORE_F_EVENTS,
+    DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
+    DDL_SCORE_F_CHECKPOINT,
 )
 
 

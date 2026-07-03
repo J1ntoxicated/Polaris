@@ -53,3 +53,48 @@ CREATE TABLE IF NOT EXISTS strategy_class (
     PRIMARY KEY (venue, strategy_id)
 );
 """
+
+# ---------------------------------------------------------------------------
+# score_F event ledger (group B — polaris.core.classes.score_f)
+#
+# score_F = Σ(net_i / max(abs(fee_i), 0.0001 * notional_i)) over every CLOSED
+# flat->nonzero->flat lifecycle (``positions`` row) for a (venue, strategy_id)
+# track. ``score_f_events`` is an APPEND-ONLY per-lifecycle event log — ONE
+# row per closed ``position_id`` (UNIQUE, so a re-scan of an already-scored
+# lifecycle is a no-op INSERT OR IGNORE) — same "no mutable aggregate column"
+# shape as ``ladder_ledger``: every daily/window total is a live ``SUM()``
+# projection over these rows, never a hand-maintained running counter, so a
+# crash mid-batch can never corrupt a rollup (replay re-derives it). Written
+# by a batch-commit sweeper (never inline in the position-close hot path,
+# mirrors ``materialize_credits`` / feedback_db_lock_is_architecture_signal).
+# ---------------------------------------------------------------------------
+
+DDL_SCORE_F_EVENTS = """
+CREATE TABLE IF NOT EXISTS score_f_events (
+    position_id TEXT PRIMARY KEY,
+    venue TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    closed_ts INTEGER NOT NULL,
+    net_usd REAL NOT NULL DEFAULT 0.0,
+    fee_denom_usd REAL NOT NULL DEFAULT 0.0001,
+    score_contrib REAL NOT NULL DEFAULT 0.0
+);
+"""
+
+DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_score_f_events_track_day
+    ON score_f_events(venue, strategy_id, day);
+"""
+
+# Scan-window watermark — how far the score_F sweeper has progressed
+# (closed_ts of the last position folded in). Advances only after a batch's
+# INSERTs all commit; a crash mid-batch just re-scans the same window next
+# pass, safe because ``position_id`` PRIMARY KEY makes the INSERT idempotent
+# (mirrors ``ladder_credit_checkpoint``).
+DDL_SCORE_F_CHECKPOINT = """
+CREATE TABLE IF NOT EXISTS score_f_checkpoint (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_scanned_closed_ts INTEGER NOT NULL DEFAULT 0
+);
+"""

@@ -132,6 +132,12 @@ class GoldRiskoffTrendAmplifyStrategy(BaseStrategy):
         product_class="cfd",
         hold_overnight=True,
         profit_target_r=None,
+        # bars-EXTERNAL input: _riskoff_scalar reads MarketView.altdata.vix,
+        # which refreshes on its own intraday cadence independent of the 1D
+        # bar close — the bar-advance dispatch gate must not suppress a
+        # re-eval (compute-scheduling exemption only, see
+        # StrategyMetadata.evaluates_in_progress_bar).
+        evaluates_in_progress_bar=True,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

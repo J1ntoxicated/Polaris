@@ -98,6 +98,20 @@ class StrategyMetadata:
     # flow_not_block: it never blocks the SIGNAL; it only defers the ORDER (the
     # signal + would-be P&L are logged, not dropped). NOT a size dampen / halt.
     shadow_first: bool = False
+    # evaluates_in_progress_bar: exempts this strategy from the bar-advance
+    # dispatch gate (compute scheduling only — never a trade throttle). The
+    # DEFAULT (False) means ``generate_raw_signal`` is a PURE function of
+    # ``MarketView.bars`` (ADR-008 signal-generator-only), so the live bar
+    # pipeline SKIPS a re-invocation when the newest bar ts has not advanced
+    # since this (venue, symbol, timeframe, strategy) key was last evaluated —
+    # a same-bar re-poll would recompute the byte-identical signal. Set True
+    # for a strategy whose signal ALSO depends on something that changes
+    # BETWEEN bar closes (a live session-open window / orderbook depth /
+    # funding rate / intraday VIX) — it re-evaluates every tick, unchanged from
+    # pre-gate behaviour. flow_not_block: this is a redundant-recompute skip,
+    # never a size dampen / entry block — every signal-bearing bar is still
+    # evaluated (see ``_production_bar_gate.bar_advance_due``).
+    evaluates_in_progress_bar: bool = False
 
 
 @dataclass(frozen=True, slots=True)

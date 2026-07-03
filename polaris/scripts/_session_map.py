@@ -57,6 +57,7 @@ __all__ = [
     "US_CLOSE_MIN",
     "US_OPEN_MIN",
     "WARM_LEAD_MIN",
+    "entry_fanout_active",
     "equity_fetch_active",
     "instrument_session_weight",
     "session_group",
@@ -357,6 +358,66 @@ def equity_fetch_active(
     # Fully closed (overnight / weekend) → only the #66 pre-open warm window may
     # keep the backfill alive; otherwise skip (the market is producing no bars).
     return _session_warm_active(venue, asset_class, symbol, ts)
+
+
+def entry_fanout_active(
+    venue: str, asset_class: str, symbol: str, now_ts: int | float
+) -> bool:
+    """Should the bar-pipeline NEW-ENTRY strategy dispatch fan-out run right now?
+
+    A NEW-ENTRY-ONLY compute-scheduling gate (spec_b — mirrors the shape of
+    ``equity_entry_held_for_session``: an INTEGRITY-class skip, never a P&L
+    throttle). A closed venue book produces no new bars and would reject any
+    order, so re-running the strategy dispatch fan-out for it is a wasted CPU
+    cycle — not a missed opportunity. This predicate is consulted ONLY at the
+    NEW-ENTRY fan-out call site; it is structurally ABSENT from the exit/
+    recalc lane, EOD flatten, rotation, and WS resubscribe, so an open
+    position's management is completely unaffected regardless of what this
+    returns (flow_not_block).
+
+    Routing:
+    - alpaca equity -> delegates to the existing #84 ``equity_fetch_active``
+      (weekend + RTH + #66 warm window; byte-identical to that gate). An
+      Alpaca CRYPTO symbol is not equity-gated (mirrors ``equity_fetch_active``).
+    - capital forex -> 24/5: True any weekday hour, False only on the weekend
+      (the FX book is shut).
+    - capital index/commodity -> the cached regional session window
+      (``session_group``/``_GROUP_WINDOW``) as a HARD boolean: True inside the
+      symbol's cash window on a weekday, False outside it or on the weekend.
+      An unmapped symbol (e.g. a commodity with no discrete cash session) has
+      no window to be outside of -> True any weekday hour, False on the
+      weekend (flow_not_block: unknown = active).
+    - okx / any other venue -> unconditionally True (fail-open — doubt never
+      skips a fan-out).
+    """
+    v = venue.strip().lower()
+    if v == "alpaca":
+        return equity_fetch_active(venue, asset_class, symbol, now_ts)
+    if v != "capital":
+        return True  # okx (24/7) + any unmapped venue — fail-open
+
+    try:
+        ts = int(now_ts)
+    except (TypeError, ValueError, OverflowError):
+        return True  # unparseable clock → active (flow_not_block, never skip)
+    if ts < 0:
+        ts = 0
+    local = dt.datetime.fromtimestamp(ts, tz=dt.UTC)
+    is_weekend = local.weekday() >= 5
+    if is_weekend:
+        return False  # Capital books (FX/index/commodity) are shut all weekend
+
+    cls = asset_class.strip().lower()
+    if cls in _FX_CLASSES:
+        return True  # FX 24/5 — active any weekday hour (weekend already handled)
+
+    group = session_group(symbol)
+    if group is None:
+        return True  # no discrete cash session (commodity/unmapped) → active
+
+    minute = local.hour * 60 + local.minute
+    open_min, close_min = _GROUP_WINDOW[group]
+    return open_min <= minute < close_min
 
 
 def session_transitions(

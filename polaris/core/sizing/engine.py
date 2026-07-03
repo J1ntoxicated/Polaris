@@ -568,7 +568,6 @@ def headroom_min(
     track_remaining: float,
     venue_daily_remaining: float,
     total_daily_remaining: float,
-    r_pool_remaining: float | None = None,
 ) -> tuple[float, str]:
     """Single-pass ``min()`` over proposed + every available cap.
 
@@ -581,17 +580,14 @@ def headroom_min(
     None values for underlying / cluster mean "not configured" — they do not
     participate in the min().
 
-    ``r_pool_remaining`` (pts-classes group E) is a pure min() SLOT —
-    ``min(alloc, 0.5 x track_gross_cap(intent.track))`` at the
-    ``compute_size`` call site, where ``alloc`` is THIS signal's own
-    (venue, strategy) share of the track's BENCH-freed capital as computed by
-    ``polaris.core.classes.r_pool.allocate_r_pool`` — bounding how much of the
-    R-pool a single signal can draw on. It is a min() term exactly like every
-    existing slot here, NOT a T4 chain multiplier (9-stack ban intact);
-    ``None`` (default) means "not configured" and never participates,
-    matching ``underlying_remaining`` / ``cluster_remaining``'s existing
-    opt-in shape — every pre-group-E caller (no ``bench_freed_usd`` /
-    ``track_members`` threaded) is byte-identical.
+    pts-classes group E's R-pool (BENCH-freed R routed to EARN members —
+    ``polaris.core.classes.r_pool.allocate_r_pool``) is NOT a slot here: spec
+    ⑤ (prove_then_scale_classes_2026-07-03.md) + the module's own docstring
+    require it to be ADDITIVE headroom (freed R makes a winning EARN member's
+    cap BIGGER), and a min() term can only shrink a value, never grow it. The
+    ``compute_size`` call site folds the R-pool allocation onto
+    ``single_trade_cap`` BEFORE calling this function (ladder-draw pattern:
+    ``cap_base + addon``) instead of passing it in as a competing candidate.
     """
     candidates: list[tuple[str, float]] = [
         ("proposed", proposed_risk_pct),
@@ -606,8 +602,6 @@ def headroom_min(
     if cluster_remaining is not None:
         candidates.insert(4 if underlying_remaining is not None else 3,
                           ("cluster", cluster_remaining))
-    if r_pool_remaining is not None:
-        candidates.append(("r_pool", r_pool_remaining))
 
     final_name, final_val = min(candidates, key=lambda c: c[1])
     return max(0.0, final_val), final_name
@@ -871,27 +865,29 @@ def compute_size(
                     intent.venue, intent.symbol, intent.signal_id, draw_id,
                     draw_used_usd, cap_base, single_trade_cap,
                 )
-    # R-pool slot (pts-classes group E) — cap = min(alloc, 0.5 x track_R).
-    # ``alloc`` is THIS signal's own (venue, strategy) share of the track's
-    # BENCH-freed R, computed by actually calling ``allocate_r_pool`` against
-    # the caller-supplied ``PortfolioState.bench_freed_usd`` /
-    # ``track_members`` roster (group E's routing function otherwise has zero
-    # callers — the primary spec term, not just the static ceiling). The
-    # 0.5 x track_gross_cap(intent.track) half stays as the outer ceiling on
-    # top (same pct-of-equity basis as the "track" slot above) — both are
-    # pure min() composition, no new T4 multiplier (9-stack ban intact).
-    # Every pre-fix caller leaves ``bench_freed_usd``/``track_members`` empty
-    # dicts, so ``bench_freed`` degenerates to 0.0 and ``alloc`` to 0.0 — that
-    # would incorrectly bind r_pool at 0 for such callers, so a track with NO
-    # R-pool state configured at all opts this slot OUT entirely (None,
-    # matching underlying_remaining/cluster_remaining's existing "not
-    # configured" shape) rather than silently zeroing every signal's size.
+    # R-pool slot (pts-classes group E) — ADDITIVE headroom onto the binding
+    # single-trade cap, ladder-draw style (engine.py ``draw_for_signal`` above:
+    # ``cap_effective = cap_base + draw_used``). ``alloc`` is THIS signal's own
+    # (venue, strategy) share of the track's BENCH-freed R, computed by
+    # actually calling ``allocate_r_pool`` against the caller-supplied
+    # ``PortfolioState.bench_freed_usd`` / ``track_members`` roster (group E's
+    # routing function otherwise has zero callers). Spec ⑤
+    # (prove_then_scale_classes_2026-07-03.md) + this module's own docstring
+    # (r_pool.py, test_r_pool.py) require the freed pool to WIDEN an EARN
+    # winner's headroom, never compete as a downward min() clamp on the base
+    # T4 size — a min() term can only shrink, never add, so the alloc is
+    # folded onto ``single_trade_cap`` BEFORE ``headroom_min`` runs.
+    # ``0.5 x track_gross_cap(intent.track)`` caps the ADDED amount only (not
+    # the base size) — same half-track ceiling the spec table names, just
+    # applied to the increment instead of as a competing slot. Every pre-fix
+    # caller leaves ``bench_freed_usd``/``track_members`` empty dicts, so
+    # ``alloc`` degenerates to 0.0 — a no-op addition, byte-identical to the
+    # pre-group-E chain.
     bench_freed = portfolio.bench_freed_usd.get(intent.track, 0.0)
     members = portfolio.track_members.get(intent.track, [])
-    r_pool_ceiling = 0.5 * track_gross_cap(intent.track)
-    if not portfolio.bench_freed_usd and not portfolio.track_members:
-        r_pool_remaining: float | None = None
-    else:
+    r_pool_addon_ceiling = 0.5 * track_gross_cap(intent.track)
+    r_pool_addon_pct = 0.0
+    if portfolio.bench_freed_usd or portfolio.track_members:
         pool_result = allocate_r_pool(
             track=intent.track,
             bench_freed_usd=bench_freed,
@@ -904,7 +900,16 @@ def compute_size(
         )
         basis_now = portfolio.equity_usd * intent.leverage
         alloc_pct = alloc_usd / basis_now if basis_now > 0.0 else 0.0
-        r_pool_remaining = min(alloc_pct, r_pool_ceiling)
+        r_pool_addon_pct = min(alloc_pct, r_pool_addon_ceiling)
+    if r_pool_addon_pct > 0.0:
+        r_pool_cap_base = single_trade_cap
+        single_trade_cap = r_pool_cap_base + r_pool_addon_pct
+        logger.info(
+            "[T4/r-pool-addon] %s/%s sid=%s track=%s addon_pct=%.6f "
+            "cap_base=%.4f cap_effective=%.4f",
+            intent.venue, intent.symbol, intent.signal_id, intent.track,
+            r_pool_addon_pct, r_pool_cap_base, single_trade_cap,
+        )
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
         single_trade_cap=single_trade_cap,
@@ -914,7 +919,6 @@ def compute_size(
         track_remaining=track_rem,
         venue_daily_remaining=venue_daily_rem,
         total_daily_remaining=total_daily_rem,
-        r_pool_remaining=r_pool_remaining,
     )
     if binding == "single_trade":
         # Structured binding log (P0-3 test requirement): name the SPECIFIC
@@ -1017,12 +1021,13 @@ def compute_size(
             probe_risk_pct = probe_notional_usd(intent.venue) / basis if basis > 0.0 else 0.0
             # Defense in depth: the fixed probe constant still passes through
             # the SAME already-computed headroom_min caps (no new cap slot —
-            # reuses the exact per_symbol/cluster/track/venue/total/r_pool
-            # remaining values from step 7/R-pool-slot above) so a genuinely
-            # cap-exhausted portfolio still clips a probe, same as it would
-            # clip an EARN trade. r_pool_remaining MUST be threaded here too —
-            # this is a second, independent headroom_min() call, not covered
-            # by the outer one above.
+            # reuses the exact per_symbol/cluster/track/venue/total remaining
+            # values from step 7 above) so a genuinely cap-exhausted portfolio
+            # still clips a probe, same as it would clip an EARN trade.
+            # ``single_trade_cap`` already carries the R-pool ADDITIVE
+            # headroom folded in above (ladder-style) — no separate
+            # ``r_pool_remaining`` slot to thread here, it is not a
+            # competing min() candidate.
             final_risk_pct, binding = headroom_min(
                 proposed_risk_pct=probe_risk_pct,
                 single_trade_cap=single_trade_cap,
@@ -1032,7 +1037,6 @@ def compute_size(
                 track_remaining=track_rem,
                 venue_daily_remaining=venue_daily_rem,
                 total_daily_remaining=total_daily_rem,
-                r_pool_remaining=r_pool_remaining,
             )
             notional = final_risk_pct * basis
             if binding == "proposed":

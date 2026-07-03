@@ -774,17 +774,30 @@ def test_t4_compute_proposed_nan_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R-pool headroom slot — pts-classes group E. ``0.5 x track_R`` (track_R =
-# track_gross_cap(intent.track)) is a NEW pure min() term in the SAME
-# headroom_min() clip, not a T4 chain multiplier — the R-pool's allocated
-# capital is bounded by half of that track's total gross-cap headroom,
-# composed via min() alongside every existing cap (9-stack ban intact).
+# R-pool headroom — pts-classes group E. Spec ⑤
+# (prove_then_scale_classes_2026-07-03.md) + the module's own docstring
+# (polaris/core/classes/r_pool.py, tests/test_r_pool.py) require BENCH-freed
+# R routed to an EARN member to be ADDITIVE headroom (ladder-draw pattern,
+# ``cap_base + addon``, folded onto ``single_trade_cap`` BEFORE
+# ``headroom_min`` runs) — NEVER a competing min() slot that can clip a
+# winning EARN member's size down. ``headroom_min`` itself therefore has no
+# r_pool parameter at all; see tests/test_r_pool_engine_wire.py for the
+# compute_size-level additive-headroom proof.
 # ---------------------------------------------------------------------------
 
 
-def test_headroom_min_r_pool_slot_optional_default_none() -> None:
-    """Omitting r_pool_remaining reproduces the exact pre-group-E result —
-    byte-identical backward compat for every existing call site."""
+def test_headroom_min_has_no_r_pool_param() -> None:
+    """headroom_min's signature has no r_pool slot — the R-pool allocation is
+    folded additively onto single_trade_cap by the compute_size call site
+    instead of competing here (a min() term can only shrink, never add)."""
+    import inspect
+
+    params = set(inspect.signature(headroom_min).parameters)
+    assert "r_pool_remaining" not in params
+
+
+def test_headroom_min_unaffected_by_r_pool_removal() -> None:
+    """Ordinary headroom_min behavior (no r_pool involvement) is untouched."""
     val, name = headroom_min(
         proposed_risk_pct=0.20,
         single_trade_cap=0.08,
@@ -799,69 +812,14 @@ def test_headroom_min_r_pool_slot_optional_default_none() -> None:
     assert name in ("single_trade", "venue_daily")
 
 
-def test_headroom_min_r_pool_slot_clips_when_lowest() -> None:
-    """0.5 x track_R participates in the min() and can bind as ``r_pool``."""
-    r_pool_val = 0.03  # deliberately below every other candidate below
-    val, name = headroom_min(
-        proposed_risk_pct=0.20,
-        single_trade_cap=0.30,
-        per_symbol_remaining=0.50,
-        underlying_remaining=None,
-        cluster_remaining=None,
-        track_remaining=0.60,
-        venue_daily_remaining=0.30,
-        total_daily_remaining=0.30,
-        r_pool_remaining=r_pool_val,
-    )
-    assert val == pytest.approx(r_pool_val)
-    assert name == "r_pool"
-
-
-def test_headroom_min_r_pool_slot_does_not_bind_when_not_lowest() -> None:
-    track_r = track_gross_cap("A")
-    val, name = headroom_min(
-        proposed_risk_pct=0.01,
-        single_trade_cap=0.30,
-        per_symbol_remaining=0.50,
-        underlying_remaining=None,
-        cluster_remaining=None,
-        track_remaining=0.60,
-        venue_daily_remaining=0.30,
-        total_daily_remaining=0.30,
-        r_pool_remaining=0.5 * track_r,
-    )
-    assert val == pytest.approx(0.01)
-    assert name == "proposed"
-
-
-def test_headroom_min_r_pool_none_never_participates() -> None:
-    """r_pool_remaining=None (the default) must never enter the min() —
-    proven by a deliberately tiny value that WOULD bind if it participated."""
-    val, name = headroom_min(
-        proposed_risk_pct=0.20,
-        single_trade_cap=0.30,
-        per_symbol_remaining=0.50,
-        underlying_remaining=None,
-        cluster_remaining=None,
-        track_remaining=0.60,
-        venue_daily_remaining=0.30,
-        total_daily_remaining=0.30,
-    )
-    assert name != "r_pool"
-    assert val == pytest.approx(0.20)
-
-
-def test_compute_size_r_pool_term_uses_half_track_gross_cap(memdb: sqlite3.Connection) -> None:
-    """compute_size threads 0.5 x track_gross_cap(intent.track) into the
-    headroom_min() r_pool slot automatically — no caller wiring needed."""
+def test_compute_size_no_r_pool_state_byte_identical(memdb: sqlite3.Connection) -> None:
+    """compute_size with no bench_freed_usd/track_members (every pre-group-E
+    caller) must never bind r_pool and never error — a no-op addition."""
     _seed_top_quartile_cell(memdb)
     intent = _intent()
     assert intent.track == "A"
     sized = compute_size(
         memdb, intent=intent, risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
-    # Track A gross cap = 0.99 -> r_pool slot = 0.495, far above this small
-    # signal's proposed size, so it must NOT bind — but must not error/skip
-    # either (regression-proof that the new slot is wired, not just defined).
     assert math.isfinite(sized.final_risk_pct)
     assert sized.binding_cap != "r_pool"

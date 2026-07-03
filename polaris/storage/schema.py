@@ -23,6 +23,12 @@ from polaris.storage.schema_ddl_altdata import (
     DDL_TICKER_GROUND,
     DDL_TICKER_GROUND_INDEX,
 )
+from polaris.storage.schema_ddl_classes import (
+    DDL_SCORE_F_CHECKPOINT,
+    DDL_SCORE_F_EVENTS,
+    DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
+    DDL_STRATEGY_CLASS,
+)
 from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS,
     DDL_ALLOCATOR_RESERVATIONS_KEY_INDEX,
@@ -117,6 +123,10 @@ from polaris.storage.schema_ddl_ext import (
     DDL_VENUE_BLOCKLIST,
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
+)
+from polaris.storage.schema_ddl_reranker import (
+    DDL_PROBE_SLOT_ASSIGNMENT,
+    DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
 )
 
 # ---------------------------------------------------------------------------
@@ -255,6 +265,19 @@ ALL_DDL: tuple[str, ...] = (
     DDL_LADDER_LEDGER_DRAW_UNIQUE,
     DDL_LADDER_LEDGER_TS_INDEX,
     DDL_LADDER_CREDIT_CHECKPOINT,
+    # Performance-Tiered Strategy classes (pts-classes 2026-07-03, group A) —
+    # capital-routing tier record (which class/track_R cap a strategy holds),
+    # NOT a block filter. See schema_ddl_classes.py docstring.
+    DDL_STRATEGY_CLASS,
+    # score_F classification (pts-classes 2026-07-03, group B) — append-only
+    # per-lifecycle fee-normalized-edge event ledger + sweeper checkpoint.
+    DDL_SCORE_F_EVENTS,
+    DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
+    DDL_SCORE_F_CHECKPOINT,
+    # Probe reranker (pts-classes 2026-07-03, group F) — append-only per-run
+    # snapshot of which PROVE candidates hold a track's concurrent probe slot.
+    DDL_PROBE_SLOT_ASSIGNMENT,
+    DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
 )
 
 
@@ -635,6 +658,20 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     if rs_cols and "last_advanced_bar_id" not in rs_cols:
         conn.execute(
             "ALTER TABLE regime_state ADD COLUMN last_advanced_bar_id INTEGER"
+        )
+    # strategy_class.last_promotion_ts — pts-classes (group WIRE) close-hook
+    # glue needs a promotion-only timestamp to enforce the 24h promotion rate
+    # limit (transition.py's own last_transition_ts is bumped on EVERY
+    # transition including demotions, so it cannot double as this). ADDITIVE,
+    # NULL default = "never promoted" (transition.py treats None as never
+    # rate-limited, matching a fresh/bootstrapped row).
+    sc_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(strategy_class)").fetchall()
+    }
+    if sc_cols and "last_promotion_ts" not in sc_cols:
+        conn.execute(
+            "ALTER TABLE strategy_class ADD COLUMN last_promotion_ts INTEGER"
         )
     _migrate_quote_ticks_to_lww(conn)
 

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris daily probe slot reranker — 07:35 LOCAL (machine TZ = Australia/Sydney).
+
+  pts-classes (group F, prove_then_scale_classes_2026-07-03.md 빌드 스펙 ⑥):
+  pessimistic-shadow score_F desc rerank of every PROVE-class candidate,
+  concurrent probe cap (3/2/1 per track) + 24h probe fee cap
+  (6/4/2 x F_track_cap) slot assignment, persisted append-only into
+  probe_slot_assignment (one snapshot batch per run_ts).
+
+  Scheduled 5 minutes after com.polaris.daily.restart's 07:30 trigger — the
+  restart's own settle window (RESTART_SETTLE_SEC=120s) plus retention/WAL
+  work is expected done by then, so this sweep reads a freshly-booted, quiet
+  DB rather than racing the restart's own writes. This job itself never stops
+  the bot and never opens the DB in any exclusive mode — a plain read + one
+  small append-only batch commit (feedback_db_lock_is_architecture_signal).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.probe.reranker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.probe_reranker</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>35</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/probe_reranker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/probe_reranker.err</string>
+</dict>
+</plist>

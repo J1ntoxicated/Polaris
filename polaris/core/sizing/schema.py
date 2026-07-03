@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
+from polaris.core.classes.r_pool import TrackMember
+
 # ---------------------------------------------------------------------------
 # Constants (P0)
 # ---------------------------------------------------------------------------
@@ -419,3 +421,11 @@ class PortfolioState:
     track_used_pct: dict[Track, float] = field(default_factory=dict)
     open_positions: list[PositionRiskState] = field(default_factory=list)
     fill_rate_active_cut: bool = False  # post-hysteresis state
+    # pts-classes group E (R-pool) — per-track BENCH-freed R headroom (USD)
+    # and the track's current (venue,strategy_id) roster, threaded straight
+    # into ``polaris.core.classes.r_pool.allocate_r_pool`` by ``compute_size``.
+    # Default {} for every pre-group-E caller (byte-identical: an empty dict
+    # means zero freed R / zero members, same as "not configured" elsewhere
+    # in this module).
+    bench_freed_usd: dict[Track, float] = field(default_factory=dict)
+    track_members: dict[Track, list[TrackMember]] = field(default_factory=dict)

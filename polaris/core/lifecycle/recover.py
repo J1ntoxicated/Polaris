@@ -23,14 +23,22 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any, Protocol
 
+from polaris.core.lifecycle.recover_classes import (
+    StrategyClassRow,
+    bootstrap_replay_strategy_class,
+    hydrate_strategy_class,
+)
 from polaris.core.lifecycle.trade import SimulatedTrade
 from polaris.core.metrics.risk_unit import risk_usd_at_entry
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "StrategyClassRow",
+    "bootstrap_replay_strategy_class",
     "hydrate_last_entry_by_key",
     "hydrate_open_positions",
+    "hydrate_strategy_class",
     "reconcile_venue_positions",
 ]
 

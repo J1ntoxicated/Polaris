@@ -1,13 +1,13 @@
 #!/bin/bash
-# Remove the four Polaris ops automation agents (watchdog / daily restart /
-# daily digest / nightly replay). Touches ONLY these labels — never the
-# dashboard agent, never any running process (no signals of any kind; a
-# running bot keeps running).
+# Remove the five Polaris ops automation agents (watchdog / daily restart /
+# daily digest / nightly replay / probe reranker). Touches ONLY these labels
+# — never the dashboard agent, never any running process (no signals of any
+# kind; a running bot keeps running).
 set -euo pipefail
 
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 UID_N="$(id -u)"
-OWN=(com.polaris.watchdog com.polaris.daily.restart com.polaris.daily.digest com.polaris.replay.nightly)
+OWN=(com.polaris.watchdog com.polaris.daily.restart com.polaris.daily.digest com.polaris.replay.nightly com.polaris.probe.reranker)
 
 for label in "${OWN[@]}"; do
     launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true

@@ -20,7 +20,7 @@ time keeps the replay deterministic without re-implementing portfolio state.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from polaris.core.cell_matrix import CellContext, CellKeyP0
 from polaris.core.cell_matrix.schema import TradeClose
@@ -45,6 +45,7 @@ from polaris.core.replay.fill_model import (
 from polaris.core.replay.models import ReplayConfig, ReplayResult, ReplayTrade
 from polaris.core.replay.sandbox_db import seed_sandbox
 from polaris.core.sizing import SignalIntent, compute_size
+from polaris.core.sizing.probe_notional import resolve_strategy_class
 from polaris.core.streams import resolve_stream
 from polaris.strategies import all_strategies
 from polaris.strategies.base import BaseStrategy, RawSignal
@@ -258,6 +259,17 @@ class ReplayEngine:
             now_ts=int(bars[i].ts),
         )
         intent: SignalIntent = payload["signal_intent"]
+        # pts-classes (group D): class-aware, same as the live path. NOTE —
+        # ``strategy_class`` is not in sandbox_db.SEED_TABLES yet, so this
+        # resolves to the fail-open default (EARN) for every replay run today
+        # (byte-identical to pre-pts-classes replay behaviour) until that
+        # table is added to the seed set (out of this group's scope).
+        intent = replace(
+            intent,
+            strategy_class=resolve_strategy_class(
+                sandbox, venue=venue, strategy_id=intent.strategy
+            ),
+        )
         sized = compute_size(
             sandbox,
             intent=intent,

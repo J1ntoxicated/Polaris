@@ -17,6 +17,19 @@ MARKER_PATTERNS: dict[str, re.Pattern[str]] = {
     "db_lock": re.compile(r"database is locked"),
     "ws_error": re.compile(r"ws\] connection error"),
     "ws_gave_up": re.compile(r"giving up, REST-only mode"),
+    # pts-classes group G — transition.py's fill-gate outcome (a (venue,
+    # strategy) track has too little execution evidence to judge; the close
+    # hook only logs on a CHANGED class, so this marker matches wherever the
+    # literal reason string appears (future-proofs the emission side, which
+    # lives in group WIRE's _production_close_classes.py, out of this
+    # group's scope).
+    "exec_starved": re.compile(r"EXEC_STARVED"),
+    # tools/ops/probe_reranker.py's daily rerank: a PROVE candidate lost its
+    # slot to the shared 24h probe-fee budget (FEE_CAP_EXHAUSTED) — the
+    # concurrency-only exhaustion (CONCURRENCY_CAP_EXHAUSTED) is a routine
+    # capacity outcome, not a fee-budget signal, so it is intentionally not
+    # matched here.
+    "probe_fee_exhausted": re.compile(r"FEE_CAP_EXHAUSTED"),
 }
 
 

@@ -35,7 +35,12 @@ from polaris.core.cell_matrix import (
     resolve_routing_for_cell,
     update_on_trade_close,
 )
-from polaris.core.cell_matrix.routing import fetch_posterior_tilt
+from polaris.core.cell_matrix.routing import (
+    ANTI_EDGE_MIN_N,
+    ANTI_EDGE_P_POS_MAX,
+    fetch_learner_anti_edge,
+    fetch_posterior_tilt,
+)
 from polaris.core.cell_matrix.score import (
     POSTERIOR_TILT_CEIL,
     POSTERIOR_TILT_FLOOR,
@@ -148,6 +153,61 @@ def test_fetch_posterior_tilt_mature_winner_amplifies(memdb: sqlite3.Connection)
         regime="bull_trend", p_pos=0.95, n_samples=60,
     )
     assert fetch_posterior_tilt(memdb, key) > 1.0
+
+
+# ---------------------------------------------------------------------------
+# fetch_learner_anti_edge — pts-classes (group D) PROVE shadow-routing trigger
+# (p_pos<=0.20 & n_samples>=20, task-header threshold — distinct from this
+# file's posterior_tilt / EDGE_VERDICT_TAU_LO thresholds). Lives alongside
+# fetch_posterior_tilt (SAME learner_posterior table + fail-open contract) so
+# polaris.core.sizing never reads the raw table directly (SSOT guard,
+# test_edge_validation.test_sizing_does_not_import_posterior).
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_learner_anti_edge_true_when_low_and_sufficient_n(
+    memdb: sqlite3.Connection,
+) -> None:
+    key = CellKeyP0("okx", "volume_burst", "AE-USDT", "bull_trend")
+    _seed_posterior(
+        memdb, exchange="okx", strategy="volume_burst", ticker="AE-USDT",
+        regime="bull_trend", p_pos=0.10, n_samples=25,
+    )
+    assert fetch_learner_anti_edge(memdb, key) is True
+
+
+def test_fetch_learner_anti_edge_false_when_n_insufficient(memdb: sqlite3.Connection) -> None:
+    key = CellKeyP0("okx", "volume_burst", "SPARSE-USDT", "bull_trend")
+    _seed_posterior(
+        memdb, exchange="okx", strategy="volume_burst", ticker="SPARSE-USDT",
+        regime="bull_trend", p_pos=0.05, n_samples=ANTI_EDGE_MIN_N - 1,
+    )
+    assert fetch_learner_anti_edge(memdb, key) is False
+
+
+def test_fetch_learner_anti_edge_false_when_p_pos_above_threshold(
+    memdb: sqlite3.Connection,
+) -> None:
+    key = CellKeyP0("okx", "volume_burst", "OK-USDT", "bull_trend")
+    _seed_posterior(
+        memdb, exchange="okx", strategy="volume_burst", ticker="OK-USDT",
+        regime="bull_trend", p_pos=0.25, n_samples=50,
+    )
+    assert fetch_learner_anti_edge(memdb, key) is False
+
+
+def test_fetch_learner_anti_edge_boundary_inclusive(memdb: sqlite3.Connection) -> None:
+    key = CellKeyP0("okx", "volume_burst", "BOUND-USDT", "bull_trend")
+    _seed_posterior(
+        memdb, exchange="okx", strategy="volume_burst", ticker="BOUND-USDT",
+        regime="bull_trend", p_pos=ANTI_EDGE_P_POS_MAX, n_samples=ANTI_EDGE_MIN_N,
+    )
+    assert fetch_learner_anti_edge(memdb, key) is True
+
+
+def test_fetch_learner_anti_edge_false_when_no_row(memdb: sqlite3.Connection) -> None:
+    key = CellKeyP0("okx", "volume_burst", "NO-ROW-USDT", "bull_trend")
+    assert fetch_learner_anti_edge(memdb, key) is False
 
 
 # ---------------------------------------------------------------------------

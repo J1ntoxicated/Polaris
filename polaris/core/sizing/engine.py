@@ -24,7 +24,10 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-from polaris.core.cell_matrix import CellKeyP0
+from polaris.core.cell_matrix import CellKeyP0, fetch_learner_anti_edge
+from polaris.core.classes.probe_fee import accrue_probe_fee
+from polaris.core.classes.r_pool import allocate_r_pool
+from polaris.core.classes.shadow_fill import record_shadow_fill
 from polaris.core.learners.base import (
     NEUTRAL_MULT,
     clip_individual_mult,
@@ -40,6 +43,11 @@ from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
 from polaris.core.sizing.ladder import draw_for_signal
+from polaris.core.sizing.probe_notional import (
+    bottom_cell_shadow_hit,
+    probe_notional_usd,
+    prove_admission_ok,
+)
 from polaris.core.sizing.r_budget_sizer import (
     CapQtyInputs,
     compute_r_budget_qty,
@@ -174,6 +182,15 @@ class SignalIntent:
     # so an absent value is byte-identical to pre-ladder sizing).
     ladder_fresh_bp_usd: float = -1.0
     ladder_pending_usd: float = -1.0
+    # pts-classes (group D) — Performance-Tiered Strategy class this signal's
+    # (venue, strategy) currently holds (``strategy_class`` table, group A
+    # storage). Default "EARN" == byte-identical for every existing caller
+    # that hasn't threaded a real class yet (no_block_filter_architecture:
+    # this is a capital-ROUTING input, never a defensive throttle). Callers
+    # resolve the live class from the ``strategy_class`` table themselves
+    # (core sizing does not read it directly — no new coupling to the group A
+    # storage module from this dataclass).
+    strategy_class: str = "EARN"
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +581,15 @@ def headroom_min(
         single → per-symbol → underlying → cluster → track → venue → total
     None values for underlying / cluster mean "not configured" — they do not
     participate in the min().
+
+    pts-classes group E's R-pool (BENCH-freed R routed to EARN members —
+    ``polaris.core.classes.r_pool.allocate_r_pool``) is NOT a slot here: spec
+    ⑤ (prove_then_scale_classes_2026-07-03.md) + the module's own docstring
+    require it to be ADDITIVE headroom (freed R makes a winning EARN member's
+    cap BIGGER), and a min() term can only shrink a value, never grow it. The
+    ``compute_size`` call site folds the R-pool allocation onto
+    ``single_trade_cap`` BEFORE calling this function (ladder-draw pattern:
+    ``cap_base + addon``) instead of passing it in as a competing candidate.
     """
     candidates: list[tuple[str, float]] = [
         ("proposed", proposed_risk_pct),
@@ -841,6 +867,55 @@ def compute_size(
                     intent.venue, intent.symbol, intent.signal_id, draw_id,
                     draw_used_usd, cap_base, single_trade_cap,
                 )
+    # R-pool slot (pts-classes group E) — ADDITIVE headroom onto the binding
+    # single-trade cap, ladder-draw style (engine.py ``draw_for_signal`` above:
+    # ``cap_effective = cap_base + draw_used``). ``alloc`` is THIS signal's own
+    # (venue, strategy) share of the track's BENCH-freed R, computed by
+    # actually calling ``allocate_r_pool`` against the caller-supplied
+    # ``PortfolioState.bench_freed_usd`` / ``track_members`` roster (group E's
+    # routing function otherwise has zero callers). Spec ⑤
+    # (prove_then_scale_classes_2026-07-03.md) + this module's own docstring
+    # (r_pool.py, test_r_pool.py) require the freed pool to WIDEN an EARN
+    # winner's headroom, never compete as a downward min() clamp on the base
+    # T4 size — a min() term can only shrink, never add, so the alloc is
+    # folded onto ``single_trade_cap`` BEFORE ``headroom_min`` runs.
+    # ``0.5 x track_gross_cap(intent.track)`` caps the ADDED amount only (not
+    # the base size) — same half-track ceiling the spec table names, just
+    # applied to the increment instead of as a competing slot. Every pre-fix
+    # caller leaves ``bench_freed_usd``/``track_members`` empty dicts, so
+    # ``alloc`` degenerates to 0.0 — a no-op addition, byte-identical to the
+    # pre-group-E chain.
+    bench_freed = portfolio.bench_freed_usd.get(intent.track, 0.0)
+    members = portfolio.track_members.get(intent.track, [])
+    r_pool_addon_ceiling = 0.5 * track_gross_cap(intent.track)
+    r_pool_addon_pct = 0.0
+    if portfolio.bench_freed_usd or portfolio.track_members:
+        pool_result = allocate_r_pool(
+            track=intent.track,
+            bench_freed_usd=bench_freed,
+            probe_notional_usd=probe_notional_usd(intent.venue),
+            members=members,
+        )
+        alloc_usd = next(
+            (a.allocated_usd for a in pool_result.allocations if a.strategy_id == intent.strategy),
+            0.0,
+        )
+        basis_now = portfolio.equity_usd * intent.leverage
+        alloc_pct = alloc_usd / basis_now if basis_now > 0.0 else 0.0
+        r_pool_addon_pct = min(alloc_pct, r_pool_addon_ceiling)
+    if r_pool_addon_pct > 0.0:
+        r_pool_cap_base = single_trade_cap
+        single_trade_cap = r_pool_cap_base + r_pool_addon_pct
+        # pts-classes group G — name the NEW ``0.5 x track_R`` ceiling term
+        # explicitly (not just the resulting cap_effective) so the
+        # binding-cap audit trail shows WHICH new term widened this signal's
+        # headroom, falsifiable by a human/alert reading the log.
+        logger.info(
+            "[T4/r-pool-addon] %s/%s sid=%s track=%s addon_pct=%.6f "
+            "track_r_ceiling=%.4f cap_base=%.4f cap_effective=%.4f",
+            intent.venue, intent.symbol, intent.signal_id, intent.track,
+            r_pool_addon_pct, r_pool_addon_ceiling, r_pool_cap_base, single_trade_cap,
+        )
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
         single_trade_cap=single_trade_cap,
@@ -924,6 +999,104 @@ def compute_size(
                 else 0.0
             )
             binding = "r_budget_active"
+
+    # pts-classes (group D) — EARN/PROVE/BENCH class-aware routing. LAST step
+    # before SizingFinal: overrides only the FINAL notional/risk_pct/binding
+    # output for PROVE/BENCH (no new T4 multiplier — 9-stack ban intact).
+    # EARN takes NONE of this branch — byte-identical to the pre-existing
+    # chain above. flow_not_block / aggressive_always_profit /
+    # no_block_filter_architecture: PROVE/BENCH shadow-routing NEVER stops the
+    # signal from being fully computed above (proposal/cell/tier all still
+    # resolved for learning) — it only zeroes the PLACED size.
+    if intent.strategy_class == "EARN":
+        pass
+    elif intent.strategy_class == "PROVE":
+        stop_dist_pct = intent.atr_pct * (
+            intent.stop_atr_mult if intent.stop_atr_mult > 0.0 else STOP_ATR_MULT
+        )
+        admitted = prove_admission_ok(venue=intent.venue, stop_dist_pct=stop_dist_pct)
+        cell_key = CellKeyP0(
+            exchange=intent.venue, strategy=intent.strategy,
+            ticker=intent.symbol, regime=intent.regime,
+        )
+        shadow_triggered = bottom_cell_shadow_hit(cell_mult) or fetch_learner_anti_edge(
+            conn, cell_key
+        )
+        if admitted and not shadow_triggered:
+            basis = portfolio.equity_usd * intent.leverage
+            probe_risk_pct = probe_notional_usd(intent.venue) / basis if basis > 0.0 else 0.0
+            # Defense in depth: the fixed probe constant still passes through
+            # the SAME already-computed headroom_min caps (no new cap slot —
+            # reuses the exact per_symbol/cluster/track/venue/total remaining
+            # values from step 7 above) so a genuinely cap-exhausted portfolio
+            # still clips a probe, same as it would clip an EARN trade.
+            # ``single_trade_cap`` already carries the R-pool ADDITIVE
+            # headroom folded in above (ladder-style) — no separate
+            # ``r_pool_remaining`` slot to thread here, it is not a
+            # competing min() candidate.
+            final_risk_pct, binding = headroom_min(
+                proposed_risk_pct=probe_risk_pct,
+                single_trade_cap=single_trade_cap,
+                per_symbol_remaining=per_symbol_remaining,
+                underlying_remaining=underlying_remaining,
+                cluster_remaining=cluster_rem,
+                track_remaining=track_rem,
+                venue_daily_remaining=venue_daily_rem,
+                total_daily_remaining=total_daily_rem,
+            )
+            notional = final_risk_pct * basis
+            if binding == "proposed":
+                binding = "prove_probe_notional"
+            # pts-classes (group WIRE) — accrue this fired probe's expected
+            # round-trip fee onto strategy_class.probe_fee_24h (bookkeeping
+            # only; the daily reranker enforces the 24h fee cap downstream).
+            accrue_probe_fee(
+                conn, venue=intent.venue, strategy_id=intent.strategy,
+                notional_usd=notional,
+            )
+        else:
+            notional = 0.0
+            final_risk_pct = 0.0
+            binding = "prove_shadow"
+            # pts-classes (group WIRE) — record the pessimistic shadow fill so
+            # the BENCH reentry ladder has evidence to read later. order_style
+            # defaults to "market" (sizing does not know the execution-layer
+            # order style yet) — the conservative, more-pessimistic choice.
+            record_shadow_fill(
+                conn, venue=intent.venue, strategy_id=intent.strategy,
+                ticker=intent.symbol, regime=intent.regime,
+                order_style="market", atr_pct=intent.atr_pct,
+            )
+        # pts-classes group G — name the fixed PROVE probe constant
+        # (probe_notional_usd_source) driving this size, not just the final
+        # (possibly cap-clipped) notional — makes the T4-chain-external
+        # constant itself falsifiable in the audit trail.
+        logger.info(
+            "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s shadow=%s "
+            "stop_dist_pct=%.6f binding=%s probe_notional_usd=%.2f notional=%.2f",
+            intent.venue, intent.symbol, intent.signal_id, admitted,
+            shadow_triggered, stop_dist_pct, binding,
+            probe_notional_usd(intent.venue), notional,
+        )
+    else:
+        # BENCH (and any unrecognized/KILL class) — always shadow. Fail-safe
+        # toward shadow rather than silently defaulting an unknown class to
+        # full EARN size.
+        notional = 0.0
+        final_risk_pct = 0.0
+        binding = "bench_shadow"
+        # pts-classes (group WIRE) — same shadow-fill recording as the PROVE
+        # shadow branch above (BENCH is shadow-routed unconditionally).
+        record_shadow_fill(
+            conn, venue=intent.venue, strategy_id=intent.strategy,
+            ticker=intent.symbol, regime=intent.regime,
+            order_style="market", atr_pct=intent.atr_pct,
+        )
+        logger.info(
+            "[T4/pts-class] %s/%s sid=%s class=%s -> bench_shadow (routing, "
+            "not a block — signal fully computed above for learning)",
+            intent.venue, intent.symbol, intent.signal_id, intent.strategy_class,
+        )
 
     return SizingFinal(
         proposed=proposal,

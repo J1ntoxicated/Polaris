@@ -1,0 +1,115 @@
+"""pts-classes (group WIRE) — boot sequence: hydrate + bootstrap replay.
+
+DEMO/PAPER only (virtual capital, OKX SPOT demo + Capital CFD demo).
+Aggressive bias preserved — ``strategy_class`` is a capital-ROUTING record;
+seeding/hydrating it never blocks a strategy from signaling/learning/shadow-
+pricing (aggressive_always_profit / no_block_filter_architecture).
+
+Wires group A's ``hydrate_strategy_class`` / ``bootstrap_replay_strategy_class``
+(storage layer, ``polaris.core.lifecycle.recover``) into the ACTUAL boot path
+(``run_production_paper_loop``) — previously exercised only by
+``tests/test_schema_ddl_classes.py``, never called at real boot (silent
+INERT: registered but never fired). ``strategy_class`` itself needs no
+in-memory mirror (``resolve_strategy_class`` already reads it fresh from the
+DB on every G5 call, no cache layer) — hydrate here is a startup CORRECTNESS
+check + one-shot bootstrap trigger, not a state-rebuild like
+``hydrate_open_positions``.
+
+Bootstrap fires ONLY when the ``strategy_class`` table is completely empty
+(a fresh DB / this feature's first boot) — an already-seeded table is left
+untouched (idempotent, restart must never reset a live-tracked class, mirrors
+``bootstrap_replay_strategy_class``'s own per-candidate ON CONFLICT DO NOTHING
+guard). Candidates are every ``(venue, strategy_id)`` in ``STRATEGY_REGISTRY``
+(``cls.metadata.venue`` — the registry's own strategy->venue mapping).
+
+The injected ``score_f`` callable aggregates group B's ``compute_score_f``
+(``Σ score_contrib`` over closed lifecycles) restricted to the trailing
+``lookback_days`` window ending ``now_ts`` — group B's function returns the
+full unbounded history; this lookback-windowed SUM is WIRE's own assembly
+(the same "no separate SSOT specifies HOW to source this" precedent as the
+close-hook module).
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+
+from polaris.core.classes.score_f import compute_score_f
+from polaris.core.lifecycle.recover import (
+    bootstrap_replay_strategy_class,
+    hydrate_strategy_class,
+)
+from polaris.strategies import STRATEGY_REGISTRY
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["boot_hydrate_and_bootstrap_strategy_class"]
+
+# Bootstrap replay window — mirrors the debate spec's "existing 5-week live
+# history" bootstrap-replay basis (prove_then_scale_classes_2026-07-03.md
+# 빌드 스펙 #7).
+_BOOTSTRAP_LOOKBACK_DAYS = 35
+
+
+def _lookback_score_f(
+    conn: sqlite3.Connection, venue: str, strategy_id: str, lookback_days: int
+) -> float:
+    """``Σ score_contrib`` over closed lifecycles in the trailing
+    ``lookback_days`` window (the ``ScoreFFn`` signature group A's
+    ``bootstrap_replay_strategy_class`` expects)."""
+    results = compute_score_f(conn, venue=venue, strategy_id=strategy_id)
+    if not results:
+        return 0.0
+    cutoff = max(r.closed_ts for r in results) - lookback_days * 86_400
+    return sum(r.score_contrib for r in results if r.closed_ts >= cutoff)
+
+
+def _registry_candidates() -> list[tuple[str, str]]:
+    return [
+        (cls.metadata.venue, strategy_id)
+        for strategy_id, cls in STRATEGY_REGISTRY.items()
+    ]
+
+
+def boot_hydrate_and_bootstrap_strategy_class(
+    conn: sqlite3.Connection, *, now_ts: int
+) -> int:
+    """Hydrate the persisted ``strategy_class`` table; bootstrap-replay every
+    registered candidate ONLY when the table is completely empty.
+
+    Returns the number of candidates seeded (0 when the table already had
+    rows — restart must never reset a live-tracked class). Fail-open: any
+    exception is logged and swallowed (boot must never crash on a
+    classification-layer failure, flow_not_block); returns 0 on failure.
+    """
+    try:
+        existing = hydrate_strategy_class(conn)
+        if existing:
+            logger.info(
+                "[pts-classes/boot] %d strategy_class row(s) already tracked "
+                "— hydrate only, no bootstrap replay",
+                len(existing),
+            )
+            return 0
+        candidates = _registry_candidates()
+        bootstrap_replay_strategy_class(
+            conn,
+            candidates=candidates,
+            score_f=_lookback_score_f,
+            lookback_days=_BOOTSTRAP_LOOKBACK_DAYS,
+            now_ts=now_ts,
+        )
+        conn.commit()
+        logger.info(
+            "[pts-classes/boot] bootstrap-replayed %d candidate(s) over a "
+            "%d-day lookback",
+            len(candidates), _BOOTSTRAP_LOOKBACK_DAYS,
+        )
+        return len(candidates)
+    except Exception:  # noqa: BLE001 — boot must never crash on this
+        logger.exception(
+            "[pts-classes/boot] hydrate/bootstrap failed — strategy_class "
+            "left as-is (G5 falls back to EARN default per-row)"
+        )
+        return 0

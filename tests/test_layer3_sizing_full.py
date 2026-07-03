@@ -771,3 +771,55 @@ def test_t4_compute_proposed_negative_rejected() -> None:
 def test_t4_compute_proposed_nan_rejected() -> None:
     with pytest.raises(ValueError):
         compute_proposed(base_risk_pct=float("nan"), continuous=1.0, tier_amp=1.0, cell_mult=1.0)
+
+
+# ---------------------------------------------------------------------------
+# R-pool headroom — pts-classes group E. Spec ⑤
+# (prove_then_scale_classes_2026-07-03.md) + the module's own docstring
+# (polaris/core/classes/r_pool.py, tests/test_r_pool.py) require BENCH-freed
+# R routed to an EARN member to be ADDITIVE headroom (ladder-draw pattern,
+# ``cap_base + addon``, folded onto ``single_trade_cap`` BEFORE
+# ``headroom_min`` runs) — NEVER a competing min() slot that can clip a
+# winning EARN member's size down. ``headroom_min`` itself therefore has no
+# r_pool parameter at all; see tests/test_r_pool_engine_wire.py for the
+# compute_size-level additive-headroom proof.
+# ---------------------------------------------------------------------------
+
+
+def test_headroom_min_has_no_r_pool_param() -> None:
+    """headroom_min's signature has no r_pool slot — the R-pool allocation is
+    folded additively onto single_trade_cap by the compute_size call site
+    instead of competing here (a min() term can only shrink, never add)."""
+    import inspect
+
+    params = set(inspect.signature(headroom_min).parameters)
+    assert "r_pool_remaining" not in params
+
+
+def test_headroom_min_unaffected_by_r_pool_removal() -> None:
+    """Ordinary headroom_min behavior (no r_pool involvement) is untouched."""
+    val, name = headroom_min(
+        proposed_risk_pct=0.20,
+        single_trade_cap=0.08,
+        per_symbol_remaining=0.50,
+        underlying_remaining=None,
+        cluster_remaining=None,
+        track_remaining=0.60,
+        venue_daily_remaining=0.08,
+        total_daily_remaining=0.10,
+    )
+    assert val == pytest.approx(0.08)
+    assert name in ("single_trade", "venue_daily")
+
+
+def test_compute_size_no_r_pool_state_byte_identical(memdb: sqlite3.Connection) -> None:
+    """compute_size with no bench_freed_usd/track_members (every pre-group-E
+    caller) must never bind r_pool and never error — a no-op addition."""
+    _seed_top_quartile_cell(memdb)
+    intent = _intent()
+    assert intent.track == "A"
+    sized = compute_size(
+        memdb, intent=intent, risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
+    assert math.isfinite(sized.final_risk_pct)
+    assert sized.binding_cap != "r_pool"

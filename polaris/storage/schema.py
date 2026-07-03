@@ -23,6 +23,7 @@ from polaris.storage.schema_ddl_altdata import (
     DDL_TICKER_GROUND,
     DDL_TICKER_GROUND_INDEX,
 )
+from polaris.storage.schema_ddl_classes import DDL_STRATEGY_CLASS
 from polaris.storage.schema_ddl_core import (
     DDL_ALLOCATOR_RESERVATIONS,
     DDL_ALLOCATOR_RESERVATIONS_KEY_INDEX,
@@ -255,6 +256,10 @@ ALL_DDL: tuple[str, ...] = (
     DDL_LADDER_LEDGER_DRAW_UNIQUE,
     DDL_LADDER_LEDGER_TS_INDEX,
     DDL_LADDER_CREDIT_CHECKPOINT,
+    # Performance-Tiered Strategy classes (pts-classes 2026-07-03, group A) —
+    # capital-routing tier record (which class/track_R cap a strategy holds),
+    # NOT a block filter. See schema_ddl_classes.py docstring.
+    DDL_STRATEGY_CLASS,
 )
 
 

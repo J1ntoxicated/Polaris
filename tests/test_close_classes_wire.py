@@ -164,6 +164,60 @@ def test_close_hook_increments_dwell_on_no_transition(conn):
     assert row[0] == 1
 
 
+def test_close_hook_logs_exec_starved_unconditionally(conn, caplog):
+    """Regression (pts-classes group G blocker): the close hook's log line
+    was gated on ``if changed:``, but EXEC_STARVED is BY CONSTRUCTION an
+    unchanged-class result (``_unchanged(inp, reason="EXEC_STARVED")`` in
+    transition.py) — so the line could never fire in production, leaving
+    log_scan.py's ``EXEC_STARVED`` regex + watchdog.py's ``exec_starved``
+    alert permanently dead (0 forever) regardless of real starvation.
+
+    Drives ``n_fills_total`` >= 50 with ``last_50_fill_rate`` == 0.0 (50
+    recent signals, zero fills within that signal span) to force the real
+    ``_fill_gate_ok`` gate to fail via the PRODUCTION emission path — not a
+    hand-written synthetic log line."""
+    _upsert_class(conn, strategy_class="EARN", window_w=3)
+
+    # 55 far-past closes -> 110 fills total (well over the n>=50 floor),
+    # all timestamped before the 50 recent signals below.
+    base_ts = 1_700_000_000
+    for i in range(55):
+        _mk_closed_position(conn, position_id=f"old{i}", closed_ts=base_ts + i * 60, pnl_r=0.1)
+
+    # 50 recent signals with no fills after them -> last_50_fill_rate == 0.0.
+    now_ts = base_ts + 55 * 60 + 3600
+    for i in range(50):
+        conn.execute(
+            "INSERT INTO signals (strategy_id, signal_id, instrument_id, "
+            "direction, score, thesis, ts) VALUES (?, ?, ?, 'long', 0.5, 't', ?)",
+            (STRATEGY_ID, f"sig-{i}", f"{VENUE}:XAUUSD", now_ts - (50 - i)),
+        )
+    conn.commit()
+
+    trade = _Trade(venue=VENUE, strategy_id=STRATEGY_ID)
+    with caplog.at_level("INFO", logger="polaris.scripts._production_close_classes"):
+        update_strategy_class_on_close(conn, trade=trade, now_ts=now_ts, state=_State())
+
+    row = conn.execute(
+        "SELECT strategy_class FROM strategy_class WHERE venue=? AND strategy_id=?",
+        (VENUE, STRATEGY_ID),
+    ).fetchone()
+    assert row[0] == "EARN"  # unchanged, as EXEC_STARVED implies
+
+    lines = [
+        r.getMessage() for r in caplog.records if "EXEC_STARVED" in r.getMessage()
+    ]
+    assert lines, "expected an unconditional EXEC_STARVED log line from the close hook"
+    assert lines[0] == (
+        f"[pts-classes] {VENUE}/{STRATEGY_ID} transition unchanged (EXEC_STARVED)"
+    )
+    # This is the exact literal log_scan.py's MARKER_PATTERNS["exec_starved"]
+    # regex (r"EXEC_STARVED") keys on — confirms the producer -> consumer
+    # string actually matches, not just "some log line fired".
+    import re
+    assert re.compile(r"EXEC_STARVED").search(lines[0])
+
+
 def test_close_hook_never_raises_on_db_error(conn, monkeypatch):
     """Fail-open: any internal exception is swallowed (mirrors every other
     ``_safe_*`` post-commit helper) — a classification failure must never

@@ -298,6 +298,17 @@ def update_strategy_class_on_close(
                 "[pts-classes] %s/%s transition %s -> %s (%s)",
                 venue, strategy_id, klass, result.strategy_class, result.reason,
             )
+        elif result.reason == "EXEC_STARVED":
+            # Unconditional (not gated on `changed`) — EXEC_STARVED is itself
+            # the falsifiable signal (Spec (8): a fill-starved track is stuck
+            # AT its current class, so `changed` is always False here by
+            # construction; gating this line on `changed` would mean it can
+            # never fire in production, leaving log_scan.py's regex +
+            # watchdog.py's exec_starved alert permanently dead).
+            logger.info(
+                "[pts-classes] %s/%s transition unchanged (EXEC_STARVED)",
+                venue, strategy_id,
+            )
     except Exception as exc:  # noqa: BLE001 — fail-open, never unwind the close
         logger.error(
             "[pts-classes] transition update failed for %s/%s: %r",

@@ -183,10 +183,20 @@ def run_rerank(conn: sqlite3.Connection, *, now_ts: int) -> int:
 
 
 def main() -> int:
+    from polaris.logging_config import setup_polaris_logging
     from polaris.storage.schema import init_db
     from tools.ops.ops_config import OpsConfig
 
     cfg = OpsConfig.default()
+    # This process runs standalone under launchd (its own StandardOutPath —
+    # data/paper/ops/probe_reranker.log — separate from the bot's own
+    # process); the root logger otherwise defaults to WARNING and the
+    # FEE_CAP_EXHAUSTED INFO line above would be silently discarded before
+    # even reaching stdout. Routing the file handler at ``cfg.bot_log`` (the
+    # SAME file tools/ops/log_scan.py scans / tools/ops/watchdog.py alerts
+    # on) — not this job's own StandardOutPath — is what makes the marker
+    # reachable by the watchdog at all.
+    setup_polaris_logging(level="INFO", log_file=str(cfg.bot_log))
     conn = init_db(cfg.db_path)
     try:
         inserted = run_rerank(conn, now_ts=int(time.time()))

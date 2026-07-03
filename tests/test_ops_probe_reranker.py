@@ -17,12 +17,15 @@ group's scope).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 import pytest
 
 from polaris.storage.schema import init_db
-from tools.ops.probe_reranker import run_rerank
+from tools.ops import log_scan
+from tools.ops.ops_config import OpsConfig
+from tools.ops.probe_reranker import main, run_rerank
 
 NOW = 1_780_000_000
 DAY = 86_400
@@ -192,6 +195,60 @@ def test_run_rerank_idempotent_same_run_ts_is_noop_reinsert(conn: sqlite3.Connec
         "SELECT COUNT(*) FROM probe_slot_assignment WHERE run_ts = ?", (NOW,)
     ).fetchone()[0]
     assert count == 1
+
+
+def test_main_routes_fee_cap_exhausted_to_bot_log_for_watchdog(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (pts-classes group G blocker): ``main()`` never called
+    ``setup_polaris_logging``/``basicConfig`` (root logger stayed at default
+    WARNING, discarding the FEE_CAP_EXHAUSTED INFO line before it even
+    reached stdout) AND — even if it had logged — this job runs as a
+    SEPARATE launchd process writing its own ``probe_reranker.log``, not
+    ``cfg.bot_log`` (the file ``tools/ops/log_scan.py``/``watchdog.py``
+    actually read). Exercises the REAL end-to-end path: ``main()`` ->
+    ``cfg.bot_log`` on disk -> ``log_scan.scan()`` (the watchdog's actual
+    consumer) — not a ``caplog`` capture that bypasses both breaks.
+
+    Root-logger handlers are process-global; reset after the test so this
+    doesn't leak into other tests in the same run.
+    """
+    root = logging.getLogger()
+    prev_handlers = list(root.handlers)
+    prev_level = root.level
+    try:
+        proj = tmp_path / "proj"
+        (proj / "data" / "paper").mkdir(parents=True)
+        db_path = proj / "data" / "polaris_live.sqlite"
+        bot_log = proj / "data" / "paper" / "polaris_runtime.log"
+        cfg = OpsConfig(
+            project_dir=proj, db_path=db_path, bot_log=bot_log,
+            pidfile=proj / "data" / "paper" / "production.pid",
+            sentinel=proj / "data" / "paper" / "MANUAL_STOP",
+            ops_dir=proj / "data" / "paper" / "ops",
+            vault_dir=tmp_path / "vault",
+            python_bin=proj / ".venv" / "bin" / "python",
+        )
+        monkeypatch.setattr(OpsConfig, "default", classmethod(lambda cls: cfg))
+        monkeypatch.setattr("time.time", lambda: float(NOW))
+
+        conn = init_db(db_path)
+        _mk_strategy_class(conn, venue="okx", strategy_id="leader", probe_fee_24h=40.0, shadow_ring=[9.0])
+        _mk_strategy_class(conn, venue="okx", strategy_id="laggard", probe_fee_24h=40.0, shadow_ring=[1.0])
+        conn.close()
+
+        assert main() == 0
+
+        assert bot_log.exists(), "main() must write to cfg.bot_log, not its own StandardOutPath"
+        text = bot_log.read_text(encoding="utf-8")
+        assert "FEE_CAP_EXHAUSTED" in text
+        assert "laggard" in text
+
+        counts = log_scan.scan(cfg)
+        assert counts["probe_fee_exhausted"] == 1
+    finally:
+        root.handlers = prev_handlers
+        root.setLevel(prev_level)
 
 
 def test_run_rerank_slot_active_actually_reassigns_across_runs(

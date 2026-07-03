@@ -39,6 +39,7 @@ from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
 from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
 from polaris.core.sizing.kelly import kelly_or_cold_start
+from polaris.core.sizing.ladder import draw_for_signal
 from polaris.core.sizing.r_budget_sizer import (
     CapQtyInputs,
     compute_r_budget_qty,
@@ -163,6 +164,16 @@ class SignalIntent:
     # default, never the fee-aware floor — callers that care about the floor
     # MUST thread the real value.
     stop_atr_mult: float = 0.0
+    # Profit-sweep ladder 3단 auto-draw inputs
+    # (vault/50_research/debates/profit_sweep_ladder_2026-07-03.md). Only
+    # consumed when ``venue == "alpaca"`` — the venue adapter (scripts layer,
+    # core must not import it) is the only caller with live buying-power +
+    # pending-order data, so it threads the two here. Defaults (-1.0) mean
+    # "not supplied" — ``draw_for_signal`` is skipped entirely (never a $0
+    # clamp; the ladder only ADDS headroom to the existing %-equity result,
+    # so an absent value is byte-identical to pre-ladder sizing).
+    ladder_fresh_bp_usd: float = -1.0
+    ladder_pending_usd: float = -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +805,42 @@ def compute_size(
         ("notional_hard_cap", notional_cap_pct),
     ]
     single_trade_name, single_trade_cap = min(single_trade_sub_terms, key=lambda t: t[1])
+
+    # Profit-sweep ladder — 3단(Alpaca) auto-draw (profit_sweep_ladder_2026-07-03.md
+    # consensus). ``cap_effective = cap_base + draw_used``: the draw ADDS headroom
+    # onto the binding single-trade cap that already won the min() above — it
+    # never replaces or multiplies it (9-stack ban intact; pure additive term on
+    # the SAME slot). Only fires when the caller threaded live BP/pending data
+    # (both >= 0) for the Alpaca venue; threshold=0 — every eligible signal
+    # attempts a draw, no hidden blocker.
+    if (
+        intent.venue == "alpaca"
+        and intent.ladder_fresh_bp_usd >= 0.0
+        and intent.ladder_pending_usd >= 0.0
+    ):
+        basis = portfolio.equity_usd * intent.leverage
+        needed_usd = single_trade_cap * basis
+        if needed_usd > 0.0 and basis > 0.0:
+            draw_used_usd, draw_id = draw_for_signal(
+                conn,
+                signal_id=intent.signal_id,
+                venue=intent.venue,
+                symbol=intent.symbol,
+                strategy_id=intent.strategy,
+                needed_usd=needed_usd,
+                fresh_bp_usd=intent.ladder_fresh_bp_usd,
+                pending_usd=intent.ladder_pending_usd,
+                now_ts=ts,
+            )
+            if draw_used_usd > 0.0:
+                cap_base = single_trade_cap
+                single_trade_cap = cap_base + (draw_used_usd / basis)
+                logger.info(
+                    "[T4/ladder-draw] %s/%s sid=%s draw_id=%s drawn_usd=%.2f "
+                    "cap_base=%.4f cap_effective=%.4f",
+                    intent.venue, intent.symbol, intent.signal_id, draw_id,
+                    draw_used_usd, cap_base, single_trade_cap,
+                )
     final_risk_pct, binding = headroom_min(
         proposed_risk_pct=proposal.proposed_risk_pct,
         single_trade_cap=single_trade_cap,

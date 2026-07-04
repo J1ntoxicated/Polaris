@@ -1,0 +1,40 @@
+{
+  "_comment": "SAMPLE ONLY — illustrative fixture, NOT live data. Do not seed. Symbols/scores/URLs are placeholders showing the CONTRACT.md shape.",
+  "_sample": true,
+  "generated_at": "2026-07-04T11:30:00Z",
+  "expiry_ts": "2026-07-04T20:00:00Z",
+  "candidates": [
+    {
+      "symbol": "SAMPLE_AAPL",
+      "venue": "alpaca",
+      "thesis_tag": "pead_high",
+      "score": 0.82,
+      "catalyst_ts": "2026-07-03T20:05:00Z",
+      "evidence": [
+        "https://finviz.com/quote.ashx?t=AAPL",
+        "https://stockanalysis.com/markets/premarket/"
+      ]
+    },
+    {
+      "symbol": "SAMPLE_NVDA",
+      "venue": "alpaca",
+      "thesis_tag": "sector_rs",
+      "score": 0.64,
+      "catalyst_ts": null,
+      "evidence": [
+        "https://finviz.com/groups.ashx?g=sector&v=140"
+      ]
+    },
+    {
+      "symbol": "SAMPLE_XYZ",
+      "venue": "alpaca",
+      "thesis_tag": "short_squeeze",
+      "score": 0.41,
+      "catalyst_ts": "2026-07-04T09:15:00Z",
+      "evidence": [
+        "https://cdn.finra.org/equity/regsho/daily/CNMSshvol20260702.txt",
+        "https://news.google.com/rss/search?q=XYZ+when:1d&hl=en-US&gl=US&ceid=US:en"
+      ]
+    }
+  ]
+}

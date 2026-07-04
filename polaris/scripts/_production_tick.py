@@ -9,6 +9,7 @@ loop state lives in ``_production_state``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import math
 import os
@@ -48,6 +49,7 @@ from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
+from polaris.core.universe.intel_seed import load_intel_seed
 from polaris.core.universe.schema import ALLOWED_TRADE_QUOTE_CCY_OKX
 from polaris.scripts import _production_rotation as rotation
 from polaris.scripts._production_bar_gate import (
@@ -941,6 +943,17 @@ async def _run_tick(
                     )
                     state.fault_events += 1
                     continue
+                # Cowork watchlist-intel cohort tag (additive, read-only
+                # rank-uplift signal — never sizing/gating). Alpaca-only feed
+                # (CONTRACT.md); a non-Alpaca venue or an unseeded symbol
+                # leaves seed_tag at its "" default (byte-identical). Separate
+                # from thesis_tag (strategy-owned — e.g. equity_52wk_high_breakout
+                # overwrites thesis_tag with its own breakout string) so this
+                # never collides with strategy output.
+                if venue == "alpaca":
+                    seed_tag = load_intel_seed().seed_tags.get(symbol, "")
+                    if seed_tag:
+                        sig = dataclasses.replace(sig, seed_tag=seed_tag)
                 state.signals_by_tf[timeframe] = (
                     state.signals_by_tf.get(timeframe, 0) + 1
                 )

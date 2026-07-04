@@ -27,6 +27,11 @@ from polaris.core.classes.score_f import (
 )
 from polaris.storage.schema import init_db
 
+# NOTE: seed_tag cohort aggregation (score_f_by_seed_tag) has its own test
+# module — tests/test_score_f_seed_tag_cohort.py — to keep this file within
+# the file-size cap; _mk_position here grew a seed_tag kwarg (default "")
+# purely so that module can reuse this file's fixtures unmodified.
+
 
 @pytest.fixture
 def conn(tmp_path) -> sqlite3.Connection:
@@ -43,13 +48,14 @@ def _mk_position(
     status: str = "closed",
     opened_ts: int = 1_700_000_000,
     closed_ts: int | None = 1_700_003_600,
+    seed_tag: str = "",
 ) -> None:
     conn.execute(
         "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
         "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
-        "closed_ts) VALUES (?, ?, ?, ?, ?, ?, 'long', 1.0, ?, ?, ?)",
+        "closed_ts, seed_tag) VALUES (?, ?, ?, ?, ?, ?, 'long', 1.0, ?, ?, ?, ?)",
         (position_id, venue, symbol, strategy_id, strategy_id, strategy_id,
-         status, opened_ts, closed_ts),
+         status, opened_ts, closed_ts, seed_tag),
     )
 
 

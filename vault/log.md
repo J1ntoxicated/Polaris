@@ -288,3 +288,9 @@
 - 2026-07-04 그룹F 노트 갭 즉시 팔로업: G5 probe slot/24h fee cap 소비 미배선(PROVE admission 무제한) → wf_91e207ed 빌드+fresh 리뷰 발사
 - 2026-07-04 그룹F 팔로업 완료: engine.py compute_size PROVE 분기가 probe_slot_assignment(slot_active, 신선도 172800s)+strategy_class.probe_fee_24h vs 6/4/2xF_track_cap 실제 소비(신규 core/sizing/probe_cap.py, read-only) — 초과=기존 shadow swap 재사용+[pts-classes] probe_cap 로그, 스냅샷 부재=open-position count fallback, EARN/BENCH 회귀 불변, 테스트 310 pass, mypy --strict+ruff clean
 2026-07-03 15:06 [Edit: /Users/jinyoon/Projects/Polaris/vault/log.md]
+2026-07-03 15:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=373 learners=3 paper=True]
+2026-07-03 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=221 learners=3 paper=True]
+2026-07-03 daily-auto [closes=25 pnl_usd=-660.75 opens=26 faults=0 restarts=2]
+- 2026-07-04 probe 리랭커 launchd 등록(Jin 승인) — 매일 07:35 자동 rerank, 금일 미실행분은 수동 1회로 보전(A3/B2/C1 슬롯)
+- 2026-07-04 cowork/watchlist_intel/ 인스트럭션 폴더 작성 (INSTRUCTIONS/CONTRACT/example/README) — Alpaca 와치리스트 촉매 후보 발굴 코워크 세션, drop=data/intel/alpaca_seed.json, additive rank-uplift only(flow_not_block), PtS 코호트 태그
+2026-07-04 10:58 [Edit: /Users/jinyoon/Projects/Polaris/cowork/watchlist_intel/README.md]

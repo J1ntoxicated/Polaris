@@ -758,14 +758,14 @@ async def reserve_and_submit(
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
             " status, opened_ts, swap_count, deal_id, entry_atr_pct, "
-            " entry_atr_timeframe, risk_usd, entry_regime) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, ?)",
+            " entry_atr_timeframe, risk_usd, entry_regime, seed_tag) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, ?, ?)",
             (
                 position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
                 entry_base_qty,
                 now_ts, trade.deal_id, entry_atr_pct, entry_atr_timeframe,
-                risk_usd, open_regime,
+                risk_usd, open_regime, sig.seed_tag,
             ),
         )
         # contribution_id ties the entry fill back to the position so the

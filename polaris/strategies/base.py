@@ -133,6 +133,14 @@ class RawSignal:
     venue_constraints: dict[str, Any] = field(default_factory=dict)
     created_at_bar: int = 0
     tags: dict[str, str] = field(default_factory=dict)
+    # Cowork watchlist-intel cohort tag (additive, separate from ``thesis_tag``
+    # which the owning strategy already occupies — equity_52wk_high_breakout
+    # overwrites thesis_tag with its own breakout-fraction string). "" = not a
+    # seeded symbol (the overwhelming default). Stamped post-generation by the
+    # tick loop (never by a strategy) so this field is byte-identical dead
+    # weight for every strategy until wired. Read-only rank-uplift/measurement
+    # signal — never sizing/gating input (flow_not_block).
+    seed_tag: str = ""
 
 
 @dataclass(frozen=True, slots=True)

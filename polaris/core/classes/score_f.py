@@ -38,9 +38,11 @@ __all__ = [
     "FTrackCapResult",
     "LifecycleFee",
     "ScoreFResult",
+    "SeedTagCohort",
     "compute_score_f",
     "f_track_cap",
     "rollup_score_f",
+    "score_f_by_seed_tag",
 ]
 
 # net_i/fee_i denominator floor — 0.0001 * notional_i (task spec), applied via
@@ -79,6 +81,23 @@ class ScoreFResult:
     fee_usd: float
     fee_denom_usd: float
     score_contrib: float
+
+
+@dataclass(slots=True)
+class SeedTagCohort:
+    """Read-only score_F rollup for one cowork watchlist-intel ``seed_tag``.
+
+    Prove-then-Scale measurement (``cowork/watchlist_intel/CONTRACT.md``): a
+    tag whose cohort does not earn (weak/negative ``score_f_mean``) is a
+    signal that the FEED should be demoted — this dataclass only reports the
+    number, it does not itself throttle/cap/gate anything (no consumer wired
+    yet; that stays a future task per the build spec).
+    """
+
+    seed_tag: str
+    n_lifecycles: int
+    score_f_sum: float
+    score_f_mean: float
 
 
 @dataclass(slots=True)
@@ -254,6 +273,43 @@ def rollup_score_f(conn: sqlite3.Connection, *, now_ts: int) -> int:
     )
     conn.commit()
     return inserted
+
+
+# ---------------------------------------------------------------------------
+# seed_tag cohort report — cowork watchlist-intel Prove-then-Scale measurement
+# ---------------------------------------------------------------------------
+
+
+def score_f_by_seed_tag(conn: sqlite3.Connection) -> list[SeedTagCohort]:
+    """Roll up ``score_f_events`` by ``positions.seed_tag`` (join on position_id).
+
+    Read-only, no writes anywhere (pure aggregation over the rollup-sweeper's
+    existing ledger — ``rollup_score_f`` must have run first for a lifecycle to
+    appear here). seed_tag='' (the unseeded default — the overwhelming case)
+    is EXCLUDED — this report is scoped to actual cowork-intel-tagged cohorts
+    only, per the Prove-then-Scale measurement task. No consumer reads this
+    yet (measurement/reporting only); it never caps/throttles/gates a strategy
+    or a feed itself (aggressive_always_profit / no_block_filter_architecture —
+    the feed just loses future RANK-UPLIFT influence if a downstream consumer
+    later chooses to act on a weak cohort, that decision is out of scope here).
+    """
+    rows = conn.execute(
+        "SELECT p.seed_tag, COUNT(*), COALESCE(SUM(e.score_contrib), 0.0) "
+        "FROM score_f_events e "
+        "JOIN positions p ON p.position_id = e.position_id "
+        "WHERE p.seed_tag != '' "
+        "GROUP BY p.seed_tag "
+        "ORDER BY p.seed_tag ASC"
+    ).fetchall()
+    return [
+        SeedTagCohort(
+            seed_tag=str(seed_tag),
+            n_lifecycles=int(n),
+            score_f_sum=float(total),
+            score_f_mean=float(total) / int(n) if n else 0.0,
+        )
+        for seed_tag, n, total in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

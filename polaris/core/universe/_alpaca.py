@@ -36,6 +36,7 @@ import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
+from polaris.core.universe.intel_seed import load_intel_seed
 from polaris.core.universe.schema import LIQUID_EQUITY_SYMBOLS, UniverseInstrument
 
 logger = logging.getLogger(__name__)
@@ -362,10 +363,11 @@ async def _fetch_alpaca_liquidity(
 ) -> dict[str, dict[str, float]]:
     """Real per-symbol liquidity for a BOUNDED candidate set (never all 12.9k).
 
-    Candidates = (most-actives screener ∩ universe) ∪ (curated seed ∩ universe).
-    Batched snapshots give the daily bar → real ``vol_24h_usd`` (close × volume)
-    and an intraday-range ATR proxy. Any failure returns ``{}`` (smoke-safe — the
-    rows then keep their coarse placeholder and still flow). Maps to
+    Candidates = (most-actives screener ∩ universe) ∪ (curated seed ∩ universe)
+    ∪ (cowork intel seed ∩ universe). Batched snapshots give the daily bar →
+    real ``vol_24h_usd`` (close × volume) and an intraday-range ATR proxy. Any
+    failure returns ``{}`` (smoke-safe — the rows then keep their coarse
+    placeholder and still flow). Maps to
     ``{symbol: {"vol_24h_usd", "atr_24h_pct"}}``.
     """
     if not symbols:
@@ -392,6 +394,16 @@ async def _fetch_alpaca_liquidity(
                 seen.add(s)
                 candidates.append(s)
         for s in LIQUID_SEED_SYMBOLS:
+            if s in symbols and s not in seen:
+                seen.add(s)
+                candidates.append(s)
+        # cowork watchlist-intel feed (additive union, SAME pattern as the
+        # curated LIQUID_SEED_SYMBOLS above — never removes/reorders an
+        # existing candidate, only widens the probed set so a seeded name gets
+        # a REAL liquidity snapshot instead of the coarse placeholder).
+        # Fail-safe by construction (see intel_seed.load_intel_seed): absent /
+        # expired / malformed feed → empty set → this loop is a no-op.
+        for s in load_intel_seed().symbols:
             if s in symbols and s not in seen:
                 seen.add(s)
                 candidates.append(s)

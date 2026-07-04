@@ -580,6 +580,20 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
     # ONLY — never read by sizing/gating/exit-timing. Pragma guard = idempotent.
     if "stop_atr_mult" not in cols:
         conn.execute("ALTER TABLE positions ADD COLUMN stop_atr_mult REAL")
+    # positions.seed_tag — cowork watchlist-intel cohort tag (2026-07-04 wiring
+    # task). Additive, NOT NULL DEFAULT '' (legacy/un-seeded rows read as
+    # unseeded, not NULL — matches the column's own DDL_POSITIONS default so a
+    # fresh DB and a migrated legacy DB agree byte-for-byte). Stamped at
+    # position-open time from the RawSignal.seed_tag the tick loop attaches for
+    # an Alpaca symbol currently in the cowork seed feed; "" = not seeded.
+    # MEASUREMENT/cohort-rollup only (score_f cohort helper) — never sizing/
+    # gating input (flow_not_block). Pragma guard = idempotent (same
+    # last_promotion_ts drift precedent — DDL_POSITIONS alone covers a fresh DB,
+    # this ALTER backfills a pre-existing DB file that predates the column).
+    if "seed_tag" not in cols:
+        conn.execute(
+            "ALTER TABLE positions ADD COLUMN seed_tag TEXT NOT NULL DEFAULT ''"
+        )
     # Backfill legacy open positions left at NULL exit_state to 'open' so the
     # tick loop / precise-exit FSM reads a consistent lifecycle marker. Only
     # touches still-NULL rows (idempotent). Closed rows keep NULL → they are

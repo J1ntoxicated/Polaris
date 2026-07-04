@@ -418,7 +418,8 @@ CREATE TABLE IF NOT EXISTS positions (
     risk_usd REAL,
     entry_regime TEXT,
     exit_cadence TEXT,
-    stop_atr_mult REAL
+    stop_atr_mult REAL,
+    seed_tag TEXT NOT NULL DEFAULT ''
 );
 """
 

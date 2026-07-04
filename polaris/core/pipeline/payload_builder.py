@@ -250,6 +250,9 @@ def build_validator_payload(
             "sizing_hint": raw_signal.sizing_hint,
             "ttl_bars": raw_signal.ttl_bars,
             "thesis_tag": raw_signal.thesis_tag,
+            # Cowork watchlist-intel cohort tag (additive, "" = unseeded).
+            # Separate from thesis_tag (strategy-owned) — see RawSignal.seed_tag.
+            "seed_tag": raw_signal.seed_tag,
         },
         "cell_routing": cell_summary,
         "baseline": baseline_summary,

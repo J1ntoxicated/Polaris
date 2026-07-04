@@ -32,6 +32,9 @@ mirrors the learner-snapshot Path-constant convention). Overwrite each run.
 - `volume_breakout` — 52wk-high breakout on abnormal high volume.
 - `insider_buy` — non-routine opportunistic / cluster insider purchase.
 - `short_squeeze` — high short interest WITH a live catalyst (bonus only).
+- Crypto/macro `thesis_tag` + `venue` okx/capital + top-level `macro_events[]` →
+  `CONTRACT_CRYPTO_MACRO.md`. 🚨 Collect ≠ consume: bot consumes ONLY `venue:
+  alpaca` today; okx/capital/`macro_events[]` are collected-only + IGNORED (fail-safe).
 
 ## Expiry semantics (fail-safe)
 `expiry_ts` in the past → the bot treats the file as absent and seeds nothing.

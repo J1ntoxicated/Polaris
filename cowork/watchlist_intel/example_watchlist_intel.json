@@ -35,6 +35,59 @@
         "https://cdn.finra.org/equity/regsho/daily/CNMSshvol20260702.txt",
         "https://news.google.com/rss/search?q=XYZ+when:1d&hl=en-US&gl=US&ceid=US:en"
       ]
+    },
+    {
+      "symbol": "SAMPLE_BTC-USDT",
+      "venue": "okx",
+      "thesis_tag": "etf_flow",
+      "score": 0.58,
+      "catalyst_ts": "2026-07-03T21:00:00Z",
+      "evidence": [
+        "https://bitbo.io/treasuries/etf-flows/"
+      ]
+    },
+    {
+      "symbol": "SAMPLE_SMCI",
+      "venue": "alpaca",
+      "thesis_tag": "theme_momentum",
+      "theme": "semiconductors",
+      "score": 0.71,
+      "catalyst_ts": "2026-07-03T13:30:00Z",
+      "evidence": [
+        "https://stockanalysis.com/api/symbol/e/SMH/history?range=3M&period=Daily",
+        "https://news.google.com/rss/search?q=semiconductor+AI+chips"
+      ]
+    }
+  ],
+  "_comment_context": "SAMPLE macro-context blocks — collected-only, bot IGNORES them today (code allowlist = default-deny; only venue:alpaca candidates pass). Pure tailwind context, never a block.",
+  "fx_context": {
+    "dxy_trend": "down",
+    "pairs": {"EURUSD": 1.089, "USDJPY": 151.2},
+    "rate_expectations": "cuts_priced"
+  },
+  "bond_context": {
+    "y10_nominal": 4.48,
+    "y10_real": 2.25,
+    "curve_2s10s": 0.35
+  },
+  "market_regime": {
+    "risk_state": "neutral",
+    "btc_ndx_corr20": 0.41,
+    "dxy_gold_corr20": -0.62,
+    "vix": 16.6,
+    "rationale": "VIX 16.6/+0, DXY 5d down/+1, DFII10 up/-1, corr20 0.41 NDX up/+1 -> S=+1 neutral"
+  },
+  "_comment_macro": "SAMPLE macro_events — collected-only, bot IGNORES them today (fail-safe). Session context, NOT tradeable candidates.",
+  "macro_events": [
+    {
+      "date_utc": "2026-07-04T12:30:00Z",
+      "event": "SAMPLE US Non-Farm Payrolls (High impact)",
+      "affected_symbols": ["GOLD", "US100"]
+    },
+    {
+      "date_utc": "2026-07-01T14:30:00Z",
+      "event": "SAMPLE EIA Crude Oil Inventories",
+      "affected_symbols": ["OIL_CRUDE"]
     }
   ]
 }

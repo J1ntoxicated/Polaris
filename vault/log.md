@@ -294,3 +294,7 @@
 - 2026-07-04 probe 리랭커 launchd 등록(Jin 승인) — 매일 07:35 자동 rerank, 금일 미실행분은 수동 1회로 보전(A3/B2/C1 슬롯)
 - 2026-07-04 cowork/watchlist_intel/ 인스트럭션 폴더 작성 (INSTRUCTIONS/CONTRACT/example/README) — Alpaca 와치리스트 촉매 후보 발굴 코워크 세션, drop=data/intel/alpaca_seed.json, additive rank-uplift only(flow_not_block), PtS 코호트 태그
 2026-07-04 10:58 [Edit: /Users/jinyoon/Projects/Polaris/cowork/watchlist_intel/README.md]
+- 2026-07-04 cowork intel 파이프 배포 6792aa8: cowork/watchlist_intel/ 인스트럭션 폴더(리서치 3축→합성→리뷰) + 봇 인제스트(리더→유니버스 union→seed_tag→코호트) APPROVE, 풀스위트 4676 pass, 재기동 PID 72955
+2026-07-04 10:59 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=221 learners=3 paper=True]
+- 2026-07-04 cowork intel 크립토/매크로 축 증축: INSTRUCTIONS_CRYPTO_MACRO.md(OKX 24/7 unlock/listing/etf_flow/news + FF/EIA macro, 데일리+10분) + CONTRACT venue okx/capital·thesis_tag 6종·macro_events[] 신설(수집≠소비 명시, 봇 IGNORE fail-safe), example okx후보+macro 2건, 전 파일 md≤60·거부키워드 0hit
+- 2026-07-04 cowork intel 매크로 컨텍스트 축 증축: INSTRUCTIONS_CONTEXT.md(FX/DXY·채권·리짐·테마 4축, 검증소스만, 데일리+2분·테마딥스캔 격일, 리짐 산식 S∈[-4,+4] 재현가능+rationale 1줄 의무) + CONTRACT_CONTEXT.md(top-level fx_context/bond_context/market_regime + thesis_tag fx_tailwind/theme_momentum·candidates[].theme, 수집≠소비=코드 allowlist default-deny 메커니즘 명시), example fx/bond/regime 블록+theme_momentum 후보 추가(_sample 유지·JSON valid), README 1줄. 전 md≤60·거부키워드 0hit·순풍가점 전용 flow_not_block

@@ -46,3 +46,10 @@ rank-uplift term, never a size or a gate.
   · professional risk · real-money safety · fractional Kelly is too aggressive in
   practice · 표본 부족 risk.
 - Output MUST validate against `CONTRACT.md`. When in doubt, emit fewer, higher-confidence candidates.
+
+## Crypto / macro axes → `INSTRUCTIONS_CRYPTO_MACRO.md`
+OKX (crypto, 24/7) + Capital CFD (macro/commodity) collection — per-axis method,
+verified free/no-login sources, and the daily +10 min routine — lives in the
+split file `INSTRUCTIONS_CRYPTO_MACRO.md`. Weekends: crypto axis only (OKX 24/7);
+macro/CFD axes are weekday-session bound. Those candidates use `venue` okx /
+capital and the new `thesis_tag` + `macro_events[]` fields in `CONTRACT.md`.

@@ -3,8 +3,7 @@
 DEMO/PAPER. Additive rank-uplift only (flow_not_block) — never a block filter.
 
 ## Drop path
-`data/intel/alpaca_seed.json` (repo-relative; new `data/intel/` namespace,
-mirrors the learner-snapshot Path-constant convention). Overwrite each run.
+`data/intel/alpaca_seed.json` (repo-relative). Overwrite each run.
 
 ## JSON schema
 ```json
@@ -17,12 +16,21 @@ mirrors the learner-snapshot Path-constant convention). Overwrite each run.
       "venue": "alpaca",           // constant for this feed
       "thesis_tag": "pead_high",   // from allowed list below
       "score": 0.0,                // [0,1] rank-uplift, per INSTRUCTIONS rubric
+      "close": 0.0,                // last close (REQ) — self-report entry geometry
+      "high_52wk": 0.0,            // max(high, prior 252 bars) (REQ; or dist_to_trigger_pct)
+      "dist_to_trigger_pct": 0.0,  // 100*(close/(0.99*high_52wk)-1); ≥0 = at/through trigger
       "catalyst_ts": "<ISO-8601 UTC or null>", // when the catalyst hit/hits
-      "evidence": ["https://..."]  // ≥1 source URL, required
+      "catalyst_age_days": 0,      // days since catalyst_ts (null if no catalyst_ts)
+      "drift_consumed": false,     // true = initial pop already faded (window late)
+      "evidence": ["https://...", "https://..."] // ≥2 live sources (see rule below)
     }
   ]
 }
 ```
+Entry geometry (`equity_52wk_high_breakout`): emit when `close >= 0.99*high_52wk`
+AND `close > SMA200`. `close`+`high_52wk` (or `dist_to_trigger_pct`) self-report
+distance to trigger — far-below candidates stay in the feed, only their rank
+decays (INSTRUCTIONS proximity term = uplift decay, not a block).
 
 ## thesis_tag allowed values
 - `pead_high` — positive earnings surprise near/at 52-week high (strongest).
@@ -32,29 +40,21 @@ mirrors the learner-snapshot Path-constant convention). Overwrite each run.
 - `volume_breakout` — 52wk-high breakout on abnormal high volume.
 - `insider_buy` — non-routine opportunistic / cluster insider purchase.
 - `short_squeeze` — high short interest WITH a live catalyst (bonus only).
-- Crypto/macro `thesis_tag` + `venue` okx/capital + top-level `macro_events[]` →
-  `CONTRACT_CRYPTO_MACRO.md`. 🚨 Collect ≠ consume: bot consumes ONLY `venue:
-  alpaca` today; okx/capital/`macro_events[]` are collected-only + IGNORED (fail-safe).
+- Crypto/macro `thesis_tag` + `venue` okx/capital + `macro_events[]` →
+  `CONTRACT_CRYPTO_MACRO.md`. 🚨 Collect ≠ consume: bot reads ONLY `venue:alpaca`; okx/capital/`macro_events[]` are collected + IGNORED (fail-safe).
+
+## Evidence rule (mandatory, strengthened)
+- ≥2 INDEPENDENT live sources/candidate (not 2 links to the same page). Prefer
+  primary: SEC (8-K/filings), BLS/BEA/gov, or a wire (Reuters/AP/PR/BW).
+- Every URL resolves NOW — no 404/403/dead. Won't load → drop it; <2 left →
+  drop the candidate. Single-source/dead-link rows are malformed → reader skips.
 
 ## Expiry semantics (fail-safe)
-`expiry_ts` in the past → the bot treats the file as absent and seeds nothing.
-A stale or missing feed therefore degrades to the bot's normal universe — never
-an error, never a stuck seed. Set `expiry_ts` = end of the target US session.
+`expiry_ts` in the past → bot treats the file as absent, seeds nothing (degrades
+to the normal universe — never an error). Set = end of target US session.
 
-## Ingest status (READ, wired 2026-07-04)
-`polaris/core/universe/intel_seed.py` reads this file (fail-safe: schema-
-validated, `_sample:true`/expired/absent/malformed all no-op). The Alpaca
-universe is fed by `(most-actives ∩ universe) ∪ (curated LIQUID_SEED_SYMBOLS
-∩ universe) ∪ (this feed ∩ universe)` — additive union, `_alpaca.py`. A seeded
-signal carries the tag in a SEPARATE `seed_tag` field (`RawSignal.seed_tag`,
-G3 payload); `equity_52wk_high_breakout` still owns/overwrites `thesis_tag` —
-untouched. `positions.seed_tag` (DDL + legacy ALTER) is stamped at open.
-
-## Cohort measurement (Prove-then-Scale) — wired, no consumer yet
-`polaris/core/classes/score_f.py::score_f_by_seed_tag` rolls up score_F per
-`seed_tag` (join `score_f_events` → `positions.seed_tag`), read-only —
-verify: `python3 -c "from polaris.storage.schema import init_db; from
-polaris.core.classes.score_f import score_f_by_seed_tag as f; print(f(init_db(
-'data/polaris_live.sqlite')))"`. Principle: if a tag's cohort does NOT earn —
-its score_F is weak — that feed should be demoted (a future consumer's job).
-Aggressive stays intact: the feed just loses influence, the bot never throttles.
+## Backward-compat (extra fields are safe)
+The reader (`intel_seed.py`) validates only `symbol`, `venue`, `thesis_tag`,
+`score`, `evidence`, `expiry_ts` — it IGNORES every other key, so ALL the new
+self-report fields above add telemetry with ZERO ingest-behavior change
+(hardcompat intact). Reader detail → `CONTRACT_INGEST.md`.

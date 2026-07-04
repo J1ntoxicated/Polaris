@@ -17,6 +17,14 @@ intact: extra data can only add context/uplift, it never throttles or blocks.
 - `okx` — OKX SPOT crypto (24/7). Symbol notation `BASE-QUOTE`, e.g. `BTC-USDT`.
 - `capital` — Capital CFD (macro/commodity/index). Symbol notation bare, e.g. `GOLD`.
 
+## okx candidate self-report (removes rediscovery cost)
+Each `okx` candidate SHOULD carry — reader IGNORES both today (hardcompat):
+- `already_in_roster` (bool) — true if the symbol is already a live OKX strategy
+  symbol (BTC-USDT / ETH-USDT etc.), so a future consumer skips re-adding it.
+- `consumer_strategy` (string|null) — the strategy that would trade it, or `null`
+  when none exists yet (most tokens today → `null`). Stops re-deriving this each run.
+These are self-tags for the collector's own bookkeeping, never a gate.
+
 ## New `thesis_tag` values (add to CONTRACT.md's list)
 - `token_unlock` — token unlock within 7d, large %MCap (CryptoRank). venue okx.
 - `listing` — new listing / delisting announcement (OKX API). venue okx.

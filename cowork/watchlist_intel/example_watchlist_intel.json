@@ -9,20 +9,31 @@
       "venue": "alpaca",
       "thesis_tag": "pead_high",
       "score": 0.82,
+      "close": 214.5,
+      "high_52wk": 216.0,
+      "dist_to_trigger_pct": 0.28,
       "catalyst_ts": "2026-07-03T20:05:00Z",
+      "catalyst_age_days": 1,
+      "drift_consumed": false,
       "evidence": [
-        "https://finviz.com/quote.ashx?t=AAPL",
-        "https://stockanalysis.com/markets/premarket/"
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=AAPL&type=8-K",
+        "https://finviz.com/quote.ashx?t=AAPL"
       ]
     },
     {
       "symbol": "SAMPLE_NVDA",
       "venue": "alpaca",
       "thesis_tag": "sector_rs",
-      "score": 0.64,
+      "score": 0.31,
+      "close": 118.0,
+      "high_52wk": 152.0,
+      "dist_to_trigger_pct": -21.6,
       "catalyst_ts": null,
+      "catalyst_age_days": null,
+      "drift_consumed": true,
       "evidence": [
-        "https://finviz.com/groups.ashx?g=sector&v=140"
+        "https://finviz.com/groups.ashx?g=sector&v=140",
+        "https://www.reuters.com/technology/"
       ]
     },
     {
@@ -30,7 +41,12 @@
       "venue": "alpaca",
       "thesis_tag": "short_squeeze",
       "score": 0.41,
+      "close": 47.9,
+      "high_52wk": 48.0,
+      "dist_to_trigger_pct": 0.83,
       "catalyst_ts": "2026-07-04T09:15:00Z",
+      "catalyst_age_days": 0,
+      "drift_consumed": false,
       "evidence": [
         "https://cdn.finra.org/equity/regsho/daily/CNMSshvol20260702.txt",
         "https://news.google.com/rss/search?q=XYZ+when:1d&hl=en-US&gl=US&ceid=US:en"
@@ -41,21 +57,23 @@
       "venue": "okx",
       "thesis_tag": "etf_flow",
       "score": 0.58,
+      "already_in_roster": true,
+      "consumer_strategy": "connors_rsi2",
       "catalyst_ts": "2026-07-03T21:00:00Z",
       "evidence": [
         "https://bitbo.io/treasuries/etf-flows/"
       ]
     },
     {
-      "symbol": "SAMPLE_SMCI",
-      "venue": "alpaca",
-      "thesis_tag": "theme_momentum",
-      "theme": "semiconductors",
-      "score": 0.71,
-      "catalyst_ts": "2026-07-03T13:30:00Z",
+      "symbol": "SAMPLE_PEPE-USDT",
+      "venue": "okx",
+      "thesis_tag": "token_unlock",
+      "score": 0.44,
+      "already_in_roster": false,
+      "consumer_strategy": null,
+      "catalyst_ts": "2026-07-05T00:00:00Z",
       "evidence": [
-        "https://stockanalysis.com/api/symbol/e/SMH/history?range=3M&period=Daily",
-        "https://news.google.com/rss/search?q=semiconductor+AI+chips"
+        "https://cryptorank.io/token-unlock"
       ]
     }
   ],

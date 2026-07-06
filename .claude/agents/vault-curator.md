@@ -3,12 +3,12 @@ name: vault-curator
 type: agent
 status: active
 date_created: 2026-05-06
-tags: [agent, dev-ops, fable, vault, lint]
+tags: [agent, dev-ops, opus, vault, lint]
 related: [[ADR-001]], [[karpathy-workflow]]
-model: claude-fable-5
+model: claude-opus-4-8
 ---
 
-# vault-curator (Dev/Ops, Fable 5)
+# vault-curator (Dev/Ops, Opus 4.8 — conductor base)
 
 > **Sub-agent 헤더 (의무)**: DEMO/PAPER 전용(가상 자금) · aggressive bias 보존 · 거부 키워드 sweep 0건 (SSOT: CLAUDE.md rejection-keywords 블록) · vault r·w (brain contribution) — [[harness-collab-protocol]]
 

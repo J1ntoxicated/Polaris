@@ -122,7 +122,19 @@
     },
     "collaboration": {
       "spec": "vault/30_components/harness-collab-protocol.md",
-      "main_role": "orchestrator_synthesizer",
+      "main_role": "conductor_orchestrator_synthesizer",
+      "model_tiers": {
+        "note": "Jin 2026-07-06. Opus=conductor base (main loop/Jin dialog/review/advisor/analysis); Fable=complex blueprint/design only when credits available, else Opus does it; Sonnet=builder; Haiku=realtime tick; none=deterministic. SSOT=memory polaris_agent_model_tiers.",
+        "conductor": "claude-opus-4-8",
+        "complex_blueprint": "claude-fable-5 (available) -> claude-opus-4-8 (fallback)",
+        "builder": "claude-sonnet-5",
+        "realtime": "claude-haiku-4-5"
+      },
+      "effort_policy": {
+        "session_default": "xhigh",
+        "per_agent_override": "workflow agent() effort param: low for cheap mechanical stages, max for hardest verify/judge",
+        "ultracode": "user-toggled; when on, workflow+adversarial-verify by default. Not self-enabled."
+      },
       "builder_not_reviewer": true,
       "primary_reviewer": "claude_subagent",
       "reviewer_fallback": "claude_subagent",
@@ -136,7 +148,7 @@
       "review_gate_enabled": false
     }
   },
-  "model": "claude-fable-5",
+  "model": "claude-opus-4-8",
   "outputStyle": "default",
   "spinnerTipsEnabled": false,
   "prefersReducedMotion": true

@@ -4,12 +4,12 @@ type: agent
 gate: 7
 status: active
 date_created: 2026-05-06
-tags: [agent, gate, fable-p1, python-p0, realtime]
+tags: [agent, gate, opus-devspawn, python-p0, realtime]
 related: [[ADR-004]], [[ADR-005]], [[active-autonomous-vision]]
-model: claude-fable-5  # P1; P0 = Python
+model: claude-opus-4-8  # dev-spawn 도메인 추론; 봇 런타임 AI gate=GPT, P0=Python deterministic
 ---
 
-# adaptive-exit (Gate 7)
+# adaptive-exit (Gate 7 — dev-spawn Opus / 런타임 GPT / Python P0)
 
 > ⚠️ **AI-FREE IN-LOOP (W3 cutover, [[ADR-011]])**: G7 runtime = **deterministic Python primary** (the `model: claude-fable-5` field is historical/dev-spawn only — **Anthropic blocked for runtime, in-loop GPT=0**). GPT = shadow/sentinel only.
 

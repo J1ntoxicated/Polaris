@@ -37,7 +37,12 @@ from typing import Any
 
 from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.ingest import persist_bars
-from polaris.scripts._production_bars import fetch_bars_one
+from polaris.core.data.schema import Bar
+from polaris.scripts._production_bars import (
+    ALPACA_TIMEFRAME_BY_INTERVAL,
+    fetch_alpaca_bars_multi,
+    fetch_bars_one,
+)
 from polaris.scripts._production_layers import read_active_universe
 from polaris.scripts._session_map import equity_fetch_active, session_warm_active
 
@@ -100,6 +105,79 @@ STATIC_GROUND_REFRESH_SEC = 900.0
 TICKER_GROUND_REFRESH_SEC = 180.0
 
 
+def warm_eligible_symbols(conn: sqlite3.Connection) -> frozenset[tuple[str, str]]:
+    """Latest-cycle ``(venue, symbol)`` rows that are TRADE-eligible FOCUS names.
+
+    A2 SCOPE fix: the 1m session-warm pass used to run over EVERY universe-wide
+    open-imminent symbol (~1,491 names for Alpaca equities alone) even though
+    equity strategies are all ``1D`` — nothing in the pipeline consumes
+    universe-wide 1m bars. The only consumer of pre-open 1m freshness is the
+    live tick/recency-guard path for names the bot can actually ACT on, i.e. the
+    trade-eligible FOCUS set (``watchlist_focus`` latest cycle, ``trade_eligible
+    = 1``, the ~150-name set) — mirrors ``_production_layers.trade_ineligible_
+    set``'s COALESCE contract so a legacy/un-judged row (NULL) still counts as
+    eligible (flow-preserving). An empty/absent focus cycle → empty set (the
+    caller then skips warming entirely rather than falling back to the
+    universe-wide 1,491, which is the whole point of this scope-down).
+    """
+    row = conn.execute("SELECT MAX(cycle_ts) FROM watchlist_focus").fetchone()
+    if row is None or row[0] is None:
+        return frozenset()
+    latest_cycle = int(row[0])
+    rows = conn.execute(
+        "SELECT venue, symbol FROM watchlist_focus "
+        "WHERE cycle_ts = ? AND COALESCE(trade_eligible, 1) = 1",
+        (latest_cycle,),
+    ).fetchall()
+    return frozenset((str(r[0]), str(r[1])) for r in rows)
+
+
+async def _prefetch_alpaca_multi(
+    active: list[Any],
+    *,
+    resolutions: tuple[str, ...],
+    alpaca_adapter: Any,
+    limit: int,
+) -> dict[str, dict[str, list[Bar]]]:
+    """Batch-prefetch the Alpaca exchange-fallback for every resolution (A2).
+
+    Root cause: Yahoo (PRIMARY) is IP-throttled under the full-universe walk, so
+    nearly every Alpaca-venue symbol falls through to the single-symbol exchange
+    fallback — ~1,491 individual ``/v2/stocks/{symbol}/bars`` requests dumped onto
+    the 200 req/min IEX cap. This issues ONE chunked multi-symbol request per
+    resolution instead (``fetch_alpaca_bars_multi``, ~100 symbols/request — ~1,491
+    symbols collapse to ~15 requests total across the 3 base resolutions).
+    ``wait_for_token=True``: this off-tick pass has no cadence deadline, so a
+    drained bucket is WAITED OUT (real wait) rather than proceeding token-less
+    into a 429 (WAIT-NOT-DROP). Returns ``{resolution: {symbol: [Bar,...]}}``; an
+    unsupported resolution / no adapter → empty inner dict (graceful, mirrors the
+    single-fetch skip).
+    """
+    cache: dict[str, dict[str, list[Bar]]] = {}
+    if alpaca_adapter is None:
+        return cache
+    alpaca_symbols = sorted(
+        {inst.symbol for inst in active if inst.venue == "alpaca"}
+    )
+    if not alpaca_symbols:
+        return cache
+    for interval in resolutions:
+        if interval not in ALPACA_TIMEFRAME_BY_INTERVAL:
+            continue  # unsupported resolution for Alpaca — single-fetch path skips it too
+        try:
+            cache[interval] = await fetch_alpaca_bars_multi(
+                alpaca_adapter, alpaca_symbols,
+                bar_interval=interval, limit=limit,
+                wait_for_token=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad resolution never aborts the walk
+            logger.debug(
+                "[ground] alpaca multi-prefetch %s failed (%d symbols): %r",
+                interval, len(alpaca_symbols), exc,
+            )
+    return cache
+
+
 async def ingest_static_ground_bars(
     conn: sqlite3.Connection,
     *,
@@ -128,16 +206,33 @@ async def ingest_static_ground_bars(
     pulled this period is a cache hit here — no double fetch. flow_not_block: this
     only WIDENS observation; it gates nothing.
 
+    A2 BATCH fix: before the per-instrument walk, every Alpaca-venue symbol's
+    exchange-fallback bars are PRE-FETCHED in bulk (``_prefetch_alpaca_multi`` —
+    ~15 chunked multi-symbol requests instead of up to ~1,491 single-symbol
+    requests). Yahoo stays PRIMARY and unchanged (tried first, per-symbol,
+    inside ``fetch_bars_one``); the prefetched cache is only consulted on a
+    Yahoo miss for an ``alpaca`` symbol, replacing what used to be an individual
+    exchange request. Per-symbol recency semantics are unaffected — a symbol
+    absent from Alpaca's batch response still degrades to ``[]`` exactly like a
+    single-fetch miss (no symbol is silently dropped).
+
     Session pre-open WARM (#66, Jin "장 열기 전부터 거래가능 바 알아서 채워야"): if
-    ``warm_resolutions`` is non-empty, every instrument that ``session_warm_active``
-    flags as open-imminent (Capital indices + Alpaca US equities in their
-    ``[open - WARM_LEAD_MIN, close)`` window — never crypto/FX, see the predicate)
-    ALSO gets those resolutions (1m) fetched, so its bars are fresh AT the cash open
-    instead of 0.5h-stale (which the recency gate would skip). DATA-ONLY: warming
-    pre-fills stored bars; entry / sizing / exit are untouched. An overlap with a
-    base resolution is skipped (no double fetch). ``warm_resolutions=()`` (the
-    default / kill-switch) = byte-identical to the pre-#66 behavior. ``now_ts``
-    (UTC epoch) drives the warm-window check (defaults to ``time.time()``).
+    ``warm_resolutions`` is non-empty, every instrument that BOTH (a)
+    ``session_warm_active`` flags as open-imminent (Capital indices + Alpaca US
+    equities in their ``[open - WARM_LEAD_MIN, close)`` window — never
+    crypto/FX, see the predicate) AND (b) is a TRADE-ELIGIBLE FOCUS name
+    (``warm_eligible_symbols`` — the ~150-name ``watchlist_focus`` set) ALSO
+    gets those resolutions (1m) fetched, so its bars are fresh AT the cash open
+    instead of 0.5h-stale (which the recency gate would skip). A2 SCOPE fix:
+    equity strategies are all ``1D`` — nothing consumes universe-wide 1m bars,
+    so restricting (b) to the actually-tradeable FOCUS set (not the ~1,491
+    universe-wide open-imminent names) drops the single biggest wasted fetch
+    without losing any consumer (OKX crypto is never warm-scoped here —
+    ``session_warm_active`` already excludes it). DATA-ONLY: warming pre-fills
+    stored bars; entry / sizing / exit are untouched. An overlap with a base
+    resolution is skipped (no double fetch). ``warm_resolutions=()`` (the
+    default / kill-switch) = warming OFF. ``now_ts`` (UTC epoch) drives the
+    warm-window check (defaults to ``time.time()``).
 
     Returns ``{"instruments": K, "bars": N, "timed_out": bool,
     "warm_instruments": W, "warm_bars": M}``.
@@ -149,6 +244,15 @@ async def ingest_static_ground_bars(
 
     warm_set = frozenset(warm_resolutions)
     warm_now = int(now_ts) if now_ts is not None else int(time.time())
+    # A2 SCOPE: the warm pass is restricted to trade-eligible FOCUS names — the
+    # only symbols anything downstream actually consumes 1m bars for.
+    warm_eligible = warm_eligible_symbols(conn) if warm_set else frozenset()
+    # A2 BATCH: pre-fetch the Alpaca exchange-fallback for every base resolution
+    # in ONE chunked pass (Yahoo stays PRIMARY, tried per-symbol as before).
+    alpaca_multi_cache = await _prefetch_alpaca_multi(
+        active, resolutions=resolutions,
+        alpaca_adapter=alpaca_adapter, limit=limit,
+    )
     sem = asyncio.Semaphore(max(1, parallel))
     persisted_instruments: set[str] = set()
     warm_instruments: set[str] = set()
@@ -166,6 +270,7 @@ async def ingest_static_ground_bars(
                     alpaca_adapter=alpaca_adapter,
                     limit=limit, bar_interval=interval,
                     gpt_client_factory=gpt_client_factory,
+                    alpaca_multi_cache=alpaca_multi_cache.get(interval),
                 )
             except Exception as exc:  # noqa: BLE001 — one bad ticker never aborts
                 logger.debug(
@@ -195,8 +300,17 @@ async def ingest_static_ground_bars(
         for interval in resolutions:
             out.extend(await _fetch_interval(venue, symbol, asset_class, interval))
         # Pre-open WARM: ADD the warm resolutions for open-imminent symbols only
-        # (skip any already pulled as a base resolution — no double fetch).
-        if warm_set and session_warm_active(venue, asset_class, symbol, warm_now):
+        # (skip any already pulled as a base resolution — no double fetch). A2
+        # SCOPE: additionally restricted to the trade-eligible FOCUS set — a
+        # universe-wide open-imminent name that the bot cannot act on (not in
+        # ``watchlist_focus``) gets no 1m warm fetch (equity strategies are all
+        # 1D; nothing consumes universe-wide 1m bars — this was the single
+        # biggest wasted fetch in the #66 warm pass).
+        if (
+            warm_set
+            and (venue, symbol) in warm_eligible
+            and session_warm_active(venue, asset_class, symbol, warm_now)
+        ):
             for interval in warm_set:
                 if interval in resolutions:
                     continue

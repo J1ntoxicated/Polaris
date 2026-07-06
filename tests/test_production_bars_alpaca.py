@@ -340,3 +340,185 @@ async def test_okx_branch_unchanged_by_alpaca_kwarg() -> None:
     with patch("polaris.scripts._production_bars.fetch_okx_bars", new=_fake):
         await fetch_bars_one("okx", "BTC-USDT", "crypto", bar_interval="15m")
     assert captured["bar_interval"] == "15m"
+
+
+# ---------------------------------------------------------------------------
+# 429-storm batch fetch — fetch_alpaca_bars_multi: chunked multi-symbol batch
+# ---------------------------------------------------------------------------
+
+
+class _FakeAlpacaAdapterMulti:
+    """Minimal stand-in exposing ``fetch_bars_multi`` like ``AlpacaAdapter``."""
+
+    def __init__(self, rows_by_symbol: dict[str, list[dict[str, Any]]]) -> None:
+        self._rows_by_symbol = rows_by_symbol
+        self.calls: list[dict[str, Any]] = []
+
+    async def fetch_bars_multi(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str = "1Day",
+        limit: int = 300,
+        start: str | None = None,
+        wait_for_token: bool = False,
+    ) -> dict[str, list[dict[str, Any]]]:
+        self.calls.append(
+            {
+                "symbols": list(symbols), "timeframe": timeframe,
+                "limit": limit, "start": start, "wait_for_token": wait_for_token,
+            }
+        )
+        return {s: self._rows_by_symbol[s] for s in symbols if s in self._rows_by_symbol}
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_normalizes_and_accounts_every_symbol() -> None:
+    """Every requested symbol is a key in the result — a bar-less symbol → []."""
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+
+    rows = {"AAPL": _raw_alpaca_bars(2), "MSFT": _raw_alpaca_bars(1)}
+    adapter = _FakeAlpacaAdapterMulti(rows)
+    out = await fetch_alpaca_bars_multi(
+        adapter, ["AAPL", "MSFT", "ZZZZ"], bar_interval="1D",
+    )
+    assert set(out) == {"AAPL", "MSFT", "ZZZZ"}  # ZZZZ present, empty — not dropped
+    assert len(out["AAPL"]) == 2
+    assert len(out["MSFT"]) == 1
+    assert out["ZZZZ"] == []
+    for bars in (out["AAPL"], out["MSFT"]):
+        assert all(isinstance(b, Bar) for b in bars)
+        assert bars == sorted(bars, key=lambda b: b.ts)  # newest-last preserved
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_chunks_at_boundary() -> None:
+    """~250 symbols chunk into 3 requests of <=100 each (chunk boundary pin)."""
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+    from polaris.venues.alpaca.adapter import ALPACA_BARS_MULTI_CHUNK
+
+    symbols = [f"SYM{i:04d}" for i in range(250)]
+    rows = {s: _raw_alpaca_bars(1) for s in symbols}
+    adapter = _FakeAlpacaAdapterMulti(rows)
+    out = await fetch_alpaca_bars_multi(adapter, symbols, bar_interval="1D")
+    assert ALPACA_BARS_MULTI_CHUNK == 100
+    assert len(adapter.calls) == 3  # 100 + 100 + 50
+    assert [len(c["symbols"]) for c in adapter.calls] == [100, 100, 50]
+    # every symbol from every chunk accounted for, none dropped at the boundary.
+    assert set(out) == set(symbols)
+    assert all(len(out[s]) == 1 for s in symbols)
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_collapses_request_count() -> None:
+    """The quantified collapse: 1,491 single fetches -> ~15 batch requests."""
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+    from polaris.venues.alpaca.adapter import ALPACA_BARS_MULTI_CHUNK
+
+    n = 1_491
+    symbols = [f"SYM{i:04d}" for i in range(n)]
+    rows = {s: _raw_alpaca_bars(1) for s in symbols}
+    adapter = _FakeAlpacaAdapterMulti(rows)
+    await fetch_alpaca_bars_multi(adapter, symbols, bar_interval="1D")
+    expected_requests = -(-n // ALPACA_BARS_MULTI_CHUNK)  # ceil division
+    assert expected_requests == 15
+    assert len(adapter.calls) == 15  # collapsed from 1,491 single-symbol fetches
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_since_ts_tightens_start_incremental() -> None:
+    """``since_ts`` narrows the shared ``start`` window (recency preserved)."""
+    import datetime as _dt
+
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+
+    adapter = _FakeAlpacaAdapterMulti({"AAPL": []})
+    recent_ts = int(_dt.datetime(2026, 6, 20, tzinfo=_dt.UTC).timestamp())
+    await fetch_alpaca_bars_multi(
+        adapter, ["AAPL"], bar_interval="1D", since_ts=recent_ts,
+    )
+    start = adapter.calls[0]["start"]
+    assert start >= "2026-06-1"  # tightened toward since_ts, not the 330d fixed lookback
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_chunk_error_degrades_others_survive() -> None:
+    """A failing chunk yields [] for its own symbols; OTHER chunks still succeed."""
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+
+    class _FlakyAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_bars_multi(self, symbols: list[str], **kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("boom")
+            return {s: _raw_alpaca_bars(1) for s in symbols}
+
+    symbols = [f"SYM{i:04d}" for i in range(150)]  # 2 chunks (100 + 50)
+    adapter = _FlakyAdapter()
+    out = await fetch_alpaca_bars_multi(adapter, symbols, bar_interval="1D")
+    assert adapter.calls == 2
+    first_chunk, second_chunk = symbols[:100], symbols[100:]
+    assert all(out[s] == [] for s in first_chunk)  # failed chunk degrades, not raises
+    assert all(len(out[s]) == 1 for s in second_chunk)  # the other chunk unaffected
+
+
+@pytest.mark.asyncio
+async def test_fetch_alpaca_bars_multi_unsupported_interval_returns_empty_all() -> None:
+    """An unsupported bar_interval degrades every symbol to [] without a request."""
+    from polaris.scripts._production_bars import fetch_alpaca_bars_multi
+
+    adapter = _FakeAlpacaAdapterMulti({})
+    out = await fetch_alpaca_bars_multi(adapter, ["AAPL", "MSFT"], bar_interval="3m")
+    assert out == {"AAPL": [], "MSFT": []}
+    assert adapter.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 429-storm batch fetch — fetch_bars_one alpaca_multi_cache serves Yahoo-miss
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_one_serves_from_alpaca_multi_cache_no_network() -> None:
+    """When ``alpaca_multi_cache`` is given, a Yahoo miss is served from it —
+    NO per-symbol Alpaca network call (the collapse mechanism itself)."""
+    adapter = _FakeAlpacaAdapterMulti({})  # would 0-out any real call
+    cached_bar = Bar(
+        instrument_id="alpaca:AAPL", underlying_group_id="equity:AAPL",
+        venue="alpaca", symbol="AAPL", bar_interval="1D", ts=1_700_000_000,
+        open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
+    )
+    bars = await fetch_bars_one(
+        "alpaca", "AAPL", "equity",
+        alpaca_adapter=adapter, bar_interval="1D",
+        alpaca_multi_cache={"AAPL": [cached_bar]},
+    )
+    assert bars == [cached_bar]
+    assert adapter.calls == []  # never called fetch_bars_multi — served from cache
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_one_cache_miss_symbol_degrades_to_empty() -> None:
+    """A symbol absent from the cache (Alpaca had nothing for it) -> [] gracefully."""
+    bars = await fetch_bars_one(
+        "alpaca", "ZZZZ", "equity",
+        alpaca_adapter=_FakeAlpacaAdapterMulti({}), bar_interval="1D",
+        alpaca_multi_cache={"AAPL": []},  # ZZZZ not in cache
+    )
+    assert bars == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_one_default_cache_none_unchanged_live_path() -> None:
+    """``alpaca_multi_cache=None`` (every existing/live-tick caller) keeps the
+    single-symbol exchange-fallback path exactly as before (byte-identical)."""
+    fake = _FakeAlpacaAdapter(_raw_alpaca_bars(1))
+    bars = await fetch_bars_one(
+        "alpaca", "AAPL", "equity",
+        alpaca_adapter=fake, bar_interval="1D",
+    )
+    assert len(bars) == 1
+    assert len(fake.calls) == 1  # single-symbol fetch_bars still used (cache absent)

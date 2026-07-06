@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ALPACA_ACCOUNT_PATH",
+    "ALPACA_BARS_MULTI_CHUNK",
+    "ALPACA_BARS_MULTI_PAGE_LIMIT",
     "ALPACA_DATA_BASE",
     "ALPACA_ORDERS_PATH",
     "ALPACA_PAPER_BASE",
@@ -84,6 +86,27 @@ _DATA_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
 DATA_RATE: Final[int] = 200  # tokens per DATA_PER_SEC window (basic-plan cap)
 DATA_PER_SEC: Final[float] = 60.0
 DATA_ACQUIRE_TIMEOUT_SEC: Final[float] = 5.0
+
+# A2 — multi-symbol bar fetch (429-storm fix). Alpaca's ``/v2/stocks/bars``
+# accepts a comma-joined ``symbols`` param covering many tickers in ONE request,
+# so the static-ground off-tick fan-out (~1,491 single-symbol Alpaca fallback
+# fetches when Yahoo is IP-throttled) collapses to ~15 batched requests instead
+# of storming the 200 req/min IEX cap. Chunk width is bounded well under any
+# venue URL-length limit for a comma-joined symbol list (basic-plan documented
+# ceiling); a caller may still hit either endpoint per its own need — this is
+# additive, not a replacement for the single-symbol path (the live tick path
+# keeps using ``fetch_bars`` unchanged).
+ALPACA_BARS_MULTI_CHUNK: Final[int] = 100
+
+# Multi-symbol ``limit`` is an AGGREGATE cap across the whole ``symbols`` list
+# (unlike the single-symbol endpoint, where ``limit`` is PER-SYMBOL) — Alpaca
+# paginates the remainder behind ``next_page_token``. A single request-``limit``
+# of 240 on a 100-symbol chunk returns ~240 bars TOTAL (~2.4/symbol), not
+# ~227/symbol, starving the MA200/52wk warmup. Draining pagination at Alpaca's
+# max PAGE limit (10000) makes every symbol get its full per-chunk history
+# regardless of chunk width (100 symbols x 227 1D bars ~= 22.7k > one page, so
+# more than one page is expected and MUST be drained, not just requested).
+ALPACA_BARS_MULTI_PAGE_LIMIT: Final[int] = 10000
 
 
 def _retry_after_sec(resp: httpx.Response, fallback: float) -> float:
@@ -227,6 +250,7 @@ class AlpacaAdapter:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         on_data_host: bool = False,
+        wait_for_token: bool = False,
     ) -> Any:
         """Authed request → parsed JSON. Raises on transport / 4xx-5xx.
 
@@ -236,17 +260,30 @@ class AlpacaAdapter:
         bar (the 429-storm half of the universe-swell incident). The trade host is
         unchanged (orders have their own idempotent retry path). A non-429 4xx/5xx
         still raises immediately (caller's existing handling).
+
+        ``wait_for_token`` (A2 WAIT-NOT-DROP, root-cause fix): the live-tick focus
+        fetch (5s cadence) needs the bounded SOFT-cap acquire below — a real wait
+        there would stall the tick. The OFF-TICK static-ground background pass has
+        no deadline, so it acquires with ``timeout=None`` (a REAL wait: the call
+        blocks until a token frees rather than proceeding token-less into a 429).
+        Both are pure pacing (flow_not_block — never rejected, only paced); the
+        trade host is never paced regardless of this flag.
         """
         cli = self.data_client if on_data_host else self.client
         for attempt in range(DATA_RETRY_MAX + 1):
             if on_data_host:
                 # Pace BEFORE the GET so the fan-out stays under the cap (this is
-                # what prevents the 429 rather than retrying into it). The bounded
-                # acquire is a SOFT cap: if the wait elapses the GET still proceeds
-                # token-less (flow_not_block — the bar is never dropped; the 429
-                # backoff below is the safety net). The trade host is never paced —
-                # orders flow at full speed (aggressive bias intact).
-                await self._data_bucket.acquire(timeout=DATA_ACQUIRE_TIMEOUT_SEC)
+                # what prevents the 429 rather than retrying into it). The default
+                # bounded acquire is a SOFT cap: if the wait elapses the GET still
+                # proceeds token-less (flow_not_block — the bar is never dropped;
+                # the 429 backoff below is the safety net). ``wait_for_token=True``
+                # (off-tick background pass only) waits for a REAL token instead —
+                # it has no cadence deadline to protect, so it defers rather than
+                # over-running the cap. The trade host is never paced — orders flow
+                # at full speed (aggressive bias intact).
+                await self._data_bucket.acquire(
+                    timeout=None if wait_for_token else DATA_ACQUIRE_TIMEOUT_SEC
+                )
             resp = await cli.request(
                 method, path, params=params, json=json_body, headers=self._auth_headers
             )
@@ -365,6 +402,7 @@ class AlpacaAdapter:
         start: str | None = None,
         feed: str | None = None,
         sort: str = "desc",
+        wait_for_token: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch up to ``limit`` ``timeframe`` bars for ``symbol`` (data host).
 
@@ -403,11 +441,89 @@ class AlpacaAdapter:
             f"/v2/stocks/{symbol}/bars",
             params=params,
             on_data_host=True,
+            wait_for_token=wait_for_token,
         )
         if isinstance(body, dict):
             bars = body.get("bars")
             return list(bars) if isinstance(bars, list) else []
         return []
+
+    async def fetch_bars_multi(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str = "1Day",
+        limit: int = 300,
+        start: str | None = None,
+        feed: str | None = None,
+        sort: str = "desc",
+        wait_for_token: bool = False,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Fetch ``timeframe`` bars for MANY symbols, draining pagination (data host).
+
+        A2 429-storm root-cause fix: the multi-symbol ``GET /v2/stocks/bars``
+        endpoint accepts a comma-joined ``symbols`` list, returning
+        ``{"bars": {SYMBOL: [bar, ...], ...}, "next_page_token": ...}`` — one
+        request (page) instead of one per symbol. Chunked at
+        ``ALPACA_BARS_MULTI_CHUNK`` (~100) per request; caller
+        (``fetch_alpaca_bars_multi``) issues the chunked requests and merges. A
+        symbol Alpaca has no bars for (delisted / genuinely no data this window)
+        is simply ABSENT from the returned dict — never silently dropped from the
+        caller's accounting, since the caller iterates its own requested-symbol
+        list against this dict's keys (missing == empty list, not an error).
+
+        PAGINATION (fix, verified live): unlike the single-symbol endpoint where
+        ``limit`` is PER-SYMBOL, the multi-symbol endpoint treats ``limit`` as an
+        AGGREGATE cap across the WHOLE ``symbols`` list — the remainder is
+        paginated behind ``next_page_token``. A 100-symbol chunk requested at a
+        per-symbol-sized ``limit`` (e.g. 240) would return ~240 bars TOTAL
+        (~2.4/symbol), starving the MA200/52wk warmup. So every PAGE here is
+        requested at Alpaca's max page size (``ALPACA_BARS_MULTI_PAGE_LIMIT`` =
+        10000, ignoring the caller's ``limit``) and pages are drained by looping
+        ``page_token`` until ``next_page_token`` is null/absent, merging each
+        page's ``bars[symbol]`` in arrival order (oldest-first pages first, per
+        ``sort``) — so every requested symbol ends up with its FULL history for
+        the chunk/window, not a slice of an aggregate cap.
+
+        Same ``feed``/``sort`` freshness contract as :meth:`fetch_bars`.
+        """
+        if not symbols:
+            return {}
+        if feed is None:
+            feed = "iex"
+        merged: dict[str, list[dict[str, Any]]] = {}
+        page_token: str | None = None
+        while True:
+            params: dict[str, str] = {
+                "symbols": ",".join(symbols),
+                "timeframe": timeframe,
+                "limit": str(ALPACA_BARS_MULTI_PAGE_LIMIT),
+                "feed": feed,
+                "sort": sort,
+            }
+            if start is not None:
+                params["start"] = start
+            if page_token is not None:
+                params["page_token"] = page_token
+            body = await self.request_json(
+                "GET",
+                "/v2/stocks/bars",
+                params=params,
+                on_data_host=True,
+                wait_for_token=wait_for_token,
+            )
+            if not isinstance(body, dict):
+                break
+            raw_bars = body.get("bars")
+            if isinstance(raw_bars, dict):
+                for sym, rows in raw_bars.items():
+                    if not isinstance(rows, list):
+                        continue
+                    merged.setdefault(str(sym), []).extend(rows)
+            page_token = body.get("next_page_token")
+            if not page_token:
+                break
+        return merged
 
     async def fetch_quote(self, symbol: str) -> dict[str, Any]:
         """Latest quote (best bid/ask) for ``symbol`` (data host)."""

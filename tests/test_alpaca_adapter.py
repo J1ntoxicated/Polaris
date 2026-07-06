@@ -19,6 +19,7 @@ from polaris.venues.alpaca.adapter import (
     ALPACA_DATA_BASE,
     ALPACA_ORDERS_PATH,
     ALPACA_PAPER_BASE,
+    DATA_ACQUIRE_TIMEOUT_SEC,
     AlpacaAdapter,
     AlpacaOrderResponse,
     resolve_alpaca_credentials,
@@ -583,6 +584,181 @@ async def test_fetch_bars_explicit_feed_overrides(monkeypatch: pytest.MonkeyPatc
     finally:
         await data_client.aclose()
     assert captured["feed"] == "sip"
+
+
+# ---------------------------------------------------------------------------
+# A2 — multi-symbol batch bar fetch (429-storm collapse fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_multi_one_request_many_symbols() -> None:
+    """One ``/v2/stocks/bars`` request returns bars for every requested symbol."""
+    captured: dict[str, Any] = {}
+
+    def responder(req: httpx.Request) -> Any:
+        captured["path"] = req.url.path
+        captured["symbols"] = req.url.params.get("symbols")
+        return {
+            "bars": {
+                "AAPL": [{"t": "2026-06-26T13:00:00Z", "o": 1, "h": 2, "l": 1,
+                          "c": 2, "v": 100}],
+                "MSFT": [{"t": "2026-06-26T13:00:00Z", "o": 3, "h": 4, "l": 3,
+                          "c": 4, "v": 200}],
+            }
+        }
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        out = await adapter.fetch_bars_multi(
+            ["AAPL", "MSFT"], timeframe="1Day", start="2024-01-01",
+        )
+    finally:
+        await data_client.aclose()
+    assert len(transport.calls) == 1  # ONE request for both symbols
+    assert captured["path"] == "/v2/stocks/bars"
+    assert captured["symbols"] == "AAPL,MSFT"
+    assert set(out) == {"AAPL", "MSFT"}
+    assert len(out["AAPL"]) == 1
+    assert len(out["MSFT"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_multi_missing_symbol_returns_empty_not_dropped() -> None:
+    """A symbol Alpaca has no bars for is absent from the response dict.
+
+    The caller (``fetch_alpaca_bars_multi``) iterates its OWN requested-symbol
+    list against this dict's keys, so "absent" degrades to an empty list rather
+    than silently vanishing from the per-symbol accounting.
+    """
+    def responder(req: httpx.Request) -> Any:
+        return {"bars": {"AAPL": [{"t": "2026-06-26T13:00:00Z", "c": 191.0}]}}
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        out = await adapter.fetch_bars_multi(["AAPL", "ZZZZ"], timeframe="1Day")
+    finally:
+        await data_client.aclose()
+    assert "AAPL" in out
+    assert "ZZZZ" not in out  # caller treats a missing key as empty, not an error
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_multi_drains_next_page_token_full_history_per_symbol() -> None:
+    """Multi-symbol ``limit`` is an AGGREGATE cap, not per-symbol — pagination
+    MUST be drained or each symbol is starved below MA200/52wk warmup depth.
+
+    Simulates a >limit multi-symbol response: the FIRST page is truncated
+    (fewer bars than the full per-symbol warmup) WITH a ``next_page_token``;
+    the SECOND page carries the remainder with a null token. Every symbol must
+    end up with its FULL expected bar count once both pages are merged —
+    proving the adapter loops on ``next_page_token`` (passed back as
+    ``page_token``) instead of stopping after page 1.
+    """
+    warmup_depth = 227  # 1D 330-day lookback ~= 227 trading days (MA200 ~205 + slack)
+    symbols = ["AAPL", "MSFT"]
+    page1_count = 100  # < warmup_depth — proves page 1 alone is NOT "full history"
+    page2_count = warmup_depth - page1_count
+
+    def _bar(i: int) -> dict[str, Any]:
+        return {"t": f"2026-01-{(i % 28) + 1:02d}T13:00:00Z", "o": 1, "h": 2, "l": 1,
+                "c": 2, "v": 100}
+
+    calls_seen: list[str | None] = []
+
+    def responder(req: httpx.Request) -> Any:
+        token = req.url.params.get("page_token")
+        calls_seen.append(token)
+        if token is None:
+            return {
+                "bars": {sym: [_bar(i) for i in range(page1_count)] for sym in symbols},
+                "next_page_token": "PAGE2TOKEN",
+            }
+        assert token == "PAGE2TOKEN"
+        return {
+            "bars": {sym: [_bar(i) for i in range(page2_count)] for sym in symbols},
+            "next_page_token": None,
+        }
+
+    transport = _MockTransport(responder)
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        out = await adapter.fetch_bars_multi(
+            symbols, timeframe="1Day", limit=240, start="2024-01-01",
+        )
+    finally:
+        await data_client.aclose()
+    assert len(transport.calls) == 2  # two pages drained, not one
+    assert calls_seen == [None, "PAGE2TOKEN"]  # second request replays the token
+    for sym in symbols:
+        assert len(out[sym]) == warmup_depth  # full history, not the truncated page 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_multi_empty_symbols_no_request() -> None:
+    """An empty symbol list makes zero network calls (degrade-never-crash)."""
+    transport = _MockTransport(lambda req: {"bars": {}})
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    try:
+        out = await adapter.fetch_bars_multi([], timeframe="1Day")
+    finally:
+        await data_client.aclose()
+    assert out == {}
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_multi_wait_for_token_waits_indefinitely() -> None:
+    """``wait_for_token=True`` acquires with ``timeout=None`` (a REAL wait).
+
+    A2 WAIT-NOT-DROP: the off-tick static-ground pass has no cadence deadline,
+    so it should wait out a drained bucket instead of proceeding token-less into
+    a 429 (the default bounded-soft-cap behaviour every OTHER caller keeps).
+    """
+    captured_timeout: dict[str, Any] = {"seen": "unset"}
+
+    class _StubBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            captured_timeout["seen"] = timeout
+            return True
+
+    transport = _MockTransport(lambda req: {"bars": {"AAPL": []}})
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    adapter._data_bucket = _StubBucket()  # type: ignore[assignment]
+    try:
+        await adapter.fetch_bars_multi(["AAPL"], timeframe="1Day", wait_for_token=True)
+    finally:
+        await data_client.aclose()
+    assert captured_timeout["seen"] is None  # None == wait as long as needed
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_default_wait_for_token_false_stays_bounded() -> None:
+    """Default (``wait_for_token=False``, every existing caller) keeps the
+    bounded SOFT-cap acquire — the live tick path's behaviour is unchanged."""
+    captured_timeout: dict[str, Any] = {"seen": "unset"}
+
+    class _StubBucket:
+        async def acquire(self, *, timeout: float | None = None) -> bool:
+            captured_timeout["seen"] = timeout
+            return True
+
+    transport = _MockTransport(lambda req: {"bars": [{"t": "2026-06-26T13:00:00Z", "c": 1.0}]})
+    data_client = httpx.AsyncClient(transport=transport, base_url=ALPACA_DATA_BASE)
+    adapter = AlpacaAdapter(api_key="K", secret="S", data_client=data_client)
+    adapter._data_bucket = _StubBucket()  # type: ignore[assignment]
+    try:
+        await adapter.fetch_bars("AAPL", start="2026-06-26")
+    finally:
+        await data_client.aclose()
+    assert captured_timeout["seen"] == DATA_ACQUIRE_TIMEOUT_SEC
 
 
 # ---------------------------------------------------------------------------

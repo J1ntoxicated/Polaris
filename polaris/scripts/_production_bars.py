@@ -36,6 +36,7 @@ from polaris.scripts._yahoo_bars import (
     is_okx_native_preferred,
     should_fetch_exchange_fallback,
 )
+from polaris.venues.alpaca.adapter import ALPACA_BARS_MULTI_CHUNK
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.okx.adapter import fetch_okx_bars
@@ -407,6 +408,96 @@ async def fetch_alpaca_bars(
     return out
 
 
+async def fetch_alpaca_bars_multi(
+    adapter: Any,
+    symbols: list[str],
+    *,
+    bar_interval: str = "1D",
+    limit: int = 240,
+    asset_class: str = "equity",
+    since_ts: int | None = None,
+    wait_for_token: bool = False,
+    chunk_size: int = ALPACA_BARS_MULTI_CHUNK,
+) -> dict[str, list[Bar]]:
+    """Fetch + normalize Alpaca bars for MANY symbols, chunked (A2 429-storm fix).
+
+    Root cause: the static-ground off-tick fallback issued ONE
+    ``/v2/stocks/{symbol}/bars`` request per unmapped/throttled symbol — with
+    Yahoo IP-throttled that was ~1,491 single fetches per walk, dumped onto the
+    Alpaca 200/min IEX cap. ``AlpacaAdapter.fetch_bars_multi`` batches many
+    symbols into ONE request; this wrapper chunks ``symbols`` at ``chunk_size``
+    (~100/request — ~1,491 symbols → ~15 requests) and normalizes each row the
+    same way :func:`fetch_alpaca_bars` does.
+
+    Per-symbol recency/skip semantics are PRESERVED: every requested symbol is a
+    key in the returned dict (even if Alpaca returned no bars for it → ``[]``),
+    so a caller iterating ``symbols`` never silently drops one. A chunk-level
+    fetch error degrades that whole chunk's symbols to ``[]`` (one bad chunk
+    never aborts the others — degrade-never-halt) rather than raising.
+
+    ``wait_for_token`` forwards to :meth:`AlpacaAdapter.fetch_bars_multi` (A2
+    WAIT-NOT-DROP): the off-tick static-ground caller passes ``True`` so a
+    drained token bucket is WAITED OUT rather than proceeding token-less into a
+    429; the live tick path never calls this batch fetcher.
+
+    ``limit`` here is the PER-SYMBOL warmup depth of the caller's *intent*
+    (mirrors :func:`fetch_alpaca_bars`'s per-symbol ``limit``), but is NOT
+    forwarded to Alpaca as-is: the multi-symbol endpoint's ``limit`` is an
+    AGGREGATE cap across the whole chunk, not per-symbol, so
+    ``AlpacaAdapter.fetch_bars_multi`` drains ``next_page_token`` pagination at
+    its own max page size instead, guaranteeing every symbol gets its full
+    per-chunk history regardless of chunk width. See the pagination note on
+    :meth:`AlpacaAdapter.fetch_bars_multi`.
+    """
+    out: dict[str, list[Bar]] = {}
+    if not symbols:
+        return out
+    timeframe = ALPACA_TIMEFRAME_BY_INTERVAL.get(bar_interval)
+    if timeframe is None:
+        logger.warning(
+            "[L1/alpaca] unsupported bar_interval=%r — skipping multi-fetch of %d symbol(s)",
+            bar_interval, len(symbols),
+        )
+        return dict.fromkeys(symbols, [])
+    start = _alpaca_bars_start(bar_interval, since_ts=since_ts)
+    for i in range(0, len(symbols), max(1, chunk_size)):
+        chunk = symbols[i : i + chunk_size]
+        try:
+            raw_by_symbol = await adapter.fetch_bars_multi(
+                chunk, timeframe=timeframe, limit=limit, start=start,
+                wait_for_token=wait_for_token,
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.debug(
+                "[L1/alpaca] multi-fetch chunk (%d symbols) failed: %r",
+                len(chunk), exc,
+            )
+            for symbol in chunk:
+                out[symbol] = []
+            continue
+        for symbol in chunk:
+            underlying = compute_underlying_group_id(
+                "alpaca", symbol, asset_class=asset_class
+            )
+            bars: list[Bar] = []
+            for row in raw_by_symbol.get(symbol, []):
+                bar = _alpaca_bar_to_canonical(
+                    row, symbol=symbol, bar_interval=bar_interval,
+                    underlying_group_id=underlying,
+                )
+                if bar is not None:
+                    bars.append(bar)
+            bars.sort(key=lambda b: b.ts)  # canonical newest-last (mirror single-fetch)
+            out[symbol] = bars
+    logger.info(
+        "[alpaca] multi-fetch bars=%s/%s symbols=%d chunks=%d",
+        bar_interval, len(symbols),
+        sum(1 for v in out.values() if v),
+        (len(symbols) + chunk_size - 1) // max(1, chunk_size),
+    )
+    return out
+
+
 async def fetch_bars_one(
     venue: str,
     symbol: str,
@@ -418,6 +509,7 @@ async def fetch_bars_one(
     bar_interval: str = "1m",
     since_ts: int | None = None,
     gpt_client_factory: Any = None,
+    alpaca_multi_cache: dict[str, list[Bar]] | None = None,
 ) -> list[Bar]:
     """Single-instrument bar fetch. Returns canonical Bar list (newest last).
 
@@ -447,6 +539,17 @@ async def fetch_bars_one(
     unmapped symbol can be resolved to its Yahoo ticker via ONE gpt-5-mini lookup
     (keyless-safe — a missing key just disables the GPT branch, exchange fallback
     still covers it).
+
+    A2 429-storm fix: ``alpaca_multi_cache`` (default ``None`` — the live 5s tick
+    path never passes it, byte-identical behaviour) lets a bulk caller (the
+    static-ground off-tick walk) pre-fetch ALL its Alpaca symbols via ONE batched
+    ``fetch_alpaca_bars_multi`` call and hand the result in here. When present and
+    Yahoo misses for an ``alpaca`` symbol, the cached batch result is served
+    INSTEAD OF issuing a new single-symbol Alpaca request — this is what collapses
+    ~1,491 single fallback fetches to ~15 batch requests. A symbol absent from the
+    cache (Alpaca returned nothing for it) degrades to ``[]``, same as a normal
+    single-fetch miss (no symbol is silently dropped from the caller's own
+    accounting — the caller still iterates every requested symbol).
     """
     # Yahoo PRIMARY — bar HISTORY only (live price WS path untouched).
     yahoo_bars = await fetch_yahoo_bars(
@@ -456,6 +559,10 @@ async def fetch_bars_one(
     )
     if yahoo_bars:
         return yahoo_bars  # already newest-last; no reversal needed.
+    # Yahoo had nothing. For an Alpaca symbol with a pre-fetched batch cache
+    # available, serve from it — NO per-symbol network call (the 429-storm fix).
+    if venue == "alpaca" and alpaca_multi_cache is not None:
+        return alpaca_multi_cache.get(symbol, [])
     # Yahoo had nothing → exchange FALLBACK, throttled per (venue, symbol) so the
     # unmapped tail cannot recreate a REST storm (fetch-efficiency, not a block).
     #

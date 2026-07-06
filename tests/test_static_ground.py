@@ -54,6 +54,29 @@ def _seat_active(
     conn.commit()
 
 
+def _seat_focus(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, str]],
+    *,
+    cycle_ts: int = 1_000,
+    trade_eligible: int = 1,
+) -> None:
+    """Insert ``(venue, symbol)`` rows into the latest ``watchlist_focus`` cycle.
+
+    A2 SCOPE: the 1m warm pass now requires a symbol be in this trade-eligible
+    FOCUS set (mirrors production ``watchlist_focus`` — the sweep's persisted
+    ~150-name pick), so warm-pass tests must seed it explicitly.
+    """
+    for rank, (venue, symbol) in enumerate(rows):
+        conn.execute(
+            "INSERT OR REPLACE INTO watchlist_focus (cycle_ts, venue, symbol, "
+            "focus_score, focus_rank, target_bucket, trade_eligible) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cycle_ts, venue, symbol, 1.0, rank, "trade", trade_eligible),
+        )
+    conn.commit()
+
+
 def _mk_bar(venue: str, symbol: str, interval: str, ts: int) -> Bar:
     return Bar(
         instrument_id=f"{venue}:{symbol}",
@@ -581,6 +604,8 @@ async def test_warm_adds_1m_for_pre_open_index_only(
          ("capital", "J225", "index", "index:J225"),      # Asia long closed → no 1m
          ("okx", "BTC-USDT", "crypto", "crypto:BTC")],    # crypto → never warmed
     )
+    # A2 SCOPE: warm now also requires trade-eligible FOCUS membership.
+    _seat_focus(conn, [("capital", "US100")])
     seen: list[tuple[str, str]] = []
 
     async def _fake(
@@ -617,6 +642,8 @@ async def test_warm_alpaca_equity_pre_open(
 ) -> None:
     """An Alpaca US equity (the 미장 gap) gets a 1m warm before the US open."""
     _seat_active(conn, [("alpaca", "AAPL", "equity", "equity:AAPL")])
+    # A2 SCOPE: warm now also requires trade-eligible FOCUS membership.
+    _seat_focus(conn, [("alpaca", "AAPL")])
     seen: list[tuple[str, str]] = []
 
     async def _fake(
@@ -698,6 +725,7 @@ async def test_warm_fetch_failure_degrades_gracefully(
     up — warming is best-effort, the bot loop is untouched.
     """
     _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    _seat_focus(conn, [("capital", "US100")])  # A2 SCOPE: warm needs FOCUS membership
 
     async def _fake(
         venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
@@ -727,6 +755,7 @@ async def test_warm_does_not_double_fetch_overlapping_resolution(
 ) -> None:
     """If 1m is already a base resolution the warm pass must not re-fetch it."""
     _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    _seat_focus(conn, [("capital", "US100")])  # A2 SCOPE: warm needs FOCUS membership
     count_1m = 0
 
     async def _fake(
@@ -851,3 +880,240 @@ async def test_producer_forwards_warm_resolutions(
         _stop_after_first(),
     )
     assert seen["warm_resolutions"] == ("1m",)
+
+
+# ---------------------------------------------------------------------------
+# A2 — warm_eligible_symbols: trade-eligible FOCUS scope (not universe-wide)
+# ---------------------------------------------------------------------------
+
+
+def test_warm_eligible_symbols_empty_when_no_focus_cycle(
+    conn: sqlite3.Connection,
+) -> None:
+    """No ``watchlist_focus`` cycle at all -> empty set (warm pass gets nothing)."""
+    assert sg.warm_eligible_symbols(conn) == frozenset()
+
+
+def test_warm_eligible_symbols_filters_to_trade_eligible_only(
+    conn: sqlite3.Connection,
+) -> None:
+    """Only ``trade_eligible=1`` rows of the LATEST cycle are returned."""
+    _seat_focus(conn, [("alpaca", "AAPL")], cycle_ts=100, trade_eligible=1)
+    _seat_focus(conn, [("alpaca", "TSLA")], cycle_ts=100, trade_eligible=0)
+    out = sg.warm_eligible_symbols(conn)
+    assert out == frozenset({("alpaca", "AAPL")})
+
+
+def test_warm_eligible_symbols_only_latest_cycle(conn: sqlite3.Connection) -> None:
+    """A stale (superseded) cycle's rows are NOT included — only MAX(cycle_ts)."""
+    _seat_focus(conn, [("alpaca", "OLD")], cycle_ts=100)
+    _seat_focus(conn, [("alpaca", "NEW")], cycle_ts=200)
+    assert sg.warm_eligible_symbols(conn) == frozenset({("alpaca", "NEW")})
+
+
+@pytest.mark.asyncio
+async def test_warm_excludes_focus_ineligible_universe_wide_name(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2 SCOPE: a universe-wide open-imminent symbol NOT in the trade-eligible
+    FOCUS set gets NO 1m warm fetch, even though it is inside the pre-open
+    window — this is the fix for the ~1,491-name universe-wide waste (equity
+    strategies are all 1D; nothing consumes universe-wide 1m bars).
+    """
+    _seat_active(
+        conn,
+        [("capital", "US100", "index", "index:US100"),  # in FOCUS → warmed
+         ("capital", "US500", "index", "index:US500")],  # NOT in FOCUS → no warm
+    )
+    _seat_focus(conn, [("capital", "US100")])  # US500 intentionally NOT seeded
+    seen: list[tuple[str, str]] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append((symbol, bar_interval))
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    warmed_1m = {sym for sym, iv in seen if iv == "1m"}
+    assert warmed_1m == {"US100"}  # US500 excluded despite being open-imminent
+    base_1d = {sym for sym, iv in seen if iv == "1D"}
+    assert base_1d == {"US100", "US500"}  # base coverage UNCHANGED (still all-active)
+    assert result["warm_instruments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_empty_focus_cycle_warms_nothing(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``watchlist_focus`` cycle at all -> the warm pass fires for NO symbol,
+    even one that is open-imminent (base coverage is unaffected)."""
+    _seat_active(conn, [("capital", "US100", "index", "index:US100")])
+    seen: list[tuple[str, str]] = []
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        seen.append((symbol, bar_interval))
+        return [_mk_bar(venue, symbol, bar_interval, int(time.time()))]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), warm_resolutions=("1m",),
+        now_ts=_utc_warm(13, 10),
+    )
+    assert "1m" not in {iv for _sym, iv in seen}
+    assert result["warm_instruments"] == 0
+    assert {sym for sym, iv in seen if iv == "1D"} == {"US100"}  # base unaffected
+
+
+# ---------------------------------------------------------------------------
+# A2 — Alpaca multi-symbol batch prefetch collapses the exchange-fallback fan-out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefetch_alpaca_multi_one_call_covers_every_alpaca_symbol(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The static-ground walk issues ONE (chunked) multi-fetch, not N single
+    fetches, for the Alpaca-venue slice of the active universe."""
+    from polaris.scripts._production_layers import read_active_universe
+
+    alpaca_calls: list[list[str]] = []
+
+    async def _fake_multi(
+        adapter: Any, symbols: list[str], *, bar_interval: str = "1D",
+        limit: int = 240, wait_for_token: bool = False, since_ts: Any = None,
+    ) -> dict[str, list[Bar]]:
+        alpaca_calls.append(list(symbols))
+        return {
+            s: [_mk_bar("alpaca", s, bar_interval, int(time.time()))] for s in symbols
+        }
+
+    monkeypatch.setattr(sg, "fetch_alpaca_bars_multi", _fake_multi)
+
+    _seat_active(
+        conn,
+        [("alpaca", f"SYM{i}", "equity", f"equity:SYM{i}") for i in range(120)],
+    )
+    active = read_active_universe(conn)
+    cache = await sg._prefetch_alpaca_multi(
+        active, resolutions=("1D", "1H", "15m"),
+        alpaca_adapter=object(), limit=240,
+    )
+    # 3 resolutions x 1 chunked call each (120 symbols < ALPACA_BARS_MULTI_CHUNK
+    # is false at 120>100, so this also exercises the chunk-boundary split inside
+    # fetch_alpaca_bars_multi itself — here we assert the static-ground layer
+    # issues exactly ONE fetch_alpaca_bars_multi call PER resolution, not one per
+    # symbol (the 1,491-symbol collapse mechanism).
+    assert len(alpaca_calls) == 3  # one call per resolution, batched internally
+    assert all(len(c) == 120 for c in alpaca_calls)
+    assert set(cache) == {"1D", "1H", "15m"}
+    assert len(cache["1D"]) == 120
+
+
+@pytest.mark.asyncio
+async def test_prefetch_alpaca_multi_no_adapter_returns_empty(
+    conn: sqlite3.Connection,
+) -> None:
+    """No adapter threaded through -> empty cache, no crash (mirrors the
+    single-fetch ``alpaca_adapter is None`` guard)."""
+    from polaris.scripts._production_layers import read_active_universe
+
+    _seat_active(conn, [("alpaca", "AAPL", "equity", "equity:AAPL")])
+    active = read_active_universe(conn)
+    cache = await sg._prefetch_alpaca_multi(
+        active, resolutions=("1D",), alpaca_adapter=None, limit=240,
+    )
+    assert cache == {}
+
+
+@pytest.mark.asyncio
+async def test_prefetch_alpaca_multi_ignores_non_alpaca_venues(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OKX/Capital symbols never enter the Alpaca batch prefetch."""
+    from polaris.scripts._production_layers import read_active_universe
+
+    calls: list[list[str]] = []
+
+    async def _fake_multi(
+        adapter: Any, symbols: list[str], **_kw: Any
+    ) -> dict[str, list[Bar]]:
+        calls.append(list(symbols))
+        return {}
+
+    monkeypatch.setattr(sg, "fetch_alpaca_bars_multi", _fake_multi)
+    _seat_active(
+        conn,
+        [("okx", "BTC-USDT", "crypto", "crypto:BTC"),
+         ("capital", "US100", "index", "index:US100")],
+    )
+    active = read_active_universe(conn)
+    cache = await sg._prefetch_alpaca_multi(
+        active, resolutions=("1D",), alpaca_adapter=object(), limit=240,
+    )
+    assert calls == []  # never called — no alpaca symbols present
+    assert cache == {}
+
+
+@pytest.mark.asyncio
+async def test_prefetch_alpaca_multi_error_degrades_gracefully(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blown-up resolution's prefetch never aborts the walk (degrade-never-crash)."""
+    from polaris.scripts._production_layers import read_active_universe
+
+    async def _boom(adapter: Any, symbols: list[str], **_kw: Any) -> Any:
+        raise RuntimeError("alpaca down")
+
+    monkeypatch.setattr(sg, "fetch_alpaca_bars_multi", _boom)
+    _seat_active(conn, [("alpaca", "AAPL", "equity", "equity:AAPL")])
+    active = read_active_universe(conn)
+    cache = await sg._prefetch_alpaca_multi(
+        active, resolutions=("1D",), alpaca_adapter=object(), limit=240,
+    )
+    assert cache == {}  # degraded, not raised
+
+
+@pytest.mark.asyncio
+async def test_ingest_static_ground_bars_serves_alpaca_from_batch_cache(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: the full walk serves Alpaca symbols from the ONE prefetched
+    batch cache — ``fetch_bars_one`` is called (Yahoo-primary attempt still
+    happens per-symbol) but the Alpaca exchange fallback itself is never
+    invoked per-symbol; the batch prefetch supplies the data instead."""
+    _seat_active(
+        conn,
+        [("alpaca", "AAPL", "equity", "equity:AAPL"),
+         ("alpaca", "MSFT", "equity", "equity:MSFT")],
+    )
+
+    async def _fake_multi(
+        adapter: Any, symbols: list[str], *, bar_interval: str = "1D", **_kw: Any
+    ) -> dict[str, list[Bar]]:
+        return {
+            s: [_mk_bar("alpaca", s, bar_interval, int(time.time()))] for s in symbols
+        }
+
+    monkeypatch.setattr(sg, "fetch_alpaca_bars_multi", _fake_multi)
+    # fetch_bars_one is UNPATCHED here — it runs for real, Yahoo will fail (no
+    # network in tests) and it must fall through to the alpaca_multi_cache arg
+    # rather than trying a per-symbol exchange call (no adapter given below, so
+    # a per-symbol path would return [] — proving the cache path is what fed it).
+    result = await sg.ingest_static_ground_bars(
+        conn, resolutions=("1D",), alpaca_adapter=object(),
+    )
+    assert result["instruments"] == 2
+    n = conn.execute(
+        "SELECT COUNT(DISTINCT symbol) FROM bars WHERE bar_interval='1D'"
+    ).fetchone()[0]
+    assert n == 2

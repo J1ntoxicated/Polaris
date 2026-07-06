@@ -305,3 +305,6 @@
 2026-07-05 21:43 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=334 learners=3 paper=True]
 2026-07-05 daily-auto [closes=1 pnl_usd=-311.06 opens=1 faults=0 restarts=2]
 - 2026-07-06 하네스 재편(Jin): Opus=컨덕터 기본베이스(메인루프·리뷰·어드바이저·분석/포렌식/큐레이션), Fable=복잡 설계·블루프린트 전용(가용시, 리밋 시 Opus 대행), Sonnet=builder, Haiku=realtime. settings.json model→opus, agent 7개(analyst/forensicist/vault-curator + 게이트 dev-spawn 4)→opus, effort 기본 xhigh 정책. memory polaris_agent_model_tiers 전면 재작성
+2026-07-06 07:37 [Edit: /Users/jinyoon/.claude/projects/-Users-jinyoon-Projects-Polaris/memory/MEMORY.md]
+2026-07-06 10:29 [Write: /Users/jinyoon/Projects/Polaris/tests/test_quote_writer_lock_drop.py]
+- 2026-07-06 라이브로그 버그헌트 3픽스(fresh-agent 적대리뷰 3/3 APPROVE): ①OKX 51068 재시작-고아 베뉴스탑 — fetch_algo_order 추가+arm adopt로 다음 tighten 자가치유(G7 tighten 무력화 해소, fail-open) ②quote_writer WAL 백프레셔 로깅 ERROR+traceback/초 → 카운터+60s WARN(ops_alerts 403 오염 제거) ③fred_macro 실패=타입+HTTP status만 로깅(빈에러 은폐 해소 + 선재 api_key URL 유출 봉쇄). 신규 테스트 9, 스위트 4685 pass·mypy strict·ruff clean. 미착수 D=DB 2.87GB/WAL/락은 retention 정상(accepted trade, 핫패치 금지)

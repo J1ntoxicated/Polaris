@@ -1038,6 +1038,84 @@ async def test_cancel_algo_order_posts_list() -> None:
     assert sent[0]["instId"] == "ETH-USDT"
 
 
+@pytest.mark.asyncio
+async def test_fetch_algo_order_by_clordid_sanitizes_and_parses() -> None:
+    """fetch_algo_order GETs /trade/order-algo by algoClOrdId, sanitizing the key
+    IDENTICALLY to the place leg so the lookup matches what was submitted, and
+    parses data[0] into an OKXAlgoOrderResponse (algoId recovered for adoption)."""
+    captured: dict[str, Any] = {}
+    raw_clordid = "polstoppos-abc"
+
+    def responder(req: httpx.Request) -> Any:
+        if req.url.path == OKX_PLACE_ALGO_ORDER_PATH and req.method == "GET":
+            captured["query"] = dict(req.url.params)
+            return {
+                "code": "0",
+                "msg": "",
+                "data": [
+                    {
+                        "algoId": "orphan-9",
+                        "algoClOrdId": sanitize_clordid(raw_clordid),
+                        "slTriggerPx": "97.0",
+                        "state": "live",
+                    }
+                ],
+            }
+        return httpx.Response(404, json={"code": "1"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.fetch_algo_order(
+            inst_id="ETH-USDT", algo_cl_ord_id=raw_clordid
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is True
+    assert resp.algo_id == "orphan-9"
+    # The GET key is the SANITIZED clOrdId (byte-identical to the place leg).
+    assert captured["query"]["algoClOrdId"] == sanitize_clordid(raw_clordid)
+    assert captured["query"]["instId"] == "ETH-USDT"
+    assert resp.raw["data"][0]["slTriggerPx"] == "97.0"
+
+
+@pytest.mark.asyncio
+async def test_fetch_algo_order_transport_error_fails_open() -> None:
+    """A transport blip on the recovery GET returns ok=False (never raises) — the
+    caller keeps the software stop as the backstop (flow_not_block)."""
+
+    def responder(req: httpx.Request) -> Any:
+        return httpx.Response(500, json={"code": "1", "msg": "boom"})
+
+    transport = _MockTransport(responder)
+    client = httpx.AsyncClient(transport=transport, base_url="https://us.okx.com")
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        resp = await adapter.fetch_algo_order(
+            inst_id="ETH-USDT", algo_cl_ord_id="polstoppos-x"
+        )
+    finally:
+        await client.aclose()
+    assert resp.ok is False
+    assert resp.algo_id is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_algo_order_requires_a_key() -> None:
+    """Neither algoId nor algoClOrdId → ValueError (no unfiltered GET)."""
+    client = httpx.AsyncClient(
+        transport=_MockTransport(lambda r: {"code": "0", "data": []}),
+        base_url="https://us.okx.com",
+    )
+    adapter = OKXAdapter(api_key="K", secret="S", passphrase="P", client=client)
+    try:
+        with pytest.raises(ValueError, match="algo_id or algo_cl_ord_id"):
+            await adapter.fetch_algo_order(inst_id="ETH-USDT")
+    finally:
+        await client.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Candles 429 pacing + backoff (the OKX "Too Many" storm root-cause fix)
 # ---------------------------------------------------------------------------

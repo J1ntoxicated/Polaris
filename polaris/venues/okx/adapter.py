@@ -894,6 +894,47 @@ class OKXAdapter:
             params["clOrdId"] = cl_ord_id
         return await self._signed_request("GET", OKX_TRADE_ORDER_PATH, params=params)
 
+    async def fetch_algo_order(
+        self,
+        *,
+        inst_id: str,
+        algo_id: str | None = None,
+        algo_cl_ord_id: str | None = None,
+    ) -> OKXAlgoOrderResponse:
+        """Query a resting conditional stop by ``algoId`` or client ``algoClOrdId``.
+
+        OKX ``GET /trade/order-algo`` (same path as the place POST) accepts either
+        key. Used to ADOPT an orphaned venue stop after a restart: the re-arm POST
+        collides with the prior run's still-resting stop (the ``algoClOrdId`` is
+        deterministic per position) and returns 51068, but that reject carries no
+        ``algoId`` — this GET recovers it so the next tighten can cancel-then-replace
+        instead of looping 51068 forever with the venue stop frozen at the stale
+        prior-run trigger. ``algo_cl_ord_id`` is sanitized IDENTICALLY to the place
+        leg so the lookup key always matches what was submitted. Fail-open: any
+        transport/parse error returns ``ok=False`` (the software stop stays the
+        backstop — flow_not_block).
+        """
+        if not algo_id and not algo_cl_ord_id:
+            raise ValueError("fetch_algo_order requires algo_id or algo_cl_ord_id")
+        params: dict[str, Any] = {"instId": inst_id}
+        if algo_id:
+            params["algoId"] = algo_id
+        else:
+            params["algoClOrdId"] = sanitize_clordid(algo_cl_ord_id or "")
+        try:
+            body = await self._signed_request(
+                "GET", OKX_PLACE_ALGO_ORDER_PATH, params=params
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.warning(
+                "[okx] fetch_algo_order inst=%s failed (fail-open): %r", inst_id, exc
+            )
+            return OKXAlgoOrderResponse(
+                ok=False, algo_id=None, client_order_id=algo_cl_ord_id,
+                code="fetch_failed", msg=str(exc), raw={},
+            )
+        return _parse_algo_response(body)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

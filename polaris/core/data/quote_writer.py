@@ -65,6 +65,14 @@ RING_BUFFER_DEPTH = 600
 # mark; this constant is the shared default for the remaining execution prices.
 LIVE_PRICE_FRESH_SEC = 35.0
 
+# A flush that hits "database is locked/busy" is EXPECTED WAL backpressure under
+# the accepted checkpoint trade (see production_paper_loop._wal_checkpoint_producer),
+# NOT a fault — quote_ticks is a single-row LWW table, so a dropped batch only
+# defers the latest price for those instruments to the next 1 Hz flush. Emit at
+# most one WARNING summary per this interval instead of an ERROR+traceback per
+# drop (the per-second storm dominated the daily ops_alerts count + bloated the log).
+_LOCK_WARN_INTERVAL_SEC = 60.0
+
 _INSERT_SQL = (
     "INSERT OR REPLACE INTO quote_ticks "
     "(instrument_id, venue, symbol, ts, bid, ask, mid, spread_bps, "
@@ -226,6 +234,16 @@ class QuoteTickWriter:
         self._conn: sqlite3.Connection | None = None
         self.flush_count = 0
         self.rows_written = 0
+        # WAL-backpressure drop accounting (rate-limited WARNING, see
+        # ``_LOCK_WARN_INTERVAL_SEC``) — kept distinct from genuine flush faults
+        # (which stay ERROR+traceback) so a real bug never hides behind the
+        # expected per-second lock drops.
+        self.lock_drops = 0
+        self.lock_ticks_dropped = 0
+        # -inf sentinel = "never warned" → the FIRST backpressure drop always emits
+        # its summary immediately (this WARNING is the signal that replaces the old
+        # per-drop ERROR storm, so it must not be delayed by a low monotonic clock).
+        self._last_lock_warn = float("-inf")
 
     # ------------------------------------------------------------------
     # In-mem path (WS recv callback) — M2: NO DB access here.
@@ -384,6 +402,25 @@ class QuoteTickWriter:
             await loop.run_in_executor(
                 None, self._flush_blocking, snapshot, inflow_rows
             )
+        except sqlite3.OperationalError as exc:  # noqa: BLE001 — write must never halt the bot (AGGRESSIVE)
+            msg = str(exc).lower()
+            if "lock" in msg or "busy" in msg:
+                # EXPECTED WAL backpressure — count it and summarise at most once
+                # per interval (never a per-second ERROR+traceback storm).
+                self.lock_drops += 1
+                self.lock_ticks_dropped += len(snapshot)
+                now = time.monotonic()
+                if now - self._last_lock_warn >= _LOCK_WARN_INTERVAL_SEC:
+                    logger.warning(
+                        "[quote_writer] WAL backpressure: %d flush drops (%d ticks) "
+                        "so far — latest prices refresh on the next flush",
+                        self.lock_drops, self.lock_ticks_dropped,
+                    )
+                    self._last_lock_warn = now
+            else:
+                logger.exception(
+                    "[quote_writer] flush of %d ticks failed — dropping batch", len(snapshot)
+                )
         except Exception:  # noqa: BLE001 — write must never halt the bot (AGGRESSIVE)
             logger.exception(
                 "[quote_writer] flush of %d ticks failed — dropping batch", len(snapshot)

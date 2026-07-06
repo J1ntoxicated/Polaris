@@ -113,14 +113,43 @@ async def arm_okx_venue_stop(
             "[L6/exit] venue-stop armed %s algoId=%s slTriggerPx=%.6g",
             trade.symbol, resp.algo_id, stop_price,
         )
-    else:
-        # Algo endpoint unavailable for this symbol — cache the result so the arm
-        # backs off instead of re-attempting every tick; keep the software stop.
-        trade.okx_stop_unavail_until = (
-            now_monotonic() + _VENUE_STOP_UNAVAIL_COOLDOWN_SEC
+        return
+    if resp.code == "51068":
+        # 51068 = a stop with THIS deterministic algoClOrdId already rests on OKX:
+        # an orphan from before a restart (the in-mem algoId was lost, so prev_algo
+        # was None and this re-POST collided). Recover the resting algoId via a GET
+        # and ADOPT it so the NEXT tighten cancel-then-replaces it — otherwise the
+        # arm loops 51068 forever with the venue stop frozen at the prior run's
+        # stale trigger, defeating the ratchet. Fail-open: a recovery miss falls
+        # through to the software-stop backstop below.
+        existing = await okx_adapter.fetch_algo_order(
+            inst_id=trade.symbol,
+            algo_cl_ord_id=f"polstop{(trade.position_id or trade.symbol)}",
         )
-        logger.info(
-            "[L6/exit] venue-stop unavailable %s (%s) — software stop backstop, "
-            "arm backed off %.0fs",
-            trade.symbol, resp.code, _VENUE_STOP_UNAVAIL_COOLDOWN_SEC,
-        )
+        rows = existing.raw.get("data") or [{}]
+        state = str(rows[0].get("state", "")).lower()
+        if existing.ok and existing.algo_id and state == "live":
+            adopted_px = stop_price
+            with contextlib.suppress(TypeError, ValueError):
+                px = float(rows[0].get("slTriggerPx") or 0.0)
+                if px > 0.0:
+                    adopted_px = px
+            trade.okx_stop_algo_id = existing.algo_id
+            trade.okx_stop_px = adopted_px
+            trade.okx_stop_unavail_until = None
+            logger.info(
+                "[L6/exit] venue-stop ADOPTED orphan %s algoId=%s slTriggerPx=%.6g "
+                "— next tighten will cancel-replace",
+                trade.symbol, existing.algo_id, adopted_px,
+            )
+            return
+    # Algo endpoint unavailable / orphan unrecoverable — cache the result so the
+    # arm backs off instead of re-attempting every tick; keep the software stop.
+    trade.okx_stop_unavail_until = (
+        now_monotonic() + _VENUE_STOP_UNAVAIL_COOLDOWN_SEC
+    )
+    logger.info(
+        "[L6/exit] venue-stop unavailable %s (%s) — software stop backstop, "
+        "arm backed off %.0fs",
+        trade.symbol, resp.code, _VENUE_STOP_UNAVAIL_COOLDOWN_SEC,
+    )

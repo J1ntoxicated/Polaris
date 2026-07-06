@@ -264,3 +264,121 @@ async def test_arm_skips_when_no_adapter_or_no_stop() -> None:
     cap_trade.venue = "capital"
     await arm_okx_venue_stop(trade=cap_trade, okx_adapter=okx, side="long", stop_price=98.5)
     assert len(okx.placements) == 0
+
+
+# ---------------------------------------------------------------------------
+# 51068 orphan adoption — a restart leaves the prior run's stop resting on OKX
+# with the SAME deterministic algoClOrdId, so the re-arm POST collides (51068)
+# and the in-mem algoId was lost. Without recovery the arm loops 51068 forever
+# and the venue stop stays FROZEN at the stale prior-run trigger, defeating the
+# just-enabled G7 tighten rail. The arm must recover + ADOPT the resting algoId
+# so the next tighten cancel-then-replaces it. Fail-open throughout.
+# ---------------------------------------------------------------------------
+
+
+class _FakeOKXOrphan:
+    """A prior-run stop already rests on OKX (deterministic algoClOrdId). The
+    first place COLLIDES (51068); a GET recovers the resting order; once the
+    orphan is cancelled a later place succeeds (the self-heal path)."""
+
+    def __init__(
+        self, *, orphan_state: str = "live", fetch_ok: bool = True,
+        orphan_px: str = "97.0",
+    ) -> None:
+        self.orphan_present = True
+        self._orphan_state = orphan_state
+        self._fetch_ok = fetch_ok
+        self._orphan_px = orphan_px
+        self.placements: list[dict[str, Any]] = []
+        self.cancels: list[dict[str, Any]] = []
+        self.fetches: list[dict[str, Any]] = []
+        self._n = 0
+
+    async def place_conditional_stop(self, **kwargs: Any) -> OKXAlgoOrderResponse:
+        self.placements.append(kwargs)
+        if self.orphan_present:
+            return OKXAlgoOrderResponse(
+                ok=False, algo_id=None, client_order_id="cl",
+                code="51068", msg="algoClOrdId already exists", raw={},
+            )
+        self._n += 1
+        return OKXAlgoOrderResponse(
+            ok=True, algo_id=f"fresh-{self._n}", client_order_id="cl",
+            code="0", msg="", raw={},
+        )
+
+    async def fetch_algo_order(self, **kwargs: Any) -> OKXAlgoOrderResponse:
+        self.fetches.append(kwargs)
+        if not self._fetch_ok or not self.orphan_present:
+            return OKXAlgoOrderResponse(
+                ok=False, algo_id=None, client_order_id=None,
+                code="fetch_failed", msg="", raw={},
+            )
+        return OKXAlgoOrderResponse(
+            ok=True, algo_id="orphan-9", client_order_id="cl", code="0", msg="",
+            raw={"data": [{
+                "algoId": "orphan-9", "slTriggerPx": self._orphan_px,
+                "state": self._orphan_state,
+            }]},
+        )
+
+    async def cancel_algo_order(self, **kwargs: Any) -> dict[str, Any]:
+        self.cancels.append(kwargs)
+        self.orphan_present = False  # cancelling the orphan clears the collision
+        return {"code": "0", "data": []}
+
+
+@pytest.mark.asyncio
+async def test_arm_adopts_orphan_stop_on_51068() -> None:
+    """A 51068 collision → recover the resting algoId via GET and ADOPT it (algoId
+    + the orphan's actual trigger px), NOT back off to a cooldown."""
+    trade = _trade()
+    okx = _FakeOKXOrphan()
+    await arm_okx_venue_stop(trade=trade, okx_adapter=okx, side="long", stop_price=98.5)
+    assert len(okx.placements) == 1       # the colliding place
+    assert len(okx.fetches) == 1          # the recovery GET fired
+    assert trade.okx_stop_algo_id == "orphan-9"       # resting algoId adopted
+    assert trade.okx_stop_px == pytest.approx(97.0)   # orphan's real trigger adopted
+    assert getattr(trade, "okx_stop_unavail_until", None) is None  # NOT backed off
+
+
+@pytest.mark.asyncio
+async def test_arm_51068_self_heals_on_next_tighten() -> None:
+    """THE regression: after adopting, a tightened stop cancel-then-replaces the
+    orphan — the 51068 loop is broken and the venue stop tracks the ratchet."""
+    trade = _trade()
+    okx = _FakeOKXOrphan()
+    await arm_okx_venue_stop(trade=trade, okx_adapter=okx, side="long", stop_price=98.5)
+    assert trade.okx_stop_algo_id == "orphan-9"  # adopted at 97.0
+    # Software stop tightens well above 97.0 → cancel orphan, place fresh (no collision).
+    await arm_okx_venue_stop(trade=trade, okx_adapter=okx, side="long", stop_price=99.4)
+    assert okx.cancels and okx.cancels[0]["algo_id"] == "orphan-9"
+    assert trade.okx_stop_algo_id == "fresh-1"        # tighter stop now rests
+    assert trade.okx_stop_px == pytest.approx(99.4)
+
+
+@pytest.mark.asyncio
+async def test_arm_51068_orphan_not_live_falls_back_to_software_stop() -> None:
+    """A recovered order that is NOT 'live' (already canceled/triggered) is never
+    adopted — back off + keep the software stop (never adopt a dead algoId)."""
+    trade = _trade()
+    okx = _FakeOKXOrphan(orphan_state="canceled")
+    await arm_okx_venue_stop(
+        trade=trade, okx_adapter=okx, side="long", stop_price=98.5,
+        now_monotonic=lambda: 1000.0,
+    )
+    assert trade.okx_stop_algo_id is None
+    assert getattr(trade, "okx_stop_unavail_until", None) == pytest.approx(1300.0)
+
+
+@pytest.mark.asyncio
+async def test_arm_51068_fetch_failure_falls_back_to_software_stop() -> None:
+    """A failed recovery GET (fail-open) → no adoption, software stop backstop."""
+    trade = _trade()
+    okx = _FakeOKXOrphan(fetch_ok=False)
+    await arm_okx_venue_stop(
+        trade=trade, okx_adapter=okx, side="long", stop_price=98.5,
+        now_monotonic=lambda: 1000.0,
+    )
+    assert trade.okx_stop_algo_id is None
+    assert getattr(trade, "okx_stop_unavail_until", None) == pytest.approx(1300.0)

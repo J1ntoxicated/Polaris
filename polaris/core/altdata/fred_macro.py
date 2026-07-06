@@ -152,7 +152,16 @@ class FredMacroCollector:
                 if val is not None and obs_date:
                     out[_asof_key(key)] = obs_date
         except (httpx.HTTPError, RuntimeError) as exc:
-            logger.info("[altdata] fred_macro fetch failed (graceful skip): %s", exc)
+            # Surface the failure TYPE (+ HTTP status) — httpx timeouts carry an
+            # EMPTY message, so the old %s logged a bare "... skip): " that hid what
+            # silenced the macro feed. NB: log the class name / status, NEVER
+            # str(exc)/repr(exc): on a raise_for_status error HTTPStatusError embeds
+            # the full request URL incl. ``?api_key=<FRED_KEY>`` → a secret leak.
+            detail = type(exc).__name__
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None:
+                detail = f"{detail} HTTP {status}"
+            logger.info("[altdata] fred_macro fetch failed (graceful skip): %s", detail)
             return {}
         finally:
             if own:

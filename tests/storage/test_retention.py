@@ -413,6 +413,30 @@ def test_probe_retention_prunes_old_keeps_recent(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_entrance_judgments_retention_is_7d_not_45d(tmp_path: Path) -> None:
+    """A3: entrance_judgments window is 7d — an 8d-old row is pruned even though
+    it is well inside the OTHER probe tables' 45d window (proves the per-table
+    window, not just a shared 45d default)."""
+    conn = _probe_db(tmp_path)
+    try:
+        _insert_entrance_judgment(conn, NOW - 8 * 86_400)   # outside 7d -> deleted
+        _insert_entrance_judgment(conn, NOW - 6 * 86_400)   # inside 7d -> kept
+        _insert_probe_decision(conn, NOW - 8 * 86_400)      # inside 45d -> kept
+
+        deleted = run_probe_retention(conn, now_ts=NOW)
+
+        assert deleted["entrance_judgments"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM entrance_judgments"
+        ).fetchone()[0] == 1
+        assert deleted["probe_decisions"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM probe_decisions"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_probe_retention_idempotent(tmp_path: Path) -> None:
     conn = _probe_db(tmp_path)
     try:

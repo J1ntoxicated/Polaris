@@ -152,13 +152,21 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
 # gate_events 30d, with margin so a probe decision still joins its 30d gate
 # event). Its OWN allowlist (not the live-DB ``_ALLOWED``) so neither path can
 # ever cross-prune the other's tables.
+#
+# entrance_judgments: 45d -> 7d (A3, 2026-07-07). This table has NO runtime
+# consumer (grepped — only tests + the deferred Increment-2 advisory
+# reference it) and the writer already drops deep never-actionable rows
+# (``ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND`` in tuning_log.py), so a 45d window
+# on the surviving borderline/eligible rows is far past any read need; 7d is
+# ample margin for the still-unbuilt Increment-2 advisory to catch up.
 PROBE_RETENTION_SPEC: tuple[RetentionRule, ...] = (
     RetentionRule("probe_readings", "ts", 45 * _DAY,
                   "observe-only readings; densest probe stream"),
     RetentionRule("probe_decisions", "ts", 45 * _DAY,
                   "composed engine decisions + in-place outcome backfill"),
-    RetentionRule("entrance_judgments", "ts", 45 * _DAY,
-                  "judged entrance candidates (Increment-1 telemetry seam)"),
+    RetentionRule("entrance_judgments", "ts", 7 * _DAY,
+                  "judged entrance candidates (Increment-1 telemetry seam); "
+                  "A3 write-amplification cut, no runtime consumer"),
 )
 
 # Frozen lookup of allowed (table -> ts_column). The DELETE builder accepts

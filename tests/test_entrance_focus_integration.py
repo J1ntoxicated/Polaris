@@ -6,7 +6,9 @@ Proves the judgment is BUILT + LANDED (not "researched, unapplied"):
   * ``refresh_focus_watchlist`` persists ``opportunity_score`` + ``trade_eligible``
     on every focus row (the judgment is actually written).
   * The ambiguity sidecar receives one ``entrance_judgments`` row per candidate
-    when a probe_conn is supplied — observe-only, AI-free.
+    that is trade_eligible OR near the trade floor when a probe_conn is
+    supplied — observe-only, AI-free (A3: deep never-actionable misses are
+    dropped from the sidecar write, not from the judgment itself).
   * The WATCH set (full focus) stays a superset of the TRADE set (eligible) at the
     real ``get_focus_targets`` seam — flow-preserving decouple.
 """
@@ -69,8 +71,14 @@ def test_refresh_writes_ambiguity_sidecar(tmp_path) -> None:
     probe_conn = open_probe_db(f"{tmp_path}/probes.sqlite")
     _seed_universe(conn, [("okx", "BTC-USDT", 9e8, 6.0), ("okx", "ETH-USDT", 3e8, 4.0)])
     refresh_focus_watchlist(conn, cycle_ts=2000, probe_conn=probe_conn, run_id="r1")
-    n = probe_conn.execute("SELECT COUNT(*) FROM entrance_judgments").fetchone()[0]
-    assert n == 2  # one row per judged candidate (observe-only, AI-free)
+    rows = probe_conn.execute(
+        "SELECT instrument_id, trade_eligible FROM entrance_judgments"
+    ).fetchall()
+    # A3 write-amp cut: the deep never-actionable (trade_eligible=0, far below
+    # floor) candidate is not persisted to the sidecar; the eligible one is.
+    ids = {r[0] for r in rows}
+    assert "okx:BTC-USDT" in ids
+    assert all(eligible == 1 for _, eligible in rows)
     conn.close()
     probe_conn.close()
 

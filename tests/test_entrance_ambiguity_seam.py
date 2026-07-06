@@ -13,6 +13,7 @@ import sqlite3
 
 from polaris.core.probes.entrance import JudgeReading
 from polaris.core.probes.tuning_log import (
+    ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND,
     PROBE_DDL,
     log_entrance_judgments,
     open_probe_db,
@@ -96,4 +97,41 @@ def test_writer_is_fail_open_on_missing_table() -> None:
     log_entrance_judgments(conn, ts=1, run_id="r", cycle_ts=1, readings={
         "okx:X": _reading("okx:X", score=0.5, eligible=True, ambiguous=False)
     })
+    conn.close()
+
+
+def test_deep_never_actionable_row_is_not_written(tmp_path: object) -> None:
+    """A3: trade_eligible=0 far below the floor is DROPPED (write-amp cut)."""
+    conn = open_probe_db(f"{tmp_path}/probes.sqlite")
+    deep_margin = -(ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND + 0.20)
+    readings = {
+        "okx:DEEP": _reading(
+            "okx:DEEP", score=0.30 + deep_margin, eligible=False, ambiguous=False
+        ),
+    }
+    log_entrance_judgments(
+        conn, ts=1000, run_id="r1", cycle_ts=1000, readings=readings
+    )
+    n = conn.execute("SELECT COUNT(*) FROM entrance_judgments").fetchone()[0]
+    assert n == 0
+    conn.close()
+
+
+def test_eligible_and_near_threshold_rows_are_written(tmp_path: object) -> None:
+    """A3: trade_eligible=1 rows AND near-threshold trade_eligible=0 rows persist."""
+    conn = open_probe_db(f"{tmp_path}/probes.sqlite")
+    near_margin = -(ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND - 0.01)
+    readings = {
+        "okx:ELIGIBLE": _reading("okx:ELIGIBLE", score=0.9, eligible=True, ambiguous=False),
+        "okx:NEAR": _reading(
+            "okx:NEAR", score=0.30 + near_margin, eligible=False, ambiguous=False
+        ),
+    }
+    log_entrance_judgments(
+        conn, ts=1000, run_id="r1", cycle_ts=1000, readings=readings
+    )
+    ids = {
+        r[0] for r in conn.execute("SELECT instrument_id FROM entrance_judgments")
+    }
+    assert ids == {"okx:ELIGIBLE", "okx:NEAR"}
     conn.close()

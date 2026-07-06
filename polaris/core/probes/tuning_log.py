@@ -23,6 +23,7 @@ from polaris.core.probes import EngineDecision, ProbeReading
 from polaris.core.probes.entrance import JudgeReading
 
 __all__ = [
+    "ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND",
     "PROBE_DDL",
     "backfill_probe_outcome",
     "log_entrance_judgments",
@@ -30,6 +31,19 @@ __all__ = [
     "log_probe_readings",
     "open_probe_db",
 ]
+
+# A3 write-amplification cut (2026-07-07, forensic: 23.4M rows @ ~21/s, 75.6%
+# trade_eligible=0 never-actionable): entrance_judgments is PURE OBSERVE-ONLY
+# telemetry with NO runtime consumer (grepped — only tests + the deferred
+# Increment-2 advisory reference it). Deep never-actionable rows (trade_eligible=0
+# AND far from the trade floor) carry no calibration signal, so they are no
+# longer persisted. Rows are KEPT when trade_eligible=1 OR the judge_margin
+# (signed distance to the trade floor) is within this band — this preserves
+# every borderline/calibration-relevant row (the ones a future floor-tuning pass
+# would need) while dropping the deep-miss firehose. Widen (never hard-drop
+# further) if a consumer needs more of the tail — this does NOT touch any
+# live entry/exit/sizing decision, only what telemetry is written.
+ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND: float = 0.10
 
 PROBE_DDL: tuple[str, ...] = (
     """
@@ -328,12 +342,21 @@ def log_entrance_judgments(
     probe writers — the focus pass must never crash on a log failure).
     ``venue_symbol_by_iid`` maps instrument_id → (venue, symbol); a missing entry
     falls back to splitting the instrument_id on ``:`` (the ``venue:symbol`` form).
+
+    A3 write-amplification cut: a row is persisted only when ``trade_eligible``
+    OR its ``judge_margin`` is within ``ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND`` of
+    the trade floor (calibration-relevant borderline). Deep never-actionable
+    misses (trade_eligible=0, far below floor) are DROPPED before the INSERT —
+    this only trims what telemetry is written, never the judgment itself (the
+    in-memory ``readings`` — and thus focus rank / eligibility — is untouched).
     """
     if conn is None or not readings:
         return
     vs = venue_symbol_by_iid or {}
     rows = []
     for iid, r in readings.items():
+        if not r.trade_eligible and abs(r.judge_margin) > ENTRANCE_JUDGMENT_NEAR_THRESHOLD_BAND:
+            continue
         venue, symbol = vs.get(iid, _split_iid(iid))
         rows.append(
             (
@@ -345,6 +368,8 @@ def log_entrance_judgments(
                 json.dumps(r.evidence, sort_keys=True, default=str),
             )
         )
+    if not rows:
+        return
     with contextlib.suppress(sqlite3.Error):
         conn.executemany(
             "INSERT INTO entrance_judgments "

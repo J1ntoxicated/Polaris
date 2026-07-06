@@ -97,13 +97,16 @@ def test_non_equity_never_gated() -> None:
 
 
 def test_equity_strategies_still_registered_and_dispatched() -> None:
-    # The relax does not touch registration/dispatch — the two equity strategies
-    # remain registered AND dispatched (now active on any feed).
-    assert "equity_vol_expansion_pocket_pivot" in STRATEGY_REGISTRY
-    assert "equity_52wk_high_breakout" in STRATEGY_REGISTRY
+    # SUPERSEDED by the B1 prune (2026-07-06) — the relax itself did not touch
+    # registration/dispatch, but the subsequent live-ledger forensic
+    # (-$137.23 / -$431.05, 0% win) KILLed both at the registry level (100.9%
+    # of the -$2,024 book loss). Modules preserved read-only; no longer
+    # registered or dispatched.
+    assert "equity_vol_expansion_pocket_pivot" not in STRATEGY_REGISTRY
+    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
     dispatch_ids = {s.metadata.strategy_id for s in _all_strategies()}
-    assert "equity_vol_expansion_pocket_pivot" in dispatch_ids
-    assert "equity_52wk_high_breakout" in dispatch_ids
+    assert "equity_vol_expansion_pocket_pivot" not in dispatch_ids
+    assert "equity_52wk_high_breakout" not in dispatch_ids
 
 
 # ---------------------------------------------------------------------------

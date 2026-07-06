@@ -67,11 +67,15 @@ def test_bar_trend_arm_lowered_to_common_case() -> None:
     assert BAR_TREND_TRAIL_MULT == 3.0  # UNCHANGED — the runner still runs wide
 
 
-def test_session_breakout_schedule_arms_at_020() -> None:
-    # session_breakout (correlation_group cfd_session_event → TREND bucket, index
-    # asset_class) routes to the bar default schedule with the lowered arm / raised
-    # fraction.
-    sched = _mfe_protect_for_strategy("session_breakout")
+def test_bar_trend_schedule_arms_at_020() -> None:
+    # xau_indices_trend (correlation_group cfd_index_commodity_trend → TREND
+    # bucket, index/commodity asset_class) routes to the bar default schedule
+    # with the lowered arm / raised fraction. (session_breakout, the original
+    # exemplar, was un-registered 2026-07-06 — B1 prune, live-ledger
+    # forensic, -$933.65 fee-bleed — so this test now exercises the
+    # remaining live Capital TREND-bucket bar strategy; the wiring under test
+    # is bucket-keyed, not strategy-specific.)
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     assert sched is not None
     assert sched.peak_lock_arm_r == 0.20
     assert sched.peak_lock_frac == 0.65
@@ -81,12 +85,12 @@ def test_session_breakout_schedule_arms_at_020() -> None:
 
 
 def test_common_020_winner_arms_profit_floor() -> None:
-    # A session_breakout long peaks at +0.20R (27.9% of live closes reach it).
+    # A bar-TREND long peaks at +0.20R (27.9% of live closes reach it).
     # With arm 0.20 the peak-fraction floor ARMS and locks a profit stop ABOVE
     # entry: 100 + 0.20*0.65*atr_r = 100 + 0.26 = 100.26 (stop > entry).
     # Under the OLD 0.30 arm this +0.20R winner armed NOTHING (0.20 < 0.30 arm AND
     # < 0.30 BEP rung) → wide trail only → stop <= entry → round-trip.
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.4,
         atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=20,
@@ -107,7 +111,7 @@ def test_big_winner_floor_higher_under_065_frac() -> None:
     # A big winner (+2.0R MFE) locks entry + 2.0*0.65*atr_r = 100 + 2.6 = 102.6,
     # strictly ABOVE the old 0.55-frac floor (100 + 2.0*0.55*2.0 = 102.2). The
     # give-back exposure shrank from 45% to 35% of the reached peak.
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=104.0,
         atr_pct=ATR_PCT, pnl_r=2.0, held_seconds=40,
@@ -128,7 +132,7 @@ def test_loss_side_untouched_no_profit_floor() -> None:
     # (peak == entry) gets NO profit floor — the wide trail sits BELOW entry and
     # the G6 -1.0R rail (in the orchestrator) owns the loss side, unchanged by the
     # arm/frac recalib. The peak-fraction floor never pushes the stop below entry.
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=99.0,
         atr_pct=ATR_PCT, pnl_r=-0.5, held_seconds=20,
@@ -142,7 +146,7 @@ def test_below_new_arm_no_premature_profit_floor() -> None:
     # A peak just BELOW the new 0.20 arm (0.15R) still does NOT arm the
     # peak-fraction floor (and is below the 0.30 BEP rung) → no profit floor; the
     # wide trail (< entry) governs. No fee-negative crumb lock below the arm.
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.3,
         atr_pct=ATR_PCT, pnl_r=0.15, held_seconds=20,
@@ -174,7 +178,7 @@ def test_runner_still_runs_floor_ratchets_up() -> None:
     # the upside, never closes while price is above the floor. A runner armed at
     # +0.20R climbs +0.20R -> +0.40R -> +1.85R; each tick makes a new high (price
     # well above the climbing floor) so it does NOT close (let-winners-run).
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d1 = evaluate_exit(
         prev=_fresh("long"), side="long", entry_price=ENTRY, last_price=100.4,
         atr_pct=ATR_PCT, pnl_r=0.20, held_seconds=20,
@@ -206,7 +210,7 @@ def test_peak_give_back_closes_at_locked_fraction() -> None:
     # 100 - 0.40*0.65*2.0 = 99.48; a retrace to 99.6 (worse than the floor for a
     # short) closes AT the locked +0.26R via atr_trail_stop — banking the fraction,
     # NOT a flat 100.0 round-trip.
-    sched = _mfe_protect_for_strategy("session_breakout")
+    sched = _mfe_protect_for_strategy("xau_indices_trend")
     d1 = evaluate_exit(
         prev=_fresh("short"), side="short", entry_price=ENTRY, last_price=99.2,
         atr_pct=ATR_PCT, pnl_r=0.40, held_seconds=20,

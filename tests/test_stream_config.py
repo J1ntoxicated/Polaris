@@ -221,8 +221,10 @@ def test_stream_rosters_match_current_strategy_venue_mapping() -> None:
     assert a.strategy_roster == frozenset(
         {"rsi_bb_pullback"}
     )
+    # session_breakout un-registered 2026-07-06 (B1 prune, live-ledger
+    # forensic, -$933.65 fee-bleed) — dropped from the Capital roster.
     assert b.strategy_roster == frozenset(
-        {"fx_breakout_basket", "xau_indices_trend", "session_breakout"}
+        {"fx_breakout_basket", "xau_indices_trend"}
     )
     # No strategy belongs to both streams.
     assert a.strategy_roster.isdisjoint(b.strategy_roster)

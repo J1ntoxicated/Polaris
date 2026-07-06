@@ -26,7 +26,6 @@ from polaris.strategies import (
     EMACrossoverStrategy,
     FXBreakoutBasketStrategy,
     RSIBBPullbackStrategy,
-    SessionBreakoutStrategy,
 )
 from polaris.strategies.base import BarView, MarketView, RawSignal
 from polaris.strategies.cci_reversion import _cci, _typical
@@ -36,6 +35,11 @@ from polaris.strategies.connors_rsi2 import TREND_FILTER_MA, _rsi, _sma
 # un-registered (KILLed); their modules are preserved so this relaxed-threshold
 # unit test still exercises their entry logic.
 from polaris.strategies.fx_range_fade import FXRangeFadeStrategy
+
+# session_breakout un-registered 2026-07-06 (B1 prune, live-ledger forensic,
+# -$933.65 fee-bleed) — module preserved read-only; this emit-threshold test
+# exercises it directly.
+from polaris.strategies.session_breakout import SessionBreakoutStrategy
 
 # spot_donchian un-registered 2026-06-27 (#56 stop-bleeders KILL) — module
 # preserved read-only; this emit-threshold test exercises it directly.

@@ -5,17 +5,16 @@ safe to skip a same-bar re-eval" (the 17 close-only dispatch-eligible
 strategies). True = exempt (this strategy's signal depends on something that
 can change BETWEEN bar closes — session clock / live orderbook / funding /
 intraday altdata) — it must keep re-evaluating every tick, byte-identical to
-pre-gate behaviour. Exactly the 5 strategies audited in the design doc.
+pre-gate behaviour. Originally 5 strategies audited in the design doc; now 3
+registered (session_breakout un-registered 2026-07-06, B1 prune).
 """
 
 from __future__ import annotations
 
 from polaris.strategies import STRATEGY_REGISTRY
 
-# The FIVE strategies whose generate_raw_signal reads a bars-EXTERNAL input
-# that can change between bar closes:
-#   - session_breakout: MarketView.is_session_open_window (wall-clock minute
-#     window, session_window_now(now_ts) — changes intra-bar).
+# The strategies whose generate_raw_signal reads a bars-EXTERNAL input that
+# can change between bar closes:
 #   - weekend_thin_book_flush_maker / weekend_funding_capitulation_maker: the
 #     weekend-only edge depends on live orderbook depth (fill path) / funding
 #     rate (AltDataView, refreshed on its own cadence independent of the 1H bar
@@ -26,8 +25,12 @@ from polaris.strategies import STRATEGY_REGISTRY
 #     module kept read-only per the strategies/__init__.py history; the flag
 #     is still set on the module for documentation completeness, but it has
 #     zero live dispatch effect since it is absent from STRATEGY_REGISTRY).
+#   - session_breakout: MarketView.is_session_open_window (wall-clock minute
+#     window, session_window_now(now_ts) — changes intra-bar). Un-registered
+#     2026-07-06 (B1 prune, live-ledger forensic, -$933.65 fee-bleed) — same
+#     "flag preserved, zero registered-dispatch effect" treatment as
+#     volume_burst, so it is no longer expected here.
 _EXPECTED_EXEMPT_REGISTERED = {
-    "session_breakout",
     "weekend_thin_book_flush_maker",
     "weekend_funding_capitulation_maker",
     "gold_riskoff_trend_amplify",
@@ -44,7 +47,7 @@ def test_default_is_false_for_close_only_strategies() -> None:
     assert OKXDonchian55BreakoutStrategy.metadata.evaluates_in_progress_bar is False
 
 
-def test_exactly_the_four_registered_strategies_are_exempt() -> None:
+def test_exactly_the_three_registered_strategies_are_exempt() -> None:
     """The bar-advance gate must exempt exactly the registered strategies whose
     signal depends on a bars-external input — no more, no less. A stray True
     on a close-only strategy would silently disable its gate savings; a

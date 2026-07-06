@@ -49,7 +49,6 @@ from polaris.strategies import (
     MarketView,
     OKXDonchian55BreakoutStrategy,
     RawSignal,
-    SessionBreakoutStrategy,
     XAUIndicesTrendStrategy,
 )
 from polaris.venues.okx import fetch_okx_bars
@@ -146,10 +145,12 @@ def _okx_strategies() -> list[BaseStrategy]:
 
 
 def _capital_strategies() -> list[BaseStrategy]:
+    # session_breakout un-registered 2026-07-06 (B1 prune, live-ledger forensic,
+    # -$933.65 fee-bleed) — no longer dispatched live, so the smoke rig no longer
+    # references it (same "no KILLed/un-registered strategy" rule as _okx_strategies).
     return [
         FXBreakoutBasketStrategy(),
         XAUIndicesTrendStrategy(),
-        SessionBreakoutStrategy(),
     ]
 
 

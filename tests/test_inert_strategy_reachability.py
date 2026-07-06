@@ -31,7 +31,6 @@ from polaris.strategies import (
     gold_trend_chandelier_1d,
     index_52w_high_momentum,
     index_dual_momentum_rotation,
-    session_breakout,
     silver_breakout_1h,
     uk100_breakout_1h,
     us100_breakout_1h,
@@ -66,9 +65,10 @@ def test_carveout_unions_index_strategy_symbols() -> None:
     # index/commodity bar strategies' SUPPORTED_SYMBOLS — no hand-rolled list.
     # Phase2 fan-out (wajecs9ct) added gold_trend_chandelier_1d (metals+energy).
     # Opus-spec 3-clone build added silver/us100/uk100_breakout_1h.
+    # (session_breakout un-registered 2026-07-06 — B1 prune, live-ledger
+    # forensic, -$933.65 fee-bleed — its SUPPORTED_SYMBOLS term is dropped.)
     expected = (
         xau_indices_trend.SUPPORTED_SYMBOLS
-        | session_breakout.SUPPORTED_SYMBOLS
         | index_dual_momentum_rotation.SUPPORTED_SYMBOLS
         | index_52w_high_momentum.SUPPORTED_SYMBOLS
         | gold_trend_chandelier_1d.SUPPORTED_SYMBOLS

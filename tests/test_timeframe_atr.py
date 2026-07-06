@@ -71,13 +71,16 @@ def test_strategy_timeframe_resolves_registry() -> None:
     # falls back to "1m"; ema_crossover keeps the registry-resolve coverage).
     assert strategy_timeframe("ema_crossover") == "1H"
     assert strategy_timeframe("connors_rsi2") == "1D"
-    assert strategy_timeframe("session_breakout") == "5m"
 
 
 def test_strategy_timeframe_unregistered_falls_back_to_1m() -> None:
     # tick-engine signals (micro_reversion / flow_pressure / burst_rider) are
     # NOT in STRATEGY_REGISTRY → "1m" = the pre-fix behaviour, byte-identical.
     assert strategy_timeframe("micro_reversion") == "1m"
+    # session_breakout un-registered 2026-07-06 (B1 prune, live-ledger
+    # forensic, -$933.65 fee-bleed) — was "5m", now falls back to "1m" like
+    # any other unregistered id (degrade-never-crash).
+    assert strategy_timeframe("session_breakout") == "1m"
     assert strategy_timeframe("flow_pressure") == "1m"
     assert strategy_timeframe("") == "1m"
     assert strategy_timeframe("no_such_strategy") == "1m"

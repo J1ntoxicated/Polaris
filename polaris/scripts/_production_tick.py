@@ -101,9 +101,6 @@ from polaris.strategies.index_52w_high_momentum import (
 from polaris.strategies.index_dual_momentum_rotation import (
     SUPPORTED_SYMBOLS as _IDX_DUALMOM_SYMBOLS,
 )
-from polaris.strategies.session_breakout import (
-    SUPPORTED_SYMBOLS as _SESSION_BREAKOUT_SYMBOLS,
-)
 from polaris.strategies.silver_breakout_1h import (
     SUPPORTED_SYMBOLS as _SILVER_BREAKOUT_SYMBOLS,
 )
@@ -155,27 +152,29 @@ def _focus_cycle_target() -> int:
 # engine (no double-trade); the engine reads the SAME frozenset as PHASE1_VENUES.
 
 # Capital non-forex (index/commodity) symbols that an ENABLED Capital bar
-# strategy actually supports — the UNION of the FIVE enabled index/commodity bar
-# strategies' SUPPORTED_SYMBOLS (xau_indices_trend + session_breakout +
-# index_dual_momentum_rotation + index_52w_high_momentum + gold_trend_chandelier_1d).
-# Built from the strategy modules so it can never drift from what they accept. The
-# routing carve-out below keeps these on the bar pipeline (donchian/momentum/
-# session/rotation) so they get a trend/breakout edge COMPLEMENTARY to the tick
-# engine's flow micro-structure on the SAME symbol. Symbols are the raw
-# live-universe spelling (e.g. ``GOLD`` / ``US100`` / ``J225``), upper-cased like
-# the strategy symbol gate. wave2 fix: the two index strategies (dual_momentum +
-# 52w_high) were INERT — their wave2 symbols (J225/HK50/AU200/AU200AU) were NOT in
-# the prior union, so keep_on_bar_path returned False and the bar fan-out vacated
-# them → generate_raw_signal was NEVER reached (live: 0 signals). Phase2 fan-out
+# strategy actually supports — the UNION of the enabled index/commodity bar
+# strategies' SUPPORTED_SYMBOLS (xau_indices_trend + index_dual_momentum_rotation
+# + index_52w_high_momentum + gold_trend_chandelier_1d). Built from the strategy
+# modules so it can never drift from what they accept. The routing carve-out
+# below keeps these on the bar pipeline (donchian/momentum/rotation) so they get
+# a trend/breakout edge COMPLEMENTARY to the tick engine's flow micro-structure
+# on the SAME symbol. Symbols are the raw live-universe spelling (e.g. ``GOLD``
+# / ``US100`` / ``J225``), upper-cased like the strategy symbol gate. wave2 fix:
+# the two index strategies (dual_momentum + 52w_high) were INERT — their wave2
+# symbols (J225/HK50/AU200/AU200AU) were NOT in the prior union, so
+# keep_on_bar_path returned False and the bar fan-out vacated them →
+# generate_raw_signal was NEVER reached (live: 0 signals). Phase2 fan-out
 # (wajecs9ct): gold_trend_chandelier_1d widened {GOLD,XAUUSD} → metals+energy fan
 # (SILVER/PALLADIUM/COPPER/OIL_BRENT/GASOLINE + Tier-2), so its module is now
 # unioned to keep those NEW commodity epics reachable (else same vacate-skip INERT
 # recurrence). Unioning their SUPPORTED_SYMBOLS restores reachability (flow_not_
 # block — purely additive). Opus-spec 3-clone build: silver/us100/uk100_breakout_1h
 # are unioned in too — same vacate-skip recurrence would otherwise apply to them.
+# (session_breakout un-registered 2026-07-06 — B1 prune, live-ledger forensic,
+# -$933.65 fee-bleed — so its SUPPORTED_SYMBOLS term is dropped from the union:
+# no longer dispatched, so its symbols need no bar-path reachability.)
 CAPITAL_BAR_STRATEGY_SYMBOLS: frozenset[str] = (
     _XAU_INDICES_SYMBOLS
-    | _SESSION_BREAKOUT_SYMBOLS
     | _IDX_DUALMOM_SYMBOLS
     | _IDX_52W_SYMBOLS
     | _GOLD_TREND_SYMBOLS

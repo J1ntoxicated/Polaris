@@ -34,8 +34,11 @@ from polaris.scripts._production_tick_mfe import (
     _momentum_trail_mult,
 )
 
-# The design-named bar TREND family.
-_BAR_TREND = ("session_breakout", "fx_breakout_basket")
+# The design-named bar TREND family. (session_breakout un-registered
+# 2026-07-06 — B1 prune, live-ledger forensic, -$933.65 fee-bleed — swapped
+# for xau_indices_trend, the remaining live Capital TREND-bucket bar
+# strategy.)
+_BAR_TREND = ("xau_indices_trend", "fx_breakout_basket")
 # REVERSION-bucket bar strategies (their edge is a bounded revert-to-mean).
 # (fx_range_fade was un-registered in the strategy-wave1 restructure → its
 # registry-backed bucket now defaults to the let-run TREND default, so it is no

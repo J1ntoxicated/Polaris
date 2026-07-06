@@ -457,14 +457,18 @@ def test_tsmom_metadata_adr008_contract() -> None:
 
 
 # ===========================================================================
-# Registration — all 4 registered + dispatched; fx_range_fade un-registered
+# Registration — all 4 registered + dispatched; fx_range_fade un-registered.
+# (donchian_turtle_breakout was itself later un-registered 2026-07-06 in the
+# B1 prune — live-ledger forensic, -$540.58 real directional loss — so it is
+# no longer a member of ``_NEW_IDS``; see test_donchian_turtle_unregistered /
+# test_donchian_turtle_module_preserved below, mirroring the fx_range_fade
+# pair.)
 # ===========================================================================
 
 _NEW_IDS = (
     "okx_donchian_55_breakout",
     "tsmom_12_1_multiasset",
     "macd_ema_trend_pullback",
-    "donchian_turtle_breakout",
 )
 
 
@@ -496,15 +500,30 @@ def test_fx_range_fade_module_preserved() -> None:
     assert FXRangeFadeStrategy.metadata.strategy_id == "fx_range_fade"
 
 
+def test_donchian_turtle_unregistered() -> None:
+    # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$540.58 real
+    # directional loss): not in the live registry, not dispatched.
+    from polaris.scripts._production_tick import _all_strategies
+
+    assert "donchian_turtle_breakout" not in STRATEGY_REGISTRY
+    assert "donchian_turtle_breakout" not in {
+        s.metadata.strategy_id for s in _all_strategies()
+    }
+
+
+def test_donchian_turtle_module_preserved() -> None:
+    # Behaviour is severed but the module + class are preserved (data/research).
+    assert DonchianTurtleBreakoutStrategy.metadata.strategy_id == "donchian_turtle_breakout"
+
+
 def test_other_strategies_not_regressed() -> None:
-    # The kill + the 4 new builds must NOT drop the untouched live strategies.
-    # (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL and
-    # spot_donchian in the #56 stop-bleeders KILL — neither is a regression
-    # sentinel here anymore.)
+    # The kill + the new builds must NOT drop the untouched live strategies.
+    # (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL,
+    # spot_donchian in the #56 stop-bleeders KILL, and session_breakout in the
+    # 2026-07-06 B1 prune — none is a regression sentinel here anymore.)
     for sid in (
         "rsi_bb_pullback",
         "bar_breakout_run",
-        "session_breakout",
         "fx_breakout_basket",
         "xau_indices_trend",
     ):

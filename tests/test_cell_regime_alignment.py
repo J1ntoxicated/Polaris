@@ -26,11 +26,12 @@ from polaris.core.cell_matrix.score import (
 )
 
 # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) + spot_donchian
-# un-registered 2026-06-27 (#56 stop-bleeders KILL) — both removed from the live
-# trend-strategy exemplars (neither scores via _TREND_STRATEGIES anymore).
+# un-registered 2026-06-27 (#56 stop-bleeders KILL) + session_breakout
+# un-registered 2026-07-06 (B1 prune, live-ledger forensic, -$933.65
+# fee-bleed) — all removed from the live trend-strategy exemplars (none
+# scores via _TREND_STRATEGIES anymore).
 TREND_STRATEGIES = (
     "fx_breakout_basket",
-    "session_breakout",
     "xau_indices_trend",
 )
 TREND_REGIMES = ("bull_trend", "bear_trend")
@@ -263,10 +264,12 @@ LONG_ONLY_VENUES = ("okx", "alpaca")
 # volume_burst un-registered 2026-06-27 (#61 — live-churn KILL); removed here
 # so this set lists only live long-only trend strategies.
 LONG_ONLY_TREND_STRATEGIES = ("xau_indices_trend",)
+# session_breakout un-registered 2026-07-06 (B1 prune, live-ledger forensic,
+# -$933.65 fee-bleed) — removed here so this set lists only live Capital
+# trend strategies.
 CAPITAL_TREND_STRATEGIES = (
     "fx_breakout_basket",
     "xau_indices_trend",
-    "session_breakout",
 )
 
 

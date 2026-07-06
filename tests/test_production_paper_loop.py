@@ -486,23 +486,29 @@ async def test_l7_supervise_strategies_wired() -> None:
     judgement landed 2026-06-28 once the live read confirmed it is fee-fatal.
     The registered-but-unvalidated supertrend / connors_rsi2 / cci_reversion stay
     OUT (already absent + now flag-enforced). A KILL = no-emit, not removal: all
-    stay registered (open-position close path preserved)."""
+    stay registered (open-position close path preserved).
+
+    B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss) then KILLed
+    session_breakout / donchian_turtle_breakout / equity_52wk_high_breakout /
+    equity_vol_expansion_pocket_pivot AT THE REGISTRY level (100.9% of the
+    loss) — unlike the dispatch_eligible KILLs above, these 4 are removed from
+    STRATEGY_REGISTRY entirely (modules preserved read-only): 20 → 16."""
     strategies = _all_strategies()
-    assert len(strategies) == 20
+    assert len(strategies) == 16
     ids = {s.metadata.strategy_id for s in strategies}
     assert "volume_burst" not in ids  # KILLed 2026-06-27 (#61)
     assert "spot_donchian" not in ids  # KILLed 2026-06-27 (#56 stop-bleeders)
-    assert "session_breakout" in ids
+    assert "session_breakout" not in ids  # B1 prune 2026-07-06
     assert "fx_range_fade" not in ids  # KILLed in strategy-wave1
     assert "bar_breakout_run" in ids
     assert "okx_donchian_55_breakout" in ids
     assert "tsmom_12_1_multiasset" in ids
     assert "macd_ema_trend_pullback" in ids
-    assert "donchian_turtle_breakout" in ids
+    assert "donchian_turtle_breakout" not in ids  # B1 prune 2026-07-06
     # strategy-wave2 dispatch additions.
     assert "gold_trend_chandelier_1d" in ids
     assert "index_dual_momentum_rotation" in ids
-    assert "equity_vol_expansion_pocket_pivot" in ids
+    assert "equity_vol_expansion_pocket_pivot" not in ids  # B1 prune 2026-07-06
     # weekend-maker dispatch — the two VALIDATED weekend OKX makers.
     assert "weekend_thin_book_flush_maker" in ids
     assert "weekend_funding_capitulation_maker" in ids
@@ -596,7 +602,11 @@ def test_g2_emit_no_cap() -> None:
     # dispatch_eligible=False → 17 dispatched survivors. KILL = no-emit, not removal:
     # both stay registered (open-position close path kept).
     # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h → 20.
-    assert len(strategies) == 20
+    # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
+    # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
+    # -equity_vol_expansion_pocket_pivot (100.9% of the loss, registry-level
+    # removal): 20 → 16.
+    assert len(strategies) == 16
 
 
 @pytest.mark.asyncio

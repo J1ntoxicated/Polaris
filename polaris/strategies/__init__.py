@@ -20,7 +20,6 @@ Track A — OKX SPOT:
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
   - ``xau_indices_trend``      (correlation_group=cfd_index_commodity_trend)
-  - ``session_breakout``       (correlation_group=cfd_session_event)
   - ``gold_trend_chandelier_1d``      (correlation_group=cfd_gold_trend_chandelier, 1D)
   - ``gold_riskoff_trend_amplify``    (correlation_group=cfd_gold_riskoff_trend, 1D)
   - ``gold_breakout_1h``              (correlation_group=cfd_gold_breakout_1h, 1H)
@@ -32,10 +31,6 @@ Track B — Capital CFD:
     per-symbol clone of gold_breakout_1h on US100, session-gated)
   - ``uk100_breakout_1h``             (correlation_group=cfd_uk100_breakout_1h, 1H —
     per-symbol clone of gold_breakout_1h on UK100, session-gated, probe cap)
-
-Track C — Alpaca US equity (INERT until SIP key #42 routes equity bars):
-  - ``equity_52wk_high_breakout``         (correlation_group=equity_52wk_high_breakout, 1D)
-  - ``equity_vol_expansion_pocket_pivot`` (correlation_group=equity_vol_expansion_pocket_pivot, 1D)
 
 (``tsmom``, ``equity_tsmom``, ``equity_rsi_bb_pullback``, ``equity_gap_go`` were
 KILLed 2026-06-26 — gross-negative entry expectancy (negative BEFORE fees,
@@ -60,6 +55,22 @@ open-position close path are preserved read-only; only the signal-emit
 behaviour is severed. The dead registry/learner rows are swept by the next
 ``learner_prune``.)
 
+(``session_breakout`` / ``donchian_turtle_breakout`` / ``equity_52wk_high_breakout``
+/ ``equity_vol_expansion_pocket_pivot`` were un-registered 2026-07-06 — KILLed
+(B1 prune, live-ledger forensic): these 4 ids are 100.9% of the -$2,024 book
+loss — ``session_breakout`` -$933.65 NET / 88 trades / fees 9.7x gross (pure
+fee-bleed churn), ``donchian_turtle_breakout`` -$540.58 (real directional
+loss), ``equity_52wk_high_breakout`` -$137.23, ``equity_vol_expansion_pocket_pivot``
+-$431.05 (0% win). /debate GO — this is CAPITAL CONCENTRATION on the validated
+slow-trend edge (the surviving OKX 1D + Capital gold/index strategies), NOT a
+defensive throttle. Evidence + debate transcript:
+``vault/50_research/debates/strategy_prune_b1_b2_2026-07-06.md``. Same
+dispatch-level KILL as the autopsy survivors above — modules preserved
+read-only (2 ``donchian_turtle_breakout`` positions were live at prune time;
+their exit path resolves via ``STRATEGY_REGISTRY.get()`` → ``None`` → default
+exit, degrade-never-crash); only the signal-emit behaviour + registry
+membership are severed.)
+
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
 legs deploy live now; the multi-asset strategies' equity-ETF legs (tsmom / macd /
@@ -81,12 +92,7 @@ from polaris.strategies.base import (
 )
 from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
-from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
-from polaris.strategies.equity_52wk_high_breakout import Equity52WkHighBreakoutStrategy
-from polaris.strategies.equity_vol_expansion_pocket_pivot import (
-    EquityVolExpansionPocketPivotStrategy,
-)
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.gold_breakout_1h import GoldBreakout1HStrategy
 from polaris.strategies.gold_riskoff_trend_amplify import GoldRiskoffTrendAmplifyStrategy
@@ -98,7 +104,6 @@ from polaris.strategies.index_dual_momentum_rotation import (
 from polaris.strategies.macd_ema_trend_pullback import MACDEMATrendPullbackStrategy
 from polaris.strategies.okx_donchian_55_breakout import OKXDonchian55BreakoutStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
-from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.silver_breakout_1h import SilverBreakout1HStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
@@ -119,26 +124,23 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     OKXDonchian55BreakoutStrategy.metadata.strategy_id: OKXDonchian55BreakoutStrategy,
     TSMom12_1MultiAssetStrategy.metadata.strategy_id: TSMom12_1MultiAssetStrategy,
     MACDEMATrendPullbackStrategy.metadata.strategy_id: MACDEMATrendPullbackStrategy,
-    DonchianTurtleBreakoutStrategy.metadata.strategy_id: DonchianTurtleBreakoutStrategy,
     FXBreakoutBasketStrategy.metadata.strategy_id: FXBreakoutBasketStrategy,
     XAUIndicesTrendStrategy.metadata.strategy_id: XAUIndicesTrendStrategy,
-    SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
     EMACrossoverStrategy.metadata.strategy_id: EMACrossoverStrategy,
     ConnorsRSI2Strategy.metadata.strategy_id: ConnorsRSI2Strategy,
     SupertrendStrategy.metadata.strategy_id: SupertrendStrategy,
     CCIReversionStrategy.metadata.strategy_id: CCIReversionStrategy,
     # strategy-wave2 — 7 verified fee-beating research survivors (2026-06-27).
     # Capital CFD GOLD / index (5, deploy live) + Alpaca equity (2, inert until
-    # SIP #42 routes equity bars — degrade-never-crash).
+    # SIP #42 routes equity bars — degrade-never-crash). (equity_52wk_high_breakout
+    # / equity_vol_expansion_pocket_pivot were un-registered 2026-07-06 — B1 prune,
+    # see the KILL block in the module docstring above; the 5 Capital CFD survivors
+    # below are unaffected.)
     GoldTrendChandelier1DStrategy.metadata.strategy_id: GoldTrendChandelier1DStrategy,
     GoldRiskoffTrendAmplifyStrategy.metadata.strategy_id: GoldRiskoffTrendAmplifyStrategy,
     GoldBreakout1HStrategy.metadata.strategy_id: GoldBreakout1HStrategy,
     Index52WHighMomentumStrategy.metadata.strategy_id: Index52WHighMomentumStrategy,
     IndexDualMomentumRotationStrategy.metadata.strategy_id: IndexDualMomentumRotationStrategy,
-    Equity52WkHighBreakoutStrategy.metadata.strategy_id: Equity52WkHighBreakoutStrategy,
-    EquityVolExpansionPocketPivotStrategy.metadata.strategy_id: (
-        EquityVolExpansionPocketPivotStrategy
-    ),
     # #77 weekend maker — the SINGLE verified crypto maker BUILD (research
     # w5xhhz2m9: 1 of 12 net-positive under the real maker fee, +73 bps). OKX
     # SPOT, weekend (Sat/Sun UTC) thin-book flush, post-only deep bid, no-fill =
@@ -176,10 +178,7 @@ __all__ = [
     "COLD_START_NEUTRAL_STRENGTH",
     "CCIReversionStrategy",
     "ConnorsRSI2Strategy",
-    "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
-    "Equity52WkHighBreakoutStrategy",
-    "EquityVolExpansionPocketPivotStrategy",
     "FXBreakoutBasketStrategy",
     "GoldBreakout1HStrategy",
     "GoldRiskoffTrendAmplifyStrategy",
@@ -192,7 +191,6 @@ __all__ = [
     "RSIBBPullbackStrategy",
     "RawSignal",
     "STRATEGY_REGISTRY",
-    "SessionBreakoutStrategy",
     "SilverBreakout1HStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",

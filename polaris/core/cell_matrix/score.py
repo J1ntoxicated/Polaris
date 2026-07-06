@@ -54,12 +54,13 @@ REGIME_ALIGN_DAMPEN: Final[float] = 0.8
 # every live trend strategy is regime-scored (an omitted id would be silently
 # scored neutral).
 # (volume_burst was un-registered 2026-06-27 in the #61 live-churn KILL +
-# spot_donchian un-registered 2026-06-27 in the #56 stop-bleeders KILL — both
-# removed here so this set stays in sync with STRATEGY_REGISTRY: no dead id remains.)
+# spot_donchian un-registered 2026-06-27 in the #56 stop-bleeders KILL +
+# session_breakout un-registered 2026-07-06 in the B1 prune (live-ledger
+# forensic, -$933.65 fee-bleed) — all removed here so this set stays in sync
+# with STRATEGY_REGISTRY: no dead id remains.)
 _TREND_STRATEGIES: Final[frozenset[str]] = frozenset(
     {
         "fx_breakout_basket",
-        "session_breakout",
         "xau_indices_trend",
     }
 )

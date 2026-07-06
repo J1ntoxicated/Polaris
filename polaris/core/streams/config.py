@@ -214,7 +214,10 @@ STREAMS: dict[StreamId, StreamConfig] = {
         adapter_ref="CapitalAdapter",
         universe_source="capital_navigation",
         strategy_roster=frozenset(
-            {"fx_breakout_basket", "xau_indices_trend", "session_breakout"}
+            # session_breakout un-registered 2026-07-06 (B1 prune, live-ledger
+            # forensic, -$933.65 fee-bleed) — kept in sync with
+            # STRATEGY_REGISTRY.
+            {"fx_breakout_basket", "xau_indices_trend"}
         ),
         sizing_profile=SizingProfile(
             leverage_source="per_market_constraint",

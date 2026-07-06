@@ -22,7 +22,6 @@ from polaris.strategies import (
     gold_trend_chandelier_1d,
     index_52w_high_momentum,
     index_dual_momentum_rotation,
-    session_breakout,
     silver_breakout_1h,
     uk100_breakout_1h,
     us100_breakout_1h,
@@ -31,7 +30,7 @@ from polaris.strategies import (
 
 
 def test_capital_index_symbol_reaches_bar_path() -> None:
-    # US100 is in session_breakout + xau_indices_trend SUPPORTED_SYMBOLS — it
+    # US100 is in us100_breakout_1h + xau_indices_trend SUPPORTED_SYMBOLS — it
     # must NOT be vacated from the bar fan-out (previously skipped → 0% emit).
     assert keep_on_bar_path(asset_class="index", symbol="US100") is True
 
@@ -86,9 +85,11 @@ def test_carveout_symbols_union_matches_enabled_strategies() -> None:
     # wave2 added index_dual_momentum_rotation + index_52w_high_momentum; Phase2
     # fan-out (wajecs9ct) added gold_trend_chandelier_1d (metals+energy widen);
     # Opus-spec 3-clone build added silver/us100/uk100_breakout_1h.
+    # (session_breakout un-registered 2026-07-06 — B1 prune, live-ledger
+    # forensic, -$933.65 fee-bleed — its SUPPORTED_SYMBOLS term is dropped:
+    # no longer dispatched, so its symbols need no bar-path reachability.)
     expected = (
         xau_indices_trend.SUPPORTED_SYMBOLS
-        | session_breakout.SUPPORTED_SYMBOLS
         | index_dual_momentum_rotation.SUPPORTED_SYMBOLS
         | index_52w_high_momentum.SUPPORTED_SYMBOLS
         | gold_trend_chandelier_1d.SUPPORTED_SYMBOLS

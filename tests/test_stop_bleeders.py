@@ -58,7 +58,10 @@ def test_registry_drops_to_20() -> None:
     # flush_maker (#77, the single verified crypto maker BUILD) → 21; +1
     # weekend_funding_capitulation_maker (#80, 2nd weekend edge, positioning) → 22.
     # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h → 25.
-    assert len(STRATEGY_REGISTRY) == 25
+    # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
+    # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
+    # -equity_vol_expansion_pocket_pivot (100.9% of the loss): 25 → 21.
+    assert len(STRATEGY_REGISTRY) == 21
 
 
 def test_dispatch_is_subset_of_registry_no_zombie() -> None:
@@ -126,10 +129,13 @@ def test_non_equity_strategies_never_feed_gated() -> None:
 
 
 def test_equity_strategies_remain_registered() -> None:
-    # SIP-gate is a dispatch-time inert, NOT a registry KILL — the equity
-    # strategies stay registered so they auto-activate when SIP is routed.
-    assert "equity_vol_expansion_pocket_pivot" in STRATEGY_REGISTRY
-    assert "equity_52wk_high_breakout" in STRATEGY_REGISTRY
+    # SUPERSEDED by the B1 prune (2026-07-06) — the SIP-gate finding above was
+    # about dispatch-time inert-ness, but the live-ledger forensic (-$137.23 /
+    # -$431.05, 0% win) then KILLed both at the registry level (100.9% of the
+    # -$2,024 book loss alongside session_breakout / donchian_turtle_breakout).
+    # Modules preserved read-only; no longer registered or dispatched.
+    assert "equity_vol_expansion_pocket_pivot" not in STRATEGY_REGISTRY
+    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
     dispatch_ids = {s.metadata.strategy_id for s in _all_strategies()}
-    assert "equity_vol_expansion_pocket_pivot" in dispatch_ids
-    assert "equity_52wk_high_breakout" in dispatch_ids
+    assert "equity_vol_expansion_pocket_pivot" not in dispatch_ids
+    assert "equity_52wk_high_breakout" not in dispatch_ids

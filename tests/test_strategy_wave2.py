@@ -536,12 +536,16 @@ def test_equity_52wk_no_lookahead() -> None:
 
 
 def test_equity_52wk_metadata_and_registry() -> None:
-    _assert_trend_let_run("equity_52wk_high_breakout")
+    # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$137.23): module
+    # preserved read-only, but no longer a member of STRATEGY_REGISTRY.
     m = Equity52WkHighBreakoutStrategy.metadata
+    assert bucket_from_correlation_group(m.correlation_group_id) is Bucket.TREND
+    assert m.hold_overnight is True
+    assert m.profit_target_r is None
     assert m.venue == "alpaca"
     assert m.product_class == "equity"
     assert EQ_HIGH_LOOKBACK == 252
-    assert STRATEGY_REGISTRY["equity_52wk_high_breakout"] is Equity52WkHighBreakoutStrategy
+    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -610,14 +614,15 @@ def test_pocket_pivot_no_emit_lower_third_close() -> None:
 
 
 def test_pocket_pivot_metadata_and_registry() -> None:
-    _assert_trend_let_run("equity_vol_expansion_pocket_pivot")
+    # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$431.05, 0% win):
+    # module preserved read-only, but no longer a member of STRATEGY_REGISTRY.
     m = EquityVolExpansionPocketPivotStrategy.metadata
+    assert bucket_from_correlation_group(m.correlation_group_id) is Bucket.TREND
+    assert m.hold_overnight is True
+    assert m.profit_target_r is None
     assert m.venue == "alpaca"
     assert SMA_SLOW == 200
-    assert (
-        STRATEGY_REGISTRY["equity_vol_expansion_pocket_pivot"]
-        is EquityVolExpansionPocketPivotStrategy
-    )
+    assert "equity_vol_expansion_pocket_pivot" not in STRATEGY_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -630,18 +635,23 @@ def test_registry_has_20_strategies() -> None:
     # +weekend_thin_book_flush_maker (#77, single verified crypto maker BUILD) → 21;
     # +weekend_funding_capitulation_maker (#80, 2nd weekend edge, positioning) → 22.
     # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h → 25.
-    assert len(STRATEGY_REGISTRY) == 25
+    # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
+    # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
+    # -equity_vol_expansion_pocket_pivot (100.9% of the loss): 25 → 21.
+    assert len(STRATEGY_REGISTRY) == 21
 
 
 def test_wave2_all_registered() -> None:
+    # equity_52wk_high_breakout / equity_vol_expansion_pocket_pivot were
+    # un-registered 2026-07-06 (B1 prune) — no longer asserted here; see
+    # test_equity_52wk_metadata_and_registry / test_pocket_pivot_metadata_and_registry
+    # for their (now KILLed) registry-absence coverage.
     for sid in (
         "gold_trend_chandelier_1d",
         "gold_riskoff_trend_amplify",
         "gold_breakout_1h",
         "index_52w_high_momentum",
         "index_dual_momentum_rotation",
-        "equity_52wk_high_breakout",
-        "equity_vol_expansion_pocket_pivot",
     ):
         assert sid in STRATEGY_REGISTRY
 

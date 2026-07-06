@@ -20,15 +20,17 @@ from polaris.strategies import (
     MarketView,
     RawSignal,
     RSIBBPullbackStrategy,
-    SessionBreakoutStrategy,
     StrategyMetadata,
     XAUIndicesTrendStrategy,
     all_strategies,
 )
 
 # volume_burst un-registered 2026-06-27 (#61 live-churn KILL) + spot_donchian
-# un-registered 2026-06-27 (#56 stop-bleeders KILL) — modules preserved
-# read-only, so isolated signal-gen tests import the classes directly.
+# un-registered 2026-06-27 (#56 stop-bleeders KILL) + session_breakout
+# un-registered 2026-07-06 (B1 prune, live-ledger forensic, -$933.65
+# fee-bleed) — modules preserved read-only, so isolated signal-gen tests
+# import the classes directly.
+from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.volume_burst import VolumeBurstStrategy
 
@@ -595,7 +597,10 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     # weekend_funding_positioning_mean_reversion): 21 → 22.
     # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h, each its OWN
     # correlation_group_id (per_ticker_tailored): 22 → 25.
-    assert len(seen) == 25, f"correlation groups not unique: {seen}"
+    # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
+    # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
+    # -equity_vol_expansion_pocket_pivot (100.9% of the loss): 25 → 21.
+    assert len(seen) == 21, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
@@ -606,7 +611,10 @@ def test_strategy_registry_size() -> None:
     # +weekend_thin_book_flush_maker (#77 — single verified crypto maker BUILD): 21.
     # +weekend_funding_capitulation_maker (#80 — 2nd weekend edge, positioning): 22.
     # Opus-spec 3-clone build: +silver/us100/uk100_breakout_1h: 22 → 25.
-    assert len(STRATEGY_REGISTRY) == 25
+    # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
+    # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
+    # -equity_vol_expansion_pocket_pivot (100.9% of the loss): 25 → 21.
+    assert len(STRATEGY_REGISTRY) == 21
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

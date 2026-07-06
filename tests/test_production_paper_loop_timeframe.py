@@ -124,24 +124,25 @@ def test_strategy_metadata_timeframe_used() -> None:
         # 1H crypto trend-template, gross +$0.12 < fee $2.37 per round-trip) set
         # dispatch_eligible=False (dual-SSOT KILL) — dropped from dispatch (registered,
         # open-position close path preserved). ema_crossover KILLed 2026-06-28.
+        # session_breakout / donchian_turtle_breakout / equity_52wk_high_breakout
+        # / equity_vol_expansion_pocket_pivot un-registered 2026-07-06 (B1 prune,
+        # live-ledger forensic, -$2,024 book loss, 100.9% attributable) — dropped.
         "fx_breakout_basket": "1H",
         "xau_indices_trend": "1H",
-        "session_breakout": "5m",
         "bar_breakout_run": "1D",  # daily/position horizon (Donchian-40 breakout)
-        # strategy-wave1: fx_range_fade KILLed; 4 verified 1D survivors added.
+        # strategy-wave1: fx_range_fade KILLed; 4 verified 1D survivors added
+        # (one, donchian_turtle_breakout, later B1-KILLed — see above).
         "okx_donchian_55_breakout": "1D",
         "tsmom_12_1_multiasset": "1D",
         "macd_ema_trend_pullback": "1D",
-        "donchian_turtle_breakout": "1D",
         # legacy tsmom (cross-sym) + the equity_* strategies (1D) were KILLed.
-        # strategy-wave2 (2026-06-27): 7 verified research survivors dispatched.
+        # strategy-wave2 (2026-06-27): 7 verified research survivors dispatched
+        # (2 equity legs later B1-KILLed — see above).
         "gold_trend_chandelier_1d": "1D",
         "gold_riskoff_trend_amplify": "1D",
         "gold_breakout_1h": "1H",
         "index_52w_high_momentum": "1D",
         "index_dual_momentum_rotation": "1D",
-        "equity_52wk_high_breakout": "1D",
-        "equity_vol_expansion_pocket_pivot": "1D",
         # weekend-maker dispatch fix — the two VALIDATED weekend OKX makers (#77
         # thin-book flush + #80 funding capitulation), both OKX SPOT 1H.
         "weekend_thin_book_flush_maker": "1H",

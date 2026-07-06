@@ -30,15 +30,16 @@ from polaris.strategies.base import BarView, MarketView
 _CLOSE_ONLY_ID = "gold_trend_chandelier_1d"
 _EXEMPT_ID = "gold_riskoff_trend_amplify"
 
-# The REAL OKX 1D dispatch bucket today has 5 close-only strategies sharing
+# The REAL OKX 1D dispatch bucket today has 4 close-only strategies sharing
 # (venue="okx", timeframe="1D") — the actual production shape this test
 # guards against (see the BLOCKER this regression test closes).
+# (donchian_turtle_breakout un-registered 2026-07-06 — B1 prune, live-ledger
+# forensic, -$540.58 real directional loss — dropped from this bucket list.)
 _OKX_1D_CLOSE_ONLY_IDS = [
     "bar_breakout_run",
     "okx_donchian_55_breakout",
     "tsmom_12_1_multiasset",
     "macd_ema_trend_pullback",
-    "donchian_turtle_breakout",
 ]
 
 
@@ -133,13 +134,13 @@ def test_close_only_strategy_produces_identical_signal_when_gate_would_have_fire
         assert sig_a.strength == sig_b.strength
 
 
-def test_okx_1d_bucket_has_5_close_only_strategies_sharing_the_bucket_today() -> None:
+def test_okx_1d_bucket_has_4_close_only_strategies_sharing_the_bucket_today() -> None:
     """Sanity: pins the REAL production shape this regression test guards —
     if a future registry change drops this below 2, the test below stops
     exercising the multi-sibling starvation case and must be revisited."""
     okx_1d = [s for s in _OKX_1D_CLOSE_ONLY_IDS if s in STRATEGY_REGISTRY]
     assert len(okx_1d) == len(_OKX_1D_CLOSE_ONLY_IDS), (
-        "expected all 5 OKX 1D close-only strategies to be registered"
+        "expected all 4 OKX 1D close-only strategies to be registered"
     )
     for sid in okx_1d:
         strat = STRATEGY_REGISTRY[sid]
@@ -155,7 +156,7 @@ def test_multiple_close_only_siblings_sharing_a_bucket_all_fire_on_first_observa
     bar reads it as already-evaluated and is skipped FOREVER (the next bar
     advance repeats: strategy 1 runs and re-bumps before siblings get a turn).
 
-    This test puts all 5 REAL OKX-1D close-only strategies through the SAME
+    This test puts all 4 REAL OKX-1D close-only strategies through the SAME
     (venue, symbol, timeframe) bucket on one unchanged bar and asserts EVERY
     ONE of them is evaluated (gate fires) on the bar's first observation —
     the exact production configuration the 3-tuple key silently broke.

@@ -195,7 +195,19 @@ def resolve_strategy_class(conn: sqlite3.Connection | None, *, venue: str, strat
     error, the safe/byte-identical default wins). ``conn is None`` is a real
     caller shape (e.g. a test-only compute_size stand-in that never touches
     the DB) — same fail-open contract, not a crash.
+
+    VIRTUAL ACCOUNT (``POLARIS_VIRTUAL_ACCOUNT=1``): the shadow gate is bypassed —
+    EVERY registered strategy routes to ``EARN`` so every signal becomes a real
+    (virtual) trade that is visible + measured. The whole point of the virtual
+    account is to SEE every edge trade (limits removed); the Prove-then-Scale
+    shadow gate is REAL-money capital protection, unneeded on virtual funds. The
+    ``strategy_class`` table still tracks the live class (the transition FSM keeps
+    scoring per-strategy virtual performance for the eventual real-wire flip) —
+    only virtual SIZING ignores it here. Env read directly (not via the
+    scripts-layer ``virtual_account_enabled``) to keep core→scripts layering clean.
     """
+    if os.environ.get("POLARIS_VIRTUAL_ACCOUNT", "0") == "1":
+        return "EARN"
     if conn is None:
         return DEFAULT_STRATEGY_CLASS
     try:

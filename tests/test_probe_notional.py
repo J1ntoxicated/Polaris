@@ -174,6 +174,23 @@ def test_resolve_strategy_class_reads_persisted_row(memdb: sqlite3.Connection) -
     assert resolve_strategy_class(memdb, venue="okx", strategy_id="volume_burst") == "PROVE"
 
 
+def test_resolve_strategy_class_virtual_account_forces_earn(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VIRTUAL ACCOUNT (POLARIS_VIRTUAL_ACCOUNT=1): the Prove-then-Scale shadow gate
+    is bypassed -- a persisted PROVE/BENCH row still resolves to EARN so EVERY
+    signal trades virtual size (limits removed for full validation). With the env
+    unset, the DB class is honoured (byte-identical real-money path)."""
+    memdb.execute(
+        "INSERT INTO strategy_class (venue, strategy_id, strategy_class) "
+        "VALUES ('okx', 'shadowed_strat', 'PROVE')"
+    )
+    monkeypatch.setenv("POLARIS_VIRTUAL_ACCOUNT", "1")
+    assert resolve_strategy_class(memdb, venue="okx", strategy_id="shadowed_strat") == "EARN"
+    monkeypatch.delenv("POLARIS_VIRTUAL_ACCOUNT", raising=False)
+    assert resolve_strategy_class(memdb, venue="okx", strategy_id="shadowed_strat") == "PROVE"
+
+
 def test_resolve_strategy_class_defaults_to_earn_when_no_row(memdb: sqlite3.Connection) -> None:
     """A strategy with no strategy_class row yet (bootstrap hasn't run / brand
     new strategy) defaults to EARN -- byte-identical pre-pts-classes sizing,

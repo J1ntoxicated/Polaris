@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import sqlite3
@@ -45,6 +46,7 @@ from polaris.scripts._production_bars import (
 )
 from polaris.scripts._production_layers import read_active_universe
 from polaris.scripts._session_map import equity_fetch_active, session_warm_active
+from polaris.strategies import STRATEGY_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,30 @@ def warm_eligible_symbols(conn: sqlite3.Connection) -> frozenset[tuple[str, str]
         (latest_cycle,),
     ).fetchall()
     return frozenset((str(r[0]), str(r[1])) for r in rows)
+
+
+def capital_tradeable_symbols() -> frozenset[str]:
+    """SSOT-derived union of every symbol a REGISTERED Capital strategy trades.
+
+    Capital bars 429-storm fix (PRIORITY half): read each ``STRATEGY_REGISTRY``
+    entry whose ``metadata.venue == "capital"`` and pull its module-level
+    ``SUPPORTED_SYMBOLS`` / ``BASKET_SYMBOLS`` frozenset via introspection — NOT
+    a hand-maintained duplicate list (would drift the moment a strategy's symbol
+    set changes). Used only to ORDER the static-ground walk (tradeable-first);
+    it narrows nothing — every active Capital instrument (incl. the untradeable
+    exotic-FX/commodity tail) is still walked (flow_not_block).
+    """
+    out: set[str] = set()
+    for cls in STRATEGY_REGISTRY.values():
+        if cls.metadata.venue != "capital":
+            continue
+        mod = inspect.getmodule(cls)
+        syms = getattr(mod, "SUPPORTED_SYMBOLS", None) or getattr(
+            mod, "BASKET_SYMBOLS", None
+        )
+        if syms:
+            out.update(syms)
+    return frozenset(out)
 
 
 async def _prefetch_alpaca_multi(
@@ -242,6 +268,23 @@ async def ingest_static_ground_bars(
         return {"instruments": 0, "bars": 0, "timed_out": False,
                 "warm_instruments": 0, "warm_bars": 0}
 
+    # Capital bars 429-storm fix (PRIORITY half): schedule the tradeable Capital
+    # set (GOLD/US100/UK100/... — what registered strategies actually trade)
+    # FIRST, so it wins the semaphore + bars-pacing bucket ahead of the exotic
+    # FX/commodity tail (SEKMXN/HKDTRY/...) that Yahoo has no series for. A
+    # stable sort (Python's ``sorted`` is stable) preserves the DB's existing
+    # relative order within each group. ADD-only reordering — every active
+    # instrument (all venues, incl. the exotic tail) is still walked
+    # (flow_not_block: this prioritizes, never narrows, observation).
+    _capital_tradeable = capital_tradeable_symbols()
+    if _capital_tradeable:
+        active = sorted(
+            active,
+            key=lambda inst: not (
+                inst.venue == "capital" and inst.symbol in _capital_tradeable
+            ),
+        )
+
     warm_set = frozenset(warm_resolutions)
     warm_now = int(now_ts) if now_ts is not None else int(time.time())
     # A2 SCOPE: the warm pass is restricted to trade-eligible FOCUS names — the
@@ -271,6 +314,10 @@ async def ingest_static_ground_bars(
                     limit=limit, bar_interval=interval,
                     gpt_client_factory=gpt_client_factory,
                     alpaca_multi_cache=alpaca_multi_cache.get(interval),
+                    # Capital bars 429-storm fix: off-tick walk has no cadence
+                    # deadline, so it WAITS for a real token (wait-not-drop)
+                    # instead of bursting past Capital's ~10 req/s demo ceiling.
+                    wait_for_token=True,
                 )
             except Exception as exc:  # noqa: BLE001 — one bad ticker never aborts
                 logger.debug(

@@ -1117,3 +1117,119 @@ async def test_ingest_static_ground_bars_serves_alpaca_from_batch_cache(
         "SELECT COUNT(DISTINCT symbol) FROM bars WHERE bar_interval='1D'"
     ).fetchone()[0]
     assert n == 2
+
+
+# ---------------------------------------------------------------------------
+# Capital bars 429-storm fix — SCOPE (SSOT tradeable set) + PRIORITY (schedule
+# tradeable-first so a saturated bucket/timeout degrades the exotic tail, not
+# GOLD/US100/UK100/etc).
+# ---------------------------------------------------------------------------
+
+
+def test_capital_tradeable_symbols_derived_from_registry() -> None:
+    """The tradeable set is derived from STRATEGY_REGISTRY, not hand-maintained.
+
+    Every registered Capital-venue strategy's SUPPORTED_SYMBOLS/BASKET_SYMBOLS
+    module constant is unioned in — this is the SSOT (no duplicated hardcoded
+    list to drift). Spot-check a few names known to be traded live.
+    """
+    syms = sg.capital_tradeable_symbols()
+    assert isinstance(syms, frozenset)
+    # gold / index / commodity / major-FX names actually traded by registered
+    # Capital strategies (xau_indices_trend, gold_breakout_1h, us100/uk100_
+    # breakout_1h, fx_breakout_basket, ...).
+    for expected in ("GOLD", "XAUUSD", "US100", "UK100", "EURUSD"):
+        assert expected in syms
+    # A random exotic cross that no registered strategy trades must be absent.
+    assert "SEKMXN" not in syms
+    assert "HKDTRY" not in syms
+
+
+@pytest.mark.asyncio
+async def test_capital_tradeable_scheduled_before_exotic_tail(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tradeable Capital symbols (GOLD/US100/...) are fetched BEFORE the exotic
+    tail (SEKMXN/HKDTRY/...), so a bucket/timeout squeeze starves the exotic
+    tail first — never the names the registered strategies trade.
+
+    ADD-only: both groups are still fully walked (flow_not_block — nothing is
+    dropped from observation), only the DISPATCH ORDER changes.
+    """
+    # Exotic tail seated FIRST in the DB (proves order is NOT DB-insertion order).
+    _seat_active(
+        conn,
+        [
+            ("capital", "SEKMXN", "forex", "forex:SEKMXN"),
+            ("capital", "HKDTRY", "forex", "forex:HKDTRY"),
+            ("capital", "AUDUSD_ZERO", "forex", "forex:AUDUSD_ZERO"),
+        ],
+    )
+    _seat_active(
+        conn,
+        [
+            ("capital", "GOLD", "commodity", "commodity:GOLD"),
+            ("capital", "US100", "indices", "indices:US100"),
+        ],
+    )
+
+    order: list[str] = []
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **_kw: Any) -> list[Bar]:
+        order.append(symbol)
+        return []
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    monkeypatch.setattr(sg, "STATIC_GROUND_PARALLEL_DEFAULT", 1)
+    await sg.ingest_static_ground_bars(conn, resolutions=("1D",), parallel=1)
+
+    assert set(order) == {"SEKMXN", "HKDTRY", "AUDUSD_ZERO", "GOLD", "US100"}
+    tradeable_positions = [order.index(s) for s in ("GOLD", "US100")]
+    exotic_positions = [order.index(s) for s in ("SEKMXN", "HKDTRY", "AUDUSD_ZERO")]
+    assert max(tradeable_positions) < min(exotic_positions)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_token_true_forwarded_to_capital_fetch(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The off-tick walk forwards ``wait_for_token=True`` to ``fetch_bars_one``
+    (Capital bars 429-storm fix — a real wait, no cadence deadline to protect)."""
+    _seat_active(conn, [("capital", "GOLD", "commodity", "commodity:GOLD")])
+    seen: dict[str, Any] = {}
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **kw: Any) -> list[Bar]:
+        seen["wait_for_token"] = kw.get("wait_for_token")
+        return []
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    await sg.ingest_static_ground_bars(conn, resolutions=("1D",))
+    assert seen["wait_for_token"] is True
+
+
+@pytest.mark.asyncio
+async def test_non_capital_universe_order_unaffected_when_no_tradeable_overlap(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OKX/Capital rows are untouched by the Capital priority reorder — every
+    active instrument (any venue) is still walked exactly once. (Equity is
+    excluded here — ``equity_fetch_active`` gates it by market-hours, which is
+    orthogonal to this test's concern.)"""
+    _seat_active(
+        conn,
+        [
+            ("okx", "BTC-USDT", "crypto", "crypto:BTC"),
+            ("okx", "ETH-USDT", "crypto", "crypto:ETH"),
+            ("capital", "GOLD", "commodity", "commodity:GOLD"),
+        ],
+    )
+    fetched: list[str] = []
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **_kw: Any) -> list[Bar]:
+        fetched.append(f"{venue}:{symbol}")
+        return []
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    result = await sg.ingest_static_ground_bars(conn, resolutions=("1D",))
+    assert result["instruments"] == 0  # no bars returned by the fake, but...
+    assert set(fetched) == {"okx:BTC-USDT", "okx:ETH-USDT", "capital:GOLD"}

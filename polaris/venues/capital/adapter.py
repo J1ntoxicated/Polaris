@@ -29,6 +29,7 @@ import httpx
 
 from polaris.core.data.canonical import compute_underlying_group_id
 from polaris.core.data.schema import BAR_INTERVALS, Bar
+from polaris.core.ratelimit import AsyncTokenBucket
 from polaris.venues.capital.session import CapitalSession
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,51 @@ CAPITAL_WORKINGORDERS_PATH: Final[str] = "/api/v1/workingorders"
 CAPITAL_CONFIRMS_PATH: Final[str] = "/api/v1/confirms"
 
 REST_TIMEOUT_SEC: Final[float] = 15.0
+
+# Bars 429-storm fix (mirrors the OKX ``_CANDLES_BUCKET`` / Alpaca ``_data_bucket``
+# pattern). Root cause: the off-tick static-ground full-universe walk
+# (``_static_ground.ingest_static_ground_bars``) has NO client-side pacing on the
+# Capital exchange-fallback path, so a Yahoo-miss on the exotic-FX/commodity tail
+# (SEKMXN / HKDTRY / AUDUSD_ZERO / ... — Yahoo has no series for illiquid crosses)
+# fans out one ``/prices/{epic}`` GET per symbol per resolution, bounded only by
+# the semaphore width (32) — far above Capital's documented ~10 req/s per-account
+# demo REST ceiling (vault/50_research/startup_capital_proxy_parallel_2026-06-25.md)
+# — producing the live 429 storm that starved GOLD/US100/UK100 bar-advances.
+# ``rate=8, per_sec=1.0`` paces every bars GET to 8 req/s sustained, comfortably
+# under the ~10 req/s ceiling (headroom for the live trading path's own Capital
+# REST calls — open/close/list/confirm — which do NOT go through this bucket,
+# see ``CapitalAdapter``, so no entry/exit is ever paced). PRICES-ONLY: the trade
+# lifecycle is untouched (flow_not_block — a paced GET WAITS for a token, it is
+# never rejected/dropped).
+BARS_RATE: Final[int] = 8
+BARS_PER_SEC: Final[float] = 1.0
+BARS_RETRY_MAX: Final[int] = 3  # extra attempts after a 429
+BARS_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s, 2.0s
+_BARS_RETRY_MAX_DELAY_SEC: Final[float] = 30.0
+# Bounds the live-tick pacing wait so a saturated bucket cannot stall the 5s
+# cadence coroutine; on timeout the GET proceeds token-less (SOFT cap,
+# flow_not_block — the bar is never dropped, the 429 backoff below is the
+# safety net). The off-tick static-ground pass instead acquires with
+# ``wait_for_token=True`` (a REAL wait — it has no cadence deadline to protect).
+BARS_ACQUIRE_TIMEOUT_SEC: Final[float] = 5.0
+
+_BARS_BUCKET: AsyncTokenBucket = AsyncTokenBucket(rate=BARS_RATE, per_sec=BARS_PER_SEC)
+
+
+def _bars_retry_after_sec(resp: httpx.Response, fallback: float) -> float:
+    """Backoff seconds for a bars 429 — honour ``Retry-After`` if sane."""
+    raw = resp.headers.get("Retry-After", "")
+    if raw:
+        try:
+            return min(_BARS_RETRY_MAX_DELAY_SEC, max(0.0, float(raw)))
+        except ValueError:
+            pass
+    return min(_BARS_RETRY_MAX_DELAY_SEC, fallback)
+
+
+async def _async_sleep(delay: float) -> None:
+    """Indirection so tests can monkeypatch the backoff sleep to a no-op."""
+    await asyncio.sleep(delay)
 
 # D-3 — bounded submit backoff for the deal endpoints (open/close legs only).
 # Total budget = 1 + len(delays) attempts, ≤1.5 s extra latency (tick pace 5 s
@@ -181,22 +227,36 @@ async def fetch_capital_bars(
     base_url: str = CAPITAL_BASE_DEMO,
     asset_class: str = "forex",
     client: httpx.AsyncClient | None = None,
+    wait_for_token: bool = False,
 ) -> list[Bar]:
     """Fetch up to ``limit`` candles for ``epic`` from Capital demo REST.
 
     Demo session creds (CST + X-SECURITY-TOKEN) must be obtained via /session
     by the caller. The function emits canonical Bars.
+
+    PACED + 429-resilient (bars 429-storm fix): every request first takes a
+    token from the shared ``_BARS_BUCKET`` (8 req/s, under Capital's ~10 req/s
+    demo ceiling), so the bar-ingest fan-out (live tick + off-tick static-ground
+    walk) cannot burst past the cap. A residual 429 is retried with bounded
+    backoff (honouring ``Retry-After``). Exhausting the retries re-raises so the
+    caller degrades to ``[]`` (flow_not_block — the live WS quote/entry/exit
+    path never flows through this bucket).
+
+    ``wait_for_token`` (A2 WAIT-NOT-DROP pattern): the live-tick focus fetch
+    (5s cadence) uses the bounded ``BARS_ACQUIRE_TIMEOUT_SEC`` soft-cap acquire
+    below — a real wait there could stall the tick. The off-tick static-ground
+    background pass has no deadline, so it passes ``wait_for_token=True`` (a
+    REAL wait: the call blocks until a token frees rather than proceeding
+    token-less into a 429).
     """
     own = client is None
     cli = client or httpx.AsyncClient(base_url=base_url, timeout=REST_TIMEOUT_SEC)
     try:
-        resp = await cli.get(
-            f"{CAPITAL_PRICES_PATH}/{epic}",
-            params={"resolution": resolution, "max": str(limit)},
-            headers={"CST": cst, "X-SECURITY-TOKEN": security_token},
+        body = await _get_prices_with_pacing(
+            cli, epic=epic, resolution=resolution, limit=limit,
+            cst=cst, security_token=security_token,
+            wait_for_token=wait_for_token,
         )
-        resp.raise_for_status()
-        body = resp.json()
     finally:
         if own:
             await cli.aclose()
@@ -210,6 +270,54 @@ async def fetch_capital_bars(
         if bar is not None:
             out.append(bar)
     return out
+
+
+async def _get_prices_with_pacing(
+    cli: httpx.AsyncClient,
+    *,
+    epic: str,
+    resolution: str,
+    limit: int,
+    cst: str,
+    security_token: str,
+    wait_for_token: bool,
+) -> dict[str, Any]:
+    """GET ``/prices/{epic}``, paced by the bars token bucket + bounded 429 backoff.
+
+    Returns the parsed JSON body. A non-429 HTTP error or an exhausted-429 path
+    re-raises (caller degrades to ``[]``). ``wait_for_token=True`` acquires with
+    ``timeout=None`` (a real wait); ``False`` (default, live tick) bounds the
+    wait at ``BARS_ACQUIRE_TIMEOUT_SEC`` and proceeds token-less on timeout
+    (soft cap, flow_not_block).
+    """
+    params = {"resolution": resolution, "max": str(limit)}
+    headers = {"CST": cst, "X-SECURITY-TOKEN": security_token}
+    for attempt in range(BARS_RETRY_MAX + 1):
+        # Return value intentionally unused: a False (timed-out) acquire still
+        # proceeds (soft cap) rather than dropping the bar — see docstring.
+        await _BARS_BUCKET.acquire(
+            timeout=None if wait_for_token else BARS_ACQUIRE_TIMEOUT_SEC
+        )
+        resp = await cli.get(
+            f"{CAPITAL_PRICES_PATH}/{epic}", params=params, headers=headers
+        )
+        if resp.status_code == 429 and attempt < BARS_RETRY_MAX:
+            delay = _bars_retry_after_sec(
+                resp, BARS_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+            )
+            logger.info(
+                "[capital] bars 429 %s — backoff %.2fs (retry %d/%d)",
+                epic, delay, attempt + 1, BARS_RETRY_MAX,
+            )
+            await _async_sleep(delay)
+            continue
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise RuntimeError(f"Capital prices unexpected payload: {type(body).__name__}")
+        return body
+    # Unreachable: the final attempt either returns or raise_for_status raises.
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------

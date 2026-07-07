@@ -510,6 +510,7 @@ async def fetch_bars_one(
     since_ts: int | None = None,
     gpt_client_factory: Any = None,
     alpaca_multi_cache: dict[str, list[Bar]] | None = None,
+    wait_for_token: bool = False,
 ) -> list[Bar]:
     """Single-instrument bar fetch. Returns canonical Bar list (newest last).
 
@@ -550,6 +551,14 @@ async def fetch_bars_one(
     cache (Alpaca returned nothing for it) degrades to ``[]``, same as a normal
     single-fetch miss (no symbol is silently dropped from the caller's own
     accounting — the caller still iterates every requested symbol).
+
+    Capital bars 429-storm fix: ``wait_for_token`` forwards to
+    ``fetch_capital_bars``'s pacing bucket (default ``False`` — the live 5s tick
+    path uses the bounded soft-cap acquire, byte-identical behaviour). The
+    off-tick static-ground full-universe walk passes ``wait_for_token=True`` (a
+    real wait, no cadence deadline to protect) so its exotic-FX/commodity
+    exchange-fallback fan-out paces under Capital's ~10 req/s demo ceiling
+    instead of bursting past it.
     """
     # Yahoo PRIMARY — bar HISTORY only (live price WS path untouched).
     yahoo_bars = await fetch_yahoo_bars(
@@ -613,6 +622,7 @@ async def fetch_bars_one(
                 resolution=resolution,
                 limit=limit,
                 asset_class=asset_class,
+                wait_for_token=wait_for_token,
             )
         except (httpx.HTTPError, RuntimeError) as exc:
             logger.debug("[L1/capital] %s fetch failed: %r", symbol, exc)

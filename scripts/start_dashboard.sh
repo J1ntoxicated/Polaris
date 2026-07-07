@@ -20,6 +20,12 @@ cd "$POLARIS_DIR"
 
 _start_server() {
     mkdir -p data/paper
+    # Mirror the bot's virtual-account mode so the dashboard mode-banner reflects
+    # the RUNNING bot's state (botctl defaults POLARIS_VIRTUAL_ACCOUNT=1). The
+    # dashboard is a separate process; without this it read its own (empty) env
+    # and mislabelled a virtual bot as "real-venue ON". Overridable to match a
+    # non-default bot launch.
+    export POLARIS_VIRTUAL_ACCOUNT="${POLARIS_VIRTUAL_ACCOUNT:-1}"
     nohup python3 -m tools.visualizer.server --db "$DASH_DB" --port "$PORT" \
         > "$LOG" 2>&1 &
     # Wait for the port to come up (max ~10s).

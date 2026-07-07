@@ -5,6 +5,7 @@
       "name": "polaris-dashboard",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "tools.visualizer.server", "--db", "data/polaris_live.sqlite", "--port", "8770"],
+      "env": {"POLARIS_VIRTUAL_ACCOUNT": "1"},
       "port": 8770,
       "autoPort": false
     },

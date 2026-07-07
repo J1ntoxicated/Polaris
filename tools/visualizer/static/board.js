@@ -745,7 +745,7 @@
         <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span></span>`;
     return `<div title="Forward edge since the latest main-logic reset — counts only trades OPENED under the new logic (opened_ts ≥ reset @ ${esc(when)})"
         style="display:flex;gap:16px;align-items:baseline;flex-wrap:wrap;padding:5px 8px;margin-top:4px;border:1px solid rgba(95,175,255,.35);border-radius:4px;background:rgba(95,175,255,.07);font-size:13px">
-        <span style="font-weight:800;letter-spacing:.08em;color:var(--p-acc,#5fafff)">SINCE RESET</span>
+        <span style="font-weight:800;letter-spacing:.08em;color:var(--p-acc,#5fafff)">SINCE RESET</span>${d.virtual_account_enabled ? ' <span class="kk" style="color:#e0a030;font-weight:700" title="This is the pre-virtual real-venue ledger. The live measurement is the VIRTUAL $100k x 3 account strip below.">· LEGACY real-venue (pre-virtual) — see VIRTUAL $100k x 3 below</span>' : ''}
         <span class="kk" title="${esc(when)}">${lbl}${sha}</span>
         ${m('Net', `<span class="${netCls}">${fmtUsd(s.net_usd, 0)}</span>`)}
         ${m('Trades', `<span class="b-flat">${s.n || 0}</span>`)}

@@ -9,7 +9,7 @@ a trading path.
 from __future__ import annotations
 
 import sqlite3
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 from polaris.core.metrics.risk_unit import realised_r_stream
 from polaris.scripts.dashboard.snapshot_models import (
@@ -95,6 +95,63 @@ def _avg_r_by_strategy(conn: sqlite3.Connection) -> dict[str, float]:
     }
 
 
+def _strategy_class_by_id(conn: sqlite3.Connection) -> dict[str, str]:
+    """{strategy_id: strategy_class} — best-effort, ignores the venue dimension.
+
+    ``strategy_class`` is keyed ``(venue, strategy_id)`` but in practice each
+    registered strategy trades exactly one venue, so a plain ``strategy_id``
+    lookup is unambiguous for every real row (a strategy_id present under >1
+    venue keeps its FIRST row — display-only, never a sizing read). Missing
+    table / no row → absent from the map; the caller falls back to the same
+    "EARN" default ``resolve_strategy_class`` uses on a bootstrap gap."""
+    rows = _safe_query(
+        conn, "SELECT strategy_id, strategy_class FROM strategy_class"
+    )
+    out: dict[str, str] = {}
+    for strategy_id, cls in rows:
+        sid = str(strategy_id)
+        if sid not in out:
+            out[sid] = str(cls or "EARN")
+    return out
+
+
+_SIGNALS_24H_LOOKBACK_SEC: Final = 86_400
+
+
+def _signal_activity_by_strategy(
+    conn: sqlite3.Connection, *, now_s: int
+) -> dict[str, tuple[int, int]]:
+    """{strategy_id: (signals_24h, last_signal_ts)} — "why quiet" evidence.
+
+    ``signals_24h`` = distinct signal_id count in the last 24h; ``last_signal_ts``
+    = the strategy's most-recent signal ts (0 = never signalled, ANY window).
+    Two queries (24h window + all-time max) so a strategy that last fired 3 days
+    ago still shows its true last-signal age instead of a false 0. Display-only;
+    never a trading path."""
+    since = now_s - _SIGNALS_24H_LOOKBACK_SEC
+    recent_rows = _safe_query(
+        conn,
+        """SELECT strategy_id, COUNT(DISTINCT signal_id) FROM signals
+           WHERE ts >= ? GROUP BY strategy_id""",
+        (since,),
+    )
+    recent_n: dict[str, int] = {str(r[0]): int(r[1] or 0) for r in recent_rows}
+    last_rows = _safe_query(
+        conn,
+        "SELECT strategy_id, MAX(ts) FROM signals GROUP BY strategy_id",
+    )
+    out: dict[str, tuple[int, int]] = {}
+    for strategy_id, last_ts in last_rows:
+        sid = str(strategy_id)
+        out[sid] = (recent_n.get(sid, 0), int(last_ts or 0))
+    # A strategy with 24h signals but somehow missing from last_rows (shouldn't
+    # happen — MAX(ts) always covers it — kept for defensive completeness).
+    for sid, n in recent_n.items():
+        if sid not in out:
+            out[sid] = (n, now_s)
+    return out
+
+
 def _strategy_stats(
     conn: sqlite3.Connection,
     *,
@@ -142,6 +199,18 @@ def _strategy_stats(
     # so a strategy shows ONE consistent R everywhere (not a flat $10 proxy).
     # Reconciled (tracking-failure) rows are excluded (pnl_r NULL there).
     avg_r_by_strat = _avg_r_by_strategy(conn)
+    class_by_id = _strategy_class_by_id(conn)
+    signal_activity = _signal_activity_by_strategy(conn, now_s=now_s)
+
+    def _new_stat(sid: str) -> StrategyStat:
+        signals_24h, last_signal_ts = signal_activity.get(sid, (0, 0))
+        return StrategyStat(
+            strategy_id=sid, open_n=0, closed_n=0, wr_pct=0.0,
+            avg_r=0.0, pf=0.0, pnl_usd=0.0, notional_usd=0.0,
+            strategy_class=class_by_id.get(sid, "EARN"),
+            signals_24h=signals_24h, last_signal_ts=last_signal_ts,
+        )
+
     by_strat: dict[str, StrategyStat] = {}
     for r in rows:
         sid = str(r[0])
@@ -153,26 +222,29 @@ def _strategy_stats(
         wr = (wins / closed_n * 100.0) if closed_n else 0.0
         avg_r = avg_r_by_strat.get(sid, 0.0)
         pf = (net_win / net_loss) if net_loss > 0 else (net_win and 9.99 or 0.0)
-        by_strat[sid] = StrategyStat(
-            strategy_id=sid,
-            open_n=0,
-            closed_n=closed_n,
-            wr_pct=wr,
-            avg_r=avg_r,
-            pf=pf,
-            pnl_usd=pnl_total,
-            notional_usd=0.0,
-        )
+        s = _new_stat(sid)
+        s.closed_n = closed_n
+        s.wr_pct = wr
+        s.avg_r = avg_r
+        s.pf = pf
+        s.pnl_usd = pnl_total
+        by_strat[sid] = s
 
     # Layer in open-position counts + notional
     for p in positions:
-        s = by_strat.get(p.strategy_id) or StrategyStat(
-            strategy_id=p.strategy_id, open_n=0, closed_n=0, wr_pct=0.0,
-            avg_r=0.0, pf=0.0, pnl_usd=0.0, notional_usd=0.0,
-        )
+        s = by_strat.get(p.strategy_id) or _new_stat(p.strategy_id)
         s.open_n += 1
         s.notional_usd += p.size_usd
         by_strat[p.strategy_id] = s
+
+    # SIGNAL/SETUP STATE ("why quiet"): a strategy that has signalled but never
+    # traded (or hasn't in this session's fills window) still belongs on the
+    # roster — otherwise a slow-trend book with 3 signals/24h and 0 trades
+    # would silently vanish from the board instead of reading as "quiet by
+    # design". Display-only; never feeds sizing/gating.
+    for sid in signal_activity:
+        if sid not in by_strat:
+            by_strat[sid] = _new_stat(sid)
 
     out = sorted(by_strat.values(), key=lambda s: s.pnl_usd, reverse=True)
     return out

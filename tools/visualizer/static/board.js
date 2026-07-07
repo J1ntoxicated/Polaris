@@ -57,6 +57,12 @@
     font-size: 10px; letter-spacing: 0.18em; font-weight: 700;
     padding: 2px 8px; border: 1px solid var(--polaris-blue); color: var(--polaris-blue);
   }
+  /* VIRTUAL PAPER mode badge (Jin 2026-07-07) — distinct amber tone so the
+     fresh $100k×3 virtual measurement reads as a different accounting mode
+     from the legacy real-venue reconciliation badge above. */
+  #board .b-head .badge.badge-virtual {
+    border-color: var(--p-amb, #ffb84d); color: var(--p-amb, #ffb84d);
+  }
   #board .b-head .meta { color: var(--p-gry); font-size: 11px; }
   #board .b-head .meta b { color: var(--p-wht); font-weight: 700; }
   #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 14px; }
@@ -114,6 +120,27 @@
     border: 1px solid rgba(95,135,175,0.22); background: rgba(15,19,26,0.40);
     overflow: hidden;
   }
+  /* VIRTUAL ACCOUNT strip (Jin 2026-07-07) — THE profit readout: per-exchange
+     fresh $100k seed · equity now · this-week PnL · trades · sparkline. Sits
+     ABOVE the legacy streams-tbl inside the SAME #b-streams grid row (no new
+     grid track — the 6-row contract stays exact). */
+  #board .virt-strip { border-bottom: 1px solid rgba(95,135,175,0.18); }
+  #board .virt-tbl { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
+  #board .virt-tbl thead th {
+    color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.06em;
+    padding: 3px 8px; font-size: 9px; text-transform: uppercase;
+  }
+  #board .virt-tbl thead th.l { text-align: left; }
+  #board .virt-tbl tbody td { padding: 3px 8px; text-align: right; white-space: nowrap; }
+  #board .virt-tbl tbody td.l { text-align: left; font-weight: 700; letter-spacing: 0.06em; }
+  #board .virt-tbl tbody tr td:first-child { border-left: 3px solid var(--ghost); }
+  #board .virt-tbl tbody tr.lane-a td:first-child { border-left-color: var(--stream-a); }
+  #board .virt-tbl tbody tr.lane-b td:first-child { border-left-color: var(--stream-b); }
+  #board .virt-tbl tbody tr.lane-c td:first-child { border-left-color: var(--stream-c); }
+  #board .virt-tbl .virt-eq { color: var(--p-wht); font-weight: 700; }
+  #board .virt-tbl .virt-spark { text-align: left; }
+  #board .book-status { padding: 3px 8px 5px; font-size: 10px; color: var(--p-dim); border-bottom: 1px solid rgba(95,135,175,0.18); }
+  #board .book-status b { color: var(--p-gry); font-weight: 700; }
   #board .streams-tbl { width: 100%; border-collapse: collapse; font-size: 11px; table-layout: fixed; }
   #board .streams-tbl thead th {
     color: var(--p-dim); font-weight: 700; text-align: right; letter-spacing: 0.06em;
@@ -557,7 +584,7 @@
     return `
     <div class="b-head">
       <span class="title"><span class="star">★</span> POLARIS</span>
-      <span class="badge">DEMO·PAPER</span>
+      <span class="badge" id="b-mode-badge" title="">DEMO·PAPER</span>
       <span class="regime-lbl">MARKETS</span><span class="regime-tag" id="b-regime">—</span>
       <span class="meta">Watching <b id="b-focus">—</b> symbols · <b id="b-cells">—</b> mature cells (n_eff&ge;20) · refreshed <b id="b-refresh">—</b></span>
       <span class="clock" id="b-clock">--:--:--</span>
@@ -568,8 +595,14 @@
     <!-- EXCHANGE SELECTOR (E3) — scopes tabs below + globe focus (board_exchange.js). -->
     ${window.PolarisBoardExchange ? window.PolarisBoardExchange.selectorMarkup() : ''}
 
-    <!-- 3-STREAM EXCHANGE SUMMARY — always visible (stays on top). -->
-    <div class="streams-strip" id="b-streams"></div>
+    <!-- 3-STREAM EXCHANGE SUMMARY — always visible (stays on top). VIRTUAL
+         ACCOUNT (the profit readout) + book-status stack ABOVE the legacy
+         per-venue table inside this SAME grid row (no new grid track). -->
+    <div class="streams-strip" id="b-streams">
+      <div class="virt-strip" id="b-virt"></div>
+      <div class="book-status" id="b-book-status"></div>
+      <div id="b-streams-legacy"></div>
+    </div>
 
     <!-- FULL-WIDTH TAB STRIP — POSITIONS default. -->
     <div class="b-tabs" id="b-tabs">${tabBtns}</div>
@@ -616,6 +649,16 @@
       const live = freshness(d).live;
       star.classList.toggle('live', live);
       star.classList.toggle('stale', !live);
+    }
+    // MODE badge (Jin 2026-07-07) — VIRTUAL PAPER vs legacy real-venue
+    // reconciliation label, so the fresh $100k×3 virtual measurement is never
+    // confused with the old real-venue equity. Server-fed d.mode_banner.
+    const modeBadge = $('b-mode-badge');
+    if (modeBadge) {
+      const virt = !!d.virtual_account_enabled;
+      modeBadge.textContent = virt ? 'VIRTUAL PAPER · $100k×3' : 'DEMO·PAPER';
+      modeBadge.title = d.mode_banner || '';
+      modeBadge.classList.toggle('badge-virtual', virt);
     }
   }
 
@@ -819,6 +862,75 @@
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${paths}</svg>${lg}</span>`;
   }
 
+  // VIRTUAL ACCOUNT strip (Jin 2026-07-07) — THE profit readout: per-exchange
+  // fresh $100k seed, current virtual equity, this-week PnL (realized +
+  // unrealized), trades this week, and a tiny weekly-curve sparkline. Zero
+  // venue calls (internal fills ledger only, server-side). Always visible,
+  // stacked above the legacy per-venue table in the SAME grid row.
+  const VIRT_HEAD =
+    `<colgroup>
+        <col style="width:10%"><col style="width:14%"><col style="width:13%"><col style="width:13%">
+        <col style="width:9%"><col style="width:20%">
+       </colgroup><thead><tr>
+        <th class="l">VENUE</th><th>SEED &rarr; EQUITY</th><th title="realized + unrealized PnL since this week's Monday anchor">WEEK P&amp;L</th>
+        <th>WEEK TRADES</th><th>ALL-TIME</th><th class="l">WEEKLY CURVE</th>
+      </tr></thead>`;
+  function weeklySparkSvg(curve) {
+    if (!curve || curve.length < 2) return '<span class="b-flat">—</span>';
+    const W = 90, H = 20, pad = 2;
+    const mn = Math.min(...curve), mx = Math.max(...curve);
+    const up = curve[curve.length - 1] >= curve[0];
+    const stroke = up ? 'var(--p-grn)' : 'var(--p-red)';
+    const d = sparkPathShared(curve, mn, mx, W, H, pad);
+    return `<svg viewBox="0 0 ${W} ${H}" style="width:${W}px;height:${H}px;vertical-align:middle">
+      <path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+  function renderVirtualStrip(d) {
+    const el = $('b-virt');
+    if (!el) return;
+    const rows = d.streams || [];
+    if (!rows.length) { el.innerHTML = ''; return; }
+    const trs = rows.map(s => {
+      const lc = venueStream(s.venue).toLowerCase();
+      const weekPnl = (s.weekly_realized_pnl_usd || 0) + (s.weekly_unrealized_pnl_usd || 0);
+      const seed = s.virtual_seed_usd != null ? s.virtual_seed_usd : 100000;
+      const veq = s.virtual_equity_usd != null ? s.virtual_equity_usd : seed;
+      const allTime = veq - seed;
+      return `<tr class="lane-${lc}" title="${esc(s.label)} — virtual equity, zero venue calls · seed ${fmtUsd(seed, 0)}">
+        <td class="l">${esc(s.label)}</td>
+        <td class="num virt-eq">${fmtUsd(seed, 0)} → ${fmtUsd(veq, 0)}</td>
+        <td class="num ${pn(weekPnl)}" title="realized ${fmtUsd(s.weekly_realized_pnl_usd, 0)} + unrealized ${fmtUsd(s.weekly_unrealized_pnl_usd, 0)}">${fmtUsd(weekPnl, 0)}</td>
+        <td class="num b-flat">${s.weekly_trades || 0}</td>
+        <td class="num ${pn(allTime)}" title="all-time change since the $100k seed">${fmtUsd(allTime, 0)}</td>
+        <td class="virt-spark">${weeklySparkSvg(s.virtual_weekly_curve)}</td>
+      </tr>`;
+    }).join('');
+    el.innerHTML = `<table class="virt-tbl">${VIRT_HEAD}<tbody>${trs}</tbody></table>`;
+  }
+
+  // Book-status one-liner (Jin 2026-07-07) — "why quiet" at a glance, driven
+  // by strategy_stats' signal activity. Picks the most-recently-signalled
+  // strategy as the representative line; falls back to a generic note when
+  // no strategy has signalled yet (fresh boot / empty DB).
+  function renderBookStatus(d) {
+    const el = $('b-book-status');
+    if (!el) return;
+    const stats = d.strategy_stats || [];
+    if (!stats.length) {
+      el.innerHTML = '<b>Book status</b> — no strategy activity yet.';
+      return;
+    }
+    const withSignals = stats.filter(s => (s.last_signal_ts || 0) > 0);
+    if (!withSignals.length) {
+      el.innerHTML = '<b>Book status</b> — no signals yet this session.';
+      return;
+    }
+    const top = withSignals.slice().sort((a, b) => (b.last_signal_ts || 0) - (a.last_signal_ts || 0))[0];
+    const ageSec = Math.max(0, (d.ts_now || 0) - (top.last_signal_ts || 0));
+    el.innerHTML = `<b>Book status</b> — ${esc(top.strategy_id)}: ${top.signals_24h || 0} signals/24h`
+      + ` · last signal ${hms(ageSec)} ago · trades fire on setup (rare by design, not broken).`;
+  }
+
   // Per-stream summary strip — ALWAYS visible. Server-fed d.streams.
   // Bloomberg de-card (2026-06-22): each venue = ONE dense tabular row (no card
   // chrome / big padding). venue │ equity │ net PnL │ uPnL │ exposure │ open │
@@ -844,7 +956,7 @@
     return cur > prev ? 'up' : 'down';
   }
   function renderStreams(d) {
-    const el = $('b-streams');
+    const el = $('b-streams-legacy');
     if (!el) return;
     const rows = d.streams || [];
     if (!rows.length) { el.innerHTML = ''; el.__structKey = null; return; }
@@ -957,6 +1069,8 @@
     // the console instead of being swallowed by poll()'s catch.
     try { renderHeader(d); } catch (e) { console.error('[render] renderHeader', e); }
     try { renderKpis(d); } catch (e) { console.error('[render] renderKpis', e); }
+    try { renderVirtualStrip(d); } catch (e) { console.error('[render] renderVirtualStrip', e); }
+    try { renderBookStatus(d); } catch (e) { console.error('[render] renderBookStatus', e); }
     try { renderStreams(d); } catch (e) { console.error('[render] renderStreams', e); }
     try { renderFooter(d); } catch (e) { console.error('[render] renderFooter', e); }
     if (window.PolarisBoardTabs) {

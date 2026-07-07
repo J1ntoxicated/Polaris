@@ -34,6 +34,7 @@ from polaris.core.sizing.constants import (
     demo_starting_equity_okx,
     demo_starting_equity_total,
 )
+from polaris.scripts._virtual_account import virtual_account_enabled
 from polaris.scripts.dashboard.snapshot_models import (
     STARTING_CAPITAL,
     AlertRow,
@@ -231,6 +232,18 @@ def _starting_capital() -> float:
     return demo_starting_equity_total()
 
 
+def _mode_banner(virtual_on: bool) -> str:
+    """One-line plain-English mode label (Jin 2026-07-07).
+
+    Distinguishes the fresh $100k-per-exchange VIRTUAL measurement from the
+    legacy real-venue equity reconciliation (the old $157k-style number) so
+    the two are never confused on the board. Display-only.
+    """
+    if virtual_on:
+        return "VIRTUAL PAPER ACCOUNT — venue reconciliation OFF — seed $100k x 3"
+    return "DEMO/PAPER — real-venue reconciliation ON"
+
+
 def _confidence_panel(
     conn: sqlite3.Connection, *, starting_equity: float, n_cells: int = 8
 ) -> ConfidencePanel:
@@ -313,6 +326,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
     starting_okx = demo_starting_equity_okx()
     starting_capital_cap = demo_starting_equity_capital()
     starting_capital_alp = demo_starting_equity_alpaca_display()
+    virtual_on = virtual_account_enabled()
+    mode_banner = _mode_banner(virtual_on)
     if not db_path.exists():
         return DashboardSnapshot(
             ts_now=_now_s(),
@@ -322,6 +337,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             starting_capital_alpaca=starting_capital_alp,
             equity_now=starting_capital,
             peak_equity=starting_capital,
+            virtual_account_enabled=virtual_on,
+            mode_banner=mode_banner,
         )
 
     now_s = _now_s()
@@ -516,6 +533,8 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             since_reset=since_reset,
             strategy_since_reset=strategy_since_reset,
             context_intel=context_intel,
+            virtual_account_enabled=virtual_on,
+            mode_banner=mode_banner,
         )
     finally:
         conn.close()

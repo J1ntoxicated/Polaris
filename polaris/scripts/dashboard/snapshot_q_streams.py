@@ -44,6 +44,7 @@ from polaris.scripts.dashboard.snapshot_q_positions import (
     _last_prices,
     _read_positions,
 )
+from polaris.storage.virtual_account_equity import virtual_equity_now
 from polaris.storage.weekly_equity_trace import all_current_week_rows
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,12 @@ _STREAM_DISPLAY_DEFAULT: Final[tuple[str, str]] = ("?", "#9e9e9e")
 
 
 RECENT_CLOSED_PER_STREAM: Final[int] = 6  # cap of recent-closed rows per lane
+
+# VIRTUAL ACCOUNT seed (Jin 2026-07-07) — $100k per exchange, the fresh
+# measurement anchor. Distinct from the legacy real-venue starting-equity
+# constants (``demo_starting_equity_okx`` etc, the old $79k/$51k-style venue
+# split) — this is the NEW uniform per-exchange virtual seed.
+VIRTUAL_SEED_USD: Final[float] = 100_000.0
 
 
 def _recent_closed_by_venue(
@@ -401,6 +408,15 @@ def _per_stream_summary(
     # is the continuously-compounding account, untouched by the weekly row).
     weekly_by_exchange = {r.exchange: r for r in all_current_week_rows(conn, now_ts=now_s)}
 
+    # VIRTUAL ACCOUNT per exchange (Jin 2026-07-07) — the fresh $100k seed
+    # measurement (``virtual_account_equity.virtual_equity_now``), SEPARATE
+    # from the legacy real-venue ``starting`` / ``equity`` above. Zero venue
+    # calls (internal fills ledger only). THE profit readout for the board.
+    virtual_by_venue = {
+        venue: virtual_equity_now(conn, exchange=venue, seed_equity=VIRTUAL_SEED_USD)
+        for venue in ("okx", "capital", "alpaca")
+    }
+
     out: list[StreamSummary] = []
     # Stable lane order = SSOT registration order (A, B, C).
     for stream_id, cfg in STREAMS.items():
@@ -478,6 +494,23 @@ def _per_stream_summary(
                 ),
                 weekly_trades=(
                     weekly_by_exchange[venue].trades if venue in weekly_by_exchange else 0
+                ),
+                # VIRTUAL ACCOUNT (Jin 2026-07-07) — the fresh $100k-seed
+                # measurement, zero venue calls. THE profit readout.
+                virtual_seed_usd=(
+                    virtual_by_venue[venue].seed_anchor
+                    if venue in virtual_by_venue else VIRTUAL_SEED_USD
+                ),
+                virtual_equity_usd=(
+                    virtual_by_venue[venue].equity
+                    if venue in virtual_by_venue else VIRTUAL_SEED_USD
+                ),
+                virtual_weekly_curve=(
+                    [
+                        weekly_by_exchange[venue].start_equity,
+                        weekly_by_exchange[venue].current_equity,
+                    ]
+                    if venue in weekly_by_exchange else []
                 ),
             )
         )

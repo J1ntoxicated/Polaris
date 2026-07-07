@@ -831,8 +831,24 @@
         : sr
           ? `<span class="${pn(sr.net_usd)}" title="since reset: ${sr.n} trades · WR ${(sr.wr_pct || 0).toFixed(0)}% · PF ${(sr.pf >= 9.99 ? '∞' : (sr.pf || 0).toFixed(2))} · avgR ${(sr.avg_r || 0).toFixed(2)}">${fmtUsd(sr.net_usd, 0)}</span> <span class="b-flat" style="font-size:9px">n${sr.n} ${(sr.wr_pct || 0).toFixed(0)}%</span>`
           : '<span class="b-flat" title="no trade opened under new logic yet">—</span>';
+      // STRATEGY ROSTER + SIGNAL/SETUP STATE (Jin 2026-07-07) — "which edges
+      // are active + why quiet". CLASS = EARN/PROVE/BENCH (VIRTUAL mode forces
+      // EARN at sizing regardless — this shows the tracked class, not the
+      // sizing override). SIGNALS(24h) + last-signal age answer "why no
+      // trades" directly on this roster row.
+      const clsCls = s.strategy_class === 'EARN' ? 'b-pos'
+        : s.strategy_class === 'BENCH' ? 'b-neg' : 'b-flat';
+      const sig24h = s.signals_24h || 0;
+      const lastSigAge = (d.ts_now && s.last_signal_ts)
+        ? Math.max(0, d.ts_now - s.last_signal_ts) : null;
+      const lastSigHtml = lastSigAge == null
+        ? '<span class="b-flat">never</span>'
+        : `<span class="b-flat">${hms(lastSigAge)} ago</span>`;
       return `<tr>
         <td class="l tk" title="${esc(s.strategy_id)}">${esc(s.strategy_id)}</td>
+        <td class="l ${clsCls}" title="strategy_class (VIRTUAL mode sizes every signal as EARN regardless)">${esc(s.strategy_class || 'EARN')}</td>
+        <td class="num ${sig24h ? 'b-pos' : 'b-flat'}" title="distinct signals emitted in the last 24h">${sig24h}</td>
+        <td class="num" title="time since this strategy's most recent signal">${lastSigHtml}</td>
         <td class="num b-flat">${s.open_n || 0}</td>
         <td class="num b-flat">${s.closed_n || 0}</td>
         <td class="num">${(s.wr_pct || 0).toFixed(1)}%</td>
@@ -846,11 +862,14 @@
     }).join('');
     body.innerHTML = note +
       `<table><colgroup>
-        <col style="width:13%"><col style="width:5%"><col style="width:6%"><col style="width:6%">
-        <col style="width:5%"><col style="width:7%"><col style="width:9%"><col style="width:13%">
-        <col style="width:9%"><col style="width:27%">
+        <col style="width:11%"><col style="width:5%"><col style="width:6%"><col style="width:7%">
+        <col style="width:4%"><col style="width:5%"><col style="width:5%">
+        <col style="width:4%"><col style="width:6%"><col style="width:8%"><col style="width:11%">
+        <col style="width:8%"><col style="width:20%">
        </colgroup><thead><tr>
-        <th class="l">STRATEGY</th><th>OPEN</th><th>CLOSED</th><th>WR</th>
+        <th class="l">STRATEGY</th><th class="l" title="EARN/PROVE/BENCH — VIRTUAL mode sizes every signal as EARN regardless of this label">CLASS</th>
+        <th title="distinct signals emitted in the last 24h">SIGNALS(24h)</th><th title="time since this strategy's most recent signal">LAST SIGNAL</th>
+        <th>OPEN</th><th>CLOSED</th><th>WR</th>
         <th>PF</th><th title="stream-common R: pnl_usd / R_budget (2% of stream starting equity) — comparable across venues; distinct from per-trade MFE/MAE-R">AVG-R</th><th>PnL$</th>
         <th title="SINCE RESET (new logic): net$ + trade count + WR over trades OPENED after the latest main-logic reset">SINCE RESET</th>
         <th>NOTIONAL</th>

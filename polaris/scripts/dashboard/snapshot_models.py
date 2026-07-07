@@ -93,6 +93,18 @@ class StrategyStat:
     pf: float
     pnl_usd: float
     notional_usd: float
+    # STRATEGY ROSTER state (Jin 2026-07-07) — "which edges are active + how".
+    # ``strategy_class`` is EARN/PROVE/BENCH from the ``strategy_class`` table
+    # (best-effort: an unbootstrapped row defaults to "EARN", the same
+    # fail-open default ``resolve_strategy_class`` uses). VIRTUAL mode forces
+    # EARN at sizing regardless of this label (every signal becomes a real
+    # virtual trade) — this field shows the tracked class, not the sizing
+    # override. ``signals_24h`` = distinct signals emitted in the last 24h
+    # (``signals`` table). ``last_signal_ts`` = 0 when never signalled.
+    # Display-only; never feeds sizing/gating/exit.
+    strategy_class: str = "EARN"
+    signals_24h: int = 0
+    last_signal_ts: int = 0
 
 
 @dataclass(slots=True)
@@ -390,6 +402,18 @@ class StreamSummary:
     weekly_realized_pnl_usd: float = 0.0
     weekly_unrealized_pnl_usd: float = 0.0
     weekly_trades: int = 0
+    # VIRTUAL ACCOUNT (Jin 2026-07-07) — the fresh $100k-per-exchange measurement
+    # (``polaris.storage.virtual_account_equity.virtual_equity_now``), continuously
+    # compounding, SEPARATE from the legacy real-venue ``equity_usd``/
+    # ``starting_capital`` above (the old $157k-style venue reconciliation). THE
+    # profit readout Jin reads at a glance. ``virtual_seed_usd`` is $100k unless a
+    # ruin re-seed fired (then the latest reseeded_to). ``virtual_weekly_curve`` is
+    # a short recent-week end-of-day-ish equity trace for the sparkline (oldest→
+    # newest; currently just [start, current] — the weekly row is the only
+    # persisted history point). Never a venue call; never feeds sizing/gating.
+    virtual_seed_usd: float = 100_000.0
+    virtual_equity_usd: float = 100_000.0
+    virtual_weekly_curve: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -776,3 +800,12 @@ class DashboardSnapshot:
     # is "the bot's eyes" surfaced for the operator. dataclasses.asdict serializes
     # it for the web snapshot. NEVER feeds sizing/gating/exit — pure board column.
     context_intel: list[ContextIntelRow] = field(default_factory=list)
+    # VIRTUAL ACCOUNT mode banner (Jin 2026-07-07) — "is it making profit + why
+    # is it quiet" at a glance. ``virtual_account_enabled`` mirrors
+    # ``POLARIS_VIRTUAL_ACCOUNT=1`` (read once at snapshot build time, display
+    # only — never re-derives sizing behavior). ``mode_banner`` is the one-line
+    # plain-English label the board renders so the fresh $100k×3 virtual
+    # measurement is never confused with the legacy real-venue equity ($157k
+    # style) reconciliation, which is OFF in this mode. Never feeds trading.
+    virtual_account_enabled: bool = False
+    mode_banner: str = ""

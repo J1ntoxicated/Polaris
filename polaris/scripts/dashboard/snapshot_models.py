@@ -381,6 +381,15 @@ class StreamSummary:
     # that explicit rather than silently showing a live-looking number.
     marks_label: str = ""
     marks_age_sec: int = 0
+    # Weekly per-exchange trace (Jin 2026-07-07) — Monday-anchored (UTC),
+    # NON-DESTRUCTIVE (trace != reset; the running account above compounds
+    # continuously across week boundaries). "This week so far" per exchange:
+    # realized + unrealized PnL and the trade count since the current week's
+    # Monday anchor. 0.0/0 when no row exists yet this week (graceful).
+    weekly_start_equity: float = 0.0
+    weekly_realized_pnl_usd: float = 0.0
+    weekly_unrealized_pnl_usd: float = 0.0
+    weekly_trades: int = 0
 
 
 @dataclass(slots=True)

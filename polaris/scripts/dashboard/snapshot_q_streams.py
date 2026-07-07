@@ -44,6 +44,7 @@ from polaris.scripts.dashboard.snapshot_q_positions import (
     _last_prices,
     _read_positions,
 )
+from polaris.storage.weekly_equity_trace import all_current_week_rows
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,11 @@ def _per_stream_summary(
         _alpaca_marks_age_sec(conn, now_s=now_s) if alpaca_session != "rth" else 0
     )
 
+    # Weekly per-exchange trace (Jin 2026-07-07) — Monday-anchored, NON-
+    # DESTRUCTIVE (this is "this week so far" telemetry; the equity/DD above
+    # is the continuously-compounding account, untouched by the weekly row).
+    weekly_by_exchange = {r.exchange: r for r in all_current_week_rows(conn, now_ts=now_s)}
+
     out: list[StreamSummary] = []
     # Stable lane order = SSOT registration order (A, B, C).
     for stream_id, cfg in STREAMS.items():
@@ -458,6 +464,21 @@ def _per_stream_summary(
                 recent_closed=recent_closed_by_venue.get(venue, []),
                 marks_label=marks_label,
                 marks_age_sec=marks_age_sec,
+                weekly_start_equity=(
+                    weekly_by_exchange[venue].start_equity
+                    if venue in weekly_by_exchange else 0.0
+                ),
+                weekly_realized_pnl_usd=(
+                    weekly_by_exchange[venue].realized_pnl_usd
+                    if venue in weekly_by_exchange else 0.0
+                ),
+                weekly_unrealized_pnl_usd=(
+                    weekly_by_exchange[venue].unrealized_pnl_usd
+                    if venue in weekly_by_exchange else 0.0
+                ),
+                weekly_trades=(
+                    weekly_by_exchange[venue].trades if venue in weekly_by_exchange else 0
+                ),
             )
         )
     return out

@@ -7,14 +7,15 @@ Before this fix the dashboard hard-coded ``STARTING_CAPITAL = 10_000`` while
 produced bogus DD / exposure ratios. After the fix:
 
 * SSOT lives at ``polaris.core.sizing.constants``.
-* Total demo equity = OKX SPOT $79K + Capital CFD $51K = $130K.
+* Total demo equity = OKX SPOT + Capital CFD (uniform $100K seed, Jin
+  2026-07-07 measurement-start re-seed) = $200K.
 * Per-venue values exposed on ``DashboardSnapshot`` for the renderer split.
 * Env vars override (POLARIS_DEMO_STARTING_EQUITY_OKX/CAPITAL/TOTAL).
 
 P0-2 (Jin 2026-07-02): ``demo_starting_equity_total()`` now sums all 3 venues
-(OKX + Capital + Alpaca display-baseline $30,181.75) = $160,181.75. The
+(OKX + Capital + Alpaca display-baseline $30,181.75) = $230,181.75. The
 OKX+Capital-only ``TOTAL_DEMO_STARTING_EQUITY_USD`` module constant is
-unchanged ($130K, still the sizing-relevant OKX:Capital ratio anchor) —
+unchanged ($200K, still the sizing-relevant OKX:Capital ratio anchor) —
 ``_ALPACA_TOTAL`` below is the derived 3-venue expectation these tests assert.
 """
 
@@ -40,7 +41,7 @@ from polaris.core.sizing.constants import (
     production_default_equity_usd,
 )
 
-# 3-venue header total (OKX $79K + Capital $51K + Alpaca display $30,181.75).
+# 3-venue header total (OKX $100K + Capital $100K + Alpaca display $30,181.75).
 _ALPACA_TOTAL: float = TOTAL_DEMO_STARTING_EQUITY_USD + ALPACA_DISPLAY_STARTING_EQUITY_USD
 
 # ---------------------------------------------------------------------------
@@ -48,23 +49,24 @@ _ALPACA_TOTAL: float = TOTAL_DEMO_STARTING_EQUITY_USD + ALPACA_DISPLAY_STARTING_
 # ---------------------------------------------------------------------------
 
 
-def test_okx_demo_starting_equity_79k() -> None:
-    assert OKX_DEMO_STARTING_EQUITY_USD == 79_000.0
+def test_okx_demo_starting_equity_100k() -> None:
+    """Uniform $100K virtual seed (Jin 2026-07-07 measurement-start re-seed)."""
+    assert OKX_DEMO_STARTING_EQUITY_USD == 100_000.0
 
 
-def test_capital_demo_starting_equity_51k() -> None:
-    """A$78K @ ~0.654 ≈ USD $51K (per CLAUDE.md + 2026-05-07 audit)."""
-    assert CAPITAL_DEMO_STARTING_EQUITY_USD == 51_000.0
+def test_capital_demo_starting_equity_100k() -> None:
+    """Uniform $100K virtual seed (Jin 2026-07-07 measurement-start re-seed)."""
+    assert CAPITAL_DEMO_STARTING_EQUITY_USD == 100_000.0
 
 
-def test_total_demo_equity_130000() -> None:
-    """OKX+Capital constant = 130K (still the sizing-relevant ratio anchor)."""
-    assert TOTAL_DEMO_STARTING_EQUITY_USD == 130_000.0
+def test_total_demo_equity_200000() -> None:
+    """OKX+Capital constant = 200K (still the sizing-relevant ratio anchor)."""
+    assert TOTAL_DEMO_STARTING_EQUITY_USD == 200_000.0
 
 
-def test_total_demo_equity_160181_75_with_alpaca() -> None:
-    """P0-2: 3-venue header total = OKX 79K + Capital 51K + Alpaca 30,181.75."""
-    assert demo_starting_equity_total() == 160_181.75
+def test_total_demo_equity_230181_75_with_alpaca() -> None:
+    """P0-2: 3-venue header total = OKX 100K + Capital 100K + Alpaca 30,181.75."""
+    assert demo_starting_equity_total() == 230_181.75
     assert demo_starting_equity_total() == _ALPACA_TOTAL
 
 
@@ -112,7 +114,7 @@ def test_env_override_total_splits_venues_proportionally(
     # Sum invariant — the source of truth for the F12 bug (+Alpaca display leg).
     assert math.isclose(okx + cap + ALPACA_DISPLAY_STARTING_EQUITY_USD, total, abs_tol=1e-6)
     assert math.isclose(total, 200_000.0 + ALPACA_DISPLAY_STARTING_EQUITY_USD)
-    # Default ratio (79:51) is preserved so the split is recognisable.
+    # Default ratio (currently 50:50) is preserved so the split is recognisable.
     expected_okx = 200_000.0 * (
         OKX_DEMO_STARTING_EQUITY_USD / TOTAL_DEMO_STARTING_EQUITY_USD
     )
@@ -123,7 +125,7 @@ def test_env_override_okx_alone_does_not_mutate_capital(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per-venue env independence: setting only OKX env keeps the Capital
-    starting equity at its hard-coded default ($51K)."""
+    starting equity at its hard-coded default ($100K)."""
     monkeypatch.setenv("POLARIS_DEMO_STARTING_EQUITY_OKX", "100000")
     monkeypatch.delenv("POLARIS_DEMO_STARTING_EQUITY_CAPITAL", raising=False)
     monkeypatch.delenv("POLARIS_DEMO_STARTING_EQUITY_TOTAL", raising=False)
@@ -315,10 +317,11 @@ def test_dashboard_snapshot_zero_db_uses_total_base(tmp_path: Path) -> None:
 def test_dashboard_snapshot_dd_calculated_from_correct_base(
     memdb: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A close fill of -$3,500 → DD% computed off $130K base, not $10K.
+    """A close fill of -$3,500 → DD% computed off the real venue base, not $10K.
 
-    Before the F12 fix a -$3,500 close on a $10K base = 35% DD; on the
-    real $130K base = 2.69% DD. The dashboard must compute the latter.
+    Before the F12 fix a -$3,500 close on a $10K base = 35% DD; on the real
+    (uniform $100K-per-exchange) base the DD is under 5%. The dashboard must
+    compute the latter.
     """
     db_path = tmp_path / "polaris.sqlite"
     # Populate a minimal schema with one closed fill of -3,500 USD.
@@ -342,11 +345,11 @@ def test_dashboard_snapshot_dd_calculated_from_correct_base(
     from polaris.scripts.dashboard.snapshot import collect_snapshot
 
     snap = collect_snapshot(db_path=db_path)
-    # Equity ~ 160.18K - 3.5K = ~156.68K
+    # Equity ~ 230.18K - 3.5K = ~226.68K
     assert snap.starting_capital == _ALPACA_TOTAL
-    # DD must be small (-3.5K against ~160K base, NOT 35% on 10K base).
+    # DD must be small (-3.5K against ~230K base, NOT 35% on 10K base).
     assert snap.drawdown_pct < 5.0, (
-        f"DD% must be computed off $130K base; got {snap.drawdown_pct:.2f}% "
+        f"DD% must be computed off the real venue base; got {snap.drawdown_pct:.2f}% "
         f"(would be ~35% on the legacy hardcoded $10K base)"
     )
     _ = monkeypatch

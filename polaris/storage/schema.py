@@ -128,6 +128,12 @@ from polaris.storage.schema_ddl_reranker import (
     DDL_PROBE_SLOT_ASSIGNMENT,
     DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
 )
+from polaris.storage.schema_ddl_virtual import (
+    DDL_VIRTUAL_RUIN_EVENTS,
+    DDL_VIRTUAL_RUIN_EVENTS_INDEX,
+    DDL_WEEKLY_EQUITY_CURVE,
+    DDL_WEEKLY_EQUITY_CURVE_INDEX,
+)
 
 # ---------------------------------------------------------------------------
 # Paths / constants
@@ -278,6 +284,12 @@ ALL_DDL: tuple[str, ...] = (
     # snapshot of which PROVE candidates hold a track's concurrent probe slot.
     DDL_PROBE_SLOT_ASSIGNMENT,
     DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
+    # Virtual-account weekly equity trace + reset-only-on-ruin ledger
+    # (Jin 2026-07-07). TRACE != RESET — see schema_ddl_virtual.py.
+    DDL_WEEKLY_EQUITY_CURVE,
+    DDL_WEEKLY_EQUITY_CURVE_INDEX,
+    DDL_VIRTUAL_RUIN_EVENTS,
+    DDL_VIRTUAL_RUIN_EVENTS_INDEX,
 )
 
 

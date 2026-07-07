@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from polaris.storage.weekly_equity_trace import all_current_week_rows
 from tools.ops import alerting
 from tools.ops.ops_config import REJECTION_KEYWORDS, OpsConfig, iso_utc
 
@@ -49,6 +50,10 @@ class DigestData:
     venues: list[tuple[str, int, float, float]] = field(default_factory=list)
     strategies: list[tuple[str, int, float]] = field(default_factory=list)
     faults: list[tuple[str, int]] = field(default_factory=list)
+    # Weekly per-exchange VIRTUAL trace (Jin 2026-07-07) — TRACE, never RESET;
+    # this week's realized+unrealized PnL so far, per exchange. Empty when no
+    # weekly_equity_curve row exists yet for the current week (graceful).
+    weekly_pnl: list[tuple[str, float, float, int]] = field(default_factory=list)
 
 
 def _window(now: float) -> tuple[str, int, int]:
@@ -60,7 +65,8 @@ def _window(now: float) -> tuple[str, int, int]:
 
 
 def _collect(
-    conn: sqlite3.Connection, data: DigestData, start_ms: int, end_ms: int
+    conn: sqlite3.Connection, data: DigestData, start_ms: int, end_ms: int,
+    *, now_ts: int,
 ) -> None:
     start_s, end_s = start_ms // 1000, end_ms // 1000
     close_where = "is_close = 1 AND ts_ms >= ? AND ts_ms < ?"
@@ -125,6 +131,13 @@ def _collect(
     data.open_positions = int(conn.execute(
         "SELECT COUNT(*) FROM positions WHERE status = 'open'",
     ).fetchone()[0])
+    # Weekly per-exchange VIRTUAL trace (Jin 2026-07-07) — TRACE, never RESET;
+    # "this week so far" per exchange, read at generation time (not the
+    # yesterday-UTC window above). Graceful empty when no row exists yet.
+    data.weekly_pnl = [
+        (r.exchange, r.realized_pnl_usd, r.unrealized_pnl_usd, r.trades)
+        for r in all_current_week_rows(conn, now_ts=now_ts)
+    ]
 
 
 def _read_ops_files(cfg: OpsConfig, data: DigestData) -> None:
@@ -189,6 +202,15 @@ def render(data: DigestData) -> str:
     if data.faults:
         lines += ["", "## Faults by type", "| fault_type | count |", "| --- | --- |"]
         lines += [f"| {t} | {n} |" for t, n in data.faults]
+    if data.weekly_pnl:
+        # VIRTUAL account weekly trace (Jin 2026-07-07) — TRACE, never RESET;
+        # this week so far, per exchange (realized + unrealized).
+        lines += ["", "## Weekly virtual PnL (this week so far, per exchange)",
+                  "| exchange | realized_usd | unrealized_usd | trades |",
+                  "| --- | --- | --- | --- |"]
+        lines += [
+            f"| {e} | {r:+.2f} | {u:+.2f} | {t} |" for e, r, u, t in data.weekly_pnl
+        ]
     if len(lines) > MAX_LINES:  # defensive — section caps already guarantee this
         lines = lines[: MAX_LINES - 1] + ["(truncated)"]
     return "\n".join(lines) + "\n"
@@ -234,7 +256,7 @@ def run(cfg: OpsConfig, *, now: float | None = None) -> int:
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
-        _collect(conn, data, start_ms, end_ms)
+        _collect(conn, data, start_ms, end_ms, now_ts=int(now_f))
     except sqlite3.Error as exc:
         out_path.write_text(
             "---\n"

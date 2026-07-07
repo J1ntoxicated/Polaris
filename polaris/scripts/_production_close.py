@@ -62,6 +62,7 @@ from polaris.scripts._production_close_helpers import (
     close_pnl_usd_total,
     real_pnl_r_from_fills,
 )
+from polaris.scripts._production_close_virtual import safe_update_virtual_trace
 from polaris.scripts._smoke_fills import SimulatedTrade, simulate_close
 from polaris.scripts._smoke_real_roundtrip import (
     CloseOrphan,
@@ -920,7 +921,7 @@ async def _close_trade_with_real_pnl(
     # partial-then-full close, so partial folds + this fold sum to exactly ONE
     # whole-position fold — no double-count). ``gross_pnl_usd`` is already this
     # slice's pnl_usd, so the R and $ folded here are consistent.
-    _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
+    pnl_usd_net, pnl_r_net = compute_net_pnl_r(
         conn, trade=trade, gross_pnl_r=final_slice_pnl_r, gross_pnl_usd=pnl_usd,
     )
     won = pnl_r_net > 0.0
@@ -998,6 +999,12 @@ async def _close_trade_with_real_pnl(
     _safe_update_posterior(
         conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net,
         pnl_r_gross=final_slice_pnl_r, now_ts=now_ts,
+    )
+    # VIRTUAL ACCOUNT (Jin 2026-07-07): weekly per-exchange trace (TRACE, never
+    # RESET — the account compounds continuously) + reset-only-on-ruin check.
+    # Measurement hygiene only — never blocks/skips a trade. Fail-open inside.
+    safe_update_virtual_trace(
+        conn, trade=trade, pnl_usd_net=pnl_usd_net, now_ts=now_ts,
     )
     # FIX 1 — G8 post-trade reflector folds the SAME net R + net ``won`` as the
     # cell/learners/posterior so the reflection lesson is fee-coherent (a gross R

@@ -204,11 +204,12 @@ def test_realised_r_clamped_at_100() -> None:
 
 
 def test_r_budget_is_base_risk_pct_times_starting_equity() -> None:
-    # OKX 79k, Capital 51k → 2% each. (Default env-free constants.)
-    assert r_budget_for_stream("A_okx_crypto") == pytest.approx(BASE_RISK_PCT * 79_000.0)
-    assert r_budget_for_stream("B_capital_cfd") == pytest.approx(BASE_RISK_PCT * 51_000.0)
-    assert r_budget_for_stream("A_okx_crypto") == pytest.approx(1_580.0)
-    assert r_budget_for_stream("B_capital_cfd") == pytest.approx(1_020.0)
+    # OKX 100k, Capital 100k → 2% each (uniform $100k virtual seed, Jin
+    # 2026-07-07). (Default env-free constants.)
+    assert r_budget_for_stream("A_okx_crypto") == pytest.approx(BASE_RISK_PCT * 100_000.0)
+    assert r_budget_for_stream("B_capital_cfd") == pytest.approx(BASE_RISK_PCT * 100_000.0)
+    assert r_budget_for_stream("A_okx_crypto") == pytest.approx(2_000.0)
+    assert r_budget_for_stream("B_capital_cfd") == pytest.approx(2_000.0)
 
 
 def test_r_budget_alpaca_has_deterministic_fallback() -> None:

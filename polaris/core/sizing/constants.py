@@ -12,11 +12,16 @@ the production pipeline used ``EQUITY_USD_DEMO_DEFAULT = 79_000``. That
 mismatch produced bogus dashboard DD / exposure ratios (e.g. -127% DD on a
 $3.5K loss because base was wrongly $10K instead of $130K).
 
-Demo-account split (per CLAUDE.md + 2026-05-07 audit):
+Demo-account split — UNIFORM $100k-per-exchange virtual seed (Jin 2026-07-07,
+post B1-prune + R-ruler measurement start). This is the VIRTUAL ACCOUNT SIZE
+only — the T4 sizing formula/caps/amplifiers/cell-mults are unchanged; they
+scale off whichever equity value is passed in, same as before. Learning
+aggregates (cell_matrix / learners) are untouched — only the balance re-seeds.
 
-* OKX SPOT demo  : USD $79,000           (env: ``POLARIS_DEMO_STARTING_EQUITY_OKX``)
-* Capital CFD    : A$78,000 ≈ USD $51,000 (env: ``POLARIS_DEMO_STARTING_EQUITY_CAPITAL``)
-* Total          : USD $130,000          (env: ``POLARIS_DEMO_STARTING_EQUITY_TOTAL``)
+* OKX SPOT demo  : USD $100,000 (env: ``POLARIS_DEMO_STARTING_EQUITY_OKX``)
+* Capital CFD    : USD $100,000 (env: ``POLARIS_DEMO_STARTING_EQUITY_CAPITAL``)
+* Alpaca paper   : USD $100,000 (env: ``POLARIS_DEMO_STARTING_EQUITY_ALPACA``)
+* Total          : USD $300,000 (env: ``POLARIS_DEMO_STARTING_EQUITY_TOTAL``)
 
 Per-venue overrides resolve in priority order:
     1. Per-venue env var (``POLARIS_DEMO_STARTING_EQUITY_OKX|CAPITAL``)
@@ -47,8 +52,8 @@ __all__ = [
     "production_default_equity_usd",
 ]
 
-OKX_DEMO_STARTING_EQUITY_USD: Final[float] = 79_000.0
-CAPITAL_DEMO_STARTING_EQUITY_USD: Final[float] = 51_000.0
+OKX_DEMO_STARTING_EQUITY_USD: Final[float] = 100_000.0
+CAPITAL_DEMO_STARTING_EQUITY_USD: Final[float] = 100_000.0
 TOTAL_DEMO_STARTING_EQUITY_USD: Final[float] = (
     OKX_DEMO_STARTING_EQUITY_USD + CAPITAL_DEMO_STARTING_EQUITY_USD
 )
@@ -96,7 +101,9 @@ def _read_float_env(name: str) -> float | None:
 
 
 def _split_default_ratio(total: float) -> tuple[float, float]:
-    """Split a total across OKX / Capital using the default 79:51 ratio."""
+    """Split a total across OKX / Capital using the default ratio (50:50 as of
+    the 2026-07-07 uniform $100k-per-exchange seed; ratio-derived so a TOTAL
+    override still splits proportionally to the current constants)."""
     default_ratio_okx = OKX_DEMO_STARTING_EQUITY_USD / TOTAL_DEMO_STARTING_EQUITY_USD
     okx = total * default_ratio_okx
     cap = total - okx

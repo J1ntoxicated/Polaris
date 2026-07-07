@@ -16,7 +16,7 @@ import sqlite3
 
 import pytest
 
-from polaris.core.metrics.risk_unit import realised_r_stream
+from polaris.core.metrics.risk_unit import r_budget_for_venue, realised_r_stream
 from polaris.scripts.dashboard.snapshot_queries import (
     _avg_r_by_strategy,
     _closed_position_r,
@@ -24,6 +24,8 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _strategy_stats,
     _ticker_stats,
 )
+
+_OKX_BUDGET = r_budget_for_venue("okx")
 
 
 def _seed(
@@ -71,10 +73,10 @@ def _seed(
 def test_r_aggregations_ignore_stored_pnl_r_use_fills(memdb: sqlite3.Connection) -> None:
     # Stored pnl_r is -999 (legacy garbage); the read path must re-derive from
     # fills.pnl_usd / R_budget(venue), NOT trust the stored value.
-    _seed(memdb, pid="p1", venue="okx", symbol="BTC", strategy="tsmom", pnl_usd=1580.0)
+    _seed(memdb, pid="p1", venue="okx", symbol="BTC", strategy="tsmom", pnl_usd=_OKX_BUDGET)
     rows = _closed_position_r(memdb)
     assert len(rows) == 1
-    assert rows[0].r == pytest.approx(1.0)  # 1580 / 1580, not -999
+    assert rows[0].r == pytest.approx(1.0)  # 1R / 1R, not -999
     assert _avg_r_by_strategy(memdb)["tsmom"] == pytest.approx(1.0)
     assert _ticker_stats(memdb, now_s=3000)[0].sum_r == pytest.approx(1.0)
 
@@ -88,10 +90,10 @@ def test_same_dollar_loss_comparable_r_across_venues(memdb: sqlite3.Connection) 
 
 
 def test_reconciled_excluded_from_every_r_surface(memdb: sqlite3.Connection) -> None:
-    _seed(memdb, pid="ok", venue="okx", symbol="BTC", strategy="s", pnl_usd=1580.0)
+    _seed(memdb, pid="ok", venue="okx", symbol="BTC", strategy="s", pnl_usd=_OKX_BUDGET)
     # A reconciled tracking-failure with a big loss fill — must NOT enter R/PF.
     _seed(memdb, pid="rec", venue="okx", symbol="DOGE", strategy="s",
-          pnl_usd=-31600.0, status="reconciled")
+          pnl_usd=-20 * _OKX_BUDGET, status="reconciled")
 
     # _closed_position_r (the shared source) excludes it.
     syms = {r.symbol for r in _closed_position_r(memdb)}

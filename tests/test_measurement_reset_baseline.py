@@ -147,24 +147,25 @@ def test_since_reset_counts_only_post_reset_opened(memdb: sqlite3.Connection) ->
     stamp_measurement_reset(memdb, label="W4", git_sha="sha",
                             reset_ts=5000, equity_baseline_usd=160_000.0)
     # POST-reset trades (opened_ts >= 5000) — the new-logic edge.
-    _seed_trade(memdb, pid="new1", pnl_usd=3160.0, opened_ts=6000)   # +2R win
-    _seed_trade(memdb, pid="new2", pnl_usd=1580.0, opened_ts=7000)   # +1R win
-    _seed_trade(memdb, pid="new3", pnl_usd=-1580.0, opened_ts=8000)  # −1R loss
+    _seed_trade(memdb, pid="new1", pnl_usd=2 * _OKX_BUDGET, opened_ts=6000)   # +2R win
+    _seed_trade(memdb, pid="new2", pnl_usd=1 * _OKX_BUDGET, opened_ts=7000)   # +1R win
+    _seed_trade(memdb, pid="new3", pnl_usd=-1 * _OKX_BUDGET, opened_ts=8000)  # −1R loss
 
     roll = _since_reset_rollup(memdb)
     assert roll is not None
     # Only the 3 new-logic trades counted (old1/old2 excluded by opened_ts).
     assert roll.n == 3
-    # net$ = Σ close pnl − Σ fee, over the post-reset window = 3160+1580−1580 = 3160
-    assert roll.net_usd == pytest.approx(3160.0)
+    # net$ = Σ close pnl − Σ fee, over the post-reset window = (2+1−1) × R_budget
+    expected_net = 2 * _OKX_BUDGET
+    assert roll.net_usd == pytest.approx(expected_net)
     # win% = 2/3.
     assert roll.win_pct == pytest.approx(2 / 3 * 100.0)
-    # PF = gross_win / gross_loss = (3160+1580)/1580 = 3.0.
+    # PF = gross_win / gross_loss = (2+1)R / 1R = 3.0.
     assert roll.pf == pytest.approx(3.0)
     # avg_r = mean(stream-common R) = mean(+2, +1, −1) = +0.6667R.
     assert roll.avg_r == pytest.approx((2.0 + 1.0 - 1.0) / 3.0, abs=1e-3)
     # equity_change = net$ over the window (baseline + net$ = new equity).
-    assert roll.equity_change_usd == pytest.approx(3160.0)
+    assert roll.equity_change_usd == pytest.approx(expected_net)
     assert roll.reset_ts == 5000
     assert roll.label == "W4"
 

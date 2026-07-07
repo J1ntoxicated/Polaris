@@ -177,6 +177,28 @@ def test_golden_output(cfg: OpsConfig) -> None:
     )
 
 
+def test_weekly_virtual_pnl_section_renders_when_present(cfg: OpsConfig) -> None:
+    """Weekly per-exchange VIRTUAL trace (Jin 2026-07-07) — TRACE, never RESET;
+    a stamped ``weekly_equity_curve`` row for the CURRENT week (at generation
+    time, ``NOW``) surfaces as a digest section. Absent when no row exists
+    (the golden-output test above stays byte-identical)."""
+    _golden_db(cfg)
+    conn = sqlite3.connect(cfg.db_path)
+    from polaris.storage.weekly_equity_trace import upsert_weekly_row
+
+    upsert_weekly_row(
+        conn, exchange="okx", now_ts=int(NOW), account_equity=100_250.0,
+        realized_pnl_delta_usd=250.0, unrealized_pnl_usd=15.0, trade_delta=2,
+    )
+    conn.commit()
+    conn.close()
+
+    assert daily_digest.run(cfg, now=NOW) == 0
+    out = (cfg.digest_dir / "2026-06-09.md").read_text(encoding="utf-8")
+    assert "## Weekly virtual PnL (this week so far, per exchange)" in out
+    assert "| okx | +250.00 | +15.00 | 2 |" in out
+
+
 def test_net_headline_survives_entry_leg_fee_2026_06_30_case(cfg: OpsConfig) -> None:
     """audit2 P0-2 ①: 2026-06-30-style case — small +gross close pnl masked a real
     round-trip-fee loss because the entry leg's fee was never summed. Repro:

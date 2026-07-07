@@ -92,17 +92,19 @@ def _portfolio(equity_usd: float, *, track: str = "A") -> PortfolioState:
 def test_low_vs_high_continuous_scalar_yield_different_notional(
     memdb: sqlite3.Connection,
 ) -> None:
-    # base_risk_pct=0.055 mirrors the audit scenario: weak (cont=0.75) prices
-    # BELOW the old $5,000 clamp, strong (cont=1.50) prices ABOVE it (and
-    # below the 0.09×equity absolute ceiling, so neither hits a DIFFERENT
-    # cap — the divergence is purely the continuous scalar doing its job).
+    # base_risk_pct=0.043 mirrors the audit scenario (re-tuned for the
+    # 2026-07-07 $100k uniform virtual seed, was 0.055 @ $79k): weak
+    # (cont=0.75) prices BELOW the old $5,000 clamp, strong (cont=1.50)
+    # prices ABOVE it (and below the 0.09×equity absolute ceiling, so
+    # neither hits a DIFFERENT cap — the divergence is purely the
+    # continuous scalar doing its job).
     weak = compute_size(
-        memdb, intent=_intent(signal_strength=0.5, base_risk_pct=0.055),  # cont floor 0.75
+        memdb, intent=_intent(signal_strength=0.5, base_risk_pct=0.043),  # cont floor 0.75
         risk_state=_risk_state(), portfolio=_portfolio(OKX_DEMO_STARTING_EQUITY_USD),
         now_ts=NOW,
     )
     strong = compute_size(
-        memdb, intent=_intent(signal_strength=1.5, base_risk_pct=0.055),  # cont ceiling 1.50
+        memdb, intent=_intent(signal_strength=1.5, base_risk_pct=0.043),  # cont ceiling 1.50
         risk_state=_risk_state(), portfolio=_portfolio(OKX_DEMO_STARTING_EQUITY_USD),
         now_ts=NOW,
     )
@@ -173,7 +175,12 @@ def test_equity_usd_for_venue_dispatches_per_venue(
 def test_capital_notional_uses_capital_equity_not_okx(
     memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # OKX and Capital are both $100k by default (uniform virtual seed, Jin
+    # 2026-07-07) — force them apart via env so this stays a real dispatch
+    # test (Capital sizes off ITS OWN equity, not a coincidentally-equal
+    # OKX figure) rather than a vacuous "not equal" check.
     monkeypatch.delenv("POLARIS_EQUITY_USD", raising=False)
+    monkeypatch.setenv("POLARIS_DEMO_STARTING_EQUITY_OKX", "79000")
     leverage = 20.0  # Capital index/commodity fallback leverage tier
     capital_equity = equity_usd_for_venue("capital")
     assert capital_equity == pytest.approx(CAPITAL_DEMO_STARTING_EQUITY_USD)
@@ -187,9 +194,9 @@ def test_capital_notional_uses_capital_equity_not_okx(
     assert sized.final_notional_usd == pytest.approx(
         sized.final_risk_pct * CAPITAL_DEMO_STARTING_EQUITY_USD * leverage
     )
-    # Sanity: NOT sized against the OKX figure.
+    # Sanity: NOT sized against the (deliberately different, env-forced) OKX figure.
     assert sized.final_notional_usd != pytest.approx(
-        sized.final_risk_pct * OKX_DEMO_STARTING_EQUITY_USD * leverage
+        sized.final_risk_pct * 79_000.0 * leverage
     )
 
 
@@ -275,10 +282,14 @@ async def test_reserve_and_submit_notional_not_clamped_to_5000(
 async def test_pipeline_threads_venue_aware_equity_into_sizer_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Capital-venue signal must size against the Capital $51,000 demo
-    balance, not the OKX $79,000 figure (P1-7)."""
+    """A Capital-venue signal must size against the Capital demo balance,
+    not the OKX figure (P1-7). OKX and Capital are both $100k by default
+    (uniform virtual seed, Jin 2026-07-07) — force OKX apart via env so
+    this stays a real dispatch test rather than a vacuous "not equal"
+    check on two coincidentally-equal constants."""
     conn = _pipe_conn()
     monkeypatch.delenv("POLARIS_EQUITY_USD", raising=False)
+    monkeypatch.setenv("POLARIS_DEMO_STARTING_EQUITY_OKX", "79000")
     captured: dict[str, Any] = {}
     real_build_sizer_payload = run_signal_mod.build_sizer_payload
 
@@ -306,4 +317,4 @@ async def test_pipeline_threads_venue_aware_equity_into_sizer_payload(
         phase="P0",
     )
     assert captured["equity_usd"] == pytest.approx(CAPITAL_DEMO_STARTING_EQUITY_USD)
-    assert captured["equity_usd"] != pytest.approx(OKX_DEMO_STARTING_EQUITY_USD)
+    assert captured["equity_usd"] != pytest.approx(79_000.0)

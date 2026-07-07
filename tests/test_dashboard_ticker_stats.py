@@ -55,12 +55,12 @@ def _closed(
 
 def test_ticker_stats_stream_common_r_worst_first(memdb: sqlite3.Connection) -> None:
     # $ outcomes per symbol → R = pnl_usd / R_budget(okx).
-    _closed(memdb, pid="p1", symbol="BTC", pnl_usd=3160.0)   # +2R
-    _closed(memdb, pid="p2", symbol="BTC", pnl_usd=1580.0)   # +1R
-    _closed(memdb, pid="p3", symbol="ETH", pnl_usd=-7900.0)  # −5R
+    _closed(memdb, pid="p1", symbol="BTC", pnl_usd=2 * _OKX_BUDGET)   # +2R
+    _closed(memdb, pid="p2", symbol="BTC", pnl_usd=1 * _OKX_BUDGET)   # +1R
+    _closed(memdb, pid="p3", symbol="ETH", pnl_usd=-5 * _OKX_BUDGET)  # −5R
     # reconciled (tracking failure) must be EXCLUDED from the R ledger — even with
     # a close fill carrying $, its status gates it out of the JOIN.
-    _closed(memdb, pid="p4", symbol="DOGE", pnl_usd=-31600.0, status="reconciled")
+    _closed(memdb, pid="p4", symbol="DOGE", pnl_usd=-20 * _OKX_BUDGET, status="reconciled")
     # open + no close fill must be EXCLUDED.
     _closed(memdb, pid="p5", symbol="SOL", pnl_usd=0.0, status="open",
             with_close_fill=False)
@@ -70,7 +70,7 @@ def test_ticker_stats_stream_common_r_worst_first(memdb: sqlite3.Connection) -> 
 
     assert "SOL" not in by_sym
     assert "DOGE" not in by_sym  # reconciled excluded from R aggregation
-    assert by_sym["BTC"].sum_r == pytest.approx(3.0)  # (3160+1580)/1580
+    assert by_sym["BTC"].sum_r == pytest.approx(3.0)  # (2R+1R)/1R
     assert by_sym["BTC"].n == 2
     assert by_sym["BTC"].wr_pct == pytest.approx(100.0)
     assert by_sym["ETH"].sum_r == pytest.approx(-5.0)
@@ -91,10 +91,10 @@ def test_ticker_stats_comparable_across_venues(memdb: sqlite3.Connection) -> Non
 
 def test_avg_r_by_strategy_stream_common(memdb: sqlite3.Connection) -> None:
     # Two strategies, mean stream-common R per strategy; reconciled excluded.
-    _closed(memdb, pid="a1", symbol="BTC", pnl_usd=1580.0, strategy="tsmom")   # +1R
-    _closed(memdb, pid="a2", symbol="ETH", pnl_usd=4740.0, strategy="tsmom")   # +3R
-    _closed(memdb, pid="b1", symbol="SOL", pnl_usd=-1580.0, strategy="rsi")    # −1R
-    _closed(memdb, pid="r1", symbol="DOGE", pnl_usd=-9999.0, strategy="tsmom",
+    _closed(memdb, pid="a1", symbol="BTC", pnl_usd=1 * _OKX_BUDGET, strategy="tsmom")   # +1R
+    _closed(memdb, pid="a2", symbol="ETH", pnl_usd=3 * _OKX_BUDGET, strategy="tsmom")   # +3R
+    _closed(memdb, pid="b1", symbol="SOL", pnl_usd=-1 * _OKX_BUDGET, strategy="rsi")    # −1R
+    _closed(memdb, pid="r1", symbol="DOGE", pnl_usd=-6.33 * _OKX_BUDGET, strategy="tsmom",
             status="reconciled")
     avg = _avg_r_by_strategy(memdb)
     assert avg["tsmom"] == pytest.approx(2.0)   # mean(1, 3) — reconciled excluded

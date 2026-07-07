@@ -500,6 +500,23 @@
          /api/ai_activity (own endpoint, fetched once per activation). -->
     <div class="tab-pane" id="pane-ai">
       <div class="tab-grid-1">${collapsiblePanel('AI · in-loop trading=0 · dev debates (GPT/Gemini) · probe escalation (observe)', 'ai-activity-body', 'mini')}</div>
+    </div>
+
+    <!-- TAB · LEGACY (Jin 2026-07-07 virtual-primary restructure) — the
+         pre-virtual real-venue accounting, demoted out of the always-visible
+         header/strip so the VIRTUAL $100k×3 account is the unambiguous
+         primary view. Mounts the SAME markup/renderers the header used to
+         show (legacy money-metrics headline + SINCE RESET + the legacy
+         per-venue streams table) — only reachable via this tab, and only
+         populated while virtual mode is ON (board_tabs_ext.js gates it). -->
+    <div class="tab-pane" id="pane-legacy">
+      <div class="tab-grid-1">
+        <div class="panel">
+          <div class="p-head"><span>Legacy · pre-virtual real-venue accounting</span></div>
+          <div class="p-body mini" id="legacy-kpi-body"></div>
+          <div class="p-body" id="legacy-streams-body"></div>
+        </div>
+      </div>
     </div>`;
   }
 
@@ -525,6 +542,7 @@
     setCnt('tabcnt-path', '');
     setCnt('tabcnt-learned', '');
     setCnt('tabcnt-ai', '');   // own endpoint (/api/ai_activity), not the snapshot
+    setCnt('tabcnt-legacy', '');   // pre-virtual real-venue accounting, no live count
   }
 
   // ── TAB 1 · POSITIONS (expanded columns, flashing CURRENT price) ──────────

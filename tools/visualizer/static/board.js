@@ -571,6 +571,14 @@
     { id: 'ai', label: 'AI' },
     { id: 'chart', label: 'Chart' },
     { id: 'weekend', label: 'Weekend' },
+    // LEGACY (Jin 2026-07-07 virtual-primary restructure): pre-virtual
+    // real-venue accounting (SINCE RESET + $227k-style equity headline +
+    // peak/drawdown/PF + the legacy per-venue streams table), demoted out of
+    // the always-visible header/strip into its own tab so the VIRTUAL $100k×3
+    // account is the unambiguous primary view. Real mode (virtual OFF) never
+    // renders into this pane — the legacy content stays in its original
+    // header/strip spot, byte-identical to before this change.
+    { id: 'legacy', label: 'Legacy' },
   ];
 
   function skeleton() {
@@ -755,18 +763,51 @@
       </div>`;
   }
 
-  function renderKpis(d) {
-    const el = $('b-kpis'); if (!el) return;
-    el.style.display = 'block';
-    // P0-4 ③: WINNING/LOSING + the headline PF/win-rate judge off the SAME
-    // ledger the SINCE RESET line shows (since_reset.pf, both legs net of fee) —
-    // not the all-time confidence panel (a stale pre-reset PF used to disagree
-    // with the SINCE RESET line on the same screen). Falls back to all-time
-    // confidence only when no reset has been stamped yet (since_reset is null).
+  // Legacy real-venue KPI metrics (Equity $227k-style headline / Today /
+  // Session / Win rate / Profit factor / Max drawdown) + the SINCE RESET line.
+  // Jin 2026-07-07 virtual-primary restructure: this is the pre-virtual
+  // real-venue ledger. In REAL mode (virtual OFF) it stays the header's
+  // primary content (byte-identical to before this change). In VIRTUAL mode it
+  // is demoted into the LEGACY tab (board_tabs.js mounts '#legacy-kpi-body')
+  // so the VIRTUAL $100k×3 strip is the unambiguous headline.
+  function legacyKpiHtml(d, health) {
     const c = d.confidence || {};
     const sr = d.since_reset || null;
     const pf = sr ? sr.pf : c.profit_factor;
     const wr = sr ? sr.win_pct : c.win_rate_pct;
+    const start = d.starting_capital || 0;
+    const dayPct = start ? (d.daily_pnl_usd / start) * 100 : null;
+    const sessionPct = start ? (d.session_pnl_usd / start) * 100 : null;
+    const sessionDiffers = Math.abs((d.session_pnl_usd || 0) - (d.daily_pnl_usd || 0)) > 0.005;
+    const profitable = (pf != null && pf >= 1);
+    const pfTag = (pf == null) ? ''
+      : profitable
+        ? '<span class="b-pos" style="font-size:9px;letter-spacing:.1em">profitable</span>'
+        : '<span class="b-neg" style="font-size:9px;letter-spacing:.1em">losing</span>';
+    const metric = (label, valHtml, tag) =>
+      `<span style="display:inline-flex;align-items:baseline;gap:6px">
+        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span>${tag ? ' ' + tag : ''}</span>`;
+    const metrics =
+      `<div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);font-size:13px">
+        ${metric('Equity', `<span title="OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees"><span class="b-flat">${fmtUsd(d.equity_now, 0)}</span> <span class="kk">demo</span> · <span class="${(start && d.equity_now_real_fee_net >= start) ? 'b-pos' : 'b-neg'}" style="font-weight:700">${fmtUsd(d.equity_now_real_fee_net, 0)}</span> <span class="kk">real-fee-net</span></span>`)}
+        ${metric('Today', `<span title="AEST-midnight-floored — resets daily" class="${pn(d.daily_pnl_usd)}">${fmtUsd(d.daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
+        ${sessionDiffers ? metric('Session', `<span title="whole bot-uptime sum — not reset daily" class="${pn(d.session_pnl_usd)}">${fmtUsd(d.session_pnl_usd, 0)}${sessionPct == null ? '' : ' (' + fmtSignedPct(sessionPct, 2) + ')'}</span>`) : ''}
+        ${metric('Win rate', `<span class="b-flat">${wr == null ? '—' : wr.toFixed(0) + '%'}</span>`)}
+        ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
+        ${metric('Max drawdown', `<span class="b-neg" title="measured on the demo-fee curve (70bps demo fee, not the 10bps real-fee-net curve)">-${fmtPct(d.drawdown_pct, 1)}</span> <span class="kk">demo-fee curve</span>`)}
+      </div>`;
+    return (health || '') + sinceResetHtml(d) + metrics;
+  }
+
+  function renderKpis(d) {
+    const el = $('b-kpis'); if (!el) return;
+    el.style.display = 'block';
+    // P0-4 ③: WINNING/LOSING judged off the SAME ledger the SINCE RESET line
+    // shows (since_reset.pf) — not the all-time confidence panel. Falls back
+    // to all-time confidence only when no reset has been stamped yet.
+    const c = d.confidence || {};
+    const sr = d.since_reset || null;
+    const pf = sr ? sr.pf : c.profit_factor;
     // Regime is per-instrument (60 markets). Show the dominant share + a full
     // per-market breakdown on hover, never a single global label.
     const rdist = regimeDist(d);
@@ -777,19 +818,7 @@
     const marketTitle = rdist
       ? 'Per-instrument: ' + rdist.parts.join(', ') + ' (' + rdist.total + ' markets)'
       : '';
-    // today's % vs starting capital (snapshot carries no daily_pnl_pct).
-    const start = d.starting_capital || 0;
-    const dayPct = start ? (d.daily_pnl_usd / start) * 100 : null;
-    // SESSION (whole-uptime sum) vs Today (AEST-midnight-floored) — P0-2. Shown
-    // only when they diverge (multi-day uptime) so the common single-day case
-    // stays uncluttered.
-    const sessionPct = start ? (d.session_pnl_usd / start) * 100 : null;
-    const sessionDiffers = Math.abs((d.session_pnl_usd || 0) - (d.daily_pnl_usd || 0)) > 0.005;
     const profitable = (pf != null && pf >= 1);
-    const pfTag = (pf == null) ? ''
-      : profitable
-        ? '<span class="b-pos" style="font-size:9px;letter-spacing:.1em">profitable</span>'
-        : '<span class="b-neg" style="font-size:9px;letter-spacing:.1em">losing</span>';
     // (j-i) HEALTH one-liner — Bot LIVE/STALE by tick freshness · winning/losing
     //       · anomaly count. (j-ii) state colour: winning green / losing red.
     const fr = freshness(d);
@@ -816,23 +845,13 @@
         <span title="${esc(marketTitle)}"><span class="kk">Markets</span> <span style="color:var(--p-wht);font-weight:700">${esc(market)}</span></span>
         <span style="margin-left:auto"><span class="kk">Updated</span> <span class="b-flat" id="b-kpi-clock">${clockStr()}</span></span>
       </div>`;
-    const metric = (label, valHtml, tag) =>
-      `<span style="display:inline-flex;align-items:baseline;gap:6px">
-        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span>${tag ? ' ' + tag : ''}</span>`;
-    const metrics =
-      `<div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);font-size:13px">
-        ${metric('Equity', `<span title="OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees"><span class="b-flat">${fmtUsd(d.equity_now, 0)}</span> <span class="kk">demo</span> · <span class="${(start && d.equity_now_real_fee_net >= start) ? 'b-pos' : 'b-neg'}" style="font-weight:700">${fmtUsd(d.equity_now_real_fee_net, 0)}</span> <span class="kk">real-fee-net</span></span>`)}
-        ${metric('Today', `<span title="AEST-midnight-floored — resets daily" class="${pn(d.daily_pnl_usd)}">${fmtUsd(d.daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
-        ${sessionDiffers ? metric('Session', `<span title="whole bot-uptime sum — not reset daily" class="${pn(d.session_pnl_usd)}">${fmtUsd(d.session_pnl_usd, 0)}${sessionPct == null ? '' : ' (' + fmtSignedPct(sessionPct, 2) + ')'}</span>`) : ''}
-        ${metric('Win rate', `<span class="b-flat">${wr == null ? '—' : wr.toFixed(0) + '%'}</span>`)}
-        ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : pf.toFixed(2)}</span>`, pfTag)}
-        ${metric('Max drawdown', `<span class="b-neg" title="measured on the demo-fee curve (70bps demo fee, not the 10bps real-fee-net curve)">-${fmtPct(d.drawdown_pct, 1)}</span> <span class="kk">demo-fee curve</span>`)}
-      </div>`;
-    // SINCE RESET (new logic) — the FORWARD edge measured only over trades OPENED
-    // after the latest main-logic reset. This is the headline Jin reads (the edge
-    // under the CURRENT logic), shown above the all-time metrics. Absent (null) =
-    // no reset stamped → the line is hidden and the all-time metrics stand alone.
-    el.innerHTML = status + sinceResetHtml(d) + metrics;
+    // VIRTUAL-PRIMARY restructure (Jin 2026-07-07): in REAL mode (virtual OFF)
+    // the header stays exactly what it always was — status + SINCE RESET +
+    // the legacy money metrics — byte-identical to before this change. In
+    // VIRTUAL mode the header is JUST the status line (the VIRTUAL $100k×3
+    // strip below is the headline); the legacy metrics render instead into
+    // the LEGACY tab pane via legacyKpiHtml() (board_tabs_ext.js calls it).
+    el.innerHTML = d.virtual_account_enabled ? status : legacyKpiHtml(d, status);
   }
 
   // (f) main-area dual-equity sparkline — equity_curve (demo, dashed dim) vs
@@ -955,8 +974,14 @@
     if (prev == null || cur == null || cur === prev) return '';
     return cur > prev ? 'up' : 'down';
   }
-  function renderStreams(d) {
-    const el = $('b-streams-legacy');
+  // renderStreamsInto(d, targetId) — the legacy per-venue streams table,
+  // parametrized on its mount so the SAME renderer + row-diff state can target
+  // either the always-visible strip ('b-streams-legacy', real mode) or the
+  // LEGACY tab pane ('legacy-streams-body', virtual mode) — Jin 2026-07-07
+  // virtual-primary restructure. renderStreams(d) is the original real-mode
+  // call, preserved so real-mode behavior is byte-identical to before.
+  function renderStreamsInto(d, targetId) {
+    const el = $(targetId);
     if (!el) return;
     const rows = d.streams || [];
     if (!rows.length) { el.innerHTML = ''; el.__structKey = null; return; }
@@ -1013,6 +1038,18 @@
     }
     // Re-apply the active-exchange highlight (syncTable may have rebuilt rows).
     if (window.PolarisBoardExchange) window.PolarisBoardExchange.syncExchangeUi();
+  }
+  // Dispatcher: REAL mode keeps the legacy streams table in the always-visible
+  // strip ('b-streams-legacy', byte-identical to before this change). VIRTUAL
+  // mode moves it into the LEGACY tab ('legacy-streams-body') instead, so the
+  // always-visible strip shows only the VIRTUAL $100k×3 primary readout.
+  function renderStreams(d) {
+    const virt = !!d.virtual_account_enabled;
+    const legacyStrip = $('b-streams-legacy');
+    if (legacyStrip) legacyStrip.style.display = virt ? 'none' : '';
+    if (!virt) renderStreamsInto(d, 'b-streams-legacy');
+    // (LEGACY tab render is driven by board_tabs_ext.js's 'legacy' registration
+    // so it only runs while that pane is active, like every other tab.)
   }
 
   // Recently-closed, inline (was a separate row in the old card). Compact.
@@ -1321,6 +1358,8 @@
     // E3: re-render hook for exchange-select. The scope helpers
     // (getActiveExchange/venueMatches/venueFilter) are added by board_exchange.js.
     rerenderActive: rerenderActive,
+    legacyKpiHtml: legacyKpiHtml,     // LEGACY tab: pre-virtual money-metrics markup
+    renderStreamsInto: renderStreamsInto,   // LEGACY tab: legacy per-venue streams table
   };
 
   function init() {
@@ -1346,10 +1385,17 @@
     startSphereWatchdog();
   }
 
-  // Node export (unit tests) — expose the pure uPnL-trajectory math without the
-  // browser bootstrap. Guarded so the browser path is untouched.
+  // Node export (unit tests) — expose pure math/markup functions without the
+  // browser bootstrap. Guarded so the browser path is untouched. legacyKpiHtml
+  // is the LEGACY-tab content (Jin 2026-07-07 virtual-primary restructure) —
+  // exported so pytest can pin its gating contract via node (see
+  // tests/test_dashboard_virtual_primary_legacy_tab.py).
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { upnlTrajectory: upnlTrajectory, _upnlSvgFromSeries: _upnlSvgFromSeries };
+    module.exports = {
+      upnlTrajectory: upnlTrajectory,
+      _upnlSvgFromSeries: _upnlSvgFromSeries,
+      legacyKpiHtml: legacyKpiHtml,
+    };
   }
   // Browser bootstrap — only when a real DOM is present (skipped under node).
   if (typeof document !== 'undefined') {

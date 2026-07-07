@@ -13,7 +13,8 @@
   const T = window.PolarisBoardTabs;
   if (!B || !T) { return; }   // board.js + board_tabs.js must load first
   const { $, fmtUsd, fmtPct, fmtSignedPct, fmtPx, fmtR, sparkline, symCell, pn, esc, hms,
-    hhmmss, venueStream, getActiveExchange, venueMatches, venueFilter } = B;
+    hhmmss, venueStream, getActiveExchange, venueMatches, venueFilter,
+    legacyKpiHtml, renderStreamsInto } = B;
   const setCnt = T.setCnt;
 
   // E3 (Jin 2026-05-31): analytics tabs scope where the data carries venue
@@ -1072,4 +1073,16 @@
   T.register('build', () => placeholder('build-body', 'commit timeline · wave digest · activity heat · test-health', 'GET /api/buildlog'));
   T.register('path', () => placeholder('path-body', 'phase ladder P0→P6 · plan kanban · next strikes · blockers', 'GET /api/roadmap'));
   T.register('learned', () => placeholder('learned-body', 'lessons feed · anti-pattern wall · root-cause · debate verdicts', 'GET /api/lessons'));
+
+  // LEGACY tab (Jin 2026-07-07 virtual-primary restructure) — pre-virtual
+  // real-venue accounting, only reachable here in VIRTUAL mode (the header/
+  // strip show the VIRTUAL $100k×3 primary readout instead). In REAL mode
+  // (virtual OFF) this pane is intentionally left blank — that content still
+  // renders in its original header/strip spot, unchanged.
+  T.register('legacy', (d) => {
+    const kpiEl = $('legacy-kpi-body');
+    if (kpiEl) kpiEl.innerHTML = d.virtual_account_enabled ? legacyKpiHtml(d) : '';
+    if (d.virtual_account_enabled) renderStreamsInto(d, 'legacy-streams-body');
+    else { const sEl = $('legacy-streams-body'); if (sEl) sEl.innerHTML = ''; }
+  });
 })();

@@ -65,6 +65,7 @@ from polaris.core.benchmark.statistics import (
 from polaris.core.benchmark.walk_forward import WalkForwardSplit, walk_forward_splits
 from polaris.core.data.schema import Bar
 from polaris.core.evolve.positive_control import gate_can_discriminate, min_passable_n
+from polaris.core.metrics.risk_unit import R_USD_PROXY
 from polaris.core.replay.engine import ReplayEngine
 from polaris.core.replay.models import ReplayConfig, ReplayResult, ReplayTrade
 from polaris.strategies.base import BaseStrategy
@@ -299,7 +300,10 @@ def _result_from(
     metrics = {
         "net_pnl": net_pnl,
         "turnover": turnover,
-        "fee_drag_real_r": fee_drag / 50.0,  # PNL_R_USD_DENOM
+        # ReplayTrade carries no venue (replay-engine-internal), so this
+        # unifies onto risk_unit.R_USD_PROXY — the ONE documented $-per-R
+        # fallback proxy — instead of a bare 50.0 literal (2026-07-07).
+        "fee_drag_real_r": fee_drag / R_USD_PROXY,
         "max_dd": float(full.metrics.get("max_dd", 0.0)),
         "n": float(len(trades)),
     }

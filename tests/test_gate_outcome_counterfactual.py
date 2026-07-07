@@ -491,16 +491,16 @@ async def test_backfill_survives_missing_gate_events_table(
 
 def _seed_position_and_fill(
     conn: sqlite3.Connection, *, position_id: str, base_qty: float = 100.0,
-    entry_price: float = 100.0, bar_close: float = 130.0,
+    entry_price: float = 100.0, bar_close: float = 130.0, risk_usd: float = 500.0,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
-        " opened_ts, swap_count) "
+        " opened_ts, swap_count, risk_usd) "
         "VALUES (?, 'okx', 'SOL-USDT', 'crypto:SOL', 'tsmom', 'tsmom', "
-        " 'tsmom', 'long', ?, 'open', ?, 0)",
-        (position_id, base_qty, NOW),
+        " 'tsmom', 'long', ?, 'open', ?, 0, ?)",
+        (position_id, base_qty, NOW, risk_usd),
     )
     conn.execute(
         "INSERT INTO fills "

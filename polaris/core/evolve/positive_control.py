@@ -14,6 +14,7 @@ every existing import path still resolves.
 from __future__ import annotations
 
 from polaris.core.benchmark.gate import evaluate_gate
+from polaris.core.metrics.risk_unit import R_USD_PROXY
 from polaris.core.replay.models import ReplayResult, ReplayTrade
 
 __all__ = [
@@ -28,9 +29,12 @@ __all__ = [
 # starved, not feature-exhausted.
 _PC_MEAN: float = 0.2
 _PC_SPREAD: float = 0.1
-# PNL_R_USD_DENOM (fill_model) — the synthetic USD pnl is pnl_r * this so the
-# gate's bot_sharpe path is internally consistent (not read by the stat tier).
-_PNL_R_USD_DENOM: float = 50.0
+# The synthetic USD pnl is pnl_r * this so the gate's bot_sharpe path is
+# internally consistent (not read by the stat tier). This synthetic probe has
+# no real venue/trade, so it unifies onto ``risk_unit.R_USD_PROXY`` — the ONE
+# documented $-per-R fallback proxy — rather than a private duplicate constant
+# (2026-07-07 R4-proxy retirement).
+_PNL_R_USD_DENOM: float = R_USD_PROXY
 
 
 def _synthetic_strong_edge(n_trades: int, *, mean: float, spread: float) -> list[float]:

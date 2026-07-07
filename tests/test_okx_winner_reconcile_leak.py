@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts._production_close import _close_trade_with_real_pnl
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts.production_paper_loop import ProdLoopState
@@ -193,8 +193,9 @@ async def test_drained_mark_close_books_true_winner_pnl(
     ).fetchone()
     assert row[0] is not None
     expected_pnl_usd = (mark - entry) * qty  # +127.95
-    assert row[0] == pytest.approx(expected_pnl_usd / r_budget_for_venue("okx"),
-                                   rel=1e-6)
+    assert row[0] == pytest.approx(
+        realised_r(pnl_usd=expected_pnl_usd, risk_usd=24.7), rel=1e-6,
+    )
     assert row[0] > 0.0  # captured a real WIN, not discarded
 
 

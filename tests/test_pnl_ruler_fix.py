@@ -8,10 +8,14 @@ Two confirmed bugs are pinned here:
 BUG ① — the probe-outcome backfill stamped the per-stream LEDGER ``pnl_r``
 (``realised_r_stream``) into ``probe_decisions.realized_pnl_r``, a column that is
 the per-trade-ATR EXCURSION ruler (``unit_tag='excursion'``). The close path now
-rescales the dollar pnl by the per-trade-ATR whole-position 1R
-(``realised_r(pnl_usd, atr_risk_usd)``) so ``realized_pnl_r`` AND ``mfe_r_final``
-share ONE ruler → ``giveback_r = max(0, mfe - realized)`` is a same-ruler
-subtraction, not a meaningless cross-ruler one.
+rescales the dollar pnl by a per-trade risk unit (``realised_r(pnl_usd,
+risk_usd)``) so ``realized_pnl_r`` AND ``mfe_r_final`` share ONE ruler →
+``giveback_r = max(0, mfe - realized)`` is a same-ruler subtraction, not a
+meaningless cross-ruler one. (2026-07-07: the call site's ``risk_usd`` source
+was further unified onto the SAME persisted ``positions.risk_usd`` the realised
+ledger ``pnl_r`` now uses — see ``test_pnl_r_rebase_risk_usd.py``. The tests
+below exercise ``_safe_backfill_probe_outcome`` directly with a hand-supplied
+``risk_usd``, so they remain valid regardless of where the caller sources it.)
 
 BUG ② — the excursion R-denominator relative floor (``_ATR_PCT_RELATIVE_FLOOR``)
 was ``1e-4``, 5x looser than the entry anchor sane-band floor

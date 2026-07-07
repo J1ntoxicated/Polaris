@@ -53,6 +53,18 @@ RECONCILE_STRATEGY_ID = "_reconcile_import"
 # ``entry_atr_pct`` NULL, exactly like a cold/missing bars window would.
 AtrAnchorFn = Callable[[sqlite3.Connection, str, int], "tuple[float, str] | None"]
 
+# Optional quote-ccy→USD rate resolver — ``(conn, venue, symbol) -> rate | None``.
+# Injected by the ``scripts``-layer caller (mirrors ``AtrAnchorFn``'s own
+# layering rationale: the real resolver needs the Capital constraint cache /
+# session, a ``scripts``-layer concern ``polaris.core`` must not import UP
+# into). ``None`` (the default, or an injected resolver returning ``None``)
+# degrades to ``quote_usd_rate=1.0`` — byte-identical to the pre-fix behaviour
+# for OKX/Alpaca (already USD-quoted) and the prior Capital adopt-path bug
+# (2026-07-02 audit rank 4: a non-USD Capital epic — USDJPY, J225=JPY,
+# EU50=EUR — adopted WITHOUT this rate inflated/deflated ``risk_usd`` by the
+# raw FX level, e.g. J225 stamped $47,615.89 vs real ≈$317).
+QuoteUsdRateFn = Callable[[sqlite3.Connection, str, str], "float | None"]
+
 
 class _AlpacaLike(Protocol):
     async def fetch_positions(self) -> list[dict[str, Any]]: ...
@@ -219,6 +231,7 @@ def _import_one(
     now_ts: int,
     deal_id: str | None,
     atr_anchor_fn: AtrAnchorFn | None = None,
+    quote_usd_rate_fn: QuoteUsdRateFn | None = None,
 ) -> SimulatedTrade | None:
     """Persist one reconcile-import position + synthetic entry fill at mark.
 
@@ -264,9 +277,25 @@ def _import_one(
             logger.warning("[reconcile] entry ATR anchor read failed: %r", exc)
         if anchor is not None:
             entry_atr_pct, entry_atr_timeframe = anchor
+    # FX fix (2026-07-07, audit rank 4): a non-USD-quoted adopted CFD (USDJPY,
+    # J225=JPY, EU50=EUR, …) must convert through the SAME quote_usd_rate
+    # ``risk_usd_at_entry`` uses on the normal entry-stamp path — omitting it
+    # inflated/deflated risk_usd by the raw FX level (J225 stamped $47,615.89 vs
+    # real ≈$317). ``None`` resolver / a resolver returning ``None`` degrades to
+    # 1.0 (byte-identical to the pre-fix behaviour for USD-quoted instruments).
+    quote_usd_rate = 1.0
+    if quote_usd_rate_fn is not None:
+        try:
+            resolved_rate = quote_usd_rate_fn(conn, venue, symbol)
+        except sqlite3.Error as exc:
+            resolved_rate = None
+            logger.warning("[reconcile] quote_usd_rate read failed: %r", exc)
+        if resolved_rate is not None and resolved_rate > 0.0:
+            quote_usd_rate = resolved_rate
     risk_usd = (
         risk_usd_at_entry(
             entry_price=mark, entry_atr_pct=entry_atr_pct, base_qty=base_qty,
+            quote_usd_rate=quote_usd_rate,
         )
         or None
         if entry_atr_pct is not None
@@ -368,6 +397,7 @@ async def _reconcile_capital(
     existing: set[tuple[str, str]],
     now_ts: int,
     atr_anchor_fn: AtrAnchorFn | None,
+    quote_usd_rate_fn: QuoteUsdRateFn | None = None,
 ) -> list[SimulatedTrade]:
     out: list[SimulatedTrade] = []
     body = await adapter.list_positions()
@@ -388,7 +418,7 @@ async def _reconcile_capital(
         trade = _import_one(
             conn, venue="capital", symbol=symbol, side=side, mark=mark,
             base_qty=base_qty, now_ts=now_ts, deal_id=deal_id,
-            atr_anchor_fn=atr_anchor_fn,
+            atr_anchor_fn=atr_anchor_fn, quote_usd_rate_fn=quote_usd_rate_fn,
         )
         if trade is not None:
             existing.add(("capital", symbol))
@@ -412,6 +442,7 @@ async def reconcile_venue_positions(
     now_ts: int,
     import_okx_spot: bool = False,
     atr_anchor_fn: AtrAnchorFn | None = None,
+    quote_usd_rate_fn: QuoteUsdRateFn | None = None,
 ) -> list[SimulatedTrade]:
     """Import live venue positions NOT yet tracked in the DB (startup blind-spot).
 
@@ -448,6 +479,14 @@ async def reconcile_venue_positions(
     layering rail, ``test_core_layering.py``). ``None`` (the default) leaves
     every imported row's ``entry_atr_pct``/``risk_usd`` at the legacy-graceful
     NULL/floor degrade — byte-identical for a caller that does not inject one.
+
+    ``quote_usd_rate_fn`` (FX fix, 2026-07-07): optional quote-ccy→USD rate
+    resolver, same layering rationale as ``atr_anchor_fn`` — only reaches
+    Capital epics (OKX/Alpaca are already USD-quoted). ``None`` (the default)
+    leaves every imported Capital row's ``risk_usd`` at ``quote_usd_rate=1.0``,
+    which is CORRECT for a USD-quoted epic but WRONG (raw-FX-inflated/deflated)
+    for a non-USD one — the caller should inject a resolver whenever Capital
+    adopt-import is wired live.
     """
     existing = _existing_keys(conn)
     out: list[SimulatedTrade] = []
@@ -465,6 +504,7 @@ async def reconcile_venue_positions(
             out.extend(
                 await _reconcile_capital(
                     conn, capital_adapter, existing, now_ts, atr_anchor_fn,
+                    quote_usd_rate_fn,
                 )
             )
         except Exception:  # noqa: BLE001

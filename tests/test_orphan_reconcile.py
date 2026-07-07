@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts._production_close import (
     _close_trade_with_real_pnl,
     _real_close_fill,
@@ -114,15 +114,16 @@ async def test_transient_reject_returns_none_not_orphan() -> None:
 def _seed_open(
     conn: sqlite3.Connection, *, position_id: str, base_qty: float,
     entry_price: float = 0.12, with_entry_fill: bool = True,
+    risk_usd: float = 5.0,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
-        " opened_ts, swap_count) "
+        " opened_ts, swap_count, risk_usd) "
         "VALUES (?, 'okx', 'FIL-USDT', 'crypto:FIL', 'tsmom', 'tsmom', "
-        " 'tsmom', 'long', ?, 'open', ?, 0)",
-        (position_id, base_qty, NOW),
+        " 'tsmom', 'long', ?, 'open', ?, 0, ?)",
+        (position_id, base_qty, NOW, risk_usd),
     )
     # ``with_entry_fill=False`` models a GHOST over-count — a tracked base_qty the
     # wallet never actually held (no real entry fill). That is the only case that
@@ -378,21 +379,23 @@ def test_real_pnl_r_records_true_loss_beyond_old_10r_clamp(
 ) -> None:
     """No hidden ±10 clamp — the realised R records the TRUE move up to ±100.
 
-    Step N (2026-06-23): realised R is the stream-common ``pnl_usd / R_budget``
-    (OKX R_budget = 0.02 × $79k = $1,580), NOT the per-trade ATR anchor. The old
-    ±10 clamp that HID losses is gone; the unified bound is ±100. A long entered
-    at 100 closing at 30 → pnl_usd −70 → −70/1580 R (a small but HONEST loss),
-    and a truly catastrophic $ loss clamps at −100R (not −10)."""
+    2026-07-07 re-base: realised R is ``pnl_usd / risk_usd`` (this position's own
+    staked risk), NOT the per-stream R_budget or the per-trade ATR anchor. The
+    old ±10 clamp that HID losses is gone; the unified bound is ±100. A long
+    entered at 100 closing at 30 → pnl_usd −70 → −70/risk_usd R (a real,
+    UNCRUSHED loss — well past the old ±10 ceiling), and a truly catastrophic $
+    loss clamps at −100R (not −10)."""
     from polaris.scripts._production_close import real_pnl_r_from_fills
 
-    _seed_open(memdb, position_id="pos-clamp", base_qty=1.0, entry_price=100.0)
+    _seed_open(memdb, position_id="pos-clamp", base_qty=1.0, entry_price=100.0, risk_usd=5.0)
     trade = _trade("pos-clamp", 1.0)
     pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
         memdb, trade=trade, exit_price_override=30.0
     )
     assert exit_price == pytest.approx(30.0)
     assert pnl_usd == pytest.approx(-70.0)
-    assert pnl_r == pytest.approx(-70.0 / r_budget_for_venue("okx"))
+    assert pnl_r == pytest.approx(realised_r(pnl_usd=-70.0, risk_usd=5.0))
+    assert pnl_r < -10.0  # past the OLD hidden ceiling — no longer hidden
 
     # A genuinely catastrophic $ loss clamps at −100R (NOT the old −10 ceiling).
     # base_qty 10k @ entry 100 → $1M notional; exit 1 → ~−$990k → clamp −100R.

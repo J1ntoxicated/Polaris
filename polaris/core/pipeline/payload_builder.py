@@ -48,6 +48,7 @@ from polaris.core.cell_matrix import (
     fetch_cell_stat,
 )
 from polaris.core.data.baseline import read_baseline_state
+from polaris.core.metrics.risk_unit import r_budget_for_venue
 from polaris.core.pipeline._payload_db import _safe_query
 from polaris.core.pipeline._sizer_payload import (
     build_sizer_payload,
@@ -90,12 +91,14 @@ __all__ = [
 # cell distribution panel so both views agree on which cells are "eligible".
 CELL_POOL_MIN_N_EFF: Final[float] = 5.0
 
-# USD-per-R heuristic divisor used by `load_recent_same_symbol_trades` to
-# project a $-PnL into an R-multiple when the underlying R-unit is unknown
-# (Day 6 smoke baseline = $50 risk per trade). Replaced by the per-trade
-# `risk_usd` once the sizing engine persists it (P1 Layer 5 R6).
+# USD-per-R heuristic divisor. RETIRED as the ``load_recent_same_symbol_trades``
+# denominator (2026-07-07 re-base: that call site now uses
+# ``r_budget_for_venue`` — the per-stream dollar risk budget — since no
+# per-trade ``risk_usd`` is available at a bare ``fills`` row). Still imported
+# directly by ``polaris.scripts._run_signal_helpers`` for an unrelated
+# representative-notional cost_r calc — kept defined + exported for that
+# consumer; do not read it as this module's own R-multiple denominator anymore.
 PNL_R_USD_DENOM: Final[float] = 50.0
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -189,6 +192,10 @@ def load_recent_same_symbol_trades(
         """,
         (venue, f"%{symbol}%", int(limit)),
     )
+    # A bare ``fills`` row carries no per-trade ``risk_usd`` (that lives on
+    # ``positions``, not joined here) — the per-stream R_budget is the
+    # documented fallback denominator (2026-07-07 re-base), not a flat $50.
+    r_budget = r_budget_for_venue(venue) or PNL_R_USD_DENOM
     return [
         {
             "ts": int(r[0]) // 1000,
@@ -198,7 +205,7 @@ def load_recent_same_symbol_trades(
             "fee_usd": float(r[4]),
             "slippage_bps": float(r[5]),
             "won": float(r[3]) > 0.0,
-            "pnl_r": float(r[3]) / PNL_R_USD_DENOM,
+            "pnl_r": float(r[3]) / r_budget,
         }
         for r in rows
     ]

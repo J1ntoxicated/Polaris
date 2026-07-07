@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts._production_close import _close_trade_with_real_pnl
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts._smoke_real_roundtrip import (
@@ -138,15 +138,16 @@ async def test_full_availbal_closes_normally_with_siblings() -> None:
 def _seed_open(
     conn: sqlite3.Connection, *, position_id: str, base_qty: float,
     symbol: str = "LTC-USDT", group: str = "crypto:LTC", entry_price: float = 0.12,
+    risk_usd: float = 5.0,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
-        " opened_ts, swap_count) "
+        " opened_ts, swap_count, risk_usd) "
         "VALUES (?, 'okx', ?, ?, 'flow_pressure', 'flow_pressure', "
-        " 'flow_pressure', 'long', ?, 'open', ?, 0)",
-        (position_id, symbol, group, base_qty, NOW),
+        " 'flow_pressure', 'long', ?, 'open', ?, 0, ?)",
+        (position_id, symbol, group, base_qty, NOW, risk_usd),
     )
     conn.execute(
         "INSERT INTO fills "
@@ -259,7 +260,7 @@ async def test_sibling_drain_mark_close_books_true_pnl(
         "SELECT pnl_r FROM positions WHERE position_id='pos-loss'"
     ).fetchone()
     assert row[0] is not None
-    assert row[0] == pytest.approx(-0.20 / r_budget_for_venue("okx"), rel=1e-6)
+    assert row[0] == pytest.approx(realised_r(pnl_usd=-0.20, risk_usd=5.0), rel=1e-6)
     assert row[0] < 0.0  # a real loss is recorded, NOT dropped/zeroed
 
 

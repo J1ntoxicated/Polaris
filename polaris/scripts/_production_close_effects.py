@@ -48,6 +48,7 @@ from polaris.core.pipeline.gate_state import (
 )
 from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams import resolve_stream, resolve_stream_profile
+from polaris.scripts._production_close_helpers import _position_risk_usd
 from polaris.scripts._smoke_fills import SimulatedTrade
 
 if TYPE_CHECKING:
@@ -313,7 +314,7 @@ def _safe_backfill_probe_outcome(
 def _read_cost_inputs(
     conn: sqlite3.Connection, trade: SimulatedTrade
 ) -> tuple[float, float, float, float, float, float | None]:
-    """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd).
+    """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, cost_denom_usd).
 
     P0-2 fix — BOTH legs are matched by ``contribution_id = position_id`` (the
     close fill is persisted with ``contribution_id=trade.position_id`` in
@@ -322,18 +323,23 @@ def _read_cost_inputs(
     Only when ``position_id`` is unset (legacy callers) do we fall back to the
     latest ``(strategy, instrument)`` fill.
 
-    FIX 2 (unit boundary, 2026-07-02 audit) — the returned denominator is now
-    ``r_budget_for_venue(trade.venue)``, the SAME per-stream R_budget constant
-    (OKX $1,580 / Capital $1,020 / ...) that ``gross_pnl_r`` (passed in by the
-    caller as ``realised_r_stream = pnl_usd / R_budget``) is already denominated
-    in. The PRIOR denominator (a 1m-bar-ATR-derived whole-position 1R,
-    ``size_usd × atr_pct × 2``) was a COMPLETELY DIFFERENT unit — dividing the
-    R_budget-unit gross by an ATR-unit cost pinned Capital scratches to a
-    uniform −0.30R and blew OKX cost-in-R out to −0.69..−1.79R (a fee-rate /
-    ATR-floor artefact, not real edge). ``pnl_r_net = gross_pnl_r -
-    cost_usd/r_budget_usd`` is now a same-unit subtraction. An unknown venue
-    (``r_budget_for_venue`` → 0.0) returns ``None`` so the caller SKIPS the
-    cost-in-R adjustment entirely (measurement-only — never gates sizing).
+    FIX 3 (cross-ruler fee-drag, 2026-07-07 R-ruler unification review) — the
+    returned denominator is now the per-trade staked risk
+    (``positions.risk_usd`` via ``_position_risk_usd``), the SAME ruler
+    ``gross_pnl_r`` is now denominated in (``realised_r(pnl_usd, risk_usd)``,
+    the post-re-base gross). FIX 2 (2026-07-02 audit) had made this
+    ``r_budget_for_venue`` — the OLD per-stream ruler — which was correct while
+    gross was still R_budget-denominated, but the re-base moved gross onto
+    risk_usd WITHOUT moving this denominator, re-introducing the exact same
+    class of unit mismatch FIX 2 removed (measured 29/183 ``won``-verdict
+    flips: a fee-eaten loss on the risk_usd ruler folded as a winner because
+    the fee term was shrunk by the OLD, usually-larger R_budget constant).
+    Falls back to ``r_budget_for_venue(trade.venue)`` only when
+    ``positions.risk_usd`` is unavailable/NULL/<=0 (legacy rows / no
+    position_id — mirrors the fallback ``shadow_acceptance.py`` /
+    ``payload_builder.py`` already use for the same gap). An unknown venue
+    AND no risk_usd → ``None`` sentinel so the caller SKIPS the cost-in-R
+    adjustment entirely (measurement-only — never gates sizing).
     """
     inst = f"{trade.venue}:{trade.symbol}"
     entry: tuple[Any, ...] | None = None
@@ -370,12 +376,18 @@ def _read_cost_inputs(
     size_usd = float(entry[2]) if entry else trade.notional_usd
     exit_fee = float(exit_row[0]) if exit_row else 0.0
     exit_slip = float(exit_row[1]) if exit_row else 0.0
-    # FIX 2 — same R_budget constant the caller's gross_pnl_r already divides by
-    # (realised_r_stream). A venue with no configured budget → None sentinel;
-    # the caller skips the cost-in-R adjustment rather than divide by 0.
-    budget = r_budget_for_venue(trade.venue)
-    r_budget_usd: float | None = budget if budget > 0.0 else None
-    return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd
+    # FIX 3 — same ruler the caller's gross_pnl_r is now denominated in
+    # (per-trade risk_usd). Fall back to the OLD per-stream R_budget constant
+    # only when risk_usd is unavailable, so legacy/no-position_id callers keep
+    # the pre-re-base behaviour rather than silently skip the cost adjustment.
+    risk_usd = _position_risk_usd(conn, trade.position_id)
+    cost_denom_usd: float | None
+    if risk_usd > 0.0:
+        cost_denom_usd = risk_usd
+    else:
+        budget = r_budget_for_venue(trade.venue)
+        cost_denom_usd = budget if budget > 0.0 else None
+    return entry_fee, entry_slip, exit_fee, exit_slip, size_usd, cost_denom_usd
 
 
 def compute_net_pnl_r(
@@ -397,36 +409,38 @@ def compute_net_pnl_r(
 
     #46 single-truth preserved: ``fills.pnl_usd`` (GROSS) + ``fills.fee_usd``
     (REAL) remain the truth; the net is an in-memory derivation only (no new truth
-    column). FIX 2 (unit boundary) — the cost-in-R denominator is now the SAME
-    per-stream R_budget constant ``gross_pnl_r`` is already denominated in (see
-    ``_read_cost_inputs``), so ``pnl_r_net = gross_pnl_r - cost_usd/R_budget`` is
-    a same-unit subtraction (previously an ATR-unit cost was subtracted from an
-    R_budget-unit gross — a unit mismatch that pinned Capital scratches to a
-    uniform −0.30R and inflated OKX cost-in-R to −0.69..−1.79R). An unknown venue
-    (no configured R_budget) → the cost-in-R adjustment is SKIPPED (net R ==
-    gross R) so the learners never fold a divide-by-zero artefact. ``pnl_usd_net``
-    always nets the dollar cost (finite + sane). NEVER read by sizing
-    (measurement/learning only — the 9-stack ban + −1.0R rail are untouched).
+    column). FIX 3 (cross-ruler fee-drag) — the cost-in-R denominator is now the
+    SAME ruler ``gross_pnl_r`` is denominated in post-re-base: per-trade
+    ``positions.risk_usd`` (see ``_read_cost_inputs``), falling back to the OLD
+    per-stream R_budget constant only when risk_usd is unavailable. So
+    ``pnl_r_net = gross_pnl_r - cost_usd/risk_usd`` is a same-unit subtraction
+    (the interim state — gross on risk_usd, fee term on R_budget — silently
+    flipped 29/183 fee-eaten scratches to a ``won`` winner). Neither ruler
+    available (unknown venue + no risk_usd) → the cost-in-R adjustment is
+    SKIPPED (net R == gross R) so the learners never fold a divide-by-zero
+    artefact. ``pnl_usd_net`` always nets the dollar cost (finite + sane).
+    NEVER read by sizing (measurement/learning only — the 9-stack ban + −1.0R
+    rail are untouched).
 
     Fail-open: any read/compute error returns ``(gross_pnl_usd, gross_pnl_r)`` so
     the already-committed close still folds a value (best-effort learning).
     """
     try:
         (
-            entry_fee, entry_slip, exit_fee, exit_slip, size_usd, r_budget_usd,
+            entry_fee, entry_slip, exit_fee, exit_slip, size_usd, cost_denom_usd,
         ) = _read_cost_inputs(conn, trade)
-        if r_budget_usd is None:
-            # Unknown venue (no configured R_budget): skip the cost-in-R
-            # adjustment (net==gross) rather than divide by zero. WARN (not
-            # silent) per the no-garbage mandate.
+        if cost_denom_usd is None:
+            # No per-trade risk_usd AND no configured venue R_budget: skip the
+            # cost-in-R adjustment (net==gross) rather than divide by zero.
+            # WARN (not silent) per the no-garbage mandate.
             logger.warning(
-                "[close/net] %s:%s no R_budget for venue — "
+                "[close/net] %s:%s no risk_usd/R_budget denominator — "
                 "cost-in-R adjustment skipped (net==gross)",
                 trade.venue, trade.symbol,
             )
         return cost_adjusted_pnl_r(
             gross_pnl_usd=gross_pnl_usd, gross_pnl_r=gross_pnl_r, size_usd=size_usd,
-            atr_usd=r_budget_usd, venue=trade.venue,
+            atr_usd=cost_denom_usd, venue=trade.venue,
             entry_fee_usd=entry_fee, exit_fee_usd=exit_fee,
             entry_slippage_bps=entry_slip, exit_slippage_bps=exit_slip,
         )

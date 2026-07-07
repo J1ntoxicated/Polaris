@@ -13,14 +13,25 @@ actually sized the entry (2026-07-02 audit: 6 of 14 folds mismatched).
 falling back to the live SSOT only when unavailable (no position_id / NULL —
 legacy rows).
 
-FIX 2 (P2-13) — the cost-in-R denominator (``_read_cost_inputs``'s returned
-``atr_usd``) was a 1m-bar-ATR-derived whole-position 1R value, a COMPLETELY
-DIFFERENT unit than ``gross_pnl_r`` (which is ``pnl_usd / R_budget``, a fixed
-per-stream dollar constant — OKX $1,580 / Capital $1,020). Subtracting an
-ATR-unit cost from an R_budget-unit gross pinned Capital scratches to a uniform
-−0.30R and inflated OKX cost-in-R to −0.69..−1.79R (a fee-rate/ATR-floor
-artefact, not real edge). The denominator is now ``r_budget_for_venue`` — the
-SAME constant the gross is already denominated in.
+FIX 2 (P2-13, 2026-07-02) — the cost-in-R denominator (``_read_cost_inputs``'s
+returned ``atr_usd``) was a 1m-bar-ATR-derived whole-position 1R value, a
+COMPLETELY DIFFERENT unit than ``gross_pnl_r`` (which was then ``pnl_usd /
+R_budget``, a fixed per-stream dollar constant — OKX $1,580 / Capital $1,020).
+Subtracting an ATR-unit cost from an R_budget-unit gross pinned Capital
+scratches to a uniform −0.30R and inflated OKX cost-in-R to −0.69..−1.79R (a
+fee-rate/ATR-floor artefact, not real edge). FIX 2 made the denominator
+``r_budget_for_venue`` — the SAME constant the gross was then denominated in.
+
+FIX 3 (cross-ruler fee-drag, 2026-07-07 R-ruler unification review) — the
+subsequent re-base moved ``gross_pnl_r`` onto per-trade ``positions.risk_usd``
+(``realised_r``) WITHOUT moving this denominator, silently re-introducing the
+FIX-2 unit mismatch in the opposite direction: gross on risk_usd, fee term
+still on the (usually much larger) R_budget constant — shrinking the fee term
+enough to flip 29/183 fee-eaten scratches to a ``won`` winner. The denominator
+is now per-trade ``positions.risk_usd`` (the SAME ruler gross is denominated
+in), falling back to ``r_budget_for_venue`` only when risk_usd is unavailable
+(no seeded ``positions`` row in these fixtures below → the fallback path is
+what tests 152-183 exercise).
 """
 
 from __future__ import annotations
@@ -145,7 +156,10 @@ async def test_fold_close_slice_cell_matrix_keyed_on_entry_regime(
 
 
 # ---------------------------------------------------------------------------
-# FIX 2 — cost-in-R unit (R_budget, not ATR-derived)
+# FIX 2 — cost-in-R unit (R_budget, not ATR-derived) — fallback path only.
+# These fixtures never seed a ``positions`` row for posX/posCheap/posExp, so
+# ``_position_risk_usd`` returns 0.0 and FIX 3's per-trade risk_usd is
+# unavailable — the r_budget_for_venue FALLBACK is what these exercise.
 # ---------------------------------------------------------------------------
 
 
@@ -217,3 +231,83 @@ def test_compute_net_pnl_r_cost_fraction_is_small_and_unit_consistent(
     # ~$1.08 round-trip fee / $1,580 R_budget ≈ 0.00068 — a small fraction,
     # nowhere near the ~0.3R uniform pin or the -0.69..-1.79R inflation.
     assert 0.0 < cost_in_r < 0.01
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — cross-ruler fee-drag regression (the MAJOR this file's audit found).
+# A seeded ``positions`` row WITH a per-trade risk_usd exercises the NEW-ruler
+# path in ``_read_cost_inputs`` (not the FIX-2 fallback tests 152-197 above).
+# ---------------------------------------------------------------------------
+
+
+def _seed_position_with_risk_usd(
+    conn: sqlite3.Connection, *, position_id: str, risk_usd: float,
+) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO positions "
+        "(position_id, venue, symbol, underlying_group_id, strategy_id, "
+        " entry_strategy_id, active_strategy_id, side, qty, status, "
+        " opened_ts, swap_count, risk_usd) "
+        "VALUES (?, 'okx', 'BTC-USDT', 'crypto:BTC', 'tsmom', 'tsmom', "
+        " 'tsmom', 'long', 0.01, 'open', ?, 0, ?)",
+        (position_id, NOW, risk_usd),
+    )
+
+
+def test_fee_eaten_scratch_does_not_flip_to_won_cross_ruler_regression(
+    memdb: sqlite3.Connection,
+) -> None:
+    """THE MAJOR (2026-07-07 R-ruler unification review): gross is slightly
+    POSITIVE on the risk_usd ruler (+0.02R on a $50 stake == +$1 gross) but the
+    REAL round-trip fee ($2.00) exceeds that gross dollar move. Net must be a
+    LOSS on the SAME risk_usd ruler the gross used — cost_usd/risk_usd, NOT
+    cost_usd/R_budget (R_budget=$1,580 for OKX would shrink the $2 fee to
+    ~0.0013R, leaving net_r barely positive — a fee-eaten scratch silently
+    folding as a ``won`` winner into the cell matrix/learners/NIG posterior,
+    the exact 29/183-flip defect this test pins closed)."""
+    risk_usd = 50.0
+    _seed_position_with_risk_usd(memdb, position_id="posFee", risk_usd=risk_usd)
+    inst = "okx:BTC-USDT"
+    entry = Fill(
+        venue="okx", instrument_id=inst, strategy_id="tsmom", side="buy",
+        size_usd=600.0, fill_price=60_000.0, fee_usd=1.0, slippage_bps=0.0,
+        ts_ms=NOW * 1000, order_id="e1", base_qty=0.01, quote_qty=600.0,
+    )
+    exit_fill = Fill(
+        venue="okx", instrument_id=inst, strategy_id="tsmom", side="sell",
+        size_usd=600.0, fill_price=60_001.0, fee_usd=1.0, slippage_bps=0.0,
+        ts_ms=(NOW + 60) * 1000, order_id="x1", base_qty=0.01, quote_qty=600.01,
+    )
+    persist_fill(memdb, entry, is_close=False, contribution_id="posFee")
+    persist_fill(memdb, exit_fill, is_close=True, pnl_usd=1.0, contribution_id="posFee")
+    trade = SimulatedTrade(
+        signal_id="sFee", venue="okx", symbol="BTC-USDT", strategy_id="tsmom",
+        side="long", entry_price=60_000.0, notional_usd=600.0, open_ts=NOW,
+        position_id="posFee",
+    )
+    gross_pnl_usd = 1.0
+    gross_pnl_r = gross_pnl_usd / risk_usd  # == realised_r(1.0, 50.0) == 0.02
+
+    # Sanity: the denominator _read_cost_inputs now returns for a position WITH
+    # risk_usd is risk_usd itself, NOT the venue R_budget (the bug this pins).
+    *_rest, cost_denom_usd = _read_cost_inputs(memdb, trade)
+    assert cost_denom_usd == pytest.approx(risk_usd)
+    assert cost_denom_usd != pytest.approx(r_budget_for_venue("okx"))
+
+    _pnl_usd_net, pnl_r_net = compute_net_pnl_r(
+        memdb, trade=trade, gross_pnl_r=gross_pnl_r, gross_pnl_usd=gross_pnl_usd,
+    )
+
+    # The real $2.00 round-trip fee exceeds the $1.00 gross -> net must be a
+    # LOSS, and the won verdict (net_r > 0) must NOT flip to a winner.
+    assert pnl_r_net < 0.0
+    won = pnl_r_net > 0.0
+    assert won is False
+
+    # Cross-check against the OLD (buggy) ruler to prove this is a REAL fix,
+    # not a tautology: dividing the SAME $2 fee by the OLD R_budget constant
+    # would have left net_r positive (the flip this defect caused).
+    old_ruler_cost_in_r = 2.0 / r_budget_for_venue("okx")
+    old_ruler_net_r = gross_pnl_r - old_ruler_cost_in_r
+    assert old_ruler_net_r > 0.0, "fixture must reproduce the pre-fix flip"
+    assert (old_ruler_net_r > 0.0) != (pnl_r_net > 0.0)

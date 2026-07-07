@@ -9,14 +9,19 @@ learners / posterior. The R ledger read ~break-even (−0.0007R) while the dolla
 ledger was −$15.93. The learning layer under-recognised the loss (optimism bias).
 
 FIX (measurement/learning only — sizing / -1.0R rail / order path untouched,
-flow_not_block): the partial-close path now computes the SLICE's stream-common R
-(``realised_r_stream`` is LINEAR in pnl_usd, so a slice's R is its fraction of
-the whole-position R automatically), stamps it cumulatively onto
-``positions.pnl_r`` (so a partial-only position is no longer NULL), and folds the
-REAL-fee NET slice R into the cell matrix / learners / meta-label / posterior.
-The full-close path folds only its FINAL-SLICE R, so partial + remainder sum to
-exactly one whole-position fold. A SINGLE-SHOT full close (no prior partial) is
-byte-identical — the slice IS the whole.
+flow_not_block): the partial-close path now computes the SLICE's R rescaled by
+the position's own staked risk (``realised_r`` is LINEAR in pnl_usd, so a
+slice's R is its fraction of the whole-position R automatically), stamps it
+cumulatively onto ``positions.pnl_r`` (so a partial-only position is no longer
+NULL), and folds the REAL-fee NET slice R into the cell matrix / learners /
+meta-label / posterior. The full-close path folds only its FINAL-SLICE R, so
+partial + remainder sum to exactly one whole-position fold. A SINGLE-SHOT full
+close (no prior partial) is byte-identical — the slice IS the whole.
+
+2026-07-07 re-base: the R denominator is now ``positions.risk_usd`` (per-trade
+staked risk) instead of the per-stream ``R_budget`` constant
+(``realised_r_stream``) — ``_seed`` below stamps a ``risk_usd`` so every
+expected-value computation in this file uses ``realised_r(pnl_usd, risk_usd)``.
 
 DEMO/PAPER only; virtual funds. No defensive throttle, no size dampen, no chain
 multiplier. #46 single-truth preserved: fills.pnl_usd (gross) + fills.fee_usd
@@ -31,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import realised_r_stream
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts._production_close import _close_trade_with_real_pnl
 from polaris.scripts._smoke_fills import SimulatedTrade
 from polaris.scripts.production_paper_loop import ProdLoopState
@@ -39,19 +44,23 @@ from polaris.scripts.production_paper_loop import ProdLoopState
 NOW = 1_780_000_000
 
 
+_RISK_USD = 500.0  # per-trade staked risk stamped on every seeded position
+
+
 def _seed(
     conn: sqlite3.Connection, *, position_id: str, base_qty: float,
     entry_price: float = 100.0, bar_close: float = 130.0, side: str = "long",
+    risk_usd: float = _RISK_USD,
 ) -> None:
     """OPEN position + entry fill + fresh 1m bars (mark vs entry sets the sign)."""
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
-        " opened_ts, swap_count) "
+        " opened_ts, swap_count, risk_usd) "
         "VALUES (?, 'okx', 'SOL-USDT', 'crypto:SOL', 'tsmom', 'tsmom', "
-        " 'tsmom', ?, ?, 'open', ?, 0)",
-        (position_id, side, base_qty, NOW),
+        " 'tsmom', ?, ?, 'open', ?, 0, ?)",
+        (position_id, side, base_qty, NOW, risk_usd),
     )
     conn.execute(
         "INSERT INTO fills "
@@ -248,11 +257,11 @@ async def test_partial_then_full_folds_whole_once_no_double_count(
         "SELECT SUM(pnl_usd) FROM fills WHERE contribution_id = 'pos-pf' "
         "AND is_close = 1"
     ).fetchone()[0]
-    whole_gross_r = realised_r_stream(pnl_usd=fills_total, venue="okx")
+    whole_gross_r = realised_r(pnl_usd=fills_total, risk_usd=_RISK_USD)
     # spy.posterior stores (pnl_r_net, pnl_r_gross); sum the GROSS (index 1).
     folded_gross_sum = sum(gross for _net, gross in spy.posterior)
     # No double-count: the GROSS R folded across both slices sums to EXACTLY the
-    # whole-position gross R (realised_r_stream is linear in pnl_usd, so the two
+    # whole-position gross R (realised_r is linear in pnl_usd, so the two
     # slice Rs add to the whole). Both slices are wins.
     assert folded_gross_sum == pytest.approx(whole_gross_r, rel=1e-6)
     assert all(won for _, won in spy.cell)
@@ -290,7 +299,7 @@ async def test_single_shot_full_close_fold_unchanged(
         "SELECT SUM(pnl_usd) FROM fills WHERE contribution_id = 'pos-1shot' "
         "AND is_close = 1"
     ).fetchone()[0]
-    whole_gross_r = realised_r_stream(pnl_usd=fills_total, venue="okx")
+    whole_gross_r = realised_r(pnl_usd=fills_total, risk_usd=_RISK_USD)
     # The single fold's GROSS R is the whole position R.
     assert spy.posterior[0][1] == pytest.approx(whole_gross_r, rel=1e-9)
     # positions.pnl_r is the whole position R.
@@ -342,5 +351,5 @@ async def test_partial_only_position_no_nulled_r_leak(
         "SELECT SUM(pnl_usd) FROM fills WHERE contribution_id = 'pos-luna' "
         "AND is_close = 1"
     ).fetchone()[0]
-    expected_r = realised_r_stream(pnl_usd=closed_usd, venue="okx")
+    expected_r = realised_r(pnl_usd=closed_usd, risk_usd=_RISK_USD)
     assert pnl_r == pytest.approx(expected_r, rel=1e-6)

@@ -525,14 +525,16 @@ async def test_pipeline_threads_real_roundtrip_to_reserve(
 # ---------------------------------------------------------------------------
 
 
-def _seed_pos_and_entry(memdb: sqlite3.Connection, pos_id: str) -> None:
+def _seed_pos_and_entry(
+    memdb: sqlite3.Connection, pos_id: str, *, risk_usd: float = 100.0,
+) -> None:
     memdb.execute(
         "INSERT INTO positions (position_id, venue, symbol, "
         " underlying_group_id, strategy_id, entry_strategy_id, "
-        " active_strategy_id, side, qty, status, opened_ts, swap_count) "
+        " active_strategy_id, side, qty, status, opened_ts, swap_count, risk_usd) "
         "VALUES (?, 'okx', 'BTC-USDT', 'crypto:BTC', 'volume_burst', "
-        "        'volume_burst', 'volume_burst', 'long', 0.001, 'open', ?, 0)",
-        (pos_id, int(time.time())),
+        "        'volume_burst', 'volume_burst', 'long', 0.001, 'open', ?, 0, ?)",
+        (pos_id, int(time.time()), risk_usd),
     )
     memdb.execute(
         "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "

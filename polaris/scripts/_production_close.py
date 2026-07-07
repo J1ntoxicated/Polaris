@@ -36,7 +36,7 @@ from polaris.core.live_recalc.session_exit_rail import (
     _fx_in_session,
     alpaca_close_retry_should_defer,
 )
-from polaris.core.metrics.risk_unit import realised_r, realised_r_stream
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_capital_sizing import capital_close_contract_factor
 from polaris.scripts._production_close_classes import update_strategy_class_on_close
@@ -57,6 +57,7 @@ from polaris.scripts._production_close_helpers import (
     _latest_bar_close,
     _note_pending_close,
     _persist_partial_close,
+    _position_risk_usd,
     _reconcile_orphan,
     close_pnl_usd_total,
     real_pnl_r_from_fills,
@@ -771,11 +772,14 @@ async def _close_trade_with_real_pnl(
             # Forward progress (a real partial fill) — reset the zombie tally so a
             # genuinely-filling position is never drained as un-closeable.
             state.close_reject_counts.pop(drain_pid, None)
-            # P2 R-ledger-leak fix: the slice's stream-common R (linear in the
-            # sliced pnl_usd, so it is the slice's fraction of the whole-position
-            # R). Stamped cumulatively onto positions.pnl_r inside the persist txn
-            # so a partial-only close (LUNA / DOT) is no longer NULL.
-            slice_pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
+            # P2 R-ledger-leak fix: the slice's R, rescaled by THIS position's
+            # own staked risk (``realised_r`` is linear in pnl_usd, so a slice's
+            # R is its fraction of the whole-position R automatically). Stamped
+            # cumulatively onto positions.pnl_r inside the persist txn so a
+            # partial-only close (LUNA / DOT) is no longer NULL.
+            slice_pnl_r = realised_r(
+                pnl_usd=pnl_usd, risk_usd=_position_risk_usd(conn, trade.position_id),
+            )
             persisted = _persist_partial_close(
                 conn, state=state, trade=trade, close_fill=real_fill,
                 pnl_usd=pnl_usd, now_ts=now_ts, slice_pnl_r=slice_pnl_r,
@@ -810,26 +814,31 @@ async def _close_trade_with_real_pnl(
     # BUILD_SCHEMA: persist final MFE/MAE (R units) + exit_state at close.
     # Best-effort from tracked peak/trough vs entry — measurement only, never
     # gates sizing or blocks entry. Computed BEFORE the write txn (pure read).
-    # ``atr_risk_usd`` = the whole-position dollar 1R for the per-trade-ATR
-    # EXCURSION ruler (same unit as mfe_r/mae_r); ``realized_atr_r`` rescales the
-    # dollar pnl into that ruler so the probe-outcome backfill (realized_pnl_r /
-    # giveback_r) reconciles with mfe_r_final. This is the EXCURSION ruler, NOT
-    # the per-stream ledger ``pnl_r`` (which stays on the positions row below).
-    mfe_r, mae_r, atr_risk_usd = _close_excursion_r(
+    # ``atr_risk_usd`` (3rd return, unused below) stays the EXCURSION ruler for
+    # mfe_r/mae_r (a per-trade stop-distance unit derived from possibly-refreshed
+    # bars) — untouched. ``realized_atr_r`` (the probe-outcome ruler) is now
+    # rescaled by THIS position's persisted ``risk_usd`` (the SAME canonical
+    # denominator ``final_slice_pnl_r`` below uses) instead of a second,
+    # independently-recomputed ATR risk figure — one ruler, one source, so
+    # positions.pnl_r / segments.pnl_r / probe.realized_pnl_r agree exactly for
+    # a single-shot full close (2026-07-07 re-base, /debate-cleared).
+    mfe_r, mae_r, _atr_risk_usd = _close_excursion_r(
         conn, trade=trade, exit_price=exit_price, state=state,
     )
-    realized_atr_r = realised_r(pnl_usd=pnl_usd, risk_usd=atr_risk_usd)
-    # P2 R-ledger-leak fix: this FINAL slice's stream-common R. ``pnl_usd`` is
-    # already sliced to the un-closed remainder (real_pnl_r_from_fills with
-    # close_base_qty); ``realised_r_stream`` is LINEAR in pnl_usd, so this is the
-    # remainder's fraction of the whole-position R. For a SINGLE-SHOT full close
-    # (no prior partial) the slice IS the whole → final_slice_pnl_r == ``pnl_r``
-    # exactly (same function, same input), so the fold + stamp below stay
-    # byte-identical. For a partial-then-full close, the partials already folded
-    # + stamped their fractions, so folding only this remainder makes
-    # partial + remainder sum to exactly ONE whole-position fold (no double-count)
-    # and the accumulated positions.pnl_r reaches the whole-position R.
-    final_slice_pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
+    risk_usd = _position_risk_usd(conn, trade.position_id)
+    realized_atr_r = realised_r(pnl_usd=pnl_usd, risk_usd=risk_usd)
+    # P2 R-ledger-leak fix: this FINAL slice's R, rescaled by the position's own
+    # staked risk. ``pnl_usd`` is already sliced to the un-closed remainder
+    # (real_pnl_r_from_fills with close_base_qty); ``realised_r`` is LINEAR in
+    # pnl_usd, so this is the remainder's fraction of the whole-position R. For
+    # a SINGLE-SHOT full close (no prior partial) the slice IS the whole →
+    # final_slice_pnl_r == ``pnl_r`` exactly (same function, same inputs), so
+    # the fold + stamp below stay byte-identical. For a partial-then-full close,
+    # the partials already folded + stamped their fractions, so folding only
+    # this remainder makes partial + remainder sum to exactly ONE whole-position
+    # fold (no double-count) and the accumulated positions.pnl_r reaches the
+    # whole-position R.
+    final_slice_pnl_r = realised_r(pnl_usd=pnl_usd, risk_usd=risk_usd)
     try:
         conn.execute("BEGIN IMMEDIATE")
         persist_fill(

@@ -24,7 +24,7 @@ from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.isolation.circuit_breaker import FAULT_EXCEPTION, record_fault
 from polaris.core.live_recalc.excursion import compute_excursion_r
-from polaris.core.metrics.risk_unit import realised_r_stream
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_capital_sizing import _peek_quote_usd_rate
@@ -127,28 +127,25 @@ def real_pnl_r_from_fills(
     exit_price = exit_price_override if exit_price_override else bar_close
     if entry_price <= 0.0 or exit_price <= 0.0:
         return (0.0, 0.0, entry_price)
-    # Step N: the realised-R denominator is the per-stream R_budget (resolved by
-    # venue below), so the entry ATR anchor is no longer read here — it remains
-    # the excursion (mfe_r/mae_r) denominator inside ``_close_excursion_r``.
     pnl_abs = (
         (exit_price - entry_price)
         if trade.side == "long"
         else (entry_price - exit_price)
     )
     pnl_usd = (pnl_abs / entry_price) * size_usd
-    # Step N (2026-06-23, Jin LOCKED): realised R = the dollar truth rescaled by
-    # the per-STREAM R_budget (BASE_RISK_PCT × the stream's starting equity), NOT
-    # the per-trade ATR risk_usd. The ATR denominator was internally consistent
-    # within a venue but NON-COMPARABLE across venues (1D vs 1m ATR anchor → a
-    # −$2 OKX loss read as ~−1.3R while a −$44 Alpaca loss read ~−0.25R, a 123×
-    # risk-unit skew). R_budget is a per-stream CONSTANT, so within a stream R
-    # stays a pure linear rescale of pnl_usd (same sign, same bleeder ranking →
-    # the R and $ ledgers stay reconciled) AND a $X outcome maps to a comparable
-    # R on every venue. pnl_r is computed from the FULL (pre-slice) pnl_usd so it
-    # stays qty-invariant — the partial slicing below only scales the $ stamp.
-    # The ATR ``atr_pct`` above is RETAINED for the excursion (mfe_r/mae_r) path,
-    # a DIFFERENT (per-trade stop-distance) R unit — not the realised R here.
-    pnl_r = realised_r_stream(pnl_usd=pnl_usd, venue=trade.venue)
+    # Re-based (2026-07-07, /debate-cleared): realised R = the dollar truth
+    # rescaled by THIS position's own staked risk (``positions.risk_usd``,
+    # stamped at entry — stop distance × filled size, FX-corrected), NOT a
+    # per-stream constant. The per-stream R_budget (``realised_r_stream``) made
+    # every trade on a venue share the SAME denominator regardless of how much
+    # was actually risked, so a big-size scratch and a small-size full-stop-out
+    # read as similar R. Per-trade risk_usd is the CANONICAL 1R (sign(R) ==
+    # sign(pnl_usd) preserved; a non-positive/unknown risk_usd → R stays 0.0,
+    # never an exploded denominator). pnl_r is computed from the FULL
+    # (pre-slice) pnl_usd so it stays qty-invariant — the partial slicing below
+    # only scales the $ stamp.
+    risk_usd = _position_risk_usd(conn, trade.position_id)
+    pnl_r = realised_r(pnl_usd=pnl_usd, risk_usd=risk_usd)
     # BUG A — slice the pnl_usd to THIS close fill's fraction of the entry qty,
     # clamped to the un-closed remainder (persisted close fills of the SAME
     # instrument subtracted; foreign-instrument fills sharing the id are the
@@ -170,6 +167,31 @@ def real_pnl_r_from_fills(
     # the one telemetry bound (Step M). The old ±10 clamp that HID −34..−100R
     # losses is gone — G6/G7/precise-exit now see the true loss magnitude.
     return (pnl_r, pnl_usd, exit_price)
+
+
+def _position_risk_usd(conn: sqlite3.Connection, position_id: str | None) -> float:
+    """This position's persisted staked risk (``positions.risk_usd``), or 0.0.
+
+    ``risk_usd`` is stamped once at entry (:func:`risk_usd_at_entry` — stop
+    distance × filled size, FX-corrected) and is the CANONICAL per-trade 1R
+    denominator for the realised close-path R (2026-07-07 re-base). Returns 0.0
+    (never raises) when the position has no id, the row is missing, the column
+    is NULL, or a legacy/degenerate value is non-positive — the caller
+    (``realised_r``) then keeps R at 0.0 rather than an exploded/garbage ratio.
+    """
+    if not position_id:
+        return 0.0
+    try:
+        row = conn.execute(
+            "SELECT risk_usd FROM positions WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0.0
+    if row is None or row[0] is None:
+        return 0.0
+    risk_usd = float(row[0])
+    return risk_usd if risk_usd > 0.0 else 0.0
 
 
 def _entry_anchor_atr_pct(
@@ -402,13 +424,14 @@ def _persist_partial_close(
     ``True`` on durable persist (state preserved + reduced), ``False`` on a DB
     error (no mutation — retry next tick).
 
-    P2 R-ledger-leak fix — ``slice_pnl_r`` (this slice's stream-common R) is
-    ACCUMULATED onto ``positions.pnl_r`` in the SAME txn (``COALESCE(pnl_r,0) +
-    slice``). A position that closes predominantly via partials (LUNA / DOT) no
-    longer leaves ``pnl_r`` NULL — the realised R sums across slices to the
-    whole-position R (``realised_r_stream`` is linear in pnl_usd, so the slice
-    stamps sum exactly). Atomic with the fill persist + qty decrement so the
-    durable R never diverges from the persisted slice $. Measurement only.
+    P2 R-ledger-leak fix — ``slice_pnl_r`` (this slice's R, rescaled by the
+    position's own staked risk) is ACCUMULATED onto ``positions.pnl_r`` in the
+    SAME txn (``COALESCE(pnl_r,0) + slice``). A position that closes
+    predominantly via partials (LUNA / DOT) no longer leaves ``pnl_r`` NULL —
+    the realised R sums across slices to the whole-position R (``realised_r``
+    is linear in pnl_usd, so the slice stamps sum exactly). Atomic with the
+    fill persist + qty decrement so the durable R never diverges from the
+    persisted slice $. Measurement only.
     """
     filled = close_fill.base_qty
     remaining = max(0.0, trade.base_qty - filled)

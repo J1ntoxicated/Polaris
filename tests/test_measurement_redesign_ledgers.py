@@ -1,16 +1,17 @@
-"""Step N (2026-06-23) — the two ledgers AGREE on a seeded DB, stream-common R.
+"""Step N (2026-06-23) + 2026-07-07 re-base — the two ledgers AGREE on a seeded
+DB; the realised-R denominator is now per-trade ``risk_usd``.
 
 End-to-end-ish: seed entry fills + entry_atr_pct + risk_usd on positions, run
 ``real_pnl_r_from_fills`` (the close path), and assert:
-  * realised R == pnl_usd / R_budget(stream) (the stream-common rescaling),
+  * realised R == realised_r(pnl_usd, risk_usd) (the per-trade staked-risk
+    rescaling — 2026-07-07 replaces the per-stream R_budget denominator),
   * sign(R) == sign(pnl_usd) for EVERY symbol (ledgers agree on sign),
   * R-ranking == $-ranking WITHIN a venue (same bleeders, same order),
   * the ±100 clamp holds,
-  * a −$2 OKX loss and a −$2 Alpaca loss now map to COMPARABLE R (not 200×
-    apart — the venue-skew the design audit flagged is gone),
-  * the realised-R denominator is INDEPENDENT of the entry ATR anchor (the old
-    skew source) — two trades with the SAME $ and venue but different ATR
-    timeframes get the SAME R.
+  * the realised-R denominator now DOES depend on the per-trade risk_usd (the
+    OPPOSITE of the retired Step N stream-common design) — two trades with the
+    SAME $ but different risk_usd get DIFFERENT R, and a legacy NULL-risk_usd
+    row yields R == 0.0 (unknowable risk, never guessed).
 """
 
 from __future__ import annotations
@@ -19,11 +20,7 @@ import sqlite3
 
 import pytest
 
-from polaris.core.metrics.risk_unit import (
-    R_CLAMP,
-    r_budget_for_venue,
-    risk_usd_at_entry,
-)
+from polaris.core.metrics.risk_unit import R_CLAMP, realised_r, risk_usd_at_entry
 from polaris.scripts._production_close_helpers import real_pnl_r_from_fills
 from polaris.scripts._smoke_fills import SimulatedTrade
 
@@ -115,8 +112,9 @@ def test_ledgers_agree_sign_and_ranking(memdb: sqlite3.Connection) -> None:
     assert by_dollar[0] == "BNT"
 
 
-def test_realised_r_equals_pnl_usd_over_r_budget(memdb: sqlite3.Connection) -> None:
-    # Step N: the denominator is the per-stream R_budget, NOT risk_usd.
+def test_realised_r_equals_pnl_usd_over_risk_usd(memdb: sqlite3.Connection) -> None:
+    """2026-07-07: the denominator is THIS position's own ``risk_usd``, NOT the
+    per-stream R_budget."""
     trade = _seed_trade(
         memdb, pid="p1", symbol="ETH", side="long",
         entry_price=2000.0, exit_price=2060.0, qty=1.0, atr_pct=0.01, venue="okx",
@@ -124,50 +122,51 @@ def test_realised_r_equals_pnl_usd_over_r_budget(memdb: sqlite3.Connection) -> N
     pnl_r, pnl_usd, _exit = real_pnl_r_from_fills(
         memdb, trade=trade, exit_price_override=2060.0,
     )
-    budget = r_budget_for_venue("okx")
-    assert pnl_r == pytest.approx(pnl_usd / budget)
+    expected_risk_usd = risk_usd_at_entry(entry_price=2000.0, entry_atr_pct=0.01, base_qty=1.0)
+    assert pnl_r == pytest.approx(realised_r(pnl_usd=pnl_usd, risk_usd=expected_risk_usd))
 
 
-def test_same_dollar_loss_comparable_across_venues(memdb: sqlite3.Connection) -> None:
-    """A ~−$2 loss on OKX and on Alpaca now map to COMPARABLE R via the close path.
-
-    Before (per-trade ATR risk_usd, 1m vs 1D anchor): the two read >100× apart.
-    With the stream-common R_budget they are within the same order of magnitude.
-    Constructed so each trade's realised pnl_usd is ≈ −$2 on its own venue.
-    """
-    # OKX: 1m ATR anchor; Alpaca: 1D ATR anchor (the historical skew source).
-    t_okx = _seed_trade(
+def test_realised_r_depends_on_risk_usd_not_venue(memdb: sqlite3.Connection) -> None:
+    """2026-07-07 re-base: the OLD Step-N design made a same-$ OKX/Alpaca loss
+    COMPARABLE via a per-stream constant regardless of the position's actual
+    staked risk. The re-based ruler is the OPPOSITE — R now varies with the
+    position's OWN risk_usd (bigger stake -> smaller |R| for the same $), which
+    is the whole point (a real per-trade risk unit, not a venue-wide proxy)."""
+    t_small_risk = _seed_trade(
         memdb, pid="o", symbol="OKXSYM", side="long",
         entry_price=100.0, exit_price=98.0, qty=1.0, atr_pct=0.001, venue="okx",
     )
-    t_alp = _seed_trade(
+    t_big_risk = _seed_trade(
         memdb, pid="a", symbol="ALPSYM", side="long",
         entry_price=100.0, exit_price=98.0, qty=1.0, atr_pct=0.1265, venue="alpaca",
     )
-    r_okx, usd_okx, _ = real_pnl_r_from_fills(memdb, trade=t_okx, exit_price_override=98.0)
-    r_alp, usd_alp, _ = real_pnl_r_from_fills(memdb, trade=t_alp, exit_price_override=98.0)
-    # Same $ outcome on both venues (qty 1, entry 100, exit 98 → −$2).
-    assert usd_okx == pytest.approx(usd_alp)
-    assert r_okx < 0 and r_alp < 0
-    # The 200× venue skew is gone despite the 126× ATR-anchor difference.
-    ratio = abs(r_okx) / abs(r_alp)
-    assert 0.2 < ratio < 5.0
+    r_small_risk, usd_1, _ = real_pnl_r_from_fills(memdb, trade=t_small_risk, exit_price_override=98.0)
+    r_big_risk, usd_2, _ = real_pnl_r_from_fills(memdb, trade=t_big_risk, exit_price_override=98.0)
+    # Same $ outcome (qty 1, entry 100, exit 98 → −$2) but DIFFERENT risk_usd
+    # (atr_pct 0.001 vs 0.1265) -> DIFFERENT |R|, the small-risk trade reading a
+    # much LARGER |R| for the identical dollar loss.
+    assert usd_1 == pytest.approx(usd_2)
+    assert r_small_risk < 0 and r_big_risk < 0
+    assert abs(r_small_risk) > abs(r_big_risk) * 10.0
 
 
-def test_realised_r_independent_of_atr_timeframe(memdb: sqlite3.Connection) -> None:
-    """Two SAME-$ same-venue trades with wildly different ATR anchors get the
-    SAME realised R — the ATR-timeframe skew no longer leaks into realised R."""
+def test_realised_r_scales_with_atr_anchor_via_risk_usd(memdb: sqlite3.Connection) -> None:
+    """Two SAME-$ same-venue trades with different ATR anchors now get
+    DIFFERENT realised R — risk_usd (derived from the anchor) IS the
+    denominator (the opposite of the retired Step-N independence property)."""
     kw = dict(entry_price=100.0, exit_price=97.0, qty=10.0, venue="okx")
     t_small_atr = _seed_trade(memdb, pid="sa", symbol="SA", side="long", atr_pct=0.001, **kw)
     t_big_atr = _seed_trade(memdb, pid="ba", symbol="BA", side="long", atr_pct=0.1265, **kw)
     r_small, _u1, _ = real_pnl_r_from_fills(memdb, trade=t_small_atr, exit_price_override=97.0)
     r_big, _u2, _ = real_pnl_r_from_fills(memdb, trade=t_big_atr, exit_price_override=97.0)
-    assert r_small == pytest.approx(r_big)
+    assert r_small != pytest.approx(r_big)
+    assert abs(r_small) > abs(r_big)
 
 
-def test_legacy_null_risk_usd_same_r(memdb: sqlite3.Connection) -> None:
-    # Step N: R no longer reads risk_usd at all, so a NULL-risk_usd legacy row and
-    # a persisted-risk_usd row get the IDENTICAL R (the denominator is R_budget).
+def test_legacy_null_risk_usd_yields_zero_r(memdb: sqlite3.Connection) -> None:
+    """2026-07-07: R IS keyed on risk_usd now, so a NULL-risk_usd legacy row
+    yields R == 0.0 (unknowable risk, never guessed) while a persisted-risk_usd
+    row on the SAME $ outcome gets a real nonzero R."""
     kw = dict(entry_price=100.0, exit_price=97.0, qty=10.0, atr_pct=0.01, venue="okx")
     t_persisted = _seed_trade(
         memdb, pid="pp", symbol="AAA", side="long", persist_risk_usd=True, **kw,
@@ -181,7 +180,8 @@ def test_legacy_null_risk_usd_same_r(memdb: sqlite3.Connection) -> None:
     r_legacy, _u2, _e2 = real_pnl_r_from_fills(
         memdb, trade=t_legacy, exit_price_override=kw["exit_price"],
     )
-    assert r_persisted == pytest.approx(r_legacy)
+    assert r_persisted != 0.0
+    assert r_legacy == 0.0
 
 
 def test_close_path_r_clamped_at_100(memdb: sqlite3.Connection) -> None:

@@ -45,15 +45,16 @@ class _DrainedOKX:
 
 
 def _seed_open(conn: sqlite3.Connection, *, position_id: str, base_qty: float,
-               entry_price: float, symbol: str = "SOL-USDT") -> None:
+               entry_price: float, symbol: str = "SOL-USDT",
+               risk_usd: float = 24.7) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
         " opened_ts, swap_count, mfe_r, mae_r, risk_usd) "
         "VALUES (?, 'okx', ?, ?, 'volume_burst', 'volume_burst', "
-        " 'volume_burst', 'long', ?, 'open', ?, 0, 0.01, -0.01, 24.7)",
-        (position_id, symbol, f"crypto:{symbol.split('-')[0]}", base_qty, NOW),
+        " 'volume_burst', 'long', ?, 'open', ?, 0, 0.01, -0.01, ?)",
+        (position_id, symbol, f"crypto:{symbol.split('-')[0]}", base_qty, NOW, risk_usd),
     )
     conn.execute(
         "INSERT INTO fills "
@@ -117,7 +118,12 @@ async def test_close_log_won_is_net_loss_when_fee_eats_tiny_gross(
     The ``[close]`` log MUST report ``won=False`` — the net verdict the cell /
     learners / posterior fold — not the fee-free gross ``won=True``."""
     entry, mark, qty = 150.0, 150.05, 8.53
-    _seed_open(memdb, position_id="pos-tiny", base_qty=qty, entry_price=entry)
+    # 2026-07-07 re-base: gross pnl_r is now pnl_usd/risk_usd (per-trade staked
+    # risk), not pnl_usd/R_budget — a large risk_usd (a big intended stop) keeps
+    # the gross R small enough that the fixed real-fee cost-in-R term (still
+    # denominated in the SEPARATE, untouched r_budget_for_venue constant) can
+    # flip its sign, reproducing the same fee-eats-tiny-gross scenario.
+    _seed_open(memdb, position_id="pos-tiny", base_qty=qty, entry_price=entry, risk_usd=500.0)
     _seed_atr_bars(memdb, mark=mark)
     state = ProdLoopState()
     trade = _trade("pos-tiny", qty, entry)

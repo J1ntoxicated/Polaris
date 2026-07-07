@@ -701,14 +701,25 @@ def test_close_real_pnl_from_fills(memdb: sqlite3.Connection) -> None:
         signal_id="t2", venue="okx", symbol="BTC-USDT",
         strategy_id="volume_burst", side="long",
         entry_price=0.0, notional_usd=100.0,
-        open_ts=int(time.time()),
+        open_ts=int(time.time()), position_id="pos_t2",
+    )
+    # 2026-07-07 re-base: pnl_r now reads this position's own risk_usd (a bare
+    # fills-only fixture with no position_id yielded pnl_r=0.0 -- unknowable
+    # risk, never guessed). Seed a minimal positions row so pnl_r is non-zero.
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        " strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        " opened_ts, swap_count, risk_usd) "
+        "VALUES ('pos_t2', 'okx', 'BTC-USDT', 'crypto:BTC', 'volume_burst', "
+        " 'volume_burst', 'volume_burst', 'long', 0.001666, 'open', ?, 0, 100.0)",
+        (int(time.time()),),
     )
     memdb.execute(
         "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
         " size_usd, fill_price, fee_usd, slippage_bps, ts_ms, order_id, "
         " contribution_id, pnl_usd, is_close, base_qty, quote_qty, state) "
         "VALUES ('fent', 'okx', 'okx:BTC-USDT', 'volume_burst', 'buy', "
-        "        100.0, 60000.0, 0.1, 1.0, ?, 'o2', NULL, 0.0, 0, "
+        "        100.0, 60000.0, 0.1, 1.0, ?, 'o2', 'pos_t2', 0.0, 0, "
         "        0.001666, 100.0, 'filled')",
         (int(time.time() * 1000),),
     )
@@ -948,6 +959,15 @@ def test_real_pnl_matches_closed_fill_price(memdb: sqlite3.Connection) -> None:
         entry_price=0.0, notional_usd=100.0, open_ts=int(time.time()),
         position_id="pos_match",
     )
+    # 2026-07-07 re-base: pnl_r reads this position's own risk_usd.
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        " strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        " opened_ts, swap_count, risk_usd) "
+        "VALUES ('pos_match', 'okx', 'BTC-USDT', 'crypto:BTC', 'volume_burst', "
+        " 'volume_burst', 'volume_burst', 'long', 0.001666, 'open', ?, 0, 100.0)",
+        (int(time.time()),),
+    )
     # Seed an entry fill linked by contribution_id.
     memdb.execute(
         "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
@@ -1004,6 +1024,14 @@ def test_real_pnl_matches_by_position_id_not_strategy_symbol(
                 0.0, 0.0, 0.0, 0.0, "test",
             ),
         )
+    # 2026-07-07 re-base: pnl_r reads the position's own risk_usd.
+    memdb.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        " strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        " opened_ts, swap_count, risk_usd) "
+        "VALUES ('pos_old', 'okx', 'BTC-USDT', 'crypto:BTC', 'volume_burst', "
+        " 'volume_burst', 'volume_burst', 'long', 0.002, 'open', 1, 0, 100.0)",
+    )
     # Two entries on (volume_burst, BTC-USDT) at different prices.
     memdb.execute(
         "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "

@@ -39,6 +39,7 @@ import sqlite3
 from typing import Any
 
 from polaris.core.economics.fees import demo_fee_usd, real_fee_usd
+from polaris.core.metrics.risk_unit import r_budget_for_venue, realised_r
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
@@ -156,12 +157,13 @@ def chop_churn(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(*) FROM positions"
     ).fetchone()[0]
 
-    # Closed trades joined to their realised close-fill pnl_usd. LEFT JOIN so a
-    # closed position with no close fill still counts (pnl unknown → 0.0).
+    # Closed trades joined to their realised close-fill pnl_usd + the position's
+    # own staked risk (``risk_usd``, stamped at entry). LEFT JOIN so a closed
+    # position with no close fill still counts (pnl unknown → 0.0).
     closed = conn.execute(
         """
         SELECT p.position_id, p.symbol, p.opened_ts, p.closed_ts,
-               COALESCE(SUM(f.pnl_usd), 0.0) AS pnl_usd
+               COALESCE(SUM(f.pnl_usd), 0.0) AS pnl_usd, p.venue, p.risk_usd
         FROM positions p
         LEFT JOIN fills f
             ON f.contribution_id = p.position_id AND f.is_close = 1
@@ -189,10 +191,16 @@ def chop_churn(conn: sqlite3.Connection) -> dict[str, Any]:
     loser_timeouts = 0
     per_symbol_streak: dict[str, int] = {}
     repeat_loss_max = 0
-    for _pid, symbol, opened_ts, closed_ts, pnl_usd in closed:
+    for _pid, symbol, opened_ts, closed_ts, pnl_usd, venue, risk_usd in closed:
         hold = max(0.0, float(closed_ts) - float(opened_ts))
         holds.append(hold)
-        pnl_r = float(pnl_usd) / PNL_R_USD_DENOM
+        # This position's own staked risk (canonical); a NULL/legacy row falls
+        # back to the per-stream R_budget, not a flat $50 (2026-07-07 re-base).
+        row_risk_usd = float(risk_usd) if risk_usd is not None else 0.0
+        if row_risk_usd > 0.0:
+            pnl_r = realised_r(pnl_usd=float(pnl_usd), risk_usd=row_risk_usd)
+        else:
+            pnl_r = float(pnl_usd) / (r_budget_for_venue(str(venue or "")) or PNL_R_USD_DENOM)
         if pnl_r < 0.0 and hold >= LOSER_TIMEOUT_SEC:
             loser_timeouts += 1
         sym = str(symbol)

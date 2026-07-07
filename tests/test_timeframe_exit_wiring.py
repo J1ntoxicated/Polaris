@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_close_helpers import (
     _close_excursion_r,
@@ -90,16 +90,17 @@ def _seed_position(
     opened_ts: int = NOW,
     entry_atr_pct: float | None = None,
     entry_atr_timeframe: str | None = None,
+    risk_usd: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO positions "
         "(position_id, venue, symbol, underlying_group_id, strategy_id, "
         " entry_strategy_id, active_strategy_id, side, qty, status, "
-        " opened_ts, swap_count, entry_atr_pct, entry_atr_timeframe) "
+        " opened_ts, swap_count, entry_atr_pct, entry_atr_timeframe, risk_usd) "
         "VALUES (?, 'okx', 'BTC-USDT', 'crypto:BTC', ?, ?, ?, ?, 0.001, "
-        " 'open', ?, 0, ?, ?)",
+        " 'open', ?, 0, ?, ?, ?)",
         (position_id, strategy, strategy, strategy, side, opened_ts,
-         entry_atr_pct, entry_atr_timeframe),
+         entry_atr_pct, entry_atr_timeframe, risk_usd),
     )
     conn.execute(
         "INSERT INTO fills "
@@ -326,16 +327,16 @@ async def test_open_path_stamps_null_when_no_bars(
 # --- close path shares the anchored denominator ------------------------------
 
 
-def test_close_pnl_r_is_stream_common_not_atr_anchor(memdb: sqlite3.Connection) -> None:
-    # Step N (2026-06-23): the realised-R denominator is the per-stream R_budget
-    # (0.02 × OKX $79k = $1,580), NO LONGER the per-trade ATR anchor. The entry
-    # fill is size_usd=80 @ entry 100, so exit 98 (long) → pnl_usd = -2/100*80 =
-    # -$1.60 → pnl_r = -1.60 / 1580. The 0.04 anchor here no longer affects
-    # realised R (it drives only the excursion mfe_r/mae_r path).
+def test_close_pnl_r_uses_position_risk_usd_not_atr_anchor(memdb: sqlite3.Connection) -> None:
+    # 2026-07-07 re-base: the realised-R denominator is THIS position's own
+    # persisted risk_usd, NOT the per-stream R_budget and NOT the entry_atr_pct
+    # anchor directly (the anchor only feeds risk_usd at the ENTRY stamp site,
+    # not here). The entry fill is size_usd=80 @ entry 100, so exit 98 (long)
+    # -> pnl_usd = -2/100*80 = -$1.60 -> pnl_r = realised_r(-1.60, risk_usd).
     _seed_bars(memdb, interval="1m", n=14, band=0.05, close=100.0)
     _seed_position(
         memdb, position_id="pos-close", strategy="ema_crossover",
-        entry_atr_pct=0.04, entry_atr_timeframe="1H",
+        entry_atr_pct=0.04, entry_atr_timeframe="1H", risk_usd=20.0,
     )
     trade = _trade("pos-close")
     pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
@@ -343,29 +344,29 @@ def test_close_pnl_r_is_stream_common_not_atr_anchor(memdb: sqlite3.Connection) 
     )
     assert exit_price == 98.0
     assert pnl_usd == pytest.approx(-1.60)
-    assert pnl_r == pytest.approx(pnl_usd / r_budget_for_venue("okx"))
+    assert pnl_r == pytest.approx(realised_r(pnl_usd=pnl_usd, risk_usd=20.0))
 
 
-def test_close_pnl_r_independent_of_atr_anchor_presence(
+def test_close_pnl_r_zero_when_risk_usd_unset(
     memdb: sqlite3.Connection,
 ) -> None:
-    # Two positions, SAME $ outcome, one with an ATR anchor and one legacy-NULL:
-    # the stream-common R is IDENTICAL (the anchor no longer touches realised R).
+    """A legacy/NULL-risk_usd position yields pnl_r == 0.0 (unknowable risk,
+    never guessed) — the OPPOSITE of the retired Step-N anchor-independence
+    property, which is exactly the point: risk_usd IS now the denominator."""
     _seed_bars(memdb, interval="1m", n=14, band=0.25, close=100.0)
     _seed_position(
         memdb, position_id="pos-anch", strategy="ema_crossover",
-        entry_atr_pct=0.04, entry_atr_timeframe="1H",
+        entry_atr_pct=0.04, entry_atr_timeframe="1H", risk_usd=None,
     )
-    _seed_position(memdb, position_id="pos-null", strategy="ema_crossover")
+    _seed_position(memdb, position_id="pos-null", strategy="ema_crossover", risk_usd=None)
     r_anch, _u1, _e1 = real_pnl_r_from_fills(
         memdb, trade=_trade("pos-anch"), exit_price_override=99.0,
     )
     r_null, _u2, _e2 = real_pnl_r_from_fills(
         memdb, trade=_trade("pos-null"), exit_price_override=99.0,
     )
-    # pnl_usd = -1/100*80 = -$0.80 → -0.80 / 1580, regardless of the anchor.
-    assert r_anch == pytest.approx(-0.80 / r_budget_for_venue("okx"))
-    assert r_anch == pytest.approx(r_null)
+    assert r_anch == 0.0
+    assert r_null == 0.0
 
 
 def test_close_excursion_uses_entry_anchor(memdb: sqlite3.Connection) -> None:

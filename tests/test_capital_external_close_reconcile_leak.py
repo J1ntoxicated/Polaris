@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.metrics.risk_unit import r_budget_for_venue
+from polaris.core.metrics.risk_unit import realised_r
 from polaris.scripts import _production_close as pc
 from polaris.scripts._production_close import _close_trade_with_real_pnl
 from polaris.scripts._smoke_fills import SimulatedTrade
@@ -194,7 +194,7 @@ async def test_external_close_books_true_realised_pnl(
     assert row[0] is not None
     expected_pnl_usd = (mark - entry) / entry * size_usd
     assert row[0] == pytest.approx(
-        expected_pnl_usd / r_budget_for_venue("capital"), rel=1e-6,
+        realised_r(pnl_usd=expected_pnl_usd, risk_usd=24.5), rel=1e-6,
     )
     assert row[0] > 0.0  # captured a real WIN, not discarded
 

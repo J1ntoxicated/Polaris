@@ -102,7 +102,13 @@ class OpsConfig:
 
     @property
     def start_cmd(self) -> list[str]:
-        """CLAUDE.md Quick reference start command — absolute paths only."""
+        """CLAUDE.md Quick reference start command — absolute paths only.
+
+        VIRTUAL ACCOUNT (Jin 2026-07-07): ``--real-roundtrip`` dropped —
+        ``POLARIS_VIRTUAL_ACCOUNT=1`` (set in ``botctl._spawn``'s env) forces
+        ``real_roundtrip`` off so every fill is fully internal-ledger
+        simulated with zero real-venue order/reconcile/balance calls.
+        """
         return [
             str(self.python_bin),
             "-m", "polaris.scripts.ignite_p1",
@@ -110,7 +116,6 @@ class OpsConfig:
             "--duration", str(self.duration_sec),
             "--tick", "5",
             "--full-pipeline",
-            "--real-roundtrip",
             "--db", str(self.db_path),
             "-vv",
             "--log-file", str(self.bot_log),

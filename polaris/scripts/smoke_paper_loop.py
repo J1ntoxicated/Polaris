@@ -40,6 +40,10 @@ from polaris.scripts._smoke_real_roundtrip import (
     run_okx_round_trip,
 )
 from polaris.scripts._smoke_state import FOCUS, FocusEntry, LoopState
+from polaris.scripts._virtual_account import (
+    resolve_real_roundtrip,
+    virtual_account_enabled,
+)
 from polaris.storage.schema import init_db
 from polaris.strategies import (
     BarBreakoutRunStrategy,
@@ -325,6 +329,11 @@ async def run_smoke(
     ``ignite_p1`` passes its own path so paper-mode persists to the same DB
     that bootstrap created (codex Day 6 P0 fix)."""
     _load_dotenv()
+    # VIRTUAL ACCOUNT (Jin 2026-07-07): forces real_roundtrip off — this
+    # standalone Day-6 smoke CLI is a separate real-order-capable entry point
+    # (real_okx/real_capital probes + real_roundtrip round-trip below), so it
+    # gets the same override as ignite()/run_production_paper_loop().
+    real_roundtrip = resolve_real_roundtrip(real_roundtrip)
     if db_path is None:
         db_path = Path("data/polaris.sqlite")
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,9 +371,13 @@ async def run_smoke(
     real_capital_result: dict[str, Any] = {"skipped": True}
     real_round_trip_okx: dict[str, Any] = {"skipped": True}
     real_round_trip_cap: dict[str, Any] = {"skipped": True}
-    if real_okx:
+    # VIRTUAL ACCOUNT (Jin 2026-07-07): real_okx/real_capital are independent
+    # real-order probe flags (not threaded through real_roundtrip) — force
+    # them off too under virtual mode so no real venue order fires here.
+    virtual = virtual_account_enabled()
+    if real_okx and not virtual:
         real_okx_result = await real_okx_probe()
-    if real_capital:
+    if real_capital and not virtual:
         real_capital_result = await real_capital_probe()
     if real_roundtrip:
         real_round_trip_okx = await run_okx_round_trip(

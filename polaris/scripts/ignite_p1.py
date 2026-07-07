@@ -73,6 +73,7 @@ from polaris.scripts._production_layers import (
     refresh_focus_watchlist,
     refresh_okx_universe_once,
 )
+from polaris.scripts._virtual_account import resolve_real_roundtrip
 from polaris.scripts.production_paper_loop import (
     DEFAULT_DURATION_SEC as SMOKE_DURATION_SEC,
 )
@@ -246,6 +247,11 @@ async def ignite(
     """
     started = int(time.time())
     _load_dotenv()
+    # VIRTUAL ACCOUNT (Jin 2026-07-07): POLARIS_VIRTUAL_ACCOUNT=1 forces
+    # real_roundtrip off regardless of the caller-requested value — every
+    # venue touch point downstream is already gated behind real_roundtrip
+    # (see _virtual_account.py). Default off: byte-identical unless set.
+    real_roundtrip = resolve_real_roundtrip(real_roundtrip)
     target_db = db_path or Path("data/polaris.sqlite")
     target_db.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(target_db)

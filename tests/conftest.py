@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -78,6 +80,44 @@ def _reset_log_dedup_caches() -> Iterator[None]:
         rate=_okx_adapter.CANDLES_RATE, per_sec=_okx_adapter.CANDLES_PER_SEC
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_root_logger_handlers() -> Iterator[None]:
+    """Drop root-logger handlers installed by any test, after every test.
+
+    Root-cause fix (Jin 2026-07-07, "smoke harness fixture leak" — evidence:
+    ``data/paper/polaris_runtime.log`` interleaved live-bot lines with
+    ``pos-stophit``/``pos-g7exit``/``pos-2``/``pos-B`` fixture position IDs
+    that exist ONLY in ``tests/test_live_recalc_loop.py`` /
+    ``tests/test_okx_pooled_wallet_close.py``, plus an
+    ``argv=['--db', '.../pytest.../polaris.sqlite']`` line with no
+    ``--log-file`` override). Any test that calls ``ignite_p1.main()`` /
+    ``ignite()`` / ``run_production_paper_loop()``'s CLI (e.g.
+    ``test_ignite_main_dry_run_exits_zero``) invokes
+    ``setup_polaris_logging(log_file=DEFAULT_LOG_FILE)`` — argparse's
+    ``--log-file`` default is the SAME path the live bot writes to
+    (``data/paper/polaris_runtime.log``). ``logging.basicConfig(force=True)``
+    then REPLACES the process-global root handlers with a
+    ``RotatingFileHandler`` pointed at that shared file, with NO teardown —
+    so every later test in the same pytest process (including pure in-memory
+    unit tests with zero file I/O intent) has its ``logger.info(...)`` calls
+    silently appended to the live bot's runtime log for the rest of the
+    pytest session. This was NEVER a live ``state.open_trades`` contamination
+    (no fixture position ever entered the real loop's in-memory state) — it
+    is a logging-handler leak, the same class of process-global test
+    pollution ``polaris_test_vault`` (above) already fixed for the vault dir.
+    Mirrors ``tests/test_logging_config.py``'s local ``_reset_root_logger``
+    fixture, applied suite-wide so no test anywhere can leave the root logger
+    pointed at a real file after it finishes.
+    """
+    yield
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        with contextlib.suppress(Exception):
+            h.close()
+    root.setLevel(logging.WARNING)
 
 
 @pytest.fixture

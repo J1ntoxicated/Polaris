@@ -94,6 +94,7 @@ from polaris.scripts._static_ground import (
     ingest_static_ground_bars,
     refresh_ticker_ground,
 )
+from polaris.scripts._virtual_account import resolve_real_roundtrip
 from polaris.scripts.reconcile_alpaca_zombies import (
     reconcile_alpaca_qty_drift,
     reconcile_alpaca_venue_drift,
@@ -697,6 +698,11 @@ async def run_production_paper_loop(
     shared across ticks; Capital reuses the loop-owned session.
     """
     _load_dotenv()
+    # VIRTUAL ACCOUNT (Jin 2026-07-07): POLARIS_VIRTUAL_ACCOUNT=1 forces
+    # real_roundtrip off here too (defense in depth — this function is called
+    # directly by smoke_paper_loop / tests, not only via ignite()). Every
+    # venue touch point downstream is already gated behind real_roundtrip.
+    real_roundtrip = resolve_real_roundtrip(real_roundtrip)
     target_db = db_path or Path("data/polaris.sqlite")
     # P0-1 venue-safety: real demo orders must NEVER write into the shared
     # simulate-only DB (``data/polaris.sqlite``). Refuse to start so a real

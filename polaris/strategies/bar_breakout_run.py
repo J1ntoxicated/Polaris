@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -41,8 +42,11 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-DONCHIAN_WINDOW: Final[int] = 40
-ROC_LOOKBACK: Final[int] = 10
+# VIRTUAL-mode loosening (Jin 2026-07-07): 40->20-bar Donchian (~2-2.5x trigger
+# rate) + ROC-10->5 (still a positive-momentum confirm, shorter). REAL is
+# byte-identical (env unset -> real wins).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 40)
+ROC_LOOKBACK: Final[int] = virtual_loosen(5, 10)
 
 # Strength curve (frozen v1). Strength scales with the raw ROC-10 momentum,
 # floored so a bare breakout still sizes meaningfully and capped at 1.0.
@@ -91,8 +95,11 @@ class BarBreakoutRunStrategy(BaseStrategy):
         last = bars[-1]
 
         # Donchian-40 prior-high: EXCLUDE the current closing bar (no look-ahead).
-        # Prefer the pre-fed indicator when finite; else recompute from bars.
-        if is_finite(market_view.donchian_high_40):
+        # Reuse the pre-fed indicator when finite AND DONCHIAN_WINDOW is still 40
+        # (REAL mode only — the pre-fed field is a fixed 40-bar Donchian high, not
+        # valid as a stand-in once VIRTUAL mode loosens the window to 20), else
+        # recompute in-module at the (possibly loosened) window.
+        if DONCHIAN_WINDOW == 40 and is_finite(market_view.donchian_high_40):
             prior_high = market_view.donchian_high_40
         else:
             prior_high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])

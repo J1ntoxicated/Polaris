@@ -53,6 +53,7 @@ from __future__ import annotations
 from typing import Final
 
 from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
+from polaris.strategies._virtual_loosen import virtual_loosen, virtual_mode_enabled
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -62,7 +63,12 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-EMA_FILTER: Final[int] = 200
+# VIRTUAL-mode loosening (Jin 2026-07-07): 200->50-EMA regime filter fires much
+# sooner; the shallow-pullback-only gate (MACD<=0) is DROPPED in virtual (see
+# generate_raw_signal below) so any bullish cross inside the (now 50-EMA)
+# uptrend admits — still trend-continuation, just not pullback-restricted.
+# REAL byte-identical (env unset).
+EMA_FILTER: Final[int] = virtual_loosen(50, 200)
 MACD_FAST: Final[int] = 12
 MACD_SLOW: Final[int] = 26
 MACD_SIGNAL: Final[int] = 9
@@ -107,7 +113,7 @@ class MACDEMATrendPullbackStrategy(BaseStrategy):
     metadata = StrategyMetadata(
         strategy_id="macd_ema_trend_pullback",
         timeframe="1D",
-        warmup_bars=EMA_FILTER + MACD_SLOW + MACD_SIGNAL,  # 200 + 26 + 9 = 235
+        warmup_bars=EMA_FILTER + MACD_SLOW + MACD_SIGNAL,  # real 200+26+9=235
         max_positions=3,
         gross_cap=0.20,
         per_symbol_cap=0.07,
@@ -132,14 +138,16 @@ class MACDEMATrendPullbackStrategy(BaseStrategy):
         last = bars[-1]
         closes = [b.close for b in bars]
 
-        # (1) Regime filter: close > 200-EMA (uptrend). Reuse the pre-fed MA-200
-        # when finite, else recompute the 200-EMA from closes.
-        if is_finite(market_view.ma_200):
-            ema_200 = market_view.ma_200
-            assert ema_200 is not None
+        # (1) Regime filter: close > EMA_FILTER-EMA (uptrend). Reuse the pre-fed
+        # MA-200 when finite AND EMA_FILTER is still 200 (REAL mode only — the
+        # pre-fed field is a 200-period MA, not valid as a stand-in once VIRTUAL
+        # mode loosens EMA_FILTER to 50), else recompute in-module.
+        if EMA_FILTER == 200 and is_finite(market_view.ma_200):
+            ema_filter_val = market_view.ma_200
+            assert ema_filter_val is not None
         else:
-            ema_200 = _ema_last(closes, EMA_FILTER)
-        if last.close <= ema_200:
+            ema_filter_val = _ema_last(closes, EMA_FILTER)
+        if last.close <= ema_filter_val:
             return None
 
         # (2)+(3) MACD line/signal/histogram (recompute in-module). The MACD line
@@ -155,8 +163,11 @@ class MACDEMATrendPullbackStrategy(BaseStrategy):
         if not bullish_cross:
             return None
         # (3) re-acceleration AFTER a shallow pullback (NOT an exhaustion top):
-        # the MACD line must be at/below zero at the cross.
-        if line_now > 0.0:
+        # the MACD line must be at/below zero at the cross. VIRTUAL-mode
+        # loosening (Jin 2026-07-07): this is the single most restrictive
+        # filter in the set — DROP it in virtual (admit any bullish cross
+        # inside the uptrend), REAL keeps it byte-identical (env unset).
+        if not virtual_mode_enabled() and line_now > 0.0:
             return None
 
         # (4) Volume confirm: current volume > the 20-bar average volume.
@@ -186,7 +197,7 @@ class MACDEMATrendPullbackStrategy(BaseStrategy):
                 "macd_line": f"{line_now:.6f}",
                 "macd_signal": f"{sig_now:.6f}",
                 "macd_hist": f"{hist:.6f}",
-                "ema_200": f"{ema_200:.4f}",
+                "ema_200": f"{ema_filter_val:.4f}",
             },
         )
 

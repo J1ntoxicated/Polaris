@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -55,7 +56,10 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-DONCHIAN_WINDOW: Final[int] = 55
+# VIRTUAL-mode loosening (Jin 2026-07-07): 55->30-bar (~2x trigger rate); the
+# risk-off amplifier only sizes, never gates — entry loosens via lookback only.
+# REAL byte-identical (env unset).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(30, 55)
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_TRAIL_MULT: Final[float] = 3.0
 ATR_STOP_MULT: Final[float] = 2.0

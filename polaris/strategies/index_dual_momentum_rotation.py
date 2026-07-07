@@ -50,6 +50,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -60,7 +61,11 @@ from polaris.strategies.base import (
 )
 
 ROC_LOOKBACK: Final[int] = 120
-TOP_N: Final[int] = 2
+# VIRTUAL-mode loosening (Jin 2026-07-07): TOP_N 2->4 admits more of the 5-index
+# set per rebalance while the ABSOLUTE-momentum gate (ROC_120>0) stays intact —
+# still dual-momentum, not a bare admit. Monthly cadence (the fee-immunity) is
+# UNTOUCHED. REAL byte-identical (env unset).
+TOP_N: Final[int] = virtual_loosen(4, 2)
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_STOP_MULT: Final[float] = 2.5
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -36,9 +37,11 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-# A deep over-sold flush — tighter than a routine RSI-BB pullback (the weekend
+# VIRTUAL-mode loosening (Jin 2026-07-07): 25->35 is still a normal over-sold
+# level (not noise), ~2-3x trigger rate. REAL byte-identical (env unset). A
+# deep over-sold flush — tighter than a routine RSI-BB pullback (the weekend
 # thesis wants a genuine over-correction, not a shallow dip).
-RSI_FLUSH_THRESHOLD = 25.0
+RSI_FLUSH_THRESHOLD = virtual_loosen(35.0, 25.0)
 WARMUP_BARS = 24  # enough for RSI(14) + a Bollinger(20) lower band
 
 # Clean-revert harvest target (R). The research asymmetry: clean fill +~0.30R /
@@ -84,7 +87,11 @@ class WeekendThinBookFlushMakerStrategy(BaseStrategy):
         # every block (WIN 5.4%) and the FIX-EXIT 3×ATR R-unit only flips the
         # MEDIAN positive (mean still −0.105R, single ~20wk period). So the order
         # is SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
-        shadow_first=True,
+        # VIRTUAL-mode loosening (Jin 2026-07-07): no real capital is at risk in
+        # virtual, so shadow-suppression is un-needed — un-shadow so the order
+        # actually routes (currently shadow-only → 0 real fills to observe).
+        # REAL keeps shadow_first=True byte-identical (env unset).
+        shadow_first=virtual_loosen(False, True),
         # bars-EXTERNAL input: the weekend thin-book edge is a live orderbook/
         # fill-path condition, not solely the 1H bar close — the bar-advance
         # dispatch gate must not suppress a re-eval (compute-scheduling

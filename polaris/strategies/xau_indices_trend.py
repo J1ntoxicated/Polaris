@@ -13,6 +13,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -22,8 +23,11 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-DONCHIAN_WINDOW = 30
-MOMENTUM_LOOKBACK = 20
+# VIRTUAL-mode loosening (Jin 2026-07-07): already the loosest of the family
+# (D-30, both long+short) — halve to 15/10, still a channel-break + momentum
+# trigger. REAL byte-identical (env unset).
+DONCHIAN_WINDOW = virtual_loosen(15, 30)
+MOMENTUM_LOOKBACK = virtual_loosen(10, 20)
 # 'GOLD' is the LIVE Capital commodity symbol (asset_class=commodity); 'XAUUSD'
 # is kept for safety (additive, not a replace) so any path still carrying the
 # legacy spelling matches too. Without 'GOLD' the symbol gate below rejected the
@@ -69,7 +73,11 @@ class XAUIndicesTrendStrategy(BaseStrategy):
         if len(bars) < max(DONCHIAN_WINDOW, MOMENTUM_LOOKBACK) + 1:
             return None
         last = bars[-1]
-        if is_finite(market_view.momentum_20bar):
+        # Reuse the pre-fed momentum/Donchian fields only when their loosened
+        # window still matches the pre-fed (fixed) window — REAL mode only. In
+        # VIRTUAL mode (windows loosened to 15/10) the pre-fed 30/20-bar fields
+        # are not a valid stand-in, so recompute in-module at the loosened window.
+        if MOMENTUM_LOOKBACK == 20 and is_finite(market_view.momentum_20bar):
             momentum = market_view.momentum_20bar
         else:
             past_close = bars[-(MOMENTUM_LOOKBACK + 1)].close
@@ -78,7 +86,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
             momentum = (last.close - past_close) / past_close
         if momentum is None:
             return None
-        if is_finite(market_view.donchian_high_30):
+        if DONCHIAN_WINDOW == 30 and is_finite(market_view.donchian_high_30):
             high = market_view.donchian_high_30
         else:
             high = max(b.high for b in bars[-(DONCHIAN_WINDOW + 1):-1])
@@ -102,7 +110,7 @@ class XAUIndicesTrendStrategy(BaseStrategy):
                       "donchian_high_30": f"{high:.4f}",
                       "leverage": f"{int(LEVERAGE_MAX)}"},
             )
-        if is_finite(market_view.donchian_low_30):
+        if DONCHIAN_WINDOW == 30 and is_finite(market_view.donchian_low_30):
             low = market_view.donchian_low_30
         else:
             low = min(b.low for b in bars[-(DONCHIAN_WINDOW + 1):-1])

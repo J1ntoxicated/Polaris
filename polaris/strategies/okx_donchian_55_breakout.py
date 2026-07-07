@@ -48,6 +48,7 @@ from __future__ import annotations
 from typing import Final
 
 from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -57,7 +58,10 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-DONCHIAN_WINDOW: Final[int] = 55
+# VIRTUAL-mode loosening (Jin 2026-07-07, "그만 묶어"): 55->20-bar channel is the
+# Turtle-1 fast lookback, ~2.5-3x the trigger rate, still a genuine breakout +
+# momentum confirm. REAL is byte-identical (unset env -> real wins).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 55)
 ROC_LOOKBACK: Final[int] = 20
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_STOP_MULT: Final[float] = 2.0

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -48,8 +49,11 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-HIGH_LOOKBACK: Final[int] = 252
-PROXIMITY: Final[float] = 0.98
+# VIRTUAL-mode loosening (Jin 2026-07-07): 252->120-bar (6-month) high is still
+# a legit multi-month breakout; 3%-proximity band widens the "near-high" catch.
+# REAL byte-identical (env unset).
+HIGH_LOOKBACK: Final[int] = virtual_loosen(120, 252)
+PROXIMITY: Final[float] = virtual_loosen(0.97, 0.98)
 ROC_LOOKBACK: Final[int] = 60
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_STOP_MULT: Final[float] = 2.0

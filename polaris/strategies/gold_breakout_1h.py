@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -41,7 +42,9 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-DONCHIAN_WINDOW: Final[int] = 55
+# VIRTUAL-mode loosening (Jin 2026-07-07): 55->20-bar channel, ~2.5-3x trigger
+# rate, same 1H gold breakout mechanism. REAL byte-identical (env unset).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 55)
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 EXIT_DONCHIAN: Final[int] = 20
 

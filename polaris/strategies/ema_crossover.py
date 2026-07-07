@@ -43,6 +43,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -54,7 +55,9 @@ from polaris.strategies.base import (
 
 EMA_FAST = 20
 EMA_SLOW = 50
-EMA_REGIME = 200
+# VIRTUAL-mode loosening (Jin 2026-07-07): 200->50-EMA regime filter fires
+# sooner (cross+regime+ADX mechanism unchanged). REAL byte-identical.
+EMA_REGIME = virtual_loosen(50, 200)
 ADX_THRESHOLD = 14.0  # relaxed 20 -> 14 (flow_not_block, more emits): a weaker-trend EMA cross now fires
 
 # Strength curve (frozen v1): a stronger trend (higher ADX) → stronger signal.
@@ -118,7 +121,12 @@ class EMACrossoverStrategy(BaseStrategy):
         # positions still exit via the recalc loop). flow_not_block-safe: an edgeless
         # strategy is retired at the source, it neither halts nor dampens any other
         # strategy's size.
-        dispatch_eligible=False,
+        # VIRTUAL-mode loosening (Jin 2026-07-07): the KILL was for fee-fatality
+        # ONLY (gross +$0.12 < the real OKX taker fee $2.37) — virtual has no
+        # real fees, so un-KILL (dispatch_eligible=True) in virtual mode; this is
+        # the actual unleash for this strategy (0 -> live). REAL stays the
+        # byte-identical KILL (env unset).
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
@@ -142,10 +150,13 @@ class EMACrossoverStrategy(BaseStrategy):
         if not crossed_up:
             return None
 
-        # 2. EMA200 regime: only take the cross on the right side of the dominant
-        #    trend. Prefer the orchestrator-fed ma_200 (populated on the spot
-        #    stream); fall back to an in-strategy compute when absent.
-        if is_finite(market_view.ma_200):
+        # 2. EMA_REGIME regime: only take the cross on the right side of the
+        #    dominant trend. Prefer the orchestrator-fed ma_200 (populated on the
+        #    spot stream) ONLY when EMA_REGIME is still 200 (REAL mode — the
+        #    pre-fed field is a 200-period MA, not valid once VIRTUAL mode
+        #    loosens EMA_REGIME to 50); fall back to an in-strategy compute
+        #    otherwise.
+        if EMA_REGIME == 200 and is_finite(market_view.ma_200):
             ema200 = market_view.ma_200
         elif len(closes) >= EMA_REGIME:
             ema200 = _ema(closes, EMA_REGIME)

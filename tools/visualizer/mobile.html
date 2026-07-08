@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
+<meta http-equiv="Cache-Control" content="no-store"/>
+<title>POLARIS · Mobile</title>
+<link rel="stylesheet" href="static/polaris.css"/>
+<style>
+  /* iPhone single-column. Dark minimal, existing #board palette only — no new
+     colors. All values pulled from /api/snapshot (1s poll). English chrome.
+     Focus: a COMPACT status line, then the two main sections the phone is for —
+     Open Positions + live Gate Activity. */
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--p-wht);
+    font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap {
+    max-width: 430px;
+    margin: 0 auto;
+    padding: 14px 14px 40px;
+    box-sizing: border-box;
+  }
+  /* Header: bot status + small twinkling Polaris star. */
+  .hdr {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--ghost);
+  }
+  .star {
+    font-size: 18px; line-height: 1;
+    color: var(--polaris-blue);
+    animation: twinkle 2.4s ease-in-out infinite;
+  }
+  @keyframes twinkle {
+    0%, 100% { opacity: 0.45; transform: scale(0.92); }
+    50%      { opacity: 1;    transform: scale(1.08); }
+  }
+  .hdr .name { font-size: 13px; letter-spacing: 1px; color: var(--p-wht); }
+  .hdr .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--p-dim); margin-left: auto;
+  }
+  .hdr .dot.live { background: var(--p-grn); }
+  .hdr .status { font-size: 11px; color: var(--p-gry); }
+
+  /* Neural Cloud globe — same Canvas 2D engine as desktop, kept COMPACT at the
+     top (~28-30vh) so it reads as a small cloud, not the whole screen. Constellation
+     pulled inward via setBaseZoom 0.6 (see inline script below). */
+  .globe-pane {
+    position: relative;
+    width: 100%;
+    height: 29vh; min-height: 160px; max-height: 250px;
+    margin: 8px 0 2px;
+    overflow: hidden;
+  }
+  canvas#sphere {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    touch-action: pan-y;   /* let the page scroll over the canvas */
+  }
+  /* live ticker line under the globe (fed by globe-flows updateTicker). */
+  #ticker {
+    font-size: 9px; letter-spacing: 0.06em;
+    color: var(--p-dim); text-align: center;
+    padding: 1px 0 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #tooltip { display: none; }
+
+  /* Compact status strip — Equity + Today P&L on one tight line. Small, not hero. */
+  /* Two aligned columns: EQUITY (demo + real-fee-net) | TODAY ($ + %). No wrap. */
+  .strip {
+    display: grid; grid-template-columns: 1fr auto;
+    padding: 6px 0 4px;
+    border-bottom: 1px solid var(--bg-row-alt);
+  }
+  .strip .cell { display: flex; flex-direction: column; gap: 1px; }
+  .strip .cell.r { text-align: right; }
+  .strip .k { font-size: 9px; letter-spacing: 0.6px; color: var(--p-gry); }
+  .strip .v { font-size: 16px; color: var(--p-wht); font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .strip .sub { font-size: 10px; color: var(--p-dim); font-variant-numeric: tabular-nums; }
+  .strip .v.pos, .strip .sub.pos { color: var(--pnl-pos); }
+  .strip .v.neg, .strip .sub.neg { color: var(--pnl-neg); }
+
+  .sec { margin-top: 16px; }
+  .sec h2 {
+    display: flex; align-items: baseline;
+    font-size: 10px; letter-spacing: 1.5px; font-weight: 600;
+    color: var(--p-gry); text-transform: uppercase;
+    margin: 0 0 6px; padding-bottom: 4px;
+    border-bottom: 1px solid var(--ghost);
+  }
+  .sec h2 .cnt {
+    margin-left: auto; color: var(--p-dim); font-size: 9px; letter-spacing: 1px;
+  }
+  /* Collapsible section (every section except Open Positions). The h2 toggles;
+     the body folds. Chevron points down when open, right when collapsed. State
+     persists in localStorage (mobile.js wireCollapse). */
+  .sec.collapsible h2 { cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .sec.collapsible h2:active { color: var(--p-cyn); }
+  .sec.collapsible h2 .chev {
+    width: 0; height: 0; margin-right: 7px; flex: 0 0 auto; align-self: center;
+    border-left: 4px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+    transform: rotate(90deg); transition: transform 0.12s ease; opacity: 0.8;
+  }
+  .sec.collapsible.collapsed h2 .chev { transform: rotate(0deg); }
+  .sec.collapsible.collapsed > div { display: none; }
+
+  /* Venue stream colours (SSOT mirror of desktop #board --stream-a/b/c). mobile
+     is standalone (no board_*.js), so the vars are defined locally here. OKX cyan
+     / Capital purple / Alpaca amber — same hexes as static/board.js. */
+  :root {
+    --stream-a: #5fdfff;   /* OKX */
+    --stream-b: #a87cff;   /* Capital */
+    --stream-c: #ffc84f;   /* Alpaca */
+  }
+  /* Exchange colour label — small uppercase tag in front of a position row.
+     Matches the desktop per-position venue cue (coloured left-border + VEN cell). */
+  .vchip {
+    flex: 0 0 auto; font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
+    padding: 1px 5px; border-left: 3px solid var(--p-dim); color: var(--p-dim);
+    background: rgba(15,19,26,0.55);
+  }
+  .vchip.v-okx     { color: var(--stream-a); border-left-color: var(--stream-a); }
+  .vchip.v-capital { color: var(--stream-b); border-left-color: var(--stream-b); }
+  .vchip.v-alpaca  { color: var(--stream-c); border-left-color: var(--stream-c); }
+
+  /* ── Aligned tables (single-column phone). Every section is a real grid with a
+     header row so columns line up + are labelled. Fixed numeric columns, symbol
+     ellipsis-truncates, no overlap. Mirrors the desktop Open Positions style. ── */
+  .tbl { display: block; }
+  .thr, .tr {
+    display: grid; align-items: baseline; column-gap: 5px;
+    padding: 4px 0; border-bottom: 1px solid var(--bg-row-alt);
+    font-size: 11px; white-space: nowrap;
+  }
+  .thr {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--bg);
+    color: var(--p-dim); font-size: 8.5px; letter-spacing: 0.6px;
+    text-transform: uppercase; border-bottom: 1px solid var(--ghost);
+  }
+  .tr .num, .thr .num { font-variant-numeric: tabular-nums; }
+  .tr > span, .thr > span { overflow: hidden; text-overflow: ellipsis; }
+  .ta-r { text-align: right; }
+  .ta-c { text-align: center; }
+
+  /* Open Positions — chip · symbol · side · current(live) · profit · % · exp.
+     Dropped ENTRY on phone (overflow fix); current price is what matters live.
+     Sums comfortably under a 375px viewport. */
+  .pos-grid {
+    grid-template-columns: 24px minmax(34px,1fr) 14px 58px 58px 44px 44px;
+  }
+  .row .a { color: var(--p-wht); }
+  .row .b { color: var(--p-gry); font-size: 10px; text-align: center; }
+  .row .pxc { color: var(--p-wht); font-size: 10px; text-align: right; }  /* current (live) */
+  .row .sp  { text-align: right; }                                        /* profit */
+  .row .pct { font-size: 10px; text-align: right; }                       /* percent */
+  .row .exp { color: var(--p-gry); font-size: 10px; text-align: right; }  /* exposure */
+  /* Per-cell live-mark flash (SSE push): only a cell whose streamed value moved
+     flashes ~400ms green-up / red-down; unchanged cells stay put. */
+  .row .px-flash-up   { animation: pxup 0.42s ease-out; }
+  .row .px-flash-down { animation: pxdn 0.42s ease-out; }
+  @keyframes pxup { 0% { background: rgba(135,215,135,0.40); } 100% { background: transparent; } }
+  @keyframes pxdn { 0% { background: rgba(215,135,135,0.40); } 100% { background: transparent; } }
+  .empty { font-size: 11px; color: var(--p-dim); padding: 6px 0; }
+
+  /* Gate Decisions — G# · what it decided · n. */
+  .gd-grid { grid-template-columns: 26px 1fr 30px; }
+  .gd-grid .g  { color: var(--p-cyn); font-weight: 700; }
+  .gd-grid .hl { color: var(--p-grn); }
+  .gd-grid .n  { text-align: right; color: var(--p-dim); }
+
+  /* Gate Activity — TIME · G# · DECISION · SYMBOL  (grid so rows align). */
+  .ga-grid { grid-template-columns: 52px 26px 50px 1fr; }
+  .ga-grid .t { color: var(--p-dim); font-size: 10px; }
+  .ga-grid .g { color: var(--p-cyn); }
+  .ga-grid .v.pass  { color: var(--p-grn); }
+  .ga-grid .v.kill  { color: var(--p-red); }
+  .ga-grid .v.other { color: var(--p-ylw); }
+  .ga-grid .v.info  { color: var(--p-cyn); }
+  .ga-grid .sym { color: var(--p-wht); }
+
+  /* Probe Activity — TIME · PROBE · SYMBOL · LEAN/CONF. */
+  .pr-grid { grid-template-columns: 52px 1fr 56px 64px; }
+  .pr-grid .t { color: var(--p-dim); font-size: 10px; }
+  .pr-grid .pn { color: var(--p-cyn); }
+  .pr-grid .sym { color: var(--p-wht); }
+  .pr-grid .rd { text-align: right; }
+
+  .pos { color: var(--pnl-pos); }
+  .neg { color: var(--pnl-neg); }
+  .flat { color: var(--pnl-flat); }
+  .side-long  { color: var(--p-grn); }
+  .side-short { color: var(--p-red); }
+  .foot { margin-top: 22px; font-size: 9px; color: var(--p-dim); text-align: center; }
+
+  /* ── SINCE RESET line (Jin 2026-06-24) — forward edge since the latest main-
+       logic reset, mirrors the desktop board line. One compact row, no wrap. ── */
+  .sreset {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin: 6px 0 2px; padding: 5px 8px;
+    border: 1px solid rgba(95,175,255,.32); border-radius: 4px;
+    background: rgba(95,175,255,.06); font-size: 11px;
+  }
+  .sreset .tag { font-weight: 700; letter-spacing: .08em; color: var(--polaris-blue, #5fafff); font-size: 10px; }
+  .sreset .lbl { color: var(--p-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 38%; }
+  .sreset .kv { color: var(--p-gry); }
+  .sreset .kv b { font-weight: 700; color: var(--p-wht); margin-left: 3px; }
+  .sreset .kv b.pos { color: var(--pnl-pos); }
+  .sreset .kv b.neg { color: var(--pnl-neg); }
+
+  /* ── Tab bar (Jin 2026-06-24) — Main / Logic / Build / Roadmap / AI. Sticky
+       under the globe so the phone scans like the desktop tabs but condensed. ── */
+  .tabbar {
+    display: flex; gap: 2px; position: sticky; top: 0; z-index: 5;
+    background: var(--bg); padding: 6px 0 4px; margin-top: 6px;
+    border-bottom: 1px solid var(--ghost); overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tabbar button {
+    flex: 1 0 auto; appearance: none; -webkit-appearance: none;
+    background: transparent; border: 1px solid var(--ghost); border-radius: 4px;
+    color: var(--p-gry); font-family: inherit; font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; padding: 6px 9px; cursor: pointer; white-space: nowrap;
+  }
+  .tabbar button.on { color: var(--p-cyn); border-color: var(--p-cyn); background: rgba(95,175,255,.08); }
+  .tabpane { display: none; }
+  .tabpane.on { display: block; }
+
+  /* Recent Trades — TIME · SYM · side · P&L · R · why. Aligned grid, no wrap. */
+  .rt-grid { grid-template-columns: 48px minmax(34px,1fr) 12px 56px 40px 46px; }
+  .rt-grid .t { color: var(--p-dim); font-size: 10px; }
+  .rt-grid .sym { color: var(--p-wht); }
+  .rt-grid .s { text-align: center; font-size: 10px; }
+  .rt-grid .pl { text-align: right; }
+  .rt-grid .r { text-align: right; color: var(--p-gry); font-size: 10px; }
+  .rt-grid .why { text-align: right; color: var(--p-ylw); font-size: 9px; }
+
+  /* Logic / AI compact rows — name + value, one line each. */
+  .kv-grid { grid-template-columns: minmax(60px,1fr) auto auto auto; }
+  .kv-grid .nm { color: var(--p-cyn); }
+  .kv-grid .a, .kv-grid .b, .kv-grid .c { text-align: right; color: var(--p-gry); font-size: 10px; }
+
+  /* Build commit / Roadmap item / Lesson rows — single dense line each. */
+  .li {
+    display: flex; gap: 7px; align-items: baseline;
+    padding: 4px 0; border-bottom: 1px solid var(--bg-row-alt);
+    font-size: 10.5px; white-space: nowrap; overflow: hidden;
+  }
+  .li .when { color: var(--p-dim); font-size: 9px; flex: 0 0 auto; }
+  .li .what { color: var(--p-wht); overflow: hidden; text-overflow: ellipsis; }
+  .li .tg {
+    flex: 0 0 auto; font-size: 8px; letter-spacing: .06em; padding: 0 4px;
+    border: 1px solid var(--ghost); border-radius: 3px; color: var(--p-gry);
+  }
+  .li .tg.done  { color: var(--p-grn); border-color: var(--p-grn); }
+  .li .tg.build { color: var(--p-cyn); border-color: var(--p-cyn); }
+  .li .tg.next  { color: var(--p-ylw); border-color: var(--p-ylw); }
+  .ph-head { color: var(--p-gry); font-size: 10px; letter-spacing: .04em; margin: 10px 0 3px; text-transform: uppercase; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hdr">
+      <span class="star">★</span>
+      <span class="name">POLARIS</span>
+      <span class="status" id="status">connecting…</span>
+      <span class="dot" id="dot"></span>
+    </div>
+
+    <!-- Neural Cloud globe (same Canvas 2D engine as desktop). Self-driving:
+         globe-flows.js polls /static/graph.json every 1s and calls setGraph.
+         Kept compact at the top — Open Positions + Gate Activity are the focus. -->
+    <div class="globe-pane">
+      <canvas id="sphere"></canvas>
+      <div id="tooltip"></div>
+    </div>
+    <div id="ticker">--</div>
+
+    <!-- Compact status strip — small, not a hero block. -->
+    <div class="strip">
+      <div class="cell">
+        <span class="k">EQUITY</span>
+        <span class="v num" id="equity">—</span>
+        <span class="sub num" id="equity-sub">—</span>
+      </div>
+      <div class="cell r">
+        <span class="k">TODAY</span>
+        <span class="v num" id="pnl">—</span>
+        <span class="sub num" id="pnl-pct">—</span>
+      </div>
+    </div>
+
+    <!-- SINCE RESET — forward edge since the latest main-logic reset (mirrors the
+         desktop board). Hidden until a reset is stamped (mobile.js fills it). -->
+    <div class="sreset" id="sreset" style="display:none"></div>
+
+    <!-- Tab bar — Main / Logic / Build / Roadmap / AI. -->
+    <div class="tabbar" id="tabbar">
+      <button data-tab="main" class="on">Main</button>
+      <button data-tab="logic">Logic</button>
+      <button data-tab="build">Build</button>
+      <button data-tab="roadmap">Roadmap</button>
+      <button data-tab="ai">AI</button>
+    </div>
+
+    <!-- TAB · MAIN — Gate Decisions + Open Positions + Recent Trades. -->
+    <div class="tabpane on" id="tab-main">
+      <div class="sec collapsible" data-ck="m.collapse.gatedec">
+        <h2 role="button" tabindex="0" aria-expanded="true"><span class="chev" aria-hidden="true"></span>Gate Decisions <span class="cnt" id="gd-cnt"></span></h2>
+        <div id="gatedec"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Open Positions <span class="cnt" id="pos-cnt"></span></h2>
+        <div id="positions"></div>
+      </div>
+
+      <div class="sec collapsible" data-ck="m.collapse.recenttrades">
+        <h2 role="button" tabindex="0" aria-expanded="true"><span class="chev" aria-hidden="true"></span>Recent Trades <span class="cnt" id="rt-cnt"></span></h2>
+        <div id="recenttrades"></div>
+      </div>
+
+      <div class="sec collapsible collapsed" data-ck="m.collapse.gatefeed">
+        <h2 role="button" tabindex="0" aria-expanded="false"><span class="chev" aria-hidden="true"></span>Gate Activity <span class="cnt" id="gate-cnt"></span></h2>
+        <div id="gatefeed"></div>
+      </div>
+
+      <div class="sec collapsible collapsed" data-ck="m.collapse.probefeed">
+        <h2 role="button" tabindex="0" aria-expanded="false"><span class="chev" aria-hidden="true"></span>Probe Activity <span class="cnt" id="probe-cnt"></span></h2>
+        <div id="probefeed"></div>
+      </div>
+    </div>
+
+    <!-- TAB · LOGIC — per-strategy edge + learners + regime (snapshot, condensed). -->
+    <div class="tabpane" id="tab-logic">
+      <div class="sec"><h2>Per-Strategy <span class="cnt" id="strat-cnt"></span></h2><div id="stratlist"></div></div>
+      <div class="sec"><h2>Learners <span class="cnt" id="lrn-cnt"></span></h2><div id="lrnlist"></div></div>
+      <div class="sec"><h2>Regime <span class="cnt" id="rgm-cnt"></span></h2><div id="rgmlist"></div></div>
+    </div>
+
+    <!-- TAB · BUILD — recent commits + test count (GET /api/buildlog, condensed). -->
+    <div class="tabpane" id="tab-build">
+      <div class="sec"><h2>Build <span class="cnt" id="build-cnt"></span></h2><div id="buildlist"></div></div>
+    </div>
+
+    <!-- TAB · ROADMAP — phase items + next (GET /api/roadmap, condensed). -->
+    <div class="tabpane" id="tab-roadmap">
+      <div class="sec"><h2>Roadmap <span class="cnt" id="road-cnt"></span></h2><div id="roadlist"></div></div>
+    </div>
+
+    <!-- TAB · AI — admission shadow + gpt stats (snapshot, condensed). AI-free core. -->
+    <div class="tabpane" id="tab-ai">
+      <div class="sec"><h2>AI Shadow <span class="cnt" id="ai-cnt"></span></h2><div id="ailist"></div></div>
+    </div>
+
+    <div class="foot">DEMO / PAPER · display-only · polls every 1s · <a href="/?desktop=1" style="color:var(--polaris-blue);text-decoration:none">Desktop ▸</a></div>
+  </div>
+
+  <!-- Neural Cloud globe engine — SAME scripts as desktop index.html. Each binds
+       to canvas#sphere, reads /static/graph.json on its own 1s loop, and renders.
+       Load order: core → satellites → flows → funnel (each wraps the prior). -->
+  <script src="static/globe-core.js?v=26_tierlod"></script>
+  <script src="static/globe-satellites.js?v=23_layered"></script>
+  <script src="static/globe-flows.js?v=24_onionsync"></script>
+  <script src="static/globe-funnel.js?v=23_layered"></script>
+  <script>
+    // Globe fits to canvas clientWidth/Height; nudge resize after layout settles
+    // so fit() picks up the real mobile pane size (not an initial guess). Pull the
+    // constellation in tighter (base zoom 0.6) so it stays a small compact cloud
+    // inside the shorter top pane instead of overflowing.
+    function mobileGlobeFit() {
+      window.dispatchEvent(new Event('resize'));
+      if (window.PolarisGlobe && window.PolarisGlobe.setBaseZoom) {
+        window.PolarisGlobe.setBaseZoom(0.6);
+      }
+    }
+    window.addEventListener('load', function () {
+      requestAnimationFrame(mobileGlobeFit);
+      setTimeout(mobileGlobeFit, 250);
+    });
+  </script>
+  <script src="static/mobile.js?v=19_tabs_sreset"></script>
+</body>
+</html>

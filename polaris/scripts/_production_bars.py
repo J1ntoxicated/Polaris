@@ -214,13 +214,29 @@ TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
 # the warmup-depth fix is purely additive (no block / no warmup hurdle lowered;
 # the 252-bar-high edge is untouched). Intraday tf stay 240 so the Alpaca 429
 # avoidance is preserved exactly.
+#
+# 15m → 400 (Jin 2026-07-09, rsi_bb_pullback silent-INERT part A): the overnight
+# source audit measured ~50-56% of OKX 15m bars as forward-fill synthetic (flat
+# OHLC / vol<=0); rsi_bb_pullback's ma_200 filter needs 200 REAL bars, so the
+# 240-bar window (~120 real at that synthetic fraction) left only ~14% of the
+# 227-symbol universe with a computable ma_200 (the strategy was 0/2244 signals
+# for want of real-bar depth, not the entry threshold). A 400-bar window at the
+# same ~50% real fraction yields ~200 real bars, clearing ma_200 for the
+# majority of the universe. The DB already holds 1300+ 15m bars/symbol, so this
+# is purely a deeper READ slice of existing history — no new fetch pressure, and
+# OKX 15m is NOT on the Alpaca-429-bounded path this default protects. Mirrors
+# the existing 1D→260 warmup-depth precedent. ALL-MODES infra (not env-gated):
+# read depth only, no threshold lowered, no edge changed — REAL rsi_bb stays
+# dispatch-off regardless.
 _DEFAULT_BAR_FETCH_LIMIT = 240
-_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260}
+_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260, "15m": 400}
 
 
 def bar_fetch_limit_for(timeframe: str) -> int:
     """Per-timeframe bar-fetch/read limit. 1D → 260 (clears the 253 equity_52wk
-    warmup); every other timeframe → 240 (Alpaca 429 avoidance preserved)."""
+    warmup); 15m → 400 (clears the ma_200/200-real-bar rsi_bb_pullback warmup
+    against the ~50% synthetic-fill 15m canvas); every other timeframe → 240
+    (Alpaca 429 avoidance preserved)."""
     return _BAR_FETCH_LIMIT_BY_INTERVAL.get(timeframe, _DEFAULT_BAR_FETCH_LIMIT)
 
 

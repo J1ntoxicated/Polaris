@@ -119,9 +119,19 @@ def test_1d_fetch_limit_clears_equity_52wk_warmup() -> None:
 
 
 def test_non_1d_timeframes_keep_240_limit() -> None:
-    # Intraday timeframes keep the 240 cap (Alpaca 429 avoidance preserved).
-    for tf in ("1m", "5m", "15m", "1H"):
+    # Intraday timeframes (excluding 15m, which has its own deeper warmup —
+    # see test_15m_fetch_limit_clears_rsi_bb_pullback_warmup) keep the 240 cap
+    # (Alpaca 429 avoidance preserved).
+    for tf in ("1m", "5m", "1H"):
         assert bar_fetch_limit_for(tf) == 240
+
+
+def test_15m_fetch_limit_clears_rsi_bb_pullback_warmup() -> None:
+    # rsi_bb_pullback (Jin 2026-07-09, silent-INERT part A) needs 200 REAL bars
+    # for ma_200 against a ~50% synthetic-fill 15m canvas — 240 left only ~120
+    # real bars (0/2244 signals). 15m now resolves to 400 (all-modes infra, not
+    # env-gated) so the majority of the universe clears ma_200.
+    assert bar_fetch_limit_for("15m") == 400
 
 
 def test_unknown_timeframe_defaults_to_240() -> None:

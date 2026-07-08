@@ -347,3 +347,6 @@
 2026-07-07 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=383 learners=3 paper=True]
 2026-07-07 daily-auto [closes=4 pnl_usd=-12.61 opens=5 faults=0 restarts=12]
 - 2026-07-08 feat(dashboard): 모바일 대응 — 폰에서 대시보드 URL 접속 시 자동으로 단일컬럼 /m 페이지로. server.py UA-sniff(iPhone/Android/iPod→/mobile.html, iPad/데스크톱=풀보드) + index.html viewport meta 신설(구 부재=폰 줌아웃 깨짐) + narrow-viewport(<768) 클라이언트 가드(데스크톱 UA 스푸핑 폰·좁은 창) + ?desktop=1 오버라이드 + /m에 Desktop 링크. Preview MCP 375px 실검증(리다이렉트+단일컬럼 렌더 스샷) + 데스크톱 회귀 통과 + UA curl 매트릭스 6/6.
+2026-07-08 11:07 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=384 learners=3 paper=True]
+2026-07-08 19:02 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=376 learners=3 paper=True]
+- 2026-07-09 deploy(active-trading-max): 전체 재감사(5슬라이스)→Opus 계획→Sonnet 병렬빌드(worktree)→Opus 적대리뷰 — 5그룹 중 4 APPROVE 머지·배포(PID 24047): rsi_bb 15m 워밍업+완화 부활 / Alpaca fill 오배선 픽스+equity 2종 virtual 재편입(레지스트리 27) / cci 유니버스 FX majors 확폭 / static-ground bars db_writer 이관+virtual equity uPnL 라이브파생 재구현. 1 REJECT(쿨다운 v1 bar_seconds 오염=엑싯회귀 3종 적발)→v2 수술픽스(전용 reentry_cooldown_seconds seam, 회귀 전부 테스트가드)→fresh Opus 재리뷰 APPROVE→머지(다음 재기동 픽업). 전날 밤 성적: 언리시 후 45오픈/7h·net +$101. 잔여: push 승인, 램프업 관찰.

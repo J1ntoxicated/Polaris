@@ -74,10 +74,13 @@ membership are severed.
 VIRTUAL-mode exception (Jin 2026-07-08): the KILL rationale above is real
 maker/taker FEE-BLEED — void when ``POLARIS_VIRTUAL_ACCOUNT=1`` (no real fees).
 ``session_breakout`` / ``donchian_turtle_breakout`` / ``spot_donchian`` /
-``volume_burst`` (NOT the two equity ids — those stay out, Alpaca-inert on
-SIP #42) are re-admitted into ``STRATEGY_REGISTRY`` for VIRTUAL only, below.
-REAL byte-identical: the re-registration block never runs when the env is
-unset, so the REAL registry keeps exactly the members listed above.)
+``volume_burst`` are re-admitted into ``STRATEGY_REGISTRY`` for VIRTUAL only,
+below. The two equity ids were withheld from that re-admit pending Alpaca 1D
+bar supply; Jin 2026-07-09 — now confirmed live (``connors_rsi2`` fires on the
+same 1D/alpaca feed) — so ``equity_52wk_high_breakout`` /
+``equity_vol_expansion_pocket_pivot`` join the same VIRTUAL-only re-admit
+below. REAL byte-identical: the re-registration block never runs when the env
+is unset, so the REAL registry keeps exactly the members listed above.)
 
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
@@ -103,6 +106,10 @@ from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
 from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
+from polaris.strategies.equity_52wk_high_breakout import Equity52WkHighBreakoutStrategy
+from polaris.strategies.equity_vol_expansion_pocket_pivot import (
+    EquityVolExpansionPocketPivotStrategy,
+)
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.gold_breakout_1h import GoldBreakout1HStrategy
 from polaris.strategies.gold_riskoff_trend_amplify import GoldRiskoffTrendAmplifyStrategy
@@ -177,20 +184,26 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     UK100Breakout1HStrategy.metadata.strategy_id: UK100Breakout1HStrategy,
 }
 
-# VIRTUAL-mode-only re-registration (Jin 2026-07-08): these 4 ids were
-# un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real maker/taker fees ate
-# the edge live (session_breakout -$933.65/88 trades fees 9.7x gross,
-# donchian_turtle_breakout -$540.58, spot_donchian fee-fatal intraday class,
-# volume_burst inverted-asymmetry churn). VIRTUAL has NO real fees, so the
-# fee-bleed KILL rationale is VOID there — re-admit for virtual observation
-# only. REAL registry above stays byte-identical (env unset -> this block never
-# runs, so REAL never sees these ids).
+# VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09): the
+# first 4 ids were un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real
+# maker/taker fees ate the edge live (session_breakout -$933.65/88 trades fees
+# 9.7x gross, donchian_turtle_breakout -$540.58, spot_donchian fee-fatal
+# intraday class, volume_burst inverted-asymmetry churn). VIRTUAL has NO real
+# fees, so the fee-bleed KILL rationale is VOID there — re-admit for virtual
+# observation only. The 2 equity ids were separately un-registered in the same
+# B1 prune and withheld from the first re-admit pending Alpaca 1D bar supply;
+# that is now confirmed live (``connors_rsi2`` fires on the same 1D/alpaca
+# feed), so they join this VIRTUAL-only re-admit too. REAL registry above
+# stays byte-identical (env unset -> this block never runs, so REAL never sees
+# these ids).
 if virtual_mode_enabled():  # pragma: no branch — deterministic per-process env read
     for _virtual_only_cls in (
         SessionBreakoutStrategy,
         DonchianTurtleBreakoutStrategy,
         SpotDonchianStrategy,
         VolumeBurstStrategy,
+        Equity52WkHighBreakoutStrategy,
+        EquityVolExpansionPocketPivotStrategy,
     ):
         STRATEGY_REGISTRY[_virtual_only_cls.metadata.strategy_id] = _virtual_only_cls
 
@@ -210,6 +223,8 @@ __all__ = [
     "ConnorsRSI2Strategy",
     "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
+    "Equity52WkHighBreakoutStrategy",
+    "EquityVolExpansionPocketPivotStrategy",
     "FXBreakoutBasketStrategy",
     "GoldBreakout1HStrategy",
     "GoldRiskoffTrendAmplifyStrategy",

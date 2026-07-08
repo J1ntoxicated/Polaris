@@ -38,6 +38,7 @@ from polaris.core.data._tick_activation import (
 )
 from polaris.core.data.schema import QuoteTick
 from polaris.core.ticks.types import TickSample
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect
 
 # ``ACTIVATION_MAX_SYMBOLS`` is re-exported (the #39 per-symbol accumulator + its
@@ -206,9 +207,15 @@ class QuoteTickWriter:
         db_path: Path | str,
         *,
         flush_interval_sec: float = 1.0,
+        db_writer: DBWriter | None = None,
     ) -> None:
         self._db_path = db_path
         self._flush_interval = flush_interval_sec
+        # db-writer-reader-split (opt-in — default None is BYTE-IDENTICAL to the
+        # pre-split dedicated-conn path below). When set AND the kill switch
+        # reads enabled, the flush submits a job to the shared single-RW-conn
+        # writer instead of opening/using ``self._conn``.
+        self._db_writer = db_writer
         # Coalesce: last-write-wins per instrument_id (PK collisions dropped).
         self._buf: dict[str, QuoteTick] = {}
         # Process-shared live price view: instrument_id -> (mid, last_ws_monotonic).
@@ -398,6 +405,18 @@ class QuoteTickWriter:
         inflow_rows = [
             (venue, *acc.rollup()) for venue, acc in self._inflow.items()
         ]
+        # db-writer-reader-split (opt-in): submit is a cheap non-blocking queue
+        # put (no executor hop needed) — the shared writer thread owns the
+        # single RW conn + transaction boundary. Fire-and-forget, matching the
+        # pre-split "a dropped batch just defers to the next flush" contract
+        # (DBWriter counts a drop/failure itself; there is no per-writer WAL
+        # lock left to contend since only ONE RW conn exists process-wide).
+        if self._db_writer is not None and dbwriter_enabled():
+            self._db_writer.submit(
+                lambda conn: self._write_rows(conn, snapshot, inflow_rows),
+                label="quote_writer",
+            )
+            return
         try:
             await loop.run_in_executor(
                 None, self._flush_blocking, snapshot, inflow_rows
@@ -426,6 +445,25 @@ class QuoteTickWriter:
                 "[quote_writer] flush of %d ticks failed — dropping batch", len(snapshot)
             )
 
+    def _write_rows(
+        self,
+        conn: sqlite3.Connection,
+        ticks: list[QuoteTick],
+        inflow_rows: list[tuple[str, int, int, float, int]],
+    ) -> None:
+        """Statement body shared by the legacy dedicated-conn flush
+        (``_flush_blocking``, wraps this in its own BEGIN/COMMIT) and the
+        db-writer-reader-split job path (the shared ``DBWriter`` wraps this in
+        its own per-job SAVEPOINT inside its batch transaction). Issues NO
+        BEGIN/COMMIT/SAVEPOINT of its own — the caller owns the txn boundary.
+        """
+        rows = [_row(q) for q in ticks]
+        conn.executemany(_INSERT_SQL, rows)
+        if inflow_rows:
+            conn.executemany(_INFLOW_UPSERT_SQL, inflow_rows)
+        self.flush_count += 1
+        self.rows_written += len(rows)
+
     def _flush_blocking(
         self,
         ticks: list[QuoteTick],
@@ -439,18 +477,13 @@ class QuoteTickWriter:
         ships with (skew 0 — same BEGIN..COMMIT).
         """
         conn = self._ensure_conn()
-        rows = [_row(q) for q in ticks]
         conn.execute("BEGIN")
         try:
-            conn.executemany(_INSERT_SQL, rows)
-            if inflow_rows:
-                conn.executemany(_INFLOW_UPSERT_SQL, inflow_rows)
+            self._write_rows(conn, ticks, inflow_rows)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        self.flush_count += 1
-        self.rows_written += len(rows)
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:

@@ -42,6 +42,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect
 
 __all__ = ["TechnicalStoreWriter"]
@@ -89,9 +90,13 @@ class TechnicalStoreWriter:
         db_path: Path | str,
         *,
         flush_interval_sec: float = 1.0,
+        db_writer: DBWriter | None = None,
     ) -> None:
         self._db_path = db_path
         self._flush_interval = flush_interval_sec
+        # db-writer-reader-split (opt-in — default None is BYTE-IDENTICAL to the
+        # pre-split dedicated-conn path below).
+        self._db_writer = db_writer
         # Coalesce: last-write-wins per (instrument_id, bar_interval). A re-record
         # overwrites the buffered snapshot, so the buffer is bounded by the number
         # of distinct (focus symbol × timeframe) pairs seen between drains.
@@ -159,6 +164,13 @@ class TechnicalStoreWriter:
             return
         snapshot = list(self._buf.items())
         self._buf.clear()
+        # db-writer-reader-split (opt-in): fire-and-forget submit to the shared
+        # single-RW-conn writer instead of an executor-offloaded dedicated conn.
+        if self._db_writer is not None and dbwriter_enabled():
+            self._db_writer.submit(
+                lambda conn: self._write_rows(conn, snapshot), label="tech_store"
+            )
+            return
         try:
             await loop.run_in_executor(None, self._flush_blocking, snapshot)
         except Exception:  # noqa: BLE001 — write must never halt the bot (AGGRESSIVE)
@@ -166,6 +178,28 @@ class TechnicalStoreWriter:
                 "[tech_store] flush of %d entries failed — dropping batch",
                 len(snapshot),
             )
+
+    def _write_rows(
+        self,
+        conn: sqlite3.Connection,
+        entries: list[tuple[tuple[str, str], _TechEntry]],
+    ) -> None:
+        """Statement body shared by the legacy dedicated-conn flush and the
+        db-writer-reader-split job path. Issues NO BEGIN/COMMIT/SAVEPOINT of
+        its own — the caller owns the transaction boundary."""
+        rows = [
+            (
+                instrument_id, bar_interval, name, float(v),
+                entry.computed_ts, entry.source_bar_ts,
+            )
+            for (instrument_id, bar_interval), entry in entries
+            for name, v in entry.values.items()
+        ]
+        if not rows:
+            return
+        conn.executemany(_UPSERT_SQL, rows)
+        self.flush_count += 1
+        self.rows_written += len(rows)
 
     def _flush_blocking(
         self, entries: list[tuple[tuple[str, str], _TechEntry]]
@@ -178,26 +212,14 @@ class TechnicalStoreWriter:
         (incl. a missing table — degrade-never-crash) propagates to ``_flush_once``
         which logs + drops the batch; the loop survives.
         """
-        rows = [
-            (
-                instrument_id, bar_interval, name, float(v),
-                entry.computed_ts, entry.source_bar_ts,
-            )
-            for (instrument_id, bar_interval), entry in entries
-            for name, v in entry.values.items()
-        ]
-        if not rows:
-            return
         conn = self._ensure_conn()
         conn.execute("BEGIN")
         try:
-            conn.executemany(_UPSERT_SQL, rows)
+            self._write_rows(conn, entries)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        self.flush_count += 1
-        self.rows_written += len(rows)
 
     def _ensure_conn(self) -> sqlite3.Connection:
         if self._conn is None:

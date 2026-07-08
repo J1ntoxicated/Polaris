@@ -37,6 +37,7 @@ from polaris.core.data.baseline import (
     upsert_baseline_state,
 )
 from polaris.core.data.schema import Bar, BaselineValue
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect
 
 logger = logging.getLogger(__name__)
@@ -461,17 +462,38 @@ async def ingest_bars_offloaded(
     bars: Iterable[Bar],
     *,
     asset_class: str = "",
+    db_writer: DBWriter | None = None,
 ) -> dict[str, int]:
-    """Off-loop twin of ``ingest_bars`` — persist + baseline on a worker thread.
+    """Off-loop twin of ``ingest_bars`` — persist + baseline off the loop.
 
-    The bars list is snapshotted before hand-off (plain data, no conn), then the
-    whole DB write runs via ``asyncio.to_thread`` on a dedicated connection so
-    the event loop stays free to service the tick engine / WS recv during the
-    write. Same return shape and identical persisted rows as ``ingest_bars``.
+    Default (``db_writer=None``) is BYTE-IDENTICAL to the pre-split path: the
+    bars list is snapshotted (plain data, no conn) and the whole write runs via
+    ``asyncio.to_thread`` on a DEDICATED connection.
+
+    db-writer-reader-split (opt-in): when ``db_writer`` is supplied and the
+    kill switch reads enabled, the write is submitted as a DURABLE job to the
+    shared single-RW-conn writer instead of opening a competing dedicated
+    conn — this also folds ``persist_bars`` + ``update_baseline_from_bars``'s
+    previously per-statement autocommits into ONE batched commit (the
+    DBWriter's per-job SAVEPOINT lives inside its batch transaction).
     """
     bars_list = list(bars)
     if not bars_list:
         return {"bars": 0, "baseline_samples": 0}
+    if db_writer is not None and dbwriter_enabled():
+        result = {"bars": 0, "baseline_samples": 0}
+
+        def _job(conn: sqlite3.Connection) -> None:
+            result.update(ingest_bars(conn, bars_list, asset_class=asset_class))
+
+        future = db_writer.submit(_job, durable=True, label="ingest_bars")
+        assert future is not None
+        try:
+            await asyncio.wrap_future(future)
+        except Exception as exc:  # noqa: BLE001 — degrade-never-crash (offload fault)
+            logger.warning("[ingest] db_writer offload failed (degrade): %r", exc)
+            return {"bars": 0, "baseline_samples": 0}
+        return result
     return await asyncio.to_thread(
         _ingest_blocking, db_path, bars_list, asset_class=asset_class
     )
@@ -499,13 +521,33 @@ def _persist_blocking(db_path: str | Path, bars: list[Bar]) -> int:
         conn.close()
 
 
-async def persist_bars_offloaded(db_path: str | Path, bars: Iterable[Bar]) -> int:
+async def persist_bars_offloaded(
+    db_path: str | Path,
+    bars: Iterable[Bar],
+    *,
+    db_writer: DBWriter | None = None,
+) -> int:
     """Off-loop twin of ``persist_bars`` — higher-timeframe persist off the loop.
 
-    Snapshots the bars and hands the DB write to a worker thread on a dedicated
-    connection. Same return value (rows persisted) as ``persist_bars``.
+    Default (``db_writer=None``) is BYTE-IDENTICAL to the pre-split path
+    (worker thread + dedicated connection). db-writer-reader-split (opt-in):
+    see ``ingest_bars_offloaded`` docstring — same durable-submit shape.
     """
     bars_list = list(bars)
     if not bars_list:
         return 0
+    if db_writer is not None and dbwriter_enabled():
+        result = {"n": 0}
+
+        def _job(conn: sqlite3.Connection) -> None:
+            result["n"] = persist_bars(conn, bars_list)
+
+        future = db_writer.submit(_job, durable=True, label="persist_bars")
+        assert future is not None
+        try:
+            await asyncio.wrap_future(future)
+        except Exception as exc:  # noqa: BLE001 — degrade-never-crash (offload fault)
+            logger.warning("[ingest] db_writer persist offload failed (degrade): %r", exc)
+            return 0
+        return result["n"]
     return await asyncio.to_thread(_persist_blocking, db_path, bars_list)

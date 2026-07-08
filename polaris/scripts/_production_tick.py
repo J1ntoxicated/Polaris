@@ -550,6 +550,7 @@ async def _run_tick(
         limit=240, now_mono=now_mono,
         skip_if_current=skip_if_current,
         gpt_client_factory=default_gpt_factory,
+        db_writer=state.db_writer,
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]

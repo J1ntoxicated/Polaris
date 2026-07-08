@@ -39,6 +39,7 @@ from typing import Any
 from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.ingest import persist_bars
 from polaris.core.data.schema import Bar
+from polaris.scripts._ground_write_chunks import GroundRow, submit_ground_chunks
 from polaris.scripts._production_bars import (
     ALPACA_TIMEFRAME_BY_INTERVAL,
     fetch_alpaca_bars_multi,
@@ -46,6 +47,7 @@ from polaris.scripts._production_bars import (
 )
 from polaris.scripts._production_layers import read_active_universe
 from polaris.scripts._session_map import equity_fetch_active, session_warm_active
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.strategies import STRATEGY_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -441,11 +443,21 @@ def _persist_ticker_ground(
     )
 
 
+def _persist_ground_row(conn: sqlite3.Connection, row: GroundRow) -> None:
+    """Adapter: ``submit_ground_chunks``'s injected per-row persist callable."""
+    inst, ts, has_sentiment, has_event, evidence = row
+    _persist_ticker_ground(
+        conn, inst=inst, now_ts=ts,
+        has_sentiment=has_sentiment, has_event=has_event, ground=evidence,
+    )
+
+
 def refresh_ticker_ground(
     conn: sqlite3.Connection,
     *,
     cache: Any,
     now_ts: int | None = None,
+    db_writer: DBWriter | None = None,
 ) -> int:
     """Materialize per-active-ticker sentiment/event ground (built on the fuser).
 
@@ -461,6 +473,15 @@ def refresh_ticker_ground(
     ``cache=None`` (smoke/replay) → no-op (returns 0). EVIDENCE only: the written
     rows feed the candidate sweep as SIGNAL ground; nothing here sizes / blocks /
     exits / halts (flow_not_block). Returns the number of rows written.
+
+    Default (``db_writer=None``) is BYTE-IDENTICAL to the pre-split single-
+    transaction path. db-writer-reader-split (opt-in, design SSOT:
+    ``vault/50_research/db-writer-reader-split-design_2026-07-08.md``): when
+    ``db_writer`` is supplied and the kill switch reads enabled, the fused
+    evidence is computed exactly as before (pure in-mem, unchanged) but
+    persisted via bounded chunk jobs on the shared writer
+    (``_ground_write_chunks.submit_ground_chunks``) instead of one giant
+    ``conn`` transaction.
     """
     if cache is None:
         return 0
@@ -468,43 +489,49 @@ def refresh_ticker_ground(
     if not active:
         return 0
     ts = now_ts if now_ts is not None else int(time.time())
-    written = 0
-    # Single explicit transaction over the whole ~1882-row walk (event-loop-stall
-    # fix, adversarial review 2026-06-25): under autocommit each INSERT would emit
-    # its own WAL frame (~1882 fsyncs) and block the loop — the same hazard
-    # quote_writer wraps. fuse_evidence is pure in-memory + _persist_ticker_ground
-    # is a single INSERT, so NO await is taken inside the txn → it stays atomic
-    # w.r.t. the event loop (the tick body's own BEGIN can never interleave).
-    conn.execute("BEGIN")
-    try:
-        for inst in active:
-            try:
-                _hint, _conf, evidence = fuse_evidence(
-                    inst.underlying_group_id, cache
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad group never aborts
-                logger.debug(
-                    "[ground] fuse_evidence failed for %s: %r",
-                    inst.underlying_group_id, exc,
-                )
-                evidence = {}
-            # "sentiment" ground = any directional alt-data evidence present for the
-            # group (the fused scores/sources). "event" ground = a discrete catalyst
-            # surfaced in the evidence (regime label / news headline). Both are pure
-            # presence flags so the sweep can cheaply triage covered vs empty.
-            has_sentiment = bool(evidence)
-            has_event = bool(evidence.get("label") or evidence.get("news_headline"))
-            _persist_ticker_ground(
-                conn, inst=inst, now_ts=ts,
-                has_sentiment=has_sentiment, has_event=has_event,
-                ground=evidence,
+    rows: list[GroundRow] = []
+    for inst in active:
+        try:
+            _hint, _conf, evidence = fuse_evidence(inst.underlying_group_id, cache)
+        except Exception as exc:  # noqa: BLE001 — one bad group never aborts
+            logger.debug(
+                "[ground] fuse_evidence failed for %s: %r",
+                inst.underlying_group_id, exc,
             )
-            written += 1
-        conn.execute("COMMIT")
-    except Exception:
-        with contextlib.suppress(Exception):
-            conn.execute("ROLLBACK")
-        raise
+            evidence = {}
+        # "sentiment" ground = any directional alt-data evidence present for the
+        # group (the fused scores/sources). "event" ground = a discrete catalyst
+        # surfaced in the evidence (regime label / news headline). Both are pure
+        # presence flags so the sweep can cheaply triage covered vs empty.
+        has_sentiment = bool(evidence)
+        has_event = bool(evidence.get("label") or evidence.get("news_headline"))
+        rows.append((inst, ts, has_sentiment, has_event, evidence))
+
+    if db_writer is not None and dbwriter_enabled():
+        submit_ground_chunks(db_writer, rows, _persist_ground_row)
+        written = len(rows)
+    else:
+        written = 0
+        # Single explicit transaction over the whole ~1882-row walk (event-loop-
+        # stall fix, adversarial review 2026-06-25): under autocommit each INSERT
+        # would emit its own WAL frame (~1882 fsyncs) and block the loop — the
+        # same hazard quote_writer wraps. _persist_ticker_ground is a single
+        # INSERT and nothing here awaits, so it stays atomic w.r.t. the event
+        # loop (the tick body's own BEGIN can never interleave).
+        conn.execute("BEGIN")
+        try:
+            for inst, row_ts, has_sentiment, has_event, evidence in rows:
+                _persist_ticker_ground(
+                    conn, inst=inst, now_ts=row_ts,
+                    has_sentiment=has_sentiment, has_event=has_event,
+                    ground=evidence,
+                )
+                written += 1
+            conn.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(Exception):
+                conn.execute("ROLLBACK")
+            raise
     logger.info("[ground] per-ticker sentiment/event ground: %d ticker(s)", written)
     return written
 

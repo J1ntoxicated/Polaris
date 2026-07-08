@@ -14,6 +14,7 @@ into ``ALL_DDL`` and owns the connect / init / migration logic.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -300,7 +301,27 @@ ALL_DDL: tuple[str, ...] = (
 # but never 0 (0 DISABLES autocheckpoint, the unbounded-growth state). PASSIVE
 # semantics: it never blocks on a reader and never takes the exclusive lock, so it
 # does NOT contend the 1 Hz writer ([[feedback_db_lock_is_architecture_signal]]).
+# Env-overridable (db-writer-reader-split design §5) — default is the value above,
+# unchanged behaviour when the env var is unset.
 WAL_AUTOCHECKPOINT_PAGES: int = 1000
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _busy_timeout_ms() -> int:
+    return _env_int("POLARIS_DB_BUSY_TIMEOUT_MS", 5000)
+
+
+def _wal_autockpt_pages() -> int:
+    return _env_int("POLARIS_DB_WAL_AUTOCKPT_PAGES", WAL_AUTOCHECKPOINT_PAGES)
 
 
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -311,8 +332,27 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES};")
+    conn.execute(f"PRAGMA busy_timeout={_busy_timeout_ms()};")
+    conn.execute(f"PRAGMA wal_autocheckpoint={_wal_autockpt_pages()};")
+    return conn
+
+
+def connect_ro(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Open a READ-ONLY sqlite connection (reader-side of the writer/reader split).
+
+    Generalizes the dashboard's ``file:...?mode=ro`` pattern
+    (``tools/visualizer/server.py``) for bot-internal readers. ``mode=ro`` means
+    sqlite refuses any write on this handle at the OS/VFS level (belt-and-braces
+    on top of ``query_only``), so a reader can NEVER accidentally become a second
+    RW connection and re-introduce the write-lock contention this split removes.
+    Raises if the DB file does not exist yet (``mode=ro`` cannot create it) —
+    callers should ``connect()``/``init_db()`` once at boot before any reader.
+    """
+    path = Path(db_path)
+    uri = f"file:{path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    conn.execute(f"PRAGMA busy_timeout={_busy_timeout_ms()};")
+    conn.execute("PRAGMA query_only=ON;")
     return conn
 
 

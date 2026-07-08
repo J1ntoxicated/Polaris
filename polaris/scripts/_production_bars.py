@@ -36,6 +36,7 @@ from polaris.scripts._yahoo_bars import (
     is_okx_native_preferred,
     should_fetch_exchange_fallback,
 )
+from polaris.storage.db_writer import DBWriter
 from polaris.venues.alpaca.adapter import ALPACA_BARS_MULTI_CHUNK
 from polaris.venues.capital.adapter import fetch_capital_bars
 from polaris.venues.capital.session import CapitalSession
@@ -656,6 +657,7 @@ async def ingest_bars_per_timeframe(
     now_mono: float | None = None,
     skip_if_current: set[tuple[str, str]] | None = None,
     gpt_client_factory: Any = None,
+    db_writer: DBWriter | None = None,
 ) -> dict[str, int]:
     """F10 — Day 9: drive the per-timeframe ingest fan-out for one tick.
 
@@ -708,6 +710,7 @@ async def ingest_bars_per_timeframe(
                 limit=tf_limit, bar_interval=timeframe,
                 skip_if_current=skip_if_current,
                 gpt_client_factory=gpt_client_factory,
+                db_writer=db_writer,
             )
             total_bars += result["bars"]
             total_baseline += result["baseline_samples"]
@@ -750,6 +753,7 @@ async def ingest_bars_for_focus(
     bar_interval: str = "1m",
     skip_if_current: set[tuple[str, str]] | None = None,
     gpt_client_factory: Any = None,
+    db_writer: DBWriter | None = None,
 ) -> dict[str, int]:
     """Fetch + persist + baseline-update bars for every focus entry.
 
@@ -843,7 +847,9 @@ async def ingest_bars_for_focus(
     # without recomputing the baseline.
     if bar_interval != "1m":
         if db_path is not None:
-            total_persisted = await persist_bars_offloaded(db_path, out_bars)
+            total_persisted = await persist_bars_offloaded(
+                db_path, out_bars, db_writer=db_writer
+            )
         else:
             total_persisted = persist_bars(conn, out_bars)
         # Higher-tf ingest visibility (INFO): the 1m path logs ``[ingest]`` from
@@ -892,7 +898,9 @@ async def ingest_bars_for_focus(
         # in-mem (tests, ``db_path is None``) fallback keeps the on-loop async
         # path (still offloads the heavy sort, byte-identical output).
         if db_path is not None:
-            result = await ingest_bars_offloaded(db_path, group, asset_class=ac)
+            result = await ingest_bars_offloaded(
+                db_path, group, asset_class=ac, db_writer=db_writer
+            )
         else:
             result = await ingest_bars_async(conn, group, asset_class=ac)
         total_persisted += result["bars"]

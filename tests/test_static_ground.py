@@ -467,7 +467,9 @@ async def test_ticker_ground_producer_runs_independent_of_bars(
 
     calls: list[int] = []
 
-    def _fake_refresh(_conn: Any, *, cache: Any, now_ts: int | None = None) -> int:
+    def _fake_refresh(
+        _conn: Any, *, cache: Any, now_ts: int | None = None, db_writer: Any = None
+    ) -> int:
         calls.append(1)
         return 7
 

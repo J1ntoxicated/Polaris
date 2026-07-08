@@ -103,6 +103,7 @@ from polaris.scripts.reconcile_orphans import (
     flatten_venue_eod,
     reconcile_venue_orphans,
 )
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect, init_db
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
@@ -437,6 +438,7 @@ async def _altdata_producer(
     stop_evt: asyncio.Event,
     collectors: list[Any] | None = None,
     poll_sec: float = 30.0,
+    db_writer: DBWriter | None = None,
 ) -> None:
     """Refresh alt-data EVIDENCE collectors on each one's own TTL cadence.
 
@@ -482,10 +484,30 @@ async def _altdata_producer(
                 name, asset_class or "-", int(ttl),
             )
             try:
-                persist_altdata_snapshot(
-                    conn, ts=int(time.time()), source=name,
-                    asset_class=asset_class, payload=payload,
-                )
+                # db-writer-reader-split (opt-in): fire-and-forget submit to the
+                # shared single-RW-conn writer instead of writing on the loop-
+                # owned ``conn`` directly. Default (db_writer=None) is byte-
+                # identical to the pre-split direct-write path.
+                if db_writer is not None and dbwriter_enabled():
+                    snap_ts, snap_name, snap_asset, snap_payload = (
+                        int(time.time()), name, asset_class, payload
+                    )
+
+                    def _job(
+                        c: sqlite3.Connection,
+                        t: int = snap_ts, n: str = snap_name,
+                        a: str = snap_asset, p: dict[str, Any] = snap_payload,
+                    ) -> None:
+                        persist_altdata_snapshot(
+                            c, ts=t, source=n, asset_class=a, payload=p
+                        )
+
+                    db_writer.submit(_job, label="altdata_snapshot")
+                else:
+                    persist_altdata_snapshot(
+                        conn, ts=int(time.time()), source=name,
+                        asset_class=asset_class, payload=payload,
+                    )
             except Exception:  # noqa: BLE001 — snapshot is audit-only, never fatal
                 logger.exception("[altdata] snapshot persist failed for %s", name)
             state.altdata_refreshes += 1
@@ -592,6 +614,7 @@ async def _ticker_ground_producer(
         try:
             tickers = refresh_ticker_ground(
                 conn, cache=getattr(state, "altdata_cache", None),
+                db_writer=state.db_writer,
             )
             state.static_ground_tickers = tickers
         except Exception:  # noqa: BLE001 — ground fill never halts the bot
@@ -719,6 +742,17 @@ async def run_production_paper_loop(
     reset_process_fence()
     get_process_fence(conn)
     state = ProdLoopState()
+    # db-writer-reader-split (design SSOT:
+    # vault/50_research/db-writer-reader-split-design_2026-07-08.md) — the
+    # process's ONE RW sqlite connection, generalizing #74's per-writer offload
+    # thread into a single shared writer thread/queue so the bot can never
+    # contend its own WAL write lock again. Kill switch
+    # (POLARIS_DBWRITER_ENABLED=0, default enabled) leaves ``state.db_writer``
+    # None → every wired consumer below falls back to its pre-split dedicated-
+    # conn behaviour with NO code change (same-restart rollback).
+    if dbwriter_enabled():
+        state.db_writer = DBWriter(target_db)
+        state.db_writer.start()
     # #32 — wire the AI-JUDGE client onto state so the G3/G4 orchestrator + the
     # G7 live-recalc exit run the per-ticker judge alongside the deterministic
     # decision (shadow default: logs only; deterministic acts byte-identical).
@@ -818,6 +852,13 @@ async def run_production_paper_loop(
             ck.close()
 
     async def _wal_checkpoint_producer() -> None:
+        # db-writer-reader-split: once the shared DBWriter is active it owns
+        # the ONLY RW conn and its own periodic TRUNCATE checkpoint replaces
+        # this PASSIVE-only producer entirely (design §4 — one checkpoint
+        # owner, not two). This producer only runs when the kill switch left
+        # ``state.db_writer`` None (byte-identical to the pre-split behaviour).
+        if state.db_writer is not None:
+            return
         while not stop_evt.is_set():
             try:
                 await asyncio.wait_for(stop_evt.wait(), timeout=15.0)
@@ -853,7 +894,10 @@ async def run_production_paper_loop(
     # code_review_2026-06-24); the regime path keeps its direct local reference.
     state.altdata_cache = altdata_cache
     altdata_task = asyncio.create_task(
-        _altdata_producer(conn, cache=altdata_cache, state=state, stop_evt=stop_evt)
+        _altdata_producer(
+            conn, cache=altdata_cache, state=state, stop_evt=stop_evt,
+            db_writer=state.db_writer,
+        )
     )
 
     capital_session: CapitalSession | None = None
@@ -878,7 +922,7 @@ async def run_production_paper_loop(
     # symbols. Spawned AFTER the Capital session so Capital WS reuses its token
     # (M4). Tasks are stored + torn down in the finally below (M5). WS is
     # additive: REST bar ingest stays the fallback, so a WS failure never halts.
-    quote_writer = QuoteTickWriter(target_db)
+    quote_writer = QuoteTickWriter(target_db, db_writer=state.db_writer)
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
@@ -889,7 +933,7 @@ async def run_production_paper_loop(
     # tick body now ``record``s the indicator snapshot in-mem; this 1Hz flush task
     # off-loads the write on a dedicated conn (its own thread). Torn down in the
     # finally below alongside the WS writer. Evidence keeps flowing (flow_not_block).
-    tech_store_writer = TechnicalStoreWriter(target_db)
+    tech_store_writer = TechnicalStoreWriter(target_db, db_writer=state.db_writer)
     state.tech_store_writer = tech_store_writer
     tech_store_flush_task = asyncio.create_task(
         tech_store_writer.run_flush_loop(stop_evt)
@@ -1305,6 +1349,14 @@ async def run_production_paper_loop(
             await tech_store_flush_task
         with contextlib.suppress(Exception):
             tech_store_writer.close()
+        # db-writer-reader-split — every producer that could still submit a job
+        # (WS flush tasks, tech-store flush task, altdata/ground producers) has
+        # already been cancelled + awaited above, so it is safe to drain +
+        # TRUNCATE-checkpoint + close the shared writer now. None when the kill
+        # switch left it unwired (nothing to stop).
+        if state.db_writer is not None:
+            with contextlib.suppress(Exception):
+                state.db_writer.stop()
         # ADR-012 — close the probe tuning-log sidecar (separate DB).
         if state.probe_conn is not None:
             with contextlib.suppress(Exception):

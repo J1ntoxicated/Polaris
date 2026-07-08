@@ -19,6 +19,7 @@ from polaris.core.pipeline.g1_focus_gate import G1FocusCache
 from polaris.core.pipeline.g6_call_gate import G6CallCache
 from polaris.scripts._production_capital_sizing import CapitalConstraintCache
 from polaris.scripts._smoke_fills import SimulatedTrade
+from polaris.storage.db_writer import DBWriter
 
 
 @dataclass(slots=True)
@@ -220,6 +221,14 @@ class ProdLoopState:
     # write on a dedicated conn. None until the loop wires it (smoke/replay leave it
     # None → the tick body keeps the inline upsert, behavior-identical to pre-#88).
     tech_store_writer: TechnicalStoreWriter | None = None
+    # db-writer-reader-split (design SSOT:
+    # vault/50_research/db-writer-reader-split-design_2026-07-08.md) — the
+    # process's ONE RW sqlite connection, shared by every writer wired below.
+    # None when disabled (POLARIS_DBWRITER_ENABLED=0) or in smoke/replay paths
+    # that never wire it → every consumer falls back to its pre-split
+    # dedicated-conn behaviour (byte-identical, see each writer's db_writer
+    # param docstring).
+    db_writer: DBWriter | None = None
     # Alt-data EVIDENCE cache singleton (#6) — the SAME object fed to
     # compute_and_flip_regime (Layer 6 regime evidence). Shared onto state so the
     # Layer-0 focus producer can build the entrance-judge ``altdata_lean`` from the

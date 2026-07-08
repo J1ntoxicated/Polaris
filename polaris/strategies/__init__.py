@@ -185,23 +185,31 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
 }
 
 # VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09): the
-# first 4 ids were un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real
+# first 3 ids were un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real
 # maker/taker fees ate the edge live (session_breakout -$933.65/88 trades fees
 # 9.7x gross, donchian_turtle_breakout -$540.58, spot_donchian fee-fatal
-# intraday class, volume_burst inverted-asymmetry churn). VIRTUAL has NO real
-# fees, so the fee-bleed KILL rationale is VOID there — re-admit for virtual
-# observation only. The 2 equity ids were separately un-registered in the same
-# B1 prune and withheld from the first re-admit pending Alpaca 1D bar supply;
-# that is now confirmed live (``connors_rsi2`` fires on the same 1D/alpaca
-# feed), so they join this VIRTUAL-only re-admit too. REAL registry above
-# stays byte-identical (env unset -> this block never runs, so REAL never sees
-# these ids).
+# intraday class). VIRTUAL has NO real fees, so the fee-bleed KILL rationale
+# is VOID there — re-admit for virtual observation only. The 2 equity ids were
+# separately un-registered in the same B1 prune and withheld from the first
+# re-admit pending Alpaca 1D bar supply; that is now confirmed live
+# (``connors_rsi2`` fires on the same 1D/alpaca feed), so they join this
+# VIRTUAL-only re-admit too. REAL registry above stays byte-identical (env
+# unset -> this block never runs, so REAL never sees these ids).
+#
+# ``volume_burst`` was in the first re-admit but is EXCLUDED again
+# (2026-07-09 출혈정지): the fee-bleed-void rationale never applied to it —
+# #61's autopsy verdict was GROSS-negative (수수료 전부터 손실), and the
+# virtual re-admit re-confirmed exactly that live: 50 fills since re-admit,
+# gross (price-only, fee 前) -$173.65 / net -$473.65, early-window closes sum
+# -4.2R with a -1.22R rail-breach outlier — negative even with zero real
+# fees. Removing a strategy whose negative edge is proven both historically
+# and live is the same Jin-mandated 출혈정지 as the original #61 KILL — not a
+# defensive throttle; 26 other strategies keep the virtual activity.
 if virtual_mode_enabled():  # pragma: no branch — deterministic per-process env read
     for _virtual_only_cls in (
         SessionBreakoutStrategy,
         DonchianTurtleBreakoutStrategy,
         SpotDonchianStrategy,
-        VolumeBurstStrategy,
         Equity52WkHighBreakoutStrategy,
         EquityVolExpansionPocketPivotStrategy,
     ):

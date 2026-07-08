@@ -350,3 +350,5 @@
 2026-07-08 11:07 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=384 learners=3 paper=True]
 2026-07-08 19:02 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=376 learners=3 paper=True]
 - 2026-07-09 deploy(active-trading-max): 전체 재감사(5슬라이스)→Opus 계획→Sonnet 병렬빌드(worktree)→Opus 적대리뷰 — 5그룹 중 4 APPROVE 머지·배포(PID 24047): rsi_bb 15m 워밍업+완화 부활 / Alpaca fill 오배선 픽스+equity 2종 virtual 재편입(레지스트리 27) / cci 유니버스 FX majors 확폭 / static-ground bars db_writer 이관+virtual equity uPnL 라이브파생 재구현. 1 REJECT(쿨다운 v1 bar_seconds 오염=엑싯회귀 3종 적발)→v2 수술픽스(전용 reentry_cooldown_seconds seam, 회귀 전부 테스트가드)→fresh Opus 재리뷰 APPROVE→머지(다음 재기동 픽업). 전날 밤 성적: 언리시 후 45오픈/7h·net +$101. 잔여: push 승인, 램프업 관찰.
+2026-07-08 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=366 learners=3 paper=True]
+- 2026-07-09 fix(strategy/출혈정지): volume_burst virtual 재등록 제외 — #61 gross-negative 판정을 라이브가 재확인(재등록 후 50체결 gross -$174/net -$474, -1.22R rail초과 1건, virtual 무수수료에서도 음수). 루프 틱이 연속 -1R 패턴 적발→메인 개입, fresh Opus 리뷰 APPROVE(방어 throttle 아님·REAL 21 불변·VIRTUAL 26 활동 유지 판정). 부수: Haiku 틱 누적쿼리 경계미적용 오보(-396) 교정 — 배포누적 +$254 방향 유지

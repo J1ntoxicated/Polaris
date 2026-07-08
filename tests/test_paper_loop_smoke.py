@@ -82,6 +82,64 @@ def test_simulated_open_fill_capital() -> None:
     assert trade.symbol == "EURUSD"
 
 
+def test_simulated_open_fill_alpaca_routes_through_normalize_alpaca_fill() -> None:
+    # ROOT CAUSE this seals: alpaca venue used to fall into the `else` branch
+    # (capital handling) — recorded as capital:{epic}@$10 placeholder instead
+    # of the real equity qty/price. This pins the 3-way branch so alpaca gets
+    # its own normalize_alpaca_fill path with the correct qty = notional/price.
+    sig = RawSignal(
+        signal_id="sig3",
+        strategy_id="equity_52wk_high_breakout",
+        symbol="AAPL",
+        side="long",
+        strength=0.8,
+        sizing_hint=0.05,
+        ttl_bars=10,
+        thesis_tag="eq_52wk",
+        correlation_group="equity_52wk_high_breakout",
+    )
+    fill, trade = simulate_open_fill(
+        signal=sig, venue="alpaca", last_price=200.0, notional_usd=1_000.0
+    )
+    assert fill.venue == "alpaca"
+    assert fill.side == "buy"
+    assert fill.size_usd == pytest.approx(1_000.0)
+    assert fill.fill_price == pytest.approx(200.0)
+    assert fill.base_qty == pytest.approx(5.0)  # notional / price = 1000 / 200
+    assert fill.instrument_id == "alpaca:AAPL"
+    assert trade.venue == "alpaca"
+    assert trade.symbol == "AAPL"
+    assert trade.entry_price == 200.0
+    assert trade.notional_usd == pytest.approx(1_000.0)
+
+
+def test_simulated_close_alpaca_routes_through_normalize_alpaca_fill() -> None:
+    sig = RawSignal(
+        signal_id="sig4",
+        strategy_id="equity_vol_expansion_pocket_pivot",
+        symbol="MSFT",
+        side="long",
+        strength=0.7,
+        sizing_hint=0.05,
+        ttl_bars=10,
+        thesis_tag="eq_pivot",
+        correlation_group="equity_vol_expansion_pocket_pivot",
+    )
+    _, trade = simulate_open_fill(
+        signal=sig, venue="alpaca", last_price=100.0, notional_usd=500.0
+    )
+    close_fill = simulate_close(trade, exit_price=110.0)
+    assert close_fill.venue == "alpaca"
+    assert close_fill.side == "sell"  # opposite of original long
+    assert close_fill.fill_price == pytest.approx(110.0)
+    # simulate_close re-derives qty from the ORIGINAL open notional / exit price
+    # (mirrors the existing OKX close-fill formula — trade.notional_usd is the
+    # entry-side dollar notional, not a carried share count).
+    assert close_fill.base_qty == pytest.approx(500.0 / 110.0)
+    assert close_fill.size_usd == pytest.approx(500.0)
+    assert close_fill.instrument_id == "alpaca:MSFT"
+
+
 def test_simulated_close_round_trip() -> None:
     sig = RawSignal(
         signal_id="s",

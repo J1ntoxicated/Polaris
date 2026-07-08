@@ -13,6 +13,7 @@ from typing import Any
 
 from polaris.core.data.fill_normalizer import (
     Fill,
+    normalize_alpaca_fill,
     normalize_capital_confirm,
     normalize_okx_fill,
 )
@@ -62,6 +63,31 @@ def _okx_fill_payload(
     }
 
 
+def _alpaca_fill_payload(
+    *,
+    symbol: str,
+    side: str,  # "long" / "short"
+    notional_usd: float,
+    avg_price: float,
+    is_close: bool,
+) -> dict[str, Any]:
+    flipped = ("sell" if side == "long" else "buy") if is_close else (
+        "buy" if side == "long" else "sell"
+    )
+    return {
+        "id": uuid.uuid4().hex[:16],
+        "client_order_id": uuid.uuid4().hex[:12],
+        "symbol": symbol,
+        "side": flipped,
+        "status": "filled",
+        # Alpaca US equity is unlevered cash — qty is derived from notional/price
+        # (mirrors the OKX quote_ccy accFillSz derivation above).
+        "filled_qty": str(notional_usd / avg_price if avg_price > 0.0 else 0.0),
+        "filled_avg_price": str(avg_price),
+        "filled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 def _capital_fill_payload(
     *,
     epic: str,
@@ -106,6 +132,18 @@ def simulate_open_fill(
             strategy_id=signal.strategy_id,
             expected_price=last_price,
         )
+    elif venue == "alpaca":
+        fill = normalize_alpaca_fill(
+            _alpaca_fill_payload(
+                symbol=signal.symbol,
+                side=signal.side,
+                notional_usd=notional_usd,
+                avg_price=last_price,
+                is_close=False,
+            ),
+            strategy_id=signal.strategy_id,
+            expected_price=last_price,
+        )
     else:
         fill = normalize_capital_confirm(
             _capital_fill_payload(
@@ -137,6 +175,18 @@ def simulate_close(trade: SimulatedTrade, *, exit_price: float) -> Fill:
         return normalize_okx_fill(
             _okx_fill_payload(
                 instrument=trade.symbol,
+                side=trade.side,
+                notional_usd=trade.notional_usd,
+                avg_price=exit_price,
+                is_close=True,
+            ),
+            strategy_id=trade.strategy_id,
+            expected_price=exit_price,
+        )
+    if trade.venue == "alpaca":
+        return normalize_alpaca_fill(
+            _alpaca_fill_payload(
+                symbol=trade.symbol,
                 side=trade.side,
                 notional_usd=trade.notional_usd,
                 avg_price=exit_price,

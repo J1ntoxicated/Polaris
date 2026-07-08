@@ -7,8 +7,12 @@ never halts on P&L, and exempts strong signals (AGGRESSIVE flow preserved).
 
 from __future__ import annotations
 
+import importlib
+import os
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from types import ModuleType
 from typing import Literal
 
 import pytest
@@ -23,6 +27,8 @@ from polaris.core.isolation.reentry import (
 )
 from polaris.core.lifecycle.recover import hydrate_last_entry_by_key
 from polaris.storage.schema import ALL_DDL
+
+_VIRTUAL_ENV = "POLARIS_VIRTUAL_ACCOUNT"
 
 
 @pytest.fixture()
@@ -660,3 +666,135 @@ def test_boot_refire_no_prior_position_still_first_entry_allowed(
         timeframe="1H", side="long", created_at_bar=900, now_ts=1300,
         last_bar=None, last_side=None,
     ) is False
+
+
+# --- VIRTUAL-mode re-entry cooldown loosening v2 (Jin 2026-07-09) -----------
+#
+# Surgical redo of the REJECTed v1 (commit 9d4cd57 on
+# virtual/reentry-rotation-cooldown-loosen): v1 scaled ``bar_seconds()``
+# itself, a SHARED physical-bar primitive also consumed by
+# ``exit_params.hold_frac_for_timeframe`` (1D/intraday classification),
+# ``loser_timeout`` (drift-backstop floor + 4H cap-exempt boundary), and
+# ``_production_recalc`` (maturity-gate horizon) — none of which are the
+# re-entry cooldown. Scaling it silently mis-classified a virtual 1D position
+# as intraday (43200s < the 86400s daily threshold) = an exit regression. v2
+# introduces ``reentry_cooldown_seconds`` as a SEPARATE virtual-scaled seam;
+# ``bar_seconds`` itself reads no env at all in either mode. Module-level
+# ``_COOLDOWN_FACTOR`` is read once at import, so it is exercised via
+# ``importlib.reload`` (mirrors ``test_virtual_loosen_okx_donchian55.py``'s
+# established idiom); ``bar_seconds`` / downstream consumers need no reload
+# since they take no env-dependent shortcuts.
+
+
+def _reload_reentry_with_env(value: str | None) -> ModuleType:
+    if value is None:
+        os.environ.pop(_VIRTUAL_ENV, None)
+    else:
+        os.environ[_VIRTUAL_ENV] = value
+    import polaris.core.isolation.reentry as reentry_mod
+
+    return importlib.reload(reentry_mod)
+
+
+@pytest.fixture(autouse=True)
+def _restore_virtual_env_and_module() -> Iterator[None]:
+    """Isolate the env var + force a fresh import per test (no cross-test leak)."""
+    prior = os.environ.get(_VIRTUAL_ENV)
+    yield
+    if prior is None:
+        os.environ.pop(_VIRTUAL_ENV, None)
+    else:
+        os.environ[_VIRTUAL_ENV] = prior
+    import polaris.core.isolation.reentry as reentry_mod
+
+    os.environ.pop(_VIRTUAL_ENV, None)
+    importlib.reload(reentry_mod)
+
+
+_ALL_TIMEFRAMES = ("1m", "5m", "15m", "1H", "4H", "1D", "bogus")
+
+
+def test_bar_seconds_is_env_invariant_real_and_virtual() -> None:
+    # bar_seconds() is a PURE physical-bar primitive — zero env coupling in
+    # EITHER mode. This is the structural fix for the REJECT: v1 made it
+    # env-branching, which silently broke the three other consumers.
+    real_mod = _reload_reentry_with_env(None)
+    real_values = {tf: real_mod.bar_seconds(tf) for tf in _ALL_TIMEFRAMES}
+    virtual_mod = _reload_reentry_with_env("1")
+    virtual_values = {tf: virtual_mod.bar_seconds(tf) for tf in _ALL_TIMEFRAMES}
+    assert real_values == virtual_values
+    assert real_values["1D"] == 86400  # daily-classification boundary, locked.
+    assert real_values["4H"] == 14400  # loser_timeout cap-exempt boundary, locked.
+
+
+def test_cooldown_factor_real_reentry_cooldown_seconds_matches_bar_seconds() -> None:
+    real_mod = _reload_reentry_with_env(None)
+    assert real_mod._COOLDOWN_FACTOR == 1.0
+    for tf in _ALL_TIMEFRAMES:
+        assert real_mod.reentry_cooldown_seconds(tf) == real_mod.bar_seconds(tf)
+
+
+def test_cooldown_factor_virtual_halves_reentry_cooldown_seconds_only() -> None:
+    virtual_mod = _reload_reentry_with_env("1")
+    assert virtual_mod._COOLDOWN_FACTOR == 0.5
+    assert virtual_mod.reentry_cooldown_seconds("1H") == 1800
+    assert virtual_mod.reentry_cooldown_seconds("1m") == 30
+    assert virtual_mod.reentry_cooldown_seconds("5m") == 150
+    assert virtual_mod.reentry_cooldown_seconds("15m") == 450
+    assert virtual_mod.reentry_cooldown_seconds("4H") == 7200
+    assert virtual_mod.reentry_cooldown_seconds("1D") == 43200
+    assert virtual_mod.reentry_cooldown_seconds("bogus") == 150  # unknown also halves.
+    # bar_seconds itself is UNCHANGED — the exact regression the REJECT flagged.
+    assert virtual_mod.bar_seconds("1D") == 86400
+    assert virtual_mod.bar_seconds("4H") == 14400
+
+
+def test_tailored_cap_and_cs3_threshold_unaffected_by_virtual_mode() -> None:
+    # Regression: the cooldown-TIME loosening must NOT touch the concurrent-cap
+    # or Cold-Start CS-3 sample-floor rails (caps/sizing untouched, per spec).
+    real_mod = _reload_reentry_with_env(None)
+    real_ceiling = real_mod.TAILORED_CAP_CEILING
+    real_win_rate_floor = real_mod.TAILORED_CAP_WIN_RATE_FLOOR
+    real_cs3 = real_mod.CS3_N_THRESHOLD
+
+    virtual_mod = _reload_reentry_with_env("1")
+    assert real_ceiling == virtual_mod.TAILORED_CAP_CEILING
+    assert real_win_rate_floor == virtual_mod.TAILORED_CAP_WIN_RATE_FLOOR
+    assert real_cs3 == virtual_mod.CS3_N_THRESHOLD
+
+
+def test_hold_frac_for_timeframe_1d_unaffected_by_virtual_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # REJECT root-cause regression guard: v1 scaled bar_seconds() itself, so in
+    # virtual mode bar_seconds("1D")==43200 fell BELOW the 86400s daily
+    # threshold in exit_params.hold_frac_for_timeframe -> a virtual 1D
+    # position was misclassified as intraday (hold_frac 0.05 instead of 0.10),
+    # an exit-timing regression. v2's reentry_cooldown_seconds seam does not
+    # touch bar_seconds, so this must hold identically in EITHER mode.
+    from polaris.core.live_recalc.exit_engine import hold_frac_for_timeframe
+
+    monkeypatch.delenv(_VIRTUAL_ENV, raising=False)
+    assert hold_frac_for_timeframe("1D") == pytest.approx(0.10)
+    assert hold_frac_for_timeframe("1H") == pytest.approx(0.05)
+
+    monkeypatch.setenv(_VIRTUAL_ENV, "1")
+    assert hold_frac_for_timeframe("1D") == pytest.approx(0.10)
+    assert hold_frac_for_timeframe("1H") == pytest.approx(0.05)
+
+
+def test_loser_timeout_floor_unaffected_by_virtual_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression guard: loser_timeout's bar-scaled floor + 4H cap-exempt
+    # boundary both depend on bar_seconds() — confirm byte-identical results
+    # across REAL/VIRTUAL now that bar_seconds() itself is env-invariant.
+    from polaris.core.live_recalc.loser_timeout import loser_timeout_for_strategy
+
+    monkeypatch.delenv(_VIRTUAL_ENV, raising=False)
+    real_daily = loser_timeout_for_strategy("connors_rsi2")
+    real_1h = loser_timeout_for_strategy("ema_crossover")
+
+    monkeypatch.setenv(_VIRTUAL_ENV, "1")
+    assert loser_timeout_for_strategy("connors_rsi2") == real_daily
+    assert loser_timeout_for_strategy("ema_crossover") == real_1h

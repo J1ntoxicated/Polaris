@@ -58,6 +58,7 @@ from polaris.scripts._production_rotation_reader import (
     read_cell_posterior,
 )
 from polaris.strategies import RawSignal
+from polaris.strategies._virtual_loosen import virtual_loosen
 
 if TYPE_CHECKING:
     from polaris.scripts._production_state import ProdLoopState
@@ -89,8 +90,16 @@ def _env_float(name: str, default: float) -> float:
 # (venue, symbol, strategy) cannot be re-entered for this window — NOT even by a
 # strong signal (the reentry backdoor is closed). Defaults to the MIN_HOLD floor
 # so the freed capital is not immediately re-spent on the name we just exited.
+# VIRTUAL ACCOUNT (Jin 2026-07-09, ``POLARIS_VIRTUAL_ACCOUNT=1``): default
+# halves to 150.0s via the shared ``virtual_loosen`` helper — virtual has no
+# real capital/fees so this TIME-axis anti-churn window may loosen; REAL stays
+# byte-identical at 300.0s. An explicit ``POLARIS_ROTATION_VACATED_COOLDOWN_SEC``
+# override still wins in either mode. This constant is a standalone rotation-
+# only cooldown (not a shared physical-bar primitive like
+# ``core.isolation.reentry.bar_seconds``), so loosening it here has no
+# downstream side effect.
 ROTATION_VACATED_COOLDOWN_SEC: Final[float] = _env_float(
-    "POLARIS_ROTATION_VACATED_COOLDOWN_SEC", 300.0
+    "POLARIS_ROTATION_VACATED_COOLDOWN_SEC", virtual_loosen(150.0, 300.0)
 )
 
 

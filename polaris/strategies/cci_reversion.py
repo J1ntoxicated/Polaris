@@ -15,9 +15,15 @@ EXIT (downstream): CCI → 0 (mean) or +100; declared as ``profit_target_r = 1.0
 so the precise-exit engine HARVESTS the bounded revert instead of letting the
 wide ATR trail round-trip it back to ~0R.
 
-Symbols: the Capital commodity/index majors, shared with ``xau_indices_trend``
-(``SUPPORTED_SYMBOLS``) — gold + the index CFDs. LONG-ONLY (the spec is an
-oversold-reversion long); short reversion is left to other strategies.
+Symbols: REAL = the Capital commodity/index majors (gold + index CFDs) — the
+same set ``xau_indices_trend`` trades, but no longer a shared import; each
+module now owns its own ``SUPPORTED_SYMBOLS`` (decoupled, Jin 2026-07-09 —
+"독자 확장"). VIRTUAL additionally widens into the FX majors (reused SSOT from
+``fx_breakout_basket.BASKET_SYMBOLS``, all venue=capital) so the reversion has
+more Capital instruments to fire on in paper mode; REAL stays byte-identical.
+No crypto is added (Layer 0 / G1 Universe Scanner's domain, not this
+strategy's). LONG-ONLY (the spec is an oversold-reversion long); short
+reversion is left to other strategies.
 """
 
 from __future__ import annotations
@@ -30,7 +36,36 @@ from polaris.strategies.base import (
     StrategyMetadata,
     make_signal_id,
 )
-from polaris.strategies.xau_indices_trend import SUPPORTED_SYMBOLS
+from polaris.strategies.fx_breakout_basket import BASKET_SYMBOLS
+
+# REAL universe = gold + index majors only — byte-identical to the set formerly
+# imported from ``xau_indices_trend.SUPPORTED_SYMBOLS``. VIRTUAL unions in the FX
+# majors (reused SSOT, not re-hardcoded) so the reversion has a wider Capital
+# universe to fire on without touching REAL at all (flow_not_block: widen, never
+# dampen).
+_REAL_SYMBOLS: frozenset[str] = frozenset(
+    {"XAUUSD", "GOLD", "US500", "US100", "DE40", "UK100", "EU50", "US30"}
+)
+SUPPORTED_SYMBOLS: frozenset[str] = virtual_loosen(
+    _REAL_SYMBOLS | BASKET_SYMBOLS, _REAL_SYMBOLS
+)
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Reduce a Capital venue epic to its bare instrument for ``SUPPORTED_
+    SYMBOLS`` matching. Capital's real FX epics carry a suffix (e.g. AUD/USD
+    lists as ``AUDUSD_ZERO``, weekend variants as ``EURUSD_W``) that the prior
+    ``.upper().replace("/", "").replace(".", "")`` normalization missed once FX
+    entered this strategy's (VIRTUAL-mode) universe — strip a trailing
+    ``_SUFFIX`` too. Mirrors ``fx_breakout_basket._normalize_basket_symbol``
+    (same SSOT intent; kept as a local/inline helper here per spec, no
+    cross-strategy-module coupling for the normalization step itself).
+    """
+    s = symbol.upper().replace("/", "").replace(".", "")
+    if "_" in s:
+        s = s.split("_", 1)[0]
+    return s
+
 
 CCI_WINDOW = 20
 CCI_CONSTANT = 0.015
@@ -96,7 +131,7 @@ class CCIReversionStrategy(BaseStrategy):
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
         if not self.warmup_ok(market_view):
             return None
-        sym = market_view.symbol.upper().replace("/", "").replace(".", "")
+        sym = _normalize_symbol(market_view.symbol)
         if sym not in SUPPORTED_SYMBOLS:
             return None
         bars = market_view.bars
@@ -142,5 +177,6 @@ __all__ = [
     "CCI_WINDOW",
     "REVERSION_TARGET_R",
     "STRENGTH_BASE",
+    "SUPPORTED_SYMBOLS",
     "TTL_BARS",
 ]

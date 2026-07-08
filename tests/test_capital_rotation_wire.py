@@ -25,8 +25,12 @@ non-fungible). loser_timeout coordination: rotation defers to the exit engine
 
 from __future__ import annotations
 
+import importlib
+import os
 import sqlite3
 import time
+from collections.abc import Iterator
+from types import ModuleType
 from unittest.mock import AsyncMock
 
 import pytest
@@ -46,6 +50,8 @@ from polaris.scripts._production_rotation import (
 )
 from polaris.scripts._production_state import ProdLoopState
 from polaris.strategies.base import RawSignal
+
+_VIRTUAL_ENV = "POLARIS_VIRTUAL_ACCOUNT"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -803,3 +809,64 @@ def test_seam2_helper_registers_on_balance_reject() -> None:
         reject_code="51155", notional_usd=4000.0,
     )
     assert state2.rotation_candidates == []
+
+
+# --- VIRTUAL-mode vacated-cooldown default loosening (Jin 2026-07-09, v2) ---
+#
+# ROTATION_VACATED_COOLDOWN_SEC's default is read once at import via the
+# shared ``polaris.strategies._virtual_loosen.virtual_loosen`` helper — this is
+# a STANDALONE rotation-only cooldown constant (unlike
+# ``core.isolation.reentry.bar_seconds``, it has no other consumer), so
+# loosening it at the consumption site is safe by construction. Each mode is
+# exercised via ``importlib.reload`` (mirrors
+# ``test_virtual_loosen_okx_donchian55.py``'s established idiom).
+
+
+def _reload_rotation_with_env(value: str | None) -> ModuleType:
+    if value is None:
+        os.environ.pop(_VIRTUAL_ENV, None)
+    else:
+        os.environ[_VIRTUAL_ENV] = value
+    import polaris.scripts._production_rotation as rotation_mod
+
+    return importlib.reload(rotation_mod)
+
+
+@pytest.fixture(autouse=True)
+def _restore_virtual_env_and_rotation_module() -> Iterator[None]:
+    """Isolate the env var + force a fresh import per test (no cross-test leak)."""
+    prior = os.environ.get(_VIRTUAL_ENV)
+    yield
+    if prior is None:
+        os.environ.pop(_VIRTUAL_ENV, None)
+    else:
+        os.environ[_VIRTUAL_ENV] = prior
+    import polaris.scripts._production_rotation as rotation_mod
+
+    os.environ.pop(_VIRTUAL_ENV, None)
+    importlib.reload(rotation_mod)
+
+
+def test_rotation_vacated_cooldown_real_byte_identical() -> None:
+    real_mod = _reload_rotation_with_env(None)
+    assert real_mod.ROTATION_VACATED_COOLDOWN_SEC == 300.0
+
+
+def test_rotation_vacated_cooldown_virtual_halves_default() -> None:
+    virtual_mod = _reload_rotation_with_env("1")
+    assert virtual_mod.ROTATION_VACATED_COOLDOWN_SEC == 150.0
+
+
+def test_rotation_vacated_cooldown_explicit_env_override_wins_both_modes() -> None:
+    # An explicit POLARIS_ROTATION_VACATED_COOLDOWN_SEC override still wins over
+    # the virtual-loosened default in EITHER mode (env is a caller-level tune,
+    # not something the virtual-loosen default should shadow).
+    os.environ["POLARIS_ROTATION_VACATED_COOLDOWN_SEC"] = "99.0"
+    try:
+        real_mod = _reload_rotation_with_env(None)
+        assert real_mod.ROTATION_VACATED_COOLDOWN_SEC == 99.0
+        virtual_mod = _reload_rotation_with_env("1")
+        assert virtual_mod.ROTATION_VACATED_COOLDOWN_SEC == 99.0
+    finally:
+        os.environ.pop("POLARIS_ROTATION_VACATED_COOLDOWN_SEC", None)
+        _reload_rotation_with_env(None)

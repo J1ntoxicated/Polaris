@@ -31,10 +31,10 @@ from polaris.core.isolation.circuit_breaker import (
     should_allow_new_entry,
 )
 from polaris.core.isolation.reentry import (
-    bar_seconds,
     concurrent_same_side_open,
     is_novel_reentry,
     reentry_cooldown_active,
+    reentry_cooldown_seconds,
     tailored_concurrent_cap,
 )
 from polaris.core.isolation.worker import (
@@ -1050,10 +1050,14 @@ async def _run_tick(
                 # ``strength`` NEVER exempts (it is momentum, not conviction, and
                 # spikes in chop → the old exemption stacked every tick). A
                 # genuine new opportunity (new bar / flip) still flows.
+                # VIRTUAL ACCOUNT (Jin 2026-07-09): ``reentry_cooldown_seconds``
+                # (not ``bar_seconds`` directly) — halves the window in virtual
+                # mode; REAL is byte-identical. This is the ONLY seam where the
+                # virtual-cooldown factor applies (see reentry.py module docstring).
                 if reentry_cooldown_active(
                     conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
                     now_ts=now_ts,
-                    cooldown_sec=bar_seconds(strategy.metadata.timeframe),
+                    cooldown_sec=reentry_cooldown_seconds(strategy.metadata.timeframe),
                     exempt=is_novel_reentry(
                         created_at_bar=sig.created_at_bar, side=sig.side,
                         last_entry_bar=last_bar, last_entry_side=last_side,

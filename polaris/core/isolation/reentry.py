@@ -20,6 +20,16 @@ The window is now derived from the strategy timeframe (one bar:
 1m→60s … 1H→3600s) via :func:`bar_seconds`, so a 1H thesis is not re-bought
 every 5 minutes. The flat default below stays as the env-overridable fallback
 for callers without a timeframe.
+
+VIRTUAL ACCOUNT (Jin 2026-07-09): :func:`reentry_cooldown_seconds` applies a
+virtual-only loosening factor to the re-entry cooldown WINDOW. ``bar_seconds``
+itself stays a byte-identical physical-bar primitive — it is shared by
+``exit_params.hold_frac_for_timeframe`` (1D/intraday classification),
+``loser_timeout`` (drift-backstop floor + cap-exempt boundary), and
+``_production_recalc`` (maturity-gate horizon), none of which are the re-entry
+cooldown and none of which may be scaled by this factor (a prior REJECTed
+attempt scaled ``bar_seconds`` itself and silently mis-classified a virtual 1D
+position as intraday — 43200s < the 86400s daily threshold).
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ __all__ = [
     "concurrent_same_side_open",
     "is_novel_reentry",
     "reentry_cooldown_active",
+    "reentry_cooldown_seconds",
     "stamp_reentry_anchor",
     "tailored_concurrent_cap",
 ]
@@ -72,8 +83,38 @@ def bar_seconds(timeframe: str) -> int:
     Unknown / malformed timeframe falls back to the flat default cooldown so the
     guard never degrades to 0 (which would disable it) — fail-safe toward the
     existing 300s behaviour.
+
+    PURE physical-bar primitive — never scaled by the virtual-cooldown factor
+    (see :func:`reentry_cooldown_seconds`). ``exit_params``, ``loser_timeout``,
+    and ``_production_recalc`` all depend on this returning the REAL wall-clock
+    bar length regardless of ``POLARIS_VIRTUAL_ACCOUNT``.
     """
     return _BAR_SECONDS.get(timeframe, _DEFAULT_COOLDOWN_SEC)
+
+
+# VIRTUAL ACCOUNT (Jin 2026-07-09): the re-entry cooldown WINDOW is a TIME-axis
+# guard only (no caps/sizing touched) — virtual has no real capital/fees, so the
+# window may loosen (never a defensive dampen: this is a widen-from-1.0
+# multiplier, not a shrink). Env read DIRECTLY (not via
+# ``polaris.scripts._virtual_account.virtual_account_enabled``) to keep
+# core→scripts layering clean — same precedent as
+# ``polaris.core.sizing.probe_notional.resolve_strategy_class``. Applied ONLY at
+# the re-entry-cooldown consumption seam (:func:`reentry_cooldown_seconds`) —
+# NEVER inside ``bar_seconds`` itself, which stays a shared physical-bar
+# primitive for the other three consumers listed on its docstring.
+_VIRTUAL: Final[bool] = os.environ.get("POLARIS_VIRTUAL_ACCOUNT", "0") == "1"
+_COOLDOWN_FACTOR: Final[float] = 0.5 if _VIRTUAL else 1.0
+
+
+def reentry_cooldown_seconds(timeframe: str) -> int:
+    """Re-entry cooldown WINDOW for ``timeframe`` — the ONLY virtual-scaled seam.
+
+    REAL (``POLARIS_VIRTUAL_ACCOUNT`` unset/``0``): byte-identical to
+    :func:`bar_seconds` (factor 1.0). VIRTUAL (``=1``): halved (factor 0.5) so
+    a virtual-mode duplicate-open suppression window loosens without touching
+    the shared physical-bar primitive any other module reads.
+    """
+    return int(bar_seconds(timeframe) * _COOLDOWN_FACTOR)
 
 
 def is_novel_reentry(

@@ -2,6 +2,21 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<script>
+  // Narrow-viewport guard: routes phones (and narrow desktop windows) to the
+  // single-column /m page BEFORE the WebGL globe + board assets load. The server
+  // also UA-sniffs "/"; this catches phones that spoof a desktop UA and windows
+  // narrowed after load. ?desktop=1 forces the full board.
+  (function () {
+    try {
+      if (window.location.search.indexOf('desktop=1') !== -1) return;
+      var w = Math.min(window.innerWidth || 9999,
+                       (window.screen && window.screen.width) || 9999);
+      if (w < 768) window.location.replace('/m');
+    } catch (e) { /* never block the desktop board */ }
+  })();
+</script>
 <meta http-equiv="Cache-Control" content="no-store"/>
 <title>★ POLARIS · NEURAL CLOUD</title>
 <link rel="stylesheet" href="static/polaris.css"/>

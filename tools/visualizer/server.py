@@ -95,6 +95,17 @@ _BOOT_TS = time.time()
 _DB_PATH = Path("data/polaris_live.sqlite")
 _SENTINEL_DB_PATH = Path("data/sentinel.sqlite")
 
+# Phone detection for auto-routing "/" → the purpose-built single-column page.
+# iPad/tablets deliberately excluded (they report desktop Safari and the 70% board
+# is usable at tablet width); ?desktop=1 forces the full board on any device.
+_MOBILE_UA_RE = re.compile(
+    r"Mobi|Android|iPhone|iPod|IEMobile|BlackBerry|Opera Mini", re.IGNORECASE
+)
+
+
+def _is_mobile_ua(ua: str) -> bool:
+    return bool(_MOBILE_UA_RE.search(ua))
+
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
     """Load ``.env`` into ``os.environ`` (existing keys win), best-effort.
@@ -1011,6 +1022,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # iPhone single-column page (display-only, polls /api/snapshot). Path-only
         # match so a trailing slash / query is tolerated; serves the static file.
         if self.path == "/m" or self.path.startswith("/m?") or self.path == "/m/":
+            self.path = "/mobile.html"
+            super().do_GET()
+            return
+        # Phone auto-route: a bare visit to "/" from a mobile browser gets the
+        # single-column page — the WebGL globe + 70% board are never served to a
+        # phone. ?desktop=1 forces the full board. index.html also does a
+        # client-side narrow-viewport guard (catches desktop-UA phones).
+        path_only = self.path.split("?", 1)[0]
+        if (
+            path_only in ("/", "/index.html")
+            and "desktop=1" not in self.path
+            and _is_mobile_ua(self.headers.get("User-Agent", ""))
+        ):
             self.path = "/mobile.html"
             super().do_GET()
             return

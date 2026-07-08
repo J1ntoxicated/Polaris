@@ -30,7 +30,19 @@ RSI_PERIOD = 14
 # VIRTUAL-mode loosening (Jin 2026-07-08): 39 -> 50 (midline) widens the dip
 # further while keeping the BB_lower-touch + MA200-uptrend compound condition
 # intact (the setup identity, not a bare RSI threshold). REAL byte-identical.
-RSI_THRESHOLD = virtual_loosen(50.0, 39.0)
+# VIRTUAL-mode loosening round 2 (Jin 2026-07-09, silent-INERT part A): 50 -> 55
+# — the live alt RSI(14) cluster sat 50.9-65 during the unleash window, so the
+# 50 midline still caught almost none; 55 admits the low-50s dips (e.g. CFX/SOL
+# ~50.9) while BB-proximity + close>ma_200 still enforce the pullback-in-uptrend
+# identity. REAL 39 stays byte-identical (unchanged).
+RSI_THRESHOLD = virtual_loosen(55.0, 39.0)
+# Near-touch multiplier for the BB_lower gate (Jin 2026-07-09). REAL keeps the
+# exact-pierce rule (last.low > bb_lo, byte-identical: *1.0 is a no-op). VIRTUAL
+# admits a low within 0.4% ABOVE bb_lower (last.low > bb_lo * 1.004) — typical
+# OKX 15m true-range on liquid alts exceeds 0.4%, so a bar that dipped to within
+# 0.4% of the lower band is a real band-proximity pullback the exact-pierce rule
+# was discarding, without admitting a bar that never approached the band.
+BB_TOUCH_MULT = virtual_loosen(1.004, 1.0)
 BB_WINDOW = 20
 BB_STD = 2.0
 TREND_FILTER_MA = 200
@@ -88,7 +100,7 @@ class RSIBBPullbackStrategy(BaseStrategy):
         last = bars[-1]
         if rsi is None or rsi >= self.rsi_threshold:
             return None
-        if bb_lo is None or last.low > bb_lo:
+        if bb_lo is None or last.low > bb_lo * BB_TOUCH_MULT:
             return None
         if ma200 is None or last.close <= ma200:
             return None
@@ -113,6 +125,7 @@ class RSIBBPullbackStrategy(BaseStrategy):
 
 __all__ = [
     "BB_STD",
+    "BB_TOUCH_MULT",
     "BB_WINDOW",
     "RSI_PERIOD",
     "RSI_THRESHOLD",

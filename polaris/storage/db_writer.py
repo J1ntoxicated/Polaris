@@ -13,10 +13,13 @@ This module is the GENERALIZATION of #74: instead of one dedicated thread per
 writer, every writer submits a job (a plain callable that takes the ONE shared
 RW ``sqlite3.Connection`` and issues its statements — no BEGIN/COMMIT of its
 own, the writer thread owns the transaction boundary) onto an MPSC queue drained
-by a single background thread that holds the process's only RW connection. Since
-only one RW connection ever exists, the bot can never contend its own WAL write
-lock again — ``database is locked`` from self-contention becomes structurally
-impossible, not just less likely.
+by a single background thread that holds the one RW connection for every WIRED
+writer. Routing the high-frequency writers (ingest, quote flush, tech-store,
+altdata, static/ticker ground) through a single serialized RW conn removes their
+mutual WAL-write-lock self-contention, so ``database is locked`` drops sharply.
+It is REDUCED, not eliminated: the loop ``conn``, ``focus_conn`` and
+``probe_conn`` remain independent RW connections (not yet migrated), so residual
+contention with those is bounded, not zero.
 
 Batching: jobs that arrive within a short drain window are committed together
 (one WAL frame flush for many jobs = throughput), but each job runs inside its

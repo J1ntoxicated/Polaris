@@ -39,6 +39,7 @@ __all__ = [
     "bottom_cell_shadow_hit",
     "probe_notional_usd",
     "prove_admission_ok",
+    "prove_probe_on_anti_edge",
     "prove_stop_dist_floor_pct",
     "resolve_strategy_class",
     "round_trip_fee_rate",
@@ -71,6 +72,32 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def prove_probe_on_anti_edge() -> bool:
+    """B (2026-07-08): when True (default), a PROVE probe fires a small REAL
+    size even on an anti-edge / bottom-suppression cell, instead of routing to
+    shadow (size 0).
+
+    Rationale — the shadow-on-anti-edge routing was a catch-22: a PROVE track
+    that is never sized-real never fills, so it never accrues the dwell/fill
+    evidence the transition machine needs (``_check_prove_to_earn`` dwell>=10
+    closes + the ``_fill_gate_ok`` execution-evidence gate), so it stays
+    shadowed forever and can never promote to EARN. Since the losing history
+    that made the learner mark the cell anti-edge is exactly what PROVE is
+    meant to re-test, forcing shadow guarantees the re-test never happens.
+
+    Bounded, NOT churn: the probe stays min-notional (``probe_notional_usd``),
+    is 24h-fee-capped (``probe_cap_check`` still routes a cap-exhausted probe to
+    shadow), admission-gated (``prove_admission_ok``: stop_dist > K*round-trip
+    fee — genuinely sub-fee setups still shadow), and headroom-clipped (the same
+    per_symbol/cluster/track/venue/total caps an EARN trade clips against). A
+    PROVE track that keeps losing on real probes self-demotes to BENCH (which
+    IS unconditional shadow) via ``PROVE_STAGNATION``.
+
+    Set ``POLARIS_PROVE_PROBE_ON_ANTI_EDGE=0`` to restore shadow-on-anti-edge.
+    """
+    return os.environ.get("POLARIS_PROVE_PROBE_ON_ANTI_EDGE", "1") == "1"
 
 
 def venue_min_notional_usd(venue: str) -> float:

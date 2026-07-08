@@ -192,11 +192,19 @@ def test_prove_no_atr_data_shadow_routes(memdb: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PROVE — shadow triggers (bottom-suppression cell / learner anti-edge)
+# PROVE — anti-edge routing (bottom-suppression cell / learner anti-edge)
+#
+# B (2026-07-08): under the default POLARIS_PROVE_PROBE_ON_ANTI_EDGE=1, an
+# anti-edge cell no longer FORCES shadow — a PROVE probe fires a small REAL size
+# so the track accrues real fill/dwell evidence (breaks the shadow catch-22).
+# The legacy shadow-on-anti-edge routing is preserved behind the flag=0.
 # ---------------------------------------------------------------------------
 
 
-def test_prove_bottom_cell_shadow_routes_even_if_admitted(memdb: sqlite3.Connection) -> None:
+def test_prove_bottom_cell_probes_real_size_under_default(memdb: sqlite3.Connection) -> None:
+    """Bottom-suppression cell + admitted -> probe fires a REAL min-notional
+    size (was shadow pre-B). The cell mult (0.5) is informational on the
+    proposal; the probe is a fixed floor, not cell-mult-shrunk."""
     _seed_bottom_quartile_cell(memdb, symbol="BOT-USDT")
     floor = prove_stop_dist_floor_pct("okx")
     intent = _intent(
@@ -206,11 +214,17 @@ def test_prove_bottom_cell_shadow_routes_even_if_admitted(memdb: sqlite3.Connect
         memdb, intent=intent, risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
     assert sized.proposed.cell_routing_mult == 0.5
-    assert sized.final_notional_usd == 0.0
-    assert sized.binding_cap == "prove_shadow"
+    assert sized.final_notional_usd == pytest.approx(venue_min_notional_usd("okx"))
+    assert sized.binding_cap == "prove_probe_notional"
 
 
-def test_prove_anti_edge_learner_shadow_routes_even_if_admitted(memdb: sqlite3.Connection) -> None:
+def test_prove_anti_edge_learner_probes_real_size_under_default(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Learner anti-edge posterior + admitted -> probe fires REAL size (was
+    shadow pre-B). This is the catch-22 fix: the losing history that marked the
+    cell anti-edge is exactly what PROVE re-tests, so it must trade to earn
+    fresh evidence."""
     _seed_mid_cell(memdb, symbol="AE-USDT")
     _seed_anti_edge_posterior(memdb, symbol="AE-USDT")
     floor = prove_stop_dist_floor_pct("okx")
@@ -220,8 +234,29 @@ def test_prove_anti_edge_learner_shadow_routes_even_if_admitted(memdb: sqlite3.C
     sized = compute_size(
         memdb, intent=intent, risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
     )
+    assert sized.final_notional_usd == pytest.approx(venue_min_notional_usd("okx"))
+    assert sized.binding_cap == "prove_probe_notional"
+
+
+def test_prove_anti_edge_shadow_under_legacy_flag(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POLARIS_PROVE_PROBE_ON_ANTI_EDGE=0 restores the pre-B routing: an
+    anti-edge cell forces shadow (size 0). Reversibility guarantee."""
+    monkeypatch.setenv("POLARIS_PROVE_PROBE_ON_ANTI_EDGE", "0")
+    _seed_mid_cell(memdb, symbol="AE2-USDT")
+    _seed_anti_edge_posterior(memdb, symbol="AE2-USDT")
+    floor = prove_stop_dist_floor_pct("okx")
+    intent = _intent(
+        strategy_class="PROVE", symbol="AE2-USDT", atr_pct=floor * 10.0, stop_atr_mult=1.0,
+    )
+    sized = compute_size(
+        memdb, intent=intent, risk_state=_risk_state(), portfolio=_portfolio(), now_ts=NOW + 100,
+    )
     assert sized.final_notional_usd == 0.0
     assert sized.binding_cap == "prove_shadow"
+    # Still fully computed (flow_not_block audit trail intact).
+    assert sized.proposed.proposed_risk_pct > 0.0
 
 
 # ---------------------------------------------------------------------------

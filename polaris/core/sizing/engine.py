@@ -49,6 +49,7 @@ from polaris.core.sizing.probe_notional import (
     bottom_cell_shadow_hit,
     probe_notional_usd,
     prove_admission_ok,
+    prove_probe_on_anti_edge,
 )
 from polaris.core.sizing.r_budget_sizer import (
     CapQtyInputs,
@@ -1028,7 +1029,15 @@ def compute_size(
             exchange=intent.venue, strategy=intent.strategy,
             ticker=intent.symbol, regime=intent.regime,
         )
-        shadow_triggered = bottom_cell_shadow_hit(cell_mult) or fetch_learner_anti_edge(
+        # B (2026-07-08): anti-edge (bottom-suppression cell OR Bayesian-learner
+        # anti-edge) is computed for observability but — under the default
+        # ``prove_probe_on_anti_edge()`` — no longer FORCES shadow (size 0). A
+        # PROVE probe fires a small real size on an anti-edge cell so it accrues
+        # real fill/dwell evidence (breaks the shadow catch-22, see
+        # ``prove_probe_on_anti_edge`` docstring). Only the 24h probe-fee cap
+        # (below) still routes to shadow. Set POLARIS_PROVE_PROBE_ON_ANTI_EDGE=0
+        # to restore the legacy shadow-on-anti-edge routing.
+        anti_edge = bottom_cell_shadow_hit(cell_mult) or fetch_learner_anti_edge(
             conn, cell_key
         )
         # pts-classes group F followup — actually CONSUME the 07:30 reranker's
@@ -1055,7 +1064,13 @@ def compute_size(
             ).f_track_cap_usd,
             now_ts=ts,
         )
-        shadow_triggered = shadow_triggered or not cap_result.admitted
+        # Under the default, a cap-exhausted probe is the ONLY shadow trigger
+        # (daily probe-fee budget spent). With the legacy flag off, an anti-edge
+        # cell also forces shadow (pre-B behavior).
+        if prove_probe_on_anti_edge():
+            shadow_triggered = not cap_result.admitted
+        else:
+            shadow_triggered = anti_edge or not cap_result.admitted
         if admitted and not shadow_triggered:
             basis = portfolio.equity_usd * intent.leverage
             probe_risk_pct = probe_notional_usd(intent.venue) / basis if basis > 0.0 else 0.0
@@ -1106,10 +1121,11 @@ def compute_size(
         # (possibly cap-clipped) notional — makes the T4-chain-external
         # constant itself falsifiable in the audit trail.
         logger.info(
-            "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s shadow=%s "
-            "stop_dist_pct=%.6f binding=%s probe_notional_usd=%.2f notional=%.2f",
+            "[T4/pts-class] %s/%s sid=%s class=PROVE admitted=%s anti_edge=%s "
+            "shadow=%s stop_dist_pct=%.6f binding=%s probe_notional_usd=%.2f "
+            "notional=%.2f",
             intent.venue, intent.symbol, intent.signal_id, admitted,
-            shadow_triggered, stop_dist_pct, binding,
+            anti_edge, shadow_triggered, stop_dist_pct, binding,
             probe_notional_usd(intent.venue), notional,
         )
     else:

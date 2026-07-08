@@ -570,6 +570,7 @@ async def _static_ground_producer(
                 alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
                 warm_resolutions=warm_resolutions,
+                db_writer=state.db_writer,
             )
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]

@@ -11,7 +11,9 @@ reset) while still being able to "re-seed" cleanly after a ruin event.
 
 Realized PnL is NET of fees, excludes RECONCILED (tracking-failure) fills —
 same convention as ``snapshot_q_equity._realised_pnl_since``. Unrealized PnL
-is read from open ``positions`` marks (best-effort; 0.0 when absent).
+is LIVE-DERIVED from open positions as ``(mark - entry) * qty * sign``
+(best-effort; 0.0 when a position has no resolvable entry/mark) — see
+``_unrealized_pnl_now``.
 """
 
 from __future__ import annotations
@@ -73,24 +75,58 @@ def _realized_pnl_net_since(
 
 
 def _unrealized_pnl_now(conn: sqlite3.Connection, *, exchange: str) -> float:
-    """Sum of open positions' unrealized PnL for ``exchange`` (best-effort).
+    """Sum of open positions' unrealized PnL for ``exchange``, LIVE-DERIVED.
 
-    Reads ``positions.upnl_usd`` when the column carries a live mark (P5 live
-    recalc keeps it fresh); missing/absent column degrades to 0.0 — never
-    raises, never a trading path.
+    ``positions`` carries no ``upnl_usd`` column at all (schema_ddl_core) — the
+    prior implementation's ``PRAGMA table_info`` guard was therefore always
+    False, so this always read 0.0 (forward-fix, not a hardcode). Instead this
+    derives ``(mark - entry) * qty * sign`` per open position, same as the
+    dashboard's live positions board
+    (``snapshot_q_positions._read_positions``): ``entry`` = the latest
+    open-fill price (``fills.is_close = 0``), ``mark`` = the latest bar
+    close/fresh quote-tick mid. Function-LOCAL import of those two lookups —
+    a module-level import would deadlock on partial init: importing
+    ``polaris.scripts.dashboard.snapshot_q_positions`` first initializes the
+    ``polaris.scripts.dashboard`` package, whose ``__init__`` eagerly chains
+    into ``snapshot_q_streams``, which imports THIS module (``virtual_equity_
+    now``) at its own module level — a circular import.
+
+    No quote-ccy→USD conversion (unlike the dashboard's ``upnl_usd``, #50):
+    scope is the raw ``(mark - entry) * qty * sign`` in the instrument's quote
+    ccy. FX/CFD instruments quoted in JPY/EUR (J225/EU50/…) are therefore NOT
+    USD-normalized here — a known deviation from the dashboard's positions
+    board, left for a follow-up if virtual-equity display needs USD parity.
+
+    Best-effort: any sqlite error degrades to 0.0 — never raises, never a
+    trading path (display-only, like ``virtual_equity_now`` itself).
     """
+    from polaris.scripts.dashboard.snapshot_q_positions import (
+        _entry_price_lookup,
+        _last_prices,
+    )
+
     try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)")}
-        if "upnl_usd" not in cols:
-            return 0.0
-        row = conn.execute(
-            "SELECT COALESCE(SUM(upnl_usd), 0.0) FROM positions "
+        rows = conn.execute(
+            "SELECT symbol, strategy_id, side, qty FROM positions "
             "WHERE venue = ? AND status = 'open'",
             (exchange,),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.Error:
         return 0.0
-    return float(row[0] or 0.0) if row else 0.0
+    if not rows:
+        return 0.0
+    last_prices = _last_prices(conn)
+    entry_lookup = _entry_price_lookup(conn)
+    total = 0.0
+    for symbol, strategy_id, side, qty in rows:
+        inst = f"{exchange}:{symbol}"
+        entry = entry_lookup.get((exchange, inst, str(strategy_id)))
+        if entry is None or entry <= 0.0:
+            entry = last_prices.get(inst, 0.0) or 0.0
+        mark = last_prices.get(inst, entry)
+        sign = 1.0 if str(side).lower() in {"long", "buy"} else -1.0
+        total += (mark - entry) * float(qty or 0.0) * sign
+    return total
 
 
 def virtual_equity_now(

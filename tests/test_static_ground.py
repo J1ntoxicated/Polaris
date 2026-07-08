@@ -23,7 +23,8 @@ import pytest
 
 from polaris.core.data.schema import Bar
 from polaris.scripts import _static_ground as sg
-from polaris.storage.schema import init_db
+from polaris.storage.db_writer import DBWriter
+from polaris.storage.schema import connect, init_db
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -281,6 +282,172 @@ async def test_fill_per_symbol_error_is_swallowed(
     assert result["instruments"] == 1
     n = conn.execute("SELECT COUNT(*) FROM bars WHERE symbol='GOOD-USDT'").fetchone()[0]
     assert n == 1
+
+
+# ---------------------------------------------------------------------------
+# db-writer-reader-split (opt-in) — ``persist_bars`` routed through the shared
+# ``DBWriter`` instead of a SAVEPOINT on the caller's (loop-owned) ``conn``.
+# design SSOT: vault/50_research/db-writer-reader-split-design_2026-07-08.md
+# §2 W1/(편입). Default (``db_writer=None`` or the kill switch) MUST stay
+# byte-identical to the direct-write SAVEPOINT path pinned above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fill_via_db_writer_matches_direct_write_golden(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``db_writer=`` opt-in persists the SAME bars as the direct-write path."""
+    active = [("okx", f"C{i}-USDT", "crypto", f"crypto:C{i}") for i in range(5)]
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        return [_mk_bar(venue, symbol, bar_interval, 1_700_000_000)]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+
+    golden_conn = init_db(tmp_path / "golden.sqlite")
+    _seat_active(golden_conn, active)
+    golden_result = await sg.ingest_static_ground_bars(golden_conn, resolutions=("1D",))
+    golden_rows = sorted(
+        golden_conn.execute(
+            "SELECT instrument_id, bar_interval, ts, close FROM bars"
+        ).fetchall()
+    )
+
+    dbw_db = tmp_path / "dbw.sqlite"
+    dbw_conn = init_db(dbw_db)
+    _seat_active(dbw_conn, active)
+    dbw = DBWriter(dbw_db, batch_max=8, drain_ms=10)
+    dbw.start()
+    try:
+        dbw_result = await sg.ingest_static_ground_bars(
+            dbw_conn, resolutions=("1D",), db_writer=dbw,
+        )
+    finally:
+        dbw.stop()
+    dbw_rows = sorted(
+        connect(dbw_db).execute(
+            "SELECT instrument_id, bar_interval, ts, close FROM bars"
+        ).fetchall()
+    )
+
+    assert dbw_result == golden_result
+    assert dbw_rows == golden_rows
+    assert len(dbw_rows) == 5
+
+
+@pytest.mark.asyncio
+async def test_fill_kill_switch_falls_back_to_direct_write(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``POLARIS_DBWRITER_ENABLED=0`` + a supplied ``db_writer`` still falls back
+    to the direct SAVEPOINT write on ``conn`` — same same-restart rollback shape
+    as every other db-writer-reader-split call site (no code revert needed)."""
+    monkeypatch.setenv("POLARIS_DBWRITER_ENABLED", "0")
+    _seat_active(
+        (dbw_conn := init_db(tmp_path / "dbw.sqlite")),
+        [("okx", "BTC-USDT", "crypto", "crypto:BTC")],
+    )
+
+    async def _fake(venue: str, symbol: str, asset_class: str, **_kw: Any) -> list[Bar]:
+        return [_mk_bar(venue, symbol, "1D", 1_700_000_000)]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    dbw = DBWriter(tmp_path / "dbw.sqlite", batch_max=8, drain_ms=10)
+    dbw.start()
+    try:
+        result = await sg.ingest_static_ground_bars(
+            dbw_conn, resolutions=("1D",), db_writer=dbw,
+        )
+    finally:
+        dbw.stop()
+    assert result["instruments"] == 1
+    # Persisted via the direct SAVEPOINT path on dbw_conn, NOT routed to the
+    # writer thread at all — the kill switch short-circuits before submit().
+    assert dbw.jobs_processed == 0
+    n = dbw_conn.execute("SELECT COUNT(*) FROM bars WHERE symbol='BTC-USDT'").fetchone()[0]
+    assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_fill_persist_error_via_db_writer_does_not_abort_walk(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed candle routed through ``db_writer`` degrades the same way as
+    the direct-write SAVEPOINT path (mirrors
+    ``test_fill_persist_error_does_not_abort_walk``): the writer's OWN per-job
+    SAVEPOINT isolates the bad batch, the good instruments still persist."""
+    dbw_db = tmp_path / "dbw.sqlite"
+    dbw_conn = init_db(dbw_db)
+    _seat_active(
+        dbw_conn,
+        [("okx", "GOOD1-USDT", "crypto", "crypto:GOOD1"),
+         ("okx", "BADBAR-USDT", "crypto", "crypto:BADBAR"),
+         ("okx", "GOOD2-USDT", "crypto", "crypto:GOOD2")],
+    )
+
+    async def _fake(
+        venue: str, symbol: str, asset_class: str, *, bar_interval: str = "1m",
+        **_kw: Any,
+    ) -> list[Bar]:
+        bar = _mk_bar(venue, symbol, bar_interval, 1_700_000_000)
+        if symbol == "BADBAR-USDT":
+            object.__setattr__(bar, "close", float("nan"))
+        return [bar]
+
+    monkeypatch.setattr(sg, "fetch_bars_one", _fake)
+    dbw = DBWriter(dbw_db, batch_max=8, drain_ms=10)
+    dbw.start()
+    try:
+        result = await sg.ingest_static_ground_bars(
+            dbw_conn, resolutions=("1D",), db_writer=dbw,
+        )
+    finally:
+        dbw.stop()
+    assert result["instruments"] == 2
+    persisted = {
+        r[0] for r in connect(dbw_db).execute(
+            "SELECT DISTINCT symbol FROM bars WHERE bar_interval='1D'"
+        ).fetchall()
+    }
+    assert persisted == {"GOOD1-USDT", "GOOD2-USDT"}
+
+
+@pytest.mark.asyncio
+async def test_static_ground_producer_forwards_db_writer(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bar producer forwards ``state.db_writer`` to the bulk fill (mirrors
+    ``_ticker_ground_producer`` already forwarding it to ``refresh_ticker_ground``)."""
+    from polaris.scripts import production_paper_loop as ppl
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_bars(_conn: Any, *, db_writer: Any = "unset", **_kw: Any) -> dict[str, Any]:
+        seen["db_writer"] = db_writer
+        return {"instruments": 0, "bars": 0, "timed_out": False}
+
+    monkeypatch.setattr(ppl, "ingest_static_ground_bars", _fake_bars)
+
+    state = ppl.ProdLoopState()
+    sentinel = object()
+    state.db_writer = sentinel  # type: ignore[assignment]
+    stop_evt = asyncio.Event()
+
+    async def _stop_after_first() -> None:
+        await asyncio.sleep(0.02)
+        stop_evt.set()
+
+    await asyncio.gather(
+        ppl._static_ground_producer(
+            conn, state=state, stop_evt=stop_evt, refresh_sec=999.0,
+        ),
+        _stop_after_first(),
+    )
+    assert seen["db_writer"] is sentinel
 
 
 # ---------------------------------------------------------------------------

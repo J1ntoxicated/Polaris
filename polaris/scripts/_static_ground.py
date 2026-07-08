@@ -39,7 +39,11 @@ from typing import Any
 from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.ingest import persist_bars
 from polaris.core.data.schema import Bar
-from polaris.scripts._ground_write_chunks import GroundRow, submit_ground_chunks
+from polaris.scripts._ground_write_chunks import (
+    GroundRow,
+    submit_bars_persist,
+    submit_ground_chunks,
+)
 from polaris.scripts._production_bars import (
     ALPACA_TIMEFRAME_BY_INTERVAL,
     fetch_alpaca_bars_multi,
@@ -218,6 +222,7 @@ async def ingest_static_ground_bars(
     limit: int = 240,
     warm_resolutions: tuple[str, ...] = (),
     now_ts: int | float | None = None,
+    db_writer: DBWriter | None = None,
 ) -> dict[str, Any]:
     """Fetch + persist Yahoo multi-resolution bars for EVERY active instrument.
 
@@ -261,6 +266,18 @@ async def ingest_static_ground_bars(
     resolution is skipped (no double fetch). ``warm_resolutions=()`` (the
     default / kill-switch) = warming OFF. ``now_ts`` (UTC epoch) drives the
     warm-window check (defaults to ``time.time()``).
+
+    Default (``db_writer=None``) is BYTE-IDENTICAL to the pre-split path: each
+    instrument's fetched bars are persisted via a ``SAVEPOINT`` on the
+    caller's shared ``conn`` (the loop-owned conn — a WAL-write-lock
+    contender, see ``polaris.storage.db_writer`` module docstring).
+    db-writer-reader-split (opt-in, design SSOT:
+    ``vault/50_research/db-writer-reader-split-design_2026-07-08.md``): when
+    ``db_writer`` is supplied and the kill switch reads enabled, the same
+    ``persist_bars`` call is submitted as a durable job on the shared writer
+    instead (its own per-job SAVEPOINT gives the identical bad-batch
+    isolation) — same durable-submit shape as
+    ``polaris.core.data.ingest.persist_bars_offloaded``.
 
     Returns ``{"instruments": K, "bars": N, "timed_out": bool,
     "warm_instruments": W, "warm_bars": M}``.
@@ -365,25 +382,41 @@ async def ingest_static_ground_bars(
                     continue
                 out.extend(await _fetch_interval(venue, symbol, asset_class, interval))
         if out:
-            # persist_bars is a sync DB write; cheap (INSERT OR REPLACE on the PK).
-            # GUARD (live probe 2026-06-25): a real Yahoo frame can carry a malformed
-            # candle (NULL/NaN close → IntegrityError on the NOT NULL bars.close).
-            # An unguarded raise here aborted the WHOLE gather and poisoned the
-            # shared txn. Wrap + SAVEPOINT-rollback so one bad batch is skipped and
-            # the walk + the already-persisted instruments survive (degrade-never-halt).
-            try:
-                conn.execute("SAVEPOINT ground_persist")
-                n = persist_bars(conn, out)
-                conn.execute("RELEASE ground_persist")
-            except Exception as exc:  # noqa: BLE001 — one bad batch never aborts the walk
-                with contextlib.suppress(Exception):
-                    conn.execute("ROLLBACK TO ground_persist")
+            if db_writer is not None and dbwriter_enabled():
+                # db-writer-reader-split (opt-in): durable-submit to the shared
+                # writer instead of a SAVEPOINT on the loop-owned conn (helper
+                # split out to ``_ground_write_chunks`` — this file is already
+                # >500 LOC). The writer's OWN per-job SAVEPOINT gives the
+                # identical bad-batch isolation (a malformed candle never
+                # poisons the batch or the walk).
+                try:
+                    n = await submit_bars_persist(db_writer, out)
+                except Exception as exc:  # noqa: BLE001 — degrade-never-crash (offload fault)
+                    logger.debug(
+                        "[ground] %s:%s db_writer persist failed (degrade): %r",
+                        venue, symbol, exc,
+                    )
+                    return
+            else:
+                # persist_bars is a sync DB write; cheap (INSERT OR REPLACE on the PK).
+                # GUARD (live probe 2026-06-25): a real Yahoo frame can carry a malformed
+                # candle (NULL/NaN close → IntegrityError on the NOT NULL bars.close).
+                # An unguarded raise here aborted the WHOLE gather and poisoned the
+                # shared txn. Wrap + SAVEPOINT-rollback so one bad batch is skipped and
+                # the walk + the already-persisted instruments survive (degrade-never-halt).
+                try:
+                    conn.execute("SAVEPOINT ground_persist")
+                    n = persist_bars(conn, out)
                     conn.execute("RELEASE ground_persist")
-                logger.debug(
-                    "[ground] %s:%s persist skipped (bad batch): %r",
-                    venue, symbol, exc,
-                )
-                return
+                except Exception as exc:  # noqa: BLE001 — one bad batch never aborts the walk
+                    with contextlib.suppress(Exception):
+                        conn.execute("ROLLBACK TO ground_persist")
+                        conn.execute("RELEASE ground_persist")
+                    logger.debug(
+                        "[ground] %s:%s persist skipped (bad batch): %r",
+                        venue, symbol, exc,
+                    )
+                    return
             if n:
                 total_bars += n
                 persisted_instruments.add(f"{venue}:{symbol}")

@@ -1,30 +1,41 @@
-"""Chunk-submit helper for ``refresh_ticker_ground``'s db-writer-reader-split
+"""Chunk-submit helpers for ``_static_ground.py``'s db-writer-reader-split
 opt-in path (design SSOT:
 ``vault/50_research/db-writer-reader-split-design_2026-07-08.md`` §2 W1).
 
-Split out of ``_static_ground.py`` (already >500 LOC) to keep this addition
+Split out of ``_static_ground.py`` (already >500 LOC) to keep each addition
 isolated + independently testable rather than growing that file further.
 
-The legacy path (``db_writer=None``) wraps the WHOLE active-universe walk
-(~1882 rows) in ONE explicit ``BEGIN..COMMIT`` on the loop-owned conn — the
-dominant write-lock contender the split design targets (a single txn can hold
-the WAL write lock for hundreds of ms, starving the 1Hz quote/tech flushes
-past their ``busy_timeout``). This module replaces that with many small
-chunk jobs submitted to the shared ``DBWriter`` — each chunk is one
-``SAVEPOINT`` inside the writer's own batch transaction, so the walk
-interleaves with the writer's other traffic instead of monopolizing the lock.
+``submit_ground_chunks`` (``refresh_ticker_ground``): the legacy path
+(``db_writer=None``) wraps the WHOLE active-universe walk (~1882 rows) in ONE
+explicit ``BEGIN..COMMIT`` on the loop-owned conn — the dominant write-lock
+contender the split design targets (a single txn can hold the WAL write lock
+for hundreds of ms, starving the 1Hz quote/tech flushes past their
+``busy_timeout``). This replaces that with many small chunk jobs submitted to
+the shared ``DBWriter`` — each chunk is one ``SAVEPOINT`` inside the writer's
+own batch transaction, so the walk interleaves with the writer's other
+traffic instead of monopolizing the lock.
+
+``submit_bars_persist`` (``ingest_static_ground_bars``): one instrument's
+fetched bars, durable-submitted to the same shared writer instead of a
+SAVEPOINT on the loop-owned conn — same durable-submit shape as
+``polaris.core.data.ingest.persist_bars_offloaded``'s db_writer branch.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from polaris.core.data.ingest import persist_bars
+from polaris.core.data.schema import Bar
 from polaris.storage.db_writer import DBWriter
 
-__all__ = ["GroundRow", "ground_chunk_rows", "submit_ground_chunks"]
+__all__ = [
+    "GroundRow", "ground_chunk_rows", "submit_bars_persist", "submit_ground_chunks",
+]
 
 # A pre-computed ``ticker_ground`` row: (instrument, ts, has_sentiment,
 # has_event, evidence). Plain data — fuse_evidence has already run (pure
@@ -67,3 +78,23 @@ def submit_ground_chunks(
                 persist_one(conn, row)
 
         db_writer.submit(_job, label="ticker_ground_chunk")
+
+
+async def submit_bars_persist(db_writer: DBWriter, bars: list[Bar]) -> int:
+    """Durable-submit one instrument's fetched bars via ``persist_bars``,
+    awaiting the COMMIT before returning the persisted count.
+
+    Raises on submit/commit failure — the caller (``ingest_static_ground_bars``)
+    already wraps this in its own try/except for venue/symbol-scoped degrade
+    logging, mirroring the direct-write SAVEPOINT path's error handling (one
+    bad batch never aborts the walk).
+    """
+    result_box = {"n": 0}
+
+    def _job(conn: sqlite3.Connection) -> None:
+        result_box["n"] = persist_bars(conn, bars)
+
+    future = db_writer.submit(_job, durable=True, label="ground_persist_bars")
+    assert future is not None
+    await asyncio.wrap_future(future)
+    return result_box["n"]

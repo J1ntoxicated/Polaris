@@ -38,10 +38,12 @@ from polaris.strategies.base import (
 )
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): 25->35 is still a normal over-sold
-# level (not noise), ~2-3x trigger rate. REAL byte-identical (env unset). A
-# deep over-sold flush — tighter than a routine RSI-BB pullback (the weekend
-# thesis wants a genuine over-correction, not a shallow dip).
-RSI_FLUSH_THRESHOLD = virtual_loosen(35.0, 25.0)
+# level (not noise), ~2-3x trigger rate. Deepened 35->45 (Jin 2026-07-08): still
+# <=50 (midline, floor>=45 keeps it a genuine oversold read, not neutral). REAL
+# byte-identical (env unset). A deep over-sold flush — tighter than a routine
+# RSI-BB pullback (the weekend thesis wants a genuine over-correction, not a
+# shallow dip).
+RSI_FLUSH_THRESHOLD = virtual_loosen(45.0, 25.0)
 WARMUP_BARS = 24  # enough for RSI(14) + a Bollinger(20) lower band
 
 # Clean-revert harvest target (R). The research asymmetry: clean fill +~0.30R /
@@ -54,7 +56,12 @@ STRENGTH_FLOOR = 0.4
 STRENGTH_OFFSET = 0.5
 TTL_BARS = 3
 
-_WEEKEND_UTC_WEEKDAYS = frozenset({5, 6})  # Sat=5, Sun=6
+# VIRTUAL-mode loosening (Jin 2026-07-08): the weekend-only gate is a sample-
+# availability restriction (the historical edge was measured on weekend thin-
+# book data), not the trigger mechanism itself (RSI-flush + BB-lower wick,
+# unchanged below) — un-gate to all 7 UTC weekdays so virtual observes fills
+# daily. REAL byte-identical (Sat=5, Sun=6 only).
+_WEEKEND_UTC_WEEKDAYS = virtual_loosen(frozenset(range(7)), frozenset({5, 6}))
 
 
 def _is_weekend_utc(ts: int) -> bool:

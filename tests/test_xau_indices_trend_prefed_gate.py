@@ -9,7 +9,7 @@ and ``market_view.donchian_high_30``/``donchian_low_30`` UNCONDITIONALLY at
 FIXED windows (20-bar momentum, 30-bar Donchian), regardless of VIRTUAL/REAL
 mode. If ``generate_raw_signal`` reused those pre-fed fields whenever finite
 (the pre-fix shape), the module's own loosened ``MOMENTUM_LOOKBACK``
-(20->10) and ``DONCHIAN_WINDOW`` (30->15) in VIRTUAL mode would never
+(20->5) and ``DONCHIAN_WINDOW`` (30->10) in VIRTUAL mode would never
 actually run on the live loop — a silent no-op for BOTH levers.
 
 Fix: gate each pre-fed reuse on the loosened window still matching the
@@ -120,7 +120,7 @@ def teardown_module() -> None:
 
 def test_virtual_mode_fires_donchian_with_prefed_30bar_finite() -> None:
     """Live-production shape: pre-fed donchian_high_30/low_30 are FINITE
-    (fixed 30-bar), yet VIRTUAL mode must fire off the loosened 15-bar window —
+    (fixed 30-bar), yet VIRTUAL mode must fire off the loosened 10-bar window —
     proving the in-module recompute runs, not the stale pre-fed reuse. Hold
     momentum fixed-positive (both windows agree) to isolate the Donchian gate."""
     closes = [100.0] * 30 + [80.0] * 15 + [85.0]
@@ -129,7 +129,7 @@ def test_virtual_mode_fires_donchian_with_prefed_30bar_finite() -> None:
     prefed_low_30 = min(b.low for b in bars[-31:-1])
 
     virtual_mod = _reload_with_env("1")
-    assert virtual_mod.DONCHIAN_WINDOW == 15
+    assert virtual_mod.DONCHIAN_WINDOW == 10
     strategy = virtual_mod.XAUIndicesTrendStrategy()
     sig = strategy.generate_raw_signal(
         _mv_with_live_prefed(
@@ -140,7 +140,7 @@ def test_virtual_mode_fires_donchian_with_prefed_30bar_finite() -> None:
         )
     )
     assert sig is not None, (
-        "VIRTUAL (15-bar loosened) must fire even when the pre-fed "
+        "VIRTUAL (10-bar loosened) must fire even when the pre-fed "
         "donchian_high_30 (fixed 30-bar) is finite — else the loosening is a "
         "silent no-op on the live loop"
     )
@@ -176,7 +176,7 @@ def test_real_mode_byte_identical_donchian_reuse_with_prefed_finite() -> None:
 def test_virtual_mode_fires_momentum_with_prefed_20bar_finite() -> None:
     """Live-production shape: pre-fed momentum_20bar is FINITE (a fixed-window
     read, forced NEGATIVE here to model a stale/mismatched production feed),
-    yet VIRTUAL mode must still fire off the loosened 10-bar in-module
+    yet VIRTUAL mode must still fire off the loosened 5-bar in-module
     recompute (positive on this series) — proving the recompute runs, not
     the stale pre-fed reuse. Donchian high/low held permissive (finite, far
     outside price) so only the momentum gate is under test."""
@@ -185,7 +185,7 @@ def test_virtual_mode_fires_momentum_with_prefed_20bar_finite() -> None:
     prefed_momentum_20 = -0.05  # forced negative pre-fed value (see docstring)
 
     virtual_mod = _reload_with_env("1")
-    assert virtual_mod.MOMENTUM_LOOKBACK == 10
+    assert virtual_mod.MOMENTUM_LOOKBACK == 5
     strategy = virtual_mod.XAUIndicesTrendStrategy()
     sig = strategy.generate_raw_signal(
         _mv_with_live_prefed(
@@ -196,7 +196,7 @@ def test_virtual_mode_fires_momentum_with_prefed_20bar_finite() -> None:
         )
     )
     assert sig is not None, (
-        "VIRTUAL (10-bar loosened momentum) must fire even when the pre-fed "
+        "VIRTUAL (5-bar loosened momentum) must fire even when the pre-fed "
         "momentum_20bar (fixed 20-bar, negative here) is finite — else the "
         "loosening is a silent no-op on the live loop"
     )

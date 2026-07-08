@@ -41,6 +41,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -53,7 +54,11 @@ from polaris.strategies.base import (
 
 ATR_PERIOD = 10
 MULTIPLIER = 3.0
-ATR_FLOOR_PCT = 0.0005  # 0.05% (fraction) — liquidity floor (liquid majors only)
+# 0.05% (fraction) — liquidity floor (liquid majors only). VIRTUAL-mode
+# loosening (Jin 2026-07-08): 0.05% -> 0.02% admits more of the universe while
+# still excluding true dead-flat micro-caps; the flip trigger itself is
+# unchanged. REAL byte-identical.
+ATR_FLOOR_PCT = virtual_loosen(0.0002, 0.0005)
 
 # Strength curve (frozen v1): a wider flip gap (close further above the band,
 # scaled by ATR) → a more decisive trend turn → stronger signal.
@@ -168,7 +173,10 @@ class SupertrendStrategy(BaseStrategy):
         # stays OUT of NEW-ENTRY dispatch (unvalidated live = churn risk). It was
         # already absent from the prior dispatch literal; this flag makes the KILL
         # explicit + structurally enforced (registered, not dispatched).
-        dispatch_eligible=False,
+        # VIRTUAL-mode loosening (Jin 2026-07-08): unvalidated-live churn risk is
+        # VOID in virtual (no real capital) — un-KILL so this dispatches and
+        # fires. REAL byte-identical.
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

@@ -69,7 +69,15 @@ dispatch-level KILL as the autopsy survivors above — modules preserved
 read-only (2 ``donchian_turtle_breakout`` positions were live at prune time;
 their exit path resolves via ``STRATEGY_REGISTRY.get()`` → ``None`` → default
 exit, degrade-never-crash); only the signal-emit behaviour + registry
-membership are severed.)
+membership are severed.
+
+VIRTUAL-mode exception (Jin 2026-07-08): the KILL rationale above is real
+maker/taker FEE-BLEED — void when ``POLARIS_VIRTUAL_ACCOUNT=1`` (no real fees).
+``session_breakout`` / ``donchian_turtle_breakout`` / ``spot_donchian`` /
+``volume_burst`` (NOT the two equity ids — those stay out, Alpaca-inert on
+SIP #42) are re-admitted into ``STRATEGY_REGISTRY`` for VIRTUAL only, below.
+REAL byte-identical: the re-registration block never runs when the env is
+unset, so the REAL registry keeps exactly the members listed above.)
 
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
@@ -80,6 +88,7 @@ turtle) are inert until the Alpaca SIP key (#42) routes equity bars
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_mode_enabled
 from polaris.strategies.bar_breakout_run import BarBreakoutRunStrategy
 from polaris.strategies.base import (
     COLD_START_NEUTRAL_STRENGTH,
@@ -92,6 +101,7 @@ from polaris.strategies.base import (
 )
 from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
+from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.gold_breakout_1h import GoldBreakout1HStrategy
@@ -104,11 +114,14 @@ from polaris.strategies.index_dual_momentum_rotation import (
 from polaris.strategies.macd_ema_trend_pullback import MACDEMATrendPullbackStrategy
 from polaris.strategies.okx_donchian_55_breakout import OKXDonchian55BreakoutStrategy
 from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
+from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.silver_breakout_1h import SilverBreakout1HStrategy
+from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.supertrend import SupertrendStrategy
 from polaris.strategies.tsmom_12_1_multiasset import TSMom12_1MultiAssetStrategy
 from polaris.strategies.uk100_breakout_1h import UK100Breakout1HStrategy
 from polaris.strategies.us100_breakout_1h import US100Breakout1HStrategy
+from polaris.strategies.volume_burst import VolumeBurstStrategy
 from polaris.strategies.weekend_funding_capitulation_maker import (
     WeekendFundingCapitulationMakerStrategy,
 )
@@ -164,6 +177,23 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     UK100Breakout1HStrategy.metadata.strategy_id: UK100Breakout1HStrategy,
 }
 
+# VIRTUAL-mode-only re-registration (Jin 2026-07-08): these 4 ids were
+# un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real maker/taker fees ate
+# the edge live (session_breakout -$933.65/88 trades fees 9.7x gross,
+# donchian_turtle_breakout -$540.58, spot_donchian fee-fatal intraday class,
+# volume_burst inverted-asymmetry churn). VIRTUAL has NO real fees, so the
+# fee-bleed KILL rationale is VOID there — re-admit for virtual observation
+# only. REAL registry above stays byte-identical (env unset -> this block never
+# runs, so REAL never sees these ids).
+if virtual_mode_enabled():  # pragma: no branch — deterministic per-process env read
+    for _virtual_only_cls in (
+        SessionBreakoutStrategy,
+        DonchianTurtleBreakoutStrategy,
+        SpotDonchianStrategy,
+        VolumeBurstStrategy,
+    ):
+        STRATEGY_REGISTRY[_virtual_only_cls.metadata.strategy_id] = _virtual_only_cls
+
 
 def all_strategies() -> list[BaseStrategy]:
     """Instantiate one of each registered strategy (used by smoke + tests)."""
@@ -178,6 +208,7 @@ __all__ = [
     "COLD_START_NEUTRAL_STRENGTH",
     "CCIReversionStrategy",
     "ConnorsRSI2Strategy",
+    "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
     "FXBreakoutBasketStrategy",
     "GoldBreakout1HStrategy",
@@ -191,12 +222,15 @@ __all__ = [
     "RSIBBPullbackStrategy",
     "RawSignal",
     "STRATEGY_REGISTRY",
+    "SessionBreakoutStrategy",
     "SilverBreakout1HStrategy",
+    "SpotDonchianStrategy",
     "StrategyMetadata",
     "SupertrendStrategy",
     "TSMom12_1MultiAssetStrategy",
     "UK100Breakout1HStrategy",
     "US100Breakout1HStrategy",
+    "VolumeBurstStrategy",
     "WeekendFundingCapitulationMakerStrategy",
     "WeekendThinBookFlushMakerStrategy",
     "XAUIndicesTrendStrategy",

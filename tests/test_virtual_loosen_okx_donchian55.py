@@ -3,10 +3,10 @@
 DEMO/PAPER 가상자금 — aggressive bias preserved, flow_not_block (this is a
 LOOSENING, more trades, never a throttle). Proves the shared
 ``polaris.strategies._virtual_loosen.virtual_loosen`` mechanism on
-``okx_donchian_55_breakout`` (DONCHIAN_WINDOW: virtual 20 / real 55):
+``okx_donchian_55_breakout`` (DONCHIAN_WINDOW: virtual 10 / real 55):
 
   (a) VIRTUAL mode (``POLARIS_VIRTUAL_ACCOUNT=1``) fires on a bar series that
-      breaks a 20-bar high but NOT a 55-bar high — the conservative REAL
+      breaks a 10-bar high but NOT a 55-bar high — the conservative REAL
       threshold would REJECT this same series (proves loosening works).
   (b) REAL mode (env unset) rejects that same series (proves the real path is
       unchanged / byte-identical to the frozen research-survivor threshold).
@@ -88,28 +88,29 @@ def _reload_with_env(value: str | None):
 
 
 # ===========================================================================
-# (a) + (b): the same bar series — a fresh 20-bar high, NOT a fresh 55-bar high
+# (a) + (b): the same bar series — a fresh 10-bar high, NOT a fresh 55-bar high
 # ===========================================================================
 
 
-def _series_breaks_20_not_55() -> list[float]:
+def _series_breaks_10_not_55() -> list[float]:
     """80 bars: flat-ish history, then a dip, then a rally that clears the
-    last-20-bar high but stays UNDER the bar-55-ago high (a 55-bar breakout
-    would reject this; a 20-bar breakout accepts it)."""
+    last-10-bar high (entirely inside the dip) but stays UNDER the
+    bar-55-ago high (a 55-bar breakout would reject this; a 10-bar breakout
+    accepts it)."""
     closes = [100.0] * 55  # bar 55 high anchor = 100.3 (high = close+0.3)
-    closes += [90.0] * 20  # a deep dip -> resets the 20-bar high much lower
-    closes += [95.0]  # final close: > 20-bar prior high (90.3), < 55-bar (100.3)
+    closes += [90.0] * 20  # a deep dip -> resets the 10-bar high much lower
+    closes += [95.0]  # final close: > 10-bar prior high (90.3), < 55-bar (100.3)
     return closes
 
 
 def test_virtual_mode_fires_where_real_mode_rejects() -> None:
-    closes = _series_breaks_20_not_55()
+    closes = _series_breaks_10_not_55()
 
     virtual_mod = _reload_with_env("1")
     virtual_strategy = virtual_mod.OKXDonchian55BreakoutStrategy()
-    assert virtual_mod.DONCHIAN_WINDOW == 20
+    assert virtual_mod.DONCHIAN_WINDOW == 10
     virtual_sig = virtual_strategy.generate_raw_signal(_mv(_bars(closes)))
-    assert virtual_sig is not None, "VIRTUAL (20-bar) must fire on a 20-bar breakout"
+    assert virtual_sig is not None, "VIRTUAL (10-bar) must fire on a 10-bar breakout"
     assert virtual_sig.side == "long"
 
     real_mod = _reload_with_env(None)

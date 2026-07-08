@@ -60,7 +60,10 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-ROC_LOOKBACK: Final[int] = 120
+# VIRTUAL-mode loosening (Jin 2026-07-08): 120->60-bar (3-month) ROC is still a
+# genuine multi-month momentum measure (floor>=60), just faster to rank/rotate.
+# REAL byte-identical (env unset).
+ROC_LOOKBACK: Final[int] = virtual_loosen(60, 120)
 # VIRTUAL-mode loosening (Jin 2026-07-07): TOP_N 2->4 admits more of the 5-index
 # set per rebalance while the ABSOLUTE-momentum gate (ROC_120>0) stays intact —
 # still dual-momentum, not a bare admit. Monthly cadence (the fee-immunity) is

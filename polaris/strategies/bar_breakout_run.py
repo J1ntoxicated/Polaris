@@ -43,9 +43,10 @@ from polaris.strategies.base import (
 )
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): 40->20-bar Donchian (~2-2.5x trigger
-# rate) + ROC-10->5 (still a positive-momentum confirm, shorter). REAL is
-# byte-identical (env unset -> real wins).
-DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 40)
+# rate) + ROC-10->5 (still a positive-momentum confirm, shorter). Deepened
+# 20->10 (Jin 2026-07-08): still a real 10-bar prior-high break, floor>=10.
+# REAL is byte-identical (env unset -> real wins).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(10, 40)
 ROC_LOOKBACK: Final[int] = virtual_loosen(5, 10)
 
 # Strength curve (frozen v1). Strength scales with the raw ROC-10 momentum,

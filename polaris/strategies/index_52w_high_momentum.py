@@ -51,9 +51,12 @@ from polaris.strategies.base import (
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): 252->120-bar (6-month) high is still
 # a legit multi-month breakout; 3%-proximity band widens the "near-high" catch.
-# REAL byte-identical (env unset).
-HIGH_LOOKBACK: Final[int] = virtual_loosen(120, 252)
-PROXIMITY: Final[float] = virtual_loosen(0.97, 0.98)
+# Deepened 120->60 / 0.97->0.95 (Jin 2026-07-08): still a real multi-month
+# (~3-month, floor>=60) high + a genuine near-high proximity (floor>=0.95, i.e.
+# within 5% of the high — not a bare level touch). REAL byte-identical
+# (env unset).
+HIGH_LOOKBACK: Final[int] = virtual_loosen(60, 252)
+PROXIMITY: Final[float] = virtual_loosen(0.95, 0.98)
 ROC_LOOKBACK: Final[int] = 60
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_STOP_MULT: Final[float] = 2.0

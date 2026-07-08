@@ -56,8 +56,10 @@ from polaris.strategies.base import (
 EMA_FAST = 20
 EMA_SLOW = 50
 # VIRTUAL-mode loosening (Jin 2026-07-07): 200->50-EMA regime filter fires
-# sooner (cross+regime+ADX mechanism unchanged). REAL byte-identical.
-EMA_REGIME = virtual_loosen(50, 200)
+# sooner (cross+regime+ADX mechanism unchanged). Deepened 50->20 (Jin
+# 2026-07-08): still a real regime-EMA filter (floor>=20), just faster to
+# confirm. REAL byte-identical.
+EMA_REGIME = virtual_loosen(20, 200)
 ADX_THRESHOLD = 14.0  # relaxed 20 -> 14 (flow_not_block, more emits): a weaker-trend EMA cross now fires
 
 # Strength curve (frozen v1): a stronger trend (higher ADX) → stronger signal.

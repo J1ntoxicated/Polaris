@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -65,7 +66,11 @@ STRENGTH_OFFSET = 0.5
 STRENGTH_DEPTH_CAP = 0.5
 TTL_BARS = 6  # the unwind is a multi-bar drift (slower than the flush)
 
-_WEEKEND_UTC_WEEKDAYS = frozenset({5, 6})  # Sat=5, Sun=6
+# VIRTUAL-mode loosening (Jin 2026-07-08): the weekend-only gate is a sample-
+# availability restriction, not the edge itself (the edge = funding<=own p10 AND
+# <0, unchanged below) — un-gate to all 7 UTC weekdays so virtual observes fills
+# daily instead of only Sat/Sun. REAL byte-identical (Sat=5, Sun=6 only).
+_WEEKEND_UTC_WEEKDAYS = virtual_loosen(frozenset(range(7)), frozenset({5, 6}))
 
 
 def _is_weekend_utc(ts: int) -> bool:
@@ -99,7 +104,9 @@ class WeekendFundingCapitulationMakerStrategy(BaseStrategy):
         # real but OPTIMISTIC (OOS +1.69R regime-amplified; conservative ≈+0.2-0.4R)
         # on a THIN 96d single period — durability INCONCLUSIVE. So the order is
         # SUPPRESSED while the would-be P&L accrues live — zero capital at risk.
-        shadow_first=True,
+        # VIRTUAL-mode loosening (Jin 2026-07-08): zero real capital at risk in
+        # virtual — un-shadow so the order actually routes. REAL byte-identical.
+        shadow_first=virtual_loosen(False, True),
         # bars-EXTERNAL input: the funding rate (MarketView.altdata) refreshes
         # on its own intraday cadence independent of the 1H bar close — the
         # bar-advance dispatch gate must not suppress a re-eval (compute-

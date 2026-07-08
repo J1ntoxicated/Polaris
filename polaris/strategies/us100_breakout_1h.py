@@ -30,9 +30,11 @@ from polaris.strategies.base import (
 )
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): 55->20-bar channel, ~2.5-3x trigger
-# rate, same 1H US100 breakout mechanism. Session gate is UNCHANGED (weekday+
-# holiday SSOT, not an entry-loosening knob). REAL byte-identical (env unset).
-DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 55)
+# rate, same 1H US100 breakout mechanism. Deepened 20->10 (Jin 2026-07-08):
+# still a real 10-bar prior-high break, floor>=10. Session gate is UNCHANGED
+# (weekday+holiday SSOT, not an entry-loosening knob). REAL byte-identical
+# (env unset).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(10, 55)
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 EXIT_DONCHIAN: Final[int] = 20
 

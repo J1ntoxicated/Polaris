@@ -60,8 +60,10 @@ from polaris.strategies.base import (
 
 # VIRTUAL-mode loosening (Jin 2026-07-07, "그만 묶어"): 55->20-bar channel is the
 # Turtle-1 fast lookback, ~2.5-3x the trigger rate, still a genuine breakout +
-# momentum confirm. REAL is byte-identical (unset env -> real wins).
-DONCHIAN_WINDOW: Final[int] = virtual_loosen(20, 55)
+# momentum confirm. Deepened 20->10 (Jin 2026-07-08): still a real 10-bar prior-
+# high break + ROC-20 momentum confirm, floor>=10. REAL is byte-identical
+# (unset env -> real wins).
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(10, 55)
 ROC_LOOKBACK: Final[int] = 20
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_STOP_MULT: Final[float] = 2.0

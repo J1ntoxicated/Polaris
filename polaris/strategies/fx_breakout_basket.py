@@ -16,6 +16,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -25,14 +26,19 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-WINDOW = 40
+# VIRTUAL-mode loosening (Jin 2026-07-08): 40->20-bar Donchian (~2x trigger
+# rate). REAL byte-identical (env unset -> real wins).
+WINDOW = virtual_loosen(20, 40)
 ADX_PERIOD = 14
 # /debate-confirmable (Jin veto): widened 20.0 -> 15.0 to cover the mid-ADX
 # [15,25] dead seam where a pair (live: EURUSD 27.3 / GBPUSD 22.7) matched
 # NEITHER breakout (>thresh) nor fade (<max). Lower threshold = MORE breakout
 # signals (aggressive / flow_not_block); the fade max rises to 25.0 in tandem so
 # [15,25] is covered by BOTH (they compete; arbitration ranks them downstream).
-ADX_THRESHOLD = 10.5  # relaxed 15 -> 10.5 (flow_not_block, more breakout emits): a weaker-trend donchian break now fires
+# relaxed 15 -> 10.5 (flow_not_block, more breakout emits): a weaker-trend
+# donchian break now fires. VIRTUAL-mode loosening (Jin 2026-07-08): 10.5 -> 5.0
+# (ADX>=5 = trend-existence floor, not noise). REAL byte-identical.
+ADX_THRESHOLD = virtual_loosen(5.0, 10.5)
 BASKET_SYMBOLS: frozenset[str] = frozenset(
     {"EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD"}
 )
@@ -96,7 +102,11 @@ class FXBreakoutBasketStrategy(BaseStrategy):
             return None
         adx_score = STRENGTH_BASE + (adx - self.adx_threshold) / ADX_STRENGTH_DENOM
         strength = min(1.0, max(STRENGTH_BASE, adx_score))
-        if is_finite(market_view.donchian_high_40):
+        # Reuse the pre-fed indicator when finite AND WINDOW is still 40 (REAL
+        # mode only — the pre-fed field is a fixed 40-bar Donchian, not a valid
+        # stand-in once VIRTUAL mode loosens the window to 20), else recompute
+        # in-module at the (possibly loosened) window.
+        if WINDOW == 40 and is_finite(market_view.donchian_high_40):
             high = market_view.donchian_high_40
         else:
             high = max(b.high for b in bars[-(WINDOW + 1):-1])
@@ -117,7 +127,7 @@ class FXBreakoutBasketStrategy(BaseStrategy):
                 tags={"adx_14": f"{adx:.1f}", "donchian_high_40": f"{high:.5f}",
                       "leverage": f"{int(LEVERAGE_MAX)}"},
             )
-        if is_finite(market_view.donchian_low_40):
+        if WINDOW == 40 and is_finite(market_view.donchian_low_40):
             low = market_view.donchian_low_40
         else:
             low = min(b.low for b in bars[-(WINDOW + 1):-1])

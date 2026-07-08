@@ -58,6 +58,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 from polaris.strategies._okx_liquid_universe import okx_liquid_top_n
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -67,8 +68,12 @@ from polaris.strategies.base import (
     make_signal_id,
 )
 
-MOM_LOOKBACK: Final[int] = 252
-MOM_SKIP: Final[int] = 21
+# VIRTUAL-mode loosening (Jin 2026-07-08): 252->63 (quarterly, not noise) + the
+# skip 21->5 in tandem widens the sign>0 symbol breadth at the monthly rebalance
+# without touching the rebalance CADENCE itself (that IS the fee-immunity edge —
+# see ``_is_rebalance_bar``, structurally unchanged). REAL byte-identical.
+MOM_LOOKBACK: Final[int] = virtual_loosen(63, 252)
+MOM_SKIP: Final[int] = virtual_loosen(5, 21)
 VOL_LOOKBACK: Final[int] = 63
 
 # Inverse-vol weight: a TARGET per-asset daily vol the realized vol is scaled to.

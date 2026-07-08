@@ -25,9 +25,11 @@ from polaris.strategies.base import (
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): already the loosest of the family
 # (D-30, both long+short) — halve to 15/10, still a channel-break + momentum
-# trigger. REAL byte-identical (env unset).
-DONCHIAN_WINDOW = virtual_loosen(15, 30)
-MOMENTUM_LOOKBACK = virtual_loosen(10, 20)
+# trigger. Deepened 15->10 / 10->5 (Jin 2026-07-08): still a real channel-break
+# (floor>=10) + a real positive-momentum confirm (floor>=5). REAL byte-identical
+# (env unset).
+DONCHIAN_WINDOW = virtual_loosen(10, 30)
+MOMENTUM_LOOKBACK = virtual_loosen(5, 20)
 # 'GOLD' is the LIVE Capital commodity symbol (asset_class=commodity); 'XAUUSD'
 # is kept for safety (additive, not a replace) so any path still carrying the
 # legacy spelling matches too. Without 'GOLD' the symbol gate below rejected the

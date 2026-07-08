@@ -67,8 +67,9 @@ from polaris.strategies.base import (
 # sooner; the shallow-pullback-only gate (MACD<=0) is DROPPED in virtual (see
 # generate_raw_signal below) so any bullish cross inside the (now 50-EMA)
 # uptrend admits — still trend-continuation, just not pullback-restricted.
+# Deepened 50->20 (Jin 2026-07-08): still a real regime-EMA filter (floor>=20).
 # REAL byte-identical (env unset).
-EMA_FILTER: Final[int] = virtual_loosen(50, 200)
+EMA_FILTER: Final[int] = virtual_loosen(20, 200)
 MACD_FAST: Final[int] = 12
 MACD_SLOW: Final[int] = 26
 MACD_SIGNAL: Final[int] = 9

@@ -22,6 +22,7 @@ oversold-reversion long); short reversion is left to other strategies.
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -33,7 +34,11 @@ from polaris.strategies.xau_indices_trend import SUPPORTED_SYMBOLS
 
 CCI_WINDOW = 20
 CCI_CONSTANT = 0.015
-CCI_OVERSOLD = -70.0  # relaxed -100 -> -70 (flow_not_block, more emits): a shallower oversold cross-up now fires
+# relaxed -100 -> -70 (flow_not_block, more emits): a shallower oversold cross-up
+# now fires. VIRTUAL-mode loosening (Jin 2026-07-08): -70 -> -40 widens further
+# while staying a genuine <0 deviation cross-up (not a bare zero-cross). REAL
+# byte-identical.
+CCI_OVERSOLD = virtual_loosen(-40.0, -70.0)
 # extreme→mean = -70 CCI revert; 1 R harvested at the bounded target. Same
 # EXPECTANCY rationale as fx_range_fade.FADE_TARGET_R — a per-position close
 # target so the revert is banked, NOT a size dampen / entry block (flow_not_block).
@@ -82,7 +87,10 @@ class CCIReversionStrategy(BaseStrategy):
         # Stays OUT of NEW-ENTRY dispatch (it was already absent from the prior
         # literal); this flag makes the KILL explicit + structurally enforced
         # (registered, not dispatched).
-        dispatch_eligible=False,
+        # VIRTUAL-mode loosening (Jin 2026-07-08): no OOS/fee evidence needed —
+        # virtual has no real fees — un-KILL so this dispatches and fires. REAL
+        # byte-identical.
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

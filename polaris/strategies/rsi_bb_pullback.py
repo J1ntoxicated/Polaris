@@ -15,6 +15,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -25,7 +26,11 @@ from polaris.strategies.base import (
 )
 
 RSI_PERIOD = 14
-RSI_THRESHOLD = 39.0  # relaxed 30 -> 39 (flow_not_block, more emits): a shallower RSI dip now fires
+# relaxed 30 -> 39 (flow_not_block, more emits): a shallower RSI dip now fires.
+# VIRTUAL-mode loosening (Jin 2026-07-08): 39 -> 50 (midline) widens the dip
+# further while keeping the BB_lower-touch + MA200-uptrend compound condition
+# intact (the setup identity, not a bare RSI threshold). REAL byte-identical.
+RSI_THRESHOLD = virtual_loosen(50.0, 39.0)
 BB_WINDOW = 20
 BB_STD = 2.0
 TREND_FILTER_MA = 200
@@ -59,7 +64,10 @@ class RSIBBPullbackStrategy(BaseStrategy):
         # flagged (same family as the KILLed micro_reversion / spot_donchian); no
         # OOS / fee-hurdle evidence. Stays registered so its open positions still
         # exit via the recalc loop — KILL is no-emit, not module removal.
-        dispatch_eligible=False,
+        # VIRTUAL-mode loosening (Jin 2026-07-08): the fee-fatal KILL rationale is
+        # VOID in virtual (no real fees/slippage) — un-KILL so this dispatches and
+        # fires. REAL byte-identical (dispatch_eligible stays False, env unset).
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

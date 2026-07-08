@@ -25,6 +25,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BarView,
     BaseStrategy,
@@ -35,7 +36,10 @@ from polaris.strategies.base import (
 )
 
 RSI_PERIOD = 2
-RSI_ENTRY = 13.0  # relaxed 10 -> 13 (flow_not_block, more emits): a shallower RSI(2) oversold dip now fires
+# relaxed 10 -> 13 (flow_not_block, more emits): a shallower RSI(2) oversold dip
+# now fires. VIRTUAL-mode loosening (Jin 2026-07-08): 13 -> 20 widens further;
+# the SMA200 uptrend filter stays intact (the setup identity). REAL byte-identical.
+RSI_ENTRY = virtual_loosen(20.0, 13.0)
 TREND_FILTER_MA = 200
 EXIT_MA = 5
 RSI_EXIT = 65.0
@@ -111,7 +115,9 @@ class ConnorsRSI2Strategy(BaseStrategy):
         # claim only; no in-system OOS / fee validation. Stays OUT of NEW-ENTRY
         # dispatch (it was already absent from the prior literal); this flag makes
         # the KILL explicit + structurally enforced (registered, not dispatched).
-        dispatch_eligible=False,
+        # VIRTUAL-mode loosening (Jin 2026-07-08): no real capital / fee exposure
+        # in virtual — un-KILL so this dispatches and fires. REAL byte-identical.
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

@@ -51,8 +51,10 @@ from polaris.strategies.base import (
 )
 
 # VIRTUAL-mode loosening (Jin 2026-07-07): 55->30-bar (~2x trigger rate); daily
-# bars are scarcer than 1H so keep >=30 (don't over-fire). REAL byte-identical.
-DONCHIAN_WINDOW: Final[int] = virtual_loosen(30, 55)
+# bars are scarcer than 1H so keep >=30 (don't over-fire). Deepened 30->15
+# (Jin 2026-07-08): still a real 15-bar (1D) prior-high break, floor>=15 for
+# the daily timeframe. REAL byte-identical.
+DONCHIAN_WINDOW: Final[int] = virtual_loosen(15, 55)
 # Exit basis (G7-owned — documented here as the verified schedule, not applied):
 ATR_TRAIL_MULT: Final[float] = 3.0
 ATR_LOOKBACK: Final[int] = 14

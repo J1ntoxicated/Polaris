@@ -874,16 +874,22 @@ async def run_production_paper_loop(
     wal_task = asyncio.create_task(_wal_checkpoint_producer())
     # Data-stream RETENTION producer (root fix for unbounded growth: the
     # retention DELETEs existed but nothing in the loop ever called them, so
-    # data/ grew to 12 GB + the probe sidecar to 2.2 GB). Every 30 min it
-    # OFFLOADS the prune to a worker thread (its own dedicated live-DB + probe-DB
-    # handles, never the loop conn) — allowlist-bounded (ledger untouchable),
-    # degrade-never-crash, NO exclusive lock (WAL hygiene stays with the PASSIVE
-    # producer above). Prunes BOTH the live DB and data/probes.sqlite.
+    # data/ grew to 12 GB + the probe sidecar to 2.2 GB). Every 30 min it prunes
+    # BOTH the live DB and data/probes.sqlite — allowlist-bounded (ledger
+    # untouchable), degrade-never-crash. LIVE-DB writes route through the
+    # shared db_writer (chunked jobs, interleaved with hot-path traffic —
+    # forensic hunt 2026-07-09: the prior dedicated autocommit conn's 11
+    # unwrapped DELETEs were the actual `database is locked` storm culprit);
+    # the PROBE DB keeps its own dedicated worker-thread conn (separate file,
+    # never contends the live DB's writers). WAL hygiene stays with db_writer's
+    # own TRUNCATE checkpoint (or the PASSIVE producer above when db_writer is
+    # kill-switched off).
     retention_task = asyncio.create_task(
         retention_producer(
             live_db=target_db,
             probe_db=target_db.parent / "probes.sqlite",
             stop_evt=stop_evt,
+            db_writer=state.db_writer,
         )
     )
     # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each

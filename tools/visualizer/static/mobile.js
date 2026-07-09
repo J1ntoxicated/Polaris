@@ -229,36 +229,10 @@
     }
   }
 
-  // AI tab — admission shadow + gpt stats (AI-free core: these are observe-only).
-  function paintAi(s) {
-    var al = $('ailist'); if (!al) return;
-    var sh = s.ai_shadow || {};
-    var adm = sh.admission || [];
-    if ($('ai-cnt')) $('ai-cnt').textContent = adm.length || '';
-    var html = '';
-    html += '<div class="li"><span class="what">in-loop GPT calls</span><span class="when num">0</span></div>';
-    html += '<div class="li"><span class="what">admission shadow (would-suppress)</span><span class="when num">' +
-      (sh.admission_suppress_n || 0) + ' / ' + (sh.admission_total_n || 0) + '</span></div>';
-    if (adm.length) {
-      html += adm.map(function (a) {
-        return '<div class="tr kv-grid" title="' + esc(a.regime) + '">' +
-          '<span class="nm">' + esc(a.regime || '—') + '</span>' +
-          '<span class="a num">n=' + (a.n || 0) + '</span>' +
-          '<span class="b num">sup ' + (a.would_suppress_n || 0) + '</span>' +
-          '<span class="c num">' + (a.suppress_pct || 0).toFixed(0) + '%</span>' +
-          '</div>';
-      }).join('');
-    }
-    var gs = s.gpt_stats || [];
-    if (gs.length) {
-      html += '<div class="ph-head">GPT calls (dev/debate)</div>';
-      html += gs.map(function (g) {
-        return '<div class="li"><span class="what">' + esc(g.model || g.kind || 'gpt') + '</span>' +
-          '<span class="when num">' + (g.n || g.count || 0) + '</span></div>';
-      }).join('');
-    }
-    al.innerHTML = html;
-  }
+  // AI tab (Jin 2026-07-10 restructure) — 3 sections (bot / harness / cowork
+  // intel), fetch-once from GET /api/ai_activity like Build/Roadmap below
+  // (loadAi(), wired in showTab()) rather than the 1s snapshot poll — the
+  // AI tab's own data lives behind its own endpoint, not `s`.
 
   function paint(s) {
     // Header status — alive if we have a snapshot.
@@ -267,7 +241,6 @@
     paintSinceReset(s);
     paintRecentTrades(s);
     paintLogic(s);
-    paintAi(s);
 
     // Compact status strip: equity + today P&L (small, not a hero block).
     // VIRTUAL mode (Jin 2026-07-08 dashboard-live-net fix): shows the fresh
@@ -533,7 +506,7 @@
   }
 
   // ── Tabs (Jin 2026-06-24) — Main / Logic / Build / Roadmap / AI ────────────
-  // Main + Logic + AI are fed by the 1s snapshot poll (paint). Build + Roadmap
+  // Main + Logic are fed by the 1s snapshot poll (paint). Build + Roadmap + AI
   // pull from dedicated fetch-once endpoints (like the desktop reference tabs),
   // loaded lazily the first time their tab is opened.
   var _loaded = {};
@@ -545,6 +518,7 @@
     try { localStorage.setItem('m.tab', name); } catch (e) { /* private mode */ }
     if (name === 'build') loadBuild();
     if (name === 'roadmap') loadRoadmap();
+    if (name === 'ai') loadAi();
   }
   function wireTabs() {
     var bar = $('tabbar'); if (!bar) return;
@@ -597,6 +571,63 @@
         });
         body.innerHTML = html;
       }).catch(function () { body.innerHTML = '<div class="empty">/api/roadmap unavailable</div>'; _loaded.roadmap = false; });
+  }
+  // AI tab — 3 abridged sections (GET /api/ai_activity, fetch-once): 1 BOT AI
+  // (runtime OpenAI GPT: gate_events + #32 judge overlay + admission shadow),
+  // 2 HARNESS AI (this Claude Code harness, dev-time — NOT the bot's LLM),
+  // 3 COWORK INTEL (watchlist seed feed + expiry status, badge large on EXPIRED).
+  function loadAi() {
+    if (_loaded.ai) return; _loaded.ai = true;
+    var body = $('ailist'); if (!body) return;
+    body.innerHTML = '<div class="empty">loading…</div>';
+    fetch('/api/ai_activity', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        d = d || {};
+        var bot = d.bot_ai || {};
+        var harness = d.harness_ai || {};
+        var cowork = d.cowork_intel || {};
+        if ($('ai-cnt')) $('ai-cnt').textContent = '';
+        var html = '';
+
+        html += '<div class="ph-head">1 · BOT AI · runtime · OpenAI GPT</div>';
+        var ge = bot.gate_events || {};
+        html += '<div class="li"><span class="what">gate_events (' + (ge.window_h || 24) + 'h)</span><span class="when num">' + (ge.total || 0) + '</span></div>';
+        var mu = ge.model_used || {};
+        Object.keys(mu).forEach(function (k) {
+          html += '<div class="li"><span class="what">model_used: ' + esc(k) + '</span><span class="when num">' + mu[k] + '</span></div>';
+        });
+        var j = bot.judge || {};
+        html += '<div class="li"><span class="what">#32 judge calls (' + (j.window_h || 24) + 'h)</span><span class="when num">' + (j.calls || 0) + '</span></div>';
+        if (j.calls) {
+          html += '<div class="li"><span class="what">avg latency</span><span class="when num">' + (j.avg_latency_ms != null ? Math.round(j.avg_latency_ms) + 'ms' : '—') + '</span></div>';
+          html += '<div class="li"><span class="what">salvage</span><span class="when num">' + (j.salvage_count || 0) + '</span></div>';
+        }
+        var adm = bot.entry_admission_shadow || {};
+        html += '<div class="li"><span class="what">admission shadow (would-suppress)</span><span class="when num">' +
+          (adm.would_suppress || 0) + ' / ' + (adm.total || 0) + '</span></div>';
+
+        html += '<div class="ph-head">2 · HARNESS AI · dev · Claude</div>';
+        html += '<div class="li"><span class="what" style="color:var(--p-cyn)">' +
+          esc(harness.label || "Claude harness (dev) — not the bot's LLM") + '</span></div>';
+        (harness.models || []).forEach(function (m) {
+          html += '<div class="li"><span class="what">' + esc(m.model || '—') + '</span><span class="when num">' + (m.turns || 0) + ' turns</span></div>';
+        });
+
+        html += '<div class="ph-head">3 · COWORK INTEL · feed</div>';
+        if (!cowork.available) {
+          html += '<div class="li"><span class="what">no feed</span></div>';
+        } else {
+          var stKey = String(cowork.status || '').toLowerCase();
+          var stCls = stKey === 'expired' ? 'danger' : (stKey === 'active' ? 'done' : '');
+          html += '<div class="li">' + (stCls ? '<span class="tg ' + stCls + '">' + esc(cowork.status) + '</span>' : '<span class="tg">' + esc(cowork.status || '—') + '</span>') +
+            '<span class="what">cohort fired: ' + (cowork.cohort_fired || 0) + '</span></div>';
+          (cowork.candidates || []).slice(0, 8).forEach(function (c) {
+            html += '<div class="li"><span class="what">' + esc(c.symbol || '—') + ' · ' + esc(c.thesis_tag || '') + '</span>' +
+              '<span class="when num">' + (c.score != null ? c.score.toFixed(2) : '—') + '</span></div>';
+          });
+        }
+        body.innerHTML = html;
+      }).catch(function () { body.innerHTML = '<div class="empty">/api/ai_activity unavailable</div>'; _loaded.ai = false; });
   }
 
   wireCollapse();

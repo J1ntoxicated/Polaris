@@ -262,6 +262,9 @@
   .li .tg.done  { color: var(--p-grn); border-color: var(--p-grn); }
   .li .tg.build { color: var(--p-cyn); border-color: var(--p-cyn); }
   .li .tg.next  { color: var(--p-ylw); border-color: var(--p-ylw); }
+  /* cowork-intel feed status (AI tab, section 3) — expired must read as an
+     obvious warning even in the dense phone list. */
+  .li .tg.danger { color: var(--p-red); border-color: var(--p-red); font-weight: 700; }
   .ph-head { color: var(--p-gry); font-size: 10px; letter-spacing: .04em; margin: 10px 0 3px; text-transform: uppercase; }
 </style>
 </head>
@@ -355,9 +358,10 @@
       <div class="sec"><h2>Roadmap <span class="cnt" id="road-cnt"></span></h2><div id="roadlist"></div></div>
     </div>
 
-    <!-- TAB · AI — admission shadow + gpt stats (snapshot, condensed). AI-free core. -->
+    <!-- TAB · AI — 3 sections (Jin 2026-07-10): bot runtime GPT / Claude
+         harness (dev) / cowork intel feed. GET /api/ai_activity, fetch-once. -->
     <div class="tabpane" id="tab-ai">
-      <div class="sec"><h2>AI Shadow <span class="cnt" id="ai-cnt"></span></h2><div id="ailist"></div></div>
+      <div class="sec"><h2>AI <span class="cnt" id="ai-cnt"></span></h2><div id="ailist"></div></div>
     </div>
 
     <div class="foot">DEMO / PAPER · display-only · polls every 1s · <a href="/?desktop=1" style="color:var(--polaris-blue);text-decoration:none">Desktop ▸</a></div>

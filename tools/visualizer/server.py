@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import datetime as dt
 import http.server
 import json
 import os
@@ -721,20 +722,30 @@ def _build_lessons() -> dict[str, Any]:
 
 
 # ── AI activity (display-only) ──────────────────────────────────────────────
-# /api/ai_activity surfaces the ONLY two places AI is used in Polaris — neither
-# touches the trading loop. (1) dev debates (GPT + Gemini cross-validation, the
-# vault/50_research/debates/*.md files) and (2) the probe AI-escalation seam
-# (hardening #11): decisions the bot flagged ``ambiguous`` (composite landed in
-# the HOLD dead band) where a future arbiter *could* escalate — observe-only,
-# the advisor is not built so there is no GPT answer yet. The in-loop trading
-# AI call count is a hard 0 (W3 AI-free cutover, commit aafb635): tick entry /
-# G3 / G4 / G7 are deterministic. This endpoint is pure read-only display; it
-# never reads/writes sizing/risk/orders. Its own slow cache + the ref loop.
+# /api/ai_activity — THREE separate "AI" populations that Jin flagged as
+# confusingly mixed into one tab (2026-07-10):
+#   1. bot_ai       — the BOT's own runtime OpenAI GPT usage: gate_events
+#                      model_used + the #32 AI-judge overlay (G3/G4/G7,
+#                      non-blocking) + entry_admission_shadow + the legacy
+#                      dev-debates/probe-escalation feed.
+#   2. harness_ai   — THIS Claude Code harness (dev-time only) — never the
+#                      bot's LLM. data/runtime/model_usage_ledger.json +
+#                      vault/log.md wave tail.
+#   3. cowork_intel — the cowork watchlist-intel seed feed (Alpaca
+#                      candidates) + its expiry status + cohort fire rate.
+# The in-loop trading DECISION is still a hard-0-GPT-calls deterministic core
+# (W3 AI-free cutover, commit aafb635: tick entry / G3 / G4 / G7 primary
+# decisions) — the #32 judge is a NON-BLOCKING overlay that never changes
+# that decision, only annotates/measures it. Pure read-only display; never
+# reads/writes sizing/risk/orders. Its own cache + the ref loop.
 _ai_activity_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _ai_activity_lock = threading.Lock()
-_AI_ACTIVITY_TTL = 60.0
+_AI_ACTIVITY_TTL = 30.0
 
 _PROBE_DB_PATH = Path("data/probes.sqlite")
+_MODEL_LEDGER_PATH = REPO_ROOT / "data" / "runtime" / "model_usage_ledger.json"
+_ALPACA_SEED_PATH = REPO_ROOT / "data" / "intel" / "alpaca_seed.json"
+_MARKET_CONTEXT_PATH = REPO_ROOT / "data" / "intel" / "market_context.md"
 
 # Heading classifiers for the loosely-formatted debate files. A debate may use
 # English ('### GPT-Pass-1 Position', '## Final Recommendation') or Korean
@@ -896,12 +907,391 @@ def _read_escalations(limit: int = 40) -> list[dict[str, Any]]:
     return out
 
 
-def _build_ai_activity() -> dict[str, Any]:
-    """AI usage window: in-loop=0 + dev debates + probe escalations. Read-only."""
+_BOT_AI_WINDOW_S = 86400  # 24h — section 1 (bot_ai) rollup window
+
+
+def _gate_events_model_used(window_s: int) -> dict[str, Any]:
+    """gate_events decision volume + model_used breakdown over ``window_s``.
+
+    Read-only 24h aggregate — the literal answer to "what actually drove
+    G1-G8 decisions" (today: overwhelmingly ``python`` — the W3 AI-free
+    deterministic core; polaris/core/pipeline/config.py). Missing DB/table →
+    zero counts, never an exception."""
+    empty: dict[str, Any] = {"total": 0, "model_used": {}}
+    if not _DB_PATH.exists():
+        return empty
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            cutoff = int(time.time()) - window_s
+            rows = conn.execute(
+                "SELECT model_used, COUNT(*) FROM gate_events "
+                "WHERE created_ts > ? GROUP BY model_used",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return empty
+    model_used = {str(m or "unknown"): int(n) for m, n in rows}
+    return {"total": sum(model_used.values()), "model_used": model_used}
+
+
+def _entry_admission_shadow_summary(
+    window_s: int, recent_n: int = 8
+) -> dict[str, Any]:
+    """entry_admission_shadow rollup + most-recent rows over ``window_s``.
+
+    Component C (edge-first entry admission) — SHADOW telemetry, logged only,
+    never blocks the pipeline (polaris/core/economics/entry_admission_shadow.py).
+    Missing DB/table → zero counts + empty recent list, never an exception."""
+    empty: dict[str, Any] = {"total": 0, "admit": 0, "would_suppress": 0, "recent": []}
+    if not _DB_PATH.exists():
+        return empty
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            cutoff = int(time.time()) - window_s
+            totals = conn.execute(
+                "SELECT COUNT(*), SUM(admit), SUM(would_suppress) "
+                "FROM entry_admission_shadow WHERE created_ts > ?",
+                (cutoff,),
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT created_ts, symbol, strategy_id, regime, admit, "
+                "would_suppress, reason FROM entry_admission_shadow "
+                "WHERE created_ts > ? ORDER BY created_ts DESC LIMIT ?",
+                (cutoff, recent_n),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return empty
+    total_n = int(totals[0] or 0) if totals else 0
+    admit_n = int(totals[1] or 0) if totals else 0
+    suppress_n = int(totals[2] or 0) if totals else 0
+    recent = [
+        {
+            "ts": int(ts or 0), "symbol": str(sym or ""),
+            "strategy_id": str(strat or ""), "regime": str(regime or ""),
+            "admit": bool(admit), "would_suppress": bool(sup),
+            "reason": str(reason or ""),
+        }
+        for ts, sym, strat, regime, admit, sup, reason in rows
+    ]
     return {
-        "in_loop_ai_calls": 0,
-        "debates": _read_debates(8),
-        "escalations": _read_escalations(40),
+        "total": total_n, "admit": admit_n, "would_suppress": suppress_n,
+        "recent": recent,
+    }
+
+
+# ── #32 AI judge — runtime-log-derived call stats (display-only) ───────────
+# The judge (GPT, a non-blocking overlay on G3/G4/G7 — polaris/core/pipeline/
+# agents/ai_judge.py) logs verdict/escalation/latency via
+# ``logger.info("[ai-judge] ...")``. By construction (apply_entry_verdict /
+# apply_exit_verdict copy model_used/latency_ms/tokens from the DETERMINISTIC
+# result, never the judge's own JudgeOutcome) none of that lands in
+# gate_events — the shadow verdict itself lives in gate_shadow_events.
+# technical_flags as a ``judge:<VERDICT>`` tag with no latency column. The
+# runtime log is the ONLY durable place a judge call's verdict+latency pair
+# is recorded, so this is a best-effort text scan (background ref-loop only,
+# never a request thread). Missing/rotated-away log → all-zero, never raises.
+_JUDGE_LOG_TAIL_BYTES = 8_000_000  # ample per file for a day of INFO logging
+_JUDGE_LINE_RE = re.compile(
+    r"^(?P<ts>\S+) .*\[ai-judge\].*?"
+    r"(?:verdict=(?P<verdict>\w+)\s+)?"
+    r"\(det=\w+\)\s+escalation=(?P<escalation>\w+)"
+    r"(?:\s+latency=(?P<latency>\d+)ms|\s+wall_clock_ms=(?P<wall_ms>\d+))?"
+)
+
+
+def _parse_log_ts(raw: str) -> float:
+    """``polaris.logging_config`` ISO-UTC-ms line prefix → epoch seconds, or
+    0.0 on any parse failure."""
+    try:
+        return (
+            dt.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ")
+            .replace(tzinfo=dt.UTC)
+            .timestamp()
+        )
+    except ValueError:
+        return 0.0
+
+
+def _tail_bytes(path: Path, max_bytes: int) -> list[str]:
+    """Seek-based tail (last ``max_bytes``) of ``path`` → decoded lines.
+
+    [] on any OSError (missing file / permission) — never raises."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            block = min(size, max_bytes)
+            fh.seek(size - block)
+            data = fh.read(block)
+        return data.decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+
+
+def _judge_log_lines(window_s: int, log_path: Path | None) -> list[str]:
+    """Tail of the live bot log covering ``window_s``, oldest-first.
+
+    ``log_path`` defaults to ``_resolve_bot_log()`` (the live bot's newest
+    runtime log; injectable so tests never touch the real filesystem glob).
+    The daily 07:30 auto-restart rotates the previous log to
+    ``<name>.<suffix>`` alongside it (CLAUDE.md Quick reference); when the
+    current file's own oldest kept line is still inside the window, this also
+    reads the newest such rotated sibling so a 24h window isn't silently
+    truncated to 'since last restart'."""
+    log = log_path if log_path is not None else _resolve_bot_log()
+    if log is None or not log.exists():
+        return []
+    lines = _tail_bytes(log, _JUDGE_LOG_TAIL_BYTES)
+    cutoff = time.time() - window_s
+    oldest_ts = 0.0
+    for ln in lines[:5]:  # line 0 may be seek-truncated; try a few
+        t = _parse_log_ts(ln.split(" ", 1)[0])
+        if t > 0:
+            oldest_ts = t
+            break
+    if oldest_ts == 0.0 or oldest_ts > cutoff:
+        with contextlib.suppress(OSError):
+            rotated = sorted(
+                (p for p in log.parent.glob(f"{log.name}.*") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if rotated:
+                lines = _tail_bytes(rotated[0], _JUDGE_LOG_TAIL_BYTES) + lines
+    return lines
+
+
+def _judge_call_stats(
+    window_s: int, *, log_path: Path | None = None
+) -> dict[str, Any]:
+    """#32 AI-judge call stats over ``window_s`` — verdict distribution,
+    escalation/salvage counts, average latency. See the module note above
+    ``_JUDGE_LINE_RE`` for why this reads the runtime log rather than
+    gate_events. ``log_path`` is test-injectable; production omits it."""
+    lines = _judge_log_lines(window_s, log_path)
+    cutoff = time.time() - window_s
+    verdicts: dict[str, int] = {}
+    escalations: dict[str, int] = {}
+    latencies: list[int] = []
+    calls = 0
+    for line in lines:
+        if "[ai-judge]" not in line:
+            continue
+        m = _JUDGE_LINE_RE.match(line)
+        if not m:
+            continue
+        ts = _parse_log_ts(m.group("ts"))
+        if ts and ts < cutoff:
+            continue
+        calls += 1
+        verdict = m.group("verdict")
+        if verdict:
+            verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        esc = m.group("escalation")
+        if esc:
+            escalations[esc] = escalations.get(esc, 0) + 1
+        lat_raw = m.group("latency") or m.group("wall_ms")
+        if lat_raw:
+            latencies.append(int(lat_raw))
+    avg_latency = sum(latencies) / len(latencies) if latencies else None
+    return {
+        "window_h": window_s // 3600,
+        "calls": calls,
+        "verdicts": verdicts,
+        "escalations": escalations,
+        "salvage_count": escalations.get("gpt_ok_salvaged", 0),
+        "avg_latency_ms": round(avg_latency, 1) if avg_latency is not None else None,
+        "latency_sample_n": len(latencies),
+        "log_available": bool(lines),
+    }
+
+
+# ── Harness AI (Claude Code, dev-time) — display-only ───────────────────────
+# THIS is the "AI you (Claude) use" half of Jin's 2026-07-10 complaint —
+# entirely separate from bot_ai above. Sourced from the model-usage ledger the
+# harness itself maintains (data/runtime/model_usage_ledger.json — same file
+# vault/40_ops/model-usage-stats.md is periodically snapshotted from) + the
+# vault/log.md wave-append tail. Never touches sizing/risk/orders.
+def _harness_model_usage_top(n: int = 4) -> list[dict[str, Any]]:
+    """Top-``n`` Claude harness models by total turns (main+side), aggregated
+    across every session in the usage ledger. Fail-safe: missing/corrupt file
+    → [] (dev-side telemetry, never an exception)."""
+    if not _MODEL_LEDGER_PATH.exists():
+        return []
+    try:
+        raw = json.loads(_MODEL_LEDGER_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for models in raw.values():
+        if not isinstance(models, dict):
+            continue
+        for model, dates in models.items():
+            if not isinstance(dates, dict):
+                continue
+            a = agg.setdefault(model, {"turns": 0, "out_tok": 0, "last_seen": ""})
+            for date, stats in dates.items():
+                if not isinstance(stats, dict):
+                    continue
+                a["turns"] += int(stats.get("turns", 0) or 0) + int(
+                    stats.get("side_turns", 0) or 0
+                )
+                a["out_tok"] += int(stats.get("out_tok", 0) or 0)
+                if date > a["last_seen"]:
+                    a["last_seen"] = date
+    rows = [
+        {"model": m, "turns": v["turns"], "out_tok": v["out_tok"], "last_seen": v["last_seen"]}
+        for m, v in agg.items()
+    ]
+    rows.sort(key=lambda r: int(r["turns"]), reverse=True)
+    return rows[:n]
+
+
+def _harness_recent_waves(n: int = 3, *, log_path: Path | None = None) -> list[str]:
+    """Last ``n`` wave-log lines (``- YYYY-MM-DD ...`` entries) from
+    vault/log.md — the 1-line-per-wave append mandate (CLAUDE.md Workflow #7).
+    Boot/digest marker lines (no leading '- ') are excluded. [] if absent.
+    ``log_path`` is test-injectable; production omits it."""
+    if log_path is None:
+        log_path = REPO_ROOT / "vault" / "log.md"
+    if not log_path.exists():
+        return []
+    with contextlib.suppress(OSError):
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        waves = [ln for ln in lines if ln.lstrip().startswith("- ")]
+        return waves[-n:]
+    return []
+
+
+def _build_harness_ai() -> dict[str, Any]:
+    """Claude harness (dev-time) usage — NOT the bot's runtime LLM. Read-only."""
+    return {
+        "label": "Claude harness (dev) — not the bot's LLM",
+        "models": _harness_model_usage_top(4),
+        "recent_waves": _harness_recent_waves(3),
+    }
+
+
+# ── Cowork intel feed — display-only ────────────────────────────────────────
+# The cowork watchlist-intel seed feed (contract: cowork/watchlist_intel/
+# CONTRACT.md) — symbol candidates with a thesis_tag + score, consumed by
+# polaris/core/universe/intel_seed.py as a rank-uplift signal (never a hard
+# gate). Surfaces the feed's OWN expiry ts with an EXPIRED/ACTIVE badge (an
+# expired feed is not re-fetched or hidden here — display-only truth) + the
+# cohort's actual fire rate (positions.seed_tag — the ACTUAL wiring point per
+# polaris/storage/schema.py) so a stale feed reads honest, not silently fresh.
+def _parse_iso_ts(raw: str) -> float | None:
+    """Best-effort ISO-8601 'Z' timestamp → epoch seconds, or None."""
+    if not raw:
+        return None
+    try:
+        return (
+            dt.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=dt.UTC)
+            .timestamp()
+        )
+    except ValueError:
+        return None
+
+
+def _cohort_fired_count() -> int:
+    """# of positions opened from a cowork-intel seed_tag cohort. 0 is a
+    valid, HONEST reading (the feed may have expired before any cohort symbol
+    fired) — never hidden as an error. Missing DB/table → 0."""
+    if not _DB_PATH.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE seed_tag != ''"
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
+def _build_cowork_intel() -> dict[str, Any]:
+    """Cowork watchlist-intel feed (Alpaca seed candidates) — read-only."""
+    if not _ALPACA_SEED_PATH.exists():
+        return {"available": False, "status": "NO_FEED"}
+    try:
+        raw = json.loads(_ALPACA_SEED_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "status": "NO_FEED"}
+    if not isinstance(raw, dict):
+        return {"available": False, "status": "NO_FEED"}
+    generated_at = str(raw.get("generated_at", ""))
+    expiry_ts = str(raw.get("expiry_ts", ""))
+    expiry_epoch = _parse_iso_ts(expiry_ts)
+    status = "UNKNOWN"
+    if expiry_epoch is not None:
+        status = "EXPIRED" if expiry_epoch < time.time() else "ACTIVE"
+    candidates = raw.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+    rows = [c for c in candidates if isinstance(c, dict)]
+    rows.sort(key=lambda c: float(c.get("score", 0.0) or 0.0), reverse=True)
+    trimmed = [
+        {
+            "symbol": str(c.get("symbol", "")), "venue": str(c.get("venue", "")),
+            "thesis_tag": str(c.get("thesis_tag", "")),
+            "score": float(c.get("score", 0.0) or 0.0),
+        }
+        for c in rows[:8]
+    ]
+    mkt_head: list[str] = []
+    if _MARKET_CONTEXT_PATH.exists():
+        with contextlib.suppress(OSError):
+            mkt_head = [
+                ln for ln in _MARKET_CONTEXT_PATH.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+                if ln.strip()
+            ][:3]
+    return {
+        "available": True, "status": status,
+        "generated_at": generated_at, "expiry_ts": expiry_ts,
+        "candidates": trimmed, "cohort_fired": _cohort_fired_count(),
+        "market_context_head": mkt_head,
+    }
+
+
+def _build_ai_activity() -> dict[str, Any]:
+    """3-section AI tab payload (Jin 2026-07-10 — bot AI / Claude harness AI /
+    cowork intel were all mixed into one undifferentiated tab):
+
+    1. bot_ai       — runtime OpenAI GPT: gate_events model_used + the #32
+                      judge overlay + entry_admission_shadow + the legacy
+                      dev-debates/probe-escalation feed (kept, unchanged).
+    2. harness_ai   — THIS Claude Code harness (dev-time). Never the bot's LLM.
+    3. cowork_intel — the cowork watchlist-intel seed feed + expiry status.
+
+    Every sub-builder is independently fail-safe (missing file/table/log →
+    zero/empty, never an exception) so one absent source never blanks the
+    other two sections."""
+    return {
+        "bot_ai": {
+            "window_h": _BOT_AI_WINDOW_S // 3600,
+            "in_loop_ai_calls": 0,
+            "gate_events": _gate_events_model_used(_BOT_AI_WINDOW_S),
+            "judge": _judge_call_stats(_BOT_AI_WINDOW_S),
+            "entry_admission_shadow": _entry_admission_shadow_summary(_BOT_AI_WINDOW_S),
+            "debates": _read_debates(8),
+            "probe_escalations": _read_escalations(40),
+        },
+        "harness_ai": _build_harness_ai(),
+        "cowork_intel": _build_cowork_intel(),
         "ts": time.time(),
     }
 

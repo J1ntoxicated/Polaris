@@ -14,15 +14,17 @@ Codex BLOCKING constraints baked in (non-negotiable, aggressive bias preserved):
   ``no_block_filter_architecture``). A cold cell passes through ("모호하면 통과");
   a losing cell flows (PASS) or gets a conservative MODIFY trim (precise sizing,
   NOT a block). Loss-defense lives at EXIT (peak-protect, fee-net), never here.
-- G4 PROCEED default; KILL ONLY on a stale / crossed book. Wide spread and
-  adverse drift are FLAGS (surfaced for calibration), never KILL. realized-vol
-  is NOT an input at all ("expanding vol = opportunity" thesis).
+- G4 PROCEED default; KILL ONLY on a crossed book. Stale top-of-book (measured
+  against a per-ticker median tick-interval baseline, safe global fallback when
+  absent), wide spread, and adverse drift are FLAGS (surfaced for calibration),
+  never KILL. realized-vol is NOT an input at all ("expanding vol = opportunity"
+  thesis).
 - ``net_edge_r`` is NEVER consulted by either rule (it is a self-declared
   placeholder, "NOT alpha, Do not trade off this number").
 
 The G3 technical layer raises NO entry-block KILL at all — its only outputs are
-PASS / conservative MODIFY. The genuine micro-structure KILLs (crossed / stale
-book) live exclusively in G4's :func:`technical_watch_decision`.
+PASS / conservative MODIFY. The one genuine micro-structure KILL (crossed book)
+lives exclusively in G4's :func:`technical_watch_decision`.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ __all__ = [
     "MODIFY_CONSERVATIVE_SCALAR",
     "ShadowDecision",
     "SPREAD_WIDE_MULT",
+    "STALE_TICK_BASELINE_MULT",
     "STALE_TICK_MAX_SEC",
     "g3_shadow_inputs_from_payload",
     "g4_shadow_inputs_from_payload",
@@ -54,9 +57,19 @@ CELL_WARM_MIN_N_EFF: Final[float] = 5.0
 # the GPT G3 MODIFY range [0.5, 1.5] and <= 1.0 (a mild trim, never an amplify).
 MODIFY_CONSERVATIVE_SCALAR: Final[float] = 0.85
 
-# G4 staleness bound — a top-of-book older than this is "stale" → KILL. 30s is
-# the G4 watch window; double it for the freshness bound.
+# G4 staleness FALLBACK bound — used ONLY when no per-ticker
+# ``baseline_p50_tick_interval_sec`` is supplied (safe default for symbols
+# without a cadence stat yet). 30s is the G4 watch window; double it for the
+# freshness bound. A top-of-book older than this is "stale" → FLAG (never KILL
+# — see ``STALE_TICK_BASELINE_MULT`` for the per-ticker bound).
 STALE_TICK_MAX_SEC: Final[float] = 60.0
+
+# G4 stale-vs-per-ticker-baseline FLAG multiplier — mirrors SPREAD_WIDE_MULT's
+# baseline-relative pattern. A low-cadence symbol's own median tick interval
+# (``baseline_p50_tick_interval_sec``, a universe stat) times this multiplier
+# is the FLAG bound; this replaces the flat global bound for any symbol with a
+# known cadence baseline (flag only — never a KILL).
+STALE_TICK_BASELINE_MULT: Final[float] = 3.0
 
 # G4 spread-vs-baseline FLAG multiplier (flag only — never a KILL).
 SPREAD_WIDE_MULT: Final[float] = 3.0
@@ -160,8 +173,11 @@ class G4ShadowInputs:
     """Inputs for the G4 technical rule (from tick window + spread baseline).
 
     Deliberately carries NO realized-vol field (codex BLOCKING B — vol expansion
-    is opportunity, never a KILL) and NO ``net_edge_r``. ``best_bid`` / ``best_ask``
-    + ``last_tick_age_sec`` drive the only KILL paths (crossed / stale book).
+    is opportunity, never a KILL) and NO ``net_edge_r``. ``best_bid`` /
+    ``best_ask`` drive the only KILL path (crossed book). ``last_tick_age_sec``
+    (measured against ``baseline_p50_tick_interval_sec`` — a per-ticker median
+    tick-interval universe stat, ``baseline_p50_spread_bps`` pattern; falls back
+    to the fixed ``STALE_TICK_MAX_SEC`` bound when no baseline is available) /
     ``spread_bps`` / ``drift_bps`` only raise FLAGS.
     """
 
@@ -170,31 +186,53 @@ class G4ShadowInputs:
     last_tick_age_sec: float
     spread_bps: float = 0.0
     baseline_p50_spread_bps: float = 0.0
+    baseline_p50_tick_interval_sec: float = 0.0
     drift_bps: float = 0.0
 
 
-def technical_watch_decision(inp: G4ShadowInputs) -> ShadowDecision:
-    """G4 deterministic technical rule — PROCEED default, KILL only stale/crossed.
+def _stale_flag_threshold_sec(baseline_p50_tick_interval_sec: float) -> float:
+    """Per-ticker stale-tick FLAG bound (``baseline_p50_spread_bps`` pattern).
 
-    KILL (microstructure broken) only when:
-    - the book is CROSSED (best_bid >= best_ask, both positive), or
-    - the top-of-book is STALE (last_tick_age_sec > STALE_TICK_MAX_SEC).
-
-    Wide spread (spread_bps > baseline * SPREAD_WIDE_MULT) and adverse drift
-    (|drift_bps| > DRIFT_FLAG_BPS) raise FLAGS but the decision stays PROCEED
-    (codex C — flag default, KILL promotion deferred to a calibrated cutover).
-    realized-vol is not an input (codex B). PROCEED carries any flags.
+    A symbol's own median tick-interval baseline (a universe stat, supplied by
+    the caller — same shape as ``baseline_p50_spread_bps``) scaled by
+    ``STALE_TICK_BASELINE_MULT`` sets the bound, so a naturally low-cadence
+    symbol (e.g. a slow FX cross) is judged against ITS OWN normal cadence
+    instead of a flat global bound (the flat bound was a per-ticker false
+    positive — a routine tick on a slow symbol read as "stale"). Absent a
+    baseline (<= 0.0, no universe stat yet for this symbol) falls back to the
+    fixed ``STALE_TICK_MAX_SEC`` bound — a safe, conservative default.
     """
-    # KILL — crossed book (positive prices, bid at/above ask).
+    if baseline_p50_tick_interval_sec > 0.0:
+        return baseline_p50_tick_interval_sec * STALE_TICK_BASELINE_MULT
+    return STALE_TICK_MAX_SEC
+
+
+def technical_watch_decision(inp: G4ShadowInputs) -> ShadowDecision:
+    """G4 deterministic technical rule — PROCEED default, KILL only on crossed book.
+
+    KILL (microstructure broken) only when the book is CROSSED (best_bid >=
+    best_ask, both positive) — the sole remaining KILL path.
+
+    Stale top-of-book (last_tick_age_sec > the per-ticker
+    ``baseline_p50_tick_interval_sec * STALE_TICK_BASELINE_MULT`` bound, or the
+    fixed ``STALE_TICK_MAX_SEC`` fallback when no baseline is supplied), wide
+    spread (spread_bps > baseline * SPREAD_WIDE_MULT), and adverse drift
+    (|drift_bps| > DRIFT_FLAG_BPS) all raise FLAGS but the decision stays
+    PROCEED (flow_not_block — a stale/wide/adverse read is surfaced for
+    calibration, never an entry block; codex C — flag default, KILL promotion
+    deferred to a calibrated cutover). realized-vol is not an input (codex B).
+    PROCEED carries any flags.
+    """
+    # KILL — crossed book (positive prices, bid at/above ask). The ONLY
+    # remaining KILL path (genuine microstructure integrity break).
     if inp.best_bid > 0.0 and inp.best_ask > 0.0 and inp.best_bid >= inp.best_ask:
         return ShadowDecision(decision=GateDecision.KILL, reason="crossed_book")
 
-    # KILL — stale top-of-book.
-    if inp.last_tick_age_sec > STALE_TICK_MAX_SEC:
-        return ShadowDecision(decision=GateDecision.KILL, reason="stale_book")
-
-    # FLAG-only (never KILL).
+    # FLAG-only (never KILL) — stale / wide spread / adverse drift.
     flags: list[str] = []
+    stale_threshold_sec = _stale_flag_threshold_sec(inp.baseline_p50_tick_interval_sec)
+    if inp.last_tick_age_sec > stale_threshold_sec:
+        flags.append("stale_book")
     if (
         inp.baseline_p50_spread_bps > 0.0
         and inp.spread_bps > inp.baseline_p50_spread_bps * SPREAD_WIDE_MULT
@@ -215,7 +253,7 @@ def _last_tick_age_sec(tick_window: list[dict[str, Any]], now_ts: int | float) -
     if not tick_window:
         # No tick stream supplied (P0 payloads pass tick_window=[]). Treat as
         # "unknown freshness", NOT stale — return 0.0 so the absence of a tick
-        # stream never manufactures a stale KILL (behavior-safe shadow).
+        # stream never manufactures a stale flag (behavior-safe shadow).
         return 0.0
     last = tick_window[-1]
     ts = last.get("ts")
@@ -252,6 +290,9 @@ def g4_shadow_inputs_from_payload(
         spread_bps=float(payload.get("spread_bps", 0.0) or 0.0),
         baseline_p50_spread_bps=float(
             payload.get("baseline_p50_spread_bps", 0.0) or 0.0
+        ),
+        baseline_p50_tick_interval_sec=float(
+            payload.get("baseline_p50_tick_interval_sec", 0.0) or 0.0
         ),
         drift_bps=drift_bps,
     )

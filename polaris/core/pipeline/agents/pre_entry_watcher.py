@@ -172,9 +172,9 @@ def _log_g4_shadow(
     """Compute the G4 deterministic technical rule + log it vs the GPT decision.
 
     AI-conductor P0 SHADOW (behavior 0): the technical decision is logged for the
-    acceptance gate and NEVER returned. KILL only on stale/crossed book;
-    spread/drift = flag; realized-vol not consulted; net_edge not consulted (all
-    enforced inside the rule). No-op when ``shadow_conn`` is None.
+    acceptance gate and NEVER returned. KILL only on crossed book;
+    stale/spread/drift = flag; realized-vol not consulted; net_edge not
+    consulted (all enforced inside the rule). No-op when ``shadow_conn`` is None.
     """
     if shadow_conn is None:
         return
@@ -213,14 +213,15 @@ async def _maybe_judge_timing(
     No-op when ``judge_client`` is None (deterministic result returned byte-identical).
     The judge reads the bot's own information + tick context and can REFINE_TIMING
     (one-shot, time-boxed) but NEVER KILL — its verdict type has no block member, so
-    a PROCEED can never become a KILL. Only the objective crossed/stale-book KILL
+    a PROCEED can never become a KILL. Only the objective crossed-book KILL
     (deterministic microstructure validity) reaches here as a non-PROCEED, and the
     caller does NOT route that through the judge. Active mode annotates; shadow logs.
 
     A+B CALL GATE (#32 axes): only a FLAGGED PROCEED (watch_flags ∈ {spread_wide,
-    drift}) with robust evidence escalates; a clean non-flagged PROCEED skips the GPT
-    call (anti-flooding). ``escalate=False`` NEVER blocks — the PROCEED flows
-    unchanged (flow_not_block). The fast-path PROCEED never reaches here.
+    drift, stale_book}) with robust evidence escalates; a clean non-flagged PROCEED
+    skips the GPT call (anti-flooding). ``escalate=False`` NEVER blocks — the
+    PROCEED flows unchanged (flow_not_block). The fast-path PROCEED never reaches
+    here.
     """
     if judge_client is None:
         return det_result
@@ -264,7 +265,7 @@ async def pre_entry_watcher_gate(
 
     ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
     the env): the deterministic technical rule (former shadow — PROCEED
-    default, KILL only on stale/crossed book, wide-spread/drift = flags) IS
+    default, KILL only on crossed book, stale/wide-spread/drift = flags) IS
     the primary decision — zero GPT calls, ``model_used="python"``, no shadow
     row. The fast-path eligibility short-circuit above it is flag-independent
     (unchanged either way). flag=0 → legacy GPT path byte-identical.
@@ -318,9 +319,10 @@ async def pre_entry_watcher_gate(
     use_ai_free = ai_free if ai_free is not None else ai_free_mode()
     if use_ai_free:
         # W3 AI-FREE primary: the technical watch rule drives the pipeline.
-        # KILL only on a stale / crossed book (microstructure broken — the
-        # pre-existing deterministic KILL set, no new block); wide spread /
-        # drift stay FLAGS on a PROCEED, surfaced as ``watch_flags``.
+        # KILL only on a crossed book (microstructure broken — the
+        # pre-existing deterministic KILL set, no new block); stale (per-ticker
+        # baseline) / wide spread / drift stay FLAGS on a PROCEED, surfaced as
+        # ``watch_flags``.
         now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
         technical = technical_watch_decision(
             g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
@@ -352,7 +354,7 @@ async def pre_entry_watcher_gate(
         )
         # #32 AI JUDGE (entry-timing): a per-ticker, STRUCTURALLY non-blocking
         # timing judgment over the bot's own info + tick context. Only the PROCEED
-        # path is judged (the objective crossed/stale-book KILL above is
+        # path is judged (the objective crossed-book KILL above is
         # deterministic microstructure validity, never AI). The judge has no KILL
         # path; shadow logs, active annotates (one-shot REFINE_TIMING). No-op when
         # ``judge_client`` is None (byte-identical).

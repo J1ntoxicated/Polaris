@@ -403,7 +403,9 @@ async def test_g4_ai_free_crossed_book_kill(ai_free_on: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_g4_ai_free_stale_book_kill(ai_free_on: None) -> None:
+async def test_g4_ai_free_stale_book_flags_not_kill(ai_free_on: None) -> None:
+    """No per-ticker cadence baseline in payload → fixed fallback bound →
+    stale is a FLAG on a PROCEED (flow_not_block), never a KILL."""
     now = int(time.time())
     res = await pre_entry_watcher_gate(
         _g4_ctx(
@@ -412,9 +414,9 @@ async def test_g4_ai_free_stale_book_kill(ai_free_on: None) -> None:
         ),
         client=_ForbiddenClient(),
     )
-    assert res.decision == GateDecision.KILL
+    assert res.decision == GateDecision.PROCEED
     assert res.model_used == "python"
-    assert res.payload["reason"] == "stale_book"
+    assert "stale_book" in res.payload.get("watch_flags", [])
 
 
 @pytest.mark.asyncio

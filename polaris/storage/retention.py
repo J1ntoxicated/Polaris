@@ -219,6 +219,58 @@ def prune_table(
     return int(cur.rowcount or 0)
 
 
+def prune_table_chunk(
+    conn: sqlite3.Connection,
+    table: str,
+    ts_column: str,
+    retain_sec: int,
+    *,
+    now_ts: int,
+    chunk_rows: int,
+    allowed: dict[str, str] | None = None,
+    bar_interval: str | None = None,
+) -> int:
+    """Delete at most ``chunk_rows`` aged rows in ONE bounded statement.
+
+    Same allowlist guard as ``prune_table`` (a non-allowlisted ``(table,
+    ts_column)`` still raises before any SQL is formed) — the only difference
+    is the DELETE is capped via a ``rowid IN (SELECT rowid ... LIMIT ?)``
+    subquery so a single call never holds the write lock for the FULL aged-row
+    count on a million-row stream (``bars``). Returns rows deleted (< the
+    caller's ``chunk_rows`` means the rule is fully drained for this pass).
+
+    Intended for the LIVE loop's db_writer-routed prune (chunked, interleaved
+    with hot-path writer traffic between chunks —
+    [[feedback_db_lock_is_architecture_signal]]); the down-window
+    ``run_retention_job`` keeps using the unchunked ``prune_table`` since the
+    bot is confirmed stopped there (no contention to interleave around).
+    """
+    allow = _ALLOWED if allowed is None else allowed
+    allowed_col = allow.get(table)
+    if allowed_col is None or allowed_col != ts_column:
+        raise ValueError(
+            f"refusing prune of non-allowlisted target ({table!r}, {ts_column!r}); "
+            f"allowlist={allow!r}"
+        )
+    if retain_sec <= 0:
+        raise ValueError(f"retain_sec must be positive, got {retain_sec}")
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows must be positive, got {chunk_rows}")
+    cutoff = int(now_ts) - int(retain_sec)
+    # table/column are allowlist-validated literals (never user input); the
+    # cutoff + bar_interval + chunk_rows are all bound parameters.
+    inner = f"SELECT rowid FROM {table} WHERE {ts_column} < ?"  # noqa: S608
+    params: list[object] = [cutoff]
+    if bar_interval is not None:
+        inner += " AND bar_interval = ?"
+        params.append(bar_interval)
+    inner += " LIMIT ?"
+    params.append(chunk_rows)
+    sql = f"DELETE FROM {table} WHERE rowid IN ({inner})"  # noqa: S608 (validated)
+    cur = conn.execute(sql, tuple(params))
+    return int(cur.rowcount or 0)
+
+
 def run_retention(
     conn: sqlite3.Connection,
     *,

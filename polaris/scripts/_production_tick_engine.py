@@ -175,6 +175,7 @@ def _sized_notional(
     underlying_group_id: str,
     regime: str,
     now_ts: int,
+    strength_scalar: float = 1.0,
 ) -> float:
     """Run the EXISTING T4 ``compute_size`` and return its final notional (USD).
 
@@ -183,6 +184,10 @@ def _sized_notional(
     caps). Returns ``0.0`` when a binding cap clipped to zero — a capital-headroom
     result (opportunity-cost ceiling), NOT a defensive throttle. The conviction
     feeds the EXISTING ``signal_strength`` input; no new multiplier is introduced.
+    ``strength_scalar`` defaults 1.0 (byte-identical) — the P5 tick path has no
+    G3 AI-gate step (deterministic microstructure decision only), so there is no
+    verdict to thread; the parameter exists for interface parity with the bar
+    path's ``build_sizer_payload`` (same SignalIntent field).
     """
     stream = resolve_stream(intent.venue)
     strength = _conviction_to_strength(intent.conviction)
@@ -213,6 +218,7 @@ def _sized_notional(
         stream_id=stream.stream_id,
         signal_family=intent.signal_family,
         strategy_class=strategy_class,
+        strength_scalar=float(strength_scalar),
     )
     equity = production_default_equity_usd()
     risk_state = _read_strategy_risk_state(

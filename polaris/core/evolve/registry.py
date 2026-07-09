@@ -13,6 +13,17 @@ honest verdict (gate.passed on the HELD-OUT slice); ``n_trades`` is the OOS trad
 count (thin-N stays visible); ``trials_searched`` is the grid breadth behind the
 winner (multiple-testing honesty, feeds the DSR search-breadth reader).
 
+``survivor_admissions`` (added for the P0a-survivor -> virtual-PROVE wire,
+``polaris.core.evolve.survivor_gate``) is a SEPARATE, equally OFFLINE table in
+this SAME registry file: one row per ``(venue, variant_id)`` admitted into the
+virtual PROVE cohort after clearing the 3 admission guards. It carries no
+"class" column at all — every row IS a PROVE admission by construction
+(``survivor_gate`` has no code path that can write anything else); EARN
+promotion is never decided here, only by the live
+``polaris.core.classes.transition.evaluate_transition`` FSM, fed by real
+virtual-account fills elsewhere. ``resolved_ts`` is a nullable throttle-release
+valve (NULL == still occupying a cohort slot).
+
 DDL is additive + idempotent (``CREATE TABLE IF NOT EXISTS``), and follows the
 project connect convention (WAL, ``isolation_level=None``, ``busy_timeout``) so
 the file is single-writer safe across reconnects.
@@ -27,11 +38,15 @@ from pathlib import Path
 __all__ = [
     "CellAggregate",
     "PassRateAggregate",
+    "SurvivorAdmissionRow",
     "TrialRow",
     "aggregate_pass_rate",
+    "count_active_admissions",
     "cumulative_trials_per_cell",
     "open_registry",
+    "record_survivor_admission",
     "record_trial",
+    "resolve_survivor_admission",
 ]
 
 # ---------------------------------------------------------------------------
@@ -71,10 +86,35 @@ DDL_VARIANT_TRIALS_CELL_INDEX = (
     "CREATE INDEX IF NOT EXISTS ix_variant_trials_cell ON variant_trials (cell_key, oos_pass)"
 )
 
+# survivor_admissions (P0a survivor -> virtual PROVE wire) — see module
+# docstring. No "class" column by construction: every row IS a PROVE
+# admission (survivor_gate.py has no path to write anything else).
+DDL_SURVIVOR_ADMISSIONS = """
+CREATE TABLE IF NOT EXISTS survivor_admissions (
+    venue               TEXT    NOT NULL,   -- okx|capital|alpaca
+    variant_id          TEXT    NOT NULL,   -- "<strategy_id>|k=v,..." (make_variant id)
+    strategy            TEXT    NOT NULL,
+    track               TEXT    NOT NULL,   -- A|B|C (resolve_stream(venue).track)
+    cell_key            TEXT    NOT NULL,   -- the triggering cell_key
+    n_independent_cells INTEGER NOT NULL DEFAULT 0,
+    reason              TEXT    NOT NULL DEFAULT '',
+    admitted_ts         INTEGER NOT NULL,
+    resolved_ts         INTEGER,            -- NULL == still occupies a cohort slot
+    PRIMARY KEY (venue, variant_id)
+)
+"""
+
+DDL_SURVIVOR_ADMISSIONS_TRACK_INDEX = (
+    "CREATE INDEX IF NOT EXISTS ix_survivor_admissions_track_active "
+    "ON survivor_admissions (track, resolved_ts)"
+)
+
 _ALL_DDL: tuple[str, ...] = (
     DDL_VARIANT_TRIALS,
     DDL_VARIANT_TRIALS_OOS_INDEX,
     DDL_VARIANT_TRIALS_CELL_INDEX,
+    DDL_SURVIVOR_ADMISSIONS,
+    DDL_SURVIVOR_ADMISSIONS_TRACK_INDEX,
 )
 
 
@@ -105,6 +145,21 @@ class TrialRow:
     trials_searched: int
     is_oos_spread: float
     created_ts: int
+
+
+@dataclass(frozen=True, slots=True)
+class SurvivorAdmissionRow:
+    """One P0a survivor admitted into the virtual PROVE cohort (mirrors
+    ``survivor_admissions`` columns). No "class" field — see module docstring."""
+
+    venue: str
+    variant_id: str
+    strategy: str
+    track: str
+    cell_key: str
+    n_independent_cells: int
+    reason: str
+    admitted_ts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,3 +354,68 @@ def cumulative_trials_per_cell(conn: sqlite3.Connection) -> dict[str, int]:
             "SELECT cell_key, COUNT(*) FROM variant_trials GROUP BY cell_key"
         ).fetchall()
     }
+
+
+# ---------------------------------------------------------------------------
+# survivor_admissions — P0a survivor -> virtual PROVE wire (survivor_gate.py)
+# ---------------------------------------------------------------------------
+
+_INSERT_SURVIVOR_ADMISSION = """
+INSERT INTO survivor_admissions (
+    venue, variant_id, strategy, track, cell_key, n_independent_cells,
+    reason, admitted_ts, resolved_ts
+) VALUES (
+    :venue, :variant_id, :strategy, :track, :cell_key, :n_independent_cells,
+    :reason, :admitted_ts, NULL
+)
+ON CONFLICT (venue, variant_id) DO NOTHING
+"""
+
+
+def record_survivor_admission(conn: sqlite3.Connection, row: SurvivorAdmissionRow) -> None:
+    """Idempotently admit one P0a survivor into the virtual PROVE cohort.
+
+    PK ``(venue, variant_id)`` — re-evaluating an already-admitted survivor is a
+    no-op (``DO NOTHING``): it never re-timestamps, never double-counts against
+    ``count_active_admissions``. There is no parameter here (or anywhere in this
+    function) capable of writing anything other than a PROVE admission.
+    """
+    conn.execute(
+        _INSERT_SURVIVOR_ADMISSION,
+        {
+            "venue": row.venue,
+            "variant_id": row.variant_id,
+            "strategy": row.strategy,
+            "track": row.track,
+            "cell_key": row.cell_key,
+            "n_independent_cells": int(row.n_independent_cells),
+            "reason": row.reason,
+            "admitted_ts": int(row.admitted_ts),
+        },
+    )
+
+
+def count_active_admissions(conn: sqlite3.Connection, *, track: str) -> int:
+    """Count survivors currently occupying a ``track``'s cohort slot
+    (``resolved_ts IS NULL``) — feeds the cohort-cap throttle guard."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM survivor_admissions WHERE track = ? AND resolved_ts IS NULL",
+        (track,),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def resolve_survivor_admission(
+    conn: sqlite3.Connection, *, venue: str, variant_id: str, resolved_ts: int
+) -> None:
+    """Free a cohort slot (throttle release valve, ``flow_not_block``).
+
+    The caller (elsewhere — the live PtS side, out of this module's scope)
+    calls this once a survivor's admission has resolved out of PROVE by
+    whatever means (EARN/BENCH/KILL); this module only tracks slot occupancy,
+    never the resolution outcome itself.
+    """
+    conn.execute(
+        "UPDATE survivor_admissions SET resolved_ts = ? WHERE venue = ? AND variant_id = ?",
+        (int(resolved_ts), venue, variant_id),
+    )

@@ -20,6 +20,7 @@ import uuid
 
 import pytest
 
+import polaris.scripts._production_recalc as _production_recalc
 from polaris.core.lineage import record_segment_open
 from polaris.scripts._production_close import close_specific_position
 from polaris.scripts._production_recalc import (
@@ -207,6 +208,73 @@ async def test_recalc_5s_cadence_log_each_tick(memdb: sqlite3.Connection) -> Non
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
     assert state.recalc_g6_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_recalc_hoists_dirty_marks_into_single_batch_flush(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """writer-migration-completion design #4: the per-position dirty mark is
+    hoisted OUT of the ``_evaluate_position`` loop — ``mark_positions_dirty``
+    fires exactly ONCE per sweep (collapses N lock acquisitions into 1), and
+    every active position still lands in ``position_live_recalc_state``
+    (dirty visibility to the async recalc sweep unchanged)."""
+    pids = ("pos-A", "pos-B", "pos-C")
+    for pid in pids:
+        _seed_position_and_fill(memdb, position_id=pid, symbol=f"{pid}-USDT")
+    state = ProdLoopState()
+    state.open_trades = [_trade_for(p, symbol=f"{p}-USDT") for p in pids]
+
+    calls: list[list[tuple[str, str, int]]] = []
+    real_mark_positions_dirty = _production_recalc.mark_positions_dirty
+
+    def _spy(conn: sqlite3.Connection, entries: list[tuple[str, str, int]]) -> None:
+        calls.append(list(entries))
+        real_mark_positions_dirty(conn, entries)
+
+    monkeypatch.setattr(_production_recalc, "mark_positions_dirty", _spy)
+
+    n = await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
+    )
+    assert n == 3
+    assert len(calls) == 1, "expected exactly ONE batch flush, not per-position calls"
+    flushed_ids = {entry[0] for entry in calls[0]}
+    assert flushed_ids == set(pids)
+
+    # Dirty rows landed for all 3 positions (read-your-writes into the sweep).
+    dirty_ids = {r[0] for r in memdb.execute(
+        "SELECT position_id FROM position_live_recalc_state"
+    ).fetchall()}
+    assert dirty_ids == set(pids)
+
+
+@pytest.mark.asyncio
+async def test_recalc_batch_dirty_flush_failure_does_not_block_sweep(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The docstring's existing contract — 'an exception ... does not block
+    the sweep' — must still hold for the hoisted batch flush: a raising
+    ``mark_positions_dirty`` degrades (counted via ``fault_events``), it does
+    NOT abort G6/G7 evaluation for every position in the cycle."""
+    pids = ("pos-A", "pos-B")
+    for pid in pids:
+        _seed_position_and_fill(memdb, position_id=pid, symbol=f"{pid}-USDT")
+    state = ProdLoopState()
+    state.open_trades = [_trade_for(p, symbol=f"{p}-USDT") for p in pids]
+
+    def _raising(conn: sqlite3.Connection, entries: list[tuple[str, str, int]]) -> None:
+        raise sqlite3.OperationalError("simulated batch flush failure")
+
+    monkeypatch.setattr(_production_recalc, "mark_positions_dirty", _raising)
+
+    n = await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
+    )
+    assert n == 2  # sweep still evaluated both positions
+    assert state.fault_events >= 1
 
 
 # ---------------------------------------------------------------------------

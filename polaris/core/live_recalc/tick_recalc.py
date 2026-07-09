@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -58,6 +59,38 @@ def mark_position_dirty(
         " dirty_reason = excluded.dirty_reason, "
         " dirty_ts = excluded.dirty_ts",
         (position_id, now_ts, reason, now_ts),
+    )
+
+
+def mark_positions_dirty(
+    conn: sqlite3.Connection,
+    entries: Sequence[tuple[str, str, int]],
+) -> None:
+    """Batch form of ``mark_position_dirty`` — one multi-row INSERT for N
+    positions instead of N single-row statements (writer-migration-completion
+    design #3: collapses ≤50 lock acquisitions/recalc-cycle into 1).
+
+    ``entries`` is a sequence of ``(position_id, reason, now_ts)`` — same
+    fields as the individual-call form. Same last-reason-wins semantics,
+    including WITHIN one batch: SQLite resolves a multi-row upsert's
+    ``ON CONFLICT`` sequentially per row, so a later duplicate ``position_id``
+    in ``entries`` overwrites an earlier one (matches calling
+    ``mark_position_dirty`` N times in order).
+    """
+    if not entries:
+        return
+    placeholders = ", ".join(["(?, ?, ?, ?, 0)"] * len(entries))
+    params: list[str | int] = []
+    for position_id, reason, now_ts in entries:
+        params.extend((position_id, now_ts, reason, now_ts))
+    conn.execute(
+        "INSERT INTO position_live_recalc_state "
+        "(position_id, last_check_ts, dirty_reason, dirty_ts, cooldown_until_ts) "
+        f"VALUES {placeholders} "
+        "ON CONFLICT(position_id) DO UPDATE SET "
+        " dirty_reason = excluded.dirty_reason, "
+        " dirty_ts = excluded.dirty_ts",
+        params,
     )
 
 
@@ -191,6 +224,7 @@ __all__ = [
     "LIVE_RECALC_MAX_POSITIONS",
     "RecalcLogEntry",
     "mark_position_dirty",
+    "mark_positions_dirty",
     "recompute_exit_params",
     "run_live_recalc_cycle",
     "should_run_recalc",

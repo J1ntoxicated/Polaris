@@ -38,7 +38,7 @@ from polaris.core.live_recalc.strategy_swap import (
 )
 from polaris.core.live_recalc.tick_recalc import (
     LIVE_RECALC_MAX_POSITIONS,
-    mark_position_dirty,
+    mark_positions_dirty,
 )
 from polaris.core.pipeline import (
     GateContext,
@@ -885,12 +885,27 @@ async def recalc_active_positions(
     # sweep (no schema change, no leak — the entry is written on first escalate).
     for stale_id in [k for k in state.judge_exit_cooldowns if k not in live_ids]:
         del state.judge_exit_cooldowns[stale_id]
+    # writer-migration-completion design #4: hoist the per-position dirty mark
+    # OUT of the evaluation loop — one batch flush BEFORE evaluation instead
+    # of up to LIVE_RECALC_MAX_POSITIONS individual writes/lock-acquisitions.
+    # Synchronous (no await inside the txn, shared-conn safe) → dirty state is
+    # visible to the async recalc sweep exactly as before. flow_not_block: a
+    # flush failure degrades (counted), it must not abort G6/G7 evaluation for
+    # every position in the cycle — same fault-isolation contract this
+    # function already promises for the per-position chain below.
+    try:
+        mark_positions_dirty(
+            conn, [(pid, "tick_5s_g6", now_ts) for pid in live_ids],
+        )
+    except Exception as exc:  # noqa: BLE001 — flow_not_block: never abort the sweep
+        logger.error(
+            "[L6/g6] batch dirty-mark flush raised for %d position(s): %r",
+            len(live_ids), exc,
+        )
+        state.fault_events += 1
     for pos in positions:
         position_id = str(pos["position_id"])
         try:
-            mark_position_dirty(
-                conn, position_id=position_id, reason="tick_5s_g6", now_ts=now_ts,
-            )
             regime = lookup_regime(conn, str(pos["venue"]), str(pos["symbol"]))
             await _evaluate_position(
                 conn=conn, state=state, pos=pos, regime=regime,

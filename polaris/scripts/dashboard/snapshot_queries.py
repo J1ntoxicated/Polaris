@@ -90,6 +90,11 @@ from polaris.scripts.dashboard.snapshot_q_streams import (
     _per_stream_summary,
     _recent_closed_by_venue,
 )
+from polaris.scripts.dashboard.snapshot_q_virtual import (
+    virtual_daily_pnl_usd,
+    virtual_session_pnl_usd,
+    virtual_since_reset,
+)
 
 __all__ = [
     "ALPACA_EQUITY_PROBE_TTL_SEC",
@@ -152,4 +157,7 @@ __all__ = [
     "_symbol_from_inst",
     "_ticker_stats",
     "_today_start_ms",
+    "virtual_daily_pnl_usd",
+    "virtual_session_pnl_usd",
+    "virtual_since_reset",
 ]

@@ -247,7 +247,7 @@ def _drawdown_and_sharpe(
 
 
 def _realised_pnl_since(
-    conn: sqlite3.Connection, *, lookback_ms: int
+    conn: sqlite3.Connection, *, lookback_ms: int, venue: str | None = None
 ) -> tuple[float, int]:
     """Realised PnL (NET of fees) & closed-trade count since ``lookback_ms``.
 
@@ -262,18 +262,36 @@ def _realised_pnl_since(
     Matches the exclusion the R column (``_closed_position_r``) already applies,
     so the dollar headline and the R ledger agree. Display-only; the per-fill
     ``pnl_usd`` dollar truth is untouched.
+
+    ``venue`` (Jin 2026-07-08 dashboard-live-net fix) narrows to one venue's
+    fills when given — reused by ``snapshot_q_virtual`` to scope the VIRTUAL
+    ledger's per-venue 'today'/'session' aggregates without a second query.
+    ``None`` (the default) keeps the original unfiltered behavior byte-identical.
     """
-    rows = _safe_query(
-        conn,
-        """SELECT COALESCE(SUM(CASE WHEN f.is_close = 1 THEN f.pnl_usd ELSE 0.0 END), 0.0)
-                  - COALESCE(SUM(f.fee_usd), 0.0),
-                  COALESCE(SUM(f.is_close), 0)
-           FROM fills f
-           LEFT JOIN positions p ON p.position_id = f.contribution_id
-           WHERE f.ts_ms >= ?
-             AND (p.status IS NULL OR p.status != 'reconciled')""",
-        (lookback_ms,),
-    )
+    if venue is None:
+        rows = _safe_query(
+            conn,
+            """SELECT COALESCE(SUM(CASE WHEN f.is_close = 1 THEN f.pnl_usd ELSE 0.0 END), 0.0)
+                      - COALESCE(SUM(f.fee_usd), 0.0),
+                      COALESCE(SUM(f.is_close), 0)
+               FROM fills f
+               LEFT JOIN positions p ON p.position_id = f.contribution_id
+               WHERE f.ts_ms >= ?
+                 AND (p.status IS NULL OR p.status != 'reconciled')""",
+            (lookback_ms,),
+        )
+    else:
+        rows = _safe_query(
+            conn,
+            """SELECT COALESCE(SUM(CASE WHEN f.is_close = 1 THEN f.pnl_usd ELSE 0.0 END), 0.0)
+                      - COALESCE(SUM(f.fee_usd), 0.0),
+                      COALESCE(SUM(f.is_close), 0)
+               FROM fills f
+               LEFT JOIN positions p ON p.position_id = f.contribution_id
+               WHERE f.ts_ms >= ? AND f.venue = ?
+                 AND (p.status IS NULL OR p.status != 'reconciled')""",
+            (lookback_ms, venue),
+        )
     if not rows:
         return 0.0, 0
     return float(rows[0][0] or 0.0), int(rows[0][1] or 0)

@@ -24,6 +24,7 @@ from polaris.core.sizing.constants import (
     demo_starting_equity_capital,
     demo_starting_equity_okx,
 )
+from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams.config import STREAMS
 from polaris.scripts.dashboard.snapshot_models import (
     ClosedTrade,
@@ -226,12 +227,16 @@ def _alpaca_account_equity() -> _AlpacaEquity | None:
     return result
 
 
-def _alpaca_marks_age_sec(conn: sqlite3.Connection, *, now_s: int) -> int:
-    """Age (seconds) of the freshest ``alpaca:*`` bar close, for the RTH-closed
-    stale-mark label. 0 when no alpaca bars exist yet (nothing to be stale)."""
+def _marks_age_sec(conn: sqlite3.Connection, *, venue: str, now_s: int) -> int:
+    """Age (seconds) of the freshest ``<venue>:*`` bar close, for a closed-venue
+    stale-mark label. 0 when no bars exist yet for that venue (nothing to be
+    stale). Generalized (Jin 2026-07-08 dashboard-live-net fix) from the
+    Alpaca-only original — Capital CFD (FX/indices/gold) also closes on
+    weekends, so this now serves both lanes."""
     rows = _safe_query(
         conn,
-        "SELECT MAX(ts) FROM bars WHERE instrument_id LIKE 'alpaca:%'",
+        "SELECT MAX(ts) FROM bars WHERE instrument_id LIKE ?",
+        (f"{venue}:%",),
     )
     latest_ts = int(rows[0][0] or 0) if rows and rows[0][0] is not None else 0
     return max(0, now_s - latest_ts) if latest_ts > 0 else 0
@@ -400,7 +405,20 @@ def _per_stream_summary(
     # the last internal mark (stale bars/ticks), so label it explicitly.
     alpaca_session = us_equity_session_state(now_s)
     alpaca_marks_age = (
-        _alpaca_marks_age_sec(conn, now_s=now_s) if alpaca_session != "rth" else 0
+        _marks_age_sec(conn, venue="alpaca", now_s=now_s)
+        if alpaca_session != "rth" else 0
+    )
+    # Capital CFD (FX/indices/gold) weekend closure (Jin 2026-07-08 fix —
+    # dashboard-live-net hunt) — the bot's own venue-native session SSOT
+    # (``polaris.core.sizing.session.resolve_venue_session``) already models
+    # this (``_capital_session``: closed Fri 22:00 UTC → Sun 22:00 UTC), but the
+    # dashboard's staleness check previously only looked at Alpaca, on the false
+    # premise OKX/Capital are "always 24/7" — Capital is NOT. Same pattern as
+    # Alpaca above: "fx_open" → live; anything else → last internal mark, labeled.
+    capital_session = resolve_venue_session("capital", now_s)
+    capital_marks_age = (
+        _marks_age_sec(conn, venue="capital", now_s=now_s)
+        if capital_session != "fx_open" else 0
     )
 
     # Weekly per-exchange trace (Jin 2026-07-07) — Monday-anchored, NON-
@@ -442,14 +460,18 @@ def _per_stream_summary(
         # Only ai_cost (a real extra deduction not reflected in fills.pnl_usd)
         # is subtracted. Never feeds sizing/gating.
         net_after_cost = net_pnl - ai_cost
-        # Alpaca-only: label uPnL as a stale internal mark when the RTH session
-        # is closed (probe equity is only live during "rth"). OKX/Capital are
-        # 24/7 markets → always "" (no label).
+        # Label uPnL as a stale internal mark whenever the venue's OWN native
+        # session (SSOT: resolve_venue_session) is closed — Alpaca (RTH) and
+        # Capital (FX/indices weekend) both have real closed windows; OKX
+        # (crypto, "always_on") never does, so it always stays "" (no label).
         marks_label = ""
         marks_age_sec = 0
         if stream_id == "C_alpaca_equity" and alpaca_session != "rth":
             marks_label = "internal marks (venue closed)"
             marks_age_sec = alpaca_marks_age
+        elif stream_id == "B_capital_cfd" and capital_session != "fx_open":
+            marks_label = "internal marks (venue closed)"
+            marks_age_sec = capital_marks_age
         out.append(
             StreamSummary(
                 stream_id=stream_id,

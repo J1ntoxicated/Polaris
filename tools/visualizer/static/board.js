@@ -763,6 +763,60 @@
       </div>`;
   }
 
+  // VIRTUAL-ledger SINCE RESET (Jin 2026-07-08 dashboard-live-net fix) — the
+  // virtual-mode counterpart of sinceResetHtml above. Forward edge measured
+  // ONLY over trades opened at/after EACH venue's own virtual go-live/re-seed
+  // anchor (server: snapshot_q_virtual.virtual_since_reset), aggregated across
+  // the 3 venues — the fresh $100k×3 ledger, never the pre-virtual history.
+  function virtualSinceResetHtml(d) {
+    const s = d.virtual_since_reset;
+    if (!s) return '';
+    const pf = (s.pf >= 9.99) ? '∞' : (s.pf || 0).toFixed(2);
+    const winning = (s.pf != null && s.pf >= 1) || (s.net_usd >= 0);
+    const netCls = winning ? 'b-pos' : 'b-neg';
+    const when = s.reset_ts ? new Date(s.reset_ts * 1000).toLocaleString() : '';
+    const m = (label, valHtml) =>
+      `<span style="display:inline-flex;align-items:baseline;gap:5px">
+        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span></span>`;
+    return `<div title="Forward edge since the VIRTUAL ledger's own go-live/re-seed anchor (per venue) — the fresh $100k×3 account, NOT the pre-virtual real-venue history${when ? ' @ ' + esc(when) : ''}"
+        style="display:flex;gap:16px;align-items:baseline;flex-wrap:wrap;padding:5px 8px;margin-top:4px;border:1px solid rgba(135,215,95,.35);border-radius:4px;background:rgba(135,215,95,.07);font-size:13px">
+        <span style="font-weight:800;letter-spacing:.08em;color:var(--p-grn,#87d75f)">SINCE VIRTUAL RESET</span>
+        ${m('Net', `<span class="${netCls}">${fmtUsd(s.net_usd, 0)}</span>`)}
+        ${m('Trades', `<span class="b-flat">${s.n || 0}</span>`)}
+        ${m('Win', `<span class="b-flat">${(s.win_pct || 0).toFixed(0)}%</span>`)}
+        ${m('PF', `<span class="${winning ? 'b-pos' : 'b-neg'}">${pf}</span>`)}
+        ${m('Avg-R', `<span class="${pn(s.avg_r)}">${fmtR(s.avg_r, 2)}</span>`)}
+      </div>`;
+  }
+
+  // VIRTUAL-ledger primary KPI metrics (Jin 2026-07-08 dashboard-live-net fix)
+  // — the VIRTUAL-mode counterpart of legacyKpiHtml below: Today/Session
+  // scoped to the fresh $100k×3 ledger (per-venue anchor, aggregated —
+  // snapshot_q_virtual), NOT the unfiltered fills-table scan legacyKpiHtml
+  // still reads (that stays LEGACY-tab-only, byte-identical). Equity/drawdown
+  // stay in the always-visible VIRTUAL strip below (per-venue) — no aggregate
+  // equity CURVE is computed server-side, so this metrics row is $-only.
+  function virtualKpiHtml(d, health) {
+    const s = d.virtual_since_reset || {};
+    const start = (d.streams || []).reduce((a, x) => a + (x.virtual_seed_usd || 0), 0);
+    const dayPct = start ? (d.virtual_daily_pnl_usd / start) * 100 : null;
+    const sessionPct = start ? (d.virtual_session_pnl_usd / start) * 100 : null;
+    const sessionDiffers = Math.abs((d.virtual_session_pnl_usd || 0) - (d.virtual_daily_pnl_usd || 0)) > 0.005;
+    const pf = s.pf;
+    const profitable = (pf != null && pf >= 1);
+    const metric = (label, valHtml) =>
+      `<span style="display:inline-flex;align-items:baseline;gap:6px">
+        <span class="kk">${label}</span> <span style="font-weight:700">${valHtml}</span></span>`;
+    const metrics =
+      `<div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;margin-top:3px;border-top:1px solid rgba(255,255,255,.08);font-size:13px">
+        ${metric('Today', `<span title="AEST-midnight-floored — virtual ledger only" class="${pn(d.virtual_daily_pnl_usd)}">${fmtUsd(d.virtual_daily_pnl_usd, 0)}${dayPct == null ? '' : ' (' + fmtSignedPct(dayPct, 2) + ')'}</span>`)}
+        ${sessionDiffers ? metric('Session', `<span title="since the virtual ledger's own go-live/re-seed" class="${pn(d.virtual_session_pnl_usd)}">${fmtUsd(d.virtual_session_pnl_usd, 0)}${sessionPct == null ? '' : ' (' + fmtSignedPct(sessionPct, 2) + ')'}</span>`) : ''}
+        ${metric('Win rate', `<span class="b-flat">${s.win_pct == null ? '—' : s.win_pct.toFixed(0) + '%'}</span>`)}
+        ${metric('Profit factor', `<span class="${profitable ? 'b-pos' : 'b-neg'}">${pf == null ? '—' : (pf >= 9.99 ? '∞' : pf.toFixed(2))}</span>`)}
+      </div>`;
+    return (health || '') + virtualSinceResetHtml(d) + metrics;
+  }
+
   // Legacy real-venue KPI metrics (Equity $227k-style headline / Today /
   // Session / Win rate / Profit factor / Max drawdown) + the SINCE RESET line.
   // Jin 2026-07-07 virtual-primary restructure: this is the pre-virtual
@@ -802,11 +856,15 @@
   function renderKpis(d) {
     const el = $('b-kpis'); if (!el) return;
     el.style.display = 'block';
+    const virt = !!d.virtual_account_enabled;
     // P0-4 ③: WINNING/LOSING judged off the SAME ledger the SINCE RESET line
     // shows (since_reset.pf) — not the all-time confidence panel. Falls back
-    // to all-time confidence only when no reset has been stamped yet.
+    // to all-time confidence only when no reset has been stamped yet. VIRTUAL
+    // mode (Jin 2026-07-08 fix) judges off virtual_since_reset instead — the
+    // WINNING/LOSING badge must never be coloured off the pre-virtual legacy
+    // ledger while the board is showing the fresh $100k×3 account.
     const c = d.confidence || {};
-    const sr = d.since_reset || null;
+    const sr = virt ? (d.virtual_since_reset || null) : (d.since_reset || null);
     const pf = sr ? sr.pf : c.profit_factor;
     // Regime is per-instrument (60 markets). Show the dominant share + a full
     // per-market breakdown on hover, never a single global label.
@@ -825,7 +883,7 @@
     const botCls = fr.live ? 'b-pos' : 'b-neg';
     const botTxt = fr.live ? 'LIVE' : 'STALE';
     const botSub = fr.live ? '' : (fr.ageSec != null ? ' <span class="b-flat" style="font-weight:400">' + hms(fr.ageSec) + ' ago</span>' : '');
-    const winning = (pf != null) ? profitable : (d.daily_pnl_usd >= 0);
+    const winning = (pf != null) ? profitable : ((virt ? d.virtual_daily_pnl_usd : d.daily_pnl_usd) >= 0);
     const winCls = winning ? 'b-pos' : 'b-neg';
     const winTxt = winning ? 'WINNING' : 'LOSING';
     const anoms = scanAnomalies(d);
@@ -848,17 +906,24 @@
     // VIRTUAL-PRIMARY restructure (Jin 2026-07-07): in REAL mode (virtual OFF)
     // the header stays exactly what it always was — status + SINCE RESET +
     // the legacy money metrics — byte-identical to before this change. In
-    // VIRTUAL mode the header is JUST the status line (the VIRTUAL $100k×3
-    // strip below is the headline); the legacy metrics render instead into
-    // the LEGACY tab pane via legacyKpiHtml() (board_tabs_ext.js calls it).
-    el.innerHTML = d.virtual_account_enabled ? status : legacyKpiHtml(d, status);
+    // VIRTUAL mode (Jin 2026-07-08 fix) the header now shows the VIRTUAL-ledger
+    // SINCE RESET + Today/Session (virtualKpiHtml) instead of just the bare
+    // status line — since_reset/daily/session are now virtual-ledger-scoped
+    // main-board fields, not omitted. The legacy metrics still render
+    // separately into the LEGACY tab pane via legacyKpiHtml() (unchanged).
+    el.innerHTML = virt ? virtualKpiHtml(d, status) : legacyKpiHtml(d, status);
   }
 
   // (f) main-area dual-equity sparkline — equity_curve (demo, dashed dim) vs
   // equity_curve_real_fee_net (headline, green/red by trend). Axis-less, small,
   // shares one y-scale so the GAP (honest fee cost) reads at a glance. Renders
   // inline in the HEALTH row; graceful empty when the curves aren't ready.
+  // VIRTUAL mode (Jin 2026-07-08 fix): these curves are the LEGACY unfiltered
+  // fills scan (pre-virtual history mixed in) — showing them unqualified next
+  // to the WINNING/LOSING badge would be misleading, so this renders nothing
+  // in virtual mode until a virtual-scoped equity curve exists server-side.
   function dualSparkHtml(d) {
+    if (d.virtual_account_enabled) return '';
     const real = d.equity_curve_real_fee_net || [];
     const demo = d.equity_curve || [];
     if (real.length < 2 && demo.length < 2) return '';

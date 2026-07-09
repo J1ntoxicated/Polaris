@@ -39,7 +39,7 @@ class _SinceResetRow(NamedTuple):
 
 
 def _closed_since_reset(
-    conn: sqlite3.Connection, *, reset_ts: int
+    conn: sqlite3.Connection, *, reset_ts: int, venue: str | None = None
 ) -> list[_SinceResetRow]:
     """CLOSED positions OPENED at/after ``reset_ts`` joined to their close fills.
 
@@ -50,23 +50,44 @@ def _closed_since_reset(
     position with no matched close fill is skipped (no $ truth). ``net_usd``
     subtracts the fee on BOTH legs (entry ``is_close=0`` + this close leg) via the
     ``entry_fee`` correlated sum, matching the digest/strategy NET (audit2 P0-2
-    ③). Read-only."""
-    rows = _safe_query(
-        conn,
-        """SELECT p.strategy_id, p.venue,
-                  COALESCE(SUM(f.pnl_usd), 0.0) AS gross_pnl,
-                  COALESCE(SUM(f.fee_usd), 0.0) AS close_fee,
-                  COUNT(f.fill_id) AS n_close,
-                  COALESCE((SELECT SUM(e.fee_usd) FROM fills e
-                            WHERE e.contribution_id = p.position_id
-                              AND e.is_close = 0), 0.0) AS entry_fee
-           FROM positions p
-           JOIN fills f
-             ON f.contribution_id = p.position_id AND f.is_close = 1
-           WHERE p.status = 'closed' AND p.opened_ts >= ?
-           GROUP BY p.position_id""",
-        (int(reset_ts),),
-    )
+    ③). ``venue`` (Jin 2026-07-08 dashboard-live-net fix) narrows to one venue —
+    reused by ``snapshot_q_virtual`` to scope a per-venue VIRTUAL-anchor rollup
+    without a second query shape; ``None`` keeps the original behavior. Read-only.
+    """
+    if venue is None:
+        rows = _safe_query(
+            conn,
+            """SELECT p.strategy_id, p.venue,
+                      COALESCE(SUM(f.pnl_usd), 0.0) AS gross_pnl,
+                      COALESCE(SUM(f.fee_usd), 0.0) AS close_fee,
+                      COUNT(f.fill_id) AS n_close,
+                      COALESCE((SELECT SUM(e.fee_usd) FROM fills e
+                                WHERE e.contribution_id = p.position_id
+                                  AND e.is_close = 0), 0.0) AS entry_fee
+               FROM positions p
+               JOIN fills f
+                 ON f.contribution_id = p.position_id AND f.is_close = 1
+               WHERE p.status = 'closed' AND p.opened_ts >= ?
+               GROUP BY p.position_id""",
+            (int(reset_ts),),
+        )
+    else:
+        rows = _safe_query(
+            conn,
+            """SELECT p.strategy_id, p.venue,
+                      COALESCE(SUM(f.pnl_usd), 0.0) AS gross_pnl,
+                      COALESCE(SUM(f.fee_usd), 0.0) AS close_fee,
+                      COUNT(f.fill_id) AS n_close,
+                      COALESCE((SELECT SUM(e.fee_usd) FROM fills e
+                                WHERE e.contribution_id = p.position_id
+                                  AND e.is_close = 0), 0.0) AS entry_fee
+               FROM positions p
+               JOIN fills f
+                 ON f.contribution_id = p.position_id AND f.is_close = 1
+               WHERE p.status = 'closed' AND p.opened_ts >= ? AND p.venue = ?
+               GROUP BY p.position_id""",
+            (int(reset_ts), venue),
+        )
     out: list[_SinceResetRow] = []
     for r in rows:
         if int(r[4] or 0) <= 0:

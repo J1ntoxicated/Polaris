@@ -121,17 +121,24 @@
   // SINCE RESET — forward edge since the latest main-logic reset. Mirrors the
   // desktop board sinceResetHtml, condensed to one phone line. Hidden when no
   // reset is stamped. Net/PF colour by winning (pf>=1 or net>=0).
+  // VIRTUAL mode (Jin 2026-07-08 dashboard-live-net fix): reads
+  // ``virtual_since_reset`` (fresh $100k×3 ledger, per-venue anchor) instead
+  // of the LEGACY ``since_reset`` (unfiltered fills scan, pre-virtual history
+  // mixed in) — this is the main board Jin actually watches on the phone, so
+  // it must show the SAME scope the mode banner claims, never the legacy one.
   function paintSinceReset(s) {
     var el = $('sreset'); if (!el) return;
-    var sr = s.since_reset;
+    var virt = !!s.virtual_account_enabled;
+    var sr = virt ? s.virtual_since_reset : s.since_reset;
     if (!sr) { el.style.display = 'none'; return; }
     el.style.display = 'flex';
     var pf = (sr.pf >= 9.99) ? '∞' : (sr.pf || 0).toFixed(2);
     var winning = (sr.pf != null && sr.pf >= 1) || (sr.net_usd >= 0);
     var netCls = winning ? 'pos' : 'neg';
-    var lbl = sr.label ? esc(sr.label) : 'reset';
+    var lbl = virt ? 'virtual ledger' : (sr.label ? esc(sr.label) : 'reset');
+    var tag = virt ? 'SINCE VIRTUAL RESET' : 'SINCE RESET';
     el.innerHTML =
-      '<span class="tag">SINCE RESET</span>' +
+      '<span class="tag">' + tag + '</span>' +
       '<span class="lbl" title="' + lbl + '">' + lbl + '</span>' +
       '<span class="kv">Net<b class="' + netCls + '">' + signed(sr.net_usd) + '</b></span>' +
       '<span class="kv">Trades<b>' + (sr.n || 0) + '</b></span>' +
@@ -263,20 +270,42 @@
     paintAi(s);
 
     // Compact status strip: equity + today P&L (small, not a hero block).
-    // Show BOTH: demo (70bps fee-burdened) · real-fee-net (go-live truth at 10bps).
+    // VIRTUAL mode (Jin 2026-07-08 dashboard-live-net fix): shows the fresh
+    // $100k×3 virtual ledger (Σ streams[].virtual_equity_usd / virtual_daily_
+    // pnl_usd) instead of the LEGACY equity_now/daily_pnl_usd (an unfiltered
+    // fills-table scan that still mixes in the pre-virtual real-roundtrip
+    // history) — this status strip is the main board Jin actually watches on
+    // the phone, so it must match the mode banner's claimed scope. REAL mode
+    // (virtual OFF) stays byte-identical to before this change.
+    var virt = !!s.virtual_account_enabled;
     var eq = $('equity');
-    eq.textContent = usd(s.equity_now) + ' demo';
-    eq.title = 'OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees';
     var eqSub = $('equity-sub');
-    if (eqSub) eqSub.textContent = usd(s.equity_now_real_fee_net) + ' real-fee-net';
+    var pnlVal, dayStartEq;
+    if (virt) {
+      var streams = s.streams || [];
+      var virtEq = streams.reduce(function (a, x) { return a + (x.virtual_equity_usd != null ? x.virtual_equity_usd : 0); }, 0);
+      var virtSeed = streams.reduce(function (a, x) { return a + (x.virtual_seed_usd != null ? x.virtual_seed_usd : 0); }, 0);
+      eq.textContent = usd(virtEq) + ' virtual';
+      eq.title = 'VIRTUAL $100k x 3 ledger — zero venue calls, seed ' + usd(virtSeed);
+      if (eqSub) eqSub.textContent = 'seed ' + usd(virtSeed);
+      pnlVal = s.virtual_daily_pnl_usd;
+      dayStartEq = virtEq;
+    } else {
+      // Show BOTH: demo (70bps fee-burdened) · real-fee-net (go-live truth at 10bps).
+      eq.textContent = usd(s.equity_now) + ' demo';
+      eq.title = 'OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees';
+      if (eqSub) eqSub.textContent = usd(s.equity_now_real_fee_net) + ' real-fee-net';
+      pnlVal = s.daily_pnl_usd;
+      dayStartEq = s.equity_now || 0;
+    }
     var pnl = $('pnl');
-    pnl.textContent = signed(s.daily_pnl_usd);
-    pnl.className = 'v num ' + pnlClass(s.daily_pnl_usd);
+    pnl.textContent = signed(pnlVal);
+    pnl.className = 'v num ' + pnlClass(pnlVal);
     var pnlPct = $('pnl-pct');
     if (pnlPct) {
-      // today's return on day-start equity (equity_now − today's P&L).
-      var dayStart = (s.equity_now || 0) - (s.daily_pnl_usd || 0);
-      var dp = dayStart > 0 ? (s.daily_pnl_usd / dayStart) * 100 : 0;
+      // today's return on day-start equity (current equity − today's P&L).
+      var dayStart = dayStartEq - (pnlVal || 0);
+      var dp = dayStart > 0 ? (pnlVal / dayStart) * 100 : 0;
       pnlPct.textContent = (dp >= 0 ? '+' : '') + dp.toFixed(2) + '%';
       pnlPct.className = 'sub num ' + pnlClass(dp);
     }

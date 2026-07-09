@@ -28,6 +28,7 @@ from polaris.core.metrics.risk_unit import realised_r
 from polaris.core.streams import resolve_stream
 from polaris.scripts._production_bars import BAR_TS_CLOCK_SKEW_SLACK_SEC
 from polaris.scripts._production_capital_sizing import _peek_quote_usd_rate
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 
 if TYPE_CHECKING:
     from polaris.scripts._production_state import ProdLoopState
@@ -251,10 +252,22 @@ def _close_excursion_r(
     position that only ever recorded its entry and exit still yields a finite,
     correctly-signed excursion (never *under*-states MFE/MAE relative to the
     realised move). The mfe_r/mae_r R denominator is the per-trade-ATR stop
-    distance (``entry_price × anchor × 2``) — the EXCURSION ruler, a DIFFERENT
-    unit from the per-stream realised ``pnl_r``. mfe_r/mae_r are RATIOS of two
-    quote-ccy quantities (peak/trough/entry all share the instrument's quote
-    ccy), so they are quote-ccy-invariant and need no conversion.
+    distance (``entry_price × anchor × _stop_atr_mult_for_strategy(...)``) — the
+    EXCURSION ruler. Ruler bind fix ([[exit_peak_lock_bind_2026-07-10]] v2): the
+    multiplier is resolved from the SAME ``_stop_atr_mult_for_strategy`` the
+    entry-stamp (``risk_usd_at_entry`` in ``_production_pipeline.py``) and the
+    live exit engine already use — this was previously hardcoded to the flat
+    SSOT ``2.0`` regardless of a strategy's FEE_FLOOR_K widen, so a fee-floor-
+    widened winner's REPORTED mfe_r/mae_r were denominated on a NARROWER ruler
+    than its realised ``pnl_r`` (``positions.risk_usd``, entry-stamped with the
+    SAME resolver) — a ruler mismatch that would have leaked into the learning
+    columns (mfe_r/mae_r/pnl_r) as measurement drift. Both rulers now always
+    read the identical per-strategy multiplier for the same strategy_id +
+    atr_pct — an unregistered/no-override strategy (fee floor does not bind)
+    resolves to the unchanged flat ``2.0``, so this is byte-identical there.
+    mfe_r/mae_r are RATIOS of two quote-ccy quantities (peak/trough/entry all
+    share the instrument's quote ccy), so they are quote-ccy-invariant and need
+    no conversion.
 
     ``atr_risk_usd`` (third return) is the WHOLE-POSITION dollar 1R for that same
     per-trade-ATR ruler — ``atr_usd(per-unit) × base_qty`` — so the close path can
@@ -294,7 +307,8 @@ def _close_excursion_r(
     # legacy NULL anchor → the recent-1m-bars estimate (pre-anchor behaviour).
     anchor = _entry_anchor_atr_pct(conn, trade=trade)
     if anchor is not None:
-        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-3)
+        stop_mult = _stop_atr_mult_for_strategy(trade.strategy_id, atr_pct=anchor)
+        atr_usd = max(entry_price * anchor * stop_mult, entry_price * 1e-3)
     else:
         # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit
         # mark and ATR window derive from real recent data, never a +10h ghost.
@@ -307,7 +321,9 @@ def _close_excursion_r(
             """,
             (f"{trade.venue}:{trade.symbol}", ts_upper),
         ).fetchall()
-        atr_usd = max(entry_price * _atr_pct_from_bars(bar_rows) * 2.0, 1e-6)
+        bar_atr_pct = _atr_pct_from_bars(bar_rows)
+        stop_mult = _stop_atr_mult_for_strategy(trade.strategy_id, atr_pct=bar_atr_pct)
+        atr_usd = max(entry_price * bar_atr_pct * stop_mult, 1e-6)
     # Whole-position dollar 1R for the per-trade-ATR excursion ruler. 0.0 when
     # base_qty is unknowable → the caller keeps the backfilled excursion R at 0.
     quote_usd_rate = 1.0

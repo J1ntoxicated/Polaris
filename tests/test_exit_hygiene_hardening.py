@@ -148,6 +148,24 @@ def test_tick_cfg_schedule_now_survives_remap_behavior_change() -> None:
     assert tp.mfe_protect != _BAR_DEFAULT
 
 
+@pytest.mark.parametrize(
+    "mode", [ManagementMode.LET_RUN, ManagementMode.HARVEST, ManagementMode.REMODE]
+)
+def test_reversion_bucket_no_profit_target_r_degrades_safe(mode: ManagementMode) -> None:
+    # [[exit_peak_lock_bind_2026-07-10]] regression: a REVERSION-bucket
+    # strategy (e.g. a future "reversion"-substring id) with NO declared
+    # profit_target_r must not crash or fabricate one — it stays None (the
+    # bar default mfe_protect still applies; no peak-lock arm, since bucket
+    # only reaches the bar default which carries the disabled 0.0 pair).
+    tp = mode_to_exit_params(
+        mode, bucket=Bucket.REVERSION, mfe_r=0.6, pnl_r=0.4,
+        giveback=_GIVEBACK, base_mfe_protect=None, base_profit_target_r=None,
+    )
+    assert tp.profit_target_r is None
+    assert tp.mfe_protect == _BAR_DEFAULT
+    assert tp.mfe_protect.peak_lock_arm_r == 0.0
+
+
 def test_cut_mode_unaffected_by_base_schedule() -> None:
     # CUT closes now (broken+red) — it carries no protect schedule regardless.
     tp = mode_to_exit_params(

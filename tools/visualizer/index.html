@@ -515,11 +515,11 @@
      self-contained chart renderer. Display-only; reads /api/ticker_chart. The
      vendor lib must precede chart.js (it provides window.LightweightCharts). -->
 <script src="static/vendor/lightweight-charts.standalone.production.js"></script>
-<script src="static/chart.js?v=3_search_venue_name"></script>
+<script src="static/chart.js?v=4_footer_insert_fix"></script>
 <!-- Weekend tab: self-contained weekend operations board. Display-only; reads
      the read-only /api/weekend endpoint. Self-injects #pane-weekend + registers
      its renderer (same pattern as chart.js). -->
-<script src="static/weekend.js?v=1"></script>
+<script src="static/weekend.js?v=2_footer_insert_fix"></script>
 <script>
   // 30/70 split + left column globe(2/3)/log(1/3). globe engine fits to canvas
   // clientWidth/Height; after layout settles, nudge resize twice (rAF + delayed) so fit()

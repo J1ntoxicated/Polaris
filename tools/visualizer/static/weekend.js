@@ -95,7 +95,12 @@
     wrap.className = 'tab-pane';
     wrap.id = 'pane-weekend';
     wrap.innerHTML = PANE_HTML;
-    board.appendChild(wrap);
+    // Layout fix (2026-07-09 audit N1/N2): inject BEFORE the footer so the
+    // active pane occupies #board's 6th grid track (minmax(0,1fr)) like the
+    // built-in panes. Appending AFTER the footer pushed this pane into an
+    // implicit auto row -> body collapsed to ~32px (silent, no console error).
+    const footer = document.getElementById('b-footer');
+    if (footer) { board.insertBefore(wrap, footer); } else { board.appendChild(wrap); }
     _paneReady = true;
     return true;
   }

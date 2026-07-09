@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Final
 
 from polaris.core.data.fill_normalizer import (
     Fill,
@@ -30,6 +30,26 @@ __all__ = [
     "simulate_close",
     "simulate_open_fill",
 ]
+
+# Capital-sim pip value — matches ``normalize_capital_confirm``'s legacy
+# ``size_usd = size x pip_value_usd x leverage`` formula (leverage stays at
+# that call's default 1.0). Root-cause fix (Capital $10-flat collapse, live
+# 2026-07-07+ once VIRTUAL ACCOUNT made real_roundtrip=False the default
+# path): ``_capital_fill_payload`` used to hardcode ``size=1.0`` and never
+# receive ``notional_usd`` at all, so every simulated Capital fill stamped
+# exactly $10.00 regardless of the T4 sizer's output. ``_capital_sim_size``
+# inverts the SAME formula so ``size_usd`` tracks the requested notional.
+_CAPITAL_SIM_PIP_VALUE_USD: Final[float] = 10.0
+
+
+def _capital_sim_size(notional_usd: float) -> float:
+    """T4 notional -> simulated Capital ``size`` (lots), pip-value formula.
+
+    A non-positive ``notional_usd`` degrades to the old 1-lot/$10 placeholder
+    (flow_not_block — a degenerate sizer output must never raise here)."""
+    if notional_usd <= 0.0:
+        return 1.0
+    return notional_usd / _CAPITAL_SIM_PIP_VALUE_USD
 
 
 def _okx_fill_payload(
@@ -94,6 +114,7 @@ def _capital_fill_payload(
     side: str,  # "long" / "short"
     level: float,
     is_close: bool,
+    size: float = 1.0,
 ) -> dict[str, Any]:
     direction = (
         ("SELL" if side == "long" else "BUY")
@@ -106,7 +127,7 @@ def _capital_fill_payload(
         "epic": epic,
         "direction": direction,
         "level": level,
-        "size": 1.0,
+        "size": size,
         "status": "CLOSED" if is_close else "OPEN",
         "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -151,9 +172,10 @@ def simulate_open_fill(
                 side=signal.side,
                 level=last_price,
                 is_close=False,
+                size=_capital_sim_size(notional_usd),
             ),
             strategy_id=signal.strategy_id,
-            pip_value_usd=10.0,
+            pip_value_usd=_CAPITAL_SIM_PIP_VALUE_USD,
             expected_price=last_price,
         )
     trade = SimulatedTrade(
@@ -201,8 +223,9 @@ def simulate_close(trade: SimulatedTrade, *, exit_price: float) -> Fill:
             side=trade.side,
             level=exit_price,
             is_close=True,
+            size=_capital_sim_size(trade.notional_usd),
         ),
         strategy_id=trade.strategy_id,
-        pip_value_usd=10.0,
+        pip_value_usd=_CAPITAL_SIM_PIP_VALUE_USD,
         expected_price=exit_price,
     )

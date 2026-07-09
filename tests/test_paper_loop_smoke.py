@@ -74,12 +74,63 @@ def test_simulated_open_fill_capital() -> None:
         thesis_tag="fx_break",
         correlation_group="cfd_fx_trend",
     )
+    # $2,500 — deliberately NOT the old hardcoded $10 placeholder, so this
+    # test actually exercises T4-notional tracking (a notional_usd=10.0 fixture
+    # would coincidentally match the bug and mask it).
     fill, trade = simulate_open_fill(
-        signal=sig, venue="capital", last_price=1.0850, notional_usd=10.0
+        signal=sig, venue="capital", last_price=1.0850, notional_usd=2500.0
     )
     assert fill.venue == "capital"
     assert fill.side == "buy"
     assert trade.symbol == "EURUSD"
+    # Root cause regression (Capital $10-flat collapse, live 2026-07-07+):
+    # simulate_open_fill's Capital branch hardcoded size=1.0 / pip_value_usd=10.0
+    # and never forwarded notional_usd, so every VIRTUAL-ACCOUNT Capital fill
+    # (real_roundtrip forced off) stamped exactly $10.00 regardless of the T4
+    # sizer's output. size_usd must track the requested notional.
+    assert fill.size_usd == pytest.approx(2500.0)
+    assert trade.notional_usd == pytest.approx(2500.0)
+
+
+def test_simulated_close_fill_capital_tracks_open_notional() -> None:
+    """The close leg must express the SAME real notional the open leg recorded
+    (not the $10 placeholder) — PnL/exposure bookkeeping keys off this."""
+    sig = RawSignal(
+        signal_id="sig2b",
+        strategy_id="fx_breakout_basket",
+        symbol="EURUSD",
+        side="long",
+        strength=0.7,
+        sizing_hint=0.03,
+        ttl_bars=10,
+        thesis_tag="fx_break",
+        correlation_group="cfd_fx_trend",
+    )
+    _open_fill, trade = simulate_open_fill(
+        signal=sig, venue="capital", last_price=1.0850, notional_usd=2500.0
+    )
+    close_fill = simulate_close(trade, exit_price=1.0900)
+    assert close_fill.size_usd == pytest.approx(2500.0)
+
+
+def test_simulated_open_fill_capital_nonpositive_notional_falls_back() -> None:
+    """flow_not_block: a degenerate (<=0) notional must never raise — it
+    degrades to the old 1-lot/$10 placeholder rather than blocking the fill."""
+    sig = RawSignal(
+        signal_id="sig2c",
+        strategy_id="fx_breakout_basket",
+        symbol="EURUSD",
+        side="long",
+        strength=0.7,
+        sizing_hint=0.03,
+        ttl_bars=10,
+        thesis_tag="fx_break",
+        correlation_group="cfd_fx_trend",
+    )
+    fill, _trade = simulate_open_fill(
+        signal=sig, venue="capital", last_price=1.0850, notional_usd=0.0
+    )
+    assert fill.size_usd == pytest.approx(10.0)
 
 
 def test_simulated_open_fill_alpaca_routes_through_normalize_alpaca_fill() -> None:

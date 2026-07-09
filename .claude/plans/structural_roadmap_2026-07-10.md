@@ -18,6 +18,7 @@ supersedes: structural_roadmap_2026-06-22.md
 - 2.1 [BUILD] 동면 전수조사+삼분류 — DB무덤·죽은모듈·env-inert·무소비 이벤트 → WAKE/DELETE/KEEP-DORMANT (wf_005f9051)
 - 2.2 [DECISION] 판정 후 실행 웨이브 — WAKE 배선 + DELETE 정리 빌드
 - 2.3 [DONE] 대시보드 정합 — NET 버추얼 단일자·chart/weekend 붕괴 픽스·모바일 라우팅·로드맵 소스 현행화(이 파일)
+- 2.4 [DONE] 대시 화면 분리 — /flow 비주얼 월(글로브+파이프라인 강+디렉터 카메라) · / 풀와이드 워크보드 · AI탭 3섹션(bot/harness/cowork)
 
 ## R3 — 인프라 안정 (완결 유지)
 - 3.1 [DONE] DB writer/reader 분리 3파 — WAL creep 근절·retention 폭풍 근절·recalc 락 50→1

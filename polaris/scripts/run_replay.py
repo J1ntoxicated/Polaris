@@ -44,7 +44,36 @@ __all__ = [
     "build_gate",
     "main",
     "persist_run",
+    "resolve_top_n_active_instruments",
 ]
+
+
+def resolve_top_n_active_instruments(db_path: str, n: int) -> list[str]:
+    """Top-``n`` most-liquid ACTIVE ``universe`` instruments (read-only).
+
+    Dynamic-universe substitute for a hardcoded instrument default: the
+    nightly replay wrapper no longer pins symbols in the script — it asks
+    Layer 0's own ``universe`` table (``is_active = 1``, ranked by
+    ``vol_24h_usd``) which tickers are live right now. Fail-open: a missing
+    DB / table / column degrades to ``[]`` — the caller then falls back to
+    replaying ALL instruments for the interval (``--instruments`` empty),
+    never a crash and never a stale pinned symbol.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT instrument_id FROM universe WHERE is_active = 1 "
+            "ORDER BY vol_24h_usd DESC LIMIT ?",
+            (int(n),),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    return [str(r[0]) for r in rows]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +97,14 @@ def build_config(argv: list[str]) -> ConfigBundle:
         "--instruments", nargs="*", default=[],
         help="instrument_ids (venue:symbol); empty = all for the interval",
     )
+    p.add_argument(
+        "--top-n-active", type=int, default=0,
+        help="when --instruments is empty, replay only the top-N most-liquid "
+        "ACTIVE universe instruments (by vol_24h_usd) instead of ALL "
+        "instruments for the interval; 0 = disabled (no universe hardcode — "
+        "the nightly wrapper drives this from the live DB, never a pinned "
+        "symbol list)",
+    )
     p.add_argument("--start-ts", type=int, default=None)
     p.add_argument("--end-ts", type=int, default=None)
     p.add_argument("--equity", type=float, default=10_000.0)
@@ -79,8 +116,11 @@ def build_config(argv: list[str]) -> ConfigBundle:
     )
     p.add_argument("--no-persist", action="store_true", help="skip read-model write (print only)")
     args = p.parse_args(argv)
+    instrument_ids = list(args.instruments)
+    if not instrument_ids and args.top_n_active > 0:
+        instrument_ids = resolve_top_n_active_instruments(args.db, args.top_n_active)
     cfg = ReplayConfig(
-        instrument_ids=tuple(args.instruments),
+        instrument_ids=tuple(instrument_ids),
         bar_interval=args.interval,
         start_ts=args.start_ts,
         end_ts=args.end_ts,

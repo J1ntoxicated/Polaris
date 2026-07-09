@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from polaris.core.pipeline.agents.confidence import confidence_summary
+from polaris.core.probes.gate_kill_value import compute_kill_value_hints
 from polaris.core.sizing.constants import (
     demo_starting_equity_alpaca_display,
     demo_starting_equity_capital,
@@ -47,6 +48,8 @@ from polaris.scripts.dashboard.snapshot_models import (
     EdgeValidationRow,
     GateDecisionRow,
     GateEvent,
+    GateKillValuePanel,
+    GateKillValueRow,
     GptStat,
     LearnerSlot,
     PositionRow,
@@ -318,6 +321,28 @@ def _replay_panel(blk: dict[str, Any]) -> ReplayBenchmarkPanel:
     )
 
 
+def _gate_kill_value_panel(conn: sqlite3.Connection) -> GateKillValuePanel:
+    """Build the EDGE-tab gate-kill-value panel (07-08 BUILD, /debate evidence).
+
+    Read-only rollup of ``gate_kill_value.compute_kill_value_hints`` — see that
+    module's docstring for the full mandate. ``present=False`` (graceful zero)
+    when no ``(gate_id, cohort)`` group clears the stratified sample floor."""
+    hints = compute_kill_value_hints(conn)
+    if not hints:
+        return GateKillValuePanel()
+    rows = [
+        GateKillValueRow(
+            gate_id=h.gate_id, cohort=h.cohort,
+            n_killed=h.n_killed, n_passed=h.n_passed,
+            mean_killed_fwd_r=h.mean_killed_fwd_r,
+            mean_passed_fwd_r=h.mean_passed_fwd_r,
+            separation=h.separation, anti_edge=h.anti_edge,
+        )
+        for h in hints
+    ]
+    return GateKillValuePanel(present=True, rows=rows)
+
+
 # ---------------------------------------------------------------------------
 # Top-level collector
 # ---------------------------------------------------------------------------
@@ -478,6 +503,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         rotation = _rotation_telemetry(conn, now_s=now_s)
         # Component A go-live confidence panel (real-fee-net edge evidence).
         confidence = _confidence_panel(conn, starting_equity=starting_capital)
+        # G3/G4 gate-kill counterfactual value panel (07-08 BUILD) — /debate
+        # evidence only, never feeds a live gate threshold.
+        gate_kill_value = _gate_kill_value_panel(conn)
         # ADR-012 — observe-mode probe events from the SEPARATE probes.sqlite
         # sidecar (fail-open: empty list on a missing / locked sidecar). Read-only
         # connective tissue for the dashboard; never feeds sizing/gating/exit.
@@ -534,6 +562,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             asset_class_fallback_n=rotation.asset_class_fallback_n,
             last_rotation=rotation.last_rotation,
             confidence=confidence,
+            gate_kill_value=gate_kill_value,
             regime_states=regime_states,
             exit_surface=exit_surface,
             ai_shadow=ai_shadow,

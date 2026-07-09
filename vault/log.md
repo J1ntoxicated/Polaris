@@ -369,3 +369,4 @@
 2026-07-09 14:59 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=387 learners=3 paper=True]
 - 2026-07-10 fix(capital/qty-contract): BG3 회귀 발견·해소 — 루프 틱→메인 개입이 오픈 노출 합 $323k 이상치 적발, RCA=sim size(n/10)가 base_qty로 흘러 risk_usd ~750× 오탬핑(US500 $248,534 vs 진실 $330). _capital_sim_units(notional/price)+contract_factor로 size_usd·base_qty 동시 정합(Bug-C real-exposure 정규 경로), base_qty 소비자 전수감사(real-venue 무접촉·pnl_usd 무관). 서명 기반 마이그레이션 4행 --apply(US500 330.06/SG25 1439.63, idempotent·백업·감사행) 봇 정지창에서 실행. Opus 리뷰 APPROVE. 재기동 PID 92833
 2026-07-09 17:12 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=385 learners=3 paper=True]
+- 2026-07-10 fix(strategy/connors-revert): connors_rsi2 virtual 1H→1D 되돌림(Jin 즉시지시) — 손실 분해가 단독 주범 확정(오늘 -$588: DINO -2.3R churn+VTRS/SBUX, 1H=노이즈 매매 vs 검증설계 1D). 타 하향 전략 유지(rsi_bb 15m +$121 흑자). 가드테스트 맵 갱신, 재기동 픽업

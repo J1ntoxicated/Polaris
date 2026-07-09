@@ -31,7 +31,8 @@ _ENV = "POLARIS_VIRTUAL_ACCOUNT"
 # module dotted path -> (virtual timeframe, real timeframe, class name)
 _TARGETS: dict[str, tuple[str, str, str]] = {
     "polaris.strategies.equity_rsi_bb_pullback": ("1H", "1D", "EquityRSIBBPullbackStrategy"),
-    "polaris.strategies.connors_rsi2": ("1H", "1D", "ConnorsRSI2Strategy"),
+    # connors_rsi2 REVERTED to flat 1D (2026-07-10, Jin): 1H virtual bled
+    # -$588/day vs validated 1D design — removed from the downgrade map.
     "polaris.strategies.supertrend": ("15m", "1H", "SupertrendStrategy"),
     "polaris.strategies.ema_crossover": ("15m", "1H", "EMACrossoverStrategy"),
     "polaris.strategies.macd_ema_trend_pullback": ("1H", "1D", "MACDEMATrendPullbackStrategy"),

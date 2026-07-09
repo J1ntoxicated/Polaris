@@ -100,7 +100,12 @@ class ConnorsRSI2Strategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="connors_rsi2",
-        timeframe=virtual_loosen("1H", "1D"),
+        # 2026-07-10 revert (Jin): the 1H virtual downgrade bled -$588/day
+        # (DINO -2.3R churn + VTRS/SBUX) while the validated design is 1D —
+        # connors mean-reversion needs daily-close extremes, 1H trades noise.
+        # Other downgraded strategies stay (rsi_bb 15m +$121 etc.); this
+        # revert is connors-only, evidence-based.
+        timeframe="1D",
         warmup_bars=TREND_FILTER_MA + 5,
         max_positions=4,
         gross_cap=0.18,

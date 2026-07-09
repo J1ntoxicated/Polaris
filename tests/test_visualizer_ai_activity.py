@@ -384,6 +384,9 @@ def test_build_ai_activity_shape(
     monkeypatch.setattr(srv, "_MODEL_LEDGER_PATH", tmp_path / "absent_ledger.json")
     monkeypatch.setattr(srv, "_ALPACA_SEED_PATH", tmp_path / "absent_seed.json")
     monkeypatch.setattr(srv, "_MARKET_CONTEXT_PATH", tmp_path / "absent_mkt.md")
+    # judge stats read the runtime log via _resolve_bot_log() — pin it absent
+    # so a live bot's [ai-judge] lines can't leak into this shape assertion.
+    monkeypatch.setattr(srv, "_resolve_bot_log", lambda: None)
 
     out = srv._build_ai_activity()
     assert set(out.keys()) == {"bot_ai", "harness_ai", "cowork_intel", "ts"}

@@ -75,6 +75,25 @@ async def entry_sizer_gate(
     if ctx.payload.get("ai_judge_size_up_intent") and intent_raw.judge_conviction == 1.0:
         intent_raw = replace(intent_raw, judge_conviction=size_up_boost())
 
+    # G3 MODIFY strength_scalar: the SignalIntent in ctx.payload was built by
+    # build_sizer_payload BEFORE the pipeline ran (the orchestrator primes
+    # ctx.payload once, up front, then walks G1→G8 over the SAME ctx) — so it
+    # cannot have known G3's verdict at construction time. G3's actual decision
+    # (signal_validator_gate) is stamped separately into
+    # ctx.payload["validated_signal"]["strength_scalar"] (PASS→1.0, MODIFY→
+    # [0.5, 1.5], KILL never reaches this gate). Thread it onto the SAME single
+    # continuous scalar here — the SAME payload→intent replace() seam as
+    # judge_conviction above (NOT a new T4 multiplier slot; fold_strength_scalar
+    # in compute_size does the ONE clamp). Absent / == 1.0 → no-op, byte-identical.
+    validated_signal = ctx.payload.get("validated_signal")
+    if isinstance(validated_signal, dict):
+        try:
+            g3_scalar = float(validated_signal.get("strength_scalar", 1.0))
+        except (TypeError, ValueError):
+            g3_scalar = 1.0
+        if g3_scalar != intent_raw.strength_scalar:
+            intent_raw = replace(intent_raw, strength_scalar=g3_scalar)
+
     # pts-classes (group D): thread the live EARN/PROVE/BENCH class for this
     # (venue, strategy) — a missing row (bootstrap hasn't run yet) resolves to
     # EARN, byte-identical to pre-pts-classes sizing.

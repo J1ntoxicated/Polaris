@@ -157,6 +157,7 @@ def build_sizer_payload(
     entry_price: float = 0.0,
     atr_pct: float = 0.0,
     stop_atr_mult: float = 0.0,
+    strength_scalar: float = 1.0,
 ) -> dict[str, Any]:
     """Compose the G5 payload — SignalIntent + StrategyRiskState + PortfolioState.
 
@@ -169,7 +170,15 @@ def build_sizer_payload(
     callers that have a live last price / bar ATR% / fee-floored stop mult
     (``exit_strategy_config._stop_atr_mult_for_strategy`` — scripts-layer
     only, core must not import it) thread them so the shadow observation
-    fires with the real fee-floor.
+    fires with the real fee-floor. ``strength_scalar`` defaults 1.0
+    (byte-identical — G3 has not run yet at this call site in the live bar
+    pipeline; the orchestrator builds this payload up front, before G1-G8
+    execute). The actual G3 MODIFY verdict is folded onto the SignalIntent
+    later, in ``entry_sizer_gate`` (G5), via ``dataclasses.replace()`` off
+    ``ctx.payload["validated_signal"]["strength_scalar"]`` — the SAME
+    payload-seam precedent as ``judge_conviction``/SIZE_UP. This parameter
+    exists so direct (non-orchestrator) callers — replay/backtest, tests —
+    can thread a scalar at construction time too.
     """
     ts = int(now_ts if now_ts is not None else time.time())
     # Regime-fit family: derive from the strategy's correlation-group archetype
@@ -199,6 +208,7 @@ def build_sizer_payload(
         entry_price=float(entry_price),
         atr_pct=float(atr_pct),
         stop_atr_mult=float(stop_atr_mult),
+        strength_scalar=float(strength_scalar),
     )
     if conn is None:
         risk_state = default_strategy_risk_state(

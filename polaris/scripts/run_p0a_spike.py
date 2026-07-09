@@ -63,6 +63,7 @@ from polaris.core.evolve import (
 )
 from polaris.core.replay.engine import load_bars
 from polaris.core.replay.models import ReplayConfig
+from polaris.scripts._p0a_instrument_pools import DEFAULT_INSTRUMENTS as DEFAULT_INSTRUMENTS
 from polaris.scripts._p0a_verdict import K_MIN_EVALUABLE as K_MIN_EVALUABLE
 from polaris.scripts._p0a_verdict import SpikeVerdict, _classify
 from polaris.strategies import STRATEGY_REGISTRY
@@ -76,28 +77,6 @@ __all__ = [
     "run_spike",
 ]
 
-# Design-recommended OFFLINE instrument pools (design.bar_history). 1m ->
-# volume_burst (multi-fold OOS); 1H -> trend/breakout strategies pooled across
-# the top OKX 1H symbols (single OOS block, thin-N visible). Equity (alpaca 1D)
-# is data-unavailable in polaris_live.sqlite -> those specs report DATA_BOUNDED.
-DEFAULT_INSTRUMENTS: dict[str, tuple[tuple[str, ...], str]] = {
-    # strategy_id -> (instrument_ids, bar_interval)
-    "volume_burst": (
-        ("okx:BTC-USDT", "okx:ALGO-USDT", "okx:INJ-USDT", "okx:NEAR-USDT", "okx:ETH-USDT"),
-        "1m",
-    ),
-    "rsi_bb_pullback": (
-        ("okx:BTC-USDT", "okx:ETH-USDT", "okx:ALGO-USDT", "okx:INJ-USDT", "okx:ADA-USDT"),
-        "1H",
-    ),
-    "spot_donchian": (
-        ("okx:BTC-USDT", "okx:FLOKI-USDT", "okx:HYPE-USDT", "okx:ALGO-USDT",
-         "okx:ETH-USDT", "okx:INJ-USDT", "okx:ADA-USDT"),
-        "1H",
-    ),
-    "fx_breakout_basket": (("capital:EURUSD_W",), "1H"),
-    "xau_indices_trend": (("capital:US100",), "1H"),
-}
 
 @dataclass(frozen=True, slots=True)
 class StrategySpec:

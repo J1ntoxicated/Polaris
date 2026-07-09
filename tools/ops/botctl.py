@@ -246,6 +246,15 @@ def _spawn_env() -> dict[str, str]:
     # virtual — no real venue orders/reconcile/balance calls. Caller shell can
     # still override to "0" for an explicit real-roundtrip debug run.
     env["POLARIS_VIRTUAL_ACCOUNT"] = os.environ.get("POLARIS_VIRTUAL_ACCOUNT", "1")
+    # OKX LIQUIDITY FLOOR STEP-DOWN (Jin 2026-07-09, very-active/focus-expand):
+    # step 1 of a sequential, observe-then-proceed widening of the focus
+    # universe — OKX min_vol_24h_usd floor $20M schema default -> $15M (25%
+    # notch, NOT a big-bang drop). POLARIS_WATCH_MAX (resource-guard ceiling,
+    # already 1500) is deliberately NOT touched here — only the quality floor
+    # moves, never the cap. Caller shell can still override for the next step.
+    env["POLARIS_LIQFLOOR_OKX_MIN_VOL_24H_USD"] = os.environ.get(
+        "POLARIS_LIQFLOOR_OKX_MIN_VOL_24H_USD", "15000000"
+    )
     return env
 
 

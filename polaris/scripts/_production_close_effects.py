@@ -536,6 +536,7 @@ async def _safe_run_g8(
     try:
         g8_result = await post_trade_reflector_gate(
             g8_ctx, client=client_arg, conn=conn, model=model_arg,
+            db_writer=state.db_writer,
         )
         log_gate_event(conn, g8_ctx, g8_result)
         state.g8_runs += 1

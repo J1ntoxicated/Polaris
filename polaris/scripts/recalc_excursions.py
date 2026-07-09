@@ -40,6 +40,7 @@ from polaris.scripts._production_atr import (
     strategy_timeframe,
     timeframe_anchor_atr_pct,
 )
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 
 __all__ = ["CorrectionReport", "RowCorrection", "main", "run_correction"]
 
@@ -173,7 +174,12 @@ def run_correction(
             conn, instrument_id=instrument_id, timeframe=anchor_tf,
             opened_ts=opened_ts,
         )
-        atr_usd = max(entry_price * anchor * 2.0, entry_price * 1e-3)
+        # Ruler SSOT (2026-07-10, exit-peak-lock-bind-v2 review follow-up): the
+        # live entry/exit/close rulers all read _stop_atr_mult_for_strategy —
+        # a re-stamp with a flat 2.0 would overwrite resolver-bound rows and
+        # reintroduce the exact mismatch v2 removed.
+        _mult = _stop_atr_mult_for_strategy(strategy_id, atr_pct=anchor)
+        atr_usd = max(entry_price * anchor * _mult, entry_price * 1e-3)
         new_mfe, new_mae = compute_excursion_r(
             entry_price=entry_price, peak_price=peak, trough_price=trough,
             side=side, atr_usd=atr_usd,

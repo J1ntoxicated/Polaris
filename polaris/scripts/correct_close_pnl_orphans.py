@@ -33,6 +33,7 @@ from polaris.core.live_recalc.excursion import (
     _EXCURSION_R_CAP,
     compute_excursion_r,
 )
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 
 
 def _true_slice_pnl(
@@ -173,7 +174,10 @@ def analyze_capped_excursions(
         if (entry_px <= 0.0 or peak is None or trough is None
                 or atr_pct is None or float(atr_pct) <= 0.0):
             continue
-        atr_usd = entry_px * float(atr_pct) * 2.0
+        # Ruler SSOT (2026-07-10): same resolver as the live close ruler — a
+        # flat 2.0 here would re-stamp learning columns with the stale ruler.
+        _mult = _stop_atr_mult_for_strategy(str(sid), atr_pct=float(atr_pct))
+        atr_usd = entry_px * float(atr_pct) * _mult
         new_mfe, new_mae = compute_excursion_r(
             entry_price=entry_px, peak_price=float(peak),
             trough_price=float(trough), side=str(side or "long"),

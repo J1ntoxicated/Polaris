@@ -160,6 +160,31 @@ def _rsi_dip_bars(*, iid: str, venue: str, sym: str, interval: str) -> list[Bar]
     return out
 
 
+def _connors_rsi2_dip_bars() -> list[Bar]:
+    """1D uptrend (close stays > SMA200 throughout) with periodic 2-bar dip
+    events every 25 bars starting at bar 210: a $1.5 drop then a partial
+    (11.5%) recovery. That recovery lands RSI(2) ~=10.3 — strictly between the
+    knob's MIN (8.0) and MAX (13.0) grid points, so ``rsi_entry=13`` fires on
+    every dip while ``rsi_entry=8`` fires on none (discriminates cleanly)."""
+    out: list[Bar] = []
+    start, step, dip, recov_frac = 50.0, 0.3, 1.5, 0.115
+    p = start
+    for i in range(460):
+        ph = i % 25
+        if i >= 210 and ph == 0:
+            nxt = p - dip
+        elif i >= 210 and ph == 1:
+            nxt = p + recov_frac * dip
+        elif i < 210:
+            nxt = start + step * i
+        else:
+            nxt = p * 1.0015
+        out.append(_bar(i, p, max(p, nxt) * 1.0005, min(p, nxt) * 0.999, nxt, 1000.0 + i,
+                        iid="alpaca:AAPL", venue="alpaca", sym="AAPL", interval="1D"))
+        p = nxt
+    return out
+
+
 # (strategy_id, knob) -> (strategy_cls, bars, interval). Covers EVERY replay-firing
 # knob in PARAM_BOUNDS. session_breakout (atr_mult) is tested separately (cannot
 # fire through the generic replay engine).
@@ -173,6 +198,7 @@ def _replay_knob_cases() -> list[tuple[str, str, list[Bar], str]]:
          _adx_trend_bars(iid="capital:EURUSD", venue="capital", sym="EURUSD", base=1.1), "1H"),
         ("rsi_bb_pullback", "rsi_threshold",
          _rsi_dip_bars(iid="okx:BTC-USDT", venue="okx", sym="BTC-USDT", interval="1H"), "1H"),
+        ("connors_rsi2", "rsi_entry", _connors_rsi2_dip_bars(), "1D"),
     ]
 
 

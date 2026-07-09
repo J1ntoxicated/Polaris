@@ -68,6 +68,37 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, ...]]] = {
     # xau_indices_trend: bare ``momentum_20bar > 0`` trigger — NO entry-set knob
     # (momentum_gain is a strength/sizing knob, not an entry trigger). Empty grid
     # -> default-only evaluation, 0 search breadth.
+    # --- Track C: Alpaca equity (1D live in replay) ---
+    "connors_rsi2": {
+        # bounds [5, 20] — entry trigger on the RSI(2) oversold dip level (P0
+        # spec=10, REAL relaxed to 13 — see connors_rsi2.RSI_ENTRY comment).
+        "rsi_entry": (8.0, 10.0, 13.0),
+    },
+    # gold_breakout_1h / silver_breakout_1h / us100_breakout_1h /
+    # uk100_breakout_1h: pure DONCHIAN_WINDOW=55 crossing — the window is a
+    # LOCKED precomputed param (excluded by the module docstring's contract),
+    # and there is no OTHER entry-trigger threshold, so these have NO
+    # entry-set knob (empty grid, matching xau_indices_trend). Their P0a
+    # search breadth is SYMBOL/instrument-pool breadth instead (run_p0a_spike
+    # DEFAULT_INSTRUMENTS), not a PARAM_BOUNDS grid.
+    #
+    # cci_reversion / index_52w_high_momentum / macd_ema_trend_pullback DO
+    # have entry-trigger thresholds (CCI oversold level / 52w-high proximity
+    # + ROC floor / MACD re-acceleration ceiling) that are, in principle,
+    # PARAM-grid-varyable — but today those thresholds are read from
+    # MODULE-level constants inside ``generate_raw_signal`` (not ``self.<attr>``),
+    # so adding a PARAM_BOUNDS entry for them would be INERT (make_variant's
+    # subclass override would never be read — exactly what FIX 3's
+    # no-inert-knob guard exists to catch) unless the strategy module itself is
+    # refactored to read a self-attribute. That refactor touches LIVE EARN
+    # strategy entry logic and is intentionally OUT of this reactivation's
+    # surgical scope; they are evaluated at their DEFAULT config (0 search
+    # breadth, same honest empty-grid treatment as xau_indices_trend) via
+    # instrument-pool breadth only. (Separately: index_52w_high_momentum's
+    # PROXIMITY check is currently REDUNDANT with its fresh-high check for any
+    # proximity <= 1.0 — close > prior_high already implies close >=
+    # proximity * prior_high — so it would fail the no-inert-knob guard as
+    # written regardless.)
 }
 
 

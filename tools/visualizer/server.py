@@ -604,7 +604,10 @@ def _build_roadmap() -> dict[str, Any]:
 
     # 1) Phase ladder from structural_roadmap — group bullets under each '## Pn …'.
     phases: list[dict[str, Any]] = []
-    rm_path = plans_dir / "structural_roadmap_2026-06-22.md"
+    # Latest structural_roadmap_*.md wins (was a hardcoded 06-22 filename — the
+    # ROADMAP tab silently served a 3-week-stale plan; glob kills that class).
+    rm_candidates = sorted(plans_dir.glob("structural_roadmap_*.md"))
+    rm_path = rm_candidates[-1] if rm_candidates else plans_dir / "structural_roadmap_2026-06-22.md"
     if rm_path.exists():
         with contextlib.suppress(OSError):
             cur: dict[str, Any] | None = None

@@ -1,6 +1,6 @@
 ---
 type: plan
-status: active
+status: superseded
 supersedes: [[system_design_audit_2026-06-22]]
 date_created: 2026-06-22
 date_updated: 2026-06-23

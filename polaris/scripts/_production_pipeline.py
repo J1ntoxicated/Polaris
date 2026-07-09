@@ -94,6 +94,7 @@ from polaris.scripts._smoke_real_roundtrip import (
     record_venue_orphan,
     resolve_okx_base_url,
 )
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 from polaris.strategies import STRATEGY_REGISTRY, RawSignal
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital import CapitalAdapter
@@ -710,11 +711,9 @@ async def reserve_and_submit(
     if anchor is not None:
         entry_atr_pct, entry_atr_timeframe = anchor
     # The trade's per-trade 1R-in-dollars (stop distance × filled size), stamped
-    # at entry. Step N (2026-06-23): this is NO LONGER the realised-R denominator
-    # (that is now the per-stream R_budget, resolved by venue at read time — the
-    # ATR anchor here is per-strategy-timeframe and was non-comparable across
-    # venues). risk_usd is RETAINED as the per-trade stop-quality / excursion
-    # (mfe_r/mae_r) unit. Measurement only — no sizing/entry change.
+    # at entry. Re-based (2026-07-07): this IS AGAIN the realised-R denominator
+    # (``realised_r`` reads ``positions.risk_usd`` at close — the per-stream
+    # R_budget detour is gone). Measurement only — no sizing/entry change.
     entry_base_qty = float(
         fill.base_qty if fill.base_qty > 0 else notional_usd / max(last_price, 1e-6)
     )
@@ -734,10 +733,28 @@ async def reserve_and_submit(
         rate = _peek_quote_usd_rate(state.capital_constraints, conn, quote_ccy)
         if rate is not None and rate > 0.0:
             quote_usd_rate = rate
+    # R-unit ruler bind fix (forward-fix, [[exit_peak_lock_bind_2026-07-10]]):
+    # the live precise-exit engine denominates mfe_r / the peak-lock floor
+    # against ``_stop_atr_mult_for_strategy``'s FEE_FLOOR_K-widened multiplier
+    # (trade_mess_full_audit_2026-07-02, up to ~8-18x on tight-ATR Capital FX
+    # legs) — but this stamp NEVER threaded it (silently defaulted to the flat
+    # SSOT ``STOP_ATR_MULT=2.0``). Since the 2026-07-07 re-base made
+    # ``positions.risk_usd`` the realised-R denominator again, a winner whose
+    # peak-fraction floor correctly locked ~65% of its peak PRICE move (verified
+    # against live fills) got its REPORTED realised R computed on a ~4-18x
+    # NARROWER ruler than its own "MFE 3.2R" figure — reading as a ~10-15%
+    # capture instead of the true ~65%. Same resolver the exit engine + the T4
+    # sizer (``_production_run_signal.build_sizer_payload``) already use — this
+    # only aligns the RULER; no sizing / entry / the G6 -1.0R rail (which reads
+    # this SAME resolver directly, never risk_usd) changes.
     risk_usd = risk_usd_at_entry(
         entry_price=fill.fill_price,
         entry_atr_pct=entry_atr_pct if entry_atr_pct is not None else 0.0,
         base_qty=entry_base_qty,
+        stop_atr_mult=_stop_atr_mult_for_strategy(
+            sig.strategy_id,
+            atr_pct=entry_atr_pct if entry_atr_pct is not None else 0.0,
+        ),
         quote_usd_rate=quote_usd_rate,
     ) or None
     # Entry-regime anchor — the regime stamped at THIS fill (the entry-thesis

@@ -74,6 +74,27 @@ def test_bar_reversion_bucket_unchanged() -> None:
         assert _trail_mult_for_strategy(sid) is None  # module-default trail
 
 
+# --- reclassified "reversion"-substring strategies now disable peak-lock too ---
+
+# [[exit_peak_lock_bind_2026-07-10]]: cci_reversion / connors_rsi2 carry
+# correlation_group_ids with "reversion" but not "mean_reversion"/"range"
+# (cfd_commodity_reversion / equity_connors_reversion) — before the
+# _REVERSION_GROUP_SUBSTRINGS fix these fell through to the TREND default and
+# armed the let-winners-run peak-lock schedule despite being bounded
+# revert-to-mean strategies with their own profit_target_r.
+_RECLASSIFIED_REVERSION = ("cci_reversion", "connors_rsi2")
+
+
+def test_reclassified_reversion_substring_strategies_disable_peak_lock() -> None:
+    for sid in _RECLASSIFIED_REVERSION:
+        assert _bucket_for_strategy(sid) is Bucket.REVERSION
+        sched = _mfe_protect_for_strategy(sid)
+        assert sched is not None
+        assert sched.peak_lock_arm_r == 0.0
+        assert sched.peak_lock_frac == 0.0
+        assert _trail_mult_for_strategy(sid) is None
+
+
 # --- tick momentum arms +0.30R / frac 0.50, keeps low sub-arm rungs (#47) -------
 
 

@@ -46,7 +46,16 @@ logger = logging.getLogger(__name__)
 # correlation_group_id carries one of these substrings. Everything else (momo /
 # trend / breakout / event / gap / ema_trend / flow_pressure / burst_rider) is a
 # TREND archetype that may run while confirmed.
-_REVERSION_GROUP_SUBSTRINGS: Final[tuple[str, ...]] = ("mean_reversion", "range")
+# "reversion" (forward-fix, [[exit_peak_lock_bind_2026-07-10]]): cci_reversion
+# (correlation_group_id="cfd_commodity_reversion") and connors_rsi2
+# ("equity_connors_reversion") carry "reversion" without "mean_reversion"/"range"
+# — both bounded-revert-to-mean strategies with their own profit_target_r — so
+# they fell through to the TREND default and ran the let-winners-run peak-lock
+# schedule instead of the bounded-target REVERSION one. "reversion" is a
+# superset of "mean_reversion" (kept for history/no functional change there).
+_REVERSION_GROUP_SUBSTRINGS: Final[tuple[str, ...]] = (
+    "mean_reversion", "range", "reversion",
+)
 
 
 def bucket_from_correlation_group(correlation_group: str | None) -> Bucket:

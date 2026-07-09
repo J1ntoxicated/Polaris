@@ -56,6 +56,15 @@ def test_bucket_reversion_from_range() -> None:
     assert bucket_from_correlation_group("cfd_fx_range") is Bucket.REVERSION
 
 
+def test_bucket_reversion_from_bare_reversion_substring() -> None:
+    # [[exit_peak_lock_bind_2026-07-10]]: cci_reversion / connors_rsi2 carry
+    # "reversion" without "mean_reversion" or "range" — both are bounded
+    # revert-to-mean strategies (their own profit_target_r) that previously
+    # fell through to the TREND default (let-winners-run peak-lock schedule).
+    assert bucket_from_correlation_group("cfd_commodity_reversion") is Bucket.REVERSION
+    assert bucket_from_correlation_group("equity_connors_reversion") is Bucket.REVERSION
+
+
 def test_bucket_trend_default() -> None:
     for cg in (
         "spot_cross_sectional_momo",

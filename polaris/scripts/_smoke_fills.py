@@ -31,25 +31,42 @@ __all__ = [
     "simulate_open_fill",
 ]
 
-# Capital-sim pip value — matches ``normalize_capital_confirm``'s legacy
-# ``size_usd = size x pip_value_usd x leverage`` formula (leverage stays at
-# that call's default 1.0). Root-cause fix (Capital $10-flat collapse, live
-# 2026-07-07+ once VIRTUAL ACCOUNT made real_roundtrip=False the default
-# path): ``_capital_fill_payload`` used to hardcode ``size=1.0`` and never
-# receive ``notional_usd`` at all, so every simulated Capital fill stamped
-# exactly $10.00 regardless of the T4 sizer's output. ``_capital_sim_size``
-# inverts the SAME formula so ``size_usd`` tracks the requested notional.
+# Capital-sim legacy pip-value placeholder — kept ONLY as the degenerate
+# (notional<=0 / price<=0) fallback now (flow_not_block). It used to ALSO
+# drive the "real" path via ``size_usd = size x pip_value_usd x leverage``
+# (Capital $10-flat collapse fix, live 2026-07-07+), but that formula ties
+# ``size`` to ``notional/10`` with NO relationship to price — every OTHER
+# consumer of ``Fill.base_qty`` ("quantity of underlying", the SAME contract
+# OKX's ``accFillSz`` and Alpaca's ``filled_qty`` already honour, e.g.
+# ``risk_usd_at_entry``) then computed a unit ~750x too large on a
+# ~$6,300-priced instrument (US500: notional/10=5000 vs the true
+# notional/price ~7.9 -> risk_usd stamped ~$248,535 vs the true ~$330) and
+# ~10x too SMALL on a ~$1-priced FX pair. ``_capital_sim_units`` below fixes
+# this: ``size`` is derived from price (matching OKX/Alpaca) and paired with
+# ``contract_factor_usd=1.0`` (the Bug C real-exposure path already in
+# ``normalize_capital_confirm``) so ``size_usd = size * level * 1.0`` still
+# equals the requested notional exactly — ``size_usd`` AND ``base_qty`` are
+# now both correct from the same expression, instead of only ``size_usd``.
 _CAPITAL_SIM_PIP_VALUE_USD: Final[float] = 10.0
 
 
-def _capital_sim_size(notional_usd: float) -> float:
-    """T4 notional -> simulated Capital ``size`` (lots), pip-value formula.
+def _capital_sim_units(notional_usd: float, last_price: float) -> tuple[float, float | None]:
+    """T4 notional + fill price -> simulated Capital ``(size, contract_factor_usd)``.
 
-    A non-positive ``notional_usd`` degrades to the old 1-lot/$10 placeholder
-    (flow_not_block — a degenerate sizer output must never raise here)."""
-    if notional_usd <= 0.0:
-        return 1.0
-    return notional_usd / _CAPITAL_SIM_PIP_VALUE_USD
+    Returns ``size = notional_usd / last_price`` (the SAME "quantity of
+    underlying per 1x price" OKX/Alpaca's sim branches already use) paired
+    with ``contract_factor_usd=1.0`` so ``normalize_capital_confirm``'s Bug C
+    real-exposure path (``size_usd = size * level * contract_factor_usd``)
+    reproduces ``size_usd == notional_usd`` exactly while ``base_qty == size``
+    is now real units, not a price-blind ``notional/10``.
+
+    A non-positive ``notional_usd`` or ``last_price`` degrades to the old
+    1-lot/$10 legacy placeholder (``contract_factor_usd=None`` routes
+    ``normalize_capital_confirm`` back to its ``pip_value_usd`` formula)
+    rather than raising or dividing by zero (flow_not_block)."""
+    if notional_usd <= 0.0 or last_price <= 0.0:
+        return 1.0, None
+    return notional_usd / last_price, 1.0
 
 
 def _okx_fill_payload(
@@ -166,16 +183,18 @@ def simulate_open_fill(
             expected_price=last_price,
         )
     else:
+        size, contract_factor_usd = _capital_sim_units(notional_usd, last_price)
         fill = normalize_capital_confirm(
             _capital_fill_payload(
                 epic=signal.symbol,
                 side=signal.side,
                 level=last_price,
                 is_close=False,
-                size=_capital_sim_size(notional_usd),
+                size=size,
             ),
             strategy_id=signal.strategy_id,
             pip_value_usd=_CAPITAL_SIM_PIP_VALUE_USD,
+            contract_factor_usd=contract_factor_usd,
             expected_price=last_price,
         )
     trade = SimulatedTrade(
@@ -217,15 +236,17 @@ def simulate_close(trade: SimulatedTrade, *, exit_price: float) -> Fill:
             strategy_id=trade.strategy_id,
             expected_price=exit_price,
         )
+    size, contract_factor_usd = _capital_sim_units(trade.notional_usd, exit_price)
     return normalize_capital_confirm(
         _capital_fill_payload(
             epic=trade.symbol,
             side=trade.side,
             level=exit_price,
             is_close=True,
-            size=_capital_sim_size(trade.notional_usd),
+            size=size,
         ),
         strategy_id=trade.strategy_id,
         pip_value_usd=_CAPITAL_SIM_PIP_VALUE_USD,
+        contract_factor_usd=contract_factor_usd,
         expected_price=exit_price,
     )

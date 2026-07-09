@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from polaris.core.metrics.risk_unit import risk_usd_at_entry
 from polaris.scripts._smoke_fills import simulate_close, simulate_open_fill
 from polaris.scripts.smoke_paper_loop import (
     FOCUS,
@@ -90,6 +91,12 @@ def test_simulated_open_fill_capital() -> None:
     # sizer's output. size_usd must track the requested notional.
     assert fill.size_usd == pytest.approx(2500.0)
     assert trade.notional_usd == pytest.approx(2500.0)
+    # qty-unit contract regression (fix/capital-qty-contract): base_qty must be
+    # REAL underlying units (notional / price) — the SAME "quantity of
+    # underlying" contract OKX's accFillSz / Alpaca's filled_qty already honour
+    # — not the price-blind notional/10 that fed risk_usd_at_entry a ~750x-off
+    # unit on a high-priced instrument (see the risk_usd test below).
+    assert fill.base_qty == pytest.approx(2500.0 / 1.0850)
 
 
 def test_simulated_close_fill_capital_tracks_open_notional() -> None:
@@ -111,6 +118,10 @@ def test_simulated_close_fill_capital_tracks_open_notional() -> None:
     )
     close_fill = simulate_close(trade, exit_price=1.0900)
     assert close_fill.size_usd == pytest.approx(2500.0)
+    # Close-leg base_qty tracks THIS fill's price (notional / exit_price) —
+    # byte-identical pattern to the OKX/Alpaca close branches (both derive
+    # accFillSz / filled_qty from notional_usd / avg_price at the close leg).
+    assert close_fill.base_qty == pytest.approx(2500.0 / 1.0900)
 
 
 def test_simulated_open_fill_capital_nonpositive_notional_falls_back() -> None:
@@ -131,6 +142,44 @@ def test_simulated_open_fill_capital_nonpositive_notional_falls_back() -> None:
         signal=sig, venue="capital", last_price=1.0850, notional_usd=0.0
     )
     assert fill.size_usd == pytest.approx(10.0)
+    assert fill.base_qty == pytest.approx(1.0)  # legacy 1-lot placeholder
+
+
+def test_simulated_open_fill_capital_risk_usd_matches_okx_alpaca_qty_contract() -> None:
+    """Regression pin (BG3 qty-unit collapse, [[db-writer-reader-split-design]]):
+    a high-priced Capital CFD (US500-shaped: $50k notional @ price~7530) must
+    stamp ``risk_usd_at_entry`` at the TRUE stop-distance-x-size dollar figure
+    (~$330 for a 0.33% ATR x 2.0x stop), not the ~750x-inflated $248,535 the
+    price-blind ``notional/10`` unit produced (``base_qty`` fed straight into
+    ``risk_usd_at_entry`` at ``_production_pipeline.py``'s entry stamp)."""
+    sig = RawSignal(
+        signal_id="sig2d",
+        strategy_id="xau_indices_trend",
+        symbol="US500",
+        side="long",
+        strength=0.8,
+        sizing_hint=0.05,
+        ttl_bars=10,
+        thesis_tag="idx_trend",
+        correlation_group="cfd_index_trend",
+    )
+    fill, _trade = simulate_open_fill(
+        signal=sig, venue="capital", last_price=7530.0, notional_usd=50_000.0
+    )
+    assert fill.size_usd == pytest.approx(50_000.0)
+    # True unit: notional / price ~ 6.64, NOT notional / 10 = 5000.
+    assert fill.base_qty == pytest.approx(50_000.0 / 7530.0)
+    risk_usd = risk_usd_at_entry(
+        entry_price=fill.fill_price, entry_atr_pct=0.0033005940703341257,
+        base_qty=fill.base_qty, stop_atr_mult=2.0,
+    )
+    assert risk_usd == pytest.approx(330.0594070334126, rel=1e-6)
+    # The broken price-blind unit (notional/10=5000) would have stamped this:
+    broken_risk_usd = risk_usd_at_entry(
+        entry_price=fill.fill_price, entry_atr_pct=0.0033005940703341257,
+        base_qty=50_000.0 / 10.0, stop_atr_mult=2.0,
+    )
+    assert broken_risk_usd == pytest.approx(248_534.73349615966, rel=1e-6)
 
 
 def test_simulated_open_fill_alpaca_routes_through_normalize_alpaca_fill() -> None:

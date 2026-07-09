@@ -244,6 +244,24 @@
     }).join('');
     el.innerHTML = head + spreads + tiers;
   }
+  function renderGateValue(d) {
+    // G3/G4 gate-kill counterfactual value (07-08 BUILD) — SELECT-only /debate
+    // evidence, gate_kill_value.compute_kill_value_hints. Never auto-applied;
+    // this panel never feeds a live gate threshold.
+    const el = $('b-gate-value'); if (!el) return;
+    const g = d.gate_kill_value;
+    if (!g || !g.present) { el.innerHTML = '<span class="b-flat">gate value · no stratified cohort yet</span>'; return; }
+    const cells = (g.rows || []).map(r => {
+      const sep = r.separation || 0;
+      const cls = r.anti_edge ? 'lcb-neg' : (sep > 0 ? 'lcb-pos' : '');
+      const warn = r.anti_edge ? ' ⚠' : '';
+      return `<span class="cell ${cls}" title="G${r.gate_id} · ${esc(r.cohort)} · killed n=${r.n_killed} E[R]=${(r.mean_killed_fwd_r || 0).toFixed(2)} · passed n=${r.n_passed} E[R]=${(r.mean_passed_fwd_r || 0).toFixed(2)} · separation=${sep.toFixed(2)}${r.anti_edge ? ' — anti-edge: gate killed winners' : ''}">
+        <span class="nm">G${r.gate_id} ${esc(r.cohort)}</span>
+        <span class="cv ${pn(sep)}">${sep >= 0 ? '+' : ''}${sep.toFixed(2)}R${warn}</span>
+      </span>`;
+    }).join('');
+    el.innerHTML = cells;
+  }
   function renderEdge(d) {
     // edge_validation carries an ``exchange`` venue → scope it (E3).
     const rows = venueFilter(d.edge_validation, 'exchange');
@@ -1042,7 +1060,7 @@
     renderProbeActivity(d);
   });
   T.register('performance', (d) => {
-    renderDualEquity(d); renderConfidence(d); renderBenchmark(d);
+    renderDualEquity(d); renderConfidence(d); renderBenchmark(d); renderGateValue(d);
     renderVenueBreakdown(d);
     R.strategy(d);
     renderTickerStats(d);

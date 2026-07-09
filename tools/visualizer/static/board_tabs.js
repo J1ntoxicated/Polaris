@@ -425,6 +425,7 @@
             <svg id="eq-svg" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
             <div class="conf-strip" id="b-confidence"></div>
             <div class="conf-strip" id="b-benchmark" title="Offline deterministic replay benchmark (real OKX fee, baseline clock). 3-tier gate: relative / risk-adjusted / statistical. Edge significance on held-out bars."></div>
+            <div class="conf-strip" id="b-gate-value" title="G3/G4 gate-kill counterfactual value, per (gate × regime) — SELECT-only, /debate evidence, NEVER auto-applied. Positive separation = the gate correctly discriminates (kills losers, passes winners). ⚠ = the gate killed signals that would have WON (anti-edge /debate candidate)."></div>
           </div>
         </div>
         <!-- Jin 2026-06-26 (v2): the 6 breakdowns are FULL-WIDTH collapsible one-

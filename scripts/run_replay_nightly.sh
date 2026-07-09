@@ -11,8 +11,10 @@
 # This wrapper is the missing scheduled caller.
 #
 # Override: POLARIS_REPLAY_DB / POLARIS_REPLAY_INTERVAL / POLARIS_REPLAY_DAYS /
-#           POLARIS_REPLAY_INSTRUMENTS (space-separated venue:symbol) /
-#           POLARIS_REPLAY_TRIALS
+#           POLARIS_REPLAY_INSTRUMENTS (space-separated venue:symbol, pins an
+#           exact list) / POLARIS_REPLAY_TOP_N (no pinned list -> replay the
+#           top-N most-liquid ACTIVE universe instruments, DB-driven — no
+#           hardcoded symbol default) / POLARIS_REPLAY_TRIALS
 set -e
 
 POLARIS_DIR="/Users/jinyoon/Projects/Polaris"
@@ -20,7 +22,8 @@ DB="${POLARIS_REPLAY_DB:-data/polaris_live.sqlite}"
 INTERVAL="${POLARIS_REPLAY_INTERVAL:-1H}"
 DAYS="${POLARIS_REPLAY_DAYS:-30}"
 TRIALS="${POLARIS_REPLAY_TRIALS:-7}"
-INSTRUMENTS="${POLARIS_REPLAY_INSTRUMENTS:-okx:BTC-USDT okx:ETH-USDT okx:ADA-USDT}"
+TOP_N="${POLARIS_REPLAY_TOP_N:-3}"
+INSTRUMENTS="${POLARIS_REPLAY_INSTRUMENTS:-}"
 
 cd "$POLARIS_DIR"
 
@@ -32,12 +35,21 @@ if [ -z "$END_TS" ] || [ "$END_TS" = "" ]; then
 fi
 START_TS=$((END_TS - DAYS * 24 * 3600))
 
-echo "run_replay_nightly: $INTERVAL window $START_TS..$END_TS instruments=[$INSTRUMENTS]"
+# No pinned POLARIS_REPLAY_INSTRUMENTS -> let run_replay itself resolve the
+# top-N most-liquid ACTIVE universe instruments from the live DB (Layer 0
+# dynamic universe; no hardcoded venue:symbol default in this script).
+if [ -n "$INSTRUMENTS" ]; then
+  INSTRUMENT_ARGS=(--instruments $INSTRUMENTS)
+  echo "run_replay_nightly: $INTERVAL window $START_TS..$END_TS instruments=[$INSTRUMENTS] (pinned)"
+else
+  INSTRUMENT_ARGS=(--top-n-active "$TOP_N")
+  echo "run_replay_nightly: $INTERVAL window $START_TS..$END_TS top-$TOP_N active by vol_24h_usd (DB-driven)"
+fi
 python3 -m polaris.scripts.run_replay \
   --db "$DB" \
   --read-model-db "$DB" \
   --interval "$INTERVAL" \
-  --instruments $INSTRUMENTS \
+  "${INSTRUMENT_ARGS[@]}" \
   --start-ts "$START_TS" \
   --end-ts "$END_TS" \
   --trials "$TRIALS"

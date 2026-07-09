@@ -500,6 +500,43 @@ class ConfidencePanel:
 
 
 @dataclass(slots=True)
+class GateKillValueRow:
+    """One (gate_id × cohort/regime) counterfactual-value row for the EDGE tab.
+
+    Sourced from ``gate_kill_value.compute_kill_value_hints`` (07-08 BUILD) —
+    the ``gate_kill_counterfactuals`` (07-02) self-refreshing ``fwd_r_24h``
+    aggregated per gate × regime. ``mean_killed_fwd_r`` / ``mean_passed_fwd_r``
+    are fee-adjusted (``fwd_r_24h - cost_r``). ``separation`` =
+    ``mean_passed_fwd_r - mean_killed_fwd_r`` (positive = the gate correctly
+    discriminates). ``anti_edge=True`` flags ``mean_killed_fwd_r > 0`` — the
+    gate killed signals that would have WON — a ``/debate`` CANDIDATE only;
+    display-only, never wired to any live gate threshold."""
+
+    gate_id: int
+    cohort: str
+    n_killed: int
+    n_passed: int
+    mean_killed_fwd_r: float
+    mean_passed_fwd_r: float
+    separation: float
+    anti_edge: bool
+
+
+@dataclass(slots=True)
+class GateKillValuePanel:
+    """G3/G4 gate-kill counterfactual value rollup — EDGE tab, /debate evidence.
+
+    ``present=False`` when no ``(gate_id, cohort)`` group clears the
+    stratified sample floor (graceful zero). ``auto_apply`` is always
+    ``False`` — this panel can only ever be READ by a human / ``/debate``,
+    never by a live gate/sizing/exit decision."""
+
+    present: bool = False
+    auto_apply: bool = False
+    rows: list[GateKillValueRow] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class SinceResetRollup:
     """Forward-edge rollup since the LATEST measurement reset (Jin 2026-06-23).
 
@@ -825,3 +862,8 @@ class DashboardSnapshot:
     virtual_session_pnl_usd: float = 0.0
     virtual_session_trades: int = 0
     virtual_since_reset: SinceResetRollup | None = None
+    # G3/G4 gate-kill counterfactual value panel (07-08 BUILD) — EDGE tab,
+    # /debate evidence surface only (see GateKillValuePanel docstring).
+    # dataclasses.asdict serializes it for the web snapshot. Graceful zero
+    # (present=False) when no cohort clears the stratified sample floor.
+    gate_kill_value: GateKillValuePanel = field(default_factory=GateKillValuePanel)

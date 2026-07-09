@@ -8,11 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from polaris.core.data.fill_normalizer import Fill
-from polaris.core.data.fills_persist import persist_fill, read_recent_fills
+from polaris.core.data.fills_persist import read_recent_fills
 from polaris.core.data.ingest import update_baseline_from_bars
 from polaris.core.data.schema import Bar
-from polaris.scripts.dashboard_v0 import _read_recent_fills
 from polaris.storage.schema import init_db
 
 # ---------------------------------------------------------------------------
@@ -208,73 +206,6 @@ def test_baseline_recompute_uses_batch_max_ts(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P1-5 — dashboard orders fallback queries existing columns only
-# ---------------------------------------------------------------------------
-
-
-def test_dashboard_orders_fallback_does_not_crash_on_real_schema(
-    tmp_path: Path,
-) -> None:
-    """The orders DDL has no ``qty`` / ``side`` column. Insert an orders row
-    via the real schema and verify _read_recent_fills returns the fallback
-    rows (rather than silently swallowing a missing-column error)."""
-    db_path = tmp_path / "polaris.sqlite"
-    conn = init_db(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO orders
-                (order_id, venue, symbol, strategy_id, order_key, status,
-                 payload_hash, created_ts, updated_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("o1", "okx", "BTC-USDT", "vb", "key1", "submitted",
-             "h", 1_700_000_000, 1_700_000_001),
-        )
-        rows = _read_recent_fills(conn)
-        assert len(rows) == 1
-        assert rows[0]["source"] == "orders"
-        assert rows[0]["status"] == "submitted"
-        assert rows[0]["order_key"] == "key1"
-    finally:
-        conn.close()
-
-
-def test_dashboard_prefers_fills_when_present(tmp_path: Path) -> None:
-    db_path = tmp_path / "polaris.sqlite"
-    conn = init_db(db_path)
-    try:
-        # Insert one fill row.
-        persist_fill(
-            conn,
-            Fill(
-                venue="okx",
-                instrument_id="okx:ETH-USDT",
-                strategy_id="tsmom",
-                side="buy",
-                size_usd=20.0,
-                fill_price=3_000.0,
-                fee_usd=0.02,
-                slippage_bps=2.0,
-                ts_ms=1_700_000_005_000,
-                order_id="ord1",
-            ),
-            is_close=False,
-        )
-        rows = _read_recent_fills(conn)
-        assert rows[0]["source"] == "fills"
-        assert rows[0]["symbol"] == "ETH-USDT"
-        assert rows[0]["size_usd"] == 20.0
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Sanity: read_recent_fills helper still works through dry-run round-trip
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Round-2 P1 — close-leg exceptions surface ``step`` + ``open_fill_id``
 # ---------------------------------------------------------------------------
 
@@ -286,7 +217,6 @@ async def test_okx_close_leg_exception_returns_step_and_open_fill_id(
     """Exception during the close leg must surface ``step`` + ``open_fill_id``
     so the caller can resume / dispatch the orphaned position. Codex round-2 P1."""
     import polaris.scripts._smoke_real_roundtrip as mod
-    from polaris.core.data.fill_normalizer import Fill
     from polaris.scripts._smoke_real_roundtrip import run_okx_round_trip
 
     monkeypatch.setenv("OKX_DEMO_API_KEY", "fake")
@@ -357,8 +287,6 @@ async def test_okx_close_leg_exception_returns_step_and_open_fill_id(
             "SELECT COUNT(*) FROM fills WHERE is_close = 1"
         ).fetchone()[0]
         assert n_close == 0
-        # Suppress unused-import warning for Fill (used by other tests).
-        _ = Fill
     finally:
         conn.close()
 

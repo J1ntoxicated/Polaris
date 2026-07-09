@@ -4,7 +4,6 @@ Spec source:
 - vault/_NOW.md (P0 Day 7 watchdog scope)
 - ``polaris/scripts/ignite_p1.py`` (boot contract)
 - ``polaris/scripts/smoke_paper_loop.py`` (tick body)
-- ``polaris/scripts/dashboard_v0.py`` (5 s refresh sample)
 - ``polaris/venues/{okx,capital}/`` (auth surfaces)
 - ``polaris/core/isolation/{worker,circuit_breaker}`` (strategy isolation)
 - ``polaris/core/learners/scheduler.py`` (hourly trigger)
@@ -64,7 +63,6 @@ from polaris.core.isolation.worker import (
 )
 from polaris.core.learners import LearnerScheduler
 from polaris.scripts._smoke_gpt_stub import StubGPTClient
-from polaris.scripts.dashboard_v0 import collect_snapshot
 from polaris.scripts.ignite_p1 import ignite
 from polaris.scripts.smoke_paper_loop import (
     FocusEntry,
@@ -334,37 +332,6 @@ def test_make_fill_id_is_stable_per_phase() -> None:
     assert open_id != close_id
     assert open_id.endswith(":open")
     assert close_id.endswith(":close")
-
-
-# ---------------------------------------------------------------------------
-# 5. Dashboard 5 s refresh — read-only snapshot consistency
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_dashboard_5s_refresh_consistency(tmp_path: Path) -> None:
-    """Two snapshots ≥0.5 s apart against an idle DB must agree on counts."""
-    db = tmp_path / "polaris.sqlite"
-    conn = init_db(db)
-    try:
-        for i in range(3):
-            persist_fill(conn, _make_test_fill(order_id=f"d{i}"), is_close=False)
-    finally:
-        conn.close()
-    snap_a = collect_snapshot(db)
-    await asyncio.sleep(0.5)
-    snap_b = collect_snapshot(db)
-    assert len(snap_a.recent_fills) == len(snap_b.recent_fills) == 3
-    assert snap_a.daily_pnl_usd == snap_b.daily_pnl_usd
-    assert snap_a.universe_focus_count == snap_b.universe_focus_count
-
-
-def test_dashboard_target_refresh_is_5_seconds() -> None:
-    from polaris.scripts.dashboard_v0 import DEFAULT_REFRESH_SEC
-
-    assert DEFAULT_REFRESH_SEC == 5.0
-    expected_24h_frames = int(24 * 60 * 60 / DEFAULT_REFRESH_SEC)
-    assert expected_24h_frames == 17280
 
 
 # ---------------------------------------------------------------------------
@@ -751,15 +718,6 @@ async def test_24h_readiness_composite_exercises_all_layers(
     with sqlite3.connect(db) as conn:
         n_fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     assert n_fills > 0, "paper-mode loop persisted zero fills"
-
-    # --- Dashboard snapshot is well-typed (codex R2 P1-3 fix: replace
-    # vacuous `cell_total >= 0` with concrete structure assertions).
-    snap = collect_snapshot(db)
-    assert set(snap.cell_dist.keys()) == {"top", "mid", "bottom"}
-    assert all(isinstance(v, int) for v in snap.cell_dist.values())
-    assert isinstance(snap.daily_pnl_usd, float)
-    assert isinstance(snap.recent_fills, list)
-    assert isinstance(snap.universe_focus_count, int)
 
     # --- Vault writes landed inside the isolated dir
     tmp_log = (isolated_vault / "vault" / "log.md").read_text()

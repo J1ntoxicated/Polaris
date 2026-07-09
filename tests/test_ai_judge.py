@@ -276,7 +276,9 @@ def test_size_up_does_not_touch_strength_scalar() -> None:
     assert res.payload["ai_judge_size_up_intent"] is True
 
 
-def test_refine_timing_is_one_shot_flag() -> None:
+def test_refine_timing_is_flow_passthrough() -> None:
+    # Inert one-shot payload stamp removed (dead telemetry, zero consumers);
+    # REFINE_TIMING remains a pure flow-through verdict.
     det = _det_pass()
     outcome = JudgeOutcome(
         verdict=EntryJudgeVerdict.REFINE_TIMING.value,
@@ -284,7 +286,7 @@ def test_refine_timing_is_one_shot_flag() -> None:
         escalation_reason="gpt_ok",
     )
     res = apply_entry_verdict(outcome, deterministic_result=det, mode=AI_JUDGE_MODE_ACTIVE)
-    assert res.payload["ai_judge_refine_timing"]["one_shot"] is True
+    assert "ai_judge_refine_timing" not in res.payload
     assert res.decision == GateDecision.PASS  # still flows
 
 

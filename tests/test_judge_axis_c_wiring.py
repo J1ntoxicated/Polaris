@@ -175,15 +175,16 @@ def _det_pass() -> GateResult:
     )
 
 
-def test_refine_timing_stamps_one_shot() -> None:
+def test_refine_timing_is_flow_passthrough() -> None:
+    # REFINE_TIMING carried an inert one-shot payload stamp (no consumer ever
+    # read it); removed as dead telemetry. The verdict still flows unchanged.
     out = JudgeOutcome(
         verdict=EntryJudgeVerdict.REFINE_TIMING.value,
         deterministic=GateDecision.PASS, escalation_reason="t",
     )
     res = apply_entry_verdict(out, deterministic_result=_det_pass(), mode=AI_JUDGE_MODE_ACTIVE)
     assert res.decision == GateDecision.PASS  # flow unchanged
-    assert res.payload["ai_judge_refine_timing"]["one_shot"] is True
-    assert "ttl_sec" in res.payload["ai_judge_refine_timing"]
+    assert "ai_judge_refine_timing" not in res.payload
 
 
 def test_strengthen_evidence_stamps_annotation_only() -> None:

@@ -196,17 +196,6 @@ CREATE TABLE IF NOT EXISTS ticker_technicals (
 );
 """
 
-DDL_MARKET_EVENTS = """
-CREATE TABLE IF NOT EXISTS market_events (
-    ts INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    venue TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    PRIMARY KEY (ts, type, venue, symbol)
-);
-"""
-
 # Hot-path indexes for universe reads.
 DDL_UNIVERSE_INDEX_ACTIVE = """
 CREATE INDEX IF NOT EXISTS idx_universe_active_venue
@@ -426,27 +415,6 @@ CREATE TABLE IF NOT EXISTS positions (
 DDL_POSITIONS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_positions_strategy_status
     ON positions(strategy_id, status);
-"""
-
-DDL_ORDERS = """
-CREATE TABLE IF NOT EXISTS orders (
-    order_id TEXT PRIMARY KEY,
-    venue TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    strategy_id TEXT NOT NULL,
-    order_key TEXT NOT NULL,
-    venue_client_id TEXT,
-    venue_order_id TEXT,
-    status TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
-    created_ts INTEGER NOT NULL DEFAULT 0,
-    updated_ts INTEGER NOT NULL DEFAULT 0
-);
-"""
-
-DDL_ORDERS_INDEX = """
-CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_strategy_order_key
-    ON orders(strategy_id, order_key);
 """
 
 DDL_RISK_EVENTS = """

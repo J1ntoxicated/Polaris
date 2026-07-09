@@ -50,7 +50,6 @@ __all__ = [
     "size_up_boost",
     "extend_atr",
     "tighten_atr",
-    "refine_ttl_sec",
 ]
 
 # ---------------------------------------------------------------------------
@@ -122,11 +121,6 @@ def extend_atr() -> float:
 def tighten_atr() -> float:
     """C TIGHTEN — ATR-step the tighten REQUEST pulls the stop closer (rail binds)."""
     return _env_float("POLARIS_JUDGE_TIGHTEN_ATR", 0.5)
-
-
-def refine_ttl_sec() -> float:
-    """C REFINE_TIMING — one-shot time-box before the entry proceeds at market."""
-    return _env_float("POLARIS_JUDGE_REFINE_TTL_SEC", 5.0)
 
 
 # ---------------------------------------------------------------------------

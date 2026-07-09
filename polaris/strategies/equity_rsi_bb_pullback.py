@@ -19,6 +19,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -49,7 +50,7 @@ class EquityRSIBBPullbackStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="equity_rsi_bb_pullback",
-        timeframe="1D",
+        timeframe=virtual_loosen("1H", "1D"),
         warmup_bars=TREND_FILTER_MA + 5,
         max_positions=4,
         gross_cap=0.18,

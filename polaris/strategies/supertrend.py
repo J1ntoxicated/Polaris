@@ -156,7 +156,7 @@ class SupertrendStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="supertrend",
-        timeframe="1H",
+        timeframe=virtual_loosen("15m", "1H"),
         warmup_bars=ATR_PERIOD + 5,
         max_positions=3,
         gross_cap=0.20,

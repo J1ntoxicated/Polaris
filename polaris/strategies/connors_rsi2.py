@@ -100,7 +100,7 @@ class ConnorsRSI2Strategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="connors_rsi2",
-        timeframe="1D",
+        timeframe=virtual_loosen("1H", "1D"),
         warmup_bars=TREND_FILTER_MA + 5,
         max_positions=4,
         gross_cap=0.18,

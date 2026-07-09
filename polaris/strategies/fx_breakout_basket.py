@@ -74,7 +74,7 @@ class FXBreakoutBasketStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="fx_breakout_basket",
-        timeframe="1H",
+        timeframe=virtual_loosen("15m", "1H"),
         warmup_bars=WINDOW + 5,
         max_positions=5,
         gross_cap=0.36,

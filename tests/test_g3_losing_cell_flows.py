@@ -159,7 +159,7 @@ async def test_ai_free_missing_raw_signal_still_kills() -> None:
 
 
 # ===========================================================================
-# (b) micro-structure KILL preserved — G4 crossed / stale book (NOT loss-block)
+# (b) crossed-book KILL preserved; stale-book downgraded to FLAG (NOT loss-block)
 # ===========================================================================
 
 
@@ -170,8 +170,10 @@ def test_g4_crossed_book_kill_preserved() -> None:
     assert out.reason == "crossed_book"
 
 
-def test_g4_stale_book_kill_preserved() -> None:
+def test_g4_stale_book_downgraded_to_flag() -> None:
+    """Stale-vs-fallback-bound is a FLAG on PROCEED (flow_not_block), not KILL."""
     inp = G4ShadowInputs(best_bid=100.0, best_ask=100.1, last_tick_age_sec=120.0)
     out = technical_watch_decision(inp)
-    assert out.decision == GateDecision.KILL
-    assert out.reason == "stale_book"
+    assert out.decision == GateDecision.PROCEED
+    assert out.reason == "proceed_flagged"
+    assert "stale_book" in out.flags

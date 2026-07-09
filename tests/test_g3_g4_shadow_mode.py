@@ -8,8 +8,9 @@ These tests pin the AI-conductor P0 SHADOW contract (ai_conductor_architecture_
 - G3 NEVER blocks entry on a cell being "losing" (flow_not_block): a cold cell
   passes through ("모호하면 통과"); a losing cell flows (PASS) or gets a
   conservative MODIFY trim. The technical rule raises NO entry-block KILL.
-- G4 PROCEED default; KILL ONLY on stale/crossed book; spread/drift = flag (NOT
-  KILL); realized-vol NEVER kills (codex BLOCKING — "expanding=기회").
+- G4 PROCEED default; KILL ONLY on crossed book; stale book (per-ticker median
+  tick-interval baseline, safe global fallback when absent) / spread / drift =
+  flag (NOT KILL); realized-vol NEVER kills (codex BLOCKING — "expanding=기회").
 - net_edge_r is NEVER read by either technical rule (codex BLOCKING).
 - Shadow log row captures technical_decision / gpt_decision / mismatch flag +
   cell_warm + regime so the acceptance gate can analyse by regime / warm.
@@ -196,18 +197,47 @@ def test_g4_crossed_book_kill() -> None:
     assert out.decision == GateDecision.KILL
 
 
-def test_g4_stale_book_kill() -> None:
-    """last tick far older than freshness bound → stale → KILL."""
+def test_g4_stale_book_flags_not_kill_no_baseline() -> None:
+    """No per-ticker baseline → falls back to the fixed bound → FLAG, not KILL."""
     inp = G4ShadowInputs(
         best_bid=100.0,
         best_ask=100.1,
-        last_tick_age_sec=120.0,  # very stale
+        last_tick_age_sec=120.0,  # very stale vs the STALE_TICK_MAX_SEC fallback
         spread_bps=10.0,
         baseline_p50_spread_bps=8.0,
         drift_bps=0.0,
     )
     out = technical_watch_decision(inp)
-    assert out.decision == GateDecision.KILL
+    assert out.decision == GateDecision.PROCEED
+    assert "stale_book" in out.flags
+
+
+def test_g4_low_cadence_symbol_normal_tick_proceeds_clean() -> None:
+    """A low-cadence symbol's own baseline absorbs a tick that would've been
+    stale under the old flat 60s bound — no flag at all (good signal, not
+    KILLed)."""
+    inp = G4ShadowInputs(
+        best_bid=100.0,
+        best_ask=100.1,
+        last_tick_age_sec=70.0,  # > old flat STALE_TICK_MAX_SEC=60s
+        baseline_p50_tick_interval_sec=90.0,  # this symbol normally ticks ~90s
+    )
+    out = technical_watch_decision(inp)
+    assert out.decision == GateDecision.PROCEED
+    assert not out.flags
+
+
+def test_g4_stale_relative_to_tight_baseline_flags() -> None:
+    """A fast-cadence symbol well past ITS OWN baseline → FLAG, not KILL."""
+    inp = G4ShadowInputs(
+        best_bid=100.0,
+        best_ask=100.1,
+        last_tick_age_sec=100.0,
+        baseline_p50_tick_interval_sec=10.0,  # ticks ~every 10s normally
+    )
+    out = technical_watch_decision(inp)
+    assert out.decision == GateDecision.PROCEED
+    assert "stale_book" in out.flags
 
 
 def test_g4_wide_spread_flags_not_kill() -> None:

@@ -31,7 +31,12 @@ from polaris.core.replay.models import ReplayConfig
 from polaris.scripts._production_indicators import build_real_market_view
 from polaris.storage.schema import ALL_DDL
 from polaris.strategies import STRATEGY_REGISTRY
-from polaris.strategies.base import BaseStrategy
+from polaris.strategies.base import AltDataView, BarView, BaseStrategy, MarketView
+from polaris.strategies.capital_macro_riskoff_catalyst import (
+    CapitalMacroRiskoffCatalystStrategy,
+)
+from polaris.strategies.cfd_fx_range_fade_short import CFDFXRangeFadeShortStrategy
+from polaris.strategies.okx_funding_carry_persist import OKXFundingCarryPersistStrategy
 from polaris.strategies.session_breakout import SessionBreakoutStrategy
 from polaris.strategies.spot_donchian import SpotDonchianStrategy
 from polaris.strategies.tsmom import TSMOMStrategy
@@ -57,6 +62,19 @@ def _bar(
         bar_interval=interval, ts=BASE_TS + i * HOUR, open=o, high=h, low=lo,
         close=c, volume=vol, notional_usd=c * vol, spread_bps_close=4.0, source="test",
     )
+
+
+def _flat_bar_views(n: int, *, close: float) -> list[BarView]:
+    """``n`` identical flat BarViews — a warmup-satisfying MarketView.bars for
+    an altdata-only strategy (funding/vix/hy_spread), which reads no
+    bar-derived indicator (BG3 archetype-track entry-set tests below)."""
+    return [
+        BarView(
+            ts=BASE_TS + i * HOUR, open=close, high=close * 1.001,
+            low=close * 0.999, close=close, volume=1000.0,
+        )
+        for i in range(n)
+    ]
 
 
 def _replay_trade_set(
@@ -160,9 +178,33 @@ def _rsi_dip_bars(*, iid: str, venue: str, sym: str, interval: str) -> list[Bar]
     return out
 
 
+def _fx_range_fade_short_bars(*, iid: str, venue: str, sym: str) -> list[Bar]:
+    """1H range-then-overshoot cycles (BG3 archetype track). The phase-6 step is
+    trimmed (0.0135 vs the normal 0.015) just enough that the phase-6 bar stays
+    UNDER the rolling BB-upper; the phase-7 bar is then the FIRST bar each cycle
+    to pierce it, landing at ADX~20.09 -- straddling the adx_range_max grid
+    endpoints (20.0 blocks: 20.09>=20.0; 30.0 admits). Empirically tuned against
+    ``build_real_market_view`` (see BG3 archetype design notes)."""
+    out: list[Bar] = []
+    p = 1.1000
+    period = 20
+    for i in range(period * 3):
+        phase = i % period
+        step = (0.0135 if phase == 6 else 0.015) if phase < 13 else -0.012
+        nxt = p * (1 + step)
+        h = max(p, nxt) * 1.001
+        lo = min(p, nxt) * 0.999
+        out.append(_bar(i, p, h, lo, nxt, 1000.0, iid=iid, venue=venue, sym=sym, interval="1H"))
+        p = nxt
+    return out
+
+
 # (strategy_id, knob) -> (strategy_cls, bars, interval). Covers EVERY replay-firing
-# knob in PARAM_BOUNDS. session_breakout (atr_mult) is tested separately (cannot
-# fire through the generic replay engine).
+# knob in PARAM_BOUNDS. session_breakout (atr_mult) / okx_funding_carry_persist
+# (funding_threshold) / capital_macro_riskoff_catalyst (vix_threshold,
+# hy_spread_threshold) are tested separately (altdata-driven knobs never fire
+# through the generic replay engine -- build_real_market_view never populates
+# altdata in the engine's bar loop, same reason session_breakout is separate).
 def _replay_knob_cases() -> list[tuple[str, str, list[Bar], str]]:
     return [
         ("volume_burst", "vol_z_threshold", _volume_burst_bars(), "1m"),
@@ -173,6 +215,8 @@ def _replay_knob_cases() -> list[tuple[str, str, list[Bar], str]]:
          _adx_trend_bars(iid="capital:EURUSD", venue="capital", sym="EURUSD", base=1.1), "1H"),
         ("rsi_bb_pullback", "rsi_threshold",
          _rsi_dip_bars(iid="okx:BTC-USDT", venue="okx", sym="BTC-USDT", interval="1H"), "1H"),
+        ("cfd_fx_range_fade_short", "adx_range_max",
+         _fx_range_fade_short_bars(iid="capital:EURUSD", venue="capital", sym="EURUSD"), "1H"),
     ]
 
 
@@ -190,10 +234,12 @@ def test_retained_knob_changes_trade_set_in_replay(
     # volume_burst (#61 live-churn KILL) + spot_donchian (#56 stop-bleeders KILL)
     # were un-registered 2026-06-27 but their modules + offline grids are preserved
     # read-only, so resolve them from the module when the live registry no longer
-    # carries them.
+    # carries them. cfd_fx_range_fade_short is a BG3 archetype-track thesis-first
+    # base class PENDING the P0a honest-N gate -- never registered at all yet.
     unregistered: dict[str, type[BaseStrategy]] = {
         "volume_burst": VolumeBurstStrategy,
         "spot_donchian": SpotDonchianStrategy,
+        "cfd_fx_range_fade_short": CFDFXRangeFadeShortStrategy,
     }
     if strategy_id in unregistered:
         cls: type[BaseStrategy] = unregistered[strategy_id]
@@ -259,6 +305,98 @@ def test_session_breakout_atr_mult_changes_entry_set() -> None:
     assert lo != hi  # the atr_mult level changes the entry set
 
 
+def test_okx_funding_carry_persist_threshold_changes_entry_set() -> None:
+    """okx_funding_carry_persist reads MarketView.altdata, which the generic
+    replay engine never populates (build_real_market_view's engine call omits
+    altdata entirely — same reason session_breakout is exercised separately),
+    so funding_threshold is exercised at the entry-SET level: a representative
+    funding-print sweep where the strict grid endpoint (-0.0005) admits FEWER
+    prints than the loose endpoint (-0.0001)."""
+    bars = _flat_bar_views(25, close=100.0)  # >= WARMUP_BARS (24); no indicator use
+
+    def entry_set(threshold: float) -> frozenset[float]:
+        var = make_variant(OKXFundingCarryPersistStrategy, {"funding_threshold": threshold})
+        fired: set[float] = set()
+        for funding in (
+            -0.0008, -0.0007, -0.0006, -0.00045, -0.0004, -0.00035, -0.0002, -0.00005,
+        ):
+            mv = MarketView(
+                symbol="BTC-USDT", venue="okx", timeframe="1H", bars=bars,
+                last_price=100.0, spread_bps=2.0,
+                altdata=AltDataView(funding_rate_symbol=funding),
+            )
+            if var.generate_raw_signal(mv) is not None:
+                fired.add(funding)
+        return frozenset(fired)
+
+    grid = PARAM_BOUNDS["okx_funding_carry_persist"]["funding_threshold"]
+    lo = entry_set(grid[0])   # strict: -0.0005
+    hi = entry_set(grid[-1])  # loose: -0.0001
+    assert len(lo) >= 2 and len(hi) >= 2  # both admit real prints
+    assert lo != hi  # the threshold level changes the entry set
+    assert lo < hi  # strict is a STRICT subset (never MORE permissive)
+
+
+def test_capital_macro_riskoff_vix_threshold_changes_entry_set() -> None:
+    """capital_macro_riskoff_catalyst reads MarketView.altdata (vix/hy_spread),
+    same altdata-never-populates-through-replay reason as the funding carry
+    knob above, so vix_threshold is exercised at the entry-SET level: hy_spread
+    held fixed above its own threshold throughout, a VIX-print sweep where the
+    strict grid endpoint (28.0) admits FEWER prints than the loose endpoint
+    (24.0)."""
+    bars = _flat_bar_views(5, close=2000.0)  # >= WARMUP_BARS (5); no indicator use
+
+    def entry_set(threshold: float) -> frozenset[float]:
+        var = make_variant(CapitalMacroRiskoffCatalystStrategy, {"vix_threshold": threshold})
+        fired: set[float] = set()
+        for vix in (35.0, 30.0, 27.0, 25.0, 22.0):
+            mv = MarketView(
+                symbol="GOLD", venue="capital", timeframe="1H", bars=bars,
+                last_price=2000.0, spread_bps=2.0,
+                altdata=AltDataView(vix=vix, hy_spread=600.0),
+            )
+            if var.generate_raw_signal(mv) is not None:
+                fired.add(vix)
+        return frozenset(fired)
+
+    grid = PARAM_BOUNDS["capital_macro_riskoff_catalyst"]["vix_threshold"]
+    lo = entry_set(grid[-1])  # strict: 28.0
+    hi = entry_set(grid[0])   # loose: 24.0
+    assert len(lo) >= 2 and len(hi) >= 2
+    assert lo != hi
+    assert lo < hi
+
+
+def test_capital_macro_riskoff_hy_spread_threshold_changes_entry_set() -> None:
+    """Same altdata-entry-SET rationale as the sibling VIX test above, for the
+    2nd knob: vix held fixed above its own threshold throughout, an HY-spread
+    sweep where the strict grid endpoint (550.0 bps) admits FEWER prints than
+    the loose endpoint (450.0 bps)."""
+    bars = _flat_bar_views(5, close=2000.0)  # >= WARMUP_BARS (5); no indicator use
+
+    def entry_set(threshold: float) -> frozenset[float]:
+        var = make_variant(
+            CapitalMacroRiskoffCatalystStrategy, {"hy_spread_threshold": threshold}
+        )
+        fired: set[float] = set()
+        for hy in (650.0, 570.0, 520.0, 470.0, 420.0):
+            mv = MarketView(
+                symbol="GOLD", venue="capital", timeframe="1H", bars=bars,
+                last_price=2000.0, spread_bps=2.0,
+                altdata=AltDataView(vix=35.0, hy_spread=hy),
+            )
+            if var.generate_raw_signal(mv) is not None:
+                fired.add(hy)
+        return frozenset(fired)
+
+    grid = PARAM_BOUNDS["capital_macro_riskoff_catalyst"]["hy_spread_threshold"]
+    lo = entry_set(grid[-1])  # strict: 550.0
+    hi = entry_set(grid[0])   # loose: 450.0
+    assert len(lo) >= 2 and len(hi) >= 2
+    assert lo != hi
+    assert lo < hi
+
+
 # ---------------------------------------------------------------------------
 # The inert-proof: the REMOVED knobs do NOT change the trade set (the no-op
 # that slipped through before — varying ttl_bars / momentum_gain via a direct
@@ -305,7 +443,12 @@ def test_momentum_gain_is_sizing_only_same_trade_set() -> None:
 
 _REPLAY_FIRING_KNOBS = {
     (s, k) for s, k, _b, _i in _replay_knob_cases()
-} | {("session_breakout", "atr_mult")}
+} | {
+    ("session_breakout", "atr_mult"),
+    ("okx_funding_carry_persist", "funding_threshold"),
+    ("capital_macro_riskoff_catalyst", "vix_threshold"),
+    ("capital_macro_riskoff_catalyst", "hy_spread_threshold"),
+}
 
 
 def test_fix3_covers_every_param_bounds_knob() -> None:

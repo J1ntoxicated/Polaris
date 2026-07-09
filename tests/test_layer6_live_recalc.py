@@ -10,6 +10,8 @@ import asyncio
 import sqlite3
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from polaris.core.live_recalc import (
     CONVICTION_LAYER_MULTS,
@@ -26,10 +28,12 @@ from polaris.core.live_recalc import (
     evaluate_strategy_swap,
     fetch_regime,
     mark_position_dirty,
+    mark_positions_dirty,
     recompute_exit_params,
     run_live_recalc_cycle,
     should_run_recalc,
 )
+from polaris.storage.schema_ddl_ext import DDL_POSITION_LIVE_RECALC_STATE
 
 # ---------------------------------------------------------------------------
 # tick_recalc — dirty trigger + 5s cadence
@@ -87,6 +91,110 @@ def test_run_live_recalc_cycle_async(memdb: sqlite3.Connection) -> None:
     )
     assert len(out) == 2
     assert all(r.decision == "would_recalc" for r in out)
+
+
+# ---------------------------------------------------------------------------
+# mark_positions_dirty — batch form (writer-migration-completion design #3):
+# hoists per-position dirty marks out of the recalc sweep loop, collapsing
+# N lock acquisitions into 1 multi-row INSERT/COMMIT.
+# ---------------------------------------------------------------------------
+
+
+def _recalc_state_snapshot(conn: sqlite3.Connection) -> dict[str, tuple[str | None, int | None, int]]:
+    rows = conn.execute(
+        "SELECT position_id, dirty_reason, dirty_ts, last_check_ts "
+        "FROM position_live_recalc_state"
+    ).fetchall()
+    return {r[0]: (r[1], r[2], r[3]) for r in rows}
+
+
+def test_mark_positions_dirty_equivalent_to_individual_calls(
+    memdb: sqlite3.Connection,
+) -> None:
+    """N batched marks == N individual mark_position_dirty calls, including
+    within-batch duplicate position_id -> most-recent (last) entry wins."""
+    entries = [
+        ("p1", "reason_a", 100),
+        ("p2", "reason_b", 100),
+        ("p1", "reason_c", 200),  # duplicate p1 — must win over reason_a
+    ]
+    for position_id, reason, ts in entries:
+        mark_position_dirty(memdb, position_id=position_id, reason=reason, now_ts=ts)
+    individual = _recalc_state_snapshot(memdb)
+
+    memdb.execute("DELETE FROM position_live_recalc_state")
+    mark_positions_dirty(memdb, entries)
+    batched = _recalc_state_snapshot(memdb)
+
+    assert batched == individual
+    # most-recent (last) entry's dirty_reason/dirty_ts wins for a duplicate
+    # position_id — last_check_ts is untouched by ON CONFLICT (only set on
+    # the row's first insert), matching mark_position_dirty's own semantics.
+    assert batched["p1"] == ("reason_c", 200, 100)
+
+
+def test_mark_positions_dirty_read_your_writes(memdb: sqlite3.Connection) -> None:
+    """Same-conn SELECT sees every mark immediately after the flush call."""
+    entries = [("p1", "tick_5s_g6", 100), ("p2", "tick_5s_g6", 100), ("p3", "tick_5s_g6", 100)]
+    mark_positions_dirty(memdb, entries)
+    seen = {r[0] for r in memdb.execute(
+        "SELECT position_id FROM position_live_recalc_state"
+    ).fetchall()}
+    assert seen == {"p1", "p2", "p3"}
+    state = memdb.execute(
+        "SELECT dirty_reason, dirty_ts FROM position_live_recalc_state WHERE position_id='p2'"
+    ).fetchone()
+    assert state == ("tick_5s_g6", 100)
+
+
+def test_mark_positions_dirty_empty_entries_is_noop(memdb: sqlite3.Connection) -> None:
+    mark_positions_dirty(memdb, [])  # must not raise / must not touch the table
+    count = memdb.execute("SELECT COUNT(*) FROM position_live_recalc_state").fetchone()[0]
+    assert count == 0
+
+
+def test_mark_positions_dirty_single_insert_statement(memdb: sqlite3.Connection) -> None:
+    """Collapses N lock acquisitions into 1 — asserted via exactly one INSERT
+    statement issued for an N-row batch (not a loop of N single-row inserts)."""
+    statements: list[str] = []
+    memdb.set_trace_callback(lambda sql: statements.append(sql))
+    try:
+        mark_positions_dirty(
+            memdb,
+            [(f"p{i}", "tick_5s_g6", 100) for i in range(10)],
+        )
+    finally:
+        memdb.set_trace_callback(None)
+    insert_stmts = [s for s in statements if s.strip().upper().startswith("INSERT")]
+    assert len(insert_stmts) == 1
+
+
+@given(
+    entries=st.lists(
+        st.tuples(
+            st.sampled_from(["p1", "p2", "p3", "p4"]),
+            st.text(alphabet="abcde", min_size=1, max_size=6),
+            st.integers(min_value=1, max_value=10_000),
+        ),
+        min_size=0, max_size=15,
+    ),
+)
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_mark_positions_dirty_repeated_flush_idempotent(
+    entries: list[tuple[str, str, int]],
+) -> None:
+    """Flushing the SAME batch twice in a row is idempotent (final state
+    equals a single flush) — each example gets its own isolated in-memory DB."""
+    conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+    conn.execute(DDL_POSITION_LIVE_RECALC_STATE)
+    try:
+        mark_positions_dirty(conn, entries)
+        once = _recalc_state_snapshot(conn)
+        mark_positions_dirty(conn, entries)
+        twice = _recalc_state_snapshot(conn)
+        assert once == twice
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

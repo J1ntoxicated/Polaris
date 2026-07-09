@@ -158,6 +158,10 @@ class DBWriter:
         self.batches_committed = 0
         self.batch_failures = 0
         self.checkpoints_truncated = 0
+        # Rolling max BEGIN->COMMIT hold time (ms) — instrumentation for the
+        # busy_timeout sizing decision (writer-migration-completion design):
+        # batch-hold time was previously unmeasured (counters only).
+        self.batch_commit_ms_max = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -273,6 +277,7 @@ class DBWriter:
         # (a future can only be resolved once).
         conn = self._conn
         assert conn is not None
+        start_mono = time.monotonic()
         try:
             conn.execute("BEGIN")
         except sqlite3.Error as exc:
@@ -289,6 +294,14 @@ class DBWriter:
                 conn.execute("ROLLBACK")
             self._fail_batch(batch, exc)
             return
+        # Pure observability (writer-migration-completion design #1): the
+        # BEGIN->COMMIT hold time was previously unmeasured — this is the
+        # evidence the busy_timeout sizing decision depends on. No behaviour
+        # or counter semantics change.
+        duration_ms = (time.monotonic() - start_mono) * 1000.0
+        if duration_ms > self.batch_commit_ms_max:
+            self.batch_commit_ms_max = duration_ms
+        logger.debug("[db_writer] batch %d jobs %.1fms", len(batch), duration_ms)
         for job, err in zip(batch, outcomes, strict=True):
             if job.future is None:
                 continue

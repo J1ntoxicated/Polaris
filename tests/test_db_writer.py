@@ -19,6 +19,7 @@ writer lock and produces ``database is locked`` storms. §7 test plan:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -317,6 +318,109 @@ def test_queue_full_drops_never_crashes(tmp_path: object) -> None:
     w.stop(timeout=10)
     assert dropped_any
     assert w.jobs_dropped > 0
+
+
+# ---------------------------------------------------------------------------
+# 6. batch-commit timing instrumentation (writer-migration-completion design
+#    §"Per-file change spec" #1 — pure observability, fills the unmeasured
+#    batch-hold-time gap the busy_timeout sizing decision depends on).
+# ---------------------------------------------------------------------------
+
+
+def test_commit_batch_logs_duration_and_tracks_max(
+    tmp_path: object, caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = tmp_path / "timing.sqlite"  # type: ignore[operator]
+    _make_table(db)
+    w = DBWriter(db, batch_max=8, drain_ms=5)
+    w.start()
+    caplog.set_level(logging.DEBUG, logger="polaris.storage.db_writer")
+    n_jobs = 5
+    futures: list[Future[None]] = []
+    for i in range(n_jobs):
+        def _job(conn: sqlite3.Connection, i: int = i) -> None:
+            conn.execute("INSERT INTO t (thread, seq) VALUES (0, ?)", (i,))
+        fut = w.submit(_job, durable=True)
+        assert fut is not None
+        futures.append(fut)
+    for fut in futures:
+        fut.result(timeout=5)  # regression: futures still resolve post-COMMIT
+    w.stop()
+
+    # regression: counter behaviour unchanged by the added instrumentation.
+    assert w.batches_committed >= 1
+    assert w.batch_failures == 0
+
+    duration_records = [
+        r for r in caplog.records
+        if r.name == "polaris.storage.db_writer"
+        and r.getMessage().startswith("[db_writer] batch ")
+    ]
+    assert duration_records, "expected a post-COMMIT batch duration debug log"
+    total_jobs_logged = 0
+    for rec in duration_records:
+        msg = rec.getMessage()
+        # "[db_writer] batch <n> jobs <ms>ms"
+        parts = msg.split()
+        assert parts[3] == "jobs"
+        total_jobs_logged += int(parts[2])
+        assert parts[4].endswith("ms")
+        float(parts[4][:-2])  # duration parses as a float
+    assert total_jobs_logged == n_jobs
+    assert w.batch_commit_ms_max >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# 7. adversarial — db_writer batch load + 1 direct writer under contention.
+#    busy_timeout must arbitrate: the direct writer SUCCEEDS (retries within
+#    the timeout), never raises OperationalError. A failure here means the
+#    collision class is immediate SQLITE_BUSY_SNAPSHOT (timeout can't fix it)
+#    and the design decision escalates to broader coalescing.
+# ---------------------------------------------------------------------------
+
+
+def test_direct_writer_survives_dbwriter_batch_contention(tmp_path: object) -> None:
+    db = tmp_path / "contend.sqlite"  # type: ignore[operator]
+    _make_table(db)
+    w = DBWriter(db, batch_max=32, drain_ms=5, ckpt_sec=3600)
+    w.start()
+    stop_flooding = threading.Event()
+
+    def _flood() -> None:
+        seq = 0
+        while not stop_flooding.is_set():
+            def _job(conn: sqlite3.Connection, s: int = seq) -> None:
+                conn.execute("INSERT INTO t (thread, seq) VALUES (1, ?)", (s,))
+            w.submit(_job)
+            seq += 1
+
+    flooder = threading.Thread(target=_flood)
+    flooder.start()
+    try:
+        # A direct RW connection outside DBWriter — same busy_timeout PRAGMA
+        # path as loop/focus conns (connect()) per the design's structural
+        # arbiter. Must NOT raise while DBWriter is mid-flood.
+        direct = connect(db)
+        errors: list[Exception] = []
+        for i in range(20):
+            try:
+                direct.execute("BEGIN IMMEDIATE")
+                direct.execute(
+                    "INSERT INTO t (thread, seq) VALUES (2, ?)", (i,)
+                )
+                direct.execute("COMMIT")
+            except sqlite3.OperationalError as exc:
+                errors.append(exc)
+                with pytest_suppress():
+                    direct.execute("ROLLBACK")
+        direct.close()
+    finally:
+        stop_flooding.set()
+        flooder.join(timeout=10)
+        w.stop()
+    assert errors == [], (
+        f"direct writer hit OperationalError under busy_timeout arbitration: {errors}"
+    )
 
 
 # ---------------------------------------------------------------------------

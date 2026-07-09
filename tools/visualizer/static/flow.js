@@ -6,16 +6,28 @@
  * reused (SSE subscribe shape, TTL-cached stat poll, botlog tail) but this file
  * owns its own canvas + draw loop so /flow never depends on the globe booting.
  *
+ * Jin 2026-07-10 (feat/visual-wall-director): /flow is now the bottom ~45%
+ * pane of the combined visual-wall page (globe on top) instead of the whole
+ * viewport — the layout constants below are pane-relative, not full-screen.
+ * This file also renders the pts-classes river annotations (PROVE-class
+ * dotted entry particles, EARN/BENCH transition badges, per-strategy score_F
+ * window gauges, "NEW CANDIDATE" universe-admission flash) sourced from the
+ * same /api/flow_stats payload's new `classes` / `survivor_admissions_recent`
+ * fields. The director camera/warp/killcam/kill-feed overlay lives in the
+ * separate wall.js (own canvas, own SSE connection — no coupling here).
+ *
  * Data:
  *   /api/flow_stats  (30s TTL, matches the server cache) → per-gate 1h volume +
  *                     venue breakdown, fills volume, drop-lane reasons, AI-judge
- *                     shadow mismatches + recent verdicts, conversion summary.
+ *                     shadow mismatches + recent verdicts, conversion summary,
+ *                     pts-classes routing state, recent universe admissions.
  *   /stream/events    (SSE, live) → fills (entry/exit, carries real `exchange`)
  *                     drive the honest per-venue-lane particles; the gate-decision
  *                     channel (no reliable per-venue field on that lightweight
  *                     event) drives a neutral "spine" activity particle instead
  *                     of guessing a venue lane.
  *   /api/botlog       (poll ~3s) → condensed mini ticker (index.html pattern).
+ *   /api/snapshot     (poll ~5s) → equity/today-net for the bottom ticker.
  *
  * Display-only. Nothing here issues, sizes, gates or throttles a trade — the
  * drop lane is measurement honesty (same precedent as the globe's kill-sediment
@@ -65,8 +77,12 @@
   window.addEventListener('resize', fit);
 
   // ── Layout: stage x-coords + venue lane y-coords + drop-lane y ───────────
-  const MARGIN_X = 60;
-  const LANE_TOP = 172;  // clears both the column-header row and the left venue legend
+  // Jin 2026-07-10: this canvas now fills a ~45vh pane (not the full
+  // viewport, see flow.html's .river-pane) — LANE_TOP/bottomReserve are
+  // retuned to that pane's compact header/footer strips, not full-page ones.
+  const MARGIN_X = 50;
+  const LANE_TOP = 80;      // clears col-headers + the venue-legend/verdict-ticker row
+  const BOTTOM_RESERVE = 92; // drop panel + class-gauge strip + margin
   let colX = [];
   let laneY = {};
   let dropY = 0;
@@ -76,12 +92,12 @@
     const n = STAGES.length;
     const usable = Math.max(100, W - 2 * MARGIN_X);
     colX = STAGES.map((_, i) => MARGIN_X + (n > 1 ? (i * usable) / (n - 1) : 0));
-    const bottomReserve = 210; // drop panel + botlog pane + margin
-    const laneBottom = Math.max(LANE_TOP + 120, H - bottomReserve);
+    const laneBottom = Math.max(LANE_TOP + 60, H - BOTTOM_RESERVE);
     const laneSpan = laneBottom - LANE_TOP;
     VENUES.forEach((v, i) => { laneY[v] = LANE_TOP + (laneSpan * 0.62) * (i / (VENUES.length - 1 || 1)); });
     dropY = LANE_TOP + laneSpan;
     renderHeaders();
+    if (window.PolarisFlowClasses) window.PolarisFlowClasses.setColX(colX);
   }
 
   function renderHeaders() {
@@ -96,6 +112,8 @@
   // ── Live stat state (from /api/flow_stats, 30s TTL — matches server cache) ─
   let stats = null;
   let statsByGate = {};
+  let classByKey = {};   // "venue|strategy_id" -> {strategy_class, window_w, filled}
+  const classKey = (venue, sid) => venue + '|' + sid;
   function stageTotal(s) {
     if (!stats) return 0;
     if (s.id === 'fills') return (stats.fills && stats.fills.total) || 0;
@@ -118,6 +136,8 @@
       stats = d;
       statsByGate = {};
       for (const g of d.stages || []) statsByGate[g.gate_id] = g;
+      classByKey = {};
+      for (const c of d.classes || []) classByKey[classKey(c.venue, c.strategy_id)] = c;
       renderHeaders();
       renderSummary(d);
       renderDrops(d);
@@ -126,6 +146,10 @@
       for (const v of d.verdicts_recent || []) {
         if (v.ts > prevVerdictTs) spawnVerdictPulse(v);
       }
+      // pts-classes river annotations (gauge strip / EARN·BENCH badge pop /
+      // NEW CANDIDATE flash) — split into flow_classes.js to keep this file
+      // under the file-size cap; owns its own classByKey copy for diffing.
+      if (window.PolarisFlowClasses) window.PolarisFlowClasses.onStatsPoll(d);
     } catch (e) { /* display-only — keep last frame */ }
   }
 
@@ -178,12 +202,24 @@
     return (Math.min(...ys) + Math.max(...ys)) / 2;
   }
 
-  function spawnFillParticle(exchange, fromId, toId, color) {
+  function spawnFillParticle(exchange, fromId, toId, color, opts) {
     const gx = exchangeToVenue(exchange);
     const i0 = gateColIndex(fromId), i1 = gateColIndex(toId);
     if (i0 < 0 || i1 < 0) return;
     const y = laneY[gx] != null ? laneY[gx] : gateCenterY();
-    particles.push({ x0: colX[i0], y0: y, x1: colX[i1], y1: y, t: 0, dur: 0.9, color, r: 3.2 });
+    const dotted = !!(opts && opts.dotted);
+    particles.push({
+      x0: colX[i0], y0: y, x1: colX[i1], y1: y, t: 0, dur: 0.9, color,
+      r: dotted ? 2.0 : 3.2, dotted,
+    });
+  }
+  // PROVE-class tracks (still capital-limited, unproven) render their entry
+  // particle smaller/dotted so the river visually distinguishes them from an
+  // EARN-class fill — measurement only, never a block/throttle (flow_not_block).
+  function isProveClass(exchange, strategyId) {
+    const gx = exchangeToVenue(exchange);
+    const c = classByKey[gx + '|' + strategyId];
+    return !!(c && c.strategy_class === 'PROVE');
   }
   function spawnSpineParticle(gid) {
     const i1 = gateColIndex(gid);
@@ -316,6 +352,17 @@
       if (p.t >= 1) { particles.splice(k, 1); continue; }
       const x = lerp(p.x0, p.x1, p.t), y = lerp(p.y0, p.y1, p.t);
       const a = p.spine ? 0.5 * (1 - p.t * 0.3) : 0.95;
+      // PROVE-class entries trail a faint dashed line behind the (smaller)
+      // head dot — visually distinct from an EARN-class fill without a new
+      // hue (measurement, not a block/throttle).
+      if (p.dotted) {
+        ctx.save();
+        ctx.setLineDash([2, 3]);
+        ctx.strokeStyle = rgba(p.color, a * 0.5);
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(p.x0, p.y0); ctx.lineTo(x, y); ctx.stroke();
+        ctx.restore();
+      }
       const gr = ctx.createRadialGradient(x, y, 0, x, y, p.r * 2.2);
       gr.addColorStop(0, rgba(p.color, a));
       gr.addColorStop(1, rgba(p.color, 0));
@@ -335,7 +382,8 @@
       try { payload = JSON.parse(ev.data); } catch (e) { return; }
       for (const e of payload.events || []) {
         if (e.type === 'entry') {
-          spawnFillParticle(e.exchange, 5, 'fills', [0xf2, 0xf6, 0xff]);
+          const dotted = isProveClass(e.exchange, e.strategy_id);
+          spawnFillParticle(e.exchange, 5, 'fills', [0xf2, 0xf6, 0xff], { dotted });
         } else if (e.type === 'exit') {
           const pnl = parseFloat(e.pnl_usd) || 0;
           const col = pnl >= 0 ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87];
@@ -363,7 +411,9 @@
     if (m) return `<div class="bl-line ${cls}"><span class="ts">${esc(m[1])}</span> ${esc(m[2])}</div>`;
     return `<div class="bl-line ${cls}">${esc(line)}</div>`;
   }
-  const LOG_TAIL_N = 8;
+  // Jin 2026-07-10: the wall's bottom ticker is a slim 3-line strip (the
+  // globe pane above it now owns most of the vertical budget) — was 8.
+  const LOG_TAIL_N = 3;
   async function pollLog() {
     const body = document.getElementById('botlog-body');
     if (!body) return;
@@ -377,12 +427,42 @@
     } catch (e) { /* keep last frame */ }
   }
 
+  // ── Bottom ticker: equity / today-net (VIRTUAL ledger, the dashboard's
+  // primary mode per Jin 2026-07-07) — same /api/snapshot fields + aggregate
+  // pattern board.js's virtualKpiHtml/streams table already use. ───────────
+  function fmtUsd(v) {
+    if (v == null || isNaN(v)) return '–';
+    const sign = v < 0 ? '-' : '';
+    return sign + '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  }
+  async function pollEquity() {
+    try {
+      const r = await fetch('/api/snapshot?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      const equity = (d.streams || []).reduce(
+        (a, s) => a + (s.virtual_equity_usd != null ? s.virtual_equity_usd : (s.virtual_seed_usd || 0)), 0
+      );
+      const today = d.virtual_daily_pnl_usd;
+      const eqEl = document.getElementById('bl-equity');
+      const todayEl = document.getElementById('bl-today');
+      if (eqEl) eqEl.textContent = fmtUsd(equity);
+      if (todayEl) {
+        todayEl.textContent = fmtUsd(today);
+        todayEl.classList.toggle('pos', today > 0);
+        todayEl.classList.toggle('neg', today < 0);
+      }
+    } catch (e) { /* keep last frame */ }
+  }
+
   // ── Boot ──────────────────────────────────────────────────────────────
   fit();
   pollStats();
   setInterval(pollStats, 30000);   // matches the server's flow_stats TTL
   pollLog();
   setInterval(pollLog, 3000);
+  pollEquity();
+  setInterval(pollEquity, 5000);
   connectStream();
   requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
 })();

@@ -313,15 +313,27 @@ def _latest_fill_ts() -> int:
 
 
 def _fills_since(since_ms: int) -> list[dict[str, Any]]:
-    """New fills (ts_ms > since_ms) as SSE entry/exit events."""
+    """New fills (ts_ms > since_ms) as SSE entry/exit events.
+
+    Exit events carry ``strategy_id`` + ``r_multiple`` (the visual-wall kill
+    feed's "strategy ▸ SYM +0.09R" line) — ``r_multiple`` is the SAME
+    canonical risk-unit R the ticker/strategy dashboard panels use
+    (``positions.pnl_r`` via ``fills.contribution_id == positions.position_id``,
+    same lookup shape as ``snapshot_sections._pnl_r_by_contribution``). A fill
+    with no matched closed position (legacy/smoke data) reports ``None`` —
+    the client falls back to a $-only kill-feed line rather than a fake R.
+    """
     if not _DB_PATH.exists():
         return []
     try:
         conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
         try:
             rows = conn.execute(
-                "SELECT venue, instrument_id, strategy_id, side, pnl_usd, "
-                "is_close, ts_ms FROM fills WHERE ts_ms > ? ORDER BY ts_ms ASC",
+                "SELECT f.venue, f.instrument_id, f.strategy_id, f.side, "
+                "f.pnl_usd, f.is_close, f.ts_ms, p.pnl_r "
+                "FROM fills f LEFT JOIN positions p "
+                "ON p.position_id = f.contribution_id AND p.status = 'closed' "
+                "WHERE f.ts_ms > ? ORDER BY f.ts_ms ASC",
                 (since_ms,),
             ).fetchall()
         finally:
@@ -329,7 +341,7 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
     except sqlite3.Error:
         return []
     events: list[dict[str, Any]] = []
-    for venue, instrument_id, strategy_id, side, pnl_usd, is_close, ts_ms in rows:
+    for venue, instrument_id, strategy_id, side, pnl_usd, is_close, ts_ms, pnl_r in rows:
         ticker = str(instrument_id).split(":")[-1].split("-")[0]
         direction = "long" if str(side).lower() in ("buy", "long") else "short"
         if int(is_close):
@@ -339,8 +351,10 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
                     "ticker": ticker,
                     "direction": direction,
                     "exit_type": "EXIT",
+                    "strategy_id": str(strategy_id),
                     "pnl_usd": float(pnl_usd or 0.0),
                     "pnl_pct": 0.0,
+                    "r_multiple": float(pnl_r) if pnl_r is not None else None,
                     "exchange": str(venue)[:3].lower(),
                     "ts": int(ts_ms),
                 }

@@ -7,11 +7,17 @@ the only structurally-terminal ``GateDecision`` members, see
 ``polaris/core/pipeline/gate_state.py``; this is measurement honesty, the
 same precedent as the globe's kill-sediment motes — NOT a new throttle,
 nothing here blocks/sizes a trade), AI-judge shadow mismatches
-(``gate_shadow_events``), recent AI-judge verdicts (mini ticker), and a
-header conversion-rate summary (signals -> sized -> fills). Every query is
-read-only (``gate_events`` / ``gate_shadow_events`` / ``positions`` /
-``signals`` / ``fills``); a missing table or bad row degrades to the empty
-shape rather than raising (display-only, never breaks the poll).
+(``gate_shadow_events``), recent AI-judge verdicts (mini ticker), a
+header conversion-rate summary (signals -> sized -> fills), pts-classes
+routing state (``strategy_class`` — PROVE/EARN/BENCH + score_F window fill,
+for the visual-wall river's class particles/badges/gauges), and recent
+``survivor_admissions`` rows (universe-candidate admissions; the table does
+not exist yet as of this writing, so this degrades to an empty list —
+fail-safe, not a hard dependency). Every query is read-only (``gate_events``
+/ ``gate_shadow_events`` / ``positions`` / ``signals`` / ``fills`` /
+``strategy_class`` / ``survivor_admissions``); a missing table or bad row
+degrades to the empty shape rather than raising (display-only, never breaks
+the poll).
 """
 
 from __future__ import annotations
@@ -102,6 +108,60 @@ def _pct(numer: int, denom: int) -> float:
     return round(100.0 * numer / denom, 1) if denom else 0.0
 
 
+def _decode_ring(raw: Any) -> list[float]:
+    """Best-effort JSON-array decode (mirrors
+    ``polaris.core.lifecycle.recover_classes._decode_ring``, duplicated here
+    rather than imported to keep this display-only module's coupling at the
+    ``polaris.scripts.dashboard`` layer only)."""
+    try:
+        value = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return list(value) if isinstance(value, list) else []
+
+
+def _class_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Per-(venue, strategy_id) pts-classes routing state: current class
+    (EARN/PROVE/BENCH/KILL) + a score_F window-fill fraction (``filled`` of
+    ``window_w``, from the live ``intent_ring`` sample count). Feeds the flow
+    page's PROVE-class particle styling, EARN/BENCH transition badges, and
+    the per-strategy window gauge strip. Missing table -> empty (pre-
+    pts-classes DBs)."""
+    rows = _safe_query(
+        conn,
+        "SELECT venue, strategy_id, strategy_class, window_w, intent_ring "
+        "FROM strategy_class",
+    )
+    out: list[dict[str, Any]] = []
+    for venue, strategy_id, klass, window_w, intent_ring_json in rows:
+        w = int(window_w or 0)
+        filled = min(len(_decode_ring(intent_ring_json)), w) if w else 0
+        out.append({
+            "venue": str(venue), "strategy_id": str(strategy_id),
+            "strategy_class": str(klass or "PROVE"),
+            "window_w": w, "filled": filled,
+        })
+    return out
+
+
+def _survivor_admissions_recent(conn: sqlite3.Connection, *, since: int) -> list[dict[str, Any]]:
+    """Recent Layer-0 universe-candidate admissions ("NEW CANDIDATE" flash on
+    the river's G1 column). ``survivor_admissions`` is a forward-looking table
+    (not yet created by any writer as of this module's authoring) — the query
+    degrades to ``[]`` via ``_safe_query`` until it lands, which is the
+    intended fail-safe (spec: flash only if the table exists)."""
+    rows = _safe_query(
+        conn,
+        "SELECT symbol, venue, admitted_ts FROM survivor_admissions "
+        "WHERE admitted_ts > ? ORDER BY admitted_ts DESC LIMIT ?",
+        (since, _TOP_DROPS_N),
+    )
+    return [
+        {"symbol": str(sym), "venue": str(venue), "ts": int(ts or 0)}
+        for sym, venue, ts in rows
+    ]
+
+
 def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     """Assemble the ``/api/flow_stats`` payload (read-only, degrade-never-crash)."""
     since = now_s - FLOW_WINDOW_SEC
@@ -178,6 +238,8 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
 
     top_drops = sorted(drop_reasons.items(), key=lambda kv: -kv[1])[:_TOP_DROPS_N]
     verdicts.sort(key=lambda v: -int(v["ts"]))
+    classes = _class_rows(conn)
+    survivor_admissions = _survivor_admissions_recent(conn, since=since)
 
     return {
         "window_sec": FLOW_WINDOW_SEC,
@@ -195,6 +257,8 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
         ],
         "shadow_mismatch_n": shadow_n,
         "verdicts_recent": verdicts[:_VERDICTS_N],
+        "classes": classes,
+        "survivor_admissions_recent": survivor_admissions,
         "summary": {
             "signals_n": signals_n, "sized_n": sized_n, "fills_n": fills_n,
             "signal_to_sized_pct": _pct(sized_n, signals_n),

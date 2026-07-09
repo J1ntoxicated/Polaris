@@ -7,6 +7,7 @@ sizing/risk/orders; every table read is read-only synthetic in-memory SQLite.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from tools.visualizer import flow_data as fd
@@ -190,3 +191,72 @@ def test_graceful_on_missing_tables() -> None:
     out = fd.build_flow_stats(conn, now_s=NOW)
     assert len(out["stages"]) == 8
     assert out["fills"]["total"] == 0
+    # pts-classes / survivor_admissions tables absent -> empty, never crash
+    # (visual-wall director-mode backend extension, 2026-07-10).
+    assert out["classes"] == []
+    assert out["survivor_admissions_recent"] == []
+
+
+def _memdb_with_classes() -> sqlite3.Connection:
+    conn = _memdb()
+    conn.executescript(
+        """
+        CREATE TABLE strategy_class (
+            venue TEXT, strategy_id TEXT, strategy_class TEXT,
+            window_w INTEGER, intent_ring TEXT
+        );
+        """
+    )
+    return conn
+
+
+def test_classes_reports_class_and_window_fill() -> None:
+    conn = _memdb_with_classes()
+    conn.execute(
+        "INSERT INTO strategy_class VALUES "
+        "('okx', 'donchian55', 'PROVE', 20, '[1.0, -0.5, 2.0]')"
+    )
+    conn.execute(
+        "INSERT INTO strategy_class VALUES "
+        "('capital', 'connors_rsi2', 'EARN', 20, ?)",
+        (json.dumps([0.1] * 25),),  # ring longer than window_w -> capped
+    )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    by_id = {c["strategy_id"]: c for c in out["classes"]}
+    assert by_id["donchian55"] == {
+        "venue": "okx", "strategy_id": "donchian55",
+        "strategy_class": "PROVE", "window_w": 20, "filled": 3,
+    }
+    assert by_id["connors_rsi2"]["filled"] == 20  # capped at window_w
+
+
+def test_classes_empty_when_table_absent() -> None:
+    conn = _memdb()  # no strategy_class table
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    assert out["classes"] == []
+
+
+def test_survivor_admissions_recent_empty_when_table_absent() -> None:
+    conn = _memdb()  # no survivor_admissions table
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    assert out["survivor_admissions_recent"] == []
+
+
+def test_survivor_admissions_recent_reads_when_table_present() -> None:
+    conn = _memdb()
+    conn.executescript(
+        "CREATE TABLE survivor_admissions "
+        "(symbol TEXT, venue TEXT, admitted_ts INTEGER);"
+    )
+    conn.execute(
+        "INSERT INTO survivor_admissions VALUES ('SOL-USDT', 'okx', ?)",
+        (NOW - 5,),
+    )
+    conn.execute(  # stale (outside the 1h window) -> excluded
+        "INSERT INTO survivor_admissions VALUES ('OLD-USDT', 'okx', ?)",
+        (NOW - fd.FLOW_WINDOW_SEC - 100,),
+    )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    assert out["survivor_admissions_recent"] == [
+        {"symbol": "SOL-USDT", "venue": "okx", "ts": NOW - 5}
+    ]

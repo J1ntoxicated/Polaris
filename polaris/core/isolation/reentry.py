@@ -22,7 +22,8 @@ every 5 minutes. The flat default below stays as the env-overridable fallback
 for callers without a timeframe.
 
 VIRTUAL ACCOUNT (Jin 2026-07-09): :func:`reentry_cooldown_seconds` applies a
-virtual-only loosening factor to the re-entry cooldown WINDOW. ``bar_seconds``
+virtual-only loosening factor to the re-entry cooldown WINDOW (default 0.25x,
+env-overridable via ``POLARIS_VIRTUAL_COOLDOWN_FACTOR``). ``bar_seconds``
 itself stays a byte-identical physical-bar primitive — it is shared by
 ``exit_params.hold_frac_for_timeframe`` (1D/intraday classification),
 ``loser_timeout`` (drift-backstop floor + cap-exempt boundary), and
@@ -30,6 +31,15 @@ itself stays a byte-identical physical-bar primitive — it is shared by
 cooldown and none of which may be scaled by this factor (a prior REJECTed
 attempt scaled ``bar_seconds`` itself and silently mis-classified a virtual 1D
 position as intraday — 43200s < the 86400s daily threshold).
+
+SLOT CAP (2026-07-09, 676 ``concurrent_same_side_open`` skips/day observed):
+:data:`TAILORED_CAP_CEILING` — the SLOT COUNT a proven-edge key's concurrent
+same-side cap widens to — is now 3 in VIRTUAL mode (vs the pre-existing 2 in
+REAL, byte-identical). Only the slot COUNT moves; the win-rate floor
+(:data:`TAILORED_CAP_WIN_RATE_FLOOR`) and the ``CS3_N_THRESHOLD`` sample-size
+gate a name must clear before it earns the extra slot are untouched — a
+thin-sample or weak-edge key still caps at 1 in either mode. No per-symbol
+notional cap, -1R rail, or sizing multiplier is read or altered here.
 """
 
 from __future__ import annotations
@@ -92,6 +102,22 @@ def bar_seconds(timeframe: str) -> int:
     return _BAR_SECONDS.get(timeframe, _DEFAULT_COOLDOWN_SEC)
 
 
+# Relocated ABOVE the factor computation below (was previously defined only
+# once, further down, alongside ``_env_int``) — the virtual cooldown factor
+# needs it at module-import time, before ``_COOLDOWN_FACTOR`` is resolved.
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+_ENV_VIRTUAL_COOLDOWN_FACTOR: Final[str] = "POLARIS_VIRTUAL_COOLDOWN_FACTOR"
+_DEFAULT_VIRTUAL_COOLDOWN_FACTOR: Final[float] = 0.25
+
 # VIRTUAL ACCOUNT (Jin 2026-07-09): the re-entry cooldown WINDOW is a TIME-axis
 # guard only (no caps/sizing touched) — virtual has no real capital/fees, so the
 # window may loosen (never a defensive dampen: this is a widen-from-1.0
@@ -103,16 +129,28 @@ def bar_seconds(timeframe: str) -> int:
 # NEVER inside ``bar_seconds`` itself, which stays a shared physical-bar
 # primitive for the other three consumers listed on its docstring.
 _VIRTUAL: Final[bool] = os.environ.get("POLARIS_VIRTUAL_ACCOUNT", "0") == "1"
-_COOLDOWN_FACTOR: Final[float] = 0.5 if _VIRTUAL else 1.0
+
+# Concurrent-same-side skip pressure (2026-07-09, 676 skips/day observed): the
+# flat 0.5x virtual factor still left a re-entry cooling for half a physical
+# bar — dead air in a mode with no real capital/fee cost to protect against.
+# POLARIS_VIRTUAL_COOLDOWN_FACTOR widens the default to 0.25x (env-overridable
+# for ops tuning); REAL is UNCHANGED — the ``else 1.0`` branch never consults
+# this env var, so a real run stays byte-identical no matter how the env is set.
+_COOLDOWN_FACTOR: Final[float] = (
+    _env_float(_ENV_VIRTUAL_COOLDOWN_FACTOR, _DEFAULT_VIRTUAL_COOLDOWN_FACTOR)
+    if _VIRTUAL
+    else 1.0
+)
 
 
 def reentry_cooldown_seconds(timeframe: str) -> int:
     """Re-entry cooldown WINDOW for ``timeframe`` — the ONLY virtual-scaled seam.
 
     REAL (``POLARIS_VIRTUAL_ACCOUNT`` unset/``0``): byte-identical to
-    :func:`bar_seconds` (factor 1.0). VIRTUAL (``=1``): halved (factor 0.5) so
-    a virtual-mode duplicate-open suppression window loosens without touching
-    the shared physical-bar primitive any other module reads.
+    :func:`bar_seconds` (factor 1.0). VIRTUAL (``=1``): quartered by default
+    (factor 0.25, env-overridable via ``POLARIS_VIRTUAL_COOLDOWN_FACTOR``) so a
+    virtual-mode duplicate-open suppression window loosens without touching the
+    shared physical-bar primitive any other module reads.
     """
     return int(bar_seconds(timeframe) * _COOLDOWN_FACTOR)
 
@@ -262,19 +300,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+# ``_env_float`` is defined above (before ``_COOLDOWN_FACTOR``) — reused here,
+# not redefined.
 
-
-# Controlled scale-in ceiling — never uncontrolled (2 is the widen-from-1 step;
-# raising it further is a /debate-scoped decision, not a code default).
-TAILORED_CAP_CEILING: Final[int] = _env_int(_ENV_TAILORED_CAP_CEILING, 2)
+# Controlled scale-in ceiling — never uncontrolled. REAL stays the existing
+# widen-from-1 step of 2 (byte-identical — untouched). VIRTUAL (2026-07-09,
+# concurrent_same_side_open skip pressure — 676 skips/day observed) widens
+# further to 3: reuses the existing ``_VIRTUAL`` flag rather than importing a
+# scripts-layer ``virtual_loosen`` helper into core (core→scripts layering
+# stays clean, same precedent as ``_COOLDOWN_FACTOR`` above). Still
+# env-overridable via ``POLARIS_TAILORED_CAP_CEILING`` for an explicit ops
+# value on either side; raising it further than that is a /debate-scoped
+# decision, not a code default.
+TAILORED_CAP_CEILING: Final[int] = _env_int(
+    _ENV_TAILORED_CAP_CEILING, 3 if _VIRTUAL else 2
+)
 
 # A strategy's own (venue, symbol, strategy_id) win-rate must clear this floor
 # (on CS3_N_THRESHOLD+ closed trades — same SSOT as sizing's Cold-Start CS-3

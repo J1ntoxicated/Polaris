@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 from dataclasses import dataclass
 from datetime import UTC
 from typing import Any, Final
@@ -69,7 +70,25 @@ REST_TIMEOUT_SEC: Final[float] = 15.0
 # see ``CapitalAdapter``, so no entry/exit is ever paced). PRICES-ONLY: the trade
 # lifecycle is untouched (flow_not_block — a paced GET WAITS for a token, it is
 # never rejected/dropped).
-BARS_RATE: Final[int] = 8
+# 2026-07-09: env-tunable (POLARIS_CAP_BARS_RATE). The 8 req/s default proved
+# too hot once the active-trading wave widened the Capital request volume
+# (27-strategy dispatch + cci FX-major universe): live log showed 99×429/h and
+# GOLD 1m bars lagging 11min despite the tradeable-priority set. Each 429 burns
+# a retry budget that pacing-correctly would not — lowering the sustained rate
+# RAISES effective throughput when the venue is saturated. Tune via .env; the
+# code default stays 8 (behaviour-identical when the env is unset).
+def _bars_rate_env(default: int = 8) -> int:
+    raw = os.environ.get("POLARIS_CAP_BARS_RATE")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+BARS_RATE: Final[int] = _bars_rate_env()
 BARS_PER_SEC: Final[float] = 1.0
 BARS_RETRY_MAX: Final[int] = 3  # extra attempts after a 429
 BARS_RETRY_BASE_DELAY_SEC: Final[float] = 0.5  # exponential: 0.5s, 1.0s, 2.0s

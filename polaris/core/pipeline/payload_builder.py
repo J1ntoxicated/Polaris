@@ -389,11 +389,19 @@ def build_monitor_payload(
     max_loss_r: float = 1.0,
     swap_candidate: dict[str, Any] | None = None,
     stream_profile: StreamProfile | None = None,
+    conviction_stack: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose G6 payload (position + R-multiples + optional swap candidate).
 
     Gate architecture Phase 0: ``stream_profile`` is accepted (per-stream seam)
     but NOT read in P0 — output is byte-identical with or without it.
+
+    ``conviction_stack`` (optional — conviction-pyramid writer wiring,
+    vault/50_research/debates/conviction_pyramid_addon_notional_2026-07-10.md):
+    ``{cell_quartile, layer_sum_size_pct, single_trade_cap_pct, headroom_pct,
+    regime}`` for ``position_monitor_gate``'s ``conn``-gated conviction-stack
+    side-channel. Absent (default) → byte-identical (the gate's writer never
+    fires without this key).
     """
     del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     payload: dict[str, Any] = {
@@ -403,6 +411,8 @@ def build_monitor_payload(
     }
     if swap_candidate is not None:
         payload["swap_candidate"] = dict(swap_candidate)
+    if conviction_stack is not None:
+        payload["conviction_stack"] = dict(conviction_stack)
     return payload
 
 

@@ -591,8 +591,14 @@ async def _evaluate_position(
         stream_profile=stream_profile,
     )
     g6_client = gpt_client if phase == "P1" else None
+    # Conviction-pyramid writer (vault/50_research/debates/
+    # conviction_pyramid_addon_notional_2026-07-10.md): ``conn`` is threaded
+    # so the gate CAN evaluate the next-layer judgment, but it stays a no-op
+    # (byte-identical) until ``monitor_payload["conviction_stack"]`` is
+    # populated — a later dispatcher slice's responsibility (cell_quartile /
+    # layer_sum_size_pct / headroom_pct sourcing from live portfolio state).
     g6_result = await position_monitor_gate(
-        g6_ctx, client=g6_client,
+        g6_ctx, client=g6_client, conn=conn,
         call_cache=state.g6_call_cache, tick_idx=tick_idx,
     )
     log_gate_event(conn, g6_ctx, g6_result)

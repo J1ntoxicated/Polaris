@@ -86,6 +86,7 @@ from polaris.scripts._production_pipeline import (
 )
 from polaris.scripts._production_recalc import recalc_active_positions
 from polaris.scripts._production_state import ProdLoopState
+from polaris.scripts._production_tick_opposing import handle_opposing_entries
 from polaris.scripts._session_map import entry_fanout_active
 from polaris.strategies import (
     STRATEGY_REGISTRY,
@@ -1084,6 +1085,28 @@ async def _run_tick(
                         venue, symbol, strategy_id, sig.side,
                     )
                     continue
+
+                # Opposite-aware entry (Jin 2026-07-10 forensic: US500 held
+                # long x2 + short x1 — session_breakout self-hedged, flipping
+                # short on the SAME symbol 6min after going long). All the
+                # skip-checks above have passed — this entry WILL proceed, so
+                # react to a LIVE opposite-side position on (venue, symbol)
+                # NOW: SAME strategy -> close it first (exit_reason=
+                # 'signal_flip', existing close path) so the venue never
+                # carries a self-hedge; DIFFERENT strategy -> leave both open
+                # (already today's behaviour), instrumented only. NEVER
+                # blocks this entry (flow_not_block) — see
+                # ``_production_tick_opposing`` for the full contract.
+                await handle_opposing_entries(
+                    conn, state=state, venue=venue, symbol=symbol,
+                    strategy_id=strategy_id, side=sig.side, now_ts=now_ts,
+                    lookup_regime=_lookup_regime,
+                    close_specific=close_specific_position,
+                    gpt_client=haiku, phase=phase,
+                    real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+                    capital_session=capital_session,
+                    alpaca_adapter=alpaca_adapter,
+                )
 
                 # T13/H3 — PDT ranking-down (equity only; A/B no-op). When the
                 # rolling daytrade_count >= 3 this surfaces a finite, positive

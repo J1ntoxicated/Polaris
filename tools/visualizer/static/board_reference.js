@@ -382,18 +382,75 @@
   }
 
   // ── AI — GET /api/ai_activity ──────────────────────────────────────────────
-  // The truth-first AI tab. Header line states the in-loop trading AI call count
-  // (a hard 0 — W3 AI-free core: tick entry / G3 / G4 / G7 are deterministic).
-  // Below it the only two places AI IS used, neither in the trade loop: dev
-  // debates (GPT + Gemini cross-validation) and the probe escalation seam
-  // (observe-only — flagged would-escalate cases; the advisor is not built so
-  // there is no GPT answer yet). Two dense aligned tables, English, no cards.
+  // Three separate "AI" populations, kept visually distinct (Jin 2026-07-10:
+  // "the bot's AI and your (Claude's) AI are all mixed together"):
+  //   1. BOT AI      — the bot's runtime OpenAI GPT usage (gate_events +
+  //                     the #32 judge overlay + entry_admission_shadow +
+  //                     legacy dev-debates/probe-escalation feed).
+  //   2. HARNESS AI  — THIS Claude Code harness (dev-time). NOT the bot's LLM.
+  //   3. COWORK INTEL— the cowork watchlist-intel seed feed + expiry status.
+  function kvRows(obj) {
+    const entries = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return noneYet();
+    return `<div class="kv-blk">` + entries.map(([k, v]) =>
+      `<div class="kv-ln"><span class="kv-k">${esc(k)}</span><span class="kv-v">${esc(String(v))}</span></div>`
+    ).join('') + `</div>`;
+  }
   function aiHeaderHtml(n) {
     const calls = (typeof n === 'number') ? n : 0;
     return `<div class="ai-hdr">
       <span class="ai-hdr-k">In-loop trading AI</span>
       <span class="ai-hdr-v ${calls === 0 ? 'ai-zero' : ''}">${calls} calls</span>
-      <span class="ai-hdr-note">AI-free core (W3 cutover · tick entry / G3 / G4 / G7 deterministic). AI is used only for: dev debates (GPT/Gemini) + probe escalation (observe-only).</span>
+      <span class="ai-hdr-note">AI-free core (W3 cutover · tick entry / G3 / G4 / G7 deterministic decision). The #32 judge below is a non-blocking OBSERVE overlay — it never changes that decision.</span>
+    </div>`;
+  }
+  // ── section 1 · BOT AI ───────────────────────────────────────────────────
+  function gateEventsHtml(ge) {
+    ge = ge || {};
+    const total = ge.total || 0;
+    return `<div class="ref-sec">${setH(0, `gate_events · model_used (${(ge.window_h) || 24}h)`, total)}${kvRows(ge.model_used)}</div>`;
+  }
+  function judgeHtml(j) {
+    j = j || {};
+    const avgLat = (j.avg_latency_ms == null) ? '—' : Math.round(j.avg_latency_ms) + 'ms';
+    return `<div class="ref-sec">${setH(0, `#32 AI judge · G3/G4/G7 overlay (${j.window_h || 24}h)`, j.calls || 0)}
+      <div class="kv-blk">
+        <div class="kv-ln"><span class="kv-k">avg latency</span><span class="kv-v">${esc(avgLat)}</span></div>
+        <div class="kv-ln"><span class="kv-k">salvage (truncated JSON recovered)</span><span class="kv-v">${j.salvage_count || 0}</span></div>
+      </div>
+      ${(j.calls || 0) === 0 ? noneYet() : `<div class="ai-kv-2col">
+        <div><div class="kv-sub">verdicts</div>${kvRows(j.verdicts)}</div>
+        <div><div class="kv-sub">escalations</div>${kvRows(j.escalations)}</div>
+      </div>`}
+    </div>`;
+  }
+  function admissionShadowHtml(a) {
+    a = a || {};
+    const rows = a.recent || [];
+    const trs = rows.map(r => {
+      const t = r.ts ? new Date(r.ts * 1000).toISOString().slice(11, 19) : '—';
+      return `<tr>
+        <td class="l ai-date">${esc(t)}</td>
+        <td class="l">${esc(r.symbol || '—')}</td>
+        <td class="l">${esc(r.strategy_id || '—')}</td>
+        <td class="l">${esc(r.regime || '—')}</td>
+        <td class="l ${r.would_suppress ? 'ai-dec' : ''}">${r.would_suppress ? 'SUPPRESS' : 'admit'}</td>
+        <td class="l ai-q" title="${esc(r.reason || '')}">${esc(r.reason || '—')}</td>
+      </tr>`;
+    }).join('');
+    const tbl = rows.length ? `<table class="ai-tbl"><colgroup>
+        <col style="width:8%"><col style="width:14%"><col style="width:16%">
+        <col style="width:14%"><col style="width:14%"><col style="width:34%">
+       </colgroup><thead><tr>
+        <th class="l">TIME</th><th class="l">SYMBOL</th><th class="l">STRATEGY</th>
+        <th class="l">REGIME</th><th class="l">DECISION</th><th class="l">REASON</th>
+      </tr></thead><tbody>${trs}</tbody></table>` : noneYet();
+    return `<div class="ref-sec">${setH(0, `entry admission shadow (${(a.total != null) ? '24h' : ''})`, a.total || 0)}
+      <div class="kv-blk">
+        <div class="kv-ln"><span class="kv-k">admit</span><span class="kv-v">${a.admit || 0}</span></div>
+        <div class="kv-ln"><span class="kv-k">would suppress</span><span class="kv-v">${a.would_suppress || 0}</span></div>
+      </div>
+      ${tbl}
     </div>`;
   }
   function debatesTable(rows) {
@@ -443,29 +500,101 @@
         <th class="l">TIME</th><th class="l">GATE</th><th class="l">CASE</th><th class="l">STATUS</th>
       </tr></thead><tbody>${trs}</tbody></table></div>`;
   }
+  function botAiHtml(bot) {
+    bot = bot || {};
+    const dc = collapseStateDefaultClosed('pb.collapse.ai-debates');
+    return `<div class="ai-sec-wrap">
+      ${setH(0, '1 · BOT AI · runtime · OpenAI GPT', null)}
+      ${aiHeaderHtml(bot.in_loop_ai_calls)}
+      ${gateEventsHtml(bot.gate_events)}
+      ${judgeHtml(bot.judge)}
+      ${admissionShadowHtml(bot.entry_admission_shadow)}
+      <div class="ai-fold collapsible${dc.cls}" data-collapse-key="pb.collapse.ai-debates">
+        <div class="ai-fold-h collapse-toggle" role="button" tabindex="0" aria-expanded="${dc.aria}">
+          <span class="chev" aria-hidden="true"></span>
+          <span class="ai-fold-t">debates · GPT / Gemini cross-validation</span>
+          <span class="ai-fold-n">${(bot.debates || []).length}</span>
+        </div>
+        <div class="ai-fold-b">${debatesTable(bot.debates)}</div>
+      </div>
+      <div class="ai-scroll">${escalationsTable(bot.probe_escalations)}</div>
+    </div>`;
+  }
+  // ── section 2 · HARNESS AI (Claude, dev-time — NOT the bot's LLM) ───────
+  function harnessAiHtml(h) {
+    h = h || {};
+    const models = h.models || [];
+    const waves = h.recent_waves || [];
+    const modelsTbl = models.length ? `<table class="ai-tbl"><colgroup>
+        <col style="width:34%"><col style="width:22%"><col style="width:22%"><col style="width:22%">
+       </colgroup><thead><tr>
+        <th class="l">MODEL</th><th class="l">TURNS</th><th class="l">OUT TOK</th><th class="l">LAST SEEN</th>
+      </tr></thead><tbody>${models.map(m => `<tr>
+        <td class="l ai-topic">${esc(m.model || '—')}</td>
+        <td class="l">${(m.turns || 0).toLocaleString()}</td>
+        <td class="l">${(m.out_tok || 0).toLocaleString()}</td>
+        <td class="l ai-date">${esc(shortDate(m.last_seen))}</td>
+      </tr>`).join('')}</tbody></table>` : noneYet();
+    const wavesHtml = waves.length
+      ? `<div class="ref-log">` + waves.slice().reverse().map(w => `<div class="lg" title="${esc(w)}">${esc(w)}</div>`).join('') + `</div>`
+      : noneYet();
+    return `<div class="ai-sec-wrap">
+      ${setH(0, '2 · HARNESS AI · dev · Claude', null)}
+      <div class="ai-hdr"><span class="ai-hdr-note ai-harness-note">${esc(h.label || "Claude harness (dev) — not the bot's LLM")}</span></div>
+      <div class="ref-sec">${setH(0, 'model usage (top 4 by turns)', models.length)}${modelsTbl}</div>
+      <div class="ref-sec">${setH(0, 'recent waves · vault/log.md', waves.length)}${wavesHtml}</div>
+    </div>`;
+  }
+  // ── section 3 · COWORK INTEL (feed) ─────────────────────────────────────
+  function coworkStatusHtml(status) {
+    const cls = 'st-' + String(status || 'unknown').toLowerCase();
+    return `<span class="cw-status ${cls}">${esc(status || 'UNKNOWN')}</span>`;
+  }
+  function coworkIntelHtml(c) {
+    c = c || {};
+    if (!c.available) {
+      return `<div class="ai-sec-wrap">
+        ${setH(0, '3 · COWORK INTEL · feed', null)}
+        <div class="ai-hdr">${coworkStatusHtml('NO_FEED')}<span class="ai-hdr-note">no feed — data/intel/alpaca_seed.json absent or unreadable</span></div>
+      </div>`;
+    }
+    const cands = c.candidates || [];
+    const candsTbl = cands.length ? `<table class="ai-tbl"><colgroup>
+        <col style="width:16%"><col style="width:16%"><col style="width:34%"><col style="width:34%">
+       </colgroup><thead><tr>
+        <th class="l">SYMBOL</th><th class="l">VENUE</th><th class="l">THESIS TAG</th><th class="l">SCORE</th>
+      </tr></thead><tbody>${cands.map(x => `<tr>
+        <td class="l ai-topic">${esc(x.symbol || '—')}</td>
+        <td class="l">${esc(x.venue || '—')}</td>
+        <td class="l">${esc(x.thesis_tag || '—')}</td>
+        <td class="l">${(x.score != null ? x.score.toFixed(2) : '—')}</td>
+      </tr>`).join('')}</tbody></table>` : noneYet();
+    const mkt = (c.market_context_head || []);
+    const mktHtml = mkt.length
+      ? `<div class="ref-log">` + mkt.map(l => `<div class="lg" title="${esc(l)}">${esc(l)}</div>`).join('') + `</div>`
+      : noneYet();
+    return `<div class="ai-sec-wrap">
+      ${setH(0, '3 · COWORK INTEL · feed', null)}
+      <div class="ai-hdr">
+        ${coworkStatusHtml(c.status)}
+        <span class="ai-hdr-note">generated ${esc(c.generated_at || '—')} · expires ${esc(c.expiry_ts || '—')} · cohort fired: ${c.cohort_fired || 0}</span>
+      </div>
+      <div class="ref-sec">${setH(0, 'candidates (top 8 by score)', cands.length)}${candsTbl}</div>
+      <div class="ref-sec">${setH(0, 'market context · first 3 lines', mkt.length)}${mktHtml}</div>
+    </div>`;
+  }
   function renderAi() {
     const body = $('ai-activity-body'); if (!body) return;
     ensure('/api/ai_activity', (d) => {
       if (!$('ai-activity-body')) return;       // pane re-skeletoned
       if (d == null) { $('ai-activity-body').innerHTML = errorHtml('/api/ai_activity'); return; }
-      // Debate section folds away (default collapsed) via the shared #board
-      // collapsible machinery (.collapsible/.collapse-toggle/.chev/.collapsed —
-      // the delegated toggle is wired by board_tabs.wireCollapsibles). Probe
-      // calls stay expanded inside a scroll box so a long stream never pushes
-      // the pane. Display-only: the inner tables + data are unchanged.
-      const dc = collapseStateDefaultClosed('pb.collapse.ai-debates');
+      // Three visually separated sections (Jin 2026-07-10) — each independently
+      // fail-safe server-side, so one missing source never blanks the others.
       $('ai-activity-body').innerHTML =
         `<div class="ref">
-          ${aiHeaderHtml(d.in_loop_ai_calls)}
-          <div class="ai-fold collapsible${dc.cls}" data-collapse-key="pb.collapse.ai-debates">
-            <div class="ai-fold-h collapse-toggle" role="button" tabindex="0" aria-expanded="${dc.aria}">
-              <span class="chev" aria-hidden="true"></span>
-              <span class="ai-fold-t">debates · GPT / Gemini cross-validation</span>
-              <span class="ai-fold-n">${(d.debates || []).length}</span>
-            </div>
-            <div class="ai-fold-b">${debatesTable(d.debates)}</div>
-          </div>
-          <div class="ai-scroll">${escalationsTable(d.escalations)}</div>
+          ${botAiHtml(d.bot_ai)}
+          ${harnessAiHtml(d.harness_ai)}
+          ${coworkIntelHtml(d.cowork_intel)}
         </div>`;
     });
     if (CACHE['/api/ai_activity'] && CACHE['/api/ai_activity'].state === 'loading' && !body.children.length) {
@@ -514,6 +643,35 @@
     #board .ai-fold .ai-fold-b > .ref-sec > .ref-h { display: none; }
     /* probe-call section — stays expanded, scrolls if the stream is long. */
     #board .ai-scroll { max-height: 360px; overflow-y: auto; }
+
+    /* 3-section wrap (bot_ai / harness_ai / cowork_intel) — a visible rule
+       between sections so the three AI populations read as separate blocks,
+       not one undifferentiated feed (Jin 2026-07-10). */
+    #board .ai-sec-wrap { display: flex; flex-direction: column; gap: 6px;
+      padding-top: 8px; border-top: 1px solid rgba(95,135,175,0.28); }
+    #board .ai-sec-wrap:first-child { padding-top: 0; border-top: none; }
+    #board .ai-harness-note { color: var(--p-cyn); font-weight: 700; }
+
+    /* key/value blocks (gate_events model_used, judge verdicts/escalations,
+       admission-shadow totals) — dense two-column rows, no cards. */
+    #board .kv-blk { display: flex; flex-direction: column; gap: 1px; }
+    #board .kv-ln { display: flex; justify-content: space-between; gap: 8px;
+      font-size: 10px; padding: 1px 0 1px 12px; position: relative; color: var(--p-gry); }
+    #board .kv-ln::before { content: '›'; position: absolute; left: 2px; color: var(--p-dim); }
+    #board .kv-k { color: var(--p-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #board .kv-v { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #board .kv-sub { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--p-dim); margin-bottom: 1px; }
+    #board .ai-kv-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+
+    /* cowork-intel feed status badge — deliberately LARGER than the rest of
+       the dense chrome (Jin: an expired feed must be obvious at a glance). */
+    #board .cw-status { display: inline-block; font-size: 12px; font-weight: 800;
+      letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 9px;
+      border: 1px solid var(--ghost); color: var(--p-dim); }
+    #board .cw-status.st-expired { color: var(--p-red); border-color: var(--p-red); background: rgba(215,135,135,0.14); }
+    #board .cw-status.st-active { color: var(--p-grn); border-color: var(--p-grn); background: rgba(135,215,135,0.12); }
+    #board .cw-status.st-no_feed, #board .cw-status.st-unknown { color: var(--p-dim); border-color: var(--ghost); }
     `;
     document.head.appendChild(s);
   })();

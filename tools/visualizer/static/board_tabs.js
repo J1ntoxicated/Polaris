@@ -494,12 +494,14 @@
       <div class="tab-grid-1">${collapsiblePanel('Lessons · lessons feed · anti-pattern wall · root-cause', 'learned-body', 'mini')}</div>
     </div>
 
-    <!-- TAB 7 · AI — where AI is used (NOT the trading loop). Header states the
-         truth: in-loop trading AI = 0 calls (W3 AI-free core). Two tables below:
-         dev debates (GPT/Gemini) + probe escalation (observe-only). GET
-         /api/ai_activity (own endpoint, fetched once per activation). -->
+    <!-- TAB 7 · AI — three separate AI populations (Jin 2026-07-10 restructure):
+         1 BOT AI (runtime OpenAI GPT: gate_events + #32 judge overlay +
+         entry_admission_shadow + dev-debates/probe-escalation), 2 HARNESS AI
+         (this Claude Code harness, dev-time only), 3 COWORK INTEL (watchlist
+         seed feed + expiry status). GET /api/ai_activity (own endpoint,
+         fetched once per activation). -->
     <div class="tab-pane" id="pane-ai">
-      <div class="tab-grid-1">${collapsiblePanel('AI · in-loop trading=0 · dev debates (GPT/Gemini) · probe escalation (observe)', 'ai-activity-body', 'mini')}</div>
+      <div class="tab-grid-1">${collapsiblePanel('AI · 1 bot (runtime GPT) · 2 harness (dev Claude) · 3 cowork intel (feed)', 'ai-activity-body', 'mini')}</div>
     </div>
 
     <!-- TAB · LEGACY (Jin 2026-07-07 virtual-primary restructure) — the

@@ -27,11 +27,22 @@ rules never KILL a position defensively — only the hard loss rail exits, and
 winners stay open (HOLD / ADJUST_EXIT widen).
 
 Fail-open (Q4): missing position → HOLD (never KILL the position).
+
+Conviction-pyramid writer (winner add-on judgment, sizing-change ``/debate``'d
+— vault/50_research/debates/conviction_pyramid_addon_notional_2026-07-10.md):
+when the caller threads ``conn`` AND ``ctx.payload["conviction_stack"]``, a
+HOLD or ADJUST_EXIT decision (the position stays open) additionally runs
+``conviction_writer.evaluate_conviction_stack`` and attaches its result under
+``GateResult.payload["conviction_stack"]`` — a pure SIDE-CHANNEL judgment that
+never changes the HOLD/ADJUST_EXIT/EXIT_NOW/SWAP_STRATEGY decision itself
+(flow_not_block). Absent ``conn`` or the payload key → byte-identical to the
+pre-writer gate (same opt-in shape as ``tighten_enabled``).
 """
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Any
 
 from polaris.core.pipeline.config import g6_probe_tighten_mode
@@ -134,6 +145,8 @@ async def position_monitor_gate(
     call_cache: Any | None = None,
     tick_idx: int = 0,
     tighten_enabled: bool | None = None,
+    conn: sqlite3.Connection | None = None,
+    conviction_active: bool | None = None,
 ) -> GateResult:
     """Gate 6 dispatcher — deterministic Python (no LLM).
 
@@ -141,7 +154,8 @@ async def position_monitor_gate(
         ``position`` (dict, required), ``unrealized_pnl_r`` (float),
         ``max_loss_r`` (float), ``swap_candidate`` (dict | None),
         ``probe_action`` (str | None — the latest probe engine action for this
-        position, surfaced by the recalc caller from the probe_decisions sidecar).
+        position, surfaced by the recalc caller from the probe_decisions sidecar),
+        ``conviction_stack`` (dict | None — see ``conn``/``conviction_active`` below).
 
     The ``client`` / ``model`` / ``call_cache`` / ``tick_idx`` parameters are
     retained for caller compatibility (ai_conductor P3 removed the GPT branch)
@@ -152,6 +166,14 @@ async def position_monitor_gate(
     ``probe_action`` is TIGHTEN escalates to ADJUST_EXIT carrying ``tighten_intent``
     (flow_not_block — a tighter trail to G7, never a block/size cut). OFF →
     byte-identical to the pre-consumer HOLD.
+
+    ``conn`` + ``ctx.payload["conviction_stack"]`` (conviction-pyramid writer,
+    ``POLARIS_CONVICTION_PYRAMID_ACTIVE``, default OFF via ``conviction_active``
+    ``None`` reading the env): when BOTH are supplied and the decision is HOLD
+    or ADJUST_EXIT (position stays open), evaluates the next conviction layer
+    and attaches the result under ``GateResult.payload["conviction_stack"]`` —
+    see ``conviction_writer.evaluate_conviction_stack``. Absent either input →
+    no-op (byte-identical). Never runs on EXIT_NOW / SWAP_STRATEGY.
 
     Fail-open (Q4): missing position → HOLD (never KILL).
     """
@@ -174,7 +196,55 @@ async def position_monitor_gate(
     )
     probe_action_raw = ctx.payload.get("probe_action")
     probe_action = str(probe_action_raw) if isinstance(probe_action_raw, str) else None
-    return _python_decision(
+    result = _python_decision(
         pos=pos, pnl_r=pnl_r, max_loss_r=max_loss_r, candidate=candidate_dict,
         probe_action=probe_action, tighten_enabled=use_tighten,
     )
+    if conn is not None and result.decision in (GateDecision.HOLD, GateDecision.ADJUST_EXIT):
+        stack_inputs = ctx.payload.get("conviction_stack")
+        if isinstance(stack_inputs, dict):
+            # Lazy import (layer-cycle guard): conviction_writer imports back
+            # into polaris.core.pipeline.agents.* (shadow_log/config/gate_state)
+            # — a module-top-level import here would create a circular-import
+            # ordering hazard the FIRST time this file is reached via
+            # polaris.core.pipeline.agents.__init__ before conviction_writer has
+            # ever been imported. Importing inside the (rarely-hit, opt-in)
+            # branch defers it until every top-level module graph has settled.
+            from polaris.core.live_recalc.conviction_writer import (  # noqa: PLC0415
+                evaluate_conviction_stack,
+            )
+
+            try:
+                stack_result = evaluate_conviction_stack(
+                    conn,
+                    position=pos,
+                    unrealized_pnl_r=pnl_r,
+                    cell_quartile=str(stack_inputs.get("cell_quartile", "")),
+                    layer_sum_size_pct=float(stack_inputs.get("layer_sum_size_pct", 0.0)),
+                    single_trade_cap_pct=float(stack_inputs.get("single_trade_cap_pct", 0.0)),
+                    headroom_pct=float(stack_inputs.get("headroom_pct", 0.0)),
+                    run_id=ctx.run_id,
+                    regime=str(stack_inputs.get("regime", "")),
+                    now_ts=int(ctx.started_ts),
+                    active=conviction_active,
+                )
+            except sqlite3.Error as exc:
+                # Shadow/writer failure must never crash the live G6 decision
+                # already computed above (mirrors log_shadow_event's own
+                # never-crash-the-hot-path contract).
+                logger.warning(
+                    "[conviction-stack] write failed position_id=%s: %r",
+                    ctx.position_id, exc,
+                )
+                stack_result = None
+            if stack_result is not None:
+                result.payload["conviction_stack"] = {
+                    "can_stack": stack_result.can_stack,
+                    "blocked_reason": stack_result.blocked_reason,
+                    "layer_index": stack_result.layer_index,
+                    "next_layer_mult": stack_result.next_layer_mult,
+                    "active": stack_result.active,
+                    "layer_id": stack_result.layer_id,
+                    "add_on_signal": stack_result.add_on_signal,
+                }
+    return result

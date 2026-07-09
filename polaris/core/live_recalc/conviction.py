@@ -14,8 +14,9 @@ those layers).
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 CONVICTION_MAX_LAYERS: Final[int] = 3
 CONVICTION_LAYER_MULTS: Final[tuple[float, ...]] = (1.0, 0.7, 0.5)
@@ -112,6 +113,85 @@ def count_layers(conn: sqlite3.Connection, *, position_id: str) -> int:
     return 0 if row is None else int(row[0])
 
 
+def build_stack_signal(position: dict[str, Any], size_mult: float) -> dict[str, Any]:
+    """Build the add-on order's SIGNAL shape for the next conviction layer.
+
+    9-stack guard (permanent — [[conviction_pyramid_addon_notional_2026-07-10]]
+    debate D1): ``signal_strength`` is pinned to ``1.0`` (baseline) — ``size_mult``
+    travels ONLY in the separate ``layer_size_mult`` field, NEVER folded into
+    signal_strength / continuous_scalar / judge_conviction / strength_scalar or
+    any other T4 pre-clip term.
+
+    This function is intentionally side-effect-free and does NOT compute a
+    notional. The (deferred, later-slice) live dispatcher is responsible for
+    re-running the add-on through ``polaris.core.sizing.compute_size`` — with
+    ``signal_strength=1.0`` / ``judge_conviction=1.0`` / ``strength_scalar=1.0``
+    so the FULL hard-cap chain (per-symbol/per-strategy/per-track/cluster/
+    daily/headroom_min) is re-verified against current portfolio state — and
+    THEN applying ``layer_size_mult`` to the resulting (already-capped)
+    ``final_notional_usd`` as a pure post-hoc shrink (``layer_size_mult <= 1.0``
+    always, so this can only shrink the capped result, never breach it).
+    ``compute_size()`` has caller-visible side effects (R-budget shadow
+    observation, Alpaca ladder draw, PROVE/BENCH probe-fee accrual /
+    shadow-fill recording) — the dispatcher MUST isolate or account for those
+    before firing an add-on quote through it (debate D1 blind spot).
+    """
+    return {
+        "venue": position.get("venue", ""),
+        "symbol": position.get("symbol", ""),
+        "side": position.get("side", ""),
+        "strategy": position.get("strategy") or position.get("strategy_id", ""),
+        "underlying_group_id": position.get("underlying_group_id", ""),
+        "correlation_group": position.get("correlation_group", ""),
+        "parent_position_id": position.get("position_id", ""),
+        "signal_strength": 1.0,
+        "layer_size_mult": size_mult,
+    }
+
+
+def record_conviction_layer(
+    conn: sqlite3.Connection,
+    *,
+    position: dict[str, Any],
+    layer_index: int,
+    size_mult: float,
+    now_ts: int,
+) -> str | None:
+    """INSERT one ``position_conviction_layers`` row; returns the new ``layer_id``.
+
+    Idempotent-insert race guard (debate D3/round-2 blind spot): a second call
+    for the SAME ``(position_id, layer_index)`` is a no-op (returns ``None``,
+    no duplicate row) — ``layer_id`` is a random uuid primary key so a naive
+    INSERT would otherwise happily create two rows claiming the same layer
+    slot under concurrent access.
+    """
+    layer_id = uuid.uuid4().hex
+    position_id = str(position.get("position_id", ""))
+    cur = conn.execute(
+        "INSERT INTO position_conviction_layers "
+        "(layer_id, position_id, layer_index, size_mult, opened_ts, "
+        " strategy_id, venue, symbol, side) "
+        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+        "  SELECT 1 FROM position_conviction_layers "
+        "  WHERE position_id = ? AND layer_index = ?"
+        ")",
+        (
+            layer_id,
+            position_id,
+            layer_index,
+            size_mult,
+            now_ts,
+            str(position.get("strategy") or position.get("strategy_id", "")),
+            str(position.get("venue", "")),
+            str(position.get("symbol", "")),
+            str(position.get("side", "")),
+            position_id,
+            layer_index,
+        ),
+    )
+    return layer_id if cur.rowcount > 0 else None
+
+
 __all__ = [
     "CONVICTION_GROUP_CAP_MULT",
     "CONVICTION_LAYER_MULTS",
@@ -119,7 +199,9 @@ __all__ = [
     "CONVICTION_MIN_PNL_R",
     "ConvictionDecision",
     "ConvictionGateInputs",
+    "build_stack_signal",
     "can_stack_conviction",
     "compute_stack_size_mult",
     "count_layers",
+    "record_conviction_layer",
 ]

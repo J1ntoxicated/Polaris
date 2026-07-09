@@ -17,10 +17,21 @@ from polaris.core.live_recalc.conviction import (
     CONVICTION_MIN_PNL_R,
     ConvictionDecision,
     ConvictionGateInputs,
+    build_stack_signal,
     can_stack_conviction,
     compute_stack_size_mult,
     count_layers,
+    record_conviction_layer,
 )
+
+# NOTE: ``conviction_writer`` is intentionally NOT re-exported here. Unlike
+# every other module in this package, it depends on ``polaris.core.pipeline``
+# (shadow-log + gate-id + env-flag glue) — the reverse of this package's usual
+# direction (``pipeline`` depends on ``live_recalc``, e.g. ``_sizer_payload``
+# imports ``live_recalc.exit_engine``). Keeping it OUT of this eager
+# package-level import list avoids adding a new package-init-time edge to that
+# existing dependency direction; callers (``position_monitor.py``, tests)
+# import it directly via ``polaris.core.live_recalc.conviction_writer``.
 from polaris.core.live_recalc.excursion import (
     compute_excursion_r,
     compute_mae_r,
@@ -77,6 +88,7 @@ __all__ = [
     "SWAP_MAX_PER_TRADE",
     "SwapCandidate",
     "SwapDecision",
+    "build_stack_signal",
     "can_stack_conviction",
     "classify_regime",
     "compute_excursion_r",
@@ -89,6 +101,7 @@ __all__ = [
     "fetch_regime",
     "mark_position_dirty",
     "mark_positions_dirty",
+    "record_conviction_layer",
     "recompute_exit_params",
     "run_live_recalc_cycle",
     "should_run_recalc",

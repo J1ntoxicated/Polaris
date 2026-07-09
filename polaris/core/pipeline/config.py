@@ -26,14 +26,17 @@ __all__ = [
     "AI_JUDGE_MODE_ACTIVE",
     "AI_JUDGE_MODE_ENV",
     "AI_JUDGE_MODE_SHADOW",
+    "CONVICTION_PYRAMID_ACTIVE_ENV",
     "G6_PROBE_TIGHTEN_ENV",
     "ai_free_mode",
     "ai_judge_mode",
+    "conviction_pyramid_active",
     "g6_probe_tighten_mode",
 ]
 
 AI_FREE_ENV: Final[str] = "POLARIS_AI_FREE"
 G6_PROBE_TIGHTEN_ENV: Final[str] = "POLARIS_G6_PROBE_TIGHTEN"
+CONVICTION_PYRAMID_ACTIVE_ENV: Final[str] = "POLARIS_CONVICTION_PYRAMID_ACTIVE"
 AI_JUDGE_MODE_ENV: Final[str] = "POLARIS_AI_JUDGE_MODE"
 # AI-judge (#32) mode tokens. shadow = judge runs + logs only, the deterministic
 # decision still ACTS (pass-through preservation verify). active = the judge's
@@ -67,6 +70,26 @@ def g6_probe_tighten_mode(env_value: str | None = None) -> bool:
     for pure tests; ``None`` reads the process env.
     """
     raw = os.getenv(G6_PROBE_TIGHTEN_ENV) if env_value is None else env_value
+    if raw is None or raw.strip() == "":
+        return False
+    return raw.strip().lower() in _TRUTHY
+
+
+def conviction_pyramid_active(env_value: str | None = None) -> bool:
+    """True iff the G6 conviction-stack writer runs ACTIVE (real DB INSERT +
+    add-on signal), not shadow-only.
+
+    Default **OFF**: unset/empty → False — the writer ALWAYS judges +
+    logs the would-stack decision to ``gate_shadow_events`` (shadow-first,
+    sizing-change ``/debate`` consensus —
+    ``vault/50_research/debates/conviction_pyramid_addon_notional_2026-07-10.md``);
+    only the real ``position_conviction_layers`` write + add-on signal wait
+    for ``POLARIS_CONVICTION_PYRAMID_ACTIVE=1``, flipped after the shadow
+    distribution is reviewed (log-drop rate / duplicate-layer rate / cap-
+    binding distribution). ``env_value`` injectable for pure tests; ``None``
+    reads the process env.
+    """
+    raw = os.getenv(CONVICTION_PYRAMID_ACTIVE_ENV) if env_value is None else env_value
     if raw is None or raw.strip() == "":
         return False
     return raw.strip().lower() in _TRUTHY

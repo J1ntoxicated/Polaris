@@ -108,7 +108,7 @@ class CCIReversionStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="cci_reversion",
-        timeframe="1H",
+        timeframe=virtual_loosen("15m", "1H"),
         warmup_bars=CCI_WINDOW + 5,
         max_positions=4,
         gross_cap=0.36,

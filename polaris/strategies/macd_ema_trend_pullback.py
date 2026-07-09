@@ -113,7 +113,7 @@ class MACDEMATrendPullbackStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="macd_ema_trend_pullback",
-        timeframe="1D",
+        timeframe=virtual_loosen("1H", "1D"),
         warmup_bars=EMA_FILTER + MACD_SLOW + MACD_SIGNAL,  # real 200+26+9=235
         max_positions=3,
         gross_cap=0.20,

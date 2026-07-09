@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -70,7 +71,7 @@ class FXRangeFadeStrategy(BaseStrategy):
 
     metadata = StrategyMetadata(
         strategy_id="fx_range_fade",
-        timeframe="1H",
+        timeframe=virtual_loosen("15m", "1H"),
         warmup_bars=30,
         max_positions=5,
         gross_cap=0.36,

@@ -48,15 +48,17 @@ def _insert_position(
     opened_ts: int,
     status: str = "open",
     side: str = "long",
+    pnl_r: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO positions ("
         "position_id, venue, symbol, underlying_group_id, strategy_id, "
-        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts"
-        ") VALUES (?, ?, ?, '', ?, ?, ?, ?, 1.0, ?, ?)",
+        "entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
+        "pnl_r"
+        ") VALUES (?, ?, ?, '', ?, ?, ?, ?, 1.0, ?, ?, ?)",
         (
             uuid.uuid4().hex, venue, symbol, strategy_id,
-            strategy_id, strategy_id, side, status, opened_ts,
+            strategy_id, strategy_id, side, status, opened_ts, pnl_r,
         ),
     )
 
@@ -734,33 +736,177 @@ def test_cooldown_factor_real_reentry_cooldown_seconds_matches_bar_seconds() -> 
         assert real_mod.reentry_cooldown_seconds(tf) == real_mod.bar_seconds(tf)
 
 
-def test_cooldown_factor_virtual_halves_reentry_cooldown_seconds_only() -> None:
+# --- concurrent_same_side_open skip-pressure loosening v3 (Jin 2026-07-09) --
+#
+# Concurrent_same_side_open skip pressure (676 skips/day observed): the flat
+# 0.5x cooldown-window factor + the uniform 2-ceiling tailored cap still left
+# a lot of virtual-mode dead air, since virtual has no real capital/fee cost
+# to protect against. Two INDEPENDENT SLOT-COUNT-only knobs widen further:
+#   1. POLARIS_VIRTUAL_COOLDOWN_FACTOR — default 0.25x (was hardcoded 0.5x),
+#      env-overridable; REAL's 1.0x branch never reads this env var.
+#   2. TAILORED_CAP_CEILING — 3 in VIRTUAL (was uniform 2), reusing the
+#      existing ``_VIRTUAL`` flag; REAL stays byte-identical at 2.
+# Neither touches per-symbol/cluster notional caps, the -1R rail, the sizing
+# multiplier chain, or the CS3_N_THRESHOLD / win-rate sample gates below.
+
+_COOLDOWN_FACTOR_ENV = "POLARIS_VIRTUAL_COOLDOWN_FACTOR"
+
+
+def test_cooldown_factor_virtual_defaults_to_quarter_reentry_cooldown_seconds_only() -> (
+    None
+):
     virtual_mod = _reload_reentry_with_env("1")
-    assert virtual_mod._COOLDOWN_FACTOR == 0.5
-    assert virtual_mod.reentry_cooldown_seconds("1H") == 1800
-    assert virtual_mod.reentry_cooldown_seconds("1m") == 30
-    assert virtual_mod.reentry_cooldown_seconds("5m") == 150
-    assert virtual_mod.reentry_cooldown_seconds("15m") == 450
-    assert virtual_mod.reentry_cooldown_seconds("4H") == 7200
-    assert virtual_mod.reentry_cooldown_seconds("1D") == 43200
-    assert virtual_mod.reentry_cooldown_seconds("bogus") == 150  # unknown also halves.
-    # bar_seconds itself is UNCHANGED — the exact regression the REJECT flagged.
+    assert virtual_mod._COOLDOWN_FACTOR == 0.25
+    assert virtual_mod.reentry_cooldown_seconds("1H") == 900
+    assert virtual_mod.reentry_cooldown_seconds("1m") == 15
+    assert virtual_mod.reentry_cooldown_seconds("5m") == 75
+    assert virtual_mod.reentry_cooldown_seconds("15m") == 225
+    assert virtual_mod.reentry_cooldown_seconds("4H") == 3600
+    assert virtual_mod.reentry_cooldown_seconds("1D") == 21600
+    assert virtual_mod.reentry_cooldown_seconds("bogus") == 75  # unknown also quarters.
+    # bar_seconds itself is UNCHANGED — the exact regression the earlier REJECT
+    # flagged (v1 scaled bar_seconds directly and broke three other consumers).
     assert virtual_mod.bar_seconds("1D") == 86400
     assert virtual_mod.bar_seconds("4H") == 14400
 
 
-def test_tailored_cap_and_cs3_threshold_unaffected_by_virtual_mode() -> None:
-    # Regression: the cooldown-TIME loosening must NOT touch the concurrent-cap
-    # or Cold-Start CS-3 sample-floor rails (caps/sizing untouched, per spec).
+def test_cooldown_factor_real_ignores_virtual_factor_env_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # REAL must stay byte-identical to bar_seconds even if the VIRTUAL-only
+    # factor env is (mis)set — the ``else 1.0`` branch never consults it.
+    monkeypatch.setenv(_COOLDOWN_FACTOR_ENV, "0.01")
     real_mod = _reload_reentry_with_env(None)
-    real_ceiling = real_mod.TAILORED_CAP_CEILING
+    assert real_mod._COOLDOWN_FACTOR == 1.0
+    for tf in _ALL_TIMEFRAMES:
+        assert real_mod.reentry_cooldown_seconds(tf) == real_mod.bar_seconds(tf)
+
+
+def test_cooldown_factor_virtual_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_COOLDOWN_FACTOR_ENV, "0.1")
+    virtual_mod = _reload_reentry_with_env("1")
+    assert pytest.approx(0.1) == virtual_mod._COOLDOWN_FACTOR
+    assert virtual_mod.reentry_cooldown_seconds("1H") == 360
+
+
+def test_win_rate_floor_and_cs3_threshold_unaffected_by_virtual_mode() -> None:
+    # Regression: the slot-count loosening must NOT touch the win-rate floor
+    # or the Cold-Start CS-3 sample-floor rail (non-degenerate gate preserved,
+    # notional caps/sizing untouched, per spec).
+    real_mod = _reload_reentry_with_env(None)
     real_win_rate_floor = real_mod.TAILORED_CAP_WIN_RATE_FLOOR
     real_cs3 = real_mod.CS3_N_THRESHOLD
 
     virtual_mod = _reload_reentry_with_env("1")
-    assert real_ceiling == virtual_mod.TAILORED_CAP_CEILING
     assert real_win_rate_floor == virtual_mod.TAILORED_CAP_WIN_RATE_FLOOR
     assert real_cs3 == virtual_mod.CS3_N_THRESHOLD
+
+
+def test_tailored_cap_ceiling_virtual_widens_real_stays_byte_identical() -> None:
+    # The SLOT-COUNT widen: REAL keeps the pre-existing ceiling of 2
+    # (byte-identical — untouched); VIRTUAL widens to 3 (2026-07-09 slot-cap
+    # loosening, reusing the existing ``_VIRTUAL`` flag).
+    real_mod = _reload_reentry_with_env(None)
+    assert real_mod.TAILORED_CAP_CEILING == 2
+    virtual_mod = _reload_reentry_with_env("1")
+    assert virtual_mod.TAILORED_CAP_CEILING == 3
+
+
+def test_seam_skip_count_decreases_for_proven_edge_key_in_virtual_mode(
+    conn: sqlite3.Connection,
+) -> None:
+    # Concrete before/after on the SAME proven-edge key + 2 already-live
+    # same-side positions: REAL (ceiling=2) still SKIPS a 3rd entry; VIRTUAL
+    # (ceiling=3) ALLOWS it — the concurrent_same_side_open skip for this
+    # key/slot disappears. Only the slot COUNT moved; notional/sizing untouched.
+    real_mod = _reload_reentry_with_env(None)
+    for _ in range(real_mod.CS3_N_THRESHOLD):
+        _insert_position(
+            conn, venue="okx", symbol="SOL-USDT",
+            strategy_id="donchian_turtle_breakout", opened_ts=1000,
+            status="closed", pnl_r=1.0,  # 100% win-rate, n >= CS3_N_THRESHOLD.
+        )
+    _insert_position(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout", opened_ts=2000, status="open",
+    )
+    _insert_position(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout", opened_ts=2001, status="open",
+    )
+
+    real_cap = real_mod.tailored_concurrent_cap(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout",
+    )
+    assert real_cap == 2
+    assert real_mod.concurrent_same_side_open(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout", side="long", cap=real_cap,
+    ) is True  # REAL: 2 live AT the cap(2) -> 3rd entry SKIPPED.
+
+    virtual_mod = _reload_reentry_with_env("1")
+    virtual_cap = virtual_mod.tailored_concurrent_cap(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout",
+    )
+    assert virtual_cap == 3
+    assert virtual_mod.concurrent_same_side_open(
+        conn, venue="okx", symbol="SOL-USDT",
+        strategy_id="donchian_turtle_breakout", side="long", cap=virtual_cap,
+    ) is False  # VIRTUAL: 2 live UNDER the widened cap(3) -> 3rd ALLOWED.
+
+
+def test_virtual_mode_thin_sample_still_caps_at_one_and_still_skips(
+    conn: sqlite3.Connection,
+) -> None:
+    # Non-degenerate boundary regression: n < CS3_N_THRESHOLD (all wins) must
+    # still cap at 1 EVEN in VIRTUAL mode — the widened ceiling never bypasses
+    # the sample-size gate.
+    virtual_mod = _reload_reentry_with_env("1")
+    for _ in range(virtual_mod.CS3_N_THRESHOLD - 1):
+        _insert_position(
+            conn, venue="okx", symbol="ADA-USDT", strategy_id="tsmom",
+            opened_ts=1000, status="closed", pnl_r=1.0,
+        )
+    assert virtual_mod.tailored_concurrent_cap(
+        conn, venue="okx", symbol="ADA-USDT", strategy_id="tsmom",
+    ) == 1
+    _insert_position(
+        conn, venue="okx", symbol="ADA-USDT", strategy_id="tsmom",
+        opened_ts=2000, status="open",
+    )
+    assert virtual_mod.concurrent_same_side_open(
+        conn, venue="okx", symbol="ADA-USDT", strategy_id="tsmom", side="long",
+        cap=1,
+    ) is True  # still SKIPPED — thin sample earns no extra slot.
+
+
+def test_virtual_mode_weak_edge_still_caps_at_one_and_still_skips(
+    conn: sqlite3.Connection,
+) -> None:
+    # Non-degenerate boundary regression: n >= CS3_N_THRESHOLD but win-rate
+    # BELOW TAILORED_CAP_WIN_RATE_FLOOR must still cap at 1 EVEN in VIRTUAL
+    # mode — a saturated/weak-edge name gets no extra room in either mode.
+    virtual_mod = _reload_reentry_with_env("1")
+    for _ in range(virtual_mod.CS3_N_THRESHOLD):
+        _insert_position(
+            conn, venue="okx", symbol="DOGE-USDT", strategy_id="tsmom",
+            opened_ts=1000, status="closed", pnl_r=-1.0,
+        )
+    assert virtual_mod.tailored_concurrent_cap(
+        conn, venue="okx", symbol="DOGE-USDT", strategy_id="tsmom",
+    ) == 1
+    _insert_position(
+        conn, venue="okx", symbol="DOGE-USDT", strategy_id="tsmom",
+        opened_ts=2000, status="open",
+    )
+    assert virtual_mod.concurrent_same_side_open(
+        conn, venue="okx", symbol="DOGE-USDT", strategy_id="tsmom", side="long",
+        cap=1,
+    ) is True  # still SKIPPED — weak edge earns no extra slot.
 
 
 def test_hold_frac_for_timeframe_1d_unaffected_by_virtual_mode(

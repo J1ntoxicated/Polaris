@@ -209,7 +209,6 @@ def detect_regime_flip(
             "WHERE venue = ? AND underlying_group_id = ?",
             (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
-        _publish_event(conn, venue, underlying_group_id, cur_regime, candidate, now_ts)
         logger.warning(
             "[regime] %s/%s FLIP %s → %s (immediate_crisis)",
             venue,
@@ -273,7 +272,6 @@ def detect_regime_flip(
             "WHERE venue = ? AND underlying_group_id = ?",
             (candidate, conf, evidence_json, now_ts, venue, underlying_group_id),
         )
-        _publish_event(conn, venue, underlying_group_id, cur_regime, candidate, now_ts)
         logger.info(
             "[regime] %s/%s FLIP %s → %s (confirmed_2x)",
             venue,
@@ -318,30 +316,6 @@ def detect_regime_flip(
         confirmed=False,
         consecutive_count=new_count,
         reason="pending_1x",
-    )
-
-
-def _publish_event(
-    conn: sqlite3.Connection,
-    venue: str,
-    underlying_group_id: str,
-    from_regime: str,
-    to_regime: str,
-    now_ts: int,
-) -> None:
-    """Append a ``regime_flip`` row to ``market_events``."""
-    payload = json.dumps(
-        {
-            "underlying_group_id": underlying_group_id,
-            "from_regime": from_regime,
-            "to_regime": to_regime,
-        },
-        separators=(",", ":"),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO market_events "
-        "(ts, type, venue, symbol, payload_json) VALUES (?, 'regime_flip', ?, ?, ?)",
-        (now_ts, venue, underlying_group_id, payload),
     )
 
 

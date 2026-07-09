@@ -586,11 +586,13 @@ def test_get_process_fence_rejects_different_conn(memdb: sqlite3.Connection) -> 
 
 
 def test_positions_table_exists(memdb: sqlite3.Connection) -> None:
-    """Layer 7 spec required positions/orders/risk_events DDL — must be in ALL_DDL now."""
+    """Layer 7 spec required positions/risk_events DDL — must be in ALL_DDL now.
+
+    ``orders`` DDL removed (graveyard sweep): reader-0/writer-0 orphan table —
+    fills absorbed its role."""
     tables = {
         r[0]
         for r in memdb.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
     assert "positions" in tables
-    assert "orders" in tables
     assert "risk_events" in tables

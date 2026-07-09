@@ -60,7 +60,6 @@ from polaris.core.pipeline.agents._gpt_client import (
 from polaris.core.pipeline.agents._shadow_rules import ShadowDecision
 from polaris.core.pipeline.agents.judge_gate import (
     extend_atr,
-    refine_ttl_sec,
     tighten_atr,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
@@ -624,8 +623,10 @@ def apply_entry_verdict(
     In ``shadow`` mode (default) the deterministic result is returned VERBATIM
     (pass-through preserved). In ``active`` mode the verdict ANNOTATES the result
     payload (judge provenance) but NEVER changes ``decision`` / ``next_gate`` away
-    from flow: a STRENGTHEN_EVIDENCE / SIZE_UP / REFINE_TIMING verdict tags the
-    payload (intent / one-shot hint) and the deterministic decision still acts.
+    from flow: SIZE_UP tags an intent flag, STRENGTHEN_EVIDENCE tags a
+    record-only confidence flag, and every verdict (incl. REFINE_TIMING) is
+    recorded verbatim in the generic ``ai_judge`` annotation — the
+    deterministic decision still acts.
 
     By construction this function NEVER returns a KILL and NEVER strips
     ``next_gate``: it only ever copies the deterministic result and adds keys.
@@ -645,12 +646,6 @@ def apply_entry_verdict(
         # into the ONE continuous scalar + re-clamped (NOT a new multiplier stacked
         # here; 9-stack stays sealed). Absent/False → conviction 1.0 (byte-identical).
         payload["ai_judge_size_up_intent"] = True
-    if verdict is EntryJudgeVerdict.REFINE_TIMING:
-        # One-shot, time-boxed timing nudge (debate fix ②). The order submitter waits
-        # ONE window (POLARIS_JUDGE_REFINE_TTL_SEC) for a better fill then PROCEEDS at
-        # market regardless (verdict enum has NO KILL — it can only DELAY, never skip).
-        # Missed-entry cost is logged by the consumer when the one-shot expires.
-        payload["ai_judge_refine_timing"] = {"one_shot": True, "ttl_sec": refine_ttl_sec()}
     if verdict is EntryJudgeVerdict.STRENGTHEN_EVIDENCE:
         # PURE annotation — telemetry/dashboard + G8 reflector context. NO behavioral
         # consumer; deliberately does NOT bump the sizing scalar (SIZE_UP owns the

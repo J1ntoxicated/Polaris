@@ -40,11 +40,8 @@ from polaris.storage.schema_ddl_core import (
     DDL_CELL_MATRIX_PARENT2,
     DDL_CELL_MATRIX_PARENT3,
     DDL_CELL_MATRIX_SHADOW,
-    DDL_MARKET_EVENTS,
     DDL_ORDER_INTENTS,
     DDL_ORDER_INTENTS_INDEX,
-    DDL_ORDERS,
-    DDL_ORDERS_INDEX,
     DDL_PENDING_OPENS,
     DDL_POSITIONS,
     DDL_POSITIONS_INDEX,
@@ -159,7 +156,6 @@ ALL_DDL: tuple[str, ...] = (
     DDL_TICKER_BASELINE_SAMPLES,
     # ④ #12 technical store — write-after-compute LWW indicator persistence.
     DDL_TICKER_TECHNICALS,
-    DDL_MARKET_EVENTS,
     DDL_SIGNALS,
     # Layer 4 — Cell Matrix
     DDL_CELL_MATRIX_P0,
@@ -177,8 +173,6 @@ ALL_DDL: tuple[str, ...] = (
     DDL_ORDER_INTENTS_INDEX,
     DDL_POSITIONS,
     DDL_POSITIONS_INDEX,
-    DDL_ORDERS,
-    DDL_ORDERS_INDEX,
     DDL_RISK_EVENTS,
     DDL_RISK_EVENTS_INDEX,
     DDL_PENDING_OPENS,

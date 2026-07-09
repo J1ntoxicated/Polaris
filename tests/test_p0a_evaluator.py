@@ -454,6 +454,75 @@ def test_overfit_is_passes_oos_fails_same_variant(
     assert res.oos_pass is False  # held-out verdict: vanishes
 
 
+# --- (5b) BG3 archetype track (2026-07-10) — IS-negative REJECT reproducibility
+def _persistent_uptrend_with_dip_bars(*, n_cycles: int) -> list[Bar]:
+    """1H persistent-uptrend cycles with ONE ADX-range dip per cycle (the exact
+    ``cfd_fx_range_fade_short`` no-inert-knob fixture, extended across many
+    cycles). The strategy's own ADX-range guard exists PRECISELY to keep the
+    SHORT fade out of a real trend; at the guard's loosest grid endpoint
+    (``adx_range_max=30.0``) it admits the dip anyway, and every resulting
+    SHORT gets run over by the continuing uptrend -- consistently losing."""
+    bars: list[Bar] = []
+    p = 100.0
+    period = 20
+    for i in range(period * n_cycles):
+        phase = i % period
+        step = (0.0135 if phase == 6 else 0.015) if phase < 13 else -0.012
+        nxt = p * (1 + step)
+        h = max(p, nxt) * 1.001
+        lo = min(p, nxt) * 0.999
+        bars.append(
+            Bar(
+                instrument_id="capital:EURUSD", underlying_group_id="fx:EUR",
+                venue="capital", symbol="EURUSD", bar_interval="1H",
+                ts=BASE_TS + i * HOUR, open=p, high=h, low=lo, close=nxt,
+                volume=1000.0, notional_usd=nxt * 1000.0, spread_bps_close=4.0,
+                source="test",
+            )
+        )
+        p = nxt
+    return bars
+
+
+def test_is_negative_reject_reproduces_vx_squeeze_rationale() -> None:
+    """Reproduces the REJECT MECHANISM behind the ``vx_squeeze_1h_crypto4``
+    real-DB re-validation verdict (IS Sharpe negative) -- the honest-N
+    evaluator, NOT a manual eyeball, is what catches a candidate whose
+    apparent edge does not survive real bar structure (BG3 parallel manual
+    archetype track spec: "vx_squeeze_1h_crypto4 등 ... 실 DB 재검증에서
+    REJECT(IS 음수 ...)"). Uses the ``cfd_fx_range_fade_short`` thesis base
+    class at its loosest ``adx_range_max`` grid endpoint (30.0) fed a
+    persistent-uptrend fixture: the SHORT fade fires against the trend and
+    loses on BOTH the IS and the held-out OOS slice -- is_pass False, IS
+    Sharpe negative, oos_pass False, non-vacuous (n_trades > 0 both sides).
+    This is the sibling proof to (5)'s IS-PASSES/OOS-FAILS overfit fixture:
+    together they cover both REJECT shapes the vx_squeeze verdict cites
+    (a negative IS edge, and a backtest-only edge that flips OOS)."""
+    from polaris.strategies.cfd_fx_range_fade_short import CFDFXRangeFadeShortStrategy
+
+    bars = _persistent_uptrend_with_dip_bars(n_cycles=10)
+    variant = _variant(CFDFXRangeFadeShortStrategy, {"adx_range_max": 30.0})
+    res = evaluate_variant(
+        variant=variant,
+        bars_by_instrument={"capital:EURUSD": bars},
+        config=ReplayConfig(
+            instrument_ids=("capital:EURUSD",), bar_interval="1H",
+            starting_equity=10_000.0,
+        ),
+        n_splits=1,
+        warmup_bars=30,
+        max_ttl=4,
+        total_variants_searched=1,
+        sandbox_factory=_mk_sandbox,
+    )
+    assert not res.data_bounded
+    assert len(res.is_entry_ts) >= 2  # IS side has real (non-vacuous) trades
+    assert res.is_sharpe < 0.0  # "IS 음수" -- the exact REJECT criterion cited
+    assert res.is_pass is False  # never manually eyeballed past a negative IS
+    assert res.n_trades >= 2  # OOS side has real trades too
+    assert res.oos_pass is False  # held-out verdict also rejects
+
+
 # --- (6) FIX 1 positive control: gate_can_discriminate + min_passable_n -------
 def test_gate_can_discriminate_is_deterministic() -> None:
     """No randomness / no wall-clock: two calls at the same N agree exactly."""

@@ -99,6 +99,30 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, ...]]] = {
     # proximity <= 1.0 — close > prior_high already implies close >=
     # proximity * prior_high — so it would fail the no-inert-knob guard as
     # written regardless.)
+    # --- BG3 parallel manual archetype track (2026-07-10) — thesis-first ---
+    # PENDING P0a honest-N gate: NOT in STRATEGY_REGISTRY yet (see each
+    # module's docstring). Grid entries exist so the P0a evolve engine can
+    # search these BEFORE any registration/promotion decision — no manual
+    # eyeball parameter picking (the anti-pattern this track exists to avoid).
+    "cfd_fx_range_fade_short": {
+        # bounds [20, 30] — ADX no-trend/range confirmation ceiling (Wilder
+        # convention: <20 clear range, <30 permissive upper bound)
+        "adx_range_max": (20.0, 25.0, 30.0),
+    },
+    "okx_funding_carry_persist": {
+        # bounds [-0.0008, -0.0001] — moderate persistent-negative funding
+        # (shallower than a percentile-extreme squeeze breach)
+        "funding_threshold": (-0.0005, -0.0003, -0.0001),
+    },
+    "capital_macro_riskoff_catalyst": {
+        # bounds [22, 30] — moderate-elevated VIX (above the ~20 "elevated"
+        # ceiling gold_riskoff_trend_amplify already treats as risk-off,
+        # below a full crisis print)
+        "vix_threshold": (24.0, 26.0, 28.0),
+        # bounds [400, 600] bps — HY OAS credit-stress widening (above the
+        # ~300-400bps normal range, short of an all-time-crisis extreme)
+        "hy_spread_threshold": (450.0, 500.0, 550.0),
+    },
 }
 
 

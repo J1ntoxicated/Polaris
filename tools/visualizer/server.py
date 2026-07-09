@@ -8,8 +8,10 @@ the visual is purely a window onto live paper-trading state.
 
 Endpoints:
   GET /                    → index.html
+  GET /flow                → flow.html (gate+AI pipeline river, desktop-only)
   GET /static/*            → static assets (sphere-render.js, polaris.css)
   GET /static/graph.json   → regenerated snapshot (cached, TTL refresh)
+  GET /api/flow_stats      → rolling-1h gate volume + drop/AI stats (30s TTL)
   GET /stream/events       → SSE live entry/exit stream from new fills
   GET /stream/prices       → SSE per-cell live-mark push (changed cells only)
 
@@ -482,6 +484,40 @@ def _sentinel_payload() -> dict[str, Any]:
         for ts, cr, fa, dm in rrows
     ]
     return {"available": True, "findings": findings, "runs": runs, "ts": time.time()}
+
+
+# ── Flow page (display-only) ─────────────────────────────────────────────────
+# /api/flow_stats feeds the /flow "Living Pipeline River" page: rolling-1h
+# per-gate decision volume + venue breakdown, drop-lane reasons, AI-judge shadow
+# mismatches/verdicts, and the signals→sized→fills conversion summary. Same
+# serve-stale pattern as buildlog/weekend — the SQLite scan runs on the ref loop
+# cadence, never inside a request thread. Read-only; nothing here feeds sizing/
+# risk/orders.
+_flow_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_flow_lock = threading.Lock()
+_FLOW_TTL = 30.0
+
+
+def _build_flow_stats() -> dict[str, Any]:
+    """``flow_data.build_flow_stats`` over a fresh ?mode=ro connection."""
+    from tools.visualizer import flow_data
+
+    empty = {
+        "window_sec": flow_data.FLOW_WINDOW_SEC, "stages": [], "fills": {},
+        "drops": [], "shadow_mismatch_n": 0, "ai_calls_n": 0,
+        "verdicts_recent": [], "summary": {},
+    }
+    if not _DB_PATH.exists():
+        return {**empty, "ts": time.time()}
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            data = flow_data.build_flow_stats(conn, now_s=int(time.time()))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {**empty, "ts": time.time()}
+    return {**data, "ts": time.time()}
 
 
 # ── Reference endpoints (display-only) ──────────────────────────────────────
@@ -1028,6 +1064,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = "/mobile.html"
             super().do_GET()
             return
+        # Gate+AI pipeline flow page (display-only, desktop-only — same path-only
+        # match as /m). Polls /api/flow_stats + subscribes /stream/events.
+        if self.path == "/flow" or self.path.startswith("/flow?") or self.path == "/flow/":
+            self.path = "/flow.html"
+            super().do_GET()
+            return
         # Phone auto-route: a bare visit to "/" from a mobile browser gets the
         # single-column page — the WebGL globe + 70% board are never served to a
         # phone. ?desktop=1 forces the full board. index.html also does a
@@ -1118,6 +1160,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"weekend err: {exc}")
+            return
+        if self.path.startswith("/api/flow_stats"):
+            try:
+                self._json(_serve_ref(_flow_cache, _flow_lock, _build_flow_stats))
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"flow_stats err: {exc}")
             return
         super().do_GET()
 
@@ -1254,6 +1302,7 @@ def _ref_refresh_loop() -> None:
         (_ai_activity_cache, _ai_activity_lock, _build_ai_activity,
          _AI_ACTIVITY_TTL),
         (_weekend_cache, _weekend_lock, _build_weekend, _WEEKEND_TTL),
+        (_flow_cache, _flow_lock, _build_flow_stats, _FLOW_TTL),
     )
     while True:
         now = time.time()

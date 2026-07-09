@@ -386,6 +386,55 @@ def test_empty_venue_zero_costs(tmp_path: Path) -> None:
     assert alpaca.net_after_cost_usd == 0.0
 
 
+# ---------------------------------------------------------------------------
+# Mark-freshness (Jin 2026-07-08 dashboard-live-net fix) — Capital CFD closes
+# on weekends (FX/indices/gold) just like Alpaca closes outside RTH; the
+# per-lane ``marks_label``/``marks_age_sec`` must reflect THIS lane's own
+# venue-native session (SSOT: ``resolve_venue_session``), not silently stay ""
+# on the false premise that only Alpaca can go stale. OKX (crypto, 24/7) must
+# never set it regardless of the clock.
+# ---------------------------------------------------------------------------
+
+_SATURDAY_UTC_NOON = 1783771200  # 2026-07-11 12:00:00 UTC — Capital fx_weekend
+_WEDNESDAY_UTC_NOON = 1783512000  # 2026-07-08 12:00:00 UTC — Capital fx_open
+
+
+def test_capital_marks_label_set_on_weekend(tmp_path: Path) -> None:
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_SATURDAY_UTC_NOON)
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    cap = by_id["B_capital_cfd"]
+    assert cap.marks_label == "internal marks (venue closed)"
+    assert cap.marks_age_sec >= 0
+    # OKX is crypto, 24/7 — never stale regardless of the clock.
+    assert by_id["A_okx_crypto"].marks_label == ""
+    assert by_id["A_okx_crypto"].marks_age_sec == 0
+
+
+def test_capital_marks_label_empty_on_weekday(tmp_path: Path) -> None:
+    conn = _seeded_db(tmp_path)
+    try:
+        streams = _per_stream_summary(conn, now_s=_WEDNESDAY_UTC_NOON)
+    finally:
+        conn.close()
+    by_id = {s.stream_id: s for s in streams}
+    assert by_id["B_capital_cfd"].marks_label == ""
+    assert by_id["B_capital_cfd"].marks_age_sec == 0
+
+
+def test_global_upnl_marks_fields_removed() -> None:
+    """Regression guard: the misleading GLOBAL upnl_marks_label/age_sec fields
+    (which copied ONLY the Alpaca lane's staleness onto the 3-venue
+    upnl_total) are gone — freshness now lives PER-LANE only on StreamSummary."""
+    from polaris.scripts.dashboard.snapshot_models import DashboardSnapshot
+
+    assert "upnl_marks_label" not in DashboardSnapshot.__dataclass_fields__
+    assert "upnl_marks_age_sec" not in DashboardSnapshot.__dataclass_fields__
+
+
 def test_collect_snapshot_populates_cost_fields(tmp_path: Path) -> None:
     """End-to-end: collect_snapshot streams carry the new cost fields and the
     net-after-cost identity holds for every lane."""

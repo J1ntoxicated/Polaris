@@ -73,6 +73,9 @@ from polaris.scripts.dashboard.snapshot_queries import (
     _strategy_since_reset,
     _strategy_stats,
     _ticker_stats,
+    virtual_daily_pnl_usd,
+    virtual_session_pnl_usd,
+    virtual_since_reset,
 )
 from polaris.scripts.dashboard.snapshot_sections import (
     _ai_shadow_panel,
@@ -451,16 +454,25 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             universe_refresh=focus_ts,
         )
         # Stage-2 per-stream rollup. ``positions`` is passed so the per-stream
-        # open_n / upnl / exposed decompose the global totals exactly.
+        # open_n / upnl / exposed decompose the global totals exactly. Mark
+        # freshness (Alpaca RTH / Capital FX-weekend) lives PER-LANE only on
+        # each StreamSummary.marks_label/marks_age_sec — no global rollup here
+        # (a prior global upnl_marks_label/upnl_marks_age_sec that copied ONLY
+        # the Alpaca lane's label onto the 3-venue upnl_total was misleading —
+        # removed, Jin 2026-07-08 dashboard-live-net fix).
         streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
-        # Surface the Alpaca lane's mark-freshness label (if any) on the
-        # headline ``upnl_total`` too — it is the ONLY stream that can go
-        # stale (OKX/Capital are 24/7), so this is unambiguous.
-        alpaca_stream = next(
-            (s for s in streams if s.stream_id == "C_alpaca_equity"), None
+        # VIRTUAL-ledger main-board aggregates (Jin 2026-07-08 fix) — the
+        # since_reset/daily/session equivalents scoped to the fresh VIRTUAL
+        # ledger (per-venue anchor, aggregated), so the main board never mixes
+        # the legacy real-roundtrip fills in with the fresh virtual sim ones.
+        # Always computed (cheap; mirrors the existing per-stream virtual calc
+        # in ``_per_stream_summary``, which also runs unconditionally) — the
+        # frontend decides what to show based on ``virtual_account_enabled``.
+        virtual_daily_pnl, virtual_daily_n = virtual_daily_pnl_usd(conn, now_s=now_s)
+        virtual_session_pnl, virtual_session_n = virtual_session_pnl_usd(
+            conn, now_s=now_s,
         )
-        upnl_marks_label = alpaca_stream.marks_label if alpaca_stream else ""
-        upnl_marks_age_sec = alpaca_stream.marks_age_sec if alpaca_stream else 0
+        virtual_reset = virtual_since_reset(conn)
         # Rotation + session-forced-exit telemetry (follow-up #12) — display-only,
         # graceful zero when the telemetry tables are empty/absent.
         rotation = _rotation_telemetry(conn, now_s=now_s)
@@ -483,8 +495,6 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             equity_now=equity_with_upnl,
             exposed_usd=exposed_usd,
             upnl_total=upnl_total,
-            upnl_marks_label=upnl_marks_label,
-            upnl_marks_age_sec=upnl_marks_age_sec,
             daily_pnl_usd=daily_pnl,
             daily_trades=daily_n,
             session_pnl_usd=session_pnl,
@@ -535,6 +545,11 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             context_intel=context_intel,
             virtual_account_enabled=virtual_on,
             mode_banner=mode_banner,
+            virtual_daily_pnl_usd=virtual_daily_pnl,
+            virtual_daily_trades=virtual_daily_n,
+            virtual_session_pnl_usd=virtual_session_pnl,
+            virtual_session_trades=virtual_session_n,
+            virtual_since_reset=virtual_reset,
         )
     finally:
         conn.close()

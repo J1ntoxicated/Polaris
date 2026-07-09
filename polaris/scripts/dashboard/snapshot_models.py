@@ -385,12 +385,13 @@ class StreamSummary:
     # an empty list when none.
     closed_n: int = 0
     recent_closed: list[ClosedTrade] = field(default_factory=list)
-    # Alpaca-only mark-freshness label (empty for OKX/Capital, which are 24/7
-    # markets). When the RTH session is open, ``upnl_usd`` is the live venue
-    # probe and this stays "". When the session is closed (weeknight/weekend/
-    # holiday), Alpaca stops streaming quotes, so ``upnl_usd`` is derived from
-    # the last internal mark (stale bar/tick) instead — this label + age make
-    # that explicit rather than silently showing a live-looking number.
+    # Mark-freshness label — set whenever THIS lane's own venue-native session
+    # (SSOT: ``polaris.core.sizing.session.resolve_venue_session``) is closed:
+    # Alpaca (RTH open/closed) and Capital (FX/indices weekend) both have real
+    # closed windows, so ``upnl_usd`` there is derived from the last internal
+    # mark (stale bar/tick) instead of a live probe/feed — this label + age
+    # make that explicit rather than silently showing a live-looking number.
+    # OKX (crypto, 24/7) never sets this — always "".
     marks_label: str = ""
     marks_age_sec: int = 0
     # Weekly per-exchange trace (Jin 2026-07-07) — Monday-anchored (UTC),
@@ -691,13 +692,15 @@ class DashboardSnapshot:
     # ``exposed_usd`` and let the renderer label it ``EXPOSED$``.
     exposed_usd: float = 0.0
     upnl_total: float = 0.0
-    # Mark-freshness flag for ``upnl_total`` (Alpaca-only contributor): "" when
-    # every venue's marks are live (OKX/Capital 24/7 + Alpaca RTH open); else
-    # "internal marks (venue closed)" when Alpaca's RTH session is shut and its
-    # slice of upnl_total comes from a stale internal bar/tick instead of the
-    # live venue probe. ``upnl_marks_age_sec`` is that mark's staleness.
-    upnl_marks_label: str = ""
-    upnl_marks_age_sec: int = 0
+    # Mark-freshness note (Jin 2026-07-08 dashboard-live-net fix): a single
+    # global label here was misleading — it copied ONLY the Alpaca lane's
+    # staleness onto ``upnl_total`` (a 3-venue sum) on the false premise that
+    # Alpaca was the ONLY venue that can go stale. Capital CFD (FX/indices/gold)
+    # also closes on weekends (``polaris.core.sizing.session._capital_session``
+    # already models this) and was silently excluded. Mark freshness is now
+    # PER-VENUE ONLY, on ``StreamSummary.marks_label`` / ``marks_age_sec``
+    # (``streams[]`` — set for whichever lane is actually stale) — no global
+    # rollup field to keep aligned/misleading.
     # 'Today' — floored at max(session_start, latest AEST midnight) (P0-2, Jin
     # 2026-07-02) so this never spans more than ~24h even on multi-day uptime.
     daily_pnl_usd: float = 0.0
@@ -809,3 +812,16 @@ class DashboardSnapshot:
     # style) reconciliation, which is OFF in this mode. Never feeds trading.
     virtual_account_enabled: bool = False
     mode_banner: str = ""
+    # VIRTUAL ledger main-board aggregates (Jin 2026-07-08 dashboard-live-net
+    # fix) — since_reset/daily/session equivalents scoped to the fresh VIRTUAL
+    # ledger (per-venue anchor via ``virtual_account_equity``, aggregated across
+    # the 3 registered venues — ``snapshot_q_virtual``), NOT the unfiltered
+    # fills-table scan the LEGACY ``daily_pnl_usd`` / ``session_pnl_usd`` /
+    # ``since_reset`` fields above still are (those stay byte-identical,
+    # LEGACY-tab-only). The main board (desktop header + mobile status strip)
+    # reads these when ``virtual_account_enabled``. Never feeds sizing/gating.
+    virtual_daily_pnl_usd: float = 0.0
+    virtual_daily_trades: int = 0
+    virtual_session_pnl_usd: float = 0.0
+    virtual_session_trades: int = 0
+    virtual_since_reset: SinceResetRollup | None = None

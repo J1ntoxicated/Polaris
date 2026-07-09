@@ -101,6 +101,19 @@ def _session_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
     return now_s * 1000
 
 
+def _aest_midnight_ms(now_s: int) -> int:
+    """Most recent Sydney-local midnight (ms) at or before ``now_s``.
+
+    Extracted out of ``_today_start_ms`` (Jin 2026-07-08 dashboard-live-net fix)
+    so the VIRTUAL-ledger 'today' floor (``snapshot_q_virtual``) can reuse the
+    SAME AEST-midnight math instead of re-deriving it — one timezone source.
+    """
+    aest_midnight = datetime.fromtimestamp(now_s, tz=_SYDNEY_TZ).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int(aest_midnight.timestamp() * 1000)
+
+
 def _today_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
     """'Today' KPI boundary (ms) = max(session_start, latest AEST midnight).
 
@@ -115,11 +128,7 @@ def _today_start_ms(conn: sqlite3.Connection, *, now_s: int) -> int:
     separately (``session_pnl_usd`` / ``session_trades`` on the snapshot).
     """
     session_start_ms = _session_start_ms(conn, now_s=now_s)
-    aest_midnight = datetime.fromtimestamp(now_s, tz=_SYDNEY_TZ).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    aest_midnight_ms = int(aest_midnight.timestamp() * 1000)
-    return max(session_start_ms, aest_midnight_ms)
+    return max(session_start_ms, _aest_midnight_ms(now_s))
 
 
 def _session_buckets(session_start_s: int, now_s: int) -> tuple[list[int], int]:

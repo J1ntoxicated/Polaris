@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <script>
   // Narrow-viewport guard: routes phones (and narrow desktop windows) to the
-  // single-column /m page BEFORE the WebGL globe + board assets load. The server
-  // also UA-sniffs "/"; this catches phones that spoof a desktop UA and windows
+  // single-column /m page BEFORE the board assets load. The server also
+  // UA-sniffs "/"; this catches phones that spoof a desktop UA and windows
   // narrowed after load. ?desktop=1 forces the full board.
   (function () {
     try {
@@ -18,7 +18,7 @@
   })();
 </script>
 <meta http-equiv="Cache-Control" content="no-store"/>
-<title>★ POLARIS · NEURAL CLOUD</title>
+<title>★ POLARIS · BOARD</title>
 <link rel="stylesheet" href="static/polaris.css"/>
 <style>
   html, body {
@@ -36,14 +36,32 @@
     pointer-events: none;
     z-index: 0;
   }
-  /* 30/70 split: left = sphere+log (30%), right = conventional analytics board (70%) */
-  .stage { display: grid; grid-template-columns: 3fr 7fr; width: 100vw; height: 100vh; overflow: hidden; }
-  /* Left column split vertically: globe ~2/3 (top), bot log ~1/3 (bottom) */
-  .sphere-col { display: grid; grid-template-rows: 2fr 1fr; width: 100%; height: 100%; overflow: hidden; min-height: 0; }
-  .globe-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; }
-  canvas#sphere { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  /* Jin 2026-07-10 (feat/visual-wall-director, Part B): the globe moved to
+     /flow (the "visual wall" director-mode page combining globe + pipeline
+     river) — index.html ("/") is now the WORK BOARD, full-width, no sphere.
+     .board-shell = a 3-row flex column: slim pagenav strip, #board
+     (flex:1, overrides board.js's own injected `height:100vh` via higher
+     selector specificity — board.js's CSS still owns everything ELSE about
+     #board's look, untouched), and the bot log strip (moved down from the
+     old 30%-left column, same botlog-pane markup/CSS/JS — board.js already
+     polls #botlog-body unconditionally, see board.js init()). */
+  .board-shell { display: flex; flex-direction: column; width: 100vw; height: 100vh; overflow: hidden; }
+  .board-shell #board { flex: 1 1 auto; min-height: 0; height: auto; }
+  .board-shell .botlog-pane { flex: 0 0 90px; height: 90px; }
 
-  /* Bot log pane (bottom ~1/3 of left column) */
+  .pagenav-strip {
+    flex: 0 0 auto;
+    display: flex; justify-content: flex-end; align-items: center; gap: 16px;
+    padding: 4px 16px;
+    font-size: 11px; letter-spacing: 0.06em;
+    background: rgba(5,7,11,0.9);
+    border-bottom: 1px solid var(--ghost);
+  }
+  .pagenav-strip a { color: var(--p-dim); text-decoration: none; }
+  .pagenav-strip a.active { color: var(--polaris-blue); }
+  .pagenav-strip a:hover { color: var(--p-wht); }
+
+  /* Bot log pane (now a fixed-height strip under the board — see .board-shell) */
   .botlog-pane {
     display: flex; flex-direction: column; min-height: 0; overflow: hidden;
     border-top: 1px solid var(--ghost);
@@ -71,31 +89,7 @@
   .botlog-pane .bl-err  { color: var(--p-red); }
   .botlog-pane .bl-warn { color: var(--p-ylw); }
   .botlog-pane .bl-hi   { color: var(--p-cyn); font-weight: 700; }
-  /* board.js owns #board styling (right column) */
-
-  /* ── Top bar ──────────────────────────────────────────────────── */
-  .topbar {
-    position: absolute; top: 0; left: 0; right: 0;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 10px 16px; font-size: 12px; z-index: 10;
-    background: linear-gradient(to bottom, rgba(5,7,11,0.85), transparent);
-  }
-  .topbar .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.14em; white-space: nowrap; }
-  .topbar .brand .star { color: var(--polaris-blue); font-size: 18px; animation: starpulse 3s ease-in-out infinite; }
-  @keyframes starpulse {
-    0%,100% { text-shadow: 0 0 6px rgba(95,135,175,0.6); opacity: 1; }
-    50%     { text-shadow: 0 0 20px rgba(95,135,175,1); opacity: 0.85; }
-  }
-  .topbar .meta { color: var(--p-gry); display: flex; gap: 18px; }
-  .topbar .meta .lbl { color: var(--p-dim); margin-right: 6px; }
-  .topbar .meta .val { color: var(--p-wht); font-weight: 700; }
-  .topbar .legend { margin-left: auto; display: flex; flex-wrap: wrap; gap: 10px; font-size: 10px; color: var(--p-gry); align-items: center; }
-  .legend .swatch { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .legend .dot.hot { background: #fff; box-shadow: 0 0 12px #fff; }
-  .legend .dot.lit { background: #87d7ff; box-shadow: 0 0 8px #87d7ff; }
-  .legend .dot.dim { background: #4a5060; }
-  .legend .line { width: 14px; height: 1px; background: linear-gradient(to right, transparent, #87d7ff, transparent); box-shadow: 0 0 6px #87d7ff; }
+  /* board.js owns #board styling (full-width work board) */
 
   /* legacy — superseded by .side-rail */
 
@@ -175,77 +169,6 @@
   .expnl-row .pn.pos { color: var(--p-grn); }
   .expnl-row .pn.neg { color: var(--p-red); }
 
-  /* Jin: 큰 tier 범례 기본 숨김 — 좌측 가장자리 hover/탭으로 slide-in.
-     기본 상태 = 글로브만. .legend-flyout = hover hot-zone(좌측 edge) + off-canvas panel. */
-  .legend-flyout {
-    position: absolute;
-    top: 64px; left: 0; bottom: 24px;
-    z-index: 12;
-    display: flex; align-items: stretch;
-    pointer-events: none;            /* only tab + panel are interactive */
-  }
-  .legend-flyout .legend-tab {
-    pointer-events: auto;
-    align-self: flex-start;
-    margin-top: 8px;
-    width: 22px; min-height: 90px;
-    display: flex; align-items: center; justify-content: center;
-    writing-mode: vertical-rl; text-orientation: mixed;
-    background: rgba(5,7,11,0.70);
-    border: 1px solid var(--ghost); border-left: none;
-    color: var(--polaris-blue); font-size: 9px; font-weight: 700;
-    letter-spacing: 0.22em; cursor: pointer;
-    backdrop-filter: blur(3px);
-    transition: opacity 0.2s ease;
-  }
-  /* Bottom-left slide-in PIPELINE strip — vertical stack, off-canvas by default */
-  .pipeline-strip {
-    pointer-events: auto;
-    position: absolute;
-    top: 0; bottom: 0; left: 0;
-    z-index: 13;
-    transform: translateX(-105%);
-    transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
-    display: flex; flex-direction: column; gap: 3px;
-    padding: 8px 12px;
-    overflow-y: auto;
-    background: rgba(5,7,11,0.92);
-    border: 1px solid var(--ghost); border-left: none;
-    backdrop-filter: blur(5px);
-    font-size: 10px; letter-spacing: 0.08em;
-    color: var(--p-gry);
-    min-width: 120px; max-width: 280px;
-    box-shadow: 6px 0 22px rgba(0,0,0,0.55);
-  }
-  .legend-flyout:hover .pipeline-strip,
-  .legend-flyout.pinned .pipeline-strip { transform: translateX(0); }
-  .legend-flyout:hover .legend-tab,
-  .legend-flyout.pinned .legend-tab { opacity: 0; pointer-events: none; }
-  .pipeline-strip::-webkit-scrollbar { width: 4px; }
-  .pipeline-strip::-webkit-scrollbar-thumb { background: var(--ghost); }
-  .pipeline-strip .ph {
-    color: var(--polaris-blue); font-size: 9px;
-    letter-spacing: 0.20em; font-weight: 700;
-    padding-bottom: 4px; margin-bottom: 2px;
-    border-bottom: 1px solid var(--ghost);
-  }
-  .pipeline-strip .lg {
-    display: flex; gap: 6px; align-items: center;
-    color: var(--p-wht); font-weight: 700;
-    padding: 1px 0;
-  }
-  .pipeline-strip .lg .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    box-shadow: 0 0 4px currentColor;
-  }
-  .pipeline-strip .lg .tier { color: var(--p-dim); font-size: 9px; margin-left: auto; }
-  .pipeline-strip .hint {
-    color: var(--p-dim); font-size: 9px;
-    padding-top: 4px; margin-top: 2px;
-    border-top: 1px solid var(--ghost);
-    line-height: 1.5;
-  }
-
   /* legacy pipeline-mini class (still used for fallback) */
   .pipeline-mini {
     margin-top: 10px;
@@ -265,244 +188,44 @@
   .pipeline-mini .name { color: var(--p-wht); font-weight: 700; }
   .pipeline-mini .tier { color: var(--p-dim); font-size: 9px; }
 
-  /* ── Bottom strip ─────────────────────────────────────────────── */
-  .bottom {
-    position: absolute; bottom: 0; left: 0; right: 0;
-    padding: 12px 24px;
-    display: flex; gap: 24px; align-items: center;
-    font-size: 11px;
-    background: linear-gradient(to top, rgba(5,7,11,0.85), transparent);
-    z-index: 10;
-  }
-  .bottom .scope { color: var(--p-gry); }
-  .bottom .scope .v { color: var(--p-wht); font-weight: 700; }
-  .bottom .pulse-counter { color: var(--p-cyn); font-weight: 700; }
-  .bottom .filler { flex: 1; }
-  .bottom .ticker { color: var(--p-dim); font-size: 10px; max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  /* ── Title block ──────────────────────────────────────────────── */
+  /* ── Title block (pre-existing, orphaned — no consumer markup even before
+     this change; left untouched, not this change's mess) ────────────────── */
   .title-block { position: absolute; bottom: 60px; left: 24px; z-index: 10; pointer-events: none; }
   .title-block .t1 { font-size: 18px; font-weight: 700; letter-spacing: 0.28em; color: var(--p-wht); }
   .title-block .t2 { font-size: 10px; letter-spacing: 0.30em; color: var(--p-dim); margin-top: 4px; }
-
-  /* ── Page nav ─────────────────────────────────────────────────── */
-  .pagenav {
-    position: absolute; top: 48px; right: 24px;
-    display: flex; gap: 16px;
-    font-size: 11px; letter-spacing: 0.06em;
-    z-index: 11;
-  }
-  .pagenav a { color: var(--p-dim); text-decoration: none; }
-  .pagenav a.active { color: var(--polaris-blue); }
-  .pagenav a:hover { color: var(--p-wht); }
-
-  /* ── Tooltip ──────────────────────────────────────────────────── */
-  #tooltip {
-    position: absolute;
-    display: none;
-    z-index: 50;
-    pointer-events: none;
-    background: rgba(5,7,11,0.92);
-    border: 1px solid var(--ghost);
-    padding: 8px 12px;
-    font-size: 11px;
-    color: var(--p-wht);
-    backdrop-filter: blur(4px);
-    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
-    max-width: 240px;
-  }
-  #tooltip .tt-h {
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    margin-bottom: 4px;
-    border-bottom: 1px solid var(--ghost);
-    padding-bottom: 4px;
-  }
-  #tooltip .tt-tier {
-    display: inline-block;
-    padding: 1px 6px;
-    margin-right: 8px;
-    border: 1px solid currentColor;
-    font-size: 9px;
-    letter-spacing: 0.16em;
-  }
-  #tooltip .tt-tier.t0 { color: #87d7ff; }
-  #tooltip .tt-tier.t1 { color: #ff87d7; }
-  #tooltip .tt-tier.t2 { color: #87afd7; }
-  #tooltip .tt-tier.t3 { color: #d7d787; }
-  #tooltip .tt-tier.t4 { color: #ff9f87; }
-  #tooltip .tt-tier.t5 { color: #d7afff; }
-  #tooltip .tt-tier.t6 { color: #87ffd7; }
-  #tooltip .tt-tier.t7 { color: #ffaf87; }
-  #tooltip .tt-tier.t8 { color: #d7d787; }
-  #tooltip .tt-tier.t9 { color: #d78787; }
-  #tooltip .tt-l { color: var(--p-gry); font-size: 10px; line-height: 1.5; }
-  #tooltip .tt-l b { color: var(--p-wht); font-weight: 700; }
-  #tooltip .tt-l b.pos { color: var(--p-grn); }
-  #tooltip .tt-l b.neg { color: var(--p-red); }
-
-  /* ── Detail panel (Jin v4 click → detail) ─────────────────────── */
-  #detail-panel {
-    position: absolute; top: 80px; left: 24px;
-    width: 320px; z-index: 20;
-    background: rgba(5,7,11,0.92);
-    border: 1px solid var(--ghost);
-    padding: 14px 16px;
-    color: var(--p-wht);
-    font-size: 11px;
-    backdrop-filter: blur(6px);
-    box-shadow: 0 6px 24px rgba(0,0,0,0.6);
-    display: none;
-  }
-  #detail-panel.visible { display: block; }
-  #detail-panel .head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding-bottom: 8px; border-bottom: 1px solid var(--ghost); margin-bottom: 10px;
-  }
-  #detail-panel .cluster-tag {
-    font-size: 9px; letter-spacing: 0.22em;
-    padding: 2px 8px; border: 1px solid currentColor;
-  }
-  #detail-panel .close { color: var(--p-dim); cursor: pointer; font-size: 14px; padding: 0 4px; }
-  #detail-panel .close:hover { color: var(--p-wht); }
-  #detail-panel .title { font-size: 13px; font-weight: 700; margin: 6px 0 12px; word-break: break-all; }
-  #detail-panel .grid {
-    display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 10px;
-  }
-  #detail-panel .grid .k { color: var(--p-dim); }
-  #detail-panel .grid .v { color: var(--p-wht); text-align: right; font-weight: 700; }
-  #detail-panel .grid .v.pos { color: var(--p-grn); }
-  #detail-panel .grid .v.neg { color: var(--p-red); }
-  #detail-panel .chain {
-    margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--ghost);
-  }
-  #detail-panel .chain-head { color: var(--polaris-blue); font-size: 9px; letter-spacing: 0.22em; margin-bottom: 8px; }
-  #detail-panel .chain-step {
-    display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 10px;
-  }
-  #detail-panel .chain-step .swatch {
-    width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 6px currentColor; flex-shrink: 0;
-  }
-  #detail-panel .chain-step .lbl {
-    color: var(--p-gry); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  #detail-panel .chain-step.seed .lbl { color: #fff5d2; font-weight: 700; }
-  #detail-panel .chain-step .arrow { color: var(--p-dim); margin-left: 14px; }
-  #detail-panel .hint {
-    margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--ghost);
-    color: var(--p-dim); font-size: 9px; letter-spacing: 0.12em;
-  }
 </style>
 </head>
 <body>
 
-<div class="stage">
- <div class="sphere-col">
-  <div class="globe-pane">
-  <canvas id="sphere"></canvas>
-
-  <!-- Jin 2026-04-27 cloud-only: top-bar stats (REGIME/TICK/NODES/FIRING) + pagenav
-       + side-rail (OPEN POSITIONS / EXCHANGE PnL / RECENT CLOSES) 모두 제거.
-       단일 regime 표기 = multi-matrix 정합 위반.  제목/legend 만 minimal 유지. -->
-  <div class="topbar">
-    <div class="legend" style="margin-left:auto">
-      <span class="swatch"><span class="dot" style="background:#5fdfff;box-shadow:0 0 8px #5fdfff"></span>OKX</span>
-      <span class="swatch"><span class="dot" style="background:#a87cff;box-shadow:0 0 8px #a87cff"></span>CAPITAL</span>
-      <span class="swatch"><span class="dot" style="background:#ffc84f;box-shadow:0 0 8px #ffc84f"></span>ALPACA</span>
-      <span class="swatch"><span class="dot" style="background:#9fc7ff;box-shadow:0 0 8px #9fc7ff"></span>CONDUCTOR</span>
-      <span class="swatch"><span class="line"></span>TRADE FLOW</span>
-    </div>
+<!-- Jin 2026-07-10 (feat/visual-wall-director, Part B): globe moved to /flow
+     (the visual-wall director-mode page). "/" is now the full-width work
+     board — no sphere canvas, no globe scripts. -->
+<div class="board-shell">
+  <div class="pagenav-strip">
+    <a href="/" class="active">BOARD</a>
+    <a href="/flow">FLOW ▸</a>
   </div>
 
-  <!-- Jin 2026-05-31 E4: galaxy legend (3 exchange galaxies + conductor + flows).
-       Hidden by default → left-edge hover/tab slide-in. -->
-  <div class="legend-flyout" id="legend-flyout">
-   <div class="legend-tab" id="legend-tab" title="범례 보기 (hover)">LEGEND ▸</div>
-   <div class="pipeline-strip">
-    <div class="ph">Galaxies · click to zoom in</div>
-    <div class="lg"><span class="dot" style="background:#5fdfff"></span>OKX — Spot Crypto<span class="tier">cyan</span></div>
-    <div class="lg"><span class="dot" style="background:#a87cff"></span>Capital — CFD long/short<span class="tier">violet</span></div>
-    <div class="lg"><span class="dot" style="background:#ffc84f"></span>Alpaca — US Equity<span class="tier">gold</span></div>
-    <div class="lg"><span class="dot" style="background:#9fc7ff"></span>Conductor — AI hub<span class="tier">centre</span></div>
+  <!-- Full-width analytics board (native HTML/CSS, rendered by board.js). -->
+  <div id="board"></div>
 
-    <div class="ph" style="margin-top:6px">Live flows</div>
-    <div class="lg"><span class="dot" style="background:#87ffaf"></span>Trade pathway (profit)<span class="tier">flow</span></div>
-    <div class="lg"><span class="dot" style="background:#ff8787"></span>Trade pathway (loss)<span class="tier">flow</span></div>
-    <div class="lg"><span class="dot" style="background:#fff5d2"></span>Capital lifecycle<span class="tier">crypto→cfd→eq</span></div>
-
-    <div class="ph" style="margin-top:6px">Galaxy nodes (ring role)</div>
-    <div class="lg"><span class="dot" style="background:#ffffff"></span>Positions (PnL color, inner)<span class="tier">core</span></div>
-    <div class="lg"><span class="dot" style="background:#bfbfbf"></span>Strategies (mid)<span class="tier">mid</span></div>
-    <div class="lg"><span class="dot" style="background:#8f8f8f"></span>Watch / Universe (halo)<span class="tier">outer</span></div>
-
-    <div class="hint" style="margin-top: 4px;">
-      drag = orbit · wheel = zoom · click galaxy = fly in<br/>
-      Esc / R = reset · Space = toggle spin
-    </div>
-   </div><!-- /.pipeline-strip -->
-  </div><!-- /.legend-flyout -->
-
-  <!-- Jin 2026-04-27 cloud-only: title-block + bottom stats 제거.
-       제목/카운터 모두 stats 패널 정합 위반 — sphere 자체가 SSOT. -->
-  <div class="bottom">
-    <div class="filler"></div>
-    <div class="ticker" id="ticker">--</div>
-  </div>
-
-  <div id="tooltip"></div>
-
-  <!-- Sound/music player removed (Jin 2026-05-31 E4): Web Audio synth + YouTube
-       OST player + attribution + toggle all deleted per request. -->
-
-  <!-- Detail panel (Jin v4: click 시 노드 detail + provenance chain) -->
-  <aside id="detail-panel">
-    <div class="head">
-      <span class="cluster-tag" id="dp-cluster">—</span>
-      <span class="close" id="dp-close">✕</span>
-    </div>
-    <div class="title" id="dp-title">—</div>
-    <div class="grid" id="dp-grid"></div>
-    <div class="chain">
-      <div class="chain-head">Provenance Chain</div>
-      <div id="dp-chain"></div>
-    </div>
-    <div class="hint">Esc to close · R reset · Space toggle rotate</div>
-  </aside>
-  </div><!-- /.globe-pane -->
-
-  <!-- Bottom ~1/3 of left column: live bot log (rendered by board.js initBotLog) -->
+  <!-- Bot log strip (moved down from the old 30%-left globe column; same
+       markup/CSS — board.js already polls #botlog-body unconditionally). -->
   <div class="botlog-pane">
     <div class="bl-head"><span>BOT LOG</span><span class="live">live</span></div>
     <div class="bl-body" id="botlog-body"></div>
   </div>
- </div><!-- /.sphere-col -->
-
- <!-- Right half: conventional analytics board (native HTML/CSS, rendered by board.js) -->
- <div id="board"></div>
 </div>
 
-<!-- E4 galaxy globe (Jin 2026-05-31): 3 exchange galaxies + central AI conductor,
-     live particle pathways, capital-lifecycle arcs. Replaces sphere-render.js
-     (14-tier nested-sphere → static blob). globe-core = layout + render + camera;
-     globe-flows = trade_chain/lifecycle particle flows + SSE entry/exit flashes. -->
-<script src="static/globe-core.js?v=26_tierlod"></script>
-<!-- globe-satellites.js: cross-cutting clusters (strat/reg/exit/orbit/axis/obs/
-     action/exit_tally) as conductor-orbiting satellite rings. Loads AFTER core
-     (uses its PolarisGlobe_* exports at init) and before flows. -->
-<script src="static/globe-satellites.js?v=23_layered"></script>
-<script src="static/globe-flows.js?v=24_onionsync"></script>
-<!-- globe-funnel.js (P4 activity bindings: gate funnel ring + stream breath +
-     regime tide + learner tremor + tick heartbeat + kill sediment). NEW draw
-     pass — WRAPS globe-flows' published draw/setGraph hooks (does not modify
-     core, already at its LOC cap). Loads AFTER flows so the wrap chains. -->
-<script src="static/globe-funnel.js?v=23_layered"></script>
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
 <script src="static/board.js?v=19_globepulsesync"></script>
 <!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
      venue scope helpers) loads after board.js (needs window.PolarisBoard) and
-     before the tab modules (which read its scope helpers). -->
+     before the tab modules (which read its scope helpers). Its
+     window.PolarisGlobe.focusExchange() call is guarded (globe is gone from
+     this page — no-ops safely, see board_exchange.js). -->
 <script src="static/board_exchange.js?v=2_bloomberg_dense"></script>
 <script src="static/board_tabs.js?v=20_perfcollapse_gatesplit"></script>
 <script src="static/board_tabs_ext.js?v=17_venuebreak_gatesplit"></script>
@@ -520,23 +243,5 @@
      the read-only /api/weekend endpoint. Self-injects #pane-weekend + registers
      its renderer (same pattern as chart.js). -->
 <script src="static/weekend.js?v=2_footer_insert_fix"></script>
-<script>
-  // 30/70 split + left column globe(2/3)/log(1/3). globe engine fits to canvas
-  // clientWidth/Height; after layout settles, nudge resize twice (rAF + delayed) so fit()
-  // picks up the 30%-width / two-thirds-height globe pane, not an initial full-size guess.
-  window.addEventListener('load', function () {
-    requestAnimationFrame(function () { window.dispatchEvent(new Event('resize')); });
-    setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 250);
-  });
-  // Legend flyout: hover slides in (CSS). Click tab = pin open; click panel bg toggles off.
-  (function () {
-    var fly = document.getElementById('legend-flyout');
-    var tab = document.getElementById('legend-tab');
-    if (!fly || !tab) return;
-    tab.addEventListener('click', function (e) { e.stopPropagation(); fly.classList.add('pinned'); });
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') fly.classList.remove('pinned'); });
-    fly.addEventListener('mouseleave', function () { fly.classList.remove('pinned'); });
-  })();
-</script>
 </body>
 </html>

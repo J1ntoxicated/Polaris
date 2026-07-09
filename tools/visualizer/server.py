@@ -8,8 +8,10 @@ the visual is purely a window onto live paper-trading state.
 
 Endpoints:
   GET /                    → index.html
+  GET /flow                → flow.html (gate+AI pipeline river, desktop-only)
   GET /static/*            → static assets (sphere-render.js, polaris.css)
   GET /static/graph.json   → regenerated snapshot (cached, TTL refresh)
+  GET /api/flow_stats      → rolling-1h gate volume + drop/AI stats (30s TTL)
   GET /stream/events       → SSE live entry/exit stream from new fills
   GET /stream/prices       → SSE per-cell live-mark push (changed cells only)
 
@@ -312,15 +314,27 @@ def _latest_fill_ts() -> int:
 
 
 def _fills_since(since_ms: int) -> list[dict[str, Any]]:
-    """New fills (ts_ms > since_ms) as SSE entry/exit events."""
+    """New fills (ts_ms > since_ms) as SSE entry/exit events.
+
+    Exit events carry ``strategy_id`` + ``r_multiple`` (the visual-wall kill
+    feed's "strategy ▸ SYM +0.09R" line) — ``r_multiple`` is the SAME
+    canonical risk-unit R the ticker/strategy dashboard panels use
+    (``positions.pnl_r`` via ``fills.contribution_id == positions.position_id``,
+    same lookup shape as ``snapshot_sections._pnl_r_by_contribution``). A fill
+    with no matched closed position (legacy/smoke data) reports ``None`` —
+    the client falls back to a $-only kill-feed line rather than a fake R.
+    """
     if not _DB_PATH.exists():
         return []
     try:
         conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
         try:
             rows = conn.execute(
-                "SELECT venue, instrument_id, strategy_id, side, pnl_usd, "
-                "is_close, ts_ms FROM fills WHERE ts_ms > ? ORDER BY ts_ms ASC",
+                "SELECT f.venue, f.instrument_id, f.strategy_id, f.side, "
+                "f.pnl_usd, f.is_close, f.ts_ms, p.pnl_r "
+                "FROM fills f LEFT JOIN positions p "
+                "ON p.position_id = f.contribution_id AND p.status = 'closed' "
+                "WHERE f.ts_ms > ? ORDER BY f.ts_ms ASC",
                 (since_ms,),
             ).fetchall()
         finally:
@@ -328,7 +342,7 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
     except sqlite3.Error:
         return []
     events: list[dict[str, Any]] = []
-    for venue, instrument_id, strategy_id, side, pnl_usd, is_close, ts_ms in rows:
+    for venue, instrument_id, strategy_id, side, pnl_usd, is_close, ts_ms, pnl_r in rows:
         ticker = str(instrument_id).split(":")[-1].split("-")[0]
         direction = "long" if str(side).lower() in ("buy", "long") else "short"
         if int(is_close):
@@ -338,8 +352,10 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
                     "ticker": ticker,
                     "direction": direction,
                     "exit_type": "EXIT",
+                    "strategy_id": str(strategy_id),
                     "pnl_usd": float(pnl_usd or 0.0),
                     "pnl_pct": 0.0,
+                    "r_multiple": float(pnl_r) if pnl_r is not None else None,
                     "exchange": str(venue)[:3].lower(),
                     "ts": int(ts_ms),
                 }
@@ -483,6 +499,40 @@ def _sentinel_payload() -> dict[str, Any]:
         for ts, cr, fa, dm in rrows
     ]
     return {"available": True, "findings": findings, "runs": runs, "ts": time.time()}
+
+
+# ── Flow page (display-only) ─────────────────────────────────────────────────
+# /api/flow_stats feeds the /flow "Living Pipeline River" page: rolling-1h
+# per-gate decision volume + venue breakdown, drop-lane reasons, AI-judge shadow
+# mismatches/verdicts, and the signals→sized→fills conversion summary. Same
+# serve-stale pattern as buildlog/weekend — the SQLite scan runs on the ref loop
+# cadence, never inside a request thread. Read-only; nothing here feeds sizing/
+# risk/orders.
+_flow_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_flow_lock = threading.Lock()
+_FLOW_TTL = 30.0
+
+
+def _build_flow_stats() -> dict[str, Any]:
+    """``flow_data.build_flow_stats`` over a fresh ?mode=ro connection."""
+    from tools.visualizer import flow_data
+
+    empty = {
+        "window_sec": flow_data.FLOW_WINDOW_SEC, "stages": [], "fills": {},
+        "drops": [], "shadow_mismatch_n": 0, "ai_calls_n": 0,
+        "verdicts_recent": [], "summary": {},
+    }
+    if not _DB_PATH.exists():
+        return {**empty, "ts": time.time()}
+    try:
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            data = flow_data.build_flow_stats(conn, now_s=int(time.time()))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {**empty, "ts": time.time()}
+    return {**data, "ts": time.time()}
 
 
 # ── Reference endpoints (display-only) ──────────────────────────────────────
@@ -1418,6 +1468,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = "/mobile.html"
             super().do_GET()
             return
+        # Gate+AI pipeline flow page (display-only, desktop-only — same path-only
+        # match as /m). Polls /api/flow_stats + subscribes /stream/events.
+        if self.path == "/flow" or self.path.startswith("/flow?") or self.path == "/flow/":
+            self.path = "/flow.html"
+            super().do_GET()
+            return
         # Phone auto-route: a bare visit to "/" from a mobile browser gets the
         # single-column page — the WebGL globe + 70% board are never served to a
         # phone. ?desktop=1 forces the full board. index.html also does a
@@ -1508,6 +1564,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             except Exception as exc:  # display-only: never crash the loop
                 self.send_error(500, f"weekend err: {exc}")
+            return
+        if self.path.startswith("/api/flow_stats"):
+            try:
+                self._json(_serve_ref(_flow_cache, _flow_lock, _build_flow_stats))
+            except Exception as exc:  # display-only: never crash the loop
+                self.send_error(500, f"flow_stats err: {exc}")
             return
         super().do_GET()
 
@@ -1644,6 +1706,7 @@ def _ref_refresh_loop() -> None:
         (_ai_activity_cache, _ai_activity_lock, _build_ai_activity,
          _AI_ACTIVITY_TTL),
         (_weekend_cache, _weekend_lock, _build_weekend, _WEEKEND_TTL),
+        (_flow_cache, _flow_lock, _build_flow_stats, _FLOW_TTL),
     )
     while True:
         now = time.time()

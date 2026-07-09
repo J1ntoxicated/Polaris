@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta http-equiv="Cache-Control" content="no-store"/>
+<title>★ POLARIS · FLOW</title>
+<link rel="stylesheet" href="static/polaris.css"/>
+<style>
+  /* Visual Wall — "Director Mode" (Jin 2026-07-10, feat/visual-wall-director):
+     the globe (top ~55%) + Living Pipeline River (bottom ~45%) combined into
+     one game-like screen meant to run unattended on a monitor — cinematic
+     camera autopilot, warp transitions, killcam cuts, floating damage
+     numbers, a scrolling kill feed, and pts-classes river annotations.
+     Globe = reused globe-core/satellites/flows/funnel.js (canvas#sphere,
+     self-binding, same load order as the old index.html). River = flow.js
+     own canvas#flow-canvas (unrelated engine, own draw loop). wall.js owns
+     ONLY the director camera + warp/killcam/damage-number/kill-feed layer
+     (canvas#wall-fx, an inert pointer-events:none overlay over the globe).
+     English UI, Bloomberg-dense, polaris.css tokens only. */
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #05070b; color: var(--p-wht);
+    font-family: var(--font-mono);
+    overflow: hidden;
+  }
+
+  .wall-stage {
+    display: grid;
+    grid-template-rows: 55fr 45fr auto;
+    width: 100vw; height: 100vh; overflow: hidden;
+  }
+
+  /* ── Globe pane (top ~55%) ─────────────────────────────────────────────── */
+  .globe-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; }
+  canvas#sphere  { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; z-index: 1; }
+  canvas#wall-fx { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 2; pointer-events: none; }
+
+  .wall-topbar {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 8px 14px;
+    background: linear-gradient(to bottom, rgba(5,7,11,0.85), transparent);
+  }
+  .wall-topbar .brand { display: flex; align-items: center; gap: 6px; font-weight: 700; letter-spacing: 0.12em; font-size: 11px; white-space: nowrap; }
+  .wall-topbar .brand .star { color: var(--polaris-blue); font-size: 14px; }
+  .wall-pagenav { display: flex; gap: 12px; font-size: 10px; letter-spacing: 0.06em; white-space: nowrap; }
+  .wall-pagenav a { color: var(--p-dim); text-decoration: none; }
+  .wall-pagenav a.active { color: var(--polaris-blue); }
+  .wall-pagenav a:hover { color: var(--p-wht); }
+  .wall-summary { display: flex; gap: 14px; margin-left: auto; font-size: 9.5px; color: var(--p-gry); flex-wrap: wrap; }
+  .wall-summary .lbl { color: var(--p-dim); margin-right: 4px; }
+  .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  /* Kill feed — top-right, newest on top, capped 6 rows (wall.js). */
+  #kill-feed {
+    position: absolute; top: 34px; right: 10px; z-index: 10;
+    width: 240px; font-size: 9.5px; text-align: right;
+  }
+  #kill-feed .kf-row {
+    padding: 1.5px 0; color: var(--p-gry);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #kill-feed .kf-row .kf-strat { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
+  #kill-feed .kf-row.pos { color: var(--pnl-pos); }
+  #kill-feed .kf-row.neg { color: var(--pnl-neg); }
+
+  /* Class-transition badge pop ("EARN▲" / "BENCH▼") — wall.js spawns/removes. */
+  #class-badges {
+    position: absolute; left: 10px; top: 34px; z-index: 10;
+    display: flex; flex-direction: column; gap: 3px;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
+  }
+  #class-badges .badge {
+    padding: 2px 7px; border: 1px solid currentColor;
+    background: rgba(5,7,11,0.75);
+    animation: badgepop 3.2s ease-out forwards;
+  }
+  #class-badges .badge.earn  { color: var(--pnl-pos); }
+  #class-badges .badge.bench { color: var(--pnl-neg); }
+  @keyframes badgepop {
+    0%   { opacity: 0; transform: translateY(-4px); }
+    10%  { opacity: 1; transform: translateY(0); }
+    80%  { opacity: 1; }
+    100% { opacity: 0; }
+  }
+
+  .globe-ticker {
+    position: absolute; left: 10px; bottom: 8px; z-index: 9;
+    font-size: 9.5px; color: var(--p-dim);
+    max-width: 55ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ── River pane (bottom ~45%) ─────────────────────────────────────────── */
+  .river-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; border-top: 1px solid var(--ghost); }
+  canvas#flow-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  #col-headers { position: absolute; top: 4px; left: 0; right: 0; height: 26px; z-index: 9; pointer-events: none; }
+  #col-headers .col-h {
+    position: absolute; top: 0; transform: translateX(-50%);
+    font-size: 8.5px; letter-spacing: 0.10em; color: var(--p-gry);
+    text-align: center; white-space: nowrap;
+  }
+  #col-headers .col-h .n { display: block; font-size: 11px; font-weight: 700; color: var(--p-wht); font-variant-numeric: tabular-nums; }
+  #col-headers .col-h.gate { color: var(--polaris-blue); }
+  #col-headers .col-h.fills { color: var(--p-grn); }
+
+  /* Venue legend — compact single row (globe pane already sold the colors). */
+  .venue-legend { position: absolute; left: 8px; top: 32px; z-index: 9; font-size: 8.5px; display: flex; flex-direction: row; gap: 10px; }
+  .venue-legend .row { display: flex; align-items: center; gap: 4px; color: var(--p-gry); white-space: nowrap; }
+  .venue-legend .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .venue-legend .dot.drop { background: #7a7f8c; }
+
+  #drop-panel {
+    position: absolute; left: 8px; bottom: 26px; z-index: 9;
+    width: 230px; font-size: 9px; color: var(--p-gry);
+    background: rgba(5,7,11,0.7); border: 1px solid var(--ghost); padding: 5px 8px;
+  }
+  #drop-panel .h { color: #9098a8; letter-spacing: 0.14em; font-size: 8px; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  #drop-panel .row { display: flex; justify-content: space-between; padding: 1px 0; }
+  #drop-panel .row .n { color: var(--p-wht); font-variant-numeric: tabular-nums; }
+  #drop-panel .empty { color: var(--p-dim); font-style: italic; }
+
+  #verdict-ticker {
+    position: absolute; right: 8px; top: 32px; z-index: 9;
+    width: 230px; font-size: 9px; text-align: right;
+    background: rgba(5,7,11,0.7); border: 1px solid var(--ghost); padding: 5px 8px;
+  }
+  #verdict-ticker .row { padding: 1px 0; color: var(--p-gry); }
+  #verdict-ticker .row .g { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
+  #verdict-ticker .row.dim .v { color: var(--p-dim); }
+  #verdict-ticker .row.green .v { color: var(--pnl-pos); font-weight: 700; }
+  #verdict-ticker .row.amber .v { color: var(--p-ylw); font-weight: 700; }
+  #verdict-ticker .row.magenta .v { color: var(--p-mag); font-weight: 700; }
+
+  /* Per-strategy score_F window-fill gauge strip — river's own bottom edge. */
+  #class-gauge-strip {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 20px; z-index: 9;
+    overflow-x: auto; white-space: nowrap;
+    padding: 2px 8px; font-size: 8px; letter-spacing: 0.04em;
+    border-top: 1px solid var(--ghost);
+    background: rgba(5,7,11,0.55);
+  }
+  #class-gauge-strip::-webkit-scrollbar { height: 3px; }
+  #class-gauge-strip::-webkit-scrollbar-thumb { background: var(--ghost); }
+  #class-gauge-strip .chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; color: var(--p-gry); }
+  #class-gauge-strip .chip .sid { color: var(--p-wht); font-weight: 700; }
+  #class-gauge-strip .chip .gauge { display: inline-block; width: 34px; height: 6px; background: rgba(255,255,255,0.10); vertical-align: middle; }
+  #class-gauge-strip .chip .gauge .fill { display: block; height: 100%; background: var(--polaris-blue); }
+  #class-gauge-strip .chip.earn  .gauge .fill { background: var(--pnl-pos); }
+  #class-gauge-strip .chip.bench .gauge .fill { background: var(--pnl-neg); }
+
+  /* "NEW CANDIDATE" flash near the G1 column — wall.js positions it via colX. */
+  #candidate-flash {
+    position: absolute; z-index: 9; top: 4px;
+    font-size: 8px; font-weight: 700; letter-spacing: 0.10em;
+    color: var(--p-ylw); white-space: nowrap;
+    opacity: 0; transition: opacity 0.4s ease;
+    pointer-events: none;
+  }
+  #candidate-flash.show { opacity: 1; }
+
+  /* ── Bottom ticker: equity / today net / 3-line bot log (extends the
+     original flow.html botlog strip). ─────────────────────────────────── */
+  .botlog-pane {
+    position: relative; z-index: 9;
+    height: 96px; overflow: hidden;
+    border-top: 1px solid var(--ghost);
+    background: rgba(5,7,11,0.92);
+  }
+  .botlog-pane .bl-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 3px 10px; border-bottom: 1px solid var(--ghost);
+    color: var(--polaris-blue); font-size: 8px; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .botlog-pane .bl-head .live { color: var(--p-grn); font-size: 7px; letter-spacing: 0.08em; }
+  .botlog-pane .bl-head .live::before { content: '●'; margin-right: 3px; }
+  .botlog-pane .bl-head .metric { margin-left: auto; color: var(--p-dim); font-weight: 400; }
+  .botlog-pane .bl-head .metric b { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 4px; }
+  .botlog-pane .bl-head .metric b.pos { color: var(--pnl-pos); }
+  .botlog-pane .bl-head .metric b.neg { color: var(--pnl-neg); }
+  .botlog-pane .bl-body { height: 72px; overflow-y: auto; padding: 3px 10px 5px; font-size: 9.5px; line-height: 1.35; }
+  .botlog-pane .bl-body::-webkit-scrollbar { width: 5px; }
+  .botlog-pane .bl-body::-webkit-scrollbar-thumb { background: var(--ghost); }
+  .botlog-pane .bl-line { white-space: pre-wrap; word-break: break-word; color: var(--p-dim); padding: 0.5px 0; }
+  .botlog-pane .bl-line .ts { color: #6c6c6c; }
+  .botlog-pane .bl-err  { color: var(--p-red); }
+  .botlog-pane .bl-warn { color: var(--p-ylw); }
+  .botlog-pane .bl-hi   { color: var(--p-cyn); font-weight: 700; }
+
+  /* Damage numbers (floating +$/-$ text, wall.js draws these on #wall-fx —
+     this class is unused by DOM but documents the palette for that canvas
+     text: green rgb(135,255,175) profit / red rgb(255,135,135) loss. */
+</style>
+</head>
+<body>
+
+<div class="wall-stage">
+  <div class="globe-pane">
+    <canvas id="sphere"></canvas>
+    <canvas id="wall-fx"></canvas>
+
+    <div class="wall-topbar">
+      <div class="brand"><span class="star">★</span>POLARIS · FLOW</div>
+      <div class="wall-pagenav">
+        <a href="/">‹ BOARD</a>
+        <a href="/flow" class="active">FLOW</a>
+      </div>
+      <div class="wall-summary" id="summary-strip">
+        <span><span class="lbl">SIG→SIZED</span><span class="val" id="s-sig2sized">–</span></span>
+        <span><span class="lbl">SIZED→FILL</span><span class="val" id="s-sized2fill">–</span></span>
+        <span><span class="lbl">AI CALLS</span><span class="val" id="s-ai">–</span></span>
+        <span><span class="lbl">DROPS</span><span class="val" id="s-drops">–</span></span>
+        <span><span class="lbl">SHADOW</span><span class="val" id="s-shadow">–</span></span>
+      </div>
+    </div>
+
+    <div id="kill-feed"></div>
+    <div id="class-badges"></div>
+    <div class="globe-ticker" id="ticker">--</div>
+  </div>
+
+  <div class="river-pane">
+    <canvas id="flow-canvas"></canvas>
+
+    <div id="col-headers"></div>
+    <div id="candidate-flash"></div>
+
+    <div class="venue-legend">
+      <div class="row"><span class="dot" style="background:#5fdfff;box-shadow:0 0 6px #5fdfff"></span>OKX</div>
+      <div class="row"><span class="dot" style="background:#a87cff;box-shadow:0 0 6px #a87cff"></span>CAPITAL</div>
+      <div class="row"><span class="dot" style="background:#ffc84f;box-shadow:0 0 6px #ffc84f"></span>ALPACA</div>
+      <div class="row"><span class="dot drop"></span>DROP</div>
+    </div>
+
+    <div id="drop-panel">
+      <div class="h"><span>DROP LANE (1h)</span><span id="drop-total">0</span></div>
+      <div id="drop-rows"><div class="empty">no drops in window</div></div>
+    </div>
+
+    <div id="verdict-ticker">
+      <div class="row dim">no AI verdicts in window</div>
+    </div>
+
+    <div id="class-gauge-strip"></div>
+  </div>
+
+  <div class="botlog-pane">
+    <div class="bl-head">
+      <span>BOT LOG</span><span class="live">live</span>
+      <span class="metric">EQUITY<b id="bl-equity">–</b></span>
+      <span class="metric">TODAY<b id="bl-today">–</b></span>
+    </div>
+    <div class="bl-body" id="botlog-body"></div>
+  </div>
+</div>
+
+<!-- Globe engine — reused as-is, same load order as the old index.html.
+     Self-binding to canvas#sphere; flow.js/wall.js own separate canvases. -->
+<script src="static/globe-core.js?v=26_tierlod"></script>
+<script src="static/globe-satellites.js?v=23_layered"></script>
+<script src="static/globe-flows.js?v=24_onionsync"></script>
+<script src="static/globe-funnel.js?v=23_layered"></script>
+<!-- River engine (retuned pane geometry for the combined wall layout) +
+     flow_classes.js (pts-classes gauge/badge/candidate-flash annotations,
+     split out to keep flow.js under the file-size cap — MUST load before
+     flow.js, which calls window.PolarisFlowClasses each poll/layout) + the
+     director camera/warp/killcam/kill-feed overlay (new, own canvas + own
+     SSE connection — no dependency on the other two). -->
+<script src="static/flow_classes.js?v=1"></script>
+<script src="static/flow.js?v=2_wall"></script>
+<script src="static/wall.js?v=1"></script>
+<script>
+  // Globe engine fits to canvas clientWidth/Height; after layout settles,
+  // nudge resize twice (rAF + delayed) so fit() picks up the grid-sized
+  // 55%-height globe pane / 45%-height river pane, not an initial full-size
+  // guess (same double-resize-dispatch pattern the old index.html used).
+  window.addEventListener('load', function () {
+    requestAnimationFrame(function () { window.dispatchEvent(new Event('resize')); });
+    setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 250);
+  });
+</script>
+</body>
+</html>

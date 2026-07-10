@@ -187,3 +187,15 @@ async def test_now_epoch_only_gates_the_cold_start_not_steady_state(
         "a warm key must fire on the normal since-last-fetch cadence "
         "regardless of the epoch-mod slot"
     )
+
+
+def test_absent_timeframe_is_due_at_any_epoch() -> None:
+    """Review MAJOR fix: 4H/1D (absent from the offset table) must be due at
+    EVERY epoch — their 3600s cadence would otherwise defer the first
+    post-restart fetch up to ~1h (daily-bar starvation class). 1m/5m stay
+    gated (max defer 5s/30s, negligible)."""
+    from polaris.scripts._production_bars import is_timeframe_due_epoch
+
+    for tf in ("4H", "1D"):
+        for epoch in (1, 1783660112, 3599, 3600, 86399):
+            assert is_timeframe_due_epoch(tf, epoch), (tf, epoch)

@@ -220,6 +220,13 @@ TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
 # defaults to 0 (byte-identical to no offset) — only the LCM-colliding trio
 # is targeted.
 TIMEFRAME_FETCH_PHASE_OFFSET_SEC: dict[str, float] = {
+    # Presence in this table = participates in the epoch bootstrap gate
+    # (max first-fetch defer == own cadence: 1m 5s / 5m 30s — negligible).
+    # 4H/1D are DELIBERATELY absent: their 3600s cadence would defer the
+    # first-ever post-restart fetch up to ~1h (daily-bar starvation class,
+    # review MAJOR 2026-07-10) — they fetch immediately, ungated.
+    "1m": 0.0,
+    "5m": 0.0,
     "15m": 10.0,
     "1H": 20.0,
 }
@@ -238,10 +245,18 @@ def is_timeframe_due_epoch(timeframe: str, now_epoch: int) -> bool:
     due-instant for the LCM-colliding buckets so their steady-state firing
     stays staggered forever after.
     """
+    # Review MAJOR (2026-07-10 tick-w1): only the explicitly-offset (LCM-
+    # colliding) timeframes get the bootstrap gate. An absent timeframe must
+    # be due IMMEDIATELY — gating it on epoch%cadence deferred the first-ever
+    # 4H/1D fetch up to ~1h after each 07:30 restart (daily-bar starvation
+    # class), contradicting the offset table's own "absent = byte-identical"
+    # contract.
+    if timeframe not in TIMEFRAME_FETCH_PHASE_OFFSET_SEC:
+        return True
     cadence = int(TIMEFRAME_FETCH_CADENCE_SEC.get(timeframe, 5.0))
     if cadence <= 0:
         return True
-    offset = int(TIMEFRAME_FETCH_PHASE_OFFSET_SEC.get(timeframe, 0.0)) % cadence
+    offset = int(TIMEFRAME_FETCH_PHASE_OFFSET_SEC[timeframe]) % cadence
     return (int(now_epoch) - offset) % cadence == 0
 
 # Default per-fetch bar count. Intraday timeframes keep 240 (the Alpaca free-tier

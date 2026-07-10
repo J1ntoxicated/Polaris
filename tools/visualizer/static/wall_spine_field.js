@@ -192,6 +192,7 @@
       if (stratPool[k]) stratPool[k].push(n);
     });
     const perStratIdx = new Map();
+    const candRelaxIds = []; // candidates across venues — relaxed apart below
     ['okx', 'cap', 'alp'].forEach((vk) => {
       const pool = stratPool[vk];
       const ticks = hashShuffle((byCluster.mkt || []).filter((n) => String(n.exchange || '').slice(0, 3).toLowerCase() === vk));
@@ -231,23 +232,51 @@
         const total = Math.max(1, Math.ceil(cands.length / pool.length));
         const r = rngFor(n.id + ':orb');
         const gauss = () => (r() + r() + r() - 1.5) / 1.5;
-        // Jarvis wider candidate band (Jin 2026-07-10 "좀 더 큰 밴드로",
-        // feat/jarvis-language): xSig cap 150->175, vertical spread 26->40,
-        // y clamp 0.40H->0.425H (prox falloff denominator follows dy's scale).
-        const xSig = Math.min(175, 46 + 11 * Math.sqrt(total));
-        const dySig = 40;
+        // Jin 2026-07-11 "자리 넓은데 너무 모여있다 / 좀 퍼치라": scatter
+        // widened hard (xSig cap 175->340, dy 40->68) and the x clamp opens
+        // 0.62W->0.80W — the top-right sky is empty (execution district
+        // lives lower, y>0.5H), so candidates may sweep across it.
+        const xSig = Math.min(340, 60 + 18 * Math.sqrt(total));
+        const dySig = 68;
         const dx = gauss() * xSig;
         const dy = gauss() * dySig;
         const sc = screen[st.id];
         const anchorY = sc.bandAnchorY != null ? sc.bandAnchorY : sc.y;
-        const x = Math.max(8, Math.min(W * 0.62, sc.x + dx));
-        const y = Math.max(14, Math.min(H * 0.425,
+        const x = Math.max(8, Math.min(W * 0.80, sc.x + dx));
+        const y = Math.max(20, Math.min(H * 0.435,
           anchorY + dy + (bandY(x) - bandY(sc.x))));
         screen[n.id] = { x, y };
         const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / dySig) * (dy / dySig)));
         screen[n.id].coreBoost = prox;
         tickerStrat.set(n.id, st.id);
+        candRelaxIds.push(n.id);
       });
+    });
+    // Min-separation relaxation (Jin 2026-07-11 "왤케 따닥따닥이야"): a few
+    // deterministic repel passes so no two candidate dots overlap — each
+    // ticker stays individually readable (뭉침 금지 계약).
+    const SEP = 17;
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 0; i < candRelaxIds.length; i++) {
+        const a = screen[candRelaxIds[i]];
+        for (let j = i + 1; j < candRelaxIds.length; j++) {
+          const b = screen[candRelaxIds[j]];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 >= SEP * SEP) continue;
+          const d = Math.sqrt(d2) || 0.001;
+          const push = (SEP - d) / 2;
+          dx /= d; dy /= d;
+          if (d2 === 0) { dx = 1; dy = 0; }
+          a.x -= dx * push; a.y -= dy * push;
+          b.x += dx * push; b.y += dy * push;
+        }
+      }
+    }
+    candRelaxIds.forEach((id) => {
+      const s = screen[id];
+      s.x = Math.max(8, Math.min(W * 0.80, s.x));
+      s.y = Math.max(20, Math.min(H * 0.435, s.y));
     });
     // watch (G4 pre-entry probes) ride NEXT TO their ticker inside the
     // constellation ("전략이랑 프로브랑 같이").

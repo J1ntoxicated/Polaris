@@ -30,6 +30,9 @@
   const ctx = canvas.getContext('2d');
 
   const GATE_CORE = '#eafcff', GATE_HALO = '#5fd7ff', GATE_TICK = '#ffb454';
+  // Jin 2026-07-10 "각 게이트 색도 좀 다르게": per-gate identity hues G1→G8
+  // (cool→warm progression so pipeline depth also reads by color).
+  const GATE_COLORS = ['#5fa8ff', '#5fdfff', '#6fffc4', '#9dff6f', '#ffe066', '#ffb454', '#ff7a9e', '#c48aff'];
   const GATE_SWEEP = '#87ffe0'; // graft 3 (radial) — activity-load sweep, distinct from the jarvis reticle tick color
 
   const GATES = [
@@ -112,12 +115,13 @@
       // graft 1a — core/halo brightness tier lowered so the relay-hubs read
       // as woven INTO the field at rest, and only pop when actually firing.
       const core = 10 + fireT * 5.5, halo = 21 + fireT * 9;
+      const gc = GATE_COLORS[i] || GATE_HALO;
       ctx.globalCompositeOperation = 'lighter';
-      field.drawDot(ctx, gs.x, gs.y, halo, GATE_HALO, 0.08 + fireT * 0.24, 12 + fireT * 15);
+      field.drawDot(ctx, gs.x, gs.y, halo, gc, 0.10 + fireT * 0.24, 12 + fireT * 15);
       field.drawDot(ctx, gs.x, gs.y, core, GATE_CORE, 0.68 + fireT * 0.28, 8 + fireT * 13);
       ctx.globalCompositeOperation = 'source-over';
       ctx.beginPath(); ctx.arc(gs.x, gs.y, core, 0, Math.PI * 2);
-      ctx.strokeStyle = field.rgba(GATE_HALO, 0.5); ctx.lineWidth = 1; ctx.stroke();
+      ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 1; ctx.stroke();
 
       // jarvis arc-ring reticle (rotating tick band)
       const rot = t * 0.05 + i * 0.61, ringR = 40, span = Math.PI * 1.45;

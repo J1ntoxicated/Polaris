@@ -185,10 +185,19 @@
       // between comets. Amplitude is sub-pixel-to-2px — "current", not motion.
       if (node.cluster !== 'mkt') {
         const rb = rngFor(node.id + ':bob');
-        s.bobAmp = 0.6 + depth * 0.55;
+        // Jin 2026-07-10 "액티비티 있는 애들은 움직이고 전략은 스태틱":
+        // pos/watch = the living probes — visible slow wander (4-7px);
+        // strat = anchors, fully static; the rest keep the sub-2px current.
+        if (node.cluster === 'strat') {
+          s.bobAmp = 0;
+        } else if (node.cluster === 'pos' || node.cluster === 'watch') {
+          s.bobAmp = 4 + rb() * 3;
+        } else {
+          s.bobAmp = 0.6 + depth * 0.55;
+        }
         s.bobSpeed = 0.35 + rb() * 0.35;
         s.phaseOff = rb() * Math.PI * 2;
-        livingIds.push(node.id);
+        livingIds.push(node.id); // amp 0 (strat) draws static at its anchor
       }
     });
   }

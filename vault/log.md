@@ -383,3 +383,4 @@
 2026-07-09 23:57 [Edit: /Users/jinyoon/Projects/Polaris/.claude/plans/structural_roadmap_2026-07-10.md]
 2026-07-09 daily-auto [closes=109 pnl_usd=-1401.08 opens=110 faults=1 restarts=2]
 - 2026-07-10 merge(cloud-river): /flow 재구성 배포 — 구체→좌우 스캐터 클라우드(닷=티커, G1→G8 강 컬럼 정렬 PolarisWallLayout 계약, 베뉴 밴드 3단) · Jin 이펙트 원칙 반영(카메라 완전고정·전화면 이펙트 0·방사선 0·전부 닷-로컬, 메모리 영속 feedback_dashboard_element_local_motion_no_zoom) · 3:7 분할(좌 /m iframe·우 월, ?nomobile=1) · 강 의미론 픽스(G5 SIZED/KILL·G6 LIVE/checks·G7 exits/HOLD — Jin "모니터 586?" 지적, 실체=포지션 9개×재체크 430/h 표시 결함) · wall.js 삭제·events_bus 단일 SSE. Opus APPROVE_WITH_NITS(NIT tickerToKey 프룬 즉시 픽스). 라이브 검증 30.1%/81fps/에러0
+- 2026-07-10 fix(dashboard): 보드 1s 깜빡임 근절(비테이블 섹션 write-on-change 메모가드+KPI morphHtml 노드정체성 유지 — SVG 재래스터/배지 재생성이 원인) + 모바일↔보드 단일자 정렬(Today% 분모 equity→시드 통일로 -0.34%vs-0.39% 괴리 해소, Avg-R/Session 메트릭 패리티). 직접 수정·Playwright 검증(노드 identity 생존 3/3·양면 % 일치·에러0)

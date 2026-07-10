@@ -13,6 +13,10 @@ supersedes: structural_roadmap_2026-06-22.md
 - 1.4 [BUILD] candidate factory — evolve/P0a 엔진 재개, 생존자→virtual PROVE 배선 + 1차 돌파 클로닝 캠페인 (wf_f4583e9e)
 - 1.5 [BUILD] Kelly/tier 첫 증폭 관찰 — strategy_risk_state 표본 축적 중(11행), 승자 사이즈업 발화 대기
 - 1.6 [DONE] connors_rsi2 1H 실험 실패 판정(-$588/일) → 1D 되돌림. 하향 실험은 per-전략 evidence로 판정
+- 1.7 [DEBATE-DONE] 수수료 분리 판정 v0 배포(거동 0·섀도우 축적) → v1 flip은 섀도우 120 발산 기준
+- 1.8 [BUILD] Capital 유령 노출 61× 수술 — sizing_zero 사유 스탬핑 포함 (wf_e77e4229)
+- 1.9 [QUEUED] 레짐 v2 공장 — 6상태 섀도우 채널+분리력 채점(regime_factory 디베이트 R1 수렴, flip 전 R2 의무)
+- 1.10 [BUILD] 틱 W2 — 단일-writer 마이그레이션(락 사망 소멸→초 단위 틱)
 
 ## R2 — 동면 정리 (안 헷갈리게)
 - 2.1 [BUILD] 동면 전수조사+삼분류 — DB무덤·죽은모듈·env-inert·무소비 이벤트 → WAKE/DELETE/KEEP-DORMANT (wf_005f9051)
@@ -29,11 +33,6 @@ supersedes: structural_roadmap_2026-06-22.md
 - 4.1 [DEBATE] EARN 승격 세트 확정 — PtS FSM이 virtual 실사이즈 증거로 선별한 전략만
 - 4.2 [DECISION] POLARIS_VIRTUAL_ACCOUNT=0 flip 조건 — 검증 기준·리콘 재연결·튜닝 (feedback_virtual_account_first_then_real_wire)
 - 4.3 [BUILD] real-와이어 시 PROVE probe 경로 발효 확인 (5f3512e forward-fix, virtual에선 no-op)
-
-- 1.7 [DEBATE-DONE] 수수료 분리 판정 v0 배포(거동 0·섀도우 축적) → v1 flip은 섀도우 120 발산 기준
-- 1.8 [BUILD] Capital 유령 노출 61× 수술 — sizing_zero 사유 스탬핑 포함 (wf_e77e4229)
-- 1.9 [QUEUED] 레짐 v2 공장 — 6상태 섀도우 채널+분리력 채점(regime_factory 디베이트 R1 수렴, flip 전 R2 의무)
-- 1.10 [BUILD] 틱 W2 — 단일-writer 마이그레이션(락 사망 소멸→초 단위 틱)
 
 ## R5 — 이월 큐 (우선순위 낮음, 의도적 defer)
 - 5.1 [DEBATE] counterfactual auto-reader — 계측→라이브결정 폐루프는 아키텍처 변경, stale_book이 실행가능분 흡수함

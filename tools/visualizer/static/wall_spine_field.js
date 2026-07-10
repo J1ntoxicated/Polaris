@@ -229,25 +229,17 @@
         const st = pool[i % pool.length];
         const k = perStratIdx.get(st.id) || 0;
         perStratIdx.set(st.id, k + 1);
-        const total = Math.max(1, Math.ceil(cands.length / pool.length));
         const r = rngFor(n.id + ':orb');
         const gauss = () => (r() + r() + r() - 1.5) / 1.5;
-        // Jin 2026-07-11 "자리 넓은데 너무 모여있다 / 좀 퍼치라": scatter
-        // widened hard (xSig cap 175->340, dy 40->68) and the x clamp opens
-        // 0.62W->0.80W — the top-right sky is empty (execution district
-        // lives lower, y>0.5H), so candidates may sweep across it.
-        const xSig = Math.min(340, 60 + 18 * Math.sqrt(total));
+        // Jin 2026-07-11 "오른쪽 폭 다 써도 되는거 아니야": candidates sweep
+        // the FULL width along the band curve — the strategy relationship
+        // lives in the wires + migration journey, not in x-position. The
+        // sky above the monitor/exit/reflector district was dead space.
         const dySig = 68;
-        const dx = gauss() * xSig;
-        const dy = gauss() * dySig;
-        const sc = screen[st.id];
-        const anchorY = sc.bandAnchorY != null ? sc.bandAnchorY : sc.y;
-        const x = Math.max(8, Math.min(W * 0.80, sc.x + dx));
-        const y = Math.max(20, Math.min(H * 0.435,
-          anchorY + dy + (bandY(x) - bandY(sc.x))));
+        const x = Math.max(8, Math.min(W * 0.97, W * (0.03 + r() * 0.94)));
+        const y = Math.max(20, Math.min(H * 0.435, bandY(x) + gauss() * dySig));
         screen[n.id] = { x, y, isCand: true };
-        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / dySig) * (dy / dySig)));
-        screen[n.id].coreBoost = prox;
+        screen[n.id].coreBoost = Math.min(1, n.intensity != null ? +n.intensity : 0.3);
         tickerStrat.set(n.id, st.id);
         candRelaxIds.push(n.id);
       });
@@ -275,7 +267,7 @@
     }
     candRelaxIds.forEach((id) => {
       const s = screen[id];
-      s.x = Math.max(8, Math.min(W * 0.80, s.x));
+      s.x = Math.max(8, Math.min(W * 0.97, s.x));
       s.y = Math.max(20, Math.min(H * 0.435, s.y));
     });
     // watch (G4 pre-entry probes) ride NEXT TO their ticker inside the
@@ -287,7 +279,9 @@
       const mkt = allNodes.find((m) => m.cluster === 'mkt' && m.ticker === n.ticker && m.exchange === n.exchange);
       const base = mkt && screen[mkt.id];
       const r = rngFor(n.id + ':wt');
-      const x = Math.min(W * 0.60, base ? base.x : W * (0.22 + r() * 0.38));
+      // full-width follow (Jin 2026-07-11): the 0.60W clamp piled every
+      // right-side watch chip onto one exact x — track the ticker instead.
+      const x = Math.min(W * 0.97, base ? base.x : W * (0.22 + r() * 0.38));
       screen[n.id] = { x, y: H * 0.445 + (r() - 0.5) * H * 0.02 };
       if (base) {
         // short drop-line ticker -> its watch entry (the "선발" visual)
@@ -972,12 +966,8 @@
       drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.95, 0);
       ctx.globalCompositeOperation = 'lighter';
       // slimmer bracket (Jin 2026-07-11 "너무 과밀집" — ornament weight down)
+      // (orbit moon removed same day — Jin "삥삥 도는거 좀 징그러")
       drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.34 + 0.24 * lvl, lockAge);
-      // Jarvis orbit moon: a tiny satellite circling the firing ticker —
-      // angular speed ∝ fire intensity, so rotation MEANS activity.
-      const orbA = now * 0.001 * (0.5 + 1.5 * lvl) + (s.phaseOff || 0);
-      const orbR = Math.max(6, s.r * 3.2);
-      drawDot(ctx, x + Math.cos(orbA) * orbR, y + Math.sin(orbA) * orbR, 1.1, col, 0.7, 0);
     };
     firingIds.forEach((id) => {
       if (migrations.has(id)) return;

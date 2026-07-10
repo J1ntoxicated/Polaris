@@ -93,8 +93,12 @@
     const all = Array.from(dormant.values());
     const activeSet = all.filter((d) => d.restX != null || d.t < 1);
     const idleAll = all.filter((d) => d.restX == null && d.t >= 1);
-    const budget = Math.max(0, CLOUD_DOT_CAP - activeSet.length);
-    idleList = strideSample(idleAll, budget);
+    // firing dots stay in idleList (they need assignGrid slots) but are never
+    // stride-sampled out — a hot ticker must stay rendered while glowing.
+    const firingIdle = idleAll.filter((d) => d.firing);
+    const dustIdle = idleAll.filter((d) => !d.firing);
+    const budget = Math.max(0, CLOUD_DOT_CAP - activeSet.length - firingIdle.length);
+    idleList = firingIdle.concat(strideSample(dustIdle, budget));
     dormantRenderList = idleList.concat(activeSet);
     assignGrid();
   }
@@ -141,9 +145,17 @@
             tx0: 0, ty0: 0, tx1: 0, ty1: 0, returning: false,
             driftSeed: Math.random() * 1000, twinkleSeed: Math.random() * 1000,
             jx: Math.random() - 0.5, jy: Math.random() - 0.5,
-            lastActivityTs: 0,
+            lastActivityTs: 0, focus: false, firing: false, glow: 0,
           });
         }
+        // live L0 state (Jin 2026-07-10 "지켜보는 애들은 글로잉 해야"):
+        // firing = signal activity now (graph.json state/signal_count_30m);
+        // focus = L0 watchlist member. Refreshed every roster poll — glow
+        // tiers in drawDormant read these, no fabrication (roster is SSOT).
+        const dd = dormant.get(key);
+        dd.focus = n.active === true;
+        dd.firing = n.state === 'firing' || (n.signal_count_30m || 0) > 0;
+        dd.glow = Math.max(0, Math.min(1, n.intensity != null ? +n.intensity : 0));
       } else if (n.cluster === 'pos') {
         // sid = strategy_id — the per-lot discriminator (venue:ticker alone
         // collapses two open positions in the SAME instrument held by two
@@ -296,8 +308,30 @@
       dot.x = x; dot.y = y;
       const twinkle = 0.35 + 0.35 * Math.sin(now / 1400 + dot.twinkleSeed);
       const idle = dot.restX == null && dot.t >= 1;
-      const alpha = idle ? 0.14 + twinkle * 0.22 : 0.85;
-      const r = idle ? 1.5 : 3;
+      // Glow tiers (Jin 2026-07-10 "시그널/워치/지켜보는 애들은 글로잉"):
+      // firing (live signal, roster state/signal_count_30m) > mid-pipeline >
+      // focus (L0 watchlist) > dust. Halo = 2 concentric low-alpha arcs at
+      // the dot only (element-local, no shadowBlur — cheap at firing counts).
+      const hot = dot.firing || !idle;
+      if (hot) {
+        const pulse = 0.75 + 0.25 * Math.sin(now / 600 + dot.twinkleSeed);
+        const boost = 0.55 + 0.45 * (dot.glow || 0);
+        const core = idle ? 2.2 : 3;
+        ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], 0.13 * pulse * boost);
+        ctx.beginPath(); ctx.arc(x, y, core * 3.4, 0, 6.2832); ctx.fill();
+        ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], 0.3 * pulse * boost);
+        ctx.beginPath(); ctx.arc(x, y, core * 1.9, 0, 6.2832); ctx.fill();
+        ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], Math.min(1, 0.7 + 0.3 * boost));
+        ctx.beginPath(); ctx.arc(x, y, core, 0, 6.2832); ctx.fill();
+        continue;
+      }
+      // baseline brightness scales with the roster's per-ticker intensity
+      // (0..1, L0 watch level) — `active` alone is 602/638 so a binary lift
+      // would wash out contrast; continuous intensity keeps the field readable
+      // with the watched names visibly brighter (globe-era precedent).
+      const focusLift = dot.focus ? 0.06 + 0.14 * (dot.glow || 0) : 0;
+      const alpha = 0.14 + twinkle * 0.22 + focusLift;
+      const r = dot.focus && dot.glow > 0.5 ? 1.9 : 1.5;
       ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], alpha);
       ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
     }

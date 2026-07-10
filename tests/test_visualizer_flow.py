@@ -300,22 +300,41 @@ def _memdb_with_classes() -> sqlite3.Connection:
             venue TEXT, strategy_id TEXT, strategy_class TEXT,
             window_w INTEGER, intent_ring TEXT
         );
+        CREATE TABLE score_f_events (
+            position_id TEXT, venue TEXT, strategy_id TEXT, day TEXT,
+            closed_ts INTEGER, net_usd REAL, fee_denom_usd REAL,
+            score_contrib REAL
+        );
         """
     )
     return conn
 
 
+def _insert_score_events(conn: sqlite3.Connection, venue: str, sid: str, n: int) -> None:
+    for i in range(n):
+        conn.execute(
+            "INSERT INTO score_f_events VALUES (?, ?, ?, '2026-07-10', ?, 1.0, 1.0, 1.0)",
+            (f"pos_{sid}_{i}", venue, sid, 1000 + i),
+        )
+
+
 def test_classes_reports_class_and_window_fill() -> None:
+    # 2026-07-10 gauge-honesty fix: ``filled`` counts REAL judgment evidence
+    # (score_f_events rows — what the transition FSM actually consumes) and
+    # must ignore the vestigial intent_ring column (no production writer →
+    # it displayed a permanent 0/20 lie while the judge was in fact fed).
     conn = _memdb_with_classes()
     conn.execute(
         "INSERT INTO strategy_class VALUES "
-        "('okx', 'donchian55', 'PROVE', 20, '[1.0, -0.5, 2.0]')"
+        "('okx', 'donchian55', 'PROVE', 20, '[]')"
     )
+    _insert_score_events(conn, "okx", "donchian55", 3)
     conn.execute(
         "INSERT INTO strategy_class VALUES "
         "('capital', 'connors_rsi2', 'EARN', 20, ?)",
-        (json.dumps([0.1] * 25),),  # ring longer than window_w -> capped
+        (json.dumps([0.1] * 25),),  # stale ring must NOT drive the gauge
     )
+    _insert_score_events(conn, "capital", "connors_rsi2", 25)  # > window -> capped
     out = fd.build_flow_stats(conn, now_s=NOW)
     by_id = {c["strategy_id"]: c for c in out["classes"]}
     assert by_id["donchian55"] == {
@@ -323,6 +342,18 @@ def test_classes_reports_class_and_window_fill() -> None:
         "strategy_class": "PROVE", "window_w": 20, "filled": 3,
     }
     assert by_id["connors_rsi2"]["filled"] == 20  # capped at window_w
+
+
+def test_classes_window_fill_zero_when_no_score_events() -> None:
+    # ring text present but no score_f_events rows -> honest 0 (and no crash
+    # when the score_f_events table itself is absent on pre-classes DBs).
+    conn = _memdb_with_classes()
+    conn.execute(
+        "INSERT INTO strategy_class VALUES "
+        "('okx', 'supertrend', 'PROVE', 20, '[1.0, 2.0]')"
+    )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    assert out["classes"][0]["filled"] == 0
 
 
 def test_classes_empty_when_table_absent() -> None:

@@ -108,38 +108,38 @@ def _pct(numer: int, denom: int) -> float:
     return round(100.0 * numer / denom, 1) if denom else 0.0
 
 
-def _decode_ring(raw: Any) -> list[float]:
-    """Best-effort JSON-array decode (mirrors
-    ``polaris.core.lifecycle.recover_classes._decode_ring``, duplicated here
-    rather than imported to keep this display-only module's coupling at the
-    ``polaris.scripts.dashboard`` layer only)."""
-    try:
-        value = json.loads(raw) if raw else []
-    except (TypeError, ValueError):
-        return []
-    return list(value) if isinstance(value, list) else []
-
-
 def _class_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Per-(venue, strategy_id) pts-classes routing state: current class
     (EARN/PROVE/BENCH/KILL) + a score_F window-fill fraction (``filled`` of
-    ``window_w``, from the live ``intent_ring`` sample count). Feeds the flow
-    page's PROVE-class particle styling, EARN/BENCH transition badges, and
-    the per-strategy window gauge strip. Missing table -> empty (pre-
-    pts-classes DBs)."""
+    ``window_w``). Feeds the flow page's PROVE-class particle styling,
+    EARN/BENCH transition badges, and the per-strategy window gauge strip.
+    Missing table -> empty (pre-pts-classes DBs).
+
+    ``filled`` counts ``score_f_events`` rows — the evidence stream the
+    transition FSM actually consumes (``_production_close_classes.py``
+    assembles ``intent_scores`` from it). The ``strategy_class.intent_ring``
+    column has NO production writer (vestigial: schema + boot-recovery reader
+    only), so reading it here showed a permanent "0/20" while the judge was
+    in fact fully fed (2026-07-10 gauge-honesty fix)."""
+    counts: dict[tuple[str, str], int] = {}
+    for v, s, n in _safe_query(
+        conn,
+        "SELECT venue, strategy_id, COUNT(*) FROM score_f_events "
+        "GROUP BY venue, strategy_id",
+    ):
+        counts[(str(v), str(s))] = int(n or 0)
     rows = _safe_query(
         conn,
-        "SELECT venue, strategy_id, strategy_class, window_w, intent_ring "
-        "FROM strategy_class",
+        "SELECT venue, strategy_id, strategy_class, window_w FROM strategy_class",
     )
     out: list[dict[str, Any]] = []
-    for venue, strategy_id, klass, window_w, intent_ring_json in rows:
+    for venue, strategy_id, klass, window_w in rows:
         w = int(window_w or 0)
-        filled = min(len(_decode_ring(intent_ring_json)), w) if w else 0
+        n_events = counts.get((str(venue), str(strategy_id)), 0)
         out.append({
             "venue": str(venue), "strategy_id": str(strategy_id),
             "strategy_class": str(klass or "PROVE"),
-            "window_w": w, "filled": filled,
+            "window_w": w, "filled": min(n_events, w) if w else 0,
         })
     return out
 

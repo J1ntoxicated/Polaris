@@ -57,6 +57,10 @@
   const GATE_IDS = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8'];
 
   let CLUSTER_COLOR = {};
+  // Venue glow colors — same hexes as the page legend (.wall-venues) so a
+  // firing ticker reads as "its exchange is alive" (Jin 2026-07-10).
+  const VENUE_COLOR = { okx: '#5fdfff', cap: '#a87cff', alp: '#ffc84f' };
+  const firingIds = new Set(); // mkt ids firing NOW (roster-driven, 1s poll)
   let W = 1344, H = 962;
   const screen = {};      // id -> {x,y,r,depth,color,baseAlpha,bobAmp,bobSpeed,phaseOff,fireUntil,node}
   let gateScreen = [];    // 8x {x,y,fireUntil,pulsePhase} — index-aligned with GATE_IDS
@@ -170,6 +174,7 @@
   // K-NN scan every tick (that only reruns on an actual structural change —
   // see wall_spine_hud.js's node-count fingerprint check).
   function refreshNodeState(nodes) {
+    firingIds.clear();
     (nodes || []).forEach((n) => {
       const s = screen[n.id];
       if (!s) return;
@@ -178,6 +183,17 @@
       else if (n.cluster === 'watch') s.baseAlpha = 0.35 + (n.intensity || 0.4) * 0.25;
       else if (n.cluster === 'strat') s.baseAlpha = 0.55 + Math.min(0.35, (n.intensity || 0.3) * 0.4);
       else s.baseAlpha = 0.5 + (n.intensity || 0.4) * 0.3;
+      // Jin 2026-07-10 "살아있는 애들은 익스체인지 색으로 빛나야": a mkt dot
+      // whose roster state says it's firing NOW gets a persistent
+      // venue-colored breathing glow (drawn live in drawField — the dust
+      // itself stays baked in the static layer). Roster-driven, no
+      // fabrication; refreshed every 1s poll.
+      if (n.cluster === 'mkt'
+          && (n.state === 'firing' || (n.signal_count_30m || 0) > 0)) {
+        s.venueColor = VENUE_COLOR[String(n.exchange || '').slice(0, 3).toLowerCase()] || s.color;
+        s.fireLevel = Math.max(0.35, Math.min(1, n.intensity != null ? +n.intensity : 0.6));
+        firingIds.add(n.id);
+      }
     });
   }
 
@@ -454,7 +470,19 @@
       const by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
       drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
     }
+    // Persistent venue-colored breathing glow on firing tickers (element-
+    // local halo; additive so it blooms over the baked dust beneath it).
     ctx.globalCompositeOperation = 'lighter';
+    firingIds.forEach((id) => {
+      const s = screen[id];
+      if (!s) return;
+      const breathe = 0.72 + 0.28 * Math.sin(now / 650 + s.phaseOff);
+      const lvl = (s.fireLevel || 0.6) * breathe;
+      const col = s.venueColor || s.color;
+      drawDot(ctx, s.x, s.y, s.r * 3.6, col, 0.10 * lvl, 0);
+      drawDot(ctx, s.x, s.y, s.r * 1.9, col, 0.26 * lvl, 0);
+      drawDot(ctx, s.x, s.y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
+    });
     activeGlowIds.forEach((id) => {
       const s = screen[id];
       if (!s) { activeGlowIds.delete(id); return; }

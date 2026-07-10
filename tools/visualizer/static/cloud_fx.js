@@ -19,6 +19,13 @@
  * wall.js killcam vignette is abolished per spec (killcam replaced by the
  * local red shatter burst + kill-feed line, both already dot-anchored).
  *
+ * Jin 2026-07-10 (feat/flat-neural-map): 3 additions for the "Flat Neural
+ * Map" redesign — spawnAiHalo (G3/G4 gate-node AI verdict ring, replaces the
+ * removed #verdict-ticker DOM panel), spawnTickPulse (ambient G6-monitoring
+ * mark on a position orbit dot), spawnFeedbackArc (G8 -> Z2 strategy-node
+ * "lesson" particle, same math as the pre-existing comet tail). Everything
+ * else on this page is unchanged.
+ *
  * Display-only — draws pixels, reads/writes nothing that gates/sizes/routes
  * a trade.
  */
@@ -61,6 +68,21 @@
   function spawnLootBeam(key, x, y) { spawnLarge('loot', key, x, y); }
   function spawnSparkleBurst(key, x, y) { spawnLarge('sparkle', key, x, y, { color: [0x87, 0xff, 0xaf] }); }
   function spawnShatter(key, x, y) { spawnLarge('shatter', key, x, y, { color: [0xff, 0x87, 0x87] }); }
+
+  // ── "Flat Neural Map" additions (Jin 2026-07-10, feat/flat-neural-map) ──
+  // Local-only, dot-anchored — same no-full-screen-fx rule as everything else
+  // in this file. spawnAiHalo = G3/G4 AI-judge verdict pulse (replaces the
+  // removed #verdict-ticker text panel — the AI signal now reads as a ring
+  // pulse ON the gate node itself). spawnTickPulse = the tiny ambient "still
+  // being monitored" mark on an open-position orbit dot (G6 check cadence is
+  // NOT itself streamed over SSE — see cloud_nodes.js's comment — so this is
+  // an honest AMBIENT cadence indicator, never claimed as a specific event).
+  // spawnFeedbackArc = the G8 Reflector -> Z2 strategy-node "lesson" particle
+  // (the learning-loop close, reusing the same comet-tail math as the old
+  // G8->G1 respawn arc, just re-labelled for its new endpoint).
+  function spawnAiHalo(x, y, color) { small.push({ type: 'aihalo', x, y, color, t: 0, dur: 1.1 }); }
+  function spawnTickPulse(x, y) { small.push({ type: 'tick', x, y, t: 0, dur: 0.5 }); }
+  function spawnFeedbackArc(x0, y0, x1, y1) { small.push({ type: 'comet', x0, y0, x1, y1, t: 0, dur: 1.2, lesson: true }); }
 
   // ── Kill feed (top-right DOM panel, newest on top, capped 6 — same
   // element/markup wall.js used to own before it folded into cloud.js). ────
@@ -147,6 +169,14 @@
       ctx.restore();
     } else if (f.type === 'comet') {
       drawComet(ctx, f);
+    } else if (f.type === 'aihalo') {
+      const r = 8 + f.t * 16, a = (1 - f.t) * 0.75;
+      ctx.strokeStyle = rgba(f.color, a); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, 6.2832); ctx.stroke();
+    } else if (f.type === 'tick') {
+      const r = 2.5 + f.t * 5, a = (1 - f.t) * 0.35;
+      ctx.strokeStyle = `rgba(220,226,240,${a})`; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, 6.2832); ctx.stroke();
     }
   }
   // G8 Reflector -> G1 re-spawn: a short comet-tail arc (gentle sine hump),
@@ -164,6 +194,7 @@
   window.PolarisCloudFx = {
     spawnRadarPing, spawnHitFlash, spawnDamageNumber, spawnCometTail,
     spawnLootBeam, spawnSparkleBurst, spawnShatter,
+    spawnAiHalo, spawnTickPulse, spawnFeedbackArc,
     pushKillFeed, tick, draw,
   };
 })();

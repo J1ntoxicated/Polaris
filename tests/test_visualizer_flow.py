@@ -289,6 +289,7 @@ def test_graceful_on_missing_tables() -> None:
     # (visual-wall director-mode backend extension, 2026-07-10).
     assert out["classes"] == []
     assert out["survivor_admissions_recent"] == []
+    assert out["strategy_activity"] == []
 
 
 def _memdb_with_classes() -> sqlite3.Connection:
@@ -334,6 +335,49 @@ def test_survivor_admissions_recent_empty_when_table_absent() -> None:
     conn = _memdb()  # no survivor_admissions table
     out = fd.build_flow_stats(conn, now_s=NOW)
     assert out["survivor_admissions_recent"] == []
+
+
+def _memdb_with_strategy_cols() -> sqlite3.Connection:
+    """Base fixture + the real-schema ``strategy_id`` columns on signals/fills
+    (present on live DBs, absent from the base ``_memdb()`` fixture so the
+    older-shape tests above stay unaffected) — feeds the Z2 strategy-node
+    activity-sizing field (Jin 2026-07-10, feat/flat-neural-map)."""
+    conn = _memdb()
+    conn.executescript(
+        "ALTER TABLE signals ADD COLUMN strategy_id TEXT;"
+        "ALTER TABLE fills ADD COLUMN strategy_id TEXT;"
+    )
+    return conn
+
+
+def test_strategy_activity_counts_signals_and_fills_per_strategy() -> None:
+    conn = _memdb_with_strategy_cols()
+    conn.execute(
+        "INSERT INTO signals (signal_id, instrument_id, strategy_id) VALUES "
+        "('sig1', 'okx:BTC-USDT', 'donchian55')"
+    )
+    conn.execute(
+        "INSERT INTO gate_events VALUES "
+        "('e1', 2, 'PASS', NULL, NULL, 'sig1', ?)",
+        (NOW - 5,),
+    )
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, ts_ms, is_close, strategy_id) "
+        "VALUES ('f1', 'okx', ?, 0, 'donchian55')",
+        (NOW * 1000,),
+    )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    row = next(r for r in out["strategy_activity"] if r["strategy_id"] == "donchian55")
+    assert row == {
+        "venue": "okx", "strategy_id": "donchian55",
+        "signals_n": 1, "fills_n": 1,
+    }
+
+
+def test_strategy_activity_empty_when_strategy_id_column_absent() -> None:
+    conn = _memdb()  # base fixture — signals/fills have no strategy_id column
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    assert out["strategy_activity"] == []
 
 
 def test_survivor_admissions_recent_reads_when_table_present() -> None:

@@ -19,7 +19,8 @@
  * `classes` / `survivor_admissions_recent` fields.
  *
  * Data:
- *   /api/flow_stats  (30s TTL, matches the server cache) → per-gate 1h volume +
+ *   /api/flow_stats  (5s TTL, matches the server cache — Jin 2026-07-10
+ *                     feat/flat-neural-map realtime-sync) → per-gate 1h volume +
  *                     venue breakdown, fills volume, drop-lane reasons, AI-judge
  *                     shadow mismatches + recent verdicts, conversion summary,
  *                     pts-classes routing state, recent universe admissions.
@@ -151,7 +152,7 @@
     }).join('');
   }
 
-  // ── Live stat state (from /api/flow_stats, 30s TTL — matches server cache) ─
+  // ── Live stat state (from /api/flow_stats, 5s TTL — matches server cache) ──
   let stats = null;
   let statsByGate = {};
   let classByKey = {};   // "venue|strategy_id" -> {strategy_class, window_w, filled}
@@ -183,10 +184,16 @@
       renderHeaders();
       renderSummary(d);
       renderDrops(d);
-      renderVerdicts(d);
-      // pulse-ring any verdict newer than the last poll (30s cadence AI pulse).
+      // pulse-ring any verdict newer than the last poll (5s cadence AI pulse)
+      // — the river's own gate-column ring (spawnVerdictPulse) AND, if the
+      // cloud pane above is loaded, that same verdict's Z3/Z5 gate-node halo
+      // (cloud_nodes.js's onVerdict — replaces the removed #verdict-ticker
+      // text panel, Jin 2026-07-10 feat/flat-neural-map).
       for (const v of d.verdicts_recent || []) {
-        if (v.ts > prevVerdictTs) spawnVerdictPulse(v);
+        if (v.ts > prevVerdictTs) {
+          spawnVerdictPulse(v);
+          if (window.PolarisCloudNodes) window.PolarisCloudNodes.onVerdict(v);
+        }
       }
       // pts-classes river annotations (gauge strip / EARN·BENCH badge pop /
       // NEW CANDIDATE flash) — split into flow_classes.js to keep this file
@@ -215,17 +222,6 @@
     rowsEl.innerHTML = drops.map((r) =>
       `<div class="row"><span>${esc(r.label)} · ${esc(r.reason || '—')}</span><span class="n">${r.n}</span></div>`
     ).join('');
-  }
-  function renderVerdicts(d) {
-    const el = document.getElementById('verdict-ticker');
-    if (!el) return;
-    const vs = (d.verdicts_recent || []).slice(0, 3);
-    if (!vs.length) { el.innerHTML = '<div class="row dim">no AI verdicts in window</div>'; return; }
-    el.innerHTML = vs.map((v) => {
-      const cls = v.escalation === 'gpt_ok_salvaged' ? 'magenta' : v.color;
-      const t = new Date(v.ts * 1000).toISOString().slice(11, 19);
-      return `<div class="row ${esc(cls)}"><span class="g">G${v.gate_id}</span><span class="v">${esc(v.verdict)}</span> · ${t}</div>`;
-    }).join('');
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
@@ -508,7 +504,7 @@
   // ── Boot ──────────────────────────────────────────────────────────────
   fit();
   pollStats();
-  setInterval(pollStats, 30000);   // matches the server's flow_stats TTL
+  setInterval(pollStats, 5000);    // matches the server's flow_stats TTL
   pollLog();
   setInterval(pollLog, 3000);
   pollEquity();

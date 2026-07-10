@@ -11,7 +11,7 @@ Endpoints:
   GET /flow                → flow.html (gate+AI pipeline river, desktop-only)
   GET /static/*            → static assets (sphere-render.js, polaris.css)
   GET /static/graph.json   → regenerated snapshot (cached, TTL refresh)
-  GET /api/flow_stats      → rolling-1h gate volume + drop/AI stats (30s TTL)
+  GET /api/flow_stats      → rolling-1h gate volume + drop/AI stats (5s TTL)
   GET /stream/events       → SSE live entry/exit stream from new fills
   GET /stream/prices       → SSE per-cell live-mark push (changed cells only)
 
@@ -510,7 +510,12 @@ def _sentinel_payload() -> dict[str, Any]:
 # risk/orders.
 _flow_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _flow_lock = threading.Lock()
-_FLOW_TTL = 30.0
+# Jin 2026-07-10 (feat/flat-neural-map, "전부 리얼타임 싱크"): 30s -> 5s so the
+# /flow page's gate/strategy counts read as live (end-to-end <=5s including the
+# client poll). Measured ~220ms/build over the live-size DB (202k gate_events,
+# indexed on created_ts) — a 5s cadence is ~4% duty, well within the ro-read
+# budget the 3.5GB+ live DB tolerates.
+_FLOW_TTL = 5.0
 
 
 def _build_flow_stats() -> dict[str, Any]:
@@ -1698,7 +1703,9 @@ def _ref_refresh_loop() -> None:
     Kept SEPARATE from ``_bg_refresh_loop`` so git/fs work never blocks (or
     contends with) the 1s SQLite snapshot build. Each cache rebuilds only past
     its own TTL; request threads only ever serve the warm value. Cadence is the
-    shortest TTL (buildlog 30s); roadmap/lessons (60s) skip until due."""
+    shortest TTL — flow_stats' 5s (Jin 2026-07-10, feat/flat-neural-map
+    realtime-sync mandate) since 2026-07-10; buildlog/roadmap/lessons (30-60s)
+    skip until their own TTL is due."""
     builders = (
         (_buildlog_cache, _buildlog_lock, _build_buildlog, _BUILDLOG_TTL),
         (_roadmap_cache, _roadmap_lock, _build_roadmap, _ROADMAP_TTL),
@@ -1720,7 +1727,7 @@ def _ref_refresh_loop() -> None:
             with lock:
                 cache["data"] = fresh
                 cache["ts"] = time.time()
-        time.sleep(min(_BUILDLOG_TTL, _ROADMAP_TTL, _LESSONS_TTL))
+        time.sleep(min(_BUILDLOG_TTL, _ROADMAP_TTL, _LESSONS_TTL, _FLOW_TTL))
 
 
 def main() -> None:

@@ -232,9 +232,13 @@
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
     jitteredBand(byCluster.reg || [], gG3.x - 95, gG3.x + 95, gG3.y + 55, gG3.y + 115, ':reg', 0.7);
     jitteredBand(byCluster.pos || [], gG6.x - 95, gG6.x + 95, gG6.y + 60, gG6.y + 120, ':pos', 0.7);
+    // G6 monitor advisors — ALL probe readings carry gate_id=6 (verified),
+    // so they belong ON g6: a tidy left-to-top arc hugging the nucleus
+    // (same satellite grammar as G1's tier census), clear of the pos band
+    // below and the exit side to the right (Jin: "게이트 주변에 정리").
     (byCluster.probe || []).forEach((n, j) => {
-      const ang = Math.PI * 0.75 + j * 0.5; // g6 좌하단 호
-      screen[n.id] = { x: gG6.x + Math.cos(ang) * 120, y: gG6.y + Math.sin(ang) * 70 };
+      const ang = Math.PI * 1.05 + j * 0.42;
+      screen[n.id] = { x: gG6.x + Math.cos(ang) * 84, y: gG6.y + Math.sin(ang) * 58 };
     });
     jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
     jitteredBand(byCluster.exit_tally || [], gG7.x - 140, gG7.x + 60, gG7.y + 125, gG7.y + 175, ':exittally', 0.7);

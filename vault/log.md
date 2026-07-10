@@ -398,3 +398,5 @@
 - 2026-07-11 merge(jarvis-language): 자비스 시각 언어 패스 라이브 — 헤어라인 이중 레티클+코너 브래킷(게이트)·타깃락 마커(firing)·미니 링+score_F 호게이지+엘보 리더라인(전략)·[SYM] 브래킷 칩(와치)·정적 그레티큘·수치 블록. wall_spine_deco.js 분리(신규 서브시스템). flow.html keep-both 충돌 해결(사이드 패널 공존). 부수 확인: Capital 재가동 실증(GOLD/US500/US100/SG25/USDJPY 5포지션, $50k 사이징) — 고아 퍼지 효과 라이브
 - 2026-07-11: /flow 아트디렉션 마감 웨이브 — 킬피드 제거·활성 시스템 점등·firing 코어 source-over(백화 근절)·게이트 스파인 하강·후보 산포+17px repel·자비스 유영/회전위성/라벨 2단 (94353bd..beb3d98). 알파카 점검: 거래 정상(k SIZED·금요장 TROW 라운드트립), 좌측 ALP 2건은 7-08 미니사이즈 잔존, 7d -5.72R 성과열위는 별건.
 - 2026-07-11: 알파카 슬리브 디베이트 R2 수렴(5전략+인프라 5종, gross-neg 3종 부활금지) → 빌드 wf_184cbfca 가동. 진단: 데이터 정상(4,200심볼) vs 로스터 3개(전부 1D)=병목. 보드 BOT LOG 제거(ba2ce18). 스프레드 인제스트 버그 티켓 분리.
+2026-07-10 18:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=378 learners=3 paper=True]
+- 2026-07-11: 알파카 슬리브 랜딩 — 5전략+인프라 머지(d76cab8, Opus 3렌즈 전원 APPROVE_WITH_NITS, 타깃 238 pass) → 봇 즉시 재기동(PID 87922, 부팅 클린) + 대시 재시작(로스터 31, ALP 8). 15m 웜업: #4 다수 즉시 가능(중앙값 463/205), #5 ORB ~30일 램프. 발화 워처 가동.

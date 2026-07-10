@@ -147,6 +147,7 @@
     // — the top-to-bottom order finally reads as the real pipeline. The old
     // random mkt->strat links (the white-line convergence hub) die here.
     tickerStrat.clear();
+    addWatchDrop.length = 0;
     // Milky-way BAND (Jin 2026-07-10 "구모양 말고 띠처럼"): one continuous
     // galactic band sweeps the top; strategies are bright knots ALONG it and
     // ticker clouds elongate along the band tangent so neighbouring
@@ -223,12 +224,19 @@
     });
     // watch (G4 pre-entry probes) ride NEXT TO their ticker inside the
     // constellation ("전략이랑 프로브랑 같이").
+    // Watch TIER (Jin 2026-07-10 vertical hierarchy: 티커 은하수 -> 와치
+    // 티어 -> 전략 소행성대 -> 버스): G4 watchlist entries sit in their own
+    // row between the band and the strategy lane, at their ticker's x.
     (byCluster.watch || []).forEach((n) => {
       const mkt = allNodes.find((m) => m.cluster === 'mkt' && m.ticker === n.ticker && m.exchange === n.exchange);
       const base = mkt && screen[mkt.id];
       const r = rngFor(n.id + ':wt');
-      if (base) screen[n.id] = { x: base.x + (r() - 0.5) * 14, y: base.y - 6 - r() * 5 };
-      else screen[n.id] = { x: W * (0.3 + r() * 0.4), y: H * 0.44 };
+      const x = base ? base.x : W * (0.25 + r() * 0.5);
+      screen[n.id] = { x, y: H * 0.445 + (r() - 0.5) * H * 0.02 };
+      if (base) {
+        // short drop-line ticker -> its watch entry (the "선발" visual)
+        addWatchDrop.push([mkt.id, n.id]);
+      }
     });
 
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
@@ -379,6 +387,18 @@
     if (!m) {
       m = { fx: s.x, fy: s.y, tx: s.x, ty: s.y, t: 1, dur: 0.3, phase: 'out',
             lastMs: performance.now(), gateIdx: -1, stops: [], dwellUntil: 0 };
+      // Jin 2026-07-10 "전략이 활성화 티커 받아서 아래로 내리는 형상": a
+      // fresh journey first drops to the ticker's own strategy asteroid,
+      // dwells, THEN walks the gate spine.
+      const stId = tickerStrat.get(nodeId);
+      const st = stId && screen[stId];
+      if (st) {
+        const r = rngFor(nodeId + ':via');
+        m.t = 0; m.dur = 0.8 + r() * 0.3;
+        m.tx = st.x + (r() - 0.5) * 16;
+        m.ty = st.y - 8 - r() * 6;
+        m.via = true;
+      }
       migrations.set(nodeId, m);
     }
     if (m.phase === 'return') { m.phase = 'out'; m.gateIdx = -1; }
@@ -591,22 +611,33 @@
         // passes the waypoint through its own offset in a ~30px lens, so the
         // bundle reads as a braid, not a knot. Unique edge keys per path
         // (same strat->reg pair repeats across positions).
-        const pr = rngFor((ids[ids.length - 1] || 'p') + ':lens');
+        // Regime is CONTEXT, not a pipeline station (Jin 2026-07-10 "모니터는
+        // 전략이랑 연결돼야"): strand runs strategy -> position DIRECT; the
+        // entry regime hangs off the position as a thin faint context link.
+        const mainIds = ids.filter((id) => id.indexOf('reg_') !== 0);
+        const regId = ids.find((id) => id.indexOf('reg_') === 0);
+        const pr = rngFor((mainIds[mainIds.length - 1] || 'p') + ':lens');
         const la = pr() * Math.PI * 2, lr = 8 + pr() * 22;
         const ox = Math.cos(la) * lr, oy = Math.sin(la) * lr;
-        for (let i = 0; i < ids.length - 1; i++) {
-          const a = screen[ids[i]], b = screen[ids[i + 1]];
+        for (let i = 0; i < mainIds.length - 1; i++) {
+          const a = screen[mainIds[i]], b = screen[mainIds[i + 1]];
           if (!a || !b) continue;
-          const midA = i > 0, midB = (i + 1) < (ids.length - 1);
-          const key = ids[i] + '~' + (ids[ids.length - 1] || '');
+          const midA = i > 0, midB = (i + 1) < (mainIds.length - 1);
+          const key = mainIds[i] + '~' + (mainIds[mainIds.length - 1] || '');
           const hue = LINEAGE_HUES[Math.floor(rngFor(key + ':hue')() * LINEAGE_HUES.length)];
-          addAmbient(key, ids[i + 1], a.x + (midA ? ox : 0), a.y + (midA ? oy : 0),
+          addAmbient(key, mainIds[i + 1], a.x + (midA ? ox : 0), a.y + (midA ? oy : 0),
             b.x + (midB ? ox : 0), b.y + (midB ? oy : 0),
             { color: hue, alpha: 0.3, width: 1.1, glow: true, kind: 'live-open' });
         }
+        if (regId && mainIds.length) {
+          const posId = mainIds[mainIds.length - 1];
+          const a = screen[posId], b = screen[regId];
+          if (a && b) addAmbient(posId + '~ctx', regId, a.x, a.y, b.x, b.y, { color: '#8a94b0', alpha: 0.08, width: 0.5 });
+        }
       } else {
-        for (let i = 0; i < ids.length - 1; i++) {
-          const key = ids[i] + '->' + ids[i + 1];
+        const mainIds = ids.filter((id) => id.indexOf('reg_') !== 0);
+        for (let i = 0; i < mainIds.length - 1; i++) {
+          const key = mainIds[i] + '->' + mainIds[i + 1];
           closedPairCount.set(key, (closedPairCount.get(key) || 0) + 1);
         }
       }
@@ -626,6 +657,15 @@
       addAmbient(fromId, toId, a.x, a.y, b.x, b.y, { color: strandColor, alpha: 0.13 + Math.min(0.2, count * 0.01), width: w });
     });
 
+    // watch drop-lines: ticker -> its watch-tier entry (then watch -> g4)
+    addWatchDrop.forEach(([mid, wid]) => {
+      const a = screen[mid], b = screen[wid];
+      const n = nodeById[wid];
+      if (!a || !b || !n) return;
+      addAmbient(mid + '>w', wid, a.x, a.y, b.x, b.y, { color: venueColorOf(n.exchange) || '#8fb0c8', alpha: 0.22, width: 0.7, bowScale: 0.3 });
+    });
+    addWatchDrop.length = 0;
+
     // Probe wiring (Jin: "프로브들은 연결이 하나도 안 되는 거야?") —
     // anchor line to G6 (they are the monitor's advisors) + live links to
     // the positions they actually read in the last 30m (server probe_links).
@@ -644,6 +684,7 @@
     buildWhisperMesh();
   }
   let lastProbeLinks = [];
+  const addWatchDrop = []; // [mktId, watchId] — buildLayout이 채우고 buildEdges가 그림
   function setProbeLinks(links) { lastProbeLinks = links || []; }
 
   /* ===== micro-pulse pool — the unbroken current ===== */
@@ -800,6 +841,17 @@
       drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
     };
     firingIds.forEach((id) => { if (!migrations.has(id)) glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0); });
+    // active strategies glow too (Jin: "활성화 전략은 글로잉") — real state
+    // from the roster (open positions / firing), venue-colored, breathing.
+    allNodes.forEach((n) => {
+      if (n.cluster !== 'strat' || n.state !== 'firing') return;
+      const s = screen[n.id];
+      if (!s) return;
+      const breathe = 0.7 + 0.3 * Math.sin(now / 700 + (s.phaseOff || 0));
+      const col = venueColorOf(n.exchange) || s.color;
+      drawDot(ctx, s.x, s.y, s.r * 2.6, col, 0.12 * breathe, 0);
+      drawDot(ctx, s.x, s.y, s.r * 1.5, col, 0.22 * breathe, 4);
+    });
     // Pipeline migration: advance tweens, idle-decay parked dots, draw each
     // traveler at its interpolated position with a slightly boosted glow.
     migrations.forEach((m, id) => {
@@ -807,9 +859,11 @@
       if (!s) { migrations.delete(id); return; }
       if (m.t < 1) m.t = Math.min(1, m.t + dt / m.dur);
       else if (m.phase === 'out') {
-        if (m.stops && m.stops.length) {
-          // first hop departs immediately (gateIdx -1 = still at home);
-          // subsequent hops dwell so the walk is readable.
+        if (m.via) {
+          // arrived at the strategy asteroid — dwell there, then descend
+          if (!m.dwellUntil) m.dwellUntil = now + MIGRATE_DWELL_MS;
+          else if (now >= m.dwellUntil) { m.via = false; m.dwellUntil = 0; maybeAdvance(id, m); }
+        } else if (m.stops && m.stops.length) {
           if (m.gateIdx < 0) maybeAdvance(id, m);
           else if (!m.dwellUntil) m.dwellUntil = now + MIGRATE_DWELL_MS;
           else if (now >= m.dwellUntil) maybeAdvance(id, m);

@@ -230,6 +230,46 @@
   }
   function pn(v) { return v > 0 ? 'b-pos' : v < 0 ? 'b-neg' : 'b-flat'; }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+  // Blink fix (Jin 2026-07-10): the 1s poll rebuilt b-kpis/b-virt/b-book-status/
+  // b-footer innerHTML wholesale every tick even with identical data — the SVG
+  // sparklines + badges re-rasterizing each second read as a page-wide blink.
+  // These memo-guards make every non-table section write-on-change only (the
+  // tables were already per-cell diffed via syncTable).
+  function setHtmlMemo(el, html) { if (el && el.__memoHtml !== html) { el.innerHTML = html; el.__memoHtml = html; } }
+  function setTextMemo(el, txt) { if (el && el.__memoTxt !== txt) { el.textContent = txt; el.__memoTxt = txt; } }
+  // For sections whose VALUES legitimately tick every second (KPI header):
+  // replace only the text nodes/attributes that changed, keeping node identity
+  // so CSS animations don't restart and nothing re-rasterizes (no blink).
+  function morphHtml(el, html) {
+    if (!el || el.__memoHtml === html) return;
+    el.__memoHtml = html;
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    morphChildren(el, tpl.content);
+  }
+  function morphChildren(dst, src) {
+    if (dst.childNodes.length !== src.childNodes.length) {
+      dst.innerHTML = '';
+      while (src.firstChild) dst.appendChild(src.firstChild);
+      return;
+    }
+    for (let i = 0; i < src.childNodes.length; i++) {
+      const dn = dst.childNodes[i], sn = src.childNodes[i];
+      if (dn.nodeType !== sn.nodeType || (dn.nodeType === 1 && dn.tagName !== sn.tagName)) {
+        dst.replaceChild(sn.cloneNode(true), dn);
+        continue;
+      }
+      if (dn.nodeType === 3) {
+        if (dn.nodeValue !== sn.nodeValue) dn.nodeValue = sn.nodeValue;
+        continue;
+      }
+      if (dn.nodeType === 1) {
+        for (const a of sn.attributes) if (dn.getAttribute(a.name) !== a.value) dn.setAttribute(a.name, a.value);
+        for (const a of Array.from(dn.attributes)) if (!sn.hasAttribute(a.name)) dn.removeAttribute(a.name);
+        morphChildren(dn, sn);
+      }
+    }
+  }
   function clockStr() {
     const d = new Date();
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
@@ -639,18 +679,18 @@
       // Jin 2026-06-23: regime notation was too much on screen. Compact to
       // total + dominant only; full per-regime breakdown stays in the tooltip
       // (+ the REGIME tab + Open Positions REGIME column).
-      tag.textContent = dist.total + ' mkt · ' + dist.parts[0];
+      setTextMemo(tag, dist.total + ' mkt · ' + dist.parts[0]);
       tag.title = 'Regime is PER-INSTRUMENT — ' + dist.total
         + ' markets, each classified on its own. Counts: ' + dist.parts.join(', ')
         + '. (Per-market detail in the REGIME tab + Open Positions REGIME column.)';
     } else {
-      tag.textContent = '—';
+      setTextMemo(tag, '—');
       tag.title = '';
     }
-    $('b-focus').textContent = d.universe_focus_n ?? '—';
-    $('b-cells').textContent = d.active_cells_n != null && d.total_cells_n
-      ? `${d.active_cells_n}/${d.total_cells_n}` : (d.active_cells_n ?? '—');
-    $('b-refresh').textContent = d.universe_last_refresh || '—';
+    setTextMemo($('b-focus'), String(d.universe_focus_n ?? '—'));
+    setTextMemo($('b-cells'), d.active_cells_n != null && d.total_cells_n
+      ? `${d.active_cells_n}/${d.total_cells_n}` : String(d.active_cells_n ?? '—'));
+    setTextMemo($('b-refresh'), d.universe_last_refresh || '—');
     // (k) star LIVE/STALE — twinkle when the snapshot tick is fresh, dim when stale.
     const star = document.querySelector('#board .b-head .star');
     if (star) {
@@ -664,7 +704,7 @@
     const modeBadge = $('b-mode-badge');
     if (modeBadge) {
       const virt = !!d.virtual_account_enabled;
-      modeBadge.textContent = virt ? 'VIRTUAL PAPER · $100k×3' : 'DEMO·PAPER';
+      setTextMemo(modeBadge, virt ? 'VIRTUAL PAPER · $100k×3' : 'DEMO·PAPER');
       modeBadge.title = d.mode_banner || '';
       modeBadge.classList.toggle('badge-virtual', virt);
     }
@@ -676,9 +716,9 @@
   function renderFooter(d) {
     const el = $('b-footer'); if (!el) return;
     const m = d.meta;
-    if (!m) { el.textContent = ''; return; }
+    if (!m) { setTextMemo(el, ''); return; }
     const boot = m.boot_ts ? new Date(m.boot_ts * 1000).toLocaleString() : '—';
-    el.textContent = 'server ' + (m.git_sha || 'unknown') + ' · up since ' + boot;
+    setTextMemo(el, 'server ' + (m.git_sha || 'unknown') + ' · up since ' + boot);
   }
 
   // (j) Anomaly scan — only things worth watching. Returns a short string list;
@@ -901,7 +941,7 @@
       `<div style="display:flex;gap:18px;align-items:baseline;flex-wrap:wrap;padding:4px 2px;font-size:12px">
         <span><span class="kk">Bot</span> <span class="${botCls}" style="font-weight:700">${botTxt}</span></span>
         <span title="${esc(marketTitle)}"><span class="kk">Markets</span> <span style="color:var(--p-wht);font-weight:700">${esc(market)}</span></span>
-        <span style="margin-left:auto"><span class="kk">Updated</span> <span class="b-flat" id="b-kpi-clock">${clockStr()}</span></span>
+        <span style="margin-left:auto"><span class="kk">Updated</span> <span class="b-flat" id="b-kpi-clock"></span></span>
       </div>`;
     // VIRTUAL-PRIMARY restructure (Jin 2026-07-07): in REAL mode (virtual OFF)
     // the header stays exactly what it always was — status + SINCE RESET +
@@ -911,7 +951,11 @@
     // status line — since_reset/daily/session are now virtual-ledger-scoped
     // main-board fields, not omitted. The legacy metrics still render
     // separately into the LEGACY tab pane via legacyKpiHtml() (unchanged).
-    el.innerHTML = virt ? virtualKpiHtml(d, status) : legacyKpiHtml(d, status);
+    // KPI values legitimately tick every second (live UPnL) — morph only the
+    // changed text nodes so badges/structure keep node identity (blink fix).
+    morphHtml(el, virt ? virtualKpiHtml(d, status) : legacyKpiHtml(d, status));
+    const kc = $('b-kpi-clock');
+    if (kc) kc.textContent = clockStr();
   }
 
   // (f) main-area dual-equity sparkline — equity_curve (demo, dashed dim) vs
@@ -973,7 +1017,7 @@
     const el = $('b-virt');
     if (!el) return;
     const rows = d.streams || [];
-    if (!rows.length) { el.innerHTML = ''; return; }
+    if (!rows.length) { setHtmlMemo(el, ''); return; }
     const trs = rows.map(s => {
       const lc = venueStream(s.venue).toLowerCase();
       const weekPnl = (s.weekly_realized_pnl_usd || 0) + (s.weekly_unrealized_pnl_usd || 0);
@@ -989,7 +1033,7 @@
         <td class="virt-spark">${weeklySparkSvg(s.virtual_weekly_curve)}</td>
       </tr>`;
     }).join('');
-    el.innerHTML = `<table class="virt-tbl">${VIRT_HEAD}<tbody>${trs}</tbody></table>`;
+    setHtmlMemo(el, `<table class="virt-tbl">${VIRT_HEAD}<tbody>${trs}</tbody></table>`);
   }
 
   // Book-status one-liner (Jin 2026-07-07) — "why quiet" at a glance, driven
@@ -1001,18 +1045,22 @@
     if (!el) return;
     const stats = d.strategy_stats || [];
     if (!stats.length) {
-      el.innerHTML = '<b>Book status</b> — no strategy activity yet.';
+      setHtmlMemo(el, '<b>Book status</b> — no strategy activity yet.');
       return;
     }
     const withSignals = stats.filter(s => (s.last_signal_ts || 0) > 0);
     if (!withSignals.length) {
-      el.innerHTML = '<b>Book status</b> — no signals yet this session.';
+      setHtmlMemo(el, '<b>Book status</b> — no signals yet this session.');
       return;
     }
     const top = withSignals.slice().sort((a, b) => (b.last_signal_ts || 0) - (a.last_signal_ts || 0))[0];
     const ageSec = Math.max(0, (d.ts_now || 0) - (top.last_signal_ts || 0));
-    el.innerHTML = `<b>Book status</b> — ${esc(top.strategy_id)}: ${top.signals_24h || 0} signals/24h`
-      + ` · last signal ${hms(ageSec)} ago · trades fire on setup (rare by design, not broken).`;
+    // the ticking age lives in its own span so the line's <b>/text nodes are
+    // not rebuilt every second (blink fix) — only the age text node updates.
+    setHtmlMemo(el, `<b>Book status</b> — ${esc(top.strategy_id)}: ${top.signals_24h || 0} signals/24h`
+      + ` · last signal <span id="b-book-age"></span> ago · trades fire on setup (rare by design, not broken).`);
+    const ageEl = $('b-book-age');
+    if (ageEl) ageEl.textContent = hms(ageSec);
   }
 
   // Per-stream summary strip — ALWAYS visible. Server-fed d.streams.

@@ -531,7 +531,13 @@
   // b-rotation) are mounted off-pane so a stray write is a graceful no-op.
 
   // ── tab counts (header badges per tab) ────────────────────────────────────
-  function setCnt(id, val) { const el = $(id); if (el) el.textContent = (val === '' || val == null) ? '' : ('· ' + val); }
+  function setCnt(id, val) {
+    const el = $(id); if (!el) return;
+    const txt = (val === '' || val == null) ? '' : ('· ' + val);
+    // write-on-change only — same-value textContent still replaces the text
+    // node every poll and contributed to the 1s board blink (Jin 2026-07-10).
+    if (el.__memoTxt !== txt) { el.textContent = txt; el.__memoTxt = txt; }
+  }
   function renderTabCounts(d) {
     // Counts reflect the active-exchange scope (venue-carrying tabs). New
     // composite tabs: activity = open positions, performance = strategies,

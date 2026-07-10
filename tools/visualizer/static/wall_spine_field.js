@@ -156,9 +156,11 @@
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
       const x = W * 0.05 + ((i + 0.5) / stratsOrdered.length) * W * 0.90 + (r() - 0.5) * W * 0.02;
-      // Jin 2026-07-10: strategy nodes sit BELOW the star band in their own
-      // lane — the constellation rains down its spokes into its strategy.
-      screen[n.id] = { x, y: bandY(x) + H * 0.155 + (r() - 0.5) * H * 0.035, bandAnchorY: bandY(x) };
+      // FLAT strategy lane (Jin 2026-07-10 "전략 위치 왜 이래" — the earlier
+      // band-following y scattered strategies through the sky): fixed row
+      // between the band and the gate spine. Clouds stay band-anchored, so
+      // each constellation rains its spokes down into its strategy knot.
+      screen[n.id] = { x, y: H * 0.505 + (r() - 0.5) * H * 0.022, bandAnchorY: bandY(x) };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -732,6 +734,13 @@
     staticCtx.font = '600 8px JetBrains Mono, monospace';
     staticCtx.textAlign = 'center';
     allNodes.forEach((node) => {
+      if (node.cluster === 'strat') {
+        const s = screen[node.id];
+        if (!s) return;
+        staticCtx.fillStyle = rgba(s.color || '#8a94b0', node.state === 'dormant' ? 0.35 : 0.7);
+        staticCtx.fillText(String(node.label || '').slice(0, 16), s.x, s.y + 15);
+        return;
+      }
       if (node.cluster !== 'reg' && node.cluster !== 'probe' && node.cluster !== 'orbit') return;
       const s = screen[node.id];
       if (!s) return;

@@ -512,10 +512,9 @@ _flow_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _flow_lock = threading.Lock()
 # Jin 2026-07-10 (feat/flat-neural-map, "전부 리얼타임 싱크"): 30s -> 5s so the
 # /flow page's gate/strategy counts read as live (end-to-end <=5s including the
-# client poll). Measured ~220ms/build over the live-size DB (202k gate_events,
-# indexed on created_ts) — a 5s cadence is ~4% duty, well within the ro-read
-# budget the 3.5GB+ live DB tolerates.
-_FLOW_TTL = 5.0
+# client poll). Re-measured 2026-07-10 post-graveyard-DROP: ~45ms/build warm
+# over the live DB — a 1s cadence is <5% duty (Jin: "모든 리프래쉬 1초 기준").
+_FLOW_TTL = 1.0
 
 
 def _build_flow_stats() -> dict[str, Any]:
@@ -1659,7 +1658,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:
                     self.wfile.write(b": heartbeat\n\n")
                     self.wfile.flush()
-                time.sleep(2)
+                time.sleep(1)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception:  # noqa: BLE001 — best-effort stream

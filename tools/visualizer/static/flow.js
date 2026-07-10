@@ -19,8 +19,8 @@
  * /api/flow_stats payload's `classes` / `survivor_admissions_recent` fields.
  *
  * Data:
- *   /api/flow_stats  (5s TTL, matches the server cache — Jin 2026-07-10
- *                     feat/flat-neural-map realtime-sync) → per-gate 1h volume +
+ *   /api/flow_stats  (1s poll, matches the server's 1s TTL — Jin 2026-07-10
+ *                     '모든 리프래쉬 1초') → per-gate windowed volume +
  *                     venue breakdown, fills volume, drop-lane reasons, AI-judge
  *                     shadow mismatches + recent verdicts, conversion summary,
  *                     pts-classes routing state, recent universe admissions.
@@ -29,8 +29,8 @@
  *                     channel (no reliable per-venue field on that lightweight
  *                     event) drives a neutral "spine" activity particle instead
  *                     of guessing a venue lane.
- *   /api/botlog       (poll ~3s) → condensed mini ticker (index.html pattern).
- *   /api/snapshot     (poll ~5s) → equity/today-net for the bottom ticker.
+ *   /api/botlog       (poll 1s) → condensed mini ticker (index.html pattern).
+ *   /api/snapshot     (poll 1s) → equity/today-net for the bottom ticker.
  *
  * Display-only. Nothing here issues, sizes, gates or throttles a trade — the
  * drop lane is measurement honesty (same precedent as the globe's kill-sediment
@@ -495,11 +495,11 @@
   // ── Boot ──────────────────────────────────────────────────────────────
   fit();
   pollStats();
-  setInterval(pollStats, 5000);    // matches the server's flow_stats TTL
+  setInterval(pollStats, 1000);    // 1s — matches server flow_stats TTL (Jin: 모든 리프래쉬 1초)
   pollLog();
-  setInterval(pollLog, 3000);
+  setInterval(pollLog, 1000);
   pollEquity();
-  setInterval(pollEquity, 5000);
+  setInterval(pollEquity, 1000);
   connectStream();
   requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
 })();

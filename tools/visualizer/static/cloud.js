@@ -18,10 +18,10 @@
  *
  * Data (all EXISTING endpoints — no server change beyond flow_data.py's
  * additive `strategy_activity` field):
- *   /static/graph.json  (3s poll) → cluster:"mkt" (Z1 reservoir) + cluster:
+ *   /static/graph.json  (1s poll) → cluster:"mkt" (Z1 reservoir) + cluster:
  *     "pos" (forwarded to cloud_nodes.setRoster for the Z4 orbit).
- *   /api/flow_stats (this file's OWN 5s poll — pollAdmissions, matches the
- *     server's 5s TTL — NOT forwarded from flow.js) → `classes` +
+ *   /api/flow_stats (this file's OWN 1s poll — pollAdmissions, rides the
+ *     server's 1s TTL — NOT forwarded from flow.js) → `classes` +
  *     `strategy_activity` (Z2 nodes) + `stages` (Z3/Z5 counts).
  *   /stream/events (shared bus) → gate_events (Z1->Z2/Z3 glide) + fills
  *     entry (Z1->Z4 glide) + exit (forwarded straight to cloud_nodes.onExit).
@@ -369,10 +369,10 @@
   // ── Boot ─────────────────────────────────────────────────────────────
   fit();
   pollRoster();
-  setInterval(pollRoster, 3000);
+  setInterval(pollRoster, 1000);  // 1s (Jin: 모든 리프래쉬 1초)
   setInterval(sweepDecay, 5000);
   pollAdmissions();
-  setInterval(pollAdmissions, 5000); // classes/stats freshness (Jin: end-to-end <=5s)
+  setInterval(pollAdmissions, 1000); // rides the 1s server cache — no extra DB cost
   if (window.PolarisEvents) window.PolarisEvents.on(handleStream);
   requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
 })();

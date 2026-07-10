@@ -78,6 +78,24 @@
    * sediment below the sizer (measurement honesty — globe kill-mote
    * precedent, not a block). */
   const gateMotes = [[], [], [], [], [], [], [], []];
+  // G1 universe structure (Jin 2026-07-10 "유니버스도 표시"): live tier
+  // census from the real roster (S/A/B/T focus tiers), redrawn per poll.
+  let g1Tiers = [];
+  function setUniverseTiers(nodes) {
+    const c = {};
+    (nodes || []).forEach((n) => {
+      if (n.cluster !== 'mkt' || !n.tier_label) return;
+      c[n.tier_label] = (c[n.tier_label] || 0) + 1;
+    });
+    g1Tiers = ['S', 'A', 'B', 'T'].filter((k) => c[k]).map((k) => ({ k, n: c[k] }));
+  }
+  // G2 recent-signal tags ("뭐가 잡혔나") — real gate_id=2 events only.
+  const g2Tags = [];
+  function pushSignalTag(g) {
+    if (!g || g.gate_id !== 2 || !g.symbol) return;
+    g2Tags.unshift({ sym: String(g.symbol).split('-')[0].split('_')[0], venue: g.exchange || '', born: performance.now() });
+    if (g2Tags.length > 5) g2Tags.pop();
+  }
   const sediment = [];
   function verdictFamilyColor(decision, gateIdx) {
     const d = String(decision || '').toUpperCase();
@@ -116,6 +134,33 @@
       }
     });
     ctx.globalCompositeOperation = 'source-over';
+    // G1 tier satellites — the universe's real output structure
+    const g1 = gs[0];
+    if (g1 && g1Tiers.length) {
+      ctx.font = '600 8px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      g1Tiers.forEach((t, j) => {
+        const ang = Math.PI * 0.62 + j * 0.42;
+        const x = g1.x + Math.cos(ang) * 78, y = g1.y + Math.sin(ang) * 60;
+        field.drawDot(ctx, x, y, 2.4, GATE_COLORS[0], 0.5, 0);
+        ctx.fillStyle = field.rgba('#8a94b0', 0.8);
+        ctx.fillText(t.k + ' ' + t.n, x, y + 12);
+      });
+    }
+    // G2 recent-signal tags — what the signal net just caught (fade 60s)
+    const g2 = gs[1];
+    if (g2) {
+      ctx.font = '600 8.5px JetBrains Mono, monospace';
+      ctx.textAlign = 'left';
+      for (let k = g2Tags.length - 1; k >= 0; k--) {
+        const tg = g2Tags[k];
+        const age = now - tg.born;
+        if (age > 60000) { g2Tags.splice(k, 1); continue; }
+        const vc = (field.venueColorOf && field.venueColorOf(tg.venue)) || '#8fb0c8';
+        ctx.fillStyle = field.rgba(vc, 0.85 * (1 - age / 60000));
+        ctx.fillText(tg.sym, g2.x + 52, g2.y + 34 + k * 12);
+      }
+    }
     // kill sediment: drifts down, fades — measurement honesty, not a block
     for (let k = sediment.length - 1; k >= 0; k--) {
       const s = sediment[k];
@@ -262,11 +307,13 @@
   function refresh(nodes) {
     if (!booted) return;
     field.refreshNodeState(nodes);
+    setUniverseTiers(nodes);
     field.renderStaticLayer(staticCtx);
   }
   function fireGateEvent(g) {
     if (!g || !g.gate_id) return;
     pushGateMote(g.gate_id - 1, g.decision);
+    pushSignalTag(g);
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {

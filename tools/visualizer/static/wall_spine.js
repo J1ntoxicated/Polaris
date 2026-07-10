@@ -124,9 +124,16 @@
       ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 1; ctx.stroke();
 
       // jarvis arc-ring reticle (rotating tick band)
-      // static reticle (Jin 2026-07-10: the spinning tick band read as
-      // noise — the ring stays; only the rotation goes)
-      const rot = i * 0.61, ringR = 40, span = Math.PI * 1.45;
+      // Meaningful rotation (Jin 2026-07-10 "도는 건 상관없는데 의미가
+      // 있어야"): the reticle's spin RATE = this gate's real throughput
+      // (same log-scaled load as the sweep arc) + a kick while firing.
+      // Idle gate ~still, busy gate visibly working. Angle integrates via
+      // per-gate state so rate changes never snap the ring.
+      const load = Math.min(1, Math.log1p(g.count) / maxGateLog);
+      gs.spin = (gs.spin == null ? i * 0.61 : gs.spin)
+        + (now - (gs.spinT || now)) * 0.001 * (0.03 + 0.9 * load + 1.6 * fireT);
+      gs.spinT = now;
+      const rot = gs.spin, ringR = 40, span = Math.PI * 1.45;
       ctx.save();
       ctx.translate(gs.x, gs.y);
       ctx.rotate(rot);

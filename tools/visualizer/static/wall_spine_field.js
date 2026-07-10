@@ -121,8 +121,13 @@
     const byCluster = {};
     allNodes.forEach((n) => { (byCluster[n.cluster] = byCluster[n.cluster] || []).push(n); });
 
-    jitteredBand(byCluster.mkt || [], W * 0.02, W * 0.98, H * 0.045, H * 0.33, ':mkt', 0.86);
-    jitteredBand(byCluster.watch || [], W * 0.06, W * 0.94, H * 0.35, H * 0.435, ':watch', 0.8);
+    // Jin 2026-07-10 "줄서기 하는거야 뭐야": the roster arrives grouped by
+    // venue/symbol, so consecutive grid cells held same-venue names and a
+    // firing wave lit up as one straight queue. Deterministic hash-order
+    // shuffle scatters venues/symbols across the band (stable across polls).
+    const hashShuffle = (arr) => (arr || []).slice().sort((a, b) => hashStr(a.id + ':mix') - hashStr(b.id + ':mix'));
+    jitteredBand(hashShuffle(byCluster.mkt), W * 0.02, W * 0.98, H * 0.045, H * 0.33, ':mkt', 0.86);
+    jitteredBand(hashShuffle(byCluster.watch), W * 0.06, W * 0.94, H * 0.35, H * 0.435, ':watch', 0.8);
     jitteredBand(byCluster.strat || [], W * 0.07, W * 0.93, H * 0.655, H * 0.90, ':strat', 0.8);
 
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
@@ -153,6 +158,11 @@
       if (node.cluster === 'mkt' || node.cluster === 'watch') {
         const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
         if (vc) s.color = vc;
+      }
+      // Jin 2026-07-10 "열려있는 포지션은 프로핏 로스 색": open-position dots
+      // read green/red by live UPnL sign (refreshed every 1s poll below).
+      if (node.cluster === 'pos') {
+        s.color = (node.pnl_usd || 0) >= 0 ? '#7dffa8' : '#ff7d8a';
       }
       if (node.cluster === 'mkt') {
         s.r = 1.15 + depth * 0.55;
@@ -199,6 +209,8 @@
       else if (n.cluster === 'watch') s.baseAlpha = 0.35 + (n.intensity || 0.4) * 0.25;
       else if (n.cluster === 'strat') s.baseAlpha = 0.55 + Math.min(0.35, (n.intensity || 0.3) * 0.4);
       else s.baseAlpha = 0.5 + (n.intensity || 0.4) * 0.3;
+      // live P/L tint for open positions (sign can flip between polls)
+      if (n.cluster === 'pos') s.color = (n.pnl_usd || 0) >= 0 ? '#7dffa8' : '#ff7d8a';
       // Jin 2026-07-10 "살아있는 애들은 익스체인지 색으로 빛나야": a mkt dot
       // whose roster state says it's firing NOW gets a persistent
       // venue-colored breathing glow (drawn live in drawField — the dust
@@ -261,7 +273,12 @@
     const nx = -dy / dist, ny = dx / dist;
     const bowScale = (opts && opts.bowScale) || 1;
     const bow = (0.09 + r() * 0.20) * dist * (r() < 0.5 ? -1 : 1) * bowScale;
-    const mx = (x1 + x2) / 2 + nx * bow, my = (y1 + y2) / 2 + ny * bow;
+    // Jin 2026-07-10 "화면 밖으로 빠진 라인": clamp the bow control point to
+    // the canvas so no strand arcs off-frame (big-bow feedback/lineage
+    // bundles were sweeping outside and reading as cut lines).
+    const pad = 14;
+    const mx = Math.max(pad, Math.min(W - pad, (x1 + x2) / 2 + nx * bow));
+    const my = Math.max(pad, Math.min(H - pad, (y1 + y2) / 2 + ny * bow));
     const color = (opts && opts.color) || '#5fd7ff';
     const alpha = (opts && opts.alpha) != null ? opts.alpha : 0.12;
     e = {

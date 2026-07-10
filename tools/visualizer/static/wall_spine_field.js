@@ -61,6 +61,14 @@
   // firing ticker reads as "its exchange is alive" (Jin 2026-07-10).
   const VENUE_COLOR = { okx: '#5fdfff', cap: '#a87cff', alp: '#ffc84f' };
   const firingIds = new Set(); // mkt ids firing NOW (roster-driven, 1s poll)
+  // Ticker pipeline migration (Jin 2026-07-10 "유니버스 소속이 옆으로 옆으로
+  // 넘어가야"): a mkt dot with a live gate event GLIDES to a parking ring
+  // around that gate nucleus and progresses rightward as later gates fire;
+  // idle 150s -> glides home to its dust slot. Real-event-driven only.
+  // Static bake already reruns every 1s poll, so parked dots are simply
+  // skipped there and drawn live here — no ghost duplicates.
+  const migrations = new Map(); // id -> {fx,fy,tx,ty,t,dur,phase,lastMs,gateIdx}
+  const MIGRATE_IDLE_MS = 150000;
   let W = 1344, H = 962;
   const screen = {};      // id -> {x,y,r,depth,color,baseAlpha,bobAmp,bobSpeed,phaseOff,fireUntil,node}
   let gateScreen = [];    // 8x {x,y,fireUntil,pulsePhase} — index-aligned with GATE_IDS
@@ -196,6 +204,44 @@
       }
     });
   }
+
+  // Called by wall_spine.fireGateEvent for a REAL g1..g5 gate event on a mkt
+  // ticker: glide it to a parking slot ringed around that gate nucleus. A
+  // later gate re-targets the SAME dot further right (the 옆으로 progression).
+  function migrateTicker(nodeId, gateIdx) {
+    const s = screen[nodeId];
+    const gs = gateScreen[gateIdx];
+    if (!s || !gs) return;
+    const r = rngFor(nodeId + ':park:' + gateIdx);
+    const ang = r() * Math.PI * 2;
+    const rad = 30 + r() * 22;
+    const m = migrations.get(nodeId);
+    const fromX = m ? migratePos(m, s).x : s.x;
+    const fromY = m ? migratePos(m, s).y : s.y;
+    migrations.set(nodeId, {
+      fx: fromX, fy: fromY,
+      tx: gs.x + Math.cos(ang) * rad, ty: gs.y + Math.sin(ang) * rad,
+      t: 0, dur: 0.9 + r() * 0.5, phase: 'out',
+      lastMs: performance.now(), gateIdx,
+    });
+  }
+  // Send a migrated dot home (entry fill: its life continues as a pos node;
+  // or idle decay). No-op when not migrating.
+  function migrateHome(nodeId) {
+    const m = migrations.get(nodeId);
+    const s = screen[nodeId];
+    if (!m || !s) return;
+    const cur = migratePos(m, s);
+    migrations.set(nodeId, {
+      fx: cur.x, fy: cur.y, tx: s.x, ty: s.y,
+      t: 0, dur: 1.2, phase: 'return', lastMs: performance.now(), gateIdx: m.gateIdx,
+    });
+  }
+  function migratePos(m, s) {
+    const k = easeOut(Math.min(1, m.t));
+    return { x: m.fx + (m.tx - m.fx) * k, y: m.fy + (m.ty - m.fy) * k };
+  }
+  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
   function edgeFor(fromId, toId, x1, y1, x2, y2, opts) {
     const key = fromId + '->' + toId;
@@ -441,6 +487,7 @@
     ambientEdges.forEach((e) => { if (e.kind !== 'live-open' && e.kind !== 'feedback') drawEdge(staticCtx, e, 1); });
     allNodes.forEach((node) => {
       if (node.cluster !== 'mkt') return;
+      if (migrations.has(node.id)) return; // drawn live at its migrated pos
       const s = screen[node.id];
       if (!s) return;
       drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
@@ -472,16 +519,29 @@
     }
     // Persistent venue-colored breathing glow on firing tickers (element-
     // local halo; additive so it blooms over the baked dust beneath it).
+    // Migrating tickers glow at their CURRENT pipeline position instead.
     ctx.globalCompositeOperation = 'lighter';
-    firingIds.forEach((id) => {
+    const glowAt = (id, x, y, boost) => {
       const s = screen[id];
       if (!s) return;
       const breathe = 0.72 + 0.28 * Math.sin(now / 650 + s.phaseOff);
-      const lvl = (s.fireLevel || 0.6) * breathe;
-      const col = s.venueColor || s.color;
-      drawDot(ctx, s.x, s.y, s.r * 3.6, col, 0.10 * lvl, 0);
-      drawDot(ctx, s.x, s.y, s.r * 1.9, col, 0.26 * lvl, 0);
-      drawDot(ctx, s.x, s.y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
+      const lvl = Math.min(1, ((s.fireLevel || 0.6) + (boost || 0)) * breathe);
+      const col = s.venueColor || VENUE_COLOR[String((s.node && s.node.exchange) || '').slice(0, 3).toLowerCase()] || s.color;
+      drawDot(ctx, x, y, s.r * 3.6, col, 0.10 * lvl, 0);
+      drawDot(ctx, x, y, s.r * 1.9, col, 0.26 * lvl, 0);
+      drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
+    };
+    firingIds.forEach((id) => { if (!migrations.has(id)) glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0); });
+    // Pipeline migration: advance tweens, idle-decay parked dots, draw each
+    // traveler at its interpolated position with a slightly boosted glow.
+    migrations.forEach((m, id) => {
+      const s = screen[id];
+      if (!s) { migrations.delete(id); return; }
+      if (m.t < 1) m.t = Math.min(1, m.t + dt / m.dur);
+      else if (m.phase === 'out' && now - m.lastMs > MIGRATE_IDLE_MS) { migrateHome(id); return; }
+      else if (m.phase === 'return' && m.t >= 1) { migrations.delete(id); return; }
+      const pt = migratePos(m, s);
+      glowAt(id, pt.x, pt.y, 0.25);
     });
     activeGlowIds.forEach((id) => {
       const s = screen[id];
@@ -498,6 +558,7 @@
 
   window.PolarisSpineField = {
     setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
+    migrateTicker, migrateHome,
     markFire, pathEdges, rgba, drawDot, bezierPoint,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,

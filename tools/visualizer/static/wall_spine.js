@@ -199,6 +199,12 @@
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {
+      // Jin 2026-07-10: the ticker ITSELF progresses rightward — a mkt dot
+      // with a real g1..g5 event parks beside that gate (venue-colored glow)
+      // and re-parks further right on each later gate; idle -> glides home.
+      if (srcNode.cluster === 'mkt' && g.gate_id >= 1 && g.gate_id <= 5) {
+        field.migrateTicker(srcNode.id, g.gate_id - 1);
+      }
       const es = field.pathEdges([srcNode.id, gid]);
       if (es.length) { spawnComet(es, field.clusterColor()[srcNode.cluster] || GATE_HALO, 1.8); return; }
     }
@@ -212,6 +218,10 @@
     const path = strat ? field.pathEdges([strat.id, 'g2', 'g3', 'g4', 'g5']) : [];
     if (path.length) spawnComet(path, field.clusterColor().strat || '#8fd7ff', 2.0);
     else field.markFire('g5', 700);
+    // The filled ticker's journey continues as a pos-cluster node — send its
+    // parked mkt dot home instead of leaving it camped at the sizer.
+    const mkt = e.ticker && field.findNode((n) => n.cluster === 'mkt' && n.ticker === e.ticker && n.exchange === e.exchange);
+    if (mkt) field.migrateHome(mkt.id);
   }
   function fireExit(e) {
     // node.exchange and the SSE payload's e.exchange are both the same

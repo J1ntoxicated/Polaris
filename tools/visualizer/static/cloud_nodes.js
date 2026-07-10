@@ -137,9 +137,20 @@
   let gateStats = {};
 
   // ── Z4 hub + open-position orbit (phyllotaxis slots — dense, no stacking) ─
-  const posSlots = new Map(); // "venue:ticker" -> {slot,x,y,venue,ticker,pnlUsd,nextTick}
+  // Slot key = venue:ticker:strategy_id, NOT venue:ticker alone — two open
+  // lots in the SAME instrument held by two DIFFERENT strategies are two
+  // distinct rows in snap.positions (server GROUP BY venue, symbol,
+  // strategy_id, side — see polaris/scripts/dashboard/snapshot_q_positions.py)
+  // and each needs its own orbit slot or the orbit undercounts real open
+  // exposure (review finding 2026-07-10). `side` is deliberately NOT part of
+  // this key: the exit SSE event's `direction` is derived from the CLOSING
+  // fill's side (server.py exit-event builder), which is the inverse of the
+  // position's own side for a normal close — keying on it would make onExit
+  // fail to match even the common single-lot case.
+  const posKey = (venue, ticker, sid) => venue + ':' + ticker + ':' + (sid || '');
+  const posSlots = new Map(); // posKey -> {slot,x,y,venue,ticker,pnlUsd,nextTick}
   function setRoster(list) {
-    const keys = (list || []).map((p) => p.venue + ':' + p.ticker).sort();
+    const keys = (list || []).map((p) => posKey(p.venue, p.ticker, p.sid)).sort();
     const keySet = new Set(keys);
     for (const k of Array.from(posSlots.keys())) if (!keySet.has(k)) posSlots.delete(k);
     keys.forEach((k, i) => {
@@ -151,7 +162,7 @@
       s.slot = i;
     });
     for (const p of list || []) {
-      const s = posSlots.get(p.venue + ':' + p.ticker);
+      const s = posSlots.get(posKey(p.venue, p.ticker, p.sid));
       if (s) { s.venue = p.venue; s.ticker = p.ticker; s.pnlUsd = p.pnlUsd; }
     }
   }
@@ -165,7 +176,7 @@
   const exiting = [];
   function onExit(e) {
     const venue = venueOf(e.exchange);
-    const key = venue + ':' + e.ticker;
+    const key = posKey(venue, e.ticker, e.strategy_id);
     const s = posSlots.get(key);
     const start = s ? { x: s.x, y: s.y } : hubXY;
     posSlots.delete(key);

@@ -64,7 +64,6 @@
     const text = (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(0);
     small.push({ type: 'dmg', x, y, text, pos: pnl >= 0, t: 0, dur: 1.5 });
   }
-  function spawnCometTail(x0, y0, x1, y1) { small.push({ type: 'comet', x0, y0, x1, y1, t: 0, dur: 1.1 }); }
   function spawnLootBeam(key, x, y) { spawnLarge('loot', key, x, y); }
   function spawnSparkleBurst(key, x, y) { spawnLarge('sparkle', key, x, y, { color: [0x87, 0xff, 0xaf] }); }
   function spawnShatter(key, x, y) { spawnLarge('shatter', key, x, y, { color: [0xff, 0x87, 0x87] }); }
@@ -192,7 +191,7 @@
     }
   }
   window.PolarisCloudFx = {
-    spawnRadarPing, spawnHitFlash, spawnDamageNumber, spawnCometTail,
+    spawnRadarPing, spawnHitFlash, spawnDamageNumber,
     spawnLootBeam, spawnSparkleBurst, spawnShatter,
     spawnAiHalo, spawnTickPulse, spawnFeedbackArc,
     pushKillFeed, tick, draw,

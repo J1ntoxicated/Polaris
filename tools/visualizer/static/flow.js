@@ -6,17 +6,17 @@
  * reused (SSE subscribe shape, TTL-cached stat poll, botlog tail) but this file
  * owns its own canvas + draw loop so /flow never depends on the globe booting.
  *
- * Jin 2026-07-10 (feat/visual-wall-director, then feat/cloud-river): /flow
- * is now the bottom ~45% pane of a combined page — the layout constants
- * below are pane-relative, not full-screen. The top ~55% used to be a 3D
- * globe; it's now a flat horizontal particle field (cloud.js/cloud_fx.js)
- * that shares this file's own gate-column x-coordinates via
- * window.PolarisWallLayout (see publishWallLayout() below) so the two panes
- * read as one continuous pipeline. This file also renders the pts-classes
- * river annotations (PROVE-class dotted entry particles, EARN/BENCH
- * transition badges, per-strategy score_F window gauges, "NEW CANDIDATE"
- * universe-admission flash) sourced from the same /api/flow_stats payload's
- * `classes` / `survivor_admissions_recent` fields.
+ * Jin 2026-07-10 (feat/visual-wall-director, then feat/cloud-river, then
+ * feat/flat-neural-map): /flow is now the bottom ~45% pane of a combined
+ * page — the layout constants below are pane-relative, not full-screen. The
+ * top ~55% used to be a 3D globe; it's now a flat single-field system
+ * blueprint (cloud.js/cloud_nodes.js/cloud_fx.js) with its OWN independent
+ * zone geometry — the two panes no longer share an x-axis contract (that
+ * made sense for the old 3-band Cloud River, not the 5-zone blueprint). This
+ * file also renders the pts-classes river annotations (PROVE-class dotted
+ * entry particles, EARN/BENCH transition badges, per-strategy score_F window
+ * gauges, "NEW CANDIDATE" universe-admission flash) sourced from the same
+ * /api/flow_stats payload's `classes` / `survivor_admissions_recent` fields.
  *
  * Data:
  *   /api/flow_stats  (5s TTL, matches the server cache — Jin 2026-07-10
@@ -84,7 +84,7 @@
   // viewport, see flow.html's .river-pane) — LANE_TOP/bottomReserve are
   // retuned to that pane's compact header/footer strips, not full-page ones.
   const MARGIN_X = 50;
-  const LANE_TOP = 80;      // clears col-headers + the venue-legend/verdict-ticker row
+  const LANE_TOP = 80;      // clears col-headers + the venue-legend row
   const BOTTOM_RESERVE = 92; // drop panel + class-gauge strip + margin
   let colX = [];
   let laneY = {};
@@ -101,23 +101,6 @@
     dropY = LANE_TOP + laneSpan;
     renderHeaders();
     if (window.PolarisFlowClasses) window.PolarisFlowClasses.setColX(colX);
-    publishWallLayout();
-  }
-
-  // Shared layout contract for the Cloud River pane above (cloud.js, feat/
-  // cloud-river Jin 2026-07-10) — the gate columns there must land on the
-  // EXACT same x pixel as this river's own gate nodes. STAGES has a 'fills'
-  // pseudo-column between G5/G6 so the raw colX array has 9 entries;
-  // stageX below is just the 8 real gate-id entries (1..8) picked out of
-  // it — including the wider G5->G6 gap the fills column creates — so both
-  // panes agree pixel-for-pixel without recomputing spacing twice. Both
-  // canvases share the same container width (the page's right ~70% column,
-  // see flow.html), so this is already container-relative, not viewport.
-  function publishWallLayout() {
-    const stageX = [];
-    STAGES.forEach((s, i) => { if (s.gate) stageX.push(colX[i]); });
-    window.PolarisWallLayout = { stageX, width: W };
-    window.dispatchEvent(new CustomEvent('wall-layout', { detail: window.PolarisWallLayout }));
   }
 
   // Jin 2026-07-10 (stage-count semantics fix): G1-G5 are per-journey (one

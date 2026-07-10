@@ -20,8 +20,9 @@
  * additive `strategy_activity` field):
  *   /static/graph.json  (3s poll) → cluster:"mkt" (Z1 reservoir) + cluster:
  *     "pos" (forwarded to cloud_nodes.setRoster for the Z4 orbit).
- *   /api/flow_stats (flow.js's 30s poll, forwarded in via setStats) →
- *     `classes` + `strategy_activity` (Z2 nodes) + `stages` (Z3/Z5 counts).
+ *   /api/flow_stats (this file's OWN 5s poll — pollAdmissions, matches the
+ *     server's 5s TTL — NOT forwarded from flow.js) → `classes` +
+ *     `strategy_activity` (Z2 nodes) + `stages` (Z3/Z5 counts).
  *   /stream/events (shared bus) → gate_events (Z1->Z2/Z3 glide) + fills
  *     entry (Z1->Z4 glide) + exit (forwarded straight to cloud_nodes.onExit).
  *
@@ -144,7 +145,11 @@
           });
         }
       } else if (n.cluster === 'pos') {
-        posList.push({ ticker: n.ticker, venue, pnlUsd: n.pnl_usd || 0 });
+        // sid = strategy_id — the per-lot discriminator (venue:ticker alone
+        // collapses two open positions in the SAME instrument held by two
+        // DIFFERENT strategies into one orbit slot; review finding 2026-07-10
+        // — see cloud_nodes.js setRoster).
+        posList.push({ ticker: n.ticker, venue, pnlUsd: n.pnl_usd || 0, sid: n.strategy_id || '' });
       }
     }
     for (const key of Array.from(dormant.keys())) if (!seenD.has(key)) dormant.delete(key);
@@ -186,7 +191,9 @@
     dot.lastActivityTs = performance.now();
   }
 
-  // ── survivor_admissions_recent (own poll, matches flow.js's 30s TTL) ─────
+  // ── survivor_admissions_recent + classes/stats (own 5s poll, matches the
+  // server's 5s TTL — Jin 2026-07-10 end-to-end <=5s realtime-sync mandate;
+  // NOT forwarded from flow.js, which polls the same endpoint separately) ──
   let lastAdmissionTs = 0, admissionsSeeded = false;
   async function pollAdmissions() {
     try {

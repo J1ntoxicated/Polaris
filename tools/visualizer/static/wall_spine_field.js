@@ -671,11 +671,13 @@
     staticCtx.font = '600 8px JetBrains Mono, monospace';
     staticCtx.textAlign = 'center';
     allNodes.forEach((node) => {
-      if (node.cluster !== 'reg' && node.cluster !== 'probe') return;
+      if (node.cluster !== 'reg' && node.cluster !== 'probe' && node.cluster !== 'orbit') return;
       const s = screen[node.id];
       if (!s) return;
       staticCtx.fillStyle = rgba('#8a94b0', node.state === 'dormant' ? 0.4 : 0.75);
-      staticCtx.fillText(String(node.label || '').replace('regime_', ''), s.x, s.y + 14);
+      // orbit(러너/AI 위성) 라벨은 첫 세그먼트만 (session_mult:... → session_mult)
+      const lbl = String(node.label || '').replace('regime_', '').split(':')[0];
+      staticCtx.fillText(lbl, s.x, s.y + 14);
     });
   }
   // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback

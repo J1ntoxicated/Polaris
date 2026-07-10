@@ -290,6 +290,12 @@ _DEFAULT_BAR_FETCH_LIMIT = 240
 # 600 clears 560 with margin and stays comfortably above rsi_bb_pullback's
 # diluted ~400 need (its own 205-bar warmup against a ~50% synthetic-fill OKX
 # 15m canvas) — a strictly ADDITIVE widen, no existing 15m consumer narrows.
+# NOTE (rework round 3): this 600 READ-canvas limit only bounds the query, not
+# what the DB actually HOLDS — the binding ceiling is the 15m retention
+# window (``polaris.storage.retention.RETENTION_SPEC``, 15m rule), which was
+# still 30d (below the 560 warmup once accounting for RTH-only bars/holidays)
+# until raised to 45d alongside this comment. See that rule's docstring for
+# the full derivation; the two must be read together to confirm #5 reachable.
 # 1D raised 260 -> 320 (Alpaca sleeve rework, §1 #2): equity_xsect_52w_momentum
 # needs 270 REAL 1D bars for warmup_ok — 260 permanently capped the canvas
 # BELOW that (silent INERT: the strategy would never reach warmup regardless of

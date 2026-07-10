@@ -63,6 +63,18 @@
     if (v == null || isNaN(v)) return '—';
     return Number(v).toFixed(digits == null ? 2 : digits);
   }
+  // VIRTUAL ACCOUNT mode branch — mirrors wall_spine_hud.js's renderEquity
+  // (the bot-log strip ticker) so the console crown/gauges/sparkline never
+  // show a different EQUITY number than the strip on the same screen. Falls
+  // back to the legacy real-venue pair when virtual mode is off.
+  function equityOf(core) {
+    if (!core) return { equity: null, today: null };
+    const virt = !!core.virtual_account_enabled;
+    return {
+      equity: virt ? core.virtual_equity_usd : core.equity_now,
+      today: virt ? core.virtual_daily_pnl_usd : core.equity_now - core.starting_capital,
+    };
+  }
 
   /* ===== panel frame (shared chrome — border + corner brackets + header,
    * source-over only) ===== */
@@ -110,7 +122,7 @@
     const sessLbl = ['okx', 'capital', 'alpaca']
       .map((v) => (sess[v] || '-').replace('_', ' ').slice(0, 9)).join(' · ');
     const rows = [
-      ['EQUITY', fmtUsd(core.equity_now), null, 4],
+      ['EQUITY', fmtUsd(equityOf(core).equity), null, 4],
       ['PEAK', fmtUsd(core.peak_equity), null, 1800],
       ['FEE-NET', fmtUsd(core.real_fee_net), null, 1800],
       ['EXPOSURE', fmtUsd(exposure), null, 1800],
@@ -148,10 +160,13 @@
       ctx.fillRect(bx, barBot - h, barW - 2, h);
     });
     const gpt = (c && c.gpt) || {};
+    // ERR is a call-error COUNT, not a P/L figure — green/red is money-only
+    // (color contract §1). Amber (matches the verdict tape's own 'amber'
+    // convention below) flags it without bleeding into the money palette.
     labelValueRow(ctx, x0 + 6, x1 - 6, barBot + 12,
       'AI CALLS/h · OK% · ERR',
       (gpt.calls_per_h || 0) + ' · ' + fmtPct(gpt.ok_pct) + ' · ' + (gpt.err_n || 0),
-      gpt.err_n ? PNL_NEG : null, field.breath(now, 900, 11));
+      gpt.err_n ? '#ffb454' : null, field.breath(now, 900, 11));
     // VERDICT TAPE — up to 3 real recent AI-judge verdicts (flow_stats caps
     // at 3; never padded with fabricated rows).
     const tapeY = barBot + 24;
@@ -163,7 +178,10 @@
       const chipY = tapeY + i * 11;
       const startOffset = (1 - k) * 20; // slides in from +20px on first sight, settles at 0
       const text = 'g' + v.gate_id + ' ' + String(v.verdict || '').slice(0, 14).toLowerCase();
-      const col = v.color === 'green' ? PNL_POS : (v.color === 'amber' ? '#ffb454' : STEEL);
+      // AI verdict pass/amber/dim is a judge STATE, not P/L — green/red is
+      // money-only (color contract §1). Warm-white (the deck's own "active"
+      // hue) reads a pass verdict without borrowing the profit-green hex.
+      const col = v.color === 'green' ? WARM : (v.color === 'amber' ? '#ffb454' : STEEL);
       ctx.globalAlpha = k;
       ctx.textAlign = 'right'; ctx.font = '600 7px JetBrains Mono, monospace';
       ctx.fillStyle = field.rgba(col, 0.85);
@@ -182,8 +200,9 @@
     const cxs = [W * 0.05, W * 0.115, W * 0.18, W * 0.245];
     if (!c || !c.core) return;
     const core = c.core;
-    const pk = core.peak_equity > 0 ? Math.max(0, Math.min(1, core.equity_now / core.peak_equity)) : 0;
-    deco.drawArcGauge(ctx, cxs[0], cy, r, pk, WARM, 'EQUITY', fmtUsd(core.equity_now));
+    const eq = equityOf(core).equity;
+    const pk = core.peak_equity > 0 ? Math.max(0, Math.min(1, eq / core.peak_equity)) : 0;
+    deco.drawArcGauge(ctx, cxs[0], cy, r, pk, WARM, 'EQUITY', fmtUsd(eq));
     const dayPnl = c.day_pnl || 0;
     // Scale: full ring = +-10% of starting capital (a fixed, documented
     // reference — NOT a fabricated data value, the $ figure drawn is real).
@@ -298,8 +317,9 @@
       ctx.fillStyle = field.rgba(upnl >= 0 ? PNL_POS : PNL_NEG, 0.92);
       ctx.fillText(fmtUsd(upnl), x1 - 6, ry);
     });
-    // SESSION sparkline — global equity_now client ring buffer.
-    pushEquitySample(c && c.core && c.core.equity_now);
+    // SESSION sparkline — global equity client ring buffer (virtual-mode
+    // branched, same as the crown/gauges — see equityOf()).
+    pushEquitySample(c && c.core && equityOf(c.core).equity);
     if (equityRing.length > 1) {
       const sx0 = x0 + 6, sx1 = x1 - 6, sy0 = y1m - 8, sy1 = y1m - 3;
       const lo = Math.min(...equityRing), hi = Math.max(...equityRing);

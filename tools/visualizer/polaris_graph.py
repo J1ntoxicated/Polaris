@@ -1331,12 +1331,23 @@ def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
     the client renders as "—", never a crash or a fabricated number.
     """
     since_reset = snap.virtual_since_reset
+    # VIRTUAL ACCOUNT mode (Jin 2026-07-07 mandate) — same branch wall_spine_
+    # hud.js's renderEquity already applies to the bot-log strip's equity
+    # ticker (equity_now is a real-venue reconciliation that reads stale/wrong
+    # once virtual mode is on, the CLAUDE.md-mandated default). The console
+    # crown/gauges/sparkline read this same core block, so they must branch
+    # identically or the flagship EQUITY number contradicts the strip sitting
+    # right below it on the same screen (rework r2 fix).
+    virtual_equity_usd = sum((s.virtual_equity_usd for s in snap.streams), 0.0)
     core = {
         "equity_now": round(float(snap.equity_now), 2),
         "peak_equity": round(float(snap.peak_equity), 2),
         "starting_capital": round(float(snap.starting_capital), 2),
         "real_fee_net": round(float(snap.equity_now_real_fee_net), 2),
         "virtual_since_reset": dataclasses.asdict(since_reset) if since_reset else None,
+        "virtual_account_enabled": bool(snap.virtual_account_enabled),
+        "virtual_equity_usd": round(float(virtual_equity_usd), 2),
+        "virtual_daily_pnl_usd": round(float(snap.virtual_daily_pnl_usd), 2),
     }
 
     now_s = int(snap.ts_now or time.time())

@@ -32,7 +32,14 @@
   let killRows = [];
   function fingerprintOf(data) {
     const st = data.stats || {};
-    return st.node_count + ':' + st.open_count + ':' + st.cluster_count;
+    // wiring hash (Jin 2026-07-10 "배선 실시간"): lifecycle strat->pos pairs,
+    // watch set, probe links — ANY rewiring rebuilds edges within one poll.
+    let h = 2166136261;
+    const eat = (s) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } };
+    (data.lifecycle_paths || []).forEach((p) => eat(p.kind + (p.node_ids || []).join('>')));
+    (data.nodes || []).forEach((n) => { if (n.cluster === 'watch') eat(n.id); });
+    (data.probe_links || []).forEach((l) => eat(l.probe + '>' + l.pos));
+    return st.node_count + ':' + st.open_count + ':' + st.cluster_count + ':' + (h >>> 0);
   }
   function renderKillFeed() {
     const el = document.getElementById('kill-feed');

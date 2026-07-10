@@ -91,9 +91,10 @@
   }
   // G2 recent-signal tags ("뭐가 잡혔나") — real gate_id=2 events only.
   const g2Tags = [];
-  function pushSignalTag(g) {
+  function pushSignalTag(g, exchange) {
     if (!g || g.gate_id !== 2 || !g.symbol) return;
-    g2Tags.unshift({ sym: String(g.symbol).split('-')[0].split('_')[0], venue: g.exchange || '', born: performance.now() });
+    const sym = String(g.symbol).split(':').pop().split('-')[0].split('_')[0];
+    g2Tags.unshift({ sym, venue: exchange || '', born: performance.now() });
     if (g2Tags.length > 5) g2Tags.pop();
   }
   const sediment = [];
@@ -294,6 +295,7 @@
   function boot(data) {
     fitCanvas();
     field.buildLayout(data);
+    if (field.setProbeLinks) field.setProbeLinks(data.probe_links);
     field.buildEdges(data);
     field.renderStaticLayer(staticCtx);
     if (!booted) {
@@ -313,7 +315,6 @@
   function fireGateEvent(g) {
     if (!g || !g.gate_id) return;
     pushGateMote(g.gate_id - 1, g.decision);
-    pushSignalTag(g);
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {
@@ -322,6 +323,11 @@
       // and re-parks further right on each later gate; idle -> glides home.
       if (srcNode.cluster === 'mkt' && g.gate_id >= 1 && g.gate_id <= 5) {
         field.migrateTicker(srcNode.id, g.gate_id - 1);
+      }
+      // real-time wiring: this strategy really fired on this ticker NOW
+      if (g.gate_id === 2) pushSignalTag(g, srcNode.exchange);
+      if (g.strategy && field.nodeById('strat_' + g.strategy)) {
+        field.touchWire('strat_' + g.strategy, srcNode.id, field.venueColorOf(srcNode.exchange));
       }
       const es = field.pathEdges([srcNode.id, gid]);
       const vc = field.venueColorOf && field.venueColorOf(srcNode.exchange);

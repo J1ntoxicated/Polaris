@@ -1406,9 +1406,29 @@ def build_graph(
         "virtual_daily_pnl_usd": round(float(snap.virtual_daily_pnl_usd), 2),
     }
 
+    # probe -> position live links (Jin 2026-07-10 "프로브 연결"): which
+    # positions each advisor actually read in the last 30m — real events only.
+    pos_ids = {n["id"] for n in pos_nodes}
+    probe_links: list[dict[str, str]] = []
+    seen_links: set[str] = set()
+    now_s = int(snap.ts_now)
+    for ev in getattr(snap, "probe_events", []) or []:
+        name = str(ev.get("name") or "")
+        if name not in ("profit_taking", "loss_defense", "technical"):
+            continue
+        if now_s - int(ev.get("ts") or 0) > 1800:
+            continue
+        base = str(ev.get("ticker") or "").split("-")[0].split("_")[0]
+        pid = f"pos_{_short_venue(str(ev.get('venue') or ''))}_{base}"
+        key = f"probe_{name}>{pid}"
+        if pid in pos_ids and key not in seen_links:
+            seen_links.add(key)
+            probe_links.append({"probe": f"probe_{name}", "pos": pid})
+
     return {
         "nodes": nodes,
         "clusters": _CLUSTERS,
+        "probe_links": probe_links,
         "live_trades": live_trades,
         "recent_closes": closes,
         "galaxy_universe": universe,

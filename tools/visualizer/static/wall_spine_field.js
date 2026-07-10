@@ -72,6 +72,16 @@
   // Strategy-constellation assignment (Jin 2026-07-10 "전략들이 보고있는
   // 티커들 링크해서 클러스터"): mkt ticker id -> its strategy node id.
   const tickerStrat = new Map();
+  // LIVE wires (Jin 2026-07-10 "배선이 실시간으로 변경돼야"): real
+  // strategy<->ticker interactions from SSE events — created the moment a
+  // strategy actually fires on a ticker, fading over 15min, rewired live.
+  // (The hash-assigned constellation spokes remain as the dim base cloth.)
+  const liveWires = new Map(); // 'from>to' -> {from,to,color,born}
+  const LIVE_WIRE_TTL = 900000;
+  function touchWire(fromId, toId, color) {
+    if (!screen[fromId] || !screen[toId]) return;
+    liveWires.set(fromId + '>' + toId, { from: fromId, to: toId, color: color || '#8fb0c8', born: performance.now() });
+  }
   let W = 1344, H = 962;
   const screen = {};      // id -> {x,y,r,depth,color,baseAlpha,bobAmp,bobSpeed,phaseOff,fireUntil,node}
   let gateScreen = [];    // 8x {x,y,fireUntil,pulsePhase} — index-aligned with GATE_IDS
@@ -583,8 +593,25 @@
       addAmbient(fromId, toId, a.x, a.y, b.x, b.y, { color: strandColor, alpha: 0.13 + Math.min(0.2, count * 0.01), width: w });
     });
 
+    // Probe wiring (Jin: "프로브들은 연결이 하나도 안 되는 거야?") —
+    // anchor line to G6 (they are the monitor's advisors) + live links to
+    // the positions they actually read in the last 30m (server probe_links).
+    const g6gate = gateScreen[5];
+    (allNodes.filter((n) => n.cluster === 'probe')).forEach((n) => {
+      const a = screen[n.id];
+      if (!a || !g6gate) return;
+      addAmbient(n.id, 'g6', a.x, a.y, g6gate.x, g6gate.y, { color: '#8a94b0', alpha: 0.18, width: 0.7, bowScale: 0.4 });
+    });
+    (lastProbeLinks || []).forEach((lk) => {
+      const a = screen[lk.probe], b = screen[lk.pos];
+      if (!a || !b) return;
+      addAmbient(lk.probe, lk.pos, a.x, a.y, b.x, b.y, { color: '#8a94b0', alpha: 0.3, width: 0.8, glow: true });
+    });
+
     buildWhisperMesh();
   }
+  let lastProbeLinks = [];
+  function setProbeLinks(links) { lastProbeLinks = links || []; }
 
   /* ===== micro-pulse pool — the unbroken current ===== */
   const MAX_PULSES = 46;
@@ -707,6 +734,17 @@
       const by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
       drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
     }
+    // LIVE interaction wires — brighter than base cloth, fade with age,
+    // geometry from the shared bezier cache (distinct 'lw:' keys).
+    const nowMs = now;
+    liveWires.forEach((w, key) => {
+      const age = nowMs - w.born;
+      if (age > LIVE_WIRE_TTL) { liveWires.delete(key); return; }
+      const a = screen[w.from], b = screen[w.to];
+      if (!a || !b) { liveWires.delete(key); return; }
+      const e = edgeFor('lw:' + w.from, w.to, a.x, a.y, b.x, b.y, { color: w.color, alpha: 0.34, width: 0.9, bowScale: 0.5 });
+      drawEdge(ctx, e, 1 - age / LIVE_WIRE_TTL);
+    });
     // Persistent venue-colored breathing glow on firing tickers (element-
     // local halo; additive so it blooms over the baked dust beneath it).
     // Migrating tickers glow at their CURRENT pipeline position instead.
@@ -748,7 +786,7 @@
 
   window.PolarisSpineField = {
     setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
-    migrateTicker, migrateHome, venueColorOf,
+    migrateTicker, migrateHome, venueColorOf, touchWire, setProbeLinks,
     screenOf: (id) => screen[id],
     markFire, pathEdges, rgba, drawDot, bezierPoint,
     gateScreen: () => gateScreen,

@@ -69,6 +69,9 @@
   // skipped there and drawn live here — no ghost duplicates.
   const migrations = new Map(); // id -> {fx,fy,tx,ty,t,dur,phase,lastMs,gateIdx}
   const MIGRATE_IDLE_MS = 150000;
+  // Strategy-constellation assignment (Jin 2026-07-10 "전략들이 보고있는
+  // 티커들 링크해서 클러스터"): mkt ticker id -> its strategy node id.
+  const tickerStrat = new Map();
   let W = 1344, H = 962;
   const screen = {};      // id -> {x,y,r,depth,color,baseAlpha,bobAmp,bobSpeed,phaseOff,fireUntil,node}
   let gateScreen = [];    // 8x {x,y,fireUntil,pulsePhase} — index-aligned with GATE_IDS
@@ -113,7 +116,7 @@
       const t = i / (GATE_IDS.length - 1);
       const rg = rngFor(gid + ':stagger');
       const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
-      const y = H * 0.50 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.075
+      const y = H * 0.615 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
         + Math.cos(t * Math.PI * 0.9) * H * 0.02 + (rg() - 0.5) * H * 0.034;
       return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
     });
@@ -126,9 +129,52 @@
     // firing wave lit up as one straight queue. Deterministic hash-order
     // shuffle scatters venues/symbols across the band (stable across polls).
     const hashShuffle = (arr) => (arr || []).slice().sort((a, b) => hashStr(a.id + ':mix') - hashStr(b.id + ':mix'));
-    jitteredBand(hashShuffle(byCluster.mkt), W * 0.02, W * 0.98, H * 0.045, H * 0.33, ':mkt', 0.86);
-    jitteredBand(hashShuffle(byCluster.watch), W * 0.06, W * 0.94, H * 0.35, H * 0.435, ':watch', 0.8);
-    jitteredBand(byCluster.strat || [], W * 0.07, W * 0.93, H * 0.655, H * 0.90, ':strat', 0.8);
+    // Strategy constellations (Jin 2026-07-10 "전략+보는 티커 = 클러스터,
+    // 들어갈 땐 아래 메인 게이트로"): strategies anchor the TOP field; each
+    // venue's tickers are dealt round-robin (deterministic hash order) to
+    // that venue's strategies and orbit them in a golden-angle elliptical
+    // cloud. Firing tickers then DESCEND to the gate spine below (migration)
+    // — the top-to-bottom order finally reads as the real pipeline. The old
+    // random mkt->strat links (the white-line convergence hub) die here.
+    tickerStrat.clear();
+    jitteredBand(hashShuffle(byCluster.strat), W * 0.045, W * 0.955, H * 0.09, H * 0.40, ':strat', 0.6);
+    const stratPool = { okx: [], cap: [], alp: [] };
+    hashShuffle(byCluster.strat).forEach((n) => {
+      const k = String(n.exchange || '').slice(0, 3).toLowerCase();
+      if (stratPool[k]) stratPool[k].push(n);
+    });
+    const perStratIdx = new Map();
+    ['okx', 'cap', 'alp'].forEach((vk) => {
+      const pool = stratPool[vk];
+      const ticks = hashShuffle((byCluster.mkt || []).filter((n) => String(n.exchange || '').slice(0, 3).toLowerCase() === vk));
+      if (!pool.length) { // venue without strategies: park its dust low-left
+        jitteredBand(ticks, W * 0.03, W * 0.2, H * 0.46, H * 0.55, ':orphan' + vk, 0.8);
+        return;
+      }
+      ticks.forEach((n, i) => {
+        const st = pool[i % pool.length];
+        const k = perStratIdx.get(st.id) || 0;
+        perStratIdx.set(st.id, k + 1);
+        const r = rngFor(n.id + ':orb');
+        const ang = k * 2.39996 + r() * 0.6;
+        const rad = 13 + 7.2 * Math.sqrt(k + 1) + r() * 3;
+        const sc = screen[st.id];
+        screen[n.id] = {
+          x: Math.max(8, Math.min(W - 8, sc.x + Math.cos(ang) * rad)),
+          y: Math.max(14, Math.min(H * 0.47, sc.y + Math.sin(ang) * rad * 0.55)),
+        };
+        tickerStrat.set(n.id, st.id);
+      });
+    });
+    // watch (G4 pre-entry probes) ride NEXT TO their ticker inside the
+    // constellation ("전략이랑 프로브랑 같이").
+    (byCluster.watch || []).forEach((n) => {
+      const mkt = allNodes.find((m) => m.cluster === 'mkt' && m.ticker === n.ticker && m.exchange === n.exchange);
+      const base = mkt && screen[mkt.id];
+      const r = rngFor(n.id + ':wt');
+      if (base) screen[n.id] = { x: base.x + (r() - 0.5) * 14, y: base.y - 6 - r() * 5 };
+      else screen[n.id] = { x: W * (0.3 + r() * 0.4), y: H * 0.44 };
+    });
 
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
     jitteredBand(byCluster.reg || [], gG3.x - 95, gG3.x + 95, gG3.y + 55, gG3.y + 115, ':reg', 0.7);
@@ -369,29 +415,36 @@
     }
 
     const strat = allNodes.filter((n) => n.cluster === 'strat');
-    const stratByExchange = { okx: [], cap: [], alp: [] };
-    strat.forEach((n) => { if (stratByExchange[n.exchange]) stratByExchange[n.exchange].push(n); });
-
-    allNodes.filter((n) => n.cluster === 'mkt').forEach((n) => {
-      const pool = stratByExchange[n.exchange];
-      if (!pool || !pool.length) return;
-      const r = rngFor(n.id + ':pick');
-      const target = pool[Math.floor(r() * pool.length)];
-      const a = screen[n.id], b = screen[target.id];
-      if (!a || !b) return;
-      addAmbient(n.id, target.id, a.x, a.y, b.x, b.y, { color: mixHex(CLUSTER_COLOR.mkt, CLUSTER_COLOR.strat, 0.5), alpha: 0.045 + (n.intensity || 0.2) * 0.05, width: 0.55 });
+    // Constellation spokes: each ticker links to ITS strategy (short local
+    // web, venue-colored) — replaces the old random venue-pool links whose
+    // few targets became the white-line convergence hub Jin flagged.
+    tickerStrat.forEach((stratId, mktId) => {
+      const a = screen[mktId], b = screen[stratId];
+      const n = nodeById[mktId];
+      if (!a || !b || !n) return;
+      const vc = venueColorOf(n.exchange) || '#8fb0c8';
+      addAmbient(mktId, stratId, a.x, a.y, b.x, b.y, { color: vc, alpha: 0.04 + (n.intensity || 0.2) * 0.04, width: 0.5, bowScale: 0.4 });
     });
 
+    // Descent paths are WHISPERS, not beams (Jin: the additive pile-up of
+    // 26+32 bright lines into one pixel was the "white broom"). Ring-offset
+    // arrivals so nothing converges on a single point; venue-colored.
     const g4 = gateScreen[3];
     allNodes.filter((n) => n.cluster === 'watch').forEach((n) => {
       const a = screen[n.id]; if (!a) return;
-      addAmbient(n.id, 'g4', a.x, a.y, g4.x, g4.y, { color: CLUSTER_COLOR.watch, alpha: 0.14 + (n.intensity || 0.3) * 0.15, width: 0.8 });
+      const r = rngFor(n.id + ':g4arr');
+      const ang = r() * Math.PI * 2, rad = 16 + r() * 18;
+      addAmbient(n.id, 'g4', a.x, a.y, g4.x + Math.cos(ang) * rad, g4.y + Math.sin(ang) * rad,
+        { color: venueColorOf(n.exchange) || '#8fb0c8', alpha: 0.05 + (n.intensity || 0.3) * 0.05, width: 0.6, bowScale: 0.35 });
     });
 
     const g2 = gateScreen[1];
     strat.forEach((n) => {
       const a = screen[n.id]; if (!a) return;
-      addAmbient(n.id, 'g2', a.x, a.y, g2.x, g2.y, { color: CLUSTER_COLOR.strat, alpha: 0.22 + (n.intensity || 0.3) * 0.2, width: 1.0, glow: n.state === 'firing' });
+      const r = rngFor(n.id + ':g2arr');
+      const ang = r() * Math.PI * 2, rad = 18 + r() * 22;
+      addAmbient(n.id, 'g2', a.x, a.y, g2.x + Math.cos(ang) * rad, g2.y + Math.sin(ang) * rad,
+        { color: venueColorOf(n.exchange) || CLUSTER_COLOR.strat, alpha: 0.06 + (n.intensity || 0.3) * 0.05, width: 0.6, glow: n.state === 'firing', bowScale: 0.3 });
     });
 
     const g3 = gateScreen[2];
@@ -434,12 +487,24 @@
     (data.lifecycle_paths || []).forEach((p) => {
       const ids = p.node_ids;
       if (p.kind === 'open') {
+        // Per-path lens offset at shared waypoints (Jin: 13 opens all route
+        // through the CURRENT REGIME node — e.g. reg_regime_chop — and the
+        // point-convergence read as "쪼그만 점이 다 잡고있다"). Each path
+        // passes the waypoint through its own offset in a ~30px lens, so the
+        // bundle reads as a braid, not a knot. Unique edge keys per path
+        // (same strat->reg pair repeats across positions).
+        const pr = rngFor((ids[ids.length - 1] || 'p') + ':lens');
+        const la = pr() * Math.PI * 2, lr = 8 + pr() * 22;
+        const ox = Math.cos(la) * lr, oy = Math.sin(la) * lr;
         for (let i = 0; i < ids.length - 1; i++) {
           const a = screen[ids[i]], b = screen[ids[i + 1]];
           if (!a || !b) continue;
-          const key = ids[i] + '->' + ids[i + 1];
+          const midA = i > 0, midB = (i + 1) < (ids.length - 1);
+          const key = ids[i] + '~' + (ids[ids.length - 1] || '');
           const hue = LINEAGE_HUES[Math.floor(rngFor(key + ':hue')() * LINEAGE_HUES.length)];
-          addAmbient(ids[i], ids[i + 1], a.x, a.y, b.x, b.y, { color: hue, alpha: 0.5, width: 1.4, glow: true, kind: 'live-open' });
+          addAmbient(key, ids[i + 1], a.x + (midA ? ox : 0), a.y + (midA ? oy : 0),
+            b.x + (midB ? ox : 0), b.y + (midB ? oy : 0),
+            { color: hue, alpha: 0.3, width: 1.1, glow: true, kind: 'live-open' });
         }
       } else {
         for (let i = 0; i < ids.length - 1; i++) {
@@ -548,6 +613,17 @@
       const s = screen[node.id];
       if (!s) return;
       drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
+    });
+    // Regime waypoint labels — the lifecycle braid routes through these tiny
+    // nodes; unlabeled they read as a mystery knot (Jin 2026-07-10).
+    staticCtx.font = '600 8px JetBrains Mono, monospace';
+    staticCtx.textAlign = 'center';
+    allNodes.forEach((node) => {
+      if (node.cluster !== 'reg') return;
+      const s = screen[node.id];
+      if (!s) return;
+      staticCtx.fillStyle = rgba('#8a94b0', 0.75);
+      staticCtx.fillText(String(node.label || '').replace('regime_', ''), s.x, s.y + 14);
     });
   }
   // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback

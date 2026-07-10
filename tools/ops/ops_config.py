@@ -114,7 +114,10 @@ class OpsConfig:
             "-m", "polaris.scripts.ignite_p1",
             "--paper",
             "--duration", str(self.duration_sec),
-            "--tick", "5",
+            # Jin 2026-07-10 "실시간": tick sleep 5→1s. NOTE: the measured tick
+            # BODY is 14-267s (median 44s) — the sleep is not the bottleneck;
+            # the body forensic (wf tick-body-forensic) owns the real fix.
+            "--tick", "1",
             "--full-pipeline",
             "--db", str(self.db_path),
             "-vv",

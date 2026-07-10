@@ -19,6 +19,14 @@
      iframe, right = the spine canvas + bottom HUD (score_F gauge strip / bot
      log / equity). ?nomobile=1 hides the iframe and gives the wall stack the
      full width. English UI, Bloomberg-dense, polaris.css tokens only. */
+  /* Jarvis visual-language pass (Jin 2026-07-10, feat/jarvis-language):
+     material/symbol-language refinement on the SAME Synaptic Spine structure
+     above (hairline reticles, target-lock brackets, callout leader lines,
+     strategy score_F reticle, watch bracket chips, static engineering
+     graticule, numeric HUD blocks) — new draw logic lives in the sibling
+     wall_spine_deco.js, loaded between wall_spine_field.js and wall_spine.js
+     below. Philosophy doc unchanged: vault/50_research/
+     wall_design_philosophy_synaptic_current.md. */
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: #03040a; color: var(--p-wht);
@@ -74,7 +82,10 @@
   .wall-venues .v-alp { color: #ffc84f; }
   .wall-summary { display: flex; gap: 14px; margin-left: auto; font-size: 9.5px; color: var(--p-gry); flex-wrap: wrap; }
   .wall-summary .lbl { color: var(--p-dim); margin-right: 4px; }
-  .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; }
+  /* Jarvis numeric HUD block (Jin 2026-07-10, feat/jarvis-language): a thin
+     hairline rule above the tabular figure reads as a small readout block,
+     matching the gate-canvas numeric blocks (wall_spine.js drawGates()). */
+  .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; border-top: 1px solid rgba(159,192,255,0.3); padding-top: 1px; }
 
   /* Kill feed — real G3/G4/G5 KILL decisions (top-right, newest on top, capped 6). */
   #kill-feed { position: absolute; top: 34px; right: 10px; z-index: 10; width: 250px; font-size: 9.5px; text-align: right; }
@@ -139,7 +150,7 @@
   .botlog-pane .bl-head .live { color: var(--p-grn); font-size: 7px; letter-spacing: 0.08em; }
   .botlog-pane .bl-head .live::before { content: '●'; margin-right: 3px; }
   .botlog-pane .bl-head .metric { margin-left: auto; color: var(--p-dim); font-weight: 400; }
-  .botlog-pane .bl-head .metric b { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 4px; }
+  .botlog-pane .bl-head .metric b { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 4px; border-top: 1px solid rgba(159,192,255,0.3); padding-top: 1px; }
   .botlog-pane .bl-head .metric b.pos { color: var(--pnl-pos); } .botlog-pane .bl-head .metric b.neg { color: var(--pnl-neg); }
   /* Equity "vitality pulse" — small HUD addition (radial-inspired): the
      number itself breathes gently, a quiet always-on life-sign rather than a
@@ -231,15 +242,18 @@
 <!-- Shared SSE bus (events_bus.js) + pts-classes annotations (flow_classes.js,
      unchanged — gauge strip / EARN·BENCH badges / NEW CANDIDATE flash) + the
      Synaptic Spine engine: wall_spine_field.js (layout/edges/whisper-mesh/
-     static pre-render, no canvas of its own) -> wall_spine.js (canvas/rAF
-     owner, gate cores, comets, public window.PolarisSpine API) ->
+     static pre-render, no canvas of its own) -> wall_spine_deco.js (Jarvis
+     decoration layer — strategy score_F reticle / watch bracket chip /
+     engineering graticule, feat/jarvis-language) -> wall_spine.js (canvas/
+     rAF owner, gate cores, comets, public window.PolarisSpine API) ->
      wall_spine_hud.js (the only module doing network I/O — graph.json/
      flow_stats polls + SSE dispatch, drives PolarisSpine + the DOM HUD). -->
 <script src="static/events_bus.js?v=1"></script>
 <script src="static/flow_classes.js?v=1"></script>
-<script src="static/wall_spine_field.js?v=28_hierarchy"></script>
-<script src="static/wall_spine.js?v=9_livewires"></script>
-<script src="static/wall_spine_hud.js?v=2_wiringfp"></script>
+<script src="static/wall_spine_field.js?v=29_jarvis"></script>
+<script src="static/wall_spine_deco.js?v=1_jarvis"></script>
+<script src="static/wall_spine.js?v=10_jarvis"></script>
+<script src="static/wall_spine_hud.js?v=3_jarvis"></script>
 <script>
   // The spine canvas fits to canvas clientWidth/Height; after layout settles,
   // nudge resize twice (rAF + delayed) so fitCanvas() picks up the grid-

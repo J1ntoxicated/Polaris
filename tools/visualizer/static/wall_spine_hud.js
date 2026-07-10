@@ -138,6 +138,7 @@
       if (!r.ok) return;
       const d = await r.json();
       spine.setGateCounts(d.stages || []);
+      if (spine.setStrategyGauges) spine.setStrategyGauges(d.classes || []);
       renderSummary(d);
       renderDrops(d);
       for (const v of d.verdicts_recent || []) {

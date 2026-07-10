@@ -9,18 +9,24 @@
  * setFlowSummary). Decoration (panel frames/corner brackets/section
  * headers) carries no data shape, so it never reads as a fabricated number.
  *
- * Implementation note (scope decision): the build spec calls for an
- * offscreen-canvas bake of the static panel chrome (frames/headers) at 1s
- * cadence with per-frame blit + only the small dynamic bits redrawn. This
- * file instead redraws the (modest — ~9 small panels, a few dozen strokes/
- * fillTexts total) chrome directly every frame: wall_spine.js's drawGates()
- * already redraws 8 full gate reticles (rotating rings + tick bands + HUD
- * blocks) every frame at this same node count without a bake step, so the
- * per-frame cost here is the same order of magnitude as an already-proven-
- * fine code path. Trades a slice of theoretical headroom for materially
- * less surface area; revisit with an offscreen bake if a live profile ever
- * shows it's needed — the panel draw functions below don't have to change
- * shape to add one later.
+ * Implementation note (rework r3 fix, review CRITICAL/MED item 2): the build
+ * spec calls for an offscreen-canvas bake of the static panel chrome at 1s
+ * cadence with per-frame blit + only the small dynamic bits redrawn. The
+ * five panels with NO now-dependent animation — KELLY CELL LEDGER, the BAY
+ * gauges, STREAMS+SESSION, EXIT FSM, REGIME MATRIX (drawArcGauge takes no
+ * `now`; these are pure data grids/arcs) — are now baked to an offscreen
+ * canvas by ensureBake() below, re-baked only when wall_spine_hud.js's
+ * pollRoster/pollStats hand draw() a fresh console/summary object (an exact
+ * "did a poll land" signal — both pollers hand a NEW object every ~1s
+ * cycle, never mutate in place) or the wall resizes; draw() then blits that
+ * bitmap with one drawImage/frame. The TL/TR crowns and the gate ladder stay
+ * on the live per-frame path unchanged: label-breathing alpha, the verdict
+ * tape's slide/fade entrance, and the kill-pulse decay all genuinely animate
+ * on `now`, so baking those would freeze the motion the design contract
+ * calls for; the register column also stays live (positions come from
+ * field.js's per-frame screen layout). No panel draw function changed
+ * shape to add this — they're called unchanged, just against an offscreen
+ * ctx for the five now-baked ones.
  *
  * Loaded after wall_spine_deco.js / wall_console_lanes.js, before
  * wall_spine.js (which calls draw(ctx, now) once per frame — see the
@@ -75,6 +81,36 @@
       today: virt ? core.virtual_daily_pnl_usd : core.equity_now - core.starting_capital,
     };
   }
+  // client-side 1s-poll equity ring (600pt cap) — feeds both the BR SESSION
+  // sparkline below and sessionPeakUsd() (rework r3 fix, see there for why).
+  const equityRing = [];
+  const EQUITY_RING_MAX = 600;
+  function pushEquitySample(v) {
+    if (v == null || isNaN(v)) return;
+    const last = equityRing[equityRing.length - 1];
+    if (last === v) return; // dedupe identical consecutive samples (no per-frame push, only per-poll data change)
+    equityRing.push(v);
+    if (equityRing.length > EQUITY_RING_MAX) equityRing.shift();
+  }
+  // rework r3 fix (review CRITICAL/MED item 1): PEAK (TL crown) and the
+  // EQUITY/PEAK BAY gauge both used to divide by core.peak_equity — a LEGACY
+  // real-venue scalar — even when EQUITY itself had branched to
+  // core.virtual_equity_usd (equityOf() above). On a real DB this drew
+  // virtual EQUITY ($296,411) directly above a smaller legacy PEAK
+  // ($230,131): a self-evidently impossible "equity exceeds its own peak"
+  // reading, and clamped the BAY ring permanently FULL (ratio > 1 -> min(1,
+  // ...)), unable to ever show virtual drawdown. No persisted all-time
+  // virtual-peak field exists on the snapshot to branch to instead, so this
+  // derives a SESSION peak (since page load) from the same client equity
+  // ring the SESSION sparkline already builds, folding the current reading
+  // in so the result can never sit below the EQUITY value it's compared
+  // against. Labelled "(SESS)" in the crown — a since-page-load high, not an
+  // all-time one; still real, non-fabricated data (every point in the ring
+  // is a genuine polled equity reading).
+  function sessionPeakUsd(eqNow) {
+    if (eqNow == null || isNaN(eqNow)) return null;
+    return equityRing.length ? Math.max(eqNow, ...equityRing) : eqNow;
+  }
 
   /* ===== panel frame (shared chrome — border + corner brackets + header,
    * source-over only) ===== */
@@ -115,16 +151,29 @@
     panelFrame(ctx, x0, y0, x1, y1, 'EQUITY');
     if (!c || !c.core) return;
     const core = c.core;
+    const virtualMode = !!core.virtual_account_enabled;
+    const eqNow = equityOf(core).equity;
     const streams = c.streams || [];
     const exposure = streams.reduce((a, s) => a + (s.exposed || 0), 0);
     const upnl = streams.reduce((a, s) => a + (s.upnl || 0), 0);
     const sess = c.sessions || {};
     const sessLbl = ['okx', 'capital', 'alpaca']
       .map((v) => (sess[v] || '-').replace('_', ' ').slice(0, 9)).join(' · ');
+    // PEAK/FEE-NET are core.peak_equity/core.real_fee_net — LEGACY real-venue
+    // scalars. In VIRTUAL mode EQUITY above has already branched to
+    // virtual_equity_usd, so pairing it with a legacy PEAK produced an
+    // impossible "equity exceeds its own peak" reading (rework r3 fix — see
+    // sessionPeakUsd() by equityOf()). No virtual all-time peak/fee-total
+    // exists on the snapshot, so PEAK branches to the session-derived peak
+    // and FEE-NET is relabelled to disclose it's still the legacy figure
+    // rather than silently mixing accounting bases.
+    const peakVal = virtualMode ? sessionPeakUsd(eqNow) : core.peak_equity;
+    const peakLbl = virtualMode ? 'PEAK (SESS)' : 'PEAK';
+    const feeLbl = virtualMode ? 'FEE-NET (LGCY)' : 'FEE-NET';
     const rows = [
-      ['EQUITY', fmtUsd(equityOf(core).equity), null, 4],
-      ['PEAK', fmtUsd(core.peak_equity), null, 1800],
-      ['FEE-NET', fmtUsd(core.real_fee_net), null, 1800],
+      ['EQUITY', fmtUsd(eqNow), null, 4],
+      [peakLbl, fmtUsd(peakVal), null, 1800],
+      [feeLbl, fmtUsd(core.real_fee_net), null, 1800],
       ['EXPOSURE', fmtUsd(exposure), null, 1800],
       ['Σ uPnL', fmtUsd(upnl), upnl >= 0 ? PNL_POS : PNL_NEG, 900],
       ['SESSION', sessLbl, null, 3600],
@@ -201,7 +250,12 @@
     if (!c || !c.core) return;
     const core = c.core;
     const eq = equityOf(core).equity;
-    const pk = core.peak_equity > 0 ? Math.max(0, Math.min(1, eq / core.peak_equity)) : 0;
+    // Same virtual-aware peak basis as the TL crown's PEAK row (rework r3
+    // fix) — a legacy core.peak_equity denominator here in VIRTUAL mode
+    // clamped this ring permanently FULL (eq/legacy-peak > 1 -> min(1, ...)),
+    // never able to show virtual drawdown.
+    const peakBasis = core.virtual_account_enabled ? sessionPeakUsd(eq) : core.peak_equity;
+    const pk = peakBasis > 0 ? Math.max(0, Math.min(1, eq / peakBasis)) : 0;
     deco.drawArcGauge(ctx, cxs[0], cy, r, pk, WARM, 'EQUITY', fmtUsd(eq));
     const dayPnl = c.day_pnl || 0;
     // Scale: full ring = +-10% of starting capital (a fixed, documented
@@ -285,16 +339,9 @@
     bot.slice(0, 4).forEach((row, i) => drawRow(row, i + 4));
   }
 
-  /* ===== BR — per-venue strip + SESSION sparkline ===== */
-  const equityRing = []; // client-side 1s-poll ring buffer, 600pt cap
-  const EQUITY_RING_MAX = 600;
-  function pushEquitySample(v) {
-    if (v == null || isNaN(v)) return;
-    const last = equityRing[equityRing.length - 1];
-    if (last === v) return; // dedupe identical consecutive samples (no per-frame push, only per-poll data change)
-    equityRing.push(v);
-    if (equityRing.length > EQUITY_RING_MAX) equityRing.shift();
-  }
+  /* ===== BR — per-venue strip + SESSION sparkline (equityRing/
+   * pushEquitySample now live up by equityOf()/sessionPeakUsd() — shared
+   * with the TL crown + BAY gauges, see rework r3 fix there) ===== */
   const VENUE_LABEL = { okx: 'OKX', cap: 'CAPITAL', alp: 'ALPACA' };
   function drawPanelBR(ctx, c, W, H) {
     const br = Z.ladderBand.br;
@@ -452,6 +499,39 @@
     });
   }
 
+  /* ===== offscreen bake — see the file-header implementation note. Keyed on
+   * object identity of both `c` and `summary` (not just `c`) since drawGauges
+   * reads both and the two pollers, while both ~1s-cadenced, aren't
+   * guaranteed in lockstep. ===== */
+  let bakeCanvas = null, bakeCtx = null, bakedW = 0, bakedH = 0;
+  let bakedC, bakedSummary; // undefined initial — distinct from any real poll value, incl. null
+  function ensureBake(c, summary, W, H) {
+    if (!bakeCanvas || bakedW !== W || bakedH !== H) {
+      // Match wall_spine.js's fitCanvas() DPR handling — the live ctx this
+      // gets drawImage'd into is already scaled by this same dpr (its
+      // ctx.setTransform(dpr,0,0,dpr,0,0)), so an un-scaled W×H bake canvas
+      // would blit blurry on a Retina/HiDPI display next to crisp live text.
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      bakeCanvas = document.createElement('canvas');
+      bakeCanvas.width = Math.max(1, Math.round(W * dpr));
+      bakeCanvas.height = Math.max(1, Math.round(H * dpr));
+      bakeCtx = bakeCanvas.getContext('2d');
+      bakeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bakedW = W; bakedH = H; bakedC = undefined; bakedSummary = undefined;
+    }
+    if (c === bakedC && summary === bakedSummary) return;
+    bakedC = c; bakedSummary = summary;
+    bakeCtx.clearRect(0, 0, W, H);
+    // drawPanelBR first — it pushes this poll's equity sample into the
+    // shared ring sessionPeakUsd() reads (consumed by drawGauges right below
+    // AND by the still-live TL crown later this same frame).
+    drawPanelBR(bakeCtx, c, W, H);
+    drawGauges(bakeCtx, c, summary, 0, W, H);
+    drawCellLedger(bakeCtx, c, W, H);
+    drawExitFsm(bakeCtx, c, W, H);
+    drawRegimeMatrix(bakeCtx, c, W, H);
+  }
+
   /* ===== public draw seam — 2-line append in wall_spine.js's frame() ===== */
   function draw(ctx, now) {
     const spine = window.PolarisSpine;
@@ -464,15 +544,15 @@
     const summary = spine.flowSummaryOf ? spine.flowSummaryOf() : {};
     const gatePulseAt = spine.gatePulseAt;
     ctx.save();
+    ensureBake(c, summary, W, H);
+    // 5-arg form — draws the (possibly DPR-scaled, so higher source-pixel-
+    // count) bake canvas into a logical W×H rect of the already dpr-scaled
+    // live ctx, not its raw source pixel size (see ensureBake's dpr note).
+    ctx.drawImage(bakeCanvas, 0, 0, W, H);
     drawPanelTL(ctx, c, now, W, H);
     drawPanelTR(ctx, c, verdicts, now, W, H);
-    drawGauges(ctx, c, summary, now, W, H);
     drawGateLadder(ctx, c, gatePulseAt, now, W, H);
-    drawCellLedger(ctx, c, W, H);
-    drawPanelBR(ctx, c, W, H);
-    drawExitFsm(ctx, c, W, H);
     drawRegister(ctx, W, H);
-    drawRegimeMatrix(ctx, c, W, H);
     ctx.restore();
   }
 

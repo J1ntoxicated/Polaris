@@ -30,6 +30,11 @@ supersedes: structural_roadmap_2026-06-22.md
 - 4.2 [DECISION] POLARIS_VIRTUAL_ACCOUNT=0 flip 조건 — 검증 기준·리콘 재연결·튜닝 (feedback_virtual_account_first_then_real_wire)
 - 4.3 [BUILD] real-와이어 시 PROVE probe 경로 발효 확인 (5f3512e forward-fix, virtual에선 no-op)
 
+- 1.7 [DEBATE-DONE] 수수료 분리 판정 v0 배포(거동 0·섀도우 축적) → v1 flip은 섀도우 120 발산 기준
+- 1.8 [BUILD] Capital 유령 노출 61× 수술 — sizing_zero 사유 스탬핑 포함 (wf_e77e4229)
+- 1.9 [QUEUED] 레짐 v2 공장 — 6상태 섀도우 채널+분리력 채점(regime_factory 디베이트 R1 수렴, flip 전 R2 의무)
+- 1.10 [BUILD] 틱 W2 — 단일-writer 마이그레이션(락 사망 소멸→초 단위 틱)
+
 ## R5 — 이월 큐 (우선순위 낮음, 의도적 defer)
 - 5.1 [DEBATE] counterfactual auto-reader — 계측→라이브결정 폐루프는 아키텍처 변경, stale_book이 실행가능분 흡수함
 - 5.2 [DECISION] REFINE_TIMING consumer — 진입지연이라 활발 목표와 역행, ROI 낮음 판정

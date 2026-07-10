@@ -283,14 +283,22 @@ def is_timeframe_due_epoch(timeframe: str, now_epoch: int) -> bool:
 # read depth only, no threshold lowered, no edge changed — REAL rsi_bb stays
 # dispatch-off regardless.
 _DEFAULT_BAR_FETCH_LIMIT = 240
-_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260, "15m": 400}
+# 15m raised 400 -> 600 (Alpaca sleeve Wave 1.5, §1 #5): equity_opening_range_
+# breakout needs 560 REAL 15m bars (20 sessions x 26 bars/session + buffer) for
+# warmup_ok — 400 permanently capped the canvas BELOW that (silent INERT: the
+# strategy would never reach warmup regardless of how much DB history exists).
+# 600 clears 560 with margin and stays comfortably above rsi_bb_pullback's
+# diluted ~400 need (its own 205-bar warmup against a ~50% synthetic-fill OKX
+# 15m canvas) — a strictly ADDITIVE widen, no existing 15m consumer narrows.
+_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260, "15m": 600}
 
 
 def bar_fetch_limit_for(timeframe: str) -> int:
     """Per-timeframe bar-fetch/read limit. 1D → 260 (clears the 253 equity_52wk
-    warmup); 15m → 400 (clears the ma_200/200-real-bar rsi_bb_pullback warmup
-    against the ~50% synthetic-fill 15m canvas); every other timeframe → 240
-    (Alpaca 429 avoidance preserved)."""
+    warmup); 15m → 600 (clears the 560-bar equity_opening_range_breakout warmup
+    AND the ma_200/200-real-bar rsi_bb_pullback warmup against the ~50%
+    synthetic-fill 15m canvas); every other timeframe → 240 (Alpaca 429
+    avoidance preserved)."""
     return _BAR_FETCH_LIMIT_BY_INTERVAL.get(timeframe, _DEFAULT_BAR_FETCH_LIMIT)
 
 

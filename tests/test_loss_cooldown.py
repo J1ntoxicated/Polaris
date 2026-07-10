@@ -82,13 +82,31 @@ def test_connors_rsi2_loss_cooldown_bars_is_2() -> None:
     assert ConnorsRSI2Strategy.metadata.loss_cooldown_bars == 2
 
 
+def test_equity_bb_meanrev_15m_loss_cooldown_bars_is_8() -> None:
+    from polaris.strategies import EquityBbMeanrev15mStrategy
+
+    assert EquityBbMeanrev15mStrategy.metadata.loss_cooldown_bars == 8
+
+
+def test_equity_opening_range_breakout_loss_cooldown_bars_is_4() -> None:
+    from polaris.strategies import EquityOpeningRangeBreakoutStrategy
+
+    assert EquityOpeningRangeBreakoutStrategy.metadata.loss_cooldown_bars == 4
+
+
 def test_every_other_registered_strategy_defaults_to_zero() -> None:
-    # Byte-identical guard: only connors_rsi2 opts in this wave — every OTHER
-    # registered strategy's metadata keeps the default 0 (no DB query, no skip).
+    # Byte-identical guard: only connors_rsi2 (§0c) and the Alpaca sleeve Wave
+    # 1b/1.5 pair (§1 #4-#5) opt in — every OTHER registered strategy's
+    # metadata keeps the default 0 (no DB query, no skip).
     from polaris.strategies import STRATEGY_REGISTRY
 
+    _opted_in = {
+        "connors_rsi2",
+        "equity_bb_meanrev_15m",
+        "equity_opening_range_breakout",
+    }
     for sid, cls in STRATEGY_REGISTRY.items():
-        if sid == "connors_rsi2":
+        if sid in _opted_in:
             continue
         assert cls.metadata.loss_cooldown_bars == 0, (
             f"{sid} must keep loss_cooldown_bars=0 (byte-identical this wave)"

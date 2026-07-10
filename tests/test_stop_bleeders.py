@@ -64,7 +64,9 @@ def test_registry_drops_to_20() -> None:
     # Alpaca equity sleeve Wave 1a (디베이트 R2, 2026-07-11): +equity_donchian55_
     # breakout/+equity_xsect_52w_momentum/+equity_etf_trend_pullback (VIRTUAL-only
     # dispatch, registered unconditionally): 21 → 24.
-    assert len(STRATEGY_REGISTRY) == 24
+    # Wave 1b + 1.5 (§1 #4-#5, 2026-07-11): +equity_bb_meanrev_15m/
+    # +equity_opening_range_breakout (VIRTUAL-only dispatch): 24 → 26.
+    assert len(STRATEGY_REGISTRY) == 26
 
 
 def test_dispatch_is_subset_of_registry_no_zombie() -> None:

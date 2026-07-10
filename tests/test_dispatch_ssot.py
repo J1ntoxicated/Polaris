@@ -39,6 +39,9 @@ from polaris.strategies import STRATEGY_REGISTRY
 #     capital/fees in VIRTUAL, so ``dispatch_eligible=virtual_loosen(True, False)``
 #     — REAL byte-identical off (same VIRTUAL-only mechanism as connors_rsi2 /
 #     supertrend above), VIRTUAL fully dispatches.
+#   equity_bb_meanrev_15m / equity_opening_range_breakout — Alpaca equity sleeve
+#     Wave 1b + 1.5 (§1 #4-#5, 2026-07-11), same VIRTUAL-only mechanism as the
+#     Wave 1a trio above (not a KILL).
 KILLED_IDS = frozenset(
     {
         "rsi_bb_pullback",
@@ -49,6 +52,8 @@ KILLED_IDS = frozenset(
         "equity_donchian55_breakout",
         "equity_xsect_52w_momentum",
         "equity_etf_trend_pullback",
+        "equity_bb_meanrev_15m",
+        "equity_opening_range_breakout",
     }
 )
 

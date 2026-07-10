@@ -129,9 +129,20 @@ def test_non_1d_timeframes_keep_240_limit() -> None:
 def test_15m_fetch_limit_clears_rsi_bb_pullback_warmup() -> None:
     # rsi_bb_pullback (Jin 2026-07-09, silent-INERT part A) needs 200 REAL bars
     # for ma_200 against a ~50% synthetic-fill 15m canvas — 240 left only ~120
-    # real bars (0/2244 signals). 15m now resolves to 400 (all-modes infra, not
-    # env-gated) so the majority of the universe clears ma_200.
-    assert bar_fetch_limit_for("15m") == 400
+    # real bars (0/2244 signals). 15m now resolves to 600 (raised again for
+    # equity_opening_range_breakout's 560-bar warmup, see the next test) — a
+    # further widen, so the rsi_bb_pullback margin only grows.
+    assert bar_fetch_limit_for("15m") == 600
+
+
+def test_15m_fetch_limit_clears_equity_orb_warmup() -> None:
+    # equity_opening_range_breakout (Alpaca sleeve Wave 1.5, §1 #5) needs 560
+    # REAL 15m bars (20 sessions x 26 bars/session + buffer). 400 permanently
+    # capped the canvas BELOW that — the strategy would never reach warmup_ok
+    # regardless of DB history depth (silent INERT). 600 clears it with margin.
+    from polaris.strategies.equity_opening_range_breakout import WARMUP_BARS
+
+    assert bar_fetch_limit_for("15m") >= WARMUP_BARS
 
 
 def test_unknown_timeframe_defaults_to_240() -> None:

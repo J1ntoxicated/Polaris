@@ -17,8 +17,8 @@ Track A — OKX SPOT:
     weekend_funding_positioning_mean_reversion, 1H, WEEKEND-only maker — the 2nd
     weekend edge, positioning-axis, shadow-first #80)
 
-Track C — Alpaca US equity (1D, VIRTUAL-only dispatch — REAL byte-identical
-off, per ``dispatch_eligible=virtual_loosen(True, False)``):
+Track C — Alpaca US equity (VIRTUAL-only dispatch — REAL byte-identical off,
+per ``dispatch_eligible=virtual_loosen(True, False)``):
   - ``equity_donchian55_breakout``  (correlation_group=equity_donchian55_trend,
     1D — per-venue clone of okx_donchian_55_breakout math, shadow_w40/w80
     measurement-only tags)
@@ -27,6 +27,11 @@ off, per ``dispatch_eligible=virtual_loosen(True, False)``):
   - ``equity_etf_trend_pullback``   (correlation_group=equity_etf_trend_continuation,
     1D — per-venue clone of macd_ema_trend_pullback math, fixed SPY/QQQ/GLD
     universe, tsmom_12_1 shadow tags)
+  - ``equity_bb_meanrev_15m``       (correlation_group=equity_bb_meanrev_15m,
+    15m — Wave 1b, FIRST Alpaca 15m strategy; rsi_bb_pullback shape clone,
+    rth_interior gate, profit_target_r=1.0 BB-midline harvest)
+  - ``equity_opening_range_breakout`` (correlation_group=equity_orb_open,
+    15m — Wave 1.5, calendar-anchored 09:30-09:45 ET OR bar + volume confirm)
 
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
@@ -118,11 +123,15 @@ from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
 from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.equity_52wk_high_breakout import Equity52WkHighBreakoutStrategy
+from polaris.strategies.equity_bb_meanrev_15m import EquityBbMeanrev15mStrategy
 from polaris.strategies.equity_donchian55_breakout import (
     EquityDonchian55BreakoutStrategy,
 )
 from polaris.strategies.equity_etf_trend_pullback import (
     EquityEtfTrendPullbackStrategy,
+)
+from polaris.strategies.equity_opening_range_breakout import (
+    EquityOpeningRangeBreakoutStrategy,
 )
 from polaris.strategies.equity_vol_expansion_pocket_pivot import (
     EquityVolExpansionPocketPivotStrategy,
@@ -215,6 +224,13 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     EquityEtfTrendPullbackStrategy.metadata.strategy_id: (
         EquityEtfTrendPullbackStrategy
     ),
+    # Track C — Alpaca equity sleeve, Wave 1b + 1.5 (§1 #4-#5). #4 is the FIRST
+    # Alpaca 15m strategy (strategies_by_tf["15m"] gains an "alpaca" venue).
+    # Same VIRTUAL-only dispatch mechanism as Wave 1a.
+    EquityBbMeanrev15mStrategy.metadata.strategy_id: EquityBbMeanrev15mStrategy,
+    EquityOpeningRangeBreakoutStrategy.metadata.strategy_id: (
+        EquityOpeningRangeBreakoutStrategy
+    ),
 }
 
 # VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09): the
@@ -265,8 +281,10 @@ __all__ = [
     "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
     "Equity52WkHighBreakoutStrategy",
+    "EquityBbMeanrev15mStrategy",
     "EquityDonchian55BreakoutStrategy",
     "EquityEtfTrendPullbackStrategy",
+    "EquityOpeningRangeBreakoutStrategy",
     "EquityVolExpansionPocketPivotStrategy",
     "EquityXsect52wMomentumStrategy",
     "FXBreakoutBasketStrategy",

@@ -37,6 +37,9 @@
   .side-sec { flex: 1 1 50%; min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid var(--ghost); }
   .side-h { flex: 0 0 auto; padding: 6px 10px 4px; font-size: 9.5px; letter-spacing: 0.12em; color: var(--p-gry); font-weight: 700; }
   .side-h span { color: var(--p-dim); font-weight: 400; }
+  .side-sum { flex: 0 0 auto; display: flex; gap: 12px; padding: 1px 10px 5px; font-size: 10px; color: var(--p-gry); font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--ghost); }
+  .side-sum b { font-weight: 700; color: var(--p-wht); }
+  .side-sum .vc { font-size: 9px; }
   .side-rows { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 8px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
   .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 12px 58px 62px 42px 38px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
   .fx-up { animation: fxup 0.4s ease-out; } .fx-dn { animation: fxdn 0.4s ease-out; }
@@ -239,7 +242,7 @@
     if (nomobile) { document.getElementById('wall-page').classList.add('nomobile'); return; }
     var pane = document.getElementById('mobile-pane');
     pane.innerHTML =
-      '<div class="side-sec side-pos"><div class="side-h">OPEN POSITIONS <span id="side-pos-n"></span></div><div class="side-rows" id="side-pos-rows"></div></div>' +
+      '<div class="side-sec side-pos"><div class="side-h">OPEN POSITIONS <span id="side-pos-n"></span></div><div class="side-sum" id="side-pos-sum"></div><div class="side-rows" id="side-pos-rows"></div></div>' +
       '<div class="side-sec side-act"><div class="side-h">ACTIVITY</div><div class="side-rows" id="side-act-rows"></div></div>' +
       '<a class="open-board-bar" href="/">OPEN FULL BOARD ›</a>';
   })();
@@ -257,7 +260,7 @@
 <script src="static/wall_spine_field.js?v=28_hierarchy"></script>
 <script src="static/wall_spine.js?v=9_livewires"></script>
 <script src="static/wall_spine_hud.js?v=2_wiringfp"></script>
-<script src="static/wall_side.js?v=4_softfx"></script>
+<script src="static/wall_side.js?v=5_summary"></script>
 <script>
   // The spine canvas fits to canvas clientWidth/Height; after layout settles,
   // nudge resize twice (rAF + delayed) so fitCanvas() picks up the grid-

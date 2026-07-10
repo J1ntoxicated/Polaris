@@ -43,6 +43,23 @@
    * bot's live marks diffed at 4Hz), so prices tick in true real time with
    * an up/down flash. Key = venue|symbol|strategy|side (server's SSE key). */
   var rowIndex = new Map(); // key -> {cur, pnl, pct}
+  var sumEl = document.getElementById('side-pos-sum');
+  function renderSummary(rows) {
+    if (!sumEl) return;
+    var upnl = 0, size = 0, vc = { okx: 0, cap: 0, alp: 0 };
+    rows.forEach(function (p) {
+      upnl += p.upnl_usd || 0;
+      size += p.size_usd || 0;
+      var k = vkey(p.venue);
+      if (vc[k] != null) vc[k]++;
+    });
+    var html = '<span>Σ uPnL <b class="' + pnlCls(upnl) + '">' + usd(upnl) + '</b></span>'
+      + '<span>exp <b>' + kusd(size) + '</b></span>'
+      + '<span class="vc" style="color:' + VCOLOR.okx + '">OKX ' + vc.okx + '</span>'
+      + '<span class="vc" style="color:' + VCOLOR.cap + '">CAP ' + vc.cap + '</span>'
+      + '<span class="vc" style="color:' + VCOLOR.alp + '">ALP ' + vc.alp + '</span>';
+    if (html !== renderSummary._last) { sumEl.innerHTML = html; renderSummary._last = html; }
+  }
   function fmtPx(n) {
     if (n == null || isNaN(n)) return '—';
     var a = Math.abs(n);
@@ -71,6 +88,7 @@
       return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0);
     }).slice(0, 26);
     if (posN) posN.textContent = rows.length ? '· ' + rows.length : '';
+    renderSummary(rows);
     var keys = rows.map(rowKey).join('~');
     if (keys !== renderPositions._keys) {
       renderPositions._keys = keys;

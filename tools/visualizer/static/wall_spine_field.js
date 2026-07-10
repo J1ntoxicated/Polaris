@@ -146,6 +146,14 @@
       const depth = Math.floor(r() * 3);
       s.depth = depth;
       s.color = CLUSTER_COLOR[node.cluster] || '#9fb0c8';
+      // Jin 2026-07-10 "익스체인지 색은?": universe/watch tickers are venue-
+      // tinted so the whole field reads by exchange (matches the .wall-venues
+      // legend chips) — dim at rest via baseAlpha, full-strength when the
+      // firing glow / migration halo lights the same hue on top.
+      if (node.cluster === 'mkt' || node.cluster === 'watch') {
+        const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
+        if (vc) s.color = vc;
+      }
       if (node.cluster === 'mkt') {
         s.r = 1.15 + depth * 0.55;
         s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12;

@@ -151,18 +151,33 @@
         jitteredBand(ticks, W * 0.03, W * 0.2, H * 0.46, H * 0.55, ':orphan' + vk, 0.8);
         return;
       }
+      // Galaxy profile (Jin 2026-07-10 "은하수처럼"): dense luminous core
+      // thinning to a sparse halo (power-law radius), golden-angle swirl for
+      // spiral-arm hint, per-cluster tilt. First pass counts members so the
+      // radial falloff is normalized per constellation.
+      const stratCount = new Map();
+      ticks.forEach((n, i) => {
+        const st = pool[i % pool.length];
+        stratCount.set(st.id, (stratCount.get(st.id) || 0) + 1);
+      });
       ticks.forEach((n, i) => {
         const st = pool[i % pool.length];
         const k = perStratIdx.get(st.id) || 0;
         perStratIdx.set(st.id, k + 1);
+        const total = stratCount.get(st.id) || 1;
         const r = rngFor(n.id + ':orb');
-        const ang = k * 2.39996 + r() * 0.6;
-        const rad = 13 + 7.2 * Math.sqrt(k + 1) + r() * 3;
+        const maxR = Math.min(74, 15 + 7.0 * Math.sqrt(total));
+        const radFrac = Math.pow((k + 0.5) / total, 0.82);
+        const rad = 5 + (maxR - 5) * radFrac + r() * 2.5;
+        const tilt = (rngFor(st.id + ':tilt')() - 0.5) * 0.9;
+        const ang = k * 2.39996 + r() * 0.5 + radFrac * 1.7; // swirl arm twist
+        const dx = Math.cos(ang) * rad, dy = Math.sin(ang) * rad * 0.5;
         const sc = screen[st.id];
         screen[n.id] = {
-          x: Math.max(8, Math.min(W - 8, sc.x + Math.cos(ang) * rad)),
-          y: Math.max(14, Math.min(H * 0.47, sc.y + Math.sin(ang) * rad * 0.55)),
+          x: Math.max(8, Math.min(W - 8, sc.x + dx * Math.cos(tilt) - dy * Math.sin(tilt))),
+          y: Math.max(14, Math.min(H * 0.47, sc.y + dx * Math.sin(tilt) + dy * Math.cos(tilt))),
         };
+        screen[n.id].coreBoost = 1 - radFrac; // 코어일수록 밝게 (아래 알파 계산에서)
         tickerStrat.set(n.id, st.id);
       });
     });
@@ -223,8 +238,9 @@
         }
       }
       if (node.cluster === 'mkt') {
-        s.r = 1.15 + depth * 0.55;
-        s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12;
+        const cb = s.coreBoost || 0;
+        s.r = 1.15 + depth * 0.55 + cb * 0.45;
+        s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12 + cb * 0.11;
       } else if (node.cluster === 'watch') {
         s.r = 2.0 + depth * 0.4;
         s.baseAlpha = 0.35 + (node.intensity || 0.4) * 0.25;

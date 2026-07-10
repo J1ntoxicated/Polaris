@@ -184,6 +184,9 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     ai_calls_n = 0
     signals_n = 0
     sized_n = 0
+    g5_kill_n = 0
+    g7_exits_n = 0
+    g7_holds_n = 0
     verdicts: list[dict[str, Any]] = []
 
     for gid_raw, decision, payload, venue, inst, ts in rows:
@@ -200,6 +203,12 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
             signals_n += 1
         if gid == 5 and dec == "SIZED":
             sized_n += 1
+        if gid == 5 and dec == "KILL":
+            g5_kill_n += 1
+        if gid == 7 and dec == "EXIT_NOW":
+            g7_exits_n += 1
+        if gid == 7 and dec == "HOLD":
+            g7_holds_n += 1
         aj = _ai_judge_verdict(payload)
         if aj:
             if aj["escalation"] not in _NO_REAL_CALL_ESCALATIONS:
@@ -219,6 +228,16 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     ):
         fills_venues[_venue_of(str(venue or ""), None)] += int(c or 0)
     fills_n = sum(fills_venues.values())
+
+    # G6 is per-tick (a position gets re-monitored roughly every 2min), so its
+    # raw gate_events count (stage_totals[6], kept as `checks_n`) wildly
+    # overstates activity vs. the per-journey gates (G1-G5, one event per
+    # signal). `live_n` — distinct currently-open positions — is the honest
+    # headline (mirrors polaris.scripts.dashboard.snapshot_sections's
+    # `_gate_headline` gid==6 precedent). Degrades to 0 on a missing/older
+    # schema (_safe_query), never raises.
+    live_rows = _safe_query(conn, "SELECT COUNT(*) FROM positions WHERE status = 'open'")
+    live_n = int(live_rows[0][0]) if live_rows and live_rows[0][0] else 0
 
     # Shadow mismatches (deterministic-vs-GPT disagreement, gate_shadow_events)
     # feed the SAME drop lane as KILL/SKIPPED — the page's "kill/skip/shadow"
@@ -241,15 +260,29 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     classes = _class_rows(conn)
     survivor_admissions = _survivor_admissions_recent(conn, since=since)
 
+    stages: list[dict[str, Any]] = []
+    for g in sorted(_GATE_LABELS):
+        row: dict[str, Any] = {
+            "gate_id": g, "label": _GATE_LABELS[g],
+            "total": stage_totals[g], "venues": stage_venues[g],
+        }
+        # Additive per-journey/per-tick split fields (Jin 2026-07-10 stage-
+        # count semantics fix) — `total`/`venues` above are UNCHANGED for
+        # back-compat; these are extra keys existing consumers just ignore.
+        if g == 5:
+            row["sized_n"] = sized_n
+            row["kill_n"] = g5_kill_n
+        elif g == 6:
+            row["live_n"] = live_n
+            row["checks_n"] = stage_totals[6]
+        elif g == 7:
+            row["exits_n"] = g7_exits_n
+            row["holds_n"] = g7_holds_n
+        stages.append(row)
+
     return {
         "window_sec": FLOW_WINDOW_SEC,
-        "stages": [
-            {
-                "gate_id": g, "label": _GATE_LABELS[g],
-                "total": stage_totals[g], "venues": stage_venues[g],
-            }
-            for g in sorted(_GATE_LABELS)
-        ],
+        "stages": stages,
         "fills": {"total": fills_n, "venues": fills_venues},
         "drops": [
             {"gate_id": g, "label": _GATE_LABELS.get(g, f"G{g}"), "reason": r, "n": n}

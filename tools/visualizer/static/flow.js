@@ -6,15 +6,17 @@
  * reused (SSE subscribe shape, TTL-cached stat poll, botlog tail) but this file
  * owns its own canvas + draw loop so /flow never depends on the globe booting.
  *
- * Jin 2026-07-10 (feat/visual-wall-director): /flow is now the bottom ~45%
- * pane of the combined visual-wall page (globe on top) instead of the whole
- * viewport — the layout constants below are pane-relative, not full-screen.
- * This file also renders the pts-classes river annotations (PROVE-class
- * dotted entry particles, EARN/BENCH transition badges, per-strategy score_F
- * window gauges, "NEW CANDIDATE" universe-admission flash) sourced from the
- * same /api/flow_stats payload's new `classes` / `survivor_admissions_recent`
- * fields. The director camera/warp/killcam/kill-feed overlay lives in the
- * separate wall.js (own canvas, own SSE connection — no coupling here).
+ * Jin 2026-07-10 (feat/visual-wall-director, then feat/cloud-river): /flow
+ * is now the bottom ~45% pane of a combined page — the layout constants
+ * below are pane-relative, not full-screen. The top ~55% used to be a 3D
+ * globe; it's now a flat horizontal particle field (cloud.js/cloud_fx.js)
+ * that shares this file's own gate-column x-coordinates via
+ * window.PolarisWallLayout (see publishWallLayout() below) so the two panes
+ * read as one continuous pipeline. This file also renders the pts-classes
+ * river annotations (PROVE-class dotted entry particles, EARN/BENCH
+ * transition badges, per-strategy score_F window gauges, "NEW CANDIDATE"
+ * universe-admission flash) sourced from the same /api/flow_stats payload's
+ * `classes` / `survivor_admissions_recent` fields.
  *
  * Data:
  *   /api/flow_stats  (30s TTL, matches the server cache) → per-gate 1h volume +
@@ -98,14 +100,54 @@
     dropY = LANE_TOP + laneSpan;
     renderHeaders();
     if (window.PolarisFlowClasses) window.PolarisFlowClasses.setColX(colX);
+    publishWallLayout();
   }
 
+  // Shared layout contract for the Cloud River pane above (cloud.js, feat/
+  // cloud-river Jin 2026-07-10) — the gate columns there must land on the
+  // EXACT same x pixel as this river's own gate nodes. STAGES has a 'fills'
+  // pseudo-column between G5/G6 so the raw colX array has 9 entries;
+  // stageX below is just the 8 real gate-id entries (1..8) picked out of
+  // it — including the wider G5->G6 gap the fills column creates — so both
+  // panes agree pixel-for-pixel without recomputing spacing twice. Both
+  // canvases share the same container width (the page's right ~70% column,
+  // see flow.html), so this is already container-relative, not viewport.
+  function publishWallLayout() {
+    const stageX = [];
+    STAGES.forEach((s, i) => { if (s.gate) stageX.push(colX[i]); });
+    window.PolarisWallLayout = { stageX, width: W };
+    window.dispatchEvent(new CustomEvent('wall-layout', { detail: window.PolarisWallLayout }));
+  }
+
+  // Jin 2026-07-10 (stage-count semantics fix): G1-G5 are per-journey (one
+  // gate_events row per signal) so raw `total` reads as a real funnel count,
+  // but G6/G7 are per-tick (a position gets re-checked ~every 2min) — raw
+  // `total` there overcounts wildly (e.g. 9-16 open positions x ~430
+  // checks/h reads as "586"). headlineOf() picks the honest big number per
+  // gate (flow_data.py's additive sized_n/kill_n/live_n/checks_n/exits_n/
+  // holds_n fields, `total` elsewhere); subOf() is the small secondary line.
+  function headlineOf(s) {
+    const g = s.gate ? statsByGate[s.id] : null;
+    if (g && s.id === 5 && typeof g.sized_n === 'number') return g.sized_n;
+    if (g && s.id === 6 && typeof g.live_n === 'number') return g.live_n;
+    if (g && s.id === 7 && typeof g.exits_n === 'number') return g.exits_n;
+    return stageTotal(s);
+  }
+  function subOf(s) {
+    const g = s.gate ? statsByGate[s.id] : null;
+    if (!g) return '';
+    if (s.id === 5 && typeof g.kill_n === 'number') return 'KILL ' + g.kill_n;
+    if (s.id === 6 && typeof g.checks_n === 'number') return g.checks_n + ' checks/h';
+    if (s.id === 7 && typeof g.holds_n === 'number') return 'HOLD ' + g.holds_n;
+    return '';
+  }
   function renderHeaders() {
     if (!headersEl) return;
     headersEl.innerHTML = STAGES.map((s, i) => {
       const cls = s.gate ? 'col-h gate' : 'col-h fills';
-      const n = stageTotal(s);
-      return `<div class="${cls}" style="left:${colX[i]}px"><span class="n">${n}</span>${s.label}${s.ai ? ' · AI' : ''}</div>`;
+      const n = headlineOf(s);
+      const sub = subOf(s);
+      return `<div class="${cls}" style="left:${colX[i]}px"><span class="n">${n}</span>${sub ? `<span class="sub">${sub}</span>` : ''}${s.label}${s.ai ? ' · AI' : ''}</div>`;
     }).join('');
   }
 
@@ -374,25 +416,33 @@
   }
 
   // ── SSE live stream — fills (real venue) + gate decisions (spine only) ───
+  function handleStreamPayload(payload) {
+    for (const e of payload.events || []) {
+      if (e.type === 'entry') {
+        const dotted = isProveClass(e.exchange, e.strategy_id);
+        spawnFillParticle(e.exchange, 5, 'fills', [0xf2, 0xf6, 0xff], { dotted });
+      } else if (e.type === 'exit') {
+        const pnl = parseFloat(e.pnl_usd) || 0;
+        const col = pnl >= 0 ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87];
+        spawnFillParticle(e.exchange, 7, 8, col);
+      }
+    }
+    for (const g of payload.gate_events || []) {
+      spawnSpineParticle(g.gate_id);
+    }
+  }
   function connectStream() {
+    // Shared bus (events_bus.js, loaded before this file — feat/cloud-river
+    // Jin 2026-07-10): one /stream/events socket for the whole page instead
+    // of a private EventSource per module. Falls back to an own connection
+    // if the bus script didn't load, so this file still works standalone.
+    if (window.PolarisEvents) { window.PolarisEvents.on(handleStreamPayload); return; }
     let es;
     try { es = new EventSource('/stream/events'); } catch (e) { return; }
     es.onmessage = (ev) => {
       let payload;
       try { payload = JSON.parse(ev.data); } catch (e) { return; }
-      for (const e of payload.events || []) {
-        if (e.type === 'entry') {
-          const dotted = isProveClass(e.exchange, e.strategy_id);
-          spawnFillParticle(e.exchange, 5, 'fills', [0xf2, 0xf6, 0xff], { dotted });
-        } else if (e.type === 'exit') {
-          const pnl = parseFloat(e.pnl_usd) || 0;
-          const col = pnl >= 0 ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87];
-          spawnFillParticle(e.exchange, 7, 8, col);
-        }
-      }
-      for (const g of payload.gate_events || []) {
-        spawnSpineParticle(g.gate_id);
-      }
+      handleStreamPayload(payload);
     };
     es.onerror = () => { /* EventSource auto-reconnects */ };
   }

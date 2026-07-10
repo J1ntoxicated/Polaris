@@ -879,6 +879,7 @@ def compute_size(
         underlying_group_id=intent.underlying_group_id,
         asset_class=intent.asset_class,
         symbol=intent.symbol,
+        strategy_id=intent.strategy,
     )
     cluster_rem = cluster_remaining_pct(
         cluster_id=cluster_id, open_positions=portfolio.open_positions,

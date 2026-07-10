@@ -42,6 +42,7 @@ __all__ = [
     "PDT_RANK_PENALTY_STEP",
     "RTH_CLOSE_LOCAL_MINUTES",
     "RTH_CLOSE_UTC_MINUTES",
+    "RTH_EDGE_EXCLUSION_MINUTES",
     "RTH_OPEN_LOCAL_MINUTES",
     "RTH_OPEN_UTC_MINUTES",
     "US_EQUITY_CALENDAR",
@@ -50,6 +51,7 @@ __all__ = [
     "equity_ws_warm_active",
     "pdt_rank_penalty",
     "stream_session_gate_active",
+    "us_equity_rth_interior",
     "us_equity_session_state",
 ]
 
@@ -73,6 +75,15 @@ RTH_CLOSE_LOCAL_MINUTES: Final[int] = 16 * 60  # 16:00 ET
 # are telemetry/observability, not a separate policy.
 PRE_MARKET_OPEN_LOCAL_MINUTES: Final[int] = 4 * 60  # 04:00 ET
 AFTER_HOURS_CLOSE_LOCAL_MINUTES: Final[int] = 20 * 60  # 20:00 ET
+
+# §0b — RTH "interior" edge exclusion (minutes). The first/last EDGE minutes of
+# RTH (opening-gap volatility / closing-auction noise) are excluded from the
+# INTERIOR window a 15m mean-reversion entry (Wave 1b, equity_bb_meanrev_15m)
+# wants to trade inside — same INTEGRITY-style entry-window class as the RTH
+# gate itself (narrows WHEN a new entry may fire, never a P&L throttle, never
+# touches an existing position). env-tunable is NOT wired here (a fixed P0
+# constant, per-caller override via the ``edge_minutes`` arg covers ops needs).
+RTH_EDGE_EXCLUSION_MINUTES: Final[int] = 30
 
 # DST-NAIVE EDT-reference / offline-fallback constants (minutes since UTC
 # midnight). These pin the RTH window AS SEEN IN EDT (summer): 13:30-20:00 UTC.
@@ -147,6 +158,31 @@ def us_equity_session_state(ts: int | float) -> SessionState:
     if RTH_CLOSE_LOCAL_MINUTES <= minute_of_day < AFTER_HOURS_CLOSE_LOCAL_MINUTES:
         return "after_hours"
     return "closed"
+
+
+def us_equity_rth_interior(
+    ts: int | float, edge_minutes: int = RTH_EDGE_EXCLUSION_MINUTES
+) -> bool:
+    """True iff ``ts`` is inside RTH AND past the first/last ``edge_minutes``.
+
+    ``True`` iff ``us_equity_session_state(ts) == "rth"`` AND the NY-LOCAL
+    minute-of-day falls in the half-open window
+    ``[RTH_OPEN_LOCAL_MINUTES + edge_minutes, RTH_CLOSE_LOCAL_MINUTES -
+    edge_minutes)`` — e.g. the default 30min edge narrows [09:30, 16:00) ET
+    down to an interior of [10:00, 15:30) ET. Weekend/holiday handling is
+    entirely delegated to ``us_equity_session_state`` (the SSOT) — this adds
+    no separate calendar logic. Same NY-local ``zoneinfo`` path (DST-correct
+    year-round, no fixed-UTC hardcode). Non-finite / negative ``ts`` degrades
+    to ``False`` via the same guard ``us_equity_session_state`` already applies.
+    """
+    if us_equity_session_state(ts) != "rth":
+        return False
+    ts_int = max(0, int(ts))
+    local = dt.datetime.fromtimestamp(ts_int, tz=NY_TZ)
+    minute_of_day = local.hour * 60 + local.minute
+    interior_open = RTH_OPEN_LOCAL_MINUTES + edge_minutes
+    interior_close = RTH_CLOSE_LOCAL_MINUTES - edge_minutes
+    return interior_open <= minute_of_day < interior_close
 
 
 def equity_ws_warm_active(ts: int | float) -> bool:

@@ -112,6 +112,17 @@ class StrategyMetadata:
     # never a size dampen / entry block — every signal-bearing bar is still
     # evaluated (see ``_production_bar_gate.bar_advance_due``).
     evaluates_in_progress_bar: bool = False
+    # loss_cooldown_bars: symbol-local loss-reentry PACING (§0c rider — the
+    # DINO -374 repeat-reentry lesson: a strategy chased the same symbol back
+    # into a fresh loss with no cooldown). DEFAULT 0 keeps every EXISTING
+    # strategy byte-identical (its consumer short-circuits on <= 0, never
+    # querying the DB). When > 0, a NEW entry on the SAME (venue, symbol,
+    # strategy_id) is held while fewer than this many of the strategy's OWN
+    # bars have closed since its most recent LOSING close. This is a PACING
+    # skip on the strategy's OWN symbol-local history, never a uniform
+    # dampener — every OTHER symbol and every OTHER strategy on the SAME
+    # symbol is completely unaffected (flow_not_block).
+    loss_cooldown_bars: int = 0
 
 
 @dataclass(frozen=True, slots=True)

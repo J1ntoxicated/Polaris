@@ -15,10 +15,14 @@ from typing import Final
 
 from polaris.core.sizing.schema import (
     CLUSTER_BTC_ETH_PCT,
+    CLUSTER_EQUITY_BETA_TREND_PCT,
+    CLUSTER_EQUITY_MEANREV_PCT,
     CLUSTER_FX_MAJORS_PCT,
     CLUSTER_XAU_INDICES_PCT,
     PositionRiskState,
     cluster_btc_eth_pct,
+    cluster_equity_beta_trend_pct,
+    cluster_equity_meanrev_pct,
     cluster_fx_majors_pct,
     cluster_xau_indices_pct,
 )
@@ -54,11 +58,21 @@ _XAU_INDICES_CLASSES: Final[frozenset[str]] = frozenset(
 )
 _XAU_TOKENS: Final[tuple[str, ...]] = ("XAU", "GOLD")
 
+# §0a — equity mean-reversion sleeve membership (Alpaca sleeve, hard dependency
+# #1). Any equity strategy_id NOT in this set routes to the beta/trend sleeve
+# (the default equity bucket) — every equity signal now clusters to exactly one
+# of the two sleeves (never None, unlike the old un-clustered equity behaviour).
+_EQUITY_MEANREV_STRATEGY_IDS: Final[frozenset[str]] = frozenset(
+    {"equity_bb_meanrev_15m", "connors_rsi2"}
+)
+
 
 CLUSTER_DEFINITIONS: Final[dict[str, float]] = {
     "crypto:BTC+ETH": CLUSTER_BTC_ETH_PCT,
     "cfd:XAU+INDICES": CLUSTER_XAU_INDICES_PCT,
     "cfd:FX_MAJORS": CLUSTER_FX_MAJORS_PCT,
+    "equity:beta_trend": CLUSTER_EQUITY_BETA_TREND_PCT,
+    "equity:meanrev": CLUSTER_EQUITY_MEANREV_PCT,
 }
 
 
@@ -66,13 +80,16 @@ def resolve_cluster_definitions() -> dict[str, float]:
     """Cluster caps with env overrides applied (read at call time).
 
     Env-overridable for durability: ``POLARIS_CAP_CLUSTER_{BTC_ETH,XAU_INDICES,
-    FX_MAJORS}_PCT``. Defaults are the high values in :mod:`schema` (DEMO
-    data-collection — caps no longer bind at low position counts).
+    FX_MAJORS,EQUITY_BETA_TREND,EQUITY_MEANREV}_PCT``. Defaults are the high
+    values in :mod:`schema` (DEMO data-collection — caps no longer bind at low
+    position counts).
     """
     return {
         "crypto:BTC+ETH": cluster_btc_eth_pct(),
         "cfd:XAU+INDICES": cluster_xau_indices_pct(),
         "cfd:FX_MAJORS": cluster_fx_majors_pct(),
+        "equity:beta_trend": cluster_equity_beta_trend_pct(),
+        "equity:meanrev": cluster_equity_meanrev_pct(),
     }
 
 
@@ -81,16 +98,25 @@ def resolve_cluster_id(
     underlying_group_id: str,
     asset_class: str,
     symbol: str = "",
+    strategy_id: str = "",
 ) -> str | None:
-    """Map (underlying_group_id, asset_class, symbol) → cluster_id or None.
+    """Map (underlying_group_id, asset_class, symbol, strategy_id) → cluster_id
+    or None.
 
     P0 deterministic — does not consult any DB; caller supplies metadata.
+    ``strategy_id`` defaults to "" so every pre-existing (non-equity) call site
+    stays byte-identical (its branch is checked only after the crypto/FX
+    early-returns, and non-equity asset classes never reach it either).
     """
     if underlying_group_id in _CRYPTO_BTC_ETH_MEMBERS:
         return "crypto:BTC+ETH"
     if underlying_group_id in _FX_MAJOR_MEMBERS:
         return "cfd:FX_MAJORS"
     cls = (asset_class or "").lower()
+    if cls == "equity":
+        if strategy_id in _EQUITY_MEANREV_STRATEGY_IDS:
+            return "equity:meanrev"
+        return "equity:beta_trend"
     sym = (symbol or "").upper()
     is_xau = any(token in sym for token in _XAU_TOKENS) or "metal" in cls or "gold" in cls
     if cls in _XAU_INDICES_CLASSES or is_xau:

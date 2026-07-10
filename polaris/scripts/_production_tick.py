@@ -19,6 +19,7 @@ from typing import Any
 
 from polaris.core.cell_matrix.score import regime_rank_penalty
 from polaris.core.data.quote_writer import live_or_bar_price
+from polaris.core.data.schema import Bar
 from polaris.core.data.signal_persist import persist_emitted_signal
 from polaris.core.data.technical_store import (
     extract_technicals_from_mv,
@@ -356,6 +357,55 @@ def apply_equity_pdt_rank_down(venue: str, *, state: ProdLoopState) -> float:
     if penalty > 0.0:
         state.equity_pdt_rank_downs += 1
     return penalty
+
+
+def loss_cooldown_active(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    symbol: str,
+    strategy_id: str,
+    cooldown_bars: int,
+    bars: list[Bar],
+) -> bool:
+    """§0c — symbol-local loss-reentry PACING (DINO -374 repeat-reentry lesson).
+
+    ``cooldown_bars <= 0`` -> always ``False`` (byte-identical default-off; every
+    strategy except ``connors_rsi2`` keeps ``loss_cooldown_bars=0``, so this
+    never even reaches the DB for them). Reads the SINGLE most-recent CLOSED
+    position for this EXACT (venue, symbol, strategy_id) key. If it was a LOSS
+    (``pnl_r < 0``) and fewer than ``cooldown_bars`` of THIS strategy's own bars
+    (counted from ``bars`` — already fetched this tick for this
+    venue/symbol/timeframe, no extra DB read) have closed STRICTLY AFTER
+    ``closed_ts`` (no look-ahead: the closing bar itself does not count as
+    elapsed), a NEW entry on THIS symbol is held.
+
+    Symbol-local only: any OTHER symbol, any OTHER strategy on the SAME symbol,
+    and any OTHER venue is completely unaffected (flow_not_block — this is a
+    pacing skip on the strategy's OWN history, never a uniform dampener). DB
+    error / NULL pnl_r / no closed row -> ``False`` (fail-open, never a block
+    on doubt).
+    """
+    if cooldown_bars <= 0:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT pnl_r, closed_ts FROM positions "
+            "WHERE venue = ? AND symbol = ? AND strategy_id = ? "
+            "AND status = 'closed' AND closed_ts IS NOT NULL "
+            "ORDER BY closed_ts DESC LIMIT 1",
+            (venue, symbol, strategy_id),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning("loss-cooldown lookup failed: %s", exc)
+        return False
+    if row is None or row[0] is None:
+        return False
+    pnl_r, closed_ts = float(row[0]), int(row[1])
+    if pnl_r >= 0.0:
+        return False
+    bars_elapsed = sum(1 for b in bars if b.ts > closed_ts)
+    return bars_elapsed < cooldown_bars
 
 
 def _all_strategies() -> list[BaseStrategy]:
@@ -936,6 +986,18 @@ async def _run_tick(
                 # NEW entry is HELD until RTH (integrity, not a P&L throttle).
                 # Existing positions are untouched (this skips only the entry).
                 if equity_session_entry_hold(venue, now_ts=now_ts, state=state):
+                    continue
+                # §0c — symbol-local loss-reentry pacing (DINO -374 repeat-
+                # reentry lesson). loss_cooldown_bars=0 (every existing
+                # strategy's default) -> loss_cooldown_active short-circuits
+                # False without a DB query (byte-identical). Only THIS
+                # (venue, symbol, strategy_id) skips; every other symbol and
+                # every other strategy on this same symbol is unaffected.
+                if loss_cooldown_active(
+                    conn, venue=venue, symbol=symbol, strategy_id=strategy_id,
+                    cooldown_bars=strategy.metadata.loss_cooldown_bars, bars=bars,
+                ):
+                    state.loss_cooldown_entry_skips += 1
                     continue
                 # Equity-feed gate (equity-gate-relax): now a documented no-op
                 # seam. The daily-equity strategies derive their entry signal from

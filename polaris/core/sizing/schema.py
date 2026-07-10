@@ -96,6 +96,14 @@ CLUSTER_XAU_INDICES_PCT: Final[float] = 0.99
 CLUSTER_FX_MAJORS_PCT: Final[float] = 0.99
 """Cluster cap — FX majors (env: ``POLARIS_CAP_CLUSTER_FX_MAJORS_PCT``)."""
 
+CLUSTER_EQUITY_BETA_TREND_PCT: Final[float] = 0.99
+"""Cluster cap — equity beta/trend sleeve (Alpaca 1D/15m trend-continuation
+strategies; env: ``POLARIS_CAP_CLUSTER_EQUITY_BETA_TREND_PCT``)."""
+
+CLUSTER_EQUITY_MEANREV_PCT: Final[float] = 0.99
+"""Cluster cap — equity mean-reversion sleeve (``connors_rsi2`` /
+``equity_bb_meanrev_15m``; env: ``POLARIS_CAP_CLUSTER_EQUITY_MEANREV_PCT``)."""
+
 EQUITY_SHADOW_CAP_DEFAULT_PCT: Final[float] = 0.02
 """Shadow validation cap — small per-trade %-of-equity ceiling applied ONLY to the
 two UNVALIDATED daily-equity strategies (``equity_vol_expansion_pocket_pivot`` /
@@ -203,6 +211,16 @@ def cluster_xau_indices_pct() -> float:
 
 def cluster_fx_majors_pct() -> float:
     return _cap_env("POLARIS_CAP_CLUSTER_FX_MAJORS_PCT", CLUSTER_FX_MAJORS_PCT)
+
+
+def cluster_equity_beta_trend_pct() -> float:
+    return _cap_env(
+        "POLARIS_CAP_CLUSTER_EQUITY_BETA_TREND_PCT", CLUSTER_EQUITY_BETA_TREND_PCT
+    )
+
+
+def cluster_equity_meanrev_pct() -> float:
+    return _cap_env("POLARIS_CAP_CLUSTER_EQUITY_MEANREV_PCT", CLUSTER_EQUITY_MEANREV_PCT)
 
 
 def equity_shadow_cap_pct() -> float:

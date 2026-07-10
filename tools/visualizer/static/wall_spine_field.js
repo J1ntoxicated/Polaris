@@ -219,6 +219,10 @@
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
     jitteredBand(byCluster.reg || [], gG3.x - 95, gG3.x + 95, gG3.y + 55, gG3.y + 115, ':reg', 0.7);
     jitteredBand(byCluster.pos || [], gG6.x - 95, gG6.x + 95, gG6.y + 60, gG6.y + 120, ':pos', 0.7);
+    (byCluster.probe || []).forEach((n, j) => {
+      const ang = Math.PI * 0.75 + j * 0.5; // g6 좌하단 호
+      screen[n.id] = { x: gG6.x + Math.cos(ang) * 120, y: gG6.y + Math.sin(ang) * 70 };
+    });
     jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
     jitteredBand(byCluster.exit_tally || [], gG7.x - 140, gG7.x + 60, gG7.y + 125, gG7.y + 175, ':exittally', 0.7);
 
@@ -273,6 +277,10 @@
       } else if (node.cluster === 'strat') {
         s.r = 4.2 + Math.min(2.2, Math.log((node.trades_24h || 1) + 1) * 0.7);
         s.baseAlpha = 0.55 + Math.min(0.35, (node.intensity || 0.3) * 0.4);
+        if (node.state === 'dormant') { s.baseAlpha *= 0.45; s.r *= 0.8; } // 휴면 전략 = 자리만
+      } else if (node.cluster === 'probe') {
+        s.r = 2.6;
+        s.baseAlpha = node.state === 'dormant' ? 0.22 : 0.55 + (node.intensity || 0.3) * 0.3;
       } else {
         s.r = 3.0 + depth * 0.4;
         s.baseAlpha = 0.5 + (node.intensity || 0.4) * 0.3;
@@ -292,6 +300,8 @@
           s.bobAmp = 0;
         } else if (node.cluster === 'pos' || node.cluster === 'watch') {
           s.bobAmp = 4 + rb() * 3;
+        } else if (node.cluster === 'probe') {
+          s.bobAmp = node.state === 'dormant' ? 0 : 3 + rb() * 2.5;
         } else {
           s.bobAmp = 0.6 + depth * 0.55;
         }
@@ -661,10 +671,10 @@
     staticCtx.font = '600 8px JetBrains Mono, monospace';
     staticCtx.textAlign = 'center';
     allNodes.forEach((node) => {
-      if (node.cluster !== 'reg') return;
+      if (node.cluster !== 'reg' && node.cluster !== 'probe') return;
       const s = screen[node.id];
       if (!s) return;
-      staticCtx.fillStyle = rgba('#8a94b0', 0.75);
+      staticCtx.fillStyle = rgba('#8a94b0', node.state === 'dormant' ? 0.4 : 0.75);
       staticCtx.fillText(String(node.label || '').replace('regime_', ''), s.x, s.y + 14);
     });
   }

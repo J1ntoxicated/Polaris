@@ -105,6 +105,7 @@ _CLUSTERS: list[dict[str, Any]] = [
     {"id": "orbit", "label": "function satellites", "color": "#9fc7ff", "tier": 11},
     {"id": "axis", "label": "dimension axis", "color": "#ffd7c7", "tier": 12},
     {"id": "exit_tally", "label": "exit tally", "color": "#ff87af", "tier": 13},
+    {"id": "probe", "label": "position probes", "color": "#8a94b0", "tier": 14},
 ]
 
 # ── Satellite orbit specs (per-category axis + angular speed, rad/s) ──────────
@@ -739,6 +740,42 @@ def _strat_nodes(snap: Any, base_i: int) -> list[dict[str, Any]]:
     return nodes
 
 
+def _probe_nodes(snap: Any, base_i: int) -> list[dict[str, Any]]:
+    """tier14 'probe' nodes — the FULL position-probe taxonomy (Jin 2026-07-10
+    "안 쓰는 것도 다 띄워야": every advisor type gets a node; dormant when it
+    has no recent reading). Activity = snapshot.probe_events (G6-attached
+    advisor readings), so brightness is real recency, never fabricated."""
+    taxonomy = ("profit_taking", "loss_defense", "technical")
+    recent: dict[str, int] = {k: 0 for k in taxonomy}
+    latest: dict[str, int] = {k: 0 for k in taxonomy}
+    now = int(snap.ts_now)
+    for ev in getattr(snap, "probe_events", []) or []:
+        name = str(ev.get("name") or "")
+        if name in recent and now - int(ev.get("ts") or 0) <= 1800:
+            recent[name] += 1
+            latest[name] = max(latest[name], int(ev.get("ts") or 0))
+    nodes: list[dict[str, Any]] = []
+    for j, name in enumerate(taxonomy):
+        n = recent[name]
+        i = base_i + j
+        nodes.append(
+            {
+                "id": f"probe_{name}",
+                "label": name,
+                "ticker": None,
+                "intensity": round(min(1.0, 0.25 + n * 0.08), 4),
+                "size_mul": 1.0,
+                "readings_30m": n,
+                "cluster": "probe",
+                "tier": 14,
+                "state": "firing" if n > 0 else "dormant",
+                "i": i,
+                "phase": _phase(i),
+            }
+        )
+    return nodes
+
+
 def _watch_nodes(
     watch: list[dict[str, Any]], signal_counts: dict[str, int], base_i: int,
 ) -> list[dict[str, Any]]:
@@ -1277,6 +1314,8 @@ def build_graph(
     bi += len(strat_nodes)
     watch_nodes = _watch_nodes(watch, signal_counts, base_i=bi)
     bi += len(watch_nodes)
+    probe_nodes = _probe_nodes(snap, base_i=bi)
+    bi += len(probe_nodes)
     mkt_nodes, mkt_tail = _mkt_nodes(
         universe, signal_counts, tier_map, _graph_node_cap(), base_i=bi
     )
@@ -1297,6 +1336,7 @@ def build_graph(
         + reg_nodes
         + strat_nodes
         + watch_nodes
+        + probe_nodes
         + mkt_nodes
         + obs_nodes
         + action_nodes

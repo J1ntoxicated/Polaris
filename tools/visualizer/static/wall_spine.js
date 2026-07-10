@@ -70,6 +70,62 @@
     field.setSize(W, H);
   }
 
+  /* ===== gate decision motes + kill sediment (real events only) =====
+   * Jin 2026-07-10 "게이트가 너무 비어있다": each gate keeps its last ~14
+   * REAL decisions orbiting it (color = verdict family — gate hue for
+   * pass-through, amber for modify/adjust, steel for hold; NO green/red,
+   * those are money-only per the color contract). G5 KILLs fall away as dim
+   * sediment below the sizer (measurement honesty — globe kill-mote
+   * precedent, not a block). */
+  const gateMotes = [[], [], [], [], [], [], [], []];
+  const sediment = [];
+  function verdictFamilyColor(decision, gateIdx) {
+    const d = String(decision || '').toUpperCase();
+    if (/KILL|REJECT|EXIT_NOW|STOP/.test(d)) return null; // -> sediment
+    if (/MODIFY|ADJUST|WIDEN|SWAP|REFINE/.test(d)) return GATE_TICK;
+    if (/HOLD/.test(d)) return '#7a8496';
+    return GATE_COLORS[gateIdx] || GATE_HALO;
+  }
+  function pushGateMote(gateIdx, decision) {
+    if (gateIdx < 0 || gateIdx > 7) return;
+    const col = verdictFamilyColor(decision, gateIdx);
+    if (col == null) {
+      const gs = field.gateScreen()[gateIdx];
+      if (gs && sediment.length < 60) sediment.push({ x: gs.x + (Math.random() - 0.5) * 26, y: gs.y + 18, vy: 6 + Math.random() * 8, born: performance.now() });
+      return;
+    }
+    const ring = gateMotes[gateIdx];
+    ring.push({ ang: Math.random() * Math.PI * 2, drift: (Math.random() < 0.5 ? -1 : 1) * (0.05 + Math.random() * 0.1), color: col, born: performance.now() });
+    if (ring.length > 14) ring.shift();
+  }
+  const MOTE_TTL = 150000;
+  function drawGateMotes(now, dt) {
+    ctx.globalCompositeOperation = 'lighter';
+    const gs = field.gateScreen();
+    gateMotes.forEach((ring, i) => {
+      const g = gs[i];
+      if (!g) return;
+      for (let k = ring.length - 1; k >= 0; k--) {
+        const m = ring[k];
+        const age = now - m.born;
+        if (age > MOTE_TTL) { ring.splice(k, 1); continue; }
+        m.ang += m.drift * dt;
+        const fade = 1 - age / MOTE_TTL;
+        const r = 52 + (k % 3) * 7;
+        field.drawDot(ctx, g.x + Math.cos(m.ang) * r, g.y + Math.sin(m.ang) * r * 0.72, 1.7, m.color, 0.55 * fade, 3);
+      }
+    });
+    ctx.globalCompositeOperation = 'source-over';
+    // kill sediment: drifts down, fades — measurement honesty, not a block
+    for (let k = sediment.length - 1; k >= 0; k--) {
+      const s = sediment[k];
+      const age = now - s.born;
+      if (age > 60000) { sediment.splice(k, 1); continue; }
+      s.y += s.vy * dt;
+      field.drawDot(ctx, s.x, s.y, 1.4, '#7a7f8c', 0.4 * (1 - age / 60000), 0);
+    }
+  }
+
   /* ===== comets — bright particles = real events only ===== */
   const comets = [];
   function spawnComet(path, color, width) {
@@ -182,6 +238,7 @@
 
     field.drawField(ctx, now, dt);
     drawGates(now, now / 1000);
+    drawGateMotes(now, dt);
     drawComets(now, dt);
 
     requestAnimationFrame(frame);
@@ -209,6 +266,7 @@
   }
   function fireGateEvent(g) {
     if (!g || !g.gate_id) return;
+    pushGateMote(g.gate_id - 1, g.decision);
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {

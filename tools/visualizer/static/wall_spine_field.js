@@ -146,7 +146,9 @@
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
       const x = W * 0.05 + ((i + 0.5) / stratsOrdered.length) * W * 0.90 + (r() - 0.5) * W * 0.02;
-      screen[n.id] = { x, y: bandY(x) + (r() - 0.5) * H * 0.09 };
+      // Jin 2026-07-10: strategy nodes sit BELOW the star band in their own
+      // lane — the constellation rains down its spokes into its strategy.
+      screen[n.id] = { x, y: bandY(x) + H * 0.155 + (r() - 0.5) * H * 0.035, bandAnchorY: bandY(x) };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -197,9 +199,10 @@
         const dx = gauss() * xSig;
         const dy = gauss() * 26;
         const sc = screen[st.id];
+        const anchorY = sc.bandAnchorY != null ? sc.bandAnchorY : sc.y;
         const x = Math.max(8, Math.min(W - 8, sc.x + dx));
-        const y = Math.max(14, Math.min(H * 0.47,
-          sc.y + dy + (bandY(x) - bandY(sc.x))));
+        const y = Math.max(14, Math.min(H * 0.40,
+          anchorY + dy + (bandY(x) - bandY(sc.x))));
         screen[n.id] = { x, y };
         const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / 26) * (dy / 26)));
         screen[n.id].coreBoost = prox;

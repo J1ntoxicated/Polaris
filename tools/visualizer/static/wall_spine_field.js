@@ -7,6 +7,15 @@
  * keep both files under the project's 500-LOC cap (same cloud.js/
  * cloud_nodes.js precedent this design replaces).
  *
+ * Jarvis visual-language pass (Jin 2026-07-10, feat/jarvis-language): the
+ * NEW purely-additive decoration systems (strategy score_F reticle, watch
+ * bracket chip, engineering graticule) live in the sibling wall_spine_deco.js
+ * instead of growing this already-oversized file further — this file only
+ * gained the small hooks those need (nodesOf()) plus in-place refinements of
+ * EXISTING functions it already owned (target-lock bracket in glowAt(),
+ * leader-line labels in renderStaticLayer(), zigzag/bob/band-width tuning in
+ * buildLayout()).
+ *
  * Philosophy doc: vault/50_research/wall_design_philosophy_synaptic_current.md
  * Display-only — nothing here issues, sizes, gates or throttles a trade.
  */
@@ -61,6 +70,12 @@
   // firing ticker reads as "its exchange is alive" (Jin 2026-07-10).
   const VENUE_COLOR = { okx: '#5fdfff', cap: '#a87cff', alp: '#ffc84f' };
   const firingIds = new Set(); // mkt ids firing NOW (roster-driven, 1s poll)
+  // Jarvis target-lock entrance timing (Jin 2026-07-10, feat/jarvis-language):
+  // id -> performance.now() the instant a mkt dot's firing state flips on
+  // (roster-driven, 1s poll granularity) — drives the 300ms outside->inside
+  // bracket-contract animation in drawField()'s glowAt(); settled (>=300ms)
+  // ids just draw the static locked bracket.
+  const markerBorn = new Map();
   // Ticker pipeline migration (Jin 2026-07-10 "유니버스 소속이 옆으로 옆으로
   // 넘어가야"): a mkt dot with a live gate event GLIDES to a parking ring
   // around that gate nucleus and progresses rightward as later gates fire;
@@ -161,7 +176,11 @@
       // band-following y scattered strategies through the sky): fixed row
       // between the band and the gate spine. Clouds stay band-anchored, so
       // each constellation rains its spokes down into its strategy knot.
-      screen[n.id] = { x, y: H * 0.505 + (r() - 0.5) * H * 0.022, bandAnchorY: bandY(x) };
+      // Jarvis zigzag stagger (Jin 2026-07-10, feat/jarvis-language): a small
+      // deterministic ±0.016H index-alternating offset keeps consecutive
+      // knots from reading as one flat ruler line.
+      const zigzag = (i % 2 === 0 ? 1 : -1) * H * 0.016;
+      screen[n.id] = { x, y: H * 0.505 + (r() - 0.5) * H * 0.022 + zigzag, bandAnchorY: bandY(x) };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -208,16 +227,20 @@
         const total = Math.max(1, Math.ceil(cands.length / pool.length));
         const r = rngFor(n.id + ':orb');
         const gauss = () => (r() + r() + r() - 1.5) / 1.5;
-        const xSig = Math.min(150, 46 + 11 * Math.sqrt(total));
+        // Jarvis wider candidate band (Jin 2026-07-10 "좀 더 큰 밴드로",
+        // feat/jarvis-language): xSig cap 150->175, vertical spread 26->40,
+        // y clamp 0.40H->0.425H (prox falloff denominator follows dy's scale).
+        const xSig = Math.min(175, 46 + 11 * Math.sqrt(total));
+        const dySig = 40;
         const dx = gauss() * xSig;
-        const dy = gauss() * 26;
+        const dy = gauss() * dySig;
         const sc = screen[st.id];
         const anchorY = sc.bandAnchorY != null ? sc.bandAnchorY : sc.y;
         const x = Math.max(8, Math.min(W - 8, sc.x + dx));
-        const y = Math.max(14, Math.min(H * 0.40,
+        const y = Math.max(14, Math.min(H * 0.425,
           anchorY + dy + (bandY(x) - bandY(sc.x))));
         screen[n.id] = { x, y };
-        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / 26) * (dy / 26)));
+        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / dySig) * (dy / dySig)));
         screen[n.id].coreBoost = prox;
         tickerStrat.set(n.id, st.id);
       });
@@ -324,7 +347,11 @@
         // pos/watch = the living probes — visible slow wander (4-7px);
         // strat = anchors, fully static; the rest keep the sub-2px current.
         if (node.cluster === 'strat') {
-          s.bobAmp = 0;
+          // Jin 2026-07-10 revision (feat/jarvis-language, "좀 움직여도"):
+          // supersedes the earlier fully-static strat mandate below — a
+          // small 1.8-3.2px wander so the asteroid belt reads as live
+          // current too, not a frozen anchor row.
+          s.bobAmp = 1.8 + rb() * 1.4;
         } else if (node.cluster === 'pos' || node.cluster === 'watch') {
           s.bobAmp = 4 + rb() * 3;
         } else if (node.cluster === 'probe') {
@@ -346,6 +373,7 @@
   // K-NN scan every tick (that only reruns on an actual structural change —
   // see wall_spine_hud.js's node-count fingerprint check).
   function refreshNodeState(nodes) {
+    const prevFiring = firingIds.size ? new Set(firingIds) : null;
     firingIds.clear();
     (nodes || []).forEach((n) => {
       const s = screen[n.id];
@@ -369,6 +397,13 @@
         firingIds.add(n.id);
       }
     });
+    // Jarvis target-lock entrance (Jin 2026-07-10, feat/jarvis-language):
+    // only the NEWLY-firing ids get a fresh born time — a still-firing id
+    // keeps its original timestamp, so its bracket stays "settled" rather
+    // than re-popping every poll.
+    const now = performance.now();
+    firingIds.forEach((id) => { if (!prevFiring || !prevFiring.has(id)) markerBorn.set(id, now); });
+    markerBorn.forEach((_, id) => { if (!firingIds.has(id)) markerBorn.delete(id); });
   }
 
   // Called by wall_spine.fireGateEvent for a REAL g1..g5 gate event on a mkt
@@ -447,6 +482,26 @@
     return { x: m.fx + (m.tx - m.fx) * k, y: m.fy + (m.ty - m.fy) * k };
   }
   function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+  // Jarvis target-lock bracket (Jin 2026-07-10, feat/jarvis-language): a
+  // non-rotating 4-point hairline corner bracket around an actively-engaged
+  // node. lockAge==null -> settled (fully closed); lockAge<300 -> the
+  // bracket is still contracting outside->inside (element-local, one-shot).
+  function drawTargetLock(ctx, x, y, r, color, alpha, lockAge) {
+    const settled = lockAge == null || lockAge >= 300;
+    const k = settled ? 1 : easeOut(Math.max(0, lockAge) / 300);
+    const half = r * (2.4 - k * 1.4);
+    const tick = half * 0.34;
+    const a = alpha * (settled ? 1 : (0.3 + 0.7 * k));
+    ctx.strokeStyle = rgba(color, a);
+    ctx.lineWidth = 0.75;
+    [[1, -1], [1, 1], [-1, 1], [-1, -1]].forEach(([sx, sy]) => {
+      ctx.beginPath();
+      ctx.moveTo(x + sx * half, y + sy * half - sy * tick);
+      ctx.lineTo(x + sx * half, y + sy * half);
+      ctx.lineTo(x + sx * half - sx * tick, y + sy * half);
+      ctx.stroke();
+    });
+  }
   // venue color for any exchange string ('okx'/'capital'/'alpaca' or 3-letter)
   function venueColorOf(exchange) {
     return VENUE_COLOR[String(exchange || '').slice(0, 3).toLowerCase()] || null;
@@ -758,6 +813,22 @@
     ctx.fill();
     ctx.shadowBlur = 0;
   }
+  // Jarvis callout leader line (Jin 2026-07-10, feat/jarvis-language): a
+  // short one-bend hairline elbow from the node down to an offset label,
+  // instead of text sitting flush under the dot. `side` (+1/-1) is a stable
+  // per-id hash bit so neighbouring labels alternate left/right rather than
+  // stacking into one unreadable column.
+  function drawLeaderLabel(ctx, x, y, text, color, alpha, side) {
+    const midY = y + 7, endX = x + side * 9, endY = y + 13;
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x, midY); ctx.lineTo(endX, endY);
+    ctx.strokeStyle = rgba(color, alpha * 0.55);
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+    ctx.textAlign = side > 0 ? 'left' : 'right';
+    ctx.fillStyle = rgba(color, alpha);
+    ctx.fillText(text, endX + side * 2, endY + 3);
+  }
   // Static texture — background edges + the 'mkt' dust field only (baked
   // once; the single biggest per-frame cost at this node count).
   function renderStaticLayer(staticCtx) {
@@ -770,25 +841,25 @@
       if (!s) return;
       drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
     });
-    // Regime waypoint labels — the lifecycle braid routes through these tiny
-    // nodes; unlabeled they read as a mystery knot (Jin 2026-07-10).
+    // Regime/strategy/probe/runner labels — the lifecycle braid routes
+    // through these tiny nodes; unlabeled they read as a mystery knot (Jin
+    // 2026-07-10). Jarvis callout leader lines (feat/jarvis-language): a
+    // short one-bend hairline elbow replaces the flush-under label, with a
+    // stable per-id left/right alternation so neighbours don't collide.
     staticCtx.font = '600 8px JetBrains Mono, monospace';
-    staticCtx.textAlign = 'center';
     allNodes.forEach((node) => {
+      const s = screen[node.id];
+      if (!s) return;
+      const side = (hashStr(node.id) & 1) ? 1 : -1;
       if (node.cluster === 'strat') {
-        const s = screen[node.id];
-        if (!s) return;
-        staticCtx.fillStyle = rgba(s.color || '#8a94b0', node.state === 'dormant' ? 0.35 : 0.7);
-        staticCtx.fillText(String(node.label || '').slice(0, 16), s.x, s.y + 15);
+        drawLeaderLabel(staticCtx, s.x, s.y, String(node.label || '').slice(0, 16).toLowerCase(),
+          s.color || '#8a94b0', node.state === 'dormant' ? 0.35 : 0.7, side);
         return;
       }
       if (node.cluster !== 'reg' && node.cluster !== 'probe' && node.cluster !== 'orbit') return;
-      const s = screen[node.id];
-      if (!s) return;
-      staticCtx.fillStyle = rgba('#8a94b0', node.state === 'dormant' ? 0.4 : 0.75);
       // orbit(러너/AI 위성) 라벨은 첫 세그먼트만 (session_mult:... → session_mult)
-      const lbl = String(node.label || '').replace('regime_', '').split(':')[0];
-      staticCtx.fillText(lbl, s.x, s.y + 14);
+      const lbl = String(node.label || '').replace('regime_', '').split(':')[0].toLowerCase();
+      drawLeaderLabel(staticCtx, s.x, s.y, lbl, '#8a94b0', node.state === 'dormant' ? 0.4 : 0.75, side);
     });
   }
   // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback
@@ -830,7 +901,13 @@
     // local halo; additive so it blooms over the baked dust beneath it).
     // Migrating tickers glow at their CURRENT pipeline position instead.
     ctx.globalCompositeOperation = 'lighter';
-    const glowAt = (id, x, y, boost) => {
+    // Jarvis target-lock marker (Jin 2026-07-10, feat/jarvis-language):
+    // supersedes the flat 3-layer halo — same core-glow dots, PLUS a
+    // non-rotating hairline bracket (venue color) that contracts outside->
+    // inside over the first 300ms of a firing id's life (markerBorn), then
+    // sits as a settled lock bracket. lockAge=null (migrating travelers)
+    // always draws settled — they're already mid-journey, not just latched.
+    const glowAt = (id, x, y, boost, lockAge) => {
       const s = screen[id];
       if (!s) return;
       const breathe = 0.72 + 0.28 * Math.sin(now / 650 + s.phaseOff);
@@ -839,8 +916,13 @@
       drawDot(ctx, x, y, s.r * 3.6, col, 0.10 * lvl, 0);
       drawDot(ctx, x, y, s.r * 1.9, col, 0.26 * lvl, 0);
       drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
+      drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.5 + 0.35 * lvl, lockAge);
     };
-    firingIds.forEach((id) => { if (!migrations.has(id)) glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0); });
+    firingIds.forEach((id) => {
+      if (migrations.has(id)) return;
+      const born = markerBorn.get(id);
+      glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0, born == null ? null : now - born);
+    });
     // active strategies glow too (Jin: "활성화 전략은 글로잉") — real state
     // from the roster (open positions / firing), venue-colored, breathing.
     allNodes.forEach((n) => {
@@ -870,7 +952,7 @@
         } else if (now - m.lastMs > MIGRATE_IDLE_MS) { migrateHome(id); return; }
       } else if (m.phase === 'return' && m.t >= 1) { migrations.delete(id); return; }
       const pt = migratePos(m, s);
-      glowAt(id, pt.x, pt.y, 0.25);
+      glowAt(id, pt.x, pt.y, 0.25, null);
     });
     activeGlowIds.forEach((id) => {
       const s = screen[id];
@@ -895,5 +977,6 @@
     clusterColor: () => CLUSTER_COLOR,
     findNode: (pred) => allNodes.find(pred),
     nodeById: (id) => nodeById[id],
+    nodesOf: (cluster) => allNodes.filter((n) => n.cluster === cluster),
   };
 })();

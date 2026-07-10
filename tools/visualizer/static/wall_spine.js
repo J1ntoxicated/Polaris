@@ -16,7 +16,10 @@
  * public API (window.PolarisSpine) that wall_spine_hud.js drives with real
  * /static/graph.json + /api/flow_stats + /stream/events data. The background
  * constellation (layout/edges/whisper-mesh/static pre-render/parallax bob) is
- * wall_spine_field.js, loaded first.
+ * wall_spine_field.js, loaded first; the Jarvis decoration layer (strategy
+ * score_F reticle, watch bracket chip, engineering graticule — feat/jarvis-
+ * language, Jin 2026-07-10) is wall_spine_deco.js, loaded second (optional —
+ * this file degrades gracefully if it's missing).
  *
  * Camera is fully static (no zoom/pan/shake). No full-screen or radial-burst
  * effects — every effect is anchored to a node/edge. Additive ('lighter')
@@ -27,6 +30,7 @@
   const canvas = document.getElementById('spine-canvas');
   const field = window.PolarisSpineField;
   if (!canvas || !field) return;
+  const deco = window.PolarisSpineDeco; // optional — Jarvis decoration layer
   const ctx = canvas.getContext('2d');
 
   const GATE_CORE = '#eafcff', GATE_HALO = '#5fd7ff', GATE_TICK = '#ffb454';
@@ -223,7 +227,29 @@
       field.drawDot(ctx, gs.x, gs.y, core, GATE_CORE, 0.68 + fireT * 0.28, 8 + fireT * 13);
       ctx.globalCompositeOperation = 'source-over';
       ctx.beginPath(); ctx.arc(gs.x, gs.y, core, 0, Math.PI * 2);
-      ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 1; ctx.stroke();
+      ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 0.8; ctx.stroke();
+
+      const ringR = 40;
+      // Jarvis refinement (Jin 2026-07-10, feat/jarvis-language "게이트
+      // 레티클을 이중 헤어라인 링+코너 틱 4점으로 정제"): a static inner
+      // hairline ring + 4 non-rotating corner brackets frame the reticle.
+      // The throughput-rotating ring/tick-band below is UNTOUCHED — its
+      // spin rate is real signal (processing rate), not decoration.
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath(); ctx.arc(gs.x, gs.y, core + 9, 0, Math.PI * 2);
+      ctx.strokeStyle = field.rgba(gc, 0.3 + fireT * 0.2); ctx.lineWidth = 0.7; ctx.stroke();
+      const brR = ringR + 12, brTick = 6;
+      for (let c = 0; c < 4; c++) {
+        const ca = Math.PI / 4 + c * (Math.PI / 2);
+        const ux = Math.cos(ca), uy = Math.sin(ca), tx = -uy, ty = ux;
+        const cx = gs.x + ux * brR, cy = gs.y + uy * brR;
+        ctx.beginPath();
+        ctx.moveTo(cx - ux * brTick, cy - uy * brTick);
+        ctx.lineTo(cx, cy);
+        ctx.lineTo(cx + tx * brTick, cy + ty * brTick);
+        ctx.strokeStyle = field.rgba(GATE_TICK, 0.4 + fireT * 0.25); ctx.lineWidth = 0.75; ctx.stroke();
+      }
+      ctx.globalCompositeOperation = 'source-over';
 
       // jarvis arc-ring reticle (rotating tick band)
       // Meaningful rotation (Jin 2026-07-10 "도는 건 상관없는데 의미가
@@ -235,19 +261,19 @@
       gs.spin = (gs.spin == null ? i * 0.61 : gs.spin)
         + (now - (gs.spinT || now)) * 0.001 * (0.03 + 0.9 * load + 1.6 * fireT);
       gs.spinT = now;
-      const rot = gs.spin, ringR = 40, span = Math.PI * 1.45;
+      const rot = gs.spin, span = Math.PI * 1.45;
       ctx.save();
       ctx.translate(gs.x, gs.y);
       ctx.rotate(rot);
       ctx.beginPath(); ctx.arc(0, 0, ringR, -span / 2, span / 2);
-      ctx.strokeStyle = field.rgba(GATE_TICK, 0.5 + fireT * 0.3); ctx.lineWidth = 1.1; ctx.stroke();
+      ctx.strokeStyle = field.rgba(GATE_TICK, 0.5 + fireT * 0.3); ctx.lineWidth = 0.8; ctx.stroke();
       for (let k = 0; k <= 14; k++) {
         const a = -span / 2 + (span * k / 14);
         const inR = ringR - 4, outR = ringR + (k % 2 === 0 ? 6 : 3);
         ctx.beginPath();
         ctx.moveTo(Math.cos(a) * inR, Math.sin(a) * inR);
         ctx.lineTo(Math.cos(a) * outR, Math.sin(a) * outR);
-        ctx.strokeStyle = field.rgba(GATE_TICK, 0.4); ctx.lineWidth = 0.8; ctx.stroke();
+        ctx.strokeStyle = field.rgba(GATE_TICK, 0.4); ctx.lineWidth = 0.7; ctx.stroke();
       }
       ctx.restore();
 
@@ -258,7 +284,7 @@
       const sweep = Math.max(0.06, Math.min(1, Math.log1p(g.count) / maxGateLog)) * (Math.PI * 1.5);
       ctx.globalCompositeOperation = 'lighter';
       ctx.beginPath(); ctx.arc(gs.x, gs.y, ringR + 7, -Math.PI / 2, -Math.PI / 2 + sweep);
-      ctx.strokeStyle = field.rgba(GATE_SWEEP, 0.42 + fireT * 0.3); ctx.lineWidth = 2; ctx.stroke();
+      ctx.strokeStyle = field.rgba(GATE_SWEEP, 0.55 + fireT * 0.3); ctx.lineWidth = 0.9; ctx.stroke();
       ctx.globalCompositeOperation = 'source-over';
 
       ctx.textAlign = 'center';
@@ -267,9 +293,19 @@
       const below = (i % 2 === 0);
       const ly = below ? gs.y + ringR + 20 : gs.y - ringR - 12;
       ctx.fillText(`g${g.n} · ${g.label}`, gs.x, ly);
+      // Jarvis numeric HUD block (Jin 2026-07-10, feat/jarvis-language
+      // "소형 수치 블록·위 헤어라인"): a thin rule above the tabular count
+      // separates it into its own small readout block.
       ctx.font = "400 9px ui-monospace, Menlo, monospace";
+      const countTxt = String(g.count);
+      const cy = ly + (below ? 12 : -12);
+      const cw = ctx.measureText(countTxt).width;
+      ctx.beginPath();
+      ctx.moveTo(gs.x - cw / 2 - 2, cy - 7);
+      ctx.lineTo(gs.x + cw / 2 + 2, cy - 7);
+      ctx.strokeStyle = field.rgba(GATE_TICK, 0.35); ctx.lineWidth = 0.65; ctx.stroke();
       ctx.fillStyle = field.rgba(GATE_TICK, 0.85);
-      ctx.fillText(String(g.count), gs.x, ly + (below ? 12 : -12));
+      ctx.fillText(countTxt, gs.x, cy);
     });
   }
 
@@ -286,18 +322,28 @@
     drawGates(now, now / 1000);
     drawGateMotes(now, dt);
     drawComets(now, dt);
+    if (deco) deco.drawDecor(ctx, now);
 
     requestAnimationFrame(frame);
   }
 
   /* ===== public API ===== */
   let booted = false;
+  // Jarvis static-layer wrapper (Jin 2026-07-10, feat/jarvis-language): the
+  // faint engineering graticule (wall_spine_deco.js) bakes on TOP of the
+  // field's static render, same cadence — both boot() and every 1s refresh()
+  // re-render the whole static layer from scratch, so the graticule has to
+  // be re-stamped alongside it or it would vanish on the first refresh.
+  function bakeStatic() {
+    field.renderStaticLayer(staticCtx);
+    if (deco) deco.renderGraticule(staticCtx, W, H, field.gateScreen());
+  }
   function boot(data) {
     fitCanvas();
     field.buildLayout(data);
     if (field.setProbeLinks) field.setProbeLinks(data.probe_links);
     field.buildEdges(data);
-    field.renderStaticLayer(staticCtx);
+    bakeStatic();
     if (!booted) {
       booted = true;
       requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
@@ -310,7 +356,7 @@
     if (!booted) return;
     field.refreshNodeState(nodes);
     setUniverseTiers(nodes);
-    field.renderStaticLayer(staticCtx);
+    bakeStatic();
   }
   function fireGateEvent(g) {
     if (!g || !g.gate_id) return;
@@ -378,5 +424,6 @@
     refresh, setGateCounts,
     fireGateEvent, fireEntry, fireExit, fireKill, fireVerdict,
     firstGateX,
+    setStrategyGauges: (classes) => { if (deco) deco.setStrategyGauges(classes); },
   };
 })();

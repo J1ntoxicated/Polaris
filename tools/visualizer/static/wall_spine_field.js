@@ -141,7 +141,7 @@
       const t = i / (GATE_IDS.length - 1);
       const rg = rngFor(gid + ':stagger');
       const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
-      const y = H * 0.615 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
+      const y = H * 0.655 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
         + Math.cos(t * Math.PI * 0.9) * H * 0.02 + (rg() - 0.5) * H * 0.034;
       return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
     });
@@ -917,11 +917,14 @@
       const breathe = 0.72 + 0.28 * Math.sin(now / 650 + s.phaseOff);
       const lvl = Math.min(1, ((s.fireLevel || 0.6) + (boost || 0)) * breathe);
       const col = s.venueColor || VENUE_COLOR[String((s.node && s.node.exchange) || '').slice(0, 3).toLowerCase()] || s.color;
-      // core kept BELOW additive saturation so the venue hue stays legible
-      // (Jin 2026-07-11 "왜 다 똑같은 색" — cores were burning to white)
-      drawDot(ctx, x, y, s.r * 3.6, col, 0.12 * lvl, 0);
-      drawDot(ctx, x, y, s.r * 2.0, col, 0.30 * lvl, 0);
-      drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(0.8, 0.4 + 0.3 * lvl), 3);
+      // Halo stays additive (bloom over the dust), but the CORE is stamped
+      // opaque in source-over — additive stacking clips high channels and
+      // burns every venue hue to white (Jin 2026-07-11 "왜 다 똑같은 색").
+      drawDot(ctx, x, y, s.r * 3.6, col, 0.10 * lvl, 0);
+      drawDot(ctx, x, y, s.r * 2.0, col, 0.22 * lvl, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.95, 0);
+      ctx.globalCompositeOperation = 'lighter';
       drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.5 + 0.35 * lvl, lockAge);
     };
     firingIds.forEach((id) => {
@@ -976,6 +979,9 @@
       glowAt(id, pt.x, pt.y, 0.25, null);
     });
     activeGlowIds.forEach((id) => {
+      // already carrying the persistent venue glow — a second additive
+      // stamp here is what pushed firing cores past saturation
+      if (firingIds.has(id) || migrations.has(id)) { activeGlowIds.delete(id); return; }
       const s = screen[id];
       if (!s) { activeGlowIds.delete(id); return; }
       const fireT = Math.max(0, Math.min(1, (s.fireUntil - now) / 900));

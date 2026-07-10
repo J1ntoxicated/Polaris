@@ -126,10 +126,10 @@
   /* Per-cell value-change flash (Bloomberg per-cell diff) — only a cell whose
      live value CHANGED this poll flashes; unchanged cells keep their DOM. ~400ms
      green-up / red-down fade. Used by syncTable() for Open Positions + streams. */
-  #board td.px-flash-up   { animation: pxup 0.42s ease-out; }
-  #board td.px-flash-down { animation: pxdn 0.42s ease-out; }
-  @keyframes pxup { 0% { background: rgba(135,215,135,0.45); } 100% { background: transparent; } }
-  @keyframes pxdn { 0% { background: rgba(215,135,135,0.45); } 100% { background: transparent; } }
+  #board td.px-flash-up   { animation: pxup 0.3s ease-out; }
+  #board td.px-flash-down { animation: pxdn 0.3s ease-out; }
+  @keyframes pxup { 0% { background: rgba(135,215,135,0.16); } 100% { background: transparent; } }
+  @keyframes pxdn { 0% { background: rgba(215,135,135,0.16); } 100% { background: transparent; } }
 
   /* New-row ease-in (Jin 2026-06-26) — a genuinely-new diffed row (fresh
      position / trade) fades + slides in individually instead of the whole table

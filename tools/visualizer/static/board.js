@@ -1305,6 +1305,12 @@
   }
   function _flashCell(td, dir) {
     if (!td || !dir) return;
+    // rate-limit (Jin 2026-07-11 "보드 왜 블링킹거려"): with truly-live 1s
+    // marks a per-change flash strobes the whole table — numbers still tick
+    // every change, the flash fires at most once per cell per 2.5s.
+    const nowMs = Date.now();
+    if (td.__lastFx && nowMs - td.__lastFx < 4000) return;
+    td.__lastFx = nowMs;
     td.classList.remove(FLASH_UP, FLASH_DOWN);
     void td.offsetWidth;   // restart the animation if re-flashing the same cell
     td.classList.add(dir === 'up' ? FLASH_UP : FLASH_DOWN);

@@ -220,14 +220,14 @@
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
-<script src="static/board.js?v=21_noblink_morph"></script>
+<script src="static/board.js?v=22_fxlimit"></script>
 <!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
      venue scope helpers) loads after board.js (needs window.PolarisBoard) and
      before the tab modules (which read its scope helpers). Its
      window.PolarisGlobe.focusExchange() call is guarded (globe is gone from
      this page — no-ops safely, see board_exchange.js). -->
 <script src="static/board_exchange.js?v=2_bloomberg_dense"></script>
-<script src="static/board_tabs.js?v=21_noblink"></script>
+<script src="static/board_tabs.js?v=22_softfx"></script>
 <script src="static/board_tabs_ext.js?v=17_venuebreak_gatesplit"></script>
 <!-- board_reference.js (reference-tab renderers: 개발/가야할길/배운것 — static
      fetch-once from /api/buildlog · /api/roadmap · /api/lessons, NOT the 1s

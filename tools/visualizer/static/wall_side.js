@@ -56,7 +56,9 @@
     if (el.textContent !== txt) {
       var up = flash && parseFloat(txt.replace(/[^0-9.-]/g, '')) > parseFloat(el.textContent.replace(/[^0-9.-]/g, '') || '0');
       el.textContent = txt;
-      if (flash) {
+      var nowMs = Date.now();
+      if (flash && (!el.__lastFx || nowMs - el.__lastFx > 4000)) {
+        el.__lastFx = nowMs;
         el.classList.remove('fx-up', 'fx-dn');
         void el.offsetWidth;
         el.classList.add(up ? 'fx-up' : 'fx-dn');
@@ -170,16 +172,27 @@
         renderPositions(s);
         if (!seeded) {
           seeded = true;
-          (s.recent_trades || []).slice(0, 15).reverse().forEach(function (t) {
+          var seedRows = [];
+          (s.recent_trades || []).slice(0, 12).forEach(function (t) {
             var pnl = t.net_usd != null ? t.net_usd : t.pnl_usd;
-            pushFeed({ ts: t.ts_close || t.ts || 0, kind: 'EXIT', color: vcolor(t.venue),
+            seedRows.push({ ts: t.ts_close || 0, kind: 'EXIT', color: vcolor(t.venue),
               text: base(t.symbol) + ' · ' + (t.exit_reason || ''), val: usd(pnl), valCls: pnlCls(pnl) });
           });
+          (s.positions || []).forEach(function (pp) {
+            var opened = (s.ts_now || 0) - (pp.held_sec || 0);
+            seedRows.push({ ts: opened, kind: 'ENTRY', color: vcolor(pp.venue),
+              text: base(pp.symbol) + ' ' + (pp.side || '') + ' · ' + (pp.strategy_id || ''), val: kusd(pp.size_usd), valCls: 'flat-c' });
+          });
+          seedRows.sort(function (a, b) { return a.ts - b.ts; }).forEach(pushFeed);
         }
       })
       .catch(function () { /* display-only */ });
   }
   poll();
   setInterval(poll, 1000);
-  if (window.PolarisEvents) window.PolarisEvents.on(onStream);
+  // events_bus는 이 스크립트보다 늦게 초기화될 수 있음 — 재시도 구독
+  (function sub() {
+    if (window.PolarisEvents) { window.PolarisEvents.on(onStream); return; }
+    setTimeout(sub, 500);
+  })();
 })();

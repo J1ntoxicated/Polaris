@@ -165,6 +165,16 @@
       } else {
         const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
         if (vc) s.color = vc;
+        // venue-less SYSTEM meta nodes (action=gate-verdict tallies, obs=
+        // health, orbit/axis) — neutral steel, dimmer: their old cluster
+        // pinks/olives read as mystery entities next to the venue/P&L hues
+        // (Jin 2026-07-10 "핑크색 저건 왜 색이 저래?").
+        else if (node.cluster === 'action' || node.cluster === 'obs'
+                 || node.cluster === 'orbit' || node.cluster === 'axis'
+                 || node.cluster === 'exit' || node.cluster === 'exit_tally'
+                 || node.cluster === 'reg') {
+          s.color = '#8a94b0';
+        }
       }
       if (node.cluster === 'mkt') {
         s.r = 1.15 + depth * 0.55;
@@ -443,7 +453,14 @@
       const a = screen[fromId], b = screen[toId];
       if (!a || !b) return;
       const w = 0.5 + Math.min(2.6, Math.log(count + 1) * 0.8);
-      addAmbient(fromId, toId, a.x, a.y, b.x, b.y, { color: mixHex((nodeById[fromId] && CLUSTER_COLOR[nodeById[fromId].cluster]) || '#d7d787', CLUSTER_COLOR.exit_tally || '#ff87af', 0.5), alpha: 0.16 + Math.min(0.22, count * 0.01), width: w });
+      // Color contract (Jin 2026-07-10): the old pink mix glowed on recently-
+      // traded tickers and read as a mystery hue ("핑크색 저건 왜 색이 저래?").
+      // Closed-lifecycle history strands wear the ticker's VENUE color, dim —
+      // history is not money; P/L green/red stays exclusive to positions/exits.
+      const src = nodeById[fromId];
+      const strandColor = (src && venueColorOf(src.exchange))
+        || CLUSTER_COLOR[(src && src.cluster) || ''] || '#8a90a0';
+      addAmbient(fromId, toId, a.x, a.y, b.x, b.y, { color: strandColor, alpha: 0.13 + Math.min(0.2, count * 0.01), width: w });
     });
 
     buildWhisperMesh();
@@ -599,6 +616,7 @@
   window.PolarisSpineField = {
     setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
     migrateTicker, migrateHome, venueColorOf,
+    screenOf: (id) => screen[id],
     markFire, pathEdges, rgba, drawDot, bezierPoint,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,

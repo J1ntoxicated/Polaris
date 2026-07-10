@@ -38,8 +38,14 @@
   }
   function rgba(hex, a) { const [r, g, b] = hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; }
   function mixHex(h1, h2, t) {
+    // Must return '#rrggbb' (not 'rgb(...)') — hexToRgb()/rgba() above only
+    // parse the '#hex' form, and the '.startsWith(\'#\')' checks at edgeFor()
+    // shadowColor and drawField()'s micro-pulse color both gate on it; an
+    // 'rgb(...)' string silently fell through both to grey/GATE_HALO cyan
+    // instead of the blended cluster hue.
     const a = hexToRgb(h1), b = hexToRgb(h2);
-    return `rgb(${Math.round(a[0] + (b[0] - a[0]) * t)},${Math.round(a[1] + (b[1] - a[1]) * t)},${Math.round(a[2] + (b[2] - a[2]) * t)})`;
+    const hex = (v) => Math.round(a[v] + (b[v] - a[v]) * t).toString(16).padStart(2, '0');
+    return `#${hex(0)}${hex(1)}${hex(2)}`;
   }
 
   const GATE_HALO = '#5fd7ff';

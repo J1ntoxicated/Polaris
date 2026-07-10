@@ -1345,12 +1345,25 @@ def build_graph(
     # centre, glowing green/red by the real-fee-net equity vs starting capital.
     # We surface those equity scalars HERE so the globe keeps its single
     # graph.json fetch (no second /api/snapshot poll, no trading-path coupling).
+    # VIRTUAL ACCOUNT fields (Jin 2026-07-07 mandate) added alongside the LEGACY
+    # ones so wall_spine_hud.js's bottom-ticker can match the same
+    # virtual_account_enabled branch board.js/mobile.js already use — Σ
+    # streams[].virtual_equity_usd / virtual_seed_usd (no per-venue global field
+    # exists on DashboardSnapshot; virtual_daily_pnl_usd IS a global scalar).
+    virtual_equity_usd = sum(
+        (s.virtual_equity_usd for s in snap.streams), 0.0
+    )
+    virtual_seed_usd = sum((s.virtual_seed_usd for s in snap.streams), 0.0)
     polaris_core = {
         "equity_now": round(float(snap.equity_now), 2),
         "equity_now_real_fee_net": round(float(snap.equity_now_real_fee_net), 2),
         "starting_capital": round(float(snap.starting_capital), 2),
         "peak_equity": round(float(snap.peak_equity), 2),
         "ts_now": int(snap.ts_now),
+        "virtual_account_enabled": bool(snap.virtual_account_enabled),
+        "virtual_equity_usd": round(float(virtual_equity_usd), 2),
+        "virtual_seed_usd": round(float(virtual_seed_usd), 2),
+        "virtual_daily_pnl_usd": round(float(snap.virtual_daily_pnl_usd), 2),
     }
 
     return {

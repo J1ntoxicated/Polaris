@@ -54,10 +54,19 @@
   function renderEquity(data) {
     const c = data.polaris_core;
     if (!c) return;
-    const today = c.equity_now - c.starting_capital;
+    // VIRTUAL ACCOUNT mode (Jin 2026-07-07 mandate, matches board.js:852 /
+    // mobile.js:145): the ticker Jin reads at a glance is the fresh $100k x N
+    // virtual ledger's TODAY figure (AEST-midnight-floored), not inception-to-
+    // date P&L against a fixed starting_capital seed, and not the LEGACY
+    // real-venue equity_now reconciliation — both of which read as ~2 months
+    // of stale cumulative history under a 'TODAY' label once virtual mode is
+    // on. Falls back to the legacy pair when virtual mode is off.
+    const virt = !!c.virtual_account_enabled;
+    const equity = virt ? c.virtual_equity_usd : c.equity_now;
+    const today = virt ? c.virtual_daily_pnl_usd : c.equity_now - c.starting_capital;
     const eqEl = document.getElementById('bl-equity');
     const todayEl = document.getElementById('bl-today');
-    if (eqEl) eqEl.textContent = fmtUsd(c.equity_now);
+    if (eqEl) eqEl.textContent = fmtUsd(equity);
     if (todayEl) {
       todayEl.textContent = fmtUsd(today);
       todayEl.classList.toggle('pos', today >= 0);

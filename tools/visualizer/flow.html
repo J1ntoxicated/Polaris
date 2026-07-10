@@ -38,7 +38,10 @@
   .side-h { flex: 0 0 auto; padding: 6px 10px 4px; font-size: 9.5px; letter-spacing: 0.12em; color: var(--p-gry); font-weight: 700; }
   .side-h span { color: var(--p-dim); font-weight: 400; }
   .side-rows { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 8px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
-  .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 14px 62px 44px 44px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
+  .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 12px 58px 62px 42px 38px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
+  .fx-up { animation: fxup 0.4s ease-out; } .fx-dn { animation: fxdn 0.4s ease-out; }
+  @keyframes fxup { 0% { background: rgba(125,255,168,0.35); } 100% { background: transparent; } }
+  @keyframes fxdn { 0% { background: rgba(255,125,138,0.35); } 100% { background: transparent; } }
   .side-rows .r > span { overflow: hidden; text-overflow: ellipsis; }
   .side-rows .vb { width: 3px; height: 10px; border-radius: 1px; align-self: center; }
   .side-rows .vt { font-size: 8px; color: var(--p-dim); }
@@ -241,7 +244,7 @@
       '<a class="open-board-bar" href="/">OPEN FULL BOARD ›</a>';
   })();
 </script>
-<script src="static/wall_side.js?v=1"></script>
+<script src="static/wall_side.js?v=2_livepx"></script>
 
 <!-- Shared SSE bus (events_bus.js) + pts-classes annotations (flow_classes.js,
      unchanged — gauge strip / EARN·BENCH badges / NEW CANDIDATE flash) + the

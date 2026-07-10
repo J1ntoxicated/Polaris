@@ -37,28 +37,87 @@
     return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
   }
 
-  /* ===== OPEN POSITIONS (1s poll, memo write) ===== */
-  var lastPosHtml = '';
+  /* ===== OPEN POSITIONS — keyed rows, per-cell live ticks =====
+   * Structure rebuilds only when the position SET changes (1s poll); price/
+   * PnL cells update in place — from the poll AND from /stream/prices (the
+   * bot's live marks diffed at 4Hz), so prices tick in true real time with
+   * an up/down flash. Key = venue|symbol|strategy|side (server's SSE key). */
+  var rowIndex = new Map(); // key -> {cur, pnl, pct}
+  function fmtPx(n) {
+    if (n == null || isNaN(n)) return '—';
+    var a = Math.abs(n);
+    return n.toFixed(a >= 1000 ? 0 : a >= 1 ? 2 : a >= 0.01 ? 4 : 6);
+  }
+  function rowKey(p) {
+    return String(p.venue || '') + '|' + String(p.symbol || '') + '|' + String(p.strategy_id || '') + '|' + String(p.side || '');
+  }
+  function setCell(el, txt, cls, flash) {
+    if (!el) return;
+    if (el.textContent !== txt) {
+      var up = flash && parseFloat(txt.replace(/[^0-9.-]/g, '')) > parseFloat(el.textContent.replace(/[^0-9.-]/g, '') || '0');
+      el.textContent = txt;
+      if (flash) {
+        el.classList.remove('fx-up', 'fx-dn');
+        void el.offsetWidth;
+        el.classList.add(up ? 'fx-up' : 'fx-dn');
+      }
+    }
+    if (cls != null && el.className.indexOf(cls) < 0) el.className = 'num ' + cls;
+  }
   function renderPositions(s) {
     var rows = (s.positions || []).slice().sort(function (a, b) {
       return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0);
-    });
+    }).slice(0, 26);
     if (posN) posN.textContent = rows.length ? '· ' + rows.length : '';
-    var html = rows.slice(0, 26).map(function (p) {
+    var keys = rows.map(rowKey).join('~');
+    if (keys !== renderPositions._keys) {
+      renderPositions._keys = keys;
+      rowIndex.clear();
+      posRows.innerHTML = rows.map(function (p) {
+        return '<div class="r" data-k="' + esc(rowKey(p)) + '">'
+          + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
+          + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
+          + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
+          + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
+          + '<span class="num cur vt"></span>'
+          + '<span class="num pnl"></span>'
+          + '<span class="num pct"></span>'
+          + '<span class="num vt exp"></span>'
+          + '</div>';
+      }).join('');
+      posRows.querySelectorAll('.r').forEach(function (el) {
+        rowIndex.set(el.getAttribute('data-k'), {
+          cur: el.querySelector('.cur'), pnl: el.querySelector('.pnl'),
+          pct: el.querySelector('.pct'), exp: el.querySelector('.exp'),
+        });
+      });
+    }
+    rows.forEach(function (p) {
+      var c = rowIndex.get(rowKey(p));
+      if (!c) return;
       var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
       var pct = p.upnl_pct != null ? p.upnl_pct : null;
-      return '<div class="r">'
-        + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
-        + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
-        + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
-        + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
-        + '<span class="num ' + pnlCls(u) + '">' + usd(u) + '</span>'
-        + '<span class="num ' + pnlCls(pct) + '">' + (pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%') + '</span>'
-        + '<span class="num vt">' + kusd(p.size_usd) + '</span>'
-        + '</div>';
-    }).join('');
-    if (html !== lastPosHtml) { posRows.innerHTML = html; lastPosHtml = html; }
+      setCell(c.cur, fmtPx(p.last_price), null, true);
+      setCell(c.pnl, usd(u), pnlCls(u), false);
+      setCell(c.pct, pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%', pnlCls(pct), false);
+      if (c.exp && !c.exp.textContent) c.exp.textContent = kusd(p.size_usd);
+    });
   }
+  // live 4Hz price marks — the "가격 변하는 거 실시간" channel
+  try {
+    var pes = new EventSource('/stream/prices');
+    pes.onmessage = function (ev) {
+      var d;
+      try { d = JSON.parse(ev.data); } catch (e) { return; }
+      (d.prices || []).forEach(function (m) {
+        var c = rowIndex.get(m.key);
+        if (!c) return;
+        setCell(c.cur, fmtPx(m.last_price), null, true);
+        if (m.upnl_usd != null) setCell(c.pnl, usd(m.upnl_usd), pnlCls(m.upnl_usd), false);
+        if (m.upnl_pct != null) setCell(c.pct, (m.upnl_pct >= 0 ? '+' : '') + m.upnl_pct.toFixed(1) + '%', pnlCls(m.upnl_pct), false);
+      });
+    };
+  } catch (e) { /* SSE unavailable — 1s poll still ticks */ }
 
   /* ===== ACTIVITY feed (SSE + seed) ===== */
   var feed = []; // {ts, kind, color, text, val, valCls}

@@ -193,6 +193,42 @@ def _fresh_snapshot() -> dict[str, Any]:
     return {**data, "meta": {"git_sha": _GIT_SHA, "boot_ts": _BOOT_TS}}
 
 
+# ── Live venue price overlay (Jin 2026-07-11 "가격 실시간으로") ─────────────
+# The bot persists marks on its own cadence (seconds+), which capped the
+# /stream/prices tick rate. This DISPLAY-ONLY poller fetches OKX public spot
+# tickers (one unauthenticated request/s for ALL symbols, us.okx.com) and
+# overlays the freshest price onto the open-position cells; uPnL/Δ% are
+# recomputed linearly from the row's entry/size. No DB write, no bot contact,
+# no order/sizing surface. Disable with POLARIS_DASH_LIVE_PX=0.
+_LIVE_PX_ENABLED = os.environ.get("POLARIS_DASH_LIVE_PX", "1") != "0"
+_live_px: dict[str, tuple[float, float]] = {}
+_live_px_lock = threading.Lock()
+
+
+def _okx_px_loop() -> None:
+    import urllib.request
+
+    # default urllib UA gets 403 from OKX — a UA header is required
+    req = urllib.request.Request(
+        "https://us.okx.com/api/v5/market/tickers?instType=SPOT",
+        headers={"User-Agent": "Mozilla/5.0 (Polaris-dash display-only)"},
+    )
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                rows = json.loads(r.read().decode()).get("data", [])
+            now_m = time.time()
+            with _live_px_lock:
+                for t in rows:
+                    px = t.get("last")
+                    inst = t.get("instId")
+                    if px and inst:
+                        _live_px[str(inst)] = (float(px), now_m)
+        except Exception:  # noqa: BLE001 — display-only, retry after backoff
+            time.sleep(4)
+        time.sleep(1.0)
+
+
 def _price_marks() -> dict[str, dict[str, Any]]:
     """Per-open-position live-mark cells, keyed ``venue|symbol|strategy|side``.
 
@@ -210,13 +246,28 @@ def _price_marks() -> dict[str, dict[str, Any]]:
         key = "|".join(
             str(p.get(k, "")) for k in ("venue", "symbol", "strategy_id", "side")
         )
-        out[key] = {
+        cell = {
             "key": key,
             "last_price": p.get("last_price"),
             "upnl_usd": p.get("upnl_usd"),
             "delta_pct": p.get("delta_pct"),
             "upnl_pct": p.get("upnl_pct"),
         }
+        # live overlay (display-only): freshest public OKX mark wins
+        if _LIVE_PX_ENABLED and str(p.get("venue", "")).startswith("okx"):
+            with _live_px_lock:
+                lv = _live_px.get(str(p.get("symbol", "")))
+            entry = p.get("entry_price")
+            if lv and entry:
+                live_price = lv[0]
+                sign = -1.0 if str(p.get("side", "")).startswith("s") else 1.0
+                delta = (live_price / float(entry) - 1.0) * 100.0 * sign
+                size = float(p.get("size_usd") or 0.0)
+                cell["last_price"] = live_price
+                cell["delta_pct"] = delta
+                cell["upnl_pct"] = delta
+                cell["upnl_usd"] = size * delta / 100.0
+        out[key] = cell
     return out
 
 
@@ -1749,6 +1800,8 @@ def main() -> None:
         _fresh_graph()
     threading.Thread(target=_bg_refresh_loop, daemon=True).start()
     threading.Thread(target=_ref_refresh_loop, daemon=True).start()
+    if _LIVE_PX_ENABLED:
+        threading.Thread(target=_okx_px_loop, daemon=True).start()
 
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("", args.port), Handler) as httpd:

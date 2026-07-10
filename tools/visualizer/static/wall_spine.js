@@ -25,13 +25,45 @@
  * effects — every effect is anchored to a node/edge. Additive ('lighter')
  * blending only for glow passes. Single rAF loop, English UI copy only.
  * Display-only: nothing here issues, sizes, gates or throttles a trade.
+ *
+ * console v2 (Jin 2026-07-11 "제대로 하자"): the corner/BAY/ladder readout
+ * panels (wall_console_readouts.js, loaded third, optional) get their data
+ * through the setConsole/setVerdicts/setFlowSummary/markGatePulse/
+ * gatePulseAt surface below — this file owns that small state, readouts.js
+ * pulls it back out lazily each frame. Scope note on `breath()` (field.js's
+ * new phase-dispersion helper): it is used ONLY by the new readout elements
+ * that have no `screen[].phaseOff` of their own. The EXISTING glow call
+ * sites in this file/field.js/deco.js (glowAt, strategy/system firing glow,
+ * the strategy score_F reticle) already disperse phase via each node's own
+ * `screen[].phaseOff` — rewriting dozens of already-working, already-
+ * dispersed call sites to route through `breath()` instead would be a pure
+ * refactor with the same visual result and real regression risk, so it was
+ * left alone (surgical changes).
  */
 (function () {
   const canvas = document.getElementById('spine-canvas');
   const field = window.PolarisSpineField;
   if (!canvas || !field) return;
   const deco = window.PolarisSpineDeco; // optional — Jarvis decoration layer
+  const readouts = window.PolarisConsoleReadouts; // optional — console v2 panels
   const ctx = canvas.getContext('2d');
+
+  // ===== console v2 state (Jin 2026-07-11 "제대로 하자") =====
+  // Owned here (not readouts.js) so wall_spine_hud.js has one place to push
+  // graph.json's `console` block + flow_stats' `verdicts_recent`/`summary`
+  // into, same pattern as setGateCounts/setStrategyGauges below. readouts.js
+  // pulls it back out lazily (via window.PolarisSpine, safe — draw() is only
+  // ever called from frame(), long after every script tag has finished
+  // executing and this object below exists).
+  let consoleData = null;
+  let verdictsRecent = [];
+  let flowSummary = {};
+  const gatePulse = {}; // gate_id (1-8) -> performance.now() of last SSE pulse
+  function setConsole(obj) { consoleData = obj || null; }
+  function setVerdicts(list) { verdictsRecent = list || []; }
+  function setFlowSummary(s) { flowSummary = s || {}; }
+  function markGatePulse(gateId) { gatePulse[gateId] = performance.now(); }
+  function gatePulseAt(gateId) { return gatePulse[gateId] || 0; }
 
   const GATE_CORE = '#eafcff', GATE_HALO = '#5fd7ff', GATE_TICK = '#ffb454';
   // Jin 2026-07-10 "각 게이트 색도 좀 다르게": per-gate identity hues G1→G8
@@ -323,6 +355,8 @@
     drawGateMotes(now, dt);
     drawComets(now, dt);
     if (deco) deco.drawDecor(ctx, now);
+    if (readouts) readouts.draw(ctx, now);
+    if (deco) deco.drawZoneScan(ctx, now);
 
     requestAnimationFrame(frame);
   }
@@ -401,8 +435,12 @@
     // — match both, not ticker alone, so a ticker open on two venues at once
     // doesn't visually point at the wrong position.
     const pos = field.findNode((n) => n.cluster === 'pos' && n.ticker === e.ticker && n.exchange === e.exchange);
-    const tally = field.findNode((n) => n.cluster === 'exit_tally');
-    const ids = [pos ? pos.id : null, 'g6', 'g7', tally ? tally.id : null].filter(Boolean);
+    // Journey ends at g7 now (console v2 M2): exit_tally nodes no longer get
+    // a screen position (their count reads through the EXIT FSM strip
+    // instead — wall_console_readouts.js's drawExitFsm), so appending a
+    // tally hop here would make pathEdges() fail the WHOLE path (every hop
+    // must resolve) and silently drop the win/loss comet trail entirely.
+    const ids = [pos ? pos.id : null, 'g6', 'g7'].filter(Boolean);
     const path = field.pathEdges(ids);
     const win = (e.pnl_usd || 0) >= 0;
     if (path.length) spawnComet(path, win ? (field.clusterColor().pos || '#87ffaf') : (field.clusterColor().exit || '#ff5f7a'), 2.4);
@@ -425,5 +463,12 @@
     fireGateEvent, fireEntry, fireExit, fireKill, fireVerdict,
     firstGateX,
     setStrategyGauges: (classes) => { if (deco) deco.setStrategyGauges(classes); },
+    // console v2 (Jin 2026-07-11) — setters wall_spine_hud.js's existing
+    // graph.json/flow_stats polls push into, getters wall_console_readouts.js
+    // pulls lazily inside its per-frame draw().
+    setConsole, setVerdicts, setFlowSummary, markGatePulse, gatePulseAt,
+    consoleOf: () => consoleData,
+    verdictsOf: () => verdictsRecent,
+    flowSummaryOf: () => flowSummary,
   };
 })();

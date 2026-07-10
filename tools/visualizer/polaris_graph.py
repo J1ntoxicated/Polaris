@@ -402,7 +402,8 @@ def _signal_key(venue: str, symbol: str) -> str:
 
 
 def _query_signal_counts(db_path: Path) -> dict[str, int]:
-    """REAL per-instrument pipeline-catch count over the last ~30m (display-only).
+    """REAL per-instrument pipeline-catch counts — 30m firing window + a 4h
+    afterglow companion under ``key + "|4h"`` (display-only).
 
     The globe's lightup was previously driven by ``is_active`` (the universe FOCUS
     flag) with ``signal_count_30m`` hard-coded 0. This joins the real ``signals``
@@ -416,22 +417,29 @@ def _query_signal_counts(db_path: Path) -> dict[str, int]:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     counts: dict[str, int] = {}
     try:
+        # 30m = the live "firing" window; 4h afterglow rides along so
+        # low-frequency venues (Alpaca 1D strategies — Jin 2026-07-11 "알파카는
+        # 신호 안뜨는데 아예?") stay visible between their sparse bar closes.
         rows = conn.execute(
-            "SELECT instrument_id, COUNT(*) FROM signals "
-            "WHERE ts >= strftime('%s','now') - 1800 "
+            "SELECT instrument_id, "
+            "SUM(CASE WHEN ts >= strftime('%s','now') - 1800 THEN 1 ELSE 0 END), "
+            "COUNT(*) FROM signals "
+            "WHERE ts >= strftime('%s','now') - 14400 "
             "GROUP BY instrument_id"
         ).fetchall()
     except sqlite3.Error:
         return counts
     finally:
         conn.close()
-    for instrument_id, c in rows:
+    for instrument_id, c30, c4h in rows:
         inst = str(instrument_id or "")
         if ":" in inst:
             venue, symbol = inst.split(":", 1)
         else:
             venue, symbol = "okx", inst
-        counts[_signal_key(venue, symbol)] = int(c)
+        key = _signal_key(venue, symbol)
+        counts[key] = int(c30)
+        counts[key + "|4h"] = int(c4h)
     return counts
 
 
@@ -728,6 +736,10 @@ def _strat_nodes(snap: Any, base_i: int) -> list[dict[str, Any]]:
                 "intensity": round(min(1.0, 0.3 + open_n * 0.15), 4),
                 "size_mul": round(min(1.5, max(0.7, pf or 1.0)), 4),
                 "trades_24h": closed_n,
+                # real slot occupancy (Jin 2026-07-11 wall slot pips): live
+                # open count vs the strategy's own max_positions metadata.
+                "open_n": int(open_n),
+                "max_open": int(getattr(meta, "max_positions", 0) or 0),
                 "pnl_usd": round(pnl, 4),
                 "asset_group": group,
                 "cluster": "strat",
@@ -868,14 +880,15 @@ def _mkt_nodes(
     # already vol-desc, so equal-priority rows keep their volume order). The
     # first ``node_cap`` rows PER VENUE become individual nodes; the rest feed
     # that venue's haze.
-    enriched: list[tuple[int, dict[str, Any], int, str, bool]] = []
+    enriched: list[tuple[int, dict[str, Any], int, str, bool, int]] = []
     for u in universe:
         key = _signal_key(u["exchange"], u["ticker"])
         active = int(u.get("is_active", 0)) == 1
         sig_n = int(signal_counts.get(key, 0))
+        sig_4h = int(signal_counts.get(key + "|4h", 0))
         tier = tier_map.get(key, "")
         enriched.append(
-            (_mkt_priority(tier, active, sig_n), u, sig_n, tier, active)
+            (_mkt_priority(tier, active, max(sig_n, min(1, sig_4h))), u, sig_n, tier, active, sig_4h)
         )
     order = sorted(range(len(enriched)), key=lambda k: enriched[k][0])
 
@@ -885,7 +898,7 @@ def _mkt_nodes(
     # per-venue emitted-node counter → the cap is applied independently per venue.
     venue_emitted: dict[str, int] = {}
     for k in order:
-        _prio, u, sig_n, tier, active = enriched[k]
+        _prio, u, sig_n, tier, active, sig_4h = enriched[k]
         ex = str(u["exchange"])
         if venue_emitted.get(ex, 0) >= node_cap:
             # Fold into the per-venue tail haze (count + density proxy). A live
@@ -932,6 +945,7 @@ def _mkt_nodes(
                 "size_mul": size_mul,
                 "shell_floor": shell_floor,
                 "signal_count_30m": sig_n,
+                "signal_count_4h": sig_4h,
                 "cluster": "mkt",
                 "tier": 8,
                 "state": state,

@@ -75,6 +75,7 @@
   }
   #board #b-hdr-toggle:hover { color: var(--p-wht); border-color: var(--polaris-blue); }
   #board.hdr-min #b-virt, #board.hdr-min #b-book-status,
+  #board.hdr-min #b-streams-legacy,
   #board.hdr-min #b-kpis > div:not(.health) { display: none; }
   #board .b-footer { color: var(--p-dim); font-size: 9px; letter-spacing: 0.04em; text-align: right; padding: 3px 8px; opacity: 0.6; }
 
@@ -1503,7 +1504,8 @@
         board.classList.toggle('hdr-min', min);
         if (ht) ht.textContent = min ? '▸ header' : '▾ header';
       };
-      applyHdr(localStorage.getItem('polaris_hdr_min') === '1');
+      // 기본 = 접힘 (Jin 2026-07-11 "베뉴 카드 접어버리라니까? 필요할때만 열게")
+      applyHdr(localStorage.getItem('polaris_hdr_min') !== '0');
       if (ht) ht.addEventListener('click', () => {
         const min = !board.classList.contains('hdr-min');
         localStorage.setItem('polaris_hdr_min', min ? '1' : '0');

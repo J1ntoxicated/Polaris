@@ -168,23 +168,19 @@
     // ticker clouds elongate along the band tangent so neighbouring
     // constellations blend into a single streak.
     const bandY = (x) => H * 0.23 + Math.sin((x / W) * Math.PI * 1.35 + 0.7) * H * 0.095;
-    const stratsOrdered = hashShuffle(byCluster.strat);
+    // STRATEGY RAIL (Jin 2026-07-11 "전체적으로 공간활용" + "열매마냥 매달린
+    // 것"): full-width fixed-pitch instrument rail, venue-GROUPED (OKX block →
+    // CAP → ALP so the venue colors read as sections), tiny zigzag only —
+    // an engineered rail, not fruit dangling off the band.
+    const stratsOrdered = (byCluster.strat || []).slice().sort((a, b) => {
+      const va = String(a.exchange || ''), vb = String(b.exchange || '');
+      return va === vb ? String(a.label || '').localeCompare(String(b.label || '')) : va.localeCompare(vb);
+    });
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
-      // Right 28% is the execution/exit/learning district (g6 pod·pos band·
-      // g7 taxonomy·g8 ring) — the band/lane/watch stay LEFT of it so the
-      // monitor corner never collides with lane labels (Jin 2026-07-11
-      // "너무 복잡하게 겹쳐있는 부분 조정").
-      const x = W * 0.045 + ((i + 0.5) / stratsOrdered.length) * W * 0.55 + (r() - 0.5) * W * 0.012;
-      // FLAT strategy lane (Jin 2026-07-10 "전략 위치 왜 이래" — the earlier
-      // band-following y scattered strategies through the sky): fixed row
-      // between the band and the gate spine. Clouds stay band-anchored, so
-      // each constellation rains its spokes down into its strategy knot.
-      // Jarvis zigzag stagger (Jin 2026-07-10, feat/jarvis-language): a small
-      // deterministic ±0.016H index-alternating offset keeps consecutive
-      // knots from reading as one flat ruler line.
-      const zigzag = (i % 2 === 0 ? 1 : -1) * H * 0.016;
-      screen[n.id] = { x, y: H * 0.505 + (r() - 0.5) * H * 0.022 + zigzag, bandAnchorY: bandY(x) };
+      const x = W * 0.03 + ((i + 0.5) / stratsOrdered.length) * W * 0.94 + (r() - 0.5) * W * 0.006;
+      const zigzag = (i % 2 === 0 ? 1 : -1) * H * 0.011;
+      screen[n.id] = { x, y: H * 0.505 + zigzag, bandAnchorY: bandY(x) };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -215,6 +211,7 @@
       // tradable universe spreads WIDE and dim underneath as the backdrop.
       const isCandidate = (n) => n.state === 'firing'
         || (n.signal_count_30m || 0) > 0
+        || (n.signal_count_4h || 0) > 0 // 저빈도 베뉴(ALP 1D) 4h 여운
         || (n.intensity || 0) >= 0.45
         || n.tier_label === 'S' || n.tier_label === 'A' || n.tier_label === 'B';
       const cands = ticks.filter(isCandidate);
@@ -290,8 +287,21 @@
     });
 
     const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
-    jitteredBand(byCluster.reg || [], gG3.x - 95, gG3.x + 95, gG3.y + 55, gG3.y + 115, ':reg', 0.7);
-    jitteredBand(byCluster.pos || [], gG6.x - 95, gG6.x + 95, gG6.y + 60, gG6.y + 120, ':pos', 0.7);
+    // REGIME row (Jin 2026-07-11 "공간활용"): even-pitch labelled row filling
+    // the bottom-left void (above the DROP LANE overlay), feeding g3.
+    (byCluster.reg || []).forEach((n, j, arr) => {
+      const x = W * 0.05 + ((j + 0.5) / Math.max(1, arr.length)) * W * 0.25;
+      screen[n.id] = { x, y: H * 0.775 + ((j % 2) ? H * 0.018 : 0) };
+    });
+    // OPEN POSITIONS — even double-arc fan under g6 (was a jittered blob):
+    // alternating inner/outer ring, P/L colors stay the only green/red.
+    (byCluster.pos || []).forEach((n, j, arr) => {
+      const ring = j % 2;
+      const t = (Math.floor(j / 2) + 0.5) / Math.max(1, Math.ceil(arr.length / 2));
+      const ang = Math.PI * (0.12 + t * 0.76);
+      const rad = 60 + ring * 26;
+      screen[n.id] = { x: gG6.x + Math.cos(ang) * rad * 1.35, y: gG6.y + Math.sin(ang) * rad * 0.85 };
+    });
     // G6 monitor advisors — ALL probe readings carry gate_id=6 (verified),
     // so they belong ON g6: a tidy left-to-top arc hugging the nucleus
     // (same satellite grammar as G1's tier census), clear of the pos band
@@ -360,8 +370,10 @@
           livingIds.push(node.id);
         }
       } else if (node.cluster === 'watch') {
-        s.r = 2.0 + depth * 0.4;
-        s.baseAlpha = 0.35 + (node.intensity || 0.4) * 0.25;
+        // chip IS the identity — the dangling dot goes near-invisible
+        // (Jin 2026-07-11 "열매마냥 매달린것도 저게 최선이야?")
+        s.r = 1.3;
+        s.baseAlpha = 0.26 + (node.intensity || 0.4) * 0.12;
       } else if (node.cluster === 'strat') {
         s.r = 4.2 + Math.min(2.2, Math.log((node.trades_24h || 1) + 1) * 0.7);
         s.baseAlpha = 0.55 + Math.min(0.35, (node.intensity || 0.3) * 0.4);
@@ -418,7 +430,7 @@
       if (!s) return;
       s.node = n;
       if (n.cluster === 'mkt') s.baseAlpha = 0.16 + s.depth * 0.09 + (n.intensity || 0.3) * 0.12;
-      else if (n.cluster === 'watch') s.baseAlpha = 0.35 + (n.intensity || 0.4) * 0.25;
+      else if (n.cluster === 'watch') s.baseAlpha = 0.26 + (n.intensity || 0.4) * 0.12; // buildLayout dim과 동기 (리뷰 MED)
       else if (n.cluster === 'strat') s.baseAlpha = 0.55 + Math.min(0.35, (n.intensity || 0.3) * 0.4);
       else s.baseAlpha = 0.5 + (n.intensity || 0.4) * 0.3;
       // live P/L tint for open positions (sign can flip between polls)
@@ -930,6 +942,22 @@
       const by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
       drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
     }
+    // Strategy slot pips (Jin 2026-07-11 "전략마다 활성화 개수 정해져있어?"
+    // made visible): real open_n vs the strategy's own max_positions —
+    // filled pip = an occupied concurrent slot. No fabrication: both fields
+    // come straight from the registry metadata + live stats.
+    allNodes.forEach((n) => {
+      if (n.cluster !== 'strat' || !(n.max_open > 0)) return;
+      const s = screen[n.id];
+      if (!s) return;
+      const total = Math.min(6, n.max_open); // 최대 캡 6 = 레지스트리 실최대 (리뷰 LOW)
+      const open = Math.min(total, n.open_n || 0);
+      const col = venueColorOf(n.exchange) || s.color;
+      for (let p = 0; p < total; p++) {
+        const px = s.x + (p - (total - 1) / 2) * 5;
+        drawDot(ctx, px, s.y - (s.r + 5.5), 1.15, p < open ? col : '#8a94b0', p < open ? 0.9 : 0.2, 0);
+      }
+    });
     // LIVE interaction wires — brighter than base cloth, fade with age,
     // geometry from the shared bezier cache (distinct 'lw:' keys).
     const nowMs = now;

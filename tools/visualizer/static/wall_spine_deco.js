@@ -37,6 +37,27 @@
     for (let y = gy % step; y < h; y += step) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
     }
+    // Jarvis zone dividers (Jin 2026-07-11 "정리 되는 좋은거 다 갖다"):
+    // hairline separators + end ticks + tiny uppercase section tags so the
+    // vertical hierarchy (signal field → watchlist → strategy rail → gate
+    // bus → regime) reads as an engineered console, not floating layers.
+    const zone = (y, title) => {
+      ctx.strokeStyle = 'rgba(150,190,225,0.10)';
+      ctx.lineWidth = 0.6;
+      ctx.beginPath(); ctx.moveTo(w * 0.015, y); ctx.lineTo(w * 0.985, y); ctx.stroke();
+      [w * 0.015, w * 0.985].forEach((cx) => {
+        ctx.beginPath(); ctx.moveTo(cx, y - 3); ctx.lineTo(cx, y + 3); ctx.stroke();
+      });
+      ctx.font = '600 7.5px JetBrains Mono, monospace';
+      ctx.fillStyle = 'rgba(160,200,235,0.35)';
+      ctx.textAlign = 'left';
+      ctx.fillText(title, w * 0.015 + 6, y - 4);
+    };
+    zone(h * 0.052, 'SIGNAL FIELD');
+    zone(h * 0.425, 'WATCHLIST');
+    zone(h * 0.478, 'STRATEGY RAIL');
+    zone(h * 0.605, 'GATE BUS · EXECUTION · LEARNING');
+    zone(h * 0.745, 'REGIME CONTEXT');
   }
 
   /* ===== (4) strategy asteroid reticle — mini hairline ring (venue color) +
@@ -65,8 +86,9 @@
       const p = bobOf(s, now);
       const vc = field.venueColorOf(n.exchange) || s.color || '#8fb0c8';
       const ringR = (s.r || 4) + 5.5;
+      // slimmer base ring (Jin 2026-07-11 "열매마냥" — instrument, not fruit)
       ctx.beginPath(); ctx.arc(p.x, p.y, ringR, 0, Math.PI * 2);
-      ctx.strokeStyle = field.rgba(vc, 0.22); ctx.lineWidth = 0.7; ctx.stroke();
+      ctx.strokeStyle = field.rgba(vc, 0.13); ctx.lineWidth = 0.6; ctx.stroke();
       const pct = stratGauge.get(n.id) || 0;
       if (pct > 0) {
         const breathe = n.state === 'firing' ? (0.55 + 0.45 * Math.sin(now / 500 + (s.phaseOff || 0))) : 0.85;

@@ -171,7 +171,11 @@
     const stratsOrdered = hashShuffle(byCluster.strat);
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
-      const x = W * 0.05 + ((i + 0.5) / stratsOrdered.length) * W * 0.90 + (r() - 0.5) * W * 0.02;
+      // Right 28% is the execution/exit/learning district (g6 pod·pos band·
+      // g7 taxonomy·g8 ring) — the band/lane/watch stay LEFT of it so the
+      // monitor corner never collides with lane labels (Jin 2026-07-11
+      // "너무 복잡하게 겹쳐있는 부분 조정").
+      const x = W * 0.045 + ((i + 0.5) / stratsOrdered.length) * W * 0.55 + (r() - 0.5) * W * 0.012;
       // FLAT strategy lane (Jin 2026-07-10 "전략 위치 왜 이래" — the earlier
       // band-following y scattered strategies through the sky): fixed row
       // between the band and the gate spine. Clouds stay band-anchored, so
@@ -236,7 +240,7 @@
         const dy = gauss() * dySig;
         const sc = screen[st.id];
         const anchorY = sc.bandAnchorY != null ? sc.bandAnchorY : sc.y;
-        const x = Math.max(8, Math.min(W - 8, sc.x + dx));
+        const x = Math.max(8, Math.min(W * 0.62, sc.x + dx));
         const y = Math.max(14, Math.min(H * 0.425,
           anchorY + dy + (bandY(x) - bandY(sc.x))));
         screen[n.id] = { x, y };
@@ -254,7 +258,7 @@
       const mkt = allNodes.find((m) => m.cluster === 'mkt' && m.ticker === n.ticker && m.exchange === n.exchange);
       const base = mkt && screen[mkt.id];
       const r = rngFor(n.id + ':wt');
-      const x = base ? base.x : W * (0.25 + r() * 0.5);
+      const x = Math.min(W * 0.60, base ? base.x : W * (0.22 + r() * 0.38));
       screen[n.id] = { x, y: H * 0.445 + (r() - 0.5) * H * 0.02 };
       if (base) {
         // short drop-line ticker -> its watch entry (the "선발" visual)

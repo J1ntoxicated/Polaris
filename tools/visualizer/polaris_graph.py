@@ -1321,6 +1321,35 @@ def _query_gate_flow_1h(db_path: Path) -> dict[int, int]:
     return {int(gid): int(n or 0) for gid, n in _gate_flow_cache["rows"]}
 
 
+def _ramp_cells(db_path: Path, top: bool) -> list[dict[str, Any]]:
+    """Cell-ledger RAMP fallback — real rows, honestly labelled.
+
+    The ledger's canonical source is snap.cell_top/bottom (mature cells,
+    n_eff>=20). Early in a reset cycle NOTHING is mature (live max n_eff ~17)
+    and the flagship panel rendered headers-only. Rather than an empty
+    showcase, surface the actual ramp leaders straight from cell_matrix_p0
+    with ramp=True so the client dims them + tags RAMP. No fabrication: same
+    real rows the maturity gate is accumulating, mult unknown -> None ("—").
+    """
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT exchange, strategy, ticker, regime, n_eff, score "
+            "FROM cell_matrix_p0 ORDER BY score " + ("DESC" if top else "ASC") + ", n_eff DESC LIMIT 4"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    return [
+        {"exchange": ex, "strategy": st, "ticker": tk, "regime": rg,
+         "n_eff": round(float(ne or 0.0), 2), "score": round(float(sc or 0.0), 3),
+         "mult": None, "ramp": True}
+        for ex, st, tk, rg, ne, sc in rows
+    ]
+
+
 def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
     """Console v2 read-model — powers ``static/wall_console_readouts.js``'s
     corner panels (equity/AI/cell-ledger/exit-FSM/register/regime-matrix).
@@ -1427,8 +1456,8 @@ def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
         "sessions": sessions,
         "streams": streams,
         "gpt": gpt,
-        "cell_top": [_cell(r) for r in snap.cell_top],
-        "cell_bottom": [_cell(r) for r in snap.cell_bottom],
+        "cell_top": [_cell(r) for r in snap.cell_top] or _ramp_cells(db_path, top=True),
+        "cell_bottom": [_cell(r) for r in snap.cell_bottom] or _ramp_cells(db_path, top=False),
         "exit": exit_block,
         "regimes": regimes,
         "gate_flow_1h": _query_gate_flow_1h(db_path),

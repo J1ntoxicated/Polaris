@@ -171,7 +171,7 @@
     const peakLbl = virtualMode ? 'PEAK (SESS)' : 'PEAK';
     const feeLbl = virtualMode ? 'FEE-NET (LGCY)' : 'FEE-NET';
     const rows = [
-      ['EQUITY', fmtUsd(eqNow), null, 4],
+      ['EQUITY', fmtUsd(eqNow), null, 900],
       [peakLbl, fmtUsd(peakVal), null, 1800],
       [feeLbl, fmtUsd(core.real_fee_net), null, 1800],
       ['EXPOSURE', fmtUsd(exposure), null, 1800],
@@ -204,7 +204,8 @@
       const bx = barX0 + i * barW;
       ctx.fillStyle = 'rgba(138,148,176,0.14)';
       ctx.fillRect(bx, barTop, barW - 2, barBot - barTop);
-      const h = (barBot - barTop) * Math.min(1, n / maxN);
+      // log scale — g6 (~4k monitor readings/h) dwarfed every other gate to <1% on linear
+      const h = (barBot - barTop) * Math.min(1, Math.log1p(n) / Math.log1p(maxN));
       ctx.fillStyle = field.rgba(GATE_COLORS[i], 0.75);
       ctx.fillRect(bx, barBot - h, barW - 2, h);
     });
@@ -318,7 +319,10 @@
     const rowH = (y1 - y0 - 30) / 8;
     const drawRow = (row, i) => {
       const ry = y0 + 26 + (i + 0.75) * rowH;
-      ctx.font = '600 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(STEEL, 0.85); ctx.textAlign = 'left';
+      // ramp rows = real cell_matrix leaders below the n_eff maturity bar —
+      // dimmed + RAMP tag so nobody reads them as mature (no fabrication).
+      const dim = row.ramp ? 0.5 : 1;
+      ctx.font = '600 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(STEEL, 0.85 * dim); ctx.textAlign = 'left';
       ctx.fillText(String(row.exchange || '').slice(0, 3).toUpperCase(), colX[0], ry);
       ctx.fillText(String(row.strategy || '').slice(0, 12), colX[1], ry);
       ctx.fillText(String(row.ticker || '').slice(0, 8), colX[2], ry);
@@ -327,8 +331,8 @@
       ctx.fillText(fmtNum(row.n_eff, 1), colX[4] + innerW * cols[4][1] - 2, ry);
       ctx.fillText(fmtNum(row.score, 2), colX[5] + innerW * cols[5][1] - 2, ry);
       // MULT is the only warm-white-emphasised column — never P/L color (not money).
-      ctx.font = '700 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(WARM, 0.92);
-      ctx.fillText(fmtNum(row.mult, 2) + '×', colX[6] + innerW * cols[6][1] - 2, ry);
+      ctx.font = '700 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(WARM, 0.92 * dim);
+      ctx.fillText(row.ramp ? 'RAMP' : fmtNum(row.mult, 2) + '×', colX[6] + innerW * cols[6][1] - 2, ry);
     };
     top.slice(0, 4).forEach(drawRow);
     if (top.length && bot.length) {
@@ -474,7 +478,7 @@
     if (!regs.length) return;
     const venues = Array.from(new Set(regs.map((r) => r.venue))).sort();
     const classes = Array.from(new Set(regs.map((r) => r.group_id))).sort();
-    const cell = 9, gap = 2;
+    const cell = 9, gap = 5; // header 4-char at 5px mono ~12px — pitch 14 clears it (review MED)
     const x0 = W * 0.21, y0 = H * 0.83;
     ctx.font = '600 6px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(160,200,235,0.35)'; ctx.textAlign = 'left';
     ctx.fillText('REGIME MATRIX', x0, y0 - 4);

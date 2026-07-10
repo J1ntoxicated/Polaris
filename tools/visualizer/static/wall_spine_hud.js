@@ -103,6 +103,22 @@
       renderKillFeed();
       renderUniverseStat(data);
       renderEquity(data);
+      // console v2 (Jin 2026-07-11): pushed every poll regardless of the
+      // structural fingerprint match above — these numbers change every 1s
+      // even when the node/edge SET doesn't. `polaris_core.virtual_daily_
+      // pnl_usd` is the SAME source renderEquity() above already reads for
+      // the botlog TODAY figure; `stats.firing_rate` is graph.json's
+      // existing top-level scalar — both merged in here rather than
+      // duplicated server-side in polaris_graph.py's _console_block.
+      if (spine.setConsole) {
+        const pc = data.polaris_core || {};
+        spine.setConsole(data.console
+          ? Object.assign({}, data.console, {
+            firing_rate: (data.stats && data.stats.firing_rate) || 0,
+            day_pnl: pc.virtual_daily_pnl_usd || 0,
+          })
+          : null);
+      }
     } catch (e) { /* display-only — keep last frame */ }
   }
 
@@ -139,6 +155,8 @@
       const d = await r.json();
       spine.setGateCounts(d.stages || []);
       if (spine.setStrategyGauges) spine.setStrategyGauges(d.classes || []);
+      if (spine.setVerdicts) spine.setVerdicts(d.verdicts_recent || []);
+      if (spine.setFlowSummary) spine.setFlowSummary(d.summary || {});
       renderSummary(d);
       renderDrops(d);
       for (const v of d.verdicts_recent || []) {
@@ -186,6 +204,7 @@
     }
     for (const g of payload.gate_events || []) {
       spine.fireGateEvent(g);
+      if (spine.markGatePulse) spine.markGatePulse(g.gate_id);
       if (g.decision === 'KILL') {
         spine.fireKill(g);
         addKill({ ticker: g.symbol, gate_id: g.gate_id, ts: g.ts || Math.floor(Date.now() / 1000) });

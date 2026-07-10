@@ -35,6 +35,18 @@
     };
   }
   function rngFor(id) { return mulberry32(hashStr(id)); }
+  // breath(now, tierPeriod, idHash) — console v2 phase bus (Jin 2026-07-11):
+  // a shared 0..1 breathing helper for the NEW readout/decoration elements
+  // (panel sweeps, verdict tape, register rows — anything without its own
+  // screen[].phaseOff) so a bank of same-tier elements never blinks in lock-
+  // step. Existing per-node glow (glowAt/strategy-firing/system-lit) already
+  // disperses phase via screen[].phaseOff and is left untouched (surgical —
+  // no reason to touch dozens of already-working call sites for the same
+  // property they already have). Tier periods: firing 650 / survive+money
+  // 900 / system 1800 / decoration 3600ms.
+  function breath(now, tierPeriod, idHash) {
+    return 0.5 + 0.5 * Math.sin((now / tierPeriod) * Math.PI * 2 + ((idHash % 997) / 997) * Math.PI * 2);
+  }
 
   const colorRgbCache = new Map();
   function hexToRgb(hex) {
@@ -56,6 +68,30 @@
     const hex = (v) => Math.round(a[v] + (b[v] - a[v]) * t).toString(16).padStart(2, '0');
     return `#${hex(0)}${hex(1)}${hex(2)}`;
   }
+
+  // WALL_ZONES — console v2 canon (Jin 2026-07-11 "제대로 하자", build spec
+  // wall_console_blueprint.md §"존 캐논 v2"): the SINGLE source of truth for
+  // every panel/zone rectangle on the wall. deco.js's renderGraticule() and
+  // the new lanes/readouts modules all read this instead of carrying their
+  // own copies of these ratios (the old graticule's 0.478/0.605 divider
+  // values had already drifted out of sync with the real rail/gate y this
+  // file computes below — that class of bug is what this table forecloses).
+  // All values are canvas-ratio (0..1 of W/H).
+  const WALL_ZONES = {
+    crownTL: { x0: 0.012, x1: 0.215, y0: 0.055, y1: 0.165 },
+    crownTR: { x0: 0.785, x1: 0.988, y0: 0.055, y1: 0.165 },
+    signalTop: 0.165, signalClamp: 0.425,
+    bayRect: { x0: 0.02, x1: 0.275, y0: 0.30, y1: 0.44 },
+    watchDivider: 0.438, watchRow: 0.452,
+    railY: 0.492, railZigzag: 0.009,
+    gateBusY: 0.655, gateBusFloor: 0.655, gateBusCeil: 0.70,
+    registerRect: { x0: 0.962, x1: 0.988, y0: 0.575, y1: 0.745 },
+    regimeY: 0.775,
+    ladderBand: {
+      y0: 0.815, y1: 0.955,
+      gateOps: { x0: 0.36, x1: 0.52 }, cellLedger: { x0: 0.54, x1: 0.76 }, br: { x0: 0.78, x1: 0.988 },
+    },
+  };
 
   const GATE_HALO = '#5fd7ff';
   const FEEDBACK_COLOR = '#ffb454'; // gold — G8->G2 plasticity strand
@@ -83,6 +119,18 @@
   // Static bake already reruns every 1s poll, so parked dots are simply
   // skipped there and drawn live here — no ghost duplicates.
   const migrations = new Map(); // id -> {fx,fy,tx,ty,t,dur,phase,lastMs,gateIdx}
+  // Journey afterglow (Jin 2026-07-11 console v2 M5): the trail a completed
+  // migration hop leaves behind, fading 2s. Forced source-over (drawn in
+  // drawField below) — never additive, never white-blooms.
+  const afterglow = []; // {x1,y1,x2,y2,color,born}
+  const AFTERGLOW_FADE_MS = 2000;
+  const AFTERGLOW_MAX = 64;
+  function pushAfterglow(fx, fy, tx, ty, nodeId) {
+    const s = screen[nodeId];
+    const col = (s && (s.venueColor || venueColorOf((s.node && s.node.exchange) || ''))) || '#8fb0c8';
+    afterglow.push({ x1: fx, y1: fy, x2: tx, y2: ty, color: col, born: performance.now() });
+    if (afterglow.length > AFTERGLOW_MAX) afterglow.shift();
+  }
   const MIGRATE_IDLE_MS = 150000;
   // Strategy-constellation assignment (Jin 2026-07-10 "전략들이 보고있는
   // 티커들 링크해서 클러스터"): mkt ticker id -> its strategy node id.
@@ -141,8 +189,14 @@
       const t = i / (GATE_IDS.length - 1);
       const rg = rngFor(gid + ':stagger');
       const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
-      const y = H * 0.655 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
+      let y = H * WALL_ZONES.gateBusY + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
         + Math.cos(t * Math.PI * 0.9) * H * 0.02 + (rg() - 0.5) * H * 0.034;
+      // g5-g8 clamp (Jin 2026-07-11 console v2, unresolved friction #1): the
+      // back half of the S-curve used to drift up into the strategy rail's y
+      // band — flatten it into a tight floor..ceil strip so the >=0.13H
+      // rail<->gate clearance is a structural guarantee, not a lucky roll of
+      // the sin/cos undulation.
+      if (i >= 4) y = Math.max(H * WALL_ZONES.gateBusFloor, Math.min(H * WALL_ZONES.gateBusCeil, y));
       return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
     });
 
@@ -179,8 +233,8 @@
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
       const x = W * 0.03 + ((i + 0.5) / stratsOrdered.length) * W * 0.94 + (r() - 0.5) * W * 0.006;
-      const zigzag = (i % 2 === 0 ? 1 : -1) * H * 0.011;
-      screen[n.id] = { x, y: H * 0.505 + zigzag, bandAnchorY: bandY(x) };
+      const zigzag = (i % 2 === 0 ? 1 : -1) * H * WALL_ZONES.railZigzag;
+      screen[n.id] = { x, y: H * WALL_ZONES.railY + zigzag, bandAnchorY: bandY(x) };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -234,7 +288,7 @@
         // sky above the monitor/exit/reflector district was dead space.
         const dySig = 68;
         const x = Math.max(8, Math.min(W * 0.97, W * (0.03 + r() * 0.94)));
-        const y = Math.max(20, Math.min(H * 0.435, bandY(x) + gauss() * dySig));
+        const y = Math.max(20, Math.min(H * WALL_ZONES.signalClamp, bandY(x) + gauss() * dySig));
         screen[n.id] = { x, y, isCand: true };
         screen[n.id].coreBoost = Math.min(1, n.intensity != null ? +n.intensity : 0.3);
         tickerStrat.set(n.id, st.id);
@@ -262,10 +316,33 @@
         }
       }
     }
+    // Panel exclusion rects (Jin 2026-07-11 console v2 M2): the new corner
+    // readout panels + BAY gauges + bottom ladder claim screen real-estate the
+    // candidate relax pass didn't know about — pad each by the candidate bob
+    // amplitude (max ~8px) and project any intruder to its nearest edge. Rides
+    // the SAME final clamp pass already here (no new loop).
+    const exclPad = 8;
+    const exclRects = [WALL_ZONES.crownTL, WALL_ZONES.crownTR, WALL_ZONES.bayRect].map((z) => ({
+      x0: W * z.x0 - exclPad, x1: W * z.x1 + exclPad, y0: H * z.y0 - exclPad, y1: H * z.y1 + exclPad,
+    }));
+    exclRects.push({
+      x0: W * WALL_ZONES.ladderBand.gateOps.x0 - exclPad, x1: W * WALL_ZONES.ladderBand.br.x1 + exclPad,
+      y0: H * WALL_ZONES.ladderBand.y0 - exclPad, y1: H * WALL_ZONES.ladderBand.y1 + exclPad,
+    });
+    const pushOutOfRect = (s, r) => {
+      if (s.x < r.x0 || s.x > r.x1 || s.y < r.y0 || s.y > r.y1) return;
+      const dl = s.x - r.x0, dr = r.x1 - s.x, dt = s.y - r.y0, db = r.y1 - s.y;
+      const m = Math.min(dl, dr, dt, db);
+      if (m === dl) s.x = r.x0 - 1;
+      else if (m === dr) s.x = r.x1 + 1;
+      else if (m === dt) s.y = r.y0 - 1;
+      else s.y = r.y1 + 1;
+    };
     candRelaxIds.forEach((id) => {
       const s = screen[id];
       s.x = Math.max(8, Math.min(W * 0.97, s.x));
-      s.y = Math.max(20, Math.min(H * 0.435, s.y));
+      s.y = Math.max(20, Math.min(H * WALL_ZONES.signalClamp, s.y));
+      exclRects.forEach((r) => pushOutOfRect(s, r));
     });
     // watch (G4 pre-entry probes) ride NEXT TO their ticker inside the
     // constellation ("전략이랑 프로브랑 같이").
@@ -279,7 +356,7 @@
       // full-width follow (Jin 2026-07-11): the 0.60W clamp piled every
       // right-side watch chip onto one exact x — track the ticker instead.
       const x = Math.min(W * 0.97, base ? base.x : W * (0.22 + r() * 0.38));
-      screen[n.id] = { x, y: H * 0.445 + (r() - 0.5) * H * 0.02 };
+      screen[n.id] = { x, y: H * WALL_ZONES.watchRow + (r() - 0.5) * H * 0.02 };
       if (base) {
         // short drop-line ticker -> its watch entry (the "선발" visual)
         addWatchDrop.push([mkt.id, n.id]);
@@ -311,13 +388,35 @@
       screen[n.id] = { x: gG6.x + Math.cos(ang) * 84, y: gG6.y + Math.sin(ang) * 58 };
     });
     jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
-    jitteredBand(byCluster.exit_tally || [], gG7.x - 140, gG7.x + 60, gG7.y + 125, gG7.y + 175, ':exittally', 0.7);
+    // exit_tally placement SKIPPED (Jin 2026-07-11 console v2 M2): the 6
+    // exit-reason tally nodes still exist on the graph (server shape
+    // unchanged, count binding intact) but no longer get a screen position —
+    // their count now reads through the EXIT FSM strip
+    // (wall_console_readouts.js drawExitFsm) instead of a jittered dust
+    // cluster. Every downstream reader (buildEdges, refreshNodeState, the
+    // color/bob pass below) already guards on `if (!screen[id]) return`, so
+    // this degrades cleanly — no dangling wires, no undefined draws.
 
+    // Register column (Jin 2026-07-11 console v2 M2, unresolved friction #2):
+    // the g8 satellite cloud (learners/AI judges/session·liq·crisis axes/
+    // gate-decision tallies/health) used to park in a random ring around g8
+    // — it now reads as a fixed right-edge instrument register (WALL_ZONES.
+    // registerRect), same node ids/data (fingerprint-stable, no rewiring),
+    // coordinates only. wall_console_readouts.js's drawRegister() renders the
+    // name/value/delta text for each row; no orbit, no rotation.
     const meta = [].concat(byCluster.action || [], byCluster.obs || [], byCluster.orbit || [], byCluster.axis || []);
-    meta.forEach((node) => {
-      const r = rngFor(node.id + ':meta');
-      const ang = r() * Math.PI * 2, rad = 60 + r() * 95;
-      screen[node.id] = { x: gG8.x + Math.cos(ang) * rad * 1.15, y: gG8.y + Math.sin(ang) * rad * 0.62 - 10 };
+    const regZ = WALL_ZONES.registerRect;
+    // Dot sits at the column's LEFT edge (not center) — the registerRect is
+    // only ~0.026W wide, too narrow for BOTH a centered dot and its
+    // name/value text without the text visually crossing the dot (round-1
+    // self-critique: text right-aligned to x1 with a centered dot behind it
+    // stamped straight through the marker). Text (readouts.js drawRegister)
+    // reads LEFT-aligned starting just right of this dot instead.
+    const regX = W * regZ.x0 + 3;
+    const regTop = H * regZ.y0, regBottom = H * regZ.y1;
+    const regPitch = Math.min(13, (regBottom - regTop) / Math.max(1, meta.length));
+    meta.forEach((node, j) => {
+      screen[node.id] = { x: regX, y: regTop + (j + 0.5) * regPitch };
     });
 
     livingIds = [];
@@ -508,6 +607,7 @@
     const r = rngFor(nodeId + ':park:' + gi);
     const ang = r() * Math.PI * 2, rad = 30 + r() * 22;
     const cur = migratePos(m, s);
+    pushAfterglow(m.fx, m.fy, cur.x, cur.y, nodeId);
     m.fx = cur.x; m.fy = cur.y;
     m.tx = gs.x + Math.cos(ang) * rad;
     m.ty = gs.y + Math.sin(ang) * rad;
@@ -521,6 +621,7 @@
     const s = screen[nodeId];
     if (!m || !s) return;
     const cur = migratePos(m, s);
+    pushAfterglow(m.fx, m.fy, cur.x, cur.y, nodeId);
     migrations.set(nodeId, {
       fx: cur.x, fy: cur.y, tx: s.x, ty: s.y,
       t: 0, dur: 1.2, phase: 'return', lastMs: performance.now(),
@@ -822,9 +923,10 @@
   // Returns null (not a partial list) unless EVERY hop resolves, so callers
   // never render a comet that silently skips a missing hop. `reversed` marks
   // segments only found under the opposite cache key (fromId/toId swapped —
-  // e.g. exit_tally nodes are wired tally->g7, but an exit comet travels
-  // g7->tally) so the renderer samples the bezier at (1-t), not t — without
-  // this a reversed segment would visually TELEPORT to its far end at t=0.
+  // a caller walking an edge the OPPOSITE direction from how buildEdges()
+  // originally wired it) so the renderer samples the bezier at (1-t), not t
+  // — without this a reversed segment would visually TELEPORT to its far
+  // end at t=0.
   function pathEdges(ids) {
     const es = [];
     for (let i = 0; i < ids.length - 1; i++) {
@@ -892,29 +994,49 @@
       if (s.isCand) return; // living layer — drawn per-frame with drift
       drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
     });
-    // Regime/strategy/probe/runner labels — the lifecycle braid routes
-    // through these tiny nodes; unlabeled they read as a mystery knot (Jin
-    // 2026-07-10). Jarvis callout leader lines (feat/jarvis-language): a
-    // short one-bend hairline elbow replaces the flush-under label, with a
-    // stable per-id left/right alternation so neighbours don't collide.
-    staticCtx.font = '600 8px JetBrains Mono, monospace';
+    // Regime/strategy/probe labels — the lifecycle braid routes through
+    // these tiny nodes; unlabeled they read as a mystery knot (Jin
+    // 2026-07-10). ('orbit' dropped from this pass 2026-07-11 console v2 —
+    // those nodes now live in the fixed register column and get their
+    // name/value/delta text drawn there instead; a second leader-label here
+    // would double-stamp the same node.) Jarvis callout leader lines
+    // (feat/jarvis-language): a short one-bend hairline elbow. Lane
+    // assignment (Jin 2026-07-11 console v2, unresolved friction #1): the
+    // id-hash side/drop coin-flip below is replaced by
+    // PolarisConsoleLanes.place() — a measured, collision-aware greedy
+    // placer — so two nearby labels (e.g. the OKX strategy block vs a g6/g8
+    // satellite label) can no longer land on the exact same slot by chance.
+    const LABEL_FONT = '600 8px JetBrains Mono, monospace';
+    staticCtx.font = LABEL_FONT;
+    const labelItems = [];
     allNodes.forEach((node) => {
       const s = screen[node.id];
       if (!s) return;
-      const side = (hashStr(node.id) & 1) ? 1 : -1;
-      // two-row stagger (Jin 2026-07-11 "너무 과밀집"): neighbouring labels
-      // alternate between a near and a far callout row instead of piling
-      // into one dense text band.
-      const drop = (hashStr(node.id) & 2) ? 9 : 0;
       if (node.cluster === 'strat') {
-        drawLeaderLabel(staticCtx, s.x, s.y, String(node.label || '').slice(0, 16).toLowerCase(),
-          s.color || '#8a94b0', node.state === 'dormant' ? 0.22 : 0.7, side, drop);
+        labelItems.push({
+          id: node.id, x: s.x, y: s.y, cluster: 'strat',
+          text: String(node.label || '').slice(0, 16).toLowerCase(),
+          color: s.color || '#8a94b0', alpha: node.state === 'dormant' ? 0.22 : 0.7,
+        });
         return;
       }
-      if (node.cluster !== 'reg' && node.cluster !== 'probe' && node.cluster !== 'orbit') return;
-      // orbit(러너/AI 위성) 라벨은 첫 세그먼트만 (session_mult:... → session_mult)
-      const lbl = String(node.label || '').replace('regime_', '').split(':')[0].toLowerCase();
-      drawLeaderLabel(staticCtx, s.x, s.y, lbl, '#8a94b0', node.state === 'dormant' ? 0.3 : 0.75, side, drop);
+      if (node.cluster !== 'reg' && node.cluster !== 'probe') return;
+      labelItems.push({
+        id: node.id, x: s.x, y: s.y, cluster: node.cluster,
+        text: String(node.label || '').replace('regime_', '').split(':')[0].toLowerCase(),
+        color: '#8a94b0', alpha: node.state === 'dormant' ? 0.3 : 0.75,
+      });
+    });
+    const lanes = window.PolarisConsoleLanes;
+    const laneOf = lanes ? lanes.place(labelItems, { font: LABEL_FONT }) : null;
+    labelItems.forEach((it) => {
+      const s = screen[it.id];
+      if (!s) return;
+      const lane = laneOf && laneOf.get(it.id);
+      const side = lane ? lane.side : ((hashStr(it.id) & 1) ? 1 : -1);
+      const drop = lane ? lane.drop : ((hashStr(it.id) & 2) ? 9 : 0);
+      const alpha = lane && lane.dimmed ? it.alpha * 0.35 : it.alpha;
+      drawLeaderLabel(staticCtx, s.x, s.y, it.text, it.color, alpha, side, drop);
     });
   }
   // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback
@@ -953,9 +1075,14 @@
       const total = Math.min(6, n.max_open); // 최대 캡 6 = 레지스트리 실최대 (리뷰 LOW)
       const open = Math.min(total, n.open_n || 0);
       const col = venueColorOf(n.exchange) || s.color;
+      // pip row rides the SAME bob offset as its owning strategy dot (Jin
+      // 2026-07-11 console v2) so it stays visually attached instead of
+      // floating fixed while the anchor breathes underneath it.
+      const pbx = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
+      const pby = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
       for (let p = 0; p < total; p++) {
-        const px = s.x + (p - (total - 1) / 2) * 5;
-        drawDot(ctx, px, s.y - (s.r + 5.5), 1.15, p < open ? col : '#8a94b0', p < open ? 0.9 : 0.2, 0);
+        const px = pbx + (p - (total - 1) / 2) * 5;
+        drawDot(ctx, px, pby - (s.r + 5.5), 1.15, p < open ? col : '#8a94b0', p < open ? 0.9 : 0.2, 0);
       }
     });
     // LIVE interaction wires — brighter than base cloth, fade with age,
@@ -1066,7 +1193,17 @@
       drawDot(ctx, s.x, s.y, r * 1.9, s.color, fireT * 0.22, 0);
       drawDot(ctx, s.x, s.y, r, s.color, alpha, 8 + fireT * 10);
     });
+    // Journey afterglow — completed migration hops fade 2s, forced
+    // source-over (never additive-stacks toward white).
     ctx.globalCompositeOperation = 'source-over';
+    for (let i = afterglow.length - 1; i >= 0; i--) {
+      const g = afterglow[i];
+      const age = now - g.born;
+      if (age > AFTERGLOW_FADE_MS) { afterglow.splice(i, 1); continue; }
+      const a = 0.12 * (1 - age / AFTERGLOW_FADE_MS);
+      ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2);
+      ctx.strokeStyle = rgba(g.color, a); ctx.lineWidth = 0.8; ctx.stroke();
+    }
   }
 
   window.PolarisSpineField = {
@@ -1074,11 +1211,13 @@
     migrateTicker, migrateHome, venueColorOf, touchWire, setProbeLinks,
     screenOf: (id) => screen[id],
     migrationOf: (id) => migrations.get(id),
-    markFire, pathEdges, rgba, drawDot, bezierPoint,
+    markFire, pathEdges, rgba, drawDot, bezierPoint, breath,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,
     findNode: (pred) => allNodes.find(pred),
     nodeById: (id) => nodeById[id],
     nodesOf: (cluster) => allNodes.filter((n) => n.cluster === cluster),
+    sizeOf: () => ({ W, H }),
+    WALL_ZONES,
   };
 })();

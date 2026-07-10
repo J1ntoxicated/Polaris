@@ -259,16 +259,23 @@
      Synaptic Spine engine: wall_spine_field.js (layout/edges/whisper-mesh/
      static pre-render, no canvas of its own) -> wall_spine_deco.js (Jarvis
      decoration layer — strategy score_F reticle / watch bracket chip /
-     engineering graticule, feat/jarvis-language) -> wall_spine.js (canvas/
-     rAF owner, gate cores, comets, public window.PolarisSpine API) ->
-     wall_spine_hud.js (the only module doing network I/O — graph.json/
-     flow_stats polls + SSE dispatch, drives PolarisSpine + the DOM HUD). -->
+     engineering graticule) -> wall_console_lanes.js (console v2 — measured
+     collision-aware label/chip lane placer) -> wall_console_readouts.js
+     (console v2 — corner/BAY/ladder readout panels, reads WALL_ZONES/
+     nodesOf/screenOf off the field layer) -> wall_spine.js (canvas/rAF
+     owner, gate cores, comets, public window.PolarisSpine API — also owns
+     the console v2 setConsole/setVerdicts/setFlowSummary/markGatePulse
+     state) -> wall_spine_hud.js (the only module doing network I/O —
+     graph.json/flow_stats polls + SSE dispatch, drives PolarisSpine + the
+     DOM HUD). -->
 <script src="static/events_bus.js?v=1"></script>
 <script src="static/flow_classes.js?v=1"></script>
-<script src="static/wall_spine_field.js?v=39_console2"></script>
-<script src="static/wall_spine_deco.js?v=2_console"></script>
-<script src="static/wall_spine.js?v=10_jarvis"></script>
-<script src="static/wall_spine_hud.js?v=3_jarvis"></script>
+<script src="static/wall_spine_field.js?v=40_consolev2"></script>
+<script src="static/wall_spine_deco.js?v=3_consolev2"></script>
+<script src="static/wall_console_lanes.js?v=1_consolev2"></script>
+<script src="static/wall_console_readouts.js?v=4_final"></script>
+<script src="static/wall_spine.js?v=11_consolev2"></script>
+<script src="static/wall_spine_hud.js?v=4_consolev2"></script>
 <script src="static/wall_side.js?v=5_summary"></script>
 <script>
   // The spine canvas fits to canvas clientWidth/Height; after layout settles,

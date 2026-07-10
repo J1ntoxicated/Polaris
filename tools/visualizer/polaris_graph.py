@@ -31,6 +31,7 @@ at least a structural placeholder so the rings always render.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import os
@@ -39,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.scripts.dashboard.snapshot import collect_snapshot
 from polaris.strategies import STRATEGY_REGISTRY
@@ -1287,6 +1289,181 @@ def _galaxy_activity(snap: Any) -> list[dict[str, Any]]:
     return out
 
 
+# ── /flow console v2 (Jin 2026-07-11 "제대로 하자") ──────────────────────────
+# gate_flow_1h is the ONLY net-new SQL this block issues — everything else is a
+# zero-cost field copy off the already-computed collect_snapshot() result. A
+# module-level 5s cache (independent of the 1s graph-refresh cadence) keeps the
+# read to 1 query/5s instead of 1/1s (idx_gate_events_dash covers it either way,
+# but there is no reason to pay it 5x as often as it can possibly change
+# anything a human is reading). Read-only; never gates/sizes/throttles a trade.
+_gate_flow_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
+_GATE_FLOW_TTL = 5.0
+
+
+def _query_gate_flow_1h(db_path: Path) -> dict[int, int]:
+    now = time.time()
+    if now - _gate_flow_cache["ts"] >= _GATE_FLOW_TTL:
+        rows: list[Any] = []
+        if db_path.exists():
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                rows = conn.execute(
+                    "SELECT gate_id, COUNT(*) AS n FROM gate_events "
+                    "WHERE created_ts >= ? GROUP BY gate_id",
+                    (int(time.time()) - 3600,),
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+            finally:
+                conn.close()
+        _gate_flow_cache["ts"] = now
+        _gate_flow_cache["rows"] = rows
+    return {int(gid): int(n or 0) for gid, n in _gate_flow_cache["rows"]}
+
+
+def _ramp_cells(db_path: Path, top: bool) -> list[dict[str, Any]]:
+    """Cell-ledger RAMP fallback — real rows, honestly labelled.
+
+    The ledger's canonical source is snap.cell_top/bottom (mature cells,
+    n_eff>=20). Early in a reset cycle NOTHING is mature (live max n_eff ~17)
+    and the flagship panel rendered headers-only. Rather than an empty
+    showcase, surface the actual ramp leaders straight from cell_matrix_p0
+    with ramp=True so the client dims them + tags RAMP. No fabrication: same
+    real rows the maturity gate is accumulating, mult unknown -> None ("—").
+    """
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT exchange, strategy, ticker, regime, n_eff, score "
+            "FROM cell_matrix_p0 ORDER BY score " + ("DESC" if top else "ASC") + ", n_eff DESC LIMIT 4"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    return [
+        {"exchange": ex, "strategy": st, "ticker": tk, "regime": rg,
+         "n_eff": round(float(ne or 0.0), 2), "score": round(float(sc or 0.0), 3),
+         "mult": None, "ramp": True}
+        for ex, st, tk, rg, ne, sc in rows
+    ]
+
+
+def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
+    """Console v2 read-model — powers ``static/wall_console_readouts.js``'s
+    corner panels (equity/AI/cell-ledger/exit-FSM/register/regime-matrix).
+
+    Pure field-copy off ``snap`` (collect_snapshot already computed every
+    number here) plus the one cached ``gate_flow_1h`` query above. None-guarded
+    throughout: a missing/older-schema field degrades to a zero/empty reading
+    the client renders as "—", never a crash or a fabricated number.
+    """
+    since_reset = snap.virtual_since_reset
+    # VIRTUAL ACCOUNT mode (Jin 2026-07-07 mandate) — same branch wall_spine_
+    # hud.js's renderEquity already applies to the bot-log strip's equity
+    # ticker (equity_now is a real-venue reconciliation that reads stale/wrong
+    # once virtual mode is on, the CLAUDE.md-mandated default). The console
+    # crown/gauges/sparkline read this same core block, so they must branch
+    # identically or the flagship EQUITY number contradicts the strip sitting
+    # right below it on the same screen (rework r2 fix).
+    virtual_equity_usd = sum((s.virtual_equity_usd for s in snap.streams), 0.0)
+    core = {
+        "equity_now": round(float(snap.equity_now), 2),
+        "peak_equity": round(float(snap.peak_equity), 2),
+        "starting_capital": round(float(snap.starting_capital), 2),
+        "real_fee_net": round(float(snap.equity_now_real_fee_net), 2),
+        "virtual_since_reset": dataclasses.asdict(since_reset) if since_reset else None,
+        "virtual_account_enabled": bool(snap.virtual_account_enabled),
+        "virtual_equity_usd": round(float(virtual_equity_usd), 2),
+        "virtual_daily_pnl_usd": round(float(snap.virtual_daily_pnl_usd), 2),
+    }
+
+    now_s = int(snap.ts_now or time.time())
+    sessions = {v: resolve_venue_session(v, now_s) for v in ("okx", "capital", "alpaca")}
+
+    streams = [
+        {
+            "venue": _short_venue(s.venue),
+            "marks_label": s.marks_label,
+            "age_sec": int(s.marks_age_sec),
+            "exposed": round(float(s.exposed_usd), 2),
+            "upnl": round(float(s.upnl_usd), 2),
+            "equity_usd": round(float(s.virtual_equity_usd), 2),
+            "drawdown_pct": round(float(s.drawdown_pct), 2),
+        }
+        for s in snap.streams
+    ]
+
+    gcalls = sum(int(g.calls_per_h) for g in snap.gpt_stats)
+    gok_num = sum(g.ok_pct * g.calls_per_h for g in snap.gpt_stats)
+    gpt = {
+        "calls_per_h": gcalls,
+        "ok_pct": round(gok_num / gcalls, 1) if gcalls else 100.0,
+        "err_n": sum(int(g.err_n) for g in snap.gpt_stats),
+        "cost_per_h": round(sum(g.cost_per_h_usd for g in snap.gpt_stats), 4),
+    }
+
+    def _cell(row: Any) -> dict[str, Any]:
+        return {
+            "exchange": row.exchange, "strategy": row.strategy, "ticker": row.ticker,
+            "regime": row.regime, "n_eff": round(float(row.n_eff), 2),
+            "score": round(float(row.score), 3), "mult": round(float(row.mult), 3),
+        }
+
+    exit_tally: dict[str, int] = {}
+    for t in snap.recent_trades:
+        r = t.exit_reason or "EXIT"
+        exit_tally[r] = exit_tally.get(r, 0) + 1
+
+    exit_block = {
+        "fsm_states": dict(snap.exit_surface.fsm_states),
+        "g6_decisions": dict(snap.exit_surface.g6_decisions),
+        "g7_decisions": dict(snap.exit_surface.g7_decisions),
+        "tally": exit_tally,
+    }
+
+    # regimes: aggregated to (venue x asset-class) — snap.regime_states is
+    # PER-SYMBOL (``group_id`` = "equity:AAPL" / "crypto:AAVE" / ...; ~1200+
+    # rows live on a real DB, one per Alpaca-tracked ticker alone), so a raw
+    # per-row dump would both bloat the 1s graph.json payload and make the
+    # readouts' venue×asset-class grid try to draw a 1000+-column strip
+    # (build round-1 self-critique screenshot caught this — the raw grid
+    # collided with the existing 4 regime satellite nodes AND would have run
+    # off-screen). Collapsed here into the same small asset-class buckets
+    # the L4 cell matrix already groups by (crypto/forex/indices/commodity/
+    # equity — see _asset_group_for), one row per (venue, class): mean
+    # confidence + the class's most-common regime label.
+    from collections import Counter as _Counter
+    from collections import defaultdict as _defaultdict
+
+    reg_groups: dict[tuple[str, str], list[Any]] = _defaultdict(list)
+    for r in snap.regime_states:
+        cls = str(r.group_id or "").split(":", 1)[0] or "other"
+        reg_groups[(_short_venue(r.venue), cls)].append(r)
+    regimes = [
+        {
+            "venue": v, "group_id": cls,
+            "regime": _Counter(str(x.regime or "chop") for x in rows).most_common(1)[0][0],
+            "confidence": round(sum(float(x.confidence or 0.0) for x in rows) / len(rows), 3),
+            "n": len(rows),
+        }
+        for (v, cls), rows in sorted(reg_groups.items())
+    ]
+
+    return {
+        "core": core,
+        "sessions": sessions,
+        "streams": streams,
+        "gpt": gpt,
+        "cell_top": [_cell(r) for r in snap.cell_top] or _ramp_cells(db_path, top=True),
+        "cell_bottom": [_cell(r) for r in snap.cell_bottom] or _ramp_cells(db_path, top=False),
+        "exit": exit_block,
+        "regimes": regimes,
+        "gate_flow_1h": _query_gate_flow_1h(db_path),
+    }
+
+
 def build_graph(
     db_path: str | Path = "data/polaris_live.sqlite",
     snapshot: Any = None,
@@ -1449,7 +1626,7 @@ def build_graph(
         "tail_aggregate": mkt_tail,
         "trade_chains": trade_chains,
         "lifecycle_paths": lifecycle_paths,
-        "exchange_pnl": [],
+        "console": _console_block(snap, path),
         "gate_funnel": _gate_funnel(snap),
         "galaxy_activity": _galaxy_activity(snap),
         "kills": kills,

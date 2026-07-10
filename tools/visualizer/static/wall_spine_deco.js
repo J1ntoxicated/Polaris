@@ -26,7 +26,12 @@
   /* ===== (7) engineering graticule — faint static horizontal rule lines,
    * anchored to the gate spine's mean Y, alpha <=0.04. Baked into the static
    * layer once per bake (wall_spine.js's bakeStatic()) — never redrawn per
-   * frame, camera-invariant, not a radial effect (plain horizontal rules). */
+   * frame, camera-invariant, not a radial effect (plain horizontal rules).
+   * Console v2 (Jin 2026-07-11): zone dividers now read off
+   * PolarisSpineField.WALL_ZONES instead of carrying their own hardcoded
+   * ratios — the old 0.478/0.605 values had already drifted out of sync
+   * with the real rail(0.505H then)/gate(0.655H) y this file doesn't own;
+   * WALL_ZONES forecloses that class of drift for good. */
   function renderGraticule(ctx, w, h, gateScreenArr) {
     const gy = (gateScreenArr && gateScreenArr.length)
       ? gateScreenArr.reduce((a, g) => a + g.y, 0) / gateScreenArr.length
@@ -53,11 +58,72 @@
       ctx.textAlign = 'left';
       ctx.fillText(title, w * 0.015 + 6, y - 4);
     };
-    zone(h * 0.052, 'SIGNAL FIELD');
-    zone(h * 0.425, 'WATCHLIST');
-    zone(h * 0.478, 'STRATEGY RAIL');
-    zone(h * 0.605, 'GATE BUS · EXECUTION · LEARNING');
-    zone(h * 0.745, 'REGIME CONTEXT');
+    const z = field.WALL_ZONES || {};
+    zone(h * (z.signalTop != null ? z.signalTop : 0.165), 'SIGNAL FIELD');
+    zone(h * (z.watchDivider != null ? z.watchDivider : 0.438), 'WATCHLIST');
+    zone(h * ((z.railY != null ? z.railY : 0.492) - 0.014), 'STRATEGY RAIL');
+    zone(h * ((z.gateBusY != null ? z.gateBusY : 0.655) - 0.05), 'GATE BUS · EXECUTION · LEARNING');
+    zone(h * ((z.regimeY != null ? z.regimeY : 0.775) - 0.03), 'REGIME CONTEXT');
+  }
+
+  /* ===== drawArcGauge — shared hairline arc gauge (Jin 2026-07-11 console
+   * v2, wall_console_blueprint.md §3) ===== consumed by
+   * wall_console_readouts.js's BAY equity/PnL/firing/conversion gauges. A
+   * NEW standalone utility (not a refactor of the existing strategy-reticle
+   * score_F ring below, which keeps its own bespoke breathing — touching a
+   * working per-node animation for a pure code-sharing refactor risks
+   * exactly the "느낌 회귀" the build spec elsewhere explicitly forbids for
+   * zero visual gain). Base ring + steel α0.13 (always source-over), value
+   * arc in the given color (source-over), ONE additive tip mote (the single
+   * contract-approved additive exception) + optional label/value text. */
+  function drawArcGauge(ctx, cx, cy, r, pct, color, label, value) {
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(138,148,176,0.13)'; ctx.lineWidth = 1.1; ctx.stroke();
+    const clamped = Math.max(0, Math.min(1, pct || 0));
+    if (clamped > 0) {
+      ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + clamped * Math.PI * 2);
+      ctx.strokeStyle = field.rgba(color, 0.85); ctx.lineWidth = 1.7; ctx.stroke();
+      const ta = -Math.PI / 2 + clamped * Math.PI * 2;
+      ctx.globalCompositeOperation = 'lighter';
+      field.drawDot(ctx, cx + Math.cos(ta) * r, cy + Math.sin(ta) * r, 1.6, color, 0.85, 5);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    if (label) {
+      ctx.font = '600 6.5px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(138,148,176,0.55)';
+      ctx.fillText(label, cx, cy + r + 10);
+    }
+    if (value != null) {
+      ctx.font = '700 9px ui-monospace, Menlo, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(223,232,255,0.92)';
+      ctx.fillText(value, cx, cy + 3);
+    }
+  }
+
+  /* ===== drawZoneScan — SIGNAL FIELD-only scan hairline (Jin 2026-07-11
+   * console v2, "효시 부족" fix): a slow ~9s top->bottom 1px sweep confined
+   * INSIDE the signal field band (WALL_ZONES.signalTop..signalClamp) — the
+   * zone dividers themselves are the boundary, so this is element-local, not
+   * a full-screen effect. Zero data shape (no ticks/labels/counts) so it
+   * reads unmistakably as decoration, never as a fabricated reading. */
+  function drawZoneScan(ctx, now) {
+    const sz = field.sizeOf && field.sizeOf();
+    if (!sz || !sz.W || !sz.H) return;
+    const { W, H } = sz;
+    const z = field.WALL_ZONES || {};
+    const top = H * (z.signalTop != null ? z.signalTop : 0.165);
+    const bot = H * (z.signalClamp != null ? z.signalClamp : 0.425);
+    const period = 9000;
+    const t = (now % period) / period;
+    const y = top + t * (bot - top);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.beginPath();
+    ctx.moveTo(W * 0.015, y); ctx.lineTo(W * 0.985, y);
+    ctx.strokeStyle = 'rgba(150,190,225,0.04)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
   /* ===== (4) strategy asteroid reticle — mini hairline ring (venue color) +
@@ -119,16 +185,45 @@
     ctx.fillText(text, x, y + 0.5);
     ctx.textBaseline = 'alphabetic';
   }
+  // Watch chip row (Jin 2026-07-11 console v2, "TRX/USDG/ALGO 1.9px 중첩"
+  // fix): x-lane placement via PolarisConsoleLanes.placeRow — a minimum-
+  // pitch sweep + relax so adjacent "[SYM]" chips never overlap, demoting
+  // anything that still can't fit into a second row instead of stamping on
+  // top of a neighbour. A hard cap folds any further overflow into one real-
+  // count "+N" tail chip rather than crowding the row indefinitely.
+  const WATCH_CHIP_CAP = 42;
   function drawWatchChips(ctx, now) {
+    const items = [];
+    const byId = {};
     field.nodesOf('watch').forEach((n) => {
       const s = field.screenOf(n.id);
       if (!s) return;
       const p = bobOf(s, now);
       const sym = String(n.ticker || '').split(':').pop().split('-')[0].split('_')[0];
       if (!sym) return;
-      const vc = field.venueColorOf(n.exchange) || s.color || '#8fb0c8';
-      drawBracketChip(ctx, p.x, p.y - 11, sym, vc, n.state === 'dormant' ? 0.3 : 0.6);
+      byId[n.id] = { n, p, sym };
+      items.push({ id: n.id, x: p.x });
     });
+    if (!items.length) return;
+    const visible = items.slice(0, WATCH_CHIP_CAP);
+    const overflowN = items.length - visible.length;
+    const sz = field.sizeOf && field.sizeOf();
+    const wMax = (sz && sz.W) || 2000;
+    const lanes = window.PolarisConsoleLanes;
+    const placed = lanes ? lanes.placeRow(visible, { minPitch: 24, xMin: 4, xMax: wMax - 4, rowGap: 13 }) : null;
+    let lastX = 0, lastY = byId[visible[0].id].p.y;
+    visible.forEach((it) => {
+      const { n, p, sym } = byId[it.id];
+      const lane = placed && placed.get(it.id);
+      const x = lane ? lane.x : p.x;
+      const y = p.y - 11 + (lane ? lane.dy : 0);
+      const vc = field.venueColorOf(n.exchange) || '#8fb0c8';
+      drawBracketChip(ctx, x, y, sym, vc, n.state === 'dormant' ? 0.3 : 0.6);
+      lastX = x; lastY = y;
+    });
+    if (overflowN > 0) {
+      drawBracketChip(ctx, Math.min(wMax - 20, lastX + 30), lastY, '+' + overflowN, '#8a94b0', 0.55);
+    }
   }
 
   function drawDecor(ctx, now) {
@@ -136,5 +231,5 @@
     drawWatchChips(ctx, now);
   }
 
-  window.PolarisSpineDeco = { renderGraticule, setStrategyGauges, drawDecor };
+  window.PolarisSpineDeco = { renderGraticule, setStrategyGauges, drawDecor, drawArcGauge, drawZoneScan };
 })();

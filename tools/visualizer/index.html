@@ -42,12 +42,11 @@
      .board-shell = a 3-row flex column: slim pagenav strip, #board
      (flex:1, overrides board.js's own injected `height:100vh` via higher
      selector specificity — board.js's CSS still owns everything ELSE about
-     #board's look, untouched), and the bot log strip (moved down from the
-     old 30%-left column, same botlog-pane markup/CSS/JS — board.js already
-     polls #botlog-body unconditionally, see board.js init()). */
+     #board's look, untouched). Bot log strip removed
+     (Jin 2026-07-11 "보드에는 로그 띄우지 말자 포지션을 더 보여줘" — the raw
+     log lives on /flow's BOT LOG; board.js's botlog poll null-guards). */
   .board-shell { display: flex; flex-direction: column; width: 100vw; height: 100vh; overflow: hidden; }
   .board-shell #board { flex: 1 1 auto; min-height: 0; height: auto; }
-  .board-shell .botlog-pane { flex: 0 0 90px; height: 90px; }
 
   .pagenav-strip {
     flex: 0 0 auto;
@@ -61,34 +60,8 @@
   .pagenav-strip a.active { color: var(--polaris-blue); }
   .pagenav-strip a:hover { color: var(--p-wht); }
 
-  /* Bot log pane (now a fixed-height strip under the board — see .board-shell) */
-  .botlog-pane {
-    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-    border-top: 1px solid var(--ghost);
-    background: rgba(5,7,11,0.92);
-    font-family: var(--font-mono);
   }
-  .botlog-pane .bl-head {
-    flex: 0 0 auto;
-    display: flex; align-items: center; gap: 6px;
-    padding: 3px 7px; border-bottom: 1px solid var(--ghost);
-    color: var(--polaris-blue); font-size: 8px; font-weight: 700;
-    letter-spacing: 0.14em; text-transform: uppercase;
-  }
-  .botlog-pane .bl-head .live { color: var(--p-grn); font-size: 7px; letter-spacing: 0.08em; }
-  .botlog-pane .bl-head .live::before { content: '●'; margin-right: 3px; }
   /* 30% column is narrow → smaller font + horizontal scroll fallback so log stays readable */
-  .botlog-pane .bl-body {
-    flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: auto;
-    padding: 3px 7px 5px; font-size: 9px; line-height: 1.3;
-  }
-  .botlog-pane .bl-body::-webkit-scrollbar { width: 5px; height: 5px; }
-  .botlog-pane .bl-body::-webkit-scrollbar-thumb { background: var(--ghost); }
-  .botlog-pane .bl-line { white-space: pre-wrap; word-break: break-word; color: var(--p-dim); padding: 0.5px 0; }
-  .botlog-pane .bl-line .ts { color: #6c6c6c; }
-  .botlog-pane .bl-err  { color: var(--p-red); }
-  .botlog-pane .bl-warn { color: var(--p-ylw); }
-  .botlog-pane .bl-hi   { color: var(--p-cyn); font-weight: 700; }
   /* board.js owns #board styling (full-width work board) */
 
   /* legacy — superseded by .side-rail */
@@ -208,13 +181,6 @@
 
   <!-- Full-width analytics board (native HTML/CSS, rendered by board.js). -->
   <div id="board"></div>
-
-  <!-- Bot log strip (moved down from the old 30%-left globe column; same
-       markup/CSS — board.js already polls #botlog-body unconditionally). -->
-  <div class="botlog-pane">
-    <div class="bl-head"><span>BOT LOG</span><span class="live">live</span></div>
-    <div class="bl-body" id="botlog-body"></div>
-  </div>
 </div>
 
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST

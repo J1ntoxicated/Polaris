@@ -139,6 +139,13 @@ class ProdLoopState:
     # blocked. Overnight holds are free; there is no P&L halt, no entry veto.
     pdt_daytrade_count: int = 0
     equity_pdt_rank_downs: int = 0
+    # §0c — symbol-local loss-reentry pacing (DINO -374 repeat-reentry lesson).
+    # Counts NEW entries HELD because ``loss_cooldown_bars`` (per-strategy,
+    # default 0 -> never touched) had not yet elapsed since that EXACT
+    # (venue, symbol, strategy_id)'s most recent LOSING close. Telemetry only —
+    # a held position is never touched (flow_not_block); every other symbol
+    # and every other strategy on the same symbol is unaffected.
+    loss_cooldown_entry_skips: int = 0
     # Observability only (logging-observability 2026-05-31): the LAST observed
     # us_equity_cal session-open state, keyed per venue, used SOLELY to emit a
     # one-shot INFO when the equity trading session flips open↔closed (RTH

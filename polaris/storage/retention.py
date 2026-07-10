@@ -73,10 +73,12 @@ class RetentionRule:
 #   disk-growth driver and need only a few days of decision lookback — a single
 #   1200d cutoff over the WHOLE table would retain ~3.3y of 1m rows (Jin's disk
 #   concern). Each interval's window = its consumer lookback
-#   (``_production_bars._ALPACA_LOOKBACK_DAYS``: 1D=330, 1H=45, 15m=8, 5m=4, 1m=2)
+#   (``_production_bars._ALPACA_LOOKBACK_DAYS``: 1D=440, 1H=45, 15m=8, 5m=4, 1m=2)
 #   + margin for the counterfactual sweep (reads 1m at decision_ts+24h +3d grace
 #   ≈ 4d old) and weekend/session gaps. SIGNAL LOOKBACK FULLY PRESERVED:
-#     - 1m/5m/15m → 30d (≫ the ≤8d read + ~4d CF sweep; bounds the dense streams);
+#     - 1m/5m → 30d (≫ the ≤4d read + ~4d CF sweep; bounds the dense streams);
+#     - 15m   → 45d (Alpaca sleeve rework round 3, §1 #5 silent-INERT fix — see
+#       note below the RETENTION_SPEC 15m rule for the derivation);
 #     - 1H        → 90d (≫ the 45d read);
 #     - 1D / 4H   → 1200d (~3.3y): the deep one-shot OKX /history-candles backfill
 #       (the daily/4H swing canvas for future learning / indicator depth) is NOT
@@ -112,15 +114,33 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
                   "1m intraday: 2d read + ~4d CF sweep + margin", bar_interval="1m"),
     RetentionRule("bars", "ts", 30 * _DAY,
                   "5m intraday: 4d read + margin", bar_interval="5m"),
-    RetentionRule("bars", "ts", 30 * _DAY,
-                  "15m intraday: 8d read + margin", bar_interval="15m"),
+    # 15m raised 30d -> 45d (Alpaca sleeve rework round 3, §1 #5 silent-INERT
+    # fix): equity_opening_range_breakout needs WARMUP_BARS=560 REAL 15m bars
+    # (~21.5 RTH sessions x 26 bars/session) to ever emit. A 30d retention
+    # window caps the *sustainable* accumulation ceiling at ~20-22 US trading
+    # days (30 calendar days x ~0.69 trading-day fraction) x 26 bars/session =
+    # ~520-572 bars — straddling 560, and any single holiday in the rolling
+    # 30d window drops it BELOW 560 -> the strategy could sit permanently
+    # INERT even after full incremental accumulation, regardless of the 400 ->
+    # 600 15m READ-canvas widen (that widen only raises the query LIMIT; it
+    # does nothing if retention has already deleted the rows). 45d x ~0.69 x
+    # 26 =~ 807 bars, clearing 560 with ~250-bar / ~9-session margin (absorbs
+    # 2-3 holidays + early closes) while the 15m READ canvas (600, see
+    # ``_production_bars.bar_fetch_limit_for``) still pulls only the most
+    # recent 600 of those for warmup_ok — an additive widen, no existing 15m
+    # consumer (rsi_bb_pullback's ~400-bar need, the 8d Alpaca fetch lookback)
+    # narrows.
+    RetentionRule("bars", "ts", 45 * _DAY,
+                  "15m intraday: 560-bar ORB warmup ceiling fix "
+                  "(21.5 sessions x 26 + holiday margin) > prior 8d read",
+                  bar_interval="15m"),
     RetentionRule("bars", "ts", 90 * _DAY,
                   "1H: 45d read + margin", bar_interval="1H"),
     RetentionRule("bars", "ts", 1200 * _DAY,
                   "4H swing canvas: deep ③ OKX-native backfill (~3.3y)",
                   bar_interval="4H"),
     RetentionRule("bars", "ts", 1200 * _DAY,
-                  "1D canvas: 330d + MA200 warmup + deep ③ backfill (~3.3y)",
+                  "1D canvas: 440d + equity_xsect_52w warmup + deep ③ backfill (~3.3y)",
                   bar_interval="1D"),
     # Catch-all: any interval NOT enumerated above keeps the deep 1200d window
     # (never silently over-pruned). bar_interval=None → whole-table; idempotent

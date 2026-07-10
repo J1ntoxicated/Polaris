@@ -18,6 +18,14 @@ P2 — equity_52wk_high_breakout needs 253 daily bars (HIGH_LOOKBACK 252 + 1) fo
 253 → ``warmup_ok`` was ALWAYS False (no-emit across all equity symbols). The 1D
 timeframe now resolves a limit >= 260 (per-timeframe split); all OTHER timeframes
 keep 240 (Alpaca 429 avoidance preserved). HIGH_LOOKBACK / warmup is UNCHANGED.
+
+P3 — equity_xsect_52w_momentum (Alpaca sleeve §1 #2) needs 270 daily bars
+(``WARMUP_BARS``) for ``warmup_ok``. The 1D limit stayed pinned at 260 (only
+raised for the P2 253-bar need) → 260 < 270 permanently capped the canvas below
+warmup regardless of DB depth (silent INERT, the exact 등록≠발화 failure class
+§5 guards against). The 1D limit now resolves >= 270 (300) and the Alpaca
+fallback lookback window (``_ALPACA_LOOKBACK_DAYS['1D']``) widened 330d -> 410d
+so a Yahoo-miss fallback can also supply 270+ real bars.
 """
 
 from __future__ import annotations
@@ -118,6 +126,46 @@ def test_1d_fetch_limit_clears_equity_52wk_warmup() -> None:
     assert bar_fetch_limit_for("1D") >= 260
 
 
+# ---------------------------------------------------------------------------
+# P3 — equity_xsect_52w_momentum (270-bar warmup) reachability
+# ---------------------------------------------------------------------------
+
+
+def test_1d_fetch_limit_clears_equity_xsect_52w_momentum_warmup() -> None:
+    # equity_xsect_52w_momentum needs WARMUP_BARS (270) daily bars for
+    # warmup_ok. 260 (the P2-era 1D limit) permanently capped the canvas
+    # BELOW that — the strategy could never reach warmup regardless of DB
+    # depth (silent INERT). The 1D limit must clear it with margin.
+    from polaris.strategies.equity_xsect_52w_momentum import WARMUP_BARS
+
+    assert bar_fetch_limit_for("1D") >= WARMUP_BARS
+    assert WARMUP_BARS == 270
+
+
+def test_1d_alpaca_lookback_window_covers_equity_xsect_52w_momentum() -> None:
+    # The Alpaca-fallback lookback window (used when Yahoo, the 1D PRIMARY
+    # source, misses) must cover >= 270 trading bars while staying strictly
+    # BELOW the 1D fetch limit (else Alpaca's oldest-``limit``-bars-first
+    # truncation returns a STALE window instead of a recent one). US markets
+    # trade ~252 days/365.25 calendar days ≈ 0.69 trading-days-per-calendar-
+    # day (the same ratio the source comment documents) — apply it to both
+    # bounds with a small safety band around the estimate.
+    from polaris.scripts._production_bars import _ALPACA_LOOKBACK_DAYS
+    from polaris.strategies.equity_xsect_52w_momentum import WARMUP_BARS
+
+    lookback_days = _ALPACA_LOOKBACK_DAYS["1D"]
+    trading_day_ratio = 0.69
+    approx_trading_bars = lookback_days * trading_day_ratio
+    assert approx_trading_bars >= WARMUP_BARS + 10, (
+        "1D Alpaca lookback window too narrow to clear the 270-bar "
+        "equity_xsect_52w_momentum warmup via the fallback path with margin"
+    )
+    assert approx_trading_bars < bar_fetch_limit_for("1D"), (
+        "1D Alpaca lookback window must stay below the fetch limit "
+        "(else Alpaca returns a STALE oldest-limit-bars window, not recent)"
+    )
+
+
 def test_non_1d_timeframes_keep_240_limit() -> None:
     # Intraday timeframes (excluding 15m, which has its own deeper warmup —
     # see test_15m_fetch_limit_clears_rsi_bb_pullback_warmup) keep the 240 cap
@@ -129,9 +177,20 @@ def test_non_1d_timeframes_keep_240_limit() -> None:
 def test_15m_fetch_limit_clears_rsi_bb_pullback_warmup() -> None:
     # rsi_bb_pullback (Jin 2026-07-09, silent-INERT part A) needs 200 REAL bars
     # for ma_200 against a ~50% synthetic-fill 15m canvas — 240 left only ~120
-    # real bars (0/2244 signals). 15m now resolves to 400 (all-modes infra, not
-    # env-gated) so the majority of the universe clears ma_200.
-    assert bar_fetch_limit_for("15m") == 400
+    # real bars (0/2244 signals). 15m now resolves to 600 (raised again for
+    # equity_opening_range_breakout's 560-bar warmup, see the next test) — a
+    # further widen, so the rsi_bb_pullback margin only grows.
+    assert bar_fetch_limit_for("15m") == 600
+
+
+def test_15m_fetch_limit_clears_equity_orb_warmup() -> None:
+    # equity_opening_range_breakout (Alpaca sleeve Wave 1.5, §1 #5) needs 560
+    # REAL 15m bars (20 sessions x 26 bars/session + buffer). 400 permanently
+    # capped the canvas BELOW that — the strategy would never reach warmup_ok
+    # regardless of DB history depth (silent INERT). 600 clears it with margin.
+    from polaris.strategies.equity_opening_range_breakout import WARMUP_BARS
+
+    assert bar_fetch_limit_for("15m") >= WARMUP_BARS
 
 
 def test_unknown_timeframe_defaults_to_240() -> None:

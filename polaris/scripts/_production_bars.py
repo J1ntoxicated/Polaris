@@ -283,14 +283,35 @@ def is_timeframe_due_epoch(timeframe: str, now_epoch: int) -> bool:
 # read depth only, no threshold lowered, no edge changed — REAL rsi_bb stays
 # dispatch-off regardless.
 _DEFAULT_BAR_FETCH_LIMIT = 240
-_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 260, "15m": 400}
+# 15m raised 400 -> 600 (Alpaca sleeve Wave 1.5, §1 #5): equity_opening_range_
+# breakout needs 560 REAL 15m bars (20 sessions x 26 bars/session + buffer) for
+# warmup_ok — 400 permanently capped the canvas BELOW that (silent INERT: the
+# strategy would never reach warmup regardless of how much DB history exists).
+# 600 clears 560 with margin and stays comfortably above rsi_bb_pullback's
+# diluted ~400 need (its own 205-bar warmup against a ~50% synthetic-fill OKX
+# 15m canvas) — a strictly ADDITIVE widen, no existing 15m consumer narrows.
+# NOTE (rework round 3): this 600 READ-canvas limit only bounds the query, not
+# what the DB actually HOLDS — the binding ceiling is the 15m retention
+# window (``polaris.storage.retention.RETENTION_SPEC``, 15m rule), which was
+# still 30d (below the 560 warmup once accounting for RTH-only bars/holidays)
+# until raised to 45d alongside this comment. See that rule's docstring for
+# the full derivation; the two must be read together to confirm #5 reachable.
+# 1D raised 260 -> 320 (Alpaca sleeve rework, §1 #2): equity_xsect_52w_momentum
+# needs 270 REAL 1D bars for warmup_ok — 260 permanently capped the canvas
+# BELOW that (silent INERT: the strategy would never reach warmup regardless of
+# DB depth, the exact 등록≠발화 failure class §5 guards against). 320 clears
+# 270 with margin and stays comfortably above the other 1D strategies' needs
+# (equity_52wk_high_breakout/index_52w_high_momentum/tsmom_12_1_multiasset all
+# 253) — a strictly ADDITIVE widen, no existing 1D consumer narrows.
+_BAR_FETCH_LIMIT_BY_INTERVAL: dict[str, int] = {"1D": 320, "15m": 600}
 
 
 def bar_fetch_limit_for(timeframe: str) -> int:
-    """Per-timeframe bar-fetch/read limit. 1D → 260 (clears the 253 equity_52wk
-    warmup); 15m → 400 (clears the ma_200/200-real-bar rsi_bb_pullback warmup
-    against the ~50% synthetic-fill 15m canvas); every other timeframe → 240
-    (Alpaca 429 avoidance preserved)."""
+    """Per-timeframe bar-fetch/read limit. 1D → 320 (clears the 270-bar
+    equity_xsect_52w_momentum warmup, the deepest 1D need, with margin); 15m →
+    600 (clears the 560-bar equity_opening_range_breakout warmup AND the
+    ma_200/200-real-bar rsi_bb_pullback warmup against the ~50% synthetic-fill
+    15m canvas); every other timeframe → 240 (Alpaca 429 avoidance preserved)."""
     return _BAR_FETCH_LIMIT_BY_INTERVAL.get(timeframe, _DEFAULT_BAR_FETCH_LIMIT)
 
 
@@ -373,11 +394,16 @@ def _alpaca_bar_to_canonical(
 
 
 # Calendar-day lookback per interval. CRITICAL: the window [start, now] must hold
-# FEWER bars than ``limit`` (240) — Alpaca returns the OLDEST ``limit`` bars after
-# ``start`` (ascending), so a window wider than ``limit`` yields STALE bars (e.g.
-# 800d → oldest 240 ending ~1y ago). 1D=330d ≈ 227 trading days: < 240 limit (so
-# ALL are returned, ending at ~now = recent) AND ≥ the equity MA200 (~205) warmup.
-_ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 330, "1H": 45, "15m": 8, "5m": 4, "1m": 2}
+# FEWER bars than the interval's own ``bar_fetch_limit_for`` (1D → 320, all
+# others → 240) — Alpaca returns the OLDEST ``limit`` bars after ``start``
+# (ascending), so a window wider than ``limit`` yields STALE bars (e.g. 800d →
+# oldest 320 ending well over 1y ago). 1D raised 330d -> 440d (Alpaca sleeve
+# rework, §1 #2): ≈303 trading days (US calendar ~0.69 trading-days-per-
+# calendar-day) — < the 320 limit (so ALL are returned, ending at ~now =
+# recent) AND clears the deepest 1D warmup (equity_xsect_52w_momentum, 270;
+# the prior 330d/~227-trading-day window only cleared the ~205-bar equity
+# MA200 need, leaving #2 permanently short) with margin.
+_ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 440, "1H": 45, "15m": 8, "5m": 4, "1m": 2}
 
 
 # Incremental re-fetch overlap (sec). When history exists we lower-bound the
@@ -386,7 +412,7 @@ _ALPACA_LOOKBACK_DAYS: dict[str, int] = {"1D": 330, "1H": 45, "15m": 8, "5m": 4,
 # an in-progress→closed bar update + the weekend gap on 1D). The dominant
 # incremental path is 1D (Alpaca strategies are all daily); ``start`` is
 # day-granular (``%Y-%m-%d``), and ``sort='desc'`` + ``limit`` cap the response,
-# so this stays a small re-pull (a few days of bars), never the full 330d window.
+# so this stays a small re-pull (a few days of bars), never the full 440d window.
 _ALPACA_INCREMENTAL_OVERLAP_SEC = 2 * 86400  # 2 days — covers a weekend gap on 1D
 
 

@@ -29,7 +29,7 @@ from polaris.storage.schema import init_db
 def _open(conn: sqlite3.Connection, *, symbol: str = "BTC-USDT",
           underlying: str = "crypto:BTC", strategy: str = "volume_burst",
           notional: float = 20_000.0, equity: float = 79_000.0,
-          opened_ts: int = 1000) -> None:
+          opened_ts: int = 1000, asset_class: str = "crypto") -> None:
     # A real open always pairs a ``positions`` row (status='open') with the
     # ``position_risk_state`` row in the SAME transaction (see
     # ``_production_pipeline.py``) — ``_read_portfolio_state`` now JOINs on
@@ -54,7 +54,7 @@ def _open(conn: sqlite3.Connection, *, symbol: str = "BTC-USDT",
         underlying_group_id=underlying,
         strategy=strategy,
         track="A",
-        asset_class="crypto",
+        asset_class=asset_class,
         signal_strength=0.8,
         notional_usd=notional,
         equity_usd=equity,
@@ -79,6 +79,50 @@ def test_open_writes_one_row(tmp_path: Path) -> None:
         # BTC underlying → BTC+ETH cluster resolved deterministically.
         assert row[5] == "crypto:BTC+ETH"
         assert row[6] == "A"
+    finally:
+        conn.close()
+
+
+def test_equity_meanrev_strategy_persists_meanrev_cluster(tmp_path: Path) -> None:
+    """2026-07-11 fix: persist must pass strategy_id through to
+    resolve_cluster_id so an equity meanrev-sleeve position (connors_rsi2 /
+    equity_bb_meanrev_15m) is stored as ``equity:meanrev``, matching the
+    sizer's own ``engine.py:878`` resolution — not the ``equity:beta_trend``
+    default every equity position previously fell into regardless of
+    strategy."""
+    conn = init_db(tmp_path / "p.sqlite")
+    try:
+        _open(
+            conn, symbol="AAPL", underlying="equity:AAPL",
+            strategy="connors_rsi2", opened_ts=1000, asset_class="equity",
+        )
+        cluster_id = conn.execute(
+            "SELECT cluster_id FROM position_risk_state WHERE strategy = ?",
+            ("connors_rsi2",),
+        ).fetchone()[0]
+        assert cluster_id == "equity:meanrev"
+    finally:
+        conn.close()
+
+
+def test_equity_beta_trend_strategy_persists_beta_trend_cluster(
+    tmp_path: Path,
+) -> None:
+    """Contrast case: a non-meanrev equity strategy still persists
+    ``equity:beta_trend`` (the fix is additive — it does not misroute the
+    trend sleeve)."""
+    conn = init_db(tmp_path / "p.sqlite")
+    try:
+        _open(
+            conn, symbol="AAPL", underlying="equity:AAPL",
+            strategy="equity_donchian55_breakout", opened_ts=1000,
+            asset_class="equity",
+        )
+        cluster_id = conn.execute(
+            "SELECT cluster_id FROM position_risk_state WHERE strategy = ?",
+            ("equity_donchian55_breakout",),
+        ).fetchone()[0]
+        assert cluster_id == "equity:beta_trend"
     finally:
         conn.close()
 

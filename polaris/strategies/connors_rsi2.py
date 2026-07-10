@@ -123,6 +123,11 @@ class ConnorsRSI2Strategy(BaseStrategy):
         # VIRTUAL-mode loosening (Jin 2026-07-08): no real capital / fee exposure
         # in virtual — un-KILL so this dispatches and fires. REAL byte-identical.
         dispatch_eligible=virtual_loosen(True, False),
+        # §0c rider: 2 bars (2 trading days on this 1D strategy) symbol-local
+        # pacing after a LOSING close — the DINO -374 repeat-reentry lesson.
+        # Only THIS (venue, symbol, strategy_id) skips; every other symbol is
+        # unaffected (flow_not_block).
+        loss_cooldown_bars=2,
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

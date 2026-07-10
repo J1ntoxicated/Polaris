@@ -33,6 +33,21 @@
     display: flex; flex-direction: column;
   }
   .mobile-pane iframe { display: block; width: 100%; flex: 1 1 auto; border: 0; min-height: 0; }
+  /* side work pane — two stacked halves, dense mono rows */
+  .side-sec { flex: 1 1 50%; min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid var(--ghost); }
+  .side-h { flex: 0 0 auto; padding: 6px 10px 4px; font-size: 9.5px; letter-spacing: 0.12em; color: var(--p-gry); font-weight: 700; }
+  .side-h span { color: var(--p-dim); font-weight: 400; }
+  .side-rows { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 8px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 14px 62px 44px 44px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
+  .side-rows .r > span { overflow: hidden; text-overflow: ellipsis; }
+  .side-rows .vb { width: 3px; height: 10px; border-radius: 1px; align-self: center; }
+  .side-rows .vt { font-size: 8px; color: var(--p-dim); }
+  .side-rows .sym { color: var(--p-wht); font-weight: 700; }
+  .side-rows .num { text-align: right; }
+  .side-act .r { grid-template-columns: 46px 34px 1fr 58px; }
+  .side-act .t { color: var(--p-dim); font-size: 9px; }
+  .side-act .k { font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em; }
+  .pos-c { color: #7dffa8; } .neg-c { color: #ff7d8a; } .flat-c { color: var(--p-gry); }
   .mobile-pane .open-board-bar {
     flex: 0 0 auto; display: block; text-align: center;
     padding: 5px 0; font-size: 9.5px; letter-spacing: 0.06em;
@@ -211,22 +226,22 @@
   </div>
 </div>
 
-<!-- Left 30% mobile-board pane — built via JS (not a hardcoded <iframe src>)
-     so ?nomobile=1 skips the request entirely rather than loading then
-     hiding it. Same-origin /m, unaffected by this page. -->
+<!-- Left 30% work pane (Jin 2026-07-10 "모바일 빼고 반 갈라서"): top half =
+     live OPEN POSITIONS, bottom half = ACTIVITY feed (trade/gate events
+     scrolling up, jarvis-style). The bottom-of-wall BOT LOG stays the system
+     log. ?nomobile=1 hides the pane (full-width wall). wall_side.js drives. -->
 <script>
   (function () {
     var nomobile = /(?:^|[?&])nomobile=1(?:&|$)/.test(location.search);
     if (nomobile) { document.getElementById('wall-page').classList.add('nomobile'); return; }
     var pane = document.getElementById('mobile-pane');
-    var f = document.createElement('iframe');
-    f.src = '/m'; f.title = 'Polaris mobile board'; f.loading = 'lazy';
-    pane.appendChild(f);
-    var bar = document.createElement('a');
-    bar.className = 'open-board-bar'; bar.href = '/'; bar.textContent = 'OPEN FULL BOARD ›';
-    pane.appendChild(bar);
+    pane.innerHTML =
+      '<div class="side-sec side-pos"><div class="side-h">OPEN POSITIONS <span id="side-pos-n"></span></div><div class="side-rows" id="side-pos-rows"></div></div>' +
+      '<div class="side-sec side-act"><div class="side-h">ACTIVITY</div><div class="side-rows" id="side-act-rows"></div></div>' +
+      '<a class="open-board-bar" href="/">OPEN FULL BOARD ›</a>';
   })();
 </script>
+<script src="static/wall_side.js?v=1"></script>
 
 <!-- Shared SSE bus (events_bus.js) + pts-classes annotations (flow_classes.js,
      unchanged — gauge strip / EARN·BENCH badges / NEW CANDIDATE flash) + the

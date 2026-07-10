@@ -68,6 +68,14 @@
   #board .b-head .clock { margin-left: auto; color: var(--p-cyn); font-weight: 700; font-size: 14px; }
   #board .b-head .regime-lbl { color: var(--p-gry); font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; margin-right: 5px; }
   #board .b-head .regime-tag { color: var(--p-mag); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; font-size: 11px; }
+  #board #b-hdr-toggle {
+    background: none; border: 1px solid var(--ghost); color: var(--p-gry);
+    font: inherit; font-size: 9px; letter-spacing: 0.06em; cursor: pointer;
+    padding: 1px 7px; border-radius: 3px; margin-left: 10px;
+  }
+  #board #b-hdr-toggle:hover { color: var(--p-wht); border-color: var(--polaris-blue); }
+  #board.hdr-min #b-virt, #board.hdr-min #b-book-status,
+  #board.hdr-min #b-kpis > div:not(.health) { display: none; }
   #board .b-footer { color: var(--p-dim); font-size: 9px; letter-spacing: 0.04em; text-align: right; padding: 3px 8px; opacity: 0.6; }
 
   /* KPI cards — header strip, all in one row */
@@ -635,6 +643,7 @@
       <span class="badge" id="b-mode-badge" title="">DEMO·PAPER</span>
       <span class="regime-lbl">MARKETS</span><span class="regime-tag" id="b-regime">—</span>
       <span class="meta">Watching <b id="b-focus">—</b> symbols · <b id="b-cells">—</b> mature cells (n_eff&ge;20) · refreshed <b id="b-refresh">—</b></span>
+      <button type="button" id="b-hdr-toggle" title="Collapse header blocks — more room for positions (Jin 2026-07-10)">▾ header</button>
       <span class="clock" id="b-clock">--:--:--</span>
     </div>
 
@@ -1480,6 +1489,20 @@
     const board = $('board');
     if (board) {
       board.innerHTML = skeleton();
+      // header collapse (Jin 2026-07-10 "위에 접어줘 — 포지션 더 보고싶다"):
+      // hides the venue table / book status / KPI metric rows, keeps the
+      // one-line health strip. Persisted per browser.
+      const ht = $('b-hdr-toggle');
+      const applyHdr = (min) => {
+        board.classList.toggle('hdr-min', min);
+        if (ht) ht.textContent = min ? '▸ header' : '▾ header';
+      };
+      applyHdr(localStorage.getItem('polaris_hdr_min') === '1');
+      if (ht) ht.addEventListener('click', () => {
+        const min = !board.classList.contains('hdr-min');
+        localStorage.setItem('polaris_hdr_min', min ? '1' : '0');
+        applyHdr(min);
+      });
       initTabs();
       if (window.PolarisBoardExchange) window.PolarisBoardExchange.initExchangeSelector();
       setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);

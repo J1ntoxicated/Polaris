@@ -245,7 +245,7 @@
         const x = Math.max(8, Math.min(W * 0.80, sc.x + dx));
         const y = Math.max(20, Math.min(H * 0.435,
           anchorY + dy + (bandY(x) - bandY(sc.x))));
-        screen[n.id] = { x, y };
+        screen[n.id] = { x, y, isCand: true };
         const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / dySig) * (dy / dySig)));
         screen[n.id].coreBoost = prox;
         tickerStrat.set(n.id, st.id);
@@ -354,6 +354,17 @@
         s.r = 1.15 + depth * 0.55 + cb * 0.45;
         s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12 + cb * 0.11;
         if (s.bgLayer) { s.baseAlpha *= 0.42; s.r = Math.min(s.r, 1.35); } // 배경 유니버스 강한 디밍
+        // Jin 2026-07-11 "자비스 돌아가듯이 이펙트를 넣던지": candidates
+        // leave the baked dust and FLOAT — slow organic wander per dot, so
+        // the band reads as live machinery, not a printed starfield.
+        // Backdrop dust stays baked (perf).
+        if (s.isCand) {
+          const rb = rngFor(node.id + ':bob');
+          s.bobAmp = 3.5 + rb() * 2.5;
+          s.bobSpeed = 0.3 + rb() * 0.3;
+          s.phaseOff = rb() * Math.PI * 2;
+          livingIds.push(node.id);
+        }
       } else if (node.cluster === 'watch') {
         s.r = 2.0 + depth * 0.4;
         s.baseAlpha = 0.35 + (node.intensity || 0.4) * 0.25;
@@ -851,8 +862,8 @@
   // instead of text sitting flush under the dot. `side` (+1/-1) is a stable
   // per-id hash bit so neighbouring labels alternate left/right rather than
   // stacking into one unreadable column.
-  function drawLeaderLabel(ctx, x, y, text, color, alpha, side) {
-    const midY = y + 7, endX = x + side * 9, endY = y + 13;
+  function drawLeaderLabel(ctx, x, y, text, color, alpha, side, drop) {
+    const midY = y + 7, endX = x + side * 9, endY = y + 13 + (drop || 0);
     ctx.beginPath();
     ctx.moveTo(x, y); ctx.lineTo(x, midY); ctx.lineTo(endX, endY);
     ctx.strokeStyle = rgba(color, alpha * 0.55);
@@ -872,6 +883,7 @@
       if (migrations.has(node.id)) return; // drawn live at its migrated pos
       const s = screen[node.id];
       if (!s) return;
+      if (s.isCand) return; // living layer — drawn per-frame with drift
       drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
     });
     // Regime/strategy/probe/runner labels — the lifecycle braid routes
@@ -884,15 +896,19 @@
       const s = screen[node.id];
       if (!s) return;
       const side = (hashStr(node.id) & 1) ? 1 : -1;
+      // two-row stagger (Jin 2026-07-11 "너무 과밀집"): neighbouring labels
+      // alternate between a near and a far callout row instead of piling
+      // into one dense text band.
+      const drop = (hashStr(node.id) & 2) ? 9 : 0;
       if (node.cluster === 'strat') {
         drawLeaderLabel(staticCtx, s.x, s.y, String(node.label || '').slice(0, 16).toLowerCase(),
-          s.color || '#8a94b0', node.state === 'dormant' ? 0.35 : 0.7, side);
+          s.color || '#8a94b0', node.state === 'dormant' ? 0.22 : 0.7, side, drop);
         return;
       }
       if (node.cluster !== 'reg' && node.cluster !== 'probe' && node.cluster !== 'orbit') return;
       // orbit(러너/AI 위성) 라벨은 첫 세그먼트만 (session_mult:... → session_mult)
       const lbl = String(node.label || '').replace('regime_', '').split(':')[0].toLowerCase();
-      drawLeaderLabel(staticCtx, s.x, s.y, lbl, '#8a94b0', node.state === 'dormant' ? 0.4 : 0.75, side);
+      drawLeaderLabel(staticCtx, s.x, s.y, lbl, '#8a94b0', node.state === 'dormant' ? 0.3 : 0.75, side, drop);
     });
   }
   // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback
@@ -913,6 +929,7 @@
     ctx.globalCompositeOperation = 'source-over';
     stepPulses(dt);
     for (const id of livingIds) {
+      if (migrations.has(id)) continue; // traveler — drawn at its migrated pos
       const s = screen[id];
       if (!s) continue;
       const bx = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
@@ -949,17 +966,28 @@
       // Halo stays additive (bloom over the dust), but the CORE is stamped
       // opaque in source-over — additive stacking clips high channels and
       // burns every venue hue to white (Jin 2026-07-11 "왜 다 똑같은 색").
-      drawDot(ctx, x, y, s.r * 3.6, col, 0.10 * lvl, 0);
-      drawDot(ctx, x, y, s.r * 2.0, col, 0.22 * lvl, 0);
+      drawDot(ctx, x, y, s.r * 3.2, col, 0.08 * lvl, 0);
+      drawDot(ctx, x, y, s.r * 2.0, col, 0.20 * lvl, 0);
       ctx.globalCompositeOperation = 'source-over';
       drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.95, 0);
       ctx.globalCompositeOperation = 'lighter';
-      drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.5 + 0.35 * lvl, lockAge);
+      // slimmer bracket (Jin 2026-07-11 "너무 과밀집" — ornament weight down)
+      drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.34 + 0.24 * lvl, lockAge);
+      // Jarvis orbit moon: a tiny satellite circling the firing ticker —
+      // angular speed ∝ fire intensity, so rotation MEANS activity.
+      const orbA = now * 0.001 * (0.5 + 1.5 * lvl) + (s.phaseOff || 0);
+      const orbR = Math.max(6, s.r * 3.2);
+      drawDot(ctx, x + Math.cos(orbA) * orbR, y + Math.sin(orbA) * orbR, 1.1, col, 0.7, 0);
     };
     firingIds.forEach((id) => {
       if (migrations.has(id)) return;
+      const s = screen[id];
+      if (!s) return;
+      // glow rides the drifting dot (same wander formula as livingIds draw)
+      const bx = s.x + Math.sin(now * 0.0006 * (s.bobSpeed || 0.5) + (s.phaseOff || 0)) * (s.bobAmp || 0);
+      const by = s.y + Math.cos(now * 0.00042 * (s.bobSpeed || 0.5) + (s.phaseOff || 0) * 1.3) * (s.bobAmp || 0);
       const born = markerBorn.get(id);
-      glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0, born == null ? null : now - born);
+      glowAt(id, bx, by, 0, born == null ? null : now - born);
     });
     // activated SYSTEM nodes light up (Jin 2026-07-11 "액티베이트된 레짐/
     // 엑싯/리플렉터는 색 들어와야"): dominant regime, recently-used exit

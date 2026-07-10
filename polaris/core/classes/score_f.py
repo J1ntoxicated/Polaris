@@ -71,7 +71,13 @@ class LifecycleFee:
 
 @dataclass(slots=True)
 class ScoreFResult:
-    """One closed lifecycle's score_F contribution."""
+    """One closed lifecycle's score_F contribution.
+
+    ``notional_usd`` (fee-split v0 additive field, vault/50_research/debates/
+    fee_split_judgment_2026-07-10.md item 7) carries ``LifecycleFee``'s
+    already-computed notional through to ``rollup_score_f``'s INSERT — it
+    was previously discarded once the floored ``fee_denom_usd`` was derived.
+    """
 
     position_id: str
     venue: str
@@ -81,6 +87,7 @@ class ScoreFResult:
     fee_usd: float
     fee_denom_usd: float
     score_contrib: float
+    notional_usd: float = 0.0
 
 
 @dataclass(slots=True)
@@ -148,6 +155,7 @@ def compute_score_f(
                 fee_usd=fees.fee_usd,
                 fee_denom_usd=denom,
                 score_contrib=score,
+                notional_usd=fees.notional_usd,
             )
         )
     return out
@@ -246,10 +254,17 @@ def rollup_score_f(conn: sqlite3.Connection, *, now_ts: int) -> int:
             if r.closed_ts < watermark:
                 continue
             day = time.strftime("%Y-%m-%d", time.gmtime(r.closed_ts))
+            # gross_usd/notional_usd/fee_raw_usd — fee-split v0 additive
+            # columns (item 7). gross_usd mirrors net_usd (fills.pnl_usd is
+            # already fee-exclusive — see compute_lifecycle_fee docstring);
+            # fee_raw_usd is the UNFLOORED fee_usd (fee_denom_usd is the
+            # max(fee, notional-floor) value the OLD score axis uses — kept
+            # byte-identical). NEW rows only; no backfill of legacy rows.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO score_f_events "
                 "(position_id, venue, strategy_id, day, closed_ts, net_usd, "
-                "fee_denom_usd, score_contrib) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "fee_denom_usd, score_contrib, gross_usd, notional_usd, "
+                "fee_raw_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     r.position_id,
                     r.venue,
@@ -259,6 +274,9 @@ def rollup_score_f(conn: sqlite3.Connection, *, now_ts: int) -> int:
                     r.net_usd,
                     r.fee_denom_usd,
                     r.score_contrib,
+                    r.net_usd,
+                    r.notional_usd,
+                    r.fee_usd,
                 ),
             )
             if cur.rowcount > 0:

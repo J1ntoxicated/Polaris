@@ -79,9 +79,25 @@ CREATE TABLE IF NOT EXISTS score_f_events (
     closed_ts INTEGER NOT NULL,
     net_usd REAL NOT NULL DEFAULT 0.0,
     fee_denom_usd REAL NOT NULL DEFAULT 0.0001,
-    score_contrib REAL NOT NULL DEFAULT 0.0
+    score_contrib REAL NOT NULL DEFAULT 0.0,
+    gross_usd REAL,
+    notional_usd REAL,
+    fee_raw_usd REAL
 );
 """
+# gross_usd / notional_usd / fee_raw_usd — fee-split v0 additive columns
+# (vault/50_research/debates/fee_split_judgment_2026-07-10.md, item 7).
+# Nullable, NO DEFAULT (NULL = legacy/pre-migration row — explicitly
+# distinguished from a real 0.0, so the v0 percentile-proxy / v1 real-bps
+# scorers can tell "no data" apart from "measured zero"). rollup_score_f
+# populates all three for every NEW row going forward; ``gross_usd`` mirrors
+# the already-computed ``net_usd`` (fills.pnl_usd is fee-EXCLUSIVE — see
+# score_f.py's compute_lifecycle_fee docstring, so "gross" and "net" are the
+# SAME value here; the column exists as its own name for the fee-split
+# scorers' clarity, not because the underlying number differs).
+# ADDITIVE ONLY — existing net_usd/fee_denom_usd/score_contrib columns and
+# every consumer of them (transition.py's survival FSM, f_track_cap) are
+# UNCHANGED (v0 = zero behavior change, R2 item 5).
 
 DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_score_f_events_track_day

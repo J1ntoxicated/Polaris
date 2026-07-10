@@ -739,6 +739,24 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE strategy_class ADD COLUMN last_promotion_ts INTEGER"
         )
+    # score_f_events.gross_usd / notional_usd / fee_raw_usd — fee-split v0
+    # additive columns (vault/50_research/debates/fee_split_judgment_2026-07-10.md
+    # item 7). Nullable, no ALTER default (NULL = legacy row, pre-migration —
+    # a fresh DB already has these from DDL_SCORE_F_EVENTS; this ALTER guard
+    # backfills a pre-existing DB file that predates the columns, same
+    # last_promotion_ts / seed_tag precedent). ADDITIVE ONLY: existing
+    # net_usd/fee_denom_usd/score_contrib columns are untouched, and no
+    # backfill runs against legacy rows (v0 = zero behavior change).
+    sfe_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(score_f_events)").fetchall()
+    }
+    if sfe_cols and "gross_usd" not in sfe_cols:
+        conn.execute("ALTER TABLE score_f_events ADD COLUMN gross_usd REAL")
+    if sfe_cols and "notional_usd" not in sfe_cols:
+        conn.execute("ALTER TABLE score_f_events ADD COLUMN notional_usd REAL")
+    if sfe_cols and "fee_raw_usd" not in sfe_cols:
+        conn.execute("ALTER TABLE score_f_events ADD COLUMN fee_raw_usd REAL")
     _migrate_quote_ticks_to_lww(conn)
 
 

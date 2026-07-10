@@ -7,22 +7,21 @@
 <title>★ POLARIS · FLOW</title>
 <link rel="stylesheet" href="static/polaris.css"/>
 <style>
-  /* "Flat Neural Map" (Jin 2026-07-10, feat/flat-neural-map — supersedes the
-     earlier "Cloud River" 3-venue-band layout): the cloud pane is now a
-     single wide field read as a system blueprint (Z1 UNIVERSE .. Z2
-     STRATEGIES .. Z3 GATES .. Z4 EXECUTION .. Z5 EXIT/LEARN — see cloud.js +
-     cloud_nodes.js + cloud_fx.js), venue distinguished by color only (the
-     .wall-venues legend chip below). The pipeline river pane underneath is
-     UNCHANGED and no longer shares an x-axis with the cloud pane above it —
-     a 5-zone blueprint and an 8-column funnel are different visual
-     languages, so each owns its own geometry now. Page is still a 30/70
-     split: left = the /m mobile board embedded live via iframe (always-
-     visible summary for an unattended monitor), right = the cloud+river+HUD
-     stack. ?nomobile=1 hides the iframe and gives the wall stack the full
-     width. English UI, Bloomberg-dense, polaris.css tokens only. */
+  /* "Synaptic Spine" (Jin 2026-07-10, feat/jarvis-wall — supersedes the
+     "Flat Neural Map"/"Living Pipeline River" split-pane layout): the G1..G8
+     gate pipeline is now one braided spine that dissolves into the universe/
+     strategy constellation around it — a single canvas, not a grid-and-lanes
+     dashboard. Philosophy doc: vault/50_research/
+     wall_design_philosophy_synaptic_current.md. Engine = wall_spine_field.js
+     (layout/edges/whisper-mesh/static pre-render) + wall_spine.js (canvas/
+     rAF/gate cores/comets) + wall_spine_hud.js (real data wiring). Page is
+     still a 30/70 split: left = the /m mobile board embedded live via
+     iframe, right = the spine canvas + bottom HUD (score_F gauge strip / bot
+     log / equity). ?nomobile=1 hides the iframe and gives the wall stack the
+     full width. English UI, Bloomberg-dense, polaris.css tokens only. */
   html, body {
     margin: 0; padding: 0; height: 100%;
-    background: #05070b; color: var(--p-wht);
+    background: #03040a; color: var(--p-wht);
     font-family: var(--font-mono);
     overflow: hidden;
   }
@@ -30,13 +29,10 @@
   .wall-page { display: flex; flex-direction: row; width: 100vw; height: 100vh; overflow: hidden; }
   .mobile-pane {
     flex: 0 0 30%; height: 100%; min-width: 0;
-    border-right: 1px solid var(--ghost); overflow: hidden; background: #05070b;
+    border-right: 1px solid var(--ghost); overflow: hidden; background: #03040a;
     display: flex; flex-direction: column;
   }
   .mobile-pane iframe { display: block; width: 100%; flex: 1 1 auto; border: 0; min-height: 0; }
-  /* "OPEN FULL BOARD" link bar — Jin 2026-07-10: the /flow -> board path was
-     only discoverable via the cloud-pane's BOARD button; this gives the
-     mobile-summary pane its own obvious way out to the full desktop board. */
   .mobile-pane .open-board-bar {
     flex: 0 0 auto; display: block; text-align: center;
     padding: 5px 0; font-size: 9.5px; letter-spacing: 0.06em;
@@ -48,26 +44,20 @@
   .wall-page.nomobile .mobile-pane { display: none; }
   .wall-page.nomobile .wall-col { flex: 1 1 100%; }
 
-  .wall-stage {
-    display: grid;
-    grid-template-rows: 55fr 45fr auto;
-    width: 100%; height: 100%; overflow: hidden;
-  }
+  .wall-stage { display: grid; grid-template-rows: 1fr 22px 96px; width: 100%; height: 100%; overflow: hidden; }
 
-  /* ── Cloud pane (top ~55%) ─────────────────────────────────────────────── */
-  .cloud-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; background: #05070b; }
-  canvas#cloud-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 1; }
+  /* ── Spine pane (fills the remaining vertical space) ─────────────────── */
+  .spine-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; background: #03040a; }
+  canvas#spine-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
   .wall-topbar {
     position: absolute; top: 0; left: 0; right: 0; z-index: 10;
     display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     padding: 8px 14px;
-    background: linear-gradient(to bottom, rgba(5,7,11,0.85), transparent);
+    background: linear-gradient(to bottom, rgba(3,4,10,0.88), transparent);
   }
   .wall-topbar .brand { display: flex; align-items: center; gap: 6px; font-weight: 700; letter-spacing: 0.12em; font-size: 11px; white-space: nowrap; }
   .wall-topbar .brand .star { color: var(--polaris-blue); font-size: 14px; }
-  /* BOARD link — Jin 2026-07-10: "링크가 안 보임", button-ized (border+bg,
-     bigger target) instead of a bare dim-text nav item. */
   .wall-pagenav { display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: 0.06em; white-space: nowrap; }
   .wall-pagenav a { color: var(--p-dim); text-decoration: none; }
   .wall-pagenav a.active { color: var(--polaris-blue); }
@@ -77,7 +67,6 @@
     padding: 3px 9px; font-weight: 700; background: rgba(95,135,175,0.14);
   }
   .wall-pagenav a.board-btn:hover { background: rgba(95,135,175,0.28); color: var(--p-wht); }
-  /* Venue color-only legend chip (Jin: bands are gone, "베뉴는 색으로만 구분"). */
   .wall-venues { display: flex; gap: 9px; font-size: 9px; color: var(--p-gry); white-space: nowrap; }
   .wall-venues span::before { content: '●'; margin-right: 3px; }
   .wall-venues .v-okx { color: #5fdfff; }
@@ -87,30 +76,19 @@
   .wall-summary .lbl { color: var(--p-dim); margin-right: 4px; }
   .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; }
 
-  /* Kill feed — top-right, newest on top, capped 6 rows (cloud_fx.js). */
-  #kill-feed {
-    position: absolute; top: 34px; right: 10px; z-index: 10;
-    width: 240px; font-size: 9.5px; text-align: right;
-  }
-  #kill-feed .kf-row {
-    padding: 1.5px 0; color: var(--p-gry);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  #kill-feed .kf-row .kf-strat { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
-  #kill-feed .kf-row.pos { color: var(--pnl-pos); }
+  /* Kill feed — real G3/G4/G5 KILL decisions (top-right, newest on top, capped 6). */
+  #kill-feed { position: absolute; top: 34px; right: 10px; z-index: 10; width: 250px; font-size: 9.5px; text-align: right; }
+  #kill-feed .kf-row { padding: 1.5px 0; color: var(--p-gry); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #kill-feed .kf-row .kf-g { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
   #kill-feed .kf-row.neg { color: var(--pnl-neg); }
 
-  /* Class-transition badge pop ("EARN▲" / "BENCH▼") — flow_classes.js spawns/removes. */
+  /* Class-transition badge pop ("EARN▲" / "BENCH▼") — flow_classes.js owns. */
   #class-badges {
     position: absolute; left: 10px; top: 34px; z-index: 10;
     display: flex; flex-direction: column; gap: 3px;
     font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
   }
-  #class-badges .badge {
-    padding: 2px 7px; border: 1px solid currentColor;
-    background: rgba(5,7,11,0.75);
-    animation: badgepop 3.2s ease-out forwards;
-  }
+  #class-badges .badge { padding: 2px 7px; border: 1px solid currentColor; background: rgba(3,4,10,0.75); animation: badgepop 3.2s ease-out forwards; }
   #class-badges .badge.earn  { color: var(--pnl-pos); }
   #class-badges .badge.bench { color: var(--pnl-neg); }
   @keyframes badgepop {
@@ -119,45 +97,29 @@
     80%  { opacity: 1; }
     100% { opacity: 0; }
   }
-
-  /* ── River pane (bottom ~45%) ─────────────────────────────────────────── */
-  .river-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; border-top: 1px solid var(--ghost); }
-  canvas#flow-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-
-  #col-headers { position: absolute; top: 4px; left: 0; right: 0; height: 26px; z-index: 9; pointer-events: none; }
-  #col-headers .col-h {
-    position: absolute; top: 0; transform: translateX(-50%);
-    font-size: 8.5px; letter-spacing: 0.10em; color: var(--p-gry);
-    text-align: center; white-space: nowrap;
+  #candidate-flash {
+    position: absolute; z-index: 9; top: 4px; left: 8px;
+    font-size: 8px; font-weight: 700; letter-spacing: 0.10em;
+    color: var(--p-ylw); white-space: nowrap;
+    opacity: 0; transition: opacity 0.4s ease; pointer-events: none;
   }
-  #col-headers .col-h .n { display: block; font-size: 11px; font-weight: 700; color: var(--p-wht); font-variant-numeric: tabular-nums; }
-  #col-headers .col-h .sub { display: block; font-size: 7px; color: var(--p-dim); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
-  #col-headers .col-h.gate { color: var(--polaris-blue); }
-  #col-headers .col-h.fills { color: var(--p-grn); }
-
-  /* Venue legend — compact single row (the cloud pane already sold the colors). */
-  .venue-legend { position: absolute; left: 8px; top: 32px; z-index: 9; font-size: 8.5px; display: flex; flex-direction: row; gap: 10px; }
-  .venue-legend .row { display: flex; align-items: center; gap: 4px; color: var(--p-gry); white-space: nowrap; }
-  .venue-legend .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .venue-legend .dot.drop { background: #7a7f8c; }
+  #candidate-flash.show { opacity: 1; }
 
   #drop-panel {
-    position: absolute; left: 8px; bottom: 26px; z-index: 9;
-    width: 230px; font-size: 9px; color: var(--p-gry);
-    background: rgba(5,7,11,0.7); border: 1px solid var(--ghost); padding: 5px 8px;
+    position: absolute; left: 8px; bottom: 8px; z-index: 9;
+    width: 224px; font-size: 9px; color: var(--p-gry);
+    background: rgba(3,4,10,0.72); border: 1px solid var(--ghost); padding: 5px 8px;
   }
-  #drop-panel .h { color: #9098a8; letter-spacing: 0.14em; font-size: 8px; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  #drop-panel .h { color: var(--p-gry); letter-spacing: 0.14em; font-size: 8px; margin-bottom: 4px; display: flex; justify-content: space-between; }
   #drop-panel .row { display: flex; justify-content: space-between; padding: 1px 0; }
   #drop-panel .row .n { color: var(--p-wht); font-variant-numeric: tabular-nums; }
   #drop-panel .empty { color: var(--p-dim); font-style: italic; }
 
-  /* Per-strategy score_F window-fill gauge strip — river's own bottom edge. */
+  /* Per-strategy score_F window-fill gauge strip — flow_classes.js renders. */
   #class-gauge-strip {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 20px; z-index: 9;
-    overflow-x: auto; white-space: nowrap;
+    position: relative; z-index: 9; overflow-x: auto; white-space: nowrap;
     padding: 2px 8px; font-size: 8px; letter-spacing: 0.04em;
-    border-top: 1px solid var(--ghost);
-    background: rgba(5,7,11,0.55);
+    border-top: 1px solid var(--ghost); background: rgba(3,4,10,0.65);
   }
   #class-gauge-strip::-webkit-scrollbar { height: 3px; }
   #class-gauge-strip::-webkit-scrollbar-thumb { background: var(--ghost); }
@@ -168,35 +130,24 @@
   #class-gauge-strip .chip.earn  .gauge .fill { background: var(--pnl-pos); }
   #class-gauge-strip .chip.bench .gauge .fill { background: var(--pnl-neg); }
 
-  /* "NEW CANDIDATE" flash near the G1 column — flow_classes.js positions it via colX. */
-  #candidate-flash {
-    position: absolute; z-index: 9; top: 4px;
-    font-size: 8px; font-weight: 700; letter-spacing: 0.10em;
-    color: var(--p-ylw); white-space: nowrap;
-    opacity: 0; transition: opacity 0.4s ease;
-    pointer-events: none;
-  }
-  #candidate-flash.show { opacity: 1; }
-
-  /* ── Bottom ticker: equity / today net / 3-line bot log. ──────────────── */
-  .botlog-pane {
-    position: relative; z-index: 9;
-    height: 96px; overflow: hidden;
-    border-top: 1px solid var(--ghost);
-    background: rgba(5,7,11,0.92);
-  }
+  /* ── Bottom ticker: equity / today net / bot log. ─────────────────────── */
+  .botlog-pane { position: relative; z-index: 9; height: 96px; overflow: hidden; border-top: 1px solid var(--ghost); background: rgba(3,4,10,0.94); }
   .botlog-pane .bl-head {
-    display: flex; align-items: center; gap: 10px;
-    padding: 3px 10px; border-bottom: 1px solid var(--ghost);
-    color: var(--polaris-blue); font-size: 8px; font-weight: 700;
-    letter-spacing: 0.14em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 10px; padding: 3px 10px; border-bottom: 1px solid var(--ghost);
+    color: var(--polaris-blue); font-size: 8px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
   }
   .botlog-pane .bl-head .live { color: var(--p-grn); font-size: 7px; letter-spacing: 0.08em; }
   .botlog-pane .bl-head .live::before { content: '●'; margin-right: 3px; }
   .botlog-pane .bl-head .metric { margin-left: auto; color: var(--p-dim); font-weight: 400; }
   .botlog-pane .bl-head .metric b { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 4px; }
-  .botlog-pane .bl-head .metric b.pos { color: var(--pnl-pos); }
-  .botlog-pane .bl-head .metric b.neg { color: var(--pnl-neg); }
+  .botlog-pane .bl-head .metric b.pos { color: var(--pnl-pos); } .botlog-pane .bl-head .metric b.neg { color: var(--pnl-neg); }
+  /* Equity "vitality pulse" — small HUD addition (radial-inspired): the
+     number itself breathes gently, a quiet always-on life-sign rather than a
+     new full-screen effect (unbroken-current philosophy, element-local). */
+  .botlog-pane .bl-head .metric b.pulse-pos { animation: eqpulse-pos 2.4s ease-in-out infinite; }
+  .botlog-pane .bl-head .metric b.pulse-neg { animation: eqpulse-neg 2.4s ease-in-out infinite; }
+  @keyframes eqpulse-pos { 0%,100% { opacity: 1; } 50% { opacity: 0.62; } }
+  @keyframes eqpulse-neg { 0%,100% { opacity: 1; } 50% { opacity: 0.62; } }
   .botlog-pane .bl-body { height: 72px; overflow-y: auto; padding: 3px 10px 5px; font-size: 9.5px; line-height: 1.35; }
   .botlog-pane .bl-body::-webkit-scrollbar { width: 5px; }
   .botlog-pane .bl-body::-webkit-scrollbar-thumb { background: var(--ghost); }
@@ -214,8 +165,8 @@
 
   <div class="wall-col">
     <div class="wall-stage">
-      <div class="cloud-pane">
-        <canvas id="cloud-canvas"></canvas>
+      <div class="spine-pane">
+        <canvas id="spine-canvas"></canvas>
 
         <div class="wall-topbar">
           <div class="brand"><span class="star">★</span>POLARIS · FLOW</div>
@@ -232,33 +183,21 @@
             <span><span class="lbl">AI CALLS</span><span class="val" id="s-ai">–</span></span>
             <span><span class="lbl">DROPS</span><span class="val" id="s-drops">–</span></span>
             <span><span class="lbl">SHADOW</span><span class="val" id="s-shadow">–</span></span>
+            <span><span class="lbl">UNIVERSE FIRING</span><span class="val" id="s-universe">–</span></span>
           </div>
         </div>
 
         <div id="kill-feed"></div>
         <div id="class-badges"></div>
-      </div>
-
-      <div class="river-pane">
-        <canvas id="flow-canvas"></canvas>
-
-        <div id="col-headers"></div>
         <div id="candidate-flash"></div>
-
-        <div class="venue-legend">
-          <div class="row"><span class="dot" style="background:#5fdfff;box-shadow:0 0 6px #5fdfff"></span>OKX</div>
-          <div class="row"><span class="dot" style="background:#a87cff;box-shadow:0 0 6px #a87cff"></span>CAPITAL</div>
-          <div class="row"><span class="dot" style="background:#ffc84f;box-shadow:0 0 6px #ffc84f"></span>ALPACA</div>
-          <div class="row"><span class="dot drop"></span>DROP</div>
-        </div>
 
         <div id="drop-panel">
           <div class="h"><span id="drop-window">DROP LANE</span><span id="drop-total">0</span></div>
           <div id="drop-rows"><div class="empty">no drops in window</div></div>
         </div>
-
-        <div id="class-gauge-strip"></div>
       </div>
+
+      <div id="class-gauge-strip"></div>
 
       <div class="botlog-pane">
         <div class="bl-head">
@@ -274,8 +213,7 @@
 
 <!-- Left 30% mobile-board pane — built via JS (not a hardcoded <iframe src>)
      so ?nomobile=1 skips the request entirely rather than loading then
-     hiding it. Same-origin /m, unaffected by this page (server routes /m to
-     mobile.html regardless of query/UA — see server.py do_GET). -->
+     hiding it. Same-origin /m, unaffected by this page. -->
 <script>
   (function () {
     var nomobile = /(?:^|[?&])nomobile=1(?:&|$)/.test(location.search);
@@ -290,28 +228,22 @@
   })();
 </script>
 
-<!-- Shared SSE bus (one /stream/events socket for the whole page) + river
-     (flow.js, unrelated geometry to the cloud pane now — see the header
-     comment above) + pts-classes annotations (flow_classes.js, MUST load
-     before flow.js) + the Flat Neural Map: cloud_fx.js (pure fx primitives)
-     -> cloud_nodes.js (Z2..Z5 structural nodes/wiring, reads window.
-     PolarisCloudFx) -> cloud.js (canvas/rAF owner + Z1 reservoir, reads both
-     window.PolarisCloudFx and window.PolarisCloudNodes). flow.js forwards
-     AI verdicts into cloud_nodes via a runtime `if (window.PolarisCloudNodes)`
-     check, so load order between flow.js and the cloud_* trio doesn't matter
-     for that hook specifically — kept after flow_classes.js only to match
-     the page's existing top-to-bottom pane order. -->
+<!-- Shared SSE bus (events_bus.js) + pts-classes annotations (flow_classes.js,
+     unchanged — gauge strip / EARN·BENCH badges / NEW CANDIDATE flash) + the
+     Synaptic Spine engine: wall_spine_field.js (layout/edges/whisper-mesh/
+     static pre-render, no canvas of its own) -> wall_spine.js (canvas/rAF
+     owner, gate cores, comets, public window.PolarisSpine API) ->
+     wall_spine_hud.js (the only module doing network I/O — graph.json/
+     flow_stats polls + SSE dispatch, drives PolarisSpine + the DOM HUD). -->
 <script src="static/events_bus.js?v=1"></script>
 <script src="static/flow_classes.js?v=1"></script>
-<script src="static/flow.js?v=6_rt1s"></script>
-<script src="static/cloud_fx.js?v=2_flatmap"></script>
-<script src="static/cloud_nodes.js?v=1"></script>
-<script src="static/cloud.js?v=5_rt1s"></script>
+<script src="static/wall_spine_field.js?v=1"></script>
+<script src="static/wall_spine.js?v=1"></script>
+<script src="static/wall_spine_hud.js?v=1"></script>
 <script>
-  // Both flow.js and cloud.js fit to canvas clientWidth/Height; after layout
-  // settles, nudge resize twice (rAF + delayed) so fit() picks up the grid-
-  // sized 55%-height cloud pane / 45%-height river pane, not an initial
-  // full-size guess (same double-resize-dispatch pattern the old page used).
+  // The spine canvas fits to canvas clientWidth/Height; after layout settles,
+  // nudge resize twice (rAF + delayed) so fitCanvas() picks up the grid-
+  // sized pane, not an initial full-size guess.
   window.addEventListener('load', function () {
     requestAnimationFrame(function () { window.dispatchEvent(new Event('resize')); });
     setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 250);

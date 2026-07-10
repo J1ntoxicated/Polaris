@@ -1,0 +1,473 @@
+/* Polaris FLOW — "Synaptic Spine" field layer (Jin 2026-07-10, feat/jarvis-
+ * wall). Owns the background constellation: node layout (screen[] + the 8
+ * gate-spine anchor points), the ambient edge mesh (functional wiring +
+ * whisper mesh + real lifecycle chains), the micro-pulse pool, and the
+ * static-layer pre-render — everything wall_spine.js's canvas/rAF loop reads
+ * every frame but does NOT rebuild every frame. Split out of wall_spine.js to
+ * keep both files under the project's 500-LOC cap (same cloud.js/
+ * cloud_nodes.js precedent this design replaces).
+ *
+ * Philosophy doc: vault/50_research/wall_design_philosophy_synaptic_current.md
+ * Display-only — nothing here issues, sizes, gates or throttles a trade.
+ */
+(function () {
+  /* ===== seeded RNG — deterministic per-id jitter (stable across polls) === */
+  function hashStr(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function rngFor(id) { return mulberry32(hashStr(id)); }
+
+  const colorRgbCache = new Map();
+  function hexToRgb(hex) {
+    let rgb = colorRgbCache.get(hex);
+    if (rgb) return rgb;
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    rgb = m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [200, 200, 200];
+    colorRgbCache.set(hex, rgb);
+    return rgb;
+  }
+  function rgba(hex, a) { const [r, g, b] = hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; }
+  function mixHex(h1, h2, t) {
+    const a = hexToRgb(h1), b = hexToRgb(h2);
+    return `rgb(${Math.round(a[0] + (b[0] - a[0]) * t)},${Math.round(a[1] + (b[1] - a[1]) * t)},${Math.round(a[2] + (b[2] - a[2]) * t)})`;
+  }
+
+  const GATE_HALO = '#5fd7ff';
+  const FEEDBACK_COLOR = '#ffb454'; // gold — G8->G2 plasticity strand
+  // graft 4 (radial LINEAGE_HUES) — small hue spread so several live-open
+  // strands bundling into the same endpoint (G6/G7) don't wash out into one
+  // saturated white beam once additive-blended.
+  const LINEAGE_HUES = ['#87d7ff', '#9fc7ff', '#7ec8e3', '#a7d8ff', '#8fe0d0'];
+  const GATE_IDS = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8'];
+
+  let CLUSTER_COLOR = {};
+  let W = 1344, H = 962;
+  const screen = {};      // id -> {x,y,r,depth,color,baseAlpha,bobAmp,bobSpeed,phaseOff,fireUntil,node}
+  let gateScreen = [];    // 8x {x,y,fireUntil,pulsePhase} — index-aligned with GATE_IDS
+  let livingIds = [];     // non-'mkt' node ids — get the per-frame parallax bob (graft 1c)
+  let allNodes = [];
+  let nodeById = {};
+  const ambientEdges = [];
+  const edgeCache = new Map();
+  const activeGlowIds = new Set();
+
+  function setSize(w, h) { W = w; H = h; }
+
+  function jitteredBand(nodes, xMin, xMax, yMin, yMax, salt, jitterFrac) {
+    const n = nodes.length;
+    if (!n) return;
+    const aspect = Math.max(0.15, (xMax - xMin) / Math.max(1, yMax - yMin));
+    const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
+    const rows = Math.max(1, Math.ceil(n / cols));
+    const cellW = (xMax - xMin) / cols, cellH = (yMax - yMin) / rows;
+    nodes.forEach((node, idx) => {
+      const r = rngFor(node.id + salt);
+      const col = idx % cols, row = Math.floor(idx / cols);
+      const jf = jitterFrac == null ? 0.82 : jitterFrac;
+      screen[node.id] = {
+        x: xMin + cellW * (col + 0.5) + (r() - 0.5) * cellW * jf,
+        y: yMin + cellH * (row + 0.5) + (r() - 0.5) * cellH * jf,
+      };
+    });
+  }
+
+  function buildLayout(data) {
+    allNodes = data.nodes || [];
+    nodeById = {};
+    allNodes.forEach((n) => { nodeById[n.id] = n; });
+    CLUSTER_COLOR = {};
+    (data.clusters || []).forEach((c) => { CLUSTER_COLOR[c.id] = c.color; });
+
+    // Gate spine: gentle S-curve across the middle + a small deterministic
+    // per-gate force-stagger (graft 1a, organic) so the 8 relay-hubs read as
+    // woven INTO the constellation rather than a too-clean horizontal chain.
+    gateScreen = GATE_IDS.map((gid, i) => {
+      const t = i / (GATE_IDS.length - 1);
+      const rg = rngFor(gid + ':stagger');
+      const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
+      const y = H * 0.50 + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.075
+        + Math.cos(t * Math.PI * 0.9) * H * 0.02 + (rg() - 0.5) * H * 0.034;
+      return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
+    });
+
+    const byCluster = {};
+    allNodes.forEach((n) => { (byCluster[n.cluster] = byCluster[n.cluster] || []).push(n); });
+
+    jitteredBand(byCluster.mkt || [], W * 0.02, W * 0.98, H * 0.045, H * 0.33, ':mkt', 0.86);
+    jitteredBand(byCluster.watch || [], W * 0.06, W * 0.94, H * 0.35, H * 0.435, ':watch', 0.8);
+    jitteredBand(byCluster.strat || [], W * 0.07, W * 0.93, H * 0.655, H * 0.90, ':strat', 0.8);
+
+    const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
+    jitteredBand(byCluster.reg || [], gG3.x - 95, gG3.x + 95, gG3.y + 55, gG3.y + 115, ':reg', 0.7);
+    jitteredBand(byCluster.pos || [], gG6.x - 95, gG6.x + 95, gG6.y + 60, gG6.y + 120, ':pos', 0.7);
+    jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
+    jitteredBand(byCluster.exit_tally || [], gG7.x - 140, gG7.x + 60, gG7.y + 125, gG7.y + 175, ':exittally', 0.7);
+
+    const meta = [].concat(byCluster.action || [], byCluster.obs || [], byCluster.orbit || [], byCluster.axis || []);
+    meta.forEach((node) => {
+      const r = rngFor(node.id + ':meta');
+      const ang = r() * Math.PI * 2, rad = 60 + r() * 95;
+      screen[node.id] = { x: gG8.x + Math.cos(ang) * rad * 1.15, y: gG8.y + Math.sin(ang) * rad * 0.62 - 10 };
+    });
+
+    livingIds = [];
+    allNodes.forEach((node) => {
+      const s = screen[node.id];
+      if (!s) return;
+      const r = rngFor(node.id + ':depth');
+      const depth = Math.floor(r() * 3);
+      s.depth = depth;
+      s.color = CLUSTER_COLOR[node.cluster] || '#9fb0c8';
+      if (node.cluster === 'mkt') {
+        s.r = 1.15 + depth * 0.55;
+        s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12;
+      } else if (node.cluster === 'watch') {
+        s.r = 2.0 + depth * 0.4;
+        s.baseAlpha = 0.35 + (node.intensity || 0.4) * 0.25;
+      } else if (node.cluster === 'strat') {
+        s.r = 4.2 + Math.min(2.2, Math.log((node.trades_24h || 1) + 1) * 0.7);
+        s.baseAlpha = 0.55 + Math.min(0.35, (node.intensity || 0.3) * 0.4);
+      } else {
+        s.r = 3.0 + depth * 0.4;
+        s.baseAlpha = 0.5 + (node.intensity || 0.4) * 0.3;
+      }
+      s.fireUntil = 0;
+      s.node = node;
+      // graft 1c (organic parallax bob) — a tiny constant sin/cos drift on
+      // every NAMED node (everything but the 'mkt' dust field, which stays
+      // baked/static texture) so the spine never reads as fully frozen
+      // between comets. Amplitude is sub-pixel-to-2px — "current", not motion.
+      if (node.cluster !== 'mkt') {
+        const rb = rngFor(node.id + ':bob');
+        s.bobAmp = 0.6 + depth * 0.55;
+        s.bobSpeed = 0.35 + rb() * 0.35;
+        s.phaseOff = rb() * Math.PI * 2;
+        livingIds.push(node.id);
+      }
+    });
+  }
+
+  // Cheap per-poll refresh: node dynamic fields (state/intensity/pnl) change
+  // far more often than the roster's node-id SET does. Recomputing baseAlpha
+  // in place (O(n), no position/edge rebuild) lets the 1s poll stay honest
+  // about "who's lit/firing now" WITHOUT re-running the O(n^2) whisper-mesh
+  // K-NN scan every tick (that only reruns on an actual structural change —
+  // see wall_spine_hud.js's node-count fingerprint check).
+  function refreshNodeState(nodes) {
+    (nodes || []).forEach((n) => {
+      const s = screen[n.id];
+      if (!s) return;
+      s.node = n;
+      if (n.cluster === 'mkt') s.baseAlpha = 0.16 + s.depth * 0.09 + (n.intensity || 0.3) * 0.12;
+      else if (n.cluster === 'watch') s.baseAlpha = 0.35 + (n.intensity || 0.4) * 0.25;
+      else if (n.cluster === 'strat') s.baseAlpha = 0.55 + Math.min(0.35, (n.intensity || 0.3) * 0.4);
+      else s.baseAlpha = 0.5 + (n.intensity || 0.4) * 0.3;
+    });
+  }
+
+  function edgeFor(fromId, toId, x1, y1, x2, y2, opts) {
+    const key = fromId + '->' + toId;
+    let e = edgeCache.get(key);
+    if (e) return e;
+    const r = rngFor(key);
+    const dx = x2 - x1, dy = y2 - y1;
+    const dist = Math.hypot(dx, dy) || 1;
+    const nx = -dy / dist, ny = dx / dist;
+    const bowScale = (opts && opts.bowScale) || 1;
+    const bow = (0.09 + r() * 0.20) * dist * (r() < 0.5 ? -1 : 1) * bowScale;
+    const mx = (x1 + x2) / 2 + nx * bow, my = (y1 + y2) / 2 + ny * bow;
+    const color = (opts && opts.color) || '#5fd7ff';
+    const alpha = (opts && opts.alpha) != null ? opts.alpha : 0.12;
+    e = {
+      x1, y1, x2, y2,
+      c1x: x1 + (mx - x1) * 0.55, c1y: y1 + (my - y1) * 0.55,
+      c2x: x2 + (mx - x2) * 0.55, c2y: y2 + (my - y2) * 0.55,
+      color, alpha, width: (opts && opts.width) || 0.7, glow: !!(opts && opts.glow),
+      kind: (opts && opts.kind) || 'ambient',
+      strokeStyle: rgba(color, alpha),
+      shadowColor: color.startsWith('#') ? color : GATE_HALO,
+    };
+    edgeCache.set(key, e);
+    return e;
+  }
+  function bezierPoint(e, t) {
+    const u = 1 - t;
+    return {
+      x: u * u * u * e.x1 + 3 * u * u * t * e.c1x + 3 * u * t * t * e.c2x + t * t * t * e.x2,
+      y: u * u * u * e.y1 + 3 * u * u * t * e.c1y + 3 * u * t * t * e.c2y + t * t * t * e.y2,
+    };
+  }
+  function addAmbient(fromId, toId, x1, y1, x2, y2, opts) { ambientEdges.push(edgeFor(fromId, toId, x1, y1, x2, y2, opts)); }
+
+  // graft 1b (organic whisper mesh) — K-nearest-neighbour low-alpha strands
+  // across the WHOLE screen (gate cores included as candidates), so the
+  // spine reads as part of one entangled field, not a separate river next to
+  // a sparser background. Built once per layout — never touched per-frame.
+  function buildWhisperMesh() {
+    const pts = allNodes.map((n) => ({ id: n.id, x: screen[n.id] && screen[n.id].x, y: screen[n.id] && screen[n.id].y, color: (screen[n.id] || {}).color }))
+      .filter((p) => p.x != null);
+    gateScreen.forEach((g, i) => pts.push({ id: GATE_IDS[i], x: g.x, y: g.y, color: GATE_HALO }));
+    const K = 3;
+    const used = new Set();
+    for (const a of pts) {
+      const dists = [];
+      for (const b of pts) {
+        if (a === b) continue;
+        const dx = a.x - b.x, dy = a.y - b.y;
+        dists.push([dx * dx + dy * dy, b]);
+      }
+      dists.sort((p, q) => p[0] - q[0]);
+      for (let k = 0; k < K && k < dists.length; k++) {
+        const b = dists[k][1];
+        const key = a.id < b.id ? a.id + '|' + b.id : b.id + '|' + a.id;
+        if (used.has(key)) continue;
+        used.add(key);
+        addAmbient(a.id, b.id, a.x, a.y, b.x, b.y, { color: mixHex(a.color || '#8fb0c8', b.color || '#8fb0c8', 0.5), alpha: 0.035 + rngFor(key)() * 0.05, width: 0.55, bowScale: 0.5 });
+      }
+    }
+  }
+
+  function buildEdges(data) {
+    ambientEdges.length = 0;
+    edgeCache.clear();
+
+    for (let i = 0; i < gateScreen.length - 1; i++) {
+      const a = gateScreen[i], b = gateScreen[i + 1];
+      addAmbient(GATE_IDS[i], GATE_IDS[i + 1], a.x, a.y, b.x, b.y, { color: GATE_HALO, alpha: 0.34, width: 1.6, glow: true, kind: 'backbone', bowScale: 0.35 });
+    }
+    {
+      const a = gateScreen[7], b = gateScreen[1];
+      addAmbient('g8', 'g2', a.x, a.y, b.x, H * 0.985, { color: FEEDBACK_COLOR, alpha: 0.26, width: 1.3, glow: true, kind: 'feedback', bowScale: 2.6 });
+    }
+
+    const strat = allNodes.filter((n) => n.cluster === 'strat');
+    const stratByExchange = { okx: [], cap: [], alp: [] };
+    strat.forEach((n) => { if (stratByExchange[n.exchange]) stratByExchange[n.exchange].push(n); });
+
+    allNodes.filter((n) => n.cluster === 'mkt').forEach((n) => {
+      const pool = stratByExchange[n.exchange];
+      if (!pool || !pool.length) return;
+      const r = rngFor(n.id + ':pick');
+      const target = pool[Math.floor(r() * pool.length)];
+      const a = screen[n.id], b = screen[target.id];
+      if (!a || !b) return;
+      addAmbient(n.id, target.id, a.x, a.y, b.x, b.y, { color: mixHex(CLUSTER_COLOR.mkt, CLUSTER_COLOR.strat, 0.5), alpha: 0.045 + (n.intensity || 0.2) * 0.05, width: 0.55 });
+    });
+
+    const g4 = gateScreen[3];
+    allNodes.filter((n) => n.cluster === 'watch').forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      addAmbient(n.id, 'g4', a.x, a.y, g4.x, g4.y, { color: CLUSTER_COLOR.watch, alpha: 0.14 + (n.intensity || 0.3) * 0.15, width: 0.8 });
+    });
+
+    const g2 = gateScreen[1];
+    strat.forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      addAmbient(n.id, 'g2', a.x, a.y, g2.x, g2.y, { color: CLUSTER_COLOR.strat, alpha: 0.22 + (n.intensity || 0.3) * 0.2, width: 1.0, glow: n.state === 'firing' });
+    });
+
+    const g3 = gateScreen[2];
+    allNodes.filter((n) => n.cluster === 'reg').forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      addAmbient(n.id, 'g3', a.x, a.y, g3.x, g3.y, { color: CLUSTER_COLOR.reg, alpha: 0.28, width: 1.0 });
+    });
+
+    const g6 = gateScreen[5];
+    allNodes.filter((n) => n.cluster === 'pos').forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      addAmbient(n.id, 'g6', a.x, a.y, g6.x, g6.y, { color: CLUSTER_COLOR.pos, alpha: 0.4, width: 1.3, glow: true });
+    });
+
+    const g7 = gateScreen[6];
+    allNodes.filter((n) => n.cluster === 'exit').forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      addAmbient(n.id, 'g7', a.x, a.y, g7.x, g7.y, { color: CLUSTER_COLOR.exit, alpha: 0.22, width: 0.9 });
+    });
+    allNodes.filter((n) => n.cluster === 'exit_tally').forEach((n) => {
+      const a = screen[n.id]; if (!a) return;
+      const w = 0.6 + Math.min(2.2, Math.log((n.count || 1) + 1) * 0.6);
+      addAmbient(n.id, 'g7', a.x, a.y, g7.x, g7.y, { color: CLUSTER_COLOR.exit_tally, alpha: 0.28, width: w, glow: true });
+    });
+
+    const g8 = gateScreen[7];
+    ['action', 'obs', 'orbit', 'axis'].forEach((cl) => {
+      allNodes.filter((n) => n.cluster === cl).forEach((n) => {
+        const a = screen[n.id]; if (!a) return;
+        addAmbient(n.id, 'g8', a.x, a.y, g8.x, g8.y, { color: CLUSTER_COLOR[cl], alpha: 0.16, width: 0.6 });
+      });
+    });
+
+    // Real lifecycle chains — open trades (bright, pulsing) + closed-trade
+    // aggregate (width by real frequency). graft 4 (radial LINEAGE_HUES): the
+    // open-lifecycle strands get a small deterministic hue spread instead of
+    // one flat mix, so several bundling into the same G6/G7 endpoint stay
+    // distinguishable once additive-blended rather than washing to white.
+    const closedPairCount = new Map();
+    (data.lifecycle_paths || []).forEach((p) => {
+      const ids = p.node_ids;
+      if (p.kind === 'open') {
+        for (let i = 0; i < ids.length - 1; i++) {
+          const a = screen[ids[i]], b = screen[ids[i + 1]];
+          if (!a || !b) continue;
+          const key = ids[i] + '->' + ids[i + 1];
+          const hue = LINEAGE_HUES[Math.floor(rngFor(key + ':hue')() * LINEAGE_HUES.length)];
+          addAmbient(ids[i], ids[i + 1], a.x, a.y, b.x, b.y, { color: hue, alpha: 0.5, width: 1.4, glow: true, kind: 'live-open' });
+        }
+      } else {
+        for (let i = 0; i < ids.length - 1; i++) {
+          const key = ids[i] + '->' + ids[i + 1];
+          closedPairCount.set(key, (closedPairCount.get(key) || 0) + 1);
+        }
+      }
+    });
+    closedPairCount.forEach((count, key) => {
+      const [fromId, toId] = key.split('->');
+      const a = screen[fromId], b = screen[toId];
+      if (!a || !b) return;
+      const w = 0.5 + Math.min(2.6, Math.log(count + 1) * 0.8);
+      addAmbient(fromId, toId, a.x, a.y, b.x, b.y, { color: mixHex((nodeById[fromId] && CLUSTER_COLOR[nodeById[fromId].cluster]) || '#d7d787', CLUSTER_COLOR.exit_tally || '#ff87af', 0.5), alpha: 0.16 + Math.min(0.22, count * 0.01), width: w });
+    });
+
+    buildWhisperMesh();
+  }
+
+  /* ===== micro-pulse pool — the unbroken current ===== */
+  const MAX_PULSES = 46;
+  const pulses = [];
+  function spawnPulse() {
+    if (pulses.length >= MAX_PULSES || !ambientEdges.length) return;
+    pulses.push({ e: ambientEdges[Math.floor(Math.random() * ambientEdges.length)], t: 0, speed: 0.10 + Math.random() * 0.16 });
+  }
+  function stepPulses(dt) {
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      pulses[i].t += pulses[i].speed * dt;
+      if (pulses[i].t >= 1) pulses.splice(i, 1);
+    }
+    if (Math.random() < 0.62) spawnPulse();
+  }
+
+  function markFire(id, ms) {
+    if (!id) return;
+    if (/^g\d$/.test(id)) {
+      const gs = gateScreen[parseInt(id[1], 10) - 1];
+      if (gs) gs.fireUntil = Math.max(gs.fireUntil, performance.now() + ms);
+      return;
+    }
+    const s = screen[id];
+    if (!s) return;
+    s.fireUntil = Math.max(s.fireUntil, performance.now() + ms);
+    activeGlowIds.add(id);
+  }
+  // Returns null (not a partial list) unless EVERY hop resolves, so callers
+  // never render a comet that silently skips a missing hop. `reversed` marks
+  // segments only found under the opposite cache key (fromId/toId swapped —
+  // e.g. exit_tally nodes are wired tally->g7, but an exit comet travels
+  // g7->tally) so the renderer samples the bezier at (1-t), not t — without
+  // this a reversed segment would visually TELEPORT to its far end at t=0.
+  function pathEdges(ids) {
+    const es = [];
+    for (let i = 0; i < ids.length - 1; i++) {
+      const fwd = edgeCache.get(ids[i] + '->' + ids[i + 1]);
+      if (fwd) { es.push({ e: fwd, a: ids[i], b: ids[i + 1], reversed: false }); continue; }
+      const rev = edgeCache.get(ids[i + 1] + '->' + ids[i]);
+      if (rev) { es.push({ e: rev, a: ids[i], b: ids[i + 1], reversed: true }); continue; }
+      return [];
+    }
+    return es;
+  }
+
+  /* ===== draw: background + static field (called once into staticCtx) ===== */
+  function drawBackground(ctx) {
+    ctx.globalCompositeOperation = 'source-over';
+    const g = ctx.createRadialGradient(W * 0.5, H * 0.46, H * 0.05, W * 0.5, H * 0.5, H * 0.95);
+    g.addColorStop(0, '#0a1420'); g.addColorStop(0.55, '#060a14'); g.addColorStop(1, '#03040a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+  function drawEdge(ctx, e, alphaMul) {
+    ctx.beginPath();
+    ctx.moveTo(e.x1, e.y1);
+    ctx.bezierCurveTo(e.c1x, e.c1y, e.c2x, e.c2y, e.x2, e.y2);
+    ctx.strokeStyle = (alphaMul == null || alphaMul === 1) ? e.strokeStyle : rgba(e.color, e.alpha * alphaMul);
+    ctx.lineWidth = e.width;
+    if (e.glow) { ctx.shadowColor = e.shadowColor; ctx.shadowBlur = 5; }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+  function drawDot(ctx, x, y, r, color, alpha, glowBlur) {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(color, alpha);
+    if (glowBlur) { ctx.shadowColor = color; ctx.shadowBlur = glowBlur; }
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  // Static texture — background edges + the 'mkt' dust field only (baked
+  // once; the single biggest per-frame cost at this node count).
+  function renderStaticLayer(staticCtx) {
+    drawBackground(staticCtx);
+    ambientEdges.forEach((e) => { if (e.kind !== 'live-open' && e.kind !== 'feedback') drawEdge(staticCtx, e, 1); });
+    allNodes.forEach((node) => {
+      if (node.cluster !== 'mkt') return;
+      const s = screen[node.id];
+      if (!s) return;
+      drawDot(staticCtx, s.x, s.y, s.r, s.color, s.baseAlpha, 0);
+    });
+  }
+  // Per-frame: the live-pulsing edges (open-lifecycle + the gold feedback
+  // strand), the micro-pulse pool riding the ambient mesh, graft 1c's
+  // per-frame parallax bob on every NAMED (non-dust) node, and glow decay on
+  // any node/gate a comet recently touched.
+  function drawField(ctx, now, dt) {
+    ambientEdges.forEach((e) => {
+      if (e.kind === 'live-open') drawEdge(ctx, e, 0.75 + Math.sin(now / 500) * 0.15);
+      else if (e.kind === 'feedback') drawEdge(ctx, e, 0.8 + Math.sin(now / 900) * 0.2); // gold strand breathes
+    });
+    ctx.globalCompositeOperation = 'lighter';
+    pulses.forEach((p) => {
+      const pt = bezierPoint(p.e, p.t);
+      const fade = Math.sin(Math.min(1, p.t) * Math.PI);
+      drawDot(ctx, pt.x, pt.y, 1.1, p.e.color.startsWith('#') ? p.e.color : GATE_HALO, 0.32 * fade, 3);
+    });
+    ctx.globalCompositeOperation = 'source-over';
+    stepPulses(dt);
+    for (const id of livingIds) {
+      const s = screen[id];
+      if (!s) continue;
+      const bx = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
+      const by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
+      drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    activeGlowIds.forEach((id) => {
+      const s = screen[id];
+      if (!s) { activeGlowIds.delete(id); return; }
+      const fireT = Math.max(0, Math.min(1, (s.fireUntil - now) / 900));
+      if (fireT <= 0.01) { activeGlowIds.delete(id); return; }
+      const alpha = Math.min(1, s.baseAlpha + fireT * 0.55);
+      const r = s.r + fireT * s.r * 0.9;
+      drawDot(ctx, s.x, s.y, r * 1.9, s.color, fireT * 0.22, 0);
+      drawDot(ctx, s.x, s.y, r, s.color, alpha, 8 + fireT * 10);
+    });
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  window.PolarisSpineField = {
+    setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
+    markFire, pathEdges, rgba, drawDot, bezierPoint,
+    gateScreen: () => gateScreen,
+    clusterColor: () => CLUSTER_COLOR,
+    findNode: (pred) => allNodes.find(pred),
+    nodeById: (id) => nodeById[id],
+  };
+})();

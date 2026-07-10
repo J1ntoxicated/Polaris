@@ -171,6 +171,39 @@ def append_sample(
     )
 
 
+def append_samples_batch(
+    conn: sqlite3.Connection,
+    rows: Iterable[tuple[str, str, str, int, float]],
+) -> int:
+    """Bulk twin of ``append_sample`` — one ``executemany`` for many rows.
+
+    Each row is ``(instrument_id, underlying_group_id, metric, ts, value)``.
+    Same INSERT OR REPLACE statement/table/idempotency contract as
+    ``append_sample`` (upsert on (instrument_id, metric, ts)) — only the
+    write API is batched (a row-by-row ``execute`` loop -> one
+    ``executemany`` call), which cuts the per-statement Python/C round-trip
+    overhead a large ingest batch pays while holding the caller's (DBWriter
+    SAVEPOINT / batch) transaction open. No transaction control here — same
+    as ``append_sample``, whatever the caller already opened stays as-is.
+    Returns the row count submitted; empty input is a no-op (0 calls).
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return 0
+    for _iid, _gid, metric, _ts, _val in rows_list:
+        if metric not in ALLOWED_METRICS:
+            raise ValueError(f"unknown metric {metric!r}")
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO ticker_baseline_samples
+            (instrument_id, underlying_group_id, metric, ts, value)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [(iid, gid, metric, ts, float(val)) for iid, gid, metric, ts, val in rows_list],
+    )
+    return len(rows_list)
+
+
 def read_samples_window(
     conn: sqlite3.Connection,
     *,

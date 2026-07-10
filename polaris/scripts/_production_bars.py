@@ -205,6 +205,45 @@ TIMEFRAME_FETCH_CADENCE_SEC: dict[str, float] = {
     "1D": 3600.0,  # daily bars close once/day — hourly re-pull is ample.
 }
 
+# Cadence PHASE offset (forensic wf_1f586d0a tick-body fix #2, Jin 2026-07-10).
+# 5m/15m/1H cadences (30s/60s/300s) share a common multiple (LCM=300s), so
+# without a phase offset all three buckets become "due" on the SAME epoch
+# tick every 300s, stacking their DB writes into one instant — a measured
+# contributor to the write-lock contention behind the 45.2s median tick body.
+# The offset shifts WHEN within each cadence period a bucket becomes due —
+# the FREQUENCY (how often) is completely unchanged, so this is NOT a
+# throttle (flow_not_block: every bucket still fires exactly once per its own
+# cadence). 5m keeps offset 0 as the reference; 15m/1H are shifted away from
+# it AND from each other (see ``is_timeframe_due_epoch`` — the three due-sets
+# are proven pairwise disjoint over one full LCM period by
+# ``test_cadence_phase_offset.py``). A timeframe absent here (1m/4H/1D)
+# defaults to 0 (byte-identical to no offset) — only the LCM-colliding trio
+# is targeted.
+TIMEFRAME_FETCH_PHASE_OFFSET_SEC: dict[str, float] = {
+    "15m": 10.0,
+    "1H": 20.0,
+}
+
+
+def is_timeframe_due_epoch(timeframe: str, now_epoch: int) -> bool:
+    """Pure, stateless epoch-mod cadence-due check honouring the phase offset.
+
+    ``True`` iff ``now_epoch`` (seconds-epoch UTC) falls on this timeframe's
+    due slot: ``(now_epoch - offset) % cadence == 0``. Same cadence/frequency
+    as ``TIMEFRAME_FETCH_CADENCE_SEC`` — only the phase within the period
+    shifts per ``TIMEFRAME_FETCH_PHASE_OFFSET_SEC``. Used as an ADDITIVE
+    bootstrap gate (see ``ingest_bars_per_timeframe``'s ``now_epoch`` param) —
+    it never replaces the existing per-(timeframe,venue) monotonic
+    since-last-fetch cadence tracking, it only spreads the very first
+    due-instant for the LCM-colliding buckets so their steady-state firing
+    stays staggered forever after.
+    """
+    cadence = int(TIMEFRAME_FETCH_CADENCE_SEC.get(timeframe, 5.0))
+    if cadence <= 0:
+        return True
+    offset = int(TIMEFRAME_FETCH_PHASE_OFFSET_SEC.get(timeframe, 0.0)) % cadence
+    return (int(now_epoch) - offset) % cadence == 0
+
 # Default per-fetch bar count. Intraday timeframes keep 240 (the Alpaca free-tier
 # window that avoids stale-tail / 429 pressure). 1D needs MORE: the deepest 1D
 # strategy warmup is equity_52wk_high_breakout (HIGH_LOOKBACK 252 + 1 = 253
@@ -671,6 +710,7 @@ async def ingest_bars_per_timeframe(
     alpaca_adapter: Any = None,
     limit: int = 240,
     now_mono: float | None = None,
+    now_epoch: int | None = None,
     skip_if_current: set[tuple[str, str]] | None = None,
     gpt_client_factory: Any = None,
     db_writer: DBWriter | None = None,
@@ -680,6 +720,16 @@ async def ingest_bars_per_timeframe(
     Honours ``TIMEFRAME_FETCH_CADENCE_SEC`` so each timeframe bucket only
     fetches when its cadence is due. ``last_fetch_monotonic_by_tf`` and
     ``bars_persisted_by_tf`` are mutated in place (caller owns lifetimes).
+
+    ``now_epoch`` (forensic wf_1f586d0a fix #2, OPT-IN — ``None`` keeps
+    byte-identical legacy behaviour): when given, the FIRST-EVER fetch for a
+    (timeframe, venue) key additionally waits for
+    ``is_timeframe_due_epoch(timeframe, now_epoch)`` before firing, instead of
+    firing immediately. This staggers the cold-start due-instant for the
+    LCM-colliding buckets (5m/15m/1H); once a bucket has fired once, its
+    normal monotonic-since-last-fetch cadence tracking (below) takes over and
+    the staggered phase persists for the life of the process. A bucket with
+    zero offset (1m/5m/4H/1D) is unaffected either way.
 
     ``skip_if_current`` (Alpaca 429 fix, 2026-06-24): forwarded to
     ``ingest_bars_for_focus`` — a set of ``(venue, bar_interval)`` whose symbols
@@ -716,6 +766,15 @@ async def ingest_bars_per_timeframe(
             tf_venue_key = f"{timeframe}:{venue}"
             last_v = last_fetch_monotonic_by_tf.get(tf_venue_key)
             if last_v is not None and (mono - last_v) < cadence:
+                continue
+            # Cold-start phase stagger (fix #2, opt-in via now_epoch): only
+            # gates the FIRST-EVER fetch for this key — once fired, the
+            # since-last-fetch check above governs every subsequent tick.
+            if (
+                last_v is None
+                and now_epoch is not None
+                and not is_timeframe_due_epoch(timeframe, now_epoch)
+            ):
                 continue
             focus_for_v = [t for t in focus if t[0] == venue]
             if not focus_for_v:

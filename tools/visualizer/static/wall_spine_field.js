@@ -141,12 +141,12 @@
     // galactic band sweeps the top; strategies are bright knots ALONG it and
     // ticker clouds elongate along the band tangent so neighbouring
     // constellations blend into a single streak.
-    const bandY = (x) => H * 0.21 + Math.sin((x / W) * Math.PI * 1.35 + 0.7) * H * 0.075;
+    const bandY = (x) => H * 0.23 + Math.sin((x / W) * Math.PI * 1.35 + 0.7) * H * 0.095;
     const stratsOrdered = hashShuffle(byCluster.strat);
     stratsOrdered.forEach((n, i) => {
       const r = rngFor(n.id + ':knot');
       const x = W * 0.05 + ((i + 0.5) / stratsOrdered.length) * W * 0.90 + (r() - 0.5) * W * 0.02;
-      screen[n.id] = { x, y: bandY(x) + (r() - 0.5) * H * 0.05 };
+      screen[n.id] = { x, y: bandY(x) + (r() - 0.5) * H * 0.09 };
     });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
@@ -170,25 +170,39 @@
         const st = pool[i % pool.length];
         stratCount.set(st.id, (stratCount.get(st.id) || 0) + 1);
       });
-      ticks.forEach((n, i) => {
+      // Two layers (Jin 2026-07-10 "디밍된 전체를 백그라운드에 깔고,
+      // 후보들만 밝게"): CANDIDATES (firing / recent signals / focus-tier /
+      // hot intensity) ride their strategy knot in the band; the REST of the
+      // tradable universe spreads WIDE and dim underneath as the backdrop.
+      const isCandidate = (n) => n.state === 'firing'
+        || (n.signal_count_30m || 0) > 0
+        || (n.intensity || 0) >= 0.45
+        || n.tier_label === 'S' || n.tier_label === 'A' || n.tier_label === 'B';
+      const cands = ticks.filter(isCandidate);
+      const backdrop = ticks.filter((n) => !isCandidate(n));
+      jitteredBand(backdrop, W * 0.02, W * 0.98, H * 0.04, H * 0.46, ':bg' + vk, 0.9);
+      backdrop.forEach((n) => {
+        screen[n.id].bgLayer = true; // 강한 디밍 (알파 계산에서)
+        const st = pool[Math.floor(rngFor(n.id + ':bgst')() * pool.length)];
+        tickerStrat.set(n.id, st.id); // 발화 시 이주 목적지는 유지
+      });
+      cands.forEach((n, i) => {
         const st = pool[i % pool.length];
         const k = perStratIdx.get(st.id) || 0;
         perStratIdx.set(st.id, k + 1);
-        const total = stratCount.get(st.id) || 1;
+        const total = Math.max(1, Math.ceil(cands.length / pool.length));
         const r = rngFor(n.id + ':orb');
-        // elongated gaussian along the band (x-sigma scales with cluster
-        // size; y stays thin) -> the clouds run together as ONE streak.
         const gauss = () => (r() + r() + r() - 1.5) / 1.5;
-        const xSig = Math.min(120, 34 + 9 * Math.sqrt(total));
+        const xSig = Math.min(150, 46 + 11 * Math.sqrt(total));
         const dx = gauss() * xSig;
-        const dy = gauss() * 15;
+        const dy = gauss() * 26;
         const sc = screen[st.id];
         const x = Math.max(8, Math.min(W - 8, sc.x + dx));
         const y = Math.max(14, Math.min(H * 0.47,
-          sc.y + dy + (bandY(x) - bandY(sc.x)))); // follow the band curve
+          sc.y + dy + (bandY(x) - bandY(sc.x))));
         screen[n.id] = { x, y };
-        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / 15) * (dy / 15)));
-        screen[n.id].coreBoost = prox; // 코어일수록 밝게
+        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / 26) * (dy / 26)));
+        screen[n.id].coreBoost = prox;
         tickerStrat.set(n.id, st.id);
       });
     });
@@ -252,6 +266,7 @@
         const cb = s.coreBoost || 0;
         s.r = 1.15 + depth * 0.55 + cb * 0.45;
         s.baseAlpha = 0.16 + depth * 0.09 + (node.intensity || 0.3) * 0.12 + cb * 0.11;
+        if (s.bgLayer) { s.baseAlpha *= 0.42; s.r = Math.min(s.r, 1.35); } // 배경 유니버스 강한 디밍
       } else if (node.cluster === 'watch') {
         s.r = 2.0 + depth * 0.4;
         s.baseAlpha = 0.35 + (node.intensity || 0.4) * 0.25;

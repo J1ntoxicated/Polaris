@@ -128,6 +128,8 @@
     }
     for (const key of Array.from(dormant.keys())) if (!seenD.has(key)) dormant.delete(key);
     for (const key of Array.from(positions.keys())) if (!seenP.has(key)) positions.delete(key);
+    // days-long wall use: universe rotation would otherwise slow-grow this map
+    for (const [t, key] of Array.from(tickerToKey.entries())) if (!seenD.has(key)) tickerToKey.delete(t);
     rebuildDormantRenderList();
   }
 

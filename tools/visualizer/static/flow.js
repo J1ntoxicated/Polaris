@@ -117,11 +117,17 @@
     if (g && s.id === 7 && typeof g.exits_n === 'number') return g.exits_n;
     return stageTotal(s);
   }
+  // window label derives from the payload (10m rolling per Jin 2026-07-10
+  // "실시간 숫자" — never a hardcoded "/h").
+  function windowLabel() {
+    const sec = (stats && stats.window_sec) || 600;
+    return sec % 3600 === 0 ? (sec / 3600) + 'h' : Math.round(sec / 60) + 'm';
+  }
   function subOf(s) {
     const g = s.gate ? statsByGate[s.id] : null;
     if (!g) return '';
     if (s.id === 5 && typeof g.kill_n === 'number') return 'KILL ' + g.kill_n;
-    if (s.id === 6 && typeof g.checks_n === 'number') return g.checks_n + ' checks/h';
+    if (s.id === 6 && typeof g.checks_n === 'number') return g.checks_n + ' checks/' + windowLabel();
     if (s.id === 7 && typeof g.holds_n === 'number') return 'HOLD ' + g.holds_n;
     return '';
   }
@@ -198,6 +204,8 @@
   function renderDrops(d) {
     const totEl = document.getElementById('drop-total');
     const rowsEl = document.getElementById('drop-rows');
+    const winEl = document.getElementById('drop-window');
+    if (winEl) winEl.textContent = 'DROP LANE (' + windowLabel() + ')';
     if (!rowsEl) return;
     const drops = (d.drops || []).slice(0, 3);
     if (totEl) totEl.textContent = String((d.summary && d.summary.drops_total) || 0);

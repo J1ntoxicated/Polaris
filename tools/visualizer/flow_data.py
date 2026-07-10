@@ -34,7 +34,10 @@ from polaris.scripts.dashboard.snapshot_q_gate_feed import (
 
 __all__ = ["build_flow_stats", "FLOW_WINDOW_SEC"]
 
-FLOW_WINDOW_SEC: Final[int] = 3600
+# 10-min rolling window (Jin 2026-07-10 "실시간 화면 표시된 숫자로, 1시간
+# 누적 말고") — the funnel must breathe with the screen. Clients label from
+# the payload's window_sec, never a hardcoded "/h".
+FLOW_WINDOW_SEC: Final[int] = 600
 _TOP_DROPS_N: Final[int] = 8
 _VERDICTS_N: Final[int] = 3
 

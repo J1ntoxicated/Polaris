@@ -25,8 +25,8 @@ from __future__ import annotations
 from polaris.scripts._production_tick import _all_strategies, keep_on_bar_path
 from polaris.strategies import STRATEGY_REGISTRY
 
-# The KILLed / unvalidated strategies: registered (module + close path preserved)
-# but dispatch_eligible=False so they emit no NEW entry.
+# The KILLed / unvalidated / VIRTUAL-only strategies: registered (module + close
+# path preserved) but dispatch_eligible=False in REAL so they emit no NEW entry.
 #   rsi_bb_pullback — fee-fatal intraday crypto (no OOS/fee hurdle), confirmed KILL.
 #   ema_crossover — fee-fatal 1H crypto trend-template (gross +$0.12 < fee $2.37 per
 #     round-trip): the cross edge does not clear the OKX taker fee. KILLed 2026-06-28
@@ -34,6 +34,11 @@ from polaris.strategies import STRATEGY_REGISTRY
 #     no-emit pattern as rsi_bb_pullback — module + open-position close path preserved.
 #   supertrend / connors_rsi2 / cci_reversion — unvalidated (design rationale only),
 #     and never in the old dispatch literal (False = unchanged behaviour).
+#   equity_donchian55_breakout / equity_xsect_52w_momentum / equity_etf_trend_pullback
+#     — Alpaca equity sleeve Wave 1a (디베이트 R2, 2026-07-11), NOT a KILL: no real
+#     capital/fees in VIRTUAL, so ``dispatch_eligible=virtual_loosen(True, False)``
+#     — REAL byte-identical off (same VIRTUAL-only mechanism as connors_rsi2 /
+#     supertrend above), VIRTUAL fully dispatches.
 KILLED_IDS = frozenset(
     {
         "rsi_bb_pullback",
@@ -41,6 +46,9 @@ KILLED_IDS = frozenset(
         "supertrend",
         "connors_rsi2",
         "cci_reversion",
+        "equity_donchian55_breakout",
+        "equity_xsect_52w_momentum",
+        "equity_etf_trend_pullback",
     }
 )
 

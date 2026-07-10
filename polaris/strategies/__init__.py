@@ -17,6 +17,17 @@ Track A — OKX SPOT:
     weekend_funding_positioning_mean_reversion, 1H, WEEKEND-only maker — the 2nd
     weekend edge, positioning-axis, shadow-first #80)
 
+Track C — Alpaca US equity (1D, VIRTUAL-only dispatch — REAL byte-identical
+off, per ``dispatch_eligible=virtual_loosen(True, False)``):
+  - ``equity_donchian55_breakout``  (correlation_group=equity_donchian55_trend,
+    1D — per-venue clone of okx_donchian_55_breakout math, shadow_w40/w80
+    measurement-only tags)
+  - ``equity_xsect_52w_momentum``   (correlation_group=equity_xsect_52w_momentum,
+    1D — 252-bar prior-high + 2-close persistence + ATR follow-through)
+  - ``equity_etf_trend_pullback``   (correlation_group=equity_etf_trend_continuation,
+    1D — per-venue clone of macd_ema_trend_pullback math, fixed SPY/QQQ/GLD
+    universe, tsmom_12_1 shadow tags)
+
 Track B — Capital CFD:
   - ``fx_breakout_basket``     (correlation_group=cfd_fx_trend)
   - ``xau_indices_trend``      (correlation_group=cfd_index_commodity_trend)
@@ -107,8 +118,17 @@ from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
 from polaris.strategies.donchian_turtle_breakout import DonchianTurtleBreakoutStrategy
 from polaris.strategies.ema_crossover import EMACrossoverStrategy
 from polaris.strategies.equity_52wk_high_breakout import Equity52WkHighBreakoutStrategy
+from polaris.strategies.equity_donchian55_breakout import (
+    EquityDonchian55BreakoutStrategy,
+)
+from polaris.strategies.equity_etf_trend_pullback import (
+    EquityEtfTrendPullbackStrategy,
+)
 from polaris.strategies.equity_vol_expansion_pocket_pivot import (
     EquityVolExpansionPocketPivotStrategy,
+)
+from polaris.strategies.equity_xsect_52w_momentum import (
+    EquityXsect52wMomentumStrategy,
 )
 from polaris.strategies.fx_breakout_basket import FXBreakoutBasketStrategy
 from polaris.strategies.gold_breakout_1h import GoldBreakout1HStrategy
@@ -182,6 +202,19 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     SilverBreakout1HStrategy.metadata.strategy_id: SilverBreakout1HStrategy,
     US100Breakout1HStrategy.metadata.strategy_id: US100Breakout1HStrategy,
     UK100Breakout1HStrategy.metadata.strategy_id: UK100Breakout1HStrategy,
+    # Track C — Alpaca equity sleeve, Wave 1a (디베이트 R2 수렴 로스터 §1 #1-#3).
+    # VIRTUAL-only dispatch (dispatch_eligible=virtual_loosen(True, False) —
+    # REAL byte-identical off), registered unconditionally (dispatch_eligible
+    # is the single dispatch SSOT, not registry membership).
+    EquityDonchian55BreakoutStrategy.metadata.strategy_id: (
+        EquityDonchian55BreakoutStrategy
+    ),
+    EquityXsect52wMomentumStrategy.metadata.strategy_id: (
+        EquityXsect52wMomentumStrategy
+    ),
+    EquityEtfTrendPullbackStrategy.metadata.strategy_id: (
+        EquityEtfTrendPullbackStrategy
+    ),
 }
 
 # VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09): the
@@ -232,7 +265,10 @@ __all__ = [
     "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",
     "Equity52WkHighBreakoutStrategy",
+    "EquityDonchian55BreakoutStrategy",
+    "EquityEtfTrendPullbackStrategy",
     "EquityVolExpansionPocketPivotStrategy",
+    "EquityXsect52wMomentumStrategy",
     "FXBreakoutBasketStrategy",
     "GoldBreakout1HStrategy",
     "GoldRiskoffTrendAmplifyStrategy",

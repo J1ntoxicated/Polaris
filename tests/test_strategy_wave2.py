@@ -638,7 +638,10 @@ def test_registry_has_20_strategies() -> None:
     # B1 prune (2026-07-06, live-ledger forensic, -$2,024 book loss):
     # -session_breakout/-donchian_turtle_breakout/-equity_52wk_high_breakout/
     # -equity_vol_expansion_pocket_pivot (100.9% of the loss): 25 → 21.
-    assert len(STRATEGY_REGISTRY) == 21
+    # Alpaca equity sleeve Wave 1a (디베이트 R2, 2026-07-11): +equity_donchian55_
+    # breakout/+equity_xsect_52w_momentum/+equity_etf_trend_pullback (VIRTUAL-only
+    # dispatch, registered unconditionally): 21 → 24.
+    assert len(STRATEGY_REGISTRY) == 24
 
 
 def test_wave2_all_registered() -> None:

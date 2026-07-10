@@ -162,6 +162,43 @@ def _survivor_admissions_recent(conn: sqlite3.Connection, *, since: int) -> list
     ]
 
 
+def _strategy_activity(conn: sqlite3.Connection, *, since: int) -> list[dict[str, Any]]:
+    """Per-(venue, strategy_id) 1h activity — signal admissions (G2 PASS) +
+    entry fills — feeds the /flow "Flat Neural Map" page's Z2 strategy-node
+    activity sizing (Jin 2026-07-10, feat/flat-neural-map). Two independent
+    ``_safe_query`` calls (own JOIN, not the shared ``rows`` fetch above) so a
+    ``signals``/``fills`` table missing ``strategy_id`` (older DB generation)
+    degrades this field to ``[]`` without touching the existing gate/fill
+    reads elsewhere in this module."""
+    counts: dict[tuple[str, str], dict[str, int]] = {}
+
+    def bump(venue: str, sid: str, field: str) -> None:
+        if not sid:
+            return
+        counts.setdefault((venue, sid), {"signals_n": 0, "fills_n": 0})[field] += 1
+
+    for inst, sid in _safe_query(
+        conn,
+        """SELECT s.instrument_id, s.strategy_id FROM gate_events ge
+           JOIN signals s ON s.signal_id = ge.signal_id
+           WHERE ge.gate_id = 2 AND ge.decision = 'PASS' AND ge.created_ts > ?""",
+        (since,),
+    ):
+        bump(_venue_of(None, inst), str(sid or ""), "signals_n")
+
+    for venue, sid in _safe_query(
+        conn,
+        "SELECT venue, strategy_id FROM fills WHERE ts_ms > ? AND is_close = 0",
+        (since * 1000,),
+    ):
+        bump(_venue_of(str(venue or ""), None), str(sid or ""), "fills_n")
+
+    return [
+        {"venue": v, "strategy_id": sid, **c}
+        for (v, sid), c in sorted(counts.items())
+    ]
+
+
 def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     """Assemble the ``/api/flow_stats`` payload (read-only, degrade-never-crash)."""
     since = now_s - FLOW_WINDOW_SEC
@@ -259,6 +296,7 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
     verdicts.sort(key=lambda v: -int(v["ts"]))
     classes = _class_rows(conn)
     survivor_admissions = _survivor_admissions_recent(conn, since=since)
+    strategy_activity = _strategy_activity(conn, since=since)
 
     stages: list[dict[str, Any]] = []
     for g in sorted(_GATE_LABELS):
@@ -292,6 +330,7 @@ def build_flow_stats(conn: sqlite3.Connection, *, now_s: int) -> dict[str, Any]:
         "verdicts_recent": verdicts[:_VERDICTS_N],
         "classes": classes,
         "survivor_admissions_recent": survivor_admissions,
+        "strategy_activity": strategy_activity,
         "summary": {
             "signals_n": signals_n, "sized_n": sized_n, "fills_n": fills_n,
             "signal_to_sized_pct": _pct(sized_n, signals_n),

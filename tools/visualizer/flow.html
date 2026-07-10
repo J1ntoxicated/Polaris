@@ -7,16 +7,19 @@
 <title>★ POLARIS · FLOW</title>
 <link rel="stylesheet" href="static/polaris.css"/>
 <style>
-  /* "Cloud River" (Jin 2026-07-10, feat/cloud-river — supersedes the earlier
-     "Director Mode" 3D globe + river combo): the globe is gone, replaced by
-     a flat horizontal particle field (canvas#cloud-canvas, cloud.js +
-     cloud_fx.js) sharing the SAME stage-column x-axis as the pipeline river
-     below it (flow.js publishes window.PolarisWallLayout — see flow.js's
-     publishWallLayout()). Page is now a 30/70 split: left = the /m mobile
-     board embedded live via iframe (always-visible summary for an unattended
-     monitor), right = the cloud+river+HUD stack. ?nomobile=1 hides the
-     iframe and gives the wall stack the full width. English UI, Bloomberg-
-     dense, polaris.css tokens only. */
+  /* "Flat Neural Map" (Jin 2026-07-10, feat/flat-neural-map — supersedes the
+     earlier "Cloud River" 3-venue-band layout): the cloud pane is now a
+     single wide field read as a system blueprint (Z1 UNIVERSE .. Z2
+     STRATEGIES .. Z3 GATES .. Z4 EXECUTION .. Z5 EXIT/LEARN — see cloud.js +
+     cloud_nodes.js + cloud_fx.js), venue distinguished by color only (the
+     .wall-venues legend chip below). The pipeline river pane underneath is
+     UNCHANGED and no longer shares an x-axis with the cloud pane above it —
+     a 5-zone blueprint and an 8-column funnel are different visual
+     languages, so each owns its own geometry now. Page is still a 30/70
+     split: left = the /m mobile board embedded live via iframe (always-
+     visible summary for an unattended monitor), right = the cloud+river+HUD
+     stack. ?nomobile=1 hides the iframe and gives the wall stack the full
+     width. English UI, Bloomberg-dense, polaris.css tokens only. */
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: #05070b; color: var(--p-wht);
@@ -28,8 +31,19 @@
   .mobile-pane {
     flex: 0 0 30%; height: 100%; min-width: 0;
     border-right: 1px solid var(--ghost); overflow: hidden; background: #05070b;
+    display: flex; flex-direction: column;
   }
-  .mobile-pane iframe { display: block; width: 100%; height: 100%; border: 0; }
+  .mobile-pane iframe { display: block; width: 100%; flex: 1 1 auto; border: 0; min-height: 0; }
+  /* "OPEN FULL BOARD" link bar — Jin 2026-07-10: the /flow -> board path was
+     only discoverable via the cloud-pane's BOARD button; this gives the
+     mobile-summary pane its own obvious way out to the full desktop board. */
+  .mobile-pane .open-board-bar {
+    flex: 0 0 auto; display: block; text-align: center;
+    padding: 5px 0; font-size: 9.5px; letter-spacing: 0.06em;
+    color: var(--polaris-blue); text-decoration: none;
+    border-top: 1px solid var(--ghost); background: rgba(95,135,175,0.08);
+  }
+  .mobile-pane .open-board-bar:hover { background: rgba(95,135,175,0.18); color: var(--p-wht); }
   .wall-col { flex: 1 1 70%; height: 100%; min-width: 0; }
   .wall-page.nomobile .mobile-pane { display: none; }
   .wall-page.nomobile .wall-col { flex: 1 1 100%; }
@@ -52,10 +66,23 @@
   }
   .wall-topbar .brand { display: flex; align-items: center; gap: 6px; font-weight: 700; letter-spacing: 0.12em; font-size: 11px; white-space: nowrap; }
   .wall-topbar .brand .star { color: var(--polaris-blue); font-size: 14px; }
-  .wall-pagenav { display: flex; gap: 12px; font-size: 10px; letter-spacing: 0.06em; white-space: nowrap; }
+  /* BOARD link — Jin 2026-07-10: "링크가 안 보임", button-ized (border+bg,
+     bigger target) instead of a bare dim-text nav item. */
+  .wall-pagenav { display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: 0.06em; white-space: nowrap; }
   .wall-pagenav a { color: var(--p-dim); text-decoration: none; }
   .wall-pagenav a.active { color: var(--polaris-blue); }
   .wall-pagenav a:hover { color: var(--p-wht); }
+  .wall-pagenav a.board-btn {
+    color: var(--p-wht); border: 1px solid var(--polaris-blue); border-radius: 3px;
+    padding: 3px 9px; font-weight: 700; background: rgba(95,135,175,0.14);
+  }
+  .wall-pagenav a.board-btn:hover { background: rgba(95,135,175,0.28); color: var(--p-wht); }
+  /* Venue color-only legend chip (Jin: bands are gone, "베뉴는 색으로만 구분"). */
+  .wall-venues { display: flex; gap: 9px; font-size: 9px; color: var(--p-gry); white-space: nowrap; }
+  .wall-venues span::before { content: '●'; margin-right: 3px; }
+  .wall-venues .v-okx { color: #5fdfff; }
+  .wall-venues .v-cap { color: #a87cff; }
+  .wall-venues .v-alp { color: #ffc84f; }
   .wall-summary { display: flex; gap: 14px; margin-left: auto; font-size: 9.5px; color: var(--p-gry); flex-wrap: wrap; }
   .wall-summary .lbl { color: var(--p-dim); margin-right: 4px; }
   .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -123,18 +150,6 @@
   #drop-panel .row { display: flex; justify-content: space-between; padding: 1px 0; }
   #drop-panel .row .n { color: var(--p-wht); font-variant-numeric: tabular-nums; }
   #drop-panel .empty { color: var(--p-dim); font-style: italic; }
-
-  #verdict-ticker {
-    position: absolute; right: 8px; top: 32px; z-index: 9;
-    width: 230px; font-size: 9px; text-align: right;
-    background: rgba(5,7,11,0.7); border: 1px solid var(--ghost); padding: 5px 8px;
-  }
-  #verdict-ticker .row { padding: 1px 0; color: var(--p-gry); }
-  #verdict-ticker .row .g { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
-  #verdict-ticker .row.dim .v { color: var(--p-dim); }
-  #verdict-ticker .row.green .v { color: var(--pnl-pos); font-weight: 700; }
-  #verdict-ticker .row.amber .v { color: var(--p-ylw); font-weight: 700; }
-  #verdict-ticker .row.magenta .v { color: var(--p-mag); font-weight: 700; }
 
   /* Per-strategy score_F window-fill gauge strip — river's own bottom edge. */
   #class-gauge-strip {
@@ -205,8 +220,11 @@
         <div class="wall-topbar">
           <div class="brand"><span class="star">★</span>POLARIS · FLOW</div>
           <div class="wall-pagenav">
-            <a href="/">‹ BOARD</a>
+            <a href="/" class="board-btn">‹ BOARD</a>
             <a href="/flow" class="active">FLOW</a>
+          </div>
+          <div class="wall-venues">
+            <span class="v-okx">OKX</span><span class="v-cap">CAPITAL</span><span class="v-alp">ALPACA</span>
           </div>
           <div class="wall-summary" id="summary-strip">
             <span><span class="lbl">SIG→SIZED</span><span class="val" id="s-sig2sized">–</span></span>
@@ -239,10 +257,6 @@
           <div id="drop-rows"><div class="empty">no drops in window</div></div>
         </div>
 
-        <div id="verdict-ticker">
-          <div class="row dim">no AI verdicts in window</div>
-        </div>
-
         <div id="class-gauge-strip"></div>
       </div>
 
@@ -270,19 +284,29 @@
     var f = document.createElement('iframe');
     f.src = '/m'; f.title = 'Polaris mobile board'; f.loading = 'lazy';
     pane.appendChild(f);
+    var bar = document.createElement('a');
+    bar.className = 'open-board-bar'; bar.href = '/'; bar.textContent = 'OPEN FULL BOARD ›';
+    pane.appendChild(bar);
   })();
 </script>
 
 <!-- Shared SSE bus (one /stream/events socket for the whole page) + river
-     (flow.js, publishes the stage-column layout contract) + pts-classes
-     annotations (flow_classes.js, MUST load before flow.js) + the cloud
-     field + its fx layer (cloud_fx.js MUST load before cloud.js, which
-     subscribes to flow.js's layout contract + the shared SSE bus). -->
+     (flow.js, unrelated geometry to the cloud pane now — see the header
+     comment above) + pts-classes annotations (flow_classes.js, MUST load
+     before flow.js) + the Flat Neural Map: cloud_fx.js (pure fx primitives)
+     -> cloud_nodes.js (Z2..Z5 structural nodes/wiring, reads window.
+     PolarisCloudFx) -> cloud.js (canvas/rAF owner + Z1 reservoir, reads both
+     window.PolarisCloudFx and window.PolarisCloudNodes). flow.js forwards
+     AI verdicts into cloud_nodes via a runtime `if (window.PolarisCloudNodes)`
+     check, so load order between flow.js and the cloud_* trio doesn't matter
+     for that hook specifically — kept after flow_classes.js only to match
+     the page's existing top-to-bottom pane order. -->
 <script src="static/events_bus.js?v=1"></script>
 <script src="static/flow_classes.js?v=1"></script>
-<script src="static/flow.js?v=3_cloud"></script>
-<script src="static/cloud_fx.js?v=1"></script>
-<script src="static/cloud.js?v=1"></script>
+<script src="static/flow.js?v=4_flatmap"></script>
+<script src="static/cloud_fx.js?v=2_flatmap"></script>
+<script src="static/cloud_nodes.js?v=1"></script>
+<script src="static/cloud.js?v=2_flatmap"></script>
 <script>
   // Both flow.js and cloud.js fit to canvas clientWidth/Height; after layout
   // settles, nudge resize twice (rAF + delayed) so fit() picks up the grid-

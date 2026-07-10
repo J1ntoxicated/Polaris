@@ -1,44 +1,45 @@
-/* Polaris FLOW — "Cloud River" horizontal ticker field (Jin 2026-07-10,
- * feat/cloud-river). Replaces the old 3D globe (canvas#sphere + globe-core/
- * satellites/flows/funnel.js) on /flow — this is a flat, canvas-2D particle
- * field that shares the SAME x-axis as flow.js's river below it (stage
- * columns G1..G8, published as ``window.PolarisWallLayout`` — see flow.js's
- * publishWallLayout) so the two panes read as one continuous pipeline.
+/* Polaris FLOW — "Flat Neural Map" (Jin 2026-07-10, feat/flat-neural-map).
+ * Supersedes the earlier "Cloud River" 3-band layout: venue is now color-only
+ * (a small legend chip, no lanes) and the pane reads as a single wide system
+ * blueprint — Z1 UNIVERSE (this file's reservoir) .. Z2 STRATEGIES .. Z3
+ * GATES .. Z4 EXECUTION .. Z5 EXIT/LEARN (all four owned by cloud_nodes.js).
+ * This file owns the canvas/rAF loop (calls cloud_nodes.tick()/draw() and
+ * cloud_fx.tick()/draw() once a frame — 3 modules, ONE loop), the zone
+ * geometry, the Z1 ticker reservoir simulation (jittered-grid placement so
+ * ~900 dots never stack — see assignGrid), and the INBOUND ticker-dot
+ * journey (Z1 -> its strategy node -> the G2..G5 gate chain -> the Z4 hub).
+ * cloud_nodes.js owns the OUTBOUND leg (hub -> G7 -> G8 -> lesson particle)
+ * because it already tracks the open-position orbit that leg starts from.
  *
- * Coordinate system:
- *   X = pipeline stage (G1 Universe .. G8 Reflector), same pixel as the
- *       river's own gate columns below.
- *   Y = venue band, 3 rows (OKX cyan top / Capital purple mid / Alpaca amber
- *       bottom — same colors as the river's lanes).
+ * The pane below (flow.js's river) is UNCHANGED — this pane no longer shares
+ * its x-axis with it (the old "same stage-column pixel" contract made sense
+ * for a 3-band river; a 5-zone system blueprint is a different visual
+ * language, so this file now owns its own independent zone geometry).
  *
- * Data (all EXISTING endpoints — no server change):
- *   /static/graph.json  (~1s warm cache) → the dynamic universe roster.
- *     cluster:"mkt"  = the full tradable universe (dormant background dots).
- *     cluster:"pos"  = open positions (G6 MONITOR hover dots).
- *   /stream/events (shared bus, events_bus.js) → gate_events (stage warp) +
- *     fills entry/exit (hit flash / exit fx / kill feed).
- *   /api/flow_stats (30s TTL, matches flow.js's poll) → survivor_admissions_
- *     recent (loot-beam "new candidate" pop).
- *
- * Effects (radar ping / loot beam / hit flash / sparkle/shatter burst / kill
- * feed / floating damage numbers) live in cloud_fx.js — all dot-anchored,
- * this file owns the dot simulation + the ONE rAF loop that also drives fx.
+ * Data (all EXISTING endpoints — no server change beyond flow_data.py's
+ * additive `strategy_activity` field):
+ *   /static/graph.json  (3s poll) → cluster:"mkt" (Z1 reservoir) + cluster:
+ *     "pos" (forwarded to cloud_nodes.setRoster for the Z4 orbit).
+ *   /api/flow_stats (this file's OWN 5s poll — pollAdmissions, matches the
+ *     server's 5s TTL — NOT forwarded from flow.js) → `classes` +
+ *     `strategy_activity` (Z2 nodes) + `stages` (Z3/Z5 counts).
+ *   /stream/events (shared bus) → gate_events (Z1->Z2/Z3 glide) + fills
+ *     entry (Z1->Z4 glide) + exit (forwarded straight to cloud_nodes.onExit).
  *
  * Display-only. Nothing here issues, sizes, gates or throttles a trade.
  */
 (function () {
   const canvas = document.getElementById('cloud-canvas');
   const fx = window.PolarisCloudFx;
-  if (!canvas || !fx) return;
+  const nodes = window.PolarisCloudNodes;
+  if (!canvas || !fx || !nodes) return;
   const ctx = canvas.getContext('2d');
 
-  const VENUES = ['okx', 'capital', 'alpaca'];
   const VCOLOR_RGB = { okx: [0x5f, 0xdf, 0xff], capital: [0xa8, 0x7c, 0xff], alpaca: [0xff, 0xc8, 0x4f] };
-  const VLABEL = { okx: 'OKX', capital: 'CAP', alpaca: 'ALP' };
+  const VENUES = ['okx', 'capital', 'alpaca'];
 
-  const CLOUD_DOT_CAP = 600;           // render cap (spec) — dormant field is sampled above this
-  const DECAY_MS = 180000;             // 3min idle -> ease back to the G1 reservoir
-  const G7_HOLD_MS = 900, G8_HOLD_MS = 700; // exit sequence hold at each stage before advancing
+  const CLOUD_DOT_CAP = 900;           // spec allowance 600->900 (verified 60fps in preview, see notes)
+  const DECAY_MS = 180000;             // 3min idle -> ease back to the Z1 reservoir grid slot
 
   function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -49,39 +50,36 @@
     if (e === 'alp') return 'alpaca';
     return 'okx';
   }
-  // Same ticker-cleaning convention as fills/mkt-nodes across this codebase
-  // ("venue:SYM-QUOTE" -> "SYM") so gate-event symbols join the roster map.
   function cleanSymbol(sym) { return String(sym || '').split(':').pop().split('-')[0]; }
 
-  // ── Canvas fit (devicePixelRatio-aware, mirrors flow.js/globe-core) ──────
+  // ── Canvas fit + zone geometry (independent of the river pane below) ────
   let dpr = Math.min(2, window.devicePixelRatio || 1);
   let W = 0, H = 0;
-  let laneY = {};
+  let zones = null;       // {z1:{x0,x1}, z2:{...}, ...}
+  let paneTop = 50, paneBottom = 500, cy = 275;
+  const ZONE_FRAC = { z1: [0.00, 0.22], z2: [0.24, 0.44], z3: [0.46, 0.64], z4: [0.66, 0.81], z5: [0.83, 0.97] };
+  const ZONE_LABEL = { z1: 'UNIVERSE', z2: 'STRATEGIES', z3: 'GATES', z4: 'EXECUTION', z5: 'EXIT · LEARN' };
+
   function fit() {
     W = canvas.clientWidth; H = canvas.clientHeight;
     canvas.width = Math.floor(W * dpr); canvas.height = Math.floor(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const top = 46, bottom = Math.max(top + 40, H - 20);
-    VENUES.forEach((v, i) => { laneY[v] = top + (bottom - top) * (i / (VENUES.length - 1)); });
+    zones = {};
+    for (const k of Object.keys(ZONE_FRAC)) {
+      zones[k] = { x0: ZONE_FRAC[k][0] * W, x1: ZONE_FRAC[k][1] * W };
+    }
+    const geo = nodes.layout(W, H, zones);
+    paneTop = geo.paneTop; paneBottom = geo.paneBottom; cy = geo.cy;
+    rebuildDormantRenderList();
   }
   window.addEventListener('resize', fit);
-  fit();
 
-  // stageX comes from flow.js's shared layout contract (published before
-  // this script runs, and republished on every resize via 'wall-layout').
-  function stageXAt(idx) {
-    const layout = window.PolarisWallLayout;
-    if (layout && layout.stageX && layout.stageX[idx] != null) return layout.stageX[idx];
-    const margin = 50, usable = Math.max(100, W - 2 * margin); // pre-layout fallback
-    return margin + (idx * usable) / 7;
-  }
-
-  // ── Roster state ──────────────────────────────────────────────────────
-  const dormant = new Map();      // key -> dot   (cluster:"mkt", the universe reservoir)
-  const positions = new Map();    // key -> dot   (cluster:"pos", open positions)
-  const tickerToKey = new Map();  // bare ticker -> dormant key (G1..G5 gate-event lookup)
-  let dormantRenderList = [];     // stride-sampled subset actually drawn (dot cap)
-  const exiting = [];             // transient dots mid G7->G8->respawn sequence
+  // ── Z1 reservoir state ───────────────────────────────────────────────
+  const dormant = new Map();      // key -> dot (cluster:"mkt")
+  const tickerToKey = new Map();  // bare ticker -> dormant key
+  let idleList = [];              // grid-assigned idle subset actually drawn
+  let dormantRenderList = [];     // idleList + any mid-journey dots
+  let meshEdges = [];             // [dotA, dotB] faint Z1-internal neighbor links
 
   function strideSample(arr, cap) {
     if (arr.length <= cap || cap <= 0) return cap <= 0 ? [] : arr;
@@ -91,16 +89,45 @@
     return out;
   }
   function rebuildDormantRenderList() {
+    if (!zones) return;
     const all = Array.from(dormant.values());
-    const activeSet = all.filter((d) => d.stage !== 0 || d.warpT < 1);
-    const idle = all.filter((d) => d.stage === 0 && d.warpT >= 1);
-    const budget = Math.max(0, CLOUD_DOT_CAP - positions.size - activeSet.length);
-    dormantRenderList = strideSample(idle, budget).concat(activeSet);
+    const activeSet = all.filter((d) => d.restX != null || d.t < 1);
+    const idleAll = all.filter((d) => d.restX == null && d.t >= 1);
+    const budget = Math.max(0, CLOUD_DOT_CAP - activeSet.length);
+    idleList = strideSample(idleAll, budget);
+    dormantRenderList = idleList.concat(activeSet);
+    assignGrid();
+  }
+  // Jittered grid ("blue-noise-ish") placement — Jin 2026-07-10: dots must
+  // read as individually countable, never a stacked blob. Each idle dot gets
+  // a stable grid cell (index-derived, so it doesn't jump between polls) +
+  // a per-dot jitter CLAMPED to a fraction of the cell so neighbors never
+  // overlap even after drift — no physics engine needed.
+  function assignGrid() {
+    const z1 = zones.z1, w = z1.x1 - z1.x0, h = paneBottom - paneTop;
+    const n = idleList.length;
+    if (!n) { meshEdges = []; return; }
+    const cols = Math.max(1, Math.round(Math.sqrt((n * w) / h)));
+    const rows = Math.max(1, Math.ceil(n / cols));
+    const cw = w / cols, ch = h / rows;
+    idleList.forEach((dot, i) => {
+      const col = i % cols, row = Math.floor(i / cols);
+      dot.gx = z1.x0 + cw * (col + 0.5) + dot.jx * cw * 0.34;
+      dot.gy = paneTop + ch * (row + 0.5) + dot.jy * ch * 0.34;
+      dot.cellW = cw; dot.cellH = ch;
+    });
+    meshEdges = [];
+    const MAX_MESH = 260;
+    for (let i = 0; i < n && meshEdges.length < MAX_MESH; i++) {
+      if ((i + 1) % cols !== 0 && i + 1 < n && i % 2 === 0) meshEdges.push([idleList[i], idleList[i + 1]]);
+      if (i + cols < n && i % (cols * 2) === 0) meshEdges.push([idleList[i], idleList[i + cols]]);
+    }
   }
 
-  function ingestRoster(nodes) {
-    const seenD = new Set(), seenP = new Set();
-    for (const n of nodes || []) {
+  function ingestRoster(rosterNodes) {
+    const seenD = new Set();
+    const posList = [];
+    for (const n of rosterNodes || []) {
       if (!n || !n.ticker || !n.exchange) continue;
       const venue = venueOf(n.exchange);
       if (n.cluster === 'mkt') {
@@ -109,27 +136,26 @@
         tickerToKey.set(n.ticker, key);
         if (!dormant.has(key)) {
           dormant.set(key, {
-            key, ticker: n.ticker, venue, stage: 0, x: null, y: null,
+            key, ticker: n.ticker, venue, x: null, y: null, gx: 0, gy: 0,
+            cellW: 20, cellH: 20, restX: null, restY: null, t: 1, dur: 0.3,
+            tx0: 0, ty0: 0, tx1: 0, ty1: 0, returning: false,
             driftSeed: Math.random() * 1000, twinkleSeed: Math.random() * 1000,
             jx: Math.random() - 0.5, jy: Math.random() - 0.5,
-            lastActivityTs: 0, warpFromX: 0, warpToX: 0, warpT: 1, warpDur: 0.3,
+            lastActivityTs: 0,
           });
         }
       } else if (n.cluster === 'pos') {
-        const key = 'p:' + n.exchange + ':' + n.ticker;
-        seenP.add(key);
-        const prev = positions.get(key);
-        positions.set(key, {
-          key, ticker: n.ticker, venue,
-          pnlUsd: n.pnl_usd || 0, sizeUsd: n.size_usd || 0,
-          bobSeed: prev ? prev.bobSeed : Math.random() * 1000,
-        });
+        // sid = strategy_id — the per-lot discriminator (venue:ticker alone
+        // collapses two open positions in the SAME instrument held by two
+        // DIFFERENT strategies into one orbit slot; review finding 2026-07-10
+        // — see cloud_nodes.js setRoster).
+        posList.push({ ticker: n.ticker, venue, pnlUsd: n.pnl_usd || 0, sid: n.strategy_id || '' });
       }
     }
     for (const key of Array.from(dormant.keys())) if (!seenD.has(key)) dormant.delete(key);
-    for (const key of Array.from(positions.keys())) if (!seenP.has(key)) positions.delete(key);
     // days-long wall use: universe rotation would otherwise slow-grow this map
     for (const [t, key] of Array.from(tickerToKey.entries())) if (!seenD.has(key)) tickerToKey.delete(t);
+    nodes.setRoster(posList);
     rebuildDormantRenderList();
   }
 
@@ -144,39 +170,44 @@
 
   function sweepDecay() {
     const now = performance.now();
-    let any = false;
     for (const dot of dormant.values()) {
-      if (dot.stage !== 0 && dot.warpT >= 1 && now - dot.lastActivityTs > DECAY_MS) {
-        triggerWarp(dot, 0);
-        any = true;
+      if (dot.restX != null && dot.t >= 1 && now - dot.lastActivityTs > DECAY_MS) {
+        triggerWarp(dot, { x: dot.gx, y: dot.gy }, true);
       }
     }
-    if (any) rebuildDormantRenderList();
   }
 
-  // ── Warp: 400-700ms ease forward-transition to a new stage column ───────
-  function triggerWarp(dot, targetStageIdx) {
-    dot.warpFromX = dot.x != null ? dot.x : stageXAt(dot.stage);
-    dot.warpToX = stageXAt(targetStageIdx);
-    dot.stage = targetStageIdx;
-    dot.warpT = 0;
-    dot.warpDur = 0.4 + Math.random() * 0.3;
+  // ── Warp: ease tween to a new (x,y) target — generalizes the old 1D
+  // "stage" warp to the 2D zone map. `returning` marks a decay/hold-timeout
+  // ease-back to the Z1 grid slot, so the draw loop knows to clear restX/Y
+  // (go fully idle) once the tween lands, instead of parking there. ────────
+  function triggerWarp(dot, point, returning) {
+    const curX = dot.x != null ? dot.x : dot.gx, curY = dot.y != null ? dot.y : dot.gy;
+    dot.tx0 = curX; dot.ty0 = curY;
+    dot.tx1 = point.x; dot.ty1 = point.y;
+    dot.t = 0; dot.dur = 0.4 + Math.random() * 0.3;
+    dot.restX = point.x; dot.restY = point.y;
+    dot.returning = !!returning;
     dot.lastActivityTs = performance.now();
   }
 
-  // ── survivor_admissions_recent (own poll, matches flow.js's 30s TTL) ─────
+  // ── survivor_admissions_recent + classes/stats (own 5s poll, matches the
+  // server's 5s TTL — Jin 2026-07-10 end-to-end <=5s realtime-sync mandate;
+  // NOT forwarded from flow.js, which polls the same endpoint separately) ──
   let lastAdmissionTs = 0, admissionsSeeded = false;
   async function pollAdmissions() {
     try {
       const r = await fetch('/api/flow_stats?t=' + Date.now(), { cache: 'no-store' });
       if (!r.ok) return;
       const d = await r.json();
+      nodes.setStats(d.classes || [], d.strategy_activity || [], d.stages || []);
       const list = d.survivor_admissions_recent || [];
       if (admissionsSeeded) {
         for (const a of list) {
-          if (a.ts > lastAdmissionTs) {
-            const venue = venueOf(a.venue);
-            fx.spawnLootBeam('adm:' + a.symbol, stageXAt(0), laneY[venue]);
+          if (a.ts > lastAdmissionTs && zones) {
+            const vi = VENUES.indexOf(venueOf(a.venue));
+            const ax = zones.z1.x0 + (zones.z1.x1 - zones.z1.x0) * 0.5;
+            fx.spawnLootBeam('adm:' + a.symbol, ax, cy + (vi - 1) * 16);
           }
         }
       }
@@ -185,162 +216,129 @@
     } catch (e) { /* display-only */ }
   }
 
-  // ── SSE: gate_events (stage warp) + fills entry/exit (fx sequences) ─────
+  // ── SSE: gate_events (Z1->strategy->gate-chain glide) + fills entry
+  // (Z1->hub glide, then ease back — the actual position orbit dot is a
+  // SEPARATE roster-driven object owned by cloud_nodes) + exit (forwarded
+  // straight through — cloud_nodes owns the whole outbound leg). ──────────
   function onGateEvent(g) {
-    const idx = (g.gate_id || 0) - 1;
-    if (idx < 0 || idx > 4) return; // only the pre-fill pipeline (G1..G5) lives in the dormant pool
+    if (!zones || g.gate_id < 2 || g.gate_id > 5) return;
     const key = tickerToKey.get(cleanSymbol(g.symbol));
     const dot = key && dormant.get(key);
     if (!dot) return;
-    dot.lastActivityTs = performance.now();
-    if (idx > dot.stage) {
-      triggerWarp(dot, idx);
-      rebuildDormantRenderList();
-      if (g.gate_id === 2) fx.spawnRadarPing(dot.warpToX, laneY[dot.venue], VCOLOR_RGB[dot.venue]);
-    }
+    let target = null;
+    if (g.gate_id === 2) target = (g.strategy && nodes.pointForStrategy(dot.venue, g.strategy)) || nodes.pointForGate(2);
+    else target = nodes.pointForGate(g.gate_id);
+    if (!target) return;
+    triggerWarp(dot, target, false);
+    if (g.gate_id === 2) fx.spawnRadarPing(target.x, target.y, VCOLOR_RGB[dot.venue]);
   }
   function onEntry(e) {
-    const venue = venueOf(e.exchange);
-    fx.spawnHitFlash(stageXAt(4), laneY[venue]); // G5 SIZE -> FILLS
-  }
-  function findPositionKeyByTicker(ticker) {
-    for (const [k, v] of positions) if (v.ticker === ticker) return k;
-    return null;
-  }
-  function onExit(e) {
-    const pnl = parseFloat(e.pnl_usd) || 0;
-    const venue = venueOf(e.exchange);
-    const posKey = findPositionKeyByTicker(e.ticker);
-    const prev = posKey ? positions.get(posKey) : null;
-    if (posKey) positions.delete(posKey); // graduated out of the G6 monitor lane
-    const dot = { key: 'exit:' + e.ticker + ':' + performance.now(), ticker: e.ticker, venue };
-    dot.x = stageXAt(6); dot.y = laneY[venue]; // G7 EXIT
-    exiting.push(dot);
-    fx.spawnHitFlash(dot.x, dot.y);
-    fx.spawnDamageNumber(dot.x, dot.y, pnl);
-    fx.pushKillFeed(e);
-    // Loss = local red shatter (dot-anchored) + kill feed line — this IS the
-    // killcam replacement per spec, not a full-screen vignette (abolished).
-    if (pnl >= 0) fx.spawnSparkleBurst(dot.key, dot.x, dot.y);
-    else fx.spawnShatter(dot.key, dot.x, dot.y);
-    setTimeout(() => {
-      dot.x = stageXAt(7); // G8 REFLECT
-      setTimeout(() => {
-        fx.spawnCometTail(dot.x, dot.y, stageXAt(0), laneY[dot.venue]);
-        const idx = exiting.indexOf(dot);
-        if (idx >= 0) exiting.splice(idx, 1);
-        // re-seed the reservoir dot back at G1 (comet-tail respawn, the
-        // "learning loop" — no-op if the ticker fell out of the roster).
-        const dkey = tickerToKey.get(e.ticker);
-        const ddot = dkey && dormant.get(dkey);
-        if (ddot) { ddot.stage = 0; ddot.warpT = 1; ddot.lastActivityTs = 0; }
-      }, G8_HOLD_MS);
-    }, G7_HOLD_MS);
-    void prev; // position's prior pnl/size not needed for the exit fx itself
+    const key = tickerToKey.get(e.ticker);
+    const dot = key && dormant.get(key);
+    if (!dot) return;
+    const target = nodes.pointForZ4Hub();
+    triggerWarp(dot, target, false);
+    fx.spawnHitFlash(target.x, target.y);
+    setTimeout(() => triggerWarp(dot, { x: dot.gx, y: dot.gy }, true), dot.dur * 1000 + 500);
   }
   function handleStream(payload) {
     for (const e of payload.events || []) {
       if (e.type === 'entry') onEntry(e);
-      else if (e.type === 'exit') onExit(e);
+      else if (e.type === 'exit') nodes.onExit(e);
     }
     for (const g of payload.gate_events || []) onGateEvent(g);
   }
 
-  // ── Draw: dormant reservoir + open positions + exiting + fx overlay ────
-  function drawVenueLabels() {
-    ctx.font = '700 8px JetBrains Mono, monospace';
-    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    for (const v of VENUES) {
-      ctx.fillStyle = rgba(VCOLOR_RGB[v], 0.55);
-      ctx.fillText(VLABEL[v], 6, laneY[v]);
+  // ── Draw: zone labels + Z1 reservoir (mesh + dots) ──────────────────────
+  function drawZoneLabels() {
+    ctx.font = '600 7px JetBrains Mono, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(140,148,164,0.5)';
+    for (const k of Object.keys(zones)) {
+      ctx.fillText(ZONE_LABEL[k], (zones[k].x0 + zones[k].x1) / 2, paneTop - 20);
     }
   }
-  // Glide afterimage — a few fading trail dots behind the glide's own path
-  // (NOT a radial line/speed line; Jin explicitly rejected "이상한 선 발사").
+  function drawMesh() {
+    ctx.strokeStyle = 'rgba(120,150,190,0.08)';
+    ctx.lineWidth = 1;
+    for (const [a, b] of meshEdges) {
+      if (a.x == null || b.x == null) continue;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
   function drawGlideTrail(x, y, dot) {
-    const dir = dot.warpToX >= dot.warpFromX ? -1 : 1;
-    const n = 3;
-    for (let i = 1; i <= n; i++) {
-      const a = (0.5 * (1 - dot.warpT)) * (1 - i / (n + 1));
+    const dx = dot.tx1 - dot.tx0, dy = dot.ty1 - dot.ty0;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ux = -dx / dist, uy = -dy / dist;
+    for (let i = 1; i <= 3; i++) {
+      const a = (0.5 * (1 - dot.t)) * (1 - i / 4);
       ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], a);
-      ctx.beginPath(); ctx.arc(x + dir * i * 3, y, 2 - i * 0.4, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + ux * i * 3, y + uy * i * 3, 2 - i * 0.4, 0, 6.2832); ctx.fill();
     }
   }
   function drawDormant(now) {
     for (const dot of dormantRenderList) {
-      dot.warpT = Math.min(1, dot.warpT + lastDt / dot.warpDur);
       let x, y;
-      if (dot.warpT < 1) {
-        x = lerp(dot.warpFromX, dot.warpToX, easeOutCubic(dot.warpT));
-        y = laneY[dot.venue];
+      if (dot.t < 1) {
+        dot.t = Math.min(1, dot.t + lastDt / dot.dur);
+        x = lerp(dot.tx0, dot.tx1, easeOutCubic(dot.t));
+        y = lerp(dot.ty0, dot.ty1, easeOutCubic(dot.t));
         drawGlideTrail(x, y, dot);
-      } else if (dot.stage === 0) {
-        const drift = Math.sin(now / 4000 + dot.driftSeed) * 14 + Math.cos(now / 6500 + dot.driftSeed) * 6;
-        x = stageXAt(0) + dot.jx * 34 + drift;
-        y = laneY[dot.venue] + dot.jy * 22 + Math.sin(now / 3000 + dot.driftSeed) * 4;
+        if (dot.t >= 1 && dot.returning) { dot.restX = null; dot.restY = null; dot.returning = false; }
+      } else if (dot.restX != null) {
+        x = dot.restX + Math.sin(now / 900 + dot.driftSeed) * 2;
+        y = dot.restY + Math.cos(now / 900 + dot.driftSeed) * 2;
       } else {
-        x = stageXAt(dot.stage); y = laneY[dot.venue];
+        const ampX = Math.min(18, dot.cellW * 0.4), ampY = Math.min(12, dot.cellH * 0.4);
+        x = dot.gx + Math.sin(now / 4000 + dot.driftSeed) * ampX;
+        y = dot.gy + Math.cos(now / 5200 + dot.driftSeed) * ampY;
       }
       dot.x = x; dot.y = y;
       const twinkle = 0.35 + 0.35 * Math.sin(now / 1400 + dot.twinkleSeed);
-      const idle = dot.stage === 0 && dot.warpT >= 1;
-      const alpha = idle ? 0.12 + twinkle * 0.18 : 0.85;
-      const r = idle ? 1.4 : 3;
+      const idle = dot.restX == null && dot.t >= 1;
+      const alpha = idle ? 0.14 + twinkle * 0.22 : 0.85;
+      const r = idle ? 1.5 : 3;
       ctx.fillStyle = rgba(VCOLOR_RGB[dot.venue], alpha);
       ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
     }
   }
-  function sizeBucket(usd) {
-    const a = Math.abs(usd || 0);
-    if (a >= 5000) return 7;
-    if (a >= 1500) return 5.5;
-    if (a >= 500) return 4.2;
-    return 3;
-  }
-  function drawPositions(now) {
-    const x = stageXAt(5); // G6 MONITOR
-    for (const dot of positions.values()) {
-      const y = laneY[dot.venue] + Math.sin(now / 1000 + dot.bobSeed) * 5;
-      const win = dot.pnlUsd >= 0;
-      const color = win ? [0x87, 0xff, 0xaf] : [0xff, 0x87, 0x87];
-      const alpha = 0.55 + Math.min(0.4, Math.abs(dot.pnlUsd) / 300);
-      dot.x = x; dot.y = y;
-      ctx.fillStyle = rgba(color, alpha);
-      ctx.beginPath(); ctx.arc(x, y, sizeBucket(dot.sizeUsd), 0, 6.2832); ctx.fill();
-    }
-  }
-  function drawExiting() {
-    for (const dot of exiting) {
-      ctx.fillStyle = 'rgba(242,246,255,0.9)';
-      ctx.beginPath(); ctx.arc(dot.x, dot.y, 4.5, 0, 6.2832); ctx.fill();
-    }
-  }
 
-  // Camera is fully fixed (Jin 2026-07-10 explicit: no zoom/Ken Burns/pan/
-  // shake/director-camera navigation) — no transform is applied here.
+  // Camera is fully fixed (Jin 2026-07-10 explicit: no zoom/pan/shake) — no
+  // transform is applied here.
   let lastT = performance.now();
   let lastDt = 0;
   function frame(now) {
     lastDt = Math.min(0.1, (now - lastT) / 1000);
     lastT = now;
     ctx.clearRect(0, 0, W, H);
-    drawVenueLabels();
+    nodes.tick(lastDt);
+    drawZoneLabels();
+    nodes.draw(ctx, now);
+    drawMesh();
     drawDormant(now);
-    drawPositions(now);
-    drawExiting();
     fx.tick(lastDt);
     fx.draw(ctx, W, H);
     requestAnimationFrame(frame);
   }
 
-  window.addEventListener('wall-layout', () => rebuildDormantRenderList());
+  // Playwright/manual-QA hook only (Jin 2026-07-10 verification checklist
+  // item 6 — confirm a real SSE gate_event actually warps a Z1 reservoir dot
+  // off its idle grid slot). Read-only, no behavioural effect.
+  window.PolarisCloud = {
+    debugDot(ticker) {
+      const key = tickerToKey.get(ticker);
+      const dot = key && dormant.get(key);
+      return dot ? { restX: dot.restX, restY: dot.restY, t: dot.t } : null;
+    },
+  };
 
   // ── Boot ─────────────────────────────────────────────────────────────
+  fit();
   pollRoster();
   setInterval(pollRoster, 3000);
   setInterval(sweepDecay, 5000);
   pollAdmissions();
-  setInterval(pollAdmissions, 30000);
+  setInterval(pollAdmissions, 5000); // classes/stats freshness (Jin: end-to-end <=5s)
   if (window.PolarisEvents) window.PolarisEvents.on(handleStream);
   requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(frame); });
 })();

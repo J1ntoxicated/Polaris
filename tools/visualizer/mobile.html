@@ -152,14 +152,24 @@
 
   /* Open Positions — chip · symbol · side · current(live) · profit · % · exp.
      Dropped ENTRY on phone (overflow fix); current price is what matters live.
-     Sums comfortably under a 375px viewport. */
+     Sums comfortably under a 375px viewport (and the 576px /flow iframe pane —
+     same fixed-px columns, just more margin). Column widths unchanged below
+     (px-fixed, not font-driven), so the density bump next doesn't introduce
+     new overflow — cells keep their existing ellipsis fallback either way. */
   .pos-grid {
     grid-template-columns: 24px minmax(34px,1fr) 14px 58px 58px 44px 44px;
   }
-  .row .a { color: var(--p-wht); }
+  /* Jin 2026-07-10 (feat/flat-neural-map, item 6): denser phone/iframe
+     readability for THIS table only (other sections keep the base density —
+     "카드화 금지/과밀 유지" mandate) — font 11->12.5px, row padding 4->6px,
+     symbol bold, P&L contrast up. */
+  .tr.pos-grid { font-size: 12.5px; padding: 6px 0; }
+  .row .a { color: var(--p-wht); font-weight: 700; }
   .row .b { color: var(--p-gry); font-size: 10px; text-align: center; }
   .row .pxc { color: var(--p-wht); font-size: 10px; text-align: right; }  /* current (live) */
   .row .sp  { text-align: right; }                                        /* profit */
+  .tr.pos-grid .sp.pos { color: #6bffa0; }
+  .tr.pos-grid .sp.neg { color: #ff7a7a; }
   .row .pct { font-size: 10px; text-align: right; }                       /* percent */
   .row .exp { color: var(--p-gry); font-size: 10px; text-align: right; }  /* exposure */
   /* Per-cell live-mark flash (SSE push): only a cell whose streamed value moved

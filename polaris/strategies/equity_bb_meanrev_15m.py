@@ -9,15 +9,17 @@ FIXED in both VIRTUAL and REAL; only ``dispatch_eligible`` loosens, same as
 every other Wave-1 Alpaca clone).
 
 Signaling-strategy contract (ADR-008): entry trigger ONLY. ``correlation_
-group_id="equity_bb_meanrev_15m"`` — the harvest exit is delivered by
-``profit_target_r=1.0`` directly (``exit_engine`` harvests at +1R regardless of
-the correlation-group REVERSION-bucket substring match; see ``connors_rsi2``'s
-own "reversion"-without-"mean_reversion" precedent in ``exit_thesis.py``), so
-the bounded-target behaviour holds even though this id's substring is
-"meanrev" rather than "mean_reversion"/"reversion". ``hold_overnight=False`` →
-EOD flatten is the BASE case (an intraday mean-revert bet is not a swing
-hold). ``expected_holding_bars=4``. flow_not_block: a clean trigger ALWAYS
-emits.
+group_id="equity_bb_mean_reversion_15m"`` — the id MUST carry the "reversion"
+substring (``exit_thesis.bucket_from_correlation_group``) so the exit
+archetype resolves to ``Bucket.REVERSION`` (bounded harvest schedule) instead
+of falling through to the ``Bucket.TREND`` let-winners-run default — the exact
+bug class fixed one day earlier for ``cci_reversion``/``connors_rsi2``
+([[exit_peak_lock_bind_2026-07-10]]). ``profit_target_r=1.0`` caps the
+entry's UPSIDE but does NOT by itself restore the reversion-side health/trail
+schedule — the substring match is REQUIRED, not redundant with the target.
+``hold_overnight=False`` → EOD flatten is the BASE case (an intraday
+mean-revert bet is not a swing hold). ``expected_holding_bars=4``.
+flow_not_block: a clean trigger ALWAYS emits.
 
 ENTRY (15m bar close, LONG-only, deterministic, no look-ahead) requires ALL:
   (1) ``equity_liquidity_ok(bars, 26)`` (T1+T2 value-based liquidity floor —
@@ -104,7 +106,9 @@ class EquityBbMeanrev15mStrategy(BaseStrategy):
         expected_holding_bars=4,
         asset_class="equity",
         venue="alpaca",
-        correlation_group_id="equity_bb_meanrev_15m",
+        # "reversion" substring REQUIRED — bucket_from_correlation_group()
+        # routes on this exact string, not strategy_id (2026-07-11 fix).
+        correlation_group_id="equity_bb_mean_reversion_15m",
         product_class="equity",
         hold_overnight=False,
         profit_target_r=REVERT_TARGET_R,

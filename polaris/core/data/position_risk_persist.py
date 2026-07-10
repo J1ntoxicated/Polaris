@@ -50,14 +50,17 @@ def persist_position_risk_state(
 
     ``open_risk_pct`` is the notional as a fraction of equity — this is the
     field every cap (per-symbol / underlying / cluster / track) sums over. The
-    ``cluster_id`` is resolved from the same deterministic map the sizer uses so
-    a position contributes to its cluster cap exactly as the headroom check
-    expects.
+    ``cluster_id`` is resolved from the same deterministic map the sizer uses
+    (``strategy_id=strategy`` included — see the sizer's own ``engine.py:878``
+    call — so an equity meanrev-sleeve position persists as
+    ``equity:meanrev``, not the ``equity:beta_trend`` default) so a position
+    contributes to its cluster cap exactly as the headroom check expects.
     """
     cluster_id = resolve_cluster_id(
         underlying_group_id=underlying_group_id,
         asset_class=asset_class,
         symbol=symbol,
+        strategy_id=strategy,
     )
     open_risk_pct = (notional_usd / equity_usd) if equity_usd > 0.0 else 0.0
     conn.execute(

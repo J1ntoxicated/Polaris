@@ -73,7 +73,7 @@ class RetentionRule:
 #   disk-growth driver and need only a few days of decision lookback — a single
 #   1200d cutoff over the WHOLE table would retain ~3.3y of 1m rows (Jin's disk
 #   concern). Each interval's window = its consumer lookback
-#   (``_production_bars._ALPACA_LOOKBACK_DAYS``: 1D=330, 1H=45, 15m=8, 5m=4, 1m=2)
+#   (``_production_bars._ALPACA_LOOKBACK_DAYS``: 1D=440, 1H=45, 15m=8, 5m=4, 1m=2)
 #   + margin for the counterfactual sweep (reads 1m at decision_ts+24h +3d grace
 #   ≈ 4d old) and weekend/session gaps. SIGNAL LOOKBACK FULLY PRESERVED:
 #     - 1m/5m/15m → 30d (≫ the ≤8d read + ~4d CF sweep; bounds the dense streams);
@@ -120,7 +120,7 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
                   "4H swing canvas: deep ③ OKX-native backfill (~3.3y)",
                   bar_interval="4H"),
     RetentionRule("bars", "ts", 1200 * _DAY,
-                  "1D canvas: 330d + MA200 warmup + deep ③ backfill (~3.3y)",
+                  "1D canvas: 440d + equity_xsect_52w warmup + deep ③ backfill (~3.3y)",
                   bar_interval="1D"),
     # Catch-all: any interval NOT enumerated above keeps the deep 1200d window
     # (never silently over-pruned). bar_interval=None → whole-table; idempotent

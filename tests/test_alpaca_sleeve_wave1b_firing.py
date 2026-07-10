@@ -89,7 +89,7 @@ def test_new_correlation_group_ids_unique_across_registry() -> None:
 
     ids = [cls.metadata.correlation_group_id for cls in STRATEGY_REGISTRY.values()]
     assert len(ids) == len(set(ids)), "correlation_group_id collision in registry"
-    assert "equity_bb_meanrev_15m" in ids
+    assert "equity_bb_mean_reversion_15m" in ids
     assert "equity_orb_open" in ids
 
 

@@ -27,7 +27,7 @@ per ``dispatch_eligible=virtual_loosen(True, False)``):
   - ``equity_etf_trend_pullback``   (correlation_group=equity_etf_trend_continuation,
     1D — per-venue clone of macd_ema_trend_pullback math, fixed SPY/QQQ/GLD
     universe, tsmom_12_1 shadow tags)
-  - ``equity_bb_meanrev_15m``       (correlation_group=equity_bb_meanrev_15m,
+  - ``equity_bb_meanrev_15m``       (correlation_group=equity_bb_mean_reversion_15m,
     15m — Wave 1b, FIRST Alpaca 15m strategy; rsi_bb_pullback shape clone,
     rth_interior gate, profit_target_r=1.0 BB-midline harvest)
   - ``equity_opening_range_breakout`` (correlation_group=equity_orb_open,

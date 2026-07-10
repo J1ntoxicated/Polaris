@@ -230,10 +230,24 @@ def test_metadata_matches_spec_table() -> None:
     assert md.asset_class == "equity"
     assert md.venue == "alpaca"
     assert md.product_class == "equity"
-    assert md.correlation_group_id == "equity_bb_meanrev_15m"
+    assert md.correlation_group_id == "equity_bb_mean_reversion_15m"
     assert md.hold_overnight is False
     assert md.profit_target_r == 1.0
     assert md.loss_cooldown_bars == 8
+
+
+def test_correlation_group_id_resolves_to_reversion_bucket() -> None:
+    # 2026-07-11 fix: the id must carry the "reversion" substring so
+    # bucket_from_correlation_group() routes it to Bucket.REVERSION (bounded
+    # harvest schedule) instead of the Bucket.TREND let-run default — the
+    # exact bug class already fixed once for cci_reversion/connors_rsi2
+    # ([[exit_peak_lock_bind_2026-07-10]]). profit_target_r=1.0 alone does
+    # NOT restore the reversion health/trail schedule.
+    from polaris.core.live_recalc.exit_thesis import bucket_from_correlation_group
+    from polaris.core.live_recalc.exit_types import Bucket
+
+    md = EquityBbMeanrev15mStrategy.metadata
+    assert bucket_from_correlation_group(md.correlation_group_id) is Bucket.REVERSION
 
 
 def test_dispatch_eligible_is_virtual_only() -> None:

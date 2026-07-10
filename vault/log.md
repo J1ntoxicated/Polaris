@@ -400,3 +400,4 @@
 - 2026-07-11: 알파카 슬리브 디베이트 R2 수렴(5전략+인프라 5종, gross-neg 3종 부활금지) → 빌드 wf_184cbfca 가동. 진단: 데이터 정상(4,200심볼) vs 로스터 3개(전부 1D)=병목. 보드 BOT LOG 제거(ba2ce18). 스프레드 인제스트 버그 티켓 분리.
 2026-07-10 18:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=378 learners=3 paper=True]
 - 2026-07-11: 알파카 슬리브 랜딩 — 5전략+인프라 머지(d76cab8, Opus 3렌즈 전원 APPROVE_WITH_NITS, 타깃 238 pass) → 봇 즉시 재기동(PID 87922, 부팅 클린) + 대시 재시작(로스터 31, ALP 8). 15m 웜업: #4 다수 즉시 가능(중앙값 463/205), #5 ORB ~30일 램프. 발화 워처 가동.
+- 2026-07-11: /flow 콘솔 v2 랜딩(96becbd) — 워크플로 23에이전트(감사4→설계3→심판3→빌드→적대3렌즈×3라운드)+컨덕터 마감(브리드 오타·매트릭스 피치·래더 log·셀 RAMP 폴백). 신규 readouts/lanes 모듈, 크라운=스트립 $296k 정합, 라이브 에러 0. 알파카 슬리브 첫 진입 GOOG/GOOGL $6k(connors) 관측.

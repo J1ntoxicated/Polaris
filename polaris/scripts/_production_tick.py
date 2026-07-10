@@ -467,6 +467,26 @@ def _strategies_by_timeframe(
 # bug if a caller reused it.
 
 
+# Forensic wf_1f586d0a tick-body fix #3 (Jin 2026-07-10): the OUTER tick loop
+# (``production_paper_loop.py``) wraps the WHOLE ``_run_tick`` call in ONE
+# try/except — so a fault ANYWHERE inside this function (100/100 sampled
+# aborts were ``database is locked``) discarded every stage's work for the
+# rest of the tick, not just the failing stage. The discrete stages below
+# each get their OWN try/except so one stage's transient fault (e.g. a
+# momentary write-lock collision) no longer cancels the stages that would
+# otherwise still run this tick. This is fault ISOLATION/observability, not a
+# throttle — a healthy tick's behaviour is byte-identical.
+def _log_tick_stage_fault(stage: str, tick_idx: int, exc: BaseException) -> None:
+    """Log a per-stage tick fault with the STAGE NAME + exception detail (not
+    repr-only — the pre-fix outer catch-all logged only ``%r``, which could
+    not distinguish which of dozens of possible statements inside a stage
+    actually failed)."""
+    logger.error(
+        "[tick %d] stage=%s failed: %s: %s",
+        tick_idx, stage, type(exc).__name__, exc,
+    )
+
+
 async def _run_tick(
     *,
     conn: sqlite3.Connection,
@@ -548,7 +568,7 @@ async def _run_tick(
         last_fetch_monotonic_by_tf=state.last_fetch_monotonic_by_tf,
         bars_persisted_by_tf=state.bars_persisted_by_tf,
         capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        limit=240, now_mono=now_mono,
+        limit=240, now_mono=now_mono, now_epoch=now_ts,
         skip_if_current=skip_if_current,
         gpt_client_factory=default_gpt_factory,
         db_writer=state.db_writer,
@@ -591,20 +611,32 @@ async def _run_tick(
     # reads/affects any entry/exit/sizing decision.
     if now_mono - state.last_cf_sweep_monotonic >= CF_SWEEP_THROTTLE_SEC:
         state.last_cf_sweep_monotonic = now_mono
-        await sweep_forward_marks(conn, now_ts=now_ts)
+        try:
+            await sweep_forward_marks(conn, now_ts=now_ts)
+        except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+            _log_tick_stage_fault("cf_sweep_forward_marks", tick_idx, exc)
+            state.fault_events += 1
 
-    await run_recalc_for_active_positions(conn, now_ts=now_ts)
+    try:
+        await run_recalc_for_active_positions(conn, now_ts=now_ts)
+    except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+        _log_tick_stage_fault("recalc_active_positions_deterministic", tick_idx, exc)
+        state.fault_events += 1
     # Day 9 F1+F2 — live recalc loop with G6/G7 GPT per-position invocation.
     # Replaces the entry-time-only G6 wiring + FIFO-oldest close path with a
     # per-tick AI supervisory pass over every active position. Phase=P1
     # forwards the GPT client; phase=P0 keeps decisions deterministic.
-    await recalc_active_positions(
-        conn, state=state, now_ts=now_ts, gpt_client=haiku, phase=phase,
-        lookup_regime=_lookup_regime, close_specific=close_specific_position,
-        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-        tick_idx=tick_idx,
-    )
+    try:
+        await recalc_active_positions(
+            conn, state=state, now_ts=now_ts, gpt_client=haiku, phase=phase,
+            lookup_regime=_lookup_regime, close_specific=close_specific_position,
+            real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+            capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+            tick_idx=tick_idx,
+        )
+    except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+        _log_tick_stage_fault("recalc_active_positions_ai", tick_idx, exc)
+        state.fault_events += 1
     # spec_b — symbols with an OPEN position are NEVER session/idle-skipped in
     # the regime pass below (their regime must keep updating for the live
     # exit/swap path regardless of session or fanout-idle state). Computed
@@ -640,23 +672,32 @@ async def _run_tick(
         # tune / WS-recv burst yields. No behavior change: no DB transaction spans
         # this point (each conn.execute here auto-commits).
         await asyncio.sleep(0)
-        # Data-proactive (Jin 2026-06-27): a STALE 1m store refetches live instead
-        # of skipping the symbol (cooldown-gated; storm/OKX-429 safe). A FRESH read
-        # is byte-identical to the prior ``read_recent_bars`` (no fetch).
-        bars_1m = await read_recent_bars_ondemand(
-            conn, venue=venue, symbol=symbol, asset_class=asset_class,
-            bar_interval="1m",
-            freshness_threshold_sec=staleness_threshold_for("1m"),
-            capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-            gpt_client_factory=default_gpt_factory, now_mono=now_mono,
-        )
-        if not bars_1m:
+        # fix #3: isolate ONE symbol's regime-compute fault (e.g. a transient
+        # DB-lock on read_recent_bars_ondemand's stale-refetch persist) from
+        # aborting the regime pass for every OTHER focus symbol.
+        try:
+            # Data-proactive (Jin 2026-06-27): a STALE 1m store refetches live
+            # instead of skipping the symbol (cooldown-gated; storm/OKX-429
+            # safe). A FRESH read is byte-identical to the prior
+            # ``read_recent_bars`` (no fetch).
+            bars_1m = await read_recent_bars_ondemand(
+                conn, venue=venue, symbol=symbol, asset_class=asset_class,
+                bar_interval="1m",
+                freshness_threshold_sec=staleness_threshold_for("1m"),
+                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                gpt_client_factory=default_gpt_factory, now_mono=now_mono,
+            )
+            if not bars_1m:
+                continue
+            regime_by_group[(venue, group_id)] = compute_and_flip_regime(
+                conn, venue=venue, underlying_group_id=group_id,
+                bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
+                asset_class=asset_class, hint_stats=state.regime_hint_stats,
+            )
+        except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+            _log_tick_stage_fault(f"regime_compute[{venue}:{symbol}]", tick_idx, exc)
+            state.fault_events += 1
             continue
-        regime_by_group[(venue, group_id)] = compute_and_flip_regime(
-            conn, venue=venue, underlying_group_id=group_id,
-            bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
-            asset_class=asset_class, hint_stats=state.regime_hint_stats,
-        )
 
     universe_rows: list[dict[str, Any]] = []
     cur = conn.execute(
@@ -797,34 +838,45 @@ async def _run_tick(
             # the heaviest SYNC stretch in the tick — yield between symbols so the
             # tick engine + WS are not starved for the duration of the fan-out.
             await asyncio.sleep(0)
-            # Data-proactive (Jin 2026-06-27): a STALE strategy-timeframe store
-            # refetches live instead of skipping (cooldown-gated; storm/OKX-429
-            # safe). A FRESH read is byte-identical to the prior path (no fetch).
-            bars = await read_recent_bars_ondemand(
-                conn, venue=venue, symbol=symbol, asset_class=asset_class,
-                bar_interval=timeframe,
-                # Per-tf read depth: 1D reads 260 bars so the deepest 1D warmup
-                # (equity_52wk_high_breakout, 253) is satisfied — a 240 read
-                # capped the canvas below warmup → that strategy was INERT. The
-                # ingest persists the same depth; intraday tf keep 240.
-                limit=bar_fetch_limit_for(timeframe),
-                freshness_threshold_sec=staleness_threshold_for(timeframe),
-                capital_session=capital_session, alpaca_adapter=alpaca_adapter,
-                gpt_client_factory=default_gpt_factory, now_mono=now_mono,
-            )
-            if len(bars) < 30:
+            # fix #3: isolate ONE symbol's prefetch fault (e.g. a transient
+            # DB-lock on the stale-refetch persist) from aborting dispatch for
+            # every OTHER (venue, symbol, timeframe) still queued this tick.
+            try:
+                # Data-proactive (Jin 2026-06-27): a STALE strategy-timeframe
+                # store refetches live instead of skipping (cooldown-gated;
+                # storm/OKX-429 safe). A FRESH read is byte-identical to the
+                # prior path (no fetch).
+                bars = await read_recent_bars_ondemand(
+                    conn, venue=venue, symbol=symbol, asset_class=asset_class,
+                    bar_interval=timeframe,
+                    # Per-tf read depth: 1D reads 260 bars so the deepest 1D warmup
+                    # (equity_52wk_high_breakout, 253) is satisfied — a 240 read
+                    # capped the canvas below warmup → that strategy was INERT. The
+                    # ingest persists the same depth; intraday tf keep 240.
+                    limit=bar_fetch_limit_for(timeframe),
+                    freshness_threshold_sec=staleness_threshold_for(timeframe),
+                    capital_session=capital_session, alpaca_adapter=alpaca_adapter,
+                    gpt_client_factory=default_gpt_factory, now_mono=now_mono,
+                )
+                if len(bars) < 30:
+                    continue
+                regime = regime_by_group.get((venue, group_id), "chop")
+                mv = build_real_market_view(
+                    venue=venue, symbol=symbol, timeframe=timeframe, bars=bars,
+                    spread_bps=5.0, session_open_window=session_window_now(now_ts),
+                    asset_class=asset_class,
+                    # Alt-data wire (SIGNAL only): read the already-populated cache
+                    # snapshot for this group → MarketView.altdata. No network; stale/
+                    # absent/keyless → neutral no-op. NOT a block / throttle / size-cut.
+                    altdata_cache=altdata_cache, underlying_group_id=group_id,
+                    now_ts=now_ts,
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+                _log_tick_stage_fault(
+                    f"dispatch_prefetch[{venue}:{symbol}/{timeframe}]", tick_idx, exc,
+                )
+                state.fault_events += 1
                 continue
-            regime = regime_by_group.get((venue, group_id), "chop")
-            mv = build_real_market_view(
-                venue=venue, symbol=symbol, timeframe=timeframe, bars=bars,
-                spread_bps=5.0, session_open_window=session_window_now(now_ts),
-                asset_class=asset_class,
-                # Alt-data wire (SIGNAL only): read the already-populated cache
-                # snapshot for this group → MarketView.altdata. No network; stale/
-                # absent/keyless → neutral no-op. NOT a block / throttle / size-cut.
-                altdata_cache=altdata_cache, underlying_group_id=group_id,
-                now_ts=now_ts,
-            )
             # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full
             # indicator set just computed in ``mv`` (rsi/adx/bb/donchian/ema/
             # momentum) so the AI judge / probes can read it as evidence (the judge
@@ -1221,15 +1273,23 @@ async def _run_tick(
     # winner re-proposed next tick — no same-tick reopen, MAX_PER_TICK=1). Capital
     # EFFICIENCY (net deploy UP), NOT a throttle; before _evaluate_swaps so a
     # closed victim is not swap-eval'd. See _production_rotation for the contract.
-    await rotation.evaluate_capital_rotation(
-        conn, state=state, now_ts=now_ts,
-        close_specific=close_specific_position, lookup_regime=_lookup_regime,
-        equity=production_default_equity_usd(),
-        real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
-        capital_session=capital_session, gpt_client=haiku, phase=phase,
-    )
+    try:
+        await rotation.evaluate_capital_rotation(
+            conn, state=state, now_ts=now_ts,
+            close_specific=close_specific_position, lookup_regime=_lookup_regime,
+            equity=production_default_equity_usd(),
+            real_roundtrip=real_roundtrip, okx_adapter=okx_adapter,
+            capital_session=capital_session, gpt_client=haiku, phase=phase,
+        )
+    except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+        _log_tick_stage_fault("capital_rotation", tick_idx, exc)
+        state.fault_events += 1
 
-    _evaluate_swaps(conn, now_ts=now_ts)
+    try:
+        _evaluate_swaps(conn, now_ts=now_ts)
+    except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
+        _log_tick_stage_fault("evaluate_swaps", tick_idx, exc)
+        state.fault_events += 1
 
     # FIX-4 (2026-05-30): the unconditional tail-of-tick FIFO-oldest drain
     # (``if state.open_trades:`` then a bare close of trade[0]) was REMOVED.

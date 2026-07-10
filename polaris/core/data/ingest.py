@@ -30,7 +30,7 @@ from pathlib import Path
 
 from polaris.core.data.baseline import (
     _default_lookback,
-    append_sample,
+    append_samples_batch,
     compute_baseline,
     read_samples_window,
     update_baseline_from_window,
@@ -88,7 +88,7 @@ def _sanitize_aux(value: float) -> float:
 
 
 def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
-    """Idempotent insert into the ``bars`` table — per-row, batch-survivable.
+    """Idempotent insert into the ``bars`` table — batch-survivable.
 
     Returns the number of bars *persisted*. Duplicates upsert in place via
     ``INSERT OR REPLACE``, so the count is "rows written" not
@@ -101,8 +101,15 @@ def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
     Capital index bar nuked the symbol's whole batch → DB held 0 such bars). The
     auxiliary numerics (volume/notional/vwap/quotes) are sanitized to a finite
     value rather than dropping the bar. flow_not_block — data layer only.
+
+    Bulk-write lever (forensic wf_1f586d0a #1): the surviving rows are issued
+    via ONE ``conn.executemany()`` instead of a per-row ``conn.execute()``
+    loop — same rows, same INSERT OR REPLACE statement, same (caller-owned)
+    transaction; only the Python/C round-trip overhead per row is cut. This
+    is the dominant write-lock hold time on a large DBWriter-batched ingest
+    job (each job already runs inside the writer's own SAVEPOINT/BEGIN).
     """
-    n = 0
+    rows: list[tuple[object, ...]] = []
     for b in bars:
         if not _bar_ohlc_is_persistable(b):
             logger.debug(
@@ -112,37 +119,39 @@ def persist_bars(conn: sqlite3.Connection, bars: Iterable[Bar]) -> int:
                 b.open, b.high, b.low, b.close,
             )
             continue
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO bars
-                (instrument_id, underlying_group_id, venue, symbol, bar_interval,
-                 ts, open, high, low, close, volume, notional_usd, trade_count,
-                 vwap, bid_close, ask_close, spread_bps_close, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                b.instrument_id,
-                b.underlying_group_id,
-                b.venue,
-                b.symbol,
-                b.bar_interval,
-                int(b.ts),
-                float(b.open),
-                float(b.high),
-                float(b.low),
-                float(b.close),
-                _sanitize_aux(float(b.volume)),
-                _sanitize_aux(float(b.notional_usd)),
-                int(b.trade_count),
-                _sanitize_aux(float(b.vwap)),
-                _sanitize_aux(float(b.bid_close)),
-                _sanitize_aux(float(b.ask_close)),
-                _sanitize_aux(float(b.spread_bps_close)),
-                b.source,
-            ),
-        )
-        n += 1
-    return n
+        rows.append((
+            b.instrument_id,
+            b.underlying_group_id,
+            b.venue,
+            b.symbol,
+            b.bar_interval,
+            int(b.ts),
+            float(b.open),
+            float(b.high),
+            float(b.low),
+            float(b.close),
+            _sanitize_aux(float(b.volume)),
+            _sanitize_aux(float(b.notional_usd)),
+            int(b.trade_count),
+            _sanitize_aux(float(b.vwap)),
+            _sanitize_aux(float(b.bid_close)),
+            _sanitize_aux(float(b.ask_close)),
+            _sanitize_aux(float(b.spread_bps_close)),
+            b.source,
+        ))
+    if not rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO bars
+            (instrument_id, underlying_group_id, venue, symbol, bar_interval,
+             ts, open, high, low, close, volume, notional_usd, trade_count,
+             vwap, bid_close, ask_close, spread_bps_close, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    return len(rows)
 
 
 def update_baseline_from_bars(
@@ -161,40 +170,25 @@ def update_baseline_from_bars(
     previous two-pass implementation silently produced 0 baseline-state
     upserts when a generator was supplied — the second loop saw an
     exhausted iterator and skipped recompute entirely.
+
+    Bulk-write lever (forensic wf_1f586d0a #1): all 3*N per-bar sample rows
+    are built as a plain list and appended via ONE ``append_samples_batch``
+    (``executemany``) call instead of 3*N individual ``append_sample``
+    (``execute``) calls — same rows, same INSERT OR REPLACE semantics, same
+    (caller-owned) transaction. The per-(instrument,group) window recompute
+    below is UNCHANGED (still one ``update_baseline_from_window`` call per
+    unique key per batch).
     """
     bars_list: list[Bar] = list(bars)
-    n = 0
+    sample_rows: list[tuple[str, str, str, int, float]] = []
     for b in bars_list:
         atr_value = max(0.0, float(b.high) - float(b.low))
         notional = float(b.notional_usd) if b.notional_usd > 0 else float(b.close) * float(b.volume)
-        # atr
-        append_sample(
-            conn,
-            instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id,
-            metric="atr",
-            ts=int(b.ts),
-            value=atr_value,
-        )
-        # size
-        append_sample(
-            conn,
-            instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id,
-            metric="size",
-            ts=int(b.ts),
-            value=float(notional),
-        )
-        # volume
-        append_sample(
-            conn,
-            instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id,
-            metric="volume",
-            ts=int(b.ts),
-            value=float(b.volume),
-        )
-        n += 3
+        ts = int(b.ts)
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "atr", ts, atr_value))
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "size", ts, float(notional)))
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "volume", ts, float(b.volume)))
+    n = append_samples_batch(conn, sample_rows)
     # Recompute baseline state per (instrument, metric) once per batch — at
     # the *batch max ts* per (instrument, group) so out-of-order or backfill
     # batches do not compute against an early window (codex Day 6 P1 fix).
@@ -267,28 +261,21 @@ async def update_baseline_from_bars_async(
 
     The shared conn never enters the worker thread (read + write both happen on
     the loop). Output is identical to the synchronous path.
+
+    Bulk-write lever (forensic wf_1f586d0a #1): same ``append_samples_batch``
+    (one ``executemany``) swap as the sync path — see
+    ``update_baseline_from_bars`` docstring.
     """
     bars_list: list[Bar] = list(bars)
-    n = 0
+    sample_rows: list[tuple[str, str, str, int, float]] = []
     for b in bars_list:
         atr_value = max(0.0, float(b.high) - float(b.low))
         notional = float(b.notional_usd) if b.notional_usd > 0 else float(b.close) * float(b.volume)
-        append_sample(
-            conn, instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id, metric="atr",
-            ts=int(b.ts), value=atr_value,
-        )
-        append_sample(
-            conn, instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id, metric="size",
-            ts=int(b.ts), value=float(notional),
-        )
-        append_sample(
-            conn, instrument_id=b.instrument_id,
-            underlying_group_id=b.underlying_group_id, metric="volume",
-            ts=int(b.ts), value=float(b.volume),
-        )
-        n += 3
+        ts = int(b.ts)
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "atr", ts, atr_value))
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "size", ts, float(notional)))
+        sample_rows.append((b.instrument_id, b.underlying_group_id, "volume", ts, float(b.volume)))
+    n = append_samples_batch(conn, sample_rows)
     # Recompute window per (instrument, metric) at the batch-max ts (same rule
     # as the sync path: out-of-order/backfill batches don't compute early).
     instrument_max_ts: dict[tuple[str, str], int] = {}

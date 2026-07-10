@@ -37,6 +37,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SEC = 3600
 
+# Forensic wf_1f586d0a tick-body fix #3 (Jin 2026-07-10): a learner used to be
+# permanently disabled on the FIRST ``commit_hourly`` exception — including a
+# transient one (e.g. a momentary ``database is locked``). A disabled
+# learner's ``commit_hourly`` is a silent no-op (never raises — see
+# ``BaseLearner.commit_hourly``), so the scheduler could never observe
+# "recovery" once tripped: one bad hour killed that learner's tuning forever.
+# The threshold below tolerates a bounded run of CONSECUTIVE transient
+# failures (retried next cycle, no disable) and only disables on a genuinely
+# PERSISTENT fault streak — mirrors the strategy circuit breaker's
+# ``CB_EXCEPTION_THRESHOLD`` count (3) in ``polaris/core/isolation/
+# circuit_breaker.py``. flow_not_block: this is fault-tolerance/observability,
+# not a throttle — a healthy learner's cadence/behaviour is unchanged.
+LEARNER_PERSISTENT_FAILURE_THRESHOLD = 3
+
 
 @dataclass(slots=True)
 class TuneCycleReport:
@@ -68,6 +82,38 @@ class LearnerScheduler:
             ]
         else:
             self.learners = list(learners)
+        # Per-learner CONSECUTIVE failure streak (fix #3) — reset to 0 on any
+        # successful commit_hourly, only crosses the disable threshold on a
+        # genuinely persistent run of failures.
+        self._consecutive_failures: dict[str, int] = {}
+
+    def _commit_one(self, learner: BaseLearner, *, ts: int) -> HourlyCommitReport | None:
+        """Run one learner's ``commit_hourly``, applying the transient-failure
+        tolerance. Returns the report on success, ``None`` on failure (the
+        caller skips appending it — same shape as before this fix)."""
+        try:
+            report = learner.commit_hourly(now_ts=ts)
+        except Exception as exc:  # noqa: BLE001 — capture for streak/toggle
+            streak = self._consecutive_failures.get(learner.learner_id, 0) + 1
+            self._consecutive_failures[learner.learner_id] = streak
+            if streak >= LEARNER_PERSISTENT_FAILURE_THRESHOLD:
+                logger.error(
+                    "[scheduler] learner %s commit_hourly failed %d consecutive "
+                    "times (>= threshold %d) — disabling: %r",
+                    learner.learner_id, streak,
+                    LEARNER_PERSISTENT_FAILURE_THRESHOLD, exc,
+                )
+                learner.enabled = False
+            else:
+                logger.warning(
+                    "[scheduler] learner %s commit_hourly failed (%d/%d "
+                    "transient) — retrying next cycle: %r",
+                    learner.learner_id, streak,
+                    LEARNER_PERSISTENT_FAILURE_THRESHOLD, exc,
+                )
+            return None
+        self._consecutive_failures[learner.learner_id] = 0
+        return report
 
     def run_once(self, *, now_ts: int | None = None) -> TuneCycleReport:
         ts = int(now_ts if now_ts is not None else time.time())
@@ -78,16 +124,9 @@ class LearnerScheduler:
             len(self.learners),
         )
         for learner in self.learners:
-            try:
-                cycle.reports.append(learner.commit_hourly(now_ts=ts))
-            except Exception as exc:  # noqa: BLE001 — capture for toggle
-                # principle 4 — toggle on failure (caller can re-enable later).
-                logger.error(
-                    "[scheduler] learner %s commit_hourly failed: %r — disabling",
-                    learner.learner_id,
-                    exc,
-                )
-                learner.enabled = False
+            report = self._commit_one(learner, ts=ts)
+            if report is not None:
+                cycle.reports.append(report)
         cycle.expired_blocks = evict_expired_triple_blocks(self.conn, now_ts=ts)
         logger.info(
             "[scheduler] tune cycle end keys_updated_total=%d expired_blocks=%d",
@@ -118,15 +157,9 @@ class LearnerScheduler:
             len(self.learners),
         )
         for learner in self.learners:
-            try:
-                cycle.reports.append(learner.commit_hourly(now_ts=ts))
-            except Exception as exc:  # noqa: BLE001 — capture for toggle
-                logger.error(
-                    "[scheduler] learner %s commit_hourly failed: %r — disabling",
-                    learner.learner_id,
-                    exc,
-                )
-                learner.enabled = False
+            report = self._commit_one(learner, ts=ts)
+            if report is not None:
+                cycle.reports.append(report)
             # Cooperative yield: let the tick engine + WS run between learners
             # so a slow per-learner backup doesn't monopolize the loop. Safe —
             # still on the loop thread, no shared-conn race.
@@ -154,4 +187,9 @@ class LearnerScheduler:
             await asyncio.sleep(interval_sec)
 
 
-__all__ = ["DEFAULT_INTERVAL_SEC", "LearnerScheduler", "TuneCycleReport"]
+__all__ = [
+    "DEFAULT_INTERVAL_SEC",
+    "LEARNER_PERSISTENT_FAILURE_THRESHOLD",
+    "LearnerScheduler",
+    "TuneCycleReport",
+]

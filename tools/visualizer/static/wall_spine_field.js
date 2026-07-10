@@ -917,15 +917,32 @@
       const breathe = 0.72 + 0.28 * Math.sin(now / 650 + s.phaseOff);
       const lvl = Math.min(1, ((s.fireLevel || 0.6) + (boost || 0)) * breathe);
       const col = s.venueColor || VENUE_COLOR[String((s.node && s.node.exchange) || '').slice(0, 3).toLowerCase()] || s.color;
-      drawDot(ctx, x, y, s.r * 3.6, col, 0.10 * lvl, 0);
-      drawDot(ctx, x, y, s.r * 1.9, col, 0.26 * lvl, 0);
-      drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(1, 0.55 + 0.45 * lvl), 6);
+      // core kept BELOW additive saturation so the venue hue stays legible
+      // (Jin 2026-07-11 "왜 다 똑같은 색" — cores were burning to white)
+      drawDot(ctx, x, y, s.r * 3.6, col, 0.12 * lvl, 0);
+      drawDot(ctx, x, y, s.r * 2.0, col, 0.30 * lvl, 0);
+      drawDot(ctx, x, y, Math.max(1.6, s.r * 1.1), col, Math.min(0.8, 0.4 + 0.3 * lvl), 3);
       drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.5 + 0.35 * lvl, lockAge);
     };
     firingIds.forEach((id) => {
       if (migrations.has(id)) return;
       const born = markerBorn.get(id);
       glowAt(id, screen[id] && screen[id].x, screen[id] && screen[id].y, 0, born == null ? null : now - born);
+    });
+    // activated SYSTEM nodes light up (Jin 2026-07-11 "액티베이트된 레짐/
+    // 엑싯/리플렉터는 색 들어와야"): dominant regime, recently-used exit
+    // reasons, busy learners/probes — warm-white luminance lift (steel base
+    // hue preserved; green/red/venue hues stay reserved).
+    allNodes.forEach((n) => {
+      const sysCl = n.cluster === 'reg' || n.cluster === 'exit' || n.cluster === 'exit_tally'
+        || n.cluster === 'orbit' || n.cluster === 'probe' || n.cluster === 'action';
+      if (!sysCl || (n.state !== 'firing' && n.state !== 'lit')) return;
+      const s = screen[n.id];
+      if (!s) return;
+      const hot = n.state === 'firing';
+      const breathe = 0.75 + 0.25 * Math.sin(now / 800 + (s.phaseOff || 0));
+      if (hot) drawDot(ctx, s.x, s.y, (s.r || 2.5) * 2.4, '#dfe8ff', 0.14 * breathe, 0);
+      drawDot(ctx, s.x, s.y, (s.r || 2.5) * 1.1, '#dfe8ff', (hot ? 0.5 : 0.28) * breathe, hot ? 4 : 0);
     });
     // active strategies glow too (Jin: "활성화 전략은 글로잉") — real state
     // from the roster (open positions / firing), venue-colored, breathing.

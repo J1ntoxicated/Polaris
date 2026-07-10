@@ -109,10 +109,6 @@
   .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; border-top: 1px solid rgba(159,192,255,0.3); padding-top: 1px; }
 
   /* Kill feed — real G3/G4/G5 KILL decisions (top-right, newest on top, capped 6). */
-  #kill-feed { position: absolute; top: 34px; right: 10px; z-index: 10; width: 250px; font-size: 9.5px; text-align: right; }
-  #kill-feed .kf-row { padding: 1.5px 0; color: var(--p-gry); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #kill-feed .kf-row .kf-g { color: var(--polaris-blue); font-weight: 700; margin-right: 5px; }
-  #kill-feed .kf-row.neg { color: var(--pnl-neg); }
 
   /* Class-transition badge pop ("EARN▲" / "BENCH▼") — flow_classes.js owns. */
   #class-badges {
@@ -219,8 +215,7 @@
           </div>
         </div>
 
-        <div id="kill-feed"></div>
-        <div id="class-badges"></div>
+                <div id="class-badges"></div>
         <div id="candidate-flash"></div>
 
         <div id="drop-panel">
@@ -270,7 +265,7 @@
      flow_stats polls + SSE dispatch, drives PolarisSpine + the DOM HUD). -->
 <script src="static/events_bus.js?v=1"></script>
 <script src="static/flow_classes.js?v=1"></script>
-<script src="static/wall_spine_field.js?v=31_district"></script>
+<script src="static/wall_spine_field.js?v=32_activelight"></script>
 <script src="static/wall_spine_deco.js?v=1_jarvis"></script>
 <script src="static/wall_spine.js?v=10_jarvis"></script>
 <script src="static/wall_spine_hud.js?v=3_jarvis"></script>

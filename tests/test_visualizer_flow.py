@@ -47,6 +47,14 @@ def test_empty_db_yields_zeroed_shape() -> None:
     assert out["drops"] == []
     assert out["fills"]["total"] == 0
     assert out["summary"]["signal_to_sized_pct"] == 0.0
+    # additive per-journey/per-tick split fields (Jin 2026-07-10 stage-count
+    # semantics fix) — present with zeroed defaults even on an empty DB.
+    g5 = next(s for s in out["stages"] if s["gate_id"] == 5)
+    assert g5["sized_n"] == 0 and g5["kill_n"] == 0
+    g6 = next(s for s in out["stages"] if s["gate_id"] == 6)
+    assert g6["live_n"] == 0 and g6["checks_n"] == 0
+    g7 = next(s for s in out["stages"] if s["gate_id"] == 7)
+    assert g7["exits_n"] == 0 and g7["holds_n"] == 0
 
 
 def test_stage_totals_and_venue_breakdown() -> None:
@@ -177,6 +185,92 @@ def test_shadow_mismatches_feed_the_same_drop_lane_as_kill_skip() -> None:
         {"gate_id": 3, "label": "Validator", "reason": "shadow_mismatch", "n": 1}
     ]
     assert out["summary"]["drops_total"] == 1
+
+
+def test_g5_stage_splits_sized_vs_kill() -> None:
+    # G5 is per-journey (one SIZED-or-KILL verdict per signal) — SIZED vs KILL
+    # is the funnel-narrowing split ("sizing_zero" = cap-reached re-signal),
+    # kept alongside the existing raw `total` for back-compat.
+    conn = _memdb()
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO gate_events VALUES "
+            f"('sz{i}', 5, 'SIZED', NULL, NULL, NULL, ?)", (NOW - 5,),
+        )
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO gate_events VALUES "
+            f"('kl{i}', 5, 'KILL', NULL, NULL, NULL, ?)", (NOW - 5,),
+        )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    g5 = next(s for s in out["stages"] if s["gate_id"] == 5)
+    assert g5["total"] == 5
+    assert g5["sized_n"] == 3
+    assert g5["kill_n"] == 2
+
+
+def test_g6_stage_reports_live_positions_and_checks() -> None:
+    # G6 is per-tick (a position gets re-checked ~every 2min) — raw `total`
+    # (window_checks) massively overcounts distinct live positions; live_n is
+    # the honest headline (mirrors snapshot_sections._gate_headline gid==6).
+    conn = _memdb()
+    conn.executescript("ALTER TABLE positions ADD COLUMN status TEXT;")
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, status) VALUES "
+        "('p1', 'okx', 'open')"
+    )
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, status) VALUES "
+        "('p2', 'capital', 'open')"
+    )
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, status) VALUES "
+        "('p3', 'okx', 'closed')"
+    )
+    for i in range(7):
+        conn.execute(
+            "INSERT INTO gate_events VALUES "
+            f"('m{i}', 6, 'HOLD', NULL, 'p1', NULL, ?)", (NOW - 5,),
+        )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    g6 = next(s for s in out["stages"] if s["gate_id"] == 6)
+    assert g6["total"] == 7
+    assert g6["checks_n"] == 7
+    assert g6["live_n"] == 2  # p1 + p2 open; p3 closed excluded
+
+
+def test_g6_live_n_degrades_to_zero_when_positions_status_column_absent() -> None:
+    # positions.status doesn't exist on every DB generation — _safe_query must
+    # degrade to 0, never raise (display-only, never breaks the poll).
+    conn = _memdb()  # base fixture has no `status` column
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    g6 = next(s for s in out["stages"] if s["gate_id"] == 6)
+    assert g6["live_n"] == 0
+
+
+def test_g7_stage_splits_exits_vs_holds() -> None:
+    # G7 headline = actual exits (closes), secondary = HOLD reappraisals;
+    # ADJUST_EXIT (stop/TP tune, not a close) counted in `total` only.
+    conn = _memdb()
+    for i in range(4):
+        conn.execute(
+            "INSERT INTO gate_events VALUES "
+            f"('h{i}', 7, 'HOLD', NULL, NULL, NULL, ?)", (NOW - 5,),
+        )
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO gate_events VALUES "
+            f"('x{i}', 7, 'EXIT_NOW', NULL, NULL, NULL, ?)", (NOW - 5,),
+        )
+    conn.execute(
+        "INSERT INTO gate_events VALUES "
+        "('a1', 7, 'ADJUST_EXIT', NULL, NULL, NULL, ?)", (NOW - 5,),
+    )
+    out = fd.build_flow_stats(conn, now_s=NOW)
+    g7 = next(s for s in out["stages"] if s["gate_id"] == 7)
+    assert g7["total"] == 7
+    assert g7["exits_n"] == 2
+    assert g7["holds_n"] == 4
 
 
 def test_venue_of_alpaca_prefix_and_unknown_default() -> None:

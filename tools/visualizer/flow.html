@@ -7,17 +7,16 @@
 <title>★ POLARIS · FLOW</title>
 <link rel="stylesheet" href="static/polaris.css"/>
 <style>
-  /* Visual Wall — "Director Mode" (Jin 2026-07-10, feat/visual-wall-director):
-     the globe (top ~55%) + Living Pipeline River (bottom ~45%) combined into
-     one game-like screen meant to run unattended on a monitor — cinematic
-     camera autopilot, warp transitions, killcam cuts, floating damage
-     numbers, a scrolling kill feed, and pts-classes river annotations.
-     Globe = reused globe-core/satellites/flows/funnel.js (canvas#sphere,
-     self-binding, same load order as the old index.html). River = flow.js
-     own canvas#flow-canvas (unrelated engine, own draw loop). wall.js owns
-     ONLY the director camera + warp/killcam/damage-number/kill-feed layer
-     (canvas#wall-fx, an inert pointer-events:none overlay over the globe).
-     English UI, Bloomberg-dense, polaris.css tokens only. */
+  /* "Cloud River" (Jin 2026-07-10, feat/cloud-river — supersedes the earlier
+     "Director Mode" 3D globe + river combo): the globe is gone, replaced by
+     a flat horizontal particle field (canvas#cloud-canvas, cloud.js +
+     cloud_fx.js) sharing the SAME stage-column x-axis as the pipeline river
+     below it (flow.js publishes window.PolarisWallLayout — see flow.js's
+     publishWallLayout()). Page is now a 30/70 split: left = the /m mobile
+     board embedded live via iframe (always-visible summary for an unattended
+     monitor), right = the cloud+river+HUD stack. ?nomobile=1 hides the
+     iframe and gives the wall stack the full width. English UI, Bloomberg-
+     dense, polaris.css tokens only. */
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: #05070b; color: var(--p-wht);
@@ -25,16 +24,25 @@
     overflow: hidden;
   }
 
+  .wall-page { display: flex; flex-direction: row; width: 100vw; height: 100vh; overflow: hidden; }
+  .mobile-pane {
+    flex: 0 0 30%; height: 100%; min-width: 0;
+    border-right: 1px solid var(--ghost); overflow: hidden; background: #05070b;
+  }
+  .mobile-pane iframe { display: block; width: 100%; height: 100%; border: 0; }
+  .wall-col { flex: 1 1 70%; height: 100%; min-width: 0; }
+  .wall-page.nomobile .mobile-pane { display: none; }
+  .wall-page.nomobile .wall-col { flex: 1 1 100%; }
+
   .wall-stage {
     display: grid;
     grid-template-rows: 55fr 45fr auto;
-    width: 100vw; height: 100vh; overflow: hidden;
+    width: 100%; height: 100%; overflow: hidden;
   }
 
-  /* ── Globe pane (top ~55%) ─────────────────────────────────────────────── */
-  .globe-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; }
-  canvas#sphere  { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; z-index: 1; }
-  canvas#wall-fx { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 2; pointer-events: none; }
+  /* ── Cloud pane (top ~55%) ─────────────────────────────────────────────── */
+  .cloud-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; background: #05070b; }
+  canvas#cloud-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 1; }
 
   .wall-topbar {
     position: absolute; top: 0; left: 0; right: 0; z-index: 10;
@@ -52,7 +60,7 @@
   .wall-summary .lbl { color: var(--p-dim); margin-right: 4px; }
   .wall-summary .val { color: var(--p-wht); font-weight: 700; font-variant-numeric: tabular-nums; }
 
-  /* Kill feed — top-right, newest on top, capped 6 rows (wall.js). */
+  /* Kill feed — top-right, newest on top, capped 6 rows (cloud_fx.js). */
   #kill-feed {
     position: absolute; top: 34px; right: 10px; z-index: 10;
     width: 240px; font-size: 9.5px; text-align: right;
@@ -65,7 +73,7 @@
   #kill-feed .kf-row.pos { color: var(--pnl-pos); }
   #kill-feed .kf-row.neg { color: var(--pnl-neg); }
 
-  /* Class-transition badge pop ("EARN▲" / "BENCH▼") — wall.js spawns/removes. */
+  /* Class-transition badge pop ("EARN▲" / "BENCH▼") — flow_classes.js spawns/removes. */
   #class-badges {
     position: absolute; left: 10px; top: 34px; z-index: 10;
     display: flex; flex-direction: column; gap: 3px;
@@ -85,12 +93,6 @@
     100% { opacity: 0; }
   }
 
-  .globe-ticker {
-    position: absolute; left: 10px; bottom: 8px; z-index: 9;
-    font-size: 9.5px; color: var(--p-dim);
-    max-width: 55ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-
   /* ── River pane (bottom ~45%) ─────────────────────────────────────────── */
   .river-pane { position: relative; width: 100%; height: 100%; overflow: hidden; min-height: 0; border-top: 1px solid var(--ghost); }
   canvas#flow-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -102,10 +104,11 @@
     text-align: center; white-space: nowrap;
   }
   #col-headers .col-h .n { display: block; font-size: 11px; font-weight: 700; color: var(--p-wht); font-variant-numeric: tabular-nums; }
+  #col-headers .col-h .sub { display: block; font-size: 7px; color: var(--p-dim); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
   #col-headers .col-h.gate { color: var(--polaris-blue); }
   #col-headers .col-h.fills { color: var(--p-grn); }
 
-  /* Venue legend — compact single row (globe pane already sold the colors). */
+  /* Venue legend — compact single row (the cloud pane already sold the colors). */
   .venue-legend { position: absolute; left: 8px; top: 32px; z-index: 9; font-size: 8.5px; display: flex; flex-direction: row; gap: 10px; }
   .venue-legend .row { display: flex; align-items: center; gap: 4px; color: var(--p-gry); white-space: nowrap; }
   .venue-legend .dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -150,7 +153,7 @@
   #class-gauge-strip .chip.earn  .gauge .fill { background: var(--pnl-pos); }
   #class-gauge-strip .chip.bench .gauge .fill { background: var(--pnl-neg); }
 
-  /* "NEW CANDIDATE" flash near the G1 column — wall.js positions it via colX. */
+  /* "NEW CANDIDATE" flash near the G1 column — flow_classes.js positions it via colX. */
   #candidate-flash {
     position: absolute; z-index: 9; top: 4px;
     font-size: 8px; font-weight: 700; letter-spacing: 0.10em;
@@ -160,8 +163,7 @@
   }
   #candidate-flash.show { opacity: 1; }
 
-  /* ── Bottom ticker: equity / today net / 3-line bot log (extends the
-     original flow.html botlog strip). ─────────────────────────────────── */
+  /* ── Bottom ticker: equity / today net / 3-line bot log. ──────────────── */
   .botlog-pane {
     position: relative; z-index: 9;
     height: 96px; overflow: hidden;
@@ -188,94 +190,104 @@
   .botlog-pane .bl-err  { color: var(--p-red); }
   .botlog-pane .bl-warn { color: var(--p-ylw); }
   .botlog-pane .bl-hi   { color: var(--p-cyn); font-weight: 700; }
-
-  /* Damage numbers (floating +$/-$ text, wall.js draws these on #wall-fx —
-     this class is unused by DOM but documents the palette for that canvas
-     text: green rgb(135,255,175) profit / red rgb(255,135,135) loss. */
 </style>
 </head>
 <body>
 
-<div class="wall-stage">
-  <div class="globe-pane">
-    <canvas id="sphere"></canvas>
-    <canvas id="wall-fx"></canvas>
+<div class="wall-page" id="wall-page">
+  <div class="mobile-pane" id="mobile-pane"></div>
 
-    <div class="wall-topbar">
-      <div class="brand"><span class="star">★</span>POLARIS · FLOW</div>
-      <div class="wall-pagenav">
-        <a href="/">‹ BOARD</a>
-        <a href="/flow" class="active">FLOW</a>
+  <div class="wall-col">
+    <div class="wall-stage">
+      <div class="cloud-pane">
+        <canvas id="cloud-canvas"></canvas>
+
+        <div class="wall-topbar">
+          <div class="brand"><span class="star">★</span>POLARIS · FLOW</div>
+          <div class="wall-pagenav">
+            <a href="/">‹ BOARD</a>
+            <a href="/flow" class="active">FLOW</a>
+          </div>
+          <div class="wall-summary" id="summary-strip">
+            <span><span class="lbl">SIG→SIZED</span><span class="val" id="s-sig2sized">–</span></span>
+            <span><span class="lbl">SIZED→FILL</span><span class="val" id="s-sized2fill">–</span></span>
+            <span><span class="lbl">AI CALLS</span><span class="val" id="s-ai">–</span></span>
+            <span><span class="lbl">DROPS</span><span class="val" id="s-drops">–</span></span>
+            <span><span class="lbl">SHADOW</span><span class="val" id="s-shadow">–</span></span>
+          </div>
+        </div>
+
+        <div id="kill-feed"></div>
+        <div id="class-badges"></div>
       </div>
-      <div class="wall-summary" id="summary-strip">
-        <span><span class="lbl">SIG→SIZED</span><span class="val" id="s-sig2sized">–</span></span>
-        <span><span class="lbl">SIZED→FILL</span><span class="val" id="s-sized2fill">–</span></span>
-        <span><span class="lbl">AI CALLS</span><span class="val" id="s-ai">–</span></span>
-        <span><span class="lbl">DROPS</span><span class="val" id="s-drops">–</span></span>
-        <span><span class="lbl">SHADOW</span><span class="val" id="s-shadow">–</span></span>
+
+      <div class="river-pane">
+        <canvas id="flow-canvas"></canvas>
+
+        <div id="col-headers"></div>
+        <div id="candidate-flash"></div>
+
+        <div class="venue-legend">
+          <div class="row"><span class="dot" style="background:#5fdfff;box-shadow:0 0 6px #5fdfff"></span>OKX</div>
+          <div class="row"><span class="dot" style="background:#a87cff;box-shadow:0 0 6px #a87cff"></span>CAPITAL</div>
+          <div class="row"><span class="dot" style="background:#ffc84f;box-shadow:0 0 6px #ffc84f"></span>ALPACA</div>
+          <div class="row"><span class="dot drop"></span>DROP</div>
+        </div>
+
+        <div id="drop-panel">
+          <div class="h"><span>DROP LANE (1h)</span><span id="drop-total">0</span></div>
+          <div id="drop-rows"><div class="empty">no drops in window</div></div>
+        </div>
+
+        <div id="verdict-ticker">
+          <div class="row dim">no AI verdicts in window</div>
+        </div>
+
+        <div id="class-gauge-strip"></div>
+      </div>
+
+      <div class="botlog-pane">
+        <div class="bl-head">
+          <span>BOT LOG</span><span class="live">live</span>
+          <span class="metric">EQUITY<b id="bl-equity">–</b></span>
+          <span class="metric">TODAY<b id="bl-today">–</b></span>
+        </div>
+        <div class="bl-body" id="botlog-body"></div>
       </div>
     </div>
-
-    <div id="kill-feed"></div>
-    <div id="class-badges"></div>
-    <div class="globe-ticker" id="ticker">--</div>
-  </div>
-
-  <div class="river-pane">
-    <canvas id="flow-canvas"></canvas>
-
-    <div id="col-headers"></div>
-    <div id="candidate-flash"></div>
-
-    <div class="venue-legend">
-      <div class="row"><span class="dot" style="background:#5fdfff;box-shadow:0 0 6px #5fdfff"></span>OKX</div>
-      <div class="row"><span class="dot" style="background:#a87cff;box-shadow:0 0 6px #a87cff"></span>CAPITAL</div>
-      <div class="row"><span class="dot" style="background:#ffc84f;box-shadow:0 0 6px #ffc84f"></span>ALPACA</div>
-      <div class="row"><span class="dot drop"></span>DROP</div>
-    </div>
-
-    <div id="drop-panel">
-      <div class="h"><span>DROP LANE (1h)</span><span id="drop-total">0</span></div>
-      <div id="drop-rows"><div class="empty">no drops in window</div></div>
-    </div>
-
-    <div id="verdict-ticker">
-      <div class="row dim">no AI verdicts in window</div>
-    </div>
-
-    <div id="class-gauge-strip"></div>
-  </div>
-
-  <div class="botlog-pane">
-    <div class="bl-head">
-      <span>BOT LOG</span><span class="live">live</span>
-      <span class="metric">EQUITY<b id="bl-equity">–</b></span>
-      <span class="metric">TODAY<b id="bl-today">–</b></span>
-    </div>
-    <div class="bl-body" id="botlog-body"></div>
   </div>
 </div>
 
-<!-- Globe engine — reused as-is, same load order as the old index.html.
-     Self-binding to canvas#sphere; flow.js/wall.js own separate canvases. -->
-<script src="static/globe-core.js?v=26_tierlod"></script>
-<script src="static/globe-satellites.js?v=23_layered"></script>
-<script src="static/globe-flows.js?v=24_onionsync"></script>
-<script src="static/globe-funnel.js?v=23_layered"></script>
-<!-- River engine (retuned pane geometry for the combined wall layout) +
-     flow_classes.js (pts-classes gauge/badge/candidate-flash annotations,
-     split out to keep flow.js under the file-size cap — MUST load before
-     flow.js, which calls window.PolarisFlowClasses each poll/layout) + the
-     director camera/warp/killcam/kill-feed overlay (new, own canvas + own
-     SSE connection — no dependency on the other two). -->
-<script src="static/flow_classes.js?v=1"></script>
-<script src="static/flow.js?v=2_wall"></script>
-<script src="static/wall.js?v=1"></script>
+<!-- Left 30% mobile-board pane — built via JS (not a hardcoded <iframe src>)
+     so ?nomobile=1 skips the request entirely rather than loading then
+     hiding it. Same-origin /m, unaffected by this page (server routes /m to
+     mobile.html regardless of query/UA — see server.py do_GET). -->
 <script>
-  // Globe engine fits to canvas clientWidth/Height; after layout settles,
-  // nudge resize twice (rAF + delayed) so fit() picks up the grid-sized
-  // 55%-height globe pane / 45%-height river pane, not an initial full-size
-  // guess (same double-resize-dispatch pattern the old index.html used).
+  (function () {
+    var nomobile = /(?:^|[?&])nomobile=1(?:&|$)/.test(location.search);
+    if (nomobile) { document.getElementById('wall-page').classList.add('nomobile'); return; }
+    var pane = document.getElementById('mobile-pane');
+    var f = document.createElement('iframe');
+    f.src = '/m'; f.title = 'Polaris mobile board'; f.loading = 'lazy';
+    pane.appendChild(f);
+  })();
+</script>
+
+<!-- Shared SSE bus (one /stream/events socket for the whole page) + river
+     (flow.js, publishes the stage-column layout contract) + pts-classes
+     annotations (flow_classes.js, MUST load before flow.js) + the cloud
+     field + its fx layer (cloud_fx.js MUST load before cloud.js, which
+     subscribes to flow.js's layout contract + the shared SSE bus). -->
+<script src="static/events_bus.js?v=1"></script>
+<script src="static/flow_classes.js?v=1"></script>
+<script src="static/flow.js?v=3_cloud"></script>
+<script src="static/cloud_fx.js?v=1"></script>
+<script src="static/cloud.js?v=1"></script>
+<script>
+  // Both flow.js and cloud.js fit to canvas clientWidth/Height; after layout
+  // settles, nudge resize twice (rAF + delayed) so fit() picks up the grid-
+  // sized 55%-height cloud pane / 45%-height river pane, not an initial
+  // full-size guess (same double-resize-dispatch pattern the old page used).
   window.addEventListener('load', function () {
     requestAnimationFrame(function () { window.dispatchEvent(new Event('resize')); });
     setTimeout(function () { window.dispatchEvent(new Event('resize')); }, 250);

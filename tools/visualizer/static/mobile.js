@@ -137,13 +137,25 @@
     var netCls = winning ? 'pos' : 'neg';
     var lbl = virt ? 'virtual ledger' : (sr.label ? esc(sr.label) : 'reset');
     var tag = virt ? 'SINCE VIRTUAL RESET' : 'SINCE RESET';
+    // Board-parity (Jin 2026-07-10 "mobile out of sync with the board"): same
+    // metric set as the desktop SINCE line (adds Avg-R) + Session when it
+    // differs from Today — one wording, one metric set on both surfaces.
+    var avgR = sr.avg_r == null ? '—'
+      : (sr.avg_r >= 0 ? '+' : '') + sr.avg_r.toFixed(2) + 'R';
+    var daily = virt ? s.virtual_daily_pnl_usd : s.daily_pnl_usd;
+    var session = virt ? s.virtual_session_pnl_usd : s.session_pnl_usd;
+    var sessionDiffers = Math.abs((session || 0) - (daily || 0)) > 0.005;
     el.innerHTML =
       '<span class="tag">' + tag + '</span>' +
       '<span class="lbl" title="' + lbl + '">' + lbl + '</span>' +
       '<span class="kv">Net<b class="' + netCls + '">' + signed(sr.net_usd) + '</b></span>' +
       '<span class="kv">Trades<b>' + (sr.n || 0) + '</b></span>' +
       '<span class="kv">Win<b>' + (sr.win_pct || 0).toFixed(0) + '%</b></span>' +
-      '<span class="kv">PF<b class="' + netCls + '">' + pf + '</b></span>';
+      '<span class="kv">PF<b class="' + netCls + '">' + pf + '</b></span>' +
+      '<span class="kv">Avg-R<b class="' + pnlClass(sr.avg_r) + '">' + avgR + '</b></span>' +
+      (sessionDiffers
+        ? '<span class="kv">Session<b class="' + pnlClass(session) + '">' + signed(session) + '</b></span>'
+        : '');
   }
 
   // Recent Trades — TIME · SYM · side · P&L · R · why (newest first).
@@ -253,7 +265,7 @@
     var virt = !!s.virtual_account_enabled;
     var eq = $('equity');
     var eqSub = $('equity-sub');
-    var pnlVal, dayStartEq;
+    var pnlVal;
     if (virt) {
       var streams = s.streams || [];
       var virtEq = streams.reduce(function (a, x) { return a + (x.virtual_equity_usd != null ? x.virtual_equity_usd : 0); }, 0);
@@ -262,23 +274,26 @@
       eq.title = 'VIRTUAL $100k x 3 ledger — zero venue calls, seed ' + usd(virtSeed);
       if (eqSub) eqSub.textContent = 'seed ' + usd(virtSeed);
       pnlVal = s.virtual_daily_pnl_usd;
-      dayStartEq = virtEq;
     } else {
       // Show BOTH: demo (70bps fee-burdened) · real-fee-net (go-live truth at 10bps).
       eq.textContent = usd(s.equity_now) + ' demo';
       eq.title = 'OKX demo charges 70bps (7x real); real-fee-net = equity at live 10bps fees';
       if (eqSub) eqSub.textContent = usd(s.equity_now_real_fee_net) + ' real-fee-net';
       pnlVal = s.daily_pnl_usd;
-      dayStartEq = s.equity_now || 0;
     }
     var pnl = $('pnl');
     pnl.textContent = signed(pnlVal);
     pnl.className = 'v num ' + pnlClass(pnlVal);
     var pnlPct = $('pnl-pct');
     if (pnlPct) {
-      // today's return on day-start equity (current equity − today's P&L).
-      var dayStart = dayStartEq - (pnlVal || 0);
-      var dp = dayStart > 0 ? (pnlVal / dayStart) * 100 : 0;
+      // Board-parity (Jin 2026-07-10): the desktop board denominates Today %
+      // on the SEED (virt) / starting capital (real) — the old day-start-
+      // equity base here made the same $ figure show a different % than the
+      // board. One ruler on both surfaces.
+      var pctBase = virt
+        ? (s.streams || []).reduce(function (a, x) { return a + (x.virtual_seed_usd || 0); }, 0)
+        : (s.starting_capital || 0);
+      var dp = pctBase > 0 ? (pnlVal / pctBase) * 100 : 0;
       pnlPct.textContent = (dp >= 0 ? '+' : '') + dp.toFixed(2) + '%';
       pnlPct.className = 'sub num ' + pnlClass(dp);
     }

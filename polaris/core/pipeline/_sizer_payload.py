@@ -94,14 +94,26 @@ def _read_portfolio_state(
     P0 = best-effort: if ``position_risk_state`` is empty (cold start) we
     return zero usage. Layer 5 will populate this row by closing trades
     through the cell-matrix update path.
+
+    JOINed to ``positions`` on the exact write-side PK (venue, symbol,
+    strategy, opened_ts) with ``status='open'`` (2nd line of defense,
+    2026-07-10 ghost-row RCA): every terminal-transition path is supposed to
+    call ``delete_position_risk_state`` on close/reconcile, but a row that
+    slips through (a new call site that forgets it) must not permanently
+    consume per-symbol/cluster/track headroom — this filter keeps only rows
+    whose position is still genuinely open, regardless of delete-path bugs.
     """
     rows = _safe_query(
         conn,
         """
-        SELECT venue, symbol, instrument_id, underlying_group_id, cluster_id,
-               strategy, track, signal_strength, open_risk_pct, notional_usd,
-               opened_ts
-        FROM position_risk_state
+        SELECT prs.venue, prs.symbol, prs.instrument_id, prs.underlying_group_id,
+               prs.cluster_id, prs.strategy, prs.track, prs.signal_strength,
+               prs.open_risk_pct, prs.notional_usd, prs.opened_ts
+        FROM position_risk_state prs
+        INNER JOIN positions p
+            ON p.venue = prs.venue AND p.symbol = prs.symbol
+            AND p.strategy_id = prs.strategy AND p.opened_ts = prs.opened_ts
+            AND p.status = 'open'
         """,
     )
     open_positions: list[PositionRiskState] = []

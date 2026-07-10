@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.data.fill_normalizer import Fill
 from polaris.core.data.fills_persist import persist_fill
+from polaris.core.data.position_risk_persist import delete_position_risk_state
 from polaris.core.isolation.circuit_breaker import FAULT_EXCEPTION, record_fault
 from polaris.core.live_recalc.excursion import compute_excursion_r
 from polaris.core.metrics.risk_unit import realised_r
@@ -532,6 +533,18 @@ def _reconcile_orphan(
                 "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
                 "exit_state = 'reconciled' WHERE position_id = ?",
                 (now_ts, trade.position_id),
+            )
+            # Ghost-row fix (2026-07-10 RCA): a reconcile is a terminal
+            # transition same as a real close — drop the sizer's open-position
+            # risk row here too, or the freed headroom never returns (the
+            # Capital track-B / cluster starvation incident: 56 orphaned
+            # ``position_risk_state`` rows from reconciles that never deleted).
+            delete_position_risk_state(
+                conn,
+                venue=trade.venue,
+                symbol=trade.symbol,
+                strategy=trade.strategy_id,
+                opened_ts=trade.open_ts,
             )
         conn.execute("COMMIT")
     except sqlite3.Error as exc:

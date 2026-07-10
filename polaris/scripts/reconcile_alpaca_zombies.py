@@ -34,6 +34,8 @@ import time
 import uuid
 from typing import Any
 
+from polaris.core.data.position_risk_persist import delete_position_risk_state
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -59,13 +61,13 @@ def reconcile_alpaca_zombies(
     """
     now = now_ts if now_ts is not None else int(time.time())
     rows = conn.execute(
-        "SELECT position_id, symbol, strategy_id, mae_r, risk_usd "
+        "SELECT position_id, symbol, strategy_id, mae_r, risk_usd, opened_ts "
         "FROM positions WHERE venue = 'alpaca' AND status = 'open'"
     ).fetchall()
     if not rows:
         return 0
     reconciled = 0
-    for position_id, symbol, strategy_id, mae_r, risk_usd in rows:
+    for position_id, symbol, strategy_id, mae_r, risk_usd, opened_ts in rows:
         # Rough DOLLAR drift estimate (display-only): worst adverse excursion
         # (mae_r, floored at 0) × the persisted 1R-in-dollars. NULL → 0.0. This
         # is the drift COUNTER (a tracking failure), never stamped into pnl_r.
@@ -80,6 +82,14 @@ def reconcile_alpaca_zombies(
                 "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
                 "exit_state = 'reconciled' WHERE position_id = ?",
                 (now, position_id),
+            )
+            # Ghost-row fix (2026-07-10 RCA): same terminal-transition gap as
+            # ``_production_close_helpers._reconcile_orphan`` — drop the
+            # sizer's open-position risk row so freed headroom actually
+            # returns (same-class bug, different venue path).
+            delete_position_risk_state(
+                conn, venue="alpaca", symbol=str(symbol),
+                strategy=str(strategy_id), opened_ts=int(opened_ts),
             )
             conn.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -159,14 +169,14 @@ async def reconcile_alpaca_venue_drift(
         if p.get("symbol")
     }
     rows = conn.execute(
-        "SELECT position_id, symbol, strategy_id, mae_r, risk_usd "
+        "SELECT position_id, symbol, strategy_id, mae_r, risk_usd, opened_ts "
         "FROM positions WHERE venue = 'alpaca' AND status = 'open'"
     ).fetchall()
     drifted = [r for r in rows if str(r[1]) not in venue_symbols]
     if not drifted:
         return 0
     reconciled = 0
-    for position_id, symbol, strategy_id, mae_r, risk_usd in drifted:
+    for position_id, symbol, strategy_id, mae_r, risk_usd, opened_ts in drifted:
         est_drift_usd = 0.0
         if mae_r is not None and risk_usd is not None:
             est_drift_usd = min(0.0, float(mae_r)) * float(risk_usd)
@@ -176,6 +186,11 @@ async def reconcile_alpaca_venue_drift(
                 "UPDATE positions SET status = 'reconciled', closed_ts = ?, "
                 "exit_state = 'reconciled' WHERE position_id = ?",
                 (now, position_id),
+            )
+            # Ghost-row fix (2026-07-10 RCA) — see ``reconcile_alpaca_zombies``.
+            delete_position_risk_state(
+                conn, venue="alpaca", symbol=str(symbol),
+                strategy=str(strategy_id), opened_ts=int(opened_ts),
             )
             conn.execute("COMMIT")
         except sqlite3.Error as exc:

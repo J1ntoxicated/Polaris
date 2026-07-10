@@ -41,7 +41,12 @@ from polaris.core.metrics.risk_unit import STOP_ATR_MULT, r_budget_for_venue
 from polaris.core.regime_fit import regime_fit, regime_scalar
 from polaris.core.sizing.amplifier import resolve_tier_amplifier
 from polaris.core.sizing.cell_mult_application import resolve_cell_routing_mult
-from polaris.core.sizing.cluster_cap import cluster_remaining_pct, resolve_cluster_id
+from polaris.core.sizing.cluster_cap import (
+    cluster_remaining_pct,
+    cluster_used_pct,
+    resolve_cluster_definitions,
+    resolve_cluster_id,
+)
 from polaris.core.sizing.kelly import kelly_or_cold_start
 from polaris.core.sizing.ladder import draw_for_signal
 from polaris.core.sizing.probe_cap import probe_cap_check
@@ -647,6 +652,68 @@ def underlying_remaining_pct(
 
 
 # ---------------------------------------------------------------------------
+# Binding-cap observability (2026-07-10 ghost-row RCA gap-fix)
+# ---------------------------------------------------------------------------
+
+_BINDING_REASON: dict[str, str] = {
+    "proposed": "proposed_risk_zero",
+    "single_trade": "single_trade_cap_exhausted",
+    "per_symbol": "per_symbol_headroom_exhausted",
+    "underlying": "underlying_headroom_exhausted",
+    "cluster": "cluster_headroom_exhausted",
+    "track": "track_headroom_exhausted",
+    "venue_daily": "venue_daily_headroom_exhausted",
+    "total_daily": "total_daily_headroom_exhausted",
+}
+
+
+def _binding_detail(
+    *,
+    binding: str,
+    intent: SignalIntent,
+    portfolio: PortfolioState,
+    single_trade_cap: float,
+    cluster_id: str | None,
+) -> tuple[str, float, float]:
+    """``(reason, used_pct, cap_pct)`` for the headroom_min() winner.
+
+    RAW (un-clamped) used_pct — recomputed here instead of reusing the already
+    max(0, cap-used)-clamped ``*_remaining`` values — so a ``sizing_zero`` KILL
+    payload can show HOW oversubscribed the binding dimension is (e.g. the
+    Capital ghost-row incident: used=2.8291 vs cap=1.0), not just that it
+    clipped to zero. Diagnostics-only — never feeds back into sizing.
+    """
+    reason = _BINDING_REASON.get(binding, binding)
+    if binding == "per_symbol":
+        cap = venue_per_symbol_cap(intent.venue)
+        used = sum(
+            p.open_risk_pct for p in portfolio.open_positions
+            if p.venue == intent.venue and p.symbol == intent.symbol
+        )
+        return reason, used, cap
+    if binding == "underlying":
+        cap = underlying_group_pct()
+        used = sum(
+            p.open_risk_pct for p in portfolio.open_positions
+            if p.underlying_group_id == intent.underlying_group_id
+        )
+        return reason, used, cap
+    if binding == "cluster" and cluster_id is not None:
+        cap = resolve_cluster_definitions().get(cluster_id, 0.0)
+        used = cluster_used_pct(cluster_id=cluster_id, open_positions=portfolio.open_positions)
+        return reason, used, cap
+    if binding == "track":
+        return reason, portfolio.track_used_pct.get(intent.track, 0.0), track_gross_cap(intent.track)
+    if binding == "venue_daily":
+        return reason, portfolio.venue_daily_used_pct, track_daily_cap(intent.track)
+    if binding == "total_daily":
+        return reason, portfolio.total_daily_used_pct, total_daily_risk_ceiling_pct()
+    if binding == "single_trade":
+        return reason, 0.0, single_trade_cap
+    return reason, 0.0, 0.0
+
+
+# ---------------------------------------------------------------------------
 # Top-level compose (T4 main entry)
 # ---------------------------------------------------------------------------
 
@@ -936,6 +1003,10 @@ def compute_size(
         venue_daily_remaining=venue_daily_rem,
         total_daily_remaining=total_daily_rem,
     )
+    binding_reason, binding_used_pct, binding_cap_pct = _binding_detail(
+        binding=binding, intent=intent, portfolio=portfolio,
+        single_trade_cap=single_trade_cap, cluster_id=cluster_id,
+    )
     if binding == "single_trade":
         # Structured binding log (P0-3 test requirement): name the SPECIFIC
         # sub-term that clipped inside the single-trade slot, not just the
@@ -1154,4 +1225,7 @@ def compute_size(
         final_notional_usd=notional,
         leverage=intent.leverage,
         binding_cap=binding,
+        binding_reason=binding_reason,
+        binding_used_pct=binding_used_pct,
+        binding_cap_pct=binding_cap_pct,
     )

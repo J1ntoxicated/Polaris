@@ -124,7 +124,9 @@
       ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 1; ctx.stroke();
 
       // jarvis arc-ring reticle (rotating tick band)
-      const rot = t * 0.05 + i * 0.61, ringR = 40, span = Math.PI * 1.45;
+      // static reticle (Jin 2026-07-10: the spinning tick band read as
+      // noise — the ring stays; only the rotation goes)
+      const rot = i * 0.61, ringR = 40, span = Math.PI * 1.45;
       ctx.save();
       ctx.translate(gs.x, gs.y);
       ctx.rotate(rot);

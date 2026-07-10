@@ -137,7 +137,17 @@
     // — the top-to-bottom order finally reads as the real pipeline. The old
     // random mkt->strat links (the white-line convergence hub) die here.
     tickerStrat.clear();
-    jitteredBand(hashShuffle(byCluster.strat), W * 0.045, W * 0.955, H * 0.09, H * 0.40, ':strat', 0.6);
+    // Milky-way BAND (Jin 2026-07-10 "구모양 말고 띠처럼"): one continuous
+    // galactic band sweeps the top; strategies are bright knots ALONG it and
+    // ticker clouds elongate along the band tangent so neighbouring
+    // constellations blend into a single streak.
+    const bandY = (x) => H * 0.21 + Math.sin((x / W) * Math.PI * 1.35 + 0.7) * H * 0.075;
+    const stratsOrdered = hashShuffle(byCluster.strat);
+    stratsOrdered.forEach((n, i) => {
+      const r = rngFor(n.id + ':knot');
+      const x = W * 0.05 + ((i + 0.5) / stratsOrdered.length) * W * 0.90 + (r() - 0.5) * W * 0.02;
+      screen[n.id] = { x, y: bandY(x) + (r() - 0.5) * H * 0.05 };
+    });
     const stratPool = { okx: [], cap: [], alp: [] };
     hashShuffle(byCluster.strat).forEach((n) => {
       const k = String(n.exchange || '').slice(0, 3).toLowerCase();
@@ -166,18 +176,19 @@
         perStratIdx.set(st.id, k + 1);
         const total = stratCount.get(st.id) || 1;
         const r = rngFor(n.id + ':orb');
-        const maxR = Math.min(74, 15 + 7.0 * Math.sqrt(total));
-        const radFrac = Math.pow((k + 0.5) / total, 0.82);
-        const rad = 5 + (maxR - 5) * radFrac + r() * 2.5;
-        const tilt = (rngFor(st.id + ':tilt')() - 0.5) * 0.9;
-        const ang = k * 2.39996 + r() * 0.5 + radFrac * 1.7; // swirl arm twist
-        const dx = Math.cos(ang) * rad, dy = Math.sin(ang) * rad * 0.5;
+        // elongated gaussian along the band (x-sigma scales with cluster
+        // size; y stays thin) -> the clouds run together as ONE streak.
+        const gauss = () => (r() + r() + r() - 1.5) / 1.5;
+        const xSig = Math.min(120, 34 + 9 * Math.sqrt(total));
+        const dx = gauss() * xSig;
+        const dy = gauss() * 15;
         const sc = screen[st.id];
-        screen[n.id] = {
-          x: Math.max(8, Math.min(W - 8, sc.x + dx * Math.cos(tilt) - dy * Math.sin(tilt))),
-          y: Math.max(14, Math.min(H * 0.47, sc.y + dx * Math.sin(tilt) + dy * Math.cos(tilt))),
-        };
-        screen[n.id].coreBoost = 1 - radFrac; // 코어일수록 밝게 (아래 알파 계산에서)
+        const x = Math.max(8, Math.min(W - 8, sc.x + dx));
+        const y = Math.max(14, Math.min(H * 0.47,
+          sc.y + dy + (bandY(x) - bandY(sc.x)))); // follow the band curve
+        screen[n.id] = { x, y };
+        const prox = Math.exp(-((dx / xSig) * (dx / xSig) + (dy / 15) * (dy / 15)));
+        screen[n.id].coreBoost = prox; // 코어일수록 밝게
         tickerStrat.set(n.id, st.id);
       });
     });

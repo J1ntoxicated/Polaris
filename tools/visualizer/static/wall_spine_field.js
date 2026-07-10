@@ -360,22 +360,48 @@
   // Called by wall_spine.fireGateEvent for a REAL g1..g5 gate event on a mkt
   // ticker: glide it to a parking slot ringed around that gate nucleus. A
   // later gate re-targets the SAME dot further right (the 옆으로 progression).
+  // Journey choreography (Jin 2026-07-10 "G2에 붙었다가 밸리데이터로
+  // 넘어가고" — one tick's G1..G5 events arrive as one SSE batch, so a
+  // naive re-target teleported dots to the LAST gate, sometimes out of
+  // order): stops queue per ticker, always played ASCENDING with a short
+  // dwell at each gate — the dot visibly walks G2 -> G3 -> G4 -> G5.
+  const MIGRATE_DWELL_MS = 900;
   function migrateTicker(nodeId, gateIdx) {
     const s = screen[nodeId];
-    const gs = gateScreen[gateIdx];
-    if (!s || !gs) return;
-    const r = rngFor(nodeId + ':park:' + gateIdx);
-    const ang = r() * Math.PI * 2;
-    const rad = 30 + r() * 22;
-    const m = migrations.get(nodeId);
-    const fromX = m ? migratePos(m, s).x : s.x;
-    const fromY = m ? migratePos(m, s).y : s.y;
-    migrations.set(nodeId, {
-      fx: fromX, fy: fromY,
-      tx: gs.x + Math.cos(ang) * rad, ty: gs.y + Math.sin(ang) * rad,
-      t: 0, dur: 0.9 + r() * 0.5, phase: 'out',
-      lastMs: performance.now(), gateIdx,
-    });
+    if (!s || !gateScreen[gateIdx]) return;
+    let m = migrations.get(nodeId);
+    if (!m) {
+      m = { fx: s.x, fy: s.y, tx: s.x, ty: s.y, t: 1, dur: 0.3, phase: 'out',
+            lastMs: performance.now(), gateIdx: -1, stops: [], dwellUntil: 0 };
+      migrations.set(nodeId, m);
+    }
+    if (m.phase === 'return') { m.phase = 'out'; m.gateIdx = -1; }
+    if (gateIdx > m.gateIdx && m.stops.indexOf(gateIdx) < 0) {
+      m.stops.push(gateIdx);
+      m.stops.sort((a, b) => a - b);
+    }
+    m.lastMs = performance.now();
+    // NOTE: no immediate advance — an SSE batch delivers one journey's
+    // G1..G5 events in a single JS task, so departing on the FIRST event
+    // would drop the rest via the monotonic guard. The frame loop departs
+    // after the whole batch has queued (sorted ascending).
+  }
+  function maybeAdvance(nodeId, m) {
+    if (m.t < 1 || !m.stops.length) return;
+    if (performance.now() < (m.dwellUntil || 0)) return;
+    const s = screen[nodeId];
+    if (!s) return;
+    const gi = m.stops.shift();
+    const gs = gateScreen[gi];
+    if (!gs) return;
+    const r = rngFor(nodeId + ':park:' + gi);
+    const ang = r() * Math.PI * 2, rad = 30 + r() * 22;
+    const cur = migratePos(m, s);
+    m.fx = cur.x; m.fy = cur.y;
+    m.tx = gs.x + Math.cos(ang) * rad;
+    m.ty = gs.y + Math.sin(ang) * rad;
+    m.t = 0; m.dur = 0.8 + r() * 0.4; m.phase = 'out';
+    m.gateIdx = gi; m.dwellUntil = 0;
   }
   // Send a migrated dot home (entry fill: its life continues as a pos node;
   // or idle decay). No-op when not migrating.
@@ -386,7 +412,8 @@
     const cur = migratePos(m, s);
     migrations.set(nodeId, {
       fx: cur.x, fy: cur.y, tx: s.x, ty: s.y,
-      t: 0, dur: 1.2, phase: 'return', lastMs: performance.now(), gateIdx: m.gateIdx,
+      t: 0, dur: 1.2, phase: 'return', lastMs: performance.now(),
+      gateIdx: m.gateIdx, stops: [], dwellUntil: 0,
     });
   }
   function migratePos(m, s) {
@@ -766,8 +793,15 @@
       const s = screen[id];
       if (!s) { migrations.delete(id); return; }
       if (m.t < 1) m.t = Math.min(1, m.t + dt / m.dur);
-      else if (m.phase === 'out' && now - m.lastMs > MIGRATE_IDLE_MS) { migrateHome(id); return; }
-      else if (m.phase === 'return' && m.t >= 1) { migrations.delete(id); return; }
+      else if (m.phase === 'out') {
+        if (m.stops && m.stops.length) {
+          // first hop departs immediately (gateIdx -1 = still at home);
+          // subsequent hops dwell so the walk is readable.
+          if (m.gateIdx < 0) maybeAdvance(id, m);
+          else if (!m.dwellUntil) m.dwellUntil = now + MIGRATE_DWELL_MS;
+          else if (now >= m.dwellUntil) maybeAdvance(id, m);
+        } else if (now - m.lastMs > MIGRATE_IDLE_MS) { migrateHome(id); return; }
+      } else if (m.phase === 'return' && m.t >= 1) { migrations.delete(id); return; }
       const pt = migratePos(m, s);
       glowAt(id, pt.x, pt.y, 0.25);
     });
@@ -788,6 +822,7 @@
     setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
     migrateTicker, migrateHome, venueColorOf, touchWire, setProbeLinks,
     screenOf: (id) => screen[id],
+    migrationOf: (id) => migrations.get(id),
     markFire, pathEdges, rgba, drawDot, bezierPoint,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,

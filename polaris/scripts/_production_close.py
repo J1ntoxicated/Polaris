@@ -188,6 +188,18 @@ def _finalize_already_closed(
                 "AND status NOT IN ('closed', 'reconciled')",
                 (now_ts, trade.position_id),
             )
+            # Ghost-row fix (2026-07-10 RCA): this idempotent-terminal path
+            # skipped the sizer's open-position risk row delete same as
+            # ``_reconcile_orphan`` did — DELETE is naturally idempotent (a
+            # re-drive with no matching row is a no-op), so unconditional here
+            # is safe.
+            delete_position_risk_state(
+                conn,
+                venue=trade.venue,
+                symbol=trade.symbol,
+                strategy=trade.strategy_id,
+                opened_ts=trade.open_ts,
+            )
         conn.execute("COMMIT")
     if 0 <= trade_idx < len(state.open_trades) and state.open_trades[trade_idx] is trade:
         state.open_trades.pop(trade_idx)

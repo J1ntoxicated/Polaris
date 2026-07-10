@@ -627,6 +627,71 @@ def test_t4_budget_cap_still_binds_when_over_budget(memdb: sqlite3.Connection) -
     assert sized.binding_cap == "venue_daily"
 
 
+def test_t4_binding_detail_exposes_venue_daily_usage(memdb: sqlite3.Connection) -> None:
+    """sizing_zero observability (2026-07-10 ghost-row RCA gap-fix): the
+    binding constraint's RAW used_pct/cap_pct ride alongside ``binding_cap``
+    so a KILL payload shows the actual usage, not just the clipped-to-zero
+    ``final_risk_pct``."""
+    _seed_top_quartile_cell(memdb)
+    weak = SignalIntent(
+        signal_id="sig-weak3", venue="okx", symbol="PL24-USDT",
+        instrument_id="okx:PL24-USDT", underlying_group_id="crypto:PL",
+        asset_class="crypto", strategy="volume_burst", track="A",
+        regime="bull_trend", direction="long", signal_strength=0.6,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+    )
+    venue_cap = track_daily_cap("A")
+    over = PortfolioState(
+        equity_usd=10_000.0,
+        venue_daily_used_pct=venue_cap - 0.001,
+        total_daily_used_pct=0.0,
+        track_used_pct={"A": 0.0, "B": 0.0},
+        open_positions=[],
+        fill_rate_active_cut=True,
+    )
+    sized = compute_size(
+        memdb, intent=weak, risk_state=_risk_state(), portfolio=over, now_ts=NOW + 100,
+    )
+    assert sized.binding_cap == "venue_daily"
+    assert sized.binding_reason == "venue_daily_headroom_exhausted"
+    assert sized.binding_used_pct == pytest.approx(venue_cap - 0.001)
+    assert sized.binding_cap_pct == pytest.approx(venue_cap)
+
+
+def test_t4_binding_detail_reproduces_capital_ghost_row_incident(
+    memdb: sqlite3.Connection,
+) -> None:
+    """Mirrors the 2026-07-10 Capital incident: track massively oversubscribed
+    (Σopen_risk_pct=282.91% against a 100% track cap from 56 ghost
+    ``position_risk_state`` rows). The KILL payload's ``binding_used_pct`` must
+    show the TRUE (un-clamped) overage, not the headroom_min-clamped 0.0."""
+    _seed_top_quartile_cell(memdb)
+    intent = SignalIntent(
+        signal_id="sig-trackb", venue="okx", symbol="PL24-USDT",
+        instrument_id="okx:PL24-USDT", underlying_group_id="crypto:PL",
+        asset_class="crypto", strategy="volume_burst", track="B",
+        regime="bull_trend", direction="long", signal_strength=1.2,
+        listing_age_hours=72.0, leverage=1.0, base_risk_pct=0.02,
+    )
+    over_used = track_gross_cap("B") + 1.8291  # 282.91%-style overage
+    portfolio = PortfolioState(
+        equity_usd=10_000.0,
+        venue_daily_used_pct=0.0,
+        total_daily_used_pct=0.0,
+        track_used_pct={"B": over_used},
+        open_positions=[],
+        fill_rate_active_cut=False,
+    )
+    sized = compute_size(
+        memdb, intent=intent, risk_state=_risk_state(), portfolio=portfolio, now_ts=NOW + 100,
+    )
+    assert sized.final_risk_pct == 0.0
+    assert sized.binding_cap == "track"
+    assert sized.binding_reason == "track_headroom_exhausted"
+    assert sized.binding_used_pct == pytest.approx(over_used)
+    assert sized.binding_cap_pct == pytest.approx(track_gross_cap("B"))
+
+
 @settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
     base=st.floats(min_value=0.001, max_value=0.20),

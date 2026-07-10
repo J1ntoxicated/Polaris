@@ -377,6 +377,15 @@ class SizingFinal:
     final_notional_usd: float
     leverage: float
     binding_cap: str  # which cap clipped (audit string)
+    # sizing_zero observability (2026-07-10 ghost-row RCA gap-fix): a
+    # human-readable detail for ``binding_cap`` + the RAW (un-clamped)
+    # used/cap pct for that SPECIFIC constraint, so a KILL payload shows HOW
+    # oversubscribed the binding dimension is (e.g. used=2.8291 cap=1.0),
+    # not just that it clipped to zero. Display/audit only — never feeds back
+    # into sizing. Defaults keep pre-existing callers byte-identical.
+    binding_reason: str = ""
+    binding_used_pct: float = 0.0
+    binding_cap_pct: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

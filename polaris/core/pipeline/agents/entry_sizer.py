@@ -131,6 +131,14 @@ async def entry_sizer_gate(
             payload={
                 "reason": "sizing_zero",
                 "binding_cap": sized.binding_cap,
+                # Observability (2026-07-10 ghost-row RCA gap-fix): a
+                # human-readable detail (e.g. "track_headroom_exhausted") +
+                # the RAW used/cap pct for the winning constraint, so a
+                # sizing_zero KILL shows HOW oversubscribed it is at a glance
+                # — display/RCA only, no sizing effect.
+                "binding_reason": sized.binding_reason,
+                "binding_used_pct": sized.binding_used_pct,
+                "binding_cap_pct": sized.binding_cap_pct,
                 "proposed_risk_pct": sized.proposed.proposed_risk_pct,
             },
             model_used="python",

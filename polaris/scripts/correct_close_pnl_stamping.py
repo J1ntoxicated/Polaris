@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from polaris.core.data.position_risk_persist import delete_position_risk_state
 from polaris.scripts.correct_close_pnl_orphans import (
     analyze_capped_excursions,
     analyze_cross_instrument_orphans,
@@ -74,6 +75,7 @@ class PositionReport:
     stamped_sum: float
     corrected_sum: float
     last_close_ts_ms: int
+    opened_ts: int = 0
     fixes: list[FillFix] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
 
@@ -95,6 +97,7 @@ def analyze_position(
     side: str,
     status: str,
     strategy_id: str,
+    opened_ts: int,
     tol_usd: float,
 ) -> PositionReport:
     """Recompute every close fill's true slice pnl_usd for one position."""
@@ -115,7 +118,7 @@ def analyze_position(
     stamped_sum = sum(float(c[3] or 0.0) for c in closes)
     rep = PositionReport(
         position_id=position_id, venue=venue, symbol=symbol, side=side,
-        status=status, strategy_id=strategy_id,
+        status=status, strategy_id=strategy_id, opened_ts=opened_ts,
         entry_qty=float(entries[0][2]) if entries else 0.0,
         closed_qty=closed_qty, n_close=len(closes),
         stamped_sum=stamped_sum, corrected_sum=stamped_sum,
@@ -188,7 +191,7 @@ def analyze(conn: sqlite3.Connection, *, tol_usd: float) -> list[PositionReport]
     """All positions with >=1 instrument-scoped close fill (status-agnostic)."""
     rows = conn.execute(
         "SELECT p.position_id, p.venue, p.symbol, p.side, p.status, "
-        "p.strategy_id FROM positions p WHERE EXISTS ("
+        "p.strategy_id, p.opened_ts FROM positions p WHERE EXISTS ("
         "SELECT 1 FROM fills f WHERE f.contribution_id = p.position_id "
         "AND f.instrument_id = p.venue || ':' || p.symbol AND f.is_close = 1) "
         "ORDER BY p.opened_ts ASC",
@@ -197,7 +200,7 @@ def analyze(conn: sqlite3.Connection, *, tol_usd: float) -> list[PositionReport]
         analyze_position(
             conn, position_id=str(r[0]), venue=str(r[1]), symbol=str(r[2]),
             side=str(r[3] or "long"), status=str(r[4] or ""),
-            strategy_id=str(r[5] or ""), tol_usd=tol_usd,
+            strategy_id=str(r[5] or ""), opened_ts=int(r[6] or 0), tol_usd=tol_usd,
         )
         for r in rows
     ]
@@ -289,6 +292,15 @@ def apply_corrections(
                     "exit_state = 'closed' WHERE position_id = ? "
                     "AND status = 'open'",
                     (rep.last_close_ts_ms // 1000 or now_ts, rep.position_id),
+                )
+                # Ghost-row fix (2026-07-10 RCA): this retroactive status
+                # correction is a terminal transition same as a real close —
+                # drop the sizer's open-position risk row here too, or the
+                # freed headroom never returns (same-class bug as
+                # ``_reconcile_orphan`` / ``reconcile_alpaca_zombies``).
+                delete_position_risk_state(
+                    conn, venue=rep.venue, symbol=rep.symbol,
+                    strategy=rep.strategy_id, opened_ts=rep.opened_ts,
                 )
                 n_status += 1
             payload = json.dumps(

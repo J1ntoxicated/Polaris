@@ -9,6 +9,8 @@ spot leverage stays the invariant fixed 1.0.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from polaris.core.streams import (
@@ -277,14 +279,10 @@ def test_t11_c_stream_registered() -> None:
     assert {s.track for s in STREAMS.values()} == {"A", "B", "C"}
 
 
-def test_t8_sizer_payload_decodes_track_c() -> None:
-    """``_read_portfolio_state`` must 3-way decode a stored "C" track to "C",
-    never silently collapse it to "B"."""
-    import sqlite3
-
-    from polaris.core.pipeline._sizer_payload import _read_portfolio_state
-
-    conn = sqlite3.connect(":memory:")
+def _create_bare_position_risk_tables(conn: sqlite3.Connection) -> None:
+    """Minimal ``position_risk_state`` + ``positions`` pair for
+    ``_read_portfolio_state`` unit tests — the latter is required by the
+    ghost-row-defense JOIN (2026-07-10, ``_sizer_payload._read_portfolio_state``)."""
     conn.execute(
         """
         CREATE TABLE position_risk_state (
@@ -294,6 +292,23 @@ def test_t8_sizer_payload_decodes_track_c() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE positions (
+            venue TEXT, symbol TEXT, strategy_id TEXT, status TEXT,
+            opened_ts INTEGER
+        )
+        """
+    )
+
+
+def test_t8_sizer_payload_decodes_track_c() -> None:
+    """``_read_portfolio_state`` must 3-way decode a stored "C" track to "C",
+    never silently collapse it to "B"."""
+    from polaris.core.pipeline._sizer_payload import _read_portfolio_state
+
+    conn = sqlite3.connect(":memory:")
+    _create_bare_position_risk_tables(conn)
     rows = [
         ("alpaca", "AAPL", "AAPL", "AAPL", None, "equity_mom", "C", 0.8, 0.05, 500.0, 1),
         ("okx", "BTC-USDT", "BTC-USDT", "BTC", "crypto:BTC", "tsmom", "A", 0.7, 0.04, 400.0, 2),
@@ -301,6 +316,10 @@ def test_t8_sizer_payload_decodes_track_c() -> None:
     ]
     conn.executemany(
         "INSERT INTO position_risk_state VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows
+    )
+    conn.executemany(
+        "INSERT INTO positions VALUES (?,?,?,'open',?)",
+        [(r[0], r[1], r[5], r[10]) for r in rows],
     )
     conn.commit()
     state = _read_portfolio_state(conn, equity_usd=10_000.0, track="C")
@@ -311,24 +330,15 @@ def test_t8_sizer_payload_decodes_track_c() -> None:
 def test_t8_sizer_payload_unknown_track_does_not_crash() -> None:
     """An unexpected stored track value is passed through as-is (no silent
     collapse to B); decode never raises on a stray value."""
-    import sqlite3
-
     from polaris.core.pipeline._sizer_payload import _read_portfolio_state
 
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE position_risk_state (
-            venue TEXT, symbol TEXT, instrument_id TEXT, underlying_group_id TEXT,
-            cluster_id TEXT, strategy TEXT, track TEXT, signal_strength REAL,
-            open_risk_pct REAL, notional_usd REAL, opened_ts INTEGER
-        )
-        """
-    )
+    _create_bare_position_risk_tables(conn)
     conn.execute(
         "INSERT INTO position_risk_state VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         ("x", "X", "X", "X", None, "s", "Z", 0.5, 0.01, 100.0, 1),
     )
+    conn.execute("INSERT INTO positions VALUES ('x', 'X', 's', 'open', 1)")
     conn.commit()
     state = _read_portfolio_state(conn, equity_usd=10_000.0, track="C")
     assert [p.track for p in state.open_positions] == ["Z"]

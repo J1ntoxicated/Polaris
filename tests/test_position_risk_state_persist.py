@@ -30,6 +30,22 @@ def _open(conn: sqlite3.Connection, *, symbol: str = "BTC-USDT",
           underlying: str = "crypto:BTC", strategy: str = "volume_burst",
           notional: float = 20_000.0, equity: float = 79_000.0,
           opened_ts: int = 1000) -> None:
+    # A real open always pairs a ``positions`` row (status='open') with the
+    # ``position_risk_state`` row in the SAME transaction (see
+    # ``_production_pipeline.py``) — ``_read_portfolio_state`` now JOINs on
+    # this pairing (ghost-row RCA 2nd line of defense), so the fixture mirrors
+    # it. INSERT OR REPLACE keyed on position_id so a same-PK re-open (the
+    # idempotency test) stays a no-op double-insert, not a duplicate row.
+    conn.execute(
+        "INSERT OR REPLACE INTO positions (position_id, venue, symbol, "
+        "underlying_group_id, strategy_id, entry_strategy_id, "
+        "active_strategy_id, side, qty, status, opened_ts) "
+        "VALUES (?, 'okx', ?, ?, ?, ?, ?, 'long', 1.0, 'open', ?)",
+        (
+            f"okx:{symbol}:{strategy}:{opened_ts}", symbol, underlying,
+            strategy, strategy, strategy, opened_ts,
+        ),
+    )
     persist_position_risk_state(
         conn,
         venue="okx",
@@ -172,5 +188,65 @@ def test_reopen_idempotent_no_double_count(tmp_path: Path) -> None:
         _open(conn, opened_ts=5000)
         n = conn.execute("SELECT COUNT(*) FROM position_risk_state").fetchone()[0]
         assert n == 1
+    finally:
+        conn.close()
+
+
+def _seed_position_row(
+    conn: sqlite3.Connection, *, venue: str, symbol: str, strategy: str,
+    opened_ts: int, status: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, underlying_group_id, "
+        "strategy_id, entry_strategy_id, active_strategy_id, side, qty, status, "
+        "opened_ts) VALUES (?, ?, ?, 'crypto:BTC', ?, ?, ?, 'long', 1.0, ?, ?)",
+        (
+            f"{venue}:{symbol}:{opened_ts}", venue, symbol, strategy, strategy,
+            strategy, status, opened_ts,
+        ),
+    )
+
+
+def test_portfolio_state_filters_ghost_row_via_positions_join(tmp_path: Path) -> None:
+    """2026-07-10 ghost-row RCA (2nd line of defense): a ``position_risk_state``
+    row whose matching ``positions`` row is no longer ``status='open'`` (any
+    terminal-transition path that forgot to delete it) must NOT count toward
+    the sizer's headroom, even if the primary delete-on-terminal fix is missed
+    somewhere."""
+    conn = init_db(tmp_path / "p.sqlite")
+    try:
+        persist_position_risk_state(
+            conn, venue="okx", symbol="BTC-USDT", instrument_id="okx:BTC-USDT",
+            underlying_group_id="crypto:BTC", strategy="volume_burst", track="A",
+            asset_class="crypto", signal_strength=0.8, notional_usd=20_000.0,
+            equity_usd=79_000.0, opened_ts=1000,
+        )
+        _seed_position_row(
+            conn, venue="okx", symbol="BTC-USDT", strategy="volume_burst",
+            opened_ts=1000, status="closed",
+        )
+        ps = _read_portfolio_state(conn, equity_usd=79_000.0, track="A")
+        assert ps.open_positions == []
+    finally:
+        conn.close()
+
+
+def test_portfolio_state_keeps_row_when_positions_status_open(tmp_path: Path) -> None:
+    """The JOIN filter must not drop a genuinely live open position."""
+    conn = init_db(tmp_path / "p.sqlite")
+    try:
+        persist_position_risk_state(
+            conn, venue="okx", symbol="BTC-USDT", instrument_id="okx:BTC-USDT",
+            underlying_group_id="crypto:BTC", strategy="volume_burst", track="A",
+            asset_class="crypto", signal_strength=0.8, notional_usd=20_000.0,
+            equity_usd=79_000.0, opened_ts=1000,
+        )
+        _seed_position_row(
+            conn, venue="okx", symbol="BTC-USDT", strategy="volume_burst",
+            opened_ts=1000, status="open",
+        )
+        ps = _read_portfolio_state(conn, equity_usd=79_000.0, track="A")
+        assert len(ps.open_positions) == 1
+        assert ps.open_positions[0].symbol == "BTC-USDT"
     finally:
         conn.close()

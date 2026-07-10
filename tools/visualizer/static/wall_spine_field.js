@@ -155,14 +155,16 @@
       // tinted so the whole field reads by exchange (matches the .wall-venues
       // legend chips) — dim at rest via baseAlpha, full-strength when the
       // firing glow / migration halo lights the same hue on top.
-      if (node.cluster === 'mkt' || node.cluster === 'watch') {
-        const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
-        if (vc) s.color = vc;
-      }
-      // Jin 2026-07-10 "열려있는 포지션은 프로핏 로스 색": open-position dots
-      // read green/red by live UPnL sign (refreshed every 1s poll below).
+      // Jin 2026-07-10 color contract: P/L green/red is EXCLUSIVE to open
+      // positions; every other exchange-carrying entity (mkt dust, watch,
+      // strategies, exits, …) wears its venue color passively — top of the
+      // field, migrating to a gate, or firing alike. Venue-less meta nodes
+      // (obs/action/axis…) keep their cluster color.
       if (node.cluster === 'pos') {
         s.color = (node.pnl_usd || 0) >= 0 ? '#7dffa8' : '#ff7d8a';
+      } else {
+        const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
+        if (vc) s.color = vc;
       }
       if (node.cluster === 'mkt') {
         s.r = 1.15 + depth * 0.55;
@@ -271,6 +273,10 @@
     return { x: m.fx + (m.tx - m.fx) * k, y: m.fy + (m.ty - m.fy) * k };
   }
   function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+  // venue color for any exchange string ('okx'/'capital'/'alpaca' or 3-letter)
+  function venueColorOf(exchange) {
+    return VENUE_COLOR[String(exchange || '').slice(0, 3).toLowerCase()] || null;
+  }
 
   function edgeFor(fromId, toId, x1, y1, x2, y2, opts) {
     const key = fromId + '->' + toId;
@@ -592,7 +598,7 @@
 
   window.PolarisSpineField = {
     setSize, buildLayout, buildEdges, renderStaticLayer, drawField, refreshNodeState,
-    migrateTicker, migrateHome,
+    migrateTicker, migrateHome, venueColorOf,
     markFire, pathEdges, rgba, drawDot, bezierPoint,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,

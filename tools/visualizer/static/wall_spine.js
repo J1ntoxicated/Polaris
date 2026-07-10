@@ -210,7 +210,8 @@
         field.migrateTicker(srcNode.id, g.gate_id - 1);
       }
       const es = field.pathEdges([srcNode.id, gid]);
-      if (es.length) { spawnComet(es, field.clusterColor()[srcNode.cluster] || GATE_HALO, 1.8); return; }
+      const vc = field.venueColorOf && field.venueColorOf(srcNode.exchange);
+      if (es.length) { spawnComet(es, vc || field.clusterColor()[srcNode.cluster] || GATE_HALO, 1.8); return; }
     }
     field.markFire(gid, 700);
   }
@@ -220,7 +221,8 @@
     // output, so the comet rides the whole signal->sized chain to get there.
     const strat = field.nodeById('strat_' + e.strategy_id);
     const path = strat ? field.pathEdges([strat.id, 'g2', 'g3', 'g4', 'g5']) : [];
-    if (path.length) spawnComet(path, field.clusterColor().strat || '#8fd7ff', 2.0);
+    const evc = field.venueColorOf && field.venueColorOf(e.exchange);
+    if (path.length) spawnComet(path, evc || field.clusterColor().strat || '#8fd7ff', 2.0);
     else field.markFire('g5', 700);
     // The filled ticker's journey continues as a pos-cluster node — send its
     // parked mkt dot home instead of leaving it camped at the sizer.

@@ -34,6 +34,14 @@ supersedes: structural_roadmap_2026-06-22.md
 - 4.2 [DECISION] POLARIS_VIRTUAL_ACCOUNT=0 flip 조건 — 검증 기준·리콘 재연결·튜닝 (feedback_virtual_account_first_then_real_wire)
 - 4.3 [BUILD] real-와이어 시 PROVE probe 경로 발효 확인 (5f3512e forward-fix, virtual에선 no-op)
 
+## R6 — 대개편: 척후병+후방 소화계 (2026-07-11 착수, 역대 최대 구조 향상)
+- 6.1 [BUILD] frontgate top10 behavior-0 섀도우 배선 — 검증→Sonnet 배선→Opus 리뷰 (wf_19d24629)
+- 6.2 [DONE] 척후병 데이터 소싱 플랜 — EDGAR·DefiLlama 즉시, Finnhub(가입)·Coinglass(\$29 Jin 결정), vault frontgate-scan/data-sourcing-*
+- 6.3 [DONE] 후방 마스터 블루프린트 — W1~W5 시퀀스+의존성 그래프, codex R1 수용 7 (vault backgate-plan/)
+- 6.4 [QUEUED] /flow 익스포저 — 섀도우 채널+승격 진행률 게이지 (6.1 랜딩 후)
+- 6.5 [QUEUED] 무키 피드 인제스트 빌드 — EDGAR·DefiLlama (altdata 패턴)
+- 6.6 [QUEUED] W1 감시 그물 → W2 섀도우 확장 → W3 채점·승격 인프라 → W4 항목별 flip(각각 /debate R2) → W5 조건부 — master-sequence.md가 SSOT
+
 ## R5 — 이월 큐 (우선순위 낮음, 의도적 defer)
 - 5.1 [DEBATE] counterfactual auto-reader — 계측→라이브결정 폐루프는 아키텍처 변경, stale_book이 실행가능분 흡수함
 - 5.2 [DECISION] REFINE_TIMING consumer — 진입지연이라 활발 목표와 역행, ROI 낮음 판정

@@ -28,4 +28,5 @@ Vault = **세컨브레인 버스(bus)**. RAG 처럼 가운데 앉아 세 축을 
 - `data/polaris*.sqlite` (vault 밖) + `data/lessons_archive/` → **A3**
 - `50_research/` debates·forensic·lessons ([[MOC-lessons]]) → A1 리서치
 - `50_research/frontgate-scan/` 게이트 강화 스캔·블루프린트·실험 로드맵 ([[integration-blueprint]] · [[experiment-roadmap]]) → A1 리서치
+- `50_research/backgate-plan/` 후방 소화계 대개편 설계 — 섀도우→채점→flip 5도메인 ([[master-sequence]]) → A1 리서치
 - `.templates/` ADR·INSIGHT·STRATEGY·COMPONENT·LESSON · [[.tag_taxonomy]] 태그

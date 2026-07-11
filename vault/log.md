@@ -401,3 +401,6 @@
 2026-07-10 18:18 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=378 learners=3 paper=True]
 - 2026-07-11: 알파카 슬리브 랜딩 — 5전략+인프라 머지(d76cab8, Opus 3렌즈 전원 APPROVE_WITH_NITS, 타깃 238 pass) → 봇 즉시 재기동(PID 87922, 부팅 클린) + 대시 재시작(로스터 31, ALP 8). 15m 웜업: #4 다수 즉시 가능(중앙값 463/205), #5 ORB ~30일 램프. 발화 워처 가동.
 - 2026-07-11: /flow 콘솔 v2 랜딩(96becbd) — 워크플로 23에이전트(감사4→설계3→심판3→빌드→적대3렌즈×3라운드)+컨덕터 마감(브리드 오타·매트릭스 피치·래더 log·셀 RAMP 폴백). 신규 readouts/lanes 모듈, 크라운=스트립 $296k 정합, 라이브 에러 0. 알파카 슬리브 첫 진입 GOOG/GOOGL $6k(connors) 관측.
+2026-07-10 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=222 learners=3 paper=True]
+2026-07-10 daily-auto [closes=221 pnl_usd=-2584.58 opens=225 faults=2 restarts=2]
+- 2026-07-11: 프론트게이트 전략 대탐사 랜딩 — 5도메인 웹스캔→fit→심판2→codex R1(BREAK 7 수용)→vault 8파일(frontgate-scan/, 전부 lint 클린). 수렴 top10: 로스터 활성화·TSMOM 12-1·XS+52wk 랭크·캘리브레이션·DFII10·VWAP타이밍·뉴스 conviction·로테이션·TTM Squeeze·메타라벨. 핵심: 다수 후보 기구현 — 활성화>신규빌드. 고아 codex exec(23h) 킬+위생 메모리화.

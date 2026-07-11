@@ -38,11 +38,13 @@ import datetime as _dt
 import json
 import logging
 import os
+import sqlite3
 from collections.abc import Callable
 from typing import Any, Final
 
 import httpx
 
+from polaris.core.altdata.news_timing_shadow import log_news_timing_shadow
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,7 @@ class NewsSentimentCollector:
         secret_key: str | None = None,
         base_url: str = ALPACA_DATA_BASE,
         gpt_client_factory: Callable[[], Any] | None = None,
+        shadow_conn: sqlite3.Connection | None = None,
     ) -> None:
         self._api_key = api_key
         self._secret_key = secret_key
@@ -189,6 +192,11 @@ class NewsSentimentCollector:
         # Factory so tests can inject a stub; defaults to the OpenAI GPT client
         # (runtime LLM = OpenAI), resolved lazily so a missing key → lexicon.
         self._gpt_client_factory = gpt_client_factory
+        # frontgate-scan item #7 (behavior-0): optional timestamp-audit +
+        # syndicate-dedup SHADOW log. None (default) = byte-identical to the
+        # pre-item-#7 collector — this is a pure additive side-effect, the
+        # returned aggregate below is NEVER changed by its presence.
+        self._shadow_conn = shadow_conn
 
     async def fetch(
         self, *, client: httpx.AsyncClient | None = None
@@ -204,7 +212,9 @@ class NewsSentimentCollector:
             if not articles:
                 return {}
             scored = await self._classify(articles)
-            return _aggregate(articles, scored, now=_dt.datetime.now(_dt.UTC))
+            ref_now = _dt.datetime.now(_dt.UTC)
+            self._log_timing_shadow(articles, scored, ref_now)
+            return _aggregate(articles, scored, now=ref_now)
         except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
             logger.info("[altdata] news_sentiment fetch failed (graceful skip): %s", exc)
             return {}
@@ -355,6 +365,23 @@ class NewsSentimentCollector:
             reasoning_effort="minimal",
         )
         return _extract_json(response)
+
+    def _log_timing_shadow(
+        self,
+        articles: list[dict[str, Any]],
+        scored: dict[Any, dict[str, float]],
+        now: _dt.datetime,
+    ) -> None:
+        """frontgate-scan item #7 SHADOW hook — no-op unless ``shadow_conn`` was
+        supplied at construction. Fail-open: any exception here is swallowed so
+        a shadow-logging fault can never break the collector's real evidence
+        return (this runs BEFORE the ``_aggregate`` call it must not affect)."""
+        if self._shadow_conn is None:
+            return
+        try:
+            log_news_timing_shadow(self._shadow_conn, articles=articles, scored=scored, now=now)
+        except Exception as exc:  # noqa: BLE001 — instrumentation must never break fetch()
+            logger.warning("[altdata] news_timing_shadow log dropped: %r", exc)
 
 
 def _classify_lexicon(

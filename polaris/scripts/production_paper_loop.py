@@ -405,7 +405,7 @@ def persist_altdata_snapshot(
     )
 
 
-def _default_altdata_collectors() -> list[Any]:
+def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[Any]:
     """The live alt-data EVIDENCE collectors (keyless/keyed graceful-skip).
 
     Every collector is registered; a missing key/creds yields a graceful ``{}``
@@ -417,6 +417,12 @@ def _default_altdata_collectors() -> list[Any]:
     code change. News reuses the Alpaca paper creds (no creds → graceful ``{}``,
     no network) and classifies headlines via an async GPT call on its own 15min
     cadence (in-loop GPT = 0 holds — off the per-tick hot path).
+
+    ``conn`` (optional): when supplied it is threaded ONLY into
+    ``NewsSentimentCollector`` as ``shadow_conn`` — frontgate-scan item #7's
+    timestamp-audit + dedup SHADOW log (behavior-0: the collector's returned
+    evidence dict is unchanged either way; ``None`` keeps every prior call
+    site byte-identical).
     """
     return [
         OKXFundingCollector(),
@@ -424,7 +430,7 @@ def _default_altdata_collectors() -> list[Any]:
         CryptoFearGreedCollector(),
         FredMacroCollector(),
         CFTCCotCollector(),
-        NewsSentimentCollector(),
+        NewsSentimentCollector(shadow_conn=conn),
         CoinglassCollector(),
         MyfxbookCollector(),
     ]
@@ -449,7 +455,7 @@ async def _altdata_producer(
     LAST cache value is kept untouched (graceful — fewer evidence sources, never
     a throttle / halt). The loop exits promptly when ``stop_evt`` is set.
     """
-    active = collectors if collectors is not None else _default_altdata_collectors()
+    active = collectors if collectors is not None else _default_altdata_collectors(conn)
     last_fetch: dict[str, float] = {}
     while not stop_evt.is_set():
         now_mono = time.monotonic()

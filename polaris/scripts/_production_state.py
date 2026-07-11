@@ -310,6 +310,21 @@ class ProdLoopState:
     last_eval_bar_ts_by_key: dict[tuple[str, str, str, str], int] = field(
         default_factory=dict
     )
+    # Frontgate item #2 — tsmom literature-shadow dedup mark (SHADOW-LOGGING
+    # only, never a trading gate). Per (venue, symbol) key → the ts of the 1D
+    # bar the last ``log_tsmom_literature_shadow`` write was logged against.
+    # The tsmom shadow write sits AFTER the bar-advance dispatch gate above,
+    # which is entirely SKIPPED whenever the (venue, timeframe) bucket has
+    # >=1 ``evaluates_in_progress_bar`` sibling (e.g. capital/1D via
+    # gold_riskoff_trend_amplify) — without this separate mark the shadow
+    # write would re-fire every 5s tick for an unchanged 1D bar instead of
+    # once per bar-close, corrupting the roadmap #2 promotion metric
+    # (duplicate rows for the same bar). Absent key = never logged → fires
+    # once (reboot-catchup, same no-missed-bar-gap convention as
+    # ``last_eval_bar_ts_by_key``).
+    last_tsmom_shadow_bar_ts_by_key: dict[tuple[str, str], int] = field(
+        default_factory=dict
+    )
     # Idle fanout backoff (compute scheduling only — see
     # ``_production_bar_gate.idle_backoff_next_due``). Per-venue monotonic ts
     # of the next allowed dispatch-fanout wake; absent = due now (first tick).

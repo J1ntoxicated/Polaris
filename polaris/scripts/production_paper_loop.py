@@ -104,7 +104,7 @@ from polaris.scripts.reconcile_orphans import (
     reconcile_venue_orphans,
 )
 from polaris.storage.db_writer import DBWriter, dbwriter_enabled
-from polaris.storage.schema import connect, init_db
+from polaris.storage.schema import connect, connect_ro, init_db
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
@@ -300,6 +300,7 @@ async def _layer0_producer(
     state: ProdLoopState,
     stop_evt: asyncio.Event,
     focus_conn: sqlite3.Connection | None = None,
+    momentum_conn: sqlite3.Connection | None = None,
 ) -> None:
     """OKX (5min) + Capital (10min) + Alpaca (10min) refresh + focus recompute.
 
@@ -317,15 +318,24 @@ async def _layer0_producer(
     threads at once, and ``_layer0_producer`` awaits each refresh before the next,
     so only ONE worker ever touches ``focus_conn`` at a time (WAL: 1-writer safe).
     The async universe refreshes (httpx I/O) stay on the loop (they already yield).
-    flow_not_block / 9-stack untouched: only WHERE focus runs changes, never which
-    symbol is watched or how it is sized.
+
+    Same STALL class, second instance: each ``refresh_*_universe_once`` runs an
+    UNBOUNDED synchronous ``bars`` scan for the momentum-z shadow (already 1M+
+    rows on the live Alpaca universe — see ``_momentum_z_shadow_async``). That
+    scan is offloaded the same way, onto the DEDICATED READ-ONLY
+    ``momentum_conn`` sidecar — never the loop-owned ``conn`` or ``focus_conn``.
+    Every refresh in this function runs sequentially (awaited in turn), so only
+    ONE worker ever touches ``momentum_conn`` at a time.
+
+    flow_not_block / 9-stack untouched: only WHERE focus/momentum run changes,
+    never which symbol is watched, ranked, or how it is sized.
     """
     fconn = focus_conn if focus_conn is not None else conn
-    await refresh_okx_universe_once(conn)
+    await refresh_okx_universe_once(conn, momentum_conn=momentum_conn)
     state.universe_refreshes += 1
-    await refresh_capital_universe_once(conn)
+    await refresh_capital_universe_once(conn, momentum_conn=momentum_conn)
     state.capital_refreshes += 1
-    await refresh_alpaca_universe_once(conn)
+    await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
     state.alpaca_refreshes += 1
     await _refresh_focus_offloaded(fconn, state)
     last_okx = time.monotonic()
@@ -335,15 +345,15 @@ async def _layer0_producer(
         await asyncio.sleep(15.0)
         now = time.monotonic()
         if now - last_okx >= OKX_REFRESH_SEC:
-            await refresh_okx_universe_once(conn)
+            await refresh_okx_universe_once(conn, momentum_conn=momentum_conn)
             state.universe_refreshes += 1
             last_okx = now
         if now - last_capital >= CAPITAL_REFRESH_SEC:
-            await refresh_capital_universe_once(conn)
+            await refresh_capital_universe_once(conn, momentum_conn=momentum_conn)
             state.capital_refreshes += 1
             last_capital = now
         if now - last_alpaca >= ALPACA_REFRESH_SEC:
-            await refresh_alpaca_universe_once(conn)
+            await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
             state.alpaca_refreshes += 1
             last_alpaca = now
         await _refresh_focus_offloaded(fconn, state)
@@ -818,8 +828,21 @@ async def run_production_paper_loop(
     # is never touched from two threads at once. WAL (set by ``connect``) is
     # 1-writer/N-reader safe, and only one offloaded refresh runs at a time.
     focus_conn = connect(target_db)
+    # Same STALL class, second instance — DEDICATED READ-ONLY handle for the
+    # OFFLOADED momentum-z shadow scan (``_momentum_z_shadow_async``): each
+    # ``refresh_*_universe_once`` otherwise runs an unbounded synchronous
+    # ``bars`` scan (1M+ rows on the live Alpaca universe) inline on this same
+    # loop. ``mode=ro`` (belt-and-braces on top of the offload — this path
+    # only ever SELECTs).
+    momentum_conn = connect_ro(target_db)
     layer0_task = asyncio.create_task(
-        _layer0_producer(conn, state=state, stop_evt=stop_evt, focus_conn=focus_conn)
+        _layer0_producer(
+            conn,
+            state=state,
+            stop_evt=stop_evt,
+            focus_conn=focus_conn,
+            momentum_conn=momentum_conn,
+        )
     )
 
     # WAL hygiene, from process start. The bot's writes kept SQLite's
@@ -1335,6 +1358,8 @@ async def run_production_paper_loop(
         # close its dedicated live-DB handle (no worker thread touches it now).
         with contextlib.suppress(Exception):
             focus_conn.close()
+        with contextlib.suppress(Exception):
+            momentum_conn.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
         with contextlib.suppress(asyncio.CancelledError, Exception):

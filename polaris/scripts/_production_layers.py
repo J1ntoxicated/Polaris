@@ -18,6 +18,7 @@ Layers covered
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -208,16 +209,25 @@ CAPITAL_COLLAPSE_PRIOR_MIN = 5
 
 
 async def refresh_okx_universe_once(
-    conn: sqlite3.Connection, *, now_ts: int | None = None
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int | None = None,
+    momentum_conn: sqlite3.Connection | None = None,
 ) -> int:
-    """Fetch OKX tickers → 4-axis filter → persist. Returns active count."""
+    """Fetch OKX tickers → 4-axis filter → persist. Returns active count.
+
+    ``momentum_conn`` — optional dedicated READ-ONLY connection the momentum-z
+    shadow scan offloads onto (STALL-safe, see ``_momentum_z_shadow_async``).
+    """
     ts = now_ts if now_ts is not None else int(time.time())
     try:
         instruments = await fetch_okx_instruments(now_ts=ts)
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0] OKX fetch failed: %r", exc)
         return 0
-    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    momentum_z = await _momentum_z_shadow_async(
+        conn, instruments, now_ts=ts, momentum_conn=momentum_conn
+    )
     active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
@@ -278,9 +288,16 @@ def capital_active_ids_after_collapse_guard(
 
 
 async def refresh_capital_universe_once(
-    conn: sqlite3.Connection, *, now_ts: int | None = None
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int | None = None,
+    momentum_conn: sqlite3.Connection | None = None,
 ) -> int:
-    """Fetch Capital CFD nav → proxy compute → 4-axis → persist."""
+    """Fetch Capital CFD nav → proxy compute → 4-axis → persist.
+
+    ``momentum_conn`` — optional dedicated READ-ONLY connection the momentum-z
+    shadow scan offloads onto (STALL-safe, see ``_momentum_z_shadow_async``).
+    """
     ts = now_ts if now_ts is not None else int(time.time())
     api_key = os.environ.get("CAP_API_KEY")
     email = os.environ.get("CAP_EMAIL")
@@ -310,7 +327,9 @@ async def refresh_capital_universe_once(
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0/capital] proxy fetch failed: %r", exc)
 
-    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    momentum_z = await _momentum_z_shadow_async(
+        conn, instruments, now_ts=ts, momentum_conn=momentum_conn
+    )
     active = rank_active_universe(instruments, momentum_z=momentum_z)
     new_active_ids = {ins.instrument_id for ins in active}
     # C1 collapse guard: preserve prior breadth on a session-driven 1-symbol
@@ -339,7 +358,10 @@ async def refresh_capital_universe_once(
 
 
 async def refresh_alpaca_universe_once(
-    conn: sqlite3.Connection, *, now_ts: int | None = None
+    conn: sqlite3.Connection,
+    *,
+    now_ts: int | None = None,
+    momentum_conn: sqlite3.Connection | None = None,
 ) -> int:
     """Fetch Alpaca US-equity assets → rank → persist. Returns active count.
 
@@ -347,6 +369,11 @@ async def refresh_alpaca_universe_once(
     (``_alpaca``); a per-row proxy refine step is deferred to the dashboards /
     learners, so this path stays minimal (fetch → rank → persist), mirroring
     the OKX producer. Returns 0 when credentials are missing (smoke-safe).
+
+    ``momentum_conn`` — optional dedicated READ-ONLY connection the momentum-z
+    shadow scan offloads onto (STALL-safe, see ``_momentum_z_shadow_async`` —
+    this is the venue with the largest instrument count, so the biggest
+    beneficiary of the offload).
     """
     ts = now_ts if now_ts is not None else int(time.time())
     try:
@@ -362,7 +389,9 @@ async def refresh_alpaca_universe_once(
     # prior persisted timestamps and stamp `ts` on genuinely new names.
     prev = _read_alpaca_listing_prev(conn)
     instruments = merge_listing_timestamps(prev, instruments, now_ts=ts)
-    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    momentum_z = await _momentum_z_shadow_async(
+        conn, instruments, now_ts=ts, momentum_conn=momentum_conn
+    )
     active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
@@ -483,6 +512,34 @@ def compute_signal_density_7d(
     return {str(r[0]): float(r[1]) for r in rows}
 
 
+async def _momentum_z_shadow_async(
+    conn: sqlite3.Connection,
+    instruments: list[UniverseInstrument],
+    *,
+    now_ts: int,
+    momentum_conn: sqlite3.Connection | None,
+) -> dict[str, float]:
+    """Offload ``compute_momentum_z_shadow`` to a worker thread (STALL-safe).
+
+    ``compute_momentum_z_shadow`` runs an UNBOUNDED, synchronous ``bars`` scan
+    (already 1M+ rows measured on the live Alpaca universe — every
+    ``instrument_id`` x its full 1D history). Run inline on ``conn`` inside
+    ``layer0_task`` this freezes the shared event loop (tick engine + WS fill
+    producers) for several seconds every ``ALPACA_REFRESH_SEC`` — the same
+    STALL class ``_refresh_focus_offloaded`` (#74) was built to avoid. When a
+    dedicated ``momentum_conn`` is supplied (production wiring — a READ-ONLY
+    sidecar so no worker thread ever shares a connection with the loop), the
+    scan runs via ``asyncio.to_thread``. Falls back to the inline sync call on
+    the caller's own ``conn`` when no dedicated conn is given (tests / smoke —
+    behavior identical, just synchronous).
+    """
+    if momentum_conn is None:
+        return compute_momentum_z_shadow(conn, instruments, now_ts=now_ts)
+    return await asyncio.to_thread(
+        compute_momentum_z_shadow, momentum_conn, instruments, now_ts=now_ts
+    )
+
+
 def compute_momentum_z_shadow(
     conn: sqlite3.Connection,
     instruments: list[UniverseInstrument],
@@ -543,9 +600,27 @@ def refresh_sector_rotation_shadow(
     stays '' (Stage 2 — a ticker→sector mapping source is undecided, no
     calendar deadline). Read-only degrade: any query failure or a non-boundary
     cycle returns 0 (no write) — never blocks the Alpaca L0 refresh.
+
+    Per-cycle idempotency guard: ``is_rebalance_boundary`` stays True for
+    EVERY L0 cycle on the boundary UTC day (the lagged+deduped bar set is
+    frozen until the next UTC day), so a prior write for this SAME
+    ``cycle_ts`` (= ``today_utc_start``) short-circuits before the rank
+    recompute — otherwise every cycle that day would re-insert 11 duplicate
+    rows AND corrupt ``delta_from_prior`` to 0 (the correlated prior-``MAX
+    (cycle_ts)`` read would hit that same day's just-written rows instead of
+    the prior boundary day's).
     """
     ts = now_ts if now_ts is not None else int(time.time())
     today_utc_start = ts - (ts % 86_400)
+    try:
+        already_written = conn.execute(
+            "SELECT 1 FROM sector_rank_shadow WHERE cycle_ts = ? LIMIT 1",
+            (today_utc_start,),
+        ).fetchone()
+    except sqlite3.Error:
+        already_written = None
+    if already_written is not None:
+        return 0
     symbols = sorted(SECTOR_ETF_SYMBOLS)
     ids = [f"alpaca:{s}" for s in symbols]
     placeholders = ",".join("?" for _ in ids)

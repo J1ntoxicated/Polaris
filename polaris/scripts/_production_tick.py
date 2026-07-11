@@ -931,18 +931,35 @@ async def _run_tick(
                 state.fault_events += 1
                 continue
             # Frontgate item #2 — TSMOM literature-fixed 12-1 shadow tagger
-            # (G2 behavior-0). Computed on EVERY 1D bar for every focus
-            # symbol, independent of tsmom_12_1_multiasset's own monthly
-            # rebalance emit-gate — logs sign/strength to gate_shadow_events
-            # ONLY, never reads back into sizing/entry/exit. Best-effort: the
-            # function is internally fail-open (conn/warmup/write-fault ->
-            # no-op), so no additional try/except is needed here.
+            # (G2 behavior-0). Logged ONCE per 1D bar-close, independent of
+            # tsmom_12_1_multiasset's own monthly rebalance emit-gate — logs
+            # sign/strength to gate_shadow_events ONLY, never reads back into
+            # sizing/entry/exit. Best-effort: the function is internally
+            # fail-open (conn/warmup/write-fault -> no-op), so no additional
+            # try/except is needed here.
+            #
+            # Own bar-advance mark (separate from ``last_eval_bar_ts_by_key``
+            # above): the dedup gate above is SKIPPED entirely whenever this
+            # (venue, timeframe) bucket has an ``evaluates_in_progress_bar``
+            # sibling (e.g. capital/1D via gold_riskoff_trend_amplify), so
+            # without this mark the write would re-fire every 5s tick for the
+            # SAME unchanged 1D bar instead of once per bar-close.
             if timeframe == "1D":
-                log_tsmom_literature_shadow(
-                    conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
-                    venue=venue, symbol=symbol, regime=regime, bars=mv.bars,
-                    now_ts=now_ts,
-                )
+                latest_1d_bar_ts = int(mv.bars[-1].ts)
+                if bar_advance_due(
+                    last_eval_ts=state.last_tsmom_shadow_bar_ts_by_key.get(
+                        (venue, symbol)
+                    ),
+                    latest_bar_ts=latest_1d_bar_ts,
+                ):
+                    state.last_tsmom_shadow_bar_ts_by_key[(venue, symbol)] = (
+                        latest_1d_bar_ts
+                    )
+                    log_tsmom_literature_shadow(
+                        conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
+                        venue=venue, symbol=symbol, regime=regime, bars=mv.bars,
+                        now_ts=now_ts,
+                    )
             # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full
             # indicator set just computed in ``mv`` (rsi/adx/bb/donchian/ema/
             # momentum) so the AI judge / probes can read it as evidence (the judge

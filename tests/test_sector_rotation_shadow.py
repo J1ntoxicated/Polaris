@@ -221,6 +221,52 @@ def test_refresh_sector_rotation_shadow_writes_on_boundary(tmp_path: Path) -> No
         conn.close()
 
 
+def test_refresh_sector_rotation_shadow_same_day_repeat_is_idempotent(tmp_path: Path) -> None:
+    """A boundary UTC day's ``is_rebalance_boundary`` stays True for EVERY L0
+    cycle that day (lagged bars are frozen until the next UTC day). A second
+    call at the SAME ``now_ts`` day (mirroring a later same-day Alpaca refresh
+    cycle) must be a no-op — no duplicate rows, and (critically) it must not
+    corrupt a THIRD day's ``delta_from_prior`` by having the correlated
+    prior-``MAX(cycle_ts)`` read land on same-day rows."""
+    conn = init_db(tmp_path / "repeat.sqlite")
+    try:
+        n = SECTOR_ROC_LOOKBACK_DAYS + 1
+        boundary_1 = _epoch_day(2024, 2, 1)
+        _seed_trend_ending_at(conn, symbol="XLK", end_day=boundary_1, n=n, base=100.0, slope=1.0)
+        conn.commit()
+        now_ts = (boundary_1 + 1) * DAY  # first cycle of the boundary UTC day
+        first = refresh_sector_rotation_shadow(conn, now_ts=now_ts)
+        assert first == 11
+        z1 = conn.execute(
+            "SELECT momentum_z FROM sector_rank_shadow WHERE sector_etf_symbol='XLK'"
+        ).fetchone()[0]
+
+        # A LATER cycle the SAME UTC day (still is_rebalance_boundary=True,
+        # bars unchanged) — must short-circuit, not re-insert.
+        second = refresh_sector_rotation_shadow(conn, now_ts=now_ts + 3_600)
+        assert second == 0
+        count = conn.execute("SELECT COUNT(*) FROM sector_rank_shadow").fetchone()[0]
+        assert count == 11  # still exactly one row per ETF, not 22
+
+        # Next month's boundary: delta_from_prior must diff against boundary_1's
+        # z (the correlated MAX(cycle_ts) prior read), not a same-day corrupted 0.
+        boundary_2 = _epoch_day(2024, 3, 1)
+        _seed_trend_ending_at(conn, symbol="XLK", end_day=boundary_2, n=n, base=100.0, slope=3.0)
+        conn.commit()
+        third = refresh_sector_rotation_shadow(conn, now_ts=(boundary_2 + 1) * DAY)
+        assert third == 11
+        row3 = conn.execute(
+            "SELECT momentum_z, delta_from_prior FROM sector_rank_shadow "
+            "WHERE sector_etf_symbol='XLK' ORDER BY cycle_ts DESC LIMIT 1"
+        ).fetchone()
+        z3, delta = row3
+        assert delta is not None
+        assert delta != 0.0
+        assert delta == z3 - z1
+    finally:
+        conn.close()
+
+
 def _seed_trend_ending_at(
     conn: sqlite3.Connection, *, symbol: str, end_day: int, n: int, base: float, slope: float
 ) -> None:

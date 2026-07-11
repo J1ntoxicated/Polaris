@@ -231,7 +231,10 @@ async def refresh_okx_universe_once(
     active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
-    persist_momentum_shadow(conn, active)
+    try:  # fail-open shadow write (review MED)
+        persist_momentum_shadow(conn, active)
+    except sqlite3.Error:
+        logger.warning("[L0] momentum shadow write skipped (db busy)")
     logger.info("[L0/okx] universe %d → active %d", len(instruments), len(active))
     return len(active)
 
@@ -342,7 +345,10 @@ async def refresh_capital_universe_once(
     )
     guarded = active_ids != new_active_ids
     persist_universe(conn, instruments, is_active_set=active_ids)
-    persist_momentum_shadow(conn, active)
+    try:  # fail-open shadow write (review MED)
+        persist_momentum_shadow(conn, active)
+    except sqlite3.Error:
+        logger.warning("[L0] momentum shadow write skipped (db busy)")
     if guarded:
         logger.info(
             "[L0/capital] collapse guard: rank→active %d (prior %d) — KEEPING prior "
@@ -395,8 +401,11 @@ async def refresh_alpaca_universe_once(
     active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
-    persist_momentum_shadow(conn, active)
-    refresh_sector_rotation_shadow(conn, now_ts=ts)
+    try:  # fail-open shadow writes — a locked-DB fault must not kill layer0 (review MED)
+        persist_momentum_shadow(conn, active)
+        refresh_sector_rotation_shadow(conn, now_ts=ts)
+    except sqlite3.Error:
+        logger.warning("[L0/alpaca] momentum/sector shadow write skipped (db busy)")
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the
     # 21-day ghost). persist_universe only UPDATEs fetched rows, so a name absent
     # from Alpaca's churning ~13k /v2/assets set lingers is_active=1 forever — a
@@ -518,7 +527,7 @@ async def _momentum_z_shadow_async(
     *,
     now_ts: int,
     momentum_conn: sqlite3.Connection | None,
-) -> dict[str, float]:
+) -> dict[str, float] | None:
     """Offload ``compute_momentum_z_shadow`` to a worker thread (STALL-safe).
 
     ``compute_momentum_z_shadow`` runs an UNBOUNDED, synchronous ``bars`` scan
@@ -545,7 +554,7 @@ def compute_momentum_z_shadow(
     instruments: list[UniverseInstrument],
     *,
     now_ts: int | None = None,
-) -> dict[str, float]:
+) -> dict[str, float] | None:
     """Producer for the ``rank_active_universe(momentum_z=...)`` shadow seam.
 
     Frontgate-scan item #3 (behavior-0 SHADOW, 2026-07-11). Fetches each
@@ -573,7 +582,7 @@ def compute_momentum_z_shadow(
             (*ids, today_utc_start),
         ).fetchall()
     except sqlite3.Error:
-        return {}
+        return None
     bars_by_id: dict[str, list[tuple[int, float, float, float]]] = {iid: [] for iid in ids}
     for r in rows:
         bars_by_id[str(r[0])].append((int(r[1]), float(r[2]), float(r[3]), float(r[4])))

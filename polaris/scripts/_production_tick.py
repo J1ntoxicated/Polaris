@@ -944,7 +944,11 @@ async def _run_tick(
             # sibling (e.g. capital/1D via gold_riskoff_trend_amplify), so
             # without this mark the write would re-fire every 5s tick for the
             # SAME unchanged 1D bar instead of once per bar-close.
-            if timeframe == "1D":
+            # mv.bars can be EMPTY even when the raw pre-filter guard passed
+            # (all-synthetic window collapses to the empty view) — deref only
+            # when real bars exist, else the IndexError would escape this
+            # stage and abort the remaining tick dispatch (review CRITICAL).
+            if timeframe == "1D" and mv.bars:
                 latest_1d_bar_ts = int(mv.bars[-1].ts)
                 if bar_advance_due(
                     last_eval_ts=state.last_tsmom_shadow_bar_ts_by_key.get(

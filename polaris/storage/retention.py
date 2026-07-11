@@ -169,6 +169,12 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
     RetentionRule("news_timing_shadow", "ingestion_ts", 180 * _DAY,
                   "generous window for the IC probe's n>=300 accumulation; "
                   "dedup writer bounds real growth to distinct headlines"),
+    RetentionRule("vwap_timing_shadow", "decision_ts", 180 * _DAY,
+                  "per-PROCEED timing tags; window covers the >=50-sample "
+                  "promotion accumulation (review LOW housekeeping)"),
+    RetentionRule("calibration_pairs", "created_ts", 365 * _DAY,
+                  "isotonic stage needs 1.5k-3k pairs; signal_id dedup bounds "
+                  "growth — long window is deliberate (review LOW)"),
 )
 
 # --- The probe-sidecar prune allowlist (data/probes.sqlite). -----------------

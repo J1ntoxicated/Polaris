@@ -186,6 +186,10 @@ def read_exit_calibration(
         "to trigger exit — intra-trade sequencing (MFE-before-MAE or reverse) "
         "is NOT replayed (only the final mfe_r/mae_r/realized_pnl_r scalars "
         "are in the sidecar). Read as a directional signal, not a precise sim.",
+        "ASYMMETRY (review): harvest is pure first-touch, but protect is "
+        "OUTCOME-GATED (cf=-f only when mae<=-f AND realized<-f) — a dip-below-"
+        "then-recover trade keeps its realized R, so protect deltas read "
+        "systematically OPTIMISTIC vs harvest.",
         "EXCURSION ruler only — never joined to the per-stream ledger R.",
         "OFFLINE / observe-only — NEVER auto-applied to a live knob; feeds "
         "/debate (rank 16) only.",

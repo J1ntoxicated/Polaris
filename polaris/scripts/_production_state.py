@@ -279,8 +279,10 @@ class ProdLoopState:
     # IN-MEMORY "{v1_label}|{v2_label}" crosstab, same pattern as
     # regime_hint_stats above. Accumulated by compute_and_flip_regime via its
     # fail-open ``_safe_record_regime_v2_shadow`` helper, surfaced in the loop
-    # summary. Zero live-behavior consumer — measurement/OOF-scoring input
-    # (W3) only.
+    # summary. Zero live-behavior consumer. NOTE (review): this is a v1<->v2
+    # DIVERGENCE-HEALTH counter only — tick-frequency co-occurrence with no
+    # outcome dimension. The W3 OOF scorer's real input is the per-closed-
+    # position join positions.entry_regime_v2 x pnl_r, NOT this crosstab.
     regime_v2_crosstab: dict[str, int] = field(default_factory=dict)
     # ADR-012 Slice 1 — PROBE → ENGINE → TUNING-LOG sidecar (observe-only).
     # ``probe_conn`` is the SEPARATE ``data/probes.sqlite`` tuning-log handle (NOT

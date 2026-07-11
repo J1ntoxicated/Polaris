@@ -60,8 +60,6 @@
   .pagenav-strip a.active { color: var(--polaris-blue); }
   .pagenav-strip a:hover { color: var(--p-wht); }
 
-  }
-  /* 30% column is narrow → smaller font + horizontal scroll fallback so log stays readable */
   /* board.js owns #board styling (full-width work board) */
 
   /* legacy — superseded by .side-rail */
@@ -174,9 +172,13 @@
      (the visual-wall director-mode page). "/" is now the full-width work
      board — no sphere canvas, no globe scripts. -->
 <div class="board-shell">
+  <!-- Jin 2026-07-11 "아예 분리해서 둘 다 퍼시스턴트로": BOARD and FLOW live
+       in their own NAMED browser tabs — switching focuses the existing tab
+       instead of reloading this one, so neither page ever re-renders. -->
+  <script>window.name = 'polaris_board';</script>
   <div class="pagenav-strip">
     <a href="/" class="active">BOARD</a>
-    <a href="/flow">FLOW ▸</a>
+    <a href="/flow" target="polaris_flow">FLOW ▸</a>
   </div>
 
   <!-- Full-width analytics board (native HTML/CSS, rendered by board.js). -->
@@ -186,7 +188,7 @@
 <!-- board.js (core shell: header + 3-stream summary + tab strip + poll) MUST
      load before board_tabs.js (the 8 full-width tab renderers), which depends
      on window.PolarisBoard. -->
-<script src="static/board.js?v=23_hdrfold"></script>
+<script src="static/board.js?v=24_persist"></script>
 <!-- board_exchange.js (E3 exchange selector: clickable lanes + ALL toggle +
      venue scope helpers) loads after board.js (needs window.PolarisBoard) and
      before the tab modules (which read its scope helpers). Its

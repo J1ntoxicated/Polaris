@@ -631,8 +631,8 @@
   ];
 
   function skeleton() {
-    const tabBtns = TABS.map((t, i) =>
-      `<button type="button" class="b-tab${i === 0 ? ' active' : ''}" data-tab="${t.id}">`
+    const tabBtns = TABS.map((t) =>
+      `<button type="button" class="b-tab${t.id === _activeTab ? ' active' : ''}" data-tab="${t.id}">`
       + `${esc(t.label)}<span class="tab-cnt" id="tabcnt-${t.id}"></span></button>`
     ).join('');
     const panes = window.PolarisBoardTabs
@@ -1191,7 +1191,11 @@
   // ── tab switcher ──────────────────────────────────────────────────────────
   // Pure DOM visibility — no data/snapshot/trading change. Tracks the active
   // tab id so the poll loop only re-renders the visible pane (cheap).
-  let _activeTab = TABS[0].id;
+  // active tab persists across reloads (Jin 2026-07-11 "탭 누르면 리셋"):
+  // named-tab nav means reloads are rare, but a manual refresh still lands
+  // back on the tab you were reading, not the first page.
+  const _savedTab = localStorage.getItem('polaris_board_tab');
+  let _activeTab = TABS.some(t => t.id === _savedTab) ? _savedTab : TABS[0].id;
   function initTabs() {
     const tabs = $('b-tabs');
     if (!tabs) return;
@@ -1201,6 +1205,7 @@
       const which = btn.getAttribute('data-tab');
       if (!which) return;
       _activeTab = which;
+      localStorage.setItem('polaris_board_tab', which); // 리로드에도 유지
       tabs.querySelectorAll('.b-tab').forEach(b =>
         b.classList.toggle('active', b === btn));
       TABS.forEach(t => {
@@ -1512,6 +1517,11 @@
         applyHdr(min);
       });
       initTabs();
+      // paneMarkup은 activity pane을 하드코드 active — 복원된 탭으로 동기
+      TABS.forEach(t => {
+        const pane = $('pane-' + t.id);
+        if (pane) pane.classList.toggle('active', t.id === _activeTab);
+      });
       if (window.PolarisBoardExchange) window.PolarisBoardExchange.initExchangeSelector();
       setInterval(() => { const c = $('b-clock'); if (c) c.textContent = clockStr(); }, 1000);
       poll();

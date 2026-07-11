@@ -411,3 +411,7 @@
 2026-07-11 07:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=176 learners=3 paper=True]
 - 2026-07-11: frontgate 섀도우 웨이브 머지(022c344) — 검증 10/10·Sonnet 11커밋·Opus 3렌즈+컨덕터 마감(CRITICAL 빈 mv.bars 틱중단 차단 등 4건). 봇 재기동(PID 22385) 부팅클린, 섀도우 실쌓임 개시(calib 7·vwap 7·momentum_z 176). Finnhub 키 개통(.env FINNHUB_API_KEY, 스모크 OK).
 - 2026-07-11: /flow 익스포저 랜딩(95e3bf4) — SCOUT SHADOW 패널(7채널 n/승격목표 진행바+신선도)·헤더 SHADOW 실배선. Opus 2렌즈+컨덕터 마감(매트릭스 우측-앵커·패널 0.834H — 1920/1440 겹침 0 실증). 라이브 에러 0.
+2026-07-11 09:40 [Write: /private/tmp/claude-501/-Users-jinyoon-Projects-Polaris/d6d4b8b0-02d9-4200-bb95-9c53b989516a/scratchpad/render.py]
+2026-07-11 12:35 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
+2026-07-11 12:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
+- 2026-07-11: W1 감시그물+피드 3종 랜딩(71fdc6b) — monitor_tick §⑦⑧·다이제스트 롤업·분포가드(write 0) + EDGAR/DefiLlama/Finnhub 컬렉터(behavior-0, known-at-time 가드). 라이브 포렌식으로 EDGAR 60분 스윕의 프로듀서 기아 적발→회전배치 150 수술(001e8da). 재기동(41591) 후 3피드 케이던스 부활 실증(earnings 122·stables 4·edgar 20k). W1 빌더 메인트리 checkout 사고 1건 즉시 복구.

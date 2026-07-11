@@ -1315,6 +1315,11 @@ _SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
     "momentum_z": None,            # item #3 — 20 trading days, not a row count
     "tsmom_shadow": 30,            # item #2 — shadow signals >=30
     "meta_labels": 2000,           # item #10 — pooled labels >=2k
+    # scout FEEDS (2026-07-11 landed) — freshness-first, not count-gated:
+    # the client renders these as count+age rows, never a progress ratio.
+    "edgar_filings": None,
+    "earnings_calendar": None,
+    "stablecoin_liquidity": None,
 }
 _shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
 _SHADOW_CHANNELS_TTL = 5.0
@@ -1353,6 +1358,9 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 ("tsmom_shadow", "gate_shadow_events",
                  "WHERE technical_flags = 'tsmom_shadow_literature'"),
                 ("meta_labels", "meta_labels", ""),
+                ("edgar_filings", "edgar_filings", ""),
+                ("earnings_calendar", "earnings_calendar", ""),
+                ("stablecoin_liquidity", "stablecoin_liquidity", ""),
             ):
                 try:
                     row = conn.execute(

@@ -528,6 +528,18 @@
     ['news_timing_shadow', 'NEWS'], ['sector_rank_shadow', 'SECT'],
     ['momentum_z', 'MOMZ'], ['tsmom_shadow', 'TSMOM'], ['meta_labels', 'META'],
   ];
+  // scout FEEDS (2026-07-11 landed): freshness-first rows — count + age dot,
+  // no progress bar (feeds aren't promotion-count-gated) and NOT summed into
+  // the header SHADOW total (that stays promotion-shadow semantics).
+  const SCOUT_FEEDS = [
+    ['edgar_filings', 'EDGAR'], ['earnings_calendar', 'EARN'],
+    ['stablecoin_liquidity', 'STBL'],
+  ];
+  function fmtCount(n) {
+    if (n == null) return '—';
+    return n >= 10000 ? (n / 1000).toFixed(0) + 'k'
+      : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+  }
   function drawScoutShadow(ctx, c, W, H) {
     // y0 0.816->0.834: regime-row leader labels (0.80H + drop) were kissing
     // the panel title at every width (exposure review MED-b).
@@ -535,7 +547,8 @@
     panelFrame(ctx, x0, y0, x1, y1, 'SCOUT SHADOW');
     const chans = (c && c.shadow_channels) || {};
     const nowEpoch = Date.now() / 1000; // data freshness, not frame-animation clock
-    const rowH = (y1 - y0 - 12) / SHADOW_CHANNELS.length;
+    const nRows = SHADOW_CHANNELS.length + SCOUT_FEEDS.length + 0.6; // +0.6 = divider slot
+    const rowH = (y1 - y0 - 12) / nRows;
     const barX0 = x0 + 26, barX1 = x1 - 9, barW = barX1 - barX0;
     SHADOW_CHANNELS.forEach(([key, label], i) => {
       const ch = chans[key] || {};
@@ -555,6 +568,25 @@
       }
       const age = ch.fresh_ts != null ? nowEpoch - ch.fresh_ts : null;
       const lit = age != null && age < 3600;
+      ctx.beginPath(); ctx.arc(x1 - 5, ry - 1.5, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = field.rgba(lit ? WARM : STEEL, lit ? 0.85 : 0.3);
+      ctx.fill();
+    });
+    // FEEDS subgroup — hairline divider + count/age rows
+    const divY = y0 + 12 + (SHADOW_CHANNELS.length + 0.28) * rowH;
+    ctx.strokeStyle = 'rgba(138,148,176,0.18)'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(x0 + 4, divY); ctx.lineTo(x1 - 4, divY); ctx.stroke();
+    SCOUT_FEEDS.forEach(([key, label], i) => {
+      const ch = chans[key] || {};
+      const ry = y0 + 12 + (SHADOW_CHANNELS.length + 0.6 + (i + 0.7)) * rowH;
+      ctx.font = '600 5px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(138,148,176,0.65)';
+      ctx.fillText(label, x0 + 4, ry);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(223,232,255,0.75)';
+      ctx.fillText(fmtCount(ch.n), barX1 - 2, ry);
+      const age = ch.fresh_ts != null ? nowEpoch - ch.fresh_ts : null;
+      const lit = age != null && age < 21600; // feeds cadence up to 6h
       ctx.beginPath(); ctx.arc(x1 - 5, ry - 1.5, 1.5, 0, Math.PI * 2);
       ctx.fillStyle = field.rgba(lit ? WARM : STEEL, lit ? 0.85 : 0.3);
       ctx.fill();

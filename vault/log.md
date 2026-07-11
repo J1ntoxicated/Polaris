@@ -417,3 +417,4 @@
 - 2026-07-11: W1 감시그물+피드 3종 랜딩(71fdc6b) — monitor_tick §⑦⑧·다이제스트 롤업·분포가드(write 0) + EDGAR/DefiLlama/Finnhub 컬렉터(behavior-0, known-at-time 가드). 라이브 포렌식으로 EDGAR 60분 스윕의 프로듀서 기아 적발→회전배치 150 수술(001e8da). 재기동(41591) 후 3피드 케이던스 부활 실증(earnings 122·stables 4·edgar 20k). W1 빌더 메인트리 checkout 사고 1건 즉시 복구.
 2026-07-11 14:25 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=170 learners=3 paper=True]
 - 2026-07-12: W2 섀도우 확장 머지(701b42d) — 레짐 v2 트윈라이트(6상태, regime_state.regime_v2 실쌓임 개시: flat_exp 5·flat_norm 4·up 2)·오프라인 엑싯 캘리브레이터(protect 비대칭 명시)·브레인 _frontgate_line(GPT 콜 0 증가)·스키마 2분리. Opus 3렌즈 APPROVE_WITH_NITS+컨덕터 마감(crosstab 재명명 — W3 오배선 방지). 봇 재기동(49593) 부팅클린. 대개편 W0~W2 완주 — 이제 W3는 데이터 축적 트리거.
+- 2026-07-12: 게이트 위성 대개편 머지(9c3b4de) — AI유닛 소속게이트 이사(validator→g3·entry_judge→g4·exit_advise→g7)·러너3종→g5·VWAP/SQUEEZE 순찰위성·G6→G8→G5 골드 갱신 스트랜드·캡처 글라이드/평가 노치/러너 펄스(실이벤트 1회성). 날조 스윕 클린. 라이브 에러 0.

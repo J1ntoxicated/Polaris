@@ -56,6 +56,14 @@ echo "equity_deploy_cum=$(Q "SELECT ROUND(SUM(pnl_usd),2) FROM fills WHERE ts_ms
 # created_ts(epoch초) 보유 — 위 $B 1h 경계 재사용. STALL = 평일(UTC 월-금)
 # 에 inc_1h=0 AND rows>0(이전엔 기록 있었음) — 주말은 세션 인지로 정상
 # (휴장-holiday 캘린더는 W1 범위 밖, 주말만 감지).
+# KNOWN 오탐 2종 (판정자 참고용, W1 범위 내 정상 — 로직 변경 아님):
+#   (1) 평일 US 증시 휴장 — equity 채널(vwap/news/sector_rank/meta_labels)이
+#       조용해지며 STALL=1 (2026-06-28 재발 클래스와 동형). holiday calendar
+#       는 W-later 트래킹 대상, W1은 주말만 인지.
+#   (2) 이벤트-드리븐 저빈도 채널 — meta_labels는 trade CLOSE 시에만,
+#       sector_rank_shadow는 리밸런스 사이클에만 증가 → 평일 정상 조용한
+#       1h 구간도 inc_1h=0 AND rows>0 로 STALL=1 오탐 가능.
+# 두 경우 모두 numbers-only 판독(sizing/gate 미접촉)이라 non-blocking.
 DOW=$(date -u '+%u')  # 1=Mon..7=Sun
 if [ "$DOW" -le 5 ]; then IS_WEEKDAY=1; else IS_WEEKDAY=0; fi
 echo "is_weekday_utc=$IS_WEEKDAY"
@@ -110,6 +118,20 @@ if [ "${MZ_TS:-0}" -gt 0 ] 2>/dev/null; then
     echo "feed_momentum_z_age_s=$(( NOWS - MZ_TS ))"
 else
     echo "feed_momentum_z_age_s=NULL"
+fi
+
+# ⑨ 섀도우 분포 가드 (design-monitoring.md W1 §A 분포 가드 [R1-B5], read-only)
+# — 채널별 평균/표준편차/n_distinct/dominant_share/top_symbol/dedup_ratio +
+# input fingerprint(tools/ops/shadow_distribution_guard.py). §⑦의 행수/신선도
+# 만으로 못 잡는 "쌓이고는 있는데 이상한 데이터" 구멍 봉쇄. 결정적 CLI 그대로
+# 실행+캡처 — Haiku 자유쿼리 아님(§⑧ 판정주체 고정 계약 유지). 출력은 guard의
+# run_report() 라인 그대로(channel=... 로 시작, 접두사 재라벨 없음 — 단독 실행
+# 결과와 1:1 diff 가능해야 검증이 성립). venv 부재/실패해도 틱은 계속(exit 0).
+if [ -x ".venv/bin/python" ]; then
+    .venv/bin/python -m tools.ops.shadow_distribution_guard 2>/dev/null \
+        || echo "shadow_distribution_guard_FAIL=1"
+else
+    echo "shadow_distribution_guard_FAIL=1"
 fi
 
 exit 0

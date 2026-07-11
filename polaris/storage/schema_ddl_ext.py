@@ -915,3 +915,85 @@ CREATE TABLE IF NOT EXISTS ladder_credit_checkpoint (
     last_scanned_closed_ts INTEGER NOT NULL DEFAULT 0
 );
 """
+
+# ---------------------------------------------------------------------------
+# frontgate-scan item #6 (G4) — VWAP/AVWAP entry-timing SHADOW.
+# Stage 1 (this table, write side): one row per G4 AI-free PROCEED decision —
+# the known-at-time session-VWAP / signal-day-AVWAP distance (bps) from the
+# decision-time price. Stage 2 (offline, ``polaris.scripts.
+# vwap_timing_resolve``) backfills the ACTUAL fill price + side-aware
+# improvement bps via gate_events.position_id -> fills, once the signal opens
+# a position — mirrors the gate_kill_counterfactuals two-stage precedent.
+# INSTRUMENTATION ONLY — never read by any live gate/sizing/exit path.
+# ---------------------------------------------------------------------------
+
+DDL_VWAP_TIMING_SHADOW = """
+CREATE TABLE IF NOT EXISTS vwap_timing_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_id TEXT,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    decision_ts INTEGER NOT NULL,
+    current_price REAL NOT NULL DEFAULT 0.0,
+    session_vwap REAL,
+    session_vwap_bar_count INTEGER NOT NULL DEFAULT 0,
+    session_vwap_distance_bps REAL,
+    session_vwap_reason TEXT NOT NULL DEFAULT '',
+    avwap REAL,
+    avwap_bar_count INTEGER NOT NULL DEFAULT 0,
+    avwap_distance_bps REAL,
+    avwap_reason TEXT NOT NULL DEFAULT '',
+    fill_price REAL,
+    fill_ts INTEGER,
+    side TEXT NOT NULL DEFAULT '',
+    session_vwap_improvement_bps REAL,
+    avwap_improvement_bps REAL,
+    resolve_attempts INTEGER NOT NULL DEFAULT 0,
+    unresolvable INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_VWAP_TIMING_SHADOW_RUN_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_vwap_timing_shadow_run
+    ON vwap_timing_shadow(run_id);
+"""
+
+DDL_VWAP_TIMING_SHADOW_PENDING_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_vwap_timing_shadow_pending
+    ON vwap_timing_shadow(decision_ts)
+    WHERE fill_price IS NULL AND unresolvable = 0;
+"""
+
+# ---------------------------------------------------------------------------
+# frontgate-scan item #7 (G2/G3) — news publication/ingestion timestamp audit
+# + syndicate dedup SHADOW. One row per (symbol x headline) the news collector
+# scored on its existing ~15min gpt-5-mini cadence (no new GPT calls) — the
+# RAW per-article delay (publication -> ingestion), the deterministic dedup
+# group, and the signal-time sentiment/relevance, all recorded pre-aggregation
+# (``news_sentiment._aggregate`` collapses to a per-symbol MAX age — this table
+# keeps the individual-article distribution the IC probe needs).
+# INSTRUMENTATION ONLY — never read by any live gate/sizing/exit path.
+# ---------------------------------------------------------------------------
+
+DDL_NEWS_TIMING_SHADOW = """
+CREATE TABLE IF NOT EXISTS news_timing_shadow (
+    event_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL DEFAULT '',
+    headline_id TEXT NOT NULL DEFAULT '',
+    publication_ts INTEGER,
+    ingestion_ts INTEGER NOT NULL,
+    delay_h REAL,
+    dedup_group_id TEXT NOT NULL DEFAULT '',
+    sentiment REAL NOT NULL DEFAULT 0.0,
+    relevance REAL NOT NULL DEFAULT 0.0,
+    n_syndicate INTEGER NOT NULL DEFAULT 1,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_news_timing_shadow_symbol
+    ON news_timing_shadow(symbol, ingestion_ts DESC);
+"""

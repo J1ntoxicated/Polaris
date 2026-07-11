@@ -108,6 +108,18 @@ class RetentionRule:
 #   decision events for the dashboard + analysis joins. The trading ledger
 #   (positions/fills) is independent and untouched, so pruning past 30d only
 #   drops a join-convenience field on month-old analysis rows.
+#
+# * news_timing_shadow (frontgate-scan item #7 round-3 rework, verifier note)
+#   — TAG-ONLY per-article shadow log, absent from this spec since its
+#   introduction, so nothing ever pruned it (the unbounded-growth shape this
+#   module exists to close). Its own consumer, ``news_ic_probe``, reads the
+#   WHOLE table unbounded to accumulate n>=300 (sentiment, forward_return)
+#   pairs toward a one-time /debate-gated promotion decision — so the window
+#   here is deliberately generous (180d, not a tight dashboard-style cutoff)
+#   to never starve that accumulation. Now that the writer dedups on
+#   (headline_id, symbol) (INSERT OR IGNORE), real growth is bounded by
+#   distinct headline volume (~tens-hundreds of rows/day), so 180d is a small
+#   table (over-retention stays the safe direction, per this module's header).
 RETENTION_SPEC: tuple[RetentionRule, ...] = (
     # bars — PER-INTERVAL (NIT-A): dense intraday short, deep 1D/4H canvas long.
     RetentionRule("bars", "ts", 30 * _DAY,
@@ -154,6 +166,9 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
                   "consumers read MAX(cycle_ts); rest is audit history"),
     RetentionRule("gate_events", "created_ts", 30 * _DAY,
                   "dashboard 24h + counterfactual analysis join window"),
+    RetentionRule("news_timing_shadow", "ingestion_ts", 180 * _DAY,
+                  "generous window for the IC probe's n>=300 accumulation; "
+                  "dedup writer bounds real growth to distinct headlines"),
 )
 
 # --- The probe-sidecar prune allowlist (data/probes.sqlite). -----------------

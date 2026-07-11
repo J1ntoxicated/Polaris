@@ -104,15 +104,37 @@ def record_close_outcome(
     pnl_r: float,
     now_ts: int,
 ) -> None:
-    """Fill the realized outcome onto an existing entry snapshot, by signal_id.
+    """Accumulate the realized outcome onto an existing entry snapshot, by
+    signal_id.
+
+    Round-3 rework (verifier note): a scaled-out (multi-slice) close calls
+    this ONCE PER SLICE — ``fold_close_slice`` per partial, then again at the
+    terminal full/remainder close. The prior plain-overwrite UPDATE left the
+    LAST call's (remainder-only) won/pnl_r as the stored outcome, dropping
+    every earlier partial slice's contribution — the exact pair this
+    module's offline Platt/PAV fit + item #4's promotion metric read then got
+    a per-slice outcome instead of the whole-position one. ``realized_pnl_r``
+    now ACCUMULATES (mirrors ``positions.pnl_r``'s own
+    ``COALESCE(pnl_r,0)+slice`` pattern in ``_production_close.py`` — partial
+    + remainder sum to exactly the whole-position R) and ``realized_won`` is
+    derived from the ACCUMULATED total's sign, not the caller's ``won``
+    (which only knows THIS slice's own sign) — correct at both an
+    intermediate partial write and the final terminal write. A single-shot
+    close is unaffected (one call, same result as before). ``won`` is kept
+    for call-site/API compatibility; the persisted flag is always the
+    accumulated sign.
 
     A no-op (0 rows affected, no error) when the signal has no snapshot row —
     a calibration miss must never gate/abort a close. Raises on a broken
     connection; the caller's ``_safe_*`` wrapper is responsible for the
     fail-open catch (see module docstring).
     """
+    del won  # superseded by the accumulated sign — see docstring
     conn.execute(
-        "UPDATE calibration_pairs SET realized_won = ?, realized_pnl_r = ?, "
+        "UPDATE calibration_pairs SET "
+        "realized_pnl_r = COALESCE(realized_pnl_r, 0.0) + ?, "
+        "realized_won = CASE WHEN COALESCE(realized_pnl_r, 0.0) + ? > 0 "
+        "THEN 1 ELSE 0 END, "
         "closed_ts = ? WHERE signal_id = ?",
-        (1 if won else 0, float(pnl_r), now_ts, signal_id),
+        (float(pnl_r), float(pnl_r), now_ts, signal_id),
     )

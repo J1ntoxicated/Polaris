@@ -107,6 +107,7 @@ from polaris.storage.schema_ddl_ext import (
     DDL_META_LABELS,
     DDL_META_LABELS_INDEX,
     DDL_NEWS_TIMING_SHADOW,
+    DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX,
     DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX,
     DDL_POSITION_CONVICTION_LAYERS,
     DDL_POSITION_CONVICTION_LAYERS_INDEX,
@@ -234,6 +235,11 @@ ALL_DDL: tuple[str, ...] = (
     # frontgate-scan item #7 (G2/G3) — news timestamp-audit + dedup SHADOW.
     DDL_NEWS_TIMING_SHADOW,
     DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX,
+    # Round-3 rework: natural-key dedup guard (headline_id, symbol) — the
+    # rolling fetch window re-returns the same article every ~15min, so
+    # log_news_timing_shadow now writes via INSERT OR IGNORE against this
+    # index instead of one row per re-fetch.
+    DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
     # DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX is created in _apply_post_migrations

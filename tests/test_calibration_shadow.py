@@ -135,6 +135,32 @@ def test_close_outcome_fills_realized_fields_by_signal_id() -> None:
     assert row[8] == NOW + 3600  # closed_ts
 
 
+def test_close_outcome_accumulates_across_partial_and_remainder_slices() -> None:
+    """Multi-slice close (``fold_close_slice`` per partial + terminal
+    remainder) calls ``record_close_outcome`` once PER SLICE — the persisted
+    outcome must be the WHOLE-POSITION aggregate, never the last (remainder)
+    slice alone (round-3 rework, verifier note)."""
+    conn = _conn()
+    record_entry_snapshot(
+        conn, signal_id="sig-8", exchange="okx", strategy="tsmom",
+        ticker="BTC-USDT", regime="trend_up", now_ts=NOW,
+    )
+    # Partial slice: +0.5R (a win on its own).
+    record_close_outcome(conn, signal_id="sig-8", won=True, pnl_r=0.5, now_ts=NOW + 10)
+    row = _row(conn, "sig-8")
+    assert row is not None
+    assert row[6] == 1  # intermediate: running total is a win so far
+    assert row[7] == pytest.approx(0.5)
+    # Remainder slice: -1.2R (a big loss) -> whole-position aggregate is
+    # -0.7R, a LOSS, even though this slice alone is small vs the total swing.
+    record_close_outcome(conn, signal_id="sig-8", won=False, pnl_r=-1.2, now_ts=NOW + 20)
+    row = _row(conn, "sig-8")
+    assert row is not None
+    assert row[6] == 0  # whole-position aggregate flips to a loss
+    assert row[7] == pytest.approx(-0.7)  # 0.5 + (-1.2)
+    assert row[8] == NOW + 20  # closed_ts reflects the terminal write
+
+
 def test_close_outcome_noop_when_no_entry_snapshot_exists() -> None:
     """A calibration miss at entry must never gate/abort the close — the
     close-side call is a silent 0-row UPDATE, not an error."""

@@ -997,3 +997,17 @@ DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_news_timing_shadow_symbol
     ON news_timing_shadow(symbol, ingestion_ts DESC);
 """
+
+# Round-3 rework (verifier note): the news collector's fetch window is ROLLING
+# (start = now - recency_hours, not an advancing watermark), so the SAME
+# headline is re-returned on every ~15min fetch for its entire window
+# residence. Without a natural-key guard, ``log_news_timing_shadow`` INSERTs a
+# fresh row (fresh uuid4 event_id) per (article x symbol) EVERY call, so one
+# headline accumulates ~recency_hours/15min duplicate rows and corrupts the
+# IC probe's per-article sentiment distribution + n_syndicate counts. The
+# writer switches to ``INSERT OR IGNORE`` against this UNIQUE(headline_id,
+# symbol) index so a re-fetched article is a no-op, not a new row.
+DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_timing_shadow_dedup
+    ON news_timing_shadow(headline_id, symbol);
+"""

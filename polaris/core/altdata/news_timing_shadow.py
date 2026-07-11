@@ -96,6 +96,13 @@ def log_news_timing_shadow(
     own return value). ``n_syndicate`` is the dedup group's article count
     (this fetch batch only — a rolling cross-fetch count is a later addition
     once the table has accumulated history).
+
+    The collector's fetch window is ROLLING (not an advancing watermark), so
+    the same article is re-returned on every ~15min fetch for its entire
+    window residence. The write is ``INSERT OR IGNORE`` against the schema's
+    ``UNIQUE(headline_id, symbol)`` index, so a re-fetched article is a no-op
+    — the returned count is the number of rows ACTUALLY written, not the
+    number of (article x symbol) pairs attempted.
     """
     if conn is None or not articles:
         return 0
@@ -120,9 +127,9 @@ def log_news_timing_shadow(
             group_id = dedup.get(aid, str(aid))
             symbols = a.get("symbols") or []
             for sym in symbols:
-                conn.execute(
+                cur = conn.execute(
                     """
-                    INSERT INTO news_timing_shadow
+                    INSERT OR IGNORE INTO news_timing_shadow
                         (event_id, symbol, headline_id, publication_ts,
                          ingestion_ts, delay_h, dedup_group_id, sentiment,
                          relevance, n_syndicate, created_ts)
@@ -136,7 +143,7 @@ def log_news_timing_shadow(
                         group_counts.get(group_id, 1), ingestion_ts,
                     ),
                 )
-                written += 1
+                written += cur.rowcount if cur.rowcount > 0 else 0
     except sqlite3.Error as exc:
         logger.warning("[news_timing_shadow] log dropped: %r", exc)
         return written

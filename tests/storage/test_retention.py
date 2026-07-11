@@ -75,6 +75,15 @@ def _insert_gate_event(conn: sqlite3.Connection, created_ts: int) -> None:
     )
 
 
+def _insert_news_timing_shadow(conn: sqlite3.Connection, ingestion_ts: int) -> None:
+    conn.execute(
+        "INSERT INTO news_timing_shadow "
+        "(event_id, symbol, headline_id, ingestion_ts, created_ts) "
+        "VALUES (?, 'BTC-USDT', ?, ?, ?)",
+        (f"nts-{ingestion_ts}", f"h-{ingestion_ts}", ingestion_ts, ingestion_ts),
+    )
+
+
 # --- ledger / state tables: NEVER touched ----------------------------------
 
 
@@ -153,6 +162,7 @@ def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
             "ticker_baseline_samples": _insert_baseline_sample,
             "watchlist_focus": _insert_focus,
             "gate_events": _insert_gate_event,
+            "news_timing_shadow": _insert_news_timing_shadow,
         }[rule.table]
         inserter(db, cutoff - 1)   # strictly older -> deleted
         inserter(db, cutoff)       # exactly at cutoff -> kept (< is the test)

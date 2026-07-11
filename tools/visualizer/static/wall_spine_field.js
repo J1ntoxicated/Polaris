@@ -483,8 +483,16 @@
         // the original 0.62π-based angle band sat almost exactly there and
         // stamped "session_mult" right through the gate title text. Same
         // upper-left quadrant the ai_judge satellites already use cleanly.
-        const ang = Math.PI * 1.1 + runnerJ * 0.35;
-        screen[n.id] = { x: gG5.x + Math.cos(ang) * 56, y: gG5.y + Math.sin(ang) * 42 };
+        // Round 2 (label-collision fix): a flat 0.35-rad step at a single
+        // radius packed all 3 dots into a ~24x22px box — arc-length ~20px
+        // between neighbors vs 48-60px-wide labels, so labels stamped on
+        // top of each other regardless of what side the lane engine picked.
+        // Fan BOTH angle (wider step) and radius (grows per satellite) so
+        // the dots themselves land ~28-40px apart, giving the lane engine
+        // (wall_console_lanes.js place()) real x-interval room to work with.
+        const ang = Math.PI * 1.1 + runnerJ * 0.55;
+        const rad = 54 + runnerJ * 16;
+        screen[n.id] = { x: gG5.x + Math.cos(ang) * rad, y: gG5.y + Math.sin(ang) * rad * 0.75 };
         runnerJ++;
         return;
       }

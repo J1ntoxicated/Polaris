@@ -37,7 +37,16 @@
     let h = 2166136261;
     const eat = (s) => { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } };
     (data.lifecycle_paths || []).forEach((p) => eat(p.kind + (p.node_ids || []).join('>')));
-    (data.nodes || []).forEach((n) => { if (n.cluster === 'watch') eat(n.id); });
+    (data.nodes || []).forEach((n) => {
+      if (n.cluster === 'watch') eat(n.id);
+      // mkt tier_label (Jin 2026-07-11 capture-glide fix, wall_spine_field.js
+      // buildLayout's newFocusIds): a bare S/A/B promotion/demotion flips
+      // tier_label on an EXISTING mkt node with no structural change, so
+      // node/open/cluster counts alone never move — without this the poll
+      // takes the cheap refresh() path and buildLayout (and its capture
+      // glide) never runs for the promotion.
+      else if (n.cluster === 'mkt' && n.tier_label) eat(n.id + n.tier_label);
+    });
     (data.probe_links || []).forEach((l) => eat(l.probe + '>' + l.pos));
     return st.node_count + ':' + st.open_count + ':' + st.cluster_count + ':' + (h >>> 0);
   }

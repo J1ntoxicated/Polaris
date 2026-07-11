@@ -194,6 +194,10 @@ class AltDataView:
     # (a symbol with no funding row reads neutral → the strategy no-emits).
     funding_rate_symbol: float | None = None  # THIS symbol's perp funding rate
     funding_rate_p10: float | None = None  # THIS symbol's perp funding p10 (history)
+    # 10Y TIPS real yield (frontgate item #5 — gold conviction context, FRED
+    # DFII10, release-time-aware via fred_macro's generic <key>_asof pattern).
+    # None = NEUTRAL no-op (identical contract to every other field above).
+    dfii10: float | None = None
 
     def is_neutral(self) -> bool:
         """True when no field carries a value (a no-op view)."""
@@ -207,6 +211,7 @@ class AltDataView:
             and self.hy_spread is None
             and self.funding_rate_symbol is None
             and self.funding_rate_p10 is None
+            and self.dfii10 is None
         )
 
 

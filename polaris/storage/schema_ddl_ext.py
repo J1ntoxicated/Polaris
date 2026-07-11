@@ -169,6 +169,37 @@ CREATE INDEX IF NOT EXISTS idx_weekend_shadow_orders_strategy
     ON weekend_shadow_orders(strategy_id, created_ts);
 """
 
+# Sector/dual-momentum rotation context SHADOW (frontgate-scan item #8, G1,
+# behavior-0, 2026-07-11). One row per (rebalance-boundary cycle × sector ETF):
+# the 11-SPDR-sector-ETF relative-momentum rank + z, recorded on the monthly
+# rebalance-boundary bar only (mirrors ``index_dual_momentum_rotation
+# ._is_rebalance_bar`` — first 1D bar of a new UTC calendar month, NOT every
+# 5-10min L0 cycle). Stage 1 (this table, buildable now): ETF-only ranking,
+# no per-stock sector mapping. ``candidate_symbols`` stays '' until a ticker→
+# sector mapping source is decided (Stage 2, /debate item — no calendar
+# deadline). ``delta_from_prior`` = this cycle's momentum_z minus the SAME
+# symbol's last recorded momentum_z (NULL on a symbol's first-ever row).
+# NEVER read by any live trading path — RANKING/ROUTING context, not applied
+# (flow_not_block; routing-only per the integration blueprint, no directional
+# weight overlap with item #3's universe rank).
+DDL_SECTOR_RANK_SHADOW = """
+CREATE TABLE IF NOT EXISTS sector_rank_shadow (
+    rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_ts INTEGER NOT NULL,
+    sector_etf_symbol TEXT NOT NULL,
+    momentum_rank INTEGER NOT NULL,
+    momentum_z REAL NOT NULL DEFAULT 0.0,
+    candidate_symbols TEXT NOT NULL DEFAULT '',
+    delta_from_prior REAL,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_SECTOR_RANK_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_sector_rank_shadow_symbol
+    ON sector_rank_shadow(sector_etf_symbol, cycle_ts DESC);
+"""
+
 # Gate→outcome instrumentation (BUILD, behavior 0) — one row per G3/G4 GPT
 # decision on the bar entry pipeline. ``decision='KILL'`` rows are the killed
 # signals whose counterfactual forward marks (1h/4h/24h first-1m-bar closes,
@@ -361,6 +392,39 @@ CREATE INDEX IF NOT EXISTS idx_position_strategy_segments_pos
 DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_position_strategy_segments_cell
     ON position_strategy_segments(cell_key, started_ts DESC);
+"""
+
+# Probability calibration shadow (frontgate-scan item #4, G5, behavior-0,
+# 2026-07-11). One row per SIZED SIGNAL: ``predicted_p_pos`` is the
+# ``learner_posterior.p_pos`` for the signal's (exchange, strategy, ticker,
+# regime) cell SNAPSHOTTED AT SIZING TIME (never re-derived after close — the
+# cell's p_pos mutates on every subsequent close, so a post-close re-query
+# would leak future information into the "predicted" value; see
+# ``core/learners/calibration_shadow.py``). ``realized_won``/``realized_pnl_r``/
+# ``closed_ts`` stay NULL until the position closes, then are filled in-place
+# by ``signal_id`` (the sizing↔close join key — ``SimulatedTrade.signal_id``
+# is carried unchanged from entry through close). MEASUREMENT ONLY — never
+# read by sizing/gating (9-stack unaffected); feeds an OFFLINE Platt/PAV fit
+# (``core/learners/calibration_fit.py``) once enough pairs accumulate.
+DDL_CALIBRATION_PAIRS = """
+CREATE TABLE IF NOT EXISTS calibration_pairs (
+    signal_id TEXT PRIMARY KEY,
+    venue TEXT NOT NULL DEFAULT '',
+    strategy TEXT NOT NULL DEFAULT '',
+    ticker TEXT NOT NULL DEFAULT '',
+    regime TEXT NOT NULL DEFAULT '',
+    predicted_p_pos REAL NOT NULL DEFAULT 0.5,
+    n_samples_at_entry INTEGER NOT NULL DEFAULT 0,
+    realized_won INTEGER,
+    realized_pnl_r REAL,
+    closed_ts INTEGER,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_CALIBRATION_PAIRS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_calibration_pairs_strategy
+    ON calibration_pairs(strategy, regime, created_ts DESC);
 """
 
 # ---------------------------------------------------------------------------
@@ -850,4 +914,100 @@ CREATE TABLE IF NOT EXISTS ladder_credit_checkpoint (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_scanned_closed_ts INTEGER NOT NULL DEFAULT 0
 );
+"""
+
+# ---------------------------------------------------------------------------
+# frontgate-scan item #6 (G4) — VWAP/AVWAP entry-timing SHADOW.
+# Stage 1 (this table, write side): one row per G4 AI-free PROCEED decision —
+# the known-at-time session-VWAP / signal-day-AVWAP distance (bps) from the
+# decision-time price. Stage 2 (offline, ``polaris.scripts.
+# vwap_timing_resolve``) backfills the ACTUAL fill price + side-aware
+# improvement bps via gate_events.position_id -> fills, once the signal opens
+# a position — mirrors the gate_kill_counterfactuals two-stage precedent.
+# INSTRUMENTATION ONLY — never read by any live gate/sizing/exit path.
+# ---------------------------------------------------------------------------
+
+DDL_VWAP_TIMING_SHADOW = """
+CREATE TABLE IF NOT EXISTS vwap_timing_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    signal_id TEXT,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    decision_ts INTEGER NOT NULL,
+    current_price REAL NOT NULL DEFAULT 0.0,
+    session_vwap REAL,
+    session_vwap_bar_count INTEGER NOT NULL DEFAULT 0,
+    session_vwap_distance_bps REAL,
+    session_vwap_reason TEXT NOT NULL DEFAULT '',
+    avwap REAL,
+    avwap_bar_count INTEGER NOT NULL DEFAULT 0,
+    avwap_distance_bps REAL,
+    avwap_reason TEXT NOT NULL DEFAULT '',
+    fill_price REAL,
+    fill_ts INTEGER,
+    side TEXT NOT NULL DEFAULT '',
+    session_vwap_improvement_bps REAL,
+    avwap_improvement_bps REAL,
+    resolve_attempts INTEGER NOT NULL DEFAULT 0,
+    unresolvable INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_VWAP_TIMING_SHADOW_RUN_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_vwap_timing_shadow_run
+    ON vwap_timing_shadow(run_id);
+"""
+
+DDL_VWAP_TIMING_SHADOW_PENDING_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_vwap_timing_shadow_pending
+    ON vwap_timing_shadow(decision_ts)
+    WHERE fill_price IS NULL AND unresolvable = 0;
+"""
+
+# ---------------------------------------------------------------------------
+# frontgate-scan item #7 (G2/G3) — news publication/ingestion timestamp audit
+# + syndicate dedup SHADOW. One row per (symbol x headline) the news collector
+# scored on its existing ~15min gpt-5-mini cadence (no new GPT calls) — the
+# RAW per-article delay (publication -> ingestion), the deterministic dedup
+# group, and the signal-time sentiment/relevance, all recorded pre-aggregation
+# (``news_sentiment._aggregate`` collapses to a per-symbol MAX age — this table
+# keeps the individual-article distribution the IC probe needs).
+# INSTRUMENTATION ONLY — never read by any live gate/sizing/exit path.
+# ---------------------------------------------------------------------------
+
+DDL_NEWS_TIMING_SHADOW = """
+CREATE TABLE IF NOT EXISTS news_timing_shadow (
+    event_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL DEFAULT '',
+    headline_id TEXT NOT NULL DEFAULT '',
+    publication_ts INTEGER,
+    ingestion_ts INTEGER NOT NULL,
+    delay_h REAL,
+    dedup_group_id TEXT NOT NULL DEFAULT '',
+    sentiment REAL NOT NULL DEFAULT 0.0,
+    relevance REAL NOT NULL DEFAULT 0.0,
+    n_syndicate INTEGER NOT NULL DEFAULT 1,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_news_timing_shadow_symbol
+    ON news_timing_shadow(symbol, ingestion_ts DESC);
+"""
+
+# Round-3 rework (verifier note): the news collector's fetch window is ROLLING
+# (start = now - recency_hours, not an advancing watermark), so the SAME
+# headline is re-returned on every ~15min fetch for its entire window
+# residence. Without a natural-key guard, ``log_news_timing_shadow`` INSERTs a
+# fresh row (fresh uuid4 event_id) per (article x symbol) EVERY call, so one
+# headline accumulates ~recency_hours/15min duplicate rows and corrupts the
+# IC probe's per-article sentiment distribution + n_syndicate counts. The
+# writer switches to ``INSERT OR IGNORE`` against this UNIQUE(headline_id,
+# symbol) index so a re-fetched article is a no-op, not a new row.
+DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_timing_shadow_dedup
+    ON news_timing_shadow(headline_id, symbol);
 """

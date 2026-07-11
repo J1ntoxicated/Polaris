@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS universe (
     depth_10bps_usd REAL NOT NULL DEFAULT 0.0,
     signal_density_7d REAL NOT NULL DEFAULT 0.0,
     last_price REAL NOT NULL DEFAULT 0.0,
+    -- XS-momentum + 52wk-high SHADOW (frontgate-scan item #3, behavior-0):
+    -- NULL = not yet ranked with a momentum_z input this cycle. Never read by
+    -- sizing/gating/ranking selection — spread-measurement only.
+    momentum_z REAL,
+    rank_score_shadow REAL,
     listing_ts INTEGER,
     last_seen_ts INTEGER NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,

@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from polaris.core.pipeline.agents._frontgate_bars import fetch_known_bars
 from polaris.core.pipeline.agents._gpt_client import (
     DEFAULT_TIMEOUT_SEC,
     GPTCallResult,
@@ -31,6 +32,8 @@ from polaris.core.pipeline.agents._gpt_client import (
     make_system_prefix,
 )
 from polaris.core.pipeline.agents._shadow_rules import (
+    G4ShadowInputs,
+    ShadowDecision,
     g4_shadow_inputs_from_payload,
     technical_watch_decision,
 )
@@ -54,6 +57,8 @@ from polaris.core.pipeline.agents.post_trade_reflector import (
     LESSON_RECENT_TRADES_MAX,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
+from polaris.core.pipeline.agents.ttm_squeeze_shadow import compute_squeeze_state
+from polaris.core.pipeline.agents.vwap_timing_shadow import log_vwap_timing_shadow
 from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
@@ -201,6 +206,71 @@ def _log_g4_shadow(
     )
 
 
+def _log_g4_frontgate_shadow(
+    ctx: GateContext,
+    shadow_conn: sqlite3.Connection | None,
+    *,
+    inp: G4ShadowInputs,
+) -> None:
+    """VWAP/AVWAP timing (frontgate item #6) + TTM Squeeze (item #9) SHADOW tags.
+
+    Fired once per AI-free PROCEED (behavior-0 — never touches ``det_result``/
+    payload; see ``vwap_timing_shadow.py`` / ``ttm_squeeze_shadow.py`` for the
+    full design). VWAP/AVWAP writes its OWN table (``vwap_timing_shadow`` —
+    the columns don't fit ``gate_shadow_events``); TTM Squeeze reuses the
+    EXISTING ``gate_shadow_events`` table via ``log_shadow_event`` with
+    ``gpt_decision=None`` (mismatch pinned to 0 — this is a watch tag, not a
+    technical-vs-GPT comparison). Fail-open: any error here is swallowed so a
+    bars-fetch/compute fault can never crash the live gate.
+    """
+    if shadow_conn is None:
+        return
+    try:
+        decision_ts = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
+        bar_views = fetch_known_bars(
+            shadow_conn, venue=ctx.venue, symbol=ctx.symbol, decision_ts=decision_ts,
+        )
+        current_price = (
+            (inp.best_bid + inp.best_ask) / 2.0
+            if inp.best_bid > 0.0 and inp.best_ask > 0.0
+            else 0.0
+        )
+        log_vwap_timing_shadow(
+            shadow_conn,
+            run_id=ctx.run_id,
+            signal_id=ctx.signal_id,
+            venue=ctx.venue,
+            symbol=ctx.symbol,
+            decision_ts=decision_ts,
+            current_price=current_price,
+            bar_views=bar_views,
+        )
+        squeeze = compute_squeeze_state(bar_views)
+        cell = ctx.payload.get("cell_routing", {})
+        n_eff = float(cell.get("n_eff", 0.0) or 0.0) if isinstance(cell, dict) else 0.0
+        log_shadow_event(
+            shadow_conn,
+            run_id=ctx.run_id,
+            signal_id=ctx.signal_id,
+            gate_id=GATE_PRE_ENTRY_WATCHER,
+            venue=ctx.venue,
+            symbol=ctx.symbol,
+            regime=str(ctx.payload.get("regime", "")),
+            technical=ShadowDecision(
+                decision=GateDecision.PROCEED,
+                reason=squeeze.reason,
+                flags=(squeeze.reason,),
+            ),
+            gpt_decision=None,
+            cell_warm=n_eff >= 5.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — instrumentation must never crash the gate
+        logger.warning(
+            "[g4-frontgate-shadow] tag dropped run_id=%s signal_id=%s: %r",
+            ctx.run_id, ctx.signal_id, exc,
+        )
+
+
 async def _maybe_judge_timing(
     ctx: GateContext,
     *,
@@ -324,9 +394,8 @@ async def pre_entry_watcher_gate(
         # baseline) / wide spread / drift stay FLAGS on a PROCEED, surfaced as
         # ``watch_flags``.
         now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
-        technical = technical_watch_decision(
-            g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
-        )
+        inp = g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
+        technical = technical_watch_decision(inp)
         logger.info(
             "[gate/G4-watcher] AI-free decision=%s flags=%s reason=%s "
             "regime=%s sym=%s (deterministic primary, GPT=0)",
@@ -352,6 +421,9 @@ async def pre_entry_watcher_gate(
             payload=payload,
             model_used="python",
         )
+        # frontgate-scan items #6 (VWAP/AVWAP timing) + #9 (TTM Squeeze) —
+        # behavior-0 watch tags, logged only, never influence det_result above.
+        _log_g4_frontgate_shadow(ctx, shadow_conn, inp=inp)
         # #32 AI JUDGE (entry-timing): a per-ticker, STRUCTURALLY non-blocking
         # timing judgment over the bot's own info + tick context. Only the PROCEED
         # path is judged (the objective crossed-book KILL above is

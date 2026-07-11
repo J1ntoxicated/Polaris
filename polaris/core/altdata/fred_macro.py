@@ -104,6 +104,7 @@ _SERIES: Final[dict[str, str]] = {
     "vix_3m": "VXVCLS",  # 3M VIX (term structure)
     "oil_vol": "OVXCLS",  # CBOE crude-oil VIX
     "gold_vol": "GVZCLS",  # CBOE gold VIX
+    "dfii10": "DFII10",  # 10Y TIPS real yield (frontgate item #5 — gold conviction)
 }
 
 # Series published by FRED in PERCENT that the system uses in bps (×100).

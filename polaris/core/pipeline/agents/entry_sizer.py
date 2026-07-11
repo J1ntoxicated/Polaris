@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import replace
 from typing import Any
 
+from polaris.core.learners.calibration_shadow import record_entry_snapshot
 from polaris.core.pipeline.agents.judge_gate import size_up_boost
 from polaris.core.pipeline.gate_state import (
     GATE_POSITION_MONITOR,
@@ -143,6 +144,18 @@ async def entry_sizer_gate(
             },
             model_used="python",
         )
+
+    # Probability calibration shadow (#4, G5) — snapshot THIS cell's predicted
+    # p_pos at sizing time, for the SAME (venue, strategy, ticker, regime) key
+    # compute_size just resolved cell_routing_mult from. Self-contained
+    # fail-open (see calibration_shadow module docstring for the look-ahead
+    # guard + why this lives here and not inside core/sizing). Measurement
+    # only, never read by sizing (9-stack unaffected).
+    record_entry_snapshot(
+        conn, signal_id=intent_raw.signal_id, exchange=intent_raw.venue,
+        strategy=intent_raw.strategy, ticker=intent_raw.symbol,
+        regime=intent_raw.regime, now_ts=int(ctx.started_ts),
+    )
 
     payload: dict[str, Any] = {
         "sized": {

@@ -387,7 +387,13 @@ async def test_g4_ai_free_fresh_book_proceed(
     assert res.model_used == "python"
     assert res.next_gate == GATE_ENTRY_SIZER
     assert res.payload["watched_signal"]["symbol"] == "BTC-USDT"
-    assert fetch_shadow_events(memdb, gate_id=GATE_PRE_ENTRY_WATCHER) == []
+    # frontgate-scan item #9 (TTM Squeeze watch tag): the AI-free PROCEED path
+    # now ALSO logs a watch-only gate_shadow_events row (gpt_decision=""
+    # pins mismatch=0 — a watch tag, never a technical-vs-GPT comparison).
+    rows = fetch_shadow_events(memdb, gate_id=GATE_PRE_ENTRY_WATCHER)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] == ""
+    assert rows[0]["mismatch"] == 0
 
 
 @pytest.mark.asyncio
@@ -501,7 +507,13 @@ async def test_pipeline_g3_g4_ai_free_gate_events(
     ).fetchall()
     assert (3, "PASS", "python") in rows
     assert (4, "PROCEED", "python") in rows
-    assert fetch_shadow_events(memdb) == []
+    # frontgate-scan item #9: G4's AI-free PROCEED now logs one watch-only
+    # gate_shadow_events row (squeeze tag, gpt_decision="" -> mismatch=0); G3
+    # AI-free still writes none (item #9 wiring is G4-only).
+    shadow_rows = fetch_shadow_events(memdb)
+    assert len(shadow_rows) == 1
+    assert shadow_rows[0]["gate_id"] == GATE_PRE_ENTRY_WATCHER
+    assert shadow_rows[0]["mismatch"] == 0
 
 
 # ---------------------------------------------------------------------------

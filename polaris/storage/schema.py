@@ -69,6 +69,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_AI_LESSONS_INDEX,
     DDL_BENCHMARK_RESULTS,
     DDL_BENCHMARK_RESULTS_INDEX,
+    DDL_CALIBRATION_PAIRS,
+    DDL_CALIBRATION_PAIRS_INDEX,
     DDL_CAPITAL_REOPEN_PENDING,
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
@@ -104,6 +106,9 @@ from polaris.storage.schema_ddl_ext import (
     DDL_MEASUREMENT_RESETS_INDEX,
     DDL_META_LABELS,
     DDL_META_LABELS_INDEX,
+    DDL_NEWS_TIMING_SHADOW,
+    DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX,
+    DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX,
     DDL_POSITION_CONVICTION_LAYERS,
     DDL_POSITION_CONVICTION_LAYERS_INDEX,
     DDL_POSITION_LIVE_RECALC_STATE,
@@ -115,10 +120,15 @@ from polaris.storage.schema_ddl_ext import (
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
     DDL_REPLAY_RUNS_INDEX,
+    DDL_SECTOR_RANK_SHADOW,
+    DDL_SECTOR_RANK_SHADOW_INDEX,
     DDL_STRATEGY_REGIME_PRIOR,
     DDL_STRATEGY_RISK_STATE,
     DDL_V_G34_COHORT_OUTCOMES,
     DDL_VENUE_BLOCKLIST,
+    DDL_VWAP_TIMING_SHADOW,
+    DDL_VWAP_TIMING_SHADOW_PENDING_INDEX,
+    DDL_VWAP_TIMING_SHADOW_RUN_INDEX,
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
 )
@@ -210,10 +220,26 @@ ALL_DDL: tuple[str, ...] = (
     # is logged (zero capital at risk; durability of the thin sample accrues live).
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
+    # Sector/dual-momentum rotation context SHADOW (#8, G1) — 11-sector-ETF
+    # relative-momentum rank + z, recorded on the monthly rebalance boundary.
+    DDL_SECTOR_RANK_SHADOW,
+    DDL_SECTOR_RANK_SHADOW_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,
     DDL_META_LABELS_INDEX,
+    # frontgate-scan item #6 (G4) — VWAP/AVWAP entry-timing SHADOW (behavior-0).
+    DDL_VWAP_TIMING_SHADOW,
+    DDL_VWAP_TIMING_SHADOW_RUN_INDEX,
+    DDL_VWAP_TIMING_SHADOW_PENDING_INDEX,
+    # frontgate-scan item #7 (G2/G3) — news timestamp-audit + dedup SHADOW.
+    DDL_NEWS_TIMING_SHADOW,
+    DDL_NEWS_TIMING_SHADOW_SYMBOL_INDEX,
+    # Round-3 rework: natural-key dedup guard (headline_id, symbol) — the
+    # rolling fetch window re-returns the same article every ~15min, so
+    # log_news_timing_shadow now writes via INSERT OR IGNORE against this
+    # index instead of one row per re-fetch.
+    DDL_NEWS_TIMING_SHADOW_DEDUP_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
     # DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX is created in _apply_post_migrations
@@ -230,6 +256,10 @@ ALL_DDL: tuple[str, ...] = (
     # Edge-validation Phase 1 — Bayesian posterior (measure-only, no sizing wire)
     DDL_LEARNER_POSTERIOR,
     DDL_STRATEGY_REGIME_PRIOR,
+    # Probability calibration shadow (#4, G5) — predicted p_pos (snapshotted at
+    # sizing time) vs realized won, paired by signal_id (measure-only).
+    DDL_CALIBRATION_PAIRS,
+    DDL_CALIBRATION_PAIRS_INDEX,
     # Layer 6 — Live Recalc
     DDL_POSITION_LIVE_RECALC_STATE,
     DDL_REGIME_STATE,
@@ -494,6 +524,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE universe ADD COLUMN name TEXT NOT NULL DEFAULT ''"
         )
+    # universe.momentum_z / rank_score_shadow — XS-momentum + 52wk-high SHADOW
+    # (frontgate-scan item #3, behavior-0 wave 2026-07-11). ADDITIVE only:
+    # both nullable, NULL = not yet ranked with a momentum_z input (legacy row
+    # / no-momentum_z-input cycle). Never read by sizing/gating/ranking
+    # selection — spread-measurement only. Pragma guard = idempotent.
+    if uni_cols and "momentum_z" not in uni_cols:
+        conn.execute("ALTER TABLE universe ADD COLUMN momentum_z REAL")
+    if uni_cols and "rank_score_shadow" not in uni_cols:
+        conn.execute("ALTER TABLE universe ADD COLUMN rank_score_shadow REAL")
     # watchlist_focus.opportunity_score / trade_eligible — Increment 1 EntranceJudge
     # persistence (entrance-judge build 2026-06-24). ADDITIVE only: the score is
     # nullable (legacy/un-judged rows = NULL) and ``trade_eligible`` DEFAULT 1 keeps

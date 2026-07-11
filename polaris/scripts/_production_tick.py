@@ -47,6 +47,9 @@ from polaris.core.live_recalc.strategy_swap import (
     evaluate_strategy_swap,
 )
 from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
+from polaris.core.pipeline.agents.tsmom_literature_shadow import (
+    log_tsmom_literature_shadow,
+)
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
@@ -927,6 +930,40 @@ async def _run_tick(
                 )
                 state.fault_events += 1
                 continue
+            # Frontgate item #2 — TSMOM literature-fixed 12-1 shadow tagger
+            # (G2 behavior-0). Logged ONCE per 1D bar-close, independent of
+            # tsmom_12_1_multiasset's own monthly rebalance emit-gate — logs
+            # sign/strength to gate_shadow_events ONLY, never reads back into
+            # sizing/entry/exit. Best-effort: the function is internally
+            # fail-open (conn/warmup/write-fault -> no-op), so no additional
+            # try/except is needed here.
+            #
+            # Own bar-advance mark (separate from ``last_eval_bar_ts_by_key``
+            # above): the dedup gate above is SKIPPED entirely whenever this
+            # (venue, timeframe) bucket has an ``evaluates_in_progress_bar``
+            # sibling (e.g. capital/1D via gold_riskoff_trend_amplify), so
+            # without this mark the write would re-fire every 5s tick for the
+            # SAME unchanged 1D bar instead of once per bar-close.
+            # mv.bars can be EMPTY even when the raw pre-filter guard passed
+            # (all-synthetic window collapses to the empty view) — deref only
+            # when real bars exist, else the IndexError would escape this
+            # stage and abort the remaining tick dispatch (review CRITICAL).
+            if timeframe == "1D" and mv.bars:
+                latest_1d_bar_ts = int(mv.bars[-1].ts)
+                if bar_advance_due(
+                    last_eval_ts=state.last_tsmom_shadow_bar_ts_by_key.get(
+                        (venue, symbol)
+                    ),
+                    latest_bar_ts=latest_1d_bar_ts,
+                ):
+                    state.last_tsmom_shadow_bar_ts_by_key[(venue, symbol)] = (
+                        latest_1d_bar_ts
+                    )
+                    log_tsmom_literature_shadow(
+                        conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
+                        venue=venue, symbol=symbol, regime=regime, bars=mv.bars,
+                        now_ts=now_ts,
+                    )
             # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full
             # indicator set just computed in ``mv`` (rsi/adx/bb/donchian/ema/
             # momentum) so the AI judge / probes can read it as evidence (the judge
@@ -1083,6 +1120,18 @@ async def _run_tick(
                     venue, symbol, strategy_id, timeframe, sig.side,
                     sig.strength, sig.sizing_hint,
                 )
+                # Frontgate item #5 (G2 behavior-0 SHADOW): stamp the FRED
+                # DFII10 (10Y TIPS real yield) gold-conviction context as a
+                # TAG ONLY on a GOLD-symbol signal, read at signal time.
+                # mv.altdata.dfii10 defaults None (keyless/stale FRED feed) ->
+                # persist_tags stays None -> persist_emitted_signal's payload
+                # is byte-identical to before this field existed. Never a
+                # sizing/gating input — no strategy/gate reads this tag.
+                persist_tags = (
+                    {"dfii10": f"{mv.altdata.dfii10:.4f}"}
+                    if symbol in {"GOLD", "XAUUSD"} and mv.altdata.dfii10 is not None
+                    else None
+                )
                 # Persist the EMITTED signal so G2 output is queryable (the table
                 # was log-only → empty). Pure observability, FAIL-OPEN: a write
                 # error never blocks the tick. A no-emit (handled above) writes
@@ -1092,6 +1141,7 @@ async def _run_tick(
                     strategy_id=strategy_id, side=sig.side, strength=sig.strength,
                     timeframe=timeframe, ts=now_ts,
                     correlation_group=sig.correlation_group, thesis=sig.thesis_tag,
+                    tags=persist_tags,
                 )
                 # OKX settle-ability — DEFER the ENTRY (only) for an OKX pair whose
                 # quote ccy can't settle on the demo SPOT wallet (quote ∉ {USDT,

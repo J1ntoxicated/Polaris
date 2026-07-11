@@ -36,6 +36,7 @@ def persist_emitted_signal(
     ts: int,
     correlation_group: str | None = None,
     thesis: str = "",
+    tags: dict[str, str] | None = None,
 ) -> None:
     """Persist one EMITTED L1/L2 signal to the ``signals`` table (fail-open).
 
@@ -46,10 +47,19 @@ def persist_emitted_signal(
     ``(strategy_id, signal_id)`` is idempotent (a re-driven emit overwrites the
     same row, never double-counts). ANY ``sqlite3.Error`` is swallowed — a
     persistence failure logs a WARNING and returns; it NEVER blocks the tick.
+
+    ``tags`` (frontgate item #5 — e.g. a DFII10 gold-conviction stamp) is an
+    OPTIONAL additive payload key: ``None`` (the default, every existing
+    caller) leaves ``payload_json`` byte-identical to before this field
+    existed — no ``"tags"`` key is written at all unless a non-``None`` dict
+    is passed.
     """
-    payload = json.dumps(
-        {"venue": venue, "symbol": symbol, "tf": timeframe, "side": side}
-    )
+    payload_dict: dict[str, object] = {
+        "venue": venue, "symbol": symbol, "tf": timeframe, "side": side,
+    }
+    if tags is not None:
+        payload_dict["tags"] = tags
+    payload = json.dumps(payload_dict)
     try:
         conn.execute(
             """

@@ -25,6 +25,7 @@ from polaris.core.isolation.circuit_breaker import (
     record_fault,
 )
 from polaris.core.learners import ClosedTrade, LearnerScheduler
+from polaris.core.learners.calibration_shadow import record_close_outcome
 from polaris.core.learners.meta_label import (
     compute_triple_barrier_label,
     persist_meta_label,
@@ -160,6 +161,9 @@ def fold_close_slice(
     _safe_update_posterior(
         conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net,
         pnl_r_gross=slice_pnl_r, now_ts=now_ts,
+    )
+    _safe_record_calibration_outcome(
+        conn, trade=trade, won=won, pnl_r_net=pnl_r_net, now_ts=now_ts,
     )
 
 
@@ -493,6 +497,29 @@ def _safe_update_posterior(
     except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
         logger.warning(
             "[edge-validation] posterior/prior update failed %s:%s: %r",
+            trade.venue, trade.symbol, exc,
+        )
+
+
+def _safe_record_calibration_outcome(
+    conn: sqlite3.Connection, *, trade: SimulatedTrade, won: bool,
+    pnl_r_net: float, now_ts: int,
+) -> None:
+    """Probability calibration shadow (#4, G5) — fill the realized outcome onto
+    this signal's entry snapshot (``core/sizing/engine.py``'s
+    ``record_entry_snapshot`` seam). Mirrors ``_safe_update_posterior``: the
+    core call (``record_close_outcome``) raises on a broken connection, this
+    wrapper catches + logs so a calibration failure never aborts an
+    already-committed close. Measurement only — never read by sizing.
+    """
+    try:
+        record_close_outcome(
+            conn, signal_id=trade.signal_id, won=won, pnl_r=pnl_r_net,
+            now_ts=now_ts,
+        )
+    except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open
+        logger.warning(
+            "[calibration] close outcome record failed %s:%s: %r",
             trade.venue, trade.symbol, exc,
         )
 

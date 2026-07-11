@@ -227,6 +227,60 @@ async def test_l0_producer_offloads_focus_refresh_off_event_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_momentum_z_shadow_async_offloads_to_dedicated_worker_thread() -> None:
+    """The momentum-z shadow scan (``compute_momentum_z_shadow``) is an UNBOUNDED
+    synchronous ``bars`` query — already 1M+ rows on the live Alpaca universe.
+    Run inline inside ``layer0_task`` it freezes the shared event loop (tick
+    engine + WS fills) the same way the pre-#74 focus refresh did. It must run
+    via ``asyncio.to_thread`` against a DEDICATED ``momentum_conn`` sidecar —
+    never the loop-owned/caller ``conn``."""
+    import threading
+
+    from polaris.scripts._production_layers import _momentum_z_shadow_async
+
+    loop_thread_id = threading.get_ident()
+    seen: dict[str, Any] = {}
+
+    def _fake_compute(passed_conn: object, instruments: object, *, now_ts: int) -> dict[str, float]:
+        seen["thread_id"] = threading.get_ident()
+        seen["conn"] = passed_conn
+        return {}
+
+    main_conn = object()  # sentinel — the loop-owned connection
+    momentum_conn = object()  # sentinel — the dedicated read-only connection
+    with patch(
+        "polaris.scripts._production_layers.compute_momentum_z_shadow", new=_fake_compute
+    ):
+        out = await _momentum_z_shadow_async(
+            main_conn,  # type: ignore[arg-type]
+            [],
+            now_ts=1_780_000_000,
+            momentum_conn=momentum_conn,  # type: ignore[arg-type]
+        )
+
+    assert out == {}
+    assert seen["thread_id"] != loop_thread_id, (
+        "the momentum-z scan must run via asyncio.to_thread (off the event "
+        "loop), not inline — inline blocking starves the tick task → STALL"
+    )
+    assert seen["conn"] is momentum_conn
+    assert seen["conn"] is not main_conn
+
+
+@pytest.mark.asyncio
+async def test_momentum_z_shadow_async_falls_back_to_inline_sync_without_dedicated_conn() -> None:
+    """No dedicated ``momentum_conn`` given (tests / smoke path) → inline sync
+    call on the caller's own ``conn`` — behavior-identical fallback, no thread
+    hop, same as before the offload existed."""
+    from polaris.scripts._production_layers import _momentum_z_shadow_async
+
+    out = await _momentum_z_shadow_async(
+        sqlite3.connect(":memory:"), [], now_ts=1_780_000_000, momentum_conn=None
+    )
+    assert out == {}
+
+
+@pytest.mark.asyncio
 async def test_l0_producer_focus_error_does_not_kill_task() -> None:
     """2nd-defense (#74): an UNHANDLED error in the offloaded focus refresh must NOT
     propagate out of the Layer-0 producer (a dead layer0_task → frozen focus →

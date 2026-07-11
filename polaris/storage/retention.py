@@ -175,6 +175,19 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
     RetentionRule("calibration_pairs", "created_ts", 365 * _DAY,
                   "isotonic stage needs 1.5k-3k pairs; signal_id dedup bounds "
                   "growth — long window is deliberate (review LOW)"),
+    # frontgate-scan feeds (#1-3) — accession_number / (symbol,earnings_date)
+    # dedup+upsert bounds real growth to distinct events, so a generous window
+    # (matches the news_timing_shadow reasoning above) is the safe default.
+    RetentionRule("edgar_filings", "ingestion_ts", 365 * _DAY,
+                  "accession_number PK bounds growth to real new filings"),
+    RetentionRule("filing_proximity_shadow", "cycle_ts", 180 * _DAY,
+                  "G4 TAG-ONLY shadow; window matches news_timing_shadow"),
+    RetentionRule("stablecoin_liquidity", "ts", 180 * _DAY,
+                  "daily-resolution snapshot, small row count"),
+    RetentionRule("earnings_calendar", "ingestion_ts", 180 * _DAY,
+                  "(symbol,earnings_date) upsert bounds growth to real prints"),
+    RetentionRule("earnings_proximity_shadow", "cycle_ts", 180 * _DAY,
+                  "G3 TAG-ONLY shadow; window matches news_timing_shadow"),
 )
 
 # --- The probe-sidecar prune allowlist (data/probes.sqlite). -----------------

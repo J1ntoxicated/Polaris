@@ -7,6 +7,7 @@ the Finnhub endpoint is exercised via an injected ``httpx`` MockTransport.
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import pytest
 
 from polaris.core.altdata.finnhub_earnings import (
     FinnhubEarningsCollector,
+    _days_from,
     surprise_pct,
 )
 from polaris.storage.schema import init_db
@@ -66,6 +68,31 @@ def test_surprise_pct_none_when_actual_missing() -> None:
 
 def test_surprise_pct_zero_estimate_no_div_by_zero() -> None:
     assert surprise_pct(0.0, 1.0) is None
+
+
+# ── pure _days_from (bmo/amc look-ahead sign fix) ────────────────────────
+
+
+def test_days_from_amc_same_day_before_close_is_still_future() -> None:
+    """An 'amc' print (~21:00 UTC in July/EDT) hasn't happened yet at 14:00 UTC
+    on the same date — days_to_earnings must stay NON-negative, not report the
+    event as already in the past (look-ahead sign bug)."""
+    now = _dt.datetime(2026, 7, 11, 14, 0, tzinfo=_dt.UTC)
+    days = _days_from("2026-07-11", "amc", now)
+    assert days > 0.0
+
+
+def test_days_from_bmo_same_day_after_open_is_past() -> None:
+    """A 'bmo' print (~13:30 UTC in July/EDT) has already happened by 20:00
+    UTC the same date."""
+    now = _dt.datetime(2026, 7, 11, 20, 0, tzinfo=_dt.UTC)
+    days = _days_from("2026-07-11", "bmo", now)
+    assert days < 0.0
+
+
+def test_days_from_unknown_hour_falls_back_to_utc_midnight() -> None:
+    now = _dt.datetime(2026, 7, 11, 0, 0, tzinfo=_dt.UTC)
+    assert _days_from("2026-07-12", "", now) == pytest.approx(1.0)
 
 
 # ── collector ─────────────────────────────────────────────────────────────

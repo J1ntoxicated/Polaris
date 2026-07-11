@@ -231,6 +231,45 @@ async def test_refetch_same_filing_is_idempotent_dedup(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dual_class_shared_cik_both_symbols_persist(tmp_path: Path) -> None:
+    """GOOG/GOOGL (and BRK-A/BRK-B) share one CIK and thus one accession-number
+    set. The composite (symbol, accession_number) PK must keep BOTH share
+    classes' rows — a bare accession_number PK would silently drop the
+    second one via INSERT OR IGNORE."""
+    conn = init_db(tmp_path / "t.sqlite")
+    tickers_body = {
+        "0": {"cik_str": 1652044, "ticker": "GOOG", "title": "Alphabet Inc."},
+        "1": {"cik_str": 1652044, "ticker": "GOOGL", "title": "Alphabet Inc."},
+    }
+    submissions = {
+        "1652044": _submissions_body(
+            [
+                {"form": "8-K", "filingDate": "2026-07-02",
+                 "acceptanceDateTime": "2026-07-02T20:30:18.000Z",
+                 "accessionNumber": "0001652044-26-000123"},
+            ]
+        )
+    }
+    coll = EdgarEventsCollector(
+        symbols_override=("GOOG", "GOOGL"), conn=conn
+    )
+    client, _ = _client(_router(submissions, tickers_body))
+    out = await coll.fetch(client=client)
+    await client.aclose()
+
+    assert out is not None
+    assert set(out) == {"GOOG", "GOOGL"}
+    rows = conn.execute(
+        "SELECT symbol, accession_number FROM edgar_filings ORDER BY symbol"
+    ).fetchall()
+    assert rows == [
+        ("GOOG", "0001652044-26-000123"),
+        ("GOOGL", "0001652044-26-000123"),
+    ]
+    conn.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_symbol_no_cik_is_skipped() -> None:
     coll = EdgarEventsCollector(symbols_override=("ZZZZ_UNKNOWN",))
     client, transport = _client(_router({}))

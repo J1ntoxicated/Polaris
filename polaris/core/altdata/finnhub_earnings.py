@@ -27,6 +27,7 @@ import logging
 import os
 import sqlite3
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -42,6 +43,8 @@ _API_KEY_ENV: Final[str] = "FINNHUB_API_KEY"
 
 _LOOKAHEAD_DAYS: Final[int] = 14
 _LOOKBACK_DAYS: Final[int] = 7
+
+_ET_ZONE: Final[ZoneInfo] = ZoneInfo("America/New_York")
 
 
 def _to_float(value: Any) -> float | None:
@@ -60,12 +63,31 @@ def surprise_pct(eps_estimate: float | None, eps_actual: float | None) -> float 
     return round((eps_actual - eps_estimate) / abs(eps_estimate) * 100.0, 4)
 
 
-def _days_from(date_str: str, now: _dt.datetime) -> float:
+def _event_instant(date_str: str, hour: str) -> _dt.datetime | None:
+    """Pure: fold Finnhub's bmo/amc session hint into the event's UTC instant.
+
+    ``hour`` is Finnhub's session code ('bmo'=before-open ~09:30 ET,
+    'amc'=after-close ~16:00 ET). Anything else (dmh/unknown/empty) has no
+    session hint to fold and falls back to UTC midnight of ``date_str``
+    (prior behavior). DST-aware via America/New_York zoneinfo, not a fixed
+    UTC offset.
+    """
     try:
-        d = _dt.datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=_dt.UTC)
+        d = _dt.datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
+        return None
+    if hour == "bmo":
+        return d.replace(hour=9, minute=30, tzinfo=_ET_ZONE).astimezone(_dt.UTC)
+    if hour == "amc":
+        return d.replace(hour=16, minute=0, tzinfo=_ET_ZONE).astimezone(_dt.UTC)
+    return d.replace(tzinfo=_dt.UTC)
+
+
+def _days_from(date_str: str, hour: str, now: _dt.datetime) -> float:
+    instant = _event_instant(date_str, hour)
+    if instant is None:
         return 0.0
-    return round((d - now).total_seconds() / 86400.0, 3)
+    return round((instant - now).total_seconds() / 86400.0, 3)
 
 
 class FinnhubEarningsCollector:
@@ -138,17 +160,21 @@ class FinnhubEarningsCollector:
             for row in sym_rows:
                 self._persist(sym, row, ingestion_ts)
             nearest = min(
-                sym_rows, key=lambda r: abs(_days_from(str(r.get("date", "")), now))
+                sym_rows,
+                key=lambda r: abs(
+                    _days_from(str(r.get("date", "")), str(r.get("hour", "") or ""), now)
+                ),
             )
             eps_est = _to_float(nearest.get("epsEstimate"))
             eps_act = _to_float(nearest.get("epsActual"))
+            nearest_hour = str(nearest.get("hour", "") or "")
             entry = {
                 "earnings_date": str(nearest.get("date", "")),
-                "hour": str(nearest.get("hour", "") or ""),
+                "hour": nearest_hour,
                 "eps_estimate": eps_est,
                 "eps_actual": eps_act,
                 "surprise_pct": surprise_pct(eps_est, eps_act),
-                "days_from_now": _days_from(str(nearest.get("date", "")), now),
+                "days_from_now": _days_from(str(nearest.get("date", "")), nearest_hour, now),
             }
             out[sym] = entry
             self._log_shadow(sym, entry, ingestion_ts)

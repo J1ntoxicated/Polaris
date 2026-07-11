@@ -179,7 +179,7 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
     # dedup+upsert bounds real growth to distinct events, so a generous window
     # (matches the news_timing_shadow reasoning above) is the safe default.
     RetentionRule("edgar_filings", "ingestion_ts", 365 * _DAY,
-                  "accession_number PK bounds growth to real new filings"),
+                  "(symbol,accession_number) PK bounds growth to real new filings"),
     RetentionRule("filing_proximity_shadow", "cycle_ts", 180 * _DAY,
                   "G4 TAG-ONLY shadow; window matches news_timing_shadow"),
     RetentionRule("stablecoin_liquidity", "ts", 180 * _DAY,

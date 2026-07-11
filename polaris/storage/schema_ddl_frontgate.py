@@ -22,9 +22,13 @@ from __future__ import annotations
 # #1 SEC EDGAR — 8-K/10-Q/10-K filing events (per active-Alpaca-universe symbol)
 # acceptance_ts = SEC's own acceptanceDateTime (A-grade original publish time,
 # epoch seconds); ingestion_ts = when Polaris pulled the submissions feed.
-# PRIMARY KEY on accession_number (SEC's own globally-unique filing id) makes
-# the ~15min re-fetch of the same "recent" window a natural no-op (INSERT OR
-# IGNORE), so real growth is bounded by actual new filings, not fetch cadence.
+# PRIMARY KEY on (symbol, accession_number) — NOT accession_number alone:
+# dual-class tickers (GOOG/GOOGL, BRK-A/BRK-B) share one CIK and thus one
+# accession-number set, so a bare accession_number PK would silently drop
+# the second share class's row via INSERT OR IGNORE. The composite key keeps
+# this table per-symbol (matching its per-symbol index) while still making
+# the ~15min re-fetch of the same "recent" window a natural no-op, so real
+# growth is bounded by actual new filings, not fetch cadence.
 # ---------------------------------------------------------------------------
 
 DDL_EDGAR_FILINGS = """
@@ -38,7 +42,7 @@ CREATE TABLE IF NOT EXISTS edgar_filings (
     ingestion_ts INTEGER NOT NULL,
     primary_document TEXT NOT NULL DEFAULT '',
     created_ts INTEGER NOT NULL,
-    PRIMARY KEY (accession_number)
+    PRIMARY KEY (symbol, accession_number)
 );
 """
 

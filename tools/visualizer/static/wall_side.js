@@ -84,27 +84,59 @@
     if (cls != null && el.className.indexOf(cls) < 0) el.className = 'num ' + cls;
   }
   function renderPositions(s) {
-    var rows = (s.positions || []).slice().sort(function (a, b) {
-      return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0);
-    }).slice(0, 26);
+    // 티커 그룹핑 (Jin 2026-07-11 "같은 티커 여러 주문 — 합칠까?"): rows stay
+    // PER-POSITION (전략별 진입가/PnL/엑싯이 달라 합치면 정보 소실) but same-
+    // ticker rows sit TOGETHER under a slim Σ subtotal header when >1 —
+    // groups ordered by the group's |Σ uPnL| so the hottest name leads.
+    var all = (s.positions || []).slice();
+    var groups = {};
+    all.forEach(function (p) {
+      var gk = String(p.venue || '') + '|' + String(p.symbol || '');
+      (groups[gk] = groups[gk] || []).push(p);
+    });
+    var ordered = Object.keys(groups).map(function (gk) {
+      var g = groups[gk];
+      var upnl = g.reduce(function (a, p) { return a + (p.upnl_usd || 0); }, 0);
+      g.sort(function (a, b) { return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0); });
+      return { gk: gk, g: g, upnl: upnl };
+    }).sort(function (a, b) { return Math.abs(b.upnl) - Math.abs(a.upnl); });
+    var rows = [];
+    ordered.forEach(function (o) { o.g.forEach(function (p) { rows.push(p); }); });
+    rows = rows.slice(0, 26);
     if (posN) posN.textContent = rows.length ? '· ' + rows.length : '';
     renderSummary(rows);
+    var inRows = {};
+    rows.forEach(function (p) { inRows[rowKey(p)] = true; });
     var keys = rows.map(rowKey).join('~');
     if (keys !== renderPositions._keys) {
       renderPositions._keys = keys;
       rowIndex.clear();
-      posRows.innerHTML = rows.map(function (p) {
-        return '<div class="r" data-k="' + esc(rowKey(p)) + '">'
-          + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
-          + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
-          + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
-          + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
-          + '<span class="num cur vt"></span>'
-          + '<span class="num pnl"></span>'
-          + '<span class="num pct"></span>'
-          + '<span class="num vt exp"></span>'
-          + '</div>';
-      }).join('');
+      var html = '';
+      ordered.forEach(function (o) {
+        var vis = o.g.filter(function (p) { return inRows[rowKey(p)]; });
+        if (!vis.length) return;
+        if (vis.length > 1) {
+          var gsz = o.g.reduce(function (a, p) { return a + (p.size_usd || 0); }, 0);
+          html += '<div class="r grp"><span></span><span class="vt">Σ</span>'
+            + '<span class="sym" style="color:#8a94b0">' + esc(String(vis[0].symbol || '').split(':').pop())
+            + ' ×' + vis.length + '</span><span></span><span class="num vt"></span>'
+            + '<span class="num ' + pnlCls(o.upnl) + '">' + usd(o.upnl) + '</span>'
+            + '<span class="num"></span><span class="num vt">' + kusd(gsz) + '</span></div>';
+        }
+        vis.forEach(function (p) {
+          html += '<div class="r' + (vis.length > 1 ? ' ingrp' : '') + '" data-k="' + esc(rowKey(p)) + '">'
+            + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
+            + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
+            + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
+            + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
+            + '<span class="num cur vt"></span>'
+            + '<span class="num pnl"></span>'
+            + '<span class="num pct"></span>'
+            + '<span class="num vt exp"></span>'
+            + '</div>';
+        });
+      });
+      posRows.innerHTML = html;
       posRows.querySelectorAll('.r').forEach(function (el) {
         rowIndex.set(el.getAttribute('data-k'), {
           cur: el.querySelector('.cur'), pnl: el.querySelector('.pnl'),

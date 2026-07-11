@@ -160,8 +160,9 @@ async def test_fetch_picks_nearest_date_when_multiple_rows() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_computes_surprise_pct_when_actual_present() -> None:
+    # PAST print (lookback window) — surprise is known-at-time and flows through.
     def responder(req: httpx.Request) -> Any:
-        return {"earningsCalendar": [_row("AAPL", "2026-07-12", eps_est=1.0, eps_act=1.1)]}
+        return {"earningsCalendar": [_row("AAPL", "2026-07-08", eps_est=1.0, eps_act=1.1)]}
 
     coll = FinnhubEarningsCollector(api_key="k", symbols_override=("AAPL",))
     client, _ = _client(responder)
@@ -176,7 +177,7 @@ async def test_fetch_persists_calendar_row_and_shadow_tag(tmp_path: Path) -> Non
     conn = init_db(tmp_path / "t.sqlite")
 
     def responder(req: httpx.Request) -> Any:
-        return {"earningsCalendar": [_row("AAPL", "2026-07-12", eps_est=1.0, eps_act=1.1)]}
+        return {"earningsCalendar": [_row("AAPL", "2026-07-08", eps_est=1.0, eps_act=1.1)]}
 
     coll = FinnhubEarningsCollector(api_key="k", symbols_override=("AAPL",), conn=conn)
     client, _ = _client(responder)
@@ -186,7 +187,7 @@ async def test_fetch_persists_calendar_row_and_shadow_tag(tmp_path: Path) -> Non
     row = conn.execute(
         "SELECT symbol, earnings_date, surprise_pct FROM earnings_calendar"
     ).fetchone()
-    assert row == ("AAPL", "2026-07-12", pytest.approx(10.0))
+    assert row == ("AAPL", "2026-07-08", pytest.approx(10.0))
     shadow = conn.execute(
         "SELECT symbol, surprise_pct FROM earnings_proximity_shadow"
     ).fetchone()
@@ -224,3 +225,19 @@ async def test_http_error_never_leaks_token_and_returns_empty() -> None:
     out = await coll.fetch(client=client)
     await client.aclose()
     assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_future_print_with_actual_never_stamps_surprise() -> None:
+    """known-at-time invariant: a FUTURE-dated row carrying a (stale/bogus)
+    eps_actual must NOT produce a surprise tag — look-ahead-free by structure."""
+    def responder(req: httpx.Request) -> Any:
+        return {"earningsCalendar": [_row("AAPL", "2099-01-05", eps_est=1.0, eps_act=1.1)]}
+
+    coll = FinnhubEarningsCollector(api_key="k", symbols_override=("AAPL",))
+    client, _ = _client(responder)
+    out = await coll.fetch(client=client)
+    await client.aclose()
+    assert out is not None
+    assert out["AAPL"]["surprise_pct"] is None
+    assert out["AAPL"]["days_from_now"] > 0

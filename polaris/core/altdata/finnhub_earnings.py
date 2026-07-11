@@ -168,13 +168,18 @@ class FinnhubEarningsCollector:
             eps_est = _to_float(nearest.get("epsEstimate"))
             eps_act = _to_float(nearest.get("epsActual"))
             nearest_hour = str(nearest.get("hour", "") or "")
+            days_from_now = _days_from(str(nearest.get("date", "")), nearest_hour, now)
+            # known-at-time invariant (review LOW): a FUTURE print can never
+            # carry a surprise — even if the source pre-populates an actual,
+            # null it so the shadow tag is unconditionally look-ahead-free.
+            surprise = surprise_pct(eps_est, eps_act) if days_from_now <= 0 else None
             entry = {
                 "earnings_date": str(nearest.get("date", "")),
                 "hour": nearest_hour,
                 "eps_estimate": eps_est,
                 "eps_actual": eps_act,
-                "surprise_pct": surprise_pct(eps_est, eps_act),
-                "days_from_now": _days_from(str(nearest.get("date", "")), nearest_hour, now),
+                "surprise_pct": surprise,
+                "days_from_now": days_from_now,
             }
             out[sym] = entry
             self._log_shadow(sym, entry, ingestion_ts)

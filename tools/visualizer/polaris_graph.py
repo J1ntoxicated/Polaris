@@ -1290,14 +1290,101 @@ def _galaxy_activity(snap: Any) -> list[dict[str, Any]]:
 
 
 # ── /flow console v2 (Jin 2026-07-11 "제대로 하자") ──────────────────────────
-# gate_flow_1h is the ONLY net-new SQL this block issues — everything else is a
-# zero-cost field copy off the already-computed collect_snapshot() result. A
-# module-level 5s cache (independent of the 1s graph-refresh cadence) keeps the
-# read to 1 query/5s instead of 1/1s (idx_gate_events_dash covers it either way,
-# but there is no reason to pay it 5x as often as it can possibly change
-# anything a human is reading). Read-only; never gates/sizes/throttles a trade.
+# gate_flow_1h + shadow_channels (below) are the ONLY net-new SQL this block
+# issues — everything else is a zero-cost field copy off the already-computed
+# collect_snapshot() result. A module-level 5s cache (independent of the 1s
+# graph-refresh cadence) keeps the read to 1 query/5s instead of 1/1s
+# (idx_gate_events_dash covers it either way, but there is no reason to pay it
+# 5x as often as it can possibly change anything a human is reading).
+# Read-only; never gates/sizes/throttles a trade.
 _gate_flow_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
 _GATE_FLOW_TTL = 5.0
+
+# frontgate-scan SHADOW exposure (Jin 2026-07-11 "표시하면 좋을것들 익스포저",
+# roadmap vault/50_research/frontgate-scan/experiment-roadmap.md). Per-channel
+# promotion target pulled verbatim from that roadmap's numeric-criteria row;
+# ``None`` = the roadmap criterion for that channel isn't a plain row-count
+# threshold (momentum_z = "20 거래일 기록 + forward-return 스프레드", sector_
+# rank_shadow = "리밸런스 3주기") — the client renders those as "warming"
+# rather than fabricate a ratio the roadmap never specified.
+_SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
+    "calibration_pairs": 500,      # item #4 — Platt pair>=500
+    "vwap_timing_shadow": 50,      # item #6 — shadow entries >=50
+    "news_timing_shadow": 300,     # item #7 — n>=300 (IC probe)
+    "sector_rank_shadow": None,    # item #8 — 3 rebalance cycles, not a row count
+    "momentum_z": None,            # item #3 — 20 trading days, not a row count
+    "tsmom_shadow": 30,            # item #2 — shadow signals >=30
+    "meta_labels": 2000,           # item #10 — pooled labels >=2k
+}
+_shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
+_SHADOW_CHANNELS_TTL = 5.0
+
+
+def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
+    """One [n / target / fresh_ts] reading per frontgate-scan shadow channel.
+
+    Pure measurement — the SAME cached-read-only pattern as
+    ``_query_gate_flow_1h`` above, on the shadow tables landed 2026-07-10/11
+    (``calibration_pairs`` / ``vwap_timing_shadow`` / ``news_timing_shadow`` /
+    ``sector_rank_shadow`` / ``gate_shadow_events`` tsmom-tagged rows /
+    ``meta_labels``) plus ``universe.momentum_z`` (filled-row count + one
+    top/bottom spread statistic, per that column's own item #3 spec — never
+    a per-row target, since the promotion criterion there isn't a row count).
+    A table missing on an older schema None-guards that ONE channel
+    (``sqlite3.Error`` caught per-table) rather than dropping the whole
+    block — no fabricated numbers, ever.
+    """
+    now = time.time()
+    if now - _shadow_channels_cache["ts"] < _SHADOW_CHANNELS_TTL:
+        return _shadow_channels_cache["data"]
+    out: dict[str, Any] = {
+        name: {"n": None, "target": target, "fresh_ts": None}
+        for name, target in _SHADOW_CHANNEL_TARGETS.items()
+    }
+    out["momentum_z"]["spread"] = None
+    if db_path.exists():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            for name, table, where in (
+                ("calibration_pairs", "calibration_pairs", ""),
+                ("vwap_timing_shadow", "vwap_timing_shadow", ""),
+                ("news_timing_shadow", "news_timing_shadow", ""),
+                ("sector_rank_shadow", "sector_rank_shadow", ""),
+                ("tsmom_shadow", "gate_shadow_events",
+                 "WHERE technical_flags = 'tsmom_shadow_literature'"),
+                ("meta_labels", "meta_labels", ""),
+            ):
+                try:
+                    row = conn.execute(
+                        f"SELECT COUNT(*), MAX(created_ts) FROM {table} {where}"
+                    ).fetchone()
+                except sqlite3.Error:
+                    continue
+                if row is None:
+                    continue
+                n, fresh = row
+                out[name]["n"] = int(n or 0)
+                out[name]["fresh_ts"] = int(fresh) if fresh is not None else None
+            try:
+                mrow = conn.execute(
+                    "SELECT COUNT(*), MAX(momentum_z), MIN(momentum_z), "
+                    "MAX(last_seen_ts) FROM universe WHERE momentum_z IS NOT NULL"
+                ).fetchone()
+            except sqlite3.Error:
+                mrow = None
+            if mrow is not None:
+                n, mx, mn, fresh = mrow
+                spread = float(mx) - float(mn) if (mx is not None and mn is not None) else None
+                out["momentum_z"]["n"] = int(n or 0)
+                out["momentum_z"]["fresh_ts"] = int(fresh) if fresh is not None else None
+                out["momentum_z"]["spread"] = round(spread, 4) if spread is not None else None
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+    _shadow_channels_cache["ts"] = now
+    _shadow_channels_cache["data"] = out
+    return out
 
 
 def _query_gate_flow_1h(db_path: Path) -> dict[int, int]:
@@ -1461,6 +1548,7 @@ def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
         "exit": exit_block,
         "regimes": regimes,
         "gate_flow_1h": _query_gate_flow_1h(db_path),
+        "shadow_channels": _query_shadow_channels(db_path),
     }
 
 

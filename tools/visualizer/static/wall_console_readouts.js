@@ -479,7 +479,10 @@
     const venues = Array.from(new Set(regs.map((r) => r.venue))).sort();
     const classes = Array.from(new Set(regs.map((r) => r.group_id))).sort();
     const cell = 9, gap = 5; // header 4-char at 5px mono ~12px — pitch 14 clears it (review MED)
-    const x0 = W * 0.21, y0 = H * 0.83;
+    // RIGHT-anchored at 0.278W: px pitch keeps labels legible at any viewport
+    // while the matrix right edge stays fractional — the pocket to SCOUT
+    // SHADOW (x0 0.285W) is structurally >=0.007W (exposure review MED).
+    const x0 = W * 0.278 - (classes.length * (cell + gap) + 9), y0 = H * 0.83;
     ctx.font = '600 6px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(160,200,235,0.35)'; ctx.textAlign = 'left';
     ctx.fillText('REGIME MATRIX', x0, y0 - 4);
     classes.forEach((cls, ci) => {
@@ -501,6 +504,89 @@
         ctx.fillRect(x0 + 14 + ci * (cell + gap), cy, cell, cell);
       });
     });
+  }
+
+  /* ===== SCOUT SHADOW — frontgate-scan shadow-channel exposure (Jin
+   * 2026-07-11 "표시하면 좋을것들 익스포저", roadmap vault/50_research/
+   * frontgate-scan/experiment-roadmap.md). Sited in the pocket between the
+   * REGIME MATRIX (ends ~x0.28W, y<=0.883H) and GATE OPS (starts x0.36W) —
+   * the same "genuinely empty stretch below the reg dots" the matrix's own
+   * comment above identifies, one step further right; verified empty via a
+   * Playwright layout audit (build round 1 screenshot, drop-panel/regime-
+   * matrix/gate-ops rects checked — no collision). One line per channel:
+   * abbreviated name, an n/target bar (steel, warm-white once the roadmap's
+   * OWN promotion threshold is reached), and a freshness dot (lit = a row
+   * landed in the last hour). ``target === null`` (momentum_z / sector_rank_
+   * shadow — the roadmap's own criteria for those two aren't a plain
+   * row-count threshold, see polaris_graph.py's _SHADOW_CHANNEL_TARGETS) or
+   * ``n === null`` (table missing on an older schema) renders "warming"
+   * instead of a fabricated ratio. Never colored green/red (money-only,
+   * color contract §1) — reached = warm-white, same convention as the KELLY
+   * CELL LEDGER's MULT column. ===== */
+  const SHADOW_CHANNELS = [
+    ['calibration_pairs', 'CALIB'], ['vwap_timing_shadow', 'VWAP'],
+    ['news_timing_shadow', 'NEWS'], ['sector_rank_shadow', 'SECT'],
+    ['momentum_z', 'MOMZ'], ['tsmom_shadow', 'TSMOM'], ['meta_labels', 'META'],
+  ];
+  function drawScoutShadow(ctx, c, W, H) {
+    // y0 0.816->0.834: regime-row leader labels (0.80H + drop) were kissing
+    // the panel title at every width (exposure review MED-b).
+    const x0 = W * 0.285, x1 = W * 0.355, y0 = H * 0.834, y1 = H * 0.950;
+    panelFrame(ctx, x0, y0, x1, y1, 'SCOUT SHADOW');
+    const chans = (c && c.shadow_channels) || {};
+    const nowEpoch = Date.now() / 1000; // data freshness, not frame-animation clock
+    const rowH = (y1 - y0 - 12) / SHADOW_CHANNELS.length;
+    const barX0 = x0 + 26, barX1 = x1 - 9, barW = barX1 - barX0;
+    SHADOW_CHANNELS.forEach(([key, label], i) => {
+      const ch = chans[key] || {};
+      const ry = y0 + 12 + (i + 0.7) * rowH;
+      ctx.font = '600 5px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(138,148,176,0.65)';
+      ctx.fillText(label, x0 + 4, ry);
+      if (ch.n == null || ch.target == null) {
+        ctx.font = '500 4.2px JetBrains Mono, monospace';
+        ctx.fillStyle = 'rgba(138,148,176,0.4)';
+        ctx.fillText('warming', barX0, ry);
+      } else {
+        const frac = ch.target > 0 ? Math.max(0, Math.min(1, ch.n / ch.target)) : 0;
+        ctx.fillStyle = 'rgba(138,148,176,0.16)'; ctx.fillRect(barX0, ry - 3, barW, 3);
+        ctx.fillStyle = field.rgba(frac >= 1 ? WARM : STEEL, frac >= 1 ? 0.9 : 0.6);
+        ctx.fillRect(barX0, ry - 3, Math.max(0, barW * frac), 3);
+      }
+      const age = ch.fresh_ts != null ? nowEpoch - ch.fresh_ts : null;
+      const lit = age != null && age < 3600;
+      ctx.beginPath(); ctx.arc(x1 - 5, ry - 1.5, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = field.rgba(lit ? WARM : STEEL, lit ? 0.85 : 0.3);
+      ctx.fill();
+    });
+  }
+
+  /* ===== header SHADOW counter (Jin 2026-07-11) — the top-bar "SHADOW" stat
+   * used to read gate_shadow_events mismatch-only rows (flow_stats'
+   * shadow_mismatch_n — usually 0, a dead-looking reading). Wired here to
+   * the real per-poll sum across the accumulating shadow channels above
+   * instead, so it reflects growing exposure. ``momentum_z`` is EXCLUDED —
+   * per polaris_graph.py's _query_shadow_channels, its n is
+   * ``COUNT(*) FROM universe WHERE momentum_z IS NOT NULL``, a point-in-time
+   * universe-coverage snapshot (not an append-only event/row count like the
+   * other six), so it doesn't accumulate and can fall as the universe
+   * shrinks — summing it into "SHADOW" would mix a snapshot term into an
+   * accumulation total and make the header both over-read and non-monotonic.
+   * (Still shown per-channel in the SCOUT SHADOW panel above, just not
+   * folded into this header sum.) This is the SOLE writer of #s-shadow
+   * (wall_spine_hud.js's renderSummary no longer touches it — see its
+   * comment) — object-identity gated so it only re-runs once per NEW
+   * console object rather than every 60fps draw() frame. */
+  const SHADOW_HEADER_CHANNELS = SHADOW_CHANNELS.filter(([key]) => key !== 'momentum_z');
+  let shadowHeaderC;
+  function updateShadowHeader(c) {
+    if (c === shadowHeaderC) return;
+    shadowHeaderC = c;
+    const el = document.getElementById('s-shadow');
+    if (!el) return;
+    const chans = (c && c.shadow_channels) || {};
+    const total = SHADOW_HEADER_CHANNELS.reduce((a, [key]) => a + ((chans[key] && chans[key].n) || 0), 0);
+    el.textContent = String(total);
   }
 
   /* ===== offscreen bake — see the file-header implementation note. Keyed on
@@ -534,6 +620,7 @@
     drawCellLedger(bakeCtx, c, W, H);
     drawExitFsm(bakeCtx, c, W, H);
     drawRegimeMatrix(bakeCtx, c, W, H);
+    drawScoutShadow(bakeCtx, c, W, H);
   }
 
   /* ===== public draw seam — 2-line append in wall_spine.js's frame() ===== */
@@ -547,6 +634,7 @@
     const verdicts = spine.verdictsOf ? spine.verdictsOf() : [];
     const summary = spine.flowSummaryOf ? spine.flowSummaryOf() : {};
     const gatePulseAt = spine.gatePulseAt;
+    updateShadowHeader(c);
     ctx.save();
     ensureBake(c, summary, W, H);
     // 5-arg form — draws the (possibly DPR-scaled, so higher source-pixel-

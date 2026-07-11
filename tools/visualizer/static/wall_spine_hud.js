@@ -131,7 +131,10 @@
     set('s-sized2fill', fmtPct(s.sized_to_fill_pct));
     set('s-ai', String(s.ai_calls_n != null ? s.ai_calls_n : '–'));
     set('s-drops', String(s.drops_total != null ? s.drops_total : '–'));
-    set('s-shadow', String(d.shadow_mismatch_n != null ? d.shadow_mismatch_n : '–'));
+    // s-shadow intentionally NOT written here — wall_console_readouts.js's
+    // updateShadowHeader() is the sole owner (real per-channel sum, gated on
+    // new console object). d.shadow_mismatch_n was a second writer racing
+    // it on this 1s poll cadence, flickering the header to 0 between polls.
   }
   function renderDrops(d) {
     const totEl = document.getElementById('drop-total');

@@ -146,6 +146,9 @@ tags: [digest, daily-auto, ops]
 | wal_before_mb | 412.0 |
 | wal_after_mb | 1.2 |
 | ops_alerts | 2 |
+| shadow_progress | calibration_pairs=0/500 vwap_timing_shadow=0/50 news_timing_shadow=0/300 sector_rank_shadow=0/3 gate_shadow_events=0/- meta_labels=0/2000 |
+| alpaca_dispatch_today | signals=0 opens=0 |
+| kill_watch_100trade_gross | equity_bb_meanrev_15m=0/100(gross=+0.00) equity_opening_range_breakout=0/100(gross=+0.00) |
 
 ## Closes by venue
 | venue | closes | pnl_usd_net | fees_usd |
@@ -331,3 +334,86 @@ def test_db_unreadable_writes_stub_and_exits_zero(
     assert any(k == "digest_failed" for k, _, _ in alerts)
     # no vault log line for an empty stub
     assert not (cfg.vault_dir / "log.md").exists()
+
+
+def _shadow_row(conn: sqlite3.Connection, table: str, **cols: Any) -> None:
+    keys = ",".join(cols)
+    qs = ",".join("?" for _ in cols)
+    conn.execute(f"INSERT INTO {table} ({keys}) VALUES ({qs})", tuple(cols.values()))
+
+
+def test_shadow_progress_counts_channels_lifetime_and_sector_cycles(
+    cfg: OpsConfig,
+) -> None:
+    """W1 rollup (design-monitoring.md §E): shadow_progress = lifetime row
+    count per channel, EXCEPT sector_rank_shadow, whose roadmap #8 target is
+    rebalance CYCLES (COUNT DISTINCT cycle_ts), not raw rows (11/cycle)."""
+    conn = _seed_db(cfg.db_path)
+    ts = DAY_START_MS // 1000
+    _shadow_row(conn, "calibration_pairs", signal_id="s1", created_ts=ts)
+    _shadow_row(conn, "calibration_pairs", signal_id="s2", created_ts=ts)
+    _shadow_row(conn, "vwap_timing_shadow", event_id="v1", run_id="r1",
+                decision_ts=ts, created_ts=ts)
+    _shadow_row(conn, "news_timing_shadow", event_id="n1", ingestion_ts=ts,
+                created_ts=ts)
+    for cycle in (1000, 2000):  # 2 cycles x 2 ETF rows = 4 rows, 2 distinct cycles
+        for etf in ("XLE", "XLF"):
+            _shadow_row(conn, "sector_rank_shadow", cycle_ts=cycle,
+                        sector_etf_symbol=etf, momentum_rank=1, created_ts=ts)
+    _shadow_row(conn, "gate_shadow_events", event_id="g1", run_id="r1", gate_id=3,
+                technical_decision="PASS", created_ts=ts)
+    _shadow_row(conn, "meta_labels", label_id="m1", trade_id="t1",
+                strategy_id="tsmom", venue="okx", ticker="BTC-USDT",
+                barrier="time", pnl_sign=1, r=0.5, hit_horizontal=0,
+                holding_bars=4, expected_holding_bars=4, horizon_fraction=1.0,
+                created_ts=ts)
+    conn.commit()
+    conn.close()
+    assert daily_digest.run(cfg, now=NOW) == 0
+    out = (cfg.digest_dir / "2026-06-09.md").read_text(encoding="utf-8")
+    assert (
+        "| shadow_progress | calibration_pairs=2/500 vwap_timing_shadow=1/50 "
+        "news_timing_shadow=1/300 sector_rank_shadow=2/3 gate_shadow_events=1/- "
+        "meta_labels=1/2000 |"
+    ) in out
+
+
+def test_alpaca_dispatch_today_scopes_venue_and_window(cfg: OpsConfig) -> None:
+    conn = _seed_db(cfg.db_path)
+    conn.execute(
+        "INSERT INTO signals (strategy_id, signal_id, instrument_id, direction,"
+        " score, thesis, ts) VALUES ('equity_bb_meanrev_15m', 'sig1',"
+        " 'alpaca:AAPL', 'long', 1.0, '', ?)", (DAY_START_MS // 1000 + 10,),
+    )
+    conn.execute(
+        "INSERT INTO signals (strategy_id, signal_id, instrument_id, direction,"
+        " score, thesis, ts) VALUES ('tsmom', 'sig2', 'okx:BTC-USDT', 'long',"
+        " 1.0, '', ?)", (DAY_START_MS // 1000 + 10,),
+    )
+    _entry_fill(conn, "a_open", contribution_id="a1", venue="alpaca",
+                strategy_id="equity_bb_meanrev_15m", ts_ms=DAY_START_MS + 500)
+    _entry_fill(conn, "a_open_out", contribution_id="a2", venue="alpaca",
+                strategy_id="equity_bb_meanrev_15m", ts_ms=DAY_START_MS - 500)
+    conn.commit()
+    conn.close()
+    assert daily_digest.run(cfg, now=NOW) == 0
+    out = (cfg.digest_dir / "2026-06-09.md").read_text(encoding="utf-8")
+    assert "| alpaca_dispatch_today | signals=1 opens=1 |" in out
+
+
+def test_kill_watch_100trade_gross_is_lifetime_not_windowed(cfg: OpsConfig) -> None:
+    conn = _seed_db(cfg.db_path)
+    _fill(conn, "k1", strategy_id="equity_bb_meanrev_15m", pnl=-3.0,
+          ts_ms=DAY_START_MS - 86_400_000)  # outside this digest's day window
+    _fill(conn, "k2", strategy_id="equity_bb_meanrev_15m", pnl=1.5,
+          ts_ms=DAY_START_MS + 100)
+    _fill(conn, "k3", strategy_id="equity_opening_range_breakout", pnl=2.0,
+          ts_ms=DAY_START_MS + 100)
+    conn.commit()
+    conn.close()
+    assert daily_digest.run(cfg, now=NOW) == 0
+    out = (cfg.digest_dir / "2026-06-09.md").read_text(encoding="utf-8")
+    assert (
+        "| kill_watch_100trade_gross | equity_bb_meanrev_15m=2/100(gross=-1.50) "
+        "equity_opening_range_breakout=1/100(gross=+2.00) |"
+    ) in out

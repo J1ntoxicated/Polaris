@@ -29,6 +29,33 @@ VENUE_ROWS = 4
 STRATEGY_ROWS = 12
 FAULT_ROWS = 5
 
+# W1 digest rollup (design-monitoring.md §E, behavior-0, read-only). Promotion
+# targets are SSOT'd in vault/50_research/frontgate-scan/experiment-roadmap.md
+# (backlink comment per row, never re-derived/hardcoded independently here —
+# CLAUDE.md mandate ②). ``gate_shadow_events`` is the shared AI-conductor P0
+# shadow backbone (no single dedicated row-count target across the 10
+# frontgate items) — target stays ``None``; promotion JUDGMENT itself is the
+# separate W3 promotion_tracker, this is a numbers-only progress readout.
+SHADOW_TARGETS: dict[str, int | None] = {
+    "calibration_pairs": 500,    # roadmap #4 Platt: pair >= 500
+    "vwap_timing_shadow": 50,    # roadmap #6: shadow entries >= 50
+    "news_timing_shadow": 300,   # roadmap #7: n >= 300 (ingestion-based IC)
+    "sector_rank_shadow": 3,     # roadmap #8: 3 리밸런스 주기 (COUNT DISTINCT cycle_ts, not rows)
+    "gate_shadow_events": None,  # shared backbone — no single target (W3 promotion_tracker)
+    "meta_labels": 2000,         # roadmap #10: pooled labels >= 2k (non-overlapping)
+}
+
+# 100-trade gross(price-only, fee-前) < 0 → unconditional KILL trigger, per
+# each strategy module's own OPS docstring note (polaris/strategies/
+# equity_bb_meanrev_15m.py + equity_opening_range_breakout.py) — "track this
+# in the daily digest gross rollup". Lifetime cumulative (the trigger counts
+# ALL trades since strategy birth, not a single UTC day).
+KILL_WATCH_STRATEGIES: tuple[str, ...] = (
+    "equity_bb_meanrev_15m",
+    "equity_opening_range_breakout",
+)
+KILL_WATCH_TRADE_TARGET = 100
+
 
 @dataclass
 class DigestData:
@@ -54,6 +81,18 @@ class DigestData:
     # this week's realized+unrealized PnL so far, per exchange. Empty when no
     # weekly_equity_curve row exists yet for the current week (graceful).
     weekly_pnl: list[tuple[str, float, float, int]] = field(default_factory=list)
+    # W1 rollup (design-monitoring.md §E) — (channel, n, target); n = lifetime
+    # row count (sector_rank_shadow: DISTINCT cycle_ts instead, see SHADOW_TARGETS).
+    shadow_progress: list[tuple[str, int, int | None]] = field(default_factory=list)
+    # Alpaca dispatch (signal emit) / entry (open fill) counts for THIS digest's
+    # UTC day window, venue-scoped. NOTE: scoped to venue=alpaca, not to a
+    # specific "new strategy" id list — no vault SSOT names which registry
+    # entries count as "신규" for this rollup, so venue scope is the
+    # numbers-only, non-interpretive proxy (flags this explicitly, not silent).
+    alpaca_dispatch_signals: int = 0
+    alpaca_dispatch_opens: int = 0
+    # 100-trade gross kill-trigger watch (lifetime): (strategy_id, closes, gross_usd).
+    kill_watch: list[tuple[str, int, float]] = field(default_factory=list)
 
 
 def _window(now: float) -> tuple[str, int, int]:
@@ -138,6 +177,35 @@ def _collect(
         (r.exchange, r.realized_pnl_usd, r.unrealized_pnl_usd, r.trades)
         for r in all_current_week_rows(conn, now_ts=now_ts)
     ]
+    # W1 shadow-channel progress (lifetime cumulative — SHADOW_TARGETS keys
+    # are a fixed literal set, never DB-borne, so f-string table names here
+    # carry no injection surface).
+    data.shadow_progress = []
+    for channel, target in SHADOW_TARGETS.items():
+        if channel == "sector_rank_shadow":
+            n = int(conn.execute(
+                "SELECT COUNT(DISTINCT cycle_ts) FROM sector_rank_shadow",
+            ).fetchone()[0])
+        else:
+            n = int(conn.execute(f"SELECT COUNT(*) FROM {channel}").fetchone()[0])
+        data.shadow_progress.append((channel, n, target))
+    # Alpaca dispatch/entry, this digest's UTC day window.
+    data.alpaca_dispatch_signals = int(conn.execute(
+        "SELECT COUNT(*) FROM signals WHERE instrument_id LIKE 'alpaca:%'"
+        " AND ts >= ? AND ts < ?", (start_s, end_s),
+    ).fetchone()[0])
+    data.alpaca_dispatch_opens = int(conn.execute(
+        "SELECT COUNT(*) FROM fills WHERE venue = 'alpaca' AND is_close = 0"
+        f" AND {window_where}", (start_ms, end_ms),
+    ).fetchone()[0])
+    # 100-trade gross kill-trigger watch (lifetime, not day-windowed).
+    data.kill_watch = []
+    for strategy_id in KILL_WATCH_STRATEGIES:
+        n, gross = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(pnl_usd), 0) FROM fills"
+            " WHERE is_close = 1 AND strategy_id = ?", (strategy_id,),
+        ).fetchone()
+        data.kill_watch.append((strategy_id, int(n), float(gross)))
 
 
 def _read_ops_files(cfg: OpsConfig, data: DigestData) -> None:
@@ -190,6 +258,23 @@ def render(data: DigestData) -> str:
         f"| wal_after_mb | {data.wal_after} |",
         f"| ops_alerts | {data.ops_alerts} |",
     ]
+    # W1 rollup rows (design-monitoring.md §E) — inserted before the optional
+    # sections below so they survive the MAX_LINES tail-truncation on a
+    # heavy day (the mandatory summary always renders; venue/strategy/fault/
+    # weekly breakdown rows are the ones that may get cut).
+    shadow_str = " ".join(
+        f"{ch}={n}/{t if t is not None else '-'}" for ch, n, t in data.shadow_progress
+    )
+    lines.append(f"| shadow_progress | {shadow_str} |")
+    lines.append(
+        "| alpaca_dispatch_today | signals="
+        f"{data.alpaca_dispatch_signals} opens={data.alpaca_dispatch_opens} |"
+    )
+    kill_str = " ".join(
+        f"{s}={n}/{KILL_WATCH_TRADE_TARGET}(gross={g:+.2f})"
+        for s, n, g in data.kill_watch
+    )
+    lines.append(f"| kill_watch_100trade_gross | {kill_str} |")
     if data.venues:
         lines += ["", "## Closes by venue",
                   "| venue | closes | pnl_usd_net | fees_usd |",

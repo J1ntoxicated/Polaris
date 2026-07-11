@@ -51,4 +51,65 @@ echo "log_last_ts=$(tail -1 "$LOG" 2>/dev/null | cut -c1-24)"
 # ⑥ equity (배포누적 — 고정 경계, 전체합산 아님)
 echo "equity_deploy_cum=$(Q "SELECT ROUND(SUM(pnl_usd),2) FROM fills WHERE ts_ms>$DEPLOY_MS;")"
 
+# ⑦ 섀도우 채널 건강 (behavior-0 계측 6종, read-only) — design:
+# vault/50_research/backgate-plan/design-monitoring.md W1 §A. 6채널 전부
+# created_ts(epoch초) 보유 — 위 $B 1h 경계 재사용. STALL = 평일(UTC 월-금)
+# 에 inc_1h=0 AND rows>0(이전엔 기록 있었음) — 주말은 세션 인지로 정상
+# (휴장-holiday 캘린더는 W1 범위 밖, 주말만 감지).
+DOW=$(date -u '+%u')  # 1=Mon..7=Sun
+if [ "$DOW" -le 5 ]; then IS_WEEKDAY=1; else IS_WEEKDAY=0; fi
+echo "is_weekday_utc=$IS_WEEKDAY"
+for CH in calibration_pairs vwap_timing_shadow news_timing_shadow sector_rank_shadow gate_shadow_events meta_labels; do
+    ROW=$(Q "SELECT COUNT(*), COALESCE(MAX(created_ts),0), COALESCE(SUM(CASE WHEN created_ts>$B THEN 1 ELSE 0 END),0) FROM $CH;")
+    if [ "$ROW" = "QUERY_FAIL" ]; then
+        echo "shadow_${CH}_rows=QUERY_FAIL"
+        echo "shadow_${CH}_age_s=QUERY_FAIL"
+        echo "shadow_${CH}_inc_1h=QUERY_FAIL"
+        echo "shadow_${CH}_stall=QUERY_FAIL"
+        continue
+    fi
+    IFS='|' read -r ROWS LAST_TS INC <<< "$ROW"
+    if [ "${LAST_TS:-0}" -gt 0 ] 2>/dev/null; then
+        AGE=$(( $(date -u +%s) - LAST_TS ))
+    else
+        AGE="NULL"
+    fi
+    STALL=0
+    if [ "$IS_WEEKDAY" = "1" ] && [ "${ROWS:-0}" -gt 0 ] 2>/dev/null && [ "${INC:-0}" = "0" ]; then
+        STALL=1
+    fi
+    echo "shadow_${CH}_rows=$ROWS"
+    echo "shadow_${CH}_age_s=$AGE"
+    echo "shadow_${CH}_inc_1h=$INC"
+    echo "shadow_${CH}_stall=$STALL"
+done
+
+# ⑧ 척후 피드 신선도 (log_scan 신선도 마커, design-monitoring.md W1 §C) —
+# 뉴스 최신 ingestion age / DFII10 최신 신호 age / momentum_z 최신 age.
+# 숫자만(age seconds) — stale 판정(임계값)은 사람+/debate 몫, 여기선 미판정.
+NOWS=$(date -u +%s)
+NEWS_TS=$(Q "SELECT MAX(ingestion_ts) FROM news_timing_shadow;")
+if [ "${NEWS_TS:-0}" -gt 0 ] 2>/dev/null; then
+    echo "feed_news_ingestion_age_s=$(( NOWS - NEWS_TS ))"
+else
+    echo "feed_news_ingestion_age_s=NULL"
+fi
+# DFII10 (#5 골드 컨빅션) 은 GOLD/XAUUSD 신호의 payload_json tags.dfii10 로만
+# 스탬프됨(persist_tags, signal_persist.py) — 별도 테이블 없음, signals.ts 재사용.
+DFII10_TS=$(Q "SELECT MAX(ts) FROM signals WHERE payload_json LIKE '%\"dfii10\"%';")
+if [ "${DFII10_TS:-0}" -gt 0 ] 2>/dev/null; then
+    echo "feed_dfii10_signal_age_s=$(( NOWS - DFII10_TS ))"
+else
+    echo "feed_dfii10_signal_age_s=NULL"
+fi
+# momentum_z (#3 XS-모멘텀) 는 universe.momentum_z UPDATE 자체엔 타임스탬프가
+# 없음 — sector_rank_shadow.created_ts 가 momentum_z 를 보유한 유일한 시각
+# 컬럼(위 ⑦의 shadow_sector_rank_shadow_age_s 와 동일 값, 의도적 재사용).
+MZ_TS=$(Q "SELECT MAX(created_ts) FROM sector_rank_shadow;")
+if [ "${MZ_TS:-0}" -gt 0 ] 2>/dev/null; then
+    echo "feed_momentum_z_age_s=$(( NOWS - MZ_TS ))"
+else
+    echo "feed_momentum_z_age_s=NULL"
+fi
+
 exit 0

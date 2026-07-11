@@ -1457,7 +1457,12 @@
   }
 
   // ── Sphere freeze watchdog ────────────────────────────────────────────────
+  // Guard (Jin 2026-07-11 "보드 블링킹 원인"): the globe moved to /flow on
+  // 2026-07-10, so on "/" __sphereHB never ticks — this watchdog then fired
+  // location.reload() every ~10s while the tab was visible: the entire
+  // "board keeps blinking" bug. Arm it only where the sphere engine loads.
   function startSphereWatchdog() {
+    if (!document.querySelector('script[src*="globe-core"]')) return;
     let lastHB = -1, stalledMs = 0, nudged = false;
     setInterval(function () {
       if (document.hidden) { stalledMs = 0; nudged = false; lastHB = window.__sphereHB || 0; return; }

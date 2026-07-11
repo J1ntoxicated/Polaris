@@ -423,14 +423,16 @@ def test_evidence_block_no_age_keys_is_unchanged() -> None:
 
 
 def test_evidence_block_graceful_when_no_evidence() -> None:
-    """A payload with no fused evidence / ground renders only the regime line.
+    """A payload with no fused evidence / ground renders only the regime +
+    frontgate lines.
 
     Mirrors the production hot path BEFORE the ticker-ground producer covers a
-    name: absent ``evidence`` / ``ticker_ground`` keys → graceful (no n/a crash,
-    no manufactured judgment), only the regime is surfaced.
+    name: absent ``evidence`` / ``ticker_ground`` keys → graceful (no crash, no
+    manufactured judgment), only regime + the n/a-padded frontgate scout line
+    are surfaced (backgate-plan W2(c) — ``_frontgate_line`` ALWAYS renders).
     """
     rendered = _evidence_block({"regime": "chop"})
-    assert rendered == "- regime: chop"
+    assert rendered == "- regime: chop\n- frontgate: rank=n/a news=n/a calib=n/a"
 
 
 # ── Allowlist-gap fix: max-expand altdata granular keys reach the judge ───────

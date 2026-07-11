@@ -43,6 +43,11 @@ PROBE_ROLE_REGISTRY: dict[str, ProbeRole] = {
     "loss_defense": "Exit",
     "session_hours": "Exit",
     "technical": "Position",
+    # W2 (backgate-plan design-exit-matrix.md §B) — RegimeFitProbe rides the
+    # SAME G6 exit attach as the other 4, observe-only (parallel SHADOW to the
+    # existing direct regime_fit/exit_tightness call in _production_tick_mfe;
+    # never double-tightens — observe mode threads zero knobs regardless).
+    "regime_fit": "Exit",
     # Entrance (Eligibility / G1) — EntranceJudge multi-lens judgment.
     "ent_liquidity": "Eligibility",
     "ent_atr": "Eligibility",

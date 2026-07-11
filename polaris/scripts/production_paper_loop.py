@@ -1443,6 +1443,9 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
     regime_hint = " ".join(
         f"{k}={n}" for k, n in sorted(state.regime_hint_stats.items())
     ) or "-"
+    regime_v2_crosstab = " ".join(
+        f"{k}={n}" for k, n in sorted(state.regime_v2_crosstab.items())
+    ) or "-"
     fields = [
         ("ticks", tick_idx),
         ("universe_refresh", f"okx={state.universe_refreshes} capital={state.capital_refreshes}"),
@@ -1475,6 +1478,9 @@ def _log_summary(state: ProdLoopState, tick_idx: int) -> None:
         ("closed_trades", len(state.closed_trades)),
         # Altdata hint instrumentation (in-memory counters; display only).
         ("regime_hint", regime_hint),
+        # regime v2 twinlight crosstab (design-regime-v2-rollout.md W2,
+        # behavior-0; in-memory counters, display only).
+        ("regime_v2_crosstab", regime_v2_crosstab),
     ]
     logger.info("=========== production paper loop summary ===========")
     for name, value in fields:

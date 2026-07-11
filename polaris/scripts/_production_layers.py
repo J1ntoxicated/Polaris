@@ -33,6 +33,7 @@ from polaris.core.altdata.fuser import fuse_evidence
 from polaris.core.data.schema import Bar
 from polaris.core.isolation.blocklist import load_blocklist
 from polaris.core.live_recalc.regime_flip import detect_regime_flip, fetch_regime
+from polaris.core.live_recalc.regime_v2 import classify_regime_v2
 from polaris.core.live_recalc.tick_recalc import (
     mark_position_dirty,
     run_live_recalc_cycle,
@@ -1419,6 +1420,7 @@ def compute_and_flip_regime(
     altdata_cache: Any = None,
     asset_class: str = "crypto",
     hint_stats: dict[str, int] | None = None,
+    regime_v2_crosstab: dict[str, int] | None = None,
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
@@ -1454,6 +1456,17 @@ def compute_and_flip_regime(
     REDUNDANT projection of the same evidence scores compose consumes
     (intentionally retired as an input — regime_layered debate 2026-05-31);
     these counters only measure that redundancy. Per-call DB writes: 0.
+
+    ``regime_v2_crosstab`` (W2 twinlight, design-regime-v2-rollout.md,
+    behavior-0): an in-memory ``"{v1_label}|{v2_label}"`` counter dict, same
+    pattern as ``hint_stats``. The regime v2 6-state SHADOW classifier
+    (``classify_regime_v2``) is computed off the SAME ``bars`` and recorded to
+    ``regime_state.regime_v2`` bare alongside this call's v1 SSOT write — it
+    has ZERO consumers until the W4 flip ladder and is wrapped in its own
+    fail-open ``_safe_record_regime_v2_shadow`` (the ``_safe_lookup_regime``
+    degrade pattern replicated per the design doc): any failure there is
+    logged and swallowed, never altering the v1 label this function returns.
+    Default ``None`` → no counter, byte-identical to every pre-W2 caller.
     """
     price_candidate, price_strength, _price_ev = compute_real_regime_signal(
         bars, asset_class=asset_class
@@ -1525,7 +1538,44 @@ def compute_and_flip_regime(
             "[L6/regime] flip %s/%s → %s (%s)",
             venue, underlying_group_id, persisted, decision.reason,
         )
+    _safe_record_regime_v2_shadow(
+        conn, venue=venue, underlying_group_id=underlying_group_id, bars=bars,
+        v1_label=persisted, crosstab=regime_v2_crosstab,
+    )
     return persisted
+
+
+def _safe_record_regime_v2_shadow(
+    conn: sqlite3.Connection,
+    *,
+    venue: str,
+    underlying_group_id: str,
+    bars: Sequence[Bar],
+    v1_label: str,
+    crosstab: dict[str, int] | None,
+) -> None:
+    """W2 twinlight (design-regime-v2-rollout.md) — compute + persist the
+    regime v2 6-state SHADOW label alongside the v1 SSOT, fully fail-open.
+
+    ``_safe_lookup_regime`` degrade-pattern replica (mandated by the design
+    doc): ANY failure (classify raises on a pathological bar list, the
+    ``regime_v2`` column missing on a pre-migration DB, a locked row, ...) is
+    logged and swallowed here — it can NEVER propagate into
+    ``compute_and_flip_regime``'s v1 return value. behavior-0: this call has
+    no bearing on which regime the rest of the pipeline sees.
+    """
+    try:
+        v2_label = classify_regime_v2(bars)
+        conn.execute(
+            "UPDATE regime_state SET regime_v2 = ? "
+            "WHERE venue = ? AND underlying_group_id = ?",
+            (v2_label, venue, underlying_group_id),
+        )
+        if crosstab is not None:
+            key = f"{v1_label}|{v2_label}"
+            crosstab[key] = crosstab.get(key, 0) + 1
+    except Exception as exc:  # noqa: BLE001 — shadow twinlight, never blocks v1
+        logger.error("[L6/regime_v2] shadow classify/record failed: %r", exc)
 
 
 async def run_recalc_for_active_positions(

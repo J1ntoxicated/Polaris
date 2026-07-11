@@ -79,6 +79,17 @@ PROBE_DDL: tuple[str, ...] = (
         mark_source      TEXT,
         mark_age_ms      INTEGER,
         exit_state       TEXT,
+        -- regime — frontgate consumption SHADOW (backgate-plan W2-d, vault/
+        -- 50_research/backgate-plan/design-exit-matrix.md §A). ``log_probe_
+        -- decisions`` now writes ``ProbeContext.regime`` (구 4라벨) here for
+        -- every caller that threads it (the production observe_probes attach
+        -- does). NULL = legacy/un-stamped row (pre-fix rows, or a caller that
+        -- omits the kwarg). PURE TELEMETRY: no runtime consumer reads this
+        -- column. The OFFLINE calibrator (core/probes/calibration.py) does
+        -- NOT read it yet this wave — it still hardcodes regime='unknown'
+        -- (deferred split, W3) — so the producer/consumer wiring is only
+        -- half-done; do not re-claim "unblocks the split" until W3 lands.
+        regime           TEXT,
         -- Hardening #6 (2026-06-23): the R unit of every R column on this row.
         -- The probe path's pnl_r / mfe_r / mae_r AND the backfilled outcome R
         -- (realized_pnl_r / mfe_r_final / mae_r_final / giveback_r) are ALL the
@@ -176,6 +187,12 @@ def open_probe_db(path: str | Path) -> sqlite3.Connection:
             "ALTER TABLE probe_decisions "
             "ADD COLUMN unit_tag TEXT NOT NULL DEFAULT 'excursion'"
         )
+    # backgate-plan W2-d (vault/50_research/backgate-plan/design-exit-matrix.md
+    # §A): idempotent ADD COLUMN for the regime frontgate-consumption SHADOW on
+    # an EXISTING probe DB. NULL on legacy rows — PURE TELEMETRY, unblocks the
+    # OFFLINE calibrator's regime split only (see calibration.py note).
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("ALTER TABLE probe_decisions ADD COLUMN regime TEXT")
     # Hardening #11 (2026-06-23): idempotent ADD COLUMN for the AI-escalation
     # observe-only seam on an EXISTING probe DB. ``ambiguous`` DEFAULT 0 leaves
     # legacy/backfilled rows un-flagged (not retro-escalated); deadband_margin /
@@ -248,11 +265,15 @@ def log_probe_decisions(
     mark_age_ms: int,
     exit_state: str,
     eval_id: str | None = None,
+    regime: str | None = None,
 ) -> None:
     """Append one ``probe_decisions`` row (FAIL-OPEN, outcome cols NULL).
 
     No-op when ``conn`` is None / the table is absent / any sqlite error.
     ``applied`` is persisted as INT (False → 0) — in observe mode it is always 0.
+    ``regime`` (backgate-plan W2-d) is the caller's ``ProbeContext.regime`` at
+    evaluation time; ``None`` (the default for un-stamped callers) persists as
+    NULL — unchanged legacy semantics (see the DDL comment on this column).
     """
     if conn is None:
         return
@@ -271,8 +292,8 @@ def log_probe_decisions(
             " composite_lean, action, trail_mult, mfe_protect_json, "
             " widen_atr_mult, profit_target_r, applied, pnl_r_at_decision, "
             " pnl_r_truth, mark_source, mark_age_ms, exit_state, unit_tag, "
-            " ambiguous, deadband_margin, quantizer_version) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " ambiguous, deadband_margin, quantizer_version, regime) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 uuid.uuid4().hex,
                 eval_id if eval_id is not None else uuid.uuid4().hex,
@@ -287,6 +308,8 @@ def log_probe_decisions(
                 # Hardening #11: observe-only escalation-seam telemetry.
                 1 if decision.ambiguous else 0, decision.deadband_margin,
                 QUANTIZER_VERSION,
+                # backgate-plan W2-d: NULL when the caller has no regime yet.
+                None if regime is None else str(regime),
             ),
         )
 

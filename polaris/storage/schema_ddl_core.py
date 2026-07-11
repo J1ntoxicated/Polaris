@@ -413,7 +413,16 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_regime TEXT,
     exit_cadence TEXT,
     stop_atr_mult REAL,
-    seed_tag TEXT NOT NULL DEFAULT ''
+    seed_tag TEXT NOT NULL DEFAULT '',
+    -- entry_regime_v2 — regime v2 twinlight SHADOW (backgate-plan W2-d,
+    -- vault/50_research/backgate-plan/design-regime-v2-rollout.md). The 6-state
+    -- v2 label (direction up/down/flat x volatility normal/expansion) stamped
+    -- at OPEN, bare alongside entry_regime (구 4라벨) which stays the sole
+    -- canonical behavior key — this column is NEVER read by sizing/gating/exit
+    -- until it clears the flip-ladder (master-sequence.md flip stage 1).
+    -- ADDITIVE: nullable TEXT, NULL = legacy/unstamped row. Idempotent guard
+    -- in _apply_post_migrations.
+    entry_regime_v2 TEXT
 );
 """
 

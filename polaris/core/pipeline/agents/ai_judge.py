@@ -76,6 +76,7 @@ __all__ = [
     "apply_entry_verdict",
     "apply_exit_verdict",
     "judge_entry",
+    "judge_escalation_candidate",
     "judge_exit",
     "judge_wall_clock_deadline_sec",
     "parse_entry_verdict",
@@ -307,6 +308,33 @@ def _macro_panel_line(evidence: dict[str, Any]) -> str | None:
     return f"- macro panel (curated): {', '.join(parts)}"
 
 
+# backgate-plan W2(c) (vault/50_research/backgate-plan/design-brain-ai.md
+# "컨텍스트 주입" + master-sequence.md dependency graph #3/#4/#7 ->
+# "_frontgate_line 컨텍스트 (brain)"). Producer wiring for each key lands in
+# its OWN later wave: #3 rank = W0 ``universe.rank_score_shadow`` threading,
+# #4 calib = calibration Platt-fit promotion, #7 news = news_scalar product
+# slot (design-sizer.md). This consumer reads whatever the payload carries
+# TODAY; zero new GPT calls (pure string formatter folded into the EXISTING
+# ``_evidence_block``, already sent on every judge_entry/judge_exit call).
+def _frontgate_line(payload: dict[str, Any]) -> str:
+    """One-line scout/rank/calibration context for the judge prompt.
+
+    Absent data -> ``n/a`` per key (never a block, never a fabricated value).
+    Unlike the optional ``technicals``/``cell`` blocks (which OMIT the line
+    entirely when absent), this line ALWAYS renders — the judge sees
+    explicitly that a scout channel is not yet wired rather than the line
+    silently disappearing (design-brain-ai.md's deliberate "n/a 패턴" choice).
+    """
+    rank = payload.get("frontgate_rank")
+    news = payload.get("frontgate_news_conviction")
+    calib = payload.get("frontgate_calibrated_p")
+    return (
+        f"- frontgate: rank={rank if rank is not None else 'n/a'} "
+        f"news={news if news is not None else 'n/a'} "
+        f"calib={calib if calib is not None else 'n/a'}"
+    )
+
+
 def _evidence_block(payload: dict[str, Any]) -> str:
     """Render the bot's own per-ticker information for the judge prompt.
 
@@ -315,6 +343,7 @@ def _evidence_block(payload: dict[str, Any]) -> str:
     fear-greed from ``altdata.fuser``), the ticker baseline (ATR / size / volume
     technicals), cell expectancy, and ground coverage flags. All optional — a
     missing source renders as ``n/a`` (graceful, never a manufactured judgment).
+    The frontgate scout line (rank/news/calib) ALWAYS renders (n/a-padded).
     """
     regime = payload.get("regime", "n/a")
     evidence = payload.get("evidence")
@@ -322,7 +351,7 @@ def _evidence_block(payload: dict[str, Any]) -> str:
     technicals = payload.get("technicals")
     cell = payload.get("cell_routing")
     ground = payload.get("ticker_ground")
-    lines = [f"- regime: {regime}"]
+    lines = [f"- regime: {regime}", _frontgate_line(payload)]
     if isinstance(evidence, dict) and evidence:
         # Consume the keys ``altdata.fuser.fuse_evidence`` ACTUALLY emits (there is
         # no ``news_headline`` key — that was a dead read). ``label``/``scores`` are
@@ -720,6 +749,35 @@ def apply_exit_verdict(
 
 
 # ---------------------------------------------------------------------------
+# mini->5.5 escalation C-predicate — SHADOW COUNT ONLY (backgate-plan W2(c)).
+# design-brain-ai.md "mini→5.5 2단 에스컬레이션": W2 defines the predicate and
+# counts how often it fires; W5 (conditional on the measured shadow rate +
+# a fire-rate cap + a cost cap [R1-B3]) is the ONLY wave allowed to actually
+# route a call to gpt-5.5. Nothing here ever makes a second GPT call.
+# ---------------------------------------------------------------------------
+
+# Escalation reasons that mean the mini call did NOT return a clean parsed
+# verdict — parse-fallback / wall-clock timeout / truncation-salvaged. The
+# [[judge-probe-reality]] audit already measured gpt_parse_fallback at 10.6%
+# (984/9,327), tying these reasons to degraded verdict quality. ``gpt_ok``
+# (clean) and ``no_client`` (no call made — nothing to escalate FROM) are
+# excluded.
+_C_PREDICATE_DEGRADED_REASONS: Final[frozenset[str]] = frozenset(
+    {"gpt_parse_fallback", "gpt_timeout", "gpt_ok_salvaged"}
+)
+
+
+def judge_escalation_candidate(outcome: JudgeOutcome) -> bool:
+    """C-predicate: would this mini call be a mini→5.5 escalation candidate?
+
+    SHADOW COUNT ONLY — never triggers an actual gpt-5.5 call (that routing
+    is W5-conditional). Callers persist the result via ``log_judge_event``'s
+    ``c_predicate:<0|1>`` flag so the W5 measurement has data to look at.
+    """
+    return outcome.escalation_reason in _C_PREDICATE_DEGRADED_REASONS
+
+
+# ---------------------------------------------------------------------------
 # Measurement — judge-vs-deterministic + pass-through, via gate_shadow_events.
 # ---------------------------------------------------------------------------
 
@@ -738,10 +796,12 @@ def log_judge_event(
     judge verdict against the deterministic decision AND track pass-through
     preservation (the debate's "pass-through preservation을 추적 metric으로"). The
     judge VERDICT is recorded in ``technical_flags`` (``judge:<verdict>`` +
-    ``mode:<mode>`` + ``escalation:<reason>``); ``technical_decision`` is the
-    deterministic decision that the live loop actually acts on in shadow mode —
-    so a row where the judge logged but the deterministic decision flowed IS the
-    pass-through evidence. No-op when ``conn`` is None / table absent.
+    ``mode:<mode>`` + ``escalation:<reason>`` + ``c_predicate:<0|1>`` — the W2(c)
+    mini→5.5 escalation shadow count, see ``judge_escalation_candidate``);
+    ``technical_decision`` is the deterministic decision that the live loop
+    actually acts on in shadow mode — so a row where the judge logged but the
+    deterministic decision flowed IS the pass-through evidence. No-op when
+    ``conn`` is None / table absent.
     """
     if conn is None:
         return
@@ -760,6 +820,7 @@ def log_judge_event(
                 f"judge:{outcome.verdict}",
                 f"mode:{mode}",
                 f"escalation:{outcome.escalation_reason}",
+                f"c_predicate:{int(judge_escalation_candidate(outcome))}",
             ),
         ),
         # No GPT GateDecision to compare (the judge has its own verdict type) —

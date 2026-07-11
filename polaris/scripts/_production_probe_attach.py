@@ -21,9 +21,11 @@ import sqlite3
 import uuid
 from typing import TYPE_CHECKING
 
+from polaris.core.live_recalc.exit_engine import Bucket, bucket_from_correlation_group
 from polaris.core.probes import ProbeContext
 from polaris.core.probes.tuning_log import log_probe_decisions, log_probe_readings
 from polaris.core.streams import resolve_stream
+from polaris.strategies import STRATEGY_REGISTRY
 from polaris.venues.capital.session_calendar import capital_seconds_to_close
 
 if TYPE_CHECKING:
@@ -58,6 +60,7 @@ def wire_probe_sidecar(state: ProdLoopState, *, probe_db_path: str) -> None:
     from polaris.core.probes.catalog import (  # noqa: PLC0415
         LossDefenseProbe,
         ProfitTakingProbe,
+        RegimeFitProbe,
         SessionHoursProbe,
         TechnicalProbe,
     )
@@ -67,7 +70,7 @@ def wire_probe_sidecar(state: ProdLoopState, *, probe_db_path: str) -> None:
         state.probe_conn = open_probe_db(probe_db_path)
         state.probe_bus = ProbeBus(
             [ProfitTakingProbe(), LossDefenseProbe(), TechnicalProbe(),
-             SessionHoursProbe()]
+             SessionHoursProbe(), RegimeFitProbe()]
         )
         state.probe_engine = ExitEngine()
         logger.info(
@@ -97,6 +100,26 @@ def _seconds_to_close(venue: str, now_ts: int) -> int | None:
     # session-calendar driver). always_on / unknown → None inside the helper.
     asset_class = next(iter(stream.asset_classes), "")
     return capital_seconds_to_close(asset_class, now_ts)
+
+
+def _signal_family_for_strategy(strategy_id: str) -> str:
+    """Regime-fit family for ``strategy_id`` — "reversion" | "momentum".
+
+    Mirrors the SAME entry-side derivation ``_sizer_payload`` uses
+    (``bucket_from_correlation_group`` off the strategy's registered
+    ``correlation_group_id``): REVERSION bucket → "reversion", else
+    "momentum" (an unregistered id, e.g. a tick-engine id such as
+    ``micro_reversion``, is NOT in ``STRATEGY_REGISTRY``, which mirrors
+    ``exit_strategy_config``'s own TREND/"momentum" default — flow_not_block:
+    never guess adverse). Callers that already track the TRUE per-position
+    family (the tick engine's ``family_by_position``) pass it explicitly
+    instead of relying on this fallback.
+    """
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return "momentum"
+    bucket = bucket_from_correlation_group(cls.metadata.correlation_group_id)
+    return "reversion" if bucket is Bucket.REVERSION else "momentum"
 
 
 def _excursion_r(
@@ -135,6 +158,7 @@ def observe_probes(
     now_ts: int,
     run_id: str,
     mark_source: str = "bar",
+    signal_family: str | None = None,
 ) -> None:
     """Run the probe → engine → tuning-log triple in OBSERVE mode (fail-open).
 
@@ -147,6 +171,17 @@ def observe_probes(
     ``'bar'`` (the bar recalc pass, the default) or ``'tick'`` (the tick exit
     pass). The tick attach is the SAME observe-only sidecar: it threads NOTHING
     into ``run_precise_exit`` and never enters the FSM critical section.
+
+    W2 (RegimeFitProbe, design-exit-matrix.md §B): ``signal_family`` is
+    CALLER-supplied when already tracked (the tick engine's
+    ``family_by_position`` — the only source that knows the TRUE family for a
+    tick-engine strategy such as ``micro_reversion``). ``None`` (the bar-path
+    default) derives it from the position's registered strategy instead
+    (``_signal_family_for_strategy``) — imprecise ONLY for a tick-engine
+    position observed on the BAR cadence (no registry entry to resolve), the
+    SAME imprecision the live ``_production_tick_mfe`` harvest schedule already
+    accepts by hardcoding "momentum". Either way this is PURE OBSERVE telemetry
+    — it never reaches a live knob.
     """
     bus = getattr(state, "probe_bus", None)
     engine = getattr(state, "probe_engine", None)
@@ -160,6 +195,11 @@ def observe_probes(
             denom_pct=max(denom_pct, 1e-4),
         )
         recent = pos.get("recent_ticks", [])
+        family = signal_family if signal_family is not None else (
+            _signal_family_for_strategy(
+                str(pos.get("active_strategy_id") or pos.get("strategy") or "")
+            )
+        )
         ctx = ProbeContext(
             position_id=str(pos["position_id"]),
             venue=str(pos["venue"]),
@@ -181,6 +221,7 @@ def observe_probes(
             regime=regime,
             now_ts=now_ts,
             seconds_to_close=_seconds_to_close(str(pos["venue"]), now_ts),
+            signal_family=family,
         )
         readings = bus.observe(ctx)
         decision = engine.compose(readings, mode="observe")
@@ -202,7 +243,7 @@ def observe_probes(
             probe_conn, ts=now_ts, run_id=run_id, position_id=ctx.position_id,
             mode="observe", decision=decision, pnl_r_at_decision=pnl_r,
             pnl_r_truth=pnl_r, mark_source=mark_source, mark_age_ms=0,
-            exit_state=ctx.exit_state, eval_id=eval_id,
+            exit_state=ctx.exit_state, eval_id=eval_id, regime=ctx.regime,
         )
         state.probe_observe_evals = getattr(state, "probe_observe_evals", 0) + 1
     except Exception as exc:  # noqa: BLE001 — observe sidecar must never break the tick

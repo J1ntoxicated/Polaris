@@ -334,11 +334,16 @@ async def _run_exits(
         # fully fail-open — a None sidecar / raising probe / fail-open writer
         # never breaks the tick. The hard rails BYPASS this framework. This is
         # the dataset the rank-4 / rank-16 calibration readers consume.
+        # signal_family=_ex_family (W2, RegimeFitProbe): the tick engine's own
+        # tracked family — the authoritative source for a tick strategy such as
+        # micro_reversion, which observe_probes' registry-only fallback cannot
+        # resolve (tick-engine ids are not in STRATEGY_REGISTRY).
         observe_probes(
             state=state, pos=pos, side=trade.side, entry_price=entry_price,
             last_price=last_mid, atr_pct=max(atr_pct, 1e-4),
             entry_atr_pct=entry_atr_pct, pnl_r=pnl_r, held_seconds=held_seconds,
             regime=tick_regime or "chop", now_ts=now_ts, run_id=uuid.uuid4().hex,
+            signal_family=_ex_family,
             mark_source="tick",
         )
         closed = await run_precise_exit(

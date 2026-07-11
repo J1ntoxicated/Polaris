@@ -140,6 +140,7 @@ def _wire_probes(state: ProdLoopState, probe_db: str) -> None:
     from polaris.core.probes.catalog import (
         LossDefenseProbe,
         ProfitTakingProbe,
+        RegimeFitProbe,
         SessionHoursProbe,
         TechnicalProbe,
     )
@@ -147,7 +148,7 @@ def _wire_probes(state: ProdLoopState, probe_db: str) -> None:
     state.probe_conn = open_probe_db(probe_db)
     state.probe_bus = ProbeBus(
         [ProfitTakingProbe(), LossDefenseProbe(), TechnicalProbe(),
-         SessionHoursProbe()]
+         SessionHoursProbe(), RegimeFitProbe()]
     )
     state.probe_engine = ExitEngine()
 

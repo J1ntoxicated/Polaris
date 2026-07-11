@@ -50,6 +50,7 @@ from polaris.core.isolation.order_keys import (
 )
 from polaris.core.lineage import record_segment_open
 from polaris.core.live_recalc.regime_flip import fetch_regime
+from polaris.core.live_recalc.regime_v2 import fetch_regime_v2
 from polaris.core.metrics.risk_unit import risk_usd_at_entry
 from polaris.core.sizing.constants import OKX_DEMO_STARTING_EQUITY_USD
 from polaris.core.streams import derive_leverage, resolve_stream
@@ -765,6 +766,15 @@ async def reserve_and_submit(
         fetch_regime(conn, venue=venue, underlying_group_id=underlying_group_id)
         or ""
     )
+    # regime v2 twinlight (design-regime-v2-rollout.md W2, behavior-0) —
+    # entry_regime_v2 bare alongside entry_regime (구 4라벨), NEVER read by
+    # sizing/gating/exit until the W4 flip ladder. fetch_regime_v2 is
+    # internally fail-open (_safe_lookup replica) → None on any read failure
+    # (pre-migration DB / locked row), stamping NULL — the SAME degrade
+    # entry_regime already has for unseeded legacy rows.
+    open_regime_v2 = fetch_regime_v2(
+        conn, venue=venue, underlying_group_id=underlying_group_id
+    )
     try:
         # autocommit-mode connection (init_db uses isolation_level=None) —
         # explicit BEGIN+COMMIT is an atomic boundary in SQLite. ROLLBACK
@@ -775,14 +785,15 @@ async def reserve_and_submit(
             "(position_id, venue, symbol, underlying_group_id, signal_id, "
             " strategy_id, entry_strategy_id, active_strategy_id, side, qty, "
             " status, opened_ts, swap_count, deal_id, entry_atr_pct, "
-            " entry_atr_timeframe, risk_usd, entry_regime, seed_tag) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, ?, ?)",
+            " entry_atr_timeframe, risk_usd, entry_regime, seed_tag, "
+            " entry_regime_v2) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 0, ?, ?, ?, ?, ?, ?, ?)",
             (
                 position_id, venue, symbol, underlying_group_id, sig.signal_id,
                 sig.strategy_id, sig.strategy_id, sig.strategy_id, sig.side,
                 entry_base_qty,
                 now_ts, trade.deal_id, entry_atr_pct, entry_atr_timeframe,
-                risk_usd, open_regime, sig.seed_tag,
+                risk_usd, open_regime, sig.seed_tag, open_regime_v2,
             ),
         )
         # contribution_id ties the entry fill back to the position so the

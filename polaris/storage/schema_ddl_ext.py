@@ -584,6 +584,13 @@ CREATE TABLE IF NOT EXISTS regime_state (
     consecutive_candidate TEXT,
     consecutive_count INTEGER NOT NULL DEFAULT 0,
     last_advanced_bar_id INTEGER,
+    -- regime_v2 — regime v2 twinlight SHADOW (backgate-plan W2-d, vault/
+    -- 50_research/backgate-plan/design-regime-v2-rollout.md). 6-state label
+    -- (direction up/down/flat x volatility normal/expansion) bare alongside
+    -- ``regime`` (구 4라벨, unchanged canonical behavior key). NEVER read by
+    -- live routing/gating/exit until it clears the flip-ladder. ADDITIVE:
+    -- nullable TEXT, NULL = not-yet-classified row.
+    regime_v2 TEXT,
     updated_ts INTEGER NOT NULL,
     PRIMARY KEY (venue, underlying_group_id)
 );

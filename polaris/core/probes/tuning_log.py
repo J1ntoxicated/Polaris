@@ -79,6 +79,14 @@ PROBE_DDL: tuple[str, ...] = (
         mark_source      TEXT,
         mark_age_ms      INTEGER,
         exit_state       TEXT,
+        -- regime — frontgate consumption SHADOW (backgate-plan W2-d, vault/
+        -- 50_research/backgate-plan/design-exit-matrix.md §A). ProbeContext
+        -- already carries ``regime`` (구 4라벨) at evaluation time but it was
+        -- never persisted here, so the OFFLINE calibrator (core/probes/
+        -- calibration.py) degrades every group to regime='unknown'. NULL =
+        -- legacy/un-stamped row. PURE TELEMETRY: no runtime consumer reads
+        -- this column; it only unblocks the OFFLINE calibration split.
+        regime           TEXT,
         -- Hardening #6 (2026-06-23): the R unit of every R column on this row.
         -- The probe path's pnl_r / mfe_r / mae_r AND the backfilled outcome R
         -- (realized_pnl_r / mfe_r_final / mae_r_final / giveback_r) are ALL the
@@ -176,6 +184,12 @@ def open_probe_db(path: str | Path) -> sqlite3.Connection:
             "ALTER TABLE probe_decisions "
             "ADD COLUMN unit_tag TEXT NOT NULL DEFAULT 'excursion'"
         )
+    # backgate-plan W2-d (vault/50_research/backgate-plan/design-exit-matrix.md
+    # §A): idempotent ADD COLUMN for the regime frontgate-consumption SHADOW on
+    # an EXISTING probe DB. NULL on legacy rows — PURE TELEMETRY, unblocks the
+    # OFFLINE calibrator's regime split only (see calibration.py note).
+    with contextlib.suppress(sqlite3.OperationalError):
+        conn.execute("ALTER TABLE probe_decisions ADD COLUMN regime TEXT")
     # Hardening #11 (2026-06-23): idempotent ADD COLUMN for the AI-escalation
     # observe-only seam on an EXISTING probe DB. ``ambiguous`` DEFAULT 0 leaves
     # legacy/backfilled rows un-flagged (not retro-escalated); deadband_margin /

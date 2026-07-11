@@ -43,6 +43,62 @@ def test_ddl_is_idempotent() -> None:
     conn.close()
 
 
+def test_regime_column_exists_on_fresh_probe_db(tmp_path: object) -> None:
+    """probe_decisions.regime (backgate-plan W2-d frontgate-consumption
+    SHADOW) present + nullable on a fresh sidecar init."""
+    conn = open_probe_db(f"{tmp_path}/probes.sqlite")
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(probe_decisions)")}
+    assert "regime" in cols
+    conn.close()
+
+
+def test_regime_column_legacy_probe_db_gets_alter_idempotent(tmp_path: object) -> None:
+    """A legacy probe_decisions table (every pre-existing column, no ``regime``)
+    is ALTERed in place by ``open_probe_db``; re-opening is safe (duplicate-
+    column guarded). Mirrors the full pre-migration shape — ``v_probe_outcomes``
+    is created in the SAME ``PROBE_DDL`` pass and reads every outcome column, so
+    a legacy fixture must carry them all (not just the columns this test touches)."""
+    db = f"{tmp_path}/legacy_probes.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE probe_decisions ("
+        "decision_id TEXT PRIMARY KEY, eval_id TEXT NOT NULL, ts INTEGER NOT NULL, "
+        "run_id TEXT NOT NULL, position_id TEXT NOT NULL, mode TEXT NOT NULL, "
+        "composite_lean REAL NOT NULL, action TEXT NOT NULL, trail_mult REAL, "
+        "mfe_protect_json TEXT, widen_atr_mult REAL, profit_target_r REAL, "
+        "applied INTEGER NOT NULL DEFAULT 0, pnl_r_at_decision REAL, "
+        "pnl_r_truth REAL, mark_source TEXT, mark_age_ms INTEGER, "
+        "exit_state TEXT, unit_tag TEXT NOT NULL DEFAULT 'excursion', "
+        "ambiguous INTEGER NOT NULL DEFAULT 0, deadband_margin REAL, "
+        "quantizer_version TEXT, realized_pnl_r REAL, close_reason TEXT, "
+        "mfe_r_final REAL, mae_r_final REAL, giveback_r REAL, "
+        "time_to_exit_sec INTEGER, outcome_ts INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO probe_decisions (decision_id, eval_id, ts, run_id, "
+        "position_id, mode, composite_lean, action, applied) VALUES "
+        "('d1', 'e1', 1000, 'r1', 'p1', 'observe', 0.0, 'HOLD', 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = open_probe_db(db)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(probe_decisions)")}
+        assert "regime" in cols, "missing regime after migrate"
+        row = conn.execute(
+            "SELECT regime FROM probe_decisions WHERE decision_id = 'd1'"
+        ).fetchone()
+        assert row[0] is None, "legacy row must backfill regime to NULL"
+        conn.close()
+        conn = open_probe_db(db)  # re-opening (re-running the ALTER) must not raise
+        assert "regime" in {
+            row[1] for row in conn.execute("PRAGMA table_info(probe_decisions)")
+        }
+    finally:
+        conn.close()
+
+
 def test_log_readings_persists(tmp_path: object) -> None:
     conn = open_probe_db(f"{tmp_path}/probes.sqlite")
     readings = [

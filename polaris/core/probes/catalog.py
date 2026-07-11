@@ -12,6 +12,13 @@ inputs are absent. A probe ONLY describes (signed ``lean`` + ``confidence`` +
     (favorable) vs exhaustion (adverse) lean.
   * **SessionHoursProbe** — TIME ONLY: ``seconds_to_close`` → adverse lean that
     grows as the session close nears. Never reads pnl.
+  * **RegimeFitProbe** (W2, backgate-plan design-exit-matrix.md §B) —
+    ``regime_fit(signal_family, regime)`` as a composite-lean SHADOW: the SAME
+    deterministic (family × regime) table already applied directly in
+    ``_production_tick_mfe`` (harvest/protect rungs), now also observed here so
+    the offline calibrator can compare it against realized outcomes. Parallel
+    SHADOW, not a replacement — observe mode threads zero knobs either way, so
+    this can never double-tighten the live exit (§ conflict-resolution ④).
 """
 
 from __future__ import annotations
@@ -23,10 +30,12 @@ from polaris.core.probes import (
     ProbeRole,
     _clamp,
 )
+from polaris.core.regime_fit import regime_fit
 
 __all__ = [
     "LossDefenseProbe",
     "ProfitTakingProbe",
+    "RegimeFitProbe",
     "SessionHoursProbe",
     "TechnicalProbe",
 ]
@@ -173,4 +182,34 @@ class SessionHoursProbe:
             lean=lean,
             confidence=confidence,
             evidence={"seconds_to_close": int(secs)},
+        )
+
+
+class RegimeFitProbe:
+    """``regime_fit(signal_family, regime)`` as a composite-lean SHADOW (W2).
+
+    Deterministic — a real (family, regime) table hit is FULL confidence (the
+    fit is exact, not a noisy estimate); an unrecognised family or unknown/None
+    regime degrades to ``regime_fit`` neutral (``0.0``), which ABSTAINs here
+    rather than injecting a false-confident zero into the composite.
+    """
+
+    probe_id: str = "regime_fit"
+    kind: ProbeKind = "regime"
+    role: ProbeRole = "Exit"  # SSOT: PROBE_ROLE_REGISTRY (W2)
+
+    def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
+        fit = regime_fit(ctx.signal_family, ctx.regime)
+        if fit == 0.0:
+            return None  # unrecognised family / unknown regime → ABSTAIN
+        return ProbeReading(
+            probe_id=self.probe_id,
+            kind=self.kind,
+            lean=_clamp(fit, -1.0, 1.0),
+            confidence=1.0,
+            evidence={
+                "signal_family": ctx.signal_family,
+                "regime": ctx.regime,
+                "fit": round(fit, 4),
+            },
         )

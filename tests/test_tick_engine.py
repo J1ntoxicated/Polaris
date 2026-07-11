@@ -1446,6 +1446,7 @@ def _wire_tick_probes(state: ProdLoopState, probe_db: str) -> None:
     from polaris.core.probes.catalog import (
         LossDefenseProbe,
         ProfitTakingProbe,
+        RegimeFitProbe,
         SessionHoursProbe,
         TechnicalProbe,
     )
@@ -1454,7 +1455,7 @@ def _wire_tick_probes(state: ProdLoopState, probe_db: str) -> None:
     state.probe_conn = open_probe_db(probe_db)  # type: ignore[attr-defined]
     state.probe_bus = ProbeBus(  # type: ignore[attr-defined]
         [ProfitTakingProbe(), LossDefenseProbe(), TechnicalProbe(),
-         SessionHoursProbe()]
+         SessionHoursProbe(), RegimeFitProbe()]
     )
     state.probe_engine = ExitEngine()  # type: ignore[attr-defined]
 

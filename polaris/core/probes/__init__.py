@@ -55,8 +55,9 @@ __all__ = [
 # strategy-swap producer actually exists.
 EngineAction = Literal["HOLD", "WIDEN", "TIGHTEN", "HARVEST"]
 EngineMode = Literal["observe", "trail_only", "full"]
-# Probe kinds shipped in Slice 1 (news / regime / COT land in later slices).
-ProbeKind = Literal["technical", "volume", "session", "loss", "profit"]
+# Probe kinds shipped in Slice 1 + the W2 regime-fit shadow (news / COT land
+# in later slices).
+ProbeKind = Literal["technical", "volume", "session", "loss", "profit", "regime"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +94,21 @@ class ProbeContext:
     # the session probe ABSTAINS). Precomputed at the attach site so the probe
     # stays pure / sync / zero-fetch.
     seconds_to_close: int | None = None
+    # W2 (backgate-plan design-exit-matrix.md §B) — RegimeFitProbe's family
+    # input: "momentum" | "reversion", CALLER-supplied (mirrors the entrance
+    # judge's caller-supplied regime_lean) since only the attach site knows the
+    # position's strategy. Default "momentum" preserves the pre-W2 degenerate
+    # shape for any caller that does not yet supply it.
+    signal_family: str = "momentum"
+    # Version stamp for this dataclass's EXTENDED (post-Slice-1) shape — bumped
+    # only when a field is ADDED, never on a value change. Lets an offline
+    # reader over probe_readings/probe_decisions tell which ProbeContext schema
+    # produced a row without inferring it from column presence. A position
+    # opened before this field existed is UNAFFECTED: ProbeContext is built
+    # FRESH every observe tick (never deserialized from storage), so the old
+    # position's close path just gets the current version — no migration, no
+    # regression (proven byte-identical by test_probe_attach_byte_identical.py).
+    probe_ctx_version: int = 2
 
 
 @dataclass(frozen=True, slots=True)

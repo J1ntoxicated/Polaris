@@ -437,8 +437,15 @@
   function drawRegister(ctx, W, H) {
     const z = Z.registerRect;
     const x0 = W * z.x0;
+    // gate-satellite reassignment (Jin 2026-07-11): validator/entry_judge/
+    // exit_advise + the 3 runner-learner nodes now draw at their OWN gate
+    // (field.js's orbitGateTarget/renderStaticLayer) — excluded here via the
+    // same shared classifier so they don't also get a stale register row
+    // pointing a leader line back to g8.
     const nodes = [].concat(
-      field.nodesOf('action'), field.nodesOf('obs'), field.nodesOf('orbit'), field.nodesOf('axis'),
+      field.nodesOf('action'), field.nodesOf('obs'),
+      field.nodesOf('orbit').filter((n) => !field.gateSatelliteOf(n)),
+      field.nodesOf('axis'),
     );
     const gs = field.gateScreen()[7];
     ctx.font = '500 5px JetBrains Mono, monospace'; ctx.textAlign = 'left';
@@ -593,6 +600,50 @@
     });
   }
 
+  /* ===== G4/G5 shadow-channel satellites (Jin 2026-07-11 gate-satellite
+   * reassignment items 2/3) — VWAP + SQUEEZE preentry shadow readers orbit
+   * G4, a calibration-pairs accumulator orbits G5. These carry no allNodes
+   * entry (pure console.shadow_channels readout, same source as SCOUT
+   * SHADOW above) — same probe-orbit grammar as field.js's G6 probes
+   * (active=patrol at a per-satellite period 60-90s so a bank of them never
+   * moves in lock-step, dormant=parked at the base angle), computed locally
+   * since it is a few lines of sin/cos, not worth a field.js round-trip.
+   * Live per-frame (not the offscreen bake) — the patrol motion genuinely
+   * animates on `now`. ===== */
+  const SHADOW_SATS = [
+    // gate = 0-based gateScreen index (3=g4, 4=g5). fresh window matches the
+    // SCOUT SHADOW panel's own "lit" convention (age < 3600s = active).
+    { key: 'vwap_timing_shadow_1h', label: 'vwap', gate: 3, period: 62, angle0: Math.PI * 1.6 },
+    { key: 'squeeze_shadow', label: 'sqz', gate: 3, period: 81, angle0: Math.PI * 1.85 },
+    { key: 'calibration_pairs', label: 'calib', gate: 4, period: 70, angle0: Math.PI * 1.5 },
+  ];
+  // Outer patrol ring — clear of both the gate's own reticle chrome
+  // (wall_spine.js's corner brackets sit at ringR+12=52) and field.js's
+  // static entry_judge/runner-learner satellite ring (radius 56-62).
+  const SHADOW_SAT_RADIUS = 78;
+  function drawShadowSatellites(ctx, c, now) {
+    const gateScreen = field.gateScreen();
+    const chans = (c && c.shadow_channels) || {};
+    const nowEpoch = Date.now() / 1000;
+    ctx.font = '500 5px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+    SHADOW_SATS.forEach((spec) => {
+      const g = gateScreen[spec.gate];
+      if (!g) return;
+      const ch = chans[spec.key] || {};
+      const age = ch.fresh_ts != null ? nowEpoch - ch.fresh_ts : null;
+      const active = (ch.n || 0) > 0 && age != null && age < 3600;
+      // dormant = parked at the base angle (th=0), same as field.js's probe
+      // orbit (rotation = meaning contract — only active satellites patrol).
+      const th = active ? (now / 1000 % spec.period) / spec.period * Math.PI * 2 : 0;
+      const ang = spec.angle0 + th;
+      const x = g.x + Math.cos(ang) * SHADOW_SAT_RADIUS;
+      const y = g.y + Math.sin(ang) * SHADOW_SAT_RADIUS * 0.72;
+      field.drawDot(ctx, x, y, 2.0, active ? WARM : STEEL, active ? 0.75 : 0.32, active ? 4 : 0);
+      ctx.fillStyle = field.rgba(active ? WARM : STEEL, active ? 0.85 : 0.42);
+      ctx.fillText(spec.label + (ch.n != null ? ' ' + ch.n : ''), x + 4, y + 2);
+    });
+  }
+
   /* ===== header SHADOW counter (Jin 2026-07-11) — the top-bar "SHADOW" stat
    * used to read gate_shadow_events mismatch-only rows (flow_stats'
    * shadow_mismatch_n — usually 0, a dead-looking reading). Wired here to
@@ -677,6 +728,7 @@
     drawPanelTR(ctx, c, verdicts, now, W, H);
     drawGateLadder(ctx, c, gatePulseAt, now, W, H);
     drawRegister(ctx, W, H);
+    drawShadowSatellites(ctx, c, now);
     ctx.restore();
   }
 

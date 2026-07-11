@@ -57,8 +57,18 @@
     sorted.forEach((it) => {
       const w = ctx.measureText(it.text || '').width + 8;
       const x0 = it.x - w / 2, x1 = it.x + w / 2;
+      // Optional per-item side pin (round-3 g5-nucleus fix): a satellite
+      // parked WEST of its own gate core must never let the greedy placer
+      // swing its label back EAST across that core — so if `preferSide` is
+      // set, only that side's 3 lanes are considered (still falls through
+      // drop 0->9->18, still dims rather than hides on total clash). Items
+      // without it keep the original all-6-lanes-in-order scan untouched.
+      const laneIdx = it.preferSide
+        ? LABEL_LANES.map((l, i) => i).filter((i) => LABEL_LANES[i][0] === it.preferSide)
+        : LABEL_LANES.map((l, i) => i);
       let placed = false;
-      for (let li = 0; li < LABEL_LANES.length && !placed; li++) {
+      for (let k = 0; k < laneIdx.length && !placed; k++) {
+        const li = laneIdx[k];
         const row = rows[li];
         const clash = row.some((iv) => x0 < iv[1] && x1 > iv[0]);
         if (clash) continue;
@@ -68,8 +78,10 @@
       }
       if (!placed) {
         // Fallback chain: never hide, never re-stamp at full alpha over an
-        // occupied slot — dim it in lane 0 (계약 §1).
-        out.set(it.id, { side: LABEL_LANES[0][0], drop: LABEL_LANES[0][1], dimmed: true });
+        // occupied slot — dim it in lane 0 of the (pinned or default) side
+        // (계약 §1).
+        const side = it.preferSide || LABEL_LANES[0][0];
+        out.set(it.id, { side, drop: LABEL_LANES[0][1], dimmed: true });
       }
     });
     return out;

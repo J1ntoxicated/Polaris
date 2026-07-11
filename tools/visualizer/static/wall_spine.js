@@ -114,6 +114,11 @@
    * sediment below the sizer (measurement honesty — globe kill-mote
    * precedent, not a block). */
   const gateMotes = [[], [], [], [], [], [], [], []];
+  // Evaluation flash (Jin 2026-07-11 effect-builder round, item 2): one-shot
+  // micro notch on a gate's hairline ring the instant its verdict mote
+  // lands — same mote object (ang/color), no second random draw. Piggybacks
+  // pushGateMote below; drawn in wall_spine.js's drawGates (own ring geometry).
+  const gateNotch = [null, null, null, null, null, null, null, null];
   // G1 universe structure (Jin 2026-07-10 "유니버스도 표시"): live tier
   // census from the real roster (S/A/B/T focus tiers), redrawn per poll.
   let g1Tiers = [];
@@ -150,9 +155,12 @@
       return;
     }
     const ring = gateMotes[gateIdx];
-    ring.push({ ang: Math.random() * Math.PI * 2, drift: (Math.random() < 0.5 ? -1 : 1) * (0.05 + Math.random() * 0.1), color: col, born: performance.now() });
+    const mote = { ang: Math.random() * Math.PI * 2, drift: (Math.random() < 0.5 ? -1 : 1) * (0.05 + Math.random() * 0.1), color: col, born: performance.now() };
+    ring.push(mote);
     if (ring.length > 14) ring.shift();
+    gateNotch[gateIdx] = mote;
   }
+  const NOTCH_MS = 260;
   const MOTE_TTL = 150000;
   function drawGateMotes(now, dt) {
     ctx.globalCompositeOperation = 'lighter';
@@ -270,6 +278,19 @@
       ctx.globalCompositeOperation = 'lighter';
       ctx.beginPath(); ctx.arc(gs.x, gs.y, core + 9, 0, Math.PI * 2);
       ctx.strokeStyle = field.rgba(gc, 0.3 + fireT * 0.2); ctx.lineWidth = 0.7; ctx.stroke();
+      // Evaluation flash: the same mote pushGateMote just recorded, stamped
+      // once on the hairline ring at its own angle, fading over NOTCH_MS.
+      const notch = gateNotch[i];
+      if (notch) {
+        const nAge = now - notch.born;
+        if (nAge < NOTCH_MS) {
+          const nf = 1 - nAge / NOTCH_MS;
+          const nx = gs.x + Math.cos(notch.ang) * (core + 9), ny = gs.y + Math.sin(notch.ang) * (core + 9);
+          field.drawDot(ctx, nx, ny, 2 + nf * 1.6, notch.color, 0.6 * nf, 8 * nf);
+        } else {
+          gateNotch[i] = null;
+        }
+      }
       const brR = ringR + 12, brTick = 6;
       for (let c = 0; c < 4; c++) {
         const ca = Math.PI / 4 + c * (Math.PI / 2);

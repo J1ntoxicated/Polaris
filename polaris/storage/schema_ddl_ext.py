@@ -394,6 +394,39 @@ CREATE INDEX IF NOT EXISTS idx_position_strategy_segments_cell
     ON position_strategy_segments(cell_key, started_ts DESC);
 """
 
+# Probability calibration shadow (frontgate-scan item #4, G5, behavior-0,
+# 2026-07-11). One row per SIZED SIGNAL: ``predicted_p_pos`` is the
+# ``learner_posterior.p_pos`` for the signal's (exchange, strategy, ticker,
+# regime) cell SNAPSHOTTED AT SIZING TIME (never re-derived after close — the
+# cell's p_pos mutates on every subsequent close, so a post-close re-query
+# would leak future information into the "predicted" value; see
+# ``core/learners/calibration_shadow.py``). ``realized_won``/``realized_pnl_r``/
+# ``closed_ts`` stay NULL until the position closes, then are filled in-place
+# by ``signal_id`` (the sizing↔close join key — ``SimulatedTrade.signal_id``
+# is carried unchanged from entry through close). MEASUREMENT ONLY — never
+# read by sizing/gating (9-stack unaffected); feeds an OFFLINE Platt/PAV fit
+# (``core/learners/calibration_fit.py``) once enough pairs accumulate.
+DDL_CALIBRATION_PAIRS = """
+CREATE TABLE IF NOT EXISTS calibration_pairs (
+    signal_id TEXT PRIMARY KEY,
+    venue TEXT NOT NULL DEFAULT '',
+    strategy TEXT NOT NULL DEFAULT '',
+    ticker TEXT NOT NULL DEFAULT '',
+    regime TEXT NOT NULL DEFAULT '',
+    predicted_p_pos REAL NOT NULL DEFAULT 0.5,
+    n_samples_at_entry INTEGER NOT NULL DEFAULT 0,
+    realized_won INTEGER,
+    realized_pnl_r REAL,
+    closed_ts INTEGER,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_CALIBRATION_PAIRS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_calibration_pairs_strategy
+    ON calibration_pairs(strategy, regime, created_ts DESC);
+"""
+
 # ---------------------------------------------------------------------------
 # Layer 3 — Sizing/Risk State (kelly + tier amplifier)
 # Spec source: vault/30_components/layer-3-sizing-risk.md (Schema)

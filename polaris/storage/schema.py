@@ -69,6 +69,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_AI_LESSONS_INDEX,
     DDL_BENCHMARK_RESULTS,
     DDL_BENCHMARK_RESULTS_INDEX,
+    DDL_CALIBRATION_PAIRS,
+    DDL_CALIBRATION_PAIRS_INDEX,
     DDL_CAPITAL_REOPEN_PENDING,
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
@@ -236,6 +238,10 @@ ALL_DDL: tuple[str, ...] = (
     # Edge-validation Phase 1 — Bayesian posterior (measure-only, no sizing wire)
     DDL_LEARNER_POSTERIOR,
     DDL_STRATEGY_REGIME_PRIOR,
+    # Probability calibration shadow (#4, G5) — predicted p_pos (snapshotted at
+    # sizing time) vs realized won, paired by signal_id (measure-only).
+    DDL_CALIBRATION_PAIRS,
+    DDL_CALIBRATION_PAIRS_INDEX,
     # Layer 6 — Live Recalc
     DDL_POSITION_LIVE_RECALC_STATE,
     DDL_REGIME_STATE,

@@ -43,6 +43,7 @@ from polaris.scripts._production_close_classes import update_strategy_class_on_c
 from polaris.scripts._production_close_effects import (
     _safe_backfill_probe_outcome,
     _safe_lookup_entry_regime,
+    _safe_record_calibration_outcome,
     _safe_record_meta_label,
     _safe_run_g8,
     _safe_run_learners,
@@ -1011,6 +1012,11 @@ async def _close_trade_with_real_pnl(
     _safe_update_posterior(
         conn, trade=trade, regime=regime, pnl_r_net=pnl_r_net,
         pnl_r_gross=final_slice_pnl_r, now_ts=now_ts,
+    )
+    # Probability calibration shadow (#4, G5) — fills the realized outcome onto
+    # this signal's sizing-time p_pos snapshot. Measurement only, fail-open.
+    _safe_record_calibration_outcome(
+        conn, trade=trade, won=won, pnl_r_net=pnl_r_net, now_ts=now_ts,
     )
     # VIRTUAL ACCOUNT (Jin 2026-07-07): weekly per-exchange trace (TRACE, never
     # RESET — the account compounds continuously) + reset-only-on-ruin check.

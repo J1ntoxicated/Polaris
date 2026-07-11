@@ -266,6 +266,141 @@ def test_entry_regime_legacy_db_gets_alter_idempotent(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_entry_regime_v2_column_exists_on_fresh_db(tmp_path: Path) -> None:
+    """positions.entry_regime_v2 (regime v2 twinlight SHADOW, backgate-plan
+    W2-d) present + nullable on a fresh init — bare alongside entry_regime
+    (구 4라벨), which stays the sole canonical behavior key."""
+    conn = init_db(tmp_path / "regime_v2_fresh.sqlite")
+    try:
+        assert "entry_regime_v2" in _cols(conn, "positions")
+        notnull, dflt = _coldef(conn, "positions", "entry_regime_v2")
+        assert notnull == 0, "entry_regime_v2 must be nullable"
+        assert dflt is None, f"entry_regime_v2 default must be NULL (got {dflt!r})"
+    finally:
+        conn.close()
+
+
+def test_entry_regime_v2_legacy_db_gets_alter_idempotent(tmp_path: Path) -> None:
+    """A legacy positions table (no entry_regime_v2) is ALTERed in place;
+    legacy rows backfill to NULL; re-running migrations is safe."""
+    db = tmp_path / "regime_v2_legacy.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE positions ("
+        "position_id TEXT PRIMARY KEY, venue TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "strategy_id TEXT NOT NULL, entry_strategy_id TEXT NOT NULL, "
+        "active_strategy_id TEXT NOT NULL, side TEXT NOT NULL, qty REAL NOT NULL, "
+        "status TEXT NOT NULL, entry_regime TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status, entry_regime) "
+        "VALUES ('p_leg', 'okx', 'BTC-USDT', 's1', 's1', 's1', 'long', 1.0, "
+        "'open', 'chop')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db)
+    try:
+        assert "entry_regime_v2" in _cols(conn, "positions"), "missing entry_regime_v2"
+        row = conn.execute(
+            "SELECT entry_regime, entry_regime_v2 FROM positions "
+            "WHERE position_id = 'p_leg'"
+        ).fetchone()
+        assert row[0] == "chop", "구 4라벨 entry_regime must survive untouched"
+        assert row[1] is None, "legacy row must backfill entry_regime_v2 to NULL"
+        _apply_post_migrations(conn)
+        _apply_post_migrations(conn)
+        assert "entry_regime_v2" in _cols(conn, "positions")
+    finally:
+        conn.close()
+
+
+def test_regime_v2_column_exists_on_fresh_regime_state(tmp_path: Path) -> None:
+    """regime_state.regime_v2 (backgate-plan W2-d) present + nullable on a
+    fresh init — bare alongside regime (구 4라벨, unchanged canonical key)."""
+    conn = init_db(tmp_path / "regime_state_fresh.sqlite")
+    try:
+        cols = _cols(conn, "regime_state")
+        assert "regime_v2" in cols
+        assert "regime" in cols
+        notnull, dflt = _coldef(conn, "regime_state", "regime_v2")
+        assert notnull == 0, "regime_v2 must be nullable"
+        assert dflt is None, f"regime_v2 default must be NULL (got {dflt!r})"
+    finally:
+        conn.close()
+
+
+def test_regime_v2_legacy_regime_state_gets_alter_idempotent(tmp_path: Path) -> None:
+    """A legacy regime_state table (no regime_v2) is ALTERed in place; the
+    구 4라벨 regime column and its value survive untouched."""
+    db = tmp_path / "regime_state_legacy.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE regime_state ("
+        "venue TEXT NOT NULL, underlying_group_id TEXT NOT NULL, "
+        "regime TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.0, "
+        "updated_ts INTEGER NOT NULL, "
+        "PRIMARY KEY (venue, underlying_group_id))"
+    )
+    conn.execute(
+        "INSERT INTO regime_state (venue, underlying_group_id, regime, "
+        "confidence, updated_ts) VALUES ('okx', 'BTC', 'bull', 0.8, 1000)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db)
+    try:
+        cols = _cols(conn, "regime_state")
+        assert "regime_v2" in cols, "missing regime_v2 after migrate"
+        row = conn.execute(
+            "SELECT regime, regime_v2 FROM regime_state "
+            "WHERE venue = 'okx' AND underlying_group_id = 'BTC'"
+        ).fetchone()
+        assert row[0] == "bull", "구 4라벨 regime must survive untouched"
+        assert row[1] is None, "legacy row must backfill regime_v2 to NULL"
+        _apply_post_migrations(conn)
+        _apply_post_migrations(conn)
+        assert "regime_v2" in _cols(conn, "regime_state")
+    finally:
+        conn.close()
+
+
+def test_close_path_byte_identical_with_regime_v2_twinlight(tmp_path: Path) -> None:
+    """behavior-0 regression: an existing OPEN position's close path (status
+    -> 'closed', pnl_r / entry_regime writes) is byte-identical with the
+    regime_v2 twinlight columns present — the migration adds a NULL-default
+    column only, it never threads into the close write path."""
+    conn = init_db(tmp_path / "close_regress.sqlite")
+    try:
+        conn.execute(
+            "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+            " entry_strategy_id, active_strategy_id, side, qty, status, "
+            " entry_regime) VALUES ('p_close', 'okx', 'BTC-USDT', 's1', 's1', "
+            " 's1', 'long', 1.0, 'open', 'crisis')"
+        )
+        conn.commit()
+        # Existing close path: status flip + pnl_r write, exactly as the live
+        # close writer does — entry_regime_v2 is never referenced.
+        conn.execute(
+            "UPDATE positions SET status = 'closed', closed_ts = 2000, "
+            "pnl_r = 0.42 WHERE position_id = 'p_close'"
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT status, pnl_r, entry_regime, entry_regime_v2 FROM positions "
+            "WHERE position_id = 'p_close'"
+        ).fetchone()
+        assert row[0] == "closed"
+        assert abs(row[1] - 0.42) < 1e-9
+        assert row[2] == "crisis", "구 4라벨 entry_regime unaffected by close"
+        assert row[3] is None, "entry_regime_v2 stays NULL — no close-path write"
+    finally:
+        conn.close()
+
+
 def test_legacy_segments_gets_cell_key_and_index(tmp_path: Path) -> None:
     """A legacy position_strategy_segments table (no cell_key/lineage cols) must
     migrate WITHOUT crashing — the cell_key index is created in

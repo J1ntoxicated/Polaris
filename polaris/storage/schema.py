@@ -817,6 +817,19 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE score_f_events ADD COLUMN notional_usd REAL")
     if sfe_cols and "fee_raw_usd" not in sfe_cols:
         conn.execute("ALTER TABLE score_f_events ADD COLUMN fee_raw_usd REAL")
+    # positions.entry_regime_v2 / regime_state.regime_v2 — regime v2 twinlight
+    # SHADOW (backgate-plan W2-d, vault/50_research/backgate-plan/
+    # design-regime-v2-rollout.md + master-sequence.md; R1 spec: vault/
+    # 50_research/debates/regime_factory_2026-07-10.md). Both baked into the
+    # fresh DDL already; this ALTER guard backfills a pre-existing DB file
+    # that predates the columns (same last_promotion_ts / seed_tag precedent).
+    # ADDITIVE ONLY, nullable, NULL = legacy/unclassified row — the 구 4라벨
+    # canonical behavior key (positions.entry_regime / regime_state.regime)
+    # is untouched, and nothing reads these v2 columns until the flip-ladder.
+    if "entry_regime_v2" not in cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN entry_regime_v2 TEXT")
+    if rs_cols and "regime_v2" not in rs_cols:
+        conn.execute("ALTER TABLE regime_state ADD COLUMN regime_v2 TEXT")
     _migrate_quote_ticks_to_lww(conn)
 
 

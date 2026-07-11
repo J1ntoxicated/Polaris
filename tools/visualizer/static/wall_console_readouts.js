@@ -560,11 +560,10 @@
    * used to read gate_shadow_events mismatch-only rows (flow_stats'
    * shadow_mismatch_n — usually 0, a dead-looking reading). Wired here to
    * the real per-poll sum across every shadow channel above instead, so it
-   * actually reflects the accumulating exposure. Runs once per NEW console
-   * object (object-identity gated, same convention as ensureBake below) —
-   * draw() is per-frame (60fps) but this only needs to track the ~1s poll
-   * cadence, so it re-asserts over wall_spine_hud.js's own (now-stale)
-   * write on the very next frame rather than fighting it every frame. */
+   * actually reflects the accumulating exposure. This is the SOLE writer of
+   * #s-shadow (wall_spine_hud.js's renderSummary no longer touches it — see
+   * its comment) — object-identity gated so it only re-runs once per NEW
+   * console object rather than every 60fps draw() frame. */
   let shadowHeaderC;
   function updateShadowHeader(c) {
     if (c === shadowHeaderC) return;

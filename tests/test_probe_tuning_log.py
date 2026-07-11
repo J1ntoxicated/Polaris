@@ -143,6 +143,76 @@ def test_log_decision_persists_with_truth_cols(tmp_path: object) -> None:
     conn.close()
 
 
+def test_log_decision_persists_caller_supplied_regime(tmp_path: object) -> None:
+    """A caller that threads ``regime=`` gets it persisted verbatim (not NULL).
+
+    Guards the W2-d fix: ``log_probe_decisions`` must actually write the
+    ``ProbeContext.regime`` value it receives, not just accept-and-drop it.
+    """
+    conn = open_probe_db(f"{tmp_path}/probes.sqlite")
+    dec = EngineDecision(action="HOLD", composite_lean=0.0, applied=False)
+    log_probe_decisions(
+        conn, ts=1000, run_id="r1", position_id="p-regime", mode="observe",
+        decision=dec, pnl_r_at_decision=0.0, pnl_r_truth=0.0,
+        mark_source="bar", mark_age_ms=0, exit_state="open",
+        regime="trend_up_expansion",
+    )
+    row = conn.execute(
+        "SELECT regime FROM probe_decisions WHERE position_id='p-regime'"
+    ).fetchone()
+    assert row[0] == "trend_up_expansion"
+    conn.close()
+
+
+def test_log_decision_regime_defaults_to_null_when_omitted(tmp_path: object) -> None:
+    """Callers that do not pass ``regime`` keep the legacy NULL semantics."""
+    conn = open_probe_db(f"{tmp_path}/probes.sqlite")
+    dec = EngineDecision(action="HOLD", composite_lean=0.0, applied=False)
+    log_probe_decisions(
+        conn, ts=1000, run_id="r1", position_id="p-noregime", mode="observe",
+        decision=dec, pnl_r_at_decision=0.0, pnl_r_truth=0.0,
+        mark_source="bar", mark_age_ms=0, exit_state="open",
+    )
+    row = conn.execute(
+        "SELECT regime FROM probe_decisions WHERE position_id='p-noregime'"
+    ).fetchone()
+    assert row[0] is None
+    conn.close()
+
+
+def test_observe_probes_threads_ctx_regime_into_tuning_log(tmp_path: object) -> None:
+    """The production attach (``observe_probes``) must thread ``ProbeContext.
+    regime`` into the persisted ``probe_decisions.regime`` — not drop it on the
+    floor between ctx construction and the tuning-log INSERT (W2-d)."""
+    from polaris.core.probes.bus import ProbeBus
+    from polaris.core.probes.catalog import ProfitTakingProbe
+    from polaris.core.probes.engine import ExitEngine
+    from polaris.scripts._production_probe_attach import observe_probes
+
+    class _State:
+        pass
+
+    state = _State()
+    state.probe_bus = ProbeBus([ProfitTakingProbe()])  # type: ignore[attr-defined]
+    state.probe_engine = ExitEngine()  # type: ignore[attr-defined]
+    state.probe_conn = open_probe_db(f"{tmp_path}/probes.sqlite")  # type: ignore[attr-defined]
+
+    observe_probes(
+        state=state,  # type: ignore[arg-type]
+        pos={"position_id": "p-thread", "venue": "okx", "symbol": "BTC-USDT"},  # type: ignore[arg-type]
+        side="long", entry_price=100.0, last_price=102.0, atr_pct=0.01,
+        entry_atr_pct=0.01, pnl_r=1.2, held_seconds=60,
+        regime="trend_up_expansion", now_ts=1_000_000, run_id="run-thread",
+        mark_source="bar",
+    )
+    row = state.probe_conn.execute(  # type: ignore[attr-defined]
+        "SELECT regime FROM probe_decisions WHERE position_id='p-thread'"
+    ).fetchone()
+    assert row is not None, "observe_probes must have written a probe_decisions row"
+    assert row[0] == "trend_up_expansion"
+    state.probe_conn.close()  # type: ignore[attr-defined]
+
+
 def test_backfill_fills_outcome(tmp_path: object) -> None:
     conn = open_probe_db(f"{tmp_path}/probes.sqlite")
     dec = EngineDecision(action="HOLD", composite_lean=0.0, applied=False)

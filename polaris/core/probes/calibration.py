@@ -21,9 +21,11 @@ HARD RAILS (non-negotiable, ADR-011 / ADR-012):
 The grouping key honours the requested ``(kind, regime, action)`` signature:
 ``action`` comes from ``v_probe_outcomes``; ``kind`` is the DOMINANT contributing
 probe kind (max ``|lean|*confidence``) joined from ``probe_readings`` by
-``(position_id, ts)``; ``regime`` is NOT persisted in the sidecar today, so it
-degrades to ``"unknown"`` (the digest states this honestly rather than inventing
-a split). FAIL-OPEN: a missing table / sqlite error yields an empty result.
+``(position_id, ts)``; ``regime`` IS now persisted by ``log_probe_decisions``
+(backgate-plan W2-d) but this reader does NOT read it yet this wave — the
+column/reader split (W3) is deferred, so every group still degrades to
+``"unknown"`` (the digest states this honestly rather than inventing a split).
+FAIL-OPEN: a missing table / sqlite error yields an empty result.
 """
 
 from __future__ import annotations
@@ -158,8 +160,9 @@ def read_calibration(
     total_n = sum(g.n for g in groups)
     verdict = _verdict(groups)
     notes = [
-        "regime not persisted in the sidecar — bucketed as 'unknown' "
-        "(populate ProbeContext.regime into probe_decisions to split by regime).",
+        "regime IS persisted in probe_decisions (backgate-plan W2-d) but this "
+        "reader does not split by it yet — bucketed as 'unknown' pending the "
+        "W3 calibrator read-side wiring.",
         "EXCURSION ruler only — never joined to the per-stream ledger R.",
         "OFFLINE / observe-only — NEVER auto-applied to a live knob (ADR-011/012); "
         "feeds /debate (rank 16) only.",

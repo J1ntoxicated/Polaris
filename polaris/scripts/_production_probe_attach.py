@@ -243,7 +243,7 @@ def observe_probes(
             probe_conn, ts=now_ts, run_id=run_id, position_id=ctx.position_id,
             mode="observe", decision=decision, pnl_r_at_decision=pnl_r,
             pnl_r_truth=pnl_r, mark_source=mark_source, mark_age_ms=0,
-            exit_state=ctx.exit_state, eval_id=eval_id,
+            exit_state=ctx.exit_state, eval_id=eval_id, regime=ctx.regime,
         )
         state.probe_observe_evals = getattr(state, "probe_observe_evals", 0) + 1
     except Exception as exc:  # noqa: BLE001 — observe sidecar must never break the tick

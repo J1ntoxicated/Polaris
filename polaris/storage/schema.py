@@ -132,6 +132,16 @@ from polaris.storage.schema_ddl_ext import (
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
 )
+from polaris.storage.schema_ddl_frontgate import (
+    DDL_EARNINGS_CALENDAR,
+    DDL_EARNINGS_CALENDAR_DATE_INDEX,
+    DDL_EARNINGS_PROXIMITY_SHADOW,
+    DDL_EDGAR_FILINGS,
+    DDL_EDGAR_FILINGS_SYMBOL_INDEX,
+    DDL_FILING_PROXIMITY_SHADOW,
+    DDL_STABLECOIN_LIQUIDITY,
+    DDL_STABLECOIN_LIQUIDITY_SYMBOL_INDEX,
+)
 from polaris.storage.schema_ddl_reranker import (
     DDL_PROBE_SLOT_ASSIGNMENT,
     DDL_PROBE_SLOT_ASSIGNMENT_LATEST_INDEX,
@@ -315,6 +325,17 @@ ALL_DDL: tuple[str, ...] = (
     DDL_WEEKLY_EQUITY_CURVE_INDEX,
     DDL_VIRTUAL_RUIN_EVENTS,
     DDL_VIRTUAL_RUIN_EVENTS_INDEX,
+    # frontgate-scan feeds (#1-3) — SEC EDGAR filings / DefiLlama stablecoins /
+    # Finnhub earnings calendar + their G3/G4 proximity SHADOW tags. Pure
+    # EVIDENCE/provenance/shadow — zero gating/sizing touchpoints this wave.
+    DDL_EDGAR_FILINGS,
+    DDL_EDGAR_FILINGS_SYMBOL_INDEX,
+    DDL_FILING_PROXIMITY_SHADOW,
+    DDL_STABLECOIN_LIQUIDITY,
+    DDL_STABLECOIN_LIQUIDITY_SYMBOL_INDEX,
+    DDL_EARNINGS_CALENDAR,
+    DDL_EARNINGS_CALENDAR_DATE_INDEX,
+    DDL_EARNINGS_PROXIMITY_SHADOW,
 )
 
 

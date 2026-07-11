@@ -99,6 +99,49 @@ def _insert_calibration_pair(conn: sqlite3.Connection, created_ts: int) -> None:
     )
 
 
+def _insert_edgar_filing(conn: sqlite3.Connection, ingestion_ts: int) -> None:
+    conn.execute(
+        "INSERT INTO edgar_filings (symbol, cik, accession_number, form_type, "
+        "ingestion_ts, created_ts) VALUES ('AAPL', '320193', ?, '8-K', ?, ?)",
+        (f"acc-{ingestion_ts}", ingestion_ts, ingestion_ts),
+    )
+
+
+def _insert_filing_proximity_shadow(conn: sqlite3.Connection, cycle_ts: int) -> None:
+    conn.execute(
+        "INSERT INTO filing_proximity_shadow (symbol, cycle_ts, created_ts) "
+        "VALUES ('AAPL', ?, ?)",
+        (cycle_ts, cycle_ts),
+    )
+
+
+def _insert_stablecoin_liquidity(conn: sqlite3.Connection, ts: int) -> None:
+    conn.execute(
+        "INSERT INTO stablecoin_liquidity (ts, symbol, created_ts) "
+        "VALUES (?, 'USDT', ?)",
+        (ts, ts),
+    )
+
+
+def _insert_earnings_calendar(conn: sqlite3.Connection, ingestion_ts: int) -> None:
+    # earnings_date is PK-paired with symbol; using str(ingestion_ts) keeps
+    # each seeded row's key unique regardless of the window's cutoff arithmetic
+    # (retention prunes on ingestion_ts, not this column's content).
+    conn.execute(
+        "INSERT INTO earnings_calendar (symbol, earnings_date, ingestion_ts, "
+        "created_ts) VALUES ('AAPL', ?, ?, ?)",
+        (str(ingestion_ts), ingestion_ts, ingestion_ts),
+    )
+
+
+def _insert_earnings_proximity_shadow(conn: sqlite3.Connection, cycle_ts: int) -> None:
+    conn.execute(
+        "INSERT INTO earnings_proximity_shadow (symbol, cycle_ts, created_ts) "
+        "VALUES ('AAPL', ?, ?)",
+        (cycle_ts, cycle_ts),
+    )
+
+
 # --- ledger / state tables: NEVER touched ----------------------------------
 
 
@@ -180,6 +223,11 @@ def test_window_keeps_inside_deletes_outside(db: sqlite3.Connection) -> None:
             "news_timing_shadow": _insert_news_timing_shadow,
             "vwap_timing_shadow": _insert_vwap_timing_shadow,
             "calibration_pairs": _insert_calibration_pair,
+            "edgar_filings": _insert_edgar_filing,
+            "filing_proximity_shadow": _insert_filing_proximity_shadow,
+            "stablecoin_liquidity": _insert_stablecoin_liquidity,
+            "earnings_calendar": _insert_earnings_calendar,
+            "earnings_proximity_shadow": _insert_earnings_proximity_shadow,
         }[rule.table]
         inserter(db, cutoff - 1)   # strictly older -> deleted
         inserter(db, cutoff)       # exactly at cutoff -> kept (< is the test)

@@ -29,6 +29,9 @@ from polaris.core.altdata.cache import AltDataCache
 from polaris.core.altdata.cftc_cot import CFTCCotCollector
 from polaris.core.altdata.coinglass import CoinglassCollector
 from polaris.core.altdata.crypto_fg import CryptoFearGreedCollector
+from polaris.core.altdata.defillama_stables import DefiLlamaStablesCollector
+from polaris.core.altdata.edgar_events import EdgarEventsCollector
+from polaris.core.altdata.finnhub_earnings import FinnhubEarningsCollector
 from polaris.core.altdata.fred_macro import FredMacroCollector
 from polaris.core.altdata.myfxbook import MyfxbookCollector
 from polaris.core.altdata.news_sentiment import NewsSentimentCollector
@@ -428,11 +431,17 @@ def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[
     no network) and classifies headlines via an async GPT call on its own 15min
     cadence (in-loop GPT = 0 holds — off the per-tick hot path).
 
-    ``conn`` (optional): when supplied it is threaded ONLY into
-    ``NewsSentimentCollector`` as ``shadow_conn`` — frontgate-scan item #7's
-    timestamp-audit + dedup SHADOW log (behavior-0: the collector's returned
-    evidence dict is unchanged either way; ``None`` keeps every prior call
-    site byte-identical).
+    ``conn`` (optional): when supplied it is threaded into
+    ``NewsSentimentCollector`` as ``shadow_conn`` (frontgate-scan item #7's
+    timestamp-audit + dedup SHADOW log) AND into the frontgate-scan feed trio
+    below (``EdgarEventsCollector`` / ``FinnhubEarningsCollector`` /
+    ``DefiLlamaStablesCollector``) as their writer-path ``conn`` — the SAME
+    connection the bot process already writes with (RO active-universe read +
+    their own raw-event/snapshot table persistence + G3/G4 proximity SHADOW
+    tags). Behavior-0: every collector's returned evidence dict is unchanged
+    either way; ``None`` keeps every prior call site byte-identical, and the
+    EDGAR/Finnhub collectors simply return ``{}`` without a ``conn`` (no
+    active-universe symbols to resolve).
     """
     return [
         OKXFundingCollector(),
@@ -443,6 +452,12 @@ def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[
         NewsSentimentCollector(shadow_conn=conn),
         CoinglassCollector(),
         MyfxbookCollector(),
+        # frontgate-scan feeds (#1-3) — SEC EDGAR filings / Finnhub earnings
+        # calendar / DefiLlama stablecoins. Pure EVIDENCE; behavior-0 (no
+        # gating/sizing touchpoint this wave).
+        EdgarEventsCollector(conn=conn),
+        FinnhubEarningsCollector(conn=conn),
+        DefiLlamaStablesCollector(conn=conn),
     ]
 
 

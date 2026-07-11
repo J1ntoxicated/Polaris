@@ -19,6 +19,8 @@ DEMO/PAPER 가상계정 · aggressive bias 보존 · 이번 웨이브 = 계획/�
 - [[scan-frameworks]] — OSS 인프라/데이터 (Qlib·AQR·vectorbt·라이선스 지뢰)
 - [[integration-blueprint]] — 게이트별 통합 설계 (핵심; 기존 코드 재사용 맵)
 - [[experiment-roadmap]] — 우선순위 10 단계별 실험 계획 (섀도우→PROVE→승격 숫자 기준)
+- [[data-sourcing-plan]] — 피드 개통 실행 계획 (EDGAR→DefiLlama→Finnhub→Coinglass→GDELT, 모듈/스토리지/TS감사)
+- [[data-sourcing-catalog]] — 소싱 조사 전량 (채택 6 · 보류 2 · 기각 10, TS등급/검증각주 포함)
 
 ## 최종 수렴 우선순위 (요약)
 1 기존 로스터 활성화(G2) · 2 TSMOM 12-1(G2) · 3 XS-모멘텀+52wk 통합 랭크(G1)

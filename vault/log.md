@@ -404,3 +404,4 @@
 2026-07-10 21:30 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=222 learners=3 paper=True]
 2026-07-10 daily-auto [closes=221 pnl_usd=-2584.58 opens=225 faults=2 restarts=2]
 - 2026-07-11: 프론트게이트 전략 대탐사 랜딩 — 5도메인 웹스캔→fit→심판2→codex R1(BREAK 7 수용)→vault 8파일(frontgate-scan/, 전부 lint 클린). 수렴 top10: 로스터 활성화·TSMOM 12-1·XS+52wk 랭크·캘리브레이션·DFII10·VWAP타이밍·뉴스 conviction·로테이션·TTM Squeeze·메타라벨. 핵심: 다수 후보 기구현 — 활성화>신규빌드. 고아 codex exec(23h) 킬+위생 메모리화.
+- 2026-07-11: frontgate 데이터 소싱 플랜 landing — 3도메인 피드 스카우트 취합 → vault 2파일(data-sourcing-plan/catalog)+_index 갱신, 개통 순서 EDGAR→DefiLlama→Finnhub→Coinglass($29/mo 고지 대상)→GDELT, StockTwits 403 재분류.

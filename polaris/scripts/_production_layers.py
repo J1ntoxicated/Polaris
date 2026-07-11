@@ -43,12 +43,14 @@ from polaris.core.probes.entrance_leans import (
     build_technical_lean,
 )
 from polaris.core.probes.tuning_log import log_entrance_judgments
+from polaris.core.universe._momentum_shadow import dedup_daily_bars, momentum_z_composite
 from polaris.core.universe.discovery import (
     deactivate_stale_active_rows,
     fetch_alpaca_instruments,
     fetch_capital_instruments,
     fetch_okx_instruments,
     merge_listing_timestamps,
+    persist_momentum_shadow,
     persist_universe,
     rank_active_universe,
 )
@@ -210,9 +212,11 @@ async def refresh_okx_universe_once(
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0] OKX fetch failed: %r", exc)
         return 0
-    active = rank_active_universe(instruments)
+    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
+    persist_momentum_shadow(conn, active)
     logger.info("[L0/okx] universe %d → active %d", len(instruments), len(active))
     return len(active)
 
@@ -301,7 +305,8 @@ async def refresh_capital_universe_once(
     except (httpx.HTTPError, RuntimeError) as exc:
         logger.warning("[L0/capital] proxy fetch failed: %r", exc)
 
-    active = rank_active_universe(instruments)
+    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    active = rank_active_universe(instruments, momentum_z=momentum_z)
     new_active_ids = {ins.instrument_id for ins in active}
     # C1 collapse guard: preserve prior breadth on a session-driven 1-symbol
     # collapse (read prior BEFORE the upsert overwrites it).
@@ -313,6 +318,7 @@ async def refresh_capital_universe_once(
     )
     guarded = active_ids != new_active_ids
     persist_universe(conn, instruments, is_active_set=active_ids)
+    persist_momentum_shadow(conn, active)
     if guarded:
         logger.info(
             "[L0/capital] collapse guard: rank→active %d (prior %d) — KEEPING prior "
@@ -351,9 +357,11 @@ async def refresh_alpaca_universe_once(
     # prior persisted timestamps and stamp `ts` on genuinely new names.
     prev = _read_alpaca_listing_prev(conn)
     instruments = merge_listing_timestamps(prev, instruments, now_ts=ts)
-    active = rank_active_universe(instruments)
+    momentum_z = compute_momentum_z_shadow(conn, instruments, now_ts=ts)
+    active = rank_active_universe(instruments, momentum_z=momentum_z)
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
+    persist_momentum_shadow(conn, active)
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the
     # 21-day ghost). persist_universe only UPDATEs fetched rows, so a name absent
     # from Alpaca's churning ~13k /v2/assets set lingers is_active=1 forever — a
@@ -467,6 +475,50 @@ def compute_signal_density_7d(
     except sqlite3.Error:
         return {}
     return {str(r[0]): float(r[1]) for r in rows}
+
+
+def compute_momentum_z_shadow(
+    conn: sqlite3.Connection,
+    instruments: list[UniverseInstrument],
+    *,
+    now_ts: int | None = None,
+) -> dict[str, float]:
+    """Producer for the ``rank_active_universe(momentum_z=...)`` shadow seam.
+
+    Frontgate-scan item #3 (behavior-0 SHADOW, 2026-07-11). Fetches each
+    instrument's 1D ``bars`` history in ONE batched query, applies the
+    look-ahead guard (``ts < today's UTC midnight`` — NOT "drop the last row",
+    which is insufficient on OKX/Capital's dual-cadence 1D writes), dedups
+    same-UTC-day rows to the day's LAST write (``dedup_daily_bars`` — OKX
+    ~1.85x/day, Capital ~1.58x/day, Alpaca 1:1 no-op), then hands the lagged +
+    deduped bars to ``momentum_z_composite`` (XS momentum + 52wk-high,
+    grouped by venue/asset_class). Read-only; a query failure or an empty
+    ``instruments`` list degrades to ``{}`` (the caller's ``momentum_z=None``
+    default path then applies — flow_not_block, never blocks ranking).
+    """
+    if not instruments:
+        return {}
+    ts = now_ts if now_ts is not None else int(time.time())
+    today_utc_start = ts - (ts % 86_400)
+    ids = [ins.instrument_id for ins in instruments]
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT instrument_id, ts, close, high, low FROM bars "
+            f"WHERE instrument_id IN ({placeholders}) AND bar_interval = '1D' "
+            f"AND ts < ? ORDER BY instrument_id, ts ASC",
+            (*ids, today_utc_start),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    bars_by_id: dict[str, list[tuple[int, float, float, float]]] = {iid: [] for iid in ids}
+    for r in rows:
+        bars_by_id[str(r[0])].append((int(r[1]), float(r[2]), float(r[3]), float(r[4])))
+    bars_by_id = {
+        iid: dedup_daily_bars(bars) for iid, bars in bars_by_id.items()
+    }
+    groups_by_id = {ins.instrument_id: f"{ins.venue}/{ins.asset_class}" for ins in instruments}
+    return momentum_z_composite(bars_by_id, groups_by_id)
 
 
 def read_cell_scores_by_instrument(conn: sqlite3.Connection) -> dict[str, float]:

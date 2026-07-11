@@ -302,6 +302,15 @@ RANK_SCORE_W_ATR: Final[float] = 0.45
 RANK_PENALTY_W_SPREAD: Final[float] = 0.30
 RANK_PENALTY_W_DEPTH: Final[float] = 0.15
 
+# XS-momentum + 52wk-high shadow term (frontgate-scan item #3, behavior-0
+# SHADOW wave 2026-07-11): a lagged (t-1 close) cross-sectional momentum z is
+# computed and PERSISTED (``universe.momentum_z`` / ``rank_score_shadow``) for
+# spread measurement, but the live composite weight is pinned at 0.0 — the
+# real ``rank_active_universe`` score is BYTE-IDENTICAL to before this term
+# existed. Promotion (a future non-zero value, /debate-gated) auto-flows
+# through the existing weighted-sum formula with no further code change.
+RANK_SCORE_W_MOM: Final[float] = 0.0
+
 # ---------------------------------------------------------------------------
 # Pre-rank score weights (Q3)
 # ---------------------------------------------------------------------------
@@ -709,6 +718,17 @@ class UniverseInstrument:
     # ("Apple Inc. Common Stock"), Capital market ``instrumentName`` ("Gold"). OKX
     # tickers carry none → "". Keyword-default keeps all constructors valid.
     name: str = ""
+    # XS-momentum + 52wk-high SHADOW term (frontgate-scan item #3, behavior-0).
+    # None = not computed this cycle (legacy/no-momentum_z-input path, the
+    # default every existing caller/test still gets — byte-identical).
+    # Populated ONLY when ``rank_active_universe`` is called with an explicit
+    # ``momentum_z`` dict: ``momentum_z`` is the grouped-z cross-sectional
+    # momentum+52wk-high composite; ``rank_score_shadow`` is the REAL rank
+    # score (RANK_SCORE_W_MOM=0.0 folded in — algebraically identical to the
+    # live score) persisted for the first time so an offline sweep can measure
+    # forward-return spread. Never read by sizing/gating/ranking selection.
+    momentum_z: float | None = None
+    rank_score_shadow: float | None = None
 
 
 def passes_liquidity_floor(ins: UniverseInstrument) -> bool:

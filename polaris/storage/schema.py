@@ -494,6 +494,15 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE universe ADD COLUMN name TEXT NOT NULL DEFAULT ''"
         )
+    # universe.momentum_z / rank_score_shadow — XS-momentum + 52wk-high SHADOW
+    # (frontgate-scan item #3, behavior-0 wave 2026-07-11). ADDITIVE only:
+    # both nullable, NULL = not yet ranked with a momentum_z input (legacy row
+    # / no-momentum_z-input cycle). Never read by sizing/gating/ranking
+    # selection — spread-measurement only. Pragma guard = idempotent.
+    if uni_cols and "momentum_z" not in uni_cols:
+        conn.execute("ALTER TABLE universe ADD COLUMN momentum_z REAL")
+    if uni_cols and "rank_score_shadow" not in uni_cols:
+        conn.execute("ALTER TABLE universe ADD COLUMN rank_score_shadow REAL")
     # watchlist_focus.opportunity_score / trade_eligible — Increment 1 EntranceJudge
     # persistence (entrance-judge build 2026-06-24). ADDITIVE only: the score is
     # nullable (legacy/un-judged rows = NULL) and ``trade_eligible`` DEFAULT 1 keeps

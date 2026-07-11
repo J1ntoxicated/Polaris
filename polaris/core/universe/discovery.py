@@ -54,6 +54,7 @@ __all__ = [
     "fetch_okx_instruments",
     "merge_listing_timestamps",
     "parse_okx_tickers",
+    "persist_momentum_shadow",
     "persist_universe",
     "rank_active_universe",
     "refresh_alpaca_universe",
@@ -450,6 +451,34 @@ def persist_universe(
             len(new_active_ids), len(activated), len(deactivated),
             off_venue_deactivated,
         )
+
+
+def persist_momentum_shadow(
+    conn: sqlite3.Connection, ranked: list[UniverseInstrument]
+) -> None:
+    """Write ``momentum_z`` / ``rank_score_shadow`` onto existing ``universe`` rows.
+
+    Frontgate-scan item #3 (behavior-0 SHADOW, 2026-07-11). ``ranked`` is the
+    ``rank_active_universe(..., momentum_z=...)`` return value — only rows
+    carrying a non-``None`` ``momentum_z`` (i.e. the caller opted into the
+    shadow seam) are written. A separate targeted UPDATE (not folded into
+    ``persist_universe``'s upsert) so the existing, carefully-tested INSERT
+    path stays untouched; must run AFTER ``persist_universe`` has written the
+    row for this cycle (UPDATE is a no-op on a non-existent (venue, symbol)).
+    Never read by sizing/gating/ranking selection — spread-measurement only.
+    """
+    rows = [
+        (ins.momentum_z, ins.rank_score_shadow, ins.venue, ins.symbol)
+        for ins in ranked
+        if ins.momentum_z is not None
+    ]
+    if not rows:
+        return
+    conn.executemany(
+        "UPDATE universe SET momentum_z = ?, rank_score_shadow = ? "
+        "WHERE venue = ? AND symbol = ?",
+        rows,
+    )
 
 
 def deactivate_stale_active_rows(

@@ -16,12 +16,14 @@ import math
 import os
 import statistics
 from collections.abc import Sequence
+from dataclasses import replace
 
 from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.core.universe.schema import (
     RANK_PENALTY_W_DEPTH,
     RANK_PENALTY_W_SPREAD,
     RANK_SCORE_W_ATR,
+    RANK_SCORE_W_MOM,
     RANK_SCORE_W_VOL,
     UNIVERSE_RANK_TOP_N_DEFAULT,
     UNIVERSE_RANK_TOP_N_ENV,
@@ -227,6 +229,7 @@ def rank_active_universe(
     instruments: list[UniverseInstrument],
     *,
     top_n: int | None = None,
+    momentum_z: dict[str, float] | None = None,
 ) -> list[UniverseInstrument]:
     """Continuous-ranking active-set selection (replaces the hard 4-axis cut).
 
@@ -239,6 +242,19 @@ def rank_active_universe(
     decoupled from the focus window). Empty input and degenerate
     (all-tied) populations are safe — z-scores collapse to 0 and ordering is
     stable by input order.
+
+    ``momentum_z`` (frontgate-scan item #3, behavior-0 SHADOW): an optional
+    ``instrument_id -> z`` lookup (same seam pattern as
+    ``watchlist.score_focus_candidates``'s ``cell_scores``/
+    ``opportunity_scores``), producer = ``_production_layers
+    .compute_momentum_z_shadow``. When **omitted** (``None``, the default —
+    every existing caller/test) the returned instruments are BYTE-IDENTICAL
+    to before this parameter existed: no shadow fields are touched. When
+    passed, each selected row is annotated with ``momentum_z`` (0.0 default
+    for a missing lookup) and ``rank_score_shadow`` (the REAL composite score
+    with ``RANK_SCORE_W_MOM`` folded in — 0.0 weight today, so numerically
+    identical to ``scores[i]``); selection/ordering is UNCHANGED either way
+    (``RANK_SCORE_W_MOM`` never enters the sort key).
     """
     # STEP 2: enforce the per-venue stream asset-class whitelist BEFORE validity
     # ranking (Capital crypto-CFD rows are off-venue → routed to OKX track A).
@@ -288,7 +304,15 @@ def rank_active_universe(
         for i in order
         if i not in chosen and is_capital_fx_major(valid[i].venue, valid[i].symbol)
     ]
-    out = [valid[i] for i in selected] + [valid[i] for i in kept_majors]
+    out_idx = selected + kept_majors
+    if momentum_z is None:
+        out = [valid[i] for i in out_idx]
+    else:
+        out = []
+        for i in out_idx:
+            mz = float(momentum_z.get(valid[i].instrument_id, 0.0))
+            shadow = scores[i] + RANK_SCORE_W_MOM * mz
+            out.append(replace(valid[i], momentum_z=mz, rank_score_shadow=shadow))
     logger.info(
         "[universe] continuous-rank: %d → valid %d → active %d (top_n=%d, fx_majors_kept=%d)",
         len(instruments),

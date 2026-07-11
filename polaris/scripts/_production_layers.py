@@ -44,6 +44,11 @@ from polaris.core.probes.entrance_leans import (
 )
 from polaris.core.probes.tuning_log import log_entrance_judgments
 from polaris.core.universe._momentum_shadow import dedup_daily_bars, momentum_z_composite
+from polaris.core.universe._sector_rotation_shadow import (
+    SECTOR_ETF_SYMBOLS,
+    is_rebalance_boundary,
+    rank_sector_etfs,
+)
 from polaris.core.universe.discovery import (
     deactivate_stale_active_rows,
     fetch_alpaca_instruments,
@@ -362,6 +367,7 @@ async def refresh_alpaca_universe_once(
     active_ids = {ins.instrument_id for ins in active}
     persist_universe(conn, instruments, is_active_set=active_ids)
     persist_momentum_shadow(conn, active)
+    refresh_sector_rotation_shadow(conn, now_ts=ts)
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the
     # 21-day ghost). persist_universe only UPDATEs fetched rows, so a name absent
     # from Alpaca's churning ~13k /v2/assets set lingers is_active=1 forever — a
@@ -519,6 +525,81 @@ def compute_momentum_z_shadow(
     }
     groups_by_id = {ins.instrument_id: f"{ins.venue}/{ins.asset_class}" for ins in instruments}
     return momentum_z_composite(bars_by_id, groups_by_id)
+
+
+def refresh_sector_rotation_shadow(
+    conn: sqlite3.Connection, *, now_ts: int | None = None
+) -> int:
+    """Producer for the ``sector_rank_shadow`` table (frontgate-scan item #8, G1).
+
+    Stage 1 (behavior-0 SHADOW, 2026-07-11): recomputes the 11-SPDR-sector-ETF
+    relative-momentum rank ONLY on the monthly rebalance-boundary bar (mirrors
+    ``index_dual_momentum_rotation._is_rebalance_bar`` — a no-op on every other
+    L0 cycle, so this stays cheap at the 5-10min discovery cadence). Fetches
+    each ETF's 1D ``bars`` in ONE batched query with the SAME look-ahead guard
+    + dedup as ``compute_momentum_z_shadow``, ranks via ``rank_sector_etfs``,
+    reads each symbol's LAST recorded ``momentum_z`` for ``delta_from_prior``,
+    and inserts one ``sector_rank_shadow`` row per ETF. ``candidate_symbols``
+    stays '' (Stage 2 — a ticker→sector mapping source is undecided, no
+    calendar deadline). Read-only degrade: any query failure or a non-boundary
+    cycle returns 0 (no write) — never blocks the Alpaca L0 refresh.
+    """
+    ts = now_ts if now_ts is not None else int(time.time())
+    today_utc_start = ts - (ts % 86_400)
+    symbols = sorted(SECTOR_ETF_SYMBOLS)
+    ids = [f"alpaca:{s}" for s in symbols]
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT instrument_id, ts, close, high, low FROM bars "
+            f"WHERE instrument_id IN ({placeholders}) AND bar_interval = '1D' "
+            f"AND ts < ? ORDER BY instrument_id, ts ASC",
+            (*ids, today_utc_start),
+        ).fetchall()
+    except sqlite3.Error:
+        return 0
+    raw_by_id: dict[str, list[tuple[int, float, float, float]]] = {iid: [] for iid in ids}
+    for r in rows:
+        raw_by_id[str(r[0])].append((int(r[1]), float(r[2]), float(r[3]), float(r[4])))
+    deduped_by_symbol = {
+        s: dedup_daily_bars(raw_by_id[f"alpaca:{s}"]) for s in symbols
+    }
+    clock = max(deduped_by_symbol.values(), key=len, default=[])
+    if not is_rebalance_boundary(clock):
+        return 0
+    ranked = rank_sector_etfs(deduped_by_symbol)
+    try:
+        prior_rows = conn.execute(
+            "SELECT sector_etf_symbol, momentum_z FROM sector_rank_shadow "
+            "WHERE sector_etf_symbol IN ({}) "
+            "AND cycle_ts = (SELECT MAX(cycle_ts) FROM sector_rank_shadow s2 "
+            "WHERE s2.sector_etf_symbol = sector_rank_shadow.sector_etf_symbol)".format(
+                ",".join("?" for _ in symbols)
+            ),
+            tuple(symbols),
+        ).fetchall()
+    except sqlite3.Error:
+        prior_rows = []
+    prior_z = {str(r[0]): float(r[1]) for r in prior_rows}
+    insert_rows = [
+        (
+            today_utc_start,
+            symbol,
+            rank,
+            momentum_z,
+            "",
+            (momentum_z - prior_z[symbol]) if symbol in prior_z else None,
+            ts,
+        )
+        for symbol, momentum_z, rank in ranked
+    ]
+    conn.executemany(
+        "INSERT INTO sector_rank_shadow "
+        "(cycle_ts, sector_etf_symbol, momentum_rank, momentum_z, "
+        "candidate_symbols, delta_from_prior, created_ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        insert_rows,
+    )
+    return len(insert_rows)
 
 
 def read_cell_scores_by_instrument(conn: sqlite3.Connection) -> dict[str, float]:

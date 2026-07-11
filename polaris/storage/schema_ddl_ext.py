@@ -169,6 +169,37 @@ CREATE INDEX IF NOT EXISTS idx_weekend_shadow_orders_strategy
     ON weekend_shadow_orders(strategy_id, created_ts);
 """
 
+# Sector/dual-momentum rotation context SHADOW (frontgate-scan item #8, G1,
+# behavior-0, 2026-07-11). One row per (rebalance-boundary cycle × sector ETF):
+# the 11-SPDR-sector-ETF relative-momentum rank + z, recorded on the monthly
+# rebalance-boundary bar only (mirrors ``index_dual_momentum_rotation
+# ._is_rebalance_bar`` — first 1D bar of a new UTC calendar month, NOT every
+# 5-10min L0 cycle). Stage 1 (this table, buildable now): ETF-only ranking,
+# no per-stock sector mapping. ``candidate_symbols`` stays '' until a ticker→
+# sector mapping source is decided (Stage 2, /debate item — no calendar
+# deadline). ``delta_from_prior`` = this cycle's momentum_z minus the SAME
+# symbol's last recorded momentum_z (NULL on a symbol's first-ever row).
+# NEVER read by any live trading path — RANKING/ROUTING context, not applied
+# (flow_not_block; routing-only per the integration blueprint, no directional
+# weight overlap with item #3's universe rank).
+DDL_SECTOR_RANK_SHADOW = """
+CREATE TABLE IF NOT EXISTS sector_rank_shadow (
+    rowid_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_ts INTEGER NOT NULL,
+    sector_etf_symbol TEXT NOT NULL,
+    momentum_rank INTEGER NOT NULL,
+    momentum_z REAL NOT NULL DEFAULT 0.0,
+    candidate_symbols TEXT NOT NULL DEFAULT '',
+    delta_from_prior REAL,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_SECTOR_RANK_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_sector_rank_shadow_symbol
+    ON sector_rank_shadow(sector_etf_symbol, cycle_ts DESC);
+"""
+
 # Gate→outcome instrumentation (BUILD, behavior 0) — one row per G3/G4 GPT
 # decision on the bar entry pipeline. ``decision='KILL'`` rows are the killed
 # signals whose counterfactual forward marks (1h/4h/24h first-1m-bar closes,

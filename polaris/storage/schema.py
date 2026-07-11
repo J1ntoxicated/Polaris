@@ -115,6 +115,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
     DDL_REPLAY_RUNS_INDEX,
+    DDL_SECTOR_RANK_SHADOW,
+    DDL_SECTOR_RANK_SHADOW_INDEX,
     DDL_STRATEGY_REGIME_PRIOR,
     DDL_STRATEGY_RISK_STATE,
     DDL_V_G34_COHORT_OUTCOMES,
@@ -210,6 +212,10 @@ ALL_DDL: tuple[str, ...] = (
     # is logged (zero capital at risk; durability of the thin sample accrues live).
     DDL_WEEKEND_SHADOW_ORDERS,
     DDL_WEEKEND_SHADOW_ORDERS_INDEX,
+    # Sector/dual-momentum rotation context SHADOW (#8, G1) — 11-sector-ETF
+    # relative-momentum rank + z, recorded on the monthly rebalance boundary.
+    DDL_SECTOR_RANK_SHADOW,
+    DDL_SECTOR_RANK_SHADOW_INDEX,
     DDL_AI_LESSONS,
     DDL_AI_LESSONS_INDEX,
     DDL_META_LABELS,

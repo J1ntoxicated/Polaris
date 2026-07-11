@@ -84,9 +84,11 @@
     bayRect: { x0: 0.02, x1: 0.275, y0: 0.30, y1: 0.44 },
     watchDivider: 0.438, watchRow: 0.452,
     railY: 0.492, railZigzag: 0.009,
-    gateBusY: 0.655, gateBusFloor: 0.655, gateBusCeil: 0.70,
+    // Jin 2026-07-11 "전략이랑 게이트 라인 분리 좀 — 파이프 더 아래로":
+    // bus dropped 0.655->0.695 + flattened, regime row follows to 0.80.
+    gateBusY: 0.695, gateBusFloor: 0.695, gateBusCeil: 0.735,
     registerRect: { x0: 0.962, x1: 0.988, y0: 0.575, y1: 0.745 },
-    regimeY: 0.775,
+    regimeY: 0.80,
     ladderBand: {
       y0: 0.815, y1: 0.955,
       gateOps: { x0: 0.36, x1: 0.52 }, cellLedger: { x0: 0.54, x1: 0.76 }, br: { x0: 0.78, x1: 0.988 },
@@ -189,8 +191,10 @@
       const t = i / (GATE_IDS.length - 1);
       const rg = rngFor(gid + ':stagger');
       const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
-      let y = H * WALL_ZONES.gateBusY + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.055
-        + Math.cos(t * Math.PI * 0.9) * H * 0.02 + (rg() - 0.5) * H * 0.034;
+      // amplitude tamed with the lower bus (0.055/0.02/0.034 -> 0.036/0.013/
+      // 0.022): the pipe reads as one calm line well clear of the rail.
+      let y = H * WALL_ZONES.gateBusY + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.036
+        + Math.cos(t * Math.PI * 0.9) * H * 0.013 + (rg() - 0.5) * H * 0.022;
       // g5-g8 clamp (Jin 2026-07-11 console v2, unresolved friction #1): the
       // back half of the S-curve used to drift up into the strategy rail's y
       // band — flatten it into a tight floor..ceil strip so the >=0.13H

@@ -479,7 +479,10 @@
     const venues = Array.from(new Set(regs.map((r) => r.venue))).sort();
     const classes = Array.from(new Set(regs.map((r) => r.group_id))).sort();
     const cell = 9, gap = 5; // header 4-char at 5px mono ~12px — pitch 14 clears it (review MED)
-    const x0 = W * 0.21, y0 = H * 0.83;
+    // RIGHT-anchored at 0.278W: px pitch keeps labels legible at any viewport
+    // while the matrix right edge stays fractional — the pocket to SCOUT
+    // SHADOW (x0 0.285W) is structurally >=0.007W (exposure review MED).
+    const x0 = W * 0.278 - (classes.length * (cell + gap) + 9), y0 = H * 0.83;
     ctx.font = '600 6px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(160,200,235,0.35)'; ctx.textAlign = 'left';
     ctx.fillText('REGIME MATRIX', x0, y0 - 4);
     classes.forEach((cls, ci) => {
@@ -526,7 +529,9 @@
     ['momentum_z', 'MOMZ'], ['tsmom_shadow', 'TSMOM'], ['meta_labels', 'META'],
   ];
   function drawScoutShadow(ctx, c, W, H) {
-    const x0 = W * 0.285, x1 = W * 0.355, y0 = H * 0.816, y1 = H * 0.950;
+    // y0 0.816->0.834: regime-row leader labels (0.80H + drop) were kissing
+    // the panel title at every width (exposure review MED-b).
+    const x0 = W * 0.285, x1 = W * 0.355, y0 = H * 0.834, y1 = H * 0.950;
     panelFrame(ctx, x0, y0, x1, y1, 'SCOUT SHADOW');
     const chans = (c && c.shadow_channels) || {};
     const nowEpoch = Date.now() / 1000; // data freshness, not frame-animation clock

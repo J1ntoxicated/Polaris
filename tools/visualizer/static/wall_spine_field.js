@@ -1201,13 +1201,25 @@
       // Gate-satellite reassignment (orbitGateTarget): these left the
       // register column's text rows for a gate-adjacent dot, so they need
       // their own leader label here instead of drawRegister's row text.
-      if (node.cluster === 'orbit' && orbitGateTarget(node)) {
+      const gid = orbitGateTarget(node);
+      if (node.cluster === 'orbit' && gid) {
         const val = node.value != null ? node.value.toFixed(2) : null;
         const text = String(node.label || '').split(':')[0].toLowerCase() + (val ? ' ' + val : '');
-        labelItems.push({
+        const item = {
           id: node.id, x: s.x, y: s.y, cluster: node.cluster,
           text: text.slice(0, 16), color: '#8a94b0', alpha: node.state === 'dormant' ? 0.3 : 0.75,
-        });
+        };
+        // g5's innermost runner-learner satellite (buildLayout, j=0,
+        // ang=1.1pi, rad=54) sits only ~51px WEST of the g5 core — pin its
+        // label to that same side so it can't swing back east across the
+        // bright g5 nucleus (round-3 fix: it was landing on the lane
+        // engine's default right lane and stamping "session_mult" straight
+        // through the gate glow). Scoped to session_mult only — regime_mult/
+        // max_hold (j=1/j=2) sit further out AND closer to the g4/g5
+        // midpoint, so pinning them west too swings them into g4's title
+        // instead; they already read clean under the generic lane engine.
+        if (gid === 'g5' && String(node.label || '').startsWith('session_mult')) item.preferSide = -1;
+        labelItems.push(item);
         return;
       }
       if (node.cluster !== 'reg' && node.cluster !== 'probe') return;

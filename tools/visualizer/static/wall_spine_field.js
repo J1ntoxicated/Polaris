@@ -122,6 +122,10 @@
     if (n.orbit_kind === 'learner' && RUNNER_LEARNER_IDS.has(String(n.label || '').split(':')[0])) return 'g5';
     return null;
   }
+  // G8->G5 runner-update gold pulse (item 3): last real .value seen per
+  // runner-learner id, so a genuine strategy_risk_state/runner change fires
+  // the pulse exactly once — no periodic loop, no fire when data is absent.
+  const runnerLastValue = new Map();
 
   let CLUSTER_COLOR = {};
   // Venue glow colors — same hexes as the page legend (.wall-venues) so a
@@ -154,6 +158,13 @@
     if (afterglow.length > AFTERGLOW_MAX) afterglow.shift();
   }
   const MIGRATE_IDLE_MS = 150000;
+  // Capture glide-in (Jin 2026-07-11 effect-builder round, item 1): a mkt
+  // ticker newly promoted into the S/A/B focus tier by the watchlist_focus
+  // cycle (tier_label — already shipped on every mkt node, see
+  // polaris_graph.py's per-cycle tier query) glides from its dimmed backdrop
+  // slot to its new candidate slot instead of snapping. Poll-diff only —
+  // null on first boot so the initial universe never "captures" itself.
+  let prevFocusIds = null;
   // Strategy-constellation assignment (Jin 2026-07-10 "전략들이 보고있는
   // 티커들 링크해서 클러스터"): mkt ticker id -> its strategy node id.
   const tickerStrat = new Map();
@@ -203,6 +214,24 @@
     allNodes.forEach((n) => { nodeById[n.id] = n; });
     CLUSTER_COLOR = {};
     (data.clusters || []).forEach((c) => { CLUSTER_COLOR[c.id] = c.color; });
+
+    // Capture glide-in snapshot (item 1): grab each newly-focused mkt
+    // ticker's OLD screen[] slot (its dimmed backdrop position from the
+    // PRIOR poll) before anything below overwrites it. Applied once the new
+    // (candidate) position has settled, at the bottom of this function.
+    const newFocusIds = new Set();
+    allNodes.forEach((n) => {
+      if (n.cluster === 'mkt' && (n.tier_label === 'S' || n.tier_label === 'A' || n.tier_label === 'B')) newFocusIds.add(n.id);
+    });
+    const capturedGlides = [];
+    if (prevFocusIds) {
+      newFocusIds.forEach((id) => {
+        if (prevFocusIds.has(id)) return;
+        const old = screen[id];
+        if (old && old.x != null) capturedGlides.push({ id, fx: old.x, fy: old.y });
+      });
+    }
+    prevFocusIds = newFocusIds;
 
     // Gate spine: gentle S-curve across the middle + a small deterministic
     // per-gate force-stagger (graft 1a, organic) so the 8 relay-hubs read as
@@ -588,6 +617,21 @@
         livingIds.push(node.id); // amp 0 (strat) draws static at its anchor
       }
     });
+
+    // Apply the capture glide now that the new (candidate) position has
+    // settled, plus a one-shot G1 tick mark. Reuses markFire (no new flash
+    // mechanic) and the migrations Map's existing 'return'-phase tween —
+    // same shape migrateHome() seeds, so it auto-deletes itself at t>=1.
+    capturedGlides.forEach((g) => {
+      if (migrations.has(g.id)) return; // real pipeline journey in progress — don't clobber it
+      const s = screen[g.id];
+      if (!s || (s.x === g.fx && s.y === g.fy)) return;
+      migrations.set(g.id, {
+        fx: g.fx, fy: g.fy, tx: s.x, ty: s.y, t: 0, dur: 0.6, phase: 'return',
+        lastMs: performance.now(), gateIdx: -1, stops: [], dwellUntil: 0,
+      });
+      markFire('g1', 260);
+    });
   }
 
   // Cheap per-poll refresh: node dynamic fields (state/intensity/pnl) change
@@ -603,6 +647,7 @@
       const s = screen[n.id];
       if (!s) return;
       s.node = n;
+      checkRunnerPulse(n);
       if (n.cluster === 'mkt') s.baseAlpha = 0.16 + s.depth * 0.09 + (n.intensity || 0.3) * 0.12;
       else if (n.cluster === 'watch') s.baseAlpha = 0.26 + (n.intensity || 0.4) * 0.12; // buildLayout dim과 동기 (리뷰 MED)
       else if (n.cluster === 'strat') s.baseAlpha = 0.55 + Math.min(0.35, (n.intensity || 0.3) * 0.4);
@@ -987,6 +1032,10 @@
     });
 
     buildWhisperMesh();
+    // Runner-update gold pulse (item 3): edgeCache only holds the g8->g5 and
+    // runner->g5 strands once this function has run, so the relayout-path
+    // diff check lives HERE (refreshNodeState covers the no-relayout path).
+    allNodes.forEach(checkRunnerPulse);
   }
   let lastProbeLinks = [];
   const addWatchDrop = []; // [mktId, watchId] — buildLayout이 채우고 buildEdges가 그림
@@ -1005,6 +1054,28 @@
       if (pulses[i].t >= 1) pulses.splice(i, 1);
     }
     if (Math.random() < 0.62) spawnPulse();
+  }
+  // One-shot event pulse on a SPECIFIC edge (vs spawnPulse's random ambient
+  // pick) — same pool, same render/step path, just a targeted seed. `rev`
+  // rides the edge tail->head instead of head->tail; `color` overrides the
+  // edge's own hue (item 3's runner strand isn't gold at rest).
+  function spawnPulseOn(edge, opts) {
+    if (!edge || pulses.length >= MAX_PULSES) return;
+    pulses.push({ e: edge, t: 0, speed: (opts && opts.speed) || 0.22, rev: !!(opts && opts.rev), color: (opts && opts.color) || null });
+  }
+  // G8->G5 runner-update gold pulse (item 3): rides the SAME static gold
+  // hairline the G6->G8->G5 wiring already lays down (buildEdges) onward to
+  // the specific runner's own strand — two legs of one existing pool.
+  function runnerPulse(nodeId) {
+    spawnPulseOn(edgeCache.get('g8->g5'), { speed: 0.4, color: FEEDBACK_COLOR });
+    spawnPulseOn(edgeCache.get(nodeId + '->g5'), { speed: 0.4, rev: true, color: FEEDBACK_COLOR });
+  }
+  function checkRunnerPulse(n) {
+    if (n.cluster !== 'orbit' || n.orbit_kind !== 'learner' || n.value == null) return;
+    if (orbitGateTarget(n) !== 'g5') return;
+    const prev = runnerLastValue.get(n.id);
+    if (prev != null && prev !== n.value) runnerPulse(n.id);
+    runnerLastValue.set(n.id, n.value);
   }
 
   function markFire(id, ms) {
@@ -1161,9 +1232,10 @@
     });
     ctx.globalCompositeOperation = 'lighter';
     pulses.forEach((p) => {
-      const pt = bezierPoint(p.e, p.t);
+      const pt = bezierPoint(p.e, p.rev ? 1 - p.t : p.t);
       const fade = Math.sin(Math.min(1, p.t) * Math.PI);
-      drawDot(ctx, pt.x, pt.y, 1.1, p.e.color.startsWith('#') ? p.e.color : GATE_HALO, 0.32 * fade, 3);
+      const col = p.color || (p.e.color.startsWith('#') ? p.e.color : GATE_HALO);
+      drawDot(ctx, pt.x, pt.y, 1.1, col, 0.32 * fade, 3);
     });
     ctx.globalCompositeOperation = 'source-over';
     stepPulses(dt);

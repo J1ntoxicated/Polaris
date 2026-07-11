@@ -95,6 +95,7 @@
     },
   };
 
+  const PROBE_ORBIT_SEC = 75; // patrol period — slow, element-local
   const GATE_HALO = '#5fd7ff';
   const FEEDBACK_COLOR = '#ffb454'; // gold — G8->G2 plasticity strand
   // graft 4 (radial LINEAGE_HUES) — small hue spread so several live-open
@@ -387,9 +388,21 @@
     // so they belong ON g6: a tidy left-to-top arc hugging the nucleus
     // (same satellite grammar as G1's tier census), clear of the pos band
     // below and the exit side to the right (Jin: "게이트 주변에 정리").
+    // Probe PATROL orbit (Jin 2026-07-11 "프로브들은 게이트 주변 선회하면
+    // 이상한가?" — 아니, 감시 위성 은유 그대로): active probes circle g6 on
+    // a slow ~75s period; dormant probes PARK at their base angle
+    // (rotation = meaning 계약 — 도는 것 자체가 "지금 판정 활동 중" 신호).
+    // Anchor is computed at the CURRENT orbital angle each poll so baked
+    // edges/labels track within ~5px; the per-frame pass below interpolates.
     (byCluster.probe || []).forEach((n, j) => {
-      const ang = Math.PI * 1.05 + j * 0.42;
-      screen[n.id] = { x: gG6.x + Math.cos(ang) * 84, y: gG6.y + Math.sin(ang) * 58 };
+      const ang0 = Math.PI * 1.05 + j * 0.42;
+      const active = n.state !== 'dormant';
+      const th = active ? (Date.now() / 1000 % PROBE_ORBIT_SEC) / PROBE_ORBIT_SEC * Math.PI * 2 : 0;
+      const ang = ang0 + th;
+      screen[n.id] = {
+        x: gG6.x + Math.cos(ang) * 84, y: gG6.y + Math.sin(ang) * 58,
+        probeOrbit: { cx: gG6.x, cy: gG6.y, rx: 84, ry: 58, ang0, active },
+      };
     });
     jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
     // exit_tally placement SKIPPED (Jin 2026-07-11 console v2 M2): the 6
@@ -1064,8 +1077,20 @@
       if (migrations.has(id)) continue; // traveler — drawn at its migrated pos
       const s = screen[id];
       if (!s) continue;
-      const bx = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
-      const by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
+      let bx, by;
+      if (s.probeOrbit && s.probeOrbit.active) {
+        // patrol orbit — the orbit IS the anchor: s.x/y advance each frame so
+        // the 1s static bake (labels) and glow/wire readers of screenOf all
+        // track the patrol instead of pointing at a parked ghost slot.
+        const o = s.probeOrbit;
+        const th = (Date.now() / 1000 % PROBE_ORBIT_SEC) / PROBE_ORBIT_SEC * Math.PI * 2;
+        s.x = o.cx + Math.cos(o.ang0 + th) * o.rx;
+        s.y = o.cy + Math.sin(o.ang0 + th) * o.ry;
+        bx = s.x; by = s.y;
+      } else {
+        bx = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
+        by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
+      }
       drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
     }
     // Strategy slot pips (Jin 2026-07-11 "전략마다 활성화 개수 정해져있어?"

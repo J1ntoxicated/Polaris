@@ -340,3 +340,38 @@ async def test_404_submissions_for_cik_is_skipped_gracefully() -> None:
     out = await coll.fetch(client=client)
     await client.aclose()
     assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_rotating_batch_bounds_sweep(monkeypatch: Any) -> None:
+    """~1,500-symbol universe must NOT be swept in one fetch — each cycle
+    processes <=_SWEEP_BATCH and the cursor advances so successive fetches
+    cover disjoint slices (producer head-of-line starvation guard)."""
+    from polaris.core.altdata import edgar_events as mod
+
+    seen: list[str] = []
+
+    async def fake_recent(self: Any, cli: Any, cik: str, headers: Any) -> list[Any]:
+        seen.append(cik)
+        return []
+
+    monkeypatch.setattr(mod.EdgarEventsCollector, "_recent_filings", fake_recent)
+    monkeypatch.setattr(mod, "_SWEEP_BATCH", 3)
+    syms = tuple(f"SY{i}" for i in range(8))
+    coll = mod.EdgarEventsCollector(symbols_override=syms)
+
+    async def fake_cik_map(self: Any, cli: Any, headers: Any) -> dict[str, str]:
+        return {s: str(1000 + i) for i, s in enumerate(syms)}
+
+    monkeypatch.setattr(mod.EdgarEventsCollector, "_cik_map_for", fake_cik_map)
+    monkeypatch.setattr(mod, "_pace_sec", lambda: 0.0)
+
+    client, _ = _client(lambda req: {})
+    await coll.fetch(client=client)
+    first = list(seen)
+    assert len(first) == 3
+    await coll.fetch(client=client)
+    second = seen[3:]
+    assert len(second) == 3
+    assert set(first).isdisjoint(second)
+    await client.aclose()

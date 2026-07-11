@@ -60,6 +60,9 @@ _PACE_DEFAULT: Final[float] = 0.15
 # Ticker->CIK bulk map: fetched once, refreshed at most ~daily (the mapping
 # barely churns intraday).
 _CIK_MAP_TTL_SEC: Final[float] = 24 * 3600.0
+# per-fetch symbol budget (env-tunable) — see fetch()'s rotating-batch note
+_SWEEP_BATCH_ENV: Final[str] = "POLARIS_EDGAR_SWEEP_BATCH"
+_SWEEP_BATCH: Final[int] = int(os.environ.get(_SWEEP_BATCH_ENV, "") or 150)
 
 
 def _pace_sec() -> float:
@@ -195,6 +198,7 @@ class EdgarEventsCollector:
         self._forms = forms
         self._cik_map: dict[str, str] | None = None
         self._cik_map_ts: float = 0.0
+        self._sweep_cursor: int = 0  # rotating-batch position (see fetch())
 
     def _resolve_symbols(self) -> tuple[str, ...]:
         if self._symbols_override is not None:
@@ -207,6 +211,18 @@ class EdgarEventsCollector:
         symbols = self._resolve_symbols()
         if not symbols:
             return {}
+        # Rotating batch (2026-07-11 라이브 포렌식): a full ~1,500-symbol sweep
+        # takes 60min+ at SEC pace and the altdata producer is a single loop —
+        # one unbounded fetch head-of-line starves EVERY other collector
+        # (news_sentiment 900s GPT evidence first). Cap each fetch to a batch
+        # and carry a cursor so a whole universe pass completes over ~10
+        # cycles (~2.5h at ttl 900s) — filings are daily-scale events, so the
+        # pass period is far inside the signal's own timescale.
+        if len(symbols) > _SWEEP_BATCH:
+            start = self._sweep_cursor % len(symbols)
+            rotated = symbols[start:] + symbols[:start]
+            symbols = rotated[:_SWEEP_BATCH]
+            self._sweep_cursor = start + _SWEEP_BATCH
         headers = {"User-Agent": self._user_agent, "Accept": "application/json"}
         own = client is None
         cli = client or httpx.AsyncClient(timeout=REST_TIMEOUT_SEC, headers=headers)

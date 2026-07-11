@@ -559,11 +559,20 @@
   /* ===== header SHADOW counter (Jin 2026-07-11) — the top-bar "SHADOW" stat
    * used to read gate_shadow_events mismatch-only rows (flow_stats'
    * shadow_mismatch_n — usually 0, a dead-looking reading). Wired here to
-   * the real per-poll sum across every shadow channel above instead, so it
-   * actually reflects the accumulating exposure. This is the SOLE writer of
-   * #s-shadow (wall_spine_hud.js's renderSummary no longer touches it — see
-   * its comment) — object-identity gated so it only re-runs once per NEW
+   * the real per-poll sum across the accumulating shadow channels above
+   * instead, so it reflects growing exposure. ``momentum_z`` is EXCLUDED —
+   * per polaris_graph.py's _query_shadow_channels, its n is
+   * ``COUNT(*) FROM universe WHERE momentum_z IS NOT NULL``, a point-in-time
+   * universe-coverage snapshot (not an append-only event/row count like the
+   * other six), so it doesn't accumulate and can fall as the universe
+   * shrinks — summing it into "SHADOW" would mix a snapshot term into an
+   * accumulation total and make the header both over-read and non-monotonic.
+   * (Still shown per-channel in the SCOUT SHADOW panel above, just not
+   * folded into this header sum.) This is the SOLE writer of #s-shadow
+   * (wall_spine_hud.js's renderSummary no longer touches it — see its
+   * comment) — object-identity gated so it only re-runs once per NEW
    * console object rather than every 60fps draw() frame. */
+  const SHADOW_HEADER_CHANNELS = SHADOW_CHANNELS.filter(([key]) => key !== 'momentum_z');
   let shadowHeaderC;
   function updateShadowHeader(c) {
     if (c === shadowHeaderC) return;
@@ -571,7 +580,7 @@
     const el = document.getElementById('s-shadow');
     if (!el) return;
     const chans = (c && c.shadow_channels) || {};
-    const total = SHADOW_CHANNELS.reduce((a, [key]) => a + ((chans[key] && chans[key].n) || 0), 0);
+    const total = SHADOW_HEADER_CHANNELS.reduce((a, [key]) => a + ((chans[key] && chans[key].n) || 0), 0);
     el.textContent = String(total);
   }
 

@@ -1320,6 +1320,13 @@ _SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
     "edgar_filings": None,
     "earnings_calendar": None,
     "stablecoin_liquidity": None,
+    # gate-satellite reassignment (Jin 2026-07-11) — NOT rendered as SCOUT
+    # SHADOW panel rows (wall_console_readouts.js's SHADOW_CHANNELS/
+    # SCOUT_FEEDS arrays are a separate hardcoded list that doesn't include
+    # these two keys); they feed the new G4 preentry VWAP/SQUEEZE satellites
+    # instead (freshness-first, not count-gated, same as the FEEDS above).
+    "vwap_timing_shadow_1h": None,
+    "squeeze_shadow": None,
 }
 _shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
 _SHADOW_CHANNELS_TTL = 5.0
@@ -1347,16 +1354,29 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
         for name, target in _SHADOW_CHANNEL_TARGETS.items()
     }
     out["momentum_z"]["spread"] = None
+    # gate-satellite reassignment (Jin 2026-07-11): G4's new VWAP satellite
+    # wants a recent-1h reading count, not the lifetime total the plain
+    # ``vwap_timing_shadow`` channel above already carries — a fixed,
+    # trusted (not user-input) integer literal, same embedding style as the
+    # other hardcoded WHERE clauses in this tuple list.
+    _vwap_1h_cutoff = int(now) - 3600
     if db_path.exists():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
             for name, table, where in (
                 ("calibration_pairs", "calibration_pairs", ""),
                 ("vwap_timing_shadow", "vwap_timing_shadow", ""),
+                ("vwap_timing_shadow_1h", "vwap_timing_shadow",
+                 f"WHERE created_ts >= {_vwap_1h_cutoff}"),
                 ("news_timing_shadow", "news_timing_shadow", ""),
                 ("sector_rank_shadow", "sector_rank_shadow", ""),
                 ("tsmom_shadow", "gate_shadow_events",
                  "WHERE technical_flags = 'tsmom_shadow_literature'"),
+                # G4's new SQUEEZE satellite — ttm_squeeze_shadow.py's 4
+                # squeeze_on/squeeze_release_* technical_flags values, any of
+                # which mean "a squeeze shadow reading landed" (item 2).
+                ("squeeze_shadow", "gate_shadow_events",
+                 "WHERE technical_flags LIKE 'squeeze_%'"),
                 ("meta_labels", "meta_labels", ""),
                 ("edgar_filings", "edgar_filings", ""),
                 ("earnings_calendar", "earnings_calendar", ""),

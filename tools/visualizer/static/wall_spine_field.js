@@ -104,6 +104,25 @@
   const LINEAGE_HUES = ['#87d7ff', '#9fc7ff', '#7ec8e3', '#a7d8ff', '#8fe0d0'];
   const GATE_IDS = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8'];
 
+  // Gate-satellite reassignment (Jin 2026-07-11 "게이트 소속 재분류"): specific
+  // orbit_kind=ai_judge role satellites + the 3 featured learner runners
+  // (session_mult/regime_mult/max_hold — the ONLY learner ids the snapshot
+  // ever emits, snapshot_sections.py's _LEARNER_FEATURED) leave the g8
+  // register column and become satellites of the gate they actually feed —
+  // input/consumption relationship, not a rotating vote. post_trade_reflector
+  // + providers + obs/action/axis are untouched (still g8 register rows).
+  // Shared by buildLayout (placement), buildEdges (wiring) and
+  // renderStaticLayer (labels) so all three agree on where a node landed;
+  // also exported (gateSatelliteOf) so wall_console_readouts.js's register
+  // column can exclude these rows without duplicating this table.
+  const AI_JUDGE_GATE = { validator: 'g3', entry_judge: 'g4', exit_advise: 'g7' };
+  const RUNNER_LEARNER_IDS = new Set(['session_mult', 'regime_mult', 'max_hold']);
+  function orbitGateTarget(n) {
+    if (n.orbit_kind === 'ai_judge') return AI_JUDGE_GATE[n.label] || null;
+    if (n.orbit_kind === 'learner' && RUNNER_LEARNER_IDS.has(String(n.label || '').split(':')[0])) return 'g5';
+    return null;
+  }
+
   let CLUSTER_COLOR = {};
   // Venue glow colors — same hexes as the page legend (.wall-venues) so a
   // firing ticker reads as "its exchange is alive" (Jin 2026-07-10).
@@ -368,7 +387,7 @@
       }
     });
 
-    const gG3 = gateScreen[2], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
+    const gG3 = gateScreen[2], gG5 = gateScreen[4], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
     // REGIME row (Jin 2026-07-11 "공간활용"): even-pitch labelled row filling
     // the bottom-left void (above the DROP LANE overlay), feeding g3.
     (byCluster.reg || []).forEach((n, j, arr) => {
@@ -414,6 +433,38 @@
     // color/bob pass below) already guards on `if (!screen[id]) return`, so
     // this degrades cleanly — no dangling wires, no undefined draws.
 
+    // Gate-satellite placement (orbitGateTarget, module scope above): the
+    // validator/entry_judge/exit_advise ai_judge roles park a fixed slot
+    // beside their owning gate (upper-left, angle 1.3π — clear of the
+    // regime row's lower-left arrival into g3, see buildEdges); the 3
+    // runner-learner nodes fan out around g5 in the same small-arc grammar
+    // G1's tier census satellites use (angle step, no rotation — these carry
+    // no activity signal worth patrolling). Radius 56-62 clears the gate's
+    // own reticle chrome (wall_spine.js's drawGates corner brackets sit at
+    // ringR+12=52) — G1's tier census precedent (radius 78/60) confirms
+    // satellites read cleanly once clear of that band.
+    let runnerJ = 0;
+    (byCluster.orbit || []).forEach((n) => {
+      const gid = orbitGateTarget(n);
+      if (!gid) return;
+      if (gid === 'g5') {
+        // West/upper-left arc (Jin 2026-07-11 self-critique round 1,
+        // Playwright screenshot): g5 is an EVEN gate index so wall_spine.js's
+        // drawGates() puts its OWN "g5 · sizer" title BELOW (south, ~90°) —
+        // the original 0.62π-based angle band sat almost exactly there and
+        // stamped "session_mult" right through the gate title text. Same
+        // upper-left quadrant the ai_judge satellites already use cleanly.
+        const ang = Math.PI * 1.1 + runnerJ * 0.35;
+        screen[n.id] = { x: gG5.x + Math.cos(ang) * 56, y: gG5.y + Math.sin(ang) * 42 };
+        runnerJ++;
+        return;
+      }
+      const gs = gateScreen[GATE_IDS.indexOf(gid)];
+      if (!gs) return;
+      const ang = Math.PI * 1.3;
+      screen[n.id] = { x: gs.x + Math.cos(ang) * 62, y: gs.y + Math.sin(ang) * 46 };
+    });
+
     // Register column (Jin 2026-07-11 console v2 M2, unresolved friction #2):
     // the g8 satellite cloud (learners/AI judges/session·liq·crisis axes/
     // gate-decision tallies/health) used to park in a random ring around g8
@@ -421,7 +472,14 @@
     // registerRect), same node ids/data (fingerprint-stable, no rewiring),
     // coordinates only. wall_console_readouts.js's drawRegister() renders the
     // name/value/delta text for each row; no orbit, no rotation.
-    const meta = [].concat(byCluster.action || [], byCluster.obs || [], byCluster.orbit || [], byCluster.axis || []);
+    // orbit is filtered to drop the gate-satellite rows placed above — they
+    // draw at their new gate-adjacent position instead (see
+    // renderStaticLayer's labelItems), not a second time here.
+    const meta = [].concat(
+      byCluster.action || [], byCluster.obs || [],
+      (byCluster.orbit || []).filter((n) => !orbitGateTarget(n)),
+      byCluster.axis || [],
+    );
     const regZ = WALL_ZONES.registerRect;
     // Dot sits at the column's LEFT edge (not center) — the registerRect is
     // only ~0.026W wide, too narrow for BOTH a centered dot and its
@@ -754,6 +812,20 @@
       const a = gateScreen[7], b = gateScreen[1];
       addAmbient('g8', 'g2', a.x, a.y, b.x, H * 0.985, { color: FEEDBACK_COLOR, alpha: 0.26, width: 1.3, glow: true, kind: 'feedback', bowScale: 2.6 });
     }
+    // G6 reading -> G8 reflector -> G5 runner update (Jin 2026-07-11 gate-
+    // satellite reassignment item 4): same gold plasticity-strand hue as the
+    // g8->g2 feedback loop above, but STATIC hairlines (default 'ambient'
+    // kind — no breathing) — a standing wiring relationship, not a live
+    // pulse. Ends at the g5 nucleus, which the 3 runner-learner satellites
+    // (session_mult/regime_mult/max_hold, see buildLayout) already orbit.
+    {
+      const a = gateScreen[5], b = gateScreen[7];
+      addAmbient('g6', 'g8', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.14, width: 0.5, bowScale: 0.6 });
+    }
+    {
+      const a = gateScreen[7], b = gateScreen[4];
+      addAmbient('g8', 'g5', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.14, width: 0.5, bowScale: 0.6 });
+    }
 
     const strat = allNodes.filter((n) => n.cluster === 'strat');
     // Constellation spokes: each ticker links to ITS strategy (short local
@@ -791,7 +863,11 @@
     const g3 = gateScreen[2];
     allNodes.filter((n) => n.cluster === 'reg').forEach((n) => {
       const a = screen[n.id]; if (!a) return;
-      addAmbient(n.id, 'g3', a.x, a.y, g3.x, g3.y, { color: CLUSTER_COLOR.reg, alpha: 0.28, width: 1.0 });
+      // Strengthened (Jin 2026-07-11 gate-satellite reassignment item 1):
+      // the validator AI judge now sits beside g3 too — the regime row's
+      // input relationship into g3 needed to read at least as strong as the
+      // new satellite's own leader line, not fainter.
+      addAmbient(n.id, 'g3', a.x, a.y, g3.x, g3.y, { color: CLUSTER_COLOR.reg, alpha: 0.34, width: 1.3 });
     });
 
     const g6 = gateScreen[5];
@@ -815,7 +891,13 @@
     ['action', 'obs', 'orbit', 'axis'].forEach((cl) => {
       allNodes.filter((n) => n.cluster === cl).forEach((n) => {
         const a = screen[n.id]; if (!a) return;
-        addAmbient(n.id, 'g8', a.x, a.y, g8.x, g8.y, { color: CLUSTER_COLOR[cl], alpha: 0.16, width: 0.6 });
+        // Gate-satellite reassignment: retarget rather than skip, so the
+        // moved ai_judge/learner nodes still read as a wired input to their
+        // OWN gate instead of an orphaned dot (orbitGateTarget/buildLayout).
+        const gid = cl === 'orbit' ? orbitGateTarget(n) : null;
+        const gs = gid ? gateScreen[GATE_IDS.indexOf(gid)] : g8;
+        if (!gs) return;
+        addAmbient(n.id, gid || 'g8', a.x, a.y, gs.x, gs.y, { color: CLUSTER_COLOR[cl], alpha: 0.16, width: 0.6 });
       });
     });
 
@@ -1037,6 +1119,18 @@
         });
         return;
       }
+      // Gate-satellite reassignment (orbitGateTarget): these left the
+      // register column's text rows for a gate-adjacent dot, so they need
+      // their own leader label here instead of drawRegister's row text.
+      if (node.cluster === 'orbit' && orbitGateTarget(node)) {
+        const val = node.value != null ? node.value.toFixed(2) : null;
+        const text = String(node.label || '').split(':')[0].toLowerCase() + (val ? ' ' + val : '');
+        labelItems.push({
+          id: node.id, x: s.x, y: s.y, cluster: node.cluster,
+          text: text.slice(0, 16), color: '#8a94b0', alpha: node.state === 'dormant' ? 0.3 : 0.75,
+        });
+        return;
+      }
       if (node.cluster !== 'reg' && node.cluster !== 'probe') return;
       labelItems.push({
         id: node.id, x: s.x, y: s.y, cluster: node.cluster,
@@ -1246,6 +1340,7 @@
     findNode: (pred) => allNodes.find(pred),
     nodeById: (id) => nodeById[id],
     nodesOf: (cluster) => allNodes.filter((n) => n.cluster === cluster),
+    gateSatelliteOf: orbitGateTarget,
     sizeOf: () => ({ W, H }),
     WALL_ZONES,
   };

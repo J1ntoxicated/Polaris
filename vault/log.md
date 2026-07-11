@@ -410,3 +410,4 @@
 2026-07-11 05:48 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_19d24629-a40-11/polaris/scripts/production_paper_loop.py]
 2026-07-11 07:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=176 learners=3 paper=True]
 - 2026-07-11: frontgate 섀도우 웨이브 머지(022c344) — 검증 10/10·Sonnet 11커밋·Opus 3렌즈+컨덕터 마감(CRITICAL 빈 mv.bars 틱중단 차단 등 4건). 봇 재기동(PID 22385) 부팅클린, 섀도우 실쌓임 개시(calib 7·vwap 7·momentum_z 176). Finnhub 키 개통(.env FINNHUB_API_KEY, 스모크 OK).
+- 2026-07-11: /flow 익스포저 랜딩(95e3bf4) — SCOUT SHADOW 패널(7채널 n/승격목표 진행바+신선도)·헤더 SHADOW 실배선. Opus 2렌즈+컨덕터 마감(매트릭스 우측-앵커·패널 0.834H — 1920/1440 겹침 0 실증). 라이브 에러 0.

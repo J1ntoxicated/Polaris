@@ -47,6 +47,9 @@ from polaris.core.live_recalc.strategy_swap import (
     evaluate_strategy_swap,
 )
 from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
+from polaris.core.pipeline.agents.tsmom_literature_shadow import (
+    log_tsmom_literature_shadow,
+)
 from polaris.core.sizing.constants import production_default_equity_usd
 from polaris.core.streams import resolve_stream
 from polaris.core.ticks.config import TICK_ENGINE_OWNED_VENUES, tick_engine_owns_okx
@@ -927,6 +930,19 @@ async def _run_tick(
                 )
                 state.fault_events += 1
                 continue
+            # Frontgate item #2 — TSMOM literature-fixed 12-1 shadow tagger
+            # (G2 behavior-0). Computed on EVERY 1D bar for every focus
+            # symbol, independent of tsmom_12_1_multiasset's own monthly
+            # rebalance emit-gate — logs sign/strength to gate_shadow_events
+            # ONLY, never reads back into sizing/entry/exit. Best-effort: the
+            # function is internally fail-open (conn/warmup/write-fault ->
+            # no-op), so no additional try/except is needed here.
+            if timeframe == "1D":
+                log_tsmom_literature_shadow(
+                    conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
+                    venue=venue, symbol=symbol, regime=regime, bars=mv.bars,
+                    now_ts=now_ts,
+                )
             # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full
             # indicator set just computed in ``mv`` (rsi/adx/bb/donchian/ema/
             # momentum) so the AI judge / probes can read it as evidence (the judge

@@ -407,3 +407,6 @@
 - 2026-07-11: frontgate 데이터 소싱 플랜 landing — 3도메인 피드 스카우트 취합 → vault 2파일(data-sourcing-plan/catalog)+_index 갱신, 개통 순서 EDGAR→DefiLlama→Finnhub→Coinglass($29/mo 고지 대상)→GDELT, StockTwits 403 재분류.
 - 2026-07-11: 후방 소화계 마스터 블루프린트 codex R1 교차검증 — BREAK 5축 중 수용 7(마이그레이션 격리·#7 post-flip 상관 상시·#4↔#10 이중폴드 게이트·토큰 예산·콜-0 자구·frozen control+provenance·분포가드/fingerprint)/기각 2, APPROVE_WITH_AMENDMENTS → debates/backend_digestion_blueprint_r1_2026-07-11.md
 - 2026-07-11: 후방 대개편 마스터 블루프린트 랜딩(backgate-plan/ 7편+R1 디베이트, lint 0) — 핵심 수렴: 신규 아키텍처 불요, 끊긴 seam 재배선을 '섀도우 병기→오프라인 채점→항목별 독립 flip' 단일 리듬으로. W1~W5 시퀀스+충돌조정 8건. 로드맵 R6 등록.
+2026-07-11 05:48 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_19d24629-a40-11/polaris/scripts/production_paper_loop.py]
+2026-07-11 07:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=176 learners=3 paper=True]
+- 2026-07-11: frontgate 섀도우 웨이브 머지(022c344) — 검증 10/10·Sonnet 11커밋·Opus 3렌즈+컨덕터 마감(CRITICAL 빈 mv.bars 틱중단 차단 등 4건). 봇 재기동(PID 22385) 부팅클린, 섀도우 실쌓임 개시(calib 7·vwap 7·momentum_z 176). Finnhub 키 개통(.env FINNHUB_API_KEY, 스모크 OK).

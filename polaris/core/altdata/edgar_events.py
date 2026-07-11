@@ -77,6 +77,25 @@ def _cik_key(ticker: str) -> str:
     return ticker.strip().upper()
 
 
+def _cik_lookup(cik_map: dict[str, str], ticker: str) -> str | None:
+    """Dual-class separator-tolerant CIK lookup.
+
+    Live universe symbols use '.' for share classes (``BRK.B``) while SEC's
+    own ``company_tickers.json`` index uses '-' (``BRK-B``). A bare
+    ``cik_map.get(key)`` silently misses this pairing (no crash — just no
+    EDGAR coverage for that symbol), so try the swapped separator too.
+    """
+    key = _cik_key(ticker)
+    cik = cik_map.get(key)
+    if cik is not None:
+        return cik
+    if "." in key:
+        return cik_map.get(key.replace(".", "-"))
+    if "-" in key:
+        return cik_map.get(key.replace("-", "."))
+    return None
+
+
 def _parse_iso(raw: Any) -> _dt.datetime | None:
     if not isinstance(raw, str) or not raw:
         return None
@@ -199,7 +218,7 @@ class EdgarEventsCollector:
                 return {}
             now = _dt.datetime.now(_dt.UTC)
             for sym in symbols:
-                cik = cik_map.get(_cik_key(sym))
+                cik = _cik_lookup(cik_map, sym)
                 if not cik:
                     continue
                 try:

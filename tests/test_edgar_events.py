@@ -18,6 +18,7 @@ import pytest
 from polaris.core.altdata.edgar_events import (
     DEFAULT_FORMS,
     EdgarEventsCollector,
+    _cik_lookup,
     build_cik_map,
     parse_recent_filings,
 )
@@ -138,6 +139,16 @@ def test_build_cik_map_normalises_ticker_and_cik() -> None:
 def test_build_cik_map_skips_malformed_rows() -> None:
     body = {"0": {"ticker": "AAPL"}, "1": "not-a-dict", "2": {"cik_str": None, "ticker": "X"}}
     assert build_cik_map(body) == {}
+
+
+def test_cik_lookup_reconciles_dual_class_separator_mismatch() -> None:
+    """SEC's index keys dual-class tickers with '-' (BRK-B) while the live
+    universe stores '.' (BRK.B, per Alpaca) — and vice versa."""
+    mapping = {"BRK-B": "1067983", "AGM.A": "2222"}
+    assert _cik_lookup(mapping, "BRK.B") == "1067983"  # '.' -> '-' fallback
+    assert _cik_lookup(mapping, "BRK-B") == "1067983"  # exact hit, no fallback needed
+    assert _cik_lookup(mapping, "AGM-A") == "2222"  # '-' -> '.' fallback
+    assert _cik_lookup(mapping, "ZZZZ_UNKNOWN") is None
 
 
 # ── collector ─────────────────────────────────────────────────────────────
@@ -266,6 +277,34 @@ async def test_dual_class_shared_cik_both_symbols_persist(tmp_path: Path) -> Non
         ("GOOG", "0001652044-26-000123"),
         ("GOOGL", "0001652044-26-000123"),
     ]
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_dot_suffixed_symbol_resolves_via_hyphenated_sec_ticker(
+    tmp_path: Path,
+) -> None:
+    """Live universe stores dot-suffixed dual-class symbols (BRK.B) but SEC's
+    own company_tickers.json uses hyphens (BRK-B) — fetch() must still
+    resolve the CIK instead of silently skipping the symbol."""
+    conn = init_db(tmp_path / "t.sqlite")
+    tickers_body = {"0": {"cik_str": 1067983, "ticker": "BRK-B", "title": "Berkshire Hathaway"}}
+    submissions = {
+        "1067983": _submissions_body(
+            [
+                {"form": "10-Q", "filingDate": "2026-07-01",
+                 "acceptanceDateTime": "2026-07-01T12:00:00.000Z",
+                 "accessionNumber": "0001067983-26-000001"},
+            ]
+        )
+    }
+    coll = EdgarEventsCollector(symbols_override=("BRK.B",), conn=conn)
+    client, _ = _client(_router(submissions, tickers_body))
+    out = await coll.fetch(client=client)
+    await client.aclose()
+
+    assert out is not None
+    assert set(out) == {"BRK.B"}
     conn.close()
 
 

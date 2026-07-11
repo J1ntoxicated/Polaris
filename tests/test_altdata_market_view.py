@@ -94,6 +94,7 @@ def test_altdataview_default_all_neutral() -> None:
     assert av.vix is None
     assert av.crypto_fear_greed is None
     assert av.hy_spread is None
+    assert av.dfii10 is None
     assert av.is_neutral() is True
 
 
@@ -142,6 +143,21 @@ def test_map_macro_sources_populates_vix_hy() -> None:
     # crypto-only fields neutral.
     assert av.funding_rate is None
     assert av.crypto_fear_greed is None
+
+
+def test_map_macro_sources_populates_dfii10() -> None:
+    """Frontgate item #5 — DFII10 gold conviction context, same additive
+    None-default contract as vix/hy_spread."""
+    cache = _StubCache({"fred_macro": {"dfii10": 2.31}})
+    av = map_altdata_to_market_fields("commodity:XAU", cache, now_ts=1000.0)
+    assert av.dfii10 == 2.31
+    assert av.is_neutral() is False
+
+
+def test_map_absent_dfii10_is_neutral() -> None:
+    cache = _StubCache({"fred_macro": {"vix": 16.0}})
+    av = map_altdata_to_market_fields("commodity:XAU", cache, now_ts=1000.0)
+    assert av.dfii10 is None
 
 
 def test_map_commodity_cot_populates_pctile() -> None:

@@ -79,3 +79,38 @@ def test_no_emit_writes_nothing(tmp_path: Path) -> None:
     conn = _mkconn(tmp_path)
     count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
     assert count == 0
+
+
+def test_tags_default_none_omits_tags_key_byte_identical(tmp_path: Path) -> None:
+    """Frontgate item #5 — every EXISTING caller (no ``tags`` arg) must be
+    byte-identical: no ``"tags"`` key appears in payload_json at all."""
+    conn = _mkconn(tmp_path)
+    persist_emitted_signal(
+        conn, signal_id="sig3", venue="okx", symbol="BTC-USDT",
+        strategy_id="bar_breakout_run", side="long", strength=0.5,
+        timeframe="1D", ts=1_780_000_600, correlation_group=None, thesis="t",
+    )
+    import json
+
+    payload = conn.execute(
+        "SELECT payload_json FROM signals WHERE signal_id = 'sig3'"
+    ).fetchone()[0]
+    assert "tags" not in json.loads(payload)
+
+
+def test_tags_carries_dfii10_stamp(tmp_path: Path) -> None:
+    """Frontgate item #5 — a gold-strategy signal can carry a DFII10 tag."""
+    conn = _mkconn(tmp_path)
+    persist_emitted_signal(
+        conn, signal_id="sig4", venue="capital", symbol="GOLD",
+        strategy_id="gold_breakout_1h", side="long", strength=0.6,
+        timeframe="1H", ts=1_780_000_700, correlation_group=None, thesis="t",
+        tags={"dfii10": "2.3100"},
+    )
+    import json
+
+    payload = conn.execute(
+        "SELECT payload_json FROM signals WHERE signal_id = 'sig4'"
+    ).fetchone()[0]
+    data = json.loads(payload)
+    assert data["tags"] == {"dfii10": "2.3100"}

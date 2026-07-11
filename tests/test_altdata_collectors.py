@@ -445,6 +445,31 @@ async def test_fred_macro_panel_has_at_least_25_series() -> None:
     assert _SERIES["yield_curve"] == "T10Y2Y"
 
 
+def test_fred_macro_dfii10_series_id() -> None:
+    """Frontgate item #5 — exact FRED code for the 10Y TIPS real yield."""
+    from polaris.core.altdata.fred_macro import _SERIES
+
+    assert _SERIES["dfii10"] == "DFII10"
+
+
+@pytest.mark.asyncio
+async def test_fred_macro_dfii10_parses_with_asof() -> None:
+    """DFII10 is release-time-aware for free — the generic <key>_asof pattern
+    (currency #69) applies to any ``_SERIES`` addition with zero extra code."""
+
+    def responder(req: httpx.Request) -> Any:
+        sid = req.url.params.get("series_id")
+        if sid == "DFII10":
+            return {"observations": [{"date": "2026-07-09", "value": "2.31"}]}
+        return {"observations": [{"date": "2026-06-26", "value": "1.0"}]}
+
+    coll = FredMacroCollector(api_key="testkey")
+    out = await coll.fetch(client=_client(responder))
+    assert out is not None
+    assert out["dfii10"] == pytest.approx(2.31)
+    assert out["dfii10_asof"] == "2026-07-09"
+
+
 @pytest.mark.asyncio
 async def test_fred_macro_dead_move_series_degrades() -> None:
     """MOVE (FRED 400) degrades to None without dropping the rest of the panel."""

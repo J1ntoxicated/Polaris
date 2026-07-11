@@ -435,6 +435,8 @@ def map_altdata_to_market_fields(
     hy_raw = macro.get("hy_spread")
     vix = float(vix_raw) if isinstance(vix_raw, (int, float)) else None
     hy_spread = float(hy_raw) if isinstance(hy_raw, (int, float)) else None
+    dfii10_raw = macro.get("dfii10")
+    dfii10 = float(dfii10_raw) if isinstance(dfii10_raw, (int, float)) else None
 
     cot_pctile = _cot_pctile_from(
         sources.get("cftc_cot"), underlying_group_id
@@ -450,6 +452,7 @@ def map_altdata_to_market_fields(
         hy_spread=hy_spread,
         funding_rate_symbol=funding_rate_symbol,
         funding_rate_p10=funding_rate_p10,
+        dfii10=dfii10,
     )
 
 

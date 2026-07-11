@@ -1099,6 +1099,18 @@ async def _run_tick(
                     venue, symbol, strategy_id, timeframe, sig.side,
                     sig.strength, sig.sizing_hint,
                 )
+                # Frontgate item #5 (G2 behavior-0 SHADOW): stamp the FRED
+                # DFII10 (10Y TIPS real yield) gold-conviction context as a
+                # TAG ONLY on a GOLD-symbol signal, read at signal time.
+                # mv.altdata.dfii10 defaults None (keyless/stale FRED feed) ->
+                # persist_tags stays None -> persist_emitted_signal's payload
+                # is byte-identical to before this field existed. Never a
+                # sizing/gating input — no strategy/gate reads this tag.
+                persist_tags = (
+                    {"dfii10": f"{mv.altdata.dfii10:.4f}"}
+                    if symbol in {"GOLD", "XAUUSD"} and mv.altdata.dfii10 is not None
+                    else None
+                )
                 # Persist the EMITTED signal so G2 output is queryable (the table
                 # was log-only → empty). Pure observability, FAIL-OPEN: a write
                 # error never blocks the tick. A no-emit (handled above) writes
@@ -1108,6 +1120,7 @@ async def _run_tick(
                     strategy_id=strategy_id, side=sig.side, strength=sig.strength,
                     timeframe=timeframe, ts=now_ts,
                     correlation_group=sig.correlation_group, thesis=sig.thesis_tag,
+                    tags=persist_tags,
                 )
                 # OKX settle-ability — DEFER the ENTRY (only) for an OKX pair whose
                 # quote ccy can't settle on the demo SPOT wallet (quote ∉ {USDT,

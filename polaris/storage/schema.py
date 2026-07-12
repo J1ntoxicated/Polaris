@@ -117,6 +117,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_POSITION_STRATEGY_SEGMENTS,
     DDL_POSITION_STRATEGY_SEGMENTS_CELL_INDEX,
     DDL_POSITION_STRATEGY_SEGMENTS_INDEX,
+    DDL_PRICE_THROUGH_SHADOW,
+    DDL_PRICE_THROUGH_SHADOW_INDEX,
     DDL_REENTRY_ANCHOR,
     DDL_REGIME_STATE,
     DDL_REPLAY_RUNS,
@@ -226,6 +228,11 @@ ALL_DDL: tuple[str, ...] = (
     # place the weekend maker edge is visible; OKX demo's flat 70 bps hides it).
     DDL_MAKER_FILL_SHADOW,
     DDL_MAKER_FILL_SHADOW_INDEX,
+    # Price-through maker-fill shadow (maker_fill_sim R1 2026-07-12) — one row
+    # per REAL entry fill (fires even while real_roundtrip=False, unlike the
+    # maker-only table above); resolution is offline against forward bars.
+    DDL_PRICE_THROUGH_SHADOW,
+    DDL_PRICE_THROUGH_SHADOW_INDEX,
     # Shadow-first would-be orders (#94) — SUPPRESSED order on a shadow_first
     # strategy (the two weekend OKX makers); the signal flowed + the would-be P&L
     # is logged (zero capital at risk; durability of the thin sample accrues live).

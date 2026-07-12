@@ -48,6 +48,7 @@ from tools.visualizer.polaris_graph_chains import (
     build_lifecycle_paths,
     build_trade_chains,
 )
+from tools.visualizer.price_through_channel import price_through_channel_stats
 
 _LOG = logging.getLogger(__name__)
 
@@ -1336,6 +1337,11 @@ _SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
     # instead (freshness-first, not count-gated, same as the FEEDS above).
     "vwap_timing_shadow_1h": None,
     "squeeze_shadow": None,
+    # maker_fill_sim R1 2026-07-12 debate (vault/50_research/debates/
+    # maker_fill_sim_r1_2026-07-12.md) — no roadmap row-count target; the
+    # promotion gauge is the traded-through%/avg-price-improve-bps pair
+    # (n is still reported below, same shape as every other channel).
+    "price_through_shadow": None,
 }
 _shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
 # 2026-07-12 라이브 인시던트: 매초/5초 풀스캔 리더가 봇 WAL 체크포인트 창을
@@ -1365,6 +1371,8 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
         for name, target in _SHADOW_CHANNEL_TARGETS.items()
     }
     out["momentum_z"]["spread"] = None
+    out["price_through_shadow"]["traded_through_pct"] = None
+    out["price_through_shadow"]["avg_price_improve_bps"] = None
     # gate-satellite reassignment (Jin 2026-07-11): G4's new VWAP satellite
     # wants a recent-1h reading count, not the lifetime total the plain
     # ``vwap_timing_shadow`` channel above already carries — a fixed,
@@ -1417,6 +1425,23 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 out["momentum_z"]["n"] = int(n or 0)
                 out["momentum_z"]["fresh_ts"] = int(fresh) if fresh is not None else None
                 out["momentum_z"]["spread"] = round(spread, 4) if spread is not None else None
+            # maker_fill_sim R1 2026-07-12 debate — traded-through ratio +
+            # avg price-improvement bps (offline-resolved vs forward bars,
+            # tools/visualizer/price_through_channel.py). Same degrade-never-
+            # crash contract as every channel above (sqlite3.Error → None).
+            try:
+                pts = price_through_channel_stats(conn)
+            except sqlite3.Error:
+                pts = None
+            if pts is not None:
+                out["price_through_shadow"]["n"] = pts["n"]
+                out["price_through_shadow"]["fresh_ts"] = pts["fresh_ts"]
+                out["price_through_shadow"]["traded_through_pct"] = pts[
+                    "traded_through_pct"
+                ]
+                out["price_through_shadow"]["avg_price_improve_bps"] = pts[
+                    "avg_price_improve_bps"
+                ]
         except sqlite3.Error:
             pass
         finally:

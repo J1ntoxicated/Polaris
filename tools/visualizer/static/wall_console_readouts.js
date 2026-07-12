@@ -12,12 +12,13 @@
  * Implementation note (rework r3 fix, review CRITICAL/MED item 2): the build
  * spec calls for an offscreen-canvas bake of the static panel chrome at 1s
  * cadence with per-frame blit + only the small dynamic bits redrawn. The
- * five panels with NO now-dependent animation — KELLY CELL LEDGER, the BAY
- * gauges, STREAMS+SESSION, EXIT FSM, REGIME MATRIX (drawArcGauge takes no
- * `now`; these are pure data grids/arcs) — are now baked to an offscreen
- * canvas by ensureBake() below, re-baked only when wall_spine_hud.js's
- * pollRoster/pollStats hand draw() a fresh console/summary object (an exact
- * "did a poll land" signal — both pollers hand a NEW object every ~1s
+ * panels with NO now-dependent animation — KELLY CELL LEDGER, the BAY
+ * gauges, STREAMS+SESSION+STABLE, EXIT FSM, REGIME MATRIX, SCOUT SHADOW,
+ * UPCOMING EARNINGS (2026-07-12 topology-panels audit addition; drawArcGauge
+ * takes no `now`; these are pure data grids/arcs) — are now baked to an
+ * offscreen canvas by ensureBake() below, re-baked only when wall_spine_hud.
+ * js's pollRoster/pollStats hand draw() a fresh console/summary object (an
+ * exact "did a poll land" signal — both pollers hand a NEW object every ~1s
  * cycle, never mutate in place) or the wall resizes; draw() then blits that
  * bitmap with one drawImage/frame. The TL/TR crowns and the gate ladder stay
  * on the live per-frame path unchanged: label-breathing alpha, the verdict
@@ -26,7 +27,7 @@
  * calls for; the register column also stays live (positions come from
  * field.js's per-frame screen layout). No panel draw function changed
  * shape to add this — they're called unchanged, just against an offscreen
- * ctx for the five now-baked ones.
+ * ctx for the now-baked ones.
  *
  * Loaded after wall_spine_deco.js / wall_console_lanes.js, before
  * wall_spine.js (which calls draw(ctx, now) once per frame — see the
@@ -68,6 +69,15 @@
   function fmtNum(v, digits) {
     if (v == null || isNaN(v)) return '—';
     return Number(v).toFixed(digits == null ? 2 : digits);
+  }
+  // Compact $ formatter for the STABLE liquidity readout below — stablecoin
+  // TOTAL mcap runs ~$3e11, and fmtUsd's toLocaleString would spell that out
+  // as "$311,020,940,917" (way past this panel's column budget).
+  function fmtUsdCompact(v) {
+    if (v == null || isNaN(v)) return '—';
+    const abs = Math.abs(v);
+    const [div, suf] = abs >= 1e12 ? [1e12, 'T'] : abs >= 1e9 ? [1e9, 'B'] : abs >= 1e6 ? [1e6, 'M'] : [1, ''];
+    return (v < 0 ? '-$' : '$') + (abs / div).toFixed(suf ? 1 : 0) + suf;
   }
   // VIRTUAL ACCOUNT mode branch — mirrors wall_spine_hud.js's renderEquity
   // (the bot-log strip ticker) so the console crown/gauges/sparkline never
@@ -272,6 +282,41 @@
     deco.drawArcGauge(ctx, cxs[3], cy, r - 7, sized2fill, WARM, null, fmtPct(sized2fill * 100, 0));
   }
 
+  /* ===== UPCOMING EARNINGS — earnings_calendar next-7d prints for the
+   * tracked universe (Jin 2026-07-12 topology-panels audit, "월요일 JPM/WFC/C
+   * 가 바로 보이게"). Sited in WALL_ZONES.earningsRect — the crown y-band
+   * (0.055-0.165H) is otherwise empty between crownTL/crownTR (see that
+   * zone's own comment); no gate/br panel had spare room for a 6-row table
+   * (KELLY CELL LEDGER/STREAMS/EXIT FSM are already saturated — see their own
+   * fixed-pitch math below). Static (no `now` dependence) — baked. ===== */
+  function drawUpcomingEarnings(ctx, c, W, H) {
+    const z = Z.earningsRect;
+    const x0 = W * z.x0, x1 = W * z.x1, y0 = H * z.y0, y1 = H * z.y1;
+    panelFrame(ctx, x0, y0, x1, y1, 'UPCOMING EARNINGS · 7D');
+    const rows = (c && c.upcoming_earnings) || [];
+    if (!rows.length) {
+      ctx.font = '500 6px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(138,148,176,0.4)'; ctx.textAlign = 'left';
+      ctx.fillText('no prints in window', x0 + 6, y0 + 22);
+      return;
+    }
+    const cols = [['SYM', 0.24], ['DATE', 0.28], ['HR', 0.16], ['EST', 0.32]];
+    const innerW = x1 - x0 - 10;
+    let cx = x0 + 6;
+    const colX = cols.map(([, frac]) => { const at = cx; cx += innerW * frac; return at; });
+    ctx.font = '600 5.5px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(138,148,176,0.5)'; ctx.textAlign = 'left';
+    cols.forEach(([lbl], i) => ctx.fillText(lbl, colX[i], y0 + 20));
+    const rowH = (y1 - y0 - 24) / 6;
+    rows.slice(0, 6).forEach((r, i) => {
+      const ry = y0 + 24 + (i + 0.72) * rowH;
+      ctx.font = '700 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(WARM, 0.85); ctx.textAlign = 'left';
+      ctx.fillText(String(r.symbol || '').slice(0, 6), colX[0], ry);
+      ctx.font = '600 6.5px ui-monospace, Menlo, monospace'; ctx.fillStyle = field.rgba(STEEL, 0.8);
+      ctx.fillText(String(r.date || '').slice(5), colX[1], ry); // MM-DD
+      ctx.fillText(String(r.hour || '-').toUpperCase(), colX[2], ry);
+      ctx.fillText(r.est != null ? fmtNum(r.est, 2) : '—', colX[3], ry);
+    });
+  }
+
   /* ===== gate ladder — 8-column volume bars + kill ticks + GATE PULSE ===== */
   function drawGateLadder(ctx, c, gatePulseAt, now, W, H) {
     const gz = Z.ladderBand;
@@ -343,7 +388,37 @@
     bot.slice(0, 4).forEach((row, i) => drawRow(row, i + 4));
   }
 
-  /* ===== BR — per-venue strip + SESSION sparkline (equityRing/
+  /* ===== STABLE — stablecoin_liquidity TOTAL mcap, one compact line inside
+   * STREAMS (Jin 2026-07-12 "스테이블 유동성 스파크라인... 1줄 통합"). Dots,
+   * not a connected line, while the series is sparse (<20 points, roughly a
+   * day of the feed's own ~hourly cadence) — an honest "still accruing" read
+   * rather than a smoothed trend fabricated from a handful of samples (same
+   * convention SCOUT SHADOW's "warming" tag already uses). ===== */
+  function drawStableRow(ctx, c, x0, x1, y) {
+    ctx.font = '600 6px JetBrains Mono, monospace'; ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(138,148,176,0.55)';
+    ctx.fillText('STABLE', x0 + 8, y);
+    const series = (c && c.stablecoin_series) || [];
+    if (series.length >= 2) {
+      const dotsX0 = x0 + 46, dotsX1 = x1 - 62;
+      const vals = series.map((p) => p.total);
+      const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(1, hi - lo);
+      series.forEach((p, i) => {
+        const px = dotsX0 + (dotsX1 - dotsX0) * (i / (series.length - 1));
+        const py = y - 2 - 2 * ((p.total - lo) / span);
+        ctx.beginPath(); ctx.arc(px, py, 0.9, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(159,192,255,0.55)'; ctx.fill();
+      });
+    }
+    const last = series.length ? series[series.length - 1].total : null;
+    ctx.textAlign = 'right'; ctx.font = '700 6.5px ui-monospace, Menlo, monospace';
+    ctx.fillStyle = field.rgba(STEEL, 0.85);
+    ctx.fillText(fmtUsdCompact(last), x1 - 32, y);
+    ctx.font = '500 4.2px JetBrains Mono, monospace'; ctx.fillStyle = 'rgba(138,148,176,0.45)';
+    ctx.fillText(series.length < 20 ? 'accruing' : '', x1 - 2, y);
+  }
+
+  /* ===== BR — per-venue strip + STABLE line + SESSION sparkline (equityRing/
    * pushEquitySample now live up by equityOf()/sessionPeakUsd() — shared
    * with the TL crown + BAY gauges, see rework r3 fix there) ===== */
   const VENUE_LABEL = { okx: 'OKX', cap: 'CAPITAL', alp: 'ALPACA' };
@@ -352,7 +427,16 @@
     const x0 = W * br.x0, x1 = W * br.x1, y0 = H * Z.ladderBand.y0, y1m = H * 0.90, y1 = H * Z.ladderBand.y1;
     panelFrame(ctx, x0, y0, x1, y1m, 'STREAMS');
     const streams = (c && c.streams) || [];
-    const rowH = (y1m - y0 - 14) / 3;
+    // Footer reserves the bottom ~28px for two 1-line readouts (STABLE, new;
+    // SESSION equity spark, existing) — venue rows shrink to make room.
+    // Round 2 fix (Jin 2026-07-12 self-critique): the original 18px footer
+    // packed both readouts' baselines only 3px apart (STABLE at y1m-13,
+    // SESSION's label at y1m-10) — they overprinted whenever SESSION's
+    // sparkline actually had >1 distinct equity sample to draw (masked in
+    // dedupe-flat snapshots). Now matches KELLY CELL LEDGER's proven-safe
+    // ~13px baseline-to-baseline pitch (STABLE y1m-24, SESSION y1m-11).
+    const footerH = 28;
+    const rowH = (y1m - y0 - 14 - footerH) / 3;
     ['okx', 'cap', 'alp'].forEach((v, i) => {
       const s = streams.find((x) => x.venue === v) || {};
       const ry = y0 + 14 + (i + 0.7) * rowH;
@@ -378,11 +462,12 @@
       ctx.fillStyle = field.rgba(upnl >= 0 ? PNL_POS : PNL_NEG, 0.92);
       ctx.fillText(fmtUsd(upnl), x1 - 6, ry);
     });
+    drawStableRow(ctx, c, x0, x1, y1m - 24);
     // SESSION sparkline — global equity client ring buffer (virtual-mode
     // branched, same as the crown/gauges — see equityOf()).
     pushEquitySample(c && c.core && equityOf(c.core).equity);
     if (equityRing.length > 1) {
-      const sx0 = x0 + 6, sx1 = x1 - 6, sy0 = y1m - 8, sy1 = y1m - 3;
+      const sx0 = x0 + 6, sx1 = x1 - 6, sy0 = y1m - 9, sy1 = y1m - 3;
       const lo = Math.min(...equityRing), hi = Math.max(...equityRing);
       const span = Math.max(1, hi - lo);
       ctx.beginPath();
@@ -519,6 +604,24 @@
         if (!row) return;
         ctx.fillStyle = field.rgba(vc, 0.15 + 0.55 * Math.max(0, Math.min(1, conf)));
         ctx.fillRect(x0 + 14 + ci * (cell + gap), cy, cell, cell);
+        // regime_v2 twin-track marker (Jin 2026-07-12 "REGIME MATRIX에 v2
+        // 병기" — "so the twilight divergence shows"): a direction glyph
+        // (up/down/flat) drawn INSIDE the existing cell footprint — no new
+        // columns/rows, zero layout risk. Direction is carried by the GLYPH,
+        // not a hue, and brightness (not color) marks expansion vs normal —
+        // up/down here is a price-regime label, not P/L, but green/red still
+        // reads as money at a glance (color contract §1), so this stays on
+        // the same WARM/dim convention every other non-P/L readout uses.
+        // Blank when the v2 shadow hasn't scored this cell yet (no row.
+        // regime_v2 → no fabricated marker, same honesty rule as elsewhere).
+        if (row.regime_v2) {
+          const dir = row.regime_v2.startsWith('up') ? '▲'
+            : row.regime_v2.startsWith('down') ? '▼' : '·';
+          const expansion = row.regime_v2.endsWith('expansion');
+          ctx.font = '700 6px JetBrains Mono, monospace'; ctx.textAlign = 'center';
+          ctx.fillStyle = field.rgba(WARM, expansion ? 0.9 : 0.4);
+          ctx.fillText(dir, x0 + 14 + ci * (cell + gap) + cell / 2, cy + cell - 1.5);
+        }
       });
     });
   }
@@ -714,6 +817,7 @@
     drawExitFsm(bakeCtx, c, W, H);
     drawRegimeMatrix(bakeCtx, c, W, H);
     drawScoutShadow(bakeCtx, c, W, H);
+    drawUpcomingEarnings(bakeCtx, c, W, H);
   }
 
   /* ===== public draw seam — 2-line append in wall_spine.js's frame() ===== */

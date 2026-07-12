@@ -1426,6 +1426,89 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
     return out
 
 
+# UPCOMING EARNINGS panel source (Jin 2026-07-12 "월요일 JPM/WFC/C가 바로
+# 보이게"). Same cached-read-only pattern as the shadow-channel query above —
+# the 2026-07-12 WAL-choke incident mandate is every new dashboard read sits
+# behind a TTL, never a bare per-poll scan.
+_UPCOMING_EARNINGS_TTL = 60.0
+_upcoming_earnings_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
+
+
+def _query_upcoming_earnings(db_path: Path) -> list[dict[str, Any]]:
+    """Next-7-day earnings_calendar prints for symbols the L0 ``universe``
+    table already knows about (any venue, any is_active state — is_active is a
+    per-discovery-cycle FOCUS flag that toggles/goes stale between runs, not a
+    "do we track this ticker" flag; requiring it would blank this panel between
+    cycles). Top 6 by soonest date/hour — display-only, never gates/sizes.
+    """
+    now = time.time()
+    if now - _upcoming_earnings_cache["ts"] < _UPCOMING_EARNINGS_TTL:
+        return _upcoming_earnings_cache["rows"]  # type: ignore[no-any-return]
+    rows: list[dict[str, Any]] = []
+    if db_path.exists():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            for symbol, date, hour, est in conn.execute(
+                "SELECT DISTINCT e.symbol, e.earnings_date, e.hour, e.eps_estimate "
+                "FROM earnings_calendar e JOIN universe u ON u.symbol = e.symbol "
+                "WHERE e.earnings_date >= date('now') "
+                "AND e.earnings_date < date('now', '+7 days') "
+                "ORDER BY e.earnings_date ASC, e.hour ASC, e.symbol ASC LIMIT 6"
+            ).fetchall():
+                rows.append(
+                    {
+                        "symbol": str(symbol),
+                        "date": str(date),
+                        "hour": str(hour or ""),
+                        "est": round(float(est), 4) if est is not None else None,
+                    }
+                )
+        except sqlite3.Error:
+            rows = []
+        finally:
+            conn.close()
+    _upcoming_earnings_cache["ts"] = now
+    _upcoming_earnings_cache["rows"] = rows
+    return rows
+
+
+# STREAMS-panel STABLE liquidity source (Jin 2026-07-12 "스테이블 유동성
+# 스파크라인") — TOTAL-symbol mcap_usd time series, cached same TTL as the
+# shadow-channel reads above. The client renders this as a handful of dots +
+# "accruing" while the series is sparse rather than fabricate a smooth line.
+_STABLE_SERIES_TTL = 30.0
+_STABLE_SERIES_MAX = 60
+_stable_series_cache: dict[str, Any] = {"ts": 0.0, "rows": []}
+
+
+def _query_stablecoin_series(db_path: Path) -> list[dict[str, Any]]:
+    """Last ``_STABLE_SERIES_MAX`` TOTAL-symbol readings from
+    ``stablecoin_liquidity``, ascending by ts. Index-covered
+    (``idx_stablecoin_liquidity_symbol``) — a bounded LIMIT read, not a scan.
+    """
+    now = time.time()
+    if now - _stable_series_cache["ts"] < _STABLE_SERIES_TTL:
+        return _stable_series_cache["rows"]  # type: ignore[no-any-return]
+    rows: list[dict[str, Any]] = []
+    if db_path.exists():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            for ts, total in conn.execute(
+                "SELECT ts, mcap_usd FROM stablecoin_liquidity WHERE symbol = 'TOTAL' "
+                "ORDER BY ts DESC LIMIT ?",
+                (_STABLE_SERIES_MAX,),
+            ).fetchall():
+                rows.append({"ts": int(ts), "total": float(total or 0.0)})
+        except sqlite3.Error:
+            rows = []
+        finally:
+            conn.close()
+    rows.reverse()  # ascending ts for the client sparkline
+    _stable_series_cache["ts"] = now
+    _stable_series_cache["rows"] = rows
+    return rows
+
+
 def _query_gate_flow_1h(db_path: Path) -> dict[int, int]:
     now = time.time()
     if now - _gate_flow_cache["ts"] >= _GATE_FLOW_TTL:
@@ -1578,12 +1661,23 @@ def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
     for r in snap.regime_states:
         cls = str(r.group_id or "").split(":", 1)[0] or "other"
         reg_groups[(_short_venue(r.venue), cls)].append(r)
+
+    def _dominant_v2(rows: list[Any]) -> str:
+        # regime_v2 twin-track (W2 backgate wave, 2026-07-12): most-common
+        # non-empty regime_v2 label in the group, "" if the shadow hasn't
+        # scored any row here yet (client renders nothing rather than a
+        # fabricated marker — same honesty convention as SCOUT SHADOW's
+        # "warming").
+        vals = [str(x.regime_v2) for x in rows if getattr(x, "regime_v2", "")]
+        return _Counter(vals).most_common(1)[0][0] if vals else ""
+
     regimes = [
         {
             "venue": v, "group_id": cls,
             "regime": _Counter(str(x.regime or "chop") for x in rows).most_common(1)[0][0],
             "confidence": round(sum(float(x.confidence or 0.0) for x in rows) / len(rows), 3),
             "n": len(rows),
+            "regime_v2": _dominant_v2(rows),
         }
         for (v, cls), rows in sorted(reg_groups.items())
     ]
@@ -1599,6 +1693,8 @@ def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:
         "regimes": regimes,
         "gate_flow_1h": _query_gate_flow_1h(db_path),
         "shadow_channels": _query_shadow_channels(db_path),
+        "upcoming_earnings": _query_upcoming_earnings(db_path),
+        "stablecoin_series": _query_stablecoin_series(db_path),
     }
 
 

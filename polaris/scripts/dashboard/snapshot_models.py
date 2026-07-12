@@ -618,6 +618,10 @@ class RegimeStateRow:
     evidence_l1: str = ""
     evidence_l2: str = ""
     evidence_l3: str = ""
+    # regime_v2 shadow classifier (6-state direction x volatility, W2 backgate
+    # wave 2026-07-12) — empty until the shadow has scored this group at least
+    # once. Twin-tracked alongside the canonical `regime` above, never replaces it.
+    regime_v2: str = ""
 
 
 @dataclass(slots=True)

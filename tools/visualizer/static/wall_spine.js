@@ -343,7 +343,9 @@
       ctx.textAlign = 'center';
       ctx.font = "700 10px ui-monospace, Menlo, monospace";
       ctx.fillStyle = field.rgba(GATE_CORE, 0.9);
-      const below = (i % 2 === 0);
+      // g8 label forced BELOW (circuit topology round-3: above-side put it
+      // on the same band as g1's below-side 'universe' label — corner smash)
+      const below = g.id === 'g8' ? true : (i % 2 === 0);
       const ly = below ? gs.y + ringR + 20 : gs.y - ringR - 12;
       ctx.fillText(`g${g.n} · ${g.label}`, gs.x, ly);
       // Jarvis numeric HUD block (Jin 2026-07-10, feat/jarvis-language

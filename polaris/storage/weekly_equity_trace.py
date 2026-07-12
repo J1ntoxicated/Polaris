@@ -86,6 +86,9 @@ def _fresh_week_realized(
     conn: sqlite3.Connection, *, exchange: str, since_ms: int
 ) -> tuple[float, int]:
     """(realized_pnl_usd, trades) since ``since_ms`` — fresh-SUM from ``fills``.
+    CAVEAT (review LOW): self-heal covers the CURRENT week only — a close
+    dropped as the final write of a week leaves that stored row short.
+    Observability-only surface (never read by sizing/gating/exit).
 
     Mirrors ``virtual_account_equity._realized_pnl_net_since`` /
     ``snapshot_q_equity._realised_pnl_since`` byte-for-byte (REAL-fee net,

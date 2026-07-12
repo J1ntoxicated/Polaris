@@ -433,3 +433,4 @@
 - 2026-07-12: fee-split flip R2 디베이트 수렴 — GPT 5×BREAK 전항 수용/수정(venue-pool fallback·EARN 2축화·remap 재도출 케이던스·label-churn 플래그·롤백 트립와이어 5종), 발산 12.4%≤15% 게이트 통과, 스펙=fee_split_flip_r2_2026-07-12.md
 2026-07-12 11:39 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=175 learners=3 paper=True]
 - 2026-07-12: fee-split flip 랜딩(merge 8908c3a→main, 재기동 PID 5968) — 판정축 gross_bps·remap 9스코프·divergence 0.000·백필 890/890. 주말 크립토 포렌식(wf_de752dd0, 검증가 정정 포함): 주말 net -$6,391(평일 -$2,995), rsi_bb_pullback 주말 gross-음수 단독 68%, thin_book_flush=유일 gross+인데 fee가 삼킴(net -$222), OKX 전 체결 10bps taker 균일·maker_fill_shadow 0행(maker 경제 미실현), 2h-8h 보유만 흑자, 손실 00-06 UTC 집중.
+- 2026-07-12: 재개장 준비 완료 — 5축 감사(이월 0·인증 자동갱신 실증·재개 월 08:00 AEST 벤더 폴링·EARN 8종 주력) + 센트리 보강 랜딩(4847804: SILENT_CAPITAL 세션인지 WARN + db_writer qdepth 계측, Opus 리뷰+컨덕터 마감). maker 체결 시뮬 R1 디베이트 가동(wf_a83d16d7).

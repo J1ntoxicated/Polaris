@@ -1509,7 +1509,7 @@
       drawTargetLock(ctx, x, y, Math.max(1.6, s.r * 1.1), col, 0.34 + 0.24 * lvl, lockAge);
     };
     firingIds.forEach((id) => {
-      if (migrations.has(id)) return;
+      if (migrations.has(id) || layoutTweens.has(id)) return; // mid-relayout tween owns the dot; no detached glow/bracket
       const s = screen[id];
       if (!s) return;
       // glow rides the drifting dot (same wander formula as livingIds draw)

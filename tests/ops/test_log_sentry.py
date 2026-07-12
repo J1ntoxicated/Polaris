@@ -341,7 +341,7 @@ def _ok_db() -> log_sentry.DbMetrics:
     )
 
 
-def test_rail_breach_anomaly(make_db: MakeDb) -> None:
+def test_rail_breach_warn(make_db: MakeDb) -> None:
     db_path = make_db()
     now_epoch = int(NOW.timestamp())
     cutoff_epoch = now_epoch - 1800
@@ -353,7 +353,7 @@ def test_rail_breach_anomaly(make_db: MakeDb) -> None:
     assert m.rail_breach_count == 1
     assert "BTC-USDT:-1.5" in m.rail_breach_detail
     status, reasons = log_sentry.evaluate_status(_ok_log(), m)
-    assert status == "ANOMALY"
+    assert status == "WARN"
     assert "RAIL_BREACH" in reasons
 
 
@@ -541,3 +541,44 @@ def test_main_smoke(tmp_path: Path, make_db: MakeDb, capsys: pytest.CaptureFixtu
     out = capsys.readouterr().out
     assert "SENTRY_STATUS=" in out
     assert "SENTRY_REASONS=" in out
+
+
+def test_rail_breach_clustered_is_anomaly(make_db: MakeDb) -> None:
+    """3+ rail breaches = systemic -> ANOMALY (2026-07-12 review MED-2:
+    a single large loss is normal aggressive variance -> WARN only)."""
+    db_path = make_db()
+    now_epoch = int(NOW.timestamp())
+    cutoff_epoch = now_epoch - 1800
+    for i, r in enumerate((-1.3, -1.5, -2.0)):
+        _insert_position(db_path, f"p{i}", f"S{i}-USDT", r, now_epoch - 60)
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.rail_breach_count == 3
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert status == "ANOMALY"
+    assert "RAIL_BREACH" in reasons
+
+
+def test_writer_queue_full_is_anomaly(make_db: MakeDb, tmp_path: Path) -> None:
+    """Terminal-phase writer wedge: queue-full degrades with NO completed
+    batches must still fire the writer axis (2026-07-12 review MED-1)."""
+    log = tmp_path / "rt.log"
+    base = NOW.strftime("%Y-%m-%dT%H:%M")
+    lines = [
+        f"{base}:01.000Z [INFO] polaris.scripts._production_tick:1423 [tick 5] focus=52",
+        f"{base}:05.000Z [WARNING] polaris.storage.db_writer:210 DBWriter queue full (max=4096) — job dropped",
+        f"{base}:06.000Z [WARNING] polaris.storage.db_writer:210 DBWriter queue full (max=4096) — job dropped",
+    ]
+    log.write_text("\n".join(lines) + "\n")
+    from datetime import timedelta as _td
+    m = log_sentry.scan_log_axis(lines, now=NOW, cutoff=NOW - _td(minutes=60))
+    assert m.writer_queue_full_window == 2
+    db_path = make_db()
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    dbm = log_sentry.scan_db_axis(conn, int(NOW.timestamp()), int(NOW.timestamp()) - 1800)
+    conn.close()
+    status, reasons = log_sentry.evaluate_status(m, dbm)
+    assert "WRITER_QUEUE_FULL" in reasons
+    assert status == "ANOMALY"

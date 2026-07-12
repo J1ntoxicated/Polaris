@@ -52,6 +52,10 @@ _IGNITE_RE = re.compile(r"\[ignite\] CLI invoked")
 _REFRESH_RE = re.compile(r"\[altdata\] (\S+) refreshed asset=\S+ ttl=(\d+)s")
 _ERROR_RE = re.compile(r"\[ERROR\]")
 _DB_LOCKED_RE = re.compile(r"database is locked")
+# terminal-phase writer saturation (2026-07-12 review MED-1): once the writer
+# is fully wedged it stops COMPLETING batches (batch_max_ms goes silent) but
+# emits queue-full degrades — count them so the writer axis stays live.
+_QUEUE_FULL_RE = re.compile(r"DBWriter queue full")
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z")
 
 
@@ -74,6 +78,7 @@ class LogMetrics:
     altdata_last_refreshed_utc: str | None
     altdata_last_refreshed_age_s: int | None
     altdata_stale_channels: str
+    writer_queue_full_window: int = 0
 
 
 def _fmt(ts: datetime) -> str:
@@ -125,6 +130,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         errors_db_locked_window=0,
         errors_other_window=0,
         restart_count_window=0,
+        writer_queue_full_window=0,
         last_ignite_age_s=None,
         altdata_last_refreshed_utc=None,
         altdata_last_refreshed_age_s=None,
@@ -141,6 +147,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
     db_locked_window = 0
     other_error_window = 0
     restart_window = 0
+    queue_full_window = 0
     refresh_last_ts: dict[str, datetime] = {}
     refresh_ttl: dict[str, int] = {}
 
@@ -176,11 +183,18 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
                 refresh_last_ts[source] = ts
             continue
 
+        if ts >= cutoff and _QUEUE_FULL_RE.search(line):
+            queue_full_window += 1
+            continue
+
+        if ts >= cutoff and _DB_LOCKED_RE.search(line):
+            # ERROR 레벨 게이트 없이 독립 매칭 (review LOW — WARNING 레벨
+            # 락 라인 ~16%가 조기경보에서 새고 있었음)
+            db_locked_window += 1
+            continue
+
         if _ERROR_RE.search(line) and ts >= cutoff:
-            if _DB_LOCKED_RE.search(line):
-                db_locked_window += 1
-            else:
-                other_error_window += 1
+            other_error_window += 1
 
     tick_ts.sort()
     ignite_ts.sort()
@@ -230,6 +244,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         errors_db_locked_window=db_locked_window,
         errors_other_window=other_error_window,
         restart_count_window=restart_window,
+        writer_queue_full_window=queue_full_window,
         last_ignite_age_s=last_ignite_age,
         altdata_last_refreshed_utc=_fmt(last_refresh_ts) if last_refresh_ts else None,
         altdata_last_refreshed_age_s=(
@@ -294,7 +309,14 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
             reasons.append("DB_LOCK_CONTENTION")
             warn = True
 
-        if log_m.restart_count_window > 0:
+        if log_m.writer_queue_full_window > 0:
+            reasons.append("WRITER_QUEUE_FULL")
+            anomaly = True
+
+        if log_m.restart_count_window >= 3:
+            reasons.append("RESTART_LOOP")  # 워치독 부활 반복 = 크래시 루프
+            anomaly = True
+        elif log_m.restart_count_window > 0:
             reasons.append("RESTART_DETECTED")
             warn = True
 
@@ -308,7 +330,13 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
     else:
         if db_m.rail_breach_count > 0:
             reasons.append("RAIL_BREACH")
-            anomaly = True
+            # 단독 대형 손실 1-2건 = aggressive 정상 분산 → WARN.
+            # 배치 플러시 동반(밀린 엑싯 정산) 또는 3건+ = 시스템성 → ANOMALY
+            # (2026-07-12 review MED-2 — 오보 피로 방지, 스로틀 아님·표시 전용).
+            if db_m.batch_flush_count > 0 or db_m.rail_breach_count >= 3:
+                anomaly = True
+            else:
+                warn = True
         if db_m.batch_flush_count > 0:
             reasons.append("BATCH_FLUSH")
             warn = True
@@ -360,6 +388,7 @@ def format_output(
         f"errors_db_locked_window={log_m.errors_db_locked_window}",
         f"errors_other_window={log_m.errors_other_window}",
         f"restart_count_window={log_m.restart_count_window}",
+        f"writer_queue_full_window={log_m.writer_queue_full_window}",
         f"last_ignite_age_s={_s(log_m.last_ignite_age_s)}",
         f"altdata_last_refreshed_utc={_s(log_m.altdata_last_refreshed_utc)}",
         f"altdata_last_refreshed_age_s={_s(log_m.altdata_last_refreshed_age_s)}",

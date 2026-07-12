@@ -16,7 +16,7 @@ import pytest
 
 from polaris.storage.schema import ALL_DDL
 from tools.ops import log_sentry
-from tools.ops.log_sentry_db import CRYPTO_SILENT_WINDOW_MIN_S
+from tools.ops.log_sentry_db import CRYPTO_SILENT_WINDOW_MIN_S, capital_session_active
 
 NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
 RTH_EPOCH = 1768402800  # Wed 2026-01-14 15:00 UTC -> us_equity_session_state == "rth"
@@ -105,6 +105,31 @@ def _insert_signal(db_path: Path, signal_id: str, instrument_id: str, ts: int) -
         "INSERT INTO signals (strategy_id, signal_id, instrument_id, direction, "
         "score, thesis, ts) VALUES ('strat', ?, ?, 'long', 1.0, 't', ?)",
         (signal_id, instrument_id, ts),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_fill(db_path: Path, fill_id: str, instrument_id: str, ts_ms: int) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        "size_usd, fill_price, ts_ms, order_id) VALUES "
+        "(?, 'capital', ?, 'strat', 'long', 100.0, 1.0, ?, 'o1')",
+        (fill_id, instrument_id, ts_ms),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_gate_event(
+    db_path: Path, event_id: str, signal_id: str, created_ts: int
+) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO gate_events (event_id, run_id, signal_id, gate_id, phase, "
+        "created_ts) VALUES (?, 'run1', ?, 3, 'success', ?)",
+        (event_id, signal_id, created_ts),
     )
     conn.commit()
     conn.close()
@@ -338,6 +363,10 @@ def _ok_db() -> log_sentry.DbMetrics:
         crypto_signals_window=1,
         equity_active=False,
         equity_signals_window=0,
+        capital_active=False,
+        capital_signals_window=0,
+        capital_fills_window=0,
+        capital_gate_events_window=0,
     )
 
 
@@ -582,3 +611,198 @@ def test_writer_queue_full_is_anomaly(make_db: MakeDb, tmp_path: Path) -> None:
     status, reasons = log_sentry.evaluate_status(m, dbm)
     assert "WRITER_QUEUE_FULL" in reasons
     assert status == "ANOMALY"
+
+
+# --- db_writer qdepth (WRITER_QUEUE_PRESSURE) -------------------------------
+
+
+def _batch_line_qdepth(dt: datetime, ms: float, qdepth: int, qcap: int) -> str:
+    return (
+        f"{_ts(dt)} [DEBUG] polaris.storage.db_writer:304 "
+        f"[db_writer] batch 1 jobs {ms}ms qdepth={qdepth}/{qcap}"
+    )
+
+
+def test_writer_qdepth_parsed_and_pressure_warn_at_50pct() -> None:
+    lines = [
+        _tick_line(NOW - timedelta(seconds=10), 1),
+        _batch_line_qdepth(NOW - timedelta(seconds=5), 5.0, 2048, 4096),  # exactly 50%
+    ]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.writer_qdepth_pct_max == 0.5
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "WARN"
+    assert "WRITER_QUEUE_PRESSURE" in reasons
+
+
+def test_writer_qdepth_below_threshold_not_flagged() -> None:
+    lines = [
+        _tick_line(NOW - timedelta(seconds=10), 1),
+        _batch_line_qdepth(NOW - timedelta(seconds=5), 5.0, 2047, 4096),  # just under 50%
+    ]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.writer_qdepth_pct_max is not None
+    assert m.writer_qdepth_pct_max < 0.5
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert "WRITER_QUEUE_PRESSURE" not in reasons
+
+
+def test_writer_qdepth_absent_on_legacy_line_batch_ms_still_parses() -> None:
+    """Pre-qdepth log lines (no trailing qdepth=D/CAP) must still parse
+    batch_max_ms — the qdepth group is optional (backward compat)."""
+    lines = [_batch_line(NOW - timedelta(seconds=5), 12.3)]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.batch_max_ms == 12.3
+    assert m.writer_qdepth_pct_max is None
+
+
+def test_writer_queue_full_takes_precedence_over_pressure() -> None:
+    """A terminal FULL degrade this window must not also emit the earlier-
+    stage PRESSURE warning for the same underlying saturation."""
+    lines = [
+        _tick_line(NOW - timedelta(seconds=10), 1),
+        f"{_ts(NOW - timedelta(seconds=8))} [WARNING] polaris.storage.db_writer:210 "
+        "DBWriter queue full (max=4096) — job dropped",
+        _batch_line_qdepth(NOW - timedelta(seconds=5), 5.0, 4096, 4096),
+    ]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert "WRITER_QUEUE_FULL" in reasons
+    assert "WRITER_QUEUE_PRESSURE" not in reasons
+    assert status == "ANOMALY"
+
+
+# --- capital session (capital_session_active) -------------------------------
+
+CAPITAL_MON_EPOCH = 1783944000  # Mon 2026-07-13 12:00 UTC
+CAPITAL_SAT_EPOCH = 1783771200  # Sat 2026-07-11 12:00 UTC
+CAPITAL_FRI_BEFORE_CLOSE_EPOCH = 1783717140  # Fri 2026-07-10 20:59 UTC
+CAPITAL_FRI_AT_CLOSE_EPOCH = 1783717200  # Fri 2026-07-10 21:00 UTC
+CAPITAL_SUN_BEFORE_REOPEN_EPOCH = 1783893540  # Sun 2026-07-12 21:59 UTC
+CAPITAL_SUN_AT_REOPEN_EPOCH = 1783893600  # Sun 2026-07-12 22:00 UTC (grace starts)
+CAPITAL_SUN_IN_GRACE_EPOCH = 1783898940  # Sun 2026-07-12 23:29 UTC (89min post-reopen)
+CAPITAL_SUN_GRACE_ELAPSED_EPOCH = 1783899000  # Sun 2026-07-12 23:30 UTC (90min post-reopen)
+
+
+def test_capital_session_active_weekday() -> None:
+    assert capital_session_active(CAPITAL_MON_EPOCH) is True
+
+
+def test_capital_session_inactive_saturday() -> None:
+    assert capital_session_active(CAPITAL_SAT_EPOCH) is False
+
+
+def test_capital_session_active_friday_before_close() -> None:
+    assert capital_session_active(CAPITAL_FRI_BEFORE_CLOSE_EPOCH) is True
+
+
+def test_capital_session_inactive_friday_at_close() -> None:
+    assert capital_session_active(CAPITAL_FRI_AT_CLOSE_EPOCH) is False
+
+
+def test_capital_session_inactive_sunday_before_reopen() -> None:
+    assert capital_session_active(CAPITAL_SUN_BEFORE_REOPEN_EPOCH) is False
+
+
+def test_capital_session_inactive_during_reopen_grace() -> None:
+    """The reopen instant and the 89min mark must both stay inactive — the
+    false-positive-avoidance grace window (task spec: 90min post-reopen)."""
+    assert capital_session_active(CAPITAL_SUN_AT_REOPEN_EPOCH) is False
+    assert capital_session_active(CAPITAL_SUN_IN_GRACE_EPOCH) is False
+
+
+def test_capital_session_active_after_grace_elapses() -> None:
+    assert capital_session_active(CAPITAL_SUN_GRACE_ELAPSED_EPOCH) is True
+
+
+# --- SILENT_CAPITAL (scan_db_axis + evaluate_status) ------------------------
+
+
+def test_silent_capital_anomaly_when_active_and_crypto_flowing(make_db: MakeDb) -> None:
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)  # crypto flowing
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_active is True
+    assert m.capital_signals_window == 0
+    assert m.capital_fills_window == 0
+    assert m.capital_gate_events_window == 0
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert status == "ANOMALY"
+    assert "SILENT_CAPITAL" in reasons
+
+
+def test_silent_capital_not_flagged_when_session_inactive(make_db: MakeDb) -> None:
+    db_path = make_db()
+    now_epoch = CAPITAL_SAT_EPOCH  # weekend -> capital session inactive
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_active is False
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons
+
+
+def test_silent_capital_not_flagged_when_capital_signal_present(make_db: MakeDb) -> None:
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    _insert_signal(db_path, "s2", "capital:EURUSD", now_epoch - 60)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_signals_window == 1
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons
+
+
+def test_silent_capital_not_flagged_when_capital_fill_present(make_db: MakeDb) -> None:
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    _insert_fill(db_path, "f1", "capital:EURUSD", (now_epoch - 60) * 1000)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_fills_window == 1
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons
+
+
+def test_silent_capital_not_flagged_when_capital_gate_event_present(make_db: MakeDb) -> None:
+    """A capital gate_event counts even when its originating signal itself
+    falls outside the cutoff window (join is on signal_id, not signals.ts)."""
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    _insert_signal(db_path, "s2", "capital:EURUSD", now_epoch - 3600)
+    _insert_gate_event(db_path, "g1", "s2", now_epoch - 60)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_signals_window == 0
+    assert m.capital_gate_events_window == 1
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons
+
+
+def test_silent_capital_not_flagged_when_crypto_also_silent(make_db: MakeDb) -> None:
+    """Crypto also silent = global-outage signature, not capital-specific —
+    SILENT_CAPITAL must not fire on top of SESSION_SILENT_CRYPTO."""
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - CRYPTO_SILENT_WINDOW_MIN_S
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.crypto_signals_window == 0
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons

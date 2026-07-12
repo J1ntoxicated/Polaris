@@ -302,7 +302,13 @@ class DBWriter:
         duration_ms = (time.monotonic() - start_mono) * 1000.0
         if duration_ms > self.batch_commit_ms_max:
             self.batch_commit_ms_max = duration_ms
-        logger.debug("[db_writer] batch %d jobs %.1fms", len(batch), duration_ms)
+        # qdepth snapshot (in-memory queue.qsize(), no DB read-back): an
+        # early-warning precursor to "DBWriter queue full" — log_sentry.py
+        # flags WRITER_QUEUE_PRESSURE well before the queue actually saturates.
+        logger.debug(
+            "[db_writer] batch %d jobs %.1fms qdepth=%d/%d",
+            len(batch), duration_ms, self._queue.qsize(), self._queue_max,
+        )
         for job, err in zip(batch, outcomes, strict=True):
             if job.future is None:
                 continue

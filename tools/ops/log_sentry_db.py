@@ -28,6 +28,43 @@ BATCH_FLUSH_WARN_COUNT = 5  # that day's catch-up flush landed 12 closes in one 
 # unreachable when coupled to the caller's cutoff.
 CRYPTO_SILENT_WINDOW_MIN_S = 14_400
 _NY_TZ = ZoneInfo("America/New_York")
+_UTC = ZoneInfo("UTC")
+
+# --- Capital (CFD) session calendar (task spec, 2026-07-12 sentry reopen) ---
+# Approximate weekday calendar: closed Friday >= 21:00 UTC through Sunday <
+# 22:00 UTC. The reopen-side SSOT is the vendor's marketStatus
+# (venue-authoritative — polaris/venues/capital/session_calendar.py); this
+# sentry uses a plain calendar approximation, which is sufficient here since
+# it only judges silence, it never gates an entry (flow_not_block). NOTE this
+# intentionally differs from the pipeline's cfd_market_open_at (Friday 22:00
+# close) — the task spec pins the sentry's own close hour to 21:00 UTC.
+_CAPITAL_CLOSE_HOUR_UTC = 21  # Friday close
+_CAPITAL_REOPEN_HOUR_UTC = 22  # Sunday reopen
+# Post-reopen grace: SILENT_CAPITAL must not false-positive on the routine
+# quiet immediately after the weekly reopen (thin liquidity / gates still
+# warming up) before real flow has had a chance to appear.
+CAPITAL_REOPEN_GRACE_S = 90 * 60
+
+
+def capital_session_active(now_epoch: int) -> bool:
+    """Approximate Capital CFD weekday-session active check (sentry-only).
+
+    ``True`` Monday-Thursday, Friday before 21:00 UTC, and Sunday at/after
+    22:00 UTC + ``CAPITAL_REOPEN_GRACE_S``. ``False`` all day Saturday, Sunday
+    before the grace-adjusted reopen, and Friday at/after 21:00 UTC.
+    """
+    d = datetime.fromtimestamp(now_epoch, tz=_UTC)
+    weekday = d.weekday()  # Mon=0 .. Sun=6
+    if weekday == 5:  # Saturday — fully closed
+        return False
+    if weekday == 6:  # Sunday — reopens 22:00 UTC + post-reopen grace
+        reopen_ts = int(
+            datetime(d.year, d.month, d.day, _CAPITAL_REOPEN_HOUR_UTC, tzinfo=_UTC).timestamp()
+        )
+        return now_epoch >= reopen_ts + CAPITAL_REOPEN_GRACE_S
+    if weekday == 4:  # Friday — closes 21:00 UTC
+        return d.hour < _CAPITAL_CLOSE_HOUR_UTC
+    return True  # Mon-Thu — open
 
 
 @dataclass(frozen=True)
@@ -41,6 +78,10 @@ class DbMetrics:
     crypto_signals_window: int
     equity_active: bool
     equity_signals_window: int
+    capital_active: bool
+    capital_signals_window: int
+    capital_fills_window: int
+    capital_gate_events_window: int
 
 
 def open_db_readonly(db_path: Path) -> sqlite3.Connection | None:
@@ -89,6 +130,25 @@ def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) ->
     )
     equity_count = int(cur.fetchone()[0])
 
+    capital_active = capital_session_active(now_epoch)
+    cur.execute(
+        "SELECT COUNT(*) FROM signals WHERE ts > ? AND instrument_id LIKE 'capital:%'",
+        (cutoff_epoch,),
+    )
+    capital_signal_count = int(cur.fetchone()[0])
+    cur.execute(
+        "SELECT COUNT(*) FROM fills WHERE ts_ms > ? AND instrument_id LIKE 'capital:%'",
+        (cutoff_epoch * 1000,),
+    )
+    capital_fill_count = int(cur.fetchone()[0])
+    cur.execute(
+        "SELECT COUNT(*) FROM gate_events ge WHERE ge.created_ts > ? AND EXISTS ("
+        "SELECT 1 FROM signals s WHERE s.signal_id = ge.signal_id "
+        "AND s.instrument_id LIKE 'capital:%')",
+        (cutoff_epoch,),
+    )
+    capital_gate_event_count = int(cur.fetchone()[0])
+
     return DbMetrics(
         db_reachable=True,
         rail_breach_count=len(rail_rows),
@@ -99,4 +159,8 @@ def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) ->
         crypto_signals_window=crypto_count,
         equity_active=equity_active,
         equity_signals_window=equity_count,
+        capital_active=capital_active,
+        capital_signals_window=capital_signal_count,
+        capital_fills_window=capital_fill_count,
+        capital_gate_events_window=capital_gate_event_count,
     )

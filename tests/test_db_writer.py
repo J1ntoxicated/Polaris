@@ -370,6 +370,40 @@ def test_commit_batch_logs_duration_and_tracks_max(
     assert w.batch_commit_ms_max >= 0.0
 
 
+def test_commit_batch_log_line_carries_qdepth_snapshot(
+    tmp_path: object, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """log_sentry.py's WRITER_QUEUE_PRESSURE early-warning parses a trailing
+    ``qdepth=D/CAP`` field on the existing batch debug line (no new line, no
+    DB read-back — an in-memory ``queue.qsize()`` snapshot only)."""
+    db = tmp_path / "qdepth.sqlite"  # type: ignore[operator]
+    _make_table(db)
+    w = DBWriter(db, batch_max=8, drain_ms=5, queue_max=4096)
+    w.start()
+    caplog.set_level(logging.DEBUG, logger="polaris.storage.db_writer")
+
+    def _job(conn: sqlite3.Connection) -> None:
+        conn.execute("INSERT INTO t (thread, seq) VALUES (0, 1)")
+
+    fut = w.submit(_job, durable=True)
+    assert fut is not None
+    fut.result(timeout=5)
+    w.stop()
+
+    duration_records = [
+        r for r in caplog.records
+        if r.name == "polaris.storage.db_writer"
+        and r.getMessage().startswith("[db_writer] batch ")
+    ]
+    assert duration_records
+    msg = duration_records[0].getMessage()
+    assert "qdepth=" in msg
+    qdepth_field = msg.split("qdepth=")[1]
+    depth_str, cap_str = qdepth_field.split("/")
+    assert int(depth_str) >= 0
+    assert int(cap_str) == 4096
+
+
 # ---------------------------------------------------------------------------
 # 7. adversarial — db_writer batch load + 1 direct writer under contention.
 #    busy_timeout must arbitrate: the direct writer SUCCEEDS (retries within

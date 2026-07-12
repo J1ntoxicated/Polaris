@@ -1504,6 +1504,20 @@ def compute_and_flip_regime(
         if candidate == "crisis" and price_candidate != "crisis"
         else "price"
     )
+    # Scope note (db-writer-reader-split, 2026-07-12): detect_regime_flip
+    # below still writes DIRECTLY on this caller's own ``conn`` (~9
+    # INSERT/UPDATE regime_state statements incl. an always-fired
+    # updated_ts UPDATE — see regime_flip.py), and the SELECT read-back a
+    # few lines down depends on seeing that write within this same call.
+    # This v1 SSOT path is intentionally NOT migrated to db_writer — it is
+    # read-back-coupled within one flow, exactly the case the migration is
+    # forbidden from touching (invariant 1). Only the low-frequency
+    # regime_v2 SHADOW UPDATE (_safe_record_regime_v2_shadow below) was
+    # offloaded. So this stage's high-frequency direct-write lock exposure
+    # is essentially intact after this wave — do not read the offload as
+    # having eliminated regime_compute's contribution to the SQLITE_BUSY
+    # count; the reduction here is marginal, and the real drop comes from
+    # other offloaded call sites (e.g. altdata collectors).
     decision = detect_regime_flip(
         conn,
         venue=venue,
@@ -1575,13 +1589,24 @@ def _safe_record_regime_v2_shadow(
     ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): when wired
     and enabled, the UPDATE is submitted as a fire-and-forget job to the
     shared single-RW-conn writer instead of running on the caller's own
-    ``conn`` directly. Safe to defer — read-back audit confirmed ZERO
-    same-tick readers of ``regime_state.regime_v2`` (it has no consumers
-    until the W4 flip ladder, per the docstring above; the only other reader,
-    ``fetch_regime_v2`` in ``_production_pipeline.py``'s entry-stamp path,
-    reads a DIFFERENT tick's/symbol's row and is itself fail-open on a stale
-    or missing value). Default ``None`` is byte-identical to the
-    pre-migration direct-write path.
+    ``conn`` directly. Safe to defer despite a genuine same-tick reader:
+    ``fetch_regime_v2`` in ``_production_pipeline.py``'s entry-stamp path
+    (line ~775) CAN read ``regime_state.regime_v2`` for the SAME
+    ``(venue, underlying_group_id)`` this UPDATE targets, in the same tick
+    (regime_compute runs the whole focus set, then a fill on one of those
+    groups stamps ``entry_regime_v2`` later in that tick). Pre-migration,
+    both write and read shared the loop conn (autocommit) → guaranteed
+    read-your-write. Post-migration, the write lands async on the writer's
+    OWN connection, so that entry read can nondeterministically see THIS
+    cycle's or the PREVIOUS cycle's ``regime_v2`` — a genuine de-sync stale
+    read, not a "different row." It is deferrable anyway because
+    ``entry_regime_v2`` is a dormant shadow/telemetry column with ZERO
+    sizing/gating/exit consumers until the W4 flip ladder (per the docstring
+    above) and is itself fail-open on a stale or missing value — trading
+    semantics are unaffected. W4 implementer: once ``entry_regime_v2`` is
+    consumed, it is no longer a reliable "regime exactly at entry" stamp —
+    it can lag one classification cycle nondeterministically. Default
+    ``None`` is byte-identical to the pre-migration direct-write path.
     """
     try:
         v2_label = classify_regime_v2(bars)

@@ -16,6 +16,7 @@ import pytest
 
 from polaris.storage.schema import ALL_DDL
 from tools.ops import log_sentry
+from tools.ops.log_sentry_db import CRYPTO_SILENT_WINDOW_MIN_S
 
 NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
 RTH_EPOCH = 1768402800  # Wed 2026-01-14 15:00 UTC -> us_equity_session_state == "rth"
@@ -162,6 +163,27 @@ def test_tick_gap_across_restart_downgraded_to_warn() -> None:
     assert "RESTART_DETECTED" in reasons
 
 
+def test_tick_gap_non_restart_anomaly_not_masked_by_larger_restart_gap() -> None:
+    """A genuine post-restart stall must ANOMALY even when a larger restart-
+    bracketed boot gap is the window's global max (finding 2/3, 2026-07-12
+    review — max_tick_gap collapsing to a single gap masked exactly this
+    incident pattern: restart THEN freeze)."""
+    lines = [
+        _tick_line(NOW - timedelta(seconds=3600), 1),  # pre-restart tick
+        _ignite_line(NOW - timedelta(seconds=3000)),  # restart
+        _tick_line(NOW - timedelta(seconds=1680), 2),  # boot gap 1920s (spans restart)
+        _tick_line(NOW - timedelta(seconds=720), 3),  # real stall gap 960s (no restart)
+        _tick_line(NOW - timedelta(seconds=30), 4),
+    ]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=70))
+    assert m.max_tick_gap_s == 1920
+    assert m.max_tick_gap_spans_restart is True
+    assert m.max_tick_gap_non_restart_s == 960  # the real, unmasked stall
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "ANOMALY"
+    assert "TICK_GAP" in reasons
+
+
 def test_tick_stale_age_anomaly_isolated() -> None:
     lines = [_tick_line(NOW - timedelta(seconds=1000), 1)]  # only one line, no gap possible
     m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
@@ -177,9 +199,39 @@ def test_tick_missing_is_anomaly() -> None:
     lines = [_batch_line(NOW - timedelta(seconds=10), 5.0)]
     m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
     assert m.last_tick_n is None
+    assert m.last_ignite_age_s is None
     status, reasons = log_sentry.evaluate_status(m, _ok_db())
     assert status == "ANOMALY"
     assert "TICK_MISSING" in reasons
+
+
+def test_tick_missing_within_boot_grace_is_warn_booting() -> None:
+    """A freshly-rotated log holds [ignite] but no [tick] yet during the
+    routine ignite->first-tick warmup (measured 16m53s / 3m45s in real logs
+    via module replay, 2026-07-12 log_sentry review finding 1) — must
+    downgrade to WARN, not ANOMALY every daily restart (and every watchdog
+    revival), or the sentry gets muted and recreates the original miss."""
+    lines = [_ignite_line(NOW - timedelta(seconds=600))]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.last_tick_n is None
+    assert m.last_ignite_age_s == 600
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "WARN"
+    assert "BOOTING" in reasons
+    assert "TICK_MISSING" not in reasons
+
+
+def test_tick_missing_beyond_boot_grace_is_still_anomaly() -> None:
+    """Grace is bounded — a boot stuck well past the observed warmup class
+    must still ANOMALY, not silently downgrade forever."""
+    lines = [_ignite_line(NOW - timedelta(seconds=3600))]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.last_tick_n is None
+    assert m.last_ignite_age_s == 3600
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "ANOMALY"
+    assert "TICK_MISSING" in reasons
+    assert "BOOTING" not in reasons
 
 
 def test_writer_batch_slow_anomaly() -> None:
@@ -339,7 +391,7 @@ def test_session_silent_crypto_warn_wide_window(make_db: MakeDb) -> None:
     quiet gap, it does not remove crypto-silence coverage outright."""
     db_path = make_db()
     now_epoch = WEEKEND_EPOCH  # equity closed -> isolates the crypto-silence check
-    cutoff_epoch = now_epoch - log_sentry.CRYPTO_SILENT_WINDOW_MIN_S
+    cutoff_epoch = now_epoch - CRYPTO_SILENT_WINDOW_MIN_S
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
     conn.close()
@@ -351,18 +403,39 @@ def test_session_silent_crypto_warn_wide_window(make_db: MakeDb) -> None:
     assert "SESSION_SILENT_EQUITY" not in reasons
 
 
-def test_session_silent_crypto_not_flagged_short_window(make_db: MakeDb) -> None:
-    """Routine false-warn class (finding 2): crypto is the validated
-    LOW-FREQUENCY conditional edge, so a 30min zero-signal window is normal
-    live operation (a 90min quiet gap was observed mid-history), not a fault."""
+def test_session_silent_crypto_reachable_at_deployed_narrow_window(make_db: MakeDb) -> None:
+    """SESSION_SILENT_CRYPTO must fire even when the caller passes the
+    deployed monitor_tick.sh §⑩ cadence (--window-min 60 = 3600s), well under
+    CRYPTO_SILENT_WINDOW_MIN_S (14400s) — finding 4, 2026-07-12 review:
+    crypto_active was previously gated by the caller's window and was
+    permanently unreachable at that cadence (confirmed crypto_active=0 in
+    real output). The check now owns its own dedicated lookback."""
     db_path = make_db()
     now_epoch = WEEKEND_EPOCH
-    cutoff_epoch = now_epoch - 1800  # 30min — well under the silence bar
+    cutoff_epoch = now_epoch - 3600  # deployed cadence, << CRYPTO_SILENT_WINDOW_MIN_S
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
     conn.close()
+    assert m.crypto_active is True
     assert m.crypto_signals_window == 0
-    assert m.crypto_active is False
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert status == "WARN"
+    assert "SESSION_SILENT_CRYPTO" in reasons
+
+
+def test_session_silent_crypto_sees_signal_outside_narrow_caller_window(make_db: MakeDb) -> None:
+    """A crypto signal 50min ago falls outside a --window-min 60 caller's own
+    cutoff (used for the other checks) but must still be seen by the
+    dedicated crypto lookback — proves the decoupling (finding 4) didn't
+    just widen the bar, it correctly finds real recent activity too."""
+    db_path = make_db()
+    now_epoch = WEEKEND_EPOCH
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 3000)  # 50min ago
+    cutoff_epoch = now_epoch - 1800  # 30min — signal falls outside this narrow cutoff
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.crypto_signals_window == 1
     status, reasons = log_sentry.evaluate_status(_ok_log(), m)
     assert "SESSION_SILENT_CRYPTO" not in reasons
 
@@ -419,12 +492,14 @@ def _ok_log() -> log_sentry.LogMetrics:
         last_tick_age_s=10,
         max_tick_gap_s=60,
         max_tick_gap_spans_restart=False,
+        max_tick_gap_non_restart_s=None,
         batch_count_window=0,
         batch_max_ms=None,
         batch_p95_ms=None,
         errors_db_locked_window=0,
         errors_other_window=0,
         restart_count_window=0,
+        last_ignite_age_s=None,
         altdata_last_refreshed_utc=None,
         altdata_last_refreshed_age_s=None,
         altdata_stale_channels="",

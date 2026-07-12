@@ -8,7 +8,8 @@ fixed 1h DB window, not the log's own cadence/error signals. This module scans
 BOTH axes over a recent window and prints fixed ``key=value`` lines any Haiku
 tick agent can consume without free-form querying (design precedent:
 ``monitor_tick.sh`` §⑦/§⑧/§⑨, vault/50_research/backgate-plan/design-monitoring.md
-W1 "판정 주체 고정").
+W1 "판정 주체 고정"). DB axis lives in ``tools/ops/log_sentry_db.py`` (split to
+keep both files under the project's 500-LOC cap).
 
 Contract: read-only (DB opened ``mode=ro``; log opened for read only), fully
 deterministic (same log+DB state -> same output), no write surface — every
@@ -21,37 +22,29 @@ from __future__ import annotations
 import argparse
 import math
 import re
-import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-from polaris.core.sessions.equity_session_gate import us_equity_session_state
-from tools.ops._us_market_holidays import us_market_holidays
+from tools.ops.log_sentry_db import DbMetrics, open_db_readonly, scan_db_axis
 from tools.ops.ops_config import OpsConfig
 
 # --- thresholds (vault backlink: vault/log.md 2026-07-12 WAL-choke incident +
 # vault/50_research/backgate-plan/design-monitoring.md W1) ---------------
 TICK_GAP_WARN_S = 300
 TICK_GAP_ANOMALY_S = 900  # today's 26min(1560s) freeze — the miss this sentry fixes
+# ignite->first-tick warmup measured 16m53s/3m45s live (finding 1) — daily
+# rotation leaves [ignite] w/o [tick] during routine boot; grace covers that.
+TICK_MISSING_BOOT_GRACE_S = 1800
 DB_WRITER_BATCH_ANOMALY_MS = 30_000.0  # writer stalled 497s == 497000ms that day
 ERROR_OTHER_ANOMALY_COUNT = 10
 # early-warning precursor threshold, well below the 2026-07-12 incident's
 # 305-count full-stall storm (feedback_db_lock_is_architecture_signal — lock
 # contention is an architecture signal, must not read STATUS=OK while building)
 DB_LOCKED_WARN_COUNT = 10
-RAIL_PNL_R_ANOMALY = -1.2  # exit-rail breach threshold (task spec, matches gate rails)
-BATCH_FLUSH_WARN_COUNT = 5  # that day's catch-up flush landed 12 closes in one second
 ALTDATA_STALE_TTL_MULT = 2
-# crypto is the validated LOW-FREQUENCY conditional edge (MEMORY
-# project_validated_edge_is_slow_trend_not_scalp) — a live 90min zero-signal
-# gap is routine (2026-07-12 log_sentry review), so only judge crypto silence
-# over a window wide enough to clear that with margin
-CRYPTO_SILENT_WINDOW_MIN_S = 14_400
 MAX_TAIL_BYTES = 20_000_000  # bounds a multi-day log; daily restart keeps this generous
-_NY_TZ = ZoneInfo("America/New_York")
 
 _TICK_RE = re.compile(r"\[tick (\d+)\] focus=")
 _BATCH_RE = re.compile(r"\[db_writer\] batch \d+ jobs ([\d.]+)\s*ms")
@@ -70,28 +63,17 @@ class LogMetrics:
     last_tick_age_s: int | None
     max_tick_gap_s: int | None
     max_tick_gap_spans_restart: bool
+    max_tick_gap_non_restart_s: int | None
     batch_count_window: int
     batch_max_ms: float | None
     batch_p95_ms: float | None
     errors_db_locked_window: int
     errors_other_window: int
     restart_count_window: int
+    last_ignite_age_s: int | None
     altdata_last_refreshed_utc: str | None
     altdata_last_refreshed_age_s: int | None
     altdata_stale_channels: str
-
-
-@dataclass(frozen=True)
-class DbMetrics:
-    db_reachable: bool
-    rail_breach_count: int
-    rail_breach_detail: str
-    batch_flush_count: int
-    batch_flush_detail: str
-    crypto_active: bool
-    crypto_signals_window: int
-    equity_active: bool
-    equity_signals_window: int
 
 
 def _fmt(ts: datetime) -> str:
@@ -136,12 +118,14 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         last_tick_age_s=None,
         max_tick_gap_s=None,
         max_tick_gap_spans_restart=False,
+        max_tick_gap_non_restart_s=None,
         batch_count_window=0,
         batch_max_ms=None,
         batch_p95_ms=None,
         errors_db_locked_window=0,
         errors_other_window=0,
         restart_count_window=0,
+        last_ignite_age_s=None,
         altdata_last_refreshed_utc=None,
         altdata_last_refreshed_age_s=None,
         altdata_stale_channels="",
@@ -214,10 +198,16 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
     if gaps_in_window:
         max_gap_s, max_gap_spans_restart = max(gaps_in_window, key=lambda g: g[0])
         max_gap: int | None = int(max_gap_s)
+        # non-restart max, split from global (masks a real stall — finding 2/3)
+        non_restart_gaps = [g for g, spans in gaps_in_window if not spans]
+        max_gap_non_restart: int | None = int(max(non_restart_gaps)) if non_restart_gaps else None
     else:
         max_gap = None
         max_gap_spans_restart = False
+        max_gap_non_restart = None
     last_tick_age = int((now - last_tick_ts).total_seconds()) if last_tick_ts else None
+    last_ignite_ts = max(ignite_ts) if ignite_ts else None
+    last_ignite_age = int((now - last_ignite_ts).total_seconds()) if last_ignite_ts else None
 
     stale_channels = sorted(
         source
@@ -233,77 +223,19 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         last_tick_age_s=last_tick_age,
         max_tick_gap_s=max_gap,
         max_tick_gap_spans_restart=max_gap_spans_restart,
+        max_tick_gap_non_restart_s=max_gap_non_restart,
         batch_count_window=len(batch_ms_window),
         batch_max_ms=max(batch_ms_window) if batch_ms_window else None,
         batch_p95_ms=_percentile(batch_ms_window, 0.95) if batch_ms_window else None,
         errors_db_locked_window=db_locked_window,
         errors_other_window=other_error_window,
         restart_count_window=restart_window,
+        last_ignite_age_s=last_ignite_age,
         altdata_last_refreshed_utc=_fmt(last_refresh_ts) if last_refresh_ts else None,
         altdata_last_refreshed_age_s=(
             int((now - last_refresh_ts).total_seconds()) if last_refresh_ts else None
         ),
         altdata_stale_channels=",".join(stale_channels),
-    )
-
-
-def open_db_readonly(db_path: Path) -> sqlite3.Connection | None:
-    if not db_path.exists():
-        return None
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-        conn.execute("SELECT 1")
-        return conn
-    except sqlite3.Error:
-        return None
-
-
-def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) -> DbMetrics:
-    cur = conn.cursor()
-
-    cur.execute(
-        "SELECT symbol, pnl_r FROM positions WHERE closed_ts > ? AND pnl_r <= ? "
-        "ORDER BY closed_ts DESC",
-        (cutoff_epoch, RAIL_PNL_R_ANOMALY),
-    )
-    rail_rows = cur.fetchall()
-
-    cur.execute(
-        "SELECT closed_ts, COUNT(*) FROM positions WHERE closed_ts > ? "
-        "GROUP BY closed_ts HAVING COUNT(*) >= ? ORDER BY closed_ts DESC",
-        (cutoff_epoch, BATCH_FLUSH_WARN_COUNT),
-    )
-    flush_rows = cur.fetchall()
-
-    cur.execute(
-        "SELECT COUNT(*) FROM signals WHERE ts > ? AND instrument_id LIKE 'okx:%'",
-        (cutoff_epoch,),
-    )
-    crypto_count = int(cur.fetchone()[0])
-    # crypto silence is only meaningful over a window wide enough to clear the
-    # routine low-frequency quiet gap with margin (CRYPTO_SILENT_WINDOW_MIN_S)
-    crypto_active = (now_epoch - cutoff_epoch) >= CRYPTO_SILENT_WINDOW_MIN_S
-
-    now_ny_date = datetime.fromtimestamp(now_epoch, tz=_NY_TZ).date()
-    equity_active = us_equity_session_state(now_epoch) == "rth" and (
-        now_ny_date not in us_market_holidays(now_ny_date.year)
-    )
-    cur.execute(
-        "SELECT COUNT(*) FROM signals WHERE ts > ? AND instrument_id LIKE 'alpaca:%'",
-        (cutoff_epoch,),
-    )
-    equity_count = int(cur.fetchone()[0])
-
-    return DbMetrics(
-        db_reachable=True,
-        rail_breach_count=len(rail_rows),
-        rail_breach_detail=" ".join(f"{sym}:{round(float(pnl), 3)}" for sym, pnl in rail_rows),
-        batch_flush_count=len(flush_rows),
-        batch_flush_detail=" ".join(f"{ts}:{c}" for ts, c in flush_rows),
-        crypto_active=crypto_active,
-        crypto_signals_window=crypto_count,
-        equity_active=equity_active,
-        equity_signals_window=equity_count,
     )
 
 
@@ -317,8 +249,13 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
         warn = True
     else:
         if log_m.last_tick_n is None:
-            reasons.append("TICK_MISSING")
-            anomaly = True
+            age = log_m.last_ignite_age_s
+            if age is not None and age <= TICK_MISSING_BOOT_GRACE_S:
+                reasons.append("BOOTING")  # routine daily-restart warmup (finding 1)
+                warn = True
+            else:
+                reasons.append("TICK_MISSING")
+                anomaly = True
         elif log_m.last_tick_age_s is not None:
             if log_m.last_tick_age_s > TICK_GAP_ANOMALY_S:
                 reasons.append("TICK_STALE")
@@ -338,6 +275,12 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
             elif log_m.max_tick_gap_s > TICK_GAP_WARN_S:
                 reasons.append("TICK_GAP")
                 warn = True
+
+        gap_nr = log_m.max_tick_gap_non_restart_s
+        if gap_nr is not None and gap_nr > TICK_GAP_ANOMALY_S:
+            if "TICK_GAP" not in reasons:  # real stall, unmasked (finding 2/3)
+                reasons.append("TICK_GAP")
+            anomaly = True
 
         if log_m.batch_max_ms is not None and log_m.batch_max_ms > DB_WRITER_BATCH_ANOMALY_MS:
             reasons.append("WRITER_BATCH_SLOW")
@@ -410,12 +353,14 @@ def format_output(
         f"last_tick_age_s={_s(log_m.last_tick_age_s)}",
         f"max_tick_gap_s={_s(log_m.max_tick_gap_s)}",
         f"max_tick_gap_spans_restart={_s(log_m.max_tick_gap_spans_restart)}",
+        f"max_tick_gap_non_restart_s={_s(log_m.max_tick_gap_non_restart_s)}",
         f"db_writer_batch_count_window={log_m.batch_count_window}",
         f"db_writer_batch_max_ms={_s(log_m.batch_max_ms)}",
         f"db_writer_batch_p95_ms={_s(log_m.batch_p95_ms)}",
         f"errors_db_locked_window={log_m.errors_db_locked_window}",
         f"errors_other_window={log_m.errors_other_window}",
         f"restart_count_window={log_m.restart_count_window}",
+        f"last_ignite_age_s={_s(log_m.last_ignite_age_s)}",
         f"altdata_last_refreshed_utc={_s(log_m.altdata_last_refreshed_utc)}",
         f"altdata_last_refreshed_age_s={_s(log_m.altdata_last_refreshed_age_s)}",
         f"altdata_stale_channels={log_m.altdata_stale_channels or 'NONE'}",

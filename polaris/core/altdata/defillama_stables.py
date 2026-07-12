@@ -24,8 +24,18 @@ from typing import Any, Final
 import httpx
 
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 
 logger = logging.getLogger(__name__)
+
+# Shared by both the direct-conn and db_writer-submitted paths so the two
+# branches are STRUCTURALLY guaranteed to issue the identical statement.
+_STABLECOIN_LIQUIDITY_SQL = (
+    "INSERT OR REPLACE INTO stablecoin_liquidity "
+    "(ts, symbol, mcap_usd, mcap_prev_day_usd, mcap_prev_week_usd, "
+    " net_mint_7d_usd, net_mint_7d_pct, created_ts) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 DEFILLAMA_BASE: Final[str] = "https://stablecoins.llama.fi"
 _STABLES_PATH: Final[str] = "/stablecoins"
@@ -80,10 +90,14 @@ class DefiLlamaStablesCollector:
         conn: sqlite3.Connection | None = None,
         base_url: str = DEFILLAMA_BASE,
         symbols: tuple[str, ...] = TRACKED_SYMBOLS,
+        db_writer: DBWriter | None = None,
     ) -> None:
         self._conn = conn
         self._base_url = base_url
         self._symbols = symbols
+        # db-writer-reader-split (opt-in, 2026-07-12): None is byte-identical
+        # to the pre-migration direct-write path — see ``_persist``.
+        self._db_writer = db_writer
 
     async def fetch(
         self, *, client: httpx.AsyncClient | None = None
@@ -132,18 +146,27 @@ class DefiLlamaStablesCollector:
     def _persist(self, symbol: str, ts: int, entry: dict[str, Any]) -> None:
         if self._conn is None:
             return
+        args = (
+            ts, symbol, entry["mcap_usd"], entry["mcap_prev_day_usd"],
+            entry["mcap_prev_week_usd"], entry["net_mint_7d_usd"],
+            entry["net_mint_7d_pct"], ts,
+        )
         try:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO stablecoin_liquidity "
-                "(ts, symbol, mcap_usd, mcap_prev_day_usd, mcap_prev_week_usd, "
-                " net_mint_7d_usd, net_mint_7d_pct, created_ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    ts, symbol, entry["mcap_usd"], entry["mcap_prev_day_usd"],
-                    entry["mcap_prev_week_usd"], entry["net_mint_7d_usd"],
-                    entry["net_mint_7d_pct"], ts,
-                ),
-            )
+            # db-writer-reader-split (opt-in, 2026-07-12): fire-and-forget
+            # submit to the shared single-RW-conn writer instead of running
+            # on the caller's own ``conn`` directly. Safe to defer — pure
+            # liquidity snapshot with no same-tick reader. Default ``None``
+            # is byte-identical to the pre-migration direct-write path.
+            if self._db_writer is not None and dbwriter_enabled():
+                def _job(
+                    c: sqlite3.Connection,
+                    sql: str = _STABLECOIN_LIQUIDITY_SQL, a: tuple[object, ...] = args,
+                ) -> None:
+                    c.execute(sql, a)
+
+                self._db_writer.submit(_job, label="stablecoin_liquidity")
+            else:
+                self._conn.execute(_STABLECOIN_LIQUIDITY_SQL, args)
         except sqlite3.Error as exc:
             logger.warning(
                 "[altdata] stablecoin_liquidity persist dropped for %s: %r", symbol, exc

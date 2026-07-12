@@ -46,6 +46,7 @@ import httpx
 
 from polaris.core.altdata.news_timing_shadow import log_news_timing_shadow
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
+from polaris.storage.db_writer import DBWriter
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,7 @@ class NewsSentimentCollector:
         base_url: str = ALPACA_DATA_BASE,
         gpt_client_factory: Callable[[], Any] | None = None,
         shadow_conn: sqlite3.Connection | None = None,
+        shadow_db_writer: DBWriter | None = None,
     ) -> None:
         self._api_key = api_key
         self._secret_key = secret_key
@@ -197,6 +199,10 @@ class NewsSentimentCollector:
         # pre-item-#7 collector — this is a pure additive side-effect, the
         # returned aggregate below is NEVER changed by its presence.
         self._shadow_conn = shadow_conn
+        # db-writer-reader-split (opt-in, 2026-07-12): threaded through to
+        # ``log_news_timing_shadow`` only when ``shadow_conn`` is ALSO wired
+        # (same no-op-unless-shadow_conn contract). None is byte-identical.
+        self._shadow_db_writer = shadow_db_writer
 
     async def fetch(
         self, *, client: httpx.AsyncClient | None = None
@@ -379,7 +385,10 @@ class NewsSentimentCollector:
         if self._shadow_conn is None:
             return
         try:
-            log_news_timing_shadow(self._shadow_conn, articles=articles, scored=scored, now=now)
+            log_news_timing_shadow(
+                self._shadow_conn, articles=articles, scored=scored, now=now,
+                db_writer=self._shadow_db_writer,
+            )
         except Exception as exc:  # noqa: BLE001 — instrumentation must never break fetch()
             logger.warning("[altdata] news_timing_shadow log dropped: %r", exc)
 

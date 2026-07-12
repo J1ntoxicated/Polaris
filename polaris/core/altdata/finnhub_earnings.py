@@ -34,8 +34,25 @@ import httpx
 from polaris.core.altdata._universe_symbols import active_alpaca_symbols
 from polaris.core.altdata.earnings_proximity_shadow import log_earnings_proximity_shadow
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 
 logger = logging.getLogger(__name__)
+
+# Shared by both the direct-conn and db_writer-submitted paths so the two
+# branches are STRUCTURALLY guaranteed to issue the identical statement.
+_EARNINGS_CALENDAR_SQL = (
+    "INSERT INTO earnings_calendar "
+    "(symbol, earnings_date, hour, eps_estimate, eps_actual, "
+    " revenue_estimate, revenue_actual, surprise_pct, ingestion_ts, "
+    " created_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT(symbol, earnings_date) DO UPDATE SET "
+    " hour=excluded.hour, eps_estimate=excluded.eps_estimate, "
+    " eps_actual=excluded.eps_actual, "
+    " revenue_estimate=excluded.revenue_estimate, "
+    " revenue_actual=excluded.revenue_actual, "
+    " surprise_pct=excluded.surprise_pct, "
+    " ingestion_ts=excluded.ingestion_ts"
+)
 
 FINNHUB_BASE: Final[str] = "https://finnhub.io"
 _CALENDAR_PATH: Final[str] = "/api/v1/calendar/earnings"
@@ -104,6 +121,7 @@ class FinnhubEarningsCollector:
         conn: sqlite3.Connection | None = None,
         symbols_override: tuple[str, ...] | None = None,
         base_url: str = FINNHUB_BASE,
+        db_writer: DBWriter | None = None,
     ) -> None:
         self._api_key = (
             api_key if api_key is not None else os.environ.get(_API_KEY_ENV, "")
@@ -111,6 +129,9 @@ class FinnhubEarningsCollector:
         self._conn = conn
         self._symbols_override = symbols_override
         self._base_url = base_url
+        # db-writer-reader-split (opt-in, 2026-07-12): None is byte-identical
+        # to the pre-migration direct-write path — see ``_persist``.
+        self._db_writer = db_writer
 
     def _resolve_symbols(self) -> tuple[str, ...]:
         if self._symbols_override is not None:
@@ -204,26 +225,28 @@ class FinnhubEarningsCollector:
             return
         eps_est = _to_float(row.get("epsEstimate"))
         eps_act = _to_float(row.get("epsActual"))
+        args = (
+            symbol, str(row.get("date", "")), str(row.get("hour", "") or ""),
+            eps_est, eps_act, _to_float(row.get("revenueEstimate")),
+            _to_float(row.get("revenueActual")), surprise_pct(eps_est, eps_act),
+            ingestion_ts, ingestion_ts,
+        )
         try:
-            self._conn.execute(
-                "INSERT INTO earnings_calendar "
-                "(symbol, earnings_date, hour, eps_estimate, eps_actual, "
-                " revenue_estimate, revenue_actual, surprise_pct, ingestion_ts, "
-                " created_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(symbol, earnings_date) DO UPDATE SET "
-                " hour=excluded.hour, eps_estimate=excluded.eps_estimate, "
-                " eps_actual=excluded.eps_actual, "
-                " revenue_estimate=excluded.revenue_estimate, "
-                " revenue_actual=excluded.revenue_actual, "
-                " surprise_pct=excluded.surprise_pct, "
-                " ingestion_ts=excluded.ingestion_ts",
-                (
-                    symbol, str(row.get("date", "")), str(row.get("hour", "") or ""),
-                    eps_est, eps_act, _to_float(row.get("revenueEstimate")),
-                    _to_float(row.get("revenueActual")), surprise_pct(eps_est, eps_act),
-                    ingestion_ts, ingestion_ts,
-                ),
-            )
+            # db-writer-reader-split (opt-in, 2026-07-12): fire-and-forget
+            # submit to the shared single-RW-conn writer instead of running
+            # on the caller's own ``conn`` directly. Safe to defer — pure
+            # raw calendar ledger with no same-tick reader. Default ``None``
+            # is byte-identical to the pre-migration direct-write path.
+            if self._db_writer is not None and dbwriter_enabled():
+                def _job(
+                    c: sqlite3.Connection,
+                    sql: str = _EARNINGS_CALENDAR_SQL, a: tuple[object, ...] = args,
+                ) -> None:
+                    c.execute(sql, a)
+
+                self._db_writer.submit(_job, label="earnings_calendar")
+            else:
+                self._conn.execute(_EARNINGS_CALENDAR_SQL, args)
         except sqlite3.Error as exc:
             logger.warning(
                 "[altdata] earnings_calendar persist dropped for %s: %r", symbol, exc
@@ -240,6 +263,7 @@ class FinnhubEarningsCollector:
                 days_to_earnings=entry["days_from_now"],
                 hour=entry["hour"],
                 surprise_pct=entry["surprise_pct"],
+                db_writer=self._db_writer,
             )
         except Exception as exc:  # noqa: BLE001 — instrumentation must never break fetch()
             logger.warning(

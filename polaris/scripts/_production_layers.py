@@ -1497,6 +1497,23 @@ def compute_and_flip_regime(
         if candidate == "crisis" and price_candidate != "crisis"
         else "price"
     )
+    # Scope note (db-writer-reader-split, 2026-07-12, reverted 2026-07-12
+    # review round 3): detect_regime_flip below still writes DIRECTLY on
+    # this caller's own ``conn`` (~9 INSERT/UPDATE regime_state statements
+    # incl. an always-fired updated_ts UPDATE — see regime_flip.py), and
+    # the SELECT read-back a few lines down depends on seeing that write
+    # within this same call. This v1 SSOT path is intentionally NOT
+    # migrated to db_writer — it is read-back-coupled within one flow,
+    # exactly the case the migration is forbidden from touching
+    # (invariant 1). The regime_v2 SHADOW UPDATE below (
+    # _safe_record_regime_v2_shadow) was tried as an offload candidate and
+    # reverted: fetch_regime_v2's entry-stamp path (_production_pipeline.py
+    # ~L775) reads regime_state.regime_v2 for the same (venue, group)
+    # within the same tick, so deferring the write nondeterministically
+    # desyncs that read from invariant 1. So regime_compute's
+    # high-frequency direct-write lock exposure is fully intact after
+    # this wave — the SQLITE_BUSY reduction comes entirely from other
+    # offloaded call sites (e.g. altdata collectors, tsmom shadow).
     decision = detect_regime_flip(
         conn,
         venue=venue,
@@ -1563,6 +1580,17 @@ def _safe_record_regime_v2_shadow(
     logged and swallowed here — it can NEVER propagate into
     ``compute_and_flip_regime``'s v1 return value. behavior-0: this call has
     no bearing on which regime the rest of the pipeline sees.
+
+    NOT a db_writer offload candidate (db-writer-reader-split, tried and
+    reverted 2026-07-12 review round 3): ``fetch_regime_v2`` in
+    ``_production_pipeline.py``'s entry-stamp path (line ~775) CAN read
+    ``regime_state.regime_v2`` for the SAME ``(venue, underlying_group_id)``
+    this UPDATE targets, in the same tick (regime_compute runs the whole
+    focus set, then a fill on one of those groups stamps ``entry_regime_v2``
+    later in that tick) — the same-tick read-back invariant 1 forbids
+    deferring. This UPDATE stays synchronous on the caller's own ``conn``
+    (autocommit) so that read is always read-your-write, matching every
+    other Layer 6 consumer.
     """
     try:
         v2_label = classify_regime_v2(bars)

@@ -41,8 +41,23 @@ import httpx
 from polaris.core.altdata._universe_symbols import active_alpaca_symbols
 from polaris.core.altdata.filing_proximity_shadow import log_filing_proximity_shadow
 from polaris.core.universe._helpers import REST_TIMEOUT_SEC
+from polaris.storage.db_writer import (
+    DBWriter,
+    dbwriter_enabled,
+    submit_executemany_chunks,
+)
 
 logger = logging.getLogger(__name__)
+
+# Shared by both the direct-conn and db_writer-submitted paths so the two
+# branches are STRUCTURALLY guaranteed to issue the identical statement (no
+# copy-paste divergence risk between the sync and deferred write).
+_EDGAR_FILINGS_SQL = (
+    "INSERT OR IGNORE INTO edgar_filings "
+    "(symbol, cik, accession_number, form_type, filing_date, "
+    " acceptance_ts, ingestion_ts, primary_document, created_ts) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 SEC_SUBMISSIONS_BASE: Final[str] = "https://data.sec.gov"
 SEC_TICKERS_URL: Final[str] = "https://www.sec.gov/files/company_tickers.json"
@@ -63,6 +78,24 @@ _CIK_MAP_TTL_SEC: Final[float] = 24 * 3600.0
 # per-fetch symbol budget (env-tunable) — see fetch()'s rotating-batch note
 _SWEEP_BATCH_ENV: Final[str] = "POLARIS_EDGAR_SWEEP_BATCH"
 _SWEEP_BATCH: Final[int] = int(os.environ.get(_SWEEP_BATCH_ENV, "") or 150)
+
+# db_writer executemany chunk size (env-tunable, no_hardcode_in_plans) — a
+# sweep can carry up to _SWEEP_BATCH symbols' full qualifying-filing history
+# in one fetch(), so ``edgar_filings`` rows are chunk-submitted (never one
+# mega job) to bound each db_writer job's size.
+_DB_CHUNK_ENV: Final[str] = "POLARIS_EDGAR_DB_CHUNK_ROWS"
+_DB_CHUNK_DEFAULT: Final[int] = 50
+
+
+def _db_chunk_rows() -> int:
+    raw = os.environ.get(_DB_CHUNK_ENV)
+    if not raw or not raw.strip():
+        return _DB_CHUNK_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DB_CHUNK_DEFAULT
+    return value if value > 0 else _DB_CHUNK_DEFAULT
 
 
 def _pace_sec() -> float:
@@ -189,6 +222,7 @@ class EdgarEventsCollector:
         tickers_url: str = SEC_TICKERS_URL,
         user_agent: str | None = None,
         forms: frozenset[str] = DEFAULT_FORMS,
+        db_writer: DBWriter | None = None,
     ) -> None:
         self._conn = conn
         self._symbols_override = symbols_override
@@ -199,6 +233,9 @@ class EdgarEventsCollector:
         self._cik_map: dict[str, str] | None = None
         self._cik_map_ts: float = 0.0
         self._sweep_cursor: int = 0  # rotating-batch position (see fetch())
+        # db-writer-reader-split (opt-in, 2026-07-12): None is byte-identical
+        # to the pre-migration direct-write path — see ``_persist``.
+        self._db_writer = db_writer
 
     def _resolve_symbols(self) -> tuple[str, ...]:
         if self._symbols_override is not None:
@@ -298,19 +335,28 @@ class EdgarEventsCollector:
         if self._conn is None:
             return
         ingestion_ts = int(now.timestamp())
+        rows = [
+            (
+                symbol, cik, f["accession_number"], f["form_type"],
+                f["filing_date"], f["acceptance_ts"], ingestion_ts,
+                f["primary_document"], ingestion_ts,
+            )
+            for f in filings
+        ]
         try:
-            for f in filings:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO edgar_filings "
-                    "(symbol, cik, accession_number, form_type, filing_date, "
-                    " acceptance_ts, ingestion_ts, primary_document, created_ts) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        symbol, cik, f["accession_number"], f["form_type"],
-                        f["filing_date"], f["acceptance_ts"], ingestion_ts,
-                        f["primary_document"], ingestion_ts,
-                    ),
+            # db-writer-reader-split (opt-in, 2026-07-12): a symbol's full
+            # qualifying-filing history is a same-table consecutive-INSERT
+            # batch — chunk-submitted as executemany jobs instead of running
+            # on the caller's own ``conn`` directly. Safe to defer — pure raw
+            # provenance ledger with no same-tick reader. Default ``None`` is
+            # byte-identical to the pre-migration direct-write path.
+            if self._db_writer is not None and dbwriter_enabled():
+                submit_executemany_chunks(
+                    self._db_writer, _EDGAR_FILINGS_SQL, rows,
+                    chunk_rows=_db_chunk_rows(), label="edgar_filings",
                 )
+            else:
+                self._conn.executemany(_EDGAR_FILINGS_SQL, rows)
         except sqlite3.Error as exc:
             logger.warning(
                 "[altdata] edgar_filings persist dropped for %s: %r", symbol, exc
@@ -326,6 +372,7 @@ class EdgarEventsCollector:
                 accession_number=latest["accession_number"],
                 acceptance_ts=latest["acceptance_ts"],
                 now=now,
+                db_writer=self._db_writer,
             )
         except Exception as exc:  # noqa: BLE001 — instrumentation must never break fetch()
             logger.warning(

@@ -150,7 +150,10 @@ def test_regime_compute_loop_isolated_per_symbol() -> None:
     lookback_start = max(0, call_idx - 900)
     preceding = _SRC[lookback_start:call_idx]
     assert "try:" in preceding
-    lookahead_end = min(len(_SRC), call_idx + 500)
+    # 550 (was 500): db-writer-reader-split (2026-07-12) added a
+    # ``db_writer=state.db_writer,`` kwarg to the call, pushing the
+    # following except/log-fault text further from call_idx.
+    lookahead_end = min(len(_SRC), call_idx + 550)
     following = _SRC[call_idx:lookahead_end]
     assert "except Exception as exc:" in following
     assert '_log_tick_stage_fault(f"regime_compute[' in following

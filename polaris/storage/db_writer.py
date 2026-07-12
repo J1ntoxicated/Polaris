@@ -52,14 +52,15 @@ import queue
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from polaris.storage.schema import connect
 
-__all__ = ["DBWriter", "dbwriter_enabled"]
+__all__ = ["DBWriter", "dbwriter_enabled", "submit_executemany_chunks"]
 
 logger = logging.getLogger(__name__)
 
@@ -379,3 +380,33 @@ class DBWriter:
         except OSError:
             return 0
         return size // max(self._page_size, 1)
+
+
+def submit_executemany_chunks(
+    db_writer: DBWriter,
+    sql: str,
+    rows: Sequence[tuple[Any, ...]],
+    *,
+    chunk_rows: int,
+    label: str,
+) -> None:
+    """Fire-and-forget submit ``rows`` to ``db_writer`` as ``executemany`` jobs,
+    bounded to ``chunk_rows`` per job.
+
+    Same-table consecutive-INSERT batches (e.g. one altdata collector fetch
+    cycle's per-symbol rows) collapse to a handful of ``executemany`` jobs
+    instead of one job per row (less queue pressure) while staying bounded
+    (a single mega-batch never monopolizes one job/SAVEPOINT — interleaves
+    with the writer's other traffic between chunks, same shape as
+    ``_ground_write_chunks.submit_ground_chunks``). A no-op on empty ``rows``.
+    """
+    for start in range(0, len(rows), chunk_rows):
+        chunk = rows[start : start + chunk_rows]
+
+        def _job(
+            conn: sqlite3.Connection,
+            s: str = sql, c: Sequence[tuple[Any, ...]] = chunk,
+        ) -> None:
+            conn.executemany(s, c)
+
+        db_writer.submit(_job, label=label)

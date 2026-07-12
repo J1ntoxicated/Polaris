@@ -38,13 +38,43 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 import sqlite3
 import uuid
-from typing import Any
+from typing import Any, Final
+
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled, submit_executemany_chunks
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["dedup_syndicate", "log_news_timing_shadow", "normalize_headline"]
+
+# Shared by both the direct-conn and db_writer-submitted paths so the two
+# branches are STRUCTURALLY guaranteed to issue the identical statement.
+_NEWS_TIMING_SHADOW_SQL = (
+    "INSERT OR IGNORE INTO news_timing_shadow "
+    "(event_id, symbol, headline_id, publication_ts, "
+    " ingestion_ts, delay_h, dedup_group_id, sentiment, "
+    " relevance, n_syndicate, created_ts) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+# db_writer executemany chunk size (env-tunable, no_hardcode_in_plans) — one
+# ~15min fetch's whole article batch is chunk-submitted so a headline-heavy
+# cycle never becomes one mega job.
+_DB_CHUNK_ENV: Final[str] = "POLARIS_NEWS_TIMING_DB_CHUNK_ROWS"
+_DB_CHUNK_DEFAULT: Final[int] = 50
+
+
+def _db_chunk_rows() -> int:
+    raw = os.environ.get(_DB_CHUNK_ENV)
+    if not raw or not raw.strip():
+        return _DB_CHUNK_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DB_CHUNK_DEFAULT
+    return value if value > 0 else _DB_CHUNK_DEFAULT
 
 
 def normalize_headline(headline: str) -> str:
@@ -88,6 +118,7 @@ def log_news_timing_shadow(
     articles: list[dict[str, Any]],
     scored: dict[Any, dict[str, float]],
     now: _dt.datetime,
+    db_writer: DBWriter | None = None,
 ) -> int:
     """Append one ``news_timing_shadow`` row per (article x tagged symbol).
 
@@ -101,8 +132,17 @@ def log_news_timing_shadow(
     the same article is re-returned on every ~15min fetch for its entire
     window residence. The write is ``INSERT OR IGNORE`` against the schema's
     ``UNIQUE(headline_id, symbol)`` index, so a re-fetched article is a no-op
-    — the returned count is the number of rows ACTUALLY written, not the
-    number of (article x symbol) pairs attempted.
+    — in the default (direct-write) path the returned count is the number of
+    rows ACTUALLY written, not the number of (article x symbol) pairs attempted.
+
+    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): when wired and
+    enabled, the whole batch is a same-table consecutive-INSERT and is
+    chunk-submitted as ``executemany`` jobs to the shared single-RW-conn
+    writer instead of running on ``conn`` directly — TAG-ONLY, no same-tick
+    reader. The return value in that mode is the ATTEMPTED count (rows built,
+    dedup pairs included), not the actual rowcount (unknowable synchronously
+    once deferred) — no caller consumes this return value today. Default
+    ``None`` is byte-identical to the pre-migration direct-write path.
     """
     if conn is None or not articles:
         return 0
@@ -111,40 +151,39 @@ def log_news_timing_shadow(
     for gid in dedup.values():
         group_counts[gid] = group_counts.get(gid, 0) + 1
     ingestion_ts = int(now.timestamp())
-    written = 0
+    rows: list[tuple[Any, ...]] = []
+    for a in articles:
+        aid = a.get("id")
+        score = scored.get(str(aid))
+        if score is None:
+            continue
+        pub_dt = _parse_publication_ts(a.get("created_at"))
+        publication_ts = int(pub_dt.timestamp()) if pub_dt is not None else None
+        delay_h = (
+            max(0.0, (now - pub_dt).total_seconds() / 3600.0)
+            if pub_dt is not None else None
+        )
+        group_id = dedup.get(aid, str(aid))
+        symbols = a.get("symbols") or []
+        for sym in symbols:
+            rows.append((
+                uuid.uuid4().hex, str(sym), str(aid), publication_ts,
+                ingestion_ts, delay_h, group_id,
+                float(score.get("sentiment", 0.0)),
+                float(score.get("relevance", 0.0)),
+                group_counts.get(group_id, 1), ingestion_ts,
+            ))
+    if not rows:
+        return 0
     try:
-        for a in articles:
-            aid = a.get("id")
-            score = scored.get(str(aid))
-            if score is None:
-                continue
-            pub_dt = _parse_publication_ts(a.get("created_at"))
-            publication_ts = int(pub_dt.timestamp()) if pub_dt is not None else None
-            delay_h = (
-                max(0.0, (now - pub_dt).total_seconds() / 3600.0)
-                if pub_dt is not None else None
+        if db_writer is not None and dbwriter_enabled():
+            submit_executemany_chunks(
+                db_writer, _NEWS_TIMING_SHADOW_SQL, rows,
+                chunk_rows=_db_chunk_rows(), label="news_timing_shadow",
             )
-            group_id = dedup.get(aid, str(aid))
-            symbols = a.get("symbols") or []
-            for sym in symbols:
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO news_timing_shadow
-                        (event_id, symbol, headline_id, publication_ts,
-                         ingestion_ts, delay_h, dedup_group_id, sentiment,
-                         relevance, n_syndicate, created_ts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        uuid.uuid4().hex, str(sym), str(aid), publication_ts,
-                        ingestion_ts, delay_h, group_id,
-                        float(score.get("sentiment", 0.0)),
-                        float(score.get("relevance", 0.0)),
-                        group_counts.get(group_id, 1), ingestion_ts,
-                    ),
-                )
-                written += cur.rowcount if cur.rowcount > 0 else 0
+            return len(rows)
+        cur = conn.executemany(_NEWS_TIMING_SHADOW_SQL, rows)
+        return cur.rowcount if cur.rowcount > 0 else 0
     except sqlite3.Error as exc:
         logger.warning("[news_timing_shadow] log dropped: %r", exc)
-        return written
-    return written
+        return 0

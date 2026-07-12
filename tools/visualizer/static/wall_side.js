@@ -131,8 +131,10 @@
           var o = v.hdr;
           var open = expanded.has(o.gk);
           html += '<div class="r grp" data-g="' + esc(o.gk) + '" title="click to ' + (open ? 'collapse' : 'expand') + '">'
-            + '<span></span><span class="vt caret">' + (open ? '▾' : '▸') + '</span>'
-            + '<span class="sym" style="color:#8a94b0">' + esc(String(o.g[0].symbol || '').split(':').pop())
+            + '<span class="vb" style="background:' + vcolor(o.g[0].venue) + '"></span>'
+            + '<span class="vt caret">' + (open ? '▾' : '▸') + '</span>'
+            + '<span class="sym"><span class="vt" style="color:' + vcolor(o.g[0].venue) + '">' + esc(vkey(o.g[0].venue).toUpperCase()) + '</span> '
+            + esc(String(o.g[0].symbol || '').split(':').pop())
             + ' ×' + o.g.length + '</span><span></span><span class="num vt"></span>'
             + '<span class="num gpnl"></span>'
             + '<span class="num"></span><span class="num vt gexp"></span></div>';

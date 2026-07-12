@@ -142,6 +142,17 @@
   };
 
   const PROBE_ORBIT_SEC = 75; // patrol period — slow, element-local
+  // probe identity hues (Jin 2026-07-12): mid-saturation, deliberately OFF
+  // the reserved axes (P/L green-red, venue cyan-violet-amber, steel, gates)
+  const PROBE_COLORS = {
+    profit_taking: '#6fc7b2',  // teal — harvest
+    loss_defense: '#d78fa0',   // rose — protect
+    technical: '#8fa8e8',      // slate — technicals
+  };
+  function probeColorOf(id) {
+    const key = String(id || '').replace(/^probe_/, '');
+    return PROBE_COLORS[key] || '#8a94b0';
+  }
   const GATE_HALO = '#5fd7ff';
   const FEEDBACK_COLOR = '#ffb454'; // gold — G8->G2 plasticity strand
   // graft 4 (radial LINEAGE_HUES) — small hue spread so several live-open
@@ -711,6 +722,7 @@
       } else if (node.cluster === 'probe') {
         s.r = 2.6;
         s.baseAlpha = node.state === 'dormant' ? 0.22 : 0.55 + (node.intensity || 0.3) * 0.3;
+        s.color = probeColorOf(node.id); // 3종 아이덴티티 색 (계약 주석 위 참조)
       } else {
         s.r = 3.0 + depth * 0.4;
         s.baseAlpha = 0.5 + (node.intensity || 0.4) * 0.3;
@@ -1390,7 +1402,8 @@
         labelItems.push(item);
         return;
       }
-      if (node.cluster !== 'reg' && node.cluster !== 'probe') return;
+      // probe 제외 — 순찰 프레임 라벨(아이덴티티 색)이 전담 (이중 표기 방지)
+      if (node.cluster !== 'reg') return;
       labelItems.push({
         id: node.id, x: s.x, y: s.y, cluster: node.cluster,
         text: String(node.label || '').replace('regime_', '').split(':')[0].toLowerCase(),
@@ -1455,6 +1468,13 @@
         by = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
       }
       drawDot(ctx, bx, by, s.r, s.color, s.baseAlpha, 0);
+      if (s.probeOrbit) {
+        // patrol name tag — follows the orbit each frame (Jin "이름 써주면")
+        ctx.font = '600 7px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = rgba(s.color, s.probeOrbit.active ? 0.85 : 0.4);
+        ctx.fillText(String(id).replace(/^probe_/, ''), bx + s.r + 4, by + 2.5);
+      }
     }
     // Strategy slot pips (Jin 2026-07-11 "전략마다 활성화 개수 정해져있어?"
     // made visible): real open_n vs the strategy's own max_positions —

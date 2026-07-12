@@ -27,7 +27,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tools.ops.log_sentry_db import DbMetrics, open_db_readonly, scan_db_axis
+from tools.ops.log_sentry_db import (
+    DbMetrics,
+    capital_session_active,
+    open_db_readonly,
+    scan_db_axis,
+)
 from tools.ops.ops_config import OpsConfig
 
 # --- thresholds (vault backlink: vault/log.md 2026-07-12 WAL-choke incident +
@@ -45,9 +50,12 @@ ERROR_OTHER_ANOMALY_COUNT = 10
 DB_LOCKED_WARN_COUNT = 10
 ALTDATA_STALE_TTL_MULT = 2
 MAX_TAIL_BYTES = 20_000_000  # bounds a multi-day log; daily restart keeps this generous
+# early-warning precursor to WRITER_QUEUE_FULL, before the queue saturates.
+WRITER_QUEUE_PRESSURE_PCT = 0.5
 
 _TICK_RE = re.compile(r"\[tick (\d+)\] focus=")
-_BATCH_RE = re.compile(r"\[db_writer\] batch \d+ jobs ([\d.]+)\s*ms")
+# qdepth=D/CAP is an optional trailing group so pre-qdepth log lines still parse.
+_BATCH_RE = re.compile(r"\[db_writer\] batch \d+ jobs ([\d.]+)\s*ms(?: qdepth=(\d+)/(\d+))?")
 _IGNITE_RE = re.compile(r"\[ignite\] CLI invoked")
 _REFRESH_RE = re.compile(r"\[altdata\] (\S+) refreshed asset=\S+ ttl=(\d+)s")
 _ERROR_RE = re.compile(r"\[ERROR\]")
@@ -79,6 +87,7 @@ class LogMetrics:
     altdata_last_refreshed_age_s: int | None
     altdata_stale_channels: str
     writer_queue_full_window: int = 0
+    writer_qdepth_pct_max: float | None = None
 
 
 def _fmt(ts: datetime) -> str:
@@ -144,6 +153,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
     last_tick_n: int | None = None
     last_tick_ts: datetime | None = None
     batch_ms_window: list[float] = []
+    qdepth_pct_window: list[float] = []
     db_locked_window = 0
     other_error_window = 0
     restart_window = 0
@@ -167,6 +177,11 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         if m_batch:
             if ts >= cutoff:
                 batch_ms_window.append(float(m_batch.group(1)))
+                qdepth_str, qcap_str = m_batch.group(2), m_batch.group(3)
+                if qdepth_str is not None and qcap_str is not None:
+                    qcap = int(qcap_str)
+                    if qcap > 0:
+                        qdepth_pct_window.append(int(qdepth_str) / qcap)
             continue
 
         if _IGNITE_RE.search(line):
@@ -245,6 +260,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         errors_other_window=other_error_window,
         restart_count_window=restart_window,
         writer_queue_full_window=queue_full_window,
+        writer_qdepth_pct_max=max(qdepth_pct_window) if qdepth_pct_window else None,
         last_ignite_age_s=last_ignite_age,
         altdata_last_refreshed_utc=_fmt(last_refresh_ts) if last_refresh_ts else None,
         altdata_last_refreshed_age_s=(
@@ -312,6 +328,12 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
         if log_m.writer_queue_full_window > 0:
             reasons.append("WRITER_QUEUE_FULL")
             anomaly = True
+        elif (
+            log_m.writer_qdepth_pct_max is not None
+            and log_m.writer_qdepth_pct_max >= WRITER_QUEUE_PRESSURE_PCT
+        ):
+            reasons.append("WRITER_QUEUE_PRESSURE")
+            warn = True
 
         if log_m.restart_count_window >= 3:
             reasons.append("RESTART_LOOP")  # 워치독 부활 반복 = 크래시 루프
@@ -346,6 +368,23 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
         if db_m.equity_active and db_m.equity_signals_window == 0:
             reasons.append("SESSION_SILENT_EQUITY")
             warn = True
+        if (
+            db_m.capital_active
+            and db_m.capital_signals_window == 0
+            and db_m.capital_fills_window == 0
+            and db_m.crypto_active
+            and db_m.crypto_signals_window > 0
+        ):
+            # capital session active + zero capital signal/fill over the
+            # dedicated 4h lookback + crypto flowing normally == the capital
+            # track itself is dark (silent-INERT class). WARN, not ANOMALY —
+            # capital is the slow-trend low-frequency edge and genuine
+            # multi-hour intra-session lulls are routine (2026-07-12 review
+            # MED: same class as SESSION_SILENT_CRYPTO/EQUITY). The
+            # gate_events counter is informational only (non-unique
+            # signal_id join could wrongly suppress — review LOW).
+            reasons.append("SILENT_CAPITAL")
+            warn = True
 
     if anomaly:
         return "ANOMALY", reasons
@@ -371,6 +410,11 @@ def format_output(
     status: str,
     reasons: list[str],
 ) -> str:
+    qdepth_pct_str = (
+        "NULL"
+        if log_m.writer_qdepth_pct_max is None
+        else str(round(log_m.writer_qdepth_pct_max, 3))
+    )
     lines = [
         f"now_utc={_fmt(now)}",
         f"window_min={window_min}",
@@ -389,6 +433,7 @@ def format_output(
         f"errors_other_window={log_m.errors_other_window}",
         f"restart_count_window={log_m.restart_count_window}",
         f"writer_queue_full_window={log_m.writer_queue_full_window}",
+        f"db_writer_qdepth_pct_max={qdepth_pct_str}",
         f"last_ignite_age_s={_s(log_m.last_ignite_age_s)}",
         f"altdata_last_refreshed_utc={_s(log_m.altdata_last_refreshed_utc)}",
         f"altdata_last_refreshed_age_s={_s(log_m.altdata_last_refreshed_age_s)}",
@@ -402,6 +447,10 @@ def format_output(
         f"crypto_signals_window={db_m.crypto_signals_window}",
         f"equity_active={_s(db_m.equity_active)}",
         f"equity_signals_window={db_m.equity_signals_window}",
+        f"capital_active={_s(db_m.capital_active)}",
+        f"capital_signals_window={db_m.capital_signals_window}",
+        f"capital_fills_window={db_m.capital_fills_window}",
+        f"capital_gate_events_window={db_m.capital_gate_events_window}",
         f"SENTRY_STATUS={status}",
         f"SENTRY_REASONS={','.join(reasons) if reasons else 'NONE'}",
     ]
@@ -429,6 +478,10 @@ def run_sentry(log_path: Path, db_path: Path, window_min: int, now: datetime) ->
             crypto_signals_window=0,
             equity_active=False,
             equity_signals_window=0,
+            capital_active=capital_session_active(int(now.timestamp())),
+            capital_signals_window=0,
+            capital_fills_window=0,
+            capital_gate_events_window=0,
         )
 
     status, reasons = evaluate_status(log_m, db_m)

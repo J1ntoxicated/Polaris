@@ -80,6 +80,12 @@
   const WALL_ZONES = {
     crownTL: { x0: 0.012, x1: 0.215, y0: 0.055, y1: 0.165 },
     crownTR: { x0: 0.785, x1: 0.988, y0: 0.055, y1: 0.165 },
+    // UPCOMING EARNINGS (Jin 2026-07-12 topology-panels audit): the crowns'
+    // own y-band (0.055-0.165) is otherwise EMPTY between them — no node ever
+    // lands above signalTop (0.165, where the market-dot cloud starts) or
+    // left/right of the two crown x-bounds — so this sits centered in that
+    // gap with margin both sides, clear of crownTL(x1=0.215)/crownTR(x0=0.785).
+    earningsRect: { x0: 0.32, x1: 0.60, y0: 0.055, y1: 0.165 },
     signalTop: 0.165, signalClamp: 0.425,
     bayRect: { x0: 0.02, x1: 0.275, y0: 0.30, y1: 0.44 },
     watchDivider: 0.438, watchRow: 0.452,

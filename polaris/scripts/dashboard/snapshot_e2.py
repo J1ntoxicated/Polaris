@@ -96,7 +96,7 @@ def _regime_states(conn: sqlite3.Connection) -> list[RegimeStateRow]:
         conn,
         """SELECT venue, underlying_group_id, regime, confidence,
                   evidence_json, consecutive_candidate, consecutive_count,
-                  updated_ts
+                  updated_ts, regime_v2
            FROM regime_state
            ORDER BY venue ASC, underlying_group_id ASC""",
     )
@@ -115,6 +115,7 @@ def _regime_states(conn: sqlite3.Connection) -> list[RegimeStateRow]:
                 evidence_l1=l1,
                 evidence_l2=l2,
                 evidence_l3=l3,
+                regime_v2=str(r[8] or ""),
             )
         )
     return out

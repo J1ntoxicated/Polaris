@@ -421,3 +421,5 @@
 2026-07-11 23:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=169 learners=3 paper=True]
 2026-07-11 daily-auto [closes=185 pnl_usd=-2680.83 opens=196 faults=0 restarts=2]
 - 2026-07-12: 🔴 라이브 인시던트 — 대시보드 풀스캔 리더(오늘 추가된 signal_counts/momentum_z/ramp/shadow 매초 쿼리)가 WAL 체크포인트 질식 → writer 497s·틱 26-50분 동결 → 배치 엑싯 지연으로 레일 관통 2건(TRUMP -1.41R, LTC -1.17R, 오늘 -5.47R). A/B(대시 OFF)로 핀 확정 후 핫쿼리 캐시 게이트(10-30s)로 수술, writer 5.2s·틱 24s 회복. 교훈: 대시 신규 쿼리는 반드시 TTL 캐시 뒤로 + 라이브 DB 에이전트 VACUUM 복사 금지. 토폴로지 웨이브는 안전 위해 일시 정지(resumeFromRunId 재개 가능).
+2026-07-12 04:54 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
+- 2026-07-12: 🔴 스톨 2차 재발(틱 27 이후 78분, writer 큐풀 174 — 대시 캐시 픽스로 불충분) → 재기동(79326, 틱 35s 복귀)+대시 OFF A/B 관찰 개시. LOG SENTRY 랜딩(69b39bd, §⑩) — 빌더 실행이 스톨을 실시간 적발(TICK_GAP+WRITER_QUEUE_FULL), 리뷰 MED 2건(터미널 국면 큐풀 축·레일 군집 게이팅) 컨덕터 마감, 인시던트 역적용 재현 통과. 15분 창 2h 자동 감시 가동. 재발 시 = 봇 내부(피드/W2 writer 경로) 확정 → env 게이트.

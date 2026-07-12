@@ -359,8 +359,18 @@
       const vc = field.venueColorOf(v) || STEEL;
       ctx.beginPath(); ctx.arc(x0 + 8, ry - 3, 2, 0, Math.PI * 2); ctx.fillStyle = field.rgba(vc, 0.9); ctx.fill();
       ctx.font = '600 6.5px JetBrains Mono, monospace'; ctx.textAlign = 'left'; ctx.fillStyle = field.rgba(vc, 0.85);
-      const staleTag = s.marks_label ? ' · ' + s.marks_label + ' ' + Math.round((s.age_sec || 0) / 60) + 'm' : '';
-      ctx.fillText((VENUE_LABEL[v] || v.toUpperCase()) + staleTag, x0 + 14, ry);
+      // compact + measured clip (Jin 2026-07-12 "CAPITAL/ALPACA 글씨 겹쳐"):
+      // the verbose marks_label ran under the exp column — shorten to
+      // "closed Xm"/first word and hard-clip against the exp column start.
+      let staleTag = '';
+      if (s.marks_label) {
+        const word = /closed/.test(s.marks_label) ? 'closed' : String(s.marks_label).split(' ')[0];
+        staleTag = ' · ' + word + ' ' + Math.round((s.age_sec || 0) / 60) + 'm';
+      }
+      let vlabel = (VENUE_LABEL[v] || v.toUpperCase()) + staleTag;
+      const maxW = x0 + (x1 - x0) * 0.66 - 42 - (x0 + 14);
+      while (vlabel.length > 4 && ctx.measureText(vlabel).width > maxW) vlabel = vlabel.slice(0, -2);
+      ctx.fillText(vlabel, x0 + 14, ry);
       ctx.textAlign = 'right'; ctx.font = '700 7.5px ui-monospace, Menlo, monospace';
       ctx.fillStyle = field.rgba(STEEL, 0.85);
       ctx.fillText('exp ' + fmtUsd(s.exposed || 0), x0 + (x1 - x0) * 0.66, ry);

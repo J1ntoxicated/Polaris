@@ -21,6 +21,15 @@ or the taker fill itself. A None conn, a non-positive touch/fill, or a missing
 table is a no-op (degrade-never-crash): the fill already happened and must
 never be undone or fabricated by a shadow-log failure.
 
+"ONE row per real entry fill" is approximate, not transactional (2026-07-12
+review LOW): the INSERT rides the db_writer queue on its own connection, so
+if the entry's own BEGIN IMMEDIATE txn rolls back on a rare sqlite error, the
+already-queued shadow row survives — a phantom for a position-open that never
+landed. Bounded: the taker fill itself was real, the row resolves like any
+other (no directional bias to traded_through_pct), and n inflation is capped
+by how rarely that txn fails. Accepted over extending the hot txn's
+write-lock hold to cover a measurement-only row.
+
 CAVEAT (maker_fill_sim R1 BREAK note): a strict touch-through still only
 proxies queue-front fill — it cannot see partial fills or a cancel racing the
 touch. ``traded_through_pct`` / ``price_improve_bps`` are a gross, optimistic

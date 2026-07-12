@@ -86,7 +86,33 @@
     railY: 0.492, railZigzag: 0.009,
     // Jin 2026-07-11 "전략이랑 게이트 라인 분리 좀 — 파이프 더 아래로":
     // bus dropped 0.655->0.695 + flattened, regime row follows to 0.80.
-    gateBusY: 0.695, gateBusFloor: 0.695, gateBusCeil: 0.735,
+    // gateBusY kept only as the deco.js "GATE BUS" divider label pivot —
+    // the flat-pipe gateBusFloor/gateBusCeil clamp it used to anchor is
+    // gone, replaced by the circuit anchors below.
+    gateBusY: 0.695,
+    // Gate circuit topology (Jin 2026-07-12 "순환 회로" — feat/topology-
+    // panels): G1->G5 climbs a gentle ascending arch (buildLayout's
+    // gateScreen), G6 sits as a right-mid monitor hub, G7 descends below
+    // it, G8 loops back to the lower-left so the existing g8->g2 gold
+    // plasticity strand (buildEdges) reads as closing the loop. x0/x1
+    // reuse the old S-curve's proven-safe span ends (0.08W/0.915W-ish) so
+    // G1's tier-census satellites and the register column's g8 wiring keep
+    // the clearances already tuned for them.
+    gateArch: { x0: 0.08, x1: 0.58, y0: 0.755, y1: 0.695, bow: 0.018 },
+    // hub/exit re-tuned in self-critique rounds 1-2 (Playwright measurement
+    // on the real 1343x962 render): 0.715H is the same pivot the old flat
+    // bus used (proven >=0.13H clear of railY=0.492 for G6's probe-orbit
+    // reach, ry=58px). G7 sits close behind on x (0.77 vs 0.87W, >130px
+    // gate-to-gate so the two reticles — ring+corner-bracket radius ~52px
+    // each — never touch) and only 30px further down in y: with G6 already
+    // this close to the rail-safe floor, there wasn't 115px of headroom
+    // left before ladderBand.br (x0.78-0.988 @ y>=0.815) — the exit-tier
+    // fan below G7 (buildLayout's jitteredBand) is trimmed from +60..115px
+    // to +20..50px to match (round 1 caught the fan spilling ~28px into
+    // the panel at the old 115px reach).
+    gateHub: { x: 0.87, y: 0.715 },
+    gateExit: { x: 0.77, y: 0.745 },
+    gateReflector: { x: 0.14, y: 0.87 },
     registerRect: { x0: 0.962, x1: 0.988, y0: 0.575, y1: 0.745 },
     regimeY: 0.80,
     ladderBand: {
@@ -233,24 +259,42 @@
     }
     prevFocusIds = newFocusIds;
 
-    // Gate spine: gentle S-curve across the middle + a small deterministic
-    // per-gate force-stagger (graft 1a, organic) so the 8 relay-hubs read as
-    // woven INTO the constellation rather than a too-clean horizontal chain.
+    // Gate spine: circuit topology (Jin 2026-07-12 "순환 회로" — feat/
+    // topology-panels, supersedes the flat S-curve). G1->G5 climb a gentle
+    // ascending arch (entry chain), G6 is a right-mid monitor hub, G7
+    // descends below it, G8 loops back to the lower-left so the g8->g2
+    // gold plasticity strand (buildEdges) reads as CLOSING the circuit.
+    // Every anchor lives in WALL_ZONES (gateArch/gateHub/gateExit/
+    // gateReflector) — the sole source of truth every satellite/fan/edge
+    // below reads through the resulting gateScreen[] entries, same as the
+    // old S-curve. Small deterministic per-gate jitter (graft 1a, organic)
+    // carried over so the relay-hubs still read as woven INTO the field.
     gateScreen = GATE_IDS.map((gid, i) => {
-      const t = i / (GATE_IDS.length - 1);
       const rg = rngFor(gid + ':stagger');
-      const x = W * 0.085 + t * W * 0.83 + (rg() - 0.5) * W * 0.012;
-      // amplitude tamed with the lower bus (0.055/0.02/0.034 -> 0.036/0.013/
-      // 0.022): the pipe reads as one calm line well clear of the rail.
-      let y = H * WALL_ZONES.gateBusY + Math.sin(t * Math.PI * 1.7 + 0.35) * H * 0.036
-        + Math.cos(t * Math.PI * 0.9) * H * 0.013 + (rg() - 0.5) * H * 0.022;
-      // g5-g8 clamp (Jin 2026-07-11 console v2, unresolved friction #1): the
-      // back half of the S-curve used to drift up into the strategy rail's y
-      // band — flatten it into a tight floor..ceil strip so the >=0.13H
-      // rail<->gate clearance is a structural guarantee, not a lucky roll of
-      // the sin/cos undulation.
-      if (i >= 4) y = Math.max(H * WALL_ZONES.gateBusFloor, Math.min(H * WALL_ZONES.gateBusCeil, y));
-      return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
+      const jx = (rg() - 0.5) * W * 0.012, jy = (rg() - 0.5) * H * 0.012;
+      if (i <= 4) {
+        // G1->G5 entry chain — rail clearance (>=0.13H below railY, same
+        // structural guarantee the old clamp gave g5-g8) is baked into
+        // gateArch.y1 (0.695H) directly rather than re-derived here.
+        const t = i / 4;
+        const arch = WALL_ZONES.gateArch;
+        const x = W * (arch.x0 + t * (arch.x1 - arch.x0)) + jx;
+        const y = H * (arch.y0 + t * (arch.y1 - arch.y0) - Math.sin(t * Math.PI) * arch.bow) + jy;
+        return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
+      }
+      if (i === 5) { // G6 monitor — right-mid hub (probe patrol + pos fan anchor)
+        const h = WALL_ZONES.gateHub;
+        return { x: W * h.x + jx, y: H * h.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
+      }
+      if (i === 6) { // G7 exit — descends below the G6 hub
+        const e = WALL_ZONES.gateExit;
+        return { x: W * e.x + jx, y: H * e.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
+      }
+      // G8 reflector — loops back to the lower-left, clear of the regime
+      // row (WALL_ZONES-implicit x<=0.30W band) and left of ladderBand's
+      // x0 (0.36W) so its own reticle/label never touches that panel.
+      const rf = WALL_ZONES.gateReflector;
+      return { x: W * rf.x + jx, y: H * rf.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
     });
 
     const byCluster = {};
@@ -452,7 +496,10 @@
         probeOrbit: { cx: gG6.x, cy: gG6.y, rx: 84, ry: 58, ang0, active },
       };
     });
-    jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 60, gG7.y + 115, ':exit', 0.7);
+    // Fan trimmed to +20..50px (circuit topology, 2026-07-12) — see
+    // WALL_ZONES.gateExit comment: G7 no longer has the old flat bus's
+    // headroom before ladderBand.br.
+    jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 20, gG7.y + 50, ':exit', 0.7);
     // exit_tally placement SKIPPED (Jin 2026-07-11 console v2 M2): the 6
     // exit-reason tally nodes still exist on the graph (server shape
     // unchanged, count binding intact) but no longer get a screen position —
@@ -859,11 +906,22 @@
 
     for (let i = 0; i < gateScreen.length - 1; i++) {
       const a = gateScreen[i], b = gateScreen[i + 1];
-      addAmbient(GATE_IDS[i], GATE_IDS[i + 1], a.x, a.y, b.x, b.y, { color: GATE_HALO, alpha: 0.34, width: 1.6, glow: true, kind: 'backbone', bowScale: 0.35 });
+      // Return stroke G7->G8 (i===6) sweeps most of the width back to the
+      // lower-left reflector (circuit topology, 2026-07-12) — a tamed bow
+      // keeps that long near-horizontal span from arcing down through the
+      // ladder band panel (WALL_ZONES.ladderBand spans x 0.36-0.988 at
+      // y>=0.815, and g7/g8 straddle that x range).
+      const bowScale = i === 6 ? 0.1 : 0.35;
+      addAmbient(GATE_IDS[i], GATE_IDS[i + 1], a.x, a.y, b.x, b.y, { color: GATE_HALO, alpha: 0.34, width: 1.6, glow: true, kind: 'backbone', bowScale });
     }
     {
+      // g8->g2 gold plasticity strand: with the circuit topology G8 already
+      // sits near G2 (both lower-left), so this now targets g2's REAL
+      // position instead of the old S-curve's forced bottom-edge landing
+      // point (H*0.985) — that hack existed only because g8 used to be far
+      // right; a short direct arc reads as visibly CLOSING the loop now.
       const a = gateScreen[7], b = gateScreen[1];
-      addAmbient('g8', 'g2', a.x, a.y, b.x, H * 0.985, { color: FEEDBACK_COLOR, alpha: 0.26, width: 1.3, glow: true, kind: 'feedback', bowScale: 2.6 });
+      addAmbient('g8', 'g2', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.26, width: 1.3, glow: true, kind: 'feedback', bowScale: 2.6 });
     }
     // G6 reading -> G8 reflector -> G5 runner update (Jin 2026-07-11 gate-
     // satellite reassignment item 4): same gold plasticity-strand hue as the

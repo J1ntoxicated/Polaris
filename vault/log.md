@@ -424,3 +424,4 @@
 2026-07-12 04:54 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
 - 2026-07-12: 🔴 스톨 2차 재발(틱 27 이후 78분, writer 큐풀 174 — 대시 캐시 픽스로 불충분) → 재기동(79326, 틱 35s 복귀)+대시 OFF A/B 관찰 개시. LOG SENTRY 랜딩(69b39bd, §⑩) — 빌더 실행이 스톨을 실시간 적발(TICK_GAP+WRITER_QUEUE_FULL), 리뷰 MED 2건(터미널 국면 큐풀 축·레일 군집 게이팅) 컨덕터 마감, 인시던트 역적용 재현 통과. 15분 창 2h 자동 감시 가동. 재발 시 = 봇 내부(피드/W2 writer 경로) 확정 → env 게이트.
 - 2026-07-12: 게이트 순환 토폴로지+패널 편입 랜딩(c659270, 워크플로 REJECT 재작업 인수+컨덕터 마감: STREAMS 푸터 28px·g8/g1 라벨 코너·버스터 충돌 keep-branch). 한줄 스파인 → 순환 회로(아치→허브→하강→루프백). UPCOMING EARNINGS 7d·STABLE 행·레짐 v2 마커 편입. 라이브 에러 0.
+- 2026-07-12: 🔍 P0 원장 포렌식 페니 폐합 — 진실 = economic net 이번주 -$9,150(가격엣지 ≈0 + 실수수료 -$8.3k). fills.pnl_usd=GROSS 오독 정정(#46 single-truth). weekly_equity_curve 버그 2종 적발(phantom slippage falsy-zero -$827 허구 + 누산 유실 11건 +$495) → ledger-fix 웨이브 투입. 에쿼티 표시(virtual_account_equity)는 CLEAN. 사이징 체인 무손상. Jin 질문 답 = 현 회전율에선 거래↑=수수료 burn↑ 사실 — fee-split flip(그로스 판정)이 정공 해법.

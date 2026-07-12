@@ -58,6 +58,20 @@ def test_no_trade_through_records_missed_opportunity_on_buy() -> None:
     assert outcome.missed_move_bps > 0.0  # price ran away from the resting bid
 
 
+def test_exact_touch_without_crossing_is_not_traded_through_on_buy() -> None:
+    # OVER-FILL BIAS regression (maker_fill_sim R1): a bar that only TOUCHES
+    # the resting bid (low == touch_px) without going strictly below it must
+    # NOT count as a fill — a bare touch is a queue-position toss-up, not a
+    # guaranteed maker fill.
+    outcome = resolve_price_through(
+        side="buy", touch_px=99.0, fill_px=100.0,
+        forward_highs=[99.5, 100.6], forward_lows=[99.0, 100.1],
+        forward_closes=[99.3, 100.4],
+    )
+    assert outcome.traded_through is False
+    assert outcome.price_improve_bps == 0.0
+
+
 def test_sell_side_uses_ask_touch_and_high_for_trade_through() -> None:
     # SELL: touch_px is the ask a passive order rests at (above the taker fill).
     outcome = resolve_price_through(

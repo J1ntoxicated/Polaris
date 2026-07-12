@@ -11,6 +11,13 @@ improvement bps reading for the SCOUT SHADOW promotion-gauge pattern
 Read-only, bounded (recent rows only, short forward window) — never gates,
 sizes, or throttles a trade. A missing table / empty result degrades to
 ``None`` fields (no fabricated ratio), matching every sibling shadow channel.
+
+CAVEAT: both readings are GROSS / an optimistic upper bound, not the net
+realizable maker edge — ``avg_price_improve_bps`` never nets out adverse
+post-fill drift on the traded-through subset, and even the strict
+touch-through test (see ``resolve_price_through``) cannot see partial fills
+or a cancel racing the touch (maker_fill_sim R1 BREAK note). Do not read the
+promotion gauge at face value against the fee breakeven without this in mind.
 """
 
 from __future__ import annotations
@@ -39,7 +46,9 @@ def price_through_channel_stats(conn: sqlite3.Connection) -> dict[str, Any]:
     """One ``{n, traded_through_pct, avg_price_improve_bps, fresh_ts}`` reading.
 
     ``avg_price_improve_bps`` is averaged over the traded-through subset only
-    (an unfilled row has no realised improvement to average in). A missing
+    (an unfilled row has no realised improvement to average in) and is GROSS
+    — no adverse post-fill drift on that subset is netted out, so it is an
+    upper bound on realizable maker edge (module CAVEAT). A missing
     ``price_through_shadow`` / ``bars`` table degrades that ONE read to
     ``None`` fields (``sqlite3.Error`` caught) rather than raising.
     """

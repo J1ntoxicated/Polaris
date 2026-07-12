@@ -20,6 +20,14 @@ Instrumentation ONLY — never influences the live entry/exit decision, sizing,
 or the taker fill itself. A None conn, a non-positive touch/fill, or a missing
 table is a no-op (degrade-never-crash): the fill already happened and must
 never be undone or fabricated by a shadow-log failure.
+
+CAVEAT (maker_fill_sim R1 BREAK note): a strict touch-through still only
+proxies queue-front fill — it cannot see partial fills or a cancel racing the
+touch. ``traded_through_pct`` / ``price_improve_bps`` are a gross, optimistic
+upper bound on realizable maker edge, not a net figure: nothing here measures
+the adverse post-fill drift on the trades that DID trade through (only the
+missed-opportunity drift on the ones that didn't). Read the promotion gauge
+in ``tools/visualizer/price_through_channel.py`` with that in mind.
 """
 
 from __future__ import annotations
@@ -114,12 +122,15 @@ def log_price_through_entry(
 class PriceThroughOutcome(NamedTuple):
     """Resolved offline outcome of one price-through shadow row.
 
-    ``traded_through`` — the forward bars swept the resting touch (the maker
-    WOULD have filled there). ``price_improve_bps`` — how much cheaper the
-    maker fill would have landed vs the actual taker fill (positive = better);
-    0.0 when unfilled. ``missed_move_bps`` — when unfilled, how far price moved
-    AWAY from the resting touch by the last forward bar (the opportunity cost
-    of resting instead of taking); 0.0 when filled.
+    ``traded_through`` — the forward bars swept STRICTLY through the resting
+    touch (the maker WOULD have filled there — a bare touch without crossing
+    it does not count, see ``resolve_price_through``). ``price_improve_bps``
+    — how much cheaper the maker fill would have landed vs the actual taker
+    fill (positive = better); 0.0 when unfilled. GROSS only: no adverse
+    post-fill drift is netted out of it, so it is an upper bound on realizable
+    maker edge, not the net edge. ``missed_move_bps`` — when unfilled, how far
+    price moved AWAY from the resting touch by the last forward bar (the
+    opportunity cost of resting instead of taking); 0.0 when filled.
     """
 
     traded_through: bool
@@ -139,13 +150,22 @@ def resolve_price_through(
     """Resolve one shadow row against the bars AFTER its entry (OFFLINE, pure).
 
     BUY: ``touch_px`` is the bid a passive order rests at (below the taker
-    ``fill_px``) — traded-through when a forward bar's low reaches it.
-    SELL: ``touch_px`` is the ask (above ``fill_px``) — traded-through when a
-    forward bar's high reaches it. Walking the forward bars in order, the
-    FIRST bar that reaches the touch resolves ``traded_through=True``. If none
-    do, the last forward close's distance from the touch is the missed-
-    opportunity move. Degenerate inputs (no bars, non-positive prices) → a
-    flat/unresolved outcome. Pure, no I/O — mirrors
+    ``fill_px``) — traded-through when a forward bar's low goes STRICTLY
+    BELOW it. SELL: ``touch_px`` is the ask (above ``fill_px``) —
+    traded-through when a forward bar's high goes STRICTLY ABOVE it. Strict
+    (not ``<=``/``>=``) is deliberate: a bar that only TOUCHES the resting
+    price without trading through it is a queue-position toss-up (did a
+    resting maker order actually get filled, or was it a graze that reversed
+    without ever reaching the front of book?) — treating a bare touch as a
+    guaranteed fill is the over-fill / adverse-selection bias the
+    maker_fill_sim R1 debate flagged (2026-07-12) and this shadow exists to
+    NOT reproduce, unlike ``weekend_data.resolve_would_be_r`` which resolves
+    an ALREADY-filled trade's target/stop trigger (touch IS the trigger
+    there — a different question). Walking the forward bars in order, the
+    FIRST bar that trades through the touch resolves ``traded_through=True``.
+    If none do, the last forward close's distance from the touch is the
+    missed-opportunity move. Degenerate inputs (no bars, non-positive
+    prices) → a flat/unresolved outcome. Pure, no I/O — mirrors
     ``tools/visualizer/weekend_data.resolve_would_be_r``'s forward-bar-walk
     shape for the SAME "resolve against future bars" problem.
     """
@@ -159,11 +179,11 @@ def resolve_price_through(
         hi = highs[i] if i < len(highs) else forward_closes[i]
         lo = lows[i] if i < len(lows) else forward_closes[i]
         if is_buy:
-            if lo <= touch_px:
+            if lo < touch_px:
                 improve = (fill_px - touch_px) / fill_px * 10_000.0
                 return PriceThroughOutcome(True, improve, 0.0)
         else:
-            if hi >= touch_px:
+            if hi > touch_px:
                 improve = (touch_px - fill_px) / fill_px * 10_000.0
                 return PriceThroughOutcome(True, improve, 0.0)
     last = forward_closes[-1]

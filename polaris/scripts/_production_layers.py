@@ -98,6 +98,7 @@ from polaris.scripts._session_map import (
     session_group,
     session_transitions,
 )
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.capital.session_calendar import capital_seconds_to_close
@@ -1421,6 +1422,7 @@ def compute_and_flip_regime(
     asset_class: str = "crypto",
     hint_stats: dict[str, int] | None = None,
     regime_v2_crosstab: dict[str, int] | None = None,
+    db_writer: DBWriter | None = None,
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
@@ -1467,6 +1469,11 @@ def compute_and_flip_regime(
     degrade pattern replicated per the design doc): any failure there is
     logged and swallowed, never altering the v1 label this function returns.
     Default ``None`` → no counter, byte-identical to every pre-W2 caller.
+
+    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): threaded
+    through to ``_safe_record_regime_v2_shadow``'s UPDATE only — see that
+    function's docstring for why the column is safe to defer. Default
+    ``None`` is byte-identical to the pre-migration direct-write path.
     """
     price_candidate, price_strength, _price_ev = compute_real_regime_signal(
         bars, asset_class=asset_class
@@ -1540,7 +1547,7 @@ def compute_and_flip_regime(
         )
     _safe_record_regime_v2_shadow(
         conn, venue=venue, underlying_group_id=underlying_group_id, bars=bars,
-        v1_label=persisted, crosstab=regime_v2_crosstab,
+        v1_label=persisted, crosstab=regime_v2_crosstab, db_writer=db_writer,
     )
     return persisted
 
@@ -1553,6 +1560,7 @@ def _safe_record_regime_v2_shadow(
     bars: Sequence[Bar],
     v1_label: str,
     crosstab: dict[str, int] | None,
+    db_writer: DBWriter | None = None,
 ) -> None:
     """W2 twinlight (design-regime-v2-rollout.md) — compute + persist the
     regime v2 6-state SHADOW label alongside the v1 SSOT, fully fail-open.
@@ -1563,14 +1571,40 @@ def _safe_record_regime_v2_shadow(
     logged and swallowed here — it can NEVER propagate into
     ``compute_and_flip_regime``'s v1 return value. behavior-0: this call has
     no bearing on which regime the rest of the pipeline sees.
+
+    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): when wired
+    and enabled, the UPDATE is submitted as a fire-and-forget job to the
+    shared single-RW-conn writer instead of running on the caller's own
+    ``conn`` directly. Safe to defer — read-back audit confirmed ZERO
+    same-tick readers of ``regime_state.regime_v2`` (it has no consumers
+    until the W4 flip ladder, per the docstring above; the only other reader,
+    ``fetch_regime_v2`` in ``_production_pipeline.py``'s entry-stamp path,
+    reads a DIFFERENT tick's/symbol's row and is itself fail-open on a stale
+    or missing value). Default ``None`` is byte-identical to the
+    pre-migration direct-write path.
     """
     try:
         v2_label = classify_regime_v2(bars)
-        conn.execute(
-            "UPDATE regime_state SET regime_v2 = ? "
-            "WHERE venue = ? AND underlying_group_id = ?",
-            (v2_label, venue, underlying_group_id),
-        )
+        if db_writer is not None and dbwriter_enabled():
+            venue_c, group_c, label_c = venue, underlying_group_id, v2_label
+
+            def _job(
+                c: sqlite3.Connection,
+                v: str = venue_c, g: str = group_c, lbl: str = label_c,
+            ) -> None:
+                c.execute(
+                    "UPDATE regime_state SET regime_v2 = ? "
+                    "WHERE venue = ? AND underlying_group_id = ?",
+                    (lbl, v, g),
+                )
+
+            db_writer.submit(_job, label="regime_v2_shadow")
+        else:
+            conn.execute(
+                "UPDATE regime_state SET regime_v2 = ? "
+                "WHERE venue = ? AND underlying_group_id = ?",
+                (v2_label, venue, underlying_group_id),
+            )
         if crosstab is not None:
             key = f"{v1_label}|{v2_label}"
             crosstab[key] = crosstab.get(key, 0) + 1

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from polaris.core.data.fills_persist import persist_fill
 from polaris.core.data.position_risk_persist import persist_position_risk_state
 from polaris.core.economics.maker_fill_shadow import log_maker_fill
+from polaris.core.economics.price_through_shadow import log_price_through_entry
 from polaris.core.isolation.allocator_fence import (
     AllocationRequest,
     ReservationConflictError,
@@ -96,6 +97,7 @@ from polaris.scripts._smoke_real_roundtrip import (
     resolve_okx_base_url,
 )
 from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
+from polaris.storage.db_writer import DBWriter
 from polaris.strategies import STRATEGY_REGISTRY, RawSignal
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital import CapitalAdapter
@@ -155,6 +157,73 @@ def _persist_maker_fill_shadow(
         fill_px=fill_price,
         outcome=attempt.maker_outcome or "clean_fill",
         reposts=attempt.maker_reposts,
+    )
+
+
+def _fetch_touch_px(
+    conn: sqlite3.Connection, *, venue: str, symbol: str, side: str
+) -> float | None:
+    """Best-effort passive-touch lookup for the price-through shadow (read-only).
+
+    Returns the bid for a buy/long entry, the ask for a sell/short entry — the
+    price a resting maker limit would have posted at. ``None`` on a missing
+    ``quote_ticks`` row, a non-positive price, or any read error (degrade-
+    never-crash — the caller skips the shadow row rather than fabricating a
+    touch).
+    """
+    try:
+        row = conn.execute(
+            "SELECT bid, ask FROM quote_ticks WHERE venue = ? AND symbol = ? "
+            "LIMIT 1",
+            (venue, symbol),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    bid, ask = float(row[0] or 0.0), float(row[1] or 0.0)
+    is_buy = side.strip().lower() in ("buy", "long")
+    px = bid if is_buy else ask
+    return px if px > 0.0 else None
+
+
+def _persist_price_through_shadow(
+    conn: sqlite3.Connection | None,
+    *,
+    venue: str,
+    symbol: str,
+    side: str,
+    fill_price: float,
+    touch_px: float | None,
+    run_id: str,
+    strategy_id: str,
+    now_ts: int,
+    db_writer: DBWriter | None = None,
+) -> None:
+    """Persist ONE ``price_through_shadow`` row for EVERY entry fill (maker_fill_sim
+    R1 2026-07-12 debate).
+
+    Unlike ``_persist_maker_fill_shadow`` (maker-only, stays honestly 0-row
+    while ``real_roundtrip=False``), this fires on every taker AND maker entry.
+    ``touch_px`` is resolved by the caller (``_fetch_touch_px``, called BEFORE
+    the write-lock-held txn) — ``None`` (missing/stale quote) is a no-op, never
+    a fabricated row. Resolution (traded-through / price-improvement /
+    missed-opportunity) happens OFFLINE against forward bars, never here.
+    Measurement only — never touches the trade decision.
+    """
+    if conn is None or touch_px is None:
+        return
+    log_price_through_entry(
+        conn,
+        run_id=run_id,
+        strategy_id=strategy_id,
+        venue=venue,
+        symbol=symbol,
+        side=side,
+        fill_px=fill_price,
+        touch_px=touch_px,
+        now_ts=now_ts,
+        db_writer=db_writer,
     )
 
 
@@ -775,6 +844,11 @@ async def reserve_and_submit(
     open_regime_v2 = fetch_regime_v2(
         conn, venue=venue, underlying_group_id=underlying_group_id
     )
+    # PRICE-THROUGH SHADOW touch lookup (maker_fill_sim R1 2026-07-12 debate):
+    # a best-effort quote_ticks read done BEFORE the write-lock-held txn below
+    # (same placement as the regime lookups above) so the shadow
+    # instrumentation never extends the entry's BEGIN IMMEDIATE hold time.
+    shadow_touch_px = _fetch_touch_px(conn, venue=venue, symbol=symbol, side=sig.side)
     try:
         # autocommit-mode connection (init_db uses isolation_level=None) —
         # explicit BEGIN+COMMIT is an atomic boundary in SQLite. ROLLBACK
@@ -809,6 +883,22 @@ async def reserve_and_submit(
             conn, attempt=maker_attempt, run_id=sig.signal_id,
             strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
             side=sig.side, fill_price=fill.fill_price,
+        )
+        # PRICE-THROUGH SHADOW (maker_fill_sim R1 2026-07-12 debate, Hybrid
+        # C+A): fires on EVERY entry (unlike maker_fill_shadow above, which
+        # legitimately stays 0-row while real_roundtrip=False — no real maker
+        # fill can occur). ``shadow_touch_px`` was resolved BEFORE this txn
+        # (quote_ticks read); resolution (traded-through / price-improvement /
+        # missed-opportunity) is OFFLINE against forward bars
+        # (tools/visualizer/price_through_channel.py) — never decided here.
+        # db_writer-routed (new-write policy) so the shadow insert never
+        # extends this txn's write-lock hold. Shadow-only — never touches the
+        # fill / sizing / exit decision.
+        _persist_price_through_shadow(
+            conn, venue=venue, symbol=symbol, side=sig.side,
+            fill_price=fill.fill_price, touch_px=shadow_touch_px,
+            run_id=sig.signal_id, strategy_id=sig.strategy_id, now_ts=now_ts,
+            db_writer=state.db_writer,
         )
         # P5 gap-b: populate the open-position risk row the sizer's
         # PortfolioState reads, so per-symbol/underlying/cluster/track caps bind

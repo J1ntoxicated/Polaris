@@ -139,6 +139,33 @@ CREATE INDEX IF NOT EXISTS idx_maker_fill_shadow_strategy
     ON maker_fill_shadow(strategy_id, outcome, created_ts);
 """
 
+# Price-through maker-fill shadow (maker_fill_sim R1 2026-07-12 debate,
+# vault/50_research/debates/maker_fill_sim_r1_2026-07-12.md) — one row per REAL
+# entry fill (the current all-taker execution) carrying the touch a passive
+# maker limit would have rested at. Unlike maker_fill_shadow above (maker-only,
+# stays honestly 0-row while real_roundtrip=False), this fires on EVERY entry.
+# Resolution (traded-through / price-improvement / missed-opportunity) is
+# OFFLINE against forward bars — never stored here (no fabricated outcome).
+DDL_PRICE_THROUGH_SHADOW = """
+CREATE TABLE IF NOT EXISTS price_through_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL DEFAULT '',
+    fill_px REAL NOT NULL DEFAULT 0.0,
+    touch_px REAL NOT NULL DEFAULT 0.0,
+    current_fee_bps REAL NOT NULL DEFAULT 0.0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_PRICE_THROUGH_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_price_through_shadow_symbol
+    ON price_through_shadow(venue, symbol, created_ts);
+"""
+
 # Shadow-first would-be orders ([[weekend_maker_honest_rerun_2026-06-28]]) — one
 # row per SUPPRESSED order on a shadow_first strategy (the two weekend OKX makers).
 # The SIGNAL still flowed the full pipeline (G1-G5 + sizing); this records the

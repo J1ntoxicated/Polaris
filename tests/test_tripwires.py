@@ -158,6 +158,25 @@ def test_kill_fire_rate_clean_with_one_recent_transition(conn):
     assert report.kill_fire_rate_flag is False
 
 
+def test_kill_fire_rate_excludes_promotions(conn):
+    """A promotion's persist call (_production_close_classes.py's
+    _persist_transition) bumps last_transition_ts AND last_promotion_ts to
+    the SAME now_ts in one UPDATE — the opposite of a demotion, and must
+    not count toward the kill-fire-rate signal."""
+    for i in range(KILL_FIRE_RATE_MIN_TRACKS):
+        conn.execute(
+            "INSERT INTO strategy_class (venue, strategy_id, strategy_class, "
+            "window_w, dwell, ladder_step, epoch_id, last_transition_ts, "
+            "last_promotion_ts, kill_state, shadow_ring) "
+            "VALUES ('okx', ?, 'EARN', 20, 25, 0, 2, ?, ?, 'ACTIVE', '[]')",
+            (f"t{i}", NOW - 3600, NOW - 3600),
+        )
+    conn.commit()
+    report = compute_tripwire_report(conn, now_ts=NOW)
+    assert report.demoted_tracks_today == 0
+    assert report.kill_fire_rate_flag is False
+
+
 # ---------------------------------------------------------------------------
 # remap drift (reads score_f_remap_table.stale)
 # ---------------------------------------------------------------------------

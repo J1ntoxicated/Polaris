@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from polaris.core.classes.remap_table import TRACK_MIN_N, pool_scope_key, track_scope_key
 from polaris.scripts._production_boot_classes import (
     boot_hydrate_and_bootstrap_strategy_class,
 )
@@ -101,6 +102,46 @@ def test_boot_never_raises_on_internal_failure(conn, monkeypatch):
     )
     n = boot_hydrate_and_bootstrap_strategy_class(conn, now_ts=1_700_000_000)  # no raise
     assert n == 0
+
+
+def test_boot_seeds_remap_table_track_and_pool_rows(conn):
+    """CRITICAL fix — cold-start remap gap: without a boot-time seed, the
+    judged axis flips to gross_bps by default while score_f_remap_table
+    stays empty until the sweeper's own 07:40 cadence, so resolve_thresholds
+    fail-opens to legacy-scale defaults against gross-scale scores (over-
+    demotion window). Boot must populate both the per-track (n>=TRACK_MIN_N)
+    row and the venue-pool fallback row up front."""
+    venue, strategy_id = "okx", "rsi_bb_pullback"
+    for i in range(TRACK_MIN_N):
+        ts = 1_700_000_000 + i * 3600
+        position_id = f"p{i}"
+        conn.execute(
+            "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+            "entry_strategy_id, active_strategy_id, side, qty, status, "
+            "opened_ts, closed_ts) VALUES (?, ?, 'BTC-USDT', ?, ?, ?, 'long', "
+            "1.0, 'closed', ?, ?)",
+            (position_id, venue, strategy_id, strategy_id, strategy_id, ts - 3600, ts),
+        )
+        conn.execute(
+            "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+            "size_usd, fill_price, fee_usd, ts_ms, order_id, contribution_id, "
+            "pnl_usd, is_close) VALUES (?, ?, ?, ?, 'sell', 1000.0, 100.0, 1.0, ?, ?, ?, 50.0, 1)",
+            (uuid.uuid4().hex, venue, f"{venue}:BTC-USDT", strategy_id, ts * 1000,
+             uuid.uuid4().hex, position_id),
+        )
+    conn.commit()
+    boot_hydrate_and_bootstrap_strategy_class(conn, now_ts=1_700_100_000)
+    track_row = conn.execute(
+        "SELECT n_samples FROM score_f_remap_table WHERE scope_key = ?",
+        (track_scope_key(venue=venue, strategy_id=strategy_id),),
+    ).fetchone()
+    assert track_row is not None
+    assert track_row[0] == TRACK_MIN_N
+    pool_row = conn.execute(
+        "SELECT scope_key FROM score_f_remap_table WHERE scope_key = ?",
+        (pool_scope_key(venue=venue),),
+    ).fetchone()
+    assert pool_row is not None
 
 
 def test_lookback_score_f_uses_legacy_axis_not_gross_bps(conn):

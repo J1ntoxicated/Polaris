@@ -185,15 +185,26 @@ def _earn_signal(conn: sqlite3.Connection) -> tuple[float, float | None, bool]:
 
 
 def _kill_fire_rate_signal(conn: sqlite3.Connection, *, now_ts: int) -> tuple[int, float, int, bool]:
+    """``last_transition_ts`` alone conflates demotions with promotions/
+    ladder-exits: ``_persist_transition`` (``_production_close_classes.py``)
+    bumps it on ANY class change, not just a demotion. No transition-
+    direction column is persisted, but a promotion's SAME single UPDATE
+    also bumps ``last_promotion_ts`` to the identical ``now_ts`` (a
+    demotion never touches ``last_promotion_ts``) — excluding rows where
+    the two columns match turns this into a demotion-only signal without a
+    schema change."""
     today_start = now_ts - _ONE_DAY_SEC
     baseline_start = now_ts - _FOURTEEN_DAYS_SEC
+    demotion_only = "(last_promotion_ts IS NULL OR last_promotion_ts != last_transition_ts)"
     today_rows = conn.execute(
-        "SELECT strategy_id FROM strategy_class WHERE last_transition_ts >= ?", (today_start,),
+        f"SELECT strategy_id FROM strategy_class WHERE last_transition_ts >= ? AND {demotion_only}",
+        (today_start,),
     ).fetchall()
     demotions_today = len(today_rows)
     demoted_tracks_today = len({str(r[0]) for r in today_rows})
     baseline_rows = conn.execute(
-        "SELECT COUNT(*) FROM strategy_class WHERE last_transition_ts >= ? AND last_transition_ts < ?",
+        "SELECT COUNT(*) FROM strategy_class WHERE last_transition_ts >= ? "
+        f"AND last_transition_ts < ? AND {demotion_only}",
         (baseline_start, today_start),
     ).fetchone()
     baseline_avg = (int(baseline_rows[0]) if baseline_rows else 0) / 14.0

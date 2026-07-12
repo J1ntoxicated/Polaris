@@ -39,6 +39,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from polaris.core.classes.remap_table import (
+    VENUE_POOLS,
+    compute_track_remap,
+    compute_venue_pool_remap,
+    upsert_remap_entry,
+)
 from polaris.core.classes.score_f import compute_score_f
 from polaris.core.lifecycle.recover import (
     bootstrap_replay_strategy_class,
@@ -116,6 +122,40 @@ def _registry_candidates() -> list[tuple[str, str]]:
     ]
 
 
+def _seed_remap_table(conn: sqlite3.Connection, *, now_ts: int) -> None:
+    """Boot-time ``score_f_remap_table`` seed (CRITICAL fix — cold-start
+    remap gap). The refresh sweeper (``tools/ops/scoref_remap_refresh.py``)
+    only runs on its own 07:40 cadence, so a boot shortly after the
+    fee-split flip goes live would otherwise judge the flipped gross_bps
+    axis against un-remapped, legacy-scale thresholds until the first
+    sweep (up to ~24h). Mirrors ``refresh_all``'s own track -> venue-pool
+    sweep directly against ``remap_table``'s public API (this package never
+    imports ``tools/`` — that dependency runs the other way). Idempotent
+    (UPSERT) and its own fail-open try/except, independent of hydrate/
+    bootstrap's — a remap-seed failure must never block strategy_class
+    hydrate (flow_not_block)."""
+    try:
+        tracks = conn.execute(
+            "SELECT DISTINCT venue, strategy_id FROM positions WHERE status = 'closed'"
+        ).fetchall()
+        for venue, strategy_id in tracks:
+            entry = compute_track_remap(
+                conn, venue=str(venue), strategy_id=str(strategy_id), now_ts=now_ts,
+            )
+            if entry is not None:
+                upsert_remap_entry(conn, entry)
+        for venue in VENUE_POOLS:
+            pool_entry = compute_venue_pool_remap(conn, venue=venue, now_ts=now_ts)
+            if pool_entry is not None:
+                upsert_remap_entry(conn, pool_entry)
+        conn.commit()
+    except Exception:  # noqa: BLE001 — boot must never crash on this
+        logger.exception(
+            "[pts-classes/boot] remap-table seed failed — thresholds fall "
+            "back to venue-pool/hardcoded-legacy-default until the next sweep"
+        )
+
+
 def boot_hydrate_and_bootstrap_strategy_class(
     conn: sqlite3.Connection, *, now_ts: int
 ) -> int:
@@ -127,6 +167,7 @@ def boot_hydrate_and_bootstrap_strategy_class(
     exception is logged and swallowed (boot must never crash on a
     classification-layer failure, flow_not_block); returns 0 on failure.
     """
+    _seed_remap_table(conn, now_ts=now_ts)
     try:
         existing = hydrate_strategy_class(conn)
         if existing:

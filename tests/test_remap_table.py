@@ -82,26 +82,26 @@ def test_track_remap_built_at_min_n(conn):
 
 
 def test_track_remap_isotonic_order_preserved(conn):
-    """The 7 migrated thresholds stay in the SAME increasing order as their
-    legacy source (-4,-3,-1,2,3,6,9) — the isotonic-enforcement contract."""
+    """The 4 remapped judged-axis thresholds stay in the SAME increasing
+    order as their legacy source (-4,-3,-1,2) — the isotonic-enforcement
+    contract."""
     _seed_track(conn, n=60)
     entry = compute_track_remap(conn, venue="okx", strategy_id="s1", now_ts=1_700_100_000)
     assert entry is not None
     t = entry.thresholds
-    seq = [
-        t.schmitt_bench_partial, t.schmitt_bench_full, t.schmitt_prove,
-        t.prove_stagnation, t.ladder_step0, t.ladder_step1, t.ladder_step2,
-    ]
+    seq = [t.schmitt_bench_partial, t.schmitt_bench_full, t.schmitt_prove, t.prove_stagnation]
     assert seq == sorted(seq)
 
 
-def test_ladder_decay_mirrors_ladder_step0(conn):
-    """ladder_decay's legacy value (3.0) is numerically identical to
-    ladder_step0's (3.0) -> both migrate to the SAME new value."""
+def test_ladder_thresholds_never_remapped(conn):
+    """The reentry ladder judges shadow_scores (R-multiple scale, untouched
+    by the flip) — its 4 thresholds must stay at their legacy-literal
+    defaults regardless of the track's gross_bps population."""
     _seed_track(conn, n=60)
     entry = compute_track_remap(conn, venue="okx", strategy_id="s1", now_ts=1_700_100_000)
     assert entry is not None
-    assert entry.thresholds.ladder_decay == pytest.approx(entry.thresholds.ladder_step0)
+    t = entry.thresholds
+    assert (t.ladder_step0, t.ladder_step1, t.ladder_step2, t.ladder_decay) == (3.0, 6.0, 9.0, 3.0)
 
 
 def test_only_real_notional_rows_count_toward_min_n(conn):

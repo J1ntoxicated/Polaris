@@ -66,13 +66,20 @@ VENUE_POOLS: tuple[str, ...] = ("okx", "capital", "alpaca")
 PSI_STALE_THRESHOLD = 0.20
 KS_STALE_THRESHOLD = 0.15
 
-# The 7 legacy threshold constants IN THEIR NATURAL INCREASING ORDER (see
-# transition.TransitionThresholds field order) — the source sequence
-# migrate_thresholds percentile-maps + isotonic-repairs. ladder_decay is
-# NOT listed separately: its legacy value (3.0) is numerically identical to
-# ladder_step0's, so it maps to the SAME migrated value (no separate lookup
-# needed — ecdf_percentile of an identical input yields an identical rank).
-_LEGACY_ORDER: tuple[float, ...] = (-4.0, -3.0, -1.0, 2.0, 3.0, 6.0, 9.0)
+# The 4 JUDGED-axis legacy threshold constants IN THEIR NATURAL INCREASING
+# ORDER (Schmitt hysteresis + PROVE stagnation) — the source sequence
+# migrate_thresholds percentile-maps + isotonic-repairs onto the new
+# gross_bps population. The reentry-ladder's 4 thresholds (ladder_step0/1/2,
+# ladder_decay) are DELIBERATELY EXCLUDED: they judge ``shadow_scores``
+# (transition.py's ``_check_reentry_ladder``), which is populated by
+# shadow_fill.py's ``shadow_score = mu_r - pessimistic_cost_r`` — an
+# R-MULTIPLE-scale value, UNCHANGED by the fee-split flip. Remapping them
+# onto the gross_bps population (as an earlier build did) silently breaks
+# BENCH->PROVE reentry: ladder thresholds land ~10x too large for an
+# R-multiple-scale mean to ever clear, permanently blocking step-up while
+# decay fires on every check (aggressive_always_profit violation). See
+# vault fee_split_flip_r2_2026-07-12 review, CRITICAL finding on this file.
+_LEGACY_ORDER: tuple[float, ...] = (-4.0, -3.0, -1.0, 2.0)
 
 
 @dataclass(slots=True, frozen=True)
@@ -108,10 +115,9 @@ def _build_thresholds(old_population: list[float], new_population: list[float]) 
         schmitt_bench_full=migrated[1],
         schmitt_prove=migrated[2],
         prove_stagnation=migrated[3],
-        ladder_step0=migrated[4],
-        ladder_step1=migrated[5],
-        ladder_step2=migrated[6],
-        ladder_decay=migrated[4],  # same source value as ladder_step0 (see _LEGACY_ORDER note)
+        # ladder_step0/1/2/decay: NOT remapped — left at TransitionThresholds'
+        # own legacy-literal defaults (R-multiple scale, matches shadow_scores;
+        # see _LEGACY_ORDER note above).
     )
 
 

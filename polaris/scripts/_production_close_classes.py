@@ -56,10 +56,15 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.classes.remap_table import resolve_thresholds
-from polaris.core.classes.score_f import judged_score_from_stored, rollup_score_f
+from polaris.core.classes.score_f import (
+    judged_score_from_stored,
+    rollup_score_f,
+    use_legacy_net_axis,
+)
 from polaris.core.classes.transition import (
     Timeframe,
     TransitionInput,
+    TransitionThresholds,
     evaluate_transition,
 )
 from polaris.scripts._production_atr import strategy_timeframe
@@ -279,7 +284,17 @@ def update_strategy_class_on_close(
         # ladder thresholds onto score_f.py's now-flipped judged axis
         # (gross_bps). READ-ONLY, fail-open (falls back through venue-pool to
         # hardcoded legacy defaults on any gap — see remap_table.py).
-        thresholds = resolve_thresholds(conn, venue=venue, strategy_id=strategy_id)
+        # item 8 rollback guard: under POLARIS_SCOREF_NET_LEGACY=1,
+        # _intent_scores (above) already reverts to legacy-scale scores via
+        # judged_score_from_stored — resolving a gross_bps-scale remap here
+        # would compare legacy-scale scores against gross-scale thresholds
+        # (score_f_remap_table is populated by the sweeper independent of
+        # this env flag). Mirrors engine.py's own SCALE-gate guard.
+        thresholds = (
+            resolve_thresholds(conn, venue=venue, strategy_id=strategy_id)
+            if not use_legacy_net_axis()
+            else TransitionThresholds()
+        )
 
         inp = TransitionInput(
             strategy_class=klass,

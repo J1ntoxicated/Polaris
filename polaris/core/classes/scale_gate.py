@@ -17,15 +17,20 @@ distinct from a demotion/BAD_STRATEGY verdict: a strategy whose gross edge
 has not yet cleared the fee-plus-margin bar keeps trading and keeps its
 FULL baseline size — it just does not additionally get amplified.
 
-v0 wiring note: this function is standalone-tested but NOT yet called from
-``polaris.core.sizing.engine.compute_size`` — the live ``tier_amp`` resolve
-stays wired to :func:`polaris.core.sizing.amplifier.resolve_tier_amplifier`
-only. Per R2 item 5, a gross-axis flip requires ``gross_lcb`` in REAL bps
-(v1 — fills-joined notional), which v0 does not yet populate for the bulk of
-history; wiring this gate live before that data exists would silently starve
-every track's amplifier off the v0 percentile-proxy scale ambiguity. See
-``shadow_divergence.py`` for the measurement gate that must pass before this
-function's binding decision may be threaded into ``compute_size``.
+Wiring note (fee_split_flip_r2_2026-07-12 item 3, supersedes the v0-era
+"not yet wired" note this docstring used to carry): the R2 debate's own
+shadow-divergence measurement (886 closes / 743 eval-pts, 12.4% behavior
+divergence, well under the 15% flip-readiness bar — see
+``shadow_divergence.py`` / ``vault/50_research/debates/
+fee_split_flip_r2_2026-07-12.md``) already passed BEFORE this decision, so
+``polaris.core.sizing.engine.compute_size`` now calls this function live
+(gated off under ``POLARIS_SCOREF_NET_LEGACY=1`` rollback — see
+``score_f.use_legacy_net_axis``). ``gross_lcb=None`` (cold-start, N_eff
+below ``gross_scorer.N_EFF_MIN_FLOOR``) still binds/withholds by this
+function's own contract below — that is the intended, spec'd behavior
+("economic 자격 = gross_LCB > best_case_friction + edge_margin"), not a
+starvation bug: it withholds the BONUS ONLY, baseline sizing is untouched,
+so it stays compliant with aggressive_always_profit / no_defensive_dampen.
 """
 
 from __future__ import annotations

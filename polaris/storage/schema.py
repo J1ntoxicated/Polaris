@@ -28,6 +28,7 @@ from polaris.storage.schema_ddl_classes import (
     DDL_SCORE_F_CHECKPOINT,
     DDL_SCORE_F_EVENTS,
     DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
+    DDL_SCORE_F_REMAP_TABLE,
     DDL_STRATEGY_CLASS,
 )
 from polaris.storage.schema_ddl_core import (
@@ -315,6 +316,9 @@ ALL_DDL: tuple[str, ...] = (
     DDL_SCORE_F_EVENTS,
     DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX,
     DDL_SCORE_F_CHECKPOINT,
+    # fee-split v1 FLIP (fee_split_flip_r2_2026-07-12, item 2) — persisted
+    # per-track/venue-pool threshold remap table.
+    DDL_SCORE_F_REMAP_TABLE,
     # Probe reranker (pts-classes 2026-07-03, group F) — append-only per-run
     # snapshot of which PROVE candidates hold a track's concurrent probe slot.
     DDL_PROBE_SLOT_ASSIGNMENT,
@@ -817,6 +821,11 @@ def _apply_post_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE score_f_events ADD COLUMN notional_usd REAL")
     if sfe_cols and "fee_raw_usd" not in sfe_cols:
         conn.execute("ALTER TABLE score_f_events ADD COLUMN fee_raw_usd REAL")
+    # score_f_events.fee_drag_bps — fee-split v1 FLIP additive column
+    # (fee_split_flip_r2_2026-07-12 item 1). Same backfill-guard precedent as
+    # the v0 trio above: a fresh DB already has it via DDL_SCORE_F_EVENTS.
+    if sfe_cols and "fee_drag_bps" not in sfe_cols:
+        conn.execute("ALTER TABLE score_f_events ADD COLUMN fee_drag_bps REAL")
     # positions.entry_regime_v2 / regime_state.regime_v2 — regime v2 twinlight
     # SHADOW (backgate-plan W2-d, vault/50_research/backgate-plan/
     # design-regime-v2-rollout.md + master-sequence.md; R1 spec: vault/

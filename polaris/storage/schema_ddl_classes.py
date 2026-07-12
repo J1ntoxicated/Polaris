@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS score_f_events (
     score_contrib REAL NOT NULL DEFAULT 0.0,
     gross_usd REAL,
     notional_usd REAL,
-    fee_raw_usd REAL
+    fee_raw_usd REAL,
+    fee_drag_bps REAL
 );
 """
 # gross_usd / notional_usd / fee_raw_usd — fee-split v0 additive columns
@@ -95,13 +96,66 @@ CREATE TABLE IF NOT EXISTS score_f_events (
 # score_f.py's compute_lifecycle_fee docstring, so "gross" and "net" are the
 # SAME value here; the column exists as its own name for the fee-split
 # scorers' clarity, not because the underlying number differs).
-# ADDITIVE ONLY — existing net_usd/fee_denom_usd/score_contrib columns and
-# every consumer of them (transition.py's survival FSM, f_track_cap) are
-# UNCHANGED (v0 = zero behavior change, R2 item 5).
+#
+# fee_drag_bps — fee-split v1 FLIP additive column (fee_split_flip_r2_
+# 2026-07-12, item 1). ``score_contrib`` now carries the JUDGED axis
+# (gross_bps by default, legacy net/fee_denom under
+# ``POLARIS_SCOREF_NET_LEGACY=1`` — see score_f.py's ``compute_score_f``);
+# ``fee_drag_bps`` is the REPORTING-ONLY fee axis (fee_usd/notional_usd in
+# bps) — dashboards/digests/tripwires read it, nothing in the survival FSM
+# or SCALE gate treats it as a demotion input. Nullable like the v0 trio
+# above (NULL = pre-flip row, no notional_usd to derive it from).
+#
+# ADDITIVE ONLY — existing net_usd/fee_denom_usd columns and their consumer
+# (f_track_cap, the capital-routing fee cap) are UNCHANGED.
 
 DDL_SCORE_F_EVENTS_TRACK_DAY_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_score_f_events_track_day
     ON score_f_events(venue, strategy_id, day);
+"""
+
+# ---------------------------------------------------------------------------
+# score_f_remap_table (fee-split v1 FLIP, item 2) — persisted per-track /
+# per-venue-pool threshold remap, one row per scope. Spec source:
+# vault/50_research/debates/fee_split_flip_r2_2026-07-12.md (R2) item 2:
+# "임계값 = 백분위 매핑 — per-track n>=30은 개별, 미달은 venue-pool fallback
+# (okx/capital/alpaca 3세트, 글로벌 pooled 금지)."
+#
+# Persisted (not recomputed per-close) so the Schmitt/stagnation/ladder
+# thresholds transition.py reads stay STABLE across a track's whole trading
+# day — recomputing on every close would let the remap drift close-to-close
+# and defeat Schmitt hysteresis (T4 label-churn concern, R2 red-team). Refresh
+# cadence is an external sweeper (tools/ops/scoref_remap_refresh.py) — this
+# table is its write target, and ``polaris.core.classes.remap_table.
+# resolve_thresholds`` is its (read-only, fail-open) live consumer.
+#
+# ``scope_key`` = "{venue}:{strategy_id}" (scope_type='track') or
+# "{venue}:__pool__" (scope_type='pool', one of the 3 venue pools — NEVER a
+# single global pool, R2 T3 fix). ``stale``/``psi``/``ks`` are the item-4
+# staleness flag the refresh sweeper stamps (auto-flag only — nothing here
+# blocks/throttles a transition; a stale row still resolves and is used,
+# same flow_not_block contract as every other pts-classes signal).
+# ---------------------------------------------------------------------------
+
+DDL_SCORE_F_REMAP_TABLE = """
+CREATE TABLE IF NOT EXISTS score_f_remap_table (
+    scope_key TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    n_samples INTEGER NOT NULL,
+    computed_ts INTEGER NOT NULL,
+    schmitt_bench_partial REAL NOT NULL,
+    schmitt_bench_full REAL NOT NULL,
+    schmitt_prove REAL NOT NULL,
+    prove_stagnation REAL NOT NULL,
+    ladder_step0 REAL NOT NULL,
+    ladder_step1 REAL NOT NULL,
+    ladder_step2 REAL NOT NULL,
+    ladder_decay REAL NOT NULL,
+    ref_population_json TEXT NOT NULL DEFAULT '[]',
+    stale INTEGER NOT NULL DEFAULT 0,
+    psi REAL,
+    ks REAL
+);
 """
 
 # Scan-window watermark — how far the score_F sweeper has progressed

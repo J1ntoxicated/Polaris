@@ -55,10 +55,16 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from polaris.core.classes.score_f import rollup_score_f
+from polaris.core.classes.remap_table import resolve_thresholds
+from polaris.core.classes.score_f import (
+    judged_score_from_stored,
+    rollup_score_f,
+    use_legacy_net_axis,
+)
 from polaris.core.classes.transition import (
     Timeframe,
     TransitionInput,
+    TransitionThresholds,
     evaluate_transition,
 )
 from polaris.scripts._production_atr import strategy_timeframe
@@ -117,13 +123,32 @@ def _fetch_class_row(
 def _intent_scores(
     conn: sqlite3.Connection, *, venue: str, strategy_id: str, window_w: int
 ) -> list[float]:
-    """Oldest-first score_F contributions over the last ``window_w`` closes."""
+    """Oldest-first JUDGED-axis score over the last ``window_w`` closes.
+
+    Reconstructed from ``score_f_events``' raw ``net_usd``/``fee_denom_usd``/
+    ``notional_usd`` at READ TIME via ``judged_score_from_stored`` — NEVER
+    the persisted ``score_contrib`` column. The ledger is append-only with
+    no backfill, so a row's ``score_contrib`` carries whichever axis was
+    live when it was written; reading it verbatim would mix legacy and
+    gross-bps values inside the same window across the flip (or a rollback)
+    boundary (fee_split_flip_r2_2026-07-12 mixed-scale-ledger fix). Rows the
+    current axis cannot be reconstructed for (gross axis, pre-fee-split-v0
+    row with no notional data) are dropped — no fabrication, the window just
+    shrinks (transition.py's own ``_mean_tail`` already treats a short
+    window as "no verdict yet")."""
     rows = conn.execute(
-        "SELECT score_contrib FROM score_f_events "
+        "SELECT net_usd, fee_denom_usd, notional_usd FROM score_f_events "
         "WHERE venue = ? AND strategy_id = ? ORDER BY closed_ts DESC LIMIT ?",
         (venue, strategy_id, window_w),
     ).fetchall()
-    return [float(r[0]) for r in reversed(rows)]
+    scores = [
+        judged_score_from_stored(
+            float(net_usd), float(fee_denom_usd),
+            None if notional_usd is None else float(notional_usd),
+        )
+        for net_usd, fee_denom_usd, notional_usd in rows
+    ]
+    return [s for s in reversed(scores) if s is not None]
 
 
 def _recent_r_multiples(
@@ -255,6 +280,21 @@ def update_strategy_class_on_close(
         n_fills_total, n_signals_recent, n_fills_recent, last_50_rate = (
             _fill_gate_inputs(conn, venue=venue, strategy_id=strategy_id, now_ts=now_ts)
         )
+        # fee_split_flip_r2_2026-07-12 item 2 — remap the Schmitt/stagnation/
+        # ladder thresholds onto score_f.py's now-flipped judged axis
+        # (gross_bps). READ-ONLY, fail-open (falls back through venue-pool to
+        # hardcoded legacy defaults on any gap — see remap_table.py).
+        # item 8 rollback guard: under POLARIS_SCOREF_NET_LEGACY=1,
+        # _intent_scores (above) already reverts to legacy-scale scores via
+        # judged_score_from_stored — resolving a gross_bps-scale remap here
+        # would compare legacy-scale scores against gross-scale thresholds
+        # (score_f_remap_table is populated by the sweeper independent of
+        # this env flag). Mirrors engine.py's own SCALE-gate guard.
+        thresholds = (
+            resolve_thresholds(conn, venue=venue, strategy_id=strategy_id)
+            if not use_legacy_net_axis()
+            else TransitionThresholds()
+        )
 
         inp = TransitionInput(
             strategy_class=klass,
@@ -274,6 +314,7 @@ def update_strategy_class_on_close(
             n_fills_recent=n_fills_recent,
             last_50_fill_rate=last_50_rate,
             last_promotion_ts=last_promotion_ts,
+            thresholds=thresholds,
         )
         result = evaluate_transition(inp)
         changed = result.strategy_class != klass

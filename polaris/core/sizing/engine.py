@@ -27,7 +27,13 @@ from dataclasses import dataclass
 from polaris.core.cell_matrix import CellKeyP0, fetch_learner_anti_edge
 from polaris.core.classes.probe_fee import accrue_probe_fee
 from polaris.core.classes.r_pool import allocate_r_pool
-from polaris.core.classes.score_f import f_track_cap
+from polaris.core.classes.scale_gate import evaluate_scale_gate
+from polaris.core.classes.scale_gate_wire import (
+    EDGE_MARGIN_BPS,
+    resolve_best_case_friction,
+    resolve_gross_lcb,
+)
+from polaris.core.classes.score_f import f_track_cap, use_legacy_net_axis
 from polaris.core.classes.shadow_fill import record_shadow_fill
 from polaris.core.learners.base import (
     NEUTRAL_MULT,
@@ -794,6 +800,30 @@ def compute_size(
         n_closed=risk_state.closed_trades,
         hit_rate_10=risk_state.hit_rate_10,
     )
+    # (2b) fee_split_flip_r2_2026-07-12 item 3 — SCALE gate: withhold the
+    # tier-amplifier BONUS (fallback 1.0) unless this track's gross_LCB has
+    # cleared its friction-plus-margin bar. Baseline sizing/entry/cooldown
+    # untouched either way (aggressive_always_profit / no_block_filter_
+    # architecture / no_defensive_param_dampen — see scale_gate.py). A no-op
+    # when tier_amp is already 1.0 (nothing to withhold).
+    #
+    # item 8 rollback guard: under POLARIS_SCOREF_NET_LEGACY=1, score_f.py's
+    # judged axis reverts to the legacy net/fee-ratio (a different scale
+    # entirely — can swing into the hundreds on a near-zero fee denominator,
+    # see recover_classes.py). resolve_gross_lcb compares that against
+    # best_case_friction (bps of notional) if this block ran unconditionally,
+    # mis-gating the amplifier and breaking score_f.py's own "one-flag full
+    # rollback, zero other behavior change" contract. Skip the entire block
+    # under rollback — tier_amp stays whatever resolve_tier_amplifier
+    # resolved, byte-identical pre-flip behavior.
+    if not use_legacy_net_axis():
+        scale_gate_result = evaluate_scale_gate(
+            gross_lcb=resolve_gross_lcb(conn, venue=intent.venue, strategy_id=intent.strategy, now_ts=ts),
+            resolved_tier_amp=tier_amp,
+            best_case_friction=resolve_best_case_friction(venue=intent.venue, strategy_id=intent.strategy),
+            edge_margin=EDGE_MARGIN_BPS,
+        )
+        tier_amp = scale_gate_result.applied_tier_amp
     amplifier_on = tier_amp > 1.0
 
     # (3) cell mult

@@ -1,13 +1,21 @@
-"""Behavior-invariant regression — fee-split v0 additive schema must NOT
-change the live survival FSM (vault/50_research/debates/
-fee_split_judgment_2026-07-10.md R2 item 5: "v0 배포 즉시 거동 변화 0").
+"""Behavior-invariant regression — SUPERSEDED by fee_split_flip_r2_2026-07-12.
 
-DEMO/PAPER only (virtual capital, OKX SPOT demo + Capital CFD demo). The
-close-hook (``_production_close_classes.update_strategy_class_on_close``)
-keeps consuming ONLY ``score_f_events.score_contrib`` (the OLD fee-
-normalized axis) — the new ``gross_usd``/``notional_usd``/``fee_raw_usd``
-columns are written by ``rollup_score_f`` for measurement/shadow purposes
-only and must have ZERO influence on the actual transition decision.
+DEMO/PAPER only (virtual capital, OKX SPOT demo + Capital CFD demo). This
+file originally locked fee-split v0's "deploy with zero behavior change"
+mandate (vault/50_research/debates/fee_split_judgment_2026-07-10.md R2 item
+5): the close-hook read ONLY the persisted ``score_contrib`` column, and the
+new v0 ``gross_usd``/``notional_usd``/``fee_raw_usd`` columns were
+measurement-only with zero read-path influence.
+
+The v1 flip (fee_split_flip_r2_2026-07-12 item 1) intentionally ends that
+invariant — ``score_contrib`` IS now gross_bps by default. The R2 rework
+round (mixed-scale-ledger fix) went one step further: ``score_f_events`` is
+append-only with no backfill, so a pre-flip row's persisted
+``score_contrib`` still holds the LEGACY value forever; the close-hook can
+no longer trust that column's scale at all and instead reconstructs the
+CURRENT judged axis from ``net_usd``/``fee_denom_usd``/``notional_usd`` at
+READ time (``judged_score_from_stored``). This file now locks THAT
+invariant instead.
 """
 from __future__ import annotations
 
@@ -89,26 +97,29 @@ def _run_close(conn: sqlite3.Connection, *, now_ts: int) -> tuple[str, int]:
     return str(row[0]), int(row[1])
 
 
-def test_intent_scores_sql_reads_only_score_contrib_never_gross_axis():
-    """Drift-lock: the close-hook's intent-score query must select ONLY
-    score_contrib — a future accidental wire-up of gross_usd/notional_usd
-    into the LIVE survival FSM query would trip this test, forcing a
-    deliberate decision (not a silent regression)."""
+def test_intent_scores_sql_never_reads_persisted_score_contrib():
+    """Drift-lock (R2 rework, mixed-scale-ledger fix): the close-hook's
+    intent-score query must NOT select the persisted score_contrib column —
+    score_f_events is append-only/no-backfill, so that column's scale
+    depends on when a row was written. It must instead read the raw
+    net_usd/fee_denom_usd/notional_usd columns and reconstruct the CURRENT
+    judged axis at read time (judged_score_from_stored) — a future
+    accidental revert to trusting the stored column verbatim would trip
+    this test."""
     source = inspect.getsource(_production_close_classes._intent_scores)
-    assert "score_contrib" in source
-    assert "gross_usd" not in source
-    assert "notional_usd" not in source
-    assert "fee_raw_usd" not in source
+    assert "SELECT score_contrib" not in source
+    assert "SELECT net_usd, fee_denom_usd, notional_usd" in source
 
 
-def test_mutating_gross_columns_after_rollup_does_not_change_transition(conn):
+def test_corrupting_persisted_score_contrib_does_not_change_transition(conn):
     """A closed lifecycle rolls up normally and drives the close-hook's
     transition decision (stays EARN — well above the Schmitt demotion
-    threshold). Then the NEW gross_usd/notional_usd/fee_raw_usd columns are
-    overwritten with wildly different (adversarial) values via raw SQL,
-    WITHOUT touching score_contrib — re-reading the intent-score series the
-    live FSM consumes must be BYTE-IDENTICAL before and after, proving those
-    columns have zero read-path influence."""
+    threshold). Then the PERSISTED score_contrib column is overwritten with
+    a wildly different (adversarial) value via raw SQL, WITHOUT touching
+    net_usd/fee_denom_usd/notional_usd — re-reading the intent-score series
+    the live FSM consumes must be BYTE-IDENTICAL before and after, proving
+    the close-hook reconstructs from the raw columns and never reads the
+    (potentially stale-scale) persisted score_contrib."""
     from polaris.scripts._production_close_classes import _intent_scores
 
     _upsert_class(conn, window_w=3)
@@ -124,10 +135,9 @@ def test_mutating_gross_columns_after_rollup_does_not_change_transition(conn):
     assert baseline_dwell == 1
     assert scores_before_corruption  # non-empty — sanity the fixture actually scored
 
-    # Adversarially corrupt the NEW columns only (score_contrib untouched).
+    # Adversarially corrupt ONLY the persisted score_contrib column.
     conn.execute(
-        "UPDATE score_f_events SET gross_usd = -999999.0, "
-        "notional_usd = 0.0000001, fee_raw_usd = 999999.0 "
+        "UPDATE score_f_events SET score_contrib = -999999.0 "
         "WHERE position_id = 'p1'"
     )
     conn.commit()

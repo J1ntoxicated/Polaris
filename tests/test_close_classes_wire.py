@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import pytest
 
+from polaris.core.classes.remap_table import RemapEntry, track_scope_key, upsert_remap_entry
+from polaris.core.classes.transition import TransitionThresholds
 from polaris.core.sizing.probe_notional import resolve_strategy_class
 from polaris.scripts._production_close_classes import update_strategy_class_on_close
 from polaris.storage.schema import init_db
@@ -216,6 +218,34 @@ def test_close_hook_logs_exec_starved_unconditionally(conn, caplog):
     # string actually matches, not just "some log line fired".
     import re
     assert re.compile(r"EXEC_STARVED").search(lines[0])
+
+
+def test_close_hook_rollback_skips_remapped_thresholds(conn, monkeypatch):
+    """item 8 rollback (POLARIS_SCOREF_NET_LEGACY=1) must skip
+    resolve_thresholds() entirely — the remap sweeper persists gross_bps-
+    scale thresholds independent of this env flag, so applying them under
+    rollback would compare legacy-scale intent_scores against a gross-scale
+    bar. Seeds an extreme remap entry that makes demotion IMPOSSIBLE if it
+    were (wrongly) applied; under rollback the hook must fall back to
+    TransitionThresholds()'s legacy defaults and demote normally."""
+    monkeypatch.setenv("POLARIS_SCOREF_NET_LEGACY", "1")
+    _upsert_class(conn, strategy_class="EARN", window_w=3)
+    extreme_entry = RemapEntry(
+        scope_key=track_scope_key(venue=VENUE, strategy_id=STRATEGY_ID),
+        scope_type="track", n_samples=30, computed_ts=1_700_000_000,
+        thresholds=TransitionThresholds(schmitt_bench_full=-1e9, schmitt_bench_partial=-1e9),
+        ref_population=[1.0] * 30,
+    )
+    upsert_remap_entry(conn, extreme_entry)
+    conn.commit()
+    for i in range(3):
+        ts = 1_700_000_000 + (i + 1) * 3600
+        _mk_closed_position(conn, position_id=f"p{i}", closed_ts=ts, pnl_r=-5.0)
+    trade = _Trade(venue=VENUE, strategy_id=STRATEGY_ID)
+    update_strategy_class_on_close(
+        conn, trade=trade, now_ts=1_700_000_000 + 4 * 3600, state=_State()
+    )
+    assert resolve_strategy_class(conn, venue=VENUE, strategy_id=STRATEGY_ID) == "BENCH"
 
 
 def test_close_hook_never_raises_on_db_error(conn, monkeypatch):

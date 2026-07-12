@@ -92,12 +92,13 @@ project's ambiguous-threshold precedent, e.g. ``recover_classes.py``'s
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 __all__ = [
     "TransitionInput",
     "TransitionResult",
+    "TransitionThresholds",
     "evaluate_transition",
 ]
 
@@ -113,7 +114,10 @@ _SCHMITT_BENCH_FULL_THRESHOLD = -3.0
 _DWELL_PROVE_TO_EARN = 10
 _DWELL_POST_EARN_DEMOTION = 5
 
-# Tripwire.
+# Tripwire — evaluated against ``recent_r_multiples`` (realized R, NOT
+# score_F/gross_bps), so the fee_split_flip_r2_2026-07-12 threshold-remap
+# (see ``TransitionThresholds`` below) never touches these: a different scale
+# entirely, unaffected by which judged score axis feeds intent_scores.
 _TRIPWIRE_INTRADAY_N = 8
 _TRIPWIRE_INTRADAY_SUM_THRESHOLD = -4.0
 _TRIPWIRE_1D_PLUS_N = 5
@@ -140,6 +144,35 @@ _LADDER_MAX_STEP = 2
 _EPOCH_BUMP_RATIO = 1.5
 
 Timeframe = Literal["intraday", "swing", "1d_plus"]
+
+
+@dataclass(slots=True, frozen=True)
+class TransitionThresholds:
+    """The 7 score-scale thresholds ``evaluate_transition`` checks
+    ``intent_scores``/``shadow_scores`` against (Schmitt hysteresis, PROVE
+    stagnation, reentry-ladder step-up + decay) — everything EXCEPT the
+    tripwire (a separate R-multiple-scale check, never remapped).
+
+    Defaults are the pre-flip literal constants above, so a caller that never
+    supplies ``thresholds=`` (every existing call site/test) reproduces the
+    byte-identical legacy behavior. fee_split_flip_r2_2026-07-12 item 2:
+    once the judged score axis flips (score_f.py, gross_bps by default),
+    these 7 values must move onto the SAME new scale via a percentile-
+    preserving remap — ``polaris.core.classes.remap_table.resolve_thresholds``
+    is the (DB-backed, fail-open) resolver that builds this dataclass for a
+    live (venue, strategy_id) track; this module stays pure (no I/O, no
+    knowledge of score_f_events) and only consumes whatever the caller hands
+    it.
+    """
+
+    schmitt_bench_partial: float = _SCHMITT_BENCH_PARTIAL_THRESHOLD
+    schmitt_bench_full: float = _SCHMITT_BENCH_FULL_THRESHOLD
+    schmitt_prove: float = _SCHMITT_PROVE_THRESHOLD
+    prove_stagnation: float = _PROVE_STAGNATION_THRESHOLD
+    ladder_step0: float = _LADDER_STEP_UP[0][1]
+    ladder_step1: float = _LADDER_STEP_UP[1][1]
+    ladder_step2: float = _LADDER_STEP_UP[2][1]
+    ladder_decay: float = _LADDER_DECAY_THRESHOLD
 
 
 @dataclass(slots=True)
@@ -172,6 +205,7 @@ class TransitionInput:
     dwell_since_earn_demotion: int = 0
     median_notional_ratio: float = 1.0
     r_alloc_ratio: float = 1.0
+    thresholds: TransitionThresholds = field(default_factory=TransitionThresholds)
 
     def __post_init__(self) -> None:
         if self.strategy_class not in _VALID_CLASSES:
@@ -305,16 +339,17 @@ def _check_tripwire(inp: TransitionInput) -> bool:
 
 
 def _check_schmitt(inp: TransitionInput) -> str | None:
+    t = inp.thresholds
     partial_n = math.ceil(_SCHMITT_PARTIAL_WINDOW_FRAC * inp.window_w)
     partial_mean = _mean_tail(inp.intent_scores, partial_n)
     full_mean = _mean_tail(inp.intent_scores, inp.window_w)
 
-    bench_hit = (partial_mean is not None and partial_mean < _SCHMITT_BENCH_PARTIAL_THRESHOLD) or (
-        full_mean is not None and full_mean < _SCHMITT_BENCH_FULL_THRESHOLD
+    bench_hit = (partial_mean is not None and partial_mean < t.schmitt_bench_partial) or (
+        full_mean is not None and full_mean < t.schmitt_bench_full
     )
     if bench_hit:
         return "BENCH"
-    if partial_mean is not None and partial_mean < _SCHMITT_PROVE_THRESHOLD:
+    if partial_mean is not None and partial_mean < t.schmitt_prove:
         return "PROVE"
     return None
 
@@ -323,7 +358,7 @@ def _check_prove_stagnation(inp: TransitionInput) -> bool:
     full_mean = _mean_tail(inp.intent_scores, inp.window_w)
     if full_mean is None:
         return False
-    return full_mean <= _PROVE_STAGNATION_THRESHOLD
+    return full_mean <= inp.thresholds.prove_stagnation
 
 
 def _check_prove_to_earn(inp: TransitionInput) -> TransitionResult:
@@ -351,9 +386,12 @@ def _check_reentry_ladder(inp: TransitionInput) -> TransitionResult:
     chance to fire.
     """
     step = inp.ladder_step
+    t = inp.thresholds
+    ladder_score_thresholds = (t.ladder_step0, t.ladder_step1, t.ladder_step2)
 
     if step in _LADDER_STEP_UP:
-        window_mult, score_threshold = _LADDER_STEP_UP[step]
+        window_mult, _legacy_threshold = _LADDER_STEP_UP[step]
+        score_threshold = ladder_score_thresholds[step]
         window_n = math.ceil(window_mult * inp.window_w)
         mean_score = _mean_tail(inp.shadow_scores, window_n)
         if mean_score is not None and mean_score >= score_threshold:
@@ -373,7 +411,7 @@ def _check_reentry_ladder(inp: TransitionInput) -> TransitionResult:
     if step > 0:
         decay_n = math.ceil(_LADDER_DECAY_WINDOW_MULT * inp.window_w)
         decay_mean = _mean_tail(inp.shadow_scores, decay_n)
-        if decay_mean is not None and decay_mean < _LADDER_DECAY_THRESHOLD:
+        if decay_mean is not None and decay_mean < t.ladder_decay:
             return replace(
                 _unchanged(inp, reason="LADDER_DECAY"),
                 ladder_step=step - 1,

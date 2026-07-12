@@ -1,15 +1,29 @@
 """score_F — fee-normalized edge classification (pts-classes, group B).
 
-score_F = Σ(net_i / max(abs(fee_i), 0.0001 * notional_i)) over every CLOSED
-flat->nonzero->flat lifecycle (one ``positions`` row) for a (venue,
-strategy_id) track. ``net_i`` and ``fee_i`` sum ALL fills belonging to the
-lifecycle (partial closes / scale-in-out legs net together within the SAME
-lifecycle — SSOT U3: positions + fills + position_strategy_segments) so a
-scaled-out winner is one term, not several. Spread-only venues (Capital CFD
-demo reports ``fills.fee_usd = 0`` on every fill) fold a modeled spread proxy
-into ``fee_i`` via ``economics.fees.real_fee_bps`` instead of reading a real
-(always-zero) fee column — otherwise the notional floor alone would overstate
-their score_F.
+FLIP (fee_split_flip_r2_2026-07-12, item 1 — canon: vault/50_research/
+debates/fee_split_judgment_2026-07-10.md R1 + the R2 red-team fixes recorded
+in that debate's follow-up): the JUDGED axis (``score_contrib``, the value
+the survival FSM and SCALE gate consume) is now **gross_bps** —
+``net_i / notional_i * 10_000`` — summed over every CLOSED flat->nonzero->flat
+lifecycle for a (venue, strategy_id) track. Fees no longer distort the
+judgment (a strategy earning real gross price-edge is no longer demoted by
+its own fee bill). ``fee_drag_bps`` (``fee_i / notional_i * 10_000``) is
+computed alongside as a REPORTING-ONLY axis — dashboards/digests/tripwires
+read it, nothing in the survival FSM treats it as a demotion input.
+
+The legacy formula — score_F = Σ(net_i / max(abs(fee_i), 0.0001 * notional_i))
+— is preserved verbatim as ``legacy_score_contrib`` on every result (used by
+``polaris.core.classes.remap_table`` as the OLD-axis population for
+percentile-preserving threshold migration) and remains the live JUDGED axis
+when ``POLARIS_SCOREF_NET_LEGACY=1`` is set (one-flag full rollback, item 8).
+
+``net_i`` and ``fee_i`` sum ALL fills belonging to the lifecycle (partial
+closes / scale-in-out legs net together within the SAME lifecycle — SSOT U3:
+positions + fills + position_strategy_segments) so a scaled-out winner is one
+term, not several. Spread-only venues (Capital CFD demo reports
+``fills.fee_usd = 0`` on every fill) fold a modeled spread proxy into
+``fee_i`` via ``economics.fees.real_fee_bps`` instead of reading a real
+(always-zero) fee column.
 
 This module is a classification SIGNAL feeder for ``strategy_class``
 (group A, ``polaris.core.lifecycle.recover_classes``) — computing/rolling it
@@ -21,12 +35,13 @@ Rollup is a batch-commit sweeper (``rollup_score_f``) writing an append-only
 ``score_f_events`` ledger (PK=position_id, mirrors ``ladder_ledger``'s
 "no mutable aggregate column" shape) — NEVER inline in the position-close hot
 path (feedback_db_lock_is_architecture_signal). ``f_track_cap`` reads that
-ledger's ``fee_denom_usd`` column to derive the median expected fee for a
-track's capital-routing cap.
+ledger's ``fee_denom_usd`` column (UNCHANGED by the flip — legacy formula
+only) to derive the median expected fee for a track's capital-routing cap.
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import statistics
 import time
@@ -41,8 +56,12 @@ __all__ = [
     "SeedTagCohort",
     "compute_score_f",
     "f_track_cap",
+    "gross_bps_from_stored",
+    "judged_score_from_stored",
+    "legacy_score_from_stored",
     "rollup_score_f",
     "score_f_by_seed_tag",
+    "use_legacy_net_axis",
 ]
 
 # net_i/fee_i denominator floor — 0.0001 * notional_i (task spec), applied via
@@ -50,11 +69,66 @@ __all__ = [
 # never discounted (max() composition only, no new multiplier — 9-stack ban).
 _NOTIONAL_FLOOR_FRAC = 0.0001
 
+# gross_bps/fee_drag_bps conversion (fee_split_flip_r2_2026-07-12 item 1) —
+# 1bp = 1/10_000 of notional, the project's existing bps convention
+# (economics.fees._bps_to_usd's inverse).
+_BPS_DIVISOR = 10_000.0
+
 # Venues whose demo fill stream reports a real per-fill fee (fee_usd != 0) —
 # everyone else is treated as spread-only and gets the modeled-spread proxy
 # from ``economics.fees.real_fee_bps`` instead (Capital CFD demo: fee=0 on
 # every fill per ``economics.fees`` docstring).
 _REAL_FEE_VENUES = frozenset({"okx"})
+
+
+def use_legacy_net_axis() -> bool:
+    """Item 8 rollback switch: ``POLARIS_SCOREF_NET_LEGACY=1`` restores the
+    PRE-FLIP judged axis (``score_contrib`` = legacy net/fee_denom formula)
+    with zero other behavior change — one flag, full revert. The gross-axis
+    computation still runs and is still stored (``gross_usd``/``notional_usd``/
+    ``fee_drag_bps`` are unconditional), just not selected as the judged
+    column."""
+    return os.environ.get("POLARIS_SCOREF_NET_LEGACY", "0") == "1"
+
+
+def legacy_score_from_stored(net_usd: float, fee_denom_usd: float) -> float:
+    """Reconstruct the LEGACY net/fee-ratio score from a persisted
+    ``score_f_events`` row's ``net_usd``/``fee_denom_usd`` — both columns are
+    original (NOT NULL, present on every row since before the flip), so this
+    is always reconstructible regardless of which axis a row's
+    ``score_contrib`` was written under."""
+    return net_usd / fee_denom_usd if fee_denom_usd else 0.0
+
+
+def gross_bps_from_stored(net_usd: float, notional_usd: float | None) -> float | None:
+    """Reconstruct gross_bps from a persisted ``score_f_events`` row's
+    ``net_usd``/``notional_usd``. ``None`` when ``notional_usd`` is
+    unavailable (NULL or <=0 — a pre-fee-split-v0 row with no notional data)
+    — no fabrication, same contract as ``remap_table._paired_populations``."""
+    if notional_usd is None or notional_usd <= 0.0:
+        return None
+    return net_usd / notional_usd * _BPS_DIVISOR
+
+
+def judged_score_from_stored(
+    net_usd: float, fee_denom_usd: float, notional_usd: float | None,
+) -> float | None:
+    """Reconstruct the CURRENT judged axis (item 8 rollback-aware) from a
+    persisted ``score_f_events`` row's raw columns AT READ TIME — never trust
+    a stored ``score_contrib`` value's scale. The ledger is append-only with
+    no backfill (``rollup_score_f``), so a row's ``score_contrib`` carries
+    whichever axis was live WHEN IT WAS WRITTEN; a consumer that reads it
+    verbatim silently mixes legacy and gross-bps values inside the same
+    window once the flip (or a rollback) crosses a scan. Recomputing from
+    ``net_usd``/``fee_denom_usd``/``notional_usd`` here makes every row in a
+    window the SAME current-axis scale, and makes
+    ``POLARIS_SCOREF_NET_LEGACY=1`` (item 8) apply uniformly to the WHOLE
+    ledger, not just newly-written rows (fee_split_flip_r2_2026-07-12
+    mixed-scale-ledger fix). ``None`` when the gross axis is requested but
+    unreconstructible for this row (see :func:`gross_bps_from_stored`)."""
+    if use_legacy_net_axis():
+        return legacy_score_from_stored(net_usd, fee_denom_usd)
+    return gross_bps_from_stored(net_usd, notional_usd)
 
 
 @dataclass(slots=True)
@@ -77,6 +151,14 @@ class ScoreFResult:
     fee_split_judgment_2026-07-10.md item 7) carries ``LifecycleFee``'s
     already-computed notional through to ``rollup_score_f``'s INSERT — it
     was previously discarded once the floored ``fee_denom_usd`` was derived.
+
+    ``score_contrib`` (fee_split_flip_r2_2026-07-12 item 1) is the JUDGED
+    axis — gross_bps by default, or the legacy net/fee_denom formula under
+    ``POLARIS_SCOREF_NET_LEGACY=1`` (see ``use_legacy_net_axis``).
+    ``legacy_score_contrib`` ALWAYS holds the legacy formula's value
+    (regardless of the rollback flag) — ``remap_table.py`` needs it as the
+    OLD-axis population for percentile-preserving threshold migration.
+    ``fee_drag_bps`` is the REPORTING-ONLY fee axis, never a judged input.
     """
 
     position_id: str
@@ -88,6 +170,8 @@ class ScoreFResult:
     fee_denom_usd: float
     score_contrib: float
     notional_usd: float = 0.0
+    legacy_score_contrib: float = 0.0
+    fee_drag_bps: float = 0.0
 
 
 @dataclass(slots=True)
@@ -134,6 +218,7 @@ def compute_score_f(
         (venue, strategy_id),
     ).fetchall()
 
+    legacy_axis = use_legacy_net_axis()
     out: list[ScoreFResult] = []
     for position_id, symbol, closed_ts in positions:
         fees = compute_lifecycle_fee(
@@ -144,7 +229,14 @@ def compute_score_f(
             closed_ts=int(closed_ts),
         )
         denom = max(abs(fees.fee_usd), _NOTIONAL_FLOOR_FRAC * fees.notional_usd)
-        score = fees.net_usd / denom if denom > 0.0 else 0.0
+        legacy_score = fees.net_usd / denom if denom > 0.0 else 0.0
+        if fees.notional_usd > 0.0:
+            gross_bps = fees.net_usd / fees.notional_usd * _BPS_DIVISOR
+            fee_drag_bps = fees.fee_usd / fees.notional_usd * _BPS_DIVISOR
+        else:
+            gross_bps = 0.0
+            fee_drag_bps = 0.0
+        judged_score = legacy_score if legacy_axis else gross_bps
         out.append(
             ScoreFResult(
                 position_id=fees.position_id,
@@ -154,8 +246,10 @@ def compute_score_f(
                 net_usd=fees.net_usd,
                 fee_usd=fees.fee_usd,
                 fee_denom_usd=denom,
-                score_contrib=score,
+                score_contrib=judged_score,
                 notional_usd=fees.notional_usd,
+                legacy_score_contrib=legacy_score,
+                fee_drag_bps=fee_drag_bps,
             )
         )
     return out
@@ -258,13 +352,17 @@ def rollup_score_f(conn: sqlite3.Connection, *, now_ts: int) -> int:
             # columns (item 7). gross_usd mirrors net_usd (fills.pnl_usd is
             # already fee-exclusive — see compute_lifecycle_fee docstring);
             # fee_raw_usd is the UNFLOORED fee_usd (fee_denom_usd is the
-            # max(fee, notional-floor) value the OLD score axis uses — kept
-            # byte-identical). NEW rows only; no backfill of legacy rows.
+            # max(fee, notional-floor) value the legacy axis uses — kept
+            # byte-identical). fee_drag_bps (v1 flip item 1) is the
+            # REPORTING-ONLY fee axis. score_contrib is now the JUDGED axis
+            # (gross_bps by default, legacy under POLARIS_SCOREF_NET_LEGACY=1
+            # — see compute_score_f). NEW rows only; no backfill of legacy
+            # rows.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO score_f_events "
                 "(position_id, venue, strategy_id, day, closed_ts, net_usd, "
                 "fee_denom_usd, score_contrib, gross_usd, notional_usd, "
-                "fee_raw_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "fee_raw_usd, fee_drag_bps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     r.position_id,
                     r.venue,
@@ -277,6 +375,7 @@ def rollup_score_f(conn: sqlite3.Connection, *, now_ts: int) -> int:
                     r.net_usd,
                     r.notional_usd,
                     r.fee_usd,
+                    r.fee_drag_bps,
                 ),
             )
             if cur.rowcount > 0:

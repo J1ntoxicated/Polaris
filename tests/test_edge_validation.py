@@ -24,6 +24,7 @@ import pytest
 
 from polaris.core.learners._primitives import (
     COST_BPS_CAPITAL,
+    COST_BPS_OKX_FALLBACK,
     EDGE_VERDICT_TAU_HI,
     EDGE_VERDICT_TAU_LO,
 )
@@ -207,6 +208,55 @@ def test_cost_overlay_zero_atr_safe() -> None:
         exit_slippage_bps=0.0,
     )
     assert math.isfinite(pnl_r_net)
+
+
+# ---------------------------------------------------------------------------
+# 3a. FIX 2 (ledger-reconcile forensic 2026-07-12, bug①) — honest 0.0
+# slippage must flow through unchanged; only a MISSING fill (None) falls
+# back to COST_BPS_OKX_FALLBACK.
+# ---------------------------------------------------------------------------
+
+
+def test_cost_overlay_okx_real_zero_slippage_not_overridden() -> None:
+    """A real fill with recorded 0.0 slippage on BOTH legs must cost exactly
+    the fees — the 1bp fallback must NOT fire on an honest zero (the
+    ``x or FALLBACK`` falsy-zero bug this regression pins)."""
+    pnl_usd_net, _ = cost_adjusted_pnl_r(
+        gross_pnl_usd=10.0,
+        gross_pnl_r=1.0,
+        size_usd=100.0,
+        atr_usd=10.0,
+        venue="okx",
+        entry_fee_usd=0.1,
+        exit_fee_usd=0.1,
+        entry_slippage_bps=0.0,
+        exit_slippage_bps=0.0,
+    )
+    # fee-only cost — NO 1bp fallback slippage baked in.
+    assert pnl_usd_net == pytest.approx(10.0 - 0.2, rel=1e-9)
+
+
+def test_cost_overlay_okx_missing_slippage_none_uses_fallback() -> None:
+    """``None`` (no matching fill row found upstream) DOES fall back to
+    ``COST_BPS_OKX_FALLBACK`` — the fallback still exists for genuinely
+    missing data, just no longer misfires on a real zero."""
+    pnl_usd_net, _ = cost_adjusted_pnl_r(
+        gross_pnl_usd=10.0,
+        gross_pnl_r=1.0,
+        size_usd=100.0,
+        atr_usd=10.0,
+        venue="okx",
+        entry_fee_usd=0.1,
+        exit_fee_usd=0.1,
+        entry_slippage_bps=None,
+        exit_slippage_bps=None,
+    )
+    fallback_cost = (
+        0.1 + 0.1
+        + (COST_BPS_OKX_FALLBACK / 1e4) * 100.0
+        + (COST_BPS_OKX_FALLBACK / 1e4) * 100.0
+    )
+    assert pnl_usd_net == pytest.approx(10.0 - fallback_cost, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

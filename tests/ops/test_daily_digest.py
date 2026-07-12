@@ -184,14 +184,22 @@ def test_weekly_virtual_pnl_section_renders_when_present(cfg: OpsConfig) -> None
     """Weekly per-exchange VIRTUAL trace (Jin 2026-07-07) — TRACE, never RESET;
     a stamped ``weekly_equity_curve`` row for the CURRENT week (at generation
     time, ``NOW``) surfaces as a digest section. Absent when no row exists
-    (the golden-output test above stays byte-identical)."""
+    (the golden-output test above stays byte-identical).
+
+    This test is scoped to the digest's RENDERING of an existing row — the
+    row's own computation (fresh-SUM from ``fills``, single-owner) is covered
+    by ``tests/test_weekly_equity_trace.py``, so the row is written directly
+    here rather than re-deriving it from seeded fills."""
     _golden_db(cfg)
     conn = sqlite3.connect(cfg.db_path)
-    from polaris.storage.weekly_equity_trace import upsert_weekly_row
+    from polaris.storage.weekly_equity_trace import week_start_ts
 
-    upsert_weekly_row(
-        conn, exchange="okx", now_ts=int(NOW), account_equity=100_250.0,
-        realized_pnl_delta_usd=250.0, unrealized_pnl_usd=15.0, trade_delta=2,
+    conn.execute(
+        "INSERT INTO weekly_equity_curve "
+        "(exchange, week_start_ts, start_equity, current_equity, "
+        " realized_pnl_usd, unrealized_pnl_usd, trades, updated_ts) "
+        "VALUES ('okx', ?, ?, ?, ?, ?, ?, ?)",
+        (week_start_ts(int(NOW)), 100_000.0, 100_250.0, 250.0, 15.0, 2, int(NOW)),
     )
     conn.commit()
     conn.close()

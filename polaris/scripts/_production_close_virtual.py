@@ -30,14 +30,14 @@ def safe_update_virtual_trace(
     conn: sqlite3.Connection,
     *,
     trade: SimulatedTrade,
-    pnl_usd_net: float,
     now_ts: int,
 ) -> None:
     """Post-close: derive equity, trace this week, check ruin. Fail-open.
 
-    ``pnl_usd_net`` is the SAME real-fee-net close delta the cell matrix /
-    learners / posterior fold (one number, one source) — folded as this
-    close's ``realized_pnl_delta_usd`` into the weekly row.
+    The weekly row's ``realized_pnl_usd``/``trades`` are FRESH-SUMMED by
+    ``upsert_weekly_row`` straight from the ``fills`` ledger (single-owner,
+    2026-07-12 ledger-reconcile fix) — this call no longer threads a per-close
+    delta through.
     """
     exchange = trade.venue
     try:
@@ -46,9 +46,7 @@ def safe_update_virtual_trace(
         upsert_weekly_row(
             conn, exchange=exchange, now_ts=now_ts,
             account_equity=equity.equity,
-            realized_pnl_delta_usd=pnl_usd_net,
             unrealized_pnl_usd=equity.unrealized_pnl_usd,
-            trade_delta=1,
         )
         check_and_reseed_ruin(
             conn, exchange=exchange, current_equity=equity.equity,

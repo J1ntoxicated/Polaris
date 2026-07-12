@@ -21,6 +21,7 @@ NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
 RTH_EPOCH = 1768402800  # Wed 2026-01-14 15:00 UTC -> us_equity_session_state == "rth"
 CLOSED_EPOCH = 1768359600  # Wed 2026-01-14 03:00 UTC -> "closed" (off-hours, weekday)
 WEEKEND_EPOCH = 1768662000  # Sat 2026-01-17 15:00 UTC -> "closed" (weekend)
+CHRISTMAS_RTH_EPOCH = 1798210800  # Fri 2026-12-25 15:00 UTC -> "rth" by clock-of-day, holiday
 
 
 def _ts(dt: datetime) -> str:
@@ -52,6 +53,10 @@ def _error_locked_line(dt: datetime) -> str:
         "[tick 1] stage=regime_compute[okx:BTC-USDT] failed: OperationalError: "
         "database is locked"
     )
+
+
+def _error_locked_lines(dt: datetime, count: int) -> list[str]:
+    return [_error_locked_line(dt) for _ in range(count)]
 
 
 def _error_other_line(dt: datetime, n: int) -> str:
@@ -130,11 +135,31 @@ def test_tick_gap_anomaly_isolated() -> None:
     ]
     m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=40))
     assert m.max_tick_gap_s == 1560  # today's 26min freeze class
+    assert m.max_tick_gap_spans_restart is False  # no [ignite] in the gap -> real stall
     assert m.last_tick_age_s == 40  # NOT stale — isolates the gap signal
     status, reasons = log_sentry.evaluate_status(m, _ok_db())
     assert status == "ANOMALY"
     assert "TICK_GAP" in reasons
     assert "TICK_STALE" not in reasons
+
+
+def test_tick_gap_across_restart_downgraded_to_warn() -> None:
+    """A tick-gap whose interval brackets an [ignite] restart is downtime
+    explained by the restart, not a live stall — RESTART_DETECTED already
+    covers it at WARN, so TICK_GAP must not additionally escalate to ANOMALY
+    on an already-recovered bot (2026-07-12 log_sentry review)."""
+    lines = [
+        _tick_line(NOW - timedelta(seconds=1600), 1),  # gap victim
+        _ignite_line(NOW - timedelta(seconds=800)),  # restart inside the gap
+        _tick_line(NOW - timedelta(seconds=40), 2),  # recovered, recent
+    ]
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=40))
+    assert m.max_tick_gap_s == 1560
+    assert m.max_tick_gap_spans_restart is True
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "WARN"
+    assert "TICK_GAP" in reasons
+    assert "RESTART_DETECTED" in reasons
 
 
 def test_tick_stale_age_anomaly_isolated() -> None:
@@ -179,6 +204,29 @@ def test_error_other_high_anomaly_locked_counted_separately() -> None:
     status, reasons = log_sentry.evaluate_status(m, _ok_db())
     assert status == "ANOMALY"
     assert "ERROR_OTHER_HIGH" in reasons
+
+
+def test_db_locked_storm_is_warn_not_print_only() -> None:
+    """errors_db_locked_window must actually gate the verdict — previously it
+    was tracked but never consulted by evaluate_status (2026-07-12 log_sentry
+    review; feedback_db_lock_is_architecture_signal: lock contention is an
+    early-warning signal, must not silently read STATUS=OK while building)."""
+    lines = [_tick_line(NOW - timedelta(seconds=10), 1)]
+    lines += _error_locked_lines(NOW - timedelta(seconds=5), 15)
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.errors_db_locked_window == 15
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert status == "WARN"
+    assert "DB_LOCK_CONTENTION" in reasons
+
+
+def test_db_locked_below_threshold_not_flagged() -> None:
+    lines = [_tick_line(NOW - timedelta(seconds=10), 1)]
+    lines += _error_locked_lines(NOW - timedelta(seconds=5), 5)
+    m = log_sentry.scan_log_axis(lines, NOW, NOW - timedelta(minutes=30))
+    assert m.errors_db_locked_window == 5
+    status, reasons = log_sentry.evaluate_status(m, _ok_db())
+    assert "DB_LOCK_CONTENTION" not in reasons
 
 
 def test_restart_detected_is_warn_not_anomaly() -> None:
@@ -285,10 +333,13 @@ def test_batch_flush_warn(make_db: MakeDb) -> None:
     assert "BATCH_FLUSH" in reasons
 
 
-def test_session_silent_crypto_warn(make_db: MakeDb) -> None:
+def test_session_silent_crypto_warn_wide_window(make_db: MakeDb) -> None:
+    """A genuinely wide silent window (>= CRYPTO_SILENT_WINDOW_MIN_S) still WARNs
+    — the fix (finding 2) only raises the bar past the routine short-window
+    quiet gap, it does not remove crypto-silence coverage outright."""
     db_path = make_db()
     now_epoch = WEEKEND_EPOCH  # equity closed -> isolates the crypto-silence check
-    cutoff_epoch = now_epoch - 1800
+    cutoff_epoch = now_epoch - log_sentry.CRYPTO_SILENT_WINDOW_MIN_S
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
     conn.close()
@@ -298,6 +349,22 @@ def test_session_silent_crypto_warn(make_db: MakeDb) -> None:
     assert status == "WARN"
     assert "SESSION_SILENT_CRYPTO" in reasons
     assert "SESSION_SILENT_EQUITY" not in reasons
+
+
+def test_session_silent_crypto_not_flagged_short_window(make_db: MakeDb) -> None:
+    """Routine false-warn class (finding 2): crypto is the validated
+    LOW-FREQUENCY conditional edge, so a 30min zero-signal window is normal
+    live operation (a 90min quiet gap was observed mid-history), not a fault."""
+    db_path = make_db()
+    now_epoch = WEEKEND_EPOCH
+    cutoff_epoch = now_epoch - 1800  # 30min — well under the silence bar
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.crypto_signals_window == 0
+    assert m.crypto_active is False
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SESSION_SILENT_CRYPTO" not in reasons
 
 
 def test_session_silent_equity_only_during_rth(make_db: MakeDb) -> None:
@@ -327,6 +394,23 @@ def test_session_equity_silence_not_flagged_off_hours_weekday(make_db: MakeDb) -
     assert "SESSION_SILENT_EQUITY" not in reasons
 
 
+def test_session_equity_silence_not_flagged_on_holiday(make_db: MakeDb) -> None:
+    """Christmas 2026 (Fri, weekday) during would-be RTH hours must NOT flag
+    SESSION_SILENT_EQUITY — us_equity_session_state is weekend-aware but NOT
+    holiday-aware by design; scan_db_axis layers a static NYSE holiday
+    calendar on top (finding 1, 2026-07-12 log_sentry review — same bug class
+    as the 2026-06-28 weekend-STALL)."""
+    db_path = make_db()
+    now_epoch = CHRISTMAS_RTH_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.equity_active is False  # holiday overrides the clock-of-day "rth" read
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SESSION_SILENT_EQUITY" not in reasons
+
+
 def _ok_log() -> log_sentry.LogMetrics:
     return log_sentry.LogMetrics(
         log_found=True,
@@ -334,6 +418,7 @@ def _ok_log() -> log_sentry.LogMetrics:
         last_tick_utc="2026-07-12T04:00:00Z",
         last_tick_age_s=10,
         max_tick_gap_s=60,
+        max_tick_gap_spans_restart=False,
         batch_count_window=0,
         batch_max_ms=None,
         batch_p95_ms=None,

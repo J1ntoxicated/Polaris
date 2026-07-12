@@ -26,8 +26,10 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from polaris.core.sessions.equity_session_gate import us_equity_session_state
+from tools.ops._us_market_holidays import us_market_holidays
 from tools.ops.ops_config import OpsConfig
 
 # --- thresholds (vault backlink: vault/log.md 2026-07-12 WAL-choke incident +
@@ -36,10 +38,20 @@ TICK_GAP_WARN_S = 300
 TICK_GAP_ANOMALY_S = 900  # today's 26min(1560s) freeze — the miss this sentry fixes
 DB_WRITER_BATCH_ANOMALY_MS = 30_000.0  # writer stalled 497s == 497000ms that day
 ERROR_OTHER_ANOMALY_COUNT = 10
+# early-warning precursor threshold, well below the 2026-07-12 incident's
+# 305-count full-stall storm (feedback_db_lock_is_architecture_signal — lock
+# contention is an architecture signal, must not read STATUS=OK while building)
+DB_LOCKED_WARN_COUNT = 10
 RAIL_PNL_R_ANOMALY = -1.2  # exit-rail breach threshold (task spec, matches gate rails)
 BATCH_FLUSH_WARN_COUNT = 5  # that day's catch-up flush landed 12 closes in one second
 ALTDATA_STALE_TTL_MULT = 2
+# crypto is the validated LOW-FREQUENCY conditional edge (MEMORY
+# project_validated_edge_is_slow_trend_not_scalp) — a live 90min zero-signal
+# gap is routine (2026-07-12 log_sentry review), so only judge crypto silence
+# over a window wide enough to clear that with margin
+CRYPTO_SILENT_WINDOW_MIN_S = 14_400
 MAX_TAIL_BYTES = 20_000_000  # bounds a multi-day log; daily restart keeps this generous
+_NY_TZ = ZoneInfo("America/New_York")
 
 _TICK_RE = re.compile(r"\[tick (\d+)\] focus=")
 _BATCH_RE = re.compile(r"\[db_writer\] batch \d+ jobs ([\d.]+)\s*ms")
@@ -57,6 +69,7 @@ class LogMetrics:
     last_tick_utc: str | None
     last_tick_age_s: int | None
     max_tick_gap_s: int | None
+    max_tick_gap_spans_restart: bool
     batch_count_window: int
     batch_max_ms: float | None
     batch_p95_ms: float | None
@@ -122,6 +135,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         last_tick_utc=None,
         last_tick_age_s=None,
         max_tick_gap_s=None,
+        max_tick_gap_spans_restart=False,
         batch_count_window=0,
         batch_max_ms=None,
         batch_p95_ms=None,
@@ -136,6 +150,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         return empty
 
     tick_ts: list[datetime] = []
+    ignite_ts: list[datetime] = []
     last_tick_n: int | None = None
     last_tick_ts: datetime | None = None
     batch_ms_window: list[float] = []
@@ -164,6 +179,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
             continue
 
         if _IGNITE_RE.search(line):
+            ignite_ts.append(ts)  # unfiltered: used below to bridge a tick-gap pair
             if ts >= cutoff:
                 restart_window += 1
             continue
@@ -183,12 +199,24 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
                 other_error_window += 1
 
     tick_ts.sort()
+    ignite_ts.sort()
+    # (gap_seconds, spans_a_restart) per consecutive tick pair in the window. A
+    # gap that brackets an [ignite] line is downtime explained by a restart
+    # (crash+watchdog, slow boot, manual) — not a live stall (2026-07-12
+    # log_sentry review: an append-mode log tail pairs the last pre-restart
+    # tick with the first post-restart tick, so this class was false-ANOMALYing
+    # an already-recovered bot).
     gaps_in_window = [
-        (t2 - t1).total_seconds()
+        ((t2 - t1).total_seconds(), any(t1 <= ig <= t2 for ig in ignite_ts))
         for t1, t2 in zip(tick_ts, tick_ts[1:], strict=False)
         if t2 >= cutoff
     ]
-    max_gap = int(max(gaps_in_window)) if gaps_in_window else None
+    if gaps_in_window:
+        max_gap_s, max_gap_spans_restart = max(gaps_in_window, key=lambda g: g[0])
+        max_gap: int | None = int(max_gap_s)
+    else:
+        max_gap = None
+        max_gap_spans_restart = False
     last_tick_age = int((now - last_tick_ts).total_seconds()) if last_tick_ts else None
 
     stale_channels = sorted(
@@ -204,6 +232,7 @@ def scan_log_axis(lines: list[str], now: datetime, cutoff: datetime) -> LogMetri
         last_tick_utc=_fmt(last_tick_ts) if last_tick_ts else None,
         last_tick_age_s=last_tick_age,
         max_tick_gap_s=max_gap,
+        max_tick_gap_spans_restart=max_gap_spans_restart,
         batch_count_window=len(batch_ms_window),
         batch_max_ms=max(batch_ms_window) if batch_ms_window else None,
         batch_p95_ms=_percentile(batch_ms_window, 0.95) if batch_ms_window else None,
@@ -251,8 +280,14 @@ def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) ->
         (cutoff_epoch,),
     )
     crypto_count = int(cur.fetchone()[0])
+    # crypto silence is only meaningful over a window wide enough to clear the
+    # routine low-frequency quiet gap with margin (CRYPTO_SILENT_WINDOW_MIN_S)
+    crypto_active = (now_epoch - cutoff_epoch) >= CRYPTO_SILENT_WINDOW_MIN_S
 
-    equity_active = us_equity_session_state(now_epoch) == "rth"
+    now_ny_date = datetime.fromtimestamp(now_epoch, tz=_NY_TZ).date()
+    equity_active = us_equity_session_state(now_epoch) == "rth" and (
+        now_ny_date not in us_market_holidays(now_ny_date.year)
+    )
     cur.execute(
         "SELECT COUNT(*) FROM signals WHERE ts > ? AND instrument_id LIKE 'alpaca:%'",
         (cutoff_epoch,),
@@ -265,7 +300,7 @@ def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) ->
         rail_breach_detail=" ".join(f"{sym}:{round(float(pnl), 3)}" for sym, pnl in rail_rows),
         batch_flush_count=len(flush_rows),
         batch_flush_detail=" ".join(f"{ts}:{c}" for ts, c in flush_rows),
-        crypto_active=True,
+        crypto_active=crypto_active,
         crypto_signals_window=crypto_count,
         equity_active=equity_active,
         equity_signals_window=equity_count,
@@ -295,7 +330,11 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
         if log_m.max_tick_gap_s is not None:
             if log_m.max_tick_gap_s > TICK_GAP_ANOMALY_S:
                 reasons.append("TICK_GAP")
-                anomaly = True
+                if log_m.max_tick_gap_spans_restart:
+                    # downtime explained by a restart, not a live stall
+                    warn = True
+                else:
+                    anomaly = True
             elif log_m.max_tick_gap_s > TICK_GAP_WARN_S:
                 reasons.append("TICK_GAP")
                 warn = True
@@ -307,6 +346,10 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
         if log_m.errors_other_window > ERROR_OTHER_ANOMALY_COUNT:
             reasons.append("ERROR_OTHER_HIGH")
             anomaly = True
+
+        if log_m.errors_db_locked_window > DB_LOCKED_WARN_COUNT:
+            reasons.append("DB_LOCK_CONTENTION")
+            warn = True
 
         if log_m.restart_count_window > 0:
             reasons.append("RESTART_DETECTED")
@@ -366,6 +409,7 @@ def format_output(
         f"last_tick_utc={_s(log_m.last_tick_utc)}",
         f"last_tick_age_s={_s(log_m.last_tick_age_s)}",
         f"max_tick_gap_s={_s(log_m.max_tick_gap_s)}",
+        f"max_tick_gap_spans_restart={_s(log_m.max_tick_gap_spans_restart)}",
         f"db_writer_batch_count_window={log_m.batch_count_window}",
         f"db_writer_batch_max_ms={_s(log_m.batch_max_ms)}",
         f"db_writer_batch_p95_ms={_s(log_m.batch_p95_ms)}",

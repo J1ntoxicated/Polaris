@@ -718,7 +718,10 @@ def test_capital_session_active_after_grace_elapses() -> None:
 # --- SILENT_CAPITAL (scan_db_axis + evaluate_status) ------------------------
 
 
-def test_silent_capital_anomaly_when_active_and_crypto_flowing(make_db: MakeDb) -> None:
+def test_silent_capital_warn_when_active_and_crypto_flowing(make_db: MakeDb) -> None:
+    """WARN, not ANOMALY — capital is the slow-trend low-frequency edge and
+    genuine multi-hour intra-session lulls are routine (2026-07-12 review MED:
+    same severity class as SESSION_SILENT_CRYPTO/EQUITY)."""
     db_path = make_db()
     now_epoch = CAPITAL_MON_EPOCH
     cutoff_epoch = now_epoch - 1800
@@ -731,7 +734,7 @@ def test_silent_capital_anomaly_when_active_and_crypto_flowing(make_db: MakeDb) 
     assert m.capital_fills_window == 0
     assert m.capital_gate_events_window == 0
     status, reasons = log_sentry.evaluate_status(_ok_log(), m)
-    assert status == "ANOMALY"
+    assert status == "WARN"
     assert "SILENT_CAPITAL" in reasons
 
 
@@ -762,6 +765,24 @@ def test_silent_capital_not_flagged_when_capital_signal_present(make_db: MakeDb)
     assert "SILENT_CAPITAL" not in reasons
 
 
+def test_silent_capital_uses_dedicated_wide_lookback(make_db: MakeDb) -> None:
+    """A capital signal 2h old sits outside the caller's narrow cutoff but
+    inside CAPITAL_SILENT_WINDOW_MIN_S (4h) — no alert. This is the 2026-07-12
+    review MED fix: genuine multi-hour lulls on the slow-trend edge must not
+    fire on every monitor tick."""
+    db_path = make_db()
+    now_epoch = CAPITAL_MON_EPOCH
+    cutoff_epoch = now_epoch - 1800
+    _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
+    _insert_signal(db_path, "s2", "capital:EURUSD", now_epoch - 7200)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
+    conn.close()
+    assert m.capital_signals_window == 1
+    status, reasons = log_sentry.evaluate_status(_ok_log(), m)
+    assert "SILENT_CAPITAL" not in reasons
+
+
 def test_silent_capital_not_flagged_when_capital_fill_present(make_db: MakeDb) -> None:
     db_path = make_db()
     now_epoch = CAPITAL_MON_EPOCH
@@ -776,14 +797,18 @@ def test_silent_capital_not_flagged_when_capital_fill_present(make_db: MakeDb) -
     assert "SILENT_CAPITAL" not in reasons
 
 
-def test_silent_capital_not_flagged_when_capital_gate_event_present(make_db: MakeDb) -> None:
-    """A capital gate_event counts even when its originating signal itself
-    falls outside the cutoff window (join is on signal_id, not signals.ts)."""
+def test_silent_capital_gate_events_are_informational_only(make_db: MakeDb) -> None:
+    """gate_events do NOT suppress the alert: signals PK is (strategy_id,
+    signal_id), so the bare signal_id EXISTS join is not globally unique and
+    a cross-strategy collision could wrongly mask real silence (2026-07-12
+    review LOW) — the counter is kept for the readout, the verdict reads
+    signals+fills only."""
     db_path = make_db()
     now_epoch = CAPITAL_MON_EPOCH
     cutoff_epoch = now_epoch - 1800
     _insert_signal(db_path, "s1", "okx:BTC-USDT", now_epoch - 60)
-    _insert_signal(db_path, "s2", "capital:EURUSD", now_epoch - 3600)
+    # capital signal older than the dedicated 4h lookback -> outside window
+    _insert_signal(db_path, "s2", "capital:EURUSD", now_epoch - 15_000)
     _insert_gate_event(db_path, "g1", "s2", now_epoch - 60)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     m = log_sentry.scan_db_axis(conn, now_epoch, cutoff_epoch)
@@ -791,7 +816,8 @@ def test_silent_capital_not_flagged_when_capital_gate_event_present(make_db: Mak
     assert m.capital_signals_window == 0
     assert m.capital_gate_events_window == 1
     status, reasons = log_sentry.evaluate_status(_ok_log(), m)
-    assert "SILENT_CAPITAL" not in reasons
+    assert status == "WARN"
+    assert "SILENT_CAPITAL" in reasons
 
 
 def test_silent_capital_not_flagged_when_crypto_also_silent(make_db: MakeDb) -> None:

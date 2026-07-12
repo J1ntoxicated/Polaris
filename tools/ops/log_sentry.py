@@ -372,14 +372,19 @@ def evaluate_status(log_m: LogMetrics, db_m: DbMetrics) -> tuple[str, list[str]]
             db_m.capital_active
             and db_m.capital_signals_window == 0
             and db_m.capital_fills_window == 0
-            and db_m.capital_gate_events_window == 0
             and db_m.crypto_active
             and db_m.crypto_signals_window > 0
         ):
-            # capital session active + zero capital activity + crypto flowing
-            # normally == the capital track itself is dark (silent-INERT class).
+            # capital session active + zero capital signal/fill over the
+            # dedicated 4h lookback + crypto flowing normally == the capital
+            # track itself is dark (silent-INERT class). WARN, not ANOMALY —
+            # capital is the slow-trend low-frequency edge and genuine
+            # multi-hour intra-session lulls are routine (2026-07-12 review
+            # MED: same class as SESSION_SILENT_CRYPTO/EQUITY). The
+            # gate_events counter is informational only (non-unique
+            # signal_id join could wrongly suppress — review LOW).
             reasons.append("SILENT_CAPITAL")
-            anomaly = True
+            warn = True
 
     if anomaly:
         return "ANOMALY", reasons

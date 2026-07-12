@@ -27,6 +27,12 @@ BATCH_FLUSH_WARN_COUNT = 5  # that day's catch-up flush landed 12 closes in one 
 # monitor_tick.sh §⑩ --window-min 60 (3600s) made this permanently
 # unreachable when coupled to the caller's cutoff.
 CRYPTO_SILENT_WINDOW_MIN_S = 14_400
+# Capital is the SAME slow-trend low-frequency edge (2026-07-12 reopen
+# review: 42 genuine intra-session capital signal gaps > 60min over ~12
+# days, several 4-10h overnight) — judged over its own dedicated wide
+# lookback for the same reason as crypto above, never the caller's narrow
+# --window-min cutoff.
+CAPITAL_SILENT_WINDOW_MIN_S = 14_400
 _NY_TZ = ZoneInfo("America/New_York")
 _UTC = ZoneInfo("UTC")
 
@@ -131,21 +137,26 @@ def scan_db_axis(conn: sqlite3.Connection, now_epoch: int, cutoff_epoch: int) ->
     equity_count = int(cur.fetchone()[0])
 
     capital_active = capital_session_active(now_epoch)
+    capital_cutoff_epoch = now_epoch - CAPITAL_SILENT_WINDOW_MIN_S
     cur.execute(
         "SELECT COUNT(*) FROM signals WHERE ts > ? AND instrument_id LIKE 'capital:%'",
-        (cutoff_epoch,),
+        (capital_cutoff_epoch,),
     )
     capital_signal_count = int(cur.fetchone()[0])
     cur.execute(
         "SELECT COUNT(*) FROM fills WHERE ts_ms > ? AND instrument_id LIKE 'capital:%'",
-        (cutoff_epoch * 1000,),
+        (capital_cutoff_epoch * 1000,),
     )
     capital_fill_count = int(cur.fetchone()[0])
+    # Informational only — NOT part of the SILENT_CAPITAL condition:
+    # signals PK is (strategy_id, signal_id), so a bare signal_id EXISTS
+    # join is not globally unique and a cross-strategy collision could
+    # wrongly suppress the alert (2026-07-12 review LOW).
     cur.execute(
         "SELECT COUNT(*) FROM gate_events ge WHERE ge.created_ts > ? AND EXISTS ("
         "SELECT 1 FROM signals s WHERE s.signal_id = ge.signal_id "
         "AND s.instrument_id LIKE 'capital:%')",
-        (cutoff_epoch,),
+        (capital_cutoff_epoch,),
     )
     capital_gate_event_count = int(cur.fetchone()[0])
 

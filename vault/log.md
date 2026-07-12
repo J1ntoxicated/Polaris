@@ -430,3 +430,6 @@
 - 2026-07-12: 리빙 필드 머지(7dffc47) — 레이아웃 트윈·스캔 펄스·강등 글라이드·게이지 상단 2+2(EARNINGS 플랭크)·BOT LOG DEBUG 필터. 상/하 밀도 재조정은 게이지 이동으로 사실상 해소. 약속 큐 소진 — 잔여 결정: fee-split R2·Coinglass.
 2026-07-12 09:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=173 learners=3 paper=True]
 - 2026-07-12: single-writer 랜딩(1d9fbea) — A급 섀도우/컬렉터 쓰기 큐 이관, regime_v2 이관은 same-tick reader 발견으로 정직 롤백(빌더 자가교정). 실측: 락 88/h→86/h(웜업 포함, 지배원인 regime read-back 잔존 — 예측대로), 틱 60s→27-33s 개선. 근치=바 캐시 데이터모델 설계(마스터 시퀀스 등록). 프로브 3색+이름표·그룹 베뉴표시·페인트 다이어트(blur 전폐, GPU 32fps) 동일 세션 랜딩.
+- 2026-07-12: fee-split flip R2 디베이트 수렴 — GPT 5×BREAK 전항 수용/수정(venue-pool fallback·EARN 2축화·remap 재도출 케이던스·label-churn 플래그·롤백 트립와이어 5종), 발산 12.4%≤15% 게이트 통과, 스펙=fee_split_flip_r2_2026-07-12.md
+2026-07-12 11:39 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=175 learners=3 paper=True]
+- 2026-07-12: fee-split flip 랜딩(merge 8908c3a→main, 재기동 PID 5968) — 판정축 gross_bps·remap 9스코프·divergence 0.000·백필 890/890. 주말 크립토 포렌식(wf_de752dd0, 검증가 정정 포함): 주말 net -$6,391(평일 -$2,995), rsi_bb_pullback 주말 gross-음수 단독 68%, thin_book_flush=유일 gross+인데 fee가 삼킴(net -$222), OKX 전 체결 10bps taker 균일·maker_fill_shadow 0행(maker 경제 미실현), 2h-8h 보유만 흑자, 손실 00-06 UTC 집중.

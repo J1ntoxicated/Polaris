@@ -747,7 +747,6 @@ async def _run_tick(
                 bars=bars_1m, now_ts=now_ts, altdata_cache=altdata_cache,
                 asset_class=asset_class, hint_stats=state.regime_hint_stats,
                 regime_v2_crosstab=state.regime_v2_crosstab,
-                db_writer=state.db_writer,
             )
         except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
             _log_tick_stage_fault(f"regime_compute[{venue}:{symbol}]", tick_idx, exc)

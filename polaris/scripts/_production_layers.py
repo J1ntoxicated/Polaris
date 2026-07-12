@@ -98,7 +98,6 @@ from polaris.scripts._session_map import (
     session_group,
     session_transitions,
 )
-from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.venues.capital.market_proxy import populate_capital_proxies
 from polaris.venues.capital.session import CapitalSession
 from polaris.venues.capital.session_calendar import capital_seconds_to_close
@@ -1422,7 +1421,6 @@ def compute_and_flip_regime(
     asset_class: str = "crypto",
     hint_stats: dict[str, int] | None = None,
     regime_v2_crosstab: dict[str, int] | None = None,
-    db_writer: DBWriter | None = None,
 ) -> str:
     """Compute candidate regime + run Layer 6 SSOT 2-consecutive-close gate.
 
@@ -1469,11 +1467,6 @@ def compute_and_flip_regime(
     degrade pattern replicated per the design doc): any failure there is
     logged and swallowed, never altering the v1 label this function returns.
     Default ``None`` → no counter, byte-identical to every pre-W2 caller.
-
-    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): threaded
-    through to ``_safe_record_regime_v2_shadow``'s UPDATE only — see that
-    function's docstring for why the column is safe to defer. Default
-    ``None`` is byte-identical to the pre-migration direct-write path.
     """
     price_candidate, price_strength, _price_ev = compute_real_regime_signal(
         bars, asset_class=asset_class
@@ -1504,20 +1497,23 @@ def compute_and_flip_regime(
         if candidate == "crisis" and price_candidate != "crisis"
         else "price"
     )
-    # Scope note (db-writer-reader-split, 2026-07-12): detect_regime_flip
-    # below still writes DIRECTLY on this caller's own ``conn`` (~9
-    # INSERT/UPDATE regime_state statements incl. an always-fired
-    # updated_ts UPDATE — see regime_flip.py), and the SELECT read-back a
-    # few lines down depends on seeing that write within this same call.
-    # This v1 SSOT path is intentionally NOT migrated to db_writer — it is
-    # read-back-coupled within one flow, exactly the case the migration is
-    # forbidden from touching (invariant 1). Only the low-frequency
-    # regime_v2 SHADOW UPDATE (_safe_record_regime_v2_shadow below) was
-    # offloaded. So this stage's high-frequency direct-write lock exposure
-    # is essentially intact after this wave — do not read the offload as
-    # having eliminated regime_compute's contribution to the SQLITE_BUSY
-    # count; the reduction here is marginal, and the real drop comes from
-    # other offloaded call sites (e.g. altdata collectors).
+    # Scope note (db-writer-reader-split, 2026-07-12, reverted 2026-07-12
+    # review round 3): detect_regime_flip below still writes DIRECTLY on
+    # this caller's own ``conn`` (~9 INSERT/UPDATE regime_state statements
+    # incl. an always-fired updated_ts UPDATE — see regime_flip.py), and
+    # the SELECT read-back a few lines down depends on seeing that write
+    # within this same call. This v1 SSOT path is intentionally NOT
+    # migrated to db_writer — it is read-back-coupled within one flow,
+    # exactly the case the migration is forbidden from touching
+    # (invariant 1). The regime_v2 SHADOW UPDATE below (
+    # _safe_record_regime_v2_shadow) was tried as an offload candidate and
+    # reverted: fetch_regime_v2's entry-stamp path (_production_pipeline.py
+    # ~L775) reads regime_state.regime_v2 for the same (venue, group)
+    # within the same tick, so deferring the write nondeterministically
+    # desyncs that read from invariant 1. So regime_compute's
+    # high-frequency direct-write lock exposure is fully intact after
+    # this wave — the SQLITE_BUSY reduction comes entirely from other
+    # offloaded call sites (e.g. altdata collectors, tsmom shadow).
     decision = detect_regime_flip(
         conn,
         venue=venue,
@@ -1561,7 +1557,7 @@ def compute_and_flip_regime(
         )
     _safe_record_regime_v2_shadow(
         conn, venue=venue, underlying_group_id=underlying_group_id, bars=bars,
-        v1_label=persisted, crosstab=regime_v2_crosstab, db_writer=db_writer,
+        v1_label=persisted, crosstab=regime_v2_crosstab,
     )
     return persisted
 
@@ -1574,7 +1570,6 @@ def _safe_record_regime_v2_shadow(
     bars: Sequence[Bar],
     v1_label: str,
     crosstab: dict[str, int] | None,
-    db_writer: DBWriter | None = None,
 ) -> None:
     """W2 twinlight (design-regime-v2-rollout.md) — compute + persist the
     regime v2 6-state SHADOW label alongside the v1 SSOT, fully fail-open.
@@ -1586,50 +1581,24 @@ def _safe_record_regime_v2_shadow(
     ``compute_and_flip_regime``'s v1 return value. behavior-0: this call has
     no bearing on which regime the rest of the pipeline sees.
 
-    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): when wired
-    and enabled, the UPDATE is submitted as a fire-and-forget job to the
-    shared single-RW-conn writer instead of running on the caller's own
-    ``conn`` directly. Safe to defer despite a genuine same-tick reader:
-    ``fetch_regime_v2`` in ``_production_pipeline.py``'s entry-stamp path
-    (line ~775) CAN read ``regime_state.regime_v2`` for the SAME
-    ``(venue, underlying_group_id)`` this UPDATE targets, in the same tick
-    (regime_compute runs the whole focus set, then a fill on one of those
-    groups stamps ``entry_regime_v2`` later in that tick). Pre-migration,
-    both write and read shared the loop conn (autocommit) → guaranteed
-    read-your-write. Post-migration, the write lands async on the writer's
-    OWN connection, so that entry read can nondeterministically see THIS
-    cycle's or the PREVIOUS cycle's ``regime_v2`` — a genuine de-sync stale
-    read, not a "different row." It is deferrable anyway because
-    ``entry_regime_v2`` is a dormant shadow/telemetry column with ZERO
-    sizing/gating/exit consumers until the W4 flip ladder (per the docstring
-    above) and is itself fail-open on a stale or missing value — trading
-    semantics are unaffected. W4 implementer: once ``entry_regime_v2`` is
-    consumed, it is no longer a reliable "regime exactly at entry" stamp —
-    it can lag one classification cycle nondeterministically. Default
-    ``None`` is byte-identical to the pre-migration direct-write path.
+    NOT a db_writer offload candidate (db-writer-reader-split, tried and
+    reverted 2026-07-12 review round 3): ``fetch_regime_v2`` in
+    ``_production_pipeline.py``'s entry-stamp path (line ~775) CAN read
+    ``regime_state.regime_v2`` for the SAME ``(venue, underlying_group_id)``
+    this UPDATE targets, in the same tick (regime_compute runs the whole
+    focus set, then a fill on one of those groups stamps ``entry_regime_v2``
+    later in that tick) — the same-tick read-back invariant 1 forbids
+    deferring. This UPDATE stays synchronous on the caller's own ``conn``
+    (autocommit) so that read is always read-your-write, matching every
+    other Layer 6 consumer.
     """
     try:
         v2_label = classify_regime_v2(bars)
-        if db_writer is not None and dbwriter_enabled():
-            venue_c, group_c, label_c = venue, underlying_group_id, v2_label
-
-            def _job(
-                c: sqlite3.Connection,
-                v: str = venue_c, g: str = group_c, lbl: str = label_c,
-            ) -> None:
-                c.execute(
-                    "UPDATE regime_state SET regime_v2 = ? "
-                    "WHERE venue = ? AND underlying_group_id = ?",
-                    (lbl, v, g),
-                )
-
-            db_writer.submit(_job, label="regime_v2_shadow")
-        else:
-            conn.execute(
-                "UPDATE regime_state SET regime_v2 = ? "
-                "WHERE venue = ? AND underlying_group_id = ?",
-                (v2_label, venue, underlying_group_id),
-            )
+        conn.execute(
+            "UPDATE regime_state SET regime_v2 = ? "
+            "WHERE venue = ? AND underlying_group_id = ?",
+            (v2_label, venue, underlying_group_id),
+        )
         if crosstab is not None:
             key = f"{v1_label}|{v2_label}"
             crosstab[key] = crosstab.get(key, 0) + 1

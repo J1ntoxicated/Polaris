@@ -95,7 +95,7 @@
     // gateBusY kept only as the deco.js "GATE BUS" divider label pivot —
     // the flat-pipe gateBusFloor/gateBusCeil clamp it used to anchor is
     // gone, replaced by the circuit anchors below.
-    gateBusY: 0.695,
+    gateBusY: 0.655, // divider pivot follows the raised arch
     // Gate circuit topology (Jin 2026-07-12 "순환 회로" — feat/topology-
     // panels): G1->G5 climbs a gentle ascending arch (buildLayout's
     // gateScreen), G6 sits as a right-mid monitor hub, G7 descends below
@@ -104,7 +104,8 @@
     // reuse the old S-curve's proven-safe span ends (0.08W/0.915W-ish) so
     // G1's tier-census satellites and the register column's g8 wiring keep
     // the clearances already tuned for them.
-    gateArch: { x0: 0.08, x1: 0.58, y0: 0.755, y1: 0.695, bow: 0.018 },
+    // Jin 2026-07-12 '게이트 전체적으로 조금 위로': 회로 일괄 -0.04H
+    gateArch: { x0: 0.08, x1: 0.58, y0: 0.715, y1: 0.655, bow: 0.018 },
     // hub/exit re-tuned in self-critique rounds 1-2 (Playwright measurement
     // on the real 1343x962 render): 0.715H is the same pivot the old flat
     // bus used (proven >=0.13H clear of railY=0.492 for G6's probe-orbit
@@ -116,8 +117,8 @@
     // fan below G7 (buildLayout's jitteredBand) is trimmed from +60..115px
     // to +20..50px to match (round 1 caught the fan spilling ~28px into
     // the panel at the old 115px reach).
-    gateHub: { x: 0.87, y: 0.715 },
-    gateExit: { x: 0.77, y: 0.745 },
+    gateHub: { x: 0.87, y: 0.675 },
+    gateExit: { x: 0.77, y: 0.705 },
     // x=0.045 (round 2 self-critique fix, Jin 2026-07-12): 0.14 sat almost
     // exactly on the REGIME row's bull_trend node (deterministic x=0.144,
     // see buildLayout's byCluster.reg placement) — the regime row is fixed
@@ -125,7 +126,7 @@
     // `ordered`) spanning ~x0.08-0.27W, so 0.045 clears the whole row
     // (chop's own leftmost label span never reaches this far) while staying
     // right of the canvas edge for the 52px ring+bracket radius.
-    gateReflector: { x: 0.045, y: 0.87 },
+    gateReflector: { x: 0.045, y: 0.845 },
     registerRect: { x0: 0.962, x1: 0.988, y0: 0.575, y1: 0.745 },
     regimeY: 0.80,
     ladderBand: {
@@ -477,7 +478,7 @@
     // REGIME row (Jin 2026-07-11 "공간활용"): even-pitch labelled row filling
     // the bottom-left void (above the DROP LANE overlay), feeding g3.
     (byCluster.reg || []).forEach((n, j, arr) => {
-      const x = W * 0.05 + ((j + 0.5) / Math.max(1, arr.length)) * W * 0.25;
+      const x = W * 0.105 + ((j + 0.5) / Math.max(1, arr.length)) * W * 0.24; // 리플렉터 상승분 회피
       screen[n.id] = { x, y: H * 0.775 + ((j % 2) ? H * 0.018 : 0) };
     });
     // OPEN POSITIONS — even double-arc fan under g6 (was a jittered blob):

@@ -103,28 +103,25 @@
     // gone, replaced by the circuit anchors below.
     gateBusY: 0.655, // divider pivot follows the raised arch
     // Gate circuit topology (Jin 2026-07-12 "순환 회로" — feat/topology-
-    // panels): G1->G5 climbs a gentle ascending arch (buildLayout's
-    // gateScreen), G6 sits as a right-mid monitor hub, G7 descends below
-    // it, G8 loops back to the lower-left so the existing g8->g2 gold
-    // plasticity strand (buildEdges) reads as closing the loop. x0/x1
-    // reuse the old S-curve's proven-safe span ends (0.08W/0.915W-ish) so
-    // G1's tier-census satellites and the register column's g8 wiring keep
-    // the clearances already tuned for them.
-    // Jin 2026-07-12 '게이트 전체적으로 조금 위로': 회로 일괄 -0.04H
-    gateArch: { x0: 0.08, x1: 0.58, y0: 0.715, y1: 0.655, bow: 0.018 },
-    // hub/exit re-tuned in self-critique rounds 1-2 (Playwright measurement
-    // on the real 1343x962 render): 0.715H is the same pivot the old flat
-    // bus used (proven >=0.13H clear of railY=0.492 for G6's probe-orbit
-    // reach, ry=58px). G7 sits close behind on x (0.77 vs 0.87W, >130px
-    // gate-to-gate so the two reticles — ring+corner-bracket radius ~52px
-    // each — never touch) and only 30px further down in y: with G6 already
-    // this close to the rail-safe floor, there wasn't 115px of headroom
-    // left before ladderBand.br (x0.78-0.988 @ y>=0.815) — the exit-tier
-    // fan below G7 (buildLayout's jitteredBand) is trimmed from +60..115px
-    // to +20..50px to match (round 1 caught the fan spilling ~28px into
-    // the panel at the old 115px reach).
-    gateHub: { x: 0.87, y: 0.675 },
-    gateExit: { x: 0.77, y: 0.705 },
+    // panels): G1->G5 climb, G6 monitor hub, G7 exit, G8 loops back to the
+    // lower-left so the existing g8->g2 gold plasticity strand (buildEdges)
+    // reads as closing the loop.
+    // Jin 2026-07-12 "게이트 1-5 계층마다 그 층에": the gentle bowed arch is
+    // now an even STAIRCASE — 5 discrete tiers, 0.025H per step (24px at
+    // 962H, clearly separated levels). y1=0.625 keeps the proven >=0.13H
+    // clearance below railY=0.492 for G5's runner-learner satellites; y0=
+    // 0.725 keeps G1's below-label >=0.03H above the regime row (0.80H).
+    gateStairs: { x0: 0.08, x1: 0.58, y0: 0.725, y1: 0.625 },
+    // Jin 2026-07-12 "모니터보다 엑싯이 앞에 있으니까 좀 웃긴데": swapped.
+    // Monitor (G6) now sits FIRST along the flow at 0.76W, exit (G7) BEHIND
+    // it at 0.88W, so left-to-right reads sizer->monitor->exit before the
+    // G8 loopback. Clearances re-derived at min viewport 1200W: monitor->
+    // exit gap 0.12W=144px > probe-orbit reach + exit reticle (84+52=136);
+    // exit reticle right edge 0.88W+52 stays left of registerRect x0
+    // (0.962W) at both 1200/1343W; exit-tier fan below is trimmed to
+    // -60..+90px x-reach for the same register clearance.
+    gateHub: { x: 0.76, y: 0.66 },
+    gateExit: { x: 0.88, y: 0.71 },
     // x=0.045 (round 2 self-critique fix, Jin 2026-07-12): 0.14 sat almost
     // exactly on the REGIME row's bull_trend node (deterministic x=0.144,
     // see buildLayout's byCluster.reg placement) — the regime row is fixed
@@ -339,11 +336,13 @@
     });
 
     // Gate spine: circuit topology (Jin 2026-07-12 "순환 회로" — feat/
-    // topology-panels, supersedes the flat S-curve). G1->G5 climb a gentle
-    // ascending arch (entry chain), G6 is a right-mid monitor hub, G7
-    // descends below it, G8 loops back to the lower-left so the g8->g2
-    // gold plasticity strand (buildEdges) reads as CLOSING the circuit.
-    // Every anchor lives in WALL_ZONES (gateArch/gateHub/gateExit/
+    // topology-panels, supersedes the flat S-curve). G1->G5 climb an even
+    // STAIRCASE (entry chain, one discrete tier per gate — Jin 2026-07-12
+    // "계층마다 그 층에"), G6 is the monitor hub FIRST along the flow, G7
+    // exit sits behind it (Jin: "모니터보다 엑싯이 앞에 있으니까 웃긴데" —
+    // swapped), G8 loops back to the lower-left so the g8->g2 gold
+    // plasticity strand (buildEdges) reads as CLOSING the circuit.
+    // Every anchor lives in WALL_ZONES (gateStairs/gateHub/gateExit/
     // gateReflector) — the sole source of truth every satellite/fan/edge
     // below reads through the resulting gateScreen[] entries, same as the
     // old S-curve. Small deterministic per-gate jitter (graft 1a, organic)
@@ -352,20 +351,19 @@
       const rg = rngFor(gid + ':stagger');
       const jx = (rg() - 0.5) * W * 0.012, jy = (rg() - 0.5) * H * 0.012;
       if (i <= 4) {
-        // G1->G5 entry chain — rail clearance (>=0.13H below railY, same
-        // structural guarantee the old clamp gave g5-g8) is baked into
-        // gateArch.y1 (0.695H) directly rather than re-derived here.
+        // G1->G5 entry chain — even tiers, no bow: each gate one 0.025H
+        // step above the last. Rail clearance is baked into gateStairs.y1.
         const t = i / 4;
-        const arch = WALL_ZONES.gateArch;
-        const x = W * (arch.x0 + t * (arch.x1 - arch.x0)) + jx;
-        const y = H * (arch.y0 + t * (arch.y1 - arch.y0) - Math.sin(t * Math.PI) * arch.bow) + jy;
+        const st = WALL_ZONES.gateStairs;
+        const x = W * (st.x0 + t * (st.x1 - st.x0)) + jx;
+        const y = H * (st.y0 + t * (st.y1 - st.y0)) + jy;
         return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
-      if (i === 5) { // G6 monitor — right-mid hub (probe patrol + pos fan anchor)
+      if (i === 5) { // G6 monitor — hub right after the stair top (probe patrol + pos fan anchor)
         const h = WALL_ZONES.gateHub;
         return { x: W * h.x + jx, y: H * h.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
-      if (i === 6) { // G7 exit — descends below the G6 hub
+      if (i === 6) { // G7 exit — behind/below the G6 hub (flow order fix)
         const e = WALL_ZONES.gateExit;
         return { x: W * e.x + jx, y: H * e.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
@@ -579,10 +577,10 @@
         probeOrbit: { cx: gG6.x, cy: gG6.y, rx: 84, ry: 58, ang0, active },
       };
     });
-    // Fan trimmed to +20..50px (circuit topology, 2026-07-12) — see
-    // WALL_ZONES.gateExit comment: G7 no longer has the old flat bus's
-    // headroom before ladderBand.br.
-    jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 140, gG7.y + 20, gG7.y + 50, ':exit', 0.7);
+    // Fan trimmed to +20..50px / x-reach -60..+90 (circuit topology,
+    // 2026-07-12 + monitor/exit swap) — see WALL_ZONES.gateExit comment:
+    // at 0.88W the fan's right reach must clear registerRect x0 (0.962W).
+    jitteredBand(byCluster.exit || [], gG7.x - 60, gG7.x + 90, gG7.y + 20, gG7.y + 50, ':exit', 0.7);
     // exit_tally placement SKIPPED (Jin 2026-07-11 console v2 M2): the 6
     // exit-reason tally nodes still exist on the graph (server shape
     // unchanged, count binding intact) but no longer get a screen position —

@@ -191,6 +191,27 @@
   const afterglow = []; // {x1,y1,x2,y2,color,born}
   const AFTERGLOW_FADE_MS = 2000;
   const AFTERGLOW_MAX = 64;
+  // Living-field motion pass (Jin 2026-07-12, feat/living-field): three
+  // additive, purely-cosmetic behaviors riding the EXISTING migration/
+  // capture-glide machinery above — no new position math invented, just
+  // tween/flash state layered on the systems that already compute fx/fy/
+  // tx/ty (buildLayout) and drawTargetLock (target-lock bracket).
+  // 1) Layout tween — an existing candidate (screen[id].isCand) that lands
+  // at a different (x,y) on a relayout (NOT a tier promotion/demotion,
+  // both already handled by the capturedGlides/demotedIds 'return'-phase
+  // migrations in buildLayout) eases from its old spot instead of
+  // snapping. Cheap: piggybacks the drawField per-frame livingIds loop
+  // (plain drawDot, no glow/bracket chrome) since one relayout can move
+  // many candidates at once — the heavier migrations/glowAt path stays
+  // reserved for promotion/demotion/real pipeline journeys.
+  const layoutTweens = new Map(); // id -> {fx,fy,tx,ty,start,dur}
+  // 2) Scan pulse — a 300ms one-shot bracket flash (steel->venue color) on
+  // whatever screen slot a ticker currently occupies the instant a REAL
+  // gate_event names it (wall_spine.js's fireGateEvent), reusing
+  // drawTargetLock's existing outside->inside contraction (lockAge) as the
+  // shimmer itself — no second animation invented.
+  const scanFlashes = new Map(); // id -> {born,color}
+  const SCAN_MS = 300;
   function pushAfterglow(fx, fy, tx, ty, nodeId) {
     const s = screen[nodeId];
     const col = (s && (s.venueColor || venueColorOf((s.node && s.node.exchange) || ''))) || '#8fb0c8';
@@ -264,14 +285,39 @@
       if (n.cluster === 'mkt' && (n.tier_label === 'S' || n.tier_label === 'A' || n.tier_label === 'B')) newFocusIds.add(n.id);
     });
     const capturedGlides = [];
+    // Demotion glide (living-field item 3 — mirrors the capture-glide diff
+    // above): an id that WAS focus-tiered last poll but ISN'T now. Captured
+    // here at its old (still-candidate) position; applied at the bottom
+    // ONLY if it actually lands in the dimmed backdrop layer below — a
+    // tier drop that still qualifies as isCandidate via signal/intensity
+    // gets the general layout tween instead (prevCandPos below), same as
+    // any other still-candidate reposition.
+    const demotedIds = [];
     if (prevFocusIds) {
       newFocusIds.forEach((id) => {
         if (prevFocusIds.has(id)) return;
         const old = screen[id];
         if (old && old.x != null) capturedGlides.push({ id, fx: old.x, fy: old.y });
       });
+      prevFocusIds.forEach((id) => {
+        if (newFocusIds.has(id)) return;
+        const old = screen[id];
+        if (old && old.x != null) demotedIds.push({ id, fx: old.x, fy: old.y });
+      });
     }
     prevFocusIds = newFocusIds;
+    // General layout tween snapshot (living-field item 1): every id that is
+    // ALREADY a live candidate (screen[id].isCand) before this relayout —
+    // captured broadly (not just the tier-diff sets above) so an ordinary
+    // relax-pass/band recompute that shifts an unrelated candidate's (x,y)
+    // still tweens instead of snapping. Applied at the bottom once the new
+    // positions have settled; promotions/demotions above are naturally
+    // excluded there (isCand flips false/true across those transitions).
+    const prevCandPos = new Map();
+    Object.keys(screen).forEach((id) => {
+      const s = screen[id];
+      if (s && s.isCand) prevCandPos.set(id, { x: s.x, y: s.y });
+    });
 
     // Gate spine: circuit topology (Jin 2026-07-12 "순환 회로" — feat/
     // topology-panels, supersedes the flat S-curve). G1->G5 climb a gentle
@@ -700,6 +746,31 @@
         lastMs: performance.now(), gateIdx: -1, stops: [], dwellUntil: 0,
       });
       markFire('g1', 260);
+    });
+    // Demotion glide application (item 3): only when the id actually landed
+    // in the dimmed backdrop layer this relayout — mirrors capturedGlides
+    // above, same migrations 'return'-phase shape, no G1 tick (that flash
+    // is an "arrival" cue, not a departure one).
+    demotedIds.forEach((g) => {
+      if (migrations.has(g.id)) return;
+      const s = screen[g.id];
+      if (!s || !s.bgLayer) return;
+      if (s.x === g.fx && s.y === g.fy) return;
+      migrations.set(g.id, {
+        fx: g.fx, fy: g.fy, tx: s.x, ty: s.y, t: 0, dur: 0.6, phase: 'return',
+        lastMs: performance.now(), gateIdx: -1, stops: [], dwellUntil: 0,
+      });
+    });
+    // General layout tween application (item 1): still-candidate ids whose
+    // (x,y) actually moved. Cheap Map entry only — no migrations/glowAt
+    // overhead — read back by drawField's livingIds loop.
+    prevCandPos.forEach((old, id) => {
+      if (migrations.has(id)) return; // pipeline journey owns this id's motion
+      const s = screen[id];
+      if (!s || !s.isCand) return; // promoted away / demoted out / gone
+      if (Math.abs(s.x - old.x) < 0.5 && Math.abs(s.y - old.y) < 0.5) return; // no visible move
+      const r = rngFor(id + ':tweendur');
+      layoutTweens.set(id, { fx: old.x, fy: old.y, tx: s.x, ty: s.y, start: performance.now(), dur: 800 + r() * 400 });
     });
   }
 
@@ -1170,6 +1241,13 @@
     s.fireUntil = Math.max(s.fireUntil, performance.now() + ms);
     activeGlowIds.add(id);
   }
+  // Scan pulse trigger (living-field item 2) — called once per real SSE
+  // gate_event naming this ticker (wall_spine.js's fireGateEvent). Re-fires
+  // safely: a Map.set just resets born, restarting the 300ms shimmer.
+  function markScan(id, color) {
+    if (!id || !screen[id]) return;
+    scanFlashes.set(id, { born: performance.now(), color: color || null });
+  }
   // Returns null (not a partial list) unless EVERY hop resolves, so callers
   // never render a comet that silently skips a missing hop. `reversed` marks
   // segments only found under the opposite cache key (fromId/toId swapped —
@@ -1335,8 +1413,17 @@
       if (migrations.has(id)) continue; // traveler — drawn at its migrated pos
       const s = screen[id];
       if (!s) continue;
+      const tw = layoutTweens.get(id);
       let bx, by;
-      if (s.probeOrbit && s.probeOrbit.active) {
+      if (tw) {
+        // Layout tween (living-field item 1) — plain position ease, no bob
+        // overlay for the short transit; bob resumes naturally next frame
+        // once this entry is gone (s.x/y already sit at the new anchor).
+        const t = Math.min(1, (now - tw.start) / tw.dur);
+        bx = tw.fx + (tw.tx - tw.fx) * easeOut(t);
+        by = tw.fy + (tw.ty - tw.fy) * easeOut(t);
+        if (t >= 1) layoutTweens.delete(id);
+      } else if (s.probeOrbit && s.probeOrbit.active) {
         // patrol orbit — the orbit IS the anchor: s.x/y advance each frame so
         // the 1s static bake (labels) and glow/wire readers of screenOf all
         // track the patrol instead of pointing at a parked ghost slot.
@@ -1421,6 +1508,27 @@
       const born = markerBorn.get(id);
       glowAt(id, bx, by, 0, born == null ? null : now - born);
     });
+    // Scan pulse (living-field item 2): a 300ms one-shot bracket flash the
+    // instant a real gate_event names this ticker (wall_spine.js's
+    // fireGateEvent -> markScan) — "currently being inspected", drawn at
+    // wherever the ticker's dot actually sits right now (dust drift /
+    // migrating traveler alike), reusing drawTargetLock's own outside->
+    // inside contraction (lockAge) as the shimmer.
+    scanFlashes.forEach((flash, id) => {
+      const age = now - flash.born;
+      if (age > SCAN_MS) { scanFlashes.delete(id); return; }
+      const s = screen[id];
+      if (!s) { scanFlashes.delete(id); return; }
+      const m = migrations.get(id);
+      let px, py;
+      if (m) { const p = migratePos(m, s); px = p.x; py = p.y; }
+      else if (s.bobAmp) {
+        px = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
+        py = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;
+      } else { px = s.x; py = s.y; }
+      const col = mixHex('#8a94b0', flash.color || '#8a94b0', age / SCAN_MS);
+      drawTargetLock(ctx, px, py, Math.max(1.6, (s.r || 1.6) * 1.1), col, 0.55, age);
+    });
     // activated SYSTEM nodes light up (Jin 2026-07-11 "액티베이트된 레짐/
     // 엑싯/리플렉터는 색 들어와야"): dominant regime, recently-used exit
     // reasons, busy learners/probes — warm-white luminance lift (steel base
@@ -1498,7 +1606,7 @@
     migrateTicker, migrateHome, venueColorOf, touchWire, setProbeLinks,
     screenOf: (id) => screen[id],
     migrationOf: (id) => migrations.get(id),
-    markFire, pathEdges, rgba, drawDot, bezierPoint, breath,
+    markFire, markScan, pathEdges, rgba, drawDot, bezierPoint, breath,
     gateScreen: () => gateScreen,
     clusterColor: () => CLUSTER_COLOR,
     findNode: (pred) => allNodes.find(pred),

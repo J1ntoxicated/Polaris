@@ -421,6 +421,9 @@
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {
+      // Scan pulse (Jin 2026-07-12): 300ms "being inspected" bracket flash
+      // on the ticker's own dot for EVERY real gate_event naming it (1-8).
+      if (field.markScan) field.markScan(srcNode.id, field.venueColorOf && field.venueColorOf(srcNode.exchange));
       // Jin 2026-07-10: the ticker ITSELF progresses rightward — a mkt dot
       // with a real g1..g5 event parks beside that gate (venue-colored glow)
       // and re-parks further right on each later gate; idle -> glides home.

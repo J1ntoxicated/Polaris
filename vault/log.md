@@ -426,3 +426,5 @@
 - 2026-07-12: 게이트 순환 토폴로지+패널 편입 랜딩(c659270, 워크플로 REJECT 재작업 인수+컨덕터 마감: STREAMS 푸터 28px·g8/g1 라벨 코너·버스터 충돌 keep-branch). 한줄 스파인 → 순환 회로(아치→허브→하강→루프백). UPCOMING EARNINGS 7d·STABLE 행·레짐 v2 마커 편입. 라이브 에러 0.
 - 2026-07-12: 🔍 P0 원장 포렌식 페니 폐합 — 진실 = economic net 이번주 -$9,150(가격엣지 ≈0 + 실수수료 -$8.3k). fills.pnl_usd=GROSS 오독 정정(#46 single-truth). weekly_equity_curve 버그 2종 적발(phantom slippage falsy-zero -$827 허구 + 누산 유실 11건 +$495) → ledger-fix 웨이브 투입. 에쿼티 표시(virtual_account_equity)는 CLEAN. 사이징 체인 무손상. Jin 질문 답 = 현 회전율에선 거래↑=수수료 burn↑ 사실 — fee-split flip(그로스 판정)이 정공 해법.
 - 2026-07-12: ledger-fix 머지(b4067d3) — falsy-zero 3개소(posterior·rotation·close_effects)+weekly fresh-SUM 자기치유 전환. 재기동(86094) 부팅클린·틱 정상. 주간 곡선이 진실 수렴(okx -8,397/560건 = gross−실수수료). 센트리 WARN(재기동·부팅 램프)뿐.
+2026-07-12 06:33 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
+- 2026-07-12: 리빙 필드 머지(7dffc47) — 레이아웃 트윈·스캔 펄스·강등 글라이드·게이지 상단 2+2(EARNINGS 플랭크)·BOT LOG DEBUG 필터. 상/하 밀도 재조정은 게이지 이동으로 사실상 해소. 약속 큐 소진 — 잔여 결정: fee-split R2·Coinglass.

@@ -23,6 +23,9 @@ import pytest
 from polaris.core.classes.score_f import (
     compute_score_f,
     f_track_cap,
+    gross_bps_from_stored,
+    judged_score_from_stored,
+    legacy_score_from_stored,
     rollup_score_f,
 )
 from polaris.storage.schema import init_db
@@ -496,3 +499,45 @@ def test_fee_drag_bps_persisted_by_rollup(conn):
         "SELECT fee_drag_bps FROM score_f_events WHERE position_id = 'p20'"
     ).fetchone()
     assert row[0] == pytest.approx(30.0)  # 3/1000*10000
+
+
+# ---------------------------------------------------------------------------
+# R2 rework — mixed-scale-ledger fix: reconstruct-on-read helpers
+# (score_f_events is append-only/no-backfill, so a persisted score_contrib's
+# scale depends on when it was written — every consumer must reconstruct the
+# axis it wants from the always-present raw columns instead).
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_score_from_stored_matches_formula():
+    assert legacy_score_from_stored(100.0, 4.0) == pytest.approx(25.0)
+
+
+def test_legacy_score_from_stored_zero_denom_is_zero_not_crash():
+    assert legacy_score_from_stored(100.0, 0.0) == 0.0
+
+
+def test_gross_bps_from_stored_matches_formula():
+    assert gross_bps_from_stored(50.0, 1000.0) == pytest.approx(500.0)
+
+
+def test_gross_bps_from_stored_none_when_notional_missing():
+    assert gross_bps_from_stored(50.0, None) is None
+    assert gross_bps_from_stored(50.0, 0.0) is None
+
+
+def test_judged_score_from_stored_gross_by_default(monkeypatch):
+    monkeypatch.delenv("POLARIS_SCOREF_NET_LEGACY", raising=False)
+    assert judged_score_from_stored(50.0, 4.0, 1000.0) == pytest.approx(500.0)
+
+
+def test_judged_score_from_stored_legacy_under_rollback(monkeypatch):
+    monkeypatch.setenv("POLARIS_SCOREF_NET_LEGACY", "1")
+    assert judged_score_from_stored(100.0, 4.0, 1000.0) == pytest.approx(25.0)
+
+
+def test_judged_score_from_stored_none_for_gross_axis_missing_notional(monkeypatch):
+    """A pre-fee-split-v0 row (notional_usd NULL) has no reconstructible
+    gross axis — the caller must drop it, never fabricate a value."""
+    monkeypatch.delenv("POLARIS_SCOREF_NET_LEGACY", raising=False)
+    assert judged_score_from_stored(100.0, 4.0, None) is None

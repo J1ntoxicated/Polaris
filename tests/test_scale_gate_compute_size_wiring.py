@@ -114,3 +114,21 @@ def test_amplifier_passes_through_once_gross_edge_proven(conn):
         portfolio=_portfolio(), now_ts=NOW,
     )
     assert sized_amplified.final_risk_pct > sized_cold.final_risk_pct
+
+
+def test_legacy_rollback_skips_scale_gate_entirely(conn, monkeypatch):
+    """item 8 rollback (POLARIS_SCOREF_NET_LEGACY=1): the SCALE gate must be
+    skipped altogether, not evaluated against a legacy-scale gross_lcb read
+    as if it were bps — resolve_tier_amplifier's full 3.0x bonus must pass
+    through UNCHANGED, the same as pre-flip behavior, even with zero
+    score_f_events history (which would otherwise withhold the bonus)."""
+    monkeypatch.setenv("POLARIS_SCOREF_NET_LEGACY", "1")
+    sized_amplified = compute_size(
+        conn, intent=_intent(), risk_state=_amplified_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW,
+    )
+    sized_cold = compute_size(
+        conn, intent=_intent(), risk_state=_cold_risk_state(),
+        portfolio=_portfolio(), now_ts=NOW,
+    )
+    assert sized_amplified.final_risk_pct > sized_cold.final_risk_pct

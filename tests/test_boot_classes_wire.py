@@ -101,3 +101,34 @@ def test_boot_never_raises_on_internal_failure(conn, monkeypatch):
     )
     n = boot_hydrate_and_bootstrap_strategy_class(conn, now_ts=1_700_000_000)  # no raise
     assert n == 0
+
+
+def test_lookback_score_f_uses_legacy_axis_not_gross_bps(conn):
+    """R2 rework fix: recover_classes.py's bootstrap thresholds
+    (_BOOTSTRAP_EARN_THRESHOLD/_BOOTSTRAP_BENCH_THRESHOLD/
+    _BOOTSTRAP_BENCH_BAND_A_THRESHOLD) are calibrated on the LEGACY
+    net/fee-ratio scale and are out of the flip's remap scope —
+    _lookback_score_f must sum legacy_score_contrib, never the (now
+    gross_bps by default) judged score_contrib."""
+    from polaris.scripts._production_boot_classes import _lookback_score_f
+
+    venue, strategy_id = "okx", "rsi_bb_pullback"
+    conn.execute(
+        "INSERT INTO positions (position_id, venue, symbol, strategy_id, "
+        "entry_strategy_id, active_strategy_id, side, qty, status, "
+        "opened_ts, closed_ts) VALUES ('p1', ?, 'BTC-USDT', ?, ?, ?, 'long', "
+        "1.0, 'closed', 1699996400, 1700000000)",
+        (venue, strategy_id, strategy_id, strategy_id),
+    )
+    conn.execute(
+        "INSERT INTO fills (fill_id, venue, instrument_id, strategy_id, side, "
+        "size_usd, fill_price, fee_usd, ts_ms, order_id, contribution_id, "
+        "pnl_usd, is_close) VALUES (?, ?, ?, ?, 'sell', 1000.0, 100.0, 1.0, "
+        "1700000000000, ?, 'p1', 100.0, 1)",
+        (uuid.uuid4().hex, venue, f"{venue}:BTC-USDT", strategy_id, uuid.uuid4().hex),
+    )
+    conn.commit()
+    # legacy: net=100 / max(fee=1.0, 0.0001*notional=1000) = 100.0
+    # gross_bps (would be wrong here): net=100 / notional=1000 * 10000 = 1000.0
+    result = _lookback_score_f(conn, venue, strategy_id, lookback_days=35)
+    assert result == pytest.approx(100.0)

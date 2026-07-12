@@ -39,6 +39,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from polaris.core.classes.remap_table import resolve_thresholds
+from polaris.core.classes.score_f import gross_bps_from_stored, legacy_score_from_stored
 from polaris.core.classes.shadow_divergence import (
     DualScoreSample,
     ShadowDivergenceResult,
@@ -114,8 +115,19 @@ def _lcb95(values: list[float]) -> float | None:
 def _shadow_divergence_samples(
     conn: sqlite3.Connection, *, limit: int | None, since_ts: int | None,
 ) -> list[DualScoreSample]:
+    """OLD-axis (legacy) vs NEW-axis (gross_bps) verdict pairs, BOTH
+    reconstructed at read time from ``net_usd``/``fee_denom_usd``/
+    ``notional_usd`` — never from the persisted ``score_contrib`` column.
+    ``score_f_events`` is append-only with no backfill, so pre-flip rows'
+    ``score_contrib`` still holds the LEGACY value forever; classifying that
+    against gross-scale migrated thresholds (as a stored-column read would)
+    produces a structural false-positive divergence (fee_split_flip_r2_
+    2026-07-12 tripwire mislabeling fix). Rows with no reconstructible gross
+    axis (pre-fee-split-v0, ``notional_usd`` NULL) are excluded — no
+    fabricated NEW-axis verdict, same "no fabrication" contract as
+    ``remap_table._paired_populations``."""
     query = (
-        "SELECT venue, strategy_id, net_usd, fee_denom_usd, score_contrib "
+        "SELECT venue, strategy_id, net_usd, fee_denom_usd, notional_usd "
         "FROM score_f_events"
     )
     params: tuple[object, ...] = ()
@@ -131,8 +143,13 @@ def _shadow_divergence_samples(
     legacy_defaults = TransitionThresholds()
     cache: dict[tuple[str, str], TransitionThresholds] = {}
     samples: list[DualScoreSample] = []
-    for venue, strategy_id, net_usd, fee_denom_usd, score_contrib in rows:
-        legacy_score = float(net_usd) / float(fee_denom_usd) if fee_denom_usd else 0.0
+    for venue, strategy_id, net_usd, fee_denom_usd, notional_usd in rows:
+        gross_score = gross_bps_from_stored(
+            float(net_usd), None if notional_usd is None else float(notional_usd),
+        )
+        if gross_score is None:
+            continue
+        legacy_score = legacy_score_from_stored(float(net_usd), float(fee_denom_usd))
         key = (str(venue), str(strategy_id))
         if key not in cache:
             cache[key] = resolve_thresholds(conn, venue=key[0], strategy_id=key[1])
@@ -143,7 +160,7 @@ def _shadow_divergence_samples(
             up_threshold=legacy_defaults.prove_stagnation,
         )
         new_v = classify_against_thresholds(
-            float(score_contrib), down_threshold=t.schmitt_bench_full, up_threshold=t.prove_stagnation,
+            gross_score, down_threshold=t.schmitt_bench_full, up_threshold=t.prove_stagnation,
         )
         samples.append(DualScoreSample(old_verdict=old_v, new_verdict=new_v))
     return samples

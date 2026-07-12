@@ -56,7 +56,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from polaris.core.classes.remap_table import resolve_thresholds
-from polaris.core.classes.score_f import rollup_score_f
+from polaris.core.classes.score_f import judged_score_from_stored, rollup_score_f
 from polaris.core.classes.transition import (
     Timeframe,
     TransitionInput,
@@ -118,13 +118,32 @@ def _fetch_class_row(
 def _intent_scores(
     conn: sqlite3.Connection, *, venue: str, strategy_id: str, window_w: int
 ) -> list[float]:
-    """Oldest-first score_F contributions over the last ``window_w`` closes."""
+    """Oldest-first JUDGED-axis score over the last ``window_w`` closes.
+
+    Reconstructed from ``score_f_events``' raw ``net_usd``/``fee_denom_usd``/
+    ``notional_usd`` at READ TIME via ``judged_score_from_stored`` — NEVER
+    the persisted ``score_contrib`` column. The ledger is append-only with
+    no backfill, so a row's ``score_contrib`` carries whichever axis was
+    live when it was written; reading it verbatim would mix legacy and
+    gross-bps values inside the same window across the flip (or a rollback)
+    boundary (fee_split_flip_r2_2026-07-12 mixed-scale-ledger fix). Rows the
+    current axis cannot be reconstructed for (gross axis, pre-fee-split-v0
+    row with no notional data) are dropped — no fabrication, the window just
+    shrinks (transition.py's own ``_mean_tail`` already treats a short
+    window as "no verdict yet")."""
     rows = conn.execute(
-        "SELECT score_contrib FROM score_f_events "
+        "SELECT net_usd, fee_denom_usd, notional_usd FROM score_f_events "
         "WHERE venue = ? AND strategy_id = ? ORDER BY closed_ts DESC LIMIT ?",
         (venue, strategy_id, window_w),
     ).fetchall()
-    return [float(r[0]) for r in reversed(rows)]
+    scores = [
+        judged_score_from_stored(
+            float(net_usd), float(fee_denom_usd),
+            None if notional_usd is None else float(notional_usd),
+        )
+        for net_usd, fee_denom_usd, notional_usd in rows
+    ]
+    return [s for s in reversed(scores) if s is not None]
 
 
 def _recent_r_multiples(

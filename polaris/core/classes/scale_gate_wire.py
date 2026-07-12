@@ -31,6 +31,7 @@ from typing import Final
 
 from polaris.core.classes.friction_floor import best_case_friction
 from polaris.core.classes.gross_scorer import GrossEdgeSample, compute_gross_lcb
+from polaris.core.classes.score_f import gross_bps_from_stored
 from polaris.core.economics.fees import real_fee_bps
 
 __all__ = [
@@ -86,18 +87,32 @@ def resolve_gross_lcb(
     conn: sqlite3.Connection, *, venue: str, strategy_id: str, now_ts: int,
 ) -> float | None:
     """Winsorized weighted t-LCB over the track's last
-    :data:`GROSS_LCB_WINDOW` ``score_f_events.score_contrib`` closes (the
-    JUDGED axis — gross_bps by default, see score_f.py). ``None`` when no
-    closes exist yet or N_eff has not cleared the cold-start floor
+    :data:`GROSS_LCB_WINDOW` closes' gross_bps. ``None`` when no closes
+    exist yet or N_eff has not cleared the cold-start floor
     (``gross_scorer.confidence_for_n_eff``) — the caller (``evaluate_scale_gate``)
     treats ``None`` as "not yet proven", the same conservative default as
-    every other below-bar case."""
+    every other below-bar case.
+
+    gross_bps is reconstructed from ``net_usd``/``notional_usd`` at READ
+    TIME (never the persisted ``score_contrib`` column): ``score_f_events``
+    is append-only with no backfill, so a pre-flip row's ``score_contrib``
+    still holds the LEGACY value forever — trusting it verbatim would mix
+    legacy and gross-bps values inside the SAME LCB window across the flip
+    boundary (fee_split_flip_r2_2026-07-12 mixed-scale-ledger fix). Rows
+    with no reconstructible gross axis (pre-fee-split-v0, ``notional_usd``
+    NULL) are excluded, not fabricated."""
     rows = conn.execute(
-        "SELECT score_contrib, closed_ts FROM score_f_events "
+        "SELECT net_usd, notional_usd, closed_ts FROM score_f_events "
         "WHERE venue = ? AND strategy_id = ? ORDER BY closed_ts DESC LIMIT ?",
         (venue, strategy_id, GROSS_LCB_WINDOW),
     ).fetchall()
-    samples = [GrossEdgeSample(value=float(s), closed_ts=int(ts)) for s, ts in rows]
+    samples = []
+    for net_usd, notional_usd, closed_ts in rows:
+        gross = gross_bps_from_stored(
+            float(net_usd), None if notional_usd is None else float(notional_usd),
+        )
+        if gross is not None:
+            samples.append(GrossEdgeSample(value=gross, closed_ts=int(closed_ts)))
     result = compute_gross_lcb(
         samples, now_ts=now_ts, characteristic_time_seconds=CHARACTERISTIC_TIME_FLOOR_SECONDS,
     )

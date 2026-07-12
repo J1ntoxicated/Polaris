@@ -89,3 +89,36 @@ def test_gross_lcb_computed_with_enough_history(conn):
     lcb = resolve_gross_lcb(conn, venue="okx", strategy_id="proven", now_ts=NOW)
     assert lcb is not None
     assert lcb > 0.0  # consistent positive gross_bps -> a positive LCB
+
+
+def test_gross_lcb_ignores_stale_persisted_score_contrib(conn):
+    """R2 rework mixed-scale-ledger fix: resolve_gross_lcb must reconstruct
+    gross_bps from net_usd/notional_usd at read time, never trust the
+    persisted score_contrib column (append-only/no-backfill — a pre-flip
+    row's score_contrib holds the legacy value forever)."""
+    for i in range(20):
+        _mk_closed(conn, position_id=f"p{i}", venue="okx", strategy_id="proven",
+                   closed_ts=NOW - i * 100, pnl_usd=10.0)
+    conn.commit()
+    from polaris.core.classes.score_f import rollup_score_f
+    rollup_score_f(conn, now_ts=NOW)
+    before = resolve_gross_lcb(conn, venue="okx", strategy_id="proven", now_ts=NOW)
+
+    conn.execute("UPDATE score_f_events SET score_contrib = -999999.0 WHERE venue = 'okx' AND strategy_id = 'proven'")
+    conn.commit()
+    after = resolve_gross_lcb(conn, venue="okx", strategy_id="proven", now_ts=NOW)
+    assert after == pytest.approx(before)
+
+
+def test_gross_lcb_excludes_rows_without_notional(conn):
+    """A pre-fee-split-v0 row (notional_usd NULL) has no reconstructible
+    gross axis — excluded from the LCB window, never fabricated."""
+    for i in range(20):
+        _mk_closed(conn, position_id=f"p{i}", venue="okx", strategy_id="thin_notional",
+                   closed_ts=NOW - i * 100, pnl_usd=10.0)
+    conn.commit()
+    from polaris.core.classes.score_f import rollup_score_f
+    rollup_score_f(conn, now_ts=NOW)
+    conn.execute("UPDATE score_f_events SET notional_usd = NULL WHERE venue = 'okx' AND strategy_id = 'thin_notional'")
+    conn.commit()
+    assert resolve_gross_lcb(conn, venue="okx", strategy_id="thin_notional", now_ts=NOW) is None

@@ -63,6 +63,50 @@ def test_empty_db_reports_all_clean(conn):
 
 
 # ---------------------------------------------------------------------------
+# Shadow divergence — R2 rework mixed-scale-ledger fix. score_f_events is
+# append-only/no-backfill, so the persisted score_contrib column's scale
+# depends on when a row was written; both verdicts must be reconstructed
+# fresh from net_usd/fee_denom_usd/notional_usd, never from that column.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_divergence_excludes_rows_without_notional(conn):
+    """A pre-fee-split-v0 row (notional_usd NULL) has no reconstructible
+    gross axis — excluded from divergence samples, never fabricated."""
+    from polaris.core.classes.score_f import rollup_score_f
+
+    _mk_closed(conn, position_id="c1", venue="okx", strategy_id="s1",
+               closed_ts=NOW, pnl_usd=10.0)
+    conn.commit()
+    rollup_score_f(conn, now_ts=NOW)
+    conn.execute("UPDATE score_f_events SET notional_usd = NULL WHERE position_id = 'c1'")
+    conn.commit()
+
+    report = compute_tripwire_report(conn, now_ts=NOW)
+    assert report.shadow_divergence.n_samples == 0
+
+
+def test_shadow_divergence_ignores_stale_persisted_score_contrib(conn):
+    """Corrupting the PERSISTED score_contrib column (simulating a legacy
+    pre-flip row read verbatim) must not move the divergence verdict — both
+    axes are reconstructed fresh from net_usd/fee_denom_usd/notional_usd."""
+    from polaris.core.classes.score_f import rollup_score_f
+
+    _mk_closed(conn, position_id="c1", venue="okx", strategy_id="s1",
+               closed_ts=NOW, pnl_usd=10.0)
+    conn.commit()
+    rollup_score_f(conn, now_ts=NOW)
+    before = compute_tripwire_report(conn, now_ts=NOW).shadow_divergence
+
+    conn.execute("UPDATE score_f_events SET score_contrib = -999999.0 WHERE position_id = 'c1'")
+    conn.commit()
+    after = compute_tripwire_report(conn, now_ts=NOW).shadow_divergence
+
+    assert after.behavior_divergence_pct == pytest.approx(before.behavior_divergence_pct)
+    assert after.n_samples == before.n_samples
+
+
+# ---------------------------------------------------------------------------
 # EARN gross-negative signal
 # ---------------------------------------------------------------------------
 

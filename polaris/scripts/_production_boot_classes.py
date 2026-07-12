@@ -76,14 +76,24 @@ def _timeframe_bucket_fn(strategy_id: str) -> Timeframe:
 def _lookback_score_f(
     conn: sqlite3.Connection, venue: str, strategy_id: str, lookback_days: int
 ) -> float:
-    """``Σ score_contrib`` over closed lifecycles in the trailing
+    """``Σ legacy_score_contrib`` over closed lifecycles in the trailing
     ``lookback_days`` window (the ``ScoreFFn`` signature group A's
-    ``bootstrap_replay_strategy_class`` expects)."""
+    ``bootstrap_replay_strategy_class`` expects).
+
+    Deliberately the LEGACY axis, not the (default-flipped) judged
+    ``score_contrib`` — ``recover_classes.py``'s bootstrap thresholds
+    (``_BOOTSTRAP_EARN_THRESHOLD``/``_BOOTSTRAP_BENCH_THRESHOLD``/
+    ``_BOOTSTRAP_BENCH_BAND_A_THRESHOLD``) are hardcoded constants calibrated
+    on the legacy net/fee-ratio scale and are OUT OF the fee_split_flip_r2_
+    2026-07-12 remap's scope (only transition.py's 7 thresholds are
+    remapped — see remap_table.py). Summing gross_bps here would judge a
+    bootstrap candidate against thresholds tuned for a scale roughly an
+    order of magnitude smaller, mis-seeding EARN/PROVE/BENCH on a fresh DB."""
     results = compute_score_f(conn, venue=venue, strategy_id=strategy_id)
     if not results:
         return 0.0
     cutoff = max(r.closed_ts for r in results) - lookback_days * 86_400
-    return sum(r.score_contrib for r in results if r.closed_ts >= cutoff)
+    return sum(r.legacy_score_contrib for r in results if r.closed_ts >= cutoff)
 
 
 def _lookback_n_closed(

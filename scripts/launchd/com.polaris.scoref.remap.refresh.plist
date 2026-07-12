@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Polaris score_f_remap_table refresh — 07:40 LOCAL (machine TZ = Australia/Sydney).
+
+  fee-split v1 FLIP (fee_split_flip_r2_2026-07-12) item 4: re-derives every
+  eligible (venue, strategy_id) track's + all 3 venue pools' Schmitt/
+  stagnation/ladder thresholds onto the flipped gross_bps judged axis, and
+  logs the item-5 rollback tripwire report. Spec cadence "250청산 또는
+  주1회" — launchd can only offer a calendar cadence, so this runs DAILY
+  (strictly more often than "weekly", UPSERT-idempotent, cheap per its own
+  module docstring: "safe to run as often as the scheduler likes"). Until
+  this runs at least once, resolve_thresholds fail-opens to hardcoded
+  legacy-scale defaults (remap_table.py) — CRITICAL to keep scheduled, not
+  an optional sweep.
+
+  Scheduled 5 minutes after com.polaris.probe.reranker's own 07:35 trigger
+  (itself 5 minutes after com.polaris.daily.restart's 07:30 + its own
+  RESTART_SETTLE_SEC=120s settle window) — same "read a freshly-booted,
+  quiet DB, never race the restart's own writes" reasoning as that job's own
+  docstring. Read-mostly + one small append-only-per-scope UPSERT batch
+  commit — never opens the DB in any exclusive mode, never stops the bot
+  (feedback_db_lock_is_architecture_signal).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polaris.scoref.remap.refresh</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jinyoon/Projects/Polaris/.venv/bin/python</string>
+        <string>-m</string>
+        <string>tools.ops.scoref_remap_refresh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/jinyoon/Projects/Polaris</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/scoref_remap_refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jinyoon/Projects/Polaris/data/paper/ops/scoref_remap_refresh.err</string>
+</dict>
+</plist>

@@ -56,6 +56,9 @@ __all__ = [
     "SeedTagCohort",
     "compute_score_f",
     "f_track_cap",
+    "gross_bps_from_stored",
+    "judged_score_from_stored",
+    "legacy_score_from_stored",
     "rollup_score_f",
     "score_f_by_seed_tag",
     "use_legacy_net_axis",
@@ -86,6 +89,46 @@ def use_legacy_net_axis() -> bool:
     ``fee_drag_bps`` are unconditional), just not selected as the judged
     column."""
     return os.environ.get("POLARIS_SCOREF_NET_LEGACY", "0") == "1"
+
+
+def legacy_score_from_stored(net_usd: float, fee_denom_usd: float) -> float:
+    """Reconstruct the LEGACY net/fee-ratio score from a persisted
+    ``score_f_events`` row's ``net_usd``/``fee_denom_usd`` — both columns are
+    original (NOT NULL, present on every row since before the flip), so this
+    is always reconstructible regardless of which axis a row's
+    ``score_contrib`` was written under."""
+    return net_usd / fee_denom_usd if fee_denom_usd else 0.0
+
+
+def gross_bps_from_stored(net_usd: float, notional_usd: float | None) -> float | None:
+    """Reconstruct gross_bps from a persisted ``score_f_events`` row's
+    ``net_usd``/``notional_usd``. ``None`` when ``notional_usd`` is
+    unavailable (NULL or <=0 — a pre-fee-split-v0 row with no notional data)
+    — no fabrication, same contract as ``remap_table._paired_populations``."""
+    if notional_usd is None or notional_usd <= 0.0:
+        return None
+    return net_usd / notional_usd * _BPS_DIVISOR
+
+
+def judged_score_from_stored(
+    net_usd: float, fee_denom_usd: float, notional_usd: float | None,
+) -> float | None:
+    """Reconstruct the CURRENT judged axis (item 8 rollback-aware) from a
+    persisted ``score_f_events`` row's raw columns AT READ TIME — never trust
+    a stored ``score_contrib`` value's scale. The ledger is append-only with
+    no backfill (``rollup_score_f``), so a row's ``score_contrib`` carries
+    whichever axis was live WHEN IT WAS WRITTEN; a consumer that reads it
+    verbatim silently mixes legacy and gross-bps values inside the same
+    window once the flip (or a rollback) crosses a scan. Recomputing from
+    ``net_usd``/``fee_denom_usd``/``notional_usd`` here makes every row in a
+    window the SAME current-axis scale, and makes
+    ``POLARIS_SCOREF_NET_LEGACY=1`` (item 8) apply uniformly to the WHOLE
+    ledger, not just newly-written rows (fee_split_flip_r2_2026-07-12
+    mixed-scale-ledger fix). ``None`` when the gross axis is requested but
+    unreconstructible for this row (see :func:`gross_bps_from_stored`)."""
+    if use_legacy_net_axis():
+        return legacy_score_from_stored(net_usd, fee_denom_usd)
+    return gross_bps_from_stored(net_usd, notional_usd)
 
 
 @dataclass(slots=True)

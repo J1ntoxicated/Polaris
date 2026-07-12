@@ -418,7 +418,11 @@ def persist_altdata_snapshot(
     )
 
 
-def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[Any]:
+def _default_altdata_collectors(
+    conn: sqlite3.Connection | None = None,
+    *,
+    db_writer: DBWriter | None = None,
+) -> list[Any]:
     """The live alt-data EVIDENCE collectors (keyless/keyed graceful-skip).
 
     Every collector is registered; a missing key/creds yields a graceful ``{}``
@@ -442,6 +446,12 @@ def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[
     either way; ``None`` keeps every prior call site byte-identical, and the
     EDGAR/Finnhub collectors simply return ``{}`` without a ``conn`` (no
     active-universe symbols to resolve).
+
+    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): threaded the
+    same way as ``conn`` above — each collector routes its own writer-path
+    INSERT/UPSERT through the shared single-RW-conn writer when both ``conn``
+    and ``db_writer`` are wired and the kill switch is enabled; ``None`` is
+    byte-identical to the pre-migration direct-write path.
     """
     return [
         OKXFundingCollector(),
@@ -449,15 +459,15 @@ def _default_altdata_collectors(conn: sqlite3.Connection | None = None) -> list[
         CryptoFearGreedCollector(),
         FredMacroCollector(),
         CFTCCotCollector(),
-        NewsSentimentCollector(shadow_conn=conn),
+        NewsSentimentCollector(shadow_conn=conn, shadow_db_writer=db_writer),
         CoinglassCollector(),
         MyfxbookCollector(),
         # frontgate-scan feeds (#1-3) — SEC EDGAR filings / Finnhub earnings
         # calendar / DefiLlama stablecoins. Pure EVIDENCE; behavior-0 (no
         # gating/sizing touchpoint this wave).
-        EdgarEventsCollector(conn=conn),
-        FinnhubEarningsCollector(conn=conn),
-        DefiLlamaStablesCollector(conn=conn),
+        EdgarEventsCollector(conn=conn, db_writer=db_writer),
+        FinnhubEarningsCollector(conn=conn, db_writer=db_writer),
+        DefiLlamaStablesCollector(conn=conn, db_writer=db_writer),
     ]
 
 
@@ -480,7 +490,10 @@ async def _altdata_producer(
     LAST cache value is kept untouched (graceful — fewer evidence sources, never
     a throttle / halt). The loop exits promptly when ``stop_evt`` is set.
     """
-    active = collectors if collectors is not None else _default_altdata_collectors(conn)
+    active = (
+        collectors if collectors is not None
+        else _default_altdata_collectors(conn, db_writer=db_writer)
+    )
     last_fetch: dict[str, float] = {}
     while not stop_evt.is_set():
         now_mono = time.monotonic()

@@ -36,7 +36,7 @@ DEMO/PAPER 가상계정 · aggressive bias 보존 · 전 피드 = EVIDENCE 입�
 - TS 감사: date+hour(bmo/amc/dmh) 버킷 = B등급 — actual 공표 "순간"은 EDGAR acceptance(#1)와 결합해 보완.
 - 신호: G4 프리엔트리 이벤트 근접 워치 + **컨센서스 EPS 공급 → SUE 산출 가능**(#1과 페어로 PEAD 재상정 조건 완성).
 
-## 4. Coinglass 키 개통 — $29/mo Hobbyist, 저가 (코드 변경 0줄)
+## 4. Coinglass(Jin 2026-07-12 보류 — 현 무료 소스로 충분 판단, 재상정은 Jin 발화 시) 키 개통 — $29/mo Hobbyist, 저가 (코드 변경 0줄)
 - 절차: 구독 → `.env` `COINGLASS_API_KEY` 값만 — `coinglass.py` 완성 상태(현 INACTIVE, `fetch()`→`{}`). Jin 사전 1줄 고지 후 개통.
 - 스토리지: 기존 cache 경로 그대로. 청산 rows = ms epoch(A등급), 24h 백필 한계 → `altdata_snapshots` 선택 축적.
 - 신호: G2 청산-플러시 반전 conviction(**유일 소스**, Binance는 포지셔닝 비율만) + G3 거래소간 펀딩 다이버전스.

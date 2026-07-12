@@ -134,4 +134,16 @@ else
     echo "shadow_distribution_guard_FAIL=1"
 fi
 
+# ⑩ 로그+DB 양축 센트리 (vault/log.md 2026-07-12 WAL-choke 인시던트 — 대시 리더가
+# writer 497s 질식·틱 26-50분 동결시켜도 1h Haiku 틱 모니터로는 못 잡았음). 로그
+# tick cadence/writer batch/ERROR분류/재시작/altdata 신선도 + ro DB 레일breach/
+# 배치청산/세션인지 침묵을 60분 윈도로 스캔, 결정적 key=value + SENTRY_STATUS
+# 한 줄로 판정(tools/ops/log_sentry.py). read-only, venv 부재/실패해도 틱은 계속.
+if [ -x ".venv/bin/python" ]; then
+    .venv/bin/python -m tools.ops.log_sentry --window-min 60 2>/dev/null \
+        || echo "log_sentry_FAIL=1"
+else
+    echo "log_sentry_FAIL=1"
+fi
+
 exit 0

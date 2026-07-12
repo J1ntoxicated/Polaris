@@ -253,11 +253,21 @@
     }
   }
 
-  /* ===== BAY gauges — EQUITY/PEAK ratio, DAY PnL, FIRING, CONVERSION ===== */
+  /* ===== BAY gauges — EQUITY/PEAK ratio, DAY PnL, FIRING, CONVERSION (Jin
+   * 2026-07-12 "맨 위 빈 공간으로"): moved off the old mid-left bayRect slot
+   * into the top-center crown gap, split 2+2 flanking UPCOMING EARNINGS —
+   * left pair in crownTL.x1..earningsRect.x0, right pair in earningsRect.
+   * x1..crownTR.x0 (earningsRect recentered to keep both flanks equal —
+   * see WALL_ZONES). Same y-band as the crowns/earnings (0.055-0.165H). ===== */
   function drawGauges(ctx, c, summary, now, W, H) {
-    const z = Z.bayRect;
-    const cy = H * 0.375, r = 26;
-    const cxs = [W * 0.05, W * 0.115, W * 0.18, W * 0.245];
+    const cy = H * 0.10, r = 26;
+    const eZ = Z.earningsRect, lZ = Z.crownTL, rZ = Z.crownTR;
+    const leftX0 = W * lZ.x1, leftX1 = W * eZ.x0;
+    const rightX0 = W * eZ.x1, rightX1 = W * rZ.x0;
+    const cxs = [
+      leftX0 + (leftX1 - leftX0) * 0.25, leftX0 + (leftX1 - leftX0) * 0.75,
+      rightX0 + (rightX1 - rightX0) * 0.25, rightX0 + (rightX1 - rightX0) * 0.75,
+    ];
     if (!c || !c.core) return;
     const core = c.core;
     const eq = equityOf(core).equity;

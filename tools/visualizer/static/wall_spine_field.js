@@ -83,11 +83,17 @@
     // UPCOMING EARNINGS (Jin 2026-07-12 topology-panels audit): the crowns'
     // own y-band (0.055-0.165) is otherwise EMPTY between them — no node ever
     // lands above signalTop (0.165, where the market-dot cloud starts) or
-    // left/right of the two crown x-bounds — so this sits centered in that
-    // gap with margin both sides, clear of crownTL(x1=0.215)/crownTR(x0=0.785).
-    earningsRect: { x0: 0.32, x1: 0.60, y0: 0.055, y1: 0.165 },
+    // left/right of the two crown x-bounds. Recentered on the crown gap's own
+    // midpoint (Jin 2026-07-12 "4 아크 게이지 상단 이동" — "맨 위 빈 공간으로"):
+    // the BAY gauges moved into this same y-band, split 2+2 flanking this
+    // panel (see wall_console_readouts.js's drawGauges) — symmetric flanks
+    // (0.145W each) need this centered rather than the old off-center 0.32-
+    // 0.60, which left a 0.105W left flank too narrow for 2 gauges.
+    earningsRect: { x0: 0.36, x1: 0.64, y0: 0.055, y1: 0.165 },
     signalTop: 0.165, signalClamp: 0.425,
-    bayRect: { x0: 0.02, x1: 0.275, y0: 0.30, y1: 0.44 },
+    // bayRect retired (Jin 2026-07-12 "4 아크 게이지 상단 이동"): the gauges'
+    // old mid-left slot (x0.02-0.275, y0.30-0.44) is freed for the signal
+    // field — see exclRects below, which no longer excludes it.
     watchDivider: 0.438, watchRow: 0.452,
     railY: 0.492, railZigzag: 0.009,
     // Jin 2026-07-11 "전략이랑 게이트 라인 분리 좀 — 파이프 더 아래로":
@@ -474,12 +480,16 @@
       }
     }
     // Panel exclusion rects (Jin 2026-07-11 console v2 M2): the new corner
-    // readout panels + BAY gauges + bottom ladder claim screen real-estate the
-    // candidate relax pass didn't know about — pad each by the candidate bob
-    // amplitude (max ~8px) and project any intruder to its nearest edge. Rides
-    // the SAME final clamp pass already here (no new loop).
+    // readout panels + bottom ladder claim screen real-estate the candidate
+    // relax pass didn't know about — pad each by the candidate bob amplitude
+    // (max ~8px) and project any intruder to its nearest edge. Rides the SAME
+    // final clamp pass already here (no new loop). bayRect dropped (Jin
+    // 2026-07-12 "4 아크 게이지 상단 이동" — gauges moved off this slot into the
+    // crown gap, which is already dot-free per earningsRect's own comment
+    // above, so no exclusion rect is needed there) — frees the old mid-left
+    // slot (x0.02-0.275, y0.30-0.44) for the signal field.
     const exclPad = 8;
-    const exclRects = [WALL_ZONES.crownTL, WALL_ZONES.crownTR, WALL_ZONES.bayRect].map((z) => ({
+    const exclRects = [WALL_ZONES.crownTL, WALL_ZONES.crownTR].map((z) => ({
       x0: W * z.x0 - exclPad, x1: W * z.x1 + exclPad, y0: H * z.y0 - exclPad, y1: H * z.y1 + exclPad,
     }));
     exclRects.push({

@@ -403,6 +403,10 @@ def _signal_key(venue: str, symbol: str) -> str:
     return f"{_short_venue(venue)}:{tk}"
 
 
+_signal_counts_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
+_SIGNAL_COUNTS_TTL = 10.0
+
+
 def _query_signal_counts(db_path: Path) -> dict[str, int]:
     """REAL per-instrument pipeline-catch counts — 30m firing window + a 4h
     afterglow companion under ``key + "|4h"`` (display-only).
@@ -416,6 +420,9 @@ def _query_signal_counts(db_path: Path) -> dict[str, int]:
     """
     if not db_path.exists():
         return {}
+    _now = time.time()
+    if _now - _signal_counts_cache["ts"] < _SIGNAL_COUNTS_TTL:
+        return _signal_counts_cache["data"]  # type: ignore[no-any-return]
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     counts: dict[str, int] = {}
     try:
@@ -442,6 +449,8 @@ def _query_signal_counts(db_path: Path) -> dict[str, int]:
         key = _signal_key(venue, symbol)
         counts[key] = int(c30)
         counts[key + "|4h"] = int(c4h)
+    _signal_counts_cache["ts"] = _now
+    _signal_counts_cache["data"] = counts
     return counts
 
 
@@ -1329,7 +1338,9 @@ _SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
     "squeeze_shadow": None,
 }
 _shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
-_SHADOW_CHANNELS_TTL = 5.0
+# 2026-07-12 라이브 인시던트: 매초/5초 풀스캔 리더가 봇 WAL 체크포인트 창을
+# 질식시켜 writer 497s·틱 26분 동결 유발 — 대시 읽기는 전부 캐시 뒤로.
+_SHADOW_CHANNELS_TTL = 30.0
 
 
 def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
@@ -1436,6 +1447,10 @@ def _query_gate_flow_1h(db_path: Path) -> dict[int, int]:
     return {int(gid): int(n or 0) for gid, n in _gate_flow_cache["rows"]}
 
 
+_ramp_cells_cache: dict[str, Any] = {"ts": 0.0, "top": [], "bottom": []}
+_RAMP_CELLS_TTL = 30.0
+
+
 def _ramp_cells(db_path: Path, top: bool) -> list[dict[str, Any]]:
     """Cell-ledger RAMP fallback — real rows, honestly labelled.
 
@@ -1448,6 +1463,10 @@ def _ramp_cells(db_path: Path, top: bool) -> list[dict[str, Any]]:
     """
     if not db_path.exists():
         return []
+    _now = time.time()
+    _slot = "top" if top else "bottom"
+    if _now - _ramp_cells_cache["ts"] < _RAMP_CELLS_TTL and _ramp_cells_cache[_slot]:
+        return _ramp_cells_cache[_slot]  # type: ignore[no-any-return]
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         rows = conn.execute(
@@ -1457,12 +1476,15 @@ def _ramp_cells(db_path: Path, top: bool) -> list[dict[str, Any]]:
         conn.close()
     except sqlite3.Error:
         return []
-    return [
+    out = [
         {"exchange": ex, "strategy": st, "ticker": tk, "regime": rg,
          "n_eff": round(float(ne or 0.0), 2), "score": round(float(sc or 0.0), 3),
          "mult": None, "ramp": True}
         for ex, st, tk, rg, ne, sc in rows
     ]
+    _ramp_cells_cache["ts"] = _now
+    _ramp_cells_cache[_slot] = out
+    return out
 
 
 def _console_block(snap: Any, db_path: Path) -> dict[str, Any]:

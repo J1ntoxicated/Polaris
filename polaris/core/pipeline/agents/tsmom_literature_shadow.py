@@ -32,6 +32,7 @@ import uuid
 from typing import Final
 
 from polaris.core.pipeline.gate_state import GATE_STRATEGY_SIGNAL
+from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.strategies.base import BarView
 from polaris.strategies.tsmom_12_1_multiasset import MOM_LOOKBACK as _EXISTING_MOM_LOOKBACK
 from polaris.strategies.tsmom_12_1_multiasset import MOM_SKIP as _EXISTING_MOM_SKIP
@@ -45,6 +46,17 @@ __all__ = [
     "literature_mom_12_1",
     "log_tsmom_literature_shadow",
 ]
+
+# Shared by both the direct-conn and db_writer-submitted paths below so the
+# two branches are STRUCTURALLY guaranteed to issue the identical statement
+# (no copy-paste divergence risk between the sync and deferred write).
+_GATE_SHADOW_EVENTS_SQL = (
+    "INSERT INTO gate_shadow_events "
+    "(event_id, run_id, signal_id, gate_id, venue, symbol, regime, "
+    " technical_decision, technical_scalar, technical_reason, "
+    " technical_flags, gpt_decision, mismatch, cell_warm, created_ts) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 # Literature-fixed 12-1 params (Moskowitz/Ooi/Pedersen convention) — hard
 # Final ints, deliberately NOT routed through virtual_loosen(): the roadmap
@@ -113,6 +125,7 @@ def log_tsmom_literature_shadow(
     regime: str,
     bars: list[BarView],
     now_ts: int,
+    db_writer: DBWriter | None = None,
 ) -> None:
     """Append ONE ``gate_shadow_events`` row: literature sign vs existing-deployed sign.
 
@@ -120,6 +133,14 @@ def log_tsmom_literature_shadow(
     (< ``LITERATURE_MOM_LOOKBACK`` + 1 bars), or a degenerate base close. A
     write fault is swallowed + logged at WARNING (mirrors ``shadow_log``'s
     contract) — this NEVER blocks the tick.
+
+    ``db_writer`` (db-writer-reader-split, opt-in, 2026-07-12): when wired
+    and enabled, the INSERT is submitted as a fire-and-forget job to the
+    shared single-RW-conn writer instead of running on the caller's own
+    ``conn`` — safe to defer because this row is a raw shadow/telemetry
+    append with no same-tick reader (module docstring: "never sizing/entry/
+    exit"). Default ``None`` is byte-identical to the pre-migration
+    direct-write path.
     """
     if conn is None:
         return
@@ -132,22 +153,23 @@ def log_tsmom_literature_shadow(
     existing_sign = _sign(existing_mom)
     realized_vol = _realized_vol(closes, VOL_LOOKBACK)
     mismatch = 1 if (existing_sign and literature_sign != existing_sign) else 0
+    args = (
+        uuid.uuid4().hex, run_id, signal_id, int(GATE_STRATEGY_SIGNAL),
+        venue, symbol, regime, literature_sign, float(realized_vol),
+        f"tsmom_literature_12_1={literature_mom:.4f}",
+        "tsmom_shadow_literature", existing_sign, mismatch, 0, int(now_ts),
+    )
     try:
-        conn.execute(
-            """
-            INSERT INTO gate_shadow_events
-                (event_id, run_id, signal_id, gate_id, venue, symbol, regime,
-                 technical_decision, technical_scalar, technical_reason,
-                 technical_flags, gpt_decision, mismatch, cell_warm, created_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                uuid.uuid4().hex, run_id, signal_id, int(GATE_STRATEGY_SIGNAL),
-                venue, symbol, regime, literature_sign, float(realized_vol),
-                f"tsmom_literature_12_1={literature_mom:.4f}",
-                "tsmom_shadow_literature", existing_sign, mismatch, 0, int(now_ts),
-            ),
-        )
+        if db_writer is not None and dbwriter_enabled():
+            def _job(
+                c: sqlite3.Connection,
+                sql: str = _GATE_SHADOW_EVENTS_SQL, a: tuple[object, ...] = args,
+            ) -> None:
+                c.execute(sql, a)
+
+            db_writer.submit(_job, label="tsmom_literature_shadow")
+        else:
+            conn.execute(_GATE_SHADOW_EVENTS_SQL, args)
     except sqlite3.Error as exc:
         logger.warning(
             "[gate_shadow_events] tsmom literature shadow dropped %s:%s: %r",

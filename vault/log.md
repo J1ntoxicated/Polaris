@@ -418,3 +418,6 @@
 2026-07-11 14:25 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=170 learners=3 paper=True]
 - 2026-07-12: W2 섀도우 확장 머지(701b42d) — 레짐 v2 트윈라이트(6상태, regime_state.regime_v2 실쌓임 개시: flat_exp 5·flat_norm 4·up 2)·오프라인 엑싯 캘리브레이터(protect 비대칭 명시)·브레인 _frontgate_line(GPT 콜 0 증가)·스키마 2분리. Opus 3렌즈 APPROVE_WITH_NITS+컨덕터 마감(crosstab 재명명 — W3 오배선 방지). 봇 재기동(49593) 부팅클린. 대개편 W0~W2 완주 — 이제 W3는 데이터 축적 트리거.
 - 2026-07-12: 게이트 위성 대개편 머지(9c3b4de) — AI유닛 소속게이트 이사(validator→g3·entry_judge→g4·exit_advise→g7)·러너3종→g5·VWAP/SQUEEZE 순찰위성·G6→G8→G5 골드 갱신 스트랜드·캡처 글라이드/평가 노치/러너 펄스(실이벤트 1회성). 날조 스윕 클린. 라이브 에러 0.
+2026-07-11 23:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=169 learners=3 paper=True]
+2026-07-11 daily-auto [closes=185 pnl_usd=-2680.83 opens=196 faults=0 restarts=2]
+- 2026-07-12: 🔴 라이브 인시던트 — 대시보드 풀스캔 리더(오늘 추가된 signal_counts/momentum_z/ramp/shadow 매초 쿼리)가 WAL 체크포인트 질식 → writer 497s·틱 26-50분 동결 → 배치 엑싯 지연으로 레일 관통 2건(TRUMP -1.41R, LTC -1.17R, 오늘 -5.47R). A/B(대시 OFF)로 핀 확정 후 핫쿼리 캐시 게이트(10-30s)로 수술, writer 5.2s·틱 24s 회복. 교훈: 대시 신규 쿼리는 반드시 TTL 캐시 뒤로 + 라이브 DB 에이전트 VACUUM 복사 금지. 토폴로지 웨이브는 안전 위해 일시 정지(resumeFromRunId 재개 가능).

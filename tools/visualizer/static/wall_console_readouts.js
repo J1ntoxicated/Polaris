@@ -427,10 +427,15 @@
     const x0 = W * br.x0, x1 = W * br.x1, y0 = H * Z.ladderBand.y0, y1m = H * 0.90, y1 = H * Z.ladderBand.y1;
     panelFrame(ctx, x0, y0, x1, y1m, 'STREAMS');
     const streams = (c && c.streams) || [];
-    // Footer reserves the bottom ~18px for two 1-line readouts (STABLE, new;
-    // SESSION equity spark, existing) — venue rows shrink to make room, still
-    // a looser pitch than KELLY CELL LEDGER's proven-safe ~13px row spacing.
-    const footerH = 18;
+    // Footer reserves the bottom ~28px for two 1-line readouts (STABLE, new;
+    // SESSION equity spark, existing) — venue rows shrink to make room.
+    // Round 2 fix (Jin 2026-07-12 self-critique): the original 18px footer
+    // packed both readouts' baselines only 3px apart (STABLE at y1m-13,
+    // SESSION's label at y1m-10) — they overprinted whenever SESSION's
+    // sparkline actually had >1 distinct equity sample to draw (masked in
+    // dedupe-flat snapshots). Now matches KELLY CELL LEDGER's proven-safe
+    // ~13px baseline-to-baseline pitch (STABLE y1m-24, SESSION y1m-11).
+    const footerH = 28;
     const rowH = (y1m - y0 - 14 - footerH) / 3;
     ['okx', 'cap', 'alp'].forEach((v, i) => {
       const s = streams.find((x) => x.venue === v) || {};
@@ -447,12 +452,12 @@
       ctx.fillStyle = field.rgba(upnl >= 0 ? PNL_POS : PNL_NEG, 0.92);
       ctx.fillText(fmtUsd(upnl), x1 - 6, ry);
     });
-    drawStableRow(ctx, c, x0, x1, y1m - 13);
+    drawStableRow(ctx, c, x0, x1, y1m - 24);
     // SESSION sparkline — global equity client ring buffer (virtual-mode
     // branched, same as the crown/gauges — see equityOf()).
     pushEquitySample(c && c.core && equityOf(c.core).equity);
     if (equityRing.length > 1) {
-      const sx0 = x0 + 6, sx1 = x1 - 6, sy0 = y1m - 8, sy1 = y1m - 3;
+      const sx0 = x0 + 6, sx1 = x1 - 6, sy0 = y1m - 9, sy1 = y1m - 3;
       const lo = Math.min(...equityRing), hi = Math.max(...equityRing);
       const span = Math.max(1, hi - lo);
       ctx.beginPath();

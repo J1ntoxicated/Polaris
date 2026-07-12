@@ -118,7 +118,14 @@
     // the panel at the old 115px reach).
     gateHub: { x: 0.87, y: 0.715 },
     gateExit: { x: 0.77, y: 0.745 },
-    gateReflector: { x: 0.14, y: 0.87 },
+    // x=0.045 (round 2 self-critique fix, Jin 2026-07-12): 0.14 sat almost
+    // exactly on the REGIME row's bull_trend node (deterministic x=0.144,
+    // see buildLayout's byCluster.reg placement) — the regime row is fixed
+    // at 4 nodes (chop/bull_trend/bear_trend/crisis, snapshot_sections.py's
+    // `ordered`) spanning ~x0.08-0.27W, so 0.045 clears the whole row
+    // (chop's own leftmost label span never reaches this far) while staying
+    // right of the canvas edge for the 52px ring+bracket radius.
+    gateReflector: { x: 0.045, y: 0.87 },
     registerRect: { x0: 0.962, x1: 0.988, y0: 0.575, y1: 0.745 },
     regimeY: 0.80,
     ladderBand: {

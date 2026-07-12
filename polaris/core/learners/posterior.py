@@ -231,8 +231,8 @@ def cost_adjusted_pnl_r(
     venue: str,
     entry_fee_usd: float,
     exit_fee_usd: float,
-    entry_slippage_bps: float,
-    exit_slippage_bps: float,
+    entry_slippage_bps: float | None,
+    exit_slippage_bps: float | None,
 ) -> tuple[float, float]:
     """Subtract round-trip cost (fees + slippage) → (pnl_usd_net, pnl_r_net).
 
@@ -246,12 +246,26 @@ def cost_adjusted_pnl_r(
     is SKIPPED (``pnl_r_net = gross_pnl_r``) — never divide cost by a tiny floor
     that explodes the net-R (the live NIG posterior was being fed -210000 R).
     ``pnl_usd_net`` still nets the dollar cost (always finite + sane).
+
+    FIX 2 (ledger-reconcile forensic 2026-07-12, bug① phantom slippage):
+    ``entry_slippage_bps``/``exit_slippage_bps`` are ``None`` ONLY when the
+    caller found no matching fill row — ``COST_BPS_OKX_FALLBACK`` (1bp) then
+    stands in as the estimate. An honest recorded ``0.0`` (a real fill with
+    genuinely zero slippage) is a value, not a missing signal, and must flow
+    through unchanged — the previous ``x or FALLBACK`` treated 0.0 as falsy
+    and force-applied the 1bp fallback on EVERY zero-slippage fill.
     """
     if venue == "capital":
         cost_usd = 2.0 * (COST_BPS_CAPITAL / 1e4) * abs(size_usd)
     else:
-        slip_entry = (entry_slippage_bps or COST_BPS_OKX_FALLBACK) / 1e4 * abs(size_usd)
-        slip_exit = (exit_slippage_bps or COST_BPS_OKX_FALLBACK) / 1e4 * abs(size_usd)
+        entry_bps = (
+            COST_BPS_OKX_FALLBACK if entry_slippage_bps is None else entry_slippage_bps
+        )
+        exit_bps = (
+            COST_BPS_OKX_FALLBACK if exit_slippage_bps is None else exit_slippage_bps
+        )
+        slip_entry = entry_bps / 1e4 * abs(size_usd)
+        slip_exit = exit_bps / 1e4 * abs(size_usd)
         cost_usd = abs(entry_fee_usd) + abs(exit_fee_usd) + slip_entry + slip_exit
     pnl_usd_net = gross_pnl_usd - cost_usd
     if atr_usd is None or atr_usd <= 0.0:

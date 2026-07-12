@@ -317,7 +317,7 @@ def _safe_backfill_probe_outcome(
 
 def _read_cost_inputs(
     conn: sqlite3.Connection, trade: SimulatedTrade
-) -> tuple[float, float, float, float, float, float | None]:
+) -> tuple[float, float | None, float, float | None, float, float | None]:
     """Read (entry_fee, entry_slip, exit_fee, exit_slip, size_usd, cost_denom_usd).
 
     P0-2 fix — BOTH legs are matched by ``contribution_id = position_id`` (the
@@ -375,11 +375,16 @@ def _read_cost_inputs(
             "ORDER BY ts_ms DESC LIMIT 1",
             (trade.strategy_id, inst),
         ).fetchone()
+    # FIX (ledger-reconcile forensic 2026-07-12, bug① upstream symmetric):
+    # slip is None (not 0.0) when NO fill row was found — the downstream
+    # cost_adjusted_pnl_r fallback fires only on that None, never on a real
+    # fill's honest 0.0 slippage. Fee has no fallback mechanism, so it keeps
+    # its 0.0 default (a genuinely absent fee).
     entry_fee = float(entry[0]) if entry else 0.0
-    entry_slip = float(entry[1]) if entry else 0.0
+    entry_slip = float(entry[1]) if entry is not None else None
     size_usd = float(entry[2]) if entry else trade.notional_usd
     exit_fee = float(exit_row[0]) if exit_row else 0.0
-    exit_slip = float(exit_row[1]) if exit_row else 0.0
+    exit_slip = float(exit_row[1]) if exit_row is not None else None
     # FIX 3 — same ruler the caller's gross_pnl_r is now denominated in
     # (per-trade risk_usd). Fall back to the OLD per-stream R_budget constant
     # only when risk_usd is unavailable, so legacy/no-position_id callers keep

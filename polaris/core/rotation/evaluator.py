@@ -321,16 +321,19 @@ def rotation_cost_usd(
     venue: str,
     close_fee_usd: float = 0.0,
     open_fee_usd: float = 0.0,
-    close_slippage_bps: float = 0.0,
-    open_slippage_bps: float = 0.0,
+    close_slippage_bps: float | None = None,
+    open_slippage_bps: float | None = None,
 ) -> float:
     """Round-trip rotation cost in USD: close leg (A) + open leg (B).
 
     Mirrors :func:`polaris.core.learners.posterior.cost_adjusted_pnl_r`:
       - Capital demo reports ``fee=0`` so a constant ``COST_BPS_CAPITAL`` per leg
         stands in (one taker leg on the close, one on the open),
-      - OKX charges a real fee + slippage on each leg; an absent slippage falls
-        back to ``COST_BPS_OKX_FALLBACK``.
+      - OKX charges a real fee + slippage on each leg; an absent slippage (the
+        caller has no fill yet — ``None``, the default) falls back to
+        ``COST_BPS_OKX_FALLBACK``. A caller-supplied real ``0.0`` (a fill with
+        honest zero slippage) is a value, not "absent", and is never overridden
+        (ledger-reconcile forensic 2026-07-12, bug① symmetric fix).
 
     Pure; non-negative. This is the ``ROTATION_COST`` subtracted in the additive
     comparison — a cost SUBTRACTION, not a throttle.
@@ -339,8 +342,10 @@ def rotation_cost_usd(
         close_leg = (COST_BPS_CAPITAL / 1e4) * abs(close_size_usd)
         open_leg = (COST_BPS_CAPITAL / 1e4) * abs(open_size_usd)
         return close_leg + open_leg
-    close_slip = (close_slippage_bps or COST_BPS_OKX_FALLBACK) / 1e4 * abs(close_size_usd)
-    open_slip = (open_slippage_bps or COST_BPS_OKX_FALLBACK) / 1e4 * abs(open_size_usd)
+    close_bps = COST_BPS_OKX_FALLBACK if close_slippage_bps is None else close_slippage_bps
+    open_bps = COST_BPS_OKX_FALLBACK if open_slippage_bps is None else open_slippage_bps
+    close_slip = close_bps / 1e4 * abs(close_size_usd)
+    open_slip = open_bps / 1e4 * abs(open_size_usd)
     return abs(close_fee_usd) + abs(open_fee_usd) + close_slip + open_slip
 
 

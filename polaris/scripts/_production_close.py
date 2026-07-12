@@ -1022,7 +1022,7 @@ async def _close_trade_with_real_pnl(
     # RESET — the account compounds continuously) + reset-only-on-ruin check.
     # Measurement hygiene only — never blocks/skips a trade. Fail-open inside.
     safe_update_virtual_trace(
-        conn, trade=trade, pnl_usd_net=pnl_usd_net, now_ts=now_ts,
+        conn, trade=trade, now_ts=now_ts,
     )
     # FIX 1 — G8 post-trade reflector folds the SAME net R + net ``won`` as the
     # cell/learners/posterior so the reflection lesson is fee-coherent (a gross R

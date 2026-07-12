@@ -161,6 +161,22 @@ def test_rotation_cost_is_non_negative() -> None:
     assert rotation_cost_usd(close_size_usd=0.0, open_size_usd=0.0, venue="okx") >= 0.0
 
 
+def test_rotation_cost_real_zero_slippage_not_overridden() -> None:
+    """Ledger-reconcile forensic 2026-07-12, bug① symmetric fix: a real 0.0
+    slippage passed by the caller must NOT get the 1bp fallback baked in —
+    only the ``None`` default (no fill data supplied) does."""
+    cost = rotation_cost_usd(
+        close_size_usd=1_000.0,
+        open_size_usd=1_000.0,
+        venue="okx",
+        close_fee_usd=0.5,
+        open_fee_usd=0.5,
+        close_slippage_bps=0.0,
+        open_slippage_bps=0.0,
+    )
+    assert cost == pytest.approx(0.5 + 0.5)  # fee-only — no fallback slippage
+
+
 # --------------------------------------------------------------------------
 # 5. should_rotate — ADDITIVE margin, subtract cost.
 # --------------------------------------------------------------------------

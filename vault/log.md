@@ -428,3 +428,5 @@
 - 2026-07-12: ledger-fix 머지(b4067d3) — falsy-zero 3개소(posterior·rotation·close_effects)+weekly fresh-SUM 자기치유 전환. 재기동(86094) 부팅클린·틱 정상. 주간 곡선이 진실 수렴(okx -8,397/560건 = gross−실수수료). 센트리 WARN(재기동·부팅 램프)뿐.
 2026-07-12 06:33 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=172 learners=3 paper=True]
 - 2026-07-12: 리빙 필드 머지(7dffc47) — 레이아웃 트윈·스캔 펄스·강등 글라이드·게이지 상단 2+2(EARNINGS 플랭크)·BOT LOG DEBUG 필터. 상/하 밀도 재조정은 게이지 이동으로 사실상 해소. 약속 큐 소진 — 잔여 결정: fee-split R2·Coinglass.
+2026-07-12 09:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=173 learners=3 paper=True]
+- 2026-07-12: single-writer 랜딩(1d9fbea) — A급 섀도우/컬렉터 쓰기 큐 이관, regime_v2 이관은 same-tick reader 발견으로 정직 롤백(빌더 자가교정). 실측: 락 88/h→86/h(웜업 포함, 지배원인 regime read-back 잔존 — 예측대로), 틱 60s→27-33s 개선. 근치=바 캐시 데이터모델 설계(마스터 시퀀스 등록). 프로브 3색+이름표·그룹 베뉴표시·페인트 다이어트(blur 전폐, GPU 32fps) 동일 세션 랜딩.

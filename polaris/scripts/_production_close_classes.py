@@ -55,6 +55,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.classes.remap_table import resolve_thresholds
 from polaris.core.classes.score_f import rollup_score_f
 from polaris.core.classes.transition import (
     Timeframe,
@@ -255,6 +256,11 @@ def update_strategy_class_on_close(
         n_fills_total, n_signals_recent, n_fills_recent, last_50_rate = (
             _fill_gate_inputs(conn, venue=venue, strategy_id=strategy_id, now_ts=now_ts)
         )
+        # fee_split_flip_r2_2026-07-12 item 2 — remap the Schmitt/stagnation/
+        # ladder thresholds onto score_f.py's now-flipped judged axis
+        # (gross_bps). READ-ONLY, fail-open (falls back through venue-pool to
+        # hardcoded legacy defaults on any gap — see remap_table.py).
+        thresholds = resolve_thresholds(conn, venue=venue, strategy_id=strategy_id)
 
         inp = TransitionInput(
             strategy_class=klass,
@@ -274,6 +280,7 @@ def update_strategy_class_on_close(
             n_fills_recent=n_fills_recent,
             last_50_fill_rate=last_50_rate,
             last_promotion_ts=last_promotion_ts,
+            thresholds=thresholds,
         )
         result = evaluate_transition(inp)
         changed = result.strategy_class != klass

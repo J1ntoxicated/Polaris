@@ -24,14 +24,25 @@ thresholds can cross under a noisy/discontinuous ECDF) — ``enforce_isotonic``
 repairs that via pool-adjacent-violators (PAVA), the standard isotonic-
 regression algorithm, keeping migrated thresholds monotonic in the same
 direction the caller's ORIGINAL threshold sequence was.
+
+``population_stability_index`` / ``ks_statistic`` (fee_split_flip_r2_
+2026-07-12 item 4/T1) are the STALENESS pair a remap TABLE (``remap_table.py``)
+compares its stored ``ref_population`` against a track's CURRENT population
+with: PSI>0.20 or KS>0.15 flags a remap entry as needing refresh (T1 red-team
+fix — "regime mix fingerprint" drift). Auto-FLAG only (never blocks a
+transition — flow_not_block); the caller decides whether/when to refresh.
 """
 
 from __future__ import annotations
 
+import math
+
 __all__ = [
     "ecdf_percentile",
     "enforce_isotonic",
+    "ks_statistic",
     "migrate_thresholds",
+    "population_stability_index",
     "value_at_percentile",
 ]
 
@@ -124,3 +135,81 @@ def _pava_non_decreasing(values: list[float]) -> list[float]:
     for mean, weight in blocks:
         out.extend([mean] * int(weight))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Staleness pair — PSI / KS (item 4/T1: remap-table refresh trigger)
+# ---------------------------------------------------------------------------
+
+_PSI_BINS = 10
+_PSI_EPS = 1e-6  # avoids log(0) on an empty bin — standard PSI smoothing.
+
+
+def population_stability_index(
+    reference: list[float], current: list[float], *, n_bins: int = _PSI_BINS
+) -> float:
+    """Population Stability Index between ``reference`` and ``current``,
+    binned on ``reference``'s own decile edges (the standard PSI convention —
+    the REFERENCE population defines the bin boundaries, so a later refresh's
+    ``current`` reusing them measures pure distributional drift, not a
+    rebinning artifact).
+
+    0.0 when either population is empty (nothing to compare — no drift
+    signal, never a spurious "stale" flag off missing data).
+    """
+    if not reference or not current:
+        return 0.0
+    edges = _decile_edges(reference, n_bins=n_bins)
+    ref_frac = _bin_fractions(reference, edges)
+    cur_frac = _bin_fractions(current, edges)
+    psi = 0.0
+    for r, c in zip(ref_frac, cur_frac, strict=True):
+        r_s, c_s = max(r, _PSI_EPS), max(c, _PSI_EPS)
+        psi += (c_s - r_s) * math.log(c_s / r_s)
+    return psi
+
+
+def ks_statistic(reference: list[float], current: list[float]) -> float:
+    """Two-sample Kolmogorov-Smirnov statistic: max ECDF gap between
+    ``reference`` and ``current`` over the pooled sorted value set.
+
+    0.0 when either population is empty (same no-signal contract as
+    :func:`population_stability_index`).
+    """
+    if not reference or not current:
+        return 0.0
+    pooled = sorted(set(reference) | set(current))
+    max_gap = 0.0
+    for v in pooled:
+        gap = abs(ecdf_percentile(v, reference) - ecdf_percentile(v, current))
+        max_gap = max(max_gap, gap)
+    return max_gap
+
+
+def _decile_edges(population: list[float], *, n_bins: int) -> list[float]:
+    """``n_bins - 1`` interior edges splitting ``population`` into
+    ``n_bins`` equal-count buckets (nearest-rank), deduplicated (a
+    low-cardinality population can collapse edges — fewer, wider bins is the
+    correct degrade, never a crash)."""
+    ordered = sorted(population)
+    edges = [
+        value_at_percentile(ordered, i / n_bins) for i in range(1, n_bins)
+    ]
+    out: list[float] = []
+    for e in edges:
+        if not out or e > out[-1]:
+            out.append(e)
+    return out
+
+
+def _bin_fractions(population: list[float], edges: list[float]) -> list[float]:
+    """Fraction of ``population`` in each of ``len(edges) + 1`` bins split by
+    ``edges`` (interior boundaries, ascending)."""
+    counts = [0] * (len(edges) + 1)
+    for v in population:
+        idx = 0
+        while idx < len(edges) and v > edges[idx]:
+            idx += 1
+        counts[idx] += 1
+    n = len(population)
+    return [c / n for c in counts]

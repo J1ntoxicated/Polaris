@@ -175,7 +175,10 @@ def test_only_closed_positions_scored(conn):
 
 
 def test_multiple_lifecycles_sum_into_score_f(conn):
-    """score_F is the SUM of per-lifecycle net_i/denom_i terms, not an average."""
+    """score_F is the SUM of per-lifecycle terms, not an average. FLIP
+    (fee_split_flip_r2_2026-07-12 item 1): score_contrib is now gross_bps
+    (net_i/notional_i*10_000) by default — legacy_score_contrib still holds
+    the pre-flip net/fee_denom formula unconditionally."""
     _mk_position(conn, position_id="p4", closed_ts=1_700_003_600)
     _mk_fill(conn, position_id="p4", venue="okx", symbol="BTC-USDT",
               strategy_id="gold_riskoff_trend_amplify", size_usd=1000.0,
@@ -189,8 +192,11 @@ def test_multiple_lifecycles_sum_into_score_f(conn):
         conn, venue="okx", strategy_id="gold_riskoff_trend_amplify",
     )
     total = sum(ev.score_contrib for ev in events)
+    # p4: 100/1000*10000 = 1000.0 gbps ; p5: -20/1000*10000 = -200.0 gbps
+    assert total == pytest.approx(800.0)
+    legacy_total = sum(ev.legacy_score_contrib for ev in events)
     # p4: 100 / max(1.0, 0.1) = 100.0 ; p5: -20 / max(2.0, 0.1) = -10.0
-    assert total == pytest.approx(90.0)
+    assert legacy_total == pytest.approx(90.0)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +314,8 @@ def test_rollup_inserts_one_event_per_closed_lifecycle(conn):
         "SELECT position_id, score_contrib FROM score_f_events"
     ).fetchone()
     assert row[0] == "p11"
-    assert row[1] == pytest.approx(100.0)
+    # FLIP: score_contrib = gross_bps = 100/1000*10000 (was legacy net/fee_denom=100.0).
+    assert row[1] == pytest.approx(1000.0)
 
 
 def test_rollup_is_idempotent_no_double_count(conn):
@@ -416,3 +423,76 @@ def test_f_track_cap_window_w_caps_lookback(conn):
     )
     assert result.f_track_cap_usd == pytest.approx(1.0)
     assert result.n_observed == 3
+
+
+# ---------------------------------------------------------------------------
+# fee-split v1 FLIP (fee_split_flip_r2_2026-07-12 item 1) — gross_bps judged
+# axis, fee_drag_bps reporting axis, POLARIS_SCOREF_NET_LEGACY rollback.
+# ---------------------------------------------------------------------------
+
+
+def test_fee_drag_bps_is_reporting_only_and_correct(conn):
+    """fee_drag_bps = fee_usd/notional_usd*10_000 — never equal to
+    score_contrib (the judged axis), computed alongside it."""
+    _mk_position(conn, position_id="p16", closed_ts=1_700_003_600)
+    _mk_fill(conn, position_id="p16", venue="okx", symbol="BTC-USDT",
+              strategy_id="gold_riskoff_trend_amplify", size_usd=1000.0,
+              fee_usd=5.0, pnl_usd=100.0, is_close=True, ts_ms=1_700_003_000_000)
+
+    events = compute_score_f(conn, venue="okx", strategy_id="gold_riskoff_trend_amplify")
+    ev = events[0]
+    assert ev.fee_drag_bps == pytest.approx(50.0)  # 5/1000*10000
+    assert ev.score_contrib == pytest.approx(1000.0)  # gross_bps, unaffected by fee_drag_bps
+
+
+def test_zero_notional_gross_bps_and_fee_drag_bps_are_zero_not_crash(conn):
+    """No fills (notional_usd=0) degrades gross_bps/fee_drag_bps to 0.0,
+    never a ZeroDivisionError."""
+    _mk_position(conn, position_id="p17", closed_ts=1_700_003_600)
+    events = compute_score_f(conn, venue="okx", strategy_id="gold_riskoff_trend_amplify")
+    assert len(events) == 1
+    assert events[0].score_contrib == 0.0
+    assert events[0].fee_drag_bps == 0.0
+
+
+def test_legacy_net_axis_env_flag_restores_pre_flip_score_contrib(conn, monkeypatch):
+    """POLARIS_SCOREF_NET_LEGACY=1 (item 8 rollback) makes score_contrib the
+    legacy net/fee_denom formula again — one flag, full revert — while
+    fee_drag_bps/notional_usd/gross_usd keep populating unconditionally."""
+    monkeypatch.setenv("POLARIS_SCOREF_NET_LEGACY", "1")
+    _mk_position(conn, position_id="p18", closed_ts=1_700_003_600)
+    _mk_fill(conn, position_id="p18", venue="okx", symbol="BTC-USDT",
+              strategy_id="gold_riskoff_trend_amplify", size_usd=1000.0,
+              fee_usd=1.0, pnl_usd=100.0, is_close=True, ts_ms=1_700_003_000_000)
+
+    events = compute_score_f(conn, venue="okx", strategy_id="gold_riskoff_trend_amplify")
+    ev = events[0]
+    assert ev.score_contrib == pytest.approx(100.0)  # legacy: 100/max(1.0,0.1)
+    assert ev.score_contrib == pytest.approx(ev.legacy_score_contrib)
+    assert ev.fee_drag_bps == pytest.approx(10.0)  # unconditional: 1/1000*10000
+    assert ev.notional_usd == pytest.approx(1000.0)  # unconditional
+
+
+def test_legacy_flag_off_by_default(conn):
+    """No env var set -> gross_bps is the default judged axis (the flip)."""
+    _mk_position(conn, position_id="p19", closed_ts=1_700_003_600)
+    _mk_fill(conn, position_id="p19", venue="okx", symbol="BTC-USDT",
+              strategy_id="gold_riskoff_trend_amplify", size_usd=1000.0,
+              fee_usd=1.0, pnl_usd=100.0, is_close=True, ts_ms=1_700_003_000_000)
+
+    events = compute_score_f(conn, venue="okx", strategy_id="gold_riskoff_trend_amplify")
+    ev = events[0]
+    assert ev.score_contrib == pytest.approx(1000.0)  # gross_bps
+    assert ev.legacy_score_contrib == pytest.approx(100.0)  # legacy still computed
+
+
+def test_fee_drag_bps_persisted_by_rollup(conn):
+    _mk_position(conn, position_id="p20", closed_ts=1_700_003_600)
+    _mk_fill(conn, position_id="p20", venue="okx", symbol="BTC-USDT",
+              strategy_id="gold_riskoff_trend_amplify", size_usd=1000.0,
+              fee_usd=3.0, pnl_usd=50.0, is_close=True, ts_ms=1_700_003_000_000)
+    rollup_score_f(conn, now_ts=1_700_010_000)
+    row = conn.execute(
+        "SELECT fee_drag_bps FROM score_f_events WHERE position_id = 'p20'"
+    ).fetchone()
+    assert row[0] == pytest.approx(30.0)  # 3/1000*10000

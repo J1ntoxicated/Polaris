@@ -27,6 +27,8 @@ def conn(tmp_path) -> sqlite3.Connection:
 
 
 def test_cohort_groups_by_seed_tag(conn: sqlite3.Connection) -> None:
+    """FLIP (fee_split_flip_r2_2026-07-12 item 1): score_f_sum aggregates
+    score_contrib, now gross_bps (net/notional*10_000) by default."""
     _mk_position(
         conn, position_id="s1", venue="okx", strategy_id="equity_52wk_high_breakout",
         seed_tag="pead_high", closed_ts=1_700_003_600,
@@ -47,9 +49,9 @@ def test_cohort_groups_by_seed_tag(conn: sqlite3.Connection) -> None:
 
     by_tag = {c.seed_tag: c for c in cohorts}
     assert by_tag["pead_high"].n_lifecycles == 1
-    assert by_tag["pead_high"].score_f_sum == pytest.approx(100.0)
+    assert by_tag["pead_high"].score_f_sum == pytest.approx(1000.0)  # 100/1000*10000
     assert by_tag["sector_rs"].n_lifecycles == 1
-    assert by_tag["sector_rs"].score_f_sum == pytest.approx(-50.0)
+    assert by_tag["sector_rs"].score_f_sum == pytest.approx(-500.0)  # -50/1000*10000
 
 
 def test_cohort_excludes_unseeded_positions(conn: sqlite3.Connection) -> None:
@@ -83,8 +85,9 @@ def test_cohort_multiple_lifecycles_same_tag_sum_together(conn: sqlite3.Connecti
     assert len(cohorts) == 1
     assert cohorts[0].seed_tag == "pead_high"
     assert cohorts[0].n_lifecycles == 3
-    assert cohorts[0].score_f_sum == pytest.approx(130.0)
-    assert cohorts[0].score_f_mean == pytest.approx(130.0 / 3.0)
+    # gross_bps per lifecycle: 1000, 500, -200 (pnl/1000*10000) -> sum 1300.
+    assert cohorts[0].score_f_sum == pytest.approx(1300.0)
+    assert cohorts[0].score_f_mean == pytest.approx(1300.0 / 3.0)
 
 
 def test_cohort_empty_ledger_returns_empty_list(conn: sqlite3.Connection) -> None:

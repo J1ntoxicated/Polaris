@@ -11,7 +11,9 @@ from hypothesis import strategies as st
 from polaris.core.classes.threshold_migration import (
     ecdf_percentile,
     enforce_isotonic,
+    ks_statistic,
     migrate_thresholds,
+    population_stability_index,
     value_at_percentile,
 )
 
@@ -135,3 +137,49 @@ def test_migrate_empty_populations_degenerate_but_no_crash():
     result = migrate_thresholds([-1.0, 0.0, 1.0], old_population=[], new_population=[])
     assert len(result) == 3
     assert result[0] <= result[1] <= result[2]
+
+
+# ---------------------------------------------------------------------------
+# PSI / KS (fee_split_flip_r2_2026-07-12 item 4 — remap staleness pair)
+# ---------------------------------------------------------------------------
+
+
+def test_psi_identical_populations_is_zero():
+    pop = [float(x) for x in range(100)]
+    assert population_stability_index(pop, pop) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_psi_large_shift_is_large():
+    reference = [float(x) for x in range(100)]
+    current = [float(x) + 500.0 for x in range(100)]
+    assert population_stability_index(reference, current) > 0.20
+
+
+def test_psi_empty_population_is_zero_never_crash():
+    assert population_stability_index([], [1.0, 2.0]) == 0.0
+    assert population_stability_index([1.0, 2.0], []) == 0.0
+
+
+def test_ks_identical_populations_is_zero():
+    pop = [float(x) for x in range(50)]
+    assert ks_statistic(pop, pop) == pytest.approx(0.0)
+
+
+def test_ks_disjoint_populations_is_one():
+    reference = [float(x) for x in range(10)]
+    current = [float(x) + 1000.0 for x in range(10)]
+    assert ks_statistic(reference, current) == pytest.approx(1.0)
+
+
+def test_ks_empty_population_is_zero_never_crash():
+    assert ks_statistic([], [1.0]) == 0.0
+    assert ks_statistic([1.0], []) == 0.0
+
+
+@given(
+    reference=st.lists(st.floats(min_value=-1e6, max_value=1e6, allow_nan=False), min_size=1, max_size=50),
+    current=st.lists(st.floats(min_value=-1e6, max_value=1e6, allow_nan=False), min_size=1, max_size=50),
+)
+def test_property_psi_and_ks_always_non_negative(reference, current):
+    assert population_stability_index(reference, current) >= 0.0
+    assert 0.0 <= ks_statistic(reference, current) <= 1.0

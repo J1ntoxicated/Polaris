@@ -25,6 +25,7 @@ from polaris.core.classes.score_f import (
 from polaris.core.classes.transition import (
     TransitionInput,
     TransitionResult,
+    TransitionThresholds,
     evaluate_transition,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "TrackMember",
     "TransitionInput",
     "TransitionResult",
+    "TransitionThresholds",
     "allocate_r_pool",
     "compute_score_f",
     "evaluate_transition",

@@ -55,7 +55,9 @@
   @keyframes fxdn { 0% { background: rgba(255,125,138,0.35); } 100% { background: transparent; } }
   .side-rows .r > span { overflow: hidden; text-overflow: ellipsis; }
   /* 티커 그룹 소계 헤더 + 그룹 소속 행 미세 인덴트 (Jin 2026-07-11) */
-  .side-rows .r.grp { border-bottom: none; padding: 3px 0 0.5px; color: var(--p-dim); font-size: 9.5px; }
+  .side-rows .r.grp { border-bottom: 1px solid rgba(255,255,255,0.05); padding: 3px 0 2px; color: var(--p-dim); font-size: 9.5px; cursor: pointer; }
+  .side-rows .r.grp:hover { background: rgba(95,135,175,0.07); }
+  .side-rows .r.grp .caret { color: var(--polaris-blue); }
   .side-rows .r.grp .num { font-weight: 700; }
   .side-rows .r.ingrp .sym { padding-left: 7px; font-weight: 400; color: var(--p-gry); }
   .side-rows .vb { width: 3px; height: 10px; border-radius: 1px; align-self: center; }
@@ -282,7 +284,7 @@
 <script src="static/wall_console_readouts.js?v=14_gaugestop"></script>
 <script src="static/wall_spine.js?v=14_livingfield"></script>
 <script src="static/wall_spine_hud.js?v=6_logfilter"></script>
-<script src="static/wall_side.js?v=6_tickergroup"></script>
+<script src="static/wall_side.js?v=7_grpfold"></script>
 <script>
   // The spine canvas fits to canvas clientWidth/Height; after layout settles,
   // nudge resize twice (rAF + delayed) so fitCanvas() picks up the grid-

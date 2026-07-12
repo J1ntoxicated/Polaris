@@ -43,6 +43,12 @@
    * bot's live marks diffed at 4Hz), so prices tick in true real time with
    * an up/down flash. Key = venue|symbol|strategy|side (server's SSE key). */
   var rowIndex = new Map(); // key -> {cur, pnl, pct}
+  var grpIndex = new Map(); // groupKey -> {pnl, exp, caret} — 접힘 헤더 라이브 갱신
+  var lastSnap = null;      // 토글 시 즉시 재렌더용
+  var expanded = new Set(JSON.parse(localStorage.getItem('polaris_flow_grp_open') || '[]'));
+  function saveExpanded() {
+    localStorage.setItem('polaris_flow_grp_open', JSON.stringify(Array.from(expanded)));
+  }
   var sumEl = document.getElementById('side-pos-sum');
   function renderSummary(rows) {
     if (!sumEl) return;
@@ -84,10 +90,10 @@
     if (cls != null && el.className.indexOf(cls) < 0) el.className = 'num ' + cls;
   }
   function renderPositions(s) {
-    // 티커 그룹핑 (Jin 2026-07-11 "같은 티커 여러 주문 — 합칠까?"): rows stay
-    // PER-POSITION (전략별 진입가/PnL/엑싯이 달라 합치면 정보 소실) but same-
-    // ticker rows sit TOGETHER under a slim Σ subtotal header when >1 —
-    // groups ordered by the group's |Σ uPnL| so the hottest name leads.
+    lastSnap = s;
+    // 티커 그룹 = 기본 접힘 (Jin 2026-07-12 "묶어서·접어서, 눌러서 펴게"):
+    // 그룹(>1)은 Σ 요약 한 줄만, 클릭으로 펼침(localStorage 유지). 행은
+    // 포지션(전략)별 유지 — 펼치면 그대로 보임.
     var all = (s.positions || []).slice();
     var groups = {};
     all.forEach(function (p) {
@@ -100,51 +106,65 @@
       g.sort(function (a, b) { return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0); });
       return { gk: gk, g: g, upnl: upnl };
     }).sort(function (a, b) { return Math.abs(b.upnl) - Math.abs(a.upnl); });
-    var rows = [];
-    ordered.forEach(function (o) { o.g.forEach(function (p) { rows.push(p); }); });
-    rows = rows.slice(0, 26);
-    if (posN) posN.textContent = rows.length ? '· ' + rows.length : '';
-    renderSummary(rows);
-    var inRows = {};
-    rows.forEach(function (p) { inRows[rowKey(p)] = true; });
-    var keys = rows.map(rowKey).join('~');
+    if (posN) posN.textContent = all.length ? '· ' + all.length : '';
+    renderSummary(all);
+    // 가시 목록: 그룹>1 = 헤더(+펼침 시 자식), 단독 = 행 — 캡 26 가시행
+    var visible = [];
+    ordered.forEach(function (o) {
+      if (o.g.length > 1) {
+        visible.push({ hdr: o });
+        if (expanded.has(o.gk)) o.g.forEach(function (p) { visible.push({ row: p, ingrp: true }); });
+      } else {
+        visible.push({ row: o.g[0] });
+      }
+    });
+    visible = visible.slice(0, 26);
+    var keys = visible.map(function (v) {
+      return v.hdr ? 'H:' + v.hdr.gk + ':' + v.hdr.g.length : rowKey(v.row) + (v.ingrp ? ':i' : '');
+    }).join('~') + '|x:' + Array.from(expanded).join(',');
     if (keys !== renderPositions._keys) {
       renderPositions._keys = keys;
-      rowIndex.clear();
+      rowIndex.clear(); grpIndex.clear();
       var html = '';
-      ordered.forEach(function (o) {
-        var vis = o.g.filter(function (p) { return inRows[rowKey(p)]; });
-        if (!vis.length) return;
-        if (vis.length > 1) {
-          var gsz = o.g.reduce(function (a, p) { return a + (p.size_usd || 0); }, 0);
-          html += '<div class="r grp"><span></span><span class="vt">Σ</span>'
-            + '<span class="sym" style="color:#8a94b0">' + esc(String(vis[0].symbol || '').split(':').pop())
-            + ' ×' + vis.length + '</span><span></span><span class="num vt"></span>'
-            + '<span class="num ' + pnlCls(o.upnl) + '">' + usd(o.upnl) + '</span>'
-            + '<span class="num"></span><span class="num vt">' + kusd(gsz) + '</span></div>';
+      visible.forEach(function (v) {
+        if (v.hdr) {
+          var o = v.hdr;
+          var open = expanded.has(o.gk);
+          html += '<div class="r grp" data-g="' + esc(o.gk) + '" title="click to ' + (open ? 'collapse' : 'expand') + '">'
+            + '<span></span><span class="vt caret">' + (open ? '▾' : '▸') + '</span>'
+            + '<span class="sym" style="color:#8a94b0">' + esc(String(o.g[0].symbol || '').split(':').pop())
+            + ' ×' + o.g.length + '</span><span></span><span class="num vt"></span>'
+            + '<span class="num gpnl"></span>'
+            + '<span class="num"></span><span class="num vt gexp"></span></div>';
+          return;
         }
-        vis.forEach(function (p) {
-          html += '<div class="r' + (vis.length > 1 ? ' ingrp' : '') + '" data-k="' + esc(rowKey(p)) + '">'
-            + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
-            + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
-            + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
-            + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
-            + '<span class="num cur vt"></span>'
-            + '<span class="num pnl"></span>'
-            + '<span class="num pct"></span>'
-            + '<span class="num vt exp"></span>'
-            + '</div>';
-        });
+        var p = v.row;
+        html += '<div class="r' + (v.ingrp ? ' ingrp' : '') + '" data-k="' + esc(rowKey(p)) + '">'
+          + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
+          + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
+          + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
+          + '<span class="vt">' + (String(p.side || '').charAt(0).toUpperCase() || '—') + '</span>'
+          + '<span class="num cur vt"></span>'
+          + '<span class="num pnl"></span>'
+          + '<span class="num pct"></span>'
+          + '<span class="num vt exp"></span>'
+          + '</div>';
       });
       posRows.innerHTML = html;
-      posRows.querySelectorAll('.r').forEach(function (el) {
+      posRows.querySelectorAll('.r[data-k]').forEach(function (el) {
         rowIndex.set(el.getAttribute('data-k'), {
           cur: el.querySelector('.cur'), pnl: el.querySelector('.pnl'),
           pct: el.querySelector('.pct'), exp: el.querySelector('.exp'),
         });
       });
+      posRows.querySelectorAll('.r.grp').forEach(function (el) {
+        grpIndex.set(el.getAttribute('data-g'), {
+          pnl: el.querySelector('.gpnl'), exp: el.querySelector('.gexp'),
+        });
+      });
     }
-    rows.forEach(function (p) {
+    // 라이브 셀 갱신 — 보이는 개별 행
+    all.forEach(function (p) {
       var c = rowIndex.get(rowKey(p));
       if (!c) return;
       var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
@@ -154,7 +174,26 @@
       setCell(c.pct, pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%', pnlCls(pct), false);
       if (c.exp && !c.exp.textContent) c.exp.textContent = kusd(p.size_usd);
     });
+    // 접힘 그룹 헤더 Σ 라이브 갱신
+    ordered.forEach(function (o) {
+      if (o.g.length < 2) return;
+      var h = grpIndex.get(o.gk);
+      if (!h) return;
+      var gsz = o.g.reduce(function (a, p) { return a + (p.size_usd || 0); }, 0);
+      setCell(h.pnl, usd(o.upnl), pnlCls(o.upnl), false);
+      if (h.exp) h.exp.textContent = kusd(gsz);
+    });
   }
+  // 그룹 접기/펼치기 (위임 1회)
+  posRows.addEventListener('click', function (e) {
+    var g = e.target.closest ? e.target.closest('.r.grp') : null;
+    if (!g) return;
+    var gk = g.getAttribute('data-g');
+    if (expanded.has(gk)) expanded.delete(gk); else expanded.add(gk);
+    saveExpanded();
+    renderPositions._keys = null; // 구조 재렌더 강제
+    if (lastSnap) renderPositions(lastSnap);
+  });
   // live 4Hz price marks — the "가격 변하는 거 실시간" channel
   try {
     var pes = new EventSource('/stream/prices');

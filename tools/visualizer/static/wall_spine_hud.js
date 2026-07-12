@@ -180,6 +180,19 @@
   }
 
   /* ===== bot log (1s poll /api/botlog) + equity already above ===== */
+  // DEBUG filter (Jin 2026-07-12 "엑티비티와 시스템 로그 확실 분리"): the server
+  // tail (/api/botlog, _tail_botlog) intentionally sends ALL levels — DEBUG
+  // is per-decision detail (logging_config.py's own doc), and it's dense
+  // enough to fill the whole LOG_TAIL_N window on its own, pushing the real
+  // INFO+ milestones (session/boot/close/flip) and WARNING/ERROR lines
+  // clean off the visible tail. Display-only: filtered client-side before
+  // the slice below, the log FILE itself is untouched. `[DEBUG]` is the
+  // literal bracketed levelname logging_config.py's DEFAULT_FORMAT emits;
+  // lines that don't carry a recognizable level tag (e.g. traceback
+  // continuation lines) fail OPEN — never hidden on a format mismatch.
+  function isDebugLine(line) {
+    return /\[DEBUG\]/.test(line);
+  }
   function classifyLog(line) {
     const l = line.toLowerCase();
     if (/\b(error|critical|fatal)\b/.test(l) || l.includes('exception') || l.includes('traceback')) return 'bl-err';
@@ -201,7 +214,12 @@
     try {
       const r = await fetch('/api/botlog?t=' + Date.now(), { cache: 'no-store' });
       if (!r.ok) return;
-      const lines = ((await r.json()).lines || []).slice(-LOG_TAIL_N);
+      // Filter DEBUG out of the FULL server tail before slicing to the
+      // visible window — filtering after the slice would just shrink the
+      // visible count on a DEBUG-heavy tail instead of surfacing the
+      // INFO+ lines actually behind it.
+      const raw = (await r.json()).lines || [];
+      const lines = raw.filter((l) => !isDebugLine(l)).slice(-LOG_TAIL_N);
       if (!lines.length) return;
       body.innerHTML = lines.map(fmtLogLine).join('');
       body.scrollTop = body.scrollHeight;

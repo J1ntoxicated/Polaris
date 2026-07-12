@@ -131,6 +131,7 @@
    * strip, flow_stats' `classes`), breathing while the strategy is firing.
    * ===== */
   let stratGauge = new Map(); // 'strat_<id>' -> real fill fraction 0..1
+  let _chipLaneKey = ''; let _chipLanePlaced = null; // 레인 배치 캐시 (앵커 키)
   function setStrategyGauges(classes) {
     stratGauge = new Map();
     (classes || []).forEach((c) => {
@@ -202,7 +203,10 @@
       const sym = String(n.ticker || '').split(':').pop().split('-')[0].split('_')[0];
       if (!sym) return;
       byId[n.id] = { n, p, sym };
-      items.push({ id: n.id, x: p.x });
+      // placement key = ANCHOR x (s.x), not the per-frame bob (p.x) — the
+      // per-frame placeRow sweep was a core-burner (2026-07-12 랙 포렌식);
+      // anchors only move on layout rebuild, so the lane solve caches ~1/s.
+      items.push({ id: n.id, x: s.x });
     });
     if (!items.length) return;
     const visible = items.slice(0, WATCH_CHIP_CAP);
@@ -210,7 +214,14 @@
     const sz = field.sizeOf && field.sizeOf();
     const wMax = (sz && sz.W) || 2000;
     const lanes = window.PolarisConsoleLanes;
-    const placed = lanes ? lanes.placeRow(visible, { minPitch: 24, xMin: 4, xMax: wMax - 4, rowGap: 13 }) : null;
+    const laneKey = visible.map((v) => v.id + ':' + Math.round(v.x)).join('|') + '|' + wMax;
+    let placed;
+    if (laneKey === _chipLaneKey) {
+      placed = _chipLanePlaced;
+    } else {
+      placed = lanes ? lanes.placeRow(visible, { minPitch: 24, xMin: 4, xMax: wMax - 4, rowGap: 13 }) : null;
+      _chipLaneKey = laneKey; _chipLanePlaced = placed;
+    }
     let lastX = 0, lastY = byId[visible[0].id].p.y;
     visible.forEach((it) => {
       const { n, p, sym } = byId[it.id];

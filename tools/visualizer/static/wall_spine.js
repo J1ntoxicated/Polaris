@@ -97,7 +97,9 @@
   let W = 1344, H = 962;
   function fitCanvas() {
     const rect = canvas.getBoundingClientRect();
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // dpr cap 2.0->1.5 (2026-07-12 랙 포렌식: 페인트-바운드 — 레티나 풀해상도
+    // 래스터가 프레임 비용의 주범군. 1.5는 텍스트 가독 유지 + 픽셀 -44%)
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     W = rect.width; H = rect.height;
     canvas.width = staticLayer.width = Math.max(1, Math.round(W * dpr));
     canvas.height = staticLayer.height = Math.max(1, Math.round(H * dpr));

@@ -211,6 +211,7 @@
   // many candidates at once — the heavier migrations/glowAt path stays
   // reserved for promotion/demotion/real pipeline journeys.
   const layoutTweens = new Map(); // id -> {fx,fy,tx,ty,start,dur}
+  const nodesOfCache = new Map(); // cluster -> node list (frame-hot 캐시)
   // 2) Scan pulse — a 300ms one-shot bracket flash (steel->venue color) on
   // whatever screen slot a ticker currently occupies the instant a REAL
   // gate_event names it (wall_spine.js's fireGateEvent), reusing
@@ -276,6 +277,7 @@
   }
 
   function buildLayout(data) {
+    nodesOfCache.clear();
     allNodes = data.nodes || [];
     nodeById = {};
     allNodes.forEach((n) => { nodeById[n.id] = n; });
@@ -791,6 +793,7 @@
   // K-NN scan every tick (that only reruns on an actual structural change —
   // see wall_spine_hud.js's node-count fingerprint check).
   function refreshNodeState(nodes) {
+    nodesOfCache.clear();
     const prevFiring = firingIds.size ? new Set(firingIds) : null;
     firingIds.clear();
     (nodes || []).forEach((n) => {
@@ -1286,14 +1289,19 @@
     ctx.fillRect(0, 0, W, H);
   }
   function drawEdge(ctx, e, alphaMul) {
+    const a = (alphaMul == null || alphaMul === 1) ? null : e.alpha * alphaMul;
     ctx.beginPath();
     ctx.moveTo(e.x1, e.y1);
     ctx.bezierCurveTo(e.c1x, e.c1y, e.c2x, e.c2y, e.x2, e.y2);
-    ctx.strokeStyle = (alphaMul == null || alphaMul === 1) ? e.strokeStyle : rgba(e.color, e.alpha * alphaMul);
+    // glow = wide under-stroke, NOT shadowBlur (paint-bound lag forensic)
+    if (e.glow) {
+      ctx.strokeStyle = rgba(e.color, (a == null ? e.alpha : a) * 0.30);
+      ctx.lineWidth = e.width * 2.6;
+      ctx.stroke();
+    }
+    ctx.strokeStyle = a == null ? e.strokeStyle : rgba(e.color, a);
     ctx.lineWidth = e.width;
-    if (e.glow) { ctx.shadowColor = e.shadowColor; ctx.shadowBlur = 5; }
     ctx.stroke();
-    ctx.shadowBlur = 0;
   }
   function drawDot(ctx, x, y, r, color, alpha, glowBlur) {
     ctx.beginPath();
@@ -1631,7 +1639,14 @@
     clusterColor: () => CLUSTER_COLOR,
     findNode: (pred) => allNodes.find(pred),
     nodeById: (id) => nodeById[id],
-    nodesOf: (cluster) => allNodes.filter((n) => n.cluster === cluster),
+    nodesOf: (cluster) => {
+      // per-frame O(N) filter ×N passes was burning a core (2026-07-12 랙
+      // 포렌식) — cache per cluster, invalidated on layout/state refresh.
+      if (!nodesOfCache.has(cluster)) {
+        nodesOfCache.set(cluster, allNodes.filter((n) => n.cluster === cluster));
+      }
+      return nodesOfCache.get(cluster);
+    },
     gateSatelliteOf: orbitGateTarget,
     sizeOf: () => ({ W, H }),
     WALL_ZONES,

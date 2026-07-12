@@ -1530,8 +1530,18 @@
       const s = screen[id];
       if (!s) { scanFlashes.delete(id); return; }
       const m = migrations.get(id);
+      const tw = layoutTweens.get(id);
       let px, py;
       if (m) { const p = migratePos(m, s); px = p.x; py = p.y; }
+      else if (tw) {
+        // mirrors the layoutTweens branch in the livingIds draw loop above —
+        // keeps the scan bracket glued to the dot mid-relayout instead of
+        // detaching at the tween destination (c79b2a6 fixed this for the
+        // firing glow via the same layoutTweens.has(id) guard).
+        const t = Math.min(1, (now - tw.start) / tw.dur);
+        px = tw.fx + (tw.tx - tw.fx) * easeOut(t);
+        py = tw.fy + (tw.ty - tw.fy) * easeOut(t);
+      }
       else if (s.bobAmp) {
         px = s.x + Math.sin(now * 0.0006 * s.bobSpeed + s.phaseOff) * s.bobAmp;
         py = s.y + Math.cos(now * 0.00042 * s.bobSpeed + s.phaseOff * 1.3) * s.bobAmp;

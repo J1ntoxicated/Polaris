@@ -185,6 +185,17 @@
   // Venue glow colors — same hexes as the page legend (.wall-venues) so a
   // firing ticker reads as "its exchange is alive" (Jin 2026-07-10).
   const VENUE_COLOR = { okx: '#5fdfff', cap: '#a87cff', alp: '#ffc84f' };
+  // Asset-group dust colors (Jin 2026-07-13 "둘 다": background/passive mkt
+  // dust reads by asset class, ONLY the active/firing overlay stays venue-
+  // colored — see refreshNodeState's s.venueColor assignment below, untouched).
+  // Muted (~30% sat) on purpose — this is backdrop dust, not a signal color —
+  // and picked to stay perceptually clear of every reserved hex already in
+  // play: VENUE_COLOR above, P/L green/red, PROBE_COLORS teal/rose/slate,
+  // GATE_HALO cyan, FEEDBACK_COLOR gold, and the '#8a94b0' steel neutral.
+  const ASSET_GROUP_COLOR = {
+    crypto: '#979b50', forex: '#7b4f92', indices: '#696eb5',
+    commodity: '#bf7dbf', stock: '#94bb81', etf: '#a96693',
+  };
   const firingIds = new Set(); // mkt ids firing NOW (roster-driven, 1s poll)
   // Jarvis target-lock entrance timing (Jin 2026-07-10, feat/jarvis-language):
   // id -> performance.now() the instant a mkt dot's firing state flips on
@@ -678,6 +689,12 @@
       // (obs/action/axis…) keep their cluster color.
       if (node.cluster === 'pos') {
         s.color = (node.pnl_usd || 0) >= 0 ? '#7dffa8' : '#ff7d8a';
+      } else if (node.cluster === 'mkt') {
+        // Background/passive universe dust = asset-group color (dimmed via
+        // baseAlpha/bgLayer below); a node that's actually firing gets the
+        // venue-colored s.venueColor overlay from refreshNodeState instead
+        // (Jin 2026-07-13 "둘 다" — base=asset class, activation=venue).
+        s.color = ASSET_GROUP_COLOR[node.asset_group] || '#8a94b0';
       } else {
         const vc = VENUE_COLOR[String(node.exchange || '').slice(0, 3).toLowerCase()];
         if (vc) s.color = vc;

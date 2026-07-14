@@ -456,3 +456,4 @@
 - 2026-07-15: 하네스 감사 — .claude 루트 죽은 loose 스크립트 14개(wf_*.js·run_debate, 참조0) 삭제. agents 14(게이트-에이전트 8=vestigial 의심)·skills 8·plans 29(대부분 슈퍼시드)·codebase-graph 부재 = 런타임 사용분석 필요 → 리셋 P5/P6에 구체화(성급 삭제 회피).
 - 2026-07-15: 모바일 대시(/m·mobile.js) 전체 칼리브레이션을 리셋 P4에 추가 — 메인 /flow 개편(색·마퀴·액티비티·그룹핑·인스펙트) 미반영으로 '따로 놈', 전면 재정렬+데이터 정합 필요(Jin).
 - 2026-07-15: 실행금지 규칙 명문화 — Jin '리셋 됐어' 전까지 목록 추가만(빌드 착수 금지). P4에 데스크 차트섹션+모바일 글로브 리뷰/리와이어(모바일온리 전용최적화)+모바일 차트/칼리브레이션 추가.
+2026-07-14 21:37 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=334 learners=3 paper=True]

@@ -439,3 +439,12 @@
 2026-07-12 12:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=175 learners=3 paper=True]
 2026-07-12 13:31 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=175 learners=3 paper=True]
 - 2026-07-12: maker-shadow 랜딩(283355e, 재기동 PID 7395) — price_through_shadow 3열 계측(운영 무변경), 발화 실증 20분 내 3행(PENGU/STETH/AAVE, touch<fill 정상 방향), 에러 0. maker_fill_shadow는 가상모드 정직 0행 유지(빌더 판단). 승격 판단은 관통비율·가격개선 bps 축적 후.
+2026-07-12 14:04 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_80e9abfb-c29-2/polaris/core/economics/price_through_shadow.py]
+2026-07-12 14:07 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=175 learners=3 paper=True]
+2026-07-12 21:33 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=289 learners=3 paper=True]
+2026-07-12 daily-auto [closes=214 pnl_usd=-5605.99 opens=204 faults=1 restarts=2]
+2026-07-13 15:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=341 learners=3 paper=True]
+2026-07-13 21:49 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=342 learners=3 paper=True]
+2026-07-13 daily-auto [closes=136 pnl_usd=-6445.18 opens=133 faults=0 restarts=2]
+2026-07-14 09:31 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=335 learners=3 paper=True]
+- 2026-07-14: storage-split 청사진 작성(vault/50_research/storage-split-blueprint.md) — 근본픽스 설계 완료, 목요일 wipe 리셋 시 착수 대기. bars/ticker_baseline_samples/watchlist_focus를 별도 marketdata DB(자체 WAL락)로 분리 → 거래락 경합 소멸. 프리즈 인시던트(10h) 스톱갭(알파카캡400+왓치독틱생존, b51adbd)은 그때까지 유지.

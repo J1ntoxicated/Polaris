@@ -231,16 +231,25 @@
     }).join('');
   }
   function base(sym) { return String(sym || '').split(':').pop(); }
+  // Jin 2026-07-15 "액티비티 로그 좀더 디스크립티브하게": venue tag + hold
+  // duration + R-multiple, parts auto-drop when a field is absent.
+  function vlab(v) { return String(v || '').slice(0, 3).toUpperCase(); }
+  function dur(sec) { sec = +sec || 0; return sec < 60 ? Math.round(sec) + 's' : sec < 3600 ? Math.round(sec / 60) + 'm' : (sec / 3600).toFixed(1) + 'h'; }
+  function jp(parts) { return parts.filter(function (p) { return p != null && p !== ''; }).join(' · '); }
+  function fmtPx(p) { p = +p || 0; return p >= 100 ? p.toFixed(1) : p >= 1 ? p.toFixed(2) : p.toPrecision(3); }
+  function rtag(r) { return r == null ? '' : ' ' + (r >= 0 ? '+' : '') + (+r).toFixed(1) + 'R'; }
 
   function onStream(payload) {
     (payload.events || []).forEach(function (e) {
       if (e.type === 'entry') {
         pushFeed({ ts: e.ts || Math.floor(Date.now() / 1000), kind: 'ENTRY', color: vcolor(e.exchange),
-          text: base(e.ticker) + ' ' + (e.side || '') + ' · ' + (e.strategy_id || ''), val: kusd(e.size_usd), valCls: 'flat-c' });
+          text: jp([vlab(e.exchange) + ' ' + base(e.ticker) + ' ' + (e.side || ''), e.strategy_id, e.entry_price ? '@' + fmtPx(e.entry_price) : '']),
+          val: kusd(e.size_usd), valCls: 'flat-c' });
       } else if (e.type === 'exit') {
         var pnl = e.pnl_usd || 0;
         pushFeed({ ts: e.ts || Math.floor(Date.now() / 1000), kind: 'EXIT', color: vcolor(e.exchange),
-          text: base(e.ticker) + ' · ' + (e.reason || e.strategy_id || ''), val: usd(pnl), valCls: pnlCls(pnl) });
+          text: jp([vlab(e.exchange) + ' ' + base(e.ticker), e.strategy_id, e.reason, e.held_sec ? dur(e.held_sec) : '']),
+          val: usd(pnl) + rtag(e.r_units), valCls: pnlCls(pnl) });
       }
     });
     (payload.gate_events || []).forEach(function (g) {
@@ -267,12 +276,14 @@
           (s.recent_trades || []).slice(0, 12).forEach(function (t) {
             var pnl = t.net_usd != null ? t.net_usd : t.pnl_usd;
             seedRows.push({ ts: t.ts_close || 0, kind: 'EXIT', color: vcolor(t.venue),
-              text: base(t.symbol) + ' · ' + (t.exit_reason || ''), val: usd(pnl), valCls: pnlCls(pnl) });
+              text: jp([vlab(t.venue) + ' ' + base(t.symbol), t.strategy_id, t.exit_reason, t.held_sec ? dur(t.held_sec) : '']),
+              val: usd(pnl) + rtag(t.r_units), valCls: pnlCls(pnl) });
           });
           (s.positions || []).forEach(function (pp) {
             var opened = (s.ts_now || 0) - (pp.held_sec || 0);
             seedRows.push({ ts: opened, kind: 'ENTRY', color: vcolor(pp.venue),
-              text: base(pp.symbol) + ' ' + (pp.side || '') + ' · ' + (pp.strategy_id || ''), val: kusd(pp.size_usd), valCls: 'flat-c' });
+              text: jp([vlab(pp.venue) + ' ' + base(pp.symbol) + ' ' + (pp.side || ''), pp.strategy_id, pp.entry_price ? '@' + fmtPx(pp.entry_price) : '', pp.held_sec ? dur(pp.held_sec) : '']),
+              val: kusd(pp.size_usd), valCls: 'flat-c' });
           });
           seedRows.sort(function (a, b) { return a.ts - b.ts; }).forEach(pushFeed);
         }

@@ -266,7 +266,12 @@
       const gc = GATE_COLORS[i] || GATE_HALO;
       ctx.globalCompositeOperation = 'lighter';
       field.drawDot(ctx, gs.x, gs.y, halo, gc, 0.10 + fireT * 0.24, 12 + fireT * 15);
-      field.drawDot(ctx, gs.x, gs.y, core, GATE_CORE, 0.68 + fireT * 0.28, 8 + fireT * 13);
+      // Jin 2026-07-15 "구 색 그래프 색이랑 맞게 하양 줄여": core is now the
+      // gate's own hue (GATE_COLORS[i]) so each sphere reads as its graph
+      // color, not a uniform white blob; only a small dim white glint stays
+      // at the center for the lit-hub feel.
+      field.drawDot(ctx, gs.x, gs.y, core, gc, 0.6 + fireT * 0.3, 8 + fireT * 13);
+      field.drawDot(ctx, gs.x, gs.y, core * 0.46, GATE_CORE, 0.28 + fireT * 0.22, 4 + fireT * 6);
       ctx.globalCompositeOperation = 'source-over';
       ctx.beginPath(); ctx.arc(gs.x, gs.y, core, 0, Math.PI * 2);
       ctx.strokeStyle = field.rgba(gc, 0.6); ctx.lineWidth = 0.8; ctx.stroke();

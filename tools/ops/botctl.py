@@ -255,6 +255,19 @@ def _spawn_env() -> dict[str, str]:
     env["POLARIS_LIQFLOOR_OKX_MIN_VOL_24H_USD"] = os.environ.get(
         "POLARIS_LIQFLOOR_OKX_MIN_VOL_24H_USD", "15000000"
     )
+    # ALPACA FREEZE STOPGAP (Jin 2026-07-13 incident): the per-venue rank
+    # top-N default 1500 gave Alpaca a 1500-instrument active set (OKX 180 /
+    # Capital 114 sit below it). Grinding 1500 instruments' bar/ground persists
+    # flooded the single db_writer queue → WAL write-lock contention → the main
+    # tick froze mid-signal-emit for ~10h. TEMP cap to 400 (Alpaca drops to
+    # ~400, OKX/Capital untouched) until the ROOT fix lands — market-data
+    # (bars/ground) storage separated from the trading-state DB so the grind
+    # never contends for the trading WAL lock — then revert to 1500. Aggressive
+    # breadth is restored by the root fix, not permanently traded away here.
+    # Caller shell can override.
+    env["POLARIS_UNIVERSE_RANK_TOP_N"] = os.environ.get(
+        "POLARIS_UNIVERSE_RANK_TOP_N", "400"
+    )
     return env
 
 

@@ -8,9 +8,12 @@ Self-timeout 120s so a hung pass can never pile up.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import signal
 import time
+from datetime import UTC, datetime
 from types import FrameType
 
 from tools.ops import alerting, botctl, log_scan
@@ -21,6 +24,42 @@ from tools.ops.ops_config import (
     WEDGE_AGE_SEC,
     OpsConfig,
 )
+
+# TICK-FREEZE auto-recovery (Jin 2026-07-13 incident): the main tick froze
+# mid-execution for ~10h while background tasks kept the log fresh, so the
+# log-mtime wedge check never fired. A process that has not emitted a "[tick"
+# line in this long is functionally dead for trading — recover it. Threshold
+# is deliberately long (15 min >> normal ~40s cadence and >> heavy-warmup /
+# degraded multi-min ticks) so it never trips a merely-slow bot; the existing
+# flap-backoff guards against restart loops.
+TICK_FREEZE_SEC = 900
+_TICK_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z\b.*\[tick ")
+
+
+def last_tick_age(bot_log: str | os.PathLike[str], *, now: float) -> float | None:
+    """Seconds since the newest ``[tick`` line in ``bot_log`` (tail scan).
+
+    ``None`` when the file is missing or holds no tick line (pre-warmup boot) —
+    callers must treat ``None`` as "no evidence of freeze", never as frozen.
+    """
+    try:
+        size = os.path.getsize(bot_log)
+        with open(bot_log, "rb") as fh:
+            fh.seek(max(0, size - 262_144))  # 256KB tail — many ticks' worth
+            tail = fh.read().decode("utf-8", "replace")
+    except (FileNotFoundError, OSError):
+        return None
+    newest: float | None = None
+    for line in tail.splitlines():
+        m = _TICK_LINE.match(line)
+        if m is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(m.group(1)).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        newest = ts.timestamp()
+    return None if newest is None else max(0.0, now - newest)
 
 
 def decide(*, sentinel: bool, pid_alive: bool, cmd_match: bool, orphan: bool) -> str:
@@ -104,8 +143,26 @@ def run_once(cfg: OpsConfig, *, now: float | None = None) -> str:
     action = decide(sentinel=False, pid_alive=alive, cmd_match=match,
                     orphan=bool(orphans))
     if action == "health":
-        health_checks(cfg, now=now_f)
-        return "health"
+        # TICK-FREEZE recovery (Jin 2026-07-13): a matched-alive process whose
+        # tick has not advanced in TICK_FREEZE_SEC is hung, not healthy — the
+        # log-mtime wedge check misses it because background tasks keep the log
+        # fresh. This narrow, evidence-gated case supersedes the "never kill a
+        # live process" stance (the process is functionally dead for trading);
+        # SIGKILL the wedged pid, then fall through to the flap-backoff-guarded
+        # start path. `None` age (pre-warmup, no tick line yet) is NOT frozen.
+        tick_age = last_tick_age(cfg.bot_log, now=now_f)
+        if tick_age is not None and tick_age >= TICK_FREEZE_SEC and pid is not None:
+            alerting.notify(
+                cfg, "bot_tick_frozen",
+                f"tick frozen {tick_age:.0f}s (>= {TICK_FREEZE_SEC}s) while pid "
+                f"{pid} alive — killing wedged process and restarting",
+            )
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+            # fall through to the start path below (death accounting + backoff)
+        else:
+            health_checks(cfg, now=now_f)
+            return "health"
     if action == "adopt":
         opid, ocmd = orphans[0]
         botctl.write_pidfile(cfg, opid)

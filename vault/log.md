@@ -448,3 +448,4 @@
 2026-07-13 daily-auto [closes=136 pnl_usd=-6445.18 opens=133 faults=0 restarts=2]
 2026-07-14 09:31 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=335 learners=3 paper=True]
 - 2026-07-14: storage-split 청사진 작성(vault/50_research/storage-split-blueprint.md) — 근본픽스 설계 완료, 목요일 wipe 리셋 시 착수 대기. bars/ticker_baseline_samples/watchlist_focus를 별도 marketdata DB(자체 WAL락)로 분리 → 거래락 경합 소멸. 프리즈 인시던트(10h) 스톱갭(알파카캡400+왓치독틱생존, b51adbd)은 그때까지 유지.
+- 2026-07-15: delegation-gate 청사진 작성 — 진입전 지능형 전략↔티커 배정(결정론 fit-score fast-path + 애매시 gpt-5-mini 타이브레이크 slow-path, 섀도우-후-승격). 전략정렬+엑싯백스톱 동봉. 리셋 패키지 = storage-split+정렬+델리게이션+백스톱(phaseable).

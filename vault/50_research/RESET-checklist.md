@@ -5,10 +5,11 @@ date_created: 2026-07-15
 tags: [reset, master-checklist, index]
 ---
 
-# 리셋 마스터 체크리스트 (토큰 리셋 후 착수 순서)
+# 마스터 리셋 체크리스트 (토큰 리셋 후 착수 순서)
 
-목요일 wipe 리셋 = 클린 슬레이트 재설계 착수 신호. 설계는 다 서 있음(아래 청사진 참조).
-"이어서" 한 마디면 P0부터 순서대로. 빌드 = Sonnet 빌더 + Opus 3렌즈.
+Jin 2026-07-15 "클린업 할 시기" — 마스터 리셋 = **아키텍처 재설계 + 코드 클린업 +
+널리지 클린업 + 데이터 클린업** 통째로. 목요일 wipe = 클린 슬레이트 착수 신호.
+설계는 다 서 있음(아래 청사진). "이어서" 한 마디면 P0부터. 빌드 = Sonnet + Opus 3렌즈.
 
 ## P0 — 프리즈 근절 (최우선)
 - [ ] **storage-split Phase1**: bars/ticker_baseline_samples/watchlist_focus를 별도
@@ -39,5 +40,18 @@ tags: [reset, master-checklist, index]
 - [ ] **오픈 포지션 인스펙트**: 줄 스파크라인 + 액티비티 절반축소 + 클릭선택 차트(기본=최근거래
       자동추종). 딥차트는 보드 것 활용. → `dashboard-todo.md`.
 
-## 정리 대기 (Jin 판단)
-- [ ] 아카이브 2GB(polaris_live_archive 6/26·27) 삭제 여부. probes 11.7GB는 P3에서 처리.
+## P5 — 코드 클린업 (전수 조사)
+- [ ] **죽은/안 쓴 코드 sweep**: graph-first(codebase-memory) LOCATE → 실파일 검증 → 제거.
+      미참조 함수·모듈·orphan 파일·미등록 전략(P1/P3와 연계)·dead import. mypy/ruff clean·테스트 green 유지.
+- [ ] **필요/불필요 판정표**: 각 모듈 "쓰임/죽음/승격대기(built-not-wired)" 3분류.
+- [ ] 500 LOC 초과 파일 분할·중복 유틸 통합(surgical, 검증된 것만).
+
+## P6 — 널리지 클린업 (vault + memory)
+- [ ] **vault Karpathy 3-ops**: `tools/vault_lint.py --karpathy --report` → keep/compress/delete +
+      backlink 정합 + lifecycle. 이번 세션 청사진 다수 → 중복·stale 정리.
+- [ ] **memory 통합**: `consolidate-memory` — 중복 병합·stale 픽스·index 정돈.
+- [ ] 리셋 후 실제 반영된 것 vault/memory에 확정(설계→구현 상태 갱신).
+
+## 데이터 클린업
+- [x] 아카이브 2GB 삭제 (2026-07-15). 백업/잡DB 8.4GB 삭제 완료.
+- [ ] probes 11.7GB → 섀도우 DB + 리텐션 (P3). WAL 위생.

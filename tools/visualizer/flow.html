@@ -151,12 +151,18 @@
 
   /* Per-strategy score_F window-fill gauge strip — flow_classes.js renders. */
   #class-gauge-strip {
-    position: relative; z-index: 9; overflow-x: auto; white-space: nowrap;
+    position: relative; z-index: 9; overflow: hidden; white-space: nowrap;
     padding: 2px 8px; font-size: 8px; letter-spacing: 0.04em;
     border-top: 1px solid var(--ghost); background: rgba(3,4,10,0.65);
   }
-  #class-gauge-strip::-webkit-scrollbar { height: 3px; }
-  #class-gauge-strip::-webkit-scrollbar-thumb { background: var(--ghost); }
+  /* Jin 2026-07-15 "증권사 띠마냥 흐르게 다 보이게": continuous ticker-tape
+     marquee — the .cg-track is the chip run duplicated, translateX(-50%) loops
+     it seamlessly so every strategy scrolls into view. Hover pauses to read.
+     (Distinct from the verdict-tape no-marquee rule — different element.) */
+  #class-gauge-strip .cg-track { display: inline-block; will-change: transform;
+    animation-name: cg-marquee; animation-timing-function: linear; animation-iteration-count: infinite; }
+  #class-gauge-strip:hover .cg-track { animation-play-state: paused; }
+  @keyframes cg-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
   #class-gauge-strip .chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; color: var(--p-gry); }
   #class-gauge-strip .chip .sid { color: var(--p-wht); font-weight: 700; }
   #class-gauge-strip .chip .gauge { display: inline-block; width: 34px; height: 6px; background: rgba(255,255,255,0.10); vertical-align: middle; }

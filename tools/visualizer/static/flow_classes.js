@@ -28,13 +28,18 @@
     if (!el) return;
     const classes = d.classes || [];
     if (!classes.length) { el.innerHTML = ''; return; }
-    el.innerHTML = classes.map((c) => {
+    const chips = classes.map((c) => {
       const pct = c.window_w ? Math.round((100 * c.filled) / c.window_w) : 0;
       const cls = String(c.strategy_class || '').toLowerCase();
       return `<span class="chip ${esc(cls)}"><span class="sid">${esc(c.strategy_id)}</span>`
         + `<span class="gauge"><span class="fill" style="width:${pct}%"></span></span>`
         + `${c.filled}/${c.window_w}</span>`;
     }).join('');
+    // Jin 2026-07-15 "증권사 띠마냥 흐르게": duplicate the chip run inside the
+    // marquee track so translateX(-50%) loops seamlessly; duration scales with
+    // count (~2.4s/chip) for constant speed regardless of roster size.
+    const dur = Math.max(18, classes.length * 2.4);
+    el.innerHTML = `<span class="cg-track" style="animation-duration:${dur}s">${chips}${chips}</span>`;
   }
 
   function spawnClassBadge(kind, c) {

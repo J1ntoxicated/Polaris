@@ -22,24 +22,46 @@
   let _classesSeeded = false;   // first poll seeds classByKey without popping badges
   let _lastAdmissionTs = 0;     // watermark seeded on first poll (no flash flood on load)
   let _candidateFlashTimer = null;
+  let _cgSig = null;            // marquee roster signature — rebuild track only on change
 
   function renderClassGauges(d) {
     const el = document.getElementById('class-gauge-strip');
     if (!el) return;
     const classes = d.classes || [];
-    if (!classes.length) { el.innerHTML = ''; return; }
-    const chips = classes.map((c) => {
+    if (!classes.length) { el.innerHTML = ''; _cgSig = null; return; }
+    // Jin 2026-07-15 "순차적으로 계속 흐르듯이": the marquee track is rebuilt
+    // ONLY when the roster/class set changes — NOT on every stats poll.
+    // Rebuilding innerHTML each poll restarted the CSS animation, so it jerked
+    // back to the start instead of looping seamlessly. Between rebuilds the
+    // duplicated run + translateX(-50%) loops continuously; gauge fills refresh
+    // in place so the animation is never interrupted.
+    const sig = classes.map((c) => c.strategy_id + ':' + (c.strategy_class || '')).join('|');
+    if (sig !== _cgSig) {
+      const chips = classes.map((c) => {
+        const pct = c.window_w ? Math.round((100 * c.filled) / c.window_w) : 0;
+        const cls = String(c.strategy_class || '').toLowerCase();
+        return `<span class="chip ${esc(cls)}"><span class="sid">${esc(c.strategy_id)}</span>`
+          + `<span class="gauge"><span class="fill" style="width:${pct}%"></span></span>`
+          + `<span class="nm">${c.filled}/${c.window_w}</span></span>`;
+      }).join('');
+      const dur = Math.max(18, classes.length * 2.4);
+      el.innerHTML = `<span class="cg-track" style="animation-duration:${dur}s">${chips}${chips}</span>`;
+      _cgSig = sig;
+      return;
+    }
+    // roster unchanged → refresh gauge fills + N/M in BOTH duplicated copies
+    // (index i and i+per) without rebuilding the track.
+    const fills = el.querySelectorAll('.chip .fill');
+    const nms = el.querySelectorAll('.chip .nm');
+    const per = classes.length;
+    classes.forEach((c, i) => {
       const pct = c.window_w ? Math.round((100 * c.filled) / c.window_w) : 0;
-      const cls = String(c.strategy_class || '').toLowerCase();
-      return `<span class="chip ${esc(cls)}"><span class="sid">${esc(c.strategy_id)}</span>`
-        + `<span class="gauge"><span class="fill" style="width:${pct}%"></span></span>`
-        + `${c.filled}/${c.window_w}</span>`;
-    }).join('');
-    // Jin 2026-07-15 "증권사 띠마냥 흐르게": duplicate the chip run inside the
-    // marquee track so translateX(-50%) loops seamlessly; duration scales with
-    // count (~2.4s/chip) for constant speed regardless of roster size.
-    const dur = Math.max(18, classes.length * 2.4);
-    el.innerHTML = `<span class="cg-track" style="animation-duration:${dur}s">${chips}${chips}</span>`;
+      const txt = c.filled + '/' + c.window_w;
+      [i, i + per].forEach((k) => {
+        if (fills[k]) fills[k].style.width = pct + '%';
+        if (nms[k]) nms[k].textContent = txt;
+      });
+    });
   }
 
   function spawnClassBadge(kind, c) {

@@ -453,3 +453,4 @@
 - 2026-07-15: 대시 TODO 박음(dashboard-todo.md) — 오픈포지션 인라인 스파크+액티비티 절반축소+클릭선택 인스펙트 차트(기본=최근거래 자동추종, 클릭=핀). 데이터 준비됨(spark/entry/stop/mfe/mae), 서버무변경. 딥차트는 보드에 이미 있으니 가볍게. 토큰 리셋 후 리셋 대시작업에 포함.
 - 2026-07-15: RESET-checklist.md 작성 — 토큰 리셋 후 착수 마스터 순서(P0 storage-split·캡원복 / P1 엑싯백스톱·전략정렬 / P2 게이트재편7골격·델리게이션 / P3 built-not-wired 감사·프로브승격·피드축배선 / P4 대시 인스펙트). 청사진 4종 인덱스.
 - 2026-07-15: 아카이브 2GB 삭제(27GB free). 마스터 리셋 확장 = 아키텍처재설계+코드클린업(P5 죽은코드 전수sweep)+널리지클린업(P6 vault Karpathy+memory consolidate)+데이터클린업. RESET-checklist 갱신. Jin '클린업 할 시기'.
+- 2026-07-15: 하네스 감사 — .claude 루트 죽은 loose 스크립트 14개(wf_*.js·run_debate, 참조0) 삭제. agents 14(게이트-에이전트 8=vestigial 의심)·skills 8·plans 29(대부분 슈퍼시드)·codebase-graph 부재 = 런타임 사용분석 필요 → 리셋 P5/P6에 구체화(성급 삭제 회피).

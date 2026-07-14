@@ -451,3 +451,4 @@
 - 2026-07-15: delegation-gate 청사진 작성 — 진입전 지능형 전략↔티커 배정(결정론 fit-score fast-path + 애매시 gpt-5-mini 타이브레이크 slow-path, 섀도우-후-승격). 전략정렬+엑싯백스톱 동봉. 리셋 패키지 = storage-split+정렬+델리게이션+백스톱(phaseable).
 - 2026-07-15: built-not-wired 감사 플랜 작성 — 프로브 applied=0(protect 승격 유력, 유리포지션 giveback 1.03R 실측)·GPT섀도우 잉여·고아피드·미등록전략 = '해놓고 안붙인' 패턴 전수감사→평가→승격, 토큰 리셋 후 착수(Jin). 리셋 패키지에 통합.
 - 2026-07-15: 대시 TODO 박음(dashboard-todo.md) — 오픈포지션 인라인 스파크+액티비티 절반축소+클릭선택 인스펙트 차트(기본=최근거래 자동추종, 클릭=핀). 데이터 준비됨(spark/entry/stop/mfe/mae), 서버무변경. 딥차트는 보드에 이미 있으니 가볍게. 토큰 리셋 후 리셋 대시작업에 포함.
+- 2026-07-15: RESET-checklist.md 작성 — 토큰 리셋 후 착수 마스터 순서(P0 storage-split·캡원복 / P1 엑싯백스톱·전략정렬 / P2 게이트재편7골격·델리게이션 / P3 built-not-wired 감사·프로브승격·피드축배선 / P4 대시 인스펙트). 청사진 4종 인덱스.

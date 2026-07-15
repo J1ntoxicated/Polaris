@@ -898,7 +898,8 @@ async def reserve_and_submit(
             conn, venue=venue, symbol=symbol, side=sig.side,
             fill_price=fill.fill_price, touch_px=shadow_touch_px,
             run_id=sig.signal_id, strategy_id=sig.strategy_id, now_ts=now_ts,
-            db_writer=state.db_writer,
+            # storage-split — price_through_shadow is marketdata-domain.
+            db_writer=state.md_db_writer,
         )
         # P5 gap-b: populate the open-position risk row the sizer's
         # PortfolioState reads, so per-symbol/underlying/cluster/track caps bind

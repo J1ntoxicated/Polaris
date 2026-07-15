@@ -420,8 +420,9 @@ async def test_fill_persist_error_via_db_writer_does_not_abort_walk(
 async def test_static_ground_producer_forwards_db_writer(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bar producer forwards ``state.db_writer`` to the bulk fill (mirrors
-    ``_ticker_ground_producer`` already forwarding it to ``refresh_ticker_ground``)."""
+    """The bar producer forwards ``state.md_db_writer`` (storage-split,
+    2026-07-14 — ``bars`` is marketdata-domain) to the bulk fill, mirroring
+    ``_ticker_ground_producer`` forwarding it to ``refresh_ticker_ground``."""
     from polaris.scripts import production_paper_loop as ppl
 
     seen: dict[str, Any] = {}
@@ -434,7 +435,7 @@ async def test_static_ground_producer_forwards_db_writer(
 
     state = ppl.ProdLoopState()
     sentinel = object()
-    state.db_writer = sentinel  # type: ignore[assignment]
+    state.md_db_writer = sentinel  # type: ignore[assignment]
     stop_evt = asyncio.Event()
 
     async def _stop_after_first() -> None:

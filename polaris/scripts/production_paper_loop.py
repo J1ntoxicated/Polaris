@@ -108,6 +108,7 @@ from polaris.scripts.reconcile_orphans import (
 )
 from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect, connect_ro, init_db
+from polaris.storage.schema_marketdata import init_marketdata_db, marketdata_db_path_for
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
@@ -614,7 +615,9 @@ async def _static_ground_producer(
                 alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
                 warm_resolutions=warm_resolutions,
-                db_writer=state.db_writer,
+                # storage-split — static-ground bars persist into `bars`
+                # (marketdata) via the SAME persist_bars path as the hot ingest.
+                db_writer=state.md_db_writer,
             )
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]
@@ -659,7 +662,8 @@ async def _ticker_ground_producer(
         try:
             tickers = refresh_ticker_ground(
                 conn, cache=getattr(state, "altdata_cache", None),
-                db_writer=state.db_writer,
+                # storage-split — ticker_ground is marketdata-domain.
+                db_writer=state.md_db_writer,
             )
             state.static_ground_tickers = tickers
         except Exception:  # noqa: BLE001 — ground fill never halts the bot
@@ -783,10 +787,19 @@ async def run_production_paper_loop(
         )
     target_db.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(target_db)
+    # storage-split (vault/50_research/storage-split-blueprint.md, 2026-07-14
+    # wipe reset) — the marketdata firehose (bars/baseline/focus/ground/quote/
+    # altdata/shadow) gets its OWN file + WAL lock, opened right alongside the
+    # trading conn so every downstream wire-up below can reach it. ``conn``
+    # (this function's pre-existing name) stays the TRADING connection,
+    # unchanged in meaning for every existing caller.
+    md_db_path = marketdata_db_path_for(target_db)
+    md_conn = init_marketdata_db(md_db_path)
     haiku = _resolve_gpt_client(haiku)
     reset_process_fence()
     get_process_fence(conn)
     state = ProdLoopState()
+    state.md_conn = md_conn
     # db-writer-reader-split (design SSOT:
     # vault/50_research/db-writer-reader-split-design_2026-07-08.md) — the
     # process's ONE RW sqlite connection, generalizing #74's per-writer offload
@@ -798,6 +811,11 @@ async def run_production_paper_loop(
     if dbwriter_enabled():
         state.db_writer = DBWriter(target_db)
         state.db_writer.start()
+        # SECOND writer instance, same queue machinery, marketdata file — the
+        # actual lock-separation lever (storage-split item 3). Firehose
+        # writers below submit here instead of ``state.db_writer``.
+        state.md_db_writer = DBWriter(md_db_path)
+        state.md_db_writer.start()
     # #32 — wire the AI-JUDGE client onto state so the G3/G4 orchestrator + the
     # G7 live-recalc exit run the per-ticker judge alongside the deterministic
     # decision (shadow default: logs only; deterministic acts byte-identical).
@@ -960,7 +978,10 @@ async def run_production_paper_loop(
     altdata_task = asyncio.create_task(
         _altdata_producer(
             conn, cache=altdata_cache, state=state, stop_evt=stop_evt,
-            db_writer=state.db_writer,
+            # storage-split — altdata_snapshot (+ edgar/finnhub/defillama +
+            # their proximity SHADOW tags) is marketdata-domain; route to the
+            # marketdata writer so the firehose never contends the trading WAL.
+            db_writer=state.md_db_writer,
         )
     )
 
@@ -986,7 +1007,9 @@ async def run_production_paper_loop(
     # symbols. Spawned AFTER the Capital session so Capital WS reuses its token
     # (M4). Tasks are stored + torn down in the finally below (M5). WS is
     # additive: REST bar ingest stays the fallback, so a WS failure never halts.
-    quote_writer = QuoteTickWriter(target_db, db_writer=state.db_writer)
+    # storage-split — quote_ticks/tick_inflow are marketdata-domain: dedicated
+    # conn AND db_writer fallback both point at the marketdata file.
+    quote_writer = QuoteTickWriter(md_db_path, db_writer=state.md_db_writer)
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
@@ -997,7 +1020,8 @@ async def run_production_paper_loop(
     # tick body now ``record``s the indicator snapshot in-mem; this 1Hz flush task
     # off-loads the write on a dedicated conn (its own thread). Torn down in the
     # finally below alongside the WS writer. Evidence keeps flowing (flow_not_block).
-    tech_store_writer = TechnicalStoreWriter(target_db, db_writer=state.db_writer)
+    # storage-split — ticker_technicals is marketdata-domain (same rationale).
+    tech_store_writer = TechnicalStoreWriter(md_db_path, db_writer=state.md_db_writer)
     state.tech_store_writer = tech_store_writer
     tech_store_flush_task = asyncio.create_task(
         tech_store_writer.run_flush_loop(stop_evt)
@@ -1423,6 +1447,12 @@ async def run_production_paper_loop(
         if state.db_writer is not None:
             with contextlib.suppress(Exception):
                 state.db_writer.stop()
+        # storage-split — same drain/checkpoint/close for the marketdata writer.
+        if state.md_db_writer is not None:
+            with contextlib.suppress(Exception):
+                state.md_db_writer.stop()
+        with contextlib.suppress(Exception):
+            md_conn.close()
         # ADR-012 — close the probe tuning-log sidecar (separate DB).
         if state.probe_conn is not None:
             with contextlib.suppress(Exception):

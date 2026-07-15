@@ -820,6 +820,7 @@ def _sweep_focus(
     opportunity_scores: dict[str, float],
     trade_eligible: dict[str, bool],
     quote_writer: Any | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[FocusSelection]:
     """Build focus rows from the STEP② candidate sweep (today's movers).
 
@@ -834,18 +835,25 @@ def _sweep_focus(
     its in-mem accumulator (``activation_metrics``) so an intraday-active major
     outranks a calm wide-daily name. A missing writer degrades the live-motion
     activation components to neutral (the name scores on bars+spread alone).
+
+    ``md_conn`` (storage-split): ``select_candidate_focus`` + the prior-cycle
+    hysteresis read touch ONLY marketdata tables (watchlist_focus/bars/
+    quote_ticks/ticker_ground) — routed here, never ``conn`` — while
+    ``open_position_targets`` below stays on ``conn`` (trading/positions).
+    ``None`` falls back to ``conn`` (byte-identical pre-split behaviour).
     """
     # Deferred import breaks the _production_layers ⇆ _candidate_sweep_select ⇆
     # _static_ground import cycle (the sweep reads read_ticker_ground from
     # _static_ground, which imports read_active_universe from here).
     from polaris.scripts._candidate_sweep_select import select_candidate_focus
 
+    _md = md_conn if md_conn is not None else conn
     cap = _sweep_cap()
-    prev_symbols = _prev_focus_symbols(conn, now_ts)
+    prev_symbols = _prev_focus_symbols(_md, now_ts)
     open_targets = open_position_targets(conn)
     venue_weights = _build_venue_weights(universe, now_ts)
     return select_candidate_focus(
-        conn, universe, now_ts=now_ts, cap=cap,
+        _md, universe, now_ts=now_ts, cap=cap,
         bucket_counts=None, venue_weights=venue_weights,
         open_targets=open_targets, prev_focus_symbols=prev_symbols,
         opportunity_scores=opportunity_scores or None,
@@ -886,8 +894,17 @@ def refresh_focus_watchlist(
     run_id: str = "",
     quote_writer: Any | None = None,
     altdata_cache: Any | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> int:
     """Compute dynamic focus over active universe + persist; return count.
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain conn used
+    for the final ``watchlist_focus`` persist + (candidate-sweep path only)
+    the prior-cycle/bars/ticker_ground reads inside :func:`_sweep_focus`.
+    Every OTHER read here (universe/blocklist/signals/cell_matrix/regime/
+    positions) stays on ``conn`` (trading). ``None`` falls back to ``conn``
+    (byte-identical pre-split behaviour — every existing single-conn caller/
+    test is unaffected).
 
     Task 3 / D2: runtime-blocklisted (venue, symbol) — venue-permanent
     compliance rejects (51155) — are excluded so they never enter focus and
@@ -990,12 +1007,14 @@ def refresh_focus_watchlist(
     # The legacy merit producer stays intact behind POLARIS_CANDIDATE_SWEEP=0 for
     # rollback. The EntranceJudge telemetry (opportunity_score/trade_eligible flag
     # + the ambiguity sidecar) is preserved on both paths.
+    _md = md_conn if md_conn is not None else conn
     if _candidate_sweep_enabled():
         focus = _sweep_focus(
             conn, universe, ts,
             opportunity_scores=opportunity_scores,
             trade_eligible=trade_eligible,
             quote_writer=quote_writer,
+            md_conn=_md,
         )
     else:
         focus = compute_dynamic_focus(
@@ -1005,7 +1024,7 @@ def refresh_focus_watchlist(
             opportunity_scores=opportunity_scores or None,
             trade_eligible=trade_eligible or None,
         )
-    persist_focus(conn, focus)
+    persist_focus(_md, focus)
     # Ambiguity seam — write the per-candidate judgment (incl. ambiguous flag) to
     # the sidecar. PURE TELEMETRY (NO AI, NO runtime consumer; deferred Inc-2).
     if probe_conn is not None and judge_readings:

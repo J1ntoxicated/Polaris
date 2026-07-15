@@ -520,3 +520,4 @@
 2026-07-15 20:41 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
 2026-07-15 20:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
 - 2026-07-16: 마스터 리셋 착수 (Jin '리셋 됐어', 시드니 목 08:30) — 봇은 부팅실패 루프 상태여서 MANUAL_STOP 수술윈도 고정. P0 storage-split 빌드 워크플로(wf_20fa4e1d: 감사→Sonnet빌드→Opus 3렌즈) + read-only 감사편대(wf_c7762fe8: built-not-wired·하네스·죽은코드·널리지 4축) 병행 가동. 작업보드 Task #1-7 (P0-P6).
+- 2026-07-16: 감사편대 판정 랜딩 — 게이트-에이전트 8 archive·deprecated lessons 73 삭제(keep 12)·superseded plans 6 archive·auto-invasion 사본 archive·ADR-014 정정·_NOW.md 현행화. 대발견: P0a evolve 승격게이트 미가동(전략 2 INERT)·tick엔진 무발화·dead-code는 깨끗(고아 8함수뿐). 판정=reset-audit-verdicts-2026-07-16.md

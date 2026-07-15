@@ -2,7 +2,7 @@
 type: ADR
 adr_id: ADR-014
 aliases: [ADR-014]
-status: active
+status: designed-not-implemented  # 2026-07-16 리셋감사: graph MCP 미등록(vaporware) — .mcp.json 등록(P0=Jin action) 전까지 graph-first 트리거는 실행 불가 경로
 date_created: 2026-06-27
 tags: [adr, vault, graph-index, codebase-memory, reference-bridge, code-anchors, dev-time]
 related: [[ADR-001-vault-structure|ADR-001]], [[ADR-003-8-layer-architecture|ADR-003]], [[harness-collab-protocol]]

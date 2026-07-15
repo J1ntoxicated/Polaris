@@ -519,3 +519,4 @@
 2026-07-15 20:36 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
 2026-07-15 20:41 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
 2026-07-15 20:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
+- 2026-07-16: 마스터 리셋 착수 (Jin '리셋 됐어', 시드니 목 08:30) — 봇은 부팅실패 루프 상태여서 MANUAL_STOP 수술윈도 고정. P0 storage-split 빌드 워크플로(wf_20fa4e1d: 감사→Sonnet빌드→Opus 3렌즈) + read-only 감사편대(wf_c7762fe8: built-not-wired·하네스·죽은코드·널리지 4축) 병행 가동. 작업보드 Task #1-7 (P0-P6).

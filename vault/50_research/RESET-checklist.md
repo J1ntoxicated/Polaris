@@ -20,7 +20,10 @@ Jin 2026-07-15 "클린업 할 시기" — 마스터 리셋 = **아키텍처 재�
       왓치독 틱-생존은 유지(keeper).
 
 ## P1 — 안전/정합 (작고 독립)
-- [ ] **엑싯 백스톱**: 시간/하드 스톱 신설 → stopless 무한정박(DIA/CNC 6일 클래스) 근절.
+- [ ] **엑싯 백스톱 + 마크 폴백**: ①시간/하드 스톱 신설 → stopless 무한정박 근절. ②**held 포지션
+      마크가 quote_ticks(mid)에만 의존 → 알파카 held는 mid=null이라 진입가에 7일 정지(DIA/CNC
+      실측: last_seen_mid null, 바는 신선한데 마크 안 됨) → 엑싯 로직이 얼어붙은 가격 평가해 영영
+      청산 안 됨. mid 없으면 신선한 바로 마크 폴백 의무.**
 - [ ] **전략↔티커 정렬**: cci_reversion(commodity 선언인데 FX/지수 물림)·weekend_*(세션게이트 0)·
       connors_rsi2(alpaca→capital 누수) 교정 + 미등록 발화(session_breakout 등) 레지스트리 재조정.
 

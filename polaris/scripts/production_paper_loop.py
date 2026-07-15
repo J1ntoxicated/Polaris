@@ -965,6 +965,10 @@ async def run_production_paper_loop(
             probe_db=target_db.parent / "probes.sqlite",
             stop_evt=stop_evt,
             db_writer=state.db_writer,
+            # storage-split — prune the marketdata firehose (bars/baseline/
+            # focus/shadow/altdata) against its own file/writer.
+            md_db=md_db_path,
+            md_db_writer=state.md_db_writer,
         )
     )
     # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each

@@ -50,7 +50,8 @@ from pathlib import Path
 from polaris.core.probes.tuning_log import open_probe_db
 from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.retention import (
-    RETENTION_SPEC,
+    RETENTION_SPEC_MARKETDATA,
+    RETENTION_SPEC_TRADING,
     RetentionRule,
     prune_table_chunk,
     run_probe_retention,
@@ -86,23 +87,29 @@ def _retention_chunk_rows() -> int:
     return value if value > 0 else 2000
 
 
-def _prune_live_blocking(live_db: Path) -> None:
-    """Legacy path: prune the live DB on a dedicated conn (own worker thread).
+def _prune_live_blocking(
+    live_db: Path, *, spec: tuple[RetentionRule, ...] = RETENTION_SPEC_TRADING,
+) -> None:
+    """Legacy path: prune a DB on a dedicated conn (own worker thread).
 
     Used only when ``db_writer`` is unavailable/kill-switched — byte-identical
     to the pre-migration behaviour (same allowlist deletes via
     ``run_retention_live``, same degrade-never-crash wrapping).
+
+    ``spec`` (storage-split): defaults to the trading-domain rules
+    (``gate_events``) for ``live_db``; the marketdata pass below passes
+    ``RETENTION_SPEC_MARKETDATA`` against the marketdata DB path instead.
     """
     try:
         conn = connect(live_db)
         try:
-            deleted = run_retention_live(conn)
+            deleted = run_retention_live(conn, spec=spec)
         finally:
             conn.close()
         if any(deleted.values()):
-            logger.info("[retention] live prune: %s", deleted)
+            logger.info("[retention] prune %s: %s", live_db.name, deleted)
     except Exception as exc:  # noqa: BLE001 — hygiene must never halt the loop
-        logger.warning("[retention] live prune pass failed (degrade): %r", exc)
+        logger.warning("[retention] prune pass failed for %s (degrade): %r", live_db, exc)
 
 
 def _prune_probe_blocking(probe_db: Path) -> None:
@@ -127,15 +134,16 @@ def _prune_probe_blocking(probe_db: Path) -> None:
         logger.warning("[retention] probe prune unexpected error (degrade): %r", exc)
 
 
-def _prune_blocking(live_db: Path, probe_db: Path) -> None:
-    """Prune both DBs on dedicated connections (runs on a worker thread).
+def _prune_blocking(live_db: Path, md_db: Path, probe_db: Path) -> None:
+    """Prune all three DBs on dedicated connections (runs on a worker thread).
 
-    Back-compat wrapper over ``_prune_live_blocking`` + ``_prune_probe_blocking``
-    (kept as ONE call for the legacy no-db_writer path — same shape as before
-    this module's db_writer migration). Fully fail-open: a failure on either DB
-    is logged and swallowed independently.
+    Back-compat wrapper over ``_prune_live_blocking`` (x2, one per domain) +
+    ``_prune_probe_blocking`` — same shape as before this module's db_writer
+    migration, extended for the storage-split marketdata DB. Fully fail-open:
+    a failure on any DB is logged and swallowed independently.
     """
-    _prune_live_blocking(live_db)
+    _prune_live_blocking(live_db, spec=RETENTION_SPEC_TRADING)
+    _prune_live_blocking(md_db, spec=RETENTION_SPEC_MARKETDATA)
     _prune_probe_blocking(probe_db)
 
 
@@ -179,11 +187,21 @@ async def _prune_rule_chunked(
     return total
 
 
-async def _prune_live_chunked(db_writer: DBWriter, *, now_ts: int) -> None:
-    """Chunked db_writer-routed live-DB prune — one rule at a time."""
+async def _prune_live_chunked(
+    db_writer: DBWriter,
+    *,
+    now_ts: int,
+    spec: tuple[RetentionRule, ...] = RETENTION_SPEC_TRADING,
+) -> None:
+    """Chunked db_writer-routed prune — one rule at a time.
+
+    ``spec`` (storage-split): defaults to the trading-domain rule
+    (``gate_events``); the marketdata pass in ``retention_producer`` passes
+    ``RETENTION_SPEC_MARKETDATA`` with the marketdata ``DBWriter`` instead.
+    """
     chunk_rows = _retention_chunk_rows()
     deleted: dict[str, int] = {}
-    for rule in RETENTION_SPEC:
+    for rule in spec:
         n = await _prune_rule_chunked(db_writer, rule, now_ts=now_ts, chunk_rows=chunk_rows)
         deleted[rule.table] = deleted.get(rule.table, 0) + n
     if any(deleted.values()):
@@ -197,18 +215,28 @@ async def retention_producer(
     stop_evt: asyncio.Event,
     interval_sec: float = RETENTION_INTERVAL_SEC,
     db_writer: DBWriter | None = None,
+    md_db: Path | None = None,
+    md_db_writer: DBWriter | None = None,
 ) -> None:
     """Periodically off-load the retention prune until ``stop_evt`` is set.
 
     Waits ``interval_sec`` between passes (interruptible by ``stop_evt`` for a
-    prompt teardown). The LIVE-DB prune routes through ``db_writer`` (chunked
-    jobs, see ``_prune_live_chunked``) when wired and the kill switch reads
-    enabled; ``db_writer=None`` falls back to ``_prune_live_blocking`` on a
-    worker thread (byte-identical to the pre-migration behaviour). The
-    PROBE-DB prune is UNCONDITIONAL every pass, always on its own dedicated
-    conn/worker-thread (see module docstring). The first pass runs after the
-    first interval, not at boot (boot already does enough I/O; nothing here is
-    urgent).
+    prompt teardown). The LIVE-DB (trading-domain, ``gate_events`` only)
+    prune routes through ``db_writer`` (chunked jobs, see
+    ``_prune_live_chunked``) when wired and the kill switch reads enabled;
+    ``db_writer=None`` falls back to ``_prune_live_blocking`` on a worker
+    thread (byte-identical to the pre-migration behaviour).
+
+    storage-split: ``md_db``/``md_db_writer`` run the SAME pattern against
+    the marketdata DB with ``RETENTION_SPEC_MARKETDATA`` (bars/baseline/
+    focus/shadow/altdata — the actual firehose this split exists to bound).
+    ``md_db=None`` (unwired caller/test) skips the marketdata pass entirely
+    — byte-identical to the pre-split single-DB behaviour.
+
+    The PROBE-DB prune is UNCONDITIONAL every pass, always on its own
+    dedicated conn/worker-thread (see module docstring). The first pass runs
+    after the first interval, not at boot (boot already does enough I/O;
+    nothing here is urgent).
     """
     while not stop_evt.is_set():
         try:
@@ -218,11 +246,30 @@ async def retention_producer(
             pass
         try:
             if db_writer is not None and dbwriter_enabled():
-                await _prune_live_chunked(db_writer, now_ts=int(time.time()))
+                await _prune_live_chunked(
+                    db_writer, now_ts=int(time.time()), spec=RETENTION_SPEC_TRADING
+                )
             else:
-                await asyncio.to_thread(_prune_live_blocking, live_db)
+                await asyncio.to_thread(
+                    _prune_live_blocking, live_db, spec=RETENTION_SPEC_TRADING
+                )
         except Exception:  # noqa: BLE001 — task must survive any prune failure
             logger.debug("[retention] producer live-prune cycle failed", exc_info=True)
+        if md_db is not None:
+            try:
+                if md_db_writer is not None and dbwriter_enabled():
+                    await _prune_live_chunked(
+                        md_db_writer, now_ts=int(time.time()),
+                        spec=RETENTION_SPEC_MARKETDATA,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        _prune_live_blocking, md_db, spec=RETENTION_SPEC_MARKETDATA
+                    )
+            except Exception:  # noqa: BLE001 — task must survive any prune failure
+                logger.debug(
+                    "[retention] producer marketdata-prune cycle failed", exc_info=True
+                )
         try:
             await asyncio.to_thread(_prune_probe_blocking, probe_db)
         except Exception:  # noqa: BLE001 — task must survive any prune failure

@@ -38,6 +38,7 @@ from polaris.scripts._production_retention import (
     retention_producer,
 )
 from polaris.storage.db_writer import DBWriter
+from polaris.storage.retention import RETENTION_SPEC
 from polaris.storage.schema import connect, init_db
 
 NOW = 1_782_000_000
@@ -113,7 +114,9 @@ def test_prune_blocking_prunes_streams_and_keeps_ledger(tmp_path: Path) -> None:
     _seed_live(live)
     _seed_probe(probe)
 
-    _prune_blocking(live, probe)
+    # storage-split: bars is marketdata-domain — md_db=live (same combined
+    # seeded DB) so both the trading and marketdata passes prune it.
+    _prune_blocking(live, live, probe)
 
     # Stream pruned to the in-window rows.
     assert _count(live, "bars") == 1
@@ -135,7 +138,7 @@ def test_prune_blocking_degrades_on_missing_live_db(tmp_path: Path) -> None:
     sqlite3.connect(str(live)).close()
     _seed_probe(probe)
 
-    _prune_blocking(live, probe)  # must not raise
+    _prune_blocking(live, live, probe)  # must not raise
 
     assert _count(probe, "probe_decisions") == 1
 
@@ -151,7 +154,11 @@ async def test_retention_producer_runs_then_stops(tmp_path: Path) -> None:
     # Tiny interval so the first pass fires immediately; then stop.
     task = asyncio.create_task(
         retention_producer(
-            live_db=live, probe_db=probe, stop_evt=stop, interval_sec=0.01
+            live_db=live, probe_db=probe, stop_evt=stop, interval_sec=0.01,
+            # storage-split: bars is marketdata-domain — this test seeds a
+            # single combined DB (init_db's unchanged full schema), so
+            # md_db=live exercises the marketdata pass against the SAME file.
+            md_db=live,
         )
     )
     # Let at least one prune pass complete.
@@ -199,7 +206,10 @@ async def test_prune_live_chunked_prunes_and_keeps_ledger(tmp_path: Path) -> Non
     dbw = DBWriter(live, batch_max=8, drain_ms=10)
     dbw.start()
     try:
-        await _prune_live_chunked(dbw, now_ts=NOW)
+        # storage-split: default spec is trading-only (gate_events); this
+        # test also checks the (marketdata-domain) bars prune, so pass the
+        # full combined spec explicitly against the single seeded DB.
+        await _prune_live_chunked(dbw, now_ts=NOW, spec=RETENTION_SPEC)
     finally:
         dbw.stop()
 
@@ -256,6 +266,9 @@ async def test_retention_producer_routes_live_prune_through_db_writer(
         retention_producer(
             live_db=live, probe_db=probe, stop_evt=stop, interval_sec=0.01,
             db_writer=dbw,
+            # storage-split: same single-DB precedent as above — route the
+            # marketdata pass at the SAME file/writer so bars still prunes.
+            md_db=live, md_db_writer=dbw,
         )
     )
     for _ in range(200):
@@ -291,6 +304,8 @@ async def test_retention_producer_kill_switch_falls_back_to_dedicated_conn(
         retention_producer(
             live_db=live, probe_db=probe, stop_evt=stop, interval_sec=0.01,
             db_writer=dbw,
+            # storage-split: same single-DB precedent as above.
+            md_db=live, md_db_writer=dbw,
         )
     )
     for _ in range(200):

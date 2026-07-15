@@ -113,8 +113,11 @@ def _assert_wrapped_in_own_try(marker: str, stage_name: str) -> None:
 
 
 def test_cf_sweep_forward_marks_isolated() -> None:
+    # storage-split (2026-07-14): bars + gate_kill_counterfactuals are both
+    # marketdata-domain, so this call now reads/writes the marketdata conn
+    # (_md_conn), not the trading conn.
     _assert_wrapped_in_own_try(
-        "await sweep_forward_marks(conn, now_ts=now_ts)", "cf_sweep_forward_marks",
+        "await sweep_forward_marks(_md_conn, now_ts=now_ts)", "cf_sweep_forward_marks",
     )
 
 

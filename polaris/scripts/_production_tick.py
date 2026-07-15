@@ -668,10 +668,14 @@ async def _run_tick(
     # resolves pending G3/G4 KILL/PASS cohort rows from the bars just ingested
     # (zero new fetches). 60s throttle + LIMIT batch inside the sweep; never
     # reads/affects any entry/exit/sizing decision.
+    # storage-split: bars + gate_kill_counterfactuals are BOTH marketdata-
+    # domain — this sweep touches ZERO trading tables, so it reads/writes
+    # _md_conn entirely (same-conn adjacency audit item, resolved by routing
+    # the whole call to the marketdata conn rather than a partial split).
     if now_mono - state.last_cf_sweep_monotonic >= CF_SWEEP_THROTTLE_SEC:
         state.last_cf_sweep_monotonic = now_mono
         try:
-            await sweep_forward_marks(conn, now_ts=now_ts)
+            await sweep_forward_marks(_md_conn, now_ts=now_ts)
         except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
             _log_tick_stage_fault("cf_sweep_forward_marks", tick_idx, exc)
             state.fault_events += 1

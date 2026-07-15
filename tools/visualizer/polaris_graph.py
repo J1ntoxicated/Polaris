@@ -43,6 +43,7 @@ from typing import Any
 from polaris.core.sizing.session import resolve_venue_session
 from polaris.core.streams import asset_class_allowed_for_venue
 from polaris.scripts.dashboard.snapshot import collect_snapshot
+from polaris.storage.schema_marketdata import marketdata_db_path_for
 from polaris.strategies import STRATEGY_REGISTRY
 from tools.visualizer.polaris_graph_chains import (
     build_lifecycle_paths,
@@ -1362,6 +1363,12 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
     A table missing on an older schema None-guards that ONE channel
     (``sqlite3.Error`` caught per-table) rather than dropping the whole
     block — no fabricated numbers, ever.
+
+    storage-split (2026-07-14): every channel here is marketdata-domain
+    EXCEPT ``tsmom_shadow``/``squeeze_shadow`` (``gate_shadow_events`` — the
+    explicit trading-domain exception) and ``momentum_z`` (``universe``).
+    Reads a SEPARATE marketdata conn for the former; ``db_path`` (trading)
+    stays for the latter two.
     """
     now = time.time()
     if now - _shadow_channels_cache["ts"] < _SHADOW_CHANNELS_TTL:
@@ -1379,8 +1386,9 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
     # trusted (not user-input) integer literal, same embedding style as the
     # other hardcoded WHERE clauses in this tuple list.
     _vwap_1h_cutoff = int(now) - 3600
-    if db_path.exists():
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    md_path = marketdata_db_path_for(db_path)
+    if md_path.exists():
+        md_conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
         try:
             for name, table, where in (
                 ("calibration_pairs", "calibration_pairs", ""),
@@ -1389,6 +1397,48 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                  f"WHERE created_ts >= {_vwap_1h_cutoff}"),
                 ("news_timing_shadow", "news_timing_shadow", ""),
                 ("sector_rank_shadow", "sector_rank_shadow", ""),
+                ("meta_labels", "meta_labels", ""),
+                ("edgar_filings", "edgar_filings", ""),
+                ("earnings_calendar", "earnings_calendar", ""),
+                ("stablecoin_liquidity", "stablecoin_liquidity", ""),
+            ):
+                try:
+                    row = md_conn.execute(
+                        f"SELECT COUNT(*), MAX(created_ts) FROM {table} {where}"
+                    ).fetchone()
+                except sqlite3.Error:
+                    continue
+                if row is None:
+                    continue
+                n, fresh = row
+                out[name]["n"] = int(n or 0)
+                out[name]["fresh_ts"] = int(fresh) if fresh is not None else None
+            # maker_fill_sim R1 2026-07-12 debate — traded-through ratio +
+            # avg price-improvement bps (offline-resolved vs forward bars,
+            # tools/visualizer/price_through_channel.py — reads
+            # price_through_shadow + bars, both marketdata). Same degrade-
+            # never-crash contract as every channel above.
+            try:
+                pts = price_through_channel_stats(md_conn)
+            except sqlite3.Error:
+                pts = None
+            if pts is not None:
+                out["price_through_shadow"]["n"] = pts["n"]
+                out["price_through_shadow"]["fresh_ts"] = pts["fresh_ts"]
+                out["price_through_shadow"]["traded_through_pct"] = pts[
+                    "traded_through_pct"
+                ]
+                out["price_through_shadow"]["avg_price_improve_bps"] = pts[
+                    "avg_price_improve_bps"
+                ]
+        except sqlite3.Error:
+            pass
+        finally:
+            md_conn.close()
+    if db_path.exists():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            for name, table, where in (
                 ("tsmom_shadow", "gate_shadow_events",
                  "WHERE technical_flags = 'tsmom_shadow_literature'"),
                 # G4's new SQUEEZE satellite — ttm_squeeze_shadow.py's 4
@@ -1396,10 +1446,6 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 # which mean "a squeeze shadow reading landed" (item 2).
                 ("squeeze_shadow", "gate_shadow_events",
                  "WHERE technical_flags LIKE 'squeeze_%'"),
-                ("meta_labels", "meta_labels", ""),
-                ("edgar_filings", "edgar_filings", ""),
-                ("earnings_calendar", "earnings_calendar", ""),
-                ("stablecoin_liquidity", "stablecoin_liquidity", ""),
             ):
                 try:
                     row = conn.execute(
@@ -1425,23 +1471,6 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 out["momentum_z"]["n"] = int(n or 0)
                 out["momentum_z"]["fresh_ts"] = int(fresh) if fresh is not None else None
                 out["momentum_z"]["spread"] = round(spread, 4) if spread is not None else None
-            # maker_fill_sim R1 2026-07-12 debate — traded-through ratio +
-            # avg price-improvement bps (offline-resolved vs forward bars,
-            # tools/visualizer/price_through_channel.py). Same degrade-never-
-            # crash contract as every channel above (sqlite3.Error → None).
-            try:
-                pts = price_through_channel_stats(conn)
-            except sqlite3.Error:
-                pts = None
-            if pts is not None:
-                out["price_through_shadow"]["n"] = pts["n"]
-                out["price_through_shadow"]["fresh_ts"] = pts["fresh_ts"]
-                out["price_through_shadow"]["traded_through_pct"] = pts[
-                    "traded_through_pct"
-                ]
-                out["price_through_shadow"]["avg_price_improve_bps"] = pts[
-                    "avg_price_improve_bps"
-                ]
         except sqlite3.Error:
             pass
         finally:
@@ -1465,17 +1494,27 @@ def _query_upcoming_earnings(db_path: Path) -> list[dict[str, Any]]:
     per-discovery-cycle FOCUS flag that toggles/goes stale between runs, not a
     "do we track this ticker" flag; requiring it would blank this panel between
     cycles). Top 6 by soonest date/hour — display-only, never gates/sizes.
+
+    storage-split (2026-07-14, cross-domain audit item): ``earnings_calendar``
+    is marketdata-domain, ``universe`` is trading-domain — they no longer live
+    in the same file. Cross-domain audit resolution: read-only ``ATTACH`` of
+    the marketdata file onto this dashboard-only conn (non-hot-path — TTL-
+    cached 60s), per the blueprint's suggested resolution. A missing
+    marketdata file (bot never booted post-split yet) degrades to an empty
+    panel, same as any other sqlite error here.
     """
     now = time.time()
     if now - _upcoming_earnings_cache["ts"] < _UPCOMING_EARNINGS_TTL:
         return _upcoming_earnings_cache["rows"]  # type: ignore[no-any-return]
     rows: list[dict[str, Any]] = []
-    if db_path.exists():
+    md_path = marketdata_db_path_for(db_path)
+    if db_path.exists() and md_path.exists():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
+            conn.execute(f"ATTACH DATABASE 'file:{md_path}?mode=ro' AS md")
             for symbol, date, hour, est in conn.execute(
                 "SELECT DISTINCT e.symbol, e.earnings_date, e.hour, e.eps_estimate "
-                "FROM earnings_calendar e JOIN universe u ON u.symbol = e.symbol "
+                "FROM md.earnings_calendar e JOIN universe u ON u.symbol = e.symbol "
                 "WHERE e.earnings_date >= date('now') "
                 "AND e.earnings_date < date('now', '+7 days') "
                 "ORDER BY e.earnings_date ASC, e.hour ASC, e.symbol ASC LIMIT 6"
@@ -1510,11 +1549,16 @@ def _query_stablecoin_series(db_path: Path) -> list[dict[str, Any]]:
     """Last ``_STABLE_SERIES_MAX`` TOTAL-symbol readings from
     ``stablecoin_liquidity``, ascending by ts. Index-covered
     (``idx_stablecoin_liquidity_symbol``) — a bounded LIMIT read, not a scan.
+
+    storage-split (2026-07-14): ``stablecoin_liquidity`` is marketdata-domain
+    — ``db_path`` (the caller's trading path) is resolved to its marketdata
+    sibling before opening the read-only conn.
     """
     now = time.time()
     if now - _stable_series_cache["ts"] < _STABLE_SERIES_TTL:
         return _stable_series_cache["rows"]  # type: ignore[no-any-return]
     rows: list[dict[str, Any]] = []
+    db_path = marketdata_db_path_for(db_path)
     if db_path.exists():
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:

@@ -4,6 +4,10 @@ DEMO/PAPER, display-only. Confirms ``_query_shadow_channels`` exposes the
 price-through shadow (maker_fill_sim R1 2026-07-12 debate) with the SAME
 n/target/fresh_ts shape every sibling channel uses, plus the traded-through%/
 avg-price-improve-bps pair. Read-only — never gates/sizes/throttles a trade.
+
+storage-split (2026-07-14): ``price_through_shadow`` is marketdata-domain —
+``_query_shadow_channels`` reads it from the trading db_path's marketdata
+SIBLING file (``marketdata_db_path_for``), not ``db_path`` itself.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import sqlite3
 from pathlib import Path
 
 from polaris.storage.schema import ALL_DDL
+from polaris.storage.schema_marketdata import marketdata_db_path_for
 from tools.visualizer import polaris_graph as pg
 
 
@@ -20,15 +25,21 @@ def _make_db(tmp_path: Path) -> Path:
     conn = sqlite3.connect(db_path)
     for stmt in ALL_DDL:
         conn.executescript(stmt)
-    conn.execute(
+    conn.commit()
+    conn.close()
+    md_path = marketdata_db_path_for(db_path)
+    md_conn = sqlite3.connect(md_path)
+    for stmt in ALL_DDL:
+        md_conn.executescript(stmt)
+    md_conn.execute(
         "INSERT INTO price_through_shadow "
         "(event_id, run_id, strategy_id, venue, symbol, side, fill_px, "
         " touch_px, current_fee_bps, created_ts) "
         "VALUES ('e1', 'r', 's', 'okx', 'BTC-USDT', 'buy', 100.0, 99.0, "
         " 10.0, 1000)",
     )
-    conn.commit()
-    conn.close()
+    md_conn.commit()
+    md_conn.close()
     return db_path
 
 

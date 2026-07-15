@@ -517,7 +517,8 @@ async def run_tick_decision_loop(
             # still watched/persisted — cadence only governs HOW OFTEN it is eval'd.
             cycle_idx = eng.loop_count
             focus = get_focus_targets(
-                conn, cycle_ts=now_ts, max_n=watch_ceiling, cycle_index=cycle_idx
+                conn, cycle_ts=now_ts, max_n=watch_ceiling, cycle_index=cycle_idx,
+                md_conn=state.md_conn,
             )
             # Increment 1 DECOUPLE: the TRADE set (entrance-judge eligible subset)
             # gates the order-open; the watch ``focus`` above still streams/ingests
@@ -528,6 +529,7 @@ async def run_tick_decision_loop(
                 for v, s, _ac, _g in get_focus_targets(
                     conn, cycle_ts=now_ts, max_n=watch_ceiling,
                     eligible_only=True, cycle_index=cycle_idx,
+                    md_conn=state.md_conn,
                 )
             }
             # Regime is read once per (venue, group) per loop (M1/M2: a cheap

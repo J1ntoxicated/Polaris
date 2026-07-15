@@ -565,7 +565,8 @@ async def _run_tick(
     # ingest polls S/A every cycle, B every K, T every M (flow_not_block: every
     # active row is still watched, cadence only governs HOW OFTEN it is bar-pulled).
     focus = get_focus_targets(
-        conn, cycle_ts=now_ts, max_n=_focus_cycle_target(), cycle_index=tick_idx
+        conn, cycle_ts=now_ts, max_n=_focus_cycle_target(), cycle_index=tick_idx,
+        md_conn=state.md_conn,
     )
     if not focus:
         logger.warning(

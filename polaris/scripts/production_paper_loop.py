@@ -1045,7 +1045,7 @@ async def run_production_paper_loop(
         )
     ws_tasks, ws_clients = start_ws_producers(
         conn, writer=quote_writer, stop_evt=stop_evt,
-        capital_session=capital_session,
+        capital_session=capital_session, md_conn=md_conn,
     )
 
     # P0 venue wire: build a single OKX adapter for real-roundtrip runs so the
@@ -1318,7 +1318,7 @@ async def run_production_paper_loop(
             # long as it is held. Best-effort + idempotent (never forces a churn).
             if ws_clients:
                 try:
-                    await resubscribe_ws_clients(conn, ws_clients)
+                    await resubscribe_ws_clients(conn, ws_clients, md_conn=md_conn)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
 

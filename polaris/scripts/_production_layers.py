@@ -1201,8 +1201,19 @@ def get_focus_targets(
     cycle_index: int | None = None,
     cadence_k: int | None = None,
     cadence_m: int | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Read the latest focus cycle as ``(venue, symbol, asset_class, group_id)``.
+
+    ``md_conn`` (storage-split cross-domain audit item — this call site was
+    NOT in the blueprint's named list, added here): ``watchlist_focus`` is
+    marketdata-domain, ``universe`` is trading-domain. The prior single-query
+    ``LEFT JOIN`` spanned both; this now reads the focus rows from ``md_conn``
+    (falling back to ``conn`` when unwired) and resolves each row's
+    asset_class/group_id from ``universe`` via a Python-side dict merge — a
+    hot-path caller (bar ingest + WS subscription both call this every tick),
+    so the blueprint's ATTACH suggestion (non-hot-path only) does not apply
+    here; a plain second SELECT is the resolution it prescribes instead.
 
     Returns up to ``max_n`` dynamic-focus entries (ordered by focus_rank asc)
     UNIONED with every OPEN position's symbol (:func:`open_position_targets`).
@@ -1234,8 +1245,9 @@ def get_focus_targets(
     BTC seed). Union is ADD-only (flow_not_block): never blocks an entry.
     """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
+    _md = md_conn if md_conn is not None else conn
     focus: list[tuple[str, str, str, str]] = []
-    row = conn.execute(
+    row = _md.execute(
         "SELECT MAX(cycle_ts) FROM watchlist_focus WHERE cycle_ts <= ?", (ts,)
     ).fetchone()
     if row is not None and row[0] is not None:
@@ -1243,7 +1255,7 @@ def get_focus_targets(
         # DECOUPLE: the trade set filters to eligible rows; the watch set takes
         # all. COALESCE(trade_eligible,1)=1 keeps a legacy/un-judged row eligible.
         eligible_clause = (
-            " AND COALESCE(wf.trade_eligible, 1) = 1" if eligible_only else ""
+            " AND COALESCE(trade_eligible, 1) = 1" if eligible_only else ""
         )
         params: list[object] = [latest_cycle]
         # CADENCE: filter to firing tiers this cycle (legacy/un-tiered row →
@@ -1255,38 +1267,48 @@ def get_focus_targets(
             m = cadence_m if cadence_m is not None else m
             firing = _firing_tiers(int(cycle_index), int(k), int(m))
             placeholders = ", ".join("?" for _ in firing)
-            tier_clause = f" AND COALESCE(wf.tier, 'T') IN ({placeholders})"
+            tier_clause = f" AND COALESCE(tier, 'T') IN ({placeholders})"
             params.extend(firing)
         params.append(int(max_n))
-        rows = conn.execute(
+        wf_rows = _md.execute(
             f"""
-            SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
-            FROM watchlist_focus wf
-            LEFT JOIN universe u
-              ON wf.venue = u.venue AND wf.symbol = u.symbol
-            WHERE wf.cycle_ts = ?{eligible_clause}{tier_clause}
-            ORDER BY wf.focus_rank ASC
+            SELECT venue, symbol
+            FROM watchlist_focus
+            WHERE cycle_ts = ?{eligible_clause}{tier_clause}
+            ORDER BY focus_rank ASC
             LIMIT ?
             """,
             tuple(params),
         ).fetchall()
-        focus = [
-            (
-                str(r[0]),
-                str(r[1]),
-                # P2.2 fix (2026-06-22): a NULL asset_class (universe JOIN-miss)
-                # falls back to the canonical group_id prefix (5-class) BEFORE
-                # "crypto" — so an aged-out Alpaca equity / Capital commodity is
-                # not mislabelled crypto (which would apply the wrong 2.0%
-                # regime vol-floor). venue untouched; signal-only, flow_not_block.
-                str(r[2]) if r[2] else (
-                    str(r[3]).split(":", 1)[0]
-                    if r[3] and ":" in str(r[3]) else "crypto"
-                ),
-                str(r[3] or ""),
+        # storage-split (cross-domain audit): the asset_class/group_id
+        # resolution against ``universe`` (trading-domain) is now a SEPARATE
+        # query on ``conn`` + a Python-side dict merge — the prior single
+        # ``LEFT JOIN`` spanned watchlist_focus(md) and universe(trading),
+        # which no longer share a file.
+        venues = {str(v) for v, _s in wf_rows}
+        uni_by_key: dict[tuple[str, str], tuple[str, str]] = {}
+        if venues:
+            placeholders = ", ".join("?" for _ in venues)
+            for v, s, ac, gid in conn.execute(
+                f"SELECT venue, symbol, asset_class, underlying_group_id "
+                f"FROM universe WHERE venue IN ({placeholders})",
+                tuple(venues),
+            ).fetchall():
+                uni_by_key[(str(v), str(s))] = (str(ac or ""), str(gid or ""))
+        focus = []
+        for v, s in wf_rows:
+            venue, symbol = str(v), str(s)
+            ac, gid = uni_by_key.get((venue, symbol), ("", ""))
+            # P2.2 fix (2026-06-22): a NULL/missing asset_class (universe
+            # JOIN-miss) falls back to the canonical group_id prefix (5-class)
+            # BEFORE "crypto" — so an aged-out Alpaca equity / Capital
+            # commodity is not mislabelled crypto (which would apply the
+            # wrong 2.0% regime vol-floor). venue untouched; signal-only,
+            # flow_not_block.
+            resolved_ac = ac if ac else (
+                gid.split(":", 1)[0] if gid and ":" in gid else "crypto"
             )
-            for r in rows
-        ]
+            focus.append((venue, symbol, resolved_ac, gid))
     # Force-seat held symbols (additive, not truncated by max_n). De-dup on
     # (venue, symbol) so a held name already in the dynamic focus is not doubled.
     seen = {(v, s) for v, s, _ac, _g in focus}

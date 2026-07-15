@@ -45,11 +45,18 @@ def _universe_names(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
 _DASHBOARD_TICK_FRESH_SEC = 60
 
 
-def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
+def _last_prices(
+    conn: sqlite3.Connection, *, md_conn: sqlite3.Connection | None = None,
+) -> dict[str, float]:
     # P4 #1: prefer the latest WS quote tick mid (real-time px-flash) when it is
     # fresh; otherwise fall back to the last bar close. Bars stay the calc source
     # everywhere else — this only changes what "current price" the dashboard
     # shows (behavior 0; positions.last_price reads this same dict downstream).
+    #
+    # Storage-split (2026-07-14): ``bars``/``quote_ticks`` are marketdata-domain
+    # — reads go against ``md_conn`` when supplied, falling back to ``conn``
+    # (byte-identical for every existing single-conn test/caller).
+    _md = md_conn if md_conn is not None else conn
     #
     # bars JOIN: the previous `WHERE (instrument_id, ts) IN (…)` row-value form
     # forced a full bars scan (SQLite can't index a row-value IN against a
@@ -65,7 +72,7 @@ def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
     # this guard is the dashboard-side belt-and-suspenders).
     now_s = _now_s()
     rows = _safe_query(
-        conn,
+        _md,
         """SELECT b.instrument_id, b.close FROM bars b
            JOIN (SELECT instrument_id, MAX(ts) AS mts FROM bars
                  WHERE ts <= ? GROUP BY instrument_id) m
@@ -77,7 +84,7 @@ def _last_prices(conn: sqlite3.Connection) -> dict[str, float]:
     # Overlay fresh WS quote ticks (mid) on top of the bar-close baseline.
     fresh_floor = _now_s() - _DASHBOARD_TICK_FRESH_SEC
     tick_rows = _safe_query(
-        conn,
+        _md,
         """SELECT q.instrument_id, q.mid FROM quote_ticks q
            JOIN (SELECT instrument_id, MAX(ts) AS mts FROM quote_ticks GROUP BY instrument_id) m
              ON q.instrument_id = m.instrument_id AND q.ts = m.mts
@@ -154,6 +161,7 @@ def _read_positions(
     entry_lookup: dict[tuple[str, str, str], float],
     cell_mult: dict[tuple[str, str, str, str], float],
     regime_lookup: dict[tuple[str, str], str],
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[PositionRow]:
     # Logical-key dedup (B-P0-1, 2026-05-10):
     #   GROUP BY (venue, symbol, strategy_id, side) so legacy duplicate rows
@@ -230,7 +238,7 @@ def _read_positions(
         # and the headline equity/DD/Sharpe (which sum upnl_usd) aren't polluted
         # by raw-JPY magnitudes. delta_pct is a ratio → unconverted; the price
         # cells keep their quote-ccy label (#11).
-        rate = _quote_usd_rate(conn, quote_ccy)
+        rate = _quote_usd_rate(conn, quote_ccy, md_conn=md_conn)
         upnl = (last - entry) * qty * sign * rate
         size_usd = entry * abs(qty) * rate
         # uPnL as a % of deployed notional (display-only column).

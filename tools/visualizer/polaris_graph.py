@@ -303,10 +303,15 @@ def _query_tier_map(db_path: Path) -> dict[str, str]:
     already persisted by the focus cycle. Used display-only to decide which mkt
     rows stay individual nodes vs fold into the tail haze. Read-only — nothing
     here re-ranks or re-tiers anything; it mirrors the focus table as-is.
+
+    Storage-split (2026-07-14): ``watchlist_focus`` is a marketdata-domain
+    table — reads the sibling ``polaris_marketdata.sqlite`` (mode=ro), not the
+    trading ``db_path`` (which is no longer written for this table).
     """
-    if not db_path.exists():
+    md_path = marketdata_db_path_for(db_path)
+    if not md_path.exists():
         return {}
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
     out: dict[str, str] = {}
     try:
         rows = conn.execute(
@@ -457,10 +462,15 @@ def _query_signal_counts(db_path: Path) -> dict[str, int]:
 
 
 def _query_watch_focus(db_path: Path, held: set[str]) -> list[dict[str, Any]]:
-    """tier7 'watch' source — latest focus cycle symbols not already open."""
-    if not db_path.exists():
+    """tier7 'watch' source — latest focus cycle symbols not already open.
+
+    Storage-split (2026-07-14): ``watchlist_focus`` is marketdata-domain —
+    reads the sibling marketdata DB (mode=ro), mirroring ``_query_tier_map``.
+    """
+    md_path = marketdata_db_path_for(db_path)
+    if not md_path.exists():
         return []
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
             "SELECT venue, symbol, focus_score, target_bucket FROM watchlist_focus "

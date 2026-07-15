@@ -96,6 +96,7 @@ from polaris.scripts.dashboard.snapshot_sections import (
     _rotation_telemetry,
     _universe,
 )
+from polaris.storage.schema_marketdata import marketdata_db_path_for
 
 __all__ = [
     "STARTING_CAPITAL",
@@ -372,6 +373,17 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
     now_s = _now_s()
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = None
+    # Storage-split (2026-07-14) — a SECOND read-only conn against the sibling
+    # marketdata DB (bars/quote_ticks/watchlist_focus/altdata_snapshot/every
+    # *_shadow table). Every reader below that touches a marketdata-domain
+    # table takes an optional ``md_conn`` kwarg falling back to ``conn`` when
+    # None (byte-identical for legacy single-conn tests) — so a missing
+    # marketdata file degrades gracefully instead of crashing the snapshot.
+    md_path = marketdata_db_path_for(db_path)
+    md_conn = (
+        sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
+        if md_path.exists() else None
+    )
     try:
         # Component A dual curve: demo-actual (== legacy _build_equity_curve)
         # + real-fee-net (fees recomputed at the real OKX schedule). One fills
@@ -388,7 +400,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         )
         daily_pnl, daily_n = _daily_realised_pnl(conn, now_s=now_s)
         session_pnl, session_n = _session_realised_pnl(conn, now_s=now_s)
-        last_prices = _last_prices(conn)
+        last_prices = _last_prices(conn, md_conn=md_conn)
         entry_lookup = _entry_price_lookup(conn)
         cell_mult = _cell_mult_lookup(conn)
         regime_bars, regime_lookup = _regime_bars(conn, now_s=now_s)
@@ -399,6 +411,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
             entry_lookup=entry_lookup,
             cell_mult=cell_mult,
             regime_lookup=regime_lookup,
+            md_conn=md_conn,
         )
         upnl_total = sum(p.upnl_usd for p in positions)
         notional_open = sum(p.size_usd for p in positions)
@@ -445,13 +458,13 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         }
         # TRADES tab shows more rows than the legacy 10 (full-width tab).
         recent_trades = _recent_closed_trades(
-            conn, n=100, regime_lookup=regime_by_venue_symbol,
+            conn, n=100, regime_lookup=regime_by_venue_symbol, md_conn=md_conn,
         )
         # Symbol sparkline (Jin 2026-06-25) — embed the recent-close mini history
         # on each positions / ticker / recent-trade row in ONE bars query (no
         # per-row fetch). Display-only; empty spark when the bars cache has nothing
         # for a symbol (graceful).
-        _attach_sparks(conn, positions, ticker_stats, recent_trades)
+        _attach_sparks(conn, positions, ticker_stats, recent_trades, md_conn=md_conn)
         # E2 EXIT tab — FSM distribution + reason histogram (reuses recent_trades)
         # + G6/G7 gate decision counts.
         exit_surface = _exit_surface(
@@ -468,7 +481,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         edge_validation = _edge_validation(conn, n=8)
         gpt_stats = _gpt_stats(conn, now_s=now_s)
         alerts = _alerts(conn, n=3)
-        focus_n, focus_ts = _universe(conn)
+        focus_n, focus_ts = _universe(conn, md_conn=md_conn)
         # Per-gate DECISION summary (replaces the pass/kill funnel). Built AFTER
         # _universe so G1's row can show the live focus count + derived
         # liquidity-floor exclusion. Read-only; never feeds trading.
@@ -485,7 +498,9 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # (a prior global upnl_marks_label/upnl_marks_age_sec that copied ONLY
         # the Alpaca lane's label onto the 3-venue upnl_total was misleading —
         # removed, Jin 2026-07-08 dashboard-live-net fix).
-        streams = _per_stream_summary(conn, now_s=now_s, positions=positions)
+        streams = _per_stream_summary(
+            conn, now_s=now_s, positions=positions, md_conn=md_conn,
+        )
         # VIRTUAL-ledger main-board aggregates (Jin 2026-07-08 fix) — the
         # since_reset/daily/session equivalents scoped to the fresh VIRTUAL
         # ledger (per-venue anchor, aggregated), so the main board never mixes
@@ -513,7 +528,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         # CONTEXT/INTEL tab — every alt-data context input the bot weighs, the
         # latest row per source from the read-only altdata_snapshot audit table.
         # "The bot's eyes" surfaced for the operator. Never feeds trading.
-        context_intel = _collect_context_intel(conn, now_s=now_s)
+        context_intel = _collect_context_intel(conn, now_s=now_s, md_conn=md_conn)
         return DashboardSnapshot(
             ts_now=now_s,
             starting_capital=starting_capital,
@@ -582,3 +597,5 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         )
     finally:
         conn.close()
+        if md_conn is not None:
+            md_conn.close()

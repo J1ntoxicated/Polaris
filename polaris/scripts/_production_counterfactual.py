@@ -129,6 +129,15 @@ def record_pipeline_cohort(
     call) — so the killer-gate check comes FIRST: only a G3/G4 KILL takes the
     KILL branch, a G5 cap-kill after a PROCEED still records PASS. G1/G2/G5
     KILLs without a PROCEED record nothing. Never branches the pipeline.
+
+    Storage-split (2026-07-14): ``gate_kill_counterfactuals`` is a
+    marketdata-domain table (owned by ``MARKETDATA_DDL`` — ``sweep_forward_marks``
+    reads/updates it on ``state.md_conn``, per ``_production_tick.py``). The
+    INSERT below writes ``state.md_conn`` when set, falling back to ``conn``
+    (byte-identical for every existing single-conn test/caller — ``state.md_conn``
+    defaults to ``None``). Without this, pending rows accumulate in the trading
+    file forever while the sweep's marketdata copy stays empty — the
+    gate_kill_value probe never resolves anything.
     """
     try:
         if not results:
@@ -156,7 +165,8 @@ def record_pipeline_cohort(
             return  # no usable mark → no counterfactual (never a fake row)
         atr_usd = max(mark * atr_pct * 2.0, mark * _ATR_USD_FLOOR_FRAC)
         cost_r = (2.0 * real_fee_usd(venue, mark)) / atr_usd
-        conn.execute(
+        _md = state.md_conn if state.md_conn is not None else conn
+        _md.execute(
             """
             INSERT INTO gate_kill_counterfactuals
                 (event_id, run_id, signal_id, gate_id, decision, venue, symbol,

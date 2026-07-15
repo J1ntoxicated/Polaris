@@ -305,6 +305,7 @@ async def _layer0_producer(
     stop_evt: asyncio.Event,
     focus_conn: sqlite3.Connection | None = None,
     momentum_conn: sqlite3.Connection | None = None,
+    md_focus_conn: sqlite3.Connection | None = None,
 ) -> None:
     """OKX (5min) + Capital (10min) + Alpaca (10min) refresh + focus recompute.
 
@@ -339,9 +340,9 @@ async def _layer0_producer(
     state.universe_refreshes += 1
     await refresh_capital_universe_once(conn, momentum_conn=momentum_conn)
     state.capital_refreshes += 1
-    await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
+    await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn, md_conn=state.md_conn)
     state.alpaca_refreshes += 1
-    await _refresh_focus_offloaded(fconn, state)
+    await _refresh_focus_offloaded(fconn, state, md_focus_conn=md_focus_conn)
     last_okx = time.monotonic()
     last_capital = time.monotonic()
     last_alpaca = time.monotonic()
@@ -357,14 +358,19 @@ async def _layer0_producer(
             state.capital_refreshes += 1
             last_capital = now
         if now - last_alpaca >= ALPACA_REFRESH_SEC:
-            await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
+            await refresh_alpaca_universe_once(
+                conn, momentum_conn=momentum_conn, md_conn=state.md_conn
+            )
             state.alpaca_refreshes += 1
             last_alpaca = now
-        await _refresh_focus_offloaded(fconn, state)
+        await _refresh_focus_offloaded(fconn, state, md_focus_conn=md_focus_conn)
 
 
 async def _refresh_focus_offloaded(
-    focus_conn: sqlite3.Connection, state: ProdLoopState
+    focus_conn: sqlite3.Connection,
+    state: ProdLoopState,
+    *,
+    md_focus_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Run the blocking focus refresh on a worker thread (STALL-safe, #74).
 
@@ -373,6 +379,16 @@ async def _refresh_focus_offloaded(
     is ever shared with the live tick loop. ``quote_writer`` / ``altdata_cache`` are
     in-mem read-only here (lean inputs); their reads are snapshot-safe (atomic
     ``list(...)`` copies — #74) + fail-soft.
+
+    ``md_focus_conn`` (storage-split, 2026-07-14): a DEDICATED marketdata conn,
+    thread-confined to this same offloaded worker — never ``state.md_conn``,
+    which the main tick thread owns (sharing one ``sqlite3.Connection`` across
+    two threads is the #74/#88 hazard). Passed through as ``refresh_focus_watchlist``'s
+    ``md_conn`` so the final ``watchlist_focus`` persist + the candidate-sweep
+    bars/ticker_ground reads land on the SAME file ``get_focus_targets`` reads
+    from (``state.md_conn``), instead of silently falling back onto the trading
+    ``focus_conn`` (writer/reader split-brain — zero focus, zero trades on a
+    fresh init).
 
     2nd-defense (#74): the offloaded body is wrapped so an UNHANDLED error in the
     worker can never propagate out of ``layer0_task`` and kill it permanently — a
@@ -386,6 +402,7 @@ async def _refresh_focus_offloaded(
             probe_conn=getattr(state, "focus_probe_conn", None),
             quote_writer=getattr(state, "quote_writer", None),
             altdata_cache=getattr(state, "altdata_cache", None),
+            md_conn=md_focus_conn,
         )
     except Exception:  # noqa: BLE001 — must NOT kill layer0_task (focus must survive)
         logger.exception(
@@ -874,6 +891,17 @@ async def run_production_paper_loop(
     # is never touched from two threads at once. WAL (set by ``connect``) is
     # 1-writer/N-reader safe, and only one offloaded refresh runs at a time.
     focus_conn = connect(target_db)
+    # Storage-split (2026-07-14) — DEDICATED marketdata-domain handle for the
+    # SAME offloaded focus worker, thread-confined alongside ``focus_conn``.
+    # ``state.md_conn`` cannot be reused here: it belongs to the main tick
+    # thread (``get_focus_targets`` / ``sweep_forward_marks`` / bar reads in
+    # ``_run_tick``), and handing it to this ``asyncio.to_thread`` worker would
+    # share one ``sqlite3.Connection`` across two threads (#74/#88 hazard).
+    # Without this, ``refresh_focus_watchlist``'s final persist silently falls
+    # back onto ``focus_conn`` (trading DB) while every reader reads
+    # ``watchlist_focus`` from the marketdata DB — writer/reader split-brain,
+    # zero focus, zero trades on a fresh init.
+    md_focus_conn = connect(md_db_path)
     # Same STALL class, second instance — DEDICATED READ-ONLY handle for the
     # OFFLOADED momentum-z shadow scan (``_momentum_z_shadow_async``): each
     # ``refresh_*_universe_once`` otherwise runs an unbounded synchronous
@@ -888,6 +916,7 @@ async def run_production_paper_loop(
             stop_evt=stop_evt,
             focus_conn=focus_conn,
             momentum_conn=momentum_conn,
+            md_focus_conn=md_focus_conn,
         )
     )
 
@@ -1414,6 +1443,8 @@ async def run_production_paper_loop(
         # close its dedicated live-DB handle (no worker thread touches it now).
         with contextlib.suppress(Exception):
             focus_conn.close()
+        with contextlib.suppress(Exception):
+            md_focus_conn.close()
         with contextlib.suppress(Exception):
             momentum_conn.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):

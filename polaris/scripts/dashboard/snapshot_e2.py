@@ -446,7 +446,8 @@ _SUMMARISERS: Final[dict[str, _Summariser]] = {
 
 
 def _collect_context_intel(
-    conn: sqlite3.Connection, *, now_s: int
+    conn: sqlite3.Connection, *, now_s: int,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[ContextIntelRow]:
     """LATEST ``altdata_snapshot`` row per source → one CONTEXT/INTEL line each.
 
@@ -455,9 +456,13 @@ def _collect_context_intel(
     the freshest (max-ts) row is summarised to a one-line value + coarse direction
     + freshness. Display-only; NEVER read by sizing/gating/exit/strategy/loop.
     Graceful empty on a missing/empty table (older schema). Sorted by source name
-    so the panel order is stable poll-to-poll."""
+    so the panel order is stable poll-to-poll.
+
+    Storage-split (2026-07-14): ``altdata_snapshot`` is marketdata-domain —
+    reads ``md_conn`` when supplied, falling back to ``conn`` (byte-identical
+    for every existing single-conn test/caller)."""
     rows = _safe_query(
-        conn,
+        md_conn if md_conn is not None else conn,
         """SELECT a.source, a.asset_class, a.ts, a.payload_json
              FROM altdata_snapshot a
              JOIN (SELECT source, MAX(ts) AS mts

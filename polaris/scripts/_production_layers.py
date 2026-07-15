@@ -369,6 +369,7 @@ async def refresh_alpaca_universe_once(
     *,
     now_ts: int | None = None,
     momentum_conn: sqlite3.Connection | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> int:
     """Fetch Alpaca US-equity assets → rank → persist. Returns active count.
 
@@ -381,6 +382,14 @@ async def refresh_alpaca_universe_once(
     shadow scan offloads onto (STALL-safe, see ``_momentum_z_shadow_async`` —
     this is the venue with the largest instrument count, so the biggest
     beneficiary of the offload).
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain conn passed
+    to ``refresh_sector_rotation_shadow`` (its ``bars`` read + its
+    ``sector_rank_shadow`` write are both marketdata-domain tables). This call
+    runs INLINE on the caller's own thread (no ``asyncio.to_thread`` offload
+    here), so reusing the loop's persistent ``state.md_conn`` is thread-safe.
+    ``None`` falls back to ``conn`` (byte-identical pre-split behaviour for
+    every existing single-conn caller/test).
     """
     ts = now_ts if now_ts is not None else int(time.time())
     try:
@@ -404,7 +413,7 @@ async def refresh_alpaca_universe_once(
     persist_universe(conn, instruments, is_active_set=active_ids)
     try:  # fail-open shadow writes — a locked-DB fault must not kill layer0 (review MED)
         persist_momentum_shadow(conn, active)
-        refresh_sector_rotation_shadow(conn, now_ts=ts)
+        refresh_sector_rotation_shadow(md_conn if md_conn is not None else conn, now_ts=ts)
     except sqlite3.Error:
         logger.warning("[L0/alpaca] momentum/sector shadow write skipped (db busy)")
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the

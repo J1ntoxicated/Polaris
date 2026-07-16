@@ -578,10 +578,14 @@ async def _close_trade_with_real_pnl(
         bar_mark = _latest_bar_close(
             conn, venue=trade.venue, symbol=trade.symbol, md_conn=state.md_conn,
         )
+        # Quote sanity guard (P2a — STETH phantom forensic): bar_mark is a real
+        # bar close, so it is safe to pass as bar_ref (only wired when genuine —
+        # never the entry-price/0.0 fallback below).
         fresh_mark = live_or_bar_price(
             state.quote_writer,
             f"{trade.venue}:{trade.symbol}",
             bar_mark if bar_mark is not None else trade.entry_price,
+            bar_ref=bar_mark,
         )
         # Capital external-close fix: did a REAL recent price source (1m bar OR
         # live WS tick) exist, independent of the entry-price fallback? Re-resolve
@@ -592,6 +596,7 @@ async def _close_trade_with_real_pnl(
             state.quote_writer,
             f"{trade.venue}:{trade.symbol}",
             bar_mark if bar_mark is not None else 0.0,
+            bar_ref=bar_mark,
         ) > 0.0
         # Bug C fix: peek-only (no I/O) close-fill exposure factor for the
         # Capital branch of ``_real_close_fill`` (okx/alpaca never reach it).
@@ -819,8 +824,16 @@ async def _close_trade_with_real_pnl(
         # exit_price_override); no tick → override stays None and the bar close
         # remains the graceful fallback. Real-roundtrip already marks at the real
         # venue fill (above) — untouched.
+        # Quote sanity guard (P2a — STETH phantom forensic 2026-07-16: a
+        # degraded OKX demo book let the WS mid drift -9% off the true market,
+        # booking a phantom -15R sim close): fetch the real bar close so a
+        # divergent-but-fresh mid is distrusted in favour of it.
+        sim_bar_ref = _latest_bar_close(
+            conn, venue=trade.venue, symbol=trade.symbol, md_conn=state.md_conn,
+        )
         live_override = live_or_bar_price(
             state.quote_writer, f"{trade.venue}:{trade.symbol}", 0.0,
+            bar_ref=sim_bar_ref,
         )
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
             conn, trade=trade,

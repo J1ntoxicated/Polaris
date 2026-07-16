@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from polaris.core.data.quote_writer import quote_sanity_pct
 from polaris.core.isolation.reentry import bar_seconds
 from polaris.core.live_recalc.exit_params import _STATE_RANK as _EXIT_STATE_RANK
 from polaris.core.live_recalc.strategy_swap import (
@@ -217,8 +218,28 @@ def load_active_position_rows(
                     mid > 0.0
                     and time.monotonic() - last_ws_monotonic < WS_EXIT_MARK_FRESH_SEC
                 ):
-                    last_price = mid
-                    mid_used = True
+                    # Quote sanity guard (P2a — STETH phantom forensic
+                    # 2026-07-16: a degraded OKX demo book let the WS mid
+                    # drift -9% off the true market while still passing the
+                    # freshness check, booking a phantom -15R exit mark).
+                    # ``bar_close`` is only a genuine bar when ``bar_row`` is
+                    # non-empty (else it's the entry_price degrade fallback,
+                    # not a real ref) — the guard applies ONLY then. Reject →
+                    # mid stays unused, mark_source below falls to
+                    # 'bar_fallback' (never a phantom mid mark).
+                    if bar_row and abs(mid / bar_close - 1.0) > quote_sanity_pct():
+                        quote_writer.quote_sanity_rejects += 1
+                        logger.warning(
+                            "[quote-sanity] %s mid=%.6f bar_ref=%.6f "
+                            "diverge=%.2f%% > %.2f%% — distrust mid, using "
+                            "bar_close (guard, not a block)",
+                            instrument_id, mid, bar_close,
+                            abs(mid / bar_close - 1.0) * 100.0,
+                            quote_sanity_pct() * 100.0,
+                        )
+                    else:
+                        last_price = mid
+                        mid_used = True
         # DIA/CNC 7-day frozen-mark incident (P1 fix): the mid was missing/stale
         # for these Alpaca-held positions AND the prior wiring had no distinct
         # label for "bar close substituted for the missing mid" vs "cadence=bar".

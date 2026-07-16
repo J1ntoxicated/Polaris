@@ -281,7 +281,7 @@ def test_exit_mark_source_stamped_bar_fallback_when_mid_missing(
     assert rows[0]["mark_source"] == "bar_fallback"
 
 
-def test_exit_mark_source_stays_bar_when_no_bar_available(
+def test_exit_mark_source_entry_price_degrade_when_no_bar(
     memdb: sqlite3.Connection,
 ) -> None:
     inst = "alpaca:CNC"
@@ -308,7 +308,9 @@ def test_exit_mark_source_stays_bar_when_no_bar_available(
     )
     rows = load_active_position_rows(memdb)
     assert float(rows[0]["last_price"]) == pytest.approx(90.0)  # entry_price
-    assert rows[0]["mark_source"] == "bar"
+    # review LOW (2026-07-16): the deepest freeze is now distinctly labeled —
+    # never hides as plain 'bar' (which now means a healthy live/bar mark).
+    assert rows[0]["mark_source"] == "entry_price_degrade"
 
 
 # ---------------------------------------------------------------------------

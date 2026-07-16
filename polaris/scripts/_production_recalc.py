@@ -226,7 +226,15 @@ def load_active_position_rows(
         # the deeper entry_price degrade below) stood in for a missing/stale mid
         # — the entry_price case (no bar at all) keeps the plain 'bar' default,
         # never fabricating a bar-fallback claim it did not actually have.
-        mark_source = "bar_fallback" if not mid_used and bar_row else "bar"
+        # 3-way label (review LOW, 2026-07-16): 'live_mid' = fresh WS mid used;
+        # 'bar_fallback' = mid missing/stale, real bar close substituted (the
+        # DIA/CNC class, auditable); 'entry_price_degrade' = NO bar at all —
+        # the deepest freeze, now distinctly flagged instead of hiding as 'bar'.
+        mark_source = (
+            "live_mid" if mid_used
+            else "bar_fallback" if bar_row
+            else "entry_price_degrade"
+        )
         atr_samples = [
             (float(br[2]) - float(br[3])) / float(br[1])
             for br in bar_row

@@ -75,7 +75,12 @@ def _seed_adverse_position(conn: sqlite3.Connection, *, position_id: str) -> Non
         )
 
 
-def _seed_probe_tighten(conn: sqlite3.Connection, *, position_id: str) -> None:
+def _seed_probe_tighten(
+    conn: sqlite3.Connection, *, position_id: str, action: str = "TIGHTEN",
+) -> str:
+    """Seed one OPEN probe decision row; returns its ``decision_id`` (P3 promotion —
+    callers use this to assert the applied=1 write-back on the exact source row)."""
+    decision_id = uuid.uuid4().hex
     conn.execute(
         "INSERT INTO probe_decisions "
         "(decision_id, eval_id, ts, run_id, position_id, mode, composite_lean, "
@@ -83,10 +88,11 @@ def _seed_probe_tighten(conn: sqlite3.Connection, *, position_id: str) -> None:
         " mark_source, mark_age_ms, exit_state) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            uuid.uuid4().hex, uuid.uuid4().hex, NOW, "run", position_id, "observe",
-            -0.49, "TIGHTEN", None, 0, -0.05, -0.05, "bar", 0, "open",
+            decision_id, uuid.uuid4().hex, NOW, "run", position_id, "observe",
+            -0.49, action, None, 0, -0.05, -0.05, "bar", 0, "open",
         ),
     )
+    return decision_id
 
 
 def _probe_conn() -> sqlite3.Connection:
@@ -180,3 +186,83 @@ async def test_flag_off_matches_no_probe_baseline(
     base_db.close()
 
     assert with_probe == baseline  # probe TIGHTEN had ZERO effect with the flag OFF
+
+
+@pytest.mark.asyncio
+async def test_flag_on_marks_source_probe_row_applied(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3 promotion evidence: once the tighten actually lands on the live
+    position (persisted stop), the EXACT source probe_decisions row is
+    stamped applied=1 — a before/after promotion read can isolate it."""
+    monkeypatch.setenv("POLARIS_G6_PROBE_TIGHTEN", "1")
+    pid = "pos-tighten-applied"
+    _seed_adverse_position(memdb, position_id=pid)
+    state = ProdLoopState()
+    state.open_trades = [_trade(pid)]
+    state.probe_conn = _probe_conn()
+    decision_id = _seed_probe_tighten(state.probe_conn, position_id=pid)
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW + 1, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime, close_specific=close_specific_position,
+    )
+    applied = state.probe_conn.execute(
+        "SELECT applied FROM probe_decisions WHERE decision_id = ?", (decision_id,),
+    ).fetchone()
+    assert applied is not None
+    assert applied[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_flag_on_harvest_also_persists_tighter_stop(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HARVEST is a protect action too (P3 promotion) — the wiring pulls the
+    stop tighter exactly like TIGHTEN."""
+    monkeypatch.setenv("POLARIS_G6_PROBE_TIGHTEN", "1")
+    pid = "pos-harvest"
+    _seed_adverse_position(memdb, position_id=pid)
+    state = ProdLoopState()
+    state.open_trades = [_trade(pid)]
+    state.probe_conn = _probe_conn()
+    _seed_probe_tighten(state.probe_conn, position_id=pid, action="HARVEST")
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW + 1, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime, close_specific=close_specific_position,
+    )
+    row = memdb.execute(
+        "SELECT stop_price, status FROM positions WHERE position_id = ?", (pid,),
+    ).fetchone()
+    assert row is not None
+    assert row[1] == "open"
+    assert row[0] is not None
+    assert float(row[0]) > WIDE_STOP  # tightened, same as the TIGHTEN path
+
+
+@pytest.mark.asyncio
+async def test_flag_on_never_touches_qty_or_status(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """-1.0R rail / hard-MAX sizing untouched: the probe protect consumer only
+    ever adjusts ``stop_price`` (exit TIMING). ``qty`` (sizing chain output)
+    and ``status`` (never a stop-out / block) must be byte-identical
+    before/after the tighten fires."""
+    monkeypatch.setenv("POLARIS_G6_PROBE_TIGHTEN", "1")
+    pid = "pos-rail-safety"
+    _seed_adverse_position(memdb, position_id=pid)
+    qty_before = memdb.execute(
+        "SELECT qty FROM positions WHERE position_id = ?", (pid,),
+    ).fetchone()[0]
+    state = ProdLoopState()
+    state.open_trades = [_trade(pid)]
+    state.probe_conn = _probe_conn()
+    _seed_probe_tighten(state.probe_conn, position_id=pid)
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW + 1, gpt_client=None, phase="P0",
+        lookup_regime=_lookup_regime, close_specific=close_specific_position,
+    )
+    qty_after, status_after = memdb.execute(
+        "SELECT qty, status FROM positions WHERE position_id = ?", (pid,),
+    ).fetchone()
+    assert qty_after == qty_before  # size chain untouched by exit-TIMING consumer
+    assert status_after == "open"  # never a HOLD -> EXIT_NOW block

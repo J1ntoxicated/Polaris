@@ -227,7 +227,11 @@ def load_active_position_rows(
                     # not a real ref) — the guard applies ONLY then. Reject →
                     # mid stays unused, mark_source below falls to
                     # 'bar_fallback' (never a phantom mid mark).
-                    if bar_row and abs(mid / bar_close - 1.0) > quote_sanity_pct():
+                    if (
+                        bar_row
+                        and bar_close > 0.0
+                        and abs(mid / bar_close - 1.0) > quote_sanity_pct()
+                    ):
                         quote_writer.quote_sanity_rejects += 1
                         logger.warning(
                             "[quote-sanity] %s mid=%.6f bar_ref=%.6f "

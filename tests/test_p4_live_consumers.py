@@ -371,6 +371,22 @@ def test_exit_mark_sanity_guard_only_applies_with_real_bar(
     assert writer.quote_sanity_rejects == 0
 
 
+def test_exit_mark_sanity_guard_survives_zero_bar_close(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A genuine-but-zero (corrupt) bar close must not raise ZeroDivisionError
+    in the quote-sanity divergence check — the guard requires bar_close > 0.0
+    before dividing, matching ``live_or_bar_price``'s ``bar_ref > 0.0`` guard
+    in quote_writer.py."""
+    inst = "okx:BTC-USDT"
+    _seed_position(memdb, inst=inst, bar_close=0.0)
+    writer = _FakeWriter({inst: (100.0, time.monotonic() - 1.0)})
+    rows = load_active_position_rows(memdb, quote_writer=writer)  # must not raise
+    assert float(rows[0]["last_price"]) == pytest.approx(100.0)  # mid used as-is
+    assert rows[0]["mark_source"] == "live_mid"
+    assert writer.quote_sanity_rejects == 0
+
+
 def test_g4_consumes_live_tick_window_crossed_book() -> None:
     """A crossed-book WS tick (bid >= ask) flows ring → payload → G4 KILL.
 

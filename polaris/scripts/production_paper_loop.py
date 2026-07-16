@@ -1358,7 +1358,9 @@ async def run_production_paper_loop(
                     altdata_cache=altdata_cache,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error("[tick %d] error: %r", tick_idx, exc)
+                # exc_info 추가 (2026-07-16 OverflowError 725회 진단): repr만으론
+                # 발생 지점 추적 불가 — 전체 스택을 남긴다(관측 위생, 거동 무변).
+                logger.error("[tick %d] error: %r", tick_idx, exc, exc_info=True)
                 state.fault_events += 1
             # FIX 2/2 — keep the live WS set = (focus ∪ open positions). The WS
             # subscription is static-at-startup (clients re-send subscribe only on

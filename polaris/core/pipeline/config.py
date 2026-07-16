@@ -109,15 +109,19 @@ def time_stop_k_mult(env_value: str | None = None) -> float:
     ``stop_price`` / pnl_r — a P&L-agnostic time rail (same class as the
     session exit rail), independent of and never touching the -1.0R rail.
     ``env_value`` injectable for pure tests; ``None`` reads the process env.
-    An unset/empty/unparsable value falls back to ``TIME_STOP_K_DEFAULT``.
+    An unset/empty/unparsable/non-positive value falls back to
+    ``TIME_STOP_K_DEFAULT`` (K<=0 would invert the P&L-agnostic time RAIL into
+    an exit-everything-immediately THROTTLE — held_seconds>0 always fires at
+    K=0, and a negative K makes the threshold negative).
     """
     raw = os.getenv(TIME_STOP_K_ENV) if env_value is None else env_value
     if raw is None or raw.strip() == "":
         return TIME_STOP_K_DEFAULT
     try:
-        return float(raw.strip())
+        parsed = float(raw.strip())
     except ValueError:
         return TIME_STOP_K_DEFAULT
+    return parsed if parsed > 0.0 else TIME_STOP_K_DEFAULT
 
 
 def ai_judge_mode(env_value: str | None = None) -> str:

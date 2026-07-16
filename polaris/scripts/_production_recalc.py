@@ -569,6 +569,11 @@ async def _evaluate_position(
             "entry_price": entry_price,
             "last_price": last_price,
             "held_seconds": held_seconds,
+            # G6 time-stop bars-seen preference (round-2 MED fix): the SAME
+            # native-bars count the maturity gate above already computed for
+            # this position — threading it in lets G6's backstop judge on
+            # native bars instead of wall-clock (session close / gap safe).
+            "native_bars_seen": native_bars_seen,
             "cell_score": 0.0,
         },
         unrealized_pnl_r=pnl_r,

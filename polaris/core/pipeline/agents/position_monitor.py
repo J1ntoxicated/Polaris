@@ -45,7 +45,11 @@ import logging
 import sqlite3
 from typing import Any
 
-from polaris.core.pipeline.config import g6_probe_tighten_mode, time_stop_k_mult
+from polaris.core.pipeline.config import (
+    TIME_STOP_K_DEFAULT,
+    g6_probe_tighten_mode,
+    time_stop_k_mult,
+)
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GateContext,
@@ -78,10 +82,11 @@ G6_DECISION_ENUM: list[str] = ["HOLD", "ADJUST_EXIT", "EXIT_NOW", "SWAP_STRATEGY
 TIME_STOP_STANDARD_BARS: int = 10
 
 
-def _time_stop_horizon_seconds(strategy_id: str) -> int:
-    """expected_holding_bars x timeframe for a registered strategy; an
-    unregistered strategy (no metadata — e.g. a tick-engine id) falls back to
-    the "1m" timeframe x ``TIME_STOP_STANDARD_BARS`` (mirrors
+def _time_stop_horizon(strategy_id: str) -> tuple[int, int]:
+    """(horizon_seconds, horizon_bars) = expected_holding_bars x timeframe for
+    a registered strategy; an unregistered strategy (no metadata — e.g. a
+    tick-engine id) falls back to the "1m" timeframe x
+    ``TIME_STOP_STANDARD_BARS`` (mirrors
     ``_production_atr.strategy_timeframe``'s own unregistered->"1m" fallback,
     duplicated locally rather than imported — core must not depend on
     scripts)."""
@@ -93,9 +98,9 @@ def _time_stop_horizon_seconds(strategy_id: str) -> int:
 
     cls = STRATEGY_REGISTRY.get(strategy_id)
     if cls is None:
-        return bar_seconds("1m") * TIME_STOP_STANDARD_BARS
+        return bar_seconds("1m") * TIME_STOP_STANDARD_BARS, TIME_STOP_STANDARD_BARS
     bars = max(1, int(cls.metadata.expected_holding_bars))
-    return bar_seconds(cls.metadata.timeframe) * bars
+    return bar_seconds(cls.metadata.timeframe) * bars, bars
 
 
 def evaluate_strategy_swap(
@@ -137,9 +142,22 @@ def _python_decision(
     # backstop today) once held past K x the strategy's expected horizon.
     # Missing held_seconds/strategy keys degrade to 0/"" — never fires
     # (fail-open, same contract as the missing-position HOLD above).
+    # Bars-seen PREFERRED over wall-clock (mirrors exit_thesis._has_matured's
+    # maturity-gate precedent): when the caller threads ``native_bars_seen``
+    # into ``pos``, the backstop judges elapsed development in NATIVE BARS the
+    # strategy's own timeframe has seen since open — a session close / weekend
+    # gap can no longer fake wall-clock "elapsed" into an early force-exit of a
+    # still-valid slow-trend winner. Absent key (caller not yet migrated) ->
+    # byte-identical wall-clock comparison.
     held_seconds = int(pos.get("held_seconds", 0) or 0)
-    time_stop_sec = _time_stop_horizon_seconds(str(pos.get("strategy") or "")) * time_stop_k
-    if held_seconds > time_stop_sec:
+    horizon_sec, horizon_bars = _time_stop_horizon(str(pos.get("strategy") or ""))
+    time_stop_sec = horizon_sec * time_stop_k
+    native_bars_seen_raw = pos.get("native_bars_seen")
+    if native_bars_seen_raw is not None:
+        time_stopped = int(native_bars_seen_raw) > horizon_bars * time_stop_k
+    else:
+        time_stopped = held_seconds > time_stop_sec
+    if time_stopped:
         return GateResult(
             decision=GateDecision.EXIT_NOW,
             next_gate=GATE_ADAPTIVE_EXIT,
@@ -254,6 +272,11 @@ async def position_monitor_gate(
     probe_action_raw = ctx.payload.get("probe_action")
     probe_action = str(probe_action_raw) if isinstance(probe_action_raw, str) else None
     use_time_stop_k = time_stop_k if time_stop_k is not None else time_stop_k_mult()
+    # Reject a non-positive injected K -> TIME_STOP_K_DEFAULT (same clamp as
+    # time_stop_k_mult's env path — K<=0 would invert the P&L-agnostic time
+    # rail into an exit-everything-immediately throttle).
+    if use_time_stop_k <= 0.0:
+        use_time_stop_k = TIME_STOP_K_DEFAULT
     result = _python_decision(
         pos=pos, pnl_r=pnl_r, max_loss_r=max_loss_r, candidate=candidate_dict,
         probe_action=probe_action, tighten_enabled=use_tighten,

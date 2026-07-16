@@ -224,3 +224,75 @@ async def test_time_stop_uses_registered_strategy_horizon() -> None:
         _cci_ctx(horizon * 4 - 1), client=None, time_stop_k=4.0,
     )
     assert result_under.decision == GateDecision.HOLD
+
+
+# ---------------------------------------------------------------------------
+# K clamp — non-positive K must never invert the rail into a throttle
+# ---------------------------------------------------------------------------
+
+
+async def test_time_stop_k_zero_injected_clamps_to_default() -> None:
+    """K=0 injected directly must NOT fire on every held position (would
+    invert the P&L-agnostic time rail into an exit-everything throttle) —
+    clamps to TIME_STOP_K_DEFAULT (4.0), same as a fresh 90s-held position."""
+    payload = {
+        "position": _position(held_seconds=90),
+        "unrealized_pnl_r": 0.10,
+        "max_loss_r": 1.0,
+    }
+    result = await position_monitor_gate(_ctx(payload), client=None, time_stop_k=0.0)
+    assert result.decision == GateDecision.HOLD
+
+
+async def test_time_stop_k_negative_injected_clamps_to_default() -> None:
+    """K<0 injected directly must not make the threshold negative."""
+    payload = {
+        "position": _position(held_seconds=90),
+        "unrealized_pnl_r": 0.10,
+        "max_loss_r": 1.0,
+    }
+    result = await position_monitor_gate(_ctx(payload), client=None, time_stop_k=-1.0)
+    assert result.decision == GateDecision.HOLD
+
+
+async def test_time_stop_k_zero_env_clamps_to_default() -> None:
+    """POLARIS_TIME_STOP_K=0 (env path) clamps to TIME_STOP_K_DEFAULT."""
+    from polaris.core.pipeline.config import time_stop_k_mult
+
+    assert time_stop_k_mult("0") == 4.0
+    assert time_stop_k_mult("-2.5") == 4.0
+
+
+# ---------------------------------------------------------------------------
+# native_bars_seen preferred over wall-clock (bars-seen path)
+# ---------------------------------------------------------------------------
+
+
+async def test_time_stop_native_bars_seen_preferred_over_wall_clock() -> None:
+    """A position within its native-bar horizon must NOT fire even if
+    wall-clock alone (e.g. a weekend gap inflating held_seconds) looks past
+    K x horizon — native_bars_seen, not held_seconds, decides."""
+    pos = _position(held_seconds=UNREGISTERED_HORIZON_SEC * 4 + 1)
+    pos["native_bars_seen"] = 1  # well under 10-bar x K=4 = 40 bars
+    payload = {
+        "position": pos,
+        "unrealized_pnl_r": 0.10,
+        "max_loss_r": 1.0,
+    }
+    result = await position_monitor_gate(_ctx(payload), client=None, time_stop_k=4.0)
+    assert result.decision == GateDecision.HOLD
+
+
+async def test_time_stop_native_bars_seen_fires_past_bar_horizon() -> None:
+    """native_bars_seen past K x horizon_bars (10 x 4 = 40) -> EXIT_NOW even
+    with a tiny held_seconds (fast native bar cadence)."""
+    pos = _position(held_seconds=1)
+    pos["native_bars_seen"] = 41
+    payload = {
+        "position": pos,
+        "unrealized_pnl_r": 0.10,
+        "max_loss_r": 1.0,
+    }
+    result = await position_monitor_gate(_ctx(payload), client=None, time_stop_k=4.0)
+    assert result.decision == GateDecision.EXIT_NOW
+    assert result.payload.get("reason") == "time_stop"

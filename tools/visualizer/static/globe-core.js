@@ -22,10 +22,13 @@
   const ctx = canvas.getContext('2d');
 
   // Jin 2026-07-16 P4b: this engine is now MOBILE-ONLY (desktop /flow dropped
-  // the sphere for the spine canvas — no other page loads globe-core.js), so
-  // the dpr cap tunes for a small ~29vh phone pane rather than a full desktop
-  // viewport: 2x backing-buffer pixels on a battery-constrained device for a
-  // canvas this small is wasted GPU/battery, so cap at 1.5x.
+  // the sphere for the spine canvas as its own page). Note: flow.html still
+  // embeds /m in a small iframe (.mobile-pane), so this file also renders
+  // there — but at iframe size (~400x250, phone-sized), so the mobile tuning
+  // below applies cleanly to that pane too. The dpr cap tunes for a small
+  // ~29vh phone pane rather than a full desktop viewport: 2x backing-buffer
+  // pixels on a battery-constrained device for a canvas this small is wasted
+  // GPU/battery, so cap at 1.5x.
   let dpr = Math.min(1.5, window.devicePixelRatio || 1);
   let W = 0, H = 0, CX = 0, CY = 0;
   function fit() {

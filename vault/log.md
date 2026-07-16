@@ -532,3 +532,5 @@
 - 2026-07-16: P2b 랜딩(merge e43a372, 재기동 PID 20014) — 델리게이션 게이트 v1 결정론 fit-score 섀도우 코어(edge_type 26전략 전수·asset_class 정합·margin/ambiguous, md 도메인, 라이브 라우팅 0). Opus 2렌즈 3라운드 CRITICAL/MED 0, 48테스트. gross 기준 히스토리항=flip 철학 정합 문서화. P2 완료(G6G7 물리통합은 위험대비가치로 보류→백로그). P3 승격 워크플로 발사(wf_9eb2e993: protect ON·미등록 정식화·liquidity/funding 프로브축·probes 리텐션).
 2026-07-16 06:44 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=331 learners=3 paper=True]
 - 2026-07-16: P3 랜딩(merge ce72549, 재기동 PID 25446, PROBE_TIGHTEN=1) — protect 승격(허용목록·applied기록·레일무접촉)·미등록4종 정식화+capital_macro shadow-first·liquidity/funding 프로브축·probes 리텐션 확인. Opus 2렌즈 CRITICAL/MED 0. 런던 개장 후 Capital 신호 13→1530(예측 적중)·delegation_shadow 1588 축적.
+2026-07-16 08:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=334 learners=3 paper=True]
+- 2026-07-16: P4a 랜딩(merge 9169bcf) — 데스크 /flow 인스펙트 차트(자동추종/클릭핀, 진입·스톱·MFE/MAE)·포지션 스파크라인 13행·액티비티 절반·레퍼런스탭 SSOT 현행화. 브라우저 실검증(핀 동작·콘솔 0). Opus 1라운드 CRITICAL/MED 0.

@@ -259,6 +259,61 @@ def test_exit_ignores_nonpositive_live_px(memdb: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DIA/CNC 7-day frozen-mark P1 fix — mark_source stamp (2 cases)
+# ---------------------------------------------------------------------------
+#
+# The Alpaca-held incident: quote_ticks mid stayed null for days, and the
+# mark computation had no distinct label for "a genuine bar close substituted
+# for the missing mid" — case 1 below. When even the bar is unavailable, the
+# existing entry_price degrade must stay (no fabricated bar_fallback claim) —
+# case 2.
+
+
+def test_exit_mark_source_stamped_bar_fallback_when_mid_missing(
+    memdb: sqlite3.Connection,
+) -> None:
+    inst = "alpaca:DIA"
+    _seed_position(memdb, inst=inst, bar_close=100.0)
+    # No writer at all (mirrors the Alpaca-held null-mid scenario) but a real
+    # bar exists — the bar close substitutes for the missing mid.
+    rows = load_active_position_rows(memdb)
+    assert float(rows[0]["last_price"]) == pytest.approx(100.0)
+    assert rows[0]["mark_source"] == "bar_fallback"
+
+
+def test_exit_mark_source_entry_price_degrade_when_no_bar(
+    memdb: sqlite3.Connection,
+) -> None:
+    inst = "alpaca:CNC"
+    # Seed the position WITHOUT any bar row (bar_row query returns empty) —
+    # last_price degrades to entry_price, the pre-existing behaviour. No
+    # bar_fallback stamp is fabricated since no bar was actually used.
+    position_id = uuid.uuid4().hex
+    memdb.execute(
+        "INSERT OR REPLACE INTO positions "
+        "(position_id, venue, symbol, underlying_group_id, strategy_id, "
+        " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
+        " swap_count) VALUES (?, 'alpaca', 'CNC', 'equity:CNC', 'vb', 'vb', "
+        " 'vb', 'long', 1.0, 'open', ?, 0)",
+        (position_id, NOW),
+    )
+    memdb.execute(
+        "INSERT INTO fills "
+        "(fill_id, ts_ms, strategy_id, instrument_id, venue, side, base_qty, "
+        " fill_price, size_usd, fee_usd, slippage_bps, pnl_usd, is_close, "
+        " contribution_id, order_id, state) "
+        "VALUES (?, ?, 'vb', ?, 'alpaca', 'long', 1.0, 90.0, 80.0, 0.05, 1.0, "
+        " 0.0, 0, ?, ?, 'filled')",
+        (uuid.uuid4().hex, NOW * 1000, inst, position_id, uuid.uuid4().hex),
+    )
+    rows = load_active_position_rows(memdb)
+    assert float(rows[0]["last_price"]) == pytest.approx(90.0)  # entry_price
+    # review LOW (2026-07-16): the deepest freeze is now distinctly labeled —
+    # never hides as plain 'bar' (which now means a healthy live/bar mark).
+    assert rows[0]["mark_source"] == "entry_price_degrade"
+
+
+# ---------------------------------------------------------------------------
 # #3 G4 — writer ring → tick_window → live stale/crossed-book detection
 # ---------------------------------------------------------------------------
 

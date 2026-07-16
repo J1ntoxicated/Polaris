@@ -45,7 +45,11 @@ import logging
 import sqlite3
 from typing import Any
 
-from polaris.core.pipeline.config import g6_probe_tighten_mode
+from polaris.core.pipeline.config import (
+    TIME_STOP_K_DEFAULT,
+    g6_probe_tighten_mode,
+    time_stop_k_mult,
+)
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GateContext,
@@ -56,6 +60,7 @@ from polaris.core.pipeline.gate_state import (
 __all__ = [
     "DEFAULT_MAX_LOSS_R",
     "G6_DECISION_ENUM",
+    "TIME_STOP_STANDARD_BARS",
     "WIDEN_WINDOW_R",
     "evaluate_strategy_swap",
     "position_monitor_gate",
@@ -66,6 +71,36 @@ logger = logging.getLogger(__name__)
 WIDEN_WINDOW_R: float = 0.7
 DEFAULT_MAX_LOSS_R: float = 1.0
 G6_DECISION_ENUM: list[str] = ["HOLD", "ADJUST_EXIT", "EXIT_NOW", "SWAP_STRATEGY"]
+
+# Time-stop backstop (stopless zombie cleanup — P1 fix). An unregistered
+# strategy (no StrategyMetadata, e.g. a tick-engine id) has no
+# expected_holding_bars to read: it falls back to its 1m-default timeframe x
+# this many bars — the SAME 10-bar/600s standard `_production_recalc.
+# _horizon_seconds_for` already uses for its own unregistered-strategy horizon
+# fallback (this mirrors, does not import, that scripts-layer helper — core
+# must not depend on scripts).
+TIME_STOP_STANDARD_BARS: int = 10
+
+
+def _time_stop_horizon(strategy_id: str) -> tuple[int, int]:
+    """(horizon_seconds, horizon_bars) = expected_holding_bars x timeframe for
+    a registered strategy; an unregistered strategy (no metadata — e.g. a
+    tick-engine id) falls back to the "1m" timeframe x
+    ``TIME_STOP_STANDARD_BARS`` (mirrors
+    ``_production_atr.strategy_timeframe``'s own unregistered->"1m" fallback,
+    duplicated locally rather than imported — core must not depend on
+    scripts)."""
+    # Lazy import (layer-cycle guard, mirrors the conviction_writer import
+    # below): polaris.strategies / polaris.core.isolation.reentry must not be
+    # imported at this module's top level.
+    from polaris.core.isolation.reentry import bar_seconds  # noqa: PLC0415
+    from polaris.strategies import STRATEGY_REGISTRY  # noqa: PLC0415
+
+    cls = STRATEGY_REGISTRY.get(strategy_id)
+    if cls is None:
+        return bar_seconds("1m") * TIME_STOP_STANDARD_BARS, TIME_STOP_STANDARD_BARS
+    bars = max(1, int(cls.metadata.expected_holding_bars))
+    return bar_seconds(cls.metadata.timeframe) * bars, bars
 
 
 def evaluate_strategy_swap(
@@ -91,6 +126,7 @@ def _python_decision(
     candidate: dict[str, Any] | None,
     probe_action: str | None,
     tighten_enabled: bool,
+    time_stop_k: float,
 ) -> GateResult:
     """Deterministic decision rules (the sole G6 decision path)."""
     if pnl_r <= -abs(max_loss_r):
@@ -98,6 +134,45 @@ def _python_decision(
             decision=GateDecision.EXIT_NOW,
             next_gate=GATE_ADAPTIVE_EXIT,
             payload={"reason": "stop_hit", "pnl_r": pnl_r},
+            model_used="python",
+        )
+    # Time-stop backstop (stopless-zombie cleanup — P1 fix, round-3 scope fix):
+    # a P&L-agnostic time rail, independent of and NEVER touching the -1.0R
+    # rail above. Scoped to ``stop_price is None`` ONLY — that is the actual
+    # incident this backstop exists for (a stop_price-null position has no
+    # OTHER exit backstop; the ATR-trailing-stop system needs a stop_price to
+    # ever trigger). A position that already carries a real trailing
+    # stop_price is NOT stopless — it stays governed by that trail / the -1R
+    # rail / G7, so a winner's unbounded tail (profit_target_r=None slow-trend
+    # edge) is never clipped by a universal holding-period cap
+    # (aggressive_always_profit / no_defensive_param_dampen). Missing
+    # held_seconds/strategy keys degrade to 0/"" — never fires (fail-open,
+    # same contract as the missing-position HOLD above).
+    # Bars-seen PREFERRED over wall-clock (mirrors exit_thesis._has_matured's
+    # maturity-gate precedent): when the caller threads ``native_bars_seen``
+    # into ``pos``, the backstop judges elapsed development in NATIVE BARS the
+    # strategy's own timeframe has seen since open — a session close / weekend
+    # gap can no longer fake wall-clock "elapsed" into an early force-exit of a
+    # still-valid slow-trend winner. Absent key (caller not yet migrated) ->
+    # byte-identical wall-clock comparison.
+    held_seconds = int(pos.get("held_seconds", 0) or 0)
+    horizon_sec, horizon_bars = _time_stop_horizon(str(pos.get("strategy") or ""))
+    time_stop_sec = horizon_sec * time_stop_k
+    native_bars_seen_raw = pos.get("native_bars_seen")
+    if native_bars_seen_raw is not None:
+        time_stopped = int(native_bars_seen_raw) > horizon_bars * time_stop_k
+    else:
+        time_stopped = held_seconds > time_stop_sec
+    if time_stopped and pos.get("stop_price") is None:
+        return GateResult(
+            decision=GateDecision.EXIT_NOW,
+            next_gate=GATE_ADAPTIVE_EXIT,
+            payload={
+                "reason": "time_stop",
+                "pnl_r": pnl_r,
+                "held_seconds": held_seconds,
+                "time_stop_sec": time_stop_sec,
+            },
             model_used="python",
         )
     if isinstance(candidate, dict) and evaluate_strategy_swap(position=pos, candidate=candidate):
@@ -147,6 +222,7 @@ async def position_monitor_gate(
     tighten_enabled: bool | None = None,
     conn: sqlite3.Connection | None = None,
     conviction_active: bool | None = None,
+    time_stop_k: float | None = None,
 ) -> GateResult:
     """Gate 6 dispatcher — deterministic Python (no LLM).
 
@@ -175,6 +251,13 @@ async def position_monitor_gate(
     see ``conviction_writer.evaluate_conviction_stack``. Absent either input →
     no-op (byte-identical). Never runs on EXIT_NOW / SWAP_STRATEGY.
 
+    ``time_stop_k`` (stopless-zombie backstop multiplier, ``POLARIS_TIME_STOP_K``,
+    default 4.0; ``None`` reads the env): a ``stop_price``-null position held
+    past ``K x strategy_horizon_seconds`` is EXIT_NOW ("time_stop") —
+    independent of and never touching the -1.0R rail. A position that already
+    carries a real ``stop_price`` is not stopless and is never force-exited by
+    this rail (winners run unbounded). ``env_value`` injectable for tests.
+
     Fail-open (Q4): missing position → HOLD (never KILL).
     """
     pos = ctx.payload.get("position", {})
@@ -196,9 +279,16 @@ async def position_monitor_gate(
     )
     probe_action_raw = ctx.payload.get("probe_action")
     probe_action = str(probe_action_raw) if isinstance(probe_action_raw, str) else None
+    use_time_stop_k = time_stop_k if time_stop_k is not None else time_stop_k_mult()
+    # Reject a non-positive injected K -> TIME_STOP_K_DEFAULT (same clamp as
+    # time_stop_k_mult's env path — K<=0 would invert the P&L-agnostic time
+    # rail into an exit-everything-immediately throttle).
+    if use_time_stop_k <= 0.0:
+        use_time_stop_k = TIME_STOP_K_DEFAULT
     result = _python_decision(
         pos=pos, pnl_r=pnl_r, max_loss_r=max_loss_r, candidate=candidate_dict,
         probe_action=probe_action, tighten_enabled=use_tighten,
+        time_stop_k=use_time_stop_k,
     )
     if conn is not None and result.decision in (GateDecision.HOLD, GateDecision.ADJUST_EXIT):
         stack_inputs = ctx.payload.get("conviction_stack")

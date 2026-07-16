@@ -208,6 +208,7 @@ def load_active_position_rows(
         # bar close. live_px returns (mid, last_ws_monotonic); a tick older than
         # the reconnect-proof threshold degrades to the bar (no flap).
         last_price = bar_close
+        mid_used = False
         if quote_writer is not None:
             px = quote_writer.live_px(instrument_id)
             if px is not None:
@@ -217,6 +218,23 @@ def load_active_position_rows(
                     and time.monotonic() - last_ws_monotonic < WS_EXIT_MARK_FRESH_SEC
                 ):
                     last_price = mid
+                    mid_used = True
+        # DIA/CNC 7-day frozen-mark incident (P1 fix): the mid was missing/stale
+        # for these Alpaca-held positions AND the prior wiring had no distinct
+        # label for "bar close substituted for the missing mid" vs "cadence=bar".
+        # mark_source stamps 'bar_fallback' ONLY when a genuine bar close (not
+        # the deeper entry_price degrade below) stood in for a missing/stale mid
+        # — the entry_price case (no bar at all) keeps the plain 'bar' default,
+        # never fabricating a bar-fallback claim it did not actually have.
+        # 3-way label (review LOW, 2026-07-16): 'live_mid' = fresh WS mid used;
+        # 'bar_fallback' = mid missing/stale, real bar close substituted (the
+        # DIA/CNC class, auditable); 'entry_price_degrade' = NO bar at all —
+        # the deepest freeze, now distinctly flagged instead of hiding as 'bar'.
+        mark_source = (
+            "live_mid" if mid_used
+            else "bar_fallback" if bar_row
+            else "entry_price_degrade"
+        )
         atr_samples = [
             (float(br[2]) - float(br[3])) / float(br[1])
             for br in bar_row
@@ -273,6 +291,7 @@ def load_active_position_rows(
             opened_ts=opened_ts_raw,
             entry_price=entry_price,
             last_price=last_price,
+            mark_source=mark_source,
             size_usd=size_usd,
             atr_pct=atr_pct,
             correlation_group=str(r[3] or ""),
@@ -486,6 +505,11 @@ async def _evaluate_position(
         last_price=last_price, atr_pct=atr_pct, entry_atr_pct=entry_atr_pct,
         pnl_r=pnl_r, held_seconds=held_seconds, regime=regime, now_ts=now_ts,
         run_id=uuid.uuid4().hex,
+        # DIA/CNC frozen-mark P1 fix — surface whether THIS tick's mark came
+        # from the bar-close fallback (mid missing/stale) vs the plain bar
+        # cadence default. Absent key (legacy/no-writer callers) keeps the
+        # existing 'bar' default, byte-identical.
+        mark_source=str(pos.get("mark_source", "bar")),
     )
 
     # Adaptive thesis re-map (bar path): gather the entry-thesis-health inputs
@@ -553,7 +577,17 @@ async def _evaluate_position(
             "entry_price": entry_price,
             "last_price": last_price,
             "held_seconds": held_seconds,
+            # G6 time-stop bars-seen preference (round-2 MED fix): the SAME
+            # native-bars count the maturity gate above already computed for
+            # this position — threading it in lets G6's backstop judge on
+            # native bars instead of wall-clock (session close / gap safe).
+            "native_bars_seen": native_bars_seen,
             "cell_score": 0.0,
+            # G6 time-stop scope fix (round-3 BLOCKER): the backstop only
+            # force-exits a position with NO other backstop — thread the
+            # persisted trailing stop_price through so a winner already
+            # governed by a real stop is never caught by the time rail.
+            "stop_price": pos.get("stop_price"),
         },
         unrealized_pnl_r=pnl_r,
         max_loss_r=1.0,

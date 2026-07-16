@@ -105,6 +105,26 @@ def test_registered_in_registry() -> None:
     assert STRATEGY_REGISTRY["connors_rsi2"] is ConnorsRSI2Strategy
 
 
+def test_venue_guard_rejects_non_alpaca_market_view() -> None:
+    # P1 fix (2 leaked Capital fills): connors_rsi2 is alpaca-only. A
+    # market_view from ANY other venue must never emit, even given the exact
+    # canonical oversold-dip-in-uptrend bar series that fires on alpaca.
+    bars = _bars_uptrend(220, start=50.0, step=0.3)
+    last_close = bars[-3].close
+    drop = last_close - 1.5
+    bars[-2] = BarView(ts=bars[-2].ts, open=drop, high=drop + 0.1, low=drop - 0.1,
+                       close=drop, volume=1000.0)
+    bars[-1] = BarView(ts=bars[-1].ts, open=drop - 1.5, high=drop, low=drop - 1.6,
+                       close=drop - 1.5, volume=1000.0)
+    capital_mv = MarketView(
+        symbol="AAPL", venue="capital", timeframe="1D",
+        bars=bars, last_price=bars[-1].close, spread_bps=2.0, atr_pct=0.01,
+    )
+    assert ConnorsRSI2Strategy().generate_raw_signal(capital_mv) is None
+    # Sanity: the SAME bars on alpaca still fire (the guard is venue-only).
+    assert ConnorsRSI2Strategy().generate_raw_signal(_mv(bars)) is not None
+
+
 def test_harvest_helper_picks_up_target() -> None:
     from polaris.scripts._production_recalc_exit import _profit_target_for_strategy
     assert _profit_target_for_strategy("connors_rsi2") == 1.0

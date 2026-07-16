@@ -180,3 +180,74 @@ def test_no_fire_when_warmup_insufficient() -> None:
     bars = _bars(3, weekday=5)
     mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
     assert WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is None
+
+
+# ---------------------------------------------------------------------------
+# Session-gate boundary (P1 fix): Friday 21:00 UTC .. Sunday 24:00 UTC.
+# Mirrors the flush sibling's fix — the 2026-07-08 VIRTUAL loosening un-gated
+# all 7 weekdays outside the validated 95d/~13.5-weekend regime.
+# ---------------------------------------------------------------------------
+
+
+def _ts_at(weekday: int, hour: int) -> int:
+    sat = datetime(2026, 6, 27, hour, 0, tzinfo=UTC)  # 2026-06-27 = Saturday
+    delta_days = (weekday - 5) % 7
+    return int(sat.timestamp()) + delta_days * 86400
+
+
+def _bars_at(n: int, *, ts: int) -> list[BarView]:
+    ts0 = ts - (n - 1) * 3600
+    out: list[BarView] = []
+    for i in range(n):
+        c = 100.0
+        out.append(
+            BarView(ts=ts0 + i * 3600, open=c, high=c + 0.2, low=c - 0.2,
+                    close=c, volume=1000.0)
+        )
+    return out
+
+
+def test_no_fire_friday_before_2100_utc() -> None:
+    bars = _bars_at(30, ts=_ts_at(4, 20))  # Fri 20:00 UTC
+    mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
+    assert WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is None
+
+
+def test_fires_friday_at_2100_utc_session_start() -> None:
+    bars = _bars_at(30, ts=_ts_at(4, 21))  # Fri 21:00 UTC
+    mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
+    assert WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is not None
+
+
+def test_fires_sunday_late_2359_utc() -> None:
+    bars = _bars_at(30, ts=_ts_at(6, 23))  # Sun 23:00 UTC
+    mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
+    assert WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is not None
+
+
+def test_no_fire_monday_0000_utc_session_end() -> None:
+    bars = _bars_at(30, ts=_ts_at(0, 0))  # Mon 00:00 UTC
+    mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
+    assert WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is None
+
+
+def test_session_boundary_unaffected_by_virtual_mode() -> None:
+    """Not virtual_loosen'd — Monday noon never fires in EITHER mode."""
+    import importlib
+    import os
+
+    prior = os.environ.get("POLARIS_VIRTUAL_ACCOUNT")
+    try:
+        os.environ["POLARIS_VIRTUAL_ACCOUNT"] = "1"
+        import polaris.strategies.weekend_funding_capitulation_maker as mod
+        mod = importlib.reload(mod)
+        bars = _bars(30, weekday=0)  # Monday, noon fixture
+        mv = _mv(bars, funding_symbol=-0.0025, funding_p10=-0.0019)
+        assert mod.WeekendFundingCapitulationMakerStrategy().generate_raw_signal(mv) is None
+    finally:
+        if prior is None:
+            os.environ.pop("POLARIS_VIRTUAL_ACCOUNT", None)
+        else:
+            os.environ["POLARIS_VIRTUAL_ACCOUNT"] = prior
+        import polaris.strategies.weekend_funding_capitulation_maker as mod
+        importlib.reload(mod)

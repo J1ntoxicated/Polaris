@@ -131,6 +131,14 @@ class ConnorsRSI2Strategy(BaseStrategy):
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:
+        # Venue-match guard (P1 fix — 2 leaked Capital fills): this strategy is
+        # alpaca-only (metadata.venue). RawSignal carries no venue of its own
+        # (the caller's market_view.venue propagates downstream), so a
+        # dispatch-loop venue filter is the ONLY thing keeping this strategy
+        # off other venues — defense-in-depth here so a mis-routed market_view
+        # (any future/alternate dispatch path) can never leak a non-alpaca fill.
+        if market_view.venue != self.metadata.venue:
+            return None
         if not self.warmup_ok(market_view):
             return None
         bars = market_view.bars

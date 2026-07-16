@@ -73,6 +73,8 @@ from polaris.storage.schema_ddl_ext import (
     DDL_CALIBRATION_PAIRS,
     DDL_CALIBRATION_PAIRS_INDEX,
     DDL_CAPITAL_REOPEN_PENDING,
+    DDL_DELEGATION_SHADOW,
+    DDL_DELEGATION_SHADOW_INDEX,
     DDL_ENTRY_ADMISSION_SHADOW,
     DDL_ENTRY_ADMISSION_SHADOW_INDEX,
     DDL_FILLS,
@@ -233,6 +235,9 @@ ALL_DDL: tuple[str, ...] = (
     # maker-only table above); resolution is offline against forward bars.
     DDL_PRICE_THROUGH_SHADOW,
     DDL_PRICE_THROUGH_SHADOW_INDEX,
+    # Delegation-gate fit-score SHADOW (P2b) — fit-score #1 vs actual dispatch.
+    DDL_DELEGATION_SHADOW,
+    DDL_DELEGATION_SHADOW_INDEX,
     # Shadow-first would-be orders (#94) — SUPPRESSED order on a shadow_first
     # strategy (the two weekend OKX makers); the signal flowed + the would-be P&L
     # is logged (zero capital at risk; durability of the thin sample accrues live).

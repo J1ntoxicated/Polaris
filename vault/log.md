@@ -525,3 +525,5 @@
 2026-07-16 02:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=326 learners=3 paper=True]
 - 2026-07-16: 🎉 P0 storage-split 랜딩 완료 (merge ade8cca, wipe+fresh boot PID 2046) — 실증: md.bars 298k/trading.bars 0(도메인 분리 증명), 알파카 1500 활성 상태에서 락 0·에러 0·틱 1s 케이던스(프리즈 조건 그대로 재현했는데 깨끗 = 근치 확인). 디스크 45GB free. 리뷰 4라운드+최종재검 findings 20+ 전부 해소(CRITICAL 2 랜딩 전 차단). 풀스위트 신규실패 0.
 - 2026-07-16: P1 랜딩(merge 1328ff8, 재기동 PID 7158) — 마크 바-폴백+mark_source 3분류(컨덕터 마감)·G6 시간-정지 레일·cci 화이트리스트·weekend 세션게이트·connors 베뉴가드·미등록 4종 정식화. Opus 2렌즈 3라운드 CRITICAL/MED 0. STETH -15R 포렌식=팬텀 가격(데모 북 퇴화 mid, 시장은 1922인데 1747 체결) → quote 새니티 가드를 P2a에 주입. P2a(G4 폐지+G3/G7 잉여GPT 제거+새니티가드) 발사(wf_57ad0de9).
+2026-07-16 03:24 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=326 learners=3 paper=True]
+- 2026-07-16: P1 발화검증 — weekend 목요 emit 0(게이트 작동)·틱/락/에러 0. 판정 정정: cci FX 물림=버그 아님, virtual_loosen 의도 설계(REAL=gold+지수 이미 제한, 버추얼만 FX 확장 — 7/8 활발화 mandate). 미등록 4종(session_breakout 등)은 virtual 로스터 별도경로로 발화 중 = dispatch SSOT seal 우회 상태 → P3에서 정식화. 아시아 커버리지 백로그 추가(J225/HK50 1H 검증).

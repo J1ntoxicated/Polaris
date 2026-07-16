@@ -21,8 +21,10 @@ import sqlite3
 import uuid
 from typing import TYPE_CHECKING
 
+from polaris.core.indicators.production import map_altdata_to_market_fields
 from polaris.core.live_recalc.exit_engine import Bucket, bucket_from_correlation_group
 from polaris.core.probes import ProbeContext
+from polaris.core.probes.liquidity_read import read_liquidity_snapshot
 from polaris.core.probes.tuning_log import log_probe_decisions, log_probe_readings
 from polaris.core.streams import resolve_stream
 from polaris.strategies import STRATEGY_REGISTRY
@@ -58,6 +60,8 @@ def wire_probe_sidecar(state: ProdLoopState, *, probe_db_path: str) -> None:
     """
     from polaris.core.probes import ExitEngine, ProbeBus  # noqa: PLC0415
     from polaris.core.probes.catalog import (  # noqa: PLC0415
+        FundingProbe,
+        LiquidityProbe,
         LossDefenseProbe,
         ProfitTakingProbe,
         RegimeFitProbe,
@@ -70,7 +74,10 @@ def wire_probe_sidecar(state: ProdLoopState, *, probe_db_path: str) -> None:
         state.probe_conn = open_probe_db(probe_db_path)
         state.probe_bus = ProbeBus(
             [ProfitTakingProbe(), LossDefenseProbe(), TechnicalProbe(),
-             SessionHoursProbe(), RegimeFitProbe()]
+             SessionHoursProbe(), RegimeFitProbe(),
+             # P3 promotion (2026-07-16) — orphan-feed axes, join the SAME
+             # composite (never a separate gate).
+             LiquidityProbe(), FundingProbe()]
         )
         state.probe_engine = ExitEngine()
         logger.info(
@@ -159,6 +166,8 @@ def observe_probes(
     run_id: str,
     mark_source: str = "bar",
     signal_family: str | None = None,
+    conn: sqlite3.Connection | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Run the probe → engine → tuning-log triple in OBSERVE mode (fail-open).
 
@@ -182,6 +191,16 @@ def observe_probes(
     SAME imprecision the live ``_production_tick_mfe`` harvest schedule already
     accepts by hardcoding "momentum". Either way this is PURE OBSERVE telemetry
     — it never reaches a live knob.
+
+    P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    ``LiquidityProbe`` / ``FundingProbe`` orphan-feed wiring: ``conn`` (trading
+    DB, ``universe.vol_24h_usd``) / ``md_conn`` (marketdata DB,
+    ``quote_ticks.spread_bps``) are OPTIONAL — a caller that omits either (or
+    both) simply leaves that datum ``None`` and the corresponding probe
+    ABSTAINs (byte-identical to before this promotion for any caller that does
+    not pass them). Funding is read from ``state.altdata_cache`` (already
+    resident in memory, zero new fetch — the SAME cache
+    ``build_real_market_view`` reads for entry signals).
     """
     bus = getattr(state, "probe_bus", None)
     engine = getattr(state, "probe_engine", None)
@@ -200,11 +219,22 @@ def observe_probes(
                 str(pos.get("active_strategy_id") or pos.get("strategy") or "")
             )
         )
+        venue = str(pos["venue"])
+        symbol = str(pos["symbol"])
+        underlying_group_id = str(pos.get("underlying_group_id", ""))
+        liquidity = read_liquidity_snapshot(
+            universe_conn=conn, quote_conn=md_conn,
+            venue=venue, symbol=symbol, instrument_id=f"{venue}:{symbol}",
+        )
+        altdata = map_altdata_to_market_fields(
+            underlying_group_id, getattr(state, "altdata_cache", None),
+            now_ts=now_ts, symbol=symbol,
+        )
         ctx = ProbeContext(
             position_id=str(pos["position_id"]),
-            venue=str(pos["venue"]),
-            symbol=str(pos["symbol"]),
-            underlying_group_id=str(pos.get("underlying_group_id", "")),
+            venue=venue,
+            symbol=symbol,
+            underlying_group_id=underlying_group_id,
             side=side,
             entry_price=entry_price,
             last_price=last_price,
@@ -213,6 +243,9 @@ def observe_probes(
             mfe_r=mfe_r,
             mae_r=mae_r,
             held_seconds=held_seconds,
+            vol_24h_usd=liquidity.vol_24h_usd,
+            spread_bps=liquidity.spread_bps,
+            funding_rate=altdata.funding_rate,
             volume_now=float(pos.get("volume_now", 0.0)),
             volume_z=float(pos.get("volume_z", 0.0)),
             atr_slope=float(pos.get("atr_slope", 0.0)),

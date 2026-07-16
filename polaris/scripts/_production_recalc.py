@@ -553,6 +553,11 @@ async def _evaluate_position(
         # cadence default. Absent key (legacy/no-writer callers) keeps the
         # existing 'bar' default, byte-identical.
         mark_source=str(pos.get("mark_source", "bar")),
+        # P3 promotion — LiquidityProbe/FundingProbe orphan-feed wiring:
+        # universe (trading-domain) + quote_ticks (marketdata-domain,
+        # storage-split) single-row reads. state.md_conn=None (legacy/test)
+        # degrades to conn (byte-identical fallback used throughout this file).
+        conn=conn, md_conn=state.md_conn if state.md_conn is not None else conn,
     )
 
     # Adaptive thesis re-map (bar path): gather the entry-thesis-health inputs

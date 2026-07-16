@@ -43,6 +43,13 @@ PROBE_ROLE_REGISTRY: dict[str, ProbeRole] = {
     "loss_defense": "Exit",
     "session_hours": "Exit",
     "technical": "Position",
+    # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    # LiquidityProbe / FundingProbe ride the SAME G6 exit attach as Technical
+    # (Position — in-flight health observation axes; ADVERSE-ONLY /
+    # signed-carry-cost precision signals for the existing TIGHTEN/HARVEST
+    # tighten pathway, never a new gate).
+    "liquidity": "Position",
+    "funding": "Position",
     # W2 (backgate-plan design-exit-matrix.md §B) — RegimeFitProbe rides the
     # SAME G6 exit attach as the other 4, observe-only (parallel SHADOW to the
     # existing direct regime_fit/exit_tightness call in _production_tick_mfe;

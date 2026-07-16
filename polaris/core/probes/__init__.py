@@ -57,7 +57,10 @@ EngineAction = Literal["HOLD", "WIDEN", "TIGHTEN", "HARVEST"]
 EngineMode = Literal["observe", "trail_only", "full"]
 # Probe kinds shipped in Slice 1 + the W2 regime-fit shadow (news / COT land
 # in later slices).
-ProbeKind = Literal["technical", "volume", "session", "loss", "profit", "regime"]
+ProbeKind = Literal[
+    "technical", "volume", "session", "loss", "profit", "regime",
+    "liquidity", "funding",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +103,16 @@ class ProbeContext:
     # position's strategy. Default "momentum" preserves the pre-W2 degenerate
     # shape for any caller that does not yet supply it.
     signal_family: str = "momentum"
+    # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    # orphan-feed → probe axis wiring. Both CALLER-supplied (the attach site
+    # reads the already-open universe/quote_ticks tables + the already-cached
+    # AltDataCache funding snapshot — zero NEW per-tick fetch beyond a single
+    # PK lookup, mirroring the ``latest_probe_tighten`` precedent already in
+    # this same call site). ``None`` = ABSTAIN (LiquidityProbe / FundingProbe
+    # degrade-never-crash, same contract as every other Slice-1 probe).
+    vol_24h_usd: float | None = None  # universe.vol_24h_usd for this instrument
+    spread_bps: float | None = None  # quote_ticks.spread_bps (book state)
+    funding_rate: float | None = None  # AltDataCache mean OKX perp funding
     # Version stamp for this dataclass's EXTENDED (post-Slice-1) shape — bumped
     # only when a field is ADDED, never on a value change. Lets an offline
     # reader over probe_readings/probe_decisions tell which ProbeContext schema
@@ -108,7 +121,7 @@ class ProbeContext:
     # FRESH every observe tick (never deserialized from storage), so the old
     # position's close path just gets the current version — no migration, no
     # regression (proven byte-identical by test_probe_attach_byte_identical.py).
-    probe_ctx_version: int = 2
+    probe_ctx_version: int = 3
 
 
 @dataclass(frozen=True, slots=True)

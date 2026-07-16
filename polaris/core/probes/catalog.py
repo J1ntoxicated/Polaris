@@ -19,6 +19,17 @@ inputs are absent. A probe ONLY describes (signed ``lean`` + ``confidence`` +
     the offline calibrator can compare it against realized outcomes. Parallel
     SHADOW, not a replacement — observe mode threads zero knobs either way, so
     this can never double-tighten the live exit (§ conflict-resolution ④).
+  * **LiquidityProbe** (P3 promotion, 2026-07-16, vault/50_research/
+    built-not-wired-audit.md — orphan-feed wiring) — universe ``vol_24h_usd``
+    + quote-book ``spread_bps`` → an ADVERSE-ONLY exit-lean as the market
+    thins (structural response to the STETH/SPK phantom-liquidity class of
+    incident: a position whose instrument has gone thin is exactly the one a
+    tighter trail protects). Never favorable — deep/tight liquidity is the
+    NEUTRAL baseline, not a reward.
+  * **FundingProbe** (P3 promotion, same audit) — ``okx_funding`` mean perp
+    funding rate → signed carry-cost pressure on THIS position's side (a long
+    paying positive funding is adverse; a short collecting it is favorable,
+    and vice-versa for negative funding).
 """
 
 from __future__ import annotations
@@ -31,8 +42,12 @@ from polaris.core.probes import (
     _clamp,
 )
 from polaris.core.regime_fit import regime_fit
+from polaris.core.universe.schema import DEFAULT_MAX_SPREAD_BPS, liquidity_floor_for_venue
+from polaris.strategies.okx_funding_carry_persist import FUNDING_THRESHOLD
 
 __all__ = [
+    "FundingProbe",
+    "LiquidityProbe",
     "LossDefenseProbe",
     "ProfitTakingProbe",
     "RegimeFitProbe",
@@ -54,6 +69,17 @@ _LOSS_STALE_SEC: float = 600.0
 _ATR_SLOPE_FULL: float = 0.01
 # Session: lean ramps from 0 at this many seconds-to-close up to full at 0.
 _SESSION_LEAD_SEC: float = 1800.0
+# Liquidity: spread this many bps ABOVE the venue's universe-membership cap
+# (DEFAULT_MAX_SPREAD_BPS) is full adverse — reuses the SAME threshold the
+# universe-eligibility gate already applies (discovery.py / entrance.py),
+# never a new independent number.
+_SPREAD_FULL_BPS: float = DEFAULT_MAX_SPREAD_BPS
+# Funding: a carry-cost pressure this many R (fraction) deep is full adverse.
+# 3x okx_funding_carry_persist.FUNDING_THRESHOLD (-0.0003, "moderate
+# persistent-negative funding" already verified as a genuine trading signal
+# elsewhere in this codebase) — a 3x-moderate print is a clearly EXTREME
+# funding regime, not a fresh guess.
+_FUNDING_FULL: float = abs(FUNDING_THRESHOLD) * 3.0
 
 
 class ProfitTakingProbe:
@@ -211,5 +237,96 @@ class RegimeFitProbe:
                 "signal_family": ctx.signal_family,
                 "regime": ctx.regime,
                 "fit": round(fit, 4),
+            },
+        )
+
+
+class LiquidityProbe:
+    """universe vol_24h_usd + quote-book spread_bps → ADVERSE-ONLY exit-lean.
+
+    P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    the orphan-feed sweep flagged universe liquidity + the quote-book state as
+    collected-but-unconsumed. Structural response to the STETH/SPK phantom-
+    liquidity class of incident (vault): a position whose instrument has gone
+    thin (below the venue's own eligibility floor) or whose spread has widened
+    past the venue's own eligibility cap is exactly the one a tighter trail
+    protects — this NEVER produces a favorable lean (deep/tight liquidity is
+    the neutral baseline, not a reward; ``aggressive_always_profit`` / flow_
+    not_block: this is a PRECISION signal for the SAME tighten pathway
+    TIGHTEN/HARVEST already use, never a new block/size-cut).
+    """
+
+    probe_id: str = "liquidity"
+    kind: ProbeKind = "liquidity"
+    role: ProbeRole = "Position"  # SSOT: PROBE_ROLE_REGISTRY
+
+    def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
+        if ctx.vol_24h_usd is None and ctx.spread_bps is None:
+            return None  # neither datum present → ABSTAIN
+        floor = liquidity_floor_for_venue(ctx.venue)
+        thinness = 0.0
+        vol_known = ctx.vol_24h_usd is not None and floor.min_vol_24h_usd > 0.0
+        if vol_known:
+            thinness = 1.0 - _clamp(
+                ctx.vol_24h_usd / floor.min_vol_24h_usd, 0.0, 1.0  # type: ignore[operator]
+            )
+        wideness = 0.0
+        spread_known = ctx.spread_bps is not None and _SPREAD_FULL_BPS > 0.0
+        if spread_known:
+            wideness = _clamp(ctx.spread_bps / _SPREAD_FULL_BPS, 0.0, 1.0)  # type: ignore[operator]
+        n_known = int(vol_known) + int(spread_known)
+        if n_known == 0:
+            return None  # venue has no floor/cap configured → ABSTAIN
+        adverse = (thinness + wideness) / n_known
+        if adverse <= 0.0:
+            return None  # liquid + tight → neutral, never favorable
+        return ProbeReading(
+            probe_id=self.probe_id,
+            kind=self.kind,
+            lean=-_clamp(adverse, 0.0, 1.0),
+            confidence=_clamp(n_known / 2.0, 0.0, 1.0),
+            evidence={
+                "vol_24h_usd": ctx.vol_24h_usd,
+                "spread_bps": ctx.spread_bps,
+                "min_vol_24h_usd": floor.min_vol_24h_usd,
+            },
+        )
+
+
+class FundingProbe:
+    """okx_funding mean perp funding → signed carry-cost pressure lean.
+
+    P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    ``okx_funding`` is collected (``OKXFundingCollector``, ``AltDataCache``)
+    but the ONLY consumers are two ENTRY strategies (weekend_funding_
+    capitulation_maker's per-symbol p10 squeeze / okx_funding_carry_persist's
+    own carry entry); no position-monitor axis reads the funding a position is
+    ALREADY paying/collecting. Sign convention (OKX ``fundingRate``, positive =
+    longs pay shorts): a LONG paying positive funding is adverse; a SHORT
+    collecting it is favorable, and symmetrically for negative funding.
+    """
+
+    probe_id: str = "funding"
+    kind: ProbeKind = "funding"
+    role: ProbeRole = "Position"  # SSOT: PROBE_ROLE_REGISTRY
+
+    def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
+        if ctx.funding_rate is None:
+            return None  # feed absent/stale for this group → ABSTAIN
+        # Cost paid BY this position's side: a long pays positive funding (cost);
+        # a short is PAID positive funding (benefit) — invert for short.
+        cost = ctx.funding_rate if ctx.side == "long" else -ctx.funding_rate
+        if cost == 0.0:
+            return None
+        lean = -_clamp(cost / _FUNDING_FULL, -1.0, 1.0)
+        return ProbeReading(
+            probe_id=self.probe_id,
+            kind=self.kind,
+            lean=lean,
+            confidence=_clamp(abs(cost) / _FUNDING_FULL, 0.0, 1.0),
+            evidence={
+                "funding_rate": round(ctx.funding_rate, 6),
+                "side": ctx.side,
+                "cost": round(cost, 6),
             },
         )

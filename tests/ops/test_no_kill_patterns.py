@@ -16,6 +16,14 @@ FORBIDDEN = re.compile(
     r"pkill|killall|kill\s+-9|kill\s+-KILL|SIGKILL|killpg|os\.killpg"
 )
 
+# Single sanctioned exemption (Jin 2026-07-13 tick-freeze incident, landed
+# 2026-07-16): watchdog.py's tick-freeze recovery may escalate to SIGKILL —
+# but ONLY after SIGTERM + grace on the exact pidfile-verified, cmd-matched
+# bot PID (a wedged event loop can ignore TERM forever; 10h outage proved it).
+# The broad-kill rule (no pkill/killall/killpg, no killing by name/group)
+# stays absolute — this allows the one narrow, evidence-gated escalation.
+ALLOWED: set[tuple[str, str]] = {("watchdog.py", "SIGKILL")}
+
 OWNED_FILES = (
     list((PROJECT_ROOT / "tools" / "ops").glob("*.py"))
     + [
@@ -39,5 +47,7 @@ def test_no_kill_patterns_in_owned_sources() -> None:
     for path in OWNED_FILES:
         text = path.read_text(encoding="utf-8")
         for match in FORBIDDEN.finditer(text):
+            if (path.name, match.group(0)) in ALLOWED:
+                continue
             offenders.append(f"{path.name}: {match.group(0)!r}")
     assert not offenders, f"forbidden kill patterns found: {offenders}"

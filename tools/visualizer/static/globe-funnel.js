@@ -34,6 +34,19 @@
   const ARC_START = -Math.PI * 0.92;
   const ARC_SPAN = Math.PI * 1.84;
 
+  // Same 8-hue cool->warm progression as wall_spine.js's GATE_COLORS (Jin
+  // 2026-07-16 P4b) — duplicated here rather than plumbed cross-module for 8
+  // stable literal hex strings (same precedent as wall_console_readouts.js's
+  // own duplicate of the same array): shared visual language, not runtime
+  // state. Each gate marker on the lane now reads its own hue instead of one
+  // flat steel-gray, so G1..G8 are visually distinguishable (not just by the
+  // tiny label text).
+  const GATE_COLORS_HEX = ['#5fa8ff', '#5fdfff', '#6fffc4', '#9dff6f', '#ffe066', '#ffb454', '#ff7a9e', '#c48aff'];
+  const GATE_COLORS = GATE_COLORS_HEX.map((hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  });
+
   let funnel = [];                 // last gate_funnel[] (sorted by gate_id)
   const segState = [];             // per-gate {pass_n,kill_n,flash,killFlash}
   const gateAnchors = {};          // gate_id → {x,y,z} home on the lane (for edges)
@@ -122,9 +135,11 @@
       const passFrac = (g.pass_n || 0) / tot;
       const baseR = 2.0 + Math.min(2.4, Math.log10(1 + tot) * 1.4);
       const r = (baseR + (st ? st.flash * 2.4 : 0)) * (p.persp || 1);
-      // gate marker body — neutral, brightens on flow.
+      // gate marker body — its own GATE_COLORS hue (gate identity), brightens
+      // on flow.
+      const gateIdx = Math.max(0, Math.min(7, (g.gate_id || 1) - 1));
       const a = 0.32 + (st ? st.flash * 0.5 : 0);
-      ctx.fillStyle = rgba([0x9a, 0xa4, 0xc0], a);
+      ctx.fillStyle = rgba(GATE_COLORS[gateIdx] || [0x9a, 0xa4, 0xc0], a);
       ctx.fillRect(p.sx - r * 0.5, p.sy - r * 0.5, r, r);
       // pass (green) and kill (red) wedges flanking the marker — the funnel read.
       const gw = r * (0.5 + passFrac);

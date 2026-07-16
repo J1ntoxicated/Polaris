@@ -534,3 +534,4 @@
 - 2026-07-16: P3 랜딩(merge ce72549, 재기동 PID 25446, PROBE_TIGHTEN=1) — protect 승격(허용목록·applied기록·레일무접촉)·미등록4종 정식화+capital_macro shadow-first·liquidity/funding 프로브축·probes 리텐션 확인. Opus 2렌즈 CRITICAL/MED 0. 런던 개장 후 Capital 신호 13→1530(예측 적중)·delegation_shadow 1588 축적.
 2026-07-16 08:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=334 learners=3 paper=True]
 - 2026-07-16: P4a 랜딩(merge 9169bcf) — 데스크 /flow 인스펙트 차트(자동추종/클릭핀, 진입·스톱·MFE/MAE)·포지션 스파크라인 13행·액티비티 절반·레퍼런스탭 SSOT 현행화. 브라우저 실검증(핀 동작·콘솔 0). Opus 1라운드 CRITICAL/MED 0.
+- 2026-07-16: P5/P6 마무리 sweep — ansi 고아 8함수 삭제(감사판정)·frontmatter 22 백필(lint error 0)·digest 06월 9개→롤업 압축·메모리 현행화(리셋 완료 상태). P4b 모바일 빌드 병행 중.

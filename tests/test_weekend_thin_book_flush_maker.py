@@ -116,3 +116,80 @@ def test_no_fire_when_warmup_insufficient() -> None:
     bars = _flush_bars(3, weekday=5, flush=True)
     mv = _mv(bars, rsi=18.0, bb_lower=96.0)
     assert WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is None
+
+
+# ---------------------------------------------------------------------------
+# Session-gate boundary (P1 fix): Friday 21:00 UTC .. Sunday 24:00 UTC.
+# The 2026-07-08 VIRTUAL loosening un-gated all 7 weekdays — live telemetry
+# showed weekday firing (Monday 2.5x the weekend rate) outside the validated
+# 95d/~13.5-weekend regime. The boundary now applies uniformly to REAL and
+# VIRTUAL (import-reload both env states to prove neither loosens it).
+# ---------------------------------------------------------------------------
+
+
+def _ts_at(weekday: int, hour: int) -> int:
+    """An epoch-seconds ts at UTC ``hour`` on ``weekday`` (Mon=0 .. Sun=6)."""
+    sat = datetime(2026, 6, 27, hour, 0, tzinfo=UTC)  # 2026-06-27 = Saturday
+    delta_days = (weekday - 5) % 7
+    return int(sat.timestamp()) + delta_days * 86400
+
+
+def _flush_bars_at(n: int, *, ts: int, flush: bool) -> list[BarView]:
+    ts0 = ts - (n - 1) * 3600
+    out: list[BarView] = []
+    for i in range(n):
+        c = 100.0
+        out.append(BarView(ts=ts0 + i * 3600, open=c, high=c + 0.2, low=c - 0.2,
+                           close=c, volume=1000.0))
+    if flush:
+        last_ts = out[-1].ts
+        out[-1] = BarView(ts=last_ts, open=99.0, high=99.2, low=95.0,
+                          close=95.5, volume=4000.0)
+    return out
+
+
+def test_no_fire_friday_before_2100_utc() -> None:
+    bars = _flush_bars_at(30, ts=_ts_at(4, 20), flush=True)  # Fri 20:00 UTC
+    mv = _mv(bars, rsi=18.0, bb_lower=96.0)
+    assert WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is None
+
+
+def test_fires_friday_at_2100_utc_session_start() -> None:
+    bars = _flush_bars_at(30, ts=_ts_at(4, 21), flush=True)  # Fri 21:00 UTC
+    mv = _mv(bars, rsi=18.0, bb_lower=96.0)
+    assert WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is not None
+
+
+def test_fires_sunday_late_2359_utc() -> None:
+    bars = _flush_bars_at(30, ts=_ts_at(6, 23), flush=True)  # Sun 23:00 UTC
+    mv = _mv(bars, rsi=18.0, bb_lower=96.0)
+    assert WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is not None
+
+
+def test_no_fire_monday_0000_utc_session_end() -> None:
+    bars = _flush_bars_at(30, ts=_ts_at(0, 0), flush=True)  # Mon 00:00 UTC
+    mv = _mv(bars, rsi=18.0, bb_lower=96.0)
+    assert WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is None
+
+
+def test_session_boundary_unaffected_by_virtual_mode() -> None:
+    """The session gate is NOT virtual_loosen'd — Monday noon never fires in
+    EITHER mode (the exact 2.5x-weekday-firing incident this closes)."""
+    import importlib
+    import os
+
+    prior = os.environ.get("POLARIS_VIRTUAL_ACCOUNT")
+    try:
+        os.environ["POLARIS_VIRTUAL_ACCOUNT"] = "1"
+        import polaris.strategies.weekend_thin_book_flush_maker as mod
+        mod = importlib.reload(mod)
+        bars = _flush_bars(30, weekday=0, flush=True)  # Monday, noon fixture
+        mv = _mv(bars, rsi=18.0, bb_lower=96.0)
+        assert mod.WeekendThinBookFlushMakerStrategy().generate_raw_signal(mv) is None
+    finally:
+        if prior is None:
+            os.environ.pop("POLARIS_VIRTUAL_ACCOUNT", None)
+        else:
+            os.environ["POLARIS_VIRTUAL_ACCOUNT"] = prior
+        import polaris.strategies.weekend_thin_book_flush_maker as mod
+        importlib.reload(mod)

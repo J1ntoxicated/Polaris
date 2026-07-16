@@ -66,16 +66,25 @@ STRENGTH_OFFSET = 0.5
 STRENGTH_DEPTH_CAP = 0.5
 TTL_BARS = 6  # the unwind is a multi-bar drift (slower than the flush)
 
-# VIRTUAL-mode loosening (Jin 2026-07-08): the weekend-only gate is a sample-
-# availability restriction, not the edge itself (the edge = funding<=own p10 AND
-# <0, unchanged below) — un-gate to all 7 UTC weekdays so virtual observes fills
-# daily instead of only Sat/Sun. REAL byte-identical (Sat=5, Sun=6 only).
-_WEEKEND_UTC_WEEKDAYS = virtual_loosen(frozenset(range(7)), frozenset({5, 6}))
+# Session-gate revert (P1 fix, 2026-07-16): the 2026-07-08 VIRTUAL loosening
+# un-gated ALL 7 UTC weekdays (a sample-availability rationale mistakenly
+# conflated with the fee-risk axis VIRTUAL is meant to loosen). The maker
+# research validated ONLY the weekend thin book (95d / ~13.5 weekends) — live
+# telemetry showed weekday firing outside that validated regime (same class of
+# incident as the flush sibling). The weekend session boundary is a DATA-
+# VALIDITY fact, not a capital/fee-risk axis, so it applies uniformly to REAL
+# and VIRTUAL — this is why it is NOT wrapped in ``virtual_loosen``.
+_SESSION_START_WEEKDAY = 4  # Friday
+_SESSION_START_HOUR_UTC = 21
 
 
 def _is_weekend_utc(ts: int) -> bool:
-    """True when the bar's UTC weekday is Saturday or Sunday (pure, from ts)."""
-    return datetime.fromtimestamp(ts, tz=UTC).weekday() in _WEEKEND_UTC_WEEKDAYS
+    """True iff ``ts`` falls in the validated weekend thin-book session:
+    Friday 21:00 UTC through Sunday 24:00 UTC (Monday 00:00 UTC exclusive)."""
+    dt = datetime.fromtimestamp(ts, tz=UTC)
+    if dt.weekday() in (5, 6):  # Saturday / Sunday, any hour.
+        return True
+    return dt.weekday() == _SESSION_START_WEEKDAY and dt.hour >= _SESSION_START_HOUR_UTC
 
 
 class WeekendFundingCapitulationMakerStrategy(BaseStrategy):

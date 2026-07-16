@@ -50,6 +50,23 @@
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
+  // Same 8-hue cool->warm progression as wall_spine.js's / wall_console_
+  // readouts.js's / globe-funnel.js's GATE_COLORS (Jin 2026-07-16 P4b) —
+  // duplicated here rather than plumbed cross-module for 8 stable literal hex
+  // strings (established precedent in this codebase — see the identical
+  // duplication comment in wall_console_readouts.js): shared visual language,
+  // not runtime state. G1..G8 now read their own hue instead of one flat cyan.
+  var GATE_COLORS = ['#5fa8ff', '#5fdfff', '#6fffc4', '#9dff6f', '#ffe066', '#ffb454', '#ff7a9e', '#c48aff'];
+  function gateColor(gateId) {
+    var i = ((+gateId || 1) - 1) % 8;
+    return GATE_COLORS[i < 0 ? i + 8 : i];
+  }
+  // Stable per-row key — venue|symbol|strategy|side. Shared by the position
+  // GROUP fold (below), the /stream/prices SSE flash key, and the Chart tap-
+  // to-pin selection (rowKey === the SSE key already stamped as data-key).
+  function rowKey(p) {
+    return [p.venue, p.symbol, p.strategy_id, p.side].join('|');
+  }
   // Venue normalizer + short tag — mirrors board_exchange.normVenue (mobile.js is
   // standalone, no board_*.js import). Tolerates full ('capital') + short ('cap')
   // forms. Returns {key, tag}: key drives the --stream-a/b/c colour class
@@ -165,7 +182,7 @@
       .sort(function (a, b) { return (b.ts_close || 0) - (a.ts_close || 0); });
     if ($('rt-cnt')) $('rt-cnt').textContent = rt.length || '';
     if (!rt.length) { body.innerHTML = '<div class="empty">no closed trades yet</div>'; return; }
-    var hdr = '<div class="thr rt-grid"><span>TIME</span><span>SYM</span><span class="ta-c">S</span>' +
+    var hdr = '<div class="thr rt-grid"><span></span><span>TIME</span><span>SYM</span><span class="ta-c">S</span>' +
       '<span class="ta-r">P&amp;L</span><span class="ta-r">R</span><span class="ta-r">WHY</span></div>';
     body.innerHTML = hdr + rt.slice(0, 60).map(function (t) {
       var tstr = t.ts_close ? hhmmss(t.ts_close) : '';
@@ -177,8 +194,13 @@
         : (String(t.side_close || '').toLowerCase().charAt(0) === 'b');
       var sideTag = isShort ? 'S' : 'L';
       var r = (t.r_units != null) ? ((t.r_units >= 0 ? '+' : '') + t.r_units.toFixed(2) + 'R') : '—';
-      return '<div class="tr rt-grid" title="' + esc(t.symbol) + ' ' + esc(t.strategy_id) +
+      // Jin 2026-07-16 P4b: venue was previously absent from every visible
+      // cell (only in the title tooltip) — a leading .vchip fixes that, same
+      // chip already used on Open Positions.
+      var vi = venueInfo(t.venue);
+      return '<div class="tr rt-grid" title="' + esc(t.venue) + ' ' + esc(t.symbol) + ' ' + esc(t.strategy_id) +
           ' · ' + esc(t.exit_reason) + ' · ' + esc(tstr) + '">' +
+        '<span class="vchip v-' + vi.key + '">' + esc(vi.tag) + '</span>' +
         '<span class="t num">' + esc(tstr) + '</span>' +
         '<span class="sym" title="' + esc(t.symbol) + '">' + esc(t.symbol) + '</span>' +
         '<span class="s ' + (sideTag === 'S' ? 'side-short' : 'side-long') + '">' + sideTag + '</span>' +
@@ -246,6 +268,152 @@
   // (loadAi(), wired in showTab()) rather than the 1s snapshot poll — the
   // AI tab's own data lives behind its own endpoint, not `s`.
 
+  // ── Open Positions GROUP fold (Jin 2026-07-16 P4b — ported from
+  // wall_side.js grpIndex/expanded): >1 position sharing venue|symbol folds
+  // to a Σ header, tap to expand, persisted in localStorage under its own
+  // mobile-scoped key (separate from /flow's — the two panes can differ). ──
+  var _lastSnap = null;   // last /api/snapshot payload — re-render on tap w/o waiting for the next 1s poll
+  var POS_GRP_KEY = 'm.grp.open';
+  var expandedGrp = new Set();
+  try { expandedGrp = new Set(JSON.parse(localStorage.getItem(POS_GRP_KEY) || '[]')); } catch (e) { /* private mode */ }
+  function saveExpandedGrp() {
+    try { localStorage.setItem(POS_GRP_KEY, JSON.stringify(Array.from(expandedGrp))); } catch (e) { /* private mode */ }
+  }
+
+  // ── Inspect chart (Jin 2026-07-16 P4b — ported from wall_side.js
+  // CHART_STATE/chartPick): default = auto-follow the most-recently-opened
+  // position (min held_sec); tapping a position row pins it until a
+  // genuinely NEW top position appears, which unpins back to auto-follow.
+  // Reuses chart_inspect.js's buildChartSvg (P4a) — same glance-only chart
+  // as /flow's side panel. ──
+  var CHART_STATE = { sel: null, topKey: null };
+  function chartPick(all) {
+    if (!all.length) { CHART_STATE.topKey = null; return null; }
+    var top = all[0];
+    for (var i = 1; i < all.length; i++) {
+      var hs = all[i].held_sec == null ? Infinity : all[i].held_sec;
+      var th = top.held_sec == null ? Infinity : top.held_sec;
+      if (hs < th) top = all[i];
+    }
+    var tk = rowKey(top);
+    if (tk !== CHART_STATE.topKey) { CHART_STATE.topKey = tk; CHART_STATE.sel = null; }
+    if (CHART_STATE.sel) {
+      for (var j = 0; j < all.length; j++) { if (rowKey(all[j]) === CHART_STATE.sel) return all[j]; }
+      CHART_STATE.sel = null; // pinned position closed — fall back to auto-follow
+    }
+    return top;
+  }
+  function regimeLabel(p) {
+    var a = p.entry_regime, b = p.regime;
+    if (a && b && a !== b) return esc(a) + ' → ' + esc(b);
+    return esc(b || a || '');
+  }
+  function renderChart(p) {
+    var hdr = $('chart-hdr'), body = $('chart-body');
+    if (!hdr || !body) return;
+    if (!p) {
+      hdr.innerHTML = '';
+      body.innerHTML = '<div class="side-chart-empty">no open position</div>';
+      return;
+    }
+    var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
+    var vi = venueInfo(p.venue);
+    var sideCls = (String(p.side || '').toLowerCase().indexOf('s') === 0) ? 'side-short' : 'side-long';
+    hdr.innerHTML =
+      '<span class="vchip v-' + vi.key + '" title="' + esc(p.venue) + '">' + esc(vi.tag) + '</span>' +
+      '<span class="sym">' + esc(String(p.symbol || '')) + '</span>' +
+      (p.strategy_id ? '<span class="strat">' + esc(p.strategy_id) + '</span>' : '') +
+      '<span class="side ' + sideCls + '">' + esc(String(p.side || '').toUpperCase()) + '</span>' +
+      '<span class="num ' + pnlClass(u) + '">' + signed(u) + '</span>' +
+      '<span class="reg">' + regimeLabel(p) + '</span>';
+    body.innerHTML = window.PolarisChartInspect.buildChartSvg(p);
+  }
+
+  // ── Open Positions — grouped by venue|symbol, chip · symbol · side ·
+  // current(live) · profit · % · exp. Split out of paint() so a group-toggle
+  // / chart-pin tap can re-render immediately from `_lastSnap` instead of
+  // waiting up to 1s for the next poll. ──
+  function renderPositions(s) {
+    _lastSnap = s;
+    var positions = $('positions');
+    var ps = s.positions || [];
+    $('pos-cnt').textContent = ps.length || '';
+    if (!ps.length) {
+      positions.innerHTML = '<div class="empty">No open positions</div>';
+      renderChart(null);
+      return;
+    }
+    var groups = {};
+    ps.forEach(function (p) {
+      var gk = String(p.venue || '') + '|' + String(p.symbol || '');
+      (groups[gk] = groups[gk] || []).push(p);
+    });
+    var ordered = Object.keys(groups).map(function (gk) {
+      var g = groups[gk];
+      var upnl = g.reduce(function (a, p) { return a + (p.upnl_usd || 0); }, 0);
+      g.sort(function (a, b) { return Math.abs(b.upnl_usd || 0) - Math.abs(a.upnl_usd || 0); });
+      return { gk: gk, g: g, upnl: upnl };
+    }).sort(function (a, b) { return Math.abs(b.upnl) - Math.abs(a.upnl); });
+
+    var selP = chartPick(ps);
+    var selKey = selP ? rowKey(selP) : null;
+
+    // visible list: group>1 = header (+ children when expanded), single = row.
+    var visible = [];
+    ordered.forEach(function (o) {
+      if (o.g.length > 1) {
+        visible.push({ hdr: o });
+        if (expandedGrp.has(o.gk)) o.g.forEach(function (p) { visible.push({ row: p, ingrp: true }); });
+      } else {
+        visible.push({ row: o.g[0] });
+      }
+    });
+    visible = visible.slice(0, 30);
+
+    var posHdr = '<div class="thr pos-grid">' +
+      '<span></span><span>SYM</span><span class="ta-c">S</span>' +
+      '<span class="ta-r">CUR</span><span class="ta-r">P&amp;L</span>' +
+      '<span class="ta-r">%</span><span class="ta-r">EXP</span></div>';
+
+    positions.innerHTML = posHdr + visible.map(function (v) {
+      if (v.hdr) {
+        var o = v.hdr;
+        var open = expandedGrp.has(o.gk);
+        var vi0 = venueInfo(o.g[0].venue);
+        var gsz = o.g.reduce(function (a, p) { return a + (p.size_usd || 0); }, 0);
+        return '<div class="tr pos-grid grp" data-g="' + esc(o.gk) + '" title="tap to ' + (open ? 'collapse' : 'expand') + '">' +
+          '<span class="caret">' + (open ? '▾' : '▸') + '</span>' +
+          '<span class="a" title="' + esc(o.g[0].symbol) + '">' + esc(vi0.tag) + ' ' + esc(o.g[0].symbol) + ' ×' + o.g.length + '</span>' +
+          '<span></span><span></span>' +
+          '<span class="sp num ta-r ' + pnlClass(o.upnl) + '">' + signed(o.upnl) + '</span>' +
+          '<span></span>' +
+          '<span class="exp num ta-r" title="exposure (size USD)">' + kusd(gsz) + '</span>' +
+          '</div>';
+      }
+      var p = v.row;
+      var sideCls = (String(p.side || '').toLowerCase().indexOf('s') === 0 ||
+        String(p.side || '').toLowerCase() === 'short') ? 'side-short' : 'side-long';
+      var vi = venueInfo(p.venue);
+      var pct = (p.upnl_pct || 0);
+      var sideTag = (String(p.side || '').toLowerCase().charAt(0) === 's') ? 'S' : 'L';
+      // data-key matches the server /stream/prices key (venue|symbol|strategy|side)
+      // so streamed cell pushes flash the live CUR / P&L / % cells of THIS row,
+      // and doubles as the Chart tap-to-pin selection key.
+      var key = rowKey(p);
+      return '<div class="tr row pos pos-grid' + (v.ingrp ? ' ingrp' : '') + (key === selKey ? ' sel' : '') + '" data-key="' + esc(key) + '">' +
+        '<span class="vchip v-' + vi.key + '" title="' + esc(p.venue) + '">' + esc(vi.tag) + '</span>' +
+        '<span class="a" title="' + esc(p.symbol) + '">' + esc(p.symbol) + '</span>' +
+        '<span class="b ' + sideCls + '" title="' + esc(p.side) + '">' + sideTag + '</span>' +
+        '<span class="pxc num" title="current (live)">' + fmtPx(p.last_price) + '</span>' +
+        '<span class="sp num ' + pnlClass(p.upnl_usd) + '">' + signed(p.upnl_usd) + '</span>' +
+        '<span class="pct num ' + pnlClass(pct) + '">' + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</span>' +
+        '<span class="exp num" title="exposure (size USD)">' + kusd(p.size_usd) + '</span>' +
+        '</div>';
+    }).join('');
+
+    renderChart(selP);
+  }
+
   function paint(s) {
     // Header status — alive if we have a snapshot.
     $('dot').classList.add('live');
@@ -298,38 +466,9 @@
       pnlPct.className = 'sub num ' + pnlClass(dp);
     }
 
-    // ── Open Positions — aligned table w/ header. chip · symbol · side ·
-    // current(live) · profit · % · exp. ENTRY dropped on phone (overflow fix). ──
-    var positions = $('positions');
-    var ps = s.positions || [];
-    $('pos-cnt').textContent = ps.length || '';
-    if (!ps.length) {
-      positions.innerHTML = '<div class="empty">No open positions</div>';
-    } else {
-      var posHdr = '<div class="thr pos-grid">' +
-        '<span></span><span>SYM</span><span class="ta-c">S</span>' +
-        '<span class="ta-r">CUR</span><span class="ta-r">P&amp;L</span>' +
-        '<span class="ta-r">%</span><span class="ta-r">EXP</span></div>';
-      positions.innerHTML = posHdr + ps.slice(0, 30).map(function (p) {
-        var sideCls = (String(p.side || '').toLowerCase().indexOf('s') === 0 ||
-          String(p.side || '').toLowerCase() === 'short') ? 'side-short' : 'side-long';
-        var vi = venueInfo(p.venue);
-        var pct = (p.upnl_pct || 0);
-        var sideTag = (String(p.side || '').toLowerCase().charAt(0) === 's') ? 'S' : 'L';
-        // data-key matches the server /stream/prices key (venue|symbol|strategy|side)
-        // so streamed cell pushes flash the live CUR / P&L / % cells of THIS row.
-        var key = [p.venue, p.symbol, p.strategy_id, p.side].join('|');
-        return '<div class="tr row pos-grid" data-key="' + esc(key) + '">' +
-          '<span class="vchip v-' + vi.key + '" title="' + esc(p.venue) + '">' + esc(vi.tag) + '</span>' +
-          '<span class="a" title="' + esc(p.symbol) + '">' + esc(p.symbol) + '</span>' +
-          '<span class="b ' + sideCls + '" title="' + esc(p.side) + '">' + sideTag + '</span>' +
-          '<span class="pxc num" title="current (live)">' + fmtPx(p.last_price) + '</span>' +
-          '<span class="sp num ' + pnlClass(p.upnl_usd) + '">' + signed(p.upnl_usd) + '</span>' +
-          '<span class="pct num ' + pnlClass(pct) + '">' + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</span>' +
-          '<span class="exp num" title="exposure (size USD)">' + kusd(p.size_usd) + '</span>' +
-          '</div>';
-      }).join('');
-    }
+    // ── Open Positions + Chart — see renderPositions (group fold + tap-to-
+    // pin chart, split out so a tap can re-render immediately). ──
+    renderPositions(s);
 
     // ── Gate Decisions — G# · what it decided · n (aligned table). ──
     var gdec = $('gatedec');
@@ -342,7 +481,7 @@
         var gdHdr = '<div class="thr gd-grid"><span>G#</span><span>DECIDED</span><span class="ta-r">n</span></div>';
         gdec.innerHTML = gdHdr + gd.map(function (g) {
           return '<div class="tr gd-grid" title="G' + esc(g.gate_id) + ' ' + esc(g.label) + ' · ' + esc(g.headline) + '">' +
-            '<span class="g">G' + esc(g.gate_id) + '</span>' +
+            '<span class="g" style="color:' + gateColor(g.gate_id) + '">G' + esc(g.gate_id) + '</span>' +
             '<span class="hl">' + esc(g.headline || '—') + '</span>' +
             '<span class="n num">' + esc(g.n) + '</span>' +
             '</div>';
@@ -373,7 +512,7 @@
         return '<div class="tr ga-grid" title="' + esc(g) + ' ' + esc(v.txt) +
             ' · ' + esc(strat) + ' ' + esc(sym) + ' · ' + esc(why) + ' · ' + esc(tstr) + '">' +
           '<span class="t num">' + esc(tstr) + '</span>' +
-          '<span class="g">' + esc(g) + '</span>' +
+          '<span class="g" style="color:' + gateColor(e.gate_id) + '">' + esc(g) + '</span>' +
           '<span class="v ' + v.cls + '">' + esc(v.txt) + '</span>' +
           '<span class="sym" title="' + esc(sym) + '">' + esc(sym || '—') + '</span>' +
           '</div>';
@@ -460,6 +599,42 @@
         $('dot').classList.remove('live');
         $('status').textContent = 'offline';
       });
+  }
+
+  // ── Position GROUP toggle + Chart tap-to-pin (Jin 2026-07-16 P4b) ─────────
+  // One delegated listener on #positions — re-renders immediately from
+  // `_lastSnap` so a tap doesn't wait for the next 1s poll.
+  function wirePositions() {
+    var positions = $('positions');
+    if (!positions) return;
+    positions.addEventListener('click', function (e) {
+      var g = e.target.closest ? e.target.closest('.tr.pos-grid.grp') : null;
+      if (g) {
+        var gk = g.getAttribute('data-g');
+        if (expandedGrp.has(gk)) expandedGrp.delete(gk); else expandedGrp.add(gk);
+        saveExpandedGrp();
+        if (_lastSnap) renderPositions(_lastSnap);
+        return;
+      }
+      var row = e.target.closest ? e.target.closest('.tr.pos-grid.pos') : null;
+      if (!row) return;
+      var k = row.getAttribute('data-key');
+      if (!k) return;
+      CHART_STATE.sel = k;
+      if (_lastSnap) renderPositions(_lastSnap); // re-syncs .sel highlight + Chart panel, no wait
+    });
+  }
+
+  // ── Per-strategy gauge marquee (Jin 2026-07-16 P4b) — same flow_stats poll
+  // + flow_classes.js widget as /flow, so /m shows the identical class-gauge-
+  // strip marquee instead of nothing. Graceful no-op if flow_classes.js
+  // didn't load (window.PolarisFlowClasses absent) or the endpoint errors.
+  function flowStatsTick() {
+    if (!window.PolarisFlowClasses) return;
+    fetch('/api/flow_stats?t=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { window.PolarisFlowClasses.onStatsPoll(d || {}); })
+      .catch(function () { /* display-only */ });
   }
 
   // ── Live price SSE push ───────────────────────────────────────────────────
@@ -647,7 +822,10 @@
 
   wireCollapse();
   wireTabs();
+  wirePositions();
   tick();
   setInterval(tick, POLL_MS);
   connectPriceStream();
+  flowStatsTick();
+  setInterval(flowStatsTick, POLL_MS);
 })();

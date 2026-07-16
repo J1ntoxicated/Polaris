@@ -21,7 +21,11 @@
   .wrap {
     max-width: 430px;
     margin: 0 auto;
-    padding: 14px 14px 40px;
+    /* Jin 2026-07-16 P4b: viewport-fit=cover was declared but env(safe-area-
+       inset-*) was never applied — a notched/home-indicator phone could clip
+       the footer/left-right edges. env() falls back to 0 on non-notch
+       devices, so this is a no-op there. */
+    padding: calc(14px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) calc(40px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px));
     box-sizing: border-box;
   }
   /* Header: bot status + small twinkling Polaris star. */
@@ -89,11 +93,15 @@
 
   .sec { margin-top: 16px; }
   .sec h2 {
-    display: flex; align-items: baseline;
+    display: flex; align-items: center;
     font-size: 10px; letter-spacing: 1.5px; font-weight: 600;
     color: var(--p-gry); text-transform: uppercase;
     margin: 0 0 6px; padding-bottom: 4px;
     border-bottom: 1px solid var(--ghost);
+    /* Jin 2026-07-16 P4b: collapsible headers are a toggle control (role=
+       button) — min-height brings the tap target near the 44px HIG floor
+       without inflating the visible text size. */
+    min-height: 32px;
   }
   .sec h2 .cnt {
     margin-left: auto; color: var(--p-dim); font-size: 9px; letter-spacing: 1px;
@@ -159,6 +167,17 @@
   .pos-grid {
     grid-template-columns: 24px minmax(34px,1fr) 14px 58px 58px 44px 44px;
   }
+  /* Position GROUP header row (Jin 2026-07-16 P4b — ported from wall_side.js
+     grpIndex/expanded): same >1-venue|symbol rows fold to Σ, tap to expand,
+     persisted in localStorage. Reuses the .pos-grid column template so the
+     collapsed header still lines up with the ungrouped rows below it. */
+  .tr.pos-grid.grp { cursor: pointer; color: var(--p-dim); font-weight: 700; }
+  .tr.pos-grid.grp:active { background: rgba(95,175,255,.08); }
+  .tr.pos-grid.grp .caret { color: var(--polaris-blue, #5fafff); text-align: center; }
+  .tr.pos-grid.ingrp .a { padding-left: 8px; font-weight: 400; }
+  .tr.pos-grid.pos { cursor: pointer; }
+  .tr.pos-grid.pos:active { background: rgba(95,175,255,.08); }
+  .tr.pos-grid.pos.sel { background: rgba(95,175,255,.14); }
   /* Jin 2026-07-10 (feat/flat-neural-map, item 6): denser phone/iframe
      readability for THIS table only (other sections keep the base density —
      "카드화 금지/과밀 유지" mandate) — font 11->12.5px, row padding 4->6px,
@@ -225,6 +244,44 @@
   .sreset .kv b.pos { color: var(--pnl-pos); }
   .sreset .kv b.neg { color: var(--pnl-neg); }
 
+  /* ── Per-strategy score_F window-fill gauge strip (Jin 2026-07-16 P4b) —
+     ported from flow.html's #class-gauge-strip so the phone gets the SAME
+     seamless marquee (flow_classes.js renders it unchanged; this is just a
+     mobile-width CSS skin — no new colors, same EARN/BENCH hues as desktop). */
+  #class-gauge-strip {
+    position: relative; overflow: hidden; white-space: nowrap;
+    margin: 6px 0 2px; padding: 3px 0; font-size: 9px; letter-spacing: 0.04em;
+    border-top: 1px solid var(--ghost); border-bottom: 1px solid var(--ghost);
+  }
+  #class-gauge-strip .cg-track { display: inline-block; will-change: transform;
+    animation-name: cg-marquee; animation-timing-function: linear; animation-iteration-count: infinite; }
+  #class-gauge-strip:active .cg-track { animation-play-state: paused; }
+  @keyframes cg-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+  #class-gauge-strip .chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; color: var(--p-gry); }
+  #class-gauge-strip .chip .sid { color: var(--p-wht); font-weight: 700; }
+  #class-gauge-strip .chip .gauge { display: inline-block; width: 30px; height: 6px; background: rgba(255,255,255,0.10); vertical-align: middle; }
+  #class-gauge-strip .chip .gauge .fill { display: block; height: 100%; background: var(--polaris-blue); }
+  #class-gauge-strip .chip.earn  .gauge .fill { background: var(--pnl-pos); }
+  #class-gauge-strip .chip.bench .gauge .fill { background: var(--pnl-neg); }
+
+  /* ── Inspect chart section (Jin 2026-07-16 P4b) — reuses P4a's
+     chart_inspect.js (buildChartSvg) so /m gets the SAME glance-only chart as
+     /flow's side panel: auto-follows the newest open position, tap a
+     position row to pin. ── */
+  #chart-hdr {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    font-size: 10px; white-space: nowrap; padding-bottom: 4px;
+  }
+  #chart-hdr .sym { color: var(--p-wht); font-weight: 700; }
+  #chart-hdr .strat { color: var(--p-gry); font-size: 9px; }
+  /* no color here — .side-long/.side-short (global) carry the green/red;
+     an ID-scoped color here would out-specificity them into always-gray. */
+  #chart-hdr .side { font-size: 9px; letter-spacing: 0.06em; }
+  #chart-hdr .reg { margin-left: auto; color: var(--p-dim); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+  #chart-body { min-height: 110px; }
+  #chart-body svg { display: block; width: 100%; height: 110px; }
+  .side-chart-empty { color: var(--p-dim); font-size: 10px; font-style: italic; padding: 8px 0; }
+
   /* ── Tab bar (Jin 2026-06-24) — Main / Logic / Build / Roadmap / AI. Sticky
        under the globe so the phone scans like the desktop tabs but condensed. ── */
   .tabbar {
@@ -237,14 +294,24 @@
     flex: 1 0 auto; appearance: none; -webkit-appearance: none;
     background: transparent; border: 1px solid var(--ghost); border-radius: 4px;
     color: var(--p-gry); font-family: inherit; font-size: 10px; letter-spacing: .08em;
-    text-transform: uppercase; padding: 6px 9px; cursor: pointer; white-space: nowrap;
+    text-transform: uppercase; cursor: pointer; white-space: nowrap;
+    /* Jin 2026-07-16 P4b: iOS HIG wants >=44px touch targets — the old 6/9px
+       padding fell well short of that on a single sticky nav row (not a
+       repeated dense list row, so the extra height doesn't fight the
+       Bloomberg-density mandate the way padding every table row would).
+       display:flex centers the small label text inside the taller box. */
+    padding: 6px 9px; min-height: 44px;
+    display: flex; align-items: center; justify-content: center;
   }
   .tabbar button.on { color: var(--p-cyn); border-color: var(--p-cyn); background: rgba(95,175,255,.08); }
   .tabpane { display: none; }
   .tabpane.on { display: block; }
 
-  /* Recent Trades — TIME · SYM · side · P&L · R · why. Aligned grid, no wrap. */
-  .rt-grid { grid-template-columns: 48px minmax(34px,1fr) 12px 56px 40px 46px; }
+  /* Recent Trades — chip(venue) · TIME · SYM · side · P&L · R · why. Aligned
+     grid, no wrap. Jin 2026-07-16 P4b: venue was completely absent before
+     (only in the title tooltip) — a leading .vchip column fixes that,
+     matching the same chip already used on Open Positions. */
+  .rt-grid { grid-template-columns: 24px 42px minmax(30px,1fr) 12px 54px 38px 40px; }
   .rt-grid .t { color: var(--p-dim); font-size: 10px; }
   .rt-grid .sym { color: var(--p-wht); }
   .rt-grid .s { text-align: center; font-size: 10px; }
@@ -296,6 +363,11 @@
     </div>
     <div id="ticker">--</div>
 
+    <!-- Per-strategy score_F gauge marquee (Jin 2026-07-16 P4b) — same
+         flow_classes.js widget as /flow, fed by the same 1s /api/flow_stats
+         poll (mobile.js calls window.PolarisFlowClasses.onStatsPoll). -->
+    <div id="class-gauge-strip"></div>
+
     <!-- Compact status strip — small, not a hero block. -->
     <div class="strip">
       <div class="cell">
@@ -333,6 +405,14 @@
       <div class="sec">
         <h2>Open Positions <span class="cnt" id="pos-cnt"></span></h2>
         <div id="positions"></div>
+      </div>
+
+      <!-- Inspect chart (Jin 2026-07-16 P4b) — auto-follows the newest open
+           position; tap a position row above to pin (mobile.js chartPick). -->
+      <div class="sec collapsible" data-ck="m.collapse.chart">
+        <h2 role="button" tabindex="0" aria-expanded="true"><span class="chev" aria-hidden="true"></span>Chart</h2>
+        <div id="chart-hdr"></div>
+        <div id="chart-body"></div>
       </div>
 
       <div class="sec collapsible" data-ck="m.collapse.recenttrades">
@@ -377,13 +457,15 @@
     <div class="foot">DEMO / PAPER · display-only · polls every 1s · <a href="/?desktop=1" style="color:var(--polaris-blue);text-decoration:none">Desktop ▸</a></div>
   </div>
 
-  <!-- Neural Cloud globe engine — SAME scripts as desktop index.html. Each binds
-       to canvas#sphere, reads /static/graph.json on its own 1s loop, and renders.
+  <!-- Neural Cloud globe engine — MOBILE-ONLY now (Jin 2026-07-16 P4b: desktop
+       /flow replaced the sphere with the spine canvas; index.html dropped it
+       entirely — this is the only page that loads globe-core.js). Each script
+       binds to canvas#sphere, reads /static/graph.json on its own 1s loop.
        Load order: core → satellites → flows → funnel (each wraps the prior). -->
-  <script src="static/globe-core.js?v=26_tierlod"></script>
+  <script src="static/globe-core.js?v=27_mobiletuned"></script>
   <script src="static/globe-satellites.js?v=23_layered"></script>
   <script src="static/globe-flows.js?v=24_onionsync"></script>
-  <script src="static/globe-funnel.js?v=23_layered"></script>
+  <script src="static/globe-funnel.js?v=24_gatecolors"></script>
   <script>
     // Globe fits to canvas clientWidth/Height; nudge resize after layout settles
     // so fit() picks up the real mobile pane size (not an initial guess). Pull the
@@ -400,6 +482,12 @@
       setTimeout(mobileGlobeFit, 250);
     });
   </script>
-  <script src="static/mobile.js?v=20_board_parity"></script>
+  <!-- flow_classes.js — same class-gauge-strip marquee widget as /flow (Jin
+       2026-07-16 P4b). chart_inspect.js — shared buildChartSvg (P4a) so the
+       Chart section renders the identical glance-only chart. Both standalone
+       (no board_*.js dependency), safe to load on mobile as-is. -->
+  <script src="static/flow_classes.js?v=1"></script>
+  <script src="static/chart_inspect.js?v=1"></script>
+  <script src="static/mobile.js?v=21_p4b_calibration"></script>
 </body>
 </html>

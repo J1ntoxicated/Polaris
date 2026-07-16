@@ -21,7 +21,12 @@
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
 
-  let dpr = Math.min(2, window.devicePixelRatio || 1);
+  // Jin 2026-07-16 P4b: this engine is now MOBILE-ONLY (desktop /flow dropped
+  // the sphere for the spine canvas — no other page loads globe-core.js), so
+  // the dpr cap tunes for a small ~29vh phone pane rather than a full desktop
+  // viewport: 2x backing-buffer pixels on a battery-constrained device for a
+  // canvas this small is wasted GPU/battery, so cap at 1.5x.
+  let dpr = Math.min(1.5, window.devicePixelRatio || 1);
   let W = 0, H = 0, CX = 0, CY = 0;
   function fit() {
     W = canvas.clientWidth; H = canvas.clientHeight;
@@ -85,6 +90,25 @@
   };
   const NEUTRAL_GRAY = [0xc4, 0xca, 0xd2];
   function venueLight(gx) { return VENUE_LIGHT[gx] || NEUTRAL_GRAY; }
+  // ── Asset-group base color (Jin 2026-07-16 P4b mobile-drift rewire) ────────
+  // Same 6-hue palette as wall_spine_field.js's ASSET_GROUP_COLOR (duplicated
+  // here rather than plumbed cross-module for 6 stable literal hex strings —
+  // shared visual language, not runtime state; same precedent as this file's
+  // own GATE_COLORS duplication in wall_console_readouts.js). mkt-cluster
+  // universe nodes carry asset_group from the backend (polaris_graph.py); this
+  // is their BASE color — venue color is reserved for actual activation (see
+  // drawNode's `useVenue`), mirroring the desktop field's "base=asset class,
+  // activation=venue" split.
+  const ASSET_GROUP_COLOR_HEX = {
+    crypto: '#979b50', forex: '#7b4f92', indices: '#696eb5',
+    commodity: '#bf7dbf', stock: '#94bb81', etf: '#a96693',
+  };
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const ASSET_GROUP_COLOR = {};
+  Object.keys(ASSET_GROUP_COLOR_HEX).forEach((k) => { ASSET_GROUP_COLOR[k] = hexToRgb(ASSET_GROUP_COLOR_HEX[k]); });
   // Per-ticker hue/brightness jitter so individual symbols are distinguishable
   // inside one venue cloud instead of blobbing into a single flat mass — Jin
   // "각 노드 색 다 다르게". Deterministic from id (stable across refreshes), kept
@@ -128,7 +152,11 @@
   // library is "there", as soft fog) while per-frame cost stays O(venue) — the
   // mote budget never grows with the watched universe size. Display-only.
   let tailAgg = [];                 // [{gx, count, active, density}]
-  const HAZE_PER_VENUE = 64;        // fixed mote budget per venue (count-independent)
+  // Jin 2026-07-16 P4b mobile-only frame-cost trim: 64/venue (192 total) was
+  // sized for a full desktop viewport; the ~29vh phone pane doesn't resolve
+  // that many motes anyway — halved so the fixed per-frame haze cost drops
+  // without visibly thinning the fog at phone size.
+  const HAZE_PER_VENUE = 32;        // fixed mote budget per venue (count-independent)
 
   // ── SCATTERED SPARSE SPHERE — inside stays visible (Jin 2026-06-23) ──────────
   // Jin '나선형 불가사리 같다 … 전에 빌드처럼 구 덮으면서 크게 좀 스캐터 되어있게 전체적
@@ -455,8 +483,14 @@
       // Color: open positions are a pure P&L green/red dot. Other OUTER exchange
       // nodes wear their DASHBOARD venue color, per-ticker shaded (venueShade) so
       // each symbol is individually distinguishable rather than one flat blob.
+      // mkt-cluster universe nodes instead base on their ASSET_GROUP (crypto/
+      // forex/indices/commodity/stock/etf) when the backend supplies one —
+      // venue tint is reserved for actual activation (drawNode's `useVenue`).
       const shaded = venueShade(venueLight(gx), h1);
-      n.color = (role === 'pos') ? chainColor(n.pnl) : shaded;
+      n.assetGroup = bn.asset_group || null;
+      const assetBase = (role === 'mkt' && n.assetGroup && ASSET_GROUP_COLOR[n.assetGroup])
+        ? ASSET_GROUP_COLOR[n.assetGroup] : shaded;
+      n.color = (role === 'pos') ? chainColor(n.pnl) : assetBase;
       n.venueColor = shaded;
       n.base = role === 'pos' ? 2.4 : 1.9;   // Jin grayscale: 체결(녹/적) 노드 좀만 더 축소 (3.4→2.4 ~30%)
       // ── universe shell vs lit-up node ──────────────────────────────────────
@@ -737,7 +771,10 @@
   //     frame time stays flat regardless of universe size.
   // The dot still tints toward its galaxy so the 3 venues read as filled
   // galaxies; alpha is low so active/firing nodes pop on top.
-  const DIM_BUDGET = 650;            // target max dim dots actually drawn / frame
+  // Jin 2026-07-16 P4b mobile-only frame-cost trim: 650 was sized for a full
+  // desktop viewport; a ~29vh phone pane can't resolve that density, so the
+  // budget is cut for lower per-frame fillRect cost (node LOD).
+  const DIM_BUDGET = 320;            // target max dim dots actually drawn / frame
   function drawDimCloud(dim) {
     if (dim.length === 0) return;
     // LOD stride: if more dim dots than the budget, draw every Nth (deterministic
@@ -846,12 +883,18 @@
     // Jin 2026-06-23 COLORFUL: even a non-active outer node keeps its per-ticker
     // venue shade (n.color) instead of falling back to neutral gray — the cloud
     // reads colorful. Satellites keep their family color (n.color).
+    // Jin 2026-07-16 P4b: a mkt-cluster node's `n.color` is its ASSET_GROUP base
+    // (see setGraph) — it only swaps to the venue tint on actual FIRING (a real
+    // signal catch), not merely the `active` focus flag, so the asset-group base
+    // is visible at rest instead of always being overridden to venue color.
+    // Non-mkt roles (watch/satellites) keep the prior isActiveLit gate.
+    const useVenue = n.role === 'mkt' ? firing : isActiveLit;
     const c = isPos
       ? chainColor(n.pnl)
-      : (isActiveLit ? venueC : n.color);
+      : (useVenue ? venueC : n.color);
     // halo/glow color: positions glow in their own P&L color; active watch nodes
     // glow in their venue color.
-    const haloC = isPos ? c : (isActiveLit ? venueC : c);
+    const haloC = isPos ? c : (useVenue ? venueC : c);
     // ── signal lightup: a firing node = an ACTIVE signal → breathing halo so the
     //    holding ticker pops out of the cloud (the original neural-signal concept).
     if (firing) {
@@ -962,6 +1005,43 @@
     targetZoom = Math.max(0.5, Math.min(3.5, targetZoom * (e.deltaY < 0 ? 1.12 : 0.89)));
   }, { passive: false });
 
+  // ── Touch (Jin 2026-07-16 P4b — this engine is mobile-only now): 1-finger
+  // horizontal-dominant drag orbits; a vertical swipe is left untouched so the
+  // page keeps scrolling (canvas has touch-action:pan-y in mobile.html — that
+  // axis is reserved for native scroll). 2-finger pinch zooms. A plain tap
+  // (no meaningful `moved`) still reaches the 'click' listener below via the
+  // browser's synthetic click → galaxy fly-in / reset works unchanged.
+  let touchLastX = 0, touchLastY = 0, touchOrbiting = false, pinchDist0 = 0, pinchZoom0 = 1;
+  function touchDist(t0, t1) { return Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY); }
+  canvas.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      touchLastX = e.touches[0].clientX; touchLastY = e.touches[0].clientY;
+      touchOrbiting = false; moved = 0;
+    } else if (e.touches.length === 2) {
+      pinchDist0 = touchDist(e.touches[0], e.touches[1]);
+      pinchZoom0 = targetZoom;
+    }
+  }, { passive: true });
+  canvas.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2) {
+      const d = touchDist(e.touches[0], e.touches[1]);
+      if (pinchDist0 > 0) targetZoom = Math.max(0.5, Math.min(3.5, pinchZoom0 * (d / pinchDist0)));
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length !== 1) return;
+    const tx = e.touches[0].clientX, ty = e.touches[0].clientY;
+    const dx = tx - touchLastX, dy = ty - touchLastY;
+    // Small deadzone before committing to an orbit-drag: only claim the
+    // gesture once horizontal movement clearly dominates vertical.
+    if (!touchOrbiting && Math.abs(dx) > Math.abs(dy) * 1.3 && Math.abs(dx) > 6) touchOrbiting = true;
+    if (!touchOrbiting) return;
+    touchLastX = tx; touchLastY = ty; moved += Math.abs(dx) + Math.abs(dy);
+    yaw += dx * 0.006; pitch = Math.max(-1.2, Math.min(1.2, pitch + dy * 0.006));
+    e.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchend', () => { touchOrbiting = false; pinchDist0 = 0; });
+
   // click → if on a galaxy, fly in (and sync board selector); else reset
   canvas.addEventListener('click', (e) => {
     if (moved > 6) return;     // was a drag, not a click
@@ -1005,6 +1085,14 @@
   window.PolarisGlobe.focusExchange = (which) => { applyFocus(focusKey(which), false); };
   window.PolarisGlobe.getFocusExchange = () => _focus;
   window.PolarisGlobe.resetView = () => { applyFocus(null, false); yaw = 0.4; pitch = 0.32; };
+  // Jin 2026-07-16 P4b: mobile.html has called this since 2026-06-something
+  // to pull the constellation into a compact cloud for the short ~29vh phone
+  // pane, but the function was never actually defined here — the call was a
+  // guarded no-op (`if (...&&...setBaseZoom)`), so the globe always rendered
+  // at the default zoom=1.0 despite the "small compact cloud" comment/intent.
+  // Sets BOTH zoom and targetZoom so the compact framing is immediate on load
+  // (no animated zoom-out-then-in from the default).
+  window.PolarisGlobe.setBaseZoom = (z) => { zoom = z; targetZoom = z; };
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || e.key === 'r' || e.key === 'R') window.PolarisGlobe.resetView();

@@ -188,7 +188,7 @@ async def run_pipeline_for_signal(
 
     g3_payload = build_validator_payload(
         raw_signal=sig, venue=venue, symbol=symbol, instrument_id=instrument_id,
-        regime=regime, conn=conn,
+        regime=regime, conn=conn, md_conn=state.md_conn,
     )
     # P4 #3 — feed the G4 watcher the live WS tick window (last ~30 ticks,
     # newest-last) so its stale/crossed-book judgement runs on real microstructure
@@ -245,7 +245,9 @@ async def run_pipeline_for_signal(
     # rather than re-fusing on the hot path. Absent ground row (not yet covered) →
     # the keys are simply not stamped (the judge renders ``n/a`` gracefully).
     # EVIDENCE only: no gate branches on these keys (only the judge reads them).
-    ground_row = read_ticker_ground(conn, instrument_id)
+    # storage-split (round 3 MED fix): ticker_ground is marketdata-domain.
+    _ground_conn = state.md_conn if state.md_conn is not None else conn
+    ground_row = read_ticker_ground(_ground_conn, instrument_id)
     if ground_row is not None:
         payload["evidence"] = ground_row["ground"]
         payload["ticker_ground"] = {
@@ -262,8 +264,10 @@ async def run_pipeline_for_signal(
     # on the hot path, no network. ``source_bar_ts`` rides along as the currency
     # stamp. Absent (not yet stored) → key not stamped → judge renders nothing.
     # EVIDENCE only: no gate branches on it (only the judge reads it). flow_not_block.
+    # storage-split (round 3 MED fix): ticker_technicals is marketdata-domain.
     technicals = technicals_summary(
-        conn, instrument_id=instrument_id, bar_interval=strategy.metadata.timeframe
+        _ground_conn, instrument_id=instrument_id,
+        bar_interval=strategy.metadata.timeframe,
     )
     if technicals:
         payload["technicals"] = technicals

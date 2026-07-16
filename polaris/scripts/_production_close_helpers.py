@@ -50,6 +50,7 @@ def real_pnl_r_from_fills(
     conn: sqlite3.Connection, *, trade: SimulatedTrade,
     exit_price_override: float | None = None,
     close_base_qty: float | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> tuple[float, float, float]:
     """Read entry fill + most recent bars; compute R-units from real bar drift.
 
@@ -84,7 +85,14 @@ def real_pnl_r_from_fills(
     disambiguates the already-collided historical fills; the id is now made
     unique at creation too). Falls back to the legacy heuristic only when the
     trade has no ``position_id`` set (legacy callers).
+
+    ``md_conn`` (storage-split round 3 CRITICAL fix): ``fills``/``positions``
+    stay trading-domain (read on ``conn``); ``bars`` is marketdata-domain and
+    is written ONLY to the marketdata conn post-split. ``md_conn=None``
+    (legacy/test callers, single-DB mode) falls back to ``conn`` —
+    byte-identical.
     """
+    _md = md_conn if md_conn is not None else conn
     if trade.position_id:
         row = conn.execute(
             """
@@ -113,7 +121,7 @@ def real_pnl_r_from_fills(
     # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit mark
     # and ATR window are derived from real recent data, never a +10h ghost bar.
     ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
-    bar_rows = conn.execute(
+    bar_rows = _md.execute(
         """
         SELECT close, high, low FROM bars
         WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
@@ -313,8 +321,18 @@ def _close_excursion_r(
     else:
         # Exclude FUTURE-dated bars (stale +10h Capital) so the recent-bar exit
         # mark and ATR window derive from real recent data, never a +10h ghost.
+        # storage-split (round 3 CRITICAL fix): ``bars`` is marketdata-domain,
+        # written ONLY to ``state.md_conn`` post-split — read it there instead
+        # of the (bars-empty, post-split) trading ``conn``. No ``state`` /
+        # ``state.md_conn`` (legacy/test callers) falls back to ``conn``,
+        # byte-identical.
+        _md = (
+            state.md_conn
+            if state is not None and state.md_conn is not None
+            else conn
+        )
         ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
-        bar_rows = conn.execute(
+        bar_rows = _md.execute(
             """
             SELECT close, high, low FROM bars
             WHERE instrument_id = ? AND bar_interval = '1m' AND ts <= ?
@@ -331,7 +349,9 @@ def _close_excursion_r(
     if state is not None and resolve_stream(trade.venue).product_class == "cfd":
         constraint = state.capital_constraints.peek(trade.symbol)
         quote_ccy = constraint.quote_ccy if constraint is not None else ""
-        rate = _peek_quote_usd_rate(state.capital_constraints, conn, quote_ccy)
+        rate = _peek_quote_usd_rate(
+            state.capital_constraints, conn, quote_ccy, md_conn=state.md_conn,
+        )
         if rate is not None and rate > 0.0:
             quote_usd_rate = rate
     atr_risk_usd = (
@@ -401,15 +421,22 @@ def _note_pending_close(trade: SimulatedTrade, ref: str) -> None:
 
 def _latest_bar_close(
     conn: sqlite3.Connection, *, venue: str, symbol: str,
+    md_conn: sqlite3.Connection | None = None,
 ) -> float | None:
     """Latest 1m bar close for ``venue:symbol`` (FIX A fresh close-split mark).
 
     Returns ``None`` when there is no bar so the caller falls back to the entry
     price. Read-only; never raises into the close path. FUTURE-dated bars (stale
     +10h Capital) are excluded so the close-split mark is a real recent close.
+
+    ``md_conn`` (storage-split round 3 CRITICAL fix): ``bars`` is marketdata-
+    domain, written ONLY to the marketdata conn post-split. ``md_conn=None``
+    (legacy/test callers, single-DB mode) falls back to ``conn`` —
+    byte-identical.
     """
+    _md = md_conn if md_conn is not None else conn
     ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
-    row = conn.execute(
+    row = _md.execute(
         "SELECT close FROM bars WHERE instrument_id = ? AND bar_interval = '1m' "
         "AND ts <= ? ORDER BY ts DESC LIMIT 1",
         (f"{venue}:{symbol}", ts_upper),

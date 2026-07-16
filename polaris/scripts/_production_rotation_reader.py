@@ -194,6 +194,7 @@ def load_held_positions(
     now_ts: int,
     lookup_regime: Callable[[sqlite3.Connection, str, str], str],
     equity: float,
+    md_conn: sqlite3.Connection | None = None,
 ) -> tuple[list[HeldPosition], dict[str, dict[str, str]]]:
     """Load OPEN held positions on ``venue`` as ``HeldPosition`` victims.
 
@@ -207,6 +208,11 @@ def load_held_positions(
     ``avg_pnl_r`` fallback) so a held is rankable even when its posterior is
     cold. ``open_risk_pct_held`` is approximated from the entry fill notional vs
     equity (the positions row carries no risk_pct).
+
+    ``md_conn`` (storage-split round 3 MED fix): threaded to ``_held_pnl_r``'s
+    ``bars`` read (marketdata-domain). ``positions``/``fills`` stay on
+    ``conn`` (trading-domain). ``md_conn=None`` falls back to ``conn``,
+    byte-identical.
     """
     rows = conn.execute(
         """
@@ -241,7 +247,7 @@ def load_held_positions(
         )
         open_risk_pct = (size_usd / equity) if equity > 0.0 else 0.0
         pnl_r = _held_pnl_r(conn, venue=venue, symbol=symbol, side=side,
-                            entry_price=entry_price)
+                            entry_price=entry_price, md_conn=md_conn)
         held.append(
             HeldPosition(
                 position_id=position_id,
@@ -266,20 +272,26 @@ def _held_pnl_r(
     symbol: str,
     side: str,
     entry_price: float,
+    md_conn: sqlite3.Connection | None = None,
 ) -> float:
     """Unrealized R for the held — drift of the latest 1m bar vs the entry fill.
 
     Mirrors the realised-PnL denominator (``entry*atr_pct*2``) used elsewhere so
     the sign + magnitude are consistent. Fail-open to 0.0 (treated as a
     non-loser, hence NOT an eligible victim) when bars are missing.
+
+    storage-split (round 3 MED fix): ``bars`` is marketdata-domain, written
+    ONLY to ``md_conn`` post-split. ``md_conn=None`` falls back to ``conn``,
+    byte-identical.
     """
     if entry_price <= 0.0:
         return 0.0
+    _md = md_conn if md_conn is not None else conn
     # Exclude FUTURE-dated bars (stale +10h Capital) so the opportunity-cost
     # unrealized-R drift is measured against a real recent close, not a +10h ghost.
     ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     try:
-        bars = conn.execute(
+        bars = _md.execute(
             "SELECT close, high, low FROM bars "
             "WHERE instrument_id = ? AND bar_interval='1m' AND ts <= ? "
             "ORDER BY ts DESC LIMIT 14",

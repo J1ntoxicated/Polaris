@@ -322,13 +322,21 @@ def _replay_panel(blk: dict[str, Any]) -> ReplayBenchmarkPanel:
     )
 
 
-def _gate_kill_value_panel(conn: sqlite3.Connection) -> GateKillValuePanel:
+def _gate_kill_value_panel(
+    conn: sqlite3.Connection, *, md_conn: sqlite3.Connection | None = None,
+) -> GateKillValuePanel:
     """Build the EDGE-tab gate-kill-value panel (07-08 BUILD, /debate evidence).
 
     Read-only rollup of ``gate_kill_value.compute_kill_value_hints`` — see that
     module's docstring for the full mandate. ``present=False`` (graceful zero)
-    when no ``(gate_id, cohort)`` group clears the stratified sample floor."""
-    hints = compute_kill_value_hints(conn)
+    when no ``(gate_id, cohort)`` group clears the stratified sample floor.
+
+    storage-split (round 3 MED fix): ``gate_kill_counterfactuals`` is
+    marketdata-domain — written/resolved on the marketdata conn
+    (``record_pipeline_cohort`` / ``sweep_forward_marks``) post-split.
+    ``md_conn=None`` falls back to ``conn``, byte-identical.
+    """
+    hints = compute_kill_value_hints(md_conn if md_conn is not None else conn)
     if not hints:
         return GateKillValuePanel()
     rows = [
@@ -520,7 +528,7 @@ def collect_snapshot(db_path: Path = DEFAULT_DB_PATH) -> DashboardSnapshot:
         confidence = _confidence_panel(conn, starting_equity=starting_capital)
         # G3/G4 gate-kill counterfactual value panel (07-08 BUILD) — /debate
         # evidence only, never feeds a live gate threshold.
-        gate_kill_value = _gate_kill_value_panel(conn)
+        gate_kill_value = _gate_kill_value_panel(conn, md_conn=md_conn)
         # ADR-012 — observe-mode probe events from the SEPARATE probes.sqlite
         # sidecar (fail-open: empty list on a missing / locked sidecar). Read-only
         # connective tissue for the dashboard; never feeds sizing/gating/exit.

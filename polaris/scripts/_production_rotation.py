@@ -304,7 +304,8 @@ async def _rotate_one_venue(
         return False
 
     held, id_map = load_held_positions(
-        conn, venue=venue, now_ts=now_ts, lookup_regime=lookup_regime, equity=equity
+        conn, venue=venue, now_ts=now_ts, lookup_regime=lookup_regime,
+        equity=equity, md_conn=state.md_conn,
     )
     if not held:
         return False

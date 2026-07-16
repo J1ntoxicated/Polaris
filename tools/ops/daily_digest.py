@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from polaris.storage.schema_marketdata import marketdata_db_path_for
 from polaris.storage.weekly_equity_trace import all_current_week_rows
 from tools.ops import alerting
 from tools.ops.ops_config import REJECTION_KEYWORDS, OpsConfig, iso_utc
@@ -44,6 +45,17 @@ SHADOW_TARGETS: dict[str, int | None] = {
     "gate_shadow_events": None,  # shared backbone — no single target (W3 promotion_tracker)
     "meta_labels": 2000,         # roadmap #10: pooled labels >= 2k (non-overlapping)
 }
+
+# storage-split (round 3 MED fix): every SHADOW_TARGETS channel EXCEPT
+# gate_shadow_events is marketdata-domain (schema_marketdata.py domain-
+# boundary SSOT — gate_shadow_events is the one *_shadow table that stays
+# trading, same-txn joined with signals). Post-split these 5 channels are
+# written to the sibling marketdata DB, so a channel here read on the
+# trading conn reports 0/target forever (superset schema = no crash, silent
+# 0). ``_collect`` reads these off ``md_conn`` when supplied.
+_SHADOW_MARKETDATA_CHANNELS: frozenset[str] = frozenset(
+    ch for ch in SHADOW_TARGETS if ch != "gate_shadow_events"
+)
 
 # 100-trade gross(price-only, fee-前) < 0 → unconditional KILL trigger, per
 # each strategy module's own OPS docstring note (polaris/strategies/
@@ -105,7 +117,7 @@ def _window(now: float) -> tuple[str, int, int]:
 
 def _collect(
     conn: sqlite3.Connection, data: DigestData, start_ms: int, end_ms: int,
-    *, now_ts: int,
+    *, now_ts: int, md_conn: sqlite3.Connection | None = None,
 ) -> None:
     start_s, end_s = start_ms // 1000, end_ms // 1000
     close_where = "is_close = 1 AND ts_ms >= ? AND ts_ms < ?"
@@ -179,15 +191,22 @@ def _collect(
     ]
     # W1 shadow-channel progress (lifetime cumulative — SHADOW_TARGETS keys
     # are a fixed literal set, never DB-borne, so f-string table names here
-    # carry no injection surface).
+    # carry no injection surface). storage-split (round 3 MED fix): every
+    # channel except gate_shadow_events is marketdata-domain — read off
+    # md_conn when supplied (falls back to conn, byte-identical).
     data.shadow_progress = []
     for channel, target in SHADOW_TARGETS.items():
+        _sc = (
+            md_conn
+            if channel in _SHADOW_MARKETDATA_CHANNELS and md_conn is not None
+            else conn
+        )
         if channel == "sector_rank_shadow":
-            n = int(conn.execute(
+            n = int(_sc.execute(
                 "SELECT COUNT(DISTINCT cycle_ts) FROM sector_rank_shadow",
             ).fetchone()[0])
         else:
-            n = int(conn.execute(f"SELECT COUNT(*) FROM {channel}").fetchone()[0])
+            n = int(_sc.execute(f"SELECT COUNT(*) FROM {channel}").fetchone()[0])
         data.shadow_progress.append((channel, n, target))
     # Alpaca dispatch/entry, this digest's UTC day window.
     data.alpaca_dispatch_signals = int(conn.execute(
@@ -339,9 +358,16 @@ def run(cfg: OpsConfig, *, now: float | None = None) -> int:
     data = DigestData(day=day, generated_date=generated, db_name=cfg.db_path.name)
 
     conn: sqlite3.Connection | None = None
+    md_conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
-        _collect(conn, data, start_ms, end_ms, now_ts=int(now_f))
+        # storage-split (round 3 MED fix) — sibling marketdata DB ro conn,
+        # mirrors snapshot.py's collect_snapshot. Missing file (pre-split DB /
+        # single-DB test fixture) degrades to conn (byte-identical).
+        md_path = marketdata_db_path_for(cfg.db_path)
+        if md_path.exists():
+            md_conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
+        _collect(conn, data, start_ms, end_ms, now_ts=int(now_f), md_conn=md_conn)
     except sqlite3.Error as exc:
         out_path.write_text(
             "---\n"
@@ -361,6 +387,8 @@ def run(cfg: OpsConfig, *, now: float | None = None) -> int:
     finally:
         if conn is not None:
             conn.close()
+        if md_conn is not None:
+            md_conn.close()
 
     _read_ops_files(cfg, data)
     text, hits = sweep_keywords(render(data))

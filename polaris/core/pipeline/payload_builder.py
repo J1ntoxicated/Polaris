@@ -153,11 +153,19 @@ def _baseline_summary(
     conn: sqlite3.Connection,
     *,
     instrument_id: str,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
-    """Read 3 P0 baselines (atr / size / volume); empty dict on miss."""
+    """Read 3 P0 baselines (atr / size / volume); empty dict on miss.
+
+    storage-split (round 3 CRITICAL fix): ``ticker_baseline_state`` is
+    marketdata-domain — written ONLY to the marketdata conn post-split.
+    ``md_conn=None`` (legacy/test callers, single-DB mode) falls back to
+    ``conn``, byte-identical.
+    """
+    _md = md_conn if md_conn is not None else conn
     out: dict[str, Any] = {}
     for metric in ("atr", "size", "volume"):
-        bv = read_baseline_state(conn, instrument_id=instrument_id, metric=metric)
+        bv = read_baseline_state(_md, instrument_id=instrument_id, metric=metric)
         if bv is not None:
             out[metric] = {
                 "p50": bv.p50,
@@ -226,12 +234,17 @@ def build_validator_payload(
     conn: sqlite3.Connection,
     now_ts: int | None = None,
     stream_profile: StreamProfile | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Compose the G3 input payload (raw signal + cell + baseline + recent).
 
     Gate architecture Phase 0: ``stream_profile`` is accepted so the builder can
     read the per-stream seam in later phases. In P0 it is NOT read for any output
     — the returned payload is byte-identical with or without it (parity enabler).
+
+    ``md_conn`` (storage-split round 3 CRITICAL fix): threaded through to
+    ``_baseline_summary`` — ``ticker_baseline_state`` is marketdata-domain.
+    ``cell_matrix_p0`` / ``fills`` stay trading-domain (read on ``conn``).
     """
     del stream_profile  # P0: accepted but unread (behavior-identity enabler).
     ts = int(now_ts if now_ts is not None else time.time())
@@ -243,7 +256,9 @@ def build_validator_payload(
         regime=regime,
         now_ts=ts,
     )
-    baseline_summary = _baseline_summary(conn, instrument_id=instrument_id)
+    baseline_summary = _baseline_summary(
+        conn, instrument_id=instrument_id, md_conn=md_conn,
+    )
     recent_trades = load_recent_same_symbol_trades(
         conn, venue=venue, symbol=symbol, limit=5
     )

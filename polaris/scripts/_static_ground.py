@@ -127,6 +127,11 @@ def warm_eligible_symbols(conn: sqlite3.Connection) -> frozenset[tuple[str, str]
     eligible (flow-preserving). An empty/absent focus cycle → empty set (the
     caller then skips warming entirely rather than falling back to the
     universe-wide 1,491, which is the whole point of this scope-down).
+
+    ``conn`` here is whatever the caller resolved (storage-split: post-split
+    callers pass the marketdata conn — ``watchlist_focus`` is marketdata-
+    domain; a caller still on the trading conn degrades to an empty set,
+    never an error).
     """
     row = conn.execute("SELECT MAX(cycle_ts) FROM watchlist_focus").fetchone()
     if row is None or row[0] is None:
@@ -223,6 +228,7 @@ async def ingest_static_ground_bars(
     warm_resolutions: tuple[str, ...] = (),
     now_ts: int | float | None = None,
     db_writer: DBWriter | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Fetch + persist Yahoo multi-resolution bars for EVERY active instrument.
 
@@ -281,6 +287,11 @@ async def ingest_static_ground_bars(
 
     Returns ``{"instruments": K, "bars": N, "timed_out": bool,
     "warm_instruments": W, "warm_bars": M}``.
+
+    ``md_conn`` (storage-split round 3 MED fix): ``watchlist_focus`` is
+    marketdata-domain — ``warm_eligible_symbols`` reads it here. ``md_conn=
+    None`` (legacy/test callers, single-DB mode) falls back to ``conn``,
+    byte-identical.
     """
     active = read_active_universe(conn)
     if not active:
@@ -308,7 +319,10 @@ async def ingest_static_ground_bars(
     warm_now = int(now_ts) if now_ts is not None else int(time.time())
     # A2 SCOPE: the warm pass is restricted to trade-eligible FOCUS names — the
     # only symbols anything downstream actually consumes 1m bars for.
-    warm_eligible = warm_eligible_symbols(conn) if warm_set else frozenset()
+    warm_eligible = (
+        warm_eligible_symbols(md_conn if md_conn is not None else conn)
+        if warm_set else frozenset()
+    )
     # A2 BATCH: pre-fetch the Alpaca exchange-fallback for every base resolution
     # in ONE chunked pass (Yahoo stays PRIMARY, tried per-symbol as before).
     alpaca_multi_cache = await _prefetch_alpaca_multi(

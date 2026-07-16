@@ -635,6 +635,9 @@ async def _static_ground_producer(
                 # storage-split — static-ground bars persist into `bars`
                 # (marketdata) via the SAME persist_bars path as the hot ingest.
                 db_writer=state.md_db_writer,
+                # storage-split (round 3 MED fix) — watchlist_focus (warm-
+                # eligible FOCUS scoping) is marketdata-domain too.
+                md_conn=state.md_conn,
             )
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]

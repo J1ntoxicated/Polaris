@@ -800,7 +800,9 @@ async def reserve_and_submit(
     if resolve_stream(venue).product_class == "cfd":
         constraint = state.capital_constraints.peek(symbol)
         quote_ccy = constraint.quote_ccy if constraint is not None else ""
-        rate = _peek_quote_usd_rate(state.capital_constraints, conn, quote_ccy)
+        rate = _peek_quote_usd_rate(
+            state.capital_constraints, conn, quote_ccy, md_conn=state.md_conn,
+        )
         if rate is not None and rate > 0.0:
             quote_usd_rate = rate
     # R-unit ruler bind fix (forward-fix, [[exit_peak_lock_bind_2026-07-10]]):

@@ -177,15 +177,24 @@ class CapitalConstraintCache:
         return constraint
 
 
-def _bars_quote_usd_rate(conn: sqlite3.Connection, quote_ccy: str) -> float | None:
-    """Latest 1m bar close of the conversion pair → quote-ccy→USD multiplier."""
+def _bars_quote_usd_rate(
+    conn: sqlite3.Connection, quote_ccy: str,
+    md_conn: sqlite3.Connection | None = None,
+) -> float | None:
+    """Latest 1m bar close of the conversion pair → quote-ccy→USD multiplier.
+
+    storage-split (round 3 MED fix): ``bars`` is marketdata-domain, written
+    ONLY to the marketdata conn post-split. ``md_conn=None`` (legacy/test
+    callers, single-DB mode) falls back to ``conn``, byte-identical.
+    """
     pair = _QUOTE_RATE_EPICS.get(quote_ccy)
     if pair is None:
         return None
     epic, invert = pair
+    _md = md_conn if md_conn is not None else conn
     ts_upper = int(time.time()) + BAR_TS_CLOCK_SKEW_SLACK_SEC
     try:
-        row = conn.execute(
+        row = _md.execute(
             "SELECT close FROM bars WHERE instrument_id = ? AND "
             "bar_interval = '1m' AND ts <= ? ORDER BY ts DESC LIMIT 1",
             (f"capital:{epic}", ts_upper),
@@ -209,13 +218,14 @@ def _snapshot_rate(
 
 
 def _peek_quote_usd_rate(
-    cache: CapitalConstraintCache, conn: sqlite3.Connection, quote_ccy: str
+    cache: CapitalConstraintCache, conn: sqlite3.Connection, quote_ccy: str,
+    md_conn: sqlite3.Connection | None = None,
 ) -> float | None:
     """quote ccy → USD multiplier WITHOUT network (bars, then cached snapshot)."""
     q = (quote_ccy or "").upper()
     if q in _USD_EQUIVALENTS:
         return 1.0
-    rate = _bars_quote_usd_rate(conn, q)
+    rate = _bars_quote_usd_rate(conn, q, md_conn=md_conn)
     if rate is not None:
         return rate
     pair = _QUOTE_RATE_EPICS.get(q)
@@ -229,9 +239,10 @@ async def _resolve_quote_usd_rate(
     conn: sqlite3.Connection,
     session: Any,
     quote_ccy: str,
+    md_conn: sqlite3.Connection | None = None,
 ) -> float | None:
     """quote ccy → USD; bars first, the venue snapshot (via the cache) second."""
-    rate = _peek_quote_usd_rate(cache, conn, quote_ccy)
+    rate = _peek_quote_usd_rate(cache, conn, quote_ccy, md_conn=md_conn)
     if rate is not None:
         return rate
     pair = _QUOTE_RATE_EPICS.get((quote_ccy or "").upper())
@@ -268,7 +279,8 @@ async def translate_capital_order(
             )
             return None
         rate = await _resolve_quote_usd_rate(
-            cache, conn, capital_session, constraint.quote_ccy
+            cache, conn, capital_session, constraint.quote_ccy,
+            md_conn=state.md_conn,
         )
         if rate is None or rate <= 0.0:
             state.capital_constraint_fallbacks += 1
@@ -330,7 +342,8 @@ def capital_close_contract_factor(
             state.capital_constraint_fallbacks += 1
             return None
         rate = _peek_quote_usd_rate(
-            state.capital_constraints, conn, constraint.quote_ccy
+            state.capital_constraints, conn, constraint.quote_ccy,
+            md_conn=state.md_conn,
         )
         if rate is None or rate <= 0.0:
             state.capital_constraint_fallbacks += 1

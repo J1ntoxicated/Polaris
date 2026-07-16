@@ -282,9 +282,11 @@
     if (nomobile) { document.getElementById('wall-page').classList.add('nomobile'); return; }
     var pane = document.getElementById('mobile-pane');
     pane.innerHTML =
+      // 순서 (Jin 2026-07-16): POSITIONS → CHART → ACTIVITY — 차트는 포지션을
+      // 클릭해 보는 인스펙트라 포지션 바로 아래가 자연스러움; 피드는 맨 아래.
       '<div class="side-sec side-pos"><div class="side-h">OPEN POSITIONS <span id="side-pos-n"></span></div><div class="side-sum" id="side-pos-sum"></div><div class="side-rows" id="side-pos-rows"></div></div>' +
-      '<div class="side-sec side-act"><div class="side-h">ACTIVITY</div><div class="side-rows" id="side-act-rows"></div></div>' +
       '<div class="side-sec side-chart"><div class="side-h">CHART</div><div class="side-chart-hdr" id="side-chart-hdr"></div><div class="side-chart-body" id="side-chart-body"></div></div>' +
+      '<div class="side-sec side-act"><div class="side-h">ACTIVITY</div><div class="side-rows" id="side-act-rows"></div></div>' +
       '<a class="open-board-bar" href="/" target="polaris_board">OPEN FULL BOARD ›</a>';
   })();
 </script>

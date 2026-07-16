@@ -7,8 +7,9 @@ DEMO/PAPER virtual capital only. Covers:
 - ``_frontgate_bars.fetch_known_bars`` look-ahead guard (verifier note #5).
 - ``log_vwap_timing_shadow`` DB write + no-op guards.
 - The ``vwap_timing_shadow`` migration (fresh DB, additive table).
-- Behavior-0: ``pre_entry_watcher_gate`` AI-free PROCEED still returns the
-  byte-identical decision/payload with or without the new shadow tag.
+- Behavior-0: G3 (``signal_validator_gate`` — G4's content relocated here,
+  P2a group A) PASS/MODIFY still returns the byte-identical decision/payload
+  with or without the new shadow tag.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import time
 from pathlib import Path
 
 from polaris.core.pipeline.agents._frontgate_bars import bar_cutoff_ts, fetch_known_bars
-from polaris.core.pipeline.agents.pre_entry_watcher import pre_entry_watcher_gate
+from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.agents.vwap_timing_shadow import (
     MIN_VOLUME_BARS,
     compute_session_vwap,
@@ -27,7 +28,7 @@ from polaris.core.pipeline.agents.vwap_timing_shadow import (
     log_vwap_timing_shadow,
 )
 from polaris.core.pipeline.gate_state import (
-    GATE_PRE_ENTRY_WATCHER,
+    GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
     SignalLifecycle,
@@ -255,42 +256,39 @@ def test_vwap_timing_shadow_table_exists_fresh_db(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Behavior-0: pre_entry_watcher_gate AI-free PROCEED unaffected by the tag
+# Behavior-0: G3 PASS unaffected by the frontgate tag (relocated from G4,
+# P2a group A — called from signal_validator_gate now)
 # ---------------------------------------------------------------------------
 
 
-def _g4_ctx(*, shadow_conn_present: bool) -> GateContext:
+def _g3_ctx() -> GateContext:
     now = int(time.time())
     return GateContext(
         run_id="run-vwap",
         signal_id="sig-vwap",
         position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
+        gate_id=GATE_SIGNAL_VALIDATOR,
         venue="okx",
         symbol="BTC-USDT",
         strategy_id="s1",
         payload={
-            "validated_signal": {"symbol": "BTC-USDT", "strength_scalar": 1.0},
+            "raw_signal": {"symbol": "BTC-USDT", "strategy": "s1"},
+            "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
             "tick_window": [{"ts": now, "bid": 100.0, "ask": 100.1, "mid": 100.05}],
             "cell_quartile": "mid",
             "regime": "trend_up",
         },
         started_ts=now,
-        state=SignalLifecycle.VALIDATED,
+        state=SignalLifecycle.RAW,
     )
 
 
-async def test_g4_ai_free_proceed_byte_identical_with_shadow_conn(tmp_path: Path) -> None:
+async def test_g3_pass_byte_identical_with_shadow_conn(tmp_path: Path) -> None:
     conn = init_db(tmp_path / "wired.sqlite")
     try:
-        ctx_no_shadow = _g4_ctx(shadow_conn_present=False)
-        result_no_shadow = await pre_entry_watcher_gate(ctx_no_shadow, ai_free=True)
-
-        ctx_shadow = _g4_ctx(shadow_conn_present=True)
-        result_shadow = await pre_entry_watcher_gate(
-            ctx_shadow, ai_free=True, shadow_conn=conn,
-        )
-        assert result_shadow.decision == result_no_shadow.decision == GateDecision.PROCEED
+        result_no_shadow = await signal_validator_gate(_g3_ctx())
+        result_shadow = await signal_validator_gate(_g3_ctx(), shadow_conn=conn)
+        assert result_shadow.decision == result_no_shadow.decision == GateDecision.PASS
         assert result_shadow.payload == result_no_shadow.payload
         assert result_shadow.model_used == result_no_shadow.model_used == "python"
         # The tag DID fire (a row was written) — proves the wiring is live, not dead code.
@@ -299,16 +297,15 @@ async def test_g4_ai_free_proceed_byte_identical_with_shadow_conn(tmp_path: Path
         conn.close()
 
 
-async def test_g4_ai_free_shadow_tag_fail_open_on_bad_conn() -> None:
+async def test_g3_shadow_tag_fail_open_on_bad_conn() -> None:
     """A closed/broken shadow_conn must never crash the live gate (fail-open)."""
     conn = sqlite3.connect(":memory:")
     conn.close()  # deliberately broken — any .execute() raises ProgrammingError
-    ctx = _g4_ctx(shadow_conn_present=True)
-    result = await pre_entry_watcher_gate(ctx, ai_free=True, shadow_conn=conn)
-    assert result.decision == GateDecision.PROCEED
+    result = await signal_validator_gate(_g3_ctx(), shadow_conn=conn)
+    assert result.decision == GateDecision.PASS
 
 
-async def test_g4_frontgate_shadow_routes_bars_and_vwap_write_to_md_conn(
+async def test_g3_frontgate_shadow_routes_bars_and_vwap_write_to_md_conn(
     tmp_path: Path,
 ) -> None:
     """storage-split (round 4 fix): bars/vwap_timing_shadow are marketdata-
@@ -318,11 +315,10 @@ async def test_g4_frontgate_shadow_routes_bars_and_vwap_write_to_md_conn(
     shadow_conn = init_db(tmp_path / "trading.sqlite")
     md_conn = init_db(tmp_path / "md.sqlite")
     try:
-        ctx = _g4_ctx(shadow_conn_present=True)
-        result = await pre_entry_watcher_gate(
-            ctx, ai_free=True, shadow_conn=shadow_conn, md_conn=md_conn,
+        result = await signal_validator_gate(
+            _g3_ctx(), shadow_conn=shadow_conn, md_conn=md_conn,
         )
-        assert result.decision == GateDecision.PROCEED
+        assert result.decision == GateDecision.PASS
         assert md_conn.execute(
             "SELECT COUNT(*) FROM vwap_timing_shadow"
         ).fetchone()[0] == 1

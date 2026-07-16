@@ -39,6 +39,7 @@ from polaris.core.pipeline.config import (
     ai_judge_mode,
 )
 from polaris.core.pipeline.gate_state import (
+    GATE_ENTRY_SIZER,
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GateContext,
@@ -862,7 +863,7 @@ async def test_g3_active_judge_kill_output_still_passes(
         _g3_gate_ctx(), client=None, judge_client=judge, shadow_conn=memdb
     )
     assert res.decision == GateDecision.PASS  # NOT KILL — structurally impossible
-    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert res.next_gate == GATE_ENTRY_SIZER  # G3->G5 direct (P2a group A)
     assert res.payload["ai_judge"]["verdict"] == "PROCEED"  # KILL parsed to safe verdict
     # P2a group B: G3 now ALSO logs its own technical-decision row (gpt_decision=
     # None, measurement continuity) — filter to the judge's own row by its flag.

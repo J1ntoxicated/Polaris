@@ -2,6 +2,11 @@
 
 Spec source:
 - vault/30_components/layer-2-per-gate-pipeline.md (Q3 G1/G3/G4/G8 + Q6 prompts)
+
+P2a (2026-07-16): G3's legacy GPT branch is deleted outright (group B) and
+Gate 4 (Pre-Entry Watcher) is abolished as a decision step, its fast-path
+content relocated verbatim into ``_g4_frontgate.py`` (group A) — see the G3
+section below.
 """
 
 from __future__ import annotations
@@ -13,17 +18,16 @@ from pathlib import Path
 
 import pytest
 
+from polaris.core.pipeline.agents._g4_frontgate import (
+    FastPathContext,
+    is_fast_path_eligible,
+)
 from polaris.core.pipeline.agents.post_trade_reflector import (
     post_trade_reflector_gate,
 )
-from polaris.core.pipeline.agents.pre_entry_watcher import (
-    FastPathContext,
-    is_fast_path_eligible,
-    pre_entry_watcher_gate,
-)
 from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.gate_state import (
-    GATE_PRE_ENTRY_WATCHER,
+    GATE_ENTRY_SIZER,
     GateContext,
     GateDecision,
     SignalLifecycle,
@@ -31,17 +35,6 @@ from polaris.core.pipeline.gate_state import (
 
 NOW = 1_780_000_000
 
-
-
-@pytest.fixture(autouse=True)
-def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY G4 GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag
-    now defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py. P2a group B: G3 no longer branches on this
-    flag at all (its legacy path was deleted outright) — see the G3 section
-    below."""
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 class _MockGPTClient:
     def __init__(self, response_text: str = "{}") -> None:
@@ -93,7 +86,7 @@ async def test_signal_validator_gpt_client_never_called() -> None:
     result = await signal_validator_gate(ctx, client=haiku)
     assert haiku.calls == []
     assert result.model_used == "python"
-    assert result.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert result.next_gate == GATE_ENTRY_SIZER  # G3->G5 direct (P2a group A)
 
 
 async def test_signal_validator_no_client_still_flows() -> None:
@@ -113,34 +106,36 @@ async def test_signal_validator_missing_raw_signal_kill() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pre-Entry Watcher (G4)
+# G4 content, relocated into G3 (P2a group A) — crossed-book KILL rail
 # ---------------------------------------------------------------------------
 
 
-async def test_pre_entry_watcher_proceed() -> None:
-    haiku = _MockGPTClient(response_text='{"decision": "PROCEED"}')
+async def test_g3_crossed_book_kill_fail_closed() -> None:
+    """Relocated G4 rail: a crossed book (bid >= ask) KILLs inside G3's flow —
+    the pre-existing deterministic KILL set, not a new block."""
     payload = {
-        "validated_signal": {"strength_scalar": 1.0, "strategy": "vb"},
-        "tick_window": [],
+        "raw_signal": {"strategy": "vb", "score": 1.0},
+        "tick_window": [{"ts": NOW, "bid": 100.2, "ask": 100.1, "mid": 100.15}],
         "spread_bps": 5.0,
         "baseline_p50_spread_bps": 4.0,
     }
-    ctx = _ctx(payload, gate_id=4)
-    result = await pre_entry_watcher_gate(ctx, client=haiku)
-    assert result.decision == GateDecision.PROCEED
-
-
-async def test_pre_entry_watcher_kill_fail_closed() -> None:
-    haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
-    payload = {
-        "validated_signal": {"strength_scalar": 1.0, "strategy": "vb"},
-        "tick_window": [],
-        "spread_bps": 5.0,
-        "baseline_p50_spread_bps": 4.0,
-    }
-    ctx = _ctx(payload, gate_id=4)
-    result = await pre_entry_watcher_gate(ctx, client=haiku)
+    ctx = _ctx(payload, gate_id=3)
+    result = await signal_validator_gate(ctx, client=None)
     assert result.decision == GateDecision.KILL
+    assert result.payload["reason"] == "crossed_book"
+
+
+async def test_g3_clean_book_proceeds_deterministic() -> None:
+    payload = {
+        "raw_signal": {"strategy": "vb", "score": 1.0},
+        "tick_window": [{"ts": NOW, "bid": 100.0, "ask": 100.1, "mid": 100.05}],
+        "spread_bps": 5.0,
+        "baseline_p50_spread_bps": 4.0,
+    }
+    ctx = _ctx(payload, gate_id=3)
+    result = await signal_validator_gate(ctx, client=None)
+    assert result.decision in (GateDecision.PASS, GateDecision.MODIFY)
+    assert result.next_gate == GATE_ENTRY_SIZER
 
 
 def test_fast_path_eligibility_top_quartile_ok() -> None:

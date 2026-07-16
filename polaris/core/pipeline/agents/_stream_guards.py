@@ -1,10 +1,10 @@
 """Gate architecture Phase 2 — per-stream G4 fast-path eligibility guards.
 
-The G4 Pre-Entry Watcher's fast-path is an EFFICIENCY / ELIGIBILITY decision:
-skip the slow GPT watcher when the entry is clearly clean. It is NOT an entry
-throttle — a not-fast-path-eligible signal always falls through to the slow GPT
-path (which PROCEEDs or KILLs), so eligibility NEVER blocks an entry outright.
-AGGRESSIVE bias preserved.
+The (former G4, now G3-relocated — P2a group A) fast-path is an EFFICIENCY /
+ELIGIBILITY decision: skip the slow per-tick watch computation when the entry
+is clearly clean. It is NOT an entry throttle — a not-fast-path-eligible
+signal always falls through to the normal G3 flow, so eligibility NEVER
+blocks an entry outright. AGGRESSIVE bias preserved.
 
 The legacy eligibility logic is CRYPTO-shaped (spread-vs-baseline + listing_age
 + session-open shock). That is correct only for stream A (OKX spot). This module
@@ -13,7 +13,7 @@ supplies the per-stream-CORRECT eligibility checks for B and C, dispatched on th
 ``guard_token_for_product_class`` keyed on ``product_class``):
 
 - A (crypto/spot, ``crypto_spread_listing``): the legacy logic — left verbatim in
-  ``pre_entry_watcher.is_fast_path_eligible`` for byte-identity, NOT re-routed here.
+  ``_g4_frontgate.is_fast_path_eligible`` for byte-identity, NOT re-routed here.
 - B (cfd, ``cfd_session_state``): the real pre-entry risk is SESSION state — the
   FX/indices market being open and not in the daily rollover / session-open shock
   window. ``cfd_fast_path_eligible`` reuses the shared microstructure-cleanliness
@@ -22,10 +22,11 @@ supplies the per-stream-CORRECT eligibility checks for B and C, dispatched on th
   the opening-auction gap, and the PDT day-trade-count. ``equity_fast_path_eligible``
   reuses the shared cleanliness check, then requires RTH + not-opening-gap +
   PDT-clean (``pdt_rank_penalty == 0`` — PDT-flagged is NOT a block, just
-  not-fast-path; it still flows to the slow GPT path).
+  not-fast-path; it still flows through the normal (deterministic) path).
 
 None of this is a T4 sizing-chain multiplier — the guard decides only whether the
-fast-path may skip the GPT call; it never touches notional, never halts on P&L.
+fast-path may skip the slow per-tick watch computation; it never touches notional,
+never halts on P&L.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from polaris.core.streams import (
 )
 
 if TYPE_CHECKING:
-    from polaris.core.pipeline.agents.pre_entry_watcher import FastPathContext
+    from polaris.core.pipeline.agents._g4_frontgate import FastPathContext
 
 __all__ = [
     "FX_ROLLOVER_OPEN_HOUR_UTC",

@@ -56,11 +56,12 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Per-instrument ring-buffer depth for the live tick window. G4's watcher reads
-# the last ~30 ticks (pre_entry_watcher slices ``tick_window[-30:]``), and the P5
-# tick-decision engine's ``feature_window`` reads the full ring. 600 ticks is
-# ~60-120s of history at ~5-10 ticks/s — enough for the engine's 1/3/10s EWMA
-# microstructure features while staying in-mem only (never persisted; the DB keeps
+# Per-instrument ring-buffer depth for the live tick window. G3's (former G4,
+# relocated P2a group A) crossed-book/stale-book check reads the tick window
+# via ``recent_ticks``, and the P5 tick-decision engine's ``feature_window``
+# reads the full ring. 600 ticks is ~60-120s of history at ~5-10 ticks/s —
+# enough for the engine's 1/3/10s EWMA microstructure features while staying
+# in-mem only (never persisted; the DB keeps
 # last-write-wins per PK).
 RING_BUFFER_DEPTH = 600
 

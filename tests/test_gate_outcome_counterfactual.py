@@ -1,10 +1,12 @@
-"""Gate→outcome instrumentation (BUILD, behavior 0) — G3/G4 cohort tests.
+"""Gate→outcome instrumentation (BUILD, behavior 0) — G3 cohort tests.
 
 DEMO/PAPER only — virtual funds; aggressive bias preserved (measurement only,
-no gate/sizing/exit decision is touched). Pins:
+no gate/sizing/exit decision is touched). P2a group A: Gate 4 is abolished as
+a decision step (folded into G3) — the ``gate_id``/``reason`` this module
+pins are G3's own now (formerly "g3g4_pass" -> "g3_pass"). Pins:
 
-* KILL counterfactual rows are recorded ONLY for G3/G4 GPT KILLs (mark / same-
-  unit cost_r / NULL forward marks); PASS rows share the same estimator.
+* KILL counterfactual rows are recorded ONLY for a G3 KILL (mark / same-unit
+  cost_r / NULL forward marks); PASS rows share the same estimator.
 * The forward-mark sweep resolves expired horizons from already-ingested 1m
   bars (long/short sign, first-bar-after-gap semantics, idempotent re-run,
   LIMIT batching, unresolvable terminal stamp).
@@ -28,7 +30,6 @@ import polaris.scripts._production_run_signal as run_signal_mod
 from polaris.core.economics.fees import real_fee_usd
 from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
-    GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GateDecision,
     GateResult,
@@ -198,14 +199,17 @@ async def test_g5_kill_records_nothing(
 
 
 @pytest.mark.asyncio
-async def test_g4_proceed_then_g5_kill_records_pass_row(
+async def test_g3_pass_then_g5_kill_records_pass_row(
     memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Blocker R1: a G5 cap-kill AFTER a G4 PROCEED still records PASS.
+    """Blocker R1: a G5 cap-kill AFTER a G3 PASS still records PASS.
 
-    Realistic run shape [PASS, PASS, PASS, PROCEED, KILL(G5)] + ctx KILLED at
-    G5. The GPT gates passed this signal — dropping it would systematically
-    exclude cap-bound signals from the PASS cohort only (selection bias).
+    P2a group A: G4 is abolished as a decision step (G3 wires directly to
+    G5) — realistic run shape is now [PASS(G1), PASS(G2), PASS(G3),
+    KILL(G5)] + ctx KILLED at G5. G3 passed this signal — dropping it would
+    systematically exclude cap-bound signals from the PASS cohort only
+    (selection bias). "Cleared G3" is identified positionally (results[2]),
+    since the orchestrator walks G1->G2->G3->G5 strictly sequentially.
     """
     state = ProdLoopState()
     await _run_pipeline(
@@ -213,8 +217,7 @@ async def test_g4_proceed_then_g5_kill_records_pass_row(
         results=[
             GateResult(decision=GateDecision.PASS, next_gate=2),
             GateResult(decision=GateDecision.PASS, next_gate=3),
-            GateResult(decision=GateDecision.PASS, next_gate=4),
-            _proceed_result(),
+            GateResult(decision=GateDecision.PASS, next_gate=GATE_ENTRY_SIZER),
             _kill_result("sizing_zero"),
         ],
         kill_gate=GATE_ENTRY_SIZER,
@@ -222,25 +225,30 @@ async def test_g4_proceed_then_g5_kill_records_pass_row(
     rows = _cf_rows(memdb)
     assert len(rows) == 1
     assert rows[0]["decision"] == "PASS"
-    assert rows[0]["gate_id"] == GATE_PRE_ENTRY_WATCHER
-    assert rows[0]["reason"] == "g3g4_pass"
+    assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
+    assert rows[0]["reason"] == "g3_pass"
 
 
 @pytest.mark.asyncio
-async def test_g4_pass_records_pass_cohort_row(
+async def test_g3_pass_records_pass_cohort_row(
     memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A G4-cleared run records a PASS row sharing the KILL estimator (B2)."""
+    """A G3-cleared run records a PASS row sharing the KILL estimator (B2)."""
     state = ProdLoopState()
     await _run_pipeline(
         memdb, state, monkeypatch,
-        results=[_proceed_result()], kill_gate=None,
+        results=[
+            GateResult(decision=GateDecision.PASS, next_gate=2),
+            GateResult(decision=GateDecision.PASS, next_gate=3),
+            GateResult(decision=GateDecision.PASS, next_gate=GATE_ENTRY_SIZER),
+        ],
+        kill_gate=None,
     )
     rows = _cf_rows(memdb)
     assert len(rows) == 1
     assert rows[0]["decision"] == "PASS"
-    assert rows[0]["gate_id"] == GATE_PRE_ENTRY_WATCHER
-    assert rows[0]["reason"] == "g3g4_pass"
+    assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
+    assert rows[0]["reason"] == "g3_pass"
     assert rows[0]["mark_price"] == pytest.approx(100.0)
 
 
@@ -262,10 +270,10 @@ async def test_fresh_ws_tick_preferred_as_mark(
     state.quote_writer = _QW()  # type: ignore[assignment]
     await _run_pipeline(
         memdb, state, monkeypatch,
-        results=[_kill_result()], kill_gate=GATE_PRE_ENTRY_WATCHER,
+        results=[_kill_result()], kill_gate=GATE_SIGNAL_VALIDATOR,
     )
     row = _cf_rows(memdb)[0]
-    assert row["gate_id"] == 4
+    assert row["gate_id"] == 3
     assert row["mark_price"] == pytest.approx(101.5)
     assert row["mark_source"] == "ws_tick"
 

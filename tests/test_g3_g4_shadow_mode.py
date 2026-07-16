@@ -21,8 +21,6 @@ from __future__ import annotations
 import sqlite3
 import uuid
 
-import pytest
-
 from polaris.core.pipeline.agents._shadow_rules import (
     G3ShadowInputs,
     G4ShadowInputs,
@@ -30,7 +28,6 @@ from polaris.core.pipeline.agents._shadow_rules import (
     technical_validate_decision,
     technical_watch_decision,
 )
-from polaris.core.pipeline.agents.pre_entry_watcher import pre_entry_watcher_gate
 from polaris.core.pipeline.agents.shadow_log import (
     fetch_shadow_events,
     log_shadow_event,
@@ -45,18 +42,6 @@ from polaris.core.pipeline.gate_state import (
 )
 
 NOW = 1_780_000_000
-
-
-
-@pytest.fixture(autouse=True)
-def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY G4 GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag
-    now defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py. P2a group B: G3 no longer branches on this
-    flag at all (its legacy path was deleted outright) — see the behavior-0
-    section below."""
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 class _MockGPTClient:
     def __init__(self, response_text: str = "{}") -> None:
@@ -373,13 +358,15 @@ async def test_g3_technical_always_drives_gpt_client_never_touched(
     )
     result = await signal_validator_gate(ctx, client=haiku, shadow_conn=memdb)
     assert result.decision == GateDecision.MODIFY
+    # G3's own technical row + the relocated G4 frontgate squeeze tag
+    # (gate_id=4, measurement continuity) both log.
     rows = fetch_shadow_events(memdb)
-    assert len(rows) == 1
-    assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
-    assert rows[0]["technical_decision"] == "MODIFY"
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
-    assert rows[0]["mismatch"] == 0
-    assert rows[0]["cell_warm"] == 1
+    assert len(rows) == 2
+    g3_row = next(r for r in rows if r["gate_id"] == GATE_SIGNAL_VALIDATOR)
+    assert g3_row["technical_decision"] == "MODIFY"
+    assert g3_row["gpt_decision"] is None or g3_row["gpt_decision"] == ""
+    assert g3_row["mismatch"] == 0
+    assert g3_row["cell_warm"] == 1
 
 
 async def test_g3_no_shadow_conn_no_side_effect() -> None:
@@ -391,50 +378,33 @@ async def test_g3_no_shadow_conn_no_side_effect() -> None:
     assert result.payload["validated_signal"]["strength_scalar"] == 1.0
 
 
-async def test_g4_real_decision_stays_gpt_kill_even_when_technical_proceeds(
+async def test_g3_crossed_book_kill_via_relocated_g4_rail(
     memdb: sqlite3.Connection,
 ) -> None:
-    """GPT KILL; technical PROCEED (clean book) — gate returns GPT KILL (behavior 0)."""
-    haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
+    """P2a group A: the crossed-book KILL rail (relocated verbatim from G4)
+    fires inside the merged G3 flow — a clean G3 technical PASS is overridden
+    by the crossed-book KILL (broken microstructure, not a market judgment
+    call)."""
     ctx = _ctx(
         {
-            "validated_signal": {"strength_scalar": 1.0, "strategy": "vb"},
+            "raw_signal": {"strategy": "vb", "score": 1.0},
+            "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
             "tick_window": [
-                {"ts": NOW, "bid": 100.0, "ask": 100.1, "mid": 100.05},
+                {"ts": NOW, "bid": 100.2, "ask": 100.1, "mid": 100.15},  # crossed
             ],
             "spread_bps": 10.0,
             "baseline_p50_spread_bps": 8.0,
             "cell_quartile": "mid",
             "regime": "chop",
         },
-        gate_id=4,
+        gate_id=3,
     )
-    result = await pre_entry_watcher_gate(ctx, client=haiku, shadow_conn=memdb)
-    assert result.decision == GateDecision.KILL  # GPT wins (behavior 0)
+    result = await signal_validator_gate(ctx, shadow_conn=memdb)
+    assert result.decision == GateDecision.KILL
+    assert result.payload["reason"] == "crossed_book"
+    # G3's own technical row still logs (computed + logged unconditionally,
+    # before the crossed-book check) — but the frontgate squeeze tag does
+    # NOT (the rail returns before that tap runs).
     rows = fetch_shadow_events(memdb)
     assert len(rows) == 1
-    assert rows[0]["gate_id"] == GATE_PRE_ENTRY_WATCHER
-    assert rows[0]["technical_decision"] == "PROCEED"
-    assert rows[0]["gpt_decision"] == "KILL"
-    assert rows[0]["mismatch"] == 1
-
-
-async def test_g4_fast_path_unaffected_by_shadow(memdb: sqlite3.Connection) -> None:
-    """Fast-path PROCEED still short-circuits (shadow does not change control flow)."""
-    haiku = _MockGPTClient(response_text='{"decision": "PROCEED"}')
-    ctx = _ctx(
-        {
-            "validated_signal": {"strength_scalar": 1.30, "strategy": "vb"},
-            "tick_window": [],
-            "cell_quartile": "top",
-            "spread_bps": 2.0,
-            "baseline_p50_spread_bps": 4.0,
-            "recent_reject_in_6h": False,
-            "listing_age_hours": 100.0,
-            "session_open_shock_window": False,
-        },
-        gate_id=4,
-    )
-    result = await pre_entry_watcher_gate(ctx, client=haiku, shadow_conn=memdb)
-    assert result.decision == GateDecision.PROCEED
-    assert result.model_used == "python_fast_path"
+    assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR

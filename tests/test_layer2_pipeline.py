@@ -137,25 +137,23 @@ def _risk_state(n: int = 30) -> StrategyRiskState:
 # ---------------------------------------------------------------------------
 
 
-async def test_8_gate_sequential_flow_validator_to_sizer(memdb: sqlite3.Connection) -> None:
+async def test_8_gate_sequential_flow_sizer_onward(memdb: sqlite3.Connection) -> None:
+    """P2a group A: G4 no longer exists as an orchestrator step (G3 wires
+    directly to G5) — this now starts at G5 (WATCHED predecessor) and walks
+    G5->G6->G7, the same "post-entry-gates onward" intent the test name
+    originally covered via the now-gone G4 hop."""
     _seed_top_quartile_cell(memdb)
     haiku = _MockGPTClient(response_text='{"decision": "PASS", "strength_scalar": 1.0}')
 
     payload = {
         "raw_signal": {"strategy": "volume_burst", "direction": "long", "score": 1.2},
         "validated_signal": {"strategy": "volume_burst", "strength_scalar": 1.2, "direction": "long"},
-        "tick_window": [],
+        "watched_signal": {"strategy": "volume_burst", "strength_scalar": 1.2, "direction": "long"},
         "signal_intent": _intent(),
         "risk_state": _risk_state(),
         "portfolio": _portfolio(),
-        # Force fast-path eligibility off so watcher hits GPT.
-        "spread_bps": 5.0,
-        "baseline_p50_spread_bps": 4.0,
     }
-    # 1st call returns validator PASS, 2nd call (watcher) returns PROCEED.
-    haiku.response_text = '{"decision": "PROCEED"}'
 
-    # Run only G4 onwards — seed VALIDATED to satisfy the predecessor invariant.
     ctx, results = await run_signal_pipeline(
         run_id="r-1",
         venue="okx", symbol="PL24-USDT",
@@ -163,15 +161,14 @@ async def test_8_gate_sequential_flow_validator_to_sizer(memdb: sqlite3.Connecti
         payload=payload,
         conn=memdb,
         haiku_client=haiku,
-        start_gate=GATE_PRE_ENTRY_WATCHER,
-        initial_state=SignalLifecycle.VALIDATED,
+        start_gate=GATE_ENTRY_SIZER,
+        initial_state=SignalLifecycle.WATCHED,
     )
 
-    # We started at G4 (Pre-Entry Watcher) — G5 sizer should run, then G6/G7.
-    # G8 only fires when the trade has closed (EXIT_PENDING/CLOSED state); in
-    # this happy path we end at G7 with state=ACTIVE (entry confirmed).
+    # G5 sizer should run, then G6/G7. G8 only fires when the trade has
+    # closed (EXIT_PENDING/CLOSED state); in this happy path we end at G7
+    # with state=ACTIVE (entry confirmed).
     decisions = [r.decision for r in results]
-    assert GateDecision.PROCEED in decisions
     assert GateDecision.SIZED in decisions
     assert ctx.state in (
         SignalLifecycle.MONITORED,
@@ -244,70 +241,47 @@ def test_post_trade_reflector_exception_fail_open() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Q7 Fast-path (G4 only)
+# Q7 Fast-path — relocated into G3 (P2a group A)
 # ---------------------------------------------------------------------------
 
 
-async def test_fast_path_high_conviction_skip(memdb: sqlite3.Connection) -> None:
-    """Top quartile + strong signal + tight spread + clean → fast-path bypass."""
+async def test_fast_path_structurally_unreachable_via_orchestrator(
+    memdb: sqlite3.Connection,
+) -> None:
+    """P2a group A: G4's fast-path is relocated into G3's own dispatcher —
+    ``orch._wrap_validator`` is the only wiring point now (no separate
+    ``_wrap_watcher``). Even a top-quartile/tight-spread/aged-listing input
+    never fast-paths through the live gate: G3's OWN technical rule caps its
+    scalar at 1.0 (PASS) / <1.0 (MODIFY), so the 1.25 fast-path floor can
+    never be cleared — the same structural cap that made the gate audit
+    measure G4 100% no-op/PROCEED when it ran as a separate step."""
     haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
     payload = {
-        "validated_signal": {"strength_scalar": 1.30, "strategy": "vb"},
+        "raw_signal": {"strategy": "vb", "score": 1.0},
+        "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
         "cell_quartile": "top",
+        "tick_window": [{"ts": NOW, "bid": 100.0, "ask": 100.1, "mid": 100.05}],
         "spread_bps": 2.0,
         "baseline_p50_spread_bps": 4.0,
         "recent_reject_in_6h": False,
         "listing_age_hours": 100.0,
         "session_open_shock_window": False,
     }
-    # Run only G4 (so we observe the result directly).
     orch = GateOrchestrator(conn=memdb, haiku_client=haiku)
     ctx = GateContext(
         run_id="r-3", signal_id="sig-3", position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
+        gate_id=GATE_SIGNAL_VALIDATOR,
         venue="okx", symbol="BTC-USDT", strategy_id="vb",
         payload=dict(payload), started_ts=NOW,
-        state=SignalLifecycle.VALIDATED,  # G4 prereq
+        state=SignalLifecycle.RAW,
     )
-    # Override handlers to stop after G4 (no G5).
-    orch.handlers = {GATE_PRE_ENTRY_WATCHER: orch._wrap_watcher}
-    results = await orch.run(ctx, start_gate=GATE_PRE_ENTRY_WATCHER)
-    assert results[0].decision == GateDecision.PROCEED
-    assert results[0].skipped is True
-    assert results[0].model_used == "python_fast_path"
-    # No GPT call should have been made.
-    assert haiku.calls == []
-
-
-async def test_fast_path_below_strength_floor_calls_gpt(
-    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    haiku = _MockGPTClient(response_text='{"decision": "PROCEED"}')
-    payload = {
-        "validated_signal": {"strength_scalar": 1.0},
-        "cell_quartile": "top",
-        "spread_bps": 2.0,
-        "baseline_p50_spread_bps": 4.0,
-        "recent_reject_in_6h": False,
-        "listing_age_hours": 100.0,
-        "session_open_shock_window": False,
-    }
-    orch = GateOrchestrator(conn=memdb, haiku_client=haiku)
-    orch.handlers = {GATE_PRE_ENTRY_WATCHER: orch._wrap_watcher}
-    ctx = GateContext(
-        run_id="r-4", signal_id="sig-4", position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
-        venue="okx", symbol="BTC-USDT", strategy_id="vb",
-        payload=dict(payload), started_ts=NOW,
-        state=SignalLifecycle.VALIDATED,
-    )
-    results = await orch.run(ctx, start_gate=GATE_PRE_ENTRY_WATCHER)
-    assert results[0].decision == GateDecision.PROCEED
+    orch.handlers = {GATE_SIGNAL_VALIDATOR: orch._wrap_validator}
+    results = await orch.run(ctx, start_gate=GATE_SIGNAL_VALIDATOR)
+    assert results[0].decision == GateDecision.PASS
     assert results[0].skipped is False
-    assert len(haiku.calls) == 1
+    assert results[0].model_used == "python"  # NOT python_fast_path
+    # A supplied client is never touched (deterministic-only, P2a group B).
+    assert haiku.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -688,29 +662,30 @@ async def test_g8_p0_python_template_clamps_delta_to_rail(
 # ---------------------------------------------------------------------------
 
 
-async def test_orchestrator_threads_md_conn_to_g4_watcher(
+async def test_orchestrator_threads_md_conn_to_g3_validator(
     memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """G4's frontgate VWAP/TTM shadow tagger reads bars/writes
-    vwap_timing_shadow (marketdata-domain) — GateOrchestrator(md_conn=...)
-    must pass it through to pre_entry_watcher_gate."""
+    """P2a group A: the frontgate VWAP/TTM shadow tagger (relocated from G4)
+    reads bars/writes vwap_timing_shadow (marketdata-domain) from inside G3
+    now — GateOrchestrator(md_conn=...) must pass it through to
+    signal_validator_gate."""
     import polaris.core.pipeline.gate_orchestrator as orch_mod
 
     captured: dict[str, object] = {}
 
-    async def _fake_watcher(_ctx: object, **kwargs: object) -> GateResult:
+    async def _fake_validator(_ctx: object, **kwargs: object) -> GateResult:
         captured.update(kwargs)
         return GateResult(decision=GateDecision.KILL, next_gate=None, payload={})
 
-    monkeypatch.setattr(orch_mod, "pre_entry_watcher_gate", _fake_watcher)
+    monkeypatch.setattr(orch_mod, "signal_validator_gate", _fake_validator)
     md_conn = sqlite3.connect(":memory:")
     orch = GateOrchestrator(conn=memdb, md_conn=md_conn)
     ctx = GateContext(
         run_id="r-md", signal_id="s-md", position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER, venue="okx", symbol="BTC-USDT",
-        strategy_id="s1", payload={"validated_signal": {"symbol": "BTC-USDT"}},
-        started_ts=NOW, state=SignalLifecycle.VALIDATED,
+        gate_id=GATE_SIGNAL_VALIDATOR, venue="okx", symbol="BTC-USDT",
+        strategy_id="s1", payload={"raw_signal": {"symbol": "BTC-USDT"}},
+        started_ts=NOW, state=SignalLifecycle.RAW,
     )
-    await orch.run(ctx, start_gate=GATE_PRE_ENTRY_WATCHER)
+    await orch.run(ctx, start_gate=GATE_SIGNAL_VALIDATOR)
     assert captured.get("md_conn") is md_conn
     md_conn.close()

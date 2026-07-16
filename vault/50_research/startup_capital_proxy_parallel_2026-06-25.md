@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-25
+tags: [research, backfilled-frontmatter]
+---
+
 # Startup bottleneck fix — `populate_capital_proxies` sequential → parallel
 
 **Date** 2026-06-25 · **Type** digest (perf / startup incident root-cause)

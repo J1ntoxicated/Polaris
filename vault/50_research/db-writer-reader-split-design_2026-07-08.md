@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-08
+tags: [research, backfilled-frontmatter]
+---
+
 # DB Writer/Reader Split — Design (2026-07-08)
 
 > DEMO/PAPER only · aggressive/flow_not_block preserved (writes degrade, never throttle/block) · 근본 구조 수정 ([[feedback_db_lock_is_architecture_signal]]), 핫패스 패치 아님 · 이 워크플로우는 **배포 안 함** (설계만).

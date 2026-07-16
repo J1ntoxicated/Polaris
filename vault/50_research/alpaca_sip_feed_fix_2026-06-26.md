@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-26
+tags: [research, backfilled-frontmatter]
+---
+
 # Alpaca realtime fix — SIP feed switch + liquidity filter (2026-06-26)
 
 DEMO/PAPER. flow_not_block preserved. Base e6c81b6.

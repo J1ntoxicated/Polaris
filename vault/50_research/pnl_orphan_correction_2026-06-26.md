@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-26
+tags: [research, backfilled-frontmatter]
+---
+
 # PnL 측정 무결성 — cross-instrument orphan + capped mfe_r 보정 (#46)
 
 2026-06-26 · DEMO/PAPER · 측정 전용(거동 불변, flow_not_block 무관)

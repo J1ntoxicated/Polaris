@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-25
+tags: [research, backfilled-frontmatter]
+---
+
 # Venue 거래 불균형 — 근본원인 진단 (2026-06-25)
 
 DEMO/PAPER. read-only forensic. 봇 무중단(메인 worktree 가동중, 코드 미변경).

@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-25
+tags: [research, backfilled-frontmatter]
+---
+
 # News Sentiment Collector — increment 1 (collect + classify + regime evidence)
 
 2026-06-25 · DEMO/PAPER · SIGNAL/EVIDENCE-only · absorbed into existing alt-data spine (NO new pipeline)

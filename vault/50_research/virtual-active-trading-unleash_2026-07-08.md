@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-08
+tags: [research, backfilled-frontmatter]
+---
+
 # Virtual Active-Trading Unleash — per-strategy loosen spec (2026-07-08)
 
 DEMO/PAPER. Goal: VIRTUAL 활발거래 대폭↑ (`POLARIS_VIRTUAL_ACCOUNT=1`), REAL byte-identical.

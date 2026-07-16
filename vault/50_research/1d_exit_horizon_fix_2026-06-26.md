@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-26
+tags: [research, backfilled-frontmatter]
+---
+
 # 1D-exit horizon respect — kill intraday-noise thesis_cut churn (2026-06-26)
 
 Re-applied APPROVED fix (commit `2eab87d`, stale base) onto main tip `73bc6b9`,

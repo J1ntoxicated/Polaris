@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-03
+tags: [research, backfilled-frontmatter]
+---
+
 # Capital 지수 breakout-FADE (후보④) — backtest (REJECT)
 
 > 2026-07-03 · revival P1 후보 심사 · DEMO/PAPER · yfinance 1h 실데이터

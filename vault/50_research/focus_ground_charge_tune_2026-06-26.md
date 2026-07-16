@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-26
+tags: [research, backfilled-frontmatter]
+---
+
 # Dynamic-focus ground charge-rate tune — 2026-06-26
 
 DEMO/PAPER. flow_not_block / aggressive preserved — this WIDENS observation only;

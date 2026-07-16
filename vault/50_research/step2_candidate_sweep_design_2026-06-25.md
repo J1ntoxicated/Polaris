@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-25
+tags: [research, backfilled-frontmatter]
+---
+
 # STEP② Candidate Sweep — dynamic active-focus over the static ground
 
 2026-06-25 · DEMO/PAPER · OBSERVATION/focus-selection only (flow_not_block, gates nothing) · built on STEP① `24a6e6c`

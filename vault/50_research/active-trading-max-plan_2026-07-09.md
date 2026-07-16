@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-09
+tags: [research, backfilled-frontmatter]
+---
+
 # Active-Trading Maximization Plan — 5 Parallel Build Groups (2026-07-09)
 
 DEMO/PAPER only · goal = **virtual meaningful fills → hundreds/day across many strategies+venues**.

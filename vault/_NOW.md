@@ -78,4 +78,4 @@ tags: [now, tier-0]
 <!-- AUTO-END -->
 
 ## Implementation status
-- P1.0 ignition fired at 2026-07-15 20:47 (paper=True, full_pipeline=True)
+- P1.0 ignition fired at 2026-07-16 08:06 (paper=True, full_pipeline=True)

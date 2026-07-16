@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-27
+tags: [research, backfilled-frontmatter]
+---
+
 # Donchian breakout × indices_global — generalization test (REJECT)
 
 > 2026-06-27 · Phase2 fan-out gate (#78) · DEMO/PAPER · real yfinance index bars

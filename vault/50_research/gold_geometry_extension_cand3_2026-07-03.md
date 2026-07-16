@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-03
+tags: [research, backfilled-frontmatter]
+---
+
 # gold_breakout_1h 기하 확장 백테스트 — SILVER/US100/DE40/UK100 (후보③)
 
 2026-07-03 · DEMO/PAPER · scratch 백테스트 (프로덕션 무접촉) · [[layer-2-gates]] [[ADR-008]]

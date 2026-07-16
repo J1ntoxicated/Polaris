@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-09
+tags: [research, backfilled-frontmatter]
+---
+
 # Dashboard Full Audit — 2026-07-09
 
 DEMO/PAPER dashboard (:8770). Read-only synthesis of 6 audit groups (g1 activity/gates/logic · g2 performance/legacy/context · g3 ai/learned/path/build · g4 chart/weekend · g5 mobile · globe). Evidence-based, no code/DB/server touched.

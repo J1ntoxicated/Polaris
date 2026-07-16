@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-28
+tags: [research, backfilled-frontmatter]
+---
+
 # Weekend OKX Maker OOS Backtest — Signal vs Execution (2026-06-28)
 
 > ⚠️ PARTIALLY RETRACTED 2026-06-28 — adversarial re-run. Signal-edge SOLID; but

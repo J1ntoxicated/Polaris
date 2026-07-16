@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-07-07
+tags: [research, backfilled-frontmatter]
+---
+
 # Candidate #4 — OKX crypto cross-sectional momentum: REJECT (2026-07-07)
 
 DEMO/PAPER research. Aggressive bias preserved, flow_not_block. Honest net.

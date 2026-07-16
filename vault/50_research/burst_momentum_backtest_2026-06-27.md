@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-27
+tags: [research, backfilled-frontmatter]
+---
+
 # Burst-Momentum Backtest — FEE-FATAL (fade=single-regime artifact)
 
 DEMO/PAPER · OKX SPOT · real 1H bars · real fees · long-only · flow_not_block (extract, not block)

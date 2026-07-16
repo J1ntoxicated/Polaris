@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-28
+tags: [research, backfilled-frontmatter]
+---
+
 # Alpaca weekend session-gate + anti-churn fix — 2026-06-28
 
 Branch `agent-alpaca-session` (base main 654f1df). DEMO/PAPER. flow_not_block /

@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-26
+tags: [research, backfilled-frontmatter]
+---
+
 # Alpaca WS budget + bars feed follow RUNTIME feed (#43, 2026-06-26)
 
 DEMO/PAPER. flow_not_block preserved. Base 6d39fd3. Follow-up to [[alpaca_sip_feed_fix_2026-06-26]] (#38 residual defect).

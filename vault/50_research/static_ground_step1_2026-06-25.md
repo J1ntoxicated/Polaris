@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-25
+tags: [research, backfilled-frontmatter]
+---
+
 # STEP① Static-Ground Expansion — full-universe bars + per-ticker sentiment/event ground
 
 2026-06-25 · DEMO/PAPER · OBSERVATION coverage only (flow_not_block, gates nothing) · builder≠reviewer APPROVE-WITH-NITS, 0 blocker

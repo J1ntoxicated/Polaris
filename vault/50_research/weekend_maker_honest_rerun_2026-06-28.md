@@ -1,3 +1,10 @@
+---
+type: research
+status: recorded
+date_created: 2026-06-28
+tags: [research, backfilled-frontmatter]
+---
+
 # Weekend Maker OOS — HONEST RE-RUN (adversarial-verified, 2026-06-28)
 
 DEMO/PAPER. flow_not_block. Supersedes faked parts of

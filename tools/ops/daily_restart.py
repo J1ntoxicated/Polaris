@@ -74,6 +74,16 @@ def _run_retention(cfg: OpsConfig, *, now: float) -> None:
     accumulates post-split). A single combined-spec pass against only
     ``cfg.db_path`` either pruned the wrong permanently-stale copy or left the
     marketdata file's WAL to grow unbounded (never checkpointed).
+
+    P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md) —
+    probe-sidecar WAL hygiene gap: ``data/probes.sqlite`` IS pruned live every
+    30min (``retention_producer._prune_probe_blocking``, wired 2026-07-09), but
+    NOTHING ever ran its RECLAIMING checkpoint (only PASSIVE auto-checkpoints
+    at sqlite's default 1000-page threshold) — the trading/marketdata siblings
+    get one here every day, the probe sidecar never did. A third pass (prune +
+    reclaim, same ``checkpoint_wal`` this function already uses for the other
+    two) closes that gap; failure here is independently caught (own try/except)
+    so a probe-DB fault can never suppress the trading/marketdata hygiene above.
     """
     try:
         from polaris.storage.retention import (
@@ -102,6 +112,29 @@ def _run_retention(cfg: OpsConfig, *, now: float) -> None:
         alerting.notify(
             cfg, "retention_failed",
             f"retention/WAL hygiene skipped (non-fatal): {exc}",
+        )
+
+    # Probe sidecar (P3 promotion — see the docstring note above): own
+    # try/except so a fault here can NEVER suppress the trading/marketdata
+    # hygiene pass above (already committed by this point).
+    try:
+        from polaris.core.probes.tuning_log import open_probe_db
+        from polaris.storage.retention import checkpoint_wal, run_probe_retention
+
+        probe_path = cfg.db_path.parent / "probes.sqlite"
+        if probe_path.exists():
+            pconn = open_probe_db(probe_path)
+            try:
+                probe_deleted = run_probe_retention(pconn)
+            finally:
+                pconn.close()
+            checkpoint_wal(probe_path)
+            with open(cfg.restart_log, "a", encoding="utf-8") as fh:
+                fh.write(f"{iso_utc(now)} probe_retention deleted={probe_deleted}\n")
+    except Exception as exc:  # noqa: BLE001 — hygiene must never block restart
+        alerting.notify(
+            cfg, "probe_retention_failed",
+            f"probe-sidecar WAL hygiene skipped (non-fatal): {exc}",
         )
 
 

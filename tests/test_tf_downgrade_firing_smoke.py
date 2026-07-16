@@ -52,7 +52,12 @@ _REGISTERED_TARGETS = (
 _UNREGISTERED_TARGETS = ("equity_rsi_bb_pullback", "fx_range_fade")
 
 _VIRTUAL_EXPECTED_TF = {
-    "connors_rsi2": "1H",
+    # 2026-07-10 evidence-based revert (824cea0): the 1H virtual downgrade
+    # bled -$588/day (DINO -2.3R churn + VTRS/SBUX) — connors mean-reversion
+    # needs daily-close extremes, not 1H noise. Reverted to 1D in BOTH
+    # REAL and VIRTUAL (no longer virtual_loosen-gated); every other
+    # downgraded strategy below is unaffected.
+    "connors_rsi2": "1D",
     "supertrend": "15m",
     "ema_crossover": "15m",
     "cci_reversion": "15m",

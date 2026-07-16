@@ -11,14 +11,14 @@ import logging
 import sqlite3
 from collections.abc import Iterable, Sequence
 
-logger = logging.getLogger(__name__)
-
 from polaris.core.data.schema import (
     ALLOWED_METRICS,
     LOOKBACK_FAST_SEC,
     LOOKBACK_SLOW_SEC,
     BaselineValue,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Pure stats

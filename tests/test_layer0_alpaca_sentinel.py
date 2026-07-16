@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import pytest
 
 from polaris.core.universe._alpaca import (
     ALPACA_MOST_ACTIVES_PATH,

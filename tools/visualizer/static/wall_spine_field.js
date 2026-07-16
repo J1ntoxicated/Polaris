@@ -1047,7 +1047,7 @@
       // position instead of the old S-curve's forced bottom-edge landing
       // point (H*0.985) — that hack existed only because g8 used to be far
       // right; a short direct arc reads as visibly CLOSING the loop now.
-      const a = gateScreen[7], b = gateScreen[1];
+      const a = gateScreen[6], b = gateScreen[1]; // g8→g2 (G4 폐지 시프트)
       addAmbient('g8', 'g2', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.26, width: 1.3, glow: true, kind: 'feedback', bowScale: 2.6 });
     }
     // G6 reading -> G8 reflector -> G5 runner update (Jin 2026-07-11 gate-
@@ -1057,11 +1057,11 @@
     // pulse. Ends at the g5 nucleus, which the 3 runner-learner satellites
     // (session_mult/regime_mult/max_hold, see buildLayout) already orbit.
     {
-      const a = gateScreen[5], b = gateScreen[7];
+      const a = gateScreen[4], b = gateScreen[6]; // g6→g8
       addAmbient('g6', 'g8', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.14, width: 0.5, bowScale: 0.6 });
     }
     {
-      const a = gateScreen[7], b = gateScreen[4];
+      const a = gateScreen[6], b = gateScreen[3]; // g8→g5
       addAmbient('g8', 'g5', a.x, a.y, b.x, b.y, { color: FEEDBACK_COLOR, alpha: 0.14, width: 0.5, bowScale: 0.6 });
     }
 
@@ -1108,13 +1108,13 @@
       addAmbient(n.id, 'g3', a.x, a.y, g3.x, g3.y, { color: CLUSTER_COLOR.reg, alpha: 0.34, width: 1.3 });
     });
 
-    const g6 = gateScreen[5];
+    const g6 = gateScreen[4]; // G4 폐지 시프트
     allNodes.filter((n) => n.cluster === 'pos').forEach((n) => {
       const a = screen[n.id]; if (!a) return;
       addAmbient(n.id, 'g6', a.x, a.y, g6.x, g6.y, { color: CLUSTER_COLOR.pos, alpha: 0.4, width: 1.3, glow: true });
     });
 
-    const g7 = gateScreen[6];
+    const g7 = gateScreen[5];
     allNodes.filter((n) => n.cluster === 'exit').forEach((n) => {
       const a = screen[n.id]; if (!a) return;
       addAmbient(n.id, 'g7', a.x, a.y, g7.x, g7.y, { color: CLUSTER_COLOR.exit, alpha: 0.22, width: 0.9 });
@@ -1125,7 +1125,7 @@
       addAmbient(n.id, 'g7', a.x, a.y, g7.x, g7.y, { color: CLUSTER_COLOR.exit_tally, alpha: 0.28, width: w, glow: true });
     });
 
-    const g8 = gateScreen[7];
+    const g8 = gateScreen[6];
     ['action', 'obs', 'orbit', 'axis'].forEach((cl) => {
       allNodes.filter((n) => n.cluster === cl).forEach((n) => {
         const a = screen[n.id]; if (!a) return;
@@ -1212,7 +1212,7 @@
     // Probe wiring (Jin: "프로브들은 연결이 하나도 안 되는 거야?") —
     // anchor line to G6 (they are the monitor's advisors) + live links to
     // the positions they actually read in the last 30m (server probe_links).
-    const g6gate = gateScreen[5];
+    const g6gate = gateScreen[4];
     (allNodes.filter((n) => n.cluster === 'probe')).forEach((n) => {
       const a = screen[n.id];
       if (!a || !g6gate) return;

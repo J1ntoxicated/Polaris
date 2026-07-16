@@ -422,9 +422,13 @@
     setUniverseTiers(nodes);
     bakeStatic();
   }
+  // P2a 게이트 다이어트: gate_id(1..8, 4 없음) → GATES 행 인덱스 매핑
+  function gateRow(gateId) { return GATES.findIndex((x) => x.n === gateId); }
   function fireGateEvent(g) {
     if (!g || !g.gate_id) return;
-    pushGateMote(g.gate_id - 1, g.decision);
+    const _row = gateRow(g.gate_id);
+    if (_row < 0) return; // retired gate id (e.g. 4) — ignore
+    pushGateMote(_row, g.decision);
     const gid = 'g' + g.gate_id;
     const srcNode = g.symbol && field.findNode((n) => n.ticker && g.symbol.indexOf(n.ticker) >= 0 && (n.cluster === 'mkt' || n.cluster === 'watch'));
     if (srcNode) {
@@ -435,7 +439,7 @@
       // with a real g1..g5 event parks beside that gate (venue-colored glow)
       // and re-parks further right on each later gate; idle -> glides home.
       if (srcNode.cluster === 'mkt' && g.gate_id >= 1 && g.gate_id <= 5) {
-        field.migrateTicker(srcNode.id, g.gate_id - 1);
+        field.migrateTicker(srcNode.id, _row);
       }
       // real-time wiring: this strategy really fired on this ticker NOW
       if (g.gate_id === 2) pushSignalTag(g, srcNode.exchange);

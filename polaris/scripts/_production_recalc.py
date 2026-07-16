@@ -864,8 +864,15 @@ async def _evaluate_position(
             stream_profile=stream_profile,
         )
         g7_client = gpt_client if phase == "P1" else None
-        # shadow_conn (instrumentation only): rails-vs-GPT divergence row per
-        # P1 GPT call; the returned decision is byte-identical (P0 skips).
+        # shadow_conn (instrumentation only, P2a group B): logs the Q9 rail's
+        # technical decision to gate_shadow_events on EVERY call now (no more
+        # P0/P1 split — there is no GPT decision left to diverge from, so
+        # gpt_decision is always None / mismatch=0 by construction). This is
+        # a NEW per-call write on the trading conn vs the pre-P2a AI-free
+        # path (which skipped the row entirely) — deliberate ("measurement
+        # continuity", symmetric with G3); gate_shadow_events stays
+        # trading-domain by SSOT (schema_marketdata.py — same-txn joins with
+        # ``signals``), so it is NOT a storage-split candidate.
         # #32 judge_client: the per-ticker EXIT-timing judge runs alongside the
         # deterministic G7 (shadow default logs only; the rail decision still
         # acts). None → byte-identical no-judge path.

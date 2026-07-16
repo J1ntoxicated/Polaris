@@ -242,9 +242,18 @@ async def signal_validator_gate(
     # G4 fast-path (relocated verbatim, P2a group A): an EFFICIENCY skip of
     # the slow per-tick watch computation below — unaffected by MODIFY (whose
     # scalar is always <=1.0 and can never clear the 1.25 strength floor).
+    # Still routed through the G3 entry-rationale judge (fix, 2026-07-16):
+    # pre-fold G3 had NO fast path (it lived only in G4 and only ever skipped
+    # G4's own TIMING judge) — every AI-free G3 signal reached
+    # ``_maybe_judge_entry``. Returning here unconditionally would silently
+    # drop that judge (and its measurement row) for exactly the top-quartile/
+    # high-scalar cohort most likely to clear the #32 A+B escalation gate,
+    # contradicting this module's own "byte-identical" claim. G4's TIMING
+    # judge (``maybe_judge_timing``) stays skipped — that exclusion predates
+    # this fold (see its docstring: "the fast-path result never reaches here").
     fp = fast_path_context_from_payload(ctx, validated_signal)
     if is_fast_path_eligible(fp, ctx.stream_profile):
-        return GateResult(
+        fast_result = GateResult(
             decision=technical.decision,
             next_gate=GATE_ENTRY_SIZER,
             payload={
@@ -256,6 +265,10 @@ async def signal_validator_gate(
             model_used="python_fast_path",
             latency_ms=0,
             skipped=True,
+        )
+        return await _maybe_judge_entry(
+            ctx, det_result=fast_result, judge_client=judge_client,
+            shadow_conn=shadow_conn,
         )
 
     # G4 crossed-book KILL + stale/spread/drift watch_flags (relocated

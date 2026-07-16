@@ -46,6 +46,19 @@ PROBE_ENGINE_MODE: str = os.environ.get("POLARIS_PROBE_ENGINE", "observe").strip
     "observe"
 )
 
+# Evidence-composite coupling fix (review, 2026-07-16): the 2026-07-15
+# promotion readout (+0.088R HARVEST vs -0.08R HOLD) that justifies the
+# default-ON POLARIS_G6_PROBE_TIGHTEN consumer was measured on the 5-probe
+# composite (profit_taking/loss_defense/technical/session_hours/regime_fit).
+# LiquidityProbe/FundingProbe (P3 Group C) still ride the SAME bus and are
+# still fully logged via log_probe_readings — nothing is blocked, full
+# telemetry is preserved for a future independent readout — but are excluded
+# here from the composite that becomes ``probe_decisions.action``, the value
+# the live tighten consumer reads, until they earn their own validation.
+# Mirrors the existing WIDEN-exclusion allowlist
+# (``tighten_intent.PROBE_TIGHTEN_APPLY_ACTIONS``).
+_COMPOSITE_UNVALIDATED_PROBE_IDS: frozenset[str] = frozenset({"liquidity", "funding"})
+
 # G6 gate id (the probe attach rides the G6 monitor pass). Imported lazily-style
 # as a constant to avoid a heavy import at module load.
 _GATE_POSITION_MONITOR: int = 6
@@ -257,7 +270,13 @@ def observe_probes(
             signal_family=family,
         )
         readings = bus.observe(ctx)
-        decision = engine.compose(readings, mode="observe")
+        # Full 7-probe telemetry is still logged below; the composite that
+        # DRIVES the live decision stays scoped to the validated 5 (see
+        # _COMPOSITE_UNVALIDATED_PROBE_IDS above).
+        composed_readings = [
+            r for r in readings if r.probe_id not in _COMPOSITE_UNVALIDATED_PROBE_IDS
+        ]
+        decision = engine.compose(composed_readings, mode="observe")
         logger.info(
             "[probe/verdict] %s:%s pos=%s src=%s probes=%s action=%s "
             "lean=%+.3f applied=%s regime=%s pnl_r=%.2f "

@@ -42,6 +42,7 @@ from polaris.core.probes import (
     _clamp,
 )
 from polaris.core.regime_fit import regime_fit
+from polaris.core.streams import resolve_stream
 from polaris.core.universe.schema import DEFAULT_MAX_SPREAD_BPS, liquidity_floor_for_venue
 from polaris.strategies.okx_funding_carry_persist import FUNDING_THRESHOLD
 
@@ -313,6 +314,18 @@ class FundingProbe:
     def evaluate(self, ctx: ProbeContext) -> ProbeReading | None:
         if ctx.funding_rate is None:
             return None  # feed absent/stale for this group → ABSTAIN
+        # SPOT semantic guard (review fix, 2026-07-16): okx_funding is PERP
+        # funding, mapped onto a position's group by symbol (production.py's
+        # perp->spot key mapping). A SPOT position pays no funding at all, so
+        # applying the perp rate to it as a "cost paid BY this position" is a
+        # false premise, not a real carry cost — ABSTAIN unless the venue's
+        # own product_class actually bears funding-like cost (i.e. not spot).
+        # An unresolvable venue also ABSTAINs — never guess.
+        try:
+            if resolve_stream(ctx.venue).product_class == "spot":
+                return None
+        except KeyError:
+            return None
         # Cost paid BY this position's side: a long pays positive funding (cost);
         # a short is PAID positive funding (benefit) — invert for short.
         cost = ctx.funding_rate if ctx.side == "long" else -ctx.funding_rate

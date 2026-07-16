@@ -114,39 +114,66 @@ def test_liquidity_partial_data_still_evaluates() -> None:
 
 
 def test_funding_abstains_when_absent() -> None:
-    assert FundingProbe().evaluate(_ctx(funding_rate=None)) is None
+    assert FundingProbe().evaluate(_ctx(venue="capital", funding_rate=None)) is None
 
 
 def test_funding_abstains_when_exactly_zero() -> None:
-    assert FundingProbe().evaluate(_ctx(funding_rate=0.0)) is None
+    assert FundingProbe().evaluate(_ctx(venue="capital", funding_rate=0.0)) is None
+
+
+def test_funding_abstains_on_spot_product_class() -> None:
+    """Review fix (2026-07-16): okx is product_class=spot — a spot position
+    pays no funding, so a non-zero group funding_rate must still ABSTAIN
+    rather than fabricate a carry-cost lean the position doesn't bear."""
+    reading = FundingProbe().evaluate(
+        _ctx(venue="okx", side="long", funding_rate=0.0005)
+    )
+    assert reading is None
+
+
+def test_funding_abstains_on_unresolvable_venue() -> None:
+    reading = FundingProbe().evaluate(
+        _ctx(venue="not_a_real_venue", side="long", funding_rate=0.0005)
+    )
+    assert reading is None
 
 
 def test_funding_long_pays_positive_funding_is_adverse() -> None:
-    reading = FundingProbe().evaluate(_ctx(side="long", funding_rate=0.0005))
+    reading = FundingProbe().evaluate(
+        _ctx(venue="capital", side="long", funding_rate=0.0005)
+    )
     assert reading is not None
     assert reading.lean < 0.0
 
 
 def test_funding_short_collects_positive_funding_is_favorable() -> None:
-    reading = FundingProbe().evaluate(_ctx(side="short", funding_rate=0.0005))
+    reading = FundingProbe().evaluate(
+        _ctx(venue="capital", side="short", funding_rate=0.0005)
+    )
     assert reading is not None
     assert reading.lean > 0.0
 
 
 def test_funding_long_collects_negative_funding_is_favorable() -> None:
-    reading = FundingProbe().evaluate(_ctx(side="long", funding_rate=-0.0005))
+    reading = FundingProbe().evaluate(
+        _ctx(venue="capital", side="long", funding_rate=-0.0005)
+    )
     assert reading is not None
     assert reading.lean > 0.0
 
 
 def test_funding_short_pays_negative_funding_is_adverse() -> None:
-    reading = FundingProbe().evaluate(_ctx(side="short", funding_rate=-0.0005))
+    reading = FundingProbe().evaluate(
+        _ctx(venue="capital", side="short", funding_rate=-0.0005)
+    )
     assert reading is not None
     assert reading.lean < 0.0
 
 
 def test_funding_extreme_rate_saturates_lean() -> None:
-    reading = FundingProbe().evaluate(_ctx(side="long", funding_rate=0.01))
+    reading = FundingProbe().evaluate(
+        _ctx(venue="capital", side="long", funding_rate=0.01)
+    )
     assert reading is not None
     assert reading.lean == -1.0
 
@@ -234,3 +261,71 @@ def test_wire_probe_sidecar_registers_liquidity_and_funding(tmp_path: Path) -> N
     probe_ids = {p.probe_id for p in state.probe_bus._probes}  # type: ignore[attr-defined]
     assert "liquidity" in probe_ids
     assert "funding" in probe_ids
+
+
+# --------------------------------------------------------------------------- #
+# evidence-composite coupling fix (review, 2026-07-16) — liquidity/funding are
+# still fully logged (telemetry) but excluded from the composite that becomes
+# the live TIGHTEN/HARVEST consumer's ``probe_decisions.action``.
+# --------------------------------------------------------------------------- #
+
+
+def test_liquidity_and_funding_logged_but_excluded_from_composite(
+    tmp_path: Path,
+) -> None:
+    from polaris.core.probes import ExitEngine, ProbeReading
+    from polaris.core.probes.tuning_log import open_probe_db
+    from polaris.scripts._production_probe_attach import observe_probes
+
+    class _StubBus:
+        def observe(self, ctx: object) -> list[ProbeReading]:
+            # profit_taking ALONE composes to -0.1 (HOLD, above the -0.20
+            # TIGHTEN threshold). If liquidity's strong adverse lean were
+            # wrongly folded in, the mean would drop to -0.5 (TIGHTEN) —
+            # so the resulting action/lean below prove the exclusion.
+            return [
+                ProbeReading(
+                    probe_id="profit_taking", kind="profit",
+                    lean=-0.1, confidence=1.0, evidence={},
+                ),
+                ProbeReading(
+                    probe_id="liquidity", kind="liquidity",
+                    lean=-0.9, confidence=1.0, evidence={},
+                ),
+            ]
+
+    class _State:
+        pass
+
+    state = _State()
+    state.probe_bus = _StubBus()  # type: ignore[attr-defined]
+    state.probe_engine = ExitEngine()  # type: ignore[attr-defined]
+    state.probe_conn = open_probe_db(str(tmp_path / "probes.sqlite"))  # type: ignore[attr-defined]
+
+    observe_probes(
+        state=state,  # type: ignore[arg-type]
+        pos={"position_id": "p-comp", "venue": "okx", "symbol": "BTC-USDT"},  # type: ignore[arg-type]
+        side="long", entry_price=100.0, last_price=95.0, atr_pct=0.01,
+        entry_atr_pct=0.01, pnl_r=-0.5, held_seconds=60,
+        regime="trend_up", now_ts=1_000_000, run_id="run-comp",
+        mark_source="bar",
+    )
+    conn = state.probe_conn  # type: ignore[attr-defined]
+    reading_ids = {
+        r[0] for r in conn.execute(
+            "SELECT probe_id FROM probe_readings WHERE position_id='p-comp'"
+        ).fetchall()
+    }
+    assert reading_ids == {"profit_taking", "liquidity"}, (
+        "full 7-probe telemetry must still be logged (nothing blocked)"
+    )
+    action, composite_lean = conn.execute(
+        "SELECT action, composite_lean FROM probe_decisions "
+        "WHERE position_id='p-comp'"
+    ).fetchone()
+    assert action == "HOLD", (
+        "liquidity's strong adverse lean must NOT reach the live-consumed "
+        "composite — action must reflect profit_taking alone"
+    )
+    assert abs(composite_lean - (-0.1)) < 1e-9
+    conn.close()

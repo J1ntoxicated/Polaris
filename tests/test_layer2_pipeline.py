@@ -183,20 +183,19 @@ async def test_8_gate_sequential_flow_validator_to_sizer(memdb: sqlite3.Connecti
 
 
 async def test_validator_kill_terminates_pipeline(
-    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+    memdb: sqlite3.Connection,
 ) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
-    payload = {"raw_signal": {"strategy": "vb", "direction": "long", "score": 0.4}}
+    """P2a group B: G3's only KILL left is ``missing_raw_signal`` (the
+    deterministic technical rule itself never blocks entry — flow_not_block).
+    A supplied client is irrelevant / never touched."""
+    payload: dict = {"raw_signal": {}}
     ctx, results = await run_signal_pipeline(
         run_id="r-2",
         venue="okx", symbol="BTC-USDT",
         strategy_id="vb",
         payload=payload,
         conn=memdb,
-        haiku_client=haiku,
+        haiku_client=_MockGPTClient(response_text='{"decision": "KILL"}'),
         start_gate=GATE_SIGNAL_VALIDATOR,
     )
     assert results[0].decision == GateDecision.KILL

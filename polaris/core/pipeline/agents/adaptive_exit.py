@@ -1,22 +1,26 @@
-"""Gate 7 — Adaptive Exit (Python P0, GPT-5.5 P1).
+"""Gate 7 — Adaptive Exit (deterministic Q9 widening rail).
 
 Spec source:
 - vault/30_components/layer-2-per-gate-pipeline.md (Q9 floor-only widening)
 - vault/10_decisions/ADR-004-per-gate-ai-pipeline.md (Adaptive Exit)
 
-Phase contract:
-- **P0** (``client is None``): deterministic widening rules (default ATR
-  exit = floor; override only widens, never tightens; max 5/trade, 30s
-  cooldown, never below max-loss / BEP). ``model_used="python"``.
-- **P1** (``client is not None``): GPT decides among
-  HOLD / WIDEN / TIGHTEN / EXIT_NOW. **TIGHTEN is rejected** when the
-  proposed stop is *closer* than the default ATR floor (Q9 conservative
-  trap avoidance). WIDEN must push the stop *farther* than the current
-  level. EXIT_NOW falls through to a normal exit.
+Contract: the deterministic widening rules ARE the live decision (default
+ATR exit = floor; override only widens, never tightens; max 5/trade, 30s
+cooldown, never below max-loss / BEP). ``model_used="python"``.
 
-Aggressive bias (Jin 2026-05-07): TIGHTEN suggestions that violate the
-default ATR floor are reversed to HOLD — the LLM cannot dampen winners
-with a smaller stop. WIDEN is the only direction the floor permits.
+P2a group B (2026-07-16, gate-pipeline value audit): the legacy P1 GPT
+decision path (HOLD/WIDEN/TIGHTEN/EXIT_NOW via GPT) is removed outright — it
+was measured DORMANT in production (``POLARIS_AI_FREE`` default ON since
+2026-06-11 zeroed in-loop G3/G4/G7 GPT calls) and is deleted rather than kept
+as a switchable-but-unreachable branch. ``client``/``model``/``ai_free``
+remain on the signature ONLY for call-site compatibility (orchestrator +
+existing tests) — none are read; the Q9 rail is unconditionally the
+decision. The #32 AI exit-timing judge (``_maybe_judge_exit`` below) is a
+SEPARATE, out-of-scope call path — left byte-identical.
+
+Aggressive bias (Jin 2026-05-07): only the WIDEN direction is permitted past
+the default ATR floor — TIGHTEN is a probe-consumer-only path
+(``_python_tighten``), never a GPT suggestion now.
 
 Hard rails (Q9):
 - never exceed ``max_loss_r`` hard cap.
@@ -33,13 +37,6 @@ import logging
 import sqlite3
 from typing import Any
 
-from polaris.core.pipeline.agents._gpt_client import (
-    DEFAULT_TIMEOUT_SEC,
-    GPT_P0_MODEL,
-    GPT_P1_MODEL,
-    call_gpt,
-    make_system_prefix,
-)
 from polaris.core.pipeline.agents._shadow_rules import ShadowDecision
 from polaris.core.pipeline.agents.ai_judge import (
     apply_exit_verdict,
@@ -51,7 +48,7 @@ from polaris.core.pipeline.agents.judge_gate import (
     robust_min,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
-from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
+from polaris.core.pipeline.config import ai_judge_mode
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_POST_TRADE_REFLECTOR,
@@ -63,7 +60,6 @@ from polaris.core.pipeline.gate_state import (
 __all__ = [
     "COOLDOWN_SEC",
     "G7_DECISION_ENUM",
-    "G7_MAX_TOKENS",
     "MAX_OVERRIDES_PER_TRADE",
     "WIDEN_WINDOW_R",
     "adaptive_exit_gate",
@@ -76,7 +72,9 @@ logger = logging.getLogger(__name__)
 WIDEN_WINDOW_R: float = 0.7
 MAX_OVERRIDES_PER_TRADE: int = 5
 COOLDOWN_SEC: int = 30
-G7_MAX_TOKENS: int = 200
+# Kept as the canonical decision-enum reference (the deterministic rail only
+# ever emits HOLD/ADJUST_EXIT, but this enum documents the full decision
+# space the gate historically covered — still consulted by name in tests).
 G7_DECISION_ENUM: list[str] = ["HOLD", "WIDEN", "TIGHTEN", "EXIT_NOW"]
 
 
@@ -276,81 +274,6 @@ def _python_tighten(
     )
 
 
-def _format_exit_context(exit_context: dict[str, Any]) -> str:
-    """Render the #26 precise-exit context block as readable prompt lines.
-
-    DISPLAY-ONLY: this enriches what G7 *sees* (regime, ATR trajectory,
-    MFE/MAE excursion, FSM exit_state, holding time, recent price action) so it
-    can make a time/momentum/regime-aware HOLD/WIDEN/TIGHTEN/EXIT_NOW call
-    instead of rubber-stamping HOLD. It does NOT alter any decision rail.
-    """
-    lines: list[str] = []
-    if "regime" in exit_context:
-        lines.append(f"- regime: {exit_context['regime']}")
-    if "exit_state" in exit_context:
-        lines.append(f"- exit_state (FSM phase): {exit_context['exit_state']}")
-    if "held_seconds" in exit_context:
-        lines.append(f"- held_seconds: {exit_context['held_seconds']}")
-    if "mfe_r" in exit_context or "mae_r" in exit_context:
-        mfe = exit_context.get("mfe_r")
-        mae = exit_context.get("mae_r")
-        lines.append(f"- MFE/MAE (R): MFE={mfe} MAE={mae}")
-    if "atr_pct" in exit_context or "atr_slope" in exit_context:
-        lines.append(
-            f"- ATR: atr_pct={exit_context.get('atr_pct')} "
-            f"atr_slope={exit_context.get('atr_slope')} "
-            "(slope>0 = expanding volatility)"
-        )
-    if "volume_z" in exit_context:
-        lines.append(f"- volume_z: {exit_context['volume_z']}")
-    if "peak_price" in exit_context:
-        lines.append(f"- peak_price: {exit_context['peak_price']}")
-    if "recent_close_first" in exit_context:
-        lines.append(
-            f"- recent price action: {exit_context['recent_close_first']} -> "
-            f"{exit_context['recent_close_last']} "
-            f"over last {exit_context.get('recent_close_n')} bars"
-        )
-    if not lines:
-        return ""
-    return "# Market / position context\n" + "\n".join(lines) + "\n\n"
-
-
-def _build_g7_user_prompt(
-    proposal: dict[str, Any],
-    exit_context: dict[str, Any] | None = None,
-) -> str:
-    """Compact prompt for G7 GPT call.
-
-    When ``exit_context`` is supplied (#26), regime / ATR trajectory /
-    MFE-MAE / FSM exit_state / holding time / recent price action are surfaced
-    before the proposal so G7 reasons precisely. The widening rails text is
-    unchanged — enrichment is context-only, not a new decision branch.
-    """
-    context_block = _format_exit_context(exit_context or {})
-    return (
-        "# Open position — adaptive exit\n"
-        f"{proposal}\n\n"
-        f"{context_block}"
-        "Decide HOLD / WIDEN / TIGHTEN / EXIT_NOW.\n"
-        "WIDEN = push stop FARTHER from price (winners run further).\n"
-        "TIGHTEN = pull stop CLOSER (rejected if it crosses default ATR floor).\n"
-        "Use the context: a stalled winner in a fading regime may EXIT_NOW; a "
-        "strong winner with expanding favourable momentum should WIDEN. "
-        "Default = HOLD when unsure. Aggressive bias = winner extension > "
-        "premature lock-in.\n"
-        'Output JSON: {"decision":"HOLD|WIDEN|TIGHTEN|EXIT_NOW",'
-        '"new_exit_atr":2.5,"reason":"..."}'
-    )
-
-
-def _coerce_g7_decision(text: str) -> str | None:
-    s = text.strip().upper()
-    if s in {"HOLD", "WIDEN", "TIGHTEN", "EXIT_NOW"}:
-        return s
-    return None
-
-
 async def _maybe_judge_exit(
     ctx: GateContext,
     *,
@@ -496,42 +419,29 @@ async def adaptive_exit_gate(
     ctx: GateContext,
     *,
     client: Any | None = None,
-    model: str = GPT_P1_MODEL,
+    model: str = "",
     shadow_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
     judge_client: Any | None = None,
 ) -> GateResult:
-    """Gate 7 dispatcher (Python P0 + GPT P1 + W3 AI-free).
-
-    ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
-    the env): the deterministic Q9 widening rail IS the live decision even
-    when a ``client`` is supplied — ``_p1_decide`` never fires (zero GPT
-    calls, ``model_used="python"``) and no divergence shadow row is written
-    (GPT absent → nothing to compare). flag=0 → legacy P0/P1 split below,
-    byte-identical.
+    """Gate 7 dispatcher — deterministic Q9 widening rail (P2a group B).
 
     Reads ``ctx.payload`` for the widening proposal; default = HOLD with the
     current stop (floor preserved). Fail-open: errors → HOLD.
+
+    ``client`` / ``model`` / ``ai_free`` are accepted ONLY for call-site
+    compatibility (the orchestrator + existing tests still pass them) — none
+    are read. GPT is never called from this gate.
 
     G8 (Reflector) only runs after the trade actually closes. If the upstream
     state is ``EXIT_PENDING`` (G6 emitted EXIT_NOW or venue close in flight),
     we chain to G8; otherwise terminate the per-tick loop here so the
     lifecycle stays coherent (no premature reflection of an open position).
 
-    P1 GPT branch (``client is not None``, see :func:`_p1_decide`):
-    - HOLD / WIDEN / TIGHTEN / EXIT_NOW.
-    - WIDEN must satisfy Q9 widening rail (further than current,
-      above max-loss floor); else reverts to HOLD.
-    - TIGHTEN that crosses the default ATR floor is reversed to HOLD
-      (conservative trap avoidance — Jin aggressive bias mandate).
-
-    ``shadow_conn`` (G7 divergence SHADOW — instrumentation, behavior 0):
-    when supplied AND the GPT branch ran, the deterministic Q9 rail decision
-    for the SAME proposal is logged vs the GPT decision (+ the RAW GPT label)
-    into ``gate_shadow_events`` — the G7-rubber-stamp / P0-demotion evidence.
-    The returned decision is byte-identical with or without it. P0
-    (``client is None``) skips the shadow entirely: the rail IS the live
-    decision there, so a row would be guaranteed mismatch=0 noise.
+    ``shadow_conn`` (measurement continuity): when supplied, the Q9 rail
+    decision is logged to ``gate_shadow_events``. ``gpt_decision`` is always
+    ``None`` now (no GPT call to compare against — not a comparison gap, the
+    call itself is gone).
     """
     state = getattr(ctx, "state", None)
     next_gate_after_exit: int | None = (
@@ -539,7 +449,7 @@ async def adaptive_exit_gate(
         if state and state.value in {"EXIT_PENDING", "CLOSED"}
         else None
     )
-    # Probe TIGHTEN consumer (deterministic, P0+P1): a ratchet-safe tighter trail fed
+    # Probe TIGHTEN consumer (deterministic): a ratchet-safe tighter trail fed
     # by G6 when a probe reads adverse ([[g7_tick_trail_atr_scale_2026-06-25]] sibling).
     # flow_not_block — precise exit TIMING only (ADJUST_EXIT-tighten / HOLD), never a
     # block or size cut; the -1.0R rail / entry / size are untouched. When absent the
@@ -557,68 +467,51 @@ async def adaptive_exit_gate(
             payload={"stop_price": ctx.payload.get("current_stop_price")},
             model_used="python",
         )
-    use_ai_free = ai_free if ai_free is not None else ai_free_mode()
-    if client is None or use_ai_free:
-        # P0 / W3 AI-FREE: the deterministic Q9 widening rail is the live
-        # decision (``model_used="python"``); the GPT branch + its shadow
-        # never fire.
-        det_result = _python_widen_only(
-            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
-        # #32 AI JUDGE (exit-timing): a per-ticker, STRUCTURALLY non-blocking
-        # exit-timing judgment over the bot's own info + exit_context. No EXIT_NOW
-        # / KILL path exists in its verdict type, so the deterministic HOLD /
-        # ADJUST_EXIT (Q9 rail) can never become a forced cut. No-op when
-        # ``judge_client`` is None (byte-identical to the rail-only path).
-        judged = await _maybe_judge_exit(
-            ctx, det_result=det_result, proposal=proposal,
-            judge_client=judge_client, shadow_conn=shadow_conn,
-        )
-        # #32 axis-C EXIT behaviour: an active-mode EXTEND / TIGHTEN verdict stamped a
-        # REQUEST onto the judged payload. Route it THROUGH the deterministic rail
-        # (can_widen_exit / can_tighten_exit) — never around it. The rail's
-        # (allowed, reason) is FINAL (max_loss/-1.0R floor, pnl window, ratchet,
-        # override cap, cooldown). Reject → stop UNCHANGED (flow_not_block; the verdict
-        # enum has no EXIT_NOW so a forced cut is unrepresentable).
-        return _apply_exit_request(
-            judged, proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
-    result, gpt_raw = await _p1_decide(
-        ctx, proposal=proposal, client=client, model=model,
-        next_gate_after_exit=next_gate_after_exit,
+    det_result = _python_widen_only(
+        proposal=proposal, next_gate_after_exit=next_gate_after_exit,
     )
     _log_g7_shadow(
-        shadow_conn, ctx=ctx, proposal=proposal, result=result,
-        gpt_raw=gpt_raw, next_gate_after_exit=next_gate_after_exit,
+        shadow_conn, ctx=ctx, technical=det_result,
+        next_gate_after_exit=next_gate_after_exit,
     )
-    return result
+    # #32 AI JUDGE (exit-timing): a per-ticker, STRUCTURALLY non-blocking
+    # exit-timing judgment over the bot's own info + exit_context. No EXIT_NOW
+    # / KILL path exists in its verdict type, so the deterministic HOLD /
+    # ADJUST_EXIT (Q9 rail) can never become a forced cut. No-op when
+    # ``judge_client`` is None (byte-identical to the rail-only path).
+    judged = await _maybe_judge_exit(
+        ctx, det_result=det_result, proposal=proposal,
+        judge_client=judge_client, shadow_conn=shadow_conn,
+    )
+    # #32 axis-C EXIT behaviour: an active-mode EXTEND / TIGHTEN verdict stamped a
+    # REQUEST onto the judged payload. Route it THROUGH the deterministic rail
+    # (can_widen_exit / can_tighten_exit) — never around it. The rail's
+    # (allowed, reason) is FINAL (max_loss/-1.0R floor, pnl window, ratchet,
+    # override cap, cooldown). Reject → stop UNCHANGED (flow_not_block; the verdict
+    # enum has no EXIT_NOW so a forced cut is unrepresentable).
+    return _apply_exit_request(
+        judged, proposal=proposal, next_gate_after_exit=next_gate_after_exit,
+    )
 
 
 def _log_g7_shadow(
     shadow_conn: sqlite3.Connection | None,
     *,
     ctx: GateContext,
-    proposal: dict[str, Any],
-    result: GateResult,
-    gpt_raw: str,
+    technical: GateResult,
     next_gate_after_exit: int | None,
 ) -> None:
-    """Append the rails-vs-GPT G7 divergence row (instrumentation only).
+    """Log the Q9 rail's technical decision for measurement continuity.
 
-    ``technical`` = the pure Q9 widening rail re-run on the SAME proposal
-    (HOLD | ADJUST_EXIT); ``gpt_decision`` = what the live P1 branch actually
-    returned. ``technical_flags`` carries ``site:<caller>`` (live_recalc /
-    orchestrator — sample-bias separation in analysis) and ``gpt_raw:<label>``
-    (the RAW GPT verdict incl. rail-reversed WIDEN/TIGHTEN and ERR fallbacks —
-    the rubber-stamp HOLD-rate numerator). Fail-open: never crashes G7; no-op
-    when ``shadow_conn`` is None (gated call byte-identical).
+    P2a group B: ``gpt_decision`` is always ``None`` now (the legacy P1 GPT
+    branch this row used to compare against is gone — see module docstring).
+    ``technical_flags`` still carries ``site:<caller>`` (live_recalc /
+    orchestrator — sample-bias separation in analysis). Fail-open: never
+    crashes G7; no-op when ``shadow_conn`` is None.
     """
     if shadow_conn is None:
         return
     try:
-        rails = _python_widen_only(
-            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
         regime = ctx.payload.get("regime")
         if not isinstance(regime, str) or not regime:
             market_view = ctx.payload.get("market_view")
@@ -637,212 +530,14 @@ def _log_g7_shadow(
             symbol=ctx.symbol,
             regime=regime,
             technical=ShadowDecision(
-                decision=rails.decision,
-                reason=str(rails.payload.get("reason", "")),
-                flags=(f"site:{site}", f"gpt_raw:{gpt_raw}"),
+                decision=technical.decision,
+                reason=str(technical.payload.get("reason", "")),
+                flags=(f"site:{site}",),
             ),
-            gpt_decision=result.decision,
+            gpt_decision=None,
             cell_warm=False,
         )
     except Exception as exc:  # noqa: BLE001 — instrumentation must never crash G7
         logger.warning(
             "[g7-shadow] row dropped %s:%s: %r", ctx.venue, ctx.symbol, exc,
         )
-
-
-async def _p1_decide(
-    ctx: GateContext,
-    *,
-    proposal: dict[str, Any],
-    client: Any,
-    model: str,
-    next_gate_after_exit: int | None,
-) -> tuple[GateResult, str]:
-    """P1 GPT branch (pure move out of ``adaptive_exit_gate`` — behavior 0).
-
-    Returns ``(result, gpt_raw)`` where ``gpt_raw`` is the RAW GPT verdict
-    (``HOLD``/``WIDEN``/``TIGHTEN``/``EXIT_NOW``) BEFORE any rail reversal, or
-    ``ERR`` on the GPT-error / unparseable-decision fallbacks — reasons are
-    free text so the raw label cannot be recovered downstream (shadow B4).
-    """
-    p1_root = GPT_P1_MODEL.lower()
-    p0_root = GPT_P0_MODEL.lower()
-    m = model.lower()
-    if m == p1_root or m.startswith(f"{p1_root}-"):
-        model_label = "gpt_p1"
-    elif m == p0_root or m.startswith(f"{p0_root}-"):
-        model_label = "gpt"
-    else:
-        model_label = "gpt"
-
-    system = make_system_prefix(
-        role=(
-            "Polaris Adaptive Exit — winner-extension bias. WIDEN = push "
-            "stop further from entry to let winners run. TIGHTEN that "
-            "crosses the default ATR floor will be rejected upstream as a "
-            "conservative trap. Default = HOLD (current stop preserved)."
-        ),
-        decision_enum=G7_DECISION_ENUM,
-        cell_summary="",
-        baseline_summary="",
-        recent_trades_summary="",
-    )
-    exit_context = ctx.payload.get("exit_context")
-    res = await call_gpt(
-        client=client,
-        system_prefix=system,
-        user_prompt=_build_g7_user_prompt(
-            proposal,
-            exit_context if isinstance(exit_context, dict) else None,
-        ),
-        max_tokens=G7_MAX_TOKENS,
-        model=model,
-        timeout_sec=DEFAULT_TIMEOUT_SEC,
-    )
-    if res.error or res.parsed is None:
-        fallback = _python_widen_only(
-            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
-        return GateResult(
-            decision=fallback.decision,
-            next_gate=fallback.next_gate,
-            payload={**fallback.payload, "fallback": "gpt_error", "error": res.error},
-            model_used=model_label,
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-            error=res.error,
-        ), "ERR"
-    parsed = res.parsed
-    decision_text = _coerce_g7_decision(str(parsed.get("decision", "HOLD")))
-    if decision_text is None:
-        fallback = _python_widen_only(
-            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
-        return GateResult(
-            decision=fallback.decision,
-            next_gate=fallback.next_gate,
-            payload={**fallback.payload, "fallback": "bad_decision",
-                     "raw": str(parsed.get("decision", ""))[:50]},
-            model_used=model_label,
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        ), "ERR"
-    side = str(proposal.get("side", "long"))
-    current_stop = float(proposal.get("current_stop_price", 0.0))
-    proposed_stop = float(proposal.get("proposed_stop_price", current_stop))
-    reason_g7 = str(parsed.get("reason", ""))[:200]
-    new_exit_atr = parsed.get("new_exit_atr")
-
-    if decision_text == "EXIT_NOW":
-        return GateResult(
-            decision=GateDecision.EXIT_NOW,
-            next_gate=GATE_POST_TRADE_REFLECTOR,
-            payload={
-                "reason": reason_g7 or "gpt_exit_now",
-                "stop_price": current_stop,
-                "decision_source": model_label,
-            },
-            model_used=model_label,
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        ), "EXIT_NOW"
-
-    if decision_text == "WIDEN":
-        # WIDEN must push stop FARTHER than current; verify Q9 rails too.
-        if not _is_widening(side, current_stop=current_stop, proposed_stop=proposed_stop):
-            # Reverse to HOLD — stop wasn't actually widened in the proposal.
-            return GateResult(
-                decision=GateDecision.HOLD,
-                next_gate=next_gate_after_exit,
-                payload={
-                    "stop_price": current_stop,
-                    "widening_applied": False,
-                    "reason": "widen_not_farther",
-                    "decision_source": model_label,
-                },
-                model_used=model_label,
-                latency_ms=res.latency_ms,
-                input_tokens=res.input_tokens,
-                output_tokens=res.output_tokens,
-            ), "WIDEN"
-        # Re-use Q9 deterministic check on the proposal so all hard rails fire.
-        rail = _python_widen_only(
-            proposal=proposal, next_gate_after_exit=next_gate_after_exit,
-        )
-        rail.payload["decision_source"] = model_label
-        rail.payload["reason"] = (
-            "gpt_widen_accepted" if rail.payload.get("widening_applied") else
-            f"gpt_widen_blocked:{rail.payload.get('reason', '')}"
-        )
-        if isinstance(new_exit_atr, (int, float)):
-            rail.payload["new_exit_atr"] = float(new_exit_atr)
-        return GateResult(
-            decision=rail.decision,
-            next_gate=rail.next_gate,
-            payload=rail.payload,
-            model_used=model_label,
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        ), "WIDEN"
-
-    if decision_text == "TIGHTEN":
-        # Conservative trap avoidance: TIGHTEN that brings stop CLOSER than
-        # the proposal's current_stop is reversed to HOLD. We never tighten
-        # past the default ATR floor — the proposal's current_stop IS the
-        # default floor at this layer.
-        # (Long: tighter = stop > current. Short: tighter = stop < current.)
-        s_lc = side.lower()
-        is_tightening = (
-            (s_lc == "long" and proposed_stop > current_stop)
-            or (s_lc == "short" and proposed_stop < current_stop)
-        )
-        if is_tightening:
-            return GateResult(
-                decision=GateDecision.HOLD,
-                next_gate=next_gate_after_exit,
-                payload={
-                    "stop_price": current_stop,
-                    "widening_applied": False,
-                    "reason": "tighten_rejected_floor",
-                    "decision_source": model_label,
-                },
-                model_used=model_label,
-                latency_ms=res.latency_ms,
-                input_tokens=res.input_tokens,
-                output_tokens=res.output_tokens,
-            ), "TIGHTEN"
-        # Not actually a tighten — fall through as HOLD.
-        return GateResult(
-            decision=GateDecision.HOLD,
-            next_gate=next_gate_after_exit,
-            payload={
-                "stop_price": current_stop,
-                "widening_applied": False,
-                "reason": "tighten_not_closer",
-                "decision_source": model_label,
-            },
-            model_used=model_label,
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        ), "TIGHTEN"
-
-    # HOLD (default).
-    return GateResult(
-        decision=GateDecision.HOLD,
-        next_gate=next_gate_after_exit,
-        payload={
-            "stop_price": current_stop,
-            "widening_applied": False,
-            "reason": reason_g7 or "gpt_hold",
-            "decision_source": model_label,
-        },
-        model_used=model_label,
-        latency_ms=res.latency_ms,
-        input_tokens=res.input_tokens,
-        output_tokens=res.output_tokens,
-    ), "HOLD"

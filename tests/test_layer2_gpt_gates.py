@@ -21,11 +21,7 @@ from polaris.core.pipeline.agents.pre_entry_watcher import (
     is_fast_path_eligible,
     pre_entry_watcher_gate,
 )
-from polaris.core.pipeline.agents.signal_validator import (
-    MODIFY_MAX,
-    MODIFY_MIN,
-    signal_validator_gate,
-)
+from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
     GateContext,
@@ -40,9 +36,11 @@ NOW = 1_780_000_000
 @pytest.fixture(autouse=True)
 def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
-    defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py."""
+    the LEGACY G4 GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag
+    now defaults ON). The flag=1 deterministic-primary path is covered by
+    tests/test_ai_free_cutover.py. P2a group B: G3 no longer branches on this
+    flag at all (its legacy path was deleted outright) — see the G3 section
+    below."""
     monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 class _MockGPTClient:
@@ -87,42 +85,31 @@ def _ctx(payload: dict, *, gate_id: int) -> GateContext:
 # ---------------------------------------------------------------------------
 
 
-async def test_signal_validator_pass() -> None:
+async def test_signal_validator_gpt_client_never_called() -> None:
+    """P2a group B: GPT removed from the G3 live path — the deterministic
+    technical rule always drives, a supplied client is never invoked."""
     haiku = _MockGPTClient(response_text='{"decision": "PASS", "strength_scalar": 1.0}')
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
     result = await signal_validator_gate(ctx, client=haiku)
-    assert result.decision == GateDecision.PASS
+    assert haiku.calls == []
+    assert result.model_used == "python"
     assert result.next_gate == GATE_PRE_ENTRY_WATCHER
-    assert result.payload["validated_signal"]["strength_scalar"] == 1.0
 
 
-async def test_signal_validator_kill() -> None:
-    haiku = _MockGPTClient(response_text='{"decision": "KILL"}')
-    ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 0.3}}, gate_id=3)
-    result = await signal_validator_gate(ctx, client=haiku)
-    assert result.decision == GateDecision.KILL
-    assert result.next_gate is None
-
-
-async def test_signal_validator_modify_clamps_to_range() -> None:
-    haiku = _MockGPTClient(response_text='{"decision": "MODIFY", "strength_scalar": 5.0}')
-    ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
-    result = await signal_validator_gate(ctx, client=haiku)
-    assert result.decision == GateDecision.MODIFY
-    assert MODIFY_MIN <= result.payload["validated_signal"]["strength_scalar"] <= MODIFY_MAX
-
-
-async def test_signal_validator_no_client_kill() -> None:
+async def test_signal_validator_no_client_still_flows() -> None:
+    """No client at all → same deterministic flow (the legacy fail-closed
+    ``no_gpt_client`` KILL only existed inside the now-deleted branch)."""
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
     result = await signal_validator_gate(ctx, client=None)
-    assert result.decision == GateDecision.KILL
+    assert result.model_used == "python"
+    assert result.decision in (GateDecision.PASS, GateDecision.MODIFY)
 
 
-async def test_signal_validator_schema_violation_kill() -> None:
-    haiku = _MockGPTClient(response_text='{"decision": "MAYBE"}')
-    ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
-    result = await signal_validator_gate(ctx, client=haiku)
+async def test_signal_validator_missing_raw_signal_kill() -> None:
+    ctx = _ctx({}, gate_id=3)
+    result = await signal_validator_gate(ctx, client=None)
     assert result.decision == GateDecision.KILL
+    assert result.payload["reason"] == "missing_raw_signal"
 
 
 # ---------------------------------------------------------------------------

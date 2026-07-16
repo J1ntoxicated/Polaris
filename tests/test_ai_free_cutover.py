@@ -21,9 +21,7 @@ from typing import Any
 
 import pytest
 
-from polaris.core.pipeline.agents import adaptive_exit as g7_mod
 from polaris.core.pipeline.agents import pre_entry_watcher as g4_mod
-from polaris.core.pipeline.agents import signal_validator as g3_mod
 from polaris.core.pipeline.agents._shadow_rules import (
     MODIFY_CONSERVATIVE_SCALAR,
 )
@@ -48,14 +46,17 @@ from polaris.core.pipeline.gate_state import (
 
 
 def _forbid_gpt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hard zero-call assert: ANY call_gpt invocation in G3/G4/G7 explodes."""
+    """Hard zero-call assert: ANY call_gpt invocation in G4 explodes.
+
+    P2a group B: G3/G7 no longer import ``call_gpt`` at all (the legacy
+    branch was deleted outright, not just flag-gated) — nothing to patch
+    there. G4 still carries it pending the group A gate-diet pass.
+    """
 
     async def _boom(**kwargs: Any) -> Any:
         raise AssertionError("in-loop GPT call attempted in AI-free mode")
 
-    monkeypatch.setattr(g3_mod, "call_gpt", _boom)
     monkeypatch.setattr(g4_mod, "call_gpt", _boom)
-    monkeypatch.setattr(g7_mod, "call_gpt", _boom)
 
 
 class _ForbiddenClient:
@@ -220,15 +221,16 @@ def test_flag_parse(
 
 
 @pytest.mark.asyncio
-async def test_g3_direct_param_overrides_env(
+async def test_g3_ai_free_param_is_ignored_deterministic_always_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ``ai_free`` parameter is a live seam, not dead code: a direct
-    ``ai_free=True`` wins over an env that says legacy — deterministic
-    primary, zero GPT touch."""
+    """P2a group B: ``ai_free``/``client`` are compat-only now — G3's legacy
+    GPT branch is deleted outright, so an env that says "legacy" (0) plus an
+    exploding client still never gets touched; the technical rule always
+    drives."""
     monkeypatch.setenv("POLARIS_AI_FREE", "0")
     res = await signal_validator_gate(
-        _g3_ctx(quartile="top"), client=_ForbiddenClient(), ai_free=True
+        _g3_ctx(quartile="top"), client=_ForbiddenClient(), ai_free=False
     )
     assert res.decision == GateDecision.PASS
     assert res.model_used == "python"
@@ -300,8 +302,11 @@ async def test_g3_ai_free_warm_top_pass(
     assert res.model_used == "python"
     assert res.next_gate == GATE_PRE_ENTRY_WATCHER
     assert res.payload["validated_signal"]["strength_scalar"] == 1.0
-    # GPT absent → comparison impossible → shadow log naturally stops.
-    assert fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR) == []
+    # P2a group B: the technical decision is still logged for measurement
+    # continuity — gpt_decision is None now (no GPT call to compare against).
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
 
 
 @pytest.mark.asyncio
@@ -358,7 +363,9 @@ async def test_g3_ai_free_cold_quartile_warm_losing_now_modifies(
     assert res.model_used == "python"
     assert res.next_gate == GATE_PRE_ENTRY_WATCHER
     assert "losing" not in res.payload["reason"]
-    assert fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR) == []
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
 
 
 @pytest.mark.asyncio
@@ -454,8 +461,11 @@ async def test_g7_ai_free_widen_rails_primary(
     assert res.model_used == "python"
     assert res.payload["widening_applied"] is True
     assert res.payload["stop_price"] == 93.0
-    # GPT branch never fires → no divergence shadow row.
-    assert fetch_shadow_events(memdb, gate_id=7) == []
+    # P2a group B: the Q9 rail decision is still logged for measurement
+    # continuity — gpt_decision is None now (no GPT call to compare against).
+    rows = fetch_shadow_events(memdb, gate_id=7)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
 
 
 @pytest.mark.asyncio
@@ -507,41 +517,20 @@ async def test_pipeline_g3_g4_ai_free_gate_events(
     ).fetchall()
     assert (3, "PASS", "python") in rows
     assert (4, "PROCEED", "python") in rows
-    # frontgate-scan item #9: G4's AI-free PROCEED now logs one watch-only
-    # gate_shadow_events row (squeeze tag, gpt_decision="" -> mismatch=0); G3
-    # AI-free still writes none (item #9 wiring is G4-only).
+    # P2a group B: G3 now ALSO logs its technical decision for measurement
+    # continuity (gpt_decision=None, mismatch=0) — plus G4's pre-existing
+    # frontgate-scan item #9 watch-only row (squeeze tag). Both mismatch=0
+    # (no GPT decision left anywhere to diverge from).
     shadow_rows = fetch_shadow_events(memdb)
-    assert len(shadow_rows) == 1
-    assert shadow_rows[0]["gate_id"] == GATE_PRE_ENTRY_WATCHER
-    assert shadow_rows[0]["mismatch"] == 0
+    assert len(shadow_rows) == 2
+    gate_ids = {r["gate_id"] for r in shadow_rows}
+    assert gate_ids == {GATE_SIGNAL_VALIDATOR, GATE_PRE_ENTRY_WATCHER}
+    assert all(r["mismatch"] == 0 for r in shadow_rows)
 
 
 # ---------------------------------------------------------------------------
-# flag=0 — legacy GPT path byte-identical (regression pins)
+# flag=0 — G4 legacy GPT path byte-identical (regression pin, group A scope)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_g3_legacy_no_client_fail_closed(ai_free_off: None) -> None:
-    res = await signal_validator_gate(_g3_ctx(), client=None)
-    assert res.decision == GateDecision.KILL
-    assert res.payload["reason"] == "no_gpt_client"
-    assert res.model_used == "python"
-
-
-@pytest.mark.asyncio
-async def test_g3_legacy_gpt_path_and_shadow(
-    ai_free_off: None, memdb: sqlite3.Connection
-) -> None:
-    fake = _FakeGPT('{"decision": "PASS", "strength_scalar": 1.0, "thesis": "t"}')
-    res = await signal_validator_gate(_g3_ctx(), client=fake, shadow_conn=memdb)
-    assert res.decision == GateDecision.PASS
-    assert res.model_used == "gpt"
-    assert fake.call_count == 1
-    # Legacy shadow logging still records the technical-vs-GPT comparison row.
-    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] == "PASS"
 
 
 @pytest.mark.asyncio
@@ -556,20 +545,56 @@ async def test_g4_legacy_gpt_path_and_shadow(
     assert len(fetch_shadow_events(memdb, gate_id=GATE_PRE_ENTRY_WATCHER)) == 1
 
 
+# ---------------------------------------------------------------------------
+# P2a group B — G3/G7 GPT call removed UNCONDITIONALLY (flag=0 too)
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_g7_legacy_gpt_path_and_shadow(
+async def test_g3_flag_off_still_never_calls_gpt(
     ai_free_off: None, memdb: sqlite3.Connection
 ) -> None:
-    fake = _FakeGPT('{"decision": "HOLD", "reason": "hold"}')
-    res = await adaptive_exit_gate(_g7_ctx(), client=fake, shadow_conn=memdb)
-    assert res.decision == GateDecision.HOLD
-    assert res.model_used in {"gpt", "gpt_p1"}
-    assert fake.call_count == 1
-    assert len(fetch_shadow_events(memdb, gate_id=7)) == 1
+    """The legacy G3 branch is deleted, not just flag-gated: even with
+    POLARIS_AI_FREE=0 and a client that explodes on touch, the technical
+    rule drives and the shadow row logs gpt_decision=None."""
+    res = await signal_validator_gate(
+        _g3_ctx(quartile="top"), client=_ForbiddenClient(), shadow_conn=memdb,
+    )
+    assert res.decision == GateDecision.PASS
+    assert res.model_used == "python"
+    rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
 
 
 @pytest.mark.asyncio
-async def test_g7_legacy_p0_no_client_rails(ai_free_off: None) -> None:
+async def test_g3_no_client_no_longer_fail_closed(ai_free_off: None) -> None:
+    """No client at all → same deterministic flow (the old ``no_gpt_client``
+    fail-closed KILL only existed inside the now-deleted legacy branch)."""
+    res = await signal_validator_gate(_g3_ctx(quartile="top"), client=None)
+    assert res.decision == GateDecision.PASS
+    assert res.model_used == "python"
+
+
+@pytest.mark.asyncio
+async def test_g7_flag_off_still_never_calls_gpt(
+    ai_free_off: None, memdb: sqlite3.Connection
+) -> None:
+    """Same guarantee for G7: an exploding client is never touched regardless
+    of the (now-vestigial) flag; the Q9 rail drives and the shadow row logs
+    gpt_decision=None."""
+    res = await adaptive_exit_gate(
+        _g7_ctx(unrealized_pnl_r=1.0), client=_ForbiddenClient(), shadow_conn=memdb,
+    )
+    assert res.decision == GateDecision.ADJUST_EXIT
+    assert res.model_used == "python"
+    rows = fetch_shadow_events(memdb, gate_id=7)
+    assert len(rows) == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+
+
+@pytest.mark.asyncio
+async def test_g7_flag_off_no_client_still_rails(ai_free_off: None) -> None:
     res = await adaptive_exit_gate(_g7_ctx(), client=None)
     assert res.decision == GateDecision.ADJUST_EXIT
     assert res.model_used == "python"

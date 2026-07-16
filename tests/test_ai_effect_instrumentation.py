@@ -23,8 +23,6 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-import pytest
-
 from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.gate_event_log import log_gate_event
 from polaris.core.pipeline.gate_state import (
@@ -43,14 +41,6 @@ NOW = 1_780_000_000
 # ---------------------------------------------------------------------------
 
 
-
-@pytest.fixture(autouse=True)
-def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
-    defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py."""
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -277,17 +267,18 @@ def test_log_gate_event_python_gate_zero_tokens(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_signal_validator_threads_tokens_onto_result() -> None:
-    """G3 GateResult carries the GPT call's token usage (PASS path)."""
+def test_signal_validator_deterministic_reports_zero_tokens() -> None:
+    """P2a group B: G3 never calls GPT now — a supplied client's token usage
+    is never threaded onto the result (always 0 for the deterministic gate)."""
     client = _TokenGPTClient(
         response_text='{"decision": "PASS", "strength_scalar": 1.0}',
         in_tok=200, out_tok=30,
     )
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
     result = asyncio.run(signal_validator_gate(ctx, client=client))
-    assert result.decision == GateDecision.PASS
-    assert result.input_tokens == 200
-    assert result.output_tokens == 30
+    assert result.model_used == "python"
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
 
 
 # ---------------------------------------------------------------------------
@@ -295,25 +286,32 @@ def test_signal_validator_threads_tokens_onto_result() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_signal_validator_kill_captures_raw_reason() -> None:
-    """A G3 KILL now records the model's raw text (auditable), mirroring G4's
-    ``watcher_kill`` raw capture, instead of an opaque {reason: validator_kill}."""
+def test_signal_validator_only_kill_path_is_missing_raw_signal() -> None:
+    """P2a group B: the GPT-driven ``validator_kill`` raw-reason capture is
+    gone with the legacy branch — a supplied KILL-shaped client response is
+    never read, and the ONLY G3 KILL left is ``missing_raw_signal``."""
     raw = '{"decision": "KILL", "thesis": "weak burst, no follow-through"}'
     client = _TokenGPTClient(response_text=raw, in_tok=180, out_tok=20)
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 0.3}}, gate_id=3)
     result = asyncio.run(signal_validator_gate(ctx, client=client))
-    assert result.decision == GateDecision.KILL
-    assert result.payload["reason"] == "validator_kill"
-    assert result.payload["raw"] == raw  # full short text mirrored
-    # tokens also threaded on the KILL path
-    assert result.input_tokens == 180
-    assert result.output_tokens == 20
+    assert result.decision != GateDecision.KILL  # technical rule never KILLs here
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+
+    empty_ctx = _ctx({}, gate_id=3)
+    kill_result = asyncio.run(signal_validator_gate(empty_ctx, client=client))
+    assert kill_result.decision == GateDecision.KILL
+    assert kill_result.payload["reason"] == "missing_raw_signal"
+    assert "raw" not in kill_result.payload
 
 
-def test_g3_kill_raw_reason_end_to_end_logged(tmp_path: Path) -> None:
-    """The G3 raw reason survives into the persisted gate_events payload_json."""
-    raw = '{"decision": "KILL", "thesis": "spread too wide"}'
-    client = _TokenGPTClient(response_text=raw, in_tok=10, out_tok=5)
+def test_g3_deterministic_result_end_to_end_logged(tmp_path: Path) -> None:
+    """The G3 deterministic decision + zero tokens survive into the
+    persisted gate_events payload_json (GPT threading is gone)."""
+    client = _TokenGPTClient(
+        response_text='{"decision": "KILL", "thesis": "spread too wide"}',
+        in_tok=10, out_tok=5,
+    )
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 0.2}}, gate_id=3)
     result = asyncio.run(signal_validator_gate(ctx, client=client))
     conn = init_db(tmp_path / "e2e.sqlite")
@@ -325,8 +323,7 @@ def test_g3_kill_raw_reason_end_to_end_logged(tmp_path: Path) -> None:
             (ctx.signal_id,),
         ).fetchone()
         payload = json.loads(row[0])
-        assert payload["reason"] == "validator_kill"
-        assert payload["raw"] == raw
-        assert (row[1], row[2]) == (10, 5)
+        assert payload["reason"] != "validator_kill"
+        assert (row[1], row[2]) == (0, 0)
     finally:
         conn.close()

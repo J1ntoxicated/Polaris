@@ -51,9 +51,11 @@ NOW = 1_780_000_000
 @pytest.fixture(autouse=True)
 def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
-    defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py."""
+    the LEGACY G4 GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag
+    now defaults ON). The flag=1 deterministic-primary path is covered by
+    tests/test_ai_free_cutover.py. P2a group B: G3 no longer branches on this
+    flag at all (its legacy path was deleted outright) — see the behavior-0
+    section below."""
     monkeypatch.setenv("POLARIS_AI_FREE", "0")
 
 class _MockGPTClient:
@@ -348,15 +350,13 @@ def test_shadow_log_noop_without_conn() -> None:
 # ===========================================================================
 
 
-async def test_g3_real_decision_stays_gpt_pass_on_technical_mismatch(
+async def test_g3_technical_always_drives_gpt_client_never_touched(
     memdb: sqlite3.Connection,
 ) -> None:
-    """GPT says PASS; technical (warm mid) would MODIFY — gate returns GPT PASS.
-
-    Behavior-0: the GPT decision is what the gate returns; the divergent
-    technical decision is only logged. (The G3 technical rule no longer emits
-    any KILL — flow_not_block — so the mismatch exercised here is MODIFY-vs-PASS.)
-    """
+    """P2a group B: the legacy GPT branch is deleted outright — a warm-mid
+    cell always returns the technical MODIFY regardless of a supplied (and
+    unused) client, and the shadow row logs gpt_decision=None (no GPT call
+    left to compare against)."""
     haiku = _MockGPTClient(response_text='{"decision": "PASS", "strength_scalar": 1.0}')
     ctx = _ctx(
         {
@@ -372,20 +372,18 @@ async def test_g3_real_decision_stays_gpt_pass_on_technical_mismatch(
         gate_id=3,
     )
     result = await signal_validator_gate(ctx, client=haiku, shadow_conn=memdb)
-    # Real decision = GPT PASS (behavior 0).
-    assert result.decision == GateDecision.PASS
-    # Shadow row recorded the technical MODIFY vs gpt PASS mismatch.
+    assert result.decision == GateDecision.MODIFY
     rows = fetch_shadow_events(memdb)
     assert len(rows) == 1
     assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
     assert rows[0]["technical_decision"] == "MODIFY"
-    assert rows[0]["gpt_decision"] == "PASS"
-    assert rows[0]["mismatch"] == 1
+    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    assert rows[0]["mismatch"] == 0
     assert rows[0]["cell_warm"] == 1
 
 
-async def test_g3_shadow_off_when_no_conn_behaves_identically() -> None:
-    """Without shadow_conn, gate is byte-identical to legacy (no shadow side-effect)."""
+async def test_g3_no_shadow_conn_no_side_effect() -> None:
+    """Without shadow_conn, no shadow row is written — decision unaffected."""
     haiku = _MockGPTClient(response_text='{"decision": "PASS", "strength_scalar": 1.0}')
     ctx = _ctx({"raw_signal": {"strategy": "vb", "score": 1.0}}, gate_id=3)
     result = await signal_validator_gate(ctx, client=haiku)

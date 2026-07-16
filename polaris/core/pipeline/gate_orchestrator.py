@@ -303,7 +303,9 @@ class GateOrchestrator:
                 payload={"reason": "no_conn"},
                 model_used="python",
             )
-        return await entry_sizer_gate(ctx, conn=self.conn)
+        # storage-split: thread md_conn so the calibration_pairs entry INSERT
+        # lands in the marketdata DB with its close-UPDATE sibling (MED fix).
+        return await entry_sizer_gate(ctx, conn=self.conn, md_conn=self.md_conn)
 
     async def _wrap_monitor(self, ctx: GateContext) -> GateResult:
         # ai_conductor P3 (2026-05-30): G6 is now deterministic Python — the

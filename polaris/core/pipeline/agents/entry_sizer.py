@@ -36,6 +36,7 @@ async def entry_sizer_gate(
     ctx: GateContext,
     *,
     conn: sqlite3.Connection,
+    md_conn: sqlite3.Connection | None = None,
 ) -> GateResult:
     """Gate 5 dispatcher (Python deterministic T4).
 
@@ -43,6 +44,13 @@ async def entry_sizer_gate(
         ``signal_intent`` (SignalIntent | dict),
         ``risk_state`` (StrategyRiskState),
         ``portfolio`` (PortfolioState).
+
+    ``md_conn`` (storage-split, 2026-07-16 final review MED): calibration_pairs
+    is a MARKETDATA-domain table with a two-phase write — the entry INSERT
+    here and the close UPDATE in ``_production_close_effects`` (already on
+    ``state.md_conn``). Both phases must land in the SAME file or every
+    (predicted, realized) pair splits across DBs and no reader ever sees a
+    complete row. ``None`` falls back to ``conn`` (tests / single-DB callers).
 
     Fail-closed: any error → KILL (entry-side gate, Q4).
     """
@@ -151,8 +159,12 @@ async def entry_sizer_gate(
     # fail-open (see calibration_shadow module docstring for the look-ahead
     # guard + why this lives here and not inside core/sizing). Measurement
     # only, never read by sizing (9-stack unaffected).
+    # storage-split: calibration_pairs lives in the marketdata DB — write the
+    # entry snapshot to the same file the close UPDATE targets (split-brain
+    # guard, final review MED 2026-07-16).
     record_entry_snapshot(
-        conn, signal_id=intent_raw.signal_id, exchange=intent_raw.venue,
+        md_conn if md_conn is not None else conn,
+        signal_id=intent_raw.signal_id, exchange=intent_raw.venue,
         strategy=intent_raw.strategy, ticker=intent_raw.symbol,
         regime=intent_raw.regime, now_ts=int(ctx.started_ts),
     )

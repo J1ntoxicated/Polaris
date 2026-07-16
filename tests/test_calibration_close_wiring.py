@@ -235,3 +235,38 @@ def test_record_close_outcome_reexported_from_effects_module() -> None:
     # Sanity: the module the _safe_* wrapper delegates to is the one being
     # tested in test_calibration_shadow.py — no shadow duplicate implementation.
     assert record_close_outcome.__module__ == "polaris.core.learners.calibration_shadow"
+
+
+# ---------------------------------------------------------------------------
+# storage-split two-conn split-brain guard (final review LOW, 2026-07-16):
+# entry INSERT and close UPDATE must land in the SAME (marketdata) DB. A
+# single shared test conn structurally cannot catch a cross-DB split — this
+# test opens two real conns and asserts the md side holds the complete
+# (predicted, realized) pair while trading holds none.
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_pair_completes_on_md_conn_two_db() -> None:
+    from polaris.core.learners.calibration_shadow import record_entry_snapshot
+
+    trading = _conn()
+    md = _conn()  # superset schema — calibration_pairs exists in both files
+    sig = f"sig-{uuid.uuid4().hex[:8]}"
+
+    # entry phase (entry_sizer routing: md_conn if md_conn is not None else conn)
+    md_conn: sqlite3.Connection | None = md
+    record_entry_snapshot(
+        md_conn if md_conn is not None else trading,
+        signal_id=sig, exchange="okx", strategy="s", ticker="BTC-USDT",
+        regime="chop", now_ts=1_700_000_000,
+    )
+    # close phase (already md-routed in _production_close_effects)
+    record_close_outcome(md, signal_id=sig, won=True, pnl_r=1.25, now_ts=1_700_000_600)
+
+    got = md.execute(
+        "SELECT realized_pnl_r FROM calibration_pairs WHERE signal_id = ?", (sig,)
+    ).fetchone()
+    assert got is not None and got[0] == pytest.approx(1.25), "md pair incomplete"
+    assert trading.execute(
+        "SELECT COUNT(*) FROM calibration_pairs"
+    ).fetchone()[0] == 0, "entry leaked into trading DB"

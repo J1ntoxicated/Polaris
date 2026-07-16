@@ -126,7 +126,10 @@
   // Inline inspect chart — MOVED to chart_inspect.js (Jin 2026-07-16 P4b) so
   // /flow (desktop) and /m (mobile) share ONE implementation instead of two
   // drifting copies. chart_inspect.js loads before this file (see flow.html).
-  var buildChartSvg = window.PolarisChartInspect.buildChartSvg;
+  // load guard (P4b review LOW): if the shared chart_inspect module ever
+  // fails to load, degrade to an empty chart — never kill the whole pane.
+  var buildChartSvg = (window.PolarisChartInspect || {}).buildChartSvg
+    || function () { return '<div class="side-chart-empty">chart module unavailable</div>'; };
   function renderChart(p) {
     if (!chartHdr || !chartBody) return;
     if (!p) {

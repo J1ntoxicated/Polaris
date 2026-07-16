@@ -326,7 +326,8 @@
       '<span class="side ' + sideCls + '">' + esc(String(p.side || '').toUpperCase()) + '</span>' +
       '<span class="num ' + pnlClass(u) + '">' + signed(u) + '</span>' +
       '<span class="reg">' + regimeLabel(p) + '</span>';
-    body.innerHTML = window.PolarisChartInspect.buildChartSvg(p);
+    body.innerHTML = ((window.PolarisChartInspect || {}).buildChartSvg
+      || function () { return ''; })(p); // load guard (P4b review LOW)
   }
 
   // ── Open Positions — grouped by venue|symbol, chip · symbol · side ·

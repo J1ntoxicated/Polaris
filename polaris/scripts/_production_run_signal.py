@@ -394,8 +394,12 @@ async def run_pipeline_for_signal(
     if _is_shadow_first(sig.strategy_id):
         cls = STRATEGY_REGISTRY.get(sig.strategy_id)
         target_r = cls.metadata.profit_target_r if cls is not None else None
+        # storage-split (round-r2 fix): weekend_shadow_orders is marketdata-domain
+        # (weekend_data.build_weekend / server._build_weekend read it off md_conn) —
+        # writing on the trading `conn` left every reader permanently empty.
         log_shadow_order(
-            conn, run_id=ctx.run_id, strategy_id=sig.strategy_id, venue=venue,
+            state.md_conn if state.md_conn is not None else conn,
+            run_id=ctx.run_id, strategy_id=sig.strategy_id, venue=venue,
             symbol=symbol, side=sig.side, entry_mark=last_price,
             notional_usd=notional_usd, atr_pct=max(bars_atr_pct, 1e-4),
             profit_target_r=target_r, now_ts=now_ts,

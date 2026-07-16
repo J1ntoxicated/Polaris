@@ -1020,6 +1020,7 @@ async def _close_trade_with_real_pnl(
     # this signal's sizing-time p_pos snapshot. Measurement only, fail-open.
     _safe_record_calibration_outcome(
         conn, trade=trade, won=won, pnl_r_net=pnl_r_net, now_ts=now_ts,
+        state=state,
     )
     # VIRTUAL ACCOUNT (Jin 2026-07-07): weekly per-exchange trace (TRACE, never
     # RESET — the account compounds continuously) + reset-only-on-ruin check.

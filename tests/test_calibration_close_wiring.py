@@ -59,6 +59,7 @@ def test_safe_wrapper_updates_existing_snapshot() -> None:
     )
     _safe_record_calibration_outcome(
         conn, trade=trade, won=True, pnl_r_net=1.4, now_ts=NOW + 60,
+        state=ProdLoopState(),
     )
     row = conn.execute(
         "SELECT realized_won, realized_pnl_r FROM calibration_pairs "
@@ -77,6 +78,7 @@ def test_safe_wrapper_fails_open_on_broken_table() -> None:
     # Must not raise — this is the fail-open contract the close path relies on.
     _safe_record_calibration_outcome(
         conn, trade=trade, won=False, pnl_r_net=-1.0, now_ts=NOW + 60,
+        state=ProdLoopState(),
     )
 
 

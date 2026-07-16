@@ -77,10 +77,15 @@ def test_strategy_timeframe_unregistered_falls_back_to_1m() -> None:
     # tick-engine signals (micro_reversion / flow_pressure / burst_rider) are
     # NOT in STRATEGY_REGISTRY → "1m" = the pre-fix behaviour, byte-identical.
     assert strategy_timeframe("micro_reversion") == "1m"
-    # session_breakout un-registered 2026-07-06 (B1 prune, live-ledger
-    # forensic, -$933.65 fee-bleed) — was "5m", now falls back to "1m" like
-    # any other unregistered id (degrade-never-crash).
-    assert strategy_timeframe("session_breakout") == "1m"
+    # equity_vol_expansion_pocket_pivot — B1 prune (2026-07-06, live-ledger
+    # forensic, -$431.05/0% win), still unregistered under REAL/default env
+    # (out of the P3-promotion scope — see polaris/strategies/__init__.py) —
+    # falls back to "1m" like any other unregistered id (degrade-never-crash).
+    # (session_breakout was this fixture pre-P3-promotion; it is now
+    # unconditionally REGISTERED with timeframe="5m", so it no longer proves
+    # the unregistered-fallback path — see test_strategy_prune_b1.py for its
+    # dispatch_eligible=False coverage instead.)
+    assert strategy_timeframe("equity_vol_expansion_pocket_pivot") == "1m"
     assert strategy_timeframe("flow_pressure") == "1m"
     assert strategy_timeframe("") == "1m"
     assert strategy_timeframe("no_such_strategy") == "1m"

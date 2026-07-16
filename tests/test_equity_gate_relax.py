@@ -99,11 +99,20 @@ def test_non_equity_never_gated() -> None:
 def test_equity_strategies_still_registered_and_dispatched() -> None:
     # SUPERSEDED by the B1 prune (2026-07-06) — the relax itself did not touch
     # registration/dispatch, but the subsequent live-ledger forensic
-    # (-$137.23 / -$431.05, 0% win) KILLed both at the registry level (100.9%
-    # of the -$2,024 book loss). Modules preserved read-only; no longer
-    # registered or dispatched.
+    # (-$137.23 / -$431.05, 0% win) KILLed both at dispatch (100.9% of the
+    # -$2,024 book loss). Neither dispatches under REAL/default env.
+    #
+    # P3 promotion (2026-07-16): equity_52wk_high_breakout formalized off the
+    # ad hoc VIRTUAL-only registry path — unconditionally registered now,
+    # dispatch_eligible=False under REAL carries the KILL.
+    # equity_vol_expansion_pocket_pivot is out of that promotion's scope and
+    # stays fully un-registered (unchanged).
     assert "equity_vol_expansion_pocket_pivot" not in STRATEGY_REGISTRY
-    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
+    assert "equity_52wk_high_breakout" in STRATEGY_REGISTRY
+    assert (
+        STRATEGY_REGISTRY["equity_52wk_high_breakout"].metadata.dispatch_eligible
+        is False
+    )
     dispatch_ids = {s.metadata.strategy_id for s in _all_strategies()}
     assert "equity_vol_expansion_pocket_pivot" not in dispatch_ids
     assert "equity_52wk_high_breakout" not in dispatch_ids

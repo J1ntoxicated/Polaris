@@ -5,10 +5,15 @@ layer — NOT a defensive block / size-cut / dampen:
 
 A. ``spot_donchian`` KILL — OKX 1H Donchian = the fee-fatal intraday class the
    overnight research REJECTed; it kept losing live AFTER the exit fix
-   (-$85.66 / 16 closes). Removed from STRATEGY_REGISTRY + the ``_all_strategies``
-   dispatch (same pattern as the autopsy 7-strategy KILL). Its module + open-
-   position close path stay intact; the dead registry row is swept by the next
-   ``learner_prune``.
+   (-$85.66 / 16 closes). Severed from the ``_all_strategies`` dispatch (same
+   pattern as the autopsy 7-strategy KILL). Its module + open-position close
+   path stay intact.
+
+   P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+   formalized off ad hoc env-conditional STRATEGY_REGISTRY membership onto
+   ``dispatch_eligible=virtual_loosen(True, False)`` — it is now
+   UNCONDITIONALLY registered, and the REAL-mode KILL is carried by the flag
+   (False under REAL/default env) instead of registry absence.
 
 B. equity SIP-gate — ``equity_vol_expansion_pocket_pivot`` +
    ``equity_52wk_high_breakout``. NOTE (equity-gate-relax 2026-06-27): the
@@ -44,8 +49,11 @@ from polaris.strategies.rsi_bb_pullback import RSIBBPullbackStrategy
 # ---------------------------------------------------------------------------
 
 
-def test_spot_donchian_absent_from_registry() -> None:
-    assert "spot_donchian" not in STRATEGY_REGISTRY
+def test_spot_donchian_registered_but_dispatch_ineligible_under_real() -> None:
+    # P3 promotion: unconditionally registered now; the REAL-mode (default
+    # env, no POLARIS_VIRTUAL_ACCOUNT) KILL is carried by dispatch_eligible.
+    assert "spot_donchian" in STRATEGY_REGISTRY
+    assert STRATEGY_REGISTRY["spot_donchian"].metadata.dispatch_eligible is False
 
 
 def test_spot_donchian_absent_from_dispatch() -> None:
@@ -66,7 +74,11 @@ def test_registry_drops_to_20() -> None:
     # dispatch, registered unconditionally): 21 → 24.
     # Wave 1b + 1.5 (§1 #4-#5, 2026-07-11): +equity_bb_meanrev_15m/
     # +equity_opening_range_breakout (VIRTUAL-only dispatch): 24 → 26.
-    assert len(STRATEGY_REGISTRY) == 26
+    # P3 promotion (2026-07-16): +session_breakout/+donchian_turtle_breakout/
+    # +spot_donchian/+equity_52wk_high_breakout (formalized off the ad hoc
+    # VIRTUAL-only path, unconditionally registered now) +
+    # capital_macro_riskoff_catalyst (shadow-first, new registration): 26 → 31.
+    assert len(STRATEGY_REGISTRY) == 31
 
 
 def test_dispatch_is_subset_of_registry_no_zombie() -> None:
@@ -78,7 +90,7 @@ def test_dispatch_is_subset_of_registry_no_zombie() -> None:
     dispatch_ids = {s.metadata.strategy_id for s in _all_strategies()}
     assert dispatch_ids <= set(STRATEGY_REGISTRY)
     assert "spot_donchian" not in dispatch_ids
-    assert "spot_donchian" not in STRATEGY_REGISTRY
+    assert "spot_donchian" in STRATEGY_REGISTRY  # P3: registered, not dispatched
 
 
 def test_surviving_okx_breakout_still_registered() -> None:
@@ -136,11 +148,21 @@ def test_non_equity_strategies_never_feed_gated() -> None:
 def test_equity_strategies_remain_registered() -> None:
     # SUPERSEDED by the B1 prune (2026-07-06) — the SIP-gate finding above was
     # about dispatch-time inert-ness, but the live-ledger forensic (-$137.23 /
-    # -$431.05, 0% win) then KILLed both at the registry level (100.9% of the
-    # -$2,024 book loss alongside session_breakout / donchian_turtle_breakout).
-    # Modules preserved read-only; no longer registered or dispatched.
+    # -$431.05, 0% win) then KILLed both at dispatch (100.9% of the -$2,024
+    # book loss alongside session_breakout / donchian_turtle_breakout).
+    # Modules preserved read-only; neither dispatches under REAL/default env.
+    #
+    # P3 promotion (2026-07-16): equity_52wk_high_breakout formalized off the
+    # ad hoc VIRTUAL-only registry path — it is now unconditionally
+    # registered, dispatch_eligible=False under REAL carries the KILL.
+    # equity_vol_expansion_pocket_pivot is out of that promotion's scope and
+    # stays fully un-registered (unchanged).
     assert "equity_vol_expansion_pocket_pivot" not in STRATEGY_REGISTRY
-    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
+    assert "equity_52wk_high_breakout" in STRATEGY_REGISTRY
+    assert (
+        STRATEGY_REGISTRY["equity_52wk_high_breakout"].metadata.dispatch_eligible
+        is False
+    )
     dispatch_ids = {s.metadata.strategy_id for s in _all_strategies()}
     assert "equity_vol_expansion_pocket_pivot" not in dispatch_ids
     assert "equity_52wk_high_breakout" not in dispatch_ids

@@ -34,6 +34,14 @@ _EXPECTED_EXEMPT_REGISTERED = {
     "weekend_thin_book_flush_maker",
     "weekend_funding_capitulation_maker",
     "gold_riskoff_trend_amplify",
+    # P3 promotion (2026-07-16): session_breakout is now unconditionally
+    # registered (dispatch_eligible=virtual_loosen(True, False) under REAL);
+    # its session-open-window trigger is bars-external, unchanged True.
+    "session_breakout",
+    # capital_macro_riskoff_catalyst — shadow-first new registration; its
+    # vix/hy_spread altdata trigger is bars-external (refreshes on its own
+    # cadence, independent of the 1H bar close), unchanged True.
+    "capital_macro_riskoff_catalyst",
 }
 
 

@@ -3,14 +3,28 @@
 DEMO/PAPER 가상자금 — aggressive bias preserved, flow_not_block. Jin 2026-07-09:
 ``equity_52wk_high_breakout`` / ``equity_vol_expansion_pocket_pivot`` (B1-pruned
 2026-07-06, withheld from the first VIRTUAL-only re-admit pending Alpaca 1D bar
-supply) now join ``session_breakout`` / ``donchian_turtle_breakout`` /
-``spot_donchian`` / ``volume_burst`` in the VIRTUAL-only re-registration block
-(``polaris/strategies/__init__.py``).
+supply) joined ``session_breakout`` / ``donchian_turtle_breakout`` /
+``spot_donchian`` / ``volume_burst`` in the (then ad hoc, env-conditional
+registry-membership) VIRTUAL-only re-registration block.
+
+P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+``equity_52wk_high_breakout`` (+ 3 siblings out of this file's scope) formalized
+off that ad hoc mechanism onto ``dispatch_eligible=virtual_loosen(True, False)``
+on its OWN metadata (``polaris/strategies/equity_52wk_high_breakout.py``) —
+UNCONDITIONALLY registered now, VIRTUAL/REAL split carried by the flag.
+``equity_vol_expansion_pocket_pivot`` is OUT of that promotion's scope and
+stays on the original ad hoc VIRTUAL-only registry-membership path (env-
+conditional presence in ``STRATEGY_REGISTRY`` itself, dispatch_eligible
+defaults True on its own metadata) — unchanged.
 
 Proves, per the repo's own registered != dispatched INERT lesson
 (``tests/test_dispatch_ssot.py``):
 
-  (a) REAL byte-identical — env unset, both ids stay OUT of STRATEGY_REGISTRY.
+  (a) REAL byte-identical firing — env unset:
+      ``equity_52wk_high_breakout`` is now REGISTERED (dispatch_eligible=False);
+      ``equity_vol_expansion_pocket_pivot`` stays OUT of STRATEGY_REGISTRY
+      (unchanged mechanism). NEITHER dispatches — firing is byte-identical to
+      before the promotion.
   (b) VIRTUAL re-admit — env=1, both ids ARE in STRATEGY_REGISTRY, mapped to
       the correct classes, ``dispatch_eligible`` True.
   (c) live-fire, not just registered — the live bar-dispatch DERIVED set
@@ -23,8 +37,13 @@ Module-level env-branch, so both states are only observable via
 ``importlib.reload`` — mirrors ``tests/test_virtual_loosen_okx_donchian55.py``.
 ``_production_tick`` binds ``STRATEGY_REGISTRY`` by reference at its own
 import time, so reloading only the parent package would silently leave its
-dispatch set stale (a second, subtler INERT trap) — both are reloaded, in
-that order.
+dispatch set stale (a second, subtler INERT trap). ``equity_52wk_high_breakout``
+now ALSO needs its own submodule reloaded FIRST (its ``dispatch_eligible`` is a
+``virtual_loosen()`` call baked into its class-level metadata at that
+submodule's own import time — reloading only the parent package would rebind
+the name but leave the class object, and its metadata, stale — the SAME class of
+staleness the module docstring above already calls out for ``_production_tick``,
+one layer deeper). All three are reloaded, in that order.
 """
 
 from __future__ import annotations
@@ -53,7 +72,14 @@ def _reload_with_env(value: str | None):
         os.environ[_ENV] = value
     import polaris.scripts._production_tick as tick_mod
     import polaris.strategies as strategies_mod
+    import polaris.strategies.equity_52wk_high_breakout as eq52_mod
 
+    # Reload the LEAF submodule first (its dispatch_eligible=virtual_loosen()
+    # call is baked into class-level metadata at ITS OWN import time), then the
+    # package (re-executes the `from ... import` + rebuilds STRATEGY_REGISTRY
+    # off the freshly-reloaded class), then the tick module (binds
+    # STRATEGY_REGISTRY by reference at ITS OWN import time — see docstring).
+    importlib.reload(eq52_mod)
     strategies_mod = importlib.reload(strategies_mod)
     tick_mod = importlib.reload(tick_mod)
     return strategies_mod, tick_mod
@@ -78,7 +104,16 @@ def _restore_env_and_modules():
 
 def test_real_mode_equity_ids_absent_byte_identical() -> None:
     strategies_mod, tick_mod = _reload_with_env(None)
-    assert "equity_52wk_high_breakout" not in strategies_mod.STRATEGY_REGISTRY
+    # P3 promotion: equity_52wk_high_breakout is now unconditionally
+    # registered, dispatch_eligible=False under REAL — registered, not KILLed
+    # by absence. equity_vol_expansion_pocket_pivot is unchanged (still fully
+    # absent under REAL).
+    assert "equity_52wk_high_breakout" in strategies_mod.STRATEGY_REGISTRY
+    assert (
+        strategies_mod.STRATEGY_REGISTRY["equity_52wk_high_breakout"]
+        .metadata.dispatch_eligible
+        is False
+    )
     assert "equity_vol_expansion_pocket_pivot" not in strategies_mod.STRATEGY_REGISTRY
     dispatched = {s.metadata.strategy_id for s in tick_mod._all_strategies()}
     assert "equity_52wk_high_breakout" not in dispatched

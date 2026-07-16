@@ -502,10 +502,20 @@ def test_fx_range_fade_module_preserved() -> None:
 
 def test_donchian_turtle_unregistered() -> None:
     # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$540.58 real
-    # directional loss): not in the live registry, not dispatched.
+    # directional loss): never dispatched under REAL/default env.
+    #
+    # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+    # formalized off the ad hoc VIRTUAL-only registry path onto
+    # dispatch_eligible=virtual_loosen(True, False) — unconditionally
+    # registered now, the REAL-mode KILL is carried by the flag instead of
+    # registry absence.
     from polaris.scripts._production_tick import _all_strategies
 
-    assert "donchian_turtle_breakout" not in STRATEGY_REGISTRY
+    assert "donchian_turtle_breakout" in STRATEGY_REGISTRY
+    assert (
+        STRATEGY_REGISTRY["donchian_turtle_breakout"].metadata.dispatch_eligible
+        is False
+    )
     assert "donchian_turtle_breakout" not in {
         s.metadata.strategy_id for s in _all_strategies()
     }

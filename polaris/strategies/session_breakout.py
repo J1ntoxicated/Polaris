@@ -15,6 +15,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -62,6 +63,15 @@ class SessionBreakoutStrategy(BaseStrategy):
         # unchanged 5m bar (compute-scheduling exemption, never a size/entry
         # gate — see StrategyMetadata.evaluates_in_progress_bar).
         evaluates_in_progress_bar=True,
+        # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+        # formalizes the prior ad hoc VIRTUAL-only re-admit (STRATEGY_REGISTRY
+        # membership itself was the env-conditional gate, bypassing this SSOT
+        # flag — see polaris/strategies/__init__.py). Registry membership is now
+        # UNCONDITIONAL; dispatch_eligible carries the VIRTUAL/REAL split
+        # instead — byte-identical firing (VIRTUAL True / REAL False, the B1
+        # prune's real-fee-bleed KILL rationale is void under
+        # POLARIS_VIRTUAL_ACCOUNT=1 — see the registry module docstring).
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

@@ -48,6 +48,9 @@ from polaris.core.live_recalc.strategy_swap import (
     evaluate_strategy_swap,
 )
 from polaris.core.pipeline.agents._gpt_client import default_gpt_factory
+from polaris.core.pipeline.agents.capital_macro_riskoff_shadow import (
+    log_capital_macro_riskoff_shadow,
+)
 from polaris.core.pipeline.agents.tsmom_literature_shadow import (
     log_tsmom_literature_shadow,
 )
@@ -977,6 +980,29 @@ async def _run_tick(
                     log_tsmom_literature_shadow(
                         conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
                         venue=venue, symbol=symbol, regime=regime, bars=mv.bars,
+                        now_ts=now_ts, db_writer=state.db_writer,
+                    )
+            # P3 promotion — capital_macro_riskoff_catalyst SHADOW emit tagger
+            # (the strategy is registered but dispatch_eligible=False; this
+            # never gates a trade). Own bar-advance mark, same shape/rationale
+            # as the tsmom shadow mark above: this strategy's own
+            # evaluates_in_progress_bar=True bypasses the outer per-strategy
+            # dedup gate for the WHOLE (capital, 1H) bucket, so without this
+            # mark the write would re-fire every 5s tick for an unchanged bar.
+            if timeframe == "1H" and mv.bars:
+                latest_1h_bar_ts = int(mv.bars[-1].ts)
+                if bar_advance_due(
+                    last_eval_ts=state.last_macro_riskoff_shadow_bar_ts_by_key.get(
+                        (venue, symbol)
+                    ),
+                    latest_bar_ts=latest_1h_bar_ts,
+                ):
+                    state.last_macro_riskoff_shadow_bar_ts_by_key[(venue, symbol)] = (
+                        latest_1h_bar_ts
+                    )
+                    log_capital_macro_riskoff_shadow(
+                        conn, run_id=f"g2tick-{tick_idx}", signal_id=None,
+                        venue=venue, symbol=symbol, regime=regime, market_view=mv,
                         now_ts=now_ts, db_writer=state.db_writer,
                     )
             # ④ #12 technical store — WRITE-AFTER-COMPUTE. Persist the full

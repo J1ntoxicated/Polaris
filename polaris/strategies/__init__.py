@@ -90,13 +90,22 @@ membership are severed.
 VIRTUAL-mode exception (Jin 2026-07-08): the KILL rationale above is real
 maker/taker FEE-BLEED — void when ``POLARIS_VIRTUAL_ACCOUNT=1`` (no real fees).
 ``session_breakout`` / ``donchian_turtle_breakout`` / ``spot_donchian`` /
-``volume_burst`` are re-admitted into ``STRATEGY_REGISTRY`` for VIRTUAL only,
-below. The two equity ids were withheld from that re-admit pending Alpaca 1D
-bar supply; Jin 2026-07-09 — now confirmed live (``connors_rsi2`` fires on the
+``volume_burst`` were re-admitted into ``STRATEGY_REGISTRY`` for VIRTUAL only.
+The two equity ids were withheld from that re-admit pending Alpaca 1D bar
+supply; Jin 2026-07-09 — now confirmed live (``connors_rsi2`` fires on the
 same 1D/alpaca feed) — so ``equity_52wk_high_breakout`` /
-``equity_vol_expansion_pocket_pivot`` join the same VIRTUAL-only re-admit
-below. REAL byte-identical: the re-registration block never runs when the env
-is unset, so the REAL registry keeps exactly the members listed above.)
+``equity_vol_expansion_pocket_pivot`` joined the same VIRTUAL-only re-admit.
+``volume_burst`` was excluded again 2026-07-09 (see the block below the main
+registry dict). P3 promotion (2026-07-16, built-not-wired audit): the OTHER
+4 ids (``session_breakout`` / ``donchian_turtle_breakout`` / ``spot_donchian``
+/ ``equity_52wk_high_breakout``) formalized off this ad hoc env-conditional
+registry membership into ``dispatch_eligible=virtual_loosen(True, False)`` on
+each strategy's own metadata (the documented dispatch SSOT — see
+``StrategyMetadata.dispatch_eligible``) — registered UNCONDITIONALLY below,
+byte-identical firing. ``equity_vol_expansion_pocket_pivot`` is the one id
+still on the ad hoc VIRTUAL-only path (out of this promotion's scope; see the
+block below the main registry dict). REAL byte-identical throughout: REAL
+never dispatches an id whose flag resolves False.)
 
 The four 1D OKX strategies above are the verified fee-beating survivors built in
 the strategy-wave1 restructure (OOS + slippage + fee-hurdle). The crypto-major
@@ -117,6 +126,9 @@ from polaris.strategies.base import (
     MarketView,
     RawSignal,
     StrategyMetadata,
+)
+from polaris.strategies.capital_macro_riskoff_catalyst import (
+    CapitalMacroRiskoffCatalystStrategy,
 )
 from polaris.strategies.cci_reversion import CCIReversionStrategy
 from polaris.strategies.connors_rsi2 import ConnorsRSI2Strategy
@@ -231,19 +243,46 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     EquityOpeningRangeBreakoutStrategy.metadata.strategy_id: (
         EquityOpeningRangeBreakoutStrategy
     ),
+    # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+    # formalized off the VIRTUAL-only ad hoc registry re-admit below into the
+    # SAME dispatch_eligible=virtual_loosen(True, False) SSOT mechanism as the
+    # Track C Alpaca strategies above — registered UNCONDITIONALLY now,
+    # byte-identical firing (VIRTUAL True / REAL False; each strategy's own
+    # metadata carries the flag, see its module). The B1-prune real-fee-bleed
+    # KILL rationale (session_breakout / donchian_turtle_breakout /
+    # spot_donchian) and the Alpaca-1D-bar-supply gate (equity_52wk_high_
+    # breakout) are UNCHANGED — only the mechanism moved from registry
+    # membership to the metadata flag (dispatch SSOT seal, no longer bypassed).
+    SessionBreakoutStrategy.metadata.strategy_id: SessionBreakoutStrategy,
+    DonchianTurtleBreakoutStrategy.metadata.strategy_id: DonchianTurtleBreakoutStrategy,
+    SpotDonchianStrategy.metadata.strategy_id: SpotDonchianStrategy,
+    Equity52WkHighBreakoutStrategy.metadata.strategy_id: Equity52WkHighBreakoutStrategy,
+    # capital_macro_riskoff_catalyst — built, fred_macro-consuming, PENDING a
+    # live-firing decision (macro vix/hy_spread EVENT entry, no price-breakout
+    # precondition — see the strategy module docstring). SHADOW-FIRST: its own
+    # metadata carries dispatch_eligible=False (NOT virtual_loosen — this is
+    # NEW firing, unlike the 4 above which are re-admitting an already-proven
+    # REAL edge for VIRTUAL observation only), so ``_all_strategies()`` never
+    # calls its ``generate_raw_signal`` — it opens no position. Registering it
+    # here only stops it being invisible to the "built-not-wired" audit; its
+    # would-be signal is observed via ``capital_macro_riskoff_shadow.py``
+    # (a ``gate_shadow_events`` TAG, wired at ``_production_tick.py``,
+    # mirrors the tsmom literature-shadow pattern) toward a future promotion.
+    CapitalMacroRiskoffCatalystStrategy.metadata.strategy_id: (
+        CapitalMacroRiskoffCatalystStrategy
+    ),
 }
 
-# VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09): the
-# first 3 ids were un-registered 2026-07-06 (B1 prune) for FEE-BLEED — real
-# maker/taker fees ate the edge live (session_breakout -$933.65/88 trades fees
-# 9.7x gross, donchian_turtle_breakout -$540.58, spot_donchian fee-fatal
-# intraday class). VIRTUAL has NO real fees, so the fee-bleed KILL rationale
-# is VOID there — re-admit for virtual observation only. The 2 equity ids were
-# separately un-registered in the same B1 prune and withheld from the first
-# re-admit pending Alpaca 1D bar supply; that is now confirmed live
-# (``connors_rsi2`` fires on the same 1D/alpaca feed), so they join this
-# VIRTUAL-only re-admit too. REAL registry above stays byte-identical (env
-# unset -> this block never runs, so REAL never sees these ids).
+# VIRTUAL-mode-only re-registration (Jin 2026-07-08, extended 2026-07-09):
+# ``equity_vol_expansion_pocket_pivot`` was un-registered 2026-07-06 (B1
+# prune, -$431.05 / 0% win) and withheld from the REAL registry the same way
+# as the 4 ids above (see their P3-promotion note in the dict above — they
+# formalized off THIS mechanism into dispatch_eligible=virtual_loosen).
+# ``equity_vol_expansion_pocket_pivot`` is the one B1-prune id the P3
+# promotion sweep did NOT touch (scope: session_breakout / donchian_turtle_
+# breakout / spot_donchian / equity_52wk_high_breakout only) — it stays on
+# this ad hoc VIRTUAL-only path unchanged. REAL registry above stays
+# byte-identical (env unset -> this block never runs, so REAL never sees it).
 #
 # ``volume_burst`` was in the first re-admit but is EXCLUDED again
 # (2026-07-09 출혈정지): the fee-bleed-void rationale never applied to it —
@@ -255,13 +294,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
 # and live is the same Jin-mandated 출혈정지 as the original #61 KILL — not a
 # defensive throttle; 26 other strategies keep the virtual activity.
 if virtual_mode_enabled():  # pragma: no branch — deterministic per-process env read
-    for _virtual_only_cls in (
-        SessionBreakoutStrategy,
-        DonchianTurtleBreakoutStrategy,
-        SpotDonchianStrategy,
-        Equity52WkHighBreakoutStrategy,
-        EquityVolExpansionPocketPivotStrategy,
-    ):
+    for _virtual_only_cls in (EquityVolExpansionPocketPivotStrategy,):
         STRATEGY_REGISTRY[_virtual_only_cls.metadata.strategy_id] = _virtual_only_cls
 
 
@@ -277,6 +310,7 @@ __all__ = [
     "BaseStrategy",
     "COLD_START_NEUTRAL_STRENGTH",
     "CCIReversionStrategy",
+    "CapitalMacroRiskoffCatalystStrategy",
     "ConnorsRSI2Strategy",
     "DonchianTurtleBreakoutStrategy",
     "EMACrossoverStrategy",

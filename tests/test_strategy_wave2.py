@@ -536,8 +536,13 @@ def test_equity_52wk_no_lookahead() -> None:
 
 
 def test_equity_52wk_metadata_and_registry() -> None:
-    # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$137.23): module
-    # preserved read-only, but no longer a member of STRATEGY_REGISTRY.
+    # B1 prune (2026-07-06) — KILLed, live-ledger forensic (-$137.23): never
+    # dispatched under REAL/default env.
+    #
+    # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+    # formalized off the ad hoc VIRTUAL-only registry path onto
+    # dispatch_eligible=virtual_loosen(True, False) — unconditionally
+    # registered now, the REAL-mode KILL is carried by the flag.
     m = Equity52WkHighBreakoutStrategy.metadata
     assert bucket_from_correlation_group(m.correlation_group_id) is Bucket.TREND
     assert m.hold_overnight is True
@@ -545,7 +550,8 @@ def test_equity_52wk_metadata_and_registry() -> None:
     assert m.venue == "alpaca"
     assert m.product_class == "equity"
     assert EQ_HIGH_LOOKBACK == 252
-    assert "equity_52wk_high_breakout" not in STRATEGY_REGISTRY
+    assert "equity_52wk_high_breakout" in STRATEGY_REGISTRY
+    assert m.dispatch_eligible is False
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +649,11 @@ def test_registry_has_20_strategies() -> None:
     # dispatch, registered unconditionally): 21 → 24.
     # Wave 1b + 1.5 (§1 #4-#5, 2026-07-11): +equity_bb_meanrev_15m/
     # +equity_opening_range_breakout (VIRTUAL-only dispatch): 24 → 26.
-    assert len(STRATEGY_REGISTRY) == 26
+    # P3 promotion (2026-07-16): +session_breakout/+donchian_turtle_breakout/
+    # +spot_donchian/+equity_52wk_high_breakout (formalized off the ad hoc
+    # VIRTUAL-only path) + capital_macro_riskoff_catalyst (shadow-first,
+    # new): 26 → 31.
+    assert len(STRATEGY_REGISTRY) == 31
 
 
 def test_wave2_all_registered() -> None:

@@ -1194,7 +1194,10 @@
   // active tab persists across reloads (Jin 2026-07-11 "탭 누르면 리셋"):
   // named-tab nav means reloads are rare, but a manual refresh still lands
   // back on the tab you were reading, not the first page.
-  const _savedTab = localStorage.getItem('polaris_board_tab');
+  // typeof-guarded (Node export contract, see bottom of file): this runs at
+  // module top level, unconditionally, so it must survive a DOM-less `require()`.
+  const _savedTab = (typeof localStorage !== 'undefined')
+    ? localStorage.getItem('polaris_board_tab') : null;
   let _activeTab = TABS.some(t => t.id === _savedTab) ? _savedTab : TABS[0].id;
   function initTabs() {
     const tabs = $('b-tabs');

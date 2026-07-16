@@ -31,6 +31,7 @@ from polaris.scripts.correct_close_pnl_stamping import (
     audit_dup_close_fanout,
     main,
 )
+from polaris.scripts.exit_strategy_config import _stop_atr_mult_for_strategy
 from polaris.storage.schema import init_db
 
 ENTRY_QTY = 221.288515406
@@ -353,10 +354,17 @@ NL25_TRUE_SIZE = (377.7172 / 0.31) * 0.31  # = 377.7172 (qty equal → entry siz
 # True LONG-orphan pnl: open buy @22000, close sell @22330 → long WIN (positive).
 JPN225_TRUE_PNL = ((22330.0 - 22000.0) / 22000.0) * 22000.0  # = +330.0
 JPN225_TRUE_SIZE = 22000.0  # entry USD-per-unit × close qty (qty equal)
-# US100 short MFE recompute: (entry - trough) / (entry × atr_pct × 2).
+# US100 short MFE recompute: (entry - trough) / (entry × atr_pct × ruler mult).
+# The ruler mult is the SAME resolver the production ruler-alignment fix
+# (103054f, 2026-07-10) wired analyze_capped_excursions to — an unregistered
+# strategy_id ('s') widens the flat 2.0 base via the fee-aware floor, so this
+# must track the resolver rather than hardcode the pre-fix flat 2.0.
 US100_ENTRY = 29780.0
-US100_ATR_USD = max(US100_ENTRY * 0.000714813034193443 * 2.0, US100_ENTRY * 1e-4)
-US100_TRUE_MFE = (US100_ENTRY - 29191.6) / US100_ATR_USD  # ≈ 13.82
+US100_ATR_PCT = 0.000714813034193443
+US100_ATR_USD = US100_ENTRY * US100_ATR_PCT * _stop_atr_mult_for_strategy(
+    "s", atr_pct=US100_ATR_PCT
+)
+US100_TRUE_MFE = (US100_ENTRY - 29191.6) / US100_ATR_USD  # ≈ 3.29
 
 
 def test_cross_instrument_orphan_detected_and_recomputed(db_path: Path) -> None:

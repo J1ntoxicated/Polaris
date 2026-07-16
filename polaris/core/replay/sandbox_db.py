@@ -36,6 +36,11 @@ SEED_TABLES: Final[tuple[str, ...]] = (
     "learner_blocks",
     "learner_posterior",
     "strategy_regime_prior",
+    # gross-LCB SCALE-gate read seam (fee_split_flip_r2_2026-07-12) — G5 sizing
+    # (compute_size -> resolve_gross_lcb) reads this on the SAME conn it's
+    # handed, so the sandbox must carry it too or every replay position-open
+    # crashes with "no such table" the instant sizing consults it.
+    "score_f_events",
 )
 
 

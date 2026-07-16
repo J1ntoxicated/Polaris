@@ -210,8 +210,19 @@ async def test_virtual_trade_lifecycle_chain_end_to_end(
         memdb, exchange=_VENUE, seed_equity=CAPITAL_DEMO_STARTING_EQUITY_USD,
     )
     assert veq_before_close.unrealized_pnl_usd > 0.0
+    # equity = seed + realized + unrealized (virtual_account_equity.VirtualEquity
+    # contract) -- NOT seed + unrealized alone. The entry (open) fill's fee is
+    # already netted into realized_pnl_usd at fill time (_realized_pnl_net_since
+    # sums fee_usd over ALL fills, open+close -- same convention as
+    # snapshot_q_equity._realised_pnl_since: fees are paid on the leg, not
+    # deferred to close), so this open-but-unclosed position already carries a
+    # small negative realized_pnl_usd from its entry fee. Prior assertion
+    # ignored that leg and only held while fees happened to net to ~0.
+    assert veq_before_close.realized_pnl_usd < 0.0  # entry-fill fee already netted
     assert veq_before_close.equity == pytest.approx(
-        CAPITAL_DEMO_STARTING_EQUITY_USD + veq_before_close.unrealized_pnl_usd
+        CAPITAL_DEMO_STARTING_EQUITY_USD
+        + veq_before_close.realized_pnl_usd
+        + veq_before_close.unrealized_pnl_usd
     )
 
     # ---- L7: CLOSE -> weekly_equity_curve gets a row ----------------------

@@ -530,3 +530,5 @@
 - 2026-07-16: P2a 랜딩(merge 8fb52dc, 재기동 PID 16299) — G4 폐지(no-op, 섀도우탭 보존이설)·G3/G7 잉여GPT 삭제(0%불일치)·비교무의미 섀도우쓰기 드롭(리뷰 MED, trading conn 위생)·quote 새니티가드(STETH 팬텀 방지). Opus 4라운드+컨덕터 마감(테스트 12건 신계약 갱신, results[2] 커플링은 gate_id 부재로 문서화 유지 — 가짜가드 회피). 풀스위트 신규실패 0.
 2026-07-16 05:55 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=327 learners=3 paper=True]
 - 2026-07-16: P2b 랜딩(merge e43a372, 재기동 PID 20014) — 델리게이션 게이트 v1 결정론 fit-score 섀도우 코어(edge_type 26전략 전수·asset_class 정합·margin/ambiguous, md 도메인, 라이브 라우팅 0). Opus 2렌즈 3라운드 CRITICAL/MED 0, 48테스트. gross 기준 히스토리항=flip 철학 정합 문서화. P2 완료(G6G7 물리통합은 위험대비가치로 보류→백로그). P3 승격 워크플로 발사(wf_9eb2e993: protect ON·미등록 정식화·liquidity/funding 프로브축·probes 리텐션).
+2026-07-16 06:44 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=331 learners=3 paper=True]
+- 2026-07-16: P3 랜딩(merge ce72549, 재기동 PID 25446, PROBE_TIGHTEN=1) — protect 승격(허용목록·applied기록·레일무접촉)·미등록4종 정식화+capital_macro shadow-first·liquidity/funding 프로브축·probes 리텐션 확인. Opus 2렌즈 CRITICAL/MED 0. 런던 개장 후 Capital 신호 13→1530(예측 적중)·delegation_shadow 1588 축적.

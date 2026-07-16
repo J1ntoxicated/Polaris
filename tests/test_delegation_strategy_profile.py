@@ -8,19 +8,53 @@ routing bug (declared vs observed asset_class mismatch).
 
 from __future__ import annotations
 
+import importlib
+import os
+from collections.abc import Generator
+
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from polaris.core.delegation.strategy_profile import asset_class_match, edge_type_for
-from polaris.strategies import STRATEGY_REGISTRY
+from polaris.strategies.base import BaseStrategy
 
 # ---------------------------------------------------------------------------
 # edge_type_for — full live-registry coverage (no strategy left "unknown")
 # ---------------------------------------------------------------------------
 
+_ENV = "POLARIS_VIRTUAL_ACCOUNT"
 
-def test_every_registered_strategy_classifies_non_unknown() -> None:
-    for strategy_id, cls in STRATEGY_REGISTRY.items():
+
+@pytest.fixture
+def _virtual_strategy_registry() -> Generator[dict[str, type[BaseStrategy]]]:
+    """The RUNTIME-DEFAULT registry (CLAUDE.md "VIRTUAL ACCOUNT 기본 ON" —
+    ``POLARIS_VIRTUAL_ACCOUNT=1``), a strict superset of the REAL-only
+    registry (virtual mode only ADDS ids, per
+    ``polaris/strategies/__init__.py``'s ``if virtual_mode_enabled(): ...``
+    block — it never removes any). ``STRATEGY_REGISTRY`` is a module-level
+    dict built once from the env var at import time, so only
+    ``importlib.reload`` observes the virtual-mode membership — mirrors
+    ``tests/test_virtual_equity_readmit.py``'s ``_reload_with_env`` pattern.
+    Asserting non-"unknown" over this superset covers the REAL registry too.
+    """
+    prior = os.environ.get(_ENV)
+    os.environ[_ENV] = "1"
+    import polaris.strategies as strategies_mod
+
+    strategies_mod = importlib.reload(strategies_mod)
+    yield strategies_mod.STRATEGY_REGISTRY
+    if prior is None:
+        os.environ.pop(_ENV, None)
+    else:
+        os.environ[_ENV] = prior
+    importlib.reload(strategies_mod)
+
+
+def test_every_registered_strategy_classifies_non_unknown(
+    _virtual_strategy_registry: dict[str, type[BaseStrategy]],
+) -> None:
+    for strategy_id, cls in _virtual_strategy_registry.items():
         meta = cls.metadata
         edge = edge_type_for(
             strategy_id=strategy_id, correlation_group_id=meta.correlation_group_id

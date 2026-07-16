@@ -12,7 +12,10 @@ fitted — a documented v1 starting point, revisitable once the shadow
 accumulates enough rows for an empirical calibration):
 
   - history:      score_f_events realised (venue,strategy) x (symbol)
-                   gross_bps — the "최강 신호" (strongest signal) per the
+                   gross_bps, already small-sample-shrunk by
+                   ``historical_edge.fetch_historical_edge_bps`` (a thin
+                   n-trade sample cannot saturate this term the way a raw
+                   ratio could) — the "최강 신호" (strongest signal) per the
                    blueprint, so it gets the LARGEST weight.
   - asset_class:   the strategy's DECLARED asset_class vs the ticker's
                    UNIVERSE-OBSERVED asset_class — targets the audited

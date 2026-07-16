@@ -30,15 +30,28 @@ EdgeType = Literal["trend", "reversion", "breakout", "unknown"]
 # entries that trigger on a "pullback" (macd_ema_trend_pullback,
 # equity_etf_trend_pullback) — checking TREND before REVERSION classifies
 # them correctly via their correlation_group_id's "trend" keyword instead of
-# misreading the entry-trigger word "pullback" as mean-reversion. Verified
-# against every id in polaris.strategies.STRATEGY_REGISTRY as of 2026-07-16
-# (tests/test_delegation_strategy_profile.py iterates the live registry so a
-# newly-added strategy is asserted non-"unknown", not silently drifting).
+# misreading the entry-trigger word "pullback" as mean-reversion.
+#
+# "pocket_pivot" / "vol_expansion" cover equity_vol_expansion_pocket_pivot,
+# whose id/correlation_group_id contain neither "trend" nor a breakout
+# keyword despite the strategy module's own metadata comment classifying it
+# as the "TREND exit archetype (let-winners-run)" (no reversion substring in
+# its correlation_group_id) — bucketed TREND here to match. regime_fit_score
+# treats "trend" and "breakout" identically (same branch), so this choice
+# does not change the computed score either way.
+#
+# Verified against the RUNTIME-DEFAULT registry (POLARIS_VIRTUAL_ACCOUNT=1,
+# CLAUDE.md "VIRTUAL ACCOUNT 기본 ON" — 31 strategies, a superset of the
+# 26-strategy REAL registry) as of 2026-07-16
+# (tests/test_delegation_strategy_profile.py reloads polaris.strategies under
+# the virtual env so a newly-added strategy in EITHER registry is asserted
+# non-"unknown", not silently drifting).
 _BREAKOUT_KEYWORDS: Final[tuple[str, ...]] = (
     "breakout", "donchian", "opening_range", "orb",
 )
 _TREND_KEYWORDS: Final[tuple[str, ...]] = (
     "trend", "tsmom", "momentum", "chandelier", "supertrend",
+    "pocket_pivot", "vol_expansion",
 )
 _REVERSION_KEYWORDS: Final[tuple[str, ...]] = (
     "reversion", "pullback", "fade", "flush", "meanrev", "mean_reversion",

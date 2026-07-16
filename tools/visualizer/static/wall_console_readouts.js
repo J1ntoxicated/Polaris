@@ -206,17 +206,18 @@
     const x0 = W * z.x0, x1 = W * z.x1, y0 = H * z.y0, y1 = H * z.y1;
     panelFrame(ctx, x0, y0, x1, y1, 'AI / GATES');
     const flow = (c && c.gate_flow_1h) || {};
-    const vals = GATE_COLORS.map((_, i) => Number(flow[i + 1]) || 0);
+    const GATE_NUMS_TR = [1, 2, 3, 5, 6, 7, 8]; // G4 retired (P2a)
+    const vals = GATE_NUMS_TR.map((n) => Number(flow[n]) || 0);
     const maxN = Math.max(1, ...vals);
     const barX0 = x0 + 6, barX1 = x1 - 6, barTop = y0 + 14, barBot = y0 + 40;
-    const barW = (barX1 - barX0) / 8;
+    const barW = (barX1 - barX0) / GATE_NUMS_TR.length;
     vals.forEach((n, i) => {
       const bx = barX0 + i * barW;
       ctx.fillStyle = 'rgba(138,148,176,0.14)';
       ctx.fillRect(bx, barTop, barW - 2, barBot - barTop);
       // log scale — g6 (~4k monitor readings/h) dwarfed every other gate to <1% on linear
       const h = (barBot - barTop) * Math.min(1, Math.log1p(n) / Math.log1p(maxN));
-      ctx.fillStyle = field.rgba(GATE_COLORS[i], 0.75);
+      ctx.fillStyle = field.rgba(GATE_COLORS[GATE_NUMS_TR[i] - 1], 0.75);
       ctx.fillRect(bx, barBot - h, barW - 2, h);
     });
     const gpt = (c && c.gpt) || {};
@@ -333,14 +334,15 @@
     const x0 = W * gz.gateOps.x0, x1 = W * gz.gateOps.x1, y0 = H * gz.y0, y1 = H * gz.y1;
     panelFrame(ctx, x0, y0, x1, y1, 'GATE OPS · 1h');
     const flow = (c && c.gate_flow_1h) || {};
-    const vals = GATE_COLORS.map((_, i) => Number(flow[i + 1]) || 0);
+    const GATE_NUMS_LB = [1, 2, 3, 5, 6, 7, 8]; // G4 retired (P2a)
+    const vals = GATE_NUMS_LB.map((n) => Number(flow[n]) || 0);
     const maxLog = Math.max(1, ...vals.map((n) => Math.log1p(n)));
     const bx0 = x0 + 8, bx1 = x1 - 8, base = y1 - 16, top = y0 + 12;
     const colW = (bx1 - bx0) / 8;
     vals.forEach((n, i) => {
       const cx = bx0 + (i + 0.5) * colW;
       const h = (base - top) * (Math.log1p(n) / maxLog);
-      ctx.fillStyle = field.rgba(GATE_COLORS[i], 0.5);
+      ctx.fillStyle = field.rgba(GATE_COLORS[GATE_NUMS_LB[i] - 1], 0.5);
       ctx.fillRect(cx - colW * 0.28, base - h, colW * 0.56, h);
       const pulseAge = now - (gatePulseAt ? gatePulseAt(i + 1) : 0);
       if (pulseAge >= 0 && pulseAge < 400) {
@@ -736,9 +738,9 @@
   const SHADOW_SATS = [
     // gate = 0-based gateScreen index (3=g4, 4=g5). fresh window matches the
     // SCOUT SHADOW panel's own "lit" convention (age < 3600s = active).
-    { key: 'vwap_timing_shadow_1h', label: 'vwap', gate: 3, period: 62, angle0: Math.PI * 1.6 },
-    { key: 'squeeze_shadow', label: 'sqz', gate: 3, period: 81, angle0: Math.PI * 1.85 },
-    { key: 'calibration_pairs', label: 'calib', gate: 4, period: 70, angle0: Math.PI * 1.5 },
+    { key: 'vwap_timing_shadow_1h', label: 'vwap', gate: 2, period: 62, angle0: Math.PI * 1.6 },
+    { key: 'squeeze_shadow', label: 'sqz', gate: 2, period: 81, angle0: Math.PI * 1.85 },
+    { key: 'calibration_pairs', label: 'calib', gate: 3, period: 70, angle0: Math.PI * 1.5 },
   ];
   // Outer patrol ring — clear of both the gate's own reticle chrome
   // (wall_spine.js's corner brackets sit at ringR+12=52) and field.js's

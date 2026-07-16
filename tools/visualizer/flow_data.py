@@ -47,7 +47,7 @@ _VERDICTS_N: Final[int] = 3
 _DROP_DECISIONS: Final[frozenset[str]] = frozenset({"KILL", "SKIPPED"})
 
 _GATE_LABELS: Final[dict[int, str]] = {
-    1: "Universe", 2: "Signal", 3: "Validator", 4: "PreEntry",
+    1: "Universe", 2: "Signal", 3: "Validator",  # 4 (PreEntry) retired — P2a
     5: "Sizer", 6: "Monitor", 7: "Exit", 8: "Reflector",
 }
 

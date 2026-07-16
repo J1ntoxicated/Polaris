@@ -156,7 +156,9 @@
   // strands bundling into the same endpoint (G6/G7) don't wash out into one
   // saturated white beam once additive-blended.
   const LINEAGE_HUES = ['#87d7ff', '#9fc7ff', '#7ec8e3', '#a7d8ff', '#8fe0d0'];
-  const GATE_IDS = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8'];
+  // P2a 게이트 다이어트(2026-07-16): G4 폐지 — 스파인도 7게이트 현실 반영
+  const GATE_IDS = ['g1', 'g2', 'g3', 'g5', 'g6', 'g7', 'g8'];
+  const GATE_NUMS = [1, 2, 3, 5, 6, 7, 8]; // 색/라벨은 게이트 번호 고정
 
   // Gate-satellite reassignment (Jin 2026-07-11 "게이트 소속 재분류"): specific
   // orbit_kind=ai_judge role satellites + the 3 featured learner runners
@@ -169,7 +171,7 @@
   // renderStaticLayer (labels) so all three agree on where a node landed;
   // also exported (gateSatelliteOf) so wall_console_readouts.js's register
   // column can exclude these rows without duplicating this table.
-  const AI_JUDGE_GATE = { validator: 'g3', entry_judge: 'g4', exit_advise: 'g7' };
+  const AI_JUDGE_GATE = { validator: 'g3', entry_judge: 'g3', exit_advise: 'g7' }; // entry judge는 P2a에서 G3로 이설
   const RUNNER_LEARNER_IDS = new Set(['session_mult', 'regime_mult', 'max_hold']);
   function orbitGateTarget(n) {
     if (n.orbit_kind === 'ai_judge') return AI_JUDGE_GATE[n.label] || null;
@@ -361,20 +363,20 @@
     gateScreen = GATE_IDS.map((gid, i) => {
       const rg = rngFor(gid + ':stagger');
       const jx = (rg() - 0.5) * W * 0.012, jy = (rg() - 0.5) * H * 0.012;
-      if (i <= 4) {
-        // G1->G5 entry chain — even tiers, no bow: each gate one 0.025H
-        // step above the last. Rail clearance is baked into gateStairs.y1.
-        const t = i / 4;
+      if (i <= 3) {
+        // G1->G3->G5 entry chain (G4 retired) — 4 even tiers, no bow.
+        // Rail clearance is baked into gateStairs.y1.
+        const t = i / 3;
         const st = WALL_ZONES.gateStairs;
         const x = W * (st.x0 + t * (st.x1 - st.x0)) + jx;
         const y = H * (st.y0 + t * (st.y1 - st.y0)) + jy;
         return { x, y, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
-      if (i === 5) { // G6 monitor — hub right after the stair top (probe patrol + pos fan anchor)
+      if (i === 4) { // G6 monitor — hub right after the stair top (probe patrol + pos fan anchor)
         const h = WALL_ZONES.gateHub;
         return { x: W * h.x + jx, y: H * h.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
-      if (i === 6) { // G7 exit — behind/below the G6 hub (flow order fix)
+      if (i === 5) { // G7 exit — behind/below the G6 hub (flow order fix)
         const e = WALL_ZONES.gateExit;
         return { x: W * e.x + jx, y: H * e.y + jy, fireUntil: 0, pulsePhase: Math.random() * Math.PI * 2 };
       }
@@ -552,7 +554,7 @@
       }
     });
 
-    const gG3 = gateScreen[2], gG5 = gateScreen[4], gG6 = gateScreen[5], gG7 = gateScreen[6], gG8 = gateScreen[7];
+    const gG3 = gateScreen[2], gG5 = gateScreen[3], gG6 = gateScreen[4], gG7 = gateScreen[5], gG8 = gateScreen[6]; // G4 폐지 시프트
     // REGIME row (Jin 2026-07-11 "공간활용"): even-pitch labelled row filling
     // the bottom-left void (above the DROP LANE overlay), feeding g3.
     (byCluster.reg || []).forEach((n, j, arr) => {
@@ -1078,12 +1080,12 @@
     // Descent paths are WHISPERS, not beams (Jin: the additive pile-up of
     // 26+32 bright lines into one pixel was the "white broom"). Ring-offset
     // arrivals so nothing converges on a single point; venue-colored.
-    const g4 = gateScreen[3];
+    const g3d = gateScreen[2]; // watch 하강 목적지 = G3 admission (G4 폐지)
     allNodes.filter((n) => n.cluster === 'watch').forEach((n) => {
       const a = screen[n.id]; if (!a) return;
       const r = rngFor(n.id + ':g4arr');
       const ang = r() * Math.PI * 2, rad = 16 + r() * 18;
-      addAmbient(n.id, 'g4', a.x, a.y, g4.x + Math.cos(ang) * rad, g4.y + Math.sin(ang) * rad,
+      addAmbient(n.id, 'g3', a.x, a.y, g3d.x + Math.cos(ang) * rad, g3d.y + Math.sin(ang) * rad,
         { color: venueColorOf(n.exchange) || '#8fb0c8', alpha: 0.05 + (n.intensity || 0.3) * 0.05, width: 0.6, bowScale: 0.35 });
     });
 

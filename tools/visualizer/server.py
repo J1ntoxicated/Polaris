@@ -444,7 +444,7 @@ def _fills_since(since_ms: int) -> list[dict[str, Any]]:
 # ADJUST·EXIT / G8 lesson decisions) — those HOLDs are tallied in the per-gate
 # summary instead. Display-only; never reads/writes trading state.
 _GATE_SSE_LABELS: dict[int, str] = {
-    1: "Universe", 2: "Strategy", 3: "Validator", 4: "PreEntry",
+    1: "Universe", 2: "Strategy", 3: "Validator",  # 4 (PreEntry) retired — P2a
     5: "Sizer", 6: "Monitor", 7: "Exit", 8: "Reflector",
 }
 _GATE_SSE_TICK_CAP = 30

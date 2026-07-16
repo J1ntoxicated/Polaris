@@ -75,7 +75,6 @@
     { n: 1, id: 'g1', label: 'universe', count: 0 },
     { n: 2, id: 'g2', label: 'signal', count: 0 },
     { n: 3, id: 'g3', label: 'validator', count: 0 },
-    { n: 4, id: 'g4', label: 'preentry', count: 0 },
     { n: 5, id: 'g5', label: 'sizer', count: 0 },
     { n: 6, id: 'g6', label: 'monitor', count: 0 },
     { n: 7, id: 'g7', label: 'exit', count: 0 },
@@ -263,7 +262,8 @@
       // graft 1a — core/halo brightness tier lowered so the relay-hubs read
       // as woven INTO the field at rest, and only pop when actually firing.
       const core = 10 + fireT * 5.5, halo = 21 + fireT * 9;
-      const gc = GATE_COLORS[i] || GATE_HALO;
+      // P2a 게이트 다이어트: G4 폐지로 배열이 7행 — 색은 게이트 번호로 고정
+      const gc = GATE_COLORS[(g.n || i + 1) - 1] || GATE_HALO;
       ctx.globalCompositeOperation = 'lighter';
       field.drawDot(ctx, gs.x, gs.y, halo, gc, 0.10 + fireT * 0.24, 12 + fireT * 15);
       // Jin 2026-07-15 "구 색 그래프 색이랑 맞게 하양 줄여": core is now the

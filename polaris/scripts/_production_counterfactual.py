@@ -161,6 +161,10 @@ def record_pipeline_cohort(
             reason = str(last.payload.get("reason", ""))[:200]
             model_used = str(last.model_used or "")
         elif len(results) >= 3 and results[2].decision in (
+            # positional coupling (review LOW, 2026-07-16): results[2]=G3 holds
+            # only for the start_gate=G1 chain — GateResult carries no gate_id,
+            # so this is a DOCUMENTED single-caller contract (see docstring),
+            # not a runtime-verifiable one. Revisit if a second caller appears.
             GateDecision.PASS, GateDecision.MODIFY,
         ):
             decision, gate_id = "PASS", GATE_SIGNAL_VALIDATOR

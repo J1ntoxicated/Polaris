@@ -470,10 +470,12 @@ async def adaptive_exit_gate(
     det_result = _python_widen_only(
         proposal=proposal, next_gate_after_exit=next_gate_after_exit,
     )
-    _log_g7_shadow(
-        shadow_conn, ctx=ctx, technical=det_result,
-        next_gate_after_exit=next_gate_after_exit,
-    )
+    # P2a final review MED (2026-07-16): comparisonless per-position-per-tick
+    # shadow write DROPPED — with the G7 GPT branch deleted there is no
+    # divergence to measure, and this ran on the TRADING conn every recalc
+    # tick (the firehose-on-trading-lock pattern the storage split just
+    # removed). gate_events still records the decision; _log_g7_shadow stays
+    # for any future comparator.
     # #32 AI JUDGE (exit-timing): a per-ticker, STRUCTURALLY non-blocking
     # exit-timing judgment over the bot's own info + exit_context. No EXIT_NOW
     # / KILL path exists in its verdict type, so the deterministic HOLD /

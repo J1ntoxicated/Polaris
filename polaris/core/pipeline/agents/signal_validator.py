@@ -236,7 +236,13 @@ async def signal_validator_gate(
         technical.reason,
         str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
     )
-    _log_g3_shadow(ctx, shadow_conn, gpt_decision=None)
+    # P2a final review MED (2026-07-16): the per-call shadow row existed to
+    # measure GPT-vs-deterministic divergence. With the GPT branch deleted
+    # there is nothing to compare (gpt_decision would always be None,
+    # mismatch 0) and gate_events already records the deterministic decision
+    # — so the comparisonless write is DROPPED rather than re-adding
+    # continuous trading-conn volume right after the storage split relieved
+    # that exact lock. (_log_g3_shadow stays for any future comparator.)
     validated_signal = {**raw_signal, "strength_scalar": technical.scalar}
 
     # G4 fast-path (relocated verbatim, P2a group A): an EFFICIENCY skip of

@@ -28,15 +28,20 @@ __all__ = [
     "AI_JUDGE_MODE_SHADOW",
     "CONVICTION_PYRAMID_ACTIVE_ENV",
     "G6_PROBE_TIGHTEN_ENV",
+    "TIME_STOP_K_DEFAULT",
+    "TIME_STOP_K_ENV",
     "ai_free_mode",
     "ai_judge_mode",
     "conviction_pyramid_active",
     "g6_probe_tighten_mode",
+    "time_stop_k_mult",
 ]
 
 AI_FREE_ENV: Final[str] = "POLARIS_AI_FREE"
 G6_PROBE_TIGHTEN_ENV: Final[str] = "POLARIS_G6_PROBE_TIGHTEN"
 CONVICTION_PYRAMID_ACTIVE_ENV: Final[str] = "POLARIS_CONVICTION_PYRAMID_ACTIVE"
+TIME_STOP_K_ENV: Final[str] = "POLARIS_TIME_STOP_K"
+TIME_STOP_K_DEFAULT: Final[float] = 4.0
 AI_JUDGE_MODE_ENV: Final[str] = "POLARIS_AI_JUDGE_MODE"
 # AI-judge (#32) mode tokens. shadow = judge runs + logs only, the deterministic
 # decision still ACTS (pass-through preservation verify). active = the judge's
@@ -93,6 +98,26 @@ def conviction_pyramid_active(env_value: str | None = None) -> bool:
     if raw is None or raw.strip() == "":
         return False
     return raw.strip().lower() in _TRUTHY
+
+
+def time_stop_k_mult(env_value: str | None = None) -> float:
+    """G6 time-stop backstop multiplier K (default 4.0).
+
+    Stopless-zombie backstop (P1 fix): a position held longer than
+    ``K x strategy_horizon_seconds`` (expected_holding_bars x timeframe, or a
+    standard fallback for an unregistered strategy) is EXIT_NOW regardless of
+    ``stop_price`` / pnl_r — a P&L-agnostic time rail (same class as the
+    session exit rail), independent of and never touching the -1.0R rail.
+    ``env_value`` injectable for pure tests; ``None`` reads the process env.
+    An unset/empty/unparsable value falls back to ``TIME_STOP_K_DEFAULT``.
+    """
+    raw = os.getenv(TIME_STOP_K_ENV) if env_value is None else env_value
+    if raw is None or raw.strip() == "":
+        return TIME_STOP_K_DEFAULT
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return TIME_STOP_K_DEFAULT
 
 
 def ai_judge_mode(env_value: str | None = None) -> str:

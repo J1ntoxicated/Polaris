@@ -1504,3 +1504,45 @@ async def test_reconcile_alpaca_venue_drift_reachable_from_boot_module(
         "SELECT status FROM positions WHERE position_id = 'p1'"
     ).fetchone()[0]
     assert status == "reconciled"
+
+
+# ---------------------------------------------------------------------------
+# storage-split (round 4 fix): _reconcile_import_atr_anchor's md_conn kwarg
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_import_atr_anchor_prefers_md_conn_over_positional_conn(
+    memdb: sqlite3.Connection,
+) -> None:
+    """bars is marketdata-domain — recover.py's fixed ``AtrAnchorFn`` contract
+    always passes the trading conn positionally; ``md_conn`` (bound at the
+    call site) must win when supplied. ``None`` falls back to the positional
+    conn (byte-identical for direct callers/tests)."""
+    from polaris.core.data.ingest import persist_bars
+    from polaris.core.data.schema import Bar
+    from polaris.scripts.production_paper_loop import _reconcile_import_atr_anchor
+    from polaris.storage.schema import ALL_DDL
+
+    md_conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        md_conn.execute(stmt)
+    now = 1_780_000_000
+    bars = [
+        Bar(
+            instrument_id="okx:BTC-USDT", underlying_group_id="crypto:BTC",
+            venue="okx", symbol="BTC-USDT", bar_interval="1m",
+            ts=now - (19 - i) * 60,
+            open=100.0, high=101.0, low=99.0, close=100.0, volume=10.0,
+            notional_usd=1000.0, trade_count=5, vwap=100.0, bid_close=0.0,
+            ask_close=0.0, spread_bps_close=0.0, source="rest",
+        )
+        for i in range(20)
+    ]
+    persist_bars(md_conn, bars)
+
+    # memdb (the positional "trading" conn) carries NO bars.
+    assert _reconcile_import_atr_anchor(memdb, "okx:BTC-USDT", now) is None
+    # md_conn supplied -> resolves.
+    resolved = _reconcile_import_atr_anchor(memdb, "okx:BTC-USDT", now, md_conn=md_conn)
+    assert resolved is not None
+    md_conn.close()

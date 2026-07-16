@@ -99,6 +99,7 @@ class GateOrchestrator:
         self,
         *,
         conn: sqlite3.Connection | None = None,
+        md_conn: sqlite3.Connection | None = None,
         haiku_client: Any | None = None,
         handlers: dict[int, GateHandler] | None = None,
         phase: str = "P0",
@@ -120,6 +121,12 @@ class GateOrchestrator:
         if phase not in ("P0", "P1"):
             raise ValueError(f"phase must be 'P0' or 'P1', got {phase!r}")
         self.conn = conn
+        # storage-split round 4: threaded ONLY to G4's frontgate VWAP/TTM
+        # shadow tagger (bars/vwap_timing_shadow are marketdata-domain; every
+        # other gate's shadow_conn writes stay trading-domain, unaffected).
+        # None (default) → G4's frontgate shadow falls back to ``conn``
+        # (byte-identical for every existing caller/test).
+        self.md_conn = md_conn
         self.haiku_client = haiku_client
         self.phase = phase
         # #32 AI JUDGE client (gpt-5-mini). When supplied, G3/G4/G7 run a per-ticker
@@ -285,7 +292,7 @@ class GateOrchestrator:
         # parallel (PROCEED default / stale-crossed KILL only); GPT still decides.
         return await pre_entry_watcher_gate(
             ctx, client=self.haiku_client, shadow_conn=self.conn,
-            judge_client=self.judge_client,
+            md_conn=self.md_conn, judge_client=self.judge_client,
         )
 
     async def _wrap_sizer(self, ctx: GateContext) -> GateResult:
@@ -296,7 +303,9 @@ class GateOrchestrator:
                 payload={"reason": "no_conn"},
                 model_used="python",
             )
-        return await entry_sizer_gate(ctx, conn=self.conn)
+        # storage-split: thread md_conn so the calibration_pairs entry INSERT
+        # lands in the marketdata DB with its close-UPDATE sibling (MED fix).
+        return await entry_sizer_gate(ctx, conn=self.conn, md_conn=self.md_conn)
 
     async def _wrap_monitor(self, ctx: GateContext) -> GateResult:
         # ai_conductor P3 (2026-05-30): G6 is now deterministic Python — the

@@ -23,6 +23,7 @@ from polaris.core.probes.tuning_log import open_probe_db
 from polaris.storage.retention import (
     PROBE_RETENTION_SPEC,
     RETENTION_SPEC,
+    RETENTION_SPEC_TRADING,
     checkpoint_wal,
     prune_table,
     run_probe_retention,
@@ -378,6 +379,26 @@ def test_run_retention_job_end_to_end(tmp_path: Path) -> None:
     assert result["bars"] == 1
     assert "quote_ticks" not in result
     assert "__wal_checkpointed__" in result
+
+    check = sqlite3.connect(str(db_path))
+    try:
+        assert check.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 1
+    finally:
+        check.close()
+
+
+def test_run_retention_job_scoped_spec_trading_only(tmp_path: Path) -> None:
+    """storage-split: ``spec=RETENTION_SPEC_TRADING`` scopes the job to
+    gate_events only — a bars row outside its own window must survive this
+    pass (bars is NOT in ``RETENTION_SPEC_TRADING``)."""
+    db_path = tmp_path / "trading_job.sqlite"
+    conn = init_db(db_path)
+    _insert_bar(conn, NOW - 1300 * 86_400)  # outside the 1200d bars window
+    conn.commit()
+    conn.close()
+
+    result = run_retention_job(db_path, now_ts=NOW, spec=RETENTION_SPEC_TRADING)
+    assert "bars" not in result  # out of scope for the trading-only spec
 
     check = sqlite3.connect(str(db_path))
     try:

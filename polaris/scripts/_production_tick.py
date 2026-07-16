@@ -565,7 +565,8 @@ async def _run_tick(
     # ingest polls S/A every cycle, B every K, T every M (flow_not_block: every
     # active row is still watched, cadence only governs HOW OFTEN it is bar-pulled).
     focus = get_focus_targets(
-        conn, cycle_ts=now_ts, max_n=_focus_cycle_target(), cycle_index=tick_idx
+        conn, cycle_ts=now_ts, max_n=_focus_cycle_target(), cycle_index=tick_idx,
+        md_conn=state.md_conn,
     )
     if not focus:
         logger.warning(
@@ -614,7 +615,10 @@ async def _run_tick(
     # which fresh information arrives, and it runs unconditionally below —
     # ordering is load-bearing: a same-tick new bar must be visible before the
     # idle-skip decision is made, else the venue stays "idle" one extra tick).
-    _bar_snapshot_before = newest_bar_ts_by_venue(conn, bar_interval="1m")
+    # storage-split: ``bars`` lives on the marketdata conn — fall back to
+    # ``conn`` when unwired (tests / smoke) for byte-identical behaviour.
+    _md_conn = state.md_conn if state.md_conn is not None else conn
+    _bar_snapshot_before = newest_bar_ts_by_venue(_md_conn, bar_interval="1m")
     ingest_totals = await ingest_bars_per_timeframe(
         conn, focus,
         timeframe_to_venues=timeframe_to_venues,
@@ -624,7 +628,9 @@ async def _run_tick(
         limit=240, now_mono=now_mono, now_epoch=now_ts,
         skip_if_current=skip_if_current,
         gpt_client_factory=default_gpt_factory,
-        db_writer=state.db_writer,
+        # storage-split — bars/baseline are marketdata-domain.
+        db_writer=state.md_db_writer,
+        md_conn=state.md_conn,
     )
     state.bars_persisted += ingest_totals["bars"]
     state.bars_baseline_samples += ingest_totals["baseline_samples"]
@@ -640,7 +646,7 @@ async def _run_tick(
     # edges), so this can never suppress the very information that would
     # reset it (flow_not_block: a backed-off venue's bars/regime/positions are
     # still watched — only the compute-heavy re-scan is deferred).
-    _bar_snapshot_after = newest_bar_ts_by_venue(conn, bar_interval="1m")
+    _bar_snapshot_after = newest_bar_ts_by_venue(_md_conn, bar_interval="1m")
     venues_new_bar_this_tick = venues_with_new_bars(
         _bar_snapshot_before, _bar_snapshot_after
     )
@@ -662,10 +668,14 @@ async def _run_tick(
     # resolves pending G3/G4 KILL/PASS cohort rows from the bars just ingested
     # (zero new fetches). 60s throttle + LIMIT batch inside the sweep; never
     # reads/affects any entry/exit/sizing decision.
+    # storage-split: bars + gate_kill_counterfactuals are BOTH marketdata-
+    # domain — this sweep touches ZERO trading tables, so it reads/writes
+    # _md_conn entirely (same-conn adjacency audit item, resolved by routing
+    # the whole call to the marketdata conn rather than a partial split).
     if now_mono - state.last_cf_sweep_monotonic >= CF_SWEEP_THROTTLE_SEC:
         state.last_cf_sweep_monotonic = now_mono
         try:
-            await sweep_forward_marks(conn, now_ts=now_ts)
+            await sweep_forward_marks(_md_conn, now_ts=now_ts)
         except Exception as exc:  # noqa: BLE001 — isolate this stage (fix #3)
             _log_tick_stage_fault("cf_sweep_forward_marks", tick_idx, exc)
             state.fault_events += 1
@@ -733,8 +743,9 @@ async def _run_tick(
             # instead of skipping the symbol (cooldown-gated; storm/OKX-429
             # safe). A FRESH read is byte-identical to the prior
             # ``read_recent_bars`` (no fetch).
+            # storage-split: bars live on the marketdata conn.
             bars_1m = await read_recent_bars_ondemand(
-                conn, venue=venue, symbol=symbol, asset_class=asset_class,
+                _md_conn, venue=venue, symbol=symbol, asset_class=asset_class,
                 bar_interval="1m",
                 freshness_threshold_sec=staleness_threshold_for("1m"),
                 capital_session=capital_session, alpaca_adapter=alpaca_adapter,
@@ -876,7 +887,8 @@ async def _run_tick(
             )
             if not bucket_has_exempt:
                 instrument_id = f"{venue}:{symbol}"
-                latest_stored_ts = last_stored_bar_ts(conn, instrument_id, timeframe)
+                # storage-split: bars lives on the marketdata conn (620 sibling).
+                latest_stored_ts = last_stored_bar_ts(_md_conn, instrument_id, timeframe)
                 if latest_stored_ts is not None and all(
                     not bar_advance_due(
                         last_eval_ts=state.last_eval_bar_ts_by_key.get(
@@ -900,8 +912,9 @@ async def _run_tick(
                 # store refetches live instead of skipping (cooldown-gated;
                 # storm/OKX-429 safe). A FRESH read is byte-identical to the
                 # prior path (no fetch).
+                # storage-split: bars live on the marketdata conn.
                 bars = await read_recent_bars_ondemand(
-                    conn, venue=venue, symbol=symbol, asset_class=asset_class,
+                    _md_conn, venue=venue, symbol=symbol, asset_class=asset_class,
                     bar_interval=timeframe,
                     # Per-tf read depth: 1D reads 260 bars so the deepest 1D warmup
                     # (equity_52wk_high_breakout, 253) is satisfied — a 240 read

@@ -190,6 +190,23 @@ RETENTION_SPEC: tuple[RetentionRule, ...] = (
                   "G3 TAG-ONLY shadow; window matches news_timing_shadow"),
 )
 
+# storage-split (vault/50_research/storage-split-blueprint.md, 2026-07-14):
+# RETENTION_SPEC mixes marketdata-domain rules (bars/ticker_baseline_samples/
+# watchlist_focus/news_timing_shadow/... — everything the firehose writes)
+# with the ONE trading-domain rule (gate_events). Running the full spec
+# against a single conn either prunes the wrong (post-split, permanently
+# stale) copy or — if pointed at the marketdata file — raises on the missing
+# gate_events table and aborts the whole pass. Split so each half runs
+# against its own domain's conn/writer (``_production_retention.py``);
+# ``RETENTION_SPEC`` itself is UNCHANGED (kept for any single-conn caller/
+# test still exercising the full combined spec).
+RETENTION_SPEC_TRADING: tuple[RetentionRule, ...] = tuple(
+    r for r in RETENTION_SPEC if r.table == "gate_events"
+)
+RETENTION_SPEC_MARKETDATA: tuple[RetentionRule, ...] = tuple(
+    r for r in RETENTION_SPEC if r.table != "gate_events"
+)
+
 # --- The probe-sidecar prune allowlist (data/probes.sqlite). -----------------
 #
 # The observe-only AI-judge sidecar grows without bound (live: 2.2 GB). It is a
@@ -329,15 +346,24 @@ def run_retention(
     conn: sqlite3.Connection,
     *,
     now_ts: int | None = None,
+    spec: tuple[RetentionRule, ...] = RETENTION_SPEC,
 ) -> dict[str, int]:
-    """Apply every rule in ``RETENTION_SPEC``. Returns {table: rows_deleted}.
+    """Apply every rule in ``spec`` (default ``RETENTION_SPEC``, the full
+    combined set). Returns {table: rows_deleted}.
 
     A single transaction per call; idempotent. Pure deletes on raw/history
     streams — never touches the trading ledger or any decision state.
+
+    ``spec`` (storage-split): production callers pass
+    ``RETENTION_SPEC_MARKETDATA`` / ``RETENTION_SPEC_TRADING`` to scope this
+    to the conn's own domain — see the module-level split comment above
+    ``RETENTION_SPEC_TRADING``. The default stays the full combined spec so a
+    single-conn caller/test (built on the unchanged, full-superset trading
+    schema) is unaffected.
     """
     now = int(time.time()) if now_ts is None else int(now_ts)
     deleted: dict[str, int] = {}
-    for rule in RETENTION_SPEC:
+    for rule in spec:
         rows = prune_table(
             conn, rule.table, rule.ts_column, rule.retain_sec, now_ts=now,
             bar_interval=rule.bar_interval,
@@ -355,6 +381,7 @@ def run_retention_live(
     conn: sqlite3.Connection,
     *,
     now_ts: int | None = None,
+    spec: tuple[RetentionRule, ...] = RETENTION_SPEC,
 ) -> dict[str, int]:
     """LIVE-loop variant of ``run_retention`` — DEGRADE-NEVER-CRASH.
 
@@ -368,7 +395,7 @@ def run_retention_live(
     handle is never touched from two threads.
     """
     try:
-        return run_retention(conn, now_ts=now_ts)
+        return run_retention(conn, now_ts=now_ts, spec=spec)
     except sqlite3.Error as exc:
         logger.warning("[retention] live prune skipped (degrade): %r", exc)
         return {}
@@ -435,18 +462,26 @@ def checkpoint_wal(db_path: Path | str, *, timeout_sec: float = 30.0) -> tuple[i
     return busy, log_frames, checkpointed
 
 
-def run_retention_job(db_path: Path | str, *, now_ts: int | None = None) -> dict[str, int]:
+def run_retention_job(
+    db_path: Path | str, *, now_ts: int | None = None,
+    spec: tuple[RetentionRule, ...] = RETENTION_SPEC,
+) -> dict[str, int]:
     """Full hygiene pass for the ops daily-restart down-window: prune + checkpoint.
 
     Opens its own connection, runs the retention deletes, then the reclaiming WAL
     checkpoint (so the freed pages and the deletes are flushed and the -wal file
     shrinks). Returns {table: rows_deleted, '__wal_checkpointed__': frames}.
     Caller MUST ensure the bot is stopped (no concurrent writer).
+
+    ``spec`` (storage-split): pass ``RETENTION_SPEC_TRADING`` /
+    ``RETENTION_SPEC_MARKETDATA`` to scope one pass to ONE domain's DB file
+    (the ops daily-restart runs one job per file post-split). Default stays
+    the full combined spec — byte-identical for any pre-split single-DB caller.
     """
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     try:
         conn.execute("PRAGMA busy_timeout=30000")
-        result = run_retention(conn, now_ts=now_ts)
+        result = run_retention(conn, now_ts=now_ts, spec=spec)
     finally:
         conn.close()
     _busy, _log, checkpointed = checkpoint_wal(db_path)

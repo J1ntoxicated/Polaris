@@ -369,6 +369,7 @@ async def refresh_alpaca_universe_once(
     *,
     now_ts: int | None = None,
     momentum_conn: sqlite3.Connection | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> int:
     """Fetch Alpaca US-equity assets → rank → persist. Returns active count.
 
@@ -381,6 +382,14 @@ async def refresh_alpaca_universe_once(
     shadow scan offloads onto (STALL-safe, see ``_momentum_z_shadow_async`` —
     this is the venue with the largest instrument count, so the biggest
     beneficiary of the offload).
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain conn passed
+    to ``refresh_sector_rotation_shadow`` (its ``bars`` read + its
+    ``sector_rank_shadow`` write are both marketdata-domain tables). This call
+    runs INLINE on the caller's own thread (no ``asyncio.to_thread`` offload
+    here), so reusing the loop's persistent ``state.md_conn`` is thread-safe.
+    ``None`` falls back to ``conn`` (byte-identical pre-split behaviour for
+    every existing single-conn caller/test).
     """
     ts = now_ts if now_ts is not None else int(time.time())
     try:
@@ -404,7 +413,7 @@ async def refresh_alpaca_universe_once(
     persist_universe(conn, instruments, is_active_set=active_ids)
     try:  # fail-open shadow writes — a locked-DB fault must not kill layer0 (review MED)
         persist_momentum_shadow(conn, active)
-        refresh_sector_rotation_shadow(conn, now_ts=ts)
+        refresh_sector_rotation_shadow(md_conn if md_conn is not None else conn, now_ts=ts)
     except sqlite3.Error:
         logger.warning("[L0/alpaca] momentum/sector shadow write skipped (db busy)")
     # B2: deactivate the prior-active names that dropped OUT of this fetch (the
@@ -820,6 +829,7 @@ def _sweep_focus(
     opportunity_scores: dict[str, float],
     trade_eligible: dict[str, bool],
     quote_writer: Any | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[FocusSelection]:
     """Build focus rows from the STEP② candidate sweep (today's movers).
 
@@ -834,18 +844,25 @@ def _sweep_focus(
     its in-mem accumulator (``activation_metrics``) so an intraday-active major
     outranks a calm wide-daily name. A missing writer degrades the live-motion
     activation components to neutral (the name scores on bars+spread alone).
+
+    ``md_conn`` (storage-split): ``select_candidate_focus`` + the prior-cycle
+    hysteresis read touch ONLY marketdata tables (watchlist_focus/bars/
+    quote_ticks/ticker_ground) — routed here, never ``conn`` — while
+    ``open_position_targets`` below stays on ``conn`` (trading/positions).
+    ``None`` falls back to ``conn`` (byte-identical pre-split behaviour).
     """
     # Deferred import breaks the _production_layers ⇆ _candidate_sweep_select ⇆
     # _static_ground import cycle (the sweep reads read_ticker_ground from
     # _static_ground, which imports read_active_universe from here).
     from polaris.scripts._candidate_sweep_select import select_candidate_focus
 
+    _md = md_conn if md_conn is not None else conn
     cap = _sweep_cap()
-    prev_symbols = _prev_focus_symbols(conn, now_ts)
+    prev_symbols = _prev_focus_symbols(_md, now_ts)
     open_targets = open_position_targets(conn)
     venue_weights = _build_venue_weights(universe, now_ts)
     return select_candidate_focus(
-        conn, universe, now_ts=now_ts, cap=cap,
+        _md, universe, now_ts=now_ts, cap=cap,
         bucket_counts=None, venue_weights=venue_weights,
         open_targets=open_targets, prev_focus_symbols=prev_symbols,
         opportunity_scores=opportunity_scores or None,
@@ -886,8 +903,17 @@ def refresh_focus_watchlist(
     run_id: str = "",
     quote_writer: Any | None = None,
     altdata_cache: Any | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> int:
     """Compute dynamic focus over active universe + persist; return count.
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain conn used
+    for the final ``watchlist_focus`` persist + (candidate-sweep path only)
+    the prior-cycle/bars/ticker_ground reads inside :func:`_sweep_focus`.
+    Every OTHER read here (universe/blocklist/signals/cell_matrix/regime/
+    positions) stays on ``conn`` (trading). ``None`` falls back to ``conn``
+    (byte-identical pre-split behaviour — every existing single-conn caller/
+    test is unaffected).
 
     Task 3 / D2: runtime-blocklisted (venue, symbol) — venue-permanent
     compliance rejects (51155) — are excluded so they never enter focus and
@@ -990,12 +1016,14 @@ def refresh_focus_watchlist(
     # The legacy merit producer stays intact behind POLARIS_CANDIDATE_SWEEP=0 for
     # rollback. The EntranceJudge telemetry (opportunity_score/trade_eligible flag
     # + the ambiguity sidecar) is preserved on both paths.
+    _md = md_conn if md_conn is not None else conn
     if _candidate_sweep_enabled():
         focus = _sweep_focus(
             conn, universe, ts,
             opportunity_scores=opportunity_scores,
             trade_eligible=trade_eligible,
             quote_writer=quote_writer,
+            md_conn=_md,
         )
     else:
         focus = compute_dynamic_focus(
@@ -1005,7 +1033,7 @@ def refresh_focus_watchlist(
             opportunity_scores=opportunity_scores or None,
             trade_eligible=trade_eligible or None,
         )
-    persist_focus(conn, focus)
+    persist_focus(_md, focus)
     # Ambiguity seam — write the per-candidate judgment (incl. ambiguous flag) to
     # the sidecar. PURE TELEMETRY (NO AI, NO runtime consumer; deferred Inc-2).
     if probe_conn is not None and judge_readings:
@@ -1182,8 +1210,19 @@ def get_focus_targets(
     cycle_index: int | None = None,
     cadence_k: int | None = None,
     cadence_m: int | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Read the latest focus cycle as ``(venue, symbol, asset_class, group_id)``.
+
+    ``md_conn`` (storage-split cross-domain audit item — this call site was
+    NOT in the blueprint's named list, added here): ``watchlist_focus`` is
+    marketdata-domain, ``universe`` is trading-domain. The prior single-query
+    ``LEFT JOIN`` spanned both; this now reads the focus rows from ``md_conn``
+    (falling back to ``conn`` when unwired) and resolves each row's
+    asset_class/group_id from ``universe`` via a Python-side dict merge — a
+    hot-path caller (bar ingest + WS subscription both call this every tick),
+    so the blueprint's ATTACH suggestion (non-hot-path only) does not apply
+    here; a plain second SELECT is the resolution it prescribes instead.
 
     Returns up to ``max_n`` dynamic-focus entries (ordered by focus_rank asc)
     UNIONED with every OPEN position's symbol (:func:`open_position_targets`).
@@ -1215,8 +1254,9 @@ def get_focus_targets(
     BTC seed). Union is ADD-only (flow_not_block): never blocks an entry.
     """
     ts = cycle_ts if cycle_ts is not None else int(time.time())
+    _md = md_conn if md_conn is not None else conn
     focus: list[tuple[str, str, str, str]] = []
-    row = conn.execute(
+    row = _md.execute(
         "SELECT MAX(cycle_ts) FROM watchlist_focus WHERE cycle_ts <= ?", (ts,)
     ).fetchone()
     if row is not None and row[0] is not None:
@@ -1224,7 +1264,7 @@ def get_focus_targets(
         # DECOUPLE: the trade set filters to eligible rows; the watch set takes
         # all. COALESCE(trade_eligible,1)=1 keeps a legacy/un-judged row eligible.
         eligible_clause = (
-            " AND COALESCE(wf.trade_eligible, 1) = 1" if eligible_only else ""
+            " AND COALESCE(trade_eligible, 1) = 1" if eligible_only else ""
         )
         params: list[object] = [latest_cycle]
         # CADENCE: filter to firing tiers this cycle (legacy/un-tiered row →
@@ -1236,38 +1276,55 @@ def get_focus_targets(
             m = cadence_m if cadence_m is not None else m
             firing = _firing_tiers(int(cycle_index), int(k), int(m))
             placeholders = ", ".join("?" for _ in firing)
-            tier_clause = f" AND COALESCE(wf.tier, 'T') IN ({placeholders})"
+            tier_clause = f" AND COALESCE(tier, 'T') IN ({placeholders})"
             params.extend(firing)
         params.append(int(max_n))
-        rows = conn.execute(
+        wf_rows = _md.execute(
             f"""
-            SELECT wf.venue, wf.symbol, u.asset_class, u.underlying_group_id
-            FROM watchlist_focus wf
-            LEFT JOIN universe u
-              ON wf.venue = u.venue AND wf.symbol = u.symbol
-            WHERE wf.cycle_ts = ?{eligible_clause}{tier_clause}
-            ORDER BY wf.focus_rank ASC
+            SELECT venue, symbol
+            FROM watchlist_focus
+            WHERE cycle_ts = ?{eligible_clause}{tier_clause}
+            ORDER BY focus_rank ASC
             LIMIT ?
             """,
             tuple(params),
         ).fetchall()
-        focus = [
-            (
-                str(r[0]),
-                str(r[1]),
-                # P2.2 fix (2026-06-22): a NULL asset_class (universe JOIN-miss)
-                # falls back to the canonical group_id prefix (5-class) BEFORE
-                # "crypto" — so an aged-out Alpaca equity / Capital commodity is
-                # not mislabelled crypto (which would apply the wrong 2.0%
-                # regime vol-floor). venue untouched; signal-only, flow_not_block.
-                str(r[2]) if r[2] else (
-                    str(r[3]).split(":", 1)[0]
-                    if r[3] and ":" in str(r[3]) else "crypto"
-                ),
-                str(r[3] or ""),
+        # storage-split (cross-domain audit): the asset_class/group_id
+        # resolution against ``universe`` (trading-domain) is now a SEPARATE
+        # query on ``conn`` + a Python-side dict merge — the prior single
+        # ``LEFT JOIN`` spanned watchlist_focus(md) and universe(trading),
+        # which no longer share a file.
+        venues = {str(v) for v, _s in wf_rows}
+        symbols = {str(s) for _v, s in wf_rows}
+        uni_by_key: dict[tuple[str, str], tuple[str, str]] = {}
+        if venues:
+            # NIT: filter by symbol too (not venue alone) — preserves the
+            # original single-query LEFT JOIN's semantics (an exact (venue,
+            # symbol) match) while avoiding an over-fetch of every OTHER
+            # symbol on a busy venue.
+            v_placeholders = ", ".join("?" for _ in venues)
+            s_placeholders = ", ".join("?" for _ in symbols)
+            for v, s, ac, gid in conn.execute(
+                f"SELECT venue, symbol, asset_class, underlying_group_id "
+                f"FROM universe WHERE venue IN ({v_placeholders}) "
+                f"AND symbol IN ({s_placeholders})",
+                (*venues, *symbols),
+            ).fetchall():
+                uni_by_key[(str(v), str(s))] = (str(ac or ""), str(gid or ""))
+        focus = []
+        for v, s in wf_rows:
+            venue, symbol = str(v), str(s)
+            ac, gid = uni_by_key.get((venue, symbol), ("", ""))
+            # P2.2 fix (2026-06-22): a NULL/missing asset_class (universe
+            # JOIN-miss) falls back to the canonical group_id prefix (5-class)
+            # BEFORE "crypto" — so an aged-out Alpaca equity / Capital
+            # commodity is not mislabelled crypto (which would apply the
+            # wrong 2.0% regime vol-floor). venue untouched; signal-only,
+            # flow_not_block.
+            resolved_ac = ac if ac else (
+                gid.split(":", 1)[0] if gid and ":" in gid else "crypto"
             )
-            for r in rows
-        ]
+            focus.append((venue, symbol, resolved_ac, gid))
     # Force-seat held symbols (additive, not truncated by max_n). De-dup on
     # (venue, symbol) so a held name already in the dynamic focus is not doubled.
     seen = {(v, s) for v, s, _ac, _g in focus}

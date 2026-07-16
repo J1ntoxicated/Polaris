@@ -31,7 +31,8 @@ import pytest
 from polaris.core.data.ingest import persist_bars
 from polaris.core.data.schema import Bar
 from polaris.core.streams.alpaca_health import alpaca_equity_entries_halted
-from polaris.storage.schema import init_db
+from polaris.storage.schema import ALL_DDL, init_db
+from polaris.strategies.base import RawSignal
 
 
 def _alpaca_bar(symbol: str, ts: int) -> Bar:
@@ -114,3 +115,95 @@ def test_operator_override_falsey_does_not_force(
     persist_bars(conn, [_alpaca_bar("MSFT", now - 600)])
     monkeypatch.setenv("POLARIS_ALPACA_ENTRIES_HALT", "0")
     assert alpaca_equity_entries_halted(conn, now_ts=now) is False
+
+
+# ---------------------------------------------------------------------------
+# Pipeline call-site — storage-split round 4 CRITICAL fix
+# (_production_run_signal.run_pipeline_for_signal:158): bars is
+# marketdata-domain, so a trading-conn-only read sees a permanently-empty
+# table post-split -> alpaca_equity_entries_halted always returns True ->
+# every Alpaca entry HALTED forever (fail-closed, flow_not_block violation).
+# ---------------------------------------------------------------------------
+
+
+def _memdb_all_ddl() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_pipeline_alpaca_entry_not_halted_by_permanently_empty_trading_bars() -> None:
+    """A fresh Alpaca bar landing ONLY in state.md_conn (post-split reality —
+    the trading conn's bars table stays empty) must NOT halt the entry."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import run_pipeline_for_signal
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import ProdLoopState, _all_strategies
+
+    reset_process_fence()
+    conn = _memdb_all_ddl()  # trading conn — bars stays EMPTY
+    md_conn = _memdb_all_ddl()
+    persist_bars(md_conn, [_alpaca_bar("AAPL", int(time.time()) - 600)])
+
+    captured: dict[str, object] = {}
+
+    async def _spy_reserve(**_kwargs: object) -> None:
+        captured["called"] = True
+        return None
+
+    eq_sig = RawSignal(
+        signal_id="halt_fix_1", strategy_id="equity_tsmom", symbol="AAPL",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="equity_intraday",
+    )
+    await run_pipeline_for_signal(
+        conn=conn, haiku=StubGPTClient(), state=ProdLoopState(md_conn=md_conn),
+        strategy=_all_strategies()[0], sig=eq_sig, venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", regime="bull_trend",
+        bars_atr_pct=0.02, last_price=190.0,
+        universe_rows=[{"venue": "alpaca", "symbol": "AAPL", "vol_24h_usd": 2e9}],
+        now_ts=int(time.time()), reserve_and_submit=_spy_reserve,
+    )
+    assert captured.get("called") is True  # NOT halted -> pipeline reached G5
+    conn.close()
+    md_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_alpaca_entry_halt_falls_back_to_conn_when_md_conn_unwired() -> None:
+    """state.md_conn=None (legacy/smoke/replay callers) must fall back to the
+    conn it is given — byte-identical to the pre-fix single-conn behaviour."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import run_pipeline_for_signal
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import ProdLoopState, _all_strategies
+
+    reset_process_fence()
+    conn = _memdb_all_ddl()
+    persist_bars(conn, [_alpaca_bar("AAPL", int(time.time()) - int(99 * 3600))])
+
+    captured: dict[str, object] = {}
+
+    async def _spy_reserve(**_kwargs: object) -> None:
+        captured["called"] = True
+        return None
+
+    eq_sig = RawSignal(
+        signal_id="halt_fix_2", strategy_id="equity_tsmom", symbol="AAPL",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="equity_intraday",
+    )
+    await run_pipeline_for_signal(
+        conn=conn, haiku=StubGPTClient(), state=ProdLoopState(),
+        strategy=_all_strategies()[0], sig=eq_sig, venue="alpaca",
+        symbol="AAPL", asset_class="equity",
+        underlying_group_id="equity:AAPL", regime="bull_trend",
+        bars_atr_pct=0.02, last_price=190.0,
+        universe_rows=[{"venue": "alpaca", "symbol": "AAPL", "vol_24h_usd": 2e9}],
+        now_ts=int(time.time()), reserve_and_submit=_spy_reserve,
+    )
+    assert "called" not in captured  # stale bar on the fallback conn -> HALTED
+    conn.close()

@@ -331,6 +331,9 @@ def build_ticker_chart(
     ``_indicators(...)`` call below for a store read keyed by
     ``(venue, symbol, native_interval)``; the on-demand compute remains the
     fallback for symbols the store has not materialised yet.
+
+    ``conn`` — the marketdata-domain conn (storage-split, 2026-07-14): ``bars``
+    lives there, not the trading DB.
     """
     native = resolution_to_interval(resolution)
     empty = {
@@ -385,12 +388,18 @@ def _universe_names(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
     return {(str(r[0]), str(r[1])): str(r[2]) for r in rows}
 
 
-def list_chart_symbols(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def list_chart_symbols(
+    conn: sqlite3.Connection, *, names_conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
     """Distinct (venue, symbol) with the resolutions each actually has stored.
 
     Drives the Chart-tab selector: venue-grouped symbols, each tagged with the
     resolution tokens (``1m``/``5m``/…) for which bars exist + the human-readable
     ``name`` from ``universe`` (when known; '' otherwise). Read-only.
+
+    ``conn`` — the marketdata-domain conn (storage-split, 2026-07-14): ``bars``
+    lives there. ``names_conn`` — the trading conn ``universe`` still lives on;
+    falls back to ``conn`` (byte-identical for legacy single-conn callers).
     """
     try:
         rows = conn.execute(
@@ -398,7 +407,7 @@ def list_chart_symbols(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         ).fetchall()
     except sqlite3.Error:
         return []
-    names = _universe_names(conn)
+    names = _universe_names(names_conn if names_conn is not None else conn)
     by_venue: dict[str, dict[str, set[str]]] = {}
     for venue, symbol, interval in rows:
         token = _INTERVAL_TO_RESOLUTION.get(str(interval))

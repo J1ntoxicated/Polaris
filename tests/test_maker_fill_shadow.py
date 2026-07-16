@@ -84,3 +84,27 @@ def test_log_maker_fill_none_conn_is_noop() -> None:
         None, run_id="r", strategy_id="s", venue="okx", symbol="X",
         side="buy", touch_px=1.0, fill_px=1.0, outcome="clean_fill", reposts=0,
     )
+
+
+def test_log_maker_fill_routes_through_db_writer_when_wired() -> None:
+    # storage-split (round 4 fix): maker_fill_shadow is marketdata-domain —
+    # a wired db_writer (state.md_db_writer) receives the job instead of the
+    # caller's own conn.execute (mirrors log_price_through_entry's pattern).
+    conn = _conn()
+    submitted: list[str] = []
+
+    class _FakeWriter:
+        def submit(self, fn: object, *, label: str = "") -> None:
+            fn(conn)  # type: ignore[operator]
+            submitted.append(label)
+
+    log_maker_fill(
+        conn, run_id="r", strategy_id="weekend_thin_book_flush_maker",
+        venue="okx", symbol="BTC-USDT", side="buy", touch_px=100.0,
+        fill_px=99.9, outcome="clean_fill", reposts=1,
+        db_writer=_FakeWriter(),  # type: ignore[arg-type]
+    )
+    assert submitted == ["maker_fill_shadow"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM maker_fill_shadow"
+    ).fetchone()[0] == 1

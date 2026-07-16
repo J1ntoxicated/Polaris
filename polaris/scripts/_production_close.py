@@ -575,7 +575,9 @@ async def _close_trade_with_real_pnl(
         # fresh tick (graceful degrade). The venue sell still fills live (market
         # order); this only stops the delayed bar from sizing the 51201 cap-split
         # children + the close slippage_bps reference.
-        bar_mark = _latest_bar_close(conn, venue=trade.venue, symbol=trade.symbol)
+        bar_mark = _latest_bar_close(
+            conn, venue=trade.venue, symbol=trade.symbol, md_conn=state.md_conn,
+        )
         fresh_mark = live_or_bar_price(
             state.quote_writer,
             f"{trade.venue}:{trade.symbol}",
@@ -776,7 +778,7 @@ async def _close_trade_with_real_pnl(
         # slice was the residual full-PnL re-stamping path).
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
             conn, trade=trade, exit_price_override=real_fill.fill_price,
-            close_base_qty=real_fill.base_qty,
+            close_base_qty=real_fill.base_qty, md_conn=state.md_conn,
         )
         close_fill = real_fill
         # FIX B: a genuine partial (child reject / within-child) returns less
@@ -823,6 +825,7 @@ async def _close_trade_with_real_pnl(
         pnl_r, pnl_usd, exit_price = real_pnl_r_from_fills(
             conn, trade=trade,
             exit_price_override=live_override if live_override > 0.0 else None,
+            md_conn=state.md_conn,
         )
         close_fill = simulate_close(trade, exit_price=exit_price)
     # BUILD_SCHEMA: persist final MFE/MAE (R units) + exit_state at close.
@@ -1017,6 +1020,7 @@ async def _close_trade_with_real_pnl(
     # this signal's sizing-time p_pos snapshot. Measurement only, fail-open.
     _safe_record_calibration_outcome(
         conn, trade=trade, won=won, pnl_r_net=pnl_r_net, now_ts=now_ts,
+        state=state,
     )
     # VIRTUAL ACCOUNT (Jin 2026-07-07): weekly per-exchange trace (TRACE, never
     # RESET — the account compounds continuously) + reset-only-on-ruin check.

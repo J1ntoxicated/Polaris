@@ -121,6 +121,7 @@ def load_active_position_rows(
     limit: int = LIVE_RECALC_MAX_POSITIONS,
     quote_writer: Any = None,
     tf_atr_cache: dict[tuple[str, str], tuple[float, int]] | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[ActivePositionRow]:
     """Read active positions + matching entry fill + most-recent bar close.
 
@@ -136,7 +137,13 @@ def load_active_position_rows(
     expose the entry-time R anchor; a legacy NULL anchor sets
     ``anchor_missing=True`` and the consumer denominates by the current
     timeframe ATR instead (graceful, never halts).
+
+    storage-split (round 3 CRITICAL fix): ``positions``/``fills`` are
+    trading-domain (stay on ``conn``); ``bars`` is marketdata-domain and is
+    written ONLY to ``md_conn`` post-split. ``md_conn=None`` (legacy/test
+    callers, single-DB mode) falls back to ``conn`` — byte-identical.
     """
+    _md = md_conn if md_conn is not None else conn
     rows = conn.execute(
         """
         SELECT p.position_id, p.venue, p.symbol, p.underlying_group_id,
@@ -187,7 +194,7 @@ def load_active_position_rows(
         # position with no bar at/after its own open (this tick, before the
         # next bar closes) degrades to the entry-price fallback below
         # (graceful, never halts).
-        bar_row = conn.execute(
+        bar_row = _md.execute(
             """
             SELECT ts, close, high, low, volume FROM bars
             WHERE instrument_id = ? AND bar_interval = '1m'
@@ -232,13 +239,13 @@ def load_active_position_rows(
         drift_bar_row = bar_row
         if tf != "1m":
             tf_atr = timeframe_atr_pct(
-                conn, instrument_id=instrument_id, timeframe=tf,
+                _md, instrument_id=instrument_id, timeframe=tf,
                 now_ts=int(time.time()), cache=tf_atr_cache,
             )
             if tf_atr is not None:
                 atr_pct = tf_atr
             tf_bars = timeframe_bar_rows(
-                conn, instrument_id=instrument_id, timeframe=tf,
+                _md, instrument_id=instrument_id, timeframe=tf,
                 now_ts=int(time.time()), min_bars=MIN_TF_BARS,
             )
             if tf_bars is not None:
@@ -494,8 +501,12 @@ async def _evaluate_position(
     # missing bar row / unregistered strategy degrades to 0 seen (safest — the
     # gate suppresses rather than risks judging an unmeasured thesis).
     native_tf = strategy_timeframe(strategy_id)
+    # storage-split (round 4 MED fix): bars is marketdata-domain — a
+    # trading-conn read sees a permanently-empty table post-split, so the
+    # maturity gate always saw 0 bars (permanently suppressed).
     native_bars_seen = native_bars_seen_since(
-        conn, instrument_id=f"{pos['venue']}:{pos['symbol']}", timeframe=native_tf,
+        state.md_conn if state.md_conn is not None else conn,
+        instrument_id=f"{pos['venue']}:{pos['symbol']}", timeframe=native_tf,
         open_ts=int(pos.get("opened_ts", now_ts)), now_ts=now_ts,
     )
     mode = assess_mode_for_position(
@@ -728,7 +739,11 @@ async def _evaluate_position(
         # EVIDENCE only: no rail/decision branches on these keys (the judge reads
         # them; G7's widen/tighten rails are owned by the deterministic FSM).
         g7_payload_full["regime"] = regime
-        _ground_row = read_ticker_ground(conn, f"{pos['venue']}:{pos['symbol']}")
+        # storage-split (round 3 MED fix): ticker_ground is marketdata-domain.
+        _ground_conn = state.md_conn if state.md_conn is not None else conn
+        _ground_row = read_ticker_ground(
+            _ground_conn, f"{pos['venue']}:{pos['symbol']}"
+        )
         if _ground_row is not None:
             g7_payload_full["evidence"] = _ground_row["ground"]
             g7_payload_full["ticker_ground"] = {
@@ -877,6 +892,7 @@ async def recalc_active_positions(
     positions = load_active_position_rows(
         conn, limit=max_positions, quote_writer=state.quote_writer,
         tf_atr_cache=getattr(state, "tf_atr_cache", None),
+        md_conn=state.md_conn,
     )
     if not positions:
         # No open positions — clear the G6 call cache so it never grows stale.

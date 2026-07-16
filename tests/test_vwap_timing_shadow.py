@@ -306,3 +306,29 @@ async def test_g4_ai_free_shadow_tag_fail_open_on_bad_conn() -> None:
     ctx = _g4_ctx(shadow_conn_present=True)
     result = await pre_entry_watcher_gate(ctx, ai_free=True, shadow_conn=conn)
     assert result.decision == GateDecision.PROCEED
+
+
+async def test_g4_frontgate_shadow_routes_bars_and_vwap_write_to_md_conn(
+    tmp_path: Path,
+) -> None:
+    """storage-split (round 4 fix): bars/vwap_timing_shadow are marketdata-
+    domain — when ``md_conn`` is supplied, the frontgate tagger reads bars
+    from AND writes vwap_timing_shadow to it, never the trading
+    ``shadow_conn`` (which stays reserved for gate_shadow_events)."""
+    shadow_conn = init_db(tmp_path / "trading.sqlite")
+    md_conn = init_db(tmp_path / "md.sqlite")
+    try:
+        ctx = _g4_ctx(shadow_conn_present=True)
+        result = await pre_entry_watcher_gate(
+            ctx, ai_free=True, shadow_conn=shadow_conn, md_conn=md_conn,
+        )
+        assert result.decision == GateDecision.PROCEED
+        assert md_conn.execute(
+            "SELECT COUNT(*) FROM vwap_timing_shadow"
+        ).fetchone()[0] == 1
+        assert shadow_conn.execute(
+            "SELECT COUNT(*) FROM vwap_timing_shadow"
+        ).fetchone()[0] == 0
+    finally:
+        shadow_conn.close()
+        md_conn.close()

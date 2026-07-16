@@ -107,11 +107,17 @@ def compute_news_ic(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", required=True, help="SQLite path (must exist)")
+    parser.add_argument("--db", required=True, help="Trading SQLite path (must exist)")
     parser.add_argument("--horizon-sec", type=int, default=DEFAULT_HORIZON_SEC)
     parser.add_argument("--min-n", type=int, default=DEFAULT_MIN_N)
     args = parser.parse_args()
-    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    # storage-split (round 4 fix): news_timing_shadow + bars are BOTH
+    # marketdata-domain — read the sibling, not the (post-split, always-
+    # empty) trading db_path passed via --db.
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
+
+    md_path = marketdata_db_path_for(args.db)
+    conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
     try:
         digest = compute_news_ic(conn, horizon_sec=args.horizon_sec, min_n=args.min_n)
         print(digest)

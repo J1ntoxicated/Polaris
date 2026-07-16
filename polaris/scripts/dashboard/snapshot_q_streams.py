@@ -227,14 +227,19 @@ def _alpaca_account_equity() -> _AlpacaEquity | None:
     return result
 
 
-def _marks_age_sec(conn: sqlite3.Connection, *, venue: str, now_s: int) -> int:
+def _marks_age_sec(
+    conn: sqlite3.Connection, *, venue: str, now_s: int,
+    md_conn: sqlite3.Connection | None = None,
+) -> int:
     """Age (seconds) of the freshest ``<venue>:*`` bar close, for a closed-venue
     stale-mark label. 0 when no bars exist yet for that venue (nothing to be
     stale). Generalized (Jin 2026-07-08 dashboard-live-net fix) from the
     Alpaca-only original — Capital CFD (FX/indices/gold) also closes on
-    weekends, so this now serves both lanes."""
+    weekends, so this now serves both lanes. Storage-split (2026-07-14):
+    ``bars`` is marketdata-domain — reads ``md_conn`` when supplied, falling
+    back to ``conn`` (byte-identical for every existing single-conn caller)."""
     rows = _safe_query(
-        conn,
+        md_conn if md_conn is not None else conn,
         "SELECT MAX(ts) FROM bars WHERE instrument_id LIKE ?",
         (f"{venue}:%",),
     )
@@ -247,6 +252,7 @@ def _per_stream_summary(
     *,
     now_s: int,
     positions: list[PositionRow] | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[StreamSummary]:
     """Per-stream (venue lane) rollup — one row per registered stream.
 
@@ -405,7 +411,7 @@ def _per_stream_summary(
     # the last internal mark (stale bars/ticks), so label it explicitly.
     alpaca_session = us_equity_session_state(now_s)
     alpaca_marks_age = (
-        _marks_age_sec(conn, venue="alpaca", now_s=now_s)
+        _marks_age_sec(conn, venue="alpaca", now_s=now_s, md_conn=md_conn)
         if alpaca_session != "rth" else 0
     )
     # Capital CFD (FX/indices/gold) weekend closure (Jin 2026-07-08 fix —
@@ -417,7 +423,7 @@ def _per_stream_summary(
     # Alpaca above: "fx_open" → live; anything else → last internal mark, labeled.
     capital_session = resolve_venue_session("capital", now_s)
     capital_marks_age = (
-        _marks_age_sec(conn, venue="capital", now_s=now_s)
+        _marks_age_sec(conn, venue="capital", now_s=now_s, md_conn=md_conn)
         if capital_session != "fx_open" else 0
     )
 

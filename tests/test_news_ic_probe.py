@@ -8,6 +8,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+
 from polaris.scripts.news_ic_probe import compute_news_ic
 from polaris.storage.schema import init_db
 
@@ -94,3 +96,39 @@ def test_missing_table_graceful() -> None:
         assert compute_news_ic(conn)["present"] is False
     finally:
         conn.close()
+
+
+def test_main_resolves_marketdata_sibling_not_trading_db(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """storage-split (round 4 fix): news_timing_shadow + bars are BOTH
+    marketdata-domain — main() must read the marketdata sibling, not the
+    (post-split, always-empty) trading db_path passed via --db."""
+    from polaris.scripts.news_ic_probe import main
+    from polaris.storage.schema_marketdata import (
+        init_marketdata_db,
+        marketdata_db_path_for,
+    )
+
+    trading_path = tmp_path / "polaris_live.sqlite"
+    init_db(trading_path).close()  # exists, but has NO news_timing_shadow/bars
+    md_path = marketdata_db_path_for(trading_path)
+    md_conn = init_marketdata_db(md_path)
+    for i in range(10):
+        sym = f"SYM{i}"
+        sentiment = -1.0 + i * (2.0 / 9.0)  # spans -1..+1
+        _seed_news(md_conn, symbol=sym, ingestion_ts=0, sentiment=sentiment)
+        _seed_bar(md_conn, symbol=sym, ts=0, close=100.0)
+        _seed_bar(md_conn, symbol=sym, ts=24 * HOUR, close=100.0 + sentiment)
+    md_conn.commit()
+    md_conn.close()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["news_ic_probe", "--db", str(trading_path), "--min-n", "10"],
+    )
+    main()
+    out = capsys.readouterr().out
+    assert "'present': True" in out
+    assert "'n': 10" in out

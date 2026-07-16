@@ -246,7 +246,12 @@ def _shadow_incubator(conn: sqlite3.Connection) -> dict[str, Any]:
     ``created_ts`` (1m native) into a would-be R via ``resolve_would_be_r``; the
     per-strategy rollup carries n / target-hit / stop-hit / open + the median &
     mean would-be R. The ``maker_fill_shadow`` real-fee row count is reported
-    honestly (0 = persist not yet wired, FIX-EXEC pending). Read-only."""
+    honestly (0 = persist not yet wired, FIX-EXEC pending). Read-only.
+
+    ``conn`` — the marketdata-domain conn (storage-split, 2026-07-14):
+    ``weekend_shadow_orders``, ``bars``, and ``maker_fill_shadow`` are all
+    marketdata-domain tables (every ``*_shadow`` table except
+    ``gate_shadow_events``)."""
     try:
         orders = conn.execute(
             """SELECT strategy_id, venue, symbol, side, entry_mark,
@@ -323,7 +328,10 @@ def _readiness(conn: sqlite3.Connection, *, now_ts: int) -> dict[str, Any]:
 
     The countdown is pure (``next_session_opens``). Bar freshness is the age of
     the newest stored bar per (venue, symbol) for the symbols carrying weekend
-    shadow orders (the names that matter for the Monday hand-off). Read-only."""
+    shadow orders (the names that matter for the Monday hand-off). Read-only.
+
+    ``conn`` — the marketdata-domain conn (storage-split, 2026-07-14): ``bars``
+    and ``weekend_shadow_orders`` both live there."""
     opens = next_session_opens(now_ts)
     try:
         rows = conn.execute(
@@ -367,18 +375,27 @@ def _median(sorted_vals: list[float]) -> float:
     return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0
 
 
-def build_weekend(conn: sqlite3.Connection, *, now_ts: int) -> dict[str, Any]:
+def build_weekend(
+    conn: sqlite3.Connection, *, now_ts: int,
+    md_conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
     """Assemble the full Weekend-tab payload (read-only, degrade-never-crash).
 
     Each section is built independently; a failure in one yields its empty shape
     rather than blanking the whole board. ``is_weekend`` lets the client badge /
-    auto-focus the tab only when the cash books are actually shut."""
+    auto-focus the tab only when the cash books are actually shut.
+
+    ``conn`` — the trading conn (``fills`` for section ①). ``md_conn`` — the
+    marketdata-domain conn (storage-split, 2026-07-14) for sections ②/③
+    (``bars`` / ``weekend_shadow_orders`` / ``maker_fill_shadow``); falls back
+    to ``conn`` when omitted (byte-identical for single-conn callers/tests)."""
+    _md = md_conn if md_conn is not None else conn
     return {
         "ts_now": now_ts,
         "is_weekend": is_weekend_utc(now_ts),
         "settlement": _settlement(conn, now_ts=now_ts),
-        "shadow": _shadow_incubator(conn),
-        "readiness": _readiness(conn, now_ts=now_ts),
+        "shadow": _shadow_incubator(_md),
+        "readiness": _readiness(_md, now_ts=now_ts),
         # The funding-promotion gate is a fixed 3-item checklist (the GATED
         # promotion criteria from the weekend research notes); the live state is
         # derived from the shadow section (maker persist wired? funding rounds?).

@@ -283,23 +283,35 @@ def _ticker_chart(path: str) -> dict[str, Any]:
     """
     import urllib.parse
 
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
     from tools.visualizer import chart_data
 
     q = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
     if not _DB_PATH.exists():
         return {"available": False, "groups": [], "bars": [], "indicators": {}}
+    # Storage-split (2026-07-14): ``bars`` is marketdata-domain — a SECOND
+    # read-only conn against the sibling marketdata DB feeds both the symbol
+    # selector and the OHLCV series; ``conn`` (trading) still resolves
+    # ``universe.name`` for the selector's human-readable labels.
+    md_path = marketdata_db_path_for(_DB_PATH)
+    if not md_path.exists():
+        return {"available": False, "groups": [], "bars": [], "indicators": {}}
     conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+    md_conn = sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
     try:
         if q.get("list", [""])[0] == "symbols":
-            return {"groups": chart_data.list_chart_symbols(conn)}
+            return {
+                "groups": chart_data.list_chart_symbols(md_conn, names_conn=conn)
+            }
         venue = q.get("venue", [""])[0]
         symbol = q.get("symbol", [""])[0]
         resolution = q.get("resolution", ["1m"])[0]
         return chart_data.build_ticker_chart(
-            conn, venue=venue, symbol=symbol, resolution=resolution
+            md_conn, venue=venue, symbol=symbol, resolution=resolution
         )
     finally:
         conn.close()
+        md_conn.close()
 
 
 def _resolve_bot_log() -> Path | None:
@@ -1425,10 +1437,14 @@ _WEEKEND_NOTE_SUBSTR = ("weekend", "alpaca_weekend")
 def _build_weekend() -> dict[str, Any]:
     """Four-section weekend ops payload + recent research notes. Read-only.
 
-    Opens a fresh ?mode=ro connection, builds the four sections via
-    ``weekend_data.build_weekend`` (settlement / shadow / readiness), then attaches
-    the recent weekend research notes for the housekeeping queue. A missing DB or a
-    builder failure degrades to an empty-but-shaped payload (never an exception)."""
+    Opens a fresh ?mode=ro connection (trading) + a SECOND ?mode=ro connection
+    against the sibling marketdata DB (storage-split, 2026-07-14 — sections
+    ②/③ read ``bars``/``weekend_shadow_orders``/``maker_fill_shadow``), builds
+    the four sections via ``weekend_data.build_weekend`` (settlement / shadow /
+    readiness), then attaches the recent weekend research notes for the
+    housekeeping queue. A missing DB or a builder failure degrades to an
+    empty-but-shaped payload (never an exception)."""
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
     from tools.visualizer import weekend_data
 
     now_ts = int(time.time())
@@ -1446,10 +1462,21 @@ def _build_weekend() -> dict[str, Any]:
     }
     if not _DB_PATH.exists():
         return payload
+    md_path = marketdata_db_path_for(_DB_PATH)
     try:
         conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
         try:
-            built = weekend_data.build_weekend(conn, now_ts=now_ts)
+            md_conn = (
+                sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
+                if md_path.exists() else None
+            )
+            try:
+                built = weekend_data.build_weekend(
+                    conn, now_ts=now_ts, md_conn=md_conn
+                )
+            finally:
+                if md_conn is not None:
+                    md_conn.close()
         finally:
             conn.close()
     except sqlite3.Error:

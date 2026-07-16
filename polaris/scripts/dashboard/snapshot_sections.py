@@ -453,6 +453,7 @@ def _recent_closed_trades(
     *,
     n: int = 10,
     regime_lookup: dict[tuple[str, str], str] | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[ClosedTrade]:
     """Pair close fills with their entry fills, exact when possible.
 
@@ -575,7 +576,7 @@ def _recent_closed_trades(
         # entry_px × qty is in the price-quote ccy → convert to USD (#50 rate;
         # USD-equiv → 1.0) so the entry notional matches the USD close notional.
         entry_notional = (entry_px or 0.0) * abs(qty) * _quote_usd_rate(
-            conn, quote_ccy
+            conn, quote_ccy, md_conn=md_conn
         )
         # #49: the entry-leg real fee. The headline ``daily_pnl_usd`` nets
         # ``SUM(fee_usd)`` over BOTH legs, so the per-position net must also
@@ -812,10 +813,16 @@ def _alerts(conn: sqlite3.Connection, *, n: int = 3) -> list[AlertRow]:
 # ---------------------------------------------------------------------------
 
 
-def _universe(conn: sqlite3.Connection) -> tuple[int, str]:
-    # Current cycle's focus count (NOT all-time accumulated rows)
+def _universe(
+    conn: sqlite3.Connection, *, md_conn: sqlite3.Connection | None = None,
+) -> tuple[int, str]:
+    # Current cycle's focus count (NOT all-time accumulated rows). Storage-split
+    # (2026-07-14): ``watchlist_focus`` is marketdata-domain — reads ``md_conn``
+    # when supplied, falling back to ``conn`` (byte-identical for legacy
+    # single-conn callers/tests); the ``universe`` fallback below stays on
+    # ``conn`` (trading-domain, unchanged).
     rows = _safe_query(
-        conn,
+        md_conn if md_conn is not None else conn,
         "SELECT COUNT(*), cycle_ts FROM watchlist_focus "
         "WHERE cycle_ts = (SELECT MAX(cycle_ts) FROM watchlist_focus) "
         "GROUP BY cycle_ts",

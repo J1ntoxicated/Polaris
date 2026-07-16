@@ -108,6 +108,21 @@ def open_live_ro(path: Path | str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
 
 
+def _open_live_md_ro(live_db: Path | str) -> sqlite3.Connection | None:
+    """Best-effort RO conn against the marketdata sibling (storage-split round
+    4 fix): S1 (``quote_ticks``) and S6 (``tick_inflow``) both read
+    marketdata-domain tables — a plain ``live_db`` conn sees them permanently
+    empty post-split. ``None`` when the sibling file doesn't exist yet (bot
+    never booted post-split) — S1/S6 then fall back to the trading ``live``
+    conn (legacy pre-split degrade, never crashes the sentinel pass)."""
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
+
+    md_path = marketdata_db_path_for(live_db)
+    if not md_path.exists():
+        return None
+    return open_live_ro(md_path)
+
+
 def open_sentinel_db(path: Path | str) -> sqlite3.Connection:
     """Open (and bootstrap) the SEPARATE sentinel output DB."""
     p = Path(path)
@@ -226,6 +241,9 @@ def run_once(
 
     state_updates: dict[str, dict[str, Any]] = {}
     live = open_live_ro(live_db)
+    # storage-split: S1 (quote_ticks) + S6 (tick_inflow) are marketdata-domain
+    # — best-effort second RO conn (None when the sibling hasn't booted yet).
+    live_md = _open_live_md_ro(live_db)
     sconn = open_sentinel_db(sentinel_db)
     try:
         stateless_checks = (
@@ -233,9 +251,11 @@ def run_once(
             ("S3", check_s3_entry_parity_rejects),
             ("S6", check_s6_feature_availability),
         )
+        _MD_CHECKS = frozenset({"S1", "S6"})
         for check_id, fn in stateless_checks:
             try:
-                findings.extend(fn(live, now, th))
+                src = live_md if check_id in _MD_CHECKS and live_md is not None else live
+                findings.extend(fn(src, now, th))
                 ran.append(check_id)
             except Exception as exc:  # noqa: BLE001 — isolate per check
                 errors[check_id] = f"{type(exc).__name__}: {exc}"
@@ -273,6 +293,8 @@ def run_once(
             raise
     finally:
         live.close()
+        if live_md is not None:
+            live_md.close()
         sconn.close()
     return RunResult(
         checks_run=len(ran),

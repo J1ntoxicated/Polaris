@@ -254,7 +254,10 @@ _QUOTE_RATE_PAIRS: Final[Mapping[str, tuple[str, bool]]] = {
 }
 
 
-def _quote_usd_rate(conn: sqlite3.Connection, quote_ccy: str) -> float:
+def _quote_usd_rate(
+    conn: sqlite3.Connection, quote_ccy: str,
+    *, md_conn: sqlite3.Connection | None = None,
+) -> float:
     """quote-ccy → USD multiplier for the display layer (graceful, never raises).
 
     USD-equivalents (USD/USDT/USDC/"") → 1.0. Otherwise read the latest 1m bar
@@ -262,7 +265,11 @@ def _quote_usd_rate(conn: sqlite3.Connection, quote_ccy: str) -> float:
     quotes USD-per-quote (USDJPY). A missing / non-positive / unknown rate
     degrades to 1.0 — the same graceful fallback the trading path uses, so a
     new venue/ccy is never silently zeroed (the cell then shows the raw quote
-    magnitude, which is the pre-#50 behaviour, not a crash)."""
+    magnitude, which is the pre-#50 behaviour, not a crash).
+
+    Storage-split (2026-07-14): ``bars`` is marketdata-domain — reads
+    ``md_conn`` when supplied, falling back to ``conn`` (byte-identical for
+    every existing single-conn test/caller)."""
     q = (quote_ccy or "").upper()
     if q in _USD_EQUIVALENT_QUOTES:
         return 1.0
@@ -271,7 +278,7 @@ def _quote_usd_rate(conn: sqlite3.Connection, quote_ccy: str) -> float:
         return 1.0
     epic, invert = pair
     rows = _safe_query(
-        conn,
+        md_conn if md_conn is not None else conn,
         "SELECT close FROM bars WHERE instrument_id = ? AND "
         "bar_interval = '1m' ORDER BY ts DESC LIMIT 1",
         (f"capital:{epic}",),
@@ -320,6 +327,7 @@ def _spark_series(
     instruments: list[str],
     *,
     n: int = SPARK_POINTS,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, list[float]]:
     """{instrument_id: recent closes (oldest→newest)} for the row sparklines.
 
@@ -332,6 +340,10 @@ def _spark_series(
     downsampled to ``n`` points. DISPLAY-ONLY — never feeds sizing/gating/exit;
     a missing/locked bars table or an absent instrument degrades to an empty
     list (graceful). The bars cache is Yahoo-primary, already populated.
+
+    Storage-split (2026-07-14): ``bars`` is marketdata-domain — reads
+    ``md_conn`` when supplied, falling back to ``conn`` (byte-identical for
+    every existing single-conn test/caller).
     """
     insts = [i for i in dict.fromkeys(instruments) if i]
     if not insts:
@@ -343,7 +355,7 @@ def _spark_series(
     # bundled stdlib build) supports window functions; _safe_query degrades to
     # [] on any error → empty sparks, never a crash.
     rows = _safe_query(
-        conn,
+        md_conn if md_conn is not None else conn,
         f"""SELECT instrument_id, bar_interval, ts, close FROM (
                 SELECT instrument_id, bar_interval, ts, close,
                        ROW_NUMBER() OVER (
@@ -423,16 +435,18 @@ class _SparkRow(Protocol):
 def _attach_sparks(
     conn: sqlite3.Connection,
     *row_groups: Sequence[_SparkRow],
+    md_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Embed the recent-close sparkline on every (venue, symbol) row in place.
 
     ONE ``_spark_series`` query covers all groups (positions / ticker_stats /
     recent_trades) so there is no per-row fetch; each row's ``spark`` is set to
     the symbol's series (empty when the bars cache has nothing — graceful).
-    Display-only — never feeds sizing/gating/exit.
+    Display-only — never feeds sizing/gating/exit. ``md_conn`` threads through
+    to ``_spark_series`` (storage-split, 2026-07-14 — falls back to ``conn``).
     """
     insts = [f"{r.venue}:{r.symbol}" for grp in row_groups for r in grp]
-    spark_by_inst = _spark_series(conn, insts)
+    spark_by_inst = _spark_series(conn, insts, md_conn=md_conn)
     for grp in row_groups:
         for r in grp:
             r.spark = spark_by_inst.get(f"{r.venue}:{r.symbol}", [])

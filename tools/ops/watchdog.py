@@ -146,19 +146,29 @@ def run_once(cfg: OpsConfig, *, now: float | None = None) -> str:
         # TICK-FREEZE recovery (Jin 2026-07-13): a matched-alive process whose
         # tick has not advanced in TICK_FREEZE_SEC is hung, not healthy — the
         # log-mtime wedge check misses it because background tasks keep the log
-        # fresh. This narrow, evidence-gated case supersedes the "never kill a
-        # live process" stance (the process is functionally dead for trading);
-        # SIGKILL the wedged pid, then fall through to the flap-backoff-guarded
-        # start path. `None` age (pre-warmup, no tick line yet) is NOT frozen.
+        # fresh. Escalation honors the no-kill seal's spirit (SIGTERM to the
+        # exact pidfile-verified PID first, 10s grace for graceful handlers);
+        # only a wedge that ignores TERM gets the forceful signal — the
+        # process is functionally dead for trading and the PID is cmd-matched,
+        # so this cannot hit a foreign process (tests/ops/test_no_kill_patterns
+        # carries the single-file exemption). `None` age (pre-warmup, no tick
+        # line yet) is NOT frozen.
         tick_age = last_tick_age(cfg.bot_log, now=now_f)
         if tick_age is not None and tick_age >= TICK_FREEZE_SEC and pid is not None:
             alerting.notify(
                 cfg, "bot_tick_frozen",
                 f"tick frozen {tick_age:.0f}s (>= {TICK_FREEZE_SEC}s) while pid "
-                f"{pid} alive — killing wedged process and restarting",
+                f"{pid} alive — TERM->grace->force escalation, then restart",
             )
             with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGTERM)
+            for _ in range(10):  # grace window; watchdog self-timeout is 120s
+                time.sleep(1)
+                if not botctl.pid_alive(pid):
+                    break
+            else:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
             # fall through to the start path below (death accounting + backoff)
         else:
             health_checks(cfg, now=now_f)

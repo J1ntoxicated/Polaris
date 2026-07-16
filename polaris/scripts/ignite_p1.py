@@ -84,6 +84,7 @@ from polaris.scripts.production_paper_loop import (
     run_production_paper_loop,
 )
 from polaris.storage.schema import init_db
+from polaris.storage.schema_marketdata import init_marketdata_db, marketdata_db_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ async def _layer0_warm(db_path: Path) -> int:
         conn.close()
 
 
-async def _layer0_producer_start(conn: Any) -> int:
+async def _layer0_producer_start(conn: Any, *, md_conn: Any = None) -> int:
     """Day 8 — kick off the Layer 0 producer once during bootstrap.
 
     Replaces ``_layer0_warm`` for paper mode: refresh both venue universes,
@@ -165,10 +166,17 @@ async def _layer0_producer_start(conn: Any) -> int:
     the boot report. Long-running cadence (OKX 5min / Capital 10min) lives
     inside ``run_production_paper_loop`` so the producer does not contend
     with ignition's own bootstrap.
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain conn passed
+    through to ``refresh_focus_watchlist`` so this boot-warmup persist lands
+    on the SAME file the live loop's ``get_focus_targets`` reads from. Without
+    it the warmup's ``watchlist_focus`` row lands in the trading DB while the
+    subsequent ``run_production_paper_loop`` reads focus from the marketdata
+    DB — the same writer/reader split-brain as the offloaded refresh path.
     """
     okx_active = await refresh_okx_universe_once(conn)
     cap_active = await refresh_capital_universe_once(conn)
-    refresh_focus_watchlist(conn)
+    refresh_focus_watchlist(conn, md_conn=md_conn)
     logger.info(
         "[ignite] layer0 producer warmed: okx_active=%d capital_active=%d",
         okx_active, cap_active,
@@ -272,7 +280,16 @@ async def ignite(
     # 1. Layer 0 warm-up. In paper mode we run a fresh refresh so the loop
     #    has a populated universe + focus before the first tick (Day 8 spec A).
     if paper:
-        universe_count = await _layer0_producer_start(conn)
+        # Storage-split (2026-07-14): a short-lived marketdata conn, opened +
+        # closed around this one-shot bootstrap warmup only — the persistent
+        # handle ``run_production_paper_loop`` (called below) opens its own
+        # ``state.md_conn`` on the same file.
+        md_db_path = marketdata_db_path_for(target_db)
+        md_conn = init_marketdata_db(md_db_path)
+        try:
+            universe_count = await _layer0_producer_start(conn, md_conn=md_conn)
+        finally:
+            md_conn.close()
     else:
         universe_count = await _layer0_warm(target_db)
     notes.append(f"layer0_focus={universe_count}")

@@ -19,6 +19,8 @@ import inspect
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from polaris.core.economics.entry_admission import (
     CELL_POOL_MIN_N_EFF,
     EntryAdmissionDecision,
@@ -434,3 +436,60 @@ def test_ddl_creates_table_on_legacy_db(tmp_path: Path) -> None:
         assert len(fetch_entry_admission_shadow(conn)) == 1
     finally:
         conn.close()
+
+
+# ===========================================================================
+# storage-split (round 4 fix): the pipeline call site writes to state.md_conn
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_pipeline_entry_admission_shadow_writes_to_md_conn(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """entry_admission_shadow is marketdata-domain — the pipeline's
+    Component-C shadow log must land in state.md_conn, not the trading conn
+    ``run_pipeline_for_signal`` is otherwise driven by."""
+    import polaris.scripts._production_run_signal as run_signal_mod
+    from polaris.core.pipeline.gate_state import GateDecision, GateResult
+    from polaris.scripts._smoke_gpt_stub import StubGPTClient
+    from polaris.scripts.production_paper_loop import ProdLoopState
+    from polaris.storage.schema import ALL_DDL
+    from polaris.strategies.spot_donchian import SpotDonchianStrategy
+
+    class _FakeOrch:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def run(self, _ctx: object, *, start_gate: int) -> list[GateResult]:
+            return [GateResult(decision=GateDecision.KILL, next_gate=None, payload={})]
+
+    monkeypatch.setattr(run_signal_mod, "GateOrchestrator", _FakeOrch)
+
+    md_conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        md_conn.execute(stmt)
+    state = ProdLoopState(md_conn=md_conn)
+
+    sig = RawSignal(
+        signal_id="sig-admshadow", strategy_id="tsmom", symbol="BTC-USDT",
+        side="long", strength=0.9, sizing_hint=0.5, ttl_bars=24,
+        thesis_tag="t", correlation_group="spot_cross_sectional_momo",
+    )
+    await run_signal_mod.run_pipeline_for_signal(
+        conn=memdb, haiku=StubGPTClient(), state=state,
+        strategy=SpotDonchianStrategy(), sig=sig, venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        regime="bull_trend", bars_atr_pct=0.01, last_price=100.0,
+        universe_rows=[], now_ts=1_780_000_000,
+        reserve_and_submit=lambda **_: None, phase="P0",
+    )
+    md_n = md_conn.execute(
+        "SELECT COUNT(*) FROM entry_admission_shadow"
+    ).fetchone()[0]
+    trading_n = memdb.execute(
+        "SELECT COUNT(*) FROM entry_admission_shadow"
+    ).fetchone()[0]
+    assert md_n == 1
+    assert trading_n == 0
+    md_conn.close()

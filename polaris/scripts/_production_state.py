@@ -236,6 +236,22 @@ class ProdLoopState:
     # dedicated-conn behaviour (byte-identical, see each writer's db_writer
     # param docstring).
     db_writer: DBWriter | None = None
+    # storage-split (vault/50_research/storage-split-blueprint.md, 2026-07-14
+    # wipe reset) — the SECOND, marketdata-domain DBWriter: same job-queue
+    # machinery as ``db_writer`` above, but its own RW conn against the
+    # SEPARATE ``data/polaris_marketdata.sqlite`` file. Firehose writers
+    # (bars/baseline, quote_ticks/tick_inflow, ticker_technicals,
+    # altdata_snapshot, ticker_ground, gate_kill_counterfactuals, the
+    # *_shadow measurement tables) submit HERE instead of ``db_writer`` so
+    # their WAL write-lock never contends the trading-state writer. None when
+    # disabled/unwired — same fallback contract as ``db_writer``.
+    md_db_writer: DBWriter | None = None
+    # Dedicated marketdata-domain conn for the direct (non-db_writer) write
+    # paths that are NOT yet queue-migrated — watchlist_focus persist (the
+    # offloaded ``refresh_focus_watchlist`` call) + its same-tick ticker_ground
+    # reads. None → callers fall back to whatever conn they already hold
+    # (byte-identical pre-split behaviour, same idiom as ``focus_conn``).
+    md_conn: Any = None
     # Alt-data EVIDENCE cache singleton (#6) — the SAME object fed to
     # compute_and_flip_regime (Layer 6 regime evidence). Shared onto state so the
     # Layer-0 focus producer can build the entrance-judge ``altdata_lean`` from the

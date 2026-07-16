@@ -108,6 +108,7 @@ from polaris.scripts.reconcile_orphans import (
 )
 from polaris.storage.db_writer import DBWriter, dbwriter_enabled
 from polaris.storage.schema import connect, connect_ro, init_db
+from polaris.storage.schema_marketdata import init_marketdata_db, marketdata_db_path_for
 from polaris.venues.alpaca import AlpacaAdapter, resolve_alpaca_credentials
 from polaris.venues.capital.adapter import CapitalAdapter
 from polaris.venues.capital.session import CapitalSession
@@ -278,6 +279,7 @@ def alpaca_reconcile_import_enabled() -> bool:
 
 def _reconcile_import_atr_anchor(
     conn: sqlite3.Connection, instrument_id: str, now_ts: int,
+    *, md_conn: sqlite3.Connection | None = None,
 ) -> tuple[float, str] | None:
     """[P0-5] Entry-time ATR-anchor resolver injected into
     ``reconcile_venue_positions`` — lives in ``scripts`` (not ``core``) so
@@ -285,9 +287,16 @@ def _reconcile_import_atr_anchor(
     (layering rail, ``test_core_layering.py``). Same tf→1m fallback chain the
     normal entry-stamp path uses; ``_reconcile_import`` is unregistered so
     ``strategy_timeframe`` resolves "1m" (measurement-only, graceful).
+
+    ``md_conn`` (storage-split round 4 fix): bars is marketdata-domain, but
+    ``recover.py``'s ``AtrAnchorFn`` contract always calls this with the
+    TRADING conn positionally (``conn``) — the call site binds ``md_conn`` via
+    ``functools.partial(_reconcile_import_atr_anchor, md_conn=state.md_conn)``
+    so this keyword wins over the positional trading ``conn`` when wired.
+    ``None`` falls back to ``conn`` (byte-identical for direct callers/tests).
     """
     return timeframe_anchor_atr_pct(
-        conn, instrument_id=instrument_id,
+        md_conn if md_conn is not None else conn, instrument_id=instrument_id,
         timeframe=strategy_timeframe("_reconcile_import"), now_ts=now_ts,
     )
 
@@ -304,6 +313,7 @@ async def _layer0_producer(
     stop_evt: asyncio.Event,
     focus_conn: sqlite3.Connection | None = None,
     momentum_conn: sqlite3.Connection | None = None,
+    md_focus_conn: sqlite3.Connection | None = None,
 ) -> None:
     """OKX (5min) + Capital (10min) + Alpaca (10min) refresh + focus recompute.
 
@@ -338,9 +348,9 @@ async def _layer0_producer(
     state.universe_refreshes += 1
     await refresh_capital_universe_once(conn, momentum_conn=momentum_conn)
     state.capital_refreshes += 1
-    await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
+    await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn, md_conn=state.md_conn)
     state.alpaca_refreshes += 1
-    await _refresh_focus_offloaded(fconn, state)
+    await _refresh_focus_offloaded(fconn, state, md_focus_conn=md_focus_conn)
     last_okx = time.monotonic()
     last_capital = time.monotonic()
     last_alpaca = time.monotonic()
@@ -356,14 +366,19 @@ async def _layer0_producer(
             state.capital_refreshes += 1
             last_capital = now
         if now - last_alpaca >= ALPACA_REFRESH_SEC:
-            await refresh_alpaca_universe_once(conn, momentum_conn=momentum_conn)
+            await refresh_alpaca_universe_once(
+                conn, momentum_conn=momentum_conn, md_conn=state.md_conn
+            )
             state.alpaca_refreshes += 1
             last_alpaca = now
-        await _refresh_focus_offloaded(fconn, state)
+        await _refresh_focus_offloaded(fconn, state, md_focus_conn=md_focus_conn)
 
 
 async def _refresh_focus_offloaded(
-    focus_conn: sqlite3.Connection, state: ProdLoopState
+    focus_conn: sqlite3.Connection,
+    state: ProdLoopState,
+    *,
+    md_focus_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Run the blocking focus refresh on a worker thread (STALL-safe, #74).
 
@@ -372,6 +387,16 @@ async def _refresh_focus_offloaded(
     is ever shared with the live tick loop. ``quote_writer`` / ``altdata_cache`` are
     in-mem read-only here (lean inputs); their reads are snapshot-safe (atomic
     ``list(...)`` copies — #74) + fail-soft.
+
+    ``md_focus_conn`` (storage-split, 2026-07-14): a DEDICATED marketdata conn,
+    thread-confined to this same offloaded worker — never ``state.md_conn``,
+    which the main tick thread owns (sharing one ``sqlite3.Connection`` across
+    two threads is the #74/#88 hazard). Passed through as ``refresh_focus_watchlist``'s
+    ``md_conn`` so the final ``watchlist_focus`` persist + the candidate-sweep
+    bars/ticker_ground reads land on the SAME file ``get_focus_targets`` reads
+    from (``state.md_conn``), instead of silently falling back onto the trading
+    ``focus_conn`` (writer/reader split-brain — zero focus, zero trades on a
+    fresh init).
 
     2nd-defense (#74): the offloaded body is wrapped so an UNHANDLED error in the
     worker can never propagate out of ``layer0_task`` and kill it permanently — a
@@ -385,6 +410,7 @@ async def _refresh_focus_offloaded(
             probe_conn=getattr(state, "focus_probe_conn", None),
             quote_writer=getattr(state, "quote_writer", None),
             altdata_cache=getattr(state, "altdata_cache", None),
+            md_conn=md_focus_conn,
         )
     except Exception:  # noqa: BLE001 — must NOT kill layer0_task (focus must survive)
         logger.exception(
@@ -614,7 +640,12 @@ async def _static_ground_producer(
                 alpaca_adapter=alpaca_adapter,
                 gpt_client_factory=None if ai_free_mode() else default_gpt_factory,
                 warm_resolutions=warm_resolutions,
-                db_writer=state.db_writer,
+                # storage-split — static-ground bars persist into `bars`
+                # (marketdata) via the SAME persist_bars path as the hot ingest.
+                db_writer=state.md_db_writer,
+                # storage-split (round 3 MED fix) — watchlist_focus (warm-
+                # eligible FOCUS scoping) is marketdata-domain too.
+                md_conn=state.md_conn,
             )
             state.static_ground_instruments = bars_result["instruments"]
             state.static_ground_bars += bars_result["bars"]
@@ -659,7 +690,8 @@ async def _ticker_ground_producer(
         try:
             tickers = refresh_ticker_ground(
                 conn, cache=getattr(state, "altdata_cache", None),
-                db_writer=state.db_writer,
+                # storage-split — ticker_ground is marketdata-domain.
+                db_writer=state.md_db_writer,
             )
             state.static_ground_tickers = tickers
         except Exception:  # noqa: BLE001 — ground fill never halts the bot
@@ -783,10 +815,19 @@ async def run_production_paper_loop(
         )
     target_db.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(target_db)
+    # storage-split (vault/50_research/storage-split-blueprint.md, 2026-07-14
+    # wipe reset) — the marketdata firehose (bars/baseline/focus/ground/quote/
+    # altdata/shadow) gets its OWN file + WAL lock, opened right alongside the
+    # trading conn so every downstream wire-up below can reach it. ``conn``
+    # (this function's pre-existing name) stays the TRADING connection,
+    # unchanged in meaning for every existing caller.
+    md_db_path = marketdata_db_path_for(target_db)
+    md_conn = init_marketdata_db(md_db_path)
     haiku = _resolve_gpt_client(haiku)
     reset_process_fence()
     get_process_fence(conn)
     state = ProdLoopState()
+    state.md_conn = md_conn
     # db-writer-reader-split (design SSOT:
     # vault/50_research/db-writer-reader-split-design_2026-07-08.md) — the
     # process's ONE RW sqlite connection, generalizing #74's per-writer offload
@@ -798,6 +839,11 @@ async def run_production_paper_loop(
     if dbwriter_enabled():
         state.db_writer = DBWriter(target_db)
         state.db_writer.start()
+        # SECOND writer instance, same queue machinery, marketdata file — the
+        # actual lock-separation lever (storage-split item 3). Firehose
+        # writers below submit here instead of ``state.db_writer``.
+        state.md_db_writer = DBWriter(md_db_path)
+        state.md_db_writer.start()
     # #32 — wire the AI-JUDGE client onto state so the G3/G4 orchestrator + the
     # G7 live-recalc exit run the per-ticker judge alongside the deterministic
     # decision (shadow default: logs only; deterministic acts byte-identical).
@@ -856,6 +902,17 @@ async def run_production_paper_loop(
     # is never touched from two threads at once. WAL (set by ``connect``) is
     # 1-writer/N-reader safe, and only one offloaded refresh runs at a time.
     focus_conn = connect(target_db)
+    # Storage-split (2026-07-14) — DEDICATED marketdata-domain handle for the
+    # SAME offloaded focus worker, thread-confined alongside ``focus_conn``.
+    # ``state.md_conn`` cannot be reused here: it belongs to the main tick
+    # thread (``get_focus_targets`` / ``sweep_forward_marks`` / bar reads in
+    # ``_run_tick``), and handing it to this ``asyncio.to_thread`` worker would
+    # share one ``sqlite3.Connection`` across two threads (#74/#88 hazard).
+    # Without this, ``refresh_focus_watchlist``'s final persist silently falls
+    # back onto ``focus_conn`` (trading DB) while every reader reads
+    # ``watchlist_focus`` from the marketdata DB — writer/reader split-brain,
+    # zero focus, zero trades on a fresh init.
+    md_focus_conn = connect(md_db_path)
     # Same STALL class, second instance — DEDICATED READ-ONLY handle for the
     # OFFLOADED momentum-z shadow scan (``_momentum_z_shadow_async``): each
     # ``refresh_*_universe_once`` otherwise runs an unbounded synchronous
@@ -870,6 +927,7 @@ async def run_production_paper_loop(
             stop_evt=stop_evt,
             focus_conn=focus_conn,
             momentum_conn=momentum_conn,
+            md_focus_conn=md_focus_conn,
         )
     )
 
@@ -947,6 +1005,10 @@ async def run_production_paper_loop(
             probe_db=target_db.parent / "probes.sqlite",
             stop_evt=stop_evt,
             db_writer=state.db_writer,
+            # storage-split — prune the marketdata firehose (bars/baseline/
+            # focus/shadow/altdata) against its own file/writer.
+            md_db=md_db_path,
+            md_db_writer=state.md_db_writer,
         )
     )
     # #6 — alt-data EVIDENCE producer. Populates the cache singleton on each
@@ -960,7 +1022,10 @@ async def run_production_paper_loop(
     altdata_task = asyncio.create_task(
         _altdata_producer(
             conn, cache=altdata_cache, state=state, stop_evt=stop_evt,
-            db_writer=state.db_writer,
+            # storage-split — altdata_snapshot (+ edgar/finnhub/defillama +
+            # their proximity SHADOW tags) is marketdata-domain; route to the
+            # marketdata writer so the firehose never contends the trading WAL.
+            db_writer=state.md_db_writer,
         )
     )
 
@@ -986,7 +1051,9 @@ async def run_production_paper_loop(
     # symbols. Spawned AFTER the Capital session so Capital WS reuses its token
     # (M4). Tasks are stored + torn down in the finally below (M5). WS is
     # additive: REST bar ingest stays the fallback, so a WS failure never halts.
-    quote_writer = QuoteTickWriter(target_db, db_writer=state.db_writer)
+    # storage-split — quote_ticks/tick_inflow are marketdata-domain: dedicated
+    # conn AND db_writer fallback both point at the marketdata file.
+    quote_writer = QuoteTickWriter(md_db_path, db_writer=state.md_db_writer)
     # Share the writer with the tick body so the exit recalc (#2) and G4 (#3) read
     # the in-mem live_px / ring (0 DB hits) and degrade to bar close when stale.
     state.quote_writer = quote_writer
@@ -997,7 +1064,8 @@ async def run_production_paper_loop(
     # tick body now ``record``s the indicator snapshot in-mem; this 1Hz flush task
     # off-loads the write on a dedicated conn (its own thread). Torn down in the
     # finally below alongside the WS writer. Evidence keeps flowing (flow_not_block).
-    tech_store_writer = TechnicalStoreWriter(target_db, db_writer=state.db_writer)
+    # storage-split — ticker_technicals is marketdata-domain (same rationale).
+    tech_store_writer = TechnicalStoreWriter(md_db_path, db_writer=state.md_db_writer)
     state.tech_store_writer = tech_store_writer
     tech_store_flush_task = asyncio.create_task(
         tech_store_writer.run_flush_loop(stop_evt)
@@ -1021,7 +1089,7 @@ async def run_production_paper_loop(
         )
     ws_tasks, ws_clients = start_ws_producers(
         conn, writer=quote_writer, stop_evt=stop_evt,
-        capital_session=capital_session,
+        capital_session=capital_session, md_conn=md_conn,
     )
 
     # P0 venue wire: build a single OKX adapter for real-roundtrip runs so the
@@ -1136,10 +1204,17 @@ async def run_production_paper_loop(
     # management, never liquidate.
     if real_roundtrip and alpaca_reconcile_import_enabled():
         try:
+            def _atr_anchor_fn(
+                _conn: sqlite3.Connection, _iid: str, _now_ts: int,
+            ) -> tuple[float, str] | None:
+                return _reconcile_import_atr_anchor(
+                    _conn, _iid, _now_ts, md_conn=state.md_conn,
+                )
+
             imported = await reconcile_venue_positions(
                 conn, okx_adapter=None, capital_adapter=None,
                 alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
-                atr_anchor_fn=_reconcile_import_atr_anchor,
+                atr_anchor_fn=_atr_anchor_fn,
             )
         except Exception:
             logger.exception(
@@ -1294,7 +1369,7 @@ async def run_production_paper_loop(
             # long as it is held. Best-effort + idempotent (never forces a churn).
             if ws_clients:
                 try:
-                    await resubscribe_ws_clients(conn, ws_clients)
+                    await resubscribe_ws_clients(conn, ws_clients, md_conn=md_conn)
                 except Exception:  # noqa: BLE001 — visibility refresh never halts
                     logger.exception("[ws] resubscribe (focus∪held) refresh failed")
 
@@ -1387,6 +1462,8 @@ async def run_production_paper_loop(
         with contextlib.suppress(Exception):
             focus_conn.close()
         with contextlib.suppress(Exception):
+            md_focus_conn.close()
+        with contextlib.suppress(Exception):
             momentum_conn.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await altdata_task
@@ -1423,6 +1500,12 @@ async def run_production_paper_loop(
         if state.db_writer is not None:
             with contextlib.suppress(Exception):
                 state.db_writer.stop()
+        # storage-split — same drain/checkpoint/close for the marketdata writer.
+        if state.md_db_writer is not None:
+            with contextlib.suppress(Exception):
+                state.md_db_writer.stop()
+        with contextlib.suppress(Exception):
+            md_conn.close()
         # ADR-012 — close the probe tuning-log sidecar (separate DB).
         if state.probe_conn is not None:
             with contextlib.suppress(Exception):

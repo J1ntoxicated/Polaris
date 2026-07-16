@@ -755,8 +755,15 @@ async def ingest_bars_per_timeframe(
     skip_if_current: set[tuple[str, str]] | None = None,
     gpt_client_factory: Any = None,
     db_writer: DBWriter | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, int]:
     """F10 — Day 9: drive the per-timeframe ingest fan-out for one tick.
+
+    ``md_conn`` (storage-split, 2026-07-14): the marketdata-domain connection
+    for the same-tick ``bars`` read-back inside :func:`ingest_bars_for_focus`
+    (``last_stored_bar_ts`` — the incremental-fetch/skip-if-current decision).
+    ``None`` (default) falls back to ``conn`` — byte-identical to the
+    pre-split single-DB behaviour for every existing caller/test.
 
     Honours ``TIMEFRAME_FETCH_CADENCE_SEC`` so each timeframe bucket only
     fetches when its cadence is due. ``last_fetch_monotonic_by_tf`` and
@@ -827,6 +834,7 @@ async def ingest_bars_per_timeframe(
                 skip_if_current=skip_if_current,
                 gpt_client_factory=gpt_client_factory,
                 db_writer=db_writer,
+                md_conn=md_conn,
             )
             total_bars += result["bars"]
             total_baseline += result["baseline_samples"]
@@ -870,12 +878,18 @@ async def ingest_bars_for_focus(
     skip_if_current: set[tuple[str, str]] | None = None,
     gpt_client_factory: Any = None,
     db_writer: DBWriter | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, int]:
     """Fetch + persist + baseline-update bars for every focus entry.
 
     Returns aggregate counts
     ``{"bars": N, "baseline_samples": M, "symbols": K, "skipped_fresh": S}``.
     Concurrency capped at ``parallel`` to keep REST burst polite.
+
+    ``md_conn`` (storage-split): the marketdata-domain conn used for the
+    same-tick ``bars`` read-back (``last_stored_bar_ts`` below) and the
+    offloaded-write path's dedicated-conn derivation. ``None`` falls back to
+    ``conn`` (byte-identical to the pre-split single-DB behaviour).
 
     F10 — Day 9: ``bar_interval`` is forwarded to every adapter call so the
     production loop can ingest a different timeframe per strategy timeframe
@@ -901,6 +915,7 @@ async def ingest_bars_for_focus(
     seen: set[str] = set()
     skipped_fresh = 0
     now_s = int(time.time())
+    _md = md_conn if md_conn is not None else conn
 
     async def _one(target: tuple[str, str, str, str]) -> None:
         nonlocal skipped_fresh
@@ -918,7 +933,8 @@ async def ingest_bars_for_focus(
             return
         # Cache gate: last stored bar drives both skip-if-fresh and incremental
         # window. One indexed MAX(ts) lookup per symbol (cheap on the bars PK).
-        last_ts = last_stored_bar_ts(conn, instrument_id, bar_interval)
+        # storage-split: ``bars`` now lives on ``_md``, not the trading ``conn``.
+        last_ts = last_stored_bar_ts(_md, instrument_id, bar_interval)
         if (
             skip_if_current is not None
             and (venue, bar_interval) in skip_if_current
@@ -954,8 +970,10 @@ async def ingest_bars_for_focus(
     # tick-engine STALL gap). Offload the WHOLE write to a worker thread on a
     # DEDICATED conn opened from the loop conn's db path (the #74/#88 pattern).
     # An in-memory loop conn (tests) has no path → keep the write on the loop
-    # (``db_path is None``), behaviour-identical.
-    db_path = _db_path_from_conn(conn)
+    # (``db_path is None``), behaviour-identical. storage-split: derived from
+    # ``_md`` (the marketdata conn) so the offloaded write lands in the
+    # marketdata file, not the trading one.
+    db_path = _db_path_from_conn(_md)
     # Codex F10 R1 P1-2 fix: baselines (ATR/size/volume) are minute-grained;
     # routing 5m/15m/1H bars into ``update_baseline_from_bars`` would
     # contaminate the minute-windowed state. Use the full ``ingest_bars``
@@ -967,7 +985,7 @@ async def ingest_bars_for_focus(
                 db_path, out_bars, db_writer=db_writer
             )
         else:
-            total_persisted = persist_bars(conn, out_bars)
+            total_persisted = persist_bars(_md, out_bars)
         # Higher-tf ingest visibility (INFO): the 1m path logs ``[ingest]`` from
         # core.data.ingest, but the 15m/1H/1D/5m batches persist silently here —
         # so a trade on a 1H bar strategy could not be traced to its bar ingest.
@@ -1018,7 +1036,7 @@ async def ingest_bars_for_focus(
                 db_path, group, asset_class=ac, db_writer=db_writer
             )
         else:
-            result = await ingest_bars_async(conn, group, asset_class=ac)
+            result = await ingest_bars_async(_md, group, asset_class=ac)
         total_persisted += result["bars"]
         total_baseline += result["baseline_samples"]
     return {

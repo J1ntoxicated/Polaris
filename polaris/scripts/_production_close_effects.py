@@ -164,6 +164,7 @@ def fold_close_slice(
     )
     _safe_record_calibration_outcome(
         conn, trade=trade, won=won, pnl_r_net=pnl_r_net, now_ts=now_ts,
+        state=state,
     )
 
 
@@ -256,8 +257,12 @@ def _safe_record_meta_label(
             pnl_r=pnl_r, won=won, holding_bars=holding_bars,
             expected_holding_bars=expected_holding_bars,
         )
+        # storage-split (round-r2 fix): meta_labels is marketdata-domain (the
+        # polaris_graph dashboard reads it off a dedicated md_conn) — writing
+        # on the trading `conn` left the dashboard's readiness panel at 0.
         persist_meta_label(
-            conn, trade_id=trade.signal_id, strategy_id=trade.strategy_id,
+            state.md_conn if state.md_conn is not None else conn,
+            trade_id=trade.signal_id, strategy_id=trade.strategy_id,
             venue=trade.venue, ticker=trade.symbol, regime=regime,
             session="asia", label=label, now_ts=now_ts,
         )
@@ -508,7 +513,7 @@ def _safe_update_posterior(
 
 def _safe_record_calibration_outcome(
     conn: sqlite3.Connection, *, trade: SimulatedTrade, won: bool,
-    pnl_r_net: float, now_ts: int,
+    pnl_r_net: float, now_ts: int, state: ProdLoopState,
 ) -> None:
     """Probability calibration shadow (#4, G5) — fill the realized outcome onto
     this signal's entry snapshot (``core/sizing/engine.py``'s
@@ -518,8 +523,14 @@ def _safe_record_calibration_outcome(
     already-committed close. Measurement only — never read by sizing.
     """
     try:
+        # storage-split (round-r2 fix): calibration_pairs is marketdata-domain
+        # (shadow_distribution_guard + polaris_graph dashboard read it off a
+        # dedicated md_conn) — writing on the trading `conn` left both at 0.
+        # A no-op UPDATE when the entry snapshot is absent is the documented
+        # fail-open contract (record_close_outcome docstring) — unaffected.
         record_close_outcome(
-            conn, signal_id=trade.signal_id, won=won, pnl_r=pnl_r_net,
+            state.md_conn if state.md_conn is not None else conn,
+            signal_id=trade.signal_id, won=won, pnl_r=pnl_r_net,
             now_ts=now_ts,
         )
     except Exception as exc:  # noqa: BLE001 — measure-only side effect, fail-open

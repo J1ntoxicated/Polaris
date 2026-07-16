@@ -44,6 +44,8 @@ _WS_READ_DEPTH_MULT = 3
 
 def _focus_by_venue(
     conn: sqlite3.Connection,
+    *,
+    md_conn: sqlite3.Connection | None = None,
 ) -> dict[str, list[str]]:
     """Read the latest focus cycle and group ``symbol`` by ``venue``.
 
@@ -55,12 +57,16 @@ def _focus_by_venue(
     Capital 40 genuine cap, OKX 60, Alpaca feed-driven (SIP 60 / IEX 30 cap),
     env-raisable). flow_not_block: a name beyond the WS budget still bar-ingests
     via REST, it is not dropped.
+
+    ``md_conn`` (storage-split): forwarded to :func:`get_focus_targets`.
     """
     # Read deep enough that the largest per-venue budget can be filled.
     max_budget = max(
         ws_budget_for_venue(v) for v in ("okx", "capital", "alpaca")
     )
-    targets = get_focus_targets(conn, max_n=max_budget * _WS_READ_DEPTH_MULT)
+    targets = get_focus_targets(
+        conn, max_n=max_budget * _WS_READ_DEPTH_MULT, md_conn=md_conn
+    )
     by_venue: dict[str, list[str]] = {}
     for venue, symbol, _asset_class, _group in targets:
         by_venue.setdefault(venue, [])
@@ -75,6 +81,7 @@ def build_ws_clients(
     *,
     writer: QuoteTickWriter,
     capital_session: CapitalSession | None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> list[WSStreamClient]:
     """Build one WS client per venue that has focus symbols (no tasks yet).
 
@@ -82,7 +89,7 @@ def build_ws_clients(
     flush loop does all DB work). OKX is unauthenticated; Capital reuses the
     loop-owned session token; Alpaca uses paper creds + the RTH gate.
     """
-    by_venue = _focus_by_venue(conn)
+    by_venue = _focus_by_venue(conn, md_conn=md_conn)
     clients: list[WSStreamClient] = []
 
     okx_syms = by_venue.get("okx", [])
@@ -144,6 +151,7 @@ def start_ws_producers(
     writer: QuoteTickWriter,
     stop_evt: asyncio.Event,
     capital_session: CapitalSession | None = None,
+    md_conn: sqlite3.Connection | None = None,
 ) -> tuple[list[asyncio.Task[None]], list[WSStreamClient]]:
     """Spawn the writer flush loop + each venue client's ``run`` as tasks (M5).
 
@@ -152,7 +160,9 @@ def start_ws_producers(
     then ``writer.close()``. ``clients`` is returned so the caller can re-subscribe
     on universe changes (``set_symbols`` / ``set_epics``).
     """
-    clients = build_ws_clients(conn, writer=writer, capital_session=capital_session)
+    clients = build_ws_clients(
+        conn, writer=writer, capital_session=capital_session, md_conn=md_conn
+    )
     tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(writer.run_flush_loop(stop_evt))
     ]
@@ -167,7 +177,10 @@ def start_ws_producers(
 
 
 async def resubscribe_ws_clients(
-    conn: sqlite3.Connection, clients: list[WSStreamClient]
+    conn: sqlite3.Connection,
+    clients: list[WSStreamClient],
+    *,
+    md_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Push the latest focus symbols into the live clients (universe change).
 
@@ -179,7 +192,7 @@ async def resubscribe_ws_clients(
     ``subscribe_messages`` (the prior behaviour). flow_not_block: a FLOW INCREASE
     (the socket FOLLOWS focus), never a forced disconnect/churn.
     """
-    by_venue = _focus_by_venue(conn)
+    by_venue = _focus_by_venue(conn, md_conn=md_conn)
     for client in clients:
         syms = by_venue.get(client.venue, [])
         if not syms:

@@ -52,10 +52,17 @@
       var yTop = Math.min(yOf(mfe), yOf(mae)), yBot = Math.max(yOf(mfe), yOf(mae));
       svg += '<rect x="' + PADX + '" y="' + yTop.toFixed(1) + '" width="' + iw + '" height="' + (yBot - yTop).toFixed(1) + '" fill="rgba(159,192,255,0.07)"/>';
     }
-    if (mfe != null) svg += hline(yOf(mfe), '#7dffa8', '2 2', 0.8);
-    if (mae != null) svg += hline(yOf(mae), '#ff7d8a', '2 2', 0.8);
-    if (entry != null) svg += hline(yOf(entry), '#8a94b0', '3 2', 1);
-    if (stop != null) svg += hline(yOf(stop), '#ff4d5e', '4 2', 1);
+    // level labels (Jin 2026-07-16 "저 선들은 뭔데?") — each guide line names
+    // itself at the left edge; collision-free enough at glance size, ENGLISH UI.
+    function tag(y, col, txt) {
+      var yy = Math.max(PADY + 5, Math.min(H - 3, y + 2.5));
+      return '<text x="' + (PADX + 1) + '" y="' + yy.toFixed(1) + '" font-size="5.5" '
+        + 'font-family="JetBrains Mono, monospace" fill="' + col + '" opacity="0.9">' + txt + '</text>';
+    }
+    if (mfe != null) svg += hline(yOf(mfe), '#7dffa8', '2 2', 0.8) + tag(yOf(mfe), '#7dffa8', 'MFE');
+    if (mae != null) svg += hline(yOf(mae), '#ff7d8a', '2 2', 0.8) + tag(yOf(mae), '#ff7d8a', 'MAE');
+    if (entry != null) svg += hline(yOf(entry), '#8a94b0', '3 2', 1) + tag(yOf(entry), '#8a94b0', 'ENTRY');
+    if (stop != null) svg += hline(yOf(stop), '#ff4d5e', '4 2', 1) + tag(yOf(stop), '#ff4d5e', 'STOP');
     svg += '<polyline points="' + pts + '" fill="none" stroke="' + lineCol + '" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>';
     svg += '<circle cx="' + xOf(n - 1).toFixed(1) + '" cy="' + yOf(arr[n - 1]).toFixed(1) + '" r="2.5" fill="' + lineCol + '"/>';
     return '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' + svg + '</svg>';

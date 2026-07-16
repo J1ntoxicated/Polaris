@@ -174,7 +174,7 @@ async def test_news_request_sends_recency_start_window(
     import datetime as _dt
 
     parsed = _dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
-    age_h = (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds() / 3600.0
+    age_h = (_dt.datetime.now(_dt.UTC) - parsed).total_seconds() / 3600.0
     assert 35.0 <= age_h <= 37.0
 
 
@@ -185,7 +185,7 @@ async def test_news_preserves_created_at_and_surfaces_max_age() -> None:
     """
     import datetime as _dt
 
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.UTC)
     fresh = (now - _dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     stale = (now - _dt.timedelta(hours=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
     items = [

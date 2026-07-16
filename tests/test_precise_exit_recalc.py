@@ -6,7 +6,8 @@ Verifies the precise-exit engine is wired into ``recalc_active_positions``:
 - the MFE FSM advances and persists;
 - a round-tripped winner (protected BEP) closes;
 - a stale loser closes but a winner does NOT;
-- the dropped G7 EXIT_NOW decision now actually closes the position;
+- G7's legacy GPT branch is gone (P2a group B) — a G6->G7 chain never calls
+  GPT and never closes via G7 (only the Q9 rail HOLD/ADJUST_EXIT);
 - the G6 EXIT_NOW path is still honoured (hard rail unchanged).
 
 EXPECTANCY, not a throttle: per-position close only — no size change, no entry
@@ -564,35 +565,28 @@ async def test_1h_drifter_within_cap_stays_open(
     assert state.recalc_precise_exit == 0
 
 
-# --- G7 EXIT_NOW dropped-decision bug fix: now actually closes -------------
+# --- G7 GPT branch removed (P2a group B): no longer a possible EXIT_NOW source --
 
 
 @pytest.mark.asyncio
-async def test_g7_exit_now_now_closes_position(
-    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+async def test_g7_widen_chain_never_calls_gpt_or_exits(
+    memdb: sqlite3.Connection,
 ) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    # Strong winner (pnl_r > 0.7R) → deterministic G6 ADJUST_EXIT chains G7;
-    # G7 GPT emits EXIT_NOW → position must close now. tight band keeps the
-    # precise-exit engine from closing first (winner, harvest, not stopped).
-    # ai_conductor P3: G6 is deterministic, so the mock only feeds G7.
+    """P2a group B supersedes the old "dropped G7 EXIT_NOW" fix test: G7's
+    legacy GPT branch (the ONLY source of a G7 EXIT_NOW) is deleted outright,
+    so a strong winner chaining G6 ADJUST_EXIT -> G7 now always resolves to
+    the deterministic Q9 rail (HOLD/ADJUST_EXIT) — a supplied client is never
+    called, and the position stays open (no G7-driven close is possible)."""
     _seed(memdb, position_id="pos-g7x", entry_price=100.0, last_price=101.0, band=0.1)
     state = ProdLoopState()
     state.open_trades = [_trade("pos-g7x")]
-    gpt = _MockGPTClient([
-        '{"decision":"EXIT_NOW","reason":"regime flip","new_exit_atr":0.0}',  # G7
-    ])
+    gpt = _MockGPTClient()
     await _recalc(memdb, state, gpt=gpt)
-    assert _pos_row(memdb, "pos-g7x")["status"] == "closed"
+    assert _pos_row(memdb, "pos-g7x")["status"] == "open"
     assert state.recalc_g6_calls == 1
     assert state.recalc_g7_calls == 1
-    assert state.recalc_exit_now == 1
-    # precise-exit did NOT close it (the G7 EXIT_NOW did).
-    assert state.recalc_precise_exit == 0
-    # G7 is the only GPT call — G6 is deterministic (no per-position GPT).
-    assert len(gpt.calls) == 1
+    assert state.recalc_exit_now == 0
+    assert gpt.calls == []
 
 
 # --- G6 hard loss rail unchanged (deterministic EXIT_NOW at pnl_r <= -1R) ---

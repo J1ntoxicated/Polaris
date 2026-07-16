@@ -1,15 +1,15 @@
-"""G7 divergence SHADOW (instrumentation, behavior 0) — rails vs GPT.
+"""G7 shadow logging — measurement continuity (P2a group B).
 
-DEMO/PAPER only — virtual funds; aggressive bias preserved. The GPT decision
-ALWAYS drives the live pipeline; this only proves the gate_shadow_events row
-records (a) the deterministic Q9 rail decision for the same proposal, (b) the
-raw GPT label (rubber-stamp HOLD-rate numerator — B4), (c) the call-site tag,
-and that the returned decision is byte-identical with the shadow on/off.
+DEMO/PAPER only — virtual funds; aggressive bias preserved. The deterministic
+Q9 rail ALWAYS drives the live decision (the legacy P1 GPT divergence path
+was removed outright — see ``adaptive_exit.py`` module docstring). This
+proves the gate_shadow_events row still records the rail's own decision
+(``gpt_decision=None`` — nothing left to compare against) + the call-site
+tag, for acceptance-gate dashboard continuity.
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import uuid
 
@@ -28,35 +28,13 @@ from polaris.core.pipeline.gate_state import (
 NOW = 1_780_000_000
 
 
+class _ForbiddenClient:
+    """A client object that explodes on ANY attribute access (P2a group B:
+    proves G7 never touches a supplied client — the legacy branch is gone,
+    not just flag-gated)."""
 
-@pytest.fixture(autouse=True)
-def _legacy_gpt_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """W3 AI-free cutover adaptation (NOT a behavior change): this module pins
-    the LEGACY GPT path, so force POLARIS_AI_FREE=0 explicitly (the flag now
-    defaults ON). The flag=1 deterministic-primary path is covered by
-    tests/test_ai_free_cutover.py."""
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-
-class _MockGPTClient:
-    def __init__(self, response_text: str = "{}") -> None:
-        self.response_text = response_text
-        self.calls: list[dict] = []
-        outer = self
-
-        class _Messages:
-            async def create(self, **kwargs):  # noqa: ANN001, ANN202
-                outer.calls.append(kwargs)
-
-                class _Block:
-                    text = outer.response_text
-
-                class _Resp:
-                    content = [_Block()]
-                    usage = None
-
-                return _Resp()
-
-        self.messages = _Messages()
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(f"GPT client attribute touched: {name}")
 
 
 def _proposal(*, pnl_r: float = 1.2) -> dict:
@@ -94,71 +72,33 @@ def _g7_rows(conn: sqlite3.Connection) -> list[dict]:
     return fetch_shadow_events(conn, gate_id=GATE_ADAPTIVE_EXIT)
 
 
-async def test_gpt_hold_vs_rails_widen_is_mismatch_with_raw_label(
-    memdb: sqlite3.Connection,
-) -> None:
-    haiku = _MockGPTClient(json.dumps({"decision": "HOLD", "reason": "free text"}))
+async def test_widen_result_logged_with_site_tag(memdb: sqlite3.Connection) -> None:
+    """A client is supplied (and never touched) — the rail decision drives
+    and logs with the explicit call-site tag."""
     result = await adaptive_exit_gate(
-        _ctx(_proposal(), site="live_recalc"), client=haiku, shadow_conn=memdb,
-    )
-    assert result.decision == GateDecision.HOLD  # GPT still drives
-    rows = _g7_rows(memdb)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["technical_decision"] == "ADJUST_EXIT"  # rail would widen
-    assert row["gpt_decision"] == "HOLD"
-    assert row["mismatch"] == 1
-    assert "site:live_recalc" in row["technical_flags"]
-    assert "gpt_raw:HOLD" in row["technical_flags"]  # B4: raw label survives
-    assert row["regime"] == "bull_trend"
-
-
-async def test_gpt_widen_accepted_is_agreement(memdb: sqlite3.Connection) -> None:
-    haiku = _MockGPTClient(json.dumps({"decision": "WIDEN", "reason": "runner"}))
-    result = await adaptive_exit_gate(
-        _ctx(_proposal()), client=haiku, shadow_conn=memdb,
+        _ctx(_proposal(), site="live_recalc"),
+        client=_ForbiddenClient(), shadow_conn=memdb,
     )
     assert result.decision == GateDecision.ADJUST_EXIT
-    row = _g7_rows(memdb)[0]
-    assert row["technical_decision"] == "ADJUST_EXIT"
-    assert row["gpt_decision"] == "ADJUST_EXIT"
-    assert row["mismatch"] == 0
-    assert "gpt_raw:WIDEN" in row["technical_flags"]
-    # No explicit site payload → orchestrator default tag.
-    assert "site:orchestrator" in row["technical_flags"]
+    # P2a conductor closeout (2026-07-16): comparisonless shadow writes are
+    # DROPPED on the live path (no GPT to diverge from; gate_events records
+    # the decision) — the gate must write NO gate_shadow_events row.
+    assert _g7_rows(memdb) == []
 
 
-async def test_gpt_exit_now_vs_rails_hold_is_mismatch(
-    memdb: sqlite3.Connection,
-) -> None:
-    haiku = _MockGPTClient(json.dumps({"decision": "EXIT_NOW", "reason": "flip"}))
-    # Below the widen window → the rail would HOLD; GPT acts alone.
+async def test_hold_result_logged_default_site_tag(memdb: sqlite3.Connection) -> None:
+    # Below the widen window → the rail HOLDs.
     result = await adaptive_exit_gate(
-        _ctx(_proposal(pnl_r=0.5)), client=haiku, shadow_conn=memdb,
+        _ctx(_proposal(pnl_r=0.5)), client=_ForbiddenClient(), shadow_conn=memdb,
     )
-    assert result.decision == GateDecision.EXIT_NOW
-    row = _g7_rows(memdb)[0]
-    assert row["technical_decision"] == "HOLD"
-    assert row["gpt_decision"] == "EXIT_NOW"
-    assert row["mismatch"] == 1
-    assert "gpt_raw:EXIT_NOW" in row["technical_flags"]
+    assert result.decision == GateDecision.HOLD
+    # New contract: no comparisonless shadow row on the live path.
+    assert _g7_rows(memdb) == []
 
 
-async def test_gpt_error_fallback_logs_err_raw_label(
-    memdb: sqlite3.Connection,
-) -> None:
-    haiku = _MockGPTClient("this is not json")
-    result = await adaptive_exit_gate(
-        _ctx(_proposal()), client=haiku, shadow_conn=memdb,
-    )
-    # Fallback = the deterministic rail itself (fail-open contract unchanged).
-    assert result.decision in (GateDecision.ADJUST_EXIT, GateDecision.HOLD)
-    row = _g7_rows(memdb)[0]
-    assert "gpt_raw:ERR" in row["technical_flags"]
-
-
-async def test_p0_client_none_logs_no_shadow_row(memdb: sqlite3.Connection) -> None:
-    """P0 rails ARE the live decision — a shadow row would be mismatch=0 noise."""
+async def test_p0_client_none_writes_no_shadow_row(memdb: sqlite3.Connection) -> None:
+    """P2a conductor closeout: the rail IS the only decision (client=None or
+    not) and the comparisonless shadow row is NOT written on the live path."""
     result = await adaptive_exit_gate(
         _ctx(_proposal()), client=None, shadow_conn=memdb,
     )
@@ -169,55 +109,44 @@ async def test_p0_client_none_logs_no_shadow_row(memdb: sqlite3.Connection) -> N
 async def test_decision_byte_identical_with_and_without_shadow(
     memdb: sqlite3.Connection,
 ) -> None:
-    for text in (
-        '{"decision":"HOLD","reason":"x"}',
-        '{"decision":"WIDEN","reason":"x"}',
-        '{"decision":"TIGHTEN","reason":"x"}',
-        '{"decision":"EXIT_NOW","reason":"x"}',
-        "garbage",
-    ):
-        bare = await adaptive_exit_gate(
-            _ctx(_proposal()), client=_MockGPTClient(text),
-        )
-        shadowed = await adaptive_exit_gate(
-            _ctx(_proposal()), client=_MockGPTClient(text), shadow_conn=memdb,
-        )
-        assert shadowed.decision == bare.decision
-        assert shadowed.payload == bare.payload
-        assert shadowed.model_used == bare.model_used
+    bare = await adaptive_exit_gate(
+        _ctx(_proposal()), client=_ForbiddenClient(),
+    )
+    shadowed = await adaptive_exit_gate(
+        _ctx(_proposal()), client=_ForbiddenClient(), shadow_conn=memdb,
+    )
+    assert shadowed.decision == bare.decision
+    assert shadowed.payload == bare.payload
+    assert shadowed.model_used == bare.model_used
 
 
 async def test_missing_shadow_table_never_crashes(memdb: sqlite3.Connection) -> None:
     memdb.execute("DROP TABLE gate_shadow_events")
-    haiku = _MockGPTClient('{"decision":"HOLD","reason":"x"}')
     result = await adaptive_exit_gate(
-        _ctx(_proposal()), client=haiku, shadow_conn=memdb,
+        _ctx(_proposal(pnl_r=0.5)), client=_ForbiddenClient(), shadow_conn=memdb,
     )
     assert result.decision == GateDecision.HOLD
 
 
-async def test_orchestrator_p1_wrap_exit_logs_shadow(
+async def test_orchestrator_p1_wrap_exit_no_shadow_row(
     memdb: sqlite3.Connection,
 ) -> None:
-    """GateOrchestrator phase=P1 G7 passes its conn as shadow_conn."""
-    haiku = _MockGPTClient('{"decision":"HOLD","reason":"x"}')
-    orch = GateOrchestrator(conn=memdb, haiku_client=haiku, phase="P1")
-    ctx = _ctx(_proposal())
+    """GateOrchestrator phase=P1 G7: client never touched, and the live path
+    writes NO comparisonless shadow row (P2a conductor closeout)."""
+    orch = GateOrchestrator(conn=memdb, haiku_client=_ForbiddenClient(), phase="P1")
+    ctx = _ctx(_proposal(pnl_r=0.5))
     results = await orch.run(ctx, start_gate=GATE_ADAPTIVE_EXIT)
     assert results and results[0].decision == GateDecision.HOLD
-    rows = _g7_rows(memdb)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] == "HOLD"
-    assert "gpt_raw:HOLD" in rows[0]["technical_flags"]
+    assert _g7_rows(memdb) == []
 
 
-async def test_orchestrator_p0_wrap_exit_no_shadow(
+async def test_orchestrator_p0_wrap_exit_no_shadow_row(
     memdb: sqlite3.Connection,
 ) -> None:
     orch = GateOrchestrator(conn=memdb, haiku_client=None, phase="P0")
-    ctx = _ctx(_proposal())
+    ctx = _ctx(_proposal(pnl_r=0.5))
     await orch.run(ctx, start_gate=GATE_ADAPTIVE_EXIT)
-    assert _g7_rows(memdb) == []
+    assert _g7_rows(memdb) == []  # comparisonless — no live-path shadow write
 
 
 async def test_live_recalc_site_passes_shadow_conn_and_site_tag(

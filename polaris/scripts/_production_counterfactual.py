@@ -1,10 +1,11 @@
 """Gate→outcome counterfactual instrumentation (BUILD, behavior 0).
 
-DEMO/PAPER only — virtual funds. This module MEASURES the G3/G4 GPT gates so
-their value (keep / cutover / strengthen) can finally be judged with data:
+DEMO/PAPER only — virtual funds. This module MEASURES the G3 entry gate
+(historically G3/G4 GPT — G4 is abolished as a decision step, P2a group A)
+so its value can be judged with data:
 
-* ``record_pipeline_cohort`` — one ``gate_kill_counterfactuals`` row per G3/G4
-  GPT decision on the bar entry pipeline. KILL rows capture the decision-time
+* ``record_pipeline_cohort`` — one ``gate_kill_counterfactuals`` row per G3
+  decision on the bar entry pipeline. KILL rows capture the decision-time
   mark (live WS tick preferred, bar close fallback — recorded as
   ``mark_source`` so stale marks are auditable) + the round-trip REAL fee in
   the SAME per-unit ATR-R basis as the forward returns
@@ -41,7 +42,6 @@ from typing import TYPE_CHECKING, Any
 
 from polaris.core.economics.fees import real_fee_usd
 from polaris.core.pipeline.gate_state import (
-    GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
@@ -121,14 +121,22 @@ def record_pipeline_cohort(
 ) -> None:
     """Append one KILL/PASS cohort row for this pipeline run (fail-open).
 
-    KILL row: the run terminated KILLED at G3 or G4 (``ctx.gate_id`` is the
-    killer; the KILL result is always last). Exception fail-closed KILLs are
-    included and distinguishable via ``model_used``/``reason``. PASS row: the
-    run cleared G4 (a PROCEED result exists — PROCEED is G4-only), regardless
-    of the later G5 outcome (the GPT gates passed it; sizing is not their
-    call) — so the killer-gate check comes FIRST: only a G3/G4 KILL takes the
-    KILL branch, a G5 cap-kill after a PROCEED still records PASS. G1/G2/G5
-    KILLs without a PROCEED record nothing. Never branches the pipeline.
+    KILL row: the run terminated KILLED at G3 (``ctx.gate_id`` is the killer;
+    the KILL result is always last). Exception fail-closed KILLs are included
+    and distinguishable via ``model_used``/``reason``. PASS row: the run
+    cleared G3, regardless of the later G5 outcome (the gate passed it;
+    sizing is not its call) — so the killer-gate check comes FIRST: only a G3
+    KILL takes the KILL branch, a G5 cap-kill after a G3 PASS/MODIFY still
+    records PASS. G1/G2/G5 KILLs without a G3 clear record nothing. Never
+    branches the pipeline.
+
+    P2a group A (2026-07-16): Gate 4 (Pre-Entry Watcher) is abolished as a
+    decision step — G3 wires directly to G5 and its own decision tokens are
+    PASS/MODIFY/KILL (``GateDecision.PROCEED`` was G4-only and is no longer
+    emitted here). "Cleared G3" is identified POSITIONALLY: the orchestrator
+    walks G1→G2→G3→G5 strictly sequentially with no variable-length branch
+    before G3, so ``results[2]`` is G3's own result whenever the run reaches
+    that far (a G1/G2 KILL truncates ``results`` to length < 3 first).
 
     Storage-split (2026-07-14): ``gate_kill_counterfactuals`` is a
     marketdata-domain table (owned by ``MARKETDATA_DDL`` — ``sweep_forward_marks``
@@ -144,7 +152,7 @@ def record_pipeline_cohort(
             return
         killed_by_gpt_gate = (
             ctx.state is SignalLifecycle.KILLED
-            and ctx.gate_id in (GATE_SIGNAL_VALIDATOR, GATE_PRE_ENTRY_WATCHER)
+            and ctx.gate_id == GATE_SIGNAL_VALIDATOR
             and any(r.decision == GateDecision.KILL for r in results)
         )
         if killed_by_gpt_gate:
@@ -152,9 +160,15 @@ def record_pipeline_cohort(
             decision, gate_id = "KILL", int(ctx.gate_id)
             reason = str(last.payload.get("reason", ""))[:200]
             model_used = str(last.model_used or "")
-        elif any(r.decision == GateDecision.PROCEED for r in results):
-            decision, gate_id = "PASS", GATE_PRE_ENTRY_WATCHER
-            reason, model_used = "g3g4_pass", ""
+        elif len(results) >= 3 and results[2].decision in (
+            # positional coupling (review LOW, 2026-07-16): results[2]=G3 holds
+            # only for the start_gate=G1 chain — GateResult carries no gate_id,
+            # so this is a DOCUMENTED single-caller contract (see docstring),
+            # not a runtime-verifiable one. Revisit if a second caller appears.
+            GateDecision.PASS, GateDecision.MODIFY,
+        ):
+            decision, gate_id = "PASS", GATE_SIGNAL_VALIDATOR
+            reason, model_used = "g3_pass", ""
         else:
             return
         mark, mark_source = _resolve_mark(

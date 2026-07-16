@@ -7,7 +7,11 @@ Spec source:
 Each call to ``run_signal_pipeline`` walks gates 1→8 sequentially for one
 context, persisting one ``gate_events`` row per gate execution. Gate-specific
 fail policy:
-- Gate 3/4/5 fail-CLOSED: KILL → pipeline stops, signal lifecycle = KILLED.
+- Gate 3/5 fail-CLOSED: KILL → pipeline stops, signal lifecycle = KILLED.
+  (Gate 4 — Pre-Entry Watcher — is abolished as a decision step, P2a group A;
+  G3 wires directly to G5. Its content is relocated verbatim into
+  ``signal_validator.py`` — the crossed-book KILL is now part of G3's own
+  fail-closed set.)
 - Gate 6/7/8 fail-OPEN: error → caller default (HOLD / current stop / drop lesson).
 
 The orchestrator does not invent inputs — callers must seed ``ctx.payload``
@@ -29,7 +33,6 @@ from polaris.core.pipeline.agents import (
     entry_sizer_gate,
     position_monitor_gate,
     post_trade_reflector_gate,
-    pre_entry_watcher_gate,
     signal_validator_gate,
     strategy_signal_gate,
     universe_scanner_gate,
@@ -42,7 +45,6 @@ from polaris.core.pipeline.gate_state import (
     GATE_ENTRY_SIZER,
     GATE_POSITION_MONITOR,
     GATE_POST_TRADE_REFLECTOR,
-    GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GATE_STRATEGY_SIGNAL,
     GATE_UNIVERSE_SCANNER,
@@ -59,11 +61,15 @@ from polaris.core.pipeline.gate_state import (
 # tests / smoke must seed the appropriate predecessor (e.g. WATCHED to start
 # at G5). Skipping is intentionally impossible: the orchestrator emits a
 # synthetic KILL when the predecessor invariant is violated.
+#
+# P2a group A: Gate 4 (Pre-Entry Watcher) is abolished as a decision step —
+# G3 wires directly to G5 (``next_gate=GATE_ENTRY_SIZER``), so G3's own
+# PASS/MODIFY now transitions straight to WATCHED (see ``_update_lifecycle``)
+# and there is no separate G4 prereq entry.
 GATE_PREREQ_STATES: dict[int, frozenset[SignalLifecycle]] = {
     GATE_UNIVERSE_SCANNER: frozenset({SignalLifecycle.RAW}),
     GATE_STRATEGY_SIGNAL: frozenset({SignalLifecycle.RAW}),
     GATE_SIGNAL_VALIDATOR: frozenset({SignalLifecycle.RAW}),
-    GATE_PRE_ENTRY_WATCHER: frozenset({SignalLifecycle.VALIDATED}),
     GATE_ENTRY_SIZER: frozenset({SignalLifecycle.WATCHED}),
     GATE_POSITION_MONITOR: frozenset(
         {SignalLifecycle.SIZED, SignalLifecycle.ACTIVE, SignalLifecycle.MONITORED}
@@ -143,7 +149,6 @@ class GateOrchestrator:
             GATE_UNIVERSE_SCANNER: self._wrap_universe,
             GATE_STRATEGY_SIGNAL: self._wrap_strategy,
             GATE_SIGNAL_VALIDATOR: self._wrap_validator,
-            GATE_PRE_ENTRY_WATCHER: self._wrap_watcher,
             GATE_ENTRY_SIZER: self._wrap_sizer,
             GATE_POSITION_MONITOR: self._wrap_monitor,
             GATE_ADAPTIVE_EXIT: self._wrap_exit,
@@ -279,18 +284,11 @@ class GateOrchestrator:
         return await strategy_signal_gate(ctx)
 
     async def _wrap_validator(self, ctx: GateContext) -> GateResult:
-        # ai_conductor P0 SHADOW: pass the conn so the G3 deterministic technical
-        # rule is computed + logged vs the live GPT decision (behavior 0 — the
-        # GPT decision is still what drives the pipeline).
+        # P2a group A: G4's frontgate shadow tagger (VWAP/TTM squeeze, now
+        # relocated into signal_validator_gate) needs md_conn — mirrors what
+        # used to be G4-only wiring. shadow_conn logs the technical decision
+        # for measurement continuity (gpt_decision is always None — group B).
         return await signal_validator_gate(
-            ctx, client=self.haiku_client, shadow_conn=self.conn,
-            judge_client=self.judge_client,
-        )
-
-    async def _wrap_watcher(self, ctx: GateContext) -> GateResult:
-        # ai_conductor P0 SHADOW: same as G3 — G4 technical rule logged in
-        # parallel (PROCEED default / stale-crossed KILL only); GPT still decides.
-        return await pre_entry_watcher_gate(
             ctx, client=self.haiku_client, shadow_conn=self.conn,
             md_conn=self.md_conn, judge_client=self.judge_client,
         )
@@ -400,7 +398,13 @@ class GateOrchestrator:
 
     @staticmethod
     def _update_lifecycle(ctx: GateContext, gate_id: int, result: GateResult) -> None:
-        """One-way lifecycle transitions (cannot regress)."""
+        """One-way lifecycle transitions (cannot regress).
+
+        P2a group A: Gate 4 (Pre-Entry Watcher) is abolished as a decision
+        step — G3 wires directly to G5, so a G3 PASS/MODIFY transitions
+        straight to WATCHED (skipping the now-unused VALIDATED state) so
+        G5's ``{WATCHED}`` prereq is satisfied unchanged.
+        """
         if result.decision == GateDecision.KILL:
             ctx.state = SignalLifecycle.KILLED
             return
@@ -408,8 +412,6 @@ class GateOrchestrator:
             GateDecision.PASS,
             GateDecision.MODIFY,
         ):
-            ctx.state = SignalLifecycle.VALIDATED
-        elif gate_id == GATE_PRE_ENTRY_WATCHER and result.decision == GateDecision.PROCEED:
             ctx.state = SignalLifecycle.WATCHED
         elif gate_id == GATE_ENTRY_SIZER and result.decision == GateDecision.SIZED:
             ctx.state = SignalLifecycle.SIZED
@@ -482,7 +484,7 @@ async def run_signal_pipeline(
 
     ``phase`` (default ``"P0"``) drives the model split — see
     ``GateOrchestrator.__init__``. P0 forces G8 to Python template even
-    when ``haiku_client`` is supplied for G1/G3/G4.
+    when ``haiku_client`` is supplied for G1/G3.
 
     Returns the final ``GateContext`` and the list of ``GateResult`` objects.
     """
@@ -494,7 +496,6 @@ async def run_signal_pipeline(
             GATE_UNIVERSE_SCANNER: SignalLifecycle.RAW,
             GATE_STRATEGY_SIGNAL: SignalLifecycle.RAW,
             GATE_SIGNAL_VALIDATOR: SignalLifecycle.RAW,
-            GATE_PRE_ENTRY_WATCHER: SignalLifecycle.VALIDATED,
             GATE_ENTRY_SIZER: SignalLifecycle.WATCHED,
             GATE_POSITION_MONITOR: SignalLifecycle.SIZED,
             GATE_ADAPTIVE_EXIT: SignalLifecycle.MONITORED,

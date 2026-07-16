@@ -1,37 +1,36 @@
 """Gate architecture Phase 2 — per-stream G4 pre-entry guard.
 
 DEMO/PAPER ONLY. Aggressive bias preserved: fast-path is an EFFICIENCY /
-ELIGIBILITY decision (skip the slow GPT watcher when the entry is clearly
-clean), NOT an entry throttle. A not-fast-path-eligible signal always goes to
-the SLOW GPT path (which PROCEEDs or KILLs) — eligibility NEVER blocks an entry
-outright.
+ELIGIBILITY decision (skip the slow per-tick watch computation when the
+entry is clearly clean), NOT an entry throttle. A not-fast-path-eligible
+signal always flows the normal (deterministic) path — eligibility NEVER
+blocks an entry outright.
 
 Phase 2 makes fast-path eligibility CORRECT per stream via the
-``StreamProfile.guard_hooks`` seam (resolved once, read in G4):
+``StreamProfile.guard_hooks`` seam:
 - A (crypto/spot): spread-vs-baseline + listing_age — BYTE-IDENTICAL parity.
 - B (cfd): session state (market open / rollover) drives eligibility.
 - C (equity): RTH boundary + PDT state + opening gap drive eligibility.
+
+P2a group A (2026-07-16): ``is_fast_path_eligible``/``FastPathContext``
+relocated verbatim from G4 (abolished as a decision step) into
+``_g4_frontgate.py``, called from G3 (``signal_validator.py``). This file
+keeps the pure eligibility-function + payload-builder coverage (unaffected
+by the relocation); the former "through the gate" integration tests are
+gone — they exercised G4's OWN legacy GPT dispatch (deleted outright,
+P2a group B) via a hand-injected ``validated_signal.strength_scalar``, a
+scenario the live gate could never reach anyway (G3's own technical rule
+never emits a scalar >= the 1.25 fast-path floor — same structural cap that
+made the gate audit measure G4 100% no-op/PROCEED in production).
 
 No 9-stack touched, no rejection-keyword, no new entry block.
 """
 
 from __future__ import annotations
 
-import time
-
-import pytest
-
-from polaris.core.pipeline.agents.pre_entry_watcher import (
+from polaris.core.pipeline.agents._g4_frontgate import (
     FastPathContext,
     is_fast_path_eligible,
-    pre_entry_watcher_gate,
-)
-from polaris.core.pipeline.gate_state import (
-    GATE_ENTRY_SIZER,
-    GATE_PRE_ENTRY_WATCHER,
-    GateContext,
-    GateDecision,
-    SignalLifecycle,
 )
 from polaris.core.pipeline.payload_builder import build_watcher_payload
 from polaris.core.streams import resolve_stream_profile
@@ -236,171 +235,3 @@ def test_watcher_payload_C_supplies_rth_pdt_gap() -> None:
         daytrade_count=0,
     )
     assert p_rth["equity_session_state"] == "rth"
-
-
-# ---------------------------------------------------------------------------
-# Gate integration — not-eligible -> SLOW GPT path, NEVER blocked outright
-# ---------------------------------------------------------------------------
-
-
-def _gate_ctx(payload: dict, *, venue: str, symbol: str, profile) -> GateContext:
-    return GateContext(
-        run_id="r",
-        signal_id="s",
-        position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
-        venue=venue,
-        symbol=symbol,
-        strategy_id="strat",
-        payload=payload,
-        started_ts=int(time.time()),
-        state=SignalLifecycle.VALIDATED,
-        stream_profile=profile,
-    )
-
-
-class _StubGPT:
-    """Minimal OpenAI-shaped stub returning a fixed decision JSON."""
-
-    def __init__(self, decision: str = "PROCEED") -> None:
-        self._decision = decision
-        outer = self
-
-        class _Messages:
-            async def create(self, **kwargs):  # noqa: ANN001
-                class _Block:
-                    text = (
-                        '{"decision": "' + outer._decision + '", "reason": "stub"}'
-                    )
-
-                class _Resp:
-                    content = [_Block()]
-                    usage = type("U", (), {"input_tokens": 1, "output_tokens": 1})()
-
-                return _Resp()
-
-        self.messages = _Messages()
-
-
-@pytest.mark.asyncio
-async def test_B_closed_session_goes_to_slow_gpt_not_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """B during closed session: NOT fast-path -> slow GPT PROCEED (not blocked)."""
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    payload: dict = {
-        "validated_signal": {"strategy_id": "fx", "symbol": "XAUUSD",
-                             "side": "long", "strength_scalar": 1.4},
-        **build_watcher_payload(
-            spread_bps=1.0,
-            baseline_p50_spread_bps=2.0,
-            listing_age_hours=0.0,
-            stream_profile=B_PROF,
-            now_ts=WEEKEND,
-        ),
-        "cell_quartile": "top",
-    }
-    ctx = _gate_ctx(payload, venue="capital", symbol="XAUUSD", profile=B_PROF)
-    res = await pre_entry_watcher_gate(ctx, client=_StubGPT("PROCEED"))
-    # NOT fast-path (closed) -> slow GPT was consulted, decision = PROCEED
-    assert res.model_used == "gpt"
-    assert res.decision == GateDecision.PROCEED
-    assert res.next_gate == GATE_ENTRY_SIZER
-
-
-@pytest.mark.asyncio
-async def test_C_outside_rth_goes_to_slow_gpt_not_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    payload: dict = {
-        "validated_signal": {"strategy_id": "eq", "symbol": "AAPL",
-                             "side": "long", "strength_scalar": 1.4},
-        **build_watcher_payload(
-            spread_bps=1.0,
-            baseline_p50_spread_bps=2.0,
-            listing_age_hours=0.0,
-            stream_profile=C_PROF,
-            now_ts=EQUITY_CLOSED,
-            daytrade_count=0,
-        ),
-        "cell_quartile": "top",
-    }
-    ctx = _gate_ctx(payload, venue="alpaca", symbol="AAPL", profile=C_PROF)
-    res = await pre_entry_watcher_gate(ctx, client=_StubGPT("PROCEED"))
-    assert res.model_used == "gpt"  # NOT fast-path -> slow GPT
-    assert res.decision == GateDecision.PROCEED
-
-
-@pytest.mark.asyncio
-async def test_C_pdt_flagged_goes_to_slow_gpt_not_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    payload: dict = {
-        "validated_signal": {"strategy_id": "eq", "symbol": "AAPL",
-                             "side": "long", "strength_scalar": 1.4},
-        **build_watcher_payload(
-            spread_bps=1.0,
-            baseline_p50_spread_bps=2.0,
-            listing_age_hours=0.0,
-            stream_profile=C_PROF,
-            now_ts=RTH_FRIDAY,
-            daytrade_count=5,  # PDT-flagged
-        ),
-        "cell_quartile": "top",
-    }
-    ctx = _gate_ctx(payload, venue="alpaca", symbol="AAPL", profile=C_PROF)
-    res = await pre_entry_watcher_gate(ctx, client=_StubGPT("PROCEED"))
-    assert res.model_used == "gpt"  # PDT-flagged is NOT a block, just not-fast
-    assert res.decision == GateDecision.PROCEED
-
-
-@pytest.mark.asyncio
-async def test_C_rth_clean_fast_path_skips_gpt() -> None:
-    payload: dict = {
-        "validated_signal": {"strategy_id": "eq", "symbol": "AAPL",
-                             "side": "long", "strength_scalar": 1.4},
-        **build_watcher_payload(
-            spread_bps=1.0,
-            baseline_p50_spread_bps=2.0,
-            listing_age_hours=0.0,
-            stream_profile=C_PROF,
-            now_ts=RTH_FRIDAY,
-            daytrade_count=0,
-        ),
-        "cell_quartile": "top",
-    }
-    ctx = _gate_ctx(payload, venue="alpaca", symbol="AAPL", profile=C_PROF)
-    # client=None: if NOT fast-path it would KILL (no_gpt_client). Clean RTH must
-    # fast-path PROCEED without any GPT.
-    res = await pre_entry_watcher_gate(ctx)
-    assert res.model_used == "python_fast_path"
-    assert res.decision == GateDecision.PROCEED
-    assert res.skipped is True
-
-
-@pytest.mark.asyncio
-async def test_B_open_calm_fast_path_skips_gpt() -> None:
-    payload: dict = {
-        "validated_signal": {"strategy_id": "fx", "symbol": "XAUUSD",
-                             "side": "long", "strength_scalar": 1.4},
-        **build_watcher_payload(
-            spread_bps=1.0,
-            baseline_p50_spread_bps=2.0,
-            listing_age_hours=0.0,
-            stream_profile=B_PROF,
-            now_ts=FX_OPEN_CALM,
-        ),
-        "cell_quartile": "top",
-    }
-    ctx = _gate_ctx(payload, venue="capital", symbol="XAUUSD", profile=B_PROF)
-    res = await pre_entry_watcher_gate(ctx)
-    assert res.model_used == "python_fast_path"
-    assert res.decision == GateDecision.PROCEED

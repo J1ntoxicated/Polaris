@@ -1,36 +1,61 @@
-"""Gate 3 — Signal Validator (GPT P0, fail-closed).
+"""Gate 3 — Signal Validator (deterministic; G3->G5 direct wire, P2a group A).
 
 Spec source:
 - vault/30_components/layer-2-per-gate-pipeline.md (Q3 G3 + Q4 fail-closed + Q6 prompt)
 - vault/10_decisions/ADR-004-per-gate-ai-pipeline.md (Signal Validator)
 
 Behavior:
-- Input: raw_signal + cell_matrix routing summary + ticker baseline + recent same-symbol trades.
-- Output: PASS / KILL / MODIFY. MODIFY carries ``strength_scalar in [0.5, 1.5]``.
-- Fail-closed: timeout / parse error → KILL.
+- Input: raw_signal + cell_matrix routing summary + tick window / spread /
+  listing baseline (formerly G4's own inputs — the orchestrator primes
+  ``ctx.payload`` with all of it up front, so it was always available here).
+- Output: PASS / MODIFY (the G3 technical rule raises no entry-block KILL —
+  ``flow_not_block``); KILL only on ``missing_raw_signal`` or a crossed book
+  (microstructure broken — inherited from G4, see below). MODIFY carries
+  ``strength_scalar in [0.5, 1.5]``.
 
-Migration (2026-05-07): Anthropic Haiku → OpenAI GPT (Jin mandate).
-Aggressive bias preserved — no defensive throttle on PASS rate.
+P2a group B (2026-07-16, gate-pipeline value audit): the legacy in-loop GPT
+decision path is removed outright — it was measured DORMANT in production
+(``POLARIS_AI_FREE`` default ON since 2026-06-11 zeroed in-loop G3/G4/G7 GPT
+calls) and is deleted rather than kept as a switchable-but-unreachable branch.
+``client``/``ai_free`` remain on the signature ONLY for call-site
+compatibility (orchestrator + existing tests) — they are never read; the
+technical rule is unconditionally the decision.
+
+P2a group A (2026-07-16): Gate 4 (Pre-Entry Watcher) is abolished as a
+decision STEP — the audit measured it 1447/1447 PROCEED (100% no-op; its own
+GPT call was already removed in group B). G3 now wires directly to G5
+(``next_gate=GATE_ENTRY_SIZER``). G4's decision logic (the legacy GPT
+dispatch + ``no_gpt_client``/schema-violation KILLs) is gone with the module;
+its side-effect content is relocated to ``_g4_frontgate.py`` (fast-path
+eligibility, the crossed-book KILL rail + stale/spread/drift ``watch_flags``,
+the frontgate VWAP/TTM-squeeze shadow tags, and the #32 AI entry-TIMING
+judge) and called from here UNCHANGED so nothing is lost. The #32 AI
+entry-RATIONALE judge (``_maybe_judge_entry``, G3's own) is untouched. Both
+judge calls are a SEPARATE, out-of-scope subsystem — left byte-identical in
+their own logic.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import Any, Final
 
-from polaris.core.pipeline.agents._gpt_client import (
-    DEFAULT_TIMEOUT_SEC,
-    GPTCallResult,
-    call_gpt,
-    make_system_prefix,
+from polaris.core.pipeline.agents._g4_frontgate import (
+    fast_path_context_from_payload,
+    is_fast_path_eligible,
+    log_g4_frontgate_shadow,
+    maybe_judge_timing,
 )
 from polaris.core.pipeline.agents._shadow_rules import (
     CELL_WARM_MIN_N_EFF,
     G3ShadowInputs,
     ShadowDecision,
     g3_shadow_inputs_from_payload,
+    g4_shadow_inputs_from_payload,
     technical_validate_decision,
+    technical_watch_decision,
 )
 from polaris.core.pipeline.agents.ai_judge import (
     apply_entry_verdict,
@@ -43,20 +68,21 @@ from polaris.core.pipeline.agents.judge_gate import (
     should_escalate_entry,
 )
 from polaris.core.pipeline.agents.shadow_log import log_shadow_event
-from polaris.core.pipeline.config import ai_free_mode, ai_judge_mode
+from polaris.core.pipeline.config import ai_judge_mode
 from polaris.core.pipeline.gate_state import (
-    GATE_PRE_ENTRY_WATCHER,
+    GATE_ENTRY_SIZER,
     GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
     GateResult,
 )
 
+# Relocated symbols re-exported here for call-site / test compatibility (the
+# public "G4 fast-path" API used to live in pre_entry_watcher.py).
 __all__ = [
     "MODIFY_MAX",
     "MODIFY_MIN",
-    "VALIDATOR_MAX_TOKENS",
-    "VALIDATOR_RECENT_TRADES_MAX",
+    "is_fast_path_eligible",
     "signal_validator_gate",
 ]
 
@@ -64,61 +90,13 @@ logger = logging.getLogger(__name__)
 
 MODIFY_MIN: Final[float] = 0.5
 MODIFY_MAX: Final[float] = 1.5
-# Q6 G3 token budget for PASS/KILL/MODIFY response.
-VALIDATOR_MAX_TOKENS: Final[int] = 250
-# Recent same-symbol trades cap surfaced to the validator prompt.
-VALIDATOR_RECENT_TRADES_MAX: Final[int] = 5
-
-_DECISION_TOKENS = {"PASS", "KILL", "MODIFY"}
-
-
-def _build_user_prompt(
-    *,
-    raw_signal: dict[str, Any],
-    cell_routing: dict[str, Any],
-    baseline: dict[str, Any],
-    recent_trades: list[dict[str, Any]],
-) -> str:
-    rt_lines = "\n".join(
-        f"- {t.get('ts')}: pnl_r={t.get('pnl_r')} won={t.get('won')}"
-        for t in recent_trades[:VALIDATOR_RECENT_TRADES_MAX]
-    )
-    return (
-        f"# Raw signal\n{raw_signal}\n"
-        f"# Cell routing\n{cell_routing}\n"
-        f"# Baseline\n{baseline}\n"
-        f"# Recent same-symbol\n{rt_lines}\n"
-        'Output JSON: {"decision": "PASS|KILL|MODIFY", "strength_scalar": 1.0, '
-        '"thesis": "..."}'
-    )
-
-
-def _validate_decision(parsed: dict[str, Any]) -> tuple[GateDecision, float] | None:
-    """Schema-validate the GPT output. None = invalid → fail-closed KILL."""
-    decision = str(parsed.get("decision", "")).upper()
-    if decision not in _DECISION_TOKENS:
-        return None
-    raw_scalar = parsed.get("strength_scalar", 1.0)
-    try:
-        scalar = float(raw_scalar)
-    except (TypeError, ValueError):
-        scalar = 1.0
-    # Clamp to [MODIFY_MIN, MODIFY_MAX] (GPT is allowed only the 0.5-1.5 range).
-    scalar = max(MODIFY_MIN, min(MODIFY_MAX, scalar))
-    if decision == "PASS":
-        return GateDecision.PASS, 1.0
-    if decision == "KILL":
-        return GateDecision.KILL, 0.0
-    return GateDecision.MODIFY, scalar
 
 
 def _g3_technical(ctx: GateContext) -> tuple[G3ShadowInputs, ShadowDecision]:
     """Compute the G3 deterministic technical decision from ``ctx.payload``.
 
-    Shared by the legacy shadow logger AND the AI-free primary path so the two
-    can never drift. The technical rule raises NO entry-block KILL — losing is
-    never a block (``flow_not_block``); its only outputs are PASS / conservative
-    MODIFY.
+    The technical rule raises NO entry-block KILL — losing is never a block
+    (``flow_not_block``); its only outputs are PASS / conservative MODIFY.
     """
     inp = g3_shadow_inputs_from_payload(ctx.payload)
     return inp, technical_validate_decision(inp)
@@ -129,12 +107,10 @@ def _log_g3_shadow(
     shadow_conn: sqlite3.Connection | None,
     gpt_decision: GateDecision | None,
 ) -> None:
-    """Compute the G3 deterministic technical rule + log it vs the GPT decision.
+    """Compute the G3 deterministic technical rule + log it for measurement.
 
-    AI-conductor P0 SHADOW (behavior 0): the technical decision is logged for the
-    acceptance gate and NEVER returned. ``cold cell = pass-through`` and
-    ``net_edge`` is not consulted (both enforced inside the rule). No-op when
-    ``shadow_conn`` is None.
+    ``cold cell = pass-through`` and ``net_edge`` is not consulted (both
+    enforced inside the rule). No-op when ``shadow_conn`` is None.
     """
     if shadow_conn is None:
         return
@@ -161,7 +137,7 @@ async def _maybe_judge_entry(
     judge_client: Any | None,
     shadow_conn: sqlite3.Connection | None,
 ) -> GateResult:
-    """Run the #32 AI entry judge over the deterministic G3 result (non-blocking).
+    """Run the #32 AI entry-RATIONALE judge over the G3 result (non-blocking).
 
     No-op when ``judge_client`` is None (the deterministic result is returned
     byte-identical — judge absent). Otherwise the judge runs over the bot's own
@@ -215,33 +191,33 @@ async def signal_validator_gate(
     *,
     client: Any | None = None,
     shadow_conn: sqlite3.Connection | None = None,
+    md_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
     judge_client: Any | None = None,
 ) -> GateResult:
-    """Gate 3 dispatcher (GPT validator / W3 AI-free deterministic).
+    """Gate 3 dispatcher — deterministic-only, G3->G5 direct wire (P2a).
 
-    Reads inputs from ``ctx.payload``:
-        ``raw_signal``, ``cell_routing``, ``baseline``, ``recent_trades``.
-    Fail-closed: any unhandled error / non-conformant output → KILL.
+    Reads inputs from ``ctx.payload``: ``raw_signal``, ``cell_routing``, plus
+    G4's former inputs (``tick_window``, ``spread_bps``,
+    ``baseline_p50_spread_bps``, ...) — all primed up front by the caller
+    before the pipeline starts, so nothing new is required upstream.
+    Fail-closed: missing/empty ``raw_signal`` → KILL. Otherwise the technical
+    rule drives — it raises NO entry-block KILL (``flow_not_block`` — losing
+    is never a block), EXCEPT the crossed-book rail inherited from G4 (broken
+    microstructure, not a market judgment call).
 
-    ``ai_free`` (W3 cutover — ``POLARIS_AI_FREE``, default ON; ``None`` reads
-    the env): the deterministic technical rule (former shadow) IS the primary
-    decision — zero GPT calls, ``model_used="python"``, and no shadow row
-    (GPT absent → nothing to compare). The technical rule raises NO entry-block
-    KILL (``flow_not_block`` — losing is never a block), so on the AI-free path
-    G3 emits only PASS / conservative MODIFY. flag=0 → the legacy GPT path below
-    runs byte-identical.
+    ``client`` / ``ai_free`` are accepted ONLY for call-site compatibility
+    (the orchestrator + existing tests still pass them) — neither is read.
+    GPT is never called from this gate. ``md_conn`` threads to the frontgate
+    VWAP/TTM shadow tagger (marketdata-domain bars read); ``None`` falls back
+    to ``shadow_conn``.
 
-    ``shadow_conn`` (legacy AI-conductor P0 SHADOW): when supplied on the GPT
-    path, a deterministic technical rule is computed in parallel and logged
-    against the live GPT decision (behavior 0 — the GPT decision is what this
-    gate returns). None = legacy behavior, byte-identical.
+    ``shadow_conn`` (measurement continuity): when supplied, the technical
+    decision is logged to ``gate_shadow_events`` for the acceptance-gate
+    dashboards. ``gpt_decision`` is always ``None`` now (no GPT call to
+    compare against — not a comparison gap, the call itself is gone).
     """
     raw_signal = ctx.payload.get("raw_signal", {})
-    cell_routing = ctx.payload.get("cell_routing", {})
-    baseline = ctx.payload.get("baseline", {})
-    recent = ctx.payload.get("recent_trades", [])
-
     if not isinstance(raw_signal, dict) or not raw_signal:
         return GateResult(
             decision=GateDecision.KILL,
@@ -250,128 +226,95 @@ async def signal_validator_gate(
             model_used="python",
         )
 
-    use_ai_free = ai_free if ai_free is not None else ai_free_mode()
-    if use_ai_free:
-        # W3 AI-FREE primary: technical decision drives the pipeline. The G3
-        # technical rule emits ONLY PASS / conservative MODIFY (losing is never
-        # an entry block — flow_not_block), so there is no KILL branch here; the
-        # signal always flows on with its strength_scalar downstream.
-        _inp, technical = _g3_technical(ctx)
-        logger.info(
-            "[gate/G3-validator] AI-free decision=%s scalar=%.2f regime=%s "
-            "reason=%s sym=%s (deterministic primary, GPT=0)",
-            technical.decision.name,
-            technical.scalar,
-            str(ctx.payload.get("regime", "")),
-            technical.reason,
-            str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
-        )
-        det_result = GateResult(
+    _inp, technical = _g3_technical(ctx)
+    logger.info(
+        "[gate/G3-validator] decision=%s scalar=%.2f regime=%s reason=%s sym=%s "
+        "(deterministic, GPT=0)",
+        technical.decision.name,
+        technical.scalar,
+        str(ctx.payload.get("regime", "")),
+        technical.reason,
+        str(raw_signal.get("symbol", raw_signal.get("ticker", "?"))),
+    )
+    # P2a final review MED (2026-07-16): the per-call shadow row existed to
+    # measure GPT-vs-deterministic divergence. With the GPT branch deleted
+    # there is nothing to compare (gpt_decision would always be None,
+    # mismatch 0) and gate_events already records the deterministic decision
+    # — so the comparisonless write is DROPPED rather than re-adding
+    # continuous trading-conn volume right after the storage split relieved
+    # that exact lock. (_log_g3_shadow stays for any future comparator.)
+    validated_signal = {**raw_signal, "strength_scalar": technical.scalar}
+
+    # G4 fast-path (relocated verbatim, P2a group A): an EFFICIENCY skip of
+    # the slow per-tick watch computation below — unaffected by MODIFY (whose
+    # scalar is always <=1.0 and can never clear the 1.25 strength floor).
+    # Still routed through the G3 entry-rationale judge (fix, 2026-07-16):
+    # pre-fold G3 had NO fast path (it lived only in G4 and only ever skipped
+    # G4's own TIMING judge) — every AI-free G3 signal reached
+    # ``_maybe_judge_entry``. Returning here unconditionally would silently
+    # drop that judge (and its measurement row) for exactly the top-quartile/
+    # high-scalar cohort most likely to clear the #32 A+B escalation gate,
+    # contradicting this module's own "byte-identical" claim. G4's TIMING
+    # judge (``maybe_judge_timing``) stays skipped — that exclusion predates
+    # this fold (see its docstring: "the fast-path result never reaches here").
+    fp = fast_path_context_from_payload(ctx, validated_signal)
+    if is_fast_path_eligible(fp, ctx.stream_profile):
+        fast_result = GateResult(
             decision=technical.decision,
-            next_gate=GATE_PRE_ENTRY_WATCHER,
+            next_gate=GATE_ENTRY_SIZER,
             payload={
-                "validated_signal": {
-                    **raw_signal,
-                    "strength_scalar": technical.scalar,
-                },
+                "validated_signal": validated_signal,
+                "watched_signal": validated_signal,
                 "reason": technical.reason,
+                "fast_path": True,
             },
-            model_used="python",
+            model_used="python_fast_path",
+            latency_ms=0,
+            skipped=True,
         )
-        # #32 AI JUDGE (entry-rationale): a per-ticker, STRUCTURALLY non-blocking
-        # judgment over the bot's OWN info (technicals + alt-data evidence + regime
-        # + ground). The judge has no KILL path; shadow (default) logs only, active
-        # annotates flow-additively. When ``judge_client`` is None the deterministic
-        # result is returned byte-identical (judge absent → no-op).
         return await _maybe_judge_entry(
-            ctx, det_result=det_result, judge_client=judge_client,
+            ctx, det_result=fast_result, judge_client=judge_client,
             shadow_conn=shadow_conn,
         )
 
-    if client is None:
-        # Fail-closed without LLM → KILL (entry-side gate, Q4 spec).
+    # G4 crossed-book KILL + stale/spread/drift watch_flags (relocated
+    # verbatim, P2a group A). KILL only on a crossed book (microstructure
+    # broken — the pre-existing deterministic KILL set, no new block);
+    # stale (per-ticker baseline) / wide spread / drift stay FLAGS.
+    now_ref = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
+    g4_inp = g4_shadow_inputs_from_payload(ctx.payload, now_ts=now_ref)
+    watch = technical_watch_decision(g4_inp)
+    if watch.decision == GateDecision.KILL:
         return GateResult(
             decision=GateDecision.KILL,
             next_gate=None,
-            payload={"reason": "no_gpt_client"},
+            payload={"reason": watch.reason},
             model_used="python",
         )
-
-    system = make_system_prefix(
-        role=(
-            "You are a Signal Validator gate in Polaris v2 paper trading "
-            "system."
-        ),
-        decision_enum=["PASS", "KILL", "MODIFY"],
-        cell_summary=str(cell_routing),
-        baseline_summary=str(baseline),
-        recent_trades_summary=str(recent[:VALIDATOR_RECENT_TRADES_MAX]),
+    det_payload: dict[str, Any] = {
+        "validated_signal": validated_signal,
+        "watched_signal": validated_signal,
+        "reason": technical.reason,
+    }
+    if watch.flags:
+        det_payload["watch_flags"] = list(watch.flags)
+    det_result = GateResult(
+        decision=technical.decision,
+        next_gate=GATE_ENTRY_SIZER,
+        payload=det_payload,
+        model_used="python",
     )
-    prompt = _build_user_prompt(
-        raw_signal=raw_signal,
-        cell_routing=cell_routing,
-        baseline=baseline,
-        recent_trades=recent,
+    # frontgate-scan items #6 (VWAP/AVWAP timing) + #9 (TTM Squeeze) —
+    # behavior-0 watch tags, logged only, never influence det_result above.
+    log_g4_frontgate_shadow(ctx, shadow_conn, md_conn=md_conn, inp=g4_inp)
+    # #32 AI JUDGE — entry-rationale (G3's own) then entry-timing (G4's own,
+    # relocated). Both are a SEPARATE, out-of-scope call path, left
+    # byte-identical. No-op when ``judge_client`` is None.
+    result = await _maybe_judge_entry(
+        ctx, det_result=det_result, judge_client=judge_client,
+        shadow_conn=shadow_conn,
     )
-    res: GPTCallResult = await call_gpt(
-        client=client,
-        system_prefix=system,
-        user_prompt=prompt,
-        max_tokens=VALIDATOR_MAX_TOKENS,
-        timeout_sec=DEFAULT_TIMEOUT_SEC,
-    )
-
-    if res.error or res.parsed is None:
-        return GateResult(
-            decision=GateDecision.KILL,
-            next_gate=None,
-            payload={"reason": "gpt_error", "error": res.error},
-            model_used="gpt",
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-            error=res.error,
-        )
-
-    decoded = _validate_decision(res.parsed)
-    if decoded is None:
-        return GateResult(
-            decision=GateDecision.KILL,
-            next_gate=None,
-            payload={"reason": "gpt_schema_violation", "raw": res.text[:200]},
-            model_used="gpt",
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        )
-    decision, scalar = decoded
-    # AI-conductor P0 SHADOW: log the technical rule vs the live GPT decision.
-    # Behavior 0 — the GPT ``decision`` is returned unchanged below.
-    _log_g3_shadow(ctx, shadow_conn, decision)
-    if decision == GateDecision.KILL:
-        # Mirror G4's raw-reason capture (pre_entry_watcher ``watcher_kill``):
-        # persist the model's own KILL rationale so a G3 reject is auditable
-        # instead of an opaque {reason: validator_kill}. (BUILD_SCHEMA #3.)
-        return GateResult(
-            decision=decision,
-            next_gate=None,
-            payload={"reason": "validator_kill", "raw": res.text[:200]},
-            model_used="gpt",
-            latency_ms=res.latency_ms,
-            input_tokens=res.input_tokens,
-            output_tokens=res.output_tokens,
-        )
-    return GateResult(
-        decision=decision,
-        next_gate=GATE_PRE_ENTRY_WATCHER,
-        payload={
-            "validated_signal": {
-                **raw_signal,
-                "strength_scalar": scalar,
-            }
-        },
-        model_used="gpt",
-        latency_ms=res.latency_ms,
-        input_tokens=res.input_tokens,
-        output_tokens=res.output_tokens,
+    return await maybe_judge_timing(
+        ctx, det_result=result, judge_client=judge_client,
+        shadow_conn=shadow_conn,
     )

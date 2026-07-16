@@ -444,71 +444,28 @@ async def test_swap_strategy_layer6_ssot_called(memdb: sqlite3.Connection) -> No
 
 
 @pytest.mark.asyncio
-async def test_g6_adjust_exit_chains_g7(
-    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # W3 cutover adaptation (NOT a behavior change): pins the LEGACY GPT
-    # path under POLARIS_AI_FREE=0; flag=1 is covered by test_ai_free_cutover.py.
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
+async def test_g6_adjust_exit_chains_g7(memdb: sqlite3.Connection) -> None:
     """A strong winner → deterministic G6 ADJUST_EXIT → chains to G7.
 
     ai_conductor P3 (2026-05-30): G6 is deterministic (pnl_r > 0.7R → ADJUST_EXIT),
     so the tight-bar winner (pnl_r ≈ +10R, FSM keeps it open) flows G6 → G7.
-    G7 (adaptive exit) still uses GPT at P1, so exactly ONE GPT call is made
-    (G7 only — G6 never calls GPT).
+    P2a group B: G7's legacy GPT branch is deleted outright — the Q9 rail
+    drives and a supplied client is never called (G6 was already deterministic).
     """
     _seed_position_and_fill(
         memdb, position_id="pos-adj", last_price=80_400.0, tight_bars=True,
     )
     state = ProdLoopState()
     state.open_trades = [_trade_for("pos-adj")]
-    haiku = _MockGPTClient(responses=[
-        '{"decision":"WIDEN","reason":"extend stop","new_exit_atr":2.5}',  # G7
-    ])
+    haiku = _MockGPTClient()
     await recalc_active_positions(
         memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
         lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
     )
     assert state.recalc_g6_calls == 1
     assert state.recalc_g7_calls == 1
-    # Exactly one GPT call — G7 only (G6 deterministic).
-    assert len(haiku.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_g7_exit_now_closes_and_names_lineage_reason(
-    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """G6 ADJUST_EXIT chains to G7; G7 EXIT_NOW closes the position specifically
-    (P2-12: the close names 'g7_exit_now' in the lineage exit_reason, not the
-    'exit' fallback). Observability only — no close-path behaviour change.
-    """
-    monkeypatch.setenv("POLARIS_AI_FREE", "0")
-    _seed_position_and_fill(
-        memdb, position_id="pos-g7exit", last_price=80_400.0, tight_bars=True,
-    )
-    record_segment_open(
-        memdb, position_id="pos-g7exit", trade_id="pos-g7exit", venue="okx",
-        ticker="BTC-USDT", strategy_id="vb", regime="bull_trend", entry_ts=NOW,
-    )
-    state = ProdLoopState()
-    state.open_trades = [_trade_for("pos-g7exit")]
-    haiku = _MockGPTClient(responses=[
-        '{"decision":"EXIT_NOW","reason":"reversal"}',  # G7
-    ])
-    await recalc_active_positions(
-        memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P1",
-        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
-    )
-    status = memdb.execute(
-        "SELECT status FROM positions WHERE position_id = ?", ("pos-g7exit",),
-    ).fetchone()[0]
-    assert status == "closed"
-    exit_reason = memdb.execute(
-        "SELECT exit_reason FROM position_strategy_segments WHERE position_id = ?",
-        ("pos-g7exit",),
-    ).fetchone()[0]
-    assert exit_reason == "g7_exit_now"
+    # Zero GPT calls — both G6 and G7 are deterministic now.
+    assert haiku.calls == []
 
 
 # ---------------------------------------------------------------------------

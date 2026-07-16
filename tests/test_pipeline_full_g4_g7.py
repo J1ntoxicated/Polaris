@@ -17,13 +17,13 @@ from polaris.core.pipeline.agents import (
     adaptive_exit_gate,
     entry_sizer_gate,
     position_monitor_gate,
-    pre_entry_watcher_gate,
+    signal_validator_gate,
 )
 from polaris.core.pipeline.gate_state import (
     GATE_ADAPTIVE_EXIT,
     GATE_ENTRY_SIZER,
     GATE_POSITION_MONITOR,
-    GATE_PRE_ENTRY_WATCHER,
+    GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
     SignalLifecycle,
@@ -247,7 +247,7 @@ def test_validator_payload_okx_capital_baseline_symmetry(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# build_watcher_payload + G4 fast-path
+# build_watcher_payload + former G4 fast-path (relocated into G3, group A)
 # ---------------------------------------------------------------------------
 
 
@@ -265,11 +265,16 @@ def test_payload_builder_watcher_payload_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_g4_fast_path_proceed_top_quartile() -> None:
-    """G4 with fast-path eligibility (top quartile + tight spread + mature) -> PROCEED."""
+async def test_g3_top_quartile_clean_book_proceeds_deterministic() -> None:
+    """P2a group A: G4's fast-path is relocated into G3 (``signal_validator_gate``)
+    but is structurally unreachable through the live gate — G3's OWN
+    technical rule caps its scalar at 1.0, below the 1.25 fast-path floor
+    (same structural cap the gate audit's G4 100%-no-op finding reflects).
+    A clean top-quartile/tight-spread/mature-listing signal still flows
+    (PASS, deterministic, model_used='python') straight to G5."""
     payload: dict = {
-        "validated_signal": {"strategy_id": "vb", "symbol": "BTC-USDT", "side": "long",
-                              "strength_scalar": 1.4},
+        "raw_signal": {"strategy": "vb", "score": 1.0},
+        "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
         **build_watcher_payload(
             spread_bps=1.0,
             baseline_p50_spread_bps=2.0,
@@ -278,14 +283,15 @@ async def test_g4_fast_path_proceed_top_quartile() -> None:
         "cell_quartile": "top",
     }
     ctx = GateContext(
-        run_id="r", signal_id="s", position_id=None, gate_id=GATE_PRE_ENTRY_WATCHER,
+        run_id="r", signal_id="s", position_id=None, gate_id=GATE_SIGNAL_VALIDATOR,
         venue="okx", symbol="BTC-USDT", strategy_id="volume_burst",
-        payload=payload, started_ts=int(time.time()), state=SignalLifecycle.VALIDATED,
+        payload=payload, started_ts=int(time.time()), state=SignalLifecycle.RAW,
     )
-    result = await pre_entry_watcher_gate(ctx)
-    assert result.decision == GateDecision.PROCEED
+    result = await signal_validator_gate(ctx)
+    assert result.decision == GateDecision.PASS
     assert result.next_gate == GATE_ENTRY_SIZER
-    assert result.skipped is True
+    assert result.skipped is False
+    assert result.model_used == "python"
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +335,8 @@ def test_default_strategy_risk_state_cold_start() -> None:
 
 @pytest.mark.asyncio
 async def test_g4_to_g5_chain_pass_when_sizer_succeeds(tmp_path: Path) -> None:
-    """G4 PROCEED + sizer payload -> G5 emits SIZED with positive notional."""
+    """G3 PASS/MODIFY (WATCHED) + sizer payload -> G5 emits SIZED with
+    positive notional (G3->G5 direct wire, P2a group A)."""
     db_path = tmp_path / "polaris.sqlite"
     conn = init_db(db_path)
     try:

@@ -27,10 +27,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sqlite3
 import time
 from collections import deque
 from pathlib import Path
+from typing import Final
 
 from polaris.core.data._tick_activation import (
     ACTIVATION_MAX_SYMBOLS,
@@ -44,15 +46,22 @@ from polaris.storage.schema import connect
 # ``ACTIVATION_MAX_SYMBOLS`` is re-exported (the #39 per-symbol accumulator + its
 # cap live in ``_tick_activation`` for the ≤500-LOC split) so the existing
 # ``quote_writer.ACTIVATION_MAX_SYMBOLS`` import surface is unchanged.
-__all__ = ["ACTIVATION_MAX_SYMBOLS", "QuoteTickWriter", "live_or_bar_price"]
+__all__ = [
+    "ACTIVATION_MAX_SYMBOLS",
+    "QUOTE_SANITY_PCT_DEFAULT",
+    "QuoteTickWriter",
+    "live_or_bar_price",
+    "quote_sanity_pct",
+]
 
 logger = logging.getLogger(__name__)
 
-# Per-instrument ring-buffer depth for the live tick window. G4's watcher reads
-# the last ~30 ticks (pre_entry_watcher slices ``tick_window[-30:]``), and the P5
-# tick-decision engine's ``feature_window`` reads the full ring. 600 ticks is
-# ~60-120s of history at ~5-10 ticks/s — enough for the engine's 1/3/10s EWMA
-# microstructure features while staying in-mem only (never persisted; the DB keeps
+# Per-instrument ring-buffer depth for the live tick window. G3's (former G4,
+# relocated P2a group A) crossed-book/stale-book check reads the tick window
+# via ``recent_ticks``, and the P5 tick-decision engine's ``feature_window``
+# reads the full ring. 600 ticks is ~60-120s of history at ~5-10 ticks/s —
+# enough for the engine's 1/3/10s EWMA microstructure features while staying
+# in-mem only (never persisted; the DB keeps
 # last-write-wins per PK).
 RING_BUFFER_DEPTH = 600
 
@@ -65,6 +74,29 @@ RING_BUFFER_DEPTH = 600
 # path keeps its own ``WS_EXIT_MARK_FRESH_SEC`` (same value) for the exit TRIGGER
 # mark; this constant is the shared default for the remaining execution prices.
 LIVE_PRICE_FRESH_SEC = 35.0
+
+# Quote sanity guard (P2a — STETH phantom forensic 2026-07-16: a degraded OKX
+# demo book let the WS mid drift -9% off the true market while still passing
+# the freshness check above, booking a phantom -15R close). When the caller
+# supplies a real bar close as ``bar_ref``, a fresh mid that diverges from it
+# by more than this fraction is DISTRUSTED (bar_ref returned instead) — a
+# hygiene guard, not a block: it only widens which price wins, never halts a
+# trade. ``POLARIS_QUOTE_SANITY_PCT`` env-injectable; unset/unparsable/
+# non-positive falls back to the default (same shape as ``time_stop_k_mult``).
+QUOTE_SANITY_PCT_ENV: Final[str] = "POLARIS_QUOTE_SANITY_PCT"
+QUOTE_SANITY_PCT_DEFAULT: Final[float] = 0.03
+
+
+def quote_sanity_pct(env_value: str | None = None) -> float:
+    """Max fractional |mid/bar_ref - 1| before a fresh mid is distrusted."""
+    raw = os.getenv(QUOTE_SANITY_PCT_ENV) if env_value is None else env_value
+    if raw is None or raw.strip() == "":
+        return QUOTE_SANITY_PCT_DEFAULT
+    try:
+        parsed = float(raw.strip())
+    except ValueError:
+        return QUOTE_SANITY_PCT_DEFAULT
+    return parsed if parsed > 0.0 else QUOTE_SANITY_PCT_DEFAULT
 
 # A flush that hits "database is locked/busy" is EXPECTED WAL backpressure under
 # the accepted checkpoint trade (see production_paper_loop._wal_checkpoint_producer),
@@ -167,6 +199,7 @@ def live_or_bar_price(
     bar_fallback: float,
     *,
     fresh_sec: float = LIVE_PRICE_FRESH_SEC,
+    bar_ref: float | None = None,
 ) -> float:
     """Execution-default price: the LIVE WS mid, else ``bar_fallback``.
 
@@ -180,12 +213,33 @@ def live_or_bar_price(
     ``time.monotonic()`` age ``< fresh_sec`` (M6: monotonic clock, never venue
     ts), else ``bar_fallback`` (graceful degrade — never halts on a missing tick,
     AGGRESSIVE/flow_not_block invariant). 0 DB hits (reads the in-mem ring).
+
+    ``bar_ref`` (quote sanity guard, optional — pass ONLY a genuine bar close,
+    never a fallback placeholder): when supplied and positive, a fresh mid that
+    diverges from it by more than ``quote_sanity_pct()`` is DISTRUSTED — a
+    degraded order book (STETH phantom forensic 2026-07-16) can hold ``mid > 0``
+    and pass the freshness check while being far from the real market. On
+    divergence this returns ``bar_ref`` (not the mid) and bumps
+    ``quote_writer.quote_sanity_rejects`` + logs a WARNING. Hygiene guard, not a
+    block: it never halts a trade, only chooses which price wins.
     """
     if quote_writer is not None:
         px = quote_writer.live_px(instrument_id)
         if px is not None:
             mid, last_ws_monotonic = px
             if mid > 0.0 and time.monotonic() - last_ws_monotonic < fresh_sec:
+                if bar_ref is not None and bar_ref > 0.0:
+                    divergence = abs(mid / bar_ref - 1.0)
+                    if divergence > quote_sanity_pct():
+                        quote_writer.quote_sanity_rejects += 1
+                        logger.warning(
+                            "[quote-sanity] %s mid=%.6f bar_ref=%.6f diverge=%.2f%% "
+                            "> %.2f%% — distrust mid, using bar_ref (guard, not a "
+                            "block)",
+                            instrument_id, mid, bar_ref, divergence * 100.0,
+                            quote_sanity_pct() * 100.0,
+                        )
+                        return bar_ref
                 return mid
     return bar_fallback
 
@@ -247,6 +301,9 @@ class QuoteTickWriter:
         # expected per-second lock drops.
         self.lock_drops = 0
         self.lock_ticks_dropped = 0
+        # Quote sanity guard counter (P2a) — bumped by ``live_or_bar_price`` each
+        # time a fresh mid is distrusted for diverging from a real bar_ref.
+        self.quote_sanity_rejects = 0
         # -inf sentinel = "never warned" → the FIRST backpressure drop always emits
         # its summary immediately (this WARNING is the signal that replaces the old
         # per-drop ERROR storm, so it must not be delayed by a low monotonic clock).

@@ -22,7 +22,7 @@ _GATE_EVENT_LABELS: Final[Mapping[int, str]] = {
     1: "Universe",
     2: "Strategy",
     3: "Validator",
-    4: "PreEntry",
+    # 4 (PreEntry) retired — P2a gate diet 2026-07-16, G4 emits no events
     5: "Sizer",
     6: "Monitor",
     7: "Exit",

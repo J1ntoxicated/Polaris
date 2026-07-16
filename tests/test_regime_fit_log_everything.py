@@ -7,11 +7,12 @@ professional risk / 90d gate / monthly review / fractional Kelly is too
 aggressive in practice / 표본부족 / real-money safety) appears here — this BUILD
 only adds observability, it shapes nothing.
 
-The four seams under test:
+The seams under test:
   * seam1  ``[regime-fit/seam1-size]`` — sizing/engine.compute_size folds the
     ONE T4 continuous scalar and logs fit / scalar / cont before→after.
-  * G3     ``[gate/G3-validator]``     — signal_validator AI-free primary verdict.
-  * G4     ``[gate/G4-watcher]``       — pre_entry_watcher AI-free primary verdict.
+  * G3     ``[gate/G3-validator]``     — signal_validator deterministic
+    verdict (P2a: G4's own ``[gate/G4-watcher]`` line is retired — its
+    content is folded into this single G3 line, group A).
   * probe  ``[probe/verdict]``         — the observe-only probe bus→engine verdict.
 
 Each test asserts (a) the structural line is emitted at INFO and (b) the decision
@@ -26,10 +27,8 @@ import time
 
 import pytest
 
-from polaris.core.pipeline.agents.pre_entry_watcher import pre_entry_watcher_gate
 from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.gate_state import (
-    GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
@@ -69,25 +68,6 @@ def _g3_ctx(*, regime: str = "trend_up") -> GateContext:
     )
 
 
-def _g4_ctx() -> GateContext:
-    now = int(time.time())
-    return GateContext(
-        run_id="run-log",
-        signal_id="sig-1",
-        position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
-        venue="okx",
-        symbol="BTC-USDT",
-        strategy_id="s1",
-        payload={
-            "validated_signal": {"symbol": "BTC-USDT", "strength_scalar": 1.0},
-            "tick_window": [{"ts": now, "bid": 100.0, "ask": 100.1, "mid": 100.05}],
-            "cell_quartile": "mid",
-            "regime": "trend_up",
-        },
-        started_ts=now,
-        state=SignalLifecycle.VALIDATED,
-    )
 
 
 @pytest.fixture
@@ -185,7 +165,7 @@ def test_seam1_log_does_not_change_size(
 
 
 # --------------------------------------------------------------------------- #
-# G3 / G4 AI-free verdict logs                                                 #
+# G3 (+ former G4, relocated P2a group A) verdict log                          #
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_g3_ai_free_logs_verdict(
@@ -200,22 +180,6 @@ async def test_g3_ai_free_logs_verdict(
     # decision is unchanged — deterministic primary still returns its verdict.
     assert res.model_used == "python"
     assert res.decision in {GateDecision.PASS, GateDecision.MODIFY, GateDecision.KILL}
-
-
-@pytest.mark.asyncio
-async def test_g4_ai_free_logs_verdict(
-    ai_free: None, caplog: pytest.LogCaptureFixture
-) -> None:
-    logger_name = "polaris.core.pipeline.agents.pre_entry_watcher"
-    with caplog.at_level(logging.INFO, logger=logger_name):
-        res = await pre_entry_watcher_gate(_g4_ctx())
-    lines = [r.message for r in caplog.records if "[gate/G4-watcher]" in r.message]
-    # the fast-path may short-circuit before the AI-free branch; force the
-    # non-fast-path by asserting EITHER a verdict line OR a fast-path proceed.
-    if res.model_used == "python":
-        assert lines, "G4 AI-free primary must log its verdict"
-        assert "GPT=0" in lines[0]
-    assert res.decision in {GateDecision.PROCEED, GateDecision.KILL}
 
 
 @pytest.mark.asyncio

@@ -186,6 +186,9 @@ class _FakeWriter:
 
     def __init__(self, px: dict[str, tuple[float, float]]) -> None:
         self._px = px
+        # Mirrors QuoteTickWriter.quote_sanity_rejects (P2a quote sanity guard)
+        # so load_active_position_rows can bump it on a rejected divergent mid.
+        self.quote_sanity_rejects = 0
 
     def live_px(self, instrument_id: str) -> tuple[float, float] | None:
         return self._px.get(instrument_id)
@@ -226,11 +229,12 @@ def _seed_position(
 def test_exit_uses_fresh_live_px(memdb: sqlite3.Connection) -> None:
     inst = "okx:BTC-USDT"
     _seed_position(memdb, inst=inst, bar_close=100.0)
-    # Fresh tick (monotonic age ~1s) at a different price than the bar close.
-    writer = _FakeWriter({inst: (123.0, time.monotonic() - 1.0)})
+    # Fresh tick (monotonic age ~1s) at a different-but-sane price (2% off the
+    # bar close — inside the quote-sanity default 3% band).
+    writer = _FakeWriter({inst: (102.0, time.monotonic() - 1.0)})
     rows = load_active_position_rows(memdb, quote_writer=writer)
     assert len(rows) == 1
-    assert float(rows[0]["last_price"]) == pytest.approx(123.0)  # WS mid wins
+    assert float(rows[0]["last_price"]) == pytest.approx(102.0)  # WS mid wins
 
 
 def test_exit_falls_back_to_bar_when_tick_stale(memdb: sqlite3.Connection) -> None:
@@ -316,6 +320,71 @@ def test_exit_mark_source_entry_price_degrade_when_no_bar(
 # ---------------------------------------------------------------------------
 # #3 G4 — writer ring → tick_window → live stale/crossed-book detection
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# P2a quote sanity guard — STETH phantom forensic (2026-07-16): a degraded
+# OKX demo book let the WS mid drift -9% off the true market while still
+# passing the freshness check, booking a phantom -15R exit mark.
+# ---------------------------------------------------------------------------
+
+
+def test_exit_mark_distrusts_mid_diverging_from_bar(memdb: sqlite3.Connection) -> None:
+    inst = "okx:STETH-USDT"
+    _seed_position(memdb, inst=inst, bar_close=1922.0)
+    # Fresh mid, but ~9% below the real bar close (the STETH phantom shape).
+    writer = _FakeWriter({inst: (1747.0, time.monotonic() - 1.0)})
+    rows = load_active_position_rows(memdb, quote_writer=writer)
+    assert float(rows[0]["last_price"]) == pytest.approx(1922.0)  # bar wins
+    assert rows[0]["mark_source"] == "bar_fallback"
+    assert writer.quote_sanity_rejects == 1
+
+
+def test_exit_mark_sanity_guard_only_applies_with_real_bar(
+    memdb: sqlite3.Connection,
+) -> None:
+    """No genuine bar (entry_price degrade) → the guard never fires (nothing
+    trustworthy to compare against); the mid is used as-is."""
+    inst = "alpaca:CNC"
+    position_id = uuid.uuid4().hex
+    memdb.execute(
+        "INSERT OR REPLACE INTO positions "
+        "(position_id, venue, symbol, underlying_group_id, strategy_id, "
+        " entry_strategy_id, active_strategy_id, side, qty, status, opened_ts, "
+        " swap_count) VALUES (?, 'alpaca', 'CNC', 'equity:CNC', 'vb', 'vb', "
+        " 'vb', 'long', 1.0, 'open', ?, 0)",
+        (position_id, NOW),
+    )
+    memdb.execute(
+        "INSERT INTO fills "
+        "(fill_id, ts_ms, strategy_id, instrument_id, venue, side, base_qty, "
+        " fill_price, size_usd, fee_usd, slippage_bps, pnl_usd, is_close, "
+        " contribution_id, order_id, state) "
+        "VALUES (?, ?, 'vb', ?, 'alpaca', 'long', 1.0, 90.0, 80.0, 0.05, 1.0, "
+        " 0.0, 0, ?, ?, 'filled')",
+        (uuid.uuid4().hex, NOW * 1000, inst, position_id, uuid.uuid4().hex),
+    )
+    writer = _FakeWriter({inst: (200.0, time.monotonic() - 1.0)})  # wild vs entry
+    rows = load_active_position_rows(memdb, quote_writer=writer)
+    assert float(rows[0]["last_price"]) == pytest.approx(200.0)
+    assert rows[0]["mark_source"] == "live_mid"
+    assert writer.quote_sanity_rejects == 0
+
+
+def test_exit_mark_sanity_guard_survives_zero_bar_close(
+    memdb: sqlite3.Connection,
+) -> None:
+    """A genuine-but-zero (corrupt) bar close must not raise ZeroDivisionError
+    in the quote-sanity divergence check — the guard requires bar_close > 0.0
+    before dividing, matching ``live_or_bar_price``'s ``bar_ref > 0.0`` guard
+    in quote_writer.py."""
+    inst = "okx:BTC-USDT"
+    _seed_position(memdb, inst=inst, bar_close=0.0)
+    writer = _FakeWriter({inst: (100.0, time.monotonic() - 1.0)})
+    rows = load_active_position_rows(memdb, quote_writer=writer)  # must not raise
+    assert float(rows[0]["last_price"]) == pytest.approx(100.0)  # mid used as-is
+    assert rows[0]["mark_source"] == "live_mid"
+    assert writer.quote_sanity_rejects == 0
 
 
 def test_g4_consumes_live_tick_window_crossed_book() -> None:

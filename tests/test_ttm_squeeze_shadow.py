@@ -2,10 +2,11 @@
 
 DEMO/PAPER virtual capital only. Covers:
 - ``compute_squeeze_state`` pure BB-in-Keltner detector (on / release / none).
-- Live wiring: ``pre_entry_watcher_gate``'s AI-free PROCEED path now ALSO
-  logs a watch-only ``gate_shadow_events`` row via ``log_shadow_event``
-  (gpt_decision=None -> mismatch=0 pinned), never touching the returned
-  decision/payload (behavior-0).
+- Live wiring: G3 (``signal_validator_gate`` — G4's frontgate tag relocated
+  here, P2a group A) PASS path now ALSO logs a watch-only
+  ``gate_shadow_events`` row via ``log_shadow_event`` (gpt_decision=None ->
+  mismatch=0 pinned), never touching the returned decision/payload
+  (behavior-0).
 """
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ import sqlite3
 import time
 from pathlib import Path
 
-from polaris.core.pipeline.agents.pre_entry_watcher import pre_entry_watcher_gate
 from polaris.core.pipeline.agents.shadow_log import fetch_shadow_events
+from polaris.core.pipeline.agents.signal_validator import signal_validator_gate
 from polaris.core.pipeline.agents.ttm_squeeze_shadow import compute_squeeze_state
 from polaris.core.pipeline.gate_state import (
     GATE_PRE_ENTRY_WATCHER,
+    GATE_SIGNAL_VALIDATOR,
     GateContext,
     GateDecision,
     SignalLifecycle,
@@ -101,32 +103,34 @@ def test_squeeze_state_steady_trend_no_squeeze_no_release() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _g4_ctx() -> GateContext:
+def _g3_ctx() -> GateContext:
     now = int(time.time())
     return GateContext(
         run_id="run-squeeze",
         signal_id="sig-squeeze",
         position_id=None,
-        gate_id=GATE_PRE_ENTRY_WATCHER,
+        gate_id=GATE_SIGNAL_VALIDATOR,
         venue="okx",
         symbol="BTC-USDT",
         strategy_id="s1",
         payload={
-            "validated_signal": {"symbol": "BTC-USDT", "strength_scalar": 1.0},
+            "raw_signal": {"symbol": "BTC-USDT", "strategy": "s1"},
+            "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
             "tick_window": [{"ts": now, "bid": 100.0, "ask": 100.1, "mid": 100.05}],
             "cell_quartile": "mid",
             "regime": "trend_up",
         },
         started_ts=now,
-        state=SignalLifecycle.VALIDATED,
+        state=SignalLifecycle.RAW,
     )
 
 
-async def test_g4_ai_free_proceed_logs_squeeze_tag_row(tmp_path: Path) -> None:
+async def test_g3_pass_logs_squeeze_tag_row(tmp_path: Path) -> None:
     conn = init_db(tmp_path / "squeeze.sqlite")
     try:
-        result = await pre_entry_watcher_gate(_g4_ctx(), ai_free=True, shadow_conn=conn)
-        assert result.decision == GateDecision.PROCEED
+        result = await signal_validator_gate(_g3_ctx(), shadow_conn=conn)
+        assert result.decision == GateDecision.PASS
+        # G3's own technical row + the relocated G4 frontgate squeeze tag.
         rows = fetch_shadow_events(conn, gate_id=GATE_PRE_ENTRY_WATCHER)
         assert len(rows) == 1
         assert rows[0]["gpt_decision"] == ""
@@ -139,20 +143,18 @@ async def test_g4_ai_free_proceed_logs_squeeze_tag_row(tmp_path: Path) -> None:
         conn.close()
 
 
-async def test_g4_ai_free_proceed_no_shadow_conn_no_row() -> None:
-    result = await pre_entry_watcher_gate(_g4_ctx(), ai_free=True)
-    assert result.decision == GateDecision.PROCEED
+async def test_g3_pass_no_shadow_conn_no_row() -> None:
+    result = await signal_validator_gate(_g3_ctx())
+    assert result.decision == GateDecision.PASS
 
 
-async def test_g4_squeeze_tag_never_touches_payload_or_decision(tmp_path: Path) -> None:
+async def test_g3_squeeze_tag_never_touches_payload_or_decision(tmp_path: Path) -> None:
     """Behavior-0: identical decision/payload whether or not shadow_conn wires
     the squeeze tag (only a side-effect DB row differs)."""
     conn = init_db(tmp_path / "parity.sqlite")
     try:
-        ctx_a = _g4_ctx()
-        ctx_b = _g4_ctx()
-        result_no_shadow = await pre_entry_watcher_gate(ctx_a, ai_free=True)
-        result_shadow = await pre_entry_watcher_gate(ctx_b, ai_free=True, shadow_conn=conn)
+        result_no_shadow = await signal_validator_gate(_g3_ctx())
+        result_shadow = await signal_validator_gate(_g3_ctx(), shadow_conn=conn)
         assert result_no_shadow.decision == result_shadow.decision
         assert result_no_shadow.payload == result_shadow.payload
         assert result_no_shadow.model_used == result_shadow.model_used
@@ -160,8 +162,8 @@ async def test_g4_squeeze_tag_never_touches_payload_or_decision(tmp_path: Path) 
         conn.close()
 
 
-async def test_g4_squeeze_tag_fail_open_on_broken_conn() -> None:
+async def test_g3_squeeze_tag_fail_open_on_broken_conn() -> None:
     conn = sqlite3.connect(":memory:")
     conn.close()
-    result = await pre_entry_watcher_gate(_g4_ctx(), ai_free=True, shadow_conn=conn)
-    assert result.decision == GateDecision.PROCEED
+    result = await signal_validator_gate(_g3_ctx(), shadow_conn=conn)
+    assert result.decision == GateDecision.PASS

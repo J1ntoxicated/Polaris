@@ -39,6 +39,7 @@ from polaris.core.pipeline.config import (
     ai_judge_mode,
 )
 from polaris.core.pipeline.gate_state import (
+    GATE_ENTRY_SIZER,
     GATE_PRE_ENTRY_WATCHER,
     GATE_SIGNAL_VALIDATOR,
     GateContext,
@@ -862,11 +863,13 @@ async def test_g3_active_judge_kill_output_still_passes(
         _g3_gate_ctx(), client=None, judge_client=judge, shadow_conn=memdb
     )
     assert res.decision == GateDecision.PASS  # NOT KILL — structurally impossible
-    assert res.next_gate == GATE_PRE_ENTRY_WATCHER
+    assert res.next_gate == GATE_ENTRY_SIZER  # G3->G5 direct (P2a group A)
     assert res.payload["ai_judge"]["verdict"] == "PROCEED"  # KILL parsed to safe verdict
+    # P2a group B: G3 now ALSO logs its own technical-decision row (gpt_decision=
+    # None, measurement continuity) — filter to the judge's own row by its flag.
     rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
-    assert len(rows) == 1
-    assert "judge:PROCEED" in rows[0]["technical_flags"]
+    judge_rows = [r for r in rows if "judge:PROCEED" in r["technical_flags"]]
+    assert len(judge_rows) == 1
 
 
 @pytest.mark.asyncio
@@ -886,10 +889,11 @@ async def test_g3_shadow_mode_deterministic_unaffected(
     assert res.decision == GateDecision.PASS
     assert "ai_judge" not in res.payload  # shadow = no annotation, deterministic acts
     assert res.payload["validated_signal"]["strength_scalar"] == 1.0
-    # The judge row IS logged for measurement.
+    # The judge row IS logged for measurement (alongside G3's own technical-
+    # decision row added by P2a group B — filter to the judge's own row).
     rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
-    assert len(rows) == 1
-    assert "mode:shadow" in rows[0]["technical_flags"]
+    judge_rows = [r for r in rows if "mode:shadow" in r["technical_flags"]]
+    assert len(judge_rows) == 1
 
 
 def _g7_gate_ctx() -> GateContext:

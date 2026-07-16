@@ -72,7 +72,6 @@ _GATE_LABELS: Final[dict[int, str]] = {
     1: "Universe",
     2: "Strategy",
     3: "Validator",
-    4: "PreEntry",
     5: "Sizer",
     6: "Monitor",
     7: "Exit",
@@ -127,7 +126,7 @@ def _gate_decisions(
         by_gate.setdefault(gid, []).append((dec, _decode_payload(r[2])))
 
     out: list[GateDecisionRow] = []
-    for gid in range(1, 9):
+    for gid in (1, 2, 3, 5, 6, 7, 8):  # G4 abolished P2a — folded into G3, never fires
         evs = by_gate.get(gid, [])
         n = len(evs)
         headline, metrics = _gate_headline(
@@ -208,13 +207,6 @@ def _gate_headline(
             + (f" · scalar~{med:.2f}" if scalars else ""),
             m,
         )
-
-    if gid == 4:  # PreEntry — proceed / hold counts.
-        counts = _decision_counts(evs)
-        proc = counts.get("PROCEED", 0)
-        hold = counts.get("HOLD", 0)
-        m = {"decisions": counts}
-        return (f"{proc} proceeded / {hold} holding", m)
 
     if gid == 5:  # Sizer — THE T4 headline (median size + tier mix).
         risks: list[float] = []

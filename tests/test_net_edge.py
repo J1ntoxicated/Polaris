@@ -18,7 +18,7 @@ from polaris.core.pipeline import (
     SignalLifecycle,
     build_watcher_payload,
 )
-from polaris.core.pipeline.gate_state import GATE_PRE_ENTRY_WATCHER
+from polaris.core.pipeline.gate_state import GATE_SIGNAL_VALIDATOR
 from polaris.core.pipeline.net_edge import (
     SKIP_ON_NEGATIVE_NET_EDGE,
     gross_edge_r,
@@ -207,13 +207,14 @@ def test_watcher_payload_default_call_unchanged_for_okx_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Behavior identity at the consuming gate (G4): the net-edge keys must NOT
-# change the decision, the skip flag, or whether GPT is called. i.e. adding
-# measurement never skips/changes an entry. flow_not_block / AGGRESSIVE intact.
+# Behavior identity at the consuming gate (G3, folding in G4's former inputs —
+# P2a group A): the net-edge keys must NOT change the decision, the skip
+# flag, or whether GPT is called. i.e. adding measurement never skips/changes
+# an entry. flow_not_block / AGGRESSIVE intact.
 # ---------------------------------------------------------------------------
 
-# A payload that lands on the SLOW path (strength below the 1.25 fast floor) so
-# G4 actually decides via GPT — the most control-flow-sensitive case.
+# A payload shaped so G3 lands on its normal (non-fast-path) flow — the most
+# control-flow-sensitive case.
 _G4_SLOW = dict(
     spread_bps=2.0,
     baseline_p50_spread_bps=4.0,
@@ -223,31 +224,32 @@ _G4_SLOW = dict(
 )
 
 
-async def _run_g4(payload: dict[str, object]) -> tuple[GateDecision, bool, int]:
+async def _run_g3(payload: dict[str, object]) -> tuple[GateDecision, bool, int]:
     memdb = sqlite3.connect(":memory:")
     try:
         client = _RecordingGPTClient()
         orch = GateOrchestrator(conn=memdb, haiku_client=client)
-        orch.handlers = {GATE_PRE_ENTRY_WATCHER: orch._wrap_watcher}
+        orch.handlers = {GATE_SIGNAL_VALIDATOR: orch._wrap_validator}
         ctx = GateContext(
             run_id="r", signal_id="s", position_id=None,
-            gate_id=GATE_PRE_ENTRY_WATCHER, venue="okx", symbol="BTC-USDT",
+            gate_id=GATE_SIGNAL_VALIDATOR, venue="okx", symbol="BTC-USDT",
             strategy_id="vb", payload=dict(payload), started_ts=_NOW,
-            state=SignalLifecycle.VALIDATED,
+            state=SignalLifecycle.RAW,
         )
-        results = await orch.run(ctx, start_gate=GATE_PRE_ENTRY_WATCHER)
+        results = await orch.run(ctx, start_gate=GATE_SIGNAL_VALIDATOR)
         return results[0].decision, bool(results[0].skipped), len(client.calls)
     finally:
         memdb.close()
 
 
-async def test_g4_decision_identical_with_and_without_net_edge_keys() -> None:
-    """Adding net_edge_r/gross_edge_r/roundtrip_cost_r/cost_model to the G4
-    payload does NOT change the gate decision, the skip flag, or the GPT call
-    count. No entry is skipped on net edge (kill-switch off)."""
+async def test_g3_decision_identical_with_and_without_net_edge_keys() -> None:
+    """Adding net_edge_r/gross_edge_r/roundtrip_cost_r/cost_model to the G3
+    payload does NOT change the gate decision, the skip flag, or the (zero)
+    GPT call count. No entry is skipped on net edge (kill-switch off)."""
     base = {
         **_G4_SLOW,
-        "validated_signal": {"strength_scalar": 1.0},  # slow path
+        "raw_signal": {"strategy": "vb", "score": 1.0},
+        "cell_routing": {"quartile": "top", "n_eff": 10.0, "avg_pnl_r": 0.5},
         "cell_quartile": "top",
     }
     # Legacy payload (no net-edge keys).
@@ -261,9 +263,10 @@ async def test_g4_decision_identical_with_and_without_net_edge_keys() -> None:
     # Force the surfaced net edge negative to prove it is NOT acted on.
     assert full_payload["net_edge_r"] <= 0.0
 
-    legacy_result = await _run_g4(legacy_payload)
-    full_result = await _run_g4(full_payload)
-    # Identical decision, identical skip flag, identical GPT-call count.
+    legacy_result = await _run_g3(legacy_payload)
+    full_result = await _run_g3(full_payload)
+    # Identical decision, identical skip flag, identical (zero) GPT-call count.
     assert legacy_result == full_result
-    # And the entry was NOT skipped (slow path => GPT consulted, decision made).
-    assert full_result[0] == GateDecision.PROCEED
+    # And the entry was NOT skipped/blocked — deterministic PASS, GPT untouched.
+    assert full_result[0] == GateDecision.PASS
+    assert full_result[2] == 0

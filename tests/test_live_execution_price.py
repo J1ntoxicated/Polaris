@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from polaris.core.data.quote_writer import (
     LIVE_PRICE_FRESH_SEC,
+    QUOTE_SANITY_PCT_DEFAULT,
     QuoteTickWriter,
     live_or_bar_price,
+    quote_sanity_pct,
 )
 from polaris.core.data.schema import QuoteTick
 
@@ -79,6 +83,76 @@ def test_signal_on_stale_bar_entry_uses_live_price() -> None:
     entry_exec_price = live_or_bar_price(w, INST, bar_close_signal_price)
     assert entry_exec_price == LIVE_MID
     assert entry_exec_price != bar_close_signal_price
+
+
+# ---------------------------------------------------------------------------
+# P2a quote sanity guard — STETH phantom forensic (2026-07-16): a degraded
+# OKX demo book let a fresh WS mid drift ~9% off the true market, booking a
+# phantom -15R close. ``bar_ref`` (only ever a genuine bar close) lets the
+# caller pin a sanity ceiling on how far a fresh mid may diverge.
+# ---------------------------------------------------------------------------
+
+
+def test_bar_ref_none_preserves_legacy_behavior() -> None:
+    """No bar_ref supplied → byte-identical to the pre-guard contract, no
+    matter how far the mid diverges."""
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(LIVE_MID))
+    assert live_or_bar_price(w, INST, BAR_CLOSE) == LIVE_MID
+
+
+def test_mid_within_sanity_band_wins() -> None:
+    bar_ref = 1922.0
+    mid = 1900.0  # ~1.1% off — inside the default 3% band.
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(mid))
+    assert live_or_bar_price(w, INST, bar_ref, bar_ref=bar_ref) == mid
+    assert w.quote_sanity_rejects == 0
+
+
+def test_mid_beyond_sanity_band_is_distrusted() -> None:
+    """The STETH shape: market ~1922, phantom WS mid ~1747 (~9% off)."""
+    bar_ref = 1922.0
+    phantom_mid = 1747.0
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(phantom_mid))
+    result = live_or_bar_price(w, INST, bar_ref, bar_ref=bar_ref)
+    assert result == bar_ref  # bar_ref wins, NOT the phantom mid
+    assert w.quote_sanity_rejects == 1
+
+
+def test_sanity_guard_never_blocks_only_reroutes() -> None:
+    """The guard is a hygiene reroute, not a halt — a rejected mid still
+    returns a usable price (bar_ref), never raises / never None."""
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(1747.0))
+    result = live_or_bar_price(w, INST, 0.0, bar_ref=1922.0)
+    assert result == 1922.0
+
+
+def test_custom_sanity_pct_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLARIS_QUOTE_SANITY_PCT", "0.10")  # widen to 10%
+    assert quote_sanity_pct() == 0.10
+    bar_ref = 1922.0
+    mid = 1747.0  # ~9.1% off — now inside the widened 10% band.
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(mid))
+    assert live_or_bar_price(w, INST, bar_ref, bar_ref=bar_ref) == mid
+
+
+def test_sanity_pct_default_and_bad_env_fallback() -> None:
+    assert quote_sanity_pct("") == QUOTE_SANITY_PCT_DEFAULT
+    assert quote_sanity_pct("not-a-number") == QUOTE_SANITY_PCT_DEFAULT
+    assert quote_sanity_pct("-0.05") == QUOTE_SANITY_PCT_DEFAULT
+    assert quote_sanity_pct("0.10") == 0.10
+
+
+def test_bar_ref_nonpositive_skips_guard() -> None:
+    """A degenerate bar_ref (0.0/negative — not a genuine bar) never divides
+    by zero and never overrides the mid."""
+    w = QuoteTickWriter(":memory:")
+    w.on_quote(_qt(1747.0))
+    assert live_or_bar_price(w, INST, 100.0, bar_ref=0.0) == 1747.0
 
 
 def test_live_price_crosses_stop_mid_bar() -> None:

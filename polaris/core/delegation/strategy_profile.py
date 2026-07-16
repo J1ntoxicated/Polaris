@@ -74,14 +74,29 @@ def edge_type_for(*, strategy_id: str, correlation_group_id: str) -> EdgeType:
     return "unknown"
 
 
-# index/indices is a pre-existing metadata naming split, NOT introduced here:
-# index_52w_high_momentum / index_dual_momentum_rotation declare asset_class
-# "index" (singular) while polaris.core.universe._capital always persists the
-# plural "indices" for the SAME Capital instrument family (uk100/us100/etc).
-# Normalizing only this ONE confirmed synonym (not a broader asset_class
-# rename — out of this task's scope, surgical-changes) keeps those two real
-# index strategies from reading as a false mismatch against their own tickers.
-_ASSET_CLASS_ALIASES: Final[dict[str, str]] = {"index": "indices"}
+# Pre-existing metadata naming splits, NOT introduced here — each strategy
+# declares asset_class from its own vocabulary while universe.asset_class
+# (polaris.core.universe._capital / .discovery) persists a DIFFERENT string
+# for the SAME instrument family:
+#   * index_52w_high_momentum / index_dual_momentum_rotation declare "index"
+#     (singular) vs the plural "indices" _capital.py always persists for the
+#     Capital uk100/us100/etc family.
+#   * ema_crossover / rsi_bb_pullback / spot_donchian / supertrend /
+#     weekend_funding_capitulation_maker / weekend_thin_book_flush_maker /
+#     tsmom / okx_funding_carry_persist / volume_burst declare "spot" vs the
+#     "crypto" polaris.core.universe.discovery persists for OKX SPOT tickers
+#     — mirrors _production_tick.py's keep_on_bar_path, which already treats
+#     ("forex", "crypto", "spot") as equivalent for OKX/Capital-FX routing.
+#   * fx_breakout_basket / cfd_fx_range_fade_short / fx_range_fade declare
+#     "fx" vs the "forex" _capital.py persists for Capital FX tickers.
+# Normalizing only these confirmed synonyms (not a broader asset_class rename
+# — out of this task's scope, surgical-changes) keeps those strategies from
+# reading as a false mismatch against the tickers they actually trade.
+_ASSET_CLASS_ALIASES: Final[dict[str, str]] = {
+    "index": "indices",
+    "spot": "crypto",
+    "fx": "forex",
+}
 
 
 def _normalize_asset_class(value: str) -> str:

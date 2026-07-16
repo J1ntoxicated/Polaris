@@ -150,6 +150,23 @@ def test_index_indices_alias_matches() -> None:
     assert asset_class_match("indices", "index") == 1.0
 
 
+def test_spot_crypto_alias_matches() -> None:
+    # OKX SPOT strategies (ema_crossover, supertrend, spot_donchian, ...)
+    # declare "spot" while universe.asset_class persists "crypto" for the
+    # SAME OKX tickers — normalized so these read as a match, not the -0.3
+    # false mismatch audited against the live DB.
+    assert asset_class_match("spot", "crypto") == 1.0
+    assert asset_class_match("crypto", "spot") == 1.0
+
+
+def test_fx_forex_alias_matches() -> None:
+    # Capital FX strategies (fx_breakout_basket, fx_range_fade, ...) declare
+    # "fx" while universe.asset_class persists "forex" for the SAME Capital
+    # FX tickers — normalized so these read as a match.
+    assert asset_class_match("fx", "forex") == 1.0
+    assert asset_class_match("forex", "fx") == 1.0
+
+
 def test_empty_either_side_is_neutral() -> None:
     assert asset_class_match("", "fx") == 0.0
     assert asset_class_match("fx", "") == 0.0

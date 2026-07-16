@@ -538,3 +538,6 @@
 - 2026-07-16: P4b 랜딩(merge f6f87dd, 대시 재기동) — 모바일 칼리브레이션(글로브 자산군색·게이트 8색 배지 G4부재 정확·마퀴 이식·베뉴칩 73)·모바일 인스펙트 차트(chart-hdr/body svg 렌더 확인)·공유모듈 로드가드(컨덕터 마감). 모바일 뷰포트 375px 실검증·콘솔 에러 0. P4 완료.
 - 2026-07-16: 플로우 보드 게이트 수리 완결 (Jin 지적) — 스파인 7게이트(G4 노드/라벨/위성/크라운/래더 정리, 색은 게이트번호 고정). 1차 수술의 잔여 절대인덱스가 boot 사일런트킬(캔버스 전흑) → 픽셀샘플 진단으로 적발·7건 시프트·부활 실검증.
 - 2026-07-16: P5 테스트부채 랜딩 — 풀스위트 6022 pass/0 fail 달성. 프로덕션 버그 2 발굴수리(replay sandbox score_f_events 미시드=리플레이 전면 크래시·board.js 무가드 localStorage). 스테일 3계열 현행계약 갱신(건별 대조, 맹목굴복 0). 컬럼 순서 POSITIONS→CHART→ACTIVITY(Jin).
+2026-07-16 13:03 [Edit: /Users/jinyoon/Projects/Polaris/.claude/worktrees/wf_124212c2-849-1/tests/e2e/test_virtual_trade_lifecycle_chain.py]
+2026-07-16 13:08 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=332 learners=3 paper=True]
+- 2026-07-16: OverflowError(34) 라이브 이슈 — 11:20Z부터 매 3틱 725회(재기동 후 소멸 = 상태의존, 부팅+3h 발병 패턴). 틱 핸들러 exc_info 패치 랜딩(재발 시 스택 캡처) + 3.5h 감시 armed. 정적 후보(exp 사이트)는 전부 감쇠 패턴이라 미확정 — 스택 대기.

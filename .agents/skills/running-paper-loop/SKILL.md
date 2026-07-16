@@ -1,6 +1,6 @@
 ---
 name: running-paper-loop
-description: Use to start, monitor, or stop the Polaris paper-trade main loop across OKX SPOT demo, Capital CFD demo, and Alpaca paper. Boot = ignite_p1 (boot orchestrator) handing off to run_production_paper_loop (bar pipeline + live recalc + env-gated P5 tick engine). Start command SSOT = AGENTS.md Quick reference.
+description: Use to start, monitor, or stop the Polaris paper-trade main loop across OKX SPOT demo, Capital CFD demo, and Alpaca paper. Boot = ignite_p1 (boot orchestrator) handing off to run_production_paper_loop (bar pipeline + live recalc + env-gated P5 tick engine). Start command SSOT = CLAUDE.md Quick reference.
 ---
 
 # running-paper-loop (P0 skill)
@@ -9,10 +9,10 @@ description: Use to start, monitor, or stop the Polaris paper-trade main loop ac
 - Jin 이 페이퍼 트레이딩 시작 / 중지 / 상태 요청
 - 24h 세션 재기동, daily reset 후
 
-## 기동 (커맨드 SSOT = AGENTS.md "Quick reference" — 여기 복붙 금지)
+## 기동 (커맨드 SSOT = CLAUDE.md "Quick reference" — 여기 복붙 금지)
 - 골격: `python3 -m polaris.scripts.ignite_p1 --paper ...` — 정확한 플래그는
-  AGENTS.md Quick reference 에서 읽는다. 항상 백그라운드 detach
-  (Codex 세션 kill 금지 — feedback_never_kill_claude_session 참조)
+  CLAUDE.md Quick reference 에서 읽는다. 항상 백그라운드 detach
+  (Claude 세션 kill 금지 — feedback_never_kill_claude_session 참조)
 - **P5 tick engine**: env `TICK_ENGINE_ENABLED=1` 로 활성
   (SSOT: `polaris/core/ticks/config.py`)
 - 중지: `kill -SIGTERM <PID>` · 대시보드: `./scripts/start_dashboard.sh`

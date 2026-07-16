@@ -41,15 +41,19 @@
     display: flex; flex-direction: column;
   }
   .mobile-pane iframe { display: block; width: 100%; flex: 1 1 auto; border: 0; min-height: 0; }
-  /* side work pane — two stacked halves, dense mono rows */
-  .side-sec { flex: 1 1 50%; min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid var(--ghost); }
+  /* side work pane — three stacked sections, dense mono rows. OPEN POSITIONS
+     keeps half the pane; ACTIVITY was halved to make room for the CHART
+     inspect panel (Jin 2026-07-15 dashboard-todo P4). */
+  .side-sec { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid var(--ghost); }
+  .side-sec.side-pos { flex-grow: 2; }
+  .side-sec.side-act, .side-sec.side-chart { flex-grow: 1; }
   .side-h { flex: 0 0 auto; padding: 6px 10px 4px; font-size: 9.5px; letter-spacing: 0.12em; color: var(--p-gry); font-weight: 700; }
   .side-h span { color: var(--p-dim); font-weight: 400; }
   .side-sum { flex: 0 0 auto; display: flex; gap: 12px; padding: 1px 10px 5px; font-size: 10px; color: var(--p-gry); font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--ghost); }
   .side-sum b { font-weight: 700; color: var(--p-wht); }
   .side-sum .vc { font-size: 9px; }
   .side-rows { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 8px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
-  .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 12px 58px 62px 42px 38px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
+  .side-rows .r { display: grid; grid-template-columns: 3px 16px 1fr 12px 58px 62px 42px 38px 44px; gap: 5px; align-items: baseline; padding: 2.5px 0; border-bottom: 1px solid rgba(255,255,255,0.045); white-space: nowrap; }
   .fx-up { animation: fxup 0.4s ease-out; } .fx-dn { animation: fxdn 0.4s ease-out; }
   @keyframes fxup { 0% { background: rgba(125,255,168,0.35); } 100% { background: transparent; } }
   @keyframes fxdn { 0% { background: rgba(255,125,138,0.35); } 100% { background: transparent; } }
@@ -64,9 +68,25 @@
   .side-rows .vt { font-size: 8px; color: var(--p-dim); }
   .side-rows .sym { color: var(--p-wht); font-weight: 700; }
   .side-rows .num { text-align: right; }
+  /* per-row inline spark (Jin 2026-07-15 dashboard-todo P4) — group headers
+     leave the cell empty (density: no per-member trend at a glance). Rows are
+     click-selectable to pin the CHART panel below. */
+  .side-rows .r.pos { cursor: pointer; }
+  .side-rows .r.pos:hover { background: rgba(95,135,175,0.07); }
+  .side-rows .r.pos.sel { background: rgba(95,135,175,0.14); }
   .side-act .r { grid-template-columns: 46px 34px 1fr 58px; }
   .side-act .t { color: var(--p-dim); font-size: 9px; }
   .side-act .k { font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em; }
+  /* CHART inspect panel — selected position's spark + entry/stop/MFE-MAE. */
+  .side-chart-hdr { flex: 0 0 auto; display: flex; align-items: baseline; gap: 8px; padding: 0 10px 3px; font-size: 10px; flex-wrap: wrap; white-space: nowrap; }
+  .side-chart-hdr .vt { font-size: 8px; color: var(--p-dim); }
+  .side-chart-hdr .sym { color: var(--p-wht); font-weight: 700; }
+  .side-chart-hdr .strat { color: var(--p-gry); font-size: 9px; }
+  .side-chart-hdr .side { color: var(--p-dim); font-size: 9px; letter-spacing: 0.06em; }
+  .side-chart-hdr .reg { margin-left: auto; color: var(--p-dim); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+  .side-chart-body { flex: 1 1 auto; min-height: 0; padding: 0 8px 6px; }
+  .side-chart-body svg { display: block; width: 100%; height: 100%; }
+  .side-chart-empty { color: var(--p-dim); font-size: 9.5px; font-style: italic; padding: 10px; }
   .pos-c { color: #7dffa8; } .neg-c { color: #ff7d8a; } .flat-c { color: var(--p-gry); }
   .mobile-pane .open-board-bar {
     flex: 0 0 auto; display: block; text-align: center;
@@ -264,6 +284,7 @@
     pane.innerHTML =
       '<div class="side-sec side-pos"><div class="side-h">OPEN POSITIONS <span id="side-pos-n"></span></div><div class="side-sum" id="side-pos-sum"></div><div class="side-rows" id="side-pos-rows"></div></div>' +
       '<div class="side-sec side-act"><div class="side-h">ACTIVITY</div><div class="side-rows" id="side-act-rows"></div></div>' +
+      '<div class="side-sec side-chart"><div class="side-h">CHART</div><div class="side-chart-hdr" id="side-chart-hdr"></div><div class="side-chart-body" id="side-chart-body"></div></div>' +
       '<a class="open-board-bar" href="/" target="polaris_board">OPEN FULL BOARD ›</a>';
   })();
 </script>

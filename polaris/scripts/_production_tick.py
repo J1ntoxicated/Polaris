@@ -25,6 +25,7 @@ from polaris.core.data.technical_store import (
     extract_technicals_from_mv,
     upsert_technicals,
 )
+from polaris.core.delegation.shadow import log_delegation_shadow
 from polaris.core.isolation.circuit_breaker import (
     FAULT_EXCEPTION,
     FAULT_NAN,
@@ -1156,6 +1157,17 @@ async def _run_tick(
                     timeframe=timeframe, ts=now_ts,
                     correlation_group=sig.correlation_group, thesis=sig.thesis_tag,
                     tags=persist_tags,
+                )
+                # Delegation gate SHADOW (P2b, vault/50_research/
+                # delegation-gate-blueprint.md) — logs the fit-score #1 pick
+                # vs THIS strategy's actual dispatch; never influences the
+                # live signal above. Instrumentation only, marketdata-domain
+                # write (mirrors the tsmom shadow call below).
+                log_delegation_shadow(
+                    conn, run_id=f"g2tick-{tick_idx}", signal_id=sig.signal_id,
+                    venue=venue, symbol=symbol, dispatched_strategy_id=strategy_id,
+                    regime=regime, atr_pct=mv.atr_pct, now_ts=now_ts,
+                    write_conn=state.md_conn, db_writer=state.md_db_writer,
                 )
                 # OKX settle-ability — DEFER the ENTRY (only) for an OKX pair whose
                 # quote ccy can't settle on the demo SPOT wallet (quote ∉ {USDT,

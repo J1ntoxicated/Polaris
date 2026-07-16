@@ -1353,6 +1353,12 @@ _SHADOW_CHANNEL_TARGETS: dict[str, int | None] = {
     # promotion gauge is the traded-through%/avg-price-improve-bps pair
     # (n is still reported below, same shape as every other channel).
     "price_through_shadow": None,
+    # P2b delegation gate (vault/50_research/delegation-gate-blueprint.md) —
+    # "섀도우 N 축적" promotion gate has no numeric row-count target specified
+    # in the blueprint (unlike calibration_pairs/vwap/news/tsmom above) — the
+    # client renders this as count+mismatch%+ambiguous% (warming), never a
+    # fabricated ratio against an unspecified target.
+    "delegation_shadow": None,
 }
 _shadow_channels_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
 # 2026-07-12 라이브 인시던트: 매초/5초 풀스캔 리더가 봇 WAL 체크포인트 창을
@@ -1411,6 +1417,7 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 ("edgar_filings", "edgar_filings", ""),
                 ("earnings_calendar", "earnings_calendar", ""),
                 ("stablecoin_liquidity", "stablecoin_liquidity", ""),
+                ("delegation_shadow", "delegation_shadow", ""),
             ):
                 try:
                     row = md_conn.execute(
@@ -1423,6 +1430,25 @@ def _query_shadow_channels(db_path: Path) -> dict[str, Any]:
                 n, fresh = row
                 out[name]["n"] = int(n or 0)
                 out[name]["fresh_ts"] = int(fresh) if fresh is not None else None
+            # P2b delegation gate (vault/50_research/delegation-gate-
+            # blueprint.md) — mismatch%/ambiguous% alongside the plain n/
+            # fresh_ts above. Same degrade-never-crash contract; a fault or
+            # 0 rows leaves both None (never a fabricated 0%).
+            out["delegation_shadow"]["mismatch_pct"] = None
+            out["delegation_shadow"]["ambiguous_pct"] = None
+            try:
+                drow = md_conn.execute(
+                    "SELECT AVG(mismatch), AVG(ambiguous) FROM delegation_shadow"
+                ).fetchone()
+            except sqlite3.Error:
+                drow = None
+            if drow is not None and drow[0] is not None:
+                out["delegation_shadow"]["mismatch_pct"] = round(
+                    float(drow[0]) * 100.0, 2
+                )
+                out["delegation_shadow"]["ambiguous_pct"] = round(
+                    float(drow[1] or 0.0) * 100.0, 2
+                )
             # maker_fill_sim R1 2026-07-12 debate — traded-through ratio +
             # avg price-improvement bps (offline-resolved vs forward bars,
             # tools/visualizer/price_through_channel.py — reads

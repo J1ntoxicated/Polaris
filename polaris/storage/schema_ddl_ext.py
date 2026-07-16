@@ -166,6 +166,41 @@ CREATE INDEX IF NOT EXISTS idx_price_through_shadow_symbol
     ON price_through_shadow(venue, symbol, created_ts);
 """
 
+# Delegation-gate fit-score SHADOW (P2b, vault/50_research/
+# delegation-gate-blueprint.md) — one row per G2 signal emission comparing the
+# deterministic fit-score #1 pick (polaris.core.delegation.fit_score) against
+# the strategy that ACTUALLY dispatched (dumb asset_class routing, unchanged).
+# Instrumentation only — v1 never reads this back into live routing/sizing.
+# ``margin`` is NULL when this venue has <2 registered candidate strategies
+# (no second-place score to diff against — not a measured 0.0 margin).
+DDL_DELEGATION_SHADOW = """
+CREATE TABLE IF NOT EXISTS delegation_shadow (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL DEFAULT '',
+    signal_id TEXT,
+    venue TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '',
+    dispatched_strategy_id TEXT NOT NULL DEFAULT '',
+    fit_top_strategy_id TEXT NOT NULL DEFAULT '',
+    fit_top_score REAL NOT NULL DEFAULT 0.0,
+    dispatched_score REAL NOT NULL DEFAULT 0.0,
+    margin REAL,
+    mismatch INTEGER NOT NULL DEFAULT 0,
+    ambiguous INTEGER NOT NULL DEFAULT 0,
+    regime TEXT NOT NULL DEFAULT '',
+    atr_pct REAL NOT NULL DEFAULT 0.0,
+    vol_24h_usd REAL NOT NULL DEFAULT 0.0,
+    spread_bps REAL NOT NULL DEFAULT 0.0,
+    candidate_n INTEGER NOT NULL DEFAULT 0,
+    created_ts INTEGER NOT NULL
+);
+"""
+
+DDL_DELEGATION_SHADOW_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_delegation_shadow_venue_symbol
+    ON delegation_shadow(venue, symbol, created_ts);
+"""
+
 # Shadow-first would-be orders ([[weekend_maker_honest_rerun_2026-06-28]]) — one
 # row per SUPPRESSED order on a shadow_first strategy (the two weekend OKX makers).
 # The SIGNAL still flowed the full pipeline (G1-G5 + sizing); this records the

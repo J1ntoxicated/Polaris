@@ -99,6 +99,14 @@ logger = logging.getLogger(__name__)
 # fallback (graceful degrade, never halts).
 WS_EXIT_MARK_FRESH_SEC = 35.0
 
+# quote-sanity WARNING throttle (observability hygiene, 2026-07-16): a
+# persistently diverged symbol (e.g. thin-book SPK-USDT at 6.8%) re-trips the
+# guard EVERY evaluation (~1/s per position) — the guard behavior is correct
+# and counted (quote_sanity_rejects), but per-trip WARNING spam (~30k
+# lines/day/symbol) drowns the log. Log at most once per symbol per window.
+QUOTE_SANITY_LOG_THROTTLE_SEC = 300.0
+_quote_sanity_last_logged: dict[str, float] = {}
+
 __all__ = [
     "ActivePositionRow",
     "find_open_trade_by_position_id",
@@ -233,14 +241,23 @@ def load_active_position_rows(
                         and abs(mid / bar_close - 1.0) > quote_sanity_pct()
                     ):
                         quote_writer.quote_sanity_rejects += 1
-                        logger.warning(
-                            "[quote-sanity] %s mid=%.6f bar_ref=%.6f "
-                            "diverge=%.2f%% > %.2f%% — distrust mid, using "
-                            "bar_close (guard, not a block)",
-                            instrument_id, mid, bar_close,
-                            abs(mid / bar_close - 1.0) * 100.0,
-                            quote_sanity_pct() * 100.0,
-                        )
+                        _now_mono = time.monotonic()
+                        if (
+                            _now_mono
+                            - _quote_sanity_last_logged.get(instrument_id, 0.0)
+                            >= QUOTE_SANITY_LOG_THROTTLE_SEC
+                        ):
+                            _quote_sanity_last_logged[instrument_id] = _now_mono
+                            logger.warning(
+                                "[quote-sanity] %s mid=%.6f bar_ref=%.6f "
+                                "diverge=%.2f%% > %.2f%% — distrust mid, using "
+                                "bar_close (guard, not a block; throttled "
+                                "%.0fs/symbol, count=quote_sanity_rejects)",
+                                instrument_id, mid, bar_close,
+                                abs(mid / bar_close - 1.0) * 100.0,
+                                quote_sanity_pct() * 100.0,
+                                QUOTE_SANITY_LOG_THROTTLE_SEC,
+                            )
                     else:
                         last_price = mid
                         mid_used = True

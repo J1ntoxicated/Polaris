@@ -136,12 +136,18 @@ def _python_decision(
             payload={"reason": "stop_hit", "pnl_r": pnl_r},
             model_used="python",
         )
-    # Time-stop backstop (stopless-zombie cleanup — P1 fix): a P&L-agnostic
-    # time rail, independent of and NEVER touching the -1.0R rail above. Fires
-    # regardless of stop_price (a stop_price-null position has no other
-    # backstop today) once held past K x the strategy's expected horizon.
-    # Missing held_seconds/strategy keys degrade to 0/"" — never fires
-    # (fail-open, same contract as the missing-position HOLD above).
+    # Time-stop backstop (stopless-zombie cleanup — P1 fix, round-3 scope fix):
+    # a P&L-agnostic time rail, independent of and NEVER touching the -1.0R
+    # rail above. Scoped to ``stop_price is None`` ONLY — that is the actual
+    # incident this backstop exists for (a stop_price-null position has no
+    # OTHER exit backstop; the ATR-trailing-stop system needs a stop_price to
+    # ever trigger). A position that already carries a real trailing
+    # stop_price is NOT stopless — it stays governed by that trail / the -1R
+    # rail / G7, so a winner's unbounded tail (profit_target_r=None slow-trend
+    # edge) is never clipped by a universal holding-period cap
+    # (aggressive_always_profit / no_defensive_param_dampen). Missing
+    # held_seconds/strategy keys degrade to 0/"" — never fires (fail-open,
+    # same contract as the missing-position HOLD above).
     # Bars-seen PREFERRED over wall-clock (mirrors exit_thesis._has_matured's
     # maturity-gate precedent): when the caller threads ``native_bars_seen``
     # into ``pos``, the backstop judges elapsed development in NATIVE BARS the
@@ -157,7 +163,7 @@ def _python_decision(
         time_stopped = int(native_bars_seen_raw) > horizon_bars * time_stop_k
     else:
         time_stopped = held_seconds > time_stop_sec
-    if time_stopped:
+    if time_stopped and pos.get("stop_price") is None:
         return GateResult(
             decision=GateDecision.EXIT_NOW,
             next_gate=GATE_ADAPTIVE_EXIT,
@@ -246,9 +252,11 @@ async def position_monitor_gate(
     no-op (byte-identical). Never runs on EXIT_NOW / SWAP_STRATEGY.
 
     ``time_stop_k`` (stopless-zombie backstop multiplier, ``POLARIS_TIME_STOP_K``,
-    default 4.0; ``None`` reads the env): a position held past
-    ``K x strategy_horizon_seconds`` is EXIT_NOW ("time_stop") — independent
-    of and never touching the -1.0R rail. ``env_value`` injectable for tests.
+    default 4.0; ``None`` reads the env): a ``stop_price``-null position held
+    past ``K x strategy_horizon_seconds`` is EXIT_NOW ("time_stop") —
+    independent of and never touching the -1.0R rail. A position that already
+    carries a real ``stop_price`` is not stopless and is never force-exited by
+    this rail (winners run unbounded). ``env_value`` injectable for tests.
 
     Fail-open (Q4): missing position → HOLD (never KILL).
     """

@@ -575,6 +575,11 @@ async def _evaluate_position(
             # native bars instead of wall-clock (session close / gap safe).
             "native_bars_seen": native_bars_seen,
             "cell_score": 0.0,
+            # G6 time-stop scope fix (round-3 BLOCKER): the backstop only
+            # force-exits a position with NO other backstop — thread the
+            # persisted trailing stop_price through so a winner already
+            # governed by a real stop is never caught by the time rail.
+            "stop_price": pos.get("stop_price"),
         },
         unrealized_pnl_r=pnl_r,
         max_loss_r=1.0,

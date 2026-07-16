@@ -122,6 +122,24 @@ async def test_time_stop_fires_even_with_stop_price_null() -> None:
     assert result.payload.get("reason") == "time_stop"
 
 
+async def test_time_stop_does_not_fire_when_stop_price_set() -> None:
+    """Round-3 BLOCKER fix: a position that already carries a real trailing
+    stop_price is NOT stopless (it is governed by that trail / the -1R rail),
+    so the P&L-agnostic time rail must NOT force-exit it — even a WINNER, even
+    past K x horizon. Clipping this tail would throttle winners-run-unbounded
+    (aggressive_always_profit / no_defensive_param_dampen)."""
+    payload = {
+        "position": _position(
+            held_seconds=UNREGISTERED_HORIZON_SEC * 4 + 1, stop_price=79_500.0,
+        ),
+        "unrealized_pnl_r": 2.0,  # a healthy winner, well past widen window
+        "max_loss_r": 1.0,
+    }
+    result = await position_monitor_gate(_ctx(payload), client=None, time_stop_k=4.0)
+    assert result.decision != GateDecision.EXIT_NOW
+    assert result.payload.get("reason") != "time_stop"
+
+
 # ---------------------------------------------------------------------------
 # -1.0R rail independence — never touched, and still takes priority
 # ---------------------------------------------------------------------------

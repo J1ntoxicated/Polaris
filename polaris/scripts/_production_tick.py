@@ -887,7 +887,8 @@ async def _run_tick(
             )
             if not bucket_has_exempt:
                 instrument_id = f"{venue}:{symbol}"
-                latest_stored_ts = last_stored_bar_ts(conn, instrument_id, timeframe)
+                # storage-split: bars lives on the marketdata conn (620 sibling).
+                latest_stored_ts = last_stored_bar_ts(_md_conn, instrument_id, timeframe)
                 if latest_stored_ts is not None and all(
                     not bar_advance_due(
                         last_eval_ts=state.last_eval_bar_ts_by_key.get(

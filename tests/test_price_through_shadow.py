@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from polaris.core.economics.price_through_shadow import (
     log_price_through_entry,
     resolve_price_through,
@@ -158,3 +160,72 @@ def test_log_price_through_entry_routes_through_db_writer_when_wired() -> None:
     assert conn.execute(
         "SELECT COUNT(*) FROM price_through_shadow"
     ).fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# storage-split (round 4 LOW fix): the entry-path touch lookup
+# (``_production_pipeline._fetch_touch_px``) reads quote_ticks, which is
+# marketdata-domain.
+# ---------------------------------------------------------------------------
+
+
+def _insert_tick(conn: sqlite3.Connection, *, bid: float, ask: float) -> None:
+    conn.execute(
+        "INSERT INTO quote_ticks (instrument_id, venue, symbol, ts, bid, ask, "
+        "mid, spread_bps, bid_size, ask_size, source) VALUES "
+        "('okx:BTC-USDT', 'okx', 'BTC-USDT', 1000, ?, ?, 100.0, 1.0, 1.0, 1.0, 'ws')",
+        (bid, ask),
+    )
+
+
+def test_fetch_touch_px_reads_bid_for_buy_and_ask_for_sell() -> None:
+    from polaris.scripts._production_pipeline import _fetch_touch_px
+
+    conn = _conn()
+    _insert_tick(conn, bid=99.0, ask=101.0)
+    assert _fetch_touch_px(conn, venue="okx", symbol="BTC-USDT", side="buy") == 99.0
+    assert _fetch_touch_px(conn, venue="okx", symbol="BTC-USDT", side="sell") == 101.0
+
+
+@pytest.mark.asyncio
+async def test_reserve_and_submit_touch_px_resolves_from_md_conn() -> None:
+    """quote_ticks is marketdata-domain — the entry-path touch lookup must
+    resolve against state.md_conn, not the (post-split, permanently empty)
+    trading conn ``reserve_and_submit`` is otherwise driven by. If the fix
+    regresses, ``_fetch_touch_px`` reads the empty trading conn -> touch_px
+    is None -> NO price_through_shadow row is written at all."""
+    from polaris.core.isolation.allocator_fence import reset_process_fence
+    from polaris.scripts._production_pipeline import reserve_and_submit
+    from polaris.scripts.production_paper_loop import ProdLoopState
+    from polaris.storage.schema import ALL_DDL
+    from polaris.strategies.base import RawSignal
+
+    reset_process_fence()
+    # autocommit (isolation_level=None), matching the production loop's conn —
+    # reserve_and_submit issues its own explicit BEGIN IMMEDIATE below.
+    conn = sqlite3.connect(":memory:", isolation_level=None)  # trading, quote_ticks EMPTY
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    md_conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        md_conn.execute(stmt)
+    _insert_tick(md_conn, bid=99.0, ask=101.0)  # ONLY in md_conn
+
+    sig = RawSignal(
+        signal_id="sig-touch", strategy_id="ema_crossover", symbol="BTC-USDT",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="spot_cross_sectional_momo",
+    )
+    state = ProdLoopState(md_conn=md_conn)
+    trade = await reserve_and_submit(
+        conn=conn, state=state, sig=sig, venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=200.0, last_price=100.0, now_ts=1_780_000_000,
+    )
+    assert trade is not None
+    row = conn.execute(
+        "SELECT touch_px FROM price_through_shadow WHERE strategy_id = 'ema_crossover'"
+    ).fetchone()
+    assert row is not None  # a None touch_px would have skipped the row entirely
+    assert row[0] == 99.0  # buy → bid, resolved from md_conn
+    md_conn.close()

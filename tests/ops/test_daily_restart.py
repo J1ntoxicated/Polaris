@@ -159,7 +159,8 @@ def test_never_opens_db_on_stop_timeout_abort(
 def test_retention_runs_in_confirmed_down_window(
     cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Retention runs exactly once, in the down window, before start."""
+    """Retention runs exactly once, in the down window, before start (no
+    marketdata sibling in this fixture's tmp dir -> single trading-only pass)."""
     from polaris.storage import retention
 
     order: list[str] = []
@@ -177,3 +178,43 @@ def test_retention_runs_in_confirmed_down_window(
     cfg.wal_path.write_bytes(b"x" * 1024)
     assert daily_restart.run(cfg, now=NOW) == "ok"
     assert order == ["stop", "retention", "start"]
+
+
+def test_retention_runs_against_both_trading_and_marketdata_dbs(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """storage-split (round 4 fix): the marketdata sibling accumulates the
+    actual firehose rows post-split and must get its OWN retention + WAL-
+    checkpoint pass — not just the (post-split, largely empty) trading
+    db_path scoped to a combined spec."""
+    from polaris.storage import retention
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
+
+    md_path = marketdata_db_path_for(cfg.db_path)
+    md_path.write_bytes(b"")  # marketdata sibling exists (bot booted post-split)
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        retention, "run_retention_job",
+        lambda db_path, **kw: (calls.append((str(db_path), kw.get("spec"))), {})[1],
+    )
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert [c[0] for c in calls] == [str(cfg.db_path), str(md_path)]
+    assert calls[0][1] is retention.RETENTION_SPEC_TRADING
+    assert calls[1][1] is retention.RETENTION_SPEC_MARKETDATA
+
+
+def test_retention_skips_marketdata_pass_when_sibling_absent(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No marketdata sibling booted yet -> a single trading-only pass, never
+    a crash on the missing file."""
+    from polaris.storage import retention
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        retention, "run_retention_job",
+        lambda db_path, **kw: (calls.append(str(db_path)), {})[1],
+    )
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert calls == [str(cfg.db_path)]

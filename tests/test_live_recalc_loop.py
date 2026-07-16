@@ -544,3 +544,43 @@ async def test_recalc_phase_p0_no_gpt_calls(memdb: sqlite3.Connection) -> None:
     # Phase=P0 → G6 client is None → no GPT call.
     assert haiku.calls == []
     assert state.recalc_g6_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# storage-split (round 4 MED fix): the exit maturity gate's
+# native_bars_seen_since call must read state.md_conn, not the trading conn.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recalc_native_bars_seen_reads_md_conn(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bars is marketdata-domain — a trading-conn read sees a permanently
+    empty table post-split, so the maturity gate always saw 0 bars (permanent
+    suppression). Confirms the call now routes to ``state.md_conn``."""
+    from polaris.storage.schema import ALL_DDL
+
+    _seed_position_and_fill(memdb, position_id="pos-md")
+    md_conn = sqlite3.connect(":memory:")
+    for stmt in ALL_DDL:
+        md_conn.execute(stmt)
+    state = ProdLoopState(md_conn=md_conn)
+    state.open_trades = [_trade_for("pos-md")]
+
+    from polaris.scripts._production_atr import native_bars_seen_since as real_fn
+
+    captured: dict[str, object] = {}
+
+    def _spy(conn: sqlite3.Connection, **kwargs: object) -> int:
+        captured["conn"] = conn
+        return real_fn(conn, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_production_recalc, "native_bars_seen_since", _spy)
+    haiku = _MockGPTClient(responses=['{"decision":"HOLD"}'])
+    await recalc_active_positions(
+        memdb, state=state, now_ts=NOW, gpt_client=haiku, phase="P0",
+        lookup_regime=_lookup_regime_stub, close_specific=close_specific_position,
+    )
+    assert captured.get("conn") is md_conn
+    md_conn.close()

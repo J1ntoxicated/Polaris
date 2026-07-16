@@ -1295,13 +1295,20 @@ def get_focus_targets(
         # ``LEFT JOIN`` spanned watchlist_focus(md) and universe(trading),
         # which no longer share a file.
         venues = {str(v) for v, _s in wf_rows}
+        symbols = {str(s) for _v, s in wf_rows}
         uni_by_key: dict[tuple[str, str], tuple[str, str]] = {}
         if venues:
-            placeholders = ", ".join("?" for _ in venues)
+            # NIT: filter by symbol too (not venue alone) — preserves the
+            # original single-query LEFT JOIN's semantics (an exact (venue,
+            # symbol) match) while avoiding an over-fetch of every OTHER
+            # symbol on a busy venue.
+            v_placeholders = ", ".join("?" for _ in venues)
+            s_placeholders = ", ".join("?" for _ in symbols)
             for v, s, ac, gid in conn.execute(
                 f"SELECT venue, symbol, asset_class, underlying_group_id "
-                f"FROM universe WHERE venue IN ({placeholders})",
-                tuple(venues),
+                f"FROM universe WHERE venue IN ({v_placeholders}) "
+                f"AND symbol IN ({s_placeholders})",
+                (*venues, *symbols),
             ).fetchall():
                 uni_by_key[(str(v), str(s))] = (str(ac or ""), str(gid or ""))
         focus = []

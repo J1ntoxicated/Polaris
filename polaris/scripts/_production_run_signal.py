@@ -155,7 +155,13 @@ async def run_pipeline_for_signal(
     # DATA-HEALTH gate ("no live price = cannot trade"), NOT a defensive throttle:
     # it touches no sizing, applies only to NEW entries (exits untouched), and
     # auto-clears the instant a fresh Alpaca bar lands. OKX/Capital are no-ops.
-    if venue == "alpaca" and alpaca_equity_entries_halted(conn, now_ts=now_ts):
+    # storage-split (round 4 CRITICAL fix): bars is marketdata-domain — reading
+    # it off the trading ``conn`` sees a permanently-empty table post-split, so
+    # ``newest`` was always None and every Alpaca entry was HALTED forever
+    # (fail-closed, flow_not_block violation). state.md_conn (fallback conn).
+    if venue == "alpaca" and alpaca_equity_entries_halted(
+        state.md_conn if state.md_conn is not None else conn, now_ts=now_ts,
+    ):
         logger.warning(
             "[alpaca-health] HOLD new entry %s — Alpaca feed stale/dead "
             "(no live price; auto-clears on fresh data). flow_not_block: "
@@ -286,12 +292,12 @@ async def run_pipeline_for_signal(
     # decision (regime-conditioned cell expectancy + cost-aware move vs REAL
     # round-trip fee) and LOG it against this run. This NEVER branches the
     # pipeline — the live admit/skip is owned entirely by the gates below; only a
-    # single entry_admission_shadow row is added. Passing ``conn`` as the shadow
-    # conn means a None conn (never happens on this production path) would be
+    # single entry_admission_shadow row is added. A None shadow conn would be
     # byte-identical (the helper no-ops). cell_routing lives inside g3_payload.
+    # storage-split (round 4 fix): entry_admission_shadow is marketdata-domain.
     _g3_cell = g3_payload.get("cell_routing", {})
     _log_entry_admission_shadow(
-        conn,
+        state.md_conn if state.md_conn is not None else conn,
         run_id=ctx.run_id,
         sig=sig,
         venue=venue,
@@ -309,7 +315,7 @@ async def run_pipeline_for_signal(
     # signals/ticks while the universe composition is unchanged (efficiency
     # only — the focus DECISION is still GPT-chosen). G1 still always PASS.
     orch = GateOrchestrator(
-        conn=conn, haiku_client=haiku, phase=phase,
+        conn=conn, md_conn=state.md_conn, haiku_client=haiku, phase=phase,
         g1_focus_cache=state.g1_focus_cache,
         # #32 — the per-ticker AI JUDGE (G3/G4) runs alongside the deterministic
         # decision. None (no client) → byte-identical no-judge loop. Shadow mode

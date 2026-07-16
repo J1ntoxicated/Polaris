@@ -462,18 +462,26 @@ def checkpoint_wal(db_path: Path | str, *, timeout_sec: float = 30.0) -> tuple[i
     return busy, log_frames, checkpointed
 
 
-def run_retention_job(db_path: Path | str, *, now_ts: int | None = None) -> dict[str, int]:
+def run_retention_job(
+    db_path: Path | str, *, now_ts: int | None = None,
+    spec: tuple[RetentionRule, ...] = RETENTION_SPEC,
+) -> dict[str, int]:
     """Full hygiene pass for the ops daily-restart down-window: prune + checkpoint.
 
     Opens its own connection, runs the retention deletes, then the reclaiming WAL
     checkpoint (so the freed pages and the deletes are flushed and the -wal file
     shrinks). Returns {table: rows_deleted, '__wal_checkpointed__': frames}.
     Caller MUST ensure the bot is stopped (no concurrent writer).
+
+    ``spec`` (storage-split): pass ``RETENTION_SPEC_TRADING`` /
+    ``RETENTION_SPEC_MARKETDATA`` to scope one pass to ONE domain's DB file
+    (the ops daily-restart runs one job per file post-split). Default stays
+    the full combined spec — byte-identical for any pre-split single-DB caller.
     """
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     try:
         conn.execute("PRAGMA busy_timeout=30000")
-        result = run_retention(conn, now_ts=now_ts)
+        result = run_retention(conn, now_ts=now_ts, spec=spec)
     finally:
         conn.close()
     _busy, _log, checkpointed = checkpoint_wal(db_path)

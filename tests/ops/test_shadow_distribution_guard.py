@@ -139,3 +139,36 @@ def test_run_report_covers_all_six_channels_on_empty_db() -> None:
     for channel, line in zip(guard.CHANNEL_QUERIES, lines, strict=True):
         assert line.startswith(f"channel={channel} ")
         assert "n=0" in line
+
+
+def test_run_report_routes_marketdata_channels_to_md_conn_gate_shadow_stays_trading() -> None:
+    """storage-split: calibration_pairs/vwap_timing_shadow/news_timing_shadow/
+    sector_rank_shadow/meta_labels are marketdata-domain — must read from
+    ``md_conn`` when supplied. ``gate_shadow_events`` is trading-domain
+    (same-txn joined with ``signals``) and must keep reading ``conn`` even
+    when ``md_conn`` is wired."""
+    conn = sqlite3.connect(":memory:")
+    md_conn = sqlite3.connect(":memory:")
+    for c in (conn, md_conn):
+        for stmt in ALL_DDL:
+            c.execute(stmt)
+    # marketdata-domain data lands ONLY in md_conn.
+    md_conn.execute(
+        "INSERT INTO calibration_pairs (signal_id, ticker, predicted_p_pos,"
+        " created_ts) VALUES ('s1', 'BTC-USDT', 0.62, 100)",
+    )
+    md_conn.commit()
+    # trading-domain data lands ONLY in conn.
+    conn.execute(
+        "INSERT INTO gate_shadow_events (event_id, run_id, signal_id, gate_id,"
+        " venue, symbol, regime, technical_decision, technical_scalar,"
+        " created_ts) VALUES ('e1', 'r1', 's1', 4, 'okx', 'BTC-USDT', "
+        "'bull_trend', 'PROCEED', 0.5, 100)",
+    )
+    conn.commit()
+    lines = guard.run_report(conn, md_conn=md_conn)
+    by_channel = {line.split(" ")[0].split("=")[1]: line for line in lines}
+    assert "n=1" in by_channel["calibration_pairs"]  # resolved from md_conn
+    assert "n=1" in by_channel["gate_shadow_events"]  # resolved from conn
+    conn.close()
+    md_conn.close()

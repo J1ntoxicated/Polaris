@@ -134,6 +134,41 @@ async def test_open_path_stamps_risk_usd_with_fee_floor_widened_ruler(
 
 
 @pytest.mark.asyncio
+async def test_open_path_entry_atr_anchor_resolves_from_md_conn(
+    memdb: sqlite3.Connection,
+) -> None:
+    """storage-split (round 4 MED fix): bars is marketdata-domain — the
+    entry-time ATR anchor must resolve against ``state.md_conn``, not the
+    (post-split, permanently empty) trading conn passed as ``conn``."""
+    reset_process_fence()
+    from polaris.storage.schema import ALL_DDL
+
+    md_conn = sqlite3.connect(":memory:", isolation_level=None)
+    for stmt in ALL_DDL:
+        md_conn.execute(stmt)
+    _seed_bars(md_conn, interval="1H", n=20, band=0.1, close=100.0)  # ONLY md_conn
+    sig = RawSignal(
+        signal_id="sig-mdanchor", strategy_id="ema_crossover", symbol="BTC-USDT",
+        side="long", strength=0.8, sizing_hint=0.05, ttl_bars=10,
+        thesis_tag="t", correlation_group="spot_cross_sectional_momo",
+    )
+    state = ProdLoopState(md_conn=md_conn)
+    trade = await reserve_and_submit(
+        conn=memdb, state=state, sig=sig, venue="okx", symbol="BTC-USDT",
+        asset_class="crypto", underlying_group_id="crypto:BTC",
+        notional_usd=200.0, last_price=100.0, now_ts=NOW,
+    )
+    assert trade is not None
+    row = memdb.execute(
+        "SELECT entry_atr_pct FROM positions WHERE position_id = ?",
+        (trade.position_id,),
+    ).fetchone()
+    # resolved from md_conn (the empty trading `memdb` alone would yield NULL).
+    assert row[0] is not None
+    md_conn.close()
+
+
+@pytest.mark.asyncio
 async def test_open_path_wide_atr_stays_byte_identical_to_ssot_mult(
     memdb: sqlite3.Connection,
 ) -> None:

@@ -66,14 +66,38 @@ def _run_retention(cfg: OpsConfig, *, now: float) -> None:
     (data hygiene must not block bringing the bot back up). The reclaiming WAL
     checkpoint is safe here because the bot is confirmed stopped (no concurrent
     writer to contend the exclusive lock).
+
+    storage-split (round 4 fix): runs TWICE — the trading db_path scoped to
+    ``RETENTION_SPEC_TRADING`` (gate_events), and (when the marketdata sibling
+    has booted) the marketdata sibling scoped to ``RETENTION_SPEC_MARKETDATA``
+    (bars/baseline/watchlist_focus/shadow/altdata — the actual firehose that
+    accumulates post-split). A single combined-spec pass against only
+    ``cfg.db_path`` either pruned the wrong permanently-stale copy or left the
+    marketdata file's WAL to grow unbounded (never checkpointed).
     """
     try:
-        from polaris.storage.retention import run_retention_job
+        from polaris.storage.retention import (
+            RETENTION_SPEC_MARKETDATA,
+            RETENTION_SPEC_TRADING,
+            run_retention_job,
+        )
+        from polaris.storage.schema_marketdata import marketdata_db_path_for
 
-        result = run_retention_job(cfg.db_path, now_ts=int(now))
+        result = run_retention_job(
+            cfg.db_path, now_ts=int(now), spec=RETENTION_SPEC_TRADING,
+        )
         deleted = {k: v for k, v in result.items() if not k.startswith("__")}
+        md_deleted: dict[str, int] = {}
+        md_path = marketdata_db_path_for(cfg.db_path)
+        if md_path.exists():
+            md_result = run_retention_job(
+                md_path, now_ts=int(now), spec=RETENTION_SPEC_MARKETDATA,
+            )
+            md_deleted = {k: v for k, v in md_result.items() if not k.startswith("__")}
         with open(cfg.restart_log, "a", encoding="utf-8") as fh:
-            fh.write(f"{iso_utc(now)} retention deleted={deleted}\n")
+            fh.write(
+                f"{iso_utc(now)} retention deleted={deleted} md_deleted={md_deleted}\n"
+            )
     except Exception as exc:  # noqa: BLE001 — hygiene must never block restart
         alerting.notify(
             cfg, "retention_failed",

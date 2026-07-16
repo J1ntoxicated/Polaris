@@ -18,6 +18,16 @@ input. Fail-open throughout; a run whose signal never opens a position is
 terminated ``unresolvable`` after ``UNRESOLVABLE_GRACE_SEC`` so it cannot
 starve the batch forever.
 
+storage-split cross-domain fix (round 4): ``vwap_timing_shadow`` is
+marketdata-domain but the ``gate_events``/``positions``/``fills`` join keys
+are trading-domain — a genuine cross-domain read (unlike the single-domain
+sibling tools). ``resolve_vwap_timing_fills`` takes a marketdata-domain
+connection with the trading DB read-only ``ATTACH``ed as ``trading`` (see
+``main()``): reads use the ``trading.`` prefix, the ``vwap_timing_shadow``
+UPDATE stays unqualified (no cross-schema write JOIN, per the blueprint's
+"쓰기 경로엔 크로스 JOIN 금지" rule) — offline/non-hot-path, so the
+blueprint's read-only-ATTACH resolution applies.
+
 Usage (manual / cron, mirrors ``recalc_excursions.py``):
   python3 -m polaris.scripts.vwap_timing_resolve --db data/polaris_live.sqlite
 """
@@ -69,6 +79,11 @@ def resolve_vwap_timing_fills(
 ) -> int:
     """Resolve pending ``vwap_timing_shadow`` rows from already-recorded fills.
 
+    ``conn`` MUST be a marketdata-domain connection with the trading DB
+    read-only ``ATTACH``ed as ``trading`` (see module docstring / ``main()``)
+    — ``vwap_timing_shadow`` lives here (unqualified); ``gate_events`` /
+    ``positions`` / ``fills`` are read via the ``trading.`` prefix.
+
     Returns the number of rows whose fill was found + backfilled this pass.
     Fail-open — never raises; a missing table / any ``sqlite3.Error`` on the
     read yields 0.
@@ -92,7 +107,7 @@ def resolve_vwap_timing_fills(
         try:
             terminal = int(decision_ts) + UNRESOLVABLE_GRACE_SEC <= now_ts
             pos_row = conn.execute(
-                "SELECT position_id FROM gate_events WHERE run_id = ? "
+                "SELECT position_id FROM trading.gate_events WHERE run_id = ? "
                 "AND gate_id = 4 AND position_id IS NOT NULL LIMIT 1",
                 (run_id,),
             ).fetchone()
@@ -101,11 +116,13 @@ def resolve_vwap_timing_fills(
                 continue
             position_id = str(pos_row[0])
             side_row = conn.execute(
-                "SELECT side FROM positions WHERE position_id = ?", (position_id,)
+                "SELECT side FROM trading.positions WHERE position_id = ?",
+                (position_id,),
             ).fetchone()
             side = str(side_row[0]) if side_row else "long"
             fill_row = conn.execute(
-                "SELECT fill_price, ts_ms FROM fills WHERE contribution_id = ? "
+                "SELECT fill_price, ts_ms FROM trading.fills "
+                "WHERE contribution_id = ? "
                 "AND is_close = 0 ORDER BY ts_ms ASC LIMIT 1",
                 (position_id,),
             ).fetchone()
@@ -138,12 +155,16 @@ def resolve_vwap_timing_fills(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", required=True, help="SQLite path (must exist)")
+    parser.add_argument("--db", required=True, help="Trading SQLite path (must exist)")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     args = parser.parse_args()
     import time
 
-    conn = sqlite3.connect(args.db, isolation_level=None)
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
+
+    md_path = marketdata_db_path_for(args.db)
+    conn = sqlite3.connect(f"file:{md_path}", uri=True, isolation_level=None)
+    conn.execute(f"ATTACH DATABASE 'file:{args.db}?mode=ro' AS trading")
     try:
         n = resolve_vwap_timing_fills(conn, now_ts=int(time.time()), limit=args.limit)
         print(f"resolved {n} vwap_timing_shadow row(s)")

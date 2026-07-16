@@ -132,6 +132,7 @@ def _persist_maker_fill_shadow(
     symbol: str,
     side: str,
     fill_price: float,
+    db_writer: DBWriter | None = None,
 ) -> None:
     """Persist ONE maker_fill_shadow row for a post-only ENTRY fill (FIX-EXEC).
 
@@ -143,6 +144,12 @@ def _persist_maker_fill_shadow(
     entry never fabricates a maker shadow row. Entry leg is always a BUY (OKX
     post-only buy). Measurement only — degrade-never-crash (log_maker_fill swallows
     a sqlite error); the trade decision / sizing / the −1.0R rail are never touched.
+
+    ``db_writer`` (storage-split round 4 fix): ``maker_fill_shadow`` is
+    marketdata-domain — when supplied (``state.md_db_writer``), the row is
+    routed to the marketdata writer instead of the trading ``conn`` passed
+    here (mirrors ``_persist_price_through_shadow`` immediately below this
+    call site). ``None`` falls back to a direct write on ``conn``.
     """
     if attempt is None or attempt.maker_touch_px is None:
         return
@@ -157,6 +164,7 @@ def _persist_maker_fill_shadow(
         fill_px=fill_price,
         outcome=attempt.maker_outcome or "clean_fill",
         reposts=attempt.maker_reposts,
+        db_writer=db_writer,
     )
 
 
@@ -771,8 +779,13 @@ async def reserve_and_submit(
     entry_atr_pct: float | None = None
     entry_atr_timeframe: str | None = None
     try:
+        # storage-split (round 4 MED fix): bars is marketdata-domain — a
+        # trading-conn read sees a permanently-empty table post-split, so the
+        # anchor always fell to NULL (legacy current-ATR fallback), same class
+        # as the Capital quote_usd_rate fix a few lines below.
         anchor = timeframe_anchor_atr_pct(
-            conn, instrument_id=f"{venue}:{symbol}",
+            state.md_conn if state.md_conn is not None else conn,
+            instrument_id=f"{venue}:{symbol}",
             timeframe=_strategy_timeframe(sig.strategy_id), now_ts=now_ts,
         )
     except sqlite3.Error as exc:
@@ -850,7 +863,11 @@ async def reserve_and_submit(
     # a best-effort quote_ticks read done BEFORE the write-lock-held txn below
     # (same placement as the regime lookups above) so the shadow
     # instrumentation never extends the entry's BEGIN IMMEDIATE hold time.
-    shadow_touch_px = _fetch_touch_px(conn, venue=venue, symbol=symbol, side=sig.side)
+    # storage-split (round 4 LOW fix): quote_ticks is marketdata-domain.
+    shadow_touch_px = _fetch_touch_px(
+        state.md_conn if state.md_conn is not None else conn,
+        venue=venue, symbol=symbol, side=sig.side,
+    )
     try:
         # autocommit-mode connection (init_db uses isolation_level=None) —
         # explicit BEGIN+COMMIT is an atomic boundary in SQLite. ROLLBACK
@@ -885,6 +902,7 @@ async def reserve_and_submit(
             conn, attempt=maker_attempt, run_id=sig.signal_id,
             strategy_id=sig.strategy_id, venue=venue, symbol=symbol,
             side=sig.side, fill_price=fill.fill_price,
+            db_writer=state.md_db_writer,
         )
         # PRICE-THROUGH SHADOW (maker_fill_sim R1 2026-07-12 debate, Hybrid
         # C+A): fires on EVERY entry (unlike maker_fill_shadow above, which

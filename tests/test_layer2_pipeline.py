@@ -682,3 +682,36 @@ async def test_g8_p0_python_template_clamps_delta_to_rail(
     assert delta, "delta must be populated even at P0"
     for v in delta.values():
         assert abs(v) <= LESSON_DELTA_CLAMP_P0 + 1e-9, f"delta {v} exceeds rail"
+
+
+# ---------------------------------------------------------------------------
+# storage-split (round 4 fix): GateOrchestrator threads md_conn into G4 only
+# ---------------------------------------------------------------------------
+
+
+async def test_orchestrator_threads_md_conn_to_g4_watcher(
+    memdb: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G4's frontgate VWAP/TTM shadow tagger reads bars/writes
+    vwap_timing_shadow (marketdata-domain) — GateOrchestrator(md_conn=...)
+    must pass it through to pre_entry_watcher_gate."""
+    import polaris.core.pipeline.gate_orchestrator as orch_mod
+
+    captured: dict[str, object] = {}
+
+    async def _fake_watcher(_ctx: object, **kwargs: object) -> GateResult:
+        captured.update(kwargs)
+        return GateResult(decision=GateDecision.KILL, next_gate=None, payload={})
+
+    monkeypatch.setattr(orch_mod, "pre_entry_watcher_gate", _fake_watcher)
+    md_conn = sqlite3.connect(":memory:")
+    orch = GateOrchestrator(conn=memdb, md_conn=md_conn)
+    ctx = GateContext(
+        run_id="r-md", signal_id="s-md", position_id=None,
+        gate_id=GATE_PRE_ENTRY_WATCHER, venue="okx", symbol="BTC-USDT",
+        strategy_id="s1", payload={"validated_signal": {"symbol": "BTC-USDT"}},
+        started_ts=NOW, state=SignalLifecycle.VALIDATED,
+    )
+    await orch.run(ctx, start_gate=GATE_PRE_ENTRY_WATCHER)
+    assert captured.get("md_conn") is md_conn
+    md_conn.close()

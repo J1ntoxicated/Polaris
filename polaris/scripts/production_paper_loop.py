@@ -279,6 +279,7 @@ def alpaca_reconcile_import_enabled() -> bool:
 
 def _reconcile_import_atr_anchor(
     conn: sqlite3.Connection, instrument_id: str, now_ts: int,
+    *, md_conn: sqlite3.Connection | None = None,
 ) -> tuple[float, str] | None:
     """[P0-5] Entry-time ATR-anchor resolver injected into
     ``reconcile_venue_positions`` — lives in ``scripts`` (not ``core``) so
@@ -286,9 +287,16 @@ def _reconcile_import_atr_anchor(
     (layering rail, ``test_core_layering.py``). Same tf→1m fallback chain the
     normal entry-stamp path uses; ``_reconcile_import`` is unregistered so
     ``strategy_timeframe`` resolves "1m" (measurement-only, graceful).
+
+    ``md_conn`` (storage-split round 4 fix): bars is marketdata-domain, but
+    ``recover.py``'s ``AtrAnchorFn`` contract always calls this with the
+    TRADING conn positionally (``conn``) — the call site binds ``md_conn`` via
+    ``functools.partial(_reconcile_import_atr_anchor, md_conn=state.md_conn)``
+    so this keyword wins over the positional trading ``conn`` when wired.
+    ``None`` falls back to ``conn`` (byte-identical for direct callers/tests).
     """
     return timeframe_anchor_atr_pct(
-        conn, instrument_id=instrument_id,
+        md_conn if md_conn is not None else conn, instrument_id=instrument_id,
         timeframe=strategy_timeframe("_reconcile_import"), now_ts=now_ts,
     )
 
@@ -1196,10 +1204,17 @@ async def run_production_paper_loop(
     # management, never liquidate.
     if real_roundtrip and alpaca_reconcile_import_enabled():
         try:
+            def _atr_anchor_fn(
+                _conn: sqlite3.Connection, _iid: str, _now_ts: int,
+            ) -> tuple[float, str] | None:
+                return _reconcile_import_atr_anchor(
+                    _conn, _iid, _now_ts, md_conn=state.md_conn,
+                )
+
             imported = await reconcile_venue_positions(
                 conn, okx_adapter=None, capital_adapter=None,
                 alpaca_adapter=alpaca_adapter, now_ts=int(time.time()),
-                atr_anchor_fn=_reconcile_import_atr_anchor,
+                atr_anchor_fn=_atr_anchor_fn,
             )
         except Exception:
             logger.exception(

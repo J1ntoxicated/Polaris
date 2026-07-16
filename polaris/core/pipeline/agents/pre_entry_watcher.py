@@ -210,6 +210,7 @@ def _log_g4_frontgate_shadow(
     ctx: GateContext,
     shadow_conn: sqlite3.Connection | None,
     *,
+    md_conn: sqlite3.Connection | None = None,
     inp: G4ShadowInputs,
 ) -> None:
     """VWAP/AVWAP timing (frontgate item #6) + TTM Squeeze (item #9) SHADOW tags.
@@ -222,13 +223,24 @@ def _log_g4_frontgate_shadow(
     ``gpt_decision=None`` (mismatch pinned to 0 — this is a watch tag, not a
     technical-vs-GPT comparison). Fail-open: any error here is swallowed so a
     bars-fetch/compute fault can never crash the live gate.
+
+    ``shadow_conn`` is the master enable/disable toggle for this whole shadow
+    cluster (unchanged — mirrors ``_log_g4_shadow``). ``md_conn`` (storage-
+    split round 4 fix): ``bars``/``vwap_timing_shadow`` are marketdata-domain
+    while ``gate_shadow_events`` (the TTM squeeze tag below) stays
+    trading-domain (same-txn joined with ``signals``) — so the bars read +
+    the vwap_timing_shadow write route to ``md_conn`` (falling back to
+    ``shadow_conn`` when unwired, byte-identical for existing callers/tests),
+    while the TTM squeeze ``log_shadow_event`` call keeps using
+    ``shadow_conn``.
     """
     if shadow_conn is None:
         return
+    _bars_conn = md_conn if md_conn is not None else shadow_conn
     try:
         decision_ts = ctx.started_ts if ctx.started_ts > 0 else int(time.time())
         bar_views = fetch_known_bars(
-            shadow_conn, venue=ctx.venue, symbol=ctx.symbol, decision_ts=decision_ts,
+            _bars_conn, venue=ctx.venue, symbol=ctx.symbol, decision_ts=decision_ts,
         )
         current_price = (
             (inp.best_bid + inp.best_ask) / 2.0
@@ -236,7 +248,7 @@ def _log_g4_frontgate_shadow(
             else 0.0
         )
         log_vwap_timing_shadow(
-            shadow_conn,
+            _bars_conn,
             run_id=ctx.run_id,
             signal_id=ctx.signal_id,
             venue=ctx.venue,
@@ -326,6 +338,7 @@ async def pre_entry_watcher_gate(
     client: Any | None = None,
     fast_path_ctx: FastPathContext | None = None,
     shadow_conn: sqlite3.Connection | None = None,
+    md_conn: sqlite3.Connection | None = None,
     ai_free: bool | None = None,
     judge_client: Any | None = None,
 ) -> GateResult:
@@ -343,7 +356,10 @@ async def pre_entry_watcher_gate(
     ``shadow_conn`` (legacy AI-conductor P0 SHADOW): when supplied on the GPT
     path, a deterministic technical rule is computed in parallel and logged
     against the live GPT decision (behavior 0). None = legacy behavior,
-    byte-identical.
+    byte-identical. ``md_conn`` (storage-split round 4 fix): threaded to the
+    frontgate VWAP/TTM shadow tagger, whose bars read + vwap_timing_shadow
+    write are marketdata-domain (see ``_log_g4_frontgate_shadow``). None
+    falls back to ``shadow_conn``.
     """
     validated = ctx.payload.get("validated_signal", {})
     tick_window = list(ctx.payload.get("tick_window", []))
@@ -423,7 +439,7 @@ async def pre_entry_watcher_gate(
         )
         # frontgate-scan items #6 (VWAP/AVWAP timing) + #9 (TTM Squeeze) —
         # behavior-0 watch tags, logged only, never influence det_result above.
-        _log_g4_frontgate_shadow(ctx, shadow_conn, inp=inp)
+        _log_g4_frontgate_shadow(ctx, shadow_conn, md_conn=md_conn, inp=inp)
         # #32 AI JUDGE (entry-timing): a per-ticker, STRUCTURALLY non-blocking
         # timing judgment over the bot's own info + tick context. Only the PROCEED
         # path is judged (the objective crossed-book KILL above is

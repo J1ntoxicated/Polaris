@@ -50,6 +50,15 @@ def test_bar_advance_gate_sits_before_generate_raw_signal_call() -> None:
     )
 
 
+def test_bar_advance_gate_reads_last_stored_bar_ts_from_md_conn() -> None:
+    """storage-split (round 4 fix): bars is marketdata-domain — the gate's
+    ``last_stored_bar_ts`` read must use ``_md_conn`` (the 620 sibling
+    already used a few lines above for the SAME bars table), not the trading
+    ``conn`` (permanently empty post-split)."""
+    assert "last_stored_bar_ts(_md_conn, instrument_id, timeframe)" in _SRC
+    assert "last_stored_bar_ts(conn, instrument_id, timeframe)" not in _SRC
+
+
 # ---------------------------------------------------------------------------
 # spec_b — session-aware entry-fanout skip wired at the NEW-ENTRY seam only.
 # ---------------------------------------------------------------------------

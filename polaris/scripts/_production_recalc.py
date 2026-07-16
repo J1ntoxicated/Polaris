@@ -501,8 +501,12 @@ async def _evaluate_position(
     # missing bar row / unregistered strategy degrades to 0 seen (safest — the
     # gate suppresses rather than risks judging an unmeasured thesis).
     native_tf = strategy_timeframe(strategy_id)
+    # storage-split (round 4 MED fix): bars is marketdata-domain — a
+    # trading-conn read sees a permanently-empty table post-split, so the
+    # maturity gate always saw 0 bars (permanently suppressed).
     native_bars_seen = native_bars_seen_since(
-        conn, instrument_id=f"{pos['venue']}:{pos['symbol']}", timeframe=native_tf,
+        state.md_conn if state.md_conn is not None else conn,
+        instrument_id=f"{pos['venue']}:{pos['symbol']}", timeframe=native_tf,
         open_ts=int(pos.get("opened_ts", now_ts)), now_ts=now_ts,
     )
     mode = assess_mode_for_position(

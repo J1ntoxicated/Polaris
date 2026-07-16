@@ -104,3 +104,32 @@ def test_persist_maker_fill_none_conn_is_noop() -> None:
         run_id="r", strategy_id="s", venue="okx", symbol="X", side="long",
         fill_price=1.0,
     )
+
+
+def test_persist_maker_fill_threads_db_writer_when_wired() -> None:
+    # storage-split (round 4 fix): maker_fill_shadow is marketdata-domain —
+    # a wired db_writer (state.md_db_writer at the production call site)
+    # receives the job instead of the caller's own conn.execute.
+    from polaris.scripts._production_pipeline import _persist_maker_fill_shadow
+
+    conn = _conn()
+    submitted: list[str] = []
+
+    class _FakeWriter:
+        def submit(self, fn: object, *, label: str = "") -> None:
+            fn(conn)  # type: ignore[operator]
+            submitted.append(label)
+
+    attempt = OpenAttempt(
+        fill=None, maker_touch_px=100.0, maker_reposts=1, maker_outcome="clean_fill"
+    )
+    _persist_maker_fill_shadow(
+        conn, attempt=attempt, run_id="run1",
+        strategy_id="weekend_thin_book_flush_maker", venue="okx",
+        symbol="BTC-USDT", side="long", fill_price=99.9,
+        db_writer=_FakeWriter(),  # type: ignore[arg-type]
+    )
+    assert submitted == ["maker_fill_shadow"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM maker_fill_shadow"
+    ).fetchone()[0] == 1

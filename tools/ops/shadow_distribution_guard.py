@@ -193,26 +193,46 @@ def _format_report(r: ChannelDistributionReport) -> str:
     )
 
 
-def run_report(conn: sqlite3.Connection) -> list[str]:
-    """Read-only over all 6 channels; one deterministic line per channel."""
+def run_report(
+    conn: sqlite3.Connection, *, md_conn: sqlite3.Connection | None = None,
+) -> list[str]:
+    """Read-only over all 6 channels; one deterministic line per channel.
+
+    storage-split: ``gate_shadow_events`` is trading-domain (same-txn joined
+    with ``signals``) and always reads ``conn``; every other channel is
+    marketdata-domain and reads via ``md_conn`` when supplied (falls back to
+    ``conn`` — byte-identical for existing single-conn callers/tests).
+    """
     lines = []
     for channel in CHANNEL_QUERIES:
-        rows, query = read_channel_rows(conn, channel)
+        source_conn = (
+            conn if channel == "gate_shadow_events"
+            else (md_conn if md_conn is not None else conn)
+        )
+        rows, query = read_channel_rows(source_conn, channel)
         report = channel_distribution_report(channel, rows, query=query)
         lines.append(_format_report(report))
     return lines
 
 
 def main() -> int:
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
     from tools.ops.ops_config import OpsConfig
 
     cfg = OpsConfig.default()
     conn = sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
+    md_path = marketdata_db_path_for(cfg.db_path)
+    md_conn = (
+        sqlite3.connect(f"file:{md_path}?mode=ro", uri=True)
+        if md_path.exists() else None
+    )
     try:
-        for line in run_report(conn):
+        for line in run_report(conn, md_conn=md_conn):
             print(line)
     finally:
         conn.close()
+        if md_conn is not None:
+            md_conn.close()
     return 0
 
 

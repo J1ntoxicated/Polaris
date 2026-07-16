@@ -103,6 +103,31 @@ def test_watch_superset_of_trade_after_refresh() -> None:
     conn.close()
 
 
+def test_get_focus_targets_resolves_multi_venue_after_scoped_universe_query() -> None:
+    """NIT — the universe resolution SELECT now filters by symbol too (not
+    venue alone). Confirms multi-venue focus rows still resolve their
+    asset_class/group_id correctly against the narrower query."""
+    conn = init_db(":memory:")
+    _seed_universe(conn, [("okx", "BTC-USDT", 9e8, 6.0)])
+    conn.execute(
+        "INSERT OR REPLACE INTO universe "
+        "(venue, symbol, instrument_id, underlying_group_id, asset_class, "
+        " quote_ccy, state, vol_24h_usd, spread_bps, atr_24h_pct, "
+        " depth_10bps_usd, last_seen_ts, is_active) "
+        "VALUES ('capital', 'EURUSD', 'capital:EURUSD', 'forex:EURUSD', 'forex', "
+        " 'USD', 'live', 5e8, 1.0, 0.5, 1e6, 1000, 1)"
+    )
+    conn.commit()
+    refresh_focus_watchlist(conn, cycle_ts=2000)
+    targets = {
+        (v, s): (ac, g)
+        for v, s, ac, g in get_focus_targets(conn, cycle_ts=2000, max_n=10)
+    }
+    assert targets[("okx", "BTC-USDT")][0] == "crypto"
+    assert targets[("capital", "EURUSD")][0] == "forex"
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Lean wiring (audit code_review_2026-06-24): the technical / regime / altdata
 # lenses now feed opportunity_score from data the loop holds. These prove the

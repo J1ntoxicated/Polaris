@@ -780,6 +780,85 @@ def test_run_once_heartbeat_row(live_db: Path, sentinel_db: Path) -> None:
     assert duration_ms >= 0
 
 
+# ---------------------------------------------------------------------------
+# storage-split (round 4 fix): S1 (quote_ticks) + S6 (tick_inflow) read the
+# marketdata sibling, not the trading live_db conn.
+# ---------------------------------------------------------------------------
+
+
+def _md_sibling(live_db: Path) -> Path:
+    from polaris.storage.schema_marketdata import marketdata_db_path_for
+
+    path = marketdata_db_path_for(live_db)
+    conn = sqlite3.connect(path)
+    for stmt in ALL_DDL:
+        conn.execute(stmt)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_run_once_s1_reads_marketdata_sibling_when_trading_bars_empty(
+    live_db: Path, sentinel_db: Path,
+) -> None:
+    """quote_ticks is marketdata-domain — S1 must read the marketdata
+    sibling, not the (post-split, permanently empty) trading live_db."""
+    md_path = _md_sibling(live_db)
+    md_conn = _rw(md_path)
+    _insert_tick(md_conn, "okx", "BTC-USDT", NOW_OPEN - 5)  # fresh, marketdata-only
+    md_conn.close()
+    res = run_once(live_db, sentinel_db, now_ts=NOW_OPEN)
+    assert res.errors == {}
+    sconn = sqlite3.connect(sentinel_db)
+    n = sconn.execute(
+        "SELECT COUNT(*) FROM sentinel_findings WHERE check_id='S1' AND status='active'"
+    ).fetchone()[0]
+    sconn.close()
+    assert n == 0  # fresh tick in the marketdata sibling → no staleness finding
+
+
+def test_run_once_s1_marketdata_sibling_missing_degrades_to_trading_conn(
+    live_db: Path, sentinel_db: Path,
+) -> None:
+    """No marketdata sibling booted yet (early-boot / legacy) → S1 falls back
+    to the trading conn (byte-identical pre-split behaviour), never crashes."""
+    conn = _rw(live_db)
+    _insert_tick(conn, "okx", "BTC-USDT", NOW_OPEN - 5)
+    conn.close()
+    res = run_once(live_db, sentinel_db, now_ts=NOW_OPEN)
+    assert res.errors == {}
+    sconn = sqlite3.connect(sentinel_db)
+    n = sconn.execute(
+        "SELECT COUNT(*) FROM sentinel_findings WHERE check_id='S1' "
+        "AND subject='okx' AND status='active'"
+    ).fetchone()[0]
+    sconn.close()
+    assert n == 0  # resolved off the fallback trading conn
+
+
+def test_run_once_s6_reads_marketdata_sibling_tick_inflow(
+    live_db: Path, sentinel_db: Path,
+) -> None:
+    """tick_inflow is marketdata-domain — S6 has the SAME bug class as S1's
+    quote_ticks and must read the marketdata sibling too."""
+    md_path = _md_sibling(live_db)
+    md_conn = _rw(md_path)
+    _insert_inflow(
+        md_conn, "okx", last_tick_ts=NOW_OPEN - 5, ticks_600s=100,
+        max_flow_size_600s=2.0, window_started_at=NOW_OPEN - 600,
+    )
+    md_conn.close()
+    res = run_once(live_db, sentinel_db, now_ts=NOW_OPEN)
+    assert res.errors == {}
+    sconn = sqlite3.connect(sentinel_db)
+    n = sconn.execute(
+        "SELECT COUNT(*) FROM sentinel_findings WHERE check_id='S6' "
+        "AND subject='okx:no_inflow' AND status='active'"
+    ).fetchone()[0]
+    sconn.close()
+    assert n == 0  # fresh inflow row in the marketdata sibling → no no_inflow finding
+
+
 def test_run_once_atomic_rollback_on_midwrite_failure(
     live_db: Path, sentinel_db: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

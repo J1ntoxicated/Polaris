@@ -42,6 +42,16 @@ from polaris.strategies import STRATEGY_REGISTRY
 #   equity_bb_meanrev_15m / equity_opening_range_breakout — Alpaca equity sleeve
 #     Wave 1b + 1.5 (§1 #4-#5, 2026-07-11), same VIRTUAL-only mechanism as the
 #     Wave 1a trio above (not a KILL).
+#   session_breakout / donchian_turtle_breakout / spot_donchian /
+#     equity_52wk_high_breakout — P3 promotion (2026-07-16, vault/50_research/
+#     built-not-wired-audit.md): formalized off an ad hoc env-conditional
+#     STRATEGY_REGISTRY membership onto this SAME
+#     dispatch_eligible=virtual_loosen(True, False) mechanism (real-fee-bleed
+#     B1-prune KILL under REAL, unchanged; VIRTUAL dispatches).
+#   capital_macro_riskoff_catalyst — SHADOW-FIRST (P3 promotion, new firing,
+#     not a re-admit): dispatch_eligible=False in EVERY mode (not
+#     virtual_loosen'd) pending the P0a evolve honest-N gate; observed via
+#     ``capital_macro_riskoff_shadow.py`` instead.
 KILLED_IDS = frozenset(
     {
         "rsi_bb_pullback",
@@ -54,6 +64,11 @@ KILLED_IDS = frozenset(
         "equity_etf_trend_pullback",
         "equity_bb_meanrev_15m",
         "equity_opening_range_breakout",
+        "session_breakout",
+        "donchian_turtle_breakout",
+        "spot_donchian",
+        "equity_52wk_high_breakout",
+        "capital_macro_riskoff_catalyst",
     }
 )
 

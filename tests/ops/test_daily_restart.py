@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -218,3 +219,123 @@ def test_retention_skips_marketdata_pass_when_sibling_absent(
     )
     assert daily_restart.run(cfg, now=NOW) == "ok"
     assert calls == [str(cfg.db_path)]
+
+
+# --------------------------------------------------------------------------- #
+# P3 promotion — probe sidecar (data/probes.sqlite) WAL hygiene down-window
+# --------------------------------------------------------------------------- #
+
+
+def test_probe_wal_hygiene_skipped_when_sidecar_absent(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No probes.sqlite booted yet -> a no-op, never a crash on the missing file."""
+    from polaris.storage import retention
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        retention, "checkpoint_wal",
+        lambda db_path, **kw: calls.append(str(db_path)),
+    )
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert calls == []
+
+
+def test_probe_wal_hygiene_prunes_and_checkpoints_when_sidecar_present(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe sidecar gets its own prune + RECLAIMING checkpoint pass in the
+    confirmed-down window — the gap this promotion closes (it was pruned live
+    every 30min but its WAL was never reclaimed anywhere)."""
+    from polaris.core.probes.tuning_log import open_probe_db
+    from polaris.storage import retention
+
+    probe_path = cfg.db_path.parent / "probes.sqlite"
+    open_probe_db(probe_path).close()  # bootstrap the sidecar (real DDL)
+
+    prune_calls: list[str] = []
+    checkpoint_calls: list[str] = []
+    monkeypatch.setattr(
+        retention, "run_probe_retention",
+        lambda conn, **kw: (prune_calls.append("pruned"), {})[1],
+    )
+    monkeypatch.setattr(
+        retention, "checkpoint_wal",
+        lambda db_path, **kw: checkpoint_calls.append(str(db_path)),
+    )
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert prune_calls == ["pruned"]
+    assert checkpoint_calls == [str(probe_path)]
+
+
+def test_probe_wal_hygiene_failure_never_blocks_restart(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe-DB fault is caught independently — the restart still completes
+    'ok' (data hygiene must never block bringing the bot back up)."""
+    from polaris.core.probes.tuning_log import open_probe_db
+    from polaris.storage import retention
+
+    probe_path = cfg.db_path.parent / "probes.sqlite"
+    open_probe_db(probe_path).close()
+
+    def _raise(*a: object, **kw: object) -> None:
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(retention, "run_probe_retention", _raise)
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+
+
+def test_probe_wal_hygiene_never_suppresses_trading_retention(
+    cfg: OpsConfig, stop_start: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Own try/except: a probe-DB fault must not prevent the trading-domain
+    retention pass above it from running."""
+    from polaris.core.probes.tuning_log import open_probe_db
+    from polaris.storage import retention
+
+    probe_path = cfg.db_path.parent / "probes.sqlite"
+    open_probe_db(probe_path).close()
+
+    trading_calls: list[str] = []
+    monkeypatch.setattr(
+        retention, "run_retention_job",
+        lambda db_path, **kw: (trading_calls.append(str(db_path)), {})[1],
+    )
+
+    def _raise(*a: object, **kw: object) -> None:
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(retention, "run_probe_retention", _raise)
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+    assert trading_calls == [str(cfg.db_path)]
+
+
+def test_probe_wal_hygiene_end_to_end_real_functions(
+    cfg: OpsConfig, stop_start: dict[str, list[str]],
+) -> None:
+    """No monkeypatch: a real probes.sqlite with an aged row is genuinely
+    pruned and its -wal file genuinely shrinks (reclaiming TRUNCATE
+    checkpoint) through the actual daily-restart down-window call path."""
+    from polaris.core.probes.tuning_log import open_probe_db
+
+    probe_path = cfg.db_path.parent / "probes.sqlite"
+    conn = open_probe_db(probe_path)
+    aged_ts = int(NOW) - 100 * 86_400  # far past the 45d probe_readings window
+    conn.execute(
+        "INSERT INTO probe_readings (reading_id, ts, gate_id, position_id, "
+        "probe_id, kind, lean, confidence) VALUES (?,?,6,'p','pr','k',0.0,0.0)",
+        ("aged", aged_ts),
+    )
+    conn.close()
+
+    assert daily_restart.run(cfg, now=NOW) == "ok"
+
+    check = open_probe_db(probe_path)
+    try:
+        count = check.execute(
+            "SELECT COUNT(*) FROM probe_readings WHERE reading_id = 'aged'"
+        ).fetchone()[0]
+    finally:
+        check.close()
+    assert count == 0  # the aged row was pruned by the real run_probe_retention

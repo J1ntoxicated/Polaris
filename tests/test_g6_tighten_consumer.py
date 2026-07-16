@@ -131,6 +131,61 @@ def test_flag_on_stop_hit_still_wins() -> None:
     assert res.payload.get("reason") == "stop_hit"
 
 
+def test_flag_on_adverse_harvest_emits_adjust_exit() -> None:
+    """P3 promotion (2026-07-16): HARVEST is a protect action too (probe
+    performance readout: HARVEST realized +0.088R vs HOLD -0.08R) — flag ON +
+    adverse HOLD-eligible position + probe HARVEST escalates to ADJUST_EXIT
+    exactly like TIGHTEN, never EXIT_NOW, never a size cut."""
+    res = _run(
+        {
+            "position": dict(_ADVERSE),
+            "unrealized_pnl_r": -0.05,
+            "max_loss_r": 1.0,
+            "probe_action": "HARVEST",
+            "probe_composite_lean": -0.49,
+        },
+        tighten_enabled=True,
+    )
+    assert res.decision == GateDecision.ADJUST_EXIT
+    assert res.payload.get("tighten_intent") is True
+    assert res.payload.get("reason") == "probe_tighten"
+
+
+def test_flag_on_probe_widen_action_never_escalated() -> None:
+    """Structural exclusion (allowlist, not a WIDEN blocklist): flag ON, probe
+    action WIDEN (measured -0.115R net-negative in the 2026-07-15 probe
+    performance readout) never escalates — only TIGHTEN/HARVEST are promoted."""
+    res = _run(
+        {
+            "position": dict(_ADVERSE),
+            "unrealized_pnl_r": -0.05,
+            "max_loss_r": 1.0,
+            "probe_action": "WIDEN",
+            "probe_composite_lean": 0.3,
+        },
+        tighten_enabled=True,
+    )
+    assert res.decision == GateDecision.HOLD
+
+
+def test_flag_on_stop_hit_still_wins_for_harvest() -> None:
+    """-1.0R hard rail outranks HARVEST too (mirrors the TIGHTEN rail-safety
+    test above) — the catastrophic backstop is untouched by either protect
+    action."""
+    res = _run(
+        {
+            "position": dict(_ADVERSE),
+            "unrealized_pnl_r": -1.2,
+            "max_loss_r": 1.0,
+            "probe_action": "HARVEST",
+            "probe_composite_lean": -0.6,
+        },
+        tighten_enabled=True,
+    )
+    assert res.decision == GateDecision.EXIT_NOW
+    assert res.payload.get("reason") == "stop_hit"
+
+
 def test_flag_on_winner_widen_window_unchanged() -> None:
     """Flag ON, a winner above +0.7R → still ADJUST_EXIT widen_window (the tighten
     consumer only fires in the adverse HOLD band; widen is untouched)."""

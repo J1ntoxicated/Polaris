@@ -52,6 +52,13 @@ _BREAKOUT_KEYWORDS: Final[tuple[str, ...]] = (
 _TREND_KEYWORDS: Final[tuple[str, ...]] = (
     "trend", "tsmom", "momentum", "chandelier", "supertrend",
     "pocket_pivot", "vol_expansion",
+    # "riskoff" — capital_macro_riskoff_catalyst (P3 promotion, 2026-07-16):
+    # a macro flight-to-quality EVENT is a TREND move, not a bounded
+    # revert-to-mean (matches its own metadata's TREND exit-bucket rationale
+    # — see the strategy module's "NO reversion/range/mean_reversion
+    # substring" comment). gold_riskoff_trend_amplify already matches via
+    # "trend" — this is additive, no reclassification there.
+    "riskoff",
 )
 _REVERSION_KEYWORDS: Final[tuple[str, ...]] = (
     "reversion", "pullback", "fade", "flush", "meanrev", "mean_reversion",

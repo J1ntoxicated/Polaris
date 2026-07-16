@@ -605,7 +605,12 @@ def test_correlation_group_id_unique_per_strategy() -> None:
     # OWN correlation_group_id (VIRTUAL-only dispatch, registered unconditionally): 21 → 24.
     # Wave 1b + 1.5 (§1 #4-#5, 2026-07-11): +equity_bb_meanrev_15m/
     # +equity_opening_range_breakout, each its OWN correlation_group_id: 24 → 26.
-    assert len(seen) == 26, f"correlation groups not unique: {seen}"
+    # P3 promotion (2026-07-16): +session_breakout/+donchian_turtle_breakout/
+    # +spot_donchian/+equity_52wk_high_breakout (formalized off the ad hoc
+    # VIRTUAL-only path, each its OWN pre-existing correlation_group_id) +
+    # capital_macro_riskoff_catalyst (shadow-first,
+    # cfd_gold_macro_riskoff_catalyst): 26 → 31.
+    assert len(seen) == 31, f"correlation groups not unique: {seen}"
 
 
 def test_strategy_registry_size() -> None:
@@ -624,7 +629,11 @@ def test_strategy_registry_size() -> None:
     # dispatch, registered unconditionally): 21 → 24.
     # Wave 1b + 1.5 (§1 #4-#5, 2026-07-11): +equity_bb_meanrev_15m/
     # +equity_opening_range_breakout (VIRTUAL-only dispatch): 24 → 26.
-    assert len(STRATEGY_REGISTRY) == 26
+    # P3 promotion (2026-07-16): +session_breakout/+donchian_turtle_breakout/
+    # +spot_donchian/+equity_52wk_high_breakout (formalized off the ad hoc
+    # VIRTUAL-only path) + capital_macro_riskoff_catalyst (shadow-first,
+    # new): 26 → 31.
+    assert len(STRATEGY_REGISTRY) == 31
 
 
 def test_each_strategy_emits_raw_signal_class() -> None:

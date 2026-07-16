@@ -52,10 +52,13 @@ def _ctx(**over: object) -> ProbeContext:
 
 def test_probe_context_default_signal_family_and_version_stamp() -> None:
     """A caller that predates W2 (omits both kwargs) still constructs cleanly —
-    the pre-W2 degenerate shape (momentum) is preserved, never a raise."""
+    the pre-W2 degenerate shape (momentum) is preserved, never a raise.
+
+    P3 promotion (2026-07-16): probe_ctx_version bumped 2 -> 3 (vol_24h_usd /
+    spread_bps / funding_rate fields added — liquidity + funding probe axes)."""
     ctx = _ctx()
     assert ctx.signal_family == "momentum"
-    assert ctx.probe_ctx_version == 2
+    assert ctx.probe_ctx_version == 3
 
 
 def test_probe_context_signal_family_is_caller_overridable() -> None:

@@ -18,7 +18,9 @@ from __future__ import annotations
 import sqlite3
 
 from polaris.core.probes.tighten_intent import (
+    PROBE_TIGHTEN_APPLY_ACTIONS,
     latest_probe_tighten,
+    mark_probe_tighten_applied,
     synth_tighten_stop,
 )
 from polaris.core.probes.tuning_log import PROBE_DDL
@@ -105,6 +107,59 @@ def test_latest_carries_probe_trail_mult() -> None:
     got = latest_probe_tighten(conn, position_id="p1")
     assert got is not None
     assert got.trail_mult == 1.0
+
+
+def test_latest_carries_decision_id() -> None:
+    """P3 promotion: decision_id is carried so the recalc caller can stamp the
+    EXACT source row applied=1 once its tighten actually lands."""
+    conn = _probe_db()
+    _insert_decision(conn, position_id="p1", action="TIGHTEN", trail_mult=None, ts=100)
+    got = latest_probe_tighten(conn, position_id="p1")
+    assert got is not None
+    assert got.decision_id == "d_100"
+
+
+# --------------------------------------------------------------------------- #
+# PROBE_TIGHTEN_APPLY_ACTIONS (P3 promotion allowlist)
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_actions_allowlist_is_exactly_tighten_and_harvest() -> None:
+    """Structural guarantee: WIDEN/HOLD are excluded by omission from an
+    ALLOWLIST (2026-07-15 probe performance readout: WIDEN measured -0.115R
+    net-negative; TIGHTEN/HARVEST measured net-positive)."""
+    assert frozenset({"TIGHTEN", "HARVEST"}) == PROBE_TIGHTEN_APPLY_ACTIONS
+    assert "WIDEN" not in PROBE_TIGHTEN_APPLY_ACTIONS
+    assert "HOLD" not in PROBE_TIGHTEN_APPLY_ACTIONS
+
+
+# --------------------------------------------------------------------------- #
+# mark_probe_tighten_applied (promotion evidence write-back)
+# --------------------------------------------------------------------------- #
+
+
+def test_mark_applied_flips_the_exact_source_row() -> None:
+    conn = _probe_db()
+    _insert_decision(conn, position_id="p1", action="TIGHTEN", trail_mult=None, ts=100)
+    _insert_decision(conn, position_id="p1", action="TIGHTEN", trail_mult=None, ts=200)
+    mark_probe_tighten_applied(conn, decision_id="d_100")
+    row_100 = conn.execute(
+        "SELECT applied FROM probe_decisions WHERE decision_id = 'd_100'"
+    ).fetchone()
+    row_200 = conn.execute(
+        "SELECT applied FROM probe_decisions WHERE decision_id = 'd_200'"
+    ).fetchone()
+    assert row_100[0] == 1
+    assert row_200[0] == 0  # untouched — only the targeted decision_id flips
+
+
+def test_mark_applied_fail_open_on_none_conn() -> None:
+    mark_probe_tighten_applied(None, decision_id="d_100")  # must not raise
+
+
+def test_mark_applied_fail_open_on_missing_table() -> None:
+    conn = sqlite3.connect(":memory:")  # no PROBE_DDL applied — no such table
+    mark_probe_tighten_applied(conn, decision_id="d_100")  # must not raise
 
 
 # --------------------------------------------------------------------------- #

@@ -12,6 +12,7 @@ P0 params:
 
 from __future__ import annotations
 
+from polaris.strategies._virtual_loosen import virtual_loosen
 from polaris.strategies.base import (
     BaseStrategy,
     MarketView,
@@ -49,6 +50,10 @@ class SpotDonchianStrategy(BaseStrategy):
         asset_class="spot",
         venue="okx",
         correlation_group_id="spot_breakout",
+        # P3 promotion (2026-07-16, vault/50_research/built-not-wired-audit.md):
+        # formalizes the prior ad hoc VIRTUAL-only re-admit — see
+        # session_breakout.py's identical note + polaris/strategies/__init__.py.
+        dispatch_eligible=virtual_loosen(True, False),
     )
 
     def generate_raw_signal(self, market_view: MarketView) -> RawSignal | None:

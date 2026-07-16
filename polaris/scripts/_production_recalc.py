@@ -65,6 +65,7 @@ from polaris.core.probes.tighten_intent import (
     TIGHTEN_DEBOUNCE_DEFERRED_OVERRIDES,
     TIGHTEN_DEBOUNCE_DEFERRED_SECONDS,
     latest_probe_tighten,
+    mark_probe_tighten_applied,
     synth_tighten_stop,
 )
 from polaris.core.streams import resolve_stream_profile
@@ -552,6 +553,11 @@ async def _evaluate_position(
         # cadence default. Absent key (legacy/no-writer callers) keeps the
         # existing 'bar' default, byte-identical.
         mark_source=str(pos.get("mark_source", "bar")),
+        # P3 promotion — LiquidityProbe/FundingProbe orphan-feed wiring:
+        # universe (trading-domain) + quote_ticks (marketdata-domain,
+        # storage-split) single-row reads. state.md_conn=None (legacy/test)
+        # degrades to conn (byte-identical fallback used throughout this file).
+        conn=conn, md_conn=state.md_conn if state.md_conn is not None else conn,
     )
 
     # Adaptive thesis re-map (bar path): gather the entry-thesis-health inputs
@@ -932,9 +938,9 @@ async def _evaluate_position(
                 )
             state.recalc_widen_applied = getattr(state, "recalc_widen_applied", 0) + 1
         elif g7_result.payload.get("tightening_applied"):
-            # Persist the G7-tightened stop (probe TIGHTEN consumer). The synth +
-            # G7's ``can_tighten_exit`` both guaranteed it is TIGHTER (toward price);
-            # the next precise-exit tick ratchets toward it and still forbids
+            # Persist the G7-tightened stop (probe TIGHTEN/HARVEST consumer). The
+            # synth + G7's ``can_tighten_exit`` both guaranteed it is TIGHTER (toward
+            # price); the next precise-exit tick ratchets toward it and still forbids
             # loosening it. flow_not_block — a tighter trail, never a block/size cut.
             new_stop = g7_result.payload.get("stop_price")
             if new_stop is not None:
@@ -945,6 +951,15 @@ async def _evaluate_position(
             state.recalc_tighten_applied = (
                 getattr(state, "recalc_tighten_applied", 0) + 1
             )
+            # Promotion evidence (P3, 2026-07-16): stamp the EXACT source
+            # probe_decisions row applied=1 now that its tighten actually landed
+            # on the live position — a before/after read can isolate promoted
+            # decisions. Sidecar-only telemetry; never gates the write above.
+            if probe_intent is not None:
+                mark_probe_tighten_applied(
+                    getattr(state, "probe_conn", None),
+                    decision_id=probe_intent.decision_id,
+                )
 
 
 async def recalc_active_positions(

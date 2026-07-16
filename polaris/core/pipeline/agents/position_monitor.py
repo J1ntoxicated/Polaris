@@ -56,6 +56,7 @@ from polaris.core.pipeline.gate_state import (
     GateDecision,
     GateResult,
 )
+from polaris.core.probes.tighten_intent import PROBE_TIGHTEN_APPLY_ACTIONS
 
 __all__ = [
     "DEFAULT_MAX_LOSS_R",
@@ -189,15 +190,19 @@ def _python_decision(
             payload={"reason": "widen_window", "pnl_r": pnl_r},
             model_used="python",
         )
-    # Probe TIGHTEN consumer (flag-gated, default OFF): in the adverse HOLD band
-    # (-1R < pnl_r <= +0.7R, past the stop_hit rail and below the widen window) a
-    # latest probe action of TIGHTEN escalates the plain HOLD to ADJUST_EXIT carrying
-    # a ``tighten_intent``. The recalc caller reads the latest probe_decisions row to
+    # Probe protect consumer (flag-gated, default OFF pre-spawn / ON via botctl
+    # ``_spawn_env`` — P3 promotion, 2026-07-16): in the adverse HOLD band (-1R <
+    # pnl_r <= +0.7R, past the stop_hit rail and below the widen window) a latest
+    # probe action of TIGHTEN or HARVEST (``PROBE_TIGHTEN_APPLY_ACTIONS`` — an
+    # ALLOWLIST, so WIDEN structurally can never reach this path; WIDEN measured
+    # -0.115R in the 2026-07-15 probe performance readout, TIGHTEN/HARVEST measured
+    # net-positive) escalates the plain HOLD to ADJUST_EXIT carrying a
+    # ``tighten_intent``. The recalc caller reads the latest probe_decisions row to
     # synthesise the tighter stop and routes it to G7's deterministic tighten rail.
     # flow_not_block — precise exit TIMING (a tighter trail), NEVER a HOLD->EXIT_NOW
     # block or a size cut; the -1.0R rail / swap / widen window / entry / size are all
-    # untouched. Flag OFF (default) → falls through to the byte-identical plain HOLD.
-    if tighten_enabled and probe_action == "TIGHTEN":
+    # untouched. Flag OFF → falls through to the byte-identical plain HOLD.
+    if tighten_enabled and probe_action in PROBE_TIGHTEN_APPLY_ACTIONS:
         return GateResult(
             decision=GateDecision.ADJUST_EXIT,
             next_gate=GATE_ADAPTIVE_EXIT,

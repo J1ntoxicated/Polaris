@@ -268,6 +268,14 @@ def _spawn_env() -> dict[str, str]:
     env["POLARIS_UNIVERSE_RANK_TOP_N"] = os.environ.get(
         "POLARIS_UNIVERSE_RANK_TOP_N", "1500"
     )
+    # PROBE PROTECT PROMOTION (P3, 2026-07-16, vault/50_research/
+    # built-not-wired-audit.md): the probe performance readout (25,624 favorable-
+    # MFE positions) showed TIGHTEN/HARVEST correctly call giveback ahead of it
+    # (HARVEST realized +0.088R vs HOLD -0.08R) — default the G6 consumer ON for
+    # every botctl-spawned run. The consumer itself only ever escalates HOLD ->
+    # ADJUST_EXIT (a tighter trail via G7); it never touches the -1.0R rail, size,
+    # or entry. Caller shell can still override to "0" to fall back to plain HOLD.
+    env["POLARIS_G6_PROBE_TIGHTEN"] = os.environ.get("POLARIS_G6_PROBE_TIGHTEN", "1")
     return env
 
 

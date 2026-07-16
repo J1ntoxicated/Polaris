@@ -350,6 +350,17 @@ class ProdLoopState:
     last_tsmom_shadow_bar_ts_by_key: dict[tuple[str, str], int] = field(
         default_factory=dict
     )
+    # P3 promotion — capital_macro_riskoff_catalyst shadow-emit dedup mark
+    # (SHADOW-LOGGING only, never a trading gate; the strategy itself stays
+    # dispatch_eligible=False). Same shape/reasoning as
+    # ``last_tsmom_shadow_bar_ts_by_key`` above: per (venue, symbol) key → the
+    # ts of the 1H bar the last ``log_capital_macro_riskoff_shadow`` write was
+    # logged against, so an unchanged bar (this strategy's own
+    # evaluates_in_progress_bar=True bypasses the outer per-strategy dedup gate
+    # for its WHOLE bucket) logs once per bar-close, not once per 5s tick.
+    last_macro_riskoff_shadow_bar_ts_by_key: dict[tuple[str, str], int] = field(
+        default_factory=dict
+    )
     # Idle fanout backoff (compute scheduling only — see
     # ``_production_bar_gate.idle_backoff_next_due``). Per-venue monotonic ts
     # of the next allowed dispatch-fanout wake; absent = due now (first tick).

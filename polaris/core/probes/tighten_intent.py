@@ -18,23 +18,47 @@ size cut. The -1.0R hard rail / entry side / size chain are all untouched. The p
 ExitEngine.compose stays observe-only (this module only READS the sidecar log — it does
 not flip the engine to ``trail_only`` / ``full``, which remains an ADR-012 Slice 2
 ``/debate``-gated decision).
+
+P3 promotion (2026-07-16, probe protect promotion — vault/50_research/
+built-not-wired-audit.md): the probe performance readout (25,624 favorable-MFE
+positions, 2026-07-15 probe) showed protect actions (TIGHTEN + HARVEST) correctly
+called giveback ahead of it (HARVEST realized +0.088R vs HOLD -0.08R; live
+``probe_decisions`` volume TIGHTEN 7,359 / HARVEST 5,465), while WIDEN measured
+-0.115R (bad) — so ONLY TIGHTEN/HARVEST are promoted to the live consumer
+(``PROBE_TIGHTEN_APPLY_ACTIONS``, an ALLOWLIST so WIDEN/HOLD structurally can never
+reach the tighten path). ``mark_probe_tighten_applied`` closes the promotion-evidence
+loop: once G7 actually persists the tighter stop, the SOURCE probe_decisions row is
+flagged ``applied=1`` so a before/after read can isolate the promoted decisions.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 
 from polaris.core.live_recalc.exit_params import EXIT_HARVEST_TRAIL_MULT
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    "PROBE_TIGHTEN_APPLY_ACTIONS",
     "TIGHTEN_DEBOUNCE_DEFERRED_OVERRIDES",
     "TIGHTEN_DEBOUNCE_DEFERRED_SECONDS",
     "TIGHTEN_FALLBACK_TRAIL_MULT",
     "ProbeTightenIntent",
     "latest_probe_tighten",
+    "mark_probe_tighten_applied",
     "synth_tighten_stop",
 ]
+
+# The probe actions the live G6/G7 consumer is allowed to escalate into a tighter
+# trail — an ALLOWLIST (not a WIDEN blocklist) so a future probe action can never
+# silently start applying by omission. TIGHTEN and HARVEST are the two "protect a
+# winner / cut a giveback" leans the 2026-07-15 probe performance readout confirmed
+# net-positive; WIDEN measured -0.115R (net negative) and stays excluded. HOLD is
+# never a protect signal by definition.
+PROBE_TIGHTEN_APPLY_ACTIONS: frozenset[str] = frozenset({"TIGHTEN", "HARVEST"})
 
 # 1st-increment debounce posture (the per-position override COUNTER + last-override
 # TIMESTAMP are a positions-schema addition deferred to the next increment). Until
@@ -63,6 +87,10 @@ class ProbeTightenIntent:
     trail_mult: float | None
     composite_lean: float
     ts: int
+    # decision_id (probe_decisions PK) — carried so the recalc caller can flag the
+    # EXACT source row ``applied=1`` once G7 actually persists the tighter stop
+    # (mark_probe_tighten_applied below). Promotion evidence (before/after read).
+    decision_id: str
 
 
 def latest_probe_tighten(
@@ -82,7 +110,7 @@ def latest_probe_tighten(
         return None
     try:
         row = conn.execute(
-            "SELECT action, trail_mult, composite_lean, ts "
+            "SELECT action, trail_mult, composite_lean, ts, decision_id "
             "FROM probe_decisions "
             "WHERE position_id = ? AND realized_pnl_r IS NULL "
             "ORDER BY ts DESC LIMIT 1",
@@ -92,13 +120,43 @@ def latest_probe_tighten(
         return None
     if row is None:
         return None
-    action, trail_mult, composite_lean, ts = row
+    action, trail_mult, composite_lean, ts, decision_id = row
     return ProbeTightenIntent(
         action=str(action),
         trail_mult=None if trail_mult is None else float(trail_mult),
         composite_lean=float(composite_lean) if composite_lean is not None else 0.0,
         ts=int(ts),
+        decision_id=str(decision_id),
     )
+
+
+def mark_probe_tighten_applied(
+    conn: sqlite3.Connection | None,
+    *,
+    decision_id: str,
+) -> None:
+    """Flag the SOURCE ``probe_decisions`` row ``applied=1`` (promotion evidence).
+
+    Called ONLY after G7 has actually persisted the tighter stop
+    (``tightening_applied`` — the write to ``positions.stop_price`` already
+    happened). This never gates or reverses that write; it is a pure telemetry
+    stamp on the probe sidecar so a before/after read can isolate exactly which
+    TIGHTEN/HARVEST decisions were promoted into a real stop move. FAIL-OPEN: a
+    None handle or any sqlite error is logged and swallowed — the sidecar stamp
+    must never affect the live exit path.
+    """
+    if conn is None:
+        return
+    try:
+        conn.execute(
+            "UPDATE probe_decisions SET applied = 1 WHERE decision_id = ?",
+            (str(decision_id),),
+        )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "[probe] mark_probe_tighten_applied failed for %s (degrade): %r",
+            decision_id, exc,
+        )
 
 
 def synth_tighten_stop(

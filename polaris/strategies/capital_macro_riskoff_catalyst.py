@@ -23,12 +23,19 @@ long (flight-to-quality). Absent/stale alt-data (either field ``None``) is
 NEUTRAL -- no emit (degrade-never-crash, matches every other altdata-reading
 strategy in the roster).
 
-PENDING P0a GATE: NOT in ``STRATEGY_REGISTRY`` -- ``dispatch_eligible=False``
-is documentary only (registry membership, not this flag, is what the live
-dispatcher iterates on). Registration requires the P0a evolve engine to
-clear the honest-N gate on real DB bars first (no manual eyeball promotion),
-THEN a fresh Claude sub-agent external review + live-firing adversarial
-check (registered != dispatched).
+SHADOW-FIRST (P3 promotion, 2026-07-16, vault/50_research/
+built-not-wired-audit.md): registered in ``STRATEGY_REGISTRY`` (built-not-
+wired audit fix -- it was previously invisible to the registry entirely) but
+``dispatch_eligible=False`` is now LOAD-BEARING -- ``_all_strategies()``
+(the SSOT dispatch filter, ``_production_tick.py``) never calls
+``generate_raw_signal`` from the live loop, so it opens no position. Its
+would-be signal is instead observed via ``capital_macro_riskoff_shadow.py``
+(a ``gate_shadow_events`` TAG, wired at ``_production_tick.py`` right after
+the same GOLD/1H ``build_real_market_view`` the live dispatch uses) toward a
+future promotion decision. Flipping ``dispatch_eligible=True`` still requires
+the P0a evolve engine's honest-N gate on real DB bars (no manual eyeball
+promotion) THEN a fresh Claude sub-agent external review + live-firing
+adversarial check (registered != dispatched).
 
 Verified params are named Final constants (no magic numbers):
   - ``VIX_THRESHOLD = 26.0`` (moderate-elevated -- above the ~20 historical

@@ -245,12 +245,11 @@ async def test_g3_ai_free_warm_top_pass(
     assert res.model_used == "python"
     assert res.next_gate == GATE_ENTRY_SIZER
     assert res.payload["validated_signal"]["strength_scalar"] == 1.0
-    # P2a group B/A: G3's own technical row + the relocated G4 frontgate
-    # squeeze tag (gate_id=4, measurement continuity) both log.
+    # P2a group B/A: Only the relocated G4 frontgate
+    # squeeze tag (gate_id=4, a REAL preserved instrument) logs.
     rows = fetch_shadow_events(memdb)
-    assert len(rows) == 2
-    gate_ids = {r["gate_id"] for r in rows}
-    assert gate_ids == {GATE_SIGNAL_VALIDATOR, GATE_PRE_ENTRY_WATCHER}
+    assert len(rows) == 1  # G4 frontgate tag only — comparisonless G3 row dropped (P2a closeout)
+    assert rows[0]["gate_id"] == 4
     assert all(r["gpt_decision"] is None or r["gpt_decision"] == "" for r in rows)
 
 
@@ -394,8 +393,9 @@ async def test_g7_ai_free_widen_rails_primary(
     # P2a group B: the Q9 rail decision is still logged for measurement
     # continuity — gpt_decision is None now (no GPT call to compare against).
     rows = fetch_shadow_events(memdb, gate_id=7)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    # P2a conductor closeout (2026-07-16): comparisonless live-path shadow
+    # writes are dropped — gate_events records the decision instead.
+    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -449,12 +449,11 @@ async def test_pipeline_g3_ai_free_gate_events(
     ).fetchall()
     assert (3, "PASS", "python") in rows
     assert all(r[0] != GATE_PRE_ENTRY_WATCHER for r in rows)  # no G4 row — natural
-    # G3's own technical row + the relocated G4 frontgate squeeze tag
-    # (gate_id=4, measurement continuity) both still log to gate_shadow_events.
+    # Only the relocated G4 frontgate squeeze tag
+    # (gate_id=4, a REAL preserved instrument) still logs.
     shadow_rows = fetch_shadow_events(memdb)
-    assert len(shadow_rows) == 2
-    gate_ids = {r["gate_id"] for r in shadow_rows}
-    assert gate_ids == {GATE_SIGNAL_VALIDATOR, GATE_PRE_ENTRY_WATCHER}
+    assert len(shadow_rows) == 1  # G4 frontgate tag only — comparisonless G3 row dropped (P2a closeout)
+    assert shadow_rows[0]["gate_id"] == 4
     assert all(r["mismatch"] == 0 for r in shadow_rows)
 
 
@@ -476,8 +475,9 @@ async def test_g3_flag_off_still_never_calls_gpt(
     assert res.decision == GateDecision.PASS
     assert res.model_used == "python"
     rows = fetch_shadow_events(memdb, gate_id=GATE_SIGNAL_VALIDATOR)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    # P2a conductor closeout (2026-07-16): comparisonless live-path shadow
+    # writes are dropped — gate_events records the decision instead.
+    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -502,8 +502,9 @@ async def test_g7_flag_off_still_never_calls_gpt(
     assert res.decision == GateDecision.ADJUST_EXIT
     assert res.model_used == "python"
     rows = fetch_shadow_events(memdb, gate_id=7)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    # P2a conductor closeout (2026-07-16): comparisonless live-path shadow
+    # writes are dropped — gate_events records the decision instead.
+    assert rows == []
 
 
 @pytest.mark.asyncio

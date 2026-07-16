@@ -358,15 +358,18 @@ async def test_g3_technical_always_drives_gpt_client_never_touched(
     )
     result = await signal_validator_gate(ctx, client=haiku, shadow_conn=memdb)
     assert result.decision == GateDecision.MODIFY
-    # G3's own technical row + the relocated G4 frontgate squeeze tag
-    # (gate_id=4, measurement continuity) both log.
+    # Only the relocated G4 frontgate squeeze tag (a REAL preserved
+    # instrument) logs — the comparisonless G3 row is dropped.
     rows = fetch_shadow_events(memdb)
-    assert len(rows) == 2
-    g3_row = next(r for r in rows if r["gate_id"] == GATE_SIGNAL_VALIDATOR)
-    assert g3_row["technical_decision"] == "MODIFY"
-    assert g3_row["gpt_decision"] is None or g3_row["gpt_decision"] == ""
-    assert g3_row["mismatch"] == 0
-    assert g3_row["cell_warm"] == 1
+    assert len(rows) == 1  # G4 frontgate tag only — comparisonless G3 row dropped (P2a closeout)
+    assert rows[0]["gate_id"] == 4
+    g4_tag = rows[0]  # the only row — relocated frontgate tag
+    # the tag row carries the frontgate's own PROCEED verdict (the G3 MODIFY
+    # decision is asserted on `result` above; its shadow row is dropped).
+    assert g4_tag["technical_decision"] == "PROCEED"
+    assert g4_tag["gpt_decision"] is None or g4_tag["gpt_decision"] == ""
+    assert g4_tag["mismatch"] == 0
+    assert g4_tag["cell_warm"] == 1
 
 
 async def test_g3_no_shadow_conn_no_side_effect() -> None:
@@ -402,9 +405,7 @@ async def test_g3_crossed_book_kill_via_relocated_g4_rail(
     result = await signal_validator_gate(ctx, shadow_conn=memdb)
     assert result.decision == GateDecision.KILL
     assert result.payload["reason"] == "crossed_book"
-    # G3's own technical row still logs (computed + logged unconditionally,
-    # before the crossed-book check) — but the frontgate squeeze tag does
-    # NOT (the rail returns before that tap runs).
+    # P2a closeout: the comparisonless G3 row is dropped, and the crossed-book
+    # KILL returns before the frontgate squeeze tap — so NO shadow row at all.
     rows = fetch_shadow_events(memdb)
-    assert len(rows) == 1
-    assert rows[0]["gate_id"] == GATE_SIGNAL_VALIDATOR
+    assert rows == []

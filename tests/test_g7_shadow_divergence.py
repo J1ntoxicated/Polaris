@@ -80,14 +80,10 @@ async def test_widen_result_logged_with_site_tag(memdb: sqlite3.Connection) -> N
         client=_ForbiddenClient(), shadow_conn=memdb,
     )
     assert result.decision == GateDecision.ADJUST_EXIT
-    rows = _g7_rows(memdb)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["technical_decision"] == "ADJUST_EXIT"
-    assert row["gpt_decision"] is None or row["gpt_decision"] == ""
-    assert row["mismatch"] == 0
-    assert "site:live_recalc" in row["technical_flags"]
-    assert row["regime"] == "bull_trend"
+    # P2a conductor closeout (2026-07-16): comparisonless shadow writes are
+    # DROPPED on the live path (no GPT to diverge from; gate_events records
+    # the decision) — the gate must write NO gate_shadow_events row.
+    assert _g7_rows(memdb) == []
 
 
 async def test_hold_result_logged_default_site_tag(memdb: sqlite3.Connection) -> None:
@@ -96,23 +92,18 @@ async def test_hold_result_logged_default_site_tag(memdb: sqlite3.Connection) ->
         _ctx(_proposal(pnl_r=0.5)), client=_ForbiddenClient(), shadow_conn=memdb,
     )
     assert result.decision == GateDecision.HOLD
-    row = _g7_rows(memdb)[0]
-    assert row["technical_decision"] == "HOLD"
-    assert row["gpt_decision"] is None or row["gpt_decision"] == ""
-    # No explicit site payload → orchestrator default tag.
-    assert "site:orchestrator" in row["technical_flags"]
+    # New contract: no comparisonless shadow row on the live path.
+    assert _g7_rows(memdb) == []
 
 
-async def test_p0_client_none_still_logs_shadow_row(memdb: sqlite3.Connection) -> None:
-    """P2a group B: the rail IS the only decision now (client=None or not) —
-    the shadow row is still written for measurement continuity."""
+async def test_p0_client_none_writes_no_shadow_row(memdb: sqlite3.Connection) -> None:
+    """P2a conductor closeout: the rail IS the only decision (client=None or
+    not) and the comparisonless shadow row is NOT written on the live path."""
     result = await adaptive_exit_gate(
         _ctx(_proposal()), client=None, shadow_conn=memdb,
     )
     assert result.decision == GateDecision.ADJUST_EXIT
-    rows = _g7_rows(memdb)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    assert _g7_rows(memdb) == []
 
 
 async def test_decision_byte_identical_with_and_without_shadow(
@@ -137,27 +128,25 @@ async def test_missing_shadow_table_never_crashes(memdb: sqlite3.Connection) -> 
     assert result.decision == GateDecision.HOLD
 
 
-async def test_orchestrator_p1_wrap_exit_logs_shadow(
+async def test_orchestrator_p1_wrap_exit_no_shadow_row(
     memdb: sqlite3.Connection,
 ) -> None:
-    """GateOrchestrator phase=P1 G7 passes its conn as shadow_conn; the
-    supplied client is never touched (P2a group B)."""
+    """GateOrchestrator phase=P1 G7: client never touched, and the live path
+    writes NO comparisonless shadow row (P2a conductor closeout)."""
     orch = GateOrchestrator(conn=memdb, haiku_client=_ForbiddenClient(), phase="P1")
     ctx = _ctx(_proposal(pnl_r=0.5))
     results = await orch.run(ctx, start_gate=GATE_ADAPTIVE_EXIT)
     assert results and results[0].decision == GateDecision.HOLD
-    rows = _g7_rows(memdb)
-    assert len(rows) == 1
-    assert rows[0]["gpt_decision"] is None or rows[0]["gpt_decision"] == ""
+    assert _g7_rows(memdb) == []
 
 
-async def test_orchestrator_p0_wrap_exit_still_logs_shadow(
+async def test_orchestrator_p0_wrap_exit_no_shadow_row(
     memdb: sqlite3.Connection,
 ) -> None:
     orch = GateOrchestrator(conn=memdb, haiku_client=None, phase="P0")
     ctx = _ctx(_proposal(pnl_r=0.5))
     await orch.run(ctx, start_gate=GATE_ADAPTIVE_EXIT)
-    assert len(_g7_rows(memdb)) == 1
+    assert _g7_rows(memdb) == []  # comparisonless — no live-path shadow write
 
 
 async def test_live_recalc_site_passes_shadow_conn_and_site_tag(

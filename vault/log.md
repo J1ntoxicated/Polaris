@@ -535,3 +535,4 @@
 2026-07-16 08:06 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=334 learners=3 paper=True]
 - 2026-07-16: P4a 랜딩(merge 9169bcf) — 데스크 /flow 인스펙트 차트(자동추종/클릭핀, 진입·스톱·MFE/MAE)·포지션 스파크라인 13행·액티비티 절반·레퍼런스탭 SSOT 현행화. 브라우저 실검증(핀 동작·콘솔 0). Opus 1라운드 CRITICAL/MED 0.
 - 2026-07-16: P5/P6 마무리 sweep — ansi 고아 8함수 삭제(감사판정)·frontmatter 22 백필(lint error 0)·digest 06월 9개→롤업 압축·메모리 현행화(리셋 완료 상태). P4b 모바일 빌드 병행 중.
+- 2026-07-16: P4b 랜딩(merge f6f87dd, 대시 재기동) — 모바일 칼리브레이션(글로브 자산군색·게이트 8색 배지 G4부재 정확·마퀴 이식·베뉴칩 73)·모바일 인스펙트 차트(chart-hdr/body svg 렌더 확인)·공유모듈 로드가드(컨덕터 마감). 모바일 뷰포트 375px 실검증·콘솔 에러 0. P4 완료.

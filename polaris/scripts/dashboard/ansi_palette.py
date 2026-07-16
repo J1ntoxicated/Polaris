@@ -88,14 +88,6 @@ def pad(s: str, width: int) -> str:
     return _truncate(s, width)
 
 
-def rpad(s: str, width: int) -> str:
-    """Right-align s to `width`."""
-    vl = vlen(s)
-    if vl >= width:
-        return _truncate(s, width)
-    return " " * (width - vl) + s
-
-
 def _truncate(s: str, width: int) -> str:
     out: list[str] = []
     vis = 0
@@ -127,38 +119,6 @@ def color(text: str, code: str) -> str:
     if not _TTY or not code:
         return str(text)
     return f"{code}{text}{RESET}"
-
-
-def pnl_color(value: float) -> str:
-    """Pick color for a P/L value: green if >0, red if <0, grey if ==0."""
-    if value > 0:
-        return POSITIVE
-    if value < 0:
-        return NEGATIVE
-    return NEUTRAL
-
-
-def wr_color(wr_pct: float) -> str:
-    """Win-rate band: green ≥55, yellow 40–55, red <40."""
-    if wr_pct >= 55.0:
-        return POSITIVE
-    if wr_pct >= 40.0:
-        return WARNING
-    return NEGATIVE
-
-
-def pf_color(pf: float) -> str:
-    """Profit factor color: green ≥1.5, yellow ≥1.0, red <1.0."""
-    if pf >= 1.5:
-        return POSITIVE
-    if pf >= 1.0:
-        return WARNING
-    return NEGATIVE
-
-
-# ---------------------------------------------------------------------------
-# Visual helpers
-# ---------------------------------------------------------------------------
 
 
 def sparkline(data: list[float], width: int = 60) -> str:
@@ -193,53 +153,8 @@ def sparkline(data: list[float], width: int = 60) -> str:
     )
 
 
-def hline(label: str, width: int, *, label_color: str = HIGHLIGHT) -> str:
-    """Full-width horizontal divider with centered label.
-
-    Format: `─── LABEL ───────────────────`  (color = BORDER, label = HIGHLIGHT)
-    """
-    if label:
-        lbl = f" {label} "
-        side_left = 3
-        rest = width - side_left - vlen(lbl)
-        rest = max(0, rest)
-        return (
-            color(HLINE * side_left, BORDER)
-            + color(lbl, label_color + BOLD)
-            + color(HLINE * rest, BORDER)
-        )
-    return color(HLINE * width, BORDER)
-
-
 def bar(pct: float, width: int = 10, *, fill_color: str = POSITIVE) -> str:
     """Filled bar: 0–100 → █░ at given width."""
     pct = max(0.0, min(100.0, pct))
     filled = int(pct / 100.0 * width)
     return color(BLOCK * filled, fill_color) + color(SHADE * (width - filled), MUTED)
-
-
-def fmt_money(v: float, *, sign: bool = False, decimals: int = 2) -> str:
-    """Format dollar amount (with thousands separator)."""
-    if sign:
-        return f"{v:+,.{decimals}f}"
-    return f"{v:,.{decimals}f}"
-
-
-def fmt_pct(v: float, *, sign: bool = True, decimals: int = 2) -> str:
-    """Format percent."""
-    if sign:
-        return f"{v:+.{decimals}f}%"
-    return f"{v:.{decimals}f}%"
-
-
-def fmt_age(seconds: float) -> str:
-    """Human-readable age (s/m/h)."""
-    if seconds < 0:
-        return "n/a"
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.0f}m"
-    if seconds < 86400:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 86400:.1f}d"

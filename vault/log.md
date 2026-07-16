@@ -521,3 +521,6 @@
 2026-07-15 20:47 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=316 learners=3 paper=True]
 - 2026-07-16: 마스터 리셋 착수 (Jin '리셋 됐어', 시드니 목 08:30) — 봇은 부팅실패 루프 상태여서 MANUAL_STOP 수술윈도 고정. P0 storage-split 빌드 워크플로(wf_20fa4e1d: 감사→Sonnet빌드→Opus 3렌즈) + read-only 감사편대(wf_c7762fe8: built-not-wired·하네스·죽은코드·널리지 4축) 병행 가동. 작업보드 Task #1-7 (P0-P6).
 - 2026-07-16: 감사편대 판정 랜딩 — 게이트-에이전트 8 archive·deprecated lessons 73 삭제(keep 12)·superseded plans 6 archive·auto-invasion 사본 archive·ADR-014 정정·_NOW.md 현행화. 대발견: P0a evolve 승격게이트 미가동(전략 2 INERT)·tick엔진 무발화·dead-code는 깨끗(고아 8함수뿐). 판정=reset-audit-verdicts-2026-07-16.md
+2026-07-15 daily-auto [closes=160 pnl_usd=-842.90 opens=170 faults=3 restarts=1]
+2026-07-16 02:11 [ignite_p1: bootstrap target_db=polaris_live.sqlite layer0_focus=326 learners=3 paper=True]
+- 2026-07-16: 🎉 P0 storage-split 랜딩 완료 (merge ade8cca, wipe+fresh boot PID 2046) — 실증: md.bars 298k/trading.bars 0(도메인 분리 증명), 알파카 1500 활성 상태에서 락 0·에러 0·틱 1s 케이던스(프리즈 조건 그대로 재현했는데 깨끗 = 근치 확인). 디스크 45GB free. 리뷰 4라운드+최종재검 findings 20+ 전부 해소(CRITICAL 2 랜딩 전 차단). 풀스위트 신규실패 0.

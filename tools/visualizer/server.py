@@ -627,6 +627,20 @@ _SUBJECT_TYPE_RE = re.compile(r"^([a-z]+)(?:\([^)]*\))?!?:")
 # (the newest entries), so match either spelling to surface the latest count.
 _SUITE_GREEN_RE = re.compile(r"(?:suite|스위트)\s+([\d,]+)\s+green", re.IGNORECASE)
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# GFM task-list checkbox ('- [ ] …' / '- [x] …') — RESET-checklist.md's format,
+# converted to the same DONE tag the bracket-tag docs (e.g. structural_roadmap)
+# use so the board's tag styling stays uniform across both conventions.
+_CHECKBOX_RE = re.compile(r"^\[( |x|X)\]\s*(.*)$")
+# Reset master checklist (Jin 2026-07-15) — the 5 companion blueprints the
+# checklist's P-phases point into. Listed ahead of the live structural_roadmap
+# in the plan kanban since they ARE the current roadmap (Jin 2026-07-16).
+_ROADMAP_BLUEPRINTS = (
+    "storage-split-blueprint.md",
+    "delegation-gate-blueprint.md",
+    "built-not-wired-audit.md",
+    "dashboard-todo.md",
+    "reset-audit-verdicts-2026-07-16.md",
+)
 
 
 def _commit_type(subject: str) -> str:
@@ -713,19 +727,33 @@ def _first_heading_title(text: str) -> str:
     return ""
 
 
-def _build_roadmap() -> dict[str, Any]:
-    """structural_roadmap phases (P0-P6 + DONE/BUILD/DEBATE) + plan kanban + NEXT.
+def _fm_status(p: Path) -> str:
+    """Front-matter ``status:`` of a doc, or 'untracked' when absent/unreadable."""
+    status = "untracked"
+    with contextlib.suppress(OSError):
+        fm = _parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+        status = fm.get("status", "untracked")
+    return status
 
-    Read-only absolute reads under REPO_ROOT; missing files → empty sections.
+
+def _build_roadmap() -> dict[str, Any]:
+    """RESET-checklist phase ladder (P0-P6 + backlog) + plan kanban + NEXT.
+
+    SSOT (Jin 2026-07-15 master reset, dashboard-todo P4 calibration):
+    ``vault/50_research/RESET-checklist.md`` drives the phase ladder; its 5
+    companion blueprints + the one live ``.claude/plans/structural_roadmap_*``
+    lead the plan kanban — the other (superseded) plans are a P5 cleanup
+    backlog item, not surfaced here. Read-only absolute reads under
+    REPO_ROOT; missing files → empty sections.
     """
+    research_dir = REPO_ROOT / "vault" / "50_research"
     plans_dir = REPO_ROOT / ".claude" / "plans"
 
-    # 1) Phase ladder from structural_roadmap — group bullets under each '## Pn …'.
+    # 1) Phase ladder from RESET-checklist — group bullets under each '## …'.
+    #    GFM task-list checkbox ('- [ ]'/'- [x]') is stripped from the text;
+    #    '[x]' becomes the same DONE tag the bracket-tag docs use.
     phases: list[dict[str, Any]] = []
-    # Latest structural_roadmap_*.md wins (was a hardcoded 06-22 filename — the
-    # ROADMAP tab silently served a 3-week-stale plan; glob kills that class).
-    rm_candidates = sorted(plans_dir.glob("structural_roadmap_*.md"))
-    rm_path = rm_candidates[-1] if rm_candidates else plans_dir / "structural_roadmap_2026-06-22.md"
+    rm_path = research_dir / "RESET-checklist.md"
     if rm_path.exists():
         with contextlib.suppress(OSError):
             cur: dict[str, Any] | None = None
@@ -740,20 +768,27 @@ def _build_roadmap() -> dict[str, Any]:
                         t for t in ("DONE", "BUILD", "DEBATE", "DECISION")
                         if t in item
                     ]
+                    cb = _CHECKBOX_RE.match(item)
+                    if cb:
+                        item = cb.group(2).strip()
+                        if cb.group(1).lower() == "x" and "DONE" not in tags:
+                            tags.append("DONE")
                     cur["items"].append({"text": item, "tags": tags})
             phases = [p for p in phases if p["items"]]
 
-    # 2) Plan kanban — front-matter status per plan (no front-matter → 'untracked').
+    # 2) Plan kanban — RESET-checklist + its 5 blueprints first (they ARE the
+    #    current roadmap), then the one live structural_roadmap.
     plans: list[dict[str, str]] = []
-    if plans_dir.is_dir():
-        for p in sorted(plans_dir.glob("*.md")):
-            status = "untracked"
-            with contextlib.suppress(OSError):
-                fm = _parse_frontmatter(
-                    p.read_text(encoding="utf-8", errors="replace")
-                )
-                status = fm.get("status", "untracked")
-            plans.append({"name": p.stem, "status": status})
+    if rm_path.exists():
+        plans.append({"name": rm_path.stem, "status": _fm_status(rm_path)})
+    for name in _ROADMAP_BLUEPRINTS:
+        p = research_dir / name
+        if p.exists():
+            plans.append({"name": p.stem, "status": _fm_status(p)})
+    rm_candidates = sorted(plans_dir.glob("structural_roadmap_*.md"))
+    if rm_candidates:
+        p = rm_candidates[-1]
+        plans.append({"name": p.stem, "status": _fm_status(p)})
 
     # 3) NEXT order from loop_state.md — capture the '## ▶ NEXT 순서' block.
     next_lines: list[str] = []

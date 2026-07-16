@@ -11,6 +11,8 @@
   var posRows = document.getElementById('side-pos-rows');
   var posN = document.getElementById('side-pos-n');
   var actRows = document.getElementById('side-act-rows');
+  var chartHdr = document.getElementById('side-chart-hdr');
+  var chartBody = document.getElementById('side-chart-body');
   if (!posRows || !actRows) return; // ?nomobile=1 — pane absent
 
   var VCOLOR = { okx: '#5fdfff', cap: '#a87cff', alp: '#ffc84f' };
@@ -74,6 +76,123 @@
   function rowKey(p) {
     return String(p.venue || '') + '|' + String(p.symbol || '') + '|' + String(p.strategy_id || '') + '|' + String(p.side || '');
   }
+  // Inline per-row spark (Jin 2026-07-15 dashboard-todo P4) — the position's
+  // own spark[30pt] (already on the snapshot row), coloured by uPnL sign
+  // (money-only green/red contract), never by trend direction.
+  function rowSparkSvg(p) {
+    var arr = Array.isArray(p.spark) ? p.spark : [];
+    if (arr.length < 2) return '';
+    var w = 40, h = 12, pad = 1, n = arr.length;
+    var lo = Infinity, hi = -Infinity;
+    for (var i = 0; i < n; i++) { if (arr[i] < lo) lo = arr[i]; if (arr[i] > hi) hi = arr[i]; }
+    if (!isFinite(lo) || !isFinite(hi)) return '';
+    var span = (hi - lo) || 1, iw = w - pad * 2, ih = h - pad * 2;
+    var pts = arr.map(function (v, idx) {
+      var x = pad + (n === 1 ? 0 : (idx / (n - 1)) * iw);
+      var y = pad + ih - ((v - lo) / span) * ih;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
+    var col = u > 0 ? '#7dffa8' : u < 0 ? '#ff7d8a' : '#8a94b0';
+    return '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true">'
+      + '<polyline points="' + pts + '" fill="none" stroke="' + col + '" stroke-width="1" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+  // CHART inspect-panel selection (Jin 2026-07-15 dashboard-todo P4): default =
+  // auto-follow the most-recently-opened position (min held_sec); clicking a
+  // row pins it (CHART_STATE.sel) until a genuinely NEW top position appears
+  // (topKey changes), which unpins and returns to auto-follow.
+  var CHART_STATE = { sel: null, topKey: null };
+  function chartPick(all) {
+    if (!all.length) { CHART_STATE.topKey = null; return null; }
+    var top = all[0];
+    for (var i = 1; i < all.length; i++) {
+      var hs = all[i].held_sec == null ? Infinity : all[i].held_sec;
+      var th = top.held_sec == null ? Infinity : top.held_sec;
+      if (hs < th) top = all[i];
+    }
+    var tk = rowKey(top);
+    if (tk !== CHART_STATE.topKey) { CHART_STATE.topKey = tk; CHART_STATE.sel = null; }
+    if (CHART_STATE.sel) {
+      for (var j = 0; j < all.length; j++) { if (rowKey(all[j]) === CHART_STATE.sel) return all[j]; }
+      CHART_STATE.sel = null; // pinned position closed — fall back to auto-follow
+    }
+    return top;
+  }
+  function regimeLabel(p) {
+    var a = p.entry_regime, b = p.regime;
+    if (a && b && a !== b) return esc(a) + ' → ' + esc(b);
+    return esc(b || a || '');
+  }
+  // Lightweight inline inspect chart — spark price line + entry(dotted steel)/
+  // stop(dashed red) levels + MFE/MAE band (R-multiples converted to price via
+  // R = |entry - stop|, the same risk unit the position was sized against) +
+  // current-price marker. Deep multi-indicator charting lives on the board;
+  // this is a glance-only reimplementation, not a rebuild of it.
+  function buildChartSvg(p) {
+    var arr = Array.isArray(p.spark) && p.spark.length >= 2 ? p.spark.slice() : null;
+    var entry = p.entry_price || null;
+    var lastPx = p.last_price || (arr ? arr[arr.length - 1] : entry);
+    if (!arr) arr = [entry, lastPx].filter(function (v) { return v != null; });
+    if (arr.length < 2) return '<div class="side-chart-empty">no price history yet</div>';
+    var stop = p.stop_price ? p.stop_price : null;
+    var dir = String(p.side || '').toLowerCase() === 'short' ? -1 : 1;
+    var R = (entry != null && stop != null) ? Math.abs(entry - stop) : null;
+    var mfe = (R != null && p.mfe_atr_r != null) ? entry + dir * p.mfe_atr_r * R : null;
+    var mae = (R != null && p.mae_atr_r != null) ? entry + dir * p.mae_atr_r * R : null;
+
+    var vals = arr.slice();
+    if (entry != null) vals.push(entry);
+    if (stop != null) vals.push(stop);
+    if (mfe != null) vals.push(mfe);
+    if (mae != null) vals.push(mae);
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    var padSpan = (hi - lo) * 0.08 || Math.abs(hi) * 0.01 || 1;
+    lo -= padSpan; hi += padSpan;
+    var span = (hi - lo) || 1;
+
+    var W = 400, H = 130, PADX = 6, PADY = 8, n = arr.length;
+    var iw = W - PADX * 2, ih = H - PADY * 2;
+    function xOf(i) { return PADX + (n === 1 ? 0 : (i / (n - 1)) * iw); }
+    function yOf(v) { return PADY + ih - ((v - lo) / span) * ih; }
+    function hline(y, col, dash, w) {
+      var yy = y.toFixed(1);
+      return '<line x1="' + PADX + '" y1="' + yy + '" x2="' + (W - PADX) + '" y2="' + yy + '" stroke="' + col + '" stroke-width="' + w + '" stroke-dasharray="' + dash + '" opacity="0.85"/>';
+    }
+
+    var pts = arr.map(function (v, i) { return xOf(i).toFixed(1) + ',' + yOf(v).toFixed(1); }).join(' ');
+    var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
+    var lineCol = u > 0 ? '#7dffa8' : u < 0 ? '#ff7d8a' : '#9fc0ff';
+
+    var svg = '';
+    if (mfe != null && mae != null) {
+      var yTop = Math.min(yOf(mfe), yOf(mae)), yBot = Math.max(yOf(mfe), yOf(mae));
+      svg += '<rect x="' + PADX + '" y="' + yTop.toFixed(1) + '" width="' + iw + '" height="' + (yBot - yTop).toFixed(1) + '" fill="rgba(159,192,255,0.07)"/>';
+    }
+    if (mfe != null) svg += hline(yOf(mfe), '#7dffa8', '2 2', 0.8);
+    if (mae != null) svg += hline(yOf(mae), '#ff7d8a', '2 2', 0.8);
+    if (entry != null) svg += hline(yOf(entry), '#8a94b0', '3 2', 1);
+    if (stop != null) svg += hline(yOf(stop), '#ff4d5e', '4 2', 1);
+    svg += '<polyline points="' + pts + '" fill="none" stroke="' + lineCol + '" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>';
+    svg += '<circle cx="' + xOf(n - 1).toFixed(1) + '" cy="' + yOf(arr[n - 1]).toFixed(1) + '" r="2.5" fill="' + lineCol + '"/>';
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' + svg + '</svg>';
+  }
+  function renderChart(p) {
+    if (!chartHdr || !chartBody) return;
+    if (!p) {
+      chartHdr.innerHTML = '';
+      chartBody.innerHTML = '<div class="side-chart-empty">no open position</div>';
+      return;
+    }
+    var u = p.upnl_usd != null ? p.upnl_usd : p.pnl_usd;
+    var hdrHtml = '<span class="vt" style="color:' + vcolor(p.venue) + '">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
+      + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
+      + (p.strategy_id ? '<span class="strat">' + esc(p.strategy_id) + '</span>' : '')
+      + '<span class="side">' + esc(String(p.side || '').toUpperCase()) + '</span>'
+      + '<span class="num ' + pnlCls(u) + '">' + usd(u) + '</span>'
+      + '<span class="reg">' + regimeLabel(p) + '</span>';
+    if (hdrHtml !== chartHdr.__last) { chartHdr.innerHTML = hdrHtml; chartHdr.__last = hdrHtml; }
+    chartBody.innerHTML = buildChartSvg(p);
+  }
   function setCell(el, txt, cls, flash) {
     if (!el) return;
     if (el.textContent !== txt) {
@@ -108,6 +227,8 @@
     }).sort(function (a, b) { return Math.abs(b.upnl) - Math.abs(a.upnl); });
     if (posN) posN.textContent = all.length ? '· ' + all.length : '';
     renderSummary(all);
+    var selP = chartPick(all);
+    var selKey = selP ? rowKey(selP) : null;
     // 가시 목록: 그룹>1 = 헤더(+펼침 시 자식), 단독 = 행 — 캡 26 가시행
     var visible = [];
     ordered.forEach(function (o) {
@@ -137,11 +258,11 @@
             + esc(String(o.g[0].symbol || '').split(':').pop())
             + ' ×' + o.g.length + '</span><span></span><span class="num vt"></span>'
             + '<span class="num gpnl"></span>'
-            + '<span class="num"></span><span class="num vt gexp"></span></div>';
+            + '<span class="num"></span><span class="num vt gexp"></span><span></span></div>';
           return;
         }
         var p = v.row;
-        html += '<div class="r' + (v.ingrp ? ' ingrp' : '') + '" data-k="' + esc(rowKey(p)) + '">'
+        html += '<div class="r pos' + (v.ingrp ? ' ingrp' : '') + '" data-k="' + esc(rowKey(p)) + '">'
           + '<span class="vb" style="background:' + vcolor(p.venue) + '"></span>'
           + '<span class="vt">' + esc(vkey(p.venue).toUpperCase()) + '</span>'
           + '<span class="sym">' + esc(String(p.symbol || '').split(':').pop()) + '</span>'
@@ -150,6 +271,7 @@
           + '<span class="num pnl"></span>'
           + '<span class="num pct"></span>'
           + '<span class="num vt exp"></span>'
+          + '<span class="num spk"></span>'
           + '</div>';
       });
       posRows.innerHTML = html;
@@ -157,6 +279,7 @@
         rowIndex.set(el.getAttribute('data-k'), {
           cur: el.querySelector('.cur'), pnl: el.querySelector('.pnl'),
           pct: el.querySelector('.pct'), exp: el.querySelector('.exp'),
+          spk: el.querySelector('.spk'), el: el,
         });
       });
       posRows.querySelectorAll('.r.grp').forEach(function (el) {
@@ -175,6 +298,11 @@
       setCell(c.pnl, usd(u), pnlCls(u), false);
       setCell(c.pct, pct == null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%', pnlCls(pct), false);
       if (c.exp && !c.exp.textContent) c.exp.textContent = kusd(p.size_usd);
+      if (c.spk) {
+        var spkSvg = rowSparkSvg(p);
+        if (spkSvg !== c.spk.__lastSvg) { c.spk.innerHTML = spkSvg; c.spk.__lastSvg = spkSvg; }
+      }
+      if (c.el) c.el.classList.toggle('sel', rowKey(p) === selKey);
     });
     // 접힘 그룹 헤더 Σ 라이브 갱신
     ordered.forEach(function (o) {
@@ -185,16 +313,25 @@
       setCell(h.pnl, usd(o.upnl), pnlCls(o.upnl), false);
       if (h.exp) h.exp.textContent = kusd(gsz);
     });
+    renderChart(selP);
   }
-  // 그룹 접기/펼치기 (위임 1회)
+  // 그룹 접기/펼치기 + 포지션 행 클릭 = CHART 핀 (위임 1회)
   posRows.addEventListener('click', function (e) {
     var g = e.target.closest ? e.target.closest('.r.grp') : null;
-    if (!g) return;
-    var gk = g.getAttribute('data-g');
-    if (expanded.has(gk)) expanded.delete(gk); else expanded.add(gk);
-    saveExpanded();
-    renderPositions._keys = null; // 구조 재렌더 강제
-    if (lastSnap) renderPositions(lastSnap);
+    if (g) {
+      var gk = g.getAttribute('data-g');
+      if (expanded.has(gk)) expanded.delete(gk); else expanded.add(gk);
+      saveExpanded();
+      renderPositions._keys = null; // 구조 재렌더 강제
+      if (lastSnap) renderPositions(lastSnap);
+      return;
+    }
+    var row = e.target.closest ? e.target.closest('.r.pos') : null;
+    if (!row) return;
+    var k = row.getAttribute('data-k');
+    if (!k) return;
+    CHART_STATE.sel = k;
+    if (lastSnap) renderPositions(lastSnap); // re-syncs .sel highlight + CHART panel, no rebuild
   });
   // live 4Hz price marks — the "가격 변하는 거 실시간" channel
   try {
